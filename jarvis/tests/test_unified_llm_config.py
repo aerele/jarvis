@@ -887,10 +887,17 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		self.assertEqual(pool_primary_model(settings), "gpt-4o")
 
 	def test_pool_primary_model_is_blank_when_not_a_pool(self):
-		"""A single-model direct tenant has no pool primary — the flat llm_model owns it."""
+		"""A tenant with no ENABLED model has no pool primary — nothing owns it.
+
+		jarvis#794: a lone ENABLED api-key model is now pool mode (a byo-direct
+		pool of one), so it no longer demonstrates the "not a pool" case — the
+		fixture here is a disabled-only model list instead, which stays
+		genuinely not-a-pool (compute_pool_mode is False with zero enabled
+		models) and keeps this test's blank-primary coverage meaningful.
+		"""
 		from jarvis.jarvis.pool_serialize import pool_primary_model
 
-		settings = _make_settings_with_models([_api_key_model(enabled=1)])
+		settings = _make_settings_with_models([_api_key_model(enabled=0)])
 		settings.preset = None
 		self.assertEqual(pool_primary_model(settings), "")
 
@@ -1185,8 +1192,10 @@ class TestRT3UnifiedOnUpdateRouting(_RT3SettingsTestCase):
 	# ------------------------------------------------------------------ #
 
 	def test_one_model_no_preset_routes_to_single_model_path(self):
-		"""1 enabled model + no preset → single-model creds path (_enqueued_sync_via_admin),
-		proxy_active==0, proxy_recommended==1."""
+		"""1 enabled api-key model + no preset: jarvis#794 makes this a byo-direct
+		pool of one, so the pool leg (/llm-pool) is what fires — NOT the legacy
+		/llm-creds single-model path. proxy_active==0 (no sidecar for a pure
+		api-key pool), proxy_recommended==1."""
 		settings = frappe.get_single("Jarvis Settings")
 		_add_model_row(
 			settings,
@@ -1196,23 +1205,30 @@ class TestRT3UnifiedOnUpdateRouting(_RT3SettingsTestCase):
 			base_url="https://api.openai.com",
 		)
 		settings.preset = ""
-		# Trigger a structural change so the single-model path fires.
+		# Trigger a structural change so the pool path fires.
 		settings.llm_model = "gpt-4o"
 
 		pool_sync_called = []
+		creds_sync_called = []
 
 		with (
 			frappe_patch(
 				"jarvis.admin_client.post_update_llm_pool",
-				side_effect=lambda **kw: pool_sync_called.append(kw) or {},
+				side_effect=lambda **kw: pool_sync_called.append(kw) or {"action": "pool_update"},
 			),
-			frappe_patch("jarvis.admin_client.post_update_llm_creds", return_value={"action": "restart"}),
+			frappe_patch(
+				"jarvis.admin_client.post_update_llm_creds",
+				side_effect=lambda **kw: creds_sync_called.append(kw) or {"action": "restart"},
+			),
 		):
 			settings.save()
 
-		# proxy path must NOT have been called
+		# A lone api-key model must take the pool (byo-direct) leg.
+		self.assertTrue(
+			len(pool_sync_called) >= 1, "a lone api-key model must push through the pool leg (jarvis#794)"
+		)
 		self.assertEqual(
-			pool_sync_called, [], "proxy pool path must NOT be called when 1 model and no preset"
+			creds_sync_called, [], "the legacy /llm-creds leg must NOT be called for a lone api-key model"
 		)
 
 		settings = frappe.get_single("Jarvis Settings")
@@ -1561,9 +1577,15 @@ class TestRT3LegacyNoModelsBackcompat(_RT3SettingsTestCase):
 class TestRT3ProxyToDirectTransition(_RT3SettingsTestCase):
 	"""Fix 2: proxy→direct transition test.
 
-	A tenant that had ≥2 models (proxy_active=1) then drops to 1 model
-	(no preset) must have proxy_active reset to 0 and proxy_recommended
-	set to 1, and the single-model creds path must be taken (not proxy).
+	A tenant that had ≥2 models (proxy_active=1) then drops to 1 api-key model
+	(no preset) must have proxy_active reset to 0 (no sidecar for a pure
+	api-key pool) and proxy_recommended set to 1.
+
+	jarvis#794: the sync leg itself does NOT fall back to /llm-creds here — a
+	lone api-key model is still a pool (of one; ``compute_pool_mode`` is True),
+	so the save keeps taking the pool path (/llm-pool), just with
+	proxy_active=0. Coverage for the genuinely-direct leg (a lone native-OAuth
+	subscription) lives in ``TestRT6LoneSubscriptionDirectLeg``.
 	"""
 
 	def setUp(self):
@@ -1578,13 +1600,15 @@ class TestRT3ProxyToDirectTransition(_RT3SettingsTestCase):
 		frappe.db.commit()
 
 	def test_proxy_to_direct_resets_flags_and_takes_single_model_path(self):
-		"""Start with proxy_active=1 (stale), save with 1 model + no preset:
-		→ proxy_active==0, proxy_recommended==1, single-model creds path taken."""
+		"""Start with proxy_active=1 (stale), save with 1 api-key model + no preset:
+		→ proxy_active==0, proxy_recommended==1, the pool (byo-direct) path is
+		still the one pushed — NOT /llm-creds."""
 		settings = frappe.get_single("Jarvis Settings")
 		# Confirm the stale proxy_active state.
 		self.assertEqual(int(settings.proxy_active or 0), 1, "pre-condition: proxy_active must start at 1")
 
-		# Now configure a single model (no preset) — should trigger direct path.
+		# Now configure a single model (no preset) — a lone api-key model is
+		# still pool_mode (jarvis#794), just not proxy_active.
 		_add_model_row(
 			settings,
 			provider="openai_compat",
@@ -1602,7 +1626,7 @@ class TestRT3ProxyToDirectTransition(_RT3SettingsTestCase):
 		with (
 			frappe_patch(
 				"jarvis.admin_client.post_update_llm_pool",
-				side_effect=lambda **kw: pool_sync_called.append(kw),
+				side_effect=lambda **kw: pool_sync_called.append(kw) or {"action": "pool_update"},
 			),
 			frappe_patch(
 				"jarvis.admin_client.post_update_llm_creds",
@@ -1611,23 +1635,26 @@ class TestRT3ProxyToDirectTransition(_RT3SettingsTestCase):
 		):
 			settings.save()
 
-		# Proxy path must NOT have been called.
-		self.assertEqual(
-			pool_sync_called, [], "proxy pool path must NOT be called after transition to 1 model/no preset"
-		)
-
-		# Single-model path must have been taken (structural change fires restart).
+		# A lone api-key model is a byo-direct pool of one: the pool leg is
+		# still what gets pushed.
 		self.assertTrue(
-			len(creds_sync_called) >= 1,
-			"single-model creds path MUST be called after proxy→direct transition",
+			len(pool_sync_called) >= 1,
+			"a lone api-key model must still push through the pool (byo-direct) leg",
 		)
 
-		# Flags must be reset.
+		# The legacy /llm-creds leg must NOT have been called.
+		self.assertEqual(
+			creds_sync_called,
+			[],
+			"the legacy /llm-creds leg must NOT be called for a lone api-key model",
+		)
+
+		# Flags must land on: no sidecar, but still "one model" recommended.
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertEqual(
 			int(settings.proxy_active or 0),
 			0,
-			"proxy_active must be reset to 0 after transition to 1 model/no preset",
+			"proxy_active must be 0 — a pure api-key pool deploys no sidecar",
 		)
 		self.assertEqual(
 			int(settings.proxy_recommended or 0),
@@ -1828,6 +1855,14 @@ class TestRT5OnboardingWritesModelsRow(_RT3SettingsTestCase):
 		super().setUp()
 		self._clear_models()
 		_reset_settings()
+		# _confirm_apply_via_admin caches a MISS for 10s (see
+		# TestOnboardingAuditFixes.setUp's identical guard): several cases here
+		# (the "still applying" / "converges" pair, both now on the pool leg
+		# per jarvis#794) deliberately drive that miss, and a leftover entry
+		# would suppress the probe a later case in this class is exercising.
+		from jarvis.account import _APPLY_CONFIRM_MISS_KEY
+
+		frappe.cache().delete_value(_APPLY_CONFIRM_MISS_KEY)
 		# Seed admin creds so is_ready_for_chat passes the signup gate.
 		settings = frappe.get_single("Jarvis Settings")
 		settings.db_set("jarvis_admin_api_key", "test-admin-key", update_modified=False)
@@ -1973,22 +2008,25 @@ class TestRT5OnboardingWritesModelsRow(_RT3SettingsTestCase):
 		account._bust_chat_gate()
 
 	def test_api_key_first_apply_still_applying_is_not_ready(self):
-		"""Round-4 review R4-P0-6 / P1-10: a FIRST direct apply that admin returns
-		as status="applying" (busy lock / timeout / CAS refusal) must NOT open
-		chat — local key/provider/model presence alone is config intent, not proof
-		the container received the creds. Gated on the durable llm_direct_synced_at
+		"""jarvis#794: a lone api-key model now takes the POOL leg (byo-direct pool
+		of one), so a FIRST apply that admin returns as status="applying" (busy
+		lock / timeout / CAS refusal) must NOT open chat via the POOL gate —
+		local key/provider/model presence alone is config intent, not proof the
+		container received the creds. Gated on the durable llm_pool_synced_at
 		marker, which is stamped only on a confirmed status=applied."""
 		from unittest.mock import patch
 
+		from jarvis import account
+
 		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("llm_direct_synced_at", None, update_modified=False)
+		settings.db_set("llm_pool_synced_at", None, update_modified=False)
 		frappe.db.commit()
 		# get_connection must be pinned not-Ready: the applying path now runs the
 		# in-job convergence probe, and an unmocked call could reach a live admin.
 		with (
 			patch(
-				"jarvis.admin_client.post_update_llm_creds",
-				return_value={"action": "restart", "status": "applying"},
+				"jarvis.admin_client.post_update_llm_pool",
+				return_value={"action": "pool_update", "status": "applying"},
 			),
 			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Configuring"}),
 		):
@@ -2004,28 +2042,35 @@ class TestRT5OnboardingWritesModelsRow(_RT3SettingsTestCase):
 		from jarvis.account import is_ready_for_chat
 
 		settings = frappe.get_single("Jarvis Settings")
-		self.assertIsNone(settings.llm_direct_synced_at, "an 'applying' first apply is not confirmed")
-		result = is_ready_for_chat()
+		self.assertIsNone(settings.llm_pool_synced_at, "an 'applying' first apply is not confirmed")
+		# The final managed gate asks admin again (its own mock scope) — pin it
+		# not-Ready too so the never-confirmed pool stays not-ready deterministically.
+		account._bust_chat_gate()
+		with patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Configuring"}):
+			result = is_ready_for_chat()
 		self.assertFalse(
-			result.get("ready"), f"a never-confirmed direct tenant must not be chat-ready; got: {result}"
+			result.get("ready"),
+			f"a never-confirmed byo-direct pool tenant must not be chat-ready; got: {result}",
 		)
-		self.assertEqual(result.get("reason"), "llm_provisioning")
+		self.assertEqual(result.get("reason"), "llm_pool_provisioning")
+		account._bust_chat_gate()
 
 	def test_api_key_first_apply_applying_then_ready_converges_and_stamps_marker(self):
-		"""The direct analogue of the pool convergence test: an 'applying' first
-		direct apply whose in-job probe finds admin already Ready must stamp
-		llm_direct_synced_at (via _stamp_converged_ok) and open chat — without
-		this a converged-via-reconcile direct tenant would be stranded at
-		llm_provisioning forever (an 'ok' status stops every later reconcile)."""
+		"""jarvis#794: a lone api-key model is now a byo-direct pool of one, so
+		the pool convergence path applies here: an 'applying' first apply whose
+		in-job probe finds admin already Ready must stamp llm_pool_synced_at
+		(via _stamp_converged_ok) and open chat — without this a
+		converged-via-reconcile tenant would be stranded at
+		llm_pool_provisioning forever (an 'ok' status stops every later reconcile)."""
 		from unittest.mock import patch
 
 		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("llm_direct_synced_at", None, update_modified=False)
+		settings.db_set("llm_pool_synced_at", None, update_modified=False)
 		frappe.db.commit()
 		with (
 			patch(
-				"jarvis.admin_client.post_update_llm_creds",
-				return_value={"action": "restart", "status": "applying"},
+				"jarvis.admin_client.post_update_llm_pool",
+				return_value={"action": "pool_update", "status": "applying"},
 			),
 			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}),
 		):
@@ -2040,8 +2085,8 @@ class TestRT5OnboardingWritesModelsRow(_RT3SettingsTestCase):
 			)
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertTrue(
-			settings.llm_direct_synced_at,
-			"convergence to chat_readiness Ready must stamp llm_direct_synced_at",
+			settings.llm_pool_synced_at,
+			"convergence to chat_readiness Ready must stamp llm_pool_synced_at",
 		)
 		self.assertTrue(
 			(settings.last_sync_status or "").startswith("ok"),
@@ -2055,7 +2100,9 @@ class TestRT5OnboardingWritesModelsRow(_RT3SettingsTestCase):
 		# onboarding, so admin must say Ready explicitly for the gate to open.
 		account._bust_chat_gate()
 		with patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}):
-			self.assertTrue(is_ready_for_chat().get("ready"), "a converged first direct apply must open chat")
+			self.assertTrue(
+				is_ready_for_chat().get("ready"), "a converged first byo-direct pool apply must open chat"
+			)
 		account._bust_chat_gate()
 
 	def test_established_direct_tenant_stays_ready_through_resave_pending(self):
@@ -2524,10 +2571,11 @@ class TestFT2ValidateMirrorTiming(_RT3SettingsTestCase):
 		frappe.db.commit()
 
 	def test_table_api_key_rotation_enqueues_reload(self):
-		"""Changing only the table row's api_key → a credential sync (reload or restart) is enqueued.
+		"""Changing only the table row's api_key → a pool sync is enqueued.
 
-		'reload' calls post_rotate_llm_secret; 'restart' calls post_update_llm_creds.
-		Either is acceptable — what matters is that an admin sync fires.
+		jarvis#794: a lone api-key model now takes the POOL leg (byo-direct pool
+		of one), not the legacy /llm-creds direct leg — so a rotation fires
+		``post_update_llm_pool``, not post_update_llm_creds/post_rotate_llm_secret.
 		"""
 		from unittest.mock import patch
 
@@ -2542,10 +2590,7 @@ class TestFT2ValidateMirrorTiming(_RT3SettingsTestCase):
 		)
 		settings.preset = ""
 
-		with (
-			patch("jarvis.admin_client.post_update_llm_creds", return_value={"action": "restart"}),
-			patch("jarvis.admin_client.post_rotate_llm_secret", return_value={"action": "reload"}),
-		):
+		with patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}):
 			settings.save()
 
 		frappe.db.commit()
@@ -2558,25 +2603,17 @@ class TestFT2ValidateMirrorTiming(_RT3SettingsTestCase):
 				row.api_key = "sk-rotated-key"
 		# Do NOT touch legacy llm_api_key — before_validate should mirror it.
 
-		creds_calls = []
-		rotate_calls = []
-		with (
-			patch(
-				"jarvis.admin_client.post_update_llm_creds",
-				side_effect=lambda **kw: creds_calls.append(kw) or {"action": "restart"},
-			),
-			patch(
-				"jarvis.admin_client.post_rotate_llm_secret",
-				side_effect=lambda **kw: rotate_calls.append(kw) or {"action": "reload"},
-			),
+		pool_calls = []
+		with patch(
+			"jarvis.admin_client.post_update_llm_pool",
+			side_effect=lambda **kw: pool_calls.append(kw) or {"action": "pool_update"},
 		):
 			settings.save()
 
-		# Some admin call (reload or restart) must have been made.
-		total_calls = len(creds_calls) + len(rotate_calls)
+		# A pool sync must have been pushed to admin.
 		self.assertTrue(
-			total_calls >= 1,
-			"A credential sync (reload or restart) must be enqueued when table api_key rotates",
+			len(pool_calls) >= 1,
+			"A pool sync must be enqueued when the table api_key rotates",
 		)
 
 	def test_fresh_tenant_no_preseeded_key_can_save(self):
@@ -3039,7 +3076,11 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		self.assertIsNone(provider)
 
 	def test_session_model_for_single_model_tenant_is_unchanged(self):
-		"""A one-model config is not a pool at all: the flat llm_model still wins."""
+		"""jarvis#794: a lone api-key model is now a byo-direct pool (of one), not a
+		flat single-model tenant — it gets the SAME unpinned reset as any other
+		agent-direct pool (None, not the model id; see
+		test_session_model_for_byo_pool_with_no_pin_resets_to_the_agent_default).
+		proxy_active still lands on 0 (no sidecar for a pure api-key pool)."""
 		from jarvis.chat.worker import _session_model_for
 
 		self._save_pool(
@@ -3055,8 +3096,9 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		)
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertEqual(int(settings.proxy_active or 0), 0)
-		model, _ = _session_model_for(self._make_conv(model_override=""))
-		self.assertEqual(model, "gpt-4o")
+		model, provider = _session_model_for(self._make_conv(model_override=""))
+		self.assertIsNone(model)
+		self.assertIsNone(provider)
 
 	def test_session_model_for_honours_a_valid_pin(self):
 		"""A GENUINE pin still pins, and must: agent deliberately disables failover
@@ -4853,9 +4895,17 @@ class TestLeavingPoolModeConvergence(FrappeTestCase):
 		"""No before-doc means nothing was left, so the ordinary leg applies."""
 		self.assertFalse(self._leaving(None, [_api_key_model(order=0)]))
 
-	def test_single_model_edit_is_not_leaving_pool_mode(self):
-		"""A tenant that was never a pool must keep the single-model leg."""
-		self.assertFalse(self._leaving([_api_key_model(order=0)], [_api_key_model(order=0)]))
+	def test_lone_api_key_before_doc_now_reads_as_pool_mode(self):
+		"""jarvis#794: a lone api-key model IS pool mode now (a byo-direct pool
+		of one), so this before-doc was already coming FROM pool mode -
+		_is_leaving_pool_mode (a pure function of the before-doc) correctly
+		reads True. In production this exact before/after pair can no longer
+		reach the call site at all: _is_leaving_pool_mode is only consulted
+		from the else-branch of _on_update_unified_llm, taken only when the
+		AFTER doc is NOT pool mode - and a same-shape lone api-key after-doc
+		is pool mode too, so this save now takes the pool leg, not the
+		single-model leg, and never calls this function."""
+		self.assertTrue(self._leaving([_api_key_model(order=0)], [_api_key_model(order=0)]))
 
 	def test_removing_the_last_subscription_is_leaving_pool_mode(self):
 		"""An ALREADY-PROVISIONED lone subscription is pool mode, so dropping it
@@ -4885,10 +4935,20 @@ class TestLeavingPoolModeConvergence(FrappeTestCase):
 		self.assertFalse(self._leaving(before, [_api_key_model(order=0)]))
 
 	def test_teardown_push_is_allowed_past_the_pool_mode_gate(self):
-		"""The worker must not skip the job whose whole purpose is the teardown."""
+		"""The worker must not skip the job whose whole purpose is the teardown.
+
+		jarvis#794: a lone api-key model is pool mode now (compute_pool_mode is
+		True unconditionally), so it would trivially satisfy ``_pool_spec_pushable``
+		on the FIRST branch regardless of ``converge_teardown`` and stop
+		demonstrating the flag's own gate. Use a shape that is genuinely NOT a
+		pool instead - a fresh, never-synced lone subscription (same fixture as
+		test_removing_a_fresh_never_synced_lone_subscription_is_not_leaving_pool_mode)
+		- so the teardown-flag branch (``if not converge_teardown: return False`` /
+		the enabled-row fallback) is still the thing under test.
+		"""
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import _pool_spec_pushable
 
-		one_model = _make_settings_with_models([_api_key_model(order=0)])
+		one_model = _make_settings_with_models([_subscription_model(order=0, accounts=[_account()])])
 		# Without the flag this is exactly the "no longer a pool" skip that let
 		# the stale container config survive.
 		self.assertFalse(_pool_spec_pushable(one_model, False))
