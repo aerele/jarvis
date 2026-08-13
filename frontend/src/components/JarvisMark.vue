@@ -22,7 +22,7 @@
 	<span
 		v-else
 		class="jv-mark"
-		:class="[`jv-mood-${mood}`, { 'jv-hoverpeek': hoverPeek }]"
+		:class="[`jv-mood-${mood}`, { 'jv-hoverpeek': hoverPeek, 'jv-peek-on': peek }]"
 		:style="markStyle"
 	>
 		<svg
@@ -62,11 +62,15 @@ const props = defineProps({
 	},
 	/** Sidebar/brand use: reveal a friendly blink on hover, calm otherwise. */
 	hoverPeek: { type: Boolean, default: false },
+	/** Externally-driven peek: show the blinking eyes while true. Lets a larger
+	    surface (e.g. the whole sidebar brand card) drive the same reveal that
+	    hoverPeek gives on the mark alone. */
+	peek: { type: Boolean, default: false },
 });
 
 // The face element only exists when something can show it: an active mood, or a
 // hover-peek surface (where mood stays "star" but hover reveals the eyes).
-const hasFace = computed(() => props.mood !== "star" || props.hoverPeek);
+const hasFace = computed(() => props.mood !== "star" || props.hoverPeek || props.peek);
 
 const markStyle = computed(() => ({
 	width: `${props.size}px`,
@@ -234,16 +238,20 @@ const markStyle = computed(() => ({
 	}
 }
 
-/* HOVER PEEK - resting star until hovered, then a friendly blink. Enabled only
-   where hoverPeek is set (the sidebar brand), and only meaningful while mood is
-   "star" (the face is otherwise hidden). Pure CSS, no listeners. */
-.jv-hoverpeek:hover .jv-star {
+/* PEEK - resting star until triggered, then a friendly blink. Triggered by
+   hovering the mark itself (hoverPeek) or by the `peek` prop, so a larger
+   surface (e.g. the whole sidebar brand card) can drive the same reveal. Only
+   meaningful while mood is "star" (the face is otherwise hidden). */
+.jv-hoverpeek:hover .jv-star,
+.jv-peek-on .jv-star {
 	opacity: 0;
 }
-.jv-hoverpeek:hover .jv-face {
+.jv-hoverpeek:hover .jv-face,
+.jv-peek-on .jv-face {
 	opacity: 1;
 }
-.jv-hoverpeek:hover .jv-eye {
+.jv-hoverpeek:hover .jv-eye,
+.jv-peek-on .jv-eye {
 	animation: jvm-blink 1.8s ease-in-out infinite;
 }
 
@@ -252,7 +260,8 @@ const markStyle = computed(() => ({
 @media (prefers-reduced-motion: reduce) {
 	.jv-face,
 	.jv-eye,
-	.jv-hoverpeek:hover .jv-eye {
+	.jv-hoverpeek:hover .jv-eye,
+	.jv-peek-on .jv-eye {
 		animation: none !important;
 	}
 	.jv-mood-thinking .jv-eye {
