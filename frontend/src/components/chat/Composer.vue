@@ -545,39 +545,48 @@ defineExpose({ el: inputEl, focusInput });
 </script>
 
 <style scoped>
-/* Brand focus highlight: while the box is focused, a gradient ring in the logo
-   colours flows around its edge. Drawn by a masked ::after so it lays exactly
-   over the 1px edge without having to beat the element's inline border/shadow
-   (which would win by specificity). The motion is the conic gradient's ANGLE
-   animating, not a rotating element, so the border stays put and only the
-   colour travels around it. */
+/* Brand highlight: a soft gradient ring in the logo colours flows around the
+   composer edge. It is ALWAYS on (not gated on :focus-within) so it renders in
+   every layout state — including when the sidebar is collapsed and focus has
+   left the box, which used to blank it out. Drawn by a masked ::after so it
+   lays exactly over the 1px edge without having to beat the element's inline
+   border/shadow (which would win by specificity). The motion is the conic
+   gradient's ANGLE animating, not a rotating element, so the border stays put
+   and only the colour travels around it. Kept deliberately light (low opacity +
+   thin band) with one bright "spark" stop so the movement still reads. */
 @property --jv-comp-angle {
 	syntax: "<angle>";
 	inherits: false;
 	initial-value: 0deg;
 }
-.jv-composer:focus-within::after {
+.jv-composer::after {
 	content: "";
 	position: absolute;
 	inset: 0;
 	border-radius: 13px;
-	padding: 1.6px;
-	/* Logo tokens from main.css (:root), not literal hex, so a brand retune
-	   carries here instead of drifting. */
+	padding: 1.3px;
+	/* Base hue from logo tokens in main.css (:root) so a brand retune carries
+	   here; the light #cbd6ff stop is the travelling spark that keeps the slow
+	   motion legible at this low opacity. */
 	background: conic-gradient(
 		from var(--jv-comp-angle),
 		var(--brand-1),
+		var(--brand-2),
+		#cbd6ff,
 		var(--brand-2),
 		var(--brand-1),
 		var(--brand-2),
 		var(--brand-1)
 	);
+	/* Held light. The blink animation overrides this while motion is allowed;
+	   with reduced motion the animations drop and this static soft value holds. */
+	opacity: 0.62;
 	/* Mask keeps only the padding band, turning the fill into a border ring. */
 	-webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
 	-webkit-mask-composite: xor;
 	mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
 	mask-composite: exclude;
-	animation: jv-comp-flow 3s linear infinite;
+	animation: jv-comp-flow 2.6s linear infinite, jv-comp-blink 2.6s ease-in-out infinite;
 	pointer-events: none;
 }
 @keyframes jv-comp-flow {
@@ -585,9 +594,19 @@ defineExpose({ el: inputEl, focusInput });
 		--jv-comp-angle: 360deg;
 	}
 }
-/* Reduced motion: hold a still gradient border rather than spinning it. */
+/* Gentle blink so the ring visibly breathes rather than looking static. */
+@keyframes jv-comp-blink {
+	0%,
+	100% {
+		opacity: 0.5;
+	}
+	50% {
+		opacity: 0.8;
+	}
+}
+/* Reduced motion: hold a still, soft gradient border — no spin, no blink. */
 @media (prefers-reduced-motion: reduce) {
-	.jv-composer:focus-within::after {
+	.jv-composer::after {
 		animation: none;
 	}
 }
