@@ -76,21 +76,20 @@
    forms-plugin's BLUE focus ring, which contradicts the monochrome accent. Note
    the plugin rings via box-shadow + border-color, not outline, so a component's
    `outline: none` does not suppress it. */
-/* App-wide, not just .jv-root/.jv-ob-root: scoping this to those two roots left
-   every OTHER surface (Settings dialog, Skills, dashboards) painting the plugin's
-   blue focus ring. `:root :where(...)` keeps the exact (0,2,0) specificity the
-   class scoping had, so it still beats the plugin, now everywhere. .form-input and
-   .form-select cover frappe-ui internals (e.g. Autocomplete's search box) that opt
-   into the plugin's class strategy. The plugin rings via box-shadow + border-color,
-   not outline, so a component's `outline: none` alone never suppresses it. */
-:root
-	:where(
-		input:not([type="checkbox"]):not([type="radio"]),
-		textarea,
-		select,
-		.form-input,
-		.form-select
-	):focus {
+.jv-root :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus,
+.jv-ob-root :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus {
+	outline: none;
+	box-shadow: none;
+	border-color: revert;
+}
+/* App-wide, but ONLY the plugin's class-strategy targets (.form-input /
+   .form-select). Those are used by frappe-ui internals like Autocomplete's search
+   box, which carry NO focus border/shadow of their own, so they leak the blue on
+   every surface. Neutralise just those. This is deliberately NOT extended to bare
+   input/textarea/select app-wide: frappe-ui's own TextInput/Select self-protect
+   (they set focus:border/shadow/ring themselves), and a blanket reset stripped
+   that and left a bare UA-grey border on plain click focus. */
+:root :where(.form-input, .form-select):focus {
 	outline: none;
 	box-shadow: none;
 	border-color: revert;
@@ -103,14 +102,14 @@
    Suppressing it outright would cost keyboard users their focus indicator, so the
    ring is re-drawn here in the app's own accent, and only for :focus-visible, so a
    mouse click leaves the field clean while Tab still shows where you are. */
-:root
-	:where(
-		input:not([type="checkbox"]):not([type="radio"]),
-		textarea,
-		select,
-		.form-input,
-		.form-select
-	):focus-visible {
+.jv-root
+	:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible,
+.jv-ob-root
+	:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 1px;
+}
+:root :where(.form-input, .form-select):focus-visible {
 	outline: 2px solid var(--focus-ring);
 	outline-offset: 1px;
 }
