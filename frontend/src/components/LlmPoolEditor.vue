@@ -251,8 +251,17 @@
 									<path d="M6 9l6 6 6-6" />
 								</svg>
 							</button>
+							<!-- Edit and Reconnect are meaningless on a subscription row with no
+			         connected account yet (a freshly added row - or one whose only
+			         account was disconnected): there is nothing to edit and nothing to
+			         reconnect. Keyed on rowHasConnectedAccount, not "just added", so a
+			         row left accountless by a disconnect hides them the same way. -->
 							<button
-								v-if="canEdit"
+								v-if="
+									canEdit &&
+									(row.credentialType !== 'subscription' ||
+										rowHasConnectedAccount(row))
+								"
 								:disabled="!editable"
 								@click="openEdit(i)"
 								class="jv-btn jv-btn--sm jv-btn--ghost"
@@ -260,7 +269,11 @@
 								Edit
 							</button>
 							<button
-								v-if="canEdit && row.credentialType === 'subscription'"
+								v-if="
+									canEdit &&
+									row.credentialType === 'subscription' &&
+									rowHasConnectedAccount(row)
+								"
 								:disabled="!editable"
 								@click="quickReconnect(i)"
 								class="jv-btn jv-btn--sm jv-btn--ghost"
@@ -268,7 +281,7 @@
 								Reconnect
 							</button>
 							<button
-								v-else-if="canEdit"
+								v-else-if="canEdit && row.credentialType !== 'subscription'"
 								:disabled="!editable"
 								@click="openEdit(i)"
 								class="jv-btn jv-btn--sm jv-btn--ghost"
@@ -375,8 +388,11 @@
 											<path d="M6 9l6 6 6-6" />
 										</svg>
 									</button>
+									<!-- A grouped row always has 2+ accounts by construction (isGroupedRow),
+					         so rowHasConnectedAccount is always true here - kept for the same
+					         reason the ungrouped row keys on it, not row identity. -->
 									<button
-										v-if="canEdit"
+										v-if="canEdit && rowHasConnectedAccount(row)"
 										:disabled="!editable"
 										@click="openEdit(i)"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
@@ -384,7 +400,7 @@
 										Edit
 									</button>
 									<button
-										v-if="canEdit"
+										v-if="canEdit && rowHasConnectedAccount(row)"
 										:disabled="!editable"
 										@click="quickReconnect(i)"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
@@ -882,11 +898,8 @@
                entry, so two rows naming one model cannot both exist. Finding that
                out afterwards used to cost a whole wasted OAuth round trip (#575). -->
 					<p v-if="addFoldsInto" class="jv-pool-foldnote">
-						{{ upstreamLabelOf(panelRow.upstream) }} is already connected here with
-						{{ addFoldsInto.accounts.length }}
-						{{ addFoldsInto.accounts.length === 1 ? "account" : "accounts" }}. Signing
-						in adds another account to that same model, so your agent can spread its
-						work across them. It does not add a second model.
+						{{ upstreamLabelOf(panelRow.upstream) }} is already connected. Signing in
+						again adds another account to this model, not a new model.
 					</p>
 
 					<!-- Connect account: EDIT-mode re-entry only. In add mode the two-step sign-in
@@ -3781,6 +3794,15 @@ async function resync() {
 function filledRows() {
 	const pending = pendingAddRow();
 	return rows.value.filter((x) => !isRowEmpty(x) && x !== pending);
+}
+// True when a subscription row has at least one account the connect flow actually
+// placed (capture_id: fresh from a just-finished sign-in; account_ref: a stored one
+// loaded from config). Same predicate used pool-wide to mean "connected" (ready,
+// singleModeCanStart, startBlockedReason, isRowEmpty). Keyed on this rather than
+// "row was just added" because that is the real UI state: a row can sit accountless
+// after a disconnect too, not only right after being added.
+function rowHasConnectedAccount(row) {
+	return !!(row && (row.accounts || []).some((a) => a && (a.capture_id || a.account_ref)));
 }
 // True when removing this row would empty the pool, which is a disconnect rather than
 // an edit. Drives BOTH the row action's label and where remove() routes, so the button
