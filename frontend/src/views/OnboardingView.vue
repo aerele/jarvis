@@ -398,6 +398,34 @@
 											:message="detailsFieldErrors.company"
 										/>
 									</div>
+									<!-- Partner code: optional, closed by default (most customers have
+										 none). jarvis only threads the string to admin - no validation
+										 here, admin resolves/rejects it. Kept on `state`, not the
+										 billing composable, so it is intentionally NOT restored on a
+										 mid-onboarding reload (localStorage-persisted like billing) -
+										 acceptable for v1 since it's typed once at signup. -->
+									<details class="col-span-2 text-p-xs text-ink-gray-5">
+										<summary class="cursor-pointer">
+											Have a partner code? (optional)
+										</summary>
+										<div class="mt-2 flex flex-col gap-1">
+											<p class="text-p-xs text-ink-gray-5">
+												If a Frappe partner referred you, enter their code
+												here.
+											</p>
+											<FormControl
+												type="text"
+												variant="outline"
+												label="Partner code (optional)"
+												:model-value="state.partnerCode"
+												@update:model-value="
+													(v) => (state.partnerCode = v)
+												"
+												placeholder="PARTNER-CODE"
+												@keydown.enter="onDetailsSubmit"
+											/>
+										</div>
+									</details>
 									<div
 										class="col-span-2 mt-2 text-base font-semibold text-ink-gray-9"
 									>
@@ -1740,6 +1768,13 @@ const state = reactive({
 	company: "",
 	companies: [],
 	detailsErr: "",
+	// Optional partner-code passthrough (top-level kwarg to admin, NOT part of
+	// `billing`). Deliberately kept here rather than on the `billing` composable:
+	// billing is localStorage-persisted so a mid-onboarding reload restores it,
+	// but a partner code is entered once at signup and does not need that -
+	// leaving it off the persisted composable means it is simply NOT restored
+	// on reload, which is acceptable for v1.
+	partnerCode: "",
 	// The four billing inputs (contact phone, address, city, GSTIN) live in the
 	// `billing` composable below (provenance-aware, fenced, namespaced) — Plan 01.
 	// True once a payment intent exists (a signup call created checkout handles,
@@ -3145,6 +3180,9 @@ async function onPayClick() {
 		plan: state.planName,
 		provider: state.paymentProvider,
 		billing: Object.keys(billingPayload).length ? billingPayload : undefined,
+		// Top-level kwarg, parallel to nothing else here - NOT part of `billing`.
+		// Trimmed + undefined-when-blank so a blank field sends no key at all.
+		partner_code: state.partnerCode?.trim() || undefined,
 	});
 	// Plan 01: a successful signup left REVIEW for a live intent (verify / checkout /
 	// provisioning / duplicate). An intent now exists, so a subsequent Review & Pay

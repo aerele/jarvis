@@ -245,6 +245,7 @@ def signup(
 	coupon: str | None = None,
 	provider: str | None = None,
 	billing: dict | None = None,
+	partner_code: str | None = None,
 ) -> dict:
 	"""Guest signup against admin. Returns admin's data dict, which carries a
 	``payment_provider`` discriminator plus that gateway's checkout handles:
@@ -271,6 +272,12 @@ def signup(
 	stores on the Customer in the signup transaction; the response echoes
 	``billing_saved: true`` only when a NEW admin persisted it (an older admin
 	drops the unknown kwarg and never echoes it).
+
+	``partner_code`` (optional) is an opaque string admin resolves to a Partner
+	and attributes the customer to. Sent verbatim, unvalidated - admin raises on
+	an unknown code, and that error surfaces through the normal AdminValidationError
+	path like any other signup rejection. An older admin that does not know the
+	kwarg drops it silently.
 	"""
 	body = {
 		"email": email,
@@ -286,6 +293,8 @@ def signup(
 		body["provider"] = provider
 	if billing:
 		body["billing"] = billing
+	if partner_code:
+		body["partner_code"] = partner_code
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
 
 
@@ -294,6 +303,7 @@ def resume_pending_signup(
 	provider: str | None = None,
 	*,
 	billing: dict | None = None,
+	partner_code: str | None = None,
 	idempotency_key: str | None = None,
 ) -> dict:
 	"""Authenticated failed-payment resume: re-issues checkout handles for the
@@ -318,6 +328,8 @@ def resume_pending_signup(
 		body["provider"] = provider
 	if billing:
 		body["billing"] = billing
+	if partner_code:
+		body["partner_code"] = partner_code
 	if idempotency_key:
 		body["idempotency_key"] = idempotency_key
 	return _post(path=_m("billing.signup.resume_pending_signup"), body=body)

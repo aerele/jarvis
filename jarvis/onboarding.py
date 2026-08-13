@@ -859,7 +859,12 @@ def _clear_llm_secrets(settings) -> None:
 
 @frappe.whitelist()
 def start_signup(
-	email: str, company: str, plan: str, provider: str | None = None, billing: dict | None = None
+	email: str,
+	company: str,
+	plan: str,
+	provider: str | None = None,
+	billing: dict | None = None,
+	partner_code: str | None = None,
 ) -> dict:
 	"""Guest signup → store the api_token → return the Razorpay handles for Checkout.
 
@@ -877,6 +882,12 @@ def start_signup(
 	admin_client falls back to the DEFAULT_ADMIN_URL, which on a multi-site
 	bench may be the wrong control plane. Fail fast with an actionable
 	error instead of silently landing the wrong tenancy.
+
+	``partner_code`` (optional) is forwarded verbatim to admin, which resolves
+	it to a Partner and attributes the customer. This bench does no validation
+	of the code itself — an unknown code is admin's rejection to raise, and it
+	surfaces through the normal ``_ADMIN_ERRORS`` → ``_throw_admin_error`` path
+	below like any other signup error.
 
 	Two response shapes depending on admin's
 	``require_email_verification`` flag:
@@ -922,9 +933,11 @@ def start_signup(
 		# frappe.throw, and the duplicate check below needs the class and the
 		# contract code that conversion discards. Anything non-resumable then
 		# goes through the identical mapping _surface would have applied.
-		data = admin_client.signup(email, company, plan, provider=provider, billing=billing)
+		data = admin_client.signup(
+			email, company, plan, provider=provider, billing=billing, partner_code=partner_code
+		)
 	except _ADMIN_ERRORS as e:
-		resumed = _try_resume_pending_signup(e, email, plan, provider, billing)
+		resumed = _try_resume_pending_signup(e, email, plan, provider, billing, partner_code)
 		if resumed is None:
 			_throw_admin_error(e)  # always raises
 		data = resumed
@@ -969,7 +982,12 @@ def start_signup(
 
 
 def _try_resume_pending_signup(
-	err, email: str, plan: str, provider: str | None, billing: dict | None = None
+	err,
+	email: str,
+	plan: str,
+	provider: str | None,
+	billing: dict | None = None,
+	partner_code: str | None = None,
 ) -> dict | None:
 	"""Failed-payment retry: when guest signup is rejected as a duplicate and
 	this bench holds admin credentials, resume the pending signup through admin's
@@ -1011,6 +1029,7 @@ def _try_resume_pending_signup(
 			plan,
 			provider=provider,
 			billing=billing,
+			partner_code=partner_code,
 			idempotency_key=_reserve_idempotency_key(context=context),
 		)
 	except Exception:

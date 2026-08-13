@@ -423,15 +423,25 @@ async function rawOnboardingCall(method, args, opts = {}) {
 export const onboardingPaymentApi = {
 	getOnboardingState: (opts) =>
 		rawOnboardingCall("jarvis.onboarding.get_onboarding_state", {}, opts),
-	startSignup: ({ email, company, plan, provider, billing }, opts) =>
+	startSignup: ({ email, company, plan, provider, billing, partner_code }, opts) =>
 		// Plan 01: the normalized billing snapshot rides the FIRST signup call so it
 		// persists server-side while the customer is still a guest (update_billing is
 		// authenticated and unreachable mid-signup). Included only when present - an
 		// empty object is never sent (the caller omits it), so an older admin that
 		// ignores the kwarg is unaffected.
+		// partner_code: an optional TOP-LEVEL kwarg (never inside billing), same
+		// omit-when-absent shape - an older admin that doesn't know the kwarg drops
+		// it and the signup proceeds exactly as before.
 		rawOnboardingCall(
 			"jarvis.onboarding.start_signup",
-			{ email, company, plan, provider, ...(billing ? { billing } : {}) },
+			{
+				email,
+				company,
+				plan,
+				provider,
+				...(billing ? { billing } : {}),
+				...(partner_code ? { partner_code } : {}),
+			},
 			opts
 		),
 	initiateSignupPayment: ({ plan, provider }, opts) =>

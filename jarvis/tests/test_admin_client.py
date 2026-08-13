@@ -1108,6 +1108,56 @@ class TestClientCapabilityAdvert(FrappeTestCase):
 			out = admin_client.signup("e@x.com", "Co", "Annual Plan")
 		self.assertEqual(out, legacy_data)
 
+	def test_signup_forwards_partner_code_when_given(self):
+		_settings_clear_admin()  # guest signup path
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.signup("e@x.com", "Co", "Annual Plan", partner_code="PARTNER-1")
+		self.assertEqual(captured["json"]["partner_code"], "PARTNER-1")
+
+	def test_signup_omits_partner_code_when_not_given(self):
+		# An older admin ignoring the kwarg is fine; the bench must never SEND an
+		# empty one - that would be a real (if blank) value, not "not provided".
+		_settings_clear_admin()
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.signup("e@x.com", "Co", "Annual Plan")
+		self.assertNotIn("partner_code", captured["json"])
+
+	def test_resume_pending_signup_forwards_partner_code_when_given(self):
+		_settings_for_admin()  # authenticated resume path
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.resume_pending_signup("Annual Plan", partner_code="PARTNER-1")
+		self.assertEqual(captured["json"]["partner_code"], "PARTNER-1")
+
+	def test_resume_pending_signup_omits_partner_code_when_not_given(self):
+		_settings_for_admin()
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.resume_pending_signup("Annual Plan")
+		self.assertNotIn("partner_code", captured["json"])
+
 	def test_billing_facades_carry_capability_advert(self):
 		"""plan-09 P0-2: the capability advert now rides EVERY billing initiation call,
 		not just signup/resume, because admin's billing facades gate on it too. Without
