@@ -1,9 +1,10 @@
 // Global floating Jarvis widget — a draggable, edge-snapping FAB that opens
 // the side chat panel in place, present on every Desk page EXCEPT the full
-// chat page, the onboarding flow (where the agent isn't ready yet), and
-// Frappe's setup wizard (a fresh install whose site setup isn't finished, where
-// Frappe blocks the desk on the wizard). The visibility rule lives in
-// widget_visibility.mjs.
+// chat page, the onboarding flow (where the agent isn't ready yet), Frappe's
+// setup wizard (a fresh install whose site setup isn't finished, where
+// Frappe blocks the desk on the wizard), and any page where ERPNext's own
+// setup is otherwise incomplete (no Company yet). The visibility rule lives
+// in widget_visibility.mjs.
 //
 // The panel is a child of the FAB component, so hiding this host hides both.
 // On a narrow viewport the FAB navigates to the chat SPA instead of opening a
@@ -33,7 +34,8 @@ import { shouldHideWidget } from "./jarvis_chat/widget/widget_visibility.mjs";
 	function sync() {
 		ensureMounted();
 		const route = (window.frappe && frappe.get_route && frappe.get_route()) || [];
-		host.style.display = shouldHideWidget(route) ? "none" : "";
+		const siteSetupComplete = window.frappe?.boot?.jarvis_site_setup_complete;
+		host.style.display = shouldHideWidget(route, siteSetupComplete) ? "none" : "";
 	}
 
 	function start() {
