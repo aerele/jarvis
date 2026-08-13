@@ -156,6 +156,24 @@ def itemised_tax(doc, with_tax_account: bool = False) -> dict:
 	``doc.taxes``. The two majors also return different value shapes; both are
 	passed through untouched, because the consumer is the model and inventing a
 	common shape would mean fabricating fields one version does not compute.
+
+	On 16, ``_item_wise_tax_details`` is a controller-runtime attribute, not a
+	persisted field: it is set inside ``calculate_taxes_and_totals()``, which
+	runs on save/submit but never on a plain ``frappe.get_doc()`` fetch. So a
+	freshly loaded submitted document reaches this shim with the attribute
+	unset (``None``), and passing it straight to ``get_itemised_tax`` raises
+	``TypeError: 'NoneType' object is not iterable`` on every call, tax lines
+	or not. Recompute it here rather than push the caller to remember to; this
+	only touches the in-memory doc (no save), and is a no-op read on 15, whose
+	``get_itemised_tax(doc.taxes)`` never looks at this attribute at all.
+
+	``calculate_taxes_and_totals()`` itself early-returns without touching
+	``_item_wise_tax_details`` when the document has no items at all
+	(``taxes_and_totals.calculate.calculate``: ``if not len(self.doc.items):
+	return``), so the attribute can still be unset afterwards - a genuinely
+	taxless document, not a stale one. ``get_itemised_tax`` has no ``None``
+	guard of its own, so seed the empty case directly rather than let that
+	iterate a ``None`` too.
 	"""
 	from erpnext.controllers.taxes_and_totals import get_itemised_tax
 
@@ -167,8 +185,13 @@ def itemised_tax(doc, with_tax_account: bool = False) -> dict:
 	# anything else (the 16 name, an unreadable signature, a future rename) gets
 	# the document. Defaulting the other way would hand a doc-shaped callee a
 	# child table, which is the failure this shim exists to prevent.
-	target = doc.get("taxes") if first_param == "taxes" else doc
-	return get_itemised_tax(target, with_tax_account=with_tax_account)
+	if first_param == "taxes":
+		return get_itemised_tax(doc.get("taxes"), with_tax_account=with_tax_account)
+	if doc.get("_item_wise_tax_details") is None and hasattr(doc, "calculate_taxes_and_totals"):
+		doc.calculate_taxes_and_totals()
+	if doc.get("_item_wise_tax_details") is None:
+		doc._item_wise_tax_details = []
+	return get_itemised_tax(doc, with_tax_account=with_tax_account)
 
 
 def permission_conditions(engine, doctype: str, table):

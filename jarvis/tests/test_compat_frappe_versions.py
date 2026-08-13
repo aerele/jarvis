@@ -216,6 +216,29 @@ class TestItemisedTaxAcrossMajors(FrappeTestCase):
 		doc = frappe.new_doc("Sales Invoice")
 		self.assertEqual(compat.itemised_tax(doc, with_tax_account=True), {})
 
+	def test_dispatches_without_raising_on_a_freshly_fetched_doc(self):
+		"""ERPNext 16's ``_item_wise_tax_details`` is a controller-runtime
+		attribute set inside ``calculate_taxes_and_totals()`` (save/submit), not
+		a persisted field - so it is unset (``None``) on any document object
+		that was NOT just built or saved in this same Python process, which is
+		exactly the shape ``get_itemised_tax_breakup`` hands this shim: a
+		document loaded fresh via ``frappe.get_doc(doctype, name)``.
+
+		``frappe.new_doc("Sales Invoice")`` (the older test above) already has
+		the attribute unset, but reconstructing a doc from a plain dict is a
+		closer simulation of a DB round-trip - no in-memory state survives - and
+		is what actually reproduced the bug this test guards: a real call
+		through ``get_itemised_tax_breakup`` raised
+		``TypeError: 'NoneType' object is not iterable`` on every submitted
+		invoice, taxed or not, before ``compat.itemised_tax`` recomputed the
+		attribute itself."""
+		if "erpnext" not in frappe.get_installed_apps():
+			self.skipTest("erpnext not installed on this site")
+		built = frappe.new_doc("Sales Invoice")
+		fetched = frappe.get_doc(built.as_dict())
+		self.assertIsNone(fetched.get("_item_wise_tax_details"))
+		self.assertEqual(compat.itemised_tax(fetched, with_tax_account=True), {})
+
 	def test_sends_the_object_the_installed_signature_asks_for(self):
 		"""Guards the probe itself: ERPNext 16 names the first parameter ``doc``
 		and wants the parent document, ERPNext 15 names it ``taxes`` and wants
