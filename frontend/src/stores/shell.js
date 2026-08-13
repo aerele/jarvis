@@ -13,6 +13,7 @@ import { useStorage } from "@vueuse/core";
 import { toast } from "frappe-ui";
 import * as api from "@/api";
 import { errHtml } from "@/lib/errors";
+import { needsOnboarding } from "@/onboarding/readiness.js";
 
 // ---- state ------------------------------------------------------------------
 const conversations = ref([]); // [{name,title,last_active_at,starred,message_count}]
@@ -399,7 +400,17 @@ function requestNewChat(router) {
 // opens over ANY route without a chat redirect. Optional `section` targets a
 // pane; a non-string arg (e.g. a legacy `router` caller not yet updated) falls
 // back to "general" so old call-sites keep opening the dialog harmlessly.
-function openSettings(section) {
+//
+// Guarded here (jarvis#810), not at each call site, so EVERY caller is
+// covered without auditing them one by one. GeneralPane/UserMenu/ChatView
+// only ever call this post-onboarding anyway, but AppShell's openSettingsFromQuery()
+// reads a `?settings=` deep link on mount with no onboarding check of its own,
+// which let a never-onboarded workspace open the dialog straight over the
+// gate. needsOnboarding() shares AppShell's own memoized readiness promise
+// (readiness.js's checkReady()), so this costs no extra round-trip: it's
+// already in flight or resolved by the time any real caller fires.
+async function openSettings(section) {
+	if (await needsOnboarding()) return;
 	settingsOpen.value = true;
 	settingsSection.value = typeof section === "string" && section ? section : "general";
 }
