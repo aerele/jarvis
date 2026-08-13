@@ -109,6 +109,21 @@ describe("the first payment: navigate to the admin-hosted pay page", () => {
 		expect(flow.state.value.illegalTransitions).toBe(0);
 	});
 
+	test("a review submit forwards partner_code as a top-level field, not inside billing", async () => {
+		const { flow, api } = makeFlow();
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+			partner_code: "PARTNER-1",
+		});
+		expect(api.startSignup).toHaveBeenCalledWith(
+			expect.objectContaining({ partner_code: "PARTNER-1" }),
+			expect.anything()
+		);
+	});
+
 	test("a signup still awaiting verification navigates nothing", async () => {
 		const api = makeApi({
 			startSignup: vi.fn(async () =>

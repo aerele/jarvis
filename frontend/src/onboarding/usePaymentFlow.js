@@ -414,7 +414,7 @@ export function createPaymentFlow(deps) {
 	}
 
 	// ---- submit review: start the signup exactly once ----------------------
-	async function submitReview({ email, company, plan, provider, billing } = {}) {
+	async function submitReview({ email, company, plan, provider, billing, partner_code } = {}) {
 		const my = beginAction(null); // SUBMIT_REVIEW sets the busy flag itself
 		if (!my) return; // a burst of clicks produces exactly one start (P1-2)
 		try {
@@ -424,11 +424,13 @@ export function createPaymentFlow(deps) {
 				// Plan 01: the billing snapshot rides start_signup (the guest has no
 				// session for the authenticated update_billing facade). Omitted when the
 				// caller passes nothing, so an empty object never crosses the wire.
+				// partner_code is a separate, optional top-level kwarg - never nested
+				// inside billing - forwarded to admin verbatim; jarvis does no validation.
 				decoded = ingest(
 					await deadlined(
 						(signal) =>
 							api.startSignup(
-								{ email, company, plan, provider, billing },
+								{ email, company, plan, provider, billing, partner_code },
 								{ signal }
 							),
 						fetchDeadlineMs,
