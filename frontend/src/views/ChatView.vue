@@ -1807,12 +1807,9 @@
 									padding-top: 4px;
 								"
 							>
-								<span style="display: flex; gap: 4px" aria-hidden="true">
-									<span class="jv-tdot"></span>
-									<span class="jv-tdot" style="animation-delay: 0.18s"></span>
-									<span class="jv-tdot" style="animation-delay: 0.36s"></span>
-								</span>
-								<span style="font-size: 12px; color: var(--text-3)"
+								<span
+									class="jv-live-shim"
+									style="font-size: 12px; color: var(--text-3)"
 									>{{ liveStatus
 									}}<span
 										v-if="liveElapsedLabel"
@@ -10686,13 +10683,20 @@ onUnmounted(() => {
 	color: var(--text-1);
 	background: var(--surface-gray-2, rgba(0, 0, 0, 0.05));
 }
-/* thinking dots — classed so reduced-motion can disable them (UX #13) */
-.jv-tdot {
-	width: 6px;
-	height: 6px;
-	border-radius: 50%;
-	background: var(--text-3);
-	animation: jv-dot 1.1s infinite;
+/* live-status label: a gentle breathing shimmer so the "Working on it…" line
+   reads as active on its own, without the old bouncing dots competing with the
+   avatar mark's motion next to it. Disabled under reduced-motion below. */
+.jv-live-shim {
+	animation: jv-live-shim 1.8s ease-in-out infinite;
+}
+@keyframes jv-live-shim {
+	0%,
+	100% {
+		opacity: 0.55;
+	}
+	50% {
+		opacity: 1;
+	}
 }
 /* visually-hidden live region for screen-reader announcements (UX #5) */
 .jv-sr {
@@ -10719,9 +10723,9 @@ onUnmounted(() => {
 	.jv-spin {
 		animation: none;
 	}
-	.jv-tdot {
+	.jv-live-shim {
 		animation: none;
-		opacity: 0.55;
+		opacity: 1;
 	}
 	.jv-tool-dot.run,
 	.jv-mic-dot {
