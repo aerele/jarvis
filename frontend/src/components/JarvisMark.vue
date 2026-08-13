@@ -88,8 +88,8 @@ const hasFace = computed(
 // but self-triggered every IDLE_PEEK_INTERVAL_MS while nothing else is
 // driving the face. Only meaningful while mood is "star" - an active mood
 // already owns the face.
-const IDLE_PEEK_INTERVAL_MS = 8000;
-const IDLE_PEEK_HOLD_MS = 1800; // one jvm-blink cycle, then back to resting
+const IDLE_PEEK_INTERVAL_MS = 9000;
+const IDLE_PEEK_HOLD_MS = 4800; // ~1.4 jvm-lookaround cycles: a visible "thinking" glance, then back to resting
 const autoPeek = ref(false);
 let idleTimeoutId = null;
 let idleHoldTimeoutId = null;
@@ -325,11 +325,13 @@ const markStyle = computed(() => ({
 	}
 }
 
-/* PEEK - resting star until triggered, then a friendly blink. Triggered by
+/* PEEK - resting star until triggered, then the same "thinking" glance the
+   thinking mood uses (eyes look around, with a soft blink) rather than a quick
+   one-off blink, so a resting mark is clearly, visibly alive. Triggered by
    hovering the mark itself (hoverPeek), by the `peek` prop (so a larger
    surface, e.g. the whole sidebar brand card, can drive the same reveal), or
    by `idlePeek`'s own timer toggling the same `jv-peek-on` class (see
-   scheduleIdlePeek in <script>) so the mark blinks on its own while resting.
+   scheduleIdlePeek in <script>) so the mark glances on its own while resting.
    Only meaningful while mood is "star" (the face is otherwise hidden). */
 .jv-hoverpeek:hover .jv-star,
 .jv-peek-on .jv-star {
@@ -338,10 +340,11 @@ const markStyle = computed(() => ({
 .jv-hoverpeek:hover .jv-face,
 .jv-peek-on .jv-face {
 	opacity: 1;
+	animation: jvm-lookaround 3.4s ease-in-out infinite;
 }
 .jv-hoverpeek:hover .jv-eye,
 .jv-peek-on .jv-eye {
-	animation: jvm-blink 1.8s ease-in-out infinite;
+	animation: jvm-blink 3.4s ease-in-out infinite;
 }
 
 /* One calm static frame per mood, matching how JvSpinner/SetupNeuralNet handle
