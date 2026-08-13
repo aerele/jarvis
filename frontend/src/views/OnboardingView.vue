@@ -386,7 +386,10 @@
 													);
 												}
 											"
-											allow-custom
+											:allow-custom="
+												!state.erpnextInstalled ||
+												state.companies.length === 0
+											"
 											aria-required
 											autocomplete="organization"
 											:options="state.companies"
@@ -1767,6 +1770,10 @@ const state = reactive({
 	email: "",
 	company: "",
 	companies: [],
+	// Whether ERPNext is installed on the site (from getAccountDefaults). Gates
+	// whether the Company field below is a constrained picker or free text --
+	// see the allow-custom binding on the JvCombo further down.
+	erpnextInstalled: false,
 	detailsErr: "",
 	// Optional partner-code passthrough (top-level kwarg to admin, NOT part of
 	// `billing`). Deliberately kept here rather than on the `billing` composable:
@@ -4213,6 +4220,7 @@ async function prefillAccount() {
 		if (d.email && !state.email.trim()) state.email = d.email;
 		if (d.company && !state.company.trim()) state.company = d.company;
 		if (Array.isArray(d.companies)) state.companies = d.companies;
+		state.erpnextInstalled = !!d.erpnext_installed;
 	} catch (e) {
 		/* no-op: keep the placeholders */
 	}

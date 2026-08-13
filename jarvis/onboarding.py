@@ -1435,6 +1435,20 @@ def _is_undeliverable(email: str) -> bool:
 	return bool(domain) and f".{domain}".endswith(_UNDELIVERABLE_SUFFIXES)
 
 
+def _installed_apps() -> set[str]:
+	"""The site's installed apps (test seam, patch HERE rather than
+	``frappe.get_installed_apps`` directly, same convention as
+	``jarvis.chat.agent_installability.installed_apps`` and
+	``jarvis.site_profile.apps._installed_apps``). Fails toward the empty set so
+	a lookup hiccup falls back to the free text Company field instead of
+	silently claiming ERPNext is installed."""
+	try:
+		return set(frappe.get_installed_apps())
+	except Exception:
+		frappe.log_error(title="jarvis onboarding: get_installed_apps failed")
+		return set()
+
+
 @frappe.whitelist()
 def get_account_defaults() -> dict:
 	"""Prefill for the onboarding Account step so the customer doesn't retype what
@@ -1442,6 +1456,10 @@ def get_account_defaults() -> dict:
 	user/global default when set, else the site's sole Company; ``companies`` lists
 	options for a client datalist when several exist. Silent no-op (blank / empty
 	list) on sites without the Company doctype or read permission.
+
+	``erpnext_installed`` tells the client whether Company should be a constrained
+	picker (real Company records exist to pick from) or stay free text (no ERPNext
+	on the site, so there is nothing to pick from).
 
 	A reserved-domain email is dropped rather than sent. On a fresh site the caller
 	is Administrator, i.e. admin@example.com, and the step it fills says receipts go
@@ -1470,7 +1488,16 @@ def get_account_defaults() -> dict:
 		# No Company doctype / no read permission — leave blank so the client keeps
 		# its placeholder, exactly like the desk auto-fetch's silent no-op.
 		company, companies = "", []
-	return {"email": email, "company": company, "companies": companies}
+	return {
+		"email": email,
+		"company": company,
+		"companies": companies,
+		# Lets the client decide whether Company is a constrained picker (ERPNext
+		# present, real Company records exist) or a free text field (no ERPNext,
+		# or ERPNext installed with zero Company rows so onboarding never dead
+		# ends on an empty picker).
+		"erpnext_installed": "erpnext" in _installed_apps(),
+	}
 
 
 def _company_defaults_error(code: str, message: str, http_status: int) -> dict:
