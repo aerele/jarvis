@@ -1059,7 +1059,11 @@
 										<Badge
 											variant="subtle"
 											theme="blue"
-											:label="toScopeLabel(p)"
+											:label="
+												p.to_scope === 'Role'
+													? 'Role'
+													: p.to_scope || 'Org'
+											"
 										/>
 									</span>
 								</div>
