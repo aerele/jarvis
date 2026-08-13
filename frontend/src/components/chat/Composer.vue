@@ -545,10 +545,60 @@ defineExpose({ el: inputEl, focusInput });
 </script>
 
 <style scoped>
-/* black focus highlight on the composer */
-.jv-composer:focus-within {
-	border-color: var(--text-3);
-	box-shadow: 0 0 0 3px rgba(23, 23, 23, 0.07);
+/* Brand focus highlight: while the box is focused, a gradient ring in the logo
+   colours flows around its edge. Drawn by a masked ::after so it lays exactly
+   over the 1px edge without having to beat the element's inline border/shadow
+   (which would win by specificity). The motion is the conic gradient's ANGLE
+   animating, not a rotating element, so the border stays put and only the
+   colour travels around it. */
+@property --jv-comp-angle {
+	syntax: "<angle>";
+	inherits: false;
+	initial-value: 0deg;
+}
+.jv-composer:focus-within::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	border-radius: 13px;
+	padding: 1.6px;
+	/* Logo tokens from main.css (:root), not literal hex, so a brand retune
+	   carries here instead of drifting. */
+	background: conic-gradient(
+		from var(--jv-comp-angle),
+		var(--brand-1),
+		var(--brand-2),
+		var(--brand-1),
+		var(--brand-2),
+		var(--brand-1)
+	);
+	/* Mask keeps only the padding band, turning the fill into a border ring. */
+	-webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+	-webkit-mask-composite: xor;
+	mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+	mask-composite: exclude;
+	animation: jv-comp-flow 3s linear infinite;
+	pointer-events: none;
+}
+@keyframes jv-comp-flow {
+	to {
+		--jv-comp-angle: 360deg;
+	}
+}
+/* Reduced motion: hold a still gradient border rather than spinning it. */
+@media (prefers-reduced-motion: reduce) {
+	.jv-composer:focus-within::after {
+		animation: none;
+	}
+}
+/* Forced-colors / high-contrast: the masked gradient ring is dropped by the
+   system, so guarantee a focus cue with an outline (which the inline border
+   cannot override). Keyboard users always get an affordance. */
+@media (forced-colors: active) {
+	.jv-composer:focus-within {
+		outline: 2px solid Highlight;
+		outline-offset: 2px;
+	}
 }
 /* The send button inverts to black/white on hover (depends on its base color,
    so the white icon flips to the surface color). !important beats the inline
