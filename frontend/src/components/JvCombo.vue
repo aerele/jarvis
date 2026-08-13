@@ -222,6 +222,12 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", onDocClick));
 .jvc-input:focus,
 .jvc-input:focus-visible {
 	outline: none;
+	/* Also kill the @tailwindcss/forms blue ring on the inner input (it rings via
+	   box-shadow + border-color, which outline:none alone leaves untouched), so the
+	   wrapper's --cta ring is the only focus mark and there is no blue box inside the
+	   box, robust even where the app-wide index.css reset may not reach. */
+	box-shadow: none;
+	border-color: transparent;
 }
 .jvc-field:focus-within {
 	border-color: var(--cta-bd);

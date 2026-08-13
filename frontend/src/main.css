@@ -18,6 +18,12 @@
 	--brand-2: #8b5cf6;
 	--brand-grad: linear-gradient(135deg, var(--brand-1), var(--brand-2));
 
+	/* App-wide keyboard-focus ring colour. On :root (not theme.js paletteVars) so
+	   it resolves on every surface, including plain pages and teleported dialogs
+	   that never bound paletteVars, same reason --brand-* live here. Near-black,
+	   matching the --cta focus idiom the app already uses on chat and onboarding. */
+	--focus-ring: #1c1c22;
+
 	/* Money green, for the banknotes in the payment-confirming illustration
 	   ONLY (PaymentConfirmingArt.vue).
 
@@ -42,6 +48,9 @@
 }
 
 [data-theme="dark"] {
+	/* Focus ring inverts to near-white so it stays visible on the dark UI,
+	   matching --cta's dark value. */
+	--focus-ring: #ececf0;
 	/* Lifted for legibility on the dark card; the border stays a touch lighter
 	   than the fill so the note keeps its edge. */
 	--money-note: #4fbf85;
