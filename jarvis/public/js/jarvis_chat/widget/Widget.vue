@@ -512,10 +512,10 @@ onBeforeUnmount(() => {
 <style scoped>
 /* Scoped tokens for the FAB (it lives in <body>). */
 .jvw-root {
-	/* Brand gradient from the Jarvis Side Chat design board (a recorded
-	   divergence from design.md's near-black chrome, scoped to this widget). */
-	--accent: #6a56e8;
-	--accent-grad: linear-gradient(140deg, #8b7cf7, #6a56e8);
+	/* Logo gradient (same --brand-1 -> --brand-2 the SPA mark uses), so the FAB
+	   reads as the Jarvis logo rather than the deeper indigo it carried before. */
+	--accent: #8b5cf6;
+	--accent-grad: linear-gradient(135deg, #6e8bff, #8b5cf6);
 	--jvw-safe-bottom: env(safe-area-inset-bottom, 0px);
 	font-family: "Inter", system-ui, -apple-system, sans-serif;
 }
@@ -548,8 +548,8 @@ onBeforeUnmount(() => {
    the indigo brand blue (the SPA's theme.js DARK_VARS accent) so the FAB stays
    visible against dark surfaces. */
 .jvw-root--dark {
-	--accent: #8b7cf7;
-	--accent-grad: linear-gradient(140deg, #9d90ff, #7a68f0);
+	--accent: #9d7bf8;
+	--accent-grad: linear-gradient(135deg, #7e97ff, #9d7bf8);
 }
 
 /* ---- launcher bubble ---- */
@@ -564,7 +564,7 @@ onBeforeUnmount(() => {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	box-shadow: 0 10px 26px -6px rgba(106, 86, 232, 0.55);
+	box-shadow: 0 10px 26px -6px rgba(139, 92, 246, 0.5);
 	position: fixed;
 	left: 0;
 	top: 0;
@@ -581,7 +581,7 @@ onBeforeUnmount(() => {
 	/* A ring that HUGS the rounded tile. outline + outline-offset drew a
 	   detached square that looked misaligned against a full-bleed logo. */
 	outline: none;
-	box-shadow: 0 10px 26px -6px rgba(106, 86, 232, 0.55), 0 0 0 2px #fff, 0 0 0 4px var(--accent);
+	box-shadow: 0 10px 26px -6px rgba(139, 92, 246, 0.5), 0 0 0 2px #fff, 0 0 0 4px var(--accent);
 }
 .jvw-fab--snapping {
 	transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s ease;
