@@ -562,13 +562,15 @@ defineExpose({ el: inputEl, focusInput });
 	inset: 0;
 	border-radius: 13px;
 	padding: 1.6px;
+	/* Logo tokens from main.css (:root), not literal hex, so a brand retune
+	   carries here instead of drifting. */
 	background: conic-gradient(
 		from var(--jv-comp-angle),
-		#6e8bff,
-		#8b5cf6,
-		#6e8bff,
-		#8b5cf6,
-		#6e8bff
+		var(--brand-1),
+		var(--brand-2),
+		var(--brand-1),
+		var(--brand-2),
+		var(--brand-1)
 	);
 	/* Mask keeps only the padding band, turning the fill into a border ring. */
 	-webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
@@ -587,6 +589,15 @@ defineExpose({ el: inputEl, focusInput });
 @media (prefers-reduced-motion: reduce) {
 	.jv-composer:focus-within::after {
 		animation: none;
+	}
+}
+/* Forced-colors / high-contrast: the masked gradient ring is dropped by the
+   system, so guarantee a focus cue with an outline (which the inline border
+   cannot override). Keyboard users always get an affordance. */
+@media (forced-colors: active) {
+	.jv-composer:focus-within {
+		outline: 2px solid Highlight;
+		outline-offset: 2px;
 	}
 }
 /* The send button inverts to black/white on hover (depends on its base color,
