@@ -173,6 +173,26 @@ describe("PlanBillingPane", () => {
 			expect(message).toContain("2026-09-15");
 		});
 
+		it("shows an immediate-access-loss message for a trial customer", async () => {
+			// A trial cancel ends access right now — is_trial must win over the
+			// mandate branch, and must NOT promise access until access_ends_on.
+			const w = await mountPane({
+				is_trial: true,
+				has_mandate: true,
+				can_cancel: true,
+				access_ends_on: "2026-09-15",
+			});
+			const btn = cancelButton(w);
+			await btn?.trigger("click");
+			await flushPromises();
+
+			expect(confirm).toHaveBeenCalled();
+			const { message } = confirm.mock.calls[0][0];
+			expect(message).toContain("ends your free trial right now");
+			expect(message).not.toContain("2026-09-15");
+			expect(message).not.toContain("Auto-renewal will turn off");
+		});
+
 		it("shows autopay message without date when access_ends_on is missing", async () => {
 			const w = await mountPane({ has_mandate: true, can_cancel: true, access_ends_on: "" });
 			const btn = cancelButton(w);
