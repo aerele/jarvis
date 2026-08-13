@@ -1691,6 +1691,163 @@ class TestRoleScopedSkillInvocation(Part2Base):
 			{self.AUD_ROLE, second},
 		)
 
+	# ── reviewer-side role trimming: approve a SUBSET, never widen the ask ──────
+	def test_reviewer_approves_role_subset(self):
+		"""The reviewer may NARROW a multi-role request: approving a kept subset
+		publishes exactly those roles (target_role = the first kept), and a holder of
+		a DROPPED role loses access even though it was requested."""
+		from jarvis.chat import custom_skills_api
+		from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import user_can_use_skill
+
+		second = "Accounts User"
+		owner = _ensure_user("p2-trimowner@example.com", ["Jarvis User", self.AUD_ROLE, second])
+		dropped_holder = _ensure_user("p2-trimdropped@example.com", ["Jarvis User", self.AUD_ROLE])
+		kept_holder = _ensure_user("p2-trimkept@example.com", ["Jarvis User", second])
+		self.addCleanup(lambda: frappe.db.delete(SKILL, {"owner": owner}))
+		self.addCleanup(lambda: frappe.db.delete("Jarvis Skill Promotion Request", {"owner": owner}))
+
+		src = _mk_skill(owner, f"{PFX}-trim", scope="User")
+		with _as(owner):
+			req = custom_skills_api.request_skill_promotion(
+				src.name, "Role", target_roles=[self.AUD_ROLE, second]
+			)
+		# Reviewer drops the PRIMARY (Sales User), keeps only Accounts User.
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1, approved_roles=[second])
+		self.assertTrue(out["ok"])
+		shared = out["materialized"]
+
+		self.assertEqual(frappe.db.get_value(SKILL, shared, "target_role"), second)
+		self.assertEqual(
+			frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": shared, "parenttype": SKILL},
+				pluck="role",
+			),
+			[second],
+		)
+		doc = frappe.get_doc(SKILL, shared)
+		self.assertTrue(user_can_use_skill(doc, kept_holder, frappe.get_roles(kept_holder)))
+		# The DROPPED role confers no access, though the requester had asked for it.
+		self.assertFalse(user_can_use_skill(doc, dropped_holder, frappe.get_roles(dropped_holder)))
+
+	def test_reviewer_cannot_approve_role_outside_request(self):
+		"""Anti-escalation: the reviewer can only approve roles the requester ASKED
+		for. A role outside the request is refused and NOTHING is published."""
+		from jarvis.chat import custom_skills_api
+
+		owner = _ensure_user("p2-escalowner@example.com", ["Jarvis User", self.AUD_ROLE])
+		self.addCleanup(lambda: frappe.db.delete(SKILL, {"owner": owner}))
+		self.addCleanup(lambda: frappe.db.delete("Jarvis Skill Promotion Request", {"owner": owner}))
+
+		src = _mk_skill(owner, f"{PFX}-escal", scope="User")
+		with _as(owner):
+			req = custom_skills_api.request_skill_promotion(src.name, "Role", target_role=self.AUD_ROLE)
+		with _as(REVIEWER), self.assertRaises(frappe.PermissionError):
+			custom_skills_api.decide_skill_promotion(
+				req["request"], 1, approved_roles=[self.AUD_ROLE, "Accounts User"]
+			)
+		# Nothing published; the request is still Pending and the source still private.
+		self.assertEqual(
+			frappe.db.get_value("Jarvis Skill Promotion Request", req["request"], "status"), "Pending"
+		)
+		self.assertEqual(frappe.db.get_value(SKILL, src.name, "scope"), "User")
+
+	def test_reviewer_cannot_approve_empty_role_set(self):
+		"""Removing ALL roles is not an approval - the reviewer must reject instead."""
+		from jarvis.chat import custom_skills_api
+
+		owner = _ensure_user("p2-emptyowner@example.com", ["Jarvis User", self.AUD_ROLE])
+		self.addCleanup(lambda: frappe.db.delete(SKILL, {"owner": owner}))
+		self.addCleanup(lambda: frappe.db.delete("Jarvis Skill Promotion Request", {"owner": owner}))
+
+		src = _mk_skill(owner, f"{PFX}-empty", scope="User")
+		with _as(owner):
+			req = custom_skills_api.request_skill_promotion(src.name, "Role", target_role=self.AUD_ROLE)
+		with _as(REVIEWER), self.assertRaises(frappe.ValidationError):
+			custom_skills_api.decide_skill_promotion(req["request"], 1, approved_roles=[])
+		self.assertEqual(
+			frappe.db.get_value("Jarvis Skill Promotion Request", req["request"], "status"), "Pending"
+		)
+
+	def test_approve_without_approved_roles_grants_full_set(self):
+		"""Back-compat: omitting approved_roles publishes the FULL requested set."""
+		from jarvis.chat import custom_skills_api
+
+		second = "Accounts User"
+		owner = _ensure_user("p2-fullowner@example.com", ["Jarvis User", self.AUD_ROLE, second])
+		self.addCleanup(lambda: frappe.db.delete(SKILL, {"owner": owner}))
+		self.addCleanup(lambda: frappe.db.delete("Jarvis Skill Promotion Request", {"owner": owner}))
+
+		src = _mk_skill(owner, f"{PFX}-full", scope="User")
+		with _as(owner):
+			req = custom_skills_api.request_skill_promotion(
+				src.name, "Role", target_roles=[self.AUD_ROLE, second]
+			)
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)  # no approved_roles
+		self.assertEqual(
+			set(
+				frappe.get_all(
+					"Jarvis Custom Skill Allowed Role",
+					filters={"parent": out["materialized"], "parenttype": SKILL},
+					pluck="role",
+				)
+			),
+			{self.AUD_ROLE, second},
+		)
+
+	def test_reviewer_approved_roles_accepts_json_string(self):
+		"""The approve payload arrives as a JSON-encoded STRING (Frappe form-data);
+		the endpoint must decode it like target_roles - no FrappeTypeError."""
+		import json
+
+		from jarvis.chat import custom_skills_api
+
+		second = "Accounts User"
+		owner = _ensure_user("p2-jsonapprove@example.com", ["Jarvis User", self.AUD_ROLE, second])
+		self.addCleanup(lambda: frappe.db.delete(SKILL, {"owner": owner}))
+		self.addCleanup(lambda: frappe.db.delete("Jarvis Skill Promotion Request", {"owner": owner}))
+
+		src = _mk_skill(owner, f"{PFX}-jsonapprove", scope="User")
+		with _as(owner):
+			req = custom_skills_api.request_skill_promotion(
+				src.name, "Role", target_roles=[self.AUD_ROLE, second]
+			)
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(
+				req["request"], 1, approved_roles=json.dumps([second])
+			)
+		self.assertTrue(out["ok"])
+		self.assertEqual(
+			frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": out["materialized"], "parenttype": SKILL},
+				pluck="role",
+			),
+			[second],
+		)
+
+	def test_promotion_queue_serializes_target_roles(self):
+		"""The reviewer-queue serializer carries the FULL ordered role set so the card
+		renders every role (not just the primary)."""
+		from jarvis.chat import custom_skills_api
+
+		second = "Accounts User"
+		owner = _ensure_user("p2-queueowner@example.com", ["Jarvis User", self.AUD_ROLE, second])
+		self.addCleanup(lambda: frappe.db.delete(SKILL, {"owner": owner}))
+		self.addCleanup(lambda: frappe.db.delete("Jarvis Skill Promotion Request", {"owner": owner}))
+
+		src = _mk_skill(owner, f"{PFX}-queue", scope="User")
+		with _as(owner):
+			req = custom_skills_api.request_skill_promotion(
+				src.name, "Role", target_roles=[self.AUD_ROLE, second]
+			)
+		with _as(REVIEWER):
+			rows = custom_skills_api.list_skill_promotion_requests()["rows"]
+		row = next(r for r in rows if r["name"] == req["request"])
+		self.assertEqual(row["target_roles"], [self.AUD_ROLE, second])
+
 	def test_role_promoted_skill_is_slug_invocable_by_a_role_holder(self):
 		from jarvis.chat.custom_skills import _role_scoped_invocable_names, invoked_skill_clause
 

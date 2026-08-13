@@ -1064,6 +1064,57 @@
 									</span>
 								</div>
 
+								<!-- Multi-role audience. While PENDING the reviewer sees every requested
+								     role and may drop some before approving: the KEPT set (chips not struck
+								     through) is exactly what gets published, and a dropped role can be added
+								     back. Once DECIDED these are the REQUESTED roles shown statically (all
+								     solid, no trim styling); the roles actually GRANTED live in the decision
+								     note, since the request's role set is kept immutable as the original ask. -->
+								<div
+									v-if="p.to_scope === 'Role' && promoRolesFor(p).length"
+									class="mt-2 flex flex-wrap items-center gap-1.5"
+								>
+									<span class="text-sm text-ink-gray-5">{{
+										p.status === "Pending"
+											? "Grant to roles:"
+											: "Requested roles:"
+									}}</span>
+									<span
+										v-for="r in promoRolesFor(p)"
+										:key="r"
+										class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-sm"
+										:class="
+											p.status !== 'Pending' || isRoleKept(p, r)
+												? 'border-outline-gray-2 bg-surface-gray-2 text-ink-gray-8'
+												: 'border-dashed border-outline-gray-2 text-ink-gray-4 line-through'
+										"
+									>
+										{{ r }}
+										<button
+											v-if="p.status === 'Pending' && !isMyPromo(p)"
+											type="button"
+											class="-mr-0.5 text-ink-gray-5 hover:text-ink-gray-8"
+											:title="
+												isRoleKept(p, r)
+													? 'Remove this role from the approval'
+													: 'Add this role back'
+											"
+											@click="toggleRole(p, r)"
+										>
+											<FeatherIcon
+												:name="isRoleKept(p, r) ? 'x' : 'plus'"
+												class="size-3.5"
+											/>
+										</button>
+									</span>
+									<span
+										v-if="p.status === 'Pending' && !keptRolesFor(p).length"
+										class="text-sm text-ink-red-4"
+									>
+										Keep at least one role, or reject.
+									</span>
+								</div>
+
 								<!-- requester + when -->
 								<div
 									class="mt-2 flex flex-wrap items-center gap-2 text-sm text-ink-gray-6"
@@ -1152,7 +1203,11 @@
 											theme="green"
 											label="Approve"
 											:loading="skillPromoActing === p.name"
-											:disabled="!!skillPromoActing || isMyPromo(p)"
+											:disabled="
+												!!skillPromoActing ||
+												isMyPromo(p) ||
+												(p.to_scope === 'Role' && !keptRolesFor(p).length)
+											"
 											@click="approveSkillPromotion(p)"
 										/>
 										<Button
@@ -1948,6 +2003,32 @@ const skillPromoLoaded = ref(false);
 const skillPromoActing = ref(""); // skill promotion request name currently deciding
 const skillPromoExpanded = reactive({}); // name -> bool (un-clamp the instructions excerpt)
 const skillPromoReject = reactive({ show: false, p: null, reason: "" });
+// Multi-role reviewer trim: per-request KEPT role set. Absent key => default to the
+// full requested set (no mutation during render). Toggling writes an explicit array
+// here; the approve payload sends exactly this (the server refuses any role outside
+// the request). Keyed by request name, so it survives the needs_reconfirm re-open.
+const skillPromoKept = reactive({});
+// The full ordered role set a request targets (child rows, or the legacy scalar).
+function promoRolesFor(p) {
+	if (p.target_roles && p.target_roles.length) return p.target_roles;
+	return p.target_role ? [p.target_role] : [];
+}
+function keptRolesFor(p) {
+	return skillPromoKept[p.name] ?? promoRolesFor(p);
+}
+function isRoleKept(p, r) {
+	return keptRolesFor(p).includes(r);
+}
+// Toggle a role in/out of the kept set. Re-adding restores the ORIGINAL requested
+// order so the published primary (first) is stable regardless of click order.
+function toggleRole(p, r) {
+	const kept = keptRolesFor(p);
+	if (kept.includes(r)) {
+		skillPromoKept[p.name] = kept.filter((x) => x !== r);
+	} else {
+		skillPromoKept[p.name] = promoRolesFor(p).filter((x) => x === r || kept.includes(x));
+	}
+}
 // "Ask the user" follow-up dialog, shared by pattern + promotion cards. `name`
 // is the review-item name (a Jarvis Learned Pattern or a promotion request).
 const askDialog = reactive({ show: false, name: "", ask: "", sending: false });
@@ -2277,8 +2358,15 @@ function budgetWarn(p) {
 // and refuses to publish (asking for a fresh confirm) if the catalog moved again
 // (R2-SP-5). Publishing the snapshot is irreversible from the requester's side.
 async function approveSkillPromotion(p) {
-	const target = p.to_scope === "Role" ? `Role: ${esc(p.target_role || "—")}` : "Org";
-	const who = p.to_scope === "Role" ? "that role" : "everyone";
+	// Confirm + publish the KEPT roles (the reviewer may have trimmed the request),
+	// not the original ask. keptRolesFor reads the live per-request selection.
+	const kept = keptRolesFor(p);
+	const target =
+		p.to_scope === "Role"
+			? `Role${kept.length === 1 ? "" : "s"}: ${esc(kept.join(", ") || "—")}`
+			: "Org";
+	const who =
+		p.to_scope === "Role" ? (kept.length === 1 ? "that role" : "those roles") : "everyone";
 	// Recompute the budget truth fresh; fall back to the list-load projection if the
 	// preflight call fails (never block the decision on a warning fetch).
 	let ackProjection = p.push_projection || null;
@@ -2310,7 +2398,9 @@ async function approveSkillPromotion(p) {
 		message,
 		onConfirm: async ({ hideDialog }) => {
 			hideDialog();
-			await decideSkillPromo(p, 1, "", ackProjection);
+			// Re-read the kept set at confirm time; send only for Role scope.
+			const approved = p.to_scope === "Role" ? keptRolesFor(p) : null;
+			await decideSkillPromo(p, 1, "", ackProjection, approved);
 		},
 	});
 }
@@ -2328,10 +2418,10 @@ async function submitSkillPromoReject() {
 	);
 	if (ok) skillPromoReject.show = false;
 }
-async function decideSkillPromo(p, approve, note, ackProjection = null) {
+async function decideSkillPromo(p, approve, note, ackProjection = null, approvedRoles = null) {
 	skillPromoActing.value = p.name;
 	try {
-		const r = await decideSkillPromotion(p.name, approve, note, ackProjection);
+		const r = await decideSkillPromotion(p.name, approve, note, ackProjection, approvedRoles);
 		if (r && r.needs_reconfirm) {
 			// R2-SP-5: the shared catalog moved since the reviewer's ack, so the
 			// server published NOTHING. Refresh the row's projection and re-open the
