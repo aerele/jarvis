@@ -214,22 +214,34 @@ class JarvisCustomSkill(Document):
 			self.target_role = (self.target_role or "").strip() or None
 			if not self.target_role:
 				frappe.throw(_("Role-scope skills need a Target Role."))
-			# ``allowed_roles`` MIRRORS ``target_role`` on EVERY write path (issue #478).
-			# ``target_role`` is the audience of record, but the invocation path
-			# (``custom_skills._role_scoped_invocable_names``, and through it the /slug
-			# context clause) matches on the child rows and is blind to target_role, so a
-			# Role skill with an empty allowed_roles can never be triggered by /slug.
-			# Mirroring HERE rather than only at the promotion seam is what makes a Desk
-			# or REST re-target self-heal: re-pointing target_role rewrites the mirror in
-			# the same save, so the two planes can never disagree about the audience.
-			# Assignment (not append) is deliberate. The audience of a Role skill is
-			# exactly one role, so a stale role left behind by an earlier target would
-			# keep granting /slug to holders the reviewer just re-targeted away from.
-			# Compiler-managed rows are pinned to Org scope and never reach this branch,
-			# so their multi-role allowed_roles is untouched. Nothing is widened: every
-			# role named here is the target_role that ``user_can_use_skill`` already
-			# admitted.
-			self.set("allowed_roles", [{"role": self.target_role}])
+			# The audience of a Role skill is its ``allowed_roles`` set; ``target_role``
+			# is the primary and MUST be one of them. Every path that answers "which
+			# skills may this user invoke" (``_role_scoped_invocable_names`` + the /slug
+			# clause + the list query) matches on the child rows, and ``user_can_use_skill``
+			# OR-s target_role with the allowed_roles intersection - so mirroring here is
+			# what keeps the invocation plane honest.
+			#
+			# Multi-role (issue #478 extended): a promotion materializes the FULL role
+			# set with target_role = its first, and we KEEP that set. But a single-role
+			# create, or a Desk/REST re-target where target_role is changed to a role NOT
+			# in the current set, self-heals to exactly ``[target_role]`` - so re-pointing
+			# still drops stale roles the reviewer targeted away from, and a mismatched or
+			# empty set can never leave the audience wider than intended. Compiler-managed
+			# rows are pinned to Org scope and never reach this branch, so their multi-role
+			# allowed_roles is untouched.
+			existing = [
+				(r.role or "").strip() for r in (self.get("allowed_roles") or []) if (r.role or "").strip()
+			]
+			if self.target_role in existing:
+				seen: set[str] = set()
+				ordered: list[str] = []
+				for r in existing:
+					if r not in seen:
+						seen.add(r)
+						ordered.append(r)
+				self.set("allowed_roles", [{"role": r} for r in ordered])
+			else:
+				self.set("allowed_roles", [{"role": self.target_role}])
 		elif self.scope == "User":
 			# A private skill has no role audience — clear both so a stray
 			# allowed_roles/target_role can never leak it to role-holders (TASK 13

@@ -15,9 +15,26 @@ const CS = "jarvis.chat.custom_skills_api.";
 
 // Ask a reviewer to widen one of MY OWN User-scope skills up the ladder
 // (User → Role/Org). Files a Pending request and pings reviewers; the skill is
-// untouched until a reviewer decides. -> { ok, request, skill }
-export const requestSkillPromotion = ({ name, to_scope, target_role = "", note = "" }) =>
-	call(CS + "request_skill_promotion", { name, to_scope, target_role, note });
+// untouched until a reviewer decides. A Role-scope request may name SEVERAL roles
+// (target_roles); the whole set becomes the skill's audience on approval.
+// target_role stays the primary (first) for backward compatibility.
+// -> { ok, request, skill }
+export const requestSkillPromotion = ({
+	name,
+	to_scope,
+	target_role = "",
+	target_roles = [],
+	note = "",
+}) =>
+	call(CS + "request_skill_promotion", {
+		name,
+		to_scope,
+		target_role,
+		// JSON-encoded list, matching the deleteCustomSkillsBulk convention; the
+		// server (_normalize_promotion_roles) decodes the string or a raw list.
+		target_roles: JSON.stringify(Array.from(target_roles || [])),
+		note,
+	});
 
 // My most-recent promotion request for one of my skills, for the status chip.
 // Owner-scoped server-side. -> {} | {name, status, from_scope, to_scope,

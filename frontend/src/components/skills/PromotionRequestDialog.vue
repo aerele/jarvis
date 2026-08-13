@@ -16,7 +16,9 @@
 				<p class="text-p-sm text-ink-gray-5">{{ scopeHelp[toScope] }}</p>
 
 				<div v-if="toScope === 'Role'" class="flex flex-col gap-1">
-					<span class="block text-xs text-ink-gray-5">Role</span>
+					<span class="block text-xs text-ink-gray-5">{{
+						multiple ? "Roles" : "Role"
+					}}</span>
 					<template v-if="roleOptions.length">
 						<!-- Inline search + list, NOT the frappe-ui Autocomplete: its search
 						     box renders in a popover portaled OUTSIDE this reka-ui Dialog, where
@@ -28,22 +30,31 @@
 							:modelValue="roleQuery"
 							@update:modelValue="(v) => (roleQuery = v)"
 						/>
-						<div class="max-h-44 overflow-y-auto rounded border" role="listbox">
+						<div
+							class="max-h-44 overflow-y-auto rounded border"
+							:role="multiple ? 'group' : 'listbox'"
+						>
 							<button
 								v-for="r in filteredRoles"
 								:key="r"
 								type="button"
-								role="option"
-								:aria-selected="targetRole === r"
-								class="flex w-full px-3 py-2 text-left text-sm hover:bg-surface-gray-2"
+								:role="multiple ? 'checkbox' : 'option'"
+								:aria-checked="multiple ? isSelected(r) : undefined"
+								:aria-selected="multiple ? undefined : isSelected(r)"
+								class="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-surface-gray-2"
 								:class="
-									targetRole === r
+									isSelected(r)
 										? 'bg-surface-gray-3 font-medium text-ink-gray-9'
 										: 'text-ink-gray-7'
 								"
-								@click="targetRole = r"
+								@click="pick(r)"
 							>
-								{{ r }}
+								<span>{{ r }}</span>
+								<FeatherIcon
+									v-if="isSelected(r)"
+									name="check"
+									class="h-4 w-4 text-ink-gray-7"
+								/>
 							</button>
 							<p
 								v-if="!filteredRoles.length"
@@ -52,6 +63,10 @@
 								No roles match your search.
 							</p>
 						</div>
+						<p v-if="multiple && selected.length" class="text-p-sm text-ink-gray-5">
+							{{ selected.length }} role{{ selected.length === 1 ? "" : "s" }}
+							selected
+						</p>
 					</template>
 					<p v-else-if="!rolesLoading" class="text-p-sm text-ink-gray-5">
 						You hold no roles that can be targeted - promote to the whole org instead,
@@ -92,13 +107,17 @@
 // busy flag. Role options are the requester's OWN targetable roles
 // (promotable_target_roles) — a requester widens to a team they belong to.
 import { ref, computed, watch } from "vue";
-import { Button, Dialog, FormControl, toast } from "frappe-ui";
+import { Button, Dialog, FeatherIcon, FormControl, toast } from "frappe-ui";
 import { promotableTargetRoles } from "@/api/skills";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
 	noun: { type: String, default: "skill" }, // "skill" | "page"
 	busy: { type: Boolean, default: false },
+	// Multiselect role targeting (skills only). One request names several roles and
+	// the whole set becomes the skill's audience on approval. Wiki pages stay
+	// one-role-per-page, so WikiPageDialog leaves this false (single-select).
+	multiple: { type: Boolean, default: false },
 });
 const emit = defineEmits(["update:modelValue", "submit"]);
 
@@ -116,10 +135,27 @@ const show = computed({
 });
 
 const toScope = ref("Org");
-const targetRole = ref("");
+// The chosen role(s). Always an array so the single- and multi-select paths share
+// one model; single-select just holds at most one. submit() derives target_role
+// (the primary, for backward compatibility + wiki) from selected[0].
+const selected = ref([]);
 const note = ref("");
 const roles = ref([]);
 const rolesLoading = ref(false);
+
+function isSelected(r) {
+	return selected.value.includes(r);
+}
+// Single-select replaces the choice; multiselect toggles the role in/out.
+function pick(r) {
+	if (props.multiple) {
+		selected.value = isSelected(r)
+			? selected.value.filter((x) => x !== r)
+			: [...selected.value, r];
+	} else {
+		selected.value = [r];
+	}
+}
 
 const dialogTitle = computed(() => `Request promotion — ${props.noun}`);
 const roleOptions = computed(() => roles.value.map((r) => ({ label: r, value: r })));
@@ -131,11 +167,13 @@ const filteredRoles = computed(() => {
 	return q ? roles.value.filter((r) => r.toLowerCase().includes(q)) : roles.value;
 });
 const canSubmit = computed(
-	() => !!toScope.value && (toScope.value !== "Role" || !!targetRole.value)
+	() => !!toScope.value && (toScope.value !== "Role" || selected.value.length > 0)
 );
 const verb = computed(() => VERB[props.noun] || "use");
 const scopeHelp = computed(() => ({
-	Role: `Everyone who holds the chosen role will be able to ${verb.value} it.`,
+	Role: props.multiple
+		? `Everyone who holds ANY of the chosen roles will be able to ${verb.value} it.`
+		: `Everyone who holds the chosen role will be able to ${verb.value} it.`,
 	Org: `Everyone in your organisation will be able to ${verb.value} it.`,
 }));
 
@@ -161,7 +199,7 @@ watch(
 	(open) => {
 		if (!open) return;
 		toScope.value = "Org";
-		targetRole.value = "";
+		selected.value = [];
 		roleQuery.value = "";
 		note.value = "";
 		loadRoles();
@@ -170,13 +208,24 @@ watch(
 
 function submit() {
 	if (!canSubmit.value) {
-		toast.error("Pick a role for role-scope promotion.");
+		toast.error(
+			props.multiple
+				? "Pick at least one role for role-scope promotion."
+				: "Pick a role for role-scope promotion."
+		);
 		return;
 	}
-	emit("submit", {
+	const isRole = toScope.value === "Role";
+	const payload = {
 		to_scope: toScope.value,
-		target_role: toScope.value === "Role" ? targetRole.value : "",
+		// The primary role — first of the selection — kept for backward
+		// compatibility and the single-select (wiki) host.
+		target_role: isRole ? selected.value[0] || "" : "",
 		note: (note.value || "").trim(),
-	});
+	};
+	// Only the multiselect (skill) host sends the full set; the backend widens the
+	// skill's audience to every listed role.
+	if (props.multiple) payload.target_roles = isRole ? [...selected.value] : [];
+	emit("submit", payload);
 }
 </script>

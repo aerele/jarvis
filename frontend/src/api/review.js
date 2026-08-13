@@ -87,12 +87,26 @@ export const listSkillPromotions = (p = {}) =>
 // WITHOUT publishing so the reviewer reconfirms the new impact. Returns {ok,
 // status, skill, materialized, push_projection?} on success, or {ok:false, reason,
 // needs_reconfirm?, push_projection?} for a stale/changed/already-decided request.
-export const decideSkillPromotion = (name, approve, note = "", ackProjection = null) =>
+// `approvedRoles` (approve only) is the reviewer-kept SUBSET of a multi-role Role
+// request: the server publishes exactly these roles and refuses any role that was
+// not requested (anti-escalation). Omit / null → the full requested set (back-compat).
+export const decideSkillPromotion = (
+	name,
+	approve,
+	note = "",
+	ackProjection = null,
+	approvedRoles = null
+) =>
 	call(CS + "decide_skill_promotion", {
 		request_name: name,
 		approve: approve ? 1 : 0,
 		note,
 		ack_projection: ackProjection ? JSON.stringify(ackProjection) : "",
+		// Send only on approve with an explicit set; JSON.stringify matches the
+		// server's list|str normalizer (Frappe form-data delivers arrays as strings).
+		...(approve && approvedRoles
+			? { approved_roles: JSON.stringify(Array.from(approvedRoles)) }
+			: {}),
 	});
 
 // Fresh push-budget projection for one Pending promotion, recomputed at the moment

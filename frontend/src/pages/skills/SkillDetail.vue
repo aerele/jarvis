@@ -189,6 +189,7 @@
 		v-model="promoDialog"
 		noun="skill"
 		:busy="promoBusy"
+		:multiple="true"
 		@submit="submitPromotion"
 	/>
 
@@ -364,10 +365,16 @@ async function loadMyPromo() {
 	}
 }
 
-async function submitPromotion({ to_scope, target_role, note }) {
+async function submitPromotion({ to_scope, target_role, target_roles, note }) {
 	promoBusy.value = true;
 	try {
-		await requestSkillPromotion({ name: props.id, to_scope, target_role, note });
+		await requestSkillPromotion({
+			name: props.id,
+			to_scope,
+			target_role,
+			target_roles,
+			note,
+		});
 		promoDialog.value = false;
 		toast.success("Promotion requested — a reviewer will decide.");
 		await loadMyPromo();

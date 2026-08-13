@@ -3836,6 +3836,7 @@ import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
 import { normaliseAction } from "@/lib/chatAction";
 import { stripBlocks } from "@/lib/chatBlocks";
+import { shouldFollowBottom } from "@/lib/chatScroll";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
@@ -4603,9 +4604,13 @@ function revealFrame() {
 		if (!_applyRevealed(id, step.text)) revealer.drop(id);
 		else painted = true;
 	}
-	// Scroll rides the reveal, not the socket: following the text as it appears
-	// is what keeps a long answer readable while it writes itself.
-	if (painted) scrollBottomIfPinned();
+	// The reveal is the streamed answer writing itself; it must NOT chase the
+	// bottom. Following the reveal dragged the line being read up and off the top
+	// of a long answer (the "text keeps moving up" report), in an already-full
+	// chat just as much as a fresh one. The answer grows downward instead; only
+	// the jump-to-latest arrow is kept honest so the reader can snap to the newest
+	// when they choose. The one-time land on the new turn still happens at send.
+	if (painted) showScrollDown.value = distanceFromBottom() > 140;
 	if (revealer.pending().length) _revealRaf = requestAnimationFrame(revealFrame);
 }
 function pumpReveal() {
@@ -6994,18 +6999,35 @@ function scrollBottom(smooth = false) {
 	if (smooth && "scrollTo" in el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
 	else el.scrollTop = el.scrollHeight;
 }
-// Content-driven scroll: only follow the newest text while the reader is already
-// parked at the bottom. Streaming a long reply used to call scrollBottom() on
-// every chunk, which dragged the view down mid-sentence and made a big answer
-// unreadable until the turn ended. When the reader HAS scrolled up we leave the
-// viewport alone and let onThreadScroll reveal the jump-to-latest arrow instead.
-// Only user-initiated moments (opening a chat, sending a message) scroll
-// unconditionally.
+// Content-driven scroll: follow the newest text ONLY when the reader is parked at
+// the bottom AND the turn is fully settled. "Settled" needs BOTH signals, because
+// neither alone is enough:
+//   * convStreaming - the conversation is mid-turn. It stays true across the WHOLE
+//     turn (set at send / run:start, cleared only at run:end / run:error), so it
+//     covers the gaps BETWEEN deltas. revealer.pending() alone did NOT: the paced
+//     reveal DRAINS between deltas, so pending() briefly empties in every gap, and
+//     each empty gap let the per-delta scrollBottomIfPinned (fired from the
+//     assistant:delta handler) chase the bottom - dragging the line you were
+//     reading up and off the top (the "text keeps moving up" report). It bit when
+//     pinned started true, i.e. opening a chat that is ALREADY mid-stream.
+//   * revealer.pending() - the paced reveal is still writing. It outlives
+//     convStreaming past a late run:end, so the trailing reveal animation does not
+//     drag either.
+// Only pinned AND not streaming AND reveal-drained do we follow, so a settled chat
+// still keeps a pinned reader on late-loading images/charts. The reply otherwise
+// grows downward and the jump-to-latest arrow snaps to newest on demand. User
+// moments (open, send, arrow) scroll unconditionally.
 function scrollBottomIfPinned() {
-	if (pinnedToBottom.value) {
+	if (
+		shouldFollowBottom({
+			pinned: pinnedToBottom.value,
+			streaming: convStreaming.value,
+			revealPending: revealer.pending().length,
+		})
+	) {
 		scrollBottom();
-		// While following, we are at the newest text by definition — clear any arrow
-		// a mid-growth scroll event flipped on, or it lingers pointing nowhere.
+		// At the newest text by definition here, so clear any arrow a mid-growth
+		// scroll event flipped on, or it lingers pointing nowhere.
 		showScrollDown.value = false;
 		return;
 	}
@@ -7060,7 +7082,13 @@ watch(threadInnerEl, (el) => {
 					return;
 				}
 			}
-			if (pinnedToBottom.value) {
+			if (
+				shouldFollowBottom({
+					pinned: pinnedToBottom.value,
+					streaming: convStreaming.value,
+					revealPending: revealer.pending().length,
+				})
+			) {
 				scrollBottom();
 				showScrollDown.value = false;
 				return;
@@ -7073,6 +7101,12 @@ watch(threadInnerEl, (el) => {
 			else showScrollDown.value = distanceFromBottom() > 140;
 		});
 		threadRO.observe(el);
+		// Also reconcile on VIEWPORT size changes (composer growth, on-screen
+		// keyboard, window resize), not just content growth: a shrinking viewport
+		// pushes content below the fold, and a stale arrow could otherwise linger
+		// showing after the geometry - not new content - changed. The callback
+		// re-reads distanceFromBottom(), so observing the viewport self-heals it.
+		if (threadEl.value) threadRO.observe(threadEl.value);
 	}
 });
 onBeforeUnmount(() => {
