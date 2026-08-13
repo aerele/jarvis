@@ -890,6 +890,110 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 		self.assertEqual(out["reason"], "llm_credentials")
 
 
+class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
+	"""jarvis C2: a fully-onboarded, chatting customer who adds a model in
+	Settings > AI models flips their config into pool mode for the FIRST
+	time, so the per-leg sync marker (llm_pool_synced_at) is briefly unset
+	while the new apply confirms. Before this fix, is_ready_for_chat's pool
+	exit could not tell that customer apart from a genuinely never-onboarded
+	tenant - both reach the exit with the same unstamped marker - so a browser
+	reload during that window showed the full-screen "complete setup" poster
+	over a workspace that was never un-onboarded.
+
+	Pinned on the POOL provisioning exit (account.is_ready_for_chat), the
+	bug's actual trigger. All three provisioning exits (pool, api_key,
+	subscription) share the identical
+	``_rejected_sync_verdict(settings) or _provisioning_verdict(...)`` line
+	and ``_provisioning_verdict`` itself is leg-agnostic - it only reads
+	``_has_been_chat_ready`` - so this one exit stands in for all three, the
+	same reasoning TestRejectedSyncVerdictWiring above uses for its own
+	single-leg pin."""
+
+	_FIELDS = (
+		"chat_was_ready_at",
+		"chat_ready_authority",
+		"agent_url",
+		"tenant_authority_generation",
+		"llm_pool_synced_at",
+		"last_sync_status",
+		"jarvis_admin_api_key",
+	)
+
+	def setUp(self):
+		from jarvis._password_utils import set_settings_password
+
+		account._bust_chat_gate()
+		self._snap = account._settings_raw(self._FIELDS)
+		set_settings_password(
+			frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key", "test-only-c2-key"
+		)
+		self._write(
+			{
+				"chat_was_ready_at": None,
+				"chat_ready_authority": "",
+				"agent_url": "ws://c2-established-container",
+				"llm_pool_synced_at": None,
+				"last_sync_status": "pending: provisioning container (pool)",
+			}
+		)
+		self._pool_on = patch.object(account, "compute_pool_mode", return_value=True)
+		self._pool_on.start()
+		# Forces the exit past _confirm_apply_via_admin without an admin round-trip
+		# - only _has_been_chat_ready is under test here, same shape
+		# TestRejectedSyncVerdictWiring uses for the neighbouring subscription leg.
+		self._confirm_miss = patch.object(account, "_confirm_apply_via_admin", return_value=False)
+		self._confirm_miss.start()
+
+	def tearDown(self):
+		from jarvis._password_utils import clear_settings_password
+
+		self._confirm_miss.stop()
+		self._pool_on.stop()
+		clear_settings_password(frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key")
+		self._write({f: self._snap.get(f) for f in self._FIELDS})
+		account._bust_chat_gate()
+
+	def _write(self, values: dict) -> None:
+		for f, v in values.items():
+			frappe.db.set_value("Jarvis Settings", "Jarvis Settings", f, v, update_modified=False)
+
+	def test_fresh_tenant_mid_apply_still_gates_to_setup(self):
+		"""(a) No chat_was_ready_at marker at all: a genuinely never-onboarded
+		workspace must keep the hard reason unchanged - still routed to the
+		setup wizard, exactly as before this fix."""
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "llm_pool_provisioning")
+
+	def test_established_tenant_first_pool_transition_mid_apply_is_llm_applying(self):
+		"""(b) A chatting customer adds a model, flipping them into pool mode for
+		the first time: the durable marker is set and its authority anchor still
+		matches the CURRENT authority, so the soft llm_applying reason must ride
+		instead of the hard one - the setup poster must not appear on a reload."""
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		anchor = account._authority_anchor(raw)
+		self._write({"chat_was_ready_at": "2026-01-01 00:00:00", "chat_ready_authority": anchor})
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "llm_applying")
+
+	def test_established_tenant_after_reset_still_gates_to_setup(self):
+		"""(c) The marker survives a reset, but its bound authority does not: once
+		agent_url moves (a reset/reconnect) without the anchor being rebound,
+		_has_been_chat_ready must read False again and the hard reason must
+		return - proves a stale marker cannot let a reset tenant skip onboarding."""
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		anchor = account._authority_anchor(raw)
+		self._write({"chat_was_ready_at": "2026-01-01 00:00:00", "chat_ready_authority": anchor})
+		# Simulate the reset/reconnect: the container changes and the anchor is
+		# NOT rebound - exactly what a torn-down transport looks like before the
+		# next explicit Ready re-stamps it.
+		self._write({"agent_url": "ws://c2-post-reset-container"})
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "llm_pool_provisioning")
+
+
 class TestRejectedSyncVerdictClassification(FrappeTestCase):
 	"""jarvis#757 review, gap 1: _rejected_sync_verdict had no test at all, and
 	its first cut keyed on the ``"failed:"`` prefix ALONE - so a rate-limit or an

@@ -83,6 +83,14 @@ export async function isWorkspaceReady() {
 // reopened the gate: needsOnboarding() returned false, so AppShell rendered the
 // normal chat shell for a customer whose connection was never accepted and whose
 // chat therefore cannot answer.
+// "llm_applying" is deliberately ABSENT (jarvis C2): the server only ever returns
+// it for a workspace _has_been_chat_ready has already confirmed established
+// (account.py's _provisioning_verdict), so it can never fire on a genuinely
+// never-onboarded tenant - those stay on the hard llm_pool_provisioning /
+// llm_provisioning reason above. It means "an established workspace's FIRST
+// pool/direct leg is mid-apply" (e.g. adding a model in Settings), which must
+// keep the customer in their chat + history, not bounce them to the setup
+// poster on a reload. See isLlmApplying() below for its quiet in-app banner.
 const NOT_ONBOARDED_REASONS = new Set([
 	"signup",
 	"llm_pool_provisioning",
@@ -261,4 +269,18 @@ export async function readinessDetailOf() {
 export async function needsLlmConnection() {
 	const r = await checkReady();
 	return !!(r && !r.ready && r.reason === "llm_credentials");
+}
+
+// True when an established workspace's LLM leg is mid-apply for the first time
+// (jarvis C2 - e.g. adding a model in Settings > AI models just flipped it into
+// pool mode). Its own accessor, same "one reason, one accessor" convention as
+// needsLlmConnection above, rather than folding into readinessDetailOf: that one
+// is spec-pinned to container_provisioning/authority_repair_required and
+// is_ready_for_chat sends no `detail` for this reason - there is nothing to
+// quote, only a state to name. The caller's banner is quiet (no CTA, no
+// composer-disable): the container is still serving the workspace's PREVIOUS
+// config while this converges, so chat keeps working.
+export async function isLlmApplying() {
+	const r = await checkReady();
+	return !!(r && !r.ready && r.reason === "llm_applying");
 }

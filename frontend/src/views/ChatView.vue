@@ -2159,6 +2159,17 @@
 					:message="notReadyNotice"
 					style="margin-bottom: 10px"
 				/>
+				<!-- jarvis C2: an established workspace's first pool/direct leg is mid-apply
+					 (e.g. a model just added in Settings > AI models). The container keeps
+					 serving the previous config while this converges, so this is informational
+					 only - no CTA, composer stays enabled. -->
+				<Banner
+					v-else-if="llmApplying"
+					type="info"
+					title="Applying your AI configuration"
+					message="Your agent is updating. Chat keeps working with your previous connection until this finishes."
+					style="margin-bottom: 10px"
+				/>
 
 				<!-- floats just above the composer; jumps the thread to the newest message -->
 				<transition name="jv-sd">
@@ -3844,6 +3855,7 @@ import {
 	checkReady,
 	readinessDetailOf,
 	needsLlmConnection,
+	isLlmApplying,
 	forgetReady,
 } from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
@@ -3937,6 +3949,11 @@ const notReadyNotice = ref("");
 // flag rather than reusing notReadyNotice: that one carries admin's sentence about a
 // container, and this one has its own copy and its own call to action.
 const noAiConnected = ref(false);
+// jarvis C2: an established workspace's LLM leg is mid-apply for the first time
+// (e.g. a model just added in Settings > AI models). The container keeps serving
+// the workspace's previous config while this converges, so no CTA and no
+// composer-disable - just a quiet heads-up. See isLlmApplying (readiness.js).
+const llmApplying = ref(false);
 // Connecting a model is gated on require_jarvis_admin() server-side. A member who
 // cannot reach the AI models pane still gets the banner (their chat IS broken and
 // they should know why), just without a button that would only bounce them back to
@@ -9741,6 +9758,13 @@ onMounted(async () => {
 	needsLlmConnection()
 		.then((v) => {
 			noAiConnected.value = v;
+		})
+		.catch(() => {});
+	// ...and the llm_applying half (jarvis C2): same fail-open posture, an
+	// unreachable backend just leaves the quiet banner off.
+	isLlmApplying()
+		.then((v) => {
+			llmApplying.value = v;
 		})
 		.catch(() => {});
 	document.addEventListener("pointerdown", onDocClick);

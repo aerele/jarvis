@@ -613,6 +613,15 @@ def is_ready_for_chat() -> dict:
 	- ``"llm_pool_provisioning"`` - a pool is configured (pool mode) but
 	  no sync has ever applied it to the container (first sync pending or
 	  failed).
+	- ``"llm_applying"`` - the same still-converging window as
+	  ``llm_pool_provisioning`` / ``llm_provisioning``, but for a workspace
+	  that has been chat-ready before (``_has_been_chat_ready``) - e.g. an
+	  established, chatting customer whose FIRST pool leg is mid-apply after
+	  adding a model in Settings. Soft, like ``llm_credentials``: a reload
+	  during this window must keep the customer in the app, not send them
+	  back to the setup wizard (jarvis C2). Never returned for a workspace
+	  that has never been confirmed ready - that stays on the hard
+	  ``llm_pool_provisioning`` / ``llm_provisioning`` reason unchanged.
 	- ``"llm_rejected"`` - the pool/api_key/subscription config's FIRST sync ended
 	  in a terminal ``last_sync_status`` of ``"failed: ..."`` AND admin's own
 	  refusal is what produced it (an unusable spec, a validation error, a
@@ -683,7 +692,7 @@ def is_ready_for_chat() -> dict:
 	if compute_pool_mode(settings):
 		if getattr(settings, "llm_pool_synced_at", None) or _confirm_apply_via_admin(settings, is_pool=True):
 			return _admin_chat_gate()
-		return _rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_pool_provisioning"}
+		return _rejected_sync_verdict(settings) or _provisioning_verdict("llm_pool_provisioning")
 
 	auth_mode = (getattr(settings, "llm_auth_mode", "") or "api_key").strip()
 
@@ -712,7 +721,7 @@ def is_ready_for_chat() -> dict:
 		if not getattr(settings, "llm_direct_synced_at", None) and not _confirm_apply_via_admin(
 			settings, is_pool=False
 		):
-			return _rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_provisioning"}
+			return _rejected_sync_verdict(settings) or _provisioning_verdict("llm_provisioning")
 	elif auth_mode == "subscription":
 		# Unified models[]-table subscription on the DIRECT leg (jarvis#715 step
 		# 3): no cliproxy sidecar, so - like api_key direct above - this gates on
@@ -737,7 +746,7 @@ def is_ready_for_chat() -> dict:
 			if not has_configured_subscription_model(settings):
 				return _llm_missing_verdict(settings)
 			if not _confirm_apply_via_admin(settings, is_pool=False):
-				return _rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_provisioning"}
+				return _rejected_sync_verdict(settings) or _provisioning_verdict("llm_provisioning")
 	elif auth_mode == "oauth":
 		# The legacy flat-field direct-oauth flow: llm_oauth_connected_at is
 		# set (read-only) when the oauth grant completes and the admin
@@ -914,6 +923,33 @@ def _rejected_sync_verdict(settings) -> dict | None:
 		"reason": "llm_rejected",
 		"detail": detail or "Your AI configuration was rejected.",
 	}
+
+
+# jarvis C2: a reload during the mid-apply window must not show an established,
+# chatting customer the full-screen setup poster. The gate string alone cannot
+# tell "never onboarded" from "onboarded, first pool/direct leg mid-apply" - both
+# reach here with the SAME unstamped evidence marker - so the only signal that
+# can tell them apart is _has_been_chat_ready's durable, authority-bound proof.
+def _provisioning_verdict(hard_reason: str) -> dict:
+	"""Not-ready verdict for is_ready_for_chat's three still-converging exits
+	(pool, api_key, subscription), downgraded to the soft ``llm_applying``
+	reason for a workspace that has been chat-ready before.
+
+	Fetches ``raw`` itself rather than taking it from the caller: only these
+	not-ready exits ever need it, so the happy path (an already-applied leg,
+	the overwhelming majority of calls) never pays the extra ``tabSingles``
+	read.
+
+	A FRESH tenant - no durable marker, or one whose authority anchor no
+	longer matches the current (principal, container, generation) after a
+	reset/reconnect - keeps the unchanged hard reason: it must still route to
+	the setup wizard, because chat genuinely cannot work there and there is no
+	history to protect.
+	"""
+	raw = _settings_raw(_GATE_STATE_FIELDS)
+	if _has_been_chat_ready(raw):
+		return {"ready": False, "reason": "llm_applying"}
+	return {"ready": False, "reason": hard_reason}
 
 
 def _llm_missing_verdict(settings) -> dict:
