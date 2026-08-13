@@ -3,7 +3,9 @@
 		<Tooltip v-if="pending" text="Updating your assistant… (restarts briefly, ~30s)">
 			<Badge theme="orange" variant="subtle" size="lg">
 				<template #prefix>
-					<JvSpinner />
+					<!-- currentColor so the spinner takes the orange badge tone,
+					     not the brand accent (JvSpinner's default). -->
+					<JvSpinner color="currentColor" />
 				</template>
 				Applying skills…
 			</Badge>
