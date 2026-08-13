@@ -70,7 +70,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { FULL_CHAT_URL, conversationUrl, PANEL_MIN_VIEWPORT_PX } from "./config.mjs";
 import { contextFromRoute } from "./desk_context.mjs";
 import { panelLayout } from "./panel_anchor.mjs";
@@ -106,19 +106,46 @@ const IDLE_PEEK_HOLD_MS = 1800; // one jvw-blink cycle, then back to resting
 const autoPeek = ref(false);
 let idlePeekTimeoutId = null;
 let idlePeekHoldTimeoutId = null;
+let reducedMotionMql = null;
 
-function prefersReducedMotion() {
-	return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+function stopIdlePeek() {
+	if (idlePeekTimeoutId) {
+		window.clearTimeout(idlePeekTimeoutId);
+		idlePeekTimeoutId = null;
+	}
+	if (idlePeekHoldTimeoutId) {
+		window.clearTimeout(idlePeekHoldTimeoutId);
+		idlePeekHoldTimeoutId = null;
+	}
+	autoPeek.value = false;
 }
 
 function scheduleIdlePeek() {
 	idlePeekTimeoutId = window.setTimeout(() => {
-		autoPeek.value = true;
-		idlePeekHoldTimeoutId = window.setTimeout(() => {
-			autoPeek.value = false;
-		}, IDLE_PEEK_HOLD_MS);
+		// Dragging or an open panel must never grow eyes mid-interaction -
+		// mirrors idleTimer's own `if (!dragging.value)` guard on its onIdle
+		// fade above. Still reschedules either way so the cadence keeps ticking
+		// and simply resumes blinking once the FAB is resting again.
+		if (!dragging.value && !panelOpen.value) {
+			autoPeek.value = true;
+			idlePeekHoldTimeoutId = window.setTimeout(() => {
+				autoPeek.value = false;
+			}, IDLE_PEEK_HOLD_MS);
+		}
 		scheduleIdlePeek();
 	}, IDLE_PEEK_INTERVAL_MS);
+}
+
+// Reacts to the OS preference changing mid-session, not just its value at
+// mount: reduced-motion turning on stops the timer and clears any peek in
+// progress; turning back off resumes scheduling. Kept in sync with
+// JarvisMark.vue's handleReducedMotionChange by hand.
+function handleReducedMotionChange(e) {
+	if (e.matches) {
+		stopIdlePeek();
+	} else if (!brandLogoUrl) {
+		scheduleIdlePeek();
+	}
 }
 
 // Access gate: desk boot sets this once for the session (see Task B).
@@ -134,6 +161,20 @@ let unwatchTheme = null;
 const panelOpen = ref(false);
 const deskContext = ref(null);
 const contextDismissed = ref(false);
+
+// A drag starting (or the panel opening) mid-hold must cancel an in-progress
+// idle peek immediately rather than let it ride out its 1.8s hold - same
+// posture as JarvisMark.vue's mood watcher taking the face back the instant
+// something else needs to own it.
+watch([dragging, panelOpen], ([isDragging, isPanelOpen]) => {
+	if (isDragging || isPanelOpen) {
+		if (idlePeekHoldTimeoutId) {
+			window.clearTimeout(idlePeekHoldTimeoutId);
+			idlePeekHoldTimeoutId = null;
+		}
+		autoPeek.value = false;
+	}
+});
 
 // Dismissing the chip suppresses context for the current page only; a new
 // route is a new subject, so the dismissal does not carry over.
@@ -433,7 +474,11 @@ onMounted(() => {
 			if (!dragging.value) faded.value = true;
 		},
 	});
-	if (!brandLogoUrl && !prefersReducedMotion()) scheduleIdlePeek();
+	if (!brandLogoUrl && typeof window.matchMedia === "function") {
+		reducedMotionMql = window.matchMedia("(prefers-reduced-motion: reduce)");
+		reducedMotionMql.addEventListener("change", handleReducedMotionChange);
+		if (!reducedMotionMql.matches) scheduleIdlePeek();
+	}
 	window.addEventListener("resize", onResize);
 	window.addEventListener("orientationchange", onResize);
 	document.addEventListener("mousemove", onDocumentActivity, { passive: true });
@@ -459,8 +504,8 @@ onBeforeUnmount(() => {
 		window.clearTimeout(snapTimeoutHandle);
 		snapTimeoutHandle = null;
 	}
-	if (idlePeekTimeoutId) window.clearTimeout(idlePeekTimeoutId);
-	if (idlePeekHoldTimeoutId) window.clearTimeout(idlePeekHoldTimeoutId);
+	stopIdlePeek();
+	reducedMotionMql?.removeEventListener("change", handleReducedMotionChange);
 });
 </script>
 

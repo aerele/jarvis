@@ -42,7 +42,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { brandLogoUrl } from "@/branding";
 import { BRAND_STAR_PATH } from "@/lib/brand";
 
@@ -70,8 +70,10 @@ const props = defineProps({
 	    the same peek reveal hover/hoverPeek trigger on demand — the "idle"
 	    animation the mark was designed to have. Off by default: message rows
 	    render dozens of marks at once and only a chosen resting surface (the
-	    sidebar brand mark) should breathe unprompted. Skips prefers-reduced-motion
-	    entirely (never starts the timer), same posture as TourIntro's clocks. */
+	    sidebar brand mark) should breathe unprompted. Tracks prefers-reduced-motion
+	    LIVE via a matchMedia change listener (not just at mount): the timer
+	    stops the moment the OS preference flips on mid-session, and resumes if
+	    it flips off again, so a mid-session toggle is always honored. */
 	idlePeek: { type: Boolean, default: false },
 });
 
@@ -91,13 +93,18 @@ const IDLE_PEEK_HOLD_MS = 1800; // one jvm-blink cycle, then back to resting
 const autoPeek = ref(false);
 let idleTimeoutId = null;
 let idleHoldTimeoutId = null;
+let reducedMotionMql = null;
 
-function prefersReducedMotion() {
-	return (
-		typeof window !== "undefined" &&
-		typeof window.matchMedia === "function" &&
-		window.matchMedia("(prefers-reduced-motion: reduce)").matches
-	);
+function stopIdlePeek() {
+	if (idleTimeoutId) {
+		window.clearTimeout(idleTimeoutId);
+		idleTimeoutId = null;
+	}
+	if (idleHoldTimeoutId) {
+		window.clearTimeout(idleHoldTimeoutId);
+		idleHoldTimeoutId = null;
+	}
+	autoPeek.value = false;
 }
 
 function scheduleIdlePeek() {
@@ -112,14 +119,44 @@ function scheduleIdlePeek() {
 	}, IDLE_PEEK_INTERVAL_MS);
 }
 
+// Reacts to the OS preference changing mid-session, not just its value at
+// mount: reduced-motion turning on stops the timer and clears any peek in
+// progress; turning back off resumes scheduling.
+function handleReducedMotionChange(e) {
+	if (e.matches) {
+		stopIdlePeek();
+	} else if (props.idlePeek) {
+		scheduleIdlePeek();
+	}
+}
+
+// A mood taking over the face (e.g. a reply starts streaming) mid-hold must
+// not leave jv-peek-on layered on top of it - the new mood should own the
+// face immediately, not after the peek's own hold timer runs out.
+watch(
+	() => props.mood,
+	(mood) => {
+		if (mood !== "star" && autoPeek.value) {
+			if (idleHoldTimeoutId) {
+				window.clearTimeout(idleHoldTimeoutId);
+				idleHoldTimeoutId = null;
+			}
+			autoPeek.value = false;
+		}
+	}
+);
+
 onMounted(() => {
-	if (!props.idlePeek || prefersReducedMotion()) return;
-	scheduleIdlePeek();
+	if (!props.idlePeek) return;
+	if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+	reducedMotionMql = window.matchMedia("(prefers-reduced-motion: reduce)");
+	reducedMotionMql.addEventListener("change", handleReducedMotionChange);
+	if (!reducedMotionMql.matches) scheduleIdlePeek();
 });
 
 onBeforeUnmount(() => {
-	if (idleTimeoutId) window.clearTimeout(idleTimeoutId);
-	if (idleHoldTimeoutId) window.clearTimeout(idleHoldTimeoutId);
+	stopIdlePeek();
+	reducedMotionMql?.removeEventListener("change", handleReducedMotionChange);
 });
 
 const markStyle = computed(() => ({
