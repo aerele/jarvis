@@ -68,12 +68,15 @@
 							v-for="item in group.items"
 							:key="item.key"
 							class="mx-0.5 flex h-7 shrink-0 items-center gap-2 rounded px-2 text-sm text-ink-gray-8"
-							:class="
+							:class="[
 								section === item.key
 									? 'bg-surface-white shadow-sm'
-									: 'hover:bg-surface-gray-2'
-							"
+									: 'hover:bg-surface-gray-2',
+								applying ? 'cursor-not-allowed opacity-50' : '',
+							]"
 							:aria-current="section === item.key ? 'page' : undefined"
+							:aria-disabled="applying"
+							:disabled="applying"
 							@click="go(item.key)"
 						>
 							<FeatherIcon :name="item.icon" class="size-4 shrink-0" />
@@ -90,7 +93,7 @@
 				     the bottom. On a plain block wrapper both would clip silently
 				     with no scrollbar. -->
 				<div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-					<component :is="pane" />
+					<component :is="pane" ref="paneRef" />
 				</div>
 
 				<!-- Close lives at the dialog level, not in SettingsPane, so panes
@@ -109,7 +112,7 @@
 </template>
 
 <script setup>
-import { computed, defineAsyncComponent } from "vue";
+import { computed, defineAsyncComponent, ref } from "vue";
 import { Dialog, FeatherIcon } from "frappe-ui";
 // Straight from reka-ui, the same primitives frappe-ui's Dialog uses
 // internally. Needed because overriding the #body slot drops the ones it
@@ -219,7 +222,24 @@ const section = computed(() => {
 });
 const pane = computed(() => PANES[section.value]);
 
+// Template ref onto the active pane. Vue forwards a ref set on a
+// defineAsyncComponent-wrapped <component :is="..."> straight through to the
+// resolved inner component's exposed instance, so this resolves to
+// AiModelsPane's own defineExpose (which mirrors LlmPoolEditor's busy state)
+// once that pane has loaded. A pane that exposes nothing (every non-AiModels
+// pane today) just leaves `applying` false.
+const paneRef = ref(null);
+// True while the active pane is applying a change (currently only AiModelsPane
+// during a model apply). Read through the ref rather than a shell-store flag
+// so the signal dies with the pane and can never get stuck locked if the pane
+// unmounts mid-apply.
+const applying = computed(() => !!paneRef.value?.applying);
+
 function go(key) {
+	// Locked while an apply is in flight: switching sections would drop the
+	// applying pane's scrim and abandon the apply mid-flight. The dialog's own
+	// close (X) button is untouched, so a hung apply never traps the user.
+	if (applying.value) return;
 	store.settingsSection = key;
 }
 </script>

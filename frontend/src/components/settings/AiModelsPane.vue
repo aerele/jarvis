@@ -91,7 +91,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { Button } from "frappe-ui";
 import { getDirectSubscriptionStatus } from "@/api";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
@@ -199,4 +199,13 @@ async function onSaved(sync) {
 }
 
 onMounted(loadDirectSub);
+
+// Exposed for SettingsDialog: true while a model change is applying, so the
+// rail can lock section switching for the duration. Mirrors LlmPoolEditor's
+// own busy.active through the poolEditor template ref above, a template ref
+// rather than a shell-store flag, so the lock lives and dies with this pane
+// and can never get stuck true if the pane unmounts mid-apply.
+defineExpose({
+	applying: computed(() => !!poolEditor.value?.busy?.active),
+});
 </script>

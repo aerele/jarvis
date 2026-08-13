@@ -5178,7 +5178,10 @@ onBeforeUnmount(() => {
 });
 
 // Let a host (onboarding, footerless) drive Save from its own footer, and a
-// hostScrim host (AiModelsPane) read the apply-in-flight state for its own scrim.
+// hostScrim host (AiModelsPane) read the apply-in-flight state for its own
+// scrim. AiModelsPane also re-exposes busy.active as `applying`, which
+// SettingsDialog reads through its own template ref to lock section
+// switching for the same duration.
 // canStart / startBlockedReason let the onboarding controller (saveConnect) REQUIRE
 // a savable+validated config - a connected subscription, a stored key, a local
 // endpoint, or a freshly-typed remote key with a PASSING probe bound to it (P0-09) -
@@ -5199,9 +5202,17 @@ defineExpose({
 /* ===== Blocking apply overlay =============================================
    The editor is the positioning context so the scrim covers exactly it, not the
    whole settings dialog: the customer should still be able to close the dialog
-   or move to another pane while their agent restarts in the background. Inside
-   the editor, though, nothing is clickable and (thanks to `inert` on the blocks
-   underneath) nothing is tabbable either.
+   while their agent restarts in the background, so a hung apply never traps
+   them. Inside the editor, though, nothing is clickable and (thanks to `inert`
+   on the blocks underneath) nothing is tabbable either.
+
+   Moving to another settings section while an apply is active is now BLOCKED,
+   not allowed. That guard lives one level up in SettingsDialog, which reads
+   AiModelsPane's exposed `applying` (itself mirroring this `busy` ref through
+   the poolEditor template ref) and locks the rail for the duration, so a click
+   elsewhere can no longer drop this scrim and abandon the apply mid-flight.
+   This file has no notion of sibling panes, so it only ever owns the close
+   affordance above, never the lock.
 
    hostScrim consumers (AiModelsPane) skip this box entirely and render their
    own wider one instead - the editor alone was too narrow a box: the pane's
