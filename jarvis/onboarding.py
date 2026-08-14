@@ -317,14 +317,14 @@ def get_preset_catalog() -> list:
 
 @frappe.whitelist()
 def capture_onboarding_lead(
-	email=None,
-	company=None,
-	billing=None,
-	plan=None,
-	step=None,
-	contact_consent=0,
-	site_origin=None,
-	partner_code=None,
+	email: str | None = None,
+	company: str | None = None,
+	billing: dict | None = None,
+	plan: str | None = None,
+	step: str | None = None,
+	contact_consent: bool = False,
+	site_origin: str | None = None,
+	partner_code: str | None = None,
 ) -> dict:
 	"""Fire-and-forget mirror of admin's guest ``capture_onboarding_lead``: upsert
 	a ``Jarvis Lead`` from an in-progress onboarding (frozen contract). Called by
@@ -941,8 +941,8 @@ def start_signup(
 	provider: str | None = None,
 	billing: dict | None = None,
 	partner_code: str | None = None,
-	terms_accepted=None,
-	contact_consent=0,
+	terms_accepted: bool | None = None,
+	contact_consent: bool = False,
 ) -> dict:
 	"""Guest signup → store the api_token → return the Razorpay handles for Checkout.
 

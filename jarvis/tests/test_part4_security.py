@@ -484,6 +484,7 @@ _OPEN_ALLOWLIST = {
 	"account.is_ready_for_chat": "boolean readiness probe, no secret",
 	"onboarding.list_plans": "public plan catalog (spec: leave ungated)",
 	"onboarding.get_preset_catalog": "public preset catalog (spec: leave ungated)",
+	"onboarding.get_terms_url": "public Terms & Conditions page URL for the checkout link, no secret",
 	"onboarding.list_payment_providers": "public gateway list for the onboarding chooser; keys only, no secret",
 	"onboarding.get_llm_sync_status": "sanitized sync poller, needed pre-role-settle",
 	"mobile.auth.get_pairing_qr": "Guest-rejected; encodes only the site URL, no secret",
