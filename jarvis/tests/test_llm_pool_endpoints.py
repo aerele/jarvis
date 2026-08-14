@@ -223,7 +223,11 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 		(handler.py's ``execute_cmd`` -> ``get_attr`` failure, wrapped in
 		``frappe.throw``). That must fall back to the old push-blob-then-creds
 		sequence, in that order, rather than surface as a broken subscription
-		connect."""
+		connect. The blob push now goes through ``self._push_direct_subscription_blob``
+		(the same wrapper the pre-collapse code used) rather than an inlined
+		call, but the observable effect - a ``post_push_oauth_blob`` call before
+		``post_update_llm_creds`` - is unchanged, so the assertions below still
+		verify it."""
 		from jarvis import admin_client
 
 		calls = []

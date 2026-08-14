@@ -766,13 +766,14 @@ class JarvisSettings(Document):
 		(jarvis#715 step 3, point 4).
 
 		Thin wrapper around the module-level ``_direct_subscription_blob``
-		(find/validate/strip-``id_token``) - kept as its OWN method, rather than
-		inlined at the one remaining call site, because
-		``TestPushDirectSubscriptionBlobNoMatchInvariant`` calls it UNBOUND
-		against a bare test fixture; see that helper's docstring for the
-		raise-not-skip guarantee this preserves. Still used by the fallback leg
-		of ``_sync_subscription_connect_restart`` for an admin that has not yet
-		deployed ``subscription_connect``.
+		(find/validate/strip-``id_token``) plus the push itself - kept as a
+		method (not inlined) because it has two callers: the deploy-window
+		fallback leg of ``_sync_subscription_connect_restart`` (an admin that
+		has not yet deployed ``subscription_connect`` still needs the OLD
+		push-blob-then-creds sequence), and
+		``TestPushDirectSubscriptionBlobNoMatchInvariant``, which calls it
+		UNBOUND against a bare test fixture - see that helper's docstring for
+		the raise-not-skip guarantee this preserves.
 		"""
 		from jarvis import admin_client
 
@@ -843,7 +844,7 @@ class JarvisSettings(Document):
 		except admin_client.AdminValidationError as e:
 			if not admin_client.is_method_not_found(e):
 				raise
-			admin_client.post_push_oauth_blob(provider, blob)
+			self._push_direct_subscription_blob()
 			result = (
 				admin_client.post_update_llm_creds(
 					provider=self.llm_provider or "",
@@ -1614,8 +1615,9 @@ class JarvisSettings(Document):
 		# same model, same llm_auth_mode - so none of the checks in this function
 		# (structural_fields below, llm_api_key_changed) can see it. Without this,
 		# reconnecting an expired/revoked token would classify as "no change" and
-		# the fresh blob this leg itself pushes (_push_direct_subscription_blob)
-		# would never reach the container.
+		# the fresh blob this leg itself pushes (_sync_subscription_connect_restart,
+		# via post_subscription_connect or its _push_direct_subscription_blob
+		# deploy-window fallback) would never reach the container.
 		if old is not None and (self.llm_auth_mode or "") == "subscription":
 			current_snap = self.flags.get("pool_state_snapshot")
 			if current_snap is not None and current_snap != self._pool_state_snapshot(old):
