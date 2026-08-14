@@ -546,6 +546,15 @@ class JarvisSettings(Document):
 				self.llm_api_key = api_key_val
 
 	def validate(self):
+		# #731: capture the RAW pre-save wiki toggle state here, while tabSingles
+		# still holds the old value (validate runs before db_update). wiki_enabled()
+		# honours the NULL=ON idiom that has_value_changed cannot - a Check coerces
+		# NULL to 0, so the coerced before-doc would miss a NULL(=ON) -> 0 disable.
+		# on_update reads this flag to decide whether to scrub the container mirror.
+		from jarvis.chat.wiki import wiki_enabled
+
+		self.flags.wiki_was_enabled = wiki_enabled()
+
 		# Detect a new llm_api_key before _save_passwords() masks it to '****'.
 		current_key = getattr(self, "llm_api_key", None) or ""
 		if not current_key or self.is_dummy_password(current_key):
@@ -752,6 +761,10 @@ class JarvisSettings(Document):
 		)
 
 	def on_update(self):
+		# #731: runs BEFORE the unified-LLM early returns below so a settings save
+		# that both reconfigures the LLM and disables the wiki still scrubs.
+		self._maybe_scrub_wiki_on_disable()
+
 		# ------------------------------------------------------------------ #
 		# Unified LLM path (2026-06-26): models table rows or preset present.
 		# ------------------------------------------------------------------ #
@@ -772,6 +785,29 @@ class JarvisSettings(Document):
 		self.db_set("proxy_active", 0, update_modified=False)
 		self.db_set("proxy_recommended", 0, update_modified=False)
 		self._on_update_single_model_legacy()
+
+	def _maybe_scrub_wiki_on_disable(self):
+		"""Scrub the container's mirrored wiki files when "Enable Business Wiki"
+		goes ON -> OFF (#731).
+
+		The kill switch has to actually remove already-mirrored content, not just
+		gate new reads: the agent can otherwise still grep the page files off the
+		org-shared workspace, and revocation deletes never fire while the wiki is
+		off. Fires only on a real 1 -> 0 flip - the pre-save state comes from the
+		raw ``wiki_enabled()`` captured in validate() (so a NULL=ON -> 0 disable is
+		caught, which has_value_changed would miss), and the new state from the
+		value being saved. A save while already off, or a re-enable, does nothing.
+		A missing flag (validate skipped) means no scrub."""
+		from jarvis.chat import wiki_mirror
+
+		if not self.flags.get("wiki_was_enabled"):
+			return
+		raw_new = getattr(self, "wiki_enabled", None)
+		# NULL=ON idiom on the new value too: an unset field still reads as enabled.
+		now_enabled = True if raw_new is None else bool(frappe.utils.cint(raw_new))
+		if now_enabled:
+			return
+		wiki_mirror.enqueue_scrub(after_commit=True)
 
 	def _on_update_unified_llm(self):
 		"""New LLM path: validate → derive proxy_active/proxy_recommended →

@@ -72,6 +72,14 @@ _LOCK_WAIT_S = 75.0
 JOB_ID_RETRY = "wiki-mirror-sync-retry"
 JOB_ID_FULL_RETRY = "wiki-mirror-sync-full-retry"
 
+# #731: the one-shot scrub queued when "Enable Business Wiki" goes ON -> OFF. Its
+# own dedup slots, distinct from the sync ids above, for the same reason the sync
+# retry ids are distinct: a contended scrub re-queueing itself must not reuse an id
+# that is already STARTED (its own), or frappe.enqueue's deduplicate=True declines
+# it silently and the scrub is dropped, leaving the kill switch a no-op.
+JOB_ID_SCRUB = "wiki-mirror-scrub"
+JOB_ID_SCRUB_RETRY = "wiki-mirror-scrub-retry"
+
 # fleet-agent hard-caps request bodies at 256KB; keep each push call's b64
 # file payload comfortably under it.
 MAX_CALL_PAYLOAD_BYTES = 200 * 1024
@@ -518,6 +526,119 @@ def _chunk_files(files: list[dict]) -> list[list[dict]]:
 
 
 # --------------------------------------------------------------------------- #
+# scrub (kill switch: #731)
+# --------------------------------------------------------------------------- #
+def scrub() -> dict:
+	"""Remove EVERY mirrored wiki file from the tenant container. This is what
+	the "Enable Business Wiki" kill switch enqueues on its ON -> OFF transition.
+
+	Turning the wiki off only gates NEW reads/writes (``read_wiki`` etc.) and
+	short-circuits ``sync`` at its #493 entry, so already-mirrored page files sit
+	in the org-shared workspace ``wiki/`` where the agent can still grep them off
+	disk, and a page trashed/archived/narrowed while the wiki is off never has its
+	file revoked (the gated sync never runs the delete, and there is no periodic
+	sweep). Scrubbing on disable closes both: the files are gone, and the blocked
+	revocations become moot.
+
+	Run-time re-check of the toggle, the inverse of ``sync``'s #493 gate: a
+	re-enable that raced ahead of this queued job (disable -> re-enable -> "Sync
+	now") means a live mirror we must NOT wipe, so whichever job runs last leaves
+	the container matching the current toggle state.
+
+	Serialised on the SAME lock as ``sync`` (#622): a reconcile already past its
+	own gate when the operator disabled would otherwise re-push files AFTER the
+	prune, reopening the very hole this closes. On contention or crash the scrub is
+	re-queued under a DISTINCT id (``JOB_ID_SCRUB_RETRY``) rather than dropped,
+	because there is no periodic sweep to pick a stranded scrub up later.
+
+	Reuses the existing mirror push API: an explicit ``delete`` list of every
+	stamped page file plus ``index.md``/``log.md``, AND ``known_paths=[]`` so the
+	fleet's full-sync walk also prunes strays (files left at an old path by a slug
+	or type move). Idempotent and never raises: a no-op when nothing was mirrored,
+	and a logged non-error when the container is absent (the push swallows +
+	logs, returning None). Re-enabling later re-mirrors through the existing full
+	sync (``sync_wiki_mirror_now`` / a page edit)."""
+	if wiki_enabled():
+		return {"ok": False, "skipped": True, "reason": "wiki re-enabled before scrub ran"}
+	from jarvis._redis_lock import redis_lock
+
+	try:
+		with redis_lock(_LOCK_NAME, timeout_s=_LOCK_TTL_S, blocking_timeout_s=_LOCK_WAIT_S) as acquired:
+			if acquired:
+				return _scrub()
+			return _requeue_scrub(why="another mirror op still in flight")
+	except Exception:
+		frappe.log_error(title="wiki mirror: scrub crashed", message=frappe.get_traceback())
+		# A fault reaching here may be the lock itself (redis_lock propagates real
+		# Redis errors by design), in which case _scrub never ran. Re-queue rather
+		# than let the kill switch silently do nothing.
+		return _requeue_scrub(why="scrub crashed; see Error Log")
+
+
+def _scrub() -> dict:
+	# Read the stamped rows INSIDE the lock: a sync that finished while we waited
+	# has just stamped new files, and a snapshot taken before the wait would leave
+	# those stamps set after the prune - a later incremental sync would then
+	# hash-skip a file that is no longer on the container.
+	rows = frappe.get_all(
+		WIKI,
+		filters=[["mirror_hash", "!=", ""]],
+		fields=["name", "slug", "page_type"],
+		limit_page_length=0,
+	)
+	# The full set of paths this mirror ever writes: every stamped page file plus
+	# the two navigation files. Deleting an already-gone path is tolerated (the
+	# sync's delete path relies on the same), so this stays safe when nothing is
+	# actually on the container.
+	delete_paths = sorted(
+		{_wire_path(page_path(r)) for r in rows} | {_wire_path(INDEX_PATH), _wire_path(LOG_PATH)}
+	)
+
+	from jarvis import admin_client
+
+	# known_paths=[] (NOT None) tells the fleet to prune everything under wiki/,
+	# sweeping strays the path list cannot name; the explicit delete list covers
+	# the tracked files even if an empty known_paths were ever coerced away.
+	resp = admin_client.push_wiki_files(files=[], delete=delete_paths, known_paths=[])
+	if resp is None:
+		# Container absent / admin unreachable: nothing was pruned, so leave the
+		# stamps intact. Not an error - the wiki is off regardless, and a re-toggle
+		# re-fires the scrub. There is nothing to retry against an absent container.
+		frappe.log_error(
+			title="wiki mirror: scrub push failed",
+			message="admin/tenant unreachable; wiki files left in place",
+		)
+		return {"ok": False, "reason": "admin/tenant unreachable; nothing scrubbed"}
+
+	# Clear the stamps only after the confirmed prune, mirroring _sync: the stamp
+	# is the standing proof a file is on the container, so "no file" and "no stamp"
+	# stay consistent and a later re-enable full sync re-pushes cleanly.
+	for r in rows:
+		frappe.db.set_value(WIKI, r.name, "mirror_hash", "", update_modified=False)
+	frappe.db.commit()
+
+	return {
+		"ok": True,
+		"scrubbed": True,
+		"cleared": len(rows),
+		"deleted": len(delete_paths),
+		"pruned": resp.get("pruned", 0) if isinstance(resp, dict) else 0,
+	}
+
+
+def _requeue_scrub(why: str) -> dict:
+	"""Re-queue a scrub that could not run, under the RETRY job id (see
+	``_requeue_contended`` for why the id must differ from the running job's)."""
+	queued = enqueue_scrub(retry=True)
+	return {
+		"ok": False,
+		"skipped": bool(queued),
+		"requeued": bool(queued),
+		"reason": f"{why}; {'re-queued' if queued else 'RE-QUEUE FAILED, files may linger'}",
+	}
+
+
+# --------------------------------------------------------------------------- #
 # triggers
 # --------------------------------------------------------------------------- #
 def enqueue_sync(full: bool = False, after_commit: bool = False, retry: bool = False) -> bool:
@@ -567,6 +688,38 @@ def enqueue_sync(full: bool = False, after_commit: bool = False, retry: bool = F
 		return True
 	except Exception:
 		frappe.log_error(title="wiki mirror: enqueue failed", message=frappe.get_traceback())
+		return False
+
+
+def enqueue_scrub(after_commit: bool = True, retry: bool = False) -> bool:
+	"""Queue the one-shot kill-switch scrub (#731). Returns whether a job was
+	really queued.
+
+	Deliberately NOT gated on ``wiki_enabled`` the way ``enqueue_sync`` is: this
+	runs precisely because the wiki was just turned OFF, and ``scrub`` itself
+	re-checks the toggle at run time. Suppressed under tests unless
+	``frappe.flags.jarvis_test_wiki_mirror_enqueue`` is set, so a fixture save that
+	flips the toggle does not spray RQ jobs; a test invokes ``scrub`` directly.
+
+	``after_commit`` defaults True: the toggle write must land before the worker
+	runs so its own re-check sees the disable. ``retry=True`` uses the RETRY id, a
+	separate dedup slot, so a contended scrub re-queueing itself is not declined
+	for colliding with its own STARTED job."""
+	if frappe.flags.in_test and not frappe.flags.jarvis_test_wiki_mirror_enqueue:
+		return False
+	job_id = JOB_ID_SCRUB_RETRY if retry else JOB_ID_SCRUB
+	try:
+		frappe.enqueue(
+			"jarvis.chat.wiki_mirror.scrub",
+			queue=QUEUE,
+			timeout=JOB_TIMEOUT_S,
+			job_id=job_id,
+			deduplicate=True,
+			enqueue_after_commit=bool(after_commit),
+		)
+		return True
+	except Exception:
+		frappe.log_error(title="wiki mirror: scrub enqueue failed", message=frappe.get_traceback())
 		return False
 
 
