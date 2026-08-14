@@ -1432,20 +1432,15 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 		from jarvis.jarvis.pool_serialize import compute_pool_mode
 
 		pool_calls = []
-		blob_calls = []
 		with (
 			frappe_patch(
 				"jarvis.admin_client.post_update_llm_pool",
 				side_effect=lambda **kw: pool_calls.append(kw) or {"action": "pool_update"},
 			),
 			frappe_patch(
-				"jarvis.admin_client.post_push_oauth_blob",
-				side_effect=lambda provider, blob: blob_calls.append((provider, blob)) or {},
-			),
-			frappe_patch(
-				"jarvis.admin_client.post_update_llm_creds",
+				"jarvis.admin_client.post_subscription_connect",
 				return_value={"action": "restart", "status": "applied"},
-			) as mock_creds,
+			) as mock_connect,
 		):
 			out = onboarding.save_llm_pool(
 				frappe.as_json(self._lone_sub_payload()),
@@ -1457,20 +1452,17 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 		self.assertEqual(pool_calls, [], "a fresh lone renderable subscription must never push /llm-pool")
 		self.assertEqual(out["mode"], "legacy", "no apply-operation descriptor on the direct leg")
 
-		# The oauth blob is pushed to agent's auth store BEFORE /llm-creds,
-		# with id_token stripped (jarvis#715 step 3, point 4).
-		self.assertEqual(len(blob_calls), 1, "the direct leg must push the oauth blob exactly once")
-		provider, pushed_blob = blob_calls[0]
+		# ONE call now carries both the oauth blob (id_token stripped) and the
+		# creds fields (jarvis#715 step 3, point 4 - collapsed from two admin
+		# round trips into one subscription_connect call). auth_mode itself is
+		# hardcoded to "oauth" inside post_subscription_connect, not a caller
+		# kwarg - see test_admin_client.py for that body-construction test.
+		mock_connect.assert_called_once()
+		provider, pushed_blob = mock_connect.call_args.args
 		self.assertEqual(provider, "openai")
 		self.assertNotIn("id_token", pushed_blob)
 		self.assertEqual(pushed_blob.get("refresh"), "RT-direct")
-
-		mock_creds.assert_called_once()
-		self.assertEqual(
-			mock_creds.call_args.kwargs.get("auth_mode"),
-			"oauth",
-			"a subscription credential must cross the wire as oauth, not the literal 'subscription'",
-		)
+		self.assertEqual(mock_connect.call_args.kwargs.get("model"), "gpt-5.5")
 
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertEqual(int(settings.proxy_active or 0), 0, "no sidecar for a lone renderable subscription")
@@ -1491,8 +1483,7 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 				"jarvis.admin_client.post_update_llm_pool",
 				side_effect=lambda **kw: pool_calls.append(kw) or {"action": "pool_update"},
 			),
-			frappe_patch("jarvis.admin_client.post_push_oauth_blob") as mock_blob,
-			frappe_patch("jarvis.admin_client.post_update_llm_creds") as mock_creds,
+			frappe_patch("jarvis.admin_client.post_subscription_connect") as mock_connect,
 		):
 			out = onboarding.save_llm_pool(
 				frappe.as_json(self._lone_sub_payload(upstream="kimi", agent_provider="kimi")),
@@ -1504,8 +1495,7 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 		self.assertNotEqual(
 			out.get("last_sync_status", ""), "", "the pool leg must have run and stamped a status"
 		)
-		mock_blob.assert_not_called()
-		mock_creds.assert_not_called()
+		mock_connect.assert_not_called()
 
 
 class TestRT3LegacyNoModelsBackcompat(_RT3SettingsTestCase):

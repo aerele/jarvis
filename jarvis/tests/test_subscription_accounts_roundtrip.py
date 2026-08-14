@@ -345,16 +345,17 @@ class TestOrphanCaptureAdoption(_RT3SettingsTestCase):
 			# status="applied" is load-bearing: a bare Mock's .get("status") is
 			# truthy-and-not-"applied", which routes _sync_via_admin into the
 			# converge branch and calls the UNMOCKED admin_client.get_connection.
-			patch(
-				"jarvis.admin_client.post_update_llm_creds",
-				return_value={"action": "restart", "status": "applied"},
-			),
+			#
 			# jarvis#715's lone-direct-capable exception routes a single
 			# renderable subscription (this class's whole fixture shape) onto
-			# the DIRECT leg, which pushes its own oauth blob before /llm-creds
-			# (_push_direct_subscription_blob) - unmocked, that is a real admin
-			# call attempt from inside _sync_via_admin.
-			patch("jarvis.admin_client.post_push_oauth_blob"),
+			# the DIRECT leg, which makes ONE subscription_connect call
+			# (_sync_subscription_connect_restart, folding the oauth-blob push
+			# and the /llm-creds render into one admin round trip) - unmocked,
+			# that is a real admin call attempt from inside _sync_via_admin.
+			patch(
+				"jarvis.admin_client.post_subscription_connect",
+				return_value={"action": "restart", "status": "applied"},
+			),
 		):
 			return onboarding.save_llm_pool(frappe.as_json(payload), preset=None, routing_mode="failover")
 

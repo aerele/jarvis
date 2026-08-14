@@ -970,6 +970,67 @@ def post_push_oauth_blob(provider: str, blob: dict) -> dict:
 	)
 
 
+def post_subscription_connect(
+	provider: str,
+	blob: dict,
+	*,
+	model: str,
+	base_url: str,
+	api_key: str = "",
+	installed_apps: list[str] | None = None,
+) -> dict:
+	"""POST one combined subscription-connect to admin's
+	``api.tenant.subscription_connect``.
+
+	Collapses what used to be two round trips out of ``jarvis_settings.py``'s
+	subscription "restart" leg - ``post_push_oauth_blob`` (the auth-profile
+	write) THEN ``post_update_llm_creds`` (the openclaw.json render + restart)
+	- into one call, so the doctor+healthz work behind it runs once instead of
+	twice.
+
+	``provider`` is the agent auth-profile id baked into the oauth blob itself
+	(``blob["provider"]`` - "openai", "google-gemini-cli", ...; the same
+	identifier ``post_push_oauth_blob`` took), NOT necessarily
+	``Jarvis Settings.llm_provider`` - that legacy mirror is often blank for a
+	subscription model row (the UI never asks for a catalog provider on the
+	subscription leg; upstream + account already say which one). ``blob`` is
+	that oauth blob with ``id_token`` already stripped (fleet's
+	``PUT /auth-profile`` schema is ``extra_forbidden``).
+
+	``model``/``base_url``/``api_key``/``installed_apps`` mirror
+	``post_update_llm_creds``'s creds fields for parity with the two-call shape
+	this replaces - ``api_key`` is empty in practice (oauth mode's credential
+	lives in the auth-profile store, not here) but is still sent, matching what
+	the old restart leg sent unconditionally. ``auth_mode`` is hardcoded to
+	``"oauth"`` on the wire (not a parameter): this endpoint exists only for
+	the subscription/oauth leg, so there is nothing else it could be.
+
+	Timeout is 240s - strictly above the admin->fleet leg's own 210s budget
+	(same each-layer-exceeds-the-one-below rule as PR#826): this outer
+	bench->admin leg must never hang up on an apply admin is still driving.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError,
+		AdminRateLimitedError, AdminRejectedError as usual. A caller that needs
+		to detect "admin has not deployed this dotted path yet" (a deploy-order
+		gap between the jarvis and admin legs) checks ``is_method_not_found``
+		on a caught ``AdminValidationError``.
+	"""
+	return _post(
+		path=_m("api.tenant.subscription_connect"),
+		body={
+			"provider": provider,
+			"blob": blob,
+			"model": model,
+			"base_url": base_url,
+			"api_key": api_key,
+			"auth_mode": "oauth",
+			"installed_apps": installed_apps if installed_apps is not None else frappe.get_installed_apps(),
+		},
+		timeout_s=240,
+	)
+
+
 def post_push_custom_skills(skills: list[dict]) -> dict:
 	"""POST the customer's rendered custom skills to admin → fleet → container.
 
@@ -1826,6 +1887,49 @@ def _contract_error(payload) -> dict:
 	out = dict(err)
 	out["message"] = _scrub_secrets(str(err.get("message") or ""))
 	return out
+
+
+# Frappe's OWN "no such whitelisted method" rejection (frappe/handler.py
+# execute_cmd: get_attr() raises when the dotted path doesn't resolve, caught
+# and re-thrown via frappe.throw(_("Failed to get method for command {0} with
+# {1}").format(cmd, str(e))) - default exc class ValidationError,
+# http_status_code 417). It reaches _do_post as an AdminValidationError with
+# exc_type "ValidationError" - the SAME exc_type an ordinary business
+# rejection carries, so exc_type alone can't tell the two apart.
+#
+# The marker string is framework-owned (frappe/handler.py's literal format
+# string), not admin_app-owned prose, so - unlike a hand-authored admin
+# business message (AdminValidationError's own docstring warns never to
+# string-match one; an admin release reworded such a sentence once and broke
+# a substring match silently) - it is not going to be reworded out from under
+# this check by an admin deploy. The interpolated dotted path IS still
+# translation-proof even if a non-English admin locale translates the format
+# string's fixed text, so the check below accepts either half - the fixed
+# English marker OR the interpolated dotted method path (checked WITHOUT the
+# admin-app namespace prefix, since _admin_app() is a deployment override and
+# the method name after it is the constant part).
+_METHOD_NOT_FOUND_MARKER = "Failed to get method for command"
+_SUBSCRIPTION_CONNECT_METHOD = "api.tenant.subscription_connect"
+
+
+def is_method_not_found(exc: AdminValidationError) -> bool:
+	"""True when ``exc`` is Frappe's own missing-whitelisted-method rejection
+	(the dotted path this bench build calls does not exist on admin yet)
+	rather than the target endpoint's own business validation.
+
+	Callers use this to detect a deploy-order gap - this leg shipped ahead of
+	the admin endpoint it calls - and fall back to an older call sequence,
+	without keying off business-message text an admin release can reword (see
+	the marker comment above). The asymmetry in what this accepts is
+	deliberate: a false positive here just runs the old two-call sequence
+	(harmless - it is today's production path), while a false negative would
+	leave subscription connects broken until admin deploys, so the check
+	matches broadly rather than narrowly.
+	"""
+	if getattr(exc, "exc_type", None) not in (None, "ValidationError"):
+		return False
+	text = str(exc)
+	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_CONNECT_METHOD in text
 
 
 def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:
