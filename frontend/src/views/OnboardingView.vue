@@ -335,6 +335,17 @@
 										autocomplete="tel"
 										@keydown.enter="onDetailsSubmit"
 									/>
+									<!-- Optional lead-capture consent (lead-capture + T&C frozen
+										 contract): recorded on the Jarvis Lead, not on Pay - the DPDP
+										 requirement is that this is asked BEFORE the Plan-step capture
+										 fires, not bundled into the required T&C acceptance below. -->
+									<div class="col-span-2 -mt-1.5 flex items-start">
+										<Checkbox
+											:model-value="billing.consent.value"
+											label="It's okay to contact me about my account"
+											@update:model-value="(v) => billing.setConsent(v)"
+										/>
+									</div>
 									<!-- JvCombo (shared, out of scope) has no declared aria-invalid /
 										 aria-describedby / blur props, and does not spread $attrs onto
 										 its inner <input>, so those attrs would silently land on its
@@ -1249,6 +1260,38 @@
 									>
 										{{ payLinkDeadline }}
 									</p>
+									<!-- Required T&C acceptance (lead-capture + T&C frozen contract).
+										 Pay stays disabled until this is ticked; terms_accepted rides
+										 start_signup, and admin stamps the version server-side - this
+										 view never sends one. Checkbox's own `label` prop only takes
+										 plain text (no slot, no markup), so the link-bearing sentence is
+										 a sibling <label for=...> instead - clicking the embedded <a>
+										 navigates without also toggling the box. -->
+									<div
+										class="mx-auto mt-3.5 flex max-w-[560px] items-start gap-2"
+									>
+										<Checkbox
+											id="jv-ob-terms"
+											:model-value="state.termsAccepted"
+											aria-required="true"
+											@update:model-value="(v) => (state.termsAccepted = v)"
+										/>
+										<label
+											for="jv-ob-terms"
+											class="cursor-pointer select-none text-p-sm text-ink-gray-7"
+										>
+											I agree to the
+											<a
+												v-if="state.termsUrl"
+												:href="state.termsUrl"
+												target="_blank"
+												rel="noopener"
+												class="ob-link"
+												@click.stop
+												>Terms &amp; Conditions</a
+											><span v-else>Terms &amp; Conditions</span>
+										</label>
+									</div>
 								</div>
 								<div class="ob-foot">
 									<button
@@ -1263,7 +1306,7 @@
 									</button>
 									<Button
 										variant="solid"
-										:disabled="payBusyView || !payProviderReady"
+										:disabled="payDisabled"
 										:loading="payBusyView"
 										loading-text="Working…"
 										:label="payCta"
@@ -1738,7 +1781,7 @@
 <script setup>
 import { reactive, ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
-import { Button, FormControl, FeatherIcon, ErrorMessage } from "frappe-ui";
+import { Button, FormControl, FeatherIcon, ErrorMessage, Checkbox } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import JvCombo from "@/components/JvCombo.vue";
@@ -1773,6 +1816,8 @@ import {
 	updateBilling,
 	onboardingPaymentApi,
 	supportCreateTicket,
+	captureOnboardingLead,
+	getTermsUrl,
 } from "@/api";
 import {
 	createOperationController,
@@ -1915,6 +1960,16 @@ const state = reactive({
 	reconnectDirect: false,
 	reconnectEmail: "",
 	paymentProvider: "", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
+	// Required Review & Pay checkbox (T&C + lead-capture frozen contract). NOT
+	// localStorage-persisted like `billing.consent` - a legal acceptance is
+	// re-asked every time the customer lands fresh on this screen, same as it
+	// would be on any checkout. Pay stays disabled until this is true, and only
+	// a literal true is ever sent to start_signup.
+	termsAccepted: false,
+	// The admin-hosted /terms URL (jarvis.onboarding.get_terms_url), fetched
+	// best-effort on mount. Empty when admin is unreachable/unconfigured - the
+	// checkbox label then renders plain unlinked text instead of a dead link.
+	termsUrl: "",
 	// Gateways the operator has actually enabled, narrowed to what this build can
 	// render. Starts EMPTY and stays empty on a discovery failure (plan 02 P2-6):
 	// seeding "razorpay" faked a choice the control plane never confirmed, so a
@@ -2068,6 +2123,40 @@ watch(
 	},
 	{ immediate: true }
 );
+// Lead capture (lead-capture + T&C frozen contract): fire-and-forget upsert of
+// a Jarvis Lead on entering the Plan step, so an abandoned onboarding still
+// leaves something for outreach. `immediate: true` covers a RESUME that lands
+// directly on "plan" (readiness.js's landingStep) as well as a genuine forward
+// transition from Details. Only fires once email+company are both present -
+// admin's own guard treats a missing/invalid email as a no-op anyway, and
+// firing before either exists would just upsert an unidentifiable row. Never
+// awaited and never lets a rejection escape the watcher: a burst re-entry
+// (Back then Continue again) simply re-upserts and bumps last_seen, which is
+// the intended behaviour, not a bug to dedupe.
+watch(
+	() => state.step,
+	(step) => {
+		if (step !== "plan") return;
+		if (!(state.email || "").trim() || !(state.company || "").trim()) return;
+		try {
+			captureOnboardingLead({
+				email: state.email,
+				company: state.company,
+				billing: billing.buildBilling(),
+				plan: state.planName || "",
+				step: "plan",
+				contact_consent: billing.consent.value,
+				partner_code: state.partnerCode?.trim() || undefined,
+				site_origin:
+					(typeof window !== "undefined" && window.location && window.location.origin) ||
+					"",
+			}).catch(() => {});
+		} catch (e) {
+			/* fire-and-forget: must never break the step transition */
+		}
+	},
+	{ immediate: true }
+);
 // Plan 01: a Company change re-fetches ERP-derived billing defaults (debounced +
 // fenced inside fetchCompanyDefaults). Fires on the prefilled default Company too
 // (harmless: it only fills empty/erp_default fields, never user edits). immediate
@@ -2197,6 +2286,14 @@ const payCta = computed(() => {
 // paid plan and an autopay trial need one (the trial authorizes a mandate), so
 // the CTA is disabled until then and the unavailable/retry note stands in for it.
 const payProviderReady = computed(() => !!state.paymentProvider);
+// The CTA's full gate, named rather than left as three booleans inline in the
+// template (T&C + lead-capture frozen contract adds the third leg): busy,
+// no confirmed gateway yet, or the required Terms & Conditions box unticked.
+// payBusyView is declared further down; safe to close over here since this
+// getter only runs at render, after the whole setup script has executed.
+const payDisabled = computed(
+	() => payBusyView.value || !payProviderReady.value || !state.termsAccepted
+);
 // #669: how long the checkout link is good for. Reads the machine's own
 // payTokenExpiresInS, which is cleared with the token it belongs to, so this
 // renders nothing the moment the link stops being openable rather than leaving a
@@ -3289,6 +3386,10 @@ async function onPayClick() {
 		state.step = "details";
 		return;
 	}
+	// Belt-and-suspenders: the Pay button is already disabled until this is
+	// ticked (the real gate), but a programmatic/stray click must not be able to
+	// start a signup admin will reject anyway for lacking acceptance.
+	if (!state.termsAccepted) return;
 	// Plan 01: the normalized billing snapshot rides this first signup call so it
 	// persists server-side while the customer is still a guest. Omitted (undefined,
 	// never an empty object) when nothing was entered, so a blank Details step sends
@@ -3303,6 +3404,11 @@ async function onPayClick() {
 		// Top-level kwarg, parallel to nothing else here - NOT part of `billing`.
 		// Trimmed + undefined-when-blank so a blank field sends no key at all.
 		partner_code: state.partnerCode?.trim() || undefined,
+		// T&C + lead-capture frozen contract: only ever true here (the checkbox
+		// gates this click); contact_consent rides the same call so admin can
+		// record it on the Customer/Lead at the exact moment identity is real.
+		terms_accepted: true,
+		contact_consent: billing.consent.value,
 	});
 	// Plan 01: a successful signup left REVIEW for a live intent (verify / checkout /
 	// provisioning / duplicate). An intent now exists, so a subsequent Review & Pay
@@ -4604,6 +4710,14 @@ onMounted(async () => {
 	// tick, before the awaited prefill below — the discovery loading note must show
 	// from first paint (X4), independent of prefill/company.
 	loadPaymentProviders();
+	// Best-effort terms-page link for the Review & Pay checkbox. Never blocks the
+	// wizard and never throws into onMounted: a failure just leaves state.termsUrl
+	// empty, which the template renders as plain unlinked "Terms & Conditions" text.
+	getTermsUrl()
+		.then((d) => {
+			state.termsUrl = (d && d.url) || "";
+		})
+		.catch(() => {});
 	await prefillAccount();
 	// prefillAccount may set the default Company synchronously; the watcher fires,
 	// but kick a fetch explicitly too in case the prefilled value equalled the

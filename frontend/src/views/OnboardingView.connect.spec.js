@@ -29,6 +29,8 @@ const api = vi.hoisted(() => ({
 	startSignup: vi.fn(async () => ({})),
 	finishPayment: vi.fn(async () => ({})),
 	syncConnection: vi.fn(async () => ({})),
+	captureOnboardingLead: vi.fn(async () => ({ ok: true })),
+	getTermsUrl: vi.fn(async () => ({ url: "" })),
 	getLlmApplyOperation: vi.fn(),
 	// The cutover's payment flow (plan-09) instantiates from this map at setup and
 	// hydrates on mount. A benign no-signup envelope lets the view mount and reconcile
@@ -114,6 +116,13 @@ vi.mock("frappe-ui", () => {
 		Button: stub("Button"),
 		FormControl: stub("FormControl", "input"),
 		FeatherIcon: stub("FeatherIcon", "span"),
+		Checkbox: {
+			name: "Checkbox",
+			props: ["modelValue", "label", "id"],
+			emits: ["update:modelValue"],
+			template:
+				'<input type="checkbox" :id="id" :checked="!!modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" />',
+		},
 		ErrorMessage: {
 			name: "ErrorMessage",
 			props: ["message"],
