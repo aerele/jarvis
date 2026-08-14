@@ -1438,7 +1438,9 @@ class TestVisibleEffectsAndEnrichmentClaim(_TurnStateTestCase):
 
 	def test_visible_done_vacuous_when_no_visible_effect_is_owed(self):
 		rid = self._mk_finalizing(("usage",))
-		self.assertTrue(ts.visible_effects_done(rid), "nothing visible is held, so there is nothing to wait on")
+		self.assertTrue(
+			ts.visible_effects_done(rid), "nothing visible is held, so there is nothing to wait on"
+		)
 
 	def test_claim_enrichment_publish_is_exactly_once(self):
 		rid = self._mk_finalizing(("auto_title", "usage"))

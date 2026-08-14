@@ -1034,7 +1034,9 @@ class TestStuckFinishingAfterAFailingLane(_PipelineCase):
 		self.assertTrue(out["ok"], "finalize never errors a settled turn")
 		self.assertFalse(out["done"], "usage/telemetry are still owed; the turn stays finalizing")
 		self.assertTrue(out["published"], "the visible set is done, so THIS call published the clear")
-		self.assertEqual(self._state(rid), "finalizing", "the failing lane holds the state, not the affordance")
+		self.assertEqual(
+			self._state(rid), "finalizing", "the failing lane holds the state, not the affordance"
+		)
 		self.assertEqual(self._effects(rid)["usage"], "pending", "released for the next cycle")
 		self.assertEqual(int(self._val(rid, "usage_recorded")), 0, "the guard CAS rolled back")
 		self.assertEqual(
