@@ -11,6 +11,9 @@ MAX_RESULT_CHARS = 35_000
 # Top-level list-valued keys we know how to truncate: query -> "rows",
 # run_report -> "result". A bare list (get_list) is handled directly.
 _ROW_KEYS = ("rows", "result")
+# Metadata keys the guard owns in a truncation envelope; a colliding data key of
+# the same name must never overwrite the guard's authoritative value.
+_META_KEYS = ("_truncated", "shown", "total", "note")
 _SAFETY = 200  # pad for note-digit / separator variance below the hard cap
 
 # Routing help (model-facing): the full-data escapes are report_pdf for a saved
@@ -78,8 +81,12 @@ def _envelope(data, kind: str, key: str | None, kept: list, n: int, note: str) -
 	if kind == "bare":
 		return {"_truncated": True, "shown": len(kept), "total": n, "note": note, "rows": kept}
 	out: dict = {"_truncated": True, "shown": len(kept), "total": n, "note": note}
+	# Skip the row key AND the four metadata keys: a tool result carrying its own
+	# top-level "total"/"note"/"shown"/"_truncated" must not clobber the guard's
+	# authoritative values (metadata is emitted first for the debug view, but must
+	# always win over a colliding data key).
 	for k, v in data.items():
-		if k != key:
+		if k != key and k not in _META_KEYS:
 			out[k] = v
 	out[key] = kept
 	return out

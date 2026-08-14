@@ -176,3 +176,15 @@ class TestEnforceResultBudget(unittest.TestCase):
 		self.assertEqual(out["rows"], [])
 		self.assertEqual(out["shown"], 0)
 		self.assertTrue(out["_truncated"])
+
+	def test_guard_metadata_wins_over_colliding_data_key(self):
+		# A tool result carrying its own top-level "total"/"note" key must NOT
+		# overwrite the guard's authoritative metadata (regression: the M6 reorder
+		# copied data keys after the metadata, letting a collision clobber it).
+		data = {"total": "SUMMARY", "note": "data note", "rows": _rows(3000, 50)}
+		out, ev = enforce_result_budget(data, tool="query")
+		self.assertTrue(out["_truncated"])
+		self.assertEqual(out["total"], 3000)  # true row count, not "SUMMARY"
+		self.assertIn("PARTIAL", out["note"])  # guard's note, not "data note"
+		self.assertEqual(ev["total"], 3000)
+		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
