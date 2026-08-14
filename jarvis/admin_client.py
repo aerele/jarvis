@@ -1072,7 +1072,12 @@ def post_agent_run(run_id: str, agent_id: str, session_key: str, message: str, t
 	fleet boundary: a re-dispatch of a seen run returns the existing state.
 
 	Raises:
-		AdminAuthError, AdminUnreachableError, AdminValidationError.
+		AdminAuthError, AdminUnreachableError, AdminValidationError. The dispatch
+		is NON-idempotent from the bench's view (a fresh run_id would not dedupe),
+		so a transport failure where admin MAY already have received the turn
+		raises AdminAmbiguousError (an AdminUnreachableError subclass) rather than
+		the base class - the scheduler branches on it to leave the run running
+		instead of retrying under a new id (#743).
 	"""
 	return _post(
 		path=_m("api.tenant.agent_run"),
