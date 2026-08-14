@@ -14,6 +14,7 @@ from jarvis import admin_client
 from jarvis.admin_client import (
 	DEFAULT_ADMIN_URL,
 	DEFAULT_TIMEOUT_S,
+	AdminAmbiguousError,
 	AdminAuthError,
 	AdminUnreachableError,
 	AdminValidationError,
@@ -322,6 +323,67 @@ class TestNetworkErrors(FrappeTestCase):
 		with patch("requests.post", side_effect=requests.Timeout("read timeout")):
 			with self.assertRaises(AdminUnreachableError):
 				post_update_llm_creds("p", "m", "b", "k")
+
+	# ------------------------------------------------------------------ #
+	# #743: distinguish an AMBIGUOUS transport failure (admin MAY have received
+	# the request) from a CONFIRMED not-delivered one (nothing was sent). Every
+	# ambiguous case is still an AdminUnreachableError subclass, so the two tests
+	# above keep passing unchanged - that inheritance is the zero-regret proof.
+	# ------------------------------------------------------------------ #
+	@staticmethod
+	def _refused_connection_error():
+		"""The shape requests raises when the socket is REFUSED / never opened:
+		ConnectionError(MaxRetryError(reason=NewConnectionError(...))). Built by hand
+		so the classifier is exercised against the real production nesting, not a bare
+		ConnectionError."""
+		from urllib3.exceptions import MaxRetryError, NewConnectionError
+
+		reason = NewConnectionError(None, "[Errno 111] Connection refused")
+		return requests.ConnectionError(MaxRetryError(pool=None, url="/x", reason=reason))
+
+	@staticmethod
+	def _reset_connection_error():
+		"""A connection RESET after the request went out: ConnectionError(ProtocolError(
+		'Connection aborted.', ConnectionResetError(...))). The request may already have
+		crossed, so this is ambiguous."""
+		from urllib3.exceptions import ProtocolError
+
+		aborted = ProtocolError("Connection aborted.", ConnectionResetError(104, "reset by peer"))
+		return requests.ConnectionError(aborted)
+
+	def test_read_timeout_is_ambiguous(self):
+		with patch("requests.post", side_effect=requests.ReadTimeout("read timed out")):
+			with self.assertRaises(AdminAmbiguousError):
+				post_update_llm_creds("p", "m", "b", "k")
+
+	def test_bare_timeout_is_ambiguous(self):
+		with patch("requests.post", side_effect=requests.Timeout("timed out")):
+			with self.assertRaises(AdminAmbiguousError):
+				post_update_llm_creds("p", "m", "b", "k")
+
+	def test_connect_timeout_is_not_ambiguous(self):
+		"""A connect timeout never completed the handshake, so nothing was sent."""
+		with patch("requests.post", side_effect=requests.ConnectTimeout("connect timed out")):
+			with self.assertRaises(AdminUnreachableError) as cm:
+				post_update_llm_creds("p", "m", "b", "k")
+		self.assertNotIsInstance(cm.exception, AdminAmbiguousError)
+
+	def test_refused_connection_is_not_ambiguous(self):
+		"""A refused / never-opened socket sent nothing, so a retry is safe."""
+		with patch("requests.post", side_effect=self._refused_connection_error()):
+			with self.assertRaises(AdminUnreachableError) as cm:
+				post_update_llm_creds("p", "m", "b", "k")
+		self.assertNotIsInstance(cm.exception, AdminAmbiguousError)
+
+	def test_reset_connection_is_ambiguous(self):
+		"""A reset AFTER the request went out may already have been received."""
+		with patch("requests.post", side_effect=self._reset_connection_error()):
+			with self.assertRaises(AdminAmbiguousError):
+				post_update_llm_creds("p", "m", "b", "k")
+
+	def test_ambiguous_is_an_unreachable_subclass(self):
+		"""Every existing catch site that catches AdminUnreachableError keeps working."""
+		self.assertTrue(issubclass(AdminAmbiguousError, AdminUnreachableError))
 
 
 class TestAdminErrorResponses(FrappeTestCase):

@@ -124,6 +124,27 @@ class AdminUnreachableError(JarvisError):
 	"""HTTPS call to jarvis_admin failed (network, timeout, 5xx, non-JSON)."""
 
 
+class AdminAmbiguousError(AdminUnreachableError):
+	"""The HTTPS call to jarvis_admin failed at the TRANSPORT layer in a way that
+	leaves it UNKNOWN whether admin received the request: a read timeout, or a
+	connection reset AFTER the request went out. The request may already be running
+	admin-side, so re-sending it can DOUBLE a non-idempotent side effect.
+
+	Contrast ``AdminUnreachableError`` (the base), which a caller may treat as "the
+	request definitely did not land" only when it is one of the confirmed-not-sent
+	shapes routed to it: a clean connection refusal, a connect timeout (nothing was
+	sent), a 5xx (admin answered), or a non-JSON body (admin answered). Everything in
+	this subclass is the ``maybe`` case.
+
+	Deliberately a SUBCLASS of AdminUnreachableError, exactly like AdminRejectedError:
+	every existing catch site already treats an admin failure as terminal and keeps
+	working unchanged. Only a caller dispatching a NON-idempotent turn (the agent-run
+	relay, jarvis.chat.agent_scheduler) branches on it - to leave its already-running
+	run alone rather than terminalize it and mint a fresh, un-deduplicated retry
+	(jarvis #743). Idempotent readers (media download, catalog fetches) never need to
+	tell the two apart, so they keep catching the base class."""
+
+
 class AdminRejectedError(AdminUnreachableError):
 	"""jarvis_admin was REACHED and PERMANENTLY refused the request.
 

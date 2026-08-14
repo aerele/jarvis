@@ -20,6 +20,7 @@ import frappe
 import requests
 
 from jarvis.exceptions import (
+	AdminAmbiguousError,
 	AdminAuthError,
 	AdminContractError,
 	AdminRateLimitedError,
@@ -823,6 +824,9 @@ def _authenticated_raw(path: str, body: dict, *, timeout_s: int):
 		try:
 			return requests.post(url, json=body, headers=headers, timeout=timeout_s, stream=True)
 		except (requests.ConnectionError, requests.Timeout) as e:
+			# Deliberately NOT the AdminAmbiguousError split _do_post makes (#743): this
+			# path only serves idempotent media reads, so a re-send can never double a
+			# side effect and the caller never needs to tell delivered from not.
 			raise AdminUnreachableError("admin is unreachable; check network / service status") from e
 
 	bearer = {"Content-Type": "application/json"}
@@ -1139,7 +1143,12 @@ def post_agent_run(run_id: str, agent_id: str, session_key: str, message: str, t
 	fleet boundary: a re-dispatch of a seen run returns the existing state.
 
 	Raises:
-		AdminAuthError, AdminUnreachableError, AdminValidationError.
+		AdminAuthError, AdminUnreachableError, AdminValidationError. The dispatch
+		is NON-idempotent from the bench's view (a fresh run_id would not dedupe),
+		so a transport failure where admin MAY already have received the turn
+		raises AdminAmbiguousError (an AdminUnreachableError subclass) rather than
+		the base class - the scheduler branches on it to leave the run running
+		instead of retrying under a new id (#743).
 	"""
 	return _post(
 		path=_m("api.tenant.agent_run"),
@@ -2027,6 +2036,53 @@ def _permanent_rejection_code(envelope) -> str:
 	return code if code in _PERMANENT_REJECTION_CODES else ""
 
 
+def _request_maybe_delivered(e: BaseException) -> bool:
+	"""True when a transport-level failure leaves it UNKNOWN whether admin received
+	the request, so re-sending a NON-idempotent call could double its side effect
+	(jarvis #743). False only when nothing was sent: a connect timeout, or a
+	connection that was REFUSED / never established.
+
+	Fails toward ``maybe`` on purpose. A wrong ``maybe`` costs one agent-run slot a
+	3h wait for the stale-run reaper; a wrong ``not-delivered`` costs the customer a
+	duplicate audit they pay for. Only the second is unrecoverable.
+
+	  * ConnectTimeout       - the TCP handshake did not complete, nothing was sent.
+	  * refused / DNS-failed  - urllib3 raises NewConnectionError / the OS raises
+	    ConnectionRefusedError while OPENING the socket, so nothing was sent.
+	  * a bare/read Timeout   - the request WAS sent, admin may be running it now.
+	  * a reset / broken pipe - the request may already have crossed before the peer
+	    dropped it.
+	"""
+	from urllib3.exceptions import NewConnectionError
+
+	# A connect timeout is a Timeout AND a ConnectionError; check it first so it is
+	# classified as not-delivered rather than swept up by the Timeout branch below.
+	if isinstance(e, requests.ConnectTimeout):
+		return False
+	if isinstance(e, requests.Timeout):
+		return True
+	# A ConnectionError. Walk the (bounded) cause/reason chain for a definitive
+	# "the socket never opened" marker; if we find one, nothing was sent. requests
+	# wraps a refusal as ConnectionError(MaxRetryError(reason=NewConnectionError)),
+	# so ``reason`` is followed alongside __cause__ / __context__ / exception args.
+	seen: list[int] = []
+	stack: list = [e]
+	while stack and len(seen) < 20:
+		cur = stack.pop()
+		if cur is None or id(cur) in seen:
+			continue
+		seen.append(id(cur))
+		if isinstance(cur, (ConnectionRefusedError, NewConnectionError)):
+			return False
+		stack.append(getattr(cur, "__cause__", None))
+		stack.append(getattr(cur, "__context__", None))
+		stack.append(getattr(cur, "reason", None))
+		stack.extend(a for a in (getattr(cur, "args", None) or ()) if isinstance(a, BaseException))
+	# No not-delivered marker found (a reset, a broken pipe, an unknown wrap): the
+	# request may already have been received.
+	return True
+
+
 def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str) -> dict:
 	try:
 		resp = requests.post(url, json=body, headers=headers, timeout=timeout_s)
@@ -2041,6 +2097,16 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			title="admin_client: network error",
 			message=f"url={url!r} error={e!r}",
 		)
+		# jarvis #743: a transport failure where admin MAY already have received the
+		# request (a read timeout, a mid-flight reset) is distinct from one where
+		# nothing was sent (connect timeout, connection refused). AdminAmbiguousError
+		# is an AdminUnreachableError SUBCLASS, so every existing catcher is
+		# unaffected; only a caller dispatching a non-idempotent turn branches on it
+		# to avoid re-sending a call admin may already be running.
+		if _request_maybe_delivered(e):
+			raise AdminAmbiguousError(
+				"admin did not answer in time; the request may already be running"
+			) from e
 		raise AdminUnreachableError("admin is unreachable; check network / service status") from e
 
 	try:
