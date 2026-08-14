@@ -98,7 +98,9 @@ class TestExportDocumentFormats(FrappeTestCase):
 		self.assertTrue(fname.endswith(".png"))
 		self.assertEqual(payload[:4], b"\x89PNG")
 
-	def test_raw_html_passthrough(self):
+	def test_raw_html_benign_tags_survive_sanitization(self):
+		"""content_is_html=True skips markdown conversion, not sanitization —
+		benign tags with no dangerous attributes pass through unchanged."""
 		m = self._mock()
 		export_document("<h1>Raw</h1><p>kept verbatim</p>", format="html", content_is_html=True)
 		_, payload = _saved(m)
@@ -113,3 +115,79 @@ class TestExportDocumentFormats(FrappeTestCase):
 		out = export_document(_MD, title="d")
 		self.assertEqual(out["mime_type"], "application/pdf")
 		self.assertEqual(_saved(m)[1][:4], b"%PDF")
+
+
+class TestExportDocumentSanitization(FrappeTestCase):
+	"""content is agent-composed (effectively LLM-controlled) text. Two threats,
+	both must be closed on BOTH the Markdown branch and the content_is_html=True
+	raw-HTML branch: XSS in the standalone HTML, and SSRF-via-render — wkhtmltopdf
+	fetches any <img>/<link>/SVG <image> it finds, server-side, at render time."""
+
+	def _mock(self):
+		m = patch("frappe.utils.file_manager.save_file").start()
+		self.addCleanup(patch.stopall)
+		m.return_value = frappe._dict(
+			file_url="/private/files/doc.out", file_name="doc.out", file_size=1, name="F-DOC"
+		)
+		return m
+
+	def _rendered_html(self, content: str, *, content_is_html: bool) -> str:
+		m = self._mock()
+		export_document(content, format="html", content_is_html=content_is_html)
+		return _saved(m)[1].decode("utf-8")
+
+	def test_script_tag_stripped_markdown_branch(self):
+		text = self._rendered_html("hello <script>alert(1)</script> world", content_is_html=False)
+		self.assertNotIn("<script", text)
+		self.assertNotIn("alert(1)", text.replace("&#39;", "'"))  # not present as live JS either way
+
+	def test_script_tag_stripped_raw_html_branch(self):
+		text = self._rendered_html("<p>hi</p><script>alert(1)</script>", content_is_html=True)
+		self.assertNotIn("<script", text)
+
+	def test_img_tag_stripped_both_branches(self):
+		"""The SSRF vector this whole change exists to close: an <img src> makes
+		wkhtmltopdf issue a server-side fetch at render time (cloud metadata
+		endpoints, internal network probing, file:// local reads)."""
+		md_text = self._rendered_html("![x](http://169.254.169.254/latest/meta-data/)", content_is_html=False)
+		self.assertNotIn("<img", md_text)
+		html_text = self._rendered_html('<img src="file:///etc/passwd">', content_is_html=True)
+		self.assertNotIn("<img", html_text)
+
+	def test_svg_image_href_stripped(self):
+		text = self._rendered_html(
+			'<svg><image href="http://attacker.example/beacon"/></svg>', content_is_html=True
+		)
+		self.assertNotIn("<svg", text)
+		self.assertNotIn("<image", text)
+
+	def test_link_and_meta_stripped(self):
+		text = self._rendered_html(
+			'<link rel="stylesheet" href="http://attacker.example/x.css">'
+			'<meta http-equiv="refresh" content="0;url=http://attacker.example">',
+			content_is_html=True,
+		)
+		self.assertNotIn("<link", text)
+		self.assertNotIn("http-equiv", text)
+
+	def test_onerror_attribute_and_javascript_href_stripped(self):
+		text = self._rendered_html(
+			'<a href="javascript:alert(1)" onclick="alert(2)">click</a>', content_is_html=True
+		)
+		self.assertNotIn("javascript:", text)
+		self.assertNotIn("onclick", text)
+
+	def test_benign_markdown_formatting_still_renders(self):
+		text = self._rendered_html("# Title\n\n**bold** and *italic*\n\n- one\n- two", content_is_html=False)
+		self.assertIn("<h1", text)  # md_to_html's header-ids extra adds an id attribute
+		self.assertIn("Title", text)
+		self.assertIn("<strong>bold</strong>", text)
+		self.assertIn("<li>one</li>", text)
+
+	def test_content_length_cap(self):
+		with self.assertRaises(InvalidArgumentError):
+			export_document("x" * 200_001, format="html")
+		# exactly at the cap is accepted
+		m = self._mock()
+		export_document("x" * 200_000, format="html")
+		self.assertTrue(m.called)

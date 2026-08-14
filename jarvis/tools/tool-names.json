@@ -18,7 +18,7 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
-  "digest": "sha256:ab340f555a1801764b832738f7fe4866d1952b715b608deaff34ecb15d772b51",
+  "digest": "sha256:4f87815c52fe26085ebc72d8443144caa04fc7c0196ac17b0c25e5639c714def",
   "tools": [
     "add_comment",
     "add_tag",
@@ -35,6 +35,7 @@
     "describe_customizations",
     "download_pdf",
     "download_vcard",
+    "export_document",
     "export_excel",
     "find_skills",
     "finish_app_learning_run",
@@ -92,7 +93,6 @@
     "update_wiki"
   ],
   "backend_only": {
-    "create_docs": "Deprecated compat shim for already-shipped plugin bundles that still advertise jarvis__create_docs; bulk create is create_doc(docs=[...]) now. Re-adding a descriptor would resurrect the retired surface. Delete the module (and this entry) once no deployed bundle references it.",
-    "export_document": "Implemented by jarvis #337 but never given a plugin descriptor, so no agent can call it today. Exposing it is a product decision (it writes a File and needs a jarvis-persona TOOLS.md row), not a drift fix — recorded here so the gap is explicit while every OTHER drift still fails CI. Remove this entry in the change that adds the descriptor."
+    "create_docs": "Deprecated compat shim for already-shipped plugin bundles that still advertise jarvis__create_docs; bulk create is create_doc(docs=[...]) now. Re-adding a descriptor would resurrect the retired surface. Delete the module (and this entry) once no deployed bundle references it."
   }
 }
