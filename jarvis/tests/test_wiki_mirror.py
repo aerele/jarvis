@@ -862,3 +862,159 @@ class TestMirrorKillSwitch(WikiMirrorTestCase):
 			self.assertEqual(enq.call_args[0][0], wiki_mirror.JOB_METHOD)
 		finally:
 			frappe.flags.jarvis_test_wiki_mirror_enqueue = False
+
+
+class TestScrubOnDisable(WikiMirrorTestCase):
+	"""#731: turning the wiki OFF must actively REMOVE the already-mirrored page
+	files from the container, not merely gate new reads. ``scrub`` is what the
+	"Enable Business Wiki" toggle enqueues on its ON -> OFF transition; it reuses
+	the mirror push API (explicit delete list + ``known_paths=[]`` prune) and is
+	safe to run twice, with nothing mirrored, or against an absent container."""
+
+	@contextlib.contextmanager
+	def _lock_denied(self, *a, **k):
+		"""Stand-in for redis_lock that never grants (another mirror op in flight)."""
+		yield False
+
+	def setUp(self):
+		# scrub() is tenant-wide by design: it clears EVERY page's mirror_hash and
+		# commits. site.jarvis is a shared single tenant carrying real wiki pages,
+		# so snapshot every stamp and restore it in tearDown - otherwise a scrub
+		# here leaves the site's real pages unstamped for the next module.
+		super().setUp()
+		self._hash_snapshot = {
+			r.name: r.mirror_hash
+			for r in frappe.get_all(WIKI, fields=["name", "mirror_hash"], limit_page_length=0)
+		}
+
+	def tearDown(self):
+		for name, digest in self._hash_snapshot.items():
+			if frappe.db.exists(WIKI, name):
+				frappe.db.set_value(WIKI, name, "mirror_hash", digest, update_modified=False)
+		frappe.db.commit()
+		super().tearDown()
+
+	def _clear_all_stamps(self):
+		"""Force the 'nothing mirrored' state on this shared site (real pages carry
+		stamps); tearDown restores them from the snapshot."""
+		for name in frappe.get_all(WIKI, filters=[["mirror_hash", "!=", ""]], pluck="name"):
+			frappe.db.set_value(WIKI, name, "mirror_hash", "", update_modified=False)
+		frappe.db.commit()
+
+	def test_scrub_removes_every_mirrored_file_and_clears_the_stamps(self):
+		a = self._page("scrub-a")
+		b = self._page("scrub-b", page_type="Supplier")
+		with self._mock_push():
+			wiki_mirror.sync()
+		self.assertTrue(frappe.db.get_value(WIKI, a.name, "mirror_hash"))
+		self.assertTrue(frappe.db.get_value(WIKI, b.name, "mirror_hash"))
+
+		with _wiki_disabled():
+			with self._mock_push() as push:
+				out = wiki_mirror.scrub()
+
+		self.assertTrue(out["ok"])
+		self.assertTrue(out["scrubbed"])
+		# One push: no files written, an EMPTY known_paths (prune everything under
+		# wiki/), and a delete list naming every mirrored file plus the two nav
+		# files. The empty-list-vs-None distinction is load-bearing.
+		push.assert_called_once()
+		kw = push.call_args.kwargs
+		self.assertEqual(kw["files"], [])
+		self.assertEqual(kw["known_paths"], [])
+		self.assertIn(f"customers/{a.name}.md", kw["delete"])
+		self.assertIn(f"suppliers/{b.name}.md", kw["delete"])
+		self.assertIn("index.md", kw["delete"])
+		self.assertIn("log.md", kw["delete"])
+		# "no file, no stamp": a later re-enable full sync re-pushes cleanly.
+		self.assertFalse(frappe.db.get_value(WIKI, a.name, "mirror_hash"))
+		self.assertFalse(frappe.db.get_value(WIKI, b.name, "mirror_hash"))
+
+	def test_scrub_is_idempotent(self):
+		a = self._page("scrub-twice")
+		with self._mock_push():
+			wiki_mirror.sync()
+		with _wiki_disabled():
+			with self._mock_push():
+				first = wiki_mirror.scrub()
+			with self._mock_push() as push2:
+				second = wiki_mirror.scrub()  # nothing left to clear
+		self.assertTrue(first["ok"])
+		self.assertTrue(second["ok"])
+		self.assertEqual(second["cleared"], 0)
+		self.assertFalse(frappe.db.get_value(WIKI, a.name, "mirror_hash"))
+		# still asks the fleet to prune, so a stray can never outlive the switch
+		self.assertEqual(push2.call_args.kwargs["known_paths"], [])
+
+	def test_scrub_with_nothing_mirrored_is_a_safe_noop(self):
+		self._clear_all_stamps()
+		with _wiki_disabled():
+			with self._mock_push() as push:
+				out = wiki_mirror.scrub()
+		self.assertTrue(out["ok"])
+		self.assertEqual(out["cleared"], 0)
+		self.assertEqual(push.call_args.kwargs["known_paths"], [])
+
+	def test_scrub_against_an_absent_container_does_not_crash_or_clear_stamps(self):
+		a = self._page("scrub-offline")
+		with self._mock_push():
+			wiki_mirror.sync()
+		self.assertTrue(frappe.db.get_value(WIKI, a.name, "mirror_hash"))
+		with _wiki_disabled():
+			with self._mock_push(result=None):  # offline / not provisioned
+				out = wiki_mirror.scrub()  # must not raise
+		self.assertFalse(out["ok"])
+		# stamps left intact so a re-toggle can still reconcile against the container
+		self.assertTrue(frappe.db.get_value(WIKI, a.name, "mirror_hash"))
+
+	def test_scrub_skips_when_the_wiki_is_re_enabled_before_it_runs(self):
+		"""The flap: disable (scrub queued) -> re-enable + Sync now -> the stale
+		scrub runs last. Its run-time re-check must leave the live mirror alone,
+		so whichever job runs last matches the current toggle state."""
+		a = self._page("scrub-flap")
+		with self._mock_push():
+			wiki_mirror.sync()
+		# wiki is ON (the normal state), so the run-time gate short-circuits.
+		with self._mock_push() as push:
+			out = wiki_mirror.scrub()
+		push.assert_not_called()
+		self.assertTrue(out.get("skipped"))
+		self.assertTrue(frappe.db.get_value(WIKI, a.name, "mirror_hash"))
+
+	def test_a_contended_scrub_requeues_instead_of_dropping(self):
+		with (
+			_wiki_disabled(),
+			mock.patch("jarvis._redis_lock.redis_lock", self._lock_denied),
+			mock.patch.object(wiki_mirror, "_scrub") as inner,
+			mock.patch.object(wiki_mirror, "enqueue_scrub", return_value=True) as enq,
+		):
+			out = wiki_mirror.scrub()
+		self.assertFalse(inner.called, "a contended scrub must not prune concurrently")
+		self.assertTrue(enq.called, "contended work must be re-queued, never dropped")
+		self.assertTrue(out.get("requeued"))
+
+	def test_the_scrub_retry_uses_a_distinct_job_id(self):
+		"""Re-queueing under JOB_ID_SCRUB from inside the STARTED scrub would be
+		dedup-declined and the work dropped (the trap wiki_mirror documents for the
+		sync retry ids); the retry must use its own slot."""
+		frappe.flags.jarvis_test_wiki_mirror_enqueue = True
+		try:
+			with (
+				_wiki_disabled(),
+				mock.patch("jarvis._redis_lock.redis_lock", self._lock_denied),
+				mock.patch.object(wiki_mirror, "_scrub"),
+				mock.patch.object(frappe, "enqueue") as enq,
+			):
+				wiki_mirror.scrub()
+			job_id = enq.call_args.kwargs["job_id"]
+			self.assertEqual(job_id, wiki_mirror.JOB_ID_SCRUB_RETRY)
+			self.assertNotEqual(job_id, wiki_mirror.JOB_ID_SCRUB)
+		finally:
+			frappe.flags.jarvis_test_wiki_mirror_enqueue = False
+
+	def test_enqueue_scrub_is_suppressed_under_tests_without_the_optin(self):
+		"""Fixture saves that flip the toggle must not spray RQ jobs; a test drives
+		``scrub`` directly instead."""
+		with mock.patch.object(frappe, "enqueue") as enq:
+			self.assertFalse(wiki_mirror.enqueue_scrub())
+		enq.assert_not_called()
