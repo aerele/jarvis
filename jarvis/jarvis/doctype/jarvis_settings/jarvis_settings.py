@@ -546,14 +546,18 @@ class JarvisSettings(Document):
 				self.llm_api_key = api_key_val
 
 	def validate(self):
-		# #731: capture the RAW pre-save wiki toggle state here, while tabSingles
-		# still holds the old value (validate runs before db_update). wiki_enabled()
-		# honours the NULL=ON idiom that has_value_changed cannot - a Check coerces
-		# NULL to 0, so the coerced before-doc would miss a NULL(=ON) -> 0 disable.
-		# on_update reads this flag to decide whether to scrub the container mirror.
-		from jarvis.chat.wiki import wiki_enabled
-
-		self.flags.wiki_was_enabled = wiki_enabled()
+		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
+		# scrub in on_update. Capture the change here, the same way
+		# llm_auth_mode_changed is captured below: has_value_changed compares the
+		# SUBMITTED value against the stored one, so an unrelated settings save that
+		# never touched the checkbox reads as "not changed" and cannot spuriously
+		# wipe the mirror. A loaded Check always coerces to 0/1 (never None), and
+		# pre-v2 rows whose wiki_enabled is NULL are backfilled to 1 by patch, so a
+		# real disable is a 1 -> 0 change there too (a bare NULL would coerce to 0
+		# and hide the change).
+		self.flags.wiki_disabled_transition = bool(self.has_value_changed("wiki_enabled")) and not (
+			frappe.utils.cint(getattr(self, "wiki_enabled", 0))
+		)
 
 		# Detect a new llm_api_key before _save_passwords() masks it to '****'.
 		current_key = getattr(self, "llm_api_key", None) or ""
@@ -793,19 +797,13 @@ class JarvisSettings(Document):
 		The kill switch has to actually remove already-mirrored content, not just
 		gate new reads: the agent can otherwise still grep the page files off the
 		org-shared workspace, and revocation deletes never fire while the wiki is
-		off. Fires only on a real 1 -> 0 flip - the pre-save state comes from the
-		raw ``wiki_enabled()`` captured in validate() (so a NULL=ON -> 0 disable is
-		caught, which has_value_changed would miss), and the new state from the
-		value being saved. A save while already off, or a re-enable, does nothing.
-		A missing flag (validate skipped) means no scrub."""
+		off. Fires only on a genuine 1 -> 0 change of the toggle, captured in
+		validate() via has_value_changed so an unrelated settings save can never
+		wipe the mirror; a save while already off, or a re-enable, does nothing. A
+		missing flag (validate skipped) means no scrub."""
 		from jarvis.chat import wiki_mirror
 
-		if not self.flags.get("wiki_was_enabled"):
-			return
-		raw_new = getattr(self, "wiki_enabled", None)
-		# NULL=ON idiom on the new value too: an unset field still reads as enabled.
-		now_enabled = True if raw_new is None else bool(frappe.utils.cint(raw_new))
-		if now_enabled:
+		if not self.flags.get("wiki_disabled_transition"):
 			return
 		wiki_mirror.enqueue_scrub(after_commit=True)
 
