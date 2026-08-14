@@ -68,12 +68,15 @@
 							v-for="item in group.items"
 							:key="item.key"
 							class="mx-0.5 flex h-7 shrink-0 items-center gap-2 rounded px-2 text-sm text-ink-gray-8"
-							:class="
+							:class="[
 								section === item.key
 									? 'bg-surface-white shadow-sm'
-									: 'hover:bg-surface-gray-2'
-							"
+									: 'hover:bg-surface-gray-2',
+								applying ? 'cursor-not-allowed opacity-50' : '',
+							]"
 							:aria-current="section === item.key ? 'page' : undefined"
+							:aria-disabled="applying"
+							:disabled="applying"
 							@click="go(item.key)"
 						>
 							<FeatherIcon :name="item.icon" class="size-4 shrink-0" />
@@ -219,7 +222,23 @@ const section = computed(() => {
 });
 const pane = computed(() => PANES[section.value]);
 
+// True while the active pane is applying a change (currently only AiModelsPane
+// during a model apply). AiModelsPane publishes this into the shell store
+// itself (watching LlmPoolEditor's busy state, cleared on settle AND from its
+// own onUnmounted so it can never stick true) rather than this dialog reading
+// it off a template ref: that way the SAME flag also gates the store's
+// openSettings(), which is a second, independent writer of settingsSection
+// (GeneralPane's "AI models" buttons, UserMenu, ChatView, AppShell's
+// ?settings= deep link all go through it, not through go() below). A lock
+// enforced only here would leave every one of those callers free to unmount
+// AiModelsPane mid-apply (jarvis#821 review).
+const applying = computed(() => !!store.settingsApplying);
+
 function go(key) {
+	// Locked while an apply is in flight: switching sections would drop the
+	// applying pane's scrim and abandon the apply mid-flight. The dialog's own
+	// close (X) button is untouched, so a hung apply never traps the user.
+	if (applying.value) return;
 	store.settingsSection = key;
 }
 </script>

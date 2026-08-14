@@ -1984,6 +1984,12 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			# GSTIN. It is a plain rejection with a precise, customer-safe message,
 			# which is exactly what this allowlist is for.
 			"BillingMetadataRejected",
+			# Another ValidationError subclass, raised when the customer's partner
+			# code is unknown or inactive. Same shape as BillingMetadataRejected: a
+			# precise, customer-safe message that was falling through to the
+			# unknown-exc_type branch and logging a spurious error on every rejected
+			# partner code.
+			"PartnerCodeRejected",
 		):
 			# The THROWN wire shape: admin's contract ``error`` object rides at
 			# the top level next to exc_type. Both survive here - the code for a

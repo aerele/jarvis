@@ -407,7 +407,11 @@
 										 billing composable, so it is intentionally NOT restored on a
 										 mid-onboarding reload (localStorage-persisted like billing) -
 										 acceptable for v1 since it's typed once at signup. -->
-									<details class="col-span-2 text-p-xs text-ink-gray-5">
+									<details
+										class="col-span-2 text-p-xs text-ink-gray-5"
+										:open="state.partnerCodeOpen"
+										@toggle="state.partnerCodeOpen = $event.target.open"
+									>
 										<summary class="cursor-pointer">
 											Have a partner code? (optional)
 										</summary>
@@ -1782,6 +1786,11 @@ const state = reactive({
 	// leaving it off the persisted composable means it is simply NOT restored
 	// on reload, which is acceptable for v1.
 	partnerCode: "",
+	// Whether the partner-code disclosure (collapsed by default, see the
+	// `<details>` in the Details step template) is open. Forced open when a
+	// details-rejection walk-back names the partner code, so the field the
+	// customer must fix is not hidden inside a closed disclosure.
+	partnerCodeOpen: false,
 	// The four billing inputs (contact phone, address, city, GSTIN) live in the
 	// `billing` composable below (provenance-aware, fenced, namespaced) — Plan 01.
 	// True once a payment intent exists (a signup call created checkout handles,
@@ -3094,6 +3103,21 @@ async function onPayAction(a) {
 		// like the wizard threw their progress away for no reason.
 		if (pay.value.code === CODES.BENCH_SIGNUP_DETAILS_REJECTED) {
 			state.detailsErr = pay.value.message || payCopy.value.body;
+			// The partner-code input lives inside a collapsed disclosure (closed by
+			// default, since most customers have none). A walk-back landing here
+			// because of the partner code must open it, or the field the customer
+			// needs to fix stays invisible. Primary signal is local, not the message
+			// text: the customer already typed a code, so revealing the (optional,
+			// harmless-to-show) disclosure is correct even if this particular
+			// rejection turns out to be about a different field. The /partner code/i
+			// match on admin's free-text sentence is kept only as a secondary
+			// signal - it still opens the disclosure for a customer who somehow
+			// lands here with the field blank (jarvis#821 review: the text-only
+			// match silently missed a reworded/translated rejection message; no
+			// machine code exists yet for which field specifically failed).
+			if (state.partnerCode?.trim() || /partner code/i.test(state.detailsErr)) {
+				state.partnerCodeOpen = true;
+			}
 		}
 		// jarvis#297 P0-2a: "Use a different email" on a signup this session TYPED
 		// through Details already has state.email/company live in memory, but a

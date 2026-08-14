@@ -505,6 +505,21 @@ class TestDetailsRejectionIsNotAPaymentFailure(_ContractCase):
 		# The precise server sentence is what makes this actionable; it must survive.
 		self.assertEqual(error["message"], "billing.gstin is not a valid GSTIN")
 
+	def test_partner_code_rejection_gets_its_own_code(self):
+		"""`PartnerCodeRejected` is the same shape as `BillingMetadataRejected`: a
+		ValidationError SUBCLASS admin raises when the customer's OWN typed partner
+		code is unknown or inactive, before it built any provider object. It used
+		to collapse into BENCH_ADMIN_REJECTED ("the payment service refused this
+		request"), which was false in every particular for the same reason as a bad
+		GSTIN."""
+		err = AdminValidationError("Unknown partner code: ACME-2026")
+		err.exc_type = "PartnerCodeRejected"
+		error, status = onboarding_contract.error_object(err)
+		self.assertEqual(error["code"], onboarding_contract.BENCH_SIGNUP_DETAILS_REJECTED)
+		self.assertEqual(status, 409)
+		# The precise server sentence is what makes this actionable, it must survive.
+		self.assertEqual(error["message"], "Unknown partner code: ACME-2026")
+
 	def test_an_unknown_exc_type_still_routes_on_the_field_prefix(self):
 		"""An admin build whose exception class this bench has never heard of still
 		names the field by admin's own convention, so the customer is not punished
@@ -527,6 +542,7 @@ class TestDetailsRejectionIsNotAPaymentFailure(_ContractCase):
 		a sentence. A reworded message that still names its field keeps working; a
 		message that merely mentions billing does not qualify."""
 		self.assertTrue(onboarding_contract.is_details_rejection("", "BillingMetadataRejected"))
+		self.assertTrue(onboarding_contract.is_details_rejection("", "PartnerCodeRejected"))
 		self.assertTrue(onboarding_contract.is_details_rejection("billing.city is too long"))
 		self.assertFalse(onboarding_contract.is_details_rejection("your billing could not be processed"))
 		self.assertFalse(onboarding_contract.is_details_rejection(""))

@@ -27,6 +27,15 @@ const unreadConvs = ref(new Set());
 const approvalsCount = ref(0);
 const settingsOpen = ref(false); // the shell SettingsDialog binds to this
 const settingsSection = ref("general"); // active pane key in the settings dialog
+// True while the active settings pane is applying a change it cannot safely be
+// unmounted mid-flight (currently only AiModelsPane during a model apply).
+// Published by the pane itself (AiModelsPane watches LlmPoolEditor's busy.active
+// and mirrors it here, clearing it both when the apply settles AND from an
+// onUnmounted hook, so a pane torn down mid-apply can never leave this stuck
+// true). Read by every writer of settingsSection - SettingsDialog's go() and
+// openSettings() below - so a section switch can never abandon an in-flight
+// apply regardless of which caller triggered it (jarvis#821 review).
+const settingsApplying = ref(false);
 const pendingNewChat = ref(false); // consumed + cleared by ChatView
 const paletteOpen = ref(false);
 
@@ -409,8 +418,18 @@ function requestNewChat(router) {
 // gate. needsOnboarding() shares AppShell's own memoized readiness promise
 // (readiness.js's checkReady()), so this costs no extra round-trip: it's
 // already in flight or resolved by the time any real caller fires.
+//
+// Also guarded on settingsApplying (jarvis#821 review): this is a second writer
+// of settingsSection alongside SettingsDialog's rail go() - GeneralPane's "AI
+// models" buttons, UserMenu, ChatView and AppShell's deep-link handler all reach
+// settingsSection through here, not through go(), so a lock enforced only in
+// go() left every one of those callers free to switch away from AiModelsPane
+// mid-apply. settingsApplying can only be true while the dialog is already open
+// on the applying pane (see its own doc above), so refusing here never blocks a
+// legitimate first open.
 async function openSettings(section) {
 	if (await needsOnboarding()) return;
+	if (settingsApplying.value) return;
 	settingsOpen.value = true;
 	settingsSection.value = typeof section === "string" && section ? section : "general";
 }
@@ -456,6 +475,7 @@ const store = reactive({
 	approvalsCount,
 	settingsOpen,
 	settingsSection,
+	settingsApplying,
 	chatContext,
 	settingsActions,
 	activityDetail,

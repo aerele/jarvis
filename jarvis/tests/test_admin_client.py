@@ -1158,6 +1158,38 @@ class TestClientCapabilityAdvert(FrappeTestCase):
 			admin_client.resume_pending_signup("Annual Plan")
 		self.assertNotIn("partner_code", captured["json"])
 
+	def test_partner_code_rejection_is_surfaced_as_a_details_error(self):
+		"""`PartnerCodeRejected` is a ValidationError SUBCLASS admin raises for an
+		unknown or inactive partner code, before it built any provider object. It
+		used to fall through admin_client's exc_type allowlist into the unknown
+		branch and (via onboarding_contract) render as BENCH_ADMIN_REJECTED, "the
+		payment service refused this request" - false in every particular, since no
+		payment service was ever contacted. It must classify like a bad GSTIN: a
+		details-rejection the customer can actually fix."""
+		_settings_clear_admin()  # guest signup path
+		mock_post = MagicMock(
+			return_value=_mock_response(
+				417,
+				json_body={
+					"exception": "jarvis_admin.exceptions.PartnerCodeRejected: Unknown partner code: ACME-2026",
+					"exc_type": "PartnerCodeRejected",
+					"_server_messages": '["{\\"message\\": \\"Unknown partner code: ACME-2026\\", \\"indicator\\": \\"red\\"}"]',
+				},
+			)
+		)
+		with patch("requests.post", mock_post):
+			with self.assertRaises(AdminValidationError) as cm:
+				admin_client.signup("e@x.com", "Co", "Annual Plan", partner_code="ACME-2026")
+		self.assertEqual(str(cm.exception), "Unknown partner code: ACME-2026")
+
+		from jarvis import onboarding_contract
+
+		error, status = onboarding_contract.error_object(cm.exception)
+		self.assertEqual(error["code"], onboarding_contract.BENCH_SIGNUP_DETAILS_REJECTED)
+		self.assertNotEqual(error["code"], onboarding_contract.BENCH_ADMIN_REJECTED)
+		self.assertEqual(status, 409)
+		self.assertEqual(error["message"], "Unknown partner code: ACME-2026")
+
 	def test_billing_facades_carry_capability_advert(self):
 		"""plan-09 P0-2: the capability advert now rides EVERY billing initiation call,
 		not just signup/resume, because admin's billing facades gate on it too. Without
