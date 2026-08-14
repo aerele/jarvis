@@ -289,17 +289,20 @@ def _dispatch(row, now, *, run_as: str, original_user: str, source_apps: list[st
 	running, and the slot is genuinely unspent. Reading the run rather than the
 	exception is what tells the two apart.
 
-	NOT covered here: a dispatch call that fails AMBIGUOUSLY, a timeout where admin may
-	already have started the turn. ``_launch_audit`` records that as ``failed`` (it
-	cannot know better), so the retry mints a fresh run id and the fleet's run-id
-	idempotency does not engage. That is a different duplicate with a different cause,
-	pre-dating this path, and closing it needs a decision about what an ambiguous
-	dispatch means rather than another guard here.
+	The fourth case, a dispatch that fails AMBIGUOUSLY (a timeout, or a reset mid-flight,
+	where admin may already have started the turn), is #743. ``_launch_audit`` no longer
+	records it ``failed``: it leaves the run ``running`` and re-raises AdminAmbiguousError,
+	and the explicit branch below keeps the slot CLAIMED rather than handing it back. So no
+	fresh run id is minted an hour later, the fleet's run-id idempotency is never bypassed,
+	and the 3h stale-run reaper is the single arbiter of the still-running run. Leaving the
+	customer with a ``running`` run after a timeout is the accepted cost of never billing a
+	second audit for one slot.
 
 	A Redis fault propagates out of the lock instead of dispatching, which is
 	deliberate: without the lock there is no exclusivity to be had, and a slot left due
 	is recoverable where a duplicate is not.
 	"""
+	from jarvis import admin_client
 	from jarvis._redis_lock import redis_lock
 
 	with redis_lock(_dispatch_lock_name(row.name), timeout_s=DISPATCH_LOCK_TTL_S) as acquired:
@@ -327,6 +330,17 @@ def _dispatch(row, now, *, run_as: str, original_user: str, source_apps: list[st
 			# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
 			# it has no initiating human: the scheduler user (Administrator) is not one.
 			_launch_audit(inst, trigger="scheduled", source_apps=source_apps, initiating_human=None)
+		except admin_client.AdminAmbiguousError:
+			# #743: the dispatch timed out and admin MAY be running this turn.
+			# ``_launch_audit`` deliberately left the run ``running``, so the slot must
+			# stay CLAIMED: do NOT _unclaim it, do NOT _record_failed, do NOT notify the
+			# owner a run could not start (it may have). Keep the claim and let the 3h
+			# reaper arbitrate the running run. This is the same net effect as the
+			# generic ``_live_run`` branch below would reach for this row, made explicit
+			# so the money decision is not read out of a liveness query.
+			frappe.set_user(original_user)
+			frappe.db.commit()
+			return
 		except Exception:
 			frappe.set_user(original_user)
 			frappe.log_error(
@@ -838,12 +852,33 @@ def _launch_audit(
 			message=_audit_prompt(listing, inst, trigger, scope),
 			timeout_s=registry_timeout_s(slug),
 		)
+	except admin_client.AdminAmbiguousError:
+		# #743: the dispatch TIMED OUT (or the connection reset mid-flight) - admin
+		# MAY already be running this turn. Terminalizing the run ``failed`` here is
+		# exactly what let the slot be retried under a FRESH run id an hour later, so
+		# the fleet's run-id idempotency never engaged and the customer paid for two
+		# audits of one slot. So do the opposite of the confirmed-failure branch
+		# below: leave the run ``running`` (it is already committed so), do NOT tear
+		# down its session (a genuinely-live delegate resolves its identity and its
+		# record_agent_run writeback through that row), and re-raise the SAME
+		# ambiguous signal so the caller keeps the slot claimed instead of handing it
+		# back. The 3h stale-run reaper is then the single arbiter: it completes a
+		# run the writeback lands for and fails one that truly never started - it
+		# never relabels a real outcome. The commit persists the Error Log before the
+		# re-raise trips the request-level rollback on the manual path.
+		frappe.log_error(
+			title=f"jarvis agent-run dispatch ambiguous (left running): {run.name}",
+			message=frappe.get_traceback(),
+		)
+		frappe.db.commit()
+		raise
 	except Exception:
-		# The dispatch call itself failed. Mark THIS Run failed (mirror
-		# _record_failed's writeback onto the already-created "running" row so
-		# it is never orphaned), then re-raise so the caller's retry/notify path
-		# runs (scheduler: no next_run_at advance -> retry next hour;
-		# run_agent_now: surfaces the error to the UI).
+		# The dispatch call itself failed, and CONFIRMEDLY: nothing was sent (a clean
+		# refusal / connect timeout), a 4xx rejection, or an auth denial. Mark THIS
+		# Run failed (mirror _record_failed's writeback onto the already-created
+		# "running" row so it is never orphaned), then re-raise so the caller's
+		# retry/notify path runs (scheduler: no next_run_at advance -> retry next
+		# hour; run_agent_now: surfaces the error to the UI).
 		frappe.db.set_value(
 			RUN,
 			run.name,
