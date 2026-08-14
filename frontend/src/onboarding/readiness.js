@@ -278,8 +278,12 @@ export async function needsLlmConnection() {
 // is spec-pinned to container_provisioning/authority_repair_required and
 // is_ready_for_chat sends no `detail` for this reason - there is nothing to
 // quote, only a state to name. The caller's banner is quiet (no CTA, no
-// composer-disable): the container is still serving the workspace's PREVIOUS
-// config while this converges, so chat keeps working.
+// composer-disable) but NOT a promise that chat keeps answering: a FIRST
+// direct->pool transition stops and restarts the container (a 10-30s bounce),
+// so the previous config does NOT keep serving through it. This just keeps the
+// customer in their chat + history instead of bouncing them to the setup
+// wizard - see account._APPLYING_SOFT_WINDOW_S for the time-box that keeps a
+// stuck apply from staying soft forever.
 export async function isLlmApplying() {
 	const r = await checkReady();
 	return !!(r && !r.ready && r.reason === "llm_applying");

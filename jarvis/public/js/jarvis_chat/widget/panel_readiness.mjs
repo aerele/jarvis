@@ -41,6 +41,14 @@ import { AI_MODELS_SETTINGS_URL } from "./config.mjs";
 // review). "readiness_unconfirmed" is deliberately NOT added: it is transient
 // (the control plane could not answer yet), and degradedMessage below gives it
 // a dedicated "try again shortly" line that a one-way setup gate would bury.
+// "llm_applying" (jarvis C2) is deliberately ABSENT too, same as in
+// readiness.js: the server only ever returns it for a workspace that has
+// already been confirmed established (account.py's _provisioning_verdict), so
+// it can never fire on a genuinely never-onboarded tenant. Falling through to
+// "degraded" below is the whole point - it keeps the customer IN the panel
+// with a quiet heads-up instead of replacing it with the setup nudge. Keep
+// this file and readiness.js's own "deliberately ABSENT" note in sync BY HAND -
+// do not "fix" this by adding it to the set.
 const NOT_ONBOARDED_REASONS = new Set([
   "signup",
   "llm_setup",
@@ -106,10 +114,21 @@ const unconfirmedDegraded = (agentName) =>
 //                           retryable one either way - never the generic
 //                           "ask your administrator", which names a person who
 //                           cannot help with a control-plane outage.
+//   llm_applying            (jarvis C2) a quiet, honest heads-up - NOT the
+//                           generic "ask your administrator" line, which would
+//                           be actively wrong here: nothing is misconfigured,
+//                           an established workspace's own first pool/direct
+//                           apply is simply still converging. Same wording as
+//                           ChatView.vue's banner (FACT B: a first direct->pool
+//                           transition bounces the container, so this must NOT
+//                           promise chat keeps working uninterrupted).
 //   anything else           the generic line. Do NOT print a raw `detail` for
 //                           an unrecognised reason: the reason set is owned by
 //                           account.py and a future addition would leak
 //                           whatever wording it happens to carry.
+const APPLYING_DEGRADED =
+  "Updating your AI configuration. Chat may be briefly unavailable while this finishes.";
+
 export function degradedMessage(resp, agentName = "Jarvis") {
   const reason = (resp && resp.reason) || "";
   const detail = (resp && resp.detail) || "";
@@ -118,6 +137,7 @@ export function degradedMessage(resp, agentName = "Jarvis") {
   if (reason === "container_provisioning") return detail || GENERIC_DEGRADED;
   if (reason === "readiness_unconfirmed")
     return detail || unconfirmedDegraded(brand);
+  if (reason === "llm_applying") return APPLYING_DEGRADED;
   return GENERIC_DEGRADED;
 }
 
