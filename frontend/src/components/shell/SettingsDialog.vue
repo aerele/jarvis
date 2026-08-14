@@ -93,7 +93,7 @@
 				     the bottom. On a plain block wrapper both would clip silently
 				     with no scrollbar. -->
 				<div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-					<component :is="pane" ref="paneRef" />
+					<component :is="pane" />
 				</div>
 
 				<!-- Close lives at the dialog level, not in SettingsPane, so panes
@@ -112,7 +112,7 @@
 </template>
 
 <script setup>
-import { computed, defineAsyncComponent, ref } from "vue";
+import { computed, defineAsyncComponent } from "vue";
 import { Dialog, FeatherIcon } from "frappe-ui";
 // Straight from reka-ui, the same primitives frappe-ui's Dialog uses
 // internally. Needed because overriding the #body slot drops the ones it
@@ -222,18 +222,17 @@ const section = computed(() => {
 });
 const pane = computed(() => PANES[section.value]);
 
-// Template ref onto the active pane. Vue forwards a ref set on a
-// defineAsyncComponent-wrapped <component :is="..."> straight through to the
-// resolved inner component's exposed instance, so this resolves to
-// AiModelsPane's own defineExpose (which mirrors LlmPoolEditor's busy state)
-// once that pane has loaded. A pane that exposes nothing (every non-AiModels
-// pane today) just leaves `applying` false.
-const paneRef = ref(null);
 // True while the active pane is applying a change (currently only AiModelsPane
-// during a model apply). Read through the ref rather than a shell-store flag
-// so the signal dies with the pane and can never get stuck locked if the pane
-// unmounts mid-apply.
-const applying = computed(() => !!paneRef.value?.applying);
+// during a model apply). AiModelsPane publishes this into the shell store
+// itself (watching LlmPoolEditor's busy state, cleared on settle AND from its
+// own onUnmounted so it can never stick true) rather than this dialog reading
+// it off a template ref: that way the SAME flag also gates the store's
+// openSettings(), which is a second, independent writer of settingsSection
+// (GeneralPane's "AI models" buttons, UserMenu, ChatView, AppShell's
+// ?settings= deep link all go through it, not through go() below). A lock
+// enforced only here would leave every one of those callers free to unmount
+// AiModelsPane mid-apply (jarvis#821 review).
+const applying = computed(() => !!store.settingsApplying);
 
 function go(key) {
 	// Locked while an apply is in flight: switching sections would drop the

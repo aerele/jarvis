@@ -3106,10 +3106,16 @@ async function onPayAction(a) {
 			// The partner-code input lives inside a collapsed disclosure (closed by
 			// default, since most customers have none). A walk-back landing here
 			// because of the partner code must open it, or the field the customer
-			// needs to fix stays invisible. Detected on the message text (admin names
-			// the field it rejected in the sentence) since no machine code exists yet
-			// for which field specifically failed.
-			if (/partner code/i.test(state.detailsErr)) {
+			// needs to fix stays invisible. Primary signal is local, not the message
+			// text: the customer already typed a code, so revealing the (optional,
+			// harmless-to-show) disclosure is correct even if this particular
+			// rejection turns out to be about a different field. The /partner code/i
+			// match on admin's free-text sentence is kept only as a secondary
+			// signal - it still opens the disclosure for a customer who somehow
+			// lands here with the field blank (jarvis#821 review: the text-only
+			// match silently missed a reworded/translated rejection message; no
+			// machine code exists yet for which field specifically failed).
+			if (state.partnerCode?.trim() || /partner code/i.test(state.detailsErr)) {
 				state.partnerCodeOpen = true;
 			}
 		}

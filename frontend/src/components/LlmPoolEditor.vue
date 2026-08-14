@@ -251,11 +251,21 @@
 									<path d="M6 9l6 6 6-6" />
 								</svg>
 							</button>
-							<!-- Edit and Reconnect are meaningless on a subscription row with no
-			         connected account yet (a freshly added row - or one whose only
-			         account was disconnected): there is nothing to edit and nothing to
-			         reconnect. Keyed on rowHasConnectedAccount, not "just added", so a
-			         row left accountless by a disconnect hides them the same way. -->
+							<!-- Edit is meaningless on a subscription row with no connected account
+			         yet: there is nothing to edit. That covers both a freshly added,
+			         never-connected row AND one whose only account was disconnected -
+			         rows carry no "is this new" flag once the add-panel is closed
+			         (a preset-added row and a disconnected row both land here looking
+			         identical), so Edit stays keyed on rowHasConnectedAccount for both.
+
+			         Reconnect is DIFFERENT: an accountless row that lost its account to a
+			         disconnect needs Reconnect as its own recovery path (jarvis#821
+			         review - hiding it forced a destructive Remove + re-add that lost the
+			         row's place in the failover order). Since new-vs-disconnected can't be
+			         told apart reliably here, Reconnect is offered on every subscription
+			         row regardless of rowHasConnectedAccount; showing it on a row still
+			         mid-add is harmless (quickReconnect opens the same connect panel
+			         "+ Add a model" already would). -->
 							<button
 								v-if="
 									canEdit &&
@@ -269,11 +279,7 @@
 								Edit
 							</button>
 							<button
-								v-if="
-									canEdit &&
-									row.credentialType === 'subscription' &&
-									rowHasConnectedAccount(row)
-								"
+								v-if="canEdit && row.credentialType === 'subscription'"
 								:disabled="!editable"
 								@click="quickReconnect(i)"
 								class="jv-btn jv-btn--sm jv-btn--ghost"
@@ -2332,8 +2338,7 @@ const ready = computed(() => {
 	if (!singleMode.value) return false;
 	const r = rows.value[0];
 	if (!r) return false;
-	if (r.credentialType === "subscription")
-		return (r.accounts || []).some((a) => a && (a.capture_id || a.account_ref));
+	if (r.credentialType === "subscription") return rowHasConnectedAccount(r);
 	return !!(
 		(r.provider || "").trim() &&
 		(r.model || "").trim() &&
@@ -2438,8 +2443,7 @@ const singleModeCanStart = computed(() => {
 	if (!singleMode.value) return false;
 	const r = rows.value[0];
 	if (!r) return false;
-	if (r.credentialType === "subscription")
-		return (r.accounts || []).some((a) => a && (a.capture_id || a.account_ref));
+	if (r.credentialType === "subscription") return rowHasConnectedAccount(r);
 	if (!(r.provider || "").trim() || !(r.model || "").trim()) return false;
 	if (smHardFailure()) return false;
 	if (isContainerOnlyRow(r)) return true; // local / private endpoint: no bench probe
@@ -2454,9 +2458,7 @@ const startBlockedReason = computed(() => {
 	const r = rows.value[0];
 	if (!r) return "Connect a model to continue.";
 	if (r.credentialType === "subscription")
-		return (r.accounts || []).some((a) => a && (a.capture_id || a.account_ref))
-			? ""
-			: "Connect your account to continue.";
+		return rowHasConnectedAccount(r) ? "" : "Connect your account to continue.";
 	if (!(r.provider || "").trim()) return "Choose a provider to continue.";
 	if (!(r.model || "").trim()) return "Enter a model id to continue.";
 	if (smHardFailure()) return "That test failed. Update the settings above to continue.";
@@ -2572,8 +2574,7 @@ function subTestIdemKey() {
 // directly in the template alongside this (they are timing-based, not a fact
 // about the row), so this only ever names a fact about the row itself.
 function subTestBlockedReason(m) {
-	if (!m || !(m.accounts || []).some((a) => a && (a.capture_id || a.account_ref)))
-		return "Connect your account before testing.";
+	if (!rowHasConnectedAccount(m)) return "Connect your account before testing.";
 	return "";
 }
 function subTestBannerType(result) {
@@ -3797,10 +3798,14 @@ function filledRows() {
 }
 // True when a subscription row has at least one account the connect flow actually
 // placed (capture_id: fresh from a just-finished sign-in; account_ref: a stored one
-// loaded from config). Same predicate used pool-wide to mean "connected" (ready,
-// singleModeCanStart, startBlockedReason, isRowEmpty). Keyed on this rather than
-// "row was just added" because that is the real UI state: a row can sit accountless
-// after a disconnect too, not only right after being added.
+// loaded from config). THE single predicate for "connected" pool-wide (jarvis#821
+// cleanup - this used to be inlined separately at each call site): ready,
+// singleModeCanStart, startBlockedReason, subTestBlockedReason, the submit guard in
+// buildSavePayload, and the Edit/Reconnect row actions in the template above all
+// call this now rather than repeating the (accounts || []).some(...) expression.
+// Keyed on this rather than "row was just added" because that is the real UI state:
+// a row can sit accountless after a disconnect too, not only right after being
+// added.
 function rowHasConnectedAccount(row) {
 	return !!(row && (row.accounts || []).some((a) => a && (a.capture_id || a.account_ref)));
 }
@@ -4828,11 +4833,7 @@ function buildSavePayload({ exclude = null } = {}) {
 	// clear message instead.
 	if (singleMode.value && llmMode.value !== "preset") {
 		const r0 = rows.value[0];
-		if (
-			r0 &&
-			r0.credentialType === "subscription" &&
-			!(r0.accounts || []).some((a) => a && (a.capture_id || a.account_ref))
-		) {
+		if (r0 && r0.credentialType === "subscription" && !rowHasConnectedAccount(r0)) {
 			return { error: "Connect your account to continue." };
 		}
 	}
@@ -5179,9 +5180,11 @@ onBeforeUnmount(() => {
 
 // Let a host (onboarding, footerless) drive Save from its own footer, and a
 // hostScrim host (AiModelsPane) read the apply-in-flight state for its own
-// scrim. AiModelsPane also re-exposes busy.active as `applying`, which
-// SettingsDialog reads through its own template ref to lock section
-// switching for the same duration.
+// scrim. AiModelsPane also mirrors busy.active into the shell store as
+// settingsApplying, which both SettingsDialog's go() and the store's own
+// openSettings() check before letting anything change settingsSection for
+// the same duration (jarvis#821 review: a template ref alone only covered
+// go(), not every writer of settingsSection).
 // canStart / startBlockedReason let the onboarding controller (saveConnect) REQUIRE
 // a savable+validated config - a connected subscription, a stored key, a local
 // endpoint, or a freshly-typed remote key with a PASSING probe bound to it (P0-09) -
@@ -5207,12 +5210,12 @@ defineExpose({
    on the blocks underneath) nothing is tabbable either.
 
    Moving to another settings section while an apply is active is now BLOCKED,
-   not allowed. That guard lives one level up in SettingsDialog, which reads
-   AiModelsPane's exposed `applying` (itself mirroring this `busy` ref through
-   the poolEditor template ref) and locks the rail for the duration, so a click
-   elsewhere can no longer drop this scrim and abandon the apply mid-flight.
-   This file has no notion of sibling panes, so it only ever owns the close
-   affordance above, never the lock.
+   not allowed. That guard lives up in the shell store (settingsApplying),
+   which AiModelsPane sets by watching this `busy` ref through the poolEditor
+   template ref; SettingsDialog's rail and the store's own openSettings() both
+   refuse to change section while it is true, so nothing that can unmount this
+   editor mid-apply is left uncovered. This file has no notion of sibling
+   panes, so it only ever owns the close affordance above, never the lock.
 
    hostScrim consumers (AiModelsPane) skip this box entirely and render their
    own wider one instead - the editor alone was too narrow a box: the pane's

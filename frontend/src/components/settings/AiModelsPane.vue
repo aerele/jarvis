@@ -91,7 +91,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { Button } from "frappe-ui";
 import { getDirectSubscriptionStatus } from "@/api";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
@@ -99,6 +99,9 @@ import SettingsPane from "@/components/settings/SettingsPane.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { isSyncDisconnected } from "@/lib/syncStatus";
 import { agentName } from "@/branding";
+import { useShellStore } from "@/stores/shell";
+
+const store = useShellStore();
 
 // Template ref onto LlmPoolEditor's exposed { save, busy } - read busy.active/
 // busy.label above for the pane-wide scrim in the #scrim slot.
@@ -200,12 +203,30 @@ async function onSaved(sync) {
 
 onMounted(loadDirectSub);
 
-// Exposed for SettingsDialog: true while a model change is applying, so the
-// rail can lock section switching for the duration. Mirrors LlmPoolEditor's
-// own busy.active through the poolEditor template ref above, a template ref
-// rather than a shell-store flag, so the lock lives and dies with this pane
-// and can never get stuck true if the pane unmounts mid-apply.
-defineExpose({
-	applying: computed(() => !!poolEditor.value?.busy?.active),
+// True while a model change is applying, mirroring LlmPoolEditor's own
+// busy.active through the poolEditor template ref above. Still exposed (some
+// callers may want it off a template ref), but the load-bearing consumer is
+// the watcher below: it publishes the same signal into the shell store as
+// settingsApplying, which is what SettingsDialog's go() AND the store's own
+// openSettings() both check before changing settingsSection (jarvis#821
+// review: go() alone left every OTHER writer of settingsSection, e.g.
+// GeneralPane's "AI models" buttons routed through store.openSettings, free
+// to unmount this pane mid-apply).
+//
+// Two ways this is guaranteed to clear, never stick true:
+//   1. immediate watcher: the moment busy.active flips back to false (apply
+//      settles, success or failure), the next tick syncs the store.
+//   2. onUnmounted: if this pane is torn down while an apply is still in
+//      flight (the one path a value watcher can't observe, since Vue stops
+//      watchers on unmount before a final "false" could ever fire), the store
+//      flag is force-cleared directly. This is what makes the lock provably
+//      un-stickable: the pane cannot vanish without also releasing the lock
+//      it published.
+const applying = computed(() => !!poolEditor.value?.busy?.active);
+watch(applying, (v) => (store.settingsApplying = v), { immediate: true });
+onUnmounted(() => {
+	store.settingsApplying = false;
 });
+
+defineExpose({ applying });
 </script>
