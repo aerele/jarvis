@@ -3778,6 +3778,12 @@ const preflightRows = computed(() => {
 // re-runs that guard → Chat.
 async function navigateToChat() {
 	if (navigated.value) return;
+	// A terminal that resolves AFTER the customer escaped back to the editable
+	// form (the jarvis#727 chooseDifferentModel path sets finishing=false and
+	// never aborts the in-flight follow) must not yank the screen into a
+	// preflight over the abandoned config, let alone bill a probe against it
+	// (PR #848 review). Only the wait screen owns navigation.
+	if (!state.finishing && !preflight.running) return;
 	if (!preflight.done) {
 		const proceed = await runPreflightGate();
 		if (!proceed) return;

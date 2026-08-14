@@ -64,10 +64,13 @@ class TestPreflight(_RT3SettingsTestCase):
 		s.db_set("agent_url", "http://tenant.example:19060", update_modified=False)
 		s.db_set("llm_last_apply_fingerprint", "", update_modified=False)
 		frappe.cache().delete_value(preflight._probe_cache_key(s))
+		frappe.cache().delete_value(f"{preflight._probe_cache_key(s)}:inflight")
 		frappe.db.commit()
 
 	def tearDown(self):
-		frappe.cache().delete_value(preflight._probe_cache_key(frappe.get_single("Jarvis Settings")))
+		key = preflight._probe_cache_key(frappe.get_single("Jarvis Settings"))
+		frappe.cache().delete_value(key)
+		frappe.cache().delete_value(f"{key}:inflight")
 
 	def _fake_connect(self, events):
 		sess = _FakeSession(events)
@@ -276,6 +279,47 @@ class TestPreflight(_RT3SettingsTestCase):
 		self.assertEqual(first["state"], "ok")
 		self.assertEqual(second["state"], "ok")
 		self.assertEqual(len(sess.created), 1, "a repeat inside the TTL must not bill again")
+
+	def test_inflight_claim_never_double_bills(self):
+		"""PR #848 review: the verdict caches only after the probe completes, so
+		a reload during the up-to-20s window fired a SECOND billed turn. The
+		in-flight claim answers the concurrent caller without a session."""
+		s = self._direct_sub()
+		frappe.cache().set_value(f"{preflight._probe_cache_key(s)}:inflight", "1", expires_in_sec=30)
+		sess, conn = self._fake_connect([{"kind": "assistant", "text": "ok", "delta": "ok"}])
+		with (
+			patch("jarvis.chat.agent_client.AgentSession", conn),
+			patch("jarvis.chat.session_lifecycle.reclaim_throwaway_session"),
+		):
+			item = preflight._usable_item(s)
+		self.assertEqual(sess.created, [], "a concurrent caller must not open a billed session")
+		self.assertEqual(item["state"], "unknown")
+		self.assertIn("already running", item["detail"])
+		self.assertIsNone(
+			frappe.cache().get_value(preflight._probe_cache_key(s)),
+			"the still-checking answer must not be cached as a verdict",
+		)
+
+	def test_scope_failure_arriving_as_a_refused_rpc_is_auth(self):
+		"""PR #848 review: the supplement vocabulary covers BOTH surfaces - a
+		scope rejection can arrive as a raised RPC refusal too."""
+		from jarvis.chat.agent_client import AgentUnreachableError
+
+		s = self._direct_sub()
+		boom = AgentUnreachableError("Request had insufficient authentication scopes")
+		sess = _FakeSession([], raise_exc=boom)
+
+		class _Conn:
+			@staticmethod
+			def connect(*a, **kw):
+				return sess
+
+		with (
+			patch("jarvis.chat.agent_client.AgentSession", _Conn),
+			patch("jarvis.chat.session_lifecycle.reclaim_throwaway_session"),
+		):
+			item = preflight._usable_item(s)
+		self.assertEqual(item["state"], "auth")
 
 	def test_live_probe_quota_arriving_as_a_refused_rpc_is_rate_limit(self):
 		"""Round-2 MAJOR 2: proxied upstreams phrase exhaustion as refused RPCs

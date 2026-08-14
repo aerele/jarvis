@@ -45,6 +45,9 @@ _PROBE_BUDGET_S = 20
 _PROBE_CACHE_KEY = "jarvis.preflight.probe_verdict"
 _PROBE_CACHE_TTL_S = 30
 _PROBE_CACHE_TTL_UNREACHABLE_S = 5
+# Every verdict detail shown to the customer is trimmed to this (one place,
+# five consumers - PR #848 review).
+_DETAIL_MAX_CHARS = 300
 
 # Provider quota/exhaustion vocabulary, checked BEFORE the auth patterns so
 # quota prose lands on the non-blocking side. Deliberately CONTEXT-BOUND
@@ -133,7 +136,10 @@ def _integration_item() -> dict:
 
 
 def _tri(value) -> str:
-	value = (value or "").lower()
+	# str() first: a type-drifted relay value (bool/int) must degrade to
+	# "unchecked", never raise out of the one endpoint whose contract is that
+	# it cannot refuse (PR #848 review).
+	value = str(value or "").lower()
 	return value if value in ("ok", "degraded", "broken") else "unchecked"
 
 
@@ -181,7 +187,7 @@ def _probe_stored_api_key(settings) -> dict:
 		return {"state": "ok", "detail": "", "source": "key_probe"}
 	if verdict == "fail":
 		return {**_classify_probe_error(message), "source": "key_probe"}
-	return {"state": "unknown", "detail": message[:300], "source": "key_probe"}
+	return {"state": "unknown", "detail": message[:_DETAIL_MAX_CHARS], "source": "key_probe"}
 
 
 def _probe_cache_key(settings) -> str:
@@ -250,6 +256,19 @@ def _probe_direct_subscription(settings) -> dict:
 	cached = cache.get_value(cache_key)
 	if isinstance(cached, dict) and cached.get("state"):
 		return cached
+	# In-flight claim (PR #848 review): the verdict caches only AFTER the probe
+	# completes, so a reload/second tab during the up-to-20s window would fire
+	# a SECOND billed turn. The claim closes that window; the concurrent caller
+	# gets a non-blocking, uncached "still checking" answer and the next
+	# preflight (Retry, reload) reads the finished verdict from the cache.
+	inflight_key = f"{cache_key}:inflight"
+	if cache.get_value(inflight_key):
+		return {
+			"state": "unknown",
+			"detail": "A live check is already running.",
+			"source": "live_probe",
+		}
+	cache.set_value(inflight_key, "1", expires_in_sec=int(_PROBE_BUDGET_S) + 10)
 	from jarvis.chat.agent_client import AgentSession, AgentUnreachableError, oneshot_run_id
 	from jarvis.chat.prewarm import _gateway_ws_url
 	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
@@ -316,6 +335,7 @@ def _probe_direct_subscription(settings) -> dict:
 	verdict["source"] = "live_probe"
 	ttl = _PROBE_CACHE_TTL_UNREACHABLE_S if verdict["state"] == "unreachable" else _PROBE_CACHE_TTL_S
 	cache.set_value(cache_key, verdict, expires_in_sec=ttl)
+	cache.delete_value(inflight_key)
 	return verdict
 
 
@@ -336,15 +356,19 @@ def _classify_probe_exception(exc, auth_fault_detail) -> dict:
 		parts.extend(str(v) for v in details.values())
 	text = " ".join(p for p in parts if p)
 	if _RATE_LIMIT_RE.search(text):
-		return {"state": "rate_limit", "detail": str(exc)[:300]}
+		return {"state": "rate_limit", "detail": str(exc)[:_DETAIL_MAX_CHARS]}
 	auth_text = None
 	try:
 		auth_text = auth_fault_detail(exc)
 	except Exception:
 		auth_text = None
-	if auth_text:
-		return {"state": "auth", "detail": str(auth_text)[:300]}
-	return {"state": "unreachable", "detail": str(exc)[:300]}
+	# The supplement covers BOTH surfaces, same as the title regex it extends:
+	# a scope failure phrased without a status code can arrive as a refused
+	# RPC too, and missing it here would open chat on a rejected credential
+	# (PR #848 review).
+	if auth_text or _AUTH_SUPPLEMENT_RE.search(text):
+		return {"state": "auth", "detail": str(auth_text or exc)[:_DETAIL_MAX_CHARS]}
+	return {"state": "unreachable", "detail": str(exc)[:_DETAIL_MAX_CHARS]}
 
 
 # Auth vocabulary title.py's #738-scoped regex deliberately lacks but a
@@ -363,7 +387,7 @@ def _classify_probe_error(text: str) -> dict:
 	never blocks."""
 	from jarvis.chat.title import _AUTH_FAULT_RE
 
-	detail = (text or "")[:300]
+	detail = (text or "")[:_DETAIL_MAX_CHARS]
 	if _RATE_LIMIT_RE.search(text or ""):
 		return {"state": "rate_limit", "detail": detail}
 	if _AUTH_FAULT_RE.search(text or "") or _AUTH_SUPPLEMENT_RE.search(text or ""):

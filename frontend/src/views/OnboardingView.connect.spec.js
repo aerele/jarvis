@@ -1856,4 +1856,17 @@ describe("jarvis#840 the pre-chat preflight gate", () => {
 		await driveToReady(w);
 		expect(routerReplace).toHaveBeenCalledTimes(1);
 	});
+
+	it("a stale terminal after the customer escaped to the form neither navigates nor probes", async () => {
+		// PR #848 review: chooseDifferentModel resets the UI but never aborts an
+		// in-flight follow; when that stale operation later resolves ready, the
+		// gate must not yank the screen or bill a probe against the abandoned
+		// config. finishing=false is the escape's signature.
+		const w = await mountConnect();
+		w.vm.state.finishing = false;
+		await w.vm.navigateToChat();
+		await flushPromises();
+		expect(api.runChatPreflight).not.toHaveBeenCalled();
+		expect(routerReplace).not.toHaveBeenCalled();
+	});
 });
