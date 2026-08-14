@@ -90,6 +90,7 @@
   "chat_device_token",
   "last_sync_section",
   "last_sync_requested_at",
+  "llm_last_apply_fingerprint",
   "last_sync_at",
   "last_sync_status",
   "llm_pool_synced_at",
@@ -676,6 +677,13 @@
    "fieldname": "last_sync_requested_at",
    "fieldtype": "Datetime",
    "label": "Last Sync Requested At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "llm_last_apply_fingerprint",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "LLM Last Apply Fingerprint",
    "read_only": 1
   },
   {
