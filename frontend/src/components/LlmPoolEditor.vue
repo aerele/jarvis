@@ -806,9 +806,9 @@
 						{{ panel.testResult.caveat }}
 					</div>
 
-					<!-- Resilient-by-default (API KEYS ONLY): expands this provider into
-               its full single-vendor failover chain on close, sharing the
-               same key. Add-mode only. -->
+					<!-- Opt-in backups (API KEYS ONLY): when switched on, expands this
+               provider into its full single-vendor failover chain on close,
+               sharing the same key. Off by default; add-mode only. -->
 					<label
 						v-if="panel.mode === 'add'"
 						style="
@@ -832,7 +832,7 @@
 						>
 							<span class="jv-switch-knob"></span>
 						</button>
-						Add backup models automatically (recommended)
+						Add backup models automatically
 					</label>
 				</div>
 
@@ -3081,7 +3081,7 @@ const panel = ref({
 	mode: "add",
 	uid: null,
 	source: "subscription",
-	addBackups: true,
+	addBackups: false,
 	testing: false,
 	testResult: null,
 	testGen: 0,
@@ -3121,7 +3121,7 @@ function closedPanel() {
 		mode: "add",
 		uid: null,
 		source: "subscription",
-		addBackups: true,
+		addBackups: false,
 		testing: false,
 		testResult: null,
 		testGen: 0,
@@ -3181,7 +3181,7 @@ function openAdd() {
 		mode: "add",
 		uid: r._uid,
 		source: "subscription",
-		addBackups: true,
+		addBackups: false,
 		testing: false,
 		testResult: null,
 		testGen: 0,
@@ -3195,7 +3195,7 @@ function openEdit(i) {
 		mode: "edit",
 		uid: r._uid,
 		source: r.credentialType === "subscription" ? "subscription" : "api_key",
-		addBackups: true,
+		addBackups: false,
 		testing: false,
 		testResult: null,
 		testGen: 0,
@@ -3341,10 +3341,10 @@ function testResultOf(res) {
 	};
 }
 
-// Resilient-by-default (API KEYS ONLY - no subscription presets exist and
+// Opt-in backups (API KEYS ONLY - no subscription presets exist and
 // multi-model-per-account is unconfirmed for cliproxy, so subscriptions never
 // auto-add backups). Finds the catalog's single-vendor preset for this
-// provider, if any.
+// provider, if any. Only consulted when the add panel's backup switch is on.
 function vendorSinglePreset(provider) {
 	const pid = providerId(provider);
 	return catalog.value.find(

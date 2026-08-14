@@ -3963,6 +3963,21 @@ const queuedTurn = ref(null);
 const confirmedAck = ref(false);
 let _confirmedAckTimer = null;
 const ui = ref({});
+// The model picker snapshots ui at mount. When AI-model settings change in the
+// settings dialog (a pool save, or a subscription connect/disconnect), the shell
+// store bumps llmConfigVersion; re-fetch so the pin reflects the new model list
+// without a full page reload. Fields the picker reads (pool_models,
+// catalog_models, llm_model, ...) all live on this object, and getChatUiSettings
+// is the same call the mount used, so a reassign is safe. Registered here in
+// synchronous setup scope (NOT inside onMounted, which is async - a watch created
+// after its first await loses the effect scope and would never auto-dispose).
+watch(
+	() => store.llmConfigVersion,
+	async () => {
+		const next = await api.getChatUiSettings().catch(() => null);
+		if (next) ui.value = next;
+	}
+);
 // Renew-banner copy when the subscription has lapsed; null while entitled.
 // The composer is disabled alongside it (no send can succeed while stopped).
 const suspendedNotice = ref(null);

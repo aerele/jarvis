@@ -47,48 +47,53 @@
 
 		<!-- dropdown: opens UPWARD (the pill lives at the bottom of the screen) -->
 		<div v-if="open" class="mep-menu" role="menu">
-			<!-- models -->
-			<template v-for="(g, gi) in modelsByProvider" :key="g.provider">
-				<div v-if="showProviders" class="mep-head">{{ g.provider }}</div>
-				<button
-					v-if="gi === 0"
-					class="mep-item"
-					role="menuitemradio"
-					:aria-checked="!modelOverride"
-					@click="onModel('')"
-				>
-					<span class="mep-item-body">
-						<span class="mep-name">Auto</span>
-						<span class="mep-desc"
-							>Let {{ assistantName }} choose · {{ defaultModel || "default" }}</span
-						>
-					</span>
-					<CheckMark v-if="!modelOverride" />
-				</button>
-				<button
-					v-for="r in g.models"
-					:key="g.provider + '/' + r.model"
-					class="mep-item"
-					role="menuitemradio"
-					:aria-checked="r.model === modelOverride"
-					@click="onModel(r.model)"
-				>
-					<span class="mep-item-body">
-						<span class="mep-name">{{ r.model }}</span>
-						<!-- `tier` belongs to a configured pool row. An `extra` row is another
+			<!-- models (scrolls: the list can grow tall across several providers;
+			     the Effort/Persona rows and their side-flyouts stay OUTSIDE this
+			     scroll region so the flyouts anchor correctly and never clip) -->
+			<div class="mep-scroll">
+				<template v-for="(g, gi) in modelsByProvider" :key="g.provider">
+					<div v-if="showProviders" class="mep-head">{{ g.provider }}</div>
+					<button
+						v-if="gi === 0"
+						class="mep-item"
+						role="menuitemradio"
+						:aria-checked="!modelOverride"
+						@click="onModel('')"
+					>
+						<span class="mep-item-body">
+							<span class="mep-name">Auto</span>
+							<span class="mep-desc"
+								>Let {{ assistantName }} choose ·
+								{{ defaultModel || "default" }}</span
+							>
+						</span>
+						<CheckMark v-if="!modelOverride" />
+					</button>
+					<button
+						v-for="r in g.models"
+						:key="g.provider + '/' + r.model"
+						class="mep-item"
+						role="menuitemradio"
+						:aria-checked="r.model === modelOverride"
+						@click="onModel(r.model)"
+					>
+						<span class="mep-item-body">
+							<span class="mep-name">{{ r.model }}</span>
+							<!-- `tier` belongs to a configured pool row. An `extra` row is another
 						     model on a provider the customer ALREADY configured, offered so they
 						     can switch without re-saving Settings; its catalog label is the more
 						     useful subtitle, skipped when it merely repeats the id. -->
-						<span v-if="r.tier" class="mep-desc">{{ r.tier }}</span>
-						<span
-							v-else-if="r.extra && r.label && r.label !== r.model"
-							class="mep-desc"
-							>{{ r.label }}</span
-						>
-					</span>
-					<CheckMark v-if="r.model === modelOverride" />
-				</button>
-			</template>
+							<span v-if="r.tier" class="mep-desc">{{ r.tier }}</span>
+							<span
+								v-else-if="r.extra && r.label && r.label !== r.model"
+								class="mep-desc"
+								>{{ r.label }}</span
+							>
+						</span>
+						<CheckMark v-if="r.model === modelOverride" />
+					</button>
+				</template>
+			</div>
 
 			<!-- Adding a PROVIDER is configuration, not selection. The picker lists
 			     only what this tenant can actually run today (its configured
@@ -411,6 +416,14 @@ watch(open, (isOpen) => {
 	box-shadow: 0 12px 34px rgba(20, 20, 30, 0.18);
 	padding: 5px;
 	z-index: 60;
+}
+/* Only the model list scrolls; the Effort/Persona rows below stay pinned so
+   their side-flyouts anchor correctly. Caps the menu height so a long list
+   never runs off the top of the viewport (it opens upward). */
+.mep-scroll {
+	max-height: min(52vh, 420px);
+	overflow-y: auto;
+	overscroll-behavior: contain;
 }
 .mep-head {
 	padding: 6px 9px 4px;
