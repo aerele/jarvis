@@ -653,6 +653,26 @@ def confirm_payment(payload: dict) -> dict:
 	return _post(path=_m("api.tenant.confirm_payment"), body=payload)
 
 
+def get_integration_status(*, deep: bool = False, timeout_s: int = 20) -> dict:
+	"""Plugin + persona wiring tri-states for this bench's own container
+	(jarvis#840 preflight). Admin relays the fleet's integration probe and
+	answers {"tri_state": {"plugin": ..., "persona": ...}, "source":
+	"live|cached|none", "checked_at": ...} with only customer-safe fields.
+
+	``deep`` asks for the ~3s in-container probe (the boot-log truth about
+	registered tools) instead of the sub-second static one. The 20s budget
+	covers admin's own relay with headroom; callers treat EVERY failure of
+	this call as "unchecked", never as an error - an admin without the method
+	yet (deploy window) surfaces as Frappe's method-not-found rejection (see
+	``is_method_not_found``)."""
+	body = {"deep": 1} if deep else {}
+	return _post(
+		path=_m("api.tenant.integration_status"),
+		body=body,
+		timeout_s=timeout_s,
+	)
+
+
 def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	"""Fetch the assigned container connection (fallback / scheduled sync).
 
