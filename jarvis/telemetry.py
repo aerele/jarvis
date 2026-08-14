@@ -59,6 +59,30 @@ def record_tool(tool: str, args, conversation: str | None, duration_ms: int, res
 		pass
 
 
+def record_budget_event(
+	tool: str, kind: str, original_chars: int | None, shown: int | None, total: int | None
+) -> None:
+	"""One line per agent-boundary result-size guard event (truncation or an
+	uncapped-but-oversized result). Unlike ``record_tool``, this is not gated
+	on a custom-doctype target - every event is signal for sizing the budget
+	itself. Never raises."""
+	try:
+		_emit(
+			{
+				"kind": "result_budget",
+				"ts": frappe.utils.now(),
+				"site": getattr(frappe.local, "site", None),
+				"tool": tool,
+				"event": kind,
+				"original_chars": original_chars,
+				"shown": shown,
+				"total": total,
+			}
+		)
+	except Exception:
+		pass
+
+
 def emit_turn(conversation: str | None, run_id: str | None, duration_ms: int) -> None:
 	"""One line per completed turn; reads and clears the per-turn custom
 	flag. Never raises."""

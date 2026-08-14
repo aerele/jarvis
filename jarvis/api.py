@@ -15,6 +15,7 @@ from jarvis.exceptions import (
 	JarvisError,
 )
 from jarvis.permissions import has_jarvis_access
+from jarvis.tools._result_guard import enforce_result_budget
 from jarvis.tools.registry import dispatch
 
 
@@ -250,6 +251,24 @@ def _dispatch_from_session(
 			# confirmation gate can bind a parked write to it.
 			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
 			result = _run_tool(tool, parsed_args, conversation=conv)
+			# Agent-boundary model-facing size cap. ONLY on this (openclaw session)
+			# path - the dashboard builder/desk/external call_tool callers go through
+			# _dispatch_current_user and are deliberately uncapped.
+			if isinstance(result, dict) and result.get("ok"):
+				guarded, event = enforce_result_budget(result["data"], tool=tool)
+				if event:
+					result["data"] = guarded
+					frappe.logger("jarvis").warning(
+						f"result_budget[{event['kind']}] {tool} "
+						f"{event['original_chars']}c shown={event['shown']}/{event['total']}"
+					)
+					telemetry.record_budget_event(
+						tool=tool,
+						kind=event["kind"],
+						original_chars=event["original_chars"],
+						shown=event["shown"],
+						total=event["total"],
+					)
 			_persist_and_publish_tool_call(
 				session_key=session_key,
 				tool=tool,

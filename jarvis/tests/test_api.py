@@ -1012,3 +1012,40 @@ class TestC2AgentTokenExpiry(_PluginAuthTestBase):
 			result = self._call()
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["code"], "AgentTokenExpired")
+
+
+class TestDispatchFromSessionResultBudget(FrappeTestCase):
+	"""Task 2: enforce_result_budget wires into the openclaw-agent-only path
+	(_dispatch_from_session), not the shared _dispatch_and_wrap path that the
+	dashboard builder/desk/external call_tool callers use."""
+
+	def _dispatch(self, result_data):
+		from jarvis.api import _dispatch_from_session
+
+		with (
+			patch("jarvis.api._run_tool", return_value={"ok": True, "data": result_data}),
+			patch("jarvis.api.impersonate"),
+			patch("jarvis.api._persist_and_publish_tool_call"),
+			patch("jarvis.tools._delegate_capability.tool_denial", return_value=None),
+			patch("jarvis.api._get_header", return_value=None),
+			patch("jarvis.api.frappe.db.get_value", return_value="conv1"),
+		):
+			return _dispatch_from_session(
+				user="Administrator",
+				session_key="agent:test:session",
+				tool="get_list",
+				args={"doctype": "Customer"},
+			)
+
+	def test_over_budget_list_result_comes_back_truncated(self):
+		big = [{"name": f"C{i}", "blob": "x" * 80} for i in range(3000)]
+		env = self._dispatch(big)
+		self.assertTrue(env["ok"])
+		self.assertTrue(env["data"]["_truncated"])
+		self.assertLess(env["data"]["shown"], 3000)
+
+	def test_small_list_result_is_unchanged(self):
+		small = [{"name": "C1"}]
+		env = self._dispatch(small)
+		self.assertTrue(env["ok"])
+		self.assertEqual(env["data"], small)
