@@ -617,3 +617,168 @@ class TestManualAndScheduledCannotInterleave(DispatchIdempotencyTestCase):
 
 		self._run_now(inst)
 		self.assertEqual(len(self._launched(inst)), 2)
+
+
+class TestAmbiguousDispatchIsNotRetriedAsANewRun(DispatchIdempotencyTestCase):
+	"""#743: a dispatch that TIMES OUT (admin may already be running the turn) must not
+	terminalize the run, must not hand the slot back, and must not mint a fresh run id
+	an hour later - that fresh id is what bypassed the fleet's run-id idempotency and
+	billed the customer for two audits of one slot. The run is left ``running`` for the
+	3h stale-run reaper to arbitrate."""
+
+	def _ambiguous(self, **kw):
+		self.dispatched.append(kw)
+		raise admin_client.AdminAmbiguousError("admin did not answer in time; may be running")
+
+	def test_an_ambiguous_dispatch_leaves_the_run_running_and_claims_the_slot(self):
+		inst = self._due_install()
+		now = now_datetime()
+
+		self._sweep(dispatch=self._ambiguous)
+
+		running = self._runs(inst, "running")
+		self.assertEqual(len(running), 1, "the timed-out run is left running for the reaper")
+		self.assertEqual(self._runs(inst, "failed"), [], "an ambiguous dispatch is not recorded as a failure")
+		self.assertEqual(len(self._dispatched_for(inst)), 1, "exactly one dispatch attempt")
+		self.assertEqual(
+			frappe.get_all(NOTIFICATION, filters={"for_user": self.owner}, pluck="name"),
+			[],
+			"the owner is not told a run that may be running could not start",
+		)
+		self.assertGreater(self._next_run_at(inst), now, "the slot is CLAIMED, never handed back")
+
+	def test_a_later_tick_does_not_mint_a_second_run_for_the_still_running_slot(self):
+		"""THE money assertion. Even if the slot is forced due again, the still-running
+		ambiguous run blocks a second audit (via ``_live_run``): no new run id, no second
+		dispatch reaches the container."""
+		inst = self._due_install()
+
+		self._sweep(dispatch=self._ambiguous)
+		running = self._runs(inst, "running")
+		self.assertEqual(len(running), 1)
+
+		# Force the slot due again and run a HEALTHY tick: prove the running run - not
+		# merely the advanced schedule - is what stops the duplicate.
+		frappe.db.set_value(
+			INSTALLATION, inst, "next_run_at", add_days(now_datetime(), -1), update_modified=False
+		)
+		frappe.db.commit()
+		self._sweep()
+
+		self.assertEqual(self._runs(inst, "running"), running, "the same single run; no new id minted")
+		self.assertEqual(len(self._dispatched_for(inst)), 1, "no second audit reaches the container")
+
+	def test_a_confirmed_refusal_still_records_notifies_and_returns_the_slot(self):
+		"""Control (unchanged behavior): a CONFIRMED refusal - a base AdminUnreachableError,
+		not the ambiguous subclass - is terminalized, notified and retried exactly as before."""
+		inst = self._due_install()
+		now = now_datetime()
+
+		def _refused(**kw):
+			self.dispatched.append(kw)
+			raise admin_client.AdminUnreachableError("admin returned a 400 error")
+
+		self._sweep(dispatch=_refused)
+
+		self.assertEqual(self._runs(inst, "running"), [], "a confirmed refusal leaves nothing alive")
+		self.assertTrue(
+			frappe.get_all(RUN, filters={"installation": inst, "status": "failed"}, ignore_permissions=True),
+			"the failure is recorded for the customer",
+		)
+		self.assertTrue(
+			frappe.get_all(NOTIFICATION, filters={"for_user": self.owner}, pluck="name"),
+			"the owner is told the run could not start",
+		)
+		self.assertLessEqual(self._next_run_at(inst), now, "the slot goes back for a retry")
+
+
+class TestAmbiguousDispatchManualPath(DispatchIdempotencyTestCase):
+	"""#743: the manual ``run_agent_now`` path must behave the SAME as the scheduled path
+	for both outcomes - an ambiguous dispatch leaves the run running (a re-click is
+	refused), a confirmed refusal fails it (a re-click is allowed)."""
+
+	def test_a_manual_ambiguous_dispatch_leaves_the_run_running_and_blocks_a_retry(self):
+		inst = self._due_install()
+
+		def _ambiguous(**kw):
+			self.dispatched.append(kw)
+			raise admin_client.AdminAmbiguousError("admin did not answer in time; may be running")
+
+		with self.assertRaises(admin_client.AdminAmbiguousError):
+			self._run_now(inst, dispatch=_ambiguous)
+
+		self.assertEqual(len(self._runs(inst, "running")), 1, "the run is left running, not failed")
+		self.assertEqual(self._runs(inst, "failed"), [], "an ambiguous dispatch is not a failure")
+
+		# The customer clicks again: the live run must refuse it, so the timed-out turn
+		# admin may already be running is never dispatched a second time.
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._run_now(inst)
+		self.assertIn("already running", str(cm.exception))
+		self.assertEqual(len(self._dispatched_for(inst)), 1, "the second click never reaches the container")
+
+	def test_a_manual_confirmed_refusal_fails_the_run_and_allows_a_retry(self):
+		inst = self._due_install()
+
+		def _refused(**kw):
+			self.dispatched.append(kw)
+			raise admin_client.AdminUnreachableError("admin returned a 400 error")
+
+		with self.assertRaises(admin_client.AdminUnreachableError):
+			self._run_now(inst, dispatch=_refused)
+
+		self.assertEqual(self._runs(inst, "running"), [], "a confirmed refusal leaves nothing alive")
+		self.assertEqual(len(self._runs(inst, "failed")), 1, "the run is recorded failed")
+
+		# Unchanged: a confirmed refusal is retryable, so the next click starts a fresh audit.
+		self._run_now(inst)
+		self.assertEqual(len(self._launched(inst)), 1, "the retry starts a fresh audit")
+
+
+class TestReaperDoesNotRelabelAnAmbiguousRun(DispatchIdempotencyTestCase):
+	"""#743 bullet 4: whatever an ambiguous run is left as, the stale-run reaper must not
+	relabel a REAL outcome. A run admin actually completed (record_agent_run lands within
+	the hour) stays completed; a run that truly never started is the reaper's to fail."""
+
+	def _stale_running_run(self, inst: str) -> str:
+		run = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"agent": SLUG,
+				"installation": inst,
+				"trigger": "scheduled",
+				"status": "running",
+				"started_at": add_to_date(
+					now_datetime(), seconds=-(agent_scheduler.STALE_RUN_AFTER_SECONDS + 600)
+				),
+			}
+		)
+		run.flags.ignore_permissions = True
+		run.insert(ignore_permissions=True)
+		frappe.db.commit()
+		return run.name
+
+	def test_a_completed_writeback_is_never_relabeled_failed(self):
+		inst = self._due_install()
+		run = self._stale_running_run(inst)
+		# The writeback lands: admin DID run the turn, minutes into the hour.
+		frappe.db.set_value(RUN, run, "status", "completed", update_modified=False)
+		frappe.db.commit()
+
+		agent_scheduler.reap_stale_agent_runs()
+
+		self.assertEqual(
+			frappe.db.get_value(RUN, run, "status"), "completed", "the reaper never overwrites a real outcome"
+		)
+
+	def test_a_still_running_ambiguous_run_is_the_reapers_to_fail(self):
+		inst = self._due_install()
+		run = self._stale_running_run(inst)
+
+		agent_scheduler.reap_stale_agent_runs()
+
+		self.assertEqual(
+			frappe.db.get_value(RUN, run, "status"),
+			"failed",
+			"a run that truly never started is failed by the 3h backstop, the single arbiter",
+		)
