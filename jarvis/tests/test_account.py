@@ -910,7 +910,10 @@ class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
 	exit stands in for all three, the same reasoning TestRejectedSyncVerdictWiring
 	above uses for its own single-leg pin. Also pins review finding 1's
 	time-box: (b) and (d) below are the same established-workspace state,
-	differing only in how recently the apply was requested."""
+	differing only in how recently the apply was requested - (b) recent rides
+	the soft llm_applying reason, (d) stale surfaces the retryable
+	llm_apply_stuck (jarvis#825), and (e) an established marker with no apply on
+	record at all keeps the hard reason."""
 
 	_FIELDS = (
 		"chat_was_ready_at",
@@ -992,13 +995,15 @@ class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
 		self.assertFalse(out["ready"])
 		self.assertEqual(out["reason"], "llm_applying")
 
-	def test_established_tenant_stuck_apply_past_the_soft_window_gates_to_setup(self):
-		"""(d) review finding 1: an established workspace whose apply was
-		requested LONGER AGO than _APPLYING_SOFT_WINDOW_S - a stuck first-apply
-		that never converges and never writes a terminal status - must age out of
-		the soft reason and fall back to the hard one, pinning the time-box in
-		the direction (b) does not cover. Otherwise a workspace whose fleet-agent
-		never comes back would stay soft indefinitely with no way out."""
+	def test_established_tenant_stuck_apply_past_the_soft_window_is_llm_apply_stuck(self):
+		"""(d) jarvis#825: an established workspace whose apply was requested LONGER
+		AGO than _APPLYING_SOFT_WINDOW_S - a stuck first-apply that never converges
+		and never writes a terminal status - ages out of the soft llm_applying
+		reason. Before #825 it fell back to the HARD reason and silently routed the
+		established customer to the setup wizard; now it surfaces its own honest,
+		retryable ``llm_apply_stuck`` instead. The distinction from (e) below is the
+		whole point: there IS an apply on record (a present, parseable timestamp),
+		it just never finished, so there is something concrete to retry."""
 		raw = account._settings_raw(account._GATE_STATE_FIELDS)
 		anchor = account._authority_anchor(raw)
 		stale = frappe.utils.add_to_date(
@@ -1009,6 +1014,26 @@ class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
 				"chat_was_ready_at": "2026-01-01 00:00:00",
 				"chat_ready_authority": anchor,
 				"last_sync_requested_at": frappe.utils.get_datetime_str(stale),
+			}
+		)
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "llm_apply_stuck")
+
+	def test_established_tenant_with_no_apply_on_record_gates_to_setup(self):
+		"""(e) jarvis#825 guard: an established workspace (durable marker set, anchor
+		still matches) but whose last_sync_requested_at is ABSENT has no apply to be
+		stuck on, so it must keep the HARD reason - NOT llm_apply_stuck. This is what
+		separates "an apply hung" (retryable, (d)) from "there is simply no apply
+		here" (route to setup). A null stamp is the default this class's setUp writes,
+		so this pins that an established marker alone never fabricates a stuck apply."""
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		anchor = account._authority_anchor(raw)
+		self._write(
+			{
+				"chat_was_ready_at": "2026-01-01 00:00:00",
+				"chat_ready_authority": anchor,
+				"last_sync_requested_at": None,
 			}
 		)
 		out = account.is_ready_for_chat()

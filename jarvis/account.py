@@ -318,22 +318,22 @@ def _marker_is_fresh(current) -> bool:
 		return False
 
 
-def _apply_recently_requested(requested_at) -> bool:
-	"""Is ``last_sync_requested_at`` recent enough to still cover a soft
-	llm_applying verdict? Same shape as ``_marker_is_fresh`` above: a
-	null/unset value is NOT recent (a workspace that has never enqueued an
-	apply, or predates the field, must not be treated as mid-apply), and an
-	unparseable one fails the same way rather than raising - this runs on the
-	hot is_ready_for_chat path and must never turn a bad value into a 500.
-	Time-boxes review finding 1: a stuck apply that never converges and never
-	writes a terminal status ages out of the soft window and falls back to the
-	hard reason, exactly the pre-PR behaviour."""
+def _apply_age_seconds(requested_at):
+	"""Seconds elapsed since ``last_sync_requested_at``, or ``None`` when there is
+	no usable timestamp. ``None`` covers both a workspace that never enqueued an
+	apply (null/unset - predates the field, or simply none pending) and an
+	unparseable value: this runs on the hot is_ready_for_chat path and must never
+	turn a bad value into a 500, so a parse failure is swallowed to ``None`` rather
+	than raised. The single parse+diff path for the soft-window decision, so the
+	"recent" and "stale" boundaries (in ``_provisioning_verdict``) cannot drift
+	apart or be computed inconsistently - the reason a bare ``None`` sentinel is
+	returned rather than two separate predicate helpers (jarvis#825 review)."""
 	if not requested_at:
-		return False
+		return None
 	try:
-		return frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at) < _APPLYING_SOFT_WINDOW_S
+		return frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at)
 	except Exception:
-		return False
+		return None
 
 
 def _write_is_durable() -> bool:
@@ -666,6 +666,18 @@ def is_ready_for_chat() -> dict:
 	  transition bounces it (10-30s); this reason is only about keeping the
 	  customer IN the app during that window, not a claim that chat keeps
 	  answering uninterrupted.
+	- ``"llm_apply_stuck"`` - the established-workspace apply that ``llm_applying``
+	  covered has aged past ``_APPLYING_SOFT_WINDOW_S`` without ever converging or
+	  writing a terminal ``"failed:"`` status (fleet-agent down, a sync that hangs).
+	  Before jarvis#825 this silently fell back to the hard
+	  ``llm_pool_provisioning`` / ``llm_provisioning`` reason, bouncing an
+	  established customer to the setup wizard with no explanation. Now it is its
+	  own honest, retryable state: the readiness surfaces render "your last AI
+	  update didn't finish" and offer Jarvis Admins a Retry that calls
+	  ``jarvis.onboarding.resync_llm`` (probe-first, throttled), which restamps
+	  ``last_sync_requested_at`` and flips the reason back to ``llm_applying``.
+	  Only reachable for a workspace that HAS an apply on record; a never-applied
+	  one keeps the hard reason.
 	- ``"llm_rejected"`` - the pool/api_key/subscription config's FIRST sync ended
 	  in a terminal ``last_sync_status`` of ``"failed: ..."`` AND admin's own
 	  refusal is what produced it (an unusable spec, a validation error, a
@@ -1006,8 +1018,8 @@ def _not_ready_verdict(settings, raw: dict, hard_reason: str) -> dict:
 # can tell them apart is _has_been_chat_ready's durable, authority-bound proof.
 #
 # TIME-BOXED (review finding 1): softening to llm_applying also requires
-# last_sync_requested_at to be present and recent (_apply_recently_requested,
-# within _APPLYING_SOFT_WINDOW_S). Without a bound, a STUCK first apply - the
+# last_sync_requested_at to be present and recent (_apply_age_seconds below
+# _APPLYING_SOFT_WINDOW_S). Without a bound, a STUCK first apply - the
 # fleet-agent down, an apply that never converges and never writes a terminal
 # "failed:" status - would stay soft indefinitely with no way out: the reload
 # it was built to fix would instead trap the customer in a chat that can never
@@ -1034,9 +1046,20 @@ def _provisioning_verdict(raw: dict, hard_reason: str) -> dict:
 	"""
 	if not _has_been_chat_ready(raw):
 		return {"ready": False, "reason": hard_reason}
-	if not _apply_recently_requested(raw.get(_APPLYING_TIMESTAMP_FIELD)):
+	# One parse+diff for both boundaries (see _apply_age_seconds). None = no apply
+	# on record (never enqueued, or unparseable): a workspace with nothing to be
+	# mid-apply OR stuck on, so it keeps the hard reason.
+	age = _apply_age_seconds(raw.get(_APPLYING_TIMESTAMP_FIELD))
+	if age is None:
 		return {"ready": False, "reason": hard_reason}
-	return {"ready": False, "reason": "llm_applying"}
+	if age < _APPLYING_SOFT_WINDOW_S:
+		# Requested recently enough to still be plausibly converging: soft.
+		return {"ready": False, "reason": "llm_applying"}
+	# An apply WAS requested but has aged out of the soft window without
+	# converging: a stuck apply (jarvis#825). Surface an honest, retryable state
+	# instead of silently routing an established, chatting customer to the setup
+	# wizard.
+	return {"ready": False, "reason": "llm_apply_stuck"}
 
 
 def _llm_missing_verdict(settings) -> dict:

@@ -31,6 +31,10 @@
 	// Same check the SPA gate and the widget popup use, so all three surfaces
 	// agree on what "set up" means.
 	var READY_METHOD = "jarvis.account.is_ready_for_chat";
+	// The stuck-apply Retry lever (jarvis#825). Admin-gated server-side
+	// (require_jarvis_admin, which accepts System Manager - the same role this
+	// nudge is already gated to), probe-first and throttled 180s.
+	var RESYNC_METHOD = "jarvis.onboarding.resync_llm";
 	// Deep link to the AI models settings tab, used by the reconnect variant's
 	// CTA. Must match config.mjs's AI_MODELS_SETTINGS_URL: this standalone desk
 	// bundle is loaded via app_include_js and cannot import from the widget
@@ -225,6 +229,24 @@
 				href: AI_MODELS_SETTINGS_URL,
 			};
 		}
+		// jarvis#825: an established workspace whose last AI update got stuck (the
+		// soft llm_applying window aged out without converging). Like llm_credentials
+		// this reads jarvis_onboarded === false but is NOT a never-set-up workspace,
+		// so the generic "Set up Jarvis" pitch below would be actively wrong. Honest
+		// copy + a Retry that re-drives the saved config IN PLACE (resync) rather than
+		// sending them to the wizard - `action` instead of `href`, handled in inject().
+		if (reason === "llm_apply_stuck") {
+			return {
+				name: agentName,
+				aria: "Retry " + agentName + " update",
+				text:
+					"Your last " +
+					agentName +
+					" update didn't finish, so replies may fail. Retry to finish it.",
+				ctaLabel: "Retry",
+				action: "resync",
+			};
+		}
 		// Every other reason (never onboarded, or an empty/unknown reason from an
 		// older boot payload) keeps the original pitch and destination.
 		return {
@@ -277,10 +299,24 @@
 				t.textContent = variant.text;
 				b.appendChild(t);
 
-				var cta = document.createElement("a");
-				cta.className = "jvn-btn";
-				cta.href = variant.href;
-				cta.textContent = variant.ctaLabel;
+				// An in-place action (jarvis#825 Retry) is a <button> that stays on
+				// the page; every other variant is an <a> that navigates to the wizard
+				// or the settings pane.
+				var cta;
+				if (variant.action === "resync") {
+					cta = document.createElement("button");
+					cta.type = "button";
+					cta.className = "jvn-btn";
+					cta.textContent = variant.ctaLabel;
+					cta.addEventListener("click", function () {
+						retryApply(cta, variant.ctaLabel);
+					});
+				} else {
+					cta = document.createElement("a");
+					cta.className = "jvn-btn";
+					cta.href = variant.href;
+					cta.textContent = variant.ctaLabel;
+				}
 				b.appendChild(cta);
 				return b;
 			})
@@ -292,6 +328,63 @@
 		wrap.appendChild(tail);
 
 		document.body.appendChild(wrap);
+	}
+
+	// jarvis#825 Retry: re-drive the saved AI config, then re-read readiness and
+	// re-sync the nudge from the fresh verdict. A successful resync flips the reason
+	// back to llm_applying (or clears it once ready), and shouldShow() suppresses the
+	// nudge for llm_applying - so the bubble visibly goes away on success rather than
+	// leaving stale "didn't finish" copy on screen. frappe.boot.jarvis_ready_reason is
+	// a cached boot value that reverify() never rewrites (it only corrects the
+	// onboarded flag false->true), so this updates it by hand from the fresh check.
+	function retryApply(btn, label) {
+		if (btn.disabled) return;
+		btn.disabled = true;
+		btn.textContent = "Retrying…";
+		var restore = function () {
+			btn.disabled = false;
+			btn.textContent = label;
+		};
+		// Re-read readiness, update the cached boot flags from the fresh verdict,
+		// then re-sync the nudge. Returns the readiness call so the button can be
+		// restored only AFTER this settles - not before.
+		var recheck = function () {
+			return frappe.call({
+				method: READY_METHOD,
+				callback: function (r) {
+					var m = (r && r.message) || null;
+					if (m) {
+						frappe.boot.jarvis_onboarded = !!m.ready;
+						frappe.boot.jarvis_ready_reason = m.reason || "";
+					}
+					sync();
+				},
+			});
+		};
+		// The whole point is that a stuck-apply retry must NOT re-enable the button
+		// until its outcome is on screen: resync -> recheck -> THEN restore. Chaining
+		// restore onto the resync call directly (a sibling of recheck) would flip the
+		// button back mid-recheck, letting an admin double-click straight into the
+		// server's 180s throttle for no benefit. So restore rides recheck's own
+		// completion, and recheck only starts once resync has settled.
+		var afterResync = function () {
+			var rq;
+			try {
+				rq = recheck();
+			} catch (e) {
+				restore();
+				return;
+			}
+			if (rq && rq.always) rq.always(restore);
+			else restore();
+		};
+		try {
+			var req = frappe.call({ method: RESYNC_METHOD });
+			if (req && req.then) req.then(afterResync, afterResync);
+			else afterResync();
+		} catch (e) {
+			restore();
+		}
 	}
 
 	function sync() {

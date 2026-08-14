@@ -91,6 +91,10 @@ export async function isWorkspaceReady() {
 // pool/direct leg is mid-apply" (e.g. adding a model in Settings), which must
 // keep the customer in their chat + history, not bounce them to the setup
 // poster on a reload. See isLlmApplying() below for its quiet in-app banner.
+// "llm_apply_stuck" (jarvis#825) is deliberately ABSENT for the same reason:
+// the server only returns it for an established workspace whose apply hung, and
+// it must keep its chat + history and get a retryable banner, never the setup
+// poster. Do NOT "fix" the omission by adding it - see isLlmApplyStuck() below.
 const NOT_ONBOARDED_REASONS = new Set([
 	"signup",
 	"llm_pool_provisioning",
@@ -287,4 +291,21 @@ export async function needsLlmConnection() {
 export async function isLlmApplying() {
 	const r = await checkReady();
 	return !!(r && !r.ready && r.reason === "llm_applying");
+}
+
+// True when an established workspace's apply got STUCK: it was mid-apply
+// (llm_applying) but has aged past the server's soft window without ever
+// converging or writing a terminal failure (jarvis#825 - fleet-agent down, a
+// sync that hangs). Its own accessor for the same "one reason, one accessor"
+// reason as isLlmApplying above. Deliberately NOT in NOT_ONBOARDED_REASONS: the
+// workspace WAS established, so it keeps its chat + history and gets an honest,
+// retryable banner instead of the full-screen setup poster - which is the whole
+// point of #825 (before it, a stuck apply silently fell back to the hard
+// provisioning reason and bounced the customer to the wizard). The banner's
+// Retry calls resyncLlm(), gated to Jarvis Admins because the backend endpoint
+// is (jarvis.onboarding.resync_llm -> require_jarvis_admin); a non-admin sees the
+// state named but no button.
+export async function isLlmApplyStuck() {
+	const r = await checkReady();
+	return !!(r && !r.ready && r.reason === "llm_apply_stuck");
 }

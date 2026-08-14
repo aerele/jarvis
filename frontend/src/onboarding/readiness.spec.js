@@ -19,6 +19,8 @@ const {
 	replacedBanner,
 	hasReconnectIntent,
 	landingStep,
+	isLlmApplying,
+	isLlmApplyStuck,
 	RECONNECT_INTENT_URL,
 } = await import("./readiness.js");
 
@@ -111,6 +113,8 @@ describe("readiness verdict ownership", () => {
 			"container_provisioning",
 			"authority_repair_required",
 			"subscription_suspended",
+			"llm_applying",
+			"llm_apply_stuck",
 			null,
 		];
 		for (const reason of reasons) {
@@ -142,6 +146,41 @@ describe("llm_rejected still gates (jarvis#757, round-1 review of #760)", () => 
 		forgetReady();
 		verdict({ ready: false, reason: "llm_rejected", detail: "provider + model required" });
 		expect(await needsOnboarding()).toBe(true);
+	});
+});
+
+/**
+ * jarvis#825: a stuck apply must be its own honest, retryable in-app state - NOT
+ * the full-screen setup gate (that was the pre-#825 bug: an established customer
+ * whose apply hung got silently bounced to the wizard), and NOT the two ownership
+ * accessors above (it gets its own banner + Retry). These pin all three.
+ */
+describe("llm_apply_stuck (jarvis#825)", () => {
+	it("isLlmApplyStuck answers ONLY for its own reason", async () => {
+		verdict({ ready: false, reason: "llm_apply_stuck" });
+		expect(await isLlmApplyStuck()).toBe(true);
+		forgetReady();
+		verdict({ ready: false, reason: "llm_applying" });
+		expect(await isLlmApplyStuck()).toBe(false);
+		forgetReady();
+		verdict({ ready: true, reason: null });
+		expect(await isLlmApplyStuck()).toBe(false);
+	});
+
+	it("isLlmApplying and isLlmApplyStuck are mutually exclusive", async () => {
+		verdict({ ready: false, reason: "llm_apply_stuck" });
+		expect(await isLlmApplying()).toBe(false);
+		forgetReady();
+		verdict({ ready: false, reason: "llm_applying" });
+		expect(await isLlmApplyStuck()).toBe(false);
+	});
+
+	it("does NOT trip the full-screen onboarding gate", async () => {
+		// The whole point of #825: the workspace WAS established, so it keeps its
+		// chat + history and gets a banner, never the setup poster. If this ever
+		// returns true, llm_apply_stuck was wrongly added to NOT_ONBOARDED_REASONS.
+		verdict({ ready: false, reason: "llm_apply_stuck" });
+		expect(await needsOnboarding()).toBe(false);
 	});
 });
 
@@ -300,6 +339,18 @@ describe("ChatView banner chain order", () => {
 		// call to action, so a generic banner ahead of it in the chain leaves a
 		// disconnected customer with no discoverable way back to the AI models pane.
 		expect(specific).toBeLessThan(generic);
+	});
+
+	it("orders the stuck-apply banner AFTER the still-converging one (jarvis#825)", () => {
+		const applying = chatSrc.indexOf('v-else-if="llmApplying"');
+		const stuck = chatSrc.indexOf('v-else-if="llmApplyStuck"');
+		expect(applying, "ChatView must still render the llmApplying banner").not.toBe(-1);
+		expect(stuck, "ChatView must render the llmApplyStuck banner").not.toBe(-1);
+		// llmApplying is the LIVE, still-converging window; llmApplyStuck is the
+		// aged-out one. Applying must win the chain while it is true, so the honest
+		// "didn't finish" banner only shows once the soft window has genuinely
+		// lapsed - never over a retry that just flipped the reason back to applying.
+		expect(applying).toBeLessThan(stuck);
 	});
 });
 

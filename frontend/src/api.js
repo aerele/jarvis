@@ -55,6 +55,12 @@ export const checkAccountReconnect = (requestId, code) =>
 	call("jarvis.onboarding.check_account_reconnect", { request_id: requestId, code: code || "" });
 
 export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
+// Re-drive this workspace's saved AI config through admin - the customer lever
+// for a stuck apply (jarvis#825, reason "llm_apply_stuck"). Probes admin first
+// and only re-pushes if the container is NOT already serving; throttled once per
+// 180s server-side. Admin-gated (require_jarvis_admin). Returns get_llm_sync_status()'s
+// shape plus `outcome`: converged | queued | throttled | not_configured.
+export const resyncLlm = () => call("jarvis.onboarding.resync_llm");
 // Read-only poll of a durable LLM-apply operation (plan-05 D2). The single
 // Start-chatting controller (frontend/src/lib/llmOperation.js) follows exactly one
 // operation id to a terminal state through this; it never spends the apply bucket.

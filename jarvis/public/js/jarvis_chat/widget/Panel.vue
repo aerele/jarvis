@@ -380,9 +380,10 @@
 						v-if="readinessCta"
 						type="button"
 						class="jvp-btn-solid jvp-notice-cta"
+						:disabled="retryingApply"
 						@click="goReadinessCta"
 					>
-						{{ readinessCta.label }}
+						{{ retryingApply ? "Retrying…" : readinessCta.label }}
 					</button>
 				</div>
 			</div>
@@ -615,6 +616,7 @@ import {
 	transcribeAudio,
 	getChatUiSettings,
 	isReadyForChat,
+	resyncLlm,
 } from "./panel_api.mjs";
 
 const props = defineProps({
@@ -902,6 +904,9 @@ const readinessNotice = ref("");
 // or null. A member never gets one: canOnboard below gates it off before the
 // widget even asks for actionable copy.
 const readinessCta = ref(null);
+// True while a Retry (resyncLlm, for a stuck apply - jarvis#825) is in flight, so
+// the CTA shows progress and cannot be double-clicked into the server's throttle.
+const retryingApply = ref(false);
 // Only an admin who can actually reach the wizard gets the CTA button in the
 // gate state, mirroring OnboardingGate.vue's isSystemManager split. Read off
 // frappe.boot.user.roles - core Frappe bootinfo (User.load_user), already
@@ -1215,11 +1220,70 @@ function goOnboard() {
 	window.location.assign(ONBOARDING_URL);
 }
 
-// The degraded banner's CTA (readinessCta), when present. Same full-navigation
-// pattern as goOnboard above - the AI models settings pane lives in the SPA,
-// not this widget.
+// The degraded banner's CTA (readinessCta), when present. Two shapes:
+//   { href }   navigate to a settings pane in the SPA (e.g. "Connect a model").
+//   { action } an in-place action handled here (e.g. "resync" for a stuck apply,
+//              jarvis#825) - no navigation, so the customer stays in the panel.
 function goReadinessCta() {
-	if (readinessCta.value?.href) window.location.assign(readinessCta.value.href);
+	const cta = readinessCta.value;
+	if (!cta) return;
+	if (cta.href) {
+		window.location.assign(cta.href);
+		return;
+	}
+	if (cta.action === "resync") retryApply();
+}
+
+// Re-fetch the readiness verdict and re-render the degraded banner from it. Pulled
+// out of onMounted so a Retry can reuse it. Fails OPEN, same as classifyReadiness(null):
+// a flaky/unreachable check must never strand a real user behind the gate.
+function refreshReadiness() {
+	return isReadyForChat()
+		.then((r) => {
+			readiness.value = classifyReadiness(r);
+			if (readiness.value === "degraded") {
+				// canOnboard already matches JARVIS_ADMIN_ROLES (System Manager or
+				// Jarvis Admin - jarvis/permissions.py), so it doubles as the
+				// "can this person actually reconnect a model" check here.
+				const actionable = degradedActionable(r, brandName, canOnboard);
+				readinessNotice.value = actionable.text;
+				readinessCta.value = actionable.cta;
+			} else {
+				readinessNotice.value = "";
+				readinessCta.value = null;
+			}
+		})
+		.catch(() => {
+			readiness.value = classifyReadiness(null);
+			readinessNotice.value = "";
+			readinessCta.value = null;
+		});
+}
+
+// jarvis#825: re-drive the saved AI config for a stuck apply, then re-read
+// readiness so the banner reflects the new state in place. resyncLlm probes admin
+// first (converged -> nothing to do) and only re-pushes otherwise, restamping the
+// apply, which flips the reason back to llm_applying: so a successful retry swaps
+// this "didn't finish" banner for the quiet "Updating your AI configuration" one.
+// All outcomes (converged/queued/throttled) resolve the same way - just re-check.
+//
+// The SPA (frontend/src/views/ChatView.vue) carries a near-identical retryApply for
+// the same state. The two cannot share a helper - this widget is plain .mjs served
+// into Desk and cannot import from frontend/src (see panel_readiness.mjs's header) -
+// so keep the retry semantics in sync by hand.
+async function retryApply() {
+	if (retryingApply.value) return;
+	retryingApply.value = true;
+	try {
+		await resyncLlm();
+	} catch (e) {
+		/* a throttle or transient error still resolves by re-checking below */
+	}
+	try {
+		await refreshReadiness();
+	} finally {
+		retryingApply.value = false;
+	}
 }
 
 // The mic button lives in the footer, and the footer unmounts the moment the
@@ -1582,29 +1646,10 @@ onMounted(() => {
 			sttEnabled.value = false;
 		});
 	// Resolved once per mount, not on every open/keystroke - see the `readiness`
-	// declaration above for why that is still "once per Desk page load".
-	isReadyForChat()
-		.then((r) => {
-			readiness.value = classifyReadiness(r);
-			if (readiness.value === "degraded") {
-				// canOnboard already matches JARVIS_ADMIN_ROLES (System Manager or
-				// Jarvis Admin - jarvis/permissions.py), so it doubles as the
-				// "can this person actually reconnect a model" check here.
-				const actionable = degradedActionable(r, brandName, canOnboard);
-				readinessNotice.value = actionable.text;
-				readinessCta.value = actionable.cta;
-			} else {
-				readinessNotice.value = "";
-				readinessCta.value = null;
-			}
-		})
-		.catch(() => {
-			// Fail OPEN, same as classifyReadiness(null): a flaky/unreachable check
-			// must never strand a real user behind the gate.
-			readiness.value = classifyReadiness(null);
-			readinessNotice.value = "";
-			readinessCta.value = null;
-		});
+	// declaration above for why that is still "once per Desk page load". A Retry
+	// (goReadinessCta -> resync) re-runs this same fetch so the banner reflects the
+	// new verdict without a page reload.
+	refreshReadiness();
 });
 
 onBeforeUnmount(() => {
