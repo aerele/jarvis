@@ -732,16 +732,13 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		expect(wrapper.vm.state.step).toBe("plan");
 	});
 
-	it("the optional contact-consent checkbox renders on Details and wires into the billing snapshot", async () => {
+	it("Details renders no separate contact-consent checkbox (consent rides the T&C acceptance)", async () => {
 		const wrapper = mountView();
 		await flushPromises();
 		wrapper.vm.state.step = "details";
 		await flushPromises();
-		expect(wrapper.vm.billing.consent.value).toBe(false);
-		wrapper.vm.billing.setConsent(true);
-		expect(wrapper.vm.billing.consent.value).toBe(true);
-		const checkboxes = wrapper.findAll('input[type="checkbox"]');
-		expect(checkboxes.length).toBeGreaterThan(0);
+		expect(wrapper.text()).not.toContain("okay to contact me");
+		expect(wrapper.vm.billing.consent).toBeUndefined();
 	});
 
 	it("Pay stays disabled until the required T&C box is ticked", async () => {
@@ -779,7 +776,9 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		);
 		await wrapper.vm.onPayClick();
 		expect(api.onboardingPaymentApi.startSignup).toHaveBeenCalledWith(
-			expect.objectContaining({ terms_accepted: true }),
+			// contact_consent is granted BY the T&C acceptance (owner decision
+			// 2026-08-14): the same click that sends terms_accepted sends it.
+			expect.objectContaining({ terms_accepted: true, contact_consent: true }),
 			expect.anything()
 		);
 	});

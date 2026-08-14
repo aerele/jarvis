@@ -136,12 +136,11 @@ export function useBillingDetails(opts = {}) {
 	// deliberately dumb: last write wins, no provenance, because unlike the billing
 	// fields nothing auto-fills these behind the customer's back.
 	const identity = reactive({ email: "", company: "" });
-	// Details-step OPTIONAL "okay to contact me" checkbox (lead-capture + T&C
-	// frozen contract). Lives here, not on the wizard's own `state`, for the same
-	// reason as `identity`: it rides the localStorage snapshot so a mid-flow
-	// reload or a checkout round trip does not silently lose an explicit "yes".
-	// Never auto-set - only the customer's own click flips it true.
-	const consent = ref(false);
+	// No contact-consent state here any more: the Details-step "okay to contact
+	// me" checkbox was folded into the required T&C acceptance on Review & Pay
+	// (owner decision 2026-08-14), so consent rides start_signup as a literal
+	// true alongside terms_accepted and nothing about it needs to survive a
+	// reload.
 	// Provenance of the last-applied ERP defaults, forwarded to admin so it can
 	// record where the snapshot originated. Never rendered on Review & Pay.
 	const sourceCompany = ref("");
@@ -236,13 +235,6 @@ export function useBillingDetails(opts = {}) {
 		persist();
 	}
 
-	// The Details-step "It's okay to contact me" checkbox. Explicit boolean only
-	// - never inferred from anything else on the form.
-	function setConsent(value) {
-		consent.value = !!value;
-		persist();
-	}
-
 	function persist() {
 		if (!storage) return;
 		try {
@@ -255,7 +247,6 @@ export function useBillingDetails(opts = {}) {
 					gstin: fields.gstin.value,
 					email: identity.email,
 					company: identity.company,
-					contact_consent: consent.value,
 					// Stamped on every write so restore() can bound how long this PII
 					// lives, whatever happens to the session that wrote it.
 					saved_at: now(),
@@ -314,13 +305,9 @@ export function useBillingDetails(opts = {}) {
 				any = true;
 			}
 		}
-		// Same "only ever restore forward" rule as identity: a stored `true` wins;
-		// a stored `false`/absent leaves whatever this mount already has (never
-		// flips an explicit in-session "yes" back to unchecked).
-		if (d && d.contact_consent && !consent.value) {
-			consent.value = true;
-			any = true;
-		}
+		// A `contact_consent` key from a snapshot written by an older build is
+		// simply ignored: the consent checkbox no longer exists (it lives inside
+		// the T&C acceptance now), so there is nothing to restore it into.
 		return any;
 	}
 
@@ -435,8 +422,6 @@ export function useBillingDetails(opts = {}) {
 		fields,
 		identity,
 		setIdentity,
-		consent,
-		setConsent,
 		finish,
 		billingSaved,
 		sourceCompany,
