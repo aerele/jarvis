@@ -99,6 +99,13 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 	def _lone_subscription_models(self, upstream="openai", provider="openai", blob=None):
 		return [
 			{
+				# jarvis#756: the SPA's own validatePool gate refuses a
+				# provider-less subscription row client-side, so a real save
+				# always carries this - on_update mirrors it verbatim into
+				# self.llm_provider, which admin-v2's subscription_connect
+				# (jarvis_admin_v2 branch feat/subscription-connect-relay)
+				# requires.
+				"provider": provider,
 				"model": "gpt-5.5",
 				"tier": "strong",
 				"order": 0,
@@ -119,27 +126,24 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 	def test_one_renderable_subscription_model_is_direct(self):
 		"""jarvis#715: a FRESH lone subscription on a provider agent serves
 		NATIVELY (openai) needs no sidecar at all - it takes the direct
-		llm-creds leg, pushing its own oauth blob, not /llm-pool."""
-		blob_calls = []
+		leg, one subscription_connect call carrying its own oauth blob, not
+		/llm-pool."""
 		with (
 			patch("jarvis.admin_client.post_update_llm_pool") as pool,
 			patch(
-				"jarvis.admin_client.post_push_oauth_blob",
-				side_effect=lambda provider, blob: blob_calls.append((provider, blob)) or {},
-			),
-			patch(
-				"jarvis.admin_client.post_update_llm_creds",
+				"jarvis.admin_client.post_subscription_connect",
 				return_value={"action": "restart", "status": "applied"},
-			) as creds,
+			) as connect,
 		):
 			onboarding.save_llm_pool(
 				frappe.as_json(self._lone_subscription_models()), preset=None, routing_mode="failover"
 			)
 		pool.assert_not_called()
-		self.assertEqual(len(blob_calls), 1, "the direct leg must push the oauth blob")
-		self.assertEqual(blob_calls[0][0], "openai")
-		creds.assert_called_once()
-		self.assertEqual(creds.call_args.kwargs.get("auth_mode"), "oauth")
+		connect.assert_called_once()
+		provider, _blob, llm_provider = connect.call_args.args
+		self.assertEqual(provider, "openai")
+		self.assertEqual(llm_provider, "openai")
+		self.assertEqual(connect.call_args.kwargs.get("model"), "gpt-5.5")
 		s = frappe.get_single("Jarvis Settings")
 		self.assertEqual(int(s.proxy_active or 0), 0)
 
@@ -149,14 +153,11 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 		subscription-direct tenant resolved provider=None - agent then either
 		502s ("No API key found for provider ...") or silently mis-routes.
 		The lone account's own oauth_blob already carries the agent-provider id
-		under its "provider" key (the same key _push_direct_subscription_blob
+		under its "provider" key (the same key ``_direct_subscription_blob``
 		relies on), so the turn dispatcher must read it from there."""
 		from jarvis.chat.turn_handler import _resolve_model_and_provider
 
-		with (
-			patch("jarvis.admin_client.post_push_oauth_blob"),
-			patch("jarvis.admin_client.post_update_llm_creds", return_value={"action": "restart"}),
-		):
+		with patch("jarvis.admin_client.post_subscription_connect", return_value={"action": "restart"}):
 			onboarding.save_llm_pool(
 				frappe.as_json(self._lone_subscription_models()), preset=None, routing_mode="failover"
 			)
@@ -168,14 +169,11 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 	def test_lone_direct_subscription_with_a_malformed_blob_resolves_no_provider(self):
 		"""A blob missing its "provider" key (or otherwise unreadable) must
 		degrade to None, never raise or crash the turn - see
-		_push_direct_subscription_blob's own guard for the write side of this
+		``_direct_subscription_blob``'s own guard for the write side of this
 		same invariant."""
 		from jarvis.chat.turn_handler import _resolve_model_and_provider
 
-		with (
-			patch("jarvis.admin_client.post_push_oauth_blob"),
-			patch("jarvis.admin_client.post_update_llm_creds", return_value={"action": "restart"}),
-		):
+		with patch("jarvis.admin_client.post_subscription_connect", return_value={"action": "restart"}):
 			onboarding.save_llm_pool(
 				frappe.as_json(self._lone_subscription_models(blob='{"refresh_token":"rt"}')),
 				preset=None,
@@ -185,29 +183,105 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 		_, provider = _resolve_model_and_provider(conv)
 		self.assertIsNone(provider)
 
-	def test_direct_subscription_push_validation_error_surfaces_specifically(self):
+	def test_direct_subscription_connect_validation_error_surfaces_specifically(self):
 		"""jarvis#755 review: _sync_via_admin had no except clause for
-		AdminValidationError, so a concrete "missing or malformed oauth_blob"
-		reason from _push_direct_subscription_blob fell through to the generic
-		"failed: unexpected error; see Error Log" backstop - exactly the
-		failure this exception exists to name. Mirrors the pool-sync twin's own
-		handling of the same exception (jarvis_settings.py ~1975)."""
+		AdminValidationError, so a concrete rejection reason fell through to
+		the generic "failed: unexpected error; see Error Log" backstop -
+		exactly the failure this exception exists to name. Mirrors the
+		pool-sync twin's own handling of the same exception (jarvis_settings.py
+		~1975).
+
+		Also the DISCRIMINATOR for the deploy-window fallback (see
+		test_subscription_connect_method_not_found_falls_back_to_two_calls
+		below): a plain business rejection from the new endpoint is NOT the
+		"no such method" signal and must surface directly, never trigger the
+		old two-call fallback."""
 		from jarvis import admin_client
 
 		with (
 			patch(
-				"jarvis.admin_client.post_push_oauth_blob",
+				"jarvis.admin_client.post_subscription_connect",
 				side_effect=admin_client.AdminValidationError("missing or malformed oauth_blob"),
-			),
+			) as connect,
+			patch("jarvis.admin_client.post_push_oauth_blob") as blob,
 			patch("jarvis.admin_client.post_update_llm_creds") as creds,
 		):
 			onboarding.save_llm_pool(
 				frappe.as_json(self._lone_subscription_models()), preset=None, routing_mode="failover"
 			)
+		connect.assert_called_once()
+		blob.assert_not_called()
 		creds.assert_not_called()
 		s = frappe.get_single("Jarvis Settings")
 		self.assertTrue(s.last_sync_status.startswith("failed: validation:"))
 		self.assertIn("missing or malformed oauth_blob", s.last_sync_status)
+
+	def test_subscription_connect_method_not_found_falls_back_to_two_calls(self):
+		"""TODO(delete-me after admin-v2 subscription_connect deploys) deploy-window
+		coverage: an admin build that has not shipped ``subscription_connect``
+		yet answers with Frappe's own "no such whitelisted method" rejection
+		(handler.py's ``execute_cmd`` -> ``get_attr`` failure, wrapped in
+		``frappe.throw``). That must fall back to the old push-blob-then-creds
+		sequence, in that order, rather than surface as a broken subscription
+		connect. The blob push now goes through ``self._push_direct_subscription_blob``
+		(the same wrapper the pre-collapse code used) rather than an inlined
+		call, but the observable effect - a ``post_push_oauth_blob`` call before
+		``post_update_llm_creds`` - is unchanged, so the assertions below still
+		verify it."""
+		from jarvis import admin_client
+
+		calls = []
+		method_not_found = admin_client.AdminValidationError(
+			"Failed to get method for command jarvis_admin_v2.api.tenant.subscription_connect "
+			"with module 'jarvis_admin_v2.api.tenant' has no attribute 'subscription_connect'",
+			exc_type="ValidationError",
+		)
+		with (
+			patch("jarvis.admin_client.post_subscription_connect", side_effect=method_not_found) as connect,
+			patch(
+				"jarvis.admin_client.post_push_oauth_blob",
+				side_effect=lambda provider, blob: calls.append(("blob", provider, blob)) or {},
+			) as blob,
+			patch(
+				"jarvis.admin_client.post_update_llm_creds",
+				side_effect=lambda **kw: calls.append(("creds", kw))
+				or {"action": "restart", "status": "applied"},
+			) as creds,
+		):
+			onboarding.save_llm_pool(
+				frappe.as_json(self._lone_subscription_models()), preset=None, routing_mode="failover"
+			)
+		connect.assert_called_once()
+		blob.assert_called_once()
+		creds.assert_called_once()
+		self.assertEqual([c[0] for c in calls], ["blob", "creds"], "blob must push before creds")
+		self.assertEqual(calls[0][1], "openai")
+		self.assertEqual(calls[1][1].get("auth_mode"), "oauth")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(s.last_sync_status.startswith("ok"), f"expected ok, got {s.last_sync_status!r}")
+
+	def test_blank_llm_provider_is_a_clean_local_rejection(self):
+		"""admin's subscription_connect REQUIRES llm_provider and 400s
+		(ProviderMismatch) on a blank one. A provider-less subscription row is
+		refused client-side by the SPA's own validatePool gate (jarvis#756),
+		but nothing enforces that server-side, so a non-SPA caller of
+		save_llm_pool can still reach this leg with one. That must surface as
+		a clean local rejection - never an admin round trip, never the
+		method-not-found fallback."""
+		models = self._lone_subscription_models()
+		del models[0]["provider"]
+		with (
+			patch("jarvis.admin_client.post_subscription_connect") as connect,
+			patch("jarvis.admin_client.post_push_oauth_blob") as blob,
+			patch("jarvis.admin_client.post_update_llm_creds") as creds,
+		):
+			onboarding.save_llm_pool(frappe.as_json(models), preset=None, routing_mode="failover")
+		connect.assert_not_called()
+		blob.assert_not_called()
+		creds.assert_not_called()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(s.last_sync_status.startswith("failed: validation:"))
+		self.assertIn("missing llm_provider", s.last_sync_status)
 
 	def test_one_unrenderable_subscription_model_is_still_proxy(self):
 		"""Kimi has no agent-native auth flow → still needs cliproxy → the

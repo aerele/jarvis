@@ -538,6 +538,107 @@ class TestAdminErrorResponses(FrappeTestCase):
 		self.assertEqual(str(cm.exception), "customer status: Suspended")
 
 
+class TestIsMethodNotFound(FrappeTestCase):
+	"""admin_client.is_method_not_found: the subscription_connect deploy-window
+	discriminator that tells "admin has not shipped this dotted path yet"
+	apart from the endpoint's own business rejections. The landed admin build's
+	rejections (InvalidBlob, UnknownProvider, ProviderMismatch, ...) all carry
+	a structured error.code via @fleet_endpoint's EndpointError family, which
+	excludes them outright; the message-text check is the fallback signal for
+	anything that reaches here uncoded (see is_method_not_found's docstring)."""
+
+	def setUp(self):
+		_settings_for_admin()
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def test_frappes_own_missing_method_rejection_is_detected_end_to_end(self):
+		"""Frappe's handler.py execute_cmd wraps get_attr()'s failure in
+		frappe.throw(_("Failed to get method for command {0} with {1}")...) -
+		default exc class ValidationError, http_status_code 417. Shape the mock
+		response exactly like that wire contract and confirm the resulting
+		AdminValidationError classifies as method-not-found."""
+		mock_post = MagicMock(
+			return_value=_mock_response(
+				417,
+				json_body={
+					"exception": (
+						"frappe.exceptions.ValidationError: Failed to get method for command "
+						"jarvis_admin_v2.api.tenant.subscription_connect with module "
+						"'jarvis_admin_v2.api.tenant' has no attribute 'subscription_connect'"
+					),
+					"exc_type": "ValidationError",
+				},
+			)
+		)
+		with patch("requests.post", mock_post):
+			with self.assertRaises(AdminValidationError) as cm:
+				admin_client.post_subscription_connect("openai", {}, "OpenAI", model="m", base_url="")
+		self.assertTrue(admin_client.is_method_not_found(cm.exception))
+
+	def test_a_coded_business_rejection_is_not_method_not_found(self):
+		"""The REAL wire shape of the landed subscription_connect's business
+		rejections: @fleet_endpoint RETURNS (never throws) {"ok": false,
+		"error": {"code": ..., "message": ...}} under a 400 - e.g.
+		ProviderMismatch when llm_provider's expected auth-profile id disagrees
+		with provider. That arrives here as an AdminContractError whose
+		exc_type is None, the SAME as the missing-method case - so the code
+		check (not exc_type) is what has to exclude it."""
+		mock_post = MagicMock(
+			return_value=_mock_response(
+				400,
+				json_body={
+					"message": {
+						"ok": False,
+						"error": {
+							"code": "ProviderMismatch",
+							"message": (
+								"provider 'openai' does not match llm_provider 'gemini' "
+								"(expected 'google-gemini-cli')"
+							),
+						},
+					}
+				},
+			)
+		)
+		with patch("requests.post", mock_post):
+			with self.assertRaises(AdminValidationError) as cm:
+				admin_client.post_subscription_connect("openai", {}, "gemini", model="m", base_url="")
+		self.assertEqual(getattr(cm.exception, "code", ""), "ProviderMismatch")
+		self.assertFalse(admin_client.is_method_not_found(cm.exception))
+
+	def test_an_ordinary_uncoded_business_rejection_is_not_method_not_found(self):
+		"""Belt-and-suspenders: even a hypothetical bare frappe.throw business
+		rejection (no code, exc_type "ValidationError" - the same shape the
+		missing-method case has) must not be misread as "admin doesn't have
+		this method yet" on message content alone."""
+		mock_post = MagicMock(
+			return_value=_mock_response(
+				417,
+				json_body={
+					"exception": "frappe.exceptions.ValidationError: unusable oauth grant",
+					"exc_type": "ValidationError",
+					"_server_messages": '["{\\"message\\": \\"unusable oauth grant\\", \\"indicator\\": \\"red\\"}"]',
+				},
+			)
+		)
+		with patch("requests.post", mock_post):
+			with self.assertRaises(AdminValidationError) as cm:
+				admin_client.post_subscription_connect("openai", {}, "OpenAI", model="m", base_url="")
+		self.assertFalse(admin_client.is_method_not_found(cm.exception))
+
+	def test_a_coded_exception_is_not_method_not_found_regardless_of_text(self):
+		"""A DuplicateEntryError (or any other coded/typed rejection) can never
+		be Frappe's missing-method rejection, whatever its text happens to
+		say - is_method_not_found excludes on code/exc_type before ever
+		reading the message."""
+		exc = AdminValidationError(
+			"Failed to get method for command x with y", exc_type="DuplicateEntryError"
+		)
+		self.assertFalse(admin_client.is_method_not_found(exc))
+
+
 class TestPermanentRejectionClassification(FrappeTestCase):
 	"""jarvis #542: 502 is admin's answer BOTH to a gateway fault AND to its
 	fleet layer permanently refusing the config (@fleet_endpoint answers every
@@ -1405,6 +1506,61 @@ class TestPostPushOauthBlob(FrappeTestCase):
 			180,
 			"post_push_oauth_blob timeout must accommodate fleet-agent's "
 			"doctor + restart + healthz chain (~120s typical, 150s cap)",
+		)
+
+
+class TestPostSubscriptionConnect(FrappeTestCase):
+	def setUp(self):
+		_settings_for_admin()
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def test_happy_path_posts_combined_payload(self):
+		captured = {}
+		blob = {
+			"type": "oauth",
+			"provider": "openai",
+			"access": "AT-fresh",
+			"refresh": "RT-fresh",
+		}
+
+		def _fake_post(url, json=None, timeout=None, **_kw):
+			captured["url"] = url
+			captured["body"] = json
+			captured["timeout"] = timeout
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {"action": "restart"}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			result = admin_client.post_subscription_connect(
+				"openai",
+				blob,
+				"OpenAI",
+				model="gpt-5.5",
+				base_url="",
+			)
+		self.assertEqual(result, {"action": "restart"})
+		self.assertIn("subscription_connect", captured["url"])
+		# Admin's subscription_connect does not declare api_key or auth_mode
+		# (an oauth-only endpoint has no other mode to name) - neither is sent.
+		self.assertEqual(
+			captured["body"],
+			{
+				"provider": "openai",
+				"blob": blob,
+				"llm_provider": "OpenAI",
+				"model": "gpt-5.5",
+				"base_url": "",
+				"installed_apps": frappe.get_installed_apps(),
+			},
+		)
+		# Must exceed the admin->fleet leg's own 210s budget (each layer
+		# exceeds the one below it, same rule PR#826 established) so the
+		# bench never gives up on an apply admin is still driving.
+		self.assertGreater(
+			captured["timeout"],
+			210,
+			"post_subscription_connect timeout must outlast admin's own admin->fleet budget",
 		)
 
 

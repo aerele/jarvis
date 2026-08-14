@@ -502,6 +502,66 @@ def _schedule_sync_lock_retry(*, method: str, job_base: str, retry_left: int, **
 	)
 
 
+def _direct_subscription_blob(doc) -> tuple[str, dict]:
+	"""Find + validate the DIRECT leg's lone enabled subscription model's OAuth
+	blob, stripped of ``id_token``, ready to push or fold into a payload.
+
+	Module-level (not a method) so ``JarvisSettings._push_direct_subscription_blob``
+	can still be called UNBOUND against a bare ``frappe._dict`` test fixture
+	(``TestPushDirectSubscriptionBlobNoMatchInvariant``): reading ``doc.models``
+	rather than ``self.models`` works whether ``doc`` is a real JarvisSettings
+	document or a ``frappe._dict`` standing in for one - a helper hung off
+	``self`` would need ``self`` to already be a bound instance of this class,
+	which the fixture is not.
+
+	Mirrors ``jarvis.oauth.api.complete_paste_signin``'s push: the blob's own
+	``provider`` key already carries the agent auth-profile id (``agent_provider``
+	- "openai", "google-gemini-cli" - baked in when the blob was minted), so no
+	separate upstream-to-provider table is needed here, and ``id_token`` is
+	stripped because fleet's ``PUT /auth-profile`` schema is strict
+	(``extra_forbidden``) and only the POOL path's cliproxy-codex reformat needs it.
+
+	Only ever called for the config ``_lone_direct_capable`` allowed onto this
+	leg, so there is exactly one enabled subscription model with exactly one
+	account and ``validate_models`` has already required a well-formed,
+	non-empty ``oauth_blob`` on it before ``save()`` could reach here. Raises
+	(rather than silently skipping) if that invariant is somehow violated - the
+	caller's surrounding try/except in ``_sync_via_admin`` reports it exactly
+	like an admin failure, which is safer than rendering ``auth:"oauth"``
+	against a container with no credential behind it. That guarantee covers a
+	NO-MATCH loop too (jarvis#755 review): if nothing enabled turns out to be a
+	subscription row when this runs, falling off the loop without raising would
+	be exactly the silent skip this docstring promises never happens, so the
+	loop's tail raises the same way.
+
+	Returns ``(provider, blob)`` - the agent auth-profile id and the blob dict
+	with ``id_token`` already stripped.
+	"""
+	import json
+
+	from jarvis import admin_client
+	from jarvis.jarvis.pool_serialize import _model_accounts
+
+	for m in doc.models or []:
+		if not m.enabled or (getattr(m, "credential_type", None) or "api_key") != "subscription":
+			continue
+		accounts = _model_accounts(m)
+		if not accounts:
+			raise admin_client.AdminValidationError("direct subscription leg: no connected account to push")
+		blob_raw = (accounts[0].get("oauth_blob") if hasattr(accounts[0], "get") else "") or ""
+		try:
+			blob = json.loads(blob_raw) if blob_raw else None
+		except (TypeError, ValueError):
+			blob = None
+		if not isinstance(blob, dict) or not (blob.get("provider") or "").strip():
+			raise admin_client.AdminValidationError(
+				"direct subscription leg: missing or malformed oauth_blob"
+			)
+		direct_blob = {k: v for k, v in blob.items() if k != "id_token"}
+		return direct_blob["provider"], direct_blob
+	raise admin_client.AdminValidationError("direct subscription leg: no enabled subscription model to push")
+
+
 class JarvisSettings(Document):
 	def before_validate(self):
 		"""Mirror models[0] into legacy fields BEFORE validate() runs.
@@ -701,55 +761,100 @@ class JarvisSettings(Document):
 		agent's auth store, before the ``/llm-creds`` render that depends on it
 		(jarvis#715 step 3, point 4).
 
-		Mirrors ``jarvis.oauth.api.complete_paste_signin``'s push: the blob's own
-		``provider`` key already carries the agent auth-profile id
-		(``agent_provider`` - "openai", "google-gemini-cli" - baked in when the
-		blob was minted), so no separate upstream-to-provider table is needed
-		here, and ``id_token`` is stripped because fleet's ``PUT /auth-profile``
-		schema is strict (``extra_forbidden``) and only the POOL path's
-		cliproxy-codex reformat needs it.
-
-		Only ever called for the config ``_lone_direct_capable`` allowed onto this
-		leg, so there is exactly one enabled subscription model with exactly one
-		account and ``validate_models`` has already required a well-formed,
-		non-empty ``oauth_blob`` on it before ``save()`` could reach here. Raises
-		(rather than silently skipping the push) if that invariant is somehow
-		violated - the caller's surrounding try/except in ``_sync_via_admin``
-		reports it exactly like an admin failure, which is safer than rendering
-		``auth: "oauth"`` against a container with no credential behind it. That
-		guarantee covers a NO-MATCH loop too (jarvis#755 review): if nothing
-		enabled turns out to be a subscription row when this runs, falling off
-		the loop without raising would be exactly the silent skip this docstring
-		promises never happens, so the loop's tail raises the same way.
+		Thin wrapper around the module-level ``_direct_subscription_blob``
+		(find/validate/strip-``id_token``) plus the push itself - kept as a
+		method (not inlined) because it has two callers: the deploy-window
+		fallback leg of ``_sync_subscription_connect_restart`` (an admin that
+		has not yet deployed ``subscription_connect`` still needs the OLD
+		push-blob-then-creds sequence), and
+		``TestPushDirectSubscriptionBlobNoMatchInvariant``, which calls it
+		UNBOUND against a bare test fixture - see that helper's docstring for
+		the raise-not-skip guarantee this preserves.
 		"""
-		import json
-
 		from jarvis import admin_client
-		from jarvis.jarvis.pool_serialize import _model_accounts
 
-		for m in self.models or []:
-			if not m.enabled or (getattr(m, "credential_type", None) or "api_key") != "subscription":
-				continue
-			accounts = _model_accounts(m)
-			if not accounts:
-				raise admin_client.AdminValidationError(
-					"direct subscription leg: no connected account to push"
+		provider, direct_blob = _direct_subscription_blob(self)
+		admin_client.post_push_oauth_blob(provider, direct_blob)
+
+	def _sync_subscription_connect_restart(self) -> dict:
+		"""The subscription leg of the "restart" action's admin call.
+
+		Single call (``admin_client.post_subscription_connect``) to admin's
+		``api.tenant.subscription_connect``, which folds together what used to
+		be two round trips - push the DIRECT leg's oauth blob (the auth-profile
+		write), THEN render+restart via ``update-llm-creds`` - into one call
+		that does the doctor+healthz work behind it once. Payload building
+		reuses ``_direct_subscription_blob``'s find/validate/strip-``id_token``
+		logic (the same one ``_push_direct_subscription_blob`` used), so a
+		missing or malformed blob raises the identical ``AdminValidationError``
+		the ``_sync_via_admin`` except clauses already handle - this method
+		does not add a new failure shape, only a new call shape.
+
+		Admin's subscription_connect REQUIRES ``llm_provider`` (the catalog
+		label, e.g. "OpenAI") alongside the auth-profile ``provider`` id, and
+		derives the auth-profile id it expects from ``llm_provider`` - a blank
+		or mismatched one 400s (``ProviderMismatch``). ``on_update`` mirrors
+		``models[0].provider`` verbatim into ``self.llm_provider`` for EVERY
+		credential type, subscription included, so it is populated whenever a
+		save went through the SPA's own gate (jarvis#756's ``validatePool``
+		refuses a provider-less subscription row client-side) - but nothing on
+		the bench enforces that server-side, so a blank mirror is still
+		reachable here from any other caller of ``save_llm_pool``. Guarded
+		below with the same AdminValidationError shape the missing/malformed-
+		blob guard uses, so that reaches this method's caller as a clean local
+		rejection instead of a round trip that comes back a 400.
+
+		TODO(delete-me after admin-v2 subscription_connect deploys): admin may
+		not have the new dotted path live yet if this leg's PR lands before the
+		admin one. When ``post_subscription_connect`` comes back as Frappe's own
+		"no such whitelisted method" rejection
+		(``admin_client.is_method_not_found``), fall back to the old two-call
+		sequence this endpoint is meant to replace - same push-blob-then-creds
+		order the old code used, so a failure still lands before
+		``post_update_llm_creds`` could render ``auth:"oauth"`` against an empty
+		auth store. Any OTHER AdminValidationError (the new endpoint's own
+		business rejection - InvalidBlob, UnknownProvider, ProviderMismatch,
+		NoRunningTenant, ...) is not a deploy-window gap and re-raises straight
+		into the normal except clauses below.
+		"""
+		from jarvis import admin_client
+		from jarvis.installed_apps_sync import record_synced_snapshot
+
+		provider, blob = _direct_subscription_blob(self)
+		llm_provider = (self.llm_provider or "").strip()
+		if not llm_provider:
+			raise admin_client.AdminValidationError(
+				"direct subscription leg: missing llm_provider (catalog provider)"
+			)
+		try:
+			result = (
+				admin_client.post_subscription_connect(
+					provider,
+					blob,
+					llm_provider,
+					model=self.llm_model or "",
+					base_url=self.llm_base_url or "",
 				)
-			blob_raw = (accounts[0].get("oauth_blob") if hasattr(accounts[0], "get") else "") or ""
-			try:
-				blob = json.loads(blob_raw) if blob_raw else None
-			except (TypeError, ValueError):
-				blob = None
-			if not isinstance(blob, dict) or not (blob.get("provider") or "").strip():
-				raise admin_client.AdminValidationError(
-					"direct subscription leg: missing or malformed oauth_blob"
+				or {}
+			)
+		except admin_client.AdminValidationError as e:
+			if not admin_client.is_method_not_found(e):
+				raise
+			self._push_direct_subscription_blob()
+			result = (
+				admin_client.post_update_llm_creds(
+					provider=self.llm_provider or "",
+					model=self.llm_model or "",
+					base_url=self.llm_base_url or "",
+					api_key=self._resolve_llm_secret_for_push(),
+					auth_mode=creds_wire_auth_mode(self.llm_auth_mode),
 				)
-			direct_blob = {k: v for k, v in blob.items() if k != "id_token"}
-			admin_client.post_push_oauth_blob(blob["provider"], direct_blob)
-			return
-		raise admin_client.AdminValidationError(
-			"direct subscription leg: no enabled subscription model to push"
-		)
+				or {}
+			)
+		# The payload carries installed_apps either way; admin persisted it
+		# desired-first, so stamp even if the apply is converging.
+		record_synced_snapshot()
+		return result
 
 	def on_update(self):
 		# ------------------------------------------------------------------ #
@@ -1160,34 +1265,33 @@ class JarvisSettings(Document):
 				result = admin_client.post_rotate_llm_secret(secret=secret) or {}
 				resolved_action = result.get("action", "reload")
 			else:  # "restart"
-				# A models[]-table subscription on the DIRECT leg (jarvis#715 step 3,
-				# point 4) owns its own credential push: unlike the legacy oauth flow
-				# (whose blob reaches auth-profiles.json via complete_paste_signin
-				# BEFORE this job ever runs), the unified table's oauth_blob just sits
-				# in subscription_accounts until something pushes it. Push it FIRST -
-				# same order complete_paste_signin uses (blob, then creds) - so a
-				# failure here lands in the except clauses below and post_update_llm_creds
-				# never renders auth:"oauth" against an empty auth store.
 				if (self.llm_auth_mode or "") == "subscription":
-					self._push_direct_subscription_blob()
-				# In oauth mode the api_key body is empty - container reads
-				# credentials from auth-profiles.json instead.
-				secret = self._resolve_llm_secret_for_push()
-				result = (
-					admin_client.post_update_llm_creds(
-						provider=self.llm_provider or "",
-						model=self.llm_model or "",
-						base_url=self.llm_base_url or "",
-						api_key=secret,
-						auth_mode=creds_wire_auth_mode(self.llm_auth_mode),
+					# A models[]-table subscription on the DIRECT leg (jarvis#715 step
+					# 3, point 4) owns its own credential push: unlike the legacy oauth
+					# flow (whose blob reaches auth-profiles.json via
+					# complete_paste_signin BEFORE this job ever runs), the unified
+					# table's oauth_blob just sits in subscription_accounts until
+					# something pushes it. See _sync_subscription_connect_restart.
+					result = self._sync_subscription_connect_restart() or {}
+				else:
+					# In api_key mode the container reads the credential from this
+					# very push.
+					secret = self._resolve_llm_secret_for_push()
+					result = (
+						admin_client.post_update_llm_creds(
+							provider=self.llm_provider or "",
+							model=self.llm_model or "",
+							base_url=self.llm_base_url or "",
+							api_key=secret,
+							auth_mode=creds_wire_auth_mode(self.llm_auth_mode),
+						)
+						or {}
 					)
-					or {}
-				)
-				# The payload carried installed_apps; admin persisted it
-				# desired-first, so stamp even if the apply is converging.
-				from jarvis.installed_apps_sync import record_synced_snapshot
+					# The payload carried installed_apps; admin persisted it
+					# desired-first, so stamp even if the apply is converging.
+					from jarvis.installed_apps_sync import record_synced_snapshot
 
-				record_synced_snapshot()
+					record_synced_snapshot()
 				resolved_action = result.get("action", "restart")
 			# The push is the long part of this job, and until now every status
 			# write below still ran on the snapshot taken before it (#713). Ending
@@ -1507,8 +1611,9 @@ class JarvisSettings(Document):
 		# same model, same llm_auth_mode - so none of the checks in this function
 		# (structural_fields below, llm_api_key_changed) can see it. Without this,
 		# reconnecting an expired/revoked token would classify as "no change" and
-		# the fresh blob this leg itself pushes (_push_direct_subscription_blob)
-		# would never reach the container.
+		# the fresh blob this leg itself pushes (_sync_subscription_connect_restart,
+		# via post_subscription_connect or its _push_direct_subscription_blob
+		# deploy-window fallback) would never reach the container.
 		if old is not None and (self.llm_auth_mode or "") == "subscription":
 			current_snap = self.flags.get("pool_state_snapshot")
 			if current_snap is not None and current_snap != self._pool_state_snapshot(old):
