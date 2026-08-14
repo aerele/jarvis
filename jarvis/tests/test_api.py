@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import frappe
@@ -1049,3 +1050,30 @@ class TestDispatchFromSessionResultBudget(FrappeTestCase):
 		env = self._dispatch(small)
 		self.assertTrue(env["ok"])
 		self.assertEqual(env["data"], small)
+
+	def test_dispatch_current_user_result_not_truncated(self):
+		"""_dispatch_current_user (dashboard-builder/desk/external call_tool)
+		is deliberately uncapped - the budget guard lives ONLY on the openclaw
+		agent path (_dispatch_from_session), not the shared path this uses."""
+		from jarvis.api import _dispatch_current_user
+
+		big = [{"name": f"C{i}", "blob": "x" * 80} for i in range(3000)]
+		with patch("jarvis.api._run_tool", return_value={"ok": True, "data": big}):
+			env = _dispatch_current_user("get_list", {})
+		self.assertTrue(env["ok"])
+		self.assertIsInstance(env["data"], list)
+		self.assertEqual(len(env["data"]), 3000)
+
+	def test_session_path_emits_budget_telemetry(self):
+		"""The session path reports the truncation to telemetry with the
+		ORIGINAL (pre-truncation) size, not the shrunk one."""
+		big = [{"name": f"C{i}", "blob": "x" * 80} for i in range(3000)]
+		expected_chars = len(json.dumps(big, default=str, ensure_ascii=False, separators=(",", ":")))
+		with patch("jarvis.api.telemetry.record_budget_event") as record_mock:
+			self._dispatch(big)
+		record_mock.assert_called_once()
+		_, kwargs = record_mock.call_args
+		self.assertEqual(kwargs["tool"], "get_list")
+		self.assertEqual(kwargs["kind"], "truncated")
+		self.assertEqual(kwargs["original_chars"], expected_chars)
+		self.assertEqual(kwargs["total"], 3000)
