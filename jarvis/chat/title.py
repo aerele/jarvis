@@ -81,6 +81,86 @@ _TITLE_PROMPT = (
 )
 
 
+# A credential/provider-auth fault on the PINNED title/suggestions lane (#531
+# pins model+provider, dropping failover) gets no signal today: it is
+# swallowed exactly like an ordinary transient gateway blip, so an operator
+# has nothing to key on. This is deliberately narrow - HTTP 401/403 and each
+# provider's own auth vocabulary - so an ordinary failure (rate limit,
+# timeout, context overflow) still stays silently swallowed (#738).
+_AUTH_FAULT_RE = re.compile(
+	r"\b40[13]\b"
+	r"|unauthorized|unauthenticated|forbidden"
+	r"|authentication[_ ]?error"
+	r"|invalid[_ -]?api[_ -]?key|invalid[_ -]x-api-key|incorrect api key"
+	r"|permission[_ -]?denied"
+	r"|credential",
+	re.IGNORECASE,
+)
+
+
+def _is_auth_fault(text: str | None) -> bool:
+	"""True when ``text`` (a provider error string, or an exception's own text)
+	names an auth/credential fault rather than an ordinary failure."""
+	return bool(text) and bool(_AUTH_FAULT_RE.search(text))
+
+
+def _auth_fault_detail(exc: Exception) -> str | None:
+	"""The matched auth-fault text for ``exc``, or None when it isn't one.
+
+	Checks the exception's own message plus, when present, the structured
+	``.code`` / ``.details`` an ``AgentUnreachableError`` carries (see
+	jarvis.chat.agent_client). Explicitly excludes a stale device-token
+	pairing fault (``_is_stale_pairing``) - that is a whole-connection auth
+	failure with its own self-heal path, not a pinned-model credential
+	problem, and folding it in here would widen the signal past #738's scope."""
+	from jarvis.chat.agent_client import _is_stale_pairing
+
+	if _is_stale_pairing(exc):
+		return None
+	parts = [str(exc)]
+	code = getattr(exc, "code", None)
+	if code:
+		parts.append(str(code))
+	details = getattr(exc, "details", None)
+	if isinstance(details, dict):
+		parts.extend(str(v) for v in details.values())
+	combined = " | ".join(p for p in parts if p)
+	return combined if _is_auth_fault(combined) else None
+
+
+def _log_pinned_lane_auth_fault(lane: str, detail: str, *, model: str | None, provider: str | None) -> None:
+	"""Distinct, greppable Error Log for a credential fault on the PINNED
+	title/suggestions lane, so an operator (or the admin Errors feed that
+	``jarvis.error_push`` already forwards every jarvis-origin Error Log row
+	to, on its */5 cron) can key on this one instead of it drowning among
+	ordinary swallowed gateway blips. Still best-effort and additive only:
+	the lane's own fallback (derive_title / the previous suggestions strip)
+	runs exactly as it does for any other failure - this never changes what
+	the customer sees, it only adds the operator signal (#738).
+
+	The dotted ``jarvis.chat.<lane>:`` title is load-bearing on the
+	lifecycle-error path (no traceback to key off), where
+	``api_errors.is_jarvis_error`` only recognises this row via
+	``method.split(".", 1)[0] == "jarvis"``. The trailing synthetic
+	exception line gives ``api_errors._parse_traceback`` a real (class,
+	message) pair, so the admin-feed fingerprint keys on THIS fault instead
+	of folding into every other traceback-less log call here."""
+	exc_class = f"JarvisPinned{lane.capitalize()}AuthError"
+	try:
+		frappe.log_error(
+			title=f"jarvis.chat.{lane}: pinned lane auth fault",
+			message=(
+				f"Pinned-lane credential fault (#738): the {lane} lane pins "
+				f"model={model!r} provider={provider!r} and cannot fail over "
+				f"(#531). Chat/title continues via the lane's own fallback; "
+				f"this is only the operator signal.\n\n{detail}\n\n"
+				f"{exc_class}: lane={lane} model={model!r} provider={provider!r}"
+			),
+		)
+	except Exception:
+		pass
+
+
 def _clean(text: str | None) -> str:
 	return (text or "").strip()
 
@@ -156,6 +236,7 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 
 	prompt = _TITLE_PROMPT.format(msg=source_text[:_SOURCE_MAX_CHARS])
 	text = ""
+	lifecycle_error: str | None = None
 	# agent rejects sessions.create with a label that's already in use, so
 	# the label MUST be unique per call — a fixed "jarvis-title" works the first
 	# time then fails ("label already in use") and silently falls back to the
@@ -180,6 +261,12 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 				):
 					if ev.get("kind") == "assistant" and ev.get("text"):
 						text = ev["text"]
+					elif ev.get("kind") == "lifecycle" and ev.get("phase") == "error" and ev.get("error"):
+						# openclaw's ONLY place the run names a provider failure
+						# (see agent_client.failed_final_error). Not raised - the
+						# loop just ends with no text - so without this it is
+						# invisible: not even the generic except below fires.
+						lifecycle_error = str(ev["error"])
 				run_ended = True
 			finally:
 				# Reclaim the throwaway on the SAME pooled connection, turn
@@ -215,12 +302,17 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 					logger_name="jarvis.chat.title",
 					fired_at=None if run_ended else fired_at,
 				)
-	except Exception:
+	except Exception as e:
+		detail = _auth_fault_detail(e)
+		if detail:
+			_log_pinned_lane_auth_fault("title", detail, model=model, provider=provider)
 		frappe.log_error(
 			title="auto-title: gateway generation failed",
 			message=frappe.get_traceback(),
 		)
 		return ""
+	if not text and _is_auth_fault(lifecycle_error):
+		_log_pinned_lane_auth_fault("title", lifecycle_error, model=model, provider=provider)
 	return normalize_title(text)
 
 
