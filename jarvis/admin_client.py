@@ -973,10 +973,10 @@ def post_push_oauth_blob(provider: str, blob: dict) -> dict:
 def post_subscription_connect(
 	provider: str,
 	blob: dict,
+	llm_provider: str,
 	*,
 	model: str,
 	base_url: str,
-	api_key: str = "",
 	installed_apps: list[str] | None = None,
 ) -> dict:
 	"""POST one combined subscription-connect to admin's
@@ -990,24 +990,35 @@ def post_subscription_connect(
 
 	``provider`` is the agent auth-profile id baked into the oauth blob itself
 	(``blob["provider"]`` - "openai", "google-gemini-cli", ...; the same
-	identifier ``post_push_oauth_blob`` took), NOT necessarily
-	``Jarvis Settings.llm_provider`` - that legacy mirror is often blank for a
-	subscription model row (the UI never asks for a catalog provider on the
-	subscription leg; upstream + account already say which one). ``blob`` is
-	that oauth blob with ``id_token`` already stripped (fleet's
-	``PUT /auth-profile`` schema is ``extra_forbidden``).
+	identifier ``post_push_oauth_blob`` took). ``llm_provider`` is the
+	customer-facing catalog label ``post_update_llm_creds`` takes as its own
+	``provider`` argument (e.g. "OpenAI"). Admin REQUIRES both and derives the
+	auth-profile id it expects from ``llm_provider``, 400ing
+	(``ProviderMismatch``) when the two disagree - so a caller must never send
+	a blank or mismatched ``llm_provider``; see
+	``jarvis_settings._sync_subscription_connect_restart`` for the local guard
+	that refuses a blank one before this is ever called. ``blob`` is the oauth
+	blob with ``id_token`` already stripped (fleet's ``PUT /auth-profile``
+	schema is ``extra_forbidden``).
 
-	``model``/``base_url``/``api_key``/``installed_apps`` mirror
-	``post_update_llm_creds``'s creds fields for parity with the two-call shape
-	this replaces - ``api_key`` is empty in practice (oauth mode's credential
-	lives in the auth-profile store, not here) but is still sent, matching what
-	the old restart leg sent unconditionally. ``auth_mode`` is hardcoded to
-	``"oauth"`` on the wire (not a parameter): this endpoint exists only for
-	the subscription/oauth leg, so there is nothing else it could be.
+	``model``/``base_url``/``installed_apps`` mirror ``post_update_llm_creds``'s
+	creds fields for parity with the two-call shape this replaces. Admin's
+	``subscription_connect`` does not declare ``api_key`` or ``auth_mode`` (an
+	oauth-only endpoint has no other mode to name), so neither is sent - a
+	kwarg Frappe's whitelist handler does not declare is silently dropped, so
+	sending them would be dead weight, not a hidden bug.
 
 	Timeout is 240s - strictly above the admin->fleet leg's own 210s budget
 	(same each-layer-exceeds-the-one-below rule as PR#826): this outer
 	bench->admin leg must never hang up on an apply admin is still driving.
+	Past ~180s admin's own gunicorn worker can time out before the merged
+	fleet round trip returns (rare, but this leg's work is strictly more than
+	either old call did alone); the HTTP response is then lost, but admin
+	already persisted the desired state before dispatching to fleet, so the
+	existing reconcile path (``_confirm_apply_via_admin`` / the periodic
+	reconcile) converges the tenant without this leg retrying - a stray
+	"failed: admin unreachable" on a slow connect is transient and
+	self-corrects, not lost work.
 
 	Raises:
 		AdminAuthError, AdminUnreachableError, AdminValidationError,
@@ -1021,10 +1032,9 @@ def post_subscription_connect(
 		body={
 			"provider": provider,
 			"blob": blob,
+			"llm_provider": llm_provider,
 			"model": model,
 			"base_url": base_url,
-			"api_key": api_key,
-			"auth_mode": "oauth",
 			"installed_apps": installed_apps if installed_apps is not None else frappe.get_installed_apps(),
 		},
 		timeout_s=240,
@@ -1920,12 +1930,32 @@ def is_method_not_found(exc: AdminValidationError) -> bool:
 	Callers use this to detect a deploy-order gap - this leg shipped ahead of
 	the admin endpoint it calls - and fall back to an older call sequence,
 	without keying off business-message text an admin release can reword (see
-	the marker comment above). The asymmetry in what this accepts is
-	deliberate: a false positive here just runs the old two-call sequence
-	(harmless - it is today's production path), while a false negative would
-	leave subscription connects broken until admin deploys, so the check
-	matches broadly rather than narrowly.
+	the marker comment above).
+
+	The landed ``subscription_connect``'s own 400/409 business rejections
+	(InvalidBlob, UnknownProvider, ProviderMismatch, NoRunningTenant,
+	InvalidIdempotencyKey) all route through ``@fleet_endpoint``'s
+	``EndpointError`` family, which ALWAYS sets a structured ``error.code`` -
+	that arrives here as an ``AdminContractError`` (an AdminValidationError
+	subclass) with a non-empty ``code``, whereas Frappe's OWN missing-method
+	rejection is a bare ``AdminValidationError`` with no ``code`` at all.
+	Checking that first is a stronger signal than the message text below: it
+	excludes every CURRENT admin business rejection outright, by shape rather
+	than by wording, so a future admin release is free to reword any of those
+	messages without this silently drifting. (RateLimitExceeded's 429 never
+	reaches here at all - ``_do_post`` special-cases 429 into
+	``AdminRateLimitedError``, a sibling exception this function is never
+	called with.)
+
+	The message check is what is left to guard against an admin business
+	rejection that (now or later) uses a bare ``frappe.throw`` with no code -
+	the asymmetry in what it accepts is deliberate: a false positive here just
+	runs the old two-call sequence (harmless - it is today's production
+	path), while a false negative would leave subscription connects broken
+	until admin deploys, so it matches broadly rather than narrowly.
 	"""
+	if getattr(exc, "code", ""):
+		return False
 	if getattr(exc, "exc_type", None) not in (None, "ValidationError"):
 		return False
 	text = str(exc)

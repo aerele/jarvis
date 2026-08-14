@@ -99,6 +99,13 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 	def _lone_subscription_models(self, upstream="openai", provider="openai", blob=None):
 		return [
 			{
+				# jarvis#756: the SPA's own validatePool gate refuses a
+				# provider-less subscription row client-side, so a real save
+				# always carries this - on_update mirrors it verbatim into
+				# self.llm_provider, which admin-v2's subscription_connect
+				# (jarvis_admin_v2 branch feat/subscription-connect-relay)
+				# requires.
+				"provider": provider,
 				"model": "gpt-5.5",
 				"tier": "strong",
 				"order": 0,
@@ -133,8 +140,9 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 			)
 		pool.assert_not_called()
 		connect.assert_called_once()
-		provider, _blob = connect.call_args.args
+		provider, _blob, llm_provider = connect.call_args.args
 		self.assertEqual(provider, "openai")
+		self.assertEqual(llm_provider, "openai")
 		self.assertEqual(connect.call_args.kwargs.get("model"), "gpt-5.5")
 		s = frappe.get_single("Jarvis Settings")
 		self.assertEqual(int(s.proxy_active or 0), 0)
@@ -249,6 +257,29 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 		self.assertEqual(calls[1][1].get("auth_mode"), "oauth")
 		s = frappe.get_single("Jarvis Settings")
 		self.assertTrue(s.last_sync_status.startswith("ok"), f"expected ok, got {s.last_sync_status!r}")
+
+	def test_blank_llm_provider_is_a_clean_local_rejection(self):
+		"""admin's subscription_connect REQUIRES llm_provider and 400s
+		(ProviderMismatch) on a blank one. A provider-less subscription row is
+		refused client-side by the SPA's own validatePool gate (jarvis#756),
+		but nothing enforces that server-side, so a non-SPA caller of
+		save_llm_pool can still reach this leg with one. That must surface as
+		a clean local rejection - never an admin round trip, never the
+		method-not-found fallback."""
+		models = self._lone_subscription_models()
+		del models[0]["provider"]
+		with (
+			patch("jarvis.admin_client.post_subscription_connect") as connect,
+			patch("jarvis.admin_client.post_push_oauth_blob") as blob,
+			patch("jarvis.admin_client.post_update_llm_creds") as creds,
+		):
+			onboarding.save_llm_pool(frappe.as_json(models), preset=None, routing_mode="failover")
+		connect.assert_not_called()
+		blob.assert_not_called()
+		creds.assert_not_called()
+		s = frappe.get_single("Jarvis Settings")
+		self.assertTrue(s.last_sync_status.startswith("failed: validation:"))
+		self.assertIn("missing llm_provider", s.last_sync_status)
 
 	def test_one_unrenderable_subscription_model_is_still_proxy(self):
 		"""Kimi has no agent-native auth flow → still needs cliproxy → the

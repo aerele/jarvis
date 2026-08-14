@@ -332,6 +332,12 @@ class TestOrphanCaptureAdoption(_RT3SettingsTestCase):
 		acct.update(extra)
 		return [
 			{
+				# jarvis#756: the SPA's own validatePool gate refuses a
+				# provider-less subscription row client-side, so a real save
+				# always carries this - on_update mirrors it verbatim into
+				# self.llm_provider, which admin's subscription_connect now
+				# requires.
+				"provider": "openai",
 				"model": "gpt-5.5",
 				"tier": "strong",
 				"order": 0,

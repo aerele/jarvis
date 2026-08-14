@@ -1410,6 +1410,12 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 		)
 		return [
 			{
+				# jarvis#756: the SPA's own validatePool gate refuses a
+				# provider-less subscription row client-side, so a real save
+				# always carries this - on_update mirrors it verbatim into
+				# self.llm_provider, which admin's subscription_connect now
+				# requires.
+				"provider": agent_provider,
 				"model": "gpt-5.5",
 				"tier": "cheap",
 				"order": 0,
@@ -1452,14 +1458,16 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 		self.assertEqual(pool_calls, [], "a fresh lone renderable subscription must never push /llm-pool")
 		self.assertEqual(out["mode"], "legacy", "no apply-operation descriptor on the direct leg")
 
-		# ONE call now carries both the oauth blob (id_token stripped) and the
-		# creds fields (jarvis#715 step 3, point 4 - collapsed from two admin
-		# round trips into one subscription_connect call). auth_mode itself is
-		# hardcoded to "oauth" inside post_subscription_connect, not a caller
-		# kwarg - see test_admin_client.py for that body-construction test.
+		# ONE call now carries the oauth blob (id_token stripped), the
+		# auth-profile provider, AND the catalog llm_provider admin's
+		# subscription_connect cross-checks against it (jarvis#715 step 3,
+		# point 4 - collapsed from two admin round trips into one call).
+		# Admin does not declare api_key or auth_mode, so post_subscription_connect
+		# does not send them - see test_admin_client.py for that body test.
 		mock_connect.assert_called_once()
-		provider, pushed_blob = mock_connect.call_args.args
+		provider, pushed_blob, llm_provider = mock_connect.call_args.args
 		self.assertEqual(provider, "openai")
+		self.assertEqual(llm_provider, "openai")
 		self.assertNotIn("id_token", pushed_blob)
 		self.assertEqual(pushed_blob.get("refresh"), "RT-direct")
 		self.assertEqual(mock_connect.call_args.kwargs.get("model"), "gpt-5.5")

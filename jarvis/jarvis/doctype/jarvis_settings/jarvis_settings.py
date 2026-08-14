@@ -793,6 +793,20 @@ class JarvisSettings(Document):
 		the ``_sync_via_admin`` except clauses already handle - this method
 		does not add a new failure shape, only a new call shape.
 
+		Admin's subscription_connect REQUIRES ``llm_provider`` (the catalog
+		label, e.g. "OpenAI") alongside the auth-profile ``provider`` id, and
+		derives the auth-profile id it expects from ``llm_provider`` - a blank
+		or mismatched one 400s (``ProviderMismatch``). ``on_update`` mirrors
+		``models[0].provider`` verbatim into ``self.llm_provider`` for EVERY
+		credential type, subscription included, so it is populated whenever a
+		save went through the SPA's own gate (jarvis#756's ``validatePool``
+		refuses a provider-less subscription row client-side) - but nothing on
+		the bench enforces that server-side, so a blank mirror is still
+		reachable here from any other caller of ``save_llm_pool``. Guarded
+		below with the same AdminValidationError shape the missing/malformed-
+		blob guard uses, so that reaches this method's caller as a clean local
+		rejection instead of a round trip that comes back a 400.
+
 		TODO(delete-me after admin-v2 subscription_connect deploys): admin may
 		not have the new dotted path live yet if this leg's PR lands before the
 		admin one. When ``post_subscription_connect`` comes back as Frappe's own
@@ -802,21 +816,27 @@ class JarvisSettings(Document):
 		order the old code used, so a failure still lands before
 		``post_update_llm_creds`` could render ``auth:"oauth"`` against an empty
 		auth store. Any OTHER AdminValidationError (the new endpoint's own
-		business rejection) is not a deploy-window gap and re-raises straight
+		business rejection - InvalidBlob, UnknownProvider, ProviderMismatch,
+		NoRunningTenant, ...) is not a deploy-window gap and re-raises straight
 		into the normal except clauses below.
 		"""
 		from jarvis import admin_client
 		from jarvis.installed_apps_sync import record_synced_snapshot
 
 		provider, blob = _direct_subscription_blob(self)
+		llm_provider = (self.llm_provider or "").strip()
+		if not llm_provider:
+			raise admin_client.AdminValidationError(
+				"direct subscription leg: missing llm_provider (catalog provider)"
+			)
 		try:
 			result = (
 				admin_client.post_subscription_connect(
 					provider,
 					blob,
+					llm_provider,
 					model=self.llm_model or "",
 					base_url=self.llm_base_url or "",
-					api_key=self._resolve_llm_secret_for_push(),
 				)
 				or {}
 			)
