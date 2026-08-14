@@ -1378,29 +1378,42 @@ def start_account_reconnect(email: str, company: str = "") -> dict:
 
 @frappe.whitelist()
 def check_account_reconnect(request_id: str, code: str = "") -> dict:
-	"""Redeem the reconnect code the customer received by email (or from
-	support). Only a correct code releases anything: admin then rotates and
-	delivers the credentials — persist them and
-	grant the onboarding admin role, exactly like a fresh signup would.
-
-	Two outcomes, because there are two things a reconnect can recover
-	(admin-v2 #162):
-
-	- ``connected`` - a PAID account whose container is already running. The
-	  wizard rides the normal sync_connection path to it; only the LLM step
-	  needs re-doing on this fresh site.
-	- ``resume_payment`` - an UNFINISHED checkout (declined card, interrupted
-	  payment). There is no container, so sync_connection has nothing to reach
-	  and the wizard would sit on "setting up your workspace" forever. What was
-	  recovered is the ability to authenticate, which is precisely what
-	  ``resume_pending_signup`` needs, so the wizard goes back to Pay.
-
-	Read off admin's ``subscription_status``. An admin that predates that key
-	sends nothing and this answers ``connected``, which is exactly what it
-	answered before and is right for the only population that admin can
-	reconnect."""
+	"""Redeem the reconnect code the customer received BY EMAIL (the customer-
+	started request path). Only a correct code releases anything: admin rotates and
+	delivers the credentials, which _land_reconnect persists — see it for the
+	connected-vs-resume_payment outcomes."""
 	require_jarvis_admin()
 	data = _surface(admin_client.get_reconnect_state, request_id, code) or {}
+	return _land_reconnect(data)
+
+
+@frappe.whitelist()
+def redeem_reconnect_code(code: str, email: str = "") -> dict:
+	"""Redeem an OPERATOR-ISSUED reconnect code on this fresh bench — the
+	request-less counterpart to check_account_reconnect. The customer got the code
+	from support (out of band) and enters it PLUS their registered email; admin
+	verifies both, rotates, and returns the SAME ready bundle, which lands
+	identically (_land_reconnect). No prior customer-started request exists, so
+	there is no request_id. Same require_jarvis_admin gate: the customer is admin on
+	their own new bench. A wrong/expired/unmatched code comes back ``invalid``."""
+	require_jarvis_admin()
+	data = _surface(admin_client.redeem_reconnect_code, code, email) or {}
+	return _land_reconnect(data)
+
+
+def _land_reconnect(data: dict) -> dict:
+	"""Persist a reconnect ready-bundle and grant the onboarding admin role, exactly
+	like a fresh signup would. Shared by the email/poll path
+	(check_account_reconnect) and the operator-code path (redeem_reconnect_code):
+	both receive the SAME ready bundle from admin, so landing MUST be identical or
+	the two paths would diverge in what a reconnected site ends up holding.
+
+	Two ready outcomes (admin-v2 #162): ``connected`` — a PAID account whose
+	container is already running (ride sync_connection; only the LLM step re-does on
+	this fresh site); ``resume_payment`` — an UNFINISHED checkout with no container,
+	so the wizard goes back to Pay. Anything not ``ready`` (pending / awaiting_code /
+	expired / invalid) is surfaced verbatim for the caller to render."""
+	data = data or {}
 	if data.get("status") != "ready":
 		return {"status": data.get("status") or "expired"}
 	# A reconnect deliberately re-points this bench at an existing account's

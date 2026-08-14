@@ -1445,7 +1445,27 @@ class TestPublicOriginSweep(FrappeTestCase):
 		with patch("requests.post", side_effect=_fake_post):
 			admin_client.site_replacement()
 			admin_client.request_account_reconnect("e@x.com", "Co")
-		self.assertEqual(seen, ["https://tenant.example.com", "https://tenant.example.com"])
+			# redeem is guest-callable and hands over a workspace: the site URL MUST
+			# be server-derived, never taken from the customer, or the code could be
+			# redeemed onto a site the attacker doesn't control.
+			admin_client.redeem_reconnect_code("ABCD2345", "e@x.com")
+		self.assertEqual(seen, ["https://tenant.example.com"] * 3)
+
+	def test_redeem_forwards_code_and_email(self):
+		_settings_clear_admin()
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		captured = {}
+
+		def _fake_post(url, json=None, headers=None, timeout=None):
+			captured["url"] = url
+			captured["json"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {"status": "invalid"}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			admin_client.redeem_reconnect_code("ABCD2345", "e@x.com")
+		self.assertTrue(captured["url"].endswith("billing.reconnect.redeem_reconnect_code"))
+		self.assertEqual(captured["json"]["code"], "ABCD2345")
+		self.assertEqual(captured["json"]["email"], "e@x.com")
 
 
 class TestPostUpdateLlmCredsAuthMode(FrappeTestCase):

@@ -53,6 +53,11 @@ export const startAccountReconnect = (email, company = "") =>
 	call("jarvis.onboarding.start_account_reconnect", { email, company });
 export const checkAccountReconnect = (requestId, code) =>
 	call("jarvis.onboarding.check_account_reconnect", { request_id: requestId, code: code || "" });
+// Operator-issued code path: no prior request, so the customer supplies the code
+// they got from support PLUS their registered email (the second factor). Same
+// landing as check_account_reconnect; a wrong/expired/unmatched pair -> "invalid".
+export const redeemReconnectCode = (code, email) =>
+	call("jarvis.onboarding.redeem_reconnect_code", { code: code || "", email: email || "" });
 
 export const isReadyForChat = () => call("jarvis.account.is_ready_for_chat");
 // Re-drive this workspace's saved AI config through admin - the customer lever

@@ -1978,6 +1978,80 @@ class TestAccountReconnect(FrappeTestCase):
 			out = onboarding.check_account_reconnect("rid-x")
 		self.assertEqual(out["status"], "expired")
 
+	# ---- operator-issued code path (redeem_reconnect_code) -------------------
+	def test_redeem_forwards_code_and_email_and_lands_connected(self):
+		"""The request-less path: forward exactly (code, email) to admin and land
+		the returned ready bundle the same way check_account_reconnect does."""
+		_set_token("")
+		with patch(
+			"jarvis.onboarding.admin_client.redeem_reconnect_code",
+			return_value={
+				"status": "ready",
+				"api_key": "rk-key",
+				"api_secret": "rk-secret",
+				"customer": "someone@example.com",
+				"customer_password": "rk-pass",
+			},
+		) as redeem:
+			out = onboarding.redeem_reconnect_code("ABCD2345", "someone@example.com")
+		# email is the second factor - it MUST reach admin (never dropped).
+		redeem.assert_called_once_with("ABCD2345", "someone@example.com")
+		self.assertEqual(out["status"], "connected")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.get_password("jarvis_admin_api_key", raise_exception=False), "rk-key")
+		self.assertEqual(s.jarvis_admin_customer_email, "someone@example.com")
+
+	def test_redeem_invalid_writes_nothing(self):
+		"""A generic invalid (wrong/expired code, or email mismatch) persists no
+		credentials and is surfaced verbatim for the wizard to render."""
+		_set_token("")
+		with patch(
+			"jarvis.onboarding.admin_client.redeem_reconnect_code",
+			return_value={"status": "invalid"},
+		):
+			out = onboarding.redeem_reconnect_code("WRONGCODE", "someone@example.com")
+		self.assertEqual(out["status"], "invalid")
+		s = frappe.get_single("Jarvis Settings")
+		self.assertFalse(s.get_password("jarvis_admin_api_key", raise_exception=False))
+
+	def test_redeem_pending_payment_routes_to_resume(self):
+		"""Same admin-v2 #162 branch as the emailed path: an unfinished checkout has
+		no container, so the wizard goes back to Pay, not sync_connection."""
+		_set_token("")
+		with patch(
+			"jarvis.onboarding.admin_client.redeem_reconnect_code",
+			return_value={
+				"status": "ready",
+				"api_key": "pp-key",
+				"api_secret": "pp-secret",
+				"customer": "cust-xyz@jarvis.invalid",
+				"customer_password": "pp-pass",
+				"subscription_status": "Pending Payment",
+			},
+		):
+			out = onboarding.redeem_reconnect_code("ABCD2345", "x@y.example")
+		self.assertEqual(out["status"], "resume_payment")
+
+	def test_both_paths_share_the_same_landing(self):
+		"""The emailed poll and the operator-code redeem MUST land identically -
+		both delegate to _land_reconnect. Inlining either path's landing (so the two
+		could drift in what a reconnected site ends up holding) breaks this."""
+		ready = {
+			"status": "ready",
+			"api_key": "s-key",
+			"api_secret": "s-secret",
+			"customer": "shared@example.com",
+			"customer_password": "s-pass",
+		}
+		with patch("jarvis.onboarding._land_reconnect", return_value={"status": "connected"}) as land:
+			with patch("jarvis.onboarding.admin_client.get_reconnect_state", return_value=dict(ready)):
+				onboarding.check_account_reconnect("rid-1", "ABCD2345")
+			with patch("jarvis.onboarding.admin_client.redeem_reconnect_code", return_value=dict(ready)):
+				onboarding.redeem_reconnect_code("ABCD2345", "shared@example.com")
+		self.assertEqual(land.call_count, 2)
+		for call in land.call_args_list:
+			self.assertEqual(call.args[0].get("api_key"), "s-key")
+
 
 class TestCredentialChangeBustsTheTokenCache(FrappeTestCase):
 	"""A cached bearer outlives the credentials it was minted from. Reconnecting a
