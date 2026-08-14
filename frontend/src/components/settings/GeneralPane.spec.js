@@ -291,7 +291,7 @@ describe("GeneralPane Reset onboarding button", () => {
 	function resetBtn(w) {
 		return w
 			.findAll(".stub-button")
-			.find((b) => b.attributes("data-label") === "Reset onboarding");
+			.find((b) => b.attributes("data-label") === "Reset to onboarding");
 	}
 
 	beforeEach(() => {
@@ -302,9 +302,9 @@ describe("GeneralPane Reset onboarding button", () => {
 
 	it("is offered to an admin and hidden from a member", async () => {
 		const wAdmin = await mountAs({ admin: true });
-		expect(buttonLabels(wAdmin)).toContain("Reset onboarding");
+		expect(buttonLabels(wAdmin)).toContain("Reset to onboarding");
 		const wMember = await mountAs({ admin: false });
-		expect(buttonLabels(wMember)).not.toContain("Reset onboarding");
+		expect(buttonLabels(wMember)).not.toContain("Reset to onboarding");
 	});
 
 	// The backend (dev.reset_onboarding) is only_for("System Manager"), stricter
@@ -313,7 +313,7 @@ describe("GeneralPane Reset onboarding button", () => {
 	// control. It still sees the rest of the danger zone (gated on isSM).
 	it("is hidden from a Jarvis-Admin-only seat that the backend would reject", async () => {
 		const w = await mountAs({ admin: false, jarvisAdmin: true });
-		expect(buttonLabels(w)).not.toContain("Reset onboarding");
+		expect(buttonLabels(w)).not.toContain("Reset to onboarding");
 		// The danger zone itself renders for this seat — only this stricter button is gone.
 		expect(buttonLabels(w)).toContain("Reset workspace");
 	});

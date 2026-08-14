@@ -269,7 +269,7 @@
 			     reset-onboarding CLI); the red solid lives in the useConfirm. -->
 			<div v-if="isSystemManager" class="mt-6 flex items-start justify-between gap-4">
 				<div class="flex flex-col gap-0.5">
-					<span class="text-base font-medium text-ink-gray-8">Reset onboarding</span>
+					<span class="text-base font-medium text-ink-gray-8">Reset to onboarding</span>
 					<span class="max-w-lg text-p-sm text-ink-gray-6">
 						Clears this workspace's connection and AI setup and permanently deletes all
 						content (chats, skills, macros, triggers, learned patterns, wiki pages and
@@ -280,7 +280,7 @@
 				<Button
 					variant="subtle"
 					theme="red"
-					label="Reset onboarding"
+					label="Reset to onboarding"
 					:loading="onboardingResetBusy"
 					@click="doResetOnboarding"
 				/>
@@ -678,10 +678,10 @@ async function doReset() {
 // onboarding wizard. Full wipe every time, per the reset-onboarding CLI.
 async function doResetOnboarding() {
 	const ok = await confirm({
-		title: "Reset onboarding?",
+		title: "Reset to onboarding?",
 		message:
 			"This permanently deletes all chats, skills, macros, triggers, learned patterns, wiki pages and dashboards, and clears your AI setup, then restarts the setup wizard. Your subscription is kept. This cannot be undone.",
-		confirmLabel: "Reset onboarding",
+		confirmLabel: "Reset to onboarding",
 		danger: true,
 	});
 	if (!ok) return;
