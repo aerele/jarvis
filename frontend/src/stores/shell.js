@@ -36,6 +36,14 @@ const settingsSection = ref("general"); // active pane key in the settings dialo
 // openSettings() below - so a section switch can never abandon an in-flight
 // apply regardless of which caller triggered it (jarvis#821 review).
 const settingsApplying = ref(false);
+// Bumped whenever the tenant's LLM config changes (a pool save, a subscription
+// connect/disconnect) so views that snapshot chat-ui settings at mount - the
+// chat model picker in particular - can re-fetch instead of showing a stale
+// model list until a full page reload (jarvis: pin-not-refreshed-after-add).
+const llmConfigVersion = ref(0);
+function bumpLlmConfig() {
+	llmConfigVersion.value += 1;
+}
 const pendingNewChat = ref(false); // consumed + cleared by ChatView
 const paletteOpen = ref(false);
 
@@ -476,6 +484,7 @@ const store = reactive({
 	settingsOpen,
 	settingsSection,
 	settingsApplying,
+	llmConfigVersion,
 	chatContext,
 	settingsActions,
 	activityDetail,
@@ -509,6 +518,7 @@ const store = reactive({
 	applyRemoteNew,
 	markUnread,
 	clearUnread,
+	bumpLlmConfig,
 });
 
 export function useShellStore() {

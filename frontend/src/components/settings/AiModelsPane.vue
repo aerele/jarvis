@@ -183,6 +183,8 @@ async function loadDirectSub() {
 // reflects the new state.
 async function onDirectChanged() {
 	await loadDirectSub();
+	// A connect/disconnect changes which models the chat picker can offer.
+	store.bumpLlmConfig();
 }
 
 // After a pool save: flash the note and re-probe direct status (a save can't
@@ -199,6 +201,9 @@ async function onSaved(sync) {
 		savedNote.value = "";
 	}, 4000);
 	await loadDirectSub();
+	// Tell any mounted chat view its model list just changed so the picker
+	// refreshes without a full page reload.
+	store.bumpLlmConfig();
 }
 
 onMounted(loadDirectSub);

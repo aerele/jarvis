@@ -9881,6 +9881,19 @@ onMounted(async () => {
 		if (busy.value) nowMs.value = Date.now();
 	}, 1000);
 	ui.value = (await uiP) || {};
+	// The model picker snapshots ui at mount. When AI-model settings change in
+	// the settings dialog (a pool save or a subscription connect/disconnect),
+	// the shell store bumps llmConfigVersion; re-fetch so the pin reflects the
+	// new model list without a full page reload. Fields the picker reads
+	// (pool_models, catalog_models, llm_model, ...) all live on this object, and
+	// getChatUiSettings is the same call the mount used, so a reassign is safe.
+	watch(
+		() => store.llmConfigVersion,
+		async () => {
+			const next = await api.getChatUiSettings().catch(() => null);
+			if (next) ui.value = next;
+		}
+	);
 	// Reconcile the persona pill with the server's current value, so a persona
 	// switched on another device shows up here too. Adopt only, never a write
 	// (persist:false), since this is us catching up to the server, not a change.
