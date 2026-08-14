@@ -3684,12 +3684,33 @@ async function runPreflightGate() {
 		// The connection itself was rejected upstream: the fix is in the
 		// customer's hands, so land them back on the editable form with the
 		// provider's own sentence. A fresh attempt re-runs the preflight.
+		//
+		// The forgets mirror chooseDifferentModel's and are load-bearing, not
+		// tidying (jarvis#840 review B1): the customer is about to submit a
+		// FIXED credential, so this attempt's idempotency key and operation id
+		// must not survive - admin dedupes on both and would hand straight
+		// back the very operation whose credential the probe just refused,
+		// re-blocking forever. Stale terminal copy goes with them.
 		preflight.done = false;
-		state.finishing = false;
+		stopRetryCountdown();
+		forgetIdem();
+		opStore.forget();
+		currentOpId.value = "";
+		forgetReady();
+		readinessSeen.value = null;
+		opReadinessDetail.value = "";
+		lastOpChatReadinessReason = "";
 		state.connectPhase = "";
+		state.connectTitle = "";
+		state.connectMessage = "";
+		state.connectPaged = false;
+		state.connectSupportOffered = false;
+		state.retryAfter = 0;
+		connectModelChangeOffered.value = false;
 		state.connectBlockReason =
 			preflight.usable.detail ||
 			"Your AI provider rejected this connection. Reconnect your account.";
+		state.finishing = false;
 		return false;
 	}
 	if (preflight.usable.state === "rate_limit") {
@@ -3697,9 +3718,18 @@ async function runPreflightGate() {
 		preflight.notice =
 			"Your AI plan is at its usage limit right now. Chat will respond again when it resets.";
 		await _sleep(PREFLIGHT_NOTICE_MS);
+		// The customer may have left the wizard during the notice beat; a
+		// navigation fired after unmount would yank a different view around.
+		if (preflightDisposed.value) return false;
 	}
 	return true;
 }
+// Unmount cancels a pending notice-beat navigation (jarvis#840 review); the
+// operation controller's own unmount abort does not cover this local sleep.
+const preflightDisposed = ref(false);
+onUnmounted(() => {
+	preflightDisposed.value = true;
+});
 
 // The three checklist rows the preflight owns (jarvis#840), rendered between
 // the readiness row and "Opening chat": waiting -> active (the one call in

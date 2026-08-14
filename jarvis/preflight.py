@@ -35,20 +35,32 @@ from jarvis.permissions import require_jarvis_admin
 
 _PROBE_PROMPT = "Reply with the single word: ok"
 _PROBE_BUDGET_S = 20
-# One customer clicking through onboarding fires ONE billed probe; a reload
-# or double-entry inside the TTL reuses the verdict instead of re-billing.
+# One customer clicking through onboarding fires ONE billed probe; a reload or
+# double-entry inside the TTL reuses the verdict instead of re-billing. Keyed
+# by the jarvis#841 apply fingerprint so a FIXED credential (new blob, new
+# fingerprint) always probes fresh and can never be answered by the previous
+# credential's refusal. Billed outcomes keep the long TTL; an unreachable
+# gateway (a restart blip, nothing billed) retries almost immediately so the
+# checklist cannot lie for half a minute about a container that just came back.
 _PROBE_CACHE_KEY = "jarvis.preflight.probe_verdict"
 _PROBE_CACHE_TTL_S = 30
+_PROBE_CACHE_TTL_UNREACHABLE_S = 5
 
 # Provider quota/exhaustion vocabulary, checked BEFORE the auth patterns so
-# "insufficient credit" style messages land on the non-blocking side. The
-# auth side reuses chat/title.py's _AUTH_FAULT_RE (single source, jarvis#738)
-# rather than growing a second, drifting copy.
+# quota prose lands on the non-blocking side. Deliberately CONTEXT-BOUND
+# (jarvis#840 review M2): bare tokens like "insufficient"/"credit" also occur
+# in genuine credential failures ("Request had insufficient authentication
+# scopes", a 403), and the issue's tolerance is asymmetric - wrongly BLOCKING
+# is recoverable, wrongly letting a broken credential into chat is the exact
+# failure this feature exists to prevent. The auth side reuses
+# chat/title.py's _AUTH_FAULT_RE (single source, jarvis#738).
 _RATE_LIMIT_RE = re.compile(
 	r"\b429\b"
-	r"|rate.?limit|usage.?limit(?:_reached)?|too.?many.?requests"
-	r"|quota|overloaded|exhausted"
-	r"|insufficient|credit|billing",
+	r"|rate.?limit|usage.?limit|too.?many.?requests"
+	r"|\bquota\b|overloaded|resource.?exhausted"
+	r"|insufficient[_ -]?(?:quota|credits?|balance|funds)"
+	r"|credit.?balance|out.?of.?(?:credits?|messages)"
+	r"|billing.?(?:hard.?)?limit",
 	re.IGNORECASE,
 )
 
@@ -88,19 +100,21 @@ def _integration_item() -> dict:
 	unchecked = {"plugin": "unchecked", "persona": "unchecked", "integration_source": "unavailable"}
 	try:
 		data = admin_client.get_integration_status() or {}
-	except admin_client.AdminValidationError as e:
-		if admin_client.is_method_not_found(e):
-			return unchecked
-		return unchecked
 	except Exception:
+		# Deploy-window method-not-found, unreachable admin, anything: all the
+		# same "unchecked" - there is no second call worth making when the
+		# FIRST admin round trip already failed (jarvis#840 review M3).
 		return unchecked
 	tri = data.get("tri_state") or {}
 	plugin = _tri(tri.get("plugin"))
 	persona = _tri(tri.get("persona"))
-	if plugin != "ok" or persona != "ok":
+	if data.get("source") == "live" and (plugin != "ok" or persona != "ok"):
 		# Escalate once to the deep probe: the static one cannot see whether
 		# the plugin actually registered its tools, so a not-ok cheap answer
-		# is a suspicion, not a verdict. Best-effort - on failure the cheap
+		# is a suspicion, not a verdict. ONLY on a live not-ok (review M3): a
+		# "cached"/"none" answer means the fleet call already failed or there
+		# is no container, and the deep retry would pay a second full round
+		# trip to meet the same wall. Best-effort - on failure the cheap
 		# answer stands.
 		try:
 			deep = admin_client.get_integration_status(deep=True) or {}
@@ -165,22 +179,75 @@ def _probe_stored_api_key(settings) -> dict:
 	return {"state": "unknown", "detail": message[:300], "source": "key_probe"}
 
 
+def _probe_cache_key(settings) -> str:
+	"""Per-config cache key (jarvis#840 review M4): the jarvis#841 apply
+	fingerprint changes whenever the credential/config changes, so a fixed
+	credential always probes fresh while a reload of the SAME config reuses
+	the billed verdict."""
+	return f"{_PROBE_CACHE_KEY}:{settings.get('llm_last_apply_fingerprint') or 'nofp'}"
+
+
+def _drain_probe_stream(sess, session_key: str, run_id: str, model, provider) -> dict:
+	"""Consume the turn stream in a worker thread joined on the probe budget
+	(jarvis#840 review B2): stream_agent_turn's own deadline is the chat
+	turn's 600s and it can block long before its first yield, which would pin
+	this whitelisted request's worker for minutes on a wedged upstream. The
+	thread is pure WS work (no frappe state beyond an already-created stdlib
+	logger); abandoning it on timeout is safe because the caller closes the
+	socket right after, which unblocks the recv."""
+	import threading
+
+	out = {"saw_text": False, "error_text": "", "exc": None, "done": False}
+
+	def _drain():
+		try:
+			for event in sess.stream_agent_turn(
+				session_key,
+				_PROBE_PROMPT,
+				run_id,
+				model=model or None,
+				provider=provider,
+			):
+				kind = event.get("kind")
+				if kind == "assistant" and (event.get("delta") or event.get("text")):
+					out["saw_text"] = True
+					break
+				if kind == "lifecycle" and event.get("phase") == "error":
+					out["error_text"] = str(event.get("error") or "")
+					break
+				if kind == "lifecycle" and event.get("phase") == "end":
+					break
+		except Exception as e:
+			out["exc"] = e
+		out["done"] = True
+
+	worker = threading.Thread(target=_drain, daemon=True, name="jarvis-preflight-probe")
+	worker.start()
+	worker.join(_PROBE_BUDGET_S)
+	return out
+
+
 def _probe_direct_subscription(settings) -> dict:
 	"""ONE bounded real turn through the tenant's own container - the only
 	honest usability check the direct-subscription leg has (its Test button
 	says so in as many words). Billed, hence the cache; throwaway session,
-	deleted afterward; hard wall-clock budget so the wizard never hangs on a
-	wedged upstream."""
+	reclaimed afterward (never bare-deleted: jarvis#525/#535 - deleting under
+	a live run re-creates the session as an orphan or kills the run); hard
+	wall-clock budget so the wizard never hangs on a wedged upstream.
+
+	Model/provider pin comes from turn_handler's resolver, DELIBERATELY not
+	prewarm's simpler one: on this leg the agent-provider id rides the
+	account's own blob (jarvis#755) and only turn_handler reads it, so this is
+	what the customer's real first turn would use."""
 	cache = frappe.cache()
-	cached = cache.get_value(_PROBE_CACHE_KEY)
+	cache_key = _probe_cache_key(settings)
+	cached = cache.get_value(cache_key)
 	if isinstance(cached, dict) and cached.get("state"):
 		return cached
-	# Deliberate reuse of the chat pipeline's own private helpers - single
-	# sources for the gateway URL, the model/provider pin, and the auth
-	# vocabulary, so the probe can never drift from what a real first turn
-	# would do (the prewarm module makes the same choice).
 	from jarvis.chat.agent_client import AgentSession, AgentUnreachableError, oneshot_run_id
 	from jarvis.chat.prewarm import _gateway_ws_url
+	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
+	from jarvis.chat.title import _auth_fault_detail
 	from jarvis.chat.turn_handler import _resolve_model_and_provider
 
 	gateway_url = _gateway_ws_url(settings)
@@ -190,46 +257,41 @@ def _probe_direct_subscription(settings) -> dict:
 	verdict = {"state": "unknown", "detail": ""}
 	sess = None
 	throwaway = None
+	fired_at = None
 	try:
 		sess = AgentSession.connect(gateway_url)
 		throwaway = sess.create_session(label=f"jarvis-preflight-{uuid.uuid4().hex[:8]}")
-		deadline = time.monotonic() + _PROBE_BUDGET_S
-		error_text = ""
-		saw_text = False
-		for event in sess.stream_agent_turn(
+		fired_at = time.time()
+		out = _drain_probe_stream(
+			sess,
 			throwaway,
-			_PROBE_PROMPT,
 			oneshot_run_id("preflight", uuid.uuid4().hex, model=model, provider=provider),
-			model=model or None,
-			provider=provider,
-		):
-			kind = event.get("kind")
-			if kind == "assistant" and (event.get("delta") or event.get("text")):
-				saw_text = True
-				break
-			if kind == "lifecycle" and event.get("phase") == "error":
-				error_text = str(event.get("error") or "")
-				break
-			if kind == "relay:error":
-				error_text = str(event.get("error") or "")
-				break
-			if kind == "lifecycle" and event.get("phase") == "end":
-				break
-			if time.monotonic() > deadline:
-				break
-		if saw_text:
+			model,
+			provider,
+		)
+		if out["saw_text"]:
 			verdict = {"state": "ok", "detail": ""}
-		elif error_text:
-			verdict = _classify_probe_error(error_text)
+		elif out["error_text"]:
+			verdict = _classify_probe_error(out["error_text"])
+		elif out["exc"] is not None:
+			verdict = _classify_probe_exception(out["exc"], _auth_fault_detail)
+		elif not out["done"]:
+			# Budget expired with the run still going: billed, so cache it.
+			verdict = {"state": "unknown", "detail": "The live check timed out."}
 	except AgentUnreachableError as e:
-		verdict = {"state": "unreachable", "detail": str(e)[:300]}
+		verdict = _classify_probe_exception(e, _auth_fault_detail)
 	except Exception:
 		verdict = {"state": "unknown", "detail": ""}
 	finally:
 		if sess is not None:
 			if throwaway:
 				try:
-					sess.delete_session(throwaway)
+					# fired_at marks "no active run" untrustworthy until the
+					# grace elapses, so a not-yet-started run is never deleted
+					# out from under itself; a busy one is left for the sweep.
+					reclaim_throwaway_session(
+						sess, throwaway, logger_name="jarvis.preflight", fired_at=fired_at
+					)
 				except Exception:
 					pass  # orphan; the gateway's own sweep collects it
 			try:
@@ -237,8 +299,24 @@ def _probe_direct_subscription(settings) -> dict:
 			except Exception:
 				pass
 	verdict["source"] = "live_probe"
-	cache.set_value(_PROBE_CACHE_KEY, verdict, expires_in_sec=_PROBE_CACHE_TTL_S)
+	ttl = _PROBE_CACHE_TTL_UNREACHABLE_S if verdict["state"] == "unreachable" else _PROBE_CACHE_TTL_S
+	cache.set_value(cache_key, verdict, expires_in_sec=ttl)
 	return verdict
+
+
+def _classify_probe_exception(exc, auth_fault_detail) -> dict:
+	"""An auth fault can arrive as a RAISED gateway rejection, not only as
+	lifecycle error text (jarvis#840 review M1) - title.py handles both
+	surfaces and so must this, or a credential the probe just proved rejected
+	would read as a shrug-grade "unreachable" and open chat anyway."""
+	auth_text = None
+	try:
+		auth_text = auth_fault_detail(exc)
+	except Exception:
+		auth_text = None
+	if auth_text:
+		return {"state": "auth", "detail": str(auth_text)[:300]}
+	return {"state": "unreachable", "detail": str(exc)[:300]}
 
 
 def _classify_probe_error(text: str) -> dict:

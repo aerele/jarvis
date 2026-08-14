@@ -1824,6 +1824,13 @@ describe("jarvis#840 the pre-chat preflight gate", () => {
 		expect(w.vm.state.connectBlockReason).toMatch(/401/);
 		// A fresh attempt re-runs the preflight rather than reusing the refusal.
 		expect(w.vm.preflight.done).toBe(false);
+		// Review B1: the forgets are load-bearing. Admin dedupes on the
+		// idempotency key and the stored operation id, so keeping either would
+		// hand the next Start straight back the operation whose credential the
+		// probe just refused - a permanent block. Both must be gone so the
+		// customer's FIXED credential mints a fresh operation.
+		expect(sessionStorage.getItem(IDEM_KEY)).toBeNull();
+		expect(sessionStorage.getItem(OP_STORE_KEY)).toBeNull();
 	});
 
 	it("a provider usage limit is shown honestly and does NOT block chat", async () => {
