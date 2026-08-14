@@ -41,16 +41,23 @@ def _find_list(data):
 
 
 def _fit(rows: list, budget: int) -> list:
-	"""Largest prefix of ``rows`` whose serialized size is <= ``budget`` (may be [])."""
+	"""Largest prefix of ``rows`` whose serialized size is <= ``budget`` (may be []).
+
+	``_size(rows[:k])`` is monotonic non-decreasing in ``k``, so binary-search the
+	largest fitting ``k``. This keeps a small leading row that fits even when later
+	rows are huge (an average-based estimate would wrongly drop it)."""
 	if not rows or budget <= 0:
 		return []
 	if _size(rows) <= budget:
 		return rows
-	avg = max(1, _size(rows) // len(rows))
-	k = min(len(rows), max(0, budget // avg))
-	while k > 0 and _size(rows[:k]) > budget:
-		k -= max(1, k // 5)
-	return rows[: max(0, k)]
+	lo, hi = 0, len(rows)
+	while lo < hi:
+		mid = (lo + hi + 1) // 2
+		if _size(rows[:mid]) <= budget:
+			lo = mid
+		else:
+			hi = mid - 1
+	return rows[:lo]
 
 
 def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:

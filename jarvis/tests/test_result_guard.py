@@ -79,10 +79,33 @@ class TestEnforceResultBudget(unittest.TestCase):
 			def __str__(self):
 				raise RuntimeError("no")
 
-		out, ev = enforce_result_budget([{"x": Boom()}], tool="get_list")
-		self.assertIsNotNone(out)
+		data = [{"x": Boom()}]
+		out, ev = enforce_result_budget(data, tool="get_list")
+		self.assertIs(out, data)
+		self.assertIsNone(ev)
 
-	def test_cjk_not_overcounted(self):
-		data = [{"name": "客户名称" * 3} for _ in range(80)]
+	def test_cjk_measured_compact_not_ascii_escaped(self):
+		# ~19k CJK chars: compact (ensure_ascii=False) ~21k < 35k -> NOT truncated;
+		# ascii-escaped it would be ~115k > 35k. Fails if the guard used ensure_ascii=True.
+		data = [{"name": "客户" * 80} for _ in range(120)]
 		out, ev = enforce_result_budget(data, tool="get_list")
 		self.assertIsNone(ev)
+		self.assertIs(out, data)
+
+	def test_small_leading_row_kept_when_later_rows_huge(self):
+		data = [{"blob": "y" * 10}] + [{"blob": "x" * 100000} for _ in range(3)]
+		out, ev = enforce_result_budget(data, tool="get_list")
+		self.assertTrue(out["_truncated"])
+		self.assertGreaterEqual(out["shown"], 1)
+		self.assertEqual(out["rows"][0], {"blob": "y" * 10})
+		self.assertIn("PARTIAL", out["note"])
+		self.assertNotIn("even one row", out["note"])
+		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
+
+	def test_nested_rows_truncated_with_fat_under_budget_meta(self):
+		data = {"meta": "m" * 5000, "rows": _rows(3000, 50)}
+		out, ev = enforce_result_budget(data, tool="query")
+		self.assertTrue(out["_truncated"])
+		self.assertEqual(out["meta"], "m" * 5000)
+		self.assertLess(out["shown"], 3000)
+		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
