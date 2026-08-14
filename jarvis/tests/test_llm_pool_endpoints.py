@@ -237,9 +237,7 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 			exc_type="ValidationError",
 		)
 		with (
-			patch(
-				"jarvis.admin_client.post_subscription_connect", side_effect=method_not_found
-			) as connect,
+			patch("jarvis.admin_client.post_subscription_connect", side_effect=method_not_found) as connect,
 			patch(
 				"jarvis.admin_client.post_push_oauth_blob",
 				side_effect=lambda provider, blob: calls.append(("blob", provider, blob)) or {},

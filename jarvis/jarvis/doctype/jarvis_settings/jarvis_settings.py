@@ -547,9 +547,7 @@ def _direct_subscription_blob(doc) -> tuple[str, dict]:
 			continue
 		accounts = _model_accounts(m)
 		if not accounts:
-			raise admin_client.AdminValidationError(
-				"direct subscription leg: no connected account to push"
-			)
+			raise admin_client.AdminValidationError("direct subscription leg: no connected account to push")
 		blob_raw = (accounts[0].get("oauth_blob") if hasattr(accounts[0], "get") else "") or ""
 		try:
 			blob = json.loads(blob_raw) if blob_raw else None
@@ -561,9 +559,7 @@ def _direct_subscription_blob(doc) -> tuple[str, dict]:
 			)
 		direct_blob = {k: v for k, v in blob.items() if k != "id_token"}
 		return direct_blob["provider"], direct_blob
-	raise admin_client.AdminValidationError(
-		"direct subscription leg: no enabled subscription model to push"
-	)
+	raise admin_client.AdminValidationError("direct subscription leg: no enabled subscription model to push")
 
 
 class JarvisSettings(Document):

@@ -604,9 +604,7 @@ class TestIsMethodNotFound(FrappeTestCase):
 		)
 		with patch("requests.post", mock_post):
 			with self.assertRaises(AdminValidationError) as cm:
-				admin_client.post_subscription_connect(
-					"openai", {}, "gemini", model="m", base_url=""
-				)
+				admin_client.post_subscription_connect("openai", {}, "gemini", model="m", base_url="")
 		self.assertEqual(getattr(cm.exception, "code", ""), "ProviderMismatch")
 		self.assertFalse(admin_client.is_method_not_found(cm.exception))
 
