@@ -203,11 +203,10 @@ class TestConnectDoubleApplyDedup(_RT3SettingsTestCase):
 		clear it, or a stale stamp could absorb a later repair save against a
 		container that never received the config (jarvis#841 review)."""
 		from jarvis import settings_reset
-		from jarvis.onboarding import _DISCONNECTED_LLM_FIELDS
-
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 			_stamp_pool_applied_ok,
 		)
+		from jarvis.onboarding import _DISCONNECTED_LLM_FIELDS
 
 		s = frappe.get_single("Jarvis Settings")
 		s.db_set("llm_last_apply_fingerprint", "f" * 64, update_modified=False)
