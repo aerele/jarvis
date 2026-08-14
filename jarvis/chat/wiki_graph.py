@@ -249,8 +249,10 @@ def _build_graph_from_pages(pages, include_content: bool = False, minimise_scope
 	Shared by ``compute_graph`` (org-wide → admin push) and ``get_wiki_graph``
 	(caller-scoped → tenant SPA). Nodes: one ``org``; ``role`` nodes per
 	``target_role``; ``user`` nodes for authors + User-page targets; a ``page``
-	node per page (slug, title, type, scope, stale/contradiction; +summary when
-	``include_content``). Edges: ``scope`` (page→tier), ``authored`` (user→page,
+	node per page (slug, title, type, scope, stale/contradiction; +summary and
+	+curated ``manual_links`` targets when ``include_content`` (#644, so the
+	tenant detail panel can offer removal of exactly what it curated)). Edges:
+	``scope`` (page→tier), ``authored`` (user→page,
 	weighted), ``member-of`` (user→role via live ``frappe.get_roles``),
 	``links-to`` (body ``[[links]]`` ∪ durable ``manual_links``). Callers pass a
 	page set already filtered to what they may emit, so edges to pages outside
@@ -289,6 +291,9 @@ def _build_graph_from_pages(pages, include_content: bool = False, minimise_scope
 		emit_slug, emit_label = emitted[slug]
 		pid = f"page:{emit_slug}"
 		scope = _norm_scope(p.scope)
+		# Computed once, up front, so both the node's curated-links list below and
+		# the links-to edges further down read the same value.
+		manual_targets = _manual_link_targets(p.get("manual_links"), known_slugs)
 		node = {
 			"id": pid,
 			"kind": "page",
@@ -306,6 +311,15 @@ def _build_graph_from_pages(pages, include_content: bool = False, minimise_scope
 		if include_content:
 			# tenant SPA needs content for client-side TF-IDF similarity.
 			node["summary"] = p.get("summary") or ""
+			# #644: the curated (manual_links) targets only, never body-derived;
+			# what the tenant detail panel offers a "remove" affordance on, since
+			# that is exactly what remove_wiki_link mutates. Plain slugs, not
+			# `emitted[...]`: include_content is only ever True on this
+			# (minimise_scopes=False) tenant path, so emission is identity here.
+			# Every entry already passed through `known_slugs` (the caller's own
+			# visible-page set) inside `_manual_link_targets`, so this can never
+			# leak a target slug the caller isn't allowed to see (R3).
+			node["manual_links"] = [t for t in manual_targets if t != slug]
 		nodes.append(node)
 
 		# scope-covers edge: page → the tier that can see it. A User-scope page
@@ -334,7 +348,7 @@ def _build_graph_from_pages(pages, include_content: bool = False, minimise_scope
 		# page→page links — the Obsidian knowledge graph itself: body [[wikilinks]]
 		# ∪ durable out-of-body manual_links (R1), deduped.
 		targets = _extract_link_targets(p.body_md, known_slugs)
-		for t in _manual_link_targets(p.get("manual_links"), known_slugs):
+		for t in manual_targets:
 			if t not in targets:
 				targets.append(t)
 		for target in targets:

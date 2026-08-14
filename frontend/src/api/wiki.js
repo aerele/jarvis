@@ -70,6 +70,10 @@ export const getWikiGraph = () => call(WK + "get_wiki_graph");
 // concurrency-safe, permission-checked both ends. → {ok, manual_links, already?}
 export const addWikiLink = (slug, targetSlug) =>
 	call(WK + "add_wiki_link", { slug, target_slug: targetSlug });
+// Undo a curated [[link]] slug→target. Same permission/lock shape as addWikiLink;
+// removing a link that isn't there is a safe no-op. → {ok, manual_links, already?}
+export const removeWikiLink = (slug, targetSlug) =>
+	call(WK + "remove_wiki_link", { slug, target_slug: targetSlug });
 // Measured daily graph totals [{date, pages, links, orphans, ...}] for the
 // Evolution tab; [] until the daily snapshot job has recorded a day.
 export const getWikiGraphHistory = () => call(WK + "get_wiki_graph_history");
