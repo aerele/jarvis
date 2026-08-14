@@ -1047,9 +1047,36 @@ class TestDispatchFromSessionResultBudget(FrappeTestCase):
 
 	def test_small_list_result_is_unchanged(self):
 		small = [{"name": "C1"}]
-		env = self._dispatch(small)
+		with patch("jarvis.api.telemetry.record_budget_event") as record_mock:
+			env = self._dispatch(small)
 		self.assertTrue(env["ok"])
 		self.assertEqual(env["data"], small)
+		# An in-budget result yields no guard event, so nothing is recorded.
+		record_mock.assert_not_called()
+
+	def test_error_envelope_passes_through(self):
+		"""An error envelope (ok=False) is returned verbatim and the guard is not
+		even invoked - the size cap only applies to successful `data` results."""
+		from jarvis.api import _dispatch_from_session
+
+		err = {"ok": False, "error": {"code": "X", "message": "y"}}
+		with (
+			patch("jarvis.api._run_tool", return_value=err),
+			patch("jarvis.api.impersonate"),
+			patch("jarvis.api._persist_and_publish_tool_call"),
+			patch("jarvis.tools._delegate_capability.tool_denial", return_value=None),
+			patch("jarvis.api._get_header", return_value=None),
+			patch("jarvis.api.frappe.db.get_value", return_value="conv1"),
+			patch("jarvis.api.enforce_result_budget") as g,
+		):
+			result = _dispatch_from_session(
+				user="Administrator",
+				session_key="agent:test:session",
+				tool="get_list",
+				args={"doctype": "Customer"},
+			)
+		self.assertEqual(result, err)
+		g.assert_not_called()
 
 	def test_dispatch_current_user_result_not_truncated(self):
 		"""_dispatch_current_user (dashboard-builder/desk/external call_tool)
@@ -1063,6 +1090,7 @@ class TestDispatchFromSessionResultBudget(FrappeTestCase):
 		self.assertTrue(env["ok"])
 		self.assertIsInstance(env["data"], list)
 		self.assertEqual(len(env["data"]), 3000)
+		self.assertEqual(env["data"], big)
 
 	def test_session_path_emits_budget_telemetry(self):
 		"""The session path reports the truncation to telemetry with the
@@ -1074,6 +1102,8 @@ class TestDispatchFromSessionResultBudget(FrappeTestCase):
 		record_mock.assert_called_once()
 		_, kwargs = record_mock.call_args
 		self.assertEqual(kwargs["tool"], "get_list")
-		self.assertEqual(kwargs["kind"], "truncated")
+		self.assertEqual(kwargs["outcome"], "truncated")
 		self.assertEqual(kwargs["original_chars"], expected_chars)
 		self.assertEqual(kwargs["total"], 3000)
+		# The truncated (shrunk) count is reported, distinct from the original size.
+		self.assertLess(kwargs["shown"], 3000)

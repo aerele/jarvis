@@ -258,13 +258,9 @@ def _dispatch_from_session(
 				guarded, event = enforce_result_budget(result["data"], tool=tool)
 				if event:
 					result["data"] = guarded
-					frappe.logger("jarvis").warning(
-						f"result_budget[{event['kind']}] {tool} "
-						f"{event['original_chars']}c shown={event['shown']}/{event['total']}"
-					)
 					telemetry.record_budget_event(
 						tool=tool,
-						kind=event["kind"],
+						outcome=event["kind"],
 						original_chars=event["original_chars"],
 						shown=event["shown"],
 						total=event["total"],

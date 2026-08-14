@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 
 import frappe
 
@@ -60,12 +61,14 @@ def record_tool(tool: str, args, conversation: str | None, duration_ms: int, res
 
 
 def record_budget_event(
-	tool: str, kind: str, original_chars: int | None, shown: int | None, total: int | None
+	tool: str, outcome: str, original_chars: int | None, shown: int | None, total: int | None
 ) -> None:
 	"""One line per agent-boundary result-size guard event (truncation or an
 	uncapped-but-oversized result). Unlike ``record_tool``, this is not gated
 	on a custom-doctype target - every event is signal for sizing the budget
-	itself. Never raises."""
+	itself. The guard outcome rides under ``outcome`` (truncated / uncapped /
+	uncapped_nonrow / measure_failed) - NOT ``event`` - so it does not collide
+	with this line's own ``kind`` discriminator. Never raises."""
 	try:
 		_emit(
 			{
@@ -73,7 +76,7 @@ def record_budget_event(
 				"ts": frappe.utils.now(),
 				"site": getattr(frappe.local, "site", None),
 				"tool": tool,
-				"event": kind,
+				"outcome": outcome,
 				"original_chars": original_chars,
 				"shown": shown,
 				"total": total,
@@ -195,5 +198,16 @@ def _result_chars(result) -> int:
 		return 0
 
 
+def _telemetry_logger() -> logging.Logger:
+	# frappe.logger defaults to ERROR in prod (WARNING on a dev server), which
+	# would silently drop every telemetry INFO line. Pin to INFO so tool +
+	# result_budget telemetry is durable on any bench (mirrors chat/latency.py).
+	# Keep the same logger name/file - only the level is pinned.
+	logger = frappe.logger(_LOGGER)
+	if logger.level == 0 or logger.level > logging.INFO:
+		logger.setLevel(logging.INFO)
+	return logger
+
+
 def _emit(entry: dict) -> None:
-	frappe.logger(_LOGGER).info(json.dumps(entry, default=str))
+	_telemetry_logger().info(json.dumps(entry, default=str))
