@@ -3895,7 +3895,7 @@ async function resolveAndFollow(result, idem) {
 			continue;
 		}
 		if (r.mode === "legacy") {
-			await followLegacyReadiness();
+			await followLegacyReadiness(r);
 			return;
 		}
 		// Operation path, no descriptor, not resumable: a refusal (e.g. a rate limit).
@@ -3905,14 +3905,29 @@ async function resolveAndFollow(result, idem) {
 	await followDescriptor(r.apply_operation);
 }
 
-// Legacy fallback (single BYO api-key model, mode:"legacy"): admin's creds endpoint
-// mints no durable operation, so there is nothing to follow - poll readiness instead,
-// bounded and fail-closed. On ready → navigate once; on timeout / persistent not-ready
-// → the SAME support/retry state a non-navigable terminal gets (stay on Connect, offer
-// Retry). Deliberately NO "continue anyway" bypass (review P0-08).
+// Legacy fallback (single-model direct config, mode:"legacy" - a BYO api-key model
+// or a lone chat subscription): admin's creds endpoint mints no durable operation,
+// so there is nothing to follow - poll readiness instead, bounded and fail-closed.
+// The bound is the save result's readiness_budget_s (75s default, 300s for the
+// dual-restart subscription leg) - see legacyReadyAttempts. On ready → navigate
+// once; on timeout / persistent not-ready → the SAME support/retry state a
+// non-navigable terminal gets (stay on Connect, offer Retry). Deliberately NO
+// "continue anyway" bypass (review P0-08).
 const LEGACY_READY_ATTEMPTS = 30;
 const LEGACY_READY_INTERVAL_MS = 2500;
-async function followLegacyReadiness() {
+// The save result may carry readiness_budget_s (seconds) for a leg that takes
+// longer than the 30x2.5s=75s default - today only the subscription direct leg,
+// which does two container restarts back to back (see onboarding.py). Absent /
+// invalid = the historic 75s, so the api_key/oauth legs and any old backend are
+// byte-identical to before. The 2.5s interval is unchanged, so only the attempt
+// count grows: 300s budget -> 120 attempts.
+function legacyReadyAttempts(result) {
+	const budgetS = Number(result && result.readiness_budget_s);
+	if (!Number.isFinite(budgetS) || budgetS <= 0) return LEGACY_READY_ATTEMPTS;
+	return Math.max(LEGACY_READY_ATTEMPTS, Math.ceil((budgetS * 1000) / LEGACY_READY_INTERVAL_MS));
+}
+async function followLegacyReadiness(result) {
+	const attempts = legacyReadyAttempts(result);
 	state.finishing = true;
 	state.connectPhase = "working";
 	state.finishSubtitle = "We'll take you to chat as soon as your setup is done.";
@@ -3924,7 +3939,7 @@ async function followLegacyReadiness() {
 	let sawNamedSubject = false;
 	let lastDetail = "";
 	readinessSeen.value = null;
-	for (let i = 0; i < LEGACY_READY_ATTEMPTS; i++) {
+	for (let i = 0; i < attempts; i++) {
 		if (navigated.value) return;
 		if (state.connectPhase === "blocked") return;
 		// The jarvis#727 escape took the customer back to the editor - see
@@ -3954,7 +3969,7 @@ async function followLegacyReadiness() {
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
 		// jarvis#757: see the matching comment in waitForChatReadiness.
 		if (state.connectPhase === "blocked" || stage.editable) return;
-		if (i < LEGACY_READY_ATTEMPTS - 1) await _sleep(LEGACY_READY_INTERVAL_MS);
+		if (i < attempts - 1) await _sleep(LEGACY_READY_INTERVAL_MS);
 	}
 	state.finishing = true;
 	state.connectPhase = "retry";

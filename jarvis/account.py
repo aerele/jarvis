@@ -755,11 +755,16 @@ def is_ready_for_chat() -> dict:
 # confirmation stamps the durable marker, which ends the question for good.
 #
 # Needed because the two not-ready exits below are polled hard. OnboardingView's
-# waitUntilReady runs 30 probes at 2.5s (75s) after a Connect, and the desk
-# banner + widget probe on their own schedules — so an unproven tenant would put
-# one admin round-trip on every one of those ticks. 10s costs at most one extra
-# poll before a convergence is noticed against that 75s budget, and cuts the
-# round-trips it can generate by roughly two thirds.
+# legacy readiness wait runs a 2.5s probe loop after a Connect, and the desk
+# banner + widget probe on their own schedules, so an unproven tenant would put
+# one admin round-trip on every one of those ticks. The budget is now
+# leg-dependent (onboarding.save_llm_pool.readiness_budget_s): 75s for a
+# single-restart api_key/oauth apply, 300s for the dual-restart subscription leg
+# (jarvis#715 step 3). This 10s damp still costs at most one extra poll before a
+# convergence is noticed, and cuts the round-trips a poll generates by roughly two
+# thirds; on the widened 300s subscription poll that is ~30 damped round-trips per
+# connect instead of ~7, which is acceptable and priced in here so the next reader
+# does not rediscover it.
 _APPLY_CONFIRM_MISS_KEY = "jarvis:apply_confirm_miss"
 _APPLY_CONFIRM_MISS_TTL_S = 10
 

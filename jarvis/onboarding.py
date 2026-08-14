@@ -665,6 +665,18 @@ def save_llm_pool(
 	apply_operation = None
 	resumable = False
 	retry_after_seconds = 0
+	# Readiness-poll budget the SPA's legacy fallback should use for THIS leg, in
+	# seconds. None means "use the SPA default" (75s), correct for a single-restart
+	# api_key/oauth direct apply. The subscription direct leg (jarvis#715 step 3)
+	# does TWO admin round-trips back to back in one sync job - _push_direct_
+	# subscription_blob's doctor+restart THEN post_update_llm_creds's render+restart
+	# (jarvis_settings.py:1154-1168) - so its confirmed-apply routinely outlasts 75s
+	# and the wizard falsely showed "not connected, retry" mid-provision. 300s
+	# matches the pool path's 5-minute operation deadline and spans one */5
+	# reconcile_pending_llm_sync tick, so a stuck apply can self-heal inside the
+	# poll rather than after it. Keyed on llm_auth_mode, the same field
+	# _sync_via_admin branches on to cause the second restart - not re-derived.
+	readiness_budget_s = None
 	if compute_pool_mode(s):
 		# The durable apply operation lives on the POOL path (admin creates it in
 		# update_llm_pool). Push synchronously and hand its descriptor back so the
@@ -688,6 +700,10 @@ def save_llm_pool(
 		# admin's creds endpoint mints no apply operation, so there is no descriptor
 		# to follow - the SPA falls back to the readiness poll for this config.
 		mode = "legacy"
+		if (s.llm_auth_mode or "") == "subscription":
+			# Dual-restart leg: give the fallback poll room to see the second
+			# restart's confirmed apply (see readiness_budget_s comment above).
+			readiness_budget_s = 300
 
 	row = (
 		frappe.db.get_value(
@@ -703,6 +719,9 @@ def save_llm_pool(
 		"resumable": resumable,
 		"retry_after_seconds": retry_after_seconds,
 		"mode": mode,
+		# Legacy readiness-poll budget (seconds) for the mode:"legacy" fallback; null
+		# = SPA default. Set only for the dual-restart subscription direct leg.
+		"readiness_budget_s": readiness_budget_s,
 		# Legacy fields kept for the settings status strip and older callers.
 		"last_sync_at": str(row.get("last_sync_at") or ""),
 		"last_sync_status": row.get("last_sync_status") or "",

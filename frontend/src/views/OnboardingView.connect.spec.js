@@ -486,6 +486,69 @@ describe("§10.4 mode:legacy fallback (no durable operation)", () => {
 		expect(routerReplace).not.toHaveBeenCalled();
 	});
 
+	it("the subscription leg honors readiness_budget_s: the poll bound widens to 300s, not 75s", async () => {
+		// jarvis#715 step 3 leg does TWO container restarts, so its confirmed apply
+		// routinely lands after the 75s default. save_llm_pool returns
+		// readiness_budget_s:300 for it; the poll must run to ~120 attempts (300s /
+		// 2.5s), NOT stop at 30 and show a false "not connected, retry".
+		saveMock.mockResolvedValue({
+			ok: true,
+			result: opResult({
+				apply_operation: null,
+				resumable: false,
+				mode: "legacy",
+				readiness_budget_s: 300,
+			}),
+		});
+		api.isReadyForChat.mockResolvedValue({ ready: false, reason: "llm_provisioning" });
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear(); // ignore the one mount-time readiness probe
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(120 * 2500); // widened 300s budget
+		await p;
+
+		expect(api.isReadyForChat).toHaveBeenCalledTimes(120); // 300s / 2.5s, not 30
+		expect(w.vm.state.connectPhase).toBe("retry");
+		expect(routerReplace).not.toHaveBeenCalled();
+	});
+
+	it("a subscription apply that confirms AFTER the old 75s ceiling still navigates (the fix)", async () => {
+		// The exact bug: the dual-restart apply confirms past 30 probes (75s). With the
+		// widened budget the poll is still running and navigates once, instead of having
+		// already shown Retry at the old ceiling.
+		saveMock.mockResolvedValue({
+			ok: true,
+			result: opResult({
+				apply_operation: null,
+				resumable: false,
+				mode: "legacy",
+				readiness_budget_s: 300,
+			}),
+		});
+		let calls = 0;
+		api.isReadyForChat.mockImplementation(async () => {
+			calls += 1;
+			// Not ready through the old 75s (30-probe) ceiling; ready afterwards.
+			return calls >= 45 ? { ready: true } : { ready: false, reason: "llm_provisioning" };
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		api.isReadyForChat.mockClear(); // ignore the one mount-time readiness probe
+		calls = 0;
+
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(120 * 2500);
+		await p;
+
+		expect(routerReplace).toHaveBeenCalledTimes(1); // navigated, no false retry
+		expect(routerReplace).toHaveBeenCalledWith({ name: "Chat" });
+		expect(w.vm.state.connectPhase).not.toBe("retry");
+	});
+
 	it("a THROWING isReadyForChat is not a verdict: the legacy poll stays fail-closed", async () => {
 		saveMock.mockResolvedValue({
 			ok: true,
