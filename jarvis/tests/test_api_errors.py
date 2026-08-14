@@ -4,6 +4,7 @@ jarvis-only Error Log reader, and the self-gating push."""
 from __future__ import annotations
 
 import contextlib
+import json
 import time
 from unittest.mock import Mock, patch
 
@@ -113,6 +114,50 @@ class TestScrub(ApiErrorsBase):
 
 	def test_empty_is_safe(self):
 		self.assertEqual(api_errors._scrub_error_text(None), "")
+
+	def test_json_keys_stay_legible_values_redacted(self):
+		# #745: a payment_transition telemetry record must scrub to legible keys -
+		# only the values become [VAL]. All-string values so the comparison is exact
+		# (a bare int would survive _NUMBER_RE untouched and break the equality).
+		payload = {
+			"event": "payment.captured",
+			"from": "pending",
+			"to": "paid",
+			"code": "200",
+			"provider": "razorpay",
+			"generation": "gen-1",
+			"elapsed_bucket": "0-5s",
+			"source": "webhook",
+		}
+		out = api_errors._scrub_error_text(json.dumps(payload))
+		expected = json.dumps({k: "[VAL]" for k in payload})
+		self.assertEqual(out, expected)
+		# every value is actually gone
+		for v in payload.values():
+			self.assertNotIn(v, out)
+
+	def test_value_that_looks_like_a_key_is_still_redacted(self):
+		# A quoted VALUE that happens to spell a plausible key name (here the
+		# string "provider" used as a value, not a key) must still be redacted -
+		# position, not content, decides.
+		out = api_errors._scrub_error_text(json.dumps({"note": "provider"}))
+		self.assertEqual(out, '{"note": "[VAL]"}')
+		self.assertNotIn('"provider"', out)
+
+	def test_non_json_quoted_string_still_redacted(self):
+		# No regression on the original PII guarantee: outside JSON there is no
+		# key position at all, so every quoted literal is redacted as before -
+		# including one immediately followed by a colon in ordinary prose (the
+		# naive "redact unless followed by ':'" fix would leak this).
+		out = api_errors._scrub_error_text("Item 'widget': not found")
+		self.assertNotIn("widget", out)
+		self.assertIn("[VAL]", out)
+
+	def test_nested_objects_keep_keys_legible(self):
+		payload = {"outer": {"inner": "secret-value", "sibling": "another"}}
+		out = api_errors._scrub_error_text(json.dumps(payload))
+		expected = json.dumps({"outer": {"inner": "[VAL]", "sibling": "[VAL]"}})
+		self.assertEqual(out, expected)
 
 
 # --------------------------------------------------------------------------- #
