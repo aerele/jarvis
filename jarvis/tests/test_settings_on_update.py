@@ -31,6 +31,12 @@ _SNAPSHOT_PLAIN_FIELDS = (
 	"llm_auth_mode",
 	"last_sync_status",
 	"last_sync_at",
+	# Establishedness + apply-timing markers (jarvis C2). is_ready_for_chat now
+	# consults these at its provisioning exits, so a test that stamps them must
+	# not leave them set for the next class.
+	"chat_was_ready_at",
+	"chat_ready_authority",
+	"last_sync_requested_at",
 )
 
 # Password fields the tests overwrite. Snapshotted via get_password() because
@@ -91,6 +97,20 @@ class _SettingsSingletonTestCase(FrappeTestCase):
 			frappe.db.commit()
 		finally:
 			super().tearDownClass()
+
+	def setUp(self):
+		super().setUp()
+		# Reset the establishedness + apply-timing markers before every test. The
+		# class snapshot restores them only at tearDownClass, not between tests, and
+		# is_ready_for_chat now reads them at its provisioning exits (jarvis C2): a
+		# sibling case that stamps chat_was_ready_at (an established tenant) would
+		# otherwise leave a later fresh-tenant case reading as established, flipping
+		# its hard llm_pool_provisioning / llm_provisioning assertion to llm_applying.
+		# Every test that needs establishedness sets it in its own body, so clearing
+		# here only removes leaked state, never state a test set for itself.
+		for _f in ("chat_was_ready_at", "chat_ready_authority", "last_sync_requested_at"):
+			frappe.db.set_value("Jarvis Settings", "Jarvis Settings", _f, None, update_modified=False)
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
 
 
 class TestOnUpdateClassification(_SettingsSingletonTestCase):
