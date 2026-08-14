@@ -7,7 +7,7 @@ signal at all: not the customer (by design) and not an operator either.
 Two failure shapes reach ``_generate_via_gateway`` and both need the same
 treatment:
 
-  - an in-run provider failure, which openclaw reports as a lifecycle
+  - an in-run provider failure, which the agent runtime reports as a lifecycle
     ``phase == "error"`` event carrying the provider's own error text and
     never raises (see agent_client.failed_final_error) - before this fix
     that text was read by nobody, auth fault or not;
@@ -24,7 +24,7 @@ even though its own text says "unauthorized".
 
 SCOPE NOTE: the transport is stubbed, as everywhere else in this suite (see
 test_throwaway_session_reclaim.py) - these tests assert what the bench does
-with the events/exceptions openclaw can hand it, not openclaw's own behaviour.
+with the events/exceptions the agent runtime can hand it, not the runtime's own behaviour.
 """
 
 from __future__ import annotations

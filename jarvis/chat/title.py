@@ -262,7 +262,7 @@ def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 					if ev.get("kind") == "assistant" and ev.get("text"):
 						text = ev["text"]
 					elif ev.get("kind") == "lifecycle" and ev.get("phase") == "error" and ev.get("error"):
-						# openclaw's ONLY place the run names a provider failure
+						# the agent runtime's ONLY place the run names a provider failure
 						# (see agent_client.failed_final_error). Not raised - the
 						# loop just ends with no text - so without this it is
 						# invisible: not even the generic except below fires.

@@ -240,7 +240,7 @@ def _generate_via_gateway(gateway_url, titles: list[str], *, model, provider) ->
 						text = ev["text"]
 					elif ev.get("kind") == "lifecycle" and ev.get("phase") == "error" and ev.get("error"):
 						# See jarvis.chat.title._generate_via_gateway's copy of
-						# this branch: openclaw's only place the run names a
+						# this branch: the agent runtime's only place the run names a
 						# provider failure, and it never raises here.
 						lifecycle_error = str(ev["error"])
 				run_ended = True
