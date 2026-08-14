@@ -89,6 +89,7 @@
   "chat_device_private_key",
   "chat_device_token",
   "last_sync_section",
+  "last_sync_requested_at",
   "last_sync_at",
   "last_sync_status",
   "llm_pool_synced_at",
@@ -669,6 +670,13 @@
    "fieldtype": "Section Break",
    "label": "Last Sync",
    "collapsible": 1
+  },
+  {
+   "description": "Stamped at ENQUEUE time - the moment an apply (pool or single-model) was requested - not when it lands. jarvis C2: account._provisioning_verdict reads this to time-box the soft llm_applying reason, so a stuck apply that never writes a terminal status cannot stay soft forever. See account._APPLYING_SOFT_WINDOW_S.",
+   "fieldname": "last_sync_requested_at",
+   "fieldtype": "Datetime",
+   "label": "Last Sync Requested At",
+   "read_only": 1
   },
   {
    "fieldname": "last_sync_at",

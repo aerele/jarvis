@@ -2159,6 +2159,18 @@
 					:message="notReadyNotice"
 					style="margin-bottom: 10px"
 				/>
+				<!-- jarvis C2: an established workspace's first pool/direct leg is mid-apply
+					 (e.g. a model just added in Settings > AI models). A FIRST direct->pool
+					 transition stops and restarts the container (a 10-30s bounce) - it does
+					 NOT keep serving the old config - so this must not promise otherwise.
+					 Informational only: no CTA, composer stays enabled. -->
+				<Banner
+					v-else-if="llmApplying"
+					type="info"
+					title="Updating your AI configuration"
+					message="Chat may be briefly unavailable while this finishes."
+					style="margin-bottom: 10px"
+				/>
 
 				<!-- floats just above the composer; jumps the thread to the newest message -->
 				<transition name="jv-sd">
@@ -3844,6 +3856,7 @@ import {
 	checkReady,
 	readinessDetailOf,
 	needsLlmConnection,
+	isLlmApplying,
 	forgetReady,
 } from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
@@ -3937,6 +3950,12 @@ const notReadyNotice = ref("");
 // flag rather than reusing notReadyNotice: that one carries admin's sentence about a
 // container, and this one has its own copy and its own call to action.
 const noAiConnected = ref(false);
+// jarvis C2: an established workspace's LLM leg is mid-apply for the first time
+// (e.g. a model just added in Settings > AI models). A first direct->pool
+// transition bounces the container (stop/restart, 10-30s) rather than keeping
+// the previous config serving, so this is a quiet heads-up, not a working-chat
+// guarantee - no CTA, no composer-disable. See isLlmApplying (readiness.js).
+const llmApplying = ref(false);
 // Connecting a model is gated on require_jarvis_admin() server-side. A member who
 // cannot reach the AI models pane still gets the banner (their chat IS broken and
 // they should know why), just without a button that would only bounce them back to
@@ -4217,6 +4236,17 @@ watch(
 			forgetReady();
 			try {
 				noAiConnected.value = await needsLlmConnection();
+			} catch (e) {
+				/* leave the last known state */
+			}
+			// ...and the llm_applying half (jarvis C2): a model add/reconnect in this
+			// same pane can flip the workspace into the mid-apply window, and without
+			// this the quiet banner only ever appeared after a full page reload, never
+			// in the live add-a-model-then-close flow it was built for. Both calls ride
+			// the SAME memoized verdict forgetReady() just dropped, so this is still one
+			// round trip, not two.
+			try {
+				llmApplying.value = await isLlmApplying();
 			} catch (e) {
 				/* leave the last known state */
 			}
@@ -9741,6 +9771,13 @@ onMounted(async () => {
 	needsLlmConnection()
 		.then((v) => {
 			noAiConnected.value = v;
+		})
+		.catch(() => {});
+	// ...and the llm_applying half (jarvis C2): same fail-open posture, an
+	// unreachable backend just leaves the quiet banner off.
+	isLlmApplying()
+		.then((v) => {
+			llmApplying.value = v;
 		})
 		.catch(() => {});
 	document.addEventListener("pointerdown", onDocClick);

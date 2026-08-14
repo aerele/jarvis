@@ -99,10 +99,28 @@ _READY_MARKER_REFRESH_S = 86400
 # this suspenders, not the only fence.
 _READY_ANCHOR_FIELD = "chat_ready_authority"
 
+# jarvis C2 time-box (review finding 1): the field stamped at APPLY-ENQUEUE time
+# by jarvis_settings.py's two sync funnels (_enqueue_pool_sync,
+# _on_update_single_model_legacy). _provisioning_verdict below reads it to bound
+# how long the soft llm_applying reason can ride: without a bound, a stuck
+# first-apply (fleet-agent down, never converges, never writes a terminal
+# "failed:" status) would stay soft indefinitely with no way out. Deliberately
+# NOT in _GATE_REVISION_FIELDS: last_sync_status already flips to "pending:" on
+# the same save that stamps this, so the cached verdict is already busted by
+# the time this field would matter.
+_APPLYING_TIMESTAMP_FIELD = "last_sync_requested_at"
+# Generous on purpose: long enough that a genuinely slow but converging apply
+# (container restart, admin round-trips) never flips an established workspace
+# to the hard setup-wizard reason out from under a customer still watching it
+# finish, short enough that a stuck apply degrades to the pre-PR hard reason
+# within one sitting rather than staying soft indefinitely.
+_APPLYING_SOFT_WINDOW_S = 15 * 60
+
 _GATE_STATE_FIELDS = (
 	*_GATE_REVISION_FIELDS,
 	_READY_MARKER_FIELD,
 	_READY_ANCHOR_FIELD,
+	_APPLYING_TIMESTAMP_FIELD,
 	"jarvis_admin_api_key",
 )
 
@@ -296,6 +314,24 @@ def _marker_is_fresh(current) -> bool:
 		return False
 	try:
 		return frappe.utils.time_diff_in_seconds(frappe.utils.now(), current) < _READY_MARKER_REFRESH_S
+	except Exception:
+		return False
+
+
+def _apply_recently_requested(requested_at) -> bool:
+	"""Is ``last_sync_requested_at`` recent enough to still cover a soft
+	llm_applying verdict? Same shape as ``_marker_is_fresh`` above: a
+	null/unset value is NOT recent (a workspace that has never enqueued an
+	apply, or predates the field, must not be treated as mid-apply), and an
+	unparseable one fails the same way rather than raising - this runs on the
+	hot is_ready_for_chat path and must never turn a bad value into a 500.
+	Time-boxes review finding 1: a stuck apply that never converges and never
+	writes a terminal status ages out of the soft window and falls back to the
+	hard reason, exactly the pre-PR behaviour."""
+	if not requested_at:
+		return False
+	try:
+		return frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at) < _APPLYING_SOFT_WINDOW_S
 	except Exception:
 		return False
 
@@ -613,6 +649,23 @@ def is_ready_for_chat() -> dict:
 	- ``"llm_pool_provisioning"`` - a pool is configured (pool mode) but
 	  no sync has ever applied it to the container (first sync pending or
 	  failed).
+	- ``"llm_applying"`` - the same still-converging window as
+	  ``llm_pool_provisioning`` / ``llm_provisioning``, but for a workspace
+	  that has been chat-ready before (``_has_been_chat_ready``) - e.g. an
+	  established, chatting customer whose FIRST pool leg is mid-apply after
+	  adding a model in Settings. Soft, like ``llm_credentials``: a reload
+	  during this window must keep the customer in the app, not send them
+	  back to the setup wizard (jarvis C2). Never returned for a workspace
+	  that has never been confirmed ready - that stays on the hard
+	  ``llm_pool_provisioning`` / ``llm_provisioning`` reason unchanged. Also
+	  TIME-BOXED (review finding 1): only while ``last_sync_requested_at`` is
+	  present and within ``_APPLYING_SOFT_WINDOW_S`` of now - a stuck apply
+	  that never converges and never writes a terminal status ages out of the
+	  soft window and falls back to the hard reason, so it cannot stay soft
+	  forever. The container may briefly be unavailable while a first pool
+	  transition bounces it (10-30s); this reason is only about keeping the
+	  customer IN the app during that window, not a claim that chat keeps
+	  answering uninterrupted.
 	- ``"llm_rejected"`` - the pool/api_key/subscription config's FIRST sync ended
 	  in a terminal ``last_sync_status`` of ``"failed: ..."`` AND admin's own
 	  refusal is what produced it (an unusable spec, a validation error, a
@@ -683,7 +736,7 @@ def is_ready_for_chat() -> dict:
 	if compute_pool_mode(settings):
 		if getattr(settings, "llm_pool_synced_at", None) or _confirm_apply_via_admin(settings, is_pool=True):
 			return _admin_chat_gate()
-		return _rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_pool_provisioning"}
+		return _not_ready_verdict(settings, _settings_raw(_GATE_STATE_FIELDS), "llm_pool_provisioning")
 
 	auth_mode = (getattr(settings, "llm_auth_mode", "") or "api_key").strip()
 
@@ -712,7 +765,7 @@ def is_ready_for_chat() -> dict:
 		if not getattr(settings, "llm_direct_synced_at", None) and not _confirm_apply_via_admin(
 			settings, is_pool=False
 		):
-			return _rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_provisioning"}
+			return _not_ready_verdict(settings, _settings_raw(_GATE_STATE_FIELDS), "llm_provisioning")
 	elif auth_mode == "subscription":
 		# Unified models[]-table subscription on the DIRECT leg (jarvis#715 step
 		# 3): no cliproxy sidecar, so - like api_key direct above - this gates on
@@ -737,7 +790,7 @@ def is_ready_for_chat() -> dict:
 			if not has_configured_subscription_model(settings):
 				return _llm_missing_verdict(settings)
 			if not _confirm_apply_via_admin(settings, is_pool=False):
-				return _rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_provisioning"}
+				return _not_ready_verdict(settings, _settings_raw(_GATE_STATE_FIELDS), "llm_provisioning")
 	elif auth_mode == "oauth":
 		# The legacy flat-field direct-oauth flow: llm_oauth_connected_at is
 		# set (read-only) when the oauth grant completes and the admin
@@ -919,6 +972,71 @@ def _rejected_sync_verdict(settings) -> dict | None:
 		"reason": "llm_rejected",
 		"detail": detail or "Your AI configuration was rejected.",
 	}
+
+
+# jarvis#760: is_ready_for_chat's three provisioning exits (pool, api_key,
+# subscription) each answered "nothing has confirmed this leg applied yet" by
+# inlining the SAME `_rejected_sync_verdict(settings) or _provisioning_verdict(...)`
+# expression - and #760's own review found that a new reason added at one site
+# and missed at another silently reopened the gate. One helper, called at all
+# three sites, closes that trap: there is now exactly one place to update when
+# either half of the combinator changes.
+def _not_ready_verdict(settings, raw: dict, hard_reason: str) -> dict:
+	"""Single combinator for is_ready_for_chat's three still-converging exits.
+
+	``_rejected_sync_verdict`` takes priority: a genuine, admin-decided
+	rejection is never softened, whether or not the workspace is established -
+	re-submitting the identical config would just be refused again, so there is
+	nothing to wait for. Only when that returns ``None`` does the still-
+	converging ``_provisioning_verdict`` get a say between the soft
+	``llm_applying`` reason and ``hard_reason``.
+
+	``raw`` is fetched ONCE by the caller (``is_ready_for_chat``) rather than
+	here, so the happy path (an already-applied leg, the overwhelming majority
+	of calls) never pays the extra ``tabSingles`` read - only these not-ready
+	exits need it at all, and each call site takes exactly one branch.
+	"""
+	return _rejected_sync_verdict(settings) or _provisioning_verdict(raw, hard_reason)
+
+
+# jarvis C2: a reload during the mid-apply window must not show an established,
+# chatting customer the full-screen setup poster. The gate string alone cannot
+# tell "never onboarded" from "onboarded, first pool/direct leg mid-apply" - both
+# reach here with the SAME unstamped evidence marker - so the only signal that
+# can tell them apart is _has_been_chat_ready's durable, authority-bound proof.
+#
+# TIME-BOXED (review finding 1): softening to llm_applying also requires
+# last_sync_requested_at to be present and recent (_apply_recently_requested,
+# within _APPLYING_SOFT_WINDOW_S). Without a bound, a STUCK first apply - the
+# fleet-agent down, an apply that never converges and never writes a terminal
+# "failed:" status - would stay soft indefinitely with no way out: the reload
+# it was built to fix would instead trap the customer in a chat that can never
+# actually work, forever, with no wizard to fall back to. Aging out of the
+# window degrades to the hard reason, which is exactly the pre-PR behaviour -
+# a stuck apply was always routed to the setup wizard before this fix existed.
+def _provisioning_verdict(raw: dict, hard_reason: str) -> dict:
+	"""Not-ready verdict for is_ready_for_chat's three still-converging exits
+	(pool, api_key, subscription), downgraded to the soft ``llm_applying``
+	reason for a workspace that has been chat-ready before AND whose apply was
+	requested recently enough to still be plausibly converging.
+
+	Takes ``raw`` from the caller (see ``_not_ready_verdict``) rather than
+	fetching it itself, so a single call to ``is_ready_for_chat`` never issues
+	more than one ``_settings_raw`` read for this decision.
+
+	A FRESH tenant - no durable marker, or one whose authority anchor no
+	longer matches the current (principal, container, generation) after a
+	reset/reconnect - keeps the unchanged hard reason: it must still route to
+	the setup wizard, because chat genuinely cannot work there and there is no
+	history to protect. Likewise an ESTABLISHED tenant whose apply was
+	requested too long ago (or never recorded a request at all) keeps the hard
+	reason too - see the module comment above.
+	"""
+	if not _has_been_chat_ready(raw):
+		return {"ready": False, "reason": hard_reason}
+	if not _apply_recently_requested(raw.get(_APPLYING_TIMESTAMP_FIELD)):
+		return {"ready": False, "reason": hard_reason}
+	return {"ready": False, "reason": "llm_applying"}
 
 
 def _llm_missing_verdict(settings) -> dict:

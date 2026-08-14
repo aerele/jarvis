@@ -74,6 +74,14 @@
 	function shouldShow() {
 		if (!window.frappe || !frappe.boot) return false;
 		if (frappe.boot.jarvis_onboarded !== false) return false;
+		// jarvis C2: is_ready_for_chat itself returns ready:false for the soft
+		// "llm_applying" reason (an established workspace's first pool/direct leg
+		// is mid-apply), so jarvis_onboarded reads exactly like a never-set-up
+		// workspace here - but it is not one. Suppress the nudge entirely rather
+		// than routing it through nudgeVariant()'s reconnect copy: an established
+		// workspace mid-apply needs no Desk nudge at all, and the "Set up Jarvis"
+		// fallback pitch would be actively wrong for it.
+		if ((frappe.boot.jarvis_ready_reason || "") === "llm_applying") return false;
 		if (!erpnextSetupComplete()) return false;
 		// A second, sturdier setup signal alongside the sysdefaults flag above:
 		// the Company count (jarvis_site_setup_complete, set in jarvis.boot)

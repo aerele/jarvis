@@ -3612,8 +3612,21 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 		from jarvis.account import is_ready_for_chat
 
 		self._set_pool_gate_state(synced_at=None, status=_PENDING_APPLYING_STATUS)
-		with patch(self._READINESS_PROBE, return_value=("Ready", "")):
+		# _confirm_apply_via_admin stamps the marker via the mocked probe, then
+		# is_ready_for_chat proceeds to _admin_chat_gate, which asks admin AGAIN via
+		# get_connection. Present the same Ready consistently, or the gate's
+		# unestablished fail-closed (no chat_was_ready_at yet) decides instead of the
+		# confirmation under test. Same idiom as
+		# test_a_confirmation_is_not_damped_by_an_earlier_miss.
+		from jarvis import account
+
+		account._bust_chat_gate()
+		with (
+			patch(self._READINESS_PROBE, return_value=("Ready", "")),
+			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}),
+		):
 			result = is_ready_for_chat()
+		account._bust_chat_gate()
 		self.assertTrue(result.get("ready"), f"admin confirmed the apply; got: {result}")
 
 		settings = frappe.get_single("Jarvis Settings")
@@ -3728,8 +3741,18 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 		settings.db_set("llm_api_key", "sk-test-direct", update_modified=False)
 		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
 
-		with patch(self._READINESS_PROBE, return_value=("Ready", "")):
+		# Same two-call shape as the pool case: the confirm probe stamps the marker,
+		# then _admin_chat_gate asks admin again via get_connection. Mock both so the
+		# unestablished fail-closed does not stand in for the confirmation under test.
+		from jarvis import account
+
+		account._bust_chat_gate()
+		with (
+			patch(self._READINESS_PROBE, return_value=("Ready", "")),
+			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}),
+		):
 			result = is_ready_for_chat()
+		account._bust_chat_gate()
 		self.assertTrue(result.get("ready"), f"admin confirmed the direct apply; got: {result}")
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertTrue(settings.llm_direct_synced_at, "the direct leg's own marker must be stamped")
