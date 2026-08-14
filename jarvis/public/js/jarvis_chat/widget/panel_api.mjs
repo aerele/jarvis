@@ -8,6 +8,7 @@
 const CHAT = "jarvis.chat.api.";
 const ACTIONS = "jarvis.chat.actions_api.";
 const ACCOUNT = "jarvis.account.";
+const ONBOARDING = "jarvis.onboarding.";
 
 function call(method, args) {
   return frappe.call({ method, args: args || {} }).then((r) => r.message);
@@ -118,3 +119,9 @@ export const listPendingConfirmations = (conversation) =>
 // Chat-readiness verdict ({ready, reason, detail, billing_notice}) - see
 // panel_readiness.mjs for how the panel classifies it into gate/degraded/ready.
 export const isReadyForChat = () => call(ACCOUNT + "is_ready_for_chat");
+
+// Re-drive the saved AI config through admin - the lever for a stuck apply
+// (reason "llm_apply_stuck", jarvis#825). Probes admin first, only re-pushes if
+// not already serving, throttled 180s server-side. Admin-gated (require_jarvis_admin);
+// the panel only shows the Retry CTA to a Jarvis Admin / System Manager.
+export const resyncLlm = () => call(ONBOARDING + "resync_llm");

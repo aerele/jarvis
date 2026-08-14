@@ -49,6 +49,10 @@ import { AI_MODELS_SETTINGS_URL } from "./config.mjs";
 // with a quiet heads-up instead of replacing it with the setup nudge. Keep
 // this file and readiness.js's own "deliberately ABSENT" note in sync BY HAND -
 // do not "fix" this by adding it to the set.
+// "llm_apply_stuck" (jarvis#825) is deliberately ABSENT too, same reasoning: an
+// established workspace whose apply hung falls through to "degraded" and gets an
+// honest banner + admin Retry (degradedActionable below), never the whole-panel
+// setup gate. Keep this in sync with readiness.js by hand.
 const NOT_ONBOARDED_REASONS = new Set([
   "signup",
   "llm_setup",
@@ -129,6 +133,20 @@ const unconfirmedDegraded = (agentName) =>
 const APPLYING_DEGRADED =
   "Updating your AI configuration. Chat may be briefly unavailable while this finishes.";
 
+//   llm_apply_stuck         (jarvis#825) the llm_applying window aged out without
+//                           the apply ever finishing - a genuinely stuck apply,
+//                           not a still-converging one. The MEMBER copy here names
+//                           the state and points at an admin; the ADMIN gets the
+//                           actionable copy + Retry via degradedActionable below,
+//                           the one reason besides llm_credentials that opts into a
+//                           CTA. Same "your last AI update didn't finish" framing
+//                           as ChatView.vue's SPA banner - keep the two in sync BY
+//                           HAND.
+const APPLY_STUCK_MEMBER =
+  "Your last AI update didn't finish, so replies may fail. Ask your administrator to retry it.";
+const APPLY_STUCK_ADMIN =
+  "Your last AI update didn't finish, so replies may fail. Retry to finish it.";
+
 export function degradedMessage(resp, agentName = "Jarvis") {
   const reason = (resp && resp.reason) || "";
   const detail = (resp && resp.detail) || "";
@@ -138,6 +156,7 @@ export function degradedMessage(resp, agentName = "Jarvis") {
   if (reason === "readiness_unconfirmed")
     return detail || unconfirmedDegraded(brand);
   if (reason === "llm_applying") return APPLYING_DEGRADED;
+  if (reason === "llm_apply_stuck") return APPLY_STUCK_MEMBER;
   return GENERIC_DEGRADED;
 }
 
@@ -169,6 +188,15 @@ export function degradedActionable(
     return {
       text: "No AI connected. Connect a model to start chatting again.",
       cta: { label: "Connect a model", href: AI_MODELS_SETTINGS_URL },
+    };
+  }
+  // jarvis#825: a stuck apply an admin CAN act on from here - Retry re-drives the
+  // saved config in place (resyncLlm), so the CTA carries an `action` the panel
+  // handles locally, not an `href` that would navigate away from the chat.
+  if (isAdmin && reason === "llm_apply_stuck") {
+    return {
+      text: APPLY_STUCK_ADMIN,
+      cta: { label: "Retry", action: "resync" },
     };
   }
   return { text: degradedMessage(resp, agentName), cta: null };

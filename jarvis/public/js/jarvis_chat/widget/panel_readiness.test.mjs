@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   classifyReadiness,
   degradedMessage,
+  degradedActionable,
   SUSPENDED_FALLBACK,
 } from "./panel_readiness.mjs";
 
@@ -149,4 +150,51 @@ test("degradedMessage: never prints a raw detail for an unrecognised reason", ()
     }),
     generic
   );
+});
+
+// jarvis#825: a stuck apply is a DEGRADED state on an established workspace, never
+// the whole-panel setup gate. If it ever gated, llm_apply_stuck was wrongly added
+// to NOT_ONBOARDED_REASONS - the same regression the llm_credentials test guards.
+test("classifyReadiness: llm_apply_stuck degrades, it does NOT gate", () => {
+  assert.equal(
+    classifyReadiness({ ready: false, reason: "llm_apply_stuck" }),
+    "degraded"
+  );
+});
+
+// The member (non-admin) sees the state named and is pointed at their admin - the
+// Retry endpoint is admin-gated, so a member button would only 403. Distinct from
+// the generic "ask your administrator to finish reconnecting" line.
+test("degradedMessage: a stuck apply tells a member to ask their admin to retry", () => {
+  const msg = degradedMessage({ ready: false, reason: "llm_apply_stuck" });
+  assert.match(msg, /didn't finish/i);
+  assert.match(msg, /administrator/i);
+});
+
+// An admin gets actionable copy plus a Retry CTA carrying an `action` (handled in
+// the panel), NOT an `href` - the retry re-drives the config in place rather than
+// navigating away. This is the one reason besides llm_credentials that opts into a
+// CTA at all.
+test("degradedActionable: an admin gets a Retry action for a stuck apply", () => {
+  const out = degradedActionable(
+    { ready: false, reason: "llm_apply_stuck" },
+    "Jarvis",
+    true
+  );
+  assert.match(out.text, /Retry to finish it/);
+  assert.equal(out.cta.label, "Retry");
+  assert.equal(out.cta.action, "resync");
+  assert.equal(out.cta.href, undefined);
+});
+
+// A member never gets the button (canOnboard gates it off before the panel even
+// asks), so degradedActionable must return no CTA for them and keep the member copy.
+test("degradedActionable: a member gets no CTA for a stuck apply", () => {
+  const out = degradedActionable(
+    { ready: false, reason: "llm_apply_stuck" },
+    "Jarvis",
+    false
+  );
+  assert.equal(out.cta, null);
+  assert.match(out.text, /administrator/i);
 });

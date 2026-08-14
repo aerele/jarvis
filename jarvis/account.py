@@ -336,6 +336,25 @@ def _apply_recently_requested(requested_at) -> bool:
 		return False
 
 
+def _apply_requested_but_stale(requested_at) -> bool:
+	"""Was an apply requested (``last_sync_requested_at`` present and parseable)
+	but so long ago it has aged out of ``_APPLYING_SOFT_WINDOW_S``? This is the
+	STUCK signal for jarvis#825, and the deliberate mirror image of
+	``_apply_recently_requested``: that one returns False both for a recent apply
+	and for a workspace that never enqueued one (null/unparseable), collapsing two
+	very different states. Here we need the third: there IS a real apply on record,
+	it is just not converging. A null/unparseable stamp means no apply to be stuck
+	on, so it returns False and the caller keeps the hard setup-wizard reason. Runs
+	on the hot is_ready_for_chat path, so an unparseable value fails closed rather
+	than raising."""
+	if not requested_at:
+		return False
+	try:
+		return frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at) >= _APPLYING_SOFT_WINDOW_S
+	except Exception:
+		return False
+
+
 def _write_is_durable() -> bool:
 	"""Would a write made right now survive the end of this request?
 
@@ -666,6 +685,18 @@ def is_ready_for_chat() -> dict:
 	  transition bounces it (10-30s); this reason is only about keeping the
 	  customer IN the app during that window, not a claim that chat keeps
 	  answering uninterrupted.
+	- ``"llm_apply_stuck"`` - the established-workspace apply that ``llm_applying``
+	  covered has aged past ``_APPLYING_SOFT_WINDOW_S`` without ever converging or
+	  writing a terminal ``"failed:"`` status (fleet-agent down, a sync that hangs).
+	  Before jarvis#825 this silently fell back to the hard
+	  ``llm_pool_provisioning`` / ``llm_provisioning`` reason, bouncing an
+	  established customer to the setup wizard with no explanation. Now it is its
+	  own honest, retryable state: the readiness surfaces render "your last AI
+	  update didn't finish" and offer Jarvis Admins a Retry that calls
+	  ``jarvis.onboarding.resync_llm`` (probe-first, throttled), which restamps
+	  ``last_sync_requested_at`` and flips the reason back to ``llm_applying``.
+	  Only reachable for a workspace that HAS an apply on record; a never-applied
+	  one keeps the hard reason.
 	- ``"llm_rejected"`` - the pool/api_key/subscription config's FIRST sync ended
 	  in a terminal ``last_sync_status`` of ``"failed: ..."`` AND admin's own
 	  refusal is what produced it (an unusable spec, a validation error, a
@@ -1034,9 +1065,18 @@ def _provisioning_verdict(raw: dict, hard_reason: str) -> dict:
 	"""
 	if not _has_been_chat_ready(raw):
 		return {"ready": False, "reason": hard_reason}
-	if not _apply_recently_requested(raw.get(_APPLYING_TIMESTAMP_FIELD)):
-		return {"ready": False, "reason": hard_reason}
-	return {"ready": False, "reason": "llm_applying"}
+	requested_at = raw.get(_APPLYING_TIMESTAMP_FIELD)
+	if _apply_recently_requested(requested_at):
+		return {"ready": False, "reason": "llm_applying"}
+	# Established workspace, an apply WAS requested (timestamp present and
+	# parseable) but has aged out of the soft window without converging: a stuck
+	# apply (jarvis#825). Surface an honest, retryable state instead of silently
+	# routing an established, chatting customer to the setup wizard. An
+	# absent/unparseable timestamp is a workspace with no apply to be stuck on, so
+	# it keeps the hard reason - exactly the pre-#825 fallback.
+	if _apply_requested_but_stale(requested_at):
+		return {"ready": False, "reason": "llm_apply_stuck"}
+	return {"ready": False, "reason": hard_reason}
 
 
 def _llm_missing_verdict(settings) -> dict:

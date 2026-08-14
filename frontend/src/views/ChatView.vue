@@ -2171,6 +2171,35 @@
 					message="Chat may be briefly unavailable while this finishes."
 					style="margin-bottom: 10px"
 				/>
+				<!-- jarvis#825: the mid-apply window (llmApplying) aged out without ever
+					 finishing - a genuinely stuck apply. Honest state + a Retry that
+					 re-drives the saved config (resyncLlm), admin-gated like the AI-connect
+					 banner above. A member gets the state named but is pointed at their
+					 admin rather than a button the server would refuse. A successful retry
+					 flips the reason back to llm_applying, so this banner is replaced by the
+					 quiet "Updating" one above. Ordered LAST in the chain, after llmApplying,
+					 so the still-converging window always wins while it is live. -->
+				<Banner
+					v-else-if="llmApplyStuck"
+					type="warning"
+					title="Your last AI update didn't finish"
+					:message="
+						canRetryApply
+							? 'It looks like the last change to your AI setup got stuck. Retry to finish it.'
+							: 'It looks like the last change to your AI setup got stuck. Ask your administrator to retry it.'
+					"
+					style="margin-bottom: 10px"
+				>
+					<template v-if="canRetryApply" #action>
+						<button
+							class="jv-btn jv-btn--sm"
+							:disabled="retryingApply"
+							@click="retryApply"
+						>
+							{{ retryingApply ? "Retrying…" : "Retry" }}
+						</button>
+					</template>
+				</Banner>
 
 				<!-- floats just above the composer; jumps the thread to the newest message -->
 				<transition name="jv-sd">
@@ -3857,6 +3886,7 @@ import {
 	readinessDetailOf,
 	needsLlmConnection,
 	isLlmApplying,
+	isLlmApplyStuck,
 	forgetReady,
 } from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
@@ -3956,6 +3986,45 @@ const noAiConnected = ref(false);
 // the previous config serving, so this is a quiet heads-up, not a working-chat
 // guarantee - no CTA, no composer-disable. See isLlmApplying (readiness.js).
 const llmApplying = ref(false);
+// jarvis#825: the established-workspace apply llmApplying covered aged past the
+// server's soft window without ever converging or failing terminally (fleet-agent
+// down, a sync that hangs). Unlike llmApplying this is NOT a quiet heads-up: chat
+// genuinely cannot answer, and before #825 it silently bounced the customer to the
+// setup wizard. Its own honest banner with a Retry that re-drives the saved config.
+const llmApplyStuck = ref(false);
+// True while a Retry (resyncLlm) is in flight, so the button shows progress and
+// cannot be double-clicked into the server's 180s throttle for no reason.
+const retryingApply = ref(false);
+// Retry is gated the same as the other admin actions here: resyncLlm hits
+// require_jarvis_admin() server-side, so a member gets the state NAMED but no
+// button that would only 403 (canRetryApply below drives the copy too).
+const canRetryApply = !!(window.is_jarvis_admin || window.is_system_manager);
+// Re-drive the saved AI config, then re-read readiness so the banner reflects the
+// new state without a page reload. resyncLlm probes admin first (converged ->
+// nothing to do) and only re-pushes otherwise, restamping last_sync_requested_at,
+// which flips the server reason back to llm_applying: so a successful retry visibly
+// swaps this banner for the quiet "Updating your AI configuration" one. All
+// outcomes (converged/queued/throttled) resolve the same way - forget the memoized
+// verdict and re-derive both flags.
+async function retryApply() {
+	if (retryingApply.value || !canRetryApply) return;
+	retryingApply.value = true;
+	try {
+		await api.resyncLlm();
+	} catch (e) {
+		/* fall through to the re-read: a throttle or transient error still resolves
+		   by re-checking readiness rather than leaving the banner stale */
+	}
+	try {
+		forgetReady();
+		llmApplyStuck.value = await isLlmApplyStuck();
+		llmApplying.value = await isLlmApplying();
+	} catch (e) {
+		/* leave the last known state */
+	} finally {
+		retryingApply.value = false;
+	}
+}
 // Connecting a model is gated on require_jarvis_admin() server-side. A member who
 // cannot reach the AI models pane still gets the banner (their chat IS broken and
 // they should know why), just without a button that would only bounce them back to
@@ -4247,6 +4316,14 @@ watch(
 			// round trip, not two.
 			try {
 				llmApplying.value = await isLlmApplying();
+			} catch (e) {
+				/* leave the last known state */
+			}
+			// ...and the stuck half (jarvis#825): a model add that never converges
+			// can leave this pane on a stuck apply, so re-derive it here too off the
+			// same dropped verdict.
+			try {
+				llmApplyStuck.value = await isLlmApplyStuck();
 			} catch (e) {
 				/* leave the last known state */
 			}
@@ -9778,6 +9855,14 @@ onMounted(async () => {
 	isLlmApplying()
 		.then((v) => {
 			llmApplying.value = v;
+		})
+		.catch(() => {});
+	// ...and the llm_apply_stuck half (jarvis#825): same fail-open posture, an
+	// unreachable backend just leaves the stuck banner off. Rides the same memoized
+	// verdict as the two flags above, so still no extra round trip.
+	isLlmApplyStuck()
+		.then((v) => {
+			llmApplyStuck.value = v;
 		})
 		.catch(() => {});
 	document.addEventListener("pointerdown", onDocClick);
