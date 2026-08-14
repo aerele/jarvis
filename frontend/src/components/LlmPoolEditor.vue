@@ -28,7 +28,11 @@
          Account/Settings editor). Onboarding never reaches this branch
          (singleMode forces llmMode==='quick' below). Phase 1: read list
          only; config section arrives in phase 2. ============================================================ -->
-		<section v-if="!singleMode" :inert="busy.active" style="margin-bottom: 18px">
+		<section
+			v-if="!singleMode"
+			:inert="busy.active"
+			style="margin-bottom: 18px; display: flex; flex-direction: column; flex: 1 1 auto"
+		>
 			<!-- No section heading and no explainer here: the dialog already titles this
            pane ("AI models" / "The AI connection that powers Jarvis."), so an
            uppercase "AI MODELS" repeated below it was pure duplication. The failover
@@ -558,31 +562,6 @@
 				</svg>
 				Add a model
 			</button>
-
-			<!-- A single model has nothing to fall back to. Name the consequence instead
-           of leaving the customer to infer it from "tried in order". -->
-			<div
-				v-if="canEdit && !panel.open && rows.length === 1 && !showDirectRow"
-				class="jv-flist-hint"
-			>
-				<svg
-					viewBox="0 0 24 24"
-					width="15"
-					height="15"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="1.7"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-				>
-					<circle cx="12" cy="12" r="9" />
-					<path d="M12 16v-4M12 8h.01" />
-				</svg>
-				<span
-					><b>No backup yet.</b> If this model fails or hits its limit, chat stops. Add a
-					second one and {{ agentName }} switches over automatically.</span
-				>
-			</div>
 
 			<!-- Master-detail config section: Add/Edit a single row, or (add-mode
            only) apply a preset that replaces the whole pool. Field markup +
@@ -1449,6 +1428,35 @@
 						{{ busy.active ? "Connecting…" : panelAction.label }}
 					</button>
 				</div>
+			</div>
+
+			<!-- A single model has nothing to fall back to. Name the consequence instead
+           of leaving the customer to infer it from "tried in order". Sits at the
+           bottom of the panel (not right under the row list) so the top stays
+           clean and this settles into the space the panel would otherwise leave
+           empty; the section's own flex column (above) plus this hint's
+           margin-top: auto is what pins it there. -->
+			<div
+				v-if="canEdit && !panel.open && rows.length === 1 && !showDirectRow"
+				class="jv-flist-hint"
+			>
+				<svg
+					viewBox="0 0 24 24"
+					width="15"
+					height="15"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.7"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
+					<circle cx="12" cy="12" r="9" />
+					<path d="M12 16v-4M12 8h.01" />
+				</svg>
+				<span
+					><b>No backup yet.</b> If this model fails or hits its limit, chat stops. Add a
+					second one and {{ agentName }} switches over automatically.</span
+				>
 			</div>
 		</section>
 
@@ -2715,7 +2723,7 @@ async function testSubscriptionRow(m) {
 			subTest.value.result = {
 				kind: "ok",
 				message:
-					"Saved. This connection uses a direct setup, so there is no separate check to run. Select Start chatting to continue.",
+					"Saved. No separate check runs for this connection. Select Start chatting to continue.",
 			};
 			return;
 		}
@@ -5926,7 +5934,10 @@ defineExpose({
 	display: flex;
 	align-items: flex-start;
 	gap: 9px;
-	margin-top: 14px;
+	/* auto, not a fixed gap: sinks the hint to the bottom of the section's own
+	   flex column (see the section's inline flex styles) so it settles into the
+	   dialog's otherwise-empty space instead of hugging the row list above it. */
+	margin-top: auto;
 	padding: 11px 13px;
 	border: 1px solid var(--border);
 	border-radius: 10px;
