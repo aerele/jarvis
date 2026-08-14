@@ -29,6 +29,7 @@ const api = vi.hoisted(() => ({
 	reconnectAvailable: vi.fn(async () => ({ available: false })),
 	startAccountReconnect: vi.fn(async () => ({})),
 	checkAccountReconnect: vi.fn(async () => ({})),
+	redeemReconnectCode: vi.fn(async () => ({})),
 	getAccountDefaults: vi.fn(async () => ({})),
 	onboardingPaymentApi: {
 		getOnboardingState: vi.fn(async () => ENVELOPE({ code: "BENCH_NO_SIGNUP_CONTEXT" })),
@@ -198,6 +199,80 @@ describe("X7: defensive reconnect identity fields", () => {
 		await flushPromises();
 		expect(wrapper.vm.pay.value).toBe(STATES.RECONNECT);
 		expect(wrapper.vm.reconnectNeedsIdentity).toBe(false);
+	});
+});
+
+describe("operator-issued reconnect code: direct redeem vs emailed request", () => {
+	it("enterReconnectDirect opens the code screen in direct mode WITHOUT mailing a request", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.enterReconnectDirect();
+		expect(wrapper.vm.state.step).toBe("reconnect");
+		expect(wrapper.vm.state.reconnectDirect).toBe(true);
+		// A support code already exists out of band - never ask admin to mail one.
+		expect(api.startAccountReconnect).not.toHaveBeenCalled();
+	});
+
+	it("direct-mode submit redeems the code WITH the email, never the request poll", async () => {
+		api.redeemReconnectCode.mockResolvedValue({ status: "connected" });
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "reconnect";
+		wrapper.vm.state.reconnectDirect = true;
+		wrapper.vm.state.reconnectCode = "ABCD2345";
+		wrapper.vm.state.reconnectEmail = "known@example.com";
+		await wrapper.vm.submitReconnectCode();
+		expect(api.redeemReconnectCode).toHaveBeenCalledWith("ABCD2345", "known@example.com");
+		expect(api.checkAccountReconnect).not.toHaveBeenCalled();
+	});
+
+	it("request-mode submit polls the started request, never the direct redeem", async () => {
+		api.checkAccountReconnect.mockResolvedValue({ status: "connected" });
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "reconnect";
+		wrapper.vm.state.reconnectDirect = false;
+		wrapper.vm.state.reconnectRequestId = "rid-1";
+		wrapper.vm.state.reconnectCode = "ABCD2345";
+		await wrapper.vm.submitReconnectCode();
+		expect(api.checkAccountReconnect).toHaveBeenCalledWith("rid-1", "ABCD2345");
+		expect(api.redeemReconnectCode).not.toHaveBeenCalled();
+	});
+
+	it("direct-mode submit is blocked until the email is supplied (the 2nd factor)", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "reconnect";
+		wrapper.vm.state.reconnectDirect = true;
+		wrapper.vm.state.reconnectCode = "ABCD2345";
+		wrapper.vm.state.reconnectEmail = "   ";
+		await wrapper.vm.submitReconnectCode();
+		expect(api.redeemReconnectCode).not.toHaveBeenCalled();
+	});
+
+	it("a direct-mode invalid shows the code-or-email copy, never the confirmation-page one", async () => {
+		api.redeemReconnectCode.mockResolvedValue({ status: "invalid" });
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "reconnect";
+		wrapper.vm.state.reconnectDirect = true;
+		wrapper.vm.state.reconnectCode = "ABCD2345";
+		wrapper.vm.state.reconnectEmail = "known@example.com";
+		await wrapper.vm.submitReconnectCode();
+		// A support-code customer never saw a confirmation page - the copy must not send them there.
+		expect(wrapper.vm.state.payErr).not.toContain("confirmation page");
+		expect(wrapper.vm.state.payErr.toLowerCase()).toContain("email");
+	});
+
+	it("startReconnect (emailed path) clears direct-mode state so it can't leak in", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		// Simulate a prior direct attempt leaving residue.
+		wrapper.vm.state.reconnectDirect = true;
+		wrapper.vm.state.reconnectEmail = "stale@example.com";
+		await wrapper.vm.startReconnect();
+		expect(wrapper.vm.state.reconnectDirect).toBe(false);
+		expect(wrapper.vm.state.reconnectEmail).toBe("");
 	});
 });
 

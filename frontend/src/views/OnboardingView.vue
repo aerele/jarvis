@@ -534,6 +534,18 @@
 								This email already has a subscription under a different company.
 								Enter that company above to reconnect it instead of paying again.
 							</p>
+							<p
+								class="mx-auto mt-3 max-w-[620px] text-center text-p-sm text-ink-gray-5"
+							>
+								Have a reconnect code from support?
+								<button
+									class="ob-link"
+									:disabled="state.payBusy"
+									@click="enterReconnectDirect"
+								>
+									Enter it here</button
+								>.
+							</p>
 							<div class="ob-foot">
 								<button class="ob-back" @click="goBack">
 									<FeatherIcon
@@ -1274,12 +1286,29 @@
 							<div class="ob-body ob-body--center">
 								<div class="ob-head">
 									<h1>Enter your reconnect code</h1>
-									<p>
+									<p v-if="state.reconnectDirect">
+										Enter the code support gave you and the email your
+										subscription is registered under. Connects this site to
+										your existing subscription, nothing to pay again.
+									</p>
+									<p v-else>
 										Sent to <b>{{ state.email || "your email" }}</b
 										>. Connects this site to your existing subscription,
 										nothing to pay again.
 									</p>
 								</div>
+								<FormControl
+									v-if="state.reconnectDirect"
+									v-model="state.reconnectEmail"
+									type="email"
+									variant="outline"
+									label="Registered email"
+									class="mx-auto mb-3 w-full max-w-[320px] text-left"
+									placeholder="you@company.com"
+									autocomplete="email"
+									aria-label="Registered email"
+									@keydown.enter="submitReconnectCode"
+								/>
 								<input
 									v-model="state.reconnectCode"
 									class="ob-code"
@@ -1293,7 +1322,10 @@
 									@keydown.enter="submitReconnectCode"
 								/>
 								<p class="ob-code-note">
-									<template v-if="state.reconnectResentIn > 0">
+									<template v-if="state.reconnectDirect">
+										Single-use, and expires shortly after support issued it.
+									</template>
+									<template v-else-if="state.reconnectResentIn > 0">
 										Sent. You can resend in {{ state.reconnectResentIn }}s.
 									</template>
 									<template v-else>
@@ -1302,6 +1334,12 @@
 											Resend code
 										</button>
 									</template>
+								</p>
+								<p v-if="!state.reconnectDirect" class="ob-code-note">
+									Got a code from support instead?
+									<button class="ob-link" @click="enterReconnectDirect">
+										Enter it here
+									</button>
 								</p>
 								<Banner v-if="state.payErr" type="error" :message="state.payErr" />
 							</div>
@@ -1316,7 +1354,10 @@
 									variant="solid"
 									:loading="state.payBusy"
 									loading-text="Working…"
-									:disabled="!state.reconnectCode.trim()"
+									:disabled="
+										!state.reconnectCode.trim() ||
+										(state.reconnectDirect && !state.reconnectEmail.trim())
+									"
 									label="Finish reconnect"
 									@click="submitReconnectCode"
 								/>
@@ -1685,6 +1726,7 @@ import {
 	reconnectAvailable,
 	startAccountReconnect,
 	checkAccountReconnect,
+	redeemReconnectCode,
 	getAccountDefaults,
 	getCompanyOnboardingDefaults,
 	updateBilling,
@@ -1825,6 +1867,12 @@ const state = reactive({
 	reconnectNeedsCompany: false,
 	reconnectCode: "",
 	reconnectResentIn: 0,
+	// Direct (operator-issued) reconnect: the customer got a code from support out
+	// of band, so there is NO customer-started request to poll. They redeem the code
+	// PLUS their registered email (the second factor) in one shot. reconnectDirect
+	// switches the code screen and submit path; reconnectEmail is the typed factor.
+	reconnectDirect: false,
+	reconnectEmail: "",
 	paymentProvider: "", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
 	// Gateways the operator has actually enabled, narrowed to what this build can
 	// render. Starts EMPTY and stays empty on a discovery failure (plan 02 P2-6):
@@ -3228,6 +3276,24 @@ function cancelReconnect() {
 	state.reconnectRequestId = "";
 	state.reconnectCode = "";
 	state.reconnectResentIn = 0;
+	state.reconnectDirect = false;
+	state.reconnectEmail = "";
+}
+
+// "I have a code from support": jump straight to the code screen in DIRECT mode
+// WITHOUT asking admin to mail a code (there is no customer-started request). The
+// operator already verified identity out of band and issued the code; the
+// customer redeems it here with their registered email. Reachable from Details and
+// from the emailed-code screen (a customer handed a support code instead).
+function enterReconnectDirect() {
+	state.payErr = "";
+	state.reconnectCode = "";
+	state.reconnectRequestId = "";
+	state.reconnectResentIn = 0;
+	state.reconnectEmail = reconnectIdentity.value.email || state.email || "";
+	state.reconnectFrom = state.step === "reconnect" ? state.reconnectFrom : state.step;
+	state.reconnectDirect = true;
+	state.step = "reconnect";
 }
 
 // The code the customer read off the confirmation page (or got from support).
@@ -3256,13 +3322,17 @@ async function resendReconnectCode() {
 
 async function submitReconnectCode() {
 	if (!state.reconnectCode.trim()) return;
+	if (state.reconnectDirect && !state.reconnectEmail.trim()) return;
 	state.payErr = "";
 	state.payBusy = true;
 	try {
-		const d = await checkAccountReconnect(
-			state.reconnectRequestId,
-			state.reconnectCode.trim()
-		);
+		// Direct mode redeems an operator-issued code with the registered email (no
+		// request_id); the emailed-request path polls the request the customer
+		// started. Both land through _land_reconnect, so the outcomes below are
+		// identical — only the redeeming call differs.
+		const d = state.reconnectDirect
+			? await redeemReconnectCode(state.reconnectCode.trim(), state.reconnectEmail.trim())
+			: await checkAccountReconnect(state.reconnectRequestId, state.reconnectCode.trim());
 		if (d && d.status === "connected") {
 			state.payBusy = false;
 			// Reconnect rotated this site onto an EXISTING, already-paid account
@@ -3290,10 +3360,17 @@ async function submitReconnectCode() {
 			if (state.step === "reconnect") state.step = "details";
 			return;
 		}
-		state.payErr =
-			d && d.status === "expired"
-				? "The reconnect request expired. Start it again."
-				: "That code didn't match. Check the confirmation page and try again.";
+		// Direct mode has no confirmation page (the code came from support) and its
+		// invalid covers a mistyped code OR the wrong registered email, so point the
+		// customer at both — never at a screen they never saw.
+		if (state.reconnectDirect) {
+			state.payErr = "That code or email didn't match. Check both and try again.";
+		} else {
+			state.payErr =
+				d && d.status === "expired"
+					? "The reconnect request expired. Start it again."
+					: "That code didn't match. Check the confirmation page and try again.";
+		}
 	} catch (e) {
 		state.payErr = errMsg(e);
 	} finally {
@@ -3307,6 +3384,8 @@ async function submitReconnectCode() {
 async function startReconnect() {
 	state.payErr = "";
 	state.reconnectCode = "";
+	state.reconnectDirect = false;
+	state.reconnectEmail = "";
 	state.payBusy = true;
 	// Where to return on Back/cancel: reconnect can be entered from Details
 	// (before any plan is chosen), from the recovery card, and from the review

@@ -393,6 +393,21 @@ def get_reconnect_state(request_id: str, code: str = "") -> dict:
 	)
 
 
+def redeem_reconnect_code(code: str, email: str = "") -> dict:
+	"""Guest: redeem an OPERATOR-ISSUED reconnect code on this fresh bench — the
+	request-less counterpart to get_reconnect_state. Admin verifies (code, email)
+	together (the email is the second factor), rotates credentials NOW and re-points
+	the account HERE, returning the SAME ready bundle get_reconnect_state does
+	(status/api_key/api_secret/customer/customer_password/subscription_status). The
+	site URL is server-derived via _public_origin() so the customer can't hand admin
+	a different site's URL. Every failure is an identical generic ``{status:"invalid"}``
+	(no code/account oracle)."""
+	return _post_guest(
+		path=_m("billing.reconnect.redeem_reconnect_code"),
+		body={"code": code, "email": email, "frappe_site_url": _public_origin()},
+	)
+
+
 def get_signup_payment_state() -> dict:
 	"""Authenticated poll. Returns one of:
 	    {pending_verification: True}
