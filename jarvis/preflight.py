@@ -75,9 +75,14 @@ def run_chat_preflight() -> dict:
 	{
 	  "plugin":  "ok|degraded|broken|unchecked",
 	  "persona": "ok|degraded|broken|unchecked",
-	  "usable":  {"state": "ok|rate_limit|auth|unreachable|unknown",
+	  "usable":  {"state": "ok|rate_limit|auth|timeout|unreachable|unknown",
 	              "detail": <provider text, trimmed>, "source": ...},
 	}
+
+	Latency: the all-green path is one cheap relay + one short live turn. The
+	worst non-green path is bounded at roughly two 20s admin round trips (a
+	live "degraded" answer pays the deep escalation) plus the 20s probe
+	budget; every leg degrades rather than raises.
 
 	Plain dict like ``account.is_ready_for_chat`` (no ok-envelope): this
 	endpoint cannot refuse - every failure shape inside it degrades to an
@@ -193,8 +198,9 @@ def _drain_probe_stream(sess, session_key: str, run_id: str, model, provider) ->
 	turn's 600s and it can block long before its first yield, which would pin
 	this whitelisted request's worker for minutes on a wedged upstream. The
 	thread is pure WS work (no frappe state beyond an already-created stdlib
-	logger); abandoning it on timeout is safe because the caller closes the
-	socket right after, which unblocks the recv."""
+	logger). An abandoned worker still OWNS the socket's recv, so the caller
+	must close the socket FIRST and issue no further RPC on it (review round-2
+	MAJOR 1: a reclaim RPC would race the worker for frames and lose)."""
 	import threading
 
 	out = {"saw_text": False, "error_text": "", "exc": None, "done": False}
@@ -258,6 +264,7 @@ def _probe_direct_subscription(settings) -> dict:
 	sess = None
 	throwaway = None
 	fired_at = None
+	stream_finished = False
 	try:
 		sess = AgentSession.connect(gateway_url)
 		throwaway = sess.create_session(label=f"jarvis-preflight-{uuid.uuid4().hex[:8]}")
@@ -269,22 +276,23 @@ def _probe_direct_subscription(settings) -> dict:
 			model,
 			provider,
 		)
+		stream_finished = bool(out["done"])
 		if out["saw_text"]:
 			verdict = {"state": "ok", "detail": ""}
 		elif out["error_text"]:
 			verdict = _classify_probe_error(out["error_text"])
 		elif out["exc"] is not None:
 			verdict = _classify_probe_exception(out["exc"], _auth_fault_detail)
-		elif not out["done"]:
+		elif not stream_finished:
 			# Budget expired with the run still going: billed, so cache it.
-			verdict = {"state": "unknown", "detail": "The live check timed out."}
+			verdict = {"state": "timeout", "detail": "The live check timed out."}
 	except AgentUnreachableError as e:
 		verdict = _classify_probe_exception(e, _auth_fault_detail)
 	except Exception:
 		verdict = {"state": "unknown", "detail": ""}
 	finally:
 		if sess is not None:
-			if throwaway:
+			if throwaway and stream_finished:
 				try:
 					# fired_at marks "no active run" untrustworthy until the
 					# grace elapses, so a not-yet-started run is never deleted
@@ -294,6 +302,11 @@ def _probe_direct_subscription(settings) -> dict:
 					)
 				except Exception:
 					pass  # orphan; the gateway's own sweep collects it
+			# On the abandoned-worker path (stream_finished False) the socket
+			# closes FIRST and no reclaim RPC is issued at all: the worker
+			# still owns the recv, so a reclaim would race it for frames and
+			# burn ~10s to lose (review round-2 MAJOR 1). The hourly sweep
+			# collects the throwaway - documented-safe in session_lifecycle.
 			try:
 				sess.close()
 			except Exception:
@@ -308,7 +321,20 @@ def _classify_probe_exception(exc, auth_fault_detail) -> dict:
 	"""An auth fault can arrive as a RAISED gateway rejection, not only as
 	lifecycle error text (jarvis#840 review M1) - title.py handles both
 	surfaces and so must this, or a credential the probe just proved rejected
-	would read as a shrug-grade "unreachable" and open chat anyway."""
+	would read as a shrug-grade "unreachable" and open chat anyway.
+
+	Rate-limit FIRST, same invariant as _classify_probe_error (review round-2
+	MAJOR 2): the auth vocabulary carries a bare "credential" token, and
+	proxied upstreams phrase exhaustion as "credentials exhausted" / "no
+	healthy credential, rate limited" - quota arriving as a refused RPC must
+	still land on the non-blocking side."""
+	parts = [str(exc), str(getattr(exc, "code", "") or "")]
+	details = getattr(exc, "details", None)
+	if isinstance(details, dict):
+		parts.extend(str(v) for v in details.values())
+	text = " ".join(p for p in parts if p)
+	if _RATE_LIMIT_RE.search(text):
+		return {"state": "rate_limit", "detail": str(exc)[:300]}
 	auth_text = None
 	try:
 		auth_text = auth_fault_detail(exc)
@@ -317,6 +343,15 @@ def _classify_probe_exception(exc, auth_fault_detail) -> dict:
 	if auth_text:
 		return {"state": "auth", "detail": str(auth_text)[:300]}
 	return {"state": "unreachable", "detail": str(exc)[:300]}
+
+
+# Auth vocabulary title.py's #738-scoped regex deliberately lacks but a
+# preflight must catch: scope failures phrased without a status code. Kept
+# local rather than widening title's regex, whose scope is pinned by #738.
+_AUTH_SUPPLEMENT_RE = re.compile(
+	r"insufficient authentication|invalid[_ -]?scope",
+	re.IGNORECASE,
+)
 
 
 def _classify_probe_error(text: str) -> dict:
@@ -329,6 +364,6 @@ def _classify_probe_error(text: str) -> dict:
 	detail = (text or "")[:300]
 	if _RATE_LIMIT_RE.search(text or ""):
 		return {"state": "rate_limit", "detail": detail}
-	if _AUTH_FAULT_RE.search(text or ""):
+	if _AUTH_FAULT_RE.search(text or "") or _AUTH_SUPPLEMENT_RE.search(text or ""):
 		return {"state": "auth", "detail": detail}
 	return {"state": "unknown", "detail": detail}

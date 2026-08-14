@@ -3755,6 +3755,8 @@ const preflightRows = computed(() => {
 		? "AI connection checked"
 		: usable === "rate_limit"
 		? "AI connection is at its usage limit"
+		: usable === "timeout"
+		? "The live check timed out"
 		: "AI connection: no live check ran";
 	return [
 		{

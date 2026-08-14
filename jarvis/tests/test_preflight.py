@@ -171,7 +171,8 @@ class TestPreflight(_RT3SettingsTestCase):
 		# run re-creates the session as an orphan or kills the run) - the
 		# reclaim helper, with fired_at so a not-yet-started run is protected.
 		reclaim.assert_called_once()
-		self.assertEqual(reclaim.call_args.args[1], sess.created and "throwaway-0")
+		self.assertTrue(sess.created, "the probe must have opened its throwaway session")
+		self.assertEqual(reclaim.call_args.args[1], "throwaway-0")
 		self.assertIsNotNone(reclaim.call_args.kwargs.get("fired_at"))
 		self.assertTrue(sess.closed)
 
@@ -230,17 +231,21 @@ class TestPreflight(_RT3SettingsTestCase):
 
 		with (
 			patch("jarvis.chat.agent_client.AgentSession", _Conn),
-			patch("jarvis.chat.session_lifecycle.reclaim_throwaway_session"),
+			patch("jarvis.chat.session_lifecycle.reclaim_throwaway_session") as reclaim,
 			patch.object(preflight, "_PROBE_BUDGET_S", 0.2),
 		):
 			t0 = _time.monotonic()
 			item = preflight._usable_item(s)
 			elapsed = _time.monotonic() - t0
+		# Round-2 MAJOR 1: the abandoned worker still owns the socket's recv,
+		# so no reclaim RPC may be issued on it - close only, sweep collects.
+		reclaim.assert_not_called()
 		self.assertLess(elapsed, 1.5, "the probe must not wait out the stream's own deadline")
-		self.assertEqual(item["state"], "unknown")
+		self.assertEqual(item["state"], "timeout")
 		self.assertIn("timed out", item["detail"])
+		self.assertTrue(sess.closed, "the abandoned worker's socket must be closed")
 		cached = frappe.cache().get_value(preflight._probe_cache_key(s))
-		self.assertEqual((cached or {}).get("state"), "unknown", "a billed timeout must cache")
+		self.assertEqual((cached or {}).get("state"), "timeout", "a billed timeout must cache")
 
 	def test_live_probe_connect_failure_is_unreachable(self):
 		from jarvis.chat.agent_client import AgentUnreachableError
@@ -252,19 +257,48 @@ class TestPreflight(_RT3SettingsTestCase):
 			def connect(*a, **kw):
 				raise AgentUnreachableError("gateway down")
 
-		with patch("jarvis.chat.agent_client.AgentSession", _Conn):
+		with (
+			patch("jarvis.chat.agent_client.AgentSession", _Conn),
+			patch("jarvis.chat.session_lifecycle.reclaim_throwaway_session"),
+		):
 			item = preflight._usable_item(s)
 		self.assertEqual(item["state"], "unreachable")
 
 	def test_live_probe_verdict_is_cached_not_rebilled(self):
 		s = self._direct_sub()
 		sess, conn = self._fake_connect([{"kind": "assistant", "text": "ok", "delta": "ok"}])
-		with patch("jarvis.chat.agent_client.AgentSession", conn):
+		with (
+			patch("jarvis.chat.agent_client.AgentSession", conn),
+			patch("jarvis.chat.session_lifecycle.reclaim_throwaway_session"),
+		):
 			first = preflight._usable_item(s)
 			second = preflight._usable_item(s)
 		self.assertEqual(first["state"], "ok")
 		self.assertEqual(second["state"], "ok")
 		self.assertEqual(len(sess.created), 1, "a repeat inside the TTL must not bill again")
+
+	def test_live_probe_quota_arriving_as_a_refused_rpc_is_rate_limit(self):
+		"""Round-2 MAJOR 2: proxied upstreams phrase exhaustion as refused RPCs
+		naming the credential ("credentials exhausted, rate limited"); the
+		bare "credential" token in the auth vocabulary must not gate chat shut
+		on what is a quota condition."""
+		from jarvis.chat.agent_client import AgentUnreachableError
+
+		s = self._direct_sub()
+		boom = AgentUnreachableError("agent rejected: no healthy credential, rate limited")
+		sess = _FakeSession([], raise_exc=boom)
+
+		class _Conn:
+			@staticmethod
+			def connect(*a, **kw):
+				return sess
+
+		with (
+			patch("jarvis.chat.agent_client.AgentSession", _Conn),
+			patch("jarvis.chat.session_lifecycle.reclaim_throwaway_session"),
+		):
+			item = preflight._usable_item(s)
+		self.assertEqual(item["state"], "rate_limit")
 
 	# -- classification order --------------------------------------------------
 
