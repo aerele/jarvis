@@ -1171,9 +1171,7 @@ class TestPagesForPromptScopeFilter(FrappeTestCase):
 	def test_org_page_is_inlined_for_a_user_who_can_read_it(self):
 		# Under-block guard: a plain Org page must still reach the prompt whole.
 		self._make_org_page()
-		self.assertTrue(
-			wiki_permissions.can_read_page(frappe.get_doc(WIKI_DT, ALPHA_SLUG), self.OWNER)
-		)
+		self.assertTrue(wiki_permissions.can_read_page(frappe.get_doc(WIKI_DT, ALPHA_SLUG), self.OWNER))
 		suggested, rows = wiki._pages_for_prompt(self.ENTITIES, self.OWNER)
 		self.assertEqual([s["slug"] for s in suggested], [ALPHA_SLUG])
 		self.assertEqual([r["slug"] for r in rows], [ALPHA_SLUG])
