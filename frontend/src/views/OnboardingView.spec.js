@@ -684,10 +684,8 @@ describe("812: Company field is constrained once ERPNext has real Company record
 	});
 });
 
-// The forced-reconnect gate at the Details step: a returning customer whose
-// (email, company) is a reconnect-eligible account may ONLY reconnect - not a
-// fresh signup. Keyed on the customer-ASSERTED identity (identityFromUser), never
-// a prefilled admin email. See the /plan-check-hardened plan (C1-C6).
+// Forced-reconnect gate: an eligible returning (email, company) may only reconnect,
+// keyed on the customer-ASSERTED identity (identityFromUser), never the admin prefill.
 describe("Returning-customer forced reconnect gate", () => {
 	async function detailsView({
 		eligible,
@@ -830,9 +828,7 @@ describe("Returning-customer forced reconnect gate", () => {
 		expect(wrapper.vm.state.step).toBe("plan");
 	});
 
-	// Relies on the frappe-ui Button stub declaring no `label` prop, so the static
-	// label attribute falls through onto the root <button> and button[label="…"]
-	// matches. If the stub ever gains a label prop / inheritAttrs:false, harden this.
+	// Relies on the Button stub's `label` attr falling through to the root <button>.
 	it("renders the Reconnect CTA (not Continue) only when the gate applies", async () => {
 		const wrapper = await detailsView({ eligible: true });
 		wrapper.vm.state.reconnectEligible = true; // as if the debounce has settled

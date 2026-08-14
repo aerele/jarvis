@@ -1859,9 +1859,7 @@ const state = reactive({
 	// recovery uses server truth or an honest placeholder, never this unless the
 	// user set it.
 	identityFromUser: false,
-	// True while onDetailsSubmit is awaiting the reconnect-eligibility resolve, to
-	// disable the forward action so a second click/Enter can't double-submit
-	// (two reconnect requests, or skipping the Plan step). See onDetailsSubmit.
+	// Disables the forward action while onDetailsSubmit awaits the eligibility resolve (no double-submit).
 	detailsSubmitting: false,
 	// plan (Choose Your Plan step)
 	plans: [],
@@ -2001,20 +1999,13 @@ const reconnectInputsReady = computed(
 // wrong guess either hides recovery from someone who needs it, or sends someone
 // who has no account into a code screen no code will ever arrive for.
 const canReconnect = computed(() => reconnectInputsReady.value && state.reconnectEligible);
-// The FORCED reconnect gate: a returning customer whose (email, company) is a
-// reconnect-eligible account may ONLY reconnect - no fresh signup. Keyed on the
-// identity startReconnect will actually USE (reconnectIdentity), never raw
-// prefilled state: a prefilled-but-untyped admin email that happens to match an
-// account must NOT force a handover toward an email the customer never asserted
-// (it falls through to the Pay-step 409 + inline-identity recovery instead).
+// Forced-reconnect gate: an eligible returning (email, company) may ONLY reconnect.
+// Keyed on reconnectIdentity (what the customer typed), never the admin prefill.
 const mustReconnect = computed(
 	() =>
 		canReconnect.value && !!reconnectIdentity.value.email && !!reconnectIdentity.value.company
 );
-// Remembers the (email, company) a reconnect request was last issued for, so a
-// cancel -> Continue loop on the SAME identity reuses that request instead of
-// minting a fresh one each pass (admin allows only 5 reconnect requests/hour).
-// Deliberately NOT cleared by cancelReconnect.
+// Last (email, company) a request was issued for, so cancel->Continue reuses it (admin caps 5/hr). Not cleared on cancel.
 let reconnectIssued = null;
 
 // Debounced so typing an address doesn't call the plane per keystroke, and
@@ -2428,9 +2419,7 @@ async function fetchCompanyDefaults() {
 }
 
 async function onDetailsSubmit() {
-	// One submit at a time: the reconnect-eligibility resolve below is awaited, so
-	// without this a second click/Enter during that window double-fires (two
-	// reconnect requests, or a second goNext that skips the Plan step).
+	// One submit at a time (the eligibility resolve below is awaited).
 	if (state.detailsSubmitting) return;
 	state.detailsErr = "";
 	state.email = (state.email || "").trim();
@@ -2459,14 +2448,9 @@ async function onDetailsSubmit() {
 	// reconnect-code step's own error surface so a stale one does not linger.
 	state.payErr = "";
 	statusCheckNote.value = "";
-	// FORCED RECONNECT GATE: when this (email, company) is a reconnect-eligible
-	// existing account AND the customer has asserted that identity (reconnectIdentity,
-	// never the site-admin prefill), reconnect is the ONLY way forward - not a fresh
-	// signup. Resolve eligibility fresh here, cancelling the pending debounce, so a
-	// fast type-then-Continue can't slip past a not-yet-settled check. Fails closed:
-	// any error leaves reconnectEligible false and the customer walks the normal path
-	// (the guest signup() 409 is the authoritative backstop and still blocks the
-	// duplicate). Only `eligible` gates - needs_company / company_account_exists never do.
+	// Forced-reconnect gate: an eligible existing (email, company) the customer ASSERTED
+	// may only reconnect. Fresh resolve here (cancelling the debounce) closes the
+	// type-then-Continue race; fails closed (guest signup() 409 still blocks a duplicate).
 	state.detailsSubmitting = true;
 	try {
 		clearTimeout(eligibilityTimer);
@@ -3361,8 +3345,7 @@ async function resendReconnectCode() {
 		const id = reconnectIdentity.value;
 		const d = await startAccountReconnect(id.email, id.company);
 		state.reconnectRequestId = (d && d.request) || state.reconnectRequestId;
-		// Keep the reuse tracker on the LATEST request, so a later cancel -> Continue
-		// on this identity reuses the fresh one, not the superseded id resend replaced.
+		// Keep the reuse tracker on the latest request (resend supersedes the old id).
 		if (d && d.request) {
 			reconnectIssued = { email: id.email, company: id.company, requestId: d.request };
 		}
@@ -3439,8 +3422,7 @@ async function submitReconnectCode() {
 // code screen. Reachable from Details (a returning customer never has to pick a
 // plan or reach a payment wall) and from a rejected pay attempt.
 async function startReconnect() {
-	// No re-entry while a request is already in flight (a second click/Enter would
-	// mint a second reconnect request and burn the admin 5/hr budget).
+	// No re-entry while a request is in flight (would mint a second code + burn the 5/hr budget).
 	if (state.payBusy) return;
 	state.payErr = "";
 	state.detailsErr = ""; // any prior Details error is stale once we commit to reconnect
@@ -3454,9 +3436,7 @@ async function startReconnect() {
 	// (before any plan is chosen), from the recovery card, and from the review
 	// card's can_reconnect offer.
 	state.reconnectFrom = state.step === "reconnect" ? state.reconnectFrom : state.step;
-	// A cancel -> Continue loop on the SAME identity reuses the outstanding request
-	// instead of minting a fresh one each pass (admin allows only 5 reconnect
-	// requests/hour). A stale code is recovered by "Resend" on the code screen.
+	// Cancel -> Continue on the SAME identity reuses the outstanding request (admin caps 5/hr); a stale code -> "Resend".
 	if (
 		reconnectIssued &&
 		reconnectIssued.email === id.email &&
@@ -3479,11 +3459,8 @@ async function startReconnect() {
 		state.step = "reconnect";
 	} catch (e) {
 		state.payErr = errMsg(e);
+		// Details has no payErr banner + the gate hid the fallback, so surface it here (no silent dead-end).
 		if (state.step === "details") state.detailsErr = state.payErr;
-		// The Details step has no payErr banner, and the forced-reconnect gate hides
-		// the "Continue"/fresh-signup fallback - so a silent failure here is a
-		// dead-end (a spinner then nothing). Mirror it onto the Details error banner
-		// so the customer sees why and can retry or use the support-code link.
 	} finally {
 		state.payBusy = false;
 	}
