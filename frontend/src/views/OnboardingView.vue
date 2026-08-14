@@ -1450,7 +1450,7 @@
 												:steps="connectSteps"
 												:current-index="connectProgress.index"
 												:indeterminate="connectProgress.indeterminate"
-												:label="`Step ${connectProgress.index + 1} of ${connectSteps.length}`"
+												:label="connectProgress.caption"
 												collapse-labels
 											/>
 										</div>
@@ -3921,7 +3921,12 @@ const connectProgress = computed(() => {
 	const explain = preflight.running
 		? "Running final checks on your setup."
 		: steps[index].explain;
-	return { index, indeterminate: steps[index].state === "unknown", explain };
+	return {
+		index,
+		indeterminate: steps[index].state === "unknown",
+		explain,
+		caption: `Step ${index + 1} of ${steps.length}`,
+	};
 });
 
 // Navigate to Chat exactly once, only on an authoritative ready. forgetReady() clears
