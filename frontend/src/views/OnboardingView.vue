@@ -1463,6 +1463,41 @@
 														}}</span>
 													</span>
 												</li>
+												<!-- jarvis#840: the preflight's own rows. Same
+												     ob-phase states as the rows above; these fill in
+												     one step (the single preflight call) once
+												     readiness turns green, and none of them can hold
+												     the screen - see runPreflightGate. -->
+												<li
+													v-for="row in preflightRows"
+													:key="row.key"
+													class="ob-phase"
+													:class="`ob-phase--${row.state}`"
+												>
+													<span class="ob-phase-ico">
+														<JvSpinner
+															v-if="row.state === 'active'"
+															color="currentColor"
+															:size="20"
+														/>
+														<FeatherIcon
+															v-else-if="row.state === 'done'"
+															name="check"
+															class="h-4 w-4"
+														/>
+														<FeatherIcon
+															v-else-if="row.state === 'unknown'"
+															name="alert-circle"
+															class="h-4 w-4"
+														/>
+														<i v-else class="ob-phase-dot"></i>
+													</span>
+													<span class="ob-phase-txt">
+														<span class="ob-phase-label">{{
+															row.label
+														}}</span>
+													</span>
+												</li>
 												<li class="ob-phase ob-phase--waiting">
 													<span class="ob-phase-ico"
 														><i class="ob-phase-dot"></i
@@ -1479,6 +1514,11 @@
 												class="ob-phase-detail"
 											>
 												{{ readinessStage.detail }}
+											</p>
+											<!-- The honest usage-limit line (jarvis#840): shown for
+											     a beat before chat opens anyway; never a blocker. -->
+											<p v-if="preflight.notice" class="ob-phase-detail">
+												{{ preflight.notice }}
 											</p>
 										</div>
 										<!-- min-height (not h-full) is load-bearing: SetupNeuralNet's
@@ -1720,6 +1760,7 @@ import {
 import { inrExact, planAmount, planSuffix, planHasGst } from "@/account/format";
 import {
 	isReadyForChat,
+	runChatPreflight,
 	getLlmApplyOperation,
 	listPlans,
 	listPaymentProviders,
@@ -3678,11 +3719,155 @@ function onOpUpdate(ui) {
 	}
 }
 
+// jarvis#840: the ONE preflight between "readiness turned green" and chat. All
+// three arrival paths (waitForChatReadiness, followLegacyReadiness, the durable
+// operation's onTerminal) converge on navigateToChat, so gating here covers the
+// instant-green case that motivated the issue - a perfectly-wired connect whose
+// FIRST message then died upstream on a quota 429 nothing had checked.
+//
+// Verdict policy (the issue's core constraint): only a genuine credential
+// rejection ("auth") blocks - back to the connect form with the verbatim
+// reason. A provider usage limit shows an honest line for a beat and proceeds;
+// unchecked/unknown/unreachable rows NEVER block; a preflight call that itself
+// fails is skipped entirely (fail open - this gate must not be able to strand
+// a customer the old readiness flow would have let through).
+const preflight = reactive({
+	running: false,
+	done: false,
+	plugin: "",
+	persona: "",
+	usable: null,
+	notice: "",
+});
+const PREFLIGHT_NOTICE_MS = 2500;
+
+async function runPreflightGate() {
+	if (preflight.running) return false;
+	preflight.running = true;
+	// The checklist renders inside the working screen, so make sure it shows
+	// even when readiness was instantly green and no wait was ever displayed.
+	state.finishing = true;
+	if (!state.connectPhase) state.connectPhase = "working";
+	let d = null;
+	try {
+		d = await runChatPreflight();
+	} catch (e) {
+		d = null;
+	}
+	preflight.running = false;
+	preflight.done = true;
+	preflight.plugin = (d && d.plugin) || "unchecked";
+	preflight.persona = (d && d.persona) || "unchecked";
+	preflight.usable = (d && d.usable) || { state: "unknown", detail: "" };
+	if (preflight.usable.state === "auth") {
+		// The connection itself was rejected upstream: the fix is in the
+		// customer's hands, so land them back on the editable form with the
+		// provider's own sentence. A fresh attempt re-runs the preflight.
+		//
+		// The forgets mirror chooseDifferentModel's and are load-bearing, not
+		// tidying (jarvis#840 review B1): the customer is about to submit a
+		// FIXED credential, so this attempt's idempotency key and operation id
+		// must not survive - admin dedupes on both and would hand straight
+		// back the very operation whose credential the probe just refused,
+		// re-blocking forever. Stale terminal copy goes with them.
+		preflight.done = false;
+		stopRetryCountdown();
+		forgetIdem();
+		opStore.forget();
+		currentOpId.value = "";
+		forgetReady();
+		readinessSeen.value = null;
+		opReadinessDetail.value = "";
+		lastOpChatReadinessReason = "";
+		state.connectPhase = "";
+		state.connectTitle = "";
+		state.connectMessage = "";
+		state.connectPaged = false;
+		state.connectSupportOffered = false;
+		state.retryAfter = 0;
+		connectModelChangeOffered.value = false;
+		state.connectBlockReason =
+			preflight.usable.detail ||
+			"Your AI provider rejected this connection. Reconnect your account.";
+		state.finishing = false;
+		return false;
+	}
+	if (preflight.usable.state === "rate_limit") {
+		// Honest, non-blocking: the plan is out of quota, chat still opens.
+		preflight.notice =
+			"Your AI plan is at its usage limit right now. Chat will respond again when it resets.";
+		await _sleep(PREFLIGHT_NOTICE_MS);
+		// The customer may have left the wizard during the notice beat; a
+		// navigation fired after unmount would yank a different view around.
+		if (preflightDisposed.value) return false;
+	}
+	return true;
+}
+// Unmount cancels a pending notice-beat navigation (jarvis#840 review); the
+// operation controller's own unmount abort does not cover this local sleep.
+const preflightDisposed = ref(false);
+onUnmounted(() => {
+	preflightDisposed.value = true;
+});
+
+// The three checklist rows the preflight owns (jarvis#840), rendered between
+// the readiness row and "Opening chat": waiting -> active (the one call in
+// flight) -> done/unknown. No row state ever blocks - the blocking "auth"
+// verdict leaves this screen entirely (runPreflightGate), so it never renders
+// as a row.
+const preflightRows = computed(() => {
+	const rowState = (v) => {
+		if (preflight.running) return "active";
+		if (!preflight.done) return "waiting";
+		return v === "ok" ? "done" : "unknown";
+	};
+	const suffix = (v) =>
+		!preflight.done || v === "ok"
+			? ""
+			: v === "unchecked"
+			? ": not checked"
+			: ": needs attention";
+	const usable = (preflight.usable && preflight.usable.state) || "";
+	const usableLabel = !preflight.done
+		? "AI connection answers a live check"
+		: usable === "ok"
+		? "AI connection checked"
+		: usable === "rate_limit"
+		? "AI connection is at its usage limit"
+		: usable === "timeout"
+		? "The live check timed out"
+		: "AI connection: no live check ran";
+	return [
+		{
+			key: "plugin",
+			state: rowState(preflight.plugin),
+			label: `Business tools wired${suffix(preflight.plugin)}`,
+		},
+		{
+			key: "persona",
+			state: rowState(preflight.persona),
+			label: `Assistant persona loaded${suffix(preflight.persona)}`,
+		},
+		{ key: "usable", state: rowState(usable), label: usableLabel },
+	];
+});
+
 // Navigate to Chat exactly once, only on an authoritative ready. forgetReady() clears
 // the router's memoized readiness so its guard re-checks fresh, and router.replace
 // re-runs that guard → Chat.
-function navigateToChat() {
+async function navigateToChat() {
 	if (navigated.value) return;
+	// A terminal that resolves AFTER the customer escaped back to the editable
+	// form (the jarvis#727 chooseDifferentModel path sets finishing=false and
+	// never aborts the in-flight follow) must not yank the screen into a
+	// preflight over the abandoned config, let alone bill a probe against it
+	// (PR #848 review). Only the wait screen owns navigation.
+	if (!state.finishing && !preflight.running) return;
+	if (!preflight.done) {
+		const proceed = await runPreflightGate();
+		if (!proceed) return;
+		if (navigated.value) return;
+	}
 	navigated.value = true;
 	stopRetryCountdown();
 	forgetIdem();

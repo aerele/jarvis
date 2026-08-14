@@ -14,6 +14,13 @@ const api = vi.hoisted(() => ({
 	getAccountDefaults: vi.fn(async () => ({})),
 	listPaymentProviders: vi.fn(async () => ({ providers: ["razorpay"], default: "razorpay" })),
 	isReadyForChat: vi.fn(async () => ({ ready: false, reason: "signup" })),
+	// jarvis#840: default all-green so every pre-existing "ready navigates"
+	// assertion still holds; the preflight describe block below overrides it.
+	runChatPreflight: vi.fn(async () => ({
+		plugin: "ok",
+		persona: "ok",
+		usable: { state: "ok", detail: "" },
+	})),
 	checkSignupPaymentState: vi.fn(async () => ({})),
 	listPlans: vi.fn(async () => []),
 	reconnectAvailable: vi.fn(async () => ({})),
@@ -1687,14 +1694,15 @@ describe("jarvis wait-phases-horizontal: detail hoisted out of the phase columns
 		w.unmount();
 	});
 
-	it("still lays out exactly three phase columns, each its own row item", async () => {
+	it("still lays out each phase as its own row item (six with the jarvis#840 checklist)", async () => {
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
 		await flushPromises();
 
+		// 3 original phases + the preflight's 3 checklist rows (jarvis#840).
 		const columns = w.findAll(".ob-phases > .ob-phase");
-		expect(columns).toHaveLength(3);
+		expect(columns).toHaveLength(6);
 		// Every column still carries only its label, never the detail sentence -
 		// the hoist removed the ONLY per-row detail span, it did not just add a
 		// duplicate copy alongside it.
@@ -1777,5 +1785,88 @@ describe("subscription Test / Start-chatting mutual exclusion", () => {
 		await flushPromises();
 		expect(editor.props("hostBusy")).toBe(true);
 		w.unmount();
+	});
+});
+
+describe("jarvis#840 the pre-chat preflight gate", () => {
+	async function driveToReady(w) {
+		api.getLlmApplyOperation.mockResolvedValue(readyStatus);
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(50);
+		await p;
+		await flushPromises();
+	}
+
+	it("runs exactly once between ready and navigation, and all-green proceeds", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		await driveToReady(w);
+		expect(api.runChatPreflight).toHaveBeenCalledTimes(1);
+		expect(routerReplace).toHaveBeenCalledTimes(1);
+		expect(routerReplace).toHaveBeenCalledWith({ name: "Chat" });
+	});
+
+	it("a credential rejection blocks navigation and restores the editable form with the provider's sentence", async () => {
+		api.runChatPreflight.mockResolvedValue({
+			plugin: "ok",
+			persona: "ok",
+			usable: {
+				state: "auth",
+				detail: "OpenAI API error (401): Incorrect API key provided",
+			},
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		await driveToReady(w);
+		expect(routerReplace).not.toHaveBeenCalled();
+		expect(w.vm.state.finishing).toBe(false);
+		expect(w.vm.state.connectBlockReason).toMatch(/401/);
+		// A fresh attempt re-runs the preflight rather than reusing the refusal.
+		expect(w.vm.preflight.done).toBe(false);
+		// Review B1: the forgets are load-bearing. Admin dedupes on the
+		// idempotency key and the stored operation id, so keeping either would
+		// hand the next Start straight back the operation whose credential the
+		// probe just refused - a permanent block. Both must be gone so the
+		// customer's FIXED credential mints a fresh operation.
+		expect(sessionStorage.getItem(IDEM_KEY)).toBeNull();
+		expect(sessionStorage.getItem(OP_STORE_KEY)).toBeNull();
+	});
+
+	it("a provider usage limit is shown honestly and does NOT block chat", async () => {
+		api.runChatPreflight.mockResolvedValue({
+			plugin: "ok",
+			persona: "ok",
+			usable: { state: "rate_limit", detail: "429 usage_limit_reached" },
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		await driveToReady(w);
+		expect(w.vm.preflight.notice).toMatch(/usage limit/i);
+		expect(routerReplace).not.toHaveBeenCalled(); // still inside the honest beat
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+		expect(routerReplace).toHaveBeenCalledTimes(1);
+	});
+
+	it("unchecked rows and even a failed preflight call never block (fail open)", async () => {
+		api.runChatPreflight.mockRejectedValue(new Error("admin down"));
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		await driveToReady(w);
+		expect(routerReplace).toHaveBeenCalledTimes(1);
+	});
+
+	it("a stale terminal after the customer escaped to the form neither navigates nor probes", async () => {
+		// PR #848 review: chooseDifferentModel resets the UI but never aborts an
+		// in-flight follow; when that stale operation later resolves ready, the
+		// gate must not yank the screen or bill a probe against the abandoned
+		// config. finishing=false is the escape's signature.
+		const w = await mountConnect();
+		w.vm.state.finishing = false;
+		await w.vm.navigateToChat();
+		await flushPromises();
+		expect(api.runChatPreflight).not.toHaveBeenCalled();
+		expect(routerReplace).not.toHaveBeenCalled();
 	});
 });

@@ -312,6 +312,11 @@ export const getPresetCatalog = () => call("jarvis.onboarding.get_preset_catalog
 // calls that. See jarvis.chat.api.get_model_catalog_ui.
 export const getModelCatalogUi = () => call("jarvis.chat.api.get_model_catalog_ui");
 export const getLlmSyncStatus = () => call("jarvis.onboarding.get_llm_sync_status");
+// jarvis#840: the pre-chat preflight. Answers what readiness cannot -
+// { plugin, persona, usable: {state, detail} } - and never refuses: every
+// failure inside it degrades to unchecked/unknown (only usable.state "auth"
+// blocks, client-side). Plain dict, no ok-envelope, like isReadyForChat.
+export const runChatPreflight = () => call("jarvis.preflight.run_chat_preflight");
 // Persist the desired pool AND return the durable apply-operation descriptor the
 // Start-chatting controller follows (plan-05 D2). Returns (unwrapped)
 // { apply_operation: <12-key descriptor|null>, idempotency_key, resumable }.
