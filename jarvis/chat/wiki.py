@@ -822,7 +822,7 @@ def _ingest_note(note_name: str) -> None:
 		return
 
 	entities = _note_entities(note)
-	suggested, existing = _pages_for_prompt(entities)
+	suggested, existing = _pages_for_prompt(entities, note.owner)
 	updates = _extract_page_updates(note, entities, suggested, existing)
 	if updates is None:
 		return  # extraction failed (logged); stays New for the sweep
@@ -884,10 +884,12 @@ def _note_entities(note) -> list[dict]:
 	]
 
 
-def _pages_for_prompt(entities: list[dict]) -> tuple[list[dict], list[dict]]:
+def _pages_for_prompt(entities: list[dict], user: str) -> tuple[list[dict], list[dict]]:
 	"""(suggested page refs for the note's entities, existing page rows for
-	those refs) — both handed to the merge prompt so the model reuses our
-	slug conventions and sees the current bodies it must merge into."""
+	those refs), both handed to the merge prompt so the model reuses our
+	slug conventions and sees the current bodies it must merge into. ``user`` is
+	the human whose statement produced the note (the ingest write actor), so the
+	read filter and the later write attribution name the same principal."""
 	from jarvis.chat import entities as entities_mod
 
 	suggested: list[dict] = []
@@ -902,9 +904,26 @@ def _pages_for_prompt(entities: list[dict]) -> tuple[list[dict], list[dict]]:
 	rows = frappe.get_all(
 		WIKI,
 		filters={"slug": ["in", [s["slug"] for s in suggested]]},
-		fields=["slug", "title", "page_type", "ref_doctype", "ref_name", "summary", "body_md"],
+		fields=[
+			"slug",
+			"title",
+			"page_type",
+			"ref_doctype",
+			"ref_name",
+			"summary",
+			"body_md",
+			"scope",
+			"target_role",
+			"target_user",
+		],
 		limit_page_length=len(suggested),
 	)
+	# Scope visibility (belt and braces, mirroring wiki_clause): entity-derived
+	# slugs are unsuffixed so only Org pages should match, but an Org page
+	# NARROWED to User/Role scope after creation keeps its org-convention slug
+	# (the audience suffix is applied at create time only), so it still matches
+	# here. Never inline a body ``user`` cannot read into the merge prompt.
+	rows = [r for r in rows if wiki_permissions.can_read_page(r, user)]
 	for r in rows:
 		r["body_md"] = _body_for_prompt(r.get("body_md"))
 	return suggested, rows
