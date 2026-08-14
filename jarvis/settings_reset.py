@@ -65,6 +65,10 @@ CONNECTION = ResetSpec(
 		"chat_device_public_key",
 		# Per-push statuses that otherwise read as "already sent" on a fresh site
 		"last_sync_status",
+		# The jarvis#841 dedup stamp names a config the PREVIOUS tenancy's
+		# container held; left set, it could absorb the fresh tenancy's first
+		# identical save inside its window.
+		"llm_last_apply_fingerprint",
 		"last_sync_warnings",
 		"installed_apps_synced",
 		"custom_skills_sync_status",
