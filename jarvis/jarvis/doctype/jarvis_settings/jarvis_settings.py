@@ -2369,7 +2369,15 @@ def request_resync(settings) -> str:
 	if compute_pool_mode(settings):
 		settings._enqueue_pool_sync()
 		return "pool"
-	_write_settings_fields(settings, {"last_sync_status": "pending: provisioning container"})
+	# Stamp the request time too (jarvis C2 time-box): a direct-leg Resync is a
+	# fresh apply request, so it must restart the llm_applying soft window the
+	# same way the two enqueue funnels do, or a Resync during a stuck apply would
+	# still age out to the hard setup gate. The pool leg above already stamps via
+	# _enqueue_pool_sync; this is the direct leg's matching write.
+	_write_settings_fields(
+		settings,
+		{"last_sync_status": "pending: provisioning container", "last_sync_requested_at": frappe.utils.now()},
+	)
 	frappe.enqueue(
 		"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin",
 		queue="long",
