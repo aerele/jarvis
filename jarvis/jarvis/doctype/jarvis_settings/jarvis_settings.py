@@ -1166,7 +1166,15 @@ class JarvisSettings(Document):
 		window is deliberately the SPA's 300s subscription readiness budget
 		(onboarding.save_llm_pool), not the 600s job budget: when the wizard's
 		poll exhausts and the customer retries, the re-save must fire a REAL
-		apply even where the */5 reconcile cannot help (paused scheduler)."""
+		apply even where the */5 reconcile cannot help (paused scheduler).
+
+		Accepted residual (#846 review): a container rebuilt OUT-OF-BAND
+		(image roll, host move) inside the ok-window can absorb one identical
+		re-save, because nothing bench-side witnessed the rebuild. Bounded by
+		the 600s window, and rebuild flows that go through admin re-gate
+		readiness (authority generation / chat_readiness), which is what the
+		customer-facing surfaces key on - so the skip window closes on its
+		own rather than stranding the tenant."""
 		fingerprint = self._llm_apply_fingerprint(self.flags.get("pool_state_snapshot"))
 		if not fingerprint or fingerprint != (self.get("llm_last_apply_fingerprint") or ""):
 			return False
@@ -1929,6 +1937,12 @@ def _stamp_pool_applied_ok(settings, result: dict) -> bool:
 		"last_sync_at": _frappe.utils.now(),
 		"last_sync_status": f"ok ({resolved_action} via admin)",
 		"llm_pool_synced_at": _frappe.utils.now(),
+		# The jarvis#841 dedup stamp names a DIRECT-leg apply; this "ok" is a
+		# POOL apply, so any stamp left standing next to it is stale by
+		# definition. Belt-and-braces with the _enqueue_pool_sync clear: the
+		# synchronous sync_pool_now path suppresses that enqueue, so this is
+		# the only clear that covers it (#846 review).
+		"llm_last_apply_fingerprint": "",
 	}
 	if not result.get("unchanged"):
 		_synced["last_subscription_status"] = str(result.get("subscription_status") or "")

@@ -205,10 +205,19 @@ class TestConnectDoubleApplyDedup(_RT3SettingsTestCase):
 		from jarvis import settings_reset
 		from jarvis.onboarding import _DISCONNECTED_LLM_FIELDS
 
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			_stamp_pool_applied_ok,
+		)
+
 		s = frappe.get_single("Jarvis Settings")
 		s.db_set("llm_last_apply_fingerprint", "f" * 64, update_modified=False)
 		with patch("frappe.enqueue"):
 			s._enqueue_pool_sync()
+		self.assertEqual(s.get("llm_last_apply_fingerprint"), "")
+		# The synchronous pool push (sync_pool_now) suppresses that enqueue, so
+		# its confirmed-apply stamp must clear the stamp itself (#846 review).
+		s.db_set("llm_last_apply_fingerprint", "f" * 64, update_modified=False)
+		self.assertTrue(_stamp_pool_applied_ok(s, {"action": "pool_update"}))
 		self.assertEqual(s.get("llm_last_apply_fingerprint"), "")
 		self.assertIn("llm_last_apply_fingerprint", settings_reset.CONNECTION.blank)
 		self.assertEqual(_DISCONNECTED_LLM_FIELDS.get("llm_last_apply_fingerprint"), "")
