@@ -75,7 +75,8 @@ const props = defineProps({
 	 * to screen readers). For bars with many short-labeled steps - the connect
 	 * wait's six - a phone-width card cannot fit a label per segment; the
 	 * caption and the caller's own explanation line carry the words there.
-	 * 719px matches the onboarding wait block's own stacking breakpoint.
+	 * 720px matches the onboarding wait block's own max-width: 720px rule, so
+	 * the labels collapse at exactly the width the block goes narrow.
 	 */
 	collapseLabels: { type: Boolean, default: false },
 });
@@ -121,7 +122,7 @@ function segmentClass(i) {
 }
 /* collapseLabels: the sr-only recipe, applied only under the breakpoint so
    the label stays announced while taking no visual space. */
-@media (max-width: 719px) {
+@media (max-width: 720px) {
 	.step-progress-label--collapsible {
 		position: absolute;
 		width: 1px;

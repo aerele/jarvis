@@ -3916,8 +3916,9 @@ const connectSteps = computed(() => {
 // sentence rather than naming a row the call does not check first.
 const connectProgress = computed(() => {
 	const steps = connectSteps.value;
-	let index = steps.findIndex((s) => s.state !== "done");
-	if (index < 0) index = steps.length - 1;
+	// Always hits: the chat step is never "done" (only active or waiting), so
+	// a first not-done step always exists.
+	const index = steps.findIndex((s) => s.state !== "done");
 	const explain = preflight.running
 		? "Running final checks on your setup."
 		: steps[index].explain;
