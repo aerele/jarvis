@@ -3,7 +3,11 @@
 Short RQ job enqueued by settlement (D3 S6) and re-enqueued by the pump watchdog
 for a ``finalizing`` turn (R-13). It drives the turn's owed ``Jarvis Turn Effect``
 rows — the closed set settlement fixed atomically (OAR-9) — to ``done``, then flips
-``finalizing -> done`` and publishes ``message:enriched`` (SUX-7).
+``finalizing -> done``. jarvis#737: ``message:enriched`` (SUX-7) no longer waits on
+that flip; it publishes as soon as the VISIBLE effects are done, so a stalled
+invisible effect (usage, telemetry) never holds the "Finishing..." affordance up
+while everything the user can perceive already landed (turn_state.VISIBLE_EFFECT_NAMES,
+claim_enrichment_publish for the exactly-once guarantee across the two publish sites).
 
 Every effect is idempotent per ``(turn, effect_name)`` (the ledger's composite PK)
 and best-effort: a failing effect is retried on the next finalize cycle and
@@ -18,7 +22,7 @@ materialize (#45), macro advance + app-learning (#46/#47), auto-title (#50), wik
 nudge (#51), USAGE (#42, R-4: the ≤4.5s gateway poll runs HERE off the critical
 path, with a (turn_id) idempotency guard so a replay can't double-count the soft
 cap), and telemetry (#49). ``run:end`` is settlement's (S5); this publishes
-``message:enriched`` at completion.
+``message:enriched`` once the visible subset of the above is done (jarvis#737).
 
 Wired as the pump's ``enqueue_finalize`` seam target
 (``jarvis.chat.finalize.run_finalize``); tests drive it in-process.
@@ -134,17 +138,40 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 				pass
 			frappe.log_error(title=f"finalize.{name}", message=frappe.get_traceback())
 
+	# jarvis#737: release the VISIBLE "Finishing..." affordance as soon as the
+	# perceivable effects are done, without waiting on usage/telemetry, which
+	# legitimately keep retrying on their own cadence. This does NOT flip the
+	# turn's state; 'finalizing' -> 'done' below still requires EVERY required
+	# effect, so ledger semantics (the force-done budget, the usage soft-cap
+	# guard) are unchanged, only WHEN the publish fires moves earlier.
+	# claim_enrichment_publish is the single exactly-once gate shared with the
+	# finalize_done branch below, so whichever of the two fires first wins and
+	# the other is a no-op, never a double publish.
+	published = False
+	assistant_message = turn.get("assistant_message")
+	if (
+		state == "finalizing"
+		and owner
+		and assistant_message
+		and ts.visible_effects_done(run_id)
+		and ts.claim_enrichment_publish(run_id)
+	):
+		frappe.db.commit()
+		published = _publish_enriched(run_id, conversation, owner, assistant_message)
+
 	# Success path only: flip finalizing -> done once every required effect is done
-	# (force-done counts as done), then publish message:enriched (SUX-7). An
-	# errored/cancelled turn is already terminal — no finalize_done, no un-settling.
+	# (force-done counts as done, including usage/telemetry). An errored/cancelled
+	# turn is already terminal; no finalize_done, no un-settling.
 	done = False
 	if state == "finalizing" and ts.all_required_effects_done(run_id):
 		v = int(frappe.db.get_value(TURN, run_id, "version") or 0)
 		if ts.finalize_done(run_id, v):
 			frappe.db.commit()
 			done = True
-			_publish_enriched(run_id, conversation, owner, turn.get("assistant_message"))
-	return {"ok": True, "ran": ran, "done": done, "state": state}
+			if not published and ts.claim_enrichment_publish(run_id):
+				frappe.db.commit()
+				published = _publish_enriched(run_id, conversation, owner, assistant_message)
+	return {"ok": True, "ran": ran, "done": done, "published": published, "state": state}
 
 
 def _conversation_owner(conversation: str) -> str | None:

@@ -258,7 +258,10 @@ class TestPumpPipelineE2E(_PipelineCase):
 			out = finalize.run_finalize(rid, self._target)
 		self.assertTrue(out["done"])
 		self.assertEqual(self._state(rid), "done")
-		self.assertIn("message:enriched", self._pub_kinds())
+		# jarvis#737: the visible-set release and the finalize_done release land in the
+		# SAME call here (nothing stalls), so the exactly-once claim must still hold:
+		# one publish, not two.
+		self.assertEqual(self._pub_kinds().count("message:enriched"), 1)
 		# Every owed effect reached done exactly once (D1 spot-check).
 		self.assertTrue(all(v == "done" for v in self._effects(rid).values()))
 		self.assertEqual(recs["rich"].count, 1, "rich_outputs owner ran once")
@@ -968,14 +971,21 @@ class TestStuckFinishingAfterAFailingLane(_PipelineCase):
 	handing the code a healthy row.
 
 	What that proves, and what the fix adds:
-	  * the turn legitimately stays ``finalizing`` and promises NO ``message:enriched``
-	    while the lane keeps failing. That is by design and is NOT changed here.
-	  * the retry budget eventually force-dones the effect and the turn reaches
-	    ``done``, publishing ``message:enriched`` exactly once. But that ONE publish is
-	    best-effort, and every retry is 5 minutes apart behind the pump watchdog cron.
-	  * so a finalize that arrives AFTER the turn is done now RE-DELIVERS
-	    ``message:enriched`` (the counterpart of the CDX-12 terminal backstop), instead
-	    of returning ``already_done`` in silence and leaving the client stuck.
+	  * jarvis#737: usage is INVISIBLE ledger work (turn_state.INVISIBLE_EFFECT_NAMES).
+	    Everything the user can actually perceive (rich_outputs, auto_title, ...) is
+	    the VISIBLE set, and it is already done by the time the dead lane is hit, so
+	    ``message:enriched`` publishes right away and the turn STAYS ``finalizing``:
+	    the state transition, the force-done budget, and the usage soft-cap guard are
+	    all unchanged, only WHEN the client is told to stop waiting moves earlier.
+	  * the usage retry budget still eventually force-dones the effect and the turn
+	    reaches ``done``, but that does NOT publish a second time; the exactly-once
+	    claim (turn_state.claim_enrichment_publish) was already spent by the early
+	    visible-set publish.
+	  * separately, jarvis#681's redelivery is untouched: a finalize that arrives
+	    AFTER the turn is done still RE-DELIVERS ``message:enriched`` unconditionally
+	    (the counterpart of the CDX-12 terminal backstop), instead of returning
+	    ``already_done`` in silence and leaving a client that missed the original
+	    push stuck.
 	The client-side half of the fix, the deadline that bounds the affordance whatever
 	the server does, is covered by frontend/src/lib/enrichmentPending.test.js.
 	"""
@@ -1017,25 +1027,32 @@ class TestStuckFinishingAfterAFailingLane(_PipelineCase):
 		blind = _FakeSess()
 		blind.list_sessions = lambda: []
 
-		# ---- 1. the reported state: a completed answer, a dead lane, no clear ----
+		# ---- 1. jarvis#737: the VISIBLE set is already done, so the affordance
+		#         releases even though the dead lane holds the STATE open. ----
 		with self._gateway(blind), self._mock_enrichment_except_usage():
 			out = finalize.run_finalize(rid, self._target)
 		self.assertTrue(out["ok"], "finalize never errors a settled turn")
-		self.assertFalse(out["done"])
-		self.assertEqual(self._state(rid), "finalizing", "the failing lane holds the turn open")
+		self.assertFalse(out["done"], "usage/telemetry are still owed; the turn stays finalizing")
+		self.assertTrue(out["published"], "the visible set is done, so THIS call published the clear")
+		self.assertEqual(
+			self._state(rid), "finalizing", "the failing lane holds the state, not the affordance"
+		)
 		self.assertEqual(self._effects(rid)["usage"], "pending", "released for the next cycle")
 		self.assertEqual(int(self._val(rid, "usage_recorded")), 0, "the guard CAS rolled back")
-		self.assertNotIn(
-			"message:enriched",
-			self._pub_kinds(),
-			"nothing tells the client to stop showing Finishing... while enrichment is owed",
+		self.assertEqual(
+			self._pub_kinds().count("message:enriched"),
+			1,
+			"the client is told to stop showing Finishing... as soon as everything it can "
+			"perceive has landed, without waiting on the invisible usage lane",
 		)
 		# Everything the USER can see did land: the answer is complete, which is why a
 		# permanent "Finishing..." is a lie rather than merely pessimistic.
 		self.assertEqual(self._effects(rid)["rich_outputs"], "done")
 		self.assertEqual(self._effects(rid)["auto_title"], "done")
 
-		# ---- 2. the retry budget frees it, but only after the watchdog cadence ----
+		# ---- 2. the retry budget eventually frees the STATE too, but does NOT
+		#         publish a second time; the exactly-once claim was already spent
+		#         by the early visible-set publish above. ----
 		for _ in range(ts.FINALIZE_MAX_ATTEMPTS):
 			if self._state(rid) == "done":
 				break
@@ -1043,7 +1060,10 @@ class TestStuckFinishingAfterAFailingLane(_PipelineCase):
 				finalize.run_finalize(rid, self._target)
 		self.assertEqual(self._state(rid), "done", "a broken lane can never strand a settled turn")
 		self.assertEqual(
-			self._pub_kinds().count("message:enriched"), 1, "the clear is published exactly once"
+			self._pub_kinds().count("message:enriched"),
+			1,
+			"still exactly one publish: the ledger reaching done does not re-clear an "
+			"affordance the visible set already cleared",
 		)
 
 		# ---- 3. THE FIX: that single publish is best-effort, so a later finalize

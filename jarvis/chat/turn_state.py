@@ -107,6 +107,35 @@ EFFECT_NAMES = (
 	"telemetry_flush",
 )
 
+# jarvis#737: the perceivable subset of EFFECT_NAMES, the set the "Finishing..."
+# affordance actually exists to wait for. rich_outputs is attachments/canvas
+# (#43/#44); enrich_cards fills bare-id jarvis-cards with real schema fields
+# BEFORE the client reload a message:enriched publish triggers (finalize.py's
+# _effect_enrich_cards), so publishing ahead of it would show a bare card, a new
+# visible regression; chat_asks materializes the Approval Board fence from the
+# same reply; macro_advance/auto_title/wiki_nudge are the remaining turn-visible
+# side effects; terminal_publish is the CDX-12 terminal re-publish backstop and
+# runs first in the canon, so it is effectively always settled by the time the
+# rest are. usage and telemetry_flush are ledger/telemetry work with no visible
+# surface, and usage is the one with real external I/O (the gateway poll) that
+# legitimately stalls and retries on its own cadence, so they are excluded here
+# and race the affordance instead of gating it. Every EFFECT_NAMES member is
+# assigned to exactly one of the two tuples below (asserted immediately after),
+# so a name added to the canon without a classification fails loudly rather than
+# silently defaulting into either bucket.
+VISIBLE_EFFECT_NAMES = (
+	"terminal_publish",
+	"rich_outputs",
+	"enrich_cards",
+	"chat_asks",
+	"macro_advance",
+	"auto_title",
+	"wiki_nudge",
+)
+INVISIBLE_EFFECT_NAMES = ("usage", "telemetry_flush")
+assert set(VISIBLE_EFFECT_NAMES) | set(INVISIBLE_EFFECT_NAMES) == set(EFFECT_NAMES)
+assert not (set(VISIBLE_EFFECT_NAMES) & set(INVISIBLE_EFFECT_NAMES))
+
 TERMINAL_STATES = ("done", "errored", "cancelled")
 # Nonterminal states for the idle-release NOT EXISTS + watchdog scans.
 NONTERMINAL_STATES = (
@@ -1211,6 +1240,41 @@ def all_required_effects_done(run_id: str) -> bool:
 	return not frappe.db.sql(
 		f"""SELECT 1 FROM `tab{EFFECT}` WHERE turn=%(r)s AND status!='done' LIMIT 1""",
 		{"r": run_id},
+	)
+
+
+def visible_effects_done(run_id: str) -> bool:
+	"""jarvis#737: True iff no required VISIBLE_EFFECT_NAMES row for the turn is
+	still pending/running (force-done counts as done). Mirrors
+	all_required_effects_done but scoped to the perceivable subset, so finalize
+	can release the "Finishing..." affordance without waiting on usage/telemetry.
+	A turn that owes no visible effect at all (an all-usage synthetic ledger, or
+	a future required set with none) reads True vacuously, matching intent:
+	nothing visible is held, so there is nothing for the affordance to wait on."""
+	return not frappe.db.sql(
+		f"""SELECT 1 FROM `tab{EFFECT}` WHERE turn=%(r)s AND status!='done'
+		AND effect_name IN %(names)s LIMIT 1""",
+		{"r": run_id, "names": VISIBLE_EFFECT_NAMES},
+	)
+
+
+def claim_enrichment_publish(run_id: str) -> bool:
+	"""jarvis#737: the exactly-once gate for the message:enriched publish across
+	the two sites that can trigger it, finalize's early visible-set release and
+	the later finalize_done all-effects release. A CAS 0->1 on
+	enriched_published, so whichever site calls this first wins the publish and
+	the other affects 0 rows and skips it. Independent of finalize_done's own
+	state CAS: this never changes when the turn reaches 'done', only which call
+	is allowed to publish. Does NOT gate the jarvis#681 already-done redelivery
+	(finalize.run_finalize's top branch), which stays an unconditional
+	best-effort resend by design. No commit (caller owns the txn, same
+	discipline as the sibling effect-ledger CAS helpers)."""
+	return (
+		_run_cas(
+			f"UPDATE `tab{TURN}` SET enriched_published=1 WHERE name=%(r)s AND enriched_published=0",
+			{"r": run_id},
+		)
+		== 1
 	)
 
 
