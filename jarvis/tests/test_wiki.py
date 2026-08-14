@@ -16,8 +16,9 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
 from jarvis.chat import entities as entities_mod
-from jarvis.chat import wiki
+from jarvis.chat import wiki, wiki_permissions
 from jarvis.exceptions import FeatureDisabledError, InvalidArgumentError, PermissionDeniedError
+from jarvis.permissions import JARVIS_USER_ROLE
 from jarvis.tools.read_wiki import read_wiki
 from jarvis.tools.update_wiki import update_wiki
 
@@ -1110,3 +1111,90 @@ class TestWikiKillSwitchTools(FrappeTestCase):
 		hint = api._ERROR_HINTS.get("FeatureDisabledError", "")
 		self.assertTrue(hint)
 		self.assertNotIn("permission", hint.lower())
+
+
+class TestPagesForPromptScopeFilter(FrappeTestCase):
+	"""Issue #732: the voice-note merge prompt must never inline the body of a
+	page the note's owner cannot read. An Org page NARROWED to User/Role scope
+	AFTER creation keeps its unsuffixed, org-convention slug (the audience
+	suffix is applied at create time only), so ``_pages_for_prompt`` matches it
+	by slug and would otherwise read a body the owner must not see."""
+
+	OWNER = "wiki732-owner@test.invalid"
+	OTHER = "wiki732-other@test.invalid"
+	ENTITIES = [{"doctype": "Customer", "name": ALPHA}]
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_delete_test_pages()
+		for email in (self.OWNER, self.OTHER):
+			if not frappe.db.exists("User", email):
+				frappe.get_doc(
+					{
+						"doctype": "User",
+						"email": email,
+						"first_name": email.split("@")[0],
+						# Jarvis User (not System Manager): a real desk user who is
+						# NOT an SM, so can_read_page does not short-circuit True.
+						"user_type": "System User",
+						"send_welcome_email": 0,
+						"roles": [{"role": JARVIS_USER_ROLE}],
+					}
+				).insert(ignore_permissions=True)
+
+	def tearDown(self):
+		_delete_test_pages()
+		frappe.set_user("Administrator")
+
+	def _make_org_page(self):
+		# The entity-derived slug is exactly what _pages_for_prompt computes, so
+		# the planted Org page really is the one the merge lookup would match.
+		ref = entities_mod.page_ref_for("Customer", ALPHA)
+		self.assertEqual(ref["slug"], ALPHA_SLUG)
+		return _make_page(
+			ALPHA_SLUG,
+			ALPHA,
+			summary="Org summary.",
+			body_md="## Secret\n\nMargin is 42 percent.",
+			scope="Org",
+		)
+
+	def _narrow(self, doc, target_user):
+		doc.scope = "User"
+		doc.target_user = target_user
+		doc.save(ignore_permissions=True)
+		# Premise of the leak: narrowing after create leaves the slug unsuffixed,
+		# so the merge lookup still matches it by the org-convention slug.
+		self.assertEqual(doc.slug, ALPHA_SLUG)
+		return doc
+
+	def test_org_page_is_inlined_for_a_user_who_can_read_it(self):
+		# Under-block guard: a plain Org page must still reach the prompt whole.
+		self._make_org_page()
+		self.assertTrue(
+			wiki_permissions.can_read_page(frappe.get_doc(WIKI_DT, ALPHA_SLUG), self.OWNER)
+		)
+		suggested, rows = wiki._pages_for_prompt(self.ENTITIES, self.OWNER)
+		self.assertEqual([s["slug"] for s in suggested], [ALPHA_SLUG])
+		self.assertEqual([r["slug"] for r in rows], [ALPHA_SLUG])
+		self.assertIn("Margin is 42 percent", rows[0]["body_md"])
+
+	def test_page_narrowed_to_another_user_is_not_inlined(self):
+		# The confidentiality direction: a body the owner cannot read is gone.
+		doc = self._narrow(self._make_org_page(), self.OTHER)
+		# Precondition: the note owner genuinely cannot read it (and is not SM),
+		# so a passing test proves the filter, not an incidental SM bypass.
+		self.assertFalse(wiki_permissions.can_read_page(doc, self.OWNER))
+		suggested, rows = wiki._pages_for_prompt(self.ENTITIES, self.OWNER)
+		# The ref is still suggested (slug convention is public), but its body is
+		# withheld, which degenerates to the append-only "no existing page" case.
+		self.assertEqual([s["slug"] for s in suggested], [ALPHA_SLUG])
+		self.assertEqual(rows, [])
+
+	def test_page_narrowed_to_the_owner_is_still_inlined(self):
+		# No over-block: a page narrowed to the OWNER'S OWN scope stays visible.
+		doc = self._narrow(self._make_org_page(), self.OWNER)
+		self.assertTrue(wiki_permissions.can_read_page(doc, self.OWNER))
+		suggested, rows = wiki._pages_for_prompt(self.ENTITIES, self.OWNER)
+		self.assertEqual([r["slug"] for r in rows], [ALPHA_SLUG])
+		self.assertIn("Margin is 42 percent", rows[0]["body_md"])
