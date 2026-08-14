@@ -4,7 +4,7 @@
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<meta name="robots" content="noindex, nofollow" />
-		<title>Jarvis · Access required</title>
+		<title>{{ agent_name | e }} · Access required</title>
 		<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
 		<meta name="theme-color" content="#16161a" media="(prefers-color-scheme: dark)" />
 		<!-- The Jarvis mark uses the SPA brand gradient (JarvisMark.vue) inline; every
@@ -255,8 +255,8 @@
 			<div class="jvna-pill"><i></i>Signed in as <strong>{{ user_fullname | e }}</strong></div>
 			{% endif %}
 
-			<h1>You need access to Jarvis</h1>
-			<p class="jvna-body">You&rsquo;re not authorized just yet. One quick request to your admin, and Jarvis is all yours.</p>
+			<h1>You need access to {{ agent_name | e }}</h1>
+			<p class="jvna-body">You&rsquo;re not authorized just yet. One quick request to your admin, and {{ agent_name | e }} is all yours.</p>
 
 			<div class="jvna-actions">
 				<a class="jvna-btn jvna-btn-primary" href="/app">Back to Home</a>
