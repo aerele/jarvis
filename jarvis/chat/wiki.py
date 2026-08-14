@@ -2268,3 +2268,52 @@ def add_wiki_link(slug: str, target_slug: str) -> dict:
 	# stale doc raises TimestampMismatch instead of silently clobbering (R1).
 	frappe.db.set_value(WIKI, name, "manual_links", json.dumps(links))
 	return {"ok": True, "slug": slug, "manual_links": links}
+
+
+@frappe.whitelist()
+def remove_wiki_link(slug: str, target_slug: str) -> dict:
+	"""Undo a curated ``[[link]]`` from ``slug`` -> ``target_slug`` in
+	``manual_links``.
+
+	#644: ``add_wiki_link`` had no counterpart, so a mis-clicked "+ link" was
+	permanent short of a Desk/DB edit. Mirrors ``add_wiki_link`` exactly for
+	permission shape and locking; only the mutation differs (remove, not append):
+
+	- R1 durable: this write never touches body_md either.
+	- R2 idempotent: removing a target that isn't there is a safe no-op.
+	- R2 concurrency-safe: the SAME row-locking read (``for_update``) as add, so
+	  this sees the latest committed value rather than a stale snapshot.
+	- R3 permission-checked BOTH ends: caller must be able to EDIT ``slug`` and
+	  READ ``target_slug``, the same bar as adding, so no one can remove a link
+	  they couldn't have added, and a non-visible target reads as not-found so its
+	  existence isn't disclosed. (A manual link whose target page was since
+	  deleted can't be removed through this endpoint either; it also never
+	  renders as an edge, since the graph drops dangling links, so it's inert.)"""
+	_require_system_user()
+	slug = (slug or "").strip().lower()
+	target = (target_slug or "").strip().lower()
+	if not slug or not target:
+		frappe.throw(_("slug and target_slug are required."))
+
+	name = frappe.db.get_value(WIKI, {"slug": slug}, "name")
+	if not name:
+		frappe.throw(_("Wiki page not found."))
+	if not wiki_permissions.can_edit_page(frappe.get_doc(WIKI, name), frappe.session.user):
+		frappe.throw(_("Not permitted."), frappe.PermissionError)
+
+	target_name = frappe.db.get_value(WIKI, {"slug": target}, "name")
+	if not target_name or not wiki_permissions.can_read_page(
+		frappe.get_doc(WIKI, target_name), frappe.session.user
+	):
+		# Don't disclose a page the caller can't see.
+		frappe.throw(_("Target page not found."))
+
+	# Locking read: same reason as add_wiki_link's (see there); blocks until any
+	# concurrent add/remove on this row commits, then returns the latest value.
+	raw = frappe.db.get_value(WIKI, name, "manual_links", for_update=True)
+	links = _parse_manual_links(raw)
+	if target not in links:
+		return {"ok": True, "slug": slug, "already": True, "manual_links": links}
+	links.remove(target)
+	frappe.db.set_value(WIKI, name, "manual_links", json.dumps(links))
+	return {"ok": True, "slug": slug, "manual_links": links}

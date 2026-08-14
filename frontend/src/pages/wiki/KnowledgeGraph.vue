@@ -77,7 +77,9 @@
 					:node="state.selected"
 					:metrics="state.analysis.metrics"
 					:communities="state.analysis.communities"
+					:can-remove-link="true"
 					@focus="(id) => (state.focus = id)"
+					@remove-link="onRemoveLink"
 				/>
 				<AnalysisTabs
 					:analysis="state.analysis"
@@ -99,7 +101,9 @@
 // Tenant Knowledge Graph — the productive tool. Fetch caller-scoped graph → apply
 // exclusion → worker analysis (structure + TF-IDF similarity) → 3D graph + the
 // four analysis tabs. Productive loop: accept a suggested connection → add_wiki_link
-// (durable, out-of-body) → refetch → the edge appears.
+// (durable, out-of-body) → refetch → the edge appears. #644 wires the undo side:
+// select a page, see its curated links in the detail panel, remove one →
+// remove_wiki_link → refetch → the edge disappears.
 //
 // That loop used to be described here and switched off in the template: the page
 // passed :show-actions / :can-act / :show-priority / :show-actions-tab as false,
@@ -126,7 +130,7 @@ import {
 	egoGraph,
 	searchGraph,
 } from "wiki-graph-core";
-import { addWikiLink, getWikiGraph, getWikiGraphHistory } from "@/api/wiki";
+import { addWikiLink, getWikiGraph, getWikiGraphHistory, removeWikiLink } from "@/api/wiki";
 import { useJarvisTheme } from "@/theme";
 
 // Same breadcrumb + persistent "Open ERPNext Desk" top bar the other Skills
@@ -294,6 +298,36 @@ async function onAddLink(suggestion) {
 	toast(`Linked ${suggestion.aLabel || from} to ${suggestion.bLabel || to}`);
 	try {
 		await refetchGraph();
+	} catch (_) {}
+}
+
+// The undo side of the same loop (#644): a curated link shown in the detail
+// panel of the page it starts from -> remove -> a refetch that drops the edge.
+// remove_wiki_link is a safe no-op on a link that's already gone, so a stray
+// double-click just re-confirms it's absent rather than erroring.
+async function onRemoveLink(targetSlug) {
+	if (state.linking || !state.selected || !targetSlug) return;
+	const from = slugOf(state.selected.id);
+	if (!from) return;
+
+	state.linking = true;
+	try {
+		await removeWikiLink(from, targetSlug);
+	} catch (e) {
+		toast((e && e.message) || "Could not remove that link.");
+		return;
+	} finally {
+		state.linking = false;
+	}
+
+	toast(`Removed link to ${targetSlug}`);
+	try {
+		await refetchGraph();
+		// refetchGraph replaces state.data.nodes wholesale, so state.selected still
+		// points at the pre-removal node object; re-point it at the fresh one so
+		// the panel actually shows the link gone instead of looking unchanged.
+		const again = (state.data.nodes || []).find((n) => n.id === state.selected?.id);
+		if (again) state.selected = again;
 	} catch (_) {}
 }
 

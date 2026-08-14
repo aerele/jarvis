@@ -287,6 +287,19 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 			{"source": f"page:{b.name}", "target": f"page:{a.name}", "kind": "links-to"},
 			g["edges"],
 		)
+		# #644: the curated targets ride on the LINKING page's node, not the target's.
+		bn = self._node(g, f"page:{b.name}")
+		self.assertEqual(bn.get("manual_links"), [a.name])
+		self.assertEqual(an.get("manual_links"), [])  # a curated nothing itself
+
+	def test_manual_links_never_travel_to_admin(self):
+		"""#644: the new node field is gated on include_content, same as summary;
+		the admin (org-wide) push must not grow a new content-shaped field."""
+		a = self._page(f"{_PREFIX}-nta", "A", body_md="")
+		self._page(f"{_PREFIX}-ntp", "P", body_md="", manual_links=[a.name])
+		g = self._graph()  # compute_graph() -> admin path, include_content=False
+		pn = self._node(g, self._pid(frappe.get_doc(WIKI, f"{_PREFIX}-ntp")))
+		self.assertNotIn("manual_links", pn)
 
 	def test_get_wiki_graph_history_non_sm_blocked(self):
 		"""R3: org-wide aggregates are SM-only, unlike get_wiki_graph."""
@@ -443,6 +456,77 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 		frappe.db.set_value(WIKI, doc.name, "status", "Archived", update_modified=False)
 		g = self._graph()
 		self.assertIsNone(self._node(g, f"page:{doc.name}"))
+
+	# --- remove_wiki_link (#644: mirrors add_wiki_link's R1/R2/R3) ---
+	def test_remove_link_clears_manual_links_and_edge(self):
+		a = self._page(f"{_PREFIX}-rla", "A", body_md="")
+		p = self._page(f"{_PREFIX}-rlp", "P", body_md="original body")
+		wiki_mod.add_wiki_link(p.name, a.name)
+		res = wiki_mod.remove_wiki_link(p.name, a.name)
+		self.assertTrue(res["ok"])
+		self.assertFalse(res.get("already"))
+		# body_md untouched (R1, out of body)
+		self.assertEqual(frappe.db.get_value(WIKI, p.name, "body_md"), "original body")
+		links = wiki_mod._parse_manual_links(frappe.db.get_value(WIKI, p.name, "manual_links"))
+		self.assertNotIn(a.name, links)
+		g = self._graph()
+		self.assertNotIn(
+			{"source": f"page:{p.name}", "target": f"page:{a.name}", "kind": "links-to"}, g["edges"]
+		)
+
+	def test_remove_link_missing_edge_is_safe_noop(self):
+		a = self._page(f"{_PREFIX}-rna", "A", body_md="")
+		p = self._page(f"{_PREFIX}-rnp", "P", body_md="")
+		res = wiki_mod.remove_wiki_link(p.name, a.name)  # never added
+		self.assertTrue(res["ok"])
+		self.assertTrue(res.get("already"))
+		self.assertEqual(res["manual_links"], [])
+
+	def test_remove_link_leaves_other_targets_intact(self):
+		a = self._page(f"{_PREFIX}-rka", "A", body_md="")
+		b = self._page(f"{_PREFIX}-rkb", "B", body_md="")
+		p = self._page(f"{_PREFIX}-rkp", "P", body_md="")
+		wiki_mod.add_wiki_link(p.name, a.name)
+		wiki_mod.add_wiki_link(p.name, b.name)
+		wiki_mod.remove_wiki_link(p.name, a.name)
+		links = wiki_mod._parse_manual_links(frappe.db.get_value(WIKI, p.name, "manual_links"))
+		self.assertNotIn(a.name, links)
+		self.assertIn(b.name, links)
+
+	def test_remove_link_source_not_editable_blocked(self):
+		a = self._page(f"{_PREFIX}-rea", "A", body_md="")
+		p = self._page(f"{_PREFIX}-rep", "P", body_md="")
+		wiki_mod.add_wiki_link(p.name, a.name)
+		with patch("jarvis.chat.wiki_permissions.can_edit_page", return_value=False):
+			with self.assertRaises(frappe.PermissionError):
+				wiki_mod.remove_wiki_link(p.name, a.name)
+
+	def test_remove_link_target_not_readable_blocked(self):
+		a = self._page(f"{_PREFIX}-rra", "A", body_md="")
+		p = self._page(f"{_PREFIX}-rrp", "P", body_md="")
+		wiki_mod.add_wiki_link(p.name, a.name)
+		# target invisible → reads as not-found (doesn't disclose existence, R3)
+		with patch("jarvis.chat.wiki_permissions.can_read_page", return_value=False):
+			with self.assertRaises(frappe.ValidationError):
+				wiki_mod.remove_wiki_link(p.name, a.name)
+
+	def test_remove_link_uses_locking_read(self):
+		"""Same mechanism assertion as add_wiki_link's: for_update=True on the
+		manual_links read is what makes the write race-free (R2)."""
+		p = self._page(f"{_PREFIX}-rlockp", "P", body_md="")
+		a = self._page(f"{_PREFIX}-rlocka", "A", body_md="")
+		wiki_mod.add_wiki_link(p.name, a.name)
+		orig = frappe.db.get_value
+		seen = {}
+
+		def spy(dt, name=None, field=None, *args, **kwargs):
+			if dt == WIKI and field == "manual_links":
+				seen["for_update"] = kwargs.get("for_update")
+			return orig(dt, name, field, *args, **kwargs)
+
+		with patch.object(frappe.db, "get_value", side_effect=spy):
+			wiki_mod.remove_wiki_link(p.name, a.name)
+		self.assertTrue(seen.get("for_update"))
 
 
 class TestCuratedLinksReachReaders(WikiGraphTestCase):
