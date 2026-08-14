@@ -60,12 +60,6 @@ BACKEND_ONLY: dict[str, str] = {
 		"would resurrect the retired surface. Delete the module (and this entry) once no "
 		"deployed bundle references it."
 	),
-	"export_document": (
-		"Implemented by jarvis #337 but never given a plugin descriptor, so no agent can call it "
-		"today. Exposing it is a product decision (it writes a File and needs a jarvis-persona "
-		"TOOLS.md row), not a drift fix — recorded here so the gap is explicit while every OTHER "
-		"drift still fails CI. Remove this entry in the change that adds the descriptor."
-	),
 }
 
 _COMMENT: tuple[str, ...] = (

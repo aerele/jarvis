@@ -8,9 +8,46 @@ this the agent hand-builds the file with ``exec``/``browser`` and it never
 reaches the user. Here we render the content with Frappe's own engines
 (``md_to_html`` + ``get_pdf``) and save a private File the chat renders as a
 download card.
+
+Security: ``content`` is agent-composed, which means it is effectively
+LLM-controlled text — it must never reach the HTML unsanitized. Two distinct
+threats, both closed at one choke point:
+
+  * XSS in the standalone HTML output — ``<script>``, inline event handlers,
+    ``javascript:`` hrefs.
+  * SSRF-via-render — ``get_pdf`` runs wkhtmltopdf, which FETCHES any
+    ``<img src>`` / ``<link href>`` / SVG ``<image href>`` it finds at render
+    time, server-side. An agent-composed ``<img src="http://169.254.169.254/…">``
+    (cloud metadata) or ``file:///etc/passwd`` would make the PDF renderer
+    issue that request. This tool does not support embedded
+    images/charts (deliberately out of scope), so every fetch-capable tag is
+    stripped outright rather than merely attribute-filtered — no feature is
+    lost by removing a tag nothing here is meant to use.
+
+Two layers, mirroring the pattern ``frappe.utils.html_utils`` already uses for
+``<script>``/``<style>`` (``clean_script_and_style``, a BeautifulSoup decompose
+pass ahead of ``bleach.clean``):
+
+  1. ``_strip_unsafe_tags`` — a BeautifulSoup decompose pass that REMOVES the
+     fetch-capable tags outright (``img``/``svg``/``image``/``link``/``meta``/
+     ``style``), plus ``<script>``. Bleach's own default behaviour for a tag
+     outside its allowlist is to *escape* it into visible garbled text, not
+     remove it — safe (nothing executes or fetches) but ugly in a document
+     meant to read as a clean report, and it would leave a stripped
+     ``<script>``'s payload sitting as visible inert text. Decomposing first
+     gives a clean removal instead.
+  2. ``frappe.utils.sanitize_html`` (bleach-based) on what remains — blocks
+     event-handler attributes and non-``{cid,http,https,mailto}`` protocols
+     as part of its base allowlist (belt-and-suspenders once ``<script>`` and
+     every fetch-capable tag are already gone).
+
+Applied identically to BOTH the Markdown-rendered branch and the
+``content_is_html=True`` raw-HTML branch — the flag changes how ``content``
+becomes HTML, never whether the result gets sanitized.
 """
 
 import frappe
+from frappe.utils.html_utils import sanitize_html
 
 from jarvis.exceptions import InvalidArgumentError, NoDataError
 
@@ -19,6 +56,43 @@ _FORMATS = {
 	"html": ("html", "text/html"),
 	"png": ("png", "image/png"),
 }
+
+# Every tag capable of triggering an out-of-band fetch when wkhtmltopdf renders
+# the page, plus <script> — decomposed here (not left to sanitize_html's own
+# allowlist filtering) so its content disappears cleanly instead of surviving
+# as inert escaped text sitting visibly in the rendered document. A duplicate
+# <html>/<head>/<body> in the caller's content is not a separate risk to name
+# here: the HTML5 tree-construction algorithm (which html5lib implements)
+# already folds a second html/head/body into the single real one rather than
+# nesting it — verified empirically before relying on it.
+_UNSAFE_TAGS = {"img", "image", "svg", "link", "meta", "style", "script"}
+
+# A runaway model must not be able to hand wkhtmltopdf an unbounded document.
+_MAX_CONTENT_CHARS = 200_000
+
+
+def _strip_unsafe_tags(html: str) -> str:
+	"""Remove (not merely escape) every tag in ``_UNSAFE_TAGS``.
+
+	Same technique ``frappe.utils.html_utils.clean_script_and_style`` already
+	uses for ``<script>``/``<style>``: a BeautifulSoup decompose pass. Doing
+	this ahead of ``sanitize_html`` gives a clean removal — bleach's own
+	default for a disallowed tag is to escape it into visible text, which is
+	safe but leaves garbled tag source sitting in the rendered document.
+
+	``BeautifulSoup(html, "html5lib")`` always parses into a full document
+	(wrapping bare content in its own ``<html><head></head><body>…</body></html>``,
+	confirmed empirically), so this returns ``soup.body``'s inner HTML, not the
+	whole parsed tree — ``html`` here is a fragment about to be spliced into
+	this module's own page shell, not a full page in its own right.
+	"""
+	from bs4 import BeautifulSoup
+
+	soup = BeautifulSoup(html, "html5lib")
+	for tag in soup(list(_UNSAFE_TAGS)):
+		tag.decompose()
+	return frappe.as_unicode(soup.body.decode_contents()) if soup.body else frappe.as_unicode(soup)
+
 
 # Minimal, self-contained stylesheet so tables/headings read cleanly in every
 # format (the HTML file opens standalone; the PDF/PNG render from the same CSS).
@@ -49,14 +123,24 @@ def export_document(
 	headings, lists all render), or raw HTML when ``content_is_html`` is set.
 	``format`` is ``"pdf"`` (default), ``"html"``, or ``"png"`` (a single image
 	of the rendered pages, stacked). ``title`` names the file + document.
+
+	Both content modes are sanitized identically before rendering (see the
+	module docstring): ``content_is_html`` changes how ``content`` becomes
+	HTML, never whether the result is sanitized. Images/embedded charts are
+	not supported by design, not omission — do not ask for a workaround via
+	``content_is_html``.
 	"""
 	if not isinstance(content, str) or not content.strip():
 		raise NoDataError("No content to export.")
+	if len(content) > _MAX_CONTENT_CHARS:
+		raise InvalidArgumentError(f"content exceeds {_MAX_CONTENT_CHARS} characters")
 	fmt = (format or "pdf").lower()
 	if fmt not in _FORMATS:
 		raise InvalidArgumentError(f"format must be one of {sorted(_FORMATS)}")
 
 	body = content if content_is_html else frappe.utils.md_to_html(content)
+	body = _strip_unsafe_tags(body)
+	body = sanitize_html(body)
 	doc_title = frappe.utils.escape_html(title) if title else "Document"
 	html = (
 		f"<!doctype html><html><head><meta charset='utf-8'>"
