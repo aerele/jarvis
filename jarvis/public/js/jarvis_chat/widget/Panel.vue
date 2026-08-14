@@ -1266,6 +1266,11 @@ function refreshReadiness() {
 // apply, which flips the reason back to llm_applying: so a successful retry swaps
 // this "didn't finish" banner for the quiet "Updating your AI configuration" one.
 // All outcomes (converged/queued/throttled) resolve the same way - just re-check.
+//
+// The SPA (frontend/src/views/ChatView.vue) carries a near-identical retryApply for
+// the same state. The two cannot share a helper - this widget is plain .mjs served
+// into Desk and cannot import from frontend/src (see panel_readiness.mjs's header) -
+// so keep the retry semantics in sync by hand.
 async function retryApply() {
 	if (retryingApply.value) return;
 	retryingApply.value = true;

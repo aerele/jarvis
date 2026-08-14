@@ -4006,6 +4006,12 @@ const canRetryApply = !!(window.is_jarvis_admin || window.is_system_manager);
 // swaps this banner for the quiet "Updating your AI configuration" one. All
 // outcomes (converged/queued/throttled) resolve the same way - forget the memoized
 // verdict and re-derive both flags.
+//
+// The Desk widget (jarvis/public/js/jarvis_chat/widget/Panel.vue) carries a
+// near-identical retryApply for the same stuck-apply state. The two cannot share a
+// helper - the widget is plain .mjs served into Desk and cannot import from
+// frontend/src (see panel_readiness.mjs's header) - so keep the retry SEMANTICS in
+// sync by hand, the same convention readiness.js <-> panel_readiness.mjs already use.
 async function retryApply() {
 	if (retryingApply.value || !canRetryApply) return;
 	retryingApply.value = true;

@@ -345,8 +345,11 @@
 			btn.disabled = false;
 			btn.textContent = label;
 		};
+		// Re-read readiness, update the cached boot flags from the fresh verdict,
+		// then re-sync the nudge. Returns the readiness call so the button can be
+		// restored only AFTER this settles - not before.
 		var recheck = function () {
-			frappe.call({
+			return frappe.call({
 				method: READY_METHOD,
 				callback: function (r) {
 					var m = (r && r.message) || null;
@@ -358,12 +361,27 @@
 				},
 			});
 		};
+		// The whole point is that a stuck-apply retry must NOT re-enable the button
+		// until its outcome is on screen: resync -> recheck -> THEN restore. Chaining
+		// restore onto the resync call directly (a sibling of recheck) would flip the
+		// button back mid-recheck, letting an admin double-click straight into the
+		// server's 180s throttle for no benefit. So restore rides recheck's own
+		// completion, and recheck only starts once resync has settled.
+		var afterResync = function () {
+			var rq;
+			try {
+				rq = recheck();
+			} catch (e) {
+				restore();
+				return;
+			}
+			if (rq && rq.always) rq.always(restore);
+			else restore();
+		};
 		try {
 			var req = frappe.call({ method: RESYNC_METHOD });
-			if (req && req.then) req.then(recheck, recheck);
-			else recheck();
-			if (req && req.always) req.always(restore);
-			else restore();
+			if (req && req.then) req.then(afterResync, afterResync);
+			else afterResync();
 		} catch (e) {
 			restore();
 		}
