@@ -79,10 +79,11 @@ _LONG_BLOB_RE = re.compile(r"\b[A-Za-z0-9+/=_-]{24,}\b")
 _ID_RE = re.compile(r"\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{10,23}\b")
 # decimals, thousand-grouped, or 4+ digit runs = amounts / quantities / ids
 _NUMBER_RE = re.compile(r"(?<![\w.])(?:\d[\d,]*\.\d+|\d{1,3}(?:,\d{3})+|\d{4,})(?![\w])")
-# any quoted literal - redacted unconditionally. ERP messages quote entity names
-# ('Tata Steel Ltd') that carry no digit and sit under 24 chars, so the old
-# length/digit heuristic leaked them. A traceback's `File "..."` path is dropped
-# too; the frame's function name + line survive unquoted, which is what triage needs.
+# any quoted literal - redacted unless it sits in JSON object-key position (see
+# _redact_quoted). ERP messages quote entity names ('Tata Steel Ltd') that carry
+# no digit and sit under 24 chars, so the old length/digit heuristic leaked them.
+# A traceback's `File "..."` path is dropped too; the frame's function name +
+# line survive unquoted, which is what triage needs.
 _QUOTED_RE = re.compile(r"(['\"])((?:\\.|(?!\1).)*?)\1")
 # a run of 2+ Capitalised words - the shape of an *unquoted* ERP entity name
 # ("Employee Priya Sharma", "Supplier Reliance Industries"). Most
@@ -94,9 +95,19 @@ _NAME_RUN_RE = re.compile(r"\b[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z0-9]*){1,}\b")
 
 
 def _redact_quoted(m: re.Match) -> str:
-	# Every quoted literal is a candidate data value; redact unconditionally.
+	# Preserve a quoted literal ONLY in true JSON object-key position: preceded
+	# by '{' or ',' (start of an object/member) and followed by ':' (the key/value
+	# separator), whitespace either side allowed. A one-sided "followed by ':'"
+	# check is not enough - ordinary prose like "Item 'widget': not found" would
+	# leak the value, since colons show up outside JSON too. Every other quoted
+	# literal, including a VALUE that happens to look like a key (e.g. a string
+	# value "provider"), is a candidate data value and is redacted unconditionally.
 	# Keeping "path-shaped" quotes was tempting but unsafe - a base64 secret
 	# contains '/' too, and _LONG_BLOB_RE already drops long paths regardless.
+	head = m.string[: m.start()].rstrip()
+	tail = m.string[m.end() :].lstrip()
+	if head.endswith(("{", ",")) and tail.startswith(":"):
+		return m.group(0)
 	return m.group(1) + "[VAL]" + m.group(1)
 
 
@@ -104,12 +115,13 @@ def _scrub_error_text(text: str | None, *, keep_email: str | None = None) -> str
 	"""Redact PII / ERP values from a free-text error message or traceback.
 
 	Deliberately conservative on structure (keeps error codes, class names, field
-	names, frame functions) while removing values: emails (except the reporting user's
-	own), secret-shaped tokens, long hashes, amounts / quantities / long ids, and
-	both *quoted* and *bare capitalised* entity names. The name redaction is
-	blunt on purpose - the failure mode of a blocklist here (a leaked customer /
-	supplier / employee name crossing benches to the control plane) is worse than
-	over-redacting a doctype label."""
+	names, frame functions, and JSON object keys) while removing values: emails
+	(except the reporting user's own), secret-shaped tokens, long hashes, amounts /
+	quantities / long ids, and both *quoted* and *bare capitalised* entity names.
+	A quoted literal in JSON key position (see _redact_quoted) survives; every
+	quoted value does not. The name redaction is blunt on purpose - the failure
+	mode of a blocklist here (a leaked customer / supplier / employee name crossing
+	benches to the control plane) is worse than over-redacting a doctype label."""
 	if not text:
 		return ""
 	out = str(text)
@@ -139,7 +151,7 @@ _NORM_DIGITS = re.compile(r"\d+")
 #: change to _scrub_error_text would silently re-key the whole admin feed. Bump
 #: this constant in the SAME commit as any scrubber change, so the re-key becomes
 #: an intentional, dated event and the old rows age out via the 90-day prune.
-_SCRUB_VERSION = "1"
+_SCRUB_VERSION = "2"
 
 
 def _fingerprint(error_code: str, error_class: str, message: str, surface: str) -> str:
