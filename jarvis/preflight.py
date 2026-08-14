@@ -92,8 +92,21 @@ def run_chat_preflight() -> dict:
 	unchecked/unknown row by design. Same gate as the wizard's endpoints."""
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
-	integration = _integration_item()
-	usable = _usable_item(settings)
+	# Outer degrade guard, same shape admin grew in #334: a bug anywhere below
+	# must answer as an unchecked/unknown checklist, never a 500 the wizard
+	# has to swallow (round-5 review). The permission gate above still raises.
+	try:
+		integration = _integration_item()
+	except Exception:
+		integration = {
+			"plugin": "unchecked",
+			"persona": "unchecked",
+			"integration_source": "unavailable",
+		}
+	try:
+		usable = _usable_item(settings)
+	except Exception:
+		usable = {"state": "unknown", "detail": "", "source": "none"}
 	return {**integration, "usable": usable}
 
 
@@ -256,19 +269,6 @@ def _probe_direct_subscription(settings) -> dict:
 	cached = cache.get_value(cache_key)
 	if isinstance(cached, dict) and cached.get("state"):
 		return cached
-	# In-flight claim (PR #848 review): the verdict caches only AFTER the probe
-	# completes, so a reload/second tab during the up-to-20s window would fire
-	# a SECOND billed turn. The claim closes that window; the concurrent caller
-	# gets a non-blocking, uncached "still checking" answer and the next
-	# preflight (Retry, reload) reads the finished verdict from the cache.
-	inflight_key = f"{cache_key}:inflight"
-	if cache.get_value(inflight_key):
-		return {
-			"state": "unknown",
-			"detail": "A live check is already running.",
-			"source": "live_probe",
-		}
-	cache.set_value(inflight_key, "1", expires_in_sec=int(_PROBE_BUDGET_S) + 10)
 	from jarvis.chat.agent_client import AgentSession, AgentUnreachableError, oneshot_run_id
 	from jarvis.chat.prewarm import _gateway_ws_url
 	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
@@ -278,6 +278,21 @@ def _probe_direct_subscription(settings) -> dict:
 	gateway_url = _gateway_ws_url(settings)
 	if not gateway_url:
 		return {"state": "unreachable", "detail": "", "source": "live_probe"}
+	# In-flight claim (PR #848 review): the verdict caches only AFTER the probe
+	# completes, so a reload/second tab during the up-to-20s window would fire
+	# a SECOND billed turn. The claim closes that window; the concurrent caller
+	# gets a non-blocking, uncached "still checking" answer and the next
+	# preflight (Retry, reload) reads the finished verdict from the cache.
+	# Claimed only AFTER the no-gateway early return, which bills nothing and
+	# must not leave a 30s "already running" ghost behind (round-5 review).
+	inflight_key = f"{cache_key}:inflight"
+	if cache.get_value(inflight_key):
+		return {
+			"state": "unknown",
+			"detail": "A live check is already running.",
+			"source": "live_probe",
+		}
+	cache.set_value(inflight_key, "1", expires_in_sec=int(_PROBE_BUDGET_S) + 10)
 	model, provider = _resolve_model_and_provider(frappe._dict(model_override=""))
 	verdict = {"state": "unknown", "detail": ""}
 	sess = None
