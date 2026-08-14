@@ -1042,7 +1042,18 @@ class JarvisSettings(Document):
 		operation already created - it converges + stamps the markers WITHOUT driving
 		a second push.
 		"""
-		_write_settings_fields(self, {"last_sync_status": "pending: provisioning container (pool)"})
+		# last_sync_requested_at (jarvis C2): stamped at this ENQUEUE moment, not
+		# when the apply lands, so account._provisioning_verdict can time-box how
+		# long a still-converging apply stays soft (llm_applying) instead of
+		# routing an established workspace to the setup wizard - see
+		# account._APPLYING_SOFT_WINDOW_S.
+		_write_settings_fields(
+			self,
+			{
+				"last_sync_status": "pending: provisioning container (pool)",
+				"last_sync_requested_at": frappe.utils.now(),
+			},
+		)
 		run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
 		# Budget rationale lives on ADMIN_SYNC_RQ_TIMEOUT_S.
 		frappe.enqueue(
@@ -1082,7 +1093,13 @@ class JarvisSettings(Document):
 		# Through the guarded writer like every other status write, so the rule is
 		# uniform: a status write on THIS doctype never uses db_set, whether or not
 		# the caller happens to be inside a save (#713).
-		_write_settings_fields(self, {"last_sync_status": pending_label})
+		#
+		# last_sync_requested_at (jarvis C2): same enqueue-time stamp as the pool
+		# leg above - see that comment for why, and account._APPLYING_SOFT_WINDOW_S
+		# for how it is consumed.
+		_write_settings_fields(
+			self, {"last_sync_status": pending_label, "last_sync_requested_at": frappe.utils.now()}
+		)
 		# In tests, run inline so existing assertions on the final status
 		# don't have to poll. Set ``frappe.flags.run_admin_sync_inline``
 		# from app code that needs the synchronous behavior (rare).

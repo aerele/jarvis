@@ -902,12 +902,15 @@ class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
 
 	Pinned on the POOL provisioning exit (account.is_ready_for_chat), the
 	bug's actual trigger. All three provisioning exits (pool, api_key,
-	subscription) share the identical
-	``_rejected_sync_verdict(settings) or _provisioning_verdict(...)`` line
-	and ``_provisioning_verdict`` itself is leg-agnostic - it only reads
-	``_has_been_chat_ready`` - so this one exit stands in for all three, the
-	same reasoning TestRejectedSyncVerdictWiring above uses for its own
-	single-leg pin."""
+	subscription) share the identical ``_not_ready_verdict(settings, raw,
+	...)`` call (review finding 6's dedup of the formerly-inlined
+	``_rejected_sync_verdict(settings) or _provisioning_verdict(...)``
+	expression) and ``_provisioning_verdict`` itself is leg-agnostic - it only
+	reads ``_has_been_chat_ready`` and ``last_sync_requested_at`` - so this one
+	exit stands in for all three, the same reasoning TestRejectedSyncVerdictWiring
+	above uses for its own single-leg pin. Also pins review finding 1's
+	time-box: (b) and (d) below are the same established-workspace state,
+	differing only in how recently the apply was requested."""
 
 	_FIELDS = (
 		"chat_was_ready_at",
@@ -916,6 +919,7 @@ class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
 		"tenant_authority_generation",
 		"llm_pool_synced_at",
 		"last_sync_status",
+		"last_sync_requested_at",
 		"jarvis_admin_api_key",
 	)
 
@@ -934,6 +938,10 @@ class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
 				"agent_url": "ws://c2-established-container",
 				"llm_pool_synced_at": None,
 				"last_sync_status": "pending: provisioning container (pool)",
+				# Absent by default (order-independence with the fresh-tenant/reset
+				# tests, which must gate hard regardless of this field): only the
+				# mid-apply test below stamps it recent.
+				"last_sync_requested_at": None,
 			}
 		)
 		self._pool_on = patch.object(account, "compute_pool_mode", return_value=True)
@@ -968,14 +976,44 @@ class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
 	def test_established_tenant_first_pool_transition_mid_apply_is_llm_applying(self):
 		"""(b) A chatting customer adds a model, flipping them into pool mode for
 		the first time: the durable marker is set and its authority anchor still
-		matches the CURRENT authority, so the soft llm_applying reason must ride
-		instead of the hard one - the setup poster must not appear on a reload."""
+		matches the CURRENT authority, and the apply was just requested (NOW), so
+		the soft llm_applying reason must ride instead of the hard one - the setup
+		poster must not appear on a reload."""
 		raw = account._settings_raw(account._GATE_STATE_FIELDS)
 		anchor = account._authority_anchor(raw)
-		self._write({"chat_was_ready_at": "2026-01-01 00:00:00", "chat_ready_authority": anchor})
+		self._write(
+			{
+				"chat_was_ready_at": "2026-01-01 00:00:00",
+				"chat_ready_authority": anchor,
+				"last_sync_requested_at": frappe.utils.now(),
+			}
+		)
 		out = account.is_ready_for_chat()
 		self.assertFalse(out["ready"])
 		self.assertEqual(out["reason"], "llm_applying")
+
+	def test_established_tenant_stuck_apply_past_the_soft_window_gates_to_setup(self):
+		"""(d) review finding 1: an established workspace whose apply was
+		requested LONGER AGO than _APPLYING_SOFT_WINDOW_S - a stuck first-apply
+		that never converges and never writes a terminal status - must age out of
+		the soft reason and fall back to the hard one, pinning the time-box in
+		the direction (b) does not cover. Otherwise a workspace whose fleet-agent
+		never comes back would stay soft indefinitely with no way out."""
+		raw = account._settings_raw(account._GATE_STATE_FIELDS)
+		anchor = account._authority_anchor(raw)
+		stale = frappe.utils.add_to_date(
+			frappe.utils.now_datetime(), seconds=-(account._APPLYING_SOFT_WINDOW_S + 60)
+		)
+		self._write(
+			{
+				"chat_was_ready_at": "2026-01-01 00:00:00",
+				"chat_ready_authority": anchor,
+				"last_sync_requested_at": frappe.utils.get_datetime_str(stale),
+			}
+		)
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "llm_pool_provisioning")
 
 	def test_established_tenant_after_reset_still_gates_to_setup(self):
 		"""(c) The marker survives a reset, but its bound authority does not: once
@@ -984,7 +1022,13 @@ class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
 		return - proves a stale marker cannot let a reset tenant skip onboarding."""
 		raw = account._settings_raw(account._GATE_STATE_FIELDS)
 		anchor = account._authority_anchor(raw)
-		self._write({"chat_was_ready_at": "2026-01-01 00:00:00", "chat_ready_authority": anchor})
+		self._write(
+			{
+				"chat_was_ready_at": "2026-01-01 00:00:00",
+				"chat_ready_authority": anchor,
+				"last_sync_requested_at": frappe.utils.now(),
+			}
+		)
 		# Simulate the reset/reconnect: the container changes and the anchor is
 		# NOT rebound - exactly what a torn-down transport looks like before the
 		# next explicit Ready re-stamps it.
@@ -1093,8 +1137,9 @@ class TestRejectedSyncVerdictWiring(FrappeTestCase):
 	so nothing proved the wiring actually reaches it. Pinned on the
 	subscription leg (same fixture TestIsReadyForChatCohorts uses) as the one
 	representative exit: all three call sites share the identical
-	``_rejected_sync_verdict(settings) or {"ready": False, "reason": "llm_..."}``
-	line, and the classifier itself (covered exhaustively above) is leg-agnostic."""
+	``_not_ready_verdict(settings, raw, "llm_...")`` call (review finding 6's
+	dedup helper), and the classifier itself (covered exhaustively above) is
+	leg-agnostic."""
 
 	_FIELDS = ("llm_auth_mode", "llm_direct_synced_at", "chat_was_ready_at", "last_sync_status")
 
