@@ -193,7 +193,7 @@
 					<span class="text-base font-medium text-ink-gray-8">Reset workspace</span>
 					<span class="max-w-lg text-p-sm text-ink-gray-6">
 						Destroys this workspace's container and attaches a fresh one, then
-						reconnects automatically — use it when the workspace is stuck or won't
+						reconnects automatically. Use it when the workspace is stuck or won't
 						connect. Chat is unavailable while it runs (usually a few minutes). Your
 						subscription, chat history and AI connections are kept unless you tick the
 						options.
@@ -272,8 +272,8 @@
 					<span class="text-base font-medium text-ink-gray-8">Reset onboarding</span>
 					<span class="max-w-lg text-p-sm text-ink-gray-6">
 						Clears this workspace's connection and AI setup and permanently deletes all
-						content — chats, skills, macros, triggers, learned patterns, wiki pages and
-						dashboards — then restarts the setup wizard. Your subscription is kept.
+						content (chats, skills, macros, triggers, learned patterns, wiki pages and
+						dashboards), then restarts the setup wizard. Your subscription is kept.
 						This cannot be undone.
 					</span>
 				</div>
@@ -688,7 +688,7 @@ async function doResetOnboarding() {
 	onboardingResetBusy.value = true;
 	try {
 		await api.resetOnboarding(true);
-		toast.success("Onboarding reset — restarting setup.");
+		toast.success("Onboarding reset. Restarting setup.");
 		setTimeout(() => window.location.assign("/jarvis/onboarding"), 600);
 	} catch (e) {
 		toast.error(errHtml(e, "Could not reset onboarding."));
