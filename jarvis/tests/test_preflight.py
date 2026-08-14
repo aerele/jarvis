@@ -324,7 +324,18 @@ class TestPreflight(_RT3SettingsTestCase):
 
 	# -- endpoint envelope -----------------------------------------------------
 
+	def test_sweep_knows_the_preflight_label(self):
+		"""The abandoned-worker timeout path leans on the hourly sweep; an
+		unregistered label would fall to the 24h orphan grace instead of the
+		1h throwaway one (round-3 review)."""
+		from jarvis.chat.session_lifecycle import _THROWAWAY_LABEL_PREFIXES
+
+		self.assertIn("jarvis-preflight-", _THROWAWAY_LABEL_PREFIXES)
+
 	def test_endpoint_shape(self):
+		# Deliberately does NOT patch reclaim_throwaway_session: this is the
+		# one test exercising the real helper's swallow against a session that
+		# will not answer its probe - production behavior, keep it covered.
 		s = self._direct_sub()
 		s.db_set("last_sync_at", now(), update_modified=False)
 		_, conn = self._fake_connect([{"kind": "assistant", "text": "ok", "delta": "ok"}])

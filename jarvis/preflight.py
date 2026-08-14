@@ -306,7 +306,9 @@ def _probe_direct_subscription(settings) -> dict:
 			# closes FIRST and no reclaim RPC is issued at all: the worker
 			# still owns the recv, so a reclaim would race it for frames and
 			# burn ~10s to lose (review round-2 MAJOR 1). The hourly sweep
-			# collects the throwaway - documented-safe in session_lifecycle.
+			# collects the throwaway on the 1h throwaway grace - the
+			# "jarvis-preflight-" prefix is registered in
+			# session_lifecycle._THROWAWAY_LABEL_PREFIXES for exactly this.
 			try:
 				sess.close()
 			except Exception:
