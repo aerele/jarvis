@@ -55,6 +55,18 @@
 			<button class="wg-act" v-if="siteUrl" @click="openPage">Open page ↗</button>
 			<button class="wg-act" @click="copySlug">Copy slug</button>
 		</div>
+		<div
+			class="wg-links"
+			v-if="canRemoveLink && node.kind === 'page' && (node.manual_links || []).length"
+		>
+			<div class="wg-links-h">Curated links</div>
+			<ul>
+				<li v-for="target in node.manual_links" :key="target">
+					<span class="wg-link-target">{{ target }}</span>
+					<button class="wg-remove" @click="$emit('remove-link', target)">Remove</button>
+				</li>
+			</ul>
+		</div>
 	</div>
 	<div class="wg-detail empty text-muted" v-else><i>Click a node for details.</i></div>
 </template>
@@ -70,8 +82,14 @@ export default {
 		// Focus / Copy slug / Open page actions. On for the operator graph; the
 		// tenant graph turns them off for a read-only detail view.
 		showActions: { type: Boolean, default: true },
+		// #644: list `node.manual_links` (curated, out-of-body [[links]]) with a
+		// "Remove" affordance per entry. Off by default, additive: this component
+		// is shared with the admin/operator build (wiki-graph-core), which never
+		// gets `manual_links` on a node (it isn't `include_content`-fetched there)
+		// and never opts into this prop.
+		canRemoveLink: { type: Boolean, default: false },
 	},
-	emits: ["focus"],
+	emits: ["focus", "remove-link"],
 	computed: {
 		m() {
 			return (this.node && this.metrics[this.node.id]) || {};
@@ -165,5 +183,50 @@ export default {
 }
 .wg-act:hover {
 	background: var(--control-bg, #f3f4f6);
+}
+.wg-links {
+	margin-top: 10px;
+	padding-top: 10px;
+	border-top: 1px solid var(--border-color, #e2e6ea);
+}
+.wg-links-h {
+	font-size: 11px;
+	text-transform: uppercase;
+	color: var(--text-muted, #888);
+	margin-bottom: 4px;
+}
+.wg-links ul {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.wg-links li {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	font-size: 12px;
+	padding: 2px 0;
+}
+.wg-link-target {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+/* Mirrors SuggestPanel's `.wg-add` pill shape, in the warn red used elsewhere on
+   this panel (`.wg-kv .warn`) since this action is destructive, unlike "+ link". */
+.wg-remove {
+	font-size: 10px;
+	padding: 1px 7px;
+	border: 1px solid #d9534f;
+	color: #d9534f;
+	background: transparent;
+	border-radius: 10px;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+.wg-remove:hover {
+	background: #d9534f;
+	color: #fff;
 }
 </style>

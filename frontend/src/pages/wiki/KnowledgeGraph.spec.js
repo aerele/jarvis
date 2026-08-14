@@ -27,9 +27,16 @@ const nodes = [
 ];
 const UNLINKED = { nodes, edges: [] };
 const LINKED = { nodes, edges: [{ source: A_ID, target: B_ID, kind: "links-to" }] };
+// #644: A curated a link to B. `manual_links` only ever rides on the node that
+// did the linking (the server-side asymmetry `get_wiki_graph` returns).
+const LINKED_WITH_MANUAL = {
+	nodes: [{ ...nodes[0], manual_links: [B_SLUG] }, nodes[1]],
+	edges: [{ source: A_ID, target: B_ID, kind: "links-to" }],
+};
 
 const api = vi.hoisted(() => ({
 	addWikiLink: vi.fn(async () => ({ ok: true, manual_links: ["process--billing"] })),
+	removeWikiLink: vi.fn(async () => ({ ok: true, manual_links: [] })),
 	getWikiGraph: vi.fn(),
 	getWikiGraphHistory: vi.fn(async () => []),
 }));
@@ -67,8 +74,17 @@ vi.mock("frappe-ui", () => {
 	};
 });
 
-// Captured live prop objects (reactive), plus a handle on AnalysisTabs' emit.
-const seen = vi.hoisted(() => ({ detail: null, tabs: null, graph: null, fireAddLink: null }));
+// Captured live prop objects (reactive), plus handles on the child emits this
+// suite drives: AnalysisTabs' add-link, Graph3D's node-click (selection),
+// DetailPanel's remove-link.
+const seen = vi.hoisted(() => ({
+	detail: null,
+	tabs: null,
+	graph: null,
+	fireAddLink: null,
+	fireNodeClick: null,
+	fireRemoveLink: null,
+}));
 
 vi.mock("wiki-graph-core", () => {
 	const stub = (name, props, slot, emits = []) => ({
@@ -78,16 +94,23 @@ vi.mock("wiki-graph-core", () => {
 		setup(componentProps, { emit }) {
 			seen[slot] = componentProps;
 			if (name === "AnalysisTabs") seen.fireAddLink = (s) => emit("add-link", s);
+			if (name === "Graph3D") seen.fireNodeClick = (n) => emit("node-click", n);
+			if (name === "DetailPanel") seen.fireRemoveLink = (t) => emit("remove-link", t);
 			return () => h("div", { class: name });
 		},
 	});
 	return {
-		// Prop defaults copied from the real package: DetailPanel.vue showActions,
-		// AnalysisTabs.vue canAct / showPriority / showActionsTab.
+		// Prop defaults copied from the real package: DetailPanel.vue showActions /
+		// canRemoveLink, AnalysisTabs.vue canAct / showPriority / showActionsTab.
 		DetailPanel: stub(
 			"DetailPanel",
-			{ showActions: { type: Boolean, default: true } },
-			"detail"
+			{
+				node: Object,
+				showActions: { type: Boolean, default: true },
+				canRemoveLink: { type: Boolean, default: false },
+			},
+			"detail",
+			["focus", "remove-link"]
 		),
 		AnalysisTabs: stub(
 			"AnalysisTabs",
@@ -106,7 +129,8 @@ vi.mock("wiki-graph-core", () => {
 		Graph3D: stub(
 			"Graph3D",
 			{ data: Object, metrics: Object, mode: String, dark: Boolean },
-			"graph"
+			"graph",
+			["node-click"]
 		),
 		FilterBar: { name: "FilterBar", setup: () => () => h("div") },
 		ExclusionRules: { name: "ExclusionRules", setup: () => () => h("div") },
@@ -141,6 +165,8 @@ beforeEach(() => {
 	localStorage.clear();
 	api.addWikiLink.mockClear();
 	api.addWikiLink.mockResolvedValue({ ok: true, manual_links: [B_SLUG] });
+	api.removeWikiLink.mockClear();
+	api.removeWikiLink.mockResolvedValue({ ok: true, manual_links: [] });
 	api.getWikiGraphHistory.mockClear();
 	api.getWikiGraph.mockReset();
 	api.getWikiGraph.mockResolvedValue(UNLINKED);
@@ -227,6 +253,100 @@ describe("KnowledgeGraph action layer (#492)", () => {
 		seen.fireAddLink(SUGGESTION);
 		await flushPromises();
 		expect(api.addWikiLink).toHaveBeenCalledTimes(1);
+
+		release();
+		await flushPromises();
+		expect(seen.tabs.canAct).toBe(true);
+		expect(wrapper.exists()).toBe(true);
+	});
+});
+
+// #644: the undo counterpart. add_wiki_link had no way to remove a curated link,
+// so a mis-clicked "+ link" was permanent short of a Desk/DB edit.
+describe("KnowledgeGraph remove-link affordance (#644)", () => {
+	it("passes can-remove-link and the selected node's curated links to the detail panel", async () => {
+		api.getWikiGraph.mockResolvedValue(LINKED_WITH_MANUAL);
+		await mountGraph();
+		expect(seen.detail.canRemoveLink).toBe(true);
+
+		seen.fireNodeClick(seen.graph.data.nodes.find((n) => n.id === A_ID));
+		await flushPromises();
+		expect(seen.detail.node.manual_links).toEqual([B_SLUG]);
+	});
+
+	it("removes the curated link and the edge disappears after the refetch", async () => {
+		api.getWikiGraph.mockResolvedValue(LINKED_WITH_MANUAL);
+		const wrapper = await mountGraph();
+		seen.fireNodeClick(seen.graph.data.nodes.find((n) => n.id === A_ID));
+		await flushPromises();
+		expect(seen.graph.data.edges).toHaveLength(1);
+
+		// the server now reports the link gone
+		api.getWikiGraph.mockResolvedValue(UNLINKED);
+		seen.fireRemoveLink(B_SLUG);
+		await flushPromises();
+		await flushPromises();
+
+		// node ids are "page:<slug>"; the endpoint takes the bare source slug plus
+		// the bare target slug that DetailPanel emitted.
+		expect(api.removeWikiLink).toHaveBeenCalledWith(A_SLUG, B_SLUG);
+		expect(api.getWikiGraph).toHaveBeenCalledTimes(2);
+		expect(seen.graph.data.edges).toHaveLength(0);
+		expect(wrapper.text()).toContain(`Removed link to ${B_SLUG}`);
+		// the panel re-points at the refetched node, whose manual_links no longer
+		// includes B (the fixture's post-removal shape carries none at all).
+		expect(seen.detail.node.manual_links || []).toEqual([]);
+	});
+
+	it("still reports success when only the refetch fails, because the link is gone", async () => {
+		api.getWikiGraph.mockResolvedValueOnce(LINKED_WITH_MANUAL);
+		const wrapper = await mountGraph();
+		seen.fireNodeClick(seen.graph.data.nodes.find((n) => n.id === A_ID));
+		await flushPromises();
+
+		api.getWikiGraph.mockRejectedValueOnce(new Error("Network error"));
+		seen.fireRemoveLink(B_SLUG);
+		await flushPromises();
+		await flushPromises();
+
+		expect(api.removeWikiLink).toHaveBeenCalledTimes(1);
+		expect(wrapper.text()).toContain(`Removed link to ${B_SLUG}`);
+		expect(wrapper.text()).not.toContain("Network error");
+	});
+
+	it("surfaces a server denial and leaves the link in place", async () => {
+		api.getWikiGraph.mockResolvedValue(LINKED_WITH_MANUAL);
+		const wrapper = await mountGraph();
+		seen.fireNodeClick(seen.graph.data.nodes.find((n) => n.id === A_ID));
+		await flushPromises();
+
+		api.removeWikiLink.mockRejectedValueOnce(new Error("Not permitted."));
+		seen.fireRemoveLink(B_SLUG);
+		await flushPromises();
+		await flushPromises();
+
+		expect(wrapper.text()).toContain("Not permitted.");
+		expect(api.getWikiGraph).toHaveBeenCalledTimes(1);
+		expect(seen.graph.data.edges).toHaveLength(1);
+	});
+
+	it("ignores a second click while one removal is in flight", async () => {
+		api.getWikiGraph.mockResolvedValue(LINKED_WITH_MANUAL);
+		const wrapper = await mountGraph();
+		seen.fireNodeClick(seen.graph.data.nodes.find((n) => n.id === A_ID));
+		await flushPromises();
+
+		let release;
+		api.removeWikiLink.mockReturnValueOnce(
+			new Promise((r) => (release = () => r({ ok: true })))
+		);
+		seen.fireRemoveLink(B_SLUG);
+		await flushPromises();
+		expect(seen.tabs.canAct).toBe(false);
+
+		seen.fireRemoveLink(B_SLUG);
+		await flushPromises();
+		expect(api.removeWikiLink).toHaveBeenCalledTimes(1);
 
 		release();
 		await flushPromises();
