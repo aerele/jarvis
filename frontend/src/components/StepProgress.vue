@@ -31,7 +31,14 @@
 				class="flex flex-1 flex-col gap-1.5"
 				:aria-current="i === currentIndex ? 'step' : undefined"
 			>
-				<span v-if="step.label" class="text-p-sm" :class="labelClass(i)">
+				<span
+					v-if="step.label"
+					class="text-p-sm"
+					:class="[
+						labelClass(i),
+						collapseLabels ? 'step-progress-label--collapsible' : '',
+					]"
+				>
 					{{ step.label }}
 				</span>
 				<!-- No visible per-step label (the two wait bars have none): keep an
@@ -63,6 +70,14 @@ const props = defineProps({
 	label: { type: String, default: "" },
 	/** Accessible name for the list when there is no visible `label`. */
 	ariaLabel: { type: String, default: "Setup steps" },
+	/**
+	 * Visually hide the per-step labels on narrow screens (they stay readable
+	 * to screen readers). For bars with many short-labeled steps - the connect
+	 * wait's six - a phone-width card cannot fit a label per segment; the
+	 * caption and the caller's own explanation line carry the words there.
+	 * 719px matches the onboarding wait block's own stacking breakpoint.
+	 */
+	collapseLabels: { type: Boolean, default: false },
 });
 
 const labelId = useId();
@@ -102,6 +117,21 @@ function segmentClass(i) {
 	.step-progress-segment--indeterminate {
 		animation: none;
 		opacity: 0.75;
+	}
+}
+/* collapseLabels: the sr-only recipe, applied only under the breakpoint so
+   the label stays announced while taking no visual space. */
+@media (max-width: 719px) {
+	.step-progress-label--collapsible {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
 	}
 }
 </style>

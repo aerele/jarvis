@@ -92,4 +92,17 @@ describe("StepProgress accessibility", () => {
 		});
 		expect(items(w)[1].find(".sr-only").text()).toBe("Step 2 of 3");
 	});
+
+	it("collapseLabels tags labels collapsible (visually hidden under the breakpoint, still announced)", () => {
+		const w = mount(StepProgress, {
+			props: { steps: STEPS, currentIndex: 1, collapseLabels: true },
+		});
+		// jsdom computes no CSS: assert the hook class, whose media query does
+		// the hiding, and that the label text itself is untouched.
+		const labels = w.findAll(".step-progress-label--collapsible");
+		expect(labels).toHaveLength(3);
+		expect(labels[0].text()).toBe("Details");
+		const plain = mount(StepProgress, { props: { steps: STEPS, currentIndex: 1 } });
+		expect(plain.find(".step-progress-label--collapsible").exists()).toBe(false);
+	});
 });

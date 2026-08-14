@@ -1673,90 +1673,88 @@ describe("jarvis#752 the connect step shows admin's route verdict while still co
 	});
 });
 
-// jarvis wait-phases-horizontal: the wait block widened to 75% and the three
-// phases moved from a stacked list to equal-width columns under the bar. The
-// admin-authored detail sentence (jarvis#752/#754) no longer fits inside a
-// column a third of that width, so it was hoisted out of the phase row and
-// now renders once, full width, below the phase columns instead. These tests
-// pin the DOM shape that hoist depends on, not pixel layout (jsdom does not
-// compute CSS): the detail is a sibling of the phase list, not nested in any
-// `<li>`, and both the active phase and the detail keep their own
-// `role="status"` so a screen reader still hears each independently.
-describe("jarvis wait-phases-horizontal: detail hoisted out of the phase columns", () => {
+// 2026-08-14 connect-wait redesign: the phase columns are gone; the connect
+// wait renders ONE labeled six-segment bar (connectSteps) with the current
+// step's one-line explanation below it, and admin's own detail sentence
+// (jarvis#752/#754) below that. These tests pin the DOM shape, not pixel
+// layout (jsdom does not compute CSS).
+describe("connect wait bar: six labeled steps with a one-line explanation", () => {
 	const QUOTA_REASON = "Your OpenAI account has reached its usage limit. It resets in 2 hours.";
 
-	it("renders the detail as a sibling of the phase list, not inside a phase row", async () => {
+	it("renders six labeled steps and marks the readiness step current while applying", async () => {
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
 		await flushPromises();
 
-		const phases = w.find(".ob-phases");
-		const detail = w.find(".ob-phase-detail");
-		expect(detail.exists()).toBe(true);
-		expect(detail.text()).toBe(QUOTA_REASON);
-		// Hoisted OUT: no longer a descendant of the phase list or any row.
-		expect(detail.element.closest("ul")).toBeNull();
-		expect(detail.element.closest("li")).toBeNull();
-		// Reads as belonging to the same block: immediately after the phase list.
-		expect(phases.element.nextElementSibling).toBe(detail.element);
-		w.unmount();
-	});
+		// The old ob-phases column list must be gone from the connect screen.
+		expect(w.find(".ob-phases").exists()).toBe(false);
 
-	it("still lays out each phase as its own row item (six with the jarvis#840 checklist)", async () => {
-		const w = await mountConnect();
-
-		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
-		await flushPromises();
-
-		// 3 original phases + the preflight's 3 checklist rows (jarvis#840).
-		const columns = w.findAll(".ob-phases > .ob-phase");
-		expect(columns).toHaveLength(6);
-		// Every column still carries only its label, never the detail sentence -
-		// the hoist removed the ONLY per-row detail span, it did not just add a
-		// duplicate copy alongside it.
-		for (const column of columns) {
-			expect(column.find(".ob-phase-detail").exists()).toBe(false);
+		// Scoped to the wait bar: the top rail is its own StepProgress with its
+		// own aria-current, and must not leak into these assertions.
+		const items = w.find(".ob-progress").findAll('[role="listitem"]');
+		const labels = items.map((i) => i.text());
+		for (const expected of [
+			"Connection",
+			"Workspace",
+			"Tools",
+			"Persona",
+			"Live check",
+			"Chat",
+		]) {
+			expect(labels).toContain(expected);
 		}
+		const current = items.filter((i) => i.attributes("aria-current") === "step");
+		expect(current).toHaveLength(1);
+		expect(current[0].text()).toBe("Workspace");
 		w.unmount();
 	});
 
-	it("announces the phase and its detail as ONE live region, not two", async () => {
-		// Round-1 review: giving the hoisted detail its own role="status" made a
-		// screen reader hear the phase and the sentence explaining that phase as
-		// two unrelated announcements. Worse, that region was v-if gated, so it
-		// mounted already populated, and a live region announces CHANGES to a
-		// region that is already present, not its initial content. One shared
-		// wrapper fixes both at once.
+	it("explains the current step in one line and keeps admin's detail separate", async () => {
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
 		await flushPromises();
 
-		const active = w.find(".ob-phase--active");
+		// The explanation is the readiness phase's own sentence (waitPhases.js),
+		// never invented copy; the admin-authored detail keeps its own line.
+		expect(w.find(".ob-step-explain").text()).toBe(w.vm.readinessStage.label);
+		expect(w.find(".ob-phase-detail").text()).toBe(QUOTA_REASON);
+		w.unmount();
+	});
+
+	it("announces the explanation and admin's detail as ONE live region, not two", async () => {
+		// Same rule the phase columns followed: separate role="status" regions
+		// read as unrelated announcements, and a v-if-gated region mounts
+		// already populated so its content is never announced at all.
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		const explain = w.find(".ob-step-explain");
 		const detail = w.find(".ob-phase-detail");
-		expect(active.attributes("role")).toBeUndefined();
+		expect(explain.attributes("role")).toBeUndefined();
 		expect(detail.attributes("role")).toBeUndefined();
 
 		const owning = w
 			.findAll('[role="status"]')
 			.filter(
-				(r) => r.element.contains(active.element) && r.element.contains(detail.element)
+				(r) => r.element.contains(explain.element) && r.element.contains(detail.element)
 			);
 		expect(owning.length).toBe(1);
 		w.unmount();
 	});
 
-	it("the active phase's spinner and the waiting phase's dot are unchanged by the hoist", async () => {
+	it("the bar caption counts all six steps, matching what is drawn", async () => {
+		// The user-reported defect this redesign fixes: a "Step 2 of 3" caption
+		// over six visible items.
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
 		await flushPromises();
 
-		// design.md §3.8: JvSpinner is the only loading indicator, never a
-		// bespoke one - it renders `.jv-spin` with its own role="status".
-		expect(w.find(".ob-phase--active .jv-spin").exists()).toBe(true);
-		expect(w.find(".ob-phase--waiting .ob-phase-dot").exists()).toBe(true);
+		expect(w.text()).toContain("Step 2 of 6");
 		w.unmount();
 	});
 });
