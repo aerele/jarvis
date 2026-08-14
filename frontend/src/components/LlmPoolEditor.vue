@@ -2722,7 +2722,8 @@ async function testSubscriptionRow(m) {
 			// never ran, or a failure that did not happen.
 			subTest.value.result = {
 				kind: "ok",
-				message: "Saved. Select Start chatting to continue.",
+				message:
+					"Saved. No separate check runs for this connection. Select Start chatting to continue.",
 			};
 			return;
 		}
