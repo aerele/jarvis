@@ -414,7 +414,16 @@ export function createPaymentFlow(deps) {
 	}
 
 	// ---- submit review: start the signup exactly once ----------------------
-	async function submitReview({ email, company, plan, provider, billing, partner_code } = {}) {
+	async function submitReview({
+		email,
+		company,
+		plan,
+		provider,
+		billing,
+		partner_code,
+		terms_accepted,
+		contact_consent,
+	} = {}) {
 		const my = beginAction(null); // SUBMIT_REVIEW sets the busy flag itself
 		if (!my) return; // a burst of clicks produces exactly one start (P1-2)
 		try {
@@ -426,11 +435,25 @@ export function createPaymentFlow(deps) {
 				// caller passes nothing, so an empty object never crosses the wire.
 				// partner_code is a separate, optional top-level kwarg - never nested
 				// inside billing - forwarded to admin verbatim; jarvis does no validation.
+				// terms_accepted / contact_consent: the T&C + lead-capture frozen
+				// contract's two new kwargs. The view only ever calls submitReview with
+				// terms_accepted true (the Review & Pay checkbox gates the Pay click);
+				// forwarded here unconditionally so admin's required-acceptance check
+				// sees exactly what the customer ticked.
 				decoded = ingest(
 					await deadlined(
 						(signal) =>
 							api.startSignup(
-								{ email, company, plan, provider, billing, partner_code },
+								{
+									email,
+									company,
+									plan,
+									provider,
+									billing,
+									partner_code,
+									terms_accepted,
+									contact_consent,
+								},
 								{ signal }
 							),
 						fetchDeadlineMs,

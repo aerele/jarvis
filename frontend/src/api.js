@@ -372,6 +372,18 @@ export const getAccountDefaults = () => call("jarvis.onboarding.get_account_defa
 export const getCompanyOnboardingDefaults = (company) =>
 	call("jarvis.onboarding.get_company_onboarding_defaults", { company });
 export const syncConnection = () => call("jarvis.onboarding.sync_connection");
+// Lead-capture + T&C frozen contract. Fire-and-forget upsert of a Jarvis Lead
+// on entering the Plan step - the CALLER is responsible for not awaiting this
+// in a way that blocks the step transition and for swallowing rejections
+// (this wrapper does not catch; jarvis.onboarding.capture_onboarding_lead
+// itself never raises, but the underlying frappe-ui `call` can still reject
+// on a network failure).
+export const captureOnboardingLead = (payload) =>
+	call("jarvis.onboarding.capture_onboarding_lead", payload || {});
+// The admin-hosted Terms & Conditions URL for the Review & Pay checkbox link.
+// Best-effort ({url: ""} on any failure) - the view falls back to plain
+// unlinked text rather than gating the checkbox on this fetch.
+export const getTermsUrl = () => call("jarvis.onboarding.get_terms_url");
 export const startSignup = (email, company, plan, provider, billing) =>
 	call("jarvis.onboarding.start_signup", { email, company, plan, provider, billing });
 // Authenticated billing-only edit (Plan 01, post-intent Review & Pay "Edit"):
@@ -434,7 +446,10 @@ async function rawOnboardingCall(method, args, opts = {}) {
 export const onboardingPaymentApi = {
 	getOnboardingState: (opts) =>
 		rawOnboardingCall("jarvis.onboarding.get_onboarding_state", {}, opts),
-	startSignup: ({ email, company, plan, provider, billing, partner_code }, opts) =>
+	startSignup: (
+		{ email, company, plan, provider, billing, partner_code, terms_accepted, contact_consent },
+		opts
+	) =>
 		// Plan 01: the normalized billing snapshot rides the FIRST signup call so it
 		// persists server-side while the customer is still a guest (update_billing is
 		// authenticated and unreachable mid-signup). Included only when present - an
@@ -443,6 +458,10 @@ export const onboardingPaymentApi = {
 		// partner_code: an optional TOP-LEVEL kwarg (never inside billing), same
 		// omit-when-absent shape - an older admin that doesn't know the kwarg drops
 		// it and the signup proceeds exactly as before.
+		// terms_accepted / contact_consent (T&C + lead-capture frozen contract): sent
+		// UNCONDITIONALLY, unlike billing/partner_code above - the view only calls
+		// this once the required Review & Pay checkbox is ticked, and admin's
+		// acceptance check needs to see the real value, not an omitted key.
 		rawOnboardingCall(
 			"jarvis.onboarding.start_signup",
 			{
@@ -452,6 +471,8 @@ export const onboardingPaymentApi = {
 				provider,
 				...(billing ? { billing } : {}),
 				...(partner_code ? { partner_code } : {}),
+				terms_accepted,
+				contact_consent,
 			},
 			opts
 		),

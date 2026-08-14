@@ -31,6 +31,8 @@ const api = vi.hoisted(() => ({
 	checkAccountReconnect: vi.fn(async () => ({})),
 	redeemReconnectCode: vi.fn(async () => ({})),
 	getAccountDefaults: vi.fn(async () => ({})),
+	captureOnboardingLead: vi.fn(async () => ({ ok: true })),
+	getTermsUrl: vi.fn(async () => ({ url: "" })),
 	onboardingPaymentApi: {
 		getOnboardingState: vi.fn(async () => ENVELOPE({ code: "BENCH_NO_SIGNUP_CONTEXT" })),
 		startSignup: vi.fn(),
@@ -56,6 +58,13 @@ vi.mock("frappe-ui", () => ({
 		template: '<div v-if="message">{{ message }}</div>',
 	},
 	FeatherIcon: { name: "FeatherIcon", template: "<i />" },
+	Checkbox: {
+		name: "Checkbox",
+		props: ["modelValue", "label", "id"],
+		emits: ["update:modelValue"],
+		template:
+			'<input type="checkbox" :id="id" :checked="!!modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" />',
+	},
 	call: vi.fn(),
 	dayjs: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
 	toast: { error: vi.fn(), success: vi.fn() },
@@ -681,5 +690,97 @@ describe("812: Company field is constrained once ERPNext has real Company record
 		await flushPromises();
 		const combo = wrapper.find("jv-combo-stub");
 		expect(combo.attributes("allowcustom")).toBe("true");
+	});
+});
+
+describe("lead-capture + T&C (frozen contract)", () => {
+	it("captures a lead on entering the Plan step once email+company are present", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.email = "lead@example.com";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.step = "plan";
+		await flushPromises();
+		expect(api.captureOnboardingLead).toHaveBeenCalledWith(
+			expect.objectContaining({
+				email: "lead@example.com",
+				company: "Acme",
+				step: "plan",
+			})
+		);
+	});
+
+	it("never captures before both email and company exist", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		api.captureOnboardingLead.mockClear();
+		wrapper.vm.state.email = "lead@example.com";
+		wrapper.vm.state.company = "";
+		wrapper.vm.state.step = "plan";
+		await flushPromises();
+		expect(api.captureOnboardingLead).not.toHaveBeenCalled();
+	});
+
+	it("a capture rejection never breaks the step transition", async () => {
+		api.captureOnboardingLead.mockRejectedValueOnce(new Error("network"));
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.email = "lead@example.com";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.step = "plan";
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	it("the optional contact-consent checkbox renders on Details and wires into the billing snapshot", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		await flushPromises();
+		expect(wrapper.vm.billing.consent.value).toBe(false);
+		wrapper.vm.billing.setConsent(true);
+		expect(wrapper.vm.billing.consent.value).toBe(true);
+		const checkboxes = wrapper.findAll('input[type="checkbox"]');
+		expect(checkboxes.length).toBeGreaterThan(0);
+	});
+
+	it("Pay stays disabled until the required T&C box is ticked", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.paymentProvider = "razorpay";
+		wrapper.vm.state.termsAccepted = false;
+		await flushPromises();
+		expect(wrapper.vm.payDisabled).toBe(true);
+		wrapper.vm.state.termsAccepted = true;
+		await flushPromises();
+		expect(wrapper.vm.payDisabled).toBe(false);
+	});
+
+	it("onPayClick refuses to start a signup until T&C is ticked, then sends terms_accepted:true", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.email = "a@b.com";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.planName = "pro";
+		wrapper.vm.state.paymentProvider = "razorpay";
+		wrapper.vm.state.termsAccepted = false;
+
+		await wrapper.vm.onPayClick();
+		expect(api.onboardingPaymentApi.startSignup).not.toHaveBeenCalled();
+
+		wrapper.vm.state.termsAccepted = true;
+		api.onboardingPaymentApi.startSignup.mockResolvedValue(
+			ENVELOPE({
+				code: "SIGNUP_VERIFICATION_REQUIRED",
+				pending_verification: true,
+				attempt_id: "att_1",
+				generation: 0,
+			})
+		);
+		await wrapper.vm.onPayClick();
+		expect(api.onboardingPaymentApi.startSignup).toHaveBeenCalledWith(
+			expect.objectContaining({ terms_accepted: true }),
+			expect.anything()
+		);
 	});
 });
