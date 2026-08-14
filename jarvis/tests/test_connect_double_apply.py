@@ -196,6 +196,23 @@ class TestConnectDoubleApplyDedup(_RT3SettingsTestCase):
 		connect3, _ = self._save(_lone_subscription_models())
 		connect3.assert_called_once()
 
+	def test_every_non_direct_writer_clears_the_stamp(self):
+		"""The stamp only ever describes the last DIRECT-leg enqueue. Every
+		other writer that refreshes last_sync_* without going through the
+		classifier (pool enqueue, disconnect blanks, tenancy reset spec) must
+		clear it, or a stale stamp could absorb a later repair save against a
+		container that never received the config (jarvis#841 review)."""
+		from jarvis import settings_reset
+		from jarvis.onboarding import _DISCONNECTED_LLM_FIELDS
+
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("llm_last_apply_fingerprint", "f" * 64, update_modified=False)
+		with patch("frappe.enqueue"):
+			s._enqueue_pool_sync()
+		self.assertEqual(s.get("llm_last_apply_fingerprint"), "")
+		self.assertIn("llm_last_apply_fingerprint", settings_reset.CONNECTION.blank)
+		self.assertEqual(_DISCONNECTED_LLM_FIELDS.get("llm_last_apply_fingerprint"), "")
+
 	def test_forced_sync_still_restarts_through_an_identical_resave(self):
 		"""flags.force_admin_sync (the explicit resync lever) still applies after
 		a recent identical apply. (On this loaded-doc save the masked snapshot

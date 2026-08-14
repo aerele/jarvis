@@ -1243,6 +1243,13 @@ class JarvisSettings(Document):
 			{
 				"last_sync_status": "pending: provisioning container (pool)",
 				"last_sync_requested_at": frappe.utils.now(),
+				# The jarvis#841 dedup stamp names a DIRECT-leg apply; a pool
+				# excursion refreshes this timestamp and later lands an "ok"
+				# without going through the classifier, so a stale stamp left
+				# here could absorb a direct re-save after the pool teardown
+				# even though /llm-pool never pushed the direct blob. Cleared,
+				# same as the disconnect/reset writers.
+				"llm_last_apply_fingerprint": "",
 			},
 		)
 		run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
