@@ -24,6 +24,7 @@
   "recovering",
   "was_recovered",
   "usage_recorded",
+  "enriched_published",
   "terminal_kind",
   "terminal_payload",
   "error",
@@ -196,6 +197,14 @@
    "description": "(turn_id) idempotency guard for token-usage accrual (R-4 / §10.7): CAS 0->1 in finalize so a finalize replay can never double-count the soft monthly cap. The naked += is retired; usage is a fenced once-only enrichment effect."
   },
   {
+   "fieldname": "enriched_published",
+   "fieldtype": "Check",
+   "label": "Enriched Published",
+   "default": "0",
+   "no_copy": 1,
+   "description": "jarvis#737: exactly-once guard for the message:enriched publish. CAS 0->1 in finalize so the early visible-set release and the later finalize_done all-effects release can never both fire; whichever wins the CAS is the one call that publishes. Does not gate the jarvis#681 already-done redelivery, which stays an unconditional best-effort resend."
+  },
+  {
    "fieldname": "terminal_kind",
    "fieldtype": "Select",
    "label": "Terminal Kind",
@@ -289,7 +298,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-07-23 00:00:00.000000",
+ "modified": "2026-08-14 00:00:00.000000",
  "module": "Jarvis",
  "name": "Jarvis Chat Turn",
  "naming_rule": "By fieldname",

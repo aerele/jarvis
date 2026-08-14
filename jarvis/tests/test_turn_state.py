@@ -1401,6 +1401,56 @@ class TestEffectLedger(_TurnStateTestCase):
 
 
 # --------------------------------------------------------------------------- #
+# jarvis#737: the visible/invisible split and the exactly-once publish claim.
+# --------------------------------------------------------------------------- #
+
+
+class TestVisibleEffectsAndEnrichmentClaim(_TurnStateTestCase):
+	def _mk_finalizing(self, effects):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		rid = f"ts_vis_{frappe.generate_hash(length=6)}"
+		self._mk_turn(conv, rid, seed, "finalizing", version=7)
+		ts.insert_required_effects(rid, effects)
+		frappe.db.commit()
+		return rid
+
+	def test_vocabulary_partitions_exactly(self):
+		# Every canonical effect is classified as exactly one of visible/invisible,
+		# so a future addition to EFFECT_NAMES fails loudly instead of silently
+		# defaulting into either bucket.
+		self.assertEqual(set(ts.VISIBLE_EFFECT_NAMES) | set(ts.INVISIBLE_EFFECT_NAMES), set(ts.EFFECT_NAMES))
+		self.assertFalse(set(ts.VISIBLE_EFFECT_NAMES) & set(ts.INVISIBLE_EFFECT_NAMES))
+		self.assertIn("usage", ts.INVISIBLE_EFFECT_NAMES)
+		self.assertIn("telemetry_flush", ts.INVISIBLE_EFFECT_NAMES)
+		self.assertIn("rich_outputs", ts.VISIBLE_EFFECT_NAMES)
+		self.assertIn("auto_title", ts.VISIBLE_EFFECT_NAMES)
+
+	def test_visible_done_ignores_a_pending_invisible_effect(self):
+		rid = self._mk_finalizing(("auto_title", "usage"))
+		self.assertFalse(ts.visible_effects_done(rid), "auto_title is still pending")
+		o, tok = ts.claim_effect(rid, "auto_title")
+		self.assertTrue(ts.complete_effect(rid, "auto_title", tok))
+		frappe.db.commit()
+		# usage stays pending throughout; visible_effects_done must not wait on it.
+		self.assertTrue(ts.visible_effects_done(rid), "the only visible effect is done")
+		self.assertFalse(ts.all_required_effects_done(rid), "usage is still owed")
+
+	def test_visible_done_vacuous_when_no_visible_effect_is_owed(self):
+		rid = self._mk_finalizing(("usage",))
+		self.assertTrue(
+			ts.visible_effects_done(rid), "nothing visible is held, so there is nothing to wait on"
+		)
+
+	def test_claim_enrichment_publish_is_exactly_once(self):
+		rid = self._mk_finalizing(("auto_title", "usage"))
+		self.assertTrue(ts.claim_enrichment_publish(rid), "the first claim wins")
+		frappe.db.commit()
+		self.assertFalse(ts.claim_enrichment_publish(rid), "a second claim on the same turn is a no-op")
+		self.assertEqual(int(frappe.db.get_value("Jarvis Chat Turn", rid, "enriched_published")), 1)
+
+
+# --------------------------------------------------------------------------- #
 # JF-002: ONE canonical turn-effect vocabulary. EFFECT_NAMES is the single
 # authority; settlement, finalize and the DocType description all derive from it,
 # and the insert seam fails CLOSED on anything outside it.
