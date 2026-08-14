@@ -2,10 +2,11 @@ import json
 from typing import Any
 
 # Model-facing char budget for a single agent tool result, enforced on the
-# openclaw-agent path (jarvis.api._dispatch_from_session) - NOT in get_list/query,
+# agent path (jarvis.api._dispatch_from_session) - NOT in get_list/query,
 # which the dashboard builder/renderer also call. Compact + ensure_ascii=False so
-# it matches what openclaw feeds the model and does not over-count non-Latin
-# scripts. ~9K tokens, with headroom for openclaw's ~1.3x tool_call envelope.
+# it matches what the agent runtime feeds the model and does not over-count
+# non-Latin scripts. ~9K tokens, with headroom for the runtime's ~1.3x tool_call
+# envelope.
 MAX_RESULT_CHARS = 35_000
 
 # Top-level list-valued keys we know how to truncate: query -> "rows",
@@ -93,7 +94,7 @@ def _envelope(data, kind: str, key: str | None, kept: list, n: int, note: str) -
 
 
 def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
-	"""Cap a tool result's model-facing serialized size on the openclaw-agent path.
+	"""Cap a tool result's model-facing serialized size on the agent path.
 
 	Returns ``(data, event)``. ``event is None`` means the result is within budget
 	(or an empty/bare edge) and ``data`` is returned unchanged. Otherwise ``event``

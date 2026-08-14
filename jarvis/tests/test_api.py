@@ -1016,7 +1016,7 @@ class TestC2AgentTokenExpiry(_PluginAuthTestBase):
 
 
 class TestDispatchFromSessionResultBudget(FrappeTestCase):
-	"""Task 2: enforce_result_budget wires into the openclaw-agent-only path
+	"""Task 2: enforce_result_budget wires into the agent-only path
 	(_dispatch_from_session), not the shared _dispatch_and_wrap path that the
 	dashboard builder/desk/external call_tool callers use."""
 
@@ -1080,8 +1080,8 @@ class TestDispatchFromSessionResultBudget(FrappeTestCase):
 
 	def test_dispatch_current_user_result_not_truncated(self):
 		"""_dispatch_current_user (dashboard-builder/desk/external call_tool)
-		is deliberately uncapped - the budget guard lives ONLY on the openclaw
-		agent path (_dispatch_from_session), not the shared path this uses."""
+		is deliberately uncapped - the budget guard lives ONLY on the agent
+		path (_dispatch_from_session), not the shared path this uses."""
 		from jarvis.api import _dispatch_current_user
 
 		big = [{"name": f"C{i}", "blob": "x" * 80} for i in range(3000)]
