@@ -24,4 +24,18 @@ def get_context(context):
 		raise frappe.Redirect
 
 	context.user_fullname = frappe.utils.get_fullname(frappe.session.user)
+
+	# Whitelabel branding: same lookup as www/jarvis.py and www/jarvis_mobile.py,
+	# so a white-label tenant doesn't leak the underlying "Jarvis" brand on this
+	# gate page. Blank => the template falls back to "Jarvis".
+	_brand = (
+		frappe.get_cached_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			["agent_name"],
+			as_dict=True,
+		)
+		or {}
+	)
+	context.agent_name = _brand.get("agent_name") or "Jarvis"
 	return context

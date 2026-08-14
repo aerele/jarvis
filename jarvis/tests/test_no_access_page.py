@@ -4,6 +4,9 @@ Covers:
 - Boot flag: set_jarvis_boot(bootinfo) sets jarvis_has_access True/False per access.
 - No-access page gates: unauthorized (render), authorized (redirect to /jarvis),
   Guest (redirect to /login).
+- No-access page branding (#773): context.agent_name mirrors the tenant's
+  whitelabel Jarvis Settings.agent_name, same lookup as www/jarvis.py and
+  www/jarvis_mobile.py, falling back to "Jarvis" only when unset.
 - Main app gates: roleless → /jarvis-no-access on both; Guest → /app on jarvis.py,
   but gets the shell on jarvis_mobile.py (PWA scope — its own login route handles Guests).
 
@@ -11,6 +14,7 @@ Hermetic: throwaway System User rows (one per role shape) are created in setUp
 and deleted in tearDown; the Jarvis User role is seeded and dropped idempotently.
 """
 
+import os
 from unittest.mock import patch
 
 import frappe
@@ -183,6 +187,55 @@ class TestJarvisNoAccessPage(FrappeTestCase):
 		context = frappe._dict()
 		jarvis_no_access.get_context(context)
 		self.assertEqual(context.user_fullname, expected_fullname)
+
+	# --- (b2) whitelabel brand on the no-access page (#773) ------------------ #
+
+	def test_no_access_uses_custom_agent_name(self):
+		"""A white-label tenant's agent_name renders on the no-access page
+		instead of the hardcoded "Jarvis" (the #773 brand leak)."""
+		settings = frappe.get_single("Jarvis Settings")
+		original = settings.agent_name or ""
+		settings.db_set("agent_name", "Acme Assistant", update_modified=False)
+		frappe.db.commit()
+		try:
+			frappe.set_user(USER_NONE)
+			context = frappe._dict()
+			jarvis_no_access.get_context(context)
+			self.assertEqual(context.agent_name, "Acme Assistant")
+		finally:
+			frappe.get_single("Jarvis Settings").db_set("agent_name", original, update_modified=False)
+			frappe.db.commit()
+
+	def test_no_access_falls_back_to_jarvis_when_agent_name_blank(self):
+		"""A non-white-label tenant (agent_name unset) keeps the "Jarvis"
+		default, so this fix does not change existing tenants."""
+		settings = frappe.get_single("Jarvis Settings")
+		original = settings.agent_name or ""
+		settings.db_set("agent_name", "", update_modified=False)
+		frappe.db.commit()
+		try:
+			frappe.set_user(USER_NONE)
+			context = frappe._dict()
+			jarvis_no_access.get_context(context)
+			self.assertEqual(context.agent_name, "Jarvis")
+		finally:
+			frappe.get_single("Jarvis Settings").db_set("agent_name", original, update_modified=False)
+			frappe.db.commit()
+
+	def test_no_access_html_renders_custom_agent_name_not_jarvis(self):
+		"""The template itself (not just the context dict) consumes agent_name:
+		rendering jarvis_no_access.html with a custom name must not fall back
+		to the literal "Jarvis" copy anywhere in the visible strings."""
+		import jinja2
+
+		html_path = os.path.join(frappe.get_app_path("jarvis"), "www", "jarvis_no_access.html")
+		with open(html_path) as f:
+			template_src = f.read()
+		html = jinja2.Template(template_src).render(agent_name="Acme Assistant", user_fullname="Priya Sharma")
+		self.assertIn("You need access to Acme Assistant", html)
+		self.assertIn("and Acme Assistant is all yours", html)
+		self.assertNotIn("You need access to Jarvis", html)
+		self.assertNotIn("and Jarvis is all yours", html)
 
 	# --- (c) www.jarvis gate ------------------------------------------------- #
 
