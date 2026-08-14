@@ -1852,6 +1852,26 @@ def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_ll
 	return out
 
 
+@frappe.whitelist()
+def reset_onboarding(wipe_data: bool = True) -> dict:
+	"""Customer-facing "Reset onboarding" (Jarvis Settings button): clear this
+	bench's connection + LLM credentials and — by default, matching the
+	``bench reset-onboarding`` CLI — delete all workspace content, so the setup
+	wizard runs from step 1.
+
+	Thin whitelisted wrapper over :func:`jarvis.dev.reset_onboarding`, which does
+	the teardown (container OAuth auth-profile + chat-device unpair, both
+	best-effort; subscription/billing untouched). Distinct from
+	:func:`request_workspace_reset`, which rebuilds the container via admin.
+
+	System Manager only — the same gate dev.reset_onboarding enforces, stated here
+	so the endpoint 403s before importing rather than deep inside the teardown."""
+	frappe.only_for("System Manager")
+	from jarvis import dev
+
+	return dev.reset_onboarding(wipe_data=bool(cint(wipe_data)))
+
+
 def _wipe_workspace_content() -> None:
 	for dt in _WIPE_DOCTYPES:
 		frappe.db.delete(dt)

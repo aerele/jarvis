@@ -80,6 +80,10 @@ export const requestWorkspaceReset = (reason, opts = {}) =>
 		revoke_llm: opts.revokeLlm ? 1 : 0,
 	});
 export const workspaceResetState = () => call("jarvis.onboarding.workspace_reset_state");
+// Reset onboarding: clears connection + creds and (wipeData, the CLI default)
+// all workspace content, so the setup wizard re-runs. No container rebuild.
+export const resetOnboarding = (wipeData = true) =>
+	call("jarvis.onboarding.reset_onboarding", { wipe_data: wipeData ? 1 : 0 });
 
 // --- Per-user chat settings + real (measured) usage tracking, incl. the
 // tenant-admin usage table (design doc §4/§6). All return the house

@@ -207,3 +207,81 @@ class TestResetUnpairsTheContainer(FrappeTestCase):
 		frappe.db.commit()
 		reset_onboarding()
 		self.assertFalse(self.unpair_chat_devices.called)
+
+
+class TestResetOnboardingEndpoint(FrappeTestCase):
+	"""The whitelisted jarvis.onboarding.reset_onboarding wrapper behind the
+	'Reset onboarding' settings button. Its whole job is gate + coerce +
+	delegate to jarvis.dev.reset_onboarding (exhaustively covered above), so
+	these assert exactly that contract with dev patched out."""
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_requires_system_manager(self):
+		from jarvis.onboarding import reset_onboarding as endpoint
+
+		frappe.set_user("Guest")
+		with self.assertRaises(frappe.PermissionError):
+			endpoint()
+
+	def test_rejects_jarvis_admin_who_is_not_system_manager(self):
+		"""Stricter-than-sibling gate: the Jarvis Admin (desk) role alone is not
+		enough — only System Manager runs the wipe. Mirrors the frontend button
+		gated on is_system_manager, not the combined isSM (a Jarvis-Admin-only
+		seat must neither see nor be able to execute it)."""
+		from jarvis.onboarding import reset_onboarding as endpoint
+		from jarvis.permissions import JARVIS_ADMIN_ROLE, ensure_jarvis_admin_role
+
+		ensure_jarvis_admin_role()
+		email = "reset-ob-jarvis-admin-only@example.com"
+		if not frappe.db.exists("User", email):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": email,
+					"first_name": "Reset OB",
+					"send_welcome_email": 0,
+					"roles": [{"role": JARVIS_ADMIN_ROLE}],
+				}
+			).insert(ignore_permissions=True)
+			frappe.db.commit()
+		self.addCleanup(frappe.db.commit)
+		self.addCleanup(lambda: frappe.delete_doc("User", email, ignore_permissions=True, force=True))
+
+		roles = set(frappe.get_roles(email))
+		self.assertIn(JARVIS_ADMIN_ROLE, roles)
+		self.assertNotIn("System Manager", roles)
+
+		frappe.set_user(email)
+		with self.assertRaises(frappe.PermissionError):
+			endpoint()
+
+	@patch("jarvis.dev.reset_onboarding", return_value={"ok": True, "data": {}})
+	def test_defaults_to_full_wipe_matching_the_cli(self, m):
+		from jarvis.onboarding import reset_onboarding as endpoint
+
+		endpoint()
+		m.assert_called_once_with(wipe_data=True)
+
+	@patch("jarvis.dev.reset_onboarding", return_value={"ok": True, "data": {}})
+	def test_coerces_http_string_false(self, m):
+		"""A falsy string must forward False (never a truthy non-empty string), so
+		a stray wipe_data can't trigger the destructive content wipe. Coerced by
+		the @whitelist bool annotation in request/test context, with cint() as the
+		belt-and-suspenders fallback."""
+		from jarvis.onboarding import reset_onboarding as endpoint
+
+		endpoint(wipe_data="0")
+		m.assert_called_once_with(wipe_data=False)
+
+	@patch(
+		"jarvis.dev.reset_onboarding",
+		return_value={"ok": True, "data": {"cleared_fields": [], "wiped_doctypes": ["X"]}},
+	)
+	def test_returns_dev_payload_unchanged(self, m):
+		from jarvis.onboarding import reset_onboarding as endpoint
+
+		out = endpoint()
+		self.assertTrue(out["ok"])
+		self.assertEqual(out["data"]["wiped_doctypes"], ["X"])
