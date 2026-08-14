@@ -606,6 +606,19 @@ class JarvisSettings(Document):
 				self.llm_api_key = api_key_val
 
 	def validate(self):
+		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
+		# scrub in on_update. Capture the change here, the same way
+		# llm_auth_mode_changed is captured below: has_value_changed compares the
+		# SUBMITTED value against the stored one, so an unrelated settings save that
+		# never touched the checkbox reads as "not changed" and cannot spuriously
+		# wipe the mirror. A loaded Check always coerces to 0/1 (never None), and
+		# pre-v2 rows whose wiki_enabled is NULL are backfilled to 1 by patch, so a
+		# real disable is a 1 -> 0 change there too (a bare NULL would coerce to 0
+		# and hide the change).
+		self.flags.wiki_disabled_transition = bool(self.has_value_changed("wiki_enabled")) and not (
+			frappe.utils.cint(getattr(self, "wiki_enabled", 0))
+		)
+
 		# Detect a new llm_api_key before _save_passwords() masks it to '****'.
 		current_key = getattr(self, "llm_api_key", None) or ""
 		if not current_key or self.is_dummy_password(current_key):
@@ -857,6 +870,10 @@ class JarvisSettings(Document):
 		return result
 
 	def on_update(self):
+		# #731: runs BEFORE the unified-LLM early returns below so a settings save
+		# that both reconfigures the LLM and disables the wiki still scrubs.
+		self._maybe_scrub_wiki_on_disable()
+
 		# ------------------------------------------------------------------ #
 		# Unified LLM path (2026-06-26): models table rows or preset present.
 		# ------------------------------------------------------------------ #
@@ -877,6 +894,23 @@ class JarvisSettings(Document):
 		self.db_set("proxy_active", 0, update_modified=False)
 		self.db_set("proxy_recommended", 0, update_modified=False)
 		self._on_update_single_model_legacy()
+
+	def _maybe_scrub_wiki_on_disable(self):
+		"""Scrub the container's mirrored wiki files when "Enable Business Wiki"
+		goes ON -> OFF (#731).
+
+		The kill switch has to actually remove already-mirrored content, not just
+		gate new reads: the agent can otherwise still grep the page files off the
+		org-shared workspace, and revocation deletes never fire while the wiki is
+		off. Fires only on a genuine 1 -> 0 change of the toggle, captured in
+		validate() via has_value_changed so an unrelated settings save can never
+		wipe the mirror; a save while already off, or a re-enable, does nothing. A
+		missing flag (validate skipped) means no scrub."""
+		from jarvis.chat import wiki_mirror
+
+		if not self.flags.get("wiki_disabled_transition"):
+			return
+		wiki_mirror.enqueue_scrub(after_commit=True)
 
 	def _on_update_unified_llm(self):
 		"""New LLM path: validate → derive proxy_active/proxy_recommended →
