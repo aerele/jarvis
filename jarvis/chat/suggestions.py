@@ -31,7 +31,13 @@ import time
 
 import frappe
 
-from jarvis.chat.title import _clean, _is_greeting
+from jarvis.chat.title import (
+	_auth_fault_detail,
+	_clean,
+	_is_auth_fault,
+	_is_greeting,
+	_log_pinned_lane_auth_fault,
+)
 
 CONV = "Jarvis Conversation"
 MSG_DT = "Jarvis Chat Message"
@@ -215,6 +221,7 @@ def _generate_via_gateway(gateway_url, titles: list[str], *, model, provider) ->
 
 	prompt = _PROMPT.format(n=WANT, titles="\n".join(titles))
 	text = ""
+	lifecycle_error: str | None = None
 	label = f"jarvis-suggest-{frappe.generate_hash(length=10)}"
 	try:
 		with agent_session_pool.checkout(gateway_url) as sess:
@@ -231,6 +238,11 @@ def _generate_via_gateway(gateway_url, titles: list[str], *, model, provider) ->
 				):
 					if ev.get("kind") == "assistant" and ev.get("text"):
 						text = ev["text"]
+					elif ev.get("kind") == "lifecycle" and ev.get("phase") == "error" and ev.get("error"):
+						# See jarvis.chat.title._generate_via_gateway's copy of
+						# this branch: the agent runtime's only place the run names a
+						# provider failure, and it never raises here.
+						lifecycle_error = str(ev["error"])
 				run_ended = True
 			finally:
 				reclaim_throwaway_session(
@@ -239,12 +251,17 @@ def _generate_via_gateway(gateway_url, titles: list[str], *, model, provider) ->
 					logger_name="jarvis.chat.suggestions",
 					fired_at=None if run_ended else fired_at,
 				)
-	except Exception:
+	except Exception as e:
+		detail = _auth_fault_detail(e)
+		if detail:
+			_log_pinned_lane_auth_fault("suggestions", detail, model=model, provider=provider)
 		frappe.log_error(
 			title="prompt suggestions: gateway generation failed",
 			message=frappe.get_traceback(),
 		)
 		return []
+	if not text and _is_auth_fault(lifecycle_error):
+		_log_pinned_lane_auth_fault("suggestions", lifecycle_error, model=model, provider=provider)
 	return parse_lines(text)
 
 
