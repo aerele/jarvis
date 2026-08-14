@@ -63,8 +63,10 @@ vi.mock("@/stores/shell", () => ({
 	}),
 }));
 
+// Shared so the Reset-onboarding tests can drive the danger confirm's answer.
+const { confirmMock } = vi.hoisted(() => ({ confirmMock: vi.fn() }));
 vi.mock("@/composables/useConfirm", () => ({
-	useConfirm: () => ({ confirm: vi.fn() }),
+	useConfirm: () => ({ confirm: confirmMock }),
 }));
 
 // Every network call the pane makes on mount. getUsage / getMySettings /
@@ -75,6 +77,7 @@ vi.mock("@/api", () => ({
 	getMySettings: vi.fn(() => Promise.resolve({ ok: false })),
 	workspaceResetState: vi.fn(() => Promise.resolve({})),
 	requestWorkspaceReset: vi.fn(() => Promise.resolve({})),
+	resetOnboarding: vi.fn(() => Promise.resolve({ ok: true })),
 	clearAllHistory: vi.fn(() => Promise.resolve({})),
 	getLlmConnectionStatus: vi.fn(() => new Promise(() => {})),
 	getLlmConnectionHealth: vi.fn(() => new Promise(() => {})),
@@ -95,9 +98,9 @@ function buttonLabels(w) {
 	return w.findAll(".stub-button").map((b) => b.attributes("data-label") || "");
 }
 
-async function mountAs({ admin }) {
+async function mountAs({ admin, jarvisAdmin = false }) {
 	window.is_system_manager = admin;
-	window.is_jarvis_admin = false;
+	window.is_jarvis_admin = jarvisAdmin;
 	const w = mount(GeneralPane);
 	await flushPromises();
 	return w;
@@ -281,5 +284,60 @@ describe("GeneralPane Status badge, admin seat", () => {
 		);
 		const w = await mountAs({ admin: true });
 		expect(badge(w)).toEqual({ label: "Disconnected", theme: "orange" });
+	});
+});
+
+describe("GeneralPane Reset onboarding button", () => {
+	function resetBtn(w) {
+		return w
+			.findAll(".stub-button")
+			.find((b) => b.attributes("data-label") === "Reset onboarding");
+	}
+
+	beforeEach(() => {
+		confirmMock.mockReset();
+		api.resetOnboarding.mockReset();
+		api.resetOnboarding.mockImplementation(() => Promise.resolve({ ok: true }));
+	});
+
+	it("is offered to an admin and hidden from a member", async () => {
+		const wAdmin = await mountAs({ admin: true });
+		expect(buttonLabels(wAdmin)).toContain("Reset onboarding");
+		const wMember = await mountAs({ admin: false });
+		expect(buttonLabels(wMember)).not.toContain("Reset onboarding");
+	});
+
+	// The backend (dev.reset_onboarding) is only_for("System Manager"), stricter
+	// than the sibling Reset workspace. A Jarvis-Admin-only seat (is_jarvis_admin
+	// but not is_system_manager) must NOT see this button, or it 403s as a dead
+	// control. It still sees the rest of the danger zone (gated on isSM).
+	it("is hidden from a Jarvis-Admin-only seat that the backend would reject", async () => {
+		const w = await mountAs({ admin: false, jarvisAdmin: true });
+		expect(buttonLabels(w)).not.toContain("Reset onboarding");
+		// The danger zone itself renders for this seat — only this stricter button is gone.
+		expect(buttonLabels(w)).toContain("Reset workspace");
+	});
+
+	it("does nothing when the danger confirm is dismissed", async () => {
+		confirmMock.mockResolvedValue(false);
+		const w = await mountAs({ admin: true });
+		await resetBtn(w).trigger("click");
+		await flushPromises();
+		expect(confirmMock).toHaveBeenCalledTimes(1);
+		expect(api.resetOnboarding).not.toHaveBeenCalled();
+	});
+
+	it("full-wipes only after the confirm is accepted", async () => {
+		confirmMock.mockResolvedValue(true);
+		const w = await mountAs({ admin: true });
+		await resetBtn(w).trigger("click");
+		await flushPromises();
+		// The danger confirm must have been the gate, and the call is the
+		// CLI-matching full reset (wipe_data=true), not connection-only.
+		expect(confirmMock).toHaveBeenCalledTimes(1);
+		expect(confirmMock.mock.calls[0][0]).toMatchObject({ danger: true });
+		expect(api.resetOnboarding).toHaveBeenCalledWith(true);
+		// The success reload to /jarvis/onboarding is exercised in the browser
+		// flow review — jsdom makes window.location.assign non-stubbable.
 	});
 });
