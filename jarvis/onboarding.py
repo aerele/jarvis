@@ -1509,6 +1509,13 @@ def _land_reconnect(data: dict) -> dict:
 		}
 	)
 	grant_onboarding_admin()
+	if data.get("renew_required"):
+		# A LAPSED account (Expired subscription): its container was stopped on expiry, so there
+		# is nothing to ride sync_connection to. The wizard must land on plan/pay and Pay must call
+		# renew() - reactivate the EXISTING subscription and restart the container - never resume an
+		# unfinished checkout, never a fresh signup (no new Customer). Distinct from resume_payment,
+		# whose Pay resumes a Pending-Payment checkout.
+		return {"status": "renew_payment"}
 	if (data.get("subscription_status") or "").strip() == "Pending Payment":
 		return {"status": "resume_payment"}
 	return {"status": "connected"}
@@ -1832,10 +1839,15 @@ def finish_payment(payload: dict | str) -> dict:
 
 
 @frappe.whitelist()
-def renew(provider: str | None = None) -> dict:
+def renew(provider: str | None = None, target_plan: str | None = None) -> dict:
 	"""Existing customer initiates a renewal payment; returns a pay-page token
 	the billing page top-level-navigates to (plan-09 WS8). The admin-hosted
 	checkout completes the payment; the webhook/return activates the plan.
+
+	``target_plan``: a lapsed customer may renew ONTO another plan (the reconnect
+	renew flow lets them pick at the plan step). It MUST reach admin - Frappe drops
+	any request kwarg the signature does not name, so leaving it off silently priced
+	every reconnect renewal off the OLD plan.
 
 	Gated on System Manager: initiates a billing transaction tied to the
 	site's admin account.
@@ -1843,7 +1855,9 @@ def renew(provider: str | None = None) -> dict:
 	require_jarvis_admin()
 	# plan-09 WS8: attest the token against the bench's OWN pay origin so
 	# BillingPage can navigate (behaviour-neutral on a non-token answer).
-	return onboarding_contract.augment_pay_page(_surface(admin_client.renew, provider=provider))
+	return onboarding_contract.augment_pay_page(
+		_surface(admin_client.renew, provider=provider, target_plan=target_plan)
+	)
 
 
 _RESETTING_STATUS = "pending: resetting workspace"

@@ -560,8 +560,17 @@
 									/>Back to tour
 								</button>
 								<Button
+									v-if="mustReconnect"
+									variant="solid"
+									label="Reconnect to your workspace"
+									:loading="state.detailsSubmitting || state.payBusy"
+									@click="startReconnect"
+								/>
+								<Button
+									v-else
 									variant="solid"
 									label="Continue"
+									:loading="state.detailsSubmitting"
 									@click="onDetailsSubmit"
 								/>
 							</div>
@@ -1330,8 +1339,9 @@
 										your existing subscription, nothing to pay again.
 									</p>
 									<p v-else>
-										Sent to <b>{{ state.email || "your email" }}</b
-										>. Connects this site to your existing subscription,
+										If an account exists for this email, a reconnect code is on
+										its way to <b>{{ state.email || "your email" }}</b
+										>. It connects this site to your existing subscription,
 										nothing to pay again.
 									</p>
 								</div>
@@ -1364,7 +1374,7 @@
 										Single-use, and expires shortly after support issued it.
 									</template>
 									<template v-else-if="state.reconnectResentIn > 0">
-										Sent. You can resend in {{ state.reconnectResentIn }}s.
+										You can resend in {{ state.reconnectResentIn }}s.
 									</template>
 									<template v-else>
 										Didn't get it?
@@ -1845,6 +1855,8 @@ const state = reactive({
 	// recovery uses server truth or an honest placeholder, never this unless the
 	// user set it.
 	identityFromUser: false,
+	// Disables the forward action while onDetailsSubmit awaits the eligibility resolve (no double-submit).
+	detailsSubmitting: false,
 	// plan (Choose Your Plan step)
 	plans: [],
 	planName: null,
@@ -1992,6 +2004,14 @@ const reconnectInputsReady = computed(
 // wrong guess either hides recovery from someone who needs it, or sends someone
 // who has no account into a code screen no code will ever arrive for.
 const canReconnect = computed(() => reconnectInputsReady.value && state.reconnectEligible);
+// Forced-reconnect gate: an eligible returning (email, company) may ONLY reconnect.
+// Keyed on reconnectIdentity (what the customer typed), never the admin prefill.
+const mustReconnect = computed(
+	() =>
+		canReconnect.value && !!reconnectIdentity.value.email && !!reconnectIdentity.value.company
+);
+// Last (email, company) a request was issued for, so cancel->Continue reuses it (admin caps 5/hr). Not cleared on cancel.
+let reconnectIssued = null;
 
 // Debounced so typing an address doesn't call the plane per keystroke, and
 // cached per (email, company) so going back and forth doesn't re-ask. Fails
@@ -2448,7 +2468,9 @@ async function fetchCompanyDefaults() {
 	}
 }
 
-function onDetailsSubmit() {
+async function onDetailsSubmit() {
+	// One submit at a time (the eligibility resolve below is awaited).
+	if (state.detailsSubmitting) return;
 	state.detailsErr = "";
 	state.email = (state.email || "").trim();
 	state.company = (state.company || "").trim();
@@ -2476,6 +2498,21 @@ function onDetailsSubmit() {
 	// reconnect-code step's own error surface so a stale one does not linger.
 	state.payErr = "";
 	statusCheckNote.value = "";
+	// Forced-reconnect gate: an eligible existing (email, company) the customer ASSERTED
+	// may only reconnect. Fresh resolve here (cancelling the debounce) closes the
+	// type-then-Continue race; fails closed (guest signup() 409 still blocks a duplicate).
+	state.detailsSubmitting = true;
+	try {
+		clearTimeout(eligibilityTimer);
+		await refreshReconnectEligibility();
+		const id = reconnectIdentity.value;
+		if (state.reconnectEligible && id.email && id.company) {
+			await startReconnect();
+			return;
+		}
+	} finally {
+		state.detailsSubmitting = false;
+	}
 	// The customer just edited the details behind a FAILED attempt. Without this,
 	// walking forward from here landed them straight back on the old failure card
 	// with no new request made at all: the machine was still parked on the failed
@@ -3369,6 +3406,10 @@ async function resendReconnectCode() {
 		const id = reconnectIdentity.value;
 		const d = await startAccountReconnect(id.email, id.company);
 		state.reconnectRequestId = (d && d.request) || state.reconnectRequestId;
+		// Keep the reuse tracker on the latest request (resend supersedes the old id).
+		if (d && d.request) {
+			reconnectIssued = { email: id.email, company: id.company, requestId: d.request };
+		}
 		state.reconnectCode = "";
 		state.reconnectResentIn = 30;
 		const tick = setInterval(() => {
@@ -3420,6 +3461,17 @@ async function submitReconnectCode() {
 			if (state.step === "reconnect") state.step = "details";
 			return;
 		}
+		if (d && d.status === "renew_payment") {
+			// Recovered a LAPSED account (Expired sub): its container was stopped on expiry, so
+			// there is nothing to ride sync_connection to AND no unfinished checkout to resume. The
+			// code re-authenticated this bench onto the existing account; hand off to the billing
+			// page, which owns the renew flow (pick a plan -> renew() reactivates the EXISTING
+			// subscription + restarts the container -> the bounded recovery poll). A hard nav, like
+			// ACTIONS.BILLING: AppShell's gate re-renders the poster over an in-SPA route.
+			state.payBusy = false;
+			window.location.assign("/jarvis/billing");
+			return;
+		}
 		// Direct mode has no confirmation page (the code came from support) and its
 		// invalid covers a mistyped code OR the wrong registered email, so point the
 		// customer at both — never at a screen they never saw.
@@ -3442,24 +3494,45 @@ async function submitReconnectCode() {
 // code screen. Reachable from Details (a returning customer never has to pick a
 // plan or reach a payment wall) and from a rejected pay attempt.
 async function startReconnect() {
+	// No re-entry while a request is in flight (would mint a second code + burn the 5/hr budget).
+	if (state.payBusy) return;
 	state.payErr = "";
+	state.detailsErr = ""; // any prior Details error is stale once we commit to reconnect
 	state.reconnectCode = "";
 	state.reconnectDirect = false;
 	state.reconnectEmail = "";
-	state.payBusy = true;
+	// Authoritative identity only (P1-7): server truth, or what the customer
+	// themselves typed - never the site-admin prefill.
+	const id = reconnectIdentity.value;
 	// Where to return on Back/cancel: reconnect can be entered from Details
 	// (before any plan is chosen), from the recovery card, and from the review
 	// card's can_reconnect offer.
 	state.reconnectFrom = state.step === "reconnect" ? state.reconnectFrom : state.step;
+	// Cancel -> Continue on the SAME identity reuses the outstanding request (admin caps 5/hr); a stale code -> "Resend".
+	if (
+		reconnectIssued &&
+		reconnectIssued.email === id.email &&
+		reconnectIssued.company === id.company &&
+		reconnectIssued.requestId
+	) {
+		state.reconnectRequestId = reconnectIssued.requestId;
+		state.step = "reconnect";
+		return;
+	}
+	state.payBusy = true;
 	try {
-		// Authoritative identity only (P1-7): server truth, or what the customer
-		// themselves typed - never the site-admin prefill.
-		const id = reconnectIdentity.value;
 		const d = await startAccountReconnect(id.email, id.company);
 		state.reconnectRequestId = (d && d.request) || "";
+		reconnectIssued = {
+			email: id.email,
+			company: id.company,
+			requestId: state.reconnectRequestId,
+		};
 		state.step = "reconnect";
 	} catch (e) {
 		state.payErr = errMsg(e);
+		// Details has no payErr banner + the gate hid the fallback, so surface it here (no silent dead-end).
+		if (state.step === "details") state.detailsErr = state.payErr;
 	} finally {
 		state.payBusy = false;
 	}

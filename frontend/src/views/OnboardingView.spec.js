@@ -235,6 +235,29 @@ describe("operator-issued reconnect code: direct redeem vs emailed request", () 
 		expect(api.checkAccountReconnect).not.toHaveBeenCalled();
 	});
 
+	it("a lapsed (renew_payment) landing hands off to the billing page, not Connect", async () => {
+		// The v1 fix for the shipped-gate strand: an Expired account's container was stopped on
+		// expiry, so the code re-authenticates but there is nothing to connect to. The bench must
+		// hand off to /jarvis/billing (the renew surface), never advance to Connect and strand.
+		const assign = vi.fn();
+		const realLocation = window.location;
+		Object.defineProperty(window, "location", {
+			configurable: true,
+			value: { ...realLocation, assign },
+		});
+		api.redeemReconnectCode.mockResolvedValue({ status: "renew_payment" });
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "reconnect";
+		wrapper.vm.state.reconnectDirect = true;
+		wrapper.vm.state.reconnectCode = "ABCD2345";
+		wrapper.vm.state.reconnectEmail = "known@example.com";
+		await wrapper.vm.submitReconnectCode();
+		expect(assign).toHaveBeenCalledWith("/jarvis/billing");
+		expect(wrapper.vm.state.step).not.toBe("connect");
+		Object.defineProperty(window, "location", { configurable: true, value: realLocation });
+	});
+
 	it("request-mode submit polls the started request, never the direct redeem", async () => {
 		api.checkAccountReconnect.mockResolvedValue({ status: "connected" });
 		const wrapper = mountView();
@@ -690,6 +713,188 @@ describe("812: Company field is constrained once ERPNext has real Company record
 		await flushPromises();
 		const combo = wrapper.find("jv-combo-stub");
 		expect(combo.attributes("allowcustom")).toBe("true");
+	});
+});
+
+// Forced-reconnect gate: an eligible returning (email, company) may only reconnect,
+// keyed on the customer-ASSERTED identity (identityFromUser), never the admin prefill.
+describe("Returning-customer forced reconnect gate", () => {
+	async function detailsView({
+		eligible,
+		needs_company = false,
+		typed = true,
+		company = "Corp",
+	}) {
+		api.reconnectAvailable.mockResolvedValue({ eligible, needs_company });
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		wrapper.vm.state.email = "back@corp.test";
+		wrapper.vm.state.company = company;
+		wrapper.vm.state.identityFromUser = typed; // typed => reconnectIdentity present
+		await flushPromises();
+		return wrapper;
+	}
+
+	it("C1: forces reconnect (no goNext to plan) for an eligible account matching the typed identity", async () => {
+		api.startAccountReconnect.mockResolvedValue({ request: "req_1" });
+		const wrapper = await detailsView({ eligible: true });
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		// The await inside onDetailsSubmit resolved eligibility (it was NOT pre-settled
+		// by the debounce) - this is also the race-closure guarantee (C3).
+		expect(api.startAccountReconnect).toHaveBeenCalledWith("back@corp.test", "Corp");
+		expect(wrapper.vm.state.step).toBe("reconnect");
+	});
+
+	it("C1: does NOT force reconnect when the eligible email was only prefilled (not typed)", async () => {
+		const wrapper = await detailsView({ eligible: true, typed: false });
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).not.toHaveBeenCalled();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	it("mustReconnect is true only when eligible AND the identity is asserted", async () => {
+		const wrapper = await detailsView({ eligible: true, typed: false });
+		wrapper.vm.state.reconnectEligible = true; // eligible, but prefill-only identity
+		await flushPromises();
+		expect(wrapper.vm.mustReconnect).toBe(false);
+		wrapper.vm.state.identityFromUser = true; // now asserted
+		await flushPromises();
+		expect(wrapper.vm.mustReconnect).toBe(true);
+	});
+
+	it("C2: two rapid submits fire exactly one reconnect request", async () => {
+		let resolveReq;
+		api.startAccountReconnect.mockReturnValue(new Promise((r) => (resolveReq = r)));
+		const wrapper = await detailsView({ eligible: true });
+		const p1 = wrapper.vm.onDetailsSubmit();
+		const p2 = wrapper.vm.onDetailsSubmit(); // second click during the await window
+		resolveReq({ request: "req_1" });
+		await Promise.all([p1, p2]);
+		await flushPromises();
+		expect(api.startAccountReconnect).toHaveBeenCalledTimes(1);
+	});
+
+	it("C2: startReconnect ignores a re-entrant call while a request is in flight", async () => {
+		let resolveReq;
+		api.startAccountReconnect.mockReturnValue(new Promise((r) => (resolveReq = r)));
+		const wrapper = await detailsView({ eligible: true });
+		const p1 = wrapper.vm.startReconnect();
+		const p2 = wrapper.vm.startReconnect(); // e.g. a double-click on the Reconnect button
+		resolveReq({ request: "req_1" });
+		await Promise.all([p1, p2]);
+		await flushPromises();
+		expect(api.startAccountReconnect).toHaveBeenCalledTimes(1);
+	});
+
+	it("C2: two rapid submits on a non-eligible identity reach 'plan', never skipping to 'pay'", async () => {
+		const wrapper = await detailsView({ eligible: false });
+		const p1 = wrapper.vm.onDetailsSubmit();
+		const p2 = wrapper.vm.onDetailsSubmit();
+		await Promise.all([p1, p2]);
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	it("C4: cancel then continue with the same identity reuses the request (no second call)", async () => {
+		api.startAccountReconnect.mockResolvedValue({ request: "req_1" });
+		const wrapper = await detailsView({ eligible: true });
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).toHaveBeenCalledTimes(1);
+		wrapper.vm.cancelReconnect(); // back to details, clears reconnectRequestId
+		await flushPromises();
+		await wrapper.vm.onDetailsSubmit(); // same identity -> reuse, no fresh request
+		await flushPromises();
+		expect(api.startAccountReconnect).toHaveBeenCalledTimes(1);
+		expect(wrapper.vm.state.step).toBe("reconnect");
+		expect(wrapper.vm.state.reconnectRequestId).toBe("req_1");
+	});
+
+	it("C6: needs_company (email under a different company) does NOT gate - advances to plan", async () => {
+		const wrapper = await detailsView({
+			eligible: false,
+			needs_company: true,
+			company: "WrongCo",
+		});
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).not.toHaveBeenCalled();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	it("a brand-new (non-eligible) customer advances normally to plan", async () => {
+		const wrapper = await detailsView({ eligible: false, company: "NewCo" });
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).not.toHaveBeenCalled();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	it("a failed startReconnect on Details surfaces the error (no silent dead-end)", async () => {
+		api.startAccountReconnect.mockRejectedValue(
+			new Error("reconnect requests are rate limited")
+		);
+		const wrapper = await detailsView({ eligible: true });
+		await wrapper.vm.startReconnect();
+		await flushPromises();
+		// Stays on Details (never reached the reconnect screen)...
+		expect(wrapper.vm.state.step).toBe("details");
+		// ...and the failure is VISIBLE on the Details error banner, not swallowed.
+		expect(wrapper.vm.state.detailsErr).toBeTruthy();
+	});
+
+	it("fails closed: an admin error on the eligibility check advances to plan (no gate)", async () => {
+		api.reconnectAvailable.mockRejectedValue(new Error("admin down"));
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		wrapper.vm.state.email = "back@corp.test";
+		wrapper.vm.state.company = "Corp";
+		wrapper.vm.state.identityFromUser = true;
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).not.toHaveBeenCalled();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	// Relies on the Button stub's `label` attr falling through to the root <button>.
+	it("renders the Reconnect CTA (not Continue) only when the gate applies", async () => {
+		const wrapper = await detailsView({ eligible: true });
+		wrapper.vm.state.reconnectEligible = true; // as if the debounce has settled
+		await flushPromises();
+		expect(wrapper.find('button[label="Reconnect to your workspace"]').exists()).toBe(true);
+		expect(wrapper.find('button[label="Continue"]').exists()).toBe(false);
+		// A prefill-only (unasserted) identity keeps the normal Continue button.
+		wrapper.vm.state.identityFromUser = false;
+		await flushPromises();
+		expect(wrapper.find('button[label="Reconnect to your workspace"]').exists()).toBe(false);
+		expect(wrapper.find('button[label="Continue"]').exists()).toBe(true);
+	});
+
+	it("resend keeps the reuse tracker on the fresh request, not the superseded one", async () => {
+		api.startAccountReconnect
+			.mockResolvedValueOnce({ request: "req_1" })
+			.mockResolvedValueOnce({ request: "req_2" });
+		const wrapper = await detailsView({ eligible: true });
+		vi.useFakeTimers();
+		try {
+			await wrapper.vm.onDetailsSubmit(); // issues req_1 -> reconnect screen
+			await flushPromises();
+			await wrapper.vm.resendReconnectCode(); // resend -> req_2 (supersedes req_1)
+			await flushPromises();
+			expect(wrapper.vm.state.reconnectRequestId).toBe("req_2");
+			wrapper.vm.cancelReconnect(); // back to Details (clears reconnectRequestId)
+			await flushPromises();
+			await wrapper.vm.onDetailsSubmit(); // same identity -> reuse the FRESH request
+			await flushPromises();
+			expect(wrapper.vm.state.reconnectRequestId).toBe("req_2");
+			expect(api.startAccountReconnect).toHaveBeenCalledTimes(2); // req_1 + resend; no 3rd
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
