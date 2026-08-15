@@ -3,6 +3,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.tools._export.envelope import save_export_file
 from jarvis.tools._export.model import ExportModel
+from jarvis.tools._export.safety import escape_formula
 
 
 class TestExportModel(FrappeTestCase):
@@ -63,3 +64,19 @@ class TestExportEnvelope(FrappeTestCase):
 		env = save_export_file("x.csv", b"data\n", title="", mime_type="text/csv")
 		self.assertTrue(env["filename"].endswith(".csv"))
 		self.assertTrue(len(env["filename"]) > len(".csv"))
+
+
+class TestFormulaEscape(FrappeTestCase):
+	def test_dangerous_leading_chars_are_prefixed(self):
+		for bad in ("=1+1", "+1", "-1", "@x", "\t=cmd", "\r=cmd"):
+			self.assertTrue(escape_formula(bad).startswith("'"), bad)
+
+	def test_safe_values_untouched(self):
+		self.assertEqual(escape_formula("Acme Ltd"), "Acme Ltd")
+		self.assertEqual(escape_formula("123"), "123")
+		self.assertEqual(escape_formula(""), "")
+
+	def test_non_strings_pass_through(self):
+		self.assertEqual(escape_formula(42), 42)
+		self.assertEqual(escape_formula(0), 0)
+		self.assertIsNone(escape_formula(None))
