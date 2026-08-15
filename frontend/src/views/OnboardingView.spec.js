@@ -732,6 +732,9 @@ describe("Returning-customer forced reconnect gate", () => {
 		wrapper.vm.state.email = "back@corp.test";
 		wrapper.vm.state.company = company;
 		wrapper.vm.state.identityFromUser = typed; // typed => reconnectIdentity present
+		// Contact number is mandatory on Details now; fill it so onDetailsSubmit's
+		// gate doesn't block these reconnect-flow tests on an unrelated field.
+		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
 		await flushPromises();
 		return wrapper;
 	}
@@ -854,6 +857,7 @@ describe("Returning-customer forced reconnect gate", () => {
 		wrapper.vm.state.email = "back@corp.test";
 		wrapper.vm.state.company = "Corp";
 		wrapper.vm.state.identityFromUser = true;
+		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
 		await wrapper.vm.onDetailsSubmit();
 		await flushPromises();
 		expect(api.startAccountReconnect).not.toHaveBeenCalled();

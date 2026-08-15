@@ -323,18 +323,42 @@
 											:message="detailsFieldErrors.email"
 										/>
 									</div>
-									<FormControl
-										type="tel"
-										variant="outline"
-										label="Contact number (optional)"
-										:model-value="billing.fields.contact.value"
-										@update:model-value="
-											(v) => billing.setUserValue('contact', v)
-										"
-										placeholder="+91 98765 43210"
-										autocomplete="tel"
-										@keydown.enter="onDetailsSubmit"
-									/>
+									<div class="flex flex-col gap-1">
+										<FormControl
+											type="tel"
+											variant="outline"
+											label="Contact number"
+											:model-value="billing.fields.contact.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('contact', v);
+													clearFieldErrorIfValid(
+														'contact',
+														contactError,
+														v
+													);
+												}
+											"
+											placeholder="+91 98765 43210"
+											autocomplete="tel"
+											required
+											aria-required="true"
+											:aria-invalid="
+												detailsFieldErrors.contact ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.contact
+													? 'jv-ob-contact-err'
+													: undefined
+											"
+											@blur="touchContactField"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage
+											id="jv-ob-contact-err"
+											:message="detailsFieldErrors.contact"
+										/>
+									</div>
 									<!-- No separate contact-consent checkbox here (owner decision
 										 2026-08-14): consent to be contacted is part of the Terms &
 										 Conditions accepted at Review & Pay, where onPayClick sends
@@ -2394,8 +2418,8 @@ function onPlanContinue() {
 }
 
 // ---- Details (Your Details) -------------------------------------------------
-// Email + Company are required; GSTIN is validated (gstin.js) but optional -
-// the four billing inputs are provenance-aware state owned by the `billing`
+// Email + Company + Contact number are required; GSTIN is validated (gstin.js)
+// but optional - the four billing inputs are provenance-aware state owned by the `billing`
 // composable (Plan 01): edits are user-owned, the transitional localStorage
 // snapshot is namespaced by site+user and cleared only after admin's
 // billing_saved ack, and a Company change fetches ERP-derived defaults behind
@@ -2416,6 +2440,12 @@ function emailError(value) {
 function companyError(value) {
 	return (value || "").trim() ? "" : "Company name is required.";
 }
+// Contact number is mandatory (non-empty after trim) but not format-checked -
+// see the onboarding brief: no phone-number regex, admin's own normalizer is
+// the source of truth for shape.
+function contactError(value) {
+	return (value || "").trim() ? "" : "Enter a contact number.";
+}
 // gstinError (gstin.js) already treats a blank value as "" (GSTIN is optional).
 
 // Details-step field errors, one bucket per field so each renders under its
@@ -2423,12 +2453,15 @@ function companyError(value) {
 // no tie to what's wrong. Set all at once by onDetailsSubmit (every failure
 // shown together, not one submit per error); state.detailsErr stays reserved
 // for genuinely form-wide messages (see onPayClick's missing-details guard).
-const detailsFieldErrors = reactive({ email: "", company: "", gstin: "" });
+const detailsFieldErrors = reactive({ email: "", company: "", contact: "", gstin: "" });
 function touchEmailField() {
 	detailsFieldErrors.email = emailError(state.email);
 }
 function touchCompanyField() {
 	detailsFieldErrors.company = companyError(state.company);
+}
+function touchContactField() {
+	detailsFieldErrors.contact = contactError(billing.fields.contact.value);
 }
 function touchGstinField() {
 	detailsFieldErrors.gstin = gstinError(billing.fields.gstin.value);
@@ -2481,8 +2514,15 @@ async function onDetailsSubmit() {
 	// step, instead of dead-ending at the pay button three screens later.
 	touchEmailField();
 	touchCompanyField();
+	touchContactField();
 	touchGstinField();
-	if (detailsFieldErrors.email || detailsFieldErrors.company || detailsFieldErrors.gstin) return;
+	if (
+		detailsFieldErrors.email ||
+		detailsFieldErrors.company ||
+		detailsFieldErrors.contact ||
+		detailsFieldErrors.gstin
+	)
+		return;
 	billing.persist();
 	// Editing billing after Review & Pay: return straight to Pay, and — once an
 	// intent exists — save the edit through the authenticated update_billing

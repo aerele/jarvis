@@ -997,6 +997,12 @@ def start_signup(
 	# and clears the flag on any answer.
 	if onboarding_contract.awaiting_reconciliation():
 		_refuse_while_money_is_parked()  # always raises
+	# Contact number is mandatory on the Details step (SPA validation mirrors
+	# this), but the SPA is not the only caller of this endpoint, so the bench
+	# enforces it again here rather than trusting the client. No format check -
+	# admin's own normalizer is the source of truth for shape.
+	if not ((billing or {}).get("contact_number") or "").strip():
+		frappe.throw("Contact number is required.")
 	# The identity the customer TYPED, before admin is asked anything. Two
 	# reasons it is written first: a response lost in transit still leaves the
 	# bench knowing whose signup this was (plan 03's "bench response lost after

@@ -7,6 +7,12 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis import onboarding, onboarding_contract
 
+# start_signup now requires a non-empty billing.contact_number (Details step
+# made Contact number mandatory). Every call below that is meant to get past
+# that check uses this fixed value, so a new required field never has to be
+# threaded through 20+ call sites by hand again.
+_BILLING = {"contact_number": "+91 98765 43210"}
+
 
 def _set_token(value, secret="secret"):
 	"""Set both native credentials for tests that exercise the authenticated
@@ -195,7 +201,7 @@ class TestSyncConnection(FrappeTestCase):
 			patch("jarvis.onboarding.admin_client.signup") as mock_signup,
 		):
 			with self.assertRaises(frappe.ValidationError):
-				onboarding.start_signup("e4@x.com", "Co", "Annual Plan")
+				onboarding.start_signup("e4@x.com", "Co", "Annual Plan", billing=_BILLING)
 			mock_signup.assert_not_called()
 
 	def test_require_admin_url_allows_default_fallback(self):
@@ -329,6 +335,7 @@ class TestSignupEmailVerification(FrappeTestCase):
 				"verify-test@example.com",
 				"Acme",
 				"Annual Plan",
+				billing=_BILLING,
 			)
 		self.assertTrue(out["pending_verification"])
 		s = frappe.get_single("Jarvis Settings")
@@ -376,6 +383,7 @@ class TestSignupEmailVerification(FrappeTestCase):
 				"legacy-test@example.com",
 				"Bob Inc",
 				"Annual Plan",
+				billing=_BILLING,
 			)
 		self.assertEqual(out["razorpay_order_id"], "order_LEGACY")
 		s = frappe.get_single("Jarvis Settings")
@@ -942,11 +950,27 @@ class TestSignupResumeFallback(FrappeTestCase):
 			},
 		)
 
+	def test_missing_contact_number_rejected_before_admin_call(self):
+		"""The Details step made Contact number mandatory (the SPA mirrors this
+		check); the bench enforces it again server-side so a caller that
+		bypasses the SPA cannot reach admin with a signup admin cannot bill.
+		Both a blank-after-strip value and a wholly missing billing dict must
+		be refused, and neither may reach admin_client.signup."""
+		with patch("jarvis.onboarding.admin_client.signup") as mock_signup:
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.start_signup(
+					"owner@acme.example", "Acme", "some-plan", billing={"contact_number": "   "}
+				)
+			mock_signup.assert_not_called()
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.start_signup("owner@acme.example", "Acme", "some-plan", billing=None)
+			mock_signup.assert_not_called()
+
 	def test_coded_duplicate_resumes(self):
 		"""The headline. A coded duplicate reaches the resume with no prose read
 		and no email compared — the retry a declined card needs."""
 		with self._signup_raises(self._duplicate_coded()), self._resume_ok() as resume:
-			out = onboarding.start_signup("Resume-Me@example.com ", "Co", "some-plan")
+			out = onboarding.start_signup("Resume-Me@example.com ", "Co", "some-plan", billing=_BILLING)
 		self.assertEqual(resume.call_count, 1)
 		self.assertEqual(resume.call_args.args[0], "some-plan")
 		self.assertIsNone(resume.call_args.kwargs.get("provider"))
@@ -961,7 +985,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 		self.assertEqual(stored, self._SYNTHETIC_LOGIN)
 		self.assertNotEqual(stored, "resume-me@example.com")
 		with self._signup_raises(self._duplicate_coded()), self._resume_ok("order_R9") as resume:
-			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		resume.assert_called_once()
 		self.assertEqual(out["razorpay_order_id"], "order_R9")
 
@@ -971,7 +995,9 @@ class TestSignupResumeFallback(FrappeTestCase):
 		account those credentials belong to — whose identity the response then
 		reports."""
 		with self._signup_raises(self._duplicate_coded()), self._resume_ok("order_RX") as resume:
-			out = onboarding.start_signup("somebody-completely-else@example.com", "Co", "some-plan")
+			out = onboarding.start_signup(
+				"somebody-completely-else@example.com", "Co", "some-plan", billing=_BILLING
+			)
 		resume.assert_called_once()
 		self.assertEqual(out["email"], "owner@acme.example")
 
@@ -980,7 +1006,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 		Every admin ever deployed throws DuplicateEntryError here, which is why
 		the prose fallback could be deleted rather than widened."""
 		with self._signup_raises(self._duplicate_legacy()), self._resume_ok("order_R4") as resume:
-			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		resume.assert_called_once()
 		self.assertEqual(out["razorpay_order_id"], "order_R4")
 
@@ -996,7 +1022,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
 			self.assertRaises(frappe.ValidationError),
 		):
-			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		resume.assert_not_called()
 
 	def test_no_credentials_no_resume(self):
@@ -1008,7 +1034,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
 			self.assertRaises(frappe.ValidationError),
 		):
-			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		resume.assert_not_called()
 
 	def test_a_double_submit_reuses_one_idempotency_key(self):
@@ -1017,8 +1043,8 @@ class TestSignupResumeFallback(FrappeTestCase):
 		key. The key is persisted before the call, which is what covers the case
 		it exists for — the response that never comes back."""
 		with self._signup_raises(self._duplicate_coded()), self._resume_ok() as resume:
-			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
-			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		self.assertEqual(resume.call_count, 2)
 		first = resume.call_args_list[0].kwargs["idempotency_key"]
 		second = resume.call_args_list[1].kwargs["idempotency_key"]
@@ -1030,11 +1056,11 @@ class TestSignupResumeFallback(FrappeTestCase):
 		having one: admin would hand back the very intent the gateway refused,
 		and the customer could never escape it."""
 		with self._signup_raises(self._duplicate_coded()), self._resume_ok() as resume:
-			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 			first = resume.call_args.kwargs["idempotency_key"]
 			# The gateway refuses that intent; the wizard's status check records it.
 			onboarding_contract.update(code=onboarding_contract.PAYMENT_DECLINED)
-			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 			second = resume.call_args.kwargs["idempotency_key"]
 		self.assertNotEqual(first, second)
 
@@ -1096,7 +1122,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 			self._signup_raises(self._duplicate_coded()),
 			self._resume_ok("order_RM") as resume,
 		):
-			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		resume.assert_called_once()
 		self.assertEqual(out["razorpay_order_id"], "order_RM")
 		self.assertEqual(
@@ -1113,7 +1139,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
 			self.assertRaises(frappe.ValidationError),
 		):
-			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		resume.assert_not_called()
 
 	def test_failed_resume_surfaces_the_original_duplicate(self):
@@ -1127,7 +1153,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 			),
 			self.assertRaises(frappe.ValidationError) as ctx,
 		):
-			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		self.assertIn("already exists", str(ctx.exception))
 
 	def test_the_fresh_signup_response_carries_no_credentials(self):
@@ -1147,7 +1173,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 				"email": "owner@acme.example",
 			},
 		):
-			out = onboarding.start_signup("owner@acme.example", "Acme", "annual")
+			out = onboarding.start_signup("owner@acme.example", "Acme", "annual", billing=_BILLING)
 		for leaked in ("api_key", "api_secret", "customer_password", "agent_token"):
 			self.assertNotIn(leaked, out, f"{leaked} must not reach the browser")
 		self.assertEqual(out["razorpay_order_id"], "order_FRESH", "the checkout handles survive")
@@ -1170,7 +1196,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 				},
 			),
 		):
-			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		for leaked in ("api_key", "api_secret", "customer_password", "agent_token"):
 			self.assertNotIn(leaked, out)
 		self.assertEqual(out["razorpay_order_id"], "order_RESUMED")
@@ -1208,7 +1234,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 			patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume,
 			self.assertRaises(frappe.ValidationError) as ctx,
 		):
-			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		signup.assert_not_called()
 		resume.assert_not_called()
 		self.assertEqual(
@@ -1236,7 +1262,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 			self._signup_raises(self._duplicate_coded()),
 			self._resume_ok("order_AFTER") as resume,
 		):
-			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			out = onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		resume.assert_called_once()
 		self.assertEqual(out["razorpay_order_id"], "order_AFTER")
 
@@ -1254,7 +1280,7 @@ class TestSignupResumeFallback(FrappeTestCase):
 			),
 			self.assertRaises(frappe.ValidationError),
 		):
-			onboarding.start_signup("resume-me@example.com", "Co", "some-plan")
+			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 		self.assertEqual(frappe.local.response.get("error", {}).get("code"), "ACCOUNT_ALREADY_EXISTS")
 		self.assertEqual(frappe.local.response.get("error", {}).get("recovery"), "authenticate_or_reconnect")
 
@@ -1802,7 +1828,7 @@ class TestOnboardingFacadeEndpoints(FrappeTestCase):
 			),
 			self.assertRaises(frappe.ValidationError),
 		):
-			onboarding.start_signup("owner@acme.example", "Acme", "a-plan-admin-refuses")
+			onboarding.start_signup("owner@acme.example", "Acme", "a-plan-admin-refuses", billing=_BILLING)
 		self.assertNotIn("plan", onboarding_contract.load())
 		with patch("jarvis.onboarding.admin_client.resume_pending_signup") as resume:
 			out = onboarding.initiate_signup_payment()
