@@ -50,7 +50,7 @@
 			<!-- models (scrolls: the list can grow tall across several providers;
 			     the Effort/Persona rows and their side-flyouts stay OUTSIDE this
 			     scroll region so the flyouts anchor correctly and never clip) -->
-			<div class="mep-scroll">
+			<div class="mep-scroll" v-scroll-fade>
 				<template v-for="(g, gi) in modelsByProvider" :key="g.provider">
 					<div v-if="showProviders" class="mep-head">{{ g.provider }}</div>
 					<button
@@ -231,6 +231,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { agentName } from "@/branding";
 import { useDismissable } from "@/composables/useDismissable";
+import { vScrollFade } from "@/composables/useScrollFade";
 import { useShellStore } from "@/stores/shell";
 import CheckMark from "@/components/chat/CheckMark.vue";
 import PersonaOptions from "@/components/chat/PersonaOptions.vue";
