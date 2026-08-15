@@ -86,6 +86,29 @@ def record_budget_event(
 		pass
 
 
+def record_export_event(tool: str, fmt: str, rows: int, mode: str = "sync", outcome: str = "ok") -> None:
+	"""One line per server-side export ATTEMPT (export_query etc.): format, row
+	count, sync/background, and ``outcome`` (ok / no_data / denied / rejected).
+	Emitting on the fail-closed paths too is the point - the refused large exports
+	are exactly the signal that would justify raising the ceiling / building the
+	async path. Routes through the same INFO-pinned logger. Never raises."""
+	try:
+		_emit(
+			{
+				"kind": "export",
+				"ts": frappe.utils.now(),
+				"site": getattr(frappe.local, "site", None),
+				"tool": tool,
+				"format": fmt,
+				"rows": int(rows),
+				"mode": mode,
+				"outcome": outcome,
+			}
+		)
+	except Exception:
+		pass
+
+
 def emit_turn(conversation: str | None, run_id: str | None, duration_ms: int) -> None:
 	"""One line per completed turn; reads and clears the per-turn custom
 	flag. Never raises."""
