@@ -226,6 +226,29 @@ describe("operator-issued reconnect code: direct redeem vs emailed request", () 
 		expect(api.checkAccountReconnect).not.toHaveBeenCalled();
 	});
 
+	it("a lapsed (renew_payment) landing hands off to the billing page, not Connect", async () => {
+		// The v1 fix for the shipped-gate strand: an Expired account's container was stopped on
+		// expiry, so the code re-authenticates but there is nothing to connect to. The bench must
+		// hand off to /jarvis/billing (the renew surface), never advance to Connect and strand.
+		const assign = vi.fn();
+		const realLocation = window.location;
+		Object.defineProperty(window, "location", {
+			configurable: true,
+			value: { ...realLocation, assign },
+		});
+		api.redeemReconnectCode.mockResolvedValue({ status: "renew_payment" });
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "reconnect";
+		wrapper.vm.state.reconnectDirect = true;
+		wrapper.vm.state.reconnectCode = "ABCD2345";
+		wrapper.vm.state.reconnectEmail = "known@example.com";
+		await wrapper.vm.submitReconnectCode();
+		expect(assign).toHaveBeenCalledWith("/jarvis/billing");
+		expect(wrapper.vm.state.step).not.toBe("connect");
+		Object.defineProperty(window, "location", { configurable: true, value: realLocation });
+	});
+
 	it("request-mode submit polls the started request, never the direct redeem", async () => {
 		api.checkAccountReconnect.mockResolvedValue({ status: "connected" });
 		const wrapper = mountView();

@@ -3400,6 +3400,17 @@ async function submitReconnectCode() {
 			if (state.step === "reconnect") state.step = "details";
 			return;
 		}
+		if (d && d.status === "renew_payment") {
+			// Recovered a LAPSED account (Expired sub): its container was stopped on expiry, so
+			// there is nothing to ride sync_connection to AND no unfinished checkout to resume. The
+			// code re-authenticated this bench onto the existing account; hand off to the billing
+			// page, which owns the renew flow (pick a plan -> renew() reactivates the EXISTING
+			// subscription + restarts the container -> the bounded recovery poll). A hard nav, like
+			// ACTIONS.BILLING: AppShell's gate re-renders the poster over an in-SPA route.
+			state.payBusy = false;
+			window.location.assign("/jarvis/billing");
+			return;
+		}
 		// Direct mode has no confirmation page (the code came from support) and its
 		// invalid covers a mistyped code OR the wrong registered email, so point the
 		// customer at both — never at a screen they never saw.
