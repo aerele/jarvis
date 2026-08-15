@@ -130,19 +130,18 @@ function setTheme(t) {
 		.then(({ setUserTheme }) => setUserTheme(t))
 		.catch(() => {});
 }
-// Cycle light → dark → system → light so "follow system" stays reachable
-// (the Appearance pane that offered it was removed). A step that would not
-// change the EFFECTIVE appearance is skipped: with a dark OS, dark → system
-// renders identically, so that click would look dead and reaching light would
-// take two clicks. Skipping keeps the invariant that every click visibly
-// flips the theme. Exported pure so theme.test.js can pin the invariant.
-const _THEME_CYCLE = { light: "dark", dark: "system", system: "light" };
+// The toggle is a strict two-state flip of the EFFECTIVE appearance. It used
+// to cycle light → dark → system, but with a dark OS the dark → system step
+// rendered identically, so that click looked dead and reaching light took two
+// clicks. "system" also was not truly kept reachable by the cycle (the skip
+// that fixed the dead click made it unreachable on a dark OS anyway, and no
+// other UI offers it since the Appearance pane was removed), so the cycle was
+// dropped rather than half-kept: "system" remains the default for users who
+// never touch the toggle, and a deliberate three-way choice belongs in a
+// Settings picker if it ever comes back. Exported pure so theme.test.js can
+// pin the every-click-flips invariant.
 export function nextTheme(current, prefersDark) {
-	let next = _THEME_CYCLE[current] || "dark";
-	if (isDark(next, prefersDark) === isDark(current, prefersDark)) {
-		next = _THEME_CYCLE[next];
-	}
-	return next;
+	return isDark(current, prefersDark) ? "light" : "dark";
 }
 function toggleTheme() {
 	setTheme(nextTheme(theme.value, prefersDark.value));

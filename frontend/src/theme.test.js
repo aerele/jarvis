@@ -25,14 +25,12 @@ test("nextTheme: every click flips the effective appearance", () => {
 		}
 	}
 });
-test("nextTheme: skips the no-op step, keeps system reachable", () => {
-	// dark OS: dark -> system would render identically, so it skips to light
+test("nextTheme: strict two-state flip of the effective appearance", () => {
 	assert.equal(nextTheme("dark", true), "light");
 	assert.equal(nextTheme("light", true), "dark");
+	// "system" leaves via whichever side it currently renders as
 	assert.equal(nextTheme("system", true), "light");
-	// light OS: dark -> system is a visible change (system renders light)
-	assert.equal(nextTheme("dark", false), "system");
+	assert.equal(nextTheme("dark", false), "light");
 	assert.equal(nextTheme("light", false), "dark");
-	// light OS: system -> light would render identically, so it skips to dark
 	assert.equal(nextTheme("system", false), "dark");
 });
