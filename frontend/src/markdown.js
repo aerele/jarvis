@@ -9,6 +9,24 @@ function esc(s) {
 	);
 }
 
+// A site-relative Desk path the agent cites after creating/locating a record,
+// e.g. "/app/dashboard-view/Customer-Item Manufacturing Priority". Worth a
+// clickable link either way it shows up: alone inside a code span (the agent's
+// usual way of citing one) or as bare text. Docnames routinely contain spaces,
+// so the href percent-encodes them while the visible text stays exactly what
+// the agent wrote.
+const APP_PATH_RE = /^\/app\/\S[^\n]*$/;
+
+function appPathHref(path) {
+	return path.replace(/ /g, "%20");
+}
+
+function appPathLink(path) {
+	return `<a href="${esc(
+		appPathHref(path)
+	)}" target="_blank" rel="noopener" class="jv-md-link">${esc(path)}</a>`;
+}
+
 function inline(s) {
 	// Stash inline code spans behind a NUL sentinel FIRST, so none of the transforms
 	// below touch content meant to render verbatim: the <br> re-permit, and also
@@ -16,12 +34,32 @@ function inline(s) {
 	// `a*b*c` rendered a stray <em>). Restored last, HTML-escaped. NUL never occurs in
 	// agent/user text, so it can't collide with real content.
 	const codes = [];
+	// Bare (non-code) "/app/..." paths get the same sentinel treatment, so bold/em/
+	// link transforms below can't mangle a slash-heavy path. Only triggers after
+	// start-of-string/whitespace/an opening bracket or quote, so a path segment
+	// inside a full external URL ("https://x.com/app/foo") is never mistaken for a
+	// site-relative one. Bare text has no delimiter marking where a (possibly
+	// space-containing) path ends, so it stops at the first whitespace and trims
+	// trailing sentence punctuation; a docname with embedded spaces still comes
+	// through correctly when the agent wraps it in backticks, as in the bug's own
+	// evidence.
+	const appLinks = [];
 	let t = String(s)
 		// Strip NUL first so attacker-supplied input can't collide with the sentinel below.
 		.replace(/\u0000/g, "")
 		.replace(/`([^`]+)`/g, (_m, c) => {
 			codes.push(c);
 			return `\u0000C${codes.length - 1}\u0000`;
+		})
+		.replace(/(^|[\s([{"'])(\/app\/[^\s<>"')\u0000]+)/g, (_m, pre, rawPath) => {
+			let path = rawPath;
+			let trail = "";
+			while (path.length > "/app/".length && /[.,;:!?)\]}'"]/.test(path[path.length - 1])) {
+				trail = path[path.length - 1] + trail;
+				path = path.slice(0, -1);
+			}
+			appLinks.push(path);
+			return pre + `\u0000A${appLinks.length - 1}\u0000` + trail;
 		});
 	t = esc(t);
 	// esc() escaped ALL html (XSS-safe for LLM output). Re-permit ONLY a bare,
@@ -37,12 +75,22 @@ function inline(s) {
 		/\[([^\]]+)\]\((https?:[^)]+)\)/g,
 		'<a href="$2" target="_blank" rel="noopener" class="jv-md-link">$1</a>'
 	);
+	// Restore bare app-path links.
+	t = t.replace(/\u0000A(\d+)\u0000/g, (_m, i) => appPathLink(appLinks[Number(i)]));
 	// Restore code spans, escaping their raw content so it renders verbatim (a <br>,
-	// **bold**, etc. inside backticks shows as literal text, not markup).
-	t = t.replace(
-		/\u0000C(\d+)\u0000/g,
-		(_m, i) => `<code class="jv-md-code">${esc(codes[Number(i)])}</code>`
-	);
+	// **bold**, etc. inside backticks shows as literal text, not markup). A code span
+	// whose ENTIRE content is a site-relative "/app/..." path becomes a link instead -
+	// that's the agent's usual way of citing where it put something, and a plain grey
+	// code box reads as inert text, which is exactly the bug (the user missed a link
+	// and re-asked for the dashboard). Anything else inside backticks stays a literal
+	// code span; arbitrary code is never auto-linked.
+	t = t.replace(/\u0000C(\d+)\u0000/g, (_m, i) => {
+		const raw = codes[Number(i)];
+		const trimmed = raw.trim();
+		return APP_PATH_RE.test(trimmed)
+			? appPathLink(trimmed)
+			: `<code class="jv-md-code">${esc(raw)}</code>`;
+	});
 	return t;
 }
 
