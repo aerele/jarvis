@@ -574,17 +574,13 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
    only to a markdown body. The body is v-html, so its children carry no scope
    id → :deep() is mandatory (a plain scoped selector would match nothing).
    Narrow-window resilience: min-width:0 lets the flex child shrink; wide
-   content (tables, code) scrolls INSIDE its own box. */
+   content (code) scrolls INSIDE its own <pre> box, tables INSIDE their
+   .jv-md-tablewrap (see below — the <table> itself stays display:table so
+   its column layout keeps working; only the wrapper scrolls). */
 .jv-md-body.jv-md {
 	min-width: 0;
 	max-width: 100%;
 	overflow-wrap: anywhere;
-}
-.jv-md-body.jv-md :deep(table) {
-	display: block;
-	max-width: 100%;
-	overflow-x: auto;
-	border-collapse: collapse;
 }
 .jv-md-body.jv-md :deep(pre) {
 	max-width: 100%;
@@ -749,10 +745,25 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 	background: var(--cta-bg);
 	border-radius: 3px;
 }
+/* Scroll container: `.jv-md-table` itself stays a normal `display: table` box
+   (default) so its own auto column-layout algorithm runs and stretches to
+   fill `width: 100%` when the content is narrow. `display: block` on the
+   <table> element used to be set here instead, which breaks that algorithm —
+   the CSS anonymous-table fixup wraps the (still table-internal) thead/tbody
+   in an inner anonymous table box that ignores the outer element's width and
+   shrink-wraps to content: wide content still scrolled fine (the outer box
+   itself carried overflow-x:auto), but content narrower than the message
+   never stretched to use the available width, so columns read as cramped
+   with dead space beside them. overflow-x here (not on the table) scrolls a
+   too-wide table horizontally
+   inside the bubble/row instead of blowing out its width; overflow-y stays
+   hidden so the rounded corners survive the scroll. */
 .jv-md-body.jv-md :deep(.jv-md-tablewrap) {
+	max-width: 100%;
 	border: 1px solid var(--border);
 	border-radius: 10px;
-	overflow: hidden;
+	overflow-x: auto;
+	overflow-y: hidden;
 	margin: 4px 0 10px;
 }
 .jv-md-body.jv-md :deep(.jv-md-table) {
@@ -760,15 +771,17 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 	border-collapse: collapse;
 	font-size: 12.5px;
 }
+.jv-md-body.jv-md :deep(.jv-md-table th),
+.jv-md-body.jv-md :deep(.jv-md-table td) {
+	padding: 9px 13px;
+}
 .jv-md-body.jv-md :deep(.jv-md-table th) {
-	padding: 8px 13px;
 	font-weight: 550;
 	color: var(--text-3);
 	background: var(--surface-1);
 	border-bottom: 1px solid var(--border);
 }
 .jv-md-body.jv-md :deep(.jv-md-table td) {
-	padding: 9px 13px;
 	border-bottom: 1px solid var(--border);
 	color: var(--text);
 	font-variant-numeric: tabular-nums;
@@ -814,7 +827,11 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 }
 /* display:block is load-bearing, not cosmetic: overflow does not scroll a
    display:table box, so without it a wide email table blows out the row
-   instead of scrolling inside it. Same reason the .jv-md twin carries it. */
+   instead of scrolling inside it. Unlike the .jv-md markdown table, raw
+   email HTML arrives with no wrapper div to scroll instead — this <table>
+   IS its own scroll container, so it keeps display:block here even though
+   the .jv-md twin no longer does (that one scrolls via .jv-md-tablewrap and
+   needs display:table to keep its column-layout algorithm intact). */
 .jv-md-body.jv-html :deep(table) {
 	display: block;
 	max-width: 100%;
