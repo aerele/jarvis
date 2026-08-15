@@ -5,11 +5,21 @@ This is the write-side twin of ``export_excel`` for prose/tabular *documents*.
 ``download_pdf`` only prints one existing record through a Print Format; a
 report the agent composed from many queries has no record to print, so without
 this the agent hand-builds the file with ``exec``/``browser`` and it never
-reaches the user. Here we render the content with Frappe's own engines
-(``md_to_html`` + ``get_pdf``) and save a private File the chat renders as a
-download card.
+reaches the user.
 
-Security: ``content`` is agent-composed, which means it is effectively
+Two rendering paths share this one entry point:
+
+  * The PLAIN path (the original, in-prod behaviour) — a runaway-guarded
+    Markdown/HTML → ``get_pdf`` render with a minimal built-in stylesheet. It is
+    taken whenever NO rich kwarg is truthy, and its behaviour is byte-preserved
+    (same sanitizer, same shell, same ``save_file``) so every legacy call is
+    unaffected. See ``_render_plain`` and the sanitizer note below.
+  * The RICH path (Slice 1) — a branded, class-styled document rendered through
+    the hard-timed direct-wkhtmltopdf pipeline (``_export/document``). It is
+    opt-in: passing any truthy rich kwarg (``theme``/``letterhead``/``header``/
+    ``footer``/``watermark``/``charts``) switches to it. See ``_render_rich``.
+
+Security (PLAIN path): ``content`` is agent-composed, i.e. effectively
 LLM-controlled text — it must never reach the HTML unsanitized. Two distinct
 threats, both closed at one choke point:
 
@@ -19,10 +29,8 @@ threats, both closed at one choke point:
     ``<img src>`` / ``<link href>`` / SVG ``<image href>`` it finds at render
     time, server-side. An agent-composed ``<img src="http://169.254.169.254/…">``
     (cloud metadata) or ``file:///etc/passwd`` would make the PDF renderer
-    issue that request. This tool does not support embedded
-    images/charts (deliberately out of scope), so every fetch-capable tag is
-    stripped outright rather than merely attribute-filtered — no feature is
-    lost by removing a tag nothing here is meant to use.
+    issue that request. The plain path supports no embedded images, so every
+    fetch-capable tag is stripped outright rather than merely attribute-filtered.
 
 Two layers, mirroring the pattern ``frappe.utils.html_utils`` already uses for
 ``<script>``/``<style>`` (``clean_script_and_style``, a BeautifulSoup decompose
@@ -43,13 +51,23 @@ pass ahead of ``bleach.clean``):
 
 Applied identically to BOTH the Markdown-rendered branch and the
 ``content_is_html=True`` raw-HTML branch — the flag changes how ``content``
-becomes HTML, never whether the result gets sanitized.
+becomes HTML, never whether the result gets sanitized. The rich path uses its
+own, tighter ``sanitize_rich`` (a direct ``nh3.clean``); see that module.
 """
+
+import re
+from collections.abc import Mapping
 
 import frappe
 from frappe.utils.html_utils import sanitize_html
 
+from jarvis import telemetry
 from jarvis.exceptions import InvalidArgumentError, NoDataError
+from jarvis.tools._export import save_export_file
+from jarvis.tools._export.document.furniture import render_pdf
+from jarvis.tools._export.document.graphics import css_bar
+from jarvis.tools._export.document.sanitizer import sanitize_rich
+from jarvis.tools._export.document.theme import component_css
 
 _FORMATS = {
 	"pdf": ("pdf", "application/pdf"),
@@ -69,6 +87,250 @@ _UNSAFE_TAGS = {"img", "image", "svg", "link", "meta", "style", "script"}
 
 # A runaway model must not be able to hand wkhtmltopdf an unbounded document.
 _MAX_CONTENT_CHARS = 200_000
+
+# A document with dozens of charts is either a bug or an attempt to blow the
+# render past its wall-clock budget; cap it loudly rather than let the render
+# time out. CSS bars are cheap, so this ceiling is generous.
+_MAX_CHARTS = 20
+
+# Hard wall-clock bound handed to the rich renderer's subprocess watchdog. Kept
+# under the plugin's 30s call_tool abort so the bench kills a runaway render
+# before the client gives up (a number, not "<30s").
+_RENDER_TIMEOUT_S = 25
+
+# {{chart:N}} placeholder token the agent drops into ``content`` where a chart
+# should appear; the tool splices its own generated HTML in at that spot AFTER
+# sanitize (so the tool-controlled markup is trusted). This is the reusable
+# splice mechanism Slice 2 extends for images/QR/logos.
+_CHART_TOKEN_RE = re.compile(r"\{\{chart:(\d+)\}\}")
+
+
+def export_document(
+	content: str,
+	format: str = "pdf",
+	title: str | None = None,
+	content_is_html: bool = False,
+	*,
+	theme: bool = False,
+	letterhead: str | bool | None = None,
+	header: str | None = None,
+	footer: str | None = None,
+	watermark: str | None = None,
+	page_size: str = "A4",
+	orientation: str = "portrait",
+	margins_mm: int = 15,
+	page_numbers: bool = True,
+	charts: list | None = None,
+) -> dict:
+	"""Render ``content`` and return ``{file_url, filename, title, mime_type,
+	size_bytes, name}`` for a private downloadable File (the rich path also adds
+	``notes``).
+
+	``content`` is the composed document — Markdown by default (tables, headings,
+	lists all render), or raw HTML when ``content_is_html`` is set. ``format`` is
+	``"pdf"`` (default), ``"html"``, or ``"png"`` (a single image of the rendered
+	pages, stacked). ``title`` names the file + document.
+
+	DUAL PATH. With no truthy rich kwarg this is the original plain render —
+	sanitized (see the module docstring), image-free by design. Passing any truthy
+	rich kwarg switches to the branded rich path:
+
+	  * ``theme`` — apply the branded component stylesheet.
+	  * ``letterhead`` — a ``Letter Head`` name (str) folded in as trusted config,
+	    or ``True`` to opt into the rich path with no named letterhead.
+	  * ``header`` / ``footer`` / ``watermark`` — page furniture (PDF only).
+	  * ``page_size`` / ``orientation`` / ``margins_mm`` / ``page_numbers`` — page
+	    geometry (consumed by the rich path; they do NOT by themselves trigger it).
+	  * ``charts`` — a list of CSS-bar specs (``{"rows": [...]}``); reference each
+	    with a ``{{chart:N}}`` token in ``content`` and it is spliced in after
+	    sanitize. A token with no spec (or a spec with no token) is reported in
+	    ``notes`` rather than crashing.
+
+	Falsy rich kwargs (``header=""`` / ``charts=[]`` / ``theme=False`` /
+	``letterhead=None``) do NOT flip to the rich path — empty is not present.
+
+	SLICE-1 SCOPE (this release): rich means branding via **letterhead + CSS
+	components + CSS bar charts** only. No embedded images — no matplotlib/image
+	charts, no QR, no base64 logos (those are Slice 2). ``fmt_amount``/``fmt_pct``
+	from ``_export.document.graphics`` return small HTML fragments meant for DIRECT
+	embedding into ``content`` (e.g. a table cell); do NOT pass their output
+	through ``kpi_tile``/``css_bar``, whose text escaping would double-escape the
+	fragment's span.
+
+	OUT OF SCOPE — HARD WALLS (fail loud / degrade, never silently pretend): tagged
+	PDF / PDF-UA accessibility, PDF encryption + digital signatures, prepress CMYK
+	/ bleed, full right-to-left text shaping, row-level keep-together, widow/orphan
+	control, automatic hyphenation, and interactive AcroForm / embedded JavaScript.
+	Do not promise any of these to the user.
+	"""
+	fmt = (format or "pdf").lower()
+	try:
+		_guard_content(content)
+		if fmt not in _FORMATS:
+			raise InvalidArgumentError(f"format must be one of {sorted(_FORMATS)}")
+		if _rich_requested(theme, letterhead, header, footer, watermark, charts):
+			env = _render_rich(
+				content,
+				fmt,
+				title,
+				content_is_html,
+				letterhead=letterhead,
+				header=header,
+				footer=footer,
+				watermark=watermark,
+				page_size=page_size,
+				orientation=orientation,
+				margins_mm=margins_mm,
+				page_numbers=page_numbers,
+				charts=charts,
+			)
+			outcome = "degraded" if env["notes"] else "ok"
+		else:
+			env = _render_plain(content, fmt, title, content_is_html)
+			outcome = "ok"
+	except (NoDataError, InvalidArgumentError) as exc:
+		# Emit on the fail-closed exits too (export_document previously emitted no
+		# telemetry at all — this closes that gap on both success and failure).
+		telemetry.record_export_event(
+			tool="export_document", fmt=fmt, rows=0, mode="sync", outcome=_outcome_for(exc)
+		)
+		raise
+	telemetry.record_export_event(tool="export_document", fmt=fmt, rows=0, mode="sync", outcome=outcome)
+	return env
+
+
+def _guard_content(content: str) -> None:
+	"""Shared front-gate for both paths: non-empty string within the char cap."""
+	if not isinstance(content, str) or not content.strip():
+		raise NoDataError("No content to export.")
+	if len(content) > _MAX_CONTENT_CHARS:
+		raise InvalidArgumentError(f"content exceeds {_MAX_CONTENT_CHARS} characters")
+
+
+def _rich_requested(theme, letterhead, header, footer, watermark, charts) -> bool:
+	"""Branch on TRUTHY (non-empty) rich kwargs. Geometry kwargs (page_size /
+	orientation / margins_mm / page_numbers) have non-falsy defaults and are NOT
+	activators — only these intent kwargs flip the path, and only when truthy, so
+	``header=""`` / ``charts=[]`` / ``theme=False`` / ``letterhead=None`` stay
+	plain."""
+	return bool(theme or letterhead or header or footer or watermark or charts)
+
+
+def _render_rich(
+	content: str,
+	fmt: str,
+	title: str | None,
+	content_is_html: bool,
+	*,
+	letterhead,
+	header,
+	footer,
+	watermark,
+	page_size,
+	orientation,
+	margins_mm,
+	page_numbers,
+	charts,
+) -> dict:
+	"""The branded rich pipeline: md→HTML → sanitize → post-sanitize chart splice
+	→ emptiness guard → theme-wrap → render/compose → save. Returns the download
+	envelope plus a ``notes`` list carrying every degrade."""
+	charts = charts or []
+	if len(charts) > _MAX_CHARTS:
+		raise InvalidArgumentError(f"charts exceeds the {_MAX_CHARTS}-chart limit")
+	notes: list[str] = []
+
+	# 1. markdown → HTML BEFORE sanitize (else ![](…)/autolinks regenerate <img>/
+	#    links post-strip); raw HTML is passed straight to the sanitizer.
+	body = content if content_is_html else frappe.utils.md_to_html(content)
+	# 2. sanitize the full agent body.
+	body = sanitize_rich(body)
+	# 3. splice tool-generated chart HTML into {{chart:N}} tokens (AFTER sanitize —
+	#    this markup is tool-controlled, so it is trusted).
+	body = _splice_charts(body, charts, notes)
+	# 4. emptiness guard: never emit a blank PDF for content that sanitized away.
+	if not body.strip():
+		raise NoDataError("No content to export after sanitization.")
+	# 5. theme is tool-added AFTER sanitize (agent content never carries styling).
+	doc_body = f"<style>{component_css()}</style>{body}"
+
+	if fmt == "html":
+		# No wkhtmltopdf on the HTML path, so page furniture can't be applied —
+		# surface that rather than silently dropping it. page_numbers is excluded
+		# from this check: its default True would fire on every HTML render, and
+		# page numbers are auto-furniture, not caller content.
+		if header or footer or watermark or letterhead:
+			notes.append("furniture (header/footer/watermark) applies only to PDF output")
+		payload = doc_body.encode("utf-8")
+	else:
+		pdf_bytes = render_pdf(
+			doc_body,
+			page_size=page_size,
+			orientation=orientation,
+			margins_mm=margins_mm,
+			header_html=header,
+			footer_html=footer,
+			watermark=watermark,
+			letterhead=(letterhead if isinstance(letterhead, str) else None),
+			page_numbers=page_numbers,
+			timeout=_RENDER_TIMEOUT_S,
+		)
+		payload = pdf_bytes if fmt == "pdf" else _pdf_to_png(pdf_bytes)
+
+	if not payload:
+		raise InvalidArgumentError(f"{fmt} rendering produced no content.")
+	ext, mime = _FORMATS[fmt]
+	env = save_export_file(f"document.{ext}", payload, title or "Document", mime)
+	env["notes"] = notes
+	return env
+
+
+def _splice_charts(body: str, charts: list, notes: list[str]) -> str:
+	"""Replace each ``{{chart:N}}`` token with ``css_bar`` output for ``charts[N]``.
+
+	Runs AFTER ``sanitize_rich`` so the tool-generated bar markup (which carries a
+	single clamped ``width:N%`` inline style) is trusted and not stripped. A spec
+	whose token is absent, or a token with no matching spec, is reported in
+	``notes`` — never a crash. Orphan tokens are removed so no literal ``{{chart:N}}``
+	junk survives into the document."""
+	for i, spec in enumerate(charts):
+		token = f"{{{{chart:{i}}}}}"
+		if token not in body:
+			notes.append(f"chart {i} was provided but its {token} placeholder was not found in the content")
+			continue
+		rows = spec.get("rows", []) if isinstance(spec, Mapping) else []
+		body = body.replace(token, css_bar(rows))
+	leftovers = sorted({int(m.group(1)) for m in _CHART_TOKEN_RE.finditer(body)})
+	for idx in leftovers:
+		notes.append(f"placeholder {{{{chart:{idx}}}}} has no matching chart spec")
+	if leftovers:
+		body = _CHART_TOKEN_RE.sub("", body)
+	return body
+
+
+def _outcome_for(exc: Exception) -> str:
+	"""Map a fail-closed exception to its telemetry outcome (NoDataError first, as
+	it subclasses InvalidArgumentError)."""
+	if isinstance(exc, NoDataError):
+		return "no_data"
+	return "rejected"
+
+
+# Minimal, self-contained stylesheet so tables/headings read cleanly in every
+# format (the HTML file opens standalone; the PDF/PNG render from the same CSS).
+# PLAIN PATH ONLY — the rich path uses the branded component stylesheet instead.
+_CSS = """
+body{font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:12px;color:#1a1a1a;line-height:1.5;margin:28px;}
+h1,h2,h3,h4{color:#111;margin:1.1em 0 .4em;line-height:1.25;}
+h1{font-size:20px;} h2{font-size:16px;} h3{font-size:14px;}
+table{border-collapse:collapse;width:100%;margin:.7em 0;}
+th,td{border:1px solid #ccc;padding:5px 8px;text-align:left;font-size:11px;
+  vertical-align:top;}
+th{background:#f4f4f5;font-weight:600;}
+code{background:#f4f4f5;padding:0 3px;border-radius:3px;font-size:.92em;}
+ul,ol{margin:.4em 0 .4em 1.2em;} p{margin:.5em 0;}
+"""
 
 
 def _strip_unsafe_tags(html: str) -> str:
@@ -94,50 +356,11 @@ def _strip_unsafe_tags(html: str) -> str:
 	return frappe.as_unicode(soup.body.decode_contents()) if soup.body else frappe.as_unicode(soup)
 
 
-# Minimal, self-contained stylesheet so tables/headings read cleanly in every
-# format (the HTML file opens standalone; the PDF/PNG render from the same CSS).
-_CSS = """
-body{font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  font-size:12px;color:#1a1a1a;line-height:1.5;margin:28px;}
-h1,h2,h3,h4{color:#111;margin:1.1em 0 .4em;line-height:1.25;}
-h1{font-size:20px;} h2{font-size:16px;} h3{font-size:14px;}
-table{border-collapse:collapse;width:100%;margin:.7em 0;}
-th,td{border:1px solid #ccc;padding:5px 8px;text-align:left;font-size:11px;
-  vertical-align:top;}
-th{background:#f4f4f5;font-weight:600;}
-code{background:#f4f4f5;padding:0 3px;border-radius:3px;font-size:.92em;}
-ul,ol{margin:.4em 0 .4em 1.2em;} p{margin:.5em 0;}
-"""
-
-
-def export_document(
-	content: str,
-	format: str = "pdf",
-	title: str | None = None,
-	content_is_html: bool = False,
-) -> dict:
-	"""Render ``content`` and return ``{file_url, filename, title, mime_type,
-	size_bytes, name}`` for a private downloadable File.
-
-	``content`` is the composed document — Markdown by default (tables,
-	headings, lists all render), or raw HTML when ``content_is_html`` is set.
-	``format`` is ``"pdf"`` (default), ``"html"``, or ``"png"`` (a single image
-	of the rendered pages, stacked). ``title`` names the file + document.
-
-	Both content modes are sanitized identically before rendering (see the
-	module docstring): ``content_is_html`` changes how ``content`` becomes
-	HTML, never whether the result is sanitized. Images/embedded charts are
-	not supported by design, not omission — do not ask for a workaround via
-	``content_is_html``.
-	"""
-	if not isinstance(content, str) or not content.strip():
-		raise NoDataError("No content to export.")
-	if len(content) > _MAX_CONTENT_CHARS:
-		raise InvalidArgumentError(f"content exceeds {_MAX_CONTENT_CHARS} characters")
-	fmt = (format or "pdf").lower()
-	if fmt not in _FORMATS:
-		raise InvalidArgumentError(f"format must be one of {sorted(_FORMATS)}")
-
+def _render_plain(content: str, fmt: str, title: str | None, content_is_html: bool) -> dict:
+	"""The original plain render — byte-preserved so every legacy call is
+	unchanged: same two-layer sanitizer, same self-contained shell, same
+	``get_pdf``/``_pdf_to_png`` engines, same ``save_file`` (its own filename
+	sanitizer + return shape, without a ``notes`` key)."""
 	body = content if content_is_html else frappe.utils.md_to_html(content)
 	body = _strip_unsafe_tags(body)
 	body = sanitize_html(body)
