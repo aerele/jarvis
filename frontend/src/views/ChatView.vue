@@ -1469,6 +1469,42 @@
 										Save as macro
 									</button>
 								</div>
+								<!-- redirect card: dashboard builds no longer run inline in main
+								     chat (jarvis#884) - the agent restates the request and points
+								     here with ```jarvis-goto. Stays clickable in history so an
+								     old transcript still has a way through, even though the
+								     redirect itself only auto-fires once, live (see gotoDashboards
+								     / the run:end handler). -->
+								<div v-if="gotoOf(m)" class="jv-macrocard">
+									<div class="jv-macrocard-ic">
+										<svg
+											width="16"
+											height="16"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.7"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M18 20V10M12 20V4M6 20v-6" />
+										</svg>
+									</div>
+									<div class="jv-macrocard-txt">
+										<span class="jv-macrocard-title"
+											>Continue in Dashboards</span
+										>
+										<span class="jv-macrocard-sub">{{
+											gotoOf(m).prompt
+										}}</span>
+									</div>
+									<button
+										class="jv-macrocard-btn"
+										@click="gotoDashboards(gotoOf(m).prompt)"
+									>
+										Open Dashboards
+									</button>
+								</div>
 								<!-- inline charts: ECharts rendered from the agent's jarvis-chart spec -->
 								<div
 									v-for="(spec, ci) in chartsOf(m)"
@@ -3940,6 +3976,7 @@ import {
 } from "@/utils/voiceAudioMirror";
 import { setMacroPrefill } from "@/composables/macroPrefill";
 import { takeChatPrefill } from "@/composables/chatPrefill";
+import { setDashboardPrefill } from "@/composables/dashboardPrefill";
 import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
@@ -3966,6 +4003,7 @@ import AskCard from "@/components/chat/AskCard.vue";
 import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.vue";
 import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
+import { parseGoto } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { shouldFollowBottom } from "@/lib/chatScroll";
@@ -5846,6 +5884,16 @@ function chartsOf(m) {
 
 function askOf(m) {
 	return parseAsk((m && m.content) || "");
+}
+function gotoOf(m) {
+	return parseGoto((m && m.content) || "");
+}
+// Shared by the card's button and the run:end auto-redirect below: stash the
+// restated request for the Dashboards builder to pick up on its own mount,
+// then navigate there.
+function gotoDashboards(prompt) {
+	setDashboardPrefill({ text: prompt, autoSend: true });
+	router.push("/dashboards");
 }
 // Canonicalised at the single _ACTION_RE parse point so every consumer (render
 // gate, build watcher, buildDraftModel, edit panel, apply) sees ONE shape. See
@@ -8688,6 +8736,23 @@ function onEvent(p) {
 				// (mutex-guarded, no-op when nothing's pending) catch that race.
 				setTimeout(processMermaid, 300);
 				setTimeout(processMermaid, 900);
+			}
+			// jarvis#884: a ```jarvis-goto block on the turn that just ENDED, live,
+			// in THIS mounted view, auto-redirects to the Dashboards builder exactly
+			// once. Gated the same way markAnswerLanded is above (never a stopped or
+			// errored row), plus a durable stamp so a later reload/revisit of the
+			// same transcript never re-fires it. Only the live socket terminal ever
+			// reaches this branch, so an old message opened again never gets here at
+			// all, but the stamp is the belt-and-braces the spec asks for.
+			if (m && !m.error && !m.stopped) {
+				const goto = gotoOf(m);
+				if (goto) {
+					const firedKey = "jarvis:goto-fired:" + m.name;
+					if (!localStorage.getItem(firedKey)) {
+						localStorage.setItem(firedKey, "1");
+						gotoDashboards(goto.prompt);
+					}
+				}
 			}
 			break;
 		}

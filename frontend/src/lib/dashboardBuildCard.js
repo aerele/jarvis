@@ -106,8 +106,10 @@ const DATA_TOOLS = new Set([
 // of these are confirmed to fire for a dashboard build (only the finished
 // message's `canvas` array is a verified "published" signal), so a name in
 // here only lights the Publishing tick EARLY — it is never required for the
-// card to reach the finished state.
-const WRITE_TOOLS = new Set(["canvas", "bash", "exec", "image"]);
+// card to reach the finished state. `save_dashboard` is the new builder-tool
+// path (jarvis#884): the agent no longer builds on the agent canvas, it
+// saves a Jarvis Dashboard row directly, so that tool is the write signal now.
+const WRITE_TOOLS = new Set(["canvas", "bash", "exec", "image", "save_dashboard"]);
 
 export const DASHBOARD_BUILD_PHASES = [
 	{ key: "understanding", label: "Understanding" },

@@ -120,6 +120,36 @@ test("a write-ish tool running or already seen -> Publishing", () => {
 	);
 });
 
+test("jarvis#884: save_dashboard also lights Publishing, with or without the jarvis__ registry prefix", () => {
+	assert.equal(
+		dashboardBuildPhase({
+			activeTools: [{ name: "save_dashboard", status: "running" }],
+			statusPhase: null,
+			waiting: false,
+		}),
+		"publishing"
+	);
+	assert.equal(
+		dashboardBuildPhase({
+			activeTools: [{ name: "jarvis__save_dashboard", status: "running" }],
+			statusPhase: null,
+			waiting: false,
+		}),
+		"publishing"
+	);
+	assert.equal(
+		dashboardBuildPhase({
+			activeTools: [
+				{ name: "query", status: "completed" },
+				{ name: "jarvis__save_dashboard", status: "completed" },
+			],
+			statusPhase: "analyzing",
+			waiting: false,
+		}),
+		"publishing"
+	);
+});
+
 test("joining a turn already in flight reports null, not a guess", () => {
 	// activeTools empty, not waiting either (this mount only just mounted and
 	// hasn't seen the run:start / tool:start that already happened elsewhere)

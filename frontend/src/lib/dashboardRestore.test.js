@@ -114,9 +114,16 @@ test("the page records WHICH message is on the canvas, under the same key", () =
 			onCanvas.indexOf("canvasMsg.value = message_id;"),
 		"the id is recorded for the html that was rendered"
 	);
-	// and dropped whenever the canvas stops being a chat artifact
+	// and dropped whenever the canvas stops being a chat artifact. loadEdit's
+	// own state-setting (jarvis#884) moved into applyEditDetail, which it calls
+	// from inside the discard confirm, so the same guarantee holds, just in a
+	// different function.
 	assert.match(fnBody(pageSrc, "function clearBuilder("), /canvasMsg\.value = "";/);
-	assert.match(fnBody(pageSrc, "async function loadEdit("), /canvasMsg\.value = "";/);
+	assert.match(fnBody(pageSrc, "function applyEditDetail("), /canvasMsg\.value = "";/);
+	assert.match(
+		fnBody(pageSrc, "async function loadEdit("),
+		/applyEditDetail\(d, \{ deepLink \}\);/
+	);
 });
 
 test("a restore never overwrites a live canvas, an ?edit target or a promotion", () => {
@@ -188,8 +195,10 @@ test("a remount restores WHAT WAS BEING EDITED, not just the pixels", () => {
 		pageSrc,
 		/if \(editSeed\.value\) loadEdit\(editSeed\.value, \{ deepLink: !!routeEdit \}\);/
 	);
-	// written by both paths that make this page "the editor of X"...
-	assert.match(fnBody(pageSrc, "async function loadEdit("), /editingSticky\.value = d\.name;/);
+	// written by both paths that make this page "the editor of X"... loadEdit's
+	// own copy moved into applyEditDetail (jarvis#884), which onDashboardSaved
+	// (the pane's own build) also calls directly, bypassing the confirm.
+	assert.match(fnBody(pageSrc, "function applyEditDetail("), /editingSticky\.value = d\.name;/);
 	assert.match(fnBody(pageSrc, "function onSaved("), /editingSticky\.value = detail\.name;/);
 	// ...and dropped by every path that stops editing it
 	assert.match(fnBody(pageSrc, "function clearBuilder("), /editingSticky\.value = "";/);
