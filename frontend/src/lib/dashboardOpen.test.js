@@ -781,8 +781,14 @@ test("a pending promotion holds the pane's restore off, exactly as ?edit= does",
 	const body = watcher.slice(0, watcher.indexOf("\n);"));
 	assert.doesNotMatch(body, /promotionPending\.value = true;/);
 	// ...and a mount that will NOT promote releases the setup-time hold, or the
-	// pane's restore stays blocked for the life of the page
-	assert.match(pageSrc, /promotionPending\.value = false;\n\t\tnormalMount\(\);/);
+	// pane's restore stays blocked for the life of the page. Since the
+	// jarvis-goto hand-off (#884), that branch then forks: a goto prefill
+	// starts a CLEAN builder (never the sticky editing restore), everything
+	// else restores as before - but the hold release always comes first.
+	assert.match(
+		pageSrc,
+		/promotionPending\.value = false;\n\t\tif \(gotoText\) \{[\s\S]*?clearBuilder\(\);\n\t\t\} else \{\n\t\t\tnormalMount\(\);\n\t\t\}/
+	);
 });
 
 test("?edit= wins over ?chat=, and says so", () => {
