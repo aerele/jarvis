@@ -153,3 +153,28 @@ test("a bare path immediately abutting a code span does not swallow the code-spa
 	);
 	assert.ok(html.includes('<code class="jv-md-code">y</code>'), "the code span restores intact");
 });
+
+test("an /app/ path used AS a markdown link's own text does not nest a second <a> inside it", () => {
+	// Regression: an agent citing "[/app/foo](https://docs...)" has the path sitting
+	// inside the link's own text. Auto-linking it there would nest <a> elements, and a
+	// browser resolves that by silently closing the OUTER anchor - the external link
+	// goes dead. The path must render as plain (escaped) text inside the one real <a>.
+	const html = renderMarkdown("[/app/dashboard-view/Foo](https://docs.example.com/help)");
+	assert.ok(
+		html.includes(
+			'<a href="https://docs.example.com/help" target="_blank" rel="noopener" class="jv-md-link">/app/dashboard-view/Foo</a>'
+		),
+		"exactly one anchor, wrapping the path as plain text"
+	);
+	assert.equal((html.match(/<a /g) || []).length, 1, "no nested second anchor");
+});
+
+test("an /app/ path inside BACKTICKS used as a markdown link's text also avoids a nested <a>", () => {
+	const html = renderMarkdown("[`/app/dashboard-view/Foo`](https://docs.example.com/help)");
+	assert.equal((html.match(/<a /g) || []).length, 1, "no nested second anchor");
+	assert.ok(html.includes('<a href="https://docs.example.com/help"'), "the outer link survives");
+	assert.ok(
+		html.includes('<code class="jv-md-code">/app/dashboard-view/Foo</code>'),
+		"the path still renders as code, just not as its own link, inside the outer anchor"
+	);
+});

@@ -42,7 +42,10 @@ function inline(s) {
 	// space-containing) path ends, so it stops at the first whitespace and trims
 	// trailing sentence punctuation; a docname with embedded spaces still comes
 	// through correctly when the agent wraps it in backticks, as in the bug's own
-	// evidence.
+	// evidence. The match also excludes ]/[/( so it can't run past the end of
+	// enclosing markdown link syntax ("[/app/foo](https://...)") and swallow the
+	// whole thing as one "path" — the restore pass below separately guards against
+	// nesting a second <a> inside a link built around that syntax.
 	const appLinks = [];
 	let t = String(s)
 		// Strip NUL first so attacker-supplied input can't collide with the sentinel below.
@@ -51,7 +54,7 @@ function inline(s) {
 			codes.push(c);
 			return `\u0000C${codes.length - 1}\u0000`;
 		})
-		.replace(/(^|[\s([{"'])(\/app\/[^\s<>"')\u0000]+)/g, (_m, pre, rawPath) => {
+		.replace(/(^|[\s([{"'])(\/app\/[^\s<>"')\]\[(\u0000]+)/g, (_m, pre, rawPath) => {
 			let path = rawPath;
 			let trail = "";
 			while (path.length > "/app/".length && /[.,;:!?)\]}'"]/.test(path[path.length - 1])) {
@@ -75,22 +78,47 @@ function inline(s) {
 		/\[([^\]]+)\]\((https?:[^)]+)\)/g,
 		'<a href="$2" target="_blank" rel="noopener" class="jv-md-link">$1</a>'
 	);
-	// Restore bare app-path links.
-	t = t.replace(/\u0000A(\d+)\u0000/g, (_m, i) => appPathLink(appLinks[Number(i)]));
-	// Restore code spans, escaping their raw content so it renders verbatim (a <br>,
-	// **bold**, etc. inside backticks shows as literal text, not markup). A code span
-	// whose ENTIRE content is a site-relative "/app/..." path becomes a link instead -
-	// that's the agent's usual way of citing where it put something, and a plain grey
-	// code box reads as inert text, which is exactly the bug (the user missed a link
-	// and re-asked for the dashboard). Anything else inside backticks stays a literal
-	// code span; arbitrary code is never auto-linked.
-	t = t.replace(/\u0000C(\d+)\u0000/g, (_m, i) => {
-		const raw = codes[Number(i)];
-		const trimmed = raw.trim();
-		return APP_PATH_RE.test(trimmed)
-			? appPathLink(trimmed)
-			: `<code class="jv-md-code">${esc(raw)}</code>`;
-	});
+	// Restore both sentinel kinds in ONE pass that tracks whether we're already
+	// inside an <a> the http(s) link transform above just built (e.g. an agent
+	// citing "[/app/foo](https://docs...)" or "[`/app/foo`](https://docs...)" -
+	// the /app/ path IS that link's own text). Wrapping it in a SECOND <a> there
+	// would nest anchors, which a browser resolves by silently closing the outer
+	// one - the external link goes dead and only the inner path stays clickable.
+	// So inside an anchor a sentinel restores to its inert form (plain text /
+	// <code>) same as it always did pre-linkification; only outside one does it
+	// become its own link. Mirrors the inAnchor walk ChatView's linkifyDocs()
+	// already uses for the same reason.
+	let inAnchor = 0;
+	t = t.replace(
+		/(<a\b[^>]*>)|(<\/a>)|(?:\u0000A(\d+)\u0000)|(?:\u0000C(\d+)\u0000)/g,
+		(_m, aOpen, aClose, appIdx, codeIdx) => {
+			if (aOpen) {
+				inAnchor++;
+				return aOpen;
+			}
+			if (aClose) {
+				inAnchor = Math.max(0, inAnchor - 1);
+				return aClose;
+			}
+			if (appIdx !== undefined) {
+				const path = appLinks[Number(appIdx)];
+				return inAnchor ? esc(path) : appPathLink(path);
+			}
+			// Restore code spans, escaping their raw content so it renders verbatim
+			// (a <br>, **bold**, etc. inside backticks shows as literal text, not
+			// markup). A code span whose ENTIRE content is a site-relative
+			// "/app/..." path becomes a link instead - that's the agent's usual way
+			// of citing where it put something, and a plain grey code box reads as
+			// inert text, which is exactly the bug (the user missed a link and
+			// re-asked for the dashboard). Anything else inside backticks stays a
+			// literal code span; arbitrary code is never auto-linked.
+			const raw = codes[Number(codeIdx)];
+			const trimmed = raw.trim();
+			return !inAnchor && APP_PATH_RE.test(trimmed)
+				? appPathLink(trimmed)
+				: `<code class="jv-md-code">${esc(raw)}</code>`;
+		}
+	);
 	return t;
 }
 
