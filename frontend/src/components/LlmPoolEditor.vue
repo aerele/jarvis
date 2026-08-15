@@ -170,7 +170,7 @@
 						<span class="jv-pool-badge">{{ i + 1 }}</span>
 						<ProviderLogo
 							:provider="row.provider"
-							:upstream="row.upstream"
+							:upstream="row.credentialType === 'subscription' ? row.upstream : ''"
 							:size="18"
 						/>
 						<span class="jv-flist-chip">{{ sourceChip(row) }}</span>
@@ -333,7 +333,9 @@
 								<span class="jv-pool-badge">{{ i + 1 }}</span>
 								<ProviderLogo
 									:provider="row.provider"
-									:upstream="row.upstream"
+									:upstream="
+										row.credentialType === 'subscription' ? row.upstream : ''
+									"
 									:size="18"
 								/>
 								<span class="jv-flist-chip">{{ sourceChip(row) }}</span>
