@@ -395,7 +395,7 @@ const expiresLabel = computed(() => {
 });
 // The one line that replaces the pair for a pool: how many models, how they
 // are routed, and whether the container has the current set. humaniseSyncStatus
-// is the same translator Billing and metering's Sync row uses, so the two cannot
+// is the same translator the Usage pane's Sync row uses, so the two cannot
 // describe one last_sync_status differently. Its text is a standalone label
 // there and a clause here, hence the case fold.
 const poolSummary = computed(() => {

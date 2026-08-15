@@ -20,7 +20,8 @@ export function deriveMode(models, preset) {
 	return hasSubscription || preset ? "proxy" : "direct";
 }
 // The one place that NAMES a tenant's LLM topology. Settings > General and
-// Settings > Billing and metering each used to name it themselves and disagreed:
+// Settings > Usage's pool-status section each used to name it themselves and
+// disagreed:
 // a 2-model api-key pool read "Direct" on General while Billing called the
 // identical state "Pool (direct failover)" (jarvis#561).
 //

@@ -474,7 +474,7 @@ Every pane in the Settings dialog owns its own header (there is no global dialog
   <div class="flex items-start justify-between">
     <div class="flex flex-col gap-1">
       <h2 class="flex items-center gap-2 text-lg font-semibold text-ink-gray-8">
-        Plan &amp; billing <Badge v-if="dirty" label="Unsaved" theme="orange" variant="subtle" />
+        Billing <Badge v-if="dirty" label="Unsaved" theme="orange" variant="subtle" />
       </h2>
       <p class="max-w-md text-p-sm text-ink-gray-6">One-line description of the pane.</p>
     </div>
