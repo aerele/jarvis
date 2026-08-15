@@ -1,6 +1,6 @@
 """``jarvis__save_dashboard`` — chat/builder build → saved Jarvis Dashboard (#884).
 
-The dashboards flow no longer rides the openclaw hosted-canvas mechanism (the
+The dashboards flow no longer rides the agent runtime's hosted-canvas mechanism (the
 gateway fetch that #880 had to defend against). The agent authors the complete
 self-contained dashboard HTML and delivers it HERE, in the same "Option A" wire
 ``save_agent_dashboard`` already proved for delegate runs: persist the agent's
