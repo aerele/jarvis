@@ -9,6 +9,7 @@ import { expect, test, vi } from "vitest";
 // resources chain does not resolve under vitest. Only searchLink is used here.
 vi.mock("@/api", () => ({ searchLink: vi.fn(async () => []) }));
 
+import { searchLink } from "@/api";
 import AskCard from "../../src/components/chat/AskCard.vue";
 import { parseAsk } from "../../src/lib/chatAsk.js";
 import { mountWithPalette } from "./fixtures.js";
@@ -120,6 +121,26 @@ test("busy=false lets an otherwise-ready ask actually dispatch", async () => {
 	expect(submit(w).attributes("disabled")).toBeUndefined();
 	await submit(w).trigger("click");
 	expect(findCard(w).emitted("submit")).toHaveLength(1);
+});
+
+test("answering closes an open link-search dropdown for good, not just the input", async () => {
+	// The dropdown's own buttons had no `answered` gate - only @blur closed it,
+	// timing-fragile against a click that lands before the blur does. Focus AND
+	// input both call searchLink (empty query, then "acm"), so mock persistently.
+	searchLink.mockResolvedValue([{ value: "ACME Corp", description: "Customer" }]);
+	const withLink = spec('[{"q":"Which record?","type":"link","doctype":"Customer"}]');
+	const w = mountWithPalette(AskCard, { spec: withLink });
+	const input = w.find("input.jv-ask-field");
+	await input.trigger("focus");
+	await input.setValue("acm");
+	await vi.waitFor(() => expect(w.findAll(".jv-ask-linkmenu button").length).toBeGreaterThan(0));
+	await w.findAll(".jv-ask-linkmenu button")[0].trigger("mousedown");
+	expect(w.find(".jv-ask-linkmenu").exists()).toBe(false);
+	expect(submit(w).attributes("disabled")).toBeUndefined();
+	await submit(w).trigger("click");
+	// re-focusing (or any other path) must not resurrect the dropdown once answered
+	await input.trigger("focus");
+	expect(w.find(".jv-ask-linkmenu").exists()).toBe(false);
 });
 
 test("clicking a picked option unpicks it (and disarms Submit)", async () => {

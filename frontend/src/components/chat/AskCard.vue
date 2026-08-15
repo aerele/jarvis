@@ -72,7 +72,7 @@
 					@keydown.enter.prevent
 				/>
 				<div
-					v-if="link[qi] && link[qi].open && (link[qi].items || []).length"
+					v-if="!answered && link[qi] && link[qi].open && (link[qi].items || []).length"
 					class="jv-ask-linkmenu"
 					v-scroll-fade
 				>
