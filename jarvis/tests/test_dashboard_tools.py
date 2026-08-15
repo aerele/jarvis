@@ -195,15 +195,43 @@ class TestCreateDashboardChartChildTablePermissions(FrappeTestCase):
 		).insert()
 
 	@classmethod
+	def _grant_dashboard_chart_create(cls):
+		"""Layer a Custom DocPerm onto the CORE "Dashboard Chart" doctype so
+		``cls.ROLE`` can create one - needed for the happy-path user to reach
+		``doc.insert()`` at all. ``setup_custom_perms`` first copies the
+		existing standard rows (System Manager/Dashboard Manager/Desk User)
+		into Custom DocPerm so this ADDS a rule rather than replacing them -
+		once any Custom DocPerm row exists for a doctype, Frappe's permission
+		engine uses only those, ignoring the standard permissions.json rows.
+		"""
+		from frappe.permissions import setup_custom_perms
+
+		setup_custom_perms("Dashboard Chart")
+		if not frappe.db.exists(
+			"Custom DocPerm", {"parent": "Dashboard Chart", "role": cls.ROLE, "permlevel": 0}
+		):
+			frappe.get_doc(
+				{
+					"doctype": "Custom DocPerm",
+					"parent": "Dashboard Chart",
+					"parenttype": "DocType",
+					"parentfield": "permissions",
+					"role": cls.ROLE,
+					"permlevel": 0,
+					"read": 1,
+					"create": 1,
+				}
+			).insert(ignore_permissions=True)
+
+	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
 		frappe.set_user("Administrator")
 		cls._ensure_role()
 		cls._ensure_doctypes()
-		# Dashboard Manager: create permission on Dashboard Chart itself
-		# (unrelated to the child-table read check under test).
-		cls._ensure_user(cls.USER_WITH_ACCESS, (cls.ROLE, "Dashboard Manager"))
-		cls._ensure_user(cls.USER_WITHOUT_ACCESS, ("Dashboard Manager",))
+		cls._grant_dashboard_chart_create()
+		cls._ensure_user(cls.USER_WITH_ACCESS, (cls.ROLE,))
+		cls._ensure_user(cls.USER_WITHOUT_ACCESS, ())
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
