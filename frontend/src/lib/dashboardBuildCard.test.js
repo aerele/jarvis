@@ -202,3 +202,16 @@ test("the finished thumbnail reuses openInDashboards and the static cvOf srcdoc,
 	// dashboard message, which the codebase's own accepted design forbids.
 	assert.doesNotMatch(chatSrc, /DashboardCanvas/);
 });
+
+test("a theme toggle re-fetches every on-screen dashboard thumbnail, not just the artifact panel", () => {
+	// cvOf's cache key carries the dark flag (`${msg}::${cv}::${dark}`), and the
+	// thumbnail is the first PASSIVE reader of it in the message list — nothing
+	// else re-triggers ensureCanvas for it on a theme flip, so without this the
+	// card would strand on its loading shimmer until an unrelated resync.
+	const w = chatSrc.slice(chatSrc.indexOf("watch(effectiveDark, () => {"));
+	const body = w.slice(0, w.indexOf("\n});") + 4);
+	assert.notEqual(chatSrc.indexOf("watch(effectiveDark, () => {"), -1);
+	assert.match(body, /for \(const m of messages\.value\) \{/);
+	assert.match(body, /m\.canvas\.some\(\(cv\) => canOpenDash\(cv\)\)/);
+	assert.match(body, /ensureCanvas\(m\)/);
+});

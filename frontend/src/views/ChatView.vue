@@ -7190,6 +7190,19 @@ const dashboardBuildTickIndex = computed(() => phaseTickIndex(dashboardBuildPhas
 // Scaled-preview geometry for the finished-canvas thumbnail card (below);
 // fixed source viewport since the canvas itself has no set design width.
 const dashboardThumbGeom = computed(() => dashboardThumbnailTransform(220));
+// cvOf's cache key carries the theme (canvasContent is keyed by
+// `${msg}::${cv}::${dark}` — the backend themes the srcdoc shell), and the
+// thumbnail above is the first place that reads it PASSIVELY: every other
+// reader (openArtifact) re-fetches itself on a cache miss because a click
+// triggered it. A theme toggle alone would otherwise strand every dashboard
+// thumbnail already on screen on its loading shimmer until an unrelated
+// resync (tab focus, socket reconnect, conversation switch) happened to
+// call ensureCanvas again.
+watch(effectiveDark, () => {
+	for (const m of messages.value) {
+		if (Array.isArray(m.canvas) && m.canvas.some((cv) => canOpenDash(cv))) ensureCanvas(m);
+	}
+});
 async function openInDashboards(m, cv) {
 	const conv = currentId.value;
 	if (!conv || !canOpenDash(cv)) return;
