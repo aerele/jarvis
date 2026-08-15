@@ -639,17 +639,19 @@ test("the open artifact carries the conversation it was opened from", () => {
 });
 
 test("a dashboard build gets its OWN thumbnail card, not the generic file card", () => {
-	// canOpenDash(cv) now branches BEFORE the generic ".jv-artifact-group" card
-	// (issue #858's compact preview thumbnail), so a dashboard canvas never
-	// reaches the generic card at all — dashboardBuildCard.test.js fences the
-	// thumbnail's own markup (jv-dash-thumb, cvOf srcdoc, openInDashboards).
-	// This test only pins the ORDER and the exclusivity: the generic card's
-	// v-else must come after the dashboard branch, so every other canvas type
-	// is untouched.
-	assert.match(chatSrc, /v-else-if="canOpenDash\(cv\)"\s*\n\s*class="jv-dash-thumb"/);
+	// canPromoteDashCanvas(cv) (canOpenDash's builder-origin rule OR
+	// isDashboardCanvas's hosted-embed-marker signal) branches BEFORE the
+	// generic ".jv-artifact-group" card (issue #858's compact preview
+	// thumbnail), so a dashboard canvas never reaches the generic card at
+	// all — dashboardBuildCard.test.js fences the thumbnail's own markup
+	// (jv-dash-thumb, cvOf srcdoc, openInDashboards) and the combined gate
+	// itself. This test only pins the ORDER and the exclusivity: the generic
+	// card's v-else must come after the dashboard branch, so every other
+	// canvas type is untouched.
+	assert.match(chatSrc, /v-else-if="canPromoteDashCanvas\(cv\)"\s*\n\s*class="jv-dash-thumb"/);
 	assert.match(chatSrc, /<div v-else class="jv-artifact-group">/);
 	assert.ok(
-		chatSrc.indexOf('v-else-if="canOpenDash(cv)"') <
+		chatSrc.indexOf('v-else-if="canPromoteDashCanvas(cv)"') <
 			chatSrc.indexOf('<div v-else class="jv-artifact-group">'),
 		"the dashboard thumbnail must be offered before the generic file card falls through to it"
 	);

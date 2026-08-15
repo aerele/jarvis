@@ -15,6 +15,7 @@ import {
 	dashboardBuildPhase,
 	dashboardThumbnailTransform,
 	isDashboardBuildTurn,
+	isDashboardCanvas,
 	phaseTickIndex,
 } from "./dashboardBuildCard.js";
 
@@ -148,6 +149,25 @@ test("phaseTickIndex orders the four phases and reports -1 for indeterminate", (
 	assert.equal(DASHBOARD_BUILD_PHASES.length, 4);
 });
 
+// ---- the finished canvas: dashboard identity by content, not conversation ----
+
+test("a hosted-embed canvas item is a dashboard regardless of which conversation produced it", () => {
+	assert.equal(isDashboardCanvas({ type: "html", name: "documents/abc123/index.html" }), true);
+	// the dashboards skill is the only skill catalog-wide that uses the
+	// hosted-embed marker (documents/<id>/index.html) — a plain canvas file
+	// reference from any other skill never carries that prefix
+	assert.equal(isDashboardCanvas({ type: "html", name: "charts/sales.html" }), false);
+	assert.equal(isDashboardCanvas({ type: "html", name: "documents/abc/index.html" }), true);
+	// wrong type: an svg/pdf/image/file under the same path is not a dashboard
+	assert.equal(isDashboardCanvas({ type: "svg", name: "documents/abc/index.html" }), false);
+	assert.equal(isDashboardCanvas({ type: "image", name: "documents/abc/index.html" }), false);
+	// absent/malformed input never throws
+	assert.equal(isDashboardCanvas(null), false);
+	assert.equal(isDashboardCanvas(undefined), false);
+	assert.equal(isDashboardCanvas({ type: "html" }), false);
+	assert.equal(isDashboardCanvas({ type: "html", name: 42 }), false);
+});
+
 // ---- the finished canvas -> a scaled thumbnail transform ----
 
 test("thumbnail geometry scales the fixed source viewport to the card width", () => {
@@ -175,14 +195,17 @@ test("a custom source viewport is honoured", () => {
 test("ChatView imports the build-card helpers and gates the live card on the turn", () => {
 	assert.match(
 		chatSrc,
-		/import \{\s*DASHBOARD_BUILD_PHASES,\s*dashboardBuildPhase,\s*dashboardThumbnailTransform,\s*isDashboardBuildTurn,\s*phaseTickIndex,\s*\} from "@\/lib\/dashboardBuildCard";/
+		/import \{\s*DASHBOARD_BUILD_PHASES,\s*dashboardBuildPhase,\s*dashboardThumbnailTransform,\s*isDashboardBuildTurn,\s*isDashboardCanvas,\s*phaseTickIndex,\s*\} from "@\/lib\/dashboardBuildCard";/
 	);
 	const gate = fnBody(chatSrc, "const dashboardBuildTurn = computed(");
 	assert.match(gate, /originPage: originPage\.value,/);
 	assert.match(gate, /originOf: originOf\.value,/);
 	assert.match(gate, /conversation: currentId\.value,/);
 	// the live card and the generic activity line are mutually exclusive —
-	// exactly one of them can render for a given turn
+	// exactly one of them can render for a given turn. The live card stays
+	// origin-only: a main-chat build has no pre-canvas signal to key on (see
+	// dashboardBuildCard.js's file header), so it degrades to no card rather
+	// than guessing.
 	assert.match(
 		chatSrc,
 		/v-if="dashboardBuildTurn && \(activeTools\.length \|\| waiting\) && !queuedTurn"/
@@ -193,25 +216,37 @@ test("ChatView imports the build-card helpers and gates the live card on the tur
 	);
 });
 
+test("canPromoteDashCanvas combines the builder-origin rule with canvas-presence, and the click-through gates on it too", () => {
+	const combo = fnBody(chatSrc, "function canPromoteDashCanvas(cv) {");
+	assert.match(combo, /canOpenDash\(cv\) \|\| isDashboardCanvas\(cv\)/);
+	// openInDashboards must guard on the COMBINED gate — otherwise a click on
+	// a canvas-presence-only thumbnail (no builder origin) would silently no-op
+	const open = fnBody(chatSrc, "async function openInDashboards(m, cv) {");
+	assert.match(open, /if \(!conv \|\| !canPromoteDashCanvas\(cv\)\) return;/);
+});
+
 test("the finished thumbnail reuses openInDashboards and the static cvOf srcdoc, never the live builder mode", () => {
-	assert.match(chatSrc, /v-else-if="canOpenDash\(cv\)"\s*\n\s*class="jv-dash-thumb"/);
+	assert.match(chatSrc, /v-else-if="canPromoteDashCanvas\(cv\)"\s*\n\s*class="jv-dash-thumb"/);
 	assert.match(chatSrc, /@click="openInDashboards\(m, cv\)"/);
 	assert.match(chatSrc, /:srcdoc="cvOf\(m, cv\)"/);
 	// DashboardCanvas.vue (the builder's live-query render component) must not
 	// be pulled into ChatView — that would fire queries on every scrolled-past
 	// dashboard message, which the codebase's own accepted design forbids.
-	assert.doesNotMatch(chatSrc, /DashboardCanvas/);
+	// (word-boundary: must not catch our OWN isDashboardCanvas/canPromoteDashCanvas)
+	assert.doesNotMatch(chatSrc, /\bDashboardCanvas\.vue\b|<DashboardCanvas\b/);
 });
 
 test("a theme toggle re-fetches every on-screen dashboard thumbnail, not just the artifact panel", () => {
 	// cvOf's cache key carries the dark flag (`${msg}::${cv}::${dark}`), and the
 	// thumbnail is the first PASSIVE reader of it in the message list — nothing
 	// else re-triggers ensureCanvas for it on a theme flip, so without this the
-	// card would strand on its loading shimmer until an unrelated resync.
+	// card would strand on its loading shimmer until an unrelated resync. Must
+	// cover BOTH gates (builder-origin and canvas-presence), or a main-chat
+	// build's thumbnail would strand while a builder-origin one self-heals.
 	const w = chatSrc.slice(chatSrc.indexOf("watch(effectiveDark, () => {"));
 	const body = w.slice(0, w.indexOf("\n});") + 4);
 	assert.notEqual(chatSrc.indexOf("watch(effectiveDark, () => {"), -1);
 	assert.match(body, /for \(const m of messages\.value\) \{/);
-	assert.match(body, /m\.canvas\.some\(\(cv\) => canOpenDash\(cv\)\)/);
+	assert.match(body, /m\.canvas\.some\(\(cv\) => canPromoteDashCanvas\(cv\)\)/);
 	assert.match(body, /ensureCanvas\(m\)/);
 });

@@ -1,38 +1,90 @@
 // The "Building dashboard…" live card + finished thumbnail, for a dashboard
 // build watched from MAIN chat (issue #858).
 //
-// Two things this file decides, both pure and both fenced by
-// dashboardBuildCard.test.js so the wiring in ChatView.vue stays honest:
+// Corrected understanding (this file originally assumed main chat could
+// never originate a build at all — wrong, see below): three things this
+// file decides, all pure and all fenced by dashboardBuildCard.test.js so
+// the wiring in ChatView.vue stays honest:
 //
 //   1. Whether the turn CURRENTLY streaming into this conversation is a
-//      dashboard build, so the live progress card only ever shows for one.
+//      BUILDER-ORIGIN dashboard build, so the live progress card only ever
+//      shows for one.
 //   2. What phase that build is honestly in RIGHT NOW, from the same
 //      real events ChatView already keeps for its generic "Working on it…"
 //      indicator (tool:start/tool:end -> activeTools, statusPhase). Never a
 //      timer: a phase this mount has not seen evidence for is reported as
 //      `null` (indeterminate) rather than guessed.
+//   3. Whether a FINISHED canvas item is a dashboard build regardless of
+//      which conversation it landed in — the signal the thumbnail and its
+//      click-through gate on, since origin alone misses a real path.
 //
-// The turn-level gate reuses the exact origin binding
+// The turn-level gate (1) reuses the exact origin binding
 // `canOpenInDashboards` (dashboardOpen.js) already uses for the finished
 // artifact's "Open in Dashboards" button: `origin_page` is stamped
 // server-side only when the message that opened this turn was sent with the
 // Dashboards builder's `context: {page: "dashboards"}` (jarvis/chat/api.py).
-// A turn earns the live card under precisely the same rule a build earns the
-// promote button — main chat itself never originates one (api/dashboards.js
-// is the only sender of that context), so both gates read the same fact:
-// "this conversation's current activity came from the builder".
+// That gate is real for the LIVE PROGRESS CARD specifically — it controls
+// the extra system-prompt instructions turn_handler.py injects (theme
+// cheatsheet, interview-first flow), which only main chat's ORDINARY
+// composer never sends, so a turn watched there before the reply lands has
+// no honest pre-canvas signal (see isDashboardBuildTurn's own note).
+//
+// It is NOT true of the finished canvas, though: `jarvis/chat/canvas.py`'s
+// `persist_canvases` runs unconditionally at the end of EVERY turn, in
+// every conversation, with no origin check at all (jarvis/chat/turn_handler
+// .py's `_persist_canvas_and_publish`). And the jarvis-persona skill that
+// produces a Dashboards build (`skills/jarvis-dashboards/SKILL.md`) is
+// itself discoverable by ordinary description match in ANY chat — its own
+// text: "a dashboard request in ordinary chat... still gets built here, not
+// just pointed elsewhere". So a main-chat-originated dashboard canvas is a
+// real, reachable case, and `isDashboardCanvas` below is the signal the
+// finished-canvas UI (thumbnail, click-through) gates on instead of origin.
 
 /**
  * Does the turn currently streaming into `conversation` belong to a
- * dashboard build? Same binding rule as `canOpenInDashboards`: the origin
- * must be read FOR this exact conversation, not a stale value left over from
- * the thread the user was just looking at.
+ * BUILDER-ORIGIN dashboard build? Same binding rule as `canOpenInDashboards`:
+ * the origin must be read FOR this exact conversation, not a stale value
+ * left over from the thread the user was just looking at.
+ *
+ * This is deliberately narrower than "is this turn building a dashboard" —
+ * a main-chat build (no builder origin) is real but has no equivalent
+ * pre-canvas signal, so a plain conversation always reports `false` here
+ * and the live progress card simply does not show for it; the canvas
+ * itself still gets the thumbnail treatment once it lands, via
+ * `isDashboardCanvas` below.
  *
  * @param {{originPage: string, originOf: string, conversation: string}} arg
  */
 export function isDashboardBuildTurn({ originPage, originOf, conversation }) {
 	if (originPage !== "dashboards") return false;
 	return !!conversation && originOf === conversation;
+}
+
+// The dashboards skill is the ONLY skill in the persona catalog that uses
+// the agent's "hosted embed" canvas mechanism (`[embed ref="<id>" .../]`,
+// jarvis/chat/canvas.py `_EMBED_REF`/`_embed_ref_name`) — every hosted-embed
+// canvas item's `name` is stamped `documents/<id>/index.html` regardless of
+// which conversation produced it. A plain `canvas/<path>.html` file
+// reference (any other skill's chart/report/export output) never carries
+// this prefix. This is the cheapest signal available without a backend
+// change: it is exactly what jarvis-persona's skills/jarvis-dashboards/
+// SKILL.md already promises ("that reference is what makes the canvas
+// render it, whether that is the builder page's pane or a main-chat
+// preview") and nothing else in the 38-skill catalog emits it.
+const _HOSTED_EMBED_PREFIX = "documents/";
+
+/**
+ * Is this canvas item a dashboard build, regardless of which conversation
+ * (or turn origin) produced it? The signal the finished-canvas thumbnail and
+ * its "Open in Dashboards" click-through gate on — origin alone misses a
+ * main-chat-originated build, which is a real, reachable case (see the file
+ * header).
+ *
+ * @param {{type?: string, name?: string}|null|undefined} cv
+ */
+export function isDashboardCanvas(cv) {
+	if (!cv || cv.type !== "html") return false;
+	return typeof cv.name === "string" && cv.name.startsWith(_HOSTED_EMBED_PREFIX);
 }
 
 // Tool names that fetch data — the same jarvis__ registry names ChatView's

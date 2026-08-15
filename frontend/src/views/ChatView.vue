@@ -1506,13 +1506,16 @@
 									<!-- a Dashboards build: a compact scaled preview of the
 									     canvas itself, its name, and the way through to the
 									     builder where it runs with data — the whole card
-									     clicks through (issue #858). The preview reuses the
-									     SAME static srcdoc main chat already fetches for the
-									     artifact panel (cvOf/ensureCanvas below); never the
-									     builder's own live-query render mode, which would
-									     fire queries on every scrolled-past message. -->
+									     clicks through (issue #858). Gated on canPromoteDashCanvas,
+									     not just builder origin: persist_canvases runs for every
+									     conversation, and the dashboards skill can build from
+									     ordinary main chat too — see the note above canOpenDash.
+									     The preview reuses the SAME static srcdoc main chat
+									     already fetches for the artifact panel (cvOf/ensureCanvas
+									     below); never the builder's own live-query render mode,
+									     which would fire queries on every scrolled-past message. -->
 									<button
-										v-else-if="canOpenDash(cv)"
+										v-else-if="canPromoteDashCanvas(cv)"
 										class="jv-dash-thumb"
 										@click="openInDashboards(m, cv)"
 										:title="
@@ -3974,6 +3977,7 @@ import {
 	dashboardBuildPhase,
 	dashboardThumbnailTransform,
 	isDashboardBuildTurn,
+	isDashboardCanvas,
 	phaseTickIndex,
 } from "@/lib/dashboardBuildCard";
 import { pickGreeting } from "@/lib/greeting";
@@ -7167,6 +7171,17 @@ function canOpenDash(cv) {
 		cv,
 	});
 }
+// Origin alone misses a real case: jarvis/chat/canvas.py's persist_canvases
+// runs unconditionally at the end of every turn (no origin check), and the
+// jarvis-persona dashboards skill is discoverable by ordinary description
+// match in ANY chat, not only a builder-page conversation (jarvis#858
+// review). So the thumbnail/click-through gate on BOTH signals: the
+// existing builder-origin rule above, OR the canvas itself carrying the
+// dashboards skill's own hosted-embed marker regardless of which
+// conversation produced it (isDashboardCanvas, dashboardBuildCard.js).
+function canPromoteDashCanvas(cv) {
+	return canOpenDash(cv) || isDashboardCanvas(cv);
+}
 // ---- "Building dashboard…" live card (issue #858) — a dashboard build
 // watched from main chat, same origin binding as canOpenDash above but
 // evaluated before any canvas exists yet (the turn is still running). Phase
@@ -7200,12 +7215,13 @@ const dashboardThumbGeom = computed(() => dashboardThumbnailTransform(220));
 // call ensureCanvas again.
 watch(effectiveDark, () => {
 	for (const m of messages.value) {
-		if (Array.isArray(m.canvas) && m.canvas.some((cv) => canOpenDash(cv))) ensureCanvas(m);
+		if (Array.isArray(m.canvas) && m.canvas.some((cv) => canPromoteDashCanvas(cv)))
+			ensureCanvas(m);
 	}
 });
 async function openInDashboards(m, cv) {
 	const conv = currentId.value;
-	if (!conv || !canOpenDash(cv)) return;
+	if (!conv || !canPromoteDashCanvas(cv)) return;
 	let dashboard = null;
 	try {
 		dashboard = await dashboardForConversation(conv);
