@@ -60,34 +60,59 @@ def create_dashboard_chart(
 		raise InvalidArgumentError(f"chart_type must be one of {sorted(_CHART_TYPES)}")
 	if type not in _RENDER_TYPES:
 		raise InvalidArgumentError(f"type must be one of {sorted(_RENDER_TYPES)}")
-	if not frappe.has_permission(document_type, "read"):
-		raise PermissionDeniedError(f"no read permission on {document_type!r}")
-
-	# Child (istable) doctypes carry no rows of their own - Frappe's chart
-	# queries read them through an owning parent (`parent_doctype` on
-	# get_list), and Dashboard Chart.validate() rejects the chart outright
-	# without one. get_parent_doctypes() is the same lookup Frappe's own
-	# Dashboard Chart form uses to populate parent_document_type, so a
-	# non-table document_type always yields [] here and any supplied
-	# parent_document_type is rejected as junk for it.
-	valid_parents = get_parent_doctypes(document_type)
-	if valid_parents:
+	# Branch on istable directly - Dashboard Chart.validate() itself gates the
+	# "needs a parent" requirement on istable, and get_parent_doctypes() (a
+	# live-Table-field scan) can diverge from it both ways: an istable
+	# doctype whose owning field was since deleted/renamed still needs a
+	# parent even though the scan now returns []; a doctype only reachable
+	# via a Table MultiSelect shows up in the scan but is NOT istable and
+	# does not need one. get_parent_doctypes() is used below only to name/
+	# validate candidate parents, never to decide "is this a child table".
+	if frappe.get_meta(document_type).istable:
+		# Child (istable) doctypes carry no permissions of their own - Frappe
+		# derives read access from an owning PARENT via
+		# has_permission(child, ptype="read", parent_doctype=P) (the same call
+		# get_list.py's _readable_child_parents / query.py's step-3 child-table
+		# gate use). The plain has_permission(document_type, "read") above is
+		# never reached for a child doctype: with no parent_doctype it returns
+		# False for every non-admin regardless of real access, which would make
+		# every child-table chart Administrator-only.
+		valid_parents = get_parent_doctypes(document_type)
 		if not parent_document_type:
+			# Name only parents the caller can actually read the child
+			# through - naming an unreadable one would disclose a schema
+			# relationship to a DocType they have no access to.
+			readable = [
+				p
+				for p in valid_parents
+				if frappe.has_permission(document_type, ptype="read", parent_doctype=p)
+			]
+			if not readable:
+				raise PermissionDeniedError(
+					f"no read permission on {document_type!r} through any parent DocType"
+				)
 			raise InvalidArgumentError(
 				f"{document_type!r} is a child table; pass parent_document_type "
-				f"(one of: {', '.join(valid_parents)})"
+				f"(one of: {', '.join(readable)})"
 			)
 		if not frappe.db.exists("DocType", parent_document_type):
 			raise InvalidArgumentError(f"no such DocType {parent_document_type!r}")
 		if parent_document_type not in valid_parents:
+			# Deliberately do not list valid_parents here: the caller supplied
+			# this value themselves, but the full candidate list may include a
+			# parent they cannot read.
 			raise InvalidArgumentError(
-				f"parent_document_type {parent_document_type!r} is not a parent of "
-				f"{document_type!r} (one of: {', '.join(valid_parents)})"
+				f"parent_document_type {parent_document_type!r} is not a parent of {document_type!r}"
 			)
-		if not frappe.has_permission(parent_document_type, "read"):
-			raise PermissionDeniedError(f"no read permission on {parent_document_type!r}")
-	elif parent_document_type:
-		raise InvalidArgumentError(f"{document_type!r} is not a child table; omit parent_document_type")
+		if not frappe.has_permission(document_type, ptype="read", parent_doctype=parent_document_type):
+			raise PermissionDeniedError(
+				f"no read permission on {document_type!r} through parent {parent_document_type!r}"
+			)
+	else:
+		if parent_document_type:
+			raise InvalidArgumentError(f"{document_type!r} is not a child table; omit parent_document_type")
+		if not frappe.has_permission(document_type, "read"):
+			raise PermissionDeniedError(f"no read permission on {document_type!r}")
 
 	doc = frappe.new_doc("Dashboard Chart")
 	doc.chart_name = chart_name
