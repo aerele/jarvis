@@ -131,10 +131,21 @@ function setTheme(t) {
 		.catch(() => {});
 }
 // Cycle light → dark → system → light so "follow system" stays reachable
-// (the Appearance pane that offered it was removed).
+// (the Appearance pane that offered it was removed). A step that would not
+// change the EFFECTIVE appearance is skipped: with a dark OS, dark → system
+// renders identically, so that click would look dead and reaching light would
+// take two clicks. Skipping keeps the invariant that every click visibly
+// flips the theme. Exported pure so theme.test.js can pin the invariant.
 const _THEME_CYCLE = { light: "dark", dark: "system", system: "light" };
+export function nextTheme(current, prefersDark) {
+	let next = _THEME_CYCLE[current] || "dark";
+	if (isDark(next, prefersDark) === isDark(current, prefersDark)) {
+		next = _THEME_CYCLE[next];
+	}
+	return next;
+}
 function toggleTheme() {
-	setTheme(_THEME_CYCLE[theme.value] || "dark");
+	setTheme(nextTheme(theme.value, prefersDark.value));
 }
 
 export function useJarvisTheme() {
