@@ -41,6 +41,7 @@ import time
 
 import frappe
 
+from jarvis.chat import error_taxonomy
 from jarvis.chat.events import publish_to_user
 from jarvis.permissions import require_jarvis_access
 
@@ -1455,6 +1456,9 @@ def _write_cancel_marker(conversation: str, reason: str) -> None:
 			][0]
 			or 0
 		) + 1
+		# #823: the marker is BORN cancelled, so it carries the failure envelope
+		# from insert. `cancelled` is terminal, which is what keeps a Retry button
+		# off a turn the customer deliberately stopped or the queue aged out.
 		marker = frappe.get_doc(
 			{
 				"doctype": MSG,
@@ -1462,8 +1466,7 @@ def _write_cancel_marker(conversation: str, reason: str) -> None:
 				"seq": seq,
 				"role": "assistant",
 				"content": "",
-				"streaming": 0,
-				"error": reason,
+				**error_taxonomy.error_row_values(reason, error_taxonomy.envelope("cancelled")),
 			}
 		)
 		marker.flags.ignore_permissions = True

@@ -37,7 +37,7 @@ import time
 import frappe
 
 from jarvis._session import impersonate
-from jarvis.chat import seq_watermark
+from jarvis.chat import error_taxonomy, seq_watermark
 from jarvis.chat import turn_state as ts
 from jarvis.exceptions import AgentUnreachableError
 
@@ -312,9 +312,13 @@ def _prepare_error(
 	"Could not prepare the message." would otherwise fall into the mid-run
 	"gateway" default and tell the customer to just retry a bug that a retry
 	will most likely reproduce."""
+	# #823: classify BEFORE the row write so the envelope lands on the row and on
+	# the event together. An explicit `code` from the caller still wins; it takes
+	# its retryable from the taxonomy table rather than from a second guess.
+	env = error_taxonomy.envelope(code) if code else error_taxonomy.classify(error, exc)
 	try:
 		if assistant_msg:
-			frappe.db.set_value(MSG, assistant_msg, {"streaming": 0, "error": (error or "")[:1000]})
+			frappe.db.set_value(MSG, assistant_msg, error_taxonomy.error_row_values(error, env))
 		if ts.prepare_errored(run_id, version, error=error):
 			frappe.db.commit()
 	except Exception:
@@ -322,13 +326,6 @@ def _prepare_error(
 			frappe.db.rollback()
 		except Exception:
 			pass
-	if not code:
-		try:
-			from jarvis.chat.turn_handler import _classify_error
-
-			code = _classify_error(error, exc)
-		except Exception:
-			code = "internal"
 	if owner:
 		try:
 			ts.publish_fenced(
@@ -338,7 +335,7 @@ def _prepare_error(
 				run_id=run_id,
 				message_id=assistant_msg,
 				error=error,
-				code=code,
+				**error_taxonomy.publish_extra(env),
 				changed_data=False,
 			)
 		except Exception:

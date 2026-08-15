@@ -74,6 +74,7 @@ from dataclasses import dataclass, field
 
 import frappe
 
+from jarvis.chat import error_taxonomy
 from jarvis.chat import turn_state as ts
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import AgentUnreachableError
@@ -2026,14 +2027,20 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 	if turn is None:
 		return False
 	err = str(exc)
+	# #823: ONE envelope for the row and the event below. `exc` carries the
+	# gateway's own rejection code, which is the most trustworthy signal available
+	# anywhere on this path - a pairing rejection that already survived the
+	# self-heal reconnect is terminal, and classifying it from `err`'s text alone
+	# could not tell that apart from a passing hiccup.
+	env = error_taxonomy.classify(err, exc)
 	if ts.dispatch_errored(run_id, int(turn["version"]), ctx.epoch, error=err):
 		# Mark the placeholder errored (streaming off + error) so a reload renders the
 		# failure instead of a stuck spinner (matches legacy _mark_errored).
 		if rs.assistant_message:
 			try:
 				ts._run_cas(
-					f"UPDATE `tab{MSG}` SET streaming=0, error=%(e)s WHERE name=%(m)s",
-					{"e": err[:1000], "m": rs.assistant_message},
+					f"UPDATE `tab{MSG}` SET {error_taxonomy.MSG_ERROR_ASSIGNMENTS} WHERE name=%(m)s",
+					error_taxonomy.error_row_params(err, env, m=rs.assistant_message),
 				)
 			except Exception:
 				pass
@@ -2051,14 +2058,15 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 				run_id=run_id,
 				message_id=rs.assistant_message,
 				error=err,
-				# #702 review: pass `exc` through so this classifies the same way
-				# turn_handler's own pre-ack AgentUnreachableError path does
+				# #702 review: `exc` was passed through so this classifies the same
+				# way turn_handler's own pre-ack AgentUnreachableError path does
 				# ("unreachable", via isinstance) instead of guessing from `err`'s
 				# text alone - a rejection code like "policy_denied" matches no
 				# keyword and would otherwise fall into the mid-run "gateway"
 				# default, telling the customer a pre-ack rejection is a brief
-				# hiccup worth retrying, which it is not.
-				code=_classify_error(err, exc),
+				# hiccup worth retrying, which it is not. #823 does that once, above,
+				# and sends the SAME envelope the row got.
+				**error_taxonomy.publish_extra(env),
 				changed_data=False,
 				pump_epoch=ctx.epoch,
 				relay_target_id=ctx.relay_target_id,
@@ -2714,14 +2722,16 @@ def _settle_recover_errored(
 	``changed_data`` (the interrupted run may have streamed/tool-called; we do NOT
 	claim nothing changed). Returns won/lost."""
 	err = error or _STALLED_ERROR
+	# #823: one envelope, written to the row and published on the event.
+	env = error_taxonomy.classify(err)
 	if not ts.recover_errored(run_id, version, error=err):
 		return False
 	frappe.db.commit()
 	if assistant_message:
 		try:
 			ts._run_cas(
-				f"UPDATE `tab{MSG}` SET streaming=0, error=%(e)s WHERE name=%(m)s",
-				{"e": err[:1000], "m": assistant_message},
+				f"UPDATE `tab{MSG}` SET {error_taxonomy.MSG_ERROR_ASSIGNMENTS} WHERE name=%(m)s",
+				error_taxonomy.error_row_params(err, env, m=assistant_message),
 			)
 			frappe.db.commit()
 		except Exception:
@@ -2735,7 +2745,7 @@ def _settle_recover_errored(
 			run_id=run_id,
 			message_id=assistant_message,
 			error=err,
-			code=_classify_error(err),
+			**error_taxonomy.publish_extra(env),
 		)
 	return True
 
@@ -3512,17 +3522,15 @@ def _telemetry(event: str, **fields) -> None:
 
 
 def _classify_error(err_text: str, exc=None) -> str:
-	"""Preserve today's Message.error headline classification (SUX-11) for the
-	pump's own error publishes (definite pre-ack rejection). `exc` is forwarded
-	so a caller holding the raised AgentUnreachableError (e.g. a definite
-	pre-ack rejection) classifies the same way turn_handler's own equivalent
-	path does, rather than only ever guessing from `err_text` (#702 review)."""
-	try:
-		from jarvis.chat.turn_handler import _classify_error as _ce
+	"""The Message.error headline classification (SUX-11), code only.
 
-		return _ce(err_text, exc)
-	except Exception:
-		return "internal"
+	The pump's own error publishes now carry the full ``error_taxonomy`` envelope
+	(#823) so the row and the event agree; this stays as the code-only reading of
+	the same taxonomy, which is what the pump's tests and any remaining caller
+	ask for. `exc` is forwarded so a caller holding the raised
+	AgentUnreachableError classifies on the gateway's own rejection code rather
+	than only ever guessing from `err_text` (#702 review)."""
+	return error_taxonomy.classify(err_text, exc)["code"]
 
 
 def _dt_to_ms(dt) -> int:

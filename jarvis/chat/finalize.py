@@ -35,11 +35,35 @@ import time
 
 import frappe
 
+from jarvis.chat import error_taxonomy
 from jarvis.chat import turn_state as ts
 
 TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
+
+
+def _stored_error_row(assistant_message: str | None) -> dict:
+	"""The error envelope columns settlement persisted on an assistant row.
+
+	Returns an empty dict when there is no row (or the read fails), which
+	``error_taxonomy.stored_envelope`` reads as "nothing stored" and the caller
+	answers by classifying the text - the pre-#823 behaviour, unchanged."""
+	if not assistant_message:
+		return {}
+	try:
+		return (
+			frappe.db.get_value(
+				MSG,
+				assistant_message,
+				["error_code", "error_retryable", "error_data"],
+				as_dict=True,
+			)
+			or {}
+		)
+	except Exception:
+		return {}
+
 
 # Canonical run order = the ONE canonical vocabulary, in its declared order (never a
 # local literal — ``turn_state.EFFECT_NAMES`` is the single authority, and _RUNNERS
@@ -466,7 +490,15 @@ def _effect_terminal_publish(ctx: _Ctx) -> None:
 		pub_kind, extra = "run:end", {"stopped": True}
 	elif kind == "relay:error":
 		err = settlement._error_text(payload) or row.get("error") or "The run ended with an error."
-		pub_kind, extra = "run:error", {"error": err, "code": settlement._classify(err)}
+		# #823: this is the RE-publish of a terminal settlement already wrote, so it
+		# must repeat the envelope that landed on the assistant row, not classify a
+		# second time. A fresh classification here would be a third opinion on the
+		# same failure - the one the client happens to receive if the settlement
+		# publish was lost - and could hand back a Retry button on a terminal error
+		# the stored row had already ruled out. Only a pre-#823 row, which has no
+		# stored code, falls back to classifying the text.
+		env = error_taxonomy.stored_envelope(_stored_error_row(am)) or error_taxonomy.classify(err)
+		pub_kind, extra = "run:error", {"error": err, **error_taxonomy.publish_extra(env)}
 	else:
 		# relay:final success — mirror settlement's run:end (enrichment may still be
 		# running; enrichment_pending=True keeps a re-delivered client waiting for the

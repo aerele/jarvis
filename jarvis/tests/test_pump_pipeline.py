@@ -836,7 +836,9 @@ class TestSux11ErrorContract(_PipelineCase):
 			reserved=1,
 			assistant_message=amsg,
 			terminal_kind="relay:error",
-			terminal_payload=json.dumps({"state": "error", "error": "provider quota exceeded"}),
+			terminal_payload=json.dumps(
+				{"state": "error", "error": "insufficient_quota: add credits to continue"}
+			),
 			terminal_observed_at=frappe.utils.now(),
 		)
 		fin_rec = _Recorder()
@@ -850,7 +852,7 @@ class TestSux11ErrorContract(_PipelineCase):
 			epoch=epoch,
 			version=4,
 			terminal_kind="relay:error",
-			terminal_payload={"state": "error", "error": "provider quota exceeded"},
+			terminal_payload={"state": "error", "error": "insufficient_quota: add credits to continue"},
 			assistant_message=None,
 			owner=self._orig_user,
 			conversation=conv,
@@ -860,15 +862,26 @@ class TestSux11ErrorContract(_PipelineCase):
 		# The Message.error is set + streaming cleared; the streamed content is
 		# PRESERVED (not overwritten with the error), matching legacy _mark_errored.
 		row = frappe.db.get_value(MSG, amsg, ["error", "streaming", "content"], as_dict=True)
-		self.assertEqual(row["error"], "provider quota exceeded")
+		self.assertEqual(row["error"], "insufficient_quota: add credits to continue")
 		self.assertEqual(int(row["streaming"]), 0)
 		self.assertEqual(row["content"], "streamed so far")
-		# The run:error event carries today's classification code (SUX-11).
+		# The run:error event carries the classification code (SUX-11) and, since
+		# #823, the retryable flag the SPA's Retry button is gated on. An
+		# unambiguous exhaustion slug is TERMINAL: retrying moves nothing until the
+		# balance is topped up, so offering Retry would be a lie.
 		err_pub = next(p for p in self._pubs if p.get("kind") == "run:error")
-		self.assertEqual(err_pub["error"], "provider quota exceeded")
-		self.assertEqual(err_pub["code"], "provider", "quota -> 'provider' headline (ERROR_HEADLINES)")
+		self.assertEqual(err_pub["error"], "insufficient_quota: add credits to continue")
+		self.assertEqual(err_pub["code"], "quota-exhausted")
+		self.assertFalse(err_pub["retryable"])
+		# #823 persistence parity: the SAME envelope the event carried is on the
+		# row, so a reload renders the identical card instead of re-guessing from
+		# the error string. That is the whole point of the change, exercised here
+		# through the real settlement transaction.
+		env_row = frappe.db.get_value(MSG, amsg, ["error_code", "error_retryable"], as_dict=True)
+		self.assertEqual(env_row["error_code"], err_pub["code"])
+		self.assertEqual(int(env_row["error_retryable"]), 0)
 		# Turn.error mirrors it too.
-		self.assertEqual(self._val(rid, "error"), "provider quota exceeded")
+		self.assertEqual(self._val(rid, "error"), "insufficient_quota: add credits to continue")
 
 
 # --------------------------------------------------------------------------- #
@@ -925,7 +938,15 @@ class TestFailedFinalSettlesAsError(_PipelineCase):
 		self.assertIn("429", err)
 		self.assertIn("quota", err)
 		err_pub = next(p for p in self._pubs if p.get("kind") == "run:error")
-		self.assertEqual(err_pub["code"], "provider", "quota -> 'provider' headline (ERROR_HEADLINES)")
+		# #823: this fixture is Gemini's real 429 wording, which that API returns
+		# for an ordinary per-minute throttle just as readily as for a spent
+		# balance. Ambiguous prose is deliberately NOT called terminal - it reads
+		# as `throttled` and keeps its Retry button, because stranding a customer
+		# on a failure that clears in seconds is the worse of the two mistakes. A
+		# genuinely spent balance names itself (see the insufficient_quota case in
+		# TestSettlementError above) and is terminal there.
+		self.assertEqual(err_pub["code"], "throttled")
+		self.assertTrue(err_pub["retryable"])
 
 	def test_empty_final_after_tools_settles_errored(self):
 		# Second reproduction: same terminal reached with tools already run and a

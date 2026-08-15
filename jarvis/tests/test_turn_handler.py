@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import agent_session_pool, turn_handler, worker
+from jarvis.chat import agent_session_pool, error_taxonomy, turn_handler, worker
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
@@ -334,13 +334,40 @@ class TestClassifyError(unittest.TestCase):
 		exc = AgentUnreachableError("agent WS closed: 1006")
 		self.assertEqual(turn_handler._classify_error("agent WS closed: 1006", exc=exc), "unreachable")
 
-	def test_provider_rejection_stays_provider(self):
-		# An upstream LLM provider's own decline (quota/billing/rate limit) is
-		# actionable in a way a retry is not - must not collapse into "gateway".
-		code = turn_handler._classify_error(
+	def test_an_exhausted_quota_is_its_own_terminal_code(self):
+		# An upstream provider's own decline is actionable in a way a retry is
+		# not - it must not collapse into "gateway". #823 splits the old catch-all
+		# "provider" on the axis the customer's next step turns on: an exhausted
+		# balance is terminal until it is topped up, while a rate limit clears in
+		# seconds and stays retryable.
+		env = error_taxonomy.classify("OpenAI error: insufficient_quota, check your billing")
+		self.assertEqual(env["code"], "quota-exhausted")
+		self.assertFalse(env["retryable"])
+		throttled = error_taxonomy.classify("rate_limit_exceeded: slow down")
+		self.assertEqual(throttled["code"], "throttled")
+		self.assertTrue(throttled["retryable"])
+
+	def test_an_ambiguous_429_mentioning_a_quota_stays_retryable(self):
+		# Review finding, and the reason the exhausted markers carry no bare
+		# English words. Gemini writes "You exceeded your current quota" for an
+		# ordinary per-minute throttle exactly as it does for a spent balance;
+		# matching the bare word "quota" would call that terminal and strip the
+		# Retry button off a failure that clears in seconds. Terminal is the
+		# expensive verdict and has to be earned by an unambiguous marker.
+		env = error_taxonomy.classify(
 			"Google Generative AI API error (429): You exceeded your current quota."
 		)
-		self.assertEqual(code, "provider")
+		self.assertEqual(env["code"], "throttled")
+		self.assertTrue(env["retryable"])
+
+	def test_no_exhausted_marker_is_a_bare_english_word(self):
+		# The discipline behind the list, pinned so a later edit cannot quietly
+		# re-add "quota" or "billing" and reintroduce the stranding bug.
+		for marker in error_taxonomy.MARKERS["exhausted"]:
+			self.assertTrue(
+				"_" in marker or " " in marker,
+				f"{marker!r} is a bare word; an exhausted marker must be a slug or a phrase",
+			)
 
 	def test_connection_timed_out_is_unreachable_not_timeout(self):
 		# "connection timed out" names a transport failure (we could not reach
@@ -375,7 +402,7 @@ class TestClassifyError(unittest.TestCase):
 			turn_handler._classify_error("insufficient credit"),
 			turn_handler._classify_error("LLM request failed: network connection error."),
 		}
-		self.assertEqual(codes, {"unreachable", "provider", "gateway"})
+		self.assertEqual(codes, {"unreachable", "quota-exhausted", "gateway"})
 
 	def test_empty_and_none_degrade_to_gateway_not_a_crash(self):
 		self.assertEqual(turn_handler._classify_error(""), "gateway")
@@ -391,6 +418,273 @@ class TestClassifyError(unittest.TestCase):
 		exc = AgentUnreachableError("chat.send rejected: policy_denied: nope")
 		code = turn_handler._classify_error("chat.send rejected: policy_denied: nope", exc=exc)
 		self.assertEqual(code, "unreachable")
+
+
+class TestErrorTaxonomyRetryable(unittest.TestCase):
+	"""jarvis#823. Before this, every turn failure got a Retry button except
+	`cancelled`, so a revoked key, a model that does not exist and a spent quota
+	each offered an action that could not possibly work. Every code now carries an
+	explicit verdict, and this pins which failures may offer one at all."""
+
+	TERMINAL = {
+		"agent-unpaired",
+		"auth-invalid",
+		"cancelled",
+		"context-overflow",
+		"model-not-found",
+		"quota-exhausted",
+	}
+	RETRYABLE = {
+		"gateway",
+		"internal",
+		"provider",
+		"recovery-expired",
+		"throttled",
+		"timeout",
+		"unreachable",
+	}
+
+	def test_every_code_has_a_verdict_and_the_two_sets_are_the_whole_taxonomy(self):
+		self.assertEqual(
+			self.TERMINAL | self.RETRYABLE,
+			set(error_taxonomy.TURN_ERROR_CODES),
+			"a code added to the taxonomy needs a verdict here",
+		)
+		self.assertEqual(self.TERMINAL & self.RETRYABLE, set(), "a code cannot be both")
+		for code in self.TERMINAL:
+			self.assertFalse(error_taxonomy.TURN_ERROR_CODES[code], f"{code} must be terminal")
+		for code in self.RETRYABLE:
+			self.assertTrue(error_taxonomy.TURN_ERROR_CODES[code], f"{code} must be retryable")
+
+	def test_envelope_takes_retryable_from_the_one_table(self):
+		self.assertFalse(error_taxonomy.envelope("auth-invalid")["retryable"])
+		self.assertTrue(error_taxonomy.envelope("throttled")["retryable"])
+
+	def test_an_unknown_code_stays_retryable(self):
+		# A code this build cannot name is not evidence that a retry is pointless.
+		# "This can never work" is the one verdict never to reach for on no
+		# evidence, so an unknown code keeps its Retry button.
+		self.assertTrue(error_taxonomy.envelope("some-future-code-v2")["retryable"])
+
+	def test_the_guess_tier_is_forced_retryable_whatever_the_table_says(self):
+		# The keyword ladder is the LAST resort and it is wrong often enough that
+		# it may never produce a terminal verdict. If it ever matched its way to a
+		# terminal code, this forces the harmless answer instead.
+		env = error_taxonomy.envelope("auth-invalid", confidence="guess")
+		self.assertTrue(env["retryable"])
+		self.assertEqual(env["confidence"], "guess")
+
+
+class TestErrorTaxonomyTiers(unittest.TestCase):
+	"""The three tiers, most trustworthy first: a machine code we already hold,
+	then structure parsed out of provider prose, then the legacy keyword ladder.
+	The point of the ordering is that a terminal verdict is only ever reached on
+	real evidence."""
+
+	def test_tier1_the_gateways_own_rejection_code_wins(self):
+		# The gateway rejects an RPC with {code, message, details}. A pairing
+		# rejection has ALREADY survived one self-heal reconnect by the time it is
+		# classified, so it is terminal: another Retry click repeats a repair that
+		# just failed. The wire shape puts the real reason in details.authReason
+		# behind a generic outer code, so both are read.
+		exc = AgentUnreachableError(
+			"agent rejected: INVALID_REQUEST: unauthorized",
+			code="INVALID_REQUEST",
+			details={"authReason": "device_token_mismatch"},
+		)
+		env = error_taxonomy.classify("agent rejected: INVALID_REQUEST: unauthorized", exc)
+		self.assertEqual(env["code"], "agent-unpaired")
+		self.assertFalse(env["retryable"])
+		self.assertEqual(env["confidence"], "code")
+
+	def test_tier1_the_internal_pairing_codes_are_covered_too(self):
+		exc = AgentUnreachableError("rejected", code="device-not-paired")
+		self.assertEqual(error_taxonomy.classify("rejected", exc)["code"], "agent-unpaired")
+
+	def test_tier2_reads_the_vendors_own_http_status(self):
+		# The status a provider writes into its sentence is real structure, not a
+		# keyword: "(404)" means the model is not there whatever prose surrounds it.
+		cases = {
+			"Anthropic error (404): no route for that model": "model-not-found",
+			"OpenAI error (401): bad key": "auth-invalid",
+			"Vendor error (402): pay up": "quota-exhausted",
+			"Vendor error (429): slow down": "throttled",
+		}
+		for text, code in cases.items():
+			env = error_taxonomy.classify(text)
+			self.assertEqual(env["code"], code, text)
+			self.assertEqual(env["confidence"], "parsed", text)
+
+	def test_tier2_does_not_read_a_bare_number_as_a_status(self):
+		# A three-digit number in prose is not a status. Reading one as a status
+		# would classify a token count or a model name as a terminal failure.
+		self.assertEqual(error_taxonomy.classify("the model returned 404 tokens")["code"], "gateway")
+
+	def test_tier2_prefers_an_unambiguous_reason_over_the_bare_status(self):
+		# A 429 that names an UNAMBIGUOUS exhaustion slug is terminal, not
+		# ordinary back-pressure. Same status, opposite advice, so the marker
+		# wins - but only a marker that cannot mean anything else.
+		self.assertEqual(
+			error_taxonomy.classify("error (429): usage_limit_reached")["code"], "quota-exhausted"
+		)
+
+	def test_tier2_carries_the_reset_clock_the_provider_named(self):
+		env = error_taxonomy.classify('rate limit; "resets_in_seconds": 2400')
+		self.assertEqual(env["data"], {"resets_in_seconds": 2400})
+		self.assertEqual(
+			error_taxonomy.classify("usage_limit_reached; resets in 45 minutes")["data"],
+			{"resets_in_seconds": 2700},
+		)
+		# A clock survives the guess tier too, so an unrecognised failure that DID
+		# name its wait still tells the customer how long rather than "a moment".
+		self.assertEqual(
+			error_taxonomy.classify("something odd happened; retry-after: 90")["data"],
+			{"resets_in_seconds": 90},
+		)
+		# A nonsense clock is noise, not a promise to show a customer.
+		self.assertIsNone(error_taxonomy.classify("retry-after: 0")["data"])
+
+	def test_tier3_still_guesses_but_only_as_a_last_resort(self):
+		# Nothing structured in the text, so the legacy ladder answers - and says
+		# so, which is what keeps its verdict retryable.
+		env = error_taxonomy.classify("LLM request failed: network connection error.")
+		self.assertEqual(env["code"], "gateway")
+		self.assertEqual(env["confidence"], "guess")
+		self.assertTrue(env["retryable"])
+
+	def test_classify_is_total(self):
+		# This runs on the error path; a second exception here would strand the
+		# turn's spinner.
+		for raw in (None, "", 42, object()):
+			env = error_taxonomy.classify(raw)
+			self.assertIn("code", env)
+			self.assertIsInstance(env["retryable"], bool)
+
+	def test_the_context_overflow_park_markers_are_deliberately_excluded(self):
+		# turn_handler routes a relay:error containing the literal "context
+		# overflow" into the auto-compact park branch (the agent compacts and
+		# retries, so the turn parks for snapshot recovery rather than erroring).
+		# That branch runs BEFORE any classification and must keep its position:
+		# this taxonomy is display classification and never steers routing. The
+		# terminal variants OTHER vendors use, where no compaction retry is
+		# coming, are the ones that earn the code.
+		self.assertNotIn(
+			"context overflow",
+			[m for markers in error_taxonomy.MARKERS.values() for m in markers],
+		)
+		self.assertEqual(
+			error_taxonomy.classify("This model's maximum context length is 8192 tokens")["code"],
+			"context-overflow",
+		)
+
+
+class TestErrorTaxonomyPersistence(unittest.TestCase):
+	"""Persistence parity. The classification used to live only on the realtime
+	event, so reloading the page re-guessed the verdict from the stored string and
+	could contradict the card the customer had just read. The row now carries the
+	envelope, and these pin the shape every writer uses."""
+
+	def test_the_row_values_carry_code_and_retryable_and_clear_streaming(self):
+		env = error_taxonomy.classify("Vendor error (401): bad key")
+		values = error_taxonomy.error_row_values("Vendor error (401): bad key", env)
+		self.assertEqual(values["error_code"], "auth-invalid")
+		self.assertEqual(values["error_retryable"], 0)
+		self.assertEqual(values["streaming"], 0)
+
+	def test_a_retryable_failure_stores_a_truthy_flag(self):
+		env = error_taxonomy.classify("rate limit")
+		self.assertEqual(error_taxonomy.error_row_values("rate limit", env)["error_retryable"], 1)
+
+	def test_the_error_text_is_capped_so_a_runaway_provider_cannot_fill_the_column(self):
+		env = error_taxonomy.envelope("gateway")
+		values = error_taxonomy.error_row_values("x" * 5000, env)
+		self.assertEqual(len(values["error"]), error_taxonomy.ERROR_TEXT_MAX_CHARS)
+
+	def test_the_sql_params_and_the_set_value_dict_agree(self):
+		# Six writers use one of these two shapes; they must record the same thing
+		# or a turn's verdict depends on which code path failed it.
+		env = error_taxonomy.classify("Vendor error (404): no such model")
+		values = error_taxonomy.error_row_values("boom", env)
+		params = error_taxonomy.error_row_params("boom", env, m="MSG-1")
+		self.assertEqual(params["err"], values["error"])
+		self.assertEqual(params["err_code"], values["error_code"])
+		self.assertEqual(params["err_retryable"], values["error_retryable"])
+		self.assertEqual(params["err_data"], values["error_data"])
+		self.assertEqual(params["m"], "MSG-1")
+		# Every column the assignment string names must be bound.
+		for key in ("err", "err_code", "err_retryable", "err_data"):
+			self.assertIn(f"%({key})s", error_taxonomy.MSG_ERROR_ASSIGNMENTS)
+
+	def test_the_published_event_carries_the_flag_the_retry_button_is_gated_on(self):
+		env = error_taxonomy.classify("Vendor error (429): slow down; retry-after: 120")
+		extra = error_taxonomy.publish_extra(env)
+		self.assertEqual(extra["code"], "throttled")
+		self.assertTrue(extra["retryable"])
+		self.assertEqual(extra["resets_in_seconds"], 120)
+		# No clock named, no key - never an invented number.
+		self.assertNotIn(
+			"resets_in_seconds", error_taxonomy.publish_extra(error_taxonomy.envelope("gateway"))
+		)
+
+	def test_a_stored_envelope_round_trips_and_matches_what_was_written(self):
+		# What settlement wrote is what the terminal re-publish backstop reads, so
+		# a lost settlement publish is redelivered with the SAME verdict rather
+		# than a third opinion classified afresh.
+		env = error_taxonomy.classify("Vendor error (401): bad key")
+		row = error_taxonomy.error_row_values("Vendor error (401): bad key", env)
+		back = error_taxonomy.stored_envelope(row)
+		self.assertEqual(back["code"], env["code"])
+		self.assertEqual(back["retryable"], env["retryable"])
+
+	def test_a_pre_823_row_reports_nothing_stored_so_the_caller_falls_back(self):
+		# Absence of the CODE is the test, never falsiness of retryable: a stored
+		# error_retryable of 0 is a meaningful terminal verdict, not a missing one.
+		self.assertIsNone(error_taxonomy.stored_envelope({"error": "old row", "error_code": None}))
+		self.assertIsNone(error_taxonomy.stored_envelope({}))
+		terminal = {"error_code": "auth-invalid", "error_retryable": 0}
+		self.assertIsNotNone(error_taxonomy.stored_envelope(terminal))
+		self.assertFalse(error_taxonomy.stored_envelope(terminal)["retryable"])
+
+	def test_a_malformed_stored_blob_never_breaks_the_error_path(self):
+		env = error_taxonomy.stored_envelope({"error_code": "gateway", "error_data": "not json"})
+		self.assertEqual(env["code"], "gateway")
+		self.assertIsNone(env["data"])
+
+
+class TestErrorTaxonomyParity(unittest.TestCase):
+	"""The drift ratchet (#823). jarvis#757 and #760 both shipped out of three
+	hand-synced copies of this taxonomy. One contract file, asserted from BOTH
+	suites, is what stops a fourth: frontend/src/lib/errors.test.js asserts the JS
+	tables against the same JSON. Neither side reads it at runtime, so there is no
+	packaging dependency - it exists purely to make drift loud."""
+
+	@staticmethod
+	def _contract():
+		import json
+		import os
+
+		path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chat", "turn_error_codes.json")
+		with open(path) as fh:
+			return json.load(fh)
+
+	def test_the_python_code_table_matches_the_contract(self):
+		contract = self._contract()
+		want = {code: spec["retryable"] for code, spec in contract["codes"].items()}
+		self.assertEqual(error_taxonomy.TURN_ERROR_CODES, want)
+
+	def test_the_python_text_ladder_matches_the_contract(self):
+		# The ladder is the other half of the drift surface: two ladders that
+		# disagree make one pre-#823 row read differently before and after a
+		# refresh, which is the same defect by another route.
+		contract = self._contract()
+		got = {name: list(markers) for name, markers in error_taxonomy.MARKERS.items()}
+		self.assertEqual(got, contract["markers"])
+		status = {str(k): v for k, v in error_taxonomy.HTTP_STATUS_CODES.items()}
+		self.assertEqual(status, contract["http_status"])
+
+	def test_every_status_and_marker_target_is_a_real_code(self):
+		for code in error_taxonomy.HTTP_STATUS_CODES.values():
+			self.assertIn(code, error_taxonomy.TURN_ERROR_CODES)
 
 
 class TestPumpClassifyErrorForwardsExc(unittest.TestCase):
@@ -441,5 +735,9 @@ class TestPrepareErrorCodeOverride(FrappeTestCase):
 		self.assertEqual(published.get("code"), "internal")
 
 	def test_no_explicit_code_falls_back_to_classify_error(self):
+		# #823 split the old catch-all `provider`: an insufficient balance is an
+		# unambiguous exhaustion, which is terminal and sends the customer to their
+		# plan rather than at a Retry button that cannot help.
 		published = self._run(error="insufficient credit")
-		self.assertEqual(published.get("code"), "provider")
+		self.assertEqual(published.get("code"), "quota-exhausted")
+		self.assertFalse(published.get("retryable"))

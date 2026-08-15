@@ -33,6 +33,7 @@ import json
 
 import frappe
 
+from jarvis.chat import error_taxonomy
 from jarvis.chat import turn_state as ts
 
 TURN = "Jarvis Chat Turn"
@@ -95,18 +96,24 @@ def invoke_settlement(
 		pub_kind, pub_extra = "run:end", {"stopped": True}
 	elif kind == "relay:error":
 		err = _error_text(terminal_payload)
+		# #823: classify ONCE, then write the envelope inside the same fenced CAS
+		# that stamps the error text and publish that same envelope below. Until
+		# #823 the two were separate - the row got the text, the event got a code -
+		# so a reload re-guessed the verdict from the string and could contradict
+		# the card the customer had just read.
+		env = error_taxonomy.classify(err)
 		# Mark errored WITHOUT overwriting the streamed content (matches legacy
 		# _mark_errored: streaming=0 + error, content preserved). SUX-11: the code
 		# classification travels on the realtime event below.
 		if am:
 			ts._run_cas(
-				f"UPDATE `tab{MSG}` SET streaming=0, error=%(e)s WHERE name=%(m)s",
-				{"e": err[:1000], "m": am},
+				f"UPDATE `tab{MSG}` SET {error_taxonomy.MSG_ERROR_ASSIGNMENTS} WHERE name=%(m)s",
+				error_taxonomy.error_row_params(err, env, m=am),
 			)
 		won = ts.settle_errored(run_id, v, epoch, error=err)
 		if won:
 			ts.insert_required_effects(run_id, TERMINAL_EFFECTS)
-		pub_kind, pub_extra = "run:error", {"error": err, "code": _classify(err)}
+		pub_kind, pub_extra = "run:error", {"error": err, **error_taxonomy.publish_extra(env)}
 	else:
 		final_text = _final_text(terminal_payload)
 		# S1 final projection (final text beats the batcher tail); always clear
@@ -288,10 +295,9 @@ def _is_aborted_payload(terminal_kind, payload) -> bool:
 
 
 def _classify(err_text: str) -> str:
-	"""Preserve today's Message.error headline classification (SUX-11)."""
-	try:
-		from jarvis.chat.turn_handler import _classify_error
+	"""The Message.error headline classification (SUX-11), code only.
 
-		return _classify_error(err_text)
-	except Exception:
-		return "internal"
+	#823 kept this name for the callers that only want a code; the settlement
+	path itself now carries the full envelope (code + retryable + provider
+	metadata) so the persisted row and the published event cannot disagree."""
+	return error_taxonomy.classify(err_text)["code"]

@@ -618,6 +618,13 @@ def get_conversation(conversation: str) -> dict:
 			"content",
 			"streaming",
 			"error",
+			# jarvis#823: the persisted failure envelope. Without these three on the
+			# reload path the SPA re-guesses the verdict from the error string, which
+			# is how one failure could offer Retry before a refresh and a different
+			# verdict after one.
+			"error_code",
+			"error_retryable",
+			"error_data",
 			"recovering",
 			"stopped",
 			"tool_name",

@@ -26,6 +26,7 @@ from collections.abc import Iterator
 
 import frappe
 
+from jarvis.chat import error_taxonomy
 from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.events import publish_to_user
 from jarvis.chat.seq_watermark import wm_expr
@@ -177,6 +178,12 @@ def _finalize(row: dict, text: str) -> None:
 			"streaming": 0,
 			"recovering": 0,
 			"error": "",
+			# #823: clearing the error text has to clear the envelope with it. A
+			# recovered turn that kept a stale error_code would render the answer
+			# AND the failure card that answer just disproved.
+			"error_code": None,
+			"error_retryable": 0,
+			"error_data": None,
 			"was_recovered": 1,
 		},
 	):
@@ -265,12 +272,16 @@ def _admission_settle_conv(conversation: str, state: str, error: str | None = No
 
 
 def _error(row: dict, message: str) -> None:
+	# #823: the recovery ceiling is a real customer-visible failure and used to
+	# publish run:error with no code at all, so the SPA guessed from the text and
+	# offered Retry regardless. It now carries the same envelope every other
+	# failure path does, on the row and on the event alike.
+	env = error_taxonomy.classify(message)
 	if not _conditional_clear(
 		row["name"],
 		{
-			"streaming": 0,
+			**error_taxonomy.error_row_values(message, env),
 			"recovering": 0,
-			"error": message,
 			"was_recovered": 1,
 		},
 	):
@@ -284,6 +295,7 @@ def _error(row: dict, message: str) -> None:
 			"message_id": row["name"],
 			"run_id": "recovered",
 			"error": message,
+			**error_taxonomy.publish_extra(env),
 		},
 	)
 	_advance_macro(row["conversation"], errored=True)

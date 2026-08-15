@@ -13,6 +13,9 @@
     "content",
     "streaming",
     "error",
+    "error_code",
+    "error_retryable",
+    "error_data",
     "recovering",
     "recovery_started_at",
     "agent_seq_watermark",
@@ -74,6 +77,28 @@
       "fieldname": "error",
       "fieldtype": "Long Text",
       "label": "Error"
+    },
+    {
+      "fieldname": "error_code",
+      "fieldtype": "Data",
+      "label": "Error Code",
+      "read_only": 1,
+      "description": "jarvis#823: the stable machine code for this turn failure. Empty on rows written before #823, which the SPA still classifies from the error text."
+    },
+    {
+      "fieldname": "error_retryable",
+      "fieldtype": "Check",
+      "label": "Error Retryable",
+      "default": "0",
+      "read_only": 1,
+      "description": "jarvis#823: whether Retry can plausibly work. Authoritative only when error_code is set."
+    },
+    {
+      "fieldname": "error_data",
+      "fieldtype": "JSON",
+      "label": "Error Data",
+      "read_only": 1,
+      "description": "jarvis#823: metadata the provider supplied with the failure, e.g. resets_in_seconds."
     },
     {
       "fieldname": "recovering",

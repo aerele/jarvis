@@ -21,6 +21,7 @@ from datetime import timedelta
 import frappe
 from frappe.utils import now_datetime
 
+from jarvis.chat import error_taxonomy
 from jarvis.chat.events import publish_to_user
 
 # Error genuinely-abandoned rows (no session) after this.
@@ -70,7 +71,11 @@ def scan_and_mark_errored() -> int:
 			continue
 		# Orphaned / no session: genuinely unrecoverable.
 		if creation and creation < error_cutoff:
-			frappe.db.set_value(MSG, r["name"], {"streaming": 0, "error": _ABANDONED})
+			# #823: the sweep writes the SAME envelope shape the live paths do, so a
+			# swept row renders through the taxonomy rather than falling back to the
+			# SPA's text guess.
+			env = error_taxonomy.classify(_ABANDONED)
+			frappe.db.set_value(MSG, r["name"], error_taxonomy.error_row_values(_ABANDONED, env))
 			if r.get("owner"):
 				publish_to_user(
 					r["owner"],
@@ -79,6 +84,7 @@ def scan_and_mark_errored() -> int:
 						"conversation_id": r["conversation"],
 						"message_id": r["name"],
 						"error": _ABANDONED,
+						**error_taxonomy.publish_extra(env),
 					},
 				)
 			errored += 1
@@ -203,6 +209,9 @@ def _sweep_orphan_turns(now) -> int:
 		# Second strike: give the user the normal error + retry surface.
 		from jarvis.chat.api import _next_seq
 
+		# #823: the orphan row is BORN errored, so it carries the envelope from
+		# insert - there is no live event that could have supplied it later.
+		env = error_taxonomy.classify(_ORPHAN_ERR)
 		err = frappe.get_doc(
 			{
 				"doctype": MSG,
@@ -210,8 +219,7 @@ def _sweep_orphan_turns(now) -> int:
 				"seq": _next_seq(r["conversation"]),
 				"role": "assistant",
 				"content": "",
-				"streaming": 0,
-				"error": _ORPHAN_ERR,
+				**error_taxonomy.error_row_values(_ORPHAN_ERR, env),
 			}
 		)
 		err.insert(ignore_permissions=True)
@@ -223,6 +231,7 @@ def _sweep_orphan_turns(now) -> int:
 					"conversation_id": r["conversation"],
 					"message_id": err.name,
 					"error": _ORPHAN_ERR,
+					**error_taxonomy.publish_extra(env),
 				},
 			)
 		errored += 1

@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis import compat
-from jarvis.chat import agent_session_pool, seq_watermark, vision
+from jarvis.chat import agent_session_pool, error_taxonomy, seq_watermark, vision
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode
 
@@ -962,14 +962,21 @@ def handle_chat_send(payload: dict) -> None:
 		# changed_data: pass False only when we KNOW nothing was written (a
 		# pre-ack failure - the run never started). The SPA turns that into a
 		# "No changes were made to your data" reassurance; omit it when unknown.
-		_mark_errored(assistant_msg.name, err)
+		#
+		# #823: ONE envelope is classified here and then both persisted on the row
+		# and published on the event, so the live card and the card a reload draws
+		# say the same thing. `code`, when a caller already knows the cause, still
+		# wins - it takes its retryable from the taxonomy table rather than from a
+		# second guess.
+		env = error_taxonomy.envelope(code) if code else error_taxonomy.classify(err, exc)
+		_mark_errored(assistant_msg.name, err, env)
 		payload = {
 			"kind": "run:error",
 			"conversation_id": conversation_id,
 			"message_id": assistant_msg.name,
 			"run_id": run_id,
 			"error": err,
-			"code": code or _classify_error(err, exc),
+			**error_taxonomy.publish_extra(env),
 		}
 		if changed_data is not None:
 			payload["changed_data"] = bool(changed_data)
@@ -1344,9 +1351,11 @@ def handle_chat_send(payload: dict) -> None:
 		# it errored, publish run:error, then re-raise so RQ records the
 		# job as failed (and the operator gets a normal Error Log entry).
 		try:
+			backstop = error_taxonomy.envelope("internal")
 			_mark_errored(
 				assistant_msg.name,
 				f"unexpected worker error: {type(e).__name__}",
+				backstop,
 			)
 			_publish_to_user(
 				user,
@@ -1357,7 +1366,7 @@ def handle_chat_send(payload: dict) -> None:
 					"run_id": run_id,
 					# Don't leak full str(e) - the operator-safe identifier is
 					# the exception class; the full traceback is in Error Log.
-					"code": "internal",
+					**error_taxonomy.publish_extra(backstop),
 					"error": f"{type(e).__name__}",
 				},
 			)
@@ -2020,75 +2029,33 @@ def _create_assistant_placeholder(conv) -> "frappe.model.document.Document":
 
 
 def _classify_error(err_text: str, exc=None) -> str:
-	"""Map a raw error into a small operator-facing taxonomy code the SPA turns
-	into a plain-language headline + hint. The raw text still travels as
-	``error`` and shows behind a "Show details" disclosure - this only picks
-	the headline/hint. Mirrored in frontend/src/lib/errors.js
-	(classifyTurnErrorCode) for the no-``code`` refresh path - errorMeta in
-	ChatView.vue is not persisted, so a reload reclassifies from the stored
-	error string alone. Keep both in sync when either changes (#702)."""
-	code = getattr(exc, "code", None)
-	if code == "turn-timeout":
-		return "timeout"
-	low = (err_text or "").lower()
-	# The worker's own last-resort backstop (this module's outer
-	# ``except Exception`` around handle_chat_send) stamps code="internal"
-	# explicitly and never calls this function, but a page refresh only has
-	# the persisted string - match its wording here so the two agree.
-	if low.startswith("unexpected worker error"):
-		return "internal"
-	# "connection timed out" is a transport failure (we could not reach the
-	# gateway), not a generic timeout (the model took too long to answer) -
-	# keep it in this branch, matching classifyTurnErrorCode in
-	# frontend/src/lib/errors.js, so the same text does not classify as
-	# "unreachable" live and "timeout" on a reload.
-	if (
-		isinstance(exc, AgentUnreachableError)
-		or "ws open failed" in low
-		or "unreachable" in low
-		or "connection timed out" in low
-	):
-		return "unreachable"
-	if "recovery window" in low:
-		return "recovery-expired"
-	if "timed out" in low or "timeout" in low or "deadline" in low:
-		return "timeout"
-	if any(
-		k in low
-		for k in (
-			"quota",
-			"rate limit",
-			"rate-limit",
-			"cooldown",
-			"overloaded",
-			"insufficient",
-			"credit",
-			"billing",
-		)
-	):
-		return "provider"
-	# #702: a run that reached this branch already got an ack and started -
-	# it is a mid-run failure the agent reported for itself (relay:error), not
-	# a case where WE failed to reach the gateway (that is "unreachable",
-	# above) or a specific provider rejection (that is "provider", above).
-	# The agent's own wording here is not reliable: "LLM request failed:
-	# network connection error." was the verbatim text for a turn that
-	# actually failed because the agent's paired-device file was mid-rewrite,
-	# nothing to do with the network. Defaulting to "gateway" instead of the
-	# old "internal" tells the customer this is likely transient and worth a
-	# retry, rather than the unhelpful "something went wrong".
-	return "gateway"
+	"""The taxonomy CODE for one turn failure.
+
+	#823 moved the taxonomy itself into ``jarvis.chat.error_taxonomy``, which
+	returns that code together with the ``retryable`` boolean the SPA gates its
+	Retry button on, and with any metadata the provider supplied. This wrapper
+	stays because several callers genuinely only want the code, and because the
+	name is referenced from tests and sibling modules.
+
+	Prefer ``error_taxonomy.classify`` in new code. Dropping the envelope and
+	keeping only the code is precisely what let a terminal failure (a revoked
+	key, a model that does not exist) keep offering a Retry button that could
+	never work."""
+	return error_taxonomy.classify(err_text, exc)["code"]
 
 
-def _mark_errored(assistant_msg_name: str, error: str) -> None:
-	frappe.db.set_value(
-		MSG,
-		assistant_msg_name,
-		{
-			"streaming": 0,
-			"error": error,
-		},
-	)
+def _mark_errored(assistant_msg_name: str, error: str, env: dict | None = None) -> None:
+	"""Write a turn failure to its assistant row, envelope included.
+
+	``env`` is an ``error_taxonomy.classify`` result. Persisting it next to the
+	text is the fix for the before/after-refresh divergence: until #823 the
+	classification existed only on the realtime event, so reloading the page
+	re-guessed the verdict from the stored string and could contradict what the
+	customer had just read. Callers with no envelope in hand get one classified
+	from the text here, so the columns are never left half-written."""
+	if env is None:
+		env = error_taxonomy.classify(error)
+	frappe.db.set_value(MSG, assistant_msg_name, error_taxonomy.error_row_values(error, env))
 	frappe.db.commit()
 
 
@@ -2213,7 +2180,8 @@ def _handle_event_inner(
 					},
 				)
 				return
-			_mark_errored(assistant_msg_name, err_text)
+			env = error_taxonomy.classify(err_text)
+			_mark_errored(assistant_msg_name, err_text, env)
 			_publish_to_user(
 				user,
 				{
@@ -2221,7 +2189,7 @@ def _handle_event_inner(
 					"conversation_id": conversation_id,
 					"message_id": assistant_msg_name,
 					"run_id": run_id,
-					"code": _classify_error(err_text),
+					**error_taxonomy.publish_extra(env),
 					"error": event.get("error"),
 				},
 			)

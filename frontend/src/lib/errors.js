@@ -91,45 +91,245 @@ export function errHtml(e, fallback) {
 }
 
 // ---------------------------------------------------------------------------
-// Chat TURN failures (#702): the counterpart to errMessage() above, for a
-// chat turn's `error` column instead of a Frappe API exception. That text is
-// raw prose relayed from the agent gateway over the realtime channel, sometimes
-// verbatim - #702 was the agent reporting "LLM request failed: network
-// connection error." for a turn that failed for an entirely different reason
-// (a device-pairing file caught mid-rewrite), which the SPA had no way to
-// tell apart from a real network failure. Mirrors the operator-facing
-// taxonomy in jarvis/chat/turn_handler.py::_classify_error - keep both in
-// sync when either changes.
+// Chat TURN failures (#702, reworked by #823): the counterpart to errMessage()
+// above, for a chat turn's `error` column instead of a Frappe API exception.
 //
-// A live run:error event carries its own `code` (server-classified, richer
-// context available there - e.g. the raised exception's type). A reloaded
-// conversation only has the persisted error STRING (errorMeta in
-// ChatView.vue is not persisted), so it falls back to classifying that text
-// here. turnErrorInfo() is the single entry point for both cases.
+// #702 gave the turn error a code. #823 gives it a `retryable` boolean and a
+// place to live. Before #823 the SPA offered Retry on every code except
+// `cancelled`, so a revoked key, a model that does not exist and an exhausted
+// quota all got a button that could not possibly work; and the classification
+// was never persisted, so the same failure could read one way live and another
+// way after a refresh.
+//
+// The server now attaches an envelope - {code, retryable, resets_in_seconds} -
+// to the live run:error event AND to the message row, so both paths render
+// identically. This file owns only the COPY for each code (the seam rule from
+// the Error & Copy Book: the backend supplies codes, the frontend supplies
+// sentences). The retryable column below is the same table the backend keeps in
+// jarvis/chat/error_taxonomy.py, and jarvis/chat/turn_error_codes.json is the
+// contract both are tested against, so the three cannot drift the way the old
+// hand-synced copies did (#757, #760).
+//
+// classifyTurnErrorCode below survives for ONE case: a message row written
+// before #823, which has an error string and no code. It is the last resort,
+// not the normal path.
 //
 // MUST be total, same contract as errMessage above: given ANY shape of
 // input, this never throws.
-const TURN_ERROR_HEADLINES = {
-	unreachable: "I couldn't reach the assistant",
-	timeout: "That took too long",
-	provider: "The model is busy right now",
-	"recovery-expired": "This took too long, so I stopped waiting",
-	gateway: "A temporary problem interrupted this",
-	internal: "Something went wrong",
-	cancelled: "This message was cancelled",
+//
+// Copy follows the Error & Copy Book: title, one sentence, one action; no em
+// dashes; and a terminal failure says what to do instead of offering a retry.
+// `memberHint`/`action` exist for codes only an admin can fix - a member is told
+// who to ask rather than shown a button the server would refuse.
+// Exported for the parity test only: errors.test.js asserts this table against
+// jarvis/chat/turn_error_codes.json, the contract the Python taxonomy is tested
+// against too.
+export const TURN_ERROR_CODES = {
+	// --- terminal: retrying cannot help, so the card offers the real remedy ---
+	cancelled: {
+		retryable: false,
+		headline: "This message was cancelled.",
+		// No hint: a cancelled turn renders as a muted status note, never the red
+		// error card.
+		hint: "",
+	},
+	"quota-exhausted": {
+		retryable: false,
+		headline: "Your plan hit a limit.",
+		// The Error & Copy Book's canonical wording for this state. There is no
+		// Retry because clicking one changes nothing until the limit resets; the
+		// customer can still send a fresh message once they have dealt with it.
+		hint: "Check your plan, then try again.",
+		memberHint: "Ask your administrator to check the plan.",
+		action: "billing",
+	},
+	"auth-invalid": {
+		retryable: false,
+		headline: "Your model connection was rejected.",
+		hint: "Reconnect the model in Settings.",
+		memberHint: "Ask your administrator to reconnect the model.",
+		action: "settings",
+	},
+	"model-not-found": {
+		retryable: false,
+		headline: "That model is not available.",
+		hint: "Pick a different model in Settings.",
+		memberHint: "Ask your administrator to pick another model.",
+		action: "settings",
+	},
+	"context-overflow": {
+		retryable: false,
+		headline: "This chat is too long.",
+		hint: "Start a new chat, or ask for less at once.",
+	},
+	"agent-unpaired": {
+		retryable: false,
+		headline: "Your workspace needs reconnecting.",
+		// The book's pattern for a "needs a person" state: one sentence saying who
+		// is on it, plus a real Contact support button rather than the words
+		// "contact support" sitting inert in the prose. The action drops to nothing
+		// on a build where support is not available, and the hint still says a
+		// human is handling it, so the card is never a silent dead end.
+		hint: "Our team has been notified.",
+		action: "support",
+	},
+	// --- retryable ---
+	unreachable: {
+		retryable: true,
+		headline: "I couldn't reach the assistant.",
+		hint: "Check your connection, then try again.",
+	},
+	timeout: {
+		retryable: true,
+		headline: "That took too long.",
+		hint: "Try again, or ask for less at once.",
+	},
+	throttled: {
+		retryable: true,
+		headline: "The model is busy right now.",
+		hint: "Try again in a moment.",
+	},
+	"recovery-expired": {
+		retryable: true,
+		headline: "This took too long, so I stopped.",
+		hint: "Send your message again.",
+	},
+	gateway: {
+		retryable: true,
+		headline: "A temporary problem interrupted this.",
+		hint: "Try sending your message again.",
+	},
+	internal: {
+		retryable: true,
+		headline: "Something went wrong.",
+		hint: "Try again. If it keeps happening, contact support.",
+	},
+	// Pre-#823 code for "busy / quota / billing", now split into `throttled` and
+	// `quota-exhausted`. Nothing produces it any more; it stays so an in-flight
+	// event or an externally supplied code still renders a sentence.
+	provider: {
+		retryable: true,
+		headline: "The model is busy right now.",
+		hint: "Try again in a moment.",
+	},
 };
 
-// The "what you can do" line (ActionError.vue's `hint` slot; the turn-error
-// card in ChatView.vue mirrors that shape). No entry for `cancelled` - a
-// cancelled turn renders as a muted status note, never the red error card.
-const TURN_ERROR_HINTS = {
-	unreachable: "Check your connection, then try again.",
-	timeout: "This can happen on a large request. Try again, or ask for less at once.",
-	provider:
-		"This looks like a provider limit or billing issue. Check your plan, then try again.",
-	"recovery-expired": "Send your message again to start a fresh run.",
-	gateway: "This is usually a brief hiccup on our side. Try sending your message again.",
-	internal: "Try again. If it keeps happening, contact support.",
+// A reset clock the provider named, as a phrase a person reads. Deliberately
+// coarse: the exact second is noise, and "about" keeps it honest when the
+// provider's own clock drifts.
+function formatResetWait(seconds) {
+	const s = Number(seconds);
+	if (!Number.isFinite(s) || s <= 0) return "";
+	if (s < 90) return "a moment";
+	if (s < 3600) return `about ${Math.round(s / 60)} minutes`;
+	// Days matter: a monthly quota reset is a real value the server will persist
+	// (it accepts a clock up to 30 days), and "about 720 hours" is not a sentence
+	// anyone should read.
+	if (s < 36 * 3600) {
+		const hours = Math.round(s / 3600);
+		return hours === 1 ? "about an hour" : `about ${hours} hours`;
+	}
+	const days = Math.round(s / 86400);
+	return days === 1 ? "about a day" : `about ${days} days`;
+}
+
+// The text ladder, mirroring jarvis/chat/error_taxonomy.py tier for tier so a
+// pre-#823 row classifies here exactly as the server would. The marker lists
+// live in jarvis/chat/turn_error_codes.json, which BOTH suites assert their own
+// copy against: the three hand-synced ladders are what shipped #757 and #760,
+// and a fixture both sides are tested on is what stops a fourth.
+//
+// EXHAUSTED (a definitive refusal with an hours-scale reset clock - terminal)
+// versus THROTTLED (transient back-pressure - worth retrying) follows the host
+// plane's own rule, so the two planes cannot disagree about the same provider.
+const OVERFLOW_MARKERS = [
+	"maximum context length",
+	"context_length_exceeded",
+	"context length exceeded",
+	"prompt is too long",
+	"prompt too large",
+	"too many tokens",
+	"reduce the length of the messages",
+];
+// Every entry is an unambiguous slug or a vendor's verbatim exhaustion sentence,
+// never a bare English word: Gemini writes "You exceeded your current quota" for
+// an ordinary per-minute throttle as readily as for a spent balance, so a bare
+// "quota" here would strand a customer on a failure a retry would have fixed. An
+// ambiguous 429 falls through to the status check and reads as `throttled`.
+// Terminal is the expensive verdict and has to be earned.
+const EXHAUSTED_MARKERS = [
+	"usage_limit_reached",
+	"model_cooldown",
+	"usage_limit",
+	"insufficient_quota",
+	"insufficient_balance",
+	"insufficient balance",
+	"insufficient credit",
+	"insufficient funds",
+	"credit balance is too low",
+	"billing_hard_limit",
+	"out of credits",
+];
+const MODEL_MARKERS = [
+	"model_not_found",
+	"model not found",
+	"unknown model",
+	"does not exist or you do not have access",
+	"is not a valid model",
+	"unsupported model",
+	"no such model",
+];
+const AUTH_MARKERS = [
+	"invalid_api_key",
+	"invalid api key",
+	"incorrect api key",
+	"authentication_error",
+	"authentication failed",
+	"unauthorized",
+	"api key not valid",
+	"no api key found",
+	"permission_denied",
+	"subscription_rejected",
+	"credential",
+];
+const THROTTLE_MARKERS = [
+	"rate_limit_exceeded",
+	"rate limit",
+	"rate-limit",
+	"ratelimit",
+	"too many requests",
+	"overloaded",
+	"capacity",
+	"cooldown",
+];
+const UNREACHABLE_MARKERS = ["ws open failed", "unreachable", "connection timed out"];
+const TIMEOUT_MARKERS = ["timed out", "timeout", "deadline"];
+
+// The vendor's own HTTP status, written the two ways vendors write it. A bare
+// three-digit number anywhere in the text is NOT read as a status: that would
+// take a token count or a model name for one.
+const STATUS_PAREN = /\((\d{3})\)/;
+const STATUS_WORD = /\b(?:http[ _-]?)?(?:status|error)[ _-]?code[:= ]\s*(\d{3})\b/i;
+const STATUS_CODES = {
+	401: "auth-invalid",
+	402: "quota-exhausted",
+	403: "auth-invalid",
+	404: "model-not-found",
+	429: "throttled",
+};
+
+// Exported for the parity test only, alongside TURN_ERROR_CODES.
+export const TURN_ERROR_MATCHERS = {
+	markers: {
+		overflow: OVERFLOW_MARKERS,
+		exhausted: EXHAUSTED_MARKERS,
+		model: MODEL_MARKERS,
+		auth: AUTH_MARKERS,
+		throttle: THROTTLE_MARKERS,
+		unreachable: UNREACHABLE_MARKERS,
+		timeout: TIMEOUT_MARKERS,
+	},
+	http_status: STATUS_CODES,
 };
 
 function classifyTurnErrorCode(raw) {
@@ -137,6 +337,7 @@ function classifyTurnErrorCode(raw) {
 	// an object) would otherwise reach .toLowerCase() below and throw, which
 	// classifyErrorCode (the function this replaced) did not guard against.
 	const low = String(raw ?? "").toLowerCase();
+	const has = (markers) => markers.some((k) => low.includes(k));
 	// Phase-0 admission cancel markers: a queued turn cancelled by the user or
 	// aged out by the system leaves a durable transcript marker so a later
 	// reload shows WHY there's no reply (not a silent drop). Classified as
@@ -150,30 +351,27 @@ function classifyTurnErrorCode(raw) {
 	// Mirrors the worker's own explicit code="internal" backstop
 	// (turn_handler.py's last-resort `except Exception`) so a reload, which
 	// only has the persisted string, classifies it the same way the live
-	// event did - not as the new "gateway" default below.
+	// event did - not as the "gateway" default below.
 	if (low.startsWith("unexpected worker error")) return "internal";
-	if (
-		low.includes("ws open failed") ||
-		low.includes("unreachable") ||
-		low.includes("connection timed out")
-	)
-		return "unreachable";
+
+	// Structure the provider put in the sentence. Markers run before the status
+	// so a 429 that names a usage limit reads as exhausted (terminal) rather than
+	// as ordinary back-pressure - the distinction the next action turns on.
+	if (has(OVERFLOW_MARKERS)) return "context-overflow";
+	if (has(EXHAUSTED_MARKERS)) return "quota-exhausted";
+	if (has(MODEL_MARKERS)) return "model-not-found";
+	if (has(AUTH_MARKERS)) return "auth-invalid";
+	if (has(THROTTLE_MARKERS)) return "throttled";
+	const m = STATUS_PAREN.exec(low) || STATUS_WORD.exec(low);
+	if (m && STATUS_CODES[m[1]]) return STATUS_CODES[m[1]];
+
+	// The legacy keyword tier. "connection timed out" is a transport failure (we
+	// could not reach the gateway), not the model taking too long, so it stays
+	// ahead of the timeout markers - the Python ladder orders it the same way, or
+	// one string would read as unreachable live and timeout on a reload.
+	if (has(UNREACHABLE_MARKERS)) return "unreachable";
 	if (low.includes("recovery window")) return "recovery-expired";
-	if (low.includes("timed out") || low.includes("timeout") || low.includes("deadline"))
-		return "timeout";
-	if (
-		[
-			"quota",
-			"rate limit",
-			"rate-limit",
-			"cooldown",
-			"overloaded",
-			"insufficient",
-			"credit",
-			"billing",
-		].some((k) => low.includes(k))
-	)
-		return "provider";
+	if (has(TIMEOUT_MARKERS)) return "timeout";
 	// #702: the agent's own mid-run failure text (e.g. "LLM request failed:
 	// network connection error.", relayed verbatim) is not a reliable signal
 	// that the network was actually the problem - see the module comment
@@ -186,19 +384,81 @@ function classifyTurnErrorCode(raw) {
 	return "gateway";
 }
 
-// Combined, TOTAL turn-error envelope: {code, headline, hint}. `explicitCode`
-// is the live run:error event's own `code` field when present, and always
-// wins over re-classifying `raw`; pass "" (or omit it) for a reloaded
-// conversation, which only has the persisted string.
-export function turnErrorInfo(raw, explicitCode) {
+// Reset seconds off a live event or a persisted row, whichever shape arrived.
+function resetsFrom(meta) {
+	const v = meta && (meta.resets_in_seconds ?? meta.resetsInSeconds);
+	const n = Number(v);
+	return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// Combined, TOTAL turn-error envelope:
+//   {code, headline, hint, retryable, action, resetsInSeconds}
+//
+// `meta` is the server's envelope - a live run:error event's
+// {code, retryable, resets_in_seconds}, or the same three read off a persisted
+// message row. A bare string is accepted too, which is what the pre-#823 call
+// shape passed. Envelope first: a server-supplied code always wins over
+// re-classifying `raw`, and a server-supplied `retryable` always wins over the
+// table, because the server saw the raised exception and the gateway's own
+// rejection code and this file only ever sees prose.
+//
+// `opts.canConfigure` says whether this user can act on an ADMIN remedy - the
+// model settings and the plan page are both admin-only, server-side. A member
+// who cannot is told who to ask instead of being shown a button the server would
+// refuse. `opts.canContactSupport` does the same for the support desk, which
+// some builds do not have at all. Both default to true so a caller that passes
+// no options gets the full-capability card.
+export function turnErrorInfo(raw, meta, opts) {
 	try {
-		const code = explicitCode || classifyTurnErrorCode(raw);
+		const m = typeof meta === "string" ? { code: meta } : meta || {};
+		const code = m.code || classifyTurnErrorCode(raw);
+		// An unrecognised wire code (a future server taxonomy value this build does
+		// not know yet) degrades to the generic headline with NO hint: inventing a
+		// remedy for a code we cannot name would be worse than saying nothing. It
+		// stays retryable for the same reason the server's guess tier does - the
+		// one verdict never to reach for on no evidence is "this can never work".
+		const entry = TURN_ERROR_CODES[code] || {
+			retryable: true,
+			headline: TURN_ERROR_CODES.internal.headline,
+			hint: "",
+		};
+		const canConfigure = !opts || opts.canConfigure !== false;
+		const canContactSupport = !opts || opts.canContactSupport !== false;
+		// A remedy the user cannot perform is not a remedy. Swap in the "who to
+		// ask" wording where there is one and drop the button, rather than render a
+		// dead end. Both `settings` and `billing` are admin-only server-side, which
+		// is why they gate together - the plan page's own Renew button already
+		// hides from a member for exactly this reason.
+		const gated =
+			(entry.action === "settings" || entry.action === "billing") && !canConfigure
+				? true
+				: entry.action === "support" && !canContactSupport;
+		const resetsInSeconds = resetsFrom(m);
+		let hint = gated && entry.memberHint ? entry.memberHint : entry.hint || "";
+		// Name the wait when the provider named it. "Try again in a moment" is
+		// true but useless when the real answer is forty minutes, and a terminal
+		// limit is a lot easier to accept with a time on it.
+		const wait = code === "cancelled" ? "" : formatResetWait(resetsInSeconds);
+		if (wait) hint = entry.retryable ? `Try again in ${wait}.` : `It resets in ${wait}.`;
 		return {
 			code,
-			headline: TURN_ERROR_HEADLINES[code] || TURN_ERROR_HEADLINES.internal,
-			hint: TURN_ERROR_HINTS[code] || "",
+			headline: entry.headline || TURN_ERROR_CODES.internal.headline,
+			hint,
+			// `retryable` is what the Retry button is gated on. The server's word
+			// wins; the table answers for a legacy row that has no envelope.
+			retryable: typeof m.retryable === "boolean" ? m.retryable : !!entry.retryable,
+			action: gated ? null : entry.action || null,
+			resetsInSeconds,
 		};
 	} catch {
-		return { code: "internal", headline: TURN_ERROR_HEADLINES.internal, hint: "" };
+		const fallback = TURN_ERROR_CODES.internal;
+		return {
+			code: "internal",
+			headline: fallback.headline,
+			hint: "",
+			retryable: true,
+			action: null,
+			resetsInSeconds: 0,
+		};
 	}
 }

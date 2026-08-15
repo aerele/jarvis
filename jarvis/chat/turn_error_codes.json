@@ -1,0 +1,96 @@
+{
+	"_comment": [
+		"jarvis#823 - the ONE contract for the chat turn error taxonomy.",
+		"Read by NEITHER side at runtime: it is the fixture both test suites assert",
+		"their own table against, so the Python taxonomy (jarvis/chat/error_taxonomy.py)",
+		"and the JS taxonomy (frontend/src/lib/errors.js) cannot drift the way the",
+		"three hand-synced copies did in jarvis#757 and jarvis#760.",
+		"`codes` pins the taxonomy and which failures a Retry button may appear on.",
+		"`markers` pins the text ladder both sides run for a message row written",
+		"before #823, which has an error string and no code - if those two ladders",
+		"disagree, one failure reads differently before and after a page refresh,",
+		"which is the exact defect #823 exists to close.",
+		"Adding a code or a marker means editing THREE files in one commit: this one,",
+		"the Python table, and the JS table. Both suites go red until all three agree."
+	],
+	"codes": {
+		"agent-unpaired": { "retryable": false },
+		"auth-invalid": { "retryable": false },
+		"cancelled": { "retryable": false },
+		"context-overflow": { "retryable": false },
+		"gateway": { "retryable": true },
+		"internal": { "retryable": true },
+		"model-not-found": { "retryable": false },
+		"provider": { "retryable": true },
+		"quota-exhausted": { "retryable": false },
+		"recovery-expired": { "retryable": true },
+		"throttled": { "retryable": true },
+		"timeout": { "retryable": true },
+		"unreachable": { "retryable": true }
+	},
+	"markers": {
+		"overflow": [
+			"maximum context length",
+			"context_length_exceeded",
+			"context length exceeded",
+			"prompt is too long",
+			"prompt too large",
+			"too many tokens",
+			"reduce the length of the messages"
+		],
+		"exhausted": [
+			"usage_limit_reached",
+			"model_cooldown",
+			"usage_limit",
+			"insufficient_quota",
+			"insufficient_balance",
+			"insufficient balance",
+			"insufficient credit",
+			"insufficient funds",
+			"credit balance is too low",
+			"billing_hard_limit",
+			"out of credits"
+		],
+		"model": [
+			"model_not_found",
+			"model not found",
+			"unknown model",
+			"does not exist or you do not have access",
+			"is not a valid model",
+			"unsupported model",
+			"no such model"
+		],
+		"auth": [
+			"invalid_api_key",
+			"invalid api key",
+			"incorrect api key",
+			"authentication_error",
+			"authentication failed",
+			"unauthorized",
+			"api key not valid",
+			"no api key found",
+			"permission_denied",
+			"subscription_rejected",
+			"credential"
+		],
+		"throttle": [
+			"rate_limit_exceeded",
+			"rate limit",
+			"rate-limit",
+			"ratelimit",
+			"too many requests",
+			"overloaded",
+			"capacity",
+			"cooldown"
+		],
+		"unreachable": ["ws open failed", "unreachable", "connection timed out"],
+		"timeout": ["timed out", "timeout", "deadline"]
+	},
+	"http_status": {
+		"401": "auth-invalid",
+		"402": "quota-exhausted",
+		"403": "auth-invalid",
+		"404": "model-not-found",
+		"429": "throttled"
+	}
+}

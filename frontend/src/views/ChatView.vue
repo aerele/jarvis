@@ -985,7 +985,15 @@
 												{{ m.error }}
 											</div>
 										</details>
+										<!-- #823: Retry appears ONLY on a failure a retry could plausibly
+										     fix. Before #823 it rendered on every code but `cancelled`, so a
+										     revoked key, a model that does not exist and an exhausted quota
+										     each got a button that could never work. A terminal failure gets
+										     the corrective action instead (Settings to fix the connection or
+										     the model, the plan page for a limit), and nothing at all when
+										     there is no action the customer can take. -->
 										<button
+											v-if="errorInfo(m).retryable"
 											class="jv-retry"
 											@click="retry(m.name)"
 											:disabled="retrying"
@@ -1007,6 +1015,28 @@
 											}"
 										>
 											{{ retrying ? "Retrying…" : "Retry" }}
+										</button>
+										<button
+											v-else-if="errorInfo(m).action"
+											class="jv-retry"
+											@click="runErrorAction(errorInfo(m).action)"
+											:style="{
+												marginTop: '10px',
+												display: 'inline-flex',
+												alignItems: 'center',
+												gap: '6px',
+												padding: '6px 12px',
+												background: 'var(--red)',
+												color: '#fff',
+												border: 'none',
+												borderRadius: '7px',
+												fontFamily: 'inherit',
+												fontSize: '12px',
+												fontWeight: '550',
+												cursor: 'pointer',
+											}"
+										>
+											{{ TURN_ERROR_ACTION_LABELS[errorInfo(m).action] }}
 										</button>
 									</div>
 								</div>
@@ -4695,7 +4725,12 @@ const currentRunId = ref(null);
 const stoppedRunId = ref(null);
 const stoppedMsgIds = ref(new Set()); // assistant rows the user stopped — ignore later (incl. "recovered") events for them
 const currentMsgId = ref(null); // in-flight assistant row id (from run:start) — lets Stop pin the reply even before the first token
-const errorMeta = ref({}); // { [message_id]: { code, changed_data } } from a live run:error (not persisted; a refresh falls back to classifying the error string)
+// { [message_id]: { code, retryable, resets_in_seconds, changed_data } } from a
+// live run:error. #823 persists the same envelope on the message row, so a
+// refresh no longer re-guesses the verdict from the error string; this ref only
+// covers the window before the transcript reloads. `changed_data` stays
+// event-only - it is per-publish context, not part of the taxonomy.
+const errorMeta = ref({});
 // Pump streaming (Relay Pump) end-to-end epoch/seq fence (CDX-3 + CDX-12). The pure fence
 // logic lives in @/utils/eventFence.js (extracted so it is unit-tested by a real node test
 // — jarvis/tests/test_event_fence_client.py runs frontend/src/utils/eventFence.test.js).
@@ -4969,11 +5004,12 @@ const recoveringLabel = computed(() =>
 		? "That was a big one — reorganizing the conversation and retrying…"
 		: "Reconnecting — your answer will appear here when it's ready."
 );
-// Failure taxonomy → a plain-language headline + "what you can do" hint. The
-// raw string still shows behind "Show details". `code` comes from the live
-// run:error event; a refresh (which only has the persisted string)
-// reclassifies it. See lib/errors.js turnErrorInfo (#702) - the single,
-// tested source for this mapping, shared with errorInfo() below.
+// Failure taxonomy → a plain-language headline, a "what you can do" hint, and
+// the retryable flag the Retry button is gated on. The raw string still shows
+// behind "Show details". The code and the flag come from the server, on the live
+// run:error event and on the message row alike (#823), so both paths render the
+// same card. See lib/errors.js turnErrorInfo - the single, tested source for
+// this mapping, shared with errorInfo() below.
 // Phase-0 admission (chat concurrency): the ONLY place a Turn's internal state
 // name maps to user-facing copy (SUX-8). No raw internal state name
 // ("dispatching", "queued", …) ever renders in the UI. `queued` takes a
@@ -5003,12 +5039,79 @@ function queuedChipLabel(pos, state) {
 	if (state && TURN_STATE_COPY[state] && state !== "queued") return TURN_STATE_COPY[state]();
 	return TURN_STATE_COPY.queued(pos);
 }
-// #702: {code, headline, hint} for one message's turn error - `turnErrorInfo`
-// (lib/errors.js) is the single, tested classifier; this only adds the
-// `noChange` flag, which is per-event metadata, not part of the taxonomy.
+// #702/#823: {code, headline, hint, retryable, action} for one message's turn
+// error. `turnErrorInfo` (lib/errors.js) is the single, tested classifier; this
+// only decides WHICH envelope to hand it, and adds the `noChange` flag, which is
+// per-event metadata rather than part of the taxonomy.
+//
+// #823: the live event's envelope and the one persisted on the row are now the
+// SAME envelope, so the two branches below agree by construction - that is the
+// fix for a failure reading one way live and another way after a refresh. The
+// row wins when it has a code, being the durable record; the live event answers
+// for a message the current page has not reloaded. A row written before #823 has
+// neither and falls back to classifying its error text.
 function errorInfo(m) {
 	const meta = errorMeta.value[m.name] || {};
-	return { ...turnErrorInfo(m.error, meta.code), noChange: meta.changed_data === false };
+	// Memoised: the template reads this ~9 times for a single errored message
+	// (headline, hint, both button branches, …) and each call would otherwise
+	// re-derive the envelope and re-parse `error_data` from scratch. The key
+	// covers everything the result depends on, so a live event arriving for this
+	// message invalidates the entry at once.
+	const key = `${m.error}|${m.error_code}|${m.error_retryable}|${m.error_data}|${meta.code}|${meta.retryable}|${meta.resets_in_seconds}|${meta.changed_data}`;
+	const hit = errorInfoCache.get(m.name);
+	if (hit && hit.key === key) return hit.info;
+	const envelope = m.error_code
+		? {
+				code: m.error_code,
+				retryable: !!m.error_retryable,
+				resets_in_seconds: resetsFromRow(m),
+		  }
+		: meta;
+	const info = {
+		...turnErrorInfo(m.error, envelope, {
+			canConfigure: canConnectModel,
+			canContactSupport: supportAvailable,
+		}),
+		noChange: meta.changed_data === false,
+	};
+	errorInfoCache.set(m.name, { key, info });
+	return info;
+}
+// One entry per message, replaced whenever that message's error state changes.
+// A plain Map, not a ref: nothing renders FROM it, it only avoids repeating work
+// inside a render already driven by `messages` and `errorMeta`.
+const errorInfoCache = new Map();
+// Support is a build-level capability (some deployments ship without the desk)
+// AND a per-user one, so the Contact support remedy is gated on both, exactly as
+// the router's own /support guard is.
+const supportAvailable = !!(window.support_available && window.has_support_access);
+
+// The row's `error_data` arrives as a JSON string from the message list and as
+// an object from anywhere that already parsed it. Tolerate both, and never let a
+// malformed blob break the error card - the card IS the failure path.
+function resetsFromRow(m) {
+	const raw = m.error_data;
+	if (!raw) return 0;
+	try {
+		const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+		return Number(d && d.resets_in_seconds) || 0;
+	} catch {
+		return 0;
+	}
+}
+
+// The remedy a non-retryable failure offers in place of a Retry that cannot
+// work. Every destination already exists for another banner on this page, so
+// this routes to them rather than inventing a surface.
+const TURN_ERROR_ACTION_LABELS = {
+	settings: "Open Settings",
+	billing: "Open plan",
+	support: "Contact support",
+};
+function runErrorAction(action) {
+	if (action === "settings") goConnectModel();
+	else if (action === "billing") goRenew();
+	else if (action === "support") router.push({ name: "SupportNew" });
 }
 // Live elapsed timer shown next to the status line so a long turn reads as
 // "still working" (time ticking) rather than a frozen spinner. Hidden for the
@@ -8760,9 +8863,18 @@ function onEvent(p) {
 			resyncPendingConfirmations(currentId.value);
 			if (queuedTurn.value && queuedTurn.value.run_id === p.run_id) queuedTurn.value = null;
 			if (p.message_id) {
+				// #823: keep the whole envelope, not just the code. `retryable` is what
+				// the Retry button is gated on, and it must survive the window between
+				// this event and the reload below - the row carries the same values, so
+				// the card does not change its mind when the transcript arrives.
 				errorMeta.value = {
 					...errorMeta.value,
-					[p.message_id]: { code: p.code || "", changed_data: p.changed_data },
+					[p.message_id]: {
+						code: p.code || "",
+						retryable: p.retryable,
+						resets_in_seconds: p.resets_in_seconds,
+						changed_data: p.changed_data,
+					},
 				};
 			}
 			flushReveal(p.message_id); // whatever streamed before the error stays whole
