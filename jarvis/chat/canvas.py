@@ -260,6 +260,16 @@ def persist_canvases(
 				f"persistence is skipped entirely. msg={assistant_msg_name!r} names={names!r}"
 			),
 		)
+		# Nothing was persisted, but the reply text still carries the raw
+		# [embed ref=...] marker(s) / dead canvas link(s) - the frontend has no
+		# handling for those on their own, so left alone they would show up as
+		# literal internal markup in the chat transcript. Strip them here too,
+		# same as the success path, so the turn reads as clean prose with no
+		# canvas rather than a page or raw markup leaking through.
+		cleaned = strip_canvas_refs(content, names)
+		if cleaned != content:
+			frappe.db.set_value(MSG, assistant_msg_name, "content", cleaned)
+			frappe.db.commit()
 		return []
 
 	items: list[dict] = []

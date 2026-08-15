@@ -126,11 +126,13 @@ class TestPersistCanvasesGatewayFallback(FrappeTestCase):
 		frappe.delete_doc(MSG, self.msg.name, force=True, ignore_permissions=True, delete_permanently=True)
 		frappe.delete_doc(CONV, self.conv.name, force=True, ignore_permissions=True, delete_permanently=True)
 
-	def test_broken_gateway_persists_nothing_and_leaves_content_untouched(self):
+	def test_broken_gateway_persists_nothing_but_still_cleans_the_reply(self):
 		"""Sentinel probe 200s (the runtime shell answering for everything) ->
-		skip persistence entirely rather than save that shell as the canvas."""
+		skip persistence entirely rather than save that shell as the canvas.
+		Nothing is persisted, but the raw [embed ref=...] marker must still be
+		stripped from the reply - otherwise the customer sees literal internal
+		markup instead of clean prose with no canvas."""
 		shell_resp = Mock(status_code=200, content=b"<html>runtime web UI shell</html>")
-		original_content = self.msg.content
 
 		with patch("requests.get", return_value=shell_resp), patch.object(frappe, "log_error") as log_error:
 			items = persist_canvases(self.msg.name, self.msg.content, "ws://127.0.0.1:19000", "tok")
@@ -138,10 +140,9 @@ class TestPersistCanvasesGatewayFallback(FrappeTestCase):
 		self.assertEqual(items, [])
 		log_error.assert_called_once()
 		self.assertEqual(log_error.call_args.kwargs.get("title"), "chat canvas: gateway fallback detected")
-		# Neither the embed marker nor the content was touched.
 		stored = frappe.db.get_value(MSG, self.msg.name, ["content", "canvas"], as_dict=True)
-		self.assertEqual(stored.content, original_content)
-		self.assertIn('[embed ref="cv_abc123"', stored.content)
+		self.assertNotIn("[embed", stored.content)
+		self.assertIn("Built it.", stored.content)
 		self.assertFalse(stored.canvas)
 
 	def test_healthy_gateway_persists_the_real_document(self):
