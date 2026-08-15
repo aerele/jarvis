@@ -357,7 +357,8 @@ test("send() clears the draft up front and restores it only on rejection", () =>
 	const send = fnBody(paneSrc, "async function send(");
 	// guard, clear, optimistic bubble - in that order
 	assert.ok(
-		send.indexOf("if (!text || sending.value) return;") < send.indexOf('draft.value = "";'),
+		send.indexOf("if (!text || sending.value || runActive.value) return;") <
+			send.indexOf('draft.value = "";'),
 		"the in-flight guard must precede the clear"
 	);
 	assert.match(send, /const text = draft\.value\.trim\(\);/);
@@ -370,4 +371,33 @@ test("send() clears the draft up front and restores it only on rejection", () =>
 		send,
 		/messages\.value = messages\.value\.filter\(\(m\) => m\.name !== tmpName\)/
 	);
+});
+
+// ---- owner-reported: repeat Enter/click fires a duplicate turn -----------
+// Three 1-char messages sent 18:57:00-18:57:02 each spawned a turn and wedged
+// the pump: `sending` only spans the POST, so once it resolves (fast) the
+// button and both send entry points re-armed while the agent's turn (tracked
+// by `runActive`) was still running.
+
+test("Send is disabled while a turn is running, not just while posting", () => {
+	const composer = composerOf(paneSrc);
+	const disabledBindings = composer.match(/:disabled="[^"]*"/g) || [];
+	assert.ok(
+		disabledBindings.some((b) => b.includes("sending") && b.includes("runActive")),
+		"the Send button must gate on runActive too, or a duplicate turn can be dispatched once the POST settles"
+	);
+});
+
+test("send() and sendText() refuse to dispatch while a turn is already running", () => {
+	const send = fnBody(paneSrc, "async function send(");
+	assert.match(send, /if \(!text \|\| sending\.value \|\| runActive\.value\) return;/);
+	const sendText = fnBody(paneSrc, "function sendText(");
+	assert.match(sendText, /if \(!t \|\| sending\.value \|\| runActive\.value\) return;/);
+});
+
+test("the ask card is told when the pane would refuse a submit", () => {
+	// AskCard's own single-submit lock only closes half the race: if the host
+	// silently swallows the answer (already sending, or the prior turn hasn't
+	// finished), the card must not lock until the host would actually accept it.
+	assert.match(paneSrc, /<AskCard[\s\S]{0,240}:busy="sending \|\| runActive"/);
 });

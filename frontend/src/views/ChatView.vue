@@ -1358,6 +1358,7 @@
 									v-else-if="askFor === m.name && activeAsk"
 									:key="m.name"
 									:spec="activeAsk"
+									:busy="sending"
 									@submit="send"
 								/>
 								<!-- record cards: scrollable card strip instead of a wide table -->

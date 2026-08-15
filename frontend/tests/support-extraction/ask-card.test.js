@@ -69,12 +69,57 @@ test("the picks survive Submit, so a host that refuses the text loses nothing", 
 	await optionNamed(w, "Approve").trigger("click");
 	await submit(w).trigger("click");
 	expect(optionNamed(w, "Open").classes()).toContain("on");
-	expect(submit(w).attributes("disabled")).toBeUndefined();
-	// ...and a second click re-sends the same answers rather than an empty one
+	expect(findCard(w).emitted("submit")).toHaveLength(1);
+});
+
+test("single-submit: once answered, Submit locks and a second click cannot dispatch again", async () => {
+	// Repeat-click / repeat-Enter is the owner-reported bug: the SAME picks
+	// firing a second "submit" is a duplicate answer, not a legitimate resend.
+	const w = mountWithPalette(AskCard, { spec: CHOICES });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	await submit(w).trigger("click");
+	// locked immediately (optimistic) - the button reflects the answered state
+	expect(submit(w).attributes("disabled")).toBeDefined();
+	expect(submit(w).text()).toBe("Answered");
 	await submit(w).trigger("click");
 	const emitted = findCard(w).emitted("submit");
-	expect(emitted).toHaveLength(2);
-	expect(emitted[1][0]).toBe(emitted[0][0]);
+	expect(emitted).toHaveLength(1);
+});
+
+test("an answered ask stays inert: every control locks, not just Submit", async () => {
+	const w = mountWithPalette(AskCard, { spec: CHOICES });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	await submit(w).trigger("click");
+	// clicking a DIFFERENT option after answering must not change the picks -
+	// the card is inert, not just the Submit button
+	await optionNamed(w, "Closed").trigger("click");
+	expect(optionNamed(w, "Open").classes()).toContain("on");
+	expect(optionNamed(w, "Closed").classes()).not.toContain("on");
+});
+
+test("busy=true refuses the dispatch (host would swallow it) without locking the card", async () => {
+	// The busy window (a send in flight, a turn's tail still running) must not
+	// let the card lock on an answer that was never actually accepted - that
+	// would strand the user behind an inert "Answered" card with nothing sent.
+	const w = mountWithPalette(AskCard, { spec: CHOICES, busy: true });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	expect(submit(w).attributes("disabled")).toBeDefined();
+	await submit(w).trigger("click");
+	expect(findCard(w).emitted("submit")).toBeUndefined();
+	// not locked - the button still reads as an unanswered, resubmittable card
+	expect(submit(w).text()).toBe("Submit answers");
+});
+
+test("busy=false lets an otherwise-ready ask actually dispatch", async () => {
+	const w = mountWithPalette(AskCard, { spec: CHOICES, busy: false });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	expect(submit(w).attributes("disabled")).toBeUndefined();
+	await submit(w).trigger("click");
+	expect(findCard(w).emitted("submit")).toHaveLength(1);
 });
 
 test("clicking a picked option unpicks it (and disarms Submit)", async () => {
