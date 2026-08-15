@@ -2,7 +2,7 @@
 	<Dropdown :options="menuOptions">
 		<template #trigger="{ open }">
 			<button
-				class="relative flex h-12 items-center rounded-md py-2 duration-300 ease-in-out"
+				class="jv-focus-ring relative flex h-12 items-center rounded-md py-2 duration-300 ease-in-out"
 				:class="
 					isCollapsed
 						? 'w-auto px-0'

@@ -315,6 +315,63 @@ def get_preset_catalog() -> list:
 	return admin_client.get_preset_catalog()
 
 
+@frappe.whitelist()
+def capture_onboarding_lead(
+	email: str | None = None,
+	company: str | None = None,
+	billing: dict | None = None,
+	plan: str | None = None,
+	step: str | None = None,
+	contact_consent: bool = False,
+	site_origin: str | None = None,
+	partner_code: str | None = None,
+) -> dict:
+	"""Fire-and-forget mirror of admin's guest ``capture_onboarding_lead``: upsert
+	a ``Jarvis Lead`` from an in-progress onboarding (frozen contract). Called by
+	the wizard on entering the Plan step, NOT awaited in a way that blocks the
+	step transition.
+
+	Every param defaults so a missing/partial call can never TypeError before the
+	try below runs, and the whole body is caught broadly (not just the Admin*
+	family — see admin_client.get_preset_catalog's "Never raises" comment for why
+	a narrower except would still let a scheme-less admin URL 500 this): this
+	endpoint must never break onboarding, so any failure - a bad admin URL, no
+	admin credentials needed (it's guest), a network blip - answers ``{"ok":
+	False}`` instead of raising. Gated the same as the rest of onboarding
+	(require_jarvis_admin — the customer is admin on their own fresh bench), but
+	the gate itself is inside the guard so a permission failure degrades the same
+	as every other failure rather than 403ing a background call the view never
+	surfaces to the customer.
+	``site_origin`` sent here is advisory only - admin_client overwrites it with
+	this bench's own server-derived public origin before it ever reaches admin.
+	"""
+	try:
+		require_jarvis_admin()
+		return admin_client.capture_onboarding_lead(
+			email,
+			company=company,
+			billing=billing,
+			plan=plan,
+			step=step,
+			contact_consent=contact_consent,
+			site_origin=site_origin,
+			partner_code=partner_code,
+		)
+	except Exception:
+		return {"ok": False}
+
+
+@frappe.whitelist()
+def get_terms_url() -> dict:
+	"""The admin-hosted Terms & Conditions URL for the Review & Pay checkbox
+	link. Best-effort: ``{"url": ""}`` on any failure so the checkbox still
+	renders (with plain unlinked text) when admin is unreachable or unconfigured."""
+	try:
+		return {"url": admin_client.terms_url()}
+	except Exception:
+		return {"url": ""}
+
+
 def _subscription_upstream(sub: dict) -> str:
 	"""The one upstream a posted subscription block's accounts agree on, or "".
 
@@ -756,6 +813,8 @@ _DISCONNECTED_LLM_FIELDS = {
 	# recognise it, which is correct here: the editor's status strip hides itself
 	# rather than reporting on an apply that no longer has a subject.
 	"last_sync_status": "disconnected",
+	# The apply this stamp described no longer has a subject either (jarvis#841).
+	"llm_last_apply_fingerprint": "",
 	"last_subscription_status": "",
 	"last_sync_warnings": "[]",
 	"last_model_statuses": "[]",
@@ -884,6 +943,8 @@ def start_signup(
 	provider: str | None = None,
 	billing: dict | None = None,
 	partner_code: str | None = None,
+	terms_accepted: bool | None = None,
+	contact_consent: bool = False,
 ) -> dict:
 	"""Guest signup → store the api_token → return the Razorpay handles for Checkout.
 
@@ -907,6 +968,13 @@ def start_signup(
 	of the code itself — an unknown code is admin's rejection to raise, and it
 	surfaces through the normal ``_ADMIN_ERRORS`` → ``_throw_admin_error`` path
 	below like any other signup error.
+
+	``terms_accepted`` (required in substance, not in signature — admin rejects a
+	falsy value) and ``contact_consent`` (optional) are the T&C + lead-capture
+	frozen contract's two new kwargs. Threaded straight through to
+	``admin_client.signup`` unconditionally; the SPA only ever calls this with
+	``terms_accepted: true`` (the Review & Pay checkbox gates the Pay click), and
+	``terms_version`` is stamped SERVER-SIDE by admin — this bench never sends one.
 
 	Two response shapes depending on admin's
 	``require_email_verification`` flag:
@@ -953,7 +1021,14 @@ def start_signup(
 		# contract code that conversion discards. Anything non-resumable then
 		# goes through the identical mapping _surface would have applied.
 		data = admin_client.signup(
-			email, company, plan, provider=provider, billing=billing, partner_code=partner_code
+			email,
+			company,
+			plan,
+			provider=provider,
+			billing=billing,
+			partner_code=partner_code,
+			terms_accepted=terms_accepted,
+			contact_consent=contact_consent,
 		)
 	except _ADMIN_ERRORS as e:
 		resumed = _try_resume_pending_signup(e, email, plan, provider, billing, partner_code)
@@ -1928,6 +2003,10 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 	settings.db_set(
 		"last_sync_status", _RESETTING_RECONNECT_LLM_STATUS if reconnect_llm else _RESETTING_STATUS
 	)
+	# The container this stamp described is being torn down; left set, an
+	# identical re-save inside its window could dedup against a rebuilt
+	# container that never received the config (jarvis#841 review).
+	settings.db_set("llm_last_apply_fingerprint", "")
 	_bust_chat_gate()
 	frappe.db.commit()
 
@@ -1972,6 +2051,10 @@ def _workspace_reset_poll() -> dict:
 
 		write_connection(data)
 		settings.db_set("last_sync_status", "ok (workspace reset)")
+		# This "ok" is about the RESET, not about any config apply - the fresh
+		# container holds no direct-leg credential yet. Keep the jarvis#841
+		# dedup stamp cleared so the next save always applies for real.
+		settings.db_set("llm_last_apply_fingerprint", "")
 		_bust_chat_gate()
 		frappe.db.commit()
 	elif _resetting() and data.get("agent_url") and not (settings.get("agent_url") or ""):

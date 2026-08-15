@@ -7,14 +7,20 @@
  "engine": "InnoDB",
  "track_changes": 1,
  "field_order": [
-  "config_tab",
+  "account_tab",
   "account_section",
-  "token_budget_monthly",
   "enabled",
+  "token_budget_monthly",
+  "conversation_retention_days",
+  "budgets_section",
+  "agent_run_budget_monthly",
+  "macro_step_budget_monthly",
+  "activation_module_ceiling",
   "branding_section",
   "agent_name",
   "brand_logo",
   "brand_favicon",
+  "llm_tab",
   "llm_section",
   "models",
   "preset",
@@ -34,6 +40,7 @@
   "llm_auth_mode",
   "llm_oauth_account_email",
   "llm_oauth_connected_at",
+  "intelligence_tab",
   "behavioural_learning_section",
   "pattern_learning_enabled",
   "pattern_llm_polish",
@@ -41,32 +48,80 @@
   "pattern_window_end",
   "pattern_max_proposals_per_run",
   "pattern_row_budget_per_night",
+  "bl_col",
   "pattern_last_run_at",
   "pattern_last_run_status",
   "pattern_next_run_at",
   "pattern_scan_mode",
+  "personalise_section",
+  "personalise_daily_question_cap",
+  "personalise_enabled",
+  "chat_question_mining_enabled",
+  "personalise_col",
+  "chat_mining_watermark",
+  "chat_mining_last_run_at",
+  "chat_mining_last_run_status",
   "voice_wiki_section",
   "voice_features_enabled",
   "wiki_enabled",
   "persona_enabled",
   "home_intro_enabled",
   "wiki_nudge_cooldown_hours",
+  "knowledge_language",
+  "vw_col",
   "voice_notes_last_processed_at",
   "voice_notes_last_process_status",
-  "knowledge_language",
   "wiki_lint_last_run_at",
   "wiki_lint_summary",
   "wiki_mirror_last_synced_at",
   "wiki_mirror_last_sync_status",
-  "personalise_section",
-  "personalise_daily_question_cap",
-  "personalise_enabled",
-  "chat_question_mining_enabled",
-  "chat_mining_watermark",
-  "chat_mining_last_run_at",
-  "chat_mining_last_run_status",
-  "chat_history_section",
-  "conversation_retention_days",
+  "agent_tab",
+  "operator_section",
+  "agent_url",
+  "agent_token",
+  "agent_token_issued_at",
+  "agent_token_max_age_days",
+  "tenant_authority_generation",
+  "operator_col",
+  "tenant_authority_handle",
+  "chat_device_id",
+  "chat_device_public_key",
+  "chat_device_private_key",
+  "chat_device_token",
+  "agent_tools_section",
+  "run_query_doctype_allowlist",
+  "auto_apply_changes",
+  "core_apps_override",
+  "enable_customizations_clause",
+  "sync_tab",
+  "last_sync_section",
+  "last_sync_at",
+  "last_sync_requested_at",
+  "last_sync_status",
+  "llm_pool_synced_at",
+  "llm_direct_synced_at",
+  "chat_was_ready_at",
+  "last_sync_col",
+  "chat_ready_authority",
+  "installed_apps_synced",
+  "last_subscription_status",
+  "last_sync_warnings",
+  "last_model_statuses",
+  "llm_last_apply_fingerprint",
+  "skills_sync_section",
+  "custom_skills_synced_at",
+  "custom_skills_sync_status",
+  "agent_skills_synced_at",
+  "agent_skills_sync_status",
+  "skills_sync_col",
+  "learned_skills_synced_at",
+  "learned_skills_sync_status",
+  "agent_catalog_dirty",
+  "agent_catalog_version",
+  "release_notice_section",
+  "release_notice_active",
+  "latest_jarvis_version",
+  "release_notice_message",
   "system_tab",
   "deployment_section",
   "deployment_mode",
@@ -74,63 +129,27 @@
   "jarvis_admin_url",
   "jarvis_admin_api_key",
   "jarvis_admin_api_secret",
+  "admin_connection_col",
   "jarvis_admin_customer_email",
   "jarvis_admin_customer_password",
-  "signup_context",
-  "operator_section",
-  "agent_url",
-  "agent_token",
-  "agent_token_issued_at",
-  "agent_token_max_age_days",
-  "tenant_authority_generation",
-  "tenant_authority_handle",
-  "chat_device_id",
-  "chat_device_public_key",
-  "chat_device_private_key",
-  "chat_device_token",
-  "last_sync_section",
-  "last_sync_requested_at",
-  "last_sync_at",
-  "last_sync_status",
-  "llm_pool_synced_at",
-  "llm_direct_synced_at",
-  "chat_was_ready_at",
-  "chat_ready_authority",
-  "installed_apps_synced",
-  "last_subscription_status",
-  "last_sync_warnings",
-  "last_model_statuses",
-  "custom_skills_synced_at",
-  "custom_skills_sync_status",
-  "agent_skills_synced_at",
-  "agent_skills_sync_status",
-  "agent_catalog_dirty",
-  "agent_catalog_version",
-  "agent_run_budget_monthly",
-  "macro_step_budget_monthly",
-  "activation_module_ceiling",
-  "learned_skills_synced_at",
-  "learned_skills_sync_status",
-  "release_notice_section",
-  "release_notice_active",
-  "latest_jarvis_version",
-  "release_notice_message",
-  "agent_tools_section",
-  "run_query_doctype_allowlist",
-  "auto_apply_changes",
-  "core_apps_override",
-  "enable_customizations_clause"
+  "signup_context"
  ],
  "fields": [
   {
-   "fieldname": "config_tab",
+   "fieldname": "account_tab",
    "fieldtype": "Tab Break",
-   "label": "Configuration"
+   "label": "Account"
   },
   {
    "fieldname": "account_section",
    "fieldtype": "Section Break",
    "label": "Account"
+  },
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled",
+   "default": "1"
   },
   {
    "fieldname": "token_budget_monthly",
@@ -140,16 +159,44 @@
    "description": "0 = unlimited. Otherwise hard cap before overage billing kicks in."
   },
   {
-   "fieldname": "enabled",
-   "fieldtype": "Check",
-   "label": "Enabled",
-   "default": "1"
+   "fieldname": "conversation_retention_days",
+   "fieldtype": "Int",
+   "label": "Reclaim idle chat memory after (days)",
+   "default": "30",
+   "description": "A chat you have not opened for this many days keeps its full history but has its agent working-memory (its agent session) reclaimed to free container resources. The chat stays in your list and resumes automatically on your next message, starting without the old working context. Chats with history are never deleted. Minimum 7; set to 0 to keep sessions forever (also disables cleanup of abandoned empty chats). Default 30. Readers treat an unset value as 30 (Single defaults are not backfilled on migrate)."
+  },
+  {
+   "fieldname": "budgets_section",
+   "fieldtype": "Section Break",
+   "label": "Budgets & Limits",
+   "description": "Per-month agent-run and macro-step budgets, and the activation module ceiling."
+  },
+  {
+   "default": "62",
+   "description": "A14: monthly run budget PER installed agent (manual + scheduled runs counted together; failed runs excluded). A per-tenant aggregate ceiling (budget x enabled installs) also applies. Floored at 31 (a full daily schedule) when set below it, so a low value can never wedge every scheduled agent for a month. Raise it to allow more frequent or more numerous agent runs before scans are skipped.",
+   "fieldname": "agent_run_budget_monthly",
+   "fieldtype": "Int",
+   "label": "Agent Run Budget (monthly, per installation)"
+  },
+  {
+   "default": "500",
+   "description": "#468: monthly budget for UNATTENDED macro work, per macro owner, counted in STEPS (one run is up to 25 agent turns, so a run count would under-bound the real spend by 25x). Scheduled runs only: a manual run is an attended click already priced by the per-user token caps, and manual runs are not counted here either, so a heavy interactive month cannot silently starve the schedule. A refusal records a run with 0 steps, so it contributes nothing and the cap can never self-perpetuate; a run that failed part way through DOES count the steps it really dispatched. Leave blank or 0 to use the default of 500. A configured value below 31 is clamped UP to 31 (a full daily schedule of a single-step macro), so a low value can never wedge every schedule for a month. Raise it to allow more frequent or longer scheduled macros before runs are skipped.",
+   "fieldname": "macro_step_budget_monthly",
+   "fieldtype": "Int",
+   "label": "Scheduled Macro Step Budget (monthly, per owner)"
+  },
+  {
+   "default": "1",
+   "description": "PP-6 \u2014 site-wide ceiling on the number of LIVE agent modules (Jarvis Agent Installation.activation_state == live), global across all packs. Default 1: every customer starts with a single live module. The PP-4 promotion path refuses to flip an installation to live once the count of live installations reaches this ceiling. Raised to 2 (the stage maximum \u2014 no higher value is accepted) only by a Jarvis Admin, and only with a recorded reviewer-capacity justification (audited via track_changes + a provenance event).",
+   "fieldname": "activation_module_ceiling",
+   "fieldtype": "Int",
+   "label": "Activation Module Ceiling (live agents, site-wide)"
   },
   {
    "fieldname": "branding_section",
    "fieldtype": "Section Break",
    "label": "Branding",
-   "description": "Whitelabel identity shown to your users: the assistant's name (browser tab, chat header, notifications, and its own replies), logo, and browser-tab favicon. Blank name falls back to Jarvis. Edited by customers in Settings → Branding."
+   "description": "Whitelabel identity shown to your users: the assistant's name (browser tab, chat header, notifications, and its own replies), logo, and browser-tab favicon. Blank name falls back to Jarvis. Edited by customers in Settings \u2192 Branding."
   },
   {
    "fieldname": "agent_name",
@@ -170,9 +217,14 @@
    "description": "Browser-tab icon. Square PNG (or .ico) works best."
   },
   {
+   "fieldname": "llm_tab",
+   "fieldtype": "Tab Break",
+   "label": "Language Model"
+  },
+  {
    "fieldname": "llm_section",
    "fieldtype": "Section Break",
-   "label": "Language Model"
+   "label": "Models"
   },
   {
    "fieldname": "models",
@@ -257,9 +309,16 @@
    "default": "4096"
   },
   {
+   "fieldname": "vision_attachments_enabled",
+   "fieldtype": "Check",
+   "label": "Send Image/PDF Attachments as Vision",
+   "default": "1",
+   "description": "When on, images and PDFs the customer attaches in chat are sent to the model as native vision (the model sees them directly; PDFs are rasterized to page-images). Requires a vision-capable model (Anthropic / OpenAI / Google Gemini). Managed pool only."
+  },
+  {
    "fieldname": "llm_auth_section",
    "fieldtype": "Section Break",
-   "label": "LLM Authentication"
+   "label": "Authentication"
   },
   {
    "fieldname": "llm_auth_mode",
@@ -284,6 +343,11 @@
    "label": "Connected At",
    "read_only": 1,
    "depends_on": "eval:doc.llm_auth_mode == 'oauth'"
+  },
+  {
+   "fieldname": "intelligence_tab",
+   "fieldtype": "Tab Break",
+   "label": "Intelligence"
   },
   {
    "fieldname": "behavioural_learning_section",
@@ -332,6 +396,10 @@
    "description": "EXPLAIN-estimated rows a nightly run may scan before remaining detectors are deferred to later nights."
   },
   {
+   "fieldname": "bl_col",
+   "fieldtype": "Column Break"
+  },
+  {
    "fieldname": "pattern_last_run_at",
    "fieldtype": "Datetime",
    "label": "Last Learning Run At",
@@ -353,6 +421,57 @@
    "fieldname": "pattern_scan_mode",
    "fieldtype": "Data",
    "label": "Learning Scan Mode",
+   "read_only": 1
+  },
+  {
+   "fieldname": "personalise_section",
+   "fieldtype": "Section Break",
+   "label": "Personalisation",
+   "collapsible": 1,
+   "description": "Skills-area Personalise tab: per-user Question bank + free-capture Notes (DESIGN.md section 2.5). Gated System Manager | Administrator | Jarvis Admin for editing; readers should treat an unset personalise_enabled as ON, same convention as voice_features_enabled/wiki_enabled above."
+  },
+  {
+   "fieldname": "personalise_daily_question_cap",
+   "fieldtype": "Int",
+   "label": "Daily Question Cap",
+   "default": "5",
+   "description": "Max learning/chat-pattern questions materialized per user per day. Org-rule questions (Jarvis Personalise Question Rule) and reviewer follow-up questions are never capped by this."
+  },
+  {
+   "fieldname": "personalise_enabled",
+   "fieldtype": "Check",
+   "label": "Enable Personalisation",
+   "default": "1",
+   "description": "Master toggle for the Personalise tab: question materialization, free-capture notes, and question-rule sweeps. Readers treat an unset value as ON (Single defaults are not backfilled on migrate; seeded by jarvis.learning.roles.after_migrate)."
+  },
+  {
+   "fieldname": "chat_question_mining_enabled",
+   "fieldtype": "Check",
+   "label": "Mine Chats Into Questions",
+   "default": "1",
+   "description": "Daily sweep that mines recent chat transcripts into Personalise questions (answers then flow to the wiki and learned skills through the normal note pipeline). Also gated by Enable Personalisation and the per-user Daily Question Cap. Readers treat an unset value as ON (Single defaults are not backfilled on migrate; seeded by jarvis.learning.roles.after_migrate)."
+  },
+  {
+   "fieldname": "personalise_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "chat_mining_watermark",
+   "fieldtype": "Datetime",
+   "label": "Chat Mining Watermark",
+   "read_only": 1,
+   "description": "High-water mark: chat messages up to this timestamp have been mined (or deliberately skipped). Advanced by the daily miner; clear it to re-mine the last 7 days."
+  },
+  {
+   "fieldname": "chat_mining_last_run_at",
+   "fieldtype": "Datetime",
+   "label": "Chat Mining Last Run At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "chat_mining_last_run_status",
+   "fieldtype": "Long Text",
+   "label": "Chat Mining Last Run Status",
    "read_only": 1
   },
   {
@@ -397,6 +516,18 @@
    "description": "Minimum gap between wiki nudges in the same conversation."
   },
   {
+   "fieldname": "knowledge_language",
+   "fieldtype": "Select",
+   "label": "Knowledge Language",
+   "options": "English\nOriginal",
+   "default": "English",
+   "description": "Language for extracted knowledge (voice facts, wiki pages, drafted skill text). English (recommended) translates non-English input, keeping proper nouns in their original script with a Latin transliteration; Original keeps the dominant language of the source material. Chat transcription is always verbatim."
+  },
+  {
+   "fieldname": "vw_col",
+   "fieldtype": "Column Break"
+  },
+  {
    "fieldname": "voice_notes_last_processed_at",
    "fieldtype": "Datetime",
    "label": "Voice Notes Last Processed At",
@@ -407,14 +538,6 @@
    "fieldtype": "Long Text",
    "label": "Voice Notes Last Process Status",
    "read_only": 1
-  },
-  {
-   "fieldname": "knowledge_language",
-   "fieldtype": "Select",
-   "label": "Knowledge Language",
-   "options": "English\nOriginal",
-   "default": "English",
-   "description": "Language for extracted knowledge (voice facts, wiki pages, drafted skill text). English (recommended) translates non-English input, keeping proper nouns in their original script with a Latin transliteration; Original keeps the dominant language of the source material. Chat transcription is always verbatim."
   },
   {
    "fieldname": "wiki_lint_last_run_at",
@@ -443,144 +566,9 @@
    "description": "Outcome of the last org-wiki mirror sync into the agent workspace."
   },
   {
-   "fieldname": "personalise_section",
-   "fieldtype": "Section Break",
-   "label": "Personalisation",
-   "collapsible": 1,
-   "description": "Skills-area Personalise tab: per-user Question bank + free-capture Notes (DESIGN.md section 2.5). Gated System Manager | Administrator | Jarvis Admin for editing; readers should treat an unset personalise_enabled as ON, same convention as voice_features_enabled/wiki_enabled above."
-  },
-  {
-   "fieldname": "personalise_daily_question_cap",
-   "fieldtype": "Int",
-   "label": "Daily Question Cap",
-   "default": "5",
-   "description": "Max learning/chat-pattern questions materialized per user per day. Org-rule questions (Jarvis Personalise Question Rule) and reviewer follow-up questions are never capped by this."
-  },
-  {
-   "fieldname": "personalise_enabled",
-   "fieldtype": "Check",
-   "label": "Enable Personalisation",
-   "default": "1",
-   "description": "Master toggle for the Personalise tab: question materialization, free-capture notes, and question-rule sweeps. Readers treat an unset value as ON (Single defaults are not backfilled on migrate; seeded by jarvis.learning.roles.after_migrate)."
-  },
-  {
-   "fieldname": "chat_question_mining_enabled",
-   "fieldtype": "Check",
-   "label": "Mine Chats Into Questions",
-   "default": "1",
-   "description": "Daily sweep that mines recent chat transcripts into Personalise questions (answers then flow to the wiki and learned skills through the normal note pipeline). Also gated by Enable Personalisation and the per-user Daily Question Cap. Readers treat an unset value as ON (Single defaults are not backfilled on migrate; seeded by jarvis.learning.roles.after_migrate)."
-  },
-  {
-   "fieldname": "chat_mining_watermark",
-   "fieldtype": "Datetime",
-   "label": "Chat Mining Watermark",
-   "read_only": 1,
-   "description": "High-water mark: chat messages up to this timestamp have been mined (or deliberately skipped). Advanced by the daily miner; clear it to re-mine the last 7 days."
-  },
-  {
-   "fieldname": "chat_mining_last_run_at",
-   "fieldtype": "Datetime",
-   "label": "Chat Mining Last Run At",
-   "read_only": 1
-  },
-  {
-   "fieldname": "chat_mining_last_run_status",
-   "fieldtype": "Long Text",
-   "label": "Chat Mining Last Run Status",
-   "read_only": 1
-  },
-  {
-   "fieldname": "chat_history_section",
-   "fieldtype": "Section Break",
-   "label": "Chat History"
-  },
-  {
-   "fieldname": "conversation_retention_days",
-   "fieldtype": "Int",
-   "label": "Reclaim idle chat memory after (days)",
-   "default": "30",
-   "description": "A chat you have not opened for this many days keeps its full history but has its agent working-memory (its agent session) reclaimed to free container resources. The chat stays in your list and resumes automatically on your next message, starting without the old working context. Chats with history are never deleted. Minimum 7; set to 0 to keep sessions forever (also disables cleanup of abandoned empty chats). Default 30. Readers treat an unset value as 30 (Single defaults are not backfilled on migrate)."
-  },
-  {
-   "fieldname": "system_tab",
+   "fieldname": "agent_tab",
    "fieldtype": "Tab Break",
-   "label": "System"
-  },
-  {
-   "fieldname": "deployment_section",
-   "fieldtype": "Section Break",
-   "label": "Deployment Mode",
-   "hidden": 1
-  },
-  {
-   "fieldname": "deployment_mode",
-   "fieldtype": "Data",
-   "label": "Deployment Mode",
-   "default": "Managed",
-   "read_only": 1,
-   "hidden": 1,
-   "description": "Retired. Jarvis is managed-only; nothing reads this field. Kept so existing sites keep their column until a migration drops it."
-  },
-  {
-   "fieldname": "vision_attachments_enabled",
-   "fieldtype": "Check",
-   "label": "Send Image/PDF Attachments as Vision",
-   "default": "1",
-   "description": "When on, images and PDFs the customer attaches in chat are sent to the model as native vision (the model sees them directly; PDFs are rasterized to page-images). Requires a vision-capable model (Anthropic / OpenAI / Google Gemini). Managed pool only."
-  },
-  {
-   "fieldname": "admin_connection_section",
-   "fieldtype": "Section Break",
-   "label": "Jarvis Admin Connection",
-   "description": "Populated by the signup wizard; not customer-editable."
-  },
-  {
-   "fieldname": "jarvis_admin_url",
-   "fieldtype": "Data",
-   "permlevel": 1,
-   "label": "Jarvis Admin URL",
-   "read_only": 1,
-   "description": "HTTPS URL of the Jarvis admin host. Used for signup, billing, subscription state."
-  },
-  {
-   "fieldname": "jarvis_admin_api_key",
-   "permlevel": 1,
-   "fieldtype": "Password",
-   "label": "Jarvis Admin API Key",
-   "read_only": 1,
-   "description": "Native Frappe api_key for the customer's User on the admin site. Paired with the secret below as `Authorization: token <key>:<secret>`."
-  },
-  {
-   "fieldname": "jarvis_admin_api_secret",
-   "permlevel": 1,
-   "fieldtype": "Password",
-   "label": "Jarvis Admin API Secret",
-   "read_only": 1,
-   "description": "Native Frappe api_secret paired with the API Key. Set automatically at onboarding."
-  },
-  {
-   "fieldname": "jarvis_admin_customer_email",
-   "permlevel": 1,
-   "fieldtype": "Data",
-   "label": "Jarvis Admin Customer Email",
-   "read_only": 1,
-   "description": "The customer's login (email) on the admin site. Used as the OAuth password-grant username. Set automatically at onboarding."
-  },
-  {
-   "fieldname": "jarvis_admin_customer_password",
-   "permlevel": 1,
-   "fieldtype": "Password",
-   "label": "Jarvis Admin Customer Password",
-   "read_only": 1,
-   "description": "The customer's password on the admin site, exchanged for short-lived OAuth bearer tokens (client_id `jarvis-bench`). Set automatically once the email is verified. Empty for pre-OAuth customers, which fall back to api_key:api_secret."
-  },
-  {
-   "fieldname": "signup_context",
-   "permlevel": 1,
-   "fieldtype": "Long Text",
-   "label": "Signup Context",
-   "read_only": 1,
-   "description": "Non-secret JSON snapshot of the in-flight signup: attempt id, the customer's real email + company as admin holds them, plan/provider, the amount and what is due today, the last contract code, and the contract version. Written by jarvis.onboarding_contract so a reloaded payment page renders whose signup it is showing instead of the site admin's prefill. NO SECRETS EVER GO IN THIS FIELD - permlevel is not a container for one: a Single's value is reachable through frappe.client.get_value / get_single_value by anyone who can read the doctype, and the permlevel only governs the form. Secrets belong in the Password fields above, which encrypt into __Auth. jarvis_admin_customer_email above holds admin's SYNTHETIC login (cust-<hash>@jarvis.invalid), which is not an address and must never be shown to anyone."
+   "label": "Agent & Tools"
   },
   {
    "fieldname": "operator_section",
@@ -628,6 +616,10 @@
    "description": "The tenant-authority generation of the connection last accepted from admin (review plan 04 P0-5). Admin bumps its authority generation by 1 on every authority write; this bench refuses to overwrite the connection with a payload carrying a LOWER generation, so a slow poll cannot regress a customer onto their old container after a move/repair. 0 == no authority-fenced connection accepted yet (pre-backfill / fresh)."
   },
   {
+   "fieldname": "operator_col",
+   "fieldtype": "Column Break"
+  },
+  {
    "fieldname": "tenant_authority_handle",
    "fieldtype": "Data",
    "label": "Tenant Authority Handle",
@@ -666,22 +658,59 @@
    "description": "Bearer token agent issued at pair time. Sent in auth.deviceToken at every chat WS connect."
   },
   {
+   "fieldname": "agent_tools_section",
+   "fieldtype": "Section Break",
+   "label": "Agent Tool Restrictions"
+  },
+  {
+   "fieldname": "run_query_doctype_allowlist",
+   "fieldtype": "Small Text",
+   "permlevel": 1,
+   "label": "run_query DocType Allowlist",
+   "description": "Defense-in-depth restriction for the run_query agent tool. Comma- or newline-separated list of DocType names. When non-empty, run_query refuses any query referencing a DocType not on this list - even if the calling user has read permission on it through Frappe's normal permission system. Leave empty (default) to allow any DocType the user can read. Use this to lock the agent to a known-good slice of your data (e.g. 'Sales Invoice, Customer, Item, Sales Invoice Item') so a future allowlist bypass in the SQL parser still can't reach the rest of the bench."
+  },
+  {
+   "fieldname": "auto_apply_changes",
+   "fieldtype": "Check",
+   "label": "Auto-apply changes (skip confirmation)",
+   "default": "0",
+   "description": "DEPRECATED (issue #186): auto-apply is now per-conversation and admin-gated (Jarvis Conversation.auto_apply). This site-wide Single field is no longer read or written; left in place to avoid a destructive schema change."
+  },
+  {
+   "fieldname": "core_apps_override",
+   "fieldtype": "Small Text",
+   "label": "Additional Core Apps",
+   "description": "Customization discovery treats every installed app outside the known core stack (frappe, erpnext, hrms, india_compliance, payments, webshop, insights, wiki, jarvis) as the customer's own. Comma- or newline-separated app names listed here EXTEND that core set, so their doctypes stop being reported as customizations. Leave empty (default) on most sites."
+  },
+  {
+   "fieldname": "enable_customizations_clause",
+   "fieldtype": "Check",
+   "label": "Enable Customizations Context Clause",
+   "default": "1",
+   "description": "Adds a one-line, counts-only summary of this site's customizations (custom apps, doctype/field/workflow counts) to every chat turn's context, pointing the agent at jarvis__describe_customizations. Readers treat an unset value as ON."
+  },
+  {
+   "fieldname": "sync_tab",
+   "fieldtype": "Tab Break",
+   "label": "Sync & Status"
+  },
+  {
    "fieldname": "last_sync_section",
    "fieldtype": "Section Break",
    "label": "Last Sync",
    "collapsible": 1
   },
   {
+   "fieldname": "last_sync_at",
+   "fieldtype": "Datetime",
+   "label": "Last Sync At",
+   "read_only": 1
+  },
+  {
    "description": "Stamped at ENQUEUE time - the moment an apply (pool or single-model) was requested - not when it lands. jarvis C2: account._provisioning_verdict reads this to time-box the soft llm_applying reason, so a stuck apply that never writes a terminal status cannot stay soft forever. See account._APPLYING_SOFT_WINDOW_S.",
    "fieldname": "last_sync_requested_at",
    "fieldtype": "Datetime",
    "label": "Last Sync Requested At",
-   "read_only": 1
-  },
-  {
-   "fieldname": "last_sync_at",
-   "fieldtype": "Datetime",
-   "label": "Last Sync At",
    "read_only": 1
   },
   {
@@ -710,6 +739,10 @@
    "fieldtype": "Datetime",
    "label": "Chat Was Ready At",
    "read_only": 1
+  },
+  {
+   "fieldname": "last_sync_col",
+   "fieldtype": "Column Break"
   },
   {
    "description": "Authority the established chat-Ready claim is bound to: a digest of (admin principal, container URL, tenant authority generation) captured the last time admin confirmed this workspace Ready. The claim only survives a control-plane outage while this still matches the current authority - a workspace reset, a reconnect to a different principal/container, or an authority-generation change moves it and ends the claim mechanically, without depending on every writer remembering to clear the marker. See account._authority_anchor.",
@@ -750,6 +783,19 @@
    "read_only": 1
   },
   {
+   "fieldname": "llm_last_apply_fingerprint",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "LLM Last Apply Fingerprint",
+   "read_only": 1
+  },
+  {
+   "fieldname": "skills_sync_section",
+   "fieldtype": "Section Break",
+   "label": "Skills & Catalog Sync",
+   "description": "Read-only sync state for custom, agent-store, and learned skills, plus the agent catalog."
+  },
+  {
    "fieldname": "custom_skills_synced_at",
    "fieldtype": "Datetime",
    "label": "Custom Skills Synced At",
@@ -774,6 +820,22 @@
    "read_only": 1
   },
   {
+   "fieldname": "skills_sync_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "learned_skills_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Learned Skills Synced At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "learned_skills_sync_status",
+   "fieldtype": "Long Text",
+   "label": "Learned Skills Sync Status",
+   "read_only": 1
+  },
+  {
    "default": "0",
    "description": "Set when an install/uninstall/enable-disable changes the enabled agent set; cleared by a successful Apply push. Surfaced as `dirty` in get_agents_sync_status.",
    "fieldname": "agent_catalog_dirty",
@@ -792,42 +854,9 @@
    "read_only": 1
   },
   {
-   "default": "62",
-   "description": "A14: monthly run budget PER installed agent (manual + scheduled runs counted together; failed runs excluded). A per-tenant aggregate ceiling (budget x enabled installs) also applies. Floored at 31 (a full daily schedule) when set below it, so a low value can never wedge every scheduled agent for a month. Raise it to allow more frequent or more numerous agent runs before scans are skipped.",
-   "fieldname": "agent_run_budget_monthly",
-   "fieldtype": "Int",
-   "label": "Agent Run Budget (monthly, per installation)"
-  },
-  {
-   "default": "500",
-   "description": "#468: monthly budget for UNATTENDED macro work, per macro owner, counted in STEPS (one run is up to 25 agent turns, so a run count would under-bound the real spend by 25x). Scheduled runs only: a manual run is an attended click already priced by the per-user token caps, and manual runs are not counted here either, so a heavy interactive month cannot silently starve the schedule. A refusal records a run with 0 steps, so it contributes nothing and the cap can never self-perpetuate; a run that failed part way through DOES count the steps it really dispatched. Leave blank or 0 to use the default of 500. A configured value below 31 is clamped UP to 31 (a full daily schedule of a single-step macro), so a low value can never wedge every schedule for a month. Raise it to allow more frequent or longer scheduled macros before runs are skipped.",
-   "fieldname": "macro_step_budget_monthly",
-   "fieldtype": "Int",
-   "label": "Scheduled Macro Step Budget (monthly, per owner)"
-  },
-  {
-   "default": "1",
-   "description": "PP-6 — site-wide ceiling on the number of LIVE agent modules (Jarvis Agent Installation.activation_state == live), global across all packs. Default 1: every customer starts with a single live module. The PP-4 promotion path refuses to flip an installation to live once the count of live installations reaches this ceiling. Raised to 2 (the stage maximum — no higher value is accepted) only by a Jarvis Admin, and only with a recorded reviewer-capacity justification (audited via track_changes + a provenance event).",
-   "fieldname": "activation_module_ceiling",
-   "fieldtype": "Int",
-   "label": "Activation Module Ceiling (live agents, site-wide)"
-  },
-  {
-   "fieldname": "learned_skills_synced_at",
-   "fieldtype": "Datetime",
-   "label": "Learned Skills Synced At",
-   "read_only": 1
-  },
-  {
-   "fieldname": "learned_skills_sync_status",
-   "fieldtype": "Long Text",
-   "label": "Learned Skills Sync Status",
-   "read_only": 1
-  },
-  {
    "fieldname": "release_notice_section",
    "fieldtype": "Section Break",
-   "label": "Release Notice (synced)",
+   "label": "Release Notice",
    "description": "Mirror of the operator's release notice, pulled from the control plane. Read-only here."
   },
   {
@@ -849,36 +878,82 @@
    "read_only": 1
   },
   {
-   "fieldname": "agent_tools_section",
+   "fieldname": "system_tab",
+   "fieldtype": "Tab Break",
+   "label": "System"
+  },
+  {
+   "fieldname": "deployment_section",
    "fieldtype": "Section Break",
-   "label": "Agent Tool Restrictions"
+   "label": "Deployment Mode",
+   "hidden": 1
   },
   {
-   "fieldname": "run_query_doctype_allowlist",
-   "fieldtype": "Small Text",
+   "fieldname": "deployment_mode",
+   "fieldtype": "Data",
+   "label": "Deployment Mode",
+   "default": "Managed",
+   "read_only": 1,
+   "hidden": 1,
+   "description": "Retired. Jarvis is managed-only; nothing reads this field. Kept so existing sites keep their column until a migration drops it."
+  },
+  {
+   "fieldname": "admin_connection_section",
+   "fieldtype": "Section Break",
+   "label": "Jarvis Admin Connection",
+   "description": "Populated by the signup wizard; not customer-editable."
+  },
+  {
+   "fieldname": "jarvis_admin_url",
+   "fieldtype": "Data",
    "permlevel": 1,
-   "label": "run_query DocType Allowlist",
-   "description": "Defense-in-depth restriction for the run_query agent tool. Comma- or newline-separated list of DocType names. When non-empty, run_query refuses any query referencing a DocType not on this list - even if the calling user has read permission on it through Frappe's normal permission system. Leave empty (default) to allow any DocType the user can read. Use this to lock the agent to a known-good slice of your data (e.g. 'Sales Invoice, Customer, Item, Sales Invoice Item') so a future allowlist bypass in the SQL parser still can't reach the rest of the bench."
+   "label": "Jarvis Admin URL",
+   "read_only": 1,
+   "description": "HTTPS URL of the Jarvis admin host. Used for signup, billing, subscription state."
   },
   {
-   "fieldname": "auto_apply_changes",
-   "fieldtype": "Check",
-   "label": "Auto-apply changes (skip confirmation)",
-   "default": "0",
-   "description": "DEPRECATED (issue #186): auto-apply is now per-conversation and admin-gated (Jarvis Conversation.auto_apply). This site-wide Single field is no longer read or written; left in place to avoid a destructive schema change."
+   "fieldname": "jarvis_admin_api_key",
+   "permlevel": 1,
+   "fieldtype": "Password",
+   "label": "Jarvis Admin API Key",
+   "read_only": 1,
+   "description": "Native Frappe api_key for the customer's User on the admin site. Paired with the secret below as `Authorization: token <key>:<secret>`."
   },
   {
-   "fieldname": "core_apps_override",
-   "fieldtype": "Small Text",
-   "label": "Additional Core Apps",
-   "description": "Customization discovery treats every installed app outside the known core stack (frappe, erpnext, hrms, india_compliance, payments, webshop, insights, wiki, jarvis) as the customer's own. Comma- or newline-separated app names listed here EXTEND that core set, so their doctypes stop being reported as customizations. Leave empty (default) on most sites."
+   "fieldname": "jarvis_admin_api_secret",
+   "permlevel": 1,
+   "fieldtype": "Password",
+   "label": "Jarvis Admin API Secret",
+   "read_only": 1,
+   "description": "Native Frappe api_secret paired with the API Key. Set automatically at onboarding."
   },
   {
-   "fieldname": "enable_customizations_clause",
-   "fieldtype": "Check",
-   "label": "Enable Customizations Context Clause",
-   "default": "1",
-   "description": "Adds a one-line, counts-only summary of this site's customizations (custom apps, doctype/field/workflow counts) to every chat turn's context, pointing the agent at jarvis__describe_customizations. Readers treat an unset value as ON."
+   "fieldname": "admin_connection_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "jarvis_admin_customer_email",
+   "permlevel": 1,
+   "fieldtype": "Data",
+   "label": "Jarvis Admin Customer Email",
+   "read_only": 1,
+   "description": "The customer's login (email) on the admin site. Used as the OAuth password-grant username. Set automatically at onboarding."
+  },
+  {
+   "fieldname": "jarvis_admin_customer_password",
+   "permlevel": 1,
+   "fieldtype": "Password",
+   "label": "Jarvis Admin Customer Password",
+   "read_only": 1,
+   "description": "The customer's password on the admin site, exchanged for short-lived OAuth bearer tokens (client_id `jarvis-bench`). Set automatically once the email is verified. Empty for pre-OAuth customers, which fall back to api_key:api_secret."
+  },
+  {
+   "fieldname": "signup_context",
+   "permlevel": 1,
+   "fieldtype": "Long Text",
+   "label": "Signup Context",
+   "read_only": 1,
+   "description": "Non-secret JSON snapshot of the in-flight signup: attempt id, the customer's real email + company as admin holds them, plan/provider, the amount and what is due today, the last contract code, and the contract version. Written by jarvis.onboarding_contract so a reloaded payment page renders whose signup it is showing instead of the site admin's prefill. NO SECRETS EVER GO IN THIS FIELD - permlevel is not a container for one: a Single's value is reachable through frappe.client.get_value / get_single_value by anyone who can read the doctype, and the permlevel only governs the form. Secrets belong in the Password fields above, which encrypt into __Auth. jarvis_admin_customer_email above holds admin's SYNTHETIC login (cust-<hash>@jarvis.invalid), which is not an address and must never be shown to anyone."
   }
  ],
  "permissions": [

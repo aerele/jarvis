@@ -15,6 +15,7 @@ from jarvis.exceptions import (
 	JarvisError,
 )
 from jarvis.permissions import has_jarvis_access
+from jarvis.tools._result_guard import enforce_result_budget
 from jarvis.tools.registry import dispatch
 
 
@@ -250,6 +251,20 @@ def _dispatch_from_session(
 			# confirmation gate can bind a parked write to it.
 			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
 			result = _run_tool(tool, parsed_args, conversation=conv)
+			# Agent-boundary model-facing size cap. ONLY on this (agent session)
+			# path - the dashboard builder/desk/external call_tool callers go through
+			# _dispatch_current_user and are deliberately uncapped.
+			if isinstance(result, dict) and result.get("ok"):
+				guarded, event = enforce_result_budget(result["data"], tool=tool)
+				if event:
+					result["data"] = guarded
+					telemetry.record_budget_event(
+						tool=tool,
+						outcome=event["kind"],
+						original_chars=event["original_chars"],
+						shown=event["shown"],
+						total=event["total"],
+					)
 			_persist_and_publish_tool_call(
 				session_key=session_key,
 				tool=tool,
@@ -639,6 +654,16 @@ _WRITE_TOOLS = frozenset(
 		# detached turn as record_agent_run beside it — audited, never gated.
 		"download_pdf",
 		"export_excel",
+		# export_query / report_pdf / export_document all insert a private File
+		# (export_query + report_pdf via the shared save_export_file seam,
+		# export_document via its own save_file) - the same File-write class as
+		# download_pdf/export_excel, so they are audited (never gated: no card, the
+		# artifact is the point). export_query in particular is the highest-throughput
+		# bulk-export path (server-side, up to the row ceiling, never transiting the
+		# visible transcript), so a "who exported what" audit row is load-bearing.
+		"export_query",
+		"report_pdf",
+		"export_document",
 		"record_agent_run",
 		"record_app_wiki",
 		"finish_app_learning_run",

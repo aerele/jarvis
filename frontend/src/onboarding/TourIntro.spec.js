@@ -118,3 +118,45 @@ describe("TourIntro animation timers", () => {
 		wrapper.unmount();
 	});
 });
+
+// A phase clock never starts under prefers-reduced-motion, so it sits on the
+// LAST step of its sequence (see createPhaseClock in TourIntro.vue). Both
+// slides reworked for the two-scene / chat-scene tweaks must settle there on
+// a complete frame, not a mid-transition one, or reduced-motion users see a
+// broken mock forever.
+describe("TourIntro settled (reduced-motion) frames", () => {
+	function stubReducedMotion() {
+		vi.stubGlobal("matchMedia", (query) => ({
+			matches: true,
+			media: query,
+			addEventListener: () => {},
+			removeEventListener: () => {},
+		}));
+	}
+
+	it("Skills & Knowledge settles on the Wiki tab with the graph drawn, not the skills list", async () => {
+		stubReducedMotion();
+		const wrapper = mount(TourIntro);
+		await clickNext(wrapper);
+		expect(heading(wrapper)).toBe(SLIDE_HEADINGS[1]);
+		const tabs = wrapper.findAll(".m-tab");
+		expect(tabs[0].classes()).not.toContain("on"); // Skills
+		expect(tabs[2].classes()).toContain("on"); // Wiki
+		expect(wrapper.find(".m-graph-svg").exists()).toBe(true);
+		expect(wrapper.find(".m-row-skill").exists()).toBe(false);
+		wrapper.unmount();
+	});
+
+	it("Macros settles with the macro saved and the run done", async () => {
+		stubReducedMotion();
+		const wrapper = mount(TourIntro);
+		await clickNext(wrapper);
+		await clickNext(wrapper);
+		expect(heading(wrapper)).toBe(SLIDE_HEADINGS[2]);
+		expect(wrapper.find(".macro-card-btn").text()).toContain("Saved");
+		expect(wrapper.find(".macro-card-btn").classes()).toContain("saved");
+		expect(wrapper.text()).toContain("done");
+		expect(wrapper.find(".meta-fill").classes()).toContain("done");
+		wrapper.unmount();
+	});
+});

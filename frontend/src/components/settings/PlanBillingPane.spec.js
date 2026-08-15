@@ -52,7 +52,11 @@ vi.mock("vue-router", () => ({
 }));
 
 vi.mock("@/components/settings/SettingsPane.vue", () => ({
-	default: { name: "SettingsPane", template: `<div><slot /></div>` },
+	default: {
+		name: "SettingsPane",
+		props: ["title", "description", "error"],
+		template: `<div><h2 class="stub-title">{{ title }}</h2><slot /></div>`,
+	},
 }));
 
 import PlanBillingPane from "./PlanBillingPane.vue";
@@ -90,6 +94,14 @@ describe("PlanBillingPane", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		confirm.mockClear();
+	});
+
+	// The rail label was renamed "Plan and billing" -> "Billing"; this pane's own
+	// SettingsPane title has to track it, or the rail and the pane header would
+	// say two different things for the same section.
+	it("titles the pane 'Billing'", async () => {
+		const w = await mountPane();
+		expect(w.find(".stub-title").text()).toBe("Billing");
 	});
 
 	describe("cancel button visibility", () => {

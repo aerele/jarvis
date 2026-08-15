@@ -135,16 +135,24 @@ ORPHAN_BATCH_MAX = 200
 _CHAT_NAMESPACE_MARKER = ":dashboard:"
 
 # Labels of every throwaway session kind the bench mints: prewarm.warm_prefix,
-# title._generate_via_gateway, and learning.polish._run_gateway_turn. All three
-# now delete their own sessions, so these only turn up here when that cleanup was
-# missed (a crash, a lost cache pointer, a gateway blip) - never as live state.
+# title._generate_via_gateway, learning.polish._run_gateway_turn, and the
+# onboarding preflight's live probe (jarvis#840). Each deletes or reclaims its
+# own session, so these only turn up here when that cleanup was missed (a
+# crash, a lost cache pointer, a gateway blip) or deliberately skipped (the
+# preflight's abandoned-worker timeout path leaves its billed session for THIS
+# sweep) - never as live state.
 #
 # A short grace is SAFE for these specifically because the labels are namespaced:
 # a real conversation session is always "jarvis-chat-<user>-<ms>" (api.py
 # _ensure_session_key), so a throwaway label can never be a conversation whose
 # freshly-minted session_key has not committed yet. That race is exactly what
 # ORPHAN_GRACE_HOURS protects, and it still gets the full 24h.
-_THROWAWAY_LABEL_PREFIXES = ("jarvis-prewarm-", "jarvis-title-", "jarvis-polish-")
+_THROWAWAY_LABEL_PREFIXES = (
+	"jarvis-prewarm-",
+	"jarvis-title-",
+	"jarvis-polish-",
+	"jarvis-preflight-",
+)
 THROWAWAY_GRACE_HOURS = 1
 
 

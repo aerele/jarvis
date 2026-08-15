@@ -11,11 +11,11 @@
 		 animation via the shared phase-clock driver (see createPhaseClock in
 		 <script>): Welcome plays a looping chat conversation as the proof (ask,
 		 run a report, rank customers, create a pick list, approve, done), Skills
-		 & Knowledge builds the wiki the assistant keeps of your business, Macros
-		 collapses
-		 three routine steps into one run, File Box drops a file in and turns it
-		 into structured fields, and Dashboards types a request and draws the
-		 chart. NOTE: the approved preview at
+		 & Knowledge first builds a short skills list, then flips to the wiki tab
+		 and draws a small knowledge graph of how the business connects, Macros
+		 plays the real save-as-macro flow in chat, propose, save, then run to
+		 done, File Box drops a file in and turns it into structured fields, and
+		 Dashboards types a request and draws the chart. NOTE: the approved preview at
 		 docs/superpowers/specs/onboarding-preview-v6.html predates this cut
 		 (Chat/Agents dropped, Skills reframed to Knowledge, Dashboards added) -
 		 regenerate it before treating it as the source of truth. Self-contained,
@@ -215,52 +215,170 @@
 					<div class="mock-body">
 						<div class="m-side" v-html="sideHtml('Skills')"></div>
 						<div class="m-main">
-							<!-- the Skills area's tab strip (Skills · Personalise · Wiki),
-								 with Wiki active: the honest home of the knowledge base, since
-								 it lives as a tab of /skills, not its own nav item.
-								 knowledgeStep (script) writes the wiki page by page, then the
-								 New page invite lights up - the assistant is still learning. -->
-							<div class="m-tabs">
-								<span class="m-tab">Skills</span>
-								<span class="m-tab">Personalise</span>
-								<span class="m-tab on">Wiki</span>
-							</div>
+							<!-- the Skills area's tab strip (Skills · Personalise · Wiki), its
+								 "on" class now driven by knowledgeStep (script), not hardcoded:
+								 SCENE A plays with Skills active, listing a few skills it
+								 already runs; then the strip flips to Wiki, the honest home of
+								 the knowledge base since it lives as a tab of /skills, and
+								 SCENE B draws a small graph of how the business's pages
+								 connect. Both scenes together are the "knows your skills, and
+								 keeps learning your business" promise, shown rather than told. -->
 							<div class="phase-fade" :class="{ fading: knowledgeFading }">
-								<div class="m-row m-row-skill" v-if="knowledgeAtLeast('row1')">
-									<span class="pill">org</span>
-									<div class="t">How we raise a sales order</div>
-									<div class="meta"></div>
-								</div>
-								<div class="m-row m-row-skill" v-if="knowledgeAtLeast('row2')">
-									<span class="pill">org</span>
-									<div class="t">Approval limits by amount</div>
-									<div class="meta"></div>
-								</div>
-								<div class="m-row m-row-skill" v-if="knowledgeAtLeast('row3')">
-									<span class="pill amber">you</span>
-									<div class="t">Preferred vendors for packaging</div>
-									<div class="meta"></div>
-								</div>
-							</div>
-							<div
-								class="m-row m-row-dashed"
-								:class="{ active: knowledgeAtLeast('cta') }"
-							>
-								<span class="m-row-cta"
-									><svg
-										width="11"
-										height="11"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.5"
-										stroke-linecap="round"
-										stroke-linejoin="round"
+								<div class="m-tabs">
+									<span class="m-tab" :class="{ on: !knowledgeAtLeast('flip') }"
+										>Skills</span
 									>
-										<path d="M12 5v14M5 12h14" />
+									<span class="m-tab">Personalise</span>
+									<span class="m-tab" :class="{ on: knowledgeAtLeast('flip') }"
+										>Wiki</span
+									>
+								</div>
+								<template v-if="!knowledgeAtLeast('flip')">
+									<div class="m-row m-row-skill" v-if="knowledgeAtLeast('row1')">
+										<span class="pill">org</span>
+										<div class="t">Raise a sales order</div>
+										<div class="meta"></div>
+									</div>
+									<div class="m-row m-row-skill" v-if="knowledgeAtLeast('row2')">
+										<span class="pill">org</span>
+										<div class="t">Send statement reminders</div>
+										<div class="meta"></div>
+									</div>
+									<div class="m-row m-row-skill" v-if="knowledgeAtLeast('row3')">
+										<span class="pill amber">you</span>
+										<div class="t">Reconcile bank statement</div>
+										<div class="meta"></div>
+									</div>
+								</template>
+								<!-- v-else, not a 'graph'-gated v-else-if: the graph must
+								 enter the moment the tab flips, or the pane renders blank
+								 for the whole 'flip' step and reads as a glitch -->
+								<div class="m-graph" v-else>
+									<svg
+										class="m-graph-svg"
+										viewBox="0 0 220 120"
+										aria-hidden="true"
+									>
+										<!-- each element carries its own stagger delay in --d (one
+											 shared animation-delay: var(--d) rule in the styles), so
+											 adding or reordering nodes never silently drops a delay
+											 the way a positional nth-of-type block would -->
+										<line
+											class="m-edge"
+											style="--d: 0s"
+											x1="60"
+											y1="60"
+											x2="140"
+											y2="35"
+										/>
+										<line
+											class="m-edge"
+											style="--d: 0.05s"
+											x1="60"
+											y1="60"
+											x2="30"
+											y2="25"
+										/>
+										<line
+											class="m-edge"
+											style="--d: 0.1s"
+											x1="60"
+											y1="60"
+											x2="120"
+											y2="85"
+										/>
+										<line
+											class="m-edge"
+											style="--d: 0.15s"
+											x1="60"
+											y1="60"
+											x2="70"
+											y2="100"
+										/>
+										<line
+											class="m-edge"
+											style="--d: 0.2s"
+											x1="140"
+											y1="35"
+											x2="175"
+											y2="70"
+										/>
+										<line
+											class="m-edge"
+											style="--d: 0.25s"
+											x1="120"
+											y1="85"
+											x2="175"
+											y2="70"
+										/>
+										<circle
+											class="m-node m-node-accent"
+											style="--d: 0.15s"
+											cx="60"
+											cy="60"
+											r="7"
+										/>
+										<circle
+											class="m-node m-node-accent"
+											style="--d: 0.2s"
+											cx="140"
+											cy="35"
+											r="6"
+										/>
+										<circle
+											class="m-node"
+											style="--d: 0.25s"
+											cx="30"
+											cy="25"
+											r="5"
+										/>
+										<circle
+											class="m-node"
+											style="--d: 0.3s"
+											cx="120"
+											cy="85"
+											r="5"
+										/>
+										<circle
+											class="m-node"
+											style="--d: 0.35s"
+											cx="175"
+											cy="70"
+											r="5"
+										/>
+										<circle
+											class="m-node"
+											style="--d: 0.4s"
+											cx="70"
+											cy="100"
+											r="5"
+										/>
+										<text
+											class="m-node-label"
+											style="--d: 0.45s"
+											x="146"
+											y="31"
+										>
+											Vendors
+										</text>
+										<text
+											class="m-node-label"
+											style="--d: 0.5s"
+											x="129"
+											y="89"
+										>
+											GST
+										</text>
+										<text
+											class="m-node-label"
+											style="--d: 0.55s"
+											x="57"
+											y="113"
+										>
+											Approvals
+										</text>
 									</svg>
-									New page</span
-								>
+								</div>
 							</div>
 						</div>
 					</div>
@@ -279,56 +397,99 @@
 					</p>
 				</div>
 				<div class="mock">
-					<div class="mock-bar"><i></i><i></i><i></i><span>Macros · Runs</span></div>
+					<div class="mock-bar">
+						<i></i><i></i><i></i><span>Chat · Save as macro</span>
+					</div>
 					<div class="mock-body">
 						<div class="m-side" v-html="sideHtml('Macros')"></div>
 						<div class="m-main">
-							<!-- macrosStep (script) collapses three routine steps into one
-								 run, then plays the run out (queued -> done): the "one click"
-								 promise, shown rather than told. -->
-							<div class="phase-fade" :class="{ fading: macrosFading }">
-								<div class="m-row m-row-macro">
-									<div
-										class="chip-row"
-										v-if="macrosStep === 'chips' || macrosStep === 'collapse'"
-										:class="{ collapsing: macrosStep === 'collapse' }"
-									>
-										<span class="chip">GST</span
-										><span class="chip">Reminders</span
-										><span class="chip">Close</span>
+							<!-- macrosStep (script) plays the real save-as-macro flow in
+								 chat: the user asks for a routine job, the agent proposes a
+								 macro card (modeled on ChatView's .jv-macrocard), the Save
+								 button is pressed and flips to a saved confirmation, then a
+								 run row appears below and plays out (running -> done): the
+								 "turn a routine into one click" promise, shown, not told. -->
+							<div class="chat-anim" :class="{ fading: macrosFading }">
+								<div class="chat-flow">
+									<div class="cb u" v-if="macrosAtLeast('bubble1')">
+										{{ macrosQ1 }}
 									</div>
-									<template v-else>
-										<span class="pill amber" v-if="macrosStep === 'running'"
-											>running</span
-										>
-										<span class="pill" v-else>done</span>
-									</template>
-									<div class="t">Month-end close</div>
-									<div class="meta">
+									<div class="cb a macro-card" v-if="macrosAtLeast('card')">
+										<div class="macro-card-ic">
+											<svg
+												width="13"
+												height="13"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.7"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<polygon
+													points="12 2 2 7 12 12 22 7 12 2"
+												></polygon>
+												<polyline points="2 17 12 22 22 17"></polyline>
+												<polyline points="2 12 12 17 22 12"></polyline>
+											</svg>
+										</div>
+										<div class="macro-card-txt">
+											<span class="macro-card-title">Month-end close</span>
+											<span class="macro-card-sub">3 steps</span>
+										</div>
+										<!-- decorative, like the Welcome mock's confirm buttons:
+											 a span, not a button, so the mock adds no tab stop -->
 										<span
-											class="meta-fill"
+											class="macro-card-btn"
 											:class="{
-												on: macrosStep === 'running',
-												done: macrosAtLeast('done'),
+												pressed: macrosStep === 'press',
+												saved: macrosAtLeast('saved'),
 											}"
-										></span>
+										>
+											<template v-if="macrosAtLeast('saved')">
+												<svg
+													width="9"
+													height="9"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="3"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												>
+													<path d="M20 6 9 17l-5-5" />
+												</svg>
+												Saved
+											</template>
+											<template v-else>Save as macro</template>
+										</span>
+									</div>
+									<div class="m-row run-row" v-if="macrosAtLeast('run')">
+										<div class="run-row-head">
+											<span class="pill amber" v-if="macrosStep === 'run'"
+												>running</span
+											>
+											<span class="pill" v-else>done</span>
+											<div class="t">Month-end close</div>
+										</div>
+										<div class="run-track">
+											<span
+												class="meta-fill"
+												:class="{
+													on: macrosStep === 'run',
+													done: macrosAtLeast('done'),
+												}"
+											></span>
+										</div>
 									</div>
 								</div>
-							</div>
-							<div class="m-row">
-								<span class="pill">done</span>
-								<div class="t">Daily AR reminders</div>
-								<div class="meta"></div>
-							</div>
-							<div class="m-row">
-								<span class="pill">done</span>
-								<div class="t">Sync price list</div>
-								<div class="meta"></div>
-							</div>
-							<div class="m-row">
-								<span class="pill">done</span>
-								<div class="t">Weekly sales digest</div>
-								<div class="meta"></div>
+								<div class="composer">
+									<template v-if="macrosStep === 'type1'"
+										><span class="type-line type-m1">{{ macrosQ1 }}</span
+										><span class="type-caret" aria-hidden="true"></span
+									></template>
+									<template v-else>Ask a follow-up…</template>
+								</div>
 							</div>
 						</div>
 					</div>
@@ -421,8 +582,8 @@
 					<h2>Ask for a chart. Watch it build.</h2>
 					<p>
 						Describe what you want to see in plain words and {{ agentName }} draws it
-						on a live canvas. Keep the ones that matter and they’re saved to your
-						dashboard.
+						on a live canvas. Keep the ones that matter, save them to your dashboard,
+						and share them with the users you choose.
 					</p>
 					<p class="final-call">
 						<mark
@@ -670,32 +831,52 @@ const chatStep = chatClock.step;
 const chatFading = chatClock.fading;
 const chatAtLeast = chatClock.atLeast;
 
-// ---- skills & knowledge slide (cur === 1): the wiki writes itself ----
-// Wiki pages appear one by one, then the New page invite lights up: the
-// assistant keeps a growing, private record of how your business runs.
-const KNOWLEDGE_SEQUENCE = ["row1", "row2", "row3", "cta", "hold"];
+// ---- skills & knowledge slide (cur === 1): two scenes, skills then wiki ----
+// SCENE A lists a few skills it already runs, one row at a time, with the
+// Skills tab active. Then the tab strip flips to Wiki (the honest home of the
+// knowledge base, since it lives as a tab of /skills) and SCENE B draws a
+// small graph of how the business's pages connect, node by node: the
+// assistant keeps a growing, private record of how your business runs, and
+// already knows how to work it.
+const KNOWLEDGE_SEQUENCE = ["row1", "row2", "row3", "flip", "graph", "hold"];
 const KNOWLEDGE_DURATION_MS = {
 	row1: 520,
 	row2: 470,
 	row3: 470,
-	cta: 1500,
+	flip: 500,
+	graph: 1400,
 	hold: 1800,
 };
 const knowledgeClock = createPhaseClock(KNOWLEDGE_SEQUENCE, KNOWLEDGE_DURATION_MS);
 const knowledgeFading = knowledgeClock.fading;
 const knowledgeAtLeast = knowledgeClock.atLeast;
 
-// ---- macros slide (cur === 2): three steps collapse into one run ----
-// The chips converge into the row's pill, then the run plays out
-// (queued -> done): the "one click" promise, shown rather than told.
-const MACROS_SEQUENCE = ["chips", "collapse", "running", "done", "hold"];
+// ---- macros slide (cur === 2): the real save-as-macro flow, in chat ----
+// The user asks for a routine job, the agent proposes a macro card (modeled
+// on ChatView's .jv-macrocard), Save is pressed and flips to a saved
+// confirmation, then a run row appears below and plays out (running -> done):
+// the "turn a routine into one click" promise, shown rather than told.
+const MACROS_SEQUENCE = [
+	"type1", // composer types the month-end close request
+	"bubble1", // request becomes a user bubble
+	"card", // agent proposes the macro card
+	"press", // Save as macro shows a pressed state
+	"saved", // button flips to a saved confirmation
+	"run", // a run row appears, progress bar filling
+	"done", // run settles to done, bar full and green
+	"hold", // pause before the loop fades and restarts
+];
 const MACROS_DURATION_MS = {
-	chips: 900,
-	collapse: 650,
-	running: 1500,
-	done: 1600,
-	hold: 1400,
+	type1: 2000,
+	bubble1: 450,
+	card: 900,
+	press: 450,
+	saved: 900,
+	run: 1600,
+	done: 1800,
+	hold: 1800,
 };
+const macrosQ1 = "Run my month-end close: GST summary, payment reminders, close the books.";
 const macrosClock = createPhaseClock(MACROS_SEQUENCE, MACROS_DURATION_MS);
 const macrosStep = macrosClock.step;
 const macrosFading = macrosClock.fading;
@@ -890,21 +1071,25 @@ function sideHtml(active) {
 	.canvas-status .g {
 		animation: none;
 	}
-	.confirm-btn--ok {
+	.confirm-btn--ok,
+	.macro-card-btn {
 		transition: none;
 	}
 	.m-row-skill,
-	.meta-info {
+	.meta-info,
+	.macro-card {
 		animation: none;
 	}
 	.m-row-dashed {
 		transition: none;
 	}
-	.chip {
-		transition: none;
-	}
 	.meta-fill {
 		transition: none;
+	}
+	.m-graph-svg circle,
+	.m-graph-svg line,
+	.m-graph-svg text {
+		animation: none;
 	}
 	.file-row.dropping {
 		animation: none;
@@ -1257,8 +1442,8 @@ button:focus-visible {
 .chat-flow {
 	position: absolute;
 	top: 0;
-	left: 0;
-	right: 0;
+	left: 14px;
+	right: 14px;
 	bottom: 50px;
 	display: flex;
 	flex-direction: column;
@@ -1365,7 +1550,9 @@ button:focus-visible {
 }
 
 /* ---- skills & knowledge mock: the Skills-area tab strip (Skills ·
-   Personalise · Wiki), Wiki active - the honest home of the knowledge base. */
+   Personalise · Wiki). The "on" tab is step-driven: Skills while scene A
+   lists its rows, Wiki once the sequence flips into the graph scene, the
+   honest home of the knowledge base. */
 .m-tabs {
 	display: flex;
 	gap: 4px;
@@ -1381,6 +1568,65 @@ button:focus-visible {
 .m-tab.on {
 	color: var(--text);
 	background: var(--surface-2);
+}
+
+/* skills & knowledge mock, scene B: a small graph of how the business's
+   wiki pages connect. Edges draw first, then nodes pop in, then labels
+   fade, staggered by DOM position like the dashboards chart's bars. */
+.m-graph {
+	height: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+.m-graph-svg {
+	width: 100%;
+	height: 196px;
+	margin-top: 14px;
+}
+/* every graph element staggers by its own --d (set inline in the SVG), so
+   the entrance order survives adding or reordering nodes without a block of
+   positional nth-of-type rules to hand-renumber */
+.m-edge {
+	stroke: var(--border-2);
+	stroke-width: 1;
+	fill: none;
+	animation: jvEdgeIn 0.4s ease both;
+	animation-delay: var(--d, 0s);
+}
+.m-node {
+	fill: var(--surface-3);
+	transform-box: fill-box;
+	transform-origin: center;
+	animation: jvNodeIn 0.35s ease both;
+	animation-delay: var(--d, 0s);
+}
+.m-node-accent {
+	fill: var(--cta);
+}
+.m-node-label {
+	font-size: 8px;
+	fill: var(--text-3);
+	animation: jvEdgeIn 0.4s ease both;
+	animation-delay: var(--d, 0s);
+}
+@keyframes jvNodeIn {
+	from {
+		opacity: 0;
+		transform: scale(0.3);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+@keyframes jvEdgeIn {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
 }
 
 /* typing composer: a clip-path reveal reads as characters appearing
@@ -1410,6 +1656,11 @@ button:focus-visible {
 .type-q2 {
 	animation-duration: 1.1s;
 	animation-timing-function: steps(20, end);
+}
+/* macros slide: the month-end close request typed into the composer */
+.type-m1 {
+	animation-duration: 2s;
+	animation-timing-function: steps(33, end);
 }
 @keyframes jvTypeReveal {
 	to {
@@ -1507,44 +1758,93 @@ button:focus-visible {
 		transform: none;
 	}
 }
-/* skills slide: the New skill invite lighting up once the list is built */
-.m-row-dashed.active {
-	border-color: var(--cta);
-	background: var(--surface-2);
-}
-.m-row-dashed.active .m-row-cta {
-	color: var(--text);
-}
-
-/* macros slide: three routine steps collapsing into one run */
-.chip-row {
+/* macros slide: the agent's save-as-macro card, a scaled mock of the real
+   .jv-macrocard from ChatView.vue (icon tile, title/subtitle, Save button). */
+.macro-card {
 	display: flex;
-	gap: 6px;
+	align-items: center;
+	gap: 8px;
+	max-width: 88%;
+	padding: 8px 9px;
+	animation: jvRowIn 0.35s ease;
 }
-.chip {
-	font-size: 8.5px;
+.macro-card-ic {
+	flex: none;
+	width: 26px;
+	height: 26px;
+	border-radius: 7px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--cta-bg);
+	color: var(--cta);
+}
+.macro-card-txt {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+.macro-card-title {
+	font-size: 10.5px;
 	font-weight: 600;
-	padding: 2px 7px;
-	border-radius: 99px;
+	color: var(--text);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.macro-card-sub {
+	font-size: 9px;
+	color: var(--text-3);
+}
+/* Save as macro: pressed on click, then flips to a saved confirmation
+   (reuses the Welcome slide's confirm-btn--ok.pressed idiom). */
+.macro-card-btn {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 5px 9px;
+	border-radius: 8px;
+	border: 1px solid var(--cta);
+	background: var(--cta);
+	font-family: inherit;
+	font-size: 9.5px;
+	font-weight: 600;
+	color: var(--cta-fg);
+	transition: transform 0.15s ease, filter 0.15s ease, background-color 0.15s ease,
+		border-color 0.15s ease, color 0.15s ease;
+}
+.macro-card-btn.pressed {
+	transform: scale(0.93);
+	filter: brightness(0.88);
+}
+.macro-card-btn.saved {
+	background: var(--green-bg);
+	border-color: var(--green-bd);
+	color: var(--green);
+}
+/* macros slide: the run row stacks its head over a full-width progress
+   track inside the same card, filling while it's running and settling to
+   full and green once it's done; this is the one run the slide is actually
+   watching, so it earns more than the rows mock's small 52px meta stub. */
+.run-row {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 7px;
+}
+.run-row-head {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+}
+.run-track {
+	height: 6px;
+	border-radius: 4px;
 	background: var(--surface-2);
-	color: var(--text-2);
-	border: 1px solid var(--border);
-	transition: transform 0.4s ease, opacity 0.4s ease;
+	overflow: hidden;
 }
-.chip-row.collapsing .chip:nth-child(1) {
-	transform: translateX(16px) scale(0.4);
-	opacity: 0;
-}
-.chip-row.collapsing .chip:nth-child(2) {
-	transform: scale(0.3);
-	opacity: 0;
-}
-.chip-row.collapsing .chip:nth-child(3) {
-	transform: translateX(-16px) scale(0.4);
-	opacity: 0;
-}
-/* macros slide: the run's progress, filling while it's running and
-   settling to full once it's done */
 .meta-fill {
 	display: block;
 	height: 100%;

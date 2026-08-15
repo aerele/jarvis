@@ -90,3 +90,91 @@ test("strips NUL so crafted input can't collide with the internal code-span sent
 	assert.ok(!html.includes("<code"), "no spurious code span from an injected sentinel");
 	assert.ok(!html.includes("undefined"), "no phantom code-index leak");
 });
+
+// The motivating bug: an agent reply cites a Desk location as inline code, e.g.
+// `/app/dashboard-view/Customer-Item Manufacturing Priority`. Rendered as plain
+// code text it read as inert, so a user who'd just had that dashboard created
+// missed the link and asked for it again (conversation ves2j96q81, seq 36).
+
+test("a code span that is EXACTLY a site-relative /app/... path renders as a clickable link", () => {
+	const html = renderMarkdown(
+		"Here you go: `/app/dashboard-view/Customer-Item Manufacturing Priority`"
+	);
+	assert.ok(!html.includes("<code"), "no code span left for a pure app-path");
+	assert.ok(
+		html.includes(
+			'<a href="/app/dashboard-view/Customer-Item%20Manufacturing%20Priority" target="_blank" rel="noopener" class="jv-md-link">/app/dashboard-view/Customer-Item Manufacturing Priority</a>'
+		),
+		"renders a jv-md-link with spaces percent-encoded in the href but not the visible text"
+	);
+});
+
+test("a code span that merely CONTAINS an app path alongside other text stays a plain code span", () => {
+	const html = renderMarkdown("run `cd /app/foo && ls` first");
+	assert.ok(html.includes("<code"), "still a code span");
+	assert.ok(!html.includes("<a "), "not linkified — it's not EXACTLY a path");
+});
+
+test("an ordinary code span unrelated to /app/ paths is untouched", () => {
+	const html = renderMarkdown("use `git status` to check");
+	assert.ok(html.includes('<code class="jv-md-code">git status</code>'));
+});
+
+test("a bare /app/... path in plain prose (no backticks) also becomes a clickable link", () => {
+	const html = renderMarkdown("It's live at /app/sales-invoice/SINV-2026-00042 now.");
+	assert.ok(
+		html.includes(
+			'<a href="/app/sales-invoice/SINV-2026-00042" target="_blank" rel="noopener" class="jv-md-link">/app/sales-invoice/SINV-2026-00042</a>'
+		)
+	);
+	assert.ok(html.includes("now."), "trailing sentence punctuation stays outside the link text");
+	assert.ok(!html.includes("00042.</a>"), "the trailing period is not swallowed into the link");
+});
+
+test("an external URL is left to its own link handling, not mistaken for a site-relative path", () => {
+	const html = renderMarkdown("See [the dashboard](https://example.com/app/foo) for details.");
+	assert.ok(html.includes('<a href="https://example.com/app/foo"'), "markdown link untouched");
+	assert.ok((html.match(/<a /g) || []).length === 1, "no second, spurious link was created");
+});
+
+test("bare app-path linking does not fire inside an existing <a> tag's own path segment", () => {
+	const html = renderMarkdown("Visit https://other.example/app/thing directly.");
+	assert.ok(!html.includes('href="/app/thing"'), "the /app/ inside a full URL is not re-linked");
+});
+
+test("a bare path immediately abutting a code span does not swallow the code-span sentinel", () => {
+	// Regression: the bare-path stash runs after code spans are stashed behind a NUL
+	// sentinel, so an un-excluded sentinel char in the path's match class would pull
+	// the sentinel into the href and corrupt both the link and the code span.
+	const html = renderMarkdown("see /app/x`y`");
+	assert.ok(
+		html.includes('<a href="/app/x"'),
+		"the bare path links cleanly, without the sentinel"
+	);
+	assert.ok(html.includes('<code class="jv-md-code">y</code>'), "the code span restores intact");
+});
+
+test("an /app/ path used AS a markdown link's own text does not nest a second <a> inside it", () => {
+	// Regression: an agent citing "[/app/foo](https://docs...)" has the path sitting
+	// inside the link's own text. Auto-linking it there would nest <a> elements, and a
+	// browser resolves that by silently closing the OUTER anchor - the external link
+	// goes dead. The path must render as plain (escaped) text inside the one real <a>.
+	const html = renderMarkdown("[/app/dashboard-view/Foo](https://docs.example.com/help)");
+	assert.ok(
+		html.includes(
+			'<a href="https://docs.example.com/help" target="_blank" rel="noopener" class="jv-md-link">/app/dashboard-view/Foo</a>'
+		),
+		"exactly one anchor, wrapping the path as plain text"
+	);
+	assert.equal((html.match(/<a /g) || []).length, 1, "no nested second anchor");
+});
+
+test("an /app/ path inside BACKTICKS used as a markdown link's text also avoids a nested <a>", () => {
+	const html = renderMarkdown("[`/app/dashboard-view/Foo`](https://docs.example.com/help)");
+	assert.equal((html.match(/<a /g) || []).length, 1, "no nested second anchor");
+	assert.ok(html.includes('<a href="https://docs.example.com/help"'), "the outer link survives");
+	assert.ok(
+		html.includes('<code class="jv-md-code">/app/dashboard-view/Foo</code>'),
+		"the path still renders as code, just not as its own link, inside the outer anchor"
+	);
+});

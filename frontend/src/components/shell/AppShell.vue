@@ -53,7 +53,7 @@
 						class="flex h-12 shrink-0 items-center gap-2 border-b px-3"
 					>
 						<button
-							class="grid size-9 place-items-center rounded-md text-ink-gray-7"
+							class="jv-focus-ring grid size-9 place-items-center rounded-md text-ink-gray-7"
 							aria-label="Open navigation"
 							@click="store.mobileDrawerOpen = true"
 						>
@@ -189,7 +189,7 @@ const SETTINGS_DEEP_LINK_KEYS = new Set([
 	"shortcuts",
 	"plan",
 	"aimodels",
-	"billing",
+	"billing", // legacy alias, not a PANES key - SettingsDialog maps it to "usage"
 	"branding",
 	"usageadmin",
 ]);

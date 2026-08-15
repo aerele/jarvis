@@ -130,11 +130,21 @@ function setTheme(t) {
 		.then(({ setUserTheme }) => setUserTheme(t))
 		.catch(() => {});
 }
-// Cycle light → dark → system → light so "follow system" stays reachable
-// (the Appearance pane that offered it was removed).
-const _THEME_CYCLE = { light: "dark", dark: "system", system: "light" };
+// The toggle is a strict two-state flip of the EFFECTIVE appearance. It used
+// to cycle light → dark → system, but with a dark OS the dark → system step
+// rendered identically, so that click looked dead and reaching light took two
+// clicks. "system" also was not truly kept reachable by the cycle (the skip
+// that fixed the dead click made it unreachable on a dark OS anyway, and no
+// other UI offers it since the Appearance pane was removed), so the cycle was
+// dropped rather than half-kept: "system" remains the default for users who
+// never touch the toggle, and a deliberate three-way choice belongs in a
+// Settings picker if it ever comes back. Exported pure so theme.test.js can
+// pin the every-click-flips invariant.
+export function nextTheme(current, prefersDark) {
+	return isDark(current, prefersDark) ? "light" : "dark";
+}
 function toggleTheme() {
-	setTheme(_THEME_CYCLE[theme.value] || "dark");
+	setTheme(nextTheme(theme.value, prefersDark.value));
 }
 
 export function useJarvisTheme() {

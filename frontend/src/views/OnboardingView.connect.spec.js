@@ -14,6 +14,13 @@ const api = vi.hoisted(() => ({
 	getAccountDefaults: vi.fn(async () => ({})),
 	listPaymentProviders: vi.fn(async () => ({ providers: ["razorpay"], default: "razorpay" })),
 	isReadyForChat: vi.fn(async () => ({ ready: false, reason: "signup" })),
+	// jarvis#840: default all-green so every pre-existing "ready navigates"
+	// assertion still holds; the preflight describe block below overrides it.
+	runChatPreflight: vi.fn(async () => ({
+		plugin: "ok",
+		persona: "ok",
+		usable: { state: "ok", detail: "" },
+	})),
 	checkSignupPaymentState: vi.fn(async () => ({})),
 	listPlans: vi.fn(async () => []),
 	reconnectAvailable: vi.fn(async () => ({})),
@@ -22,6 +29,8 @@ const api = vi.hoisted(() => ({
 	startSignup: vi.fn(async () => ({})),
 	finishPayment: vi.fn(async () => ({})),
 	syncConnection: vi.fn(async () => ({})),
+	captureOnboardingLead: vi.fn(async () => ({ ok: true })),
+	getTermsUrl: vi.fn(async () => ({ url: "" })),
 	getLlmApplyOperation: vi.fn(),
 	// The cutover's payment flow (plan-09) instantiates from this map at setup and
 	// hydrates on mount. A benign no-signup envelope lets the view mount and reconcile
@@ -107,6 +116,13 @@ vi.mock("frappe-ui", () => {
 		Button: stub("Button"),
 		FormControl: stub("FormControl", "input"),
 		FeatherIcon: stub("FeatherIcon", "span"),
+		Checkbox: {
+			name: "Checkbox",
+			props: ["modelValue", "label", "id"],
+			emits: ["update:modelValue"],
+			template:
+				'<input type="checkbox" :id="id" :checked="!!modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" />',
+		},
 		ErrorMessage: {
 			name: "ErrorMessage",
 			props: ["message"],
@@ -1657,89 +1673,88 @@ describe("jarvis#752 the connect step shows admin's route verdict while still co
 	});
 });
 
-// jarvis wait-phases-horizontal: the wait block widened to 75% and the three
-// phases moved from a stacked list to equal-width columns under the bar. The
-// admin-authored detail sentence (jarvis#752/#754) no longer fits inside a
-// column a third of that width, so it was hoisted out of the phase row and
-// now renders once, full width, below the phase columns instead. These tests
-// pin the DOM shape that hoist depends on, not pixel layout (jsdom does not
-// compute CSS): the detail is a sibling of the phase list, not nested in any
-// `<li>`, and both the active phase and the detail keep their own
-// `role="status"` so a screen reader still hears each independently.
-describe("jarvis wait-phases-horizontal: detail hoisted out of the phase columns", () => {
+// 2026-08-14 connect-wait redesign: the phase columns are gone; the connect
+// wait renders ONE labeled six-segment bar (connectSteps) with the current
+// step's one-line explanation below it, and admin's own detail sentence
+// (jarvis#752/#754) below that. These tests pin the DOM shape, not pixel
+// layout (jsdom does not compute CSS).
+describe("connect wait bar: six labeled steps with a one-line explanation", () => {
 	const QUOTA_REASON = "Your OpenAI account has reached its usage limit. It resets in 2 hours.";
 
-	it("renders the detail as a sibling of the phase list, not inside a phase row", async () => {
+	it("renders six labeled steps and marks the readiness step current while applying", async () => {
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
 		await flushPromises();
 
-		const phases = w.find(".ob-phases");
-		const detail = w.find(".ob-phase-detail");
-		expect(detail.exists()).toBe(true);
-		expect(detail.text()).toBe(QUOTA_REASON);
-		// Hoisted OUT: no longer a descendant of the phase list or any row.
-		expect(detail.element.closest("ul")).toBeNull();
-		expect(detail.element.closest("li")).toBeNull();
-		// Reads as belonging to the same block: immediately after the phase list.
-		expect(phases.element.nextElementSibling).toBe(detail.element);
-		w.unmount();
-	});
+		// The old ob-phases column list must be gone from the connect screen.
+		expect(w.find(".ob-phases").exists()).toBe(false);
 
-	it("still lays out exactly three phase columns, each its own row item", async () => {
-		const w = await mountConnect();
-
-		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
-		await flushPromises();
-
-		const columns = w.findAll(".ob-phases > .ob-phase");
-		expect(columns).toHaveLength(3);
-		// Every column still carries only its label, never the detail sentence -
-		// the hoist removed the ONLY per-row detail span, it did not just add a
-		// duplicate copy alongside it.
-		for (const column of columns) {
-			expect(column.find(".ob-phase-detail").exists()).toBe(false);
+		// Scoped to the wait bar: the top rail is its own StepProgress with its
+		// own aria-current, and must not leak into these assertions.
+		const items = w.find(".ob-progress").findAll('[role="listitem"]');
+		const labels = items.map((i) => i.text());
+		for (const expected of [
+			"Connection",
+			"Workspace",
+			"Tools",
+			"Persona",
+			"Live check",
+			"Chat",
+		]) {
+			expect(labels).toContain(expected);
 		}
+		const current = items.filter((i) => i.attributes("aria-current") === "step");
+		expect(current).toHaveLength(1);
+		expect(current[0].text()).toBe("Workspace");
 		w.unmount();
 	});
 
-	it("announces the phase and its detail as ONE live region, not two", async () => {
-		// Round-1 review: giving the hoisted detail its own role="status" made a
-		// screen reader hear the phase and the sentence explaining that phase as
-		// two unrelated announcements. Worse, that region was v-if gated, so it
-		// mounted already populated, and a live region announces CHANGES to a
-		// region that is already present, not its initial content. One shared
-		// wrapper fixes both at once.
+	it("explains the current step in one line and keeps admin's detail separate", async () => {
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
 		await flushPromises();
 
-		const active = w.find(".ob-phase--active");
+		// The explanation is the readiness phase's own sentence (waitPhases.js),
+		// never invented copy; the admin-authored detail keeps its own line.
+		expect(w.find(".ob-step-explain").text()).toBe(w.vm.readinessStage.label);
+		expect(w.find(".ob-phase-detail").text()).toBe(QUOTA_REASON);
+		w.unmount();
+	});
+
+	it("announces the explanation and admin's detail as ONE live region, not two", async () => {
+		// Same rule the phase columns followed: separate role="status" regions
+		// read as unrelated announcements, and a v-if-gated region mounts
+		// already populated so its content is never announced at all.
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
+		await flushPromises();
+
+		const explain = w.find(".ob-step-explain");
 		const detail = w.find(".ob-phase-detail");
-		expect(active.attributes("role")).toBeUndefined();
+		expect(explain.attributes("role")).toBeUndefined();
 		expect(detail.attributes("role")).toBeUndefined();
 
 		const owning = w
 			.findAll('[role="status"]')
 			.filter(
-				(r) => r.element.contains(active.element) && r.element.contains(detail.element)
+				(r) => r.element.contains(explain.element) && r.element.contains(detail.element)
 			);
 		expect(owning.length).toBe(1);
 		w.unmount();
 	});
 
-	it("the active phase's spinner and the waiting phase's dot are unchanged by the hoist", async () => {
+	it("the bar caption counts all six steps, matching what is drawn", async () => {
+		// The user-reported defect this redesign fixes: a "Step 2 of 3" caption
+		// over six visible items.
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
 		await flushPromises();
 
-		// design.md §3.8: JvSpinner is the only loading indicator, never a
-		// bespoke one - it renders `.jv-spin` with its own role="status".
-		expect(w.find(".ob-phase--active .jv-spin").exists()).toBe(true);
-		expect(w.find(".ob-phase--waiting .ob-phase-dot").exists()).toBe(true);
+		expect(w.text()).toContain("Step 2 of 6");
 		w.unmount();
 	});
 });
@@ -1777,5 +1792,88 @@ describe("subscription Test / Start-chatting mutual exclusion", () => {
 		await flushPromises();
 		expect(editor.props("hostBusy")).toBe(true);
 		w.unmount();
+	});
+});
+
+describe("jarvis#840 the pre-chat preflight gate", () => {
+	async function driveToReady(w) {
+		api.getLlmApplyOperation.mockResolvedValue(readyStatus);
+		const p = w.vm.saveConnect();
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(50);
+		await p;
+		await flushPromises();
+	}
+
+	it("runs exactly once between ready and navigation, and all-green proceeds", async () => {
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		await driveToReady(w);
+		expect(api.runChatPreflight).toHaveBeenCalledTimes(1);
+		expect(routerReplace).toHaveBeenCalledTimes(1);
+		expect(routerReplace).toHaveBeenCalledWith({ name: "Chat" });
+	});
+
+	it("a credential rejection blocks navigation and restores the editable form with the provider's sentence", async () => {
+		api.runChatPreflight.mockResolvedValue({
+			plugin: "ok",
+			persona: "ok",
+			usable: {
+				state: "auth",
+				detail: "OpenAI API error (401): Incorrect API key provided",
+			},
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		await driveToReady(w);
+		expect(routerReplace).not.toHaveBeenCalled();
+		expect(w.vm.state.finishing).toBe(false);
+		expect(w.vm.state.connectBlockReason).toMatch(/401/);
+		// A fresh attempt re-runs the preflight rather than reusing the refusal.
+		expect(w.vm.preflight.done).toBe(false);
+		// Review B1: the forgets are load-bearing. Admin dedupes on the
+		// idempotency key and the stored operation id, so keeping either would
+		// hand the next Start straight back the operation whose credential the
+		// probe just refused - a permanent block. Both must be gone so the
+		// customer's FIXED credential mints a fresh operation.
+		expect(sessionStorage.getItem(IDEM_KEY)).toBeNull();
+		expect(sessionStorage.getItem(OP_STORE_KEY)).toBeNull();
+	});
+
+	it("a provider usage limit is shown honestly and does NOT block chat", async () => {
+		api.runChatPreflight.mockResolvedValue({
+			plugin: "ok",
+			persona: "ok",
+			usable: { state: "rate_limit", detail: "429 usage_limit_reached" },
+		});
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		await driveToReady(w);
+		expect(w.vm.preflight.notice).toMatch(/usage limit/i);
+		expect(routerReplace).not.toHaveBeenCalled(); // still inside the honest beat
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+		expect(routerReplace).toHaveBeenCalledTimes(1);
+	});
+
+	it("unchecked rows and even a failed preflight call never block (fail open)", async () => {
+		api.runChatPreflight.mockRejectedValue(new Error("admin down"));
+		vi.useFakeTimers();
+		const w = await mountConnect();
+		await driveToReady(w);
+		expect(routerReplace).toHaveBeenCalledTimes(1);
+	});
+
+	it("a stale terminal after the customer escaped to the form neither navigates nor probes", async () => {
+		// PR #848 review: chooseDifferentModel resets the UI but never aborts an
+		// in-flight follow; when that stale operation later resolves ready, the
+		// gate must not yank the screen or bill a probe against the abandoned
+		// config. finishing=false is the escape's signature.
+		const w = await mountConnect();
+		w.vm.state.finishing = false;
+		await w.vm.navigateToChat();
+		await flushPromises();
+		expect(api.runChatPreflight).not.toHaveBeenCalled();
+		expect(routerReplace).not.toHaveBeenCalled();
 	});
 });

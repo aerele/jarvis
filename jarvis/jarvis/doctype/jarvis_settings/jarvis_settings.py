@@ -66,6 +66,15 @@ _CONTAINER_OWNED_MODES = {"oauth", "subscription"}
 ADMIN_SYNC_RQ_TIMEOUT_S = 600
 ADMIN_SYNC_LOCK_TIMEOUT_S = ADMIN_SYNC_RQ_TIMEOUT_S
 
+# jarvis#841: how long a "pending:" single-model apply may absorb a
+# byte-identical re-save (_identical_apply_already_underway). Deliberately the
+# SPA's subscription readiness budget (onboarding.save_llm_pool's
+# readiness_budget_s), NOT the 600s job budget: when the wizard's poll exhausts
+# and the customer retries, that re-save must fire a real apply even where the
+# */5 reconcile cannot heal a dead worker (paused scheduler). The confirmed-"ok"
+# case uses ADMIN_SYNC_RQ_TIMEOUT_S instead.
+_IDENTICAL_APPLY_PENDING_WINDOW_S = 300
+
 # Lock-acquisition waits for the sync workers. A dead (SIGKILLed/OOMed)
 # holder blocks the lock for up to the full TTL (600s) - nothing releases
 # the key early in that case - so the retry chain's CUMULATIVE wait must
@@ -1129,6 +1138,57 @@ class JarvisSettings(Document):
 			tuple(rows),
 		)
 
+	@staticmethod
+	def _llm_apply_fingerprint(snapshot) -> str:
+		"""Digest of a ``_pool_state_snapshot`` tuple, or "" when there is none
+		to digest (a save path that skipped validate must never dedup). The
+		snapshot already sha256-digests every row secret, so the stored value
+		never contains credential material (at worst it is an equality oracle
+		for a full guessed config, whose secrets are high-entropy). repr() of a
+		tuple of primitives is deterministic, which is all the equality check
+		needs."""
+		import hashlib
+
+		if snapshot is None:
+			return ""
+		return hashlib.sha256(repr(snapshot).encode("utf-8")).hexdigest()
+
+	def _identical_apply_already_underway(self) -> bool:
+		"""True iff the config being saved is byte-identical to the last
+		ENQUEUED single-model apply (jarvis#841) and that apply is still good:
+		confirmed "ok" recently, or "pending" inside the wizard's own readiness
+		budget. The single-model twin of ``_pool_sync_is_redundant``, except the
+		before-doc's masks make a snapshot comparison useless here - hence the
+		fingerprint stamped at enqueue time (``_on_update_single_model_legacy``).
+
+		A "failed:" status never skips: an identical re-save after a failed
+		apply is the customer's retry lever (the F5 rule below). The "pending"
+		window is deliberately the SPA's 300s subscription readiness budget
+		(onboarding.save_llm_pool), not the 600s job budget: when the wizard's
+		poll exhausts and the customer retries, the re-save must fire a REAL
+		apply even where the */5 reconcile cannot help (paused scheduler).
+
+		Accepted residual (#846 review): a container rebuilt OUT-OF-BAND
+		(image roll, host move) inside the ok-window can absorb one identical
+		re-save, because nothing bench-side witnessed the rebuild. Bounded by
+		the 600s window, and rebuild flows that go through admin re-gate
+		readiness (authority generation / chat_readiness), which is what the
+		customer-facing surfaces key on - so the skip window closes on its
+		own rather than stranding the tenant."""
+		fingerprint = self._llm_apply_fingerprint(self.flags.get("pool_state_snapshot"))
+		if not fingerprint or fingerprint != (self.get("llm_last_apply_fingerprint") or ""):
+			return False
+		requested_at = self.get("last_sync_requested_at")
+		if not requested_at:
+			return False
+		age_s = frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at)
+		status = self.get("last_sync_status") or ""
+		if status.startswith("ok"):
+			return age_s <= ADMIN_SYNC_RQ_TIMEOUT_S
+		if status.startswith("pending"):
+			return age_s <= _IDENTICAL_APPLY_PENDING_WINDOW_S
+		return False
+
 	def _pool_sync_is_redundant(self) -> bool:
 		"""True iff this save changes nothing the pool push would transmit
 		AND the container is already in a known-good state.
@@ -1191,6 +1251,13 @@ class JarvisSettings(Document):
 			{
 				"last_sync_status": "pending: provisioning container (pool)",
 				"last_sync_requested_at": frappe.utils.now(),
+				# The jarvis#841 dedup stamp names a DIRECT-leg apply; a pool
+				# excursion refreshes this timestamp and later lands an "ok"
+				# without going through the classifier, so a stale stamp left
+				# here could absorb a direct re-save after the pool teardown
+				# even though /llm-pool never pushed the direct blob. Cleared,
+				# same as the disconnect/reset writers.
+				"llm_last_apply_fingerprint": "",
 			},
 		)
 		run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
@@ -1236,8 +1303,22 @@ class JarvisSettings(Document):
 		# last_sync_requested_at (jarvis C2): same enqueue-time stamp as the pool
 		# leg above - see that comment for why, and account._APPLYING_SOFT_WINDOW_S
 		# for how it is consumed.
+		#
+		# llm_last_apply_fingerprint (jarvis#841): what this enqueue is applying,
+		# stamped HERE rather than at convergence so it has one writer (the save
+		# path) instead of joining _stamp_converged_ok's five racing callers. The
+		# worker re-reads the doc at run time, and commit order equals stamp
+		# order, so the field always names the config the container will end up
+		# holding. _identical_apply_already_underway is the sole reader.
 		_write_settings_fields(
-			self, {"last_sync_status": pending_label, "last_sync_requested_at": frappe.utils.now()}
+			self,
+			{
+				"last_sync_status": pending_label,
+				"last_sync_requested_at": frappe.utils.now(),
+				"llm_last_apply_fingerprint": self._llm_apply_fingerprint(
+					self.flags.get("pool_state_snapshot")
+				),
+			},
 		)
 		# In tests, run inline so existing assertions on the final status
 		# don't have to poll. Set ``frappe.flags.run_admin_sync_inline``
@@ -1651,6 +1732,18 @@ class JarvisSettings(Document):
 		if old is not None and (self.llm_auth_mode or "") == "subscription":
 			current_snap = self.flags.get("pool_state_snapshot")
 			if current_snap is not None and current_snap != self._pool_state_snapshot(old):
+				# jarvis#841: this comparison cannot see that a RE-SAVE is
+				# byte-identical - the before-doc's row secrets are '*'-masks
+				# while the submitted ones are plaintext - so the wizard's
+				# Start-chatting save re-applied the exact config the sign-in
+				# step's save had just applied, bouncing the container a second
+				# time underneath the customer's first chat message. Recognise
+				# that one case by fingerprint against the last ENQUEUED apply
+				# instead. A genuinely refreshed token changes the blob and so
+				# the fingerprint, which keeps the jarvis#755 re-auth restart;
+				# force_admin_sync / llm_auth_mode_changed returned above.
+				if self._identical_apply_already_underway():
+					return None
 				return "restart"
 
 		if old is None:
@@ -1844,6 +1937,12 @@ def _stamp_pool_applied_ok(settings, result: dict) -> bool:
 		"last_sync_at": _frappe.utils.now(),
 		"last_sync_status": f"ok ({resolved_action} via admin)",
 		"llm_pool_synced_at": _frappe.utils.now(),
+		# The jarvis#841 dedup stamp names a DIRECT-leg apply; this "ok" is a
+		# POOL apply, so any stamp left standing next to it is stale by
+		# definition. Belt-and-braces with the _enqueue_pool_sync clear: the
+		# synchronous sync_pool_now path suppresses that enqueue, so this is
+		# the only clear that covers it (#846 review).
+		"llm_last_apply_fingerprint": "",
 	}
 	if not result.get("unchanged"):
 		_synced["last_subscription_status"] = str(result.get("subscription_status") or "")

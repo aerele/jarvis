@@ -118,10 +118,12 @@ MAX_CLEAR = 200
 PAGE_LIMIT = 100
 MAX_PAGES = 50
 
-# Labels of the throwaway sessions the bench mints for its own turns (mirrors
-# session_lifecycle._THROWAWAY_LABEL_PREFIXES). A real conversation session is
-# always "jarvis-chat-<user>-<ms>", so these prefixes can never collide with one.
-_BENCH_LABEL_PREFIXES = ("jarvis-prewarm-", "jarvis-title-", "jarvis-polish-")
+# Labels of the throwaway sessions the bench mints for its own turns - the ONE
+# list, imported so this can never diverge from the sweep that reaps them
+# (jarvis#840 review: the previous hand-copied mirror did). A real conversation
+# session is always "jarvis-chat-<user>-<ms>", so these prefixes can never
+# collide with one.
+from jarvis.chat.session_lifecycle import _THROWAWAY_LABEL_PREFIXES as _BENCH_LABEL_PREFIXES
 
 # agent's own per-agent session: "agent:<id>:main" and its ":heartbeat"
 # sibling. The heartbeat resumes on every tick, so a pin there fails forever.

@@ -94,31 +94,72 @@ class TestJarvisSettings(FrappeTestCase):
 	# mirror of models[0].provider — provider choice now lives in the models
 	# table/preset catalog. Contract covered by test_unified_llm_config.)
 
+	def _tab_of(self, meta, fieldname):
+		"""Fieldname of the Tab Break governing `fieldname` (None if before any tab)."""
+		tab = None
+		for f in meta.fields:
+			if f.fieldtype == "Tab Break":
+				tab = f.fieldname
+			if f.fieldname == fieldname:
+				return tab
+		return None
+
 	def test_tab_structure(self):
-		"""Two tabs: Configuration (editable) and System (read-only)."""
+		"""Six domain tabs. Fields are grouped by domain (editable and read-only
+		together), superseding the earlier two-tab editable/read-only split."""
+		meta = frappe.get_meta("Jarvis Settings")
+		tabs = [(f.fieldname, f.label) for f in meta.fields if f.fieldtype == "Tab Break"]
+		self.assertEqual(
+			tabs,
+			[
+				("account_tab", "Account"),
+				("llm_tab", "Language Model"),
+				("intelligence_tab", "Intelligence"),
+				("agent_tab", "Agent & Tools"),
+				("sync_tab", "Sync & Status"),
+				("system_tab", "System"),
+			],
+		)
+
+	def test_domain_tab_sections(self):
+		"""Key sections resolve under their domain tab."""
 		meta = frappe.get_meta("Jarvis Settings")
 		fields_by_name = {f.fieldname: f for f in meta.fields}
+		placement = {
+			"account_section": "account_tab",
+			"budgets_section": "account_tab",
+			"llm_section": "llm_tab",
+			"llm_advanced_section": "llm_tab",
+			"behavioural_learning_section": "intelligence_tab",
+			"operator_section": "agent_tab",
+			"agent_tools_section": "agent_tab",
+			"last_sync_section": "sync_tab",
+			"admin_connection_section": "system_tab",
+		}
+		for section, expected_tab in placement.items():
+			self.assertEqual(fields_by_name[section].fieldtype, "Section Break")
+			self.assertEqual(
+				self._tab_of(meta, section), expected_tab, f"{section} should be under {expected_tab}"
+			)
 
-		self.assertEqual(fields_by_name["config_tab"].fieldtype, "Tab Break")
-		self.assertEqual(fields_by_name["config_tab"].label, "Configuration")
-		self.assertEqual(fields_by_name["system_tab"].fieldtype, "Tab Break")
-		self.assertEqual(fields_by_name["system_tab"].label, "System")
-
-	def test_configuration_tab_sections(self):
-		"""Configuration tab has Account, Language Model, Sampling sections."""
+	def test_editable_knobs_not_stranded_in_readonly_plumbing(self):
+		"""Regression: editable budgets/limits belong under Account and the agent
+		tool restrictions under Agent & Tools, not buried in read-only Sync/System
+		sections (jarvis settings review)."""
 		meta = frappe.get_meta("Jarvis Settings")
-		fields_by_name = {f.fieldname: f for f in meta.fields}
-
-		for fieldname in ("account_section", "llm_section", "llm_advanced_section"):
-			self.assertEqual(fields_by_name[fieldname].fieldtype, "Section Break")
-
-	def test_system_tab_sections(self):
-		"""System tab has Jarvis Admin Connection, Agent Operator, Last Sync sections."""
-		meta = frappe.get_meta("Jarvis Settings")
-		fields_by_name = {f.fieldname: f for f in meta.fields}
-
-		for fieldname in ("admin_connection_section", "operator_section", "last_sync_section"):
-			self.assertEqual(fields_by_name[fieldname].fieldtype, "Section Break")
+		for fieldname in (
+			"agent_run_budget_monthly",
+			"macro_step_budget_monthly",
+			"activation_module_ceiling",
+		):
+			self.assertEqual(self._tab_of(meta, fieldname), "account_tab")
+		for fieldname in (
+			"run_query_doctype_allowlist",
+			"auto_apply_changes",
+			"core_apps_override",
+			"enable_customizations_clause",
+		):
+			self.assertEqual(self._tab_of(meta, fieldname), "agent_tab")
 
 	def test_operator_fields_are_readonly(self):
 		"""All 5 operator fields are system-populated and must be read-only."""

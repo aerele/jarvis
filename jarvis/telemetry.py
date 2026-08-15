@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 
 import frappe
 
@@ -53,6 +54,55 @@ def record_tool(tool: str, args, conversation: str | None, duration_ms: int, res
 				"duration_ms": int(duration_ms),
 				"result_chars": _result_chars(result),
 				"custom_target": custom_target,
+			}
+		)
+	except Exception:
+		pass
+
+
+def record_budget_event(
+	tool: str, outcome: str, original_chars: int | None, shown: int | None, total: int | None
+) -> None:
+	"""One line per agent-boundary result-size guard event (truncation or an
+	uncapped-but-oversized result). Unlike ``record_tool``, this is not gated
+	on a custom-doctype target - every event is signal for sizing the budget
+	itself. The guard outcome rides under ``outcome`` (truncated / uncapped /
+	uncapped_nonrow / measure_failed) - NOT ``event`` - so it does not collide
+	with this line's own ``kind`` discriminator. Never raises."""
+	try:
+		_emit(
+			{
+				"kind": "result_budget",
+				"ts": frappe.utils.now(),
+				"site": getattr(frappe.local, "site", None),
+				"tool": tool,
+				"outcome": outcome,
+				"original_chars": original_chars,
+				"shown": shown,
+				"total": total,
+			}
+		)
+	except Exception:
+		pass
+
+
+def record_export_event(tool: str, fmt: str, rows: int, mode: str = "sync", outcome: str = "ok") -> None:
+	"""One line per server-side export ATTEMPT (export_query etc.): format, row
+	count, sync/background, and ``outcome`` (ok / no_data / denied / rejected).
+	Emitting on the fail-closed paths too is the point - the refused large exports
+	are exactly the signal that would justify raising the ceiling / building the
+	async path. Routes through the same INFO-pinned logger. Never raises."""
+	try:
+		_emit(
+			{
+				"kind": "export",
+				"ts": frappe.utils.now(),
+				"site": getattr(frappe.local, "site", None),
+				"tool": tool,
+				"format": fmt,
+				"rows": int(rows),
+				"mode": mode,
+				"outcome": outcome,
 			}
 		)
 	except Exception:
@@ -171,5 +221,16 @@ def _result_chars(result) -> int:
 		return 0
 
 
+def _telemetry_logger() -> logging.Logger:
+	# frappe.logger defaults to ERROR in prod (WARNING on a dev server), which
+	# would silently drop every telemetry INFO line. Pin to INFO so tool +
+	# result_budget telemetry is durable on any bench (mirrors chat/latency.py).
+	# Keep the same logger name/file - only the level is pinned.
+	logger = frappe.logger(_LOGGER)
+	if logger.level == 0 or logger.level > logging.INFO:
+		logger.setLevel(logging.INFO)
+	return logger
+
+
 def _emit(entry: dict) -> None:
-	frappe.logger(_LOGGER).info(json.dumps(entry, default=str))
+	_telemetry_logger().info(json.dumps(entry, default=str))

@@ -247,6 +247,8 @@ def signup(
 	provider: str | None = None,
 	billing: dict | None = None,
 	partner_code: str | None = None,
+	terms_accepted=None,
+	contact_consent=0,
 ) -> dict:
 	"""Guest signup against admin. Returns admin's data dict, which carries a
 	``payment_provider`` discriminator plus that gateway's checkout handles:
@@ -279,6 +281,13 @@ def signup(
 	an unknown code, and that error surfaces through the normal AdminValidationError
 	path like any other signup rejection. An older admin that does not know the
 	kwarg drops it silently.
+
+	``terms_accepted`` / ``contact_consent`` (lead-capture + T&C, frozen contract):
+	sent UNCONDITIONALLY, never omitted - unlike ``coupon``/``billing``/
+	``partner_code`` above. Admin hard-rejects a signup with no truthy
+	``terms_accepted`` (the only caller is the jarvis mirror, which always sends
+	one), so there is no "omit when absent" case to preserve; an older admin that
+	does not declare either kwarg drops it silently, same as any unknown kwarg.
 	"""
 	body = {
 		"email": email,
@@ -287,6 +296,8 @@ def signup(
 		"frappe_site_url": _public_origin(),
 		"supported_providers": list(SUPPORTED_PROVIDERS),
 		"client_capabilities": _client_capabilities(),
+		"terms_accepted": terms_accepted,
+		"contact_consent": contact_consent,
 	}
 	if coupon:
 		body["coupon"] = coupon
@@ -497,6 +508,68 @@ def get_payment_providers() -> dict:
 	return _post_guest(path=_m("billing.signup.get_payment_providers"), body={})
 
 
+# Short guest timeout for the lead-capture fire-and-forget call - it fires on
+# every Plan-step render and must never make the wizard wait on it (mirrors
+# reconnect_eligibility's 8s "gates a hint, never a decision" budget).
+_LEAD_CAPTURE_TIMEOUT_S = 8
+
+
+def capture_onboarding_lead(
+	email: str,
+	company: str | None = None,
+	billing: dict | None = None,
+	plan: str | None = None,
+	step: str | None = None,
+	contact_consent=0,
+	site_origin: str | None = None,
+	partner_code: str | None = None,
+) -> dict:
+	"""Guest, best-effort upsert of a ``Jarvis Lead`` from an in-progress
+	onboarding. NEVER raises - swallows every failure and returns
+	``{"ok": False}`` instead, mirroring get_preset_catalog's "Never raises"
+	guard: a scheme-less ``jarvis_admin_url`` raises ``requests.MissingSchema``,
+	which is not in the Admin* family _post_guest converts, so the whole body is
+	guarded rather than just the HTTP call.
+
+	``site_origin`` is ALWAYS overwritten with this bench's own server-derived
+	public origin (_public_origin), never the caller-supplied value - the same
+	Host-header injection guard ``signup``/``redeem_reconnect_code`` already
+	apply to ``frappe_site_url``. A guest POST could otherwise spoof which site
+	a lead is attributed to.
+	"""
+	try:
+		body = {
+			"email": email,
+			"company": company,
+			"billing": billing,
+			"plan": plan,
+			"step": step,
+			"contact_consent": contact_consent,
+			"site_origin": _public_origin(),
+			"partner_code": partner_code,
+		}
+		return _post_guest(
+			path=_m("billing.signup.capture_onboarding_lead"),
+			body=body,
+			timeout_s=_LEAD_CAPTURE_TIMEOUT_S,
+		)
+	except Exception:
+		return {"ok": False}
+
+
+def terms_url() -> str:
+	"""The admin-hosted Terms & Conditions page for the Review & Pay checkbox
+	link. Best-effort: returns "" on any failure (no admin URL configured, a
+	malformed one, ...) rather than raising - the checkbox must render, and the
+	view falls back to plain unlinked text when this is empty."""
+	try:
+		settings = frappe.get_single("Jarvis Settings")
+		base = _admin_url(settings)
+		return f"{base}/terms" if base else ""
+	except Exception:
+		return ""
+
+
 # Admin-owned preset catalog (spec 3.3). Guest-safe fetch (get_plans pattern),
 # cached in per-site Redis, bundled fallback so onboarding never hard-fails.
 # The path is built per-call via _m() so the admin-app namespace override is
@@ -666,6 +739,26 @@ def get_stt_config() -> dict | None:
 def confirm_payment(payload: dict) -> dict:
 	"""POST Razorpay Checkout result; returns {agent_url, agent_token, tenant_status}."""
 	return _post(path=_m("api.tenant.confirm_payment"), body=payload)
+
+
+def get_integration_status(*, deep: bool = False, timeout_s: int = 20) -> dict:
+	"""Plugin + persona wiring tri-states for this bench's own container
+	(jarvis#840 preflight). Admin relays the fleet's integration probe and
+	answers {"tri_state": {"plugin": ..., "persona": ...}, "source":
+	"live|cached|none", "checked_at": ...} with only customer-safe fields.
+
+	``deep`` asks for the ~3s in-container probe (the boot-log truth about
+	registered tools) instead of the sub-second static one. The 20s budget
+	covers admin's own relay with headroom; callers treat EVERY failure of
+	this call as "unchecked", never as an error - an admin without the method
+	yet (deploy window) surfaces as Frappe's method-not-found rejection (see
+	``is_method_not_found``)."""
+	body = {"deep": 1} if deep else {}
+	return _post(
+		path=_m("api.tenant.integration_status"),
+		body=body,
+		timeout_s=timeout_s,
+	)
 
 
 def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:

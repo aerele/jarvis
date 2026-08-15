@@ -68,6 +68,7 @@
 				<div
 					v-if="link[qi] && link[qi].open && (link[qi].items || []).length"
 					class="jv-ask-linkmenu"
+					v-scroll-fade
 				>
 					<button
 						v-for="(it, ii) in link[qi].items"
@@ -119,6 +120,7 @@
 // half-made picks. Remounting on a new message is what clears the draft.
 import { ref, computed } from "vue";
 import { searchLink } from "@/api";
+import { vScrollFade } from "@/composables/useScrollFade";
 import { ASK_FIELD_TYPES, isAskReady, askAnswerText } from "@/lib/chatAsk";
 
 const props = defineProps({
