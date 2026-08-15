@@ -1795,7 +1795,7 @@ const WAIT_STEPS = Object.freeze(Array.from({ length: 3 }, (_, i) => Object.free
 
 // Frame subtitle next to the brand mark, mirroring the active step's title.
 const FRAME_SUBS = {
-	intro: "Meet your ERPNext assistant",
+	intro: "Meet Your AI Teammate",
 	plan: "Choose your plan",
 	details: "Your details",
 	pay: "Review & pay",
