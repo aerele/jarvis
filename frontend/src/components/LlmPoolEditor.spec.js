@@ -1070,3 +1070,29 @@ describe("subscription source chip labels the real provider", () => {
 		expect(chip("someday")).toBe("Subscription · someday");
 	});
 });
+
+describe("row logo matches the row's own provider (jarvis: AI-models row icon bug)", () => {
+	// seedRows() backfills a UI-only `upstream` field onto every row (subscription
+	// rows need it), defaulting to "openai" when a row has no accounts to read it
+	// from - which api-key rows never do. ProviderLogo gives that `upstream` prop
+	// priority over `provider`, so every api-key row rendered the OpenAI mark
+	// regardless of its actual provider. The fix scopes `:upstream` to subscription
+	// rows only at the two row-render call sites; this asserts through the real
+	// row template, not ProviderLogo in isolation, so it would have caught the bug.
+	it("shows the anthropic mark on an anthropic api-key row, not openai's", async () => {
+		setPool([
+			subModel("gpt-5.5", 0, [account("SUB_a", "a@x.com")]),
+			keyModel("anthropic", "claude-sonnet-5", 1),
+		]);
+		const w = await mountEditor();
+
+		const rows = w.findAll(".jv-flist-row");
+		const subRow = rows.find((r) => r.text().includes("Subscription · OpenAI"));
+		const apiKeyRow = rows.find((r) => r.text().includes("API key · Anthropic"));
+		expect(subRow).toBeTruthy();
+		expect(apiKeyRow).toBeTruthy();
+
+		expect(subRow.find('[role="img"]').attributes("aria-label")).toBe("OpenAI logo");
+		expect(apiKeyRow.find('[role="img"]').attributes("aria-label")).toBe("Anthropic logo");
+	});
+});
