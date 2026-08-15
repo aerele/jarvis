@@ -12,6 +12,7 @@
 					:key="li"
 					class="jv-ask-opt"
 					:class="{ on: isPicked(qi, lbl) }"
+					:disabled="answered"
 					@click="toggleSingle(qi, lbl)"
 				>
 					<span v-if="isPicked(qi, lbl)" class="jv-ask-tick">✓</span>{{ lbl }}
@@ -24,6 +25,7 @@
 					:key="oi"
 					class="jv-ask-opt"
 					:class="{ on: isPicked(qi, opt) }"
+					:disabled="answered"
 					@click="q.type === 'multi' ? toggleMulti(qi, opt) : toggleSingle(qi, opt)"
 				>
 					<span v-if="isPicked(qi, opt)" class="jv-ask-tick">✓</span>{{ opt }}
@@ -35,6 +37,7 @@
 				type="date"
 				class="jv-ask-field"
 				:value="sel[qi] || ''"
+				:disabled="answered"
 				@input="pickSingle(qi, $event.target.value)"
 			/>
 			<input
@@ -42,6 +45,7 @@
 				type="datetime-local"
 				class="jv-ask-field"
 				:value="sel[qi] || ''"
+				:disabled="answered"
 				@input="pickSingle(qi, $event.target.value)"
 			/>
 			<input
@@ -49,6 +53,7 @@
 				type="text"
 				class="jv-ask-field"
 				:value="sel[qi] || ''"
+				:disabled="answered"
 				@input="pickSingle(qi, $event.target.value)"
 				placeholder="Type your answer…"
 				@keydown.enter.prevent
@@ -59,6 +64,7 @@
 					type="text"
 					class="jv-ask-field"
 					:value="link[qi] && link[qi].q != null ? link[qi].q : sel[qi] || ''"
+					:disabled="answered"
 					@input="onLinkSearch(qi, q.doctype, $event.target.value)"
 					@focus="onLinkSearch(qi, q.doctype, (link[qi] && link[qi].q) || '')"
 					:placeholder="'Search ' + (q.doctype || 'records') + '…'"
@@ -66,7 +72,7 @@
 					@keydown.enter.prevent
 				/>
 				<div
-					v-if="link[qi] && link[qi].open && (link[qi].items || []).length"
+					v-if="!answered && link[qi] && link[qi].open && (link[qi].items || []).length"
 					class="jv-ask-linkmenu"
 					v-scroll-fade
 				>
@@ -86,15 +92,18 @@
 				class="jv-ask-other"
 				v-model="other[qi]"
 				placeholder="Other…"
+				:disabled="answered"
 				@input="onOther(qi, q.type)"
 				@keydown.enter.prevent
 			/>
 		</div>
 		<div class="jv-ask-foot">
-			<button class="jv-ask-submit" :disabled="!ready" @click="submit">
-				Submit answers
+			<button class="jv-ask-submit" :disabled="!ready || answered || busy" @click="submit">
+				{{ answered ? "Answered" : "Submit answers" }}
 			</button>
-			<span v-if="!ready" class="jv-ask-hint">Answer each question to continue</span>
+			<span v-if="!ready && !answered" class="jv-ask-hint"
+				>Answer each question to continue</span
+			>
 		</div>
 	</div>
 </template>
@@ -126,6 +135,11 @@ import { ASK_FIELD_TYPES, isAskReady, askAnswerText } from "@/lib/chatAsk";
 const props = defineProps({
 	// A parsed ask: { questions: [{q, type, options, doctype}] } (see parseAsk).
 	spec: { type: Object, required: true },
+	// True while the host would SILENTLY refuse a submit right now (a send
+	// already in flight, a turn's tail still running for this conversation).
+	// Gates ONLY the Submit button — the user can keep filling in answers while
+	// this is true, they just cannot dispatch until the host would accept it.
+	busy: { type: Boolean, default: false },
 });
 // The formatted answer text; the host sends it as an ordinary user message.
 const emit = defineEmits(["submit"]);
@@ -133,6 +147,11 @@ const emit = defineEmits(["submit"]);
 const sel = ref({}); // qIdx -> string (single/yesno/date/datetime/text/link) | string[] (multi)
 const other = ref({}); // qIdx -> free-text (option types only)
 const link = ref({}); // qIdx -> { q, items, open } for link-type record search
+// Locks the card once an answer has actually been DISPATCHED (not just typed).
+// Persists across re-renders of the same message (the component is not
+// remounted while it keeps the same v-if/:key) so a stale transcript refetch
+// can never resurrect a re-clickable card for an ask already answered.
+const answered = ref(false);
 
 // An ask whose questions are ALL field-type reads better as a compact mini-form
 // (no numbered badges, no dividers) than as a numbered question list.
@@ -198,7 +217,14 @@ function isPicked(i, opt) {
 	return Array.isArray(v) ? v.includes(opt) : v === opt;
 }
 function submit() {
-	if (!ready.value) return;
+	if (!ready.value || answered.value || props.busy) return;
+	// Lock BEFORE emitting (optimistic): a second click — or a re-render from
+	// the next transcript refetch — must not dispatch a second answer for this
+	// ask. Gated on props.busy too: if the host would refuse right now, locking
+	// first would silently swallow the answers with no way to retry (the same
+	// failure mode the REFUSE comment below already guards against for the
+	// picks themselves).
+	answered.value = true;
 	// Emit and keep the picks. The card is keyed by message, so it unmounts the
 	// moment the next assistant message arrives — there is nothing to reset. And
 	// a host is allowed to REFUSE the text (a send already in flight, a dictation
@@ -300,6 +326,12 @@ function submit() {
 	background: var(--cta-bg);
 	color: var(--text);
 	font-weight: 600;
+}
+.jv-ask-opt:disabled,
+.jv-ask-field:disabled,
+.jv-ask-other:disabled {
+	opacity: 0.55;
+	cursor: default;
 }
 .jv-ask-tick {
 	color: var(--cta);

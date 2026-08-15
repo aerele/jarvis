@@ -72,6 +72,7 @@
 							:key="m.name"
 							:spec="activeAsk"
 							:style="paletteVars"
+							:busy="sending || runActive"
 							@submit="sendText"
 						/>
 					</div>
@@ -139,7 +140,10 @@
 		     disabled gets blurred by the browser, which fires `change` — the
 		     frappe-ui Textarea this used to be listens on `change` too and
 		     re-emitted the PRE-CLEAR value, restoring the message we had just
-		     sent. Only the send button and send() are gated on `sending`. -->
+		     sent. Only the send button and send() are gated on `sending` /
+		     `runActive` — repeat Enter/click while a turn is still running (even
+		     after the POST that started it has long since resolved) must not fire
+		     a second turn for the same conversation. -->
 		<div class="shrink-0 border-t px-4 py-3">
 			<textarea
 				ref="box"
@@ -191,7 +195,7 @@
 				<Button
 					variant="solid"
 					label="Send"
-					:disabled="!draft.trim() || sending"
+					:disabled="!draft.trim() || sending || runActive"
 					:loading="sending"
 					@click="send"
 				/>
@@ -560,7 +564,7 @@ let ownRepoint = false;
 
 async function send() {
 	const text = draft.value.trim();
-	if (!text || sending.value) return;
+	if (!text || sending.value || runActive.value) return;
 	sending.value = true;
 	draft.value = "";
 	// optimistic user bubble - reconciled by the next transcript refetch
@@ -639,10 +643,11 @@ watch(conversation, (id, prev) => {
 });
 
 // Post a message into this pane programmatically (the save dialog's "Ask the
-// assistant to fix these" hand-off). Ignored while a send is already in flight.
+// assistant to fix these" hand-off, AskCard's answer submit). Ignored while a
+// send is already in flight OR a turn is still running for this conversation.
 function sendText(text) {
 	const t = String(text || "").trim();
-	if (!t || sending.value) return;
+	if (!t || sending.value || runActive.value) return;
 	draft.value = t;
 	send();
 }
