@@ -1263,7 +1263,7 @@
 										 a sibling <label for=...> instead - clicking the embedded <a>
 										 navigates without also toggling the box. -->
 									<div
-										class="mx-auto mt-3.5 flex max-w-[560px] items-start gap-2"
+										class="mx-auto mt-3.5 flex max-w-[560px] items-start justify-center gap-2"
 									>
 										<Checkbox
 											id="jv-ob-terms"
