@@ -444,15 +444,16 @@ async function loadMeteringField(fetchFn, target) {
 async function loadMetering() {
 	meteringLoading.value = true;
 	meteringUsageError.value = false;
-	// Order matters: results map 1:1 to the calls below. A failed usage fetch must
-	// set meteringUsageError so the card shows the retry button instead of the false
-	// "single model (direct)" note a transient error would otherwise render.
-	const [, usageOk] = await Promise.all([
+	// ANY failed fetch must set meteringUsageError so the pane shows the error
+	// banner and Retry instead of a confident-but-wrong resting state: a failed
+	// usage fetch would render the false "single model (direct)" note, and a
+	// failed config/sync fetch would render "Direct" over an empty pool list.
+	const results = await Promise.all([
 		loadMeteringField(api.getLlmConfig, meteringConfig),
 		loadMeteringField(api.getLlmUsage, meteringUsage),
 		loadMeteringField(api.getLlmSyncStatus, meteringSync),
 	]);
-	if (!usageOk) meteringUsageError.value = true;
+	if (results.includes(false)) meteringUsageError.value = true;
 	meteringLoading.value = false;
 }
 

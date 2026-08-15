@@ -210,7 +210,10 @@ const confirmOpen = computed(() => confirmState.value !== null);
 // Legacy section key: "billing" used to open the standalone "Billing and
 // metering" pane, now folded into Usage. Old deep links and any stale
 // store.openSettings("billing") caller still land on Usage instead of
-// falling through to the General default.
+// falling through to the General default. PAIRED with AppShell's
+// SETTINGS_DEEP_LINK_KEYS, which must keep "billing" for the ?settings=
+// deep link to reach this alias at all: remove an entry here or there only
+// together.
 const LEGACY_SECTION_ALIASES = { billing: "usage" };
 
 // A gated section requested by a user without the role falls back to General.

@@ -182,4 +182,10 @@ describe("UsagePane metering error/retry", () => {
 		const retry = w.findAll(".stub-button").find((b) => b.text() === "Retry");
 		expect(retry).toBeDefined();
 	});
+
+	it("a failed config fetch alone also surfaces the error, not a wrong pool state", async () => {
+		api.getLlmConfig.mockRejectedValue(new Error("boom"));
+		const w = await mountAs({ isSM: true });
+		expect(w.find(".stub-errormessage").exists()).toBe(true);
+	});
 });
