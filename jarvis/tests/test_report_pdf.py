@@ -136,6 +136,19 @@ class TestReportPdf(FrappeTestCase):
 		out = report_pdf(self.DATA, title="Q3 Users")
 		self.assertEqual(out["title"], "Q3 Users")
 
+	def test_pdf_file_is_owner_only_not_attached_to_report(self):
+		# C5 (export plan-check): the PDF is rendered under the caller's row-/field-
+		# filtered permissions, so it must be an UNATTACHED (owner-only) File - never
+		# attached to the shared Report doc, which would let anyone who can read the
+		# Report download a row-filtered artifact. Mutation-proof: reverting to
+		# dt="Report" fails this.
+		out = report_pdf(self.DATA)
+		attached = frappe.db.get_value(
+			"File", out["name"], ["attached_to_doctype", "attached_to_name"], as_dict=True
+		)
+		self.assertIsNone(attached.attached_to_doctype)
+		self.assertIsNone(attached.attached_to_name)
+
 	# ── zero rows ─────────────────────────────────────────────────────────────
 	def test_zero_rows_still_produces_a_valid_pdf(self):
 		"""An empty report is a PDF with a 'No data' note, never an error or a

@@ -120,26 +120,26 @@ def report_pdf(
 		raise InvalidArgumentError(f"PDF generation for report {report_name} produced no content")
 
 	from frappe.exceptions import ValidationError
-	from frappe.utils.file_manager import save_file
 
-	filename = f"{_safe_filename(report_title)}.pdf"
-	# Private + attached to the Report doc: auth-gated by the customer's session and
-	# re-findable, exactly like download_pdf's File.
+	from jarvis.tools._export import save_export_file
+
+	# Owner-only File (dt/dn default to None -> unattached, so has_permission falls
+	# through to owner-only). This PDF is rendered under the CALLING user's record-
+	# and field-filtered permissions, so it must NOT be attached to the shared
+	# Report doc: File.has_permission would then defer to Report read, letting
+	# anyone who can read the Report download a row-filtered artifact (e.g. a
+	# Salary Register). See the export-architecture plan-check, finding C5.
 	try:
-		file_doc = save_file(fname=filename, content=pdf_bytes, dt="Report", dn=report_name, is_private=1)
+		return save_export_file(
+			f"{_safe_filename(report_title)}.pdf",
+			pdf_bytes,
+			title=report_title,
+			mime_type="application/pdf",
+		)
 	except ValidationError as e:
 		# A File-save constraint (e.g. a rejected filename) is a bad-input outcome,
 		# not an opaque 500.
 		raise InvalidArgumentError(f"could not store the report PDF: {e}") from e
-
-	return {
-		"file_url": file_doc.file_url,
-		"filename": file_doc.file_name,
-		"title": report_title,
-		"mime_type": "application/pdf",
-		"size_bytes": int(file_doc.file_size or len(pdf_bytes)),
-		"name": file_doc.name,
-	}
 
 
 def _safe_filename(title: str) -> str:
