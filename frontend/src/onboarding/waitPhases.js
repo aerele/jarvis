@@ -399,16 +399,15 @@ export function connectHeadline(phase, { fromReadinessCeiling = false } = {}) {
  * codes, which waitPhases.js does not encode and never has: a phase counts
  * as done ONLY when the model itself says PHASE_STATE.DONE.
  *
- * That means the two waits behave differently here, honestly:
- * provisioningPhase has a DONE branch (tenant_status === "running"), so the
- * provisioning wait's bar can and does advance to 2 of 3 mid-screen.
- * readinessPhase has NO done branch at all - every reason it knows about
- * maps to ACTIVE or UNKNOWN - so the connect wait's bar stays at 1 of 3
- * until the moment is_ready_for_chat says ready and the screen navigates
- * away; it never fills to 2 in place. Both waits still get the bar: the
- * provisioning wait makes the determinate case real and demonstrable, and
- * the connect wait's honestly-stuck-at-1/3 bar is exactly the indeterminate
- * case this function has to tell apart from real progress.
+ * As of the 2026-08-14 connect-wait redesign only the PROVISIONING wait
+ * reads this: provisioningPhase has a DONE branch (tenant_status ===
+ * "running"), so that bar can and does advance to 2 of 3 mid-screen. The
+ * connect wait used to read it too and honestly sat at 1 of 3 forever
+ * (readinessPhase has NO done branch), which - combined with the jarvis#840
+ * checklist rows - left a 3-count bar over six phase columns. It now builds
+ * its own six-step labeled bar (OnboardingView's connectSteps), the
+ * "future non-duplicating layout" the label paragraph below anticipated,
+ * keeping this function's indeterminate rule but not its fixed count.
  *
  * `indeterminate` is true whenever the phase carries nothing to act on -
  * PHASE_STATE.UNKNOWN, or no phase read yet. It must render differently from

@@ -1,113 +1,100 @@
 # Jarvis
 
-AI superpowers for Frappe/ERPNext, powered by a per-tenant hosted [agent runtime](https://github.com/openclaw/openclaw).
+**The AI teammate inside ERPNext.**
 
-Jarvis lets ERPNext users — especially business owners and execs — ask plain-English questions over their ERP data and get correct, permission-aware answers grounded in the actual records. It pairs an in-bench Frappe app (settings, permission-aware tool layer, HTTP API, on-save credentials propagation) with an agent runtime hosted per-tenant on Aerele's infrastructure. Data stays on the customer's bench; the agent brain lives off the customer's bench; permissions inherit from Frappe's own per-user checks.
+Your ERP already knows what happened. Jarvis helps your team ask what it means,
+prepare what should happen next, and repeat good work without losing human
+judgement.
 
-**Status:** The end-to-end agent loop + chat UI are live, and the **Phase 3 SaaS control plane is built**: `jarvis_admin` (signup, Razorpay billing, fleet orchestration), the per-host `jarvis-fleet-agent` + Traefik TLS edge, `jarvis-openclaw-plugin` (the agent calling back into Frappe), and a RO-mounted `jarvis-persona`. **11 tools** (5 read + 6 write), identity via a single `X-Jarvis-Session` header (Path A v2). Customers connect via **Jarvis Cloud** (onboarding page); a single-bench dev path also exists. Docs are maintained in the `jarvis_admin` repo (`docs/customer-app/` for this app; `docs/production-deploy.md` for the operator bring-up) — see Documentation below.
+**Ask. Verify. Approve. Repeat.**
 
-## Installation
+## Features
 
-You can install this app using the [bench](https://github.com/frappe/bench) CLI:
+### Ask your business in plain language
 
-```bash
-cd $PATH_TO_YOUR_BENCH
-bench get-app https://github.com/Aerele-RnD/jarvis --branch main
-bench install-app jarvis
-```
+- Ask about cash, sales, purchases, stock, customers, suppliers, projects, or
+  any other records you are allowed to see.
+- Trace an answer back to the records, dates, and evidence behind it.
+- Investigate a question, compare options, prepare a draft, and continue the
+  work in one conversation.
+- Speak a request or attach an image, PDF, spreadsheet, or business document
+  when typing would leave out useful context.
+- Name, star, search, and return to conversations without mixing unrelated
+  decisions.
 
-## Quick start (Jarvis Cloud — production)
+### Turn incoming documents into reviewed work
 
-```bash
-# 1. Install the app on your site
-bench --site <your-site> install-app jarvis
-```
-Then open **`/app/jarvis-onboarding`** in Desk → sign up + pay → the control
-plane assigns you a managed agent container and stores its connection in
-Jarvis Settings. Set your LLM provider/model/key in **Jarvis Settings**, then
-chat at **`/app/jarvis-chat`**. Full walkthrough: **getting-started** (see Documentation).
+- Drop supplier bills, statements, price lists, and other source files into
+  **File Box**.
+- Let Jarvis read the source, prepare the corresponding work, and surface any
+  uncertainty instead of quietly guessing.
+- Use the **Approval Board** to inspect drafts, answer questions, approve the
+  next step, or reject it with the source conversation still in reach.
+- Preview spreadsheet imports before any rows are added.
+- Export useful records, reports, and prepared documents when the work needs to
+  leave the screen.
 
-**Local single-bench dev** (run agent yourself, no control plane) → the
-**local-dev** guide (see Documentation).
+### Turn good judgement into team practice
 
-## Optional: parallel chat turns (dedicated worker queue)
+- Add **Business Notes** for the terms, exceptions, and operating facts that
+  make your company different.
+- Use the **Wiki** to see what Jarvis knows, where it came from, who it applies
+  to, and whether it needs correction.
+- Save a business rule as a **Skill** so Jarvis follows it consistently next
+  time.
+- Save several steps as a **Macro**, run them again, or put them on a daily,
+  weekly, or monthly schedule.
+- Create a **Trigger** for work that should begin when an important ERPNext
+  record changes.
+- Install an **Agent** to check a defined area in the background and bring back
+  findings or prepared work.
+- Review suggested learning before it becomes a personal or shared rule.
 
-Each in-flight chat turn occupies one background (RQ) worker for the turn's
-whole duration, and turns run on the shared `long` queue by default — so on a
-bench with one long worker, multiple conversations (e.g. a batch of File Box
-documents) process **one at a time**, and other long-queue jobs wait behind
-them.
+### See the business and find the work faster
 
-To process turns in parallel and isolate them from the rest of the bench,
-declare a dedicated `jarvis_chat` queue in `common_site_config.json`:
+- Turn a question into a saved **Dashboard** and share the view with the right
+  people.
+- Search chats, dashboards, records, lists, and reports from one command
+  palette.
+- Filter, sort, and choose columns for busy work queues.
+- Receive notifications when work finishes or needs a decision.
+- Continue conversations, approvals, File Box work, and key business views from
+  the mobile app.
 
-```json
-"workers": {
-    "jarvis_chat": {"timeout": 720, "background_workers": 4}
-}
-```
+### Keep people in control
 
-then regenerate the process config and reload:
+- Jarvis follows each person's existing Frappe and ERPNext access. Asking
+  Jarvis does not grant access to a record the person could not otherwise open.
+- Reading and explanation can happen directly. Important or hard-to-reverse
+  actions always wait for a person.
+- Administrators may allow ordinary, reversible changes within a conversation;
+  proposed work and its evidence remain visible for review.
+- Connect a supported chat subscription you already pay for or an approved API
+  key, choose the models available to the team, and set backups when needed.
+- Review personal and team usage, limits, plan details, renewals, and activity
+  from the workspace.
 
-```bash
-bench setup supervisor && sudo supervisorctl reread && sudo supervisorctl update
-# (dev benches without supervisor: bench setup procfile, then restart bench start)
-```
+## How to Install
 
-- **Frappe Cloud**: add the same `workers` block through your bench's
-  configuration (dedicated/private benches; contact Frappe Cloud support if
-  the key isn't editable on your plan). If the queue can't be provisioned,
-  nothing breaks — see below.
-- **This is opt-in and self-disabling.** Jarvis routes turns to `jarvis_chat`
-  only when the queue is *declared* **and** a live worker is *listening on
-  it*; otherwise every turn uses the `long` queue exactly as before. A
-  declared-but-dead queue therefore never strands chats, and benches that
-  skip this section need no changes.
-- Chat workers mostly wait on network I/O (they relay the agent's event
-  stream), so they are cheap: ~100–150 MB RAM each, negligible CPU. Size
-  `background_workers` to the number of simultaneous conversations you want.
-- Escape hatch: set `jarvis_chat_queue` in a site's `site_config.json` to
-  force a specific queue (e.g. `"long"` to opt one site out).
+Jarvis supports Frappe 15 and 16.
 
-## Architecture at a glance
+### Self-hosted bench
 
-In production the customer site never runs agent — saving Jarvis Settings
-POSTs to Aerele's control plane, which provisions/updates the container on the
-fleet; the agent calls back into Frappe (`call_tool`) with per-user identity.
-See the **architecture** guide for the full picture (production vs dev shapes,
-identity flow, trust boundaries).
-
-## Documentation
-
-All Jarvis docs are maintained in the **`jarvis_admin`** repo (internal), under
-`jarvis_admin/docs/`:
-
-- **Customer-app docs** (this app) — `jarvis_admin/docs/customer-app/`:
-  getting-started, architecture, configuration, tools-api, local-dev,
-  development, decisions.
-- **Operator/platform docs** — `jarvis_admin/docs/` (start at `production-deploy.md`).
-
-(They lived here under `jarvis/docs/` previously; consolidated so all docs are in
-one place. See [`jarvis/docs/README.md`](jarvis/docs/README.md) for the pointer.)
-
-## Contributing
-
-This app uses `pre-commit` for code formatting and linting. Please [install pre-commit](https://pre-commit.com/#installation) and enable it for this repository:
+Run these commands from your Frappe bench:
 
 ```bash
-cd apps/jarvis
-pre-commit install
+bench get-app https://github.com/Aerele-RnD/jarvis.git --branch beta
+bench --site your-site.example install-app jarvis
 ```
 
-Pre-commit is configured to use the following tools for checking and formatting your code:
+### Frappe Cloud
 
-- ruff
-- eslint
-- prettier
-- pyupgrade
+On a private bench group:
 
-See the **development** guide (`jarvis_admin/docs/customer-app/development.md`) for the full dev workflow, recipes, and project layout.
+1. Open **Bench Group > Apps**, choose **Add App**, and add
+   `https://github.com/Aerele-RnD/jarvis.git` from the `beta` branch.
+2. Deploy the bench update to your site.
+3. Open **Site > Apps**, choose **Install App**, and install **Jarvis**.
 
-## License
-
-MIT
+After installation, sign in as a System Manager, open `/jarvis/onboarding`, and
+follow the setup shown on screen.

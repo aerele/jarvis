@@ -136,6 +136,11 @@ export function useBillingDetails(opts = {}) {
 	// deliberately dumb: last write wins, no provenance, because unlike the billing
 	// fields nothing auto-fills these behind the customer's back.
 	const identity = reactive({ email: "", company: "" });
+	// No contact-consent state here any more: the Details-step "okay to contact
+	// me" checkbox was folded into the required T&C acceptance on Review & Pay
+	// (owner decision 2026-08-14), so consent rides start_signup as a literal
+	// true alongside terms_accepted and nothing about it needs to survive a
+	// reload.
 	// Provenance of the last-applied ERP defaults, forwarded to admin so it can
 	// record where the snapshot originated. Never rendered on Review & Pay.
 	const sourceCompany = ref("");
@@ -300,6 +305,9 @@ export function useBillingDetails(opts = {}) {
 				any = true;
 			}
 		}
+		// A `contact_consent` key from a snapshot written by an older build is
+		// simply ignored: the consent checkbox no longer exists (it lives inside
+		// the T&C acceptance now), so there is nothing to restore it into.
 		return any;
 	}
 

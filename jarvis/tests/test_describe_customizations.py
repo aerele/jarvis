@@ -434,6 +434,49 @@ class TestToolTelemetry(_CustDiscFixtures):
 			)
 			telemetry.emit_turn("c-x", "r1", 1)  # must not raise either
 
+	def test_record_budget_event_emits_expected_shape(self):
+		from jarvis import telemetry
+
+		with patch("jarvis.telemetry._emit") as emit:
+			telemetry.record_budget_event(
+				tool="query", outcome="truncated", original_chars=90000, shown=120, total=3000
+			)
+		emit.assert_called_once()
+		entry = emit.call_args.args[0]
+		# `kind` is this line's discriminator; the guard result rides under `outcome`
+		# so the two never collide (M5).
+		self.assertEqual(entry["kind"], "result_budget")
+		self.assertEqual(entry["outcome"], "truncated")
+		self.assertEqual(entry["tool"], "query")
+		self.assertEqual(entry["original_chars"], 90000)
+		self.assertEqual(entry["shown"], 120)
+		self.assertEqual(entry["total"], 3000)
+		self.assertNotIn("event", entry)  # renamed away from the colliding key
+
+	def test_record_budget_event_never_raises(self):
+		from jarvis import telemetry
+
+		with patch("jarvis.telemetry._emit", side_effect=RuntimeError("boom")):
+			# None chars/shown/total (measure_failed / uncapped shapes) must be fine.
+			telemetry.record_budget_event(
+				tool="get_doc", outcome="measure_failed", original_chars=None, shown=None, total=None
+			)
+
+	def test_telemetry_logger_is_pinned_to_info(self):
+		# C1: frappe.logger defaults to ERROR in prod, which would silently drop
+		# every telemetry INFO line. The helper must pin the level so tool +
+		# result_budget telemetry actually reaches disk (mirrors chat/latency.py).
+		import logging
+
+		from jarvis import telemetry
+
+		logger = telemetry._telemetry_logger()
+		# frappe.logger appends the site suffix (jarvis.tool_telemetry-<site>).
+		self.assertTrue(logger.name.startswith(telemetry._LOGGER))
+		self.assertNotEqual(logger.level, logging.NOTSET)
+		self.assertLessEqual(logger.level, logging.INFO)
+		self.assertTrue(logger.isEnabledFor(logging.INFO))
+
 	def test_doctype_set_uses_two_unions_and_caches(self):
 		from jarvis import telemetry
 

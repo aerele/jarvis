@@ -335,6 +335,12 @@
 										autocomplete="tel"
 										@keydown.enter="onDetailsSubmit"
 									/>
+									<!-- No separate contact-consent checkbox here (owner decision
+										 2026-08-14): consent to be contacted is part of the Terms &
+										 Conditions accepted at Review & Pay, where onPayClick sends
+										 contact_consent alongside terms_accepted. Consequence: a lead
+										 captured at the Plan step carries no consent until the
+										 customer accepts the terms. -->
 									<!-- JvCombo (shared, out of scope) has no declared aria-invalid /
 										 aria-describedby / blur props, and does not spread $attrs onto
 										 its inner <input>, so those attrs would silently land on its
@@ -1258,6 +1264,38 @@
 									>
 										{{ payLinkDeadline }}
 									</p>
+									<!-- Required T&C acceptance (lead-capture + T&C frozen contract).
+										 Pay stays disabled until this is ticked; terms_accepted rides
+										 start_signup, and admin stamps the version server-side - this
+										 view never sends one. Checkbox's own `label` prop only takes
+										 plain text (no slot, no markup), so the link-bearing sentence is
+										 a sibling <label for=...> instead - clicking the embedded <a>
+										 navigates without also toggling the box. -->
+									<div
+										class="mx-auto mt-3.5 flex max-w-[560px] items-start gap-2"
+									>
+										<Checkbox
+											id="jv-ob-terms"
+											:model-value="state.termsAccepted"
+											aria-required="true"
+											@update:model-value="(v) => (state.termsAccepted = v)"
+										/>
+										<label
+											for="jv-ob-terms"
+											class="cursor-pointer select-none text-p-sm text-ink-gray-7"
+										>
+											I agree to the
+											<a
+												v-if="state.termsUrl"
+												:href="state.termsUrl"
+												target="_blank"
+												rel="noopener"
+												class="ob-link"
+												@click.stop
+												>Terms &amp; Conditions</a
+											><span v-else>Terms &amp; Conditions</span>
+										</label>
+									</div>
 								</div>
 								<div class="ob-foot">
 									<button
@@ -1272,7 +1310,7 @@
 									</button>
 									<Button
 										variant="solid"
-										:disabled="payBusyView || !payProviderReady"
+										:disabled="payDisabled"
 										:loading="payBusyView"
 										loading-text="Working…"
 										:label="payCta"
@@ -1401,93 +1439,48 @@
 												}}
 											</p>
 										</div>
-										<!-- jarvis#726: same step-counted bar as the provisioning wait,
-											 reading readinessStage. readinessPhase has no DONE branch
-											 (waitPhases.js), so the label stays "Step 2 of 3" until the
-											 screen navigates to chat: segment two renders as the CURRENT
-											 step (filled, design.md §4.3), never as done, and segment
-											 three only fills once the screen actually leaves. Label is
-											 "Step N of 3" only, not the phase's own sentence - see the
-											 provisioning bar's comment above. -->
+										<!-- One labeled progress bar for the whole connect wait
+											 (2026-08-14 redesign). The jarvis#726 "Step N of 3" bar
+											 plus phase columns stopped working once the jarvis#840
+											 checklist made it six columns under a 3-count bar: long
+											 wrapping labels and a count that contradicted the list
+											 (user report). The columns are gone; the bar now carries
+											 one SHORT-labeled segment per step and the current step
+											 explains itself in one line below (ob-step-explain).
+											 jarvis#763's "no per-step labels on the wait bars" held
+											 while the columns carried the words next to the bar; with
+											 the columns removed this is the non-duplicating labeled
+											 layout waitPhases.phaseProgress anticipated. Honesty is
+											 unchanged: segments fill only from observed states
+											 (connectSteps), and an UNKNOWN current step pulses
+											 indeterminate instead of filling. -->
 										<div class="ob-progress">
 											<StepProgress
-												:steps="WAIT_STEPS"
-												:current-index="readinessProgress.current - 1"
-												:indeterminate="readinessProgress.indeterminate"
-												:label="`Step ${readinessProgress.current} of ${readinessProgress.total}`"
+												:steps="connectSteps"
+												:current-index="connectProgress.index"
+												:indeterminate="connectProgress.indeterminate"
+												:label="connectProgress.caption"
+												collapse-labels
 											/>
 										</div>
-										<!-- Phase columns, driven by is_ready_for_chat's `reason` on the
-											 LAST poll (waitPhases.js). Before this the screen showed one
-											 fixed sentence for the whole two-minute wait, so a workspace
-											 being built and one that was stuck looked identical. Laid out
-											 side by side under the bar's segments, same as the
-											 provisioning wait above: the active phase's `detail` is a
-											 full admin sentence (jarvis#752/#754), so it renders once,
-											 full width, below every column rather than inside one.
-
-											 ONE live region over the phases AND that detail, same
-											 reason as the provisioning block: two role="status"
-											 regions made a screen reader hear the phase and the
-											 sentence explaining it as unrelated announcements. -->
+										<!-- ONE live region over the explanation and admin's own
+											 detail sentence (jarvis#752/#754), same reason as the
+											 provisioning block: separate role="status" regions read
+											 as unrelated announcements. -->
 										<div role="status">
-											<ul class="ob-phases" role="list">
-												<li class="ob-phase ob-phase--done">
-													<span class="ob-phase-ico">
-														<FeatherIcon
-															name="check"
-															class="h-4 w-4"
-														/>
-													</span>
-													<span class="ob-phase-txt">
-														<span class="ob-phase-label"
-															>AI connection saved</span
-														>
-													</span>
-												</li>
-												<li
-													class="ob-phase"
-													:class="`ob-phase--${readinessStage.state}`"
-												>
-													<span class="ob-phase-ico">
-														<!-- currentColor so the active step matches its
-														     sibling step icons (.ob-phase-ico sets the
-														     colour), not JvSpinner's brand default. -->
-														<JvSpinner
-															v-if="
-																readinessStage.state === 'active'
-															"
-															color="currentColor"
-															:size="20"
-														/>
-														<FeatherIcon
-															v-else
-															name="alert-circle"
-															class="h-4 w-4"
-														/>
-													</span>
-													<span class="ob-phase-txt">
-														<span class="ob-phase-label">{{
-															readinessStage.label
-														}}</span>
-													</span>
-												</li>
-												<li class="ob-phase ob-phase--waiting">
-													<span class="ob-phase-ico"
-														><i class="ob-phase-dot"></i
-													></span>
-													<span class="ob-phase-txt">
-														<span class="ob-phase-label"
-															>Opening chat</span
-														>
-													</span>
-												</li>
-											</ul>
+											<p class="ob-step-explain">
+												{{ connectProgress.explain }}
+											</p>
 											<p
 												v-if="readinessStage.detail"
 												class="ob-phase-detail"
 											>
 												{{ readinessStage.detail }}
+											</p>
+											<!-- The honest usage-limit line (jarvis#840): shown for
+											     a beat before chat opens anyway; never a blocker. -->
+											<p v-if="preflight.notice" class="ob-phase-detail">
+												{{ preflight.notice }}
 											</p>
 										</div>
 										<!-- min-height (not h-full) is load-bearing: SetupNeuralNet's
@@ -1707,7 +1700,7 @@
 <script setup>
 import { reactive, ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
-import { Button, FormControl, FeatherIcon, ErrorMessage } from "frappe-ui";
+import { Button, FormControl, FeatherIcon, ErrorMessage, Checkbox } from "frappe-ui";
 import { useJarvisTheme } from "@/theme";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import JvCombo from "@/components/JvCombo.vue";
@@ -1729,6 +1722,7 @@ import {
 import { inrExact, planAmount, planSuffix, planHasGst } from "@/account/format";
 import {
 	isReadyForChat,
+	runChatPreflight,
 	getLlmApplyOperation,
 	listPlans,
 	listPaymentProviders,
@@ -1741,6 +1735,8 @@ import {
 	updateBilling,
 	onboardingPaymentApi,
 	supportCreateTicket,
+	captureOnboardingLead,
+	getTermsUrl,
 } from "@/api";
 import {
 	createOperationController,
@@ -1797,14 +1793,13 @@ const RAIL = [
 	{ id: "connect", label: "Connect" },
 ];
 
-// Unlabelled StepProgress segments for the two wait bars below, which count
-// steps (waitPhases.phaseProgress) without naming them the way RAIL does.
-//
-// A module constant, not two computeds (round-1 review of #763). Both bars read
-// their total from phaseProgress, which counts to 3 and only 3, so a per-bar
-// computed rebuilt an identical array on every poll tick and left two places to
-// keep in step when one of them changed. If a bar ever needs a different length,
-// give it its own named constant rather than reintroducing the pair.
+// Unlabelled StepProgress segments for the PROVISIONING wait bar, which counts
+// steps (waitPhases.phaseProgress) without naming them the way RAIL does. The
+// connect wait used to share this constant; since the 2026-08-14 redesign it
+// has its own labeled six-step array (connectSteps), which is exactly the
+// "give it its own named constant" escape hatch the #763 round-1 review
+// prescribed for a bar that needs a different length - a computed there is
+// justified because its states change per tick, unlike this static shape.
 const WAIT_STEPS = Object.freeze(Array.from({ length: 3 }, (_, i) => Object.freeze({ id: i })));
 
 // Frame subtitle next to the brand mark, mirroring the active step's title.
@@ -1885,6 +1880,17 @@ const state = reactive({
 	reconnectDirect: false,
 	reconnectEmail: "",
 	paymentProvider: "", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
+	// Required Review & Pay checkbox (T&C + lead-capture frozen contract). NOT
+	// localStorage-persisted - a legal acceptance is re-asked every time the
+	// customer lands fresh on this screen, same as it would be on any checkout.
+	// Pay stays disabled until this is true, and only a literal true is ever
+	// sent to start_signup. Accepting it also grants contact consent (owner
+	// decision 2026-08-14): the terms cover being contacted about the account.
+	termsAccepted: false,
+	// The admin-hosted /terms URL (jarvis.onboarding.get_terms_url), fetched
+	// best-effort on mount. Empty when admin is unreachable/unconfigured - the
+	// checkbox label then renders plain unlinked text instead of a dead link.
+	termsUrl: "",
 	// Gateways the operator has actually enabled, narrowed to what this build can
 	// render. Starts EMPTY and stays empty on a discovery failure (plan 02 P2-6):
 	// seeding "razorpay" faked a choice the control plane never confirmed, so a
@@ -1968,12 +1974,10 @@ const readinessStage = computed(() =>
 				opReadinessDetail.value
 		  )
 );
-// jarvis#726: the progress bar next to the phase list above, reading the SAME
-// readinessStage - see waitPhases.phaseProgress.
-const readinessProgress = computed(() => phaseProgress(readinessStage.value));
-// StepProgress wants a segment per step; this wait has no named steps of its
-// own (waitPhases.phaseProgress only ever counts to 3), so the segments carry
-// no per-step label and the bar's own "Step N of 3" caption does the talking.
+// The connect wait's bar is connectSteps/connectProgress (defined with the
+// jarvis#840 preflight state they read, further down) - it stopped using
+// waitPhases.phaseProgress in the 2026-08-14 redesign because its six steps
+// are named, while phaseProgress only ever counts an unnamed 3.
 
 // Plan 01 billing state. Namespaced by site identity + logged-in user so one
 // site's / user's transitional billing PII can never prefill another's on a
@@ -2043,6 +2047,43 @@ watch(
 		if (state.step !== "details") return;
 		clearTimeout(eligibilityTimer);
 		eligibilityTimer = setTimeout(refreshReconnectEligibility, 500);
+	},
+	{ immediate: true }
+);
+// Lead capture (lead-capture + T&C frozen contract): fire-and-forget upsert of
+// a Jarvis Lead on entering the Plan step, so an abandoned onboarding still
+// leaves something for outreach. `immediate: true` covers a RESUME that lands
+// directly on "plan" (readiness.js's landingStep) as well as a genuine forward
+// transition from Details. Only fires once email+company are both present -
+// admin's own guard treats a missing/invalid email as a no-op anyway, and
+// firing before either exists would just upsert an unidentifiable row. Never
+// awaited and never lets a rejection escape the watcher: a burst re-entry
+// (Back then Continue again) simply re-upserts and bumps last_seen, which is
+// the intended behaviour, not a bug to dedupe.
+watch(
+	() => state.step,
+	(step) => {
+		if (step !== "plan") return;
+		if (!(state.email || "").trim() || !(state.company || "").trim()) return;
+		try {
+			captureOnboardingLead({
+				email: state.email,
+				company: state.company,
+				billing: billing.buildBilling(),
+				plan: state.planName || "",
+				step: "plan",
+				// No contact_consent here (defaults false upstream): the Details-step
+				// consent checkbox was folded into the T&C acceptance (owner decision
+				// 2026-08-14), which only happens later at Review & Pay. An abandoned
+				// lead therefore carries no consent to contact.
+				partner_code: state.partnerCode?.trim() || undefined,
+				site_origin:
+					(typeof window !== "undefined" && window.location && window.location.origin) ||
+					"",
+			}).catch(() => {});
+		} catch (e) {
+			/* fire-and-forget: must never break the step transition */
+		}
 	},
 	{ immediate: true }
 );
@@ -2175,6 +2216,14 @@ const payCta = computed(() => {
 // paid plan and an autopay trial need one (the trial authorizes a mandate), so
 // the CTA is disabled until then and the unavailable/retry note stands in for it.
 const payProviderReady = computed(() => !!state.paymentProvider);
+// The CTA's full gate, named rather than left as three booleans inline in the
+// template (T&C + lead-capture frozen contract adds the third leg): busy,
+// no confirmed gateway yet, or the required Terms & Conditions box unticked.
+// payBusyView is declared further down; safe to close over here since this
+// getter only runs at render, after the whole setup script has executed.
+const payDisabled = computed(
+	() => payBusyView.value || !payProviderReady.value || !state.termsAccepted
+);
 // #669: how long the checkout link is good for. Reads the machine's own
 // payTokenExpiresInS, which is cleared with the token it belongs to, so this
 // renders nothing the moment the link stops being openable rather than leaving a
@@ -3284,6 +3333,10 @@ async function onPayClick() {
 		state.step = "details";
 		return;
 	}
+	// Belt-and-suspenders: the Pay button is already disabled until this is
+	// ticked (the real gate), but a programmatic/stray click must not be able to
+	// start a signup admin will reject anyway for lacking acceptance.
+	if (!state.termsAccepted) return;
 	// Plan 01: the normalized billing snapshot rides this first signup call so it
 	// persists server-side while the customer is still a guest. Omitted (undefined,
 	// never an empty object) when nothing was entered, so a blank Details step sends
@@ -3298,6 +3351,13 @@ async function onPayClick() {
 		// Top-level kwarg, parallel to nothing else here - NOT part of `billing`.
 		// Trimmed + undefined-when-blank so a blank field sends no key at all.
 		partner_code: state.partnerCode?.trim() || undefined,
+		// T&C + lead-capture frozen contract: only ever true here (the checkbox
+		// gates this click). contact_consent is granted BY the T&C acceptance
+		// itself (owner decision 2026-08-14, replacing the separate Details-step
+		// checkbox), so it is the same literal true, recorded at the exact moment
+		// identity is real.
+		terms_accepted: true,
+		contact_consent: true,
 	});
 	// Plan 01: a successful signup left REVIEW for a live intent (verify / checkout /
 	// provisioning / duplicate). An intent now exists, so a subsequent Review & Pay
@@ -3750,11 +3810,214 @@ function onOpUpdate(ui) {
 	}
 }
 
+// jarvis#840: the ONE preflight between "readiness turned green" and chat. All
+// three arrival paths (waitForChatReadiness, followLegacyReadiness, the durable
+// operation's onTerminal) converge on navigateToChat, so gating here covers the
+// instant-green case that motivated the issue - a perfectly-wired connect whose
+// FIRST message then died upstream on a quota 429 nothing had checked.
+//
+// Verdict policy (the issue's core constraint): only a genuine credential
+// rejection ("auth") blocks - back to the connect form with the verbatim
+// reason. A provider usage limit shows an honest line for a beat and proceeds;
+// unchecked/unknown/unreachable rows NEVER block; a preflight call that itself
+// fails is skipped entirely (fail open - this gate must not be able to strand
+// a customer the old readiness flow would have let through).
+const preflight = reactive({
+	running: false,
+	done: false,
+	plugin: "",
+	persona: "",
+	usable: null,
+	notice: "",
+});
+const PREFLIGHT_NOTICE_MS = 2500;
+
+async function runPreflightGate() {
+	if (preflight.running) return false;
+	preflight.running = true;
+	// The checklist renders inside the working screen, so make sure it shows
+	// even when readiness was instantly green and no wait was ever displayed.
+	state.finishing = true;
+	if (!state.connectPhase) state.connectPhase = "working";
+	let d = null;
+	try {
+		d = await runChatPreflight();
+	} catch (e) {
+		d = null;
+	}
+	preflight.running = false;
+	preflight.done = true;
+	preflight.plugin = (d && d.plugin) || "unchecked";
+	preflight.persona = (d && d.persona) || "unchecked";
+	preflight.usable = (d && d.usable) || { state: "unknown", detail: "" };
+	if (preflight.usable.state === "auth") {
+		// The connection itself was rejected upstream: the fix is in the
+		// customer's hands, so land them back on the editable form with the
+		// provider's own sentence. A fresh attempt re-runs the preflight.
+		//
+		// The forgets mirror chooseDifferentModel's and are load-bearing, not
+		// tidying (jarvis#840 review B1): the customer is about to submit a
+		// FIXED credential, so this attempt's idempotency key and operation id
+		// must not survive - admin dedupes on both and would hand straight
+		// back the very operation whose credential the probe just refused,
+		// re-blocking forever. Stale terminal copy goes with them.
+		preflight.done = false;
+		stopRetryCountdown();
+		forgetIdem();
+		opStore.forget();
+		currentOpId.value = "";
+		forgetReady();
+		readinessSeen.value = null;
+		opReadinessDetail.value = "";
+		lastOpChatReadinessReason = "";
+		state.connectPhase = "";
+		state.connectTitle = "";
+		state.connectMessage = "";
+		state.connectPaged = false;
+		state.connectSupportOffered = false;
+		state.retryAfter = 0;
+		connectModelChangeOffered.value = false;
+		state.connectBlockReason =
+			preflight.usable.detail ||
+			"Your AI provider rejected this connection. Reconnect your account.";
+		state.finishing = false;
+		return false;
+	}
+	if (preflight.usable.state === "rate_limit") {
+		// Honest, non-blocking: the plan is out of quota, chat still opens.
+		preflight.notice =
+			"Your AI plan is at its usage limit right now. Chat will respond again when it resets.";
+		await _sleep(PREFLIGHT_NOTICE_MS);
+		// The customer may have left the wizard during the notice beat; a
+		// navigation fired after unmount would yank a different view around.
+		if (preflightDisposed.value) return false;
+	}
+	return true;
+}
+// Unmount cancels a pending notice-beat navigation (jarvis#840 review); the
+// operation controller's own unmount abort does not cover this local sleep.
+const preflightDisposed = ref(false);
+onUnmounted(() => {
+	preflightDisposed.value = true;
+});
+
+// The three checklist rows the preflight owns (jarvis#840), rendered between
+// the readiness row and "Opening chat": waiting -> active (the one call in
+// flight) -> done/unknown. No row state ever blocks - the blocking "auth"
+// verdict leaves this screen entirely (runPreflightGate), so it never renders
+// as a row.
+const preflightRows = computed(() => {
+	const rowState = (v) => {
+		if (preflight.running) return "active";
+		if (!preflight.done) return "waiting";
+		return v === "ok" ? "done" : "unknown";
+	};
+	const suffix = (v) =>
+		!preflight.done || v === "ok"
+			? ""
+			: v === "unchecked"
+			? ": not checked"
+			: ": needs attention";
+	const usable = (preflight.usable && preflight.usable.state) || "";
+	const usableLabel = !preflight.done
+		? "AI connection answers a live check"
+		: usable === "ok"
+		? "AI connection checked"
+		: usable === "rate_limit"
+		? "AI connection is at its usage limit"
+		: usable === "timeout"
+		? "The live check timed out"
+		: "AI connection: no live check ran";
+	return [
+		{
+			key: "plugin",
+			state: rowState(preflight.plugin),
+			label: `Business tools wired${suffix(preflight.plugin)}`,
+		},
+		{
+			key: "persona",
+			state: rowState(preflight.persona),
+			label: `Assistant persona loaded${suffix(preflight.persona)}`,
+		},
+		{ key: "usable", state: rowState(usable), label: usableLabel },
+	];
+});
+
+// The six connect-wait steps as ONE labeled bar (2026-08-14 redesign; see the
+// template comment for why the phase columns are gone). Short labels sit above
+// the segments; `explain` is the sentence the line under the bar shows while
+// that step is current. Nothing here is invented: step 1 is settled by
+// reaching this screen (the save was accepted), step 2 reads readinessStage
+// (waitPhases.readinessPhase has no DONE branch - readiness counts as done
+// exactly when the preflight it hands off to has started), steps 3-5 read the
+// jarvis#840 preflight rows verbatim, and "Chat" turns active only once the
+// preflight resolved, which is also when navigateToChat runs.
+const connectSteps = computed(() => {
+	const rows = preflightRows.value;
+	const readinessDone = preflight.running || preflight.done;
+	return [
+		{
+			id: "saved",
+			label: "Connection",
+			state: "done",
+			explain: "Your AI connection is saved.",
+		},
+		{
+			id: "workspace",
+			label: "Workspace",
+			state: readinessDone ? "done" : readinessStage.value.state,
+			explain: readinessStage.value.label,
+		},
+		{ id: "plugin", label: "Tools", state: rows[0].state, explain: rows[0].label },
+		{ id: "persona", label: "Persona", state: rows[1].state, explain: rows[1].label },
+		{ id: "check", label: "Live check", state: rows[2].state, explain: rows[2].label },
+		{
+			id: "chat",
+			label: "Chat",
+			state: preflight.done ? "active" : "waiting",
+			explain: "Opening your chat.",
+		},
+	];
+});
+
+// Current step = the first one not done; `indeterminate` keeps the honesty
+// rule waitPhases.phaseProgress drew: an UNKNOWN current step (a poll that
+// answered with nothing, or a degraded non-blocking preflight row) pulses
+// instead of filling. While the single preflight call is in flight all three
+// of its rows are active at once, so the explanation collapses them into one
+// sentence rather than naming a row the call does not check first.
+const connectProgress = computed(() => {
+	const steps = connectSteps.value;
+	// Always hits: the chat step is never "done" (only active or waiting), so
+	// a first not-done step always exists.
+	const index = steps.findIndex((s) => s.state !== "done");
+	const explain = preflight.running
+		? "Running final checks on your setup."
+		: steps[index].explain;
+	return {
+		index,
+		indeterminate: steps[index].state === "unknown",
+		explain,
+		caption: `Step ${index + 1} of ${steps.length}`,
+	};
+});
+
 // Navigate to Chat exactly once, only on an authoritative ready. forgetReady() clears
 // the router's memoized readiness so its guard re-checks fresh, and router.replace
 // re-runs that guard → Chat.
-function navigateToChat() {
+async function navigateToChat() {
 	if (navigated.value) return;
+	// A terminal that resolves AFTER the customer escaped back to the editable
+	// form (the jarvis#727 chooseDifferentModel path sets finishing=false and
+	// never aborts the in-flight follow) must not yank the screen into a
+	// preflight over the abandoned config, let alone bill a probe against it
+	// (PR #848 review). Only the wait screen owns navigation.
+	if (!state.finishing && !preflight.running) return;
+	if (!preflight.done) {
+		const proceed = await runPreflightGate();
+		if (!proceed) return;
+		if (navigated.value) return;
+	}
 	navigated.value = true;
 	stopRetryCountdown();
 	forgetIdem();
@@ -4491,6 +4754,14 @@ onMounted(async () => {
 	// tick, before the awaited prefill below — the discovery loading note must show
 	// from first paint (X4), independent of prefill/company.
 	loadPaymentProviders();
+	// Best-effort terms-page link for the Review & Pay checkbox. Never blocks the
+	// wizard and never throws into onMounted: a failure just leaves state.termsUrl
+	// empty, which the template renders as plain unlinked "Terms & Conditions" text.
+	getTermsUrl()
+		.then((d) => {
+			state.termsUrl = (d && d.url) || "";
+		})
+		.catch(() => {});
 	await prefillAccount();
 	// prefillAccount may set the default Company synchronously; the watcher fires,
 	// but kick a fetch explicitly too in case the prefilled value equalled the
@@ -4726,17 +4997,18 @@ onUnmounted(() => {
 	max-width: 640px;
 }
 
-/* ---- staged wait phases (waitPhases.js) --------------------------------
+/* ---- staged wait phases (waitPhases.js), PROVISIONING wait only --------
    One column per phase, side by side under the bar's segments so the whole
    block reads as one horizontal progression rather than a bar with an
    unrelated list under it (jarvis wait-phases-horizontal). Segment one sits
    above phase one for free: both this row and StepProgress.vue's own row are
    a 3-up flex with equal (`flex: 1`) children and the same 8px gap over the
-   same width, so they align without the phase labels having to become the
-   bar's own per-step labels - that route was considered and rejected, see
-   WAIT_STEPS's comment below (script section): the bar is deliberately
-   unlabelled per jarvis#763, and reintroducing labels there would require a
-   per-bar computed the same comment already warns against reintroducing.
+   same width. jarvis#763 rejected per-step labels on the bar itself BECAUSE
+   these columns already carried the words; the CONNECT wait dropped its
+   columns in the 2026-08-14 redesign (six of them under a 3-count bar wrapped
+   into unreadable towers), so its bar is now the labeled, non-duplicating
+   layout that rejection anticipated, and only the provisioning wait still
+   renders this list.
 
    The MODIFIER on each column is the honesty contract, not decoration:
    `active` is only ever set from an observation, `unknown` means a poll
@@ -4800,6 +5072,23 @@ onUnmounted(() => {
 	font-size: 12px;
 	line-height: 1.5;
 	color: var(--text-3);
+	text-align: center;
+	box-sizing: border-box;
+}
+/* The connect bar's one-line explanation of the CURRENT step (2026-08-14
+   redesign): the sentence the phase columns used to carry. Slightly stronger
+   than .ob-phase-detail below it, which stays reserved for admin's own detail
+   sentence and the preflight notice. */
+.ob-step-explain {
+	display: block;
+	width: 75%;
+	max-width: 640px;
+	margin: 10px auto 0;
+	padding: 0 8px;
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--text-2);
+	font-weight: 500;
 	text-align: center;
 	box-sizing: border-box;
 }
@@ -4898,7 +5187,8 @@ onUnmounted(() => {
 @media (max-width: 720px) {
 	.ob-progress,
 	.ob-phases,
-	.ob-phase-detail {
+	.ob-phase-detail,
+	.ob-step-explain {
 		width: 100%;
 	}
 	.ob-phases {

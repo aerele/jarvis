@@ -37,6 +37,9 @@ _SNAPSHOT_PLAIN_FIELDS = (
 	"chat_was_ready_at",
 	"chat_ready_authority",
 	"last_sync_requested_at",
+	# The jarvis#841 dedup stamp: restored so a class's test-config fingerprint
+	# never lingers on the shared site.
+	"llm_last_apply_fingerprint",
 )
 
 # Password fields the tests overwrite. Snapshotted via get_password() because
