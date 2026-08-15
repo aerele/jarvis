@@ -19,7 +19,6 @@ from jarvis.tools.report_pdf import (
 	_cell,
 	_normalise_columns,
 	_render_html,
-	_safe_filename,
 	report_pdf,
 )
 
@@ -198,12 +197,6 @@ class TestReportPdf(FrappeTestCase):
 		# The stored filename is sanitised to safe characters.
 		self.assertNotIn("/", out["filename"])
 		self.assertNotIn("<", out["filename"])
-
-	def test_safe_filename_strips_markup_slashes_and_never_empties(self):
-		self.assertEqual(_safe_filename("Flow <b>x</b>/y"), "Flow-b-x-b-y")
-		self.assertEqual(_safe_filename("////"), "report")
-		self.assertEqual(_safe_filename(""), "report")
-		self.assertLessEqual(len(_safe_filename("z" * 500)), 80)
 
 	# ── get_pdf yields no bytes -> clean error (reviewer M1, edge case 10) ─────
 	def test_empty_pdf_bytes_raises(self):

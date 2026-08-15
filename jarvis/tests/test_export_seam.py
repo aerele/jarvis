@@ -65,6 +65,22 @@ class TestExportEnvelope(FrappeTestCase):
 		self.assertTrue(env["filename"].endswith(".csv"))
 		self.assertTrue(len(env["filename"]) > len(".csv"))
 
+	def test_file_save_validation_error_becomes_clean_error(self):
+		# save_file raises ValidationError (e.g. MaxFileSizeReachedError) for a File
+		# constraint; an over-limit export must surface a clean InvalidArgumentError,
+		# not an opaque 500 / Error Log. (Reviewer I1.)
+		from unittest import mock
+
+		from frappe.exceptions import ValidationError
+
+		from jarvis.exceptions import InvalidArgumentError
+
+		with mock.patch(
+			"frappe.utils.file_manager.save_file", side_effect=ValidationError("File size exceeded")
+		):
+			with self.assertRaises(InvalidArgumentError):
+				save_export_file("x.xlsx", b"PK\x03\x04", title="Big", mime_type="x")
+
 
 class TestFormulaEscape(FrappeTestCase):
 	def test_dangerous_leading_chars_are_prefixed(self):

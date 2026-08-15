@@ -24,8 +24,6 @@ both majors (``download_pdf`` uses ``get_print`` + ``save_file`` with no
 ``jarvis.compat`` shim), so none is needed here.
 """
 
-import re
-
 import frappe
 from frappe.desk.query_report import run as frappe_run_report
 
@@ -119,8 +117,6 @@ def report_pdf(
 	if not pdf_bytes:
 		raise InvalidArgumentError(f"PDF generation for report {report_name} produced no content")
 
-	from frappe.exceptions import ValidationError
-
 	from jarvis.tools._export import save_export_file
 
 	# Owner-only File (dt/dn default to None -> unattached, so has_permission falls
@@ -129,30 +125,9 @@ def report_pdf(
 	# Report doc: File.has_permission would then defer to Report read, letting
 	# anyone who can read the Report download a row-filtered artifact (e.g. a
 	# Salary Register). See the export-architecture plan-check, finding C5.
-	try:
-		return save_export_file(
-			f"{_safe_filename(report_title)}.pdf",
-			pdf_bytes,
-			title=report_title,
-			mime_type="application/pdf",
-		)
-	except ValidationError as e:
-		# A File-save constraint (e.g. a rejected filename) is a bad-input outcome,
-		# not an opaque 500.
-		raise InvalidArgumentError(f"could not store the report PDF: {e}") from e
-
-
-def _safe_filename(title: str) -> str:
-	"""A File-doctype-safe base name derived from the title.
-
-	A report name or a caller-supplied ``title`` can carry markup, slashes and
-	other characters that Frappe's File sanitiser rejects or rewrites — notably it
-	re-introduces a ``/`` from a closing HTML tag (``</b>``), which then raises
-	``ValidationError: File name cannot have /`` deep inside ``save_file``. Keep
-	only filename-safe characters, cap the length, and never return empty.
-	"""
-	base = re.sub(r"[^A-Za-z0-9._-]+", "-", title or "").strip("-.")
-	return base[:80] or "report"
+	# save_export_file owns filename sanitising + File-size/ValidationError
+	# translation, so only the extension of this placeholder name is used.
+	return save_export_file("report.pdf", pdf_bytes, title=report_title, mime_type="application/pdf")
 
 
 def _normalise_columns(columns: list) -> list[dict]:

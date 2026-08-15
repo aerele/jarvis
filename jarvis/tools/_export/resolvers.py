@@ -31,6 +31,12 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 	``len(rows)`` IS the exact count)."""
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
+	if not frappe.db.exists("DocType", doctype):
+		raise InvalidArgumentError(f"unknown DocType: {doctype}")
+	# A stray scalar `fields="name"` would otherwise iterate into characters; the
+	# wire schema enforces an array, so this is defense-in-depth.
+	if isinstance(fields, str):
+		fields = [fields]
 	if fields is not None and "*" in fields:
 		raise InvalidArgumentError("fields=['*'] is not supported for export - name the columns you want.")
 

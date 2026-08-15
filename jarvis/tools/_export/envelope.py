@@ -14,7 +14,7 @@ def _safe_base(title: str) -> str:
 	closing HTML tag (``</b>``), which then raises ``ValidationError: File name
 	cannot have /`` deep inside ``save_file`` (a bug already hit for a sibling
 	tool). Keep only filename-safe characters, cap the length, never return
-	empty. Mirrors report_pdf._safe_filename."""
+	empty. The single filename sanitiser for every export tool."""
 	base = re.sub(r"[^A-Za-z0-9._-]+", "-", title or "").strip("-.")
 	return base[:80] or "export"
 
@@ -36,11 +36,25 @@ def save_export_file(
 	owner-only, so an export is readable only by the user who ran it. Pass
 	``dt``/``dn`` only to attach to a record the same audience may already read
 	(e.g. download_pdf attaching to its own record)."""
+	from frappe.exceptions import ValidationError
 	from frappe.utils.file_manager import save_file
+
+	from jarvis.exceptions import InvalidArgumentError
 
 	ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
 	fname = f"{_safe_base(title)}.{ext}"
-	fdoc = save_file(fname, content, dt, dn, is_private=1)
+	try:
+		fdoc = save_file(fname, content, dt, dn, is_private=1)
+	except ValidationError as e:
+		# save_file raises ValidationError for a File-save constraint - notably
+		# MaxFileSizeReachedError when the bytes exceed the site's max_file_size
+		# (default 10 MB), which a large but under-row-ceiling export can hit. A big
+		# export is legitimate, so translate to a clean, actionable error for BOTH
+		# callers rather than an opaque 500 / Error Log.
+		raise InvalidArgumentError(
+			f"could not store the export file (it may exceed the site's maximum file "
+			f"size - narrow the data or export fewer fields): {e}"
+		) from e
 	return {
 		"file_url": fdoc.file_url,
 		"filename": fdoc.file_name,

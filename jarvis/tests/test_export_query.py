@@ -104,10 +104,12 @@ class TestExportQueryPermissions(FrappeTestCase):
 		admin_res = export_query("ToDo", filters=flt, fields=["name", "description"])
 		self.assertEqual(admin_res["total"], 3)
 
-		# The restricted user (a User Permission scopes their ToDo access) sees a
-		# STRICTLY smaller set - here zero. The point is enforcement is applied:
-		# if the resolver ever used get_all / ignore_permissions this would be 3,
-		# so this assertion is mutation-proof against a permission bypass.
+		# The restricted (non-admin) user sees a STRICTLY smaller set - here zero:
+		# ToDo's record-level permission conditions hide the Administrator-created
+		# ToDos from a non-owner (the setUp User Permission further scopes access).
+		# The point is that enforcement is APPLIED: if the resolver ever used
+		# get_all / ignore_permissions this would be 3 like the admin, so this
+		# assertion is mutation-proof against a permission bypass.
 		frappe.set_user(self.USER)
 		self.assertTrue(frappe.has_permission("ToDo", "read"))  # not a blanket denial
 		restricted_res = export_query("ToDo", filters=flt, fields=["name", "description"])
