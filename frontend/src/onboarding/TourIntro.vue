@@ -250,37 +250,133 @@
 										<div class="meta"></div>
 									</div>
 								</template>
-								<div class="m-graph" v-else-if="knowledgeAtLeast('graph')">
+								<!-- v-else, not a 'graph'-gated v-else-if: the graph must
+								 enter the moment the tab flips, or the pane renders blank
+								 for the whole 'flip' step and reads as a glitch -->
+								<div class="m-graph" v-else>
 									<svg
 										class="m-graph-svg"
 										viewBox="0 0 220 120"
 										aria-hidden="true"
 									>
-										<line class="m-edge" x1="60" y1="60" x2="140" y2="35" />
-										<line class="m-edge" x1="60" y1="60" x2="30" y2="25" />
-										<line class="m-edge" x1="60" y1="60" x2="120" y2="85" />
-										<line class="m-edge" x1="60" y1="60" x2="70" y2="100" />
-										<line class="m-edge" x1="140" y1="35" x2="175" y2="70" />
-										<line class="m-edge" x1="120" y1="85" x2="175" y2="70" />
+										<!-- each element carries its own stagger delay in --d (one
+											 shared animation-delay: var(--d) rule in the styles), so
+											 adding or reordering nodes never silently drops a delay
+											 the way a positional nth-of-type block would -->
+										<line
+											class="m-edge"
+											style="--d: 0s"
+											x1="60"
+											y1="60"
+											x2="140"
+											y2="35"
+										/>
+										<line
+											class="m-edge"
+											style="--d: 0.05s"
+											x1="60"
+											y1="60"
+											x2="30"
+											y2="25"
+										/>
+										<line
+											class="m-edge"
+											style="--d: 0.1s"
+											x1="60"
+											y1="60"
+											x2="120"
+											y2="85"
+										/>
+										<line
+											class="m-edge"
+											style="--d: 0.15s"
+											x1="60"
+											y1="60"
+											x2="70"
+											y2="100"
+										/>
+										<line
+											class="m-edge"
+											style="--d: 0.2s"
+											x1="140"
+											y1="35"
+											x2="175"
+											y2="70"
+										/>
+										<line
+											class="m-edge"
+											style="--d: 0.25s"
+											x1="120"
+											y1="85"
+											x2="175"
+											y2="70"
+										/>
 										<circle
 											class="m-node m-node-accent"
+											style="--d: 0.15s"
 											cx="60"
 											cy="60"
 											r="7"
 										/>
 										<circle
 											class="m-node m-node-accent"
+											style="--d: 0.2s"
 											cx="140"
 											cy="35"
 											r="6"
 										/>
-										<circle class="m-node" cx="30" cy="25" r="5" />
-										<circle class="m-node" cx="120" cy="85" r="5" />
-										<circle class="m-node" cx="175" cy="70" r="5" />
-										<circle class="m-node" cx="70" cy="100" r="5" />
-										<text class="m-node-label" x="146" y="31">Vendors</text>
-										<text class="m-node-label" x="129" y="89">GST</text>
-										<text class="m-node-label" x="57" y="113">Approvals</text>
+										<circle
+											class="m-node"
+											style="--d: 0.25s"
+											cx="30"
+											cy="25"
+											r="5"
+										/>
+										<circle
+											class="m-node"
+											style="--d: 0.3s"
+											cx="120"
+											cy="85"
+											r="5"
+										/>
+										<circle
+											class="m-node"
+											style="--d: 0.35s"
+											cx="175"
+											cy="70"
+											r="5"
+										/>
+										<circle
+											class="m-node"
+											style="--d: 0.4s"
+											cx="70"
+											cy="100"
+											r="5"
+										/>
+										<text
+											class="m-node-label"
+											style="--d: 0.45s"
+											x="146"
+											y="31"
+										>
+											Vendors
+										</text>
+										<text
+											class="m-node-label"
+											style="--d: 0.5s"
+											x="129"
+											y="89"
+										>
+											GST
+										</text>
+										<text
+											class="m-node-label"
+											style="--d: 0.55s"
+											x="57"
+											y="113"
+										>
+											Approvals
+										</text>
 									</svg>
 								</div>
 							</div>
@@ -1488,17 +1584,22 @@ button:focus-visible {
 	height: 196px;
 	margin-top: 14px;
 }
+/* every graph element staggers by its own --d (set inline in the SVG), so
+   the entrance order survives adding or reordering nodes without a block of
+   positional nth-of-type rules to hand-renumber */
 .m-edge {
 	stroke: var(--border-2);
 	stroke-width: 1;
 	fill: none;
 	animation: jvEdgeIn 0.4s ease both;
+	animation-delay: var(--d, 0s);
 }
 .m-node {
 	fill: var(--surface-3);
 	transform-box: fill-box;
 	transform-origin: center;
 	animation: jvNodeIn 0.35s ease both;
+	animation-delay: var(--d, 0s);
 }
 .m-node-accent {
 	fill: var(--cta);
@@ -1507,51 +1608,7 @@ button:focus-visible {
 	font-size: 8px;
 	fill: var(--text-3);
 	animation: jvEdgeIn 0.4s ease both;
-}
-.m-graph-svg line:nth-of-type(1) {
-	animation-delay: 0s;
-}
-.m-graph-svg line:nth-of-type(2) {
-	animation-delay: 0.05s;
-}
-.m-graph-svg line:nth-of-type(3) {
-	animation-delay: 0.1s;
-}
-.m-graph-svg line:nth-of-type(4) {
-	animation-delay: 0.15s;
-}
-.m-graph-svg line:nth-of-type(5) {
-	animation-delay: 0.2s;
-}
-.m-graph-svg line:nth-of-type(6) {
-	animation-delay: 0.25s;
-}
-.m-graph-svg circle:nth-of-type(1) {
-	animation-delay: 0.15s;
-}
-.m-graph-svg circle:nth-of-type(2) {
-	animation-delay: 0.2s;
-}
-.m-graph-svg circle:nth-of-type(3) {
-	animation-delay: 0.25s;
-}
-.m-graph-svg circle:nth-of-type(4) {
-	animation-delay: 0.3s;
-}
-.m-graph-svg circle:nth-of-type(5) {
-	animation-delay: 0.35s;
-}
-.m-graph-svg circle:nth-of-type(6) {
-	animation-delay: 0.4s;
-}
-.m-graph-svg text:nth-of-type(1) {
-	animation-delay: 0.45s;
-}
-.m-graph-svg text:nth-of-type(2) {
-	animation-delay: 0.5s;
-}
-.m-graph-svg text:nth-of-type(3) {
-	animation-delay: 0.55s;
+	animation-delay: var(--d, 0s);
 }
 @keyframes jvNodeIn {
 	from {
