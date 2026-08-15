@@ -65,6 +65,13 @@ class TestExportEnvelope(FrappeTestCase):
 		self.assertTrue(env["filename"].endswith(".csv"))
 		self.assertTrue(len(env["filename"]) > len(".csv"))
 
+	def test_long_title_base_capped(self):
+		# The sanitizer caps the base name so a runaway title can't blow the File
+		# name length (regression cover after the _safe_filename -> _safe_base move).
+		env = save_export_file("x.csv", b"data\n", title="z" * 500, mime_type="text/csv")
+		base = env["filename"].rsplit(".", 1)[0]
+		self.assertLessEqual(len(base), 80)
+
 	def test_file_save_validation_error_becomes_clean_error(self):
 		# save_file raises ValidationError (e.g. MaxFileSizeReachedError) for a File
 		# constraint; an over-limit export must surface a clean InvalidArgumentError,

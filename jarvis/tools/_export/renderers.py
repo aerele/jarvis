@@ -18,6 +18,21 @@ def _clip(value, model: ExportModel):
 	return value
 
 
+def _xlsx_cell(value, model: ExportModel):
+	"""Prepare one xlsx cell. make_xlsx runs ``handle_html`` on every string cell
+	AFTER we'd escape, which would unwrap ``<p>=FORMULA</p>`` back into a live
+	``=FORMULA`` past the guard (formula injection). Mirror that unwrap HERE first,
+	so ``escape_formula`` runs on the same string make_xlsx ultimately stores (its
+	second handle_html is then a no-op - it returns input unchanged when there is
+	no ``<``/``>``). CSV needs none of this: it is not run through handle_html, and
+	a ``<``-leading cell is inert (not a formula) in a spreadsheet."""
+	if isinstance(value, str):
+		from frappe.utils.xlsxutils import handle_html
+
+		value = handle_html(value)
+	return _clip(escape_formula(value), model)
+
+
 def csv(model: ExportModel) -> bytes:
 	"""Plain CSV: escaped header + escaped rows, UTF-8. An empty rowset yields a
 	valid header-only file (an honest 'no rows' export, not an error)."""
@@ -32,9 +47,10 @@ def csv(model: ExportModel) -> bytes:
 def xlsx(model: ExportModel) -> bytes:
 	"""Styled workbook via the shared xlsx_bytes builder (bold header + date/currency
 	number formats from Frappe's make_xlsx). Header AND cells are formula-escaped;
-	over-long cells are clipped-with-marker and flagged in ``model.meta``. Empty
-	rowset -> valid header-only workbook."""
-	header = [escape_formula(c) for c in model.columns]
-	body = [[_clip(escape_formula(c), model) for c in row] for row in model.rows]
+	over-long cells are clipped-with-marker and flagged in ``model.meta``; HTML is
+	unwrapped before escaping so a formula hidden behind tags can't slip the guard.
+	Empty rowset -> valid header-only workbook."""
+	header = [_xlsx_cell(c, model) for c in model.columns]
+	body = [[_xlsx_cell(c, model) for c in row] for row in model.rows]
 	title = (model.meta.get("title") or "Export")[:31]
 	return compat.xlsx_bytes([(title, [header] + body)])

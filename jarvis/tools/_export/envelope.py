@@ -1,9 +1,11 @@
 import re
 
-# The single place an export becomes a File + download-card envelope, so every
-# export tool (new export_query AND the existing report_pdf/export_excel) shares
-# one shape. The chat surface renders the card automatically from this envelope
-# via api._maybe_attach_artifact (keyed on the filename extension -> canvas._EXT_TYPE).
+# The shared builder that turns an export into a private File + download-card
+# envelope. Used by export_query and report_pdf; export_excel / export_document /
+# download_pdf still roll their own save (a follow-up migration - see the export
+# DEFERRED backlog). The chat surface renders the card automatically from this
+# envelope via api._maybe_attach_artifact (keyed on the filename extension ->
+# canvas._EXT_TYPE).
 
 
 def _safe_base(title: str) -> str:
@@ -47,13 +49,14 @@ def save_export_file(
 		fdoc = save_file(fname, content, dt, dn, is_private=1)
 	except ValidationError as e:
 		# save_file raises ValidationError for a File-save constraint - notably
-		# MaxFileSizeReachedError when the bytes exceed the site's max_file_size
-		# (default 10 MB), which a large but under-row-ceiling export can hit. A big
-		# export is legitimate, so translate to a clean, actionable error for BOTH
-		# callers rather than an opaque 500 / Error Log.
+		# MaxFileSizeReachedError when the bytes exceed the site's max_file_size,
+		# which a large but under-row-ceiling export can hit. A big export is
+		# legitimate, so translate to a clean, self-contained, actionable message
+		# (the raw driver text can carry markup + a second admin-only remedy that
+		# reads as a run-on); the original rides in the traceback via `from e`.
 		raise InvalidArgumentError(
-			f"could not store the export file (it may exceed the site's maximum file "
-			f"size - narrow the data or export fewer fields): {e}"
+			"The export is too large to store as a file (it exceeds this site's maximum "
+			"file size). Narrow the filter or export fewer fields."
 		) from e
 	return {
 		"file_url": fdoc.file_url,

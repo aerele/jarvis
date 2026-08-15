@@ -654,6 +654,15 @@ _WRITE_TOOLS = frozenset(
 		# detached turn as record_agent_run beside it — audited, never gated.
 		"download_pdf",
 		"export_excel",
+		# export_query / report_pdf / export_document all insert a private File via
+		# the shared save_export_file seam - the same File-write class as
+		# download_pdf/export_excel, so they are audited (never gated: no card, the
+		# artifact is the point). export_query in particular is the highest-throughput
+		# bulk-export path (server-side, up to the row ceiling, never transiting the
+		# visible transcript), so a "who exported what" audit row is load-bearing.
+		"export_query",
+		"report_pdf",
+		"export_document",
 		"record_agent_run",
 		"record_app_wiki",
 		"finish_app_learning_run",

@@ -86,10 +86,12 @@ def record_budget_event(
 		pass
 
 
-def record_export_event(tool: str, fmt: str, rows: int, mode: str = "sync") -> None:
-	"""One line per server-side export (export_query etc.): what format, how many
-	rows, sync/background. Signal for capacity + how often large exports fire.
-	Routes through the same INFO-pinned logger as the other events. Never raises."""
+def record_export_event(tool: str, fmt: str, rows: int, mode: str = "sync", outcome: str = "ok") -> None:
+	"""One line per server-side export ATTEMPT (export_query etc.): format, row
+	count, sync/background, and ``outcome`` (ok / no_data / denied / rejected).
+	Emitting on the fail-closed paths too is the point - the refused large exports
+	are exactly the signal that would justify raising the ceiling / building the
+	async path. Routes through the same INFO-pinned logger. Never raises."""
 	try:
 		_emit(
 			{
@@ -100,6 +102,7 @@ def record_export_event(tool: str, fmt: str, rows: int, mode: str = "sync") -> N
 				"format": fmt,
 				"rows": int(rows),
 				"mode": mode,
+				"outcome": outcome,
 			}
 		)
 	except Exception:

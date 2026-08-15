@@ -64,3 +64,13 @@ class TestXlsxRenderer(FrappeTestCase):
 		cell = self._cells(content)[1][0]
 		self.assertLessEqual(len(cell), 32_767)
 		self.assertTrue(cell.endswith("…[truncated]"))
+
+	def test_html_wrapped_formula_is_neutralized(self):
+		# make_xlsx runs handle_html AFTER escaping, which would unwrap
+		# <p>=FORMULA</p> back into a live =FORMULA. We unwrap BEFORE escaping, so
+		# the stored cell is neutralized text, not an executable formula.
+		m = ExportModel(columns=["c"], rows=[['<p>=HYPERLINK("http://evil","x")</p>']], total=1)
+		cell = self._cells(renderers.xlsx(m))[1][0]
+		self.assertTrue(cell.startswith("'"), cell)  # apostrophe-escaped
+		self.assertFalse(cell.startswith("="), cell)  # NOT a live formula
+		self.assertNotIn("<p>", cell)  # HTML unwrapped
