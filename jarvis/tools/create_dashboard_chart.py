@@ -12,6 +12,7 @@ Dashboard Chart, and we check read permission on the charted doctype.
 """
 
 import frappe
+from frappe.desk.doctype.dashboard_chart.dashboard_chart import get_parent_doctypes
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 
@@ -37,6 +38,7 @@ def create_dashboard_chart(
 	time_interval: str = "Monthly",
 	filters: dict | list | None = None,
 	is_public: int = 0,
+	parent_document_type: str | None = None,
 ) -> dict:
 	"""Create a Dashboard Chart; return {name, chart_name, chart_type, url}.
 
@@ -45,6 +47,10 @@ def create_dashboard_chart(
 	By`` (need ``group_by_based_on``; Sum/Average ``group_by_type`` also needs
 	``aggregate_function_based_on``). ``type`` is the render style. ``filters``
 	is an optional Frappe filter dict/list scoping the charted records.
+	``parent_document_type`` is required when ``document_type`` is a child
+	table (e.g. charting "Sales Order Item" grouped by "item_code" needs
+	``parent_document_type="Sales Order"``) - Frappe reads a child table's
+	rows through its owning parent, and rejects the chart without it.
 	"""
 	if not chart_name:
 		raise InvalidArgumentError("chart_name is required")
@@ -57,6 +63,32 @@ def create_dashboard_chart(
 	if not frappe.has_permission(document_type, "read"):
 		raise PermissionDeniedError(f"no read permission on {document_type!r}")
 
+	# Child (istable) doctypes carry no rows of their own - Frappe's chart
+	# queries read them through an owning parent (`parent_doctype` on
+	# get_list), and Dashboard Chart.validate() rejects the chart outright
+	# without one. get_parent_doctypes() is the same lookup Frappe's own
+	# Dashboard Chart form uses to populate parent_document_type, so a
+	# non-table document_type always yields [] here and any supplied
+	# parent_document_type is rejected as junk for it.
+	valid_parents = get_parent_doctypes(document_type)
+	if valid_parents:
+		if not parent_document_type:
+			raise InvalidArgumentError(
+				f"{document_type!r} is a child table; pass parent_document_type "
+				f"(one of: {', '.join(valid_parents)})"
+			)
+		if not frappe.db.exists("DocType", parent_document_type):
+			raise InvalidArgumentError(f"no such DocType {parent_document_type!r}")
+		if parent_document_type not in valid_parents:
+			raise InvalidArgumentError(
+				f"parent_document_type {parent_document_type!r} is not a parent of "
+				f"{document_type!r} (one of: {', '.join(valid_parents)})"
+			)
+		if not frappe.has_permission(parent_document_type, "read"):
+			raise PermissionDeniedError(f"no read permission on {parent_document_type!r}")
+	elif parent_document_type:
+		raise InvalidArgumentError(f"{document_type!r} is not a child table; omit parent_document_type")
+
 	doc = frappe.new_doc("Dashboard Chart")
 	doc.chart_name = chart_name
 	doc.chart_type = chart_type
@@ -64,6 +96,8 @@ def create_dashboard_chart(
 	doc.type = type
 	doc.is_public = 1 if is_public else 0
 	doc.filters_json = frappe.as_json(filters if filters is not None else [])
+	if parent_document_type:
+		doc.parent_document_type = parent_document_type
 
 	if chart_type in ("Count", "Sum", "Average"):
 		if not based_on:

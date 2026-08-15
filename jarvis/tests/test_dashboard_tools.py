@@ -55,6 +55,64 @@ class TestCreateDashboardChart(FrappeTestCase):
 				based_on="creation",
 			)
 
+	def test_group_by_child_table_needs_parent_document_type(self):
+		# Contact/Contact Email is a core Frappe parent/child pair - istable,
+		# no ERPNext fixture needed. Without parent_document_type Frappe's own
+		# Dashboard Chart.validate() would reject the insert; the tool should
+		# catch this itself and name the valid parent in the message.
+		with self.assertRaises(InvalidArgumentError) as ctx:
+			create_dashboard_chart(
+				chart_name=_h("JT Child NoParent"),
+				document_type="Contact Email",
+				chart_type="Group By",
+				group_by_based_on="email_id",
+			)
+		self.assertIn("Contact", str(ctx.exception))
+
+	def test_group_by_child_table_with_parent_document_type(self):
+		res = create_dashboard_chart(
+			chart_name=_h("JT Child Parent"),
+			document_type="Contact Email",
+			chart_type="Group By",
+			group_by_based_on="email_id",
+			parent_document_type="Contact",
+		)
+		self.assertTrue(res["name"])
+		self.assertEqual(
+			frappe.db.get_value("Dashboard Chart", res["name"], "parent_document_type"),
+			"Contact",
+		)
+
+	def test_wrong_parent_document_type_rejected(self):
+		with self.assertRaises(InvalidArgumentError):
+			create_dashboard_chart(
+				chart_name=_h("JT Wrong Parent"),
+				document_type="Contact Email",
+				chart_type="Group By",
+				group_by_based_on="email_id",
+				parent_document_type="ToDo",
+			)
+
+	def test_junk_parent_document_type_rejected(self):
+		with self.assertRaises(InvalidArgumentError):
+			create_dashboard_chart(
+				chart_name=_h("JT Junk Parent"),
+				document_type="Contact Email",
+				chart_type="Group By",
+				group_by_based_on="email_id",
+				parent_document_type="No Such Doctype 123",
+			)
+
+	def test_parent_document_type_rejected_for_non_child_doctype(self):
+		with self.assertRaises(InvalidArgumentError):
+			create_dashboard_chart(
+				chart_name=_h("JT Parent NonChild"),
+				document_type="ToDo",
+				chart_type="Count",
+				based_on="creation",
+				parent_document_type="ToDo",
+			)
+
 	def test_duplicate_chart_name_returns_clean_error(self):
 		# Dashboard Chart autonames on chart_name -> a repeat raises Frappe's
 		# DuplicateEntryError (a NameError). _run_tool must translate it to the
