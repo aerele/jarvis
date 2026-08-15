@@ -27,7 +27,7 @@
 				:autocomplete="autocomplete"
 				:aria-required="ariaRequired ? 'true' : undefined"
 				@input="onInput"
-				@focus="open = true"
+				@focus="onFocus"
 				@keydown.down.prevent.stop="move(1)"
 				@keydown.up.prevent.stop="move(-1)"
 				@keydown.enter.prevent.stop="onEnter"
@@ -103,6 +103,14 @@ const root = ref(null);
 const inputEl = ref(null);
 const open = ref(false);
 const hi = ref(-1);
+// The query actually TYPED since the field last opened, separate from
+// modelValue: a prefilled/selected value (e.g. the provider's default model)
+// must show the FULL list on open, filtering only once the user types a new
+// character. Keying `filtered` off modelValue directly (the old behaviour)
+// filtered the list down to whatever value was already selected, so opening
+// a combobox that already held a valid pick showed exactly one option
+// (jarvis: AI models "Add a model" model dropdown).
+const typedQuery = ref("");
 
 const norm = computed(() =>
 	(props.options || []).map((o) => (typeof o === "string" ? { value: o, label: o } : o))
@@ -113,22 +121,40 @@ const displayLabel = computed(() => {
 });
 const filtered = computed(() => {
 	if (!props.allowCustom) return norm.value;
-	const q = (props.modelValue || "").trim().toLowerCase();
+	const q = typedQuery.value.trim().toLowerCase();
 	if (!q) return norm.value;
 	const hit = norm.value.filter((o) => o.label.toLowerCase().includes(q));
 	return hit.length ? hit : norm.value; // never blank the list while typing a custom id
 });
 
+// Every place the menu opens WITHOUT the user having just typed a character
+// resets typedQuery, so it shows the full list. This must NOT live in the
+// `open` watcher below: choosing an option leaves the input focused, and
+// typing again immediately re-opens (onInput sets open=true) - a watcher
+// would fire after that keystroke and wipe the query the user is mid-typing.
+function resetQuery() {
+	typedQuery.value = "";
+}
+
 function onFieldClick() {
 	if (!props.editable) return;
 	if (props.allowCustom) {
+		// Guard on `!open`: this click handler also fires (bubbled) for clicks
+		// on the input ITSELF while the menu is already open, e.g. repositioning
+		// the caret mid-query - resetting there would wipe what's being typed.
+		if (!open.value) resetQuery();
 		inputEl.value && inputEl.value.focus();
 		open.value = true;
 	} else open.value = !open.value;
 }
+function onFocus() {
+	resetQuery();
+	open.value = true;
+}
 // Reset the highlight on every keystroke: the filtered list is recomputed from
 // the new text, so a stale `hi` would make Enter pick an unrelated option.
 function onInput(e) {
+	typedQuery.value = e.target.value;
 	emit("update:modelValue", e.target.value);
 	open.value = true;
 	hi.value = -1;
@@ -140,6 +166,7 @@ function choose(o) {
 }
 function move(d) {
 	if (!open.value) {
+		resetQuery();
 		open.value = true;
 		return;
 	}
@@ -157,6 +184,7 @@ function onEnter() {
 }
 function openAnd(i) {
 	if (props.editable) {
+		resetQuery();
 		open.value = true;
 		hi.value = i;
 	}
