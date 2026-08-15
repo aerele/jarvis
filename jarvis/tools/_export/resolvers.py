@@ -97,6 +97,8 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 	# permlevel-read on is dropped from the row by get_list (on v17), so keying by
 	# column name - blank when absent - keeps every value under its own header on
 	# every engine, instead of the shift a positional as_list would produce.
+	# Keying is by plain fieldname (the tool's contract; fields=['*'] is rejected
+	# and aggregate/aliased expressions are out of scope - they'd key as blank).
 	return ExportModel(
 		columns=cols,
 		rows=[[row.get(c) for c in cols] for row in rows],

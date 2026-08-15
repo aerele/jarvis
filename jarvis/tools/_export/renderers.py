@@ -18,18 +18,17 @@ def _clip(value, model: ExportModel):
 	return value
 
 
-def _xlsx_cell(value, model: ExportModel):
+def _xlsx_cell(value, model: ExportModel, unwrap):
 	"""Prepare one xlsx cell. make_xlsx runs ``handle_html`` on every string cell
 	AFTER we'd escape, which would unwrap ``<p>=FORMULA</p>`` back into a live
-	``=FORMULA`` past the guard (formula injection). Mirror that unwrap HERE first,
-	so ``escape_formula`` runs on the same string make_xlsx ultimately stores (its
-	second handle_html is then a no-op - it returns input unchanged when there is
-	no ``<``/``>``). CSV needs none of this: it is not run through handle_html, and
-	a ``<``-leading cell is inert (not a formula) in a spreadsheet."""
+	``=FORMULA`` past the guard (formula injection). Mirror that unwrap HERE first
+	(``unwrap`` is ``handle_html``, imported once per render), so ``escape_formula``
+	runs on the same string make_xlsx ultimately stores (its second handle_html is
+	then a no-op - it returns input unchanged when there is no ``<``/``>``). CSV
+	needs none of this: it is not run through handle_html, and a ``<``-leading cell
+	is inert (not a formula) in a spreadsheet."""
 	if isinstance(value, str):
-		from frappe.utils.xlsxutils import handle_html
-
-		value = handle_html(value)
+		value = unwrap(value)
 	return _clip(escape_formula(value), model)
 
 
@@ -50,7 +49,11 @@ def xlsx(model: ExportModel) -> bytes:
 	over-long cells are clipped-with-marker and flagged in ``model.meta``; HTML is
 	unwrapped before escaping so a formula hidden behind tags can't slip the guard.
 	Empty rowset -> valid header-only workbook."""
-	header = [_xlsx_cell(c, model) for c in model.columns]
-	body = [[_xlsx_cell(c, model) for c in row] for row in model.rows]
+	# Imported lazily (once per render, not per cell): xlsxutils pulls xlsxwriter,
+	# which compat.py deliberately keeps out of module import for Frappe 15.
+	from frappe.utils.xlsxutils import handle_html
+
+	header = [_xlsx_cell(c, model, handle_html) for c in model.columns]
+	body = [[_xlsx_cell(c, model, handle_html) for c in row] for row in model.rows]
 	title = (model.meta.get("title") or "Export")[:31]
 	return compat.xlsx_bytes([(title, [header] + body)])
