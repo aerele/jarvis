@@ -220,7 +220,7 @@
 			</SidebarLink>
 			<button
 				v-if="!collapsed && editing"
-				class="flex size-8 shrink-0 items-center justify-center rounded-md text-ink-gray-5 hover:bg-surface-gray-2 hover:text-ink-gray-8 focus:outline-none focus:transition-none focus-visible:[outline:2px_solid_var(--focus-ring)] focus-visible:[outline-offset:2px]"
+				class="jv-focus-ring flex size-8 shrink-0 items-center justify-center rounded-md text-ink-gray-5 hover:bg-surface-gray-2 hover:text-ink-gray-8"
 				title="Reset to default order"
 				@click="resetOrder"
 			>
@@ -228,7 +228,7 @@
 			</button>
 			<button
 				v-if="!collapsed"
-				class="flex size-8 shrink-0 items-center justify-center rounded-md hover:bg-surface-gray-2 focus:outline-none focus:transition-none focus-visible:[outline:2px_solid_var(--focus-ring)] focus-visible:[outline-offset:2px]"
+				class="jv-focus-ring flex size-8 shrink-0 items-center justify-center rounded-md hover:bg-surface-gray-2"
 				:class="editing ? 'text-ink-blue-link' : 'text-ink-gray-5 hover:text-ink-gray-8'"
 				:title="editing ? 'Done' : 'Edit sidebar order'"
 				@click="editing = !editing"

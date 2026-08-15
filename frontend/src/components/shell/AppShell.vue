@@ -53,7 +53,7 @@
 						class="flex h-12 shrink-0 items-center gap-2 border-b px-3"
 					>
 						<button
-							class="grid size-9 place-items-center rounded-md text-ink-gray-7 focus:outline-none focus:transition-none focus-visible:[outline:2px_solid_var(--focus-ring)] focus-visible:[outline-offset:2px]"
+							class="jv-focus-ring grid size-9 place-items-center rounded-md text-ink-gray-7"
 							aria-label="Open navigation"
 							@click="store.mobileDrawerOpen = true"
 						>

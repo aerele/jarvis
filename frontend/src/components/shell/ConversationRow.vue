@@ -39,7 +39,7 @@
 					<Button
 						variant="ghost"
 						icon="more-horizontal"
-						class="!h-5 !w-5 opacity-0 group-hover:opacity-100 focus:outline-none focus:transition-none focus-visible:!opacity-100 focus-visible:[outline:2px_solid_var(--focus-ring)] focus-visible:[outline-offset:2px]"
+						class="!h-5 !w-5 opacity-0 group-hover:opacity-100 focus-visible:!opacity-100"
 						:aria-label="'Options for ' + (conv.title || 'chat')"
 						@click.stop
 					/>
