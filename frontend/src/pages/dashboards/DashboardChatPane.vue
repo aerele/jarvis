@@ -758,7 +758,15 @@ function onEvent(p) {
 			break;
 		}
 		case "tool:end": {
-			const t = activeTools.value.find((x) => x.id === p.tool_call_id);
+			// tool_call_id is optional on the wire; tool:start synthesized a
+			// fallback id for an id-less frame, so an id-less end must fall back
+			// too (latest running entry with the same name) or the entry stays
+			// "running" and the phase ticks freeze on it for the rest of the turn.
+			const t =
+				(p.tool_call_id && activeTools.value.find((x) => x.id === p.tool_call_id)) ||
+				[...activeTools.value]
+					.reverse()
+					.find((x) => x.name === p.tool_name && x.status === "running");
 			if (t) t.status = p.status || "completed";
 			break;
 		}

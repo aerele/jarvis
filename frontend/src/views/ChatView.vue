@@ -8749,7 +8749,21 @@ function onEvent(p) {
 				if (goto) {
 					const firedKey = "jarvis:goto-fired:" + m.name;
 					if (!localStorage.getItem(firedKey)) {
-						localStorage.setItem(firedKey, "1");
+						localStorage.setItem(firedKey, String(Date.now()));
+						// Bounded stamp set: these keys are write-once per redirect and
+						// would otherwise accumulate for the life of the origin. Keep
+						// the newest ~50 (the live-turn gate above is the real guard;
+						// the stamp only defends reloads of RECENT transcripts).
+						const stamps = [];
+						for (let i = 0; i < localStorage.length; i++) {
+							const k = localStorage.key(i);
+							if (k && k.startsWith("jarvis:goto-fired:"))
+								stamps.push([k, Number(localStorage.getItem(k)) || 0]);
+						}
+						stamps
+							.sort((a, b) => b[1] - a[1])
+							.slice(50)
+							.forEach(([k]) => localStorage.removeItem(k));
 						gotoDashboards(goto.prompt);
 					}
 				}

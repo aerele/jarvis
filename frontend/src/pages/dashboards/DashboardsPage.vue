@@ -700,9 +700,7 @@ async function loadEdit(name, { deepLink = true } = {}) {
 
 // The chat pane just saved a dashboard (the new save_dashboard tool,
 // jarvis#884 - dashboard builds no longer land as a canvas artifact) and told
-// us its name over the realtime channel. This is the current chat's own
-// output, replacing the very canvas the builder already has on screen, so it
-// never needs the discard confirm loadEdit uses for every other target.
+// us its name over the realtime channel.
 async function onDashboardSaved({ name } = {}) {
 	if (!name) return;
 	let d = null;
@@ -715,7 +713,16 @@ async function onDashboardSaved({ name } = {}) {
 		return;
 	}
 	if (!d || !d.name) return;
-	applyEditDetail(d, { deepLink: false });
+	// The current edit target updating itself (the normal revision loop) adopts
+	// straight away. A DIFFERENT row landing here replaces the on-screen canvas
+	// like any other target, so it rides the same discard confirm as loadEdit -
+	// confirmDiscard is a no-op when nothing unsaved is at stake, which is the
+	// whole first-build case.
+	if (savedName.value && d.name === savedName.value) {
+		applyEditDetail(d, { deepLink: false });
+		return;
+	}
+	confirmDiscard(() => applyEditDetail(d, { deepLink: false }));
 }
 
 // ?edit= also changes WITHOUT a remount — "Edit in builder" on a second

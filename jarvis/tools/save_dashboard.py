@@ -116,10 +116,10 @@ def save_dashboard(
 			"dashboard_title": detail.get("dashboard_title"),
 		},
 	)
-	# Same test-vs-live commit discipline as save_agent_dashboard: keep the
-	# enclosing test transaction rollback-able; make the row durable live.
-	if not frappe.flags.in_test:
-		frappe.db.commit()
+	# No commit here: dashboards_api.save_dashboard already committed the row
+	# unconditionally (its own contract with the SPA Save button). Tests must
+	# clean up their rows by hand - the enclosing test transaction does NOT
+	# roll this back (test_save_dashboard_tool.py does exactly that).
 
 	return {
 		"dashboard": saved_name,
