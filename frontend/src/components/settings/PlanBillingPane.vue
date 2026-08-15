@@ -1,6 +1,6 @@
 <template>
 	<SettingsPane
-		title="Plan and billing"
+		title="Billing"
 		description="Your subscription, renewal and upgrade options."
 		:error="accountErr"
 	>

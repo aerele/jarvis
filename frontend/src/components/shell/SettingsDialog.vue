@@ -132,7 +132,7 @@ const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
 // Panes are lazy: this dialog is mounted eagerly by AppShell for EVERY user, so
 // static imports would pull each pane's dependency tree (charts + usageCharts
-// for billing, LlmPoolEditor for AI models) into the initial shell bundle — even
+// for usage, LlmPoolEditor for AI models) into the initial shell bundle — even
 // for users who can never open those sections.
 const GeneralPane = defineAsyncComponent(() => import("@/components/settings/GeneralPane.vue"));
 const UsagePane = defineAsyncComponent(() => import("@/components/settings/UsagePane.vue"));
@@ -144,9 +144,6 @@ const PlanBillingPane = defineAsyncComponent(() =>
 	import("@/components/settings/PlanBillingPane.vue")
 );
 const AiModelsPane = defineAsyncComponent(() => import("@/components/settings/AiModelsPane.vue"));
-const BillingMeteringPane = defineAsyncComponent(() =>
-	import("@/components/settings/BillingMeteringPane.vue")
-);
 const UsageAdminPane = defineAsyncComponent(() =>
 	import("@/components/settings/UsageAdminPane.vue")
 );
@@ -165,7 +162,6 @@ const PANES = {
 	shortcuts: ShortcutsPane,
 	plan: PlanBillingPane,
 	aimodels: AiModelsPane,
-	billing: BillingMeteringPane,
 	branding: BrandingPane,
 	usageadmin: UsageAdminPane,
 };
@@ -188,9 +184,8 @@ const NAV = [
 		name: "Account and billing",
 		gate: () => isSM || isAdmin,
 		items: [
-			{ key: "plan", label: "Plan and billing", icon: "credit-card" },
+			{ key: "plan", label: "Billing", icon: "credit-card" },
 			{ key: "aimodels", label: "AI models", icon: "cpu" },
-			{ key: "billing", label: "Billing and metering", icon: "dollar-sign" },
 			{ key: "branding", label: "Branding", icon: "image" },
 		],
 	},
@@ -212,9 +207,16 @@ const open = computed({
 
 const confirmOpen = computed(() => confirmState.value !== null);
 
+// Legacy section key: "billing" used to open the standalone "Billing and
+// metering" pane, now folded into Usage. Old deep links and any stale
+// store.openSettings("billing") caller still land on Usage instead of
+// falling through to the General default.
+const LEGACY_SECTION_ALIASES = { billing: "usage" };
+
 // A gated section requested by a user without the role falls back to General.
 const section = computed(() => {
-	const s = store.settingsSection;
+	let s = store.settingsSection;
+	if (LEGACY_SECTION_ALIASES[s]) s = LEGACY_SECTION_ALIASES[s];
 	if (!PANES[s]) return "general";
 	const group = NAV.find((g) => g.items.some((i) => i.key === s));
 	if (group && !group.gate()) return "general";

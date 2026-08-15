@@ -1,5 +1,5 @@
 <template>
-	<SettingsPane title="Usage" description="Message and token counts for this device.">
+	<SettingsPane title="Usage" :description="paneDescription" :error="meteringErrorMessage">
 		<template v-if="hasMeasured">
 			<h3 class="text-base font-semibold text-ink-gray-9">Measured usage</h3>
 			<div class="mt-2">
@@ -165,21 +165,166 @@
 		<p v-else class="text-p-sm text-ink-gray-5">
 			No monthly budget set. Counts are estimated from message text.
 		</p>
+
+		<!-- Tenant-wide pool status and metered cost, folded in from the retired
+		     standalone "Billing and metering" pane. Admin/System-Manager only -
+		     same gate as the rail's "Account and billing" group, so an ordinary
+		     member's Usage pane is unchanged from before this merge. -->
+		<template v-if="canSeeMetering">
+			<hr class="my-8" />
+
+			<h3 class="text-base font-semibold text-ink-gray-9">Workspace pool</h3>
+			<p class="mt-1 text-p-sm text-ink-gray-6">
+				Status and metered cost for the model pool this workspace shares.
+			</p>
+
+			<div class="mt-4 flex flex-col gap-4">
+				<div class="rounded-md border p-4">
+					<h4 class="text-base font-semibold text-ink-gray-9">Status</h4>
+					<div class="mt-2">
+						<KvRow label="Mode" :value="modeLabel" />
+						<!-- last_sync_status is an internal audit string ("ok (restart via
+						     admin)") and this row used to print it verbatim, so a customer read
+						     an already-completed restart as a chore waiting for them in Desk.
+						     @/lib/syncStatus is the one place that translates it. -->
+						<KvRow label="Sync" :value="syncLabel" />
+						<KvRow
+							v-if="meteringSync.last_sync_at"
+							label="Last sync"
+							:value="meteringSync.last_sync_at"
+						/>
+					</div>
+				</div>
+
+				<div class="rounded-md border p-4">
+					<h4 class="text-base font-semibold text-ink-gray-9">Active pool</h4>
+					<div class="mt-2">
+						<KvRow label="Preset" :value="meteringConfig.preset || 'Custom'" />
+						<KvRow
+							label="Routing"
+							:value="meteringConfig.routing_mode || 'failover'"
+						/>
+					</div>
+					<div class="mt-2 flex flex-col gap-2">
+						<div
+							v-for="(m, i) in meteringConfig.models || []"
+							:key="i"
+							class="flex items-center justify-between gap-4 text-sm text-ink-gray-8"
+						>
+							<span>{{ m.provider }} · {{ m.model }}</span>
+							<Badge
+								:label="i === 0 ? 'runs every turn' : 'backup'"
+								:theme="i === 0 ? 'blue' : 'gray'"
+								variant="subtle"
+							/>
+						</div>
+					</div>
+				</div>
+
+				<div class="rounded-md border p-4">
+					<h4 class="flex items-center gap-2 text-base font-semibold text-ink-gray-9">
+						Metered cost
+						<span class="text-p-sm font-normal text-ink-gray-5">
+							· {{ meteringUsage.period || "current period" }}
+						</span>
+					</h4>
+					<Button
+						v-if="meteringUsageError"
+						class="mt-2"
+						variant="subtle"
+						label="Retry"
+						iconLeft="refresh-cw"
+						:loading="meteringLoading"
+						@click="loadMetering"
+					/>
+					<p
+						v-else-if="!meteringUsage.applicable"
+						class="mt-2 text-p-sm text-ink-gray-5"
+					>
+						Metering comes from the managed proxy. This tenant's models are called
+						straight from its container, so there is no proxy to meter.
+					</p>
+					<template v-else>
+						<div class="mt-2 grid grid-cols-3 gap-4">
+							<div class="rounded-md border p-4">
+								<div class="text-2xl font-medium text-ink-gray-8">
+									{{ meteringUsage.tokens_in }}
+								</div>
+								<div class="mt-1 text-sm text-ink-gray-6">Tokens in</div>
+							</div>
+							<div class="rounded-md border p-4">
+								<div class="text-2xl font-medium text-ink-gray-8">
+									{{ meteringUsage.tokens_out }}
+								</div>
+								<div class="mt-1 text-sm text-ink-gray-6">Tokens out</div>
+							</div>
+							<div class="rounded-md border p-4">
+								<div class="text-2xl font-medium text-ink-gray-8">
+									{{ formatUsd(meteringUsage.cost_usd) }}
+								</div>
+								<div class="mt-1 text-sm text-ink-gray-6">Cost</div>
+							</div>
+						</div>
+						<div class="mt-4 flex flex-col gap-4">
+							<div v-if="perModelSpec">
+								<h4 class="mb-1 text-sm font-medium text-ink-gray-7">
+									Tokens by model
+								</h4>
+								<JvChart :spec="perModelSpec" :dark="dark" />
+							</div>
+							<div v-if="perModelCostSpec">
+								<h4 class="mb-1 text-sm font-medium text-ink-gray-7">
+									Cost by model
+								</h4>
+								<JvChart :spec="perModelCostSpec" :dark="dark" />
+							</div>
+							<EChart v-if="gaugeOption" :option="gaugeOption" />
+						</div>
+					</template>
+				</div>
+
+				<!-- "Request log & failover history" placeholder removed — no "coming
+				     soon" cards in the language (design.md §5 #18); the section returns
+				     when the feature ships. -->
+			</div>
+		</template>
 	</SettingsPane>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, watch } from "vue";
-import { Badge } from "frappe-ui";
+import { Badge, Button } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { timeAgo } from "@/utils/datetime";
 import { modelDisplayLabel } from "@/utils/usageModel";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import KvRow from "@/components/settings/KvRow.vue";
+import JvChart from "@/charts/JvChart.vue";
+import EChart from "@/charts/EChart.vue";
+import { budgetGaugeOption, perModelBarSpec, formatUsd } from "@/charts/usageCharts.js";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
+import { connectionModeLabel } from "@/llm/pool";
+import { useJarvisTheme } from "@/theme";
 import * as api from "@/api";
 
 const shell = useShellStore();
 const s = computed(() => shell.chatContext?.sessionStats || null);
+const { effectiveDark: dark } = useJarvisTheme();
+
+// Tenant-wide pool status/cost is folded into this pane below (was the
+// standalone "Billing and metering" rail item). Gate matches SettingsDialog's
+// "Account and billing" rail group exactly (System Manager OR Jarvis Admin),
+// read off the same boot globals (jarvis/www/jarvis.py's context.boot) rather
+// than inventing a second role check.
+const isSM = !!window.is_system_manager;
+const isAdmin = !!window.is_jarvis_admin;
+const canSeeMetering = isSM || isAdmin;
+
+const paneDescription = computed(() =>
+	canSeeMetering
+		? "Message and token counts for this device, plus pool status and cost for the workspace."
+		: "Message and token counts for this device."
+);
 
 const usage = ref(null);
 
@@ -234,6 +379,89 @@ const usagePct = computed(() => {
 	return Math.min(100, Math.round((u.month_tokens / u.budget_monthly) * 100));
 });
 
-onMounted(loadUsage);
+// ---- Workspace pool status/cost (admin/SM only) ----------------------------
+// Moved verbatim from the retired BillingMeteringPane.vue: same fields, same
+// loading/error mechanics, same charts.
+const meteringConfig = ref({ models: [], proxy_active: 0 });
+const meteringUsage = ref({ applicable: false, per_model: [], used_vs_limit: {} });
+const meteringSync = ref({});
+const meteringUsageError = ref(false);
+const meteringLoading = ref(false);
+
+// SettingsPane renders the one error surface for the pane (design.md §4.1); the
+// metered-cost card keeps only the Retry button, this supplies the message it
+// retries. Same mechanism the retired pane used: a plain string fed to
+// SettingsPane's :error, which renders through frappe-ui's ErrorMessage (a text
+// sink), never v-html (see the errHtml/errMessage split in @/lib/errors).
+const meteringErrorMessage = computed(() =>
+	meteringUsageError.value ? "Usage is unavailable right now." : ""
+);
+
+// `proxy_active` means "a Bifrost/cliproxy sidecar is deployed", NOT "this is a
+// pool" - a pool of BYO api keys is rendered agent-direct and runs its own
+// failover with no sidecar. Reading the flag alone printed "Direct" right above
+// the Active-pool card listing both of that tenant's models.
+//
+// The wording itself lives in @/llm/pool, shared with Settings > General,
+// which was naming the same three states on its own and disagreeing with this
+// pane about a 2-model api-key pool (jarvis#561).
+const modeLabel = computed(() =>
+	connectionModeLabel(
+		meteringConfig.value.proxy_active,
+		(meteringConfig.value.models || []).filter((m) => m.enabled !== false).length
+	)
+);
+
+// A failure reason belongs on a surface that can act on it (the AI models pane);
+// here the row only needs to say which of the three states the pool is in.
+const syncLabel = computed(() => humaniseSyncStatus(meteringSync.value.last_sync_status).text);
+
+const perModelSpec = computed(() =>
+	(meteringUsage.value.per_model || []).length
+		? perModelBarSpec(meteringUsage.value.per_model, "tokens")
+		: null
+);
+// Cost breakdown alongside the tokens chart - same rows, already-supported
+// "cost" metric, no new data plumbing.
+const perModelCostSpec = computed(() =>
+	(meteringUsage.value.per_model || []).length
+		? perModelBarSpec(meteringUsage.value.per_model, "cost")
+		: null
+);
+const gaugeOption = computed(() => {
+	const uv = meteringUsage.value.used_vs_limit || {};
+	return budgetGaugeOption(uv.used_usd, uv.limit_usd, dark.value);
+});
+
+async function loadMeteringField(fetchFn, target) {
+	try {
+		target.value = (await fetchFn()) || target.value;
+		return true;
+	} catch (e) {
+		return false;
+	}
+}
+async function loadMetering() {
+	meteringLoading.value = true;
+	meteringUsageError.value = false;
+	// Order matters: results map 1:1 to the calls below. A failed usage fetch must
+	// set meteringUsageError so the card shows the retry button instead of the false
+	// "single model (direct)" note a transient error would otherwise render.
+	const [, usageOk] = await Promise.all([
+		loadMeteringField(api.getLlmConfig, meteringConfig),
+		loadMeteringField(api.getLlmUsage, meteringUsage),
+		loadMeteringField(api.getLlmSyncStatus, meteringSync),
+	]);
+	if (!usageOk) meteringUsageError.value = true;
+	meteringLoading.value = false;
+}
+
+onMounted(() => {
+	loadUsage();
+	// Skip the round-trip entirely for a member who can never see this section -
+	// the backend gates every one of these three calls server-side anyway
+	// (require_jarvis_admin), so this is a UX/perf saving, not a security gate.
+	if (canSeeMetering) loadMetering();
+});
 watch(() => shell.chatContext?.conversationId, loadUsage);
 </script>

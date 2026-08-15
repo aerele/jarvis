@@ -159,7 +159,7 @@ const routes = [
 		name: "AgentsList",
 		component: () => import("@/pages/agents/AgentsList.vue"),
 	},
-	// Plan and billing — the in-SPA replacement for the retired
+	// Billing — the in-SPA replacement for the retired
 	// /app/jarvis-account desk page. Reached from the settings dialog, from the
 	// chat suspension banner's Renew, and from the /desk/jarvis-account redirect
 	// that catches bookmarks and the renewal emails admin-v2 still sends.

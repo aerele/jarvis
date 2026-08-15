@@ -12,7 +12,7 @@
 	>
 		<LayoutHeader>
 			<template #left-header>
-				<Breadcrumbs :items="[{ label: 'Plan and billing' }]" />
+				<Breadcrumbs :items="[{ label: 'Billing' }]" />
 			</template>
 		</LayoutHeader>
 
@@ -34,7 +34,7 @@
 
 				<template v-else>
 					<header class="mb-7">
-						<h1 class="text-2xl font-semibold text-ink-gray-9">Plan and billing</h1>
+						<h1 class="text-2xl font-semibold text-ink-gray-9">Billing</h1>
 						<p class="mt-1 text-p-base text-ink-gray-6">
 							Compare plans and change yours. Upgrades take effect straight away;
 							switching to a smaller plan applies at your next billing cycle.
