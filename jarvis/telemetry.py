@@ -86,6 +86,26 @@ def record_budget_event(
 		pass
 
 
+def record_export_event(tool: str, fmt: str, rows: int, mode: str = "sync") -> None:
+	"""One line per server-side export (export_query etc.): what format, how many
+	rows, sync/background. Signal for capacity + how often large exports fire.
+	Routes through the same INFO-pinned logger as the other events. Never raises."""
+	try:
+		_emit(
+			{
+				"kind": "export",
+				"ts": frappe.utils.now(),
+				"site": getattr(frappe.local, "site", None),
+				"tool": tool,
+				"format": fmt,
+				"rows": int(rows),
+				"mode": mode,
+			}
+		)
+	except Exception:
+		pass
+
+
 def emit_turn(conversation: str | None, run_id: str | None, duration_ms: int) -> None:
 	"""One line per completed turn; reads and clears the per-turn custom
 	flag. Never raises."""

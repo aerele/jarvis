@@ -65,6 +65,12 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"download_pdf",
 	"report_pdf",
 	"export_excel",
+	# Server-side, permission-checked bulk export of a doctype query to a
+	# downloadable xlsx/csv. Rows never enter model context (reference-not-rows),
+	# so the export is complete; fails closed above a hard row ceiling rather
+	# than return a partial file. The right tool for "export these records",
+	# vs get_list + export_excel whose rows are truncatable.
+	"export_query",
 	# Composed report/summary (not a single record) → downloadable PDF / HTML /
 	# PNG. download_pdf prints an existing record; this renders agent-composed
 	# content so a "give me a PDF of this report" ask produces a real download.
