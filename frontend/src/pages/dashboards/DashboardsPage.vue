@@ -1100,6 +1100,14 @@ onMounted(async () => {
 	if (routeEdit && routeChat) {
 		console.warn("dashboards: ?edit= wins over ?chat=&canvas=; the promotion is ignored");
 	}
+	// ```jarvis-goto hand-off: honored only when neither deep-link claims the
+	// canvas - an ?edit= target or a ?chat=&canvas= promotion IS what the user
+	// asked to land on, and a queued prompt must not race a message into
+	// whatever thread that resolves to instead.
+	const gotoText =
+		!routeEdit && !(routeChat && routeCanvas) && dashboardPrefill && dashboardPrefill.autoSend
+			? String(dashboardPrefill.text || "").trim()
+			: "";
 	if (!routeEdit && routeChat && routeCanvas) {
 		promoteFromChat(routeChat, routeCanvas, { fallback: normalMount, dash: routeDash });
 	} else {
@@ -1107,26 +1115,21 @@ onMounted(async () => {
 		// present): release the hold taken at setup, or the pane's restore stays
 		// blocked for the life of the page.
 		promotionPending.value = false;
-		normalMount();
-	}
-	// ```jarvis-goto hand-off: only sent when neither deep-link above claims
-	// the canvas - an ?edit= target or a ?chat=&canvas= promotion IS what the
-	// user asked to land on, and a queued prompt must not race a message into
-	// whatever thread that resolves to instead. sendText() itself already
-	// no-ops if the pane is mid-send or mid-run, so a resumed thread with a
-	// build in flight simply drops the prefill rather than double-sending.
-	if (
-		!routeEdit &&
-		!(routeChat && routeCanvas) &&
-		dashboardPrefill &&
-		dashboardPrefill.autoSend
-	) {
-		const text = String(dashboardPrefill.text || "").trim();
-		if (text) {
-			nextTick(() => {
-				if (chatPane.value && chatPane.value.sendText) chatPane.value.sendText(text);
-			});
+		if (gotoText) {
+			// A goto hand-off is always a NEW build. Restoring the sticky editing
+			// target (or the previous thread under it) would land the seeded
+			// request as a revision of an older dashboard, so start clean instead
+			// of normalMount(). Nothing is unsaved at this instant - the page just
+			// mounted - so no discard confirm.
+			clearBuilder();
+		} else {
+			normalMount();
 		}
+	}
+	if (gotoText) {
+		nextTick(() => {
+			if (chatPane.value && chatPane.value.sendText) chatPane.value.sendText(gotoText);
+		});
 	}
 });
 </script>
