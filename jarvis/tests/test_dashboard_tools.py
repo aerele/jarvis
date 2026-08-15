@@ -136,6 +136,23 @@ class TestCreateDashboardChartChildTablePermissions(FrappeTestCase):
 	cannot catch that. These use a dedicated custom parent/child doctype pair
 	and two non-admin users to prove the parent-qualified check actually
 	works: one user who can read the parent, one who cannot.
+
+	The happy-path user also needs "System Manager" (not just create rights
+	on Dashboard Chart via role): CORE Frappe registers its own has_permission
+	hook for "Dashboard Chart" (frappe/hooks.py -> dashboard_chart.has_permission)
+	that doc.insert() runs through in ADDITION to the plain role-DocPerm check.
+	That hook special-cases the literal role "System Manager" and otherwise
+	requires document_type to appear in get_doctypes_with_read(user) - built
+	purely from DocPerm/Custom DocPerm rows. A child (istable) doctype like
+	CHILD_DT carries none by design (that is the whole premise of #862), so it
+	can never satisfy that branch for ANY other role, including Dashboard
+	Manager - confirmed empirically (a Custom DocPerm grant for a dedicated
+	custom role reached "create": 1 via plain has_permission() with no doc, yet
+	doc.insert() still raised PermissionError). This is pre-existing Frappe
+	behavior, unrelated to #862's fix, and does not affect it: it only means a
+	realistic non-admin "Jarvis User" customer creating a CHILD-TABLE chart
+	still needs elevated (System Manager) access today, same as before this
+	fix - #862 only removes the missing-parameter blocker.
 	"""
 
 	PARENT_DT = "JT Chart Perm Parent"
@@ -195,42 +212,16 @@ class TestCreateDashboardChartChildTablePermissions(FrappeTestCase):
 		).insert()
 
 	@classmethod
-	def _grant_dashboard_chart_create(cls):
-		"""Layer a Custom DocPerm onto the CORE "Dashboard Chart" doctype so
-		``cls.ROLE`` can create one - needed for the happy-path user to reach
-		``doc.insert()`` at all. ``setup_custom_perms`` first copies the
-		existing standard rows (System Manager/Dashboard Manager/Desk User)
-		into Custom DocPerm so this ADDS a rule rather than replacing them -
-		once any Custom DocPerm row exists for a doctype, Frappe's permission
-		engine uses only those, ignoring the standard permissions.json rows.
-		"""
-		from frappe.permissions import setup_custom_perms
-
-		setup_custom_perms("Dashboard Chart")
-		if not frappe.db.exists(
-			"Custom DocPerm", {"parent": "Dashboard Chart", "role": cls.ROLE, "permlevel": 0}
-		):
-			frappe.get_doc(
-				{
-					"doctype": "Custom DocPerm",
-					"parent": "Dashboard Chart",
-					"parenttype": "DocType",
-					"parentfield": "permissions",
-					"role": cls.ROLE,
-					"permlevel": 0,
-					"read": 1,
-					"create": 1,
-				}
-			).insert(ignore_permissions=True)
-
-	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
 		frappe.set_user("Administrator")
 		cls._ensure_role()
 		cls._ensure_doctypes()
-		cls._grant_dashboard_chart_create()
-		cls._ensure_user(cls.USER_WITH_ACCESS, (cls.ROLE,))
+		# "System Manager" is needed only to clear CORE Frappe's own
+		# Dashboard-Chart-creation hook (see class docstring) - it is NOT what
+		# grants read on CHILD_DT/PARENT_DT; that is cls.ROLE, the thing this
+		# test actually exercises.
+		cls._ensure_user(cls.USER_WITH_ACCESS, (cls.ROLE, "System Manager"))
 		cls._ensure_user(cls.USER_WITHOUT_ACCESS, ())
 
 	def tearDown(self):
@@ -238,18 +229,6 @@ class TestCreateDashboardChartChildTablePermissions(FrappeTestCase):
 
 	def test_non_admin_with_parent_read_can_chart_child_table(self):
 		frappe.set_user(self.USER_WITH_ACCESS)
-		# TEMP DIAGNOSTIC (removed before merge): CI has twice denied "create"
-		# on Dashboard Chart for this user despite the role grant; dump why.
-		from frappe import permissions as _fp
-
-		ok = _fp.has_permission("Dashboard Chart", "create", debug=True)
-		print(
-			f"\nDIAG create-perm on 'Dashboard Chart' for {self.USER_WITH_ACCESS}: "
-			f"ok={ok} roles={frappe.get_roles()} "
-			f"custom_docperm_rows={frappe.get_all('Custom DocPerm', filters={'parent': 'Dashboard Chart'}, fields=['role', 'create', 'read', 'permlevel'])} "
-			f"log={_fp._pop_debug_log()}\n",
-			flush=True,
-		)
 		res = create_dashboard_chart(
 			chart_name=_h("JT Perm OK"),
 			document_type=self.CHILD_DT,
