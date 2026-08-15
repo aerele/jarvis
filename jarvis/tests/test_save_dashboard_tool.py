@@ -130,9 +130,7 @@ class TestSaveDashboardTool(unittest.TestCase):
 			first = save_dashboard(html=_HTML, dashboard_title="Total Items")
 			second = save_dashboard(html=_HTML_V2, name=first["dashboard"])
 		self.assertEqual(first["dashboard"], second["dashboard"])
-		rows = frappe.get_all(
-			DASHBOARD, filters={"source_conversation": self.conversation}, pluck="name"
-		)
+		rows = frappe.get_all(DASHBOARD, filters={"source_conversation": self.conversation}, pluck="name")
 		self.assertEqual(len(rows), 1)
 		self.assertIn("11", frappe.db.get_value(DASHBOARD, rows[0], "html"))
 
@@ -183,9 +181,7 @@ class TestSaveDashboardTool(unittest.TestCase):
 				save_dashboard(html=_HTML_V2, name=theirs["dashboard"])
 		finally:
 			frappe.set_user("Administrator")
-			for name in frappe.get_all(
-				DASHBOARD, filters={"source_conversation": other_conv}, pluck="name"
-			):
+			for name in frappe.get_all(DASHBOARD, filters={"source_conversation": other_conv}, pluck="name"):
 				frappe.delete_doc(DASHBOARD, name, force=True, ignore_permissions=True)
 			frappe.delete_doc(CONVERSATION, other_conv, force=True, ignore_permissions=True)
 			frappe.set_user(USER)

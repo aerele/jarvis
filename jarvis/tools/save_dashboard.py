@@ -62,8 +62,7 @@ def save_dashboard(
 	session_key = get_session_key()
 	if not session_key:
 		raise InvalidArgumentError(
-			"save_dashboard must be called from a chat agent session "
-			"(no session_key in context)"
+			"save_dashboard must be called from a chat agent session (no session_key in context)"
 		)
 
 	conv = frappe.db.get_value(
@@ -81,22 +80,17 @@ def save_dashboard(
 
 	fields: dict = {"html": html, "source_conversation": conv.name}
 	if name:
-		row = frappe.db.get_value(
-			DASHBOARD, name, ["name", "source_conversation"], as_dict=True
-		)
+		row = frappe.db.get_value(DASHBOARD, name, ["name", "source_conversation"], as_dict=True)
 		if not row:
 			raise InvalidArgumentError(f"no saved dashboard named {name!r}")
 		if (row.source_conversation or "") != conv.name:
 			raise InvalidArgumentError(
-				"that dashboard belongs to a different conversation; "
-				"omit name to save a new one"
+				"that dashboard belongs to a different conversation; omit name to save a new one"
 			)
 		fields["name"] = name
 	else:
 		if not (dashboard_title or "").strip():
-			raise InvalidArgumentError(
-				"dashboard_title is required on the first save"
-			)
+			raise InvalidArgumentError("dashboard_title is required on the first save")
 	if dashboard_title:
 		fields["dashboard_title"] = dashboard_title
 	if theme:

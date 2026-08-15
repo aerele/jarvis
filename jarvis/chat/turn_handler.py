@@ -1580,11 +1580,7 @@ def _dashboard_saved(conversation_id: str) -> bool:
 	if not conversation_id:
 		return False
 	try:
-		return bool(
-			frappe.db.exists(
-				"Jarvis Dashboard", {"source_conversation": conversation_id}
-			)
-		)
+		return bool(frappe.db.exists("Jarvis Dashboard", {"source_conversation": conversation_id}))
 	except Exception:
 		frappe.log_error(
 			title="dashboards: saved probe failed",
