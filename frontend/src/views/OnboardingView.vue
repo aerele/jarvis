@@ -1301,8 +1301,9 @@
 										your existing subscription, nothing to pay again.
 									</p>
 									<p v-else>
-										Sent to <b>{{ state.email || "your email" }}</b
-										>. Connects this site to your existing subscription,
+										If an account exists for this email, a reconnect code is on
+										its way to <b>{{ state.email || "your email" }}</b
+										>. It connects this site to your existing subscription,
 										nothing to pay again.
 									</p>
 								</div>
@@ -1335,7 +1336,7 @@
 										Single-use, and expires shortly after support issued it.
 									</template>
 									<template v-else-if="state.reconnectResentIn > 0">
-										Sent. You can resend in {{ state.reconnectResentIn }}s.
+										You can resend in {{ state.reconnectResentIn }}s.
 									</template>
 									<template v-else>
 										Didn't get it?
