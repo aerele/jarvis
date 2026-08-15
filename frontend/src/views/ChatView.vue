@@ -5435,7 +5435,7 @@ const starredCount = computed(() => store.conversations.filter((c) => c.starred)
 // jarvis.chat.api.get_tool_activity / get_usage.chat_tool_calls.
 const headerSub = computed(() => {
 	const n = visibleMessages.value.length;
-	return n ? `${Math.ceil(n / 2)} message${n > 2 ? "s" : ""}` : "ERPNext Assistant";
+	return n ? `${Math.ceil(n / 2)} message${n > 2 ? "s" : ""}` : "Your AI Teammate";
 });
 const canSend = computed(
 	() =>
