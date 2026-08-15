@@ -1503,6 +1503,72 @@
 											>{{ cv.title }}</span
 										>
 									</button>
+									<!-- a Dashboards build: a compact scaled preview of the
+									     canvas itself, its name, and the way through to the
+									     builder where it runs with data — the whole card
+									     clicks through (issue #858). Gated on canPromoteDashCanvas,
+									     not just builder origin: persist_canvases runs for every
+									     conversation, and the dashboards skill can build from
+									     ordinary main chat too — see the note above canOpenDash.
+									     The preview reuses the SAME static srcdoc main chat
+									     already fetches for the artifact panel (cvOf/ensureCanvas
+									     below); never the builder's own live-query render mode,
+									     which would fire queries on every scrolled-past message. -->
+									<button
+										v-else-if="canPromoteDashCanvas(cv)"
+										class="jv-dash-thumb"
+										@click="openInDashboards(m, cv)"
+										:title="
+											'Open ' + cv.title + ' in Dashboards, with its data'
+										"
+									>
+										<span
+											class="jv-dash-thumb-preview"
+											:style="{
+												height:
+													dashboardThumbGeom.containerHeightPx + 'px',
+											}"
+										>
+											<iframe
+												v-if="cvOf(m, cv)"
+												:srcdoc="cvOf(m, cv)"
+												sandbox="allow-scripts"
+												tabindex="-1"
+												aria-hidden="true"
+												class="jv-dash-thumb-frame"
+												:style="{
+													width: dashboardThumbGeom.sourceWidthPx + 'px',
+													height:
+														dashboardThumbGeom.sourceHeightPx + 'px',
+													transform:
+														'scale(' + dashboardThumbGeom.scale + ')',
+												}"
+											/>
+											<span
+												v-else
+												class="jv-dash-thumb-loading"
+												aria-hidden="true"
+											></span>
+										</span>
+										<span class="jv-dash-thumb-meta">
+											<span class="jv-dash-thumb-title">{{ cv.title }}</span>
+											<span class="jv-dash-thumb-open">
+												<svg
+													width="13"
+													height="13"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="1.9"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												>
+													<path d="M18 20V10M12 20V4M6 20v-6" />
+												</svg>
+												Open in Dashboards
+											</span>
+										</span>
+									</button>
 									<!-- everything else → the file card -->
 									<div v-else class="jv-artifact-group">
 										<button
@@ -1549,29 +1615,6 @@
 											>
 												<path d="M9 18l6-6-6-6" />
 											</svg>
-										</button>
-										<!-- a Dashboards build opened in main chat: the card
-										     above previews the document but never runs its
-										     queries — the builder does -->
-										<button
-											v-if="canOpenDash(cv)"
-											class="jv-artifact-open"
-											@click="openInDashboards(m, cv)"
-											title="Open this dashboard in Dashboards, with its data"
-										>
-											<svg
-												width="13"
-												height="13"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.9"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<path d="M18 20V10M12 20V4M6 20v-6" />
-											</svg>
-											Open in Dashboards
 										</button>
 									</div>
 								</template>
@@ -1720,13 +1763,63 @@
 						</Message>
 					</template>
 
+					<!-- dashboard build: a real progress card keyed to actual tool
+					     activity, never a timer (issue #858). Same turn gate as the
+					     generic activity line below (queued chip wins over both);
+					     mutually exclusive with it so only one ever shows. Phases
+					     light up from real events only — a mount that joined the
+					     turn already in flight (no activeTools seen yet) shows the
+					     honest indeterminate header with no tick lit, rather than
+					     guessing "Understanding". -->
+					<div
+						v-if="dashboardBuildTurn && (activeTools.length || waiting) && !queuedTurn"
+						class="jv-dashbuild"
+						style="display: flex; gap: 12px"
+					>
+						<JarvisMark
+							:size="28"
+							:radius="7"
+							mood="thinking"
+							style="margin-top: 2px"
+						/>
+						<div style="flex: 1; min-width: 0; padding-top: 3px">
+							<div class="jv-dashbuild-card" role="status" aria-live="polite">
+								<span class="jv-dashbuild-head">
+									<span class="jv-live-shim">Building dashboard…</span>
+								</span>
+								<ol class="jv-dashbuild-steps">
+									<li
+										v-for="(step, si) in DASHBOARD_BUILD_PHASES"
+										:key="step.key"
+										class="jv-dashbuild-step"
+										:class="{
+											done:
+												dashboardBuildTickIndex >= 0 &&
+												si < dashboardBuildTickIndex,
+											current: si === dashboardBuildTickIndex,
+										}"
+									>
+										<span class="jv-dashbuild-tick" aria-hidden="true"></span>
+										{{ step.label }}
+									</li>
+								</ol>
+								<div class="jv-dashbuild-skel" aria-hidden="true">
+									<span class="jv-dashbuild-skel-row"></span>
+									<span class="jv-dashbuild-skel-row"></span>
+									<span class="jv-dashbuild-skel-row short"></span>
+								</div>
+							</div>
+						</div>
+					</div>
 					<!-- live tool activity + thinking (Claude Code style). Suppressed
 					     while a queued chip is showing (F2): whenever the accept says
 					     the turn is queued, the "Queued — ~N ahead" chip WINS over this
 					     "Working on it…" / warming placeholder — never both, and never a
 					     stray warming spinner masking the chip. -->
 					<div
-						v-if="(activeTools.length || waiting) && !queuedTurn"
+						v-if="
+							(activeTools.length || waiting) && !queuedTurn && !dashboardBuildTurn
+						"
 						style="display: flex; gap: 12px"
 					>
 						<JarvisMark
@@ -3879,6 +3972,14 @@ import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
+import {
+	DASHBOARD_BUILD_PHASES,
+	dashboardBuildPhase,
+	dashboardThumbnailTransform,
+	isDashboardBuildTurn,
+	isDashboardCanvas,
+	phaseTickIndex,
+} from "@/lib/dashboardBuildCard";
 import { pickGreeting } from "@/lib/greeting";
 import { dashboardForConversation } from "@/api/dashboards";
 import {
@@ -7070,9 +7171,57 @@ function canOpenDash(cv) {
 		cv,
 	});
 }
+// Origin alone misses a real case: jarvis/chat/canvas.py's persist_canvases
+// runs unconditionally at the end of every turn (no origin check), and the
+// jarvis-persona dashboards skill is discoverable by ordinary description
+// match in ANY chat, not only a builder-page conversation (jarvis#858
+// review). So the thumbnail/click-through gate on BOTH signals: the
+// existing builder-origin rule above, OR the canvas itself carrying the
+// dashboards skill's own hosted-embed marker regardless of which
+// conversation produced it (isDashboardCanvas, dashboardBuildCard.js).
+function canPromoteDashCanvas(cv) {
+	return canOpenDash(cv) || isDashboardCanvas(cv);
+}
+// ---- "Building dashboard…" live card (issue #858) — a dashboard build
+// watched from main chat, same origin binding as canOpenDash above but
+// evaluated before any canvas exists yet (the turn is still running). Phase
+// comes from the SAME real tool-activity signals the generic "Working on
+// it…" line already keeps (activeTools/statusPhase/waiting) — never a timer.
+const dashboardBuildTurn = computed(() =>
+	isDashboardBuildTurn({
+		originPage: originPage.value,
+		originOf: originOf.value,
+		conversation: currentId.value,
+	})
+);
+const dashboardBuildPhaseKey = computed(() =>
+	dashboardBuildPhase({
+		activeTools: activeTools.value,
+		statusPhase: statusPhase.value,
+		waiting: waiting.value,
+	})
+);
+const dashboardBuildTickIndex = computed(() => phaseTickIndex(dashboardBuildPhaseKey.value));
+// Scaled-preview geometry for the finished-canvas thumbnail card (below);
+// fixed source viewport since the canvas itself has no set design width.
+const dashboardThumbGeom = computed(() => dashboardThumbnailTransform(220));
+// cvOf's cache key carries the theme (canvasContent is keyed by
+// `${msg}::${cv}::${dark}` — the backend themes the srcdoc shell), and the
+// thumbnail above is the first place that reads it PASSIVELY: every other
+// reader (openArtifact) re-fetches itself on a cache miss because a click
+// triggered it. A theme toggle alone would otherwise strand every dashboard
+// thumbnail already on screen on its loading shimmer until an unrelated
+// resync (tab focus, socket reconnect, conversation switch) happened to
+// call ensureCanvas again.
+watch(effectiveDark, () => {
+	for (const m of messages.value) {
+		if (Array.isArray(m.canvas) && m.canvas.some((cv) => canPromoteDashCanvas(cv)))
+			ensureCanvas(m);
+	}
+});
 async function openInDashboards(m, cv) {
 	const conv = currentId.value;
-	if (!conv || !canOpenDash(cv)) return;
+	if (!conv || !canPromoteDashCanvas(cv)) return;
 	let dashboard = null;
 	try {
 		dashboard = await dashboardForConversation(conv);
@@ -10886,6 +11035,11 @@ onUnmounted(() => {
 	.jv-mic-dot {
 		animation: none;
 	}
+	.jv-dashbuild-tick,
+	.jv-dashbuild-skel-row,
+	.jv-dash-thumb-loading {
+		animation: none;
+	}
 	.jv-settings,
 	.jv-skills-modal {
 		animation: none;
@@ -12402,6 +12556,158 @@ onUnmounted(() => {
 	border-color: var(--border-2);
 	background: var(--surface-2);
 	color: var(--text);
+}
+
+/* dashboard-build finished thumbnail (issue #858): whole card clicks through
+   to the builder, so — unlike .jv-artifact — there is no separate follow-on
+   button. */
+.jv-dash-thumb {
+	display: flex;
+	flex-direction: column;
+	width: 100%;
+	max-width: 220px;
+	margin-top: 12px;
+	padding: 0;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--surface);
+	cursor: pointer;
+	text-align: left;
+	font-family: inherit;
+	overflow: hidden;
+	transition: border-color 0.12s, background 0.12s;
+}
+.jv-dash-thumb:hover {
+	border-color: var(--border-2);
+	background: var(--surface-1);
+}
+.jv-dash-thumb-preview {
+	position: relative;
+	width: 100%;
+	overflow: hidden;
+	background: var(--surface-1);
+	border-bottom: 1px solid var(--border);
+}
+.jv-dash-thumb-frame {
+	border: 0;
+	transform-origin: top left;
+	pointer-events: none;
+}
+.jv-dash-thumb-loading {
+	display: block;
+	width: 100%;
+	height: 100%;
+	background: linear-gradient(
+		90deg,
+		var(--surface-1) 25%,
+		var(--surface-2) 37%,
+		var(--surface-1) 63%
+	);
+	background-size: 400% 100%;
+	animation: jv-dashbuild-shimmer 1.6s ease infinite;
+}
+.jv-dash-thumb-meta {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 9px 12px 10px;
+}
+.jv-dash-thumb-title {
+	font-size: 13px;
+	font-weight: 550;
+	color: var(--text);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.jv-dash-thumb-open {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	font-weight: 550;
+	color: var(--cta);
+}
+
+/* dashboard-build live progress card (issue #858) */
+.jv-dashbuild-card {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	max-width: 260px;
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--surface);
+}
+.jv-dashbuild-head {
+	font-size: 12px;
+}
+.jv-dashbuild-steps {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+.jv-dashbuild-step {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	font-size: 11.5px;
+	color: var(--text-3);
+}
+.jv-dashbuild-step.done,
+.jv-dashbuild-step.current {
+	color: var(--text-2);
+}
+.jv-dashbuild-step.current {
+	color: var(--text);
+	font-weight: 550;
+}
+.jv-dashbuild-tick {
+	flex: none;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--border-2);
+}
+.jv-dashbuild-step.done .jv-dashbuild-tick {
+	background: var(--green);
+}
+.jv-dashbuild-step.current .jv-dashbuild-tick {
+	background: var(--cta);
+	animation: jv-live-shim 1.8s ease-in-out infinite;
+}
+.jv-dashbuild-skel {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.jv-dashbuild-skel-row {
+	display: block;
+	height: 8px;
+	border-radius: 4px;
+	background: linear-gradient(
+		90deg,
+		var(--surface-1) 25%,
+		var(--surface-2) 37%,
+		var(--surface-1) 63%
+	);
+	background-size: 400% 100%;
+	animation: jv-dashbuild-shimmer 1.6s ease infinite;
+}
+.jv-dashbuild-skel-row.short {
+	width: 60%;
+}
+@keyframes jv-dashbuild-shimmer {
+	0% {
+		background-position: 100% 50%;
+	}
+	100% {
+		background-position: 0 50%;
+	}
 }
 
 /* confirm / cancel card for a pending ERP-mutating action */

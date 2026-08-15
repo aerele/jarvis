@@ -638,23 +638,29 @@ test("the open artifact carries the conversation it was opened from", () => {
 	assert.match(chatSrc, /artifact\.value = \{ \.\.\.artifact\.value, sheetIdx: si \};/);
 });
 
-test("the inline card offers it as a SIBLING button, never nested in the card", () => {
-	// .jv-artifact is itself a <button>; a button inside a button is invalid
-	// HTML and browsers drop it out of the card entirely.
+test("a dashboard build gets its OWN thumbnail card, not the generic file card", () => {
+	// canPromoteDashCanvas(cv) (canOpenDash's builder-origin rule OR
+	// isDashboardCanvas's hosted-embed-marker signal) branches BEFORE the
+	// generic ".jv-artifact-group" card (issue #858's compact preview
+	// thumbnail), so a dashboard canvas never reaches the generic card at
+	// all — dashboardBuildCard.test.js fences the thumbnail's own markup
+	// (jv-dash-thumb, cvOf srcdoc, openInDashboards) and the combined gate
+	// itself. This test only pins the ORDER and the exclusivity: the generic
+	// card's v-else must come after the dashboard branch, so every other
+	// canvas type is untouched.
+	assert.match(chatSrc, /v-else-if="canPromoteDashCanvas\(cv\)"\s*\n\s*class="jv-dash-thumb"/);
 	assert.match(chatSrc, /<div v-else class="jv-artifact-group">/);
+	assert.ok(
+		chatSrc.indexOf('v-else-if="canPromoteDashCanvas(cv)"') <
+			chatSrc.indexOf('<div v-else class="jv-artifact-group">'),
+		"the dashboard thumbnail must be offered before the generic file card falls through to it"
+	);
+	// the generic card itself no longer carries a canOpenDash branch of its own
 	const group = chatSrc.slice(
 		chatSrc.indexOf('<div v-else class="jv-artifact-group">'),
 		chatSrc.indexOf("</template>", chatSrc.indexOf('<div v-else class="jv-artifact-group">'))
 	);
-	assert.match(group, /class="jv-artifact"/);
-	assert.match(group, /v-if="canOpenDash\(cv\)"/);
-	assert.match(group, /@click="openInDashboards\(m, cv\)"/);
-	assert.match(group, /Open in Dashboards/);
-	// the button closes the card's <button> first
-	assert.ok(
-		group.indexOf("</button>") < group.indexOf('v-if="canOpenDash(cv)"'),
-		"the affordance must follow the card, not live inside it"
-	);
+	assert.doesNotMatch(group, /canOpenDash/);
 });
 
 test("the open preview panel offers the same hand-off, for its OWN conversation", () => {
