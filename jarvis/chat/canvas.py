@@ -67,6 +67,13 @@ _CANVAS_BARE = re.compile(rf"\S*?canvas/{_PATH}\.(?:{_EXTS})(?![\w])", re.IGNORE
 # ``[embed url="/__openclaw__/canvas/..." /]``). The gateway serves ref
 # documents at ``canvas/documents/<id>/index.html``, so refs fold into the
 # same fetch/persist path as plain canvas file references.
+#
+# On at least one observed runtime build, that route did not intercept these
+# requests at all (nonexistent AND real refs both came back HTTP 200 from the
+# runtime's own web UI, falling through as a catch-all) even though the
+# published document existed on disk with the right content. See
+# ``_gateway_fakes_missing_canvas_as_ok`` — persistence is skipped for the
+# whole turn when that is detected, rather than saving that page.
 _EMBED_MARKER = re.compile(r"\[embed\s[^\]]*\]", re.IGNORECASE)
 _EMBED_REF = re.compile(r"\[embed\s[^\]]*?\bref=[\"']([\w.\-]+)[\"'][^\]]*\]", re.IGNORECASE)
 
@@ -143,6 +150,40 @@ def fetch_canvas(agent_url: str, token: str, name: str) -> tuple[bytes, str] | N
 	return r.content, _type_for(name)
 
 
+def _gateway_fakes_missing_canvas_as_ok(agent_url: str, token: str) -> bool:
+	"""True only when the gateway is confirmed to answer EVERY canvas path with
+	HTTP 200, including one that cannot possibly exist.
+
+	When the runtime's own web UI ends up as the catch-all for unmatched
+	``/__openclaw__/canvas/...`` requests (its route never intercepted, for
+	whatever reason on that gateway build/version), it answers with HTTP 200
+	and its own app shell for ANY path — real artifact, wrong ref, or a
+	fabricated one alike. ``fetch_canvas`` only checks for a 200 with a body,
+	so that shell would otherwise get saved and rendered as if it were the
+	published artifact. Probing with a name that cannot exist tells them
+	apart: a gateway that is actually serving the canvas directory 404s an
+	unknown document; one that fell through to its own UI does not.
+
+	A probe that can't even complete (network error, timeout) is NOT treated
+	as broken — that's inconclusive, not confirmed, so callers fall back to
+	letting each real fetch below fail on its own merits.
+	"""
+	import uuid
+
+	import requests
+
+	base = _http_base(agent_url)
+	if not base or not token:
+		return False
+	sentinel = f"documents/jarvis-canvas-probe-{uuid.uuid4().hex}/index.html"
+	url = f"{base}/__openclaw__/canvas/{sentinel}"
+	try:
+		r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+	except Exception:
+		return False
+	return r.status_code != 404
+
+
 def _title_for(name: str, content: bytes | None, typ: str) -> str:
 	"""Prefer the artifact's own <title> (text types); else prettify the
 	filename (charts/sales-this-month.svg → "Sales This Month")."""
@@ -205,6 +246,20 @@ def persist_canvases(
 	strip the dead links, and return ``[{name, title, type, file_url}]``."""
 	names = detect_canvas_names(content)
 	if not names:
+		return []
+
+	if _gateway_fakes_missing_canvas_as_ok(agent_url, token):
+		frappe.log_error(
+			title="chat canvas: gateway fallback detected",
+			message=(
+				"The agent runtime answered a nonexistent canvas document with "
+				"something other than 404, so its canvas route is not actually "
+				"intercepting these requests (they are falling through to the "
+				"runtime's own web UI as a catch-all). Every artifact fetch this "
+				"turn would 200 with that page instead of the real content, so "
+				f"persistence is skipped entirely. msg={assistant_msg_name!r} names={names!r}"
+			),
+		)
 		return []
 
 	items: list[dict] = []
