@@ -5822,6 +5822,17 @@ defineExpose({
 .jv-cfg-grid :deep(.jvc-field:focus-within) {
 	border-color: var(--text-3);
 }
+/* JvCombo's own scoped style draws a heavy `outline: 2px solid var(--cta)`
+   ring on `:focus-visible` (border-color above is its only meant-for-here
+   focus cue). Chromium matches :focus-visible on a real <input> even for a
+   mouse click, so the Model field (allowCustom, has an inner <input>) shows
+   that ring on click while the Provider field (a role=button div, no inner
+   input) does not - the "Model's border is heavier than Provider/API key"
+   look. Suppress it here so every field in this grid focuses identically. */
+.jv-cfg-grid :deep(.jvc-field:focus-visible),
+.jv-cfg-grid :deep(.jvc-field:has(.jvc-input:focus-visible)) {
+	outline: none;
+}
 .jv-cfg-inp:disabled {
 	opacity: 0.6;
 	cursor: default;
