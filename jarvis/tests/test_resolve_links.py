@@ -49,9 +49,7 @@ class TestResolveLinks(FrappeTestCase):
 		self.assertEqual(row1["status"], "missing")
 
 	def test_unchecked_when_no_read_permission(self):
-		with patch(
-			"jarvis.tools.resolve_links.frappe.has_permission", return_value=False
-		):
+		with patch("jarvis.tools.resolve_links.frappe.has_permission", return_value=False):
 			res = resolve_links("ToDo", {"allocated_to": "Administrator"})
 		self.assertEqual(self._link(res, "allocated_to")["status"], "unchecked")
 

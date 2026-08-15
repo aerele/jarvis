@@ -1,0 +1,310 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { mount, flushPromises } from "@vue/test-utils";
+
+vi.hoisted(() => {
+	window.matchMedia = (q) => ({
+		matches: false,
+		media: q,
+		onchange: null,
+		addEventListener() {},
+		removeEventListener() {},
+		addListener() {},
+		removeListener() {},
+		dispatchEvent: () => false,
+	});
+});
+
+const api = vi.hoisted(() => ({
+	getAccount: vi.fn(),
+	cancelPlanAtPeriodEnd: vi.fn(),
+	resumePlan: vi.fn(),
+	cancelScheduledDowngrade: vi.fn(),
+}));
+vi.mock("@/api", () => api);
+
+vi.mock("frappe-ui", () => ({
+	Badge: {
+		name: "Badge",
+		props: ["label", "theme", "variant"],
+		template: `<span class="stub-badge" :data-label="label">{{ label }}</span>`,
+	},
+	Button: {
+		name: "Button",
+		props: ["label", "variant", "theme", "iconRight", "iconLeft", "loading", "disabled"],
+		emits: ["click"],
+		template: `<button class="stub-button" :data-label="label" @click="$emit('click')">{{ label }}</button>`,
+	},
+	FeatherIcon: { name: "FeatherIcon", template: `<span />` },
+}));
+
+const confirm = vi.fn();
+vi.mock("@/composables/useConfirm", () => ({
+	useConfirm: () => ({ confirm }),
+}));
+
+const shell = { settingsOpen: false };
+vi.mock("@/stores/shell", () => ({
+	useShellStore: () => shell,
+}));
+
+vi.mock("vue-router", () => ({
+	useRouter: () => ({ push: vi.fn() }),
+}));
+
+vi.mock("@/components/settings/SettingsPane.vue", () => ({
+	default: {
+		name: "SettingsPane",
+		props: ["title", "description", "error"],
+		template: `<div><h2 class="stub-title">{{ title }}</h2><slot /></div>`,
+	},
+}));
+
+import PlanBillingPane from "./PlanBillingPane.vue";
+
+function baseAccount(overrides = {}) {
+	return {
+		plan: { plan_name: "Pro", price_inr: 3999, billing_cycle: "Monthly" },
+		subscription_status: "Active",
+		current_period_end: "2026-09-15 00:00:00",
+		access_ends_on: "2026-09-15",
+		days_remaining: 30,
+		autorenew: 1,
+		has_mandate: true,
+		can_cancel: true,
+		can_reauthorize: false,
+		cancel_at_period_end: false,
+		scheduled_plan: null,
+		...overrides,
+	};
+}
+
+async function mountPane(accountData = {}) {
+	const acct = baseAccount(accountData);
+	api.getAccount.mockResolvedValue(acct);
+	const w = mount(PlanBillingPane);
+	await flushPromises();
+	return w;
+}
+
+function cancelButton(w) {
+	return w.findAll(".stub-button").find((b) => b.text().includes("Cancel"));
+}
+
+describe("PlanBillingPane", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		confirm.mockClear();
+	});
+
+	// The rail label was renamed "Plan and billing" -> "Billing"; this pane's own
+	// SettingsPane title has to track it, or the rail and the pane header would
+	// say two different things for the same section.
+	it("titles the pane 'Billing'", async () => {
+		const w = await mountPane();
+		expect(w.find(".stub-title").text()).toBe("Billing");
+	});
+
+	describe("cancel button visibility", () => {
+		it("shows cancel button when can_cancel is true", async () => {
+			const w = await mountPane({ can_cancel: true });
+			expect(cancelButton(w)).toBeDefined();
+		});
+
+		it("hides cancel button when can_cancel is false", async () => {
+			const w = await mountPane({ can_cancel: false });
+			expect(cancelButton(w)).toBeUndefined();
+		});
+
+		it("hides cancel button when autopay is off", async () => {
+			// AutoPay turned off: mandate released, nothing left to cancel
+			const w = await mountPane({ can_cancel: false, has_mandate: false });
+			expect(cancelButton(w)).toBeUndefined();
+		});
+
+		it("shows cancel button when can_cancel is absent and neither cancelling nor ended (legacy admin fallback)", async () => {
+			// Old admin versions lack the can_cancel field; fallback to !cancelling && !ended
+			const acct = baseAccount({
+				cancel_at_period_end: false,
+				subscription_status: "Active",
+			});
+			delete acct.can_cancel;
+			api.getAccount.mockResolvedValue(acct);
+			const w = mount(PlanBillingPane);
+			await flushPromises();
+			expect(cancelButton(w)).toBeDefined();
+		});
+
+		it("hides cancel button when can_cancel is absent and cancelling", async () => {
+			const acct = baseAccount({ cancel_at_period_end: true });
+			delete acct.can_cancel;
+			api.getAccount.mockResolvedValue(acct);
+			const w = mount(PlanBillingPane);
+			await flushPromises();
+			expect(cancelButton(w)).toBeUndefined();
+		});
+
+		it("hides cancel button when can_cancel is absent and ended", async () => {
+			const acct = baseAccount({ subscription_status: "Expired" });
+			delete acct.can_cancel;
+			api.getAccount.mockResolvedValue(acct);
+			const w = mount(PlanBillingPane);
+			await flushPromises();
+			expect(cancelButton(w)).toBeUndefined();
+		});
+	});
+
+	describe("cancel button label", () => {
+		it("shows 'Cancel auto-renewal' for mandate customers", async () => {
+			const w = await mountPane({ has_mandate: true, can_cancel: true });
+			const btn = cancelButton(w);
+			expect(btn?.text()).toContain("Cancel auto-renewal");
+		});
+
+		it("shows 'Cancel subscription' for non-mandate customers", async () => {
+			const w = await mountPane({ has_mandate: false, can_cancel: true });
+			const btn = cancelButton(w);
+			expect(btn?.text()).toContain("Cancel subscription");
+		});
+	});
+
+	describe("cancel confirmation dialog", () => {
+		it("shows autopay-specific message for mandate customers", async () => {
+			const w = await mountPane({
+				has_mandate: true,
+				can_cancel: true,
+				access_ends_on: "2026-09-15",
+			});
+			const btn = cancelButton(w);
+			await btn?.trigger("click");
+			await flushPromises();
+
+			expect(confirm).toHaveBeenCalled();
+			const { message } = confirm.mock.calls[0][0];
+			expect(message).toContain("Auto-renewal will turn off");
+			expect(message).toContain("can set it up again anytime");
+			expect(message).toContain("2026-09-15");
+		});
+
+		it("shows an immediate-access-loss message for a trial customer", async () => {
+			// A trial cancel ends access right now — is_trial must win over the
+			// mandate branch, and must NOT promise access until access_ends_on.
+			const w = await mountPane({
+				is_trial: true,
+				has_mandate: true,
+				can_cancel: true,
+				access_ends_on: "2026-09-15",
+			});
+			const btn = cancelButton(w);
+			await btn?.trigger("click");
+			await flushPromises();
+
+			expect(confirm).toHaveBeenCalled();
+			const { message } = confirm.mock.calls[0][0];
+			expect(message).toContain("ends your free trial right now");
+			expect(message).not.toContain("2026-09-15");
+			expect(message).not.toContain("Auto-renewal will turn off");
+		});
+
+		it("shows autopay message without date when access_ends_on is missing", async () => {
+			const w = await mountPane({ has_mandate: true, can_cancel: true, access_ends_on: "" });
+			const btn = cancelButton(w);
+			await btn?.trigger("click");
+			await flushPromises();
+
+			expect(confirm).toHaveBeenCalled();
+			const { message } = confirm.mock.calls[0][0];
+			expect(message).toContain("Auto-renewal will turn off");
+			expect(message).toContain("can set it up again anytime");
+		});
+
+		it("shows period-end message for non-mandate customers", async () => {
+			const w = await mountPane({
+				has_mandate: false,
+				can_cancel: true,
+				access_ends_on: "2026-09-15",
+			});
+			const btn = cancelButton(w);
+			await btn?.trigger("click");
+			await flushPromises();
+
+			expect(confirm).toHaveBeenCalled();
+			const { message } = confirm.mock.calls[0][0];
+			expect(message).toContain("You'll keep full access until 2026-09-15");
+			expect(message).toContain("resume any time");
+			expect(message).not.toContain("Auto-renewal");
+		});
+
+		it("confirms with danger flag", async () => {
+			const w = await mountPane({ has_mandate: true, can_cancel: true });
+			const btn = cancelButton(w);
+			await btn?.trigger("click");
+			await flushPromises();
+
+			expect(confirm).toHaveBeenCalled();
+			const opts = confirm.mock.calls[0][0];
+			expect(opts.danger).toBe(true);
+		});
+	});
+
+	describe("cancel action", () => {
+		it("calls API and reloads account on confirm", async () => {
+			confirm.mockResolvedValue(true);
+			api.cancelPlanAtPeriodEnd.mockResolvedValue({});
+			const acct = baseAccount({ has_mandate: true, can_cancel: true });
+			api.getAccount.mockResolvedValueOnce(acct);
+			const w = await mountPane({ has_mandate: true, can_cancel: true });
+
+			const btn = cancelButton(w);
+			await btn?.trigger("click");
+			await flushPromises();
+
+			expect(api.cancelPlanAtPeriodEnd).toHaveBeenCalled();
+			expect(api.getAccount).toHaveBeenCalledTimes(2); // Initial load + reload
+		});
+
+		it("does nothing on cancel/dismiss", async () => {
+			confirm.mockResolvedValue(false);
+			const w = await mountPane({ has_mandate: true, can_cancel: true });
+
+			const btn = cancelButton(w);
+			await btn?.trigger("click");
+			await flushPromises();
+
+			expect(api.cancelPlanAtPeriodEnd).not.toHaveBeenCalled();
+		});
+	});
+
+	// #10-e review: "excl. GST" used to render unconditionally next to the
+	// plan's price, which wrongly claimed an exemption for a 0-GST plan and
+	// for EVERY plan before get_plans starts sending gst_percent at all.
+	describe("excl. GST label tracks the plan's own gst_percent", () => {
+		it("is absent when gst_percent is undefined (pre-companion-PR get_plans row)", async () => {
+			const w = await mountPane(); // baseAccount's plan has no gst_percent
+			expect(w.text()).not.toContain("excl. GST");
+		});
+
+		it("is absent when gst_percent is 0", async () => {
+			const w = await mountPane({
+				plan: {
+					plan_name: "Pro",
+					price_inr: 3999,
+					billing_cycle: "Monthly",
+					gst_percent: 0,
+				},
+			});
+			expect(w.text()).not.toContain("excl. GST");
+		});
+
+		it("is present when gst_percent is a positive number", async () => {
+			const w = await mountPane({
+				plan: {
+					plan_name: "Pro",
+					price_inr: 3999,
+					billing_cycle: "Monthly",
+					gst_percent: 18,
+				},
+			});
+			expect(w.text()).toContain("excl. GST");
+		});
+	});
+});

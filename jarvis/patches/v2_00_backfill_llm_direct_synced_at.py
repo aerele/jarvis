@@ -45,5 +45,4 @@ def execute():
 		return  # not a configured direct tenant
 	if not settings.last_sync_at:
 		return  # no sync ever completed: nothing to grandfather
-	frappe.db.set_single_value(
-		"Jarvis Settings", "llm_direct_synced_at", settings.last_sync_at)
+	frappe.db.set_single_value("Jarvis Settings", "llm_direct_synced_at", settings.last_sync_at)

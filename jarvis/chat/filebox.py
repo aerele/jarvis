@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 
 import frappe
+
 from jarvis.permissions import require_jarvis_user
 
 INBOUND_PROMPT = (
@@ -40,8 +41,10 @@ def drop_file(file_url: str, file_name: str | None = None) -> dict:
 		frappe.throw("file_url is required")
 	# The URL must be a real uploaded File of this site (no external URLs).
 	fdoc = frappe.db.get_value(
-		"File", {"file_url": file_url},
-		["name", "file_name", "file_size", "is_private"], as_dict=True,
+		"File",
+		{"file_url": file_url},
+		["name", "file_name", "file_size", "is_private"],
+		as_dict=True,
 	)
 	if not fdoc:
 		frappe.throw("Unknown file - upload it first")
@@ -59,14 +62,16 @@ def drop_file(file_url: str, file_name: str | None = None) -> dict:
 	# directly (destructive ops still park to the approval board). Set via
 	# db.set_value to bypass the controller's admin-gate on enabling it.
 	frappe.db.set_value(
-		"Jarvis Conversation", conv_id,
+		"Jarvis Conversation",
+		conv_id,
 		{"title": f"File: {title}", "file_box": 1},
 		update_modified=False,
 	)
 	# Durable exact link: attach the File to the conversation so resumes
 	# re-attach THIS file (not a fragile filename-prefix LIKE match).
 	frappe.db.set_value(
-		"File", fdoc.name,
+		"File",
+		fdoc.name,
 		{"attached_to_doctype": "Jarvis Conversation", "attached_to_name": conv_id},
 		update_modified=False,
 	)
@@ -76,7 +81,9 @@ def drop_file(file_url: str, file_name: str | None = None) -> dict:
 	# background=1 (requires the dedicated-chat-queue PR): a batch of
 	# drops drains FIFO and never jumps ahead of a human's typed question.
 	res = send_message(
-		conversation=conv_id, message=INBOUND_PROMPT, attachments=attachments,
+		conversation=conv_id,
+		message=INBOUND_PROMPT,
+		attachments=attachments,
 		background=1,
 	)
 	return {
@@ -105,7 +112,8 @@ def list_inbound(limit: int = 30) -> list[dict]:
 			"status": ["!=", "Archived"],
 		},
 		fields=["name", "title", "creation"],
-		order_by="creation desc", limit_page_length=int(limit),
+		order_by="creation desc",
+		limit_page_length=int(limit),
 	)
 	conv_ids = [r.name for r in rows]
 	# Batched: one grouped query for pending approvals, one window query for
@@ -120,7 +128,8 @@ def list_inbound(limit: int = 30) -> list[dict]:
 			from `tabJarvis Approval Request`
 			where conversation in %(convs)s and status='Pending'
 			group by conversation""",
-			{"convs": conv_ids}, as_dict=True,
+			{"convs": conv_ids},
+			as_dict=True,
 		):
 			pending_by_conv[row.conversation] = row.n
 	last_by_conv = {}
@@ -133,7 +142,8 @@ def list_inbound(limit: int = 30) -> list[dict]:
 			      group by conversation) x
 			  on x.conversation = m.conversation and x.mseq = m.seq
 			where m.role='assistant'""",
-			{"convs": conv_ids}, as_dict=True,
+			{"convs": conv_ids},
+			as_dict=True,
 		):
 			last_by_conv[row.conversation] = row
 	for r in rows:
@@ -203,6 +213,7 @@ def _conv_visible(alias: str) -> str:
 _INBOUND_INNER = f"""
 	SELECT c.name, c.title, c.creation,
 	       COALESCE(pa.n, 0) AS pending_approvals,
+	       COALESCE(bt.behind, 0) AS behind_chat,
 	       CASE
 	         WHEN COALESCE(pa.n, 0) > 0                 THEN 'needs_approval'
 	         WHEN lm.conversation IS NULL               THEN 'processing'
@@ -226,6 +237,10 @@ _INBOUND_INNER = f"""
 	                 WHERE mm.role = 'assistant' GROUP BY mm.conversation) x
 	             ON x.conversation = m.conversation AND x.mseq = m.seq
 	           WHERE m.role = 'assistant') lm ON lm.conversation = c.name
+	LEFT JOIN (SELECT bT.conversation, 1 AS behind
+	           FROM `tabJarvis Chat Turn` bT
+	           WHERE bT.turn_class = 'background' AND bT.state = 'queued'
+	           GROUP BY bT.conversation) bt ON bt.conversation = c.name
 	WHERE {_conv_visible("c")} AND c.title LIKE 'File: %%' AND c.status != 'Archived'
 	{{extra}}
 """
@@ -333,15 +348,14 @@ def list_inbound_page(
 
 	order = _order_by(sort_field, sort_dir, _INBOUND_SORTABLE, "creation", "desc", prefix="t.")
 
-	total = frappe.db.sql(
-		f"SELECT COUNT(*) FROM ({inner}) t {outer}", params
-	)[0][0]
+	total = frappe.db.sql(f"SELECT COUNT(*) FROM ({inner}) t {outer}", params)[0][0]
 	rows = frappe.db.sql(
-		f"""SELECT t.name, t.title, t.creation, t.status, t.pending_approvals
+		f"""SELECT t.name, t.title, t.creation, t.status, t.pending_approvals, t.behind_chat
 		FROM ({inner}) t {outer}
 		ORDER BY {order}
 		LIMIT %(page_length)s OFFSET %(start)s""",
-		params, as_dict=True,
+		params,
+		as_dict=True,
 	)
 
 	# Attach the source File so the list can offer an inline preview. Each File-Box
@@ -385,7 +399,8 @@ def _latest_assistant(conversation: str):
 		"""SELECT streaming, recovering FROM `tabJarvis Chat Message`
 		WHERE conversation = %s AND role = 'assistant'
 		ORDER BY seq DESC LIMIT 1""",
-		(conversation,), as_dict=True,
+		(conversation,),
+		as_dict=True,
 	)
 	return rows[0] if rows else None
 
@@ -466,7 +481,8 @@ def clear_processed_inbound() -> dict:
 	rows = frappe.db.sql(
 		f"SELECT t.name FROM ({_INBOUND_INNER.format(extra='AND c.owner = %(me)s')}) t "
 		f"WHERE t.status IN ('done', 'error')",
-		{"me": me}, as_dict=True,
+		{"me": me},
+		as_dict=True,
 	)
 	deleted = 0
 	for r in rows:

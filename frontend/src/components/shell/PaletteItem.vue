@@ -12,16 +12,16 @@
 <script setup>
 // Command-palette result row (DESIGN-V3 §3.5): rendered by
 // JarvisCommandPalette's grouped list. Chats show a timeAgo suffix.
-import { computed } from "vue"
-import { FeatherIcon } from "frappe-ui"
-import { timeAgo } from "@/utils/datetime"
+import { computed } from "vue";
+import { FeatherIcon } from "frappe-ui";
+import { timeAgo } from "@/utils/datetime";
 
 const props = defineProps({
 	item: { type: Object, required: true },
 	active: { type: Boolean, default: false },
-})
+});
 
 // Frappe rows carry an explicit suffix (the doctype/"List"/"Report" tag); chat
 // rows fall back to a relative-time stamp.
-const suffix = computed(() => props.item.suffix ?? timeAgo(props.item.last_active_at))
+const suffix = computed(() => props.item.suffix ?? timeAgo(props.item.last_active_at));
 </script>

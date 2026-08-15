@@ -10,14 +10,18 @@
 				<!-- own header row: #body is a full override (FilePreview.vue's idiom),
 				     so the close button lives here instead of Dialog's default title bar -->
 				<div class="flex h-[45px] shrink-0 items-center justify-between border-b px-5">
-					<span class="text-lg font-semibold text-ink-gray-9">Personalisation Settings</span>
+					<span class="text-lg font-semibold text-ink-gray-9"
+						>Personalisation Settings</span
+					>
 					<Button variant="ghost" icon="x" :tooltip="'Close'" @click="close" />
 				</div>
 
 				<div class="flex min-h-0 flex-1">
 					<!-- ─────────── left nav (CRM Settings.vue idiom) ─────────── -->
 					<div class="w-56 shrink-0 overflow-y-auto border-r p-4">
-						<div class="text-xs-medium uppercase tracking-wide text-ink-gray-5">Settings</div>
+						<div class="text-xs-medium uppercase tracking-wide text-ink-gray-5">
+							Settings
+						</div>
 						<nav class="mt-2 flex flex-col gap-0.5">
 							<button
 								v-for="s in SECTIONS"
@@ -42,14 +46,22 @@
 						<div v-if="section === 'questions'" class="flex flex-col gap-5">
 							<div class="flex items-start justify-between gap-3">
 								<div>
-									<h2 class="text-lg font-semibold text-ink-gray-9">Question sources</h2>
+									<h2 class="text-lg font-semibold text-ink-gray-9">
+										Question sources
+									</h2>
 									<p class="mt-1 text-p-base text-ink-gray-6">
-										Admin-authored questions Jarvis asks everyone, a role, or one person &mdash;
-										separate from the questions it generates on its own from behaviour and chat
-										patterns (uncapped, materialized as soon as you save one).
+										Admin-authored questions {{ agentName }} asks everyone, a
+										role, or one person &mdash; separate from the questions it
+										generates on its own from behaviour and chat patterns
+										(uncapped, materialized as soon as you save one).
 									</p>
 								</div>
-								<Button variant="solid" label="New question" iconLeft="plus" @click="openNew" />
+								<Button
+									variant="solid"
+									label="New question"
+									iconLeft="plus"
+									@click="openNew"
+								/>
 							</div>
 
 							<!-- inline editor card (create or edit; never a separate Dialog) -->
@@ -68,9 +80,9 @@
 									/>
 									<FormControl
 										type="textarea"
-										label="Context for Jarvis (optional)"
+										:label="`Context for ${agentName} (optional)`"
 										:rows="3"
-										placeholder="What should Jarvis share when asking this?"
+										:placeholder="`What should ${agentName} share when asking this?`"
 										:modelValue="editor.context_md"
 										@update:modelValue="(v) => (editor.context_md = v)"
 									/>
@@ -81,22 +93,32 @@
 										:modelValue="editor.scope"
 										@update:modelValue="(v) => (editor.scope = v)"
 									/>
-									<div v-if="editor.scope === 'Role'" class="flex flex-col gap-1">
+									<div
+										v-if="editor.scope === 'Role'"
+										class="flex flex-col gap-1"
+									>
 										<span class="block text-xs text-ink-gray-5">Role</span>
 										<Autocomplete
 											placeholder="Search roles"
 											:options="roleOptions"
 											:modelValue="editor.target_role"
-											@update:modelValue="(v) => (editor.target_role = (v && v.value) || '')"
+											@update:modelValue="
+												(v) => (editor.target_role = (v && v.value) || '')
+											"
 										/>
 									</div>
-									<div v-if="editor.scope === 'User'" class="flex flex-col gap-1">
+									<div
+										v-if="editor.scope === 'User'"
+										class="flex flex-col gap-1"
+									>
 										<span class="block text-xs text-ink-gray-5">Person</span>
 										<Autocomplete
 											placeholder="Search people"
 											:options="userOptions"
 											:modelValue="editor.target_user"
-											@update:modelValue="(v) => (editor.target_user = (v && v.value) || '')"
+											@update:modelValue="
+												(v) => (editor.target_user = (v && v.value) || '')
+											"
 										/>
 									</div>
 									<div class="flex items-center gap-2">
@@ -105,7 +127,11 @@
 									</div>
 
 									<div class="flex items-center justify-end gap-2 border-t pt-3">
-										<Button label="Cancel" :disabled="editor.saving" @click="closeEditor" />
+										<Button
+											label="Cancel"
+											:disabled="editor.saving"
+											@click="closeEditor"
+										/>
 										<Button
 											variant="solid"
 											label="Save"
@@ -119,7 +145,7 @@
 
 							<!-- rule list -->
 							<div v-if="rulesLoading" class="grid place-items-center py-10">
-								<LoadingIndicator class="size-5 text-ink-gray-5" />
+								<JvSpinner />
 							</div>
 							<div
 								v-else-if="!rules.length"
@@ -130,7 +156,8 @@
 									No configured questions yet
 								</div>
 								<div class="max-w-sm text-p-base text-ink-gray-6">
-									Add what Jarvis should ask every employee, a role, or one person.
+									Add what {{ agentName }} should ask every employee, a role, or
+									one person.
 								</div>
 							</div>
 							<div v-else class="flex flex-col gap-2">
@@ -140,7 +167,9 @@
 									class="flex items-center gap-3 rounded-lg border p-3"
 								>
 									<div class="min-w-0 flex-1">
-										<div class="truncate text-sm text-ink-gray-9">{{ r.question }}</div>
+										<div class="truncate text-sm text-ink-gray-9">
+											{{ r.question }}
+										</div>
 										<Badge
 											class="mt-1.5"
 											:theme="SCOPE_THEME[r.scope] || 'gray'"
@@ -174,41 +203,49 @@
 						<!-- ══════════════ Limits (caps & toggles) ══════════════ -->
 						<div v-else class="flex flex-col gap-5">
 							<div>
-								<h2 class="text-lg font-semibold text-ink-gray-9">Caps &amp; toggles</h2>
+								<h2 class="text-lg font-semibold text-ink-gray-9">
+									Caps &amp; toggles
+								</h2>
 								<p class="mt-1 text-p-base text-ink-gray-6">
-									Control how many behavioural-learning / chat-pattern questions Jarvis adds to
-									a person's bank each day. Organisation, role, and reviewer follow-up questions
-									are never capped.
+									Control how many behavioural-learning / chat-pattern questions
+									{{ agentName }} adds to a person's bank each day. Organisation,
+									role, and reviewer follow-up questions are never capped.
 								</p>
 							</div>
 
-							<div class="flex items-start justify-between gap-3 rounded-lg border p-4">
+							<div
+								class="flex items-start justify-between gap-3 rounded-lg border p-4"
+							>
 								<div>
 									<div class="text-base font-medium text-ink-gray-9">
 										Personalisation questions
 									</div>
 									<div class="mt-0.5 text-sm text-ink-gray-6">
-										Turn off to stop Jarvis asking anyone new questions. Existing questions stay
-										listed and answerable.
+										Turn off to stop {{ agentName }} asking anyone new
+										questions. Existing questions stay listed and answerable.
 									</div>
 								</div>
 								<Switch v-model="settings.personalise_enabled" size="md" />
 							</div>
 
-							<div class="flex items-start justify-between gap-3 rounded-lg border p-4">
+							<div
+								class="flex items-start justify-between gap-3 rounded-lg border p-4"
+							>
 								<div>
 									<div class="text-base font-medium text-ink-gray-9">
 										Learn from chats
 									</div>
 									<div class="mt-0.5 text-sm text-ink-gray-6">
-										Once a day, Jarvis reviews recent chats and drafts questions so people can
-										confirm what it should remember. Answers become wiki notes and skills.
+										Once a day, {{ agentName }} reviews recent chats and drafts
+										questions so people can confirm what it should remember.
+										Answers become wiki notes and skills.
 									</div>
 									<div
 										v-if="settings.chat_mining_last_run_status"
 										class="mt-1.5 text-xs text-ink-gray-5"
 									>
-										Last run{{ chatMiningLastRunAgo }}: {{ settings.chat_mining_last_run_status }}
+										Last run{{ chatMiningLastRunAgo }}:
+										{{ settings.chat_mining_last_run_status }}
 									</div>
 									<Button
 										class="mt-2"
@@ -221,7 +258,10 @@
 										@click="generateNow"
 									/>
 								</div>
-								<Switch v-model="settings.chat_question_mining_enabled" size="md" />
+								<Switch
+									v-model="settings.chat_question_mining_enabled"
+									size="md"
+								/>
 							</div>
 
 							<FormControl
@@ -283,7 +323,7 @@
 //   - Person options: `jarvis.chat.custom_skills_api.list_shareable_users`
 //     (the ShareDialog.vue endpoint — "listShareableUsers-style endpoint"
 //     the build brief pointed at) — enabled users, excluding the caller.
-import { ref, reactive, computed, watch } from "vue"
+import { ref, reactive, computed, watch } from "vue";
 import {
 	Autocomplete,
 	Badge,
@@ -291,12 +331,12 @@ import {
 	Dialog,
 	FeatherIcon,
 	FormControl,
-	LoadingIndicator,
 	Switch,
 	toast,
 	confirmDialog,
-} from "frappe-ui"
-import { listShareableUsers } from "@/api"
+} from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
+import { listShareableUsers } from "@/api";
 import {
 	listRoleOptions,
 	listQuestionRules,
@@ -305,106 +345,104 @@ import {
 	getPersonalisationSettings,
 	setPersonalisationSettings,
 	generateChatQuestionsNow,
-} from "@/api/personalise"
-import { timeAgo } from "@/utils/datetime"
+} from "@/api/personalise";
+import { timeAgo } from "@/utils/datetime";
+import { agentName } from "@/branding";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	open: { type: Boolean, default: false },
-})
-const emit = defineEmits(["update:open"])
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
+});
+const emit = defineEmits(["update:open"]);
 function intOr(v, d) {
-	if (v === null || v === undefined || v === "") return d
-	const n = Number(v)
-	return Number.isFinite(n) ? n : d
+	if (v === null || v === undefined || v === "") return d;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : d;
 }
 
 function close() {
-	emit("update:open", false)
+	emit("update:open", false);
 }
 function onClosed() {
 	// drop the inline editor so the next open never flashes a stale draft
-	editor.show = false
+	editor.show = false;
 }
 
 // ── left nav ─────────────────────────────────────────────────────────────────
 const SECTIONS = [
 	{ label: "Questions", value: "questions" },
 	{ label: "Limits", value: "limits" },
-]
-const section = ref("questions")
+];
+const section = ref("questions");
 
 // ── question rules ──────────────────────────────────────────────────────────
 const SCOPE_OPTIONS = [
 	{ label: "Everyone in the org", value: "Org" },
 	{ label: "People with a role", value: "Role" },
 	{ label: "One person", value: "User" },
-]
+];
 // Same theme convention as WikiTab's scope badge (research/design-language.md
 // §6: gray=neutral, blue=info, green=success/personal).
-const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" }
+const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" };
 
-const rules = ref([])
-const rulesLoading = ref(false)
-const roleOptions = ref([]) // [{label, value}] — Role Autocomplete
-const userOptions = ref([]) // [{label, value}] — Person Autocomplete
+const rules = ref([]);
+const rulesLoading = ref(false);
+const roleOptions = ref([]); // [{label, value}] — Role Autocomplete
+const userOptions = ref([]); // [{label, value}] — Person Autocomplete
 
 function userLabel(id) {
-	const u = userOptions.value.find((o) => o.value === id)
-	return (u && u.label) || id
+	const u = userOptions.value.find((o) => o.value === id);
+	return (u && u.label) || id;
 }
 function scopeLabel(rule) {
-	if (rule.scope === "Role") return `Role: ${rule.target_role || "—"}`
-	if (rule.scope === "User") return `Person: ${userLabel(rule.target_user)}`
-	return "Everyone"
+	if (rule.scope === "Role") return `Role: ${rule.target_role || "—"}`;
+	if (rule.scope === "User") return `Person: ${userLabel(rule.target_user)}`;
+	return "Everyone";
 }
 
 async function loadRules() {
-	rulesLoading.value = true
+	rulesLoading.value = true;
 	try {
-		rules.value = (await listQuestionRules()) || []
+		rules.value = (await listQuestionRules()) || [];
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		rulesLoading.value = false
+		rulesLoading.value = false;
 	}
 }
 
 async function loadTargetOptions() {
 	try {
-		const roles = await listRoleOptions()
-		roleOptions.value = (roles || []).map((r) => ({ label: r, value: r }))
+		const roles = await listRoleOptions();
+		roleOptions.value = (roles || []).map((r) => ({ label: r, value: r }));
 	} catch (e) {
-		roleOptions.value = []
+		roleOptions.value = [];
 	}
 	try {
-		const users = await listShareableUsers()
+		const users = await listShareableUsers();
 		userOptions.value = (users || []).map((u) => ({
 			label: u.full_name || u.name,
 			value: u.name,
-		}))
+		}));
 	} catch (e) {
-		userOptions.value = []
+		userOptions.value = [];
 	}
 }
 
 // immediate-save Switch (row toggle), rollback on failure
-const rowActing = ref("")
+const rowActing = ref("");
 async function toggleActive(rule, value) {
-	const prev = rule.active
-	rule.active = value ? 1 : 0
-	rowActing.value = rule.name
+	const prev = rule.active;
+	rule.active = value ? 1 : 0;
+	rowActing.value = rule.name;
 	try {
-		await saveQuestionRule({ name: rule.name, active: value ? 1 : 0 })
-		toast.success(value ? "Question enabled" : "Question paused")
+		await saveQuestionRule({ name: rule.name, active: value ? 1 : 0 });
+		toast.success(value ? "Question enabled" : "Question paused");
 	} catch (e) {
-		rule.active = prev
-		toast.error(errMsg(e))
+		rule.active = prev;
+		toast.error(errHtml(e));
 	} finally {
-		rowActing.value = ""
+		rowActing.value = "";
 	}
 }
 
@@ -419,42 +457,42 @@ const editor = reactive({
 	target_user: "",
 	active: true,
 	saving: false,
-})
+});
 
 function openNew() {
-	editor.show = true
-	editor.name = ""
-	editor.question = ""
-	editor.context_md = ""
-	editor.scope = "Org"
-	editor.target_role = ""
-	editor.target_user = ""
-	editor.active = true
+	editor.show = true;
+	editor.name = "";
+	editor.question = "";
+	editor.context_md = "";
+	editor.scope = "Org";
+	editor.target_role = "";
+	editor.target_user = "";
+	editor.active = true;
 }
 function openEdit(rule) {
-	editor.show = true
-	editor.name = rule.name
-	editor.question = rule.question || ""
-	editor.context_md = rule.context_md || ""
-	editor.scope = rule.scope || "Org"
-	editor.target_role = rule.target_role || ""
-	editor.target_user = rule.target_user || ""
-	editor.active = !!rule.active
+	editor.show = true;
+	editor.name = rule.name;
+	editor.question = rule.question || "";
+	editor.context_md = rule.context_md || "";
+	editor.scope = rule.scope || "Org";
+	editor.target_role = rule.target_role || "";
+	editor.target_user = rule.target_user || "";
+	editor.active = !!rule.active;
 }
 function closeEditor() {
-	editor.show = false
+	editor.show = false;
 }
 
 const canSaveEditor = computed(() => {
-	if (!editor.question.trim()) return false
-	if (editor.scope === "Role" && !editor.target_role) return false
-	if (editor.scope === "User" && !editor.target_user) return false
-	return true
-})
+	if (!editor.question.trim()) return false;
+	if (editor.scope === "Role" && !editor.target_role) return false;
+	if (editor.scope === "User" && !editor.target_user) return false;
+	return true;
+});
 
 async function saveEditor() {
-	if (!canSaveEditor.value) return
-	editor.saving = true
+	if (!canSaveEditor.value) return;
+	editor.saving = true;
 	try {
 		const payload = {
 			question: editor.question.trim(),
@@ -463,35 +501,34 @@ async function saveEditor() {
 			target_role: editor.scope === "Role" ? editor.target_role : "",
 			target_user: editor.scope === "User" ? editor.target_user : "",
 			active: editor.active ? 1 : 0,
-		}
-		if (editor.name) payload.name = editor.name
-		await saveQuestionRule(payload)
-		toast.success(editor.name ? "Question updated" : "Question added")
-		closeEditor()
-		await loadRules()
+		};
+		if (editor.name) payload.name = editor.name;
+		await saveQuestionRule(payload);
+		toast.success(editor.name ? "Question updated" : "Question added");
+		closeEditor();
+		await loadRules();
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		editor.saving = false
+		editor.saving = false;
 	}
 }
 
 function confirmDeleteRule(rule) {
 	confirmDialog({
 		title: "Delete this question?",
-		message:
-			"Removes this configured question. Questions Jarvis already asked people from this rule stay in their own banks — this only stops new ones.",
+		message: `Removes this configured question. Questions ${agentName} already asked people from this rule stay in their own banks — this only stops new ones.`,
 		onConfirm: async ({ hideDialog }) => {
 			try {
-				await deleteQuestionRule(rule.name)
-				hideDialog()
-				toast.success("Question removed")
-				loadRules()
+				await deleteQuestionRule(rule.name);
+				hideDialog();
+				toast.success("Question removed");
+				loadRules();
 			} catch (e) {
-				toast.error(errMsg(e))
+				toast.error(errHtml(e));
 			}
 		},
-	})
+	});
 }
 
 // ── limits (personalise settings) ───────────────────────────────────────────
@@ -501,99 +538,99 @@ const settings = reactive({
 	chat_question_mining_enabled: true,
 	chat_mining_last_run_at: null,
 	chat_mining_last_run_status: "",
-})
-const settingsLoading = ref(false)
-const savingSettings = ref(false)
-const generatingNow = ref(false)
+});
+const settingsLoading = ref(false);
+const savingSettings = ref(false);
+const generatingNow = ref(false);
 
 const chatMiningLastRunAgo = computed(() =>
-	settings.chat_mining_last_run_at ? ` ${timeAgo(settings.chat_mining_last_run_at)}` : "",
-)
+	settings.chat_mining_last_run_at ? ` ${timeAgo(settings.chat_mining_last_run_at)}` : ""
+);
 
 async function loadSettings() {
-	settingsLoading.value = true
+	settingsLoading.value = true;
 	try {
-		const s = await getPersonalisationSettings()
-		settings.daily_question_cap = intOr(s.daily_question_cap, 5)
-		settings.personalise_enabled = !!s.personalise_enabled
-		settings.chat_question_mining_enabled = !!s.chat_question_mining_enabled
-		settings.chat_mining_last_run_at = s.chat_mining_last_run_at || null
-		settings.chat_mining_last_run_status = s.chat_mining_last_run_status || ""
+		const s = await getPersonalisationSettings();
+		settings.daily_question_cap = intOr(s.daily_question_cap, 5);
+		settings.personalise_enabled = !!s.personalise_enabled;
+		settings.chat_question_mining_enabled = !!s.chat_question_mining_enabled;
+		settings.chat_mining_last_run_at = s.chat_mining_last_run_at || null;
+		settings.chat_mining_last_run_status = s.chat_mining_last_run_status || "";
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		settingsLoading.value = false
+		settingsLoading.value = false;
 	}
 }
 
 async function saveSettings() {
-	savingSettings.value = true
+	savingSettings.value = true;
 	try {
 		const res = await setPersonalisationSettings({
 			daily_question_cap: Number(settings.daily_question_cap) || 0,
 			personalise_enabled: settings.personalise_enabled ? 1 : 0,
 			chat_question_mining_enabled: settings.chat_question_mining_enabled ? 1 : 0,
-		})
-		settings.daily_question_cap = intOr(res.daily_question_cap, settings.daily_question_cap)
-		settings.personalise_enabled = !!res.personalise_enabled
-		settings.chat_question_mining_enabled = !!res.chat_question_mining_enabled
-		settings.chat_mining_last_run_at = res.chat_mining_last_run_at || null
-		settings.chat_mining_last_run_status = res.chat_mining_last_run_status || ""
-		toast.success("Settings saved")
+		});
+		settings.daily_question_cap = intOr(res.daily_question_cap, settings.daily_question_cap);
+		settings.personalise_enabled = !!res.personalise_enabled;
+		settings.chat_question_mining_enabled = !!res.chat_question_mining_enabled;
+		settings.chat_mining_last_run_at = res.chat_mining_last_run_at || null;
+		settings.chat_mining_last_run_status = res.chat_mining_last_run_status || "";
+		toast.success("Settings saved");
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		savingSettings.value = false
+		savingSettings.value = false;
 	}
 }
 
 async function generateNow() {
-	generatingNow.value = true
+	generatingNow.value = true;
 	try {
-		const res = await generateChatQuestionsNow()
+		const res = await generateChatQuestionsNow();
 		if (res && res.ok) {
-			toast.success("Mining recent chats — new questions will appear shortly.")
+			toast.success("Mining recent chats — new questions will appear shortly.");
 			// The job runs in the background (queue 'long'); poll the last-run
 			// status a few times so the line under the button reflects the result
 			// ("… N questions" or "no new chat activity") without reopening the dialog.
-			pollMiningStatus()
+			pollMiningStatus();
 		} else {
-			toast.info((res && res.reason) || "Already running.")
+			toast.info((res && res.reason) || "Already running.");
 		}
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		generatingNow.value = false
+		generatingNow.value = false;
 	}
 }
 
 function pollMiningStatus() {
-	let tries = 0
-	const before = settings.chat_mining_last_run_at
+	let tries = 0;
+	const before = settings.chat_mining_last_run_at;
 	const tick = async () => {
-		tries += 1
+		tries += 1;
 		try {
-			const s = await getPersonalisationSettings()
-			settings.chat_mining_last_run_at = s.chat_mining_last_run_at || null
-			settings.chat_mining_last_run_status = s.chat_mining_last_run_status || ""
+			const s = await getPersonalisationSettings();
+			settings.chat_mining_last_run_at = s.chat_mining_last_run_at || null;
+			settings.chat_mining_last_run_status = s.chat_mining_last_run_status || "";
 			// Stop once the run stamped a newer timestamp, or after ~30s.
-			if (settings.chat_mining_last_run_at !== before || tries >= 6) return
+			if (settings.chat_mining_last_run_at !== before || tries >= 6) return;
 		} catch (e) {
 			/* best-effort */
 		}
-		setTimeout(tick, 5000)
-	}
-	setTimeout(tick, 4000)
+		setTimeout(tick, 5000);
+	};
+	setTimeout(tick, 4000);
 }
 
 // ── init: (re)load everything fresh every time the dialog opens ─────────────
 watch(
 	() => props.open,
 	(v) => {
-		if (!v) return
-		loadRules()
-		loadSettings()
-		loadTargetOptions()
-	},
-)
+		if (!v) return;
+		loadRules();
+		loadSettings();
+		loadTargetOptions();
+	}
+);
 </script>

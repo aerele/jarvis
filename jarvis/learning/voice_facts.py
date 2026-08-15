@@ -109,9 +109,7 @@ def after_migrate() -> None:
 			frappe.db.set_single_value(SETTINGS, updates, update_modified=False)
 			frappe.db.commit()
 	except Exception:
-		frappe.log_error(
-			title="jarvis voice bootstrap failed", message=frappe.get_traceback()
-		)
+		frappe.log_error(title="jarvis voice bootstrap failed", message=frappe.get_traceback())
 
 
 # --------------------------------------------------------------------------- #
@@ -122,7 +120,7 @@ def process_daily() -> None:
 	feature toggle (NULL=ON) and an empty New backlog; otherwise enqueues the
 	deduped worker. Never raises out of the scheduler.
 
-	Deliberately NOT gated on self-host: the sweep's wiki ingest and
+	Deliberately ungated on deployment: the sweep's wiki ingest and
 	JLP-proposal work is all bench-side; only the learned-skill container
 	push is (separately) managed-only."""
 	try:
@@ -231,6 +229,18 @@ def _housekeeping() -> None:
 # --------------------------------------------------------------------------- #
 # extraction
 # --------------------------------------------------------------------------- #
+def _is_personalise_note(source: str | None, question: str | None) -> bool:
+	"""The provenance test that decides a note's wiki SCOPE, in ONE place.
+
+	True = the note's facts stay PRIVATE to its owner (User-scope page); False =
+	they are an Org contribution and reach the shared Org page. Only an explicit
+	"Personalise" capture or an answer linked to a Personalise question is
+	private - every other capture surface (Business Tab / Chat Nudge / Mobile) is
+	Org-sourced. Adding a source to ``voice_notes_api._SOURCES`` therefore adds an
+	ORG contributor unless it is also named here."""
+	return (source == "Personalise") or bool(question)
+
+
 def _load_business_batches() -> tuple[list[dict], int]:
 	"""New Business notes grouped per (owner, personalise) into
 	<=MAX_NOTES_PER_BATCH chunks, capped at MAX_BATCHES_PER_RUN batches per run.
@@ -250,8 +260,7 @@ def _load_business_batches() -> tuple[list[dict], int]:
 	)
 	by_group: dict[tuple[str, bool], list] = {}
 	for r in rows:
-		personalise = (r.source == "Personalise") or bool(r.question)
-		by_group.setdefault((r.owner, personalise), []).append(r)
+		by_group.setdefault((r.owner, _is_personalise_note(r.source, r.question)), []).append(r)
 
 	batches: list[dict] = []
 	for key in sorted(by_group, key=lambda k: (k[0], k[1])):
@@ -432,7 +441,7 @@ def _merge_fact(facts: dict, fact: dict, batch: dict) -> None:
 			# Org page (crossing User->Org is an explicit Review promotion,
 			# DESIGN.md 1). Track the two provenance cohorts SEPARATELY (never a
 			# single collapsed flag) so a statement seen by both a Personalise
-			# owner and an Org source (Business Tab / Chat Nudge) fans each
+			# owner and an Org source (Business Tab / Chat Nudge / Mobile) fans each
 			# Personalise owner out to their own User page while only the
 			# Org-sourced contribution lands on the Org page.
 			"personalise_users": {owner} if personalise else set(),
@@ -490,10 +499,7 @@ def _candidate_from_fact(f: dict) -> dict:
 def _skill_draft(statement: str, n: int, m: int, last_date: str) -> str:
 	statement = (statement or "").strip()
 	sep = "" if statement.endswith((".", "!", "?")) else "."
-	return (
-		f"- {statement}{sep} Evidence: stated in {n} voice note(s) "
-		f"by {m} user(s), last {last_date}."
-	)
+	return f"- {statement}{sep} Evidence: stated in {n} voice note(s) by {m} user(s), last {last_date}."
 
 
 def _persist_rule_facts(rule_facts: list[dict]) -> dict:
@@ -578,13 +584,9 @@ def _persist_rule_facts(rule_facts: list[dict]) -> dict:
 def _flag_personalise_origin(pattern_key: str) -> None:
 	"""Stamp ``personalise_origin=1`` on the JLP for ``pattern_key`` (idempotent,
 	sticky). Security review PART 2 TASK 16 provenance."""
-	row = frappe.db.get_value(
-		JLP, {"pattern_key": pattern_key}, ["name", "personalise_origin"], as_dict=True
-	)
+	row = frappe.db.get_value(JLP, {"pattern_key": pattern_key}, ["name", "personalise_origin"], as_dict=True)
 	if row and not row.personalise_origin:
-		frappe.db.set_value(
-			JLP, row.name, {"personalise_origin": 1}, update_modified=False
-		)
+		frappe.db.set_value(JLP, row.name, {"personalise_origin": 1}, update_modified=False)
 
 
 def _surface(pattern_key: str) -> None:
@@ -610,7 +612,7 @@ def _apply_context_facts(context_facts: list[dict]) -> int:
 	to their OWN User-scope page (default_scope="User", target_user=owner -
 	invisible to others), and a fact may fan out to several such owners; a
 	Personalise contribution NEVER lands on the shared Org page. Only Org-sourced
-	contributions (Business Tab / Chat Nudge) keep today's Org behavior exactly
+	contributions (Business Tab / Chat Nudge / Mobile) keep today's Org behavior exactly
 	(the positional 3-arg call, unchanged). A statement seen by both cohorts
 	writes to BOTH targets - privately to each Personalise owner, and to Org for
 	the Org-sourced half."""
@@ -648,7 +650,8 @@ def _apply_context_facts(context_facts: list[dict]) -> int:
 			}
 		]
 		try:
-			wiki.apply_extracted_page_updates(updates, "voice", user)
+			# A page a person edited by hand is add-only from here (issue #489).
+			wiki.apply_extracted_page_updates(updates, "voice", user, preserve_curated=True)
 			applied += len(fs)
 		except Exception:
 			frappe.log_error(
@@ -666,7 +669,12 @@ def _apply_context_facts(context_facts: list[dict]) -> int:
 		]
 		try:
 			wiki.apply_extracted_page_updates(
-				updates, "voice", user, default_scope="User", target_user=user
+				updates,
+				"voice",
+				user,
+				default_scope="User",
+				target_user=user,
+				preserve_curated=True,
 			)
 			applied += len(fs)
 		except Exception:
@@ -763,7 +771,13 @@ def _apply_personalise_context(context_facts: list[dict], owner: str, ref: str |
 		]
 		try:
 			applied, _failed = wiki.apply_extracted_page_updates(
-				updates, "voice", owner, ref=ref, default_scope="User", target_user=owner
+				updates,
+				"voice",
+				owner,
+				ref=ref,
+				default_scope="User",
+				target_user=owner,
+				preserve_curated=True,
 			)
 		except Exception:
 			frappe.log_error(
@@ -772,8 +786,12 @@ def _apply_personalise_context(context_facts: list[dict], owner: str, ref: str |
 			)
 			continue
 		if applied:
-			slug = wiki.user_scope_slug(base_slug, owner)
-			title = frappe.db.get_value(WIKI, {"slug": slug}, "title")
+			# Audience-filtered (issue #490): looking the title up by the PREDICTED
+			# suffixed slug alone named a colleague's page whenever two addresses
+			# scrub to the same local part, so the receipt advertised a page this
+			# owner cannot even read.
+			name, slug = wiki.resolve_user_scope_page(base_slug, owner)
+			title = frappe.db.get_value(WIKI, name, "title") if name else None
 			if title:
 				pages.append({"slug": slug, "title": title})
 	return pages

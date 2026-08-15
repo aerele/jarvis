@@ -93,7 +93,7 @@ def _mapper_map(source_doctype: str) -> dict:
 			if tail.startswith(prefix):
 				# setdefault: first wins, and _doc_actions already sorts the
 				# DocType's own methods ahead of foreign ones.
-				out.setdefault(tail[len(prefix):], method)
+				out.setdefault(tail[len(prefix) :], method)
 				break
 	cache.set_value(key, out, expires_in_sec=_MAPPER_TTL)
 	return out
@@ -113,7 +113,9 @@ def resolve_mapper(source_doctype: str, target_doctype: str) -> str | None:
 
 
 def mapped_values(
-	source_doctype: str, source_name: str, target_doctype: str,
+	source_doctype: str,
+	source_name: str,
+	target_doctype: str,
 ) -> tuple[dict | None, str | None]:
 	"""``(values, note)`` for ``target_doctype`` mapped from ``source_name``.
 
@@ -163,8 +165,17 @@ def mapped_values(
 
 # Framework bookkeeping the agent must never copy into a draft.
 _DROP_KEYS = {
-	"name", "owner", "creation", "modified", "modified_by", "docstatus", "idx",
-	"parent", "parentfield", "parenttype", "doctype",
+	"name",
+	"owner",
+	"creation",
+	"modified",
+	"modified_by",
+	"docstatus",
+	"idx",
+	"parent",
+	"parentfield",
+	"parenttype",
+	"doctype",
 }
 
 

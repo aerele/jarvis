@@ -149,9 +149,7 @@ def _source_available(spec: dict) -> bool:
 	"""A stream-source detector runs unless the preflight/engine marked its
 	Detector State not_applicable (structural no-signal, e.g. printing bypasses
 	frappe's print system entirely). Missing state row = available (first run)."""
-	state = frappe.db.get_value(
-		"Jarvis Pattern Detector State", spec.get("id"), "not_applicable"
-	)
+	state = frappe.db.get_value("Jarvis Pattern Detector State", spec.get("id"), "not_applicable")
 	return not state
 
 
@@ -237,9 +235,16 @@ def reduce_units(rows, spec: dict, patterndb=None) -> list:
 			# stale full-window average. Prefer the recent behaviour if it can
 			# stand on its own gates, else withhold this segment entirely.
 			retarget = _retarget_recent(
-				spec, ant, units, recent_cutoff, recent_counts,
-				multi=multi, targets=targets, org_default=org_default,
-				patterndb=patterndb, decision=decision,
+				spec,
+				ant,
+				units,
+				recent_cutoff,
+				recent_counts,
+				multi=multi,
+				targets=targets,
+				org_default=org_default,
+				patterndb=patterndb,
+				decision=decision,
 			)
 			if retarget:
 				out.append(retarget)
@@ -345,7 +350,9 @@ def evaluate_segment(
 	created_list = [c for c in created if c is not None]
 	# Collapse creation clusters up to a multi-minute gap (not just the sub-second
 	# default): a real go-live import runs over minutes/hours, not one second.
-	effective_units = stats.collapse_bursts(created_list, max_gap_s=BURST_MAX_GAP_S) if created_list else n_units
+	effective_units = (
+		stats.collapse_bursts(created_list, max_gap_s=BURST_MAX_GAP_S) if created_list else n_units
+	)
 	if effective_units < n_min:
 		return None
 	# An import backfills many historical POSTING dates in ONE creation session,
@@ -379,9 +386,7 @@ def evaluate_segment(
 	p_value_method = None
 	p_value_correction = None
 	if rest_k is not None and rest_n is not None and int(rest_n) > 0 and n_units > 0:
-		p_value, p_value_method = stats.enrichment_p_value(
-			k, n_units, k + int(rest_k), n_units + int(rest_n)
-		)
+		p_value, p_value_method = stats.enrichment_p_value(k, n_units, k + int(rest_k), n_units + int(rest_n))
 		# Within-segment Bonferroni for a post-hoc argmax consequent: testing
 		# the WINNER of V candidate values is up to V times as likely to show
 		# a small tail under the null (union bound), so correct before BH.
@@ -716,7 +721,9 @@ def _recency_decision(units: dict, full_mode, cutoff, c_min: float | None = None
 	}
 
 
-def _retarget_recent(spec, ant, units, cutoff, recent_counts, *, multi, targets, org_default, patterndb, decision):
+def _retarget_recent(
+	spec, ant, units, cutoff, recent_counts, *, multi, targets, org_default, patterndb, decision
+):
 	"""Re-evaluate a segment on its recent subset for the flipped mode, so a
 	recent policy change is proposed (annotated) instead of the stale average.
 	Returns a raw candidate or None if the recent evidence fails its gates or a
@@ -847,7 +854,9 @@ def _party_state_map(patterndb, link_doctype: str, parties) -> dict:
 	return out
 
 
-def _state_predicts_template(state_by_party: dict, template_by_party: dict, min_states: int = 2, purity: float = 0.8) -> bool:
+def _state_predicts_template(
+	state_by_party: dict, template_by_party: dict, min_states: int = 2, purity: float = 0.8
+) -> bool:
 	"""True when party STATE predicts the tax template about as well as the party
 	does: group the known-state parties by state; if the dominant template within
 	each state accounts for >= ``purity`` of that state's parties across >=
@@ -953,9 +962,21 @@ def _enforcement_conflict(doctype: str, field_name: str, patterndb) -> str | Non
 	like = f"%{field_name}%"
 	found = []
 	probes = [
-		("Server Script", "SELECT name FROM `tabServer Script` WHERE reference_doctype = %(dt)s AND disabled = 0 AND script LIKE %(like)s LIMIT 1", {"dt": doctype, "like": like}),
-		("Client Script", "SELECT name FROM `tabClient Script` WHERE dt = %(dt)s AND enabled = 1 AND script LIKE %(like)s LIMIT 1", {"dt": doctype, "like": like}),
-		("Workflow", "SELECT name FROM `tabWorkflow` WHERE document_type = %(dt)s AND is_active = 1 LIMIT 1", {"dt": doctype}),
+		(
+			"Server Script",
+			"SELECT name FROM `tabServer Script` WHERE reference_doctype = %(dt)s AND disabled = 0 AND script LIKE %(like)s LIMIT 1",
+			{"dt": doctype, "like": like},
+		),
+		(
+			"Client Script",
+			"SELECT name FROM `tabClient Script` WHERE dt = %(dt)s AND enabled = 1 AND script LIKE %(like)s LIMIT 1",
+			{"dt": doctype, "like": like},
+		),
+		(
+			"Workflow",
+			"SELECT name FROM `tabWorkflow` WHERE document_type = %(dt)s AND is_active = 1 LIMIT 1",
+			{"dt": doctype},
+		),
 	]
 	for label, sql, params in probes:
 		try:

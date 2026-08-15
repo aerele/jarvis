@@ -1,0 +1,43 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`user bubble renders identically (dark) 1`] = `
+"<div class="jv-root jv-dark" style="--surface: #16161a; --surface-1: #1d1d22; --surface-2: #26262d; --surface-3: #30303a; --border: #2c2c34; --border-2: #3a3a45; --text: #ededf2; --text-2: #b6b6c0; --text-3: #7e7e8a; --cta: #ececf0; --cta-fg: #1c1c22; --cta-bg: #26262d; --cta-bd: #3a3a45; --link: #6e8bff; --green: #34d399; --green-bg: #15271f; --green-bd: #214b38; --red: #f87171; --red-bg: #2a1818; --red-bd: #4a2a2a; --amber: #fbbf24; --amber-bg: #2a2315; --amber-bd: #4a3d1f;">
+  <div data-v-25f0d04f="" class="jv-umsg" style="display: flex; flex-direction: column; align-items: flex-end;">
+    <div data-v-25f0d04f="" class="jv-ububble" style="max-width: 78%; min-width: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px 14px 4px 14px; padding: 10px 14px; font-size: 14px; line-height: 1.5; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;">Can you summarise the attached screenshot and open a ticket for it?</div>
+    <!--v-if-->
+    <!-- attached images → same clickable thumbnail + preview as generated ones --><button data-v-25f0d04f="" class="jv-img-artifact" title="Open screenshot.png" style="margin-top: 8px; cursor: zoom-in;"><img data-v-25f0d04f="" src="/files/screenshot.png" alt="screenshot.png" loading="lazy"></button>
+    <div data-v-25f0d04f="" class="jv-msgbar">
+      <!-- sent-time: revealed with the bar on hover; its own hover
+				     (native title) gives the full day-date-month-year-time.
+				     Order: time → edit → copy (edit before copy). --><span data-v-25f0d04f="" class="jv-msgtime" title="">9:12</span><button data-v-25f0d04f="" class="jv-msgbtn" title="Edit &amp; resend"><svg data-v-25f0d04f="" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path data-v-25f0d04f="" d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+          <path data-v-25f0d04f="" d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+        </svg></button><button data-v-25f0d04f="" class="jv-msgbtn" title="Copy"><svg data-v-25f0d04f="" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect data-v-25f0d04f="" x="9" y="9" width="13" height="13" rx="2"></rect>
+          <path data-v-25f0d04f="" d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+        </svg></button>
+    </div>
+  </div>
+</div>"
+`;
+
+exports[`user bubble renders identically (light) 1`] = `
+"<div class="jv-root" style="--surface: #ffffff; --surface-1: #f7f7f8; --surface-2: #f1f1f3; --surface-3: #ececef; --border: #e8e8ec; --border-2: #dfdfe4; --text: #171717; --text-2: #4a4a4f; --text-3: #6d6d76; --cta: #1c1c22; --cta-fg: #ffffff; --cta-bg: #f1f1f4; --cta-bd: #e2e2e8; --link: #1579d0; --green: #16a34a; --green-bg: #edf8f0; --green-bd: #cdeed8; --red: #dc2626; --red-bg: #fdf0ef; --red-bd: #f5d4d1; --amber: #d97706; --amber-bg: #fdf6ec; --amber-bd: #f3e2c2;">
+  <div data-v-25f0d04f="" class="jv-umsg" style="display: flex; flex-direction: column; align-items: flex-end;">
+    <div data-v-25f0d04f="" class="jv-ububble" style="max-width: 78%; min-width: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: 14px 14px 4px 14px; padding: 10px 14px; font-size: 14px; line-height: 1.5; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;">Can you summarise the attached screenshot and open a ticket for it?</div>
+    <!--v-if-->
+    <!-- attached images → same clickable thumbnail + preview as generated ones --><button data-v-25f0d04f="" class="jv-img-artifact" title="Open screenshot.png" style="margin-top: 8px; cursor: zoom-in;"><img data-v-25f0d04f="" src="/files/screenshot.png" alt="screenshot.png" loading="lazy"></button>
+    <div data-v-25f0d04f="" class="jv-msgbar">
+      <!-- sent-time: revealed with the bar on hover; its own hover
+				     (native title) gives the full day-date-month-year-time.
+				     Order: time → edit → copy (edit before copy). --><span data-v-25f0d04f="" class="jv-msgtime" title="">9:12</span><button data-v-25f0d04f="" class="jv-msgbtn" title="Edit &amp; resend"><svg data-v-25f0d04f="" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path data-v-25f0d04f="" d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+          <path data-v-25f0d04f="" d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+        </svg></button><button data-v-25f0d04f="" class="jv-msgbtn" title="Copy"><svg data-v-25f0d04f="" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect data-v-25f0d04f="" x="9" y="9" width="13" height="13" rx="2"></rect>
+          <path data-v-25f0d04f="" d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+        </svg></button>
+    </div>
+  </div>
+</div>"
+`;

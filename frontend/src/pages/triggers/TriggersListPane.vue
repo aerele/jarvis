@@ -8,7 +8,7 @@
 		:total="total"
 		:has-more="hasMore"
 		:quick-filters="quickFilters"
-		:filter-defs="filterDefs"
+		:filter-state="filterState"
 		:filters="filters"
 		:sort-options="sortOptions"
 		:sort="sort"
@@ -24,6 +24,9 @@
 				'Ask in the chat on the left — e.g. \'Warn me when a Sales Invoice over 1 lakh is submitted\'',
 		}"
 		@update:filters="setFilters"
+		@update:filter-clauses="setClauses"
+		@request-filter-schema="requestSchema"
+		@dismiss-filter-notice="dismissFilterNotice"
 		@update:sort="(s) => setSort(s.field, s.dir)"
 		@update:page-length="(v) => (pageLength = v)"
 		@load-more="loadMore"
@@ -41,11 +44,7 @@
 
 		<!-- enabled: inline Switch (admins, optimistic) / read-only badge -->
 		<template #cell-enabled="{ row }">
-			<div
-				v-if="caps.can_manage"
-				class="flex w-full items-center"
-				@click.stop.prevent
-			>
+			<div v-if="caps.can_manage" class="flex w-full items-center" @click.stop.prevent>
 				<Switch
 					:modelValue="!!row.enabled"
 					:disabled="togglingRow === row.name"
@@ -79,7 +78,12 @@
 		</template>
 
 		<template #cell-action_type="{ row }">
-			<Badge v-if="row.action_type === 'Script'" variant="subtle" theme="blue" label="Script" />
+			<Badge
+				v-if="row.action_type === 'Script'"
+				variant="subtle"
+				theme="blue"
+				label="Script"
+			/>
 			<!-- LLM: violet pill - Badge has no purple theme in frappe-ui 0.1.278,
 			     so this composes the same subtle-badge recipe from the emitted
 			     violet semantic tokens (Badge md metrics: h-5 px-1.5 text-xs) -->
@@ -108,7 +112,9 @@
 		<template #select-actions="{ selections, unselectAll }">
 			<Dropdown
 				v-if="caps.can_manage"
-				:options="[{ label: 'Delete', onClick: () => bulkDelete(selections, unselectAll) }]"
+				:options="[
+					{ label: 'Delete', onClick: () => bulkDelete(selections, unselectAll) },
+				]"
 			>
 				<Button icon="more-horizontal" variant="ghost" />
 			</Dropdown>
@@ -124,35 +130,36 @@
 // bulk Delete (server cap 50); everyone else reads. The parent refreshes this
 // pane via the exposed refresh() when the chat pane's run ends or a
 // trigger:changed frame arrives.
-import { ref, computed } from "vue"
-import { useRouter } from "vue-router"
-import { Badge, Button, Dropdown, Switch, Tooltip, toast, confirmDialog } from "frappe-ui"
-import ListPage from "@/components/list/ListPage.vue"
-import { useListPage } from "@/composables/useListPage"
-import { timeAgo, exactDate } from "@/utils/datetime"
-import * as apiTriggers from "@/api/triggers"
+import { ref, computed } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { Badge, Button, Dropdown, Switch, Tooltip, toast, confirmDialog } from "frappe-ui";
+import ListPage from "@/components/list/ListPage.vue";
+import { useListPage } from "@/composables/useListPage";
+import { triggersListFetch } from "@/pages/list/listFetchers";
+import { timeAgo, exactDate } from "@/utils/datetime";
+import * as apiTriggers from "@/api/triggers";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	caps: { type: Object, default: () => ({}) }, // get_triggers_caps payload
-})
+});
 
-const router = useRouter()
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
+const router = useRouter();
+// /triggers is a TABBED route (Triggers | Activity); the payload carries its view
+// key so the Activity tab never applies this list's filters (judgment C08-7).
+const route = useRoute();
 
 // ── list config ──────────────────────────────────────────────────────────────
 const ENABLED_OPTIONS = [
 	{ label: "All", value: "" },
 	{ label: "Enabled", value: "1" },
 	{ label: "Disabled", value: "0" },
-]
+];
 const ACTION_OPTIONS = [
 	{ label: "All actions", value: "" },
 	{ label: "Script", value: "Script" },
 	{ label: "LLM", value: "LLM" },
-]
+];
 
 // Column budget: the list shares the tab with a 380px chat pane, so at a
 // 1440px viewport it only gets ~800px — fixed tracks are kept lean so the
@@ -169,7 +176,7 @@ const columns = [
 	{ label: "Action", key: "action_type", width: "4.5rem" },
 	{ label: "24h", key: "activity_24h", width: "3rem", align: "center" },
 	{ label: "Last activity", key: "last_activity_at", width: "7.5rem" },
-]
+];
 
 // search rides the quick-filter strip (MacrosList/SkillsList pattern): it lives
 // in the filters object for a controlled input; fetchFn moves it onto the
@@ -180,12 +187,13 @@ const quickFilters = computed(() => [
 	{ key: "search", label: "Search triggers", type: "text" },
 	{ key: "enabled", label: "Status", type: "select", options: ENABLED_OPTIONS },
 	{ key: "action_type", label: "Action", type: "select", options: ACTION_OPTIONS },
-])
-const filterDefs = computed(() => [
-	{ key: "enabled", label: "Status", type: "select", options: ENABLED_OPTIONS },
-	{ key: "action_type", label: "Action", type: "select", options: ACTION_OPTIONS },
-	{ key: "doc_event", label: "Event", type: "select", options: eventOptions.value },
-])
+]);
+// plan 08 wave 1: the curated `filterDefs` array is GONE as the filter catalog.
+// The panel is generated from the server schema for view_key "triggers". The
+// trigger's LOGIC fields (condition / script_body / llm_instruction) are
+// withheld by the registry's `excluded_fields`, because a `like` filter over
+// them would rebuild what _trigger_detail redacts from non-managers (D1-b).
+const QUICK_CLAUSES = { enabled: "enabled", action_type: "action_type" };
 
 // backend _TRIGGER_SORTABLE whitelist (unknown fields THROW, stricter than
 // macros): modified · trigger_name · target_doctype · doc_event · action_type
@@ -197,8 +205,8 @@ const sortOptions = [
 	{ label: "Event", value: "doc_event" },
 	{ label: "Action", value: "action_type" },
 	{ label: "Enabled", value: "enabled" },
-]
-const DEFAULT_SORT = { field: "modified", dir: "desc" }
+];
+const DEFAULT_SORT = { field: "modified", dir: "desc" };
 
 const {
 	rows,
@@ -214,82 +222,91 @@ const {
 	resetLoad,
 	loadMore,
 	refreshKeep,
+	filterState,
+	setClauses,
+	requestSchema,
+	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => {
-		const { search: q, ...rest } = p.filters || {}
-		return apiTriggers.listTriggersPage({ ...p, search: q || p.search || "", filters: rest })
-	},
+	fetchFn: triggersListFetch,
 	defaultSort: DEFAULT_SORT,
 	storageKey: "triggers",
-})
+	viewKey: "triggers",
+	quickClauses: QUICK_CLAUSES,
+	rootDoctype: "Jarvis Trigger",
+	route,
+	router,
+});
 
 // the parent (TriggersPage) calls this on chat run:end / trigger:changed
-defineExpose({ refresh: refreshKeep })
+defineExpose({ refresh: refreshKeep });
 
 function getRowRoute(row) {
-	return { name: "TriggerDetail", params: { id: row.name } }
+	return { name: "TriggerDetail", params: { id: row.name } };
 }
 
 // ── caps.events → labels ─────────────────────────────────────────────────────
 const eventOptions = computed(() => [
 	{ label: "All events", value: "" },
 	...(props.caps.events || []).map((e) => ({ label: e.label, value: e.value })),
-])
+]);
 function eventLabel(value) {
-	const hit = (props.caps.events || []).find((e) => e.value === value)
-	return (hit && hit.label) || value || "-"
+	const hit = (props.caps.events || []).find((e) => e.value === value);
+	return (hit && hit.label) || value || "-";
 }
 
 // ── inline enabled toggle (optimistic; reverts on failure) ───────────────────
-const togglingRow = ref("")
+const togglingRow = ref("");
 async function toggleEnabled(row, value) {
-	if (togglingRow.value) return
-	togglingRow.value = row.name
-	const prev = row.enabled
-	row.enabled = value ? 1 : 0
+	if (togglingRow.value) return;
+	togglingRow.value = row.name;
+	const prev = row.enabled;
+	row.enabled = value ? 1 : 0;
 	try {
-		await apiTriggers.setTriggerEnabled(row.name, value ? 1 : 0)
+		await apiTriggers.setTriggerEnabled(row.name, value ? 1 : 0);
 	} catch (e) {
-		row.enabled = prev
-		toast.error(errMsg(e))
+		row.enabled = prev;
+		toast.error(errHtml(e));
 	} finally {
-		togglingRow.value = ""
+		togglingRow.value = "";
 	}
 }
 
 // ── bulk delete (admins; server cap 50) ──────────────────────────────────────
 function bulkDelete(selections, unselectAll) {
-	const names = Array.from(selections || [])
-	if (!names.length) return
+	const names = Array.from(selections || []);
+	if (!names.length) return;
 	if (names.length > 50) {
-		toast.error("Select at most 50 triggers per delete.")
-		return
+		toast.error("Select at most 50 triggers per delete.");
+		return;
 	}
 	confirmDialog({
 		title: `Delete ${names.length} trigger${names.length === 1 ? "" : "s"}?`,
-		message: "Deletes the selected triggers. Their activity log entries are kept. This can't be undone.",
+		message:
+			"Deletes the selected triggers. Their activity log entries are kept. This can't be undone.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				// -> {deleted, skipped: [{name, reason}]} (per-row try/except)
-				const res = (await apiTriggers.deleteTriggersBulk(names)) || {}
-				const skipped = res.skipped || []
-				const deleted = res.deleted != null ? res.deleted : names.length - skipped.length
+				const res = (await apiTriggers.deleteTriggersBulk(names)) || {};
+				const skipped = res.skipped || [];
+				const deleted = res.deleted != null ? res.deleted : names.length - skipped.length;
 				if (skipped.length) {
-					const reasons = [...new Set(skipped.map((s) => s.reason || "skipped"))].join(", ")
+					const reasons = [...new Set(skipped.map((s) => s.reason || "skipped"))].join(
+						", "
+					);
 					toast.create({
 						message: `Deleted ${deleted} (skipped ${skipped.length}: ${reasons})`,
 						type: "info",
-					})
+					});
 				} else {
-					toast.success(`Deleted ${deleted} trigger${deleted === 1 ? "" : "s"}`)
+					toast.success(`Deleted ${deleted} trigger${deleted === 1 ? "" : "s"}`);
 				}
-				unselectAll()
-				hideDialog()
-				resetLoad()
+				unselectAll();
+				hideDialog();
+				resetLoad();
 			} catch (e) {
-				toast.error(errMsg(e))
+				toast.error(errHtml(e));
 			}
 		},
-	})
+	});
 }
 </script>

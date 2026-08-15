@@ -43,6 +43,16 @@ from dataclasses import dataclass, field
 # family's surviving proposals are flukes.
 FDR_Q = 0.05
 
+# jarvis#483: the ONLY way ``engine._read_and_persist`` may skip this module's BH
+# pass and persist a unit's raw candidates uncorrected. ``fdr_buffer`` there has no
+# default and is not optional, precisely so a caller cannot skip correction by
+# omitting the argument or by passing ``None`` out of habit (Python's usual "nothing
+# here" value) - both used to silently persist every raw candidate with zero
+# multiple-testing correction, letting a detector that tests hundreds of suppliers
+# take hundreds of shots at a fluke. A caller that genuinely wants that (there is
+# currently none) must say so with this exact sentinel.
+NO_FDR = object()
+
 # Defensive soft cap on a family's buffered candidates: a many-company tenant
 # can concentrate one detector's whole family in RAM before the first persist
 # (the run's memory high-water mark). Crossing the cap releases the buffered

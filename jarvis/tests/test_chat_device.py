@@ -3,10 +3,10 @@
 Two surface areas to cover:
 1. ensure_paired: generates a keypair if missing, calls admin to register the
    public side, persists everything atomically; reuses existing creds when
-   present; surfaces admin failures as OpenclawUnreachableError without
+   present; surfaces admin failures as AgentUnreachableError without
    half-persisting a broken state.
-2. build_payload_v3 / sign_payload: the byte-exact mirror of openclaw's
-   device-auth.ts:36 - if openclaw rev-bumps the format, this is the test
+2. build_payload_v3 / sign_payload: the byte-exact mirror of agent's
+   device-auth.ts:36 - if agent rev-bumps the format, this is the test
    that catches it before chat goes live.
 """
 
@@ -22,7 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import device as chat_device
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 
 
 def _b64u(raw: bytes) -> str:
@@ -30,10 +30,12 @@ def _b64u(raw: bytes) -> str:
 
 
 _SNAPSHOT_PASSWORD_FIELDS = (
-	"chat_device_private_key", "chat_device_token",
+	"chat_device_private_key",
+	"chat_device_token",
 )
 _SNAPSHOT_PLAIN_FIELDS = (
-	"chat_device_id", "chat_device_public_key",
+	"chat_device_id",
+	"chat_device_public_key",
 )
 
 
@@ -96,7 +98,7 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 		self.assertEqual(creds.device_token, "tok-from-admin")
 		self.assertEqual(creds.public_key, captured["public_key"])
 		self.assertEqual(creds.device_id, captured["device_id"])
-		# deviceId must match sha256(rawPublicKey) - same invariant openclaw enforces.
+		# deviceId must match sha256(rawPublicKey) - same invariant agent enforces.
 		raw = base64.urlsafe_b64decode(captured["public_key"] + "=" * (-len(captured["public_key"]) % 4))
 		self.assertEqual(creds.device_id, hashlib.sha256(raw).hexdigest())
 		# Persisted in Settings.
@@ -109,11 +111,10 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 	def test_reuses_existing_creds_without_admin_call(self):
 		# Seed Settings with a valid keypair + token.
 		priv = Ed25519PrivateKey.generate()
-		pub_raw = priv.public_key().public_bytes(serialization.Encoding.Raw,
-												  serialization.PublicFormat.Raw)
-		priv_raw = priv.private_bytes(serialization.Encoding.Raw,
-									   serialization.PrivateFormat.Raw,
-									   serialization.NoEncryption())
+		pub_raw = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+		priv_raw = priv.private_bytes(
+			serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()
+		)
 		s = frappe.get_single("Jarvis Settings")
 		s.db_set("chat_device_id", hashlib.sha256(pub_raw).hexdigest())
 		s.db_set("chat_device_public_key", _b64u(pub_raw))
@@ -128,9 +129,8 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 		self.assertEqual(creds.device_id, hashlib.sha256(pub_raw).hexdigest())
 
 	def test_admin_failure_raises_and_does_not_persist(self):
-		with patch("jarvis.chat.device.admin_client.pair_chat_device",
-				   side_effect=RuntimeError("boom")):
-			with self.assertRaises(OpenclawUnreachableError):
+		with patch("jarvis.chat.device.admin_client.pair_chat_device", side_effect=RuntimeError("boom")):
+			with self.assertRaises(AgentUnreachableError):
 				chat_device.ensure_paired()
 		# Nothing persisted on failure.
 		s = frappe.get_single("Jarvis Settings")
@@ -138,9 +138,8 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 		self.assertFalse(s.get_password("chat_device_private_key", raise_exception=False))
 
 	def test_empty_device_token_raises_unreachable(self):
-		with patch("jarvis.chat.device.admin_client.pair_chat_device",
-				   return_value={"device_token": ""}):
-			with self.assertRaises(OpenclawUnreachableError):
+		with patch("jarvis.chat.device.admin_client.pair_chat_device", return_value={"device_token": ""}):
+			with self.assertRaises(AgentUnreachableError):
 				chat_device.ensure_paired()
 
 	def test_concurrent_callers_share_one_admin_pair_call(self):
@@ -168,7 +167,8 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 		# the lock race.
 		first_priv = Ed25519PrivateKey.generate()
 		first_pub_raw = first_priv.public_key().public_bytes(
-			serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+			serialization.Encoding.Raw,
+			serialization.PublicFormat.Raw,
 		)
 		first_device_id = hashlib.sha256(first_pub_raw).hexdigest()
 
@@ -176,10 +176,16 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 			s = frappe.get_single("Jarvis Settings")
 			s.db_set("chat_device_id", first_device_id)
 			s.db_set("chat_device_public_key", _b64u(first_pub_raw))
-			s.db_set("chat_device_private_key", _b64u(first_priv.private_bytes(
-				serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
-				serialization.NoEncryption(),
-			)))
+			s.db_set(
+				"chat_device_private_key",
+				_b64u(
+					first_priv.private_bytes(
+						serialization.Encoding.Raw,
+						serialization.PrivateFormat.Raw,
+						serialization.NoEncryption(),
+					)
+				),
+			)
 			s.db_set("chat_device_token", "tok-winner")
 			frappe.db.commit()
 
@@ -187,12 +193,12 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 			def __enter__(_self):
 				_pre_populate_settings_inside_lock()
 				return True
+
 			def __exit__(_self, *a):
 				return False
 
 		mock_pair = patch("jarvis.chat.device.admin_client.pair_chat_device").start()
-		mock_lock = patch("jarvis._redis_lock.redis_lock",
-		                  return_value=_FakeLockCtx()).start()
+		mock_lock = patch("jarvis._redis_lock.redis_lock", return_value=_FakeLockCtx()).start()
 		try:
 			creds = chat_device.ensure_paired()
 		finally:
@@ -216,8 +222,9 @@ class TestEnsurePaired(_SettingsSnapshotMixin, FrappeTestCase):
 		s.db_set("chat_device_token", "")
 		frappe.db.commit()
 
-		with patch("jarvis.chat.device.admin_client.pair_chat_device",
-				   return_value={"device_token": "tok-repaired"}):
+		with patch(
+			"jarvis.chat.device.admin_client.pair_chat_device", return_value={"device_token": "tok-repaired"}
+		):
 			creds = chat_device.ensure_paired()
 		self.assertEqual(creds.device_token, "tok-repaired")
 		self.assertNotEqual(creds.device_id, "abc")  # fresh keypair was generated
@@ -230,20 +237,25 @@ class TestRotateChatDevice(_SettingsSnapshotMixin, FrappeTestCase):
 	def test_rotate_generates_fresh_keypair_even_when_pairing_exists(self):
 		# Seed Settings with valid pre-rotation creds.
 		priv = Ed25519PrivateKey.generate()
-		pub_raw = priv.public_key().public_bytes(serialization.Encoding.Raw,
-												  serialization.PublicFormat.Raw)
+		pub_raw = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 		old_device_id = hashlib.sha256(pub_raw).hexdigest()
 		s = frappe.get_single("Jarvis Settings")
 		s.db_set("chat_device_id", old_device_id)
 		s.db_set("chat_device_public_key", _b64u(pub_raw))
-		s.db_set("chat_device_private_key", _b64u(priv.private_bytes(
-			serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
-			serialization.NoEncryption())))
+		s.db_set(
+			"chat_device_private_key",
+			_b64u(
+				priv.private_bytes(
+					serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()
+				)
+			),
+		)
 		s.db_set("chat_device_token", "tok-old")
 		frappe.db.commit()
 
-		with patch("jarvis.chat.device.admin_client.pair_chat_device",
-				   return_value={"device_token": "tok-new"}):
+		with patch(
+			"jarvis.chat.device.admin_client.pair_chat_device", return_value={"device_token": "tok-new"}
+		):
 			out = chat_device.rotate_chat_device()
 
 		# Wire-shape check + new device_id is fresh + token rotated.
@@ -256,8 +268,7 @@ class TestRotateChatDevice(_SettingsSnapshotMixin, FrappeTestCase):
 	def test_rotate_preserves_old_creds_on_admin_failure(self):
 		# Seed old creds.
 		priv = Ed25519PrivateKey.generate()
-		pub_raw = priv.public_key().public_bytes(serialization.Encoding.Raw,
-												  serialization.PublicFormat.Raw)
+		pub_raw = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 		old_device_id = hashlib.sha256(pub_raw).hexdigest()
 		s = frappe.get_single("Jarvis Settings")
 		s.db_set("chat_device_id", old_device_id)
@@ -265,9 +276,10 @@ class TestRotateChatDevice(_SettingsSnapshotMixin, FrappeTestCase):
 		s.db_set("chat_device_token", "tok-old")
 		frappe.db.commit()
 
-		with patch("jarvis.chat.device.admin_client.pair_chat_device",
-				   side_effect=RuntimeError("admin down")):
-			with self.assertRaises(OpenclawUnreachableError):
+		with patch(
+			"jarvis.chat.device.admin_client.pair_chat_device", side_effect=RuntimeError("admin down")
+		):
+			with self.assertRaises(AgentUnreachableError):
 				chat_device.rotate_chat_device()
 
 		# Old creds intact.
@@ -366,23 +378,30 @@ class TestUpdateDeviceToken(_SettingsSnapshotMixin, FrappeTestCase):
 class TestSigning(FrappeTestCase):
 	def test_build_payload_v3_format(self):
 		out = chat_device.build_payload_v3(
-			device_id="DID", client_id="gateway-client", client_mode="backend",
-			role="operator", scopes=["operator.write", "operator.admin"],
-			signed_at_ms=12345, device_token="TOK", nonce="NONCE",
-			platform="Linux", device_family="",
+			device_id="DID",
+			client_id="gateway-client",
+			client_mode="backend",
+			role="operator",
+			scopes=["operator.write", "operator.admin"],
+			signed_at_ms=12345,
+			device_token="TOK",
+			nonce="NONCE",
+			platform="Linux",
+			device_family="",
 		)
-		# Mirror of openclaw's buildDeviceAuthPayloadV3 (device-auth.ts:36).
+		# Mirror of agent's buildDeviceAuthPayloadV3 (device-auth.ts:36).
 		# Platform is normalized to ASCII lowercase ("linux"); device_family
 		# stays empty.
-		expected = "v3|DID|gateway-client|backend|operator|operator.write,operator.admin|12345|TOK|NONCE|linux|"
+		expected = (
+			"v3|DID|gateway-client|backend|operator|operator.write,operator.admin|12345|TOK|NONCE|linux|"
+		)
 		self.assertEqual(out, expected)
 
 	def test_sign_payload_verifies_with_public_key(self):
 		"""Round-trip: sign with private, verify with the matching public key
-		using the same Ed25519 raw scheme openclaw uses."""
+		using the same Ed25519 raw scheme agent uses."""
 		priv = Ed25519PrivateKey.generate()
-		pub_raw = priv.public_key().public_bytes(serialization.Encoding.Raw,
-												  serialization.PublicFormat.Raw)
+		pub_raw = priv.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 		payload = "v3|x|y|z|operator||0||n||"
 		sig_b64u = chat_device.sign_payload(priv, payload)
 		# Decode and verify.
@@ -392,9 +411,45 @@ class TestSigning(FrappeTestCase):
 
 	def test_metadata_normalization_lowercases_ascii_only(self):
 		out = chat_device.build_payload_v3(
-			device_id="x", client_id="c", client_mode="m", role="r",
-			scopes=["s"], signed_at_ms=0, device_token="", nonce="n",
-			platform="DarwinARM64", device_family="iPhone15",
+			device_id="x",
+			client_id="c",
+			client_mode="m",
+			role="r",
+			scopes=["s"],
+			signed_at_ms=0,
+			device_token="",
+			nonce="n",
+			platform="DarwinARM64",
+			device_family="iPhone15",
 		)
 		# Trailing fields after the nonce: |<platform>|<device_family>
 		self.assertTrue(out.endswith("|darwinarm64|iphone15"))
+
+
+class TestSessionDeviceIsStale(FrappeTestCase):
+	"""jarvis #712: the single source of truth both jarvis.api.call_tool
+	(the security guard, must never auto-heal) and turn_handler.
+	handle_chat_send (the recovery, safe to auto-heal) read to decide
+	whether a session's snapshotted device binding is stale."""
+
+	def test_mismatched_ids_are_stale(self):
+		self.assertTrue(chat_device.session_device_is_stale("old-device", "new-device"))
+
+	def test_matching_ids_are_not_stale(self):
+		self.assertFalse(chat_device.session_device_is_stale("same-device", "same-device"))
+
+	def test_blank_row_device_is_backwards_compat_not_stale(self):
+		"""Pre-migration row (no chat_device_id column populated yet) must
+		keep dispatching - see the C2 backwards-compat note in api.py."""
+		self.assertFalse(chat_device.session_device_is_stale("", "current-device"))
+
+	def test_blank_current_device_is_not_stale(self):
+		"""A bench that has never paired has no current device to compare
+		against - never reject on that alone."""
+		self.assertFalse(chat_device.session_device_is_stale("old-device", ""))
+
+	def test_both_blank_is_not_stale(self):
+		self.assertFalse(chat_device.session_device_is_stale("", ""))
+
+	def test_whitespace_is_stripped_before_comparing(self):
+		self.assertFalse(chat_device.session_device_is_stale("  dev-1  ", "dev-1"))

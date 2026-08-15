@@ -37,7 +37,7 @@
    "fieldname": "action",
    "fieldtype": "Select",
    "label": "Action",
-   "options": "installed\nuninstalled\nenabled\ndisabled\nschedule_changed\nconfig_changed\nrun_started\nrun_completed\nrun_partial\nrun_failed",
+   "options": "installed\nuninstalled\nenabled\ndisabled\nschedule_changed\nconfig_changed\nrun_as_changed\nrun_started\nrun_completed\nrun_partial\nrun_failed",
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1

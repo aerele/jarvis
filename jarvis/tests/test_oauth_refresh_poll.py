@@ -72,8 +72,9 @@ class TestOauthRefreshPoll(_PollTestCase):
 	def test_no_change_when_profile_present(self):
 		"""Container reports profile present -> leave last_sync_status
 		alone (don't clobber the legitimate save's 'ok' marker)."""
-		with patch("jarvis.admin_client.post_llm_auth_status",
-		           return_value={"data": {"auth_profile_present": True}}):
+		with patch(
+			"jarvis.admin_client.post_llm_auth_status", return_value={"data": {"auth_profile_present": True}}
+		):
 			poll_oauth_refresh_status()
 		s = frappe.get_single("Jarvis Settings")
 		self.assertEqual(s.last_sync_status, "ok (restart via admin)")
@@ -83,8 +84,9 @@ class TestOauthRefreshPoll(_PollTestCase):
 		"""The core fix: container reports profile absent -> flip status
 		to oauth_expired AND clear the cached account email so the UI
 		can render 'reconnect'."""
-		with patch("jarvis.admin_client.post_llm_auth_status",
-		           return_value={"data": {"auth_profile_present": False}}):
+		with patch(
+			"jarvis.admin_client.post_llm_auth_status", return_value={"data": {"auth_profile_present": False}}
+		):
 			poll_oauth_refresh_status()
 		s = frappe.get_single("Jarvis Settings")
 		self.assertEqual(s.last_sync_status, "oauth_expired")
@@ -95,8 +97,11 @@ class TestOauthRefreshPoll(_PollTestCase):
 		"""AdminUnreachable is ambiguous (could be admin down OR container
 		lost profile). Must NOT flip status - the next hour retries."""
 		from jarvis.exceptions import AdminUnreachableError
-		with patch("jarvis.admin_client.post_llm_auth_status",
-		           side_effect=AdminUnreachableError("connection refused")):
+
+		with patch(
+			"jarvis.admin_client.post_llm_auth_status",
+			side_effect=AdminUnreachableError("connection refused"),
+		):
 			poll_oauth_refresh_status()
 		s = frappe.get_single("Jarvis Settings")
 		# Unchanged.
@@ -108,8 +113,8 @@ class TestOauthRefreshPoll(_PollTestCase):
 		(bench credentials wrong, not container state). Surface it
 		separately so the operator can act on the right thing."""
 		from jarvis.exceptions import AdminAuthError
-		with patch("jarvis.admin_client.post_llm_auth_status",
-		           side_effect=AdminAuthError("bad bench creds")):
+
+		with patch("jarvis.admin_client.post_llm_auth_status", side_effect=AdminAuthError("bad bench creds")):
 			poll_oauth_refresh_status()
 		s = frappe.get_single("Jarvis Settings")
 		self.assertIn("failed", s.last_sync_status or "")
@@ -120,8 +125,11 @@ class TestOauthRefreshPoll(_PollTestCase):
 	def test_admin_rate_limited_skips_without_flip(self):
 		"""Rate-limit is transient; skip + retry next tick."""
 		from jarvis.exceptions import AdminRateLimitedError
-		with patch("jarvis.admin_client.post_llm_auth_status",
-		           side_effect=AdminRateLimitedError(retry_after_seconds=600)):
+
+		with patch(
+			"jarvis.admin_client.post_llm_auth_status",
+			side_effect=AdminRateLimitedError(retry_after_seconds=600),
+		):
 			poll_oauth_refresh_status()
 		s = frappe.get_single("Jarvis Settings")
 		# Unchanged.
@@ -135,8 +143,10 @@ class TestOauthRefreshPoll(_PollTestCase):
 		- so it must not flip. It also must not escape: uncaught, it raised out
 		of the hourly scheduled job."""
 		from jarvis.exceptions import AdminValidationError
-		with patch("jarvis.admin_client.post_llm_auth_status",
-		           side_effect=AdminValidationError("NoRunningTenant")):
+
+		with patch(
+			"jarvis.admin_client.post_llm_auth_status", side_effect=AdminValidationError("NoRunningTenant")
+		):
 			poll_oauth_refresh_status()  # must not raise
 		s = frappe.get_single("Jarvis Settings")
 		# Unchanged.

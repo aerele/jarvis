@@ -169,9 +169,7 @@ def postprocess_default_vs_usage(rows, spec, company, patterndb, params):
 		return []  # realized usage matches config -> nothing to reconcile
 
 	exceptions = [
-		{"unit": uid, "value": v, "month": month_key(d)}
-		for uid, (v, d, _c) in units.items()
-		if v != mode
+		{"unit": uid, "value": v, "month": month_key(d)} for uid, (v, d, _c) in units.items() if v != mode
 	][:20]
 	raw = evaluate_segment(
 		spec,

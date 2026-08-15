@@ -1,9 +1,10 @@
 """Jarvis User Settings DocType controller.
 
 One row per Frappe user, holding that user's chat preferences
-(``notify_enabled`` / ``activity_detail``), an admin-set monthly token cap
-(``monthly_token_limit``, permlevel 1), and the read-only usage counters the
-turn handler increments via atomic SQL (``jarvis.chat.usage``).
+(``notify_enabled`` / ``activity_detail``), an admin-set all-time token cap
+(``monthly_token_limit`` - legacy fieldname, the cap is now all-time not
+monthly, permlevel 1), and the read-only usage counters the turn handler
+increments via atomic SQL (``jarvis.chat.usage``).
 
 Rows are created lazily by ``jarvis.chat.usage.get_or_create_user_settings``
 with an explicit ``owner`` so the ``if_owner`` permlevel-0 grant holds even

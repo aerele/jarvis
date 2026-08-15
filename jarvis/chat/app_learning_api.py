@@ -23,13 +23,21 @@ from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 RUN = "Jarvis App Learning Run"
 
 _STATUSES = {
-	"Queued", "Zipping", "Analyzing", "Ingesting", "Completed", "Failed", "Cancelled",
+	"Queued",
+	"Zipping",
+	"Analyzing",
+	"Ingesting",
+	"Completed",
+	"Failed",
+	"Cancelled",
 }
 _CANCELLABLE = ("Queued", "Zipping", "Analyzing")
 
 _RUN_FILTERS = {"app", "status"}
 _RUN_SORTABLE = {
-	"creation": "creation", "app": "app", "status": "status",
+	"creation": "creation",
+	"app": "app",
+	"status": "status",
 	"finished_at": "finished_at",
 }
 
@@ -37,10 +45,23 @@ _RUN_SORTABLE = {
 MAX_SCHEDULE_DAYS_OUT = 30
 
 _ROW_FIELDS = (
-	"name", "app", "status", "scheduled_at", "started_at", "finished_at",
-	"conversation", "zip_size", "file_count", "batches_total", "batches_done",
-	"pages_written", "skills_created", "skills_deferred", "error",
-	"requested_by", "creation",
+	"name",
+	"app",
+	"status",
+	"scheduled_at",
+	"started_at",
+	"finished_at",
+	"conversation",
+	"zip_size",
+	"file_count",
+	"batches_total",
+	"batches_done",
+	"pages_written",
+	"skills_created",
+	"skills_deferred",
+	"error",
+	"requested_by",
+	"creation",
 )
 
 _DATETIME_ROW_KEYS = ("scheduled_at", "started_at", "finished_at", "creation")
@@ -104,11 +125,29 @@ def get_app_learning_overview() -> dict:
 @frappe.whitelist()
 @require_jarvis_user
 def schedule_app_learning(apps: str, when: str = "", consent: int = 0) -> dict:
-	"""Queue one learning run per app. ``apps`` is a JSON list of installed
-	custom app names; ``when`` empty means now, else a future frappe datetime
-	(<= 30 days out). ``consent=1`` is mandatory — the run spends provider
-	tokens and writes wiki pages/skills directly."""
+	"""RETIRED (rollback-operable). The chat-batch custom-app learning pipeline has been
+	REPLACED by the Custom App Learning *scribe* delegate agent (marketplace slug
+	``custom-app-learning``), which reads app source and writes the wiki in the Jarvis
+	container instead of feeding source through a chat transcript. This endpoint REFUSES
+	while the pipeline is retired (the default) so no new chat-pipeline run can start; the
+	engine and the ``Jarvis App Learning Run`` doctype stay present (rollback + historical
+	rows) but dormant. Install/run the agent from the Agents page instead.
+
+	CA3-5: the refusal is CONDITIONAL on ``app_analysis._legacy_retired()``. When an
+	operator DELIBERATELY re-enables the pipeline for rollback (conf
+	``jarvis_app_learning_reenable``), this endpoint executes the retained scheduling body
+	below, so a rollback can actually queue a run — the self-gating ``app_analysis.tick``
+	cron (re-registered in hooks, inert while retired) then drives it forward."""
 	_require_manage()
+	if app_analysis._legacy_retired():
+		frappe.throw(
+			_(
+				"The chat-batch app-learning pipeline is retired. Install and run the "
+				"Custom App Learning agent from the Agents page instead."
+			)
+		)
+	# Retained legacy scheduling body — operable ONLY when the pipeline is re-enabled for
+	# rollback (the refusal above is bypassed).
 	if cint(consent) != 1:
 		frappe.throw(_("Consent to the token cost and direct wiki/skill writes is required."))
 
@@ -138,9 +177,7 @@ def schedule_app_learning(apps: str, when: str = "", consent: int = 0) -> dict:
 		if scheduled_at <= now:
 			frappe.throw(_("Schedule time must be in the future."))
 		if scheduled_at > add_to_date(now, days=MAX_SCHEDULE_DAYS_OUT):
-			frappe.throw(
-				_("Schedule time can be at most {0} days out.").format(MAX_SCHEDULE_DAYS_OUT)
-			)
+			frappe.throw(_("Schedule time can be at most {0} days out.").format(MAX_SCHEDULE_DAYS_OUT))
 	else:
 		scheduled_at = now
 
@@ -154,22 +191,20 @@ def schedule_app_learning(apps: str, when: str = "", consent: int = 0) -> dict:
 			limit=1,
 		)
 		if open_run:
-			frappe.throw(
-				_("App {0} already has a run in progress ({1}).").format(
-					app, open_run[0].status
-				)
-			)
+			frappe.throw(_("App {0} already has a run in progress ({1}).").format(app, open_run[0].status))
 
 	created: list[str] = []
 	for app in names:
-		doc = frappe.get_doc({
-			"doctype": RUN,
-			"app": app,
-			"status": "Queued",
-			"scheduled_at": scheduled_at,
-			"requested_by": frappe.session.user,
-			"consent_at": now,
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"app": app,
+				"status": "Queued",
+				"scheduled_at": scheduled_at,
+				"requested_by": frappe.session.user,
+				"consent_at": now,
+			}
+		)
 		doc.insert(ignore_permissions=True)
 		created.append(doc.name)
 	frappe.db.commit()
@@ -189,8 +224,9 @@ def cancel_app_learning_run(name: str) -> dict:
 	doc = frappe.get_doc(RUN, name)
 	if doc.status not in _CANCELLABLE:
 		frappe.throw(
-			_("Only a run that is Queued, Zipping or Analyzing can be cancelled "
-			  "(this one is {0}).").format(doc.status)
+			_("Only a run that is Queued, Zipping or Analyzing can be cancelled (this one is {0}).").format(
+				doc.status
+			)
 		)
 	app_analysis.mark_cancelled(doc.name)
 	return {"ok": True}
@@ -243,16 +279,15 @@ def list_app_learning_runs_page(
 	where = " AND ".join(conds)
 	order = _order_by(sort_field, sort_dir)
 
-	total = frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tabJarvis App Learning Run` WHERE {where}", params
-	)[0][0]
+	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis App Learning Run` WHERE {where}", params)[0][0]
 	rows = frappe.db.sql(
 		f"""SELECT {", ".join(_ROW_FIELDS)}
 		FROM `tabJarvis App Learning Run`
 		WHERE {where}
 		ORDER BY {order}
 		LIMIT %(page_length)s OFFSET %(start)s""",
-		params, as_dict=True,
+		params,
+		as_dict=True,
 	)
 	for r in rows:
 		_row_out(r)

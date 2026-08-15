@@ -1,10 +1,11 @@
 <script setup>
-import { computed, ref, watch } from "vue"
-import { renderMarkdown } from "@shared/markdown.js"
-import { pendingCardOf, pendingExpiry } from "@shared/lib/actionSummary.js"
-import Sheet from "./Sheet.vue"
-import PendingCard from "./PendingCard.vue"
-import * as api from "../api"
+import { computed, ref, watch } from "vue";
+import { renderMarkdown } from "@shared/markdown.js";
+import { pendingCardOf, pendingExpiry } from "@shared/lib/actionSummary.js";
+import Sheet from "./Sheet.vue";
+import PendingCard from "./PendingCard.vue";
+import * as api from "../api";
+import { agentName } from "@/branding";
 
 // Approve / deny a parked write.
 //
@@ -14,64 +15,64 @@ import * as api from "../api"
 // puts a biometric prompt in front of approve; the browser has no equivalent it
 // can trust, and this surface is already behind the Frappe session, so the
 // confirmation itself is the gate.
-const props = defineProps({ action: { type: Object, default: null } })
-const emit = defineEmits(["close", "resolved"])
+const props = defineProps({ action: { type: Object, default: null } });
+const emit = defineEmits(["close", "resolved"]);
 
-const state = ref("review") // review | busy | approved | denied
-const error = ref("")
+const state = ref("review"); // review | busy | approved | denied
+const error = ref("");
 
 // Fresh card → fresh sheet.
 watch(
 	() => props.action?.token,
 	() => {
-		state.value = "review"
-		error.value = ""
-	},
-)
+		state.value = "review";
+		error.value = "";
+	}
+);
 
 const summary = computed(
-	() => props.action?.summary || props.action?.tool || "Approve this change",
-)
+	() => props.action?.summary || props.action?.tool || "Approve this change"
+);
 
 // F9: the server-built "what will change" card (null -> fall back to previewHtml).
-const card = computed(() => pendingCardOf({ preview: props.action?.preview }))
+const card = computed(() => pendingCardOf({ preview: props.action?.preview }));
 // Raw dry-run JSON for the card's Details expander; empty for described-intent
 // previews or when there is no dry-run doc.
 const rawDetails = computed(() => {
-	const pv = props.action?.preview
-	if (!pv || typeof pv === "string" || pv.described || pv.would == null) return ""
-	return typeof pv.would === "string" ? pv.would : JSON.stringify(pv.would, null, 2)
-})
+	const pv = props.action?.preview;
+	if (!pv || typeof pv === "string" || pv.described || pv.would == null) return "";
+	return typeof pv.would === "string" ? pv.would : JSON.stringify(pv.would, null, 2);
+});
 // F15: the server's wall-clock expiry (epoch seconds) for this parked token.
-const expired = computed(() => pendingExpiry(props.action?.expires_at, Date.now()).expired)
+const expired = computed(() => pendingExpiry(props.action?.expires_at, Date.now()).expired);
 
 // The preview is either a ready-made string or {note, would} — `described` means
 // the note already says it all and the payload dump would just be noise.
 const previewHtml = computed(() => {
-	const pv = props.action?.preview
-	if (!pv) return ""
-	if (typeof pv === "string") return renderMarkdown(pv)
-	const parts = []
-	if (pv.note) parts.push(pv.note)
+	const pv = props.action?.preview;
+	if (!pv) return "";
+	if (typeof pv === "string") return renderMarkdown(pv);
+	const parts = [];
+	if (pv.note) parts.push(pv.note);
 	if (!pv.described && pv.would != null) {
-		const body = typeof pv.would === "string" ? pv.would : JSON.stringify(pv.would, null, 2)
-		parts.push("```\n" + body + "\n```")
+		const body = typeof pv.would === "string" ? pv.would : JSON.stringify(pv.would, null, 2);
+		parts.push("```\n" + body + "\n```");
 	}
-	return parts.length ? renderMarkdown(parts.join("\n\n")) : ""
-})
+	return parts.length ? renderMarkdown(parts.join("\n\n")) : "";
+});
 
 function deny() {
-	if (state.value === "busy") return
-	state.value = "denied"
-	emit("resolved", props.action.token, "denied")
+	if (state.value === "busy") return;
+	state.value = "denied";
+	emit("resolved", props.action.token, "denied");
 }
 
 async function approve() {
-	if (state.value === "busy") return
-	error.value = ""
-	state.value = "busy"
+	if (state.value === "busy") return;
+	error.value = "";
+	state.value = "busy";
 	try {
-		const r = await api.confirmTool(props.action.token, props.action.conversation)
+		const r = await api.confirmTool(props.action.token, props.action.conversation);
 		if (r && r.ok === false) {
 			// The token is single-use and short-lived: a stale card must say so
 			// rather than look like a failure the user can retry.
@@ -79,21 +80,21 @@ async function approve() {
 				// InvalidConfirmation is deliberately opaque; use the card's own
 				// wall-clock expiry to say the right thing (F15).
 				error.value = pendingExpiry(props.action?.expires_at, Date.now()).expired
-					? "This confirmation expired — tell Jarvis the action again to retry it."
-					: "Couldn't confirm — it may have been handled elsewhere. Refresh, or ask Jarvis to try again."
-				state.value = "review"
-				emit("resolved", props.action.token, "expired")
-				return
+					? `This confirmation expired. Tell ${agentName} the action again to retry it.`
+					: `Couldn't confirm. It may have been handled elsewhere. Refresh, or ask ${agentName} to try again.`;
+				state.value = "review";
+				emit("resolved", props.action.token, "expired");
+				return;
 			}
-			error.value = r.error?.message || r.reason || "Couldn't run this action."
-			state.value = "review"
-			return
+			error.value = r.error?.message || r.reason || "Couldn't run this action.";
+			state.value = "review";
+			return;
 		}
-		state.value = "approved"
-		emit("resolved", props.action.token, "approved")
+		state.value = "approved";
+		emit("resolved", props.action.token, "approved");
 	} catch (e) {
-		error.value = e?.message || "Couldn't run this action."
-		state.value = "review"
+		error.value = e?.message || "Couldn't run this action.";
+		state.value = "review";
 	}
 }
 </script>
@@ -103,19 +104,40 @@ async function approve() {
 		<div v-if="props.action" class="jv-dsheet">
 			<div v-if="state === 'approved' || state === 'denied'" class="jv-dresult">
 				<div class="jv-dresult-icon" :class="state === 'approved' ? 'is-ok' : 'is-no'">
-					<svg v-if="state === 'approved'" viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+					<svg
+						v-if="state === 'approved'"
+						viewBox="0 0 24 24"
+						width="34"
+						height="34"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.4"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<path d="M20 6 9 17l-5-5" />
 					</svg>
-					<svg v-else viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+					<svg
+						v-else
+						viewBox="0 0 24 24"
+						width="32"
+						height="32"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.4"
+						stroke-linecap="round"
+					>
 						<path d="M18 6 6 18M6 6l12 12" />
 					</svg>
 				</div>
-				<div class="jv-dresult-title">{{ state === "approved" ? "Approved" : "Denied" }}</div>
+				<div class="jv-dresult-title">
+					{{ state === "approved" ? "Approved" : "Denied" }}
+				</div>
 				<div class="jv-dresult-sub">
 					{{
 						state === "approved"
-							? "Jarvis is running the action now. You'll see the result in the thread."
-							: "The change was rejected. Jarvis won't run this action."
+							? `${agentName} is running the action now. You'll see the result in the thread.`
+							: `The change was rejected. ${agentName} won't run this action.`
 					}}
 				</div>
 				<button class="jv-btn is-primary" @click="emit('close')">Done</button>
@@ -130,13 +152,22 @@ async function approve() {
 					<div class="jv-dsummary">{{ summary }}</div>
 					<PendingCard v-if="card" :card="card" :details="rawDetails" class="jv-dcard" />
 					<div v-else-if="previewHtml" class="jv-dpreview" v-html="previewHtml" />
-					<div v-if="expired" class="jv-dexpired">This confirmation expired — tell Jarvis the action again to retry it.</div>
+					<div v-if="expired" class="jv-dexpired">
+						This confirmation expired. Tell {{ agentName }} the action again to retry
+						it.
+					</div>
 					<div v-if="error" class="jv-derror">{{ error }}</div>
 				</div>
 
 				<div class="jv-dactions">
-					<button class="jv-btn is-ghost" :disabled="state === 'busy'" @click="deny">Deny</button>
-					<button class="jv-btn is-primary jv-dapprove" :disabled="state === 'busy' || expired" @click="approve">
+					<button class="jv-btn is-ghost" :disabled="state === 'busy'" @click="deny">
+						Deny
+					</button>
+					<button
+						class="jv-btn is-primary jv-dapprove"
+						:disabled="state === 'busy' || expired"
+						@click="approve"
+					>
 						<span v-if="state === 'busy'" class="jv-spinner" />
 						<span v-else>Approve</span>
 					</button>
@@ -204,8 +235,18 @@ async function approve() {
 	background: var(--card2);
 	font-size: 12px;
 }
-.jv-dcard { margin-top: 12px; }
-.jv-dexpired { margin-top: 12px; padding: 11px; border-radius: 10px; background: var(--card2); color: var(--ink5); font-size: 12.5px; line-height: 1.45; }
+.jv-dcard {
+	margin-top: 12px;
+}
+.jv-dexpired {
+	margin-top: 12px;
+	padding: 11px;
+	border-radius: 10px;
+	background: var(--card2);
+	color: var(--ink5);
+	font-size: 12.5px;
+	line-height: 1.45;
+}
 .jv-derror {
 	margin-top: 12px;
 	padding: 11px;

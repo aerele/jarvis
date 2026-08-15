@@ -1,8 +1,8 @@
 """Tests for per-conversation thinking effort (Phase 2).
 
-Covers _thinking_prefix (pure unit) and the directive-leading invariant
-that holds even when _prepend_doc_context prefixes a [Viewing: ...] line
-(spec section 7.3, verification item 10.3).
+Covers the directive-leading invariant that holds even when
+_prepend_doc_context prefixes a [Viewing: ...] line (spec section 7.3,
+verification item 10.3).
 """
 
 from unittest.mock import MagicMock, patch
@@ -10,9 +10,8 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import openclaw_session_pool
+from jarvis.chat import agent_session_pool
 from jarvis.chat.api import create_conversation, send_message
-from jarvis.chat.turn_handler import _thinking_prefix
 from jarvis.chat.worker import run_agent_turn
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
@@ -21,34 +20,22 @@ from jarvis.tests.test_chat_api import (
 )
 
 
-class TestThinkingPrefix(FrappeTestCase):
-	def test_levels_emit_directive(self):
-		self.assertEqual(_thinking_prefix("low"), "/think low\n")
-		self.assertEqual(_thinking_prefix("MEDIUM"), "/think medium\n")
-		self.assertEqual(_thinking_prefix("high"), "/think high\n")
-
-	def test_empty_or_invalid_emits_nothing(self):
-		self.assertEqual(_thinking_prefix(""), "")
-		self.assertEqual(_thinking_prefix(None), "")
-		self.assertEqual(_thinking_prefix("ultra"), "")
-
-
 class TestThinkingDirectiveLeading(FrappeTestCase):
-	"""The /think directive must be the FIRST bytes sent to openclaw
+	"""The /think directive must be the FIRST bytes sent to agent
 	even when _prepend_doc_context prepends a [Viewing: ...] line for
 	floating-widget auto-context (spec 7.3, verification 10.3).
 
-	These tests call run_agent_turn with a mocked openclaw session and
+	These tests call run_agent_turn with a mocked agent session and
 	capture the message argument actually passed to stream_agent_turn.
 
 	test_directive_leads_with_doc_context is the RED-before / GREEN-after
-	test: before the relocation fix in handle_chat_send it fails because
-	_thinking_prefix was applied before _prepend_doc_context (so [Viewing:]
+	test: before the relocation fix in handle_chat_send it failed because the
+	/think prefix was applied before _prepend_doc_context (so [Viewing:]
 	displaced the directive); after the fix it passes.
 	"""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -56,9 +43,11 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 		conv = create_conversation()
 		with patch("frappe.enqueue"):
 			result = send_message(
-				conv, "what is the status?", thinking_override="high",
+				conv,
+				"what is the status?",
+				thinking_override="high",
 			)
-		# send_message no longer creates the openclaw session on the web
+		# send_message no longer creates the agent session on the web
 		# request (2026-07 latency plan, Phase 1.1 — the worker creates it on
 		# its pooled connection). These tests assert message COMPOSITION on an
 		# existing session, so seed the key directly, same as
@@ -75,26 +64,30 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 	def _capture_message_sent(self, context=None):
 		"""Run one agent turn and return (message, thinking) passed to chat_send.
 
-		The managed path sends the turn via ``chat_send`` (relay flow); the
-		thinking level rides the structured ``thinking`` kwarg, not the message
-		body (only the self-hosted HTTP path still inlines ``/think``). Uses
+		The turn goes out via ``chat_send`` (relay flow); the thinking level rides
+		the structured ``thinking`` kwarg, not the message body. Uses
 		call_args_list[0] (the FIRST call) to capture the user turn; a second
 		call, if any, is the auto-title prompt and must be ignored.
 		"""
 		fake_sess = MagicMock()
 		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
-		fake_sess.relay_turn_events.return_value = iter([
-			{"kind": "lifecycle", "phase": "start"},
-			{"kind": "lifecycle", "phase": "end"},
-			{"kind": "relay:final", "text": None},
-		])
+		fake_sess.relay_turn_events.return_value = iter(
+			[
+				{"kind": "lifecycle", "phase": "start"},
+				{"kind": "lifecycle", "phase": "end"},
+				{"kind": "relay:final", "text": None},
+			]
+		)
 		with patch(
-			"jarvis.chat.openclaw_session_pool.OpenclawSession.connect",
+			"jarvis.chat.agent_session_pool.AgentSession.connect",
 			return_value=fake_sess,
 		):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(
-					self.conv, self.user_msg, run_id="r1", context=context,
+					self.conv,
+					self.user_msg,
+					run_id="r1",
+					context=context,
 				)
 		first_call = fake_sess.chat_send.call_args_list[0]
 		pos = first_call.args

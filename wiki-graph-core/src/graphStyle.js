@@ -5,8 +5,16 @@
 
 const KIND = { org: "#a970ff", role: "#f2b134", user: "#4c9aff", page: "#8892b0" };
 const COMMUNITY = [
-	"#7c9eff", "#f2b134", "#4bd0a0", "#ff7ab6", "#a970ff",
-	"#ff8a5c", "#5cc8ff", "#c3d82c", "#ff5c8a", "#9d7bff",
+	"#7c9eff",
+	"#f2b134",
+	"#4bd0a0",
+	"#ff7ab6",
+	"#a970ff",
+	"#ff8a5c",
+	"#5cc8ff",
+	"#c3d82c",
+	"#ff5c8a",
+	"#9d7bff",
 ];
 const DEBT = "#ff5c5c";
 
@@ -33,19 +41,34 @@ export function nodeStyle(n, m, { mode, dark }) {
 }
 
 const EDGE_COLORS_DARK = {
-	"links-to": "#5a6478", scope: "#3a3f4b", authored: "#3f6f57",
-	"member-of": "#5a4f7a", read: "#3a5a80", wrote: "#7a5a3a", "cluster-link": "#5a6478",
+	"links-to": "#5a6478",
+	scope: "#3a3f4b",
+	authored: "#3f6f57",
+	"member-of": "#5a4f7a",
+	read: "#3a5a80",
+	wrote: "#7a5a3a",
+	"cluster-link": "#5a6478",
 };
 const EDGE_COLORS_LIGHT = {
-	"links-to": "#aeb6c2", scope: "#e2e6ea", authored: "#bfe3cf",
-	"member-of": "#d8cff0", read: "#cfe0f5", wrote: "#f0dcc0", "cluster-link": "#aeb6c2",
+	"links-to": "#aeb6c2",
+	scope: "#e2e6ea",
+	authored: "#bfe3cf",
+	"member-of": "#d8cff0",
+	read: "#cfe0f5",
+	wrote: "#f0dcc0",
+	"cluster-link": "#aeb6c2",
 };
 
 export function edgeStyle(e, { dark }) {
 	const map = dark ? EDGE_COLORS_DARK : EDGE_COLORS_LIGHT;
 	const strong = e.kind === "links-to" || e.kind === "cluster-link";
 	return {
-		size: e.kind === "cluster-link" ? Math.min(1 + (e.weight || 1) * 0.5, 5) : (strong ? 1.4 : 0.7),
+		size:
+			e.kind === "cluster-link"
+				? Math.min(1 + (e.weight || 1) * 0.5, 5)
+				: strong
+				? 1.4
+				: 0.7,
 		color: map[e.kind] || (dark ? "#3a3f4b" : "#e2e6ea"),
 		type: "line",
 	};

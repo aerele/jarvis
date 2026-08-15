@@ -1,7 +1,8 @@
 """Tests for the Skills-page IA v2 voice-note CRUD extensions
 (``jarvis.chat.voice_notes_api``): ``update_voice_note`` (owner-only AND
 status ``New`` only, so the edited transcript re-feeds the daily sweep
-untouched) and the escaped ``search`` param on ``list_my_voice_notes_page``.
+untouched) and the escaped ``search`` param on ``list_my_voice_notes_page``,
+plus the ``source`` contract every shipped client depends on.
 
 Sibling of test_voice_facts.py (same fixture/idiom set: insert-as-owner,
 System User fixtures, ``_as`` set_user wrap, explicit cleanup); the sweep and
@@ -153,9 +154,7 @@ class TestUpdateVoiceNote(VoiceNotesCrudTestCase):
 			name = self._note(USER_A, f"{parked} history", status=parked)
 			with _as(USER_A), self.assertRaises(frappe.ValidationError):
 				voice_notes_api.update_voice_note(name, "rewritten history")
-			self.assertEqual(
-				frappe.db.get_value(NOTE, name, "transcript"), f"{parked} history"
-			)
+			self.assertEqual(frappe.db.get_value(NOTE, name, "transcript"), f"{parked} history")
 
 	def test_update_unknown_note(self):
 		with _as(USER_A), self.assertRaises(frappe.ValidationError):
@@ -242,3 +241,72 @@ class TestVoiceNotesSearch(VoiceNotesCrudTestCase):
 		with _as(USER_A):
 			page = voice_notes_api.list_my_voice_notes_page(search="x" * 140 + "z")
 		self.assertEqual(page["total"], 1)
+
+
+# --------------------------------------------------------------------------- #
+# save_voice_note `source` contract (JF-020)
+# --------------------------------------------------------------------------- #
+# Every capture surface that ships a client sending an explicit `source`. Each
+# entry names the client file that sends it, so deleting a value from
+# voice_notes_api._SOURCES fails here with the surface it would break instead of
+# silently 417-ing that client in the field:
+#
+#   Business Tab  frontend/src/api/voice.js         (web SPA, Personalise tab)
+#   Chat Nudge    frontend/src/views/ChatView.vue   (post-turn "remember this?")
+#   Mobile        jarvis_mobile src/api/endpoints.ts saveVoiceNote
+#                 (repo Aerele-RnD/jarvis_mobile)
+#
+# The PWA (pwa/src/api.js) deliberately sends NO source and rides the server
+# default, so it is not listed.
+CLIENT_SOURCES = {
+	"Business Tab": "frontend/src/api/voice.js",
+	"Chat Nudge": "frontend/src/views/ChatView.vue",
+	"Mobile": "jarvis_mobile src/api/endpoints.ts (saveVoiceNote)",
+}
+
+
+class TestVoiceNoteSourceContract(VoiceNotesCrudTestCase):
+	def test_every_shipped_client_source_is_accepted(self):
+		for source, client in CLIENT_SOURCES.items():
+			self.assertIn(
+				source,
+				voice_notes_api._SOURCES,
+				msg=f"{source!r} was dropped from voice_notes_api._SOURCES - {client} now 417s",
+			)
+
+	def test_allowlist_is_a_subset_of_the_doctype_options(self):
+		# frappe rejects an off-list Select value at insert, so an allowlist entry
+		# missing from the doctype would pass validation here and then explode on
+		# doc.insert() for the caller.
+		options = frappe.get_meta(NOTE).get_field("source").options.split("\n")
+		for source in voice_notes_api._SOURCES:
+			self.assertIn(source, options)
+
+	def test_each_allowed_source_round_trips(self):
+		# End-to-end through the endpoint (not just the constant): proves frappe's
+		# Select validation accepts the value on a real insert.
+		with _as(USER_A):
+			for source in voice_notes_api._SOURCES:
+				out = voice_notes_api.save_voice_note(
+					transcript=f"note captured from {source}",
+					context_type="Business",
+					source=source,
+				)
+				self.assertEqual(frappe.db.get_value(NOTE, out["name"], "source"), source)
+
+	def test_unknown_source_is_still_rejected(self):
+		# Fail closed: the allowlist grew, it did not become a passthrough.
+		with _as(USER_A), self.assertRaises(frappe.ValidationError):
+			voice_notes_api.save_voice_note(transcript="from nowhere", source="Telepathy")
+		self.assertEqual(frappe.db.count(NOTE, {"owner": USER_A}), 0)
+
+	def test_mobile_capture_is_org_scoped_not_private(self):
+		# Scope invariant: a phone capture is the Business tab on a phone, so its
+		# facts belong on the shared Org wiki exactly like a desktop capture -
+		# only "Personalise"/question-linked notes are private to their owner.
+		from jarvis.learning import voice_facts
+
+		for source in voice_notes_api._SOURCES:
+			self.assertFalse(voice_facts._is_personalise_note(source, None))
+		self.assertTrue(voice_facts._is_personalise_note("Personalise", None))
+		self.assertTrue(voice_facts._is_personalise_note("Mobile", "JPQ-0001"))

@@ -37,6 +37,13 @@ def _iter_api_modules():
 	import jarvis
 
 	yield jarvis
+	# LANDMINE (see jarvis#485, bench commit 96336978): walking + importing every
+	# module here can, in a parallel-test shard's file order on Python 3.14, leave
+	# `sys.modules['jarvis.selfhost'] = None`. Any later `import jarvis.selfhost` in
+	# the same shard process - in another test or in app code under test - then
+	# raises ModuleNotFoundError, and the failure looks unrelated to this file. If
+	# you hit that, the fix belongs here (e.g. snapshot + restore sys.modules around
+	# the walk), not in the victim test.
 	for info in pkgutil.walk_packages(jarvis.__path__, prefix="jarvis."):
 		if info.name.startswith(_SKIP_PREFIXES):
 			continue
@@ -76,11 +83,9 @@ class TestWhitelistAnnotations(FrappeTestCase):
 						continue
 					if param.annotation is inspect.Parameter.empty:
 						offenders.append(f"{key}({pname})")
-		self.assertTrue(found_any, "sweep found no whitelisted functions - "
-						"module walk or detection broke")
+		self.assertTrue(found_any, "sweep found no whitelisted functions - module walk or detection broke")
 		self.assertFalse(
 			offenders,
 			"un-annotated @frappe.whitelist parameters (500 under Frappe's "
-			"require_type_annotated_api_methods, which hooks.py enables): "
-			+ ", ".join(sorted(offenders)),
+			"require_type_annotated_api_methods, which hooks.py enables): " + ", ".join(sorted(offenders)),
 		)

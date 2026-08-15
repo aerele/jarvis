@@ -18,12 +18,14 @@ NOTE_DT = "Note"
 
 def _make_note(title: str = "jarvis-test-note", content: str = "before") -> str:
 	"""Create a Note row and return its name. Caller is responsible for cleanup."""
-	doc = frappe.get_doc({
-		"doctype": NOTE_DT,
-		"title": title,
-		"content": content,
-		"public": 1,
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": NOTE_DT,
+			"title": title,
+			"content": content,
+			"public": 1,
+		}
+	)
 	doc.insert(ignore_permissions=True)
 	frappe.db.commit()
 	return doc.name
@@ -135,9 +137,7 @@ class TestUpdateDocHappyPath(FrappeTestCase):
 			name=self.note,
 			changes={"content": "updated content", "title": "updated title"},
 		)
-		fresh = frappe.db.get_value(
-			NOTE_DT, self.note, ["content", "title"], as_dict=True
-		)
+		fresh = frappe.db.get_value(NOTE_DT, self.note, ["content", "title"], as_dict=True)
 		self.assertEqual(fresh["content"], "updated content")
 		self.assertEqual(fresh["title"], "updated title")
 

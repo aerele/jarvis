@@ -10,6 +10,7 @@
   "description",
   "dashboard_type",
   "theme",
+  "theme_schema_version",
   "scope",
   "target_role",
   "target_user",
@@ -45,9 +46,19 @@
    "fieldname": "theme",
    "fieldtype": "Select",
    "label": "Theme",
-   "options": "Jarvis\nInsight\nClaude\nGraphite",
+   "options": "Jarvis\nInsight\nClaude\nGraphite\nCustom",
    "default": "Jarvis",
-   "description": "Named render theme injected by the canvas shell as CSS variables. Jarvis = the app's own design language (default), Insight = Frappe-Insights-style light, Claude = warm ivory, Graphite = dark."
+   "description": "Named render theme injected by the canvas shell as CSS variables + component classes in a winning @layer. Jarvis = the app's own design language (default), Insight = Frappe-Insights-style light, Claude = warm ivory, Graphite = dark. Custom = bespoke escape hatch: the author's own design wins and the save-time theme lint relaxes its design rules (the safety bans stay)."
+  },
+  {
+   "fieldname": "theme_schema_version",
+   "fieldtype": "Int",
+   "label": "Theme Schema Version",
+   "default": "0",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "description": "Stamped by the save-time theme validator when the HTML passes (current: 1). 0/unset = legacy dashboard saved before the standard existed; grandfathered (never retro-enforced on read). Never set directly."
   },
   {
    "fieldname": "scope",

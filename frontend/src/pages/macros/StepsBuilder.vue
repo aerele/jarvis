@@ -2,7 +2,10 @@
 	<div>
 		<div class="flex flex-col gap-3">
 			<template v-for="(st, si) in modelValue" :key="si">
-				<div v-if="showIndicatorAbove(si)" class="h-0.5 rounded bg-[color:var(--ink-gray-9)]" />
+				<div
+					v-if="showIndicatorAbove(si)"
+					class="h-0.5 rounded bg-[color:var(--ink-gray-9)]"
+				/>
 				<div
 					class="space-y-2 rounded-md border p-3"
 					:class="{ 'opacity-50': dragIdx === si }"
@@ -85,7 +88,10 @@
 						</div>
 					</div>
 				</div>
-				<div v-if="showIndicatorBelow(si)" class="h-0.5 rounded bg-[color:var(--ink-gray-9)]" />
+				<div
+					v-if="showIndicatorBelow(si)"
+					class="h-0.5 rounded bg-[color:var(--ink-gray-9)]"
+				/>
 			</template>
 		</div>
 		<button
@@ -106,97 +112,97 @@
 // dashed "Add step" footer. v-model on the steps array; field edits mutate
 // the (parent-reactive) step objects in place, structural changes emit a new
 // array.
-import { ref, onMounted } from "vue"
-import { Button, FormControl, Autocomplete, confirmDialog } from "frappe-ui"
-import * as api from "@/api"
+import { ref, onMounted } from "vue";
+import { Button, FormControl, Autocomplete, confirmDialog } from "frappe-ui";
+import * as api from "@/api";
 
 const props = defineProps({
 	modelValue: { type: Array, default: () => [] }, // [{label, prompt, skills[]}]
 	disabled: { type: Boolean, default: false },
-})
+});
 
-const emit = defineEmits(["update:modelValue"])
+const emit = defineEmits(["update:modelValue"]);
 
 // ── per-step skills: own + shared-with-me, enabled only (a disabled skill
 //    can't be invoked - round-2 parity) ────────────────────────────────────────
-const skillRows = ref([])
+const skillRows = ref([]);
 onMounted(async () => {
 	try {
-		skillRows.value = ((await api.listCustomSkills()) || []).filter((s) => s.enabled)
+		skillRows.value = ((await api.listCustomSkills()) || []).filter((s) => s.enabled);
 	} catch (e) {
 		// picker stays empty; chips still render from the raw names
 	}
-})
+});
 
 function skillLabel(name) {
-	const s = skillRows.value.find((r) => r.name === name)
-	return (s && s.skill_name) || name
+	const s = skillRows.value.find((r) => r.name === name);
+	return (s && s.skill_name) || name;
 }
 
 function skillOptionsFor(st) {
-	const taken = new Set(st.skills || [])
+	const taken = new Set(st.skills || []);
 	return skillRows.value
 		.filter((s) => !taken.has(s.name))
-		.map((s) => ({ label: `/${s.skill_name}${s.mine ? "" : " · shared"}`, value: s.name }))
+		.map((s) => ({ label: `/${s.skill_name}${s.mine ? "" : " · shared"}`, value: s.name }));
 }
 
 function addSkill(st, name) {
-	if (props.disabled) return
-	if (!Array.isArray(st.skills)) st.skills = []
-	if (!st.skills.includes(name)) st.skills.push(name)
+	if (props.disabled) return;
+	if (!Array.isArray(st.skills)) st.skills = [];
+	if (!st.skills.includes(name)) st.skills.push(name);
 }
 
 function removeSkill(st, name) {
-	st.skills = (st.skills || []).filter((n) => n !== name)
+	st.skills = (st.skills || []).filter((n) => n !== name);
 }
 
 // ── structural edits (emit a fresh array) ────────────────────────────────────
 function addStep() {
-	emit("update:modelValue", [...props.modelValue, { label: "", prompt: "", skills: [] }])
+	emit("update:modelValue", [...props.modelValue, { label: "", prompt: "", skills: [] }]);
 }
 
 function removeStep(si) {
-	if (props.modelValue.length <= 1) return // min 1 step
-	const st = props.modelValue[si]
+	if (props.modelValue.length <= 1) return; // min 1 step
+	const st = props.modelValue[si];
 	const doRemove = () =>
 		emit(
 			"update:modelValue",
 			props.modelValue.filter((_, i) => i !== si)
-		)
+		);
 	if ((st.prompt || "").trim()) {
 		confirmDialog({
 			title: "Remove step?",
 			message: `Step ${si + 1} has a prompt - remove it anyway?`,
 			onConfirm: ({ hideDialog }) => {
-				doRemove()
-				hideDialog()
+				doRemove();
+				hideDialog();
 			},
-		})
+		});
 	} else {
-		doRemove()
+		doRemove();
 	}
 }
 
 function move(si, delta) {
-	const to = si + delta
-	if (to < 0 || to >= props.modelValue.length) return
-	const next = [...props.modelValue]
-	const [it] = next.splice(si, 1)
-	next.splice(to, 0, it)
-	emit("update:modelValue", next)
+	const to = si + delta;
+	if (to < 0 || to >= props.modelValue.length) return;
+	const next = [...props.modelValue];
+	const [it] = next.splice(si, 1);
+	next.splice(to, 0, it);
+	emit("update:modelValue", next);
 }
 
 // ── HTML5 drag-reorder (grip = drag source, whole card = drop target) ────────
-const dragIdx = ref(null)
-const dragOverIdx = ref(null)
+const dragIdx = ref(null);
+const dragOverIdx = ref(null);
 
 function onDragStart(si, e) {
-	if (props.disabled) return
-	dragIdx.value = si
+	if (props.disabled) return;
+	dragIdx.value = si;
 	if (e && e.dataTransfer) {
-		e.dataTransfer.effectAllowed = "move"
+		e.dataTransfer.effectAllowed = "move";
 		try {
-			e.dataTransfer.setData("text/plain", String(si))
+			e.dataTransfer.setData("text/plain", String(si));
 		} catch (err) {
 			// some browsers throw on setData for non-standard types - ignore
 		}
@@ -204,35 +210,35 @@ function onDragStart(si, e) {
 }
 
 function onDragOver(si) {
-	if (dragIdx.value !== null) dragOverIdx.value = si
+	if (dragIdx.value !== null) dragOverIdx.value = si;
 }
 
 function onDragLeave(si) {
-	if (dragOverIdx.value === si) dragOverIdx.value = null
+	if (dragOverIdx.value === si) dragOverIdx.value = null;
 }
 
 function onDrop(si) {
-	const from = dragIdx.value
-	dragIdx.value = null
-	dragOverIdx.value = null
-	if (from === null || from === si) return
-	const next = [...props.modelValue]
-	const [it] = next.splice(from, 1)
-	next.splice(si, 0, it)
-	emit("update:modelValue", next)
+	const from = dragIdx.value;
+	dragIdx.value = null;
+	dragOverIdx.value = null;
+	if (from === null || from === si) return;
+	const next = [...props.modelValue];
+	const [it] = next.splice(from, 1);
+	next.splice(si, 0, it);
+	emit("update:modelValue", next);
 }
 
 function onDragEnd() {
-	dragIdx.value = null
-	dragOverIdx.value = null
+	dragIdx.value = null;
+	dragOverIdx.value = null;
 }
 
 // drop indicator sits where the dragged card will land (above the target when
 // moving up, below it when moving down)
 function showIndicatorAbove(si) {
-	return dragIdx.value !== null && dragOverIdx.value === si && dragIdx.value > si
+	return dragIdx.value !== null && dragOverIdx.value === si && dragIdx.value > si;
 }
 function showIndicatorBelow(si) {
-	return dragIdx.value !== null && dragOverIdx.value === si && dragIdx.value < si
+	return dragIdx.value !== null && dragOverIdx.value === si && dragIdx.value < si;
 }
 </script>

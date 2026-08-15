@@ -1,6 +1,7 @@
 <script setup>
-import { computed, ref } from "vue"
-import * as api from "../api"
+import { computed, ref } from "vue";
+import * as api from "../api";
+import { agentName } from "@/branding";
 
 // The agent proposes a document; a human applies it.
 //
@@ -15,59 +16,74 @@ import * as api from "../api"
 const props = defineProps({
 	action: { type: Object, required: true },
 	conversation: { type: String, required: true },
-})
-const emit = defineEmits(["applied", "dismissed"])
+});
+const emit = defineEmits(["applied", "dismissed"]);
 
-const state = ref("review") // review | busy | done
-const error = ref("")
-const applied = ref(null)
+const state = ref("review"); // review | busy | done
+const error = ref("");
+const applied = ref(null);
 
-const isEmail = computed(() => props.action.kind === "email")
-const verb = computed(() => String(props.action.verb || "").toLowerCase())
-const isWrite = computed(() => verb.value === "create" || verb.value === "update")
+const isEmail = computed(() => props.action.kind === "email");
+const verb = computed(() => String(props.action.verb || "").toLowerCase());
+const isWrite = computed(() => verb.value === "create" || verb.value === "update");
 const heading = computed(
-	() => props.action.title || `${verb.value === "create" ? "Create" : "Update"} ${props.action.doctype || "record"}`,
-)
+	() =>
+		props.action.title ||
+		`${verb.value === "create" ? "Create" : "Update"} ${props.action.doctype || "record"}`
+);
+
+// No `tables` escape here, unlike the desktop: this card neither renders nor
+// applies child tables, so a block with no `fields` has nothing to show.
+const invalid = computed(() => {
+	if (!isWrite.value) return "";
+	if (Array.isArray(props.action.docs))
+		return `This draft carries a \`docs\` batch, which is a create_doc payload rather than a card. Ask ${agentName} to apply them as a batch.`;
+	if (verb.value === "create" && !(props.action.fields || []).length)
+		return "This draft has no fields to show.";
+	return "";
+});
 
 async function apply() {
-	if (state.value === "busy") return
-	state.value = "busy"
-	error.value = ""
+	if (state.value === "busy") return;
+	state.value = "busy";
+	error.value = "";
 	try {
 		// The card names fields by LABEL; the write wants fieldnames. Ask the
 		// server for the form meta and map — guessing (lower-casing and swapping
 		// spaces for underscores) is right until it isn't, and then it silently
 		// writes the wrong field.
-		const meta = await api.getDoctypeFormMeta(props.action.doctype)
+		const meta = await api.getDoctypeFormMeta(props.action.doctype);
 		if (meta?.ok === false) {
-			error.value = meta.reason || "That document type isn't available to you."
-			state.value = "review"
-			return
+			error.value = meta.reason || "That document type isn't available to you.";
+			state.value = "review";
+			return;
 		}
-		const byLabel = new Map()
+		const byLabel = new Map();
 		for (const f of meta.fields || []) {
-			if (f.label) byLabel.set(String(f.label).toLowerCase(), f.fieldname)
-			byLabel.set(String(f.fieldname).toLowerCase(), f.fieldname)
+			if (f.label) byLabel.set(String(f.label).toLowerCase(), f.fieldname);
+			byLabel.set(String(f.fieldname).toLowerCase(), f.fieldname);
 		}
 
-		const values = {}
-		const unmapped = []
+		const values = {};
+		const unmapped = [];
 		for (const f of props.action.fields || []) {
-			const fieldname = byLabel.get(f.label.toLowerCase())
-			if (fieldname) values[fieldname] = f.value
-			else unmapped.push(f.label)
+			const fieldname = byLabel.get(f.label.toLowerCase());
+			if (fieldname) values[fieldname] = f.value;
+			else unmapped.push(f.label);
 		}
 		if (!Object.keys(values).length) {
-			error.value = "Couldn't match any of these fields on that document type."
-			state.value = "review"
-			return
+			error.value = "Couldn't match any of these fields on that document type.";
+			state.value = "review";
+			return;
 		}
 		// Never apply half a record silently: if a field the agent proposed has no
 		// home on the doctype, say so instead of writing the rest and calling it done.
 		if (unmapped.length) {
-			error.value = `Not applying: ${unmapped.join(", ")} ${unmapped.length === 1 ? "is not a field" : "are not fields"} on ${props.action.doctype}. Ask Jarvis to correct it.`
-			state.value = "review"
-			return
+			error.value = `Not applying: ${unmapped.join(", ")} ${
+				unmapped.length === 1 ? "is not a field" : "are not fields"
+			} on ${props.action.doctype}. Ask ${agentName} to correct it.`;
+			state.value = "review";
+			return;
 		}
 
 		const r = await api.applyAction({
@@ -78,24 +94,24 @@ async function apply() {
 			submit: props.action.submit ? 1 : 0,
 			conversation: props.conversation,
 			continue: props.action.continue ? 1 : 0,
-		})
+		});
 		if (r?.ok === false) {
-			error.value = r.error?.message || r.reason || "Couldn't save that."
-			state.value = "review"
-			return
+			error.value = r.error?.message || r.reason || "Couldn't save that.";
+			state.value = "review";
+			return;
 		}
-		applied.value = r?.data?.name || r?.name || ""
-		state.value = "done"
-		emit("applied", applied.value)
+		applied.value = r?.data?.name || r?.name || "";
+		state.value = "done";
+		emit("applied", applied.value);
 	} catch (e) {
-		error.value = e?.message || "Couldn't save that."
-		state.value = "review"
+		error.value = e?.message || "Couldn't save that.";
+		state.value = "review";
 	}
 }
 
 async function copyBody() {
 	try {
-		await navigator.clipboard.writeText(props.action.body || "")
+		await navigator.clipboard.writeText(props.action.body || "");
 	} catch {
 		/* clipboard blocked — nothing useful to say about it */
 	}
@@ -107,14 +123,28 @@ async function copyBody() {
 	     confirmation arrives separately as an action:pending card. -->
 	<div v-if="isEmail" class="jv-action">
 		<div class="jv-action-head">
-			<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-				<path d="M4 4h16v16H4z" /><path d="M22 6l-10 7L2 6" />
+			<svg
+				viewBox="0 0 24 24"
+				width="15"
+				height="15"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.8"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
+				<path d="M4 4h16v16H4z" />
+				<path d="M22 6l-10 7L2 6" />
 			</svg>
 			Email draft
 		</div>
 		<div class="jv-action-body">
-			<div class="jv-field"><span>To</span><strong>{{ props.action.to }}</strong></div>
-			<div class="jv-field"><span>Subject</span><strong>{{ props.action.subject }}</strong></div>
+			<div class="jv-field">
+				<span>To</span><strong>{{ props.action.to }}</strong>
+			</div>
+			<div class="jv-field">
+				<span>Subject</span><strong>{{ props.action.subject }}</strong>
+			</div>
 			<pre class="jv-email-body">{{ props.action.body }}</pre>
 		</div>
 		<div class="jv-action-foot">
@@ -124,8 +154,18 @@ async function copyBody() {
 
 	<div v-else-if="isWrite" class="jv-action" :class="{ 'is-done': state === 'done' }">
 		<div class="jv-action-head">
-			<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-				<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" />
+			<svg
+				viewBox="0 0 24 24"
+				width="15"
+				height="15"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.8"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
+				<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+				<path d="M14 2v6h6" />
 			</svg>
 			<span class="jv-action-title">{{ heading }}</span>
 			<span class="jv-action-tag">{{ props.action.doctype }}</span>
@@ -138,18 +178,37 @@ async function copyBody() {
 			</div>
 		</div>
 
-		<div v-if="error" class="jv-action-err">{{ error }}</div>
+		<div v-if="invalid || error" class="jv-action-err">{{ invalid || error }}</div>
 
 		<div v-if="state === 'done'" class="jv-action-done">
-			<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+			<svg
+				viewBox="0 0 24 24"
+				width="15"
+				height="15"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2.4"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
 				<path d="M20 6 9 17l-5-5" />
 			</svg>
 			{{ verb === "create" ? "Created" : "Updated" }}{{ applied ? ` ${applied}` : "" }}
 		</div>
 
 		<div v-else class="jv-action-foot">
-			<button class="jv-btn is-ghost" :disabled="state === 'busy'" @click="emit('dismissed')">Cancel</button>
-			<button class="jv-btn is-primary" :disabled="state === 'busy'" @click="apply">
+			<button
+				class="jv-btn is-ghost"
+				:disabled="state === 'busy'"
+				@click="emit('dismissed')"
+			>
+				Cancel
+			</button>
+			<button
+				class="jv-btn is-primary"
+				:disabled="state === 'busy' || !!invalid"
+				@click="apply"
+			>
 				<span v-if="state === 'busy'" class="jv-spinner" />
 				<span v-else>{{ verb === "create" ? "Create" : "Save" }}</span>
 			</button>

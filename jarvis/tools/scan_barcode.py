@@ -13,6 +13,7 @@ Batch / Warehouse up via raw ``frappe.db.get_value`` /
 wrapper explicitly checks Item / Serial No / Batch / Warehouse read
 permission on whatever the scan resolved before returning it.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -21,34 +22,34 @@ from jarvis.exceptions import InvalidArgumentError
 
 
 def scan_barcode(search_value: str) -> dict:
-    """Look ``search_value`` up across Barcode, Serial No, and Batch
-    No tables. Returns whatever ERPNext's resolver finds, typically
-    ``{item_code, barcode, serial_no, batch_no, ...}`` - shape varies
-    by what the scanner matched."""
-    if not search_value:
-        raise InvalidArgumentError("search_value is required")
+	"""Look ``search_value`` up across Barcode, Serial No, and Batch
+	No tables. Returns whatever ERPNext's resolver finds, typically
+	``{item_code, barcode, serial_no, batch_no, ...}`` - shape varies
+	by what the scanner matched."""
+	if not search_value:
+		raise InvalidArgumentError("search_value is required")
 
-    from erpnext.stock.utils import scan_barcode as _scan
+	from erpnext.stock.utils import scan_barcode as _scan
 
-    result = _scan(search_value=search_value)
-    # The underlying helper returns a typed dataclass (BarcodeScanResult)
-    # or a dict depending on the ERPNext release; normalise to a JSON-
-    # friendly dict either way.
-    if hasattr(result, "__dict__"):
-        result = {k: v for k, v in vars(result).items() if not k.startswith("_")}
-    elif not isinstance(result, dict):
-        result = {"raw": result}
+	result = _scan(search_value=search_value)
+	# The underlying helper returns a typed dataclass (BarcodeScanResult)
+	# or a dict depending on the ERPNext release; normalise to a JSON-
+	# friendly dict either way.
+	if hasattr(result, "__dict__"):
+		result = {k: v for k, v in vars(result).items() if not k.startswith("_")}
+	elif not isinstance(result, dict):
+		result = {"raw": result}
 
-    item_code = result.get("item_code")
-    if item_code:
-        frappe.has_permission("Item", "read", doc=item_code, throw=True)
-    serial_no = result.get("serial_no")
-    if serial_no:
-        frappe.has_permission("Serial No", "read", doc=serial_no, throw=True)
-    batch_no = result.get("batch_no")
-    if batch_no:
-        frappe.has_permission("Batch", "read", doc=batch_no, throw=True)
-    warehouse = result.get("warehouse")
-    if warehouse:
-        frappe.has_permission("Warehouse", "read", doc=warehouse, throw=True)
-    return result
+	item_code = result.get("item_code")
+	if item_code:
+		frappe.has_permission("Item", "read", doc=item_code, throw=True)
+	serial_no = result.get("serial_no")
+	if serial_no:
+		frappe.has_permission("Serial No", "read", doc=serial_no, throw=True)
+	batch_no = result.get("batch_no")
+	if batch_no:
+		frappe.has_permission("Batch", "read", doc=batch_no, throw=True)
+	warehouse = result.get("warehouse")
+	if warehouse:
+		frappe.has_permission("Warehouse", "read", doc=warehouse, throw=True)
+	return result

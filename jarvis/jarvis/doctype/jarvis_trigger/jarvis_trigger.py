@@ -146,16 +146,12 @@ class JarvisTrigger(Document):
 	def _validate_target_doctype(self):
 		if not self.target_doctype:
 			frappe.throw(_("Target DocType is required."))
-		row = frappe.db.get_value(
-			"DocType", self.target_doctype, ["issingle", "istable"], as_dict=True
-		)
+		row = frappe.db.get_value("DocType", self.target_doctype, ["issingle", "istable"], as_dict=True)
 		if not row:
 			frappe.throw(_("DocType '{0}' does not exist.").format(self.target_doctype))
 		if cint(row.issingle):
 			frappe.throw(
-				_("Triggers cannot target single DocTypes ('{0}' is a Single).").format(
-					self.target_doctype
-				)
+				_("Triggers cannot target single DocTypes ('{0}' is a Single).").format(self.target_doctype)
 			)
 		if cint(row.istable):
 			frappe.throw(
@@ -220,9 +216,8 @@ class JarvisTrigger(Document):
 					"it; LLM actions work without it."
 				)
 			)
-		from RestrictedPython import compile_restricted
-
 		from frappe.utils.safe_exec import FrappeTransformer
+		from RestrictedPython import compile_restricted
 
 		try:
 			compile_restricted(self.script_body, policy=FrappeTransformer)
@@ -236,11 +231,7 @@ class JarvisTrigger(Document):
 		if not instruction:
 			frappe.throw(_("LLM instruction is required for an LLM action."))
 		if len(instruction) > MAX_LLM_INSTRUCTION_LEN:
-			frappe.throw(
-				_("LLM instruction must be at most {0} characters.").format(
-					MAX_LLM_INSTRUCTION_LEN
-				)
-			)
+			frappe.throw(_("LLM instruction must be at most {0} characters.").format(MAX_LLM_INSTRUCTION_LEN))
 		self.llm_instruction = instruction
 		cap = cint(self.llm_daily_cap) or DEFAULT_LLM_DAILY_CAP
 		self.llm_daily_cap = max(1, min(cap, MAX_LLM_DAILY_CAP))
@@ -258,22 +249,20 @@ class JarvisTrigger(Document):
 		# with _guard_server_script_link: the sync must never touch a foreign
 		# Server Script even if the link were somehow repointed).
 		managed = self._managed_script_name()
-		existing = (
-			managed
-			if managed and frappe.db.exists("Server Script", managed)
-			else None
-		)
+		existing = managed if managed and frappe.db.exists("Server Script", managed) else None
 		ss = frappe.get_doc("Server Script", existing) if existing else frappe.new_doc("Server Script")
-		ss.update({
-			"script_type": "DocType Event",
-			"reference_doctype": self.target_doctype,
-			"doctype_event": SCRIPT_EVENT_MAP[self.doc_event],
-			"script": self.script_body,
-			# ALWAYS disabled: core's server_script_map skips disabled scripts,
-			# so only jarvis.triggers.engine dispatches it (exactly once, and
-			# only while the trigger is enabled).
-			"disabled": 1,
-		})
+		ss.update(
+			{
+				"script_type": "DocType Event",
+				"reference_doctype": self.target_doctype,
+				"doctype_event": SCRIPT_EVENT_MAP[self.doc_event],
+				"script": self.script_body,
+				# ALWAYS disabled: core's server_script_map skips disabled scripts,
+				# so only jarvis.triggers.engine dispatches it (exactly once, and
+				# only while the trigger is enabled).
+				"disabled": 1,
+			}
+		)
 		# Server Script.validate() is only_for("Script Manager") — a Jarvis
 		# Admin saving a trigger legitimately is not one. Skipping validate is
 		# safe: _validate_script() above already compile-checked the body (and
@@ -299,9 +288,7 @@ class JarvisTrigger(Document):
 		if clear_link and self.server_script:
 			self.db_set("server_script", None, update_modified=False)
 		if name:
-			frappe.delete_doc(
-				"Server Script", name, ignore_permissions=True, ignore_missing=True, force=True
-			)
+			frappe.delete_doc("Server Script", name, ignore_permissions=True, ignore_missing=True, force=True)
 
 	# ------------------------------------------------------------------ #
 	# cache + realtime

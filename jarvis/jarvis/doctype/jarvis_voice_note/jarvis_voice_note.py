@@ -55,18 +55,14 @@ class JarvisVoiceNote(Document):
 		if self.kind in TRANSCRIPT_REQUIRED_KINDS and not self.transcript:
 			frappe.throw(_("Transcript is required for Text and Voice notes."))
 		if len(self.transcript) > MAX_TRANSCRIPT_LEN:
-			frappe.throw(
-				_("Transcript must be at most {0} characters.").format(MAX_TRANSCRIPT_LEN)
-			)
+			frappe.throw(_("Transcript must be at most {0} characters.").format(MAX_TRANSCRIPT_LEN))
 		if (self.duration_s or 0) < 0:
 			self.duration_s = 0
 
 	def _validate_context(self):
 		context_type = self.context_type or "Business"
 		if context_type == "Conversation" and not self.conversation:
-			frappe.throw(
-				_("A Conversation-context voice note must link a conversation.")
-			)
+			frappe.throw(_("A Conversation-context voice note must link a conversation."))
 		# Cross-link ownership guard (security review TASK 5): a note may only
 		# reference a conversation the caller OWNS. if_owner blocks cross-user
 		# READS, but without this a user could still link attacker content into
@@ -76,9 +72,7 @@ class JarvisVoiceNote(Document):
 		if self.conversation and not (
 			self.flags.ignore_permissions or frappe.session.user == "Administrator"
 		):
-			owner = frappe.db.get_value(
-				"Jarvis Conversation", self.conversation, "owner"
-			)
+			owner = frappe.db.get_value("Jarvis Conversation", self.conversation, "owner")
 			if owner and owner != frappe.session.user:
 				frappe.throw(
 					_("You can only attach notes to your own conversations."),

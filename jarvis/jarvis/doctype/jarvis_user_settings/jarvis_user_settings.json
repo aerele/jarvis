@@ -12,10 +12,17 @@
     "prefs_section",
     "notify_enabled",
     "activity_detail",
+    "preferred_persona",
+    "support_context_copy_pref",
     "app_state_section",
     "business_greeting_state",
     "business_greeting_chat_count",
     "business_greeting_hidden_at_count",
+    "sidebar_order",
+    "prompt_suggestions",
+    "prompt_suggestions_at",
+    "home_intro_seen_version",
+    "home_intro_seen_at",
     "usage_limits_tab",
     "limit_section",
     "monthly_token_limit",
@@ -26,7 +33,8 @@
     "month_tokens",
     "total_tokens",
     "last_usage_at",
-    "last_synced_at"
+    "last_synced_at",
+    "user_model_usage"
   ],
   "fields": [
     {
@@ -58,27 +66,93 @@
       "label": "Show Activity Detail",
       "default": "1"
     },
+    {
+      "fieldname": "preferred_persona",
+      "fieldtype": "Select",
+      "label": "Assistant Persona",
+      "options": "Jarvis\nJara",
+      "default": "Jarvis",
+      "description": "Which persona voice this user chats with: Jarvis (default) or Jara (calmer, more jovial). Voice only - same tools, permissions, and behaviour."
+    },
+    {
+      "fieldname": "support_context_copy_pref",
+      "fieldtype": "Select",
+      "label": "Copy Chat Into Support Ticket",
+      "options": "\nYes\nNo",
+      "description": "Remembered answer to \"copy the last few chat messages into a new support ticket?\" - blank means ask every time (the default); Yes/No is a permanent 'don't ask again' the New Ticket flow reads before showing that popup. Set by the popup itself, not editable elsewhere."
+    },
     { "fieldname": "app_state_section", "fieldtype": "Section Break", "label": "App State" },
     {
       "fieldname": "business_greeting_state",
       "fieldtype": "Select",
       "label": "Business Greeting State",
       "options": "\nDismissed",
-      "description": "Merged from Jarvis User Preference. Blank = eligible for the every-third-new-chat greeting; Dismissed = permanent 'Don't ask again' (DB-only so cache flushes can't resurrect it)."
+      "permlevel": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Merged from Jarvis User Preference. Blank = eligible for the every-third-new-chat greeting; Dismissed = permanent 'Don't ask again' (DB-only so cache flushes can't resurrect it). Permlevel 1: server-owned app state, written only by jarvis.chat.greeting via raw db calls that bypass permlevel — a Jarvis User can read but never write it through a generic document update."
     },
     {
       "fieldname": "business_greeting_chat_count",
       "fieldtype": "Int",
       "label": "Business Greeting Chat Count",
       "default": "0",
-      "description": "Merged from Jarvis User Preference. Counts genuinely-new chats; drives the multiple-of-3 greeting cadence."
+      "permlevel": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Merged from Jarvis User Preference. Counts genuinely-new chats; drives the multiple-of-3 greeting cadence. Permlevel 1: server-owned (jarvis.chat.greeting.increment_new_chat_count), read-only to a Jarvis User."
     },
     {
       "fieldname": "business_greeting_hidden_at_count",
       "fieldtype": "Int",
       "label": "Business Greeting Hidden At Count",
       "default": "0",
-      "description": "Merged from Jarvis User Preference. Chat count at which the card was last 'Maybe later'-ed; keeps a refresh from re-showing it."
+      "permlevel": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Merged from Jarvis User Preference. Chat count at which the card was last 'Maybe later'-ed; keeps a refresh from re-showing it. Permlevel 1: server-owned (jarvis.chat.greeting), read-only to a Jarvis User."
+    },
+    {
+      "fieldname": "sidebar_order",
+      "fieldtype": "Small Text",
+      "label": "Sidebar Order",
+      "no_copy": 1,
+      "description": "Per-user sidebar nav order as JSON {\"top\":[labels],\"more\":[labels]}. UI state only; the client reconciles against its defaults."
+    },
+    {
+      "fieldname": "prompt_suggestions",
+      "fieldtype": "Small Text",
+      "label": "Prompt Suggestions",
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Cached new-chat prompt suggestions, a JSON array of strings synthesised from this user's own recent chat TITLES by jarvis.chat.suggestions. Server-owned cache, refreshed at most every few days and only when the user has chatted since. Safe to clear - it regenerates."
+    },
+    {
+      "fieldname": "prompt_suggestions_at",
+      "fieldtype": "Datetime",
+      "label": "Prompt Suggestions At",
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "When prompt_suggestions was last synthesised; drives the refresh gate."
+    },
+    {
+      "fieldname": "home_intro_seen_version",
+      "fieldtype": "Int",
+      "label": "Home Intro Seen Version",
+      "default": "0",
+      "permlevel": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Highest chat-home introduction version this user has been shown (0 = never). Monotonic; only jarvis.chat.user_settings_api.mark_home_intro_seen writes it (raw SQL, permlevel-bypassing). Permlevel 1: a Jarvis User can read this but a generic owner-level document update CANNOT write it, so a client can neither invent a future version nor mute the next introduction. Bumping HOME_INTRO_VERSION re-shows the introduction once."
+    },
+    {
+      "fieldname": "home_intro_seen_at",
+      "fieldtype": "Datetime",
+      "label": "Home Intro Seen At",
+      "permlevel": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "When home_intro_seen_version was last advanced. Permlevel 1: server-owned, read-only to a Jarvis User."
     },
     { "fieldname": "usage_limits_tab", "fieldtype": "Tab Break", "label": "Usage & limits" },
     {
@@ -89,10 +163,10 @@
     {
       "fieldname": "monthly_token_limit",
       "fieldtype": "Int",
-      "label": "Monthly Token Limit",
+      "label": "Token Limit",
       "permlevel": 1,
       "default": "0",
-      "description": "Per-user monthly token cap. 0 = unlimited. Admins only."
+      "description": "Per-user all-time token cap. 0 = unlimited. Admins only. Fieldname is legacy-named (\"monthly\") but the cap does not reset - it is an all-time budget."
     },
     {
       "fieldname": "usage_section",
@@ -156,6 +230,16 @@
       "read_only": 1,
       "no_copy": 1,
       "description": "When admin_sync_usage last refreshed per-session snapshots."
+    },
+    {
+      "fieldname": "user_model_usage",
+      "fieldtype": "Table",
+      "label": "Per-Model Usage",
+      "options": "Jarvis User Model Usage",
+      "permlevel": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Per-model month-to-date token counters + per-model caps. Written only by server code (jarvis.chat.usage). 0 cap = unlimited. Bench keeps the current month only; admin persists history from the daily push."
     }
   ],
   "permissions": [

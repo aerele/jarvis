@@ -1,8 +1,7 @@
 """Tests for the SM-gated learning-board API (jarvis/chat/learned_api.py).
 
 Covers, per plan sections 6.4/6.5/5.1: System-Manager gating (non-SM ->
-PermissionError), the managed-only self-host block (and the deliberate
-get_learning_status exemption), the frozen list envelope + domain facets +
+PermissionError), the frozen list envelope + domain facets +
 board counters, the approve/reject/un-approve/restore/snooze lifecycle
 transitions with their TOCTOU source guards, the A-class-only batch_approve
 guard, run-now enqueue, apply delegation to the compiler, the settings
@@ -49,12 +48,17 @@ def _ensure_non_sm(email: str) -> str:
 	# User - a Website User is a weaker negative test and could mask a bug if an
 	# endpoint ever gated on user_type instead of the role.
 	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email,
-			"first_name": "la-nonsm", "send_welcome_email": 0, "enabled": 1,
-			"user_type": "System User",
-			"roles": [{"role": "Sales User"}],
-		})
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "la-nonsm",
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "System User",
+				"roles": [{"role": "Sales User"}],
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert()
 		frappe.db.commit()
@@ -73,11 +77,16 @@ def _ensure_website_user(email: str) -> str:
 	# only), unlike the deliberately weaker Website-User negative the SM-gate
 	# tests avoid (see _ensure_non_sm).
 	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email,
-			"first_name": "la-web", "send_welcome_email": 0, "enabled": 1,
-			"user_type": "Website User",
-		})
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "la-web",
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "Website User",
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert()
 		frappe.db.commit()
@@ -103,20 +112,14 @@ def _polish_flag(on: int):
 	try:
 		yield
 	finally:
-		frappe.db.set_single_value(
-			SETTINGS, "pattern_llm_polish", orig or 0, update_modified=False
-		)
+		frappe.db.set_single_value(SETTINGS, "pattern_llm_polish", orig or 0, update_modified=False)
 		frappe.db.commit()
 
 
 def _wipe() -> None:
-	for name in frappe.get_all(
-		JLP, filters={"pattern_key": ["like", f"{KEY_PREFIX}%"]}, pluck="name"
-	):
+	for name in frappe.get_all(JLP, filters={"pattern_key": ["like", f"{KEY_PREFIX}%"]}, pluck="name"):
 		frappe.delete_doc(JLP, name, force=True, ignore_permissions=True)
-	for name in frappe.get_all(
-		RUN, filters={"requested_by": ["like", "%learned-run%"]}, pluck="name"
-	):
+	for name in frappe.get_all(RUN, filters={"requested_by": ["like", "%learned-run%"]}, pluck="name"):
 		frappe.delete_doc(RUN, name, force=True, ignore_permissions=True)
 	frappe.db.commit()
 
@@ -189,23 +192,6 @@ class TestLearnedApi(unittest.TestCase):
 					call()
 
 	# ------------------------------------------------------------------ #
-	# self-host block (+ get_learning_status exemption)
-	# ------------------------------------------------------------------ #
-	def test_self_host_blocks_feature_endpoints(self):
-		name = _mk("sh1")
-		with mock.patch("jarvis.selfhost.is_self_hosted", return_value=True):
-			with self.assertRaises(frappe.ValidationError):
-				learned_api.list_learned_patterns_page()
-			with self.assertRaises(frappe.ValidationError):
-				learned_api.get_learned_pattern(name)
-			with self.assertRaises(frappe.ValidationError):
-				learned_api.approve_learned_pattern(name)
-			# get_learning_status is exempt: it reports self_hosted so the tab can
-			# render the managed-only empty state.
-			status = learned_api.get_learning_status()
-			self.assertEqual(status["self_hosted"], 1)
-
-	# ------------------------------------------------------------------ #
 	# list envelope + facets + counters
 	# ------------------------------------------------------------------ #
 	def test_list_envelope_shape_and_facets(self):
@@ -217,8 +203,15 @@ class TestLearnedApi(unittest.TestCase):
 
 		out = learned_api.list_learned_patterns_page(status="Proposed", surfaced=1)
 		for key in (
-			"rows", "total", "has_more", "start", "page_length", "facets",
-			"queued_count", "pending_apply_count", "review_activity",
+			"rows",
+			"total",
+			"has_more",
+			"start",
+			"page_length",
+			"facets",
+			"queued_count",
+			"pending_apply_count",
+			"review_activity",
 		):
 			self.assertIn(key, out)
 
@@ -268,8 +261,12 @@ class TestLearnedApi(unittest.TestCase):
 	def test_get_learned_pattern_drilldown(self):
 		name = _mk(
 			"det1",
-			support_n=214, n_rows=800, confidence_pct=96.0, wilson_low=0.91,
-			gap=0.4, roles=["System Manager"],
+			support_n=214,
+			n_rows=800,
+			confidence_pct=96.0,
+			wilson_low=0.91,
+			gap=0.4,
+			roles=["System Manager"],
 			evidence={"exceptions": [{"ref": "SINV-1"}], "base_rate": 0.5},
 		)
 		out = learned_api.get_learned_pattern(name)
@@ -341,14 +338,15 @@ class TestLearnedApi(unittest.TestCase):
 		# the durable band cap and the flag-origin stale_reason are cleared, so
 		# the pipeline stops clamping and the board banner goes away.
 		name = _mk(
-			"fc1", status="Stale", strength_band="Low",
-			stale_reason="flagged by 2 users", flag_band_cap="Low",
+			"fc1",
+			status="Stale",
+			strength_band="Low",
+			stale_reason="flagged by 2 users",
+			flag_band_cap="Low",
 		)
 		out = learned_api.approve_learned_pattern(name)
 		self.assertEqual(out["status"], "Approved")
-		row = frappe.db.get_value(
-			JLP, name, ["flag_band_cap", "stale_reason"], as_dict=True
-		)
+		row = frappe.db.get_value(JLP, name, ["flag_band_cap", "stale_reason"], as_dict=True)
 		self.assertFalse(row.flag_band_cap)
 		self.assertFalse(row.stale_reason)
 
@@ -356,7 +354,8 @@ class TestLearnedApi(unittest.TestCase):
 		# Only FLAG-origin reasons are cleared on approve; a drift-origin reason
 		# stays (the drift pass owns it).
 		name = _mk(
-			"fc2", status="Stale",
+			"fc2",
+			status="Stale",
 			stale_reason="confidence dropped 96% -> 71% (window 18 months)",
 		)
 		learned_api.approve_learned_pattern(name)
@@ -536,19 +535,17 @@ class TestLearnedApi(unittest.TestCase):
 		try:
 			with mock.patch("frappe.enqueue"):
 				# A valid write persists.
-				learned_api.set_learning_settings(
-					{"pattern_max_proposals_per_run": 7}
-				)
-				self.assertEqual(
-					frappe.db.get_single_value(SETTINGS, "pattern_max_proposals_per_run"), 7
-				)
+				learned_api.set_learning_settings({"pattern_max_proposals_per_run": 7})
+				self.assertEqual(frappe.db.get_single_value(SETTINGS, "pattern_max_proposals_per_run"), 7)
 				# Enabling with a sub-1h window is rejected by the doc validation.
 				with self.assertRaises(frappe.ValidationError):
-					learned_api.set_learning_settings({
-						"pattern_learning_enabled": 1,
-						"pattern_window_start": "02:00:00",
-						"pattern_window_end": "02:30:00",
-					})
+					learned_api.set_learning_settings(
+						{
+							"pattern_learning_enabled": 1,
+							"pattern_window_start": "02:00:00",
+							"pattern_window_end": "02:30:00",
+						}
+					)
 		finally:
 			with mock.patch("frappe.enqueue"):
 				restore = frappe.get_single(SETTINGS)
@@ -570,9 +567,7 @@ class TestLearnedApi(unittest.TestCase):
 		try:
 			with mock.patch("frappe.enqueue") as enq:
 				learned_api.set_learning_settings({"pattern_max_proposals_per_run": 9})
-			self.assertEqual(
-				frappe.db.get_single_value(SETTINGS, "pattern_max_proposals_per_run"), 9
-			)
+			self.assertEqual(frappe.db.get_single_value(SETTINGS, "pattern_max_proposals_per_run"), 9)
 			self.assertFalse(enq.called)
 		finally:
 			frappe.db.set_single_value(SETTINGS, orig, update_modified=False)
@@ -585,7 +580,8 @@ class TestLearnedApi(unittest.TestCase):
 		orig = {f: s.get(f) for f in learned_api._SETTINGS_FIELDS}
 		try:
 			frappe.db.set_value(
-				SETTINGS, SETTINGS,
+				SETTINGS,
+				SETTINGS,
 				{
 					"pattern_window_start": None,
 					"pattern_window_end": None,
@@ -617,13 +613,16 @@ class TestLearnedApi(unittest.TestCase):
 		orig = {f: s.get(f) for f in learned_api._SETTINGS_FIELDS}
 		try:
 			frappe.db.set_value(
-				SETTINGS, SETTINGS,
+				SETTINGS,
+				SETTINGS,
 				{k: None for k in bootstrap._SETTINGS_DEFAULTS},
 				update_modified=False,
 			)
 			# a non-null operator value must NOT be clobbered
 			frappe.db.set_value(
-				SETTINGS, SETTINGS, {"pattern_max_proposals_per_run": 3},
+				SETTINGS,
+				SETTINGS,
+				{"pattern_max_proposals_per_run": 3},
 				update_modified=False,
 			)
 			frappe.db.commit()
@@ -636,13 +635,9 @@ class TestLearnedApi(unittest.TestCase):
 
 			self.assertEqual(_hhmmss("pattern_window_start"), "01:00:00")
 			self.assertEqual(_hhmmss("pattern_window_end"), "05:00:00")
-			self.assertEqual(
-				frappe.db.get_single_value(SETTINGS, "pattern_row_budget_per_night"), 500000
-			)
+			self.assertEqual(frappe.db.get_single_value(SETTINGS, "pattern_row_budget_per_night"), 500000)
 			# left the operator's non-null value alone
-			self.assertEqual(
-				frappe.db.get_single_value(SETTINGS, "pattern_max_proposals_per_run"), 3
-			)
+			self.assertEqual(frappe.db.get_single_value(SETTINGS, "pattern_max_proposals_per_run"), 3)
 		finally:
 			frappe.db.set_single_value(SETTINGS, orig, update_modified=False)
 			frappe.db.commit()
@@ -654,16 +649,12 @@ class TestLearnedApi(unittest.TestCase):
 		# (~0 on a stable site -> permanent false data_starved) - fix 7.
 		from jarvis.learning import bootstrap, registry
 
-		series_total = int(
-			frappe.db.sql("select coalesce(sum(`current`), 0) from `tabSeries`")[0][0]
-		)
+		series_total = int(frappe.db.sql("select coalesce(sum(`current`), 0) from `tabSeries`")[0][0])
 		self.assertEqual(bootstrap._naming_series_doc_count(), series_total)
 
 		naming = registry.get_detector("cfg-naming-series")
 		self.assertEqual(
-			bootstrap._readiness_count(
-				naming, naming["doctype"], naming.get("window_months") or 12
-			),
+			bootstrap._readiness_count(naming, naming["doctype"], naming.get("window_months") or 12),
 			series_total,
 		)
 		# a normal party/group detector still counts its OWN doctype's recent rows.
@@ -704,19 +695,20 @@ class TestLearnedApi(unittest.TestCase):
 
 		def _turn(pattern_name, acting_user):
 			frappe.db.set_value(
-				JLP, pattern_name, {"materialized_skill": "learned-selling"},
+				JLP,
+				pattern_name,
+				{"materialized_skill": "learned-selling"},
 				update_modified=False,
 			)
 			return {"ok": True, "text": polished, "reason": ""}
 
 		with _polish_flag(1):
-			with mock.patch(
-				"jarvis.learning.polish.polish_skill_draft", side_effect=_turn
-			):
+			with mock.patch("jarvis.learning.polish.polish_skill_draft", side_effect=_turn):
 				out = learned_api.polish_learned_draft(name)
 		self.assertTrue(out["ok"])
 		row = frappe.db.get_value(
-			JLP, name,
+			JLP,
+			name,
 			["skill_draft", "draft_edited", "draft_polished", "materialized_skill"],
 			as_dict=True,
 		)
@@ -733,15 +725,11 @@ class TestLearnedApi(unittest.TestCase):
 		orig_draft = frappe.db.get_value(JLP, name, "skill_draft")
 
 		def _turn(pattern_name, acting_user):
-			frappe.db.set_value(
-				JLP, pattern_name, {"status": "Rejected"}, update_modified=False
-			)
+			frappe.db.set_value(JLP, pattern_name, {"status": "Rejected"}, update_modified=False)
 			return {"ok": True, "text": "- Should be discarded.", "reason": ""}
 
 		with _polish_flag(1):
-			with mock.patch(
-				"jarvis.learning.polish.polish_skill_draft", side_effect=_turn
-			):
+			with mock.patch("jarvis.learning.polish.polish_skill_draft", side_effect=_turn):
 				out = learned_api.polish_learned_draft(name)
 		self.assertFalse(out["ok"])
 		self.assertIn("Rejected", out["reason"])
@@ -754,7 +742,8 @@ class TestLearnedApi(unittest.TestCase):
 			with mock.patch(
 				"jarvis.learning.polish.polish_skill_draft",
 				return_value={
-					"ok": False, "text": None,
+					"ok": False,
+					"text": None,
 					"reason": "monthly polish budget exhausted",
 				},
 			):
@@ -762,9 +751,7 @@ class TestLearnedApi(unittest.TestCase):
 		self.assertFalse(out["ok"])
 		self.assertEqual(out["reason"], "monthly polish budget exhausted")
 		self.assertEqual(frappe.db.get_value(JLP, name, "skill_draft"), orig_draft)
-		self.assertEqual(
-			int(frappe.db.get_value(JLP, name, "draft_polished") or 0), 0
-		)
+		self.assertEqual(int(frappe.db.get_value(JLP, name, "draft_polished") or 0), 0)
 
 	# ------------------------------------------------------------------ #
 	# correction loop (plan 6.5): flag_learned_default
@@ -790,12 +777,6 @@ class TestLearnedApi(unittest.TestCase):
 		self.assertEqual(out["flags_count"], 1)
 		self.assertEqual(out["distinct_users"], 1)
 		self.assertFalse(out["demoted"])
-
-	def test_flag_self_host_blocked(self):
-		name = _mk("fl3", status="Active")
-		with mock.patch("jarvis.selfhost.is_self_hosted", return_value=True):
-			with self.assertRaises(frappe.ValidationError):
-				learned_api.flag_learned_default(name)
 
 	def test_flag_only_on_active_or_approved(self):
 		proposed = _mk("fl4")  # Proposed
@@ -828,9 +809,7 @@ class TestLearnedApi(unittest.TestCase):
 				out = learned_api.flag_learned_default(name)
 		self.assertFalse(out["demoted"])
 		self.assertEqual(out["flags_count"], 1)
-		row = frappe.db.get_value(
-			JLP, name, ["strength_band", "stale_reason", "status"], as_dict=True
-		)
+		row = frappe.db.get_value(JLP, name, ["strength_band", "stale_reason", "status"], as_dict=True)
 		self.assertEqual(row.strength_band, "High")
 		self.assertFalse(row.stale_reason)
 		self.assertEqual(row.status, "Active")
@@ -840,15 +819,14 @@ class TestLearnedApi(unittest.TestCase):
 		name = _mk("fl8", status="Approved", strength_band="High")
 		learned_api.flag_learned_default(name, note="admin flag")
 		try:
-			with mock.patch(
-				"frappe.utils.user.get_users_with_role", return_value=[self.non_sm]
-			):
+			with mock.patch("frappe.utils.user.get_users_with_role", return_value=[self.non_sm]):
 				with _as(self.non_sm):
 					out = learned_api.flag_learned_default(name, note="also wrong")
 			self.assertTrue(out["demoted"])
 			self.assertEqual(out["distinct_users"], 2)
 			row = frappe.db.get_value(
-				JLP, name,
+				JLP,
+				name,
 				["strength_band", "flag_band_cap", "stale_reason", "status"],
 				as_dict=True,
 			)
@@ -857,9 +835,7 @@ class TestLearnedApi(unittest.TestCase):
 			self.assertEqual(row.flag_band_cap, "Medium")
 			self.assertIn("flagged by 2 users", row.stale_reason)
 			self.assertEqual(row.status, "Approved")  # High->Medium: still served
-			subjects = frappe.get_all(
-				"Notification Log", filters={"for_user": self.non_sm}, pluck="subject"
-			)
+			subjects = frappe.get_all("Notification Log", filters={"for_user": self.non_sm}, pluck="subject")
 			self.assertTrue(any("flag" in (s or "").lower() for s in subjects))
 		finally:
 			frappe.db.delete("Notification Log", {"for_user": self.non_sm})
@@ -877,7 +853,8 @@ class TestLearnedApi(unittest.TestCase):
 		self.assertTrue(out["demoted"])
 		self.assertEqual(out["status"], "Stale")
 		row = frappe.db.get_value(
-			JLP, name,
+			JLP,
+			name,
 			["status", "strength_band", "flag_band_cap", "stale_reason"],
 			as_dict=True,
 		)
@@ -891,9 +868,7 @@ class TestLearnedApi(unittest.TestCase):
 			learned_api.flag_learned_default(name)
 		# ...and an SM re-approve restores it, clearing the cap + flag reason.
 		learned_api.approve_learned_pattern(name)
-		row = frappe.db.get_value(
-			JLP, name, ["status", "flag_band_cap", "stale_reason"], as_dict=True
-		)
+		row = frappe.db.get_value(JLP, name, ["status", "flag_band_cap", "stale_reason"], as_dict=True)
 		self.assertEqual(row.status, "Approved")
 		self.assertFalse(row.flag_band_cap)
 		self.assertFalse(row.stale_reason)
@@ -926,7 +901,9 @@ class TestLearnedApi(unittest.TestCase):
 				if e["user"] == self.non_sm:
 					e["ts"] = str(add_days(now_datetime(), -2))
 			frappe.db.set_value(
-				JLP, name, {"counter_evidence": json.dumps(entries)},
+				JLP,
+				name,
+				{"counter_evidence": json.dumps(entries)},
 				update_modified=False,
 			)
 			frappe.db.commit()
@@ -949,14 +926,15 @@ class TestLearnedApi(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	def test_list_exposes_stale_and_flag_fields(self):
 		name = _mk(
-			"st1", status="Stale", surfaced=1, flags_count=2,
+			"st1",
+			status="Stale",
+			surfaced=1,
+			flags_count=2,
 			stale_reason="confidence dropped 96% -> 71% (window 18 months)",
 		)
 		# db.set_value: the pointer references a managed skill row that need not
 		# exist in this fixture (Link validation is an insert-time concern).
-		frappe.db.set_value(
-			JLP, name, {"materialized_skill": "learned-selling"}, update_modified=False
-		)
+		frappe.db.set_value(JLP, name, {"materialized_skill": "learned-selling"}, update_modified=False)
 		frappe.db.commit()
 
 		out = learned_api.list_learned_patterns_page(status="Stale", surfaced="all")
@@ -993,17 +971,23 @@ class TestLearnedSkillsPush(unittest.TestCase):
 
 	def setUp(self):
 		frappe.set_user("Administrator")
-		self._sync = frappe.db.get_value(
-			SETTINGS, SETTINGS,
-			["learned_skills_synced_at", "learned_skills_sync_status"], as_dict=True,
-		) or frappe._dict()
+		self._sync = (
+			frappe.db.get_value(
+				SETTINGS,
+				SETTINGS,
+				["learned_skills_synced_at", "learned_skills_sync_status"],
+				as_dict=True,
+			)
+			or frappe._dict()
+		)
 		self._wipe_managed()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
 		self._wipe_managed()
 		frappe.db.set_value(
-			SETTINGS, SETTINGS,
+			SETTINGS,
+			SETTINGS,
 			{
 				"learned_skills_synced_at": self._sync.get("learned_skills_synced_at"),
 				"learned_skills_sync_status": self._sync.get("learned_skills_sync_status"),
@@ -1019,15 +1003,17 @@ class TestLearnedSkillsPush(unittest.TestCase):
 	def _mk_managed(self, slug="learned-selling"):
 		frappe.flags.jarvis_pattern_engine = True
 		try:
-			doc = frappe.get_doc({
-				"doctype": self.SKILL,
-				"skill_name": slug,
-				"description": "Learned selling habits for this org.",
-				"instructions": "# Learned selling habits\n- test rule",
-				"enabled": 1,
-				"user_invocable": 0,
-				"managed_by_learning": 1,
-			})
+			doc = frappe.get_doc(
+				{
+					"doctype": self.SKILL,
+					"skill_name": slug,
+					"description": "Learned selling habits for this org.",
+					"instructions": "# Learned selling habits\n- test rule",
+					"enabled": 1,
+					"user_invocable": 0,
+					"managed_by_learning": 1,
+				}
+			)
 			doc.flags.ignore_permissions = True
 			doc.insert(ignore_permissions=True)
 		finally:
@@ -1067,13 +1053,11 @@ class TestLearnedSkillsPush(unittest.TestCase):
 
 		self._mk_managed()
 		# in_test -> the deduped worker runs INLINE inside enqueue.
-		with mock.patch(
-			"jarvis.admin_client.post_push_learned_skills", return_value={}
-		) as post:
+		with mock.patch("jarvis.admin_client.post_push_learned_skills", return_value={}) as post:
 			learned_skills_api.enqueue_learned_skills_push()
 		st = learned_skills_api.get_learned_skills_sync_status()
 		self.assertFalse(st["pending"])
-		self.assertTrue(st["last_sync_status"].startswith("ok (applied 1 via admin)"))
+		self.assertEqual(st["last_sync_status"], "ok (1 installed via admin)")
 		self.assertTrue(st["last_sync_at"])
 		post.assert_called_once()
 		# the wire body key + item shape match the admin/fleet contract.
@@ -1099,7 +1083,8 @@ class TestLearnedSkillsPush(unittest.TestCase):
 	def test_apply_status_proxies_learned_sync(self):
 		# get_learned_apply_status now reads the LEARNED pair, not the custom one.
 		frappe.db.set_value(
-			SETTINGS, SETTINGS,
+			SETTINGS,
+			SETTINGS,
 			{"learned_skills_sync_status": "pending: applying learned skills"},
 			update_modified=False,
 		)
@@ -1118,9 +1103,10 @@ class TestLearnedSkillsPush(unittest.TestCase):
 		# A recent terminal learned sync can belong to the cutover Apply: the
 		# custom pair is included so its reconcile outcome is observable.
 		frappe.db.set_value(
-			SETTINGS, SETTINGS,
+			SETTINGS,
+			SETTINGS,
 			{
-				"learned_skills_sync_status": "ok (applied 1 via admin)",
+				"learned_skills_sync_status": "ok (1 installed via admin)",
 				"learned_skills_synced_at": now_datetime(),
 			},
 			update_modified=False,
@@ -1133,7 +1119,8 @@ class TestLearnedSkillsPush(unittest.TestCase):
 
 		# An old sync cannot: the envelope stays lean (custom_sync None).
 		frappe.db.set_value(
-			SETTINGS, SETTINGS,
+			SETTINGS,
+			SETTINGS,
 			{"learned_skills_synced_at": add_days(now_datetime(), -3)},
 			update_modified=False,
 		)
@@ -1143,7 +1130,8 @@ class TestLearnedSkillsPush(unittest.TestCase):
 
 		# Never-pushed (empty pair) -> None as well.
 		frappe.db.set_value(
-			SETTINGS, SETTINGS,
+			SETTINGS,
+			SETTINGS,
 			{"learned_skills_sync_status": "", "learned_skills_synced_at": None},
 			update_modified=False,
 		)
@@ -1207,17 +1195,24 @@ class TestLearnedDecidedView(unittest.TestCase):
 		approved = _mk("dv1", status="Approved", reviewed_at=add_days(now, -1))
 		active = _mk("dv2", status="Active", reviewed_at=add_days(now, -2))
 		rejected = _mk(
-			"dv3", status="Rejected", review_note="not a real habit",
+			"dv3",
+			status="Rejected",
+			review_note="not a real habit",
 			reviewed_at=add_days(now, -3),
 		)
 		acked = _mk(
-			"dv4", status="Rejected", review_note=learned_api.ACK_NOTE,
-			effective_sensitivity="B", reviewed_at=add_days(now, -4),
+			"dv4",
+			status="Rejected",
+			review_note=learned_api.ACK_NOTE,
+			effective_sensitivity="B",
+			reviewed_at=add_days(now, -4),
 		)
 		applied = _mk(
-			"dv5", status="Rejected",
+			"dv5",
+			status="Rejected",
 			review_note=learned_api.APPLIED_NOTE_PREFIX + "shipping-defaults",
-			effective_sensitivity="B", reviewed_at=add_days(now, -5),
+			effective_sensitivity="B",
+			reviewed_at=add_days(now, -5),
 		)
 		snoozed = _mk("dv6", status="Snoozed", reviewed_at=add_days(now, -6))
 		superseded = _mk("dv7", status="Superseded", reviewed_at=add_days(now, -7))
@@ -1238,18 +1233,14 @@ class TestLearnedDecidedView(unittest.TestCase):
 		# reviewed_by/reviewed_at feed the who/when line.
 		by_name = {r["name"]: r for r in out["rows"]}
 		self.assertEqual(by_name[acked]["review_note"], learned_api.ACK_NOTE)
-		self.assertTrue(
-			by_name[applied]["review_note"].startswith(learned_api.APPLIED_NOTE_PREFIX)
-		)
+		self.assertTrue(by_name[applied]["review_note"].startswith(learned_api.APPLIED_NOTE_PREFIX))
 		self.assertIn("reviewed_by", by_name[approved])
 		self.assertTrue(by_name[approved]["reviewed_at"])
 
 	def test_decided_orders_reviewed_at_desc_nulls_last(self):
 		now = now_datetime()
 		newest = _mk("do1", status="Approved", reviewed_at=now)
-		older = _mk(
-			"do2", status="Rejected", review_note="x", reviewed_at=add_days(now, -5)
-		)
+		older = _mk("do2", status="Rejected", review_note="x", reviewed_at=add_days(now, -5))
 		oldest = _mk("do3", status="Snoozed", reviewed_at=add_days(now, -9))
 		undated = _mk("do4", status="Archived")  # no reviewed_at -> sorts last
 
@@ -1261,20 +1252,14 @@ class TestLearnedDecidedView(unittest.TestCase):
 		self.assertEqual(self._names(out), [newest, older, oldest, undated])
 
 	def test_decided_ignores_surfaced_filter(self):
-		unsurfaced = _mk(
-			"ds1", status="Approved", surfaced=0, reviewed_at=now_datetime()
-		)
-		out = learned_api.list_learned_patterns_page(
-			view="decided", surfaced=1, page_length=100
-		)
+		unsurfaced = _mk("ds1", status="Approved", surfaced=0, reviewed_at=now_datetime())
+		out = learned_api.list_learned_patterns_page(view="decided", surfaced=1, page_length=100)
 		self.assertIn(unsurfaced, self._names(out))
 
 	def test_decided_overrides_status_filter(self):
 		proposed = _mk("dov1")  # would match status="Proposed"
 		decided = _mk("dov2", status="Approved", reviewed_at=now_datetime())
-		out = learned_api.list_learned_patterns_page(
-			view="decided", status="Proposed", page_length=100
-		)
+		out = learned_api.list_learned_patterns_page(view="decided", status="Proposed", page_length=100)
 		names = self._names(out)
 		self.assertIn(decided, names)
 		self.assertNotIn(proposed, names)
@@ -1289,8 +1274,15 @@ class TestLearnedDecidedView(unittest.TestCase):
 		self.assertIn(proposed, names)
 		self.assertNotIn(decided, names)
 		for key in (
-			"rows", "total", "has_more", "start", "page_length", "facets",
-			"queued_count", "pending_apply_count", "review_activity",
+			"rows",
+			"total",
+			"has_more",
+			"start",
+			"page_length",
+			"facets",
+			"queued_count",
+			"pending_apply_count",
+			"review_activity",
 		):
 			self.assertIn(key, out)
 		# reviewed_at now rides the card in EVERY view (string-normalized, empty
@@ -1306,17 +1298,24 @@ class TestLearnedDecidedView(unittest.TestCase):
 		approved = _mk("dp1", status="Approved", reviewed_at=add_days(now, -1))
 		active = _mk("dp2", status="Active", reviewed_at=add_days(now, -2))
 		rejected = _mk(
-			"dp3", status="Rejected", review_note="not a real habit",
+			"dp3",
+			status="Rejected",
+			review_note="not a real habit",
 			reviewed_at=add_days(now, -3),
 		)
 		acked = _mk(
-			"dp4", status="Rejected", review_note=learned_api.ACK_NOTE,
-			effective_sensitivity="B", reviewed_at=add_days(now, -4),
+			"dp4",
+			status="Rejected",
+			review_note=learned_api.ACK_NOTE,
+			effective_sensitivity="B",
+			reviewed_at=add_days(now, -4),
 		)
 		applied = _mk(
-			"dp5", status="Rejected",
+			"dp5",
+			status="Rejected",
 			review_note=learned_api.APPLIED_NOTE_PREFIX + "shipping-defaults",
-			effective_sensitivity="B", reviewed_at=add_days(now, -5),
+			effective_sensitivity="B",
+			reviewed_at=add_days(now, -5),
 		)
 		snoozed = _mk("dp6", status="Snoozed", reviewed_at=add_days(now, -6))
 
@@ -1324,8 +1323,10 @@ class TestLearnedDecidedView(unittest.TestCase):
 			return set(
 				self._names(
 					learned_api.list_learned_patterns_page(
-						view="decided", disposition=disposition,
-						search="Statement for dp", page_length=100,
+						view="decided",
+						disposition=disposition,
+						search="Statement for dp",
+						page_length=100,
 					)
 				)
 			)
@@ -1343,9 +1344,7 @@ class TestLearnedDecidedView(unittest.TestCase):
 	def test_decided_sort_oldest_flips_ordering(self):
 		now = now_datetime()
 		newest = _mk("dso1", status="Approved", reviewed_at=now)
-		older = _mk(
-			"dso2", status="Rejected", review_note="x", reviewed_at=add_days(now, -5)
-		)
+		older = _mk("dso2", status="Rejected", review_note="x", reviewed_at=add_days(now, -5))
 		oldest = _mk("dso3", status="Snoozed", reviewed_at=add_days(now, -9))
 		undated = _mk("dso4", status="Archived")  # no reviewed_at
 

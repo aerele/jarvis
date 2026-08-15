@@ -14,9 +14,46 @@
 <template>
 	<div class="jv-receipt" :class="'jv-receipt--' + view.tone">
 		<span class="jv-receipt-ico" :class="view.icon" aria-hidden="true">
-			<svg v-if="view.icon === 'confirmed'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
-			<svg v-else-if="view.icon === 'discarded'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M5.6 5.6l12.8 12.8" /></svg>
-			<svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+			<svg
+				v-if="view.icon === 'confirmed'"
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2.4"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
+				<path d="M20 6 9 17l-5-5" />
+			</svg>
+			<svg
+				v-else-if="view.icon === 'discarded'"
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
+				<circle cx="12" cy="12" r="9" />
+				<path d="M5.6 5.6l12.8 12.8" />
+			</svg>
+			<svg
+				v-else
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2.4"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
+				<path d="M18 6 6 18M6 6l12 12" />
+			</svg>
 		</span>
 		<div class="jv-receipt-main">
 			<div class="jv-receipt-line">
@@ -28,7 +65,8 @@
 					rel="noopener"
 					class="jv-receipt-open"
 					title="Open in Desk"
-				>open ↗</a>
+					>open ↗</a
+				>
 				<button
 					v-if="hasWhy || hasList"
 					class="jv-receipt-toggle"
@@ -36,7 +74,20 @@
 					@click="open = !open"
 				>
 					{{ hasWhy ? "why" : "details" }}
-					<svg class="jv-receipt-chev" :class="{ open }" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+					<svg
+						class="jv-receipt-chev"
+						:class="{ open }"
+						width="11"
+						height="11"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.4"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
+						<path d="M6 9l6 6 6-6" />
+					</svg>
 				</button>
 				<span v-if="ts" class="jv-receipt-time">{{ ts }}</span>
 			</div>
@@ -45,7 +96,14 @@
 				<div v-if="hasWhy" class="jv-receipt-error">{{ view.error }}</div>
 				<div v-if="hasList" class="jv-receipt-targets">
 					<template v-for="(t, i) in view.targets" :key="i">
-						<a v-if="t.url" :href="t.url" target="_blank" rel="noopener" class="jv-receipt-link">{{ t.name }}</a>
+						<a
+							v-if="t.url"
+							:href="t.url"
+							target="_blank"
+							rel="noopener"
+							class="jv-receipt-link"
+							>{{ t.name }}</a
+						>
 						<span v-else class="jv-receipt-tgt">{{ t.name }}</span>
 					</template>
 				</div>
@@ -55,57 +113,57 @@
 </template>
 
 <script setup>
-import { computed, ref } from "vue"
-import { receiptView } from "@/lib/actionSummary"
+import { computed, ref } from "vue";
+import { receiptView } from "@/lib/actionSummary";
 
 const props = defineProps({
 	// A role="tool" Jarvis Chat Message with a non-empty action_outcome.
 	message: { type: Object, required: true },
-})
+});
 
-const open = ref(false)
+const open = ref(false);
 
 function parseJson(v) {
-	if (v == null) return null
-	if (typeof v === "object") return v
+	if (v == null) return null;
+	if (typeof v === "object") return v;
 	try {
-		return JSON.parse(v)
+		return JSON.parse(v);
 	} catch (e) {
-		return null
+		return null;
 	}
 }
 
 const view = computed(() => {
-	const m = props.message
+	const m = props.message;
 	return receiptView(
 		m.tool_name,
 		parseJson(m.tool_args) || {},
 		parseJson(m.tool_result),
-		m.action_outcome,
-	)
-})
+		m.action_outcome
+	);
+});
 
 // A single-record outcome with a Desk link → show a compact "open" affordance
 // (the record name is already in the title). Bulk uses the details expander.
 const singleUrl = computed(() => {
-	const t = view.value.targets
-	return view.value.count === 1 && t.length === 1 && t[0].url ? t[0].url : ""
-})
-const hasWhy = computed(() => view.value.outcome === "failed" && !!view.value.error)
-const hasList = computed(() => view.value.count > 1 && view.value.targets.length > 0)
+	const t = view.value.targets;
+	return view.value.count === 1 && t.length === 1 && t[0].url ? t[0].url : "";
+});
+const hasWhy = computed(() => view.value.outcome === "failed" && !!view.value.error);
+const hasList = computed(() => view.value.count > 1 && view.value.targets.length > 0);
 const teaser = computed(() => {
-	const names = view.value.targets.map((t) => t.name).filter(Boolean)
-	if (names.length <= 3) return names.join(", ")
-	return names.slice(0, 3).join(", ") + `, +${names.length - 3} more`
-})
+	const names = view.value.targets.map((t) => t.name).filter(Boolean);
+	if (names.length <= 3) return names.join(", ");
+	return names.slice(0, 3).join(", ") + `, +${names.length - 3} more`;
+});
 
 const ts = computed(() => {
-	const c = props.message.creation
-	if (!c) return ""
-	const d = new Date(String(c).replace(" ", "T"))
-	if (isNaN(d.getTime())) return ""
-	return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-})
+	const c = props.message.creation;
+	if (!c) return "";
+	const d = new Date(String(c).replace(" ", "T"));
+	if (isNaN(d.getTime())) return "";
+	return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+});
 </script>
 
 <style scoped>

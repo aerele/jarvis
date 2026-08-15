@@ -1,13 +1,11 @@
 // Learning-board API (plan §6.4) - thin wrappers around
-// `jarvis.chat.learned_api.*`, the SM-gated + managed-only endpoints behind the
-// Skills-page "Learning" tab. Mirrors src/api/skills.js: one `call` per
-// endpoint; list/settings/batch args are JSON-encoded where the server
-// `_parse_json`s them. `get_learning_status` is the only endpoint reachable on
-// self-host (it reports `self_hosted` so the tab can show the managed-only
-// empty state); every other call throws on a self-hosted bench.
-import { call } from "frappe-ui"
+// `jarvis.chat.learned_api.*`, the SM-gated endpoints behind the Skills-page
+// "Learning" tab. Mirrors src/api/skills.js: one `call` per endpoint;
+// list/settings/batch args are JSON-encoded where the server `_parse_json`s
+// them.
+import { call } from "frappe-ui";
 
-const LR = "jarvis.chat.learned_api."
+const LR = "jarvis.chat.learned_api.";
 
 // ── list / board ─────────────────────────────────────────────────────────────
 // Flat kwargs (NOT the frozen `filters` JSON envelope the four feature lists
@@ -31,11 +29,11 @@ export const listLearnedPatternsPage = (p = {}) =>
 		view: p.view || "",
 		disposition: p.disposition || "",
 		sort: p.sort || "",
-	})
+	});
 
 // Full row + drill-down stats (raw n / confidence / wilson / gap), detected
 // roles, compiled-bullet preview, exceptions (SM may see named parties), runs.
-export const getLearnedPattern = (name) => call(LR + "get_learned_pattern", { name })
+export const getLearnedPattern = (name) => call(LR + "get_learned_pattern", { name });
 
 // ── lifecycle transitions (§6.5) - human SM actions, TOCTOU-safe server-side ──
 // Proposed→Approved (or Stale→Approved). Passing an edited draft freezes the
@@ -46,28 +44,28 @@ export const approveLearnedPattern = (name, editedSkillDraft) =>
 		editedSkillDraft != null && editedSkillDraft !== ""
 			? { name, edited_skill_draft: editedSkillDraft }
 			: { name }
-	)
-export const unapproveLearnedPattern = (name) => call(LR + "unapprove_learned_pattern", { name })
+	);
+export const unapproveLearnedPattern = (name) => call(LR + "unapprove_learned_pattern", { name });
 export const rejectLearnedPattern = (name, reason) =>
-	call(LR + "reject_learned_pattern", { name, reason })
+	call(LR + "reject_learned_pattern", { name, reason });
 // B/C insight-only disposition (Phase 1): records that the SM read the insight
 // and dismisses it (stored server-side as a terminal Rejected + a stable note).
 // A-class rows are refused server-side - they must be Approved to reach the
 // container. Wired to the "Acknowledge (insight only)" card action.
 export const acknowledgeLearnedPattern = (name) =>
-	call(LR + "acknowledge_learned_pattern", { name })
-export const restoreRejectedPattern = (name) => call(LR + "restore_rejected_pattern", { name })
+	call(LR + "acknowledge_learned_pattern", { name });
+export const restoreRejectedPattern = (name) => call(LR + "restore_rejected_pattern", { name });
 export const snoozeLearnedPattern = (name, days) =>
-	call(LR + "snooze_learned_pattern", { name, days })
+	call(LR + "snooze_learned_pattern", { name, days });
 // Correction loop (§6.5): any signed-in desk (System) user, NOT SM-gated,
 // flags an Active/Approved learned default as wrong-here. One entry per user
 // (a re-flag updates it); ≥2 distinct users or ≥3 events demotes the strength
 // band one level and notifies SMs. Guest/portal sessions are refused server-side.
 export const flagLearnedDefault = (name, note = "") =>
-	call(LR + "flag_learned_default", { name, note })
+	call(LR + "flag_learned_default", { name, note });
 // A-class only; a mixed batch (any B/C) is refused whole, server-side.
 export const batchApprove = (names) =>
-	call(LR + "batch_approve", { names: JSON.stringify(Array.from(names || [])) })
+	call(LR + "batch_approve", { names: JSON.stringify(Array.from(names || [])) });
 
 // ── insight → skill (wiki-v2 D5) ─────────────────────────────────────────────
 // B/C insights never compile into learned skills; "Apply to skill…" folds one
@@ -78,43 +76,41 @@ export const batchApprove = (names) =>
 // marks the pattern acknowledged with an applied-to-skill note. The updated
 // skill rides the normal Skills-tab apply (no auto-push).
 export const draftInsightSkillUpdate = (patternName) =>
-	call(LR + "draft_insight_skill_update", { pattern_name: patternName })
+	call(LR + "draft_insight_skill_update", { pattern_name: patternName });
 export const applyInsightSkillUpdate = (patternName, payload = {}) => {
-	const args = { pattern_name: patternName, action: payload.action || "" }
-	if (payload.skill_name) args.skill_name = payload.skill_name
-	if (payload.updated_instructions) args.updated_instructions = payload.updated_instructions
+	const args = { pattern_name: patternName, action: payload.action || "" };
+	if (payload.skill_name) args.skill_name = payload.skill_name;
+	if (payload.updated_instructions) args.updated_instructions = payload.updated_instructions;
 	// dict arg JSON-encoded like batch_approve / setLearningSettings
-	if (payload.new_skill) args.new_skill = JSON.stringify(payload.new_skill)
-	return call(LR + "apply_insight_skill_update", args)
-}
+	if (payload.new_skill) args.new_skill = JSON.stringify(payload.new_skill);
+	return call(LR + "apply_insight_skill_update", args);
+};
 
 // ── apply / sync (learned skills ride the custom-skill push, §6.2) ───────────
-export const applyLearnedSkills = () => call(LR + "apply_learned_skills")
+export const applyLearnedSkills = () => call(LR + "apply_learned_skills");
 // Proxies get_custom_skills_sync_status - same pill the Skills page polls.
-export const getLearnedApplyStatus = () => call(LR + "get_learned_apply_status")
+export const getLearnedApplyStatus = () => call(LR + "get_learned_apply_status");
 // Board badge: surfaced patterns still awaiting a decision.
-export const pendingLearnedCount = () => call(LR + "pending_learned_count")
+export const pendingLearnedCount = () => call(LR + "pending_learned_count");
 
 // ── run now (§5.1 / §5.2 manual bypass) ──────────────────────────────────────
-export const runPatternAnalysisNow = () => call(LR + "run_pattern_analysis_now")
+export const runPatternAnalysisNow = () => call(LR + "run_pattern_analysis_now");
 
 // ── settings + status (the in-tab config surface, §6.4) ──────────────────────
 export const getLearningSettings = (includePreflight = 0) =>
-	call(LR + "get_learning_settings", { include_preflight: includePreflight ? 1 : 0 })
+	call(LR + "get_learning_settings", { include_preflight: includePreflight ? 1 : 0 });
 export const setLearningSettings = (payload) =>
-	call(LR + "set_learning_settings", { payload: JSON.stringify(payload || {}) })
-// SM-only but NOT self-host-gated - the probe the tab uses to render the
-// managed-only empty state (reports {self_hosted, enabled, last/next run, ...}).
-export const getLearningStatus = () => call(LR + "get_learning_status")
+	call(LR + "set_learning_settings", { payload: JSON.stringify(payload || {}) });
+// SM-only - the status probe the Analysis tab renders from
+// (reports {enabled, last/next run, ...}).
+export const getLearningStatus = () => call(LR + "get_learning_status");
 
 // ── Review-tab access probe (Skills-area rework, DESIGN.md §6/§6b) ──────────
 // Reviewer-set role check ONLY (Jarvis Skill Reviewer | Jarvis Admin | System
-// Manager | Administrator), NOT self-host-gated - mirrors `getLearningStatus`
-// so ReviewTab can still render its managed-only empty state on a
-// self-hosted bench. Review visibility is a SEPARATE gate from Analysis now
-// (SkillsPage's tab strip uses the collapsed `get_skills_area_caps` probe for
-// that; this one is for ReviewTab's own reviewer-only affordances - e.g.
+// Manager | Administrator). Review visibility is a SEPARATE gate from Analysis
+// now (SkillsPage's tab strip uses the collapsed `get_skills_area_caps` probe
+// for that; this one is for ReviewTab's own reviewer-only affordances - e.g.
 // "Ask the user" follow-ups, promotion decisions). Reports
-// {self_hosted, pending_promotions, pending_patterns} so the tab's two queue-
-// type chips render their counts without a second round-trip.
-export const getReviewAccess = () => call(LR + "get_review_access")
+// {pending_promotions, pending_patterns} so the tab's two queue-type chips
+// render their counts without a second round-trip.
+export const getReviewAccess = () => call(LR + "get_review_access");

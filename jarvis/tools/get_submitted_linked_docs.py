@@ -12,6 +12,7 @@ submittable filter entirely.
 
 Underlying helper enforces read permission on the source.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -21,27 +22,27 @@ from jarvis.tools import require_doctype_and_name
 
 
 def get_submitted_linked_docs(doctype: str, name: str) -> dict:
-    """Return ``{linked, doctype, name}`` where ``linked`` is a list of
-    ``{doctype, name, docstatus}`` for every submittable record in the
-    cancel-impact tree rooted at ``doctype/name``.
-    """
-    require_doctype_and_name(doctype, name)
-    if not frappe.db.exists(doctype, name):
-        raise InvalidArgumentError(f"unknown {doctype}: {name}")
+	"""Return ``{linked, doctype, name}`` where ``linked`` is a list of
+	``{doctype, name, docstatus}`` for every submittable record in the
+	cancel-impact tree rooted at ``doctype/name``.
+	"""
+	require_doctype_and_name(doctype, name)
+	if not frappe.db.exists(doctype, name):
+		raise InvalidArgumentError(f"unknown {doctype}: {name}")
 
-    from frappe.desk.form.linked_with import (
-        get_submitted_linked_docs as _gsl,
-    )
+	from frappe.desk.form.linked_with import (
+		get_submitted_linked_docs as _gsl,
+	)
 
-    result = _gsl(doctype=doctype, name=name)
-    # The underlying helper returns either a dict {"docs": [...]} or a
-    # raw list depending on the Frappe release; normalise to list.
-    if isinstance(result, dict):
-        linked = result.get("docs") or []
-    else:
-        linked = result or []
-    return {
-        "linked": linked,
-        "doctype": doctype,
-        "name": name,
-    }
+	result = _gsl(doctype=doctype, name=name)
+	# The underlying helper returns either a dict {"docs": [...]} or a
+	# raw list depending on the Frappe release; normalise to list.
+	if isinstance(result, dict):
+		linked = result.get("docs") or []
+	else:
+		linked = result or []
+	return {
+		"linked": linked,
+		"doctype": doctype,
+		"name": name,
+	}

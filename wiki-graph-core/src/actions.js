@@ -9,13 +9,18 @@ export function computeActions(data, analysis) {
 
 	const authors = {};
 	for (const e of edges) {
-		if (e.kind === "authored") (authors[e.target] = authors[e.target] || new Set()).add(e.source);
+		if (e.kind === "authored")
+			(authors[e.target] = authors[e.target] || new Set()).add(e.source);
 	}
 
 	const stale = pages
 		.filter((p) => p.stale || p.contradiction)
-		.map((p) => ({ slug: p.slug, label: p.label, id: p.id,
-			reason: p.contradiction ? "contradiction" : "stale" }));
+		.map((p) => ({
+			slug: p.slug,
+			label: p.label,
+			id: p.id,
+			reason: p.contradiction ? "contradiction" : "stale",
+		}));
 
 	const orphans = pages
 		.filter((p) => (metrics[p.id] || {}).orphan)
@@ -23,10 +28,18 @@ export function computeActions(data, analysis) {
 
 	const busFactor = pages
 		.filter((p) => (authors[p.id] || new Set()).size === 1)
-		.map((p) => ({ slug: p.slug, label: p.label, id: p.id,
-			author: [...authors[p.id]][0].replace(/^user:/, "") }));
+		.map((p) => ({
+			slug: p.slug,
+			label: p.label,
+			id: p.id,
+			author: [...authors[p.id]][0].replace(/^user:/, ""),
+		}));
 
-	const norm = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+	const norm = (t) =>
+		String(t || "")
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, " ")
+			.trim();
 	const byNorm = {};
 	for (const p of pages) {
 		const k = norm(p.label);

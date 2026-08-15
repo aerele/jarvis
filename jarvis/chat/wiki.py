@@ -30,9 +30,32 @@ writes behind explicit channel checks + the controller sanitizer).
 Merge discipline (``apply_extracted_page_updates``): ``append_md`` appends,
 ``body_md`` replaces only when the update carries no contradiction; a flagged
 contradiction APPENDS a ``## Contradiction flagged (<date>)`` section and sets
-``contradiction_flag`` — extracted content never silently overwrites contested
-knowledge. Every applied update appends a ``{date, kind, ref, user}`` sources
-entry and refreshes ``last_confirmed_at``.
+``contradiction_flag`` WHICHEVER key carried it — extracted content never
+silently overwrites contested knowledge, and never buries it as ordinary prose
+where ``jarvis.learning.wiki_lint`` cannot find it. Every applied update appends
+a ``{date, kind, ref, user}`` sources entry and refreshes ``last_confirmed_at``.
+
+The voice-note ingest is APPEND-ONLY against pages that already exist
+(``allow_body_replace=False``). It shows the model at most
+``_MAX_EXISTING_BODY_PROMPT_CHARS`` of a stored body and caps the reply at 4000
+tokens, so a "full merged body" reply can never carry a long page back intact —
+replacing with it deleted everything past the excerpt. The prompt now asks for
+``append_md`` on an existing page, and the merge appends a stray ``body_md``
+instead of swapping it in.
+
+Two fences protect text the machine does not own, and they answer different
+questions. ``provenance_prefix`` (Custom App Learning scribe) asks "is this page
+MINE?" and REFUSES anything else outright. ``preserve_curated`` (every voice
+caller) asks "did a PERSON write this?" and, when the answer is yes, downgrades
+the write to add-only: a dated attribution heading, no summary overwrite, and a
+refusal rather than a head-truncating clip. The voice ingest cannot use the first
+one, because its own writes are stamped ``voice`` and ``voice`` counts as a human
+kind, so the fence would lock it out of the pages it created itself.
+
+Personal (User-scope) pages are resolved by ``resolve_user_scope_page``, never by
+a bare slug lookup: the ``--u-<localpart>`` audience suffix is NOT unique across
+users, so an unfiltered lookup could hand one colleague's private page to
+another.
 """
 
 from __future__ import annotations
@@ -44,7 +67,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, now_datetime
 
-from jarvis.chat import wiki_permissions
+from jarvis.chat import list_filters, wiki_permissions
 from jarvis.chat.events import publish_to_user
 from jarvis.jarvis.doctype.jarvis_wiki_page.jarvis_wiki_page import (
 	MAX_BODY_LEN,
@@ -55,7 +78,9 @@ from jarvis.jarvis.doctype.jarvis_wiki_page.jarvis_wiki_page import (
 )
 from jarvis.learning.sanitizer import scan_instruction_injection
 from jarvis.permissions import (
-	JARVIS_REVIEWER_ROLES, has_jarvis_admin_access, require_jarvis_admin,
+	JARVIS_REVIEWER_ROLES,
+	has_jarvis_admin_access,
+	require_jarvis_admin,
 )
 
 WIKI = "Jarvis Wiki Page"
@@ -71,8 +96,15 @@ SETTINGS = "Jarvis Settings"
 _REVIEWER_ROLES = JARVIS_REVIEWER_ROLES
 
 PAGE_TYPES = (
-	"Customer", "Supplier", "Item", "Process", "Doctype",
-	"Exception", "Integration", "People", "Org",
+	"Customer",
+	"Supplier",
+	"Item",
+	"Process",
+	"Doctype",
+	"Exception",
+	"Integration",
+	"People",
+	"Org",
 )
 
 # [Context:] clause budget — shares ~700 chars with personal_skill_clause.
@@ -101,27 +133,67 @@ _INGEST_SYSTEM = (
 	"You maintain an internal business wiki. Given a spoken note transcript, "
 	"the ERP entities in view and the existing wiki pages, output ONLY a JSON "
 	"array of page updates - no prose, no markdown fences. Each item must be "
-	'an object with exactly these keys: "slug" (lowercase-hyphen page id; '
-	'reuse the existing or suggested slug when one is given), "page_type" '
-	'(one of "Customer", "Supplier", "Item", "Process", "Doctype", '
-	'"Exception", "Integration", "People", "Org"), "title", "ref_doctype", '
-	'"ref_name" (the ERP record the page is about, or null), "summary" (one '
-	'paragraph, max 500 characters), "body_md" (markdown) and "contradiction" '
-	'(boolean). When the note does NOT contradict a page, "body_md" must be '
-	"the FULL updated body: the existing body with the new durable knowledge "
-	"merged in - never drop existing content. When the note contradicts what "
-	'a page already says, set "contradiction": true and put ONLY the new '
-	'conflicting information in "body_md" (it is appended as a flagged '
-	"section; the existing body is preserved). Record only durable business "
-	"knowledge - how the org, its customers, suppliers, items and processes "
-	"work; ignore greetings, small talk and one-off tasks. At most "
-	f"{MAX_PAGES_PER_NOTE} pages. Output [] when there is nothing durable."
+	'an object with these keys: "slug" (lowercase-hyphen page id; reuse the '
+	'existing or suggested slug when one is given), "page_type" (one of '
+	'"Customer", "Supplier", "Item", "Process", "Doctype", "Exception", '
+	'"Integration", "People", "Org"), "title", "ref_doctype", "ref_name" (the '
+	'ERP record the page is about, or null), "summary" (one paragraph, max 500 '
+	'characters), "contradiction" (boolean), and EXACTLY ONE body key chosen '
+	"as follows.\n"
+	'The page is NOT in the existing wiki pages: use "body_md" - the full body '
+	"of the new page.\n"
+	'The page IS in the existing wiki pages: use "append_md" - ONLY the new '
+	"durable knowledge, as a short markdown section. It is appended to the "
+	"stored body, so never repeat what the page already says and never send "
+	"the page body back. The body you were shown may be an excerpt, so a "
+	"full-body reply would destroy the part you cannot see.\n"
+	"The note CONTRADICTS what an existing page says: set "
+	'"contradiction": true and put ONLY the new conflicting information in '
+	'"body_md". It is appended as a flagged section for a human to reconcile; '
+	"the existing body is preserved.\n"
+	"Record only durable business knowledge - how the org, its customers, "
+	"suppliers, items and processes work; ignore greetings, small talk and "
+	f"one-off tasks. At most {MAX_PAGES_PER_NOTE} pages. Output [] when there "
+	"is nothing durable."
 )
+
+# Appended to a stored body that did not fit the prompt budget. Without it the
+# model reads a plain slice as the whole page and "merges" against a phantom
+# document (issue #488).
+_BODY_EXCERPT_MARKER = (
+	"\n\n[EXCERPT ONLY: {n} further characters of this page are not shown. "
+	'Reply with "append_md" for this page, never a full body.]'
+)
+# How far back an excerpt may snap to end on a whole line.
+_EXCERPT_LINE_SNAP_CHARS = 200
 
 
 # --------------------------------------------------------------------------- #
 # shared helpers
 # --------------------------------------------------------------------------- #
+# #493: the single refusal every agent-facing wiki surface hands back when the
+# operator has switched "Enable Business Wiki" off. Defined beside the toggle it
+# reports so the two tools and the dispatch gate cannot drift into wording the
+# others do not use.
+#
+# The no-retry instruction is IN the message on purpose: the agent plugin relays a
+# failed tool call to the model as "<code>: <message>" and drops every other field,
+# so a hint the model must act on arrives no other way (the same reason
+# _delegate_capability puts it there). The envelope's ``hint`` keeps its usual
+# human-facing "what you can do" role.
+WIKI_DISABLED_MESSAGE = (
+	"The business wiki is turned off for this workspace, so wiki pages cannot be "
+	"read or written. This is an operator setting rather than a permission problem, "
+	"so retrying, changing the arguments or calling the other wiki tool will not "
+	"help. Answer from what you already know, and if the user needs the wiki, tell "
+	'them an administrator can switch it back on with "Enable Business Wiki" in '
+	"Jarvis Settings."
+)
+# What a short-circuited background job (mirror push, graph push, history snapshot)
+# reports instead. Read by an operator in a job result, never by the model.
+WIKI_DISABLED_REASON = "the business wiki is turned off for this workspace"
+
+
 def wiki_enabled() -> bool:
 	"""Operator toggle; NULL=ON (the vision_attachments_enabled idiom — Single
 	defaults are not backfilled on migrate, so a pre-existing Settings row has
@@ -193,14 +265,77 @@ def _suffix_slug(base_slug, suffix: str) -> str:
 
 
 def user_scope_slug(base_slug, user: str) -> str:
-	"""The audience-suffixed slug a User-scope page for ``user`` gets
-	(``<base>--u-<localpart>``), mirroring the controller exactly."""
+	"""The PREFERRED audience-suffixed slug for ``user``'s User-scope page
+	(``<base>--u-<localpart>``) — what the controller gives them when that slug
+	is free or already theirs. It is NOT unique per user: see
+	``user_scope_slug_candidates``."""
 	from jarvis.chat.entities import scrub
 
 	local = scrub(str(user or "").split("@")[0])
 	if not local:
 		return _normalize_slug(base_slug)
 	return _suffix_slug(base_slug, f"--u-{local}")
+
+
+def _user_slug_digest(user: str) -> str:
+	"""A short stable digest of the WHOLE address, used to break a local-part
+	collision. ``scrub`` is lossy (it folds ``@``, ``.``, ``_`` and every other
+	non-alnum run to one hyphen), so no scrubbed form of an email — local part
+	OR full address — is injective. A digest of the raw address is."""
+	import hashlib
+
+	return hashlib.sha256(str(user or "").strip().lower().encode("utf-8")).hexdigest()[:8]
+
+
+def user_scope_slug_candidates(base_slug, user: str) -> list[str]:
+	"""Every slug ``user``'s User-scope page for ``base_slug`` may carry, most
+	preferred first.
+
+	The audience suffix keys on the email LOCAL PART, so alice@acme.com and
+	alice@contractor.io both derive ``--u-alice`` — and since the slug IS the
+	docname (``autoname: field:slug``, unique), the second user's page collided
+	with the first's, which is issue #490. The preferred form is still offered
+	first, so every page created before that fix keeps its slug and its docname
+	(no rename, no orphan); a genuine cross-user collision falls back to
+	``--u-<localpart>-<digest>``.
+
+	Both forms are PURE functions of the base slug and the address, so the
+	controller (which picks one at create time) and the resolvers (which probe
+	them at read time) agree without a shared lookup table."""
+	from jarvis.chat.entities import scrub
+
+	normalized = _normalize_slug(base_slug)
+	preferred = user_scope_slug(base_slug, user)
+	local = scrub(str(user or "").split("@")[0])
+	if not local:
+		return [preferred]
+	alt = _suffix_slug(base_slug, f"--u-{local}-{_user_slug_digest(user)}")
+	# An already-suffixed slug passed back in must not be suffixed twice. The
+	# disambiguated form is checked first: it ENDS WITH the preferred one, so
+	# testing the preferred form first would mis-classify it.
+	if normalized == alt:
+		return [alt]
+	if normalized == preferred:
+		return [preferred]
+	return [preferred, alt]
+
+
+def resolve_user_scope_page(base_slug, target_user: str) -> tuple[str | None, str]:
+	"""Resolve ``target_user``'s OWN User-scope page for ``base_slug``.
+
+	Returns ``(docname or None, slug)``. EVERY probe filters on
+	``scope``/``target_user``, so a slug this user does not own can never
+	resolve here — that unfiltered lookup was how one colleague's private note
+	landed in another's page (issue #490). Mirrors
+	``jarvis.tools.update_wiki._find_existing``, which always got this right."""
+	candidates = user_scope_slug_candidates(base_slug, target_user)
+	for candidate in candidates:
+		name = frappe.db.get_value(
+			WIKI, {"slug": candidate, "scope": "User", "target_user": target_user}, "name"
+		)
+		if name:
+			return name, candidate
+	return None, candidates[0]
 
 
 def role_scope_slug(base_slug, role: str) -> str:
@@ -229,7 +364,7 @@ def _clip_body(body: str) -> str:
 	clipped = body[-MAX_BODY_LEN:]
 	nl = clipped.find("\n")
 	if 0 <= nl < 200:
-		clipped = clipped[nl + 1:]
+		clipped = clipped[nl + 1 :]
 	return clipped.lstrip()
 
 
@@ -328,10 +463,7 @@ def wiki_clause(conversation_id: str, context: dict | None = None) -> str:
 		# Scope visibility (belt and braces: entity-derived slugs are
 		# unsuffixed so only Org pages should ever match, but a clause must
 		# never inline a page the session user cannot read).
-		pages = [
-			p for p in pages
-			if wiki_permissions.can_read_page(p, frappe.session.user)
-		]
+		pages = [p for p in pages if wiki_permissions.can_read_page(p, frappe.session.user)]
 		if not pages:
 			return ""
 		by_slug = {p.slug: p for p in pages}
@@ -342,19 +474,14 @@ def wiki_clause(conversation_id: str, context: dict | None = None) -> str:
 			summary = _safe_clause_summary(p.summary)
 			bits.append(f"{p.slug}: {summary}" if summary else p.slug)
 		clause = "; wiki notes: " + "; ".join(bits)
-		more = [
-			p.slug
-			for p in ordered[_CLAUSE_MAX_INLINE:_CLAUSE_MAX_INLINE + _CLAUSE_MAX_MORE]
-		]
+		more = [p.slug for p in ordered[_CLAUSE_MAX_INLINE : _CLAUSE_MAX_INLINE + _CLAUSE_MAX_MORE]]
 		if more:
 			more_clause = f"; more wiki: {', '.join(more)} via jarvis__read_wiki"
 			if len(clause) + len(more_clause) <= _CLAUSE_MAX_CHARS:
 				clause += more_clause
 		return clause[:_CLAUSE_MAX_CHARS]
 	except Exception:
-		frappe.log_error(
-			title="wiki: clause build failed", message=frappe.get_traceback()
-		)
+		frappe.log_error(title="wiki: clause build failed", message=frappe.get_traceback())
 		return ""
 
 
@@ -558,15 +685,9 @@ def maybe_nudge(conversation_id: str, user: str, run_id: str | None = None) -> N
 
 
 def _maybe_nudge(conversation_id: str, user: str) -> None:
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return
 	if not wiki_enabled():
 		return
-	conv = frappe.db.get_value(
-		CONV, conversation_id, ["name", "file_box"], as_dict=True
-	)
+	conv = frappe.db.get_value(CONV, conversation_id, ["name", "file_box"], as_dict=True)
 	if not conv or cint(conv.file_box):
 		return
 	cache = frappe.cache()
@@ -580,10 +701,7 @@ def _maybe_nudge(conversation_id: str, user: str) -> None:
 	if not entities:
 		return
 
-	hours = (
-		cint(frappe.db.get_single_value(SETTINGS, "wiki_nudge_cooldown_hours"))
-		or _DEFAULT_COOLDOWN_HOURS
-	)
+	hours = cint(frappe.db.get_single_value(SETTINGS, "wiki_nudge_cooldown_hours")) or _DEFAULT_COOLDOWN_HOURS
 	# Cooldown is stamped even though the user may ignore the nudge — one
 	# prompt per conversation per window, never a nag loop. Atomic NX set
 	# (pickled so get_value round-trips): of two concurrent turns racing past
@@ -596,11 +714,14 @@ def _maybe_nudge(conversation_id: str, user: str) -> None:
 	)
 	if not won:
 		return
-	publish_to_user(user, {
-		"kind": "wiki:nudge",
-		"conversation_id": conversation_id,
-		"entities": entities,
-	})
+	publish_to_user(
+		user,
+		{
+			"kind": "wiki:nudge",
+			"conversation_id": conversation_id,
+			"entities": entities,
+		},
+	)
 
 
 def _nudge_entities(conversation_id: str) -> list[dict]:
@@ -627,13 +748,15 @@ def _nudge_entities(conversation_id: str) -> list[dict]:
 		seen.add(page_ref["slug"])
 		slugs.append(page_ref["slug"])
 		label = ref["name"] if page_ref["ref_name"] else ref["doctype"]
-		out.append({
-			"doctype": ref["doctype"],
-			"name": ref["name"],
-			"label": label,
-			"has_page": False,
-			"_slug": page_ref["slug"],
-		})
+		out.append(
+			{
+				"doctype": ref["doctype"],
+				"name": ref["name"],
+				"label": label,
+				"has_page": False,
+				"_slug": page_ref["slug"],
+			}
+		)
 		if len(out) >= _NUDGE_MAX_ENTITIES:
 			break
 	if not out:
@@ -663,7 +786,8 @@ def dismiss_nudge(conversation: str) -> dict:
 	if owner != frappe.session.user and frappe.session.user != "Administrator":
 		frappe.throw(_("Not your conversation."), frappe.PermissionError)
 	frappe.cache().set_value(
-		_NUDGE_OFF_KEY.format(conv=conversation), 1,
+		_NUDGE_OFF_KEY.format(conv=conversation),
+		1,
 		expires_in_sec=_NUDGE_OFF_TTL_S,
 	)
 	return {"ok": True}
@@ -698,13 +822,23 @@ def _ingest_note(note_name: str) -> None:
 		return
 
 	entities = _note_entities(note)
-	suggested, existing = _pages_for_prompt(entities)
+	suggested, existing = _pages_for_prompt(entities, note.owner)
 	updates = _extract_page_updates(note, entities, suggested, existing)
 	if updates is None:
 		return  # extraction failed (logged); stays New for the sweep
 
 	applied, failed = apply_extracted_page_updates(
-		updates, "voice", note.owner, ref=note.name
+		updates,
+		"voice",
+		note.owner,
+		ref=note.name,
+		# The prompt showed the model an EXCERPT of any long page body, so this
+		# path may never replace one: a "full merged body" reply would delete
+		# everything past the excerpt (issue #488).
+		allow_body_replace=False,
+		# ... and on a page a person edited by hand, this write may only ADD:
+		# no summary overwrite, no head-truncating clip (issue #489).
+		preserve_curated=True,
 	)
 	if failed:
 		# A page write failed (already logged per-update): leave the note New
@@ -723,7 +857,8 @@ def _ingest_note(note_name: str) -> None:
 			"processed_at": now_datetime(),
 			"processed_note": (
 				f"wiki ingest: {applied} page update(s) applied"
-				if applied else "wiki ingest: nothing durable found"
+				if applied
+				else "wiki ingest: nothing durable found"
 			),
 		},
 		update_modified=False,
@@ -749,10 +884,12 @@ def _note_entities(note) -> list[dict]:
 	]
 
 
-def _pages_for_prompt(entities: list[dict]) -> tuple[list[dict], list[dict]]:
+def _pages_for_prompt(entities: list[dict], user: str) -> tuple[list[dict], list[dict]]:
 	"""(suggested page refs for the note's entities, existing page rows for
-	those refs) — both handed to the merge prompt so the model reuses our
-	slug conventions and sees the current bodies it must merge into."""
+	those refs), both handed to the merge prompt so the model reuses our
+	slug conventions and sees the current bodies it must merge into. ``user`` is
+	the human whose statement produced the note (the ingest write actor), so the
+	read filter and the later write attribution name the same principal."""
 	from jarvis.chat import entities as entities_mod
 
 	suggested: list[dict] = []
@@ -767,12 +904,47 @@ def _pages_for_prompt(entities: list[dict]) -> tuple[list[dict], list[dict]]:
 	rows = frappe.get_all(
 		WIKI,
 		filters={"slug": ["in", [s["slug"] for s in suggested]]},
-		fields=["slug", "title", "page_type", "ref_doctype", "ref_name", "summary", "body_md"],
+		fields=[
+			"slug",
+			"title",
+			"page_type",
+			"ref_doctype",
+			"ref_name",
+			"summary",
+			"body_md",
+			"scope",
+			"target_role",
+			"target_user",
+		],
 		limit_page_length=len(suggested),
 	)
+	# Scope visibility (belt and braces, mirroring wiki_clause): entity-derived
+	# slugs are unsuffixed so only Org pages should match, but an Org page
+	# NARROWED to User/Role scope after creation keeps its org-convention slug
+	# (the audience suffix is applied at create time only), so it still matches
+	# here. Never inline a body ``user`` cannot read into the merge prompt.
+	rows = [r for r in rows if wiki_permissions.can_read_page(r, user)]
 	for r in rows:
-		r["body_md"] = (r.get("body_md") or "")[:_MAX_EXISTING_BODY_PROMPT_CHARS]
+		r["body_md"] = _body_for_prompt(r.get("body_md"))
 	return suggested, rows
+
+
+def _body_for_prompt(body) -> str:
+	"""The prompt copy of a stored body: whole when it fits the budget, else the
+	head cut on a line boundary plus an explicit excerpt marker."""
+	body = body or ""
+	if len(body) <= _MAX_EXISTING_BODY_PROMPT_CHARS:
+		return body
+	head = body[:_MAX_EXISTING_BODY_PROMPT_CHARS]
+	# Snap back to a line boundary, but only a NEARBY one (the _clip_body idiom):
+	# rfind scans the WHOLE window, so a body whose only early newline is followed
+	# by one long unbroken run would otherwise be trimmed to almost nothing,
+	# spending the budget on the marker instead of on context.
+	nl = head.rfind("\n")
+	if nl > len(head) - _EXCERPT_LINE_SNAP_CHARS:
+		head = head[:nl]
+	head = head.rstrip()
+	return head + _BODY_EXCERPT_MARKER.format(n=len(body) - len(head))
 
 
 def _extract_page_updates(note, entities, suggested, existing) -> list | None:
@@ -802,9 +974,7 @@ def _extract_page_updates(note, entities, suggested, existing) -> list | None:
 			max_tokens=4000,
 		)
 	except Exception:
-		frappe.log_error(
-			title="wiki: ingest extraction failed", message=frappe.get_traceback()
-		)
+		frappe.log_error(title="wiki: ingest extraction failed", message=frappe.get_traceback())
 		return None
 	updates = _parse_updates(raw)
 	if updates is None:
@@ -823,7 +993,7 @@ def _parse_updates(raw: str) -> list | None:
 	if start < 0 or end <= start:
 		return None
 	try:
-		data = json.loads(text[start:end + 1])
+		data = json.loads(text[start : end + 1])
 	except Exception:
 		return None
 	if not isinstance(data, list):
@@ -834,6 +1004,91 @@ def _parse_updates(raw: str) -> list | None:
 # --------------------------------------------------------------------------- #
 # the shared write path
 # --------------------------------------------------------------------------- #
+# Provenance kinds that mean a HUMAN (or a human-driven pipeline) touched a page.
+# ANY of these on a page makes it non-updatable by the machine scribe — a page
+# that carries even one human touch is off-limits, so the scribe can never
+# clobber a person's edit.
+_HUMAN_SOURCE_KINDS = frozenset({"manual", "chat", "voice", "edit", "promotion", "tool"})
+
+# Provenance kinds that mean a person AUTHORED OR APPROVED this page's text with
+# their own hands: the SPA editor (``create_wiki_page`` / ``save_wiki_page`` stamp
+# "manual") and the reviewed promotion flow ("promotion"). "edit" is reserved for
+# the same meaning.
+#
+# A STRICT SUBSET of _HUMAN_SOURCE_KINDS, and deliberately so (issue #489). The
+# obvious fix — handing the voice ingest ``provenance_prefix="voice"`` — cannot
+# work, because "voice" is itself a human kind AND is what the ingest stamps on
+# every page it writes, so the fence would refuse the ingest's own pages from the
+# second note onward. "voice" and "chat" name a pipeline that DERIVED text from a
+# human utterance; "tool" names the agent's own update_wiki writes. None of those
+# is a person's typing, and none belongs here. _HUMAN_SOURCE_KINDS keeps its full
+# membership for the Custom App Learning fence, which is unchanged.
+_CURATED_SOURCE_KINDS = frozenset({"manual", "edit", "promotion"})
+
+
+def _is_txn_fatal(e: Exception) -> bool:
+	"""A transaction-FATAL DB error — a deadlock or a lock-wait timeout — aborts the
+	WHOLE InnoDB transaction (rolling back earlier in-transaction saves and releasing
+	every savepoint). It MUST propagate, never be swallowed: swallowing it would report
+	as-applied the earlier pages the abort just rolled back — a phantom tally (CA2-2). A
+	recoverable per-page error (a validation refusal, a stale-timestamp conflict) is
+	rolled back to that page's savepoint by the caller instead."""
+	db = getattr(frappe, "db", None)
+	if db is None:
+		return False
+	try:
+		return bool(db.is_deadlocked(e) or db.is_timedout(e))
+	except Exception:
+		return False
+
+
+def _sources_agent_updatable(raw, prefix: str) -> bool:
+	"""Predicate over a page's raw ``sources`` JSON: the page may be UPDATED in
+	place by the Custom App Learning scribe iff it is AGENT-OWNED (at least one
+	``kind`` starts with ``prefix``) AND has NO human/manual edit (no ``kind`` in
+	``_HUMAN_SOURCE_KINDS``).
+
+	The old predicate ("ANY source is agent") was defeated by a human edit: a
+	scribe-created page later edited via ``save_wiki_page`` retains the OLD
+	``app-learning*`` source ALONGSIDE the new ``manual`` one, so the next run
+	passed the fence and REPLACED the human body. Requiring the page to carry no
+	human touch closes that — only an exclusively-agent page is refreshable. A
+	missing/corrupt ``sources`` reads as NOT updatable (fails closed)."""
+	try:
+		sources = json.loads(raw) if raw else []
+	except Exception:
+		return False
+	if not isinstance(sources, list):
+		return False
+	kinds = [str(s.get("kind") or "") for s in sources if isinstance(s, dict)]
+	if any(k in _HUMAN_SOURCE_KINDS for k in kinds):
+		return False
+	return any(k.startswith(prefix) for k in kinds)
+
+
+def _sources_are_curated(raw) -> bool:
+	"""Predicate over a page's raw ``sources`` JSON: has a PERSON authored or
+	approved this page's text (a ``kind`` in ``_CURATED_SOURCE_KINDS``)?
+
+	Unlike ``_sources_agent_updatable`` this never refuses the write outright —
+	it downgrades it to add-only (issue #489), so the machine keeps recording
+	what it learned and the human keeps every word they wrote. A missing/corrupt
+	``sources`` reads as CURATED (fails closed toward preserving text)."""
+	try:
+		sources = json.loads(raw) if raw else []
+	except Exception:
+		return True
+	if not isinstance(sources, list):
+		return True
+	return any(str(s.get("kind") or "") in _CURATED_SOURCE_KINDS for s in sources if isinstance(s, dict))
+
+
+def _page_is_agent_updatable(name: str, prefix: str) -> bool:
+	"""``_sources_agent_updatable`` for a page by name (unlocked read — the cheap
+	early-out; the authoritative check is re-run under a row lock at save time)."""
+	return _sources_agent_updatable(frappe.db.get_value(WIKI, name, "sources"), prefix)
+
+
 def apply_extracted_page_updates(
 	updates,
 	source: str,
@@ -841,7 +1096,11 @@ def apply_extracted_page_updates(
 	ref: str | None = None,
 	default_scope: str | None = None,
 	target_user: str | None = None,
-) -> tuple[int, int]:
+	provenance_prefix: str | None = None,
+	allow_body_replace: bool = True,
+	preserve_curated: bool = False,
+	return_outcomes: bool = False,
+) -> tuple[int, int] | list[dict]:
 	"""Create/update wiki pages from extracted updates (the note ingest above
 	and ``jarvis.learning.voice_facts`` both land here). At most
 	``MAX_PAGES_PER_NOTE`` updates apply per call; per-update failures are
@@ -859,23 +1118,166 @@ def apply_extracted_page_updates(
 	page (audience-suffixed slug, invisible to others) instead of the Org page.
 	A per-update ``scope``/``target_user`` overrides the defaults. Both args
 	default to None, which preserves today's Org behavior byte-for-byte.
+
+	``provenance_prefix`` (Custom App Learning scribe writeback): when set, an
+	UPDATE only lands on a page that already carries this provenance (a
+	``sources`` kind starting with the prefix). A slug that collides with a
+	human-authored / other-feature page is REFUSED rather than overwritten — a
+	scribe can create/update only its OWN pages. None (every other caller)
+	preserves today's behavior byte-for-byte.
+
+	``allow_body_replace=False`` (voice-note ingest, issue #488): a ``body_md``
+	aimed at an EXISTING page is APPENDED instead of replacing its body. Callers
+	that only saw an EXCERPT of the stored body (``_pages_for_prompt`` clips at
+	``_MAX_EXISTING_BODY_PROMPT_CHARS``) cannot produce a lossless replacement,
+	so a replace there silently deletes the unseen tail; a duplicated section is
+	recoverable, a deleted one is not. Callers that compose a page from a source
+	they read in full (the app-learning scribe) keep the default True and still
+	replace, so a re-run refreshes its own page in place rather than doubling it.
+
+	``preserve_curated=True`` (every voice caller, issue #489): on a page a
+	PERSON authored or approved (``_sources_are_curated``) this write may only
+	ADD, never SUBTRACT. The body is appended under a dated attribution heading
+	whatever ``allow_body_replace`` says, the summary is only filled when empty,
+	and an append that would push the body past the cap is REFUSED rather than
+	clipped (the clip drops the OLDEST text, which on such a page is the human's
+	own). ``allow_body_replace`` is a property of the CALLER — it says "I only
+	saw an excerpt"; this is a property of the PAGE — it says "someone wrote
+	this by hand". Pages the machine owns are untouched by it, which is what
+	lets the voice ingest keep refreshing the pages it created itself.
+
+	``return_outcomes=True`` (Custom App Learning scribe writeback): returns a
+	PER-UPDATE outcome list ``[{slug, ok, reason}]`` aligned to the accepted
+	updates instead of the ``(applied, failed)`` tuple, so the caller can record
+	EXACTLY the pages that were written and count a provenance REFUSAL (a
+	``_apply_one_update`` returning ``False``) as failed — the aggregate tuple
+	cannot distinguish "created page B" from "refused colliding page A".
+
+	#613: the tuple path now LOGS a refusal (it left no trace at all before), but still
+	counts it as neither applied nor failed. Whether a refusal belongs on the retry path
+	is a separate decision that this change deliberately does not take: ``test_wiki``
+	pins the current contract with an explicit comment, and flipping it would retry
+	unsalvageable input forever with no attempt counter to bound it.
 	"""
 	if not isinstance(updates, list):
-		return 0, 0
+		return [] if return_outcomes else (0, 0)
+
+	# Acquire page row locks in a DETERMINISTIC global order (by normalized slug) so two
+	# concurrent batches touching the same pages can never deadlock by locking them in
+	# opposite orders (CA2-2). Outcomes are returned in the CALLER's ORIGINAL order — the
+	# scribe writeback zips them back positionally to the accepted pages.
+	batch = list(enumerate(updates[:MAX_PAGES_PER_NOTE]))
+	order = sorted(
+		range(len(batch)),
+		key=lambda i: _normalize_slug(batch[i][1].get("slug")) if isinstance(batch[i][1], dict) else "",
+	)
+	results: list[dict | None] = [None] * len(batch)
 	applied = 0
 	failed = 0
-	for update in updates[:MAX_PAGES_PER_NOTE]:
+	for i in order:
+		update = batch[i][1]
 		if not isinstance(update, dict):
+			results[i] = {"slug": None, "ok": False, "reason": "skipped"}
 			continue
+		ok = False
+		reason = "refused"
+		# Per-page SAVEPOINT: a RECOVERABLE per-page failure (a validation refusal, a
+		# stale-timestamp conflict) rolls back ONLY this page and is counted failed, so
+		# one page's failure never discards the batch's earlier saves nor leaves a
+		# half-written page to be committed at request end. A transaction-FATAL error
+		# (deadlock / lock-wait timeout) already rolled the WHOLE InnoDB transaction back
+		# (releasing every savepoint), so it is NOT swallowed — it propagates and the
+		# request fails/retries instead of reporting success for lost work (CA2-2).
+		sp = f"aepu_{frappe.generate_hash(length=8)}"
+		frappe.db.savepoint(sp)
 		try:
-			if _apply_one_update(update, source, user, ref, default_scope, target_user):
-				applied += 1
-		except Exception:
-			failed += 1
-			frappe.log_error(
-				title="wiki: page update failed", message=frappe.get_traceback()
+			ok = bool(
+				_apply_one_update(
+					update,
+					source,
+					user,
+					ref,
+					default_scope,
+					target_user,
+					provenance_prefix,
+					allow_body_replace,
+					preserve_curated,
+				)
 			)
+			reason = "applied" if ok else "refused"
+			if ok:
+				applied += 1
+			elif not provenance_prefix:
+				# #613: a refusal left NO trace at all, so knowledge lost this way was
+				# undiagnosable. It is logged now.
+				#
+				# NOT logged on the fenced paths (``provenance_prefix`` set: the Custom App
+				# Learning scribe and app_analysis). There a refusal is the DOCUMENTED
+				# expected outcome of a slug colliding with a human-edited page, the CA2-1
+				# belt working as designed, not knowledge going missing. Logging those
+				# would put a row in the Error Log for every routine collision on every
+				# rerun and bury the entries this is meant to surface.
+				#
+				# Deliberately NOT counted as failed, which is the other half of #613 and
+				# is a decision this change does not take. ``test_wiki`` pins the current
+				# contract with an explicit comment ("a skipped (identity-less) update is
+				# not a FAILURE - the note may still be marked Processed"), and flipping it
+				# would retry unsalvageable junk forever: one of the refusals that pins it
+				# is slug ``"!!!"``, which no amount of retrying repairs, and the note
+				# carries no attempt counter to bound that. See the issue.
+				_log_refused_update(update, source, ref)
+			try:
+				frappe.db.release_savepoint(sp)
+			except Exception:
+				pass
+		except Exception as e:
+			if _is_txn_fatal(e):
+				raise
+			try:
+				frappe.db.rollback(save_point=sp)
+			except Exception:
+				pass
+			failed += 1
+			reason = "error"
+			frappe.log_error(title="wiki: page update failed", message=frappe.get_traceback())
+		results[i] = {"slug": _normalize_slug(update.get("slug")), "ok": ok, "reason": reason}
+	if return_outcomes:
+		return [r if r is not None else {"slug": None, "ok": False, "reason": "skipped"} for r in results]
 	return applied, failed
+
+
+def _log_refused_update(update: dict, source: str, ref: str | None) -> None:
+	"""Record WHY an update was refused, so knowledge lost this way is diagnosable (#613).
+
+	``_apply_one_update`` answers a bare bool, so the shape of the refused update is the
+	only evidence available at this layer, and it is the evidence that matters: the
+	common refusal is an update naming no existing page while carrying neither ``title``
+	nor ``page_type``, which cannot mint one. PR #611 made that shape ordinary rather
+	than rare by telling the ingest to emit ``append_md``.
+
+	Field NAMES and CLASSIFICATIONS only, never a raw extracted value. The body of a
+	voice note is the customer's own content and must not be copied into an Error Log,
+	and ``page_type`` / ``scope`` are not safe to echo either: this helper runs precisely
+	when the model failed to produce a valid enum there, so those are the fields most
+	likely to contain a stray transcript fragment. Reporting VALID / INVALID keeps the
+	diagnostic value without the leak."""
+	page_type = (update.get("page_type") or "").strip()
+	scope = (update.get("scope") or "").strip()
+	try:
+		frappe.log_error(
+			title="wiki: page update refused",
+			message=(
+				f"source={source} ref={ref}\n"
+				f"slug={_normalize_slug(update.get('slug'))!r}\n"
+				f"has_title={bool(str(update.get('title') or '').strip())} "
+				f"page_type={'valid' if page_type in PAGE_TYPES else ('absent' if not page_type else 'invalid')}\n"
+				f"scope={scope if scope in ('Org', 'User', 'Role') else ('absent' if not scope else 'invalid')} "
+				f"has_target_user={bool(update.get('target_user'))}\n"
+				f"carries={sorted(k for k in ('body_md', 'append_md', 'summary') if update.get(k))}"
+			),
+		)
+	except Exception:
+		pass
 
 
 def _apply_one_update(
@@ -885,6 +1287,9 @@ def _apply_one_update(
 	ref: str | None,
 	default_scope: str | None = None,
 	target_user: str | None = None,
+	provenance_prefix: str | None = None,
+	allow_body_replace: bool = True,
+	preserve_curated: bool = False,
 ) -> bool:
 	slug = _normalize_slug(update.get("slug"))
 	if not slug:
@@ -903,10 +1308,14 @@ def _apply_one_update(
 
 	# User pages carry the controller's audience suffix in their docname, so a
 	# scope-aware lookup must probe the SUFFIXED slug (a base-slug lookup would
-	# miss the personal page and mint a duplicate).
-	lookup_slug = user_scope_slug(slug, tuser) if scope == "User" else slug
-
-	name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name")
+	# miss the personal page and mint a duplicate) AND filter on the audience (an
+	# unfiltered one resolves to whichever user claimed the local part first,
+	# issue #490).
+	if scope == "User":
+		name, lookup_slug = resolve_user_scope_page(slug, tuser)
+	else:
+		lookup_slug = slug
+		name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name")
 	if not name:
 		title = " ".join(str(update.get("title") or "").split())
 		page_type = (update.get("page_type") or "").strip()
@@ -936,49 +1345,134 @@ def _apply_one_update(
 			return True
 		except frappe.DuplicateEntryError:
 			# The slug appeared concurrently — merge into it instead (the stored
-			# docname is the suffixed slug for User scope).
-			name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name") or frappe.db.get_value(
-				WIKI, {"slug": doc.slug}, "name"
-			)
+			# docname is the suffixed slug for User scope). The User re-probe stays
+			# audience-filtered: a slug owned by somebody else is NOT ours to merge
+			# into, so it re-raises and the update is counted failed rather than
+			# cross-written (issue #490).
+			if scope == "User":
+				name, _ = resolve_user_scope_page(slug, tuser)
+			else:
+				name = frappe.db.get_value(WIKI, {"slug": lookup_slug}, "name") or frappe.db.get_value(
+					WIKI, {"slug": doc.slug}, "name"
+				)
 			if not name:
 				raise
 
+	# Provenance fence (scribe writeback): the slug resolved to an EXISTING page.
+	# Update it only if it is agent-owned AND carries no human edit; a collision
+	# with a human-authored / human-edited / other-feature page is refused rather
+	# than overwritten. Unlocked early-out here; re-checked under a row lock at save.
+	if provenance_prefix and not _page_is_agent_updatable(name, provenance_prefix):
+		return False
+
+	args = (name, update, source, user, ref, provenance_prefix, allow_body_replace, preserve_curated, tuser)
 	try:
-		return _merge_update_into_page(name, update, source, user, ref)
+		return _merge_update_into_page(*args)
 	except frappe.TimestampMismatchError:
 		# Concurrent save between our load and save: reload + re-merge once
 		# so ordinary concurrency doesn't drop the update.
-		return _merge_update_into_page(name, update, source, user, ref)
+		return _merge_update_into_page(*args)
 
 
 def _merge_update_into_page(
-	name: str, update: dict, source: str, user: str | None, ref: str | None
+	name: str,
+	update: dict,
+	source: str,
+	user: str | None,
+	ref: str | None,
+	provenance_prefix: str | None = None,
+	allow_body_replace: bool = True,
+	preserve_curated: bool = False,
+	expect_target_user: str | None = None,
 ) -> bool:
 	body_md = update.get("body_md")
 	append_md = update.get("append_md")
 	contradiction = bool(update.get("contradiction"))
+	curated = False
+
+	# TOCTOU close: re-check under a ROW LOCK on the page immediately before
+	# mutating it. A save that landed BETWEEN the unlocked resolution above and
+	# this save would otherwise be clobbered; the ``for_update`` read serializes
+	# against it.
+	#
+	#  * provenance (scribe writeback): a page that gained a human touch in the
+	#    gap is refused here.
+	#  * audience (issue #490): a User-scope write must land on ITS OWN user's
+	#    page. Merging into a colleague's personal page both discloses the
+	#    writer's private statement and hides it from the writer, and the page
+	#    could have been re-targeted since we resolved it.
+	#  * curation (issue #489): a human edit that landed via ``save_wiki_page``
+	#    in the gap must still downgrade this write to add-only.
+	if provenance_prefix is not None or expect_target_user is not None or preserve_curated:
+		locked = (
+			frappe.db.get_value(WIKI, name, ["sources", "target_user"], as_dict=True, for_update=True) or {}
+		)
+		if provenance_prefix is not None and not _sources_agent_updatable(
+			locked.get("sources"), provenance_prefix
+		):
+			return False
+		if expect_target_user is not None and locked.get("target_user") != expect_target_user:
+			return False
+		curated = bool(preserve_curated) and _sources_are_curated(locked.get("sources"))
 
 	doc = frappe.get_doc(WIKI, name)
-	if update.get("summary"):
+	if update.get("summary") and not (curated and (doc.summary or "").strip()):
+		# A summary REPLACES, so on a curated page it is the one field that could
+		# still destroy a human's words even after issue #488 turned the body into
+		# an append. Fill it only when the human left it empty (issue #489).
 		doc.summary = _clip_summary(update.get("summary"))
 	if not (doc.ref_doctype or "").strip() and update.get("ref_doctype"):
 		doc.ref_doctype = str(update["ref_doctype"]).strip()
 	if not (doc.ref_name or "").strip() and update.get("ref_name"):
 		doc.ref_name = str(update["ref_name"]).strip()
 
+	# ``append_md`` still wins over ``body_md``, but which key carried the content
+	# no longer decides how a CONTRADICTION lands: a contradicting append used to
+	# slip past the flagged-section path and store contested knowledge as ordinary
+	# prose, leaving neither ``contradiction_flag`` nor the marker text that
+	# jarvis.learning.wiki_lint sweeps for. Only ``body_md`` may replace, and only
+	# when the caller is allowed to.
 	existing = (doc.body_md or "").strip()
+	incoming = ""
+	replaces = False
 	if isinstance(append_md, str) and append_md.strip():
-		doc.body_md = _clip_body(f"{existing}\n\n{append_md.strip()}".strip())
+		incoming = append_md.strip()
 	elif isinstance(body_md, str) and body_md.strip():
 		incoming = body_md.strip()
+		replaces = allow_body_replace
+	if incoming:
+		stamp = now_datetime().strftime("%Y-%m-%d")
 		if contradiction and existing:
-			stamp = now_datetime().strftime("%Y-%m-%d")
-			doc.body_md = _clip_body(
-				f"{existing}\n\n## Contradiction flagged ({stamp})\n\n{incoming}"
-			)
+			merged = f"{existing}\n\n## Contradiction flagged ({stamp})\n\n{incoming}"
 			doc.contradiction_flag = 1
+		elif not existing:
+			merged = incoming
+		elif curated:
+			# A person authored or approved this page's text (issue #489). The
+			# machine may ADD to it under its own attributed heading — so the
+			# reader can always tell whose words are whose — but never rewrite
+			# it, whatever ``allow_body_replace`` says.
+			merged = f"{existing}\n\n## Added by Jarvis from a note ({stamp})\n\n{incoming}"
+		elif replaces:
+			merged = incoming
 		else:
-			doc.body_md = _clip_body(incoming)
+			# Either an append, or an append-only caller that sent a body_md
+			# anyway. The ingest only ever saw an EXCERPT of this page, so
+			# swapping the field would delete the rest; a duplicated section is
+			# recoverable by a human editor, a deleted one is not (issue #488).
+			merged = f"{existing}\n\n{incoming}"
+		if curated and existing and len(merged) > MAX_BODY_LEN:
+			# _clip_body keeps the TAIL, so clipping here would silently delete
+			# the human's oldest lines to make room for a machine append. Refuse
+			# the whole update instead and say so: dropping one note's knowledge
+			# is recoverable (the page is still there to edit), deleting a
+			# person's text is not.
+			frappe.log_error(
+				title="wiki: append refused, would truncate a human-edited page",
+				message=f"{name}: {len(existing)} + {len(incoming)} chars exceeds {MAX_BODY_LEN}",
+			)
+			return False
+		doc.body_md = _clip_body(merged)
 	append_source(doc, source, ref, user)
 	doc.last_confirmed_at = now_datetime()
 	doc.save(ignore_permissions=True)
@@ -1029,9 +1523,7 @@ def _publish_review_pending(queue: str) -> None:
 # wiki promotion (User page -> Role/Org, via the Review board)
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
-def request_wiki_promotion(
-	page: str, to_scope: str, target_role: str = "", note: str = ""
-) -> dict:
+def request_wiki_promotion(page: str, to_scope: str, target_role: str = "", note: str = "") -> dict:
 	"""Ask a reviewer to widen one of the caller's OWN User-scope wiki pages to
 	Role/Org visibility (Skills-area rework part 3). Snapshots the body into a
 	Pending ``Jarvis Wiki Promotion Request`` and pings the reviewer set — the
@@ -1041,8 +1533,10 @@ def request_wiki_promotion(
 	user = frappe.session.user
 
 	page = (page or "").strip()
-	name = page if page and frappe.db.exists(WIKI, page) else (
-		frappe.db.get_value(WIKI, {"slug": page.lower()}, "name") if page else None
+	name = (
+		page
+		if page and frappe.db.exists(WIKI, page)
+		else (frappe.db.get_value(WIKI, {"slug": page.lower()}, "name") if page else None)
 	)
 	if not name:
 		frappe.throw(_("Wiki page not found."))
@@ -1060,24 +1554,81 @@ def request_wiki_promotion(
 	if to_scope == "Role" and not target_role:
 		frappe.throw(_("Promoting to Role scope needs a target role."))
 
-	req = frappe.get_doc({
-		"doctype": PROMO,
-		"page": doc.name,
-		"from_scope": "User",
-		"to_scope": to_scope,
-		"target_role": target_role if to_scope == "Role" else None,
-		"body_snapshot": doc.body_md or "",
-		"note": (note or "").strip()[:140] or None,
-		"status": "Pending",
-	})
+	req = frappe.get_doc(
+		{
+			"doctype": PROMO,
+			"page": doc.name,
+			"from_scope": "User",
+			"to_scope": to_scope,
+			"target_role": target_role if to_scope == "Role" else None,
+			"body_snapshot": doc.body_md or "",
+			"note": (note or "").strip()[:140] or None,
+			"status": "Pending",
+		}
+	)
 	req.insert(ignore_permissions=True)
 	_publish_review_pending("promotion")
 	return {"ok": True, "request": req.name, "page": doc.slug}
 
 
-def apply_promotion(
-	request_name: str, approve, note: str = "", reviewer: str | None = None
-) -> dict:
+@frappe.whitelist()
+def my_wiki_promotion(page: str) -> dict:
+	"""The caller's MOST-RECENT promotion request for one of their OWN wiki pages
+	— the requester-side status read powering the "requested → approved /
+	rejected" chip on the page. The reviewer list endpoint is reviewer-gated, so
+	a requester needs their own owner-scoped read. Owner-scoped by the ``owner``
+	filter (can only return the caller's own request); ``page`` accepts a docname
+	or slug. Returns ``{}`` when there is none. Read-only, smallest addition
+	(Skills-area promotion surfacing — the wiki requester side was never wired)."""
+	_require_system_user()
+	me = frappe.session.user
+	page = (page or "").strip()
+	name = (
+		page
+		if page and frappe.db.exists(WIKI, page)
+		else (frappe.db.get_value(WIKI, {"slug": page.lower()}, "name") if page else None)
+	)
+	if not name:
+		return {}
+	rows = frappe.get_all(
+		PROMO,
+		filters={"page": name, "owner": me},
+		fields=[
+			"name",
+			"status",
+			"from_scope",
+			"to_scope",
+			"target_role",
+			"note",
+			"reviewer",
+			"decided_at",
+			"decision_note",
+			"creation",
+		],
+		order_by="creation desc",
+		limit=1,
+	)
+	if not rows:
+		return {}
+	r = rows[0]
+	return {
+		"name": r.name,
+		"status": r.status or "",
+		"from_scope": r.from_scope or "",
+		"to_scope": r.to_scope or "",
+		"target_role": r.target_role or "",
+		"note": r.note or "",
+		"reviewer": r.reviewer or "",
+		"reviewer_name": (frappe.db.get_value("User", r.reviewer, "full_name") or r.reviewer)
+		if r.reviewer
+		else "",
+		"decided_at": str(r.decided_at or ""),
+		"decision_note": r.decision_note or "",
+		"created": str(r.creation or ""),
+	}
+
+
+def apply_promotion(request_name: str, approve, note: str = "", reviewer: str | None = None) -> dict:
 	"""Decide a promotion request (called by ``jarvis.chat.learned_api``, which
 	owns the reviewer gate — this is NOT whitelisted). On approve, merge the
 	frozen body_snapshot into the Role/Org target page (audience-suffix slug
@@ -1094,7 +1645,7 @@ def apply_promotion(
 	# self-approval never mutates the target page.
 	if reviewer == (req.owner or "") and reviewer != "Administrator":
 		frappe.throw(
-			_("You cannot approve your own promotion request; another reviewer must decide it."),
+			_("You cannot decide your own promotion request; another reviewer must approve or reject it."),
 			frappe.PermissionError,
 		)
 	# TOCTOU-safe claim: re-read the status under a row lock (for_update) before
@@ -1200,6 +1751,7 @@ def _promote_body_into_target(req, reviewer: str) -> str:
 # SPA endpoints
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
+@list_filters.filter_errors_to_envelope
 def list_wiki_pages_page(
 	search: str | None = None,
 	page_type: str | None = None,
@@ -1208,6 +1760,8 @@ def list_wiki_pages_page(
 	archived: int = 0,
 	page: int = 1,
 	page_length: int = 20,
+	filters: str | dict | None = None,
+	filters_v2: str | list | None = None,
 ) -> dict:
 	"""Active wiki pages VISIBLE to the caller, newest-modified first.
 	Envelope: ``{rows, total, has_more, page, page_length}``; each row carries
@@ -1217,55 +1771,74 @@ def list_wiki_pages_page(
 	last_confirmed_at missing / older than 90 days — computed in SQL). Raw SQL
 	because the visibility fragment + OR-search + a real COUNT(*) don't fit
 	get_all (``frappe.db.count`` takes no or_filters, and materializing every
-	matching name per request does not scale)."""
+	matching name per request does not scale).
+
+	``filters_v2`` (plan 08 §6.2) is ADDITIVE: the canonical clause list,
+	validated and compiled against this caller's schema. This surface never had
+	a JSON ``filters`` argument — its curated controls are named parameters —
+	so ``filters`` is accepted and ignored purely to keep the migration
+	contract uniform (``test_migrated_views_actually_accept_filters_v2``
+	requires the legacy argument to still exist for the compatibility window).
+
+	Scope invariant (MIGRATION-CHECKLIST §1): the gate is ``_require_system_user``,
+	and Frappe grants every System User the ``Desk User`` role, which this
+	DocType grants a permlevel-0 ``read`` with no ``if_owner``. So the ORM read
+	scope is the whole table and this SQL scope — status plus the Org/Role/User
+	visibility fragment — is strictly narrower."""
 	_require_system_user()
+	# This surface never had a JSON `filters` blob — its curated controls are
+	# named parameters — so anything non-empty here is a caller that thinks it is
+	# filtering and is not. Fail loudly with the shared code rather than return a
+	# confidently wrong (unfiltered) list.
+	if filters not in (None, "", "{}", {}):
+		list_filters.reject_unsupported_legacy_filters("wiki_pages")
 	user = frappe.session.user
 	page, pl, offset = _clamp_paging(page, page_length)
 
 	# archived=1 lists Archived pages instead (still visibility-filtered) so
 	# an accidental archive is recoverable from the SPA, not only from Desk.
-	conditions = ["status = 'Archived'" if cint(archived) else "status = 'Active'"]
-	values: dict = {}
+	q = list_filters.new_query("wiki_pages")
+	q.server_condition("status = 'Archived'" if cint(archived) else "status = 'Active'")
 	# Pre-escaped by wiki_permissions (frappe.db.escape) — no placeholders.
 	vis = (wiki_permissions.visible_scope_condition(user) or "").strip()
 	if vis:
-		conditions.append(f"({vis})")
+		q.server_condition(f"({vis})")
 	if page_type:
 		if page_type not in PAGE_TYPES:
 			frappe.throw(_("Invalid page type filter."))
-		conditions.append("page_type = %(page_type)s")
-		values["page_type"] = page_type
-	scope_filter = (str(scope_filter).strip().lower() if scope_filter else "all")
+		q.server_condition("page_type = %(page_type)s", page_type=page_type)
+	scope_filter = str(scope_filter).strip().lower() if scope_filter else "all"
 	if scope_filter not in ("all", "org", "role", "mine"):
 		frappe.throw(_("Invalid scope filter."))
 	if scope_filter == "org":
 		# Pre-backfill rows read as Org (scope is NULL until the patch runs).
-		conditions.append("ifnull(scope, '') in ('', 'Org')")
+		q.server_condition("ifnull(scope, '') in ('', 'Org')")
 	elif scope_filter == "role":
-		conditions.append("scope = 'Role'")
+		q.server_condition("scope = 'Role'")
 	elif scope_filter == "mine":
-		conditions.append("(scope = 'User' and target_user = %(me)s)")
-		values["me"] = user
+		q.server_condition("(scope = 'User' and target_user = %(me)s)", me=user)
 	if search:
-		values["like"] = f"%{str(search).strip()[:140]}%"
-		conditions.append(
-			"(slug like %(like)s or title like %(like)s or summary like %(like)s)"
+		q.server_condition(
+			"(slug like %(like)s or title like %(like)s or summary like %(like)s)",
+			like=f"%{str(search).strip()[:140]}%",
 		)
 	if cint(attention):
-		values["stale_cutoff"] = frappe.utils.add_to_date(
-			now_datetime(), days=-_STALE_DAYS
+		q.server_condition(
+			"(contradiction_flag = 1 or last_confirmed_at is null or last_confirmed_at < %(stale_cutoff)s)",
+			stale_cutoff=frappe.utils.add_to_date(now_datetime(), days=-_STALE_DAYS),
 		)
-		conditions.append(
-			"(contradiction_flag = 1 or last_confirmed_at is null"
-			" or last_confirmed_at < %(stale_cutoff)s)"
-		)
-	where = " and ".join(conditions)
 
-	total = cint(frappe.db.sql(
-		f"select count(*) from `tabJarvis Wiki Page` where {where}", values
-	)[0][0])
-	values.update({"limit": pl, "offset": offset})
-	rows = frappe.db.sql(
+	q.apply(filters_v2)
+	where = q.where()
+	# `params()` raises on a collision with an already-bound predicate name, which
+	# a bare dict update would have silently overwritten — and overwriting a
+	# predicate's value changes what the WHERE means.
+	values = q.params({"limit": pl, "offset": offset})
+
+	total = cint(
+		list_filters.bounded_sql(f"select count(*) from `tabJarvis Wiki Page` where {where}", values)[0][0]
+	)
+	rows = list_filters.bounded_sql(
 		f"""select name, slug, title, page_type, ifnull(scope, 'Org') as scope,
 			target_role, target_user, ref_doctype, ref_name, summary, status,
 			contradiction_flag, last_confirmed_at, modified
@@ -1316,19 +1889,13 @@ def get_wiki_caps() -> dict:
 	return {
 		"creatable_scopes": wiki_permissions.creatable_scopes(user),
 		"manageable_roles": wiki_permissions.manageable_roles(user),
-		"is_sm": (
-			user == "Administrator"
-			or "System Manager" in frappe.get_roles(user)
-		),
+		"is_sm": (user == "Administrator" or "System Manager" in frappe.get_roles(user)),
 		"knowledge_language": knowledge_language.get_knowledge_language(),
 		"wiki_lint_last_run_at": _dt_str(lint_at),
-		"wiki_lint_summary": frappe.db.get_single_value(
-			SETTINGS, "wiki_lint_summary"
-		) or None,
+		"wiki_lint_summary": frappe.db.get_single_value(SETTINGS, "wiki_lint_summary") or None,
 		"wiki_mirror_last_synced_at": _dt_str(synced_at),
-		"wiki_mirror_last_sync_status": frappe.db.get_single_value(
-			SETTINGS, "wiki_mirror_last_sync_status"
-		) or None,
+		"wiki_mirror_last_sync_status": frappe.db.get_single_value(SETTINGS, "wiki_mirror_last_sync_status")
+		or None,
 	}
 
 
@@ -1415,9 +1982,7 @@ def create_wiki_page(
 		if target_role not in wiki_permissions.manageable_roles(user):
 			return {
 				"ok": False,
-				"reason": _("You cannot manage wiki pages for role {0}.").format(
-					target_role
-				),
+				"reason": _("You cannot manage wiki pages for role {0}.").format(target_role),
 			}
 	else:
 		target_role = None
@@ -1426,20 +1991,22 @@ def create_wiki_page(
 	if not slug:
 		return {"ok": False, "reason": _("Title does not produce a valid slug.")}
 
-	doc = frappe.get_doc({
-		"doctype": WIKI,
-		"slug": slug,
-		"title": title[:140],
-		"page_type": page_type,
-		"scope": scope,
-		"target_role": target_role,
-		"target_user": user if scope == "User" else None,
-		"summary": _clip_summary(summary),
-		"body_md": _clip_body(str(body_md or "")),
-		"status": "Active",
-		"sources": frappe.as_json([_source_entry("manual", None, user)]),
-		"last_confirmed_at": now_datetime(),
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": WIKI,
+			"slug": slug,
+			"title": title[:140],
+			"page_type": page_type,
+			"scope": scope,
+			"target_role": target_role,
+			"target_user": user if scope == "User" else None,
+			"summary": _clip_summary(summary),
+			"body_md": _clip_body(str(body_md or "")),
+			"status": "Active",
+			"sources": frappe.as_json([_source_entry("manual", None, user)]),
+			"last_confirmed_at": now_datetime(),
+		}
+	)
 	try:
 		doc.insert(ignore_permissions=True)
 	except frappe.DuplicateEntryError:
@@ -1593,8 +2160,7 @@ def get_wiki_graph() -> dict:
 		where += f" and ({vis})"
 	fields = ", ".join(f"`{f}`" for f in [*wiki_graph._PAGE_FIELDS, "summary"])
 	pages = frappe.db.sql(
-		f"select {fields} from `tabJarvis Wiki Page` where {where} "
-		"order by modified desc limit %(lim)s",
+		f"select {fields} from `tabJarvis Wiki Page` where {where} order by modified desc limit %(lim)s",
 		{"lim": wiki_graph.MAX_PAGES},
 		as_dict=True,
 	)
@@ -1700,5 +2266,54 @@ def add_wiki_link(slug: str, target_slug: str) -> dict:
 	links.append(target)
 	# set_value bumps modified/modified_by so a concurrent doc.save() built on the
 	# stale doc raises TimestampMismatch instead of silently clobbering (R1).
+	frappe.db.set_value(WIKI, name, "manual_links", json.dumps(links))
+	return {"ok": True, "slug": slug, "manual_links": links}
+
+
+@frappe.whitelist()
+def remove_wiki_link(slug: str, target_slug: str) -> dict:
+	"""Undo a curated ``[[link]]`` from ``slug`` -> ``target_slug`` in
+	``manual_links``.
+
+	#644: ``add_wiki_link`` had no counterpart, so a mis-clicked "+ link" was
+	permanent short of a Desk/DB edit. Mirrors ``add_wiki_link`` exactly for
+	permission shape and locking; only the mutation differs (remove, not append):
+
+	- R1 durable: this write never touches body_md either.
+	- R2 idempotent: removing a target that isn't there is a safe no-op.
+	- R2 concurrency-safe: the SAME row-locking read (``for_update``) as add, so
+	  this sees the latest committed value rather than a stale snapshot.
+	- R3 permission-checked BOTH ends: caller must be able to EDIT ``slug`` and
+	  READ ``target_slug``, the same bar as adding, so no one can remove a link
+	  they couldn't have added, and a non-visible target reads as not-found so its
+	  existence isn't disclosed. (A manual link whose target page was since
+	  deleted can't be removed through this endpoint either; it also never
+	  renders as an edge, since the graph drops dangling links, so it's inert.)"""
+	_require_system_user()
+	slug = (slug or "").strip().lower()
+	target = (target_slug or "").strip().lower()
+	if not slug or not target:
+		frappe.throw(_("slug and target_slug are required."))
+
+	name = frappe.db.get_value(WIKI, {"slug": slug}, "name")
+	if not name:
+		frappe.throw(_("Wiki page not found."))
+	if not wiki_permissions.can_edit_page(frappe.get_doc(WIKI, name), frappe.session.user):
+		frappe.throw(_("Not permitted."), frappe.PermissionError)
+
+	target_name = frappe.db.get_value(WIKI, {"slug": target}, "name")
+	if not target_name or not wiki_permissions.can_read_page(
+		frappe.get_doc(WIKI, target_name), frappe.session.user
+	):
+		# Don't disclose a page the caller can't see.
+		frappe.throw(_("Target page not found."))
+
+	# Locking read: same reason as add_wiki_link's (see there); blocks until any
+	# concurrent add/remove on this row commits, then returns the latest value.
+	raw = frappe.db.get_value(WIKI, name, "manual_links", for_update=True)
+	links = _parse_manual_links(raw)
+	if target not in links:
+		return {"ok": True, "slug": slug, "already": True, "manual_links": links}
+	links.remove(target)
 	frappe.db.set_value(WIKI, name, "manual_links", json.dumps(links))
 	return {"ok": True, "slug": slug, "manual_links": links}

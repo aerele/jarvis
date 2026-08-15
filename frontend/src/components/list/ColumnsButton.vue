@@ -4,7 +4,9 @@
 			<Button label="Columns" iconLeft="columns" @click="togglePopover()" />
 		</template>
 		<template #body>
-			<div class="my-2 min-w-40 rounded-lg bg-surface-modal p-1.5 shadow-2xl ring-1 ring-black ring-opacity-5">
+			<div
+				class="my-2 min-w-40 rounded-lg bg-surface-modal p-1.5 shadow-2xl ring-1 ring-black ring-opacity-5"
+			>
 				<div
 					v-for="column in columns"
 					:key="column.key"
@@ -36,37 +38,37 @@
 // useStorage('jarvis-cols-'+storageKey). No width editing / no reorder this wave.
 // Emits update:hidden (immediately on mount and on every change) so ListPage
 // can filter the visible columns.
-import { watch } from "vue"
-import { useStorage } from "@vueuse/core"
-import { Popover, Button, Checkbox } from "frappe-ui"
+import { watch } from "vue";
+import { useStorage } from "@vueuse/core";
+import { Popover, Button, Checkbox } from "frappe-ui";
 
 const props = defineProps({
 	columns: { type: Array, default: () => [] },
 	storageKey: { type: String, required: true },
-})
+});
 
-const emit = defineEmits(["update:hidden"])
+const emit = defineEmits(["update:hidden"]);
 
-const hidden = useStorage(`jarvis-cols-${props.storageKey}`, [])
+const hidden = useStorage(`jarvis-cols-${props.storageKey}`, []);
 
-watch(hidden, (v) => emit("update:hidden", [...(v || [])]), { immediate: true, deep: true })
+watch(hidden, (v) => emit("update:hidden", [...(v || [])]), { immediate: true, deep: true });
 
 function isLastVisible(column) {
-	if (hidden.value.includes(column.key)) return false
-	const visible = props.columns.filter((c) => !hidden.value.includes(c.key))
-	return visible.length <= 1
+	if (hidden.value.includes(column.key)) return false;
+	const visible = props.columns.filter((c) => !hidden.value.includes(c.key));
+	return visible.length <= 1;
 }
 
 function setVisible(column, visible) {
 	if (visible) {
-		hidden.value = hidden.value.filter((k) => k !== column.key)
+		hidden.value = hidden.value.filter((k) => k !== column.key);
 	} else {
-		if (isLastVisible(column)) return
-		if (!hidden.value.includes(column.key)) hidden.value = [...hidden.value, column.key]
+		if (isLastVisible(column)) return;
+		if (!hidden.value.includes(column.key)) hidden.value = [...hidden.value, column.key];
 	}
 }
 
 function reset() {
-	hidden.value = []
+	hidden.value = [];
 }
 </script>

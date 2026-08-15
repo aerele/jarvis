@@ -32,7 +32,7 @@
 
 		<!-- list -->
 		<div v-if="notes.loading && !notes.rows.length" class="py-8 text-center">
-			<LoadingIndicator class="size-5 text-ink-gray-5" />
+			<JvSpinner />
 		</div>
 		<div
 			v-else-if="!notes.rows.length && filtered"
@@ -49,7 +49,7 @@
 			<FeatherIcon name="edit-3" class="size-6 text-ink-gray-5" />
 			<span class="mt-1 text-base font-medium text-ink-gray-8">No notes yet</span>
 			<span class="text-p-base text-ink-gray-6">
-				Answers and anything you tell Jarvis land here.
+				Answers and anything you tell {{ agentName }} land here.
 			</span>
 		</div>
 		<div v-else class="divide-y rounded-lg border">
@@ -135,17 +135,16 @@
 // the nested TabBar to the Questions sub-tab, selecting the question named by
 // the emitted payload (see NoteDetailModal.vue's own comment for the full
 // emit contract - this component only passes it through unchanged).
-import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from "vue"
-import { Badge, Button, FeatherIcon, FormControl, LoadingIndicator, Tooltip, toast } from "frappe-ui"
-import { timeAgo, exactDate } from "@/utils/datetime"
-import { listNotesPage } from "@/api/personalise"
-import NoteDetailModal from "./NoteDetailModal.vue"
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
+import { timeAgo, exactDate } from "@/utils/datetime";
+import { listNotesPage } from "@/api/personalise";
+import JvSpinner from "@/components/JvSpinner.vue";
+import NoteDetailModal from "./NoteDetailModal.vue";
+import { agentName } from "@/branding";
+import { errHtml } from "@/lib/errors";
 
-const emit = defineEmits(["reanswer"])
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
+const emit = defineEmits(["reanswer"]);
 
 const KIND_OPTIONS = [
 	{ label: "All", value: "" },
@@ -153,13 +152,13 @@ const KIND_OPTIONS = [
 	{ label: "Voice", value: "Voice" },
 	{ label: "Attachment", value: "Attachment" },
 	{ label: "Link", value: "Link" },
-]
+];
 const STATUS_OPTIONS = [
 	{ label: "All", value: "" },
 	{ label: "New", value: "New" },
 	{ label: "Processed", value: "Processed" },
 	{ label: "Archived", value: "Archived" },
-]
+];
 
 // Kind badge theme map (design-language.md §5's frozen spec: Text gray,
 // Voice blue, Attachment orange, Link blue OUTLINE - the only kind that
@@ -169,9 +168,9 @@ const KIND_BADGE = {
 	Voice: { theme: "blue", variant: "subtle" },
 	Attachment: { theme: "orange", variant: "subtle" },
 	Link: { theme: "blue", variant: "outline" },
-}
+};
 function kindBadge(kind) {
-	return KIND_BADGE[kind] || { theme: "gray", variant: "subtle" }
+	return KIND_BADGE[kind] || { theme: "gray", variant: "subtle" };
 }
 
 // Status badge copy is the user-facing receipt language (DESIGN.md §5c/§6:
@@ -180,30 +179,28 @@ const STATUS_BADGE = {
 	New: { theme: "blue", label: "Processing soon" },
 	Processed: { theme: "green", label: "In your wiki" },
 	Archived: { theme: "gray", label: "Archived" },
-}
+};
 function statusBadge(status) {
-	return STATUS_BADGE[status] || { theme: "gray", label: status || "" }
+	return STATUS_BADGE[status] || { theme: "gray", label: status || "" };
 }
 
 // ── state ────────────────────────────────────────────────────────────────────
-const search = ref("")
-const kindFilter = ref("")
-const statusFilter = ref("")
-const notes = reactive({ rows: [], total: 0, hasMore: false, loading: false })
-const modalOpen = ref(false)
-const selectedName = ref("")
+const search = ref("");
+const kindFilter = ref("");
+const statusFilter = ref("");
+const notes = reactive({ rows: [], total: 0, hasMore: false, loading: false });
+const modalOpen = ref(false);
+const selectedName = ref("");
 
-const filtered = computed(
-	() => !!(search.value.trim() || kindFilter.value || statusFilter.value)
-)
+const filtered = computed(() => !!(search.value.trim() || kindFilter.value || statusFilter.value));
 
 // ── loader (NotesPane.vue:238-278 idiom, verbatim) ────────────────────────────
-let reqId = 0
+let reqId = 0;
 
 async function fetchNotes(mode = "reset") {
-	const id = ++reqId
-	const append = mode === "more"
-	notes.loading = true
+	const id = ++reqId;
+	const append = mode === "more";
+	notes.loading = true;
 	try {
 		const res = await listNotesPage({
 			start: append ? notes.rows.length : 0,
@@ -211,47 +208,47 @@ async function fetchNotes(mode = "reset") {
 			kind: kindFilter.value || undefined,
 			status: statusFilter.value || undefined,
 			search: search.value.trim() || undefined,
-		})
-		if (id !== reqId) return // stale - a newer request superseded this one
-		const rows = res.rows || []
-		notes.rows = append ? [...notes.rows, ...rows] : rows
-		notes.total = res.total || 0
-		notes.hasMore = !!res.has_more
+		});
+		if (id !== reqId) return; // stale - a newer request superseded this one
+		const rows = res.rows || [];
+		notes.rows = append ? [...notes.rows, ...rows] : rows;
+		notes.total = res.total || 0;
+		notes.hasMore = !!res.has_more;
 	} catch (e) {
-		if (id !== reqId) return
-		toast.error(errMsg(e))
+		if (id !== reqId) return;
+		toast.error(errHtml(e));
 	} finally {
-		if (id === reqId) notes.loading = false
+		if (id === reqId) notes.loading = false;
 	}
 }
 
 function reload() {
-	return fetchNotes("reset")
+	return fetchNotes("reset");
 }
-defineExpose({ reload })
+defineExpose({ reload });
 
 // search debounced 300ms; kind/status quick-filters (selects) reset immediately
-let searchTimer = null
+let searchTimer = null;
 watch(search, () => {
-	clearTimeout(searchTimer)
-	searchTimer = setTimeout(() => fetchNotes("reset"), 300)
-})
-watch(kindFilter, () => fetchNotes("reset"))
-watch(statusFilter, () => fetchNotes("reset"))
-onBeforeUnmount(() => clearTimeout(searchTimer))
+	clearTimeout(searchTimer);
+	searchTimer = setTimeout(() => fetchNotes("reset"), 300);
+});
+watch(kindFilter, () => fetchNotes("reset"));
+watch(statusFilter, () => fetchNotes("reset"));
+onBeforeUnmount(() => clearTimeout(searchTimer));
 
 // ── detail modal ─────────────────────────────────────────────────────────────
 function openDetail(row) {
-	selectedName.value = row.name
-	modalOpen.value = true
+	selectedName.value = row.name;
+	modalOpen.value = true;
 }
 
 function onNoteChanged() {
 	// Deletion (currently the only mutation the modal reports) - refetch so
 	// the row list matches server state; kind/status filters stay as-is.
-	fetchNotes("reset")
+	fetchNotes("reset");
 }
 
 // ── init ─────────────────────────────────────────────────────────────────────
-onMounted(() => fetchNotes("reset"))
+onMounted(() => fetchNotes("reset"));
 </script>

@@ -1,70 +1,71 @@
 <script setup>
-import { computed, defineAsyncComponent, onMounted, ref } from "vue"
-import AppBar from "../components/AppBar.vue"
-import * as api from "../api"
-import { relativeTime } from "../lib/time"
+import { computed, defineAsyncComponent, onMounted, ref } from "vue";
+import AppBar from "../components/AppBar.vue";
+import * as api from "../api";
+import { relativeTime } from "../lib/time";
+import { agentName } from "@/branding";
 
 // Business: what the agent knows about how YOUR company works. Notes captured
 // here are processed daily into learned defaults and the org wiki, so the agent
 // stops asking the same question twice. The web calls this Personalise; the
 // endpoints (voice_notes_api) are the same ones.
-const VoiceSheet = defineAsyncComponent(() => import("../components/VoiceSheet.vue"))
+const VoiceSheet = defineAsyncComponent(() => import("../components/VoiceSheet.vue"));
 
-const notes = ref([])
-const status = ref(null)
-const loaded = ref(false)
-const draft = ref("")
-const saving = ref(false)
-const error = ref("")
-const voiceOpen = ref(false)
-const expanded = ref("")
+const notes = ref([]);
+const status = ref(null);
+const loaded = ref(false);
+const draft = ref("");
+const saving = ref(false);
+const error = ref("");
+const voiceOpen = ref(false);
+const expanded = ref("");
 
-const micEnabled = computed(() => !!status.value?.stt_enabled)
+const micEnabled = computed(() => !!status.value?.stt_enabled);
 
 async function load() {
 	try {
-		const [st, page] = await Promise.all([api.getBusinessStatus(), api.listVoiceNotes(0, 30)])
-		status.value = st
-		notes.value = page?.rows || []
+		const [st, page] = await Promise.all([api.getBusinessStatus(), api.listVoiceNotes(0, 30)]);
+		status.value = st;
+		notes.value = page?.rows || [];
 	} catch (e) {
-		error.value = e?.message || "Couldn't load your notes."
+		error.value = e?.message || "Couldn't load your notes.";
 	} finally {
-		loaded.value = true
+		loaded.value = true;
 	}
 }
 
 async function save() {
-	const text = draft.value.trim()
-	if (!text || saving.value) return
-	saving.value = true
-	error.value = ""
+	const text = draft.value.trim();
+	if (!text || saving.value) return;
+	saving.value = true;
+	error.value = "";
 	try {
-		await api.saveVoiceNote(text)
-		draft.value = ""
-		await load()
+		await api.saveVoiceNote(text);
+		draft.value = "";
+		await load();
 	} catch (e) {
-		error.value = e?.message || "Couldn't save that note."
+		error.value = e?.message || "Couldn't save that note.";
 	} finally {
-		saving.value = false
+		saving.value = false;
 	}
 }
 
 async function remove(name) {
 	try {
-		await api.deleteVoiceNote(name)
-		notes.value = notes.value.filter((n) => n.name !== name)
+		await api.deleteVoiceNote(name);
+		notes.value = notes.value.filter((n) => n.name !== name);
 	} catch (e) {
-		error.value = e?.message || "Couldn't delete that note."
+		error.value = e?.message || "Couldn't delete that note.";
 	}
 }
 
 // Dictation drops the transcript into the draft rather than saving it outright:
 // a note you can't read before it is committed is a note you can't correct.
 function onTranscript(text) {
-	draft.value = draft.value ? `${draft.value} ${text}` : text
+	draft.value = draft.value ? `${draft.value} ${text}` : text;
 }
 
-onMounted(load)
+onMounted(load);
 </script>
 
 <template>
@@ -72,22 +73,35 @@ onMounted(load)
 
 	<div class="jv-scroll">
 		<div class="jv-capture">
-			<div class="jv-capture-head">Tell Jarvis how your business works</div>
+			<div class="jv-capture-head">Tell {{ agentName }} how your business works</div>
 			<div class="jv-capture-sub">
-				“We never ship to a customer with an overdue invoice.” Notes become defaults the agent
-				applies on its own.
+				“We never ship to a customer with an overdue invoice.” Notes become defaults the
+				agent applies on its own.
 			</div>
 			<div class="jv-capture-box">
 				<textarea v-model="draft" rows="3" placeholder="Type or dictate a note…" />
 				<div class="jv-capture-actions">
 					<button v-if="micEnabled" class="jv-ghost-btn" @click="voiceOpen = true">
-						<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+						<svg
+							viewBox="0 0 24 24"
+							width="16"
+							height="16"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.8"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
 							<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
 							<path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3" />
 						</svg>
 						Dictate
 					</button>
-					<button class="jv-primary-btn" :disabled="!draft.trim() || saving" @click="save">
+					<button
+						class="jv-primary-btn"
+						:disabled="!draft.trim() || saving"
+						@click="save"
+					>
 						{{ saving ? "Saving…" : "Save note" }}
 					</button>
 				</div>
@@ -108,7 +122,7 @@ onMounted(load)
 
 		<div v-if="!loaded" class="jv-empty">Loading…</div>
 		<div v-else-if="!notes.length" class="jv-empty" style="height: auto; padding: 24px">
-			No notes yet. The first one teaches Jarvis something new.
+			No notes yet. The first one teaches {{ agentName }} something new.
 		</div>
 
 		<ul v-else class="jv-notes">
@@ -118,12 +132,22 @@ onMounted(load)
 						{{ expanded === n.name ? n.transcript : n.excerpt || n.transcript }}
 					</div>
 					<div class="jv-note-meta">
-						<span class="jv-pill" :class="{ 'is-done': n.status === 'Processed' }">{{ n.status }}</span>
+						<span class="jv-pill" :class="{ 'is-done': n.status === 'Processed' }">{{
+							n.status
+						}}</span>
 						{{ relativeTime(n.creation) }}
 					</div>
 				</button>
 				<button class="jv-note-x" aria-label="Delete note" @click="remove(n.name)">
-					<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+					<svg
+						viewBox="0 0 24 24"
+						width="16"
+						height="16"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.9"
+						stroke-linecap="round"
+					>
 						<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" />
 					</svg>
 				</button>

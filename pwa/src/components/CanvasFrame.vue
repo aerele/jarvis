@@ -1,6 +1,6 @@
 <script setup>
-import { onMounted, ref, watch } from "vue"
-import * as api from "../api"
+import { onMounted, ref, watch } from "vue";
+import * as api from "../api";
 
 // An agent-generated html/svg artifact (a chart, a diagram), rendered inline.
 //
@@ -12,36 +12,36 @@ const props = defineProps({
 	messageName: { type: String, required: true },
 	canvasName: { type: String, default: "" },
 	height: { type: Number, default: 260 },
-})
+});
 
-const html = ref("")
-const loading = ref(true)
-const failed = ref(false)
+const html = ref("");
+const loading = ref(true);
+const failed = ref(false);
 
-const isDark = () => (window.matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0)
+const isDark = () => (window.matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0);
 
 async function load() {
-	loading.value = true
-	failed.value = false
+	loading.value = true;
+	failed.value = false;
 	try {
-		const d = await api.getCanvas(props.messageName, props.canvasName, isDark())
+		const d = await api.getCanvas(props.messageName, props.canvasName, isDark());
 		if (d?.content) {
-			html.value = d.content
+			html.value = d.content;
 		} else if (d?.data_url) {
-			html.value = `<!doctype html><body style="margin:0;background:transparent;display:flex;align-items:center;justify-content:center"><img src="${d.data_url}" style="max-width:100%;max-height:100%"></body>`
+			html.value = `<!doctype html><body style="margin:0;background:transparent;display:flex;align-items:center;justify-content:center"><img src="${d.data_url}" style="max-width:100%;max-height:100%"></body>`;
 		} else {
-			failed.value = true
+			failed.value = true;
 		}
 	} catch (e) {
-		console.error("Jarvis PWA: failed to load canvas", e)
-		failed.value = true
+		console.error("Jarvis PWA: failed to load canvas", e);
+		failed.value = true;
 	} finally {
-		loading.value = false
+		loading.value = false;
 	}
 }
 
-onMounted(load)
-watch(() => [props.messageName, props.canvasName], load)
+onMounted(load);
+watch(() => [props.messageName, props.canvasName], load);
 </script>
 
 <template>

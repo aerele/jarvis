@@ -3,7 +3,7 @@
 // fields each. Rendered as cards instead of a markdown table — a table with six
 // columns is unreadable on a phone, and the raw JSON (what the PWA showed
 // before) is unreadable anywhere.
-const props = defineProps({ data: { type: Object, required: true } })
+const props = defineProps({ data: { type: Object, required: true } });
 </script>
 
 <template>

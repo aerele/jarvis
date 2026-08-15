@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import frappe
 
-
 _LAST_SYNC_OAUTH_EXPIRED = "oauth_expired"
 
 
@@ -47,22 +46,26 @@ def poll_oauth_refresh_status() -> None:
 		return
 
 	from jarvis import admin_client
+
 	try:
 		result = admin_client.post_llm_auth_status() or {}
 	except admin_client.AdminUnreachableError as e:
 		# Network blip - can't distinguish container-lost-profile from
 		# admin-down. Log once and skip; the next hourly tick will retry.
 		frappe.logger().info(
-			"oauth_refresh_poll: admin unreachable; skipping (%s)", e,
+			"oauth_refresh_poll: admin unreachable; skipping (%s)",
+			e,
 		)
 		return
 	except admin_client.AdminAuthError as e:
 		# Bench credentials problem - flag in last_sync_status separately
 		# from oauth_expired so the operator can tell them apart.
-		settings.db_set({
-			"last_sync_status": f"failed: auth: {e}",
-			"last_sync_at": frappe.utils.now(),
-		})
+		settings.db_set(
+			{
+				"last_sync_status": f"failed: auth: {e}",
+				"last_sync_at": frappe.utils.now(),
+			}
+		)
 		frappe.log_error(
 			title="oauth_refresh_poll: admin auth failed",
 			message=frappe.get_traceback(),
@@ -76,7 +79,8 @@ def poll_oauth_refresh_status() -> None:
 		# profile - so log and skip rather than flipping to oauth_expired.
 		# Left uncaught this raised out of the scheduled job every hour.
 		frappe.logger().info(
-			"oauth_refresh_poll: admin could not report status; skipping (%s)", e,
+			"oauth_refresh_poll: admin could not report status; skipping (%s)",
+			e,
 		)
 		return
 	except admin_client.AdminRateLimitedError as e:
@@ -100,15 +104,17 @@ def poll_oauth_refresh_status() -> None:
 	# UI can show a reconnect banner. Clear the cached account email
 	# so the "Connected as <email>" UI element flips off.
 	current_status = settings.last_sync_status or ""
-	settings.db_set({
-		"last_sync_status": _LAST_SYNC_OAUTH_EXPIRED,
-		"last_sync_at": frappe.utils.now(),
-		"llm_oauth_account_email": "",
-	})
+	settings.db_set(
+		{
+			"last_sync_status": _LAST_SYNC_OAUTH_EXPIRED,
+			"last_sync_at": frappe.utils.now(),
+			"llm_oauth_account_email": "",
+		}
+	)
 	frappe.logger().info(
-		"oauth_refresh_poll: container reports auth profile absent; "
-		"flipped last_sync_status %r -> %r",
-		current_status, _LAST_SYNC_OAUTH_EXPIRED,
+		"oauth_refresh_poll: container reports auth profile absent; flipped last_sync_status %r -> %r",
+		current_status,
+		_LAST_SYNC_OAUTH_EXPIRED,
 	)
 
 
@@ -154,9 +160,9 @@ def check_agent_token_age() -> None:
 
 	try:
 		import datetime as _dt
+
 		issued = frappe.utils.get_datetime(issued_at)
-		now = (_dt.datetime.now(issued.tzinfo) if issued.tzinfo
-		       else _dt.datetime.now())
+		now = _dt.datetime.now(issued.tzinfo) if issued.tzinfo else _dt.datetime.now()
 		age_days = (now - issued).days
 	except Exception:
 		return
@@ -176,7 +182,8 @@ def check_agent_token_age() -> None:
 
 	if age_days >= max_age_days - _AGENT_TOKEN_WARN_WITHIN_DAYS:
 		frappe.logger().warning(
-			"check_agent_token_age: agent_token is %dd old "
-			"(max %dd; %dd remaining before hard rejection)",
-			age_days, max_age_days, max_age_days - age_days,
+			"check_agent_token_age: agent_token is %dd old (max %dd; %dd remaining before hard rejection)",
+			age_days,
+			max_age_days,
+			max_age_days - age_days,
 		)

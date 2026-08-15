@@ -12,6 +12,7 @@ tearDown (the lint stamps settings with a commit, so rollback isn't enough).
 from __future__ import annotations
 
 import contextlib
+import json
 from unittest import mock
 
 import frappe
@@ -32,15 +33,9 @@ _SETTINGS_FIELDS = ("wiki_lint_last_run_at", "wiki_lint_summary")
 def _mock_llm(key="", reply=None):
 	"""Patch voice._credentials (key resolution) + openrouter_complete.
 	``key=""`` = no OpenRouter key anywhere -> the confirm pass must skip."""
-	kwargs = (
-		{"side_effect": reply}
-		if isinstance(reply, (Exception, list))
-		else {"return_value": reply}
-	)
+	kwargs = {"side_effect": reply} if isinstance(reply, (Exception, list)) else {"return_value": reply}
 	with (
-		mock.patch(
-			"jarvis.chat.voice._credentials", return_value=(key, "test-model")
-		),
+		mock.patch("jarvis.chat.voice._credentials", return_value=(key, "test-model")),
 		mock.patch("jarvis.chat.voice.openrouter_complete", **kwargs) as complete,
 	):
 		yield complete
@@ -61,9 +56,18 @@ class WikiLintTestCase(FrappeTestCase):
 		frappe.db.commit()
 		super().tearDown()
 
-	def _page(self, slug, title=None, page_type="Customer", body="Body.",
-			  scope=None, status="Active", contradiction_flag=0,
-			  last_confirmed_at=None):
+	def _page(
+		self,
+		slug,
+		title=None,
+		page_type="Customer",
+		body="Body.",
+		scope=None,
+		status="Active",
+		contradiction_flag=0,
+		last_confirmed_at=None,
+		manual_links=None,
+	):
 		doc = frappe.get_doc(
 			{
 				"doctype": WIKI,
@@ -76,10 +80,15 @@ class WikiLintTestCase(FrappeTestCase):
 				"contradiction_flag": contradiction_flag,
 			}
 		)
+		if manual_links is not None:
+			doc.manual_links = json.dumps(manual_links)
 		doc.insert(ignore_permissions=True)
 		if last_confirmed_at:
 			frappe.db.set_value(
-				WIKI, doc.name, "last_confirmed_at", last_confirmed_at,
+				WIKI,
+				doc.name,
+				"last_confirmed_at",
+				last_confirmed_at,
 				update_modified=False,
 			)
 		frappe.db.commit()
@@ -89,9 +98,7 @@ class WikiLintTestCase(FrappeTestCase):
 		"""One page per failure mode + a healthy, referenced one."""
 		pages = frappe._dict()
 		# beta is referenced by alpha -> beta not orphan, alpha orphan
-		pages.alpha = self._page(
-			"alpha", body=f"Links to [[{SLUG_PREFIX}--beta]] for details."
-		)
+		pages.alpha = self._page("alpha", body=f"Links to [[{SLUG_PREFIX}--beta]] for details.")
 		pages.beta = self._page("beta")
 		# contradiction via body marker (flag cleared by a human save); also
 		# links beta so the corpus has >=2 linking pages — the orphan check
@@ -106,9 +113,7 @@ class WikiLintTestCase(FrappeTestCase):
 		# contradiction via the stored flag
 		pages.flagged = self._page("flagged", contradiction_flag=1)
 		# stale: confirmed long ago
-		pages.stale = self._page(
-			"stale", last_confirmed_at="2020-01-01 00:00:00"
-		)
+		pages.stale = self._page("stale", last_confirmed_at="2020-01-01 00:00:00")
 		# near-duplicate titles (normalized collision)
 		pages.dupa = self._page("dupa", title="Acme Corp")
 		pages.dupb = self._page("dupb", title="acme  CORP!!")
@@ -147,7 +152,8 @@ class TestDeterministicChecks(WikiLintTestCase):
 
 	def test_non_org_and_archived_pages_are_ignored(self):
 		user_page = self._page(
-			"private", scope="User",
+			"private",
+			scope="User",
 			body="## Contradiction flagged (2026-01-01)\n\nConflict.",
 			contradiction_flag=1,
 		)
@@ -159,9 +165,7 @@ class TestDeterministicChecks(WikiLintTestCase):
 		self.assertNotIn(user_page.name, out["orphans"])
 
 	def test_self_reference_does_not_rescue_an_orphan(self):
-		selfie = self._page(
-			"selfie", body=f"I cite myself: [[{SLUG_PREFIX}--selfie]]."
-		)
+		selfie = self._page("selfie", body=f"I cite myself: [[{SLUG_PREFIX}--selfie]].")
 		# two real linking pages so the young-wiki orphan gate is open
 		self._page("linker-a", body=f"See [[{SLUG_PREFIX}--linker-b]].")
 		self._page("linker-b", body=f"Back to [[{SLUG_PREFIX}--linker-a]].")
@@ -177,6 +181,44 @@ class TestDeterministicChecks(WikiLintTestCase):
 		with _mock_llm(key=""):
 			out = wiki_lint.run_lint()
 		self.assertEqual(out["orphans"], [])
+
+	def test_curated_inbound_link_rescues_an_orphan(self):
+		"""#494: add_wiki_link stores curated links in manual_links, never in
+		body_md. A body-only orphan scan therefore kept reporting the target as
+		an orphan while the Evolution tab (which unions both) showed it linked."""
+		adopted = self._page("adopted")
+		# body_md says nothing about `adopted`; only the curated store does.
+		self._page("curator", body="No wikilinks here at all.", manual_links=[adopted.name])
+		# second linking page so the young-wiki orphan gate is open
+		self._page("linker-a", body=f"See [[{SLUG_PREFIX}--linker-b]].")
+		self._page("linker-b", body=f"Back to [[{SLUG_PREFIX}--linker-a]].")
+		with _mock_llm(key=""):
+			out = wiki_lint.run_lint()
+		self.assertNotIn(adopted.name, out["orphans"])
+
+	def test_curated_links_alone_open_the_young_wiki_orphan_gate(self):
+		"""A wiki linked entirely by curation still counts as "linking is
+		practiced" — otherwise the gate silently disables the whole check."""
+		a = self._page("gate-a")
+		b = self._page("gate-b")
+		lonely = self._page("gate-lonely")
+		self._page("gate-c", manual_links=[a.name])
+		self._page("gate-d", manual_links=[b.name])
+		with _mock_llm(key=""):
+			out = wiki_lint.run_lint()
+		self.assertIn(lonely.name, out["orphans"])
+		self.assertNotIn(a.name, out["orphans"])
+		self.assertNotIn(b.name, out["orphans"])
+
+	def test_curated_self_link_does_not_rescue_an_orphan(self):
+		selfie = self._page("curated-selfie")
+		frappe.db.set_value(WIKI, selfie.name, "manual_links", json.dumps([selfie.name]))
+		frappe.db.commit()
+		self._page("linker-a", body=f"See [[{SLUG_PREFIX}--linker-b]].")
+		self._page("linker-b", body=f"Back to [[{SLUG_PREFIX}--linker-a]].")
+		with _mock_llm(key=""):
+			out = wiki_lint.run_lint()
+		self.assertIn(selfie.name, out["orphans"])
 
 	def test_settings_fields_are_stamped(self):
 		self._seed()
@@ -197,9 +239,7 @@ class TestLlmConfirmPass(WikiLintTestCase):
 		self.assertFalse(out["llm_checked"])
 		self.assertEqual(out["confirmed_contradictions"], [])
 		# the deterministic pass alone never overrides a human's flag clear
-		self.assertEqual(
-			cint(frappe.db.get_value(WIKI, pages.contra.name, "contradiction_flag")), 0
-		)
+		self.assertEqual(cint(frappe.db.get_value(WIKI, pages.contra.name, "contradiction_flag")), 0)
 
 	def test_confirmed_contradiction_sets_flag(self):
 		pages = self._seed()
@@ -218,12 +258,8 @@ class TestLlmConfirmPass(WikiLintTestCase):
 		self.assertTrue(out["llm_checked"])
 		self.assertEqual(out["confirmed_contradictions"], [pages.contra.name])
 		self.assertIn(pages.dupa.name, out["confirmed_duplicates"])
-		self.assertEqual(
-			cint(frappe.db.get_value(WIKI, pages.contra.name, "contradiction_flag")), 1
-		)
-		self.assertEqual(
-			cint(frappe.db.get_value(WIKI, pages.beta.name, "contradiction_flag")), 0
-		)
+		self.assertEqual(cint(frappe.db.get_value(WIKI, pages.contra.name, "contradiction_flag")), 1)
+		self.assertEqual(cint(frappe.db.get_value(WIKI, pages.beta.name, "contradiction_flag")), 0)
 
 	def test_llm_failure_degrades_to_deterministic_results(self):
 		pages = self._seed()
@@ -252,9 +288,7 @@ class TestLlmConfirmPass(WikiLintTestCase):
 
 class TestScheduledLint(WikiLintTestCase):
 	def test_scheduled_lint_swallows_errors(self):
-		with mock.patch.object(
-			wiki_lint, "run_lint", side_effect=Exception("boom")
-		):
+		with mock.patch.object(wiki_lint, "run_lint", side_effect=Exception("boom")):
 			wiki_lint.scheduled_lint()  # must not raise
 
 	def test_scheduled_lint_runs_when_wiki_enabled(self):

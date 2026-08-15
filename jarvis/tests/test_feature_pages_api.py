@@ -52,12 +52,16 @@ def _ensure_user(email: str) -> str:
 
 	ensure_jarvis_user_role()
 	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email,
-			"first_name": email.split("@")[0],
-			"send_welcome_email": 0, "enabled": 1,
-			"user_type": "System User",
-		})
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": email.split("@")[0],
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "System User",
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert()
 		frappe.db.commit()
@@ -124,36 +128,61 @@ def _wipe_all() -> None:
 
 def _mk_skill(owner, name, description=None, enabled=1, user_invocable=1, shared_with=None) -> str:
 	with _as(owner):
-		doc = frappe.get_doc({
-			"doctype": SKILL, "skill_name": name,
-			"description": description or f"{name} generic description",
-			"instructions": "do the thing",
-			"user_invocable": user_invocable, "enabled": enabled,
-			"shared_with": [{"user": u} for u in (shared_with or [])],
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": SKILL,
+				"skill_name": name,
+				"description": description or f"{name} generic description",
+				"instructions": "do the thing",
+				"user_invocable": user_invocable,
+				"enabled": enabled,
+				"shared_with": [{"user": u} for u in (shared_with or [])],
+			}
+		)
 		doc.flags.ignore_validate = True  # bypass the 25/owner cap for fixtures
 		doc.insert(ignore_permissions=True)
 	frappe.db.commit()
 	return doc.name
 
 
-def _mk_macro(owner, name, description="m", enabled=1, schedule_enabled=0,
-			  schedule_frequency="daily", nsteps=1, merged_prompt="", merge_status="",
-			  last_run_days=None) -> str:
+def _mk_macro(
+	owner,
+	name,
+	description="m",
+	enabled=1,
+	schedule_enabled=0,
+	schedule_frequency="daily",
+	nsteps=1,
+	merged_prompt="",
+	merge_status="",
+	last_run_days=None,
+) -> str:
 	with _as(owner):
-		doc = frappe.get_doc({
-			"doctype": MACRO, "macro_name": name, "description": description,
-			"enabled": enabled, "stop_on_error": 1,
-			"schedule_enabled": schedule_enabled, "schedule_frequency": schedule_frequency,
-			"schedule_time": "09:00:00" if schedule_enabled else None,
-			"steps": [{"label": f"s{k}", "prompt": f"prompt {k}"} for k in range(nsteps)],
-			"merged_prompt": merged_prompt, "merge_status": merge_status,
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": MACRO,
+				"macro_name": name,
+				"description": description,
+				"enabled": enabled,
+				"stop_on_error": 1,
+				"schedule_enabled": schedule_enabled,
+				"schedule_frequency": schedule_frequency,
+				"schedule_time": "09:00:00" if schedule_enabled else None,
+				"steps": [{"label": f"s{k}", "prompt": f"prompt {k}"} for k in range(nsteps)],
+				"merged_prompt": merged_prompt,
+				"merge_status": merge_status,
+			}
+		)
 		doc.flags.ignore_validate = True
 		doc.insert(ignore_permissions=True)
 	if last_run_days is not None:
-		frappe.db.set_value(MACRO, doc.name, "last_run_at",
-							now_datetime() - timedelta(days=last_run_days), update_modified=False)
+		frappe.db.set_value(
+			MACRO,
+			doc.name,
+			"last_run_at",
+			now_datetime() - timedelta(days=last_run_days),
+			update_modified=False,
+		)
 	frappe.db.commit()
 	return doc.name
 
@@ -167,20 +196,41 @@ def _mk_conv(owner, title, status="Active") -> str:
 
 
 def _add_msg(conv, seq, role, content, streaming=0, recovering=0, error="") -> None:
-	frappe.get_doc({
-		"doctype": MSG, "conversation": conv, "seq": seq, "role": role,
-		"content": content, "streaming": streaming, "recovering": recovering, "error": error,
-	}).insert(ignore_permissions=True)
+	frappe.get_doc(
+		{
+			"doctype": MSG,
+			"conversation": conv,
+			"seq": seq,
+			"role": role,
+			"content": content,
+			"streaming": streaming,
+			"recovering": recovering,
+			"error": error,
+		}
+	).insert(ignore_permissions=True)
 	frappe.db.commit()
 
 
-def _mk_approval(owner, title, status="Pending", document_type="", conversation=None,
-				 question="q?", ref_name=None, decision=None) -> str:
+def _mk_approval(
+	owner,
+	title,
+	status="Pending",
+	document_type="",
+	conversation=None,
+	question="q?",
+	ref_name=None,
+	decision=None,
+) -> str:
 	with _as(owner):
 		d = {
-			"doctype": APPROVAL, "title": title, "status": status,
-			"document_type": document_type, "conversation": conversation,
-			"question": question, "context_md": "ctx", "options": '["Approve","Reject"]',
+			"doctype": APPROVAL,
+			"title": title,
+			"status": status,
+			"document_type": document_type,
+			"conversation": conversation,
+			"question": question,
+			"context_md": "ctx",
+			"options": '["Approve","Reject"]',
 		}
 		if ref_name is not None:
 			d["ref_name"] = ref_name
@@ -193,8 +243,9 @@ def _mk_approval(owner, title, status="Pending", document_type="", conversation=
 
 
 def _set_creation(dt, name, days_ago) -> None:
-	frappe.db.set_value(dt, name, "creation", now_datetime() - timedelta(days=days_ago),
-						update_modified=False)
+	frappe.db.set_value(
+		dt, name, "creation", now_datetime() - timedelta(days=days_ago), update_modified=False
+	)
 
 
 def _names(rows, key="name"):
@@ -212,7 +263,8 @@ class TestSkillsPage(unittest.TestCase):
 		# i=10,11 shared with B).
 		for i in range(24):
 			_mk_skill(
-				USER_A, f"fp-skill-a-{i:03d}",
+				USER_A,
+				f"fp-skill-a-{i:03d}",
 				description="zebra alpha token" if i in (5, 6) else f"skill {i} generic",
 				enabled=0 if i < 3 else 1,
 				user_invocable=1 if i % 2 == 0 else 0,
@@ -237,8 +289,7 @@ class TestSkillsPage(unittest.TestCase):
 	def test_default_visibility_and_envelope(self):
 		res = self._page()
 		self.assertEqual(res["total"], 26)  # 24 own + 2 shared-enabled
-		self.assertEqual(set(res.keys()),
-						 {"rows", "total", "has_more", "start", "page_length"})
+		self.assertEqual(set(res.keys()), {"rows", "total", "has_more", "start", "page_length"})
 
 	def test_pagination(self):
 		seen, start, total = [], 0, None
@@ -262,7 +313,7 @@ class TestSkillsPage(unittest.TestCase):
 
 	def test_filter_enabled(self):
 		self.assertEqual(self._page(filters={"enabled": 1})["total"], 23)  # 21 own + 2 shared
-		self.assertEqual(self._page(filters={"enabled": 0})["total"], 3)   # own drafts only
+		self.assertEqual(self._page(filters={"enabled": 0})["total"], 3)  # own drafts only
 
 	def test_filter_user_invocable(self):
 		res = self._page(filters={"user_invocable": 1})
@@ -276,8 +327,9 @@ class TestSkillsPage(unittest.TestCase):
 		shared = self._page(filters={"scope": "shared"}, page_length=100)
 		self.assertEqual(shared["total"], 2)
 		self.assertTrue(all(r["mine"] == 0 for r in shared["rows"]))
-		self.assertEqual(set(_names(shared["rows"], "skill_name")),
-						 {"fp-skill-b-shared-000", "fp-skill-b-shared-001"})
+		self.assertEqual(
+			set(_names(shared["rows"], "skill_name")), {"fp-skill-b-shared-000", "fp-skill-b-shared-001"}
+		)
 
 	def test_sort(self):
 		asc = self._page(sort_field="skill_name", sort_dir="asc", page_length=100)["rows"]
@@ -332,7 +384,8 @@ class TestMacrosPage(unittest.TestCase):
 		for i in range(24):
 			sched = i < 9
 			_mk_macro(
-				USER_A, f"fp-macro-a-{i:03d}",
+				USER_A,
+				f"fp-macro-a-{i:03d}",
 				description="walrus token macro" if i in (5, 6) else f"macro {i} generic",
 				enabled=0 if i < 3 else 1,
 				schedule_enabled=1 if sched else 0,
@@ -389,17 +442,20 @@ class TestMacrosPage(unittest.TestCase):
 
 	def test_has_summary_and_step_count(self):
 		rows = {r["macro_name"]: r for r in self._page(page_length=100)["rows"]}
-		self.assertEqual(rows["fp-macro-a-000"]["has_summary"], 1)   # i%5==0
+		self.assertEqual(rows["fp-macro-a-000"]["has_summary"], 1)  # i%5==0
 		self.assertEqual(rows["fp-macro-a-001"]["has_summary"], 0)
 		self.assertEqual(rows["fp-macro-a-007"]["step_count"], 1 + (7 % 4))  # =4
 
 	def test_sort_name_and_default(self):
-		asc = _names(self._page(sort_field="macro_name", sort_dir="asc", page_length=100)["rows"], "macro_name")
-		desc = _names(self._page(sort_field="macro_name", sort_dir="desc", page_length=100)["rows"], "macro_name")
+		asc = _names(
+			self._page(sort_field="macro_name", sort_dir="asc", page_length=100)["rows"], "macro_name"
+		)
+		desc = _names(
+			self._page(sort_field="macro_name", sort_dir="desc", page_length=100)["rows"], "macro_name"
+		)
 		self.assertEqual(asc, sorted(asc))
 		self.assertEqual(desc, list(reversed(asc)))
-		self.assertEqual(
-			_names(self._page(page_length=100)["rows"], "macro_name"), asc)  # default asc
+		self.assertEqual(_names(self._page(page_length=100)["rows"], "macro_name"), asc)  # default asc
 
 	def test_sort_last_run_at(self):
 		rows = self._page(sort_field="last_run_at", sort_dir="desc", page_length=100)["rows"]
@@ -429,25 +485,31 @@ class TestFileBoxPage(unittest.TestCase):
 		# 3 done, 1 error, 1 processing (no assistant msg), 1 processing (streaming),
 		# 1 needs_approval. Plus a non-File-Box conv + an Archived File-Box conv.
 		self.ids["done0"] = c = _mk_conv(USER_A, "File: fp-a-uniquetoken-0001.pdf")
-		_add_msg(c, 1, "user", "process"); _add_msg(c, 2, "assistant", "drafted")
+		_add_msg(c, 1, "user", "process")
+		_add_msg(c, 2, "assistant", "drafted")
 		_set_creation(CONV, c, 100)
 		self.ids["done1"] = c = _mk_conv(USER_A, "File: fp-a-0002.pdf")
-		_add_msg(c, 1, "user", "process"); _add_msg(c, 2, "assistant", "drafted")
+		_add_msg(c, 1, "user", "process")
+		_add_msg(c, 2, "assistant", "drafted")
 		_set_creation(CONV, c, 50)
 		self.ids["done2"] = c = _mk_conv(USER_A, "File: fp-a-0003.pdf")
-		_add_msg(c, 1, "user", "process"); _add_msg(c, 2, "assistant", "drafted")
+		_add_msg(c, 1, "user", "process")
+		_add_msg(c, 2, "assistant", "drafted")
 		_set_creation(CONV, c, 1)
 		self.ids["error0"] = c = _mk_conv(USER_A, "File: fp-a-0004.pdf")
-		_add_msg(c, 1, "user", "process"); _add_msg(c, 2, "assistant", "", error="boom")
+		_add_msg(c, 1, "user", "process")
+		_add_msg(c, 2, "assistant", "", error="boom")
 		_set_creation(CONV, c, 1)
 		self.ids["proc0"] = c = _mk_conv(USER_A, "File: fp-a-0005.pdf")  # no assistant msg
 		_add_msg(c, 1, "user", "process")
 		_set_creation(CONV, c, 1)
 		self.ids["stream0"] = c = _mk_conv(USER_A, "File: fp-a-0006.pdf")
-		_add_msg(c, 1, "user", "process"); _add_msg(c, 2, "assistant", "...", streaming=1)
+		_add_msg(c, 1, "user", "process")
+		_add_msg(c, 2, "assistant", "...", streaming=1)
 		_set_creation(CONV, c, 1)
 		self.ids["na0"] = c = _mk_conv(USER_A, "File: fp-a-0007.pdf")
-		_add_msg(c, 1, "user", "process"); _add_msg(c, 2, "assistant", "queued")
+		_add_msg(c, 1, "user", "process")
+		_add_msg(c, 2, "assistant", "queued")
 		_mk_approval(USER_A, "fp-appr-na-0", "Pending", "Purchase Invoice", c, "confirm?")
 		_set_creation(CONV, c, 1)
 		# excluded rows
@@ -455,7 +517,8 @@ class TestFileBoxPage(unittest.TestCase):
 		self.ids["arch"] = _mk_conv(USER_A, "File: fp-a-archived.pdf", status="Archived")
 		# second user's File Box row (scoping)
 		self.ids["b0"] = c = _mk_conv(USER_B, "File: fp-b-0001.pdf")
-		_add_msg(c, 1, "user", "process"); _add_msg(c, 2, "assistant", "drafted")
+		_add_msg(c, 1, "user", "process")
+		_add_msg(c, 2, "assistant", "drafted")
 
 	@classmethod
 	def tearDownClass(cls):
@@ -488,22 +551,22 @@ class TestFileBoxPage(unittest.TestCase):
 		self.assertEqual(res["rows"][0]["name"], self.ids["done0"])
 
 	def test_date_filters(self):
-		cutoff_from = (today() and (now_datetime() - timedelta(days=60)).date().isoformat())
+		cutoff_from = today() and (now_datetime() - timedelta(days=60)).date().isoformat()
 		res = self._page(filters={"from_date": cutoff_from})
 		names = set(_names(res["rows"]))
 		self.assertNotIn(self.ids["done0"], names)  # 100 days ago, excluded
-		self.assertIn(self.ids["done1"], names)     # 50 days ago, included
+		self.assertIn(self.ids["done1"], names)  # 50 days ago, included
 		self.assertEqual(res["total"], 6)
 		cutoff_to = (now_datetime() - timedelta(days=70)).date().isoformat()
 		res2 = self._page(filters={"to_date": cutoff_to})
-		self.assertEqual(res2["total"], 1)          # only the 100-day-old row
+		self.assertEqual(res2["total"], 1)  # only the 100-day-old row
 		self.assertEqual(res2["rows"][0]["name"], self.ids["done0"])
 
 	def test_sort_creation_default_desc(self):
 		rows = self._page(page_length=100)["rows"]
 		self.assertEqual(rows[-1]["name"], self.ids["done0"])  # oldest last (default desc)
 		asc = self._page(sort_field="creation", sort_dir="asc", page_length=100)["rows"]
-		self.assertEqual(asc[0]["name"], self.ids["done0"])    # oldest first
+		self.assertEqual(asc[0]["name"], self.ids["done0"])  # oldest first
 
 	def test_sort_title(self):
 		titles = _names(self._page(sort_field="title", sort_dir="asc", page_length=100)["rows"], "title")
@@ -511,9 +574,9 @@ class TestFileBoxPage(unittest.TestCase):
 
 	def test_owner_scoping_and_exclusions(self):
 		names = set(_names(self._page(page_length=100)["rows"]))
-		self.assertNotIn(self.ids["b0"], names)     # other user's row
+		self.assertNotIn(self.ids["b0"], names)  # other user's row
 		self.assertNotIn(self.ids["plain"], names)  # not a File: row
-		self.assertNotIn(self.ids["arch"], names)   # archived
+		self.assertNotIn(self.ids["arch"], names)  # archived
 		b_names = set(_names(self._page(user=USER_B, page_length=100)["rows"]))
 		self.assertIn(self.ids["b0"], b_names)
 		self.assertNotIn(self.ids["done0"], b_names)
@@ -529,11 +592,16 @@ class TestFileBoxPage(unittest.TestCase):
 		_add_msg(conv, 2, "assistant", "drafted")
 		ap = _mk_approval(USER_A, "fp-appr-del", "Pending", "Purchase Invoice", conv, "confirm?")
 		with _as(USER_A):
-			f = frappe.get_doc({
-				"doctype": "File", "file_name": "fp-attach.txt",
-				"attached_to_doctype": CONV, "attached_to_name": conv,
-				"is_private": 1, "content": "hello world",
-			})
+			f = frappe.get_doc(
+				{
+					"doctype": "File",
+					"file_name": "fp-attach.txt",
+					"attached_to_doctype": CONV,
+					"attached_to_name": conv,
+					"is_private": 1,
+					"content": "hello world",
+				}
+			)
 			f.flags.ignore_permissions = True
 			f.insert(ignore_permissions=True)
 		frappe.db.commit()
@@ -575,9 +643,9 @@ class TestFileBoxPage(unittest.TestCase):
 		self.assertIn(stream, skipped)
 		self.assertIn(foreign, skipped)
 		self.assertEqual(skipped[foreign], "not permitted")
-		self.assertFalse(frappe.db.exists(CONV, done))     # the done row went
-		self.assertTrue(frappe.db.exists(CONV, stream))    # streaming row survived
-		self.assertTrue(frappe.db.exists(CONV, foreign))   # foreign row survived
+		self.assertFalse(frappe.db.exists(CONV, done))  # the done row went
+		self.assertTrue(frappe.db.exists(CONV, stream))  # streaming row survived
+		self.assertTrue(frappe.db.exists(CONV, foreign))  # foreign row survived
 
 	def test_clear_processed_leaves_active(self):
 		with _as(USER_A):
@@ -599,11 +667,16 @@ class TestApprovalsPage(unittest.TestCase):
 		self.conv_a = _mk_conv(USER_A, "fp-a-appr-conv")
 		self.conv_b = _mk_conv(USER_B, "fp-b-appr-conv")
 		# conv_a pending: PIx2, SIx2, blankx1
-		_mk_approval(USER_A, "fp-appr-a-p0", "Pending", "Purchase Invoice", self.conv_a,
-					 question="check kangaroo value")
+		_mk_approval(
+			USER_A,
+			"fp-appr-a-p0",
+			"Pending",
+			"Purchase Invoice",
+			self.conv_a,
+			question="check kangaroo value",
+		)
 		_mk_approval(USER_A, "fp-appr-a-p1", "Pending", "Purchase Invoice", self.conv_a)
-		_mk_approval(USER_A, "fp-appr-a-p2", "Pending", "Sales Invoice", self.conv_a,
-					 ref_name="REF-XYZ")
+		_mk_approval(USER_A, "fp-appr-a-p2", "Pending", "Sales Invoice", self.conv_a, ref_name="REF-XYZ")
 		_mk_approval(USER_A, "fp-appr-a-p3", "Pending", "Sales Invoice", self.conv_a)
 		_mk_approval(USER_A, "fp-appr-a-p4", "Pending", "", self.conv_a)  # Unclassified
 		# conv_a decided: 2 Approved + 1 Rejected (all PI)
@@ -650,8 +723,8 @@ class TestApprovalsPage(unittest.TestCase):
 		self.assertEqual(self._page(filters={"conversation": self.conv_b})["total"], 0)
 
 	def test_search(self):
-		self.assertEqual(self._page(search="kangaroo")["total"], 1)      # question
-		self.assertEqual(self._page(search="REF-XYZ")["total"], 1)       # ref_name
+		self.assertEqual(self._page(search="kangaroo")["total"], 1)  # question
+		self.assertEqual(self._page(search="REF-XYZ")["total"], 1)  # ref_name
 		self.assertEqual(self._page(search="fp-appr-a-p0")["total"], 1)  # title
 
 	def test_facets(self):
@@ -669,14 +742,17 @@ class TestApprovalsPage(unittest.TestCase):
 		self.assertEqual(counts, sorted(counts, reverse=True))
 
 	def test_sort(self):
-		desc = self._page(filters={"status": "All"}, sort_field="creation", sort_dir="desc",
-						   page_length=100)["rows"]
-		asc = self._page(filters={"status": "All"}, sort_field="creation", sort_dir="asc",
-						 page_length=100)["rows"]
+		desc = self._page(filters={"status": "All"}, sort_field="creation", sort_dir="desc", page_length=100)[
+			"rows"
+		]
+		asc = self._page(filters={"status": "All"}, sort_field="creation", sort_dir="asc", page_length=100)[
+			"rows"
+		]
 		self.assertEqual(_names(desc), list(reversed(_names(asc))))
 		# document_type sort is whitelisted (no throw, returns rows)
-		self.assertTrue(self._page(filters={"status": "All"}, sort_field="document_type",
-								   sort_dir="asc")["rows"])
+		self.assertTrue(
+			self._page(filters={"status": "All"}, sort_field="document_type", sort_dir="asc")["rows"]
+		)
 
 	def test_pagination(self):
 		seen, start = [], 0

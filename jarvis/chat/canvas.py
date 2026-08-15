@@ -1,6 +1,6 @@
-"""Artifact handling for the chat surface — render openclaw's file outputs inline.
+"""Artifact handling for the chat surface — render agent's file outputs inline.
 
-openclaw's agent emits rich outputs (charts, reports, PDFs, images, exports) by
+agent's agent emits rich outputs (charts, reports, PDFs, images, exports) by
 writing a file under the container's ``~/.openclaw/canvas/`` (including
 subdirectories) and referencing its path in the reply; the gateway serves it at
 ``/__openclaw__/canvas/<path>``. The live WS stream does NOT carry file content
@@ -31,10 +31,21 @@ _MAX_CANVAS_PER_TURN = 8
 #   image    -> <img>
 #   file     -> download card (no inline render)
 _EXT_TYPE = {
-	"html": "html", "htm": "html", "svg": "svg",
+	"html": "html",
+	"htm": "html",
+	"svg": "svg",
 	"pdf": "pdf",
-	"png": "image", "jpg": "image", "jpeg": "image", "gif": "image", "webp": "image",
-	"xlsx": "file", "xls": "file", "csv": "file", "json": "file", "txt": "file", "md": "file",
+	"png": "image",
+	"jpg": "image",
+	"jpeg": "image",
+	"gif": "image",
+	"webp": "image",
+	"xlsx": "file",
+	"xls": "file",
+	"csv": "file",
+	"json": "file",
+	"txt": "file",
+	"md": "file",
 }
 # Longest-first so the alternation matches "html" before "htm", "jpeg" before "jpg".
 _EXTS = "|".join(sorted(_EXT_TYPE, key=len, reverse=True))
@@ -47,21 +58,17 @@ _CANVAS_REF = re.compile(rf"canvas/({_PATH}\.(?:{_EXTS}))(?![\w])", re.IGNORECAS
 
 # Markdown link / bare path to a canvas artifact — stripped from the visible
 # reply (the artifact renders inline below, so the container-path link is noise).
-_CANVAS_LINK = re.compile(
-	rf"\[[^\]]*\]\(\s*\S*?canvas/{_PATH}\.(?:{_EXTS})\S*?\s*\)", re.IGNORECASE
-)
+_CANVAS_LINK = re.compile(rf"\[[^\]]*\]\(\s*\S*?canvas/{_PATH}\.(?:{_EXTS})\S*?\s*\)", re.IGNORECASE)
 _CANVAS_BARE = re.compile(rf"\S*?canvas/{_PATH}\.(?:{_EXTS})(?![\w])", re.IGNORECASE)
 
-# openclaw 2026.6+ "hosted embed" markers. The runtime's own system prompt
+# agent 2026.6+ "hosted embed" markers. The runtime's own system prompt
 # teaches the model to publish rich HTML as a hosted canvas document and
 # reference it with ``[embed ref="<id>" title="..." /]`` (or an explicit
 # ``[embed url="/__openclaw__/canvas/..." /]``). The gateway serves ref
 # documents at ``canvas/documents/<id>/index.html``, so refs fold into the
 # same fetch/persist path as plain canvas file references.
 _EMBED_MARKER = re.compile(r"\[embed\s[^\]]*\]", re.IGNORECASE)
-_EMBED_REF = re.compile(
-	r"\[embed\s[^\]]*?\bref=[\"']([\w.\-]+)[\"'][^\]]*\]", re.IGNORECASE
-)
+_EMBED_REF = re.compile(r"\[embed\s[^\]]*?\bref=[\"']([\w.\-]+)[\"'][^\]]*\]", re.IGNORECASE)
 
 
 def _embed_ref_name(ref: str) -> str:
@@ -77,9 +84,7 @@ _SCRIPT_BLOCK = re.compile(r"<script\b.*?</script>", re.IGNORECASE | re.DOTALL)
 
 
 def _strip_host_client(text: str) -> str:
-	return _SCRIPT_BLOCK.sub(
-		lambda m: "" if "__openclaw__/ws" in m.group(0) else m.group(0), text
-	)
+	return _SCRIPT_BLOCK.sub(lambda m: "" if "__openclaw__/ws" in m.group(0) else m.group(0), text)
 
 
 def detect_canvas_names(text: str) -> list[str]:
@@ -114,9 +119,9 @@ def _http_base(agent_url: str) -> str:
 	"""ws://host:port → http://host:port (gateway HTTP shares the WS port)."""
 	base = (agent_url or "").strip().rstrip("/")
 	if base.startswith("ws://"):
-		return "http://" + base[len("ws://"):]
+		return "http://" + base[len("ws://") :]
 	if base.startswith("wss://"):
-		return "https://" + base[len("wss://"):]
+		return "https://" + base[len("wss://") :]
 	return base
 
 
@@ -130,9 +135,7 @@ def fetch_canvas(agent_url: str, token: str, name: str) -> tuple[bytes, str] | N
 		return None
 	url = f"{base}/__openclaw__/canvas/{name}"
 	try:
-		r = requests.get(
-			url, headers={"Authorization": f"Bearer {token}"}, timeout=20
-		)
+		r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
 	except Exception:
 		return None
 	if r.status_code != 200 or not r.content:
@@ -223,20 +226,26 @@ def persist_canvases(
 				message=f"name={name!r} msg={assistant_msg_name!r}\n\n{frappe.get_traceback()}",
 			)
 			continue
-		items.append({
-			"name": name,
-			"title": _title_for(name, body, typ),
-			"type": typ,
-			"file_url": file_url,
-		})
+		items.append(
+			{
+				"name": name,
+				"title": _title_for(name, body, typ),
+				"type": typ,
+				"file_url": file_url,
+			}
+		)
 
 	if not items:
 		return []
 
 	cleaned = strip_canvas_refs(content, [i["name"] for i in items])
-	frappe.db.set_value(MSG, assistant_msg_name, {
-		"content": cleaned,
-		"canvas": frappe.as_json(items),
-	})
+	frappe.db.set_value(
+		MSG,
+		assistant_msg_name,
+		{
+			"content": cleaned,
+			"canvas": frappe.as_json(items),
+		},
+	)
 	frappe.db.commit()
 	return items

@@ -48,9 +48,7 @@ def resolve_links(doctype: str, values: dict, limit: int = 5) -> dict:
 		if not isinstance(rows, list):
 			continue
 		child_meta = frappe.get_meta(df.options)
-		child_links = [
-			c for c in child_meta.fields if c.fieldtype == "Link" and c.options
-		]
+		child_links = [c for c in child_meta.fields if c.fieldtype == "Link" and c.options]
 		for idx, row in enumerate(rows):
 			if not isinstance(row, dict):
 				continue

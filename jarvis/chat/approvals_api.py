@@ -12,9 +12,9 @@ from __future__ import annotations
 import json
 
 import frappe
-from jarvis.permissions import require_jarvis_user
 
 from jarvis._session import impersonate
+from jarvis.permissions import require_jarvis_user
 
 APPROVAL = "Jarvis Approval Request"
 
@@ -28,6 +28,7 @@ def _parse_options(raw: str | None) -> list[str]:
 		# coerces to str(list) with single quotes - salvage it.
 		try:
 			import ast
+
 			out = ast.literal_eval(raw or "[]")
 			return [str(o) for o in out] if isinstance(out, list) else []
 		except Exception:
@@ -60,20 +61,34 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 	# caller's rows, not to a mixed page that later shrinks (and no N+1).
 	if "System Manager" not in frappe.get_roles():
 		my_convs = frappe.get_all(
-			"Jarvis Conversation", filters={"owner": frappe.session.user},
+			"Jarvis Conversation",
+			filters={"owner": frappe.session.user},
 			pluck="name",
 		)
 		if not my_convs:
 			return []
 		filters["conversation"] = ["in", my_convs]
 	rows = frappe.get_all(
-		APPROVAL, filters=filters,
+		APPROVAL,
+		filters=filters,
 		fields=[
-			"name", "title", "status", "document_type", "question",
-			"context_md", "options", "conversation", "ref_doctype",
-			"ref_name", "decision", "decided_by", "decided_at", "creation",
+			"name",
+			"title",
+			"status",
+			"document_type",
+			"question",
+			"context_md",
+			"options",
+			"conversation",
+			"ref_doctype",
+			"ref_name",
+			"decision",
+			"decided_by",
+			"decided_at",
+			"creation",
 		],
-		order_by="creation desc", limit_page_length=int(limit),
+		order_by="creation desc",
+		limit_page_length=int(limit),
 	)
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
@@ -241,7 +256,8 @@ def list_approvals_page(
 		WHERE {main_where}
 		ORDER BY {order}
 		LIMIT %(page_length)s OFFSET %(start)s""",
-		params, as_dict=True,
+		params,
+		as_dict=True,
 	)
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
@@ -256,7 +272,8 @@ def list_approvals_page(
 		WHERE {base_where}
 		GROUP BY dtv
 		ORDER BY n DESC""",
-		params, as_dict=True,
+		params,
+		as_dict=True,
 	)
 	facets = {"document_type": [{"value": x.dtv, "count": x.n} for x in facet_rows]}
 
@@ -424,7 +441,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	new_status = "Approved" if int(approve) else "Rejected"
 	# Conditional flip closes the double-decide race: only ONE concurrent
 	# caller wins the Pending -> decided transition.
-	changed = frappe.db.sql(
+	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status=%s, decision=%s, decided_by=%s, decided_at=%s
 		where name=%s and status='Pending'""",
@@ -443,6 +460,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	resumed = False
 	if doc.conversation and frappe.db.exists("Jarvis Conversation", doc.conversation):
 		from jarvis.chat.api import send_message
+
 		verdict = "APPROVED" if doc.status == "Approved" else "REJECTED"
 		msg = (
 			f"[Approval {doc.name} - {doc.title}] {verdict}: {decision}\n"
@@ -467,12 +485,11 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 					"attached_to_name": doc.conversation,
 				},
 				fields=["file_url", "file_name"],
-				order_by="creation desc", limit_page_length=1,
+				order_by="creation desc",
+				limit_page_length=1,
 			)
 			if f:
-				attachments = json.dumps(
-					[{"file_url": f[0].file_url, "file_name": f[0].file_name}]
-				)
+				attachments = json.dumps([{"file_url": f[0].file_url, "file_name": f[0].file_name}])
 		# The decision is durably recorded above; a resume failure must
 		# not 500 the endpoint (the SPA would re-show a decided row).
 		# send_message is owner-only (SEC-002). A System Manager may decide
@@ -510,8 +527,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 				from jarvis.permissions import delegated_send
 
 				with impersonate(switch_to), delegated_send():
-					res = send_message(
-						conversation=doc.conversation, message=msg, attachments=attachments)
+					res = send_message(conversation=doc.conversation, message=msg, attachments=attachments)
 				resumed = bool(res.get("ok"))
 			except Exception:
 				# impersonate's finally already restored the approver, so the
@@ -538,8 +554,7 @@ def dismiss_approval(name: str) -> dict:
 		"""update `tabJarvis Approval Request`
 		set status='Dismissed', decision=%s, decided_by=%s, decided_at=%s
 		where name=%s and status='Pending'""",
-		("(dismissed - no action taken)", frappe.session.user,
-		 frappe.utils.now_datetime(), name),
+		("(dismissed - no action taken)", frappe.session.user, frappe.utils.now_datetime(), name),
 	)
 	if not frappe.db.sql(
 		"select 1 from `tabJarvis Approval Request` where name=%s and status='Dismissed'",
@@ -561,7 +576,8 @@ def restore_approval(name: str) -> dict:
 	if doc.status != "Dismissed":
 		frappe.throw(f"Only a dismissed request can be restored (this is {doc.status})")
 	frappe.db.set_value(
-		APPROVAL, name,
+		APPROVAL,
+		name,
 		{"status": "Pending", "decision": None, "decided_by": None, "decided_at": None},
 	)
 	frappe.db.commit()

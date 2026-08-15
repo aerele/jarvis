@@ -6,10 +6,10 @@ Reaching Jarvis at all requires the dedicated ``Jarvis User`` role, with
 
 Enforcement is at the HUMAN ENTRY POINTS — the SPA route (``www/jarvis.py``),
 the desk page (``jarvis_chat``) and the user-initiated chat APIs. It is
-deliberately NOT applied to machine-authenticated or delegated paths (the
-self-hosted plugin tool user, or ``send_message`` invoked under
-``set_user(owner)`` by the scheduler / approvals resume), which act as an
-identity that legitimately may not hold the role.
+deliberately NOT applied to machine-authenticated or delegated paths
+(``send_message`` invoked under ``set_user(owner)`` by the scheduler /
+approvals resume), which act as an identity that legitimately may not hold
+the role.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ import frappe
 
 # The role name + the access rule, everywhere: "Jarvis User" OR "System Manager"
 # (Administrator is implicitly allowed by has_jarvis_access / frappe perms).
-# One constant so the seed (learning/roles.py, the grant patch, tests) and the
-# gate can never drift.
+# One constant so the seed (learning/roles.py, tests) and the gate can never
+# drift.
 JARVIS_USER_ROLE = "Jarvis User"
 
 # The tenant-side admin role (design section 2): a customer power-user who can
@@ -43,6 +43,13 @@ JARVIS_ACCESS_ROLES = ("System Manager", JARVIS_USER_ROLE, JARVIS_ADMIN_ROLE)
 # Tenant-admin gate: System Manager OR the tenant admin role (Administrator is
 # implicitly allowed by has_jarvis_admin_access).
 JARVIS_ADMIN_ROLES = ("System Manager", JARVIS_ADMIN_ROLE)
+
+# Support panel roles. Support User sees only tickets they raised (scope=own); Support Admin
+# (and System Manager) see the whole tenant's queue (scope=all). Enforced in code here + at
+# the control-plane proxy; no DocPerm rows.
+JARVIS_SUPPORT_USER_ROLE = "Jarvis Support User"
+JARVIS_SUPPORT_ADMIN_ROLE = "Jarvis Support Admin"
+_SUPPORT_ALL_ROLES = ("System Manager", JARVIS_SUPPORT_ADMIN_ROLE)
 
 # Reviewer set authorized for org-wide skill / pattern / wiki effects (security
 # review PART 2, TASK 15 — RATIFIED). Housed in this lightweight module (no heavy
@@ -68,23 +75,38 @@ def require_skill_reviewer(user: str | None = None) -> None:
 	implicit). Whitelisted endpoints call this to gate org-wide skill effects."""
 	if not is_skill_reviewer(user):
 		frappe.throw(
-			"This action needs a Jarvis Skill Reviewer, Jarvis Admin or System "
-			"Manager role.",
+			"This action needs a Jarvis Skill Reviewer, Jarvis Admin or System Manager role.",
 			frappe.PermissionError,
 		)
 
 
 def ensure_jarvis_user_role() -> None:
-	"""Idempotently create the ``Jarvis User`` role (desk-access). Shared by the
-	after_migrate seed and the one-time grant patch so the role definition lives
-	in exactly one place."""
+	"""Idempotently create the ``Jarvis User`` role (desk-access).
+
+	Mostly belt-and-braces: 16 DocTypes name this role in a permission row and
+	DocType sync auto-creates any role it finds there, so the role already exists
+	by the time the after_migrate seed calls this. Kept so the definition lives in
+	exactly one place.
+
+	``is_custom`` is 0 deliberately: the role ships WITH the app (DocType sync
+	materializes it from the permission rows), so it is not a user-defined custom
+	role. It also has to match what sync actually creates -- sync wins the race,
+	so a mismatched value here would never be applied and would misdescribe every
+	live site.
+
+	NOTE: :func:`grant_onboarding_admin` is the ONLY code path that grants this
+	role, and it grants it alongside ``Jarvis Admin`` (the admin role is additive
+	and owns no chat permission rows of its own). A tenant's additional users are
+	granted ``Jarvis User`` by hand in Desk."""
 	if not frappe.db.exists("Role", JARVIS_USER_ROLE):
-		frappe.get_doc({
-			"doctype": "Role",
-			"role_name": JARVIS_USER_ROLE,
-			"desk_access": 1,
-			"is_custom": 1,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Role",
+				"role_name": JARVIS_USER_ROLE,
+				"desk_access": 1,
+				"is_custom": 0,
+			}
+		).insert(ignore_permissions=True)
 
 
 def has_jarvis_access(user: str | None = None) -> bool:
@@ -113,6 +135,31 @@ def is_system_user(user: str | None = None) -> bool:
 	return frappe.db.get_value("User", user, "user_type") == "System User"
 
 
+def is_valid_unattended_owner(user: str | None) -> bool:
+	"""True iff ``user`` may be bound as the identity of an UNATTENDED (cron) turn.
+
+	Strictly narrower than :func:`has_jarvis_access`, which answers "may this
+	identity reach Jarvis at all" and deliberately waves ``Administrator``
+	through. A scheduled turn has no human watching it, so it must never bind to:
+
+	* ``Administrator`` - every DocPerm and User Permission is bypassed, silently,
+	  on a cron.
+	* ``Guest`` - not a real identity.
+	* a **disabled** user - disabling is how an offboarded employee's access is
+	  revoked, but Frappe only clears their browser sessions: their roles survive,
+	  ``frappe.get_roles`` does not filter on ``enabled``, and nothing else in this
+	  module reads ``User.enabled``. Without this check their scheduled work keeps
+	  reaching the ERP forever.
+
+	This is the guard ``agent_scheduler._valid_owner`` has enforced since the agent
+	scheduler shipped; it lives here so every unattended dispatcher shares ONE
+	definition instead of each re-deriving it (jarvis #469: the macro scheduler had
+	not, and admitted exactly the two identities the sibling refuses)."""
+	if not user or user in ("Administrator", "Guest"):
+		return False
+	return bool(frappe.db.get_value("User", user, "enabled"))
+
+
 def require_jarvis_access(user: str | None = None) -> None:
 	"""Raise ``frappe.PermissionError`` (with a clear message) if the user lacks
 	access. Defaults to the current session user.
@@ -135,16 +182,23 @@ def require_jarvis_access(user: str | None = None) -> None:
 
 
 def ensure_jarvis_admin_role() -> None:
-	"""Idempotently create the ``Jarvis Admin`` role (desk-access, custom).
+	"""Idempotently create the ``Jarvis Admin`` role (desk-access).
 	Definition lives here (single source of truth); the after_migrate seed
-	calls this so the role exists on every migrated site."""
+	calls this so the role exists on every migrated site.
+
+	``is_custom`` is 0 for the same reason as :func:`ensure_jarvis_user_role`:
+	10 DocTypes name this role, so DocType sync creates it first and this
+	exists-guard never fires on a real site. The declared value has to match
+	what sync produces or it merely misdescribes reality."""
 	if not frappe.db.exists("Role", JARVIS_ADMIN_ROLE):
-		frappe.get_doc({
-			"doctype": "Role",
-			"role_name": JARVIS_ADMIN_ROLE,
-			"desk_access": 1,
-			"is_custom": 1,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Role",
+				"role_name": JARVIS_ADMIN_ROLE,
+				"desk_access": 1,
+				"is_custom": 0,
+			}
+		).insert(ignore_permissions=True)
 
 
 def has_jarvis_admin_access(user: str | None = None) -> bool:
@@ -166,37 +220,107 @@ def require_jarvis_admin(user: str | None = None) -> None:
 	as :func:`require_jarvis_access`)."""
 	if not has_jarvis_admin_access(user):
 		frappe.throw(
-			"You need the Jarvis Admin role to manage Jarvis users. "
-			"Ask an administrator for access.",
+			"You need the Jarvis Admin role to manage Jarvis users. Ask an administrator for access.",
 			frappe.PermissionError,
 		)
 
 
 def grant_onboarding_admin(user: str | None = None) -> None:
-	"""Grant ``Jarvis Admin`` to the onboarding/paying user (security review
-	PART 4 REVISED, TASK 44/48).
+	"""Grant ``Jarvis Admin`` AND ``Jarvis User`` to the onboarding/paying user
+	(security review PART 4 REVISED, TASK 44/48).
 
-	Grants ONLY ``Jarvis Admin`` — NOT ``Jarvis User`` — because
-	:data:`JARVIS_ACCESS_ROLES` already includes ``Jarvis Admin``, so a user
-	holding only ``Jarvis Admin`` still passes :func:`has_jarvis_access` and every
-	``@require_jarvis_user`` endpoint (they are not locked out of the chat surface
-	they administer).
+	``Jarvis Admin`` is ADDITIVE — it means "admin rights on top of a normal
+	user", never a standalone identity. An earlier revision granted it alone,
+	reasoning that :data:`JARVIS_ACCESS_ROLES` contains it so the holder still
+	passes :func:`has_jarvis_access` and every ``@require_jarvis_user`` endpoint.
+	That holds at the GATE layer and fails at the DOCTYPE layer: ``Jarvis Admin``
+	carries no permission row on ``Jarvis Conversation`` or ``Jarvis Chat
+	Message`` (nor on Approval Request, Custom Skill, Macro, Macro Run, Voice
+	Note or the three Agent doctypes), so such a user passed the gate, reached
+	``send_message`` and then failed on the message insert. Granting both roles
+	fixes all ten at once and keeps the two roles from having to be maintained in
+	lockstep.
 
-	The role name AND the target-user resolution are server-hardcoded (no
-	caller-supplied role), so the ``ignore_permissions`` insert carries NO
-	privilege-escalation vector. Idempotent — a no-op when the role is already
-	held; never grants to Administrator / Guest."""
+	The role names AND the target-user resolution are server-hardcoded (no
+	caller-supplied role), so the ``ignore_permissions`` inserts carry NO
+	privilege-escalation vector. Idempotent — already-held roles are skipped;
+	never grants to Administrator / Guest."""
 	ensure_jarvis_admin_role()
+	ensure_jarvis_user_role()
 	user = user or frappe.session.user
 	if not user or user in ("Administrator", "Guest"):
 		return
+	# Deliberately NOT User.add_roles(): that calls save(), running the whole
+	# User validation chain inside the signup / payment path, where an unrelated
+	# validation error would abort onboarding. The row insert is surgical, and
+	# set_system_user() (the reason add_roles is usually preferable) is moot here
+	# because every caller is already a System User — require_jarvis_admin gates
+	# all four call sites.
+	granted = False
+	for role in (JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE):
+		if frappe.db.exists("Has Role", {"parenttype": "User", "parent": user, "role": role}):
+			continue
+		frappe.get_doc(
+			{
+				"doctype": "Has Role",
+				"parenttype": "User",
+				"parentfield": "roles",
+				"parent": user,
+				"role": role,
+			}
+		).insert(ignore_permissions=True)
+		granted = True
+	if granted:
+		# frappe.get_roles is cached per user; without this the caller can read a
+		# stale role list for the rest of the request (and beyond).
+		frappe.clear_cache(user=user)
+
+
+def ensure_support_roles() -> None:
+	"""Idempotently create the two support panel roles (desk-access)."""
+	for role_name in (JARVIS_SUPPORT_USER_ROLE, JARVIS_SUPPORT_ADMIN_ROLE):
+		if not frappe.db.exists("Role", role_name):
+			frappe.get_doc(
+				{"doctype": "Role", "role_name": role_name, "desk_access": 1, "is_custom": 1}
+			).insert(ignore_permissions=True)
+
+
+def support_scope(user: str | None = None) -> str | None:
+	"""``"all"`` for System Manager / Support Admin, ``"own"`` for Support User, else ``None``
+	(no support access). The bench forwards this to the control plane as a filter."""
+	user = user or frappe.session.user
+	roles = set(frappe.get_roles(user))
+	if user == "Administrator" or (set(_SUPPORT_ALL_ROLES) & roles):
+		return "all"
+	if JARVIS_SUPPORT_USER_ROLE in roles:
+		return "own"
+	return None
+
+
+def grant_default_support(user: str | None = None) -> None:
+	"""Grant ``Jarvis Support User`` to a chat user so support isn't dark by default (P2).
+	Idempotent; never Administrator/Guest; only if they hold no support role already."""
+	ensure_support_roles()
+	user = user or frappe.session.user
+	if not user or user in ("Administrator", "Guest"):
+		return
+	if support_scope(user) is not None:
+		return
 	if not frappe.db.exists(
-		"Has Role", {"parenttype": "User", "parent": user, "role": JARVIS_ADMIN_ROLE}
+		"Has Role", {"parenttype": "User", "parent": user, "role": JARVIS_SUPPORT_USER_ROLE}
 	):
-		frappe.get_doc({
-			"doctype": "Has Role", "parenttype": "User",
-			"parentfield": "roles", "parent": user, "role": JARVIS_ADMIN_ROLE,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Has Role",
+				"parenttype": "User",
+				"parentfield": "roles",
+				"parent": user,
+				"role": JARVIS_SUPPORT_USER_ROLE,
+			}
+		).insert(ignore_permissions=True)
+		# Invalidate the role cache so support_scope() sees the grant in the SAME request
+		# (the lazy grant-at-boot then computes has_support_access right after).
+		frappe.clear_cache(user=user)
 
 
 def require_jarvis_user(fn):

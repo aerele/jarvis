@@ -20,12 +20,14 @@ import frappe
 import requests
 
 from jarvis.exceptions import (
+	AdminAmbiguousError,
 	AdminAuthError,
+	AdminContractError,
 	AdminRateLimitedError,
+	AdminRejectedError,
 	AdminUnreachableError,
 	AdminValidationError,
 )
-
 
 # Outer bench->admin HTTP budget. It MUST sit strictly ABOVE the admin's own
 # admin->agent leg (now 100s) so the bench never hangs up on an apply the admin
@@ -72,6 +74,7 @@ def _m(dotted: str) -> str:
 	"""Build an admin /api/method path under the configured admin-app namespace.
 	e.g. _m("api.tenant.renew") -> "/api/method/jarvis_admin_v2.api.tenant.renew"."""
 	return f"/api/method/{_admin_app()}.{dotted}"
+
 
 # Cap on the cross-boundary message length. Long messages (e.g. a Frappe
 # 500 with a 10KB traceback that happens to embed a token mid-frame) get
@@ -124,21 +127,25 @@ def _scrub_secrets(text: str) -> str:
 		return text
 	out = text
 	for pat in _SECRET_PATTERNS:
-		out = pat.sub(lambda m: (
-			# Keyword + "=[REDACTED]" for the labeled-credential pattern;
-			# bare "[REDACTED]" for the prefix / JWT patterns (whole match
-			# IS the secret).
-			f"{m.group(1)}=[REDACTED]" if m.lastindex else "[REDACTED]"
-		), out)
+		out = pat.sub(
+			lambda m: (
+				# Keyword + "=[REDACTED]" for the labeled-credential pattern;
+				# bare "[REDACTED]" for the prefix / JWT patterns (whole match
+				# IS the secret).
+				f"{m.group(1)}=[REDACTED]" if m.lastindex else "[REDACTED]"
+			),
+			out,
+		)
 	if len(out) > _MAX_MESSAGE_CHARS:
 		out = out[:_MAX_MESSAGE_CHARS] + "...[truncated]"
 	return out
+
 
 # DEFAULT_ADMIN_URL lives in hooks.py as a single source of truth for
 # deployment-level constants; re-exported here so existing
 # ``from jarvis.admin_client import DEFAULT_ADMIN_URL`` callers keep working.
 # Override per-customer via ``Jarvis Settings.jarvis_admin_url``.
-from jarvis.hooks import DEFAULT_ADMIN_URL  # noqa: E402  - used by _admin_url() below
+from jarvis.hooks import DEFAULT_ADMIN_URL
 
 
 def _admin_url(settings) -> str:
@@ -152,29 +159,264 @@ def _admin_url(settings) -> str:
 	# value added after worker start is honored without a restart (the
 	# module-level DEFAULT_ADMIN_URL import binds once and would miss it).
 	from jarvis.hooks import get_default_admin_url
+
 	conf_url = (frappe.conf.get("jarvis_admin_url") or "").strip().rstrip("/")
 	if conf_url:
 		return conf_url
 	return ((settings.jarvis_admin_url or "").rstrip("/")) or get_default_admin_url().rstrip("/")
 
 
-def signup(email: str, company_name: str, plan: str, coupon: str | None = None) -> dict:
-	"""Guest signup against admin. Returns admin's data dict
-	{api_key, api_secret, razorpay_key_id, razorpay_order_id, amount_inr}.
-	Both annual and monthly are one-shot orders (manual renew - no Razorpay subscription).
+# Payment gateways this bench build can launch in the wizard. Advertised to
+# admin so it never returns a provider the SPA/desk checkout can't render
+# (an older bench omits this, and admin falls back to razorpay).
+SUPPORTED_PROVIDERS = ("razorpay", "cashfree")
+
+# Plan-09 WS2 capability advert (frozen contract). Tells admin, in the
+# signup-payment envelope, that this bench understands the admin-hosted pay page
+# (``admin_pay_page_v1``) and which provider checkout SHAPES it can render. This
+# is BEHAVIOR-NEUTRAL predeployment: today's admin ignores keys it does not
+# declare as arguments (Frappe drops unknown form_dict entries — the same
+# mechanism that lets ``supported_providers``/``jarvis_version`` ride an old
+# admin), so nothing changes now. A later admin negotiates a token-only response
+# for capable benches off this advert and hard-fails incapable ones
+# pre-provider-object (plan-09 §R P0-4). The names here are the frozen contract —
+# keep them in lockstep with the admin side; do NOT rename without a coordinated
+# admin change. ``_client_capabilities()`` hands each caller a fresh dict so a
+# body mutation can never corrupt the shared template.
+PAY_PAGE_CAPABILITY = "admin_pay_page_v1"
+PROVIDER_SHAPES = ("razorpay_order", "razorpay_mandate", "cashfree_order", "cashfree_mandate")
+
+
+def _client_capabilities() -> dict:
+	return {"pay_page": PAY_PAGE_CAPABILITY, "provider_shapes": list(PROVIDER_SHAPES)}
+
+
+def _is_production_bench() -> bool:
+	"""True on a bench booted in production mode (supervisor/systemd managed). Used
+	only to decide whether an ``http://`` public origin is a misconfiguration worth
+	warning about — the injection fix below is identical everywhere. Mirrors the
+	admin-side ``origin._is_production_site`` (jarvis_admin_v2 WS5)."""
+	return bool(
+		frappe.conf.get("restart_supervisor_on_update") or frappe.conf.get("restart_systemd_on_update")
+	)
+
+
+def _public_origin() -> str:
+	"""A public site origin for the ``frappe_site_url`` this bench hands admin.
+
+	The bench half of the plan-09 P1-5 ``get_url`` sweep. A bare
+	``frappe.utils.get_url()`` derives the host from the request ``Host`` header
+	when ``host_name`` is unset (``get_url``'s own ``allow_header_override`` path —
+	proven reachable on this very environment), so a guest spoofing ``Host:`` on a
+	signup / reconnect / replacement-lookup POST could choose the
+	``frappe_site_url`` admin records for this tenant and the base of the magic
+	link admin then mails. The load-bearing fix is ``allow_header_override=False``:
+	it kills that injection vector.
+
+	Resolution order mirrors the admin-side ``admin_public_origin`` (jarvis_admin_v2
+	WS5): a configured ``host_name`` (validated https) wins; otherwise the site
+	fallback from ``get_url`` with header override OFF. An ``http://`` base on a
+	production bench is a misconfiguration — but it is caught at DEPLOY time by the
+	readiness gate, NOT by throwing here: throwing would break signup on any bench
+	where ``host_name`` is unset (every dev bench), and the injection vector is
+	already closed regardless of scheme."""
+	from urllib.parse import urlsplit
+
+	host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
+	if host_name:
+		if not host_name.startswith(("http://", "https://")):
+			host_name = "https://" + host_name
+		parts = urlsplit(host_name)
+		if parts.scheme == "https" and parts.hostname and "." in parts.hostname:
+			return f"https://{parts.hostname.lower()}"
+
+	base = (frappe.utils.get_url(allow_header_override=False) or "").rstrip("/")
+	if base.startswith("http://") and _is_production_bench():
+		frappe.logger("jarvis.onboarding").warning(
+			"frappe_site_url resolved to an http base on a production bench; "
+			"set host_name to an https origin (deploy readiness gates this)"
+		)
+	return base
+
+
+def signup(
+	email: str,
+	company_name: str,
+	plan: str,
+	coupon: str | None = None,
+	provider: str | None = None,
+	billing: dict | None = None,
+	partner_code: str | None = None,
+	terms_accepted=None,
+	contact_consent=0,
+) -> dict:
+	"""Guest signup against admin. Returns admin's data dict, which carries a
+	``payment_provider`` discriminator plus that gateway's checkout handles:
+	Razorpay -> {api_key, api_secret, razorpay_key_id, amount_inr}; Cashfree ->
+	{..., cashfree_app_id, cashfree_env, amount_inr}.
+
+	The order handles depend on the plan, NOT on the gateway. Annual (and any
+	non-autopay) plan is a one-shot order and comes back with
+	``razorpay_order_id`` / ``cashfree_order_id`` + ``payment_session_id``. A
+	paid MONTHLY plan is an autopay mandate instead and comes back with
+	``razorpay_subscription_id`` / ``cashfree_subscription_id`` +
+	``subscription_session_id``. Do not assume one-shot: an earlier version of
+	this docstring did, and it was wrong for every monthly plan.
 
 	When the admin's ``Jarvis Admin Settings.require_email_verification``
-	flag is ON, the response shape is:
-	    {api_key, api_secret, razorpay_key_id, amount_inr, customer,
-	     pending_verification: True}
-	(no razorpay_order_id - the order is deferred until the customer clicks
-	the magic link and the bench polls ``get_signup_payment_state``).
+	flag is ON, the response is {..., pending_verification: True} with no order
+	handles - deferred until the customer clicks the magic link and the bench
+	polls ``get_signup_payment_state``.
+
+	``provider`` (optional) requests a specific gateway; admin defaults to
+	razorpay when omitted or unsupported.
+
+	``billing`` (optional, Plan 01) is a typed snapshot admin normalizes and
+	stores on the Customer in the signup transaction; the response echoes
+	``billing_saved: true`` only when a NEW admin persisted it (an older admin
+	drops the unknown kwarg and never echoes it).
+
+	``partner_code`` (optional) is an opaque string admin resolves to a Partner
+	and attributes the customer to. Sent verbatim, unvalidated - admin raises on
+	an unknown code, and that error surfaces through the normal AdminValidationError
+	path like any other signup rejection. An older admin that does not know the
+	kwarg drops it silently.
+
+	``terms_accepted`` / ``contact_consent`` (lead-capture + T&C, frozen contract):
+	sent UNCONDITIONALLY, never omitted - unlike ``coupon``/``billing``/
+	``partner_code`` above. Admin hard-rejects a signup with no truthy
+	``terms_accepted`` (the only caller is the jarvis mirror, which always sends
+	one), so there is no "omit when absent" case to preserve; an older admin that
+	does not declare either kwarg drops it silently, same as any unknown kwarg.
 	"""
-	body = {"email": email, "company_name": company_name, "plan": plan,
-			"frappe_site_url": frappe.utils.get_url()}
+	body = {
+		"email": email,
+		"company_name": company_name,
+		"plan": plan,
+		"frappe_site_url": _public_origin(),
+		"supported_providers": list(SUPPORTED_PROVIDERS),
+		"client_capabilities": _client_capabilities(),
+		"terms_accepted": terms_accepted,
+		"contact_consent": contact_consent,
+	}
 	if coupon:
 		body["coupon"] = coupon
+	if provider:
+		body["provider"] = provider
+	if billing:
+		body["billing"] = billing
+	if partner_code:
+		body["partner_code"] = partner_code
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
+
+
+def resume_pending_signup(
+	plan: str,
+	provider: str | None = None,
+	*,
+	billing: dict | None = None,
+	partner_code: str | None = None,
+	idempotency_key: str | None = None,
+) -> dict:
+	"""Authenticated failed-payment resume: re-issues checkout handles for the
+	caller's own Pending Payment signup, optionally on a different plan/provider.
+	Returns the same checkout-fields shape as signup's sync path (no credentials
+	— the bench already holds them; that's how this call authenticates).
+
+	``idempotency_key`` makes the retry safe to repeat: admin hashes it onto the
+	subscription with the handles it mints, so a replay of the SAME key returns
+	the intent that key already created instead of opening a second gateway
+	object. A double-submitted wizard, a retried POST and a refreshed pay screen
+	converge on one order. A key admin has not seen is a NEW intent, which is
+	what a genuine second attempt after a decline needs - so the bench mints per
+	attempt, not per lifetime (jarvis.onboarding_contract.next_idempotency_key).
+	Omitted when None, exactly as an older bench sends nothing.
+
+	Raises AdminContractError carrying admin's ``code`` on a coded conflict
+	(PAYMENT_ALREADY_ACTIVE, SIGNUP_TERMINAL, ...); a plain AdminValidationError
+	from an admin too old to send one."""
+	body: dict = {"plan": plan, "client_capabilities": _client_capabilities()}
+	if provider:
+		body["provider"] = provider
+	if billing:
+		body["billing"] = billing
+	if partner_code:
+		body["partner_code"] = partner_code
+	if idempotency_key:
+		body["idempotency_key"] = idempotency_key
+	return _post(path=_m("billing.signup.resume_pending_signup"), body=body)
+
+
+def update_pending_billing(billing: dict) -> dict:
+	"""Authenticated billing-only edit: update the caller's owned Pending Payment
+	Customer WITHOUT re-issuing a payment intent (the post-intent Review & Pay
+	"Edit" path). Returns admin's data (``billing_saved`` + normalized ``billing``
+	summary). Raises AdminValidationError on a rejected payload or a non-resumable
+	status."""
+	return _post(path=_m("billing.signup.update_pending_billing"), body={"billing": billing})
+
+
+def reconnect_eligibility(email: str, company_name: str = "") -> dict:
+	"""Guest: would a reconnect for this (email, company) find anything? Read-only
+	precursor to request_account_reconnect, so the wizard can offer the reconnect
+	path only when it works. Short timeout - it gates a hint, never a decision:
+	the caller treats any failure as "don't offer"."""
+	return _post_guest(
+		path=_m("billing.reconnect.can_reconnect"),
+		body={"email": email, "company_name": company_name},
+		timeout_s=8,
+	)
+
+
+def site_replacement() -> dict:
+	"""Guest: was THIS site's account reconnected somewhere else?
+
+	The only question a site whose credentials were rotated away can still ask -
+	it can no longer authenticate, so it cannot be told over any other call.
+	Returns ``{replaced, at, moved_to}``; treat any failure as "not replaced"."""
+	return _post_guest(
+		path=_m("billing.reconnect.check_site_replaced"),
+		body={"frappe_site_url": _public_origin()},
+		timeout_s=8,
+	)
+
+
+def request_account_reconnect(email: str, company_name: str = "") -> dict:
+	"""Guest: start a fresh-bench reconnect to an EXISTING paid account (wiped
+	site recovery). Admin emails a CODE to the registered address and returns an
+	opaque request_id to poll — the response is identical whether or not the
+	email matches an account. Nothing is re-paid. ``company_name`` disambiguates
+	when one email owns several company accounts (multi-company identity)."""
+	return _post_guest(
+		path=_m("billing.reconnect.request_account_reconnect"),
+		body={"email": email, "company_name": company_name, "frappe_site_url": _public_origin()},
+	)
+
+
+def get_reconnect_state(request_id: str, code: str = "") -> dict:
+	"""Guest poll for the reconnect. Statuses: ``pending``, ``awaiting_code``
+	(the customer must type the code mailed to them, or one support issued),
+	``ready`` (+ api_key, api_secret, customer, customer_password), ``expired``.
+	The code is what releases the credentials - request_id alone never does."""
+	return _post_guest(
+		path=_m("billing.reconnect.get_reconnect_state"),
+		body={"request_id": request_id, "code": code},
+	)
+
+
+def redeem_reconnect_code(code: str, email: str = "") -> dict:
+	"""Guest: redeem an OPERATOR-ISSUED reconnect code on this fresh bench — the
+	request-less counterpart to get_reconnect_state. Admin verifies (code, email)
+	together (the email is the second factor), rotates credentials NOW and re-points
+	the account HERE, returning the SAME ready bundle get_reconnect_state does
+	(status/api_key/api_secret/customer/customer_password/subscription_status). The
+	site URL is server-derived via _public_origin() so the customer can't hand admin
+	a different site's URL. Every failure is an identical generic ``{status:"invalid"}``
+	(no code/account oracle)."""
+	return _post_guest(
+		path=_m("billing.reconnect.redeem_reconnect_code"),
+		body={"code": code, "email": email, "frappe_site_url": _public_origin()},
+	)
 
 
 def get_signup_payment_state() -> dict:
@@ -198,17 +440,134 @@ def get_signup_payment_state() -> dict:
 	)
 
 
-def dev_signup(email: str, company_name: str, plan: str) -> dict:
-	"""Razorpay-free dev signup. Returns admin's flat dict incl. api_key + api_secret + connection."""
-	return _post_guest(
-		path=_m("billing.signup.dev_force_signup"),
-		body={"email": email, "company_name": company_name, "plan": plan,
-			  "frappe_site_url": frappe.utils.get_url()},
+def check_signup_payment_status() -> dict:
+	"""Authenticated PROVIDER-TRUTH check on this signup's payment.
+
+	The authoritative half of the payment surface, and the difference from
+	``get_signup_payment_state`` is where the answer comes from: the poll reads
+	admin's own subscription row and never asks a gateway whether money moved,
+	while this asks the GATEWAY and converges a verified payment through the
+	same activation seam a callback or a webhook would have used. It is what a
+	customer whose checkout redirect died and whose webhook was lost can click -
+	their money is captured at the gateway and nothing else in the flow will
+	ever notice.
+
+	Takes no arguments by contract: admin resolves the customer from the
+	authentication this call carries and every remote identifier off their own
+	row, so there is nothing a caller can substitute to aim a check at somebody
+	else's payment.
+
+	Same envelope as the poll (``code`` + the ``can_*`` capability flags), plus
+	two facts only a check can state: ``gateway_consulted`` (whether a provider
+	was really reached in THIS call - false when it failed and false when the
+	answer came from the short cache) and ``awaiting_manual_reconciliation``
+	(present only when true: the gateway holds money we could not credit to this
+	exact subscription and generation, an operator is placing it, and a Pay
+	affordance must be suppressed - the code stays the ordinary pending one
+	because a decline here would invite a SECOND payment).
+
+	Never creates or replaces an intent. A decline or a dead handle is a REPORT;
+	opening the replacement is ``resume_pending_signup``'s job, on an explicit
+	customer action. Rate-limited per customer: a 429 carrying
+	``PAYMENT_CHECK_RATE_LIMITED`` is "wait and ask again", NOT a decline."""
+	return _post(
+		path=_m("billing.signup.check_signup_payment_status"),
+		body={},
 	)
+
+
+def get_billing_payment_state() -> dict:
+	"""Passive read of the current BILLING checkout (renew / plan change), the
+	signup poll's sibling. A live attempt re-echoes its pay-page token, so a lost
+	redirect resumes the same pay page instead of minting a second one."""
+	return _post(path=_m("api.account.get_billing_payment_state"), body={})
+
+
+def check_billing_payment_status() -> dict:
+	"""Provider-truth check on the current BILLING checkout, converged through the
+	same apply seam as the browser confirm and the webhook. Never creates or
+	replaces an intent: a decline is a report."""
+	return _post(path=_m("api.account.check_billing_payment_status"), body={})
 
 
 def get_plans() -> list:
 	return _post_guest(path=_m("billing.signup.get_plans"), body={})
+
+
+def get_payment_providers() -> dict:
+	"""Which gateways the control plane will actually charge on right now, and
+	which to preselect: ``{providers: [...], default: "..."}``.
+
+	Guest-safe like get_plans - the wizard needs it before the customer has any
+	credentials. Returns only enabled keys and the default, never gateway
+	configuration.
+
+	The caller intersects the result with SUPPORTED_PROVIDERS: admin may enable a
+	gateway this bench build cannot render, and offering it would strand the
+	customer at a checkout step that never opens."""
+	return _post_guest(path=_m("billing.signup.get_payment_providers"), body={})
+
+
+# Short guest timeout for the lead-capture fire-and-forget call - it fires on
+# every Plan-step render and must never make the wizard wait on it (mirrors
+# reconnect_eligibility's 8s "gates a hint, never a decision" budget).
+_LEAD_CAPTURE_TIMEOUT_S = 8
+
+
+def capture_onboarding_lead(
+	email: str,
+	company: str | None = None,
+	billing: dict | None = None,
+	plan: str | None = None,
+	step: str | None = None,
+	contact_consent=0,
+	site_origin: str | None = None,
+	partner_code: str | None = None,
+) -> dict:
+	"""Guest, best-effort upsert of a ``Jarvis Lead`` from an in-progress
+	onboarding. NEVER raises - swallows every failure and returns
+	``{"ok": False}`` instead, mirroring get_preset_catalog's "Never raises"
+	guard: a scheme-less ``jarvis_admin_url`` raises ``requests.MissingSchema``,
+	which is not in the Admin* family _post_guest converts, so the whole body is
+	guarded rather than just the HTTP call.
+
+	``site_origin`` is ALWAYS overwritten with this bench's own server-derived
+	public origin (_public_origin), never the caller-supplied value - the same
+	Host-header injection guard ``signup``/``redeem_reconnect_code`` already
+	apply to ``frappe_site_url``. A guest POST could otherwise spoof which site
+	a lead is attributed to.
+	"""
+	try:
+		body = {
+			"email": email,
+			"company": company,
+			"billing": billing,
+			"plan": plan,
+			"step": step,
+			"contact_consent": contact_consent,
+			"site_origin": _public_origin(),
+			"partner_code": partner_code,
+		}
+		return _post_guest(
+			path=_m("billing.signup.capture_onboarding_lead"),
+			body=body,
+			timeout_s=_LEAD_CAPTURE_TIMEOUT_S,
+		)
+	except Exception:
+		return {"ok": False}
+
+
+def terms_url() -> str:
+	"""The admin-hosted Terms & Conditions page for the Review & Pay checkbox
+	link. Best-effort: returns "" on any failure (no admin URL configured, a
+	malformed one, ...) rather than raising - the checkbox must render, and the
+	view falls back to plain unlinked text when this is empty."""
+	try:
+		settings = frappe.get_single("Jarvis Settings")
+		base = _admin_url(settings)
+		return f"{base}/terms" if base else ""
+	except Exception:
+		return ""
 
 
 # Admin-owned preset catalog (spec 3.3). Guest-safe fetch (get_plans pattern),
@@ -224,6 +583,7 @@ def get_preset_catalog() -> list:
 	and fall back to the last cached copy then the bundled default so onboarding
 	never hard-fails (spec L7). Never raises."""
 	from jarvis._preset_catalog import BUNDLED_PRESET_CATALOG
+
 	cache = frappe.cache()
 	cached = cache.get_value(_PRESET_CATALOG_CACHE_KEY)
 	if cached:
@@ -245,6 +605,89 @@ def get_preset_catalog() -> list:
 		cache.set_value(_PRESET_CATALOG_CACHE_KEY, catalog, expires_in_sec=_PRESET_CATALOG_TTL_S)
 		return catalog
 	return BUNDLED_PRESET_CATALOG
+
+
+# Admin-owned provider + model catalog. Same shape as the preset catalog above,
+# with two MANDATORY differences because this one is read on the CHAT HOT PATH
+# (chat/api.py:940 inside send_message, chat/api.py:1456 inside
+# set_conversation_model), whereas presets are only read at onboarding time.
+#
+#   1. A SHORT timeout. _post_guest defaults to DEFAULT_TIMEOUT_S = 150. An admin
+#      that hangs rather than refuses would block a chat send for 2.5 minutes.
+#   2. NEGATIVE CACHING. Caching only successes means every single request
+#      retries a dead admin. The failure marker makes an outage cost one slow
+#      request per _MODEL_CATALOG_FAIL_TTL_S, not one per chat turn.
+_MODEL_CATALOG_CACHE_KEY = "jarvis:model_catalog"
+_MODEL_CATALOG_TTL_S = 6 * 60 * 60
+_MODEL_CATALOG_FAIL_KEY = "jarvis:model_catalog:failed"
+_MODEL_CATALOG_FAIL_TTL_S = 60
+_MODEL_CATALOG_TIMEOUT_S = 5
+
+
+def get_model_catalog() -> list:
+	"""Fetch the provider + model catalog from admin (guest-safe), cache it, and
+	fall back to the bundled default so the picker never hard-fails.
+
+	NEVER raises, and never blocks a chat turn for more than
+	_MODEL_CATALOG_TIMEOUT_S. Callers on the chat hot path rely on both.
+	"""
+	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+
+	try:
+		return _fetch_model_catalog()
+	except Exception as e:
+		# The whole body is guarded, not just the HTTP call: the Redis
+		# get_value/set_value calls can raise too (a connection blip during a
+		# cache read), and this runs inside send_message. An unguarded cache
+		# error would turn a transient Redis hiccup into a 500 on every chat
+		# send, which is precisely the failure this function exists to avoid.
+		#
+		# frappe.logger(), NOT frappe.log_error: log_error writes an Error Log
+		# DOCUMENT, so it needs the DB (and the cache) to be healthy. This is the
+		# last-resort guard, reached exactly when infrastructure is unhealthy, so
+		# logging through it would raise from the handler and defeat the guard.
+		frappe.logger().warning("get_model_catalog degraded to the bundled catalog: %s", e)
+		return BUNDLED_MODEL_CATALOG
+
+
+def _fetch_model_catalog() -> list:
+	"""Cache-then-network body of get_model_catalog. May raise; the caller
+	converts any failure into the bundled fallback."""
+	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+
+	cache = frappe.cache()
+	cached = cache.get_value(_MODEL_CATALOG_CACHE_KEY)
+	if cached:
+		return cached
+	# A recent failure short-circuits the network entirely. Without this, a
+	# hanging admin costs every chat send a full timeout.
+	if cache.get_value(_MODEL_CATALOG_FAIL_KEY):
+		return BUNDLED_MODEL_CATALOG
+	try:
+		catalog = _post_guest(
+			path=_m("fleet.provider_catalog.get_provider_catalog"),
+			body={},
+			timeout_s=_MODEL_CATALOG_TIMEOUT_S,
+		)
+	except Exception:
+		# Degrade on ANY failure, not just the Admin* family: a scheme-less
+		# jarvis_admin_url raises requests.MissingSchema, which _do_post does not
+		# convert. Same reasoning as get_preset_catalog.
+		cache.set_value(_MODEL_CATALOG_FAIL_KEY, 1, expires_in_sec=_MODEL_CATALOG_FAIL_TTL_S)
+		frappe.log_error(title="get_model_catalog: admin unreachable")
+		return BUNDLED_MODEL_CATALOG
+	if isinstance(catalog, dict):
+		catalog = catalog.get("data") or []
+	if isinstance(catalog, list) and catalog:
+		cache.set_value(_MODEL_CATALOG_CACHE_KEY, catalog, expires_in_sec=_MODEL_CATALOG_TTL_S)
+		return catalog
+	# Admin answered but served nothing. Distinct from unreachable: log it
+	# separately so "admin is down" and "admin says zero enabled providers" are
+	# tellable apart in the logs. Still falls back, since an empty picker is
+	# worse for the customer than a slightly stale one.
+	cache.set_value(_MODEL_CATALOG_FAIL_KEY, 1, expires_in_sec=_MODEL_CATALOG_FAIL_TTL_S)
+	frappe.log_error(title="get_model_catalog: admin returned an empty catalog")
+	return BUNDLED_MODEL_CATALOG
 
 
 # Admin-owned speech-to-text config (voice features). Authenticated tenant
@@ -279,14 +722,10 @@ def get_stt_config() -> dict | None:
 		# slow admin must degrade to "not configured", not block the SPA.
 		cfg = _post(path=_m("api.tenant.get_stt_config"), body={}, timeout_s=5)
 	except Exception:
-		cache.set_value(
-			_STT_CONFIG_CACHE_KEY, _STT_CONFIG_MISS, expires_in_sec=_STT_CONFIG_MISS_TTL_S
-		)
+		cache.set_value(_STT_CONFIG_CACHE_KEY, _STT_CONFIG_MISS, expires_in_sec=_STT_CONFIG_MISS_TTL_S)
 		return None
 	if not isinstance(cfg, dict):
-		cache.set_value(
-			_STT_CONFIG_CACHE_KEY, _STT_CONFIG_MISS, expires_in_sec=_STT_CONFIG_MISS_TTL_S
-		)
+		cache.set_value(_STT_CONFIG_CACHE_KEY, _STT_CONFIG_MISS, expires_in_sec=_STT_CONFIG_MISS_TTL_S)
 		return None
 	out = {
 		"enabled": bool(cfg.get("enabled")),
@@ -302,6 +741,26 @@ def confirm_payment(payload: dict) -> dict:
 	return _post(path=_m("api.tenant.confirm_payment"), body=payload)
 
 
+def get_integration_status(*, deep: bool = False, timeout_s: int = 20) -> dict:
+	"""Plugin + persona wiring tri-states for this bench's own container
+	(jarvis#840 preflight). Admin relays the fleet's integration probe and
+	answers {"tri_state": {"plugin": ..., "persona": ...}, "source":
+	"live|cached|none", "checked_at": ...} with only customer-safe fields.
+
+	``deep`` asks for the ~3s in-container probe (the boot-log truth about
+	registered tools) instead of the sub-second static one. The 20s budget
+	covers admin's own relay with headroom; callers treat EVERY failure of
+	this call as "unchecked", never as an error - an admin without the method
+	yet (deploy window) surfaces as Frappe's method-not-found rejection (see
+	``is_method_not_found``)."""
+	body = {"deep": 1} if deep else {}
+	return _post(
+		path=_m("api.tenant.integration_status"),
+		body=body,
+		timeout_s=timeout_s,
+	)
+
+
 def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	"""Fetch the assigned container connection (fallback / scheduled sync).
 
@@ -314,18 +773,223 @@ def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	after an "applying"/timeout apply outcome to learn the admin reconcile
 	finished the apply (F2). Pass a short ``timeout_s`` for those hot status
 	probes so a slow admin can't stretch a convergence loop past its job budget.
+
+	Also reports this bench's jarvis version so the control plane can close out a
+	release rollout; an older admin ignores the key.
 	"""
-	return _post(path=_m("api.tenant.get_connection"), body={}, timeout_s=timeout_s)
+	from jarvis import __version__
+
+	return _post(
+		path=_m("api.tenant.get_connection"),
+		body={"jarvis_version": __version__},
+		timeout_s=timeout_s,
+	)
 
 
-def renew() -> dict:
+# --------------------------------------------------------------------------- #
+# Support panel proxies (Plan 3 B2). The customer bench forwards requesting_user +
+# scope to the control-plane support endpoints, which re-derive the customer from the
+# API key. JSON calls ride _post; only download needs raw bytes (see _authenticated_raw).
+# --------------------------------------------------------------------------- #
+
+_SUPPORT_TIMEOUT_S = 30
+
+
+def support_status(*, timeout_s: int = 8) -> dict:
+	return _post(path=_m("support.api.support_status"), body={}, timeout_s=timeout_s)
+
+
+def support_list_tickets(*, requesting_user: str, scope: str) -> dict:
+	return _post(
+		path=_m("support.api.list_tickets"),
+		body={"requesting_user": requesting_user, "scope": scope},
+		timeout_s=_SUPPORT_TIMEOUT_S,
+	)
+
+
+def support_create_ticket(
+	*, subject: str, body: str, requesting_user: str, scope: str, tenant_id=None
+) -> dict:
+	return _post(
+		path=_m("support.api.create_ticket"),
+		body={
+			"subject": subject,
+			"body": body,
+			"requesting_user": requesting_user,
+			"scope": scope,
+			"tenant_id": tenant_id,
+		},
+		timeout_s=_SUPPORT_TIMEOUT_S,
+	)
+
+
+def support_get_thread(*, ticket: str, requesting_user: str, scope: str) -> dict:
+	return _post(
+		path=_m("support.api.get_thread"),
+		body={"ticket": ticket, "requesting_user": requesting_user, "scope": scope},
+		timeout_s=_SUPPORT_TIMEOUT_S,
+	)
+
+
+def support_reply(*, ticket: str, body: str, requesting_user: str, scope: str) -> dict:
+	return _post(
+		path=_m("support.api.reply"),
+		body={"ticket": ticket, "body": body, "requesting_user": requesting_user, "scope": scope},
+		timeout_s=_SUPPORT_TIMEOUT_S,
+	)
+
+
+def support_close_ticket(*, ticket: str, requesting_user: str, scope: str) -> dict:
+	return _post(
+		path=_m("support.api.close_ticket"),
+		body={"ticket": ticket, "requesting_user": requesting_user, "scope": scope},
+		timeout_s=_SUPPORT_TIMEOUT_S,
+	)
+
+
+def support_awaiting_count(*, requesting_user: str, scope: str) -> dict:
+	return _post(
+		path=_m("support.api.awaiting_count"),
+		body={"requesting_user": requesting_user, "scope": scope},
+		timeout_s=_SUPPORT_TIMEOUT_S,
+	)
+
+
+def support_upload(
+	*,
+	ticket: str,
+	filename: str,
+	content_b64: str,
+	requesting_user: str,
+	scope: str,
+	comm: str | None = None,
+) -> dict:
+	# Bytes ride b64-in-JSON (the CP media.upload decodes) -> plain _post, no binary helper.
+	# comm (optional): the reply Communication to attach the File to so it renders inline; the CP
+	# re-checks it belongs to the ticket before honoring it.
+	return _post(
+		path=_m("support.media.upload"),
+		body={
+			"ticket": ticket,
+			"filename": filename,
+			"content_b64": content_b64,
+			"requesting_user": requesting_user,
+			"scope": scope,
+			"comm": comm,
+		},
+		timeout_s=DEFAULT_TIMEOUT_S,
+	)
+
+
+def support_download(*, ticket: str, file_url: str, requesting_user: str, scope: str):
+	"""Raw streamed fetch of a Helpdesk file via the CP proxy. Returns
+	(content_bytes, content_type, content_disposition)."""
+	resp = _authenticated_raw(
+		_m("support.media.download"),
+		{"ticket": ticket, "file_url": file_url, "requesting_user": requesting_user, "scope": scope},
+		timeout_s=DEFAULT_TIMEOUT_S,
+	)
+	return (
+		resp.content,
+		resp.headers.get("Content-Type", "application/octet-stream"),
+		resp.headers.get("Content-Disposition"),
+	)
+
+
+def _raise_for_admin_raw(resp):
+	"""Status routing for a RAW Response, mirroring _do_post's envelope routing (R1-3): 2xx returns
+	the Response; 401/403 -> AdminAuthError (drives the ladder); 429 -> AdminRateLimitedError; other
+	4xx -> AdminValidationError; 5xx -> AdminUnreachableError. DRIFT-GUARD: keep in sync with
+	_do_post's status branches - mirror any change there in both places.
+
+	One branch deliberately has NO mirror: _do_post's AdminRejectedError needs admin's
+	structured ``error.code``, and this path streams raw bytes (media download) with no
+	envelope to read it from. A rejection here stays an AdminUnreachableError, which is
+	right - no media caller waits on a reconcile."""
+	if resp.status_code < 400:
+		return resp
+	if resp.status_code in (401, 403):
+		raise AdminAuthError(f"admin returned {resp.status_code}", status_code=resp.status_code)
+	if resp.status_code == 429:
+		raise AdminRateLimitedError("rate_limited")
+	if resp.status_code < 500:
+		raise AdminValidationError(
+			_scrub_secrets((resp.text or "")[:_MAX_MESSAGE_CHARS]) or f"admin returned {resp.status_code}"
+		)
+	raise AdminUnreachableError(f"admin returned {resp.status_code}")
+
+
+def _authenticated_raw(path: str, body: dict, *, timeout_s: int):
+	"""Auth ladder (bearer -> 401 re-mint -> 403-terminal -> legacy fallback) around a RAW POST,
+	returning the requests.Response so the caller can read bytes (P3 — _do_post is JSON-only, so it
+	can't be reused for streamed media). DRIFT-GUARD: this replicates _post's ladder; mirror any
+	change to _post's auth ladder here too. Error status routing is in _raise_for_admin_raw."""
+	settings = frappe.get_single("Jarvis Settings")
+	admin_url = _admin_url(settings)
+	url = admin_url + path
+
+	def _send(headers):
+		try:
+			return requests.post(url, json=body, headers=headers, timeout=timeout_s, stream=True)
+		except (requests.ConnectionError, requests.Timeout) as e:
+			# Deliberately NOT the AdminAmbiguousError split _do_post makes (#743): this
+			# path only serves idempotent media reads, so a re-send can never double a
+			# side effect and the caller never needs to tell delivered from not.
+			raise AdminUnreachableError("admin is unreachable; check network / service status") from e
+
+	bearer = {"Content-Type": "application/json"}
+	access_token = _admin_access_token(settings, admin_url)
+	if access_token:
+		try:
+			return _raise_for_admin_raw(_send({**bearer, "Authorization": f"Bearer {access_token}"}))
+		except AdminAuthError as e:
+			if e.status_code == 403:
+				raise  # authorization denial, not a stale token — terminal
+			access_token = _admin_access_token(settings, admin_url, force_refresh=True)
+			if access_token:
+				try:
+					return _raise_for_admin_raw(_send({**bearer, "Authorization": f"Bearer {access_token}"}))
+				except AdminAuthError as retry_err:
+					if retry_err.status_code == 403:
+						raise
+			frappe.cache().delete_value(_OAUTH_CACHE_KEY)
+
+	api_key = (settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip()
+	api_secret = (settings.get_password("jarvis_admin_api_secret", raise_exception=False) or "").strip()
+	if not api_key or not api_secret:
+		raise AdminAuthError("not onboarded (no OAuth password and no api_key/secret)")
+	return _raise_for_admin_raw(_send({**bearer, "Authorization": f"token {api_key}:{api_secret}"}))
+
+
+def renew(provider: str | None = None, target_plan: str | None = None) -> dict:
 	"""Existing customer pays again to extend (manual one-shot). Returns admin's
-	data dict {razorpay_order_id, razorpay_key_id, amount_inr} for Checkout."""
-	return _post(path=_m("api.tenant.renew"), body={})
+	data dict with the ``payment_provider`` discriminator + that gateway's
+	checkout handles. A sub renews on the gateway it was created with unless
+	``provider`` overrides."""
+	body: dict = {
+		"supported_providers": list(SUPPORTED_PROVIDERS),
+		# plan-09 §R P0-4: the billing facades now gate on this advert too (not just
+		# signup/resume). Send it so admin serves a token-only pay page instead of
+		# refusing this capable bench with CLIENT_UPGRADE_REQUIRED. MUST ship before
+		# admin hard-gates billing (bench-first deploy order).
+		"client_capabilities": _client_capabilities(),
+	}
+	if provider:
+		body["provider"] = provider
+	# A lapsed subscription may renew ONTO another plan (up or down) at full price.
+	# Sent whenever the caller supplied one AT ALL: dropping an empty string here
+	# made admin's InvalidArgument branch unreachable, so a blank target silently
+	# became a plain renewal that superseded the customer's real attempt.
+	if target_plan is not None:
+		body["target_plan"] = target_plan
+	return _post(path=_m("api.tenant.renew"), body=body)
 
 
 def post_update_llm_creds(
-	provider: str, model: str, base_url: str, api_key: str,
+	provider: str,
+	model: str,
+	base_url: str,
+	api_key: str,
 	auth_mode: str = "api_key",
 ) -> dict:
 	"""POST customer's new LLM creds to admin's /tenant/update-llm-creds.
@@ -339,8 +1003,10 @@ def post_update_llm_creds(
 	return _post(
 		path=_m("api.tenant.update_llm_creds"),
 		body={
-			"provider": provider, "model": model,
-			"base_url": base_url, "api_key": api_key,
+			"provider": provider,
+			"model": model,
+			"base_url": base_url,
+			"api_key": api_key,
 			"auth_mode": auth_mode,
 			"installed_apps": frappe.get_installed_apps(),
 		},
@@ -389,16 +1055,16 @@ def post_rotate_agent_token(new_token: str) -> dict:
 
 
 def post_push_oauth_blob(provider: str, blob: dict) -> dict:
-	"""POST an openclaw OAuthCredential blob to admin → fleet-agent → container.
+	"""POST an agent OAuthCredential blob to admin → fleet-agent → container.
 
-	Called after a successful device-code poll. The container's openclaw
+	Called after a successful device-code poll. The container's agent
 	codex/gemini-cli provider reads the blob from auth-profiles.json and
 	refreshes internally via pi-ai going forward.
 
 	Timeout is bumped above the default 90s because the admin handler
 	chains to fleet-agent's PUT /auth-profile, which now runs
 	``openclaw doctor --fix --non-interactive`` (up to 60s, migrates the
-	legacy JSON store to SQLite on openclaw 2026.6.5+) plus
+	legacy JSON store to SQLite on agent 2026.6.5+) plus
 	``docker compose restart`` + healthz poll. Admin's own bound is 150s;
 	we give bench 180s to allow for the HTTPS round-trip and admin's
 	response serialization on top of that. The earlier 90s default ran
@@ -416,13 +1082,84 @@ def post_push_oauth_blob(provider: str, blob: dict) -> dict:
 	)
 
 
+def post_subscription_connect(
+	provider: str,
+	blob: dict,
+	llm_provider: str,
+	*,
+	model: str,
+	base_url: str,
+	installed_apps: list[str] | None = None,
+) -> dict:
+	"""POST one combined subscription-connect to admin's
+	``api.tenant.subscription_connect``.
+
+	Collapses what used to be two round trips out of ``jarvis_settings.py``'s
+	subscription "restart" leg - ``post_push_oauth_blob`` (the auth-profile
+	write) THEN ``post_update_llm_creds`` (the openclaw.json render + restart)
+	- into one call, so the doctor+healthz work behind it runs once instead of
+	twice.
+
+	``provider`` is the agent auth-profile id baked into the oauth blob itself
+	(``blob["provider"]`` - "openai", "google-gemini-cli", ...; the same
+	identifier ``post_push_oauth_blob`` took). ``llm_provider`` is the
+	customer-facing catalog label ``post_update_llm_creds`` takes as its own
+	``provider`` argument (e.g. "OpenAI"). Admin REQUIRES both and derives the
+	auth-profile id it expects from ``llm_provider``, 400ing
+	(``ProviderMismatch``) when the two disagree - so a caller must never send
+	a blank or mismatched ``llm_provider``; see
+	``jarvis_settings._sync_subscription_connect_restart`` for the local guard
+	that refuses a blank one before this is ever called. ``blob`` is the oauth
+	blob with ``id_token`` already stripped (fleet's ``PUT /auth-profile``
+	schema is ``extra_forbidden``).
+
+	``model``/``base_url``/``installed_apps`` mirror ``post_update_llm_creds``'s
+	creds fields for parity with the two-call shape this replaces. Admin's
+	``subscription_connect`` does not declare ``api_key`` or ``auth_mode`` (an
+	oauth-only endpoint has no other mode to name), so neither is sent - a
+	kwarg Frappe's whitelist handler does not declare is silently dropped, so
+	sending them would be dead weight, not a hidden bug.
+
+	Timeout is 240s - strictly above the admin->fleet leg's own 210s budget
+	(same each-layer-exceeds-the-one-below rule as PR#826): this outer
+	bench->admin leg must never hang up on an apply admin is still driving.
+	Past ~180s admin's own gunicorn worker can time out before the merged
+	fleet round trip returns (rare, but this leg's work is strictly more than
+	either old call did alone); the HTTP response is then lost, but admin
+	already persisted the desired state before dispatching to fleet, so the
+	existing reconcile path (``_confirm_apply_via_admin`` / the periodic
+	reconcile) converges the tenant without this leg retrying - a stray
+	"failed: admin unreachable" on a slow connect is transient and
+	self-corrects, not lost work.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError,
+		AdminRateLimitedError, AdminRejectedError as usual. A caller that needs
+		to detect "admin has not deployed this dotted path yet" (a deploy-order
+		gap between the jarvis and admin legs) checks ``is_method_not_found``
+		on a caught ``AdminValidationError``.
+	"""
+	return _post(
+		path=_m("api.tenant.subscription_connect"),
+		body={
+			"provider": provider,
+			"blob": blob,
+			"llm_provider": llm_provider,
+			"model": model,
+			"base_url": base_url,
+			"installed_apps": installed_apps if installed_apps is not None else frappe.get_installed_apps(),
+		},
+		timeout_s=240,
+	)
+
+
 def post_push_custom_skills(skills: list[dict]) -> dict:
 	"""POST the customer's rendered custom skills to admin → fleet → container.
 
 	``skills`` is the list built by ``jarvis.chat.custom_skills.build_push_payload``
 	(each ``{slug, description, user_invocable, body}``). The fleet-agent does a
 	FULL RECONCILE (writes the desired set, removes the rest) then restarts the
-	container so openclaw re-scans ``workspace/skills``. An empty list is a valid
+	container so agent re-scans ``workspace/skills``. An empty list is a valid
 	"remove all custom skills" reconcile.
 
 	Timeout matches ``post_push_oauth_blob``: the admin handler chains to the
@@ -450,7 +1187,7 @@ def post_push_agent_skills(agent_skills: list[dict]) -> dict:
 	``{slug, description, body}`` where ``slug`` is ``agent-<agent_slug>``). The
 	fleet-agent does a FULL RECONCILE of the agent_skills dir (writes the desired
 	set, removes the rest), unions ``agent-*`` into the skill allowlist, then
-	restarts the container so openclaw re-scans ``workspace/skills``. An empty
+	restarts the container so agent re-scans ``workspace/skills``. An empty
 	list is a valid "remove all agent skills" reconcile.
 
 	NOTE: the admin endpoint ``jarvis_admin.api.tenant.push_agent_skills`` and the
@@ -483,7 +1220,7 @@ def post_push_learned_skills(learned_skills: list[dict]) -> dict:
 	the agent- item shape). The fleet-agent does a FULL RECONCILE of the
 	learned_skills dir (writes the desired set, removes the rest), unions
 	``learned-*`` into the skill allowlist, then restarts the container so
-	openclaw re-scans ``workspace/skills``. An empty list is a valid "remove all
+	agent re-scans ``workspace/skills``. An empty list is a valid "remove all
 	learned skills" reconcile.
 
 	Raises:
@@ -497,8 +1234,58 @@ def post_push_learned_skills(learned_skills: list[dict]) -> dict:
 	)
 
 
-def push_wiki_files(files: list[dict], delete: list | None = None,
-					known_paths: list | None = None) -> dict | None:
+def post_agent_run(run_id: str, agent_id: str, session_key: str, message: str, timeout_s: int = 600) -> dict:
+	"""Dispatch ONE marketplace-agent delegate turn: bench → admin → fleet → the
+	customer's container (Phase 2C run relay).
+
+	The agent scheduler (``jarvis.chat.agent_scheduler._launch_audit``) mints the
+	Jarvis Agent Run + the per-run ``session_key`` (Phase 1), then calls here.
+	Admin resolves the customer's own running container and forwards to the fleet
+	agent-run verb, which dispatches the turn DETACHED on the cron lane and returns
+	the 202 run-state (``{run_id, status:"queued", ...}``) immediately. The run
+	completes later on the fleet worker; poll ``get_agent_run_status`` for the
+	result (Phase 3 ``record_agent_run`` will be the completion/writeback path).
+
+	``session_key`` is passed VERBATIM end-to-end (the only user resolver — the
+	fleet never touches the Chat Session row). Idempotent on ``run_id`` at the
+	fleet boundary: a re-dispatch of a seen run returns the existing state.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError. The dispatch
+		is NON-idempotent from the bench's view (a fresh run_id would not dedupe),
+		so a transport failure where admin MAY already have received the turn
+		raises AdminAmbiguousError (an AdminUnreachableError subclass) rather than
+		the base class - the scheduler branches on it to leave the run running
+		instead of retrying under a new id (#743).
+	"""
+	return _post(
+		path=_m("api.tenant.agent_run"),
+		body={
+			"run_id": run_id,
+			"agent_id": agent_id,
+			"session_key": session_key,
+			"message": message,
+			"timeout_s": timeout_s,
+		},
+	)
+
+
+def get_agent_run_status(run_id: str) -> dict:
+	"""Poll a delegate run's state via admin → fleet (Phase 2C run relay).
+
+	Returns ``{status, result:{reply, canvas_ref, gateway_session_id, ...}, error}``.
+	Used by the Phase-3 completion path to learn when a dispatched delegate run has
+	finished and to pull its result. Raises AdminAuthError / AdminUnreachableError /
+	AdminValidationError (an unknown run surfaces as a downstream error)."""
+	return _post(
+		path=_m("api.tenant.agent_run_status"),
+		body={"run_id": run_id},
+	)
+
+
+def push_wiki_files(
+	files: list[dict], delete: list | None = None, known_paths: list | None = None
+) -> dict | None:
 	"""POST one batch of rendered org-wiki mirror files to admin → fleet →
 	container workspace ``wiki/`` (wiki v2 mirror; see jarvis.chat.wiki_mirror).
 
@@ -577,19 +1364,135 @@ def post_subscription_disconnect() -> dict:
 	"""POST to admin to clear the customer's OAuth profile on the container.
 
 	Idempotent - a tenant in api_key mode is a no-op success.
+
+	Carries the same 180s as post_push_oauth_blob, and for the same reason: this
+	lands on admin's DELETE /auth-profile, whose own agent bound is 150s
+	(``agent_client.delete_auth_profile``) and which runs doctor + restart inside
+	it. Riding the shared DEFAULT_TIMEOUT_S of 150 left ZERO headroom for the
+	HTTPS round trip on top of that, so the bench could give up on a call admin
+	was still serving -- the same shape as the disconnect defect below.
 	"""
 	return _post(
 		path=_m("api.tenant.subscription_disconnect"),
 		body={},
+		timeout_s=180,
 	)
 
 
-def post_update_llm_pool(*, spec: dict, api_keys: dict, oauth_blobs: dict) -> dict:
-	"""POST a PoolSpec + separated secrets to admin → fleet-agent → openclaw.
+#: The disconnect's own HTTP budget. Deliberately NOT the shared 150s.
+#:
+#: admin's interactive-apply ladder hands the agent ``provision_healthz_timeout_s``
+#: to come back healthy and then waits ``+30s`` on top of that itself
+#: (``agent_client._interactive_apply_timeouts``). At the shipped 180s healthz
+#: budget admin is therefore entitled to spend 210s answering, while this call
+#: gave up at DEFAULT_TIMEOUT_S = 150 -- SIXTY SECONDS before admin could reply.
+#: So any disconnect that actually needed its healthz budget (i.e. exactly the
+#: slow container the budget exists for) raised AdminUnreachableError on a call
+#: that was still succeeding server-side.
+#:
+#: That false failure is not cosmetic. ``onboarding.disconnect_llm`` aborts
+#: BEFORE ``_clear_llm_secrets`` when this raises, by design, so the customer was
+#: left advertising a live model while admin and the host had already destroyed
+#: the credentials -- the exact inversion of the ordering guarantee that abort
+#: exists to provide. Observed end-to-end on a live pool tenant.
+#:
+#: INVARIANT: keep this ABOVE admin's ``provision_healthz_timeout_s`` + 30.
+#:
+#: AND BELOW the web worker's own ceiling, which this file cannot enforce. The
+#: call is synchronous inside a whitelisted request, so gunicorn's ``-t``
+#: (bench's ``http_timeout``, unset here and so defaulting to 120 in a
+#: supervisor deployment) bounds the whole thing. If that ceiling is lower than
+#: the budget admin needs, the worker is killed mid-call and the caller never
+#: reaches ``_clear_llm_secrets`` -- the same split state this constant exists
+#: to prevent, just triggered a layer up. Raising this without also raising
+#: ``http_timeout`` therefore fixes dev and leaves that deployment exposed;
+#: the durable fix is to stop depending on the response (converge from admin's
+#: own state on a later pass) rather than to keep widening timeouts.
+_DISCONNECT_TIMEOUT_S = 240
+
+
+def post_disconnect_llm() -> dict:
+	"""POST to admin to delete EVERY LLM credential from the customer's container:
+	the pool spec and its sidecar keys, /secrets/llm.key, and any auth profile.
+
+	Wider than post_subscription_disconnect above, which only drops the DIRECT
+	chat-subscription auth profile and leaves an api-key pool serving. This is the
+	whole connection coming down, so nothing is left that could answer a turn.
+
+	Idempotent - a tenant with nothing configured is a no-op success, so a repeat
+	call (or a retry after a read timeout) is safe.
+
+	Runs on _DISCONNECT_TIMEOUT_S, NOT the shared DEFAULT_TIMEOUT_S: see that
+	constant for why 150s was strictly below what admin is allowed to spend, and
+	what the resulting false "admin is unreachable" did to the customer's row.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError
+	"""
+	return _post(
+		path=_m("api.tenant.disconnect_llm"),
+		body={},
+		timeout_s=_DISCONNECT_TIMEOUT_S,
+	)
+
+
+def unpair_chat_devices() -> dict:
+	"""Drop the container's paired devices. Idempotent; a file op on the agent,
+	so it needs none of the disconnect budget above."""
+	return _post(path=_m("api.tenant.unpair_chat_devices"), body={}, timeout_s=60)
+
+
+# --------------------------------------------------------------------------- #
+# Workspace reset proxies. The customer bench forwards to the control plane,
+# which re-derives the customer from the api_key. ``_post`` already unwraps the
+# admin's {ok, data} envelope to the inner data dict (see _do_post), so these
+# return it directly — do NOT ``.get("data")`` again (that double-unwraps to {}).
+# --------------------------------------------------------------------------- #
+def reset_workspace(reason: str = "") -> dict:
+	"""Self-serve container rebuild (keeps customer + subscription + site data).
+	Container-recreate class op — destroy + warm-pool claim happen inline."""
+	return _post(path=_m("api.tenant_request.reset_workspace"), body={"reason": reason}, timeout_s=180)
+
+
+def reset_workspace_state() -> dict:
+	"""Latest workspace-reset request state (for the SPA poll)."""
+	return _post(path=_m("api.tenant_request.get_request_state"), body={}, timeout_s=8)
+
+
+def post_update_llm_pool(
+	*,
+	spec: dict,
+	api_keys: dict,
+	oauth_blobs: dict,
+	idempotency_key: str | None = None,
+	timeout_s: int | None = None,
+	force_probe: bool = False,
+) -> dict:
+	"""POST a PoolSpec + separated secrets to admin → fleet-agent → agent.
 
 	``spec``        : secret-free PoolSpec dict (name, routing_mode, models).
 	``api_keys``    : mapping ref → plaintext key (e.g. {"POOL_KEY_0": "sk-..."}).
 	``oauth_blobs`` : mapping account_ref → parsed OAuth blob dict.
+	``idempotency_key`` (plan-05 D2): opaque per-Start-chatting-attempt key. Admin
+	    dedupes a retry carrying the same key to the SAME durable apply operation
+	    (no new desired version, refunds the rate token, does not re-drive the
+	    push), so a double-click / lost-response resume converges on one operation.
+	    Omitted (None) preserves the pre-plan05 behaviour for internal callers.
+	``timeout_s`` (plan-05 D2, F2/F3): a SHORT bound for the synchronous
+	    descriptor-obtain from ``sync_pool_now`` - well under the gunicorn budget.
+	    A timeout here is not a lost apply: admin commits desired + operation before
+	    the fleet push, so the operation exists and the caller resumes via the same
+	    idempotency key. None keeps the long DEFAULT_TIMEOUT_S for the async worker.
+	``force_probe`` (jarvis_admin_v2#297): asks admin to run a real probe even
+	    against a byte-identical config, instead of its byte-identical no-op path
+	    answering from the last verdict on record. Admin allowlist-coerces the
+	    wire value; only a real ``true`` counts, so this is sent ONLY when the
+	    caller passed a truthy value - an ordinary (False) call posts a body with
+	    no ``force_probe`` key at all, byte-identical to before this parameter
+	    existed. Not part of admin's idempotency fingerprint: a caller that wants
+	    a fresh probe on every press must also mint a fresh ``idempotency_key``,
+	    since a reused key resolves through admin's idempotent-reuse path
+	    regardless of this flag.
 
 	The admin endpoint merges the secrets with the spec before forwarding to
 	fleet-agent. Implemented in T3 (jarvis_admin); this stub is the bench-side
@@ -607,12 +1510,49 @@ def post_update_llm_pool(*, spec: dict, api_keys: dict, oauth_blobs: dict) -> di
 	# installed_apps: the pool-safe leg of the migrate-time resync (mirrors
 	# post_update_llm_creds). A new admin persists it before the fleet forward
 	# and echoes installed_apps_persisted; an old admin ignores the extra field.
+	body = {
+		"spec": spec,
+		"api_keys": api_keys,
+		"oauth_blobs": oauth_blobs,
+		"installed_apps": frappe.get_installed_apps(),
+	}
+	if idempotency_key:
+		body["idempotency_key"] = idempotency_key
+	# Omitted (not merely False) on an ordinary call: admin allowlist-coerces
+	# anything but a real `true` to false anyway, but leaving the key out
+	# entirely on the common path keeps this body byte-identical to the one
+	# sent before force_probe existed.
+	if force_probe:
+		body["force_probe"] = True
+	kw = {"timeout_s": timeout_s} if timeout_s is not None else {}
+	return _post(path=_m("api.tenant.update_llm_pool"), body=body, **kw)
+
+
+def get_llm_apply_operation(operation_id: str, *, timeout_s: int = 8) -> dict:
+	"""Read-only status of a durable LLM-apply operation (plan-05 D2).
+
+	Wraps admin's ``api.tenant.get_llm_apply_operation``, which never mutates and
+	never spends the 20/hour apply bucket, so the SPA may poll it freely. ``_post``
+	unwraps the admin ``data`` envelope, so this returns the §8.4 status dict
+	directly:
+
+	    {operation_id, state, code, message, tenant (opaque), desired_version,
+	     applied_version, tenant_authority_generation, chat_readiness,
+	     chat_readiness_reason, retryable, retry_after_seconds}
+
+	Short default timeout: this is a hot poll on a converging apply, so a slow
+	admin must not stretch the SPA's follow loop past a beat. UnknownOperation
+	surfaces as AdminValidationError (404); a transport error surfaces as
+	AdminUnreachableError, which the client seam treats as "keep polling", not a
+	verdict.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError
+	"""
 	return _post(
-		path=_m("api.tenant.update_llm_pool"),
-		body={
-			"spec": spec, "api_keys": api_keys, "oauth_blobs": oauth_blobs,
-			"installed_apps": frappe.get_installed_apps(),
-		},
+		path=_m("api.tenant.get_llm_apply_operation"),
+		body={"operation_id": operation_id},
+		timeout_s=timeout_s,
 	)
 
 
@@ -625,7 +1565,7 @@ def post_llm_auth_status() -> dict:
 	push. The on-disk file can be present without the running gateway
 	seeing it (that's the bug class fleet-agent Task 1.2's restart
 	closed), and the bench's last_sync_status only reflects whether the
-	admin call returned 2xx - neither tells you "openclaw resolved the
+	admin call returned 2xx - neither tells you "agent resolved the
 	profile."
 
 	Returns:
@@ -657,10 +1597,31 @@ def get_llm_usage() -> dict:
 	return _post(path=_m("api.tenant.get_llm_usage"), body={})
 
 
-def pair_chat_device(public_key: str, device_id: str,
-                     *, request_timeout_s: int = 30) -> dict:
+def push_usage_rollup(rollup: dict) -> dict:
+	"""Push the bench's month-to-date per-user + per-model usage rollup to admin
+	(Architecture A, fleet usage spec §3). Idempotent snapshot; admin upserts on
+	(tenant, user, month). Called best-effort from the usage_push daily cron.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
+	return _post(path=_m("api.tenant.ingest_usage_rollup"), body={"rollup": rollup})
+
+
+def push_error_rollup(errors: list) -> dict:
+	"""Push a batch of scrubbed tenant errors (UI + code-level) to admin for the
+	per-tenant Errors feed. Called best-effort from the error_push */5 cron.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
+	return _post(path=_m("api.tenant.ingest_error_rollup"), body={"errors": errors})
+
+
+def push_bench_heartbeat(heartbeat: dict) -> dict:
+	"""Push the bench liveness vector (watchdog + oldest-turn ages) to admin's GAP 1
+	dead-man's-switch. Called best-effort from the heartbeat */5 cron.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
+	return _post(path=_m("api.tenant.ingest_bench_heartbeat"), body={"heartbeat": heartbeat})
+
+
+def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int = 30) -> dict:
 	"""POST customer's chat device pubkey to admin; admin asks the fleet-agent
-	to write a PairedDevice record into the customer's openclaw container and
+	to write a PairedDevice record into the customer's agent container and
 	returns the issued bearer device-token. Customer keeps the private key.
 
 	Sprint-2 plumb-through (2026-06-16 review): ``request_timeout_s`` is
@@ -684,7 +1645,8 @@ def pair_chat_device(public_key: str, device_id: str,
 
 def get_account_summary() -> dict:
 	"""Fetch the customer's plan + validity + upgrade-eligible plans. Used by
-	the /jarvis-account page to render plan summary and the upgrade picker."""
+	the /jarvis/billing SPA page to render the plan cards and the settings
+	dialog's Plan and billing summary."""
 	return _post(
 		path=_m("api.account.get_account_summary"),
 		body={},
@@ -701,14 +1663,75 @@ def preview_upgrade(target_plan: str) -> dict:
 	)
 
 
-def start_upgrade(target_plan: str) -> dict:
-	"""Create a prorated Razorpay order for the upgrade and return the
-	Razorpay handles ({razorpay_order_id, razorpay_key_id, amount_inr,
-	target_plan}). The order's notes carry the upgrade intent for
-	confirm_payment to pick up after Razorpay Checkout completes."""
+def start_upgrade(target_plan: str, provider: str | None = None) -> dict:
+	"""Create a prorated order for the upgrade and return the provider
+	discriminator + that gateway's checkout handles (+ target_plan). The order
+	stashes the upgrade intent for confirm_payment to apply after Checkout. A
+	sub upgrades on the gateway it was created with unless ``provider`` overrides."""
+	body: dict = {
+		"target_plan": target_plan,
+		"supported_providers": list(SUPPORTED_PROVIDERS),
+		"client_capabilities": _client_capabilities(),  # plan-09 §R P0-4 (see renew)
+	}
+	if provider:
+		body["provider"] = provider
+	return _post(path=_m("api.account.start_upgrade"), body=body)
+
+
+def cancel_plan_at_period_end() -> dict:
+	"""Schedule a period-end cancellation of the BILLING plan.
+
+	Not the LLM provider subscription - that is post_subscription_disconnect.
+	Service runs until current_period_end; resume_plan undoes it until then.
+	Returns {cancel_at_period_end, cancelled_at, access_ends_on,
+	days_remaining, has_mandate}."""
+	return _post(path=_m("api.account.cancel_plan_at_period_end"), body={})
+
+
+def resume_plan() -> dict:
+	"""Undo a scheduled cancellation while the paid period still has time.
+	Returns the same shape plus ``requires_reauthorization`` - true when the
+	sub had an autopay mandate, which cancelling released and which cannot be
+	re-armed without a fresh payment authorization."""
+	return _post(path=_m("api.account.resume_plan"), body={})
+
+
+def reauthorize_autopay() -> dict:
+	"""Mint a replacement Razorpay mandate for a sub whose autopay is off.
+
+	Returns the subscription id for a mandate-auth Checkout. Nothing is charged
+	now - the first cycle fires at the current period end.
+	"""
 	return _post(
-		path=_m("api.account.start_upgrade"),
-		body={"target_plan": target_plan},
+		path=_m("api.account.reauthorize_autopay"),
+		body={"client_capabilities": _client_capabilities()},  # plan-09 §R P0-4 (see renew)
+	)
+
+
+def preview_downgrade(target_plan: str) -> dict:
+	"""Describe a downgrade before starting it. Returns {target_plan,
+	target_price_inr, effective_on, requires_checkout}. No Razorpay object."""
+	return _post(path=_m("api.account.preview_downgrade"), body={"target_plan": target_plan})
+
+
+def start_downgrade(target_plan: str) -> dict:
+	"""Schedule a downgrade for the next cycle. Monthly autopay returns a
+	razorpay_subscription_id for a (₹0) mandate-auth Checkout; Annual/manual
+	returns {scheduled: 1} with no checkout."""
+	return _post(
+		path=_m("api.account.start_downgrade"),
+		body={
+			"target_plan": target_plan,
+			"client_capabilities": _client_capabilities(),  # plan-09 §R P0-4 (see renew)
+		},
+	)
+
+
+def cancel_scheduled_downgrade() -> dict:
+	"""Revoke a scheduled (revocable) downgrade - stay on the current plan."""
+	return _post(
+		path=_m("api.account.cancel_scheduled_downgrade"),
+		body={"client_capabilities": _client_capabilities()},  # plan-09 §R P0-4 (see renew)
 	)
 
 
@@ -752,13 +1775,18 @@ def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
 		err = token.get("error") if isinstance(token, dict) else None
 		frappe.log_error(
 			title="admin_client: oauth token request rejected",
-			message=(
-				f"grant={grant.get('grant_type')!r} "
-				f"status={resp.status_code} error={err!r}"
-			),
+			message=(f"grant={grant.get('grant_type')!r} status={resp.status_code} error={err!r}"),
 		)
 		return None
 	return token
+
+
+def clear_cached_token() -> None:
+	"""Drop the cached bearer. Anything that rotates this bench's admin credentials
+	MUST call it: the cached token was minted from the old ones, stays valid for its
+	full TTL, and keeps authenticating as the PREVIOUS account - so a reconnected
+	bench asks about a customer it no longer is and sits on "still being set up"."""
+	frappe.cache().delete_value(_OAUTH_CACHE_KEY)
 
 
 def _cache_oauth_token(token: dict) -> None:
@@ -779,8 +1807,7 @@ def _cache_oauth_token(token: dict) -> None:
 	)
 
 
-def _admin_access_token(settings, admin_url: str, *,
-						force_refresh: bool = False) -> str | None:
+def _admin_access_token(settings, admin_url: str, *, force_refresh: bool = False) -> str | None:
 	"""Return a valid OAuth bearer access token for admin, or None when the
 	bench has no OAuth credentials stored (pre-OAuth customer -> caller falls
 	back to api_key:api_secret).
@@ -791,9 +1818,7 @@ def _admin_access_token(settings, admin_url: str, *,
 	"""
 	username = (settings.jarvis_admin_customer_email or "").strip()
 	# Password field -> get_password decrypts the real value out of __Auth.
-	password = (settings.get_password(
-		"jarvis_admin_customer_password", raise_exception=False
-	) or "").strip()
+	password = (settings.get_password("jarvis_admin_customer_password", raise_exception=False) or "").strip()
 	if not username or not password:
 		return None
 
@@ -806,21 +1831,29 @@ def _admin_access_token(settings, admin_url: str, *,
 	token = None
 	refresh = cached.get("refresh_token")
 	if refresh:
-		token = _oauth_token_request(admin_url, {
-			"grant_type": "refresh_token", "refresh_token": refresh,
-		})
+		token = _oauth_token_request(
+			admin_url,
+			{
+				"grant_type": "refresh_token",
+				"refresh_token": refresh,
+			},
+		)
 	if not token:
-		token = _oauth_token_request(admin_url, {
-			"grant_type": "password", "username": username, "password": password,
-		})
+		token = _oauth_token_request(
+			admin_url,
+			{
+				"grant_type": "password",
+				"username": username,
+				"password": password,
+			},
+		)
 	if not token:
 		return None
 	_cache_oauth_token(token)
 	return token["access_token"]
 
 
-def _post(path: str, body: dict, *,
-		  timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
+def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	"""Authenticated POST. Prefers a short-lived OAuth bearer token (password
 	grant, cached in Redis) and falls back to the legacy native
 	api_key:api_secret for customers onboarded before OAuth. Raises
@@ -828,6 +1861,9 @@ def _post(path: str, body: dict, *,
 
 	Folds the Settings + admin-URL read here so public wrappers stay one-liners
 	(one Settings load per call).
+
+	DRIFT-GUARD: _authenticated_raw (media, raw/streamed responses) replicates this
+	bearer->401-remint->403-terminal->legacy ladder; mirror any change here there too.
 	"""
 	settings = frappe.get_single("Jarvis Settings")
 	admin_url = _admin_url(settings)
@@ -871,16 +1907,10 @@ def _post(path: str, body: dict, *,
 	# Legacy native api_key:api_secret (pre-OAuth customers / OAuth fallback).
 	# Both are Password fields - attribute access returns the masked "*****"
 	# placeholder; get_password decrypts the real value out of __Auth.
-	api_key = (settings.get_password(
-		"jarvis_admin_api_key", raise_exception=False
-	) or "").strip()
-	api_secret = (settings.get_password(
-		"jarvis_admin_api_secret", raise_exception=False
-	) or "").strip()
+	api_key = (settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip()
+	api_secret = (settings.get_password("jarvis_admin_api_secret", raise_exception=False) or "").strip()
 	if not api_key or not api_secret:
-		raise AdminAuthError(
-			"not onboarded (Jarvis Settings: no OAuth password and no api_key/secret)"
-		)
+		raise AdminAuthError("not onboarded (Jarvis Settings: no OAuth password and no api_key/secret)")
 	headers = {
 		"Authorization": f"token {api_key}:{api_secret}",
 		"Content-Type": "application/json",
@@ -888,8 +1918,7 @@ def _post(path: str, body: dict, *,
 	return _do_post(admin_url + path, body, headers, timeout_s, admin_url)
 
 
-def _post_guest(path: str, body: dict, *,
-				timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
+def _post_guest(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	"""Unauthenticated POST (signup, get_plans). No Authorization header.
 	Fetches the admin URL override from Settings internally so callers
 	don't have to."""
@@ -913,6 +1942,7 @@ def _extract_frappe_message(payload: dict) -> str:
 	upstream passthrough" from the 2026-06-16 cross-repo review.
 	"""
 	import json as _json
+
 	raw = (payload.get("_server_messages") or "").strip()
 	if raw:
 		try:
@@ -941,6 +1971,226 @@ def _envelope_error_message(envelope) -> str:
 	return _scrub_secrets(err.get("message") or "")
 
 
+def _contract_error(payload) -> dict:
+	"""The onboarding contract's machine-readable ``error`` object, or ``{}``.
+
+	ONE reader for the contract's TWO wire shapes. A whitelisted method's RETURN
+	value and a RAISED exception do not serialize the same way, so the identical
+	``error`` object sits at two different depths::
+
+	    returned   {"message": {"ok": false, "error": {"code": ...}}}
+	    thrown     {"exc_type": "DuplicateEntryError", "error": {"code": ...}}
+
+	Unifying them admin-side is a coordinated release against benches already in
+	the field, so the contract's answer is a reader that accepts both: top level
+	first, then under ``message``. (See the admin repo's
+	``tests/billing/fixtures/README.md``; the vendored copy of that corpus in
+	``jarvis/tests/fixtures/admin_contract/`` is what pins this function.)
+
+	FAIL CLOSED on anything else. An admin older than the contract emits no
+	``error`` object at all - only Frappe's ``exc_type`` and a sentence - and the
+	answer to that is the generic path plus ``exc_type``, NEVER a prose parse.
+	Requiring ``code`` is what makes "unknown shape" and "no contract" the same
+	branch, so a future shape cannot be half-read.
+
+	The message is scrubbed here (the single bottleneck every upstream-controlled
+	string crosses); the rest of the object is admin's, verbatim - contract rule
+	3 keeps internal document names out of it, and a facade needs the extras
+	(``retry_after_seconds``, ``subscription_status``, ``attempt_id``) intact."""
+	if not isinstance(payload, dict):
+		return {}
+	err = payload.get("error")
+	if not (isinstance(err, dict) and err.get("code")):
+		# Fall THROUGH rather than give up: a top-level ``error`` that carries no
+		# code does not mean there is no contract, only that this depth is not
+		# where it is. A response can legitimately hold both (a framework-shaped
+		# hint at the top, admin's coded envelope under ``message``), and the
+		# earlier shape - which stopped at the first ``error`` object it saw -
+		# would have read the codeless one and reported "no contract".
+		inner = payload.get("message")
+		err = inner.get("error") if isinstance(inner, dict) else None
+	if not isinstance(err, dict) or not err.get("code"):
+		return {}
+	out = dict(err)
+	out["message"] = _scrub_secrets(str(err.get("message") or ""))
+	return out
+
+
+# Frappe's OWN "no such whitelisted method" rejection (frappe/handler.py
+# execute_cmd: get_attr() raises when the dotted path doesn't resolve, caught
+# and re-thrown via frappe.throw(_("Failed to get method for command {0} with
+# {1}").format(cmd, str(e))) - default exc class ValidationError,
+# http_status_code 417). It reaches _do_post as an AdminValidationError with
+# exc_type "ValidationError" - the SAME exc_type an ordinary business
+# rejection carries, so exc_type alone can't tell the two apart.
+#
+# The marker string is framework-owned (frappe/handler.py's literal format
+# string), not admin_app-owned prose, so - unlike a hand-authored admin
+# business message (AdminValidationError's own docstring warns never to
+# string-match one; an admin release reworded such a sentence once and broke
+# a substring match silently) - it is not going to be reworded out from under
+# this check by an admin deploy. The interpolated dotted path IS still
+# translation-proof even if a non-English admin locale translates the format
+# string's fixed text, so the check below accepts either half - the fixed
+# English marker OR the interpolated dotted method path (checked WITHOUT the
+# admin-app namespace prefix, since _admin_app() is a deployment override and
+# the method name after it is the constant part).
+_METHOD_NOT_FOUND_MARKER = "Failed to get method for command"
+_SUBSCRIPTION_CONNECT_METHOD = "api.tenant.subscription_connect"
+
+
+def is_method_not_found(exc: AdminValidationError) -> bool:
+	"""True when ``exc`` is Frappe's own missing-whitelisted-method rejection
+	(the dotted path this bench build calls does not exist on admin yet)
+	rather than the target endpoint's own business validation.
+
+	Callers use this to detect a deploy-order gap - this leg shipped ahead of
+	the admin endpoint it calls - and fall back to an older call sequence,
+	without keying off business-message text an admin release can reword (see
+	the marker comment above).
+
+	The landed ``subscription_connect``'s own 400/409 business rejections
+	(InvalidBlob, UnknownProvider, ProviderMismatch, NoRunningTenant,
+	InvalidIdempotencyKey) all route through ``@fleet_endpoint``'s
+	``EndpointError`` family, which ALWAYS sets a structured ``error.code`` -
+	that arrives here as an ``AdminContractError`` (an AdminValidationError
+	subclass) with a non-empty ``code``, whereas Frappe's OWN missing-method
+	rejection is a bare ``AdminValidationError`` with no ``code`` at all.
+	Checking that first is a stronger signal than the message text below: it
+	excludes every CURRENT admin business rejection outright, by shape rather
+	than by wording, so a future admin release is free to reword any of those
+	messages without this silently drifting. (RateLimitExceeded's 429 never
+	reaches here at all - ``_do_post`` special-cases 429 into
+	``AdminRateLimitedError``, a sibling exception this function is never
+	called with.)
+
+	The message check is what is left to guard against an admin business
+	rejection that (now or later) uses a bare ``frappe.throw`` with no code -
+	the asymmetry in what it accepts is deliberate: a false positive here just
+	runs the old two-call sequence (harmless - it is today's production
+	path), while a false negative would leave subscription connects broken
+	until admin deploys, so it matches broadly rather than narrowly.
+	"""
+	if getattr(exc, "code", ""):
+		return False
+	if getattr(exc, "exc_type", None) not in (None, "ValidationError"):
+		return False
+	text = str(exc)
+	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_CONNECT_METHOD in text
+
+
+def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:
+	"""Build the known-4xx rejection, preserving admin's contract when it sent
+	one (returned for the caller to ``raise``).
+
+	AdminContractError is a SUBCLASS of AdminValidationError, so this is a strict
+	widening: every caller that only knows the parent - the whole non-onboarding
+	surface - sees the same class and the same ``str(e)`` it saw before, and only
+	a caller that asks for ``code`` notices the difference."""
+	err = _contract_error(payload)
+	if not err:
+		return AdminValidationError(message, exc_type=exc_type or None)
+	# The contract's own display copy wins over Frappe's generic extraction: on
+	# the THROWN shape the latter degrades to the bare exception class name when
+	# the body carries no _server_messages, and "DuplicateEntryError" is not a
+	# sentence to put in front of a customer.
+	return AdminContractError(
+		err.get("message") or message or f"admin returned {status}",
+		code=str(err.get("code") or ""),
+		contract_code=str(err.get("contract_code") or ""),
+		recovery=str(err.get("recovery") or ""),
+		error=err,
+		exc_type=exc_type or None,
+		http_status=status,
+	)
+
+
+# Admin ``error.code`` values that name a PERMANENT rejection: the admin was
+# reached, validated the request and refused it, so re-sending the SAME payload
+# can never converge. jarvis_admin_v2's @fleet_endpoint answers a FleetError
+# with HTTP 502 and ``error.code`` = the raising class's name, so a config
+# refusal arrives on the wire wearing the same status as a gateway fault - which
+# is how a rejected creds push came to be recorded as "pending: admin applying
+# config" forever (jarvis #542).
+#
+# An ALLOWLIST, not a denylist: an unrecognised code keeps today's optimistic
+# "admin may still be reconciling" handling, so a fleet error class we have not
+# classified yet can only ever be too patient, never wrongly terminal.
+_PERMANENT_REJECTION_CODES = frozenset(
+	{
+		# Bad provider slug, a provider with no resolvable base_url, an
+		# unusable agent-config render - deterministic in the request itself.
+		"FleetConfigError",
+		# A pool apply the fleet-agent permanently rejected (its invalid_spec
+		# envelope class). admin's own docstring: retrying the same desired
+		# spec against a healthy fleet-agent can never converge.
+		"PoolSpecRejected",
+	}
+)
+
+
+def _permanent_rejection_code(envelope) -> str:
+	"""admin's ``error.code`` when it names a permanent rejection, else "".
+
+	Only ever consulted on a response the admin actually shaped (an ``ok:
+	false`` envelope) - a proxy's HTML 502 has no envelope and never reaches
+	here, so a genuine gateway fault cannot be mistaken for a refusal."""
+	if not isinstance(envelope, dict):
+		return ""
+	err = envelope.get("error")
+	if not isinstance(err, dict):
+		return ""
+	code = err.get("code") or ""
+	return code if code in _PERMANENT_REJECTION_CODES else ""
+
+
+def _request_maybe_delivered(e: BaseException) -> bool:
+	"""True when a transport-level failure leaves it UNKNOWN whether admin received
+	the request, so re-sending a NON-idempotent call could double its side effect
+	(jarvis #743). False only when nothing was sent: a connect timeout, or a
+	connection that was REFUSED / never established.
+
+	Fails toward ``maybe`` on purpose. A wrong ``maybe`` costs one agent-run slot a
+	3h wait for the stale-run reaper; a wrong ``not-delivered`` costs the customer a
+	duplicate audit they pay for. Only the second is unrecoverable.
+
+	  * ConnectTimeout       - the TCP handshake did not complete, nothing was sent.
+	  * refused / DNS-failed  - urllib3 raises NewConnectionError / the OS raises
+	    ConnectionRefusedError while OPENING the socket, so nothing was sent.
+	  * a bare/read Timeout   - the request WAS sent, admin may be running it now.
+	  * a reset / broken pipe - the request may already have crossed before the peer
+	    dropped it.
+	"""
+	from urllib3.exceptions import NewConnectionError
+
+	# A connect timeout is a Timeout AND a ConnectionError; check it first so it is
+	# classified as not-delivered rather than swept up by the Timeout branch below.
+	if isinstance(e, requests.ConnectTimeout):
+		return False
+	if isinstance(e, requests.Timeout):
+		return True
+	# A ConnectionError. Walk the (bounded) cause/reason chain for a definitive
+	# "the socket never opened" marker; if we find one, nothing was sent. requests
+	# wraps a refusal as ConnectionError(MaxRetryError(reason=NewConnectionError)),
+	# so ``reason`` is followed alongside __cause__ / __context__ / exception args.
+	seen: list[int] = []
+	stack: list = [e]
+	while stack and len(seen) < 20:
+		cur = stack.pop()
+		if cur is None or id(cur) in seen:
+			continue
+		seen.append(id(cur))
+		if isinstance(cur, (ConnectionRefusedError, NewConnectionError)):
+			return False
+		stack.append(getattr(cur, "__cause__", None))
+		stack.append(getattr(cur, "__context__", None))
+		stack.append(getattr(cur, "reason", None))
+		stack.extend(a for a in (getattr(cur, "args", None) or ()) if isinstance(a, BaseException))
+	# No not-delivered marker found (a reset, a broken pipe, an unknown wrap): the
+	# request may already have been received.
+	return True
+
+
 def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str) -> dict:
 	try:
 		resp = requests.post(url, json=body, headers=headers, timeout=timeout_s)
@@ -955,6 +2205,16 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			title="admin_client: network error",
 			message=f"url={url!r} error={e!r}",
 		)
+		# jarvis #743: a transport failure where admin MAY already have received the
+		# request (a read timeout, a mid-flight reset) is distinct from one where
+		# nothing was sent (connect timeout, connection refused). AdminAmbiguousError
+		# is an AdminUnreachableError SUBCLASS, so every existing catcher is
+		# unaffected; only a caller dispatching a non-idempotent turn branches on it
+		# to avoid re-sending a call admin may already be running.
+		if _request_maybe_delivered(e):
+			raise AdminAmbiguousError(
+				"admin did not answer in time; the request may already be running"
+			) from e
 		raise AdminUnreachableError("admin is unreachable; check network / service status") from e
 
 	try:
@@ -967,21 +2227,19 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			title="admin_client: non-JSON response",
 			message=f"url={url!r} status={resp.status_code} body={resp.text[:1000]!r}",
 		)
-		raise AdminUnreachableError(
-			f"admin returned non-JSON response (status {resp.status_code})"
-		)
+		raise AdminUnreachableError(f"admin returned non-JSON response (status {resp.status_code})")
 
 	envelope = payload.get("message", payload) if isinstance(payload, dict) else payload
 
 	# Pre-extract the clean message + exc_type if Frappe wrapped a raised
 	# exception. The status-based branches below prefer this clean text
 	# over the raw envelope when available.
-	exc_type = (
-		payload.get("exc_type", "") if isinstance(payload, dict) else ""
+	exc_type = payload.get("exc_type", "") if isinstance(payload, dict) else ""
+	clean = (
+		_extract_frappe_message(payload)
+		if (isinstance(payload, dict) and (exc_type or payload.get("_server_messages")))
+		else ""
 	)
-	clean = _extract_frappe_message(payload) if (
-		isinstance(payload, dict) and (exc_type or payload.get("_server_messages"))
-	) else ""
 
 	def _envelope_message() -> str:
 		# _envelope_error_message already scrubs; clean is already scrubbed
@@ -995,23 +2253,57 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 	# fell through to AdminUnreachableError - losing the rate-limit
 	# category entirely. 401/403/429 always win.
 	if resp.status_code in (401, 403):
+		# Carry admin's structured ``error.code`` when the refusal envelope has one,
+		# so callers branch on a stable token rather than the human sentence a
+		# hardened control plane may omit (jarvis.account._is_never_paid_403).
+		err_obj = (envelope or {}).get("error", {}) if isinstance(envelope, dict) else {}
 		raise AdminAuthError(
 			_envelope_message() or f"admin returned {resp.status_code}",
 			status_code=resp.status_code,
+			code=(err_obj.get("code") or "") if isinstance(err_obj, dict) else "",
 		)
 	if resp.status_code == 429:
 		err = (envelope or {}).get("error", {}) if isinstance(envelope, dict) else {}
+		# A CODED 429 (PAYMENT_CHECK_RATE_LIMITED) is "wait and ask again" and
+		# must never be rendered as a decline; carry its code so a caller can
+		# tell it from the stock per-IP limiter's bare status.
+		contract = _contract_error(payload)
 		raise AdminRateLimitedError(
 			_envelope_error_message(envelope) or clean or "rate_limited",
 			retry_after_seconds=int(err.get("retry_after_seconds") or 0),
+			code=str(contract.get("code") or ""),
+			recovery=str(contract.get("recovery") or ""),
+			error=contract,
 		)
 
 	# Frappe-wrapped raised exception with no unambiguous status. Route
 	# by exc_type allowlist; default to AdminUnreachableError when the
 	# class isn't recognised.
 	if exc_type:
-		if exc_type in ("ValidationError", "DuplicateEntryError", "DoesNotExistError"):
-			raise AdminValidationError(clean)
+		if exc_type in (
+			"ValidationError",
+			"DuplicateEntryError",
+			"DoesNotExistError",
+			# A ValidationError SUBCLASS admin raises when the customer's own billing
+			# metadata is unusable. This list matches the exc_type STRING, not the
+			# class hierarchy, so a subclass is invisible here unless it is named:
+			# BillingMetadataRejected was therefore falling through to the unknown-
+			# exc_type branch below and being logged as a surprise on every bad
+			# GSTIN. It is a plain rejection with a precise, customer-safe message,
+			# which is exactly what this allowlist is for.
+			"BillingMetadataRejected",
+			# Another ValidationError subclass, raised when the customer's partner
+			# code is unknown or inactive. Same shape as BillingMetadataRejected: a
+			# precise, customer-safe message that was falling through to the
+			# unknown-exc_type branch and logging a spurious error on every rejected
+			# partner code.
+			"PartnerCodeRejected",
+		):
+			# The THROWN wire shape: admin's contract ``error`` object rides at
+			# the top level next to exc_type. Both survive here - the code for a
+			# reader that has one, exc_type for the pre-contract admin that
+			# sends nothing else.
+			raise _rejection(clean, payload=payload, status=resp.status_code, exc_type=exc_type)
 		# AuthenticationError ~ a token/credential failure (retry-eligible, 401);
 		# PermissionError ~ an authorization denial (terminal, 403). Tag the
 		# status so _post re-mints on the former but surfaces the latter as-is.
@@ -1026,9 +2318,20 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			title=f"admin_client: unrecognised exc_type={exc_type!r}",
 			message=f"url={url!r} clean={clean!r}",
 		)
-		raise AdminUnreachableError(
-			clean or f"admin returned an unrecognised error: {exc_type}"
-		)
+		# A response carrying an exc_type means the admin was REACHED and raised
+		# an exception, so route by status exactly like the enveloped path below -
+		# NOT as "unreachable". A 4xx is a rejected request (e.g. Helpdesk's
+		# InvalidEmailAddressError, a ValidationError subclass that isn't on the
+		# allowlist above) and must surface its clean message; only a 5xx is a
+		# genuine admin fault.
+		if 400 <= resp.status_code < 500:
+			raise _rejection(
+				clean or f"admin returned {resp.status_code}",
+				payload=payload,
+				status=resp.status_code,
+				exc_type=exc_type,
+			)
+		raise AdminUnreachableError(clean or f"admin returned an unrecognised error: {exc_type}")
 	# Sprint-3 PR-8 (2026-06-16 review): a 4xx response with the
 	# structured envelope ({"ok": false, "error": {...}}) is a
 	# user-input / business-rule error, NOT an "admin is unreachable"
@@ -1042,6 +2345,13 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 	#   4xx + envelope -> AdminValidationError (clean text to UI)
 	#   5xx + envelope -> AdminUnreachableError (network / admin-down)
 	#   200 with ok:false (rare; some endpoints inline failure) -> AdminUnreachableError
+	#
+	# jarvis #542 refines the last two: a 5xx (or an inlined ok:false) whose
+	# ``error.code`` is on _PERMANENT_REJECTION_CODES is admin REFUSING the
+	# request, not admin being unwell, so it raises the AdminRejectedError
+	# subclass carrying that code + admin's own message. Callers that retry or
+	# wait for a reconcile branch on it; everything else keeps catching the
+	# base class exactly as before.
 	if resp.status_code >= 400:
 		msg = _envelope_error_message(envelope)
 		if not msg:
@@ -1053,10 +2363,18 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			)
 			msg = f"admin returned {resp.status_code}"
 		if 400 <= resp.status_code < 500:
-			raise AdminValidationError(msg)
-		raise AdminUnreachableError(
-			f"admin returned a {resp.status_code} error: {msg}"
-		)
+			# The RETURNED wire shape: {"message": {"ok": false, "error": {...}}}
+			# under a deliberate 4xx. Same error object as the thrown form, one
+			# depth lower, and the same class comes out of here.
+			raise _rejection(msg, payload=payload, status=resp.status_code)
+		rejected = _permanent_rejection_code(envelope)
+		if rejected:
+			raise AdminRejectedError(
+				f"admin returned a {resp.status_code} error: {msg}",
+				code=rejected,
+				detail=msg,
+			)
+		raise AdminUnreachableError(f"admin returned a {resp.status_code} error: {msg}")
 	if isinstance(envelope, dict) and not envelope.get("ok", True):
 		err = envelope.get("error", {}) or {}
 		code = err.get("code") or "?"
@@ -1070,5 +2388,7 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		# Keep code in the message (stable identifier admin_client
 		# callers + ops can grep for). admin_url is intentionally
 		# omitted - the bench knows where it's pointing.
+		if _permanent_rejection_code(envelope):
+			raise AdminRejectedError(f"{code}: {msg}", code=code, detail=msg)
 		raise AdminUnreachableError(f"{code}: {msg}")
 	return envelope.get("data", envelope) if isinstance(envelope, dict) else envelope

@@ -26,12 +26,16 @@ from frappe.utils import cint
 
 from jarvis.permissions import (
 	JARVIS_ADMIN_ROLE,
+	JARVIS_SUPPORT_USER_ROLE,
 	JARVIS_USER_ROLE,
 	ensure_jarvis_admin_role,
 	ensure_jarvis_user_role,
+	ensure_support_roles,
 )
 
-_DT_CACHE_KEY = "jarvis_learning_roles_for_doctype"
+# _v2: the cached value is now {"roles": [...], "derived": bool}, not a bare
+# list, so the key changes rather than teaching the reader both shapes.
+_DT_CACHE_KEY = "jarvis_learning_roles_for_doctype_v2"
 _CACHE_TTL_S = 300
 
 
@@ -42,31 +46,45 @@ def roles_for_doctype(doctype: str) -> list[str]:
 	data), and if_owner-only grants (a per-owner read is not org-wide, so it is
 	not a delivery signal for a bench-global learned skill). Deterministic,
 	sorted. Empty on any failure (the caller falls back to declared priors)."""
+	return derive_roles_for_doctype(doctype)[0]
+
+
+def derive_roles_for_doctype(doctype: str) -> tuple[list[str], bool]:
+	"""``(roles, derived)`` - :func:`roles_for_doctype` plus its provenance.
+
+	``derived`` says whether the permission scan actually RAN to a conclusion.
+	True means the answer is a real finding even when it is empty ("no desk role
+	holds an org-wide read here"); False means we determined nothing and the
+	empty list is a fallback. The two are indistinguishable from the return value
+	alone, which is what makes an empty ``allowed_roles`` ambiguous downstream
+	(issue #479, design Q3). Callers recording provenance want this one; everyone
+	else keeps calling :func:`roles_for_doctype`.
+	"""
 	if not doctype:
-		return []
+		return [], False
 
 	use_cache = not frappe.flags.in_test
 	if use_cache:
 		try:
 			cached = frappe.cache().hget(_DT_CACHE_KEY, doctype)
-			if cached is not None:
-				return list(cached)
+			if isinstance(cached, dict):
+				return list(cached.get("roles") or []), bool(cached.get("derived"))
 		except Exception:
 			pass
 
-	result = _compute_roles_for_doctype(doctype)
+	roles, derived = _compute_roles_for_doctype(doctype)
 
 	if use_cache:
 		try:
-			frappe.cache().hset(_DT_CACHE_KEY, doctype, result)
+			frappe.cache().hset(_DT_CACHE_KEY, doctype, {"roles": roles, "derived": derived})
 			# Bound staleness even if the hash is never explicitly cleared.
 			frappe.cache().expire(_make_key(_DT_CACHE_KEY), _CACHE_TTL_S)
 		except Exception:
 			pass
-	return result
+	return roles, derived
 
 
-def _compute_roles_for_doctype(doctype: str) -> list[str]:
+def _compute_roles_for_doctype(doctype: str) -> tuple[list[str], bool]:
 	from frappe.permissions import get_all_perms
 
 	try:
@@ -76,9 +94,10 @@ def _compute_roles_for_doctype(doctype: str) -> list[str]:
 			fields=["name", "desk_access"],
 		)
 	except Exception:
-		return []
+		return [], False
 
 	out: set[str] = set()
+	scanned = 0
 	for role in roles:
 		name = role.get("name")
 		if not name:
@@ -91,9 +110,12 @@ def _compute_roles_for_doctype(doctype: str) -> list[str]:
 			perms = get_all_perms(name) or []
 		except Exception:
 			continue
+		scanned += 1
 		if _grants_orgwide_read(perms, doctype):
 			out.add(name)
-	return sorted(out)
+	# A scan that read NO role's permissions concluded nothing, even though it
+	# returns the same empty list as a scan that read every role and found none.
+	return sorted(out), scanned > 0
 
 
 def _grants_orgwide_read(perms, doctype: str) -> bool:
@@ -102,10 +124,12 @@ def _grants_orgwide_read(perms, doctype: str) -> bool:
 	does not qualify (plan section 4.1)."""
 	for p in perms:
 		# get_all_perms rows are frappe._dict of DocPerm / Custom DocPerm fields.
-		if (p.get("parent") == doctype
-				and cint(p.get("permlevel")) == 0
-				and cint(p.get("read"))
-				and not cint(p.get("if_owner"))):
+		if (
+			p.get("parent") == doctype
+			and cint(p.get("permlevel")) == 0
+			and cint(p.get("read"))
+			and not cint(p.get("if_owner"))
+		):
 			return True
 	return False
 
@@ -199,13 +223,18 @@ def after_migrate() -> None:
 		for role_name in _WIKI_ROLES + _PERSONALISE_ROLES:
 			if frappe.db.exists("Role", role_name):
 				continue
-			frappe.get_doc({
-				"doctype": "Role", "role_name": role_name,
-				"desk_access": 1, "is_custom": 0,
-			}).insert(ignore_permissions=True)
+			frappe.get_doc(
+				{
+					"doctype": "Role",
+					"role_name": role_name,
+					"desk_access": 1,
+					"is_custom": 0,
+				}
+			).insert(ignore_permissions=True)
 			created = True
 		# The app-access role — definition lives in jarvis/permissions.py (single
-		# source of truth), seeded here so it exists before the grant patch runs.
+		# source of truth). Normally already created by DocType sync (16 DocTypes
+		# name it in a permission row); this is the fallback.
 		if not frappe.db.exists("Role", JARVIS_USER_ROLE):
 			ensure_jarvis_user_role()
 			created = True
@@ -214,12 +243,15 @@ def after_migrate() -> None:
 		if not frappe.db.exists("Role", JARVIS_ADMIN_ROLE):
 			ensure_jarvis_admin_role()
 			created = True
+		# Support panel roles (single-source in jarvis/permissions.py). The default grant to
+		# chat users happens lazily at boot (www/jarvis.py) so we never mass-iterate users here.
+		if not frappe.db.exists("Role", JARVIS_SUPPORT_USER_ROLE):
+			ensure_support_roles()
+			created = True
 		if created:
 			frappe.db.commit()
 	except Exception:
-		frappe.log_error(
-			title="jarvis wiki roles seed failed", message=frappe.get_traceback()
-		)
+		frappe.log_error(title="jarvis wiki roles seed failed", message=frappe.get_traceback())
 
 
 def _seed_personalise_settings_defaults() -> bool:
@@ -234,9 +266,7 @@ def _seed_personalise_settings_defaults() -> bool:
 			(_PERSONALISE_SETTINGS, tuple(_PERSONALISE_SETTINGS_DEFAULTS)),
 		)
 	}
-	updates = {
-		f: v for f, v in _PERSONALISE_SETTINGS_DEFAULTS.items() if f not in existing
-	}
+	updates = {f: v for f, v in _PERSONALISE_SETTINGS_DEFAULTS.items() if f not in existing}
 	if not updates:
 		return False
 	frappe.db.set_single_value(_PERSONALISE_SETTINGS, updates, update_modified=False)

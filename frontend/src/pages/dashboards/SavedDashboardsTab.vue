@@ -10,7 +10,7 @@
 		:total="total"
 		:has-more="hasMore"
 		:quick-filters="quickFilters"
-		:filter-defs="filterDefs"
+		:filter-state="filterState"
 		:filters="filters"
 		:sort-options="sortOptions"
 		:sort="sort"
@@ -20,6 +20,9 @@
 		storage-key="dashboards"
 		:empty-state="emptyState"
 		@update:filters="setFilters"
+		@update:filter-clauses="setClauses"
+		@request-filter-schema="requestSchema"
+		@dismiss-filter-notice="dismissFilterNotice"
 		@update:sort="(s) => setSort(s.field, s.dir)"
 		@update:page-length="(v) => (pageLength = v)"
 		@load-more="loadMore"
@@ -48,7 +51,12 @@
 				theme="blue"
 				:label="row.target_role || 'Role'"
 			/>
-			<Badge v-else-if="row.scope === 'Org'" variant="subtle" theme="blue" label="Everyone" />
+			<Badge
+				v-else-if="row.scope === 'Org'"
+				variant="subtle"
+				theme="blue"
+				label="Everyone"
+			/>
 			<Badge v-else variant="subtle" theme="gray" label="Private" />
 		</template>
 
@@ -65,25 +73,31 @@
 // SavedDashboardsTab - the "Saved" tab body on /dashboards#saved: the standard
 // envelope list (MacrosList wiring minus the TabBar/header - the host page
 // owns those). Rows route to the read-only DashboardView page.
-import { computed } from "vue"
-import { Badge, Tooltip } from "frappe-ui"
-import ListPage from "@/components/list/ListPage.vue"
-import { useListPage } from "@/composables/useListPage"
-import { timeAgo, exactDate } from "@/utils/datetime"
-import { listDashboardsPage } from "@/api/dashboards"
+import { computed } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { Badge, Tooltip } from "frappe-ui";
+import ListPage from "@/components/list/ListPage.vue";
+import { useListPage } from "@/composables/useListPage";
+import { dashboardsListFetch } from "@/pages/list/listFetchers";
+import { timeAgo, exactDate } from "@/utils/datetime";
+
+// /dashboards is a TABBED route (Builder | Saved): the `fv2` payload carries its
+// view key, and every tab navigation carries the query (judgment C08-7).
+const route = useRoute();
+const router = useRouter();
 
 const SCOPE_OPTIONS = [
 	{ label: "All", value: "" },
 	{ label: "Everyone", value: "Org" },
 	{ label: "Shared with a role", value: "Role" },
 	{ label: "Private", value: "User" },
-]
+];
 // dashboard_type is derived server-side: sources present -> Connected.
 const TYPE_OPTIONS = [
 	{ label: "All", value: "" },
 	{ label: "Static", value: "Static" },
 	{ label: "Connected", value: "Connected" },
-]
+];
 
 const columns = [
 	{ label: "Title", key: "dashboard_title", width: 2 },
@@ -91,7 +105,7 @@ const columns = [
 	{ label: "Visibility", key: "scope", width: "9rem" },
 	{ label: "Owner", key: "owner", width: "10rem" },
 	{ label: "Updated", key: "modified", width: "8rem" },
-]
+];
 
 // search rides the quick-filter strip (MacrosList idiom): it lives in the
 // filters object for a controlled input, and fetchFn moves it onto the
@@ -100,18 +114,20 @@ const quickFilters = [
 	{ key: "search", label: "Search dashboards", type: "text" },
 	{ key: "scope", label: "Visibility", type: "select", options: SCOPE_OPTIONS },
 	{ key: "dashboard_type", label: "Type", type: "select", options: TYPE_OPTIONS },
-]
-const filterDefs = [
-	{ key: "scope", label: "Visibility", type: "select", options: SCOPE_OPTIONS },
-	{ key: "dashboard_type", label: "Type", type: "select", options: TYPE_OPTIONS },
-]
+];
+// plan 08 wave 1: the curated `filterDefs` array is GONE as the filter catalog.
+// The panel is generated from the server schema for view_key "saved_dashboards"
+// — every readable Jarvis Dashboard field, its standard fields, and the
+// Jarvis Dashboard Source child fields (one EXISTS, deviation D4). Both quick
+// controls map 1:1 onto a canonical field, so both stay in sync with the panel.
+const QUICK_CLAUSES = { scope: "scope", dashboard_type: "dashboard_type" };
 
 const sortOptions = [
 	{ label: "Updated", value: "modified" },
 	{ label: "Title", value: "dashboard_title" },
 	{ label: "Owner", value: "owner" },
-]
-const DEFAULT_SORT = { field: "modified", dir: "desc" }
+];
+const DEFAULT_SORT = { field: "modified", dir: "desc" };
 
 const {
 	rows,
@@ -125,35 +141,48 @@ const {
 	pageLength,
 	resetLoad,
 	loadMore,
+	filterState,
+	setClauses,
+	requestSchema,
+	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => {
-		const { search: q, ...rest } = p.filters || {}
-		return listDashboardsPage({ ...p, search: q || p.search || "", filters: rest })
-	},
+	fetchFn: dashboardsListFetch,
 	defaultSort: DEFAULT_SORT,
 	storageKey: "dashboards",
-})
+	viewKey: "saved_dashboards",
+	quickClauses: QUICK_CLAUSES,
+	// The view's identity (mirrors its list_registry entry), NOT a field catalog.
+	rootDoctype: "Jarvis Dashboard",
+	route,
+	router,
+});
 
 // §3.8: when a search/filter is active but matches nothing, the empty state
 // must point at the filters, not read "you have nothing saved".
-const hasActiveFilter = computed(() =>
-	Boolean((filters.search || "").trim() || filters.scope || filters.dashboard_type),
-)
+// "Is anything narrowing this list?" — which since the migration includes the
+// FilterGroup panel, not just the quick-filter strip. Reading only the legacy
+// object made a panel-only narrowing to zero rows render "No dashboards yet",
+// telling someone their saved work was gone (design.md §3.8).
+const hasActiveFilter = computed(
+	() =>
+		Boolean((filters.search || "").trim() || filters.scope || filters.dashboard_type) ||
+		(filterState.value?.activeCount || 0) > 0
+);
 const emptyState = computed(() =>
 	hasActiveFilter.value
 		? {
 				icon: "search",
 				title: "No matching dashboards",
 				description: "Change your search terms or filters.",
-			}
+		  }
 		: {
 				icon: "bar-chart-2",
 				title: "No dashboards yet",
 				description: "Build one with chat in the Builder tab, then save it here.",
-			},
-)
+		  }
+);
 
 function getRowRoute(row) {
-	return { name: "DashboardView", params: { id: row.name } }
+	return { name: "DashboardView", params: { id: row.name } };
 }
 </script>

@@ -128,9 +128,7 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	# Dedupe: one open chat ask per conversation. A re-asked/refined question
 	# supersedes the old one in chat anyway, and resolve_on_user_message
 	# flips the old row the moment the user replies.
-	if frappe.db.exists(
-		APPROVAL, {"conversation": conversation, "status": "Pending", "source": "Chat"}
-	):
+	if frappe.db.exists(APPROVAL, {"conversation": conversation, "status": "Pending", "source": "Chat"}):
 		return None
 	owner = frappe.db.get_value(CONV, conversation, "owner")
 	if not owner:
@@ -140,15 +138,17 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	# routes those to "Answer in chat").
 	question_text = "\n".join(q["q"] for q in questions)
 	options = questions[0]["options"] if len(questions) == 1 else []
-	doc = frappe.get_doc({
-		"doctype": APPROVAL,
-		"title": questions[0]["q"][:100],
-		"status": "Pending",
-		"source": "Chat",
-		"conversation": conversation,
-		"question": question_text,
-		"options": json.dumps(options) if options else "",
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": APPROVAL,
+			"title": questions[0]["q"][:100],
+			"status": "Pending",
+			"source": "Chat",
+			"conversation": conversation,
+			"question": question_text,
+			"options": json.dumps(options) if options else "",
+		}
+	)
 	doc.insert(ignore_permissions=True)
 	# The board scopes visibility by the LINKED CONVERSATION's owner, but the
 	# row itself should read as the customer's (if_owner Desk perms + audit).
@@ -158,12 +158,15 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	if doc.owner != owner:
 		frappe.db.set_value(APPROVAL, doc.name, "owner", owner, update_modified=False)
 	frappe.db.commit()
-	publish_to_user(owner, {
-		"kind": "approval:new",
-		"conversation_id": conversation,
-		"name": doc.name,
-		"question": question_text,
-	})
+	publish_to_user(
+		owner,
+		{
+			"kind": "approval:new",
+			"conversation_id": conversation,
+			"name": doc.name,
+			"question": question_text,
+		},
+	)
 	return doc.name
 
 

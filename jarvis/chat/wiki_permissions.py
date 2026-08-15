@@ -116,11 +116,7 @@ def can_edit_page(page, user: str | None = None) -> bool:
 	roles = set(frappe.get_roles(user))
 	if scope == "Role":
 		target_role = _get(page, "target_role")
-		return (
-			_is_wiki_manager(roles)
-			and bool(target_role)
-			and target_role in roles
-		)
+		return _is_wiki_manager(roles) and bool(target_role) and target_role in roles
 	if scope == "User":
 		return (_get(page, "target_user") or "") == user and _is_wiki_user(roles)
 	# Org pages: System Manager only.
@@ -140,7 +136,12 @@ def creatable_scopes(user: str | None = None) -> list[str]:
 		return ["Org", "Role", "User"]
 	roles = set(frappe.get_roles(user))
 	out: list[str] = []
-	if _is_wiki_manager(roles):
+	# Only offer Role when the curator actually holds a targetable role. A wiki
+	# manager who holds only blanket roles (e.g. a Jarvis Admin with no
+	# department role) has an empty manageable_roles(); offering "Role" there
+	# stranded the New-page dialog on scope=Role with an empty, unsubmittable
+	# role picker (creatable_scopes and manageable_roles must agree).
+	if _is_wiki_manager(roles) and manageable_roles(user):
 		out.append("Role")
 	if _is_wiki_user(roles):
 		out.append("User")
@@ -182,12 +183,8 @@ def visible_scope_condition(user: str | None = None) -> str:
 	roles = [r for r in frappe.get_roles(user) if r]
 	if roles:
 		role_list = ", ".join(frappe.db.escape(r) for r in roles)
-		clauses.append(
-			f"({table}.`scope` = 'Role' and {table}.`target_role` in ({role_list}))"
-		)
-	clauses.append(
-		f"({table}.`scope` = 'User' and {table}.`target_user` = {frappe.db.escape(user)})"
-	)
+		clauses.append(f"({table}.`scope` = 'Role' and {table}.`target_role` in ({role_list}))")
+	clauses.append(f"({table}.`scope` = 'User' and {table}.`target_user` = {frappe.db.escape(user)})")
 	return "(" + " or ".join(clauses) + ")"
 
 

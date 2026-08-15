@@ -119,9 +119,16 @@ _TOPIC_BY_TEMPLATE = {
 _LINE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 # ASCII-fold a few common unicode punctuation glyphs so bodies stay ASCII.
 _UNICODE_FOLD = {
-	"→": "->", "←": "<-", "—": "-", "–": "-",
-	"‘": "'", "’": "'", "“": '"', "”": '"',
-	"…": "...", " ": " ",
+	"→": "->",
+	"←": "<-",
+	"—": "-",
+	"–": "-",
+	"‘": "'",
+	"’": "'",
+	"“": '"',
+	"”": '"',
+	"…": "...",
+	" ": " ",
 }
 
 
@@ -143,9 +150,18 @@ def compile_domain_skills() -> dict:
 		JLP,
 		filters={"status": ["in", ["Approved", "Active"]], "effective_sensitivity": "A"},
 		fields=[
-			"name", "domain", "company", "pattern_statement", "skill_draft",
-			"strength_band", "support_n", "detector_id", "evidence",
-			"draft_edited", "last_seen_run",
+			"name",
+			"domain",
+			"company",
+			"pattern_statement",
+			"skill_draft",
+			"approved_draft",
+			"strength_band",
+			"support_n",
+			"detector_id",
+			"evidence",
+			"draft_edited",
+			"last_seen_run",
 		],
 	)
 	if not rows:
@@ -173,10 +189,43 @@ def compile_domain_skills() -> dict:
 			"description": _description(domain, included),
 			"body": _render_body(domain, included, run_label),
 			"allowed_roles": sorted(allowed),
+			"roles_derived": _roles_derived(included),
 			"pattern_names": [p["name"] for p in included],
 			"deferred": [p["name"] for p in deferred],
 		}
 	return result
+
+
+def _roles_derived(patterns: list) -> bool:
+	"""True iff the role derivation ran to a conclusion for EVERY source doctype
+	behind ``patterns``.
+
+	Recorded on the managed row as ``roles_derived`` and read by NOTHING (issue
+	#479 keeps today's "empty allowed_roles means everyone" reading exactly as it
+	is). It exists so a later, stricter policy can tell "we determined this skill
+	is universal" from "we could not determine anything" - the two produce an
+	identical empty ``allowed_roles`` today (design Q3 cases 1 and 3), and no
+	backfill could ever reconstruct which one a given row was. Capturing it now
+	makes that policy a one-line change instead of a migration with no data.
+
+	Conservative on every doubt: an unknown detector, a spec with no doctype, or
+	any exception all read as NOT derived."""
+	try:
+		from jarvis.learning.registry import get_detector
+		from jarvis.learning.roles import derive_roles_for_doctype
+
+		doctypes = set()
+		for p in patterns:
+			spec = get_detector(p.get("detector_id") or "") or {}
+			doctype = spec.get("doctype")
+			if not doctype:
+				return False
+			doctypes.add(doctype)
+		if not doctypes:
+			return False
+		return all(derive_roles_for_doctype(dt)[1] for dt in sorted(doctypes))
+	except Exception:
+		return False
 
 
 def compile_preview(domain: str) -> str:
@@ -191,8 +240,9 @@ def preview_bullet(pattern_name: str) -> str:
 	B/C rows are insight-only and never reach the pushed body, but the board still
 	previews the bullet the SM is deciding on. Empty string when the row is gone."""
 	row = frappe.db.get_value(
-		JLP, pattern_name,
-		["name", "domain", "skill_draft", "pattern_statement"],
+		JLP,
+		pattern_name,
+		["name", "domain", "skill_draft", "approved_draft", "pattern_statement"],
 		as_dict=True,
 	)
 	if not row:
@@ -219,11 +269,7 @@ def apply_learned_skills() -> dict:
 
 	with redis_lock(_APPLY_LOCK, timeout_s=_APPLY_LOCK_TTL, blocking_timeout_s=0) as acquired:
 		if not acquired:
-			frappe.throw(
-				_(
-					"Another Apply is already in progress; wait for it to finish, then apply again."
-				)
-			)
+			frappe.throw(_("Another Apply is already in progress; wait for it to finish, then apply again."))
 		_set_apply_marker(True)
 		try:
 			return _apply_learned_skills_locked()
@@ -260,9 +306,7 @@ def _apply_learned_skills_locked() -> dict:
 
 		existing_managed = {
 			r["skill_name"]: r["name"]
-			for r in frappe.get_all(
-				SKILL, filters={"managed_by_learning": 1}, fields=["name", "skill_name"]
-			)
+			for r in frappe.get_all(SKILL, filters={"managed_by_learning": 1}, fields=["name", "skill_name"])
 		}
 		for domain, spec in compiled.items():
 			skill_by_domain[domain] = _upsert_managed_skill(spec)
@@ -270,7 +314,7 @@ def _apply_learned_skills_locked() -> dict:
 
 		# Delete managed rows whose domain no longer has any compiled patterns.
 		for sname, row_name in existing_managed.items():
-			domain = sname[len("learned-"):] if sname.startswith("learned-") else sname
+			domain = sname[len("learned-") :] if sname.startswith("learned-") else sname
 			if domain not in compiled:
 				frappe.delete_doc(SKILL, row_name, ignore_permissions=True, force=True)
 				deleted_domains.append(domain)
@@ -335,9 +379,7 @@ def _is_learned_cutover() -> bool:
 	``datetime(1,1,1)``. frappe.db.get_value (not get_single_value): the latter
 	serves a process-local cache that background status writes do not
 	invalidate, and a stale read here would re-fire (or skip) the reconcile."""
-	status = frappe.db.get_value(
-		"Jarvis Settings", "Jarvis Settings", "learned_skills_sync_status"
-	)
+	status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "learned_skills_sync_status")
 	if (status or "").strip():
 		return False
 	# Positive Phase-1 evidence: this runs before the apply's upserts, so any
@@ -407,30 +449,53 @@ def _precheck_learned_cap(compiled: dict) -> None:
 
 
 def build_learned_push_payload() -> list[dict]:
-	"""Collect the enabled managed learned rows into the fleet push payload: a
-	list of ``{slug, description, body}`` (the agent- item shape) where ``slug``
-	is the row's ``skill_name`` verbatim (``learned-<domain>`` - NO ``custom-``
-	prefix: learned skills reconcile into the fleet's separate learned_skills
-	namespace) and ``body`` is the rendered SKILL.md whose frontmatter ``name``
-	matches the slug.
+	"""The fleet push payload alone; see :func:`learned_push_split` for the
+	payload PLUS the count of rows deliberately held back."""
+	return learned_push_split()[0]
+
+
+def learned_push_split() -> tuple[list[dict], int]:
+	"""``(payload, held_back)``. ``payload`` is the fleet push payload: a list of
+	``{slug, description, body}`` (the agent- item shape) where ``slug`` is the
+	row's ``skill_name`` verbatim (``learned-<domain>`` - NO ``custom-`` prefix:
+	learned skills reconcile into the fleet's separate learned_skills namespace)
+	and ``body`` is the rendered SKILL.md whose frontmatter ``name`` matches the
+	slug. ``held_back`` counts the managed rows kept OFF that payload because
+	they are role-restricted.
+
+	Role-restricted bodies are kept off the shared blob (issue #479), on exactly
+	the rule the sibling custom push has applied since security review PART 2
+	TASK 11 and through exactly the same helper: a managed row narrowed by
+	``allowed_roles`` would otherwise be physically written into the shared,
+	role-BLIND container, where any user's agent can ``cat`` it regardless of
+	roles. ``_upsert_managed_skill`` writes ``allowed_roles`` on every row it
+	compiles, so a tenant whose learned skills all come from role-gated doctypes
+	now pushes ZERO files, and that is the normal case rather than an edge one.
+	Those rows stay reachable: ``learned_skill_clause`` still announces them to
+	role-matched users, and ``jarvis__get_skill`` serves the body after
+	re-deriving the caller's roles at fetch time.
 
 	Reads the MANAGED ROWS (not a fresh compile): the rows are the bench-side
 	storage the last Apply committed, so a restart resync re-pushes exactly what
 	was applied without re-flipping any pattern statuses. Pinned to the
 	Administrator owner (same defense-in-depth as ``learned_skill_clause``).
-	An empty list is a valid "remove all learned skills" reconcile. Truncated at
-	``LEARNED_SKILL_CAP`` so a stale over-cap state can never be pushed (the
-	apply pre-check is the real gate)."""
-	from jarvis.chat.custom_skills import render_learned_skill_md
+	An empty list is a valid "remove all learned skills" reconcile - which is
+	what removes an already-pushed restricted body from a live container.
+	Truncated at ``LEARNED_SKILL_CAP`` so a stale over-cap state can never be
+	pushed (the apply pre-check is the real gate)."""
+	from jarvis.chat.custom_skills import render_learned_skill_md, role_restricted_names
 
 	rows = frappe.get_all(
 		SKILL,
 		filters={"enabled": 1, "managed_by_learning": 1, "owner": MANAGED_OWNER},
-		fields=["skill_name", "description", "instructions"],
+		# ``name`` feeds the role filter; it is not in the payload.
+		fields=["name", "skill_name", "description", "instructions"],
 		order_by="skill_name asc",
 	)
+	restricted = role_restricted_names([r.name for r in rows])
+	pushable = [r for r in rows if r.name not in restricted]
 	payload = []
-	for r in rows[:LEARNED_SKILL_CAP]:
+	for r in pushable[:LEARNED_SKILL_CAP]:
 		slug = (r.skill_name or "").strip().lower()
 		payload.append(
 			{
@@ -439,7 +504,7 @@ def build_learned_push_payload() -> list[dict]:
 				"body": render_learned_skill_md(slug, r.description or "", r.instructions or ""),
 			}
 		)
-	return payload
+	return payload, len(restricted)
 
 
 def _upsert_managed_skill(spec: dict) -> str:
@@ -447,9 +512,7 @@ def _upsert_managed_skill(spec: dict) -> str:
 	owner=MANAGED_OWNER (Administrator) so normal users cannot reach them. Returns
 	the row name."""
 	sname = spec["skill_name"]
-	existing = frappe.db.get_value(
-		SKILL, {"managed_by_learning": 1, "skill_name": sname}, "name"
-	)
+	existing = frappe.db.get_value(SKILL, {"managed_by_learning": 1, "skill_name": sname}, "name")
 	if existing:
 		doc = frappe.get_doc(SKILL, existing)
 	else:
@@ -467,6 +530,10 @@ def _upsert_managed_skill(spec: dict) -> str:
 	# them. The engine flag is set here, so the scope guard admits the write.
 	doc.scope = "Org"
 	doc.set("allowed_roles", [{"role": r} for r in spec["allowed_roles"]])
+	# Provenance only, deliberately INERT: nothing reads this field, and an empty
+	# allowed_roles still means "everyone" exactly as it did before (#479). See
+	# :func:`_roles_derived` for why it is captured at write time regardless.
+	doc.roles_derived = 1 if spec.get("roles_derived") else 0
 	if existing:
 		doc.save(ignore_permissions=True)
 	else:
@@ -496,7 +563,8 @@ def _finalize_patterns(compiled: dict, skill_by_domain: dict) -> int:
 				activated += 1
 			elif status == "Active":  # refresh the materialized-skill pointer only
 				frappe.db.set_value(
-					JLP, name,
+					JLP,
+					name,
 					{"materialized_skill": skill_row, "last_validated_at": now},
 					update_modified=False,
 				)
@@ -517,9 +585,7 @@ def _mark_compile_deferred(name: str) -> None:
 	if not isinstance(data, dict):
 		data = {}
 	data["compile_deferred"] = True
-	frappe.db.set_value(
-		JLP, name, {"evidence": frappe.as_json(data)}, update_modified=False
-	)
+	frappe.db.set_value(JLP, name, {"evidence": frappe.as_json(data)}, update_modified=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -587,9 +653,16 @@ def _interplay_lines(domain: str) -> list[str]:
 
 def _bullet(row: dict) -> str:
 	"""One compiled bullet: sanitized draft + JLP ref. Injection-shaped drafts
-	are withheld with a board pointer rather than embedded (plan section 6.3)."""
+	are withheld with a board pointer rather than embedded (plan section 6.3).
+
+	Source of truth is ``approved_draft`` - the text frozen when a human
+	approved it (#482). ``skill_draft`` is the LIVE detector render and is
+	rewritten in place by every re-detection, so compiling from it shipped
+	wording no one reviewed. Rows with no snapshot (Proposed previews, and
+	rows approved before the snapshot existed / before the backfill ran) fall
+	back to the live draft, then to the statement."""
 	name = row["name"]
-	draft = (row.get("skill_draft") or "").strip()
+	draft = (row.get("approved_draft") or "").strip() or (row.get("skill_draft") or "").strip()
 	if not draft:
 		draft = "- " + (row.get("pattern_statement") or "").strip()
 

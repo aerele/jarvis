@@ -53,14 +53,16 @@ SUPPORTED_EVENTS = (
 # LLM actions run after commit in a background job, so they only make sense on
 # post-events — a validate/before_submit LLM action could never block the save
 # it rides on (the reply lands after the transaction is gone).
-LLM_EVENTS = frozenset({
-	"after_insert",
-	"on_update",
-	"on_submit",
-	"on_cancel",
-	"on_trash",
-	"on_update_after_submit",
-})
+LLM_EVENTS = frozenset(
+	{
+		"after_insert",
+		"on_update",
+		"on_submit",
+		"on_cancel",
+		"on_trash",
+		"on_update_after_submit",
+	}
+)
 
 # Only these events are meant to BLOCK a save when a Script action throws. On
 # every other (post-)event a raised ``frappe.ValidationError`` — including the
@@ -132,8 +134,15 @@ def _build_triggers_map() -> dict:
 		TRIGGER,
 		filters={"enabled": 1},
 		fields=[
-			"name", "trigger_name", "owner", "target_doctype", "doc_event",
-			"condition", "action_type", "server_script", "llm_instruction",
+			"name",
+			"trigger_name",
+			"owner",
+			"target_doctype",
+			"doc_event",
+			"condition",
+			"action_type",
+			"server_script",
+			"llm_instruction",
 			"llm_daily_cap",
 		],
 	)
@@ -202,13 +211,7 @@ def dispatch(doc, method: str | None = None) -> None:
 	condition writes a Failed activity and never breaks the user's save), and
 	run/queue the action."""
 	flags = frappe.local.flags
-	if (
-		flags.in_install
-		or flags.in_patch
-		or flags.in_migrate
-		or flags.in_import
-		or flags.in_setup_wizard
-	):
+	if flags.in_install or flags.in_patch or flags.in_migrate or flags.in_import or flags.in_setup_wizard:
 		return
 	if method not in SUPPORTED_EVENTS:
 		return
@@ -348,11 +351,7 @@ def _snapshot_json(doc) -> str:
 	"""The doc AT EVENT TIME as JSON: top-level keys starting with "_" are
 	dropped, output clipped to the snapshot cap (LLM context, not archival)."""
 	try:
-		data = {
-			k: v
-			for k, v in doc.as_dict(convert_dates_to_str=True).items()
-			if not str(k).startswith("_")
-		}
+		data = {k: v for k, v in doc.as_dict(convert_dates_to_str=True).items() if not str(k).startswith("_")}
 		return frappe.as_json(data)[:_SNAPSHOT_CHAR_CAP]
 	except Exception:
 		return "{}"
@@ -395,14 +394,16 @@ def _queue_llm_action(row: dict, doc, method: str) -> None:
 		frappe.local._jarvis_trigger_llm_queue = []
 		frappe.db.after_commit.add(_flush_llm_queue)
 		frappe.db.after_rollback.add(_drop_llm_queue)
-	frappe.local._jarvis_trigger_llm_queue.append(frappe._dict(
-		trigger=row.get("name"),
-		doctype=doc.doctype,
-		docname=str(doc.name or ""),
-		event=method,
-		snapshot_json=_snapshot_json(doc),
-		fired_by=frappe.session.user,
-	))
+	frappe.local._jarvis_trigger_llm_queue.append(
+		frappe._dict(
+			trigger=row.get("name"),
+			doctype=doc.doctype,
+			docname=str(doc.name or ""),
+			event=method,
+			snapshot_json=_snapshot_json(doc),
+			fired_by=frappe.session.user,
+		)
+	)
 
 
 def _flush_llm_queue() -> None:
@@ -461,32 +462,37 @@ def _insert_activity(**fields) -> None:
 	logging must NEVER break a dispatch (or the save it rides on)."""
 	try:
 		owner = fields.pop("trigger_owner", "") or ""
-		frappe.get_doc({
-			"doctype": ACTIVITY,
-			"trigger": fields.get("trigger") or "",
-			"trigger_label": fields.get("trigger_label") or "",
-			"target_doctype": fields.get("target_doctype") or "",
-			"target_docname": fields.get("target_docname") or "",
-			"doc_event": fields.get("doc_event") or "",
-			"action_type": fields.get("action_type") or "",
-			"status": fields.get("status") or "",
-			"summary": (fields.get("summary") or "")[:_SUMMARY_CHAR_CAP],
-			"detail": (fields.get("detail") or "")[:_DETAIL_CHAR_CAP],
-			"duration_ms": cint(fields.get("duration_ms")),
-			"event_user": fields.get("event_user") or frappe.session.user,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": ACTIVITY,
+				"trigger": fields.get("trigger") or "",
+				"trigger_label": fields.get("trigger_label") or "",
+				"target_doctype": fields.get("target_doctype") or "",
+				"target_docname": fields.get("target_docname") or "",
+				"doc_event": fields.get("doc_event") or "",
+				"action_type": fields.get("action_type") or "",
+				"status": fields.get("status") or "",
+				"summary": (fields.get("summary") or "")[:_SUMMARY_CHAR_CAP],
+				"detail": (fields.get("detail") or "")[:_DETAIL_CHAR_CAP],
+				"duration_ms": cint(fields.get("duration_ms")),
+				"event_user": fields.get("event_user") or frappe.session.user,
+			}
+		).insert(ignore_permissions=True)
 		if owner:
 			from jarvis.chat.events import publish_to_user
 
-			publish_to_user(owner, {
-				"kind": "trigger:activity",
-				"trigger": fields.get("trigger") or "",
-				"trigger_label": fields.get("trigger_label") or "",
-				"status": fields.get("status") or "",
-				# action_type lets the client notifier decide what to surface
-				# (LLM "Success" findings warn; Script "Success" is quiet noise).
-				"action_type": fields.get("action_type") or "",
-			})
+			publish_to_user(
+				owner,
+				{
+					"kind": "trigger:activity",
+					"trigger": fields.get("trigger") or "",
+					"trigger_label": fields.get("trigger_label") or "",
+					"status": fields.get("status") or "",
+					# action_type lets the client notifier decide what to surface
+					# (LLM "Success" findings warn; Script "Success" is quiet noise).
+					"action_type": fields.get("action_type") or "",
+				},
+			)
 	except Exception:
 		try:
 			frappe.log_error(
@@ -497,8 +503,9 @@ def _insert_activity(**fields) -> None:
 			pass
 
 
-def _record_activity(base: dict, *, status: str, summary: str = "",
-					  detail: str = "", duration_ms: int = 0) -> None:
+def _record_activity(
+	base: dict, *, status: str, summary: str = "", detail: str = "", duration_ms: int = 0
+) -> None:
 	"""Record a Success/Failed activity WITHOUT touching the user's save
 	transaction: the insert + realtime publish are deferred to a background job
 	that runs only after the save COMMITS (``enqueue_after_commit``). This keeps
@@ -512,8 +519,7 @@ def _record_activity(base: dict, *, status: str, summary: str = "",
 		# Synchronous inline insert in tests: keeps the run deterministic and
 		# preserves the test transaction (no enqueue worker, no commit).
 		try:
-			_insert_activity(**base, status=status, summary=summary,
-							  detail=detail, duration_ms=duration_ms)
+			_insert_activity(**base, status=status, summary=summary, detail=detail, duration_ms=duration_ms)
 		except Exception:
 			pass
 		return
@@ -532,8 +538,7 @@ def _record_activity(base: dict, *, status: str, summary: str = "",
 		# Last resort: log inline rather than lose the record entirely. Still
 		# guarded so a logging failure can't break the save.
 		try:
-			_insert_activity(**base, status=status, summary=summary,
-							  detail=detail, duration_ms=duration_ms)
+			_insert_activity(**base, status=status, summary=summary, detail=detail, duration_ms=duration_ms)
 		except Exception:
 			pass
 

@@ -1,86 +1,93 @@
 <script setup>
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from "vue"
-import BrandMark from "../components/BrandMark.vue"
-import { useRouter } from "vue-router"
-import * as api from "../api"
-import { store } from "../store"
-import { EFFORT, prefs, setPrefs, thinkingOf } from "../lib/prefs"
-import { feed } from "../lib/notifications"
-import Sheet from "../components/Sheet.vue"
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from "vue";
+import BrandMark from "../components/BrandMark.vue";
+import { agentName } from "@/branding";
+import { useRouter } from "vue-router";
+import * as api from "../api";
+import { store } from "../store";
+import { EFFORT, prefs, setPrefs, thinkingOf } from "../lib/prefs";
+import { feed } from "../lib/notifications";
+import Sheet from "../components/Sheet.vue";
 
 // New chat: the hero screen, not an empty thread with a chat bar bolted to the
 // bottom. Brand mark, a greeting that knows the time of day and who you are, and
 // one card that holds the whole composer — attachments, model, mic, send.
-const VoiceSheet = defineAsyncComponent(() => import("../components/VoiceSheet.vue"))
+const VoiceSheet = defineAsyncComponent(() => import("../components/VoiceSheet.vue"));
 
-const router = useRouter()
+const router = useRouter();
 
-const input = ref("")
-const busy = ref(false)
-const error = ref("")
-const attachments = ref([])
-const settings = ref(null)
-const modelSheet = ref(false)
-const voiceOpen = ref(false)
-const inputEl = ref(null)
-const fileEl = ref(null)
+const input = ref("");
+const busy = ref(false);
+const error = ref("");
+const attachments = ref([]);
+const settings = ref(null);
+const modelSheet = ref(false);
+const voiceOpen = ref(false);
+const inputEl = ref(null);
+const fileEl = ref(null);
 
 // Morning / afternoon / evening, by the clock on THIS device — the phone's own
 // timezone is the one the user is standing in.
 const greeting = computed(() => {
-	const h = new Date().getHours()
-	const part = h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"
-	const first = String(window.frappe_full_name || "").trim().split(/\s+/)[0]
-	return first ? `${part}, ${first}.` : `${part}.`
-})
+	const h = new Date().getHours();
+	const part = h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
+	const first = String(window.frappe_full_name || "")
+		.trim()
+		.split(/\s+/)[0];
+	return first ? `${part}, ${first}.` : `${part}.`;
+});
 
 // Same derivation the desktop uses: the configured pool if there is one, else
 // the provider's subscription allowlist. Deduped — a pool holds one row per
 // account, not per model.
 const models = computed(() => {
-	const s = settings.value
-	if (!s) return []
-	const pool = s.pool_models || []
+	const s = settings.value;
+	if (!s) return [];
+	const pool = s.pool_models || [];
 	if (pool.length) {
-		const seen = new Set()
-		const out = []
+		const seen = new Set();
+		const out = [];
 		for (const r of pool) {
-			if (!r.model || seen.has(r.model)) continue
-			seen.add(r.model)
-			out.push(r.model)
+			if (!r.model || seen.has(r.model)) continue;
+			seen.add(r.model);
+			out.push(r.model);
 		}
-		return out
+		return out;
 	}
-	return s.subscription_models?.[s.llm_provider] || []
-})
+	return s.subscription_models?.[s.llm_provider] || [];
+});
 
-const currentModel = computed(() => prefs.defaultModel || settings.value?.llm_model || "")
-const micEnabled = computed(() => !!settings.value?.stt_enabled)
-const hasDraft = computed(() => input.value.trim().length > 0 || attachments.value.some((a) => a.file_url))
-const uploading = computed(() => attachments.value.some((a) => a.uploading))
+const currentModel = computed(() => prefs.defaultModel || settings.value?.llm_model || "");
+const micEnabled = computed(() => !!settings.value?.stt_enabled);
+const hasDraft = computed(
+	() => input.value.trim().length > 0 || attachments.value.some((a) => a.file_url)
+);
+const uploading = computed(() => attachments.value.some((a) => a.uploading));
 
 function modelDesc(name) {
-	const n = String(name).toLowerCase()
-	if (n.includes("opus") || n.includes("5.5")) return "Most capable — for complex, multi-step work"
-	if (n.includes("sonnet")) return "Balanced speed and intelligence"
-	if (n.includes("haiku") || n.includes("mini") || n.includes("flash")) return "Fastest — for quick everyday tasks"
-	return "Available on your plan"
+	const n = String(name).toLowerCase();
+	if (n.includes("opus") || n.includes("5.5"))
+		return "Most capable, for complex multi-step work";
+	if (n.includes("sonnet")) return "Balanced speed and intelligence";
+	if (n.includes("haiku") || n.includes("mini") || n.includes("flash"))
+		return "Fastest, for quick everyday tasks";
+	return "Available on your plan";
 }
 
 function autoGrow() {
-	const el = inputEl.value
-	if (!el) return
-	el.style.height = "auto"
-	el.style.height = `${Math.min(el.scrollHeight, 120)}px`
+	const el = inputEl.value;
+	if (!el) return;
+	el.style.height = "auto";
+	el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
 }
 
 async function send(text = input.value) {
-	const t = String(text).trim()
-	const ready = attachments.value.filter((a) => a.file_url)
-	if ((!t && !ready.length) || busy.value || uploading.value) return
+	const t = String(text).trim();
+	const ready = attachments.value.filter((a) => a.file_url);
+	if ((!t && !ready.length) || busy.value || uploading.value) return;
 
-	busy.value = true
-	error.value = ""
+	busy.value = true;
+	error.value = "";
 	try {
 		// conversation "" → the backend creates (or focuses) the empty one and
 		// hands back its id, so a new chat costs one round-trip, not two.
@@ -88,27 +95,27 @@ async function send(text = input.value) {
 			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
 			model: prefs.defaultModel || "",
 			thinking: thinkingOf(prefs.effort),
-		})
+		});
 		if (r?.ok === false || !r?.conversation_id) {
-			error.value = r?.reason || "Couldn't start that chat."
-			busy.value = false
-			return
+			error.value = r?.reason || "Couldn't start that chat.";
+			busy.value = false;
+			return;
 		}
-		input.value = ""
-		attachments.value = []
-		store.loadConversations()
-		router.push(`/c/${r.conversation_id}`)
+		input.value = "";
+		attachments.value = [];
+		store.loadConversations();
+		router.push(`/c/${r.conversation_id}`);
 	} catch (e) {
-		error.value = e?.message || "Couldn't start that chat."
-		busy.value = false
+		error.value = e?.message || "Couldn't start that chat.";
+		busy.value = false;
 	}
 }
 
 async function attach(e) {
-	const files = [...(e.target.files || [])]
-	e.target.value = ""
-	if (!files.length) return
-	error.value = ""
+	const files = [...(e.target.files || [])];
+	e.target.value = "";
+	if (!files.length) return;
+	error.value = "";
 
 	const staged = files.map((f, i) => ({
 		key: `att-${Date.now()}-${i}`,
@@ -116,53 +123,61 @@ async function attach(e) {
 		file: f,
 		preview: f.type.startsWith("image/") ? URL.createObjectURL(f) : "",
 		uploading: true,
-	}))
-	attachments.value.push(...staged)
+	}));
+	attachments.value.push(...staged);
 
 	await Promise.all(
 		staged.map(async (a) => {
 			try {
-				const up = await api.uploadFile(a.file)
-				const row = attachments.value.find((x) => x.key === a.key)
+				const up = await api.uploadFile(a.file);
+				const row = attachments.value.find((x) => x.key === a.key);
 				if (row) {
-					row.file_url = up.file_url
-					row.uploading = false
+					row.file_url = up.file_url;
+					row.uploading = false;
 				}
 			} catch (err) {
-				removeAttachment(a.key)
-				error.value = err?.message || `Couldn't upload ${a.name}.`
+				removeAttachment(a.key);
+				error.value = err?.message || `Couldn't upload ${a.name}.`;
 			}
-		}),
-	)
+		})
+	);
 }
 
 function removeAttachment(key) {
-	const row = attachments.value.find((a) => a.key === key)
-	if (row?.preview) URL.revokeObjectURL(row.preview)
-	attachments.value = attachments.value.filter((a) => a.key !== key)
+	const row = attachments.value.find((a) => a.key === key);
+	if (row?.preview) URL.revokeObjectURL(row.preview);
+	attachments.value = attachments.value.filter((a) => a.key !== key);
 }
 
 function onKeydown(e) {
 	if (e.key === "Enter" && !e.shiftKey && !/Mobi|Android/i.test(navigator.userAgent)) {
-		e.preventDefault()
-		send()
+		e.preventDefault();
+		send();
 	}
 }
 
 onMounted(async () => {
 	try {
-		settings.value = await api.getChatUiSettings()
+		settings.value = await api.getChatUiSettings();
 	} catch {
 		/* the screen still works without the model chip */
 	}
-})
-onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview)))
+});
+onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview)));
 </script>
 
 <template>
 	<div class="jv-bar is-bare">
 		<button class="jv-icon-btn" aria-label="Menu" @click="store.drawerOpen = true">
-			<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+			<svg
+				viewBox="0 0 24 24"
+				width="20"
+				height="20"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.8"
+				stroke-linecap="round"
+			>
 				<path d="M3 6h18M3 12h18M3 18h18" />
 			</svg>
 		</button>
@@ -170,8 +185,21 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 		<!-- Same place as the native app: the bell lives on the new-chat header
 		     only. It is where you land when you come back to the app, which is
 		     exactly when you want to know what happened while you were gone. -->
-		<button class="jv-icon-btn" aria-label="Notifications" @click="router.push('/notifications')">
-			<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+		<button
+			class="jv-icon-btn"
+			aria-label="Notifications"
+			@click="router.push('/notifications')"
+		>
+			<svg
+				viewBox="0 0 24 24"
+				width="20"
+				height="20"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.8"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
 				<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0" />
 			</svg>
 			<span v-if="feed.unread" class="jv-bell-dot" />
@@ -185,8 +213,17 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 
 	<div class="jv-heroc jv-safe-bottom">
 		<div v-if="error" class="jv-heroc-err">
-			<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-				<circle cx="12" cy="12" r="9" /><path d="M12 8v5M12 16h.01" />
+			<svg
+				viewBox="0 0 24 24"
+				width="14"
+				height="14"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+			>
+				<circle cx="12" cy="12" r="9" />
+				<path d="M12 8v5M12 16h.01" />
 			</svg>
 			{{ error }}
 		</div>
@@ -198,14 +235,34 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 				<div v-for="a in attachments" :key="a.key" class="jv-att">
 					<img v-if="a.preview" class="jv-att-img" :src="a.preview" :alt="a.name" />
 					<div v-else class="jv-att-file">
-						<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-							<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" />
+						<svg
+							viewBox="0 0 24 24"
+							width="16"
+							height="16"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.8"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
+							<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+							<path d="M14 2v6h6" />
 						</svg>
 						<span class="jv-att-name">{{ a.name }}</span>
 					</div>
-					<div v-if="a.uploading" class="jv-att-busy"><span class="jv-spinner is-light" /></div>
+					<div v-if="a.uploading" class="jv-att-busy">
+						<span class="jv-spinner is-light" />
+					</div>
 					<button class="jv-att-x" aria-label="Remove" @click="removeAttachment(a.key)">
-						<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round">
+						<svg
+							viewBox="0 0 24 24"
+							width="11"
+							height="11"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.6"
+							stroke-linecap="round"
+						>
 							<path d="M18 6 6 18M6 6l12 12" />
 						</svg>
 					</button>
@@ -216,7 +273,7 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 				ref="inputEl"
 				v-model="input"
 				rows="1"
-				placeholder="Message Jarvis…"
+				:placeholder="`Message ${agentName}…`"
 				@input="autoGrow"
 				@keydown="onKeydown"
 			/>
@@ -224,7 +281,15 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 			<div class="jv-card-row">
 				<input ref="fileEl" type="file" multiple hidden @change="attach" />
 				<button class="jv-round" aria-label="Attach a file" @click="fileEl.click()">
-					<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+					<svg
+						viewBox="0 0 24 24"
+						width="17"
+						height="17"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+					>
 						<path d="M12 5v14M5 12h14" />
 					</svg>
 				</button>
@@ -232,22 +297,61 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 				<button v-if="models.length" class="jv-modelchip" @click="modelSheet = true">
 					<span class="jv-dot" />
 					<span class="jv-modelchip-name">{{ currentModel || "Model" }}</span>
-					<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<svg
+						viewBox="0 0 24 24"
+						width="13"
+						height="13"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<path d="m6 9 6 6 6-6" />
 					</svg>
 				</button>
 
 				<span class="jv-spacer" />
 
-				<button v-if="!hasDraft && micEnabled" class="jv-mic" aria-label="Dictate" @click="voiceOpen = true">
-					<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+				<button
+					v-if="!hasDraft && micEnabled"
+					class="jv-mic"
+					aria-label="Dictate"
+					@click="voiceOpen = true"
+				>
+					<svg
+						viewBox="0 0 24 24"
+						width="19"
+						height="19"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.8"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
 						<path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3" />
 					</svg>
 				</button>
-				<button v-if="hasDraft" class="jv-send" aria-label="Send" :disabled="busy || uploading" @click="send()">
+				<button
+					v-if="hasDraft"
+					class="jv-send"
+					aria-label="Send"
+					:disabled="busy || uploading"
+					@click="send()"
+				>
 					<span v-if="busy" class="jv-spinner is-light" />
-					<svg v-else viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+					<svg
+						v-else
+						viewBox="0 0 24 24"
+						width="19"
+						height="19"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.1"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<path d="M12 19V5M5 12l7-7 7 7" />
 					</svg>
 				</button>
@@ -261,7 +365,15 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 			<div class="jv-msheet-head">
 				<span>Model</span>
 				<button class="jv-x" aria-label="Close" @click="modelSheet = false">
-					<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+					<svg
+						viewBox="0 0 24 24"
+						width="16"
+						height="16"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.2"
+						stroke-linecap="round"
+					>
 						<path d="M18 6 6 18M6 6l12 12" />
 					</svg>
 				</button>
@@ -279,16 +391,29 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 						<span class="jv-mrow-name">{{ m }}</span>
 						<span class="jv-mrow-desc">{{ modelDesc(m) }}</span>
 					</span>
-					<svg v-if="m === currentModel" class="jv-check" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+					<svg
+						v-if="m === currentModel"
+						class="jv-check"
+						viewBox="0 0 24 24"
+						width="18"
+						height="18"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.4"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<path d="M20 6 9 17l-5-5" />
 					</svg>
 				</button>
-				<div v-if="!models.length" class="jv-mnone">No models available on your plan yet.</div>
+				<div v-if="!models.length" class="jv-mnone">
+					No models available on your plan yet.
+				</div>
 
 				<div class="jv-sep" />
 
 				<div class="jv-msheet-sub">Effort</div>
-				<div class="jv-msheet-hint">How much Jarvis thinks before it acts.</div>
+				<div class="jv-msheet-hint">How much {{ agentName }} thinks before it acts.</div>
 				<div class="jv-seg">
 					<button
 						v-for="e in EFFORT"
@@ -340,13 +465,21 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 	gap: 14px;
 	padding: 18px;
 }
+/* The name is arbitrary-length, so this line has to survive "Administrator"
+   as well as "Jo". At 24px/600 the longest common case measured 326px against
+   324px of usable width, so it overflowed its own padding and sat edge to edge.
+   Smaller and lighter, capped short of the padding, and balanced so a wrap
+   splits evenly instead of dropping one orphaned word. */
 .jv-greeting {
 	margin: 0;
-	font-size: 24px;
-	font-weight: 600;
-	letter-spacing: -0.4px;
+	max-width: 20ch;
+	font-size: 21px;
+	font-weight: 550;
+	letter-spacing: -0.3px;
+	line-height: 1.25;
 	color: var(--ink9);
 	text-align: center;
+	text-wrap: balance;
 }
 
 .jv-heroc {
@@ -381,7 +514,10 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 	background: transparent;
 	color: var(--ink9);
 	font: inherit;
-	font-size: 14.5px;
+	/* 15.5px, not 14.5: this is the one field the user actually composes in,
+	   and the reference apps sit around 16px. Below that it reads as a caption
+	   rather than the primary input. */
+	font-size: 15.5px;
 	line-height: 1.45;
 	padding: 2px 0 12px;
 	max-height: 120px;

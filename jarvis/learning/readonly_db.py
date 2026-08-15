@@ -116,9 +116,7 @@ def validate_select(query: str) -> None:
 	if ";" in query:
 		raise PatternDBViolation("';' is not allowed anywhere in a detector query")
 	if _FORBIDDEN_RE.search(query):
-		raise PatternDBViolation(
-			"forbidden token in detector query (INTO / FOR UPDATE / LOCK IN SHARE MODE)"
-		)
+		raise PatternDBViolation("forbidden token in detector query (INTO / FOR UPDATE / LOCK IN SHARE MODE)")
 	stripped = _strip_leading_comments(query)
 	if not stripped[:6].upper() == "SELECT":
 		raise PatternDBViolation("detector queries must be a single SELECT statement")

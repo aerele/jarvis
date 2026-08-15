@@ -16,16 +16,9 @@ Two role tiers gate this module (Skills-area rework, DESIGN.md sections 1 / 6b):
   the unrelated jarvis_admin SaaS role, which lives on a DIFFERENT Frappe site -
   no technical collision, only a documented naming one).
 
-Because behavioural pattern learning is a MANAGED-ONLY feature (plan sections
-13 / 7 T5 / 6.4), both guards additionally refuse on self-hosted benches. The
-two tab PROBES are deliberately reachable on self-host so their tabs can render
-the managed-only empty state and simply report ``self_hosted=True``:
-``get_learning_status`` (Analysis, admin-role-only, no self-host block) and
-``get_review_access`` (Review, reviewer-role-only, no self-host block).
 ``flag_learned_default`` (the plan-6.5 correction loop) stays open to ANY
 authenticated System User (the chat user who just watched a learned default
-misfire), still self-host-gated and refused for Guest / portal (Website User)
-sessions.
+misfire), and is refused for Guest / portal (Website User) sessions.
 
 Board lifecycle (plan section 6.5) runs through the ``Jarvis Learned Pattern``
 state machine (``validate_transition`` in the controller). These are HUMAN
@@ -50,6 +43,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_days, now_datetime, today
 
+from jarvis.learning.lifecycle import REDRAFT_STALE_PREFIX
 from jarvis.permissions import JARVIS_REVIEWER_ROLES, require_jarvis_admin
 
 JLP = "Jarvis Learned Pattern"
@@ -59,6 +53,7 @@ SKILL = "Jarvis Custom Skill"
 # Skills-area rework surfaces the Review tab reads/writes.
 PQ = "Jarvis Personalise Question"
 PROMO = "Jarvis Wiki Promotion Request"
+SKILL_PROMO = "Jarvis Skill Promotion Request"
 WIKI = "Jarvis Wiki Page"
 VOICE = "Jarvis Voice Note"
 
@@ -72,9 +67,7 @@ _FOLLOWUP_ASK_MAX = 1000
 # go_to_chat_context: the fixed closing ask + the diff-section label + the total
 # bundle / per-section caps (DESIGN.md 6b - the bundle rides chatPrefill and the
 # LLM can fetch more via tools, so it stays lean).
-_CLOSING_ASK = (
-	"Walk me through the impact and risks of approving this; recommend a decision."
-)
+_CLOSING_ASK = "Walk me through the impact and risks of approving this; recommend a decision."
 _DIFF_LABEL = "What changes if this is approved:"
 _BUNDLE_MAX_CHARS = 4000
 _DIFF_MAX_CHARS = 1800
@@ -110,13 +103,24 @@ _FOLLOWUP_PROMPT = (
 _DOMAINS = ("selling", "buying", "stock", "accounts", "projects", "org")
 _STRENGTHS = ("High", "Medium", "Low")
 _STATUSES = (
-	"Proposed", "Approved", "Active", "Rejected",
-	"Snoozed", "Stale", "Superseded", "Archived",
+	"Proposed",
+	"Approved",
+	"Active",
+	"Rejected",
+	"Snoozed",
+	"Stale",
+	"Superseded",
+	"Archived",
 )
 # The Decided log (view="decided"): every human-touched terminal/parked state.
 # Stale stays out - it is machine-parked (drift/flag demotion), not a decision.
 _DECIDED_STATUSES = (
-	"Approved", "Active", "Rejected", "Superseded", "Archived", "Snoozed",
+	"Approved",
+	"Active",
+	"Rejected",
+	"Superseded",
+	"Archived",
+	"Snoozed",
 )
 _SNOOZE_DAYS = (7, 30, 90)
 
@@ -159,28 +163,43 @@ APPLIED_NOTE_PREFIX = "Acknowledged - applied to skill: "
 # org-wide (security review PART 2 TASK 16): the content came from a user's
 # PRIVATE note, so personal nuances must be scrubbed before it becomes org-wide.
 _SCRUB_WARNING = (
-	"This came from a user's private note - remove personal names and nuances "
-	"before making it org-wide."
+	"This came from a user's private note - remove personal names and nuances before making it org-wide."
 )
 
 # Rendered on the board when an SM edited the draft before approving: the
 # evidence line is frozen (plan section 6.5) - it still reflects the ORIGINALLY
 # detected pattern, not the human edit, which was not re-measured.
-FROZEN_EVIDENCE_LABEL = (
-	"Evidence reflects the originally detected pattern; your edit was not re-measured."
-)
+FROZEN_EVIDENCE_LABEL = "Evidence reflects the originally detected pattern; your edit was not re-measured."
 
 # Card fields only - plain English, no raw statistics (those are drill-down).
 # stale_reason / last_validated_at / flags_count / materialized_skill ride the
 # card so the board can render the Stale banner ("will be removed on next
 # Apply" needs the live-skill pointer) and the correction-loop flag badge.
 _CARD_FIELDS = [
-	"name", "pattern_statement", "skill_draft", "strength_band", "domain",
-	"company", "sensitivity", "effective_sensitivity", "exceptions_cluster",
-	"exception_n", "not_applicable", "draft_edited", "overlap_warning",
+	"name",
+	"pattern_statement",
+	"skill_draft",
+	"strength_band",
+	"domain",
+	"company",
+	"sensitivity",
+	"effective_sensitivity",
+	"exceptions_cluster",
+	"exception_n",
+	"not_applicable",
+	"draft_edited",
+	"overlap_warning",
 	# reviewed_at rides the card for the Decided log's "who/when" line.
-	"status", "surfaced", "reviewed_by", "reviewed_at", "approved_by", "creation",
-	"stale_reason", "last_validated_at", "flags_count", "materialized_skill",
+	"status",
+	"surfaced",
+	"reviewed_by",
+	"reviewed_at",
+	"approved_by",
+	"creation",
+	"stale_reason",
+	"last_validated_at",
+	"flags_count",
+	"materialized_skill",
 	# personalise_origin drives the scrub-personal-nuances warning on the promote
 	# action (security review PART 2 TASK 16).
 	"personalise_origin",
@@ -208,17 +227,6 @@ _FLAG_STALE_PREFIX = "flagged by"
 # --------------------------------------------------------------------------- #
 # gating
 # --------------------------------------------------------------------------- #
-def _is_self_hosted() -> bool:
-	try:
-		from jarvis.selfhost import is_self_hosted
-
-		return bool(is_self_hosted())
-	except Exception:
-		# A missing/broken selfhost probe on a managed bench must not block the
-		# feature; the tick/orchestrator make the same fail-open choice.
-		return False
-
-
 # The REVIEWER set gates the board/decide/apply/follow-up actions; the ADMIN
 # tier gates the Analysis config surface. Both now live in jarvis.permissions
 # (PART 4 REVISED, TASK 50 — one definition, no drift). The reviewer set stays
@@ -226,41 +234,17 @@ def _is_self_hosted() -> bool:
 _REVIEWER_ROLES = JARVIS_REVIEWER_ROLES
 
 
-def _reviewer_roles() -> None:
-	"""Reviewer-set role check ONLY (no self-host block). The Review probe
-	(``get_review_access``) uses this so it stays reachable on a self-host bench
-	to render the managed-only empty state."""
+def _guard() -> None:
+	"""Reviewer-set role check. Every board / decide / drill-down / apply /
+	follow-up endpoint calls this first."""
 	frappe.only_for(_REVIEWER_ROLES)
 
 
-def _guard() -> None:
-	"""Reviewer-set AND managed-only. Every board / decide / drill-down / apply /
-	follow-up endpoint calls this first, except ``get_review_access`` (which
-	reports self-host instead)."""
-	_reviewer_roles()
-	if _is_self_hosted():
-		frappe.throw(
-			_("Pattern learning is not available on self-hosted benches."),
-			frappe.ValidationError,
-		)
-
-
-def _admin_roles() -> None:
-	"""Admin-tier role check ONLY (no self-host block). The Analysis probe
-	(``get_learning_status``) uses this so it stays reachable on a self-host
-	bench. PART 4 REVISED, TASK 50 — delegates to jarvis.permissions."""
-	require_jarvis_admin()
-
-
 def _admin_guard() -> None:
-	"""Admin-set AND managed-only. The Analysis-tab config surface
-	(``get/set_learning_settings``, ``run_pattern_analysis_now``) calls this."""
-	_admin_roles()
-	if _is_self_hosted():
-		frappe.throw(
-			_("Pattern learning is not available on self-hosted benches."),
-			frappe.ValidationError,
-		)
+	"""Admin-tier role check. The Analysis-tab config surface
+	(``get/set_learning_settings``, ``run_pattern_analysis_now``) calls this.
+	PART 4 REVISED, TASK 50 — delegates to jarvis.permissions."""
+	require_jarvis_admin()
 
 
 # --------------------------------------------------------------------------- #
@@ -344,9 +328,7 @@ def list_learned_patterns_page(
 	decided = view == "decided"
 	if disposition and not decided:
 		frappe.throw(_("disposition applies to the decided view only."))
-	if disposition and disposition not in (
-		"approved", "applied", "acknowledged", "rejected", "snoozed"
-	):
+	if disposition and disposition not in ("approved", "applied", "acknowledged", "rejected", "snoozed"):
 		frappe.throw(_("Invalid disposition filter."))
 	if sort and sort not in (None, "", "newest", "oldest"):
 		frappe.throw(_("Invalid sort."))
@@ -415,16 +397,15 @@ def list_learned_patterns_page(
 			"`creation` DESC, `name` ASC"
 		)
 	)
-	total = frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tab{JLP}` WHERE {main_where}", params
-	)[0][0]
+	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{JLP}` WHERE {main_where}", params)[0][0]
 	rows = frappe.db.sql(
 		f"""SELECT {col_list}
 		FROM `tab{JLP}`
 		WHERE {main_where}
 		ORDER BY {order_by}
 		LIMIT %(page_length)s OFFSET %(start)s""",
-		params, as_dict=True,
+		params,
+		as_dict=True,
 	)
 	for r in rows:
 		# normalize the check fields to ints for the client
@@ -437,9 +418,7 @@ def list_learned_patterns_page(
 		# the owner, so the promote action must warn them to scrub personal
 		# names/nuances first. Non-blocking; the board shows the flag + message.
 		r["personalise_origin"] = int(r.get("personalise_origin") or 0)
-		r["scrub_warning"] = (
-			_SCRUB_WARNING if r["personalise_origin"] else ""
-		)
+		r["scrub_warning"] = _SCRUB_WARNING if r["personalise_origin"] else ""
 		r["creation"] = str(r.get("creation") or "")
 		r["reviewed_at"] = str(r.get("reviewed_at") or "")
 		r["last_validated_at"] = str(r.get("last_validated_at") or "")
@@ -457,7 +436,8 @@ def list_learned_patterns_page(
 		WHERE {base_where}
 		GROUP BY domain
 		ORDER BY n DESC""",
-		params, as_dict=True,
+		params,
+		as_dict=True,
 	)
 	facets = {"domain": [{"value": x.dv, "count": x.n} for x in facet_rows]}
 
@@ -487,9 +467,7 @@ def _pending_apply_count() -> int:
 	would NEVER activate and would wedge this bar permanently. Approve refuses B/C
 	(they go through Acknowledge instead), but the effective_sensitivity filter is
 	the belt-and-suspenders so the bar can never stick."""
-	approved = frappe.db.count(
-		JLP, {"status": "Approved", "effective_sensitivity": "A"}
-	)
+	approved = frappe.db.count(JLP, {"status": "Approved", "effective_sensitivity": "A"})
 	return approved + _stale_pending_removal_count()
 
 
@@ -502,7 +480,7 @@ def _stale_pending_removal_count() -> int:
 
 
 def _review_activity() -> dict:
-	""""X of Y decided, last by <SM>" over the surfaced batch (section 6.4)."""
+	""" "X of Y decided, last by <SM>" over the surfaced batch (section 6.4)."""
 	total = frappe.db.count(
 		JLP,
 		{
@@ -526,11 +504,7 @@ def _review_activity() -> dict:
 		"decided": decided,
 		"total": total,
 		"last_by": last_by or "",
-		"last_by_name": (
-			(frappe.db.get_value("User", last_by, "full_name") or last_by)
-			if last_by
-			else ""
-		),
+		"last_by_name": ((frappe.db.get_value("User", last_by, "full_name") or last_by) if last_by else ""),
 	}
 
 
@@ -560,9 +534,7 @@ def _attach_question_enrichment(rows: list) -> None:
 	note_names = [q.answer_note for q in q_by_pattern.values() if q.answer_note]
 	transcripts: dict = {}
 	if note_names:
-		for n in frappe.get_all(
-			VOICE, filters={"name": ["in", note_names]}, fields=["name", "transcript"]
-		):
+		for n in frappe.get_all(VOICE, filters={"name": ["in", note_names]}, fields=["name", "transcript"]):
 			transcripts[n.name] = n.transcript or ""
 	for r in rows:
 		qr = q_by_pattern.get(r["name"])
@@ -595,6 +567,10 @@ def get_learned_pattern(name: str) -> dict:
 		"roles": [r.role for r in (doc.roles or [])],
 		"pattern_statement": doc.pattern_statement or "",
 		"skill_draft": doc.skill_draft or "",
+		"approved_draft": doc.get("approved_draft") or "",
+		# What re-detection has changed since the approval, so a reviewer looking
+		# at a redraft-staled row sees exactly which words moved (#482).
+		"approved_draft_diff": _approved_draft_diff(doc),
 		"draft_edited": int(doc.draft_edited or 0),
 		"draft_polished": int(doc.get("draft_polished") or 0),
 		"compiled_preview": _compiled_preview(doc),
@@ -637,6 +613,16 @@ def get_learned_pattern(name: str) -> dict:
 	}
 
 
+def _approved_draft_diff(doc) -> str:
+	"""Unified diff of the frozen approved text vs the latest detected draft.
+	Empty when the row was never approved or nothing moved - reuses the shared
+	``_unified_diff`` the go-to-chat bundle already renders."""
+	approved = (doc.get("approved_draft") or "").strip()
+	if not approved:
+		return ""
+	return _unified_diff(approved, (doc.skill_draft or "").strip(), "approved text", "latest detected draft")
+
+
 def _compiled_preview(doc) -> str:
 	"""The exact bullet THIS pattern would compile into (drill-down preview).
 	Uses ``compiler.preview_bullet(pattern_name)`` - the single-bullet renderer;
@@ -664,9 +650,7 @@ def _load_for_transition(name: str, allowed_sources: tuple, action: str):
 	subsequent ``doc.save`` adds the modified-timestamp concurrency check."""
 	doc = frappe.get_doc(JLP, name)
 	if doc.status not in allowed_sources:
-		frappe.throw(
-			_("Pattern {0} is {1}; cannot {2}.").format(name, doc.status, action)
-		)
+		frappe.throw(_("Pattern {0} is {1}; cannot {2}.").format(name, doc.status, action))
 	return doc
 
 
@@ -674,7 +658,14 @@ def _load_for_transition(name: str, allowed_sources: tuple, action: str):
 def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) -> dict:
 	"""Proposed->Approved (or Stale->Approved). Optional edit freezes the
 	evidence line (section 6.5): ``draft_edited=1`` and the frozen label is shown
-	on the board. Stamps reviewed_by / approved_by / reviewed_at."""
+	on the board. Stamps reviewed_by / approved_by / reviewed_at.
+
+	Approval also FREEZES the reviewed text into ``approved_draft`` (#482). The
+	compiler ships that snapshot, never the live ``skill_draft`` - nightly
+	re-detection rewrites ``skill_draft`` in place on any row that is not
+	SM-edited or LLM-polished, so without the snapshot a plain "looks good"
+	approve could be silently reworded (e.g. "mostly supplies" -> "supplies
+	only") and pushed org-wide unreviewed."""
 	_guard()
 	doc = _load_for_transition(name, ("Proposed", "Stale"), "approve")
 
@@ -699,11 +690,13 @@ def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) ->
 	# writes clamp to it) and a flag-origin stale_reason; drift-origin reasons
 	# are left for the drift pass to manage.
 	doc.flag_band_cap = ""
-	if (doc.stale_reason or "").startswith(_FLAG_STALE_PREFIX):
+	if (doc.stale_reason or "").startswith((_FLAG_STALE_PREFIX, REDRAFT_STALE_PREFIX)):
 		doc.stale_reason = None
 
 	now = now_datetime()
 	doc.status = "Approved"
+	# Freeze what this reviewer actually read: the compiler reads approved_draft.
+	doc.approved_draft = (doc.skill_draft or "").strip()
 	doc.reviewed_by = frappe.session.user
 	doc.approved_by = frappe.session.user
 	doc.reviewed_at = now
@@ -749,9 +742,7 @@ def acknowledge_learned_pattern(name: str) -> dict:
 	doc = _load_for_transition(name, ("Proposed", "Stale"), "acknowledge")
 	if (doc.effective_sensitivity or "") == "A":
 		frappe.throw(
-			_(
-				"Pattern {0} is A-class; approve it to apply, rather than acknowledging it."
-			).format(name)
+			_("Pattern {0} is A-class; approve it to apply, rather than acknowledging it.").format(name)
 		)
 	doc.status = "Rejected"
 	doc.review_note = ACK_NOTE
@@ -769,12 +760,12 @@ def unapprove_learned_pattern(name: str) -> dict:
 	is refused once the row is Active, and while an Apply is in flight."""
 	_guard()
 	if _apply_pending() or _apply_in_progress():
-		frappe.throw(
-			_("An Apply is in progress; wait for it to finish before un-approving.")
-		)
+		frappe.throw(_("An Apply is in progress; wait for it to finish before un-approving."))
 	doc = _load_for_transition(name, ("Approved",), "un-approve")
 	doc.status = "Proposed"
 	doc.approved_by = None
+	# The approval is withdrawn, so the frozen reviewed text goes with it.
+	doc.approved_draft = None
 	doc.save()
 	frappe.db.commit()
 	return {"ok": True, "status": doc.status}
@@ -802,9 +793,7 @@ def snooze_learned_pattern(name: str, days: int | str = 30) -> dict:
 		days = 0
 	if days not in _SNOOZE_DAYS:
 		frappe.throw(
-			_("Snooze duration must be one of: {0} days.").format(
-				", ".join(str(d) for d in _SNOOZE_DAYS)
-			)
+			_("Snooze duration must be one of: {0} days.").format(", ".join(str(d) for d in _SNOOZE_DAYS))
 		)
 	doc = _load_for_transition(name, ("Proposed",), "snooze")
 	doc.status = "Snoozed"
@@ -841,9 +830,7 @@ def batch_approve(names: str | list) -> dict:
 	blocked = [r.name for r in rows if (r.effective_sensitivity or "") in ("B", "C")]
 	if blocked:
 		frappe.throw(
-			_("Batch approve is A-class only; these need individual review: {0}.").format(
-				", ".join(blocked)
-			)
+			_("Batch approve is A-class only; these need individual review: {0}.").format(", ".join(blocked))
 		)
 
 	approved: list[str] = []
@@ -916,8 +903,7 @@ def polish_learned_draft(name: str) -> dict:
 	if (doc.effective_sensitivity or "") != "A":
 		frappe.throw(
 			_(
-				"Pattern {0} is {1}-class (insight only); only A-class (org-level) "
-				"drafts can be polished."
+				"Pattern {0} is {1}-class (insight only); only A-class (org-level) drafts can be polished."
 			).format(name, doc.effective_sensitivity or "B/C")
 		)
 
@@ -1016,8 +1002,7 @@ def draft_insight_skill_update(pattern_name: str) -> dict:
 		return _draft_envelope(
 			ok=False,
 			reason=(
-				f"pattern is {doc.status}; only "
-				f"{', '.join(_INSIGHT_APPLY_SOURCES)} insights can be applied"
+				f"pattern is {doc.status}; only {', '.join(_INSIGHT_APPLY_SOURCES)} insights can be applied"
 			),
 		)
 
@@ -1048,9 +1033,7 @@ def draft_insight_skill_update(pattern_name: str) -> dict:
 			title="jarvis insight-to-skill: unparseable draft output",
 			message=(raw or "")[:2000] if isinstance(raw, str) else repr(raw)[:2000],
 		)
-		return _draft_envelope(
-			ok=False, reason="the model returned unparseable output; try again"
-		)
+		return _draft_envelope(ok=False, reason="the model returned unparseable output; try again")
 	return _validated_draft(parsed, candidates)
 
 
@@ -1075,8 +1058,7 @@ def apply_insight_skill_update(
 	if (doc.effective_sensitivity or "") not in ("B", "C"):
 		frappe.throw(
 			_(
-				"Pattern {0} is A-class; approve it to apply, rather than folding "
-				"it into a custom skill."
+				"Pattern {0} is A-class; approve it to apply, rather than folding it into a custom skill."
 			).format(pattern_name)
 		)
 
@@ -1168,9 +1150,7 @@ def _insight_skill_candidates(doc) -> list[dict]:
 	for r in rows:
 		score = 0
 		if pat:
-			toks = _overlap_tokens(
-				f"{(r.skill_name or '').replace('-', ' ')} {r.description or ''}"
-			)
+			toks = _overlap_tokens(f"{(r.skill_name or '').replace('-', ' ')} {r.description or ''}")
 			score = len(pat & toks)
 		scored.append((score, r))
 	# Stable sort: rows arrive modified-desc, so ties keep recency order.
@@ -1217,8 +1197,7 @@ def _insight_draft_prompt(doc, candidates: list[dict]) -> str:
 		parts.append(f"Evidence (tail): {tail}")
 	if cand_payload:
 		parts.append(
-			'Candidate skills (the ONLY valid "update" targets):\n'
-			+ json.dumps(cand_payload, default=str)
+			'Candidate skills (the ONLY valid "update" targets):\n' + json.dumps(cand_payload, default=str)
 		)
 	else:
 		parts.append('There are no candidate skills; choose "create" or "none".')
@@ -1270,8 +1249,7 @@ def _validated_draft(parsed: dict, candidates: list[dict]) -> dict:
 	if not worth or action not in ("update", "create"):
 		return _draft_envelope(
 			ok=True,
-			reason=reason
-			or "The model did not find this insight worth applying to a skill.",
+			reason=reason or "The model did not find this insight worth applying to a skill.",
 		)
 
 	if action == "update":
@@ -1287,16 +1265,11 @@ def _validated_draft(parsed: dict, candidates: list[dict]) -> dict:
 			)
 		updated = str(parsed.get("updated_instructions") or "").strip()
 		if not updated:
-			return _draft_envelope(
-				ok=False, reason="the model returned no updated instructions; try again"
-			)
+			return _draft_envelope(ok=False, reason="the model returned no updated instructions; try again")
 		if len(updated) > MAX_INSTR_LEN:
 			return _draft_envelope(
 				ok=False,
-				reason=(
-					f"the drafted instructions exceed the {MAX_INSTR_LEN}-character "
-					"cap; try again"
-				),
+				reason=(f"the drafted instructions exceed the {MAX_INSTR_LEN}-character cap; try again"),
 			)
 		return _draft_envelope(
 			ok=True,
@@ -1310,9 +1283,7 @@ def _validated_draft(parsed: dict, candidates: list[dict]) -> dict:
 
 	ns = parsed.get("new_skill")
 	if not isinstance(ns, dict):
-		return _draft_envelope(
-			ok=False, reason="the model returned no new-skill draft; try again"
-		)
+		return _draft_envelope(ok=False, reason="the model returned no new-skill draft; try again")
 	slug = str(ns.get("skill_name") or "").strip().lower()
 	desc = str(ns.get("description") or "").strip()
 	instr = str(ns.get("instructions") or "").strip()
@@ -1382,12 +1353,7 @@ def _apply_create_target(new_skill) -> tuple[str, str]:
 	SM - the normal authored-skill ownership."""
 	ns = _parse_json(new_skill, None) if isinstance(new_skill, str) else new_skill
 	if not isinstance(ns, dict):
-		frappe.throw(
-			_(
-				"Provide the new skill as an object with skill_name, description "
-				"and instructions."
-			)
-		)
+		frappe.throw(_("Provide the new skill as an object with skill_name, description and instructions."))
 	from jarvis.chat.custom_skills_api import _create_custom_skill_impl
 
 	# Call the undecorated impl: this reviewer path is already authorized by
@@ -1453,11 +1419,6 @@ def flag_learned_default(name: str, note: str = "") -> dict:
 	affordance on the skill badge is a follow-up; this endpoint is the
 	contract."""
 	_system_user_guard()
-	if _is_self_hosted():
-		frappe.throw(
-			_("Pattern learning is not available on self-hosted benches."),
-			frappe.ValidationError,
-		)
 
 	note = frappe.utils.strip_html_tags(note or "").strip()[:_FLAG_NOTE_MAX]
 
@@ -1472,16 +1433,13 @@ def flag_learned_default(name: str, note: str = "") -> dict:
 		frappe.throw(_("Unknown learned pattern: {0}.").format(name))
 	if row.status not in ("Approved", "Active"):
 		frappe.throw(
-			_(
-				"Pattern {0} is {1}; only Active or Approved learned defaults can be flagged."
-			).format(name, row.status)
+			_("Pattern {0} is {1}; only Active or Approved learned defaults can be flagged.").format(
+				name, row.status
+			)
 		)
 
 	user = frappe.session.user
-	entries = [
-		e for e in (_parse_json(row.counter_evidence, []) or [])
-		if isinstance(e, dict)
-	]
+	entries = [e for e in (_parse_json(row.counter_evidence, []) or []) if isinstance(e, dict)]
 	now = now_datetime()
 	mine = next((e for e in entries if e.get("user") == user), None)
 	in_cooldown = False
@@ -1521,9 +1479,7 @@ def flag_learned_default(name: str, note: str = "") -> dict:
 	frappe.db.commit()
 
 	if demoted:
-		_notify_flag_demotion(
-			name, distinct_users, flags_count, band, staled=(status == "Stale")
-		)
+		_notify_flag_demotion(name, distinct_users, flags_count, band, staled=(status == "Stale"))
 
 	return {
 		"ok": True,
@@ -1571,7 +1527,7 @@ def _notify_flag_demotion(
 				f"Chat users flagged this learned default as wrong "
 				f"({distinct_users} user{'s' if distinct_users != 1 else ''}, "
 				f"{flags_count} flag{'s' if flags_count != 1 else ''}); its strength "
-				f"was demoted to {band}{tail}.\n\n\"{statement}\"\n\n"
+				f'was demoted to {band}{tail}.\n\n"{statement}"\n\n'
 				"Review it on the Learning board - approve it again if the habit "
 				"still holds, or reject it for good."
 			),
@@ -1761,21 +1717,24 @@ def set_learning_settings(payload: str | dict | None = None) -> dict:
 
 @frappe.whitelist()
 def get_learning_status() -> dict:
-	"""Last-run summary + next-run pointer + self-host flag. Deliberately NOT
-	self-host-gated (admin set still): it is the Analysis-tab probe used to render
-	the managed-only empty state, so it must stay reachable on self-host. Uses the
-	role-only admin check (not ``_admin_guard``) precisely to keep that self-host
-	exemption - matching its prior bare ``frappe.only_for`` behaviour."""
-	_admin_roles()
-	self_hosted = _is_self_hosted()
+	"""Last-run summary + next-run pointer. The Analysis-tab probe."""
+	_admin_guard()
 	s = frappe.get_single(SETTINGS)
 
 	latest = frappe.get_all(
 		RUN,
 		fields=[
-			"name", "status", "trigger", "started_at", "ended_at",
-			"proposals_created", "proposals_updated", "candidates_found",
-			"coverage_note", "creation", "scan_mode",
+			"name",
+			"status",
+			"trigger",
+			"started_at",
+			"ended_at",
+			"proposals_created",
+			"proposals_updated",
+			"candidates_found",
+			"coverage_note",
+			"creation",
+			"scan_mode",
 		],
 		order_by="creation desc",
 		limit=1,
@@ -1786,7 +1745,6 @@ def get_learning_status() -> dict:
 			latest_run[k] = str(latest_run.get(k) or "")
 
 	return {
-		"self_hosted": int(self_hosted),
 		"enabled": int(s.get("pattern_learning_enabled") or 0),
 		"last_run_at": str(s.get("pattern_last_run_at") or ""),
 		"last_run_status": s.get("pattern_last_run_status") or "",
@@ -1802,15 +1760,16 @@ def get_learning_status() -> dict:
 @frappe.whitelist()
 def get_review_access() -> dict:
 	"""Cheap reviewer-access probe - the Review-tab analogue of
-	``get_learning_status``. Role-only (reviewer set), NOT self-host-gated, so a
-	self-host bench can still render the managed-only empty state; reports
-	``self_hosted`` with the same shape conventions. Carries the two Review badge
+	``get_learning_status``. Role-only (reviewer set). Carries the two Review badge
 	counts so the tab renders without a second round-trip."""
-	_reviewer_roles()
-	self_hosted = _is_self_hosted()
+	_guard()
 	return {
-		"self_hosted": int(self_hosted),
 		"pending_promotions": frappe.db.count(PROMO, {"status": "Pending"}),
+		# Skill-promotion queue badge — mirrors the wiki ``pending_promotions``
+		# count plumbing exactly (Skills-area rework: skills get the reviewer queue
+		# the wiki already had). Feeds the Review-tab "Skill promotions" chip AND
+		# the outer tab badge (SkillsPage sums pending_patterns + both promotions).
+		"pending_skill_promotions": frappe.db.count(SKILL_PROMO, {"status": "Pending"}),
 		"pending_patterns": frappe.db.count(JLP, {"status": "Proposed", "surfaced": 1}),
 	}
 
@@ -1849,9 +1808,7 @@ def list_promotion_requests_page(
 		conds.append("(page LIKE %(q)s OR note LIKE %(q)s OR body_snapshot LIKE %(q)s)")
 	where = " AND ".join(conds) or "1=1"
 
-	total = frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tab{PROMO}` WHERE {where}", params
-	)[0][0]
+	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{PROMO}` WHERE {where}", params)[0][0]
 	rows = frappe.db.sql(
 		f"""SELECT name, page, from_scope, to_scope, target_role, note,
 			body_snapshot, status, owner, creation
@@ -1859,7 +1816,8 @@ def list_promotion_requests_page(
 		WHERE {where}
 		ORDER BY creation DESC, name ASC
 		LIMIT %(page_length)s OFFSET %(start)s""",
-		params, as_dict=True,
+		params,
+		as_dict=True,
 	)
 
 	# Batched enrichment: page titles + requester names in one query each.
@@ -1960,6 +1918,7 @@ def _neutralize(text: str) -> str:
 	shared neutralizer link_fetch/jarvis_wiki_page apply; the lazy import keeps
 	link_fetch's network dependencies off the learned_api import path."""
 	from jarvis.chat.link_fetch import _neutralize as _shared
+
 	return _shared(text)
 
 
@@ -1975,11 +1934,7 @@ def _unified_diff(a: str, b: str, fromfile: str, tofile: str) -> str:
 	b_lines = (b or "").splitlines()
 	if a_lines == b_lines:
 		return ""
-	return "\n".join(
-		difflib.unified_diff(
-			a_lines, b_lines, fromfile=fromfile, tofile=tofile, lineterm=""
-		)
-	)
+	return "\n".join(difflib.unified_diff(a_lines, b_lines, fromfile=fromfile, tofile=tofile, lineterm=""))
 
 
 def _user_line(user, lead: str = "It concerns") -> str:
@@ -2038,8 +1993,7 @@ def _pattern_chat_bundle(name: str) -> str:
 	if q:
 		target_user = q.get("user")
 		parts.append(
-			'This surfaced from a question the user was asked: '
-			f'"{_excerpt(q.get("question"), 200)}"'
+			f'This surfaced from a question the user was asked: "{_excerpt(q.get("question"), 200)}"'
 		)
 		if q.get("status") == "Answered" and q.get("answer_note"):
 			transcript = frappe.db.get_value(VOICE, q["answer_note"], "transcript") or ""
@@ -2102,23 +2056,16 @@ def _promotion_chat_bundle(name: str) -> str:
 
 	# Implication (who gains visibility on approval).
 	if req.to_scope == "Role":
-		audience = (
-			f"everyone with the {req.target_role} role" if req.target_role else "a role group"
-		)
-		parts.append(
-			f"Implication: approving publishes this to Role scope - visible to {audience}."
-		)
+		audience = f"everyone with the {req.target_role} role" if req.target_role else "a role group"
+		parts.append(f"Implication: approving publishes this to Role scope - visible to {audience}.")
 	else:
 		parts.append(
-			"Implication: approving publishes this to Org scope - visible to everyone "
-			"in the organisation."
+			"Implication: approving publishes this to Org scope - visible to everyone in the organisation."
 		)
 
 	# Diff: the target page's current body vs the body after this append.
 	current, after = _promotion_target_body_and_after(req)
-	diff = _unified_diff(
-		current, after, "target page (current)", "target page (after approval)"
-	)
+	diff = _unified_diff(current, after, "target page (current)", "target page (after approval)")
 	if diff:
 		parts.append(f"{_DIFF_LABEL}\n{_clip(diff, _DIFF_MAX_CHARS)}")
 
@@ -2148,9 +2095,7 @@ def _promotion_target_body_and_after(req):
 		else:
 			target_slug = wiki._normalize_slug(base)
 		tname = frappe.db.get_value(WIKI, {"slug": target_slug}, "name")
-		current = _neutralize(
-			(frappe.db.get_value(WIKI, tname, "body_md") or "").strip() if tname else ""
-		)
+		current = _neutralize((frappe.db.get_value(WIKI, tname, "body_md") or "").strip() if tname else "")
 		after = f"{current}\n\n{section}".strip() if current else section
 		return current, after
 	except Exception:
@@ -2179,20 +2124,20 @@ def trigger_followup_question(name: str, ask: str) -> dict:
 
 	target_user, source_pattern = _resolve_followup_target(name)
 	if not target_user or target_user in ("Administrator", "Guest"):
-		frappe.throw(
-			_("Could not determine which user to ask for review item {0}.").format(name)
-		)
+		frappe.throw(_("Could not determine which user to ask for review item {0}.").format(name))
 
 	question_text = _rephrase_followup_question(ask)
-	q = frappe.get_doc({
-		"doctype": PQ,
-		"user": target_user,
-		"question": question_text,
-		"origin": "From your organisation",
-		"status": "Unanswered",
-		"asked_by": frappe.session.user,
-		"source_pattern": source_pattern or None,
-	})
+	q = frappe.get_doc(
+		{
+			"doctype": PQ,
+			"user": target_user,
+			"question": question_text,
+			"origin": "From your organisation",
+			"status": "Unanswered",
+			"asked_by": frappe.session.user,
+			"source_pattern": source_pattern or None,
+		}
+	)
 	q.flags.ignore_permissions = True
 	q.insert()
 	frappe.db.commit()

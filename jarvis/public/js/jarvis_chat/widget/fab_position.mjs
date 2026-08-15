@@ -19,44 +19,46 @@ export const STORAGE_KEY = "jarvis-fab-pos";
 /** A center X at or past the viewport midpoint counts as the right side
  * (matches which edge a released drag snaps to). */
 export function chooseSide(centerX, vw) {
-	return centerX >= vw / 2 ? "right" : "left";
+  return centerX >= vw / 2 ? "right" : "left";
 }
 
 /** Clamps a top-left Y (px) into the dockable band [topInset, vh - bottomInset
  * - fabSize]. When the viewport is too short for that band to be positive,
  * it degenerates to the single point at topInset. */
 export function clampY(y, viewport) {
-	const { topInset, bottomInset, vh, fabSize } = viewport;
-	const min = topInset;
-	const max = Math.max(topInset, vh - bottomInset - fabSize);
-	return Math.min(Math.max(y, min), max);
+  const { topInset, bottomInset, vh, fabSize } = viewport;
+  const min = topInset;
+  const max = Math.max(topInset, vh - bottomInset - fabSize);
+  return Math.min(Math.max(y, min), max);
 }
 
 /** Docked X (px) for a side. Anything other than "left" resolves as "right",
  * the same default resolvePosition() falls back to for invalid input. */
 export function xForSide(side, viewport) {
-	const { vw, edgeInset, fabSize } = viewport;
-	return side === "left" ? edgeInset : vw - edgeInset - fabSize;
+  const { vw, edgeInset, fabSize } = viewport;
+  return side === "left" ? edgeInset : vw - edgeInset - fabSize;
 }
 
 /** Y (px) -> ratio within the dockable band. Non-finite input is treated as
  * the band's top; a degenerate band always reports ratio 0. */
 export function yToRatio(y, viewport) {
-	const { topInset, bottomInset, vh, fabSize } = viewport;
-	const min = topInset;
-	const max = Math.max(topInset, vh - bottomInset - fabSize);
-	const range = max - min;
-	const safeY = Number.isFinite(y) ? y : min;
-	return range === 0 ? 0 : (clampY(safeY, viewport) - min) / range;
+  const { topInset, bottomInset, vh, fabSize } = viewport;
+  const min = topInset;
+  const max = Math.max(topInset, vh - bottomInset - fabSize);
+  const range = max - min;
+  const safeY = Number.isFinite(y) ? y : min;
+  return range === 0 ? 0 : (clampY(safeY, viewport) - min) / range;
 }
 
 /** Inverse of yToRatio(). Non-finite or out-of-[0,1] ratios clamp first. */
 export function ratioToY(ratio, viewport) {
-	const { topInset, bottomInset, vh, fabSize } = viewport;
-	const min = topInset;
-	const max = Math.max(topInset, vh - bottomInset - fabSize);
-	const safeRatio = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
-	return min + safeRatio * (max - min);
+  const { topInset, bottomInset, vh, fabSize } = viewport;
+  const min = topInset;
+  const max = Math.max(topInset, vh - bottomInset - fabSize);
+  const safeRatio = Number.isFinite(ratio)
+    ? Math.min(1, Math.max(0, ratio))
+    : 0;
+  return min + safeRatio * (max - min);
 }
 
 /** Parses the localStorage payload. Returns null for anything that isn't
@@ -64,22 +66,22 @@ export function ratioToY(ratio, viewport) {
  * shape, invalid side, non-numeric/non-finite yRatio); a finite yRatio
  * outside [0, 1] is clamped rather than rejected. */
 export function parseSavedPosition(raw) {
-	if (typeof raw !== "string") return null;
-	let obj;
-	try {
-		obj = JSON.parse(raw);
-	} catch (_) {
-		return null;
-	}
-	if (!obj || typeof obj !== "object") return null;
-	const { side, yRatio } = obj;
-	if (side !== "left" && side !== "right") return null;
-	if (typeof yRatio !== "number" || !Number.isFinite(yRatio)) return null;
-	return { side, yRatio: Math.min(1, Math.max(0, yRatio)) };
+  if (typeof raw !== "string") return null;
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+  if (!obj || typeof obj !== "object") return null;
+  const { side, yRatio } = obj;
+  if (side !== "left" && side !== "right") return null;
+  if (typeof yRatio !== "number" || !Number.isFinite(yRatio)) return null;
+  return { side, yRatio: Math.min(1, Math.max(0, yRatio)) };
 }
 
 export function serializePosition({ side, yRatio }) {
-	return JSON.stringify({ side, yRatio });
+  return JSON.stringify({ side, yRatio });
 }
 
 /** Combines a parsed (possibly null/malformed) saved position with a
@@ -88,46 +90,52 @@ export function serializePosition({ side, yRatio }) {
  * viewport-independent since positions are stored as a resolution-independent
  * ratio. */
 export function resolvePosition(saved, viewport) {
-	const valid =
-		saved &&
-		(saved.side === "left" || saved.side === "right") &&
-		typeof saved.yRatio === "number" &&
-		Number.isFinite(saved.yRatio);
-	if (!valid) return { side: "right", yRatio: 1 };
-	return { side: saved.side, yRatio: Math.min(1, Math.max(0, saved.yRatio)) };
+  const valid =
+    saved &&
+    (saved.side === "left" || saved.side === "right") &&
+    typeof saved.yRatio === "number" &&
+    Number.isFinite(saved.yRatio);
+  if (!valid) return { side: "right", yRatio: 1 };
+  return { side: saved.side, yRatio: Math.min(1, Math.max(0, saved.yRatio)) };
 }
 
 /** Starts a drag session anchored at the FAB's current pixel position and the
  * pointer's down position. */
 export function dragStart(fabX, fabY, px, py) {
-	return { startFabX: fabX, startFabY: fabY, startPx: px, startPy: py, dragging: false };
+  return {
+    startFabX: fabX,
+    startFabY: fabY,
+    startPx: px,
+    startPy: py,
+    dragging: false,
+  };
 }
 
 /** Advances the session to a new pointer position. `dragging` latches true
  * once the travelled distance reaches `threshold` and never un-latches, so a
  * drag that returns to its origin is still a drag, not a tap. */
 export function dragMove(session, px, py, threshold) {
-	const dist = Math.hypot(px - session.startPx, py - session.startPy);
-	return {
-		...session,
-		currentPx: px,
-		currentPy: py,
-		dragging: session.dragging || dist >= threshold,
-	};
+  const dist = Math.hypot(px - session.startPx, py - session.startPy);
+  return {
+    ...session,
+    currentPx: px,
+    currentPy: py,
+    dragging: session.dragging || dist >= threshold,
+  };
 }
 
 /** Resolves a session into the final docked position. `tap` is true only if
  * `dragging` never latched during the session. */
 export function dragEnd(session, viewport) {
-	const px = session.currentPx ?? session.startPx;
-	const py = session.currentPy ?? session.startPy;
-	const fabX = session.startFabX + (px - session.startPx);
-	const fabY = session.startFabY + (py - session.startPy);
-	const y = clampY(fabY, viewport);
-	const side = chooseSide(fabX + viewport.fabSize / 2, viewport.vw);
-	const x = xForSide(side, viewport);
-	const yRatio = yToRatio(y, viewport);
-	return { tap: !session.dragging, side, x, y, yRatio };
+  const px = session.currentPx ?? session.startPx;
+  const py = session.currentPy ?? session.startPy;
+  const fabX = session.startFabX + (px - session.startPx);
+  const fabY = session.startFabY + (py - session.startPy);
+  const y = clampY(fabY, viewport);
+  const side = chooseSide(fabX + viewport.fabSize / 2, viewport.vw);
+  const x = xForSide(side, viewport);
+  const yRatio = yToRatio(y, viewport);
+  return { tap: !session.dragging, side, x, y, yRatio };
 }
 
 /** Inactivity timer built on injectable timer functions so it's testable
@@ -135,23 +143,23 @@ export function dragEnd(session, viewport) {
  * creation; `poke()` restarts the countdown; `dispose()` cancels it and makes
  * further pokes a no-op. */
 export function createIdleTimer({
-	delayMs,
-	onIdle,
-	setTimeoutFn = setTimeout,
-	clearTimeoutFn = clearTimeout,
+  delayMs,
+  onIdle,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
 }) {
-	let disposed = false;
-	let handle = setTimeoutFn(onIdle, delayMs);
-	return {
-		poke() {
-			if (disposed) return;
-			clearTimeoutFn(handle);
-			handle = setTimeoutFn(onIdle, delayMs);
-		},
-		dispose() {
-			if (disposed) return;
-			disposed = true;
-			clearTimeoutFn(handle);
-		},
-	};
+  let disposed = false;
+  let handle = setTimeoutFn(onIdle, delayMs);
+  return {
+    poke() {
+      if (disposed) return;
+      clearTimeoutFn(handle);
+      handle = setTimeoutFn(onIdle, delayMs);
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      clearTimeoutFn(handle);
+    },
+  };
 }

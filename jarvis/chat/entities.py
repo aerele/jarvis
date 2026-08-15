@@ -37,17 +37,19 @@ WIKI_PAGE_TYPES = {
 }
 
 # Transactional doctypes get one Doctype-level page each (ref_name None).
-TRANSACTIONAL_DOCTYPES = frozenset({
-	"Sales Invoice",
-	"Sales Order",
-	"Purchase Invoice",
-	"Purchase Order",
-	"Delivery Note",
-	"Purchase Receipt",
-	"Payment Entry",
-	"Journal Entry",
-	"Stock Entry",
-})
+TRANSACTIONAL_DOCTYPES = frozenset(
+	{
+		"Sales Invoice",
+		"Sales Order",
+		"Purchase Invoice",
+		"Purchase Order",
+		"Delivery Note",
+		"Purchase Receipt",
+		"Payment Entry",
+		"Journal Entry",
+		"Stock Entry",
+	}
+)
 
 _MAX_ENTITIES = 20
 # Fetch window before dedupe: tool-heavy turns repeat the same doc many times.
@@ -61,9 +63,7 @@ def refs_from_tool(args: dict | None, result) -> tuple[str | None, str | None]:
 	try:
 		from jarvis import audit
 
-		doctype, name, _method = audit._ref(
-			args if isinstance(args, dict) else {}, result
-		)
+		doctype, name, _method = audit._ref(args if isinstance(args, dict) else {}, result)
 		if doctype and name:
 			return str(doctype), str(name)
 	except Exception:

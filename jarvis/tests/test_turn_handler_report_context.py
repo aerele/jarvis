@@ -28,21 +28,25 @@ class TestFormatReportFilters(FrappeTestCase):
 		"""None / "" / [] / {} are all "unset" from the operator's
 		perspective - dropping them keeps the prompt line tight."""
 		self.assertEqual(
-			_format_report_filters({
-				"customer": None,
-				"company": "",
-				"cost_centers": [],
-				"tag_filters": {},
-			}),
+			_format_report_filters(
+				{
+					"customer": None,
+					"company": "",
+					"cost_centers": [],
+					"tag_filters": {},
+				}
+			),
 			"",
 		)
 
 	def test_scalar_values_render_as_key_repr_pairs(self):
-		out = _format_report_filters({
-			"company": "Acme Ltd",
-			"from_date": "2026-01-01",
-			"show_opening_entries": 1,
-		})
+		out = _format_report_filters(
+			{
+				"company": "Acme Ltd",
+				"from_date": "2026-01-01",
+				"show_opening_entries": 1,
+			}
+		)
 		self.assertTrue(out.startswith(" with filters {"))
 		self.assertIn("company='Acme Ltd'", out)
 		self.assertIn("from_date='2026-01-01'", out)
@@ -53,10 +57,12 @@ class TestFormatReportFilters(FrappeTestCase):
 		"""Frappe filters can be lists (multi-select) or ``["op", "value"]``
 		pairs (negation, ranges). Both must render as-is so the model
 		can call ``run_report`` with the same shape."""
-		out = _format_report_filters({
-			"account": ["Debtors", "Creditors"],
-			"posting_date": ["between", ["2026-01-01", "2026-01-31"]],
-		})
+		out = _format_report_filters(
+			{
+				"account": ["Debtors", "Creditors"],
+				"posting_date": ["between", ["2026-01-01", "2026-01-31"]],
+			}
+		)
 		self.assertIn("account=['Debtors', 'Creditors']", out)
 		self.assertIn("posting_date=['between', ['2026-01-01', '2026-01-31']]", out)
 
@@ -107,8 +113,7 @@ class TestPrependDocContextReportBranch(FrappeTestCase):
 		)
 		self.assertEqual(
 			out,
-			"[Viewing: General Ledger report; resolve 'this'/'here' against it]"
-			"\n\nwhy zero rows?",
+			"[Viewing: General Ledger report; resolve 'this'/'here' against it]\n\nwhy zero rows?",
 		)
 
 	def test_report_name_with_filters(self):
@@ -156,8 +161,7 @@ class TestPrependDocContextReportBranch(FrappeTestCase):
 		)
 		self.assertEqual(
 			out,
-			"[Viewing: Sales Invoice SINV-0001; resolve 'this'/'here' against it]"
-			"\n\nis this overdue?",
+			"[Viewing: Sales Invoice SINV-0001; resolve 'this'/'here' against it]\n\nis this overdue?",
 		)
 
 	def test_empty_context_returns_unchanged(self):
@@ -184,6 +188,5 @@ class TestPrependDocContextReportBranch(FrappeTestCase):
 		)
 		self.assertEqual(
 			out,
-			"[Viewing: Stock Ledger report; resolve 'this'/'here' against it]"
-			"\n\ntell me about this",
+			"[Viewing: Stock Ledger report; resolve 'this'/'here' against it]\n\ntell me about this",
 		)

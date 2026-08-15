@@ -1,5 +1,5 @@
 """Unit tests for jarvis.chat.canvas — the pure detection/classification/strip
-helpers that turn an agent reply referencing openclaw artifacts into render
+helpers that turn an agent reply referencing agent artifacts into render
 metadata. Network fetch + File persistence are covered by the worker path.
 """
 
@@ -29,9 +29,7 @@ class TestCanvasDetection(unittest.TestCase):
 			),
 			["charts/sales-orders-overdue-june-2026.html"],
 		)
-		self.assertEqual(
-			canvas.detect_canvas_names("see canvas/a/b/c/deep.svg"), ["a/b/c/deep.svg"]
-		)
+		self.assertEqual(canvas.detect_canvas_names("see canvas/a/b/c/deep.svg"), ["a/b/c/deep.svg"])
 
 	def test_detect_pdf_image_excel(self):
 		self.assertEqual(canvas.detect_canvas_names("canvas/invoice.pdf"), ["invoice.pdf"])
@@ -73,9 +71,7 @@ class TestCanvasDetection(unittest.TestCase):
 	def test_title_from_filename_and_title_tag(self):
 		self.assertEqual(canvas._title_for("charts/sales-this-month.svg", b"", "svg"), "Sales This Month")
 		self.assertEqual(canvas._title_for("invoice.pdf", b"%PDF-1.7", "pdf"), "Invoice")
-		self.assertEqual(
-			canvas._title_for("x.html", b"<title>My Chart</title>", "html"), "My Chart"
-		)
+		self.assertEqual(canvas._title_for("x.html", b"<title>My Chart</title>", "html"), "My Chart")
 
 	def test_http_base(self):
 		self.assertEqual(canvas._http_base("ws://127.0.0.1:19002"), "http://127.0.0.1:19002")

@@ -18,6 +18,7 @@ Channel name is site-scoped: ``jarvis:chat:send:<site>``. Site scoping
 lets the realtime process (which serves all sites on the bench) keep one
 subscription per active site without cross-site bleed.
 """
+
 from __future__ import annotations
 
 import json

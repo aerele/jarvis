@@ -16,7 +16,13 @@
 		<!-- compact (embedded in the composer toolbar): icon-only, minimal chrome -->
 		<template v-else-if="compact">
 			<template v-if="phase === 'recording'">
-				<Button variant="solid" theme="red" icon="square" :tooltip="'Stop'" @click="finish" />
+				<Button
+					variant="solid"
+					theme="red"
+					icon="square"
+					:tooltip="'Stop'"
+					@click="finish"
+				/>
 				<span
 					class="inline-flex items-center gap-1.5 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs text-ink-gray-7"
 				>
@@ -63,10 +69,11 @@
 // useAudioRecorder composable (300 s hard cap lives there; onAutoStop still
 // transcribes) and voice.transcribeAudio, then hands the verbatim text to the
 // parent via @transcript - the parent owns the editable textarea + Save.
-import { ref, computed, onBeforeUnmount } from "vue"
-import { Button, toast } from "frappe-ui"
-import { useAudioRecorder } from "@/composables/useAudioRecorder"
-import { transcribeAudio } from "@/api/voice"
+import { ref, computed, onBeforeUnmount } from "vue";
+import { Button, toast } from "frappe-ui";
+import { useAudioRecorder } from "@/composables/useAudioRecorder";
+import { transcribeAudio } from "@/api/voice";
+import { errHtml } from "@/lib/errors";
 
 defineProps({
 	// Compact/embedded mode for the Personalise ChatComposer toolbar: icon-only
@@ -75,72 +82,68 @@ defineProps({
 	// keeps the standalone Business-tab rendering byte-for-byte. All recording/
 	// transcribe logic and the @transcript(text, durationS) emit are identical.
 	compact: { type: Boolean, default: false },
-})
+});
 
-const emit = defineEmits(["transcript"])
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
+const emit = defineEmits(["transcript"]);
 
 const rec = useAudioRecorder({
 	onAutoStop: (r) => {
-		toast.info("Recording stopped at the 5-minute limit - transcribing.")
-		transcribe(r)
+		toast.info("Recording stopped at the 5-minute limit - transcribing.");
+		transcribe(r);
 	},
-})
+});
 
 // UI phase on top of the recorder's own state: 'transcribing' has no recorder
 // equivalent (the mic is already released while the upload runs).
-const phase = ref("idle") // 'idle' | 'recording' | 'transcribing'
+const phase = ref("idle"); // 'idle' | 'recording' | 'transcribing'
 
 const clock = computed(() => {
-	const s = rec.durationS || 0
-	return Math.floor(s / 60) + ":" + String(Math.max(0, s) % 60).padStart(2, "0")
-})
+	const s = rec.durationS || 0;
+	return Math.floor(s / 60) + ":" + String(Math.max(0, s) % 60).padStart(2, "0");
+});
 
 async function begin() {
-	await rec.start()
+	await rec.start();
 	if (rec.state === "error") {
-		toast.error(rec.error || "Couldn't start the microphone.")
-		return
+		toast.error(rec.error || "Couldn't start the microphone.");
+		return;
 	}
-	if (rec.state === "recording") phase.value = "recording"
+	if (rec.state === "recording") phase.value = "recording";
 }
 
 async function finish() {
-	if (phase.value !== "recording") return
-	phase.value = "transcribing"
-	const r = await rec.stop()
+	if (phase.value !== "recording") return;
+	phase.value = "transcribing";
+	const r = await rec.stop();
 	if (!r || !r.blob || !r.blob.size) {
-		phase.value = "idle"
-		if (rec.state === "error") toast.error(rec.error || "Recording failed. Try again.")
-		return
+		phase.value = "idle";
+		if (rec.state === "error") toast.error(rec.error || "Recording failed. Try again.");
+		return;
 	}
-	await transcribe(r)
+	await transcribe(r);
 }
 
 async function transcribe(r) {
-	phase.value = "transcribing"
+	phase.value = "transcribing";
 	try {
-		const res = await transcribeAudio(r.blob, { durationS: r.durationS })
-		const text = ((res && res.text) || "").trim()
+		const res = await transcribeAudio(r.blob, { durationS: r.durationS });
+		const text = ((res && res.text) || "").trim();
 		// Second arg carries the recording length so consumers can tag the
 		// note kind as Voice (Personalise composer); older handlers that take
 		// only (text) simply ignore it.
-		if (text) emit("transcript", text, r.durationS || 0)
-		else toast.error("Nothing was transcribed - try again closer to the microphone.")
+		if (text) emit("transcript", text, r.durationS || 0);
+		else toast.error("Nothing was transcribed - try again closer to the microphone.");
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		phase.value = "idle"
+		phase.value = "idle";
 	}
 }
 
 function discard() {
-	rec.cancel()
-	phase.value = "idle"
+	rec.cancel();
+	phase.value = "idle";
 }
 
-onBeforeUnmount(() => rec.cancel())
+onBeforeUnmount(() => rec.cancel());
 </script>

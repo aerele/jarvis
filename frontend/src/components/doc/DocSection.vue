@@ -34,17 +34,17 @@
 // (rotate-90 when open), max-height transition, sections separated by border-t
 // (first:border-t-0). #header-suffix is additive (status badges next to the
 // label, e.g. macro "Summarized prompt").
-import { ref } from "vue"
+import { ref } from "vue";
 
 const props = defineProps({
 	label: { type: String, default: "" },
 	opened: { type: Boolean, default: true },
 	collapsible: { type: Boolean, default: true },
-})
+});
 
-const isOpened = ref(props.opened)
+const isOpened = ref(props.opened);
 
 function toggle() {
-	isOpened.value = !isOpened.value
+	isOpened.value = !isOpened.value;
 }
 </script>

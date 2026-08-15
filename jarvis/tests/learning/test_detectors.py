@@ -43,14 +43,16 @@ def _po_rows(supplier, consequent, start_date, count, step_days=1, created_day=N
 			created = f"{created_day} 03:{(i * 30) // 60:02d}:{(i * 30) % 60:02d}"
 		else:
 			created = f"{day} 10:00:00"
-		rows.append({
-			"unit_id": f"{supplier}-{consequent}-{i}",
-			"antecedent": supplier,
-			"consequent": consequent,
-			"company": factory.ALPHA,
-			"day": day,
-			"created": created,
-		})
+		rows.append(
+			{
+				"unit_id": f"{supplier}-{consequent}-{i}",
+				"antecedent": supplier,
+				"consequent": consequent,
+				"company": factory.ALPHA,
+				"day": day,
+				"created": created,
+			}
+		)
 	return rows
 
 
@@ -204,11 +206,28 @@ class TestTier1Detectors(FrappeTestCase):
 		res = self._run("sell-group-payment-terms", factory.ALPHA)
 		cand = _find(res.candidates, antecedent_value="Dealer")
 		required = {
-			"detector_id", "detector_version", "registry_version", "domain",
-			"company", "pattern_key", "roles", "pattern_statement", "skill_draft",
-			"support_n", "n_rows", "exception_n", "confidence_pct", "wilson_low",
-			"gap", "strength_band", "temporal_spread", "evidence", "exceptions",
-			"exceptions_cluster", "sensitivity", "effective_sensitivity",
+			"detector_id",
+			"detector_version",
+			"registry_version",
+			"domain",
+			"company",
+			"pattern_key",
+			"roles",
+			"pattern_statement",
+			"skill_draft",
+			"support_n",
+			"n_rows",
+			"exception_n",
+			"confidence_pct",
+			"wilson_low",
+			"gap",
+			"strength_band",
+			"temporal_spread",
+			"evidence",
+			"exceptions",
+			"exceptions_cluster",
+			"sensitivity",
+			"effective_sensitivity",
 			"not_applicable",
 		}
 		self.assertTrue(required.issubset(set(cand)), required - set(cand))
@@ -248,12 +267,14 @@ def _usage_rows(consequent, n, start=0):
 	rows = []
 	for i in range(n):
 		day = frappe.utils.add_days("2025-09-01", start + i)  # distinct calendar days
-		rows.append({
-			"unit_id": f"row-{start + i}",
-			"consequent": consequent,
-			"day": day,
-			"created": f"{day} 10:00:00",
-		})
+		rows.append(
+			{
+				"unit_id": f"row-{start + i}",
+				"consequent": consequent,
+				"day": day,
+				"created": f"{day} 10:00:00",
+			}
+		)
 	return rows
 
 
@@ -261,31 +282,41 @@ class TestConfigDetectorsFake(FrappeTestCase):
 	def test_default_vs_usage_proposes_on_divergence(self):
 		spec = registry.get_detector("cfg-default-vs-usage")
 		# configured default = Standard Selling; realized usage = Custom PL
-		db = _FakePatternDB([
-			("tabSingles", [{"value": "Standard Selling"}]),
-			("tabSales Invoice", _usage_rows("Custom PL", 40)),
-		])
-		out = config_detectors.postprocess_default_vs_usage(None, spec, None, db, {"window_start": "2025-01-01"})
+		db = _FakePatternDB(
+			[
+				("tabSingles", [{"value": "Standard Selling"}]),
+				("tabSales Invoice", _usage_rows("Custom PL", 40)),
+			]
+		)
+		out = config_detectors.postprocess_default_vs_usage(
+			None, spec, None, db, {"window_start": "2025-01-01"}
+		)
 		self.assertEqual(len(out), 1)
 		self.assertEqual(out[0]["consequent_value"], "Custom PL")
 		self.assertEqual(out[0]["evidence"]["configured_default"], "Standard Selling")
 
 	def test_default_vs_usage_silent_when_usage_matches_default(self):
 		spec = registry.get_detector("cfg-default-vs-usage")
-		db = _FakePatternDB([
-			("tabSingles", [{"value": "Standard Selling"}]),
-			("tabSales Invoice", _usage_rows("Standard Selling", 40)),
-		])
-		out = config_detectors.postprocess_default_vs_usage(None, spec, None, db, {"window_start": "2025-01-01"})
+		db = _FakePatternDB(
+			[
+				("tabSingles", [{"value": "Standard Selling"}]),
+				("tabSales Invoice", _usage_rows("Standard Selling", 40)),
+			]
+		)
+		out = config_detectors.postprocess_default_vs_usage(
+			None, spec, None, db, {"window_start": "2025-01-01"}
+		)
 		self.assertEqual(out, [])
 
 	def test_naming_series_merges_and_proposes(self):
 		spec = registry.get_detector("cfg-naming-series")
-		db = _FakePatternDB([
-			("naming_series` AS consequent", _usage_rows("SINV-.####", 30)),
-			("tabProperty Setter", []),
-			("tabSeries", [{"series": "SINV-", "current": 42}]),
-		])
+		db = _FakePatternDB(
+			[
+				("naming_series` AS consequent", _usage_rows("SINV-.####", 30)),
+				("tabProperty Setter", []),
+				("tabSeries", [{"series": "SINV-", "current": 42}]),
+			]
+		)
 		out = config_detectors.postprocess_naming_series(None, spec, None, db, {"window_start": "2025-01-01"})
 		self.assertGreaterEqual(len(out), 1)
 		first = out[0]
@@ -304,13 +335,15 @@ class TestEnforcementCrossRef(FrappeTestCase):
 
 			frappe.db.delete("Server Script", {"name": name})
 			doc = frappe.new_doc("Server Script")
-			doc.update({
-				"script_type": "DocType Event",
-				"reference_doctype": "Purchase Invoice",
-				"doctype_event": "Before Save",
-				"disabled": 0,
-				"script": "if doc.update_stock: pass",
-			})
+			doc.update(
+				{
+					"script_type": "DocType Event",
+					"reference_doctype": "Purchase Invoice",
+					"doctype_event": "Before Save",
+					"disabled": 0,
+					"script": "if doc.update_stock: pass",
+				}
+			)
 			doc.name = name
 			doc.flags.name_set = True
 			doc.db_insert()
@@ -400,13 +433,15 @@ class TestEnforcementFires(FrappeTestCase):
 		frappe.db.delete("Server Script", {"name": self.SCRIPT})
 		try:
 			doc = frappe.new_doc("Server Script")
-			doc.update({
-				"script_type": "DocType Event",
-				"reference_doctype": "Purchase Order",
-				"doctype_event": "Before Save",
-				"disabled": 0,
-				"script": "if doc.get('items'): pass  # touches is_stock_item",
-			})
+			doc.update(
+				{
+					"script_type": "DocType Event",
+					"reference_doctype": "Purchase Order",
+					"doctype_event": "Before Save",
+					"disabled": 0,
+					"script": "if doc.get('items'): pass  # touches is_stock_item",
+				}
+			)
 			doc.name = self.SCRIPT
 			doc.flags.name_set = True
 			doc.db_insert()
@@ -497,8 +532,13 @@ class TestScannedRows(FrappeTestCase):
 	def test_run_detector_charges_materialized_rows(self):
 		spec = registry.get_detector("acct-mode-of-payment")
 		rows = [
-			{"unit_id": f"pe{i}", "antecedent": "Receive", "consequent": "Cash",
-			 "day": frappe.utils.add_days("2025-09-01", i), "created": "2025-09-01 10:00:00"}
+			{
+				"unit_id": f"pe{i}",
+				"antecedent": "Receive",
+				"consequent": "Cash",
+				"day": frappe.utils.add_days("2025-09-01", i),
+				"created": "2025-09-01 10:00:00",
+			}
 			for i in range(7)
 		]
 		res = run_detector(spec, factory.ALPHA, _RowsDB(rows))
@@ -559,25 +599,31 @@ class TestPrintFormatDetector(FrappeTestCase):
 		# (wipe_print_state clears the state row; set_value on a missing row is
 		# a silent no-op, so ensure it exists first.)
 		if not frappe.db.exists("Jarvis Pattern Detector State", self.DETECTOR_ID):
-			frappe.get_doc({
-				"doctype": "Jarvis Pattern Detector State",
-				"detector_id": self.DETECTOR_ID,
-				"enabled": 1,
-			}).insert(ignore_permissions=True)
+			frappe.get_doc(
+				{
+					"doctype": "Jarvis Pattern Detector State",
+					"detector_id": self.DETECTOR_ID,
+					"enabled": 1,
+				}
+			).insert(ignore_permissions=True)
 		frappe.db.set_value(
-			"Jarvis Pattern Detector State", self.DETECTOR_ID, "not_applicable", 1,
+			"Jarvis Pattern Detector State",
+			self.DETECTOR_ID,
+			"not_applicable",
+			1,
 			update_modified=False,
 		)
 		frappe.db.commit()
 		try:
-			res = run_detector(
-				registry.get_detector(self.DETECTOR_ID), factory.ALPHA, PatternDB()
-			)
+			res = run_detector(registry.get_detector(self.DETECTOR_ID), factory.ALPHA, PatternDB())
 			self.assertIsNotNone(res.skipped_reason)
 			self.assertIn("unavailable", res.skipped_reason)
 		finally:
 			frappe.db.set_value(
-				"Jarvis Pattern Detector State", self.DETECTOR_ID, "not_applicable", 0,
+				"Jarvis Pattern Detector State",
+				self.DETECTOR_ID,
+				"not_applicable",
+				0,
 				update_modified=False,
 			)
 			frappe.db.commit()
@@ -772,9 +818,7 @@ class TestTier2Detectors(FrappeTestCase):
 		self.assertIn("geography", north["pattern_statement"].lower())
 		self.assertIn("geography", north["skill_draft"].lower())
 		# trap: an active Tax Rule already encodes the 12% template -> suppressed
-		self.assertIsNone(
-			_find(res.candidates, consequent_value=factory.EXPECT["south_tax_template"])
-		)
+		self.assertIsNone(_find(res.candidates, consequent_value=factory.EXPECT["south_tax_template"]))
 
 	# --- cost-center dimension --------------------------------------------------
 	def test_cost_center_dimension(self):
@@ -826,17 +870,13 @@ class TestTier2Detectors(FrappeTestCase):
 		self.assertEqual(services["consequent_value"], "deferred")
 		self.assertIn("expense", services["pattern_statement"])
 		# Alpha's revenue side is all-immediate -> variance-suppressed, silent
-		self.assertIsNone(
-			_find(alpha.candidates, antecedent_value="Electronics :: revenue")
-		)
+		self.assertIsNone(_find(alpha.candidates, antecedent_value="Electronics :: revenue"))
 		gamma = self._run("acct-deferred-usage", factory.GAMMA)
 		revenue = _find(gamma.candidates, antecedent_value="Electronics :: revenue")
 		self.assertIsNotNone(revenue, "deferred-revenue habit not found")
 		self.assertIn("revenue", revenue["pattern_statement"])
 		# trap: Furniture books immediately -> silent
-		self.assertIsNone(
-			_find(gamma.candidates, antecedent_value="Furniture :: revenue")
-		)
+		self.assertIsNone(_find(gamma.candidates, antecedent_value="Furniture :: revenue"))
 
 	# --- manufacturing: realized BOM vs flagged default ---------------------------
 	def test_default_bom_usage_divergence_and_default_match_trap(self):
@@ -889,12 +929,17 @@ class TestBatchSerialUsageFake(FrappeTestCase):
 		spec = registry.get_detector("stock-batch-serial-usage")
 		items = _unit_rows("Chemicals", "batch-tracked", 35)
 		items += _unit_rows("Widgets", "__untracked__", 30, start=40)
-		db = _FakePatternDB([
-			("tabStock Ledger Entry", [
-				{"item_group": "Chemicals", "batch_filled": 120, "serial_filled": 0, "total": 130},
-			]),
-			("tabItem", items),
-		])
+		db = _FakePatternDB(
+			[
+				(
+					"tabStock Ledger Entry",
+					[
+						{"item_group": "Chemicals", "batch_filled": 120, "serial_filled": 0, "total": 130},
+					],
+				),
+				("tabItem", items),
+			]
+		)
 		res = run_detector(spec, None, db)
 		self.assertIsNone(res.skipped_reason)
 		cand = _find(res.candidates, antecedent_value="Chemicals")
@@ -916,19 +961,44 @@ class TestCustomFieldAlwaysFilledFake(FrappeTestCase):
 	def test_planted_fill_pattern_and_identifier_traps(self):
 		spec = registry.get_detector("cfg-custom-field-always-filled")
 		fill_rows = _usage_rows("__filled__", 70) + _usage_rows("__empty__", 1, start=70)
-		db = _FakePatternDB([
-			("tabCustom Field", [
-				# po_no exists on Sales Invoice meta -> validation passes
-				{"dt": "Sales Invoice", "fieldname": "po_no", "fieldtype": "Data", "label": "Customer PO"},
-				# injection-shaped fieldname -> regex refuses before interpolation
-				{"dt": "Sales Invoice", "fieldname": "po_no`; DROP TABLE x", "fieldtype": "Data", "label": "Evil"},
-				# snake_case but not a real column -> meta probe refuses
-				{"dt": "Sales Invoice", "fieldname": "ghost_field_xyz", "fieldtype": "Data", "label": "Ghost"},
-				# child/non-submittable doctype -> out of scope
-				{"dt": "Customer", "fieldname": "territory", "fieldtype": "Link", "label": "Territory"},
-			]),
-			("tabSales Invoice", fill_rows),
-		])
+		db = _FakePatternDB(
+			[
+				(
+					"tabCustom Field",
+					[
+						# po_no exists on Sales Invoice meta -> validation passes
+						{
+							"dt": "Sales Invoice",
+							"fieldname": "po_no",
+							"fieldtype": "Data",
+							"label": "Customer PO",
+						},
+						# injection-shaped fieldname -> regex refuses before interpolation
+						{
+							"dt": "Sales Invoice",
+							"fieldname": "po_no`; DROP TABLE x",
+							"fieldtype": "Data",
+							"label": "Evil",
+						},
+						# snake_case but not a real column -> meta probe refuses
+						{
+							"dt": "Sales Invoice",
+							"fieldname": "ghost_field_xyz",
+							"fieldtype": "Data",
+							"label": "Ghost",
+						},
+						# child/non-submittable doctype -> out of scope
+						{
+							"dt": "Customer",
+							"fieldname": "territory",
+							"fieldtype": "Link",
+							"label": "Territory",
+						},
+					],
+				),
+				("tabSales Invoice", fill_rows),
+			]
+		)
 		res = run_detector(spec, None, db)
 		self.assertIsNone(res.skipped_reason)
 		self.assertEqual(len(res.candidates), 1, "only the validated field may propose")
@@ -943,12 +1013,22 @@ class TestCustomFieldAlwaysFilledFake(FrappeTestCase):
 		spec = registry.get_detector("cfg-custom-field-always-filled")
 		# 90% fill rate is a habit, not "mandatory in practice" (0.98 gate)
 		fill_rows = _usage_rows("__filled__", 63) + _usage_rows("__empty__", 7, start=70)
-		db = _FakePatternDB([
-			("tabCustom Field", [
-				{"dt": "Sales Invoice", "fieldname": "po_no", "fieldtype": "Data", "label": "Customer PO"},
-			]),
-			("tabSales Invoice", fill_rows),
-		])
+		db = _FakePatternDB(
+			[
+				(
+					"tabCustom Field",
+					[
+						{
+							"dt": "Sales Invoice",
+							"fieldname": "po_no",
+							"fieldtype": "Data",
+							"label": "Customer PO",
+						},
+					],
+				),
+				("tabSales Invoice", fill_rows),
+			]
+		)
 		res = run_detector(spec, None, db)
 		self.assertEqual(res.candidates, [])
 
@@ -957,13 +1037,23 @@ class TestCustomFieldAlwaysFilledFake(FrappeTestCase):
 		# a field the framework auto-fills via its configured default would show
 		# a ~100% fill rate that is configuration, not a user habit -> refused
 		fill_rows = _usage_rows("__filled__", 70)
-		db = _FakePatternDB([
-			("tabCustom Field", [
-				{"dt": "Sales Invoice", "fieldname": "po_no", "fieldtype": "Data",
-				 "label": "Customer PO", "field_default": "AUTO-PO"},
-			]),
-			("tabSales Invoice", fill_rows),
-		])
+		db = _FakePatternDB(
+			[
+				(
+					"tabCustom Field",
+					[
+						{
+							"dt": "Sales Invoice",
+							"fieldname": "po_no",
+							"fieldtype": "Data",
+							"label": "Customer PO",
+							"field_default": "AUTO-PO",
+						},
+					],
+				),
+				("tabSales Invoice", fill_rows),
+			]
+		)
 		res = run_detector(spec, None, db)
 		self.assertEqual(res.candidates, [], "a defaulted field must never propose")
 		# the SQL itself also excludes defaulted rows at source
@@ -981,17 +1071,22 @@ class TestRoleDoctypeRoutingFake(FrappeTestCase):
 		si_rows = [dict(r, owner="alice@x.com") for r in _unit_rows("d", "x", 33)]
 		si_rows += [dict(r, owner="carol@x.com") for r in _unit_rows("d", "y", 4, start=40)]
 		pe_rows = [dict(r, owner="bob@x.com") for r in _unit_rows("d", "z", 32)]
-		return _FakePatternDB([
-			("tabHas Role", [
-				{"user": "alice@x.com", "role": "Sales User"},
-				{"user": "carol@x.com", "role": "Sales User"},
-				{"user": "carol@x.com", "role": "Purchase User"},
-				{"user": "bob@x.com", "role": "Accounts User"},
-				{"user": "bob@x.com", "role": "System User"},  # generic -> ignored
-			]),
-			("tabSales Invoice", si_rows),
-			("tabPayment Entry", pe_rows),
-		])
+		return _FakePatternDB(
+			[
+				(
+					"tabHas Role",
+					[
+						{"user": "alice@x.com", "role": "Sales User"},
+						{"user": "carol@x.com", "role": "Sales User"},
+						{"user": "carol@x.com", "role": "Purchase User"},
+						{"user": "bob@x.com", "role": "Accounts User"},
+						{"user": "bob@x.com", "role": "System User"},  # generic -> ignored
+					],
+				),
+				("tabSales Invoice", si_rows),
+				("tabPayment Entry", pe_rows),
+			]
+		)
 
 	def test_fractional_weights_and_no_user_output(self):
 		import json
@@ -1023,10 +1118,12 @@ class TestRoleDoctypeRoutingFake(FrappeTestCase):
 		# would propose as misleading routing -> the postprocess requires >= 2.
 		spec = registry.get_detector("role-doctype-routing")
 		si_rows = [dict(r, owner="admin.like@x.com") for r in _unit_rows("d", "x", 40)]
-		db = _FakePatternDB([
-			("tabHas Role", [{"user": "admin.like@x.com", "role": "System Manager"}]),
-			("tabSales Invoice", si_rows),
-		])
+		db = _FakePatternDB(
+			[
+				("tabHas Role", [{"user": "admin.like@x.com", "role": "System Manager"}]),
+				("tabSales Invoice", si_rows),
+			]
+		)
 		res = run_detector(spec, None, db)
 		self.assertEqual(res.candidates, [])
 
@@ -1043,26 +1140,46 @@ class TestPartyTaxTemplateSupplierFake(FrappeTestCase):
 		rows = []
 		for j in range(32):
 			day = frappe.utils.add_days("2025-09-01", j)
-			rows.append({
-				"unit_id": f"pi-imp-{j}", "antecedent": "Supplier.supplier_group=Importers",
-				"consequent": "Import Duty 10%", "party": f"Sup{j % 8}",
-				"day": day, "created": f"{day} 10:00:00",
-			})
+			rows.append(
+				{
+					"unit_id": f"pi-imp-{j}",
+					"antecedent": "Supplier.supplier_group=Importers",
+					"consequent": "Import Duty 10%",
+					"party": f"Sup{j % 8}",
+					"day": day,
+					"created": f"{day} 10:00:00",
+				}
+			)
 		for j in range(32):
 			day = frappe.utils.add_days("2025-10-15", j)
-			rows.append({
-				"unit_id": f"pi-dom-{j}", "antecedent": "Supplier.supplier_group=Domestic",
-				"consequent": "Alpha GST 18%", "party": f"Dom{j % 8}",
-				"day": day, "created": f"{day} 10:00:00",
-			})
-		db = _FakePatternDB([
-			("tabCustom Field", [
-				{"dt": "Supplier", "fieldname": "supplier_group", "fieldtype": "Link", "label": "Supplier Group"},
-			]),
-			("tabPurchase Invoice", rows),
-			("tabTax Rule", []),
-			("tabAddress", []),
-		])
+			rows.append(
+				{
+					"unit_id": f"pi-dom-{j}",
+					"antecedent": "Supplier.supplier_group=Domestic",
+					"consequent": "Alpha GST 18%",
+					"party": f"Dom{j % 8}",
+					"day": day,
+					"created": f"{day} 10:00:00",
+				}
+			)
+		db = _FakePatternDB(
+			[
+				(
+					"tabCustom Field",
+					[
+						{
+							"dt": "Supplier",
+							"fieldname": "supplier_group",
+							"fieldtype": "Link",
+							"label": "Supplier Group",
+						},
+					],
+				),
+				("tabPurchase Invoice", rows),
+				("tabTax Rule", []),
+				("tabAddress", []),
+			]
+		)
 		raws = accounts_detectors.postprocess_party_tax_template(
 			None, spec, "SomeCo", db, {"window_start": "2025-01-01", "company": "SomeCo"}
 		)
@@ -1094,20 +1211,35 @@ class TestSegmentFieldDiscovery(FrappeTestCase):
 		return _discover_segment_fields(_FakePatternDB(mapping))
 
 	def test_identifier_field_refused_and_ranking_by_usefulness(self):
-		fields = self._discover([
-			("tabCustom Field", [
-				# alphabetical order would pick industry first; usefulness must not
-				{"dt": "Customer", "fieldname": "industry", "fieldtype": "Link", "label": "Industry"},
-				{"dt": "Customer", "fieldname": "market_segment", "fieldtype": "Link", "label": "Market Segment"},
-				{"dt": "Customer", "fieldname": "customer_type", "fieldtype": "Select", "label": "Type"},
-				# gstin/pan-shaped: effectively one distinct value per party
-				{"dt": "Customer", "fieldname": "tax_id", "fieldtype": "Data", "label": "Tax ID"},
-			]),
-			("NULLIF(`industry`", [{"total": 100, "filled": 20, "distinct_values": 5}]),
-			("NULLIF(`market_segment`", [{"total": 100, "filled": 90, "distinct_values": 4}]),
-			("NULLIF(`customer_type`", [{"total": 100, "filled": 100, "distinct_values": 2}]),
-			("NULLIF(`tax_id`", [{"total": 100, "filled": 90, "distinct_values": 85}]),
-		])
+		fields = self._discover(
+			[
+				(
+					"tabCustom Field",
+					[
+						# alphabetical order would pick industry first; usefulness must not
+						{"dt": "Customer", "fieldname": "industry", "fieldtype": "Link", "label": "Industry"},
+						{
+							"dt": "Customer",
+							"fieldname": "market_segment",
+							"fieldtype": "Link",
+							"label": "Market Segment",
+						},
+						{
+							"dt": "Customer",
+							"fieldname": "customer_type",
+							"fieldtype": "Select",
+							"label": "Type",
+						},
+						# gstin/pan-shaped: effectively one distinct value per party
+						{"dt": "Customer", "fieldname": "tax_id", "fieldtype": "Data", "label": "Tax ID"},
+					],
+				),
+				("NULLIF(`industry`", [{"total": 100, "filled": 20, "distinct_values": 5}]),
+				("NULLIF(`market_segment`", [{"total": 100, "filled": 90, "distinct_values": 4}]),
+				("NULLIF(`customer_type`", [{"total": 100, "filled": 100, "distinct_values": 2}]),
+				("NULLIF(`tax_id`", [{"total": 100, "filled": 90, "distinct_values": 85}]),
+			]
+		)
 		names = [f["fieldname"] for f in fields]
 		self.assertNotIn("tax_id", names)  # 85 distinct over 90 filled: identity
 		# Select first, then Link tier by fill rate (market_segment > industry)
@@ -1134,11 +1266,21 @@ class TestSegmentFieldDiscovery(FrappeTestCase):
 	def test_unavailable_profile_fails_open_with_zero_score(self):
 		# no probe mapping -> profile None -> the field competes at score 0
 		# (the multi-party guard downstream still blocks identity output)
-		fields = self._discover([
-			("tabCustom Field", [
-				{"dt": "Supplier", "fieldname": "supplier_group", "fieldtype": "Link", "label": "Supplier Group"},
-			]),
-		])
+		fields = self._discover(
+			[
+				(
+					"tabCustom Field",
+					[
+						{
+							"dt": "Supplier",
+							"fieldname": "supplier_group",
+							"fieldtype": "Link",
+							"label": "Supplier Group",
+						},
+					],
+				),
+			]
+		)
 		self.assertEqual([f["fieldname"] for f in fields], ["supplier_group"])
 
 
@@ -1155,29 +1297,44 @@ class TestPartyTaxTemplateSegmentGuards(FrappeTestCase):
 		# one high-volume customer: 32 invoices behind ONE identifier value
 		for j in range(32):
 			day = frappe.utils.add_days("2025-09-01", j)
-			rows.append({
-				"unit_id": f"si-one-{j}", "antecedent": "Customer.tax_id=27AAAC0001X",
-				"consequent": "GST18", "party": "CustBig",
-				"day": day, "created": f"{day} 10:00:00",
-			})
+			rows.append(
+				{
+					"unit_id": f"si-one-{j}",
+					"antecedent": "Customer.tax_id=27AAAC0001X",
+					"consequent": "GST18",
+					"party": "CustBig",
+					"day": day,
+					"created": f"{day} 10:00:00",
+				}
+			)
 		# a genuinely shared value: 32 invoices across 8 customers
 		for j in range(32):
 			day = frappe.utils.add_days("2025-10-15", j)
-			rows.append({
-				"unit_id": f"si-shared-{j}", "antecedent": "Customer.tax_id=SHARED",
-				"consequent": "GST12", "party": f"Cust{j % 8}",
-				"day": day, "created": f"{day} 10:00:00",
-			})
-		db = _FakePatternDB([
-			("tabCustom Field", [
-				{"dt": "Customer", "fieldname": "tax_id", "fieldtype": "Data", "label": "Tax ID"},
-			]),
-			# profile passes discovery so the postprocess-level guard is exercised
-			("NULLIF(`tax_id`", [{"total": 40, "filled": 40, "distinct_values": 5}]),
-			("tabSales Invoice", rows),
-			("tabTax Rule", []),
-			("tabAddress", []),
-		])
+			rows.append(
+				{
+					"unit_id": f"si-shared-{j}",
+					"antecedent": "Customer.tax_id=SHARED",
+					"consequent": "GST12",
+					"party": f"Cust{j % 8}",
+					"day": day,
+					"created": f"{day} 10:00:00",
+				}
+			)
+		db = _FakePatternDB(
+			[
+				(
+					"tabCustom Field",
+					[
+						{"dt": "Customer", "fieldname": "tax_id", "fieldtype": "Data", "label": "Tax ID"},
+					],
+				),
+				# profile passes discovery so the postprocess-level guard is exercised
+				("NULLIF(`tax_id`", [{"total": 40, "filled": 40, "distinct_values": 5}]),
+				("tabSales Invoice", rows),
+				("tabTax Rule", []),
+				("tabAddress", []),
+			]
+		)
 		raws = accounts_detectors.postprocess_party_tax_template(
 			None, spec, "SomeCo", db, {"window_start": "2025-01-01", "company": "SomeCo"}
 		)
@@ -1229,14 +1386,25 @@ class TestGeographyConfoundFloors(FrappeTestCase):
 	def test_state_normalization_merges_spelling_variants(self):
 		from jarvis.learning.detectors.accounts import _normalize_state_map
 
-		norm = _normalize_state_map({
-			"p1": "Karnataka", "p2": " karnataka ", "p3": "KARNATAKA",
-			"p4": "Maharashtra", "p5": "", "p6": None,
-		})
-		self.assertEqual(norm, {
-			"p1": "karnataka", "p2": "karnataka", "p3": "karnataka",
-			"p4": "maharashtra",
-		})
+		norm = _normalize_state_map(
+			{
+				"p1": "Karnataka",
+				"p2": " karnataka ",
+				"p3": "KARNATAKA",
+				"p4": "Maharashtra",
+				"p5": "",
+				"p6": None,
+			}
+		)
+		self.assertEqual(
+			norm,
+			{
+				"p1": "karnataka",
+				"p2": "karnataka",
+				"p3": "karnataka",
+				"p4": "maharashtra",
+			},
+		)
 
 
 # ---------------------------------------------------------------------------
@@ -1250,9 +1418,7 @@ class TestJeUsageTautologyGuard(FrappeTestCase):
 		from jarvis.learning.detectors import accounts as accounts_detectors
 
 		spec = registry.get_detector("acct-je-usage")
-		return accounts_detectors.postprocess_je_usage(
-			rows, spec, factory.ALPHA, PatternDB(), {}
-		)
+		return accounts_detectors.postprocess_je_usage(rows, spec, factory.ALPHA, PatternDB(), {})
 
 	def test_default_mode_suppresses_org_card(self):
 		rows = _unit_rows("Journal Entry", "__manual__", 35)
@@ -1297,11 +1463,13 @@ class TestTaxRuleCrossRefDates(FrappeTestCase):
 		try:
 			for name, from_date in rows:
 				doc = frappe.new_doc("Tax Rule")
-				doc.update({
-					"tax_type": "Sales",
-					"sales_tax_template": f"{name}-TMPL",
-					"from_date": from_date,
-				})
+				doc.update(
+					{
+						"tax_type": "Sales",
+						"sales_tax_template": f"{name}-TMPL",
+						"from_date": from_date,
+					}
+				)
 				doc.name = name
 				doc.flags.name_set = True
 				doc.db_insert()
@@ -1337,10 +1505,12 @@ class TestExecutorGeographyGuardFloors(FrappeTestCase):
 
 	def _run(self, po_rows, address_rows):
 		spec = registry.get_detector("buy-supplier-tax-template")
-		db = _FakePatternDB([
-			("tabPurchase Order", po_rows),
-			("tabAddress", address_rows),
-		])
+		db = _FakePatternDB(
+			[
+				("tabPurchase Order", po_rows),
+				("tabAddress", address_rows),
+			]
+		)
 		return run_detector(spec, "SomeCo", db)
 
 	def test_single_supplier_per_state_is_not_a_confound(self):
@@ -1348,10 +1518,13 @@ class TestExecutorGeographyGuardFloors(FrappeTestCase):
 		# logic called this a confound and demoted; the bucket floors refuse it.
 		rows = _po_rows("SupA", "GST18", "2025-09-01", 30)
 		rows += _po_rows("SupB", "GST12", "2025-09-02", 30)
-		res = self._run(rows, [
-			{"party": "SupA", "state": "Maharashtra"},
-			{"party": "SupB", "state": "Karnataka"},
-		])
+		res = self._run(
+			rows,
+			[
+				{"party": "SupA", "state": "Maharashtra"},
+				{"party": "SupB", "state": "Karnataka"},
+			],
+		)
 		self.assertIsNone(res.skipped_reason)
 		for supplier in ("SupA", "SupB"):
 			cand = _find(res.candidates, antecedent_value=supplier)
@@ -1370,12 +1543,15 @@ class TestExecutorGeographyGuardFloors(FrappeTestCase):
 		rows += _po_rows("SupB", "GST18", "2025-09-02", 30)
 		rows += _po_rows("SupC", "GST12", "2025-09-03", 30)
 		rows += _po_rows("SupD", "GST12", "2025-09-04", 30)
-		res = self._run(rows, [
-			{"party": "SupA", "state": "Karnataka"},
-			{"party": "SupB", "state": " karnataka "},
-			{"party": "SupC", "state": "Maharashtra"},
-			{"party": "SupD", "state": "MAHARASHTRA"},
-		])
+		res = self._run(
+			rows,
+			[
+				{"party": "SupA", "state": "Karnataka"},
+				{"party": "SupB", "state": " karnataka "},
+				{"party": "SupC", "state": "Maharashtra"},
+				{"party": "SupD", "state": "MAHARASHTRA"},
+			],
+		)
 		self.assertIsNone(res.skipped_reason)
 		for supplier in ("SupA", "SupB", "SupC", "SupD"):
 			cand = _find(res.candidates, antecedent_value=supplier)
@@ -1386,15 +1562,20 @@ class TestExecutorGeographyGuardFloors(FrappeTestCase):
 	def test_party_state_map_dedupes_case_variants(self):
 		from jarvis.learning.executor import _party_state_map
 
-		db = _FakePatternDB([
-			("tabAddress", [
-				{"party": "SupA", "state": "Karnataka"},
-				{"party": "SupA", "state": " karnataka "},
-				{"party": "SupA", "state": "Karnataka"},
-				{"party": "SupB", "state": "Tamil Nadu"},
-				{"party": "SupB", "state": "Kerala"},  # genuinely multi-state
-			]),
-		])
+		db = _FakePatternDB(
+			[
+				(
+					"tabAddress",
+					[
+						{"party": "SupA", "state": "Karnataka"},
+						{"party": "SupA", "state": " karnataka "},
+						{"party": "SupA", "state": "Karnataka"},
+						{"party": "SupB", "state": "Tamil Nadu"},
+						{"party": "SupB", "state": "Kerala"},  # genuinely multi-state
+					],
+				),
+			]
+		)
 		states = _party_state_map(db, "Supplier", ["SupA", "SupB"])
 		# SupA's variants are ONE state (display = most frequent original
 		# casing); SupB really spans two states and stays dropped.
@@ -1411,19 +1592,21 @@ def _dated_rows(supplier, consequent, start_date, count, tag):
 	rows = []
 	for i in range(count):
 		day = frappe.utils.add_days(start_date, i)
-		rows.append({
-			"unit_id": f"{supplier}-{tag}-{i}",
-			"antecedent": supplier,
-			"consequent": consequent,
-			"company": factory.ALPHA,
-			"day": day,
-			"created": f"{day} 10:00:00",
-		})
+		rows.append(
+			{
+				"unit_id": f"{supplier}-{tag}-{i}",
+				"antecedent": supplier,
+				"consequent": consequent,
+				"company": factory.ALPHA,
+				"day": day,
+				"created": f"{day} 10:00:00",
+			}
+		)
 	return rows
 
 
 class TestRecencyGrandfatheredGuard(FrappeTestCase):
-	""" 'New terms for NEW deals only, legacy accounts grandfathered': legacy
+	"""'New terms for NEW deals only, legacy accounts grandfathered': legacy
 	volume keeps the recent plurality on the old value and the share shift
 	under the 0.2 threshold, but the recent window no longer clears the
 	detector's own c_min - the candidate must carry the recency divergence

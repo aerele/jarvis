@@ -1,17 +1,17 @@
 <script setup>
-import { computed, watch } from "vue"
-import { useRoute, useRouter } from "vue-router"
-import { store } from "../store"
+import { computed, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { store } from "../store";
 
 // The native app's drawer, one for one (jarvis_mobile Drawer.tsx): four
 // destinations, then your starred and recent chats, and a bottom bar with your
 // profile and a gear. Nothing else — macros, approvals, agents and the wiki are
 // desk work, and a link out to the desktop workspace is not a phone feature.
-const router = useRouter()
-const route = useRoute()
+const router = useRouter();
+const route = useRoute();
 
-const user = computed(() => window.frappe_user_id || "")
-const fullName = computed(() => window.frappe_full_name || user.value)
+const user = computed(() => window.frappe_user_id || "");
+const fullName = computed(() => window.frappe_full_name || user.value);
 const initials = computed(
 	() =>
 		(fullName.value || user.value || "?")
@@ -19,12 +19,16 @@ const initials = computed(
 			.map((w) => w[0])
 			.slice(0, 2)
 			.join("")
-			.toUpperCase() || "?",
-)
+			.toUpperCase() || "?"
+);
 
 const NAV = [
 	{ label: "New chat", to: "/c/new", icon: "M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" },
-	{ label: "Chats", to: "/", icon: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" },
+	{
+		label: "Chats",
+		to: "/",
+		icon: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
+	},
 	{
 		label: "Business",
 		to: "/business",
@@ -35,28 +39,32 @@ const NAV = [
 		to: "/files",
 		icon: "M22 12h-6l-2 3h-4l-2-3H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z",
 	},
-]
+];
 
 const isActive = (l) =>
-	l.to === "/" ? route.path === "/" : l.to === "/c/new" ? route.path === "/c/new" : route.path.startsWith(l.to)
+	l.to === "/"
+		? route.path === "/"
+		: l.to === "/c/new"
+		? route.path === "/c/new"
+		: route.path.startsWith(l.to);
 
 // The chats you actually reach for. Starred first, then recent — the same 6/8
 // split the native drawer uses, because a phone drawer is a shortcut, not a list.
-const starred = computed(() => store.conversations.filter((c) => c.starred).slice(0, 6))
-const recent = computed(() => store.conversations.filter((c) => !c.starred).slice(0, 8))
+const starred = computed(() => store.conversations.filter((c) => c.starred).slice(0, 6));
+const recent = computed(() => store.conversations.filter((c) => !c.starred).slice(0, 8));
 
 // Load the list when the drawer opens, not on every screen: the drawer is the
 // only thing here that needs it.
 watch(
 	() => store.drawerOpen,
 	(open) => {
-		if (open && !store.loaded) store.loadConversations()
-	},
-)
+		if (open && !store.loaded) store.loadConversations();
+	}
+);
 
 function go(to) {
-	store.drawerOpen = false
-	if (route.fullPath !== to) router.push(to)
+	store.drawerOpen = false;
+	if (route.fullPath !== to) router.push(to);
 }
 </script>
 
@@ -73,7 +81,14 @@ function go(to) {
 						:class="{ 'is-active': isActive(l) }"
 						@click="go(l.to)"
 					>
-						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+						<svg
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.8"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
 							<path :d="l.icon" />
 						</svg>
 						{{ l.label }}
@@ -81,22 +96,58 @@ function go(to) {
 
 					<template v-if="starred.length">
 						<div class="jv-drawer-label">Starred</div>
-						<button v-for="c in starred" :key="c.name" class="jv-chat" @click="go(`/c/${c.name}`)">
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-								<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+						<button
+							v-for="c in starred"
+							:key="c.name"
+							class="jv-chat"
+							@click="go(`/c/${c.name}`)"
+						>
+							<svg
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.8"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path
+									d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+								/>
 							</svg>
 							<span>{{ c.title || "New chat" }}</span>
-							<svg class="jv-star" viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
-								<path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z" />
+							<svg
+								class="jv-star"
+								viewBox="0 0 24 24"
+								width="12"
+								height="12"
+								fill="currentColor"
+							>
+								<path
+									d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"
+								/>
 							</svg>
 						</button>
 					</template>
 
 					<template v-if="recent.length">
 						<div class="jv-drawer-label">Recent</div>
-						<button v-for="c in recent" :key="c.name" class="jv-chat" @click="go(`/c/${c.name}`)">
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-								<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+						<button
+							v-for="c in recent"
+							:key="c.name"
+							class="jv-chat"
+							@click="go(`/c/${c.name}`)"
+						>
+							<svg
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.8"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path
+									d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+								/>
 							</svg>
 							<span>{{ c.title || "New chat" }}</span>
 						</button>
@@ -112,9 +163,20 @@ function go(to) {
 						</span>
 					</button>
 					<button class="jv-gear" aria-label="Settings" @click="go('/settings')">
-						<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+						<svg
+							viewBox="0 0 24 24"
+							width="19"
+							height="19"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.8"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
 							<circle cx="12" cy="12" r="3" />
-							<path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+							<path
+								d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"
+							/>
 						</svg>
 					</button>
 				</div>

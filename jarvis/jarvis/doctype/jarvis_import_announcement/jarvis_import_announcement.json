@@ -1,0 +1,93 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-08-12 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "data_import",
+  "conversation",
+  "kicked_off_at",
+  "announced",
+  "announced_via",
+  "reason",
+  "attempts"
+ ],
+ "fields": [
+  {
+   "fieldname": "data_import",
+   "fieldtype": "Link",
+   "label": "Data Import",
+   "options": "Data Import",
+   "reqd": 1,
+   "unique": 1,
+   "read_only": 1,
+   "description": "The staged Data Import this row tracks. Unique: one announcement per import. The tracking row the */2 poll and the after_job fast-path both drive to exactly one completion message."
+  },
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "options": "Jarvis Conversation",
+   "reqd": 1,
+   "search_index": 1,
+   "read_only": 1,
+   "description": "The originating chat the completion message is posted into. Bound at confirm-time from the token's OWN guarded conversation (never client-supplied - security F4/PC-4). search_index: the on_conversation_trash cascade deletes by this column on every conversation delete - unindexed it takes whole-table next-key locks (ABBA-deadlock risk vs _post_completion)."
+  },
+  {
+   "fieldname": "kicked_off_at",
+   "fieldtype": "Datetime",
+   "label": "Kicked Off At",
+   "reqd": 1,
+   "read_only": 1,
+   "description": "When run_import was confirmed. The stale-guard grace (~5 min) and the O-2 absolute-age ceiling are measured from here."
+  },
+  {
+   "fieldname": "announced",
+   "fieldtype": "Check",
+   "label": "Announced",
+   "default": "0",
+   "search_index": 1,
+   "read_only": 1,
+   "description": "Terminal flag: 1 = the poll/hook is done with this row (a message was posted, OR it was aborted - see reason). The worklist filters announced=0. Flipped only via a CAS UPDATE ... WHERE announced=0 inside the conversation lock (PC-1)."
+  },
+  {
+   "fieldname": "announced_via",
+   "fieldtype": "Select",
+   "label": "Announced Via",
+   "options": "\nhook\npoll",
+   "read_only": 1,
+   "description": "Attribution (AJ-5): which mechanism classified this row - the after_job fast-path ('hook') or the */2 poll ('poll'). Surfaced in import_announce_stats as hook_rate_24h so on-call can see a silently-dead fast path (rate -> 0 while imports keep finishing)."
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Data",
+   "label": "Reason",
+   "read_only": 1,
+   "description": "Why the row went terminal: done | partial | error | timed_out | blocked | interrupted | status_unknown | data_import_deleted | no_conversation | archived | poison_error. Distinguishes a posted completion from an aborted one (stats/retention must not conflate them)."
+  },
+  {
+   "fieldname": "attempts",
+   "fieldtype": "Int",
+   "label": "Attempts",
+   "default": "0",
+   "read_only": 1,
+   "description": "Consecutive classify failures for this row (bounded retry). After a cap the poll quarantines the row terminal (reason=poison_error) so a deterministically-failing row can't re-log forever or sit un-announced below the deadman threshold."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Import Announcement",
+ "naming_rule": "Random",
+ "permissions": [],
+ "quick_entry": 0,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

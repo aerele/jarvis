@@ -29,7 +29,7 @@ import time
 import frappe
 from frappe import _
 
-from jarvis.chat import dashboard_permissions
+from jarvis.chat import dashboard_permissions, list_filters
 from jarvis.chat.macros_api import _clamp_page, _lk, _load_filters
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
@@ -56,8 +56,15 @@ _SOURCES_BLOCK_RE = re.compile(
 # — server-derived for User scope, dashboard_type — always derived, timestamps)
 # is server-owned; unknown keys throw.
 _ALLOWED_PAYLOAD_FIELDS = {
-	"name", "dashboard_title", "description", "html", "scope", "target_role",
-	"sources", "source_conversation", "theme",
+	"name",
+	"dashboard_title",
+	"description",
+	"html",
+	"scope",
+	"target_role",
+	"sources",
+	"source_conversation",
+	"theme",
 }
 
 _SCOPES = {"Org", "Role", "User"}
@@ -65,8 +72,11 @@ _TYPES = {"Static", "Connected"}
 
 _DASHBOARD_FILTERS = {"scope", "dashboard_type", "owner"}
 _DASHBOARD_SORTABLE = {
-	"modified": "modified", "dashboard_title": "dashboard_title",
-	"dashboard_type": "dashboard_type", "scope": "scope", "owner": "owner",
+	"modified": "modified",
+	"dashboard_title": "dashboard_title",
+	"dashboard_type": "dashboard_type",
+	"scope": "scope",
+	"owner": "owner",
 }
 
 # Per-tool spec key allow-lists (unknown keys throw at save time).
@@ -138,8 +148,7 @@ def _dashboard_detail(doc) -> dict:
 		"target_user": doc.target_user or "",
 		"html": doc.html or "",
 		"sources": [
-			{"source_name": s.source_name, "tool": s.tool, "spec": s.spec or ""}
-			for s in (doc.sources or [])
+			{"source_name": s.source_name, "tool": s.tool, "spec": s.spec or ""} for s in (doc.sources or [])
 		],
 		"source_conversation": doc.source_conversation or "",
 		"owner": doc.owner,
@@ -155,18 +164,19 @@ def _dashboard_detail(doc) -> dict:
 @require_jarvis_user
 def get_dashboards_caps() -> dict:
 	"""Single gating probe for the Dashboards page: which scopes the caller
-	may create in, which roles they may target, the size caps, and whether the
-	chat side can even produce canvas artifacts on this bench (self-hosted
-	chats have no gateway canvas route)."""
-	from jarvis import selfhost
-
+	may create in, which roles they may target, and the size caps."""
 	stt_enabled = False
+	# WHY it is off (ok|off|unconfigured|error): only `unconfigured` is an actionable
+	# gap worth showing the user as a faded recorder; the rest stay hidden.
+	stt_state = "error"
 	try:
 		from jarvis.chat import voice
 
 		stt_enabled = bool(voice.stt_config())
+		stt_state = voice.stt_state()
 	except Exception:
 		stt_enabled = False
+		stt_state = "error"
 	return {
 		"ok": True,
 		"data": {
@@ -175,8 +185,8 @@ def get_dashboards_caps() -> dict:
 			"max_sources": _MAX_SOURCES,
 			"max_html_chars": _MAX_HTML_CHARS,
 			"max_rows": DASHBOARD_MAX_ROWS,
-			"canvas_available": not selfhost.is_self_hosted(),
 			"stt_enabled": stt_enabled,
+			"stt_state": stt_state,
 		},
 	}
 
@@ -186,9 +196,11 @@ def get_dashboards_caps() -> dict:
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
 @require_jarvis_user
+@list_filters.filter_errors_to_envelope
 def list_dashboards_page(
 	search: str = "",
 	filters: str = "{}",
+	filters_v2: str | list | None = None,
 	sort_field: str = "modified",
 	sort_dir: str = "desc",
 	start: int = 0,
@@ -196,47 +208,60 @@ def list_dashboards_page(
 ) -> dict:
 	"""Scope-visible dashboards, server-side search / filter / sort / paginate.
 	Raw SQL bypasses the ORM permission hooks, so the visibility fragment is
-	spliced into the WHERE for non-admins. Frozen envelope in ``data``."""
+	spliced into the WHERE for non-admins. Frozen envelope in ``data``.
+
+	``filters_v2`` (plan 08 §6.2) is ADDITIVE: the canonical clause list,
+	validated and compiled against this caller's schema by
+	``jarvis.chat.list_filters``. Legacy ``filters`` keeps working unchanged for
+	the compatibility window. The visibility fragment below is server-authored
+	and stays on the query object's server side, so a user clause is ANDed
+	INSIDE it and can never widen it (C08-5).
+
+	Scope invariant (MIGRATION-CHECKLIST §1): every role that reaches this
+	endpoint holds a permlevel-0 ``read`` on Jarvis Dashboard with no
+	``if_owner``, so the ORM read scope is the whole table and this SQL scope —
+	owner OR Org OR the caller's Role OR a User-scoped row addressed to them — is
+	strictly narrower. The catalog is therefore derived from the right authority.
+	"""
 	start, pl = _clamp_page(start, page_length)
 	f = _load_filters(filters, _DASHBOARD_FILTERS)
 
-	conds = ["1=1"]
-	params: dict = {"start": start, "page_length": pl}
+	q = list_filters.new_query("saved_dashboards")
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(dashboard_title LIKE %(q)s OR description LIKE %(q)s)")
+		q.server_condition("(dashboard_title LIKE %(q)s OR description LIKE %(q)s)", q=f"%{_lk(search)}%")
 	if "scope" in f:
 		if f["scope"] not in _SCOPES:
 			frappe.throw(_("Invalid scope filter."))
-		params["scope"] = f["scope"]
-		conds.append("scope = %(scope)s")
+		q.server_condition("scope = %(scope)s", scope=f["scope"])
 	if "dashboard_type" in f:
 		if f["dashboard_type"] not in _TYPES:
 			frappe.throw(_("Invalid dashboard_type filter."))
-		params["dashboard_type"] = f["dashboard_type"]
-		conds.append("dashboard_type = %(dashboard_type)s")
+		q.server_condition("dashboard_type = %(dashboard_type)s", dashboard_type=f["dashboard_type"])
 	if "owner" in f:
-		params["owner"] = str(f["owner"])
-		conds.append("owner = %(owner)s")
+		q.server_condition("owner = %(owner)s", owner=str(f["owner"]))
 	if not has_jarvis_admin_access():
 		# Values inside are frappe.db.escape'd; spliced (not parameterized)
-		# because the role list is variable-length — same as the wiki list.
-		conds.append(dashboard_permissions.visible_scope_condition())
+		# because the role list is variable-length — same as the wiki list. It
+		# carries no placeholders, so it needs no bound params of its own.
+		q.server_condition(dashboard_permissions.visible_scope_condition())
 
-	where = " AND ".join(conds)
+	q.apply(filters_v2)
+	where = q.where()
+	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _DASHBOARD_SORTABLE, "modified")
 
-	total = frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tabJarvis Dashboard` WHERE {where}", params
-	)[0][0]
-	rows = frappe.db.sql(
+	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Dashboard` WHERE {where}", params)[0][
+		0
+	]
+	rows = list_filters.bounded_sql(
 		f"""SELECT name, dashboard_title, description, dashboard_type, scope,
 		target_role, target_user, owner, modified
 		FROM `tabJarvis Dashboard`
 		WHERE {where}
 		ORDER BY {order}
 		LIMIT %(page_length)s OFFSET %(start)s""",
-		params, as_dict=True,
+		params,
+		as_dict=True,
 	)
 	for r in rows:
 		r["modified"] = str(r["modified"])
@@ -261,6 +286,56 @@ def get_dashboard(name: str) -> dict:
 	doc = frappe.get_doc(DASHBOARD, name)
 	doc.check_permission("read")
 	return {"ok": True, "data": _dashboard_detail(doc)}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def dashboard_for_conversation(conversation: str) -> dict:
+	"""The saved dashboard this conversation built, if there is one.
+
+	Main chat offers "Open in Dashboards" on a builder conversation's html
+	artifact: a saved dashboard opens in place (``?edit=``), an unsaved canvas
+	is promoted onto the builder from the transcript instead. This is the
+	lookup behind that fork, so ``{}`` is an ordinary answer, not an error.
+
+	Permission: the CALLER must own the conversation (conversations are
+	strictly private - the same gate ``chat.api.get_conversation`` applies),
+	and the dashboard row goes through ``frappe.get_list`` - NOT get_all,
+	which sets ignore_permissions and would skip the
+	permission_query_conditions hook that applies the scope-visibility matrix.
+	A dashboard that has since moved out of the caller's reach therefore reads
+	as "none" rather than leaking its title.
+
+	``owner`` is in the filters as well: ``source_conversation`` is a
+	client-settable payload field, so an Org-scope dashboard carrying someone
+	else's conversation id would otherwise be visible on THEIR "Open in
+	Dashboards". The caller provably owns the conversation, so nobody else can
+	legitimately have built from it.
+
+	``creation`` is returned (and ordered on, not ``modified``): the caller
+	compares it against the clicked message's own creation, so merely EDITING
+	an old dashboard cannot re-hijack a click on a newer unsaved build.
+	"""
+	from jarvis.chat.api import _get_owned_conversation
+
+	_get_owned_conversation(conversation)  # non-owner: PermissionError
+	rows = frappe.get_list(
+		DASHBOARD,
+		filters={"source_conversation": conversation, "owner": frappe.session.user},
+		fields=["name", "dashboard_title", "creation"],
+		order_by="creation desc",
+		limit=1,
+	)
+	if not rows:
+		return {"ok": True, "data": {}}
+	return {
+		"ok": True,
+		"data": {
+			"name": rows[0].name,
+			"dashboard_title": rows[0].dashboard_title or "",
+			"creation": str(rows[0].creation or ""),
+		},
+	}
 
 
 # --------------------------------------------------------------------------- #
@@ -294,9 +369,7 @@ def _parse_sources_block(html: str) -> list:
 	except Exception:
 		parsed = None
 	if not isinstance(parsed, dict) or not isinstance(parsed.get("sources"), list):
-		frappe.throw(
-			_('The jarvis-sources block must be JSON of the shape {"sources": [...]}.')
-		)
+		frappe.throw(_('The jarvis-sources block must be JSON of the shape {"sources": [...]}.'))
 	return parsed["sources"]
 
 
@@ -321,26 +394,24 @@ def _normalize_source_rows(sources) -> list[dict]:
 		name = s.get("source_name") or s.get("id") or s.get("name")
 		tool = s.get("tool")
 		if isinstance(tool, str) and tool.startswith("jarvis__"):
-			tool = tool[len("jarvis__"):]
+			tool = tool[len("jarvis__") :]
 		spec = s.get("spec")
 		if spec is None:
 			args = s.get("args")
 			if isinstance(args, dict):
 				spec = args.get("spec") if isinstance(args.get("spec"), dict) else args
 		# double-wrap drift ({"spec": {"spec": {...}}}): unwrap lone spec keys
-		while (
-			isinstance(spec, dict)
-			and len(spec) == 1
-			and isinstance(spec.get("spec"), dict)
-		):
+		while isinstance(spec, dict) and len(spec) == 1 and isinstance(spec.get("spec"), dict):
 			spec = spec["spec"]
 		if isinstance(spec, (dict, list)):
 			spec = frappe.as_json(spec)
-		rows.append({
-			"source_name": name,
-			"tool": tool,
-			"spec": spec if isinstance(spec, str) else "",
-		})
+		rows.append(
+			{
+				"source_name": name,
+				"tool": tool,
+				"spec": spec if isinstance(spec, str) else "",
+			}
+		)
 	return rows
 
 
@@ -414,17 +485,11 @@ def _validate_source_row(row: dict) -> None:
 	tool = (row.get("tool") or "").strip()
 	if tool not in _ALLOWED_TOOLS:
 		frappe.throw(
-			_("Source '{0}': unknown tool '{1}' (allowed: query, run_report, get_list).").format(
-				label, tool
-			)
+			_("Source '{0}': unknown tool '{1}' (allowed: query, run_report, get_list).").format(label, tool)
 		)
 	raw = row.get("spec")
 	if isinstance(raw, str) and len(raw) > _MAX_SPEC_CHARS:
-		frappe.throw(
-			_("Source '{0}': spec must be at most {1} characters.").format(
-				label, _MAX_SPEC_CHARS
-			)
-		)
+		frappe.throw(_("Source '{0}': spec must be at most {1} characters.").format(label, _MAX_SPEC_CHARS))
 	try:
 		spec = frappe.parse_json(raw)
 	except Exception:
@@ -456,18 +521,14 @@ def _validate_query_spec(label: str, spec: dict) -> None:
 	if "limit" in spec:
 		limit = spec["limit"]
 		if isinstance(limit, bool) or not isinstance(limit, int) or not (1 <= limit <= 1000):
-			frappe.throw(
-				_("Source '{0}': limit must be an integer between 1 and 1000.").format(label)
-			)
+			frappe.throw(_("Source '{0}': limit must be an integer between 1 and 1000.").format(label))
 
 
 def _validate_get_list_spec(label: str, spec: dict) -> None:
 	unknown = set(spec) - _GET_LIST_SPEC_KEYS
 	if unknown:
 		frappe.throw(
-			_("Source '{0}': unknown get_list spec key(s): {1}").format(
-				label, ", ".join(sorted(unknown))
-			)
+			_("Source '{0}': unknown get_list spec key(s): {1}").format(label, ", ".join(sorted(unknown)))
 		)
 	doctype = spec.get("doctype")
 	if not isinstance(doctype, str) or not doctype.strip():
@@ -475,8 +536,7 @@ def _validate_get_list_spec(label: str, spec: dict) -> None:
 	if not frappe.db.exists("DocType", doctype):
 		frappe.throw(_("Source '{0}': unknown DocType: {1}").format(label, doctype))
 	if "fields" in spec and not (
-		isinstance(spec["fields"], list)
-		and all(isinstance(x, str) for x in spec["fields"])
+		isinstance(spec["fields"], list) and all(isinstance(x, str) for x in spec["fields"])
 	):
 		frappe.throw(_("Source '{0}': fields must be a list of strings.").format(label))
 	if "filters" in spec and not isinstance(spec["filters"], (dict, list)):
@@ -484,9 +544,7 @@ def _validate_get_list_spec(label: str, spec: dict) -> None:
 	if "limit" in spec:
 		limit = spec["limit"]
 		if isinstance(limit, bool) or not isinstance(limit, int) or not (1 <= limit <= 1000):
-			frappe.throw(
-				_("Source '{0}': limit must be an integer between 1 and 1000.").format(label)
-			)
+			frappe.throw(_("Source '{0}': limit must be an integer between 1 and 1000.").format(label))
 	# order_by is handed straight to frappe.get_list; validate it ourselves
 	# (whitelisted `fieldname [asc|desc]` tokens) rather than trusting the ORM
 	# to sanitize an order-by expression.
@@ -505,9 +563,7 @@ def _validate_run_report_spec(label: str, spec: dict) -> None:
 	unknown = set(spec) - _RUN_REPORT_SPEC_KEYS
 	if unknown:
 		frappe.throw(
-			_("Source '{0}': unknown run_report spec key(s): {1}").format(
-				label, ", ".join(sorted(unknown))
-			)
+			_("Source '{0}': unknown run_report spec key(s): {1}").format(label, ", ".join(sorted(unknown)))
 		)
 	report_name = spec.get("report_name")
 	if not isinstance(report_name, str) or not report_name.strip():
@@ -545,13 +601,9 @@ def run_dashboard_source(dashboard: str, source_name: str) -> dict:
 		doc.check_permission("read")
 	except frappe.PermissionError:
 		_clear_perm_message_noise()
-		return _error_envelope(
-			"PermissionError", _("You do not have access to this dashboard.")
-		)
+		return _error_envelope("PermissionError", _("You do not have access to this dashboard."))
 
-	row = next(
-		(s for s in (doc.sources or []) if s.source_name == source_name), None
-	)
+	row = next((s for s in (doc.sources or []) if s.source_name == source_name), None)
 	if row is None:
 		return _error_envelope(
 			"InvalidArgumentError",
@@ -562,9 +614,7 @@ def run_dashboard_source(dashboard: str, source_name: str) -> dict:
 	except Exception:
 		spec = None
 	if not isinstance(spec, dict):
-		return _error_envelope(
-			"InvalidArgumentError", _("The saved spec for this source is not valid JSON.")
-		)
+		return _error_envelope("InvalidArgumentError", _("The saved spec for this source is not valid JSON."))
 
 	tool = row.tool
 	columns = None
@@ -606,9 +656,7 @@ def run_dashboard_source(dashboard: str, source_name: str) -> dict:
 			# set into the browser payload. The post-loop slice still applies.
 			rows = res["result"][: DASHBOARD_MAX_ROWS + 1]
 		else:
-			return _error_envelope(
-				"InvalidArgumentError", _("Unsupported tool: {0}").format(tool)
-			)
+			return _error_envelope("InvalidArgumentError", _("Unsupported tool: {0}").format(tool))
 	except (PermissionDeniedError, frappe.PermissionError) as e:
 		# has_permission pushes "no access" lines into the message log on the
 		# denied path; clear them so they never ride back in _server_messages.
@@ -621,9 +669,7 @@ def run_dashboard_source(dashboard: str, source_name: str) -> dict:
 			title="Jarvis: dashboard source run failed",
 			message=frappe.get_traceback(),
 		)
-		return _error_envelope(
-			"InternalError", _("The data source could not be run. The error was logged.")
-		)
+		return _error_envelope("InternalError", _("The data source could not be run. The error was logged."))
 
 	truncated = False
 	if len(rows) > DASHBOARD_MAX_ROWS:

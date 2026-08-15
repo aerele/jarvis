@@ -1,5 +1,5 @@
-import { isReadyForChat } from "@/api.js"
-import { isOnboardComplete } from "@/onboarding/steps.js"
+import { isReadyForChat } from "@/api.js";
+import { isOnboardComplete } from "@/onboarding/steps.js";
 
 // Shared, memoized readiness verdict. Two callers need it per page load: the
 // router's first-navigation guard (bounce an already-onboarded user off a stale
@@ -7,29 +7,46 @@ import { isOnboardComplete } from "@/onboarding/steps.js"
 // poster when the workspace was NEVER set up). Sharing one in-flight promise
 // keeps it to a SINGLE backend round-trip.
 //
-// No cache-reset helper is needed: OnboardingView hard-reloads to /jarvis/ on
-// completion, which re-mounts the SPA and drops this module-level cache.
-let readyPromise = null
+// OnboardingView hard-reloads to /jarvis/ on completion, which re-mounts the SPA
+// and drops this cache; that covers the wizard. It does NOT cover changes made
+// in-app, which is why forgetReady() below exists: connecting or disconnecting a
+// model from the settings dialog changes this verdict without leaving the page.
+let readyPromise = null;
 
-// Fail-open: if the backend check THROWS, treat the workspace as ready so a
-// flaky/500 check never strands a real user. (Note this only covers thrown
-// errors — a returned {ready:false} is a real verdict, handled below.)
+// Fail-CLOSED-retryable: if the readiness call itself THROWS (the customer's own
+// bench erroring, not admin - the server already resolves an admin outage by
+// cohort and returns a real verdict), do NOT declare the workspace ready. The old
+// thrown->{ready:true} shortcut sent a never-onboarded workspace straight into a
+// chat that cannot answer (review P0-05). Return the same retryable verdict the
+// server uses for "nobody could confirm this", which needsOnboarding() gates on:
+// an established workspace's outage is already handled server-side, so a thrown
+// call here is the severe case and must fail closed with a retry, not open.
 export function checkReady() {
 	if (!readyPromise) {
-		readyPromise = isReadyForChat().catch(() => ({ ready: true }))
+		readyPromise = isReadyForChat().catch(() => ({
+			ready: false,
+			reason: "readiness_unconfirmed",
+			retryable: true,
+		}));
 	}
-	return readyPromise
+	return readyPromise;
+}
+
+// Drop the memoized verdict so the NEXT checkReady() asks the backend again.
+// Deliberately not a re-fetch: the callers that care re-read straight afterwards,
+// and a caller that does not must not pay for a round-trip it never reads.
+export function forgetReady() {
+	readyPromise = null;
 }
 
 // Resolves true once the workspace is chat-ready. Used by the router guard.
 export async function isWorkspaceReady() {
-	return isOnboardComplete(await checkReady())
+	return isOnboardComplete(await checkReady());
 }
 
 // Reasons (from account.py:is_ready_for_chat) that mean "this workspace has
-// never completed onboarding" — the FIRST setup step for each mode:
-//   - "signup"             managed: no admin api_key yet (wizard not started)
-//   - "selfhost_connection" self-host: no validated openclaw connection yet
+// never completed onboarding" — the FIRST setup step:
+//   - "signup"  no admin api_key yet (wizard not started)
 // Deliberately NOT "llm_credentials": that reason ALSO fires when an
 // already-onboarded workspace's LLM creds later expire/rotate. Hard-blocking a
 // working workspace out of its chat + data over a recoverable credential
@@ -46,15 +63,249 @@ export async function isWorkspaceReady() {
 // (llm_direct_synced_at never stamped). Same permanence guarantee — once a
 // direct config confirms once, the marker is permanent — so it belongs here
 // too, never on the degraded-banner path.
+// "llm_setup" is the server-decided hard variant of llm_credentials: creds
+// missing AND nothing ever synced AND the subscription never went Active — a
+// half-finished signup (e.g. failed payment), not an established workspace.
+// The soft/hard split lives server-side (_llm_missing_verdict) because only
+// admin knows the subscription state.
+// "readiness_unconfirmed" is COHORT-AWARE by construction: the server returns it
+// ONLY for a workspace nothing has ever confirmed chat-ready (an established one
+// gets ready:true through the same outage - account._admin_unreachable_verdict).
+// So when the SPA sees it, it is the never-ready cohort and must gate closed with
+// a retry, exactly the case the full-screen poster is for (review P0-05). The
+// thrown-call catch above resolves to this same reason for the severe own-bench
+// failure, which also fails closed. It differs from llm_credentials, which fires
+// on an ESTABLISHED workspace's later credential rotation and must stay degraded.
+// "llm_rejected" (jarvis#757) belongs here for the same reason the two
+// provisioning reasons do: it fires in the SAME structural position, a first sync
+// that never succeeded, and it only ever REPLACES one of them. Round-1 review of
+// jarvis#760 caught that adding the reason without listing it here silently
+// reopened the gate: needsOnboarding() returned false, so AppShell rendered the
+// normal chat shell for a customer whose connection was never accepted and whose
+// chat therefore cannot answer.
+// "llm_applying" is deliberately ABSENT (jarvis C2): the server only ever returns
+// it for a workspace _has_been_chat_ready has already confirmed established
+// (account.py's _provisioning_verdict), so it can never fire on a genuinely
+// never-onboarded tenant - those stay on the hard llm_pool_provisioning /
+// llm_provisioning reason above. It means "an established workspace's FIRST
+// pool/direct leg is mid-apply" (e.g. adding a model in Settings), which must
+// keep the customer in their chat + history, not bounce them to the setup
+// poster on a reload. See isLlmApplying() below for its quiet in-app banner.
+// "llm_apply_stuck" (jarvis#825) is deliberately ABSENT for the same reason:
+// the server only returns it for an established workspace whose apply hung, and
+// it must keep its chat + history and get a retryable banner, never the setup
+// poster. Do NOT "fix" the omission by adding it - see isLlmApplyStuck() below.
 const NOT_ONBOARDED_REASONS = new Set([
-	"signup", "selfhost_connection", "llm_pool_provisioning", "llm_provisioning",
-])
+	"signup",
+	"llm_pool_provisioning",
+	"llm_provisioning",
+	"llm_rejected",
+	"llm_setup",
+	"readiness_unconfirmed",
+]);
 
 // True only when the workspace has NOT completed onboarding at all — the single
-// case the full-screen gate poster is for. A ready workspace, a fail-open
-// (thrown) result, or a merely-degraded one (llm_credentials) all return false.
+// case the full-screen gate poster is for. A ready workspace or a merely-degraded
+// one (llm_credentials) returns false; a never-ready workspace the server could
+// not confirm (readiness_unconfirmed) returns true, and the poster offers a retry.
 export async function needsOnboarding() {
-	const resp = await checkReady()
-	if (isOnboardComplete(resp)) return false
-	return NOT_ONBOARDED_REASONS.has(resp && resp.reason)
+	const resp = await checkReady();
+	if (isOnboardComplete(resp)) return false;
+	return NOT_ONBOARDED_REASONS.has(resp && resp.reason);
+}
+
+// Re-derive the gate for a caller that already holds a verdict and can only
+// change its mind in ONE direction (#691). AppShell mounts once for the whole
+// SPA session and reads needsOnboarding() exactly once, at boot, into a local
+// ref - there is no watcher of any kind on the readiness module, so nothing
+// re-runs that read later. A connect that succeeds while still on the wizard
+// route changes the backend verdict without remounting AppShell; the ONLY
+// thing that follows is a route change (OnboardingView.navigateToChat's
+// forgetReady() + router.replace), which AppShell never notices. The customer
+// then lands on Chat with the gate still rendering the poster it computed
+// minutes earlier, over a workspace the backend already calls ready - fixed
+// only by a hard reload, which nothing on screen suggests.
+//
+// Only worth calling while `current` is still gated: a workspace that has
+// finished onboarding stays onboarded (the NOT_ONBOARDED_REASONS doc above
+// - an established workspace's later credential rotation is a soft
+// llm_credentials degrade, never a reason back in this set), so a `false`
+// verdict never needs re-confirming and this is a no-op for the overwhelming
+// majority of route changes, not an extra round-trip per navigation.
+export async function regateOnboarding(current) {
+	if (current !== true) return current;
+	return needsOnboarding();
+}
+
+// AppShell's actual route-change handler (round-4 review F3/F4), pulled out
+// here rather than left inline so its race semantics can be pinned by a plain
+// unit test without mounting the (heavy) shell component. Takes two
+// `{value}` cells - real Vue refs in production, plain objects in a test -
+// and owns writing both:
+//
+//   - F3 (the flash): `route.name` flips to "Chat" the instant
+//     navigateToChat() calls router.replace(), which is BEFORE
+//     regateOnboarding()'s await resolves. Writing `gated` only once the
+//     fresh verdict is in - never the stale `true` in between - means a
+//     caller folding `regating` into its own "hold rendering" condition
+//     (AppShell's `shellReady`) never derives `showGate` from the stale
+//     value while this is in flight. It only engages when a real re-check is
+//     about to happen (current is actually `true`), so ordinary onboarded
+//     navigation never touches `regating` at all.
+//   - F4 (the race): two route changes in quick succession while still gated
+//     issue two calls. `regateTokenSeq` is bumped once per call, synchronously,
+//     so it orders strictly by ISSUE time; a call whose token no longer
+//     matches the module's current sequence number when its await resolves
+//     was superseded by a later-issued call and must not write `gated` - an
+//     earlier-issued, later-resolving `true` must never overwrite a fresher
+//     `false`.
+let regateTokenSeq = 0;
+export async function regateOnRouteChange(gated, regating) {
+	if (gated.value !== true) return;
+	const myToken = ++regateTokenSeq;
+	regating.value = true;
+	const v = await regateOnboarding(true);
+	if (myToken !== regateTokenSeq) return; // superseded by a newer navigation
+	gated.value = v;
+	regating.value = false;
+}
+
+// Billing banner payload from the same memoized verdict - no extra round-trip.
+// The account was reconnected on ANOTHER site, so this one lost the workspace.
+// `site_replaced` is deliberately absent from NOT_ONBOARDED_REASONS: this site IS
+// onboarded, it just no longer holds the account, and the full-screen setup poster
+// would say the wrong thing. Returns {} unless it applies.
+export async function replacedNoticeOf() {
+	const r = await checkReady();
+	if (!r || r.reason !== "site_replaced") return {};
+	return r.replaced_notice || { replaced: true };
+}
+
+// Where that banner's action sends the customer, and how the wizard recognises it.
+// One constant for both ends: without the flag the wizard resumes its own path,
+// and a site whose key was rotated away dead-ends at "could not sign in".
+export const RECONNECT_INTENT_URL = "/jarvis/onboarding?reconnect=1";
+
+// Which step the wizard opens on. Explicit reconnect intent beats a resumed
+// step, but never a paid/provisioning one - somebody already set up is not
+// reconnecting.
+export function landingStep({ intent, resumedStep, terminal }) {
+	return intent && !terminal ? "details" : resumedStep;
+}
+
+export function hasReconnectIntent(search) {
+	try {
+		return new URLSearchParams(search || "").get("reconnect") === "1";
+	} catch {
+		return false;
+	}
+}
+
+// Copy for that banner. `moved_to` is the site now holding the account - both
+// belong to the same account holder, so naming it is what makes this actionable.
+export function replacedBanner(notice) {
+	if (!notice || !notice.replaced) return null;
+	const where = (notice.moved_to || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+	return {
+		tone: "warning",
+		title: "This site no longer has access to your workspace",
+		message: where
+			? `Your Jarvis account is now connected to ${where}. Chat here stopped working when it moved.`
+			: "Your Jarvis account was reconnected on another site. Chat here stopped working when it moved.",
+		action: "Reconnect this site instead",
+	};
+}
+
+export async function billingNoticeOf() {
+	const r = await checkReady();
+	return (r && r.billing_notice) || {};
+}
+
+// The backend's OWN explanation for a "container_provisioning" not-ready verdict
+// (jarvis.account.is_ready_for_chat's `detail`, set by _admin_chat_gate - e.g. "Your
+// OpenAI account has reached its usage limit. It resets in about 27 hours."). A
+// dedicated accessor, same shape as billingNoticeOf above, so a caller that only
+// wants "what do I tell the customer" never has to know the raw {ready, reason,
+// detail} shape checkReady() resolves to.
+//
+// Scoped to container_provisioning ALONE: "subscription_suspended" has its own
+// dedicated copy (suspensionNotice/SUSPENDED_FALLBACK in steps.js) with a Renew
+// call to action, which is wrong for this reason (nothing to renew via US when
+// the customer's OWN LLM account merely ran out of quota) - a caller must not
+// paint this detail into that banner's "Chat is paused" framing.
+//
+// "llm_credentials" is deliberately NOT handled here, and re-adding it is a
+// REGRESSION (pinned by readiness.spec.js). It used to return a fixed sentence
+// as a stopgap, from before needsLlmConnection() and the "No AI connected"
+// banner existed. Two accessors firing for one reason meant the caller rendered
+// two banners for the same state, and the generic CTA-less one won the v-else-if
+// race in ChatView - so the customer whose AI is disconnected got "Chat may not
+// work yet" with no way back to the AI models pane, which is the exact case the
+// dedicated banner was built for. One reason, one accessor: this one answers
+// "what did the backend say", needsLlmConnection() below answers "is there an
+// AI attached at all".
+// "authority_repair_required" (review plan 04 P0-6) shares this accessor and the
+// same generic, CTA-less "Chat may not work yet" banner: admin found the
+// customer's serving container ambiguous/invalid and paged support, so the ONLY
+// safe thing this UI can do is show admin's own reassurance ("your payment is
+// safe, please don't retry") - never a Renew or Reconnect action, both of which
+// could make it worse. Like container_provisioning it carries the backend's own
+// `detail`, so it belongs here rather than on any billing/AI-connect banner.
+export async function readinessDetailOf() {
+	const r = await checkReady();
+	if (!r || r.ready) return "";
+	if (r.reason === "container_provisioning" || r.reason === "authority_repair_required")
+		return r.detail || "";
+	return "";
+}
+
+// True when the workspace is not chat-ready specifically because it has no usable
+// LLM credential - the customer disconnected their AI, or the credential the
+// workspace was using expired or was revoked. A sibling accessor rather than a
+// widening of readinessDetailOf above, because that one answers "what did the
+// backend say about this" and is_ready_for_chat sends no `detail` for this reason:
+// there is nothing to quote, only a state to name.
+//
+// This deliberately does NOT belong in NOT_ONBOARDED_REASONS (see the comment
+// there). The full-screen gate poster is for a workspace that was never set up;
+// this one HAS been set up and merely has no AI attached right now, so it keeps its
+// chat history, its settings and every other route, and gets a banner instead.
+export async function needsLlmConnection() {
+	const r = await checkReady();
+	return !!(r && !r.ready && r.reason === "llm_credentials");
+}
+
+// True when an established workspace's LLM leg is mid-apply for the first time
+// (jarvis C2 - e.g. adding a model in Settings > AI models just flipped it into
+// pool mode). Its own accessor, same "one reason, one accessor" convention as
+// needsLlmConnection above, rather than folding into readinessDetailOf: that one
+// is spec-pinned to container_provisioning/authority_repair_required and
+// is_ready_for_chat sends no `detail` for this reason - there is nothing to
+// quote, only a state to name. The caller's banner is quiet (no CTA, no
+// composer-disable) but NOT a promise that chat keeps answering: a FIRST
+// direct->pool transition stops and restarts the container (a 10-30s bounce),
+// so the previous config does NOT keep serving through it. This just keeps the
+// customer in their chat + history instead of bouncing them to the setup
+// wizard - see account._APPLYING_SOFT_WINDOW_S for the time-box that keeps a
+// stuck apply from staying soft forever.
+export async function isLlmApplying() {
+	const r = await checkReady();
+	return !!(r && !r.ready && r.reason === "llm_applying");
+}
+
+// True when an established workspace's apply got STUCK: it was mid-apply
+// (llm_applying) but has aged past the server's soft window without ever
+// converging or writing a terminal failure (jarvis#825 - fleet-agent down, a
+// sync that hangs). Its own accessor for the same "one reason, one accessor"
+// reason as isLlmApplying above. Deliberately NOT in NOT_ONBOARDED_REASONS: the
+// workspace WAS established, so it keeps its chat + history and gets an honest,
+// retryable banner instead of the full-screen setup poster - which is the whole
+// point of #825 (before it, a stuck apply silently fell back to the hard
+// provisioning reason and bounced the customer to the wizard). The banner's
+// Retry calls resyncLlm(), gated to Jarvis Admins because the backend endpoint
+// is (jarvis.onboarding.resync_llm -> require_jarvis_admin); a non-admin sees the
+// state named but no button.
+export async function isLlmApplyStuck() {
+	const r = await checkReady();
+	return !!(r && !r.ready && r.reason === "llm_apply_stuck");
 }

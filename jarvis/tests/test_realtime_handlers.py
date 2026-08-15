@@ -13,6 +13,7 @@ Tests cover:
   swallows exceptions instead of taking down the loop
 - the channel name format matches dispatch.publish_chat_send
 """
+
 from __future__ import annotations
 
 import json
@@ -47,25 +48,31 @@ class TestMaybeStartChatSubscriber(FrappeTestCase):
 		# _read_common_config patched: the gate falls back to the real
 		# common_site_config.json, which may legitimately have the flag on
 		# (it does on the Path B dev bench).
-		with patch.object(frappe, "conf", _FakeConf({})), \
-		     patch.object(handlers, "_read_common_config", return_value={}), \
-		     patch("gevent.spawn") as spawn:
+		with (
+			patch.object(frappe, "conf", _FakeConf({})),
+			patch.object(handlers, "_read_common_config", return_value={}),
+			patch("gevent.spawn") as spawn,
+		):
 			spawned = handlers.maybe_start_chat_subscriber()
 		self.assertFalse(spawned)
 		spawn.assert_not_called()
 		self.assertFalse(handlers._SUBSCRIBER_SPAWNED)
 
 	def test_no_spawn_when_socketio_backend_is_node(self):
-		with patch.object(frappe, "conf", _FakeConf({"socketio_backend": "node"})), \
-		     patch("gevent.spawn") as spawn:
+		with (
+			patch.object(frappe, "conf", _FakeConf({"socketio_backend": "node"})),
+			patch("gevent.spawn") as spawn,
+		):
 			spawned = handlers.maybe_start_chat_subscriber()
 		self.assertFalse(spawned)
 		spawn.assert_not_called()
 		self.assertFalse(handlers._SUBSCRIBER_SPAWNED)
 
 	def test_spawn_when_socketio_backend_is_python(self):
-		with patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})), \
-		     patch("gevent.spawn") as spawn:
+		with (
+			patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})),
+			patch("gevent.spawn") as spawn,
+		):
 			spawned = handlers.maybe_start_chat_subscriber()
 		self.assertTrue(spawned)
 		# The watchdog is bound to the site resolved at spawn time (the
@@ -77,10 +84,12 @@ class TestMaybeStartChatSubscriber(FrappeTestCase):
 		"""socketio_backend=python but neither an open site context nor a
 		default_site: log an error and skip the spawn instead of raising -
 		a raise at import would take down the whole realtime server."""
-		with patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})), \
-		     patch.object(handlers, "_read_common_config", return_value={}), \
-		     patch.object(frappe.local, "site", None), \
-		     patch("gevent.spawn") as spawn:
+		with (
+			patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})),
+			patch.object(handlers, "_read_common_config", return_value={}),
+			patch.object(frappe.local, "site", None),
+			patch("gevent.spawn") as spawn,
+		):
 			spawned = handlers.maybe_start_chat_subscriber()
 		self.assertFalse(spawned)
 		spawn.assert_not_called()
@@ -89,12 +98,15 @@ class TestMaybeStartChatSubscriber(FrappeTestCase):
 	def test_backend_flag_falls_back_to_common_site_config(self):
 		"""The realtime process imports this module with no frappe context;
 		the gate must still see the flag via common_site_config.json."""
-		with patch.object(frappe, "conf", _FakeConf({})), \
-		     patch.object(
-		         handlers, "_read_common_config",
-		         return_value={"socketio_backend": "python"},
-		     ), \
-		     patch("gevent.spawn") as spawn:
+		with (
+			patch.object(frappe, "conf", _FakeConf({})),
+			patch.object(
+				handlers,
+				"_read_common_config",
+				return_value={"socketio_backend": "python"},
+			),
+			patch("gevent.spawn") as spawn,
+		):
 			spawned = handlers.maybe_start_chat_subscriber()
 		self.assertTrue(spawned)
 		spawn.assert_called_once()
@@ -102,8 +114,10 @@ class TestMaybeStartChatSubscriber(FrappeTestCase):
 	def test_python_backend_match_is_case_insensitive(self):
 		"""Operators may type 'Python' or 'PYTHON' in the config; the
 		gate normalises before comparing."""
-		with patch.object(frappe, "conf", _FakeConf({"socketio_backend": "PYTHON"})), \
-		     patch("gevent.spawn") as spawn:
+		with (
+			patch.object(frappe, "conf", _FakeConf({"socketio_backend": "PYTHON"})),
+			patch("gevent.spawn") as spawn,
+		):
 			spawned = handlers.maybe_start_chat_subscriber()
 		self.assertTrue(spawned)
 		spawn.assert_called_once()
@@ -112,8 +126,10 @@ class TestMaybeStartChatSubscriber(FrappeTestCase):
 		"""Idempotent: once the watchdog is running, a second call must
 		not spawn a duplicate greenlet (which would double-subscribe to
 		Redis and cause every chat turn to run twice)."""
-		with patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})), \
-		     patch("gevent.spawn") as spawn:
+		with (
+			patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})),
+			patch("gevent.spawn") as spawn,
+		):
 			first = handlers.maybe_start_chat_subscriber()
 			second = handlers.maybe_start_chat_subscriber()
 		self.assertTrue(first)
@@ -141,8 +157,7 @@ class TestRunOne(FrappeTestCase):
 	def test_dispatches_decoded_payload_to_handle_chat_send(self):
 		payload = {"conversation_id": "c1", "message_id": "m1", "run_id": "r1"}
 		raw = json.dumps(payload).encode("utf-8")
-		with self._null_ctx() as ctx, \
-		     patch("jarvis.chat.turn_handler.handle_chat_send") as mock_handle:
+		with self._null_ctx() as ctx, patch("jarvis.chat.turn_handler.handle_chat_send") as mock_handle:
 			handlers._run_one(raw, self.SITE)
 		mock_handle.assert_called_once_with(payload)
 		ctx.assert_called_once_with(self.SITE)
@@ -152,8 +167,7 @@ class TestRunOne(FrappeTestCase):
 		strings; accept both."""
 		payload = {"conversation_id": "c2", "message_id": "m2", "run_id": "r2"}
 		raw = json.dumps(payload)
-		with self._null_ctx(), \
-		     patch("jarvis.chat.turn_handler.handle_chat_send") as mock_handle:
+		with self._null_ctx(), patch("jarvis.chat.turn_handler.handle_chat_send") as mock_handle:
 			handlers._run_one(raw, self.SITE)
 		mock_handle.assert_called_once_with(payload)
 
@@ -163,19 +177,22 @@ class TestRunOne(FrappeTestCase):
 		The exception is logged via frappe.log_error instead."""
 		payload = {"conversation_id": "c", "message_id": "m", "run_id": "r"}
 		raw = json.dumps(payload).encode("utf-8")
-		with self._null_ctx(), \
-		     patch("jarvis.chat.turn_handler.handle_chat_send",
-		           side_effect=RuntimeError("boom")), \
-		     patch("frappe.log_error") as mock_log:
+		with (
+			self._null_ctx(),
+			patch("jarvis.chat.turn_handler.handle_chat_send", side_effect=RuntimeError("boom")),
+			patch("frappe.log_error") as mock_log,
+		):
 			handlers._run_one(raw, self.SITE)  # must not raise
 		mock_log.assert_called_once()
 
 	def test_swallows_invalid_json(self):
 		"""A malformed payload (corrupt publish, schema drift) must not
 		take down the loop. Log and move on."""
-		with self._null_ctx(), \
-		     patch("jarvis.chat.turn_handler.handle_chat_send") as mock_handle, \
-		     patch("frappe.log_error") as mock_log:
+		with (
+			self._null_ctx(),
+			patch("jarvis.chat.turn_handler.handle_chat_send") as mock_handle,
+			patch("frappe.log_error") as mock_log,
+		):
 			handlers._run_one(b"not-json", self.SITE)  # must not raise
 		mock_handle.assert_not_called()
 		mock_log.assert_called_once()
@@ -183,9 +200,11 @@ class TestRunOne(FrappeTestCase):
 	def test_swallows_non_dict_payload(self):
 		"""Defensive: a JSON value that isn't an object can't be a turn
 		payload. Reject + log."""
-		with self._null_ctx(), \
-		     patch("jarvis.chat.turn_handler.handle_chat_send") as mock_handle, \
-		     patch("frappe.log_error") as mock_log:
+		with (
+			self._null_ctx(),
+			patch("jarvis.chat.turn_handler.handle_chat_send") as mock_handle,
+			patch("frappe.log_error") as mock_log,
+		):
 			handlers._run_one(b'["not", "a", "dict"]', self.SITE)
 		mock_handle.assert_not_called()
 		mock_log.assert_called_once()
@@ -194,9 +213,10 @@ class TestRunOne(FrappeTestCase):
 		"""If the site context itself cannot open (bad site, db down), the
 		failure is logged to the module logger and swallowed - the loop
 		must survive."""
-		with patch.object(
-		     handlers, "_turn_context", side_effect=RuntimeError("no such site")
-		), patch("jarvis.chat.turn_handler.handle_chat_send") as mock_handle:
+		with (
+			patch.object(handlers, "_turn_context", side_effect=RuntimeError("no such site")),
+			patch("jarvis.chat.turn_handler.handle_chat_send") as mock_handle,
+		):
 			handlers._run_one(b"{}", self.SITE)  # must not raise
 		mock_handle.assert_not_called()
 
@@ -219,18 +239,18 @@ class TestDispatch(FrappeTestCase):
 		payload = {"conversation_id": "c1", "message_id": "m1", "run_id": "r1"}
 		with patch.object(frappe, "cache", return_value=fake_cache):
 			dispatch.publish_chat_send(payload)
-		fake_cache.publish.assert_called_once_with(
-			dispatch._channel(frappe.local.site), json.dumps(payload)
-		)
+		fake_cache.publish.assert_called_once_with(dispatch._channel(frappe.local.site), json.dumps(payload))
 
 	def test_dispatch_turn_publishes_only_after_commit(self):
 		from jarvis.chat import api as chat_api
 
 		payload = {"conversation_id": "c1", "message_id": "m1", "run_id": "r1"}
-		with patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})), \
-		     patch("jarvis.chat.dispatch.subscriber_count", return_value=1), \
-		     patch("jarvis.chat.dispatch.publish_chat_send") as mock_pub, \
-		     patch("frappe.enqueue") as mock_enqueue:
+		with (
+			patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})),
+			patch("jarvis.chat.dispatch.subscriber_count", return_value=1),
+			patch("jarvis.chat.dispatch.publish_chat_send") as mock_pub,
+			patch("frappe.enqueue") as mock_enqueue,
+		):
 			chat_api._dispatch_turn(payload)
 			mock_pub.assert_not_called()  # nothing until the transaction lands
 			frappe.db.commit()
@@ -245,11 +265,13 @@ class TestDispatch(FrappeTestCase):
 		from jarvis.chat import api as chat_api
 
 		payload = {"conversation_id": "c2", "message_id": "m2", "run_id": "r2"}
-		with patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})), \
-		     patch("jarvis.chat.dispatch.subscriber_count", return_value=0), \
-		     patch("jarvis.chat.dispatch.publish_chat_send") as mock_pub, \
-		     patch("frappe.enqueue") as mock_enqueue, \
-		     patch("frappe.log_error") as mock_log:
+		with (
+			patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})),
+			patch("jarvis.chat.dispatch.subscriber_count", return_value=0),
+			patch("jarvis.chat.dispatch.publish_chat_send") as mock_pub,
+			patch("frappe.enqueue") as mock_enqueue,
+			patch("frappe.log_error") as mock_log,
+		):
 			chat_api._dispatch_turn(payload)
 			frappe.db.commit()  # even after commit: no publish was registered
 		mock_pub.assert_not_called()
@@ -267,11 +289,12 @@ class TestDispatch(FrappeTestCase):
 		from jarvis.chat import api as chat_api
 
 		payload = {"conversation_id": "c3", "message_id": "m3", "run_id": "r3"}
-		with patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})), \
-		     patch("jarvis.chat.dispatch.subscriber_count",
-		           side_effect=RuntimeError("redis hiccup")), \
-		     patch("jarvis.chat.dispatch.publish_chat_send") as mock_pub, \
-		     patch("frappe.enqueue") as mock_enqueue:
+		with (
+			patch.object(frappe, "conf", _FakeConf({"socketio_backend": "python"})),
+			patch("jarvis.chat.dispatch.subscriber_count", side_effect=RuntimeError("redis hiccup")),
+			patch("jarvis.chat.dispatch.publish_chat_send") as mock_pub,
+			patch("frappe.enqueue") as mock_enqueue,
+		):
 			chat_api._dispatch_turn(payload)
 			frappe.db.commit()
 		mock_pub.assert_not_called()

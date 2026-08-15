@@ -15,16 +15,21 @@
     "error",
     "recovering",
     "recovery_started_at",
-    "openclaw_seq_watermark",
+    "agent_seq_watermark",
     "was_recovered",
+    "stopped",
     "tool_name",
     "tool_args",
     "tool_result",
     "tool_status",
+    "tool_call_id",
     "action_outcome",
     "ref_doctype",
     "ref_name",
     "canvas",
+    "reply_duration_ms",
+    "model",
+    "provider",
     "hidden"
   ],
   "fields": [
@@ -75,7 +80,7 @@
       "fieldtype": "Check",
       "label": "Recovering",
       "default": 0,
-      "description": "True while a managed turn timed out or dropped on the bench but openclaw is presumed still working or finished. turn_recovery finalizes it from the gateway snapshot instead of erroring. streaming stays 1 so the UI keeps the spinner."
+      "description": "True while a managed turn timed out or dropped on the bench but agent is presumed still working or finished. turn_recovery finalizes it from the gateway snapshot instead of erroring. streaming stays 1 so the UI keeps the spinner."
     },
     {
       "fieldname": "recovery_started_at",
@@ -84,13 +89,13 @@
       "description": "When this row entered the recovering state. Bounds the recovery window against an absolute ceiling."
     },
     {
-      "fieldname": "openclaw_seq_watermark",
+      "fieldname": "agent_seq_watermark",
       "fieldtype": "Int",
-      "label": "Openclaw Seq Watermark",
+      "label": "Agent Seq Watermark",
       "read_only": 1,
       "hidden": 1,
       "permlevel": 1,
-      "description": "Highest openclaw transcript seq observed before this turn's chat.send; snapshot recovery only finalizes from strictly newer assistant messages. permlevel 1 (server-only; TASK 9): written by the worker via frappe.db.set_value / read via raw SQL, so no user can read/set the watermark through generic REST."
+      "description": "Highest agent transcript seq observed before this turn's chat.send; snapshot recovery only finalizes from strictly newer assistant messages. permlevel 1 (server-only; TASK 9): written by the worker via frappe.db.set_value / read via raw SQL, so no user can read/set the watermark through generic REST."
     },
     {
       "fieldname": "was_recovered",
@@ -100,6 +105,14 @@
       "read_only": 1,
       "hidden": 1,
       "description": "Set when this turn was finalized or errored by snapshot recovery rather than its live worker - the never-error machinery's fingerprint."
+    },
+    {
+      "fieldname": "stopped",
+      "fieldtype": "Check",
+      "label": "Stopped",
+      "default": 0,
+      "read_only": 1,
+      "description": "User hit Stop and the abort landed; content is whatever streamed first (may be empty)."
     },
     {
       "fieldname": "tool_name",
@@ -125,6 +138,16 @@
       "label": "Tool Status",
       "options": "\nrunning\ncompleted\nerror",
       "depends_on": "eval:doc.role=='tool'"
+    },
+    {
+      "fieldname": "tool_call_id",
+      "fieldtype": "Data",
+      "label": "Tool Call ID",
+      "length": 128,
+      "search_index": 1,
+      "no_copy": 1,
+      "depends_on": "eval:doc.role=='tool'",
+      "description": "The agent tool-call id for this receipt. (session_key->conversation, tool_call_id) is the R-6 out-of-band idempotency key: a duplicate callback for the same tool call dedupes instead of writing a second receipt. Null for legacy callbacks that carry no call id."
     },
     {
       "fieldname": "action_outcome",
@@ -156,6 +179,32 @@
       "fieldtype": "JSON",
       "label": "Canvas",
       "description": "Rich artifacts (chart/canvas) the agent rendered this turn: [{name,title,type,file_url}]."
+    },
+    {
+      "fieldname": "reply_duration_ms",
+      "fieldtype": "Int",
+      "label": "Reply Duration Ms",
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "CDX-20 — the assistant reply's honest generation span in milliseconds, on ONE durable baseline shared with the live timer: run:start (the pump's dispatching_at, stamped at the ready->dispatching transition immediately before run:start is published) -> settlement (the terminal instant). Stamped in the winning settlement txn. The SPA reads THIS on reload (ChatView.elapsedOf) so a reloaded reply shows the same duration the live run:start->run:end timer showed, within network tolerance. Replaces the old creation/modified rewrite (creation is Frappe's record-creation AUDIT field and is no longer repurposed as a metric). NULL on legacy (non-pump) rows, which fall back to modified-creation."
+    },
+    {
+      "fieldname": "model",
+      "fieldtype": "Data",
+      "label": "Model",
+      "length": 140,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "jarvis#560 - the model that actually PRODUCED this reply, stamped on assistant rows only. Read at finalize from the gateway's sessions.list row for this turn's session (the same row the per-model usage bucket is billed against, so the transcript and the usage pane can never disagree). It names the model that answered, which is not always the one requested: an unpinned conversation keeps the agent's failover chain live, so a substitution lands here with no other trace. Blank on legacy rows and on turns whose session row never named a model."
+    },
+    {
+      "fieldname": "provider",
+      "fieldtype": "Data",
+      "label": "Provider",
+      "length": 140,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "jarvis#560 - the agent provider id that served this reply (sessions.list `modelProvider`, e.g. `gemini`, `openai_compat`), paired with `model`. Two providers can expose the same model id, so the pair is what identifies the run for an audit or an incident review."
     },
     {
       "fieldname": "hidden",

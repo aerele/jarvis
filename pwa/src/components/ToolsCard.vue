@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from "vue"
+import { ref } from "vue";
 
 // What the agent DID, as one collapsible card rather than a bubble per call.
 // Used twice: live (steps arriving on tool:start/tool:end) and settled (the
@@ -10,9 +10,9 @@ const props = defineProps({
 	steps: { type: Array, default: () => [] },
 	live: { type: Boolean, default: false },
 	defaultOpen: { type: Boolean, default: false },
-})
+});
 
-const open = ref(props.defaultOpen)
+const open = ref(props.defaultOpen);
 
 // Icons by intent, so a glance at the card reads as "it searched, then wrote".
 const ICONS = {
@@ -24,18 +24,18 @@ const ICONS = {
 	chart: "M18 20V10M12 20V4M6 20v-6",
 	file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6",
 	tool: "M14.7 6.3a4 4 0 0 1-5 5L4 17v3h3l5.7-5.7a4 4 0 0 1 5-5l2-2-3-3z",
-}
+};
 
 function icon(name) {
-	const n = String(name || "").toLowerCase()
-	if (/search|list|find|query/.test(n)) return ICONS.search
-	if (/create|new/.test(n)) return ICONS.plus
-	if (/update|edit|set|amend/.test(n)) return ICONS.edit
-	if (/delete|cancel/.test(n)) return ICONS.trash
-	if (/mail|email|send/.test(n)) return ICONS.mail
-	if (/report|chart|aggregate|export/.test(n)) return ICONS.chart
-	if (/doc|get|read|schema|pdf/.test(n)) return ICONS.file
-	return ICONS.tool
+	const n = String(name || "").toLowerCase();
+	if (/search|list|find|query/.test(n)) return ICONS.search;
+	if (/create|new/.test(n)) return ICONS.plus;
+	if (/update|edit|set|amend/.test(n)) return ICONS.edit;
+	if (/delete|cancel/.test(n)) return ICONS.trash;
+	if (/mail|email|send/.test(n)) return ICONS.mail;
+	if (/report|chart|aggregate|export/.test(n)) return ICONS.chart;
+	if (/doc|get|read|schema|pdf/.test(n)) return ICONS.file;
+	return ICONS.tool;
 }
 </script>
 
@@ -44,7 +44,16 @@ function icon(name) {
 		<button class="jv-tools-head" @click="open = !open">
 			<span v-if="props.live" class="jv-spinner" />
 			<span class="jv-tools-title">{{ props.title }}</span>
-			<svg class="jv-chev" :class="{ 'is-open': open }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+			<svg
+				class="jv-chev"
+				:class="{ 'is-open': open }"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
 				<path d="m6 9 6 6 6-6" />
 			</svg>
 		</button>
@@ -52,16 +61,42 @@ function icon(name) {
 		<div v-if="open" class="jv-tools-body">
 			<div v-for="s in props.steps" :key="s.id" class="jv-step">
 				<span class="jv-step-icon" :class="{ 'is-error': s.status === 'error' }">
-					<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<svg
+						viewBox="0 0 24 24"
+						width="12"
+						height="12"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<path :d="icon(s.toolName || s.title)" />
 					</svg>
 				</span>
 				<span class="jv-step-title">{{ s.title }}</span>
 				<span v-if="s.status === 'running'" class="jv-spinner" />
-				<svg v-else-if="s.status === 'error'" class="jv-step-mark is-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+				<svg
+					v-else-if="s.status === 'error'"
+					class="jv-step-mark is-error"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.4"
+					stroke-linecap="round"
+				>
 					<path d="M18 6 6 18M6 6l12 12" />
 				</svg>
-				<svg v-else class="jv-step-mark is-done" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+				<svg
+					v-else
+					class="jv-step-mark is-done"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.4"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
 					<path d="M20 6 9 17l-5-5" />
 				</svg>
 			</div>

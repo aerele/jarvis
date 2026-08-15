@@ -49,6 +49,7 @@ The matching publisher lives at ``jarvis.chat.dispatch.publish_chat_send``;
 both sides use the same site-scoped channel format (pinned by a test
 against dispatch._channel).
 """
+
 from __future__ import annotations
 
 import json
@@ -157,9 +158,7 @@ def _run_one(raw: bytes | str, site: str) -> None:
 					message=frappe.get_traceback(),
 				)
 	except Exception:
-		_logger.exception(
-			"jarvis chat subscriber: turn context failed for site %s", site
-		)
+		_logger.exception("jarvis chat subscriber: turn context failed for site %s", site)
 
 
 def _subscribe_loop_once(site: str) -> None:
@@ -229,8 +228,8 @@ def maybe_start_chat_subscriber() -> bool:
 	gevent.spawn(_watchdog_loop, site)
 	_SUBSCRIBER_SPAWNED = True
 	_logger.info(
-		"jarvis chat subscriber: watchdog greenlet spawned for %s "
-		"(socketio_backend=python)", site,
+		"jarvis chat subscriber: watchdog greenlet spawned for %s (socketio_backend=python)",
+		site,
 	)
 	return True
 

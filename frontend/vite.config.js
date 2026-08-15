@@ -1,7 +1,285 @@
-import { defineConfig } from "vite"
-import vue from "@vitejs/plugin-vue"
-import frappeui from "frappe-ui/vite"
-import path from "path"
+import { defineConfig } from "vite";
+import vue from "@vitejs/plugin-vue";
+import frappeui from "frappe-ui/vite";
+import path from "path";
+import fs from "fs";
+import { AsyncLocalStorage } from "async_hooks";
+
+// DEV-ONLY SHIM — grants no server-side privilege whatsoever.
+//
+// Frappe injects window.is_system_manager / window.is_jarvis_admin (and
+// csrf_token, etc.) into jarvis/www/jarvis.html at render time via
+// jinjaBootData (see jarvis/www/jarvis.py). `vite serve` serves its own
+// frontend/index.html instead, which never goes through that Jinja render,
+// so those flags are simply undefined. SettingsDialog.vue, OnboardingGate.vue,
+// AiModelsPane.vue, etc. read window.is_system_manager / window.is_jarvis_admin
+// at component-setup time (before any user interaction), so the ACCOUNT AND
+// BILLING settings rail (Plan and billing, AI models, Connection, Billing and
+// metering, Branding) never renders on the dev server without this.
+//
+// This plugin fills ONLY those two flags, ONLY on `vite serve` (never
+// `vite build`), and ONLY when a flag isn't already set. It does not touch
+// the backend, does not create a session, and does not forge a CSRF token —
+// every admin API these panes call still re-checks require_jarvis_admin() /
+// System Manager server-side (jarvis/permissions.py). A user who is not
+// actually an admin still gets 403s from the real API calls; this only
+// unlocks the client-side rail so the panes are reachable to look at.
+//
+// csrf_token used to be deliberately excluded from this shim (Frappe has no
+// clean bare-token endpoint, and a fabricated value would silently fail the
+// session-bound CSRF check). devCsrfToken() below closes that gap for real,
+// by fetching the actual per-session token instead of fabricating one.
+function devBootFlags() {
+	const FLAGS = { is_system_manager: true, is_jarvis_admin: true };
+	return {
+		name: "jarvis-dev-boot-flags",
+		apply: "serve", // vite never invokes this hook for `vite build`
+		transformIndexHtml() {
+			const assignments = Object.entries(FLAGS)
+				.map(
+					([key, value]) =>
+						`if (typeof window.${key} === "undefined") window.${key} = ${JSON.stringify(
+							value
+						)};`
+				)
+				.join("\n");
+			// Returning tags (rather than a string.replace on the raw html) means
+			// this can't silently no-op if index.html's markup ever changes shape.
+			return [
+				{
+					tag: "script",
+					injectTo: "body", // same spot jinjaBootData uses in the real build
+					children: [
+						"// DEV-ONLY SHIM (jarvis-dev-boot-flags, frontend/vite.config.js).",
+						"// NOT auth: grants zero server-side privilege, every admin API",
+						"// still re-checks permissions. Fills the boot flags Frappe would",
+						"// inject via www/jarvis.html so admin-gated settings panes are",
+						"// reachable on `vite serve`. Never present in a build.",
+						assignments,
+					].join("\n"),
+				},
+			];
+		},
+	};
+}
+
+// DEV-ONLY SHIM — grants no server-side privilege whatsoever.
+//
+// window.csrf_token is undefined on `vite serve` for the same reason the two
+// boot flags above are: the real value only ever gets baked in by Frappe's
+// Jinja render of jarvis/www/jarvis.html (context.boot.csrf_token =
+// frappe.sessions.get_csrf_token(), see jarvis/www/jarvis.py), and vite serves
+// its own frontend/index.html instead. frappe-ui's call() (utils/call.js)
+// reads window.csrf_token at CALL time, not at module load, so every write
+// AND every whitelisted read that isn't allow_guest gets rejected with
+// frappe.exceptions.CSRFTokenError before this shim: settings panes render
+// their chrome but stay empty or show an error state forever.
+//
+// The fix is to fetch the token for real rather than fabricate one — a fake
+// value would fail the session-bound check just as loudly as no value, but
+// more confusingly. So this asks the SAME backend for the SAME thing it would
+// hand the browser on a normal page load: a request to this site's own
+// server-rendered /jarvis, with the browser's session cookie forwarded,
+// scrape the csrf_token straight out of the boot script jinjaBootData put
+// there. That means this only ever succeeds for a request carrying a cookie
+// for a session that already has Jarvis access (frappe.sessions.get_csrf_token
+// is session-scoped, not per-page) — no new authorization boundary is opened.
+//
+// This has to be split across two plugin hooks because Vite's dev-mode
+// transformIndexHtml hook (unlike the build-mode one) is only ever handed
+// {path, filename, server, originalUrl} — no request object, so no cookies.
+// configureServer() below registers a middleware (added directly, so Vite
+// installs it BEFORE its own internal ones, including the one that serves
+// index.html and fires transformIndexHtml) that does the fetch and stashes
+// the result in an AsyncLocalStorage store for transformIndexHtml to read
+// back. A plain module-level variable would do the same job on a single
+// serialized request stream, but two page loads racing their backend fetches
+// (e.g. two tabs opened together) could then clobber each other's token
+// before the slower one's transformIndexHtml ran; AsyncLocalStorage gives
+// each request its own store instead, so there is no cross-request race to
+// reason about.
+//
+// Residual trust assumption: fetchSessionCsrfToken() (below) picks its fetch
+// target from the request's own Host header. server.allowedHosts: true (#462)
+// means Vite itself will accept any Host, so without isKnownSiteHost()'s
+// check this would be an unauthenticated header choosing where the user's
+// session cookie gets sent. isKnownSiteHost() narrows that from "any host" to
+// "a host this bench actually has a site for" before the cookie is ever
+// forwarded anywhere. That does not make the Host header trusted, it only
+// bounds the blast radius to this bench's own configured sites.
+const csrfRequestContext = new AsyncLocalStorage();
+
+function devCsrfToken() {
+	return {
+		name: "jarvis-dev-csrf-token",
+		apply: "serve", // vite never invokes this hook for `vite build`
+		configureServer(server) {
+			server.middlewares.use((req, res, next) => {
+				// Only a real document navigation (full load / hard refresh) needs
+				// this: SPA route changes never hit the server, and the app's own
+				// XHR/fetch calls to /api/... ask for JSON, not text/html, so this
+				// never fires per API call — only once per page load.
+				if (req.method !== "GET" || !(req.headers.accept || "").includes("text/html")) {
+					return next();
+				}
+				const store = { token: null };
+				csrfRequestContext.run(store, () => {
+					fetchSessionCsrfToken(req, server.config.logger)
+						.then((token) => {
+							store.token = token;
+						})
+						.finally(next);
+				});
+			});
+		},
+		transformIndexHtml() {
+			const token = csrfRequestContext.getStore()?.token;
+			if (!token) return []; // no session cookie, no access, or the backend fetch failed — leave undefined, same as before this shim
+			return [
+				{
+					tag: "script",
+					injectTo: "body", // same spot jinjaBootData uses in the real build
+					children: [
+						"// DEV-ONLY SHIM (jarvis-dev-csrf-token, frontend/vite.config.js).",
+						"// NOT auth: this is the real per-session token, fetched server-side",
+						"// from this same backend's own /jarvis render — the backend still",
+						"// authenticates the session cookie and authorizes every request",
+						"// exactly as it does for a served page. Never present in a build.",
+						`if (typeof window.csrf_token === "undefined") window.csrf_token = ${JSON.stringify(
+							token
+						)};`,
+					].join("\n"),
+				},
+			];
+		},
+	};
+}
+
+// Walks up from `dir` looking for the bench root (the directory that has both
+// `sites/` and `apps/` as children) — same signal frappe-ui's own vite plugin
+// uses (frappe-ui/vite/utils.js findBenchPath), reimplemented here because
+// that file isn't part of frappe-ui's package "exports" map. Walking up
+// (rather than a fixed relative depth) is what makes this work unchanged from
+// a git worktree nested arbitrarily deeper than frontend/../../..
+function findBenchRoot(dir) {
+	for (;;) {
+		if (fs.existsSync(path.join(dir, "sites")) && fs.existsSync(path.join(dir, "apps"))) {
+			return dir;
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return null; // reached filesystem root without finding one
+		dir = parent;
+	}
+}
+
+// src/socket.js imports the bench's common_site_config.json by a FIXED relative
+// depth ("../../../../sites/..."), which only resolves when frontend/ sits at
+// apps/<app>/frontend. From a git worktree it is nested deeper
+// (.claude/worktrees/<name>/frontend), the specifier lands somewhere that does
+// not exist, and the whole build dies on "Could not resolve". findBenchRoot
+// already walks up rather than counting levels, which is exactly the property
+// the depth-based specifier lacks, so point the alias at the file it found.
+//
+// Aliased here rather than edited in socket.js so the source keeps a plain
+// relative import that still resolves for anyone reading it, and so this stays
+// one build-config concern in one place.
+function commonSiteConfigPath() {
+	const benchRoot = findBenchRoot(__dirname);
+	return benchRoot
+		? path.join(benchRoot, "sites", "common_site_config.json")
+		: // No bench above us (a bare checkout, CI without a bench). Fall back to
+		  // the original literal so the failure mode is unchanged rather than new.
+		  path.resolve(__dirname, "../../../../sites/common_site_config.json");
+}
+
+function getWebserverPort() {
+	if (process.env.FRAPPE_WEB_SERVER_PORT) {
+		return Number(process.env.FRAPPE_WEB_SERVER_PORT);
+	}
+	const benchRoot = findBenchRoot(__dirname);
+	const configPath = benchRoot && path.join(benchRoot, "sites", "common_site_config.json");
+	if (!configPath || !fs.existsSync(configPath)) return 8000; // matches frappeProxy()'s own fallback
+	try {
+		return JSON.parse(fs.readFileSync(configPath, "utf-8")).webserver_port || 8000;
+	} catch {
+		return 8000;
+	}
+}
+
+// Host header, stripped to bare hostname. Handles the IPv6-literal form
+// (`[::1]:8095`, brackets required by RFC 3986 so the literal's own colons
+// don't collide with the port separator) — split(":")[0] alone would yield
+// "[" for that form. Plain hostnames only ever have one colon (the port), so
+// splitting on the first one is enough for the common case.
+function hostnameFromHeader(hostHeader) {
+	if (!hostHeader) return "";
+	if (hostHeader.startsWith("[")) {
+		const end = hostHeader.indexOf("]");
+		return end === -1 ? "" : hostHeader.slice(1, end);
+	}
+	return hostHeader.split(":")[0];
+}
+
+// Is `host` one of THIS bench's actual sites? Read from sites/ directly
+// (a directory is a site iff it has its own site_config.json — the same
+// signal frappe's own bench CLI uses) rather than hardcoding names, so a
+// newly-created site doesn't have to be taught to this file. `localhost` /
+// `127.0.0.1` are deliberately never in this list: bench is Host-routed, so
+// the backend itself already 404s both today ("<host> does not exist") —
+// this isn't a new restriction, just not silently pretending they'd work.
+const SITE_NAME_PATTERN = /^[a-zA-Z0-9.-]+$/; // Frappe site names are domain-like; also rules out "../" before it ever reaches path.join
+function isKnownSiteHost(host) {
+	if (!host || !SITE_NAME_PATTERN.test(host)) return false;
+	const benchRoot = findBenchRoot(__dirname);
+	return !!benchRoot && fs.existsSync(path.join(benchRoot, "sites", host, "site_config.json"));
+}
+
+async function fetchSessionCsrfToken(req, logger) {
+	const cookie = req.headers.cookie;
+	const host = hostnameFromHeader(req.headers.host);
+	if (!cookie || !host) return null; // no session cookie forwarded (not logged in yet) — nothing to look up
+
+	// Fail closed: server.allowedHosts: true (from #462) means Vite itself
+	// accepts any Host header, and this function forwards the request's
+	// session cookie to wherever `host` points. Left unchecked, that's an
+	// unauthenticated header choosing the destination for a credential — so
+	// only ever fetch for a host this bench actually hosts. An unrecognised
+	// host gets no token and no crash, same as a request with no cookie: the
+	// page loads exactly as it does for a logged-out session today.
+	if (!isKnownSiteHost(host)) return null;
+
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 5000);
+	try {
+		// Bench is Host-routed, so hit the SAME site the browser asked vite for.
+		// This is a direct request to the real Frappe webserver, not through
+		// vite's own /api proxy: that proxy only covers desk|app|login|api|assets
+		// |files|private (see frappe-ui/vite/frappeProxy.js) — /jarvis is vite's
+		// own SPA route, never proxied.
+		const response = await fetch(`http://${host}:${getWebserverPort()}/jarvis`, {
+			headers: { Cookie: cookie },
+			// A guest or a session without Jarvis access gets a 30x from
+			// jarvis/www/jarvis.py's has_jarvis_access() gate, to /app or
+			// /jarvis-no-access. Treat that as "no token" rather than following
+			// it — the redirect target's markup carries no csrf_token of ours.
+			redirect: "manual",
+			signal: controller.signal,
+		});
+		if (response.status !== 200) return null;
+		const html = await response.text();
+		// frappe-ui's jinjaBootData plugin renders context.boot.csrf_token as
+		// window["csrf_token"] = <tojson>; — see jarvis/www/jarvis.py.
+		const match = html.match(/window\["csrf_token"\]\s*=\s*("(?:[^"\\]|\\.)*")/);
+		return match ? JSON.parse(match[1]) : null;
+	} catch (error) {
+		logger.warn(`[jarvis-dev-csrf-token] could not fetch a real token: ${error.message}`, {
+			timestamp: true,
+		});
+		return null;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
 
 export default defineConfig({
 	plugins: [
@@ -14,10 +292,13 @@ export default defineConfig({
 			},
 		}),
 		vue(),
+		devBootFlags(),
+		devCsrfToken(),
 	],
 	resolve: {
 		alias: {
 			"@": path.resolve(__dirname, "src"),
+			"../../../../sites/common_site_config.json": commonSiteConfigPath(),
 		},
 		// wiki-graph-core is a self-contained file: package (own vue in its
 		// node_modules); dedupe keeps a single Vue instance shared with the app.
@@ -25,5 +306,9 @@ export default defineConfig({
 	},
 	optimizeDeps: {
 		include: ["frappe-ui > feather-icons", "showdown", "engine.io-client"],
+		exclude: ["frappe-ui"],
 	},
-})
+	server: {
+		allowedHosts: true,
+	},
+});

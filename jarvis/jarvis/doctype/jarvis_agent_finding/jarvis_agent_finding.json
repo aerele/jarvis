@@ -10,18 +10,35 @@
   "agent",
   "rule_id",
   "severity",
+  "result_class",
   "title",
   "detail_md",
   "section",
   "effective_date",
   "disclaimer",
+  "rule_version",
+  "assumptions",
+  "known_exceptions",
+  "source",
+  "reviewer",
+  "confidence",
+  "match_basis",
+  "false_positive_path",
+  "confirmation_status",
   "ref_doctype",
   "ref_name",
+  "company",
   "amount",
+  "outcome_provenance",
   "fingerprint",
   "state",
   "first_seen_run",
-  "last_seen_run"
+  "last_seen_run",
+  "resolved_by",
+  "resolved_at",
+  "resolution_kind",
+  "result_link_doctype",
+  "result_link_name"
  ],
  "fields": [
   {
@@ -91,6 +108,14 @@
    "label": "Reference Name"
   },
   {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "in_standard_filter": 1,
+   "description": "The company scope this finding was detected under (A16). Stamped at insert so a Company-B run never auto-resolves a Company-A finding; empty legacy rows are exempt until re-seen."
+  },
+  {
    "fieldname": "amount",
    "fieldtype": "Currency",
    "label": "Amount"
@@ -122,6 +147,130 @@
    "fieldtype": "Link",
    "label": "Last Seen Run",
    "options": "Jarvis Agent Run"
+  },
+  {
+   "fieldname": "result_class",
+   "fieldtype": "Select",
+   "label": "Result Class",
+   "options": "observed_fact\nderived_candidate\nlegal_scenario\nconfirmed_outcome",
+   "reqd": 1,
+   "no_copy": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "PP-1 four-class value grammar. Set once at writeback, never editable afterwards (controller set-once guard). observed_fact = direct record read; derived_candidate = a candidate until confirmed; legal_scenario = a rule scenario, never realised exposure; confirmed_outcome is RESERVED — an evaluator may not emit it (written only by the PP-5 provenance ledger)."
+  },
+  {
+   "fieldname": "confidence",
+   "fieldtype": "Percent",
+   "label": "Confidence",
+   "depends_on": "eval:doc.result_class=='derived_candidate'",
+   "description": "derived_candidate only — the match/estimate confidence."
+  },
+  {
+   "fieldname": "match_basis",
+   "fieldtype": "Small Text",
+   "label": "Match Basis",
+   "depends_on": "eval:doc.result_class=='derived_candidate'",
+   "description": "derived_candidate only — how the candidate was matched (e.g. '2B-match', 'fuzzy vendor')."
+  },
+  {
+   "fieldname": "false_positive_path",
+   "fieldtype": "Small Text",
+   "label": "False Positive Path",
+   "depends_on": "eval:doc.result_class=='derived_candidate'",
+   "description": "derived_candidate only — how a false positive would present, so a reviewer can rule it out."
+  },
+  {
+   "default": "unconfirmed",
+   "fieldname": "confirmation_status",
+   "fieldtype": "Select",
+   "label": "Confirmation Status",
+   "options": "unconfirmed\nconfirmed\nrejected",
+   "read_only": 1,
+   "depends_on": "eval:doc.result_class=='derived_candidate'",
+   "description": "derived_candidate lifecycle. Unconfirmed at writeback; only the PP-5 provenance ledger may move it off unconfirmed."
+  },
+  {
+   "fieldname": "rule_version",
+   "fieldtype": "Data",
+   "label": "Rule Version",
+   "depends_on": "eval:doc.result_class=='legal_scenario'",
+   "description": "legal_scenario only — the version of the statutory rule set applied."
+  },
+  {
+   "fieldname": "assumptions",
+   "fieldtype": "Small Text",
+   "label": "Assumptions",
+   "depends_on": "eval:doc.result_class=='legal_scenario'",
+   "description": "legal_scenario only — the assumptions the scenario rests on."
+  },
+  {
+   "fieldname": "known_exceptions",
+   "fieldtype": "Small Text",
+   "label": "Known Exceptions",
+   "depends_on": "eval:doc.result_class=='legal_scenario'",
+   "description": "legal_scenario only — documented carve-outs / exceptions to the rule."
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Data",
+   "label": "Source",
+   "depends_on": "eval:doc.result_class=='legal_scenario'",
+   "description": "legal_scenario only — the authoritative reference for the rule."
+  },
+  {
+   "fieldname": "reviewer",
+   "fieldtype": "Link",
+   "label": "Reviewer",
+   "options": "User",
+   "depends_on": "eval:doc.result_class=='legal_scenario'",
+   "description": "legal_scenario only — the named reviewer of record."
+  },
+  {
+   "fieldname": "outcome_provenance",
+   "fieldtype": "Link",
+   "label": "Outcome Provenance",
+   "options": "Jarvis Agent Provenance Event",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "PP-5 — required iff result_class == confirmed_outcome, empty for every other class. Set ONLY by the provenance ledger when a transaction_posted / finding_resolved(human) event closes the loop; also moves confirmation_status to confirmed."
+  },
+  {
+   "fieldname": "resolved_by",
+   "fieldtype": "Link",
+   "label": "Resolved By",
+   "options": "User",
+   "read_only": 1,
+   "description": "PP-5 finding review provenance — the user who resolved this finding (human resolves only)."
+  },
+  {
+   "fieldname": "resolved_at",
+   "fieldtype": "Datetime",
+   "label": "Resolved At",
+   "read_only": 1,
+   "description": "PP-5 finding review provenance — when the finding was resolved (human OR automatic)."
+  },
+  {
+   "fieldname": "resolution_kind",
+   "fieldtype": "Select",
+   "label": "Resolution Kind",
+   "options": "human\nauto_coverage\nauto_watermark",
+   "read_only": 1,
+   "description": "PP-5 — separates human resolution from automatic. A16 coverage auto-resolve stamps auto_coverage; a watermark-gated auto-resolve stamps auto_watermark; a person stamps human."
+  },
+  {
+   "fieldname": "result_link_doctype",
+   "fieldtype": "Data",
+   "label": "Result Link DocType",
+   "read_only": 1,
+   "description": "PP-5 — the resulting transaction/draft CREATED from acting on this finding (distinct from the flagged ref_doctype/ref_name)."
+  },
+  {
+   "fieldname": "result_link_name",
+   "fieldtype": "Data",
+   "label": "Result Link Name",
+   "read_only": 1,
+   "description": "PP-5 — the name of the resulting transaction/draft created from acting on this finding."
   }
  ],
  "index_web_pages_for_search": 0,

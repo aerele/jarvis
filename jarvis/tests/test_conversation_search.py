@@ -28,11 +28,15 @@ CONV = "Jarvis Conversation"
 
 def _ensure_user(email: str) -> str:
 	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email,
-			"first_name": email.split("@")[0],
-			"send_welcome_email": 0, "enabled": 1,
-		})
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": email.split("@")[0],
+				"send_welcome_email": 0,
+				"enabled": 1,
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert()
 		frappe.db.commit()
@@ -68,22 +72,36 @@ def _wipe() -> None:
 	frappe.db.commit()
 
 
-def _mk_conv(owner: str, title: str, status: str = "Active", starred: int = 0,
-			 active_days_ago: int = 0) -> str:
+def _mk_conv(
+	owner: str, title: str, status: str = "Active", starred: int = 0, active_days_ago: int = 0
+) -> str:
 	with _as(owner):
-		doc = frappe.get_doc({
-			"doctype": CONV, "title": title, "status": status, "starred": starred,
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": CONV,
+				"title": title,
+				"status": status,
+				"starred": starred,
+			}
+		)
 		doc.insert(ignore_permissions=True)
 	# search_conversations hides message-less drafts, so give each fixture a
 	# message to keep it searchable (a real chat always has at least one).
-	frappe.get_doc({
-		"doctype": "Jarvis Chat Message", "conversation": doc.name, "seq": 1,
-		"role": "user", "content": "hi",
-	}).insert(ignore_permissions=True)
+	frappe.get_doc(
+		{
+			"doctype": "Jarvis Chat Message",
+			"conversation": doc.name,
+			"seq": 1,
+			"role": "user",
+			"content": "hi",
+		}
+	).insert(ignore_permissions=True)
 	frappe.db.set_value(
-		CONV, doc.name, "last_active_at",
-		now_datetime() - timedelta(days=active_days_ago), update_modified=False,
+		CONV,
+		doc.name,
+		"last_active_at",
+		now_datetime() - timedelta(days=active_days_ago),
+		update_modified=False,
 	)
 	frappe.db.commit()
 	return doc.name
@@ -122,12 +140,8 @@ class TestConversationSearch(unittest.TestCase):
 
 	def test_envelope_keys(self):
 		res = self._search()
-		self.assertEqual(
-			set(res.keys()), {"rows", "total", "has_more", "start", "page_length"}
-		)
-		self.assertEqual(
-			set(res["rows"][0].keys()), {"name", "title", "starred", "last_active_at"}
-		)
+		self.assertEqual(set(res.keys()), {"rows", "total", "has_more", "start", "page_length"})
+		self.assertEqual(set(res["rows"][0].keys()), {"name", "title", "starred", "last_active_at"})
 
 	def test_owner_scoping(self):
 		names = set(_names(self._search()["rows"]))

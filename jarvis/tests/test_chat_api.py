@@ -6,11 +6,14 @@ real chat history previously wiped that history; the fixture user keeps
 test cleanups scoped to disposable rows.
 """
 
+import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import admission, pump
 from jarvis.chat.api import (
 	_AGENT_TURN_WORKER_TIMEOUT,
 	archive_conversation,
@@ -28,22 +31,29 @@ from jarvis.chat.api import (
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
+PUMP = "Jarvis Relay Pump"
 TEST_USER = "jarvis-test@example.com"
+
+# CDX-10: these classes assert the LEGACY dispatch path — provision an honestly-legacy site
+# (transport_mode ROW = 'legacy' + explicit conf jarvis_pump_enabled=0), restored after.
+from jarvis.tests._transport_helpers import provision_legacy_site as _provision_legacy_site
 
 
 def _ensure_test_user(user: str = TEST_USER) -> None:
 	"""Create the fixture user if missing; idempotent."""
 	if frappe.db.exists("User", user):
 		return
-	doc = frappe.get_doc({
-		"doctype": "User",
-		"email": user,
-		"first_name": "Jarvis",
-		"last_name": "Test",
-		"enabled": 1,
-		"send_welcome_email": 0,
-		"user_type": "System User",
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": "User",
+			"email": user,
+			"first_name": "Jarvis",
+			"last_name": "Test",
+			"enabled": 1,
+			"send_welcome_email": 0,
+			"user_type": "System User",
+		}
+	)
 	doc.insert(ignore_permissions=True)
 	# Grant System Manager so the test user can dispatch every tool path.
 	doc.add_roles("System Manager")
@@ -100,10 +110,15 @@ class TestListConversations(_ChatTestCase):
 		self.assertEqual(result, [])
 
 	def _add_message(self, conversation, seq=1):
-		frappe.get_doc({
-			"doctype": MSG, "conversation": conversation, "seq": seq,
-			"role": "user", "content": "hi",
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": conversation,
+				"seq": seq,
+				"role": "user",
+				"content": "hi",
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
 
 	def test_returns_active_conversations_for_current_user_only(self):
@@ -162,13 +177,15 @@ class TestCreateOrFocusEmpty(_ChatTestCase):
 
 	def test_creates_new_when_only_non_empty_exist(self):
 		filled = create_conversation()
-		frappe.get_doc({
-			"doctype": MSG,
-			"conversation": filled,
-			"seq": 1,
-			"role": "user",
-			"content": "hi",
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": filled,
+				"seq": 1,
+				"role": "user",
+				"content": "hi",
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
 
 		returned = create_or_focus_empty()
@@ -214,11 +231,16 @@ class TestCreateOrFocusEmpty(_ChatTestCase):
 		# Belt-and-suspenders: any empty carrying an attached File is skipped so a
 		# reuse never adopts a stray upload (delete-cascade / bypass concerns).
 		withfile = create_conversation()
-		f = frappe.get_doc({
-			"doctype": "File", "file_name": "coe-attach.txt",
-			"attached_to_doctype": CONV, "attached_to_name": withfile,
-			"content": "x", "is_private": 1,
-		}).insert(ignore_permissions=True)
+		f = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": "coe-attach.txt",
+				"attached_to_doctype": CONV,
+				"attached_to_name": withfile,
+				"content": "x",
+				"is_private": 1,
+			}
+		).insert(ignore_permissions=True)
 		self.addCleanup(lambda: frappe.delete_doc("File", f.name, force=True, ignore_permissions=True))
 		frappe.db.commit()
 		returned = create_or_focus_empty()
@@ -236,13 +258,15 @@ class TestGetConversation(_ChatTestCase):
 		name = create_conversation()
 		# Manually insert messages out of seq order
 		for seq, role, content in [(2, "assistant", "B"), (1, "user", "A")]:
-			doc = frappe.get_doc({
-				"doctype": MSG,
-				"conversation": name,
-				"seq": seq,
-				"role": role,
-				"content": content,
-			})
+			doc = frappe.get_doc(
+				{
+					"doctype": MSG,
+					"conversation": name,
+					"seq": seq,
+					"role": role,
+					"content": content,
+				}
+			)
 			doc.insert(ignore_permissions=True)
 		frappe.db.commit()
 		result = get_conversation(name)
@@ -268,6 +292,8 @@ class TestSendMessage(_ChatTestCase):
 	def setUp(self):
 		super().setUp()
 		self.conv = create_conversation()
+		# CDX-10: these tests assert the LEGACY worker enqueue — provision a legacy site.
+		_provision_legacy_site(self)
 
 	def test_rejects_when_policy_says_no(self):
 		with patch(
@@ -286,15 +312,13 @@ class TestSendMessage(_ChatTestCase):
 	def test_human_send_to_missing_conversation_falls_back(self):
 		# A stale/reaped conversation id from a human send lands in a fresh chat
 		# instead of dead-ending on DoesNotExistError.
-		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"), \
-		     patch("frappe.enqueue"):
+		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"), patch("frappe.enqueue"):
 			result = send_message("JCONV-99999", "hi")
 		self.assertTrue(result["ok"])
 		self.assertNotEqual(result["conversation_id"], "JCONV-99999")
 		self.assertTrue(frappe.db.exists(CONV, result["conversation_id"]))
 		# The message landed in the fallback conversation.
-		self.assertTrue(frappe.db.exists(
-			MSG, {"conversation": result["conversation_id"], "role": "user"}))
+		self.assertTrue(frappe.db.exists(MSG, {"conversation": result["conversation_id"], "role": "user"}))
 
 	def test_delegated_send_to_missing_conversation_raises(self):
 		# Delegated/system flows pass a real conversation; a genuine not-found is
@@ -337,8 +361,11 @@ class TestSendMessage(_ChatTestCase):
 			with patch("frappe.enqueue") as enqueue:
 				send_message(self.conv, "hi")
 		_, kwargs = enqueue.call_args
-		self.assertEqual(kwargs["timeout"], _AGENT_TURN_WORKER_TIMEOUT,
-			"RQ worker budget must cover pair+connect+turn worst case")
+		self.assertEqual(
+			kwargs["timeout"],
+			_AGENT_TURN_WORKER_TIMEOUT,
+			"RQ worker budget must cover pair+connect+turn worst case",
+		)
 
 	def test_seq_increments_across_calls(self):
 		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
@@ -366,15 +393,11 @@ class TestSendMessage(_ChatTestCase):
 		self.assertEqual(doc.title, "New chat")
 
 	def test_bumps_last_active_at(self):
-		before = frappe.utils.get_datetime(frappe.get_value(
-			CONV, self.conv, "last_active_at"
-		))
+		before = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
 		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
 			with patch("frappe.enqueue"):
 				send_message(self.conv, "hi")
-		after = frappe.utils.get_datetime(frappe.get_value(
-			CONV, self.conv, "last_active_at"
-		))
+		after = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
 		self.assertGreaterEqual(after, before)
 
 
@@ -383,7 +406,9 @@ class TestRetryMessage(_ChatTestCase):
 	errored assistant message.
 	"""
 
-	def _make_turn(self, conv: str, user_text: str = "list 3 customers", with_error: bool = False) -> tuple[str, str]:
+	def _make_turn(
+		self, conv: str, user_text: str = "list 3 customers", with_error: bool = False
+	) -> tuple[str, str]:
 		"""Seed a conversation with a user message + assistant message at the
 		next two seq values. Returns (user_message_name, assistant_message_name).
 		"""
@@ -391,14 +416,22 @@ class TestRetryMessage(_ChatTestCase):
 			"SELECT COALESCE(MAX(seq), 0) FROM `tabJarvis Chat Message` WHERE conversation = %s",
 			(conv,),
 		)[0][0]
-		user_doc = frappe.get_doc({
-			"doctype": MSG, "conversation": conv, "seq": base_seq + 1,
-			"role": "user", "content": user_text,
-		})
+		user_doc = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": conv,
+				"seq": base_seq + 1,
+				"role": "user",
+				"content": user_text,
+			}
+		)
 		user_doc.insert()
 		asst_payload = {
-			"doctype": MSG, "conversation": conv, "seq": base_seq + 2,
-			"role": "assistant", "content": "",
+			"doctype": MSG,
+			"conversation": conv,
+			"seq": base_seq + 2,
+			"role": "assistant",
+			"content": "",
 		}
 		if with_error:
 			asst_payload["error"] = "rate limit"
@@ -410,6 +443,14 @@ class TestRetryMessage(_ChatTestCase):
 	def setUp(self):
 		super().setUp()
 		self.conv = create_conversation()
+		# retry_message now shares send_message's entitlement gate. Pin it to
+		# "entitled" so these tests don't depend on the live control plane's
+		# current subscription state; the suspended case is tested explicitly.
+		gate = patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None})
+		gate.start()
+		self.addCleanup(gate.stop)
+		# CDX-10: these tests assert the LEGACY worker enqueue / shared dispatcher — provision legacy.
+		_provision_legacy_site(self)
 
 	def test_routes_through_shared_dispatcher(self):
 		"""Retry must use the SAME dispatcher as send_message (after-commit
@@ -455,10 +496,16 @@ class TestRetryMessage(_ChatTestCase):
 
 	def test_rejects_if_no_preceding_user_message(self):
 		"""An orphan errored assistant (somehow inserted without a user) - refuse."""
-		asst_doc = frappe.get_doc({
-			"doctype": MSG, "conversation": self.conv, "seq": 1,
-			"role": "assistant", "content": "", "error": "boom",
-		})
+		asst_doc = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": self.conv,
+				"seq": 1,
+				"role": "assistant",
+				"content": "",
+				"error": "boom",
+			}
+		)
 		asst_doc.insert()
 		frappe.db.commit()
 		result = retry_message(asst_doc.name)
@@ -476,10 +523,16 @@ class TestRetryMessage(_ChatTestCase):
 			"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation = %s",
 			(self.conv,),
 		)[0][0]
-		errored = frappe.get_doc({
-			"doctype": MSG, "conversation": self.conv, "seq": seq_max + 1,
-			"role": "assistant", "content": "", "error": "rate limit",
-		})
+		errored = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": self.conv,
+				"seq": seq_max + 1,
+				"role": "assistant",
+				"content": "",
+				"error": "rate limit",
+			}
+		)
 		errored.insert()
 		frappe.db.commit()
 
@@ -490,15 +543,24 @@ class TestRetryMessage(_ChatTestCase):
 
 	def test_bumps_conversation_last_active_at(self):
 		_u, asst_id = self._make_turn(self.conv, with_error=True)
-		before = frappe.utils.get_datetime(frappe.get_value(
-			CONV, self.conv, "last_active_at"
-		))
+		before = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
 		with patch("frappe.enqueue"):
 			retry_message(asst_id)
-		after = frappe.utils.get_datetime(frappe.get_value(
-			CONV, self.conv, "last_active_at"
-		))
+		after = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
 		self.assertGreaterEqual(after, before)
+
+	def test_rejects_when_subscription_suspended(self):
+		"""The Retry button sits on the exact error a stopped container produces.
+		A suspended retry must be refused HERE, not dispatched to the worker to
+		grind the 25s WS-open loop and error identically all over again."""
+		_u, asst_id = self._make_turn(self.conv, with_error=True)
+		suspended = {"ready": False, "reason": "subscription_suspended", "detail": "expired"}
+		with patch("jarvis.account._admin_chat_gate", return_value=suspended):
+			with patch("jarvis.chat.api._dispatch_turn") as dispatch:
+				result = retry_message(asst_id)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reason"], "subscription_suspended")
+		dispatch.assert_not_called()
 
 
 class TestSetConversationModel(_ChatTestCase):
@@ -573,7 +635,11 @@ class TestSetConversationModel(_ChatTestCase):
 class TestSendMessageWithModelOverride(_ChatTestCase):
 	"""send_message accepts an optional model_override that gets applied
 	to the conversation BEFORE the worker is enqueued - so the first
-	turn lands on the picked model without a race against the worker."""
+	turn lands on the picked model without a race against the worker.
+
+	CDX-10: the persist-before-enqueue capture asserts the LEGACY worker enqueue fires, so
+	these run on a legacy-provisioned site (see setUp). The override-persistence invariant the
+	pump path ALSO satisfies is covered by TestSendModelOverridePumpTwin below."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -600,17 +666,24 @@ class TestSendMessageWithModelOverride(_ChatTestCase):
 	def setUp(self):
 		super().setUp()
 		self.conv = create_conversation()
+		# CDX-10: the persist-before-enqueue capture asserts the LEGACY worker enqueue.
+		_provision_legacy_site(self)
 
 	def test_valid_override_persists_before_enqueue(self):
 		"""When model_override is passed, conv.model_override is set
 		before frappe.enqueue is called (so the worker sees the right value)."""
 		from jarvis.chat.api import send_message
+
 		written = {}
+
 		def capture(*a, **kw):
 			# Snapshot the DB value at the moment enqueue is called
 			written["override"] = frappe.db.get_value(CONV, self.conv, "model_override")
-		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"), \
-		     patch("frappe.enqueue", side_effect=capture):
+
+		with (
+			patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"),
+			patch("frappe.enqueue", side_effect=capture),
+		):
 			result = send_message(self.conv, "hi", model_override="gpt-5.4-mini")
 		self.assertTrue(result["ok"])
 		self.assertEqual(written["override"], "gpt-5.4-mini")
@@ -618,6 +691,7 @@ class TestSendMessageWithModelOverride(_ChatTestCase):
 	def test_unknown_override_rejected(self):
 		"""Invalid model name yields ok:false with no DB write or enqueue."""
 		from jarvis.chat.api import send_message
+
 		with patch("frappe.enqueue") as enqueue:
 			result = send_message(self.conv, "hi", model_override="gpt-4o")
 		self.assertFalse(result["ok"])
@@ -630,15 +704,74 @@ class TestSendMessageWithModelOverride(_ChatTestCase):
 		"""Calling send_message without model_override doesn't touch
 		conv.model_override (so per-conversation settings persist)."""
 		from jarvis.chat.api import send_message
+
 		# Pre-set an override
 		frappe.db.set_value(CONV, self.conv, "model_override", "gpt-5.4")
-		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"), \
-		     patch("frappe.enqueue"):
+		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"), patch("frappe.enqueue"):
 			send_message(self.conv, "hi")
 		self.assertEqual(
 			frappe.db.get_value(CONV, self.conv, "model_override"),
 			"gpt-5.4",
 		)
+
+
+class TestSendModelOverridePumpTwin(_ChatTestCase):
+	"""CDX-10 pump-mode twin: the override-persistence invariant the legacy test asserts ALSO
+	holds on the PUMP path — send_message writes conv.model_override BEFORE the transport
+	decision, so a pump-owned turn still lands on the picked model. Provisions the default pump
+	site (transport_mode ROW = pump, conf absent = default-ON) and stubs the pump wake so no
+	real hop enqueues."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		settings = frappe.get_single("Jarvis Settings")
+		cls._settings_snap = {
+			"llm_auth_mode": settings.llm_auth_mode,
+			"llm_provider": settings.llm_provider,
+			"llm_model": settings.llm_model,
+		}
+		settings.db_set("llm_auth_mode", "oauth", update_modified=False)
+		settings.db_set("llm_provider", "OpenAI", update_modified=False)
+		settings.db_set("llm_model", "gpt-5.5", update_modified=False)
+		frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		settings = frappe.get_single("Jarvis Settings")
+		for k, v in cls._settings_snap.items():
+			settings.db_set(k, v, update_modified=False)
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		super().setUp()
+		self.conv = create_conversation()
+		target = admission.DEFAULT_RELAY_TARGET
+		self._prior_mode = frappe.db.get_value(PUMP, target, "transport_mode")
+		pump.set_transport_mode(target, pump._MODE_PUMP)  # the default-ON site the fenced read decides on
+		frappe.db.commit()
+		self.addCleanup(self._restore_mode)
+
+	def _restore_mode(self):
+		frappe.db.set_value(
+			PUMP, admission.DEFAULT_RELAY_TARGET, "transport_mode", self._prior_mode, update_modified=False
+		)
+		frappe.db.commit()
+
+	def test_override_persists_on_pump_path(self):
+		from jarvis.chat.api import send_message
+
+		with (
+			patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"),
+			patch.object(pump, "ensure_pump", lambda *a, **k: None),
+			patch.object(pump, "lpush_wake", lambda *a, **k: None),
+		):
+			result = send_message(self.conv, "hi", model_override="gpt-5.4-mini")
+		self.assertTrue(result["ok"])
+		# Pump path: the override was persisted to the conversation BEFORE dispatch — the same
+		# invariant the legacy test asserts, holding cross-transport.
+		self.assertEqual(frappe.db.get_value(CONV, self.conv, "model_override"), "gpt-5.4-mini")
 
 
 class TestSendMessageThinkingOverride(_ChatTestCase):
@@ -649,15 +782,22 @@ class TestSendMessageThinkingOverride(_ChatTestCase):
 	def setUp(self):
 		super().setUp()
 		self.conv = create_conversation()
+		# CDX-10: the persist-before-enqueue capture asserts the LEGACY worker enqueue.
+		_provision_legacy_site(self)
 
 	def test_valid_thinking_override_persists_before_enqueue(self):
 		"""thinking_override='low' is written to conv before frappe.enqueue fires."""
 		from jarvis.chat.api import send_message
+
 		written = {}
+
 		def capture(*a, **kw):
 			written["thinking"] = frappe.db.get_value(CONV, self.conv, "thinking_override")
-		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"), \
-		     patch("frappe.enqueue", side_effect=capture):
+
+		with (
+			patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"),
+			patch("frappe.enqueue", side_effect=capture),
+		):
 			result = send_message(self.conv, "hi", thinking_override="low")
 		self.assertTrue(result["ok"])
 		self.assertEqual(written["thinking"], "low")
@@ -666,9 +806,9 @@ class TestSendMessageThinkingOverride(_ChatTestCase):
 		"""An empty string clears thinking_override (unlike model_override which
 		ignores empty strings)."""
 		from jarvis.chat.api import send_message
+
 		frappe.db.set_value(CONV, self.conv, "thinking_override", "high")
-		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"), \
-		     patch("frappe.enqueue"):
+		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"), patch("frappe.enqueue"):
 			result = send_message(self.conv, "hi", thinking_override="")
 		self.assertTrue(result["ok"])
 		self.assertEqual(frappe.db.get_value(CONV, self.conv, "thinking_override"), "")
@@ -676,9 +816,9 @@ class TestSendMessageThinkingOverride(_ChatTestCase):
 	def test_none_keeps_existing_thinking_override(self):
 		"""None for thinking_override does not touch conv.thinking_override."""
 		from jarvis.chat.api import send_message
+
 		frappe.db.set_value(CONV, self.conv, "thinking_override", "medium")
-		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"), \
-		     patch("frappe.enqueue"):
+		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"), patch("frappe.enqueue"):
 			result = send_message(self.conv, "hi")
 		self.assertTrue(result["ok"])
 		self.assertEqual(
@@ -689,6 +829,7 @@ class TestSendMessageThinkingOverride(_ChatTestCase):
 	def test_invalid_thinking_override_rejected(self):
 		"""Invalid thinking level yields ok:false with no DB write or enqueue."""
 		from jarvis.chat.api import send_message
+
 		with patch("frappe.enqueue") as enqueue:
 			result = send_message(self.conv, "hi", thinking_override="ultra")
 		self.assertFalse(result["ok"])
@@ -740,10 +881,12 @@ class TestChatUiSettings(FrappeTestCase):
 		# times" - the catalogue + per-provider defaults are now
 		# served from the single Python source so jarvis_onboarding.js
 		# and jarvis_account.js can drop their hand-maintained copies.
-		from jarvis.chat.api import get_chat_ui_settings
 		from jarvis._subscription_models import (
-			DEFAULT_MODEL, SUBSCRIPTION_MODELS,
+			DEFAULT_MODEL,
+			SUBSCRIPTION_MODELS,
 		)
+		from jarvis.chat.api import get_chat_ui_settings
+
 		s = get_chat_ui_settings()
 		self.assertEqual(s["subscription_models"], SUBSCRIPTION_MODELS)
 		self.assertEqual(s["default_models"], DEFAULT_MODEL)
@@ -753,14 +896,167 @@ class TestChatUiSettings(FrappeTestCase):
 			self.assertIn(default, SUBSCRIPTION_MODELS[provider])
 
 
+class TestCatalogModelsForPool(FrappeTestCase):
+	"""The chat picker may offer catalog models on a provider the tenant ALREADY
+	configured, because the container serves a model id the pool spec never named.
+	z.ai is excluded: an unnamed model there loses `reasoning`/`compat` and returns
+	a blank bubble (#526). Mirrors jarvis-fleet-agent pool_render's `any_model`."""
+
+	CATALOG = [
+		{
+			"provider_id": "anthropic",
+			"catalog_id": "anthropic",
+			"models": [
+				{"model_id": "claude-opus-4-8", "label": "Opus", "tier": "api_key", "sort_order": 2},
+				{"model_id": "claude-sonnet-4-6", "label": "Sonnet", "tier": "api_key", "sort_order": 1},
+				{"model_id": "claude-sub", "label": "Sub", "tier": "subscription"},
+			],
+		},
+		{
+			"provider_id": "google",
+			"catalog_id": "gemini",
+			"subscription_label": "Google Gemini",
+			"models": [
+				{"model_id": "gemini-3.6-flash", "label": "Flash", "tier": "api_key"},
+				{"model_id": "gemini-2.5-pro", "label": "Pro", "tier": "subscription", "sort_order": 1},
+			],
+		},
+		{
+			"provider_id": "zai_coding",
+			"catalog_id": "zai_coding",
+			"models": [{"model_id": "glm-4.6", "label": "GLM 4.6", "tier": "api_key"}],
+		},
+		# OpenAI carries BOTH tiers under one entry: catalog_id "openai" for the
+		# api-key join and subscription_label "OpenAI" (-> agent_provider "openai")
+		# for the subscription join. Both land on the same output key, so the two
+		# tiers must merge rather than clobber.
+		{
+			"provider_id": "openai",
+			"catalog_id": "openai",
+			"subscription_label": "OpenAI",
+			"models": [
+				{"model_id": "gpt-5.5", "label": "GPT-5.5", "tier": "subscription", "sort_order": 1},
+				{"model_id": "gpt-5.4", "label": "GPT-5.4", "tier": "subscription", "sort_order": 2},
+				{"model_id": "gpt-5-api", "label": "GPT-5 API", "tier": "api_key", "sort_order": 1},
+			],
+		},
+	]
+
+	@staticmethod
+	def _sub_row(model, upstream, enabled=1):
+		"""A subscription pool row whose encrypted accounts blob carries `upstream`,
+		matching how the pool build derives the provider (chat/api.py:1757)."""
+		import json
+
+		return {
+			"enabled": enabled,
+			"provider": "",
+			"model": model,
+			"credential_type": "subscription",
+			"subscription_accounts": json.dumps([{"upstream": upstream}]),
+		}
+
+	def _settings(self, rows):
+		return frappe._dict(models=[frappe._dict(r) for r in rows])
+
+	def _run(self, rows):
+		from unittest.mock import patch
+
+		from jarvis.chat import api
+
+		with patch("jarvis.admin_client.get_model_catalog", return_value=self.CATALOG):
+			return api._catalog_models_for_pool(self._settings(rows))
+
+	def test_offers_catalog_models_for_a_configured_provider_only(self):
+		out = self._run([{"enabled": 1, "provider": "anthropic", "model": "claude-sonnet-4-6"}])
+		self.assertEqual(list(out), ["anthropic"], "a provider with no credential must not appear")
+		# sort_order wins over id, and subscription-tier rows are excluded
+		self.assertEqual([r["model"] for r in out["anthropic"]], ["claude-sonnet-4-6", "claude-opus-4-8"])
+		self.assertEqual(out["anthropic"][0]["label"], "Sonnet")
+
+	def test_zai_provider_is_excluded(self):
+		out = self._run([{"enabled": 1, "provider": "zai_coding", "model": "glm-4.7"}])
+		self.assertEqual(out, {}, "an unnamed GLM id returns a blank bubble (#526)")
+
+	def test_zai_reached_through_openai_compat_base_url_is_excluded(self):
+		"""The #526 tenant reached z.ai through the generic openai_compat row, so a
+		provider-id-only test would miss the very pool that reported the bug."""
+		out = self._run(
+			[
+				{
+					"enabled": 1,
+					"provider": "openai_compat",
+					"model": "glm-4.7",
+					"base_url": "https://api.z.ai/api/coding/paas/v4",
+				}
+			]
+		)
+		self.assertEqual(out, {})
+
+	def test_disabled_rows_contribute_nothing(self):
+		self.assertEqual(self._run([{"enabled": 0, "provider": "anthropic", "model": "x"}]), {})
+		# A subscription row with empty provider AND no connected account has no
+		# upstream to key on (pool_models keys such a row as "" too, so nothing to
+		# join against).
+		self.assertEqual(
+			self._run([{"enabled": 1, "provider": "", "model": "x", "credential_type": "subscription"}]),
+			{},
+		)
+
+	def test_explicit_provider_subscription_keys_on_catalog_id_not_upstream(self):
+		"""A subscription row that carries an explicit `provider` keys its pool_models
+		entry on that provider (like an api-key row), NOT the account upstream. So
+		catalog_models must key it the same way (`gemini`), or the picker's join
+		silently omits the tenant's extra models (review #0)."""
+		row = self._sub_row("gemini-2.5-pro", "google-gemini-cli")
+		row["provider"] = "gemini"
+		out = self._run([row])
+		self.assertEqual(list(out), ["gemini"])
+		self.assertEqual([r["model"] for r in out["gemini"]], ["gemini-2.5-pro"])
+		self.assertNotIn("google-gemini-cli", out)
+
+	def test_offers_subscription_tier_for_a_connected_subscription(self):
+		"""A ChatGPT-subscription tenant sees the whole subscription tier, keyed by
+		the account upstream (`openai`) the pool row carries — not just its one
+		saved model. api_key-tier ids on the same provider must NOT leak in."""
+		out = self._run([self._sub_row("gpt-5.5", "openai")])
+		self.assertEqual(list(out), ["openai"])
+		self.assertEqual([r["model"] for r in out["openai"]], ["gpt-5.5", "gpt-5.4"])
+		self.assertEqual(out["openai"][0]["label"], "GPT-5.5")
+
+	def test_api_key_and_subscription_on_openai_merge_under_one_key(self):
+		"""catalog_id == agent_provider == "openai": both tiers land on one key and
+		must union (not clobber). The api-key row lets the picker offer gpt-5-api;
+		the subscription account lets it offer gpt-5.5 / gpt-5.4."""
+		out = self._run(
+			[
+				{"enabled": 1, "provider": "openai", "model": "gpt-5-api"},
+				self._sub_row("gpt-5.5", "openai"),
+			]
+		)
+		self.assertEqual(list(out), ["openai"])
+		self.assertEqual(sorted(r["model"] for r in out["openai"]), ["gpt-5-api", "gpt-5.4", "gpt-5.5"])
+
+	def test_legacy_google_provider_id_maps_onto_the_gemini_wire_id(self):
+		"""normalize_provider collapses the legacy `google` id onto `gemini`, which is
+		what pool rows and the catalog's catalog_id both use."""
+		out = self._run([{"enabled": 1, "provider": "google", "model": "gemini-3.6-flash"}])
+		self.assertEqual(list(out), ["gemini"])
+
+
 class TestWarmSessionEndpoint(FrappeTestCase):
+	def tearDown(self):
+		from jarvis.chat import prewarm
+
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
+
 	def test_warm_session_enqueues_not_inline(self):
 		"""warm_session must enqueue warm_prefix as a background job and
 		return immediately - proves FIX D (non-blocking web worker)."""
-		from jarvis.chat import api
+		from jarvis.chat import api, prewarm
 
-		with patch("frappe.enqueue") as enqueue, \
-		     patch("jarvis.chat.prewarm.warm_prefix") as wp:
+		frappe.cache().delete_value(prewarm._warm_cooldown_key())
+		with patch("frappe.enqueue") as enqueue, patch("jarvis.chat.prewarm.warm_prefix") as wp:
 			out = api.warm_session()
 
 		# Must have enqueued the prewarm job with the right method + queue.
@@ -770,6 +1066,20 @@ class TestWarmSessionEndpoint(FrappeTestCase):
 		)
 		# warm_prefix must NOT have been called inline in the web worker.
 		wp.assert_not_called()
+		self.assertEqual(out, {"ok": True, "enqueued": True})
+
+	def test_warm_session_respects_the_cooldown(self):
+		"""#548: a warm is a billed upstream request against the tenant's own
+		quota, so this endpoint must go through the same cooldown as the
+		chat-surface trigger. It used to enqueue unconditionally, which let any
+		authenticated Jarvis user turn N calls into N short-queue jobs."""
+		from jarvis.chat import api, prewarm
+
+		frappe.cache().set_value(prewarm._warm_cooldown_key(), "1", expires_in_sec=60)
+		with patch("frappe.enqueue") as enqueue:
+			out = api.warm_session()
+
+		enqueue.assert_not_called()
 		self.assertEqual(out, {"ok": True, "enqueued": True})
 
 
@@ -795,15 +1105,26 @@ class TestConversationOwnershipEnforcement(_ChatTestCase):
 		self.conv = create_conversation()
 		# Seed one user turn + one errored assistant turn so the message-id
 		# endpoints (get_canvas, retry_message) have targets.
-		user_msg = frappe.get_doc({
-			"doctype": MSG, "conversation": self.conv, "seq": 1,
-			"role": "user", "content": "what is our payroll?",
-		})
+		user_msg = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": self.conv,
+				"seq": 1,
+				"role": "user",
+				"content": "what is our payroll?",
+			}
+		)
 		user_msg.insert(ignore_permissions=True)
-		asst_msg = frappe.get_doc({
-			"doctype": MSG, "conversation": self.conv, "seq": 2,
-			"role": "assistant", "content": "", "error": "rate limit",
-		})
+		asst_msg = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": self.conv,
+				"seq": 2,
+				"role": "assistant",
+				"content": "",
+				"error": "rate limit",
+			}
+		)
 		asst_msg.insert(ignore_permissions=True)
 		frappe.db.commit()
 		self.user_msg = user_msg.name
@@ -851,9 +1172,7 @@ class TestConversationOwnershipEnforcement(_ChatTestCase):
 				send_message(self.conv, "hijack this thread")
 		dispatch.assert_not_called()
 		# No message row was injected into the victim's conversation.
-		self.assertEqual(
-			len(frappe.get_all(MSG, filters={"conversation": self.conv})), 2
-		)
+		self.assertEqual(len(frappe.get_all(MSG, filters={"conversation": self.conv})), 2)
 
 	def test_non_owner_cannot_retry_message(self):
 		self._as_intruder()
@@ -899,3 +1218,75 @@ class TestConversationOwnershipEnforcement(_ChatTestCase):
 			self.assertTrue(send_message(self.conv, "hello")["ok"])
 			self.assertTrue(retry_message(self.asst_msg)["ok"])
 		self.assertTrue(archive_conversation(self.conv)["ok"])
+
+
+class TestAllowedPinModels(unittest.TestCase):
+	"""_allowed_pin_models is the single source of truth both set_conversation_model
+	and send_message validate against, so the two cannot drift (the send_message path
+	used to check only the subscription allowlist and rejected every pool pin)."""
+
+	@staticmethod
+	def _settings(provider, pool):
+		return SimpleNamespace(
+			llm_provider=provider,
+			models=[SimpleNamespace(model=m, enabled=e) for m, e in pool],
+		)
+
+	def test_pool_rows_are_unioned_for_a_subscription_tenant(self):
+		from jarvis.chat import api
+
+		# A subscription/pool tenant stores llm_provider="", so the subscription
+		# allowlist is empty and the pin must be accepted from the enabled pool rows.
+		with patch.object(api, "_SUBSCRIPTION_MODELS", {"": [], "OpenAI": ["gpt-5.6"]}):
+			allowed = api._allowed_pin_models(
+				self._settings("", [("claude-sonnet-5", 1), ("glm-4.7", 1), ("retired", 0)])
+			)
+		self.assertIn("claude-sonnet-5", allowed)
+		self.assertIn("glm-4.7", allowed)
+		self.assertNotIn("retired", allowed)  # disabled pool rows are excluded
+		self.assertNotIn("gpt-5.6", allowed)  # not this tenant's subscription list
+
+	def test_subscription_models_are_included(self):
+		from jarvis.chat import api
+
+		with patch.object(api, "_SUBSCRIPTION_MODELS", {"OpenAI": ["gpt-5.6", "gpt-5.5"]}):
+			allowed = api._allowed_pin_models(self._settings("OpenAI", []))
+		self.assertEqual(allowed, {"gpt-5.6", "gpt-5.5"})
+
+	def test_connected_subscription_tier_is_pinnable(self):
+		"""A ChatGPT-subscription tenant (llm_provider="") stores one model but may
+		PIN any model in the connected upstream's subscription tier — display and
+		validation share _catalog_models_for_pool, so the picker and the pin agree."""
+		import json
+
+		from jarvis.chat import api
+
+		catalog = [
+			{
+				"catalog_id": "openai",
+				"subscription_label": "OpenAI",
+				"models": [
+					{"model_id": "gpt-5.5", "tier": "subscription"},
+					{"model_id": "gpt-5.4", "tier": "subscription"},
+				],
+			}
+		]
+		sub_row = SimpleNamespace(
+			model="gpt-5.5",
+			enabled=1,
+			provider="",
+			credential_type="subscription",
+			subscription_accounts=json.dumps([{"upstream": "openai"}]),
+		)
+		settings = SimpleNamespace(llm_provider="", models=[sub_row])
+		# Patch _SUBSCRIPTION_MODELS too: leaving the real lazy map in place would
+		# resolve it against the tiny patched catalog and cache that on frappe.local,
+		# truncating the subscription catalogue for later tests. It is "" here anyway.
+		with (
+			patch("jarvis.admin_client.get_model_catalog", return_value=catalog),
+			patch.object(api, "_SUBSCRIPTION_MODELS", {}),
+		):
+			allowed = api._allowed_pin_models(settings)
+		# the saved model AND its sibling in the same subscription tier
+		self.assertIn("gpt-5.5", allowed)
+		self.assertIn("gpt-5.4", allowed)

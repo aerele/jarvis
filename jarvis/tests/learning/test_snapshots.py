@@ -33,15 +33,17 @@ _TEST_DETECTOR = "_jpl-test-snapshots"
 def seed_print_log(ref_doctype: str, ref_name: str, print_format: str, created: str) -> str:
 	"""One Access Log row exactly as frappe printview writes it (method='Print',
 	page='Print Format: <name>'), with a controlled creation timestamp."""
-	doc = frappe.get_doc({
-		"doctype": "Access Log",
-		"user": "Administrator",
-		"export_from": ref_doctype,
-		"reference_document": ref_name,
-		"file_type": "PDF",
-		"method": "Print",
-		"page": f"Print Format: {print_format}",
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": "Access Log",
+			"user": "Administrator",
+			"export_from": ref_doctype,
+			"reference_document": ref_name,
+			"file_type": "PDF",
+			"method": "Print",
+			"page": f"Print Format: {print_format}",
+		}
+	)
 	doc.insert(ignore_permissions=True)
 	frappe.db.set_value(
 		"Access Log", doc.name, {"creation": created, "modified": created}, update_modified=False
@@ -80,17 +82,19 @@ class TestSnapshotUpsert(FrappeTestCase):
 
 	def test_upsert_creates_then_merges_additively(self):
 		name1 = snapshots.upsert_monthly(
-			_TEST_DETECTOR, "2026-05", None,
+			_TEST_DETECTOR,
+			"2026-05",
+			None,
 			_payload("CustA", "FmtX", {"2026-05-01": 3, "2026-05-02": 2}, "2026-05-01", "2026-05-02"),
 		)
 		name2 = snapshots.upsert_monthly(
-			_TEST_DETECTOR, "2026-05", None,
+			_TEST_DETECTOR,
+			"2026-05",
+			None,
 			_payload("CustA", "FmtX", {"2026-05-02": 1, "2026-05-09": 1}, "2026-05-02", "2026-05-09"),
 		)
 		self.assertEqual(name1, name2, "same (detector, period, company) must merge, not duplicate")
-		self.assertEqual(
-			frappe.db.count(SNAPSHOT, {"detector_id": _TEST_DETECTOR}), 1
-		)
+		self.assertEqual(frappe.db.count(SNAPSHOT, {"detector_id": _TEST_DETECTOR}), 1)
 		merged = snapshots.read_all(_TEST_DETECTOR)
 		agg = merged["counts"]["CustA"]["FmtX"]
 		self.assertEqual(agg["n"], 7)
@@ -102,11 +106,15 @@ class TestSnapshotUpsert(FrappeTestCase):
 
 	def test_read_all_merges_periods_and_filters_company(self):
 		snapshots.upsert_monthly(
-			_TEST_DETECTOR, "2026-04", None,
+			_TEST_DETECTOR,
+			"2026-04",
+			None,
 			_payload("CustA", "FmtX", {"2026-04-10": 4}, "2026-04-10", "2026-04-10"),
 		)
 		snapshots.upsert_monthly(
-			_TEST_DETECTOR, "2026-05", None,
+			_TEST_DETECTOR,
+			"2026-05",
+			None,
 			_payload("CustA", "FmtX", {"2026-05-11": 6}, "2026-05-11", "2026-05-11"),
 		)
 		merged = snapshots.read_all(_TEST_DETECTOR)
@@ -123,16 +131,20 @@ class TestSnapshotUpsert(FrappeTestCase):
 
 	def test_snapshot_key_unique_constraint(self):
 		snapshots.upsert_monthly(
-			_TEST_DETECTOR, "2026-06", None,
+			_TEST_DETECTOR,
+			"2026-06",
+			None,
 			_payload("CustA", "FmtX", {"2026-06-01": 1}, "2026-06-01", "2026-06-01"),
 		)
-		duplicate = frappe.get_doc({
-			"doctype": SNAPSHOT,
-			"detector_id": _TEST_DETECTOR,
-			"period": "2026-06",
-			"company": None,
-			"payload": "{}",
-		})
+		duplicate = frappe.get_doc(
+			{
+				"doctype": SNAPSHOT,
+				"detector_id": _TEST_DETECTOR,
+				"period": "2026-06",
+				"company": None,
+				"payload": "{}",
+			}
+		)
 		with self.assertRaises((frappe.UniqueValidationError, frappe.DuplicateEntryError)):
 			duplicate.insert(ignore_permissions=True)
 
@@ -245,9 +257,7 @@ class TestIngestGating(FrappeTestCase):
 	def _closed_window_run(self, trigger="scheduled"):
 		# start == end is a degenerate (empty) window: ``in_window`` is always
 		# False, so a scheduled run reads as out-of-window at any wall clock.
-		return frappe._dict(
-			trigger=trigger, window_start_used="02:00:00", window_end_used="02:00:00"
-		)
+		return frappe._dict(trigger=trigger, window_start_used="02:00:00", window_end_used="02:00:00")
 
 	def test_paused_run_skips_ingest_entirely(self):
 		summary = snapshots.ingest_print_log(paused=True)
@@ -343,9 +353,7 @@ class TestIngestChunkCommits(FrappeTestCase):
 		def counting_commit(*args, **kwargs):
 			# the in-transaction watermark at commit time = what this chunk's
 			# transaction is about to make durable
-			committed_watermarks.append(
-				str(frappe.db.get_value(STATE, _TEST_DETECTOR, "last_watermark"))
-			)
+			committed_watermarks.append(str(frappe.db.get_value(STATE, _TEST_DETECTOR, "last_watermark")))
 			return real_commit(*args, **kwargs)
 
 		with mock.patch.object(snapshots, "_db_runner", self._fake_runner(chunk1, chunk2)):
@@ -370,9 +378,7 @@ class TestIngestChunkCommits(FrappeTestCase):
 			len(chunk1) + 3,
 		)
 		merged = snapshots.read_all(_TEST_DETECTOR)
-		self.assertEqual(
-			merged["counts"]["_JPL-FakeCust"]["Fake Invoice"]["n"], len(chunk1) + 3
-		)
+		self.assertEqual(merged["counts"]["_JPL-FakeCust"]["Fake Invoice"]["n"], len(chunk1) + 3)
 
 	def test_window_close_between_chunks_keeps_committed_chunk(self):
 		chunk1, chunk2 = self._chunks()
@@ -391,9 +397,7 @@ class TestIngestChunkCommits(FrappeTestCase):
 			chunk1[-1]["created"],
 		)
 		merged = snapshots.read_all(_TEST_DETECTOR)
-		self.assertEqual(
-			merged["counts"]["_JPL-FakeCust"]["Fake Invoice"]["n"], len(chunk1)
-		)
+		self.assertEqual(merged["counts"]["_JPL-FakeCust"]["Fake Invoice"]["n"], len(chunk1))
 
 
 class TestPreflightPrintSignal(FrappeTestCase):
@@ -417,14 +421,10 @@ class TestPreflightPrintSignal(FrappeTestCase):
 		super().tearDownClass()
 
 	def _state(self):
-		return frappe.db.get_value(
-			STATE, DETECTOR_ID, ["not_applicable", "last_error"], as_dict=True
-		)
+		return frappe.db.get_value(STATE, DETECTOR_ID, ["not_applicable", "last_error"], as_dict=True)
 
 	def test_zero_print_signal_marks_not_applicable_with_reason(self):
-		outcome = bootstrap._apply_print_signal(
-			{"supported": True, "access_log_rows": 40, "print_rows": 0}
-		)
+		outcome = bootstrap._apply_print_signal({"supported": True, "access_log_rows": 40, "print_rows": 0})
 		self.assertTrue(outcome["applied"])
 		self.assertTrue(outcome["not_applicable"])
 		state = self._state()
@@ -434,9 +434,7 @@ class TestPreflightPrintSignal(FrappeTestCase):
 
 	def test_print_signal_clears_a_stale_flag(self):
 		bootstrap._apply_print_signal({"supported": True, "access_log_rows": 40, "print_rows": 0})
-		outcome = bootstrap._apply_print_signal(
-			{"supported": True, "access_log_rows": 41, "print_rows": 1}
-		)
+		outcome = bootstrap._apply_print_signal({"supported": True, "access_log_rows": 41, "print_rows": 1})
 		self.assertTrue(outcome["applied"])
 		self.assertFalse(outcome["not_applicable"])
 		state = self._state()

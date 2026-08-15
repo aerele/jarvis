@@ -37,15 +37,17 @@ CUSTOM_ROLE = "Jarvis Dash Test Role"
 def _ensure_user(email: str, roles: list[str]) -> None:
 	"""Create the fixture user if missing; idempotent."""
 	if not frappe.db.exists("User", email):
-		frappe.get_doc({
-			"doctype": "User",
-			"email": email,
-			"first_name": "Dash",
-			"last_name": "Test",
-			"enabled": 1,
-			"send_welcome_email": 0,
-			"user_type": "System User",
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "Dash",
+				"last_name": "Test",
+				"enabled": 1,
+				"send_welcome_email": 0,
+				"user_type": "System User",
+			}
+		).insert(ignore_permissions=True)
 	doc = frappe.get_doc("User", email)
 	doc.add_roles(*roles)
 	frappe.db.commit()
@@ -53,12 +55,14 @@ def _ensure_user(email: str, roles: list[str]) -> None:
 
 def _ensure_custom_role() -> None:
 	if not frappe.db.exists("Role", CUSTOM_ROLE):
-		frappe.get_doc({
-			"doctype": "Role",
-			"role_name": CUSTOM_ROLE,
-			"desk_access": 1,
-			"is_custom": 1,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Role",
+				"role_name": CUSTOM_ROLE,
+				"desk_access": 1,
+				"is_custom": 1,
+			}
+		).insert(ignore_permissions=True)
 
 
 class _DashboardPermTestCase(FrappeTestCase):
@@ -88,20 +92,18 @@ class _DashboardPermTestCase(FrappeTestCase):
 		prev = frappe.session.user
 		frappe.set_user("Administrator")
 		try:
-			doc = frappe.get_doc({
-				"doctype": DASHBOARD,
-				"dashboard_title": kw.pop(
-					"dashboard_title", f"perm-{frappe.generate_hash(length=8)}"
-				),
-				"scope": scope,
-				"html": "<h1>t</h1>",
-				**kw,
-			}).insert()
+			doc = frappe.get_doc(
+				{
+					"doctype": DASHBOARD,
+					"dashboard_title": kw.pop("dashboard_title", f"perm-{frappe.generate_hash(length=8)}"),
+					"scope": scope,
+					"html": "<h1>t</h1>",
+					**kw,
+				}
+			).insert()
 			self._dashboards.append(doc.name)
 			if owner:
-				frappe.db.set_value(
-					DASHBOARD, doc.name, "owner", owner, update_modified=False
-				)
+				frappe.db.set_value(DASHBOARD, doc.name, "owner", owner, update_modified=False)
 			frappe.db.commit()
 			return doc.name
 		finally:
@@ -112,9 +114,7 @@ class _DashboardPermTestCase(FrappeTestCase):
 
 	def _visible_names(self, user: str, names: list[str]) -> set:
 		frappe.set_user(user)
-		rows = frappe.get_list(
-			DASHBOARD, filters={"name": ["in", names]}, pluck="name"
-		)
+		rows = frappe.get_list(DASHBOARD, filters={"name": ["in", names]}, pluck="name")
 		return set(rows)
 
 
@@ -198,9 +198,7 @@ class TestWriteMatrix(_DashboardPermTestCase):
 		mine = frappe.get_doc(DASHBOARD, name)
 		mine.description = "mine"
 		mine.save()
-		self.assertEqual(
-			frappe.db.get_value(DASHBOARD, name, "description"), "mine"
-		)
+		self.assertEqual(frappe.db.get_value(DASHBOARD, name, "description"), "mine")
 
 	def test_delete_matrix(self):
 		name = self._mk("User", target_user=PLAIN_A, owner=PLAIN_A)
@@ -219,9 +217,7 @@ class TestWriteMatrix(_DashboardPermTestCase):
 		# private dashboard must hit the permission wall in jarvis.tools.
 		name = self._mk("User", target_user=PLAIN_A, owner=PLAIN_A)
 		frappe.set_user(PLAIN_B)
-		self.assertRaises(
-			PermissionDeniedError, tool_get_doc, DASHBOARD, name
-		)
+		self.assertRaises(PermissionDeniedError, tool_get_doc, DASHBOARD, name)
 		frappe.clear_messages()
 
 
@@ -246,22 +242,26 @@ class TestScopeHelpers(_DashboardPermTestCase):
 class TestControllerScopeGate(_DashboardPermTestCase):
 	def test_plain_user_cannot_create_org_dashboard(self):
 		frappe.set_user(PLAIN_A)
-		doc = frappe.get_doc({
-			"doctype": DASHBOARD,
-			"dashboard_title": f"gate-{frappe.generate_hash(length=8)}",
-			"scope": "Org",
-			"html": "<h1>x</h1>",
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": DASHBOARD,
+				"dashboard_title": f"gate-{frappe.generate_hash(length=8)}",
+				"scope": "Org",
+				"html": "<h1>x</h1>",
+			}
+		)
 		self.assertRaises(frappe.PermissionError, doc.insert)
 
 	def test_plain_user_cannot_widen_own_to_role(self):
 		frappe.set_user(PLAIN_A)
-		doc = frappe.get_doc({
-			"doctype": DASHBOARD,
-			"dashboard_title": f"gate-{frappe.generate_hash(length=8)}",
-			"scope": "User",
-			"html": "<h1>x</h1>",
-		}).insert()
+		doc = frappe.get_doc(
+			{
+				"doctype": DASHBOARD,
+				"dashboard_title": f"gate-{frappe.generate_hash(length=8)}",
+				"scope": "User",
+				"html": "<h1>x</h1>",
+			}
+		).insert()
 		self._dashboards.append(doc.name)
 		doc.scope = "Role"
 		doc.target_role = CUSTOM_ROLE
@@ -269,24 +269,28 @@ class TestControllerScopeGate(_DashboardPermTestCase):
 
 	def test_admin_role_scope_with_untargetable_role_throws(self):
 		frappe.set_user(ADMIN_USER)
-		doc = frappe.get_doc({
-			"doctype": DASHBOARD,
-			"dashboard_title": f"gate-{frappe.generate_hash(length=8)}",
-			"scope": "Role",
-			"target_role": "System Manager",  # exists, but never targetable
-			"html": "<h1>x</h1>",
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": DASHBOARD,
+				"dashboard_title": f"gate-{frappe.generate_hash(length=8)}",
+				"scope": "Role",
+				"target_role": "System Manager",  # exists, but never targetable
+				"html": "<h1>x</h1>",
+			}
+		)
 		self.assertRaises(frappe.ValidationError, doc.insert)
 
 	def test_user_scope_autofill_and_scope_switch_clears_counterpart(self):
 		frappe.set_user(ADMIN_USER)
-		doc = frappe.get_doc({
-			"doctype": DASHBOARD,
-			"dashboard_title": f"gate-{frappe.generate_hash(length=8)}",
-			"scope": "Role",
-			"target_role": CUSTOM_ROLE,
-			"html": "<h1>x</h1>",
-		}).insert()
+		doc = frappe.get_doc(
+			{
+				"doctype": DASHBOARD,
+				"dashboard_title": f"gate-{frappe.generate_hash(length=8)}",
+				"scope": "Role",
+				"target_role": CUSTOM_ROLE,
+				"html": "<h1>x</h1>",
+			}
+		).insert()
 		self._dashboards.append(doc.name)
 		self.assertFalse(doc.target_user)
 		doc.scope = "User"
@@ -302,14 +306,16 @@ class TestControllerScopeGate(_DashboardPermTestCase):
 		"""A direct REST/Desk write cannot push a User-scoped dashboard into an
 		arbitrary victim's list — target_user is always forced to the owner."""
 		frappe.set_user(PLAIN_A)
-		doc = frappe.get_doc({
-			"doctype": DASHBOARD,
-			"dashboard_title": f"pin-{frappe.generate_hash(length=8)}",
-			"scope": "User",
-			# attacker-supplied victim — must be ignored
-			"target_user": PLAIN_B,
-			"html": "<h1>x</h1>",
-		}).insert()
+		doc = frappe.get_doc(
+			{
+				"doctype": DASHBOARD,
+				"dashboard_title": f"pin-{frappe.generate_hash(length=8)}",
+				"scope": "User",
+				# attacker-supplied victim — must be ignored
+				"target_user": PLAIN_B,
+				"html": "<h1>x</h1>",
+			}
+		).insert()
 		self._dashboards.append(doc.name)
 		self.assertEqual(doc.target_user, PLAIN_A)  # pinned to owner, not PLAIN_B
 		# and it is NOT visible to the intended victim

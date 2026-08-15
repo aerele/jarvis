@@ -43,12 +43,35 @@ import zipfile
 import frappe
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
+# The source-collection machinery (custom-apps allowlist, extension allowlist,
+# the per-file/file-count/zip caps, the _is_contained symlink-containment guard,
+# the _priority ordering and the _collect_files walk) now lives in the shared
+# jarvis.learning.app_source module — ONE source of truth reused by the Custom
+# App Learning scribe delegate's source-read tools. Re-exported here so this
+# legacy pipeline (and its callers / tests referencing app_analysis.<name>) keep
+# working byte-for-byte; the legacy behaviour is unchanged.
+from jarvis.learning.app_source import (
+	APPROX_FILE_BAIL,
+	EXCLUDED_APPS,
+	EXT_ALLOWLIST,
+	FILE_CAP,
+	PER_FILE_CAP_BYTES,
+	ZIP_CAP_BYTES,
+	_app_source_dir,
+	_app_title,
+	_app_version,
+	_approx_size,
+	_collect_files,
+	_installed_custom_apps,
+	_is_contained,
+	_is_excluded_dir,
+	_priority,
+	_resolve_app_root,
+)
+
 RUN = "Jarvis App Learning Run"
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
-
-# Core apps whose knowledge Jarvis already has (or must never mine).
-EXCLUDED_APPS = frozenset({"frappe", "erpnext", "hrms", "india_compliance", "jarvis"})
 
 QUEUE = "long"
 TICK_JOB_ID = "jarvis_app_learning_tick"
@@ -62,25 +85,44 @@ NON_TERMINAL = ("Queued", "Zipping", "Analyzing", "Ingesting")
 ACTIVE = ("Zipping", "Analyzing", "Ingesting")
 TERMINAL = ("Completed", "Failed", "Cancelled")
 
-# --- snapshot caps -----------------------------------------------------------
-EXT_ALLOWLIST = frozenset({
-	".py", ".js", ".ts", ".vue", ".json", ".md", ".txt", ".html", ".css",
-	".toml", ".cfg", ".yml", ".yaml",
-})
-_EXCLUDE_DIR_NAMES = frozenset({
-	".git", "node_modules", "dist", "build", "__pycache__", ".venv", "env",
-})
-_EXCLUDE_DIR_PATHS = frozenset({"public/frontend", "public/dist"})
-PER_FILE_CAP_BYTES = 200 * 1024
-FILE_CAP = 3000
-ZIP_CAP_BYTES = 25 * 1024 * 1024
-# Fast-probe bail for list_custom_apps (approx_files/approx_kb stop counting).
-APPROX_FILE_BAIL = 3000
+
+class _LegacyRetired(RuntimeError):
+	"""Raised by a legacy transition-maker when the chat-batch pipeline is retired."""
+
+
+def _legacy_retired() -> bool:
+	"""The chat-batch pipeline is RETIRED (replaced by the Custom App Learning scribe
+	delegate) and FAIL-CLOSED: every legacy entry point + forward transition below
+	refuses unless it is DELIBERATELY re-enabled for rollback (conf
+	``jarvis_app_learning_reenable``). The doctype + engine stay present for rollback +
+	historical rows, but no live path can advance a run.
+
+	This is what makes retirement inert against an IN-FLIGHT worker (CA2-1): the cron
+	tick is unscheduled and ``schedule_app_learning`` refuses, but a ``process_due`` /
+	``ingest`` job already enqueued before the upgrade, or ``on_turn_end`` firing for a
+	conversation an old worker left ``Analyzing``, would otherwise still run. With this
+	guard the worker's NEXT step (its next enqueued job, or the new-code turn-end hook)
+	REFUSES, so it can never resurrect ``Analyzing`` on a row the retirement migration
+	Cancelled. Retired-by-default (no conf key present) so production is always closed."""
+	return not bool(frappe.conf.get("jarvis_app_learning_reenable"))
+
+
+# --- snapshot caps ---------------------------------------------------------- #
+# EXT_ALLOWLIST / _EXCLUDE_DIR_* / PER_FILE_CAP_BYTES / FILE_CAP / ZIP_CAP_BYTES /
+# APPROX_FILE_BAIL are imported from jarvis.learning.app_source (see the import
+# block above) — one source of truth shared with the delegate source-read tools.
 
 # --- batching / analysis -----------------------------------------------------
 BATCH_CHAR_BUDGET = 20000
 MAX_BATCHES = 40
 STALE_TURN_MINUTES = 45
+# CDX-19: how many tick cycles (10 min each) a capacity-deferred analysis turn may be
+# re-attempted before the run fails honestly — ~200 min of sustained site overload.
+_MAX_CAPACITY_WAITS = 20
+# CDX-22: how long a cancel waits for the SAME per-run lock the chaining/recovery critical
+# sections hold. Those sections are fast (parse + a few writes + an enqueue), so this is ample.
+# Module-level so tests can shorten it.
+_CANCEL_LOCK_BLOCK_S = 10.0
 ZIP_RETENTION_DAYS = 7
 MAX_WIKI_PAGES = 8
 MAX_SKILLS = 5
@@ -97,64 +139,12 @@ _ANALYSIS_RE = re.compile(r"```jarvis-app-analysis[ \t]*\n([\s\S]*?)```")
 
 
 # --------------------------------------------------------------------------- #
-# app discovery (the API's data source; factored so tests can patch)
+# app discovery + size probe: _installed_custom_apps / _app_source_dir /
+# _app_title / _app_version / _approx_size are imported from
+# jarvis.learning.app_source (shared with the delegate tools). The cached
+# wrapper + the API's row assembler stay here (they lean on frappe.cache +
+# the Jarvis App Learning Run doctype, both legacy-pipeline-specific).
 # --------------------------------------------------------------------------- #
-def _installed_custom_apps() -> list[str]:
-	"""Installed apps eligible for learning (install order kept)."""
-	return [a for a in frappe.get_installed_apps() if a not in EXCLUDED_APPS]
-
-
-def _app_source_dir(app: str) -> str:
-	"""Source dir of ``app`` on this bench. Factored (tests patch this)."""
-	return os.path.join(frappe.utils.get_bench_path(), "apps", app)
-
-
-def _app_title(app: str) -> str:
-	try:
-		titles = frappe.get_hooks("app_title", app_name=app)
-		return str(titles[0]) if titles else app
-	except Exception:
-		return app
-
-
-def _app_version(app: str) -> str:
-	try:
-		return str(frappe.get_attr(f"{app}.__version__") or "")
-	except Exception:
-		return ""
-
-
-def _approx_size(src_dir: str) -> tuple[int, int]:
-	"""(approx eligible file count, approx KB) — fast walk with a bail at
-	``APPROX_FILE_BAIL`` files so a huge tree can't stall the settings card."""
-	count = 0
-	total = 0
-	src_real = os.path.realpath(src_dir)
-	for root, dirs, files in os.walk(src_dir):
-		rel_root = os.path.relpath(root, src_dir)
-		dirs[:] = [
-			d for d in dirs
-			if not _is_excluded_dir(rel_root, d)
-			and not os.path.islink(os.path.join(root, d))
-		]
-		for fname in files:
-			if os.path.splitext(fname)[1].lower() not in EXT_ALLOWLIST:
-				continue
-			full = os.path.join(root, fname)
-			# Mirror the snapshot's symlink-containment guard so the probe count
-			# matches what will actually be zipped.
-			if os.path.islink(full) or not _is_contained(full, src_real):
-				continue
-			count += 1
-			try:
-				total += os.path.getsize(full)
-			except OSError:
-				pass
-			if count >= APPROX_FILE_BAIL:
-				return count, total // 1024
-	return count, total // 1024
-
-
 _SIZE_PROBE_TTL_S = 120
 
 
@@ -193,18 +183,21 @@ def list_custom_apps_data() -> list[dict]:
 			order_by="creation desc",
 			limit=1,
 		)
-		out.append({
-			"app": app,
-			"title": _app_title(app),
-			"installed_version": _app_version(app),
-			"path_ok": path_ok,
-			"approx_files": approx_files,
-			"approx_kb": approx_kb,
-			"last_run": (
-				{"status": last[0].status, "finished_at": str(last[0].finished_at or "")}
-				if last else None
-			),
-		})
+		out.append(
+			{
+				"app": app,
+				"title": _app_title(app),
+				"installed_version": _app_version(app),
+				"path_ok": path_ok,
+				"approx_files": approx_files,
+				"approx_kb": approx_kb,
+				"last_run": (
+					{"status": last[0].status, "finished_at": str(last[0].finished_at or "")}
+					if last
+					else None
+				),
+			}
+		)
 	return out
 
 
@@ -221,19 +214,75 @@ def _set_run(run_name: str, fields: dict) -> None:
 		_bust_active_conversations()
 
 
+def _cas_status(run_name: str, expected: str, fields: dict) -> bool:
+	"""Compare-and-set a forward status transition (CA2-1): apply ``fields`` (which
+	must set ``status``) ONLY when the row is STILL at ``expected``. Returns True when
+	this call won the transition, False when the row had already moved (a cancel or the
+	retirement migration flipped it) and was left untouched.
+
+	The expected status is read under a row lock (``for_update``), so the read+write is
+	atomic against a concurrent ``mark_cancelled`` / retirement UPDATE (both block on the
+	row lock until this commits). This is what stops a mid-flight ``start_run`` from
+	restoring ``Analyzing`` on a row a cancel/retirement already moved to Cancelled."""
+	current = frappe.db.get_value(RUN, run_name, "status", for_update=True)
+	if current != expected:
+		frappe.db.commit()  # release the row lock; nothing to change
+		return False
+	frappe.db.set_value(RUN, run_name, fields)
+	frappe.db.commit()
+	if "status" in fields:
+		_bust_active_conversations()
+	return True
+
+
 def _fail_run(run_name: str, msg: str) -> None:
-	_set_run(run_name, {
-		"status": "Failed",
-		"finished_at": now_datetime(),
-		"error": (msg or "")[:500],
-	})
+	# CA3-2: the failure transition is compare-and-set too. Read the status under a ROW
+	# LOCK and fail ONLY a still-NON-terminal run, so a run a concurrent cancel / the
+	# retirement migration already terminalized is NEVER overwritten to Failed (a Cancelled
+	# run must stay Cancelled, a Completed run must stay Completed). A terminal row is a
+	# no-op — the lock is released and the terminal state stands.
+	current = frappe.db.get_value(RUN, run_name, "status", for_update=True)
+	if current in TERMINAL:
+		frappe.db.commit()  # release the row lock; a terminal row is left as-is
+		return
+	_set_run(
+		run_name,
+		{
+			"status": "Failed",
+			"finished_at": now_datetime(),
+			"error": (msg or "")[:500],
+		},
+	)
 
 
 def mark_cancelled(run_name: str) -> None:
 	"""Cancel a run (the API validates the transition). The turn-end hook and
 	``process_due`` both re-check status, so an in-flight turn finishes but
-	nothing further chains."""
-	_set_run(run_name, {"status": "Cancelled", "finished_at": now_datetime()})
+	nothing further chains.
+
+	CDX-22: acquire the SAME ``jarvis_app_learning_run:<run>`` lock the chaining (``on_turn_end``)
+	and capacity-resume (``_recover_stale_runs``) critical sections hold across their
+	recheck->enqueue window. So a cancel can no longer land BETWEEN a recovery/turn-end recheck of
+	``Analyzing`` and its enqueue of the next batch/final turn (which would start work after the
+	explicit cancel). The block body still writes ``Cancelled`` even if the lock is momentarily
+	unavailable — a user cancel must never be dropped; the turn-end recheck is the backstop for that
+	rare case."""
+	from jarvis._redis_lock import redis_lock
+
+	with redis_lock(
+		f"jarvis_app_learning_run:{run_name}", timeout_s=60, blocking_timeout_s=_CANCEL_LOCK_BLOCK_S
+	):
+		# CA3-2: re-read cancellation eligibility under a ROW LOCK. Cancel ONLY a
+		# still-NON-terminal run, so a run that WON a concurrent forward transition
+		# (Ingesting -> Completed) or was already terminal is never overwritten Cancelled
+		# — the committed terminal state stands. A user cancel of a live run is never
+		# dropped: a non-terminal row is cancelled even if the redis lock was momentarily
+		# busy (the block still runs), and the turn-end recheck backstops the rare case.
+		current = frappe.db.get_value(RUN, run_name, "status", for_update=True)
+		if current in TERMINAL:
+			frappe.db.commit()  # release the row lock; a terminal run is left as-is
+			return
+		_set_run(run_name, {"status": "Cancelled", "finished_at": now_datetime()})
 
 
 def _load_notes(run) -> dict:
@@ -261,14 +310,12 @@ def _active_conversations() -> set[str]:
 	if isinstance(cached, list):
 		return set(cached)
 	convs = [
-		c for c in frappe.get_all(
-			RUN, filters={"status": ["in", list(NON_TERMINAL)]}, pluck="conversation"
-		) if c
+		c
+		for c in frappe.get_all(RUN, filters={"status": ["in", list(NON_TERMINAL)]}, pluck="conversation")
+		if c
 	]
 	try:
-		frappe.cache().set_value(
-			_ACTIVE_CONV_CACHE_KEY, convs, expires_in_sec=_ACTIVE_CONV_CACHE_TTL_S
-		)
+		frappe.cache().set_value(_ACTIVE_CONV_CACHE_KEY, convs, expires_in_sec=_ACTIVE_CONV_CACHE_TTL_S)
 	except Exception:
 		pass
 	return set(convs)
@@ -280,8 +327,8 @@ def _active_conversations() -> set[str]:
 def tick() -> None:
 	"""*/10 cron entry. Never raises. Cleanup + stale recovery always run;
 	new work starts only when a due Queued run exists and no run is active."""
-	if frappe.conf.get("jarvis_app_learning_disabled"):
-		return
+	if _legacy_retired():
+		return  # CA2-1: the pipeline is retired + fail-closed — never start/advance work
 	try:
 		_cleanup_zips()
 	except Exception:
@@ -349,8 +396,14 @@ def _active_runs() -> list:
 		RUN,
 		filters={"status": ["in", list(ACTIVE)]},
 		fields=[
-			"name", "app", "status", "conversation", "started_at", "modified",
-			"batches_done", "batches_total",
+			"name",
+			"app",
+			"status",
+			"conversation",
+			"started_at",
+			"modified",
+			"batches_done",
+			"batches_total",
 		],
 		order_by="creation asc",
 	)
@@ -360,6 +413,8 @@ def process_due() -> None:
 	"""Queue-``long`` worker behind ``TICK_JOB_ID``: single-flight on a redis
 	lock; starts the OLDEST due Queued run iff nothing is active (the
 	bench-wide one-non-terminal-run rule). Never raises."""
+	if _legacy_retired():
+		return  # CA2-1: a job enqueued before retirement refuses instead of starting a run
 	from jarvis._redis_lock import redis_lock
 
 	with redis_lock(LOCK_NAME, timeout_s=PROCESS_TIMEOUT_S, blocking_timeout_s=0) as acquired:
@@ -381,126 +436,28 @@ def process_due() -> None:
 
 # --------------------------------------------------------------------------- #
 # snapshot zip (read-only wrt the app source tree)
+#
+# The collection walk + its guards — _is_excluded_dir / _priority / _is_contained
+# / _collect_files — are imported from jarvis.learning.app_source (the import
+# block at the top) so the legacy zip path and the delegate source-read tools
+# share exactly one implementation of the symlink-containment guard, the caps and
+# the priority ordering. Only the zip/batch machinery below is pipeline-specific.
 # --------------------------------------------------------------------------- #
-def _is_excluded_dir(rel_root: str, dirname: str) -> bool:
-	if dirname in _EXCLUDE_DIR_NAMES:
-		return True
-	rel = os.path.join(rel_root, dirname) if rel_root not in (".", "") else dirname
-	return rel.replace(os.sep, "/") in _EXCLUDE_DIR_PATHS
-
-
-def _priority(rel_path: str) -> int:
-	"""Manifest / subset priority (lower = analysed first / kept under the cap):
-	hooks.py, doctype schemas, doctype controllers, report scripts, api-ish
-	python, workflow/fixture JSON, other python, js/ts/vue, md, rest.
-
-	Report scripts (``/report/<name>/*.py``) and fixture-style JSON
-	(``fixtures/*.json``, plus Workflow / Property Setter / Custom Field / Print
-	Format exports which often carry the real business logic in fixture-heavy
-	apps) are lifted ABOVE js/vue/md so they aren't the first things dropped when
-	a large app hits the file cap."""
-	p = rel_path.replace(os.sep, "/")
-	pp = f"/{p}"
-	base = os.path.basename(p)
-	if base == "hooks.py":
-		return 0
-	in_doctype = "/doctype/" in pp
-	if in_doctype and p.endswith(".json"):
-		return 1
-	if in_doctype and p.endswith(".py") and base != "__init__.py":
-		return 2
-	if "/report/" in pp and p.endswith(".py") and base != "__init__.py":
-		return 3
-	if p.endswith(".py") and "api" in base:
-		return 4
-	# fixture-ish JSON: /fixtures/ exports, or workflow/print-format/custom-field
-	# folders that store business config as JSON.
-	if p.endswith(".json") and (
-		"/fixtures/" in pp
-		or "/workflow/" in pp
-		or "/print_format/" in pp
-		or "/custom/" in pp
-	):
-		return 5
-	if p.endswith(".py"):
-		return 6
-	if p.endswith((".js", ".ts", ".vue")):
-		return 7
-	if p.endswith(".md"):
-		return 8
-	return 9
-
-
-def _is_contained(full: str, root_real: str) -> bool:
-	"""True iff ``full`` resolves to a path INSIDE ``root_real`` (already a
-	realpath). Defends against symlinks in the app source that would otherwise
-	make ``open()``/``zipfile.write`` follow the link and ship the TARGET's
-	content — e.g. a ``config.json -> ../../sites/common_site_config.json`` link
-	exfiltrating site secrets to the external LLM. os.walk itself does not
-	descend symlinked dirs (followlinks=False), but a symlinked FILE is still
-	opened by name, so every file is realpath-checked here."""
-	try:
-		real = os.path.realpath(full)
-	except OSError:
-		return False
-	return real == root_real or real.startswith(root_real + os.sep)
-
-
-def _collect_files(src_dir: str) -> tuple[list[str], dict]:
-	"""Snapshot-eligible relative paths (sorted for determinism) + coverage
-	notes. Applies the extension allowlist, dir excludes, the per-file size
-	cap (skip + note), a symlink-containment guard (skip + note) and the total
-	file cap (prioritized subset + note)."""
-	rels: list[str] = []
-	skipped_large = 0
-	skipped_symlink = 0
-	src_real = os.path.realpath(src_dir)
-	for root, dirs, files in os.walk(src_dir):
-		rel_root = os.path.relpath(root, src_dir)
-		# Drop excluded AND symlinked directories (never descend a link out of
-		# the tree — os.walk keeps followlinks off, but excluding here also keeps
-		# such dirs out of the size probe / listing).
-		dirs[:] = sorted(
-			d for d in dirs
-			if not _is_excluded_dir(rel_root, d)
-			and not os.path.islink(os.path.join(root, d))
-		)
-		for fname in sorted(files):
-			if os.path.splitext(fname)[1].lower() not in EXT_ALLOWLIST:
-				continue
-			full = os.path.join(root, fname)
-			if os.path.islink(full) or not _is_contained(full, src_real):
-				skipped_symlink += 1
-				continue
-			try:
-				size = os.path.getsize(full)
-			except OSError:
-				continue
-			if size > PER_FILE_CAP_BYTES:
-				skipped_large += 1
-				continue
-			rel = fname if rel_root in (".", "") else os.path.join(rel_root, fname)
-			rels.append(rel.replace(os.sep, "/"))
-	dropped = 0
-	if len(rels) > FILE_CAP:
-		rels.sort(key=lambda r: (_priority(r), r))
-		dropped = len(rels) - FILE_CAP
-		rels = rels[:FILE_CAP]
-	notes = {
-		"skipped_large_files": skipped_large,
-		"skipped_symlinks": skipped_symlink,
-		"dropped_files": dropped,
-	}
-	return rels, notes
-
-
 def _snapshot_zip(run_name: str, app: str) -> dict:
 	"""Zip ``apps/<app>`` (filtered) into the site's private files under
 	``app_learning/<run>.zip``. Read-only wrt the source tree. Raises on any
 	problem (missing source dir, zip over cap) — the caller fails the run."""
-	src = _app_source_dir(app)
-	if not os.path.isdir(src):
-		raise FileNotFoundError(f"app source directory not found: apps/{app}")
+	if _legacy_retired():
+		raise _LegacyRetired("app-learning snapshot is retired")
+	# CA2-1 belt: resolve the source ROOT through the canonical, containment-validated
+	# resolver (the round-1 scribe-path win) so the LEGACY walk cannot follow a
+	# symlinked/relocated app root (apps/<app> -> <bench>/sites) and ship site secrets
+	# to the LLM. A missing/unsafe root raises (surfaced as FileNotFoundError so the
+	# caller fails the run exactly as before).
+	try:
+		src = _resolve_app_root(app)
+	except ValueError as e:
+		raise FileNotFoundError(f"app source directory not found or unsafe: apps/{app}: {e}")
 	rels, notes = _collect_files(src)
 	if not rels:
 		raise ValueError(f"no snapshot-eligible source files found in apps/{app}")
@@ -533,9 +490,7 @@ def _delete_zip_file(zip_path: str) -> None:
 	"""Best-effort delete, constrained to the app_learning subfolder so a
 	corrupt row can never aim the delete anywhere else."""
 	try:
-		expected_dir = os.path.realpath(
-			frappe.get_site_path("private", "files", "app_learning")
-		)
+		expected_dir = os.path.realpath(frappe.get_site_path("private", "files", "app_learning"))
 		real = os.path.realpath(zip_path or "")
 		if real.startswith(expected_dir + os.sep) and os.path.isfile(real):
 			os.remove(real)
@@ -593,7 +548,7 @@ def _plan_batches(manifest: list[tuple[str, str]]) -> tuple[list[list[tuple[str,
 			continue
 		n = (len(content) + BATCH_CHAR_BUDGET - 1) // BATCH_CHAR_BUDGET
 		for i in range(n):
-			chunk = content[i * BATCH_CHAR_BUDGET:(i + 1) * BATCH_CHAR_BUDGET]
+			chunk = content[i * BATCH_CHAR_BUDGET : (i + 1) * BATCH_CHAR_BUDGET]
 			units.append((f"{path} (part {i + 1}/{n})", chunk))
 
 	batches: list[list[tuple[str, str]]] = []
@@ -642,9 +597,7 @@ def _batch_prompt(app: str, k: int, total: int, files: list[tuple[str, str]]) ->
 	]
 	for path, content in files:
 		label = " ".join(str(path).split())
-		parts.append(
-			f"File: {label}\n" + _fence_untrusted(content, f"{app} source file: {label}")
-		)
+		parts.append(f"File: {label}\n" + _fence_untrusted(content, f"{app} source file: {label}"))
 	return "\n\n".join(parts)
 
 
@@ -694,7 +647,8 @@ def _final_prompt(app: str, total: int, dropped_batches: int, zip_notes: dict | 
 	caveats = _coverage_caveats(dropped_batches, zip_notes or {})
 	if caveats:
 		parts.append(
-			"Coverage note: this analysis is PARTIAL - " + "; ".join(caveats)
+			"Coverage note: this analysis is PARTIAL - "
+			+ "; ".join(caveats)
 			+ ". Say so explicitly in the overview page."
 		)
 	parts.append(
@@ -706,7 +660,7 @@ def _final_prompt(app: str, total: int, dropped_batches: int, zip_notes: dict | 
 		'"summary": "..."}\n'
 		"```\n"
 		f"At most {MAX_WIKI_PAGES} wiki_pages and {MAX_SKILLS} skills. page_type "
-		f"must be one of: {', '.join(PAGE_TYPES)}. mode is \"create\" for a new "
+		f'must be one of: {", ".join(PAGE_TYPES)}. mode is "create" for a new '
 		'page or "append" to add to an existing one.'
 	)
 	return "\n\n".join(parts)
@@ -720,10 +674,15 @@ def start_run(run_name: str) -> None:
 	(the ``macros.run_macro`` shape, owned by the requesting admin) and enqueue
 	batch 1. Any failure lands on the run row as Failed and lets the next
 	queued app proceed; the app source tree is never written to."""
+	if _legacy_retired():
+		raise _LegacyRetired("app-learning start_run is retired")
 	run = frappe.get_doc(RUN, run_name)
 	if run.status != "Queued":
 		return
-	_set_run(run_name, {"status": "Zipping", "started_at": now_datetime()})
+	# CA2-1: compare-and-set Queued -> Zipping. If a cancel / the retirement migration
+	# moved the row off Queued between the read above and here, abort rather than start.
+	if not _cas_status(run_name, "Queued", {"status": "Zipping", "started_at": now_datetime()}):
+		return
 	try:
 		snap = _snapshot_zip(run_name, run.app)
 	except Exception as e:
@@ -739,11 +698,14 @@ def start_run(run_name: str) -> None:
 	# conversation steps — so if any of those raise, the run is Failed WITH its
 	# zip_path recorded and _cleanup_zips can always reclaim the file. (Without
 	# this, a zip written here but never stamped on the row orphans on disk.)
-	_set_run(run_name, {
-		"zip_path": snap["zip_path"],
-		"zip_size": snap["zip_size"],
-		"file_count": snap["file_count"],
-	})
+	_set_run(
+		run_name,
+		{
+			"zip_path": snap["zip_path"],
+			"zip_size": snap["zip_size"],
+			"file_count": snap["file_count"],
+		},
+	)
 	try:
 		batches, dropped_batches = _plan_batches(_manifest_from_zip(snap["zip_path"]))
 		if not batches:
@@ -761,23 +723,24 @@ def start_run(run_name: str) -> None:
 		owner = run.requested_by or frappe.session.user
 		# Fresh conversation titled after the app, seeded with an intro so the
 		# transcript reads as a self-contained run (the macros.run_macro shape).
-		conv = frappe.get_doc({
-			"doctype": CONV,
-			"title": f"App learning: {run.app}"[:140],
-			"status": "Active",
-		})
+		conv = frappe.get_doc(
+			{
+				"doctype": CONV,
+				"title": f"App learning: {run.app}"[:140],
+				"status": "Active",
+			}
+		)
 		conv.flags.ignore_permissions = True
 		conv.insert()
-		intro = frappe.get_doc({
-			"doctype": MSG,
-			"conversation": conv.name,
-			"seq": 1,
-			"role": "assistant",
-			"content": (
-				f"▶ Learning from app **{run.app}** — "
-				f"{len(batches)} source batch(es)."
-			),
-		})
+		intro = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": conv.name,
+				"seq": 1,
+				"role": "assistant",
+				"content": (f"▶ Learning from app **{run.app}** — {len(batches)} source batch(es)."),
+			}
+		)
 		intro.flags.ignore_permissions = True
 		intro.insert()
 		if owner != frappe.session.user:
@@ -788,16 +751,24 @@ def start_run(run_name: str) -> None:
 		notes = _load_notes(run)
 		notes["zip"] = snap["notes"]
 		notes["plan"] = {"batches": len(batches), "dropped_batches": dropped_batches}
-		_set_run(run_name, {
-			"status": "Analyzing",
-			"conversation": conv.name,
-			"zip_path": snap["zip_path"],
-			"zip_size": snap["zip_size"],
-			"file_count": snap["file_count"],
-			"batches_total": len(batches),
-			"batches_done": 0,
-			"notes": json.dumps(notes),
-		})
+		# CA2-1: compare-and-set Zipping -> Analyzing. A cancel / the retirement
+		# migration that landed while we snapshotted + planned moved the row off
+		# Zipping; do NOT resurrect Analyzing on it (the conversation is left inert).
+		if not _cas_status(
+			run_name,
+			"Zipping",
+			{
+				"status": "Analyzing",
+				"conversation": conv.name,
+				"zip_path": snap["zip_path"],
+				"zip_size": snap["zip_size"],
+				"file_count": snap["file_count"],
+				"batches_total": len(batches),
+				"batches_done": 0,
+				"notes": json.dumps(notes),
+			},
+		):
+			return
 		run.reload()
 		_send_batch_turn(run, 1)
 	except Exception as e:
@@ -809,9 +780,12 @@ def start_run(run_name: str) -> None:
 		_enqueue_tick()
 
 
-def _send_batch_turn(run, k: int) -> None:
+def _send_batch_turn(run, k: int) -> bool:
 	"""Rebuild batch ``k`` from the run's zip and enqueue it as one agent turn
-	(the macros ``_run_step`` seam: ``jarvis.chat.api._enqueue_turn``)."""
+	(the macros ``_run_step`` seam: ``jarvis.chat.api._enqueue_turn``). Returns True
+	when dispatched, False when DEFERRED for capacity (CDX-19)."""
+	if _legacy_retired():
+		raise _LegacyRetired("app-learning turn dispatch is retired")
 	batches, _dropped = _plan_batches(_manifest_from_zip(run.zip_path))
 	if k < 1 or k > len(batches):
 		raise ValueError(f"batch {k} out of range (have {len(batches)})")
@@ -821,10 +795,13 @@ def _send_batch_turn(run, k: int) -> None:
 	# interactive=False: analysis turns run at BACKGROUND priority so an
 	# up-to-40-turn run never jumps ahead of a real user's chat on the shared
 	# queue (the owner's "must not affect day-to-day operations" requirement).
-	api._enqueue_turn(run.conversation, prompt, interactive=False)
+	out = api._enqueue_turn(run.conversation, prompt, interactive=False)
+	return _handle_enqueue_result(run, out, str(k))
 
 
-def _send_final_turn(run) -> None:
+def _send_final_turn(run) -> bool:
+	if _legacy_retired():
+		raise _LegacyRetired("app-learning turn dispatch is retired")
 	notes = _load_notes(run)
 	dropped = cint((notes.get("plan") or {}).get("dropped_batches"))
 	prompt = _final_prompt(run.app, cint(run.batches_total), dropped, notes.get("zip") or {})
@@ -833,7 +810,42 @@ def _send_final_turn(run) -> None:
 	# interactive=False: analysis turns run at BACKGROUND priority so an
 	# up-to-40-turn run never jumps ahead of a real user's chat on the shared
 	# queue (the owner's "must not affect day-to-day operations" requirement).
-	api._enqueue_turn(run.conversation, prompt, interactive=False)
+	out = api._enqueue_turn(run.conversation, prompt, interactive=False)
+	return _handle_enqueue_result(run, out, "final")
+
+
+def _handle_enqueue_result(run, out, current_key: str) -> bool:
+	"""CDX-19: interpret ``_enqueue_turn``'s result for the analysis chain. On an accept-gate
+	OVERLOAD the turn was NOT dispatched (its seed was cleaned up), so the run must NEITHER
+	advance NOR fail — it defers, and the tick's stale-recovery pass re-attempts the SAME
+	pending turn promptly (bounded by ``_MAX_CAPACITY_WAITS``, then Failed with an honest
+	reason). This is the run state machine's own retry semantics reused for capacity, so the
+	chain never waits forever for a terminal that can never arrive. Returns dispatched?"""
+	if isinstance(out, dict) and out.get("overloaded"):
+		_mark_capacity_wait(run, current_key)
+		return False
+	_clear_capacity_wait(run)
+	return True
+
+
+def _mark_capacity_wait(run, current_key: str) -> None:
+	"""Record that the pending analysis turn could not be admitted (site overloaded) and bump
+	the bounded attempt counter. The run stays Analyzing; the tick re-attempts ``current_key``."""
+	notes = _load_notes(run)
+	cw = notes.setdefault("capacity_wait", {})
+	cw["key"] = current_key
+	cw["count"] = int(cw.get("count") or 0) + 1
+	_set_run(run.name, {"notes": json.dumps(notes)})
+	run.notes = json.dumps(notes)
+
+
+def _clear_capacity_wait(run) -> None:
+	"""Drop the capacity-wait marker once a turn dispatches (or on the normal chain). Cheap
+	no-op when no marker is set, so the common path pays nothing."""
+	notes = _load_notes(run)
+	if notes.pop("capacity_wait", None) is not None:
+		_set_run(run.name, {"notes": json.dumps(notes)})
+		run.notes = json.dumps(notes)
 
 
 # --------------------------------------------------------------------------- #
@@ -846,6 +858,12 @@ def on_turn_end(conversation_id: str, *, errored: bool) -> None:
 	parses the reply, stores notes, and chains the next batch / the final
 	consolidation / the ingest. Serialized per run via a redis lock so a
 	re-delivered event can't double-advance."""
+	if _legacy_retired():
+		# CA2-1 (load-bearing): the retirement guard interposes on the chaining step.
+		# Even if an old in-flight worker left a run Analyzing + enqueued a turn, when
+		# that turn completes this NEW-code hook refuses to advance it — so the run can
+		# never progress past that turn, staying inert instead of resurrecting.
+		return
 	if not conversation_id:
 		return
 	try:
@@ -881,14 +899,17 @@ def _publish_progress(run, done: int, total: int) -> None:
 	try:
 		from jarvis.chat.events import publish_to_user
 
-		publish_to_user(run.requested_by, {
-			"kind": "app_learning:update",
-			"run": run.name,
-			"app": run.app,
-			"status": "Analyzing",
-			"batches_done": int(done),
-			"batches_total": int(total),
-		})
+		publish_to_user(
+			run.requested_by,
+			{
+				"kind": "app_learning:update",
+				"run": run.name,
+				"app": run.app,
+				"status": "Analyzing",
+				"batches_done": int(done),
+				"batches_total": int(total),
+			},
+		)
 	except Exception:
 		pass
 
@@ -908,14 +929,16 @@ def _advance_run(run, *, errored: bool) -> None:
 		return
 
 	if current_key == "final":
-		if not isinstance(parsed.get("wiki_pages"), list) and not isinstance(
-			parsed.get("skills"), list
-		):
+		if not isinstance(parsed.get("wiki_pages"), list) and not isinstance(parsed.get("skills"), list):
 			_retry_or_fail(run, current_key, "final reply missing wiki_pages/skills")
 			return
 		notes = _load_notes(run)
 		notes["final"] = {"summary": str(parsed.get("summary") or "")[:1000]}
-		_set_run(run.name, {"status": "Ingesting", "notes": json.dumps(notes)})
+		# CA3-2: compare-and-set Analyzing -> Ingesting. If a cancel / the retirement
+		# migration moved the row off Analyzing while this final turn ran, do NOT
+		# resurrect it into Ingesting — leave the conversation inert (no ingest enqueued).
+		if not _cas_status(run.name, "Analyzing", {"status": "Ingesting", "notes": json.dumps(notes)}):
+			return
 		_enqueue_ingest(run.name)
 		return
 
@@ -923,7 +946,8 @@ def _advance_run(run, *, errored: bool) -> None:
 	raw_notes = parsed.get("notes")
 	batch_notes = (
 		[str(x)[:MAX_NOTE_CHARS] for x in raw_notes if isinstance(x, str)][:MAX_NOTES_PER_BATCH]
-		if isinstance(raw_notes, list) else []
+		if isinstance(raw_notes, list)
+		else []
 	)
 	notes = _load_notes(run)
 	notes.setdefault("batches", {})[str(k)] = batch_notes
@@ -1017,19 +1041,19 @@ def _recover_stale_runs() -> bool:
 	turn), then Failed. A Zipping/Ingesting run whose worker died (no row
 	progress for >45 min — their jobs time out long before that) is failed /
 	re-enqueued once under a fresh hop job id."""
+	if _legacy_retired():
+		return False  # CA2-1: retired — never retry/re-enqueue a legacy run
 	rows = _active_runs()
 	if not rows:
 		return False
 	cutoff = add_to_date(now_datetime(), minutes=-STALE_TURN_MINUTES)
 	for r in rows:
 		if r.status == "Analyzing":
-			last = _last_turn_activity(r.conversation) or r.started_at or r.modified
-			if last and get_datetime(last) >= get_datetime(cutoff):
-				continue
 			# Take the SAME per-run lock on_turn_end uses, so a stale-recovery
 			# retry can never race a late-arriving turn-end event into a
 			# double-advance. Non-blocking: if a turn-end is mid-flight, skip
-			# this tick — it's making progress, so it isn't stale.
+			# this tick — it's making progress, so it isn't stale. (At most one
+			# non-terminal run exists bench-wide, so this is one lock per tick.)
 			from jarvis._redis_lock import redis_lock
 
 			with redis_lock(
@@ -1039,6 +1063,30 @@ def _recover_stale_runs() -> bool:
 					continue
 				run = frappe.get_doc(RUN, r.name)
 				if run.status != "Analyzing":
+					continue
+				# CDX-19: a capacity-DEFERRED turn (its enqueue hit a full admission queue) is
+				# re-attempted PROMPTLY every tick, independent of the 45-min silence window,
+				# bounded by _MAX_CAPACITY_WAITS then Failed with an honest capacity reason. The
+				# marker's count was bumped by _mark_capacity_wait on each overload.
+				notes = _load_notes(run)
+				cw = notes.get("capacity_wait")
+				if isinstance(cw, dict) and cw.get("key"):
+					if int(cw.get("count") or 0) > _MAX_CAPACITY_WAITS:
+						_fail_run(
+							run.name,
+							"the site stayed busy — analysis could not get capacity to continue",
+						)
+						_enqueue_tick()
+						continue
+					key = cw["key"]
+					if key == "final":
+						_send_final_turn(run)
+					else:
+						_send_batch_turn(run, int(key))
+					continue
+				# No capacity wait — apply the 45-min silence rule (retry once, then Failed).
+				last = _last_turn_activity(run.conversation) or run.started_at or run.modified
+				if last and get_datetime(last) >= get_datetime(cutoff):
 					continue
 				done, total = cint(run.batches_done), cint(run.batches_total)
 				current_key = "final" if done >= total else str(done + 1)
@@ -1071,7 +1119,23 @@ def _recover_stale_runs() -> bool:
 def ingest(run: str) -> None:
 	"""Queue-``long`` worker: land the final consolidation payload. Per-page /
 	per-skill failures are logged and counted; a wholesale failure marks the
-	run Failed. Never raises."""
+	run Failed. Never raises.
+
+	CA3-2 (cancel-vs-ingest): the writeback is coordinated with the SAME per-run redis
+	lock the chaining/cancel critical sections hold, rechecks retirement + ``Ingesting``
+	status under it before any side effect, and terminalizes ``Ingesting -> Completed``
+	with a COMPARE-AND-SET under a row lock. The wiki-page writes ride in a SAVEPOINT and
+	commit together with the ``Completed`` status only when the CAS WINS; if the CAS LOSES
+	(a cancel / the retirement migration moved the row off Ingesting), the pages are ROLLED
+	BACK to the savepoint and no skills are created — a cancelled run never keeps this run's
+	pages or skills. Org skills (which commit internally) are created only AFTER the run is
+	durably Completed, so a lost CAS leaves nothing that needs undoing."""
+	if _legacy_retired():
+		# CA2-1: an ingest job enqueued before retirement fails CLOSED — the legacy
+		# wiki/skill writeback never runs post-retirement (the scribe owns writes now).
+		return
+	from jarvis._redis_lock import redis_lock
+
 	try:
 		doc = frappe.get_doc(RUN, run)
 	except Exception:
@@ -1082,51 +1146,98 @@ def ingest(run: str) -> None:
 		return
 	if doc.status != "Ingesting":
 		return
-	try:
-		payload = _parse_last_reply(doc.conversation)
-		if not isinstance(payload, dict):
-			_fail_run(run, "final reply unavailable or unparseable at ingest time")
-			_enqueue_tick()
+	with redis_lock(
+		f"jarvis_app_learning_run:{run}", timeout_s=INGEST_TIMEOUT_S, blocking_timeout_s=10.0
+	) as acquired:
+		if not acquired:
+			# Another critical section (chaining / cancel / a concurrent ingest) holds the
+			# run lock — do NOT double-write. The stale-run recovery re-enqueues ingest.
 			return
-		pages_written, pages_failed = _ingest_wiki_pages(doc, payload)
-		skills_created, skills_deferred, skills_failed = _ingest_skills(doc, payload)
-
-		notes = _load_notes(doc)
-		notes["ingest"] = {
-			"pages_written": pages_written,
-			"pages_failed": pages_failed,
-			"skills_created": skills_created,
-			"skills_deferred": skills_deferred,
-			"skills_failed": skills_failed,
-		}
-		_delete_zip_file(doc.zip_path)
-		_set_run(run, {
-			"status": "Completed",
-			"finished_at": now_datetime(),
-			"zip_path": "",
-			"pages_written": pages_written,
-			"skills_created": skills_created,
-			"skills_deferred": skills_deferred,
-			"notes": json.dumps(notes),
-		})
+		# CA3-2: recheck retirement + Ingesting eligibility UNDER the lock, immediately
+		# before any side effect. A cancel / retirement that landed after the pre-lock read
+		# is honoured here — no pages/skills are written.
+		if _legacy_retired():
+			return
 		try:
-			from jarvis.chat.events import publish_to_user
-
-			publish_to_user(doc.requested_by, {
-				"kind": "app_learning:done",
-				"run": run,
-				"app": doc.app,
-			})
+			doc = frappe.get_doc(RUN, run)
 		except Exception:
-			pass  # the run completed; a missed toast must not fail it
-	except Exception:
-		frappe.log_error(
-			title=f"jarvis app learning: ingest failed ({doc.app})",
-			message=frappe.get_traceback(),
-		)
-		_fail_run(run, "ingest failed; see Error Log")
-	finally:
-		_enqueue_tick()
+			return
+		if doc.status != "Ingesting":
+			return
+		try:
+			payload = _parse_last_reply(doc.conversation)
+			if not isinstance(payload, dict):
+				_fail_run(run, "final reply unavailable or unparseable at ingest time")
+				return
+			# The wiki writes ride in a SAVEPOINT so a lost completion CAS can discard them
+			# cleanly — they are the ONLY pre-CAS side effect (skills come after the win).
+			sp = f"jal_ingest_{frappe.generate_hash(length=8)}"
+			frappe.db.savepoint(sp)
+			pages_written, pages_failed = _ingest_wiki_pages(doc, payload)
+			notes = _load_notes(doc)
+			notes["ingest"] = {"pages_written": pages_written, "pages_failed": pages_failed}
+			# CA3-2: CAS Ingesting -> Completed under a ROW LOCK, committing the pages with
+			# the status atomically. A row moved off Ingesting (cancel / retirement) LOSES
+			# the CAS: roll the pages back to the savepoint and leave the terminal row as-is
+			# — never complete a cancelled run, never keep its pages.
+			if frappe.db.get_value(RUN, run, "status", for_update=True) != "Ingesting":
+				frappe.db.rollback(save_point=sp)
+				frappe.db.commit()  # release the row lock; the terminal state stands
+				return
+			frappe.db.set_value(
+				RUN,
+				run,
+				{
+					"status": "Completed",
+					"finished_at": now_datetime(),
+					"pages_written": pages_written,
+					"notes": json.dumps(notes),
+				},
+			)
+			frappe.db.commit()  # pages + Completed land together, or (on loss above) neither
+			_bust_active_conversations()
+			# Post-completion side effects: the terminal transition is already durable, so
+			# the skill creates' internal commits are safe. A failure here logs + counts but
+			# never un-completes the run (``_fail_run`` no-ops on the now-terminal row).
+			_delete_zip_file(doc.zip_path)
+			frappe.db.set_value(RUN, run, "zip_path", "", update_modified=False)
+			skills_created, skills_deferred, skills_failed = _ingest_skills(doc, payload)
+			notes["ingest"].update(
+				{
+					"skills_created": skills_created,
+					"skills_deferred": skills_deferred,
+					"skills_failed": skills_failed,
+				}
+			)
+			_set_run(
+				run,
+				{
+					"skills_created": skills_created,
+					"skills_deferred": skills_deferred,
+					"notes": json.dumps(notes),
+				},
+			)
+			try:
+				from jarvis.chat.events import publish_to_user
+
+				publish_to_user(
+					doc.requested_by,
+					{
+						"kind": "app_learning:done",
+						"run": run,
+						"app": doc.app,
+					},
+				)
+			except Exception:
+				pass  # the run completed; a missed toast must not fail it
+		except Exception:
+			frappe.log_error(
+				title=f"jarvis app learning: ingest failed ({doc.app})",
+				message=frappe.get_traceback(),
+			)
+			_fail_run(run, "ingest failed; see Error Log")
+		finally:
+			_enqueue_tick()
 
 
 def _slugify(text: str) -> str:
@@ -1139,8 +1250,11 @@ def _ingest_wiki_pages(doc, payload: dict) -> tuple[int, int]:
 	``mode: append`` items map to that function's ``append_md`` shape) and
 	apply in chunks of its per-call cap. Returns ``(applied, failed)``."""
 	from jarvis.chat.wiki import (
-		MAX_PAGES_PER_NOTE, PAGE_TYPES, apply_extracted_page_updates,
+		MAX_PAGES_PER_NOTE,
+		PAGE_TYPES,
+		apply_extracted_page_updates,
 	)
+	from jarvis.tools.record_app_wiki import PROVENANCE_FENCE_PREFIX
 
 	raw = payload.get("wiki_pages")
 	if not isinstance(raw, list):
@@ -1185,10 +1299,15 @@ def _ingest_wiki_pages(doc, payload: dict) -> tuple[int, int]:
 	failed = 0
 	for i in range(0, len(updates), MAX_PAGES_PER_NOTE):
 		a, f = apply_extracted_page_updates(
-			updates[i:i + MAX_PAGES_PER_NOTE],
+			updates[i : i + MAX_PAGES_PER_NOTE],
 			source=f"app-learning:{doc.app}",
 			user=doc.requested_by,
 			ref=doc.name,
+			# CA2-1 belt: even under a deliberate rollback (un-retire), the legacy
+			# ingest can only create/refresh its OWN app-learning pages and can NEVER
+			# overwrite a human-authored / human-edited page on a slug collision. The
+			# legacy stamp (``app-learning:<app>``) shares the scribe's fence prefix.
+			provenance_prefix=PROVENANCE_FENCE_PREFIX,
 		)
 		applied += a
 		failed += f
@@ -1201,13 +1320,16 @@ def _sanitize_skill_slug(name, app: str) -> str:
 	never masquerade as a compiled/learned skill), app-prefixed when too
 	short, clipped to the doctype cap."""
 	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import (
-		LEARNED_PREFIX, MAX_SLUG_LEN, MIN_SLUG_LEN, RESERVED_PREFIX,
+		LEARNED_PREFIX,
+		MAX_SLUG_LEN,
+		MIN_SLUG_LEN,
+		RESERVED_PREFIX,
 	)
 
 	s = _slugify(name)
 	for prefix in (RESERVED_PREFIX, LEARNED_PREFIX):
 		while s.startswith(prefix):
-			s = s[len(prefix):]
+			s = s[len(prefix) :]
 	if not s:
 		return ""
 	if len(s) < MIN_SLUG_LEN:
@@ -1233,7 +1355,8 @@ def _ingest_skills(doc, payload: dict) -> tuple[int, int, int]:
 		return 0, 0, 0
 	from jarvis.chat.custom_skills_api import _create_custom_skill_impl
 	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import (
-		MAX_DESC_LEN, MAX_INSTR_LEN,
+		MAX_DESC_LEN,
+		MAX_INSTR_LEN,
 	)
 
 	created = failed = 0

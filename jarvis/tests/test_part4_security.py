@@ -2,7 +2,7 @@
 exploit reproductions + fix proofs.
 
 Covers the central admin gate (TASK 44), the Settings operator-field permlevel
-fence (TASK 46), the ping_admin/ping_openclaw token+URL redaction (TASK 34-R),
+fence (TASK 46), the ping_admin/ping_agent token+URL redaction (TASK 34-R),
 the onboarding grant (TASK 48), the date_add SQLi (TASK 35), the widened
 agent-admin endpoints (TASK 45/47), the Jarvis User Settings ORM scoping (TASK
 52), the FOUR owner-decision capabilities kept System-Manager-only, and the
@@ -34,12 +34,13 @@ SETTINGS = "Jarvis Settings"
 USER_SETTINGS = "Jarvis User Settings"
 LISTING = "Jarvis Agent Listing"
 
-USER_A = "p4-usera@example.com"       # plain Jarvis User
-USER_B = "p4-userb@example.com"       # plain Jarvis User
-ADMIN = "p4-admin@example.com"        # Jarvis Admin, NOT System Manager
-SM = "p4-sm@example.com"              # System Manager (real, not Administrator)
-WEBSITE = "p4-website@example.com"    # Website (portal) user
-GRANTEE = "p4-grantee@example.com"    # Jarvis User with NO Jarvis Admin (grant target)
+USER_A = "p4-usera@example.com"  # plain Jarvis User
+USER_B = "p4-userb@example.com"  # plain Jarvis User
+ADMIN = "p4-admin@example.com"  # Jarvis Admin, NOT System Manager
+SM = "p4-sm@example.com"  # System Manager (real, not Administrator)
+WEBSITE = "p4-website@example.com"  # Website (portal) user
+GRANTEE = "p4-grantee@example.com"  # Jarvis User with NO Jarvis Admin (grant target)
+BARE = "p4-bare@example.com"  # NEITHER Jarvis role — additive-grant target
 AGENT_SLUG = "p4-test-agent"
 PFX = "p4"
 
@@ -62,10 +63,16 @@ def _ensure_user(email: str, roles: list[str], user_type: str = "System User") -
 	ensure_jarvis_user_role()
 	ensure_jarvis_admin_role()
 	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email, "first_name": PFX,
-			"send_welcome_email": 0, "enabled": 1, "user_type": user_type,
-		})
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": PFX,
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": user_type,
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert(ignore_permissions=True)
 	if frappe.db.get_value("User", email, "user_type") != user_type:
@@ -89,25 +96,28 @@ class Part4Base(FrappeTestCase):
 		super().setUpClass()
 		_ensure_user(USER_A, ["Jarvis User"])
 		_ensure_user(USER_B, ["Jarvis User"])
-		_ensure_user(ADMIN, ["Jarvis Admin"])         # NOT System Manager
+		_ensure_user(ADMIN, ["Jarvis Admin"])  # NOT System Manager
 		_ensure_user(SM, ["System Manager"])
-		_ensure_user(GRANTEE, ["Jarvis User"])        # no Jarvis Admin yet
+		_ensure_user(GRANTEE, ["Jarvis User"])  # no Jarvis Admin yet
+		# Holds NEITHER role, so the additive grant can be observed from zero.
+		# _ensure_user pins user_type, so it stays a System User despite no
+		# desk-access role.
+		_ensure_user(BARE, [])
 		_ensure_user(WEBSITE, [], user_type="Website User")
 		if not frappe.db.exists(LISTING, AGENT_SLUG):
-			frappe.get_doc({
-				"doctype": LISTING, "agent_slug": AGENT_SLUG, "title": "P4 Test Agent",
-				"description": "test", "status": "Published", "nature": "Auditor",
-			}).insert(ignore_permissions=True)
+			frappe.get_doc(
+				{
+					"doctype": LISTING,
+					"agent_slug": AGENT_SLUG,
+					"title": "P4 Test Agent",
+					"description": "test",
+					"status": "Published",
+					"nature": "Auditor",
+				}
+			).insert(ignore_permissions=True)
 		# Deterministic baseline for the permlevel-fence read/write assertions.
-		frappe.db.set_value(
-			SETTINGS, SETTINGS, "agent_url", "ws://p4-baseline", update_modified=False)
-		# Behavioural learning is managed-only; the Settings validate() throws
-		# "available on managed plans only" when pattern_learning_enabled is on AND
-		# the site is self-hosted. The permlevel-fence tests save Jarvis Settings, so
-		# disable it here to keep that unrelated plan-gate from firing on a
-		# self-hosted test site (it is off in CI's baked dump, on locally).
-		frappe.db.set_value(
-			SETTINGS, SETTINGS, "pattern_learning_enabled", 0, update_modified=False)
+		frappe.db.set_value(SETTINGS, SETTINGS, "agent_url", "ws://p4-baseline", update_modified=False)
+		frappe.db.set_value(SETTINGS, SETTINGS, "pattern_learning_enabled", 0, update_modified=False)
 		frappe.db.commit()
 
 	@classmethod
@@ -115,8 +125,7 @@ class Part4Base(FrappeTestCase):
 		frappe.db.rollback()
 		if frappe.db.exists(LISTING, AGENT_SLUG):
 			frappe.delete_doc(LISTING, AGENT_SLUG, force=True, ignore_permissions=True)
-		frappe.db.set_value(
-			SETTINGS, SETTINGS, "agent_url", "", update_modified=False)
+		frappe.db.set_value(SETTINGS, SETTINGS, "agent_url", "", update_modified=False)
 		frappe.db.commit()
 		super().tearDownClass()
 
@@ -149,31 +158,60 @@ class TestAdminTierGate(Part4Base):
 # TASK 44/48 — grant_onboarding_admin
 # --------------------------------------------------------------------------- #
 class TestOnboardingGrant(Part4Base):
-	def test_grant_is_idempotent_and_only_jarvis_admin(self):
+	def test_grant_is_idempotent_and_additive(self):
+		"""Both roles are granted. "Jarvis Admin" is admin rights ON TOP of a
+		normal user: alone it passes the access gate but owns no permission row
+		on Jarvis Conversation / Jarvis Chat Message, so the holder could reach
+		send_message and then fail on the insert."""
 		from jarvis.permissions import grant_onboarding_admin
 
-		def _rows():
+		def _rows(role):
 			return frappe.db.count(
 				"Has Role",
-				{"parenttype": "User", "parent": GRANTEE, "role": "Jarvis Admin"},
+				{"parenttype": "User", "parent": BARE, "role": role},
 			)
 
-		self.assertEqual(_rows(), 0)
+		# BARE holds neither role (GRANTEE is seeded WITH "Jarvis User", so it
+		# cannot show the additive grant from zero).
+		self.assertEqual(_rows("Jarvis Admin"), 0)
+		self.assertEqual(_rows("Jarvis User"), 0)
+		grant_onboarding_admin(BARE)
+		self.assertEqual(_rows("Jarvis Admin"), 1)
+		self.assertEqual(_rows("Jarvis User"), 1)
+		# The helper invalidates the role cache itself, so no clear_cache here.
+		roles = frappe.get_roles(BARE)
+		self.assertIn("Jarvis Admin", roles)
+		self.assertIn("Jarvis User", roles)
+		# Idempotent: a second call adds no duplicate rows.
+		grant_onboarding_admin(BARE)
+		self.assertEqual(_rows("Jarvis Admin"), 1)
+		self.assertEqual(_rows("Jarvis User"), 1)
+
+	def test_grant_tops_up_a_partially_granted_user(self):
+		"""GRANTEE already holds "Jarvis User" only. The grant must add the
+		missing "Jarvis Admin" without duplicating the role it already has."""
+		from jarvis.permissions import grant_onboarding_admin
+
+		def _rows(role):
+			return frappe.db.count(
+				"Has Role",
+				{"parenttype": "User", "parent": GRANTEE, "role": role},
+			)
+
+		self.assertEqual(_rows("Jarvis User"), 1)
+		self.assertEqual(_rows("Jarvis Admin"), 0)
 		grant_onboarding_admin(GRANTEE)
-		self.assertEqual(_rows(), 1)
-		frappe.clear_cache(user=GRANTEE)
-		self.assertIn("Jarvis Admin", frappe.get_roles(GRANTEE))
-		# Idempotent: a second call adds no duplicate row.
-		grant_onboarding_admin(GRANTEE)
-		self.assertEqual(_rows(), 1)
+		self.assertEqual(_rows("Jarvis User"), 1)
+		self.assertEqual(_rows("Jarvis Admin"), 1)
 
 	def test_grant_never_touches_administrator_or_guest(self):
 		from jarvis.permissions import grant_onboarding_admin
 
 		grant_onboarding_admin("Administrator")  # no-op, no raise
-		grant_onboarding_admin("Guest")          # no-op, no raise
-		self.assertFalse(frappe.db.exists(
-			"Has Role", {"parenttype": "User", "parent": "Guest", "role": "Jarvis Admin"}))
+		grant_onboarding_admin("Guest")  # no-op, no raise
+		self.assertFalse(
+			frappe.db.exists("Has Role", {"parenttype": "User", "parent": "Guest", "role": "Jarvis Admin"})
+		)
 
 
 # --------------------------------------------------------------------------- #
@@ -181,8 +219,10 @@ class TestOnboardingGrant(Part4Base):
 # --------------------------------------------------------------------------- #
 class TestSettingsPermlevelFence(Part4Base):
 	OPERATOR_FIELDS = (
-		"jarvis_admin_url", "agent_url", "agent_token",
-		"selfhost_tool_user", "sandbox_mode", "run_query_doctype_allowlist",
+		"jarvis_admin_url",
+		"agent_url",
+		"agent_token",
+		"run_query_doctype_allowlist",
 	)
 
 	def test_jarvis_admin_cannot_read_operator_fields_but_sm_can(self):
@@ -192,14 +232,15 @@ class TestSettingsPermlevelFence(Part4Base):
 			doc = frappe.get_doc(SETTINGS)
 			doc.apply_fieldlevel_read_permissions()
 			for f in self.OPERATOR_FIELDS:
-				self.assertFalse(
-					doc.get(f), f"Jarvis Admin can read fenced operator field {f!r}")
+				self.assertFalse(doc.get(f), f"Jarvis Admin can read fenced operator field {f!r}")
 		with _as(SM):
 			doc_sm = frappe.get_doc(SETTINGS)
 			doc_sm.apply_fieldlevel_read_permissions()
 			self.assertEqual(
-				doc_sm.get("agent_url"), "ws://p4-baseline",
-				"System Manager lost read on the permlevel-1 operator section")
+				doc_sm.get("agent_url"),
+				"ws://p4-baseline",
+				"System Manager lost read on the permlevel-1 operator section",
+			)
 
 	def test_jarvis_admin_write_to_operator_field_is_dropped_sm_write_applies(self):
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
@@ -213,14 +254,18 @@ class TestSettingsPermlevelFence(Part4Base):
 				except frappe.PermissionError:
 					pass
 			self.assertEqual(
-				frappe.db.get_value(SETTINGS, SETTINGS, "agent_url"), "ws://p4-baseline",
-				"a Jarvis Admin repointed agent_url via REST — permlevel fence failed")
+				frappe.db.get_value(SETTINGS, SETTINGS, "agent_url"),
+				"ws://p4-baseline",
+				"a Jarvis Admin repointed agent_url via REST — permlevel fence failed",
+			)
 			# System Manager (pl1 write) -> the write applies.
 			with _as(SM):
 				frappe.client.set_value(SETTINGS, SETTINGS, "agent_url", "ws://sm-set")
 			self.assertEqual(
-				frappe.db.get_value(SETTINGS, SETTINGS, "agent_url"), "ws://sm-set",
-				"System Manager could not write the permlevel-1 operator field")
+				frappe.db.get_value(SETTINGS, SETTINGS, "agent_url"),
+				"ws://sm-set",
+				"System Manager could not write the permlevel-1 operator field",
+			)
 
 	def test_jarvis_admin_cannot_write_admin_credential_field_sm_can(self):
 		# Finding B: the six admin-credential / device fields (jarvis_admin_api_key
@@ -235,8 +280,7 @@ class TestSettingsPermlevelFence(Part4Base):
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
 
 		def _key():
-			return frappe.get_doc(SETTINGS).get_password(
-				"jarvis_admin_api_key", raise_exception=False)
+			return frappe.get_doc(SETTINGS).get_password("jarvis_admin_api_key", raise_exception=False)
 
 		with patch.object(JarvisSettings, "on_update", lambda self: None):
 			# Server-side seed via the real writer (permlevel-bypass, unbroken).
@@ -245,37 +289,40 @@ class TestSettingsPermlevelFence(Part4Base):
 			# Jarvis Admin (pl0 write, NO pl1) -> the credential write is dropped.
 			with _as(ADMIN):
 				try:
-					frappe.client.set_value(
-						SETTINGS, SETTINGS, "jarvis_admin_api_key", "ADMIN-HIJACK")
+					frappe.client.set_value(SETTINGS, SETTINGS, "jarvis_admin_api_key", "ADMIN-HIJACK")
 				except frappe.PermissionError:
 					pass
 			self.assertEqual(
-				_key(), "BASE-KEY",
+				_key(),
+				"BASE-KEY",
 				"a Jarvis Admin overwrote jarvis_admin_api_key via REST — the "
-				"credential permlevel fence failed (admin-connection hijack)")
+				"credential permlevel fence failed (admin-connection hijack)",
+			)
 			# System Manager (pl1 write) -> the write applies.
 			with _as(SM):
-				frappe.client.set_value(
-					SETTINGS, SETTINGS, "jarvis_admin_api_key", "SM-SET-KEY")
+				frappe.client.set_value(SETTINGS, SETTINGS, "jarvis_admin_api_key", "SM-SET-KEY")
 			self.assertEqual(
-				_key(), "SM-SET-KEY",
-				"System Manager could not write the permlevel-1 credential field")
+				_key(), "SM-SET-KEY", "System Manager could not write the permlevel-1 credential field"
+			)
 
 
 # --------------------------------------------------------------------------- #
-# TASK 34-R — ping_admin / ping_openclaw never leak the token or operator URL
+# TASK 34-R — ping_admin / ping_agent never leak the token or operator URL
 # --------------------------------------------------------------------------- #
 class TestDiagnosticsRedaction(Part4Base):
 	def test_ping_admin_redacts_token_and_urls_on_success(self):
 		mock_settings = MagicMock()
 		mock_settings.get_password.return_value = "test-admin-key"
 		leaky = {
-			"agent_token": "SECRET-TOKEN", "agent_url": "ws://secret-agent",
+			"agent_token": "SECRET-TOKEN",
+			"agent_url": "ws://secret-agent",
 			"admin_url": "https://secret-admin",
 		}
-		with _as(ADMIN), \
-			patch("frappe.get_single", return_value=mock_settings), \
-			patch("jarvis.admin_client.get_connection", return_value=leaky):
+		with (
+			_as(ADMIN),
+			patch("frappe.get_single", return_value=mock_settings),
+			patch("jarvis.admin_client.get_connection", return_value=leaky),
+		):
 			res = diagnostics.ping_admin()
 		self.assertTrue(res.get("ok"))
 		blob = json.dumps(res)
@@ -286,24 +333,26 @@ class TestDiagnosticsRedaction(Part4Base):
 		self.assertNotIn("connection", res)
 		self.assertNotIn("admin_url", res)
 
-	def test_ping_openclaw_drops_agent_url(self):
+	def test_ping_agent_drops_agent_url(self):
 		mock_settings = MagicMock()
-		mock_settings.agent_url = "ws://secret-openclaw"
+		mock_settings.agent_url = "ws://secret-agent"
 		mock_settings.get_password.return_value = "tok-secret"
-		with _as(ADMIN), \
-			patch("frappe.get_single", return_value=mock_settings), \
-			patch("jarvis.openclaw_ws.ping", return_value=None):
-			res = diagnostics.ping_openclaw()
+		with (
+			_as(ADMIN),
+			patch("frappe.get_single", return_value=mock_settings),
+			patch("jarvis.agent_ws.ping", return_value=None),
+		):
+			res = diagnostics.ping_agent()
 		self.assertTrue(res.get("ok"))
 		self.assertNotIn("agent_url", res)
-		self.assertNotIn("secret-openclaw", json.dumps(res))
+		self.assertNotIn("secret-agent", json.dumps(res))
 
 	def test_ping_endpoints_reject_plain_jarvis_user(self):
 		with _as(USER_A):
 			with self.assertRaises(frappe.PermissionError):
 				diagnostics.ping_admin()
 			with self.assertRaises(frappe.PermissionError):
-				diagnostics.ping_openclaw()
+				diagnostics.ping_agent()
 
 	def test_ping_admin_admits_jarvis_admin(self):
 		# The gate lets a Jarvis-Admin-not-SM through (returns a config verdict
@@ -329,47 +378,6 @@ class TestOwnerSmOnlyCapabilities(Part4Base):
 			with self.assertRaises(frappe.PermissionError):
 				jarvis_api.rotate_agent_token()
 
-	def test_selfhost_write_capabilities_reject_non_sm_admin(self):
-		from jarvis import selfhost
-
-		with _as(ADMIN):
-			with self.assertRaises(frappe.PermissionError):
-				selfhost.save_self_hosted("http://x", "tok")
-			with self.assertRaises(frappe.PermissionError):
-				selfhost.test_connection("http://x")
-
-	def test_admin_can_use_widened_selfhost_status(self):
-		from jarvis import selfhost
-
-		# get_status was widened to the admin tier — a Jarvis Admin may call it.
-		with _as(ADMIN):
-			out = selfhost.get_status()
-		self.assertIn("deployment_mode", out)
-
-	def test_get_status_redacts_agent_url_from_non_sm_admin(self):
-		from jarvis import selfhost
-
-		# Finding A: agent_url is a permlevel-1 operator field (TASK 46) redacted
-		# from ping_openclaw (TASK 34-R). get_status was widened to the admin tier,
-		# so it must ALSO withhold agent_url from a Jarvis-Admin-not-SM while still
-		# showing it to a System Manager. Parallels test_ping_openclaw_drops_agent_url.
-		mock_settings = MagicMock()
-		mock_settings.deployment_mode = "Self-Hosted"
-		mock_settings.agent_url = "ws://secret-selfhost"
-		mock_settings.selfhost_last_validated_at = ""
-		mock_settings.selfhost_stream = 1
-		with _as(ADMIN), patch("frappe.get_single", return_value=mock_settings):
-			admin_out = selfhost.get_status()
-		self.assertFalse(
-			admin_out.get("agent_url"),
-			"get_status leaked the self-host agent_url to a Jarvis-Admin-not-SM")
-		self.assertNotIn("secret-selfhost", json.dumps(admin_out))
-		with _as(SM), patch("frappe.get_single", return_value=mock_settings):
-			sm_out = selfhost.get_status()
-		self.assertEqual(
-			sm_out.get("agent_url"), "ws://secret-selfhost",
-			"System Manager lost agent_url in get_status after the redaction")
-
 
 # --------------------------------------------------------------------------- #
 # TASK 35 — date_add SQLi (unconstrained literal n)
@@ -380,7 +388,7 @@ class TestDateAddSqli(Part4Base):
 		from jarvis.tools._expr import _build_date_add
 
 		x = Field("d")
-		payload = '1 YEAR)) UNION SELECT * FROM `__Auth` -- '
+		payload = "1 YEAR)) UNION SELECT * FROM `__Auth` -- "
 		for dialect in ("mariadb", "sqlite"):
 			with self.assertRaises(InvalidArgumentError):
 				_build_date_add([x, payload, "year"], dialect)
@@ -421,7 +429,8 @@ class TestUserSettingsScoping(Part4Base):
 	def test_website_user_cannot_read_the_doctype(self):
 		self.assertFalse(
 			frappe.has_permission(USER_SETTINGS, "read", user=WEBSITE),
-			"a Website/portal user can still reach Jarvis User Settings")
+			"a Website/portal user can still reach Jarvis User Settings",
+		)
 		# A Jarvis User retains read (if_owner row).
 		self.assertTrue(frappe.has_permission(USER_SETTINGS, "read", user=USER_A))
 
@@ -429,14 +438,12 @@ class TestUserSettingsScoping(Part4Base):
 		row_a = usage.get_or_create_user_settings(USER_A)
 		row_b = usage.get_or_create_user_settings(USER_B)
 		with _as(USER_A):
-			mine = set(frappe.get_list(
-				USER_SETTINGS, pluck="name", limit_page_length=0))
+			mine = set(frappe.get_list(USER_SETTINGS, pluck="name", limit_page_length=0))
 		self.assertIn(row_a.name, mine)
 		self.assertNotIn(row_b.name, mine, "leak: a Jarvis User sees another user's row")
 		# The admin tier is unrestricted (admin_list_user_usage relies on this).
 		with _as(ADMIN):
-			everyone = set(frappe.get_list(
-				USER_SETTINGS, pluck="name", limit_page_length=0))
+			everyone = set(frappe.get_list(USER_SETTINGS, pluck="name", limit_page_length=0))
 		self.assertIn(row_a.name, everyone)
 		self.assertIn(row_b.name, everyone)
 
@@ -456,30 +463,38 @@ _APP_ROOT = os.path.dirname(os.path.dirname(__file__))
 # test_chat_endpoint_gating only sweeps jarvis/chat/, so every Part-4 gap lives
 # outside it — this guard closes that hole.
 _GUARD_SUBSTRS = (
-	"require_jarvis_admin", "require_jarvis_access", "require_jarvis_user",
-	"require_skill_reviewer", "only_for", "has_jarvis_access",
-	"has_jarvis_admin_access", "is_system_user", "_dev_guard",
-	"_require_system_user", "_require_admin",
+	"require_jarvis_admin",
+	"require_jarvis_access",
+	"require_jarvis_user",
+	"require_skill_reviewer",
+	"only_for",
+	"has_jarvis_access",
+	"has_jarvis_admin_access",
+	"is_system_user",
+	"_require_system_user",
+	"_require_admin",
 )
 
 # Intentionally-open endpoints (justified): boolean readiness probes, the public
-# plan/preset catalog + the onboarding sync poller (carry no secret; the SPA
-# needs them before roles settle), and the site-URL pairing QR (Guest-rejected,
-# no secret).
+# plan/preset/gateway catalog + the onboarding sync poller (carry no secret; the
+# SPA needs them before roles settle), and the site-URL pairing QR
+# (Guest-rejected, no secret).
 _OPEN_ALLOWLIST = {
 	"account.is_onboarded": "boolean readiness probe, no secret",
 	"account.is_ready_for_chat": "boolean readiness probe, no secret",
 	"onboarding.list_plans": "public plan catalog (spec: leave ungated)",
 	"onboarding.get_preset_catalog": "public preset catalog (spec: leave ungated)",
+	"onboarding.get_terms_url": "public Terms & Conditions page URL for the checkout link, no secret",
+	"onboarding.list_payment_providers": "public gateway list for the onboarding chooser; keys only, no secret",
 	"onboarding.get_llm_sync_status": "sanitized sync poller, needed pre-role-settle",
 	"mobile.auth.get_pairing_qr": "Guest-rejected; encodes only the site URL, no secret",
+	"mobile.auth.get_pwa_qr": "Guest-rejected; encodes only the public PWA URL, no secret",
 }
 
 _COVERED_MODULES = {
 	"diagnostics.py": "diagnostics",
 	"onboarding.py": "onboarding",
 	"account.py": "account",
-	"selfhost.py": "selfhost",
 	"dev.py": "dev",
 }
 _COVERED_SUBPATHS = {
@@ -535,6 +550,5 @@ class TestPrivilegedEndpointGating(Part4Base):
 		self.assertFalse(
 			offenders,
 			"ungated privileged @frappe.whitelist endpoints (add require_jarvis_admin / "
-			"only_for / a role guard, or allowlist with a justification): "
-			+ ", ".join(sorted(offenders)),
+			"only_for / a role guard, or allowlist with a justification): " + ", ".join(sorted(offenders)),
 		)

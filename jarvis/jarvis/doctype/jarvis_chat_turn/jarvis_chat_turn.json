@@ -1,0 +1,321 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:run_id",
+ "creation": "2026-07-22 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "run_id",
+  "conversation",
+  "relay_target_id",
+  "turn_class",
+  "state",
+  "version",
+  "pump_epoch",
+  "gateway_run_id",
+  "seed_message",
+  "assistant_message",
+  "last_event_seq",
+  "reserved",
+  "reservation_expires_at",
+  "cancel_requested",
+  "cancel_reason",
+  "recovering",
+  "was_recovered",
+  "usage_recorded",
+  "enriched_published",
+  "terminal_kind",
+  "terminal_payload",
+  "error",
+  "dispatch_payload",
+  "enqueued_at",
+  "preparing_at",
+  "ready_at",
+  "dispatching_at",
+  "first_event_at",
+  "terminal_observed_at",
+  "finalizing_at",
+  "done_at",
+  "recovery_started_at",
+  "deadline_at"
+ ],
+ "fields": [
+  {
+   "fieldname": "run_id",
+   "fieldtype": "Data",
+   "label": "Run ID",
+   "reqd": 1,
+   "unique": 1,
+   "in_list_view": 1,
+   "length": 32,
+   "description": "Server-minted idempotency key for this send; immutable; the doctype name."
+  },
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "options": "Jarvis Conversation",
+   "reqd": 1,
+   "search_index": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Owning conversation; per-conversation single-flight scopes on it."
+  },
+  {
+   "fieldname": "relay_target_id",
+   "fieldtype": "Data",
+   "label": "Relay Target ID",
+   "reqd": 1,
+   "search_index": 1,
+   "in_standard_filter": 1,
+   "length": 140,
+   "description": "Container/gateway shard; admission credits + lease + epoch key on it. Phase 0 uses one site-wide shard."
+  },
+  {
+   "fieldname": "turn_class",
+   "fieldtype": "Select",
+   "label": "Turn Class",
+   "options": "interactive\nbackground",
+   "default": "interactive",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Fairness class: interactive (typed/retry/continuation) vs background (File Box / app-learning)."
+  },
+  {
+   "fieldname": "state",
+   "fieldtype": "Select",
+   "label": "State",
+   "options": "queued\npreparing\nready\ndispatching\nstreaming\nterminal_observed\nfinalizing\ndone\nerrored\ncancelled\nrecovering",
+   "default": "queued",
+   "reqd": 1,
+   "search_index": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Full D2 state machine: queued -> preparing -> ready -> dispatching -> streaming -> terminal_observed -> finalizing -> done|errored, + cancelled (from every cancellable state) and recovering (explicit re-entry route)."
+  },
+  {
+   "fieldname": "version",
+   "fieldtype": "Int",
+   "label": "Version",
+   "default": "0",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Optimistic-concurrency token; bumped on EVERY transition; the actor-fence half of every CAS."
+  },
+  {
+   "fieldname": "pump_epoch",
+   "fieldtype": "Int",
+   "label": "Pump Epoch",
+   "default": "0",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Generation of the pump that owns this turn's streaming lifecycle; stamped at ready->dispatching, re-stamped by takeover reconciliation; the epoch-fence half of every pump-owned CAS. MariaDB, not Redis, is the fence (D2 #5)."
+  },
+  {
+   "fieldname": "gateway_run_id",
+   "fieldtype": "Data",
+   "label": "Gateway Run ID",
+   "length": 64,
+   "search_index": 1,
+   "read_only": 1,
+   "description": "The runId agent returns at the agent ack; broadcast frames are matched on it. Set at dispatching->streaming; null until ack (D2 #2)."
+  },
+  {
+   "fieldname": "seed_message",
+   "fieldtype": "Link",
+   "label": "Seed Message",
+   "options": "Jarvis Chat Message",
+   "reqd": 1,
+   "search_index": 1,
+   "description": "The user message row that seeded this turn; its seq was allocated under the conversation lock (D3 Race 1)."
+  },
+  {
+   "fieldname": "assistant_message",
+   "fieldtype": "Link",
+   "label": "Assistant Message",
+   "options": "Jarvis Chat Message",
+   "description": "The assistant row deltas stream into; created by prepare; null until preparing (D2 #9)."
+  },
+  {
+   "fieldname": "last_event_seq",
+   "fieldtype": "Int",
+   "label": "Last Event Seq",
+   "default": "0",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "High-water mark of applied broadcast event_seq (watermark); delta apply guards event_seq > last_event_seq so re-attach + duplicate frames are idempotent (D2 #10, Amendment B)."
+  },
+  {
+   "fieldname": "reserved",
+   "fieldtype": "Check",
+   "label": "Reserved",
+   "default": "0",
+   "description": "Holds one admission credit. Reserved under the Jarvis Relay Pump shard lock (OAR-1) at the queued->preparing grant; cleared at settlement (D2 #11)."
+  },
+  {
+   "fieldname": "reservation_expires_at",
+   "fieldtype": "Datetime",
+   "label": "Reservation Expires At",
+   "search_index": 1,
+   "description": "Set when a credit is reserved at send-acceptance but not yet CLAIMED; NULLed at the queued->preparing claim (OAR-5) so a slow prepare is never reclaimed (D2 #12)."
+  },
+  {
+   "fieldname": "cancel_requested",
+   "fieldtype": "Check",
+   "label": "Cancel Requested",
+   "default": "0",
+   "description": "Web-sender sets it to request cancellation of an in-flight turn; the pump observes it, drives the out-of-band chat.abort, and settles to cancelled (D2 #17)."
+  },
+  {
+   "fieldname": "cancel_reason",
+   "fieldtype": "Small Text",
+   "label": "Cancel Reason",
+   "description": "Recorded reason when a queued turn is system-cancelled (age-out, SUX-5)."
+  },
+  {
+   "fieldname": "recovering",
+   "fieldtype": "Check",
+   "label": "Recovering",
+   "default": "0",
+   "description": "Set together with state='recovering' when the watchdog/pump parks a turn on reconcile-mismatch, deadline, or DB error; mirrors Message.recovering; drives the SUX-1 reconnecting banner. Cleared on the recovering exit (D2 recovering route)."
+  },
+  {
+   "fieldname": "was_recovered",
+   "fieldtype": "Check",
+   "label": "Was Recovered",
+   "default": "0",
+   "description": "Set when a watchdog/recovery re-attached or re-dispatched this turn (or a takeover re-stamped it); feeds the attempt suffix + stale-fence telemetry (D2 #16)."
+  },
+  {
+   "fieldname": "usage_recorded",
+   "fieldtype": "Check",
+   "label": "Usage Recorded",
+   "default": "0",
+   "no_copy": 1,
+   "description": "(turn_id) idempotency guard for token-usage accrual (R-4 / §10.7): CAS 0->1 in finalize so a finalize replay can never double-count the soft monthly cap. The naked += is retired; usage is a fenced once-only enrichment effect."
+  },
+  {
+   "fieldname": "enriched_published",
+   "fieldtype": "Check",
+   "label": "Enriched Published",
+   "default": "0",
+   "no_copy": 1,
+   "description": "jarvis#737: exactly-once guard for the message:enriched publish. CAS 0->1 in finalize so the early visible-set release and the later finalize_done all-effects release can never both fire; whichever wins the CAS is the one call that publishes. Does not gate the jarvis#681 already-done redelivery, which stays an unconditional best-effort resend."
+  },
+  {
+   "fieldname": "terminal_kind",
+   "fieldtype": "Select",
+   "label": "Terminal Kind",
+   "options": "\nrelay:final\nrelay:error\nrelay:interrupted",
+   "description": "Recorded at streaming->terminal_observed so SETTLEMENT is recoverable from the row alone if the pump dies before settling (D2 #13, R-12)."
+  },
+  {
+   "fieldname": "terminal_payload",
+   "fieldtype": "Long Text",
+   "label": "Terminal Payload",
+   "description": "The terminal frame's projected final text or error (JSON), captured at terminal_observed; the settlement txn reads it to write the final assistant projection (D2 #14)."
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error",
+   "description": "User-facing error payload on errored/failed-final. Mirrors Message.error (D2 #15)."
+  },
+  {
+   "fieldname": "dispatch_payload",
+   "fieldtype": "Long Text",
+   "label": "Dispatch Payload",
+   "description": "JSON of the extra enqueue kwargs (attachments/context) so a queued turn re-dispatches with them on promotion."
+  },
+  {
+   "fieldname": "enqueued_at",
+   "fieldtype": "Datetime",
+   "label": "Enqueued At",
+   "in_list_view": 1,
+   "description": "Stamped at (none)->queued; queue_wait_ms baseline (D2 #18)."
+  },
+  {
+   "fieldname": "preparing_at",
+   "fieldtype": "Datetime",
+   "label": "Preparing At",
+   "description": "Stamped at queued->preparing (D2 #19); the PREPARE_DEADLINE_S=300 watchdog baseline."
+  },
+  {
+   "fieldname": "ready_at",
+   "fieldtype": "Datetime",
+   "label": "Ready At",
+   "description": "Stamped at preparing->ready (D2 #20)."
+  },
+  {
+   "fieldname": "dispatching_at",
+   "fieldtype": "Datetime",
+   "label": "Dispatching At",
+   "in_list_view": 1,
+   "description": "Stamped at ready->dispatching; admission-credit confirm point; the recovering-exit origin discriminator (NULL => pre-dispatch park, D2 #21) (D2 #21)."
+  },
+  {
+   "fieldname": "first_event_at",
+   "fieldtype": "Datetime",
+   "label": "First Event At",
+   "description": "Stamped at dispatching->streaming (first broadcast frame / ack); streaming-stall SLO baseline (D2 #22)."
+  },
+  {
+   "fieldname": "terminal_observed_at",
+   "fieldtype": "Datetime",
+   "label": "Terminal Observed At",
+   "search_index": 1,
+   "description": "Stamped at streaming->terminal_observed; watchdog uses it to tell 'settlement owed' from a still-streaming turn (D2 #23)."
+  },
+  {
+   "fieldname": "finalizing_at",
+   "fieldtype": "Datetime",
+   "label": "Finalizing At",
+   "search_index": 1,
+   "description": "Stamped at the settlement txn terminal_observed->finalizing; watchdog uses it to tell 'enrichment owed' from 'settlement owed' (D2 #24)."
+  },
+  {
+   "fieldname": "done_at",
+   "fieldtype": "Datetime",
+   "label": "Done At",
+   "in_list_view": 1,
+   "description": "Stamped at finalizing->done|errored|cancelled; terminal timestamp for retention/GC (D2 #25)."
+  },
+  {
+   "fieldname": "recovery_started_at",
+   "fieldtype": "Datetime",
+   "label": "Recovery Started At",
+   "description": "When the recovering route was entered; bounds recovery backoff before parking (D2 #26)."
+  },
+  {
+   "fieldname": "deadline_at",
+   "fieldtype": "Datetime",
+   "label": "Deadline At",
+   "search_index": 1,
+   "description": "Per-turn soft deadline (dispatch time + TURN_TIMEOUT_SECONDS=600); the stale-scan sweeper marks recovering/errored past it (D2 #27)."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-14 00:00:00.000000",
+ "module": "Jarvis",
+ "name": "Jarvis Chat Turn",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "role": "Jarvis Admin"
+  }
+ ],
+ "quick_entry": 0,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

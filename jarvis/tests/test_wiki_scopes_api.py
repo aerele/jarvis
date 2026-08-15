@@ -16,8 +16,8 @@ from frappe.utils import add_to_date, now_datetime
 
 from jarvis.chat import wiki
 from jarvis.exceptions import PermissionDeniedError
+from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE
 from jarvis.tools.read_wiki import read_wiki
-from jarvis.permissions import JARVIS_USER_ROLE
 from jarvis.tools.update_wiki import update_wiki
 
 WIKI_DT = "Jarvis Wiki Page"
@@ -40,26 +40,30 @@ def _delete_scope_pages():
 
 def _ensure_role(name):
 	if not frappe.db.exists("Role", name):
-		frappe.get_doc({
-			"doctype": "Role",
-			"role_name": name,
-			"desk_access": 1,
-			"is_custom": 0,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Role",
+				"role_name": name,
+				"desk_access": 1,
+				"is_custom": 0,
+			}
+		).insert(ignore_permissions=True)
 
 
 def _ensure_user(email, first_name, roles):
 	if not frappe.db.exists("User", email):
-		frappe.get_doc({
-			"doctype": "User",
-			"email": email,
-			"first_name": first_name,
-			# Role-less users flip to Website User; every fixture carries at
-			# least one desk role so user_type sticks.
-			"user_type": "System User",
-			"send_welcome_email": 0,
-			"roles": [{"role": r} for r in roles],
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": first_name,
+				# Role-less users flip to Website User; every fixture carries at
+				# least one desk role so user_type sticks.
+				"user_type": "System User",
+				"send_welcome_email": 0,
+				"roles": [{"role": r} for r in roles],
+			}
+		).insert(ignore_permissions=True)
 
 
 def _make_page(slug, title, page_type="Org", **kwargs):
@@ -91,17 +95,19 @@ class _WikiScopeFixture(FrappeTestCase):
 		_ensure_user(PLAIN_USER, "Wkscope Plain", ["Desk User"])
 		# KW_USER now stands for a plain Jarvis User (own-page editor).
 		_ensure_user(KW_USER, "Wkscope KWU", ["Desk User", JARVIS_USER_ROLE])
-		_ensure_user(
-			KW_MANAGER, "Wkscope KWM", ["Desk User", KW_MANAGER_ROLE, TEST_ROLE]
-		)
+		_ensure_user(KW_MANAGER, "Wkscope KWM", ["Desk User", KW_MANAGER_ROLE, TEST_ROLE])
 		# PLAIN_USER stands for a user WITHOUT Jarvis app access. Fixtures persist
-		# and the one-time grant patch may have granted "Jarvis User", so strip it
-		# to exercise the no-access cases (creates nothing; personal writes
-		# refused).
-		frappe.db.delete("Has Role", {
-			"parenttype": "User", "parent": PLAIN_USER,
-			"role": ["in", (JARVIS_USER_ROLE, KW_MANAGER_ROLE)],
-		})
+		# across runs and an earlier case may have left "Jarvis User" on it, so
+		# strip it to exercise the no-access cases (creates nothing; personal
+		# writes refused).
+		frappe.db.delete(
+			"Has Role",
+			{
+				"parenttype": "User",
+				"parent": PLAIN_USER,
+				"role": ["in", (JARVIS_USER_ROLE, KW_MANAGER_ROLE)],
+			},
+		)
 		frappe.clear_cache(user=PLAIN_USER)
 		frappe.db.commit()
 
@@ -133,16 +139,25 @@ class _WikiScopeFixture(FrappeTestCase):
 		"""One page per scope cell; returns {label: slug} (post-suffix)."""
 		org = _make_page("org--wkscope-handbook", "Wkscope Handbook")
 		role = _make_page(
-			"process--wkscope-role-note", "Wkscope Role Note",
-			page_type="Process", scope="Role", target_role=TEST_ROLE,
+			"process--wkscope-role-note",
+			"Wkscope Role Note",
+			page_type="Process",
+			scope="Role",
+			target_role=TEST_ROLE,
 		)
 		mine = _make_page(
-			"people--wkscope-plain-note", "Wkscope Plain Note",
-			page_type="People", scope="User", target_user=PLAIN_USER,
+			"people--wkscope-plain-note",
+			"Wkscope Plain Note",
+			page_type="People",
+			scope="User",
+			target_user=PLAIN_USER,
 		)
 		other = _make_page(
-			"people--wkscope-kwu-note", "Wkscope KWU Note",
-			page_type="People", scope="User", target_user=KW_USER,
+			"people--wkscope-kwu-note",
+			"Wkscope KWU Note",
+			page_type="People",
+			scope="User",
+			target_user=KW_USER,
 		)
 		return {
 			"org": org.slug,
@@ -177,6 +192,29 @@ class TestWikiCapsAndLanguage(_WikiScopeFixture):
 		self.assertEqual(set(caps["creatable_scopes"]), {"Org", "Role", "User"})
 		self.assertIn(TEST_ROLE, caps["manageable_roles"])
 
+	def test_manager_with_no_targetable_roles_hides_role_scope(self):
+		# A wiki manager (here a Jarvis Admin) who holds only blanket roles has an
+		# empty manageable_roles: JARVIS_ADMIN_ROLE / JARVIS_USER_ROLE / "Desk User"
+		# are all in _NON_TARGETABLE_ROLES. creatable_scopes must NOT offer "Role"
+		# then, or the New-page dialog strands on scope=Role with an empty,
+		# unsubmittable picker. "User" is still offered (an admin is a wiki user).
+		email = "wkscope-admin@test.invalid"
+		_ensure_user(email, "Wkscope Admin", ["Desk User", JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE])
+		frappe.clear_cache(user=email)
+		frappe.db.commit()
+		try:
+			frappe.set_user(email)
+			caps = wiki.get_wiki_caps()
+			self.assertFalse(caps["is_sm"])
+			self.assertEqual(caps["manageable_roles"], [])
+			self.assertNotIn("Role", caps["creatable_scopes"])
+			self.assertIn("User", caps["creatable_scopes"])
+		finally:
+			frappe.set_user("Administrator")
+			if frappe.db.exists("User", email):
+				frappe.delete_doc("User", email, ignore_permissions=True, force=True)
+			frappe.db.commit()
+
 	def test_caps_guest_rejected(self):
 		frappe.set_user("Guest")
 		with self.assertRaises(frappe.PermissionError):
@@ -184,14 +222,11 @@ class TestWikiCapsAndLanguage(_WikiScopeFixture):
 
 	def test_knowledge_language_default_and_setter(self):
 		rows = frappe.db.sql(
-			"select value from `tabSingles` "
-			"where doctype='Jarvis Settings' and field='knowledge_language'"
+			"select value from `tabSingles` where doctype='Jarvis Settings' and field='knowledge_language'"
 		)
 		original = rows[0][0] if rows else None
 		try:
-			frappe.db.delete(
-				"Singles", {"doctype": SETTINGS, "field": "knowledge_language"}
-			)
+			frappe.db.delete("Singles", {"doctype": SETTINGS, "field": "knowledge_language"})
 			self.assertEqual(wiki.get_wiki_caps()["knowledge_language"], "English")
 
 			# SM-only setter.
@@ -207,13 +242,9 @@ class TestWikiCapsAndLanguage(_WikiScopeFixture):
 			self.assertEqual(wiki.get_wiki_caps()["knowledge_language"], "Original")
 		finally:
 			frappe.set_user("Administrator")
-			frappe.db.delete(
-				"Singles", {"doctype": SETTINGS, "field": "knowledge_language"}
-			)
+			frappe.db.delete("Singles", {"doctype": SETTINGS, "field": "knowledge_language"})
 			if original is not None:
-				frappe.db.set_single_value(
-					SETTINGS, "knowledge_language", original, update_modified=False
-				)
+				frappe.db.set_single_value(SETTINGS, "knowledge_language", original, update_modified=False)
 
 
 class TestWikiListScopes(_WikiScopeFixture):
@@ -267,15 +298,12 @@ class TestWikiListScopes(_WikiScopeFixture):
 	def test_attention_filter(self):
 		_make_page("org--wkscope-fresh", "Wkscope Fresh")
 		stale = _make_page(
-			"org--wkscope-stale", "Wkscope Stale",
+			"org--wkscope-stale",
+			"Wkscope Stale",
 			last_confirmed_at=add_to_date(now_datetime(), days=-100),
 		)
-		contra = _make_page(
-			"org--wkscope-contra", "Wkscope Contra", contradiction_flag=1
-		)
-		never = _make_page(
-			"org--wkscope-never", "Wkscope Never", last_confirmed_at=None
-		)
+		contra = _make_page("org--wkscope-contra", "Wkscope Contra", contradiction_flag=1)
+		never = _make_page("org--wkscope-never", "Wkscope Never", last_confirmed_at=None)
 		visible, out = self._visible_slugs(attention=1)
 		self.assertEqual(visible, {stale.slug, contra.slug, never.slug})
 		row = next(r for r in out["rows"] if r["slug"] == stale.slug)
@@ -284,15 +312,11 @@ class TestWikiListScopes(_WikiScopeFixture):
 
 	def test_page_type_and_search_filters(self):
 		self._plant_matrix_pages()
-		out = wiki.list_wiki_pages_page(
-			search="wkscope", page_type="Process", page_length=100
-		)
+		out = wiki.list_wiki_pages_page(search="wkscope", page_type="Process", page_length=100)
 		self.assertEqual(out["total"], 1)
 		self.assertEqual(len(out["rows"]), 1)
 		self.assertEqual(out["rows"][0]["page_type"], "Process")
-		self.assertTrue(
-			out["rows"][0]["slug"].startswith("process--wkscope-role-note")
-		)
+		self.assertTrue(out["rows"][0]["slug"].startswith("process--wkscope-role-note"))
 		out = wiki.list_wiki_pages_page(search="wkscope handbook", page_length=100)
 		self.assertEqual(out["total"], 1)
 		self.assertEqual(out["rows"][0]["slug"], "org--wkscope-handbook")
@@ -304,9 +328,7 @@ class TestWikiListScopes(_WikiScopeFixture):
 			_make_page(f"org--wkscope-pg-{i}", f"Wkscope Pg {i}")
 		seen = set()
 		for page in (1, 2, 3):
-			out = wiki.list_wiki_pages_page(
-				search="wkscope-pg", page=page, page_length=2
-			)
+			out = wiki.list_wiki_pages_page(search="wkscope-pg", page=page, page_length=2)
 			self.assertEqual(out["total"], 5)
 			self.assertEqual(out["has_more"], page < 3)
 			seen |= {r["slug"] for r in out["rows"]}
@@ -355,8 +377,10 @@ class TestWikiGetPage(_WikiScopeFixture):
 class TestWikiCreateMatrix(_WikiScopeFixture):
 	def test_sm_creates_org_page_with_derived_slug(self):
 		out = wiki.create_wiki_page(
-			title="Wkscope Returns Policy", page_type="Org",
-			summary="How wkscope returns work.", body_md="- 30 days",
+			title="Wkscope Returns Policy",
+			page_type="Org",
+			summary="How wkscope returns work.",
+			body_md="- 30 days",
 		)
 		self.assertTrue(out["ok"])
 		self.assertEqual(out["slug"], "org--wkscope-returns-policy")
@@ -374,17 +398,13 @@ class TestWikiCreateMatrix(_WikiScopeFixture):
 	def test_plain_user_cannot_create(self):
 		frappe.set_user(PLAIN_USER)
 		for scope in ("Org", "User"):
-			out = wiki.create_wiki_page(
-				title="Wkscope Nope", page_type="Org", scope=scope
-			)
+			out = wiki.create_wiki_page(title="Wkscope Nope", page_type="Org", scope=scope)
 			self.assertFalse(out["ok"])
 			self.assertTrue(out["reason"])
 
 	def test_kw_user_creates_user_scope_only(self):
 		frappe.set_user(KW_USER)
-		out = wiki.create_wiki_page(
-			title="Wkscope My Notes", page_type="People", scope="User"
-		)
+		out = wiki.create_wiki_page(title="Wkscope My Notes", page_type="People", scope="User")
 		self.assertTrue(out["ok"])
 		# Controller suffixes User-scope slugs so users can never collide.
 		self.assertIn("--u-", out["slug"])
@@ -398,21 +418,19 @@ class TestWikiCreateMatrix(_WikiScopeFixture):
 
 	def test_user_scope_slugs_do_not_collide_across_users(self):
 		frappe.set_user(KW_USER)
-		a = wiki.create_wiki_page(
-			title="Wkscope Same Title", page_type="People", scope="User"
-		)
+		a = wiki.create_wiki_page(title="Wkscope Same Title", page_type="People", scope="User")
 		frappe.set_user(KW_MANAGER)
-		b = wiki.create_wiki_page(
-			title="Wkscope Same Title", page_type="People", scope="User"
-		)
+		b = wiki.create_wiki_page(title="Wkscope Same Title", page_type="People", scope="User")
 		self.assertTrue(a["ok"] and b["ok"])
 		self.assertNotEqual(a["slug"], b["slug"])
 
 	def test_kw_manager_role_scope_matrix(self):
 		frappe.set_user(KW_MANAGER)
 		out = wiki.create_wiki_page(
-			title="Wkscope Team Runbook", page_type="Process",
-			scope="Role", target_role=TEST_ROLE,
+			title="Wkscope Team Runbook",
+			page_type="Process",
+			scope="Role",
+			target_role=TEST_ROLE,
 		)
 		self.assertTrue(out["ok"])
 		self.assertIn("--r-", out["slug"])
@@ -422,15 +440,15 @@ class TestWikiCreateMatrix(_WikiScopeFixture):
 
 		# A role the manager does not hold is not manageable.
 		out = wiki.create_wiki_page(
-			title="Wkscope Foreign Runbook", page_type="Process",
-			scope="Role", target_role=OTHER_ROLE,
+			title="Wkscope Foreign Runbook",
+			page_type="Process",
+			scope="Role",
+			target_role=OTHER_ROLE,
 		)
 		self.assertFalse(out["ok"])
 		# Role scope without a target role is malformed.
 		with self.assertRaises(frappe.ValidationError):
-			wiki.create_wiki_page(
-				title="Wkscope No Role", page_type="Process", scope="Role"
-			)
+			wiki.create_wiki_page(title="Wkscope No Role", page_type="Process", scope="Role")
 
 	def test_malformed_input_throws(self):
 		with self.assertRaises(frappe.ValidationError):
@@ -467,9 +485,7 @@ class TestWikiSaveArchiveMatrix(_WikiScopeFixture):
 		# user can read it but not save it.
 		slugs = self._plant_matrix_pages()
 		frappe.set_user(PLAIN_USER)
-		self.assertEqual(
-			wiki.get_wiki_page(slugs["plain_user"])["can_edit"], False
-		)
+		self.assertEqual(wiki.get_wiki_page(slugs["plain_user"])["can_edit"], False)
 		with self.assertRaises(frappe.PermissionError):
 			wiki.save_wiki_page(slug=slugs["plain_user"], body_md="- edit")
 
@@ -480,9 +496,7 @@ class TestWikiSaveArchiveMatrix(_WikiScopeFixture):
 		self.assertTrue(out["ok"])
 		out = wiki.archive_wiki_page(slug=slugs["role"])
 		self.assertTrue(out["ok"])
-		self.assertEqual(
-			frappe.db.get_value(WIKI_DT, slugs["role"], "status"), "Archived"
-		)
+		self.assertEqual(frappe.db.get_value(WIKI_DT, slugs["role"], "status"), "Archived")
 
 	def test_archive_org_page_sm_only(self):
 		slugs = self._plant_matrix_pages()
@@ -526,9 +540,7 @@ class TestWikiSaveArchiveMatrix(_WikiScopeFixture):
 		frappe.set_user("Administrator")
 		out = wiki.restore_wiki_page(slug=slugs["org"])
 		self.assertTrue(out["ok"])
-		self.assertEqual(
-			frappe.db.get_value(WIKI_DT, slugs["org"], "status"), "Active"
-		)
+		self.assertEqual(frappe.db.get_value(WIKI_DT, slugs["org"], "status"), "Active")
 
 
 class TestWikiToolVisibility(_WikiScopeFixture):
@@ -563,8 +575,10 @@ class TestUpdateWikiScope(_WikiScopeFixture):
 		# the confirm-gated tool, even with doctype write moved off Desk User.
 		frappe.set_user(PLAIN_USER)
 		out = update_wiki(
-			slug="org--wkscope-tool-org", title="Wkscope Tool Org",
-			page_type="Org", replace_body_md="First.",
+			slug="org--wkscope-tool-org",
+			title="Wkscope Tool Org",
+			page_type="Org",
+			replace_body_md="First.",
 		)
 		self.assertTrue(out["ok"] and out["created"])
 		self.assertEqual(out["scope"], "Org")
@@ -579,20 +593,24 @@ class TestUpdateWikiScope(_WikiScopeFixture):
 		# creation is refused now that own-page editing rides Jarvis User.
 		frappe.set_user(PLAIN_USER)
 		out = update_wiki(
-			slug="wkscope-personal", title="Wkscope Personal",
-			page_type="People", scope="User", replace_body_md="x",
+			slug="wkscope-personal",
+			title="Wkscope Personal",
+			page_type="People",
+			scope="User",
+			replace_body_md="x",
 		)
 		self.assertFalse(out["ok"])
 		self.assertIn("Jarvis User", out["reason"])
-		self.assertFalse(
-			frappe.db.exists(WIKI_DT, {"slug": ["like", "wkscope-personal%"]})
-		)
+		self.assertFalse(frappe.db.exists(WIKI_DT, {"slug": ["like", "wkscope-personal%"]}))
 
 	def test_user_scope_happy_path_and_base_slug_reuse(self):
 		frappe.set_user(KW_USER)
 		out = update_wiki(
-			slug="wkscope-personal", title="Wkscope Personal",
-			page_type="People", scope="User", replace_body_md="First.",
+			slug="wkscope-personal",
+			title="Wkscope Personal",
+			page_type="People",
+			scope="User",
+			replace_body_md="First.",
 		)
 		self.assertTrue(out["ok"] and out["created"])
 		self.assertEqual(out["scope"], "User")
@@ -613,21 +631,24 @@ class TestUpdateWikiScope(_WikiScopeFixture):
 
 	def test_user_scope_on_org_slug_forks_a_personal_page(self):
 		org = _make_page(
-			"process--wkscope-shared", "Wkscope Shared",
-			page_type="Process", body_md="Org body.",
+			"process--wkscope-shared",
+			"Wkscope Shared",
+			page_type="Process",
+			body_md="Org body.",
 		)
 		frappe.set_user(KW_USER)
 		out = update_wiki(
-			slug="process--wkscope-shared", title="Wkscope Shared Fork",
-			page_type="Process", scope="User", append_md="- personal view",
+			slug="process--wkscope-shared",
+			title="Wkscope Shared Fork",
+			page_type="Process",
+			scope="User",
+			append_md="- personal view",
 		)
 		self.assertTrue(out["ok"] and out["created"])
 		self.assertNotEqual(out["slug"], org.slug)
 		self.assertEqual(out["scope"], "User")
 		# The org page is untouched.
-		self.assertEqual(
-			frappe.db.get_value(WIKI_DT, org.slug, "body_md"), "Org body."
-		)
+		self.assertEqual(frappe.db.get_value(WIKI_DT, org.slug, "body_md"), "Org body.")
 
 	def test_foreign_user_page_not_writable_via_tool(self):
 		slugs = self._plant_matrix_pages()
@@ -639,6 +660,4 @@ class TestUpdateWikiScope(_WikiScopeFixture):
 		from jarvis.exceptions import InvalidArgumentError
 
 		with self.assertRaises(InvalidArgumentError):
-			update_wiki(
-				slug="org--wkscope-x", title="X", page_type="Org", scope="Team"
-			)
+			update_wiki(slug="org--wkscope-x", title="X", page_type="Org", scope="Team")

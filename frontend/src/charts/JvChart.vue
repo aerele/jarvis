@@ -4,43 +4,43 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onBeforeUnmount, computed, nextTick } from "vue"
-import { buildOption } from "./chartTheme.js"
+import { ref, watch, onMounted, onBeforeUnmount, computed, nextTick } from "vue";
+import { buildOption } from "./chartTheme.js";
 
 const props = defineProps({
 	spec: { type: Object, required: true },
 	dark: { type: Boolean, default: false },
-})
+});
 
-const el = ref(null)
-let chart = null
-let ro = null
+const el = ref(null);
+let chart = null;
+let ro = null;
 
-const option = computed(() => buildOption(props.spec, props.dark))
-const invalid = computed(() => option.value === null)
+const option = computed(() => buildOption(props.spec, props.dark));
+const invalid = computed(() => option.value === null);
 
 async function ensure() {
-	if (invalid.value || !el.value) return
+	if (invalid.value || !el.value) return;
 	if (!chart) {
 		// Lazy import: keep echarts off the first-paint path (mirrors mermaid).
-		const echarts = await import("echarts")
-		if (!el.value) return
-		chart = echarts.init(el.value, null, { renderer: "svg" })
-		ro = new ResizeObserver(() => chart && chart.resize())
-		ro.observe(el.value)
+		const echarts = await import("echarts");
+		if (!el.value) return;
+		chart = echarts.init(el.value, null, { renderer: "svg" });
+		ro = new ResizeObserver(() => chart && chart.resize());
+		ro.observe(el.value);
 	}
-	chart.setOption(option.value, true)
+	chart.setOption(option.value, true);
 }
 
-onMounted(() => nextTick(ensure))
-watch(option, ensure)
+onMounted(() => nextTick(ensure));
+watch(option, ensure);
 onBeforeUnmount(() => {
-	if (ro && el.value) ro.unobserve(el.value)
+	if (ro && el.value) ro.unobserve(el.value);
 	if (chart) {
-		chart.dispose()
-		chart = null
+		chart.dispose();
+		chart = null;
 	}
-})
+});
 </script>
 
 <style scoped>

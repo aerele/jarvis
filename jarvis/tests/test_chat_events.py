@@ -1,4 +1,4 @@
-"""Tests for jarvis.chat.events - openclaw event parsing + realtime publish wrapper."""
+"""Tests for jarvis.chat.events - agent event parsing + realtime publish wrapper."""
 
 from unittest.mock import patch
 
@@ -25,40 +25,46 @@ class TestParseEvent(FrappeTestCase):
 		self.assertEqual(ev["error"], "x")
 
 	def test_tool_start(self):
-		ev = parse_event({
-			"stream": "item",
-			"data": {
-				"kind": "tool",
-				"phase": "start",
-				"name": "jarvis__get_list",
-				"toolCallId": "tc-1",
-			},
-		})
+		ev = parse_event(
+			{
+				"stream": "item",
+				"data": {
+					"kind": "tool",
+					"phase": "start",
+					"name": "jarvis__get_list",
+					"toolCallId": "tc-1",
+				},
+			}
+		)
 		self.assertEqual(ev["kind"], "tool")
 		self.assertEqual(ev["phase"], "start")
 		self.assertEqual(ev["tool_name"], "jarvis__get_list")
 		self.assertEqual(ev["tool_call_id"], "tc-1")
 
 	def test_tool_end(self):
-		ev = parse_event({
-			"stream": "item",
-			"data": {
-				"kind": "tool",
-				"phase": "end",
-				"name": "jarvis__get_list",
-				"toolCallId": "tc-1",
-				"status": "completed",
-			},
-		})
+		ev = parse_event(
+			{
+				"stream": "item",
+				"data": {
+					"kind": "tool",
+					"phase": "end",
+					"name": "jarvis__get_list",
+					"toolCallId": "tc-1",
+					"status": "completed",
+				},
+			}
+		)
 		self.assertEqual(ev["kind"], "tool")
 		self.assertEqual(ev["phase"], "end")
 		self.assertEqual(ev["status"], "completed")
 
 	def test_assistant_delta(self):
-		ev = parse_event({
-			"stream": "assistant",
-			"data": {"text": "Hello world", "delta": " world"},
-		})
+		ev = parse_event(
+			{
+				"stream": "assistant",
+				"data": {"text": "Hello world", "delta": " world"},
+			}
+		)
 		self.assertEqual(ev["kind"], "assistant")
 		self.assertEqual(ev["text"], "Hello world")
 		self.assertEqual(ev["delta"], " world")

@@ -28,11 +28,17 @@ PLAIN_USER = "app-learn-api-user@example.com"
 
 def _ensure_user(email: str, roles: list[str]) -> None:
 	if not frappe.db.exists("User", email):
-		frappe.get_doc({
-			"doctype": "User", "email": email, "first_name": "AL",
-			"last_name": "Test", "enabled": 1, "send_welcome_email": 0,
-			"user_type": "System User",
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "AL",
+				"last_name": "Test",
+				"enabled": 1,
+				"send_welcome_email": 0,
+				"user_type": "System User",
+			}
+		).insert(ignore_permissions=True)
 	u = frappe.get_doc("User", email)
 	# strip any drifted roles, then set exactly the ones asked for
 	u.set("roles", [])
@@ -51,16 +57,29 @@ class _ApiTestCase(FrappeTestCase):
 		frappe.db.commit()
 		# Two fake installed custom apps; never actually zipped/enqueued.
 		self._patches = [
+			mock.patch.object(app_analysis, "_installed_custom_apps", return_value=["fakeapp", "otherapp"]),
 			mock.patch.object(
-				app_analysis, "_installed_custom_apps", return_value=["fakeapp", "otherapp"]
-			),
-			mock.patch.object(
-				app_analysis, "list_custom_apps_data",
+				app_analysis,
+				"list_custom_apps_data",
 				return_value=[
-					{"app": "fakeapp", "title": "Fake App", "installed_version": "1.0",
-					 "path_ok": True, "approx_files": 3, "approx_kb": 4, "last_run": None},
-					{"app": "otherapp", "title": "Other App", "installed_version": "2.0",
-					 "path_ok": True, "approx_files": 5, "approx_kb": 9, "last_run": None},
+					{
+						"app": "fakeapp",
+						"title": "Fake App",
+						"installed_version": "1.0",
+						"path_ok": True,
+						"approx_files": 3,
+						"approx_kb": 4,
+						"last_run": None,
+					},
+					{
+						"app": "otherapp",
+						"title": "Other App",
+						"installed_version": "2.0",
+						"path_ok": True,
+						"approx_files": 5,
+						"approx_kb": 9,
+						"last_run": None,
+					},
 				],
 			),
 			mock.patch.object(app_analysis, "_enqueue_tick", return_value=None),
@@ -86,8 +105,11 @@ class TestGating(_ApiTestCase):
 		self.assertRaises(frappe.PermissionError, app_learning_api.get_app_learning_overview)
 		self.assertRaises(frappe.PermissionError, app_learning_api.list_app_learning_runs_page)
 		self.assertRaises(
-			frappe.PermissionError, app_learning_api.schedule_app_learning,
-			frappe.as_json(["fakeapp"]), "", 1,
+			frappe.PermissionError,
+			app_learning_api.schedule_app_learning,
+			frappe.as_json(["fakeapp"]),
+			"",
+			1,
 		)
 
 	def test_admin_can_read(self):
@@ -100,6 +122,17 @@ class TestGating(_ApiTestCase):
 
 
 class TestSchedule(_ApiTestCase):
+	def setUp(self):
+		super().setUp()
+		# CA3-5: ``schedule_app_learning`` refuses ONLY while the legacy pipeline is retired
+		# (the default). These tests exercise the RETAINED scheduling body, which is reachable
+		# only when the pipeline is re-enabled for rollback — so run them un-retired. (The
+		# refuse-while-retired config is covered by test_app_learning_agent's
+		# TestLegacyScheduleRetired.)
+		p = mock.patch.object(app_analysis, "_legacy_retired", return_value=False)
+		p.start()
+		self.addCleanup(p.stop)
+
 	def test_consent_is_mandatory(self):
 		frappe.set_user(ADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):
@@ -129,10 +162,14 @@ class TestSchedule(_ApiTestCase):
 
 	def test_duplicate_non_terminal_run_is_rejected_atomically(self):
 		frappe.set_user(ADMIN_USER)
-		frappe.get_doc({
-			"doctype": RUN, "app": "fakeapp", "status": "Analyzing",
-			"requested_by": ADMIN_USER,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": RUN,
+				"app": "fakeapp",
+				"status": "Analyzing",
+				"requested_by": ADMIN_USER,
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
 		# scheduling fakeapp + otherapp must reject BEFORE inserting either
 		with self.assertRaises(frappe.ValidationError):
@@ -141,10 +178,14 @@ class TestSchedule(_ApiTestCase):
 
 	def test_terminal_run_does_not_block_rescheduling(self):
 		frappe.set_user(ADMIN_USER)
-		frappe.get_doc({
-			"doctype": RUN, "app": "fakeapp", "status": "Completed",
-			"requested_by": ADMIN_USER,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": RUN,
+				"app": "fakeapp",
+				"status": "Completed",
+				"requested_by": ADMIN_USER,
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
 		r = self._schedule(["fakeapp"])
 		self.assertEqual(len(r["data"]["runs"]), 1)
@@ -172,10 +213,14 @@ class TestSchedule(_ApiTestCase):
 
 class TestCancel(_ApiTestCase):
 	def _mk(self, status: str) -> str:
-		doc = frappe.get_doc({
-			"doctype": RUN, "app": "fakeapp", "status": status,
-			"requested_by": ADMIN_USER,
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"app": "fakeapp",
+				"status": status,
+				"requested_by": ADMIN_USER,
+			}
+		)
 		doc.insert(ignore_permissions=True)
 		frappe.db.commit()
 		return doc.name
@@ -197,11 +242,15 @@ class TestCancel(_ApiTestCase):
 class TestRunsList(_ApiTestCase):
 	def _seed(self, n: int):
 		for i in range(n):
-			frappe.get_doc({
-				"doctype": RUN, "app": "fakeapp" if i % 2 else "otherapp",
-				"status": "Completed" if i % 2 else "Failed",
-				"requested_by": ADMIN_USER, "error": f"boom-{i}",
-			}).insert(ignore_permissions=True)
+			frappe.get_doc(
+				{
+					"doctype": RUN,
+					"app": "fakeapp" if i % 2 else "otherapp",
+					"status": "Completed" if i % 2 else "Failed",
+					"requested_by": ADMIN_USER,
+					"error": f"boom-{i}",
+				}
+			).insert(ignore_permissions=True)
 		frappe.db.commit()
 
 	def test_envelope_and_pagination(self):
@@ -215,9 +264,9 @@ class TestRunsList(_ApiTestCase):
 	def test_status_and_app_filters(self):
 		frappe.set_user(ADMIN_USER)
 		self._seed(6)
-		page = app_learning_api.list_app_learning_runs_page(
-			filters=frappe.as_json({"status": "Failed"})
-		)["data"]
+		page = app_learning_api.list_app_learning_runs_page(filters=frappe.as_json({"status": "Failed"}))[
+			"data"
+		]
 		self.assertTrue(all(r["status"] == "Failed" for r in page["rows"]))
 
 	def test_search_matches_error(self):
@@ -229,15 +278,53 @@ class TestRunsList(_ApiTestCase):
 	def test_unknown_filter_and_sort_throw(self):
 		frappe.set_user(ADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):
-			app_learning_api.list_app_learning_runs_page(
-				filters=frappe.as_json({"requested_by": ADMIN_USER})
-			)
+			app_learning_api.list_app_learning_runs_page(filters=frappe.as_json({"requested_by": ADMIN_USER}))
 		with self.assertRaises(frappe.ValidationError):
 			app_learning_api.list_app_learning_runs_page(sort_field="requested_by")
 
 	def test_invalid_status_filter_value_throws(self):
 		frappe.set_user(ADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):
-			app_learning_api.list_app_learning_runs_page(
-				filters=frappe.as_json({"status": "Bogus"})
-			)
+			app_learning_api.list_app_learning_runs_page(filters=frappe.as_json({"status": "Bogus"}))
+
+
+class TestRetireLegacyRunsMigration(_ApiTestCase):
+	"""CA-5: the upgrade migration must not strand a run that was Queued (or
+	mid-flight) before the chat-batch pipeline was retired — nothing advances it
+	and the frontend surfaces were removed. It is terminalized to Cancelled with a
+	retirement reason; historical terminal rows are untouched; re-run is a no-op."""
+
+	def _mk(self, status: str, error: str = "") -> str:
+		doc = frappe.get_doc(
+			{"doctype": RUN, "app": "fakeapp", "status": status, "requested_by": ADMIN_USER, "error": error}
+		)
+		doc.insert(ignore_permissions=True)
+		frappe.db.commit()
+		return doc.name
+
+	def test_non_terminal_rows_are_cancelled_with_reason(self):
+		from jarvis.patches.v2_06_retire_app_learning_runs import execute
+
+		non_terminal = {s: self._mk(s) for s in ("Queued", "Zipping", "Analyzing", "Ingesting")}
+		done = self._mk("Completed")
+		failed = self._mk("Failed", error="real failure")
+
+		execute()
+		frappe.db.commit()
+
+		for status, name in non_terminal.items():
+			row = frappe.db.get_value(RUN, name, ["status", "error", "finished_at"], as_dict=True)
+			self.assertEqual(row.status, "Cancelled", f"{status} row must be terminalized")
+			self.assertIn("retired", (row.error or "").lower())
+			self.assertTrue(row.finished_at)
+		# historical terminal rows are untouched (status + a real failure reason)
+		self.assertEqual(frappe.db.get_value(RUN, done, "status"), "Completed")
+		self.assertEqual(frappe.db.get_value(RUN, failed, "status"), "Failed")
+		self.assertEqual(frappe.db.get_value(RUN, failed, "error"), "real failure")
+
+		# idempotent: a second run leaves everything terminal, nothing to change
+		execute()
+		frappe.db.commit()
+		self.assertEqual(
+			frappe.db.count(RUN, {"status": ["in", ("Queued", "Zipping", "Analyzing", "Ingesting")]}), 0
+		)

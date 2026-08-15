@@ -45,9 +45,7 @@ class JarvisWikiPromotionRequest(Document):
 		# here, so a later edit to the source page can never retroactively
 		# change what the reviewer is diffing against.
 		if not self.body_snapshot and self.page:
-			self.body_snapshot = (
-				frappe.db.get_value("Jarvis Wiki Page", self.page, "body_md") or ""
-			)
+			self.body_snapshot = frappe.db.get_value("Jarvis Wiki Page", self.page, "body_md") or ""
 
 	def _guard_page_readable(self):
 		"""The requester must be able to READ the source page before it is
@@ -74,13 +72,9 @@ class JarvisWikiPromotionRequest(Document):
 	def _validate_scopes(self):
 		self.from_scope = (self.from_scope or "").strip()
 		if self.from_scope and self.from_scope not in FROM_SCOPES:
-			frappe.throw(
-				_("From Scope must be one of {0}.").format(", ".join(FROM_SCOPES))
-			)
+			frappe.throw(_("From Scope must be one of {0}.").format(", ".join(FROM_SCOPES)))
 		self.to_scope = (self.to_scope or "").strip()
 		if self.to_scope not in TO_SCOPES:
-			frappe.throw(
-				_("To Scope must be one of {0}.").format(", ".join(TO_SCOPES))
-			)
+			frappe.throw(_("To Scope must be one of {0}.").format(", ".join(TO_SCOPES)))
 		if self.to_scope == "Role" and not self.target_role:
 			frappe.throw(_("Promoting to Role scope needs a Target Role."))

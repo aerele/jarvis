@@ -88,9 +88,7 @@ class TestKnowledgeLanguage(unittest.TestCase):
 		self.assertEqual(knowledge_language.get_knowledge_language(), "English")
 
 	def test_survives_settings_read_failure(self):
-		with mock.patch.object(
-			frappe.db, "get_single_value", side_effect=Exception("boom")
-		):
+		with mock.patch.object(frappe.db, "get_single_value", side_effect=Exception("boom")):
 			self.assertEqual(knowledge_language.get_knowledge_language(), "English")
 			self.assertTrue(knowledge_language.language_directive())
 
@@ -121,9 +119,7 @@ class TestKnowledgeLanguage(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	def test_voice_facts_prompt_carries_english_directive_by_default(self):
 		_set_value(None)
-		with mock.patch(
-			"jarvis.chat.voice.openrouter_complete", return_value="[]"
-		) as m:
+		with mock.patch("jarvis.chat.voice.openrouter_complete", return_value="[]") as m:
 			out = voice_facts._extract_batch(_batch())
 		self.assertEqual(out, [])
 		m.assert_called_once()
@@ -134,9 +130,7 @@ class TestKnowledgeLanguage(unittest.TestCase):
 
 	def test_voice_facts_prompt_switches_to_original(self):
 		_set_value("Original")
-		with mock.patch(
-			"jarvis.chat.voice.openrouter_complete", return_value="[]"
-		) as m:
+		with mock.patch("jarvis.chat.voice.openrouter_complete", return_value="[]") as m:
 			voice_facts._extract_batch(_batch())
 		system = m.call_args.args[0][0]["content"]
 		self.assertIn(knowledge_language._ORIGINAL_DIRECTIVE, system)

@@ -38,12 +38,16 @@ INSTALLATION = "Jarvis Agent Installation"
 
 def _ensure_user(email: str) -> str:
 	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email,
-			"first_name": email.split("@")[0],
-			"send_welcome_email": 0, "enabled": 1,
-			"user_type": "System User",
-		})
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": email.split("@")[0],
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "System User",
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert()
 		frappe.db.commit()
@@ -90,11 +94,17 @@ def _wipe() -> None:
 
 def _mk_skill(owner: str, name: str, shared_with=None) -> str:
 	with _as(owner):
-		doc = frappe.get_doc({
-			"doctype": SKILL, "skill_name": name, "description": "d",
-			"instructions": "do it", "enabled": 1, "user_invocable": 1,
-			"shared_with": [{"user": u} for u in (shared_with or [])],
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": SKILL,
+				"skill_name": name,
+				"description": "d",
+				"instructions": "do it",
+				"enabled": 1,
+				"user_invocable": 1,
+				"shared_with": [{"user": u} for u in (shared_with or [])],
+			}
+		)
 		doc.flags.ignore_validate = True
 		doc.insert(ignore_permissions=True)
 	frappe.db.commit()
@@ -103,11 +113,16 @@ def _mk_skill(owner: str, name: str, shared_with=None) -> str:
 
 def _mk_macro(owner: str, name: str) -> str:
 	with _as(owner):
-		doc = frappe.get_doc({
-			"doctype": MACRO, "macro_name": name, "description": "m",
-			"enabled": 1, "stop_on_error": 1,
-			"steps": [{"label": "s1", "prompt": "prompt 1"}],
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": MACRO,
+				"macro_name": name,
+				"description": "m",
+				"enabled": 1,
+				"stop_on_error": 1,
+				"steps": [{"label": "s1", "prompt": "prompt 1"}],
+			}
+		)
 		doc.flags.ignore_validate = True
 		doc.insert(ignore_permissions=True)
 	frappe.db.commit()
@@ -116,9 +131,14 @@ def _mk_macro(owner: str, name: str) -> str:
 
 def _mk_run(owner: str, macro: str, status: str = "completed") -> str:
 	with _as(owner):
-		doc = frappe.get_doc({
-			"doctype": RUN, "macro": macro, "status": status, "trigger": "manual",
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"macro": macro,
+				"status": status,
+				"trigger": "manual",
+			}
+		)
 		doc.insert(ignore_permissions=True)
 	frappe.db.commit()
 	return doc.name
@@ -181,6 +201,7 @@ class TestSkillsBulkDelete(unittest.TestCase):
 
 	def test_bulk_delete_accepts_json_string(self):
 		import json
+
 		with _as(USER_A):
 			res = delete_custom_skills_bulk(json.dumps([self.a0]))
 		self.assertEqual(res["deleted"], 1)
@@ -232,7 +253,7 @@ class TestMacrosBulkAndRunsTotal(unittest.TestCase):
 		self.assertEqual(skipped["v3-no-such-macro"], "not found")
 		self.assertFalse(frappe.db.exists(MACRO, self.a0))
 		self.assertEqual(frappe.db.count(RUN, {"macro": self.a0}), 0)  # history gone
-		self.assertTrue(frappe.db.exists(MACRO, self.b0))              # B untouched
+		self.assertTrue(frappe.db.exists(MACRO, self.b0))  # B untouched
 		self.assertEqual(frappe.db.count(RUN, {"macro": self.b0}), 1)
 
 	def test_list_macro_runs_total_owner_scoped(self):
@@ -247,9 +268,7 @@ class TestMacrosBulkAndRunsTotal(unittest.TestCase):
 			self.assertEqual(list_macro_runs(status="completed")["total"], 5)  # 2 + 3
 			self.assertEqual(list_macro_runs(status="failed")["total"], 2)
 			self.assertEqual(list_macro_runs(macro=self.a1)["total"], 5)
-			self.assertEqual(
-				list_macro_runs(status="failed", macro=self.a1)["total"], 2
-			)
+			self.assertEqual(list_macro_runs(status="failed", macro=self.a1)["total"], 2)
 
 	def test_list_macro_runs_total_independent_of_limit(self):
 		with _as(USER_A):
@@ -284,22 +303,36 @@ class TestGetApproval(unittest.TestCase):
 			conv.insert(ignore_permissions=True)
 		self.conv = conv.name
 		# Pending approval owned by Administrator, conversation owned by A.
-		appr = frappe.get_doc({
-			"doctype": APPROVAL, "title": "v3-appr-pending", "status": "Pending",
-			"document_type": "Purchase Invoice", "conversation": self.conv,
-			"question": "post it?", "context_md": "ctx",
-			"options": '["Post","Hold"]', "ref_doctype": "Purchase Invoice",
-			"ref_name": "PI-0001",
-		})
+		appr = frappe.get_doc(
+			{
+				"doctype": APPROVAL,
+				"title": "v3-appr-pending",
+				"status": "Pending",
+				"document_type": "Purchase Invoice",
+				"conversation": self.conv,
+				"question": "post it?",
+				"context_md": "ctx",
+				"options": '["Post","Hold"]',
+				"ref_doctype": "Purchase Invoice",
+				"ref_name": "PI-0001",
+			}
+		)
 		appr.insert(ignore_permissions=True)
 		self.pending = appr.name
-		decided = frappe.get_doc({
-			"doctype": APPROVAL, "title": "v3-appr-decided", "status": "Approved",
-			"document_type": "Sales Invoice", "conversation": self.conv,
-			"question": "send it?", "options": '["Yes"]',
-			"decision": "Yes", "decided_by": "Administrator",
-			"decided_at": frappe.utils.now_datetime(),
-		})
+		decided = frappe.get_doc(
+			{
+				"doctype": APPROVAL,
+				"title": "v3-appr-decided",
+				"status": "Approved",
+				"document_type": "Sales Invoice",
+				"conversation": self.conv,
+				"question": "send it?",
+				"options": '["Yes"]',
+				"decision": "Yes",
+				"decided_by": "Administrator",
+				"decided_at": frappe.utils.now_datetime(),
+			}
+		)
 		decided.insert(ignore_permissions=True)
 		frappe.db.commit()
 		self.decided = decided.name
@@ -328,10 +361,15 @@ class TestGetApproval(unittest.TestCase):
 
 	def test_assignee_docshare_reads_but_cannot_act(self):
 		# a DocShare read row (what toggle_assignment creates) grants READ only
-		frappe.get_doc({
-			"doctype": "DocShare", "share_doctype": APPROVAL,
-			"share_name": self.pending, "user": USER_B, "read": 1,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "DocShare",
+				"share_doctype": APPROVAL,
+				"share_name": self.pending,
+				"user": USER_B,
+				"read": 1,
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
 		with _as(USER_B):
 			res = get_approval(self.pending)
@@ -357,11 +395,15 @@ class TestGetAgent(unittest.TestCase):
 		_ensure_user(USER_A)
 		_ensure_user(USER_B)
 		agent_catalog.sync_agent_listings()
-		cls.slug = "audit-auditor"
+		cls.slug = "close-auditor"
 		if not frappe.db.exists(LISTING, cls.slug):
-			cls.slug = frappe.get_all(
-				LISTING, filters={"status": "Published"}, pluck="name", limit=1
-			)[0]
+			cls.slug = frappe.get_all(LISTING, filters={"status": "Published"}, pluck="name", limit=1)[0]
+		# close-auditor requires GL Entry / Account / Company read (install A12-gate);
+		# grant it to the installers so the self-mapped installs validate.
+		if frappe.db.exists("Role", "Accounts User"):
+			for u in (USER_A, USER_B):
+				frappe.get_doc("User", u).add_roles("Accounts User")
+				frappe.clear_cache(user=u)
 
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -370,11 +412,16 @@ class TestGetAgent(unittest.TestCase):
 				frappe.delete_doc(INSTALLATION, n, force=True, ignore_permissions=True)
 		frappe.db.commit()
 		with _as(USER_A):
-			inst = frappe.get_doc({
-				"doctype": INSTALLATION, "agent": self.slug, "enabled": 0,
-				"installed_version": frappe.db.get_value(LISTING, self.slug, "version"),
-				"installed_at": frappe.utils.now(),
-			})
+			inst = frappe.get_doc(
+				{
+					"doctype": INSTALLATION,
+					"agent": self.slug,
+					"enabled": 0,
+					"run_as_user": frappe.session.user,  # self-map (reqd since Phase 1 identity)
+					"installed_version": frappe.db.get_value(LISTING, self.slug, "version"),
+					"installed_at": frappe.utils.now(),
+				}
+			)
 			inst.insert(ignore_permissions=True)
 		frappe.db.commit()
 		self.installation = inst.name
@@ -393,9 +440,7 @@ class TestGetAgent(unittest.TestCase):
 		self.assertIsNotNone(res["installation"])
 		self.assertEqual(res["installation"]["name"], self.installation)
 		self.assertNotIn("all_roles", res)  # SM-only payload
-		self.assertEqual(
-			res["install_count"], frappe.db.count(INSTALLATION, {"agent": self.slug})
-		)
+		self.assertEqual(res["install_count"], frappe.db.count(INSTALLATION, {"agent": self.slug}))
 		self.assertGreaterEqual(res["install_count"], 1)
 
 	def test_non_installer_gets_no_installation(self):

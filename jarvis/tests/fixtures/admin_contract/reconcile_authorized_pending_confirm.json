@@ -1,0 +1,34 @@
+{
+  "contract_version": 2,
+  "name": "reconcile_authorized_pending_confirm",
+  "description": "A provider-truth check on a Razorpay AUTOPAY signup whose mandate the gateway says is authorized. The customer has already parted with the authorization amount, but Razorpay publishes no route from a subscription id to its authorization PAYMENT id - so there is no idempotency key to activate under, and activating without one is the double activation this contract exists to prevent. The honest answer is CONFIRM, never a new intent: a second intent authorizes a second mandate and charges the signup fee twice. `can_initiate_payment` is FALSE to match (the retry path refuses this state outright), and `recovery` carries the same instruction the 409 form of this code carries, so one reader handles both.",
+  "endpoint": "jarvis_admin_v2.billing.signup.check_signup_payment_status",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.attempt_id",
+    "body.message.data.payment_last_checked_at",
+    "body.message.data.razorpay_key_id",
+    "body.message.data.razorpay_subscription_id"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+        "recovery": "confirm_payment",
+        "pending_verification": false,
+        "payment_provider": "razorpay",
+        "razorpay_subscription_id": "sub_placeholder",
+        "razorpay_key_id": "placeholder",
+        "can_initiate_payment": false,
+        "can_check_status": true,
+        "can_reconnect": false,
+        "gateway_consulted": true,
+        "payment_last_checked_at": "2026-08-02 00:00:00.000000",
+        "attempt_id": "att_placeholder",
+        "generation": 1
+      }
+    }
+  }
+}

@@ -4,14 +4,24 @@
 			<div class="wg3d-fallback-inner">
 				<div class="wg3d-fallback-icon">◍</div>
 				<p><strong>3D graph unavailable</strong></p>
-				<p class="text-muted">WebGL is disabled or unsupported in this browser. The analysis
-					cards still work — use them to explore hubs, gaps, and suggested links.</p>
+				<p class="text-muted">
+					WebGL is disabled or unsupported in this browser. The analysis cards still work
+					— use them to explore hubs, gaps, and suggested links.
+				</p>
 			</div>
 		</div>
 		<template v-else>
-			<div class="wg3d-canvas" ref="el" role="img"
-				aria-label="3D knowledge graph. This canvas is decorative; use the analysis cards and lists beside it to explore the same data by keyboard."></div>
-			<span v-if="shownCount < totalCount" class="wg3d-cap" :title="`Rendering the ${shownCount} most-connected of ${totalCount} nodes for performance`">
+			<div
+				class="wg3d-canvas"
+				ref="el"
+				role="img"
+				aria-label="3D knowledge graph. This canvas is decorative; use the analysis cards and lists beside it to explore the same data by keyboard."
+			></div>
+			<span
+				v-if="shownCount < totalCount"
+				class="wg3d-cap"
+				:title="`Rendering the ${shownCount} most-connected of ${totalCount} nodes for performance`"
+			>
 				showing {{ shownCount }} of {{ totalCount }}
 			</span>
 		</template>
@@ -31,8 +41,10 @@ import { nodeStyle, edgeStyle } from "./graphStyle.js";
 export function webglAvailable() {
 	try {
 		const c = document.createElement("canvas");
-		return !!(window.WebGLRenderingContext
-			&& (c.getContext("webgl") || c.getContext("experimental-webgl")));
+		return !!(
+			window.WebGLRenderingContext &&
+			(c.getContext("webgl") || c.getContext("experimental-webgl"))
+		);
 	} catch (_) {
 		return false;
 	}
@@ -53,10 +65,16 @@ export default {
 	setup(props, { emit }) {
 		const el = ref(null);
 		const noWebgl = ref(!webglAvailable());
-		const shownCount = ref(0), totalCount = ref(0);
-		let ForceGraph3D = null, graph = null, ro = null, io = null;
-		let hoverNode = null, adj = {};
-		const hlNodes = new Set(), hlLinks = new Set();
+		const shownCount = ref(0),
+			totalCount = ref(0);
+		let ForceGraph3D = null,
+			graph = null,
+			ro = null,
+			io = null;
+		let hoverNode = null,
+			adj = {};
+		const hlNodes = new Set(),
+			hlLinks = new Set();
 
 		async function libs() {
 			if (!ForceGraph3D) ForceGraph3D = (await import("3d-force-graph")).default;
@@ -64,30 +82,51 @@ export default {
 
 		function build() {
 			const d = props.data || { nodes: [], edges: [] };
-			const ids = new Set(), all = [];
+			const ids = new Set(),
+				all = [];
 			for (const n of d.nodes || []) {
 				if (!n || !n.id || ids.has(n.id)) continue;
 				ids.add(n.id);
-				const s = nodeStyle(n, props.metrics[n.id] || {}, { mode: props.mode, dark: props.dark });
-				all.push({ id: n.id, _node: n, __size: s.size || 6, __color: s.color, __label: s.label });
+				const s = nodeStyle(n, props.metrics[n.id] || {}, {
+					mode: props.mode,
+					dark: props.dark,
+				});
+				all.push({
+					id: n.id,
+					_node: n,
+					__size: s.size || 6,
+					__color: s.color,
+					__label: s.label,
+				});
 			}
 			totalCount.value = all.length;
 			// Node-cap (R4): keep the biggest/most-connected nodes when over budget.
 			let nodes = all;
 			if (all.length > props.maxNodes) {
-				nodes = all.slice().sort((a, b) => b.__size - a.__size).slice(0, props.maxNodes);
+				nodes = all
+					.slice()
+					.sort((a, b) => b.__size - a.__size)
+					.slice(0, props.maxNodes);
 			}
 			shownCount.value = nodes.length;
 			const keep = new Set(nodes.map((n) => n.id));
-			const seen = new Set(), links = [];
+			const seen = new Set(),
+				links = [];
 			adj = {};
 			for (const e of d.edges || []) {
-				if (!e || !keep.has(e.source) || !keep.has(e.target) || e.source === e.target) continue;
-				const key = e.source < e.target ? `${e.source}|${e.target}` : `${e.target}|${e.source}`;
+				if (!e || !keep.has(e.source) || !keep.has(e.target) || e.source === e.target)
+					continue;
+				const key =
+					e.source < e.target ? `${e.source}|${e.target}` : `${e.target}|${e.source}`;
 				if (seen.has(key)) continue;
 				seen.add(key);
 				const st = edgeStyle(e, { dark: props.dark });
-				links.push({ source: e.source, target: e.target, __color: st.color, __width: st.size || 1 });
+				links.push({
+					source: e.source,
+					target: e.target,
+					__color: st.color,
+					__width: st.size || 1,
+				});
 				(adj[e.source] = adj[e.source] || new Set()).add(e.target);
 				(adj[e.target] = adj[e.target] || new Set()).add(e.source);
 			}
@@ -98,7 +137,8 @@ export default {
 		const dimLink = () => (props.dark ? "#20242b" : "#f0f1f3");
 		const nodeColor = (n) => (!hoverNode || hlNodes.has(n.id) ? n.__color : dimNode());
 		const linkColor = (l) => (!hoverNode || hlLinks.has(l) ? l.__color : dimLink());
-		const linkWidth = (l) => (hoverNode && hlLinks.has(l) ? (l.__width || 1) * 2 : (l.__width || 1));
+		const linkWidth = (l) =>
+			hoverNode && hlLinks.has(l) ? (l.__width || 1) * 2 : l.__width || 1;
 
 		function highlight(node) {
 			hoverNode = node || null;
@@ -106,7 +146,7 @@ export default {
 			hlLinks.clear();
 			if (node && graph) {
 				hlNodes.add(node.id);
-				for (const nb of (adj[node.id] || [])) hlNodes.add(nb);
+				for (const nb of adj[node.id] || []) hlNodes.add(nb);
 				for (const l of graph.graphData().links) {
 					const s = typeof l.source === "object" ? l.source.id : l.source;
 					const t = typeof l.target === "object" ? l.target.id : l.target;
@@ -163,7 +203,13 @@ export default {
 		}
 
 		onMounted(render);
-		watch(() => [props.data, props.mode, props.dark], () => { hoverNode = null; render(); });
+		watch(
+			() => [props.data, props.mode, props.dark],
+			() => {
+				hoverNode = null;
+				render();
+			}
+		);
 		onBeforeUnmount(() => {
 			if (ro) ro.disconnect();
 			if (io) io.disconnect();
@@ -176,11 +222,50 @@ export default {
 </script>
 
 <style scoped>
-.wg3d { position: relative; width: 100%; height: 72vh; min-height: 420px; border: 1px solid var(--border-color, #e2e6ea); border-radius: 8px; overflow: hidden; background: var(--card-bg, transparent); }
-.wg3d-canvas { width: 100%; height: 100%; }
-.wg3d-cap { position: absolute; bottom: 8px; right: 10px; font-size: 11px; color: var(--text-muted, #888); background: var(--card-bg, rgba(255,255,255,0.7)); border: 1px solid var(--border-color, #e2e6ea); border-radius: 10px; padding: 1px 9px; pointer-events: none; }
-.wg3d-fallback { display: flex; align-items: center; justify-content: center; height: 100%; padding: 24px; }
-.wg3d-fallback-inner { text-align: center; max-width: 360px; }
-.wg3d-fallback-icon { font-size: 40px; opacity: 0.4; margin-bottom: 8px; }
-.wg3d-fallback p { margin: 4px 0; font-size: 13px; }
+.wg3d {
+	position: relative;
+	width: 100%;
+	height: 72vh;
+	min-height: 420px;
+	border: 1px solid var(--border-color, #e2e6ea);
+	border-radius: 8px;
+	overflow: hidden;
+	background: var(--card-bg, transparent);
+}
+.wg3d-canvas {
+	width: 100%;
+	height: 100%;
+}
+.wg3d-cap {
+	position: absolute;
+	bottom: 8px;
+	right: 10px;
+	font-size: 11px;
+	color: var(--text-muted, #888);
+	background: var(--card-bg, rgba(255, 255, 255, 0.7));
+	border: 1px solid var(--border-color, #e2e6ea);
+	border-radius: 10px;
+	padding: 1px 9px;
+	pointer-events: none;
+}
+.wg3d-fallback {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 100%;
+	padding: 24px;
+}
+.wg3d-fallback-inner {
+	text-align: center;
+	max-width: 360px;
+}
+.wg3d-fallback-icon {
+	font-size: 40px;
+	opacity: 0.4;
+	margin-bottom: 8px;
+}
+.wg3d-fallback p {
+	margin: 4px 0;
+	font-size: 13px;
+}
 </style>

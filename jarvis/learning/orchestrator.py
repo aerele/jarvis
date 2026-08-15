@@ -3,9 +3,8 @@
 ``tick()`` is the app-static cron entry (per-site cron rows are impossible;
 they are reset on migrate). It is intentionally cheap and self-enforcing:
 
-1. Bail on the site_config kill switch, self-host, the disabled flag, an
-   un-onboarded account, or a time outside the analysis window (wrap-aware,
-   site-tz).
+1. Bail on the site_config kill switch, the disabled flag, an un-onboarded
+   account, or a time outside the analysis window (wrap-aware, site-tz).
 2. Stale-run watch: a Running run whose heartbeat predates the current
    window (or is >20 min old), and a Queued run that never got a worker
    (queued >20 min), are marked Failed with a coverage note. This is the
@@ -49,7 +48,7 @@ WORKER_TIMEOUT_S = 1500
 WINDOW_SAFETY_MARGIN_MIN = 5
 
 # Stale thresholds for the recovery watch.
-STALE_RUN_MINUTES = 20   # Running with no heartbeat this long -> Failed
+STALE_RUN_MINUTES = 20  # Running with no heartbeat this long -> Failed
 QUEUE_STALE_MINUTES = 20  # Queued with no worker this long -> Failed (no worker time)
 
 _OPEN_STATUSES = ("Queued", "Running", "Paused")
@@ -63,15 +62,6 @@ def tick() -> None:
 	for this site. Runs as Administrator (the scheduler user), default queue."""
 	if frappe.conf.get("jarvis_pattern_learning_disabled"):
 		return
-	try:
-		from jarvis.selfhost import is_self_hosted
-
-		if is_self_hosted():
-			return
-	except Exception:
-		# selfhost probe failure must never let the feature run on self-host;
-		# but a genuinely-missing module on managed benches should not block.
-		pass
 	if not _feature_enabled():
 		return
 	if not _is_onboarded():
@@ -135,18 +125,11 @@ def _schedule_in_window(now, window_start, window_end) -> None:
 def run_now(requested_by: str) -> dict:
 	"""Create a manual ``Jarvis Pattern Run`` and enqueue the engine. Manual
 	runs BYPASS the window (plan section 5.2, trigger-aware) but keep the row
-	budget + statement timeouts. Refuses on self-host or when disabled.
+	budget + statement timeouts. Refuses when disabled.
 
 	Returns ``{"ok": bool, "run": <name>|None, "reason": <str>|None}``."""
 	if frappe.conf.get("jarvis_pattern_learning_disabled"):
 		return {"ok": False, "run": None, "reason": "pattern learning is disabled for this site"}
-	try:
-		from jarvis.selfhost import is_self_hosted
-
-		if is_self_hosted():
-			return {"ok": False, "run": None, "reason": "pattern learning is not available on self-hosted benches"}
-	except Exception:
-		pass
 	if not _feature_enabled():
 		return {"ok": False, "run": None, "reason": "pattern learning is not enabled"}
 
@@ -160,15 +143,17 @@ def run_now(requested_by: str) -> dict:
 
 	window_start = _settings_value("pattern_window_start")
 	window_end = _settings_value("pattern_window_end")
-	run = frappe.get_doc({
-		"doctype": RUN,
-		"status": "Queued",
-		"trigger": "manual",
-		"requested_by": requested_by,
-		"window_start_used": window_start,
-		"window_end_used": window_end,
-		"scan_mode": "full",
-	})
+	run = frappe.get_doc(
+		{
+			"doctype": RUN,
+			"status": "Queued",
+			"trigger": "manual",
+			"requested_by": requested_by,
+			"window_start_used": window_start,
+			"window_end_used": window_end,
+			"scan_mode": "full",
+		}
+	)
 	run.flags.ignore_permissions = True
 	run.insert()
 
@@ -189,14 +174,16 @@ def run_now(requested_by: str) -> dict:
 # run creation / resume
 # --------------------------------------------------------------------------- #
 def _create_and_enqueue_run(now, window_start, window_end) -> str:
-	run = frappe.get_doc({
-		"doctype": RUN,
-		"status": "Queued",
-		"trigger": "scheduled",
-		"window_start_used": window_start,
-		"window_end_used": window_end,
-		"scan_mode": "full",
-	})
+	run = frappe.get_doc(
+		{
+			"doctype": RUN,
+			"status": "Queued",
+			"trigger": "scheduled",
+			"window_start_used": window_start,
+			"window_end_used": window_end,
+			"scan_mode": "full",
+		}
+	)
 	run.flags.ignore_permissions = True
 	run.insert()
 
@@ -327,7 +314,9 @@ def in_window(window_start, window_end, now) -> bool:
 	return now_s >= start_s or now_s < end_s
 
 
-def should_pause_for_window(window_start, window_end, now, margin_min: int = WINDOW_SAFETY_MARGIN_MIN) -> bool:
+def should_pause_for_window(
+	window_start, window_end, now, margin_min: int = WINDOW_SAFETY_MARGIN_MIN
+) -> bool:
 	"""Engine per-unit check: stop when out of window OR within ``margin_min``
 	of window end, so a unit's writes never straddle the boundary."""
 	if not in_window(window_start, window_end, now):

@@ -277,7 +277,11 @@ class TestSiteProfileRender(unittest.TestCase):
 			],
 			"core_customizations": [],
 			"workflows": [
-				{"name": "Vehicle Approval", "doctype": "Vehicle Log", "states": ["Draft", "Verified", "Approved"]},
+				{
+					"name": "Vehicle Approval",
+					"doctype": "Vehicle Log",
+					"states": ["Draft", "Verified", "Approved"],
+				},
 			],
 			"reports": [],
 			"print_formats": [],
@@ -293,7 +297,13 @@ class TestSiteProfileRender(unittest.TestCase):
 			"apps": ["fleet_mgmt"],
 			"modules": {"Fleet": "fleet_mgmt"},
 			"custom_doctypes": [
-				{"name": "Ledger Tweak", "module": "Accounts", "istable": 0, "issingle": 0, "is_submittable": 0},
+				{
+					"name": "Ledger Tweak",
+					"module": "Accounts",
+					"istable": 0,
+					"issingle": 0,
+					"is_submittable": 0,
+				},
 			],
 			"core_customizations": [],
 			"workflows": [],

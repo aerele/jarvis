@@ -65,12 +65,16 @@ def _ensure_user(email: str) -> str:
 
 	ensure_jarvis_user_role()
 	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email,
-			"first_name": email.split("@")[0],
-			"send_welcome_email": 0, "enabled": 1,
-			"user_type": "System User",
-		})
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": email.split("@")[0],
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "System User",
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert()
 		frappe.db.commit()
@@ -131,19 +135,39 @@ def _mk_conv(owner, title, status="Active") -> str:
 
 
 def _add_msg(conv, seq, role, content, streaming=0, recovering=0, error="") -> None:
-	frappe.get_doc({
-		"doctype": MSG, "conversation": conv, "seq": seq, "role": role,
-		"content": content, "streaming": streaming, "recovering": recovering, "error": error,
-	}).insert(ignore_permissions=True)
+	frappe.get_doc(
+		{
+			"doctype": MSG,
+			"conversation": conv,
+			"seq": seq,
+			"role": role,
+			"content": content,
+			"streaming": streaming,
+			"recovering": recovering,
+			"error": error,
+		}
+	).insert(ignore_permissions=True)
 	frappe.db.commit()
 
 
-def _mk_approval(owner, title, status="Pending", conversation=None, source=None,
-				 question="q?", options='["Approve","Reject"]', decision=None) -> str:
+def _mk_approval(
+	owner,
+	title,
+	status="Pending",
+	conversation=None,
+	source=None,
+	question="q?",
+	options='["Approve","Reject"]',
+	decision=None,
+) -> str:
 	with _as(owner):
 		d = {
-			"doctype": APPROVAL, "title": title, "status": status,
-			"conversation": conversation, "question": question, "options": options,
+			"doctype": APPROVAL,
+			"title": title,
+			"status": status,
+			"conversation": conversation,
+			"question": question,
+			"options": options,
 		}
 		if source is not None:
 			d["source"] = source
@@ -162,11 +186,16 @@ def _mk_approval(owner, title, status="Pending", conversation=None, source=None,
 
 def _attach_file(conv: str, owner: str, file_name="ca-attach.txt") -> str:
 	with _as(owner):
-		f = frappe.get_doc({
-			"doctype": "File", "file_name": file_name,
-			"attached_to_doctype": CONV, "attached_to_name": conv,
-			"is_private": 1, "content": "hello world",
-		})
+		f = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": file_name,
+				"attached_to_doctype": CONV,
+				"attached_to_name": conv,
+				"is_private": 1,
+				"content": "hello world",
+			}
+		)
 		f.flags.ignore_permissions = True
 		f.insert(ignore_permissions=True)
 	frappe.db.commit()
@@ -213,13 +242,17 @@ class TestParseAsk(unittest.TestCase):
 		self.assertEqual(parse_ask("```jarvis-ask {}```"), [])
 
 	def test_normalization_mirrors_client(self):
-		qs = parse_ask(_fence([
-			{"q": "ok to proceed?", "type": "boolean"},          # boolean -> yesno
-			{"q": "pick one", "type": "bogus", "options": ["x"]},  # unknown -> single
-			{"q": "no options, not a field type", "type": "multi"},  # dropped
-			{"question": "alt key works?", "type": "text"},      # question alias
-			{"type": "single", "options": ["y"]},                # empty q dropped
-		]))
+		qs = parse_ask(
+			_fence(
+				[
+					{"q": "ok to proceed?", "type": "boolean"},  # boolean -> yesno
+					{"q": "pick one", "type": "bogus", "options": ["x"]},  # unknown -> single
+					{"q": "no options, not a field type", "type": "multi"},  # dropped
+					{"question": "alt key works?", "type": "text"},  # question alias
+					{"type": "single", "options": ["y"]},  # empty q dropped
+				]
+			)
+		)
 		self.assertEqual(
 			[(q["q"], q["type"]) for q in qs],
 			[("ok to proceed?", "yesno"), ("pick one", "single"), ("alt key works?", "text")],
@@ -260,7 +293,8 @@ class TestMaterialize(unittest.TestCase):
 
 	def _rows(self):
 		return frappe.get_all(
-			APPROVAL, filters={"conversation": self.conv},
+			APPROVAL,
+			filters={"conversation": self.conv},
 			fields=["name", "title", "status", "source", "question", "options", "owner"],
 		)
 
@@ -367,9 +401,7 @@ class TestResolveOnUserMessage(unittest.TestCase):
 		# other conversation untouched
 		self.assertEqual(st(self.other_pending).status, "Pending")
 		# audit stamps
-		row = frappe.db.get_value(
-			APPROVAL, self.chat_pending, ["decided_by", "decided_at"], as_dict=True
-		)
+		row = frappe.db.get_value(APPROVAL, self.chat_pending, ["decided_by", "decided_at"], as_dict=True)
 		self.assertEqual(row.decided_by, USER_A)
 		self.assertTrue(row.decided_at)
 
@@ -397,9 +429,7 @@ class TestDecideChatSource(unittest.TestCase):
 
 	def test_chat_row_resumes_without_reattach(self):
 		ap = _mk_approval(USER_A, "ca-appr-dec-chat", "Pending", self.conv, source="Chat")
-		with _as(USER_A), patch(
-			"jarvis.chat.api.send_message", return_value={"ok": True}
-		) as sm:
+		with _as(USER_A), patch("jarvis.chat.api.send_message", return_value={"ok": True}) as sm:
 			res = decide(ap, "Acme", 1)
 		self.assertTrue(res["ok"])
 		self.assertTrue(res["resumed"])
@@ -413,9 +443,7 @@ class TestDecideChatSource(unittest.TestCase):
 	def test_filebox_row_still_reattaches(self):
 		# source NULL (pre-field row) = File Box: the re-attach must survive.
 		ap = _mk_approval(USER_A, "ca-appr-dec-fb", "Pending", self.conv, source=None)
-		with _as(USER_A), patch(
-			"jarvis.chat.api.send_message", return_value={"ok": True}
-		) as sm:
+		with _as(USER_A), patch("jarvis.chat.api.send_message", return_value={"ok": True}) as sm:
 			decide(ap, "Approve as drafted", 1)
 		sm.assert_called_once()
 		attachments = sm.call_args.kwargs["attachments"]
@@ -496,7 +524,11 @@ class TestApprovalsPageExtensions(unittest.TestCase):
 		self.pending_fb = _mk_approval(USER_A, "ca-page-fb", "Pending", self.conv, source=None)
 		self.pending_chat = _mk_approval(USER_A, "ca-page-chat", "Pending", self.conv, source="Chat")
 		self.answered = _mk_approval(
-			USER_A, "ca-page-ans", "Answered", self.conv, source="Chat",
+			USER_A,
+			"ca-page-ans",
+			"Answered",
+			self.conv,
+			source="Chat",
 			decision="(answered in chat)",
 		)
 
@@ -591,18 +623,14 @@ class TestAwaitingReply(unittest.TestCase):
 		convs = {r["conversation"] for r in lane}
 		self.assertEqual(convs, {self.conv_q, self.conv_fence})
 		for r in lane:
-			self.assertEqual(
-				set(r.keys()), {"conversation", "title", "question_excerpt", "last_at"}
-			)
+			self.assertEqual(set(r.keys()), {"conversation", "title", "question_excerpt", "last_at"})
 			self.assertTrue(r["title"].startswith("ca-conv-await"))
 			self.assertLessEqual(len(r["question_excerpt"]), 140)
 			self.assertTrue(r["last_at"])
 		# the shallow opener greeting is NOT surfaced (the flood we prevent)
 		self.assertNotIn(self.conv_greet, convs)
 		by_conv = {r["conversation"]: r for r in lane}
-		self.assertTrue(
-			by_conv[self.conv_q]["question_excerpt"].endswith("Should I submit the invoice now?")
-		)
+		self.assertTrue(by_conv[self.conv_q]["question_excerpt"].endswith("Should I submit the invoice now?"))
 		# newest first: conv_greet was seeded last but excluded, so conv_fence
 		# (seeded after conv_q) leads
 		self.assertEqual(lane[0]["conversation"], self.conv_fence)

@@ -109,9 +109,7 @@ class TestCancelDocHappyPath(FrappeTestCase):
 		"""on_cancel hooks may reject - e.g. invoice partly paid → can't
 		cancel without first reversing payment. Let the real reason surface."""
 		doc = _fake_doc(docstatus=1)
-		doc.cancel.side_effect = frappe.ValidationError(
-			"Cannot cancel: payment of ₹50,000 has been applied"
-		)
+		doc.cancel.side_effect = frappe.ValidationError("Cannot cancel: payment of ₹50,000 has been applied")
 		with patch("frappe.get_meta", return_value=_fake_meta()):
 			with patch("frappe.has_permission", return_value=True):
 				with patch("frappe.get_doc", return_value=doc):

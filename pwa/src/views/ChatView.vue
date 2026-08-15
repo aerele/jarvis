@@ -1,91 +1,143 @@
 <script setup>
-import { computed, defineAsyncComponent, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue"
-import BrandMark from "../components/BrandMark.vue"
-import { useRouter } from "vue-router"
+import {
+	computed,
+	defineAsyncComponent,
+	inject,
+	nextTick,
+	onMounted,
+	onUnmounted,
+	ref,
+	watch,
+} from "vue";
+import BrandMark from "../components/BrandMark.vue";
+import { agentName } from "@/branding";
+import { useRouter } from "vue-router";
 // The desktop SPA's renderer — dependency-free, and sharing it means an agent
 // reply reads identically on both surfaces.
-import { renderMarkdown } from "@shared/markdown.js"
-import * as api from "../api"
-import { store } from "../store"
-import { parseAction, parseCards, parseCharts, parseSkillsUsed, stripAgentBlocks, toolStatus } from "../lib/blocks"
-import { spanBetween } from "../lib/time"
-import ActionCard from "../components/ActionCard.vue"
-import ChartCard from "../components/ChartCard.vue"
-import Composer from "../components/Composer.vue"
-import DecisionCard from "../components/DecisionCard.vue"
-import DecisionSheet from "../components/DecisionSheet.vue"
-import FilePreviewSheet from "../components/FilePreviewSheet.vue"
-import MessageMedia from "../components/MessageMedia.vue"
-import RecordCards from "../components/RecordCards.vue"
-import Sheet from "../components/Sheet.vue"
-import SkillChips from "../components/SkillChips.vue"
-import ThinkingIndicator from "../components/ThinkingIndicator.vue"
+import { renderMarkdown } from "@shared/markdown.js";
+import { admitEvent } from "@jsshared/pump_fence.mjs";
+import { eventFence } from "../lib/pump_fence_state.js";
+import * as api from "../api";
+import { store } from "../store";
+import {
+	countDiagrams,
+	parseAction,
+	parseCards,
+	parseCharts,
+	parseSkillsUsed,
+	stripAgentBlocks,
+	toolStatus,
+} from "../lib/blocks";
+import { spanBetween } from "../lib/time";
+import { sortPendingCards } from "../lib/sortPendingCards.js";
+import ActionCard from "../components/ActionCard.vue";
+import ChartCard from "../components/ChartCard.vue";
+import Composer from "../components/Composer.vue";
+import DecisionCard from "../components/DecisionCard.vue";
+import DecisionSheet from "../components/DecisionSheet.vue";
+import FilePreviewSheet from "../components/FilePreviewSheet.vue";
+import MessageMedia from "../components/MessageMedia.vue";
+import RecordCards from "../components/RecordCards.vue";
+import Sheet from "../components/Sheet.vue";
+import SkillChips from "../components/SkillChips.vue";
+import ThinkingIndicator from "../components/ThinkingIndicator.vue";
 // Lazy: the voice sheet pulls in the shared audio recorder, and a user who never
 // taps the mic should never pay for it.
-const VoiceSheet = defineAsyncComponent(() => import("../components/VoiceSheet.vue"))
+const VoiceSheet = defineAsyncComponent(() => import("../components/VoiceSheet.vue"));
 
-const props = defineProps({ id: { type: String, default: "" } })
-const router = useRouter()
-const socket = inject("$socket")
+const props = defineProps({ id: { type: String, default: "" } });
+const router = useRouter();
+const socket = inject("$socket");
 
 // "new" is a route-only placeholder: the conversation does not exist until the
 // first send, which is when the backend creates (or focuses) it and tells us
 // its real id.
-const convId = ref(props.id === "new" ? "" : props.id)
-const conversation = ref(null)
-const messages = ref([])
-const input = ref("")
-const loading = ref(false)
-const sendBusy = ref(false)
-const errorBanner = ref("")
-const attachments = ref([])
-const pending = ref([]) // parked writes awaiting approval
-const settings = ref(null)
+const convId = ref(props.id === "new" ? "" : props.id);
+const conversation = ref(null);
+// Deep link to this thread in the desktop web chat (outside the PWA's
+// /jarvis-mobile scope), where the SPA draws diagrams the PWA can't.
+const webChatUrl = computed(() =>
+	convId.value ? `/jarvis/c/${encodeURIComponent(convId.value)}` : "/jarvis/"
+);
+const messages = ref([]);
+const input = ref("");
+const loading = ref(false);
+const sendBusy = ref(false);
+const errorBanner = ref("");
+const attachments = ref([]);
+const pending = ref([]); // parked writes awaiting approval
+// Ordered the SAME way the server orders the parked list, because a typed
+// "confirm 2" selects by the number shown on the card. The store keeps tokens in
+// a Redis SET, which has no order at all, so without this the numbers on screen
+// and the numbers the server counts could disagree and the wrong write would run.
+// Tokens compare by code unit to match Python's byte order, not localeCompare.
+// Ordered by the shared, unit-tested comparator so the numbers on screen match
+// the server's (expires_at, token) order a typed "confirm N" resolves against.
+const orderedPending = computed(() => sortPendingCards(pending.value));
+// Typed approval works here as on the desktop, but only the desktop advertised
+// it. The selective example numbers track the real count so it never overshoots.
+const typedApprovalHint = computed(() => {
+	const n = orderedPending.value.length;
+	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
+});
+const settings = ref(null);
 
 // The turn in flight. Held separately from `messages` because it is not durable
 // yet: the row exists server-side but its content arrives as a stream.
-const live = ref(null) // { runId, messageId, text, tools[] }
+const live = ref(null); // { runId, messageId, text, tools[] }
 // Stop is a UI-level cancel too — the backend may still finish the turn, so
 // ignore what comes back rather than letting a "stopped" reply reappear.
-const ignoredRuns = ref(new Set())
+const ignoredRuns = ref(new Set());
+// JF-018: the Relay-Pump epoch/seq watermark lives in a MODULE-scope singleton
+// (see ../lib/pump_fence_state.js for why): this component is route-mounted and
+// unmounts on /business, /files or /, so a component-scope fence would be wiped
+// on every route away and readmit the stale frames it exists to drop. The
+// singleton is what actually delivers "the terminal marker outlives the view".
 
-const decision = ref(null)
-const preview = ref(null)
-const voiceOpen = ref(false)
-const menuOpen = ref(false)
-const renaming = ref(false)
-const renameText = ref("")
-const menuError = ref("")
-const starred = ref(false)
-const autoApply = ref(false)
+const decision = ref(null);
+const preview = ref(null);
+const voiceOpen = ref(false);
+const menuOpen = ref(false);
+const renaming = ref(false);
+const renameText = ref("");
+const menuError = ref("");
+const starred = ref(false);
+const autoApply = ref(false);
 
-const scroller = ref(null)
-const composer = ref(null)
+const scroller = ref(null);
+const composer = ref(null);
 // An action card is a live offer, not history: only the newest assistant turn
 // may still be applied. Scrolling back to last week's proposal and tapping
 // Create would write a record the user has long since moved on from.
-const dismissedActions = ref(new Set())
+const dismissedActions = ref(new Set());
 
-const sending = computed(() => !!live.value || sendBusy.value)
+const sending = computed(() => !!live.value || sendBusy.value);
 const title = computed(
-	() => conversation.value?.title || store.conversations.find((c) => c.name === convId.value)?.title || "New chat",
-)
-const model = computed(() => conversation.value?.model_override || settings.value?.llm_model || "")
-const micEnabled = computed(() => !!settings.value?.stt_enabled)
+	() =>
+		conversation.value?.title ||
+		store.conversations.find((c) => c.name === convId.value)?.title ||
+		"New chat"
+);
+const model = computed(
+	() => conversation.value?.model_override || settings.value?.llm_model || ""
+);
+const micEnabled = computed(() => !!settings.value?.stt_enabled);
 
 // Everything the agent's raw text carries, unpacked once per message. Done here
 // rather than in the template: the template would re-run it on every render, and
 // markdown + JSON parsing per message per frame is exactly how a chat thread
 // starts dropping frames as it grows.
 const view = (m) => {
-	const content = m.content || ""
-	const html = renderMarkdown(stripAgentBlocks(content))
-	const cards = parseCards(content)
-	const charts = parseCharts(content)
+	const content = m.content || "";
+	const html = renderMarkdown(stripAgentBlocks(content));
+	const cards = parseCards(content);
+	const charts = parseCharts(content);
 	return {
 		html,
 		cards,
 		charts,
+		// Mermaid diagrams can't be drawn here; surface a chip to the web chat.
+		diagrams: countDiagrams(content),
 		action: parseAction(content),
 		skills: parseSkillsUsed(content),
 		took: spanBetween(m.creation, m.modified),
@@ -93,10 +145,21 @@ const view = (m) => {
 		// call and writes an empty assistant row. With no prose, no cards, no
 		// canvas and no error text, the thread would render a blank gap and the
 		// user would be left wondering whether anything happened at all.
+		// A stop is not a failure: excluded here so a stopped-before-stream turn
+		// (content == "") never lands in the "Jarvis didn't return a reply" error
+		// branch, telling the user it failed when they are the one who stopped it.
+		// The marker itself renders from a SIBLING gated on `stopped`, outside
+		// this chain - the exclusion alone would leave a blank gap.
 		empty:
-			!html && !cards && !charts.length && !parseAction(content) && !m.error && !(m.canvas || []).length,
-	}
-}
+			!html &&
+			!cards &&
+			!charts.length &&
+			!parseAction(content) &&
+			!m.error &&
+			!(m.canvas || []).length &&
+			!m.stopped,
+	};
+};
 
 // ── thread assembly ─────────────────────────────────────────────────────────
 // Tool rows BELONG to the assistant turn that ran them. The worker creates the
@@ -109,88 +172,109 @@ const view = (m) => {
 // Each turn therefore renders as ONE card, not one bubble per call — a wall of
 // "get_list → completed" is not an answer.
 const items = computed(() => {
-	const out = []
-	let current = null // the assistant item tool rows attach to
+	const out = [];
+	let current = null; // the assistant item tool rows attach to
 	for (const m of messages.value) {
 		// The streaming row renders from `live`, not from its (empty) stored copy.
-		if (live.value && (m.name === live.value.messageId || (m.role === "assistant" && m.streaming))) continue
+		if (
+			live.value &&
+			(m.name === live.value.messageId || (m.role === "assistant" && m.streaming))
+		)
+			continue;
 
 		if (m.role === "user") {
-			current = null
-			out.push({ type: "user", key: m.name, msg: m })
+			current = null;
+			out.push({ type: "user", key: m.name, msg: m });
 		} else if (m.role === "tool") {
 			// A tool row with no assistant turn to hang off (a recovered or
 			// truncated thread) still has to appear — never silently drop it.
 			if (!current) {
-				current = { type: "assistant", key: m.name, msg: null, view: null, tools: [] }
-				out.push(current)
+				current = { type: "assistant", key: m.name, msg: null, view: null, tools: [] };
+				out.push(current);
 			}
-			current.tools.push(m)
+			current.tools.push(m);
 		} else {
-			current = { type: "assistant", key: m.name, msg: m, view: view(m), tools: [] }
-			out.push(current)
+			current = { type: "assistant", key: m.name, msg: m, view: view(m), tools: [] };
+			out.push(current);
 		}
 	}
-	return out
-})
+	return out;
+});
 
 const lastAssistantKey = computed(() => {
-	const assistants = items.value.filter((i) => i.type === "assistant" && i.msg)
-	return assistants.length ? assistants[assistants.length - 1].key : ""
-})
+	const assistants = items.value.filter((i) => i.type === "assistant" && i.msg);
+	return assistants.length ? assistants[assistants.length - 1].key : "";
+});
 
 // The write leaves a receipt in the conversation, so reload rather than guess.
 function onActionApplied() {
-	load()
-	store.loadConversations()
+	load();
+	store.loadConversations();
 }
 
 // ── scrolling ───────────────────────────────────────────────────────────────
 function atBottom() {
-	const el = scroller.value
-	if (!el) return true
-	return el.scrollHeight - el.scrollTop - el.clientHeight < 120
+	const el = scroller.value;
+	if (!el) return true;
+	return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
 }
-// Follow the stream only if the user is already at the bottom; yanking them
-// down while they scroll back through a long reply is the classic chat sin.
+// Whether new content should keep the view pinned to the newest text. Sending a
+// message drops this (see send): the reply then grows DOWNWARD from where the
+// turn landed instead of sliding its own opening up past the top of the viewport
+// on every streamed chunk — the "large paragraph slides upward" bug. A real
+// scroll back to the bottom resumes following; a fresh load restores it.
+const follow = ref(true);
+function onScroll() {
+	follow.value = atBottom();
+}
+// Follow the newest text only while `follow` holds (parked at the bottom) AND no
+// reply is streaming (`live`): chasing the bottom mid-stream drags the line you
+// are reading up and off the top, so a long reply never settles enough to read.
+// While streaming the reply grows downward and you scroll at your own pace; a
+// forced scroll (open / send / stop) always lands, and once the turn ends normal
+// follow resumes so late content still keeps a bottom-parked reader pinned.
 async function scrollToBottom(force = false) {
-	const stick = force || atBottom()
-	await nextTick()
-	if (stick && scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+	const stick = force || (follow.value && !live.value);
+	await nextTick();
+	if (stick && scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight;
 }
 
 // ── loading ─────────────────────────────────────────────────────────────────
 async function load(force = false) {
-	if (!convId.value) return
-	loading.value = true
+	if (!convId.value) return;
+	// A fresh open / refresh follows the newest content again (streaming replies
+	// arrive via socket events, never load(), so this never re-pins mid-reply).
+	follow.value = true;
+	loading.value = true;
 	try {
-		const d = await api.getConversation(convId.value)
-		conversation.value = d?.conversation || null
-		messages.value = d?.messages || []
-		autoApply.value = !!d?.conversation?.auto_apply
-		const row = store.conversations.find((c) => c.name === convId.value)
-		if (row) starred.value = !!row.starred
+		const d = await api.getConversation(convId.value);
+		conversation.value = d?.conversation || null;
+		messages.value = d?.messages || [];
+		autoApply.value = !!d?.conversation?.auto_apply;
+		const row = store.conversations.find((c) => c.name === convId.value);
+		if (row) starred.value = !!row.starred;
 		// A reply still streaming when we (re)opened the chat: restore the busy
 		// state from the durable flag rather than assuming the turn is over.
-		const last = messages.value[messages.value.length - 1]
+		const last = messages.value[messages.value.length - 1];
 		if (last?.role === "assistant" && last.streaming && !live.value) {
-			live.value = { runId: "", messageId: last.name, text: last.content || "", tools: [] }
+			live.value = { runId: "", messageId: last.name, text: last.content || "", tools: [] };
 		}
-		await scrollToBottom(force)
+		await scrollToBottom(force);
 	} catch (e) {
-		console.error("Jarvis PWA: failed to load conversation", e)
+		console.error("Jarvis PWA: failed to load conversation", e);
 	} finally {
-		loading.value = false
+		loading.value = false;
 	}
 }
 
 // Parked writes survive a reload: re-ask rather than leaving an approval the
 // user can never reach.
 async function loadPending() {
-	if (!convId.value) return
+	if (!convId.value) return;
 	try {
-		const r = await api.listPendingConfirmations(convId.value)
-		if (r?.ok && r.data) pending.value = r.data.pending.filter((p) => p.conversation === convId.value)
+		const r = await api.listPendingConfirmations(convId.value);
+		if (r?.ok && r.data)
+			pending.value = r.data.pending.filter((p) => p.conversation === convId.value);
 	} catch {
 		/* the cards also arrive live; a failed resync is not worth a banner */
 	}
@@ -198,18 +282,26 @@ async function loadPending() {
 
 // ── sending ─────────────────────────────────────────────────────────────────
 async function send() {
-	const text = input.value.trim()
-	const ready = attachments.value.filter((a) => a.file_url)
-	if ((!text && !ready.length) || sending.value) return
+	const text = input.value.trim();
+	const ready = attachments.value.filter((a) => a.file_url);
+	if ((!text && !ready.length) || sending.value) return;
 
-	errorBanner.value = ""
-	input.value = ""
-	composer.value?.reset()
-	attachments.value = []
-	sendBusy.value = true
+	errorBanner.value = "";
+	input.value = "";
+	composer.value?.reset();
+	attachments.value = [];
+	sendBusy.value = true;
 	// Optimistic user bubble; the server echoes it back on the next load.
-	messages.value.push({ name: `local-${Date.now()}`, role: "user", content: text, optimistic: true })
-	await scrollToBottom(true)
+	messages.value.push({
+		name: `local-${Date.now()}`,
+		role: "user",
+		content: text,
+		optimistic: true,
+	});
+	await scrollToBottom(true);
+	// Land on the new turn, then stop following so the reply grows downward
+	// instead of dragging the view up as it streams (see `follow`).
+	follow.value = false;
 
 	try {
 		// No model/effort override here: an existing chat keeps whatever it was
@@ -218,46 +310,72 @@ async function send() {
 		// screen — same rule as the native app.
 		const res = await api.sendMessage(convId.value, text, {
 			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
-		})
+			// Numbers a typed approval selects by must resolve against the cards on
+			// screen, in this order, not a list the server re-fetches at send time.
+			approvalTokens: orderedPending.value.map((p) => p.token),
+		});
+		// The server read this as a go-ahead on the parked card and ran the
+		// confirmation instead of starting a turn, so no run events are coming and
+		// nothing was persisted for the typed words. Take the spinner down here or
+		// it waits forever, and drop the optimistic echo of a message that does not
+		// exist. The receipt chip in the reloaded thread is what the user sees.
+		if (res?.confirmed) {
+			sendBusy.value = false;
+			messages.value = messages.value.filter((m) => !m.optimistic);
+			if (res.ok === false)
+				errorBanner.value =
+					res.error?.message ||
+					"That confirmation is no longer valid. Ask again to retry it.";
+			await load(true);
+			await loadPending();
+			return;
+		}
 		if (res?.ok === false) {
-			sendBusy.value = false
-			errorBanner.value = res.reason || "Couldn't send that message."
-			messages.value = messages.value.filter((m) => !m.optimistic)
-			return
+			sendBusy.value = false;
+			messages.value = messages.value.filter((m) => !m.optimistic);
+			// A rollout started under this tab; the gate only latches at boot, so
+			// reload onto it instead of leaving them retrying.
+			if (res.reason === "release_update_required") {
+				errorBanner.value = "Jarvis is being updated. Reloading…";
+				setTimeout(() => window.location.reload(), 1500);
+				return;
+			}
+			errorBanner.value = res.reason || "Couldn't send that message.";
+			return;
 		}
 		// First send of a brand-new chat: adopt the id the backend just created,
 		// and put the row in the list without a refetch.
-		const id = res?.conversation_id
+		const id = res?.conversation_id;
 		if (id && id !== convId.value) {
-			convId.value = id
-			router.replace(`/c/${id}`)
-			store.loadConversations()
+			convId.value = id;
+			router.replace(`/c/${id}`);
+			store.loadConversations();
 		}
 	} catch (e) {
-		sendBusy.value = false
-		errorBanner.value = "That didn't reach Jarvis. Check your connection and try again."
-		messages.value = messages.value.filter((m) => !m.optimistic)
+		sendBusy.value = false;
+		errorBanner.value = `That didn't reach ${agentName}. Check your connection and try again.`;
+		messages.value = messages.value.filter((m) => !m.optimistic);
 	}
 }
 
 async function stop() {
-	const runId = live.value?.runId || ""
+	const runId = live.value?.runId || "";
 	// Ignore anything still arriving for this run: the backend may well finish
 	// the turn anyway, and a reply the user stopped must not reappear.
-	if (runId) ignoredRuns.value.add(runId)
-	live.value = null
-	sendBusy.value = false
+	if (runId) ignoredRuns.value.add(runId);
+	live.value = null;
+	sendBusy.value = false;
 	try {
-		await api.stopRun(convId.value, runId)
+		await api.stopRun(convId.value, runId);
 	} catch {
 		// Best-effort: the UI stop stands even if the turn finishes server-side.
 	}
-	load()
+	load();
 }
 
 // ── attachments ─────────────────────────────────────────────────────────────
 async function attach(files) {
-	errorBanner.value = ""
+	errorBanner.value = "";
 	const staged = files.map((f, i) => ({
 		key: `att-${Date.now()}-${i}`,
 		name: f.name,
@@ -265,72 +383,85 @@ async function attach(files) {
 		// Local thumbnail while it uploads — a picked photo should appear instantly.
 		preview: f.type.startsWith("image/") ? URL.createObjectURL(f) : "",
 		uploading: true,
-	}))
-	attachments.value.push(...staged)
+	}));
+	attachments.value.push(...staged);
 
 	await Promise.all(
 		staged.map(async (a) => {
 			try {
-				const up = await api.uploadFile(a.file)
-				const row = attachments.value.find((x) => x.key === a.key)
+				const up = await api.uploadFile(a.file);
+				const row = attachments.value.find((x) => x.key === a.key);
 				if (row) {
-					row.file_url = up.file_url
-					row.uploading = false
+					row.file_url = up.file_url;
+					row.uploading = false;
 				}
 			} catch (e) {
-				removeAttachment(a.key)
-				errorBanner.value = e?.message || `Couldn't upload ${a.name}.`
+				removeAttachment(a.key);
+				errorBanner.value = e?.message || `Couldn't upload ${a.name}.`;
 			}
-		}),
-	)
+		})
+	);
 }
 
 function removeAttachment(key) {
-	const row = attachments.value.find((a) => a.key === key)
-	if (row?.preview) URL.revokeObjectURL(row.preview)
-	attachments.value = attachments.value.filter((a) => a.key !== key)
+	const row = attachments.value.find((a) => a.key === key);
+	if (row?.preview) URL.revokeObjectURL(row.preview);
+	attachments.value = attachments.value.filter((a) => a.key !== key);
+}
+
+// Preview a pending (not-yet-sent) attachment the user taps in the composer.
+// Reuses the same bottom sheet as sent-message media; a synthesized canvas-like
+// item lets previewKind route by the file_url extension. messageName is empty
+// (no message exists yet) - only the html/svg CanvasFrame path needs one, and
+// image/PDF (the common case) render straight from the session-authed file_url.
+function onPreviewPending(a) {
+	if (!a || !a.file_url) return;
+	preview.value = {
+		item: { file_url: a.file_url, title: a.name, name: a.file_url },
+		messageName: "",
+	};
 }
 
 function onTranscript(text) {
-	input.value = input.value ? `${input.value} ${text}` : text
+	input.value = input.value ? `${input.value} ${text}` : text;
 }
 
 // ── conversation menu ───────────────────────────────────────────────────────
 async function toggleStar() {
-	const next = !starred.value
-	starred.value = next
+	const next = !starred.value;
+	starred.value = next;
 	try {
-		await api.setStar(convId.value, next)
-		store.loadConversations()
+		await api.setStar(convId.value, next);
+		store.loadConversations();
 	} catch {
-		starred.value = !next
+		starred.value = !next;
 	}
 }
 
 async function toggleAutoApply() {
-	const next = !autoApply.value
-	menuError.value = ""
+	const next = !autoApply.value;
+	menuError.value = "";
 	try {
-		await api.setAutoApply(convId.value, next)
-		autoApply.value = next
+		await api.setAutoApply(convId.value, next);
+		autoApply.value = next;
 	} catch (e) {
 		// Only a System Manager may turn this on — the server is the authority.
-		menuError.value = e?.message || "Only a System Manager can enable auto-apply."
+		menuError.value = e?.message || "Only a System Manager can enable auto-apply.";
 	}
 }
 
 async function saveRename() {
-	const t = renameText.value.trim()
-	if (!t) return
-	menuError.value = ""
+	const t = renameText.value.trim();
+	if (!t) return;
+	menuError.value = "";
 	try {
-		await api.renameConversation(convId.value, t)
-		if (conversation.value) conversation.value.title = t
-		store.applyRename(convId.value, t)
-		renaming.value = false
-		menuOpen.value = false
+		await api.renameConversation(convId.value, t);
+		if (conversation.value) conversation.value.title = t;
+		store.applyRename(convId.value, t);
+		renaming.value = false;
+		menuOpen.value = false;
 	} catch (e) {
-		menuError.value = e?.message || "Couldn't rename this chat."
+		menuError.value = e?.message || "Couldn't rename this chat.";
 	}
 }
 
@@ -338,63 +469,115 @@ async function saveRename() {
 // `assistant:delta` carries the CUMULATIVE text, not an increment — assign it,
 // never append, or the reply doubles up.
 function onEvent(p) {
-	const conv = p.conversation_id || p.conversation
-	if (conv !== convId.value) return
-	const ignored = p.run_id ? ignoredRuns.value.has(p.run_id) : false
+	const conv = p.conversation_id || p.conversation;
+	if (conv !== convId.value) return;
+	const ignored = p.run_id ? ignoredRuns.value.has(p.run_id) : false;
+
+	// JF-018: fence out a superseded pump's straggler before it touches anything.
+	// Because a delta carries the CUMULATIVE text, an out-of-order one REWINDS the
+	// reply mid-stream, and a stale run:end/run:error tears down a turn that has
+	// already been taken over. Dropping is invisible to the user: every terminal
+	// path below calls load(), and that durable re-fetch is what converges content.
+	// Same placement and the same kind set as the desktop SPA — see
+	// jarvis/public/js/shared/pump_fence.mjs for the mirrored comparison ladder.
+	if (!admitEvent(eventFence, p)) return;
 
 	switch (p.kind) {
 		case "run:start":
-			if (ignored) return
-			sendBusy.value = false
-			live.value = { runId: p.run_id || "", messageId: p.message_id || "", text: "", tools: [] }
-			break
+			if (ignored) return;
+			sendBusy.value = false;
+			live.value = {
+				runId: p.run_id || "",
+				messageId: p.message_id || "",
+				text: "",
+				tools: [],
+			};
+			break;
 
 		case "assistant:delta":
-			if (ignored) return
-			if (!live.value) live.value = { runId: p.run_id || "", messageId: "", text: "", tools: [] }
-			live.value.messageId = p.message_id || live.value.messageId
-			live.value.text = p.text || ""
-			scrollToBottom()
-			break
+			if (ignored) return;
+			if (!live.value)
+				live.value = { runId: p.run_id || "", messageId: "", text: "", tools: [] };
+			live.value.messageId = p.message_id || live.value.messageId;
+			live.value.text = p.text || "";
+			scrollToBottom();
+			break;
 
 		case "tool:start": {
-			if (ignored || !live.value) return
-			const id = p.tool_call_id || `t-${live.value.tools.length}`
-			if (live.value.tools.some((t) => t.id === id)) return
+			if (ignored || !live.value) return;
+			const id = p.tool_call_id || `t-${live.value.tools.length}`;
+			if (live.value.tools.some((t) => t.id === id)) return;
 			live.value.tools.push({
 				id,
 				title: p.tool_title || p.tool_name || "Tool call",
 				toolName: p.tool_name,
 				status: "running",
-			})
-			scrollToBottom()
-			break
+			});
+			scrollToBottom();
+			break;
 		}
 
 		case "tool:end": {
-			if (ignored || !live.value) return
-			const step = live.value.tools.find((t) => t.id === p.tool_call_id)
-			if (step) step.status = toolStatus(p.status) === "error" ? "error" : "done"
-			break
+			if (ignored || !live.value) return;
+			const step = live.value.tools.find((t) => t.id === p.tool_call_id);
+			if (step) step.status = toolStatus(p.status) === "error" ? "error" : "done";
+			break;
 		}
 
 		case "run:end":
-			sendBusy.value = false
-			live.value = null
+			sendBusy.value = false;
+			live.value = null;
+			// C2 self-heal: a parked confirmation card whose best-effort action:pending
+			// push was missed rides the terminal here (settlement/finalize) - surface it at
+			// turn-end WITHOUT a manual reload. Deduped by token; a conv-less token ("")
+			// binds to this conversation, mirroring the action:pending case below. Skip a
+			// run the user STOPPED - its cards were swept server-side; don't resurrect them.
+			if (!ignored && Array.isArray(p.pending)) {
+				for (const card of p.pending) {
+					if (!card.token || pending.value.some((x) => x.token === card.token)) continue;
+					pending.value.push({
+						token: card.token,
+						tool: card.tool || "",
+						summary: card.summary || "",
+						preview: card.preview ?? null,
+						conversation: card.conversation || conv,
+						run_id: card.run_id,
+						expires_at: card.expires_at ?? null,
+					});
+				}
+			}
 			// The reply is durable now; reconcile against it (canvas items, final
 			// formatting) instead of trusting the streamed copy.
-			load()
-			break
+			load();
+			break;
 
 		case "run:error":
-			sendBusy.value = false
-			live.value = null
-			if (!ignored) errorBanner.value = p.error || "That turn failed."
-			load()
-			break
+			sendBusy.value = false;
+			live.value = null;
+			if (!ignored) errorBanner.value = p.error || "That turn failed.";
+			// C2 self-heal (mirror run:end): a card parked in a turn that then errors
+			// must still auto-recover — drain p.pending here too, not only on run:end.
+			// Deduped by token; a conv-less token ("") binds to this conversation; a
+			// user-STOPPED run is skipped (its cards were swept server-side).
+			if (!ignored && Array.isArray(p.pending)) {
+				for (const card of p.pending) {
+					if (!card.token || pending.value.some((x) => x.token === card.token)) continue;
+					pending.value.push({
+						token: card.token,
+						tool: card.tool || "",
+						summary: card.summary || "",
+						preview: card.preview ?? null,
+						conversation: card.conversation || conv,
+						run_id: card.run_id,
+						expires_at: card.expires_at ?? null,
+					});
+				}
+			}
+			load();
+			break;
 
 		case "action:pending":
-			if (!p.token || pending.value.some((x) => x.token === p.token)) return
+			if (!p.token || pending.value.some((x) => x.token === p.token)) return;
 			pending.value.push({
 				token: p.token,
 				tool: p.tool || "",
@@ -403,85 +586,117 @@ function onEvent(p) {
 				conversation: conv,
 				run_id: p.run_id,
 				expires_at: p.expires_at ?? null,
-			})
-			scrollToBottom()
-			break
+			});
+			scrollToBottom();
+			break;
 
 		case "canvas":
 		case "conversation:renamed":
-			load()
-			break
+			load();
+			break;
+
+		case "import:finished":
+			// Slice B: a background CSV import finished; the bench already posted
+			// the "✓ ..." completion message into this conversation. The guard
+			// above already confirmed this is the open conversation, so pull it
+			// in the same way canvas/conversation:renamed do — a durable reload,
+			// since this frame carries no message body to splice in by hand.
+			load();
+			break;
 	}
 }
 
 function onResolved(token) {
-	pending.value = pending.value.filter((p) => p.token !== token)
-	decision.value = null
+	pending.value = pending.value.filter((p) => p.token !== token);
+	decision.value = null;
 }
 
 const onResync = () => {
-	load()
-	loadPending()
-}
+	load();
+	loadPending();
+};
 
 watch(
 	() => props.id,
 	(id) => {
-		convId.value = id === "new" ? "" : id
-		messages.value = []
-		conversation.value = null
-		pending.value = []
-		live.value = null
-		sendBusy.value = false
-		errorBanner.value = ""
-		load(true)
-		loadPending()
-	},
-)
+		convId.value = id === "new" ? "" : id;
+		store.clearUnread(convId.value);
+		messages.value = [];
+		conversation.value = null;
+		pending.value = [];
+		live.value = null;
+		sendBusy.value = false;
+		errorBanner.value = "";
+		load(true);
+		loadPending();
+	}
+);
 
 onMounted(async () => {
-	socket?.on("jarvis:event", onEvent)
-	window.addEventListener("jv:resync", onResync)
-	if (!store.loaded) store.loadConversations()
-	load(true)
-	loadPending()
+	socket?.on("jarvis:event", onEvent);
+	window.addEventListener("jv:resync", onResync);
+	// Opening the chat IS reading it — drop the list's dot straight away.
+	store.clearUnread(convId.value);
+	if (!store.loaded) store.loadConversations();
+	load(true);
+	loadPending();
 	try {
-		settings.value = await api.getChatUiSettings()
+		settings.value = await api.getChatUiSettings();
 	} catch {
 		// The header subtitle and the mic are both optional; a failure here must
 		// not stop the user from chatting.
 	}
-})
+});
 onUnmounted(() => {
-	socket?.off("jarvis:event", onEvent)
-	window.removeEventListener("jv:resync", onResync)
-	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview))
-})
+	socket?.off("jarvis:event", onEvent);
+	window.removeEventListener("jv:resync", onResync);
+	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
+});
 </script>
 
 <template>
 	<div class="jv-bar">
 		<button class="jv-icon-btn" aria-label="Back" @click="router.push('/')">
-			<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+			<svg
+				viewBox="0 0 24 24"
+				width="20"
+				height="20"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.9"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
 				<path d="m15 18-6-6 6-6" />
 			</svg>
 		</button>
 		<div class="jv-head">
 			<div class="jv-head-title">{{ title }}</div>
-			<div class="jv-head-sub">{{ model ? `Jarvis · ${model}` : "Jarvis" }}</div>
+			<div class="jv-head-sub">{{ model ? `${agentName} · ${model}` : agentName }}</div>
 		</div>
-		<button v-if="convId" class="jv-icon-btn" aria-label="Chat options" @click="menuOpen = true">
+		<button
+			v-if="convId"
+			class="jv-icon-btn"
+			aria-label="Chat options"
+			@click="menuOpen = true"
+		>
 			<svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor">
-				<circle cx="12" cy="5" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="12" cy="19" r="1.7" />
+				<circle cx="12" cy="5" r="1.7" />
+				<circle cx="12" cy="12" r="1.7" />
+				<circle cx="12" cy="19" r="1.7" />
 			</svg>
 		</button>
 	</div>
 
-	<div ref="scroller" class="jv-scroll jv-thread">
+	<div ref="scroller" class="jv-scroll jv-thread" @scroll.passive="onScroll">
 		<div v-if="!items.length && !live && !loading" class="jv-empty">
 			<BrandMark :size="52" />
-			<div style="font-size: 16px; font-weight: 600; color: var(--ink9)">What can I do for you?</div>
-			<div style="font-size: 14px; line-height: 1.5">Try “show me this month's overdue invoices”.</div>
+			<div style="font-size: 16px; font-weight: 600; color: var(--ink9)">
+				What can I do for you?
+			</div>
+			<div style="font-size: 14px; line-height: 1.5">
+				Try “show me this month's overdue invoices”.
+			</div>
 		</div>
 
 		<template v-for="it in items" :key="it.key">
@@ -501,10 +716,20 @@ onUnmounted(() => {
 				<template v-if="it.msg">
 					<div v-if="it.view.html" class="jv-md" v-html="it.view.html" />
 					<div v-else-if="it.view.empty" class="jv-msg-error">
-						Jarvis didn't return a reply for this turn. Try asking again.
+						{{ agentName }} didn't return a reply for this turn. Try asking again.
 					</div>
+					<!-- SIBLING of the chain above, not a v-else-if in it: a partial stop
+					     has non-empty html, so chaining this would let the first branch
+					     win and the marker would never render - the exact defect it
+					     exists to fix. Gated only on `stopped`, it shows for both the
+					     partial and the empty stop. -->
+					<div v-if="it.msg.stopped" class="jv-stopped">You stopped this reply.</div>
 					<ActionCard
-						v-if="it.view.action && it.key === lastAssistantKey && !dismissedActions.has(it.key)"
+						v-if="
+							it.view.action &&
+							it.key === lastAssistantKey &&
+							!dismissedActions.has(it.key)
+						"
 						:action="it.view.action"
 						:conversation="convId"
 						@applied="onActionApplied"
@@ -512,6 +737,46 @@ onUnmounted(() => {
 					/>
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />
 					<ChartCard v-for="(c, ci) in it.view.charts" :key="ci" :spec="c" />
+					<a
+						v-if="it.view.diagrams"
+						class="jv-diagram-chip"
+						:href="webChatUrl"
+						target="_blank"
+						rel="noopener"
+					>
+						<svg
+							class="jv-diagram-chip-ic"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.7"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<rect x="3" y="3" width="7" height="6" rx="1" />
+							<rect x="14" y="15" width="7" height="6" rx="1" />
+							<path d="M6.5 9v4a2 2 0 0 0 2 2H14" />
+						</svg>
+						<span class="jv-diagram-chip-tx">
+							<span class="jv-diagram-chip-t">{{
+								it.view.diagrams > 1 ? it.view.diagrams + " diagrams" : "Diagram"
+							}}</span>
+							<span class="jv-diagram-chip-s">Open in web chat</span>
+						</span>
+						<svg
+							class="jv-diagram-chip-go"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.7"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<path d="M7 17 17 7M8 7h9v9" />
+						</svg>
+					</a>
 					<SkillChips :names="it.view.skills" />
 					<div v-if="it.msg.error" class="jv-msg-error">{{ it.msg.error }}</div>
 					<MessageMedia
@@ -520,8 +785,18 @@ onUnmounted(() => {
 						@open="preview = { item: $event, messageName: it.msg.name }"
 					/>
 					<div v-if="it.view.took" class="jv-took">
-						<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-							<circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+						<svg
+							viewBox="0 0 24 24"
+							width="11"
+							height="11"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
+							<circle cx="12" cy="12" r="9" />
+							<path d="M12 7v5l3 2" />
 						</svg>
 						{{ it.view.took }}
 					</div>
@@ -539,20 +814,42 @@ onUnmounted(() => {
 		<ThinkingIndicator v-if="sending && !(live && live.text)" />
 
 		<DecisionCard
-			v-for="p in pending"
+			v-for="(p, pi) in orderedPending"
 			:key="p.token"
-			:summary="p.summary || p.tool || 'Jarvis needs your approval'"
+			:summary="
+				(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
+				(p.summary || p.tool || `${agentName} needs your approval`)
+			"
 			@open="decision = p"
 		/>
+		<!-- Both ways to approve, shown once under the stack. -->
+		<p v-if="orderedPending.length" class="jv-typehint">{{ typedApprovalHint }}</p>
 	</div>
 
 	<div v-if="errorBanner" class="jv-banner">
-		<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-			<circle cx="12" cy="12" r="9" /><path d="M12 8v5M12 16h.01" />
+		<svg
+			viewBox="0 0 24 24"
+			width="14"
+			height="14"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+		>
+			<circle cx="12" cy="12" r="9" />
+			<path d="M12 8v5M12 16h.01" />
 		</svg>
 		<span>{{ errorBanner }}</span>
 		<button class="jv-banner-x" aria-label="Dismiss" @click="errorBanner = ''">
-			<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+			<svg
+				viewBox="0 0 24 24"
+				width="14"
+				height="14"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2.2"
+				stroke-linecap="round"
+			>
 				<path d="M18 6 6 18M6 6l12 12" />
 			</svg>
 		</button>
@@ -568,32 +865,64 @@ onUnmounted(() => {
 		@stop="stop"
 		@attach="attach"
 		@remove="removeAttachment"
+		@preview="onPreviewPending"
 		@mic="voiceOpen = true"
 	/>
 
 	<!-- chat options -->
-	<Sheet :open="menuOpen" @close="((menuOpen = false), (renaming = false))">
+	<Sheet :open="menuOpen" @close="(menuOpen = false), (renaming = false)">
 		<div class="jv-menu">
 			<template v-if="renaming">
 				<div class="jv-menu-title">Rename chat</div>
-				<input v-model="renameText" class="jv-input" placeholder="Chat title" @keydown.enter="saveRename" />
+				<input
+					v-model="renameText"
+					class="jv-input"
+					placeholder="Chat title"
+					@keydown.enter="saveRename"
+				/>
 				<div v-if="menuError" class="jv-menu-error">{{ menuError }}</div>
 				<div class="jv-menu-actions">
 					<button class="jv-btn is-ghost" @click="renaming = false">Cancel</button>
-					<button class="jv-btn is-primary" :disabled="!renameText.trim()" @click="saveRename">Save</button>
+					<button
+						class="jv-btn is-primary"
+						:disabled="!renameText.trim()"
+						@click="saveRename"
+					>
+						Save
+					</button>
 				</div>
 			</template>
 
 			<template v-else>
 				<button class="jv-row-btn" @click="toggleStar">
-					<svg viewBox="0 0 24 24" width="19" height="19" :fill="starred ? 'var(--amber-dot)' : 'none'" :stroke="starred ? 'var(--amber-dot)' : 'currentColor'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-						<path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z" />
+					<svg
+						viewBox="0 0 24 24"
+						width="19"
+						height="19"
+						:fill="starred ? 'var(--amber-dot)' : 'none'"
+						:stroke="starred ? 'var(--amber-dot)' : 'currentColor'"
+						stroke-width="1.8"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
+						<path
+							d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"
+						/>
 					</svg>
 					{{ starred ? "Starred" : "Star this chat" }}
 				</button>
 
-				<button class="jv-row-btn" @click="((renameText = title), (renaming = true))">
-					<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+				<button class="jv-row-btn" @click="(renameText = title), (renaming = true)">
+					<svg
+						viewBox="0 0 24 24"
+						width="19"
+						height="19"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.8"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
 					</svg>
 					Rename chat
@@ -603,16 +932,36 @@ onUnmounted(() => {
 				     commits ERP writes without asking. It is the single most
 				     dangerous switch in the product, so it looks like one. -->
 				<div class="jv-danger">
-					<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-						<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+					<svg
+						viewBox="0 0 24 24"
+						width="18"
+						height="18"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
+						<path
+							d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+						/>
 						<path d="M12 9v4M12 17h.01" />
 					</svg>
 					<div class="jv-danger-main">
 						<div class="jv-danger-title">Auto-apply changes</div>
-						<div class="jv-danger-sub">Jarvis commits ERP writes without asking. Turns off approval prompts.</div>
+						<div class="jv-danger-sub">
+							{{ agentName }} commits ERP writes without asking. Turns off approval
+							prompts.
+						</div>
 						<div v-if="menuError" class="jv-menu-error">{{ menuError }}</div>
 					</div>
-					<button class="jv-toggle" :class="{ 'is-on': autoApply }" role="switch" :aria-checked="autoApply" @click="toggleAutoApply">
+					<button
+						class="jv-toggle"
+						:class="{ 'is-on': autoApply }"
+						role="switch"
+						:aria-checked="autoApply"
+						@click="toggleAutoApply"
+					>
 						<span />
 					</button>
 				</div>
@@ -621,7 +970,11 @@ onUnmounted(() => {
 	</Sheet>
 
 	<DecisionSheet :action="decision" @close="decision = null" @resolved="onResolved" />
-	<FilePreviewSheet :item="preview?.item" :message-name="preview?.messageName || ''" @close="preview = null" />
+	<FilePreviewSheet
+		:item="preview?.item"
+		:message-name="preview?.messageName || ''"
+		@close="preview = null"
+	/>
 	<VoiceSheet :open="voiceOpen" @close="voiceOpen = false" @transcript="onTranscript" />
 </template>
 
@@ -685,6 +1038,16 @@ onUnmounted(() => {
 	line-height: 1.4;
 	color: var(--red);
 }
+/* The stop marker is muted (--ink5), never the error tone above it: the user
+   pressed Stop on purpose, so this states what happened, it doesn't warn. */
+.jv-stopped {
+	margin-top: 8px;
+	padding-top: 7px;
+	border-top: 1px solid var(--border);
+	font-size: 11.5px;
+	line-height: 1.4;
+	color: var(--ink5);
+}
 .jv-took {
 	display: flex;
 	align-items: center;
@@ -699,6 +1062,55 @@ onUnmounted(() => {
 	line-height: 1.6;
 	color: var(--ink7);
 	overflow-wrap: anywhere;
+}
+
+/* "Open in web chat" chip for a mermaid diagram the PWA can't draw. */
+.jv-diagram-chip {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 6px 0;
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	background: var(--card);
+	color: var(--ink9);
+	text-decoration: none;
+	-webkit-tap-highlight-color: transparent;
+}
+.jv-diagram-chip:active {
+	background: var(--card2);
+}
+.jv-diagram-chip-ic {
+	width: 30px;
+	height: 30px;
+	flex: 0 0 auto;
+	padding: 6px;
+	border-radius: 8px;
+	background: var(--card2);
+	color: var(--accent);
+	box-sizing: border-box;
+}
+.jv-diagram-chip-tx {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	line-height: 1.3;
+}
+.jv-diagram-chip-t {
+	font-size: 14px;
+	font-weight: 600;
+}
+.jv-diagram-chip-s {
+	font-size: 12.5px;
+	color: var(--ink5);
+}
+.jv-diagram-chip-go {
+	width: 16px;
+	height: 16px;
+	flex: 0 0 auto;
+	color: var(--ink4);
 }
 .jv-md :deep(p) {
 	margin: 0 0 8px;
@@ -785,6 +1197,12 @@ onUnmounted(() => {
 	border-radius: 4px;
 }
 
+.jv-typehint {
+	margin: 6px 4px 2px;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--ink5);
+}
 .jv-banner {
 	display: flex;
 	align-items: center;

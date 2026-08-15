@@ -18,7 +18,7 @@
 // preview + save payload.
 
 export const CSP_META =
-	'<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; img-src data: blob:; font-src data:; connect-src \'none\'">'
+	"<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'\">";
 
 // ── the bridge runtime (inline JS, stringified into the srcdoc) ───────────────
 // window.jarvis API for dashboard HTML:
@@ -239,11 +239,11 @@ export const RUNTIME_JS = `(function () {
 	}
 	if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
 	else boot();
-})();`
+})();`;
 
 // Any JS inlined into HTML must not terminate its own <script> wrapper.
 function escInline(js) {
-	return String(js || "").replace(/<\/script/gi, "<\\/script")
+	return String(js || "").replace(/<\/script/gi, "<\\/script");
 }
 
 // Split author HTML into (headInner, bodyInner). We NEVER re-emit the author's
@@ -252,25 +252,21 @@ function escInline(js) {
 // outside the first <head> and the <body> (e.g. a <script> placed before
 // <head>) is intentionally DROPPED, not run.
 function splitAuthorHtml(src) {
-	const headM = /<head[^>]*>([\s\S]*?)<\/head>/i.exec(src)
-	const bodyM = /<body[^>]*>([\s\S]*?)<\/body>/i.exec(src)
+	const headM = /<head[^>]*>([\s\S]*?)<\/head>/i.exec(src);
+	const bodyM = /<body[^>]*>([\s\S]*?)<\/body>/i.exec(src);
 	if (bodyM) {
-		return { headInner: headM ? headM[1] : "", bodyInner: bodyM[1] }
+		return { headInner: headM ? headM[1] : "", bodyInner: bodyM[1] };
 	}
 	if (headM) {
 		// <head> but no <body>: body is everything after </head>, minus a
 		// trailing </html>.
-		const after = src
-			.slice(headM.index + headM[0].length)
-			.replace(/<\/html>\s*$/i, "")
-		return { headInner: headM[1], bodyInner: after }
+		const after = src.slice(headM.index + headM[0].length).replace(/<\/html>\s*$/i, "");
+		return { headInner: headM[1], bodyInner: after };
 	}
 	// fragment (no head/body): strip a leading doctype + any stray html tags,
 	// everything is body content.
-	const body = src
-		.replace(/^\s*<!doctype[^>]*>\s*/i, "")
-		.replace(/<\/?html[^>]*>/gi, "")
-	return { headInner: "", bodyInner: body }
+	const body = src.replace(/^\s*<!doctype[^>]*>\s*/i, "").replace(/<\/?html[^>]*>/gi, "");
+	return { headInner: "", bodyInner: body };
 }
 
 // buildSrcdoc(html, {dark, echartsSource, theme}) → the full srcdoc string.
@@ -288,53 +284,345 @@ function splitAuthorHtml(src) {
 // bridged data. Wrapping guarantees nothing author-supplied precedes the CSP.)
 export function buildSrcdoc(
 	html,
-	{ dark = false, echartsSource = "", theme: themeSpec = null } = {},
+	{ dark = false, echartsSource = "", theme: themeSpec = null } = {}
 ) {
 	// A named dashboard theme (from lib/dashboardThemes) owns the canvas look
-	// when provided: its CSS variables + base rules are injected BEFORE the
-	// dashboard's own styles (so those win conflicts), a JARVIS_THEME global
-	// exposes the chart palette, and data-theme follows the theme's own
-	// light/dark - independent of the app shell's mode. Without a theme the
-	// legacy dark flag drives data-theme only.
-	const theme = themeSpec ? (themeSpec.dark ? "dark" : "light") : dark ? "dark" : "light"
+	// when provided: its --jd-* variables + named component classes are emitted
+	// in a later-declared `@layer theme` while the author's own <style> is
+	// wrapped in `@layer author` (declared first), so the theme wins the CSS-vs-
+	// CSS battle regardless of author source order or specificity. A JARVIS_THEME
+	// global exposes the chart palette, and data-theme follows the theme's own
+	// light/dark - independent of the app shell's mode. A "Custom" (bespoke)
+	// theme is the opposite: the tokens are injected UNLAYERED and the author's
+	// <style> is left unlayered too, so the author's own design wins (the save-
+	// time validator relaxes the design rules for it but keeps the safety bans).
+	// Without a theme the legacy dark flag drives data-theme only.
+	const theme = themeSpec ? (themeSpec.dark ? "dark" : "light") : dark ? "dark" : "light";
+	const bespoke = !!(themeSpec && themeSpec.bespoke);
+	const themeCss = themeSpec
+		? bespoke
+			? themeSpec.css
+			: `@layer author, theme;@layer theme{${themeSpec.css}}`
+		: "";
 	const themeBlock = themeSpec
-		? `<style id="jarvis-theme">${themeSpec.css}</style>` +
-			`<script>window.JARVIS_THEME=${escInline(
+		? `<style id="jarvis-theme">${themeCss}</style>` +
+		  `<script>window.JARVIS_THEME=${escInline(
 				JSON.stringify({
 					name: themeSpec.key,
 					label: themeSpec.label,
 					dark: !!themeSpec.dark,
 					accent: themeSpec.accent,
 					palette: themeSpec.palette,
-				}),
-			)}<\/script>`
-		: ""
+				})
+		  )}<\/script>`
+		: "";
 	const scripts =
 		themeBlock +
 		(echartsSource ? `<script>${escInline(echartsSource)}<\/script>` : "") +
-		`<script>${escInline(RUNTIME_JS)}<\/script>`
+		`<script>${escInline(RUNTIME_JS)}<\/script>`;
 
-	const { headInner, bodyInner } = splitAuthorHtml(String(html || ""))
+	const { headInner, bodyInner } = splitAuthorHtml(String(html || ""));
+	// Under a standard (non-bespoke) theme, wrap the author's <style> contents in
+	// `@layer author` so the theme's `@layer theme` wins. Skipped for bespoke /
+	// no-theme, where author CSS stays unlayered and wins.
+	const prep = (s) =>
+		themeSpec && !bespoke ? wrapAuthorStyles(stripHostClient(s)) : stripHostClient(s);
 	return (
 		`<!DOCTYPE html><html data-theme="${theme}"><head>` +
 		CSP_META +
 		'<meta charset="utf-8">' +
 		scripts +
-		stripHostClient(headInner) +
+		prep(headInner) +
 		"</head><body>" +
-		stripHostClient(bodyInner) +
+		prep(bodyInner) +
 		"</body></html>"
-	)
+	);
+}
+
+// True if the CSS contains a `}` with no matching `{` before it — a stray/excess
+// close brace that, once interpolated into `@layer author{ … }`, would terminate
+// the layer early and let the following author rule render UNLAYERED, outranking
+// the theme (F#4). Strings, comments and CSS escapes are skipped so a `}` inside
+// them never counts. An UNCLOSED `{` (depth ends > 0) is safe — it stays contained
+// inside the wrapper — so it is NOT treated as an escape.
+function cssEscapesLayer(css) {
+	const s = String(css || "");
+	let depth = 0;
+	for (let i = 0; i < s.length; i++) {
+		const c = s[i];
+		if (c === "\\") {
+			i++; // CSS escape: the next char is never structural
+			continue;
+		}
+		if (c === "/" && s[i + 1] === "*") {
+			const end = s.indexOf("*/", i + 2);
+			i = end < 0 ? s.length : end + 1;
+			continue;
+		}
+		if (c === '"' || c === "'") {
+			i++;
+			while (i < s.length && s[i] !== c) {
+				if (s[i] === "\\") i++;
+				i++;
+			}
+			continue;
+		}
+		if (c === "{") depth++;
+		else if (c === "}" && --depth < 0) return true;
+	}
+	return false;
+}
+
+// Find the index of the `>` that ends a tag beginning at `from`, honoring quoted
+// attribute values so a quoted `>` (e.g. `<style data-x=">">`) never closes the
+// tag early. Returns -1 when the tag is unterminated. This is the DR2-2 fix: the
+// prior `<style[^>]*>` regex stopped at the FIRST `>`, even inside a quote, which
+// let `.jd-card{…}` render UNLAYERED and outrank `@layer theme`.
+function tagCloseIndex(src, from) {
+	let quote = "";
+	for (let j = from; j < src.length; j++) {
+		const c = src[j];
+		if (quote) {
+			if (c === quote) quote = "";
+		} else if (c === '"' || c === "'") {
+			quote = c;
+		} else if (c === ">") {
+			return j;
+		}
+	}
+	return -1;
+}
+
+// Where a raw-text / RCDATA element's content ends: the first case-insensitive
+// `</name` that is an appropriate end tag (followed by whitespace, `/`, `>` or
+// EOF). Returns -1 (content runs to EOF) when there is none — matching the
+// browser, which applies an UNCLOSED <style>/<script>/… to end-of-document.
+function rawTextEnd(lower, src, from, name) {
+	const needle = "</" + name;
+	let k = from;
+	for (;;) {
+		const e = lower.indexOf(needle, k);
+		if (e < 0) return -1;
+		const nxt = src[e + needle.length];
+		if (nxt === undefined || /[\s/>]/.test(nxt)) return e;
+		k = e + needle.length;
+	}
+}
+
+// HTML raw-text / RCDATA elements whose content is NOT parsed as markup, so a
+// `<style>` (or a fake `</style>`) appearing inside them is text, never a tag.
+// <style> is handled specially (its CSS is wrapped); the rest are skipped whole.
+// <plaintext> is special-cased in the scanner (it consumes to EOF).
+const RAWTEXT_ELEMENTS = new Set([
+	"script",
+	"style",
+	"textarea",
+	"title",
+	"xmp",
+	"iframe",
+	"noembed",
+	"noframes",
+	"noscript",
+]);
+
+// Wrap the inner CSS of every author <style> in `@layer author { … }` so a
+// standard theme's later-declared `@layer theme` wins the cascade regardless of
+// the author's source order or selector specificity.
+//
+// The AI's HTML is untrusted, so this must find the SAME real <style> elements
+// the iframe browser tokenizes — a substring scan for "<style" desyncs on any
+// "<style" that is not actually a start tag (inside an attribute value, a
+// comment, or a <script>/<textarea> body), which lets a fake "<style" swallow the
+// real "</style>" and leave the real CSS UNLAYERED, outranking @layer theme
+// (DR3-1). So this is a proper HTML tokenizer-state walk, not a hand-scanner over
+// "<style": DATA state advances tag-by-tag; a start tag is consumed to its true
+// end `>` honoring quoted attributes (so a "<style" INSIDE an attribute is part of
+// its tag, never a token); comments (incl. the abrupt-closing `<!-->` / `<!--->`
+// and `--!>` forms), bogus comments and PIs are skipped as units; raw-text /
+// RCDATA elements (<script>, <textarea>, <title>, … and <plaintext> → to EOF) have
+// their bodies skipped whole, so a "<style" inside them is never a tag.
+//
+// Only real <style> elements are rewritten: the start tag ends at its first
+// UNQUOTED `>`, and its content is raw text to the first `</style` (or EOF). An
+// UNCLOSED <style> still applies its CSS to EOF in the browser, so it is layered
+// too and closed with a synthesized `</style>` so it can't swallow our shell's
+// trailing tags (F2). An empty style block is left untouched. A block whose CSS
+// has a stray `}` that would break OUT of `@layer author{}` is DROPPED (emitted as
+// an empty <style>) rather than let through unlayered (F#4) — the save-time
+// validator already rejects this, so this only bites live previews + grandfathered
+// docs that skip validation. Author `@import`, inline `style=` colors and
+// `!important` still beat layers by design — the validator bans those.
+function wrapAuthorStyles(html) {
+	const src = String(html || "");
+	const lower = src.toLowerCase();
+	const n = src.length;
+	let out = "";
+	let i = 0;
+	while (i < n) {
+		const lt = src.indexOf("<", i);
+		if (lt < 0) {
+			out += src.slice(i);
+			break;
+		}
+		const c1 = src[lt + 1];
+		if (c1 === undefined) {
+			// a trailing `<` is literal text
+			out += src.slice(i);
+			break;
+		}
+
+		// `<!…` — comment or other markup declaration.
+		if (c1 === "!") {
+			let end;
+			if (src[lt + 2] === "-" && src[lt + 3] === "-") {
+				// a comment: nothing inside is a tag. It ends at `-->` / `--!>`, or —
+				// for the abrupt-closing empty forms — a `>` right after `<!--` /
+				// `<!---`. Ending exactly where the browser does is what prevents a
+				// later real <style> from being swallowed (DR3-1).
+				const p = lt + 4;
+				if (src[p] === ">") {
+					end = p + 1;
+				} else if (src[p] === "-" && src[p + 1] === ">") {
+					end = p + 2;
+				} else {
+					let e = -1;
+					let len = 3;
+					for (let k = p; k < n; k++) {
+						if (src[k] === "-" && src[k + 1] === "-") {
+							if (src[k + 2] === ">") {
+								e = k;
+								len = 3;
+								break;
+							}
+							if (src[k + 2] === "!" && src[k + 3] === ">") {
+								e = k;
+								len = 4;
+								break;
+							}
+						}
+					}
+					end = e < 0 ? n : e + len;
+				}
+			} else {
+				// bogus comment / doctype / CDATA: to the first `>`.
+				const g = src.indexOf(">", lt + 2);
+				end = g < 0 ? n : g + 1;
+			}
+			out += src.slice(i, end);
+			i = end;
+			continue;
+		}
+
+		// `</…>` end tag, or `<?…>` PI (a bogus comment): skip to the tag's `>`
+		// (quote-aware for the end tag so a quoted `>` can't close it early).
+		if (c1 === "/") {
+			const e = tagCloseIndex(src, lt + 2);
+			const end = e < 0 ? n : e + 1;
+			out += src.slice(i, end);
+			i = end;
+			continue;
+		}
+		if (c1 === "?") {
+			const g = src.indexOf(">", lt + 2);
+			const end = g < 0 ? n : g + 1;
+			out += src.slice(i, end);
+			i = end;
+			continue;
+		}
+
+		// A start tag must be `<` + ASCII letter; any other `<` is literal text.
+		if (!/[a-zA-Z]/.test(c1)) {
+			out += src.slice(i, lt + 1);
+			i = lt + 1;
+			continue;
+		}
+
+		// Start tag: read the tag name (to the first whitespace / `/` / `>`), then
+		// find the tag's true end `>` honoring quoted attribute values (so
+		// `<x a=">">` does not end at the quoted `>`, and a `<style` sitting INSIDE
+		// an attribute value is consumed as part of THIS tag — DR3-1).
+		let j = lt + 1;
+		while (j < n && !/[\s/>]/.test(src[j])) j++;
+		const name = lower.slice(lt + 1, j);
+		const tagEnd = tagCloseIndex(src, j);
+		if (tagEnd < 0) {
+			// unterminated start tag (truncated) — nothing after renders as markup
+			out += src.slice(i);
+			break;
+		}
+
+		if (name === "style") {
+			out += src.slice(i, tagEnd + 1); // pre-style content + the opening tag
+			const contentStart = tagEnd + 1;
+			const rawEnd = rawTextEnd(lower, src, contentStart, "style");
+			let css;
+			let close;
+			let next;
+			if (rawEnd < 0) {
+				css = src.slice(contentStart);
+				close = "</style>"; // unclosed: synthesize a closer (F2)
+				next = n;
+			} else {
+				css = src.slice(contentStart, rawEnd);
+				const closeEnd = tagCloseIndex(src, rawEnd + "</style".length);
+				if (closeEnd < 0) {
+					close = src.slice(rawEnd);
+					next = n;
+				} else {
+					close = src.slice(rawEnd, closeEnd + 1);
+					next = closeEnd + 1;
+				}
+			}
+			if (!css.trim()) {
+				out += css + close; // empty block: leave untouched
+			} else if (cssEscapesLayer(css)) {
+				out += close; // stray-} block dropped, never emitted unlayered (F#4)
+			} else {
+				out += `@layer author{${css}}${close}`;
+			}
+			i = next;
+			continue;
+		}
+
+		if (name === "plaintext") {
+			// after <plaintext> everything is raw text to EOF — no later tag exists
+			out += src.slice(i);
+			break;
+		}
+
+		if (RAWTEXT_ELEMENTS.has(name)) {
+			// a raw-text / RCDATA body (<script>, <textarea>, …): its content is not
+			// markup, so skip it whole — a `<style>` inside is text, not a tag (DR3-1).
+			out += src.slice(i, tagEnd + 1);
+			const contentStart = tagEnd + 1;
+			const rawEnd = rawTextEnd(lower, src, contentStart, name);
+			if (rawEnd < 0) {
+				out += src.slice(contentStart);
+				i = n;
+				continue;
+			}
+			const closeEnd = tagCloseIndex(src, rawEnd + ("</" + name).length);
+			const end = closeEnd < 0 ? n : closeEnd + 1;
+			out += src.slice(contentStart, end);
+			i = end;
+			continue;
+		}
+
+		// Ordinary element: emit the start tag and resume DATA scanning after it.
+		out += src.slice(i, tagEnd + 1);
+		i = tagEnd + 1;
+	}
+	return out;
 }
 
 // Dashboards saved before the gateway host-client strip landed carry a dead
-// openclaw live-reload script (a WebSocket to /__openclaw__/ws). It can't work
+// agent live-reload script (a WebSocket to /__openclaw__/ws). It can't work
 // inside the sandbox (connect-src 'none' blocks it) and just logs a CSP
 // violation on every view — drop any <script> that references the host socket.
 function stripHostClient(html) {
 	return String(html || "").replace(/<script\b[\s\S]*?<\/script>/gi, (m) =>
-		m.includes("__openclaw__/ws") ? "" : m,
-	)
+		m.includes("__openclaw__/ws") ? "" : m
+	);
 }
 
 // Parent-side parse of the SAME #jarvis-sources block the runtime reads -
@@ -344,23 +632,22 @@ function stripHostClient(html) {
 // jarvis__ tool prefix, args/args.spec for spec) so preview, save and render
 // always agree. → [{source_name, tool, spec}]
 export function parseSourcesBlock(html) {
-	const m =
-		/<script[^>]*\bid\s*=\s*["']jarvis-sources["'][^>]*>([\s\S]*?)<\/script>/i.exec(
-			String(html || ""),
-		)
-	if (!m) return []
+	const m = /<script[^>]*\bid\s*=\s*["']jarvis-sources["'][^>]*>([\s\S]*?)<\/script>/i.exec(
+		String(html || "")
+	);
+	if (!m) return [];
 	try {
-		const parsed = JSON.parse(m[1])
-		const list = (parsed && parsed.sources) || []
+		const parsed = JSON.parse(m[1]);
+		const list = (parsed && parsed.sources) || [];
 		return list
 			.map((s) => {
-				if (!s) return null
-				const source_name = s.source_name || s.id || s.name
-				if (!source_name) return null
-				const tool = String(s.tool || "").replace(/^jarvis__/, "")
-				let spec = s.spec
+				if (!s) return null;
+				const source_name = s.source_name || s.id || s.name;
+				if (!source_name) return null;
+				const tool = String(s.tool || "").replace(/^jarvis__/, "");
+				let spec = s.spec;
 				if (spec == null && s.args && typeof s.args === "object") {
-					spec = s.args.spec && typeof s.args.spec === "object" ? s.args.spec : s.args
+					spec = s.args.spec && typeof s.args.spec === "object" ? s.args.spec : s.args;
 				}
 				// double-wrap drift ({"spec":{"spec":{...}}}): unwrap lone spec keys
 				while (
@@ -371,12 +658,12 @@ export function parseSourcesBlock(html) {
 					spec.spec &&
 					typeof spec.spec === "object"
 				) {
-					spec = spec.spec
+					spec = spec.spec;
 				}
-				return { source_name, tool, spec }
+				return { source_name, tool, spec };
 			})
-			.filter(Boolean)
+			.filter(Boolean);
 	} catch (e) {
-		return []
+		return [];
 	}
 }

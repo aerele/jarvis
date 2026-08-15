@@ -47,8 +47,21 @@ class TestBenjaminiHochberg(FrappeTestCase):
 	# the largest rank i with p_(i) <= (i/15)*0.05 is i=4 (0.0095 <= 0.01333;
 	# 0.0201 > 0.01667), so exactly the 4 smallest p-values are discoveries.
 	BH_1995 = [
-		0.0001, 0.0004, 0.0019, 0.0095, 0.0201, 0.0278, 0.0298, 0.0344,
-		0.0459, 0.3240, 0.4262, 0.5719, 0.6528, 0.7590, 1.000,
+		0.0001,
+		0.0004,
+		0.0019,
+		0.0095,
+		0.0201,
+		0.0278,
+		0.0298,
+		0.0344,
+		0.0459,
+		0.3240,
+		0.4262,
+		0.5719,
+		0.6528,
+		0.7590,
+		1.000,
 	]
 
 	def test_bh_1995_worked_example(self):
@@ -163,8 +176,12 @@ class TestDetectorFamilyBuffer(FrappeTestCase):
 		self.assertEqual(
 			buf.counts(),
 			{
-				"families": 2, "tested": 3, "untested": 1, "fdr_rejected": 2,
-				"early_releases": 0, "peak_buffered": 2,
+				"families": 2,
+				"tested": 3,
+				"untested": 1,
+				"fdr_rejected": 2,
+				"early_releases": 0,
+				"peak_buffered": 2,
 			},
 		)
 
@@ -320,11 +337,7 @@ def _planted_pattern_rows(rng, uid0=100000):
 	for party in _PLANTED:
 		for _ in range(60):
 			uid += 1
-			value = (
-				"Wholesale"
-				if rng.random() < 0.95
-				else rng.choices(_VALUES, weights=_WEIGHTS, k=1)[0]
-			)
+			value = "Wholesale" if rng.random() < 0.95 else rng.choices(_VALUES, weights=_WEIGHTS, k=1)[0]
 			rows.extend(_unit_rows(rng, uid, party, value))
 	return rows, uid
 
@@ -428,10 +441,15 @@ class TestSelectionCorrection(FrappeTestCase):
 		for i, value in enumerate(values):
 			day = _BASE_DAY + datetime.timedelta(days=i % 60)
 			created = datetime.datetime.combine(day, datetime.time(9 + (i % 8), i % 60))
-			rows.append({
-				"unit_id": f"S-{uid0 + i:05d}", "antecedent": party,
-				"consequent": value, "day": day, "created": created,
-			})
+			rows.append(
+				{
+					"unit_id": f"S-{uid0 + i:05d}",
+					"antecedent": party,
+					"consequent": value,
+					"day": day,
+					"created": created,
+				}
+			)
 		return rows
 
 	def _mixed_rows(self):
@@ -440,7 +458,7 @@ class TestSelectionCorrection(FrappeTestCase):
 		a_values = [a_values[(i * 7) % 40] for i in range(40)]  # interleave
 		rows = self._segment_rows("PARTY-A", a_values, 0)
 		# PARTY-B: 10x "X" + 30x "Y" (rest population; own mode Y at 75% < c_min).
-		b_values = (["X"] * 10 + ["Y"] * 30)
+		b_values = ["X"] * 10 + ["Y"] * 30
 		b_values = [b_values[(i * 3) % 40] for i in range(40)]
 		rows += self._segment_rows("PARTY-B", b_values, 1000)
 		return rows

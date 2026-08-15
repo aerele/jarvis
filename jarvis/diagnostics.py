@@ -4,7 +4,7 @@ Three whitelisted endpoints exposed as buttons:
 
 - ping_admin: hits an authenticated admin endpoint to verify the
   customer's jarvis_admin_api_key works against jarvis_admin_url.
-- ping_openclaw: opens a WS to agent_url with agent_token and completes
+- ping_agent: opens a WS to agent_url with agent_token and completes
   the connect handshake only. No restart, no reload.
 - force_resync: re-runs the same sync path as Jarvis Settings.on_update
   without depending on its change-detection. Useful when an LLM key
@@ -33,10 +33,12 @@ def ping_admin() -> dict:
 	System Manager / Administrator)."""
 	require_jarvis_admin()
 	from jarvis import admin_client
+
 	settings = frappe.get_single("Jarvis Settings")
 	if not (settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip():
 		return {
-			"ok": False, "kind": "config",
+			"ok": False,
+			"kind": "config",
 			"error": "jarvis_admin_api_key is not set; complete onboarding first.",
 		}
 	try:
@@ -51,15 +53,16 @@ def ping_admin() -> dict:
 
 
 @frappe.whitelist()
-def ping_openclaw() -> dict:
+def ping_agent() -> dict:
 	"""Open WS to agent_url with agent_token; connect handshake only.
 
 	SECURITY (PART 4 REVISED, TASK 34-R / 45): gated on ``require_jarvis_admin``
 	and the ``agent_url`` is dropped from the response (endpoint disclosure +
 	operator-scope probe surface). Returns only the connectivity verdict."""
 	require_jarvis_admin()
-	from jarvis import openclaw_ws
-	from jarvis.exceptions import OpenclawUnreachableError
+	from jarvis import agent_ws
+	from jarvis.exceptions import AgentUnreachableError
+
 	settings = frappe.get_single("Jarvis Settings")
 	url = (settings.agent_url or "").strip()
 	token = settings.get_password("agent_token", raise_exception=False) or ""
@@ -68,9 +71,9 @@ def ping_openclaw() -> dict:
 	if not token:
 		return {"ok": False, "kind": "config", "error": "agent_token is not set."}
 	try:
-		openclaw_ws.ping(url, token)
+		agent_ws.ping(url, token)
 		return {"ok": True, "kind": "ok", "connected": True}
-	except OpenclawUnreachableError as e:
+	except AgentUnreachableError as e:
 		return {"ok": False, "kind": "unreachable", "error": str(e)}
 	except Exception as e:
 		return {"ok": False, "kind": "error", "error": f"{type(e).__name__}: {e}"}
@@ -87,7 +90,7 @@ def force_resync(action: str = "reload") -> dict:
 	if action not in ("reload", "restart"):
 		raise frappe.ValidationError(f"invalid action {action!r}; expected reload or restart")
 	settings = frappe.get_single("Jarvis Settings")
-	# Always the admin path: the legacy local-openclaw sync was retired with
+	# Always the admin path: the legacy local-agent sync was retired with
 	# the managed fleet (its method no longer exists), and _sync_via_admin
 	# surfaces its own clear error on an unconfigured bench.
 	settings._sync_via_admin(action)
@@ -145,9 +148,7 @@ def chat_recovery_stats() -> dict:
 
 	win_24h = _window(24)
 	win_7d = _window(24 * 7)
-	recovered_rate_24h = (
-		(win_24h["recovered"] / win_24h["total"]) if win_24h["total"] else 0
-	)
+	recovered_rate_24h = (win_24h["recovered"] / win_24h["total"]) if win_24h["total"] else 0
 	return {
 		"24h": win_24h,
 		"7d": win_7d,
@@ -159,8 +160,8 @@ def chat_recovery_stats() -> dict:
 def reset_agent_pairing() -> dict:
 	"""Clear the cached chat-device pairing and re-pair from scratch.
 
-	Use when openclaw rejects the existing pairing (e.g. 'device token
-	mismatch') and the automatic repair did not fire because openclaw
+	Use when agent rejects the existing pairing (e.g. 'device token
+	mismatch') and the automatic repair did not fire because agent
 	returned a generic error code. Clears the chat-device creds, drops any
 	pooled connection, then opens a fresh device-paired connection (which
 	re-pairs via the ops bench + fleet-agent) to verify.
@@ -169,27 +170,79 @@ def reset_agent_pairing() -> dict:
 	diagnostic, widened from SM-only.
 	"""
 	require_jarvis_admin()
-	from jarvis.chat import openclaw_session_pool
+	from jarvis.chat import agent_session_pool
+	from jarvis.chat.agent_client import AgentSession
 	from jarvis.chat.device import clear_credentials
-	from jarvis.chat.openclaw_client import OpenclawSession
-	from jarvis.exceptions import OpenclawUnreachableError
+	from jarvis.exceptions import AgentUnreachableError
 
 	settings = frappe.get_single("Jarvis Settings")
-	gateway_url = (settings.agent_url or "").strip().replace(
-		"http://", "ws://").replace("https://", "wss://")
+	gateway_url = (settings.agent_url or "").strip().replace("http://", "ws://").replace("https://", "wss://")
 	if not gateway_url:
 		return {"ok": False, "kind": "config", "error": "agent_url is not set."}
 
 	clear_credentials()
 	try:
-		openclaw_session_pool.drain_all()
+		agent_session_pool.drain_all()
 	except Exception:
 		pass
 	try:
-		sess = OpenclawSession.connect(gateway_url)
+		sess = AgentSession.connect(gateway_url)
 		sess.close()
 		return {"ok": True, "message": "Cleared the old pairing and reconnected to the agent."}
-	except OpenclawUnreachableError as e:
+	except AgentUnreachableError as e:
 		return {"ok": False, "kind": "unreachable", "error": str(e)}
 	except Exception as e:
 		return {"ok": False, "kind": "error", "error": f"{type(e).__name__}: {e}"}
+
+
+@frappe.whitelist()
+def import_announce_stats() -> dict:
+	"""Operator visibility into the Slice B import auto-tell (import_announce). Surfaces
+	the pending/stuck backlog broken out by reason, and the fast-path ATTRIBUTION so a
+	silently-dead after_job hook is visible: if ``hook_rate_24h`` collapses toward 0 while
+	imports keep finishing (``total`` > 0), the fast path is down and the ``*/2`` poll is
+	carrying everything - act on it.
+
+	Gated on ``require_jarvis_admin``: the raw COUNTs span ALL users' announcements
+	(tenant-wide operational metadata), and the doctype has NO user-facing read grant."""
+	require_jarvis_admin()
+	ann = "Jarvis Import Announcement"
+	if not frappe.db.exists("DocType", ann):
+		return {"pending": 0, "note": "doctype not migrated"}
+	now = frappe.utils.now_datetime()
+	grace_cutoff = frappe.utils.add_to_date(now, minutes=-30)
+	pending = frappe.db.count(ann, {"announced": 0})
+	stuck = frappe.db.count(ann, {"announced": 0, "kicked_off_at": ["<", grace_cutoff]})
+	oldest = frappe.db.get_value(ann, {"announced": 0}, "kicked_off_at", order_by="kicked_off_at asc")
+	oldest_age_min = (
+		round((now - frappe.utils.get_datetime(oldest)).total_seconds() / 60.0, 1) if oldest else 0
+	)
+	since_24h = frappe.utils.add_to_date(now, hours=-24)
+	win = frappe.db.sql(
+		"""
+		SELECT COUNT(*) AS total,
+			   SUM(CASE WHEN announced_via = 'hook' THEN 1 ELSE 0 END) AS via_hook,
+			   SUM(CASE WHEN announced_via = 'poll' THEN 1 ELSE 0 END) AS via_poll
+		FROM `tabJarvis Import Announcement`
+		WHERE announced = 1 AND modified >= %(since)s
+		""",
+		{"since": since_24h},
+		as_dict=True,
+	)[0]
+	total = win.total or 0
+	reasons = frappe.db.sql(
+		"""
+		SELECT reason, COUNT(*) AS c FROM `tabJarvis Import Announcement`
+		WHERE announced = 1 AND modified >= %(since)s GROUP BY reason
+		""",
+		{"since": since_24h},
+		as_dict=True,
+	)
+	return {
+		"pending": pending,
+		"stuck_past_grace": stuck,
+		"oldest_pending_age_min": oldest_age_min,
+		"24h": {"total": total, "via_hook": win.via_hook or 0, "via_poll": win.via_poll or 0},
+		"hook_rate_24h": (win.via_hook / total) if total else 0,
+		"by_reason_24h": {(r.reason or "unknown"): r.c for r in reasons},
+	}

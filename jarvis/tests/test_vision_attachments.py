@@ -98,10 +98,14 @@ class TestPrepareAttachments(FrappeTestCase):
 		att = _make_file("secret.txt", b"hello")  # owned by Administrator
 		user = "vision_perm_test@example.com"
 		if not frappe.db.exists("User", user):
-			frappe.get_doc({
-				"doctype": "User", "email": user, "first_name": "VT",
-				"send_welcome_email": 0,
-			}).insert(ignore_permissions=True)
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": user,
+					"first_name": "VT",
+					"send_welcome_email": 0,
+				}
+			).insert(ignore_permissions=True)
 		frappe.set_user(user)
 		try:
 			msg, parts = _prepare_attachments("hi", [att], vision_ok=True)

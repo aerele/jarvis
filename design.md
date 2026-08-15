@@ -135,9 +135,48 @@ this is the mapping (use it when porting, never when writing new UI):
 | brand purple `#8b5cf6`, gradients, glow rgba | **no equivalent — delete from chrome and controls on rewrite** | untokenized; violates §1.1–1.3 |
 
 > **Brand-asset exception:** the gradient/purple ban applies to chrome and controls, not to
-> brand-identity assets. The Jarvis mark, and a single sanctioned "processing" illustration
-> during a long provisioning wait (SetupNeuralNet), may keep the brand gradient — provided
-> they honor `prefers-reduced-motion` and read their colors from tokens, not hard-coded rgba.
+> brand-identity assets. The Jarvis mark, and the two sanctioned illustrations of a long
+> onboarding wait, may keep the brand gradient, provided they honor
+> `prefers-reduced-motion` with a calm static frame and read their colours from tokens rather
+> than hard-coded rgba. The one carve-out is the white foreground drawn *on* the brand fill
+> (the spark, the rupee glyph): white on the brand gradient is theme-invariant for the same
+> reason `ink-white` is, and there is no token for it. Everything else comes from a var. The
+> two illustrations, and they are a closed set:
+>
+> | Illustration | Renders during | Subject |
+> |---|---|---|
+> | `SetupNeuralNet` | the long provisioning/readiness wait | ERP modules connecting to the mark |
+> | `PaymentConfirmingArt` | not currently rendered anywhere; see the note below | banknotes arriving at the mark along a rail |
+>
+> jarvis#728 measured the bench's payment-confirming screen against a real payment: the wait
+> behind it is a single reconcile round trip, not a poll, so it resolves well under the
+> tens-of-seconds bar this carve-out sets and now uses JvSpinner instead. The component, its
+> tokens and this table row are kept rather than deleted: retiring or repurposing the asset for
+> a screen whose wait actually earns it is a design-owner call, not a bugfix-PR call.
+>
+> Rules that come with the second one (product owner authorized it on 2026-08-07, overruling
+> the previous single-illustration wording):
+>
+> - **One illustration per screen, never both at once.** They mean different things: value
+>   arriving versus a workspace being assembled. A screen that showed both would be claiming
+>   both, and a screen that used the wrong one would be claiming the wrong thing.
+> - **Neither is a spinner.** §3.8 still stands: `JvSpinner` is the only loading indicator, and
+>   short waits (a sub-second navigation, a button's own `:loading`) get it, not an
+>   illustration. These two are for waits measured in tens of seconds.
+> - **The money green is `--money-note` / `--money-note-bd`, never the semantic success ramp.**
+>   `--green` means success/paid. The confirming screen renders while the payment is
+>   *unconfirmed*, so painting it in the success colour would assert the outcome the screen
+>   exists to say we do not have yet. These two tokens flip by theme (a fill that works on a
+>   white card disappears on a near-black one) and are for this illustration and nothing else:
+>   never text, badges, banners or controls. Status is carried by the copy, never by the colour.
+> - **Notes, not coins.** Circles read as a slot machine, which is the wrong note to strike on
+>   the screen that appears right after taking someone's money. Rectangles on a rail read as a
+>   transfer.
+> - **No emoji, here least of all.** §3.9 holds: emoji are platform-drawn, so the same screen
+>   would ship a different picture per OS; they cannot take a token colour, so they cannot meet
+>   the condition above; and they ignore theme. The rupee glyph is drawn as canvas text.
+>
+> Adding a third illustration is a change to this table, not a judgement call at the call site.
 
 Coexistence rules: `theme.js#applyTheme()` already stamps `data-theme` on `<html>`, so
 Tailwind semantic tokens work everywhere, including inside legacy subtrees. The reverse is not
@@ -364,11 +403,19 @@ is theirs.)
 
 ### 3.7 Banners & notices
 
-- Inline alert (press `AlertBanner` shape): `flex items-center justify-between rounded-md p-2`
-  with typed fill — info `bg-surface-blue-2 text-ink-blue-3`, warning `bg-surface-amber-2
+- Inline alert (press `AlertBanner` shape, `Banner.vue`): `flex items-start gap-2.5 rounded-md
+  p-2.5` with typed fill: info `bg-surface-blue-2 text-ink-blue-3`, warning `bg-surface-amber-2
   text-ink-amber-3`, error `bg-surface-red-2 text-ink-red-3`, success green; icon
-  `lucide-info` / `lucide-alert-triangle` at `size-4`; copy `font-medium text-ink-gray-8`;
-  optional action button + ghost `lucide-x` dismiss.
+  `lucide-info` / `lucide-alert-triangle` at bare `size-4` (no chip, border, or background
+  around it; a wrapped icon box taller than one text line is what jarvis#725 was); copy
+  `font-medium text-ink-gray-8`; optional action button + ghost `lucide-x` dismiss.
+  **Alignment (jarvis#725): `items-start`, not `items-center`.** A bare `size-4` icon (16px)
+  sits close enough to a `text-sm` line (~15px) that `items-start` alone already reads as
+  centered on a single line. Because the icon's own height doesn't grow with the content, it
+  also stays pinned to the FIRST line no matter how many lines follow, which `items-center`
+  does not: on a title+message banner or a message that wraps, `items-center` centers the
+  icon against the whole block and visibly drifts it away from line one. Decide by rendering
+  both, not by picking the property that reads better in the one-line case.
 - Quiet informational note (Helpdesk): bordered box, not colored fill —
   `rounded-md p-2 ring-1 ring-outline-gray-modals` + `size-4` icon + `text-xs text-ink-gray-7`
   (`outline-gray-modals` matches `outline-gray-1` in light but diverges in dark).
@@ -427,7 +474,7 @@ Every pane in the Settings dialog owns its own header (there is no global dialog
   <div class="flex items-start justify-between">
     <div class="flex flex-col gap-1">
       <h2 class="flex items-center gap-2 text-lg font-semibold text-ink-gray-8">
-        Plan &amp; billing <Badge v-if="dirty" label="Unsaved" theme="orange" variant="subtle" />
+        Billing <Badge v-if="dirty" label="Unsaved" theme="orange" variant="subtle" />
       </h2>
       <p class="max-w-md text-p-sm text-ink-gray-6">One-line description of the pane.</p>
     </div>
@@ -485,13 +532,14 @@ Every pane in the Settings dialog owns its own header (there is no global dialog
   blue, not a lift** — press writes raw `ring-1 ring-gray-900`; Jarvis writes
   `border-outline-gray-5 ring-1 ring-outline-gray-5` (the darkest semantic outline) to stay
   inside the token contract.
-- **Change-plan target state is an in-SPA dialog** (press pattern): `size="3xl"`, plan grid
-  inside, full-width solid footer button whose label flips per state ("Select plan" →
-  "Upgrade plan"). If billing details/payment method are missing, the same dialog becomes a
-  stepped wizard with a `Progress` bar on top. **Until the in-SPA Razorpay flow exists**
-  (Phase-2), keep the Desk deep-link (`/app/jarvis-account?billing=1`) but render it as a
-  plain `text-ink-blue-link` text link ("Manage plan & billing"), never an `Upgrade →`
-  button-styled `<a>`.
+- **Change-plan is an in-SPA PAGE**, not a dialog. The in-SPA Razorpay flow now exists
+  (`@/lib/useRazorpay`), so the Desk deep-link is retired. Plan cards need width to be
+  compared side by side, so this is a full route at `/billing`
+  (`pages/billing/BillingPage.vue`) in the onboarding plan-card aesthetic: current plan
+  marked, one action per card. `PlanBillingPane` keeps the current-plan summary and the
+  actions that take no payment (cancel, resume, undo a revocable switch); its footer is a
+  solid "Manage plan and billing" button that closes the dialog and routes to the page.
+  Do not re-add a Desk link, and do not render plan cards in both surfaces.
 - **Billing overview**: definition-list rows separated by `h-px bg-surface-gray-2` — row title
   `font-medium` + value `text-ink-gray-7` left, **one subtle button per row right-aligned**
   ("Add card", "Edit", "Add credit"). Solid is reserved for the single action you want taken
@@ -522,6 +570,30 @@ Every pane in the Settings dialog owns its own header (there is no global dialog
   else. No gradients, no glow shadows, no pulse animations, no decorative background orbs
   (brand-asset exception: §2.2 — the Jarvis mark and the provisioning illustration only). The
   wizard proves quality through calm, not sparkle.
+- **Long waits: the headline is a phase, not a label (jarvis#727)**. On a wait screen that
+  already renders an observation-driven phase list (`onboarding/waitPhases.js`), the `h1`
+  reads off the SAME phase instead of repeating the step name: "Giving Jarvis a brain" while
+  the AI connection is being applied, "Bringing your setup online" while the container comes
+  up, "Opening your chat" once a ready verdict has actually fired the navigation. The honesty
+  rule from jarvis#709 binds the headline exactly as it binds body copy, so every unobserved
+  or unrecognised state falls back to the plain "Setting up {agentName}". Derive it in the
+  pure module and test it there; never branch on phase label text in the template.
+- **Never say "workspace" during onboarding** (product owner, twice). The customer does not
+  have one yet. Use "setup" or "onboarding", on headlines, subtitles and button labels alike.
+  **Known outstanding violations, not yet fixed:** the `waitPhases.js` phase-row labels ("Your
+  workspace is coming online", "Checking on your workspace" and siblings), the
+  `readinessWaitExhaustedMessage` bodies, and the connect step's `blocked` panel line
+  ("Something about your workspace needs a person to check it"). Those are jarvis#709/#722
+  copy, and jarvis#726's test asserts one of the strings literally, so they need their own
+  change rather than a drive-by rename. Do not add new ones; the rule binds anything you write.
+- **A dead end gets a second action (jarvis#727)**. When a wait ends in a state that retrying
+  cannot resolve, Retry must not be the only button. Offer the action that can actually change
+  the outcome, and offer it ONLY where this attempt observed the thing it would change: a
+  model change belongs on a wait that watched the customer's own configuration stall, and not
+  on one that never reached the control plane at all, where it would blame something nobody
+  examined. Keep it in the wizard, never a link to Settings: `readiness.js`'s
+  `NOT_ONBOARDED_REASONS` puts these states behind AppShell's full-screen gate, so a Settings
+  link is a round trip back to the same screen.
 - **Post-signup activation**: prefer a checklist over a marketing tour — steps registered with
   `useOnboarding(app)`, each step's action **deep-links into the real UI** (opens the settings
   dialog at the right tab, routes to the real form) and is marked complete where the action
@@ -547,6 +619,43 @@ three times. Recipe:
 - A `FormControl` paste field (never a bare `<textarea>`), inline `ErrorMessage` for
   expired/invalid-nonce errors, countdown hint in `text-p-sm text-ink-gray-5`.
 
+### 4.5 Voice capture — two surfaces, two retention models (say which one you are)
+
+Jarvis has **two** voice-recording surfaces with deliberately different contracts, and a user who
+learns one carries its expectations to the other. State which one a new surface implements.
+
+- **Chat composer dictation** (`useDictationRecorder` + `utils/voiceDictationStore.js`, ChatView):
+  a take is **one recording**, transcribed in **one call** with its full context, and its audio is
+  **retained** in an IndexedDB mirror until the transcript is part of an accepted send. While
+  recording, ~15 s timeslice fragments are mirrored as they arrive purely for crash-safety — they
+  are never a transcription unit. Anything unresolved is **visible and actionable as one chip per
+  recording** — didn't transcribe (Retry/Download/✕), edited out before sending
+  (Restore/Download/✕), audio that couldn't be saved (Download/Retry) — plus a previous-session
+  recovery banner. Nothing is ever removed silently except the success path (chips clear on the
+  send that carried their words; no toast — that would be noise on the common case). **A
+  measurement never deletes a recording** — the client's silence gate decides what to UPLOAD, and
+  a take it measured as inaudible lands on the same retained chip ("nothing was heard" /
+  Transcribe anyway), because the measurement can be wrong and the user is the only one who gets
+  to throw audio away.
+- **Single-shot capture** (`useAudioRecorder`, `VoiceRecorder.vue` — wiki nudge, Business tab):
+  record → transcribe → text, **no retention, no chips, no recovery**. A failure is a toast and a
+  re-record, and the audio is gone.
+
+Rules for either. **Never split one utterance into independently-transcribed pieces** — a speech
+model handed a fragment with no beginning and no end invents words to bridge the gap, and its
+failure mode is fluent, confident text nobody said; if a take is too long for one call, that is a
+budget problem to solve, not a reason to chop it up. Chip copy must distinguish "not sent yet"
+from "your last message went without this" (identical copy for both is what makes a correctly
+retained recording read as a stuck one). An action's tooltip must promise only what it can do
+*now* (Retry cannot edit a message that has already been sent — it adds to the current draft). A
+progress indicator may only state something it actually knows: the length of the recording being
+transcribed is honest, elapsed wait is honest, a percentage is theatre. Any wait the user cannot
+end is a bug — if a control blocks (Send behind a landing dictation), it must LOOK blocked and say
+why, and whatever it is waiting on must be cancellable. And a leave/close warning may claim loss
+**only** when something is genuinely at risk — durably mirrored, re-offerable audio must not arm
+it, edited-out and sent-without recordings included (a warning that cries wolf gets trained away). If a new surface wants the chip model, reuse the store
+rather than growing a third contract.
+
 ---
 
 ## 5. Do / Don't — current Jarvis anti-patterns
@@ -570,7 +679,7 @@ Each "Don't" is live in the Jarvis codebase today (settings dialog, onboarding, 
 | 12 | 10px uppercase group headers, 8.5px `sm-tag` micro-pill | 12px `font-medium text-ink-gray-5` group labels; `Badge size="sm"` minimum 11px |
 | 13 | Hand-pasted SVG path data per nav item | `FeatherIcon`/Lucide components at `size-4` |
 | 14 | `window.confirm()` for disconnect | frappe-ui `confirmDialog` / red-solid Dialog action |
-| 15 | Billing exits the SPA to Desk (`/app/jarvis-account?billing=1`) with link-buttons | Target: in-SPA plan/billing dialogs (press pattern); until Phase-2, the Desk link stays but styled as a plain text link (§4.2) |
+| 15 | Billing exits the SPA to Desk (`/app/jarvis-account?billing=1`) with link-buttons | RESOLVED: billing is the in-SPA `/billing` page (§4.2). The Desk page is deleted and that URL now redirects. Never re-introduce an "in Desk" billing link |
 | 16 | Toast errors in one pane, inline red text in others, green flash notes | Errors: inline `ErrorMessage` + `toast.error`; success: `toast.success`; dirty: orange "Unsaved" badge; sync: "Syncing…" badge (§4.1) |
 | 17 | Inverted toggle ("Confirm before changes" bound to `!autoApply`) | Switch state matches its label; rename the label if needed |
 | 18 | "Coming soon." placeholder card | Ship the section when it exists; empty states only for real data absence |

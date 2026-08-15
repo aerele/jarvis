@@ -1,101 +1,179 @@
 class JarvisError(Exception):
-    """Base class for all Jarvis-raised errors."""
+	"""Base class for all Jarvis-raised errors."""
 
 
 class ToolNotFoundError(JarvisError):
-    """Raised when a tool name is not registered."""
+	"""Raised when a tool name is not registered."""
 
 
 class PermissionDeniedError(JarvisError):
-    """Raised when the calling user lacks permission for the requested operation."""
+	"""Raised when the calling user lacks permission for the requested operation."""
+
+
+class CapabilityDeniedError(JarvisError):
+	"""JF-017 — a marketplace-agent delegate called a tool outside the capability
+	contract snapshotted onto its ``Jarvis Agent Run`` at launch.
+
+	Deliberately NOT a ``PermissionDeniedError``: the run-as user's Frappe rights
+	are irrelevant here. The AGENT never declared the tool, and the snapshot is
+	immutable for the life of the run — so unlike a permission denial (which an
+	administrator can resolve mid-run) the answer is FIXED. Retrying, renaming the
+	tool or changing the arguments can never turn it into a yes; that is what the
+	``_ERROR_HINTS`` entry tells the delegate, so it stops burning turns on it.
+	"""
+
+
+class FeatureDisabledError(JarvisError):
+	"""#493 - a tool for a feature the OPERATOR has switched off for this workspace.
+
+	Deliberately NOT a ``PermissionDeniedError``: nothing about the caller's Frappe
+	rights is wrong, and that hint ("ask your administrator to review your
+	permissions") would send them hunting through roles for what is a settings
+	checkbox. Like ``CapabilityDeniedError`` the answer is FIXED while the toggle is
+	off, so retrying, changing the arguments or reaching for a sibling tool can never
+	turn it into a yes. That instruction rides in the MESSAGE, because the plugin
+	relays only code + message to the model; the ``_ERROR_HINTS`` entry carries the
+	human-facing "what you can do" line.
+	"""
 
 
 class InvalidArgumentError(JarvisError):
-    """Raised when tool arguments fail validation."""
+	"""Raised when tool arguments fail validation."""
 
 
 class NoDataError(InvalidArgumentError):
-    """Raised when an export/report tool has nothing to produce (e.g. no rows
-    to write to a workbook). Carries a clean, user-facing message the agent
-    relays as-is — the point is to say "there's nothing to export" rather than
-    hand back an empty file. Inherits from InvalidArgumentError so existing
-    error envelopes route it the same way."""
+	"""Raised when an export/report tool has nothing to produce (e.g. no rows
+	to write to a workbook). Carries a clean, user-facing message the agent
+	relays as-is — the point is to say "there's nothing to export" rather than
+	hand back an empty file. Inherits from InvalidArgumentError so existing
+	error envelopes route it the same way."""
 
 
 class ResultTooLargeError(InvalidArgumentError):
-    """Raised when a row-dumping tool's result exceeds the guard threshold
-    and the caller did not opt in with ``confirm_large=True``.
+	"""Raised when a row-dumping tool's result exceeds the guard threshold
+	and the caller did not opt in with ``confirm_large=True``.
 
-    Background: the 2026-06-22 customer outage on openai/gpt-5.5 traced to
-    a single chat turn that accumulated 800+ row Timesheet Detail dumps
-    and 776-row joined query results into the agent transcript. Openclaw
-    tried to auto-compact and the upstream summarization call hit a
-    transport error - the whole turn died. The slim-`get_schema` walk-back
-    (PR #133) cut the schema side of the bloat; the row guard handles the
-    other axis (query result size).
+	Background: the 2026-06-22 customer outage on openai/gpt-5.5 traced to
+	a single chat turn that accumulated 800+ row Timesheet Detail dumps
+	and 776-row joined query results into the agent transcript. Agent
+	tried to auto-compact and the upstream summarization call hit a
+	transport error - the whole turn died. The slim-`get_schema` walk-back
+	(PR #133) cut the schema side of the bloat; the row guard handles the
+	other axis (query result size).
 
-    The guard is per-call, not per-turn. It blocks the wasteful payload
-    from ever reaching the transcript by raising at the bench layer, with
-    a structured error the agent can act on. Three actions the agent
-    can take (in priority order): narrow the filter, aggregate with
-    GROUP BY / COUNT / SUM, or pass ``confirm_large=True`` for the rare
-    workflows where every row IS the answer (audit exports, bulk
-    reconciliation).
+	The guard is per-call, not per-turn. It blocks the wasteful payload
+	from ever reaching the transcript by raising at the bench layer, with
+	a structured error the agent can act on. Three actions the agent
+	can take (in priority order): narrow the filter, aggregate with
+	GROUP BY / COUNT / SUM, or pass ``confirm_large=True`` for the rare
+	workflows where every row IS the answer (audit exports, bulk
+	reconciliation).
 
-    Inherits from InvalidArgumentError so existing error envelopes route
-    it the same way; the ``row_count`` / ``limit`` / ``tool`` attributes
-    let downstream classifiers branch on it specifically if needed.
-    """
+	Inherits from InvalidArgumentError so existing error envelopes route
+	it the same way; the ``row_count`` / ``limit`` / ``tool`` attributes
+	let downstream classifiers branch on it specifically if needed.
+	"""
 
-    def __init__(self, row_count: int, limit: int, tool: str):
-        self.row_count = row_count
-        self.limit = limit
-        self.tool = tool
-        message = (
-            f"{tool} returned {row_count} rows, which exceeds the "
-            f"{limit}-row default. To resolve: (a) narrow the filter "
-            f"to match fewer rows, (b) aggregate with GROUP BY / "
-            f"COUNT / SUM if you need a summary, or (c) pass "
-            f"confirm_large=True if you genuinely need every row "
-            f"(rare; usually means export, not chat answer). The "
-            f"{limit}-row limit exists because large row sets in the "
-            f"agent transcript cause context-window failures."
-        )
-        super().__init__(message)
-
-
-class OpenclawUnreachableError(JarvisError):
-    """Raised when the openclaw gateway can't be reached (WS handshake
-    failed, container down).
-
-    Sprint-3 (2026-06-16 review): may carry a structured ``code`` taken
-    from openclaw's rejection payload (``device-not-paired``,
-    ``token-mismatch``, ``signature-invalid``, etc.). Downstream
-    classifiers (e.g. _is_stale_pairing) should branch on this
-    attribute, not on a substring match of the message. ``code`` is
-    None when the error didn't originate from an openclaw response
-    (e.g. network-level WS open failure).
-
-    2026-07-09: also carries ``details`` - openclaw's ``error.details``
-    object. Connect AUTH failures arrive with the GENERIC error.code
-    "INVALID_REQUEST" and the machine-readable reason only in
-    ``details.authReason`` (e.g. "device_token_mismatch"), so ``code``
-    alone cannot distinguish an auth rejection from any other
-    malformed-request rejection."""
-
-    def __init__(self, message: str, *, code: str | None = None,
-                 details: dict | None = None):
-        super().__init__(message)
-        self.code = code
-        self.details = details
+	def __init__(self, row_count: int, limit: int, tool: str):
+		self.row_count = row_count
+		self.limit = limit
+		self.tool = tool
+		message = (
+			f"{tool} returned {row_count} rows, which exceeds the "
+			f"{limit}-row default. To resolve: (a) narrow the filter "
+			f"to match fewer rows, (b) aggregate with GROUP BY / "
+			f"COUNT / SUM if you need a summary, or (c) pass "
+			f"confirm_large=True if you genuinely need every row "
+			f"(rare; usually means export, not chat answer). The "
+			f"{limit}-row limit exists because large row sets in the "
+			f"agent transcript cause context-window failures."
+		)
+		super().__init__(message)
 
 
-class OpenclawReloadFailedError(JarvisError):
-    """Raised when secrets.reload returned ok=false or timed out."""
+class AgentUnreachableError(JarvisError):
+	"""Raised when the agent gateway can't be reached (WS handshake
+	failed, container down).
+
+	Sprint-3 (2026-06-16 review): may carry a structured ``code`` taken
+	from agent's rejection payload (``device-not-paired``,
+	``token-mismatch``, ``signature-invalid``, etc.). Downstream
+	classifiers (e.g. _is_stale_pairing) should branch on this
+	attribute, not on a substring match of the message. ``code`` is
+	None when the error didn't originate from an agent response
+	(e.g. network-level WS open failure).
+
+	2026-07-09: also carries ``details`` - agent's ``error.details``
+	object. Connect AUTH failures arrive with the GENERIC error.code
+	"INVALID_REQUEST" and the machine-readable reason only in
+	``details.authReason`` (e.g. "device_token_mismatch"), so ``code``
+	alone cannot distinguish an auth rejection from any other
+	malformed-request rejection."""
+
+	def __init__(self, message: str, *, code: str | None = None, details: dict | None = None):
+		super().__init__(message)
+		self.code = code
+		self.details = details
+
+
+class AgentReloadFailedError(JarvisError):
+	"""Raised when secrets.reload returned ok=false or timed out."""
 
 
 class AdminUnreachableError(JarvisError):
 	"""HTTPS call to jarvis_admin failed (network, timeout, 5xx, non-JSON)."""
+
+
+class AdminAmbiguousError(AdminUnreachableError):
+	"""The HTTPS call to jarvis_admin failed at the TRANSPORT layer in a way that
+	leaves it UNKNOWN whether admin received the request: a read timeout, or a
+	connection reset AFTER the request went out. The request may already be running
+	admin-side, so re-sending it can DOUBLE a non-idempotent side effect.
+
+	Contrast ``AdminUnreachableError`` (the base), which a caller may treat as "the
+	request definitely did not land" only when it is one of the confirmed-not-sent
+	shapes routed to it: a clean connection refusal, a connect timeout (nothing was
+	sent), a 5xx (admin answered), or a non-JSON body (admin answered). Everything in
+	this subclass is the ``maybe`` case.
+
+	Deliberately a SUBCLASS of AdminUnreachableError, exactly like AdminRejectedError:
+	every existing catch site already treats an admin failure as terminal and keeps
+	working unchanged. Only a caller dispatching a NON-idempotent turn (the agent-run
+	relay, jarvis.chat.agent_scheduler) branches on it - to leave its already-running
+	run alone rather than terminalize it and mint a fresh, un-deduplicated retry
+	(jarvis #743). Idempotent readers (media download, catalog fetches) never need to
+	tell the two apart, so they keep catching the base class."""
+
+
+class AdminRejectedError(AdminUnreachableError):
+	"""jarvis_admin was REACHED and PERMANENTLY refused the request.
+
+	The admin's fleet layer answers a config it can never accept (an unknown
+	provider slug, a spec the fleet-agent rejects) with HTTP 502 carrying its
+	own structured ``error.code`` - the same status a genuine gateway fault
+	uses. Collapsing both into ``AdminUnreachableError`` is what let a
+	deterministic rejection be recorded as "pending: admin applying config"
+	forever: the caller assumed admin had persisted the desired state and
+	would reconcile it, when in fact admin threw during validation and stored
+	nothing (jarvis #542).
+
+	``code`` is admin's own ``error.code`` (the raising exception's class
+	name, e.g. ``FleetConfigError``); ``detail`` is admin's ``error.message``
+	on its own, WITHOUT the "admin returned a 502 error: " wrapper the
+	exception message carries, so a caller can put the reason in front of a
+	customer without re-parsing it back out.
+
+	Deliberately a SUBCLASS of AdminUnreachableError: every other catch site
+	already treats an admin failure as terminal, so inheriting leaves them
+	correct with no change at all. Only the two sites that treat an
+	unreachable admin as "the apply is still landing" need to branch, and
+	they do it with an explicit handler ahead of their unreachable one.
+	"""
+
+	def __init__(self, message: str, *, code: str = "", detail: str = ""):
+		super().__init__(message)
+		self.code = code
+		self.detail = detail
 
 
 class AdminAuthError(JarvisError):
@@ -107,25 +185,114 @@ class AdminAuthError(JarvisError):
 	*authorization* denial (403 - the same customer principal backs both the
 	bearer and the legacy api_key:api_secret, so re-minting and the legacy
 	fallback would just replay into the same 403 while storming the token
-	endpoint). None when the status isn't known."""
+	endpoint). None when the status isn't known.
 
-	def __init__(self, message: str, *, status_code: int | None = None):
+	``code`` carries admin's structured ``error.code`` from the refusal envelope
+	when present (e.g. ``PENDING_PAYMENT``), so a caller can branch on a stable
+	machine token instead of parsing the human sentence a hardened control plane
+	may omit - see jarvis.account._is_never_paid_403. Empty when admin sent none."""
+
+	def __init__(self, message: str, *, status_code: int | None = None, code: str = ""):
 		super().__init__(message)
 		self.status_code = status_code
+		self.code = code
 
 
 class AdminValidationError(JarvisError):
 	"""jarvis_admin raised a Frappe ValidationError (or similar user-input
 	error) inside a whitelisted endpoint. Carries the clean operator-facing
-	message - never the traceback dump."""
+	message - never the traceback dump.
+
+	``exc_type`` is admin's own exception CLASS name ("DuplicateEntryError",
+	"ValidationError", ...) when the response declared one, else None. A caller
+	that needs to know WHICH rejection this is branches on that - or, better, on
+	the ``code`` an AdminContractError carries. Never on the message: the
+	failed-payment resume matched the substring "already registered or pending",
+	admin reworded the sentence on 2026-07-26, and the resume was unreachable
+	for every declined-card customer while both repositories stayed green."""
+
+	def __init__(self, message: str, *, exc_type: str | None = None):
+		super().__init__(message)
+		self.exc_type = exc_type
+
+
+class AdminContractError(AdminValidationError):
+	"""jarvis_admin refused the request with a MACHINE-READABLE error from the
+	onboarding/payment contract (``jarvis_admin_v2/billing/codes.py``).
+
+	The contract's whole point is that the caller branches on ``code`` and only
+	*renders* ``message``. This class is what carries the code across
+	admin_client's boundary, which used to flatten every known 4xx into a bare
+	AdminValidationError holding nothing but prose.
+
+	- ``code``          - admin's ``error.code`` (ACCOUNT_ALREADY_EXISTS, ...).
+	- ``contract_code`` - the stable code where a path already shipped a legacy
+	  identifier in ``code`` (Razorpay's "BadPaymentSignature", Cashfree's
+	  "PaymentNotConfirmed"); the legacy string stays where deployed benches
+	  look for it and the contract value rides beside it. Prefer
+	  ``stable_code``, which picks it when present.
+	- ``recovery``      - the advisory next action ("retry", "continue_setup",
+	  "authenticate_or_reconnect", ...). Advisory: the code alone decides, and
+	  an unknown hint is ignored.
+	- ``error``         - the whole ``error`` object, so a facade can hand the
+	  contract onward without re-deriving it (extras like
+	  ``retry_after_seconds``, ``subscription_status``, ``attempt_id`` live
+	  here). Contract rule 3 keeps internal document names out of it.
+	- ``http_status``   - the deliberate 4xx admin chose.
+
+	A SUBCLASS of AdminValidationError on purpose: every existing catch site
+	already handles that class and keeps working unchanged, and ``str(e)`` is
+	still the same clean message. An admin too old to send a code raises the
+	plain parent instead - that is the fail-closed path, never a prose parse."""
+
+	def __init__(
+		self,
+		message: str,
+		*,
+		code: str = "",
+		contract_code: str = "",
+		recovery: str = "",
+		error: dict | None = None,
+		exc_type: str | None = None,
+		http_status: int = 0,
+	):
+		super().__init__(message, exc_type=exc_type)
+		self.code = code
+		self.contract_code = contract_code
+		self.recovery = recovery
+		self.error = error or {}
+		self.http_status = http_status
+
+	@property
+	def stable_code(self) -> str:
+		"""``contract_code`` when admin sent one, else ``code``."""
+		return self.contract_code or self.code
 
 
 class AdminRateLimitedError(JarvisError):
 	"""jarvis_admin returned HTTP 429 - caller should back off and retry later.
 
 	``retry_after_seconds`` carries the body's hint when the admin provides
-	one (0 if absent)."""
+	one (0 if absent).
 
-	def __init__(self, message: str = "rate_limited", retry_after_seconds: int = 0):
+	``code`` / ``recovery`` / ``error`` carry the contract payload when the 429
+	is a CODED one (today: ``PAYMENT_CHECK_RATE_LIMITED``, the per-customer cap
+	on provider-truth checks) rather than the stock per-IP limiter's bare
+	status. They matter because "back off" and "your payment failed" are
+	opposite instructions to a wizard, and a caller that can only read the
+	status has to guess which one it got."""
+
+	def __init__(
+		self,
+		message: str = "rate_limited",
+		retry_after_seconds: int = 0,
+		*,
+		code: str = "",
+		recovery: str = "",
+		error: dict | None = None,
+	):
 		super().__init__(message)
 		self.retry_after_seconds = retry_after_seconds
+		self.code = code
+		self.recovery = recovery
+		self.error = error or {}

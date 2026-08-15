@@ -1,0 +1,149 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-07-21 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "event_type",
+  "occurred_at",
+  "agent",
+  "bundle_version",
+  "run",
+  "installation",
+  "preparation_mode",
+  "initiating_human",
+  "reviewing_human",
+  "outcome",
+  "finding",
+  "approval",
+  "result_link_doctype",
+  "result_link_name",
+  "detail"
+ ],
+ "fields": [
+  {
+   "fieldname": "event_type",
+   "fieldtype": "Select",
+   "label": "Event Type",
+   "options": "run_launched\nfinding_raised\napproval_requested\napproval_decided\ndraft_created\ntransaction_posted\nfinding_resolved\nagent_promoted_to_live\nincident_raised\nactivation_ceiling_raised",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "PP-5 append-only provenance event kind. confirmed_outcome findings (PP-1) are closed only by a transaction_posted / finding_resolved(human) event; agent_promoted_to_live records a PP-4 promotion; activation_ceiling_raised records a PP-6 budget raise."
+  },
+  {
+   "fieldname": "occurred_at",
+   "fieldtype": "Datetime",
+   "label": "Occurred At",
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "When the event occurred. Stamped at insert, never editable (append-only)."
+  },
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "label": "Agent",
+   "options": "Jarvis Agent Listing",
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "bundle_version",
+   "fieldtype": "Data",
+   "label": "Bundle Version",
+   "description": "Copied immutably from the run's bundle_version."
+  },
+  {
+   "fieldname": "run",
+   "fieldtype": "Link",
+   "label": "Run",
+   "options": "Jarvis Agent Run"
+  },
+  {
+   "fieldname": "installation",
+   "fieldtype": "Link",
+   "label": "Installation",
+   "options": "Jarvis Agent Installation"
+  },
+  {
+   "fieldname": "preparation_mode",
+   "fieldtype": "Select",
+   "label": "Preparation Mode",
+   "options": "shadow\nlive"
+  },
+  {
+   "fieldname": "initiating_human",
+   "fieldtype": "Link",
+   "label": "Initiating Human",
+   "options": "User"
+  },
+  {
+   "fieldname": "reviewing_human",
+   "fieldtype": "Link",
+   "label": "Reviewing Human",
+   "options": "User"
+  },
+  {
+   "fieldname": "outcome",
+   "fieldtype": "Select",
+   "label": "Outcome",
+   "options": "\napproved\nrejected\nreworked",
+   "description": "For decision events (approval_decided): approved | rejected | reworked."
+  },
+  {
+   "fieldname": "finding",
+   "fieldtype": "Link",
+   "label": "Finding",
+   "options": "Jarvis Agent Finding"
+  },
+  {
+   "fieldname": "approval",
+   "fieldtype": "Link",
+   "label": "Approval",
+   "options": "Jarvis Approval Request"
+  },
+  {
+   "fieldname": "result_link_doctype",
+   "fieldtype": "Data",
+   "label": "Result Link DocType",
+   "description": "The resulting draft/transaction this event records."
+  },
+  {
+   "fieldname": "result_link_name",
+   "fieldtype": "Data",
+   "label": "Result Link Name"
+  },
+  {
+   "fieldname": "detail",
+   "fieldtype": "Small Text",
+   "label": "Detail",
+   "description": "Free-text context: e.g. the PP-6 reviewer-capacity justification + new ceiling for an activation_ceiling_raised event."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-07-21 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Agent Provenance Event",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "role": "Jarvis Admin"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

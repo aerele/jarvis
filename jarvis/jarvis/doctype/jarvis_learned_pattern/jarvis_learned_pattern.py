@@ -47,8 +47,6 @@ class JarvisLearnedPattern(Document):
 			return
 		if new_status not in LEGAL_TRANSITIONS.get(old_status, set()):
 			frappe.throw(
-				_("Illegal learned-pattern status transition: {0} to {1}.").format(
-					old_status, new_status
-				),
+				_("Illegal learned-pattern status transition: {0} to {1}.").format(old_status, new_status),
 				frappe.ValidationError,
 			)

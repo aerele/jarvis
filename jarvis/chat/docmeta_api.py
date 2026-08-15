@@ -36,10 +36,11 @@ from __future__ import annotations
 import json
 
 import frappe
-from jarvis.permissions import has_jarvis_access, require_jarvis_user
 from frappe import _
 from frappe.desk.form import assign_to as _assign_to
 from frappe.share import add_docshare
+
+from jarvis.permissions import has_jarvis_access, require_jarvis_user
 
 ALLOWED_DOCTYPES = {
 	"Jarvis Custom Skill",
@@ -300,15 +301,17 @@ def add_comment(doctype: str, name: str, content: str) -> dict:
 	if not content:
 		frappe.throw(_("Comment is empty."))
 	content = _strip_mention_spans(content)
-	comment = frappe.get_doc({
-		"doctype": "Comment",
-		"comment_type": "Comment",
-		"reference_doctype": doctype,
-		"reference_name": name,
-		"content": content,
-		"comment_email": frappe.session.user,
-		"comment_by": _full_name(frappe.session.user),
-	}).insert(ignore_permissions=True)
+	comment = frappe.get_doc(
+		{
+			"doctype": "Comment",
+			"comment_type": "Comment",
+			"reference_doctype": doctype,
+			"reference_name": name,
+			"content": content,
+			"comment_email": frappe.session.user,
+			"comment_by": _full_name(frappe.session.user),
+		}
+	).insert(ignore_permissions=True)
 	frappe.db.commit()
 	return _comment_row(comment)
 
@@ -377,14 +380,10 @@ def toggle_assignment(doctype: str, name: str, user: str, action: str = "add") -
 			had_share = frappe.db.exists(
 				"DocShare", {"share_doctype": doctype, "share_name": name, "user": user}
 			)
-			share = add_docshare(
-				doctype, name, user, read=1, flags={"ignore_share_permission": True}
-			)
+			share = add_docshare(doctype, name, user, read=1, flags={"ignore_share_permission": True})
 			if not had_share:
 				# Marker: assignment plumbing, not an explicit share.
-				frappe.db.set_value(
-					"DocShare", share.name, "notify_by_email", 0, update_modified=False
-				)
+				frappe.db.set_value("DocShare", share.name, "notify_by_email", 0, update_modified=False)
 			_assign_to._add(
 				{"doctype": doctype, "name": name, "assign_to": [user]},
 				ignore_permissions=True,
@@ -433,14 +432,10 @@ def toggle_share(doctype: str, name: str, user: str, action: str = "add") -> lis
 
 	if action == "add":
 		if user != doc.owner:  # owner already has full access; skip the no-op row
-			share = add_docshare(
-				doctype, name, user, read=1, flags={"ignore_share_permission": True}
-			)
+			share = add_docshare(doctype, name, user, read=1, flags={"ignore_share_permission": True})
 			if not int(share.notify_by_email or 0):
 				# Marker: explicit share (upgrades an assignment-created row).
-				frappe.db.set_value(
-					"DocShare", share.name, "notify_by_email", 1, update_modified=False
-				)
+				frappe.db.set_value("DocShare", share.name, "notify_by_email", 1, update_modified=False)
 	else:
 		row = frappe.db.get_value(
 			"DocShare",
@@ -449,12 +444,8 @@ def toggle_share(doctype: str, name: str, user: str, action: str = "add") -> lis
 			as_dict=True,
 		)
 		if row and not int(row.notify_by_email or 0) and _open_todo_exists(doctype, name, user):
-			frappe.throw(
-				_("This share backs an active assignment — remove the assignment instead.")
-			)
-		frappe.db.delete(
-			"DocShare", {"share_doctype": doctype, "share_name": name, "user": user}
-		)
+			frappe.throw(_("This share backs an active assignment — remove the assignment instead."))
+		frappe.db.delete("DocShare", {"share_doctype": doctype, "share_name": name, "user": user})
 
 	# Mirror the read-share onto the linked conversation so a tagged user can
 	# actually fetch the approval's file bytes (File Box list + preview).
@@ -465,7 +456,10 @@ def toggle_share(doctype: str, name: str, user: str, action: str = "add") -> lis
 			if conv and frappe.db.exists("Jarvis Conversation", conv):
 				if action == "add":
 					add_docshare(
-						"Jarvis Conversation", conv, user, read=1,
+						"Jarvis Conversation",
+						conv,
+						user,
+						read=1,
 						flags={"ignore_share_permission": True},
 					)
 				else:
@@ -525,17 +519,13 @@ def toggle_like(doctype: str, name: str, like: int = 1) -> list[str]:
 def _set_liked_by(doctype: str, name: str, liked_by: list[str]) -> None:
 	"""Persist ``_liked_by``, auto-adding the column on first use (desk parity)."""
 	try:
-		frappe.db.set_value(
-			doctype, name, "_liked_by", json.dumps(liked_by), update_modified=False
-		)
+		frappe.db.set_value(doctype, name, "_liked_by", json.dumps(liked_by), update_modified=False)
 	except frappe.db.ProgrammingError as e:  # pragma: no cover - first-like only
 		if frappe.db.is_missing_column(e):
 			from frappe.database.schema import add_column
 
 			add_column(doctype, "_liked_by", "Text")
-			frappe.db.set_value(
-				doctype, name, "_liked_by", json.dumps(liked_by), update_modified=False
-			)
+			frappe.db.set_value(doctype, name, "_liked_by", json.dumps(liked_by), update_modified=False)
 		else:
 			raise
 
@@ -549,9 +539,7 @@ def delete_attachment(doctype: str, name: str, file: str) -> None:
 	"""Delete an attachment of the doc (write-gated). The File must actually be
 	attached to this doc — a foreign file name is refused."""
 	_get_gated(doctype, name, write=True)
-	f = frappe.db.get_value(
-		"File", file, ["attached_to_doctype", "attached_to_name"], as_dict=True
-	)
+	f = frappe.db.get_value("File", file, ["attached_to_doctype", "attached_to_name"], as_dict=True)
 	if not f or f.attached_to_doctype != doctype or f.attached_to_name != name:
 		frappe.throw(_("File is not attached to this document."))
 	frappe.delete_doc("File", file, ignore_permissions=True)

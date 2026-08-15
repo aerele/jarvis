@@ -43,6 +43,14 @@ WIKI_HAS_PAGES_CACHE_KEY = "jarvis:wiki_has_active_pages"
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
+# Complete HTML tags stripped out of stored TITLES. A title is a short Data field
+# (a name like "Acme Corp"), never markup — but it is org-user authored and gets
+# interpolated into the reviewer's promotion-approve confirm, which frappe-ui's
+# ConfirmDialog renders via v-html. Neutralizing at THIS write funnel (SAR-1
+# server belt) means a stored title can never carry a runnable element no matter
+# which writer set it; the SPA also escapes at the sink.
+_TAG_RE = re.compile(r"<[^>]*>")
+
 # Instruction shapes neutralized in stored BODIES. Bodies are markdown, so
 # headings/fences/--- stay (legitimate structure); these are pure injection
 # tokens: ignore-previous phrasing, a forged role prefix, a forged
@@ -93,11 +101,15 @@ class JarvisWikiPage(Document):
 		[Context:] clause inlines summaries; ``jarvis__read_wiki`` returns
 		bodies), so instruction-shaped content is neutralized at THIS write
 		funnel — every writer (ingest, update_wiki tool, SPA save) lands here."""
+		if self.title:
+			# Strip complete HTML tags, then drop any residual angle brackets, so a
+			# stored title can NEVER carry markup — even a malformed/unterminated
+			# tag (SAR-1 server belt). Titles are short Data, never HTML.
+			t = _CONTROL_RE.sub("", str(self.title))
+			self.title = _TAG_RE.sub("", t).replace("<", "").replace(">", "")
 		if self.summary:
 			s = _CONTROL_RE.sub("", str(self.summary))
-			self.summary = (
-				SANITIZED_PLACEHOLDER if scan_instruction_injection(s) else s
-			)
+			self.summary = SANITIZED_PLACEHOLDER if scan_instruction_injection(s) else s
 		if self.body_md:
 			body = _CONTROL_RE.sub("", str(self.body_md))
 			for pattern, repl in _BODY_NEUTRALIZE:
@@ -146,11 +158,39 @@ class JarvisWikiPage(Document):
 		caller already suffixed; base is trimmed to keep the total <= 140 and
 		grammar-valid (scrub emits alnum-and-single-hyphen runs only)."""
 		self.slug = (self.slug or "").strip().lower()
+		if self.scope == "User" and self.target_user and self.slug:
+			self.slug = self._pick_user_slug()
+			return
 		suffix = self._scope_slug_suffix()
 		if not self.slug or not suffix or self.slug.endswith(suffix):
 			return
 		base = self.slug[: MAX_SLUG_LEN - len(suffix)].rstrip("-")
 		self.slug = f"{base}{suffix}"
+
+	def _pick_user_slug(self) -> str:
+		"""The audience-suffixed slug this personal page gets.
+
+		``--u-<localpart>`` keys on the email LOCAL PART only, so alice@acme.com
+		and alice@contractor.io derive the SAME slug — and the slug IS the
+		docname (``autoname: field:slug``, unique), so the second user's page
+		collided with the first's (issue #490). The preferred form is kept
+		whenever it is unclaimed or already this user's, so every personal page
+		created before this fix keeps its slug and its docname; only a genuine
+		cross-user collision falls back to ``--u-<localpart>-<digest>``.
+
+		If BOTH forms are taken by someone else the preferred one is returned
+		unchanged and the unique index raises ``DuplicateEntryError``, exactly as
+		before — callers already handle that."""
+		from jarvis.chat.wiki import user_scope_slug_candidates
+
+		candidates = user_scope_slug_candidates(self.slug, self.target_user)
+		for candidate in candidates:
+			row = frappe.db.get_value(
+				self.doctype, {"slug": candidate}, ["name", "target_user"], as_dict=True
+			)
+			if not row or row.target_user == self.target_user:
+				return candidate
+		return candidates[0]
 
 	def _guard_scope_change(self):
 		"""Only a System Manager may re-scope or re-target an existing page —
@@ -189,9 +229,7 @@ class JarvisWikiPage(Document):
 		if not self.slug:
 			frappe.throw(_("Slug is required."))
 		if len(self.slug) > MAX_SLUG_LEN:
-			frappe.throw(
-				_("Slug must be at most {0} characters.").format(MAX_SLUG_LEN)
-			)
+			frappe.throw(_("Slug must be at most {0} characters.").format(MAX_SLUG_LEN))
 		if not SLUG_RE.match(self.slug):
 			frappe.throw(
 				_(
@@ -203,10 +241,6 @@ class JarvisWikiPage(Document):
 	def _validate_lengths(self):
 		self.title = (self.title or "").strip()
 		if self.summary and len(self.summary) > MAX_SUMMARY_LEN:
-			frappe.throw(
-				_("Summary must be at most {0} characters.").format(MAX_SUMMARY_LEN)
-			)
+			frappe.throw(_("Summary must be at most {0} characters.").format(MAX_SUMMARY_LEN))
 		if self.body_md and len(self.body_md) > MAX_BODY_LEN:
-			frappe.throw(
-				_("Body must be at most {0} characters.").format(MAX_BODY_LEN)
-			)
+			frappe.throw(_("Body must be at most {0} characters.").format(MAX_BODY_LEN))

@@ -203,8 +203,7 @@ def postprocess_itemgroup_warehouse(rows, spec, company, patterndb, params):
 	n_wh = single_value(patterndb, WAREHOUSE_COUNT_SQL, params) or 0
 	if int(n_wh) > max_wh:
 		raise DetectorSkip(
-			f"multi-plant: {int(n_wh)} shipping warehouses; needs cost-center "
-			"dimensioning (Tier-2 variant)"
+			f"multi-plant: {int(n_wh)} shipping warehouses; needs cost-center dimensioning (Tier-2 variant)"
 		)
 	return reduce_units(rows, spec, patterndb)
 
@@ -227,10 +226,7 @@ def postprocess_itemgroup_warehouse_dimensioned(rows, spec, company, patterndb, 
 		)
 
 	rows = list(rows or [])
-	if all(
-		compat.has_field("Delivery Note Item", f)
-		for f in ("item_group", "warehouse", "cost_center")
-	):
+	if all(compat.has_field("Delivery Note Item", f) for f in ("item_group", "warehouse", "cost_center")):
 		try:
 			rows += patterndb.timed_select(ITEMGROUP_WAREHOUSE_DIMENSIONED_DN_SQL, params) or []
 		except Exception:

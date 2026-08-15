@@ -53,11 +53,13 @@ class TestJarvisConversationDocType(FrappeTestCase):
 
 	def test_before_insert_sets_last_active_at(self):
 		try:
-			doc = frappe.get_doc({
-				"doctype": DOCTYPE,
-				"title": "Test chat",
-				"status": "Active",
-			})
+			doc = frappe.get_doc(
+				{
+					"doctype": DOCTYPE,
+					"title": "Test chat",
+					"status": "Active",
+				}
+			)
 			doc.insert(ignore_permissions=True)
 			self.assertIsNotNone(doc.last_active_at)
 		finally:

@@ -1,6 +1,6 @@
 """Session lifecycle: idle-session reclaim + empty-chat + orphan sweeps.
 
-Every Jarvis Conversation maps to one openclaw session, created lazily on the
+Every Jarvis Conversation maps to one agent session, created lazily on the
 first turn. Without a sweep, state accumulates forever:
 
 - Dormant conversation sessions: the user stopped chatting weeks ago but the
@@ -9,14 +9,15 @@ first turn. Without a sweep, state accumulates forever:
   0-message row cluttering history.
 - Orphaned throwaway sessions: deleted conversations leave their sessions behind,
   and so do the three throwaway kinds (auto-title, pattern polish, prefix
-  prewarm) whenever their own cleanup is missed. All three DO now delete their
-  own - title and polish in a finally, prewarm by reclaiming its predecessor on
-  the next warm - so this sweep is their backstop, not their only collector. It
-  used to be the only one, and could not keep up: a 4-minute warm cooldown alone
-  minted up to ~350 sessions/day against a sweep capped at 25/day.
+  prewarm) whenever their own cleanup is missed. All three DO now reclaim their
+  own through ``reclaim_throwaway_session`` below - title and polish in a
+  finally, prewarm by reclaiming its predecessor on the next warm - so this
+  sweep is their backstop, not their only collector. It used to be the only one,
+  and could not keep up: a 4-minute warm cooldown alone minted up to ~350
+  sessions/day against a sweep capped at 25/day.
 
 The bench is the durable owner of chat history (Jarvis Chat Message rows); the
-openclaw session is a cache of working context, not the record. Deleting one is
+agent session is a cache of working context, not the record. Deleting one is
 safe: the gateway archives the transcript first (sessions.delete
 deleteTranscript=true default), canvas/media artifacts were pulled to ERP Files
 at turn end, and the next message lazily creates a fresh session through the
@@ -26,7 +27,7 @@ The hourly ``rotate_dormant_sessions`` cron:
 
 1. FREE IDLE SESSIONS: conversations idle past the configured retention window
    (Jarvis Settings.conversation_retention_days; 0 disables) that still hold a
-   live openclaw session, with no in-flight rows -> free the session (delete the
+   live agent session, with no in-flight rows -> free the session (delete the
    gateway session, clear ``conv.session_key``, drop ``Jarvis Chat Session``
    lookup rows). The conversation is LEFT ACTIVE AND VISIBLE - only the
    container-side working memory is reclaimed. Returning to the chat lazily
@@ -53,7 +54,14 @@ gateway hygiene, always runs, and has its own budget so parts 1 + 2 cannot
 starve it. Everything is best-effort on a dedicated connection (never the pool -
 a sweep must not contend with live turns), batch-capped so a backlog drains over
 a few runs instead of stampeding a gateway, and managed-mode only.
+
+``reclaim_throwaway_session`` is the other half: the same "is this session
+really finished" gate the sweep applies, exposed to the throwaway minters so
+they can collect their own session immediately without racing the run that owns
+it. Cron and minters therefore agree on one rule - never delete a session the
+gateway still reports an active run for.
 """
+
 from __future__ import annotations
 
 import logging
@@ -67,7 +75,7 @@ CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
 CHAT_SESSION = "Jarvis Chat Session"
 
-# Retention: a conversation idle this long has its openclaw session freed (its
+# Retention: a conversation idle this long has its agent session freed (its
 # working memory reclaimed). The conversation itself stays Active and visible.
 # Configurable per-tenant via Jarvis Settings.conversation_retention_days; these
 # are the fallbacks a reader applies. DEFAULT is used when the Single field is
@@ -105,6 +113,7 @@ def _retention_days() -> int:
 		return 0
 	return max(days, MIN_RETENTION_DAYS)
 
+
 # An unreferenced gateway session younger than this is skipped: it may be
 # an in-flight title/prewarm throwaway, or a conversation whose freshly
 # created session_key has not committed yet.
@@ -126,41 +135,43 @@ ORPHAN_BATCH_MAX = 200
 _CHAT_NAMESPACE_MARKER = ":dashboard:"
 
 # Labels of every throwaway session kind the bench mints: prewarm.warm_prefix,
-# title._generate_via_gateway, and learning.polish._run_gateway_turn. All three
-# now delete their own sessions, so these only turn up here when that cleanup was
-# missed (a crash, a lost cache pointer, a gateway blip) - never as live state.
+# title._generate_via_gateway, learning.polish._run_gateway_turn, and the
+# onboarding preflight's live probe (jarvis#840). Each deletes or reclaims its
+# own session, so these only turn up here when that cleanup was missed (a
+# crash, a lost cache pointer, a gateway blip) or deliberately skipped (the
+# preflight's abandoned-worker timeout path leaves its billed session for THIS
+# sweep) - never as live state.
 #
 # A short grace is SAFE for these specifically because the labels are namespaced:
 # a real conversation session is always "jarvis-chat-<user>-<ms>" (api.py
 # _ensure_session_key), so a throwaway label can never be a conversation whose
 # freshly-minted session_key has not committed yet. That race is exactly what
 # ORPHAN_GRACE_HOURS protects, and it still gets the full 24h.
-_THROWAWAY_LABEL_PREFIXES = ("jarvis-prewarm-", "jarvis-title-", "jarvis-polish-")
+_THROWAWAY_LABEL_PREFIXES = (
+	"jarvis-prewarm-",
+	"jarvis-title-",
+	"jarvis-polish-",
+	"jarvis-preflight-",
+)
 THROWAWAY_GRACE_HOURS = 1
 
 
 def rotate_dormant_sessions() -> dict:
-	"""Hourly cron: free idle conversations' openclaw sessions, reap abandoned
+	"""Hourly cron: free idle conversations' agent sessions, reap abandoned
 	empty chats, and reap orphaned throwaway sessions. Returns a summary dict
 	(also logged) so a manual ``bench execute`` run shows what happened. (Name
 	kept for the scheduler entry in hooks.py.)"""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return {"skipped": "self-hosted"}
-
 	settings = frappe.get_single("Jarvis Settings")
-	gateway_url = (settings.agent_url or "").replace(
-		"http://", "ws://").replace("https://", "wss://")
+	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	if not gateway_url:
 		return {"skipped": "no agent_url"}
 
-	from jarvis.chat.openclaw_client import OpenclawSession
+	from jarvis.chat.agent_client import AgentSession
 
 	summary = {"sessions_freed": 0, "empty_reaped": 0, "orphans_reaped": 0, "skipped": 0, "errors": 0}
 	budget = BATCH_MAX
 	try:
-		sess = OpenclawSession.connect(gateway_url)
+		sess = AgentSession.connect(gateway_url)
 	except Exception:
 		frappe.log_error(
 			title="session_lifecycle: connect failed",
@@ -190,7 +201,7 @@ def rotate_dormant_sessions() -> dict:
 
 def _free_idle_sessions(sess, budget: int, summary: dict, days: int) -> int:
 	"""Part 1: conversations idle past the retention window that still hold an
-	openclaw session -> free the session (delete gateway session, null
+	agent session -> free the session (delete gateway session, null
 	``session_key``, drop the lookup rows). The conversation is left Active and
 	visible; only the container-side working memory is reclaimed. Starred and
 	status are irrelevant here - any idle chat with a live session qualifies.
@@ -222,7 +233,7 @@ def _free_idle_sessions(sess, budget: int, summary: dict, days: int) -> int:
 		# the local commit must not strand the sweep - the idempotent not-found
 		# handling in _delete_gateway_session lets the next run finish cleanup.
 		try:
-			# Free the openclaw session FIRST; only detach the bench side once
+			# Free the agent session FIRST; only detach the bench side once
 			# the gateway side is gone, else a crash would strand a live session
 			# under a nulled key. A gateway-delete failure leaves the row intact
 			# for the next run.
@@ -280,6 +291,14 @@ def _reap_empty(sess, budget: int, summary: dict) -> int:
 		  AND c.starred = 0
 		  AND c.file_box = 0
 		  AND c.last_active_at IS NOT NULL AND c.last_active_at < %(cutoff)s
+		  -- HARD DATA-LOSS GUARD: only a conversation with ZERO messages is ever
+		  -- reapable. A conversation that holds ANY message - a user message, or
+		  -- even an assistant row from a turn that FAILED (a terminal agent error
+		  -- leaves an errored/empty assistant row; see turn_handler + the
+		  -- agent_client failed_final mapping) - is real chat history and is
+		  -- never auto-deleted. Do NOT loosen this to reap "conversations whose
+		  -- turns all failed / produced no visible content": that would delete the
+		  -- user's message. Empty ones may go; anything with a message stays.
 		  AND NOT EXISTS (
 			SELECT 1 FROM `tabJarvis Chat Message` m WHERE m.conversation = c.name
 		  )
@@ -358,7 +377,8 @@ def _reap_orphans(sess, budget: int, summary: dict) -> None:
 		summary["errors"] += 1
 		return
 	known = {
-		k for (k,) in frappe.db.sql(
+		k
+		for (k,) in frappe.db.sql(
 			"SELECT session_key FROM `tabJarvis Conversation` "
 			"WHERE session_key IS NOT NULL AND session_key != ''"
 		)
@@ -415,3 +435,142 @@ def _delete_gateway_session(sess, session_key: str, summary: dict) -> bool:
 		)
 		summary["errors"] += 1
 		return False
+
+
+# --------------------------------------------------------------------------- #
+# throwaway reclaim (called by the minters, not by the cron)
+# --------------------------------------------------------------------------- #
+
+# A throwaway one-shot used to call sessions.delete the instant its own turn
+# returned. That is too early, and the gateway paid for it (issue #525):
+#
+# - stream_agent_turn returns on the run's lifecycle-end frame, but agent's
+#   embedded run is still finalising the session file for a beat after that;
+# - on EVERY error path stream_agent_turn RAISES while the run keeps going
+#   server side (agent's run lane deliberately survives a client drop), and
+#   the delete then ran from a finally with the run mid-flight;
+# - prewarm's fire_agent never waits at all, so its session is by definition
+#   still running when the next warm reclaims it.
+#
+# Deleting underneath a live run renames the session file out from under it.
+# Observed on jarvis-pool-bf4097: an auto-title session deleted 194ms after its
+# reply landed was RE-CREATED by the same run 113ms later (a fresh orphan the
+# sweep then has to collect), and another died outright with
+# "EmbeddedAttemptSessionTakeoverError: session file changed while embedded
+# prompt lock was released". The failed run surfaces as a decision=surface_error
+# ... next=none line that is indistinguishable in the log from a genuine
+# failover failure, which is the expensive part of the bug.
+#
+# So ask the gateway before deleting. sessions.list -> hasActiveRun is the same
+# signal _reap_orphans already trusts.
+#
+# PROBE FIRST, sleep only between retries. One of these callers
+# (learning.polish, via learned_api's "Polish with AI" and follow-up-rephrase
+# endpoints) runs INSIDE a synchronous whitelisted request, and title/polish
+# hold one of only POOL_MAX_PER_GATEWAY=3 pooled connections while they do
+# this. An unconditional settle would tax both on every call; a probe costs one
+# sessions.list and only turns into a wait when the gateway actually says the
+# run is live, which is precisely when waiting is the correct answer.
+RECLAIM_PROBE_ATTEMPTS = 6
+RECLAIM_PROBE_DELAY_S = 0.5
+
+# ...but a probe alone cannot close the window, because agent ACCEPTS a run
+# well before it STARTS one, and sessions.list reports "accepted, not started"
+# exactly like "finished": hasActiveRun is false in both.
+#
+# Measured on jarvis-pool-bf4097, 269 sessions, as the gap between the session
+# file's creation stamp (the sessions.create the bench issues immediately before
+# it fires) and the run's own session.started trajectory event:
+#
+#     p50 0.67s   p90 2.90s   p95 4.84s   (86 over 1s, 25 over 3s)
+#
+# So for a median 670ms after a fire-and-forget the gateway will happily tell a
+# reclaim "no run here", and the reclaim deletes the session out from under a
+# run that is about to start. That is a check-then-act race, and no amount of
+# probing fixes it: the probe is reading a signal that has not been written yet.
+#
+# What closes it is a caller that knows it never saw the run END. For those, a
+# "no active run" answer is only believed once RUN_START_GRACE_S has passed
+# since the fire, OR once a probe has actually caught the run active (positive
+# evidence beats the clock - see `seen_active`). Callers that DID watch the run
+# reach its terminal frame pass no fire time and keep the immediate reclaim.
+#
+# Sized just past the p95 above. We do not WAIT this out - waiting would tax
+# polish's synchronous request for nothing - we simply decline to guess and let
+# the orphan sweep collect it, which is the same trade the rest of this function
+# already makes.
+RUN_START_GRACE_S = 5.0
+
+
+def reclaim_throwaway_session(
+	sess,
+	session_key: str,
+	*,
+	logger_name: str,
+	fired_at: float | None = None,
+) -> bool:
+	"""Delete a throwaway session once the gateway stops reporting a run on it.
+
+	Probes immediately, then re-checks after ``RECLAIM_PROBE_DELAY_S`` up to
+	``RECLAIM_PROBE_ATTEMPTS`` times. Returns True when the session was deleted,
+	False when it was left behind - still busy, not started yet, or the gateway
+	would not answer.
+
+	``fired_at`` is the wall-clock ``time.time()`` at which the run was fired,
+	and MUST be passed by any caller that did not watch that run reach its
+	terminal frame: prewarm (fire-and-forget by construction) and title/polish
+	on the path where ``stream_agent_turn`` raised. It marks the answer
+	"no active run" as untrustworthy until ``RUN_START_GRACE_S`` has elapsed,
+	which is what keeps a not-yet-started run from being deleted. Callers that
+	consumed the stream to its end pass nothing and reclaim immediately, as
+	before - there is no unstarted run to protect.
+
+	Leaving it behind is safe and deliberate: every throwaway label carries a
+	``THROWAWAY_GRACE_HOURS`` grace and its own ``ORPHAN_BATCH_MAX`` budget in
+	the hourly sweep above, so a skipped reclaim costs a delayed collection, not
+	a leak. Killing a live run to hit the budget would be the worse trade - that
+	is the whole defect this function exists to remove.
+
+	RESIDUAL: ``hasActiveRun`` is the strongest finished-signal the gateway
+	exposes, so a session agent has stopped counting as active but is still
+	writing to would still be deleted underneath. Every case actually observed
+	on jarvis-pool-bf4097 had the run's lane demonstrably still working when the
+	delete landed (it re-created the session file afterwards), so the probe
+	covers them; the sweep covers whatever it does not. On the start side, a run
+	that takes longer than ``RUN_START_GRACE_S`` to appear is still exposed - 5%
+	of the measured sample - and the sweep is the backstop there too.
+
+	Never raises: every caller is a best-effort path whose real work is already
+	done by the time it reclaims."""
+	if not session_key or not isinstance(session_key, str):
+		return False
+	log = frappe.logger(logger_name)
+	# Before this instant an idle answer only means "the run has not started
+	# yet". 0.0 (no fire time given) => the caller saw the run end, trust at once.
+	#
+	# The isinstance check is not decoration: the arithmetic below sits OUTSIDE
+	# the per-probe try, so a caller that ever handed over a non-numeric fire
+	# time (a str from a cache round-trip, say) would raise straight through the
+	# "never raises" contract every caller here relies on.
+	trust_idle_after = (
+		fired_at + RUN_START_GRACE_S if isinstance(fired_at, (int, float)) and fired_at else 0.0
+	)
+	seen_active = False
+	for attempt in range(RECLAIM_PROBE_ATTEMPTS):
+		try:
+			if sess.is_run_active(session_key):
+				# Positive evidence the run exists. Every later idle answer is now
+				# a real finished-signal, so the grace above stops applying.
+				seen_active = True
+			elif seen_active or time.time() >= trust_idle_after:
+				sess.delete_session(session_key)
+				return True
+		except Exception:
+			# A gateway blip during probe or delete: hand it to the sweep
+			# rather than retrying a delete whose outcome we cannot read.
+			log.debug("throwaway session reclaim failed key=%s", session_key, exc_info=True)
+			return False
+		if attempt < RECLAIM_PROBE_ATTEMPTS - 1:
+			time.sleep(RECLAIM_PROBE_DELAY_S)
+	log.debug("throwaway session not confirmed finished, left for the sweep key=%s", session_key)
+	return False

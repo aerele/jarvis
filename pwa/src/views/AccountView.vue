@@ -1,82 +1,83 @@
 <script setup>
-import { computed, onMounted, ref } from "vue"
-import { call } from "frappe-ui"
-import AppBar from "../components/AppBar.vue"
-import * as api from "../api"
-import { resetFeed } from "../lib/notifications"
+import { computed, onMounted, ref } from "vue";
+import { call } from "frappe-ui";
+import AppBar from "../components/AppBar.vue";
+import * as api from "../api";
+import { resetFeed } from "../lib/notifications";
 
 // Account, as the native app has it: who you are, what you're on, what you've
 // used, and the way out. No link to the desktop workspace — this IS the app.
-const account = ref(null)
-const usage = ref(null)
-const loading = ref(true)
-const signingOut = ref(false)
+const account = ref(null);
+const usage = ref(null);
+const loading = ref(true);
+const signingOut = ref(false);
 
-const user = computed(() => window.frappe_user_id || "")
-const fullName = computed(() => window.frappe_full_name || user.value)
-const initial = computed(() => (fullName.value || "?").trim().charAt(0).toUpperCase())
-const host = computed(() => window.location.host)
+const user = computed(() => window.frappe_user_id || "");
+const fullName = computed(() => window.frappe_full_name || user.value);
+const initial = computed(() => (fullName.value || "?").trim().charAt(0).toUpperCase());
+const host = computed(() => window.location.host);
 
 // get_account proxies the admin's summary: {ok, data:{subscription_status,
 // plan:{plan_name, billing_cycle, price_inr}, current_period_end, autorenew}}.
-const acc = computed(() => account.value?.data ?? account.value ?? {})
-const plan = computed(() => acc.value.plan || null)
-const status = computed(() => acc.value.subscription_status || "none")
-const active = computed(() => status.value === "Active")
+const acc = computed(() => account.value?.data ?? account.value ?? {});
+const plan = computed(() => acc.value.plan || null);
+const status = computed(() => acc.value.subscription_status || "none");
+const active = computed(() => status.value === "Active");
 
 const planLabel = computed(() => {
-	const p = plan.value
-	if (!p) return "No subscription"
-	const cycle = p.billing_cycle === "Yearly" ? "/yr" : p.billing_cycle === "Monthly" ? "/mo" : ""
-	const price = p.price_inr ? ` · ₹${Number(p.price_inr).toLocaleString("en-IN")}${cycle}` : ""
-	return `${p.plan_name}${price}`
-})
+	const p = plan.value;
+	if (!p) return "No subscription";
+	const cycle =
+		p.billing_cycle === "Yearly" ? "/yr" : p.billing_cycle === "Monthly" ? "/mo" : "";
+	const price = p.price_inr ? ` · ₹${Number(p.price_inr).toLocaleString("en-IN")}${cycle}` : "";
+	return `${p.plan_name}${price}`;
+});
 
 function fmtDate(v) {
-	if (!v) return "—"
-	const d = new Date(String(v).replace(" ", "T"))
+	if (!v) return "—";
+	const d = new Date(String(v).replace(" ", "T"));
 	return Number.isNaN(d.getTime())
 		? String(v)
-		: d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })
+		: d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
 }
 
 function fmtTokens(n) {
-	if (n == null) return "—"
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`
-	if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k`
-	return String(n)
+	if (n == null) return "—";
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+	if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+	return String(n);
 }
 
-const used = computed(() => usage.value?.month_tokens ?? 0)
-const budget = computed(() => usage.value?.budget_monthly ?? 0)
+const used = computed(() => usage.value?.month_tokens ?? 0);
+const budget = computed(() => usage.value?.budget_monthly ?? 0);
 const pct = computed(() =>
-	budget.value > 0 ? Math.min(100, Math.round((used.value / budget.value) * 100)) : 0,
-)
+	budget.value > 0 ? Math.min(100, Math.round((used.value / budget.value) * 100)) : 0
+);
 
 async function signOut() {
-	if (signingOut.value) return
-	signingOut.value = true
+	if (signingOut.value) return;
+	signingOut.value = true;
 	try {
-		await call("logout")
+		await call("logout");
 	} catch {
 		// Session may already be gone; leave for the login screen either way.
 	}
 	// The feed is this person's task history — the next user of this browser must
 	// not inherit it, or its unread badge.
-	resetFeed()
+	resetFeed();
 	// In-scope: an installed app must not end its session by throwing the user
 	// into a browser tab.
-	window.location.href = "/jarvis-mobile/login"
+	window.location.href = "/jarvis-mobile/login";
 }
 
 onMounted(async () => {
 	// Neither call is essential to the screen, so a failure in one must not blank
 	// the other — settle both.
-	const [a, u] = await Promise.allSettled([api.getAccount(), api.getUsage()])
-	if (a.status === "fulfilled") account.value = a.value
-	if (u.status === "fulfilled") usage.value = u.value
-	loading.value = false
-})
+	const [a, u] = await Promise.allSettled([api.getAccount(), api.getUsage()]);
+	if (a.status === "fulfilled") account.value = a.value;
+	if (u.status === "fulfilled") usage.value = u.value;
+	loading.value = false;
+});
 </script>
 
 <template>
@@ -92,7 +93,9 @@ onMounted(async () => {
 		</div>
 
 		<div v-if="loading" class="jv-skel">
-			<div /><div /><div />
+			<div />
+			<div />
+			<div />
 		</div>
 
 		<template v-else>
@@ -118,19 +121,38 @@ onMounted(async () => {
 				<div class="jv-usage-head">
 					<span>Usage this month</span>
 					<span class="jv-num">
-						{{ budget > 0 ? `${fmtTokens(used)} / ${fmtTokens(budget)} tokens` : `${fmtTokens(used)} tokens` }}
+						{{
+							budget > 0
+								? `${fmtTokens(used)} / ${fmtTokens(budget)} tokens`
+								: `${fmtTokens(used)} tokens`
+						}}
 					</span>
 				</div>
 				<div class="jv-track"><div class="jv-fill" :style="{ width: `${pct}%` }" /></div>
 				<div class="jv-usage-foot">
-					{{ [usage?.month_label, usage?.estimated ? "estimated" : null].filter(Boolean).join(" · ") || "—" }}
+					{{
+						[usage?.month_label, usage?.estimated ? "estimated" : null]
+							.filter(Boolean)
+							.join(" · ") || "—"
+					}}
 				</div>
 			</div>
 
-			<p class="jv-note">Jarvis works with your permissions. It can only see and change what you can.</p>
+			<p class="jv-note">
+				Jarvis works with your permissions. It can only see and change what you can.
+			</p>
 
 			<button class="jv-signout" :disabled="signingOut" @click="signOut">
-				<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+				<svg
+					viewBox="0 0 24 24"
+					width="17"
+					height="17"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.9"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
 					<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
 				</svg>
 				{{ signingOut ? "Signing out…" : "Sign out" }}

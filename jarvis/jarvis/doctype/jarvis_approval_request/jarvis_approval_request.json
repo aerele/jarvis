@@ -9,6 +9,10 @@
   "title",
   "status",
   "source",
+  "agent",
+  "run",
+  "preparation_mode",
+  "result_class",
   "document_type",
   "conversation",
   "question",
@@ -119,6 +123,40 @@
    "fieldtype": "Check",
    "hidden": 1,
    "label": "Trace Comment Added"
+  },
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "label": "Agent",
+   "options": "Jarvis Agent Listing",
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "PP-5 — set for an agent-originated request; a human File-Box/Chat request leaves it blank. Distinguishes the two provenance paths."
+  },
+  {
+   "fieldname": "run",
+   "fieldtype": "Link",
+   "label": "Run",
+   "options": "Jarvis Agent Run",
+   "read_only": 1,
+   "description": "PP-5 — the Jarvis Agent Run that raised this request (agent-originated requests only)."
+  },
+  {
+   "fieldname": "preparation_mode",
+   "fieldtype": "Select",
+   "label": "Preparation Mode",
+   "options": "shadow\nlive",
+   "read_only": 1,
+   "description": "PP-5 — the activation mode (shadow|live) the originating run executed under; blank for human requests."
+  },
+  {
+   "fieldname": "result_class",
+   "fieldtype": "Select",
+   "label": "Result Class",
+   "options": "observed_fact\nderived_candidate\nlegal_scenario\nconfirmed_outcome",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "PP-1 — the value grammar class for an agent-originated, value-bearing request. Blank for a human File-Box/Chat request. Set once, never editable afterwards."
   }
  ],
  "index_web_pages_for_search": 0,

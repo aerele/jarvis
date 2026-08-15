@@ -1,101 +1,101 @@
 <!--
-  Reusable inline banner (approved design: error-toast-system-preview.html,
-  section 2 "Inline banner - contextual, actionable errors"). Sits in a fixed
+  Reusable inline banner (design.md §3.7 "Banners & notices"). Sits in a fixed
   slot on a screen (a form step, a blocked action) instead of loose colored
-  text. Icon tile + title/message body + an optional #action slot for a
-  Retry-style button. Ported from the preview's .banner / .banner.error /
-  .banner.warning CSS; .banner.info / .banner.success extrapolated from the
-  same file's .toast.info / .toast.success color pairing (the preview only
-  demoed error + warning banners, but all four states share the toast
-  palette).
+  text. Icon + title/message body + an optional #action slot for a
+  Retry-style button. Wired into onboarding's error/notice surfaces (9 spots
+  in OnboardingView.vue) and ChatView's billing/paused banners — the
+  type/title/message props and the default/#action slots are a stable API
+  that every call site depends on; only the internal styling below changed.
+
+  jarvis#725: the icon used to sit in a bordered size-6.5 (26px) chip next to
+  `items-start`. A single text-sm line is only ~15px tall, so the chip's own
+  centered icon landed well below the text's center - visibly top-heavy on
+  the common single-line case. Two fixes were possible: switch to
+  `items-center` (design.md's literal words), or shrink the icon box to the
+  text's own line-height so `items-start` already centers it. items-center
+  was rejected because it centers the icon against the WHOLE flex item - for
+  a title+message banner (two lines) or a long message that wraps, that
+  drifts the icon toward the block's middle instead of staying on the first
+  line (verified in a throwaway visual harness, not shipped: items-center
+  visibly slides the icon down to straddle both lines once a second line is
+  added). Bare `size-4` (16px, design.md's own icon-size spec, no chip) sits
+  so close to a text-sm line (~15px) that `items-start` alone reads as
+  centered, and - because the icon no longer grows with the content - it
+  stays pinned to line one no matter how many lines follow. This also
+  matches the "Test failed" reference the issue called out as already
+  correct (LlmPoolEditor's .jv-status: a bare icon, no chip).
 -->
 <template>
-	<div class="jv-banner" :class="`jv-banner--${type}`">
-		<span class="jv-banner-ic" aria-hidden="true">
-			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-				 :stroke-width="type === 'success' ? 2.6 : 2" stroke-linecap="round" stroke-linejoin="round">
-				<template v-if="type === 'error'">
-					<circle cx="12" cy="12" r="9" /><path d="M12 8v5M12 16h.01" />
-				</template>
-				<template v-else-if="type === 'warning'">
-					<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" /><path d="M12 9v4M12 17h.01" />
-				</template>
-				<template v-else-if="type === 'success'">
-					<path d="M20 6 9 17l-5-5" />
-				</template>
-				<template v-else>
-					<circle cx="12" cy="12" r="9" /><path d="M12 16v-5M12 8h.01" />
-				</template>
-			</svg>
-		</span>
-		<div class="jv-banner-bd">
+	<div class="flex items-start gap-2.5 rounded-md p-2.5" :class="variant.fill">
+		<FeatherIcon
+			:name="variant.icon"
+			class="size-4 shrink-0"
+			:class="variant.ink"
+			aria-hidden="true"
+		/>
+		<div class="min-w-0 flex-1">
 			<template v-if="title">
-				<div class="jv-banner-tt">{{ title }}</div>
-				<div v-if="message" class="jv-banner-ms">{{ message }}</div>
+				<div class="text-sm font-semibold" :class="variant.ink">{{ title }}</div>
+				<div v-if="message" class="mt-0.5 text-p-xs text-ink-gray-7">{{ message }}</div>
 			</template>
 			<!-- No title: the message reads as the primary line so a message-only
 				 banner (the common case here) doesn't look like a blank card with a
 				 muted second line. -->
-			<div v-else class="jv-banner-tt">{{ message }}</div>
+			<div v-else class="text-sm font-semibold" :class="variant.ink">{{ message }}</div>
 			<!-- Optional extra body (hint line, a details expander): renders nothing
 				 when no default slot is passed, so existing message-only callers are
 				 unaffected. -->
 			<slot />
 		</div>
-		<div v-if="$slots.action" class="jv-banner-act">
+		<div v-if="$slots.action" class="mt-0.5 flex shrink-0 items-center gap-2">
 			<slot name="action" />
 		</div>
 	</div>
 </template>
 
 <script setup>
-defineProps({
+import { computed } from "vue";
+import { FeatherIcon } from "frappe-ui";
+
+const props = defineProps({
 	type: { type: String, default: "error" }, // error | warning | info | success
 	title: { type: String, default: "" },
 	message: { type: String, default: "" },
-})
+});
+
+// Typed fill + ink, straight off design.md §3.7's banner recipe and the same
+// red/amber/green/blue ramps frappe-ui's own Badge uses (bg-surface-{hue}-2 +
+// text-ink-{hue}-3, confirmed against Badge.vue's subtle theme map). Error
+// uses ink-red-3 rather than Badge's ink-red-4 — design.md §2.1 documents
+// red-3 specifically as "error-banner ink", red-4 as badge/general error text.
+//
+// Info is the real blue ramp, not --cta: the old jv-* version painted "info"
+// with --cta/--cta-bg to dodge a since-fixed gap where --info was never
+// defined, but PR #294 repointed --cta off indigo to near-black/near-white,
+// so an "info" banner was silently rendering as a near-black/near-white card.
+// Using text-ink-blue-3 / bg-surface-blue-2 here is the fix, not a stylistic
+// swap.
+const VARIANTS = {
+	error: {
+		fill: "bg-surface-red-2",
+		ink: "text-ink-red-3",
+		icon: "alert-circle",
+	},
+	warning: {
+		fill: "bg-surface-amber-2",
+		ink: "text-ink-amber-3",
+		icon: "alert-triangle",
+	},
+	success: {
+		fill: "bg-surface-green-2",
+		ink: "text-ink-green-3",
+		icon: "check-circle",
+	},
+	info: {
+		fill: "bg-surface-blue-2",
+		ink: "text-ink-blue-3",
+		icon: "info",
+	},
+};
+const variant = computed(() => VARIANTS[props.type] || VARIANTS.error);
 </script>
-
-<style scoped>
-.jv-banner {
-	display: flex;
-	gap: 11px;
-	align-items: flex-start;
-	border-radius: 11px;
-	padding: 11px 13px;
-	animation: jv-banner-in .25s ease;
-}
-@keyframes jv-banner-in {
-	from { opacity: 0; transform: translateY(-4px); }
-	to { opacity: 1; transform: none; }
-}
-.jv-banner-ic { width: 26px; height: 26px; border-radius: 8px; flex: none; display: grid; place-items: center; }
-.jv-banner-bd { flex: 1; min-width: 0; }
-.jv-banner-tt { font-size: 13px; font-weight: 600; line-height: 1.3; }
-.jv-banner-ms { font-size: 12.5px; color: var(--text-2); line-height: 1.5; margin-top: 2px; }
-.jv-banner-act { flex: none; display: flex; gap: 8px; align-items: center; margin-top: 1px; }
-
-.jv-banner--error { background: var(--red-bg); border: 1px solid var(--red-bd); }
-.jv-banner--error .jv-banner-ic { background: var(--surface); color: var(--red); border: 1px solid var(--red-bd); }
-.jv-banner--error .jv-banner-tt { color: var(--red); }
-
-.jv-banner--warning { background: var(--amber-bg); border: 1px solid var(--amber-bd); }
-.jv-banner--warning .jv-banner-ic { background: var(--surface); color: var(--amber); border: 1px solid var(--amber-bd); }
-.jv-banner--warning .jv-banner-tt { color: var(--amber); }
-
-/* Info uses the theme's accent (--cta: indigo in light, lighter blue in dark),
-   matching how the success/warning variants use --green/--amber. The old
-   var(--info, #6e8bff) hardcoded the dark-mode blue into BOTH themes because
-   --info was never defined. */
-.jv-banner--info { background: var(--cta-bg); border: 1px solid var(--cta-bd); }
-.jv-banner--info .jv-banner-ic { background: var(--surface); color: var(--cta); border: 1px solid var(--cta-bd); }
-.jv-banner--info .jv-banner-tt { color: var(--cta); }
-
-.jv-banner--success { background: var(--green-bg); border: 1px solid var(--green-bd); }
-.jv-banner--success .jv-banner-ic { background: var(--surface); color: var(--green); border: 1px solid var(--green-bd); }
-.jv-banner--success .jv-banner-tt { color: var(--green); }
-
-@media (prefers-reduced-motion: reduce) {
-	.jv-banner { animation: none; }
-}
-</style>

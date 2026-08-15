@@ -12,17 +12,19 @@ import frappe
 
 # The core stack the persona skill families teach; anything else installed is
 # the customer's own. Extendable per site via core_apps_override.
-_KNOWN_APPS = frozenset({
-	"frappe",
-	"erpnext",
-	"hrms",
-	"india_compliance",
-	"payments",
-	"webshop",
-	"insights",
-	"wiki",
-	"jarvis",
-})
+_KNOWN_APPS = frozenset(
+	{
+		"frappe",
+		"erpnext",
+		"hrms",
+		"india_compliance",
+		"payments",
+		"webshop",
+		"insights",
+		"wiki",
+		"jarvis",
+	}
+)
 
 _SETTINGS = "Jarvis Settings"
 
@@ -62,9 +64,7 @@ def custom_module_names() -> set[str]:
 	if not apps:
 		return set()
 	try:
-		return set(
-			frappe.get_all("Module Def", filters={"app_name": ("in", apps)}, pluck="name")
-		)
+		return set(frappe.get_all("Module Def", filters={"app_name": ("in", apps)}, pluck="name"))
 	except Exception:
 		return set()
 

@@ -6,7 +6,8 @@ import { analyze } from "./graphAnalysis.js";
 import { computeSimilarity, suggestionsFromSimilar } from "./similarity.js";
 
 function _mergeSuggestions(content, structural) {
-	const seen = new Set(), out = [];
+	const seen = new Set(),
+		out = [];
 	for (const s of [...(content || []), ...(structural || [])]) {
 		if (!s || !s.a || !s.b) continue;
 		const key = s.a < s.b ? `${s.a}|${s.b}` : `${s.b}|${s.a}`;

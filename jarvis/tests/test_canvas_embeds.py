@@ -1,6 +1,6 @@
 """Hosted-embed marker support in the chat canvas pipeline.
 
-openclaw 2026.6+ teaches the model to publish rich HTML as hosted canvas
+agent 2026.6+ teaches the model to publish rich HTML as hosted canvas
 documents referenced by ``[embed ref="<id>" /]`` markers (or an explicit
 ``/__openclaw__/canvas/...`` url). These must resolve to the same gateway
 fetch path as plain ``canvas/<path>.<ext>`` references, and the markers must
@@ -15,19 +15,14 @@ from jarvis.chat.canvas import detect_canvas_names, strip_canvas_refs
 class TestCanvasEmbedDetection(FrappeTestCase):
 	def test_embed_ref_maps_to_document_path(self):
 		text = 'Done.\n\n[embed ref="sales-dash-abc123" title="Sales" height="720" /]'
-		self.assertEqual(
-			detect_canvas_names(text), ["documents/sales-dash-abc123/index.html"]
-		)
+		self.assertEqual(detect_canvas_names(text), ["documents/sales-dash-abc123/index.html"])
 
 	def test_embed_url_form_detected_via_canvas_path(self):
 		text = '[embed url="/__openclaw__/canvas/documents/cv_9/index.html" title="X" /]'
 		self.assertEqual(detect_canvas_names(text), ["documents/cv_9/index.html"])
 
 	def test_plain_canvas_path_still_detected_and_deduped(self):
-		text = (
-			"See canvas/charts/foo.html and again canvas/charts/foo.html plus "
-			'[embed ref="bar" /]'
-		)
+		text = 'See canvas/charts/foo.html and again canvas/charts/foo.html plus [embed ref="bar" /]'
 		self.assertEqual(
 			detect_canvas_names(text),
 			["charts/foo.html", "documents/bar/index.html"],

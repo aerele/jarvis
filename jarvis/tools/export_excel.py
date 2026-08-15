@@ -2,10 +2,11 @@
 File so the chat can hand the customer a download.
 
 The agent gathers rows (typically via get_list / run_report) and passes them
-here; we build the workbook with ``frappe.utils.xlsxutils.make_xlsx`` — the
-same engine Frappe's own report export uses — and save the bytes as a private
-File. The chat surface then renders a download card from the returned
-``file_url``.
+here; we build the workbook through ``jarvis.compat.xlsx_bytes`` and save the
+bytes as a private File. That shim exists because ``frappe.utils.xlsxutils``
+was rewritten from openpyxl to xlsxwriter in Frappe 16, so the engine behind
+Frappe's own report export differs per major. The chat surface then renders a
+download card from the returned ``file_url``.
 
 Two shapes:
   * single sheet — pass ``rows`` (+ optional ``title`` / ``columns``);
@@ -14,8 +15,10 @@ Two shapes:
     the only way to hand the user a real multi-tab workbook as a download —
     building one by hand via ``exec`` leaves the file stranded in the container.
 """
+
 import frappe
 
+from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, NoDataError
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -46,7 +49,8 @@ def export_excel(
 		for i, spec in enumerate(sheets):
 			if not isinstance(spec, dict):
 				raise InvalidArgumentError(
-					"each sheet must be an object with 'rows' (+ optional 'title', 'columns').")
+					"each sheet must be an object with 'rows' (+ optional 'title', 'columns')."
+				)
 			try:
 				data = _normalize(spec.get("rows"), spec.get("columns"))
 			except NoDataError:
@@ -105,23 +109,14 @@ def _normalize(rows, columns) -> list:
 
 
 def _workbook_bytes(sheet_data: list[tuple[str, list]]) -> bytes:
-	"""One workbook, a sheet per (name, data). Mirrors ``make_xlsx``'s own
-	workbook options so dates format identically, then reuses ``make_xlsx``
-	(which appends a bold-header worksheet) for each tab."""
-	from io import BytesIO
+	"""One workbook, a sheet per (name, data).
 
-	import xlsxwriter
-	from frappe.utils.xlsxutils import XLSXStyleBuilder, make_xlsx
-
-	out = BytesIO()
-	wb = xlsxwriter.Workbook(out, {
-		"constant_memory": True,
-		"default_date_format": XLSXStyleBuilder.get_datetime_format(),
-	})
-	for name, data in sheet_data:
-		make_xlsx(data, name, wb=wb)  # adds a worksheet to `wb`, returns None
-	wb.close()
-	return out.getvalue()
+	``frappe.utils.xlsxutils`` was rewritten from openpyxl to xlsxwriter in
+	Frappe 16, so the two majors need different builders; ``jarvis.compat``
+	probes for the 16 API and picks one. Building this inline against the 16 API
+	made every export raise ``ModuleNotFoundError: xlsxwriter`` on a 15 bench.
+	"""
+	return compat.xlsx_bytes(sheet_data)
 
 
 def _unique_sheet_name(raw, used: set[str]) -> str:
@@ -131,7 +126,7 @@ def _unique_sheet_name(raw, used: set[str]) -> str:
 	name, n = base, 2
 	while name.lower() in used:
 		suffix = f"-{n}"
-		name = base[:31 - len(suffix)] + suffix
+		name = base[: 31 - len(suffix)] + suffix
 		n += 1
 	used.add(name.lower())
 	return name

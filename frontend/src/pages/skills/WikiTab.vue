@@ -1,10 +1,7 @@
 <template>
 	<div class="flex h-full flex-col overflow-hidden">
 		<ListPage
-			:breadcrumbs="[
-				{ label: 'Skills', route: { name: 'SkillsList' } },
-				{ label: 'Wiki' },
-			]"
+			:breadcrumbs="[{ label: 'Skills', route: { name: 'SkillsList' } }, { label: 'Wiki' }]"
 			:columns="columns"
 			:rows="rows"
 			row-key="name"
@@ -13,13 +10,16 @@
 			:total="total"
 			:has-more="hasMore"
 			:quick-filters="quickFilters"
-			:filter-defs="filterDefs"
+			:filter-state="filterState"
 			:filters="filters"
 			:page-length="pageLength"
 			:on-row-click="openRow"
 			storage-key="wiki"
 			:empty-state="emptyState"
 			@update:filters="setFilters"
+			@update:filter-clauses="setClauses"
+			@request-filter-schema="requestSchema"
+			@dismiss-filter-notice="dismissFilterNotice"
 			@update:page-length="(v) => (pageLength = v)"
 			@load-more="loadMore"
 			@refresh="resetLoad"
@@ -58,13 +58,15 @@
 									:loading="syncing"
 									@click="confirmSync"
 								/>
+								<!-- wiki_mirror_last_sync_status is the same internal audit
+								     string every apply pipeline writes ("ok (restart via
+								     admin)", "failed: fleet returned 502") and this line
+								     used to print it verbatim. @/lib/syncStatus is the one
+								     place that turns it into words a customer can read. -->
 								<p class="text-p-sm text-ink-gray-5">
 									<template v-if="caps.wiki_mirror_last_synced_at">
-										Last synced {{ timeAgo(caps.wiki_mirror_last_synced_at) }}<span
-											v-if="caps.wiki_mirror_last_sync_status"
-										>
-											- {{ caps.wiki_mirror_last_sync_status }}</span
-										>
+										Last synced {{ timeAgo(caps.wiki_mirror_last_synced_at)
+										}}<span v-if="wikiSyncLabel"> - {{ wikiSyncLabel }}</span>
 									</template>
 									<template v-else>Not synced yet.</template>
 								</p>
@@ -78,9 +80,8 @@
 							</div>
 							<p class="mt-2 text-p-sm text-ink-gray-5">
 								<template v-if="caps.wiki_lint_last_run_at">
-									Last health check {{ timeAgo(caps.wiki_lint_last_run_at) }}<span
-										v-if="caps.wiki_lint_summary"
-									>
+									Last health check {{ timeAgo(caps.wiki_lint_last_run_at)
+									}}<span v-if="caps.wiki_lint_summary">
 										- {{ caps.wiki_lint_summary }}</span
 									>
 								</template>
@@ -102,9 +103,10 @@
 			     the empty state, which real first-visits on a grown wiki never see -->
 			<template #banner>
 				<p class="mb-2 text-p-sm text-ink-gray-5">
-					The wiki is the knowledge Jarvis keeps about your business - customers,
-					suppliers, processes, conventions. It grows from chat and voice notes;
-					Jarvis cites it when answering.
+					The wiki is the knowledge {{ agentName }} keeps about your business -
+					customers, suppliers, processes, conventions. It grows from chat and voice
+					notes; {{ agentName }}
+					cites it when answering.
 				</p>
 			</template>
 
@@ -184,11 +186,7 @@
 			</template>
 		</ListPage>
 
-		<WikiPageDialog
-			v-model="pageDialog.show"
-			:slug="pageDialog.slug"
-			@refresh="refreshKeep"
-		/>
+		<WikiPageDialog v-model="pageDialog.show" :slug="pageDialog.slug" @refresh="refreshKeep" />
 
 		<!-- New page dialog: scope options limited to what the caller may create;
 		     the server derives (and suffixes) the slug from type + title -->
@@ -210,7 +208,10 @@
 							:modelValue="createDialog.page_type"
 							@update:modelValue="(v) => (createDialog.page_type = v)"
 						/>
-						<p v-if="TYPE_HELP[createDialog.page_type]" class="text-p-sm text-ink-gray-5">
+						<p
+							v-if="TYPE_HELP[createDialog.page_type]"
+							class="text-p-sm text-ink-gray-5"
+						>
 							{{ TYPE_HELP[createDialog.page_type] }}
 						</p>
 					</div>
@@ -229,18 +230,20 @@
 							placeholder="Search roles"
 							:options="roleSelectOptions"
 							:modelValue="createDialog.target_role"
-							@update:modelValue="(v) => (createDialog.target_role = (v && v.value) || '')"
+							@update:modelValue="
+								(v) => (createDialog.target_role = (v && v.value) || '')
+							"
 						/>
 						<p v-if="!caps.is_sm" class="text-p-sm text-ink-gray-5">
-							You can share knowledge with roles you hold yourself; an
-							administrator can target any role.
+							You can share knowledge with roles you hold yourself; an administrator
+							can target any role.
 						</p>
 					</div>
 					<FormControl
 						type="textarea"
 						label="Summary (optional)"
 						:rows="2"
-						placeholder="One or two lines Jarvis can cite in chat context"
+						:placeholder="`One or two lines ${agentName} can cite in chat context`"
 						:modelValue="createDialog.summary"
 						@update:modelValue="(v) => (createDialog.summary = v)"
 					/>
@@ -289,7 +292,8 @@
 // rows the caller may manage. "New page" shows for anyone whose
 // creatable_scopes isn't empty; SMs also get the settings popover (knowledge
 // language, mirror sync, health check).
-import { reactive, ref, computed, onMounted } from "vue"
+import { reactive, ref, computed, onMounted } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import {
 	Autocomplete,
 	Badge,
@@ -300,14 +304,15 @@ import {
 	Tooltip,
 	toast,
 	confirmDialog,
-} from "frappe-ui"
-import { sessionUser } from "@/data/session"
-import ListPage from "@/components/list/ListPage.vue"
-import WikiPageDialog from "@/components/wiki/WikiPageDialog.vue"
-import { useListPage } from "@/composables/useListPage"
-import { timeAgo, exactDate } from "@/utils/datetime"
+} from "frappe-ui";
+import { sessionUser } from "@/data/session";
+import ListPage from "@/components/list/ListPage.vue";
+import WikiPageDialog from "@/components/wiki/WikiPageDialog.vue";
+import { useListPage } from "@/composables/useListPage";
+import { wikiListFetch } from "@/pages/list/listFetchers";
+import { timeAgo, exactDate } from "@/utils/datetime";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
 import {
-	listWikiPagesPage,
 	getWikiCaps,
 	createWikiPage,
 	archiveWikiPage,
@@ -316,11 +321,14 @@ import {
 	setKnowledgeLanguage,
 	syncWikiMirrorNow,
 	runWikiLintNow,
-} from "@/api/wiki"
+} from "@/api/wiki";
+import { agentName } from "@/branding";
+import { errHtml } from "@/lib/errors";
 
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
+// /skills is a TABBED shell; the `fv2` payload carries its view key so a sibling
+// tab's filters are never half-applied here (judgment C08-7).
+const route = useRoute();
+const router = useRouter();
 
 // ── static config ────────────────────────────────────────────────────────────
 const WIKI_TYPES = [
@@ -333,32 +341,32 @@ const WIKI_TYPES = [
 	"Integration",
 	"People",
 	"Org",
-]
+];
 const TYPE_OPTIONS = [
 	{ label: "All types", value: "" },
 	...WIKI_TYPES.map((t) => ({ label: t === "Org" ? "Org notes" : t, value: t })),
-]
+];
 const TYPE_SELECT_OPTIONS = [
 	{ label: "Select a type", value: "" },
 	...WIKI_TYPES.map((t) => ({ label: t === "Org" ? "Org notes" : t, value: t })),
-]
-const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" }
+];
+const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" };
 const SCOPE_OPTIONS = [
 	{ label: "All scopes", value: "" },
 	{ label: "Org", value: "org" },
 	{ label: "My role", value: "role" },
 	{ label: "Mine", value: "mine" },
-]
+];
 const ATTENTION_OPTIONS = [
 	{ label: "All pages", value: "" },
 	{ label: "Needs attention", value: "1" },
 	{ label: "Archived", value: "archived" },
-]
+];
 // "Org" as a page TYPE collides visually with the "Org" scope badge one
 // column over; display it under a clearer name (stored value unchanged).
-const TYPE_LABELS = { Org: "Org notes" }
+const TYPE_LABELS = { Org: "Org notes" };
 function typeLabel(t) {
-	return TYPE_LABELS[t] || t
+	return TYPE_LABELS[t] || t;
 }
 // one-line explanations for the create dialog's Type select
 const TYPE_HELP = {
@@ -371,16 +379,16 @@ const TYPE_HELP = {
 	Integration: "An external system your org connects to and its rules.",
 	People: "Who does what - approvers, escalation paths, contacts.",
 	Org: "General org-level facts that fit nowhere else.",
-}
+};
 const LANGUAGE_OPTIONS = [
 	{ label: "English (recommended)", value: "English" },
 	{ label: "Original language", value: "Original" },
-]
+];
 const SCOPE_LABELS = {
 	Org: "Org - visible to everyone",
 	Role: "Role - people holding a role",
 	User: "Personal - just me",
-}
+};
 
 const columns = [
 	{ label: "Title", key: "title", width: 3 },
@@ -389,7 +397,7 @@ const columns = [
 	{ label: "Summary", key: "summary", width: 4 },
 	{ label: "Updated", key: "modified", width: "8rem", align: "right" },
 	{ label: "", key: "_actions", width: "7rem", align: "right" },
-]
+];
 // search rides the quick-filter strip (FilesList precedent): it lives in the
 // filters object so the input stays controlled, and fetchFn moves it onto the
 // endpoint's `search` kwarg.
@@ -399,12 +407,17 @@ const quickFilters = [
 	{ key: "page_type", label: "Type", type: "select", options: TYPE_OPTIONS },
 	// "View", not "Attention": it also carries the Archived lifecycle view
 	{ key: "attention", label: "View", type: "select", options: ATTENTION_OPTIONS },
-]
-const filterDefs = [
-	{ key: "scope", label: "Scope", type: "select", options: SCOPE_OPTIONS },
-	{ key: "page_type", label: "Type", type: "select", options: TYPE_OPTIONS },
-	{ key: "attention", label: "View", type: "select", options: ATTENTION_OPTIONS },
-]
+];
+// plan 08 wave 1: the curated `filterDefs` array is GONE as the filter catalog.
+// The panel is generated from the server schema for view_key "wiki_pages".
+//
+// Only `page_type` maps 1:1 onto a canonical field. The other two quick controls
+// stay legacy-only on purpose, and the registry says why: `scope` is the
+// all|org|role|mine VIEW predicate (not the doctype's `scope` field — "mine"
+// means scope='User' AND target_user=me, which no single clause expresses), and
+// `attention` is a staleness/contradiction predicate that also carries the
+// Archived lifecycle switch over `status`.
+const QUICK_CLAUSES = { page_type: "page_type" };
 
 // ── list state (server envelope; endpoint paginates by page number) ──────────
 const {
@@ -419,27 +432,23 @@ const {
 	resetLoad,
 	loadMore,
 	refreshKeep,
+	filterState,
+	setClauses,
+	requestSchema,
+	dismissFilterNotice,
 } = useListPage({
-	fetchFn: (p) => {
-		const f = p.filters || {}
-		const pl = p.page_length || 20
-		return listWikiPagesPage({
-			search: f.search || p.search || "",
-			page_type: f.page_type || "",
-			scope_filter: f.scope || "all",
-			attention: f.attention === "1" ? 1 : 0,
-			archived: f.attention === "archived" ? 1 : 0,
-			// kit sends a start offset; the endpoint takes a page number
-			page: Math.floor((p.start || 0) / pl) + 1,
-			page_length: pl,
-		})
-	},
+	fetchFn: wikiListFetch,
 	storageKey: "wiki",
-})
+	viewKey: "wiki_pages",
+	quickClauses: QUICK_CLAUSES,
+	rootDoctype: "Jarvis Wiki Page",
+	route,
+	router,
+});
 
 // Archive vs Restore in the actions column keys off the lifecycle view:
 // the Archived view lists only Archived pages, every other view only Active.
-const isArchivedView = computed(() => filters.attention === "archived")
+const isArchivedView = computed(() => filters.attention === "archived");
 
 const emptyState = computed(() => {
 	if (filters.scope === "mine" && caps.creatable_scopes.includes("User"))
@@ -447,31 +456,36 @@ const emptyState = computed(() => {
 			icon: "book-open",
 			title: "No personal pages yet",
 			description:
-				'Personal pages are knowledge only you and Jarvis share - shortcuts, ' +
+				`Personal pages are knowledge only you and ${agentName} share - shortcuts, ` +
 				'preferences, your own working notes. Use "New page" and pick the ' +
-				'Personal scope to create your first one.',
-		}
-	if (Object.keys(filters).length)
+				"Personal scope to create your first one.",
+		};
+	// Panel clauses count as "filtered" too. Without this a panel-only narrowing
+	// to zero rows claimed "No wiki pages yet" — on a knowledge base that reads
+	// as data loss, which is the single most alarming thing this list can say
+	// (design.md §3.8).
+	if (Object.keys(filters).length || (filterState.value?.activeCount || 0) > 0)
 		return {
 			icon: "book-open",
 			title: "No pages match",
 			description: "Try a different search, scope or type filter.",
-		}
+		};
 	return {
 		icon: "book-open",
 		title: "No wiki pages yet",
 		description:
-			"The wiki is the knowledge base Jarvis keeps about your business - customers, " +
+			`The wiki is the knowledge base ${agentName} keeps about your business - customers, ` +
 			"suppliers, items and processes. It grows on its own as people answer chat " +
 			"nudges and record voice notes on the Business tab; pages appear here as " +
-			"Jarvis learns.",
-	}
-})
+			`${agentName} learns.`,
+	};
+});
 
 function scopeTooltip(row) {
-	if (row.scope === "Role") return `Visible to people with role: ${row.target_role || "-"}`
-	if (row.scope === "User") return `Personal page - visible only to ${row.target_user || "its owner"}`
-	return "Visible to everyone"
+	if (row.scope === "Role") return `Visible to people with role: ${row.target_role || "-"}`;
+	if (row.scope === "User")
+		return `Personal page - visible only to ${row.target_user || "its owner"}`;
+	return "Visible to everyone";
 }
 
 // ── caps (creatable scopes + SM header extras) ───────────────────────────────
@@ -484,52 +498,65 @@ const caps = reactive({
 	wiki_lint_summary: "",
 	wiki_mirror_last_synced_at: null,
 	wiki_mirror_last_sync_status: "",
-})
+});
+
+// What the "Last synced …" line says about the last mirror push. Empty only when the
+// backend recorded nothing at all, so the line stays a bare timestamp instead of
+// gaining a redundant clause; an unrecognised status still gets syncStatus's degraded
+// label rather than being dropped, because silence there would read as success. The
+// failure reason IS shown: this line has room for it, and it is the only clue a
+// customer gets about why the wiki is stale.
+const wikiSyncLabel = computed(() => {
+	const raw = (caps.wiki_mirror_last_sync_status || "").trim();
+	if (!raw) return "";
+	const st = humaniseSyncStatus(raw);
+	return st.detail ? `${st.text}: ${st.detail}` : st.text;
+});
 
 async function loadCaps() {
 	try {
-		const c = await getWikiCaps()
-		caps.is_sm = !!c.is_sm
-		caps.creatable_scopes = c.creatable_scopes || []
-		caps.manageable_roles = c.manageable_roles || []
-		caps.knowledge_language = c.knowledge_language || "English"
-		caps.wiki_lint_last_run_at = c.wiki_lint_last_run_at || null
-		caps.wiki_lint_summary = c.wiki_lint_summary || ""
-		caps.wiki_mirror_last_synced_at = c.wiki_mirror_last_synced_at || null
-		caps.wiki_mirror_last_sync_status = c.wiki_mirror_last_sync_status || ""
+		const c = await getWikiCaps();
+		caps.is_sm = !!c.is_sm;
+		caps.creatable_scopes = c.creatable_scopes || [];
+		caps.manageable_roles = c.manageable_roles || [];
+		caps.knowledge_language = c.knowledge_language || "English";
+		caps.wiki_lint_last_run_at = c.wiki_lint_last_run_at || null;
+		caps.wiki_lint_summary = c.wiki_lint_summary || "";
+		caps.wiki_mirror_last_synced_at = c.wiki_mirror_last_synced_at || null;
+		caps.wiki_mirror_last_sync_status = c.wiki_mirror_last_sync_status || "";
 	} catch (e) {
 		// read-only view stays useful without caps (no create / SM chrome)
 	}
 }
 
 // ── page viewer dialog ───────────────────────────────────────────────────────
-const pageDialog = reactive({ show: false, slug: "" })
+const pageDialog = reactive({ show: false, slug: "" });
 function openRow(row) {
-	openPage(row.slug || row.name)
+	openPage(row.slug || row.name);
 }
 function openPage(slug) {
-	pageDialog.slug = slug
-	pageDialog.show = true
+	pageDialog.slug = slug;
+	pageDialog.show = true;
 }
 
 // ── row actions (archive / restore / delete) ─────────────────────────────────
 // slug of the row with an in-flight lifecycle call - one at a time is plenty
-const rowBusy = ref("")
+const rowBusy = ref("");
 function rowSlug(row) {
-	return row.slug || row.name
+	return row.slug || row.name;
 }
 
 async function runRowAction(row, fn, successMsg) {
-	const slug = rowSlug(row)
-	rowBusy.value = slug
+	const slug = rowSlug(row);
+	rowBusy.value = slug;
 	try {
-		await fn(slug)
-		toast.success(successMsg)
-		resetLoad()
+		await fn(slug);
+		toast.success(successMsg);
+		resetLoad();
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		rowBusy.value = ""
+		rowBusy.value = "";
 	}
 }
 
@@ -539,15 +566,15 @@ function confirmArchive(row) {
 		message:
 			"Archived pages stop appearing in the list and are no longer used as chat context. The record is kept.",
 		onConfirm: async ({ hideDialog }) => {
-			hideDialog()
-			await runRowAction(row, archiveWikiPage, "Page archived")
+			hideDialog();
+			await runRowAction(row, archiveWikiPage, "Page archived");
 		},
-	})
+	});
 }
 
 // no confirm: Restore is itself the escape hatch for an accidental archive
 function doRestore(row) {
-	runRowAction(row, restoreWikiPage, "Page restored")
+	runRowAction(row, restoreWikiPage, "Page restored");
 }
 
 function confirmDelete(row) {
@@ -556,10 +583,10 @@ function confirmDelete(row) {
 		message:
 			"Permanently deletes this page - archiving keeps it recoverable. This cannot be undone.",
 		onConfirm: async ({ hideDialog }) => {
-			hideDialog()
-			await runRowAction(row, deleteWikiPage, "Page deleted")
+			hideDialog();
+			await runRowAction(row, deleteWikiPage, "Page deleted");
 		},
-	})
+	});
 }
 
 // ── create dialog ────────────────────────────────────────────────────────────
@@ -572,14 +599,14 @@ const createDialog = reactive({
 	summary: "",
 	body_md: "",
 	saving: false,
-})
+});
 
 const scopeSelectOptions = computed(() =>
 	(caps.creatable_scopes || []).map((s) => ({ label: SCOPE_LABELS[s] || s, value: s }))
-)
+);
 const roleSelectOptions = computed(() =>
 	(caps.manageable_roles || []).map((r) => ({ label: r, value: r }))
-)
+);
 // Preview of the server-derived slug (`<type>--<scrubbed-title>` plus the
 // controller's audience suffix for non-Org scopes) - mirror it fully so the
 // preview never lies about the final page id.
@@ -587,44 +614,44 @@ const scrub = (s) =>
 	String(s || "")
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
+		.replace(/^-+|-+$/g, "");
 const slugPreview = computed(() => {
-	const base = scrub(createDialog.title)
-	if (!base || !createDialog.page_type) return ""
-	let slug = `${createDialog.page_type.toLowerCase()}--${base}`
+	const base = scrub(createDialog.title);
+	if (!base || !createDialog.page_type) return "";
+	let slug = `${createDialog.page_type.toLowerCase()}--${base}`;
 	if (createDialog.scope === "User")
-		slug += `--u-${scrub(String(sessionUser() || "").split("@")[0]) || "me"}`
+		slug += `--u-${scrub(String(sessionUser() || "").split("@")[0]) || "me"}`;
 	else if (createDialog.scope === "Role" && createDialog.target_role)
-		slug += `--r-${scrub(createDialog.target_role)}`
-	return slug
-})
+		slug += `--r-${scrub(createDialog.target_role)}`;
+	return slug;
+});
 const canCreate = computed(
 	() =>
 		!!createDialog.title.trim() &&
 		!!createDialog.page_type &&
 		!!createDialog.scope &&
 		(createDialog.scope !== "Role" || !!createDialog.target_role)
-)
+);
 const createMissing = computed(() => {
-	const missing = []
-	if (!createDialog.title.trim()) missing.push("a title")
-	if (!createDialog.page_type) missing.push("a type")
-	if (createDialog.scope === "Role" && !createDialog.target_role) missing.push("a role")
-	return missing.length ? `Still needed: ${missing.join(", ")}.` : ""
-})
+	const missing = [];
+	if (!createDialog.title.trim()) missing.push("a title");
+	if (!createDialog.page_type) missing.push("a type");
+	if (createDialog.scope === "Role" && !createDialog.target_role) missing.push("a role");
+	return missing.length ? `Still needed: ${missing.join(", ")}.` : "";
+});
 
 function openCreate() {
-	createDialog.title = ""
-	createDialog.page_type = ""
-	createDialog.scope = caps.creatable_scopes[0] || "Org"
-	createDialog.target_role = ""
-	createDialog.summary = ""
-	createDialog.body_md = ""
-	createDialog.show = true
+	createDialog.title = "";
+	createDialog.page_type = "";
+	createDialog.scope = caps.creatable_scopes[0] || "Org";
+	createDialog.target_role = "";
+	createDialog.summary = "";
+	createDialog.body_md = "";
+	createDialog.show = true;
 }
 
 async function doCreate() {
-	createDialog.saving = true
+	createDialog.saving = true;
 	try {
 		const res = await createWikiPage({
 			title: createDialog.title.trim(),
@@ -633,59 +660,65 @@ async function doCreate() {
 			target_role: createDialog.scope === "Role" ? createDialog.target_role : "",
 			summary: createDialog.summary,
 			body_md: createDialog.body_md,
-		})
+		});
 		if (res && res.ok === false) {
-			toast.error(res.reason || "Could not create the page.")
+			toast.error(res.reason || "Could not create the page.");
 		} else {
-			createDialog.show = false
-			toast.success("Page created")
-			resetLoad()
-			openPage(res.slug)
+			createDialog.show = false;
+			toast.success("Page created");
+			resetLoad();
+			openPage(res.slug);
 		}
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		createDialog.saving = false
+		createDialog.saving = false;
 	}
 }
 
 // ── SM extras (settings popover) ─────────────────────────────────────────────
-const syncing = ref(false)
-const linting = ref(false)
+const syncing = ref(false);
+const linting = ref(false);
 
 async function changeLanguage(v) {
-	if (!v || v === caps.knowledge_language) return
-	const previous = caps.knowledge_language
+	if (!v || v === caps.knowledge_language) return;
+	const previous = caps.knowledge_language;
 	try {
-		await setKnowledgeLanguage(v)
-		caps.knowledge_language = v
-		toast.success(`Knowledge language set to ${v}`)
+		await setKnowledgeLanguage(v);
+		caps.knowledge_language = v;
+		toast.success(`Knowledge language set to ${v}`);
 	} catch (e) {
-		caps.knowledge_language = previous
-		toast.error(errMsg(e))
+		caps.knowledge_language = previous;
+		toast.error(errHtml(e));
 	}
 }
 
 function confirmSync() {
 	confirmDialog({
 		title: "Sync wiki to agent now?",
+		// #621: this used to promise "the daily sync". There is no daily sync: wiki_mirror
+		// is wired only as doc events, with no scheduler entry at all. Promising a
+		// fallback that does not exist is worse than promising nothing, because a user
+		// who reads it reasonably decides NOT to press the button, believing the mirror
+		// catches up within a day. It never does.
 		message:
-			"Pushes every active org-scope page into the agent's workspace mirror now, " +
-			"instead of waiting for the next change or the daily sync.",
+			"Pushes every active org-scope page into the agent's workspace mirror now. " +
+			"The mirror is otherwise updated only when a page changes, so use this if it " +
+			"looks out of date.",
 		onConfirm: async ({ hideDialog }) => {
-			syncing.value = true
+			syncing.value = true;
 			try {
-				const r = await syncWikiMirrorNow()
-				hideDialog()
-				if (r && r.ok === false) toast.error(r.reason || "Could not queue the sync.")
-				else toast.success("Sync queued")
+				const r = await syncWikiMirrorNow();
+				hideDialog();
+				if (r && r.ok === false) toast.error(r.reason || "Could not queue the sync.");
+				else toast.success("Sync queued");
 			} catch (e) {
-				toast.error(errMsg(e))
+				toast.error(errHtml(e));
 			} finally {
-				syncing.value = false
+				syncing.value = false;
 			}
 		},
-	})
+	});
 }
 
 function confirmLint() {
@@ -695,23 +728,24 @@ function confirmLint() {
 			"Scans active pages for contradictions, stale content, orphans and " +
 			"near-duplicate titles, and flags pages needing attention. May take a moment.",
 		onConfirm: async ({ hideDialog }) => {
-			linting.value = true
+			linting.value = true;
 			try {
-				const r = await runWikiLintNow()
-				hideDialog()
-				if (r && r.ok === false) toast.error(r.reason || "Could not run the health check.")
-				else toast.success("Health check finished")
-				loadCaps()
-				refreshKeep()
+				const r = await runWikiLintNow();
+				hideDialog();
+				if (r && r.ok === false)
+					toast.error(r.reason || "Could not run the health check.");
+				else toast.success("Health check finished");
+				loadCaps();
+				refreshKeep();
 			} catch (e) {
-				toast.error(errMsg(e))
+				toast.error(errHtml(e));
 			} finally {
-				linting.value = false
+				linting.value = false;
 			}
 		},
-	})
+	});
 }
 
 // ── init ─────────────────────────────────────────────────────────────────────
-onMounted(loadCaps)
+onMounted(loadCaps);
 </script>

@@ -1,0 +1,164 @@
+{
+  "name": "success",
+  "description": "Clean single-answer turn, no tools, terminal final.",
+  "ack": {
+    "status": "started"
+  },
+  "ack_behavior": "normal",
+  "frames": [
+    {
+      "op": "assistant",
+      "text": "Here is",
+      "delta": "Here is"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary",
+      "delta": " the summary"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked",
+      "delta": " you asked"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The",
+      "delta": " for. The"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue",
+      "delta": " three overdue"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total",
+      "delta": " invoices total"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two",
+      "delta": " forty two"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees",
+      "delta": " thousand rupees"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two",
+      "delta": " across two"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and",
+      "delta": " customers, and"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest",
+      "delta": " the oldest"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen",
+      "delta": " is eighteen"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past",
+      "delta": " days past"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due",
+      "delta": " its due"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I",
+      "delta": " date. I"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise",
+      "delta": " would prioritise"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme",
+      "delta": " the Acme"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first",
+      "delta": " invoice first"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it",
+      "delta": " because it"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both",
+      "delta": " is both"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest",
+      "delta": " the largest"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest and the",
+      "delta": " and the"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest and the oldest, then",
+      "delta": " oldest, then"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest and the oldest, then follow up",
+      "delta": " follow up"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest and the oldest, then follow up on the",
+      "delta": " on the"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest and the oldest, then follow up on the two smaller",
+      "delta": " two smaller"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest and the oldest, then follow up on the two smaller Globex invoices",
+      "delta": " Globex invoices"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest and the oldest, then follow up on the two smaller Globex invoices together in",
+      "delta": " together in"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest and the oldest, then follow up on the two smaller Globex invoices together in a single",
+      "delta": " a single"
+    },
+    {
+      "op": "assistant",
+      "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest and the oldest, then follow up on the two smaller Globex invoices together in a single reminder.",
+      "delta": " reminder."
+    }
+  ],
+  "terminal": {
+    "kind": "final",
+    "text": "Here is the summary you asked for. The three overdue invoices total forty two thousand rupees across two customers, and the oldest is eighteen days past its due date. I would prioritise the Acme invoice first because it is both the largest and the oldest, then follow up on the two smaller Globex invoices together in a single reminder."
+  }
+}

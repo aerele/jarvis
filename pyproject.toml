@@ -3,7 +3,7 @@ name = "jarvis"
 authors = [
     { name = "Aerele", email = "navin@aerele.in"}
 ]
-description = "AI superpowers for Frappe/ERPNext, powered by openclaw"
+description = "AI superpowers for Frappe/ERPNext — a permission-aware AI assistant over your ERP"
 requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
@@ -13,6 +13,13 @@ dependencies = [
     # PDF -> image rasterization for native LLM vision (jarvis/chat/vision.py).
     # Permissive license only: pypdfium2 (Apache/BSD), NOT PyMuPDF (AGPL).
     "pypdfium2>=4",
+    # Browser-accurate CSS/HTML parsing for the dashboard theme-conformance
+    # validator (jarvis/dashboards/theme_validator.py). A regex over untrusted
+    # canvas CSS/HTML is bypassable (escapes/entities/nesting); the validator must
+    # tokenize the way the browser does. tinycss2 + lxml are transitively present,
+    # but html5lib has no other requirer, so pin all three explicitly for the FC image.
+    "tinycss2>=1.1",
+    "html5lib>=1.1",
 ]
 
 [build-system]
@@ -65,6 +72,33 @@ ignore = [
     "UP032", # Use f-string instead of `format` call (translations)
     "UP037", # quoted annotations
     "UP040", # Use type aliases instead of type annotations
+
+    # --- Deliberate, not debt -------------------------------------------------
+    # This product writes typographic characters into user-facing strings on
+    # purpose: "->" arrows on confirmation cards, "·" separators, curly quotes in
+    # persona copy. Ruff cannot tell those from a homoglyph attack, and we are
+    # not going to ASCII-ify the UI to satisfy it.
+    "RUF001", # ambiguous unicode character in a string
+    "RUF002", # ambiguous unicode character in a docstring
+    "RUF003", # ambiguous unicode character in a comment
+
+    # --- Pre-existing debt, enabled 2026-07-17 --------------------------------
+    # The linter was configured but never enforced (the pre-commit hook was
+    # never installed), so 96 violations accumulated. 22 were auto-fixed when
+    # the hook went in; these 11 rules cover the 75 that need a human decision -
+    # several are behavioural (B905 changes what zip() does on unequal lengths;
+    # F841 can be hiding a real bug). Ignored HERE so the rule stays enforced
+    # for every other rule and all new code, rather than left un-run.
+    # Burn these down file-by-file; delete each line as it hits zero.
+    # Cleared 2026-07-20: B905 (4), F841 (11), RUF007 (2) - the behavioural ones.
+    "B007",   # loop control variable not used in the body            (4)
+    "RUF005", # prefer iterable unpacking over concatenation          (3)
+    "RUF012", # mutable class default needs ClassVar - may be a bug   (8)
+    "RUF013", # implicit Optional in a type annotation                (1)
+    "RUF015", # unnecessary allocation to grab the first element      (5)
+    "RUF046", # unnecessary int() cast                                (2)
+    "RUF059", # unused variable in an unpacking assignment            (8)
+    "UP028",  # yield in a for loop, use yield from                   (2)
 ]
 typing-modules = ["frappe.types.DF"]
 

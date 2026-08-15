@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from "vue"
+import { onMounted, onUnmounted, ref } from "vue";
 
 // A run can spend a long time in a tool before a single token streams back. A
 // bare spinner reads as "stuck", so say what it is plausibly doing — same
@@ -12,19 +12,19 @@ const WORDS = [
 	"Checking the details…",
 	"Putting it together…",
 	"Almost there…",
-]
+];
 
-const props = defineProps({ label: { type: String, default: "" } })
+const props = defineProps({ label: { type: String, default: "" } });
 
-const i = ref(0)
-let timer = null
+const i = ref(0);
+let timer = null;
 
 onMounted(() => {
 	timer = setInterval(() => {
-		i.value = (i.value + 1) % WORDS.length
-	}, 2400)
-})
-onUnmounted(() => clearInterval(timer))
+		i.value = (i.value + 1) % WORDS.length;
+	}, 2400);
+});
+onUnmounted(() => clearInterval(timer));
 </script>
 
 <template>

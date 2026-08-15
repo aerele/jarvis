@@ -20,6 +20,7 @@ Module-local helpers that wrap these (e.g. ``_surface`` in
 onboarding.py adding sync-status fields) are fine - they layer on
 top of the canonical shape rather than diverging from it.
 """
+
 from __future__ import annotations
 
 

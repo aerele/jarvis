@@ -23,20 +23,26 @@ def log_activity(*, agent, agent_title, installation, action, detail=None, run=N
 	as a System Manager acting on someone else's install. Never raises — any
 	failure is logged server-side and the caller proceeds."""
 	try:
-		doc = frappe.get_doc({
-			"doctype": ACTIVITY,
-			"agent": agent or "",
-			"agent_title": agent_title or "",
-			"installation": installation or "",
-			"action": action,
-			"run": run or "",
-			"detail": detail or "",
-		})
-		if owner:
-			# insert() only fills owner when unset, so this sticks.
-			doc.owner = owner
+		doc = frappe.get_doc(
+			{
+				"doctype": ACTIVITY,
+				"agent": agent or "",
+				"agent_title": agent_title or "",
+				"installation": installation or "",
+				"action": action,
+				"run": run or "",
+				"detail": detail or "",
+			}
+		)
 		doc.flags.ignore_permissions = True
 		doc.insert(ignore_permissions=True)
+		# insert() stamps owner = session.user (the scheduler runs as Administrator,
+		# an admin acting on someone else's install is a System Manager), so an
+		# explicit owner is pinned AFTER insert — mirroring _reassign_owner on the
+		# Run/Finding rows — else the owner-scoped (if_owner) feed would misattribute
+		# every scheduler / cross-user row to Administrator.
+		if owner and owner != doc.owner:
+			frappe.db.set_value(ACTIVITY, doc.name, "owner", owner, update_modified=False)
 	except Exception:
 		try:
 			frappe.log_error(

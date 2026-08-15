@@ -1,9 +1,11 @@
 <template>
 	<div v-if="pending || failed" class="inline-flex items-center gap-2">
 		<Tooltip v-if="pending" text="Updating your assistant… (restarts briefly, ~30s)">
-			<Badge theme="orange" variant="subtle">
+			<Badge theme="orange" variant="subtle" size="lg">
 				<template #prefix>
-					<LoadingIndicator class="size-3" />
+					<!-- currentColor so the spinner takes the orange badge tone,
+					     not the brand accent (JvSpinner's default). -->
+					<JvSpinner color="currentColor" />
 				</template>
 				Applying skills…
 			</Badge>
@@ -17,7 +19,9 @@
 			<Button variant="ghost" label="Retry" :loading="applying" @click="apply" />
 		</template>
 		<template v-else>
-			<Tooltip text="The last skills sync didn't complete. An administrator can retry it; your saved changes are safe.">
+			<Tooltip
+				text="The last skills sync didn't complete. An administrator can retry it; your saved changes are safe."
+			>
 				<Badge theme="orange" variant="subtle" label="Skills sync delayed" />
 			</Tooltip>
 		</template>
@@ -34,71 +38,72 @@
 //                endpoints don't enqueue an apply on their own)
 //   checkNow() - read the status and poll if pending (bulk delete - the
 //                server already enqueued the apply, §8.3)
-import { ref, computed, onMounted, onBeforeUnmount } from "vue"
-import { Badge, Button, Tooltip, LoadingIndicator, toast } from "frappe-ui"
-import * as api from "@/api"
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { Badge, Button, Tooltip, toast } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
+import * as api from "@/api";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
+import { errHtml } from "@/lib/errors";
 
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
+const status = ref(""); // last_sync_status: "", "pending: …", "ok …", "failed: …"
+const pending = ref(false);
+const applying = ref(false);
+const isSM = !!window.is_system_manager;
 
-const status = ref("") // last_sync_status: "", "pending: …", "ok …", "failed: …"
-const pending = ref(false)
-const applying = ref(false)
-const isSM = !!window.is_system_manager
+// Prefix parsing is shared (@/lib/syncStatus) so this pill, the agents list and
+// the AI models pane all read the same raw string the same way, and a reason long
+// enough to be a traceback gets flattened before it reaches a tooltip.
+const human = computed(() => humaniseSyncStatus(status.value));
+const failed = computed(() => human.value.kind === "failed");
+const failureReason = computed(() => human.value.detail);
 
-const failed = computed(() => (status.value || "").startsWith("failed"))
-const failureReason = computed(() =>
-	failed.value ? (status.value || "").replace(/^failed:?/, "").trim() : ""
-)
-
-let timer = null
+let timer = null;
 function startPoll() {
-	if (timer) return
+	if (timer) return;
 	timer = setInterval(async () => {
-		await load()
-		if (!pending.value) stopPoll()
-	}, 3000)
+		await load();
+		if (!pending.value) stopPoll();
+	}, 3000);
 }
 function stopPoll() {
 	if (timer) {
-		clearInterval(timer)
-		timer = null
+		clearInterval(timer);
+		timer = null;
 	}
 }
 
 async function load() {
 	try {
-		const s = (await api.getCustomSkillsSyncStatus()) || {}
-		status.value = s.last_sync_status || ""
-		pending.value = !!s.pending
+		const s = (await api.getCustomSkillsSyncStatus()) || {};
+		status.value = s.last_sync_status || "";
+		pending.value = !!s.pending;
 	} catch (e) {
 		// best-effort: a transient status failure must not break the page
 	}
 }
 
 async function checkNow() {
-	await load()
-	if (pending.value) startPoll()
+	await load();
+	if (pending.value) startPoll();
 }
 
 async function apply() {
-	if (applying.value) return
-	applying.value = true
+	if (applying.value) return;
+	applying.value = true;
 	try {
-		await api.applyCustomSkills()
-		status.value = "pending: applying skills"
-		pending.value = true
-		startPoll()
+		await api.applyCustomSkills();
+		status.value = "pending: applying skills";
+		pending.value = true;
+		startPoll();
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		applying.value = false
+		applying.value = false;
 	}
 }
 
-onMounted(() => checkNow())
-onBeforeUnmount(() => stopPoll())
+onMounted(() => checkNow());
+onBeforeUnmount(() => stopPoll());
 
-defineExpose({ apply, checkNow, pending })
+defineExpose({ apply, checkNow, pending });
 </script>

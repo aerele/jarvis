@@ -1,4 +1,5 @@
-"""SPA-facing endpoints for Jarvis Voice Note (Business tab + chat nudge).
+"""Client-facing endpoints for Jarvis Voice Note (Business tab, chat nudge,
+native app).
 
 Owner-scoped CRUD over ``Jarvis Voice Note`` rows plus the Business-tab status
 card and the SM-only "process now" trigger for the daily voice-facts sweep
@@ -6,8 +7,9 @@ card and the SM-only "process now" trigger for the daily voice-facts sweep
 ``jarvis.chat.voice.transcribe_audio``; these endpoints only persist and list
 the resulting transcripts.
 
-All endpoints reject Guest and require a System User (the feature is Desk-SPA
-only, mirroring the ``jarvis.chat.voice`` gate). ``Jarvis Wiki Page`` /
+All endpoints reject Guest and require a System User (mirroring the
+``jarvis.chat.voice`` gate); the native app authenticates the same user with a
+device API token, so it clears the same gate. ``Jarvis Wiki Page`` /
 ``jarvis.chat.wiki`` integration is best-effort lazy-imported: a Conversation
 note whose immediate ingest enqueue fails is picked up by the daily sweep.
 """
@@ -26,7 +28,14 @@ _SETTINGS = "Jarvis Settings"
 
 _EXCERPT_LEN = 300
 _CONTEXT_TYPES = ("Business", "Conversation")
-_SOURCES = ("Business Tab", "Chat Nudge")
+# Capture surfaces allowed to persist a note through this endpoint. MUST stay a
+# subset of the ``source`` Select options on Jarvis Voice Note (frappe rejects an
+# off-list Select value at insert) and MUST keep covering every surface a shipped
+# client sends: "Mobile" is what jarvis_mobile's src/api/endpoints.ts saveVoiceNote
+# posts. Anything not listed here is an Org-scoped capture for the daily sweep
+# (jarvis.learning.voice_facts treats only "Personalise"/question-linked notes as
+# private), so widening this list widens what reaches the shared Org wiki.
+_SOURCES = ("Business Tab", "Chat Nudge", "Mobile")
 _STATUSES = ("New", "Processed", "Archived")
 _MAX_ENTITIES = 20
 _SEARCH_MAX = 140
@@ -248,9 +257,7 @@ def update_voice_note(name: str, transcript: str) -> dict:
 	# stale snapshot would silently revert a just-Processed note to New and
 	# wipe its processed bookkeeping. FOR UPDATE serializes the sweep's UPDATE
 	# behind this transaction; the status check below is then authoritative.
-	row = frappe.db.get_value(
-		NOTE, name, ["owner", "status"], as_dict=True, for_update=True
-	)
+	row = frappe.db.get_value(NOTE, name, ["owner", "status"], as_dict=True, for_update=True)
 	if not row:
 		frappe.throw(_("Voice note not found."))
 	if row.owner != frappe.session.user:

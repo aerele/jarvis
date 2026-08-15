@@ -35,15 +35,17 @@ PLAIN_USER = "jarvis-trigger-user@example.com"
 def _ensure_user(email: str, roles: list[str]) -> None:
 	"""Create the fixture user if missing; idempotent."""
 	if not frappe.db.exists("User", email):
-		frappe.get_doc({
-			"doctype": "User",
-			"email": email,
-			"first_name": "Trigger",
-			"last_name": "Test",
-			"enabled": 1,
-			"send_welcome_email": 0,
-			"user_type": "System User",
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "Trigger",
+				"last_name": "Test",
+				"enabled": 1,
+				"send_welcome_email": 0,
+				"user_type": "System User",
+			}
+		).insert(ignore_permissions=True)
 	doc = frappe.get_doc("User", email)
 	doc.add_roles(*roles)
 	frappe.db.commit()
@@ -124,9 +126,7 @@ class TestCaps(_TriggersApiTestCase):
 		self.assertIn("scripts_enabled", data)
 		self.assertIn("stt_enabled", data)
 		self.assertEqual(len(data["events"]), 8)
-		self.assertEqual(
-			data["events"][0], {"value": "validate", "label": "Before Save (blockable)"}
-		)
+		self.assertEqual(data["events"][0], {"value": "validate", "label": "Before Save (blockable)"})
 		self.assertEqual(len(data["llm_events"]), 6)
 		self.assertNotIn("validate", data["llm_events"])
 		self.assertNotIn("before_submit", data["llm_events"])
@@ -157,9 +157,7 @@ class TestCrudGating(_TriggersApiTestCase):
 		# manage surfaces throw
 		payload = frappe.as_json(self._llm_payload())
 		self.assertRaises(frappe.PermissionError, create_trigger, payload)
-		self.assertRaises(
-			frappe.PermissionError, update_trigger, name, frappe.as_json({"description": "x"})
-		)
+		self.assertRaises(frappe.PermissionError, update_trigger, name, frappe.as_json({"description": "x"}))
 		self.assertRaises(frappe.PermissionError, set_trigger_enabled, name, 0)
 		self.assertRaises(frappe.PermissionError, delete_trigger, name)
 		self.assertRaises(frappe.PermissionError, delete_triggers_bulk, frappe.as_json([name]))
@@ -224,9 +222,7 @@ class TestTriggerList(_TriggersApiTestCase):
 
 	def test_unknown_filter_throws(self):
 		frappe.set_user(PLAIN_USER)
-		self.assertRaises(
-			frappe.ValidationError, list_triggers_page, filters=frappe.as_json({"bogus": 1})
-		)
+		self.assertRaises(frappe.ValidationError, list_triggers_page, filters=frappe.as_json({"bogus": 1}))
 
 	def test_invalid_filter_value_throws(self):
 		frappe.set_user(PLAIN_USER)
@@ -265,15 +261,17 @@ class TestConditionTester(_TriggersApiTestCase):
 
 	def test_unknown_doctype_throws(self):
 		frappe.set_user(PLAIN_USER)
-		self.assertRaises(
-			frappe.ValidationError, test_trigger_condition, "No Such Doctype Zzz", "True"
-		)
+		self.assertRaises(frappe.ValidationError, test_trigger_condition, "No Such Doctype Zzz", "True")
 
 	def test_would_fire_against_named_doc(self):
-		todo = frappe.get_doc({
-			"doctype": "ToDo", "description": "cond test",
-			"allocated_to": PLAIN_USER, "status": "Open",
-		}).insert(ignore_permissions=True)
+		todo = frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"description": "cond test",
+				"allocated_to": PLAIN_USER,
+				"status": "Open",
+			}
+		).insert(ignore_permissions=True)
 		self._todos.append(todo.name)
 		frappe.set_user(PLAIN_USER)
 		r = test_trigger_condition("ToDo", 'doc.status == "Open"', docname=todo.name)
@@ -285,9 +283,13 @@ class TestConditionTester(_TriggersApiTestCase):
 	def test_named_doc_requires_read_permission(self):
 		# A ToDo belonging to someone else: plain users only read ToDos they
 		# own or are assigned (frappe.desk.doctype.todo has_permission).
-		foreign = frappe.get_doc({
-			"doctype": "ToDo", "description": "foreign", "allocated_to": ADMIN_USER,
-		}).insert(ignore_permissions=True)
+		foreign = frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"description": "foreign",
+				"allocated_to": ADMIN_USER,
+			}
+		).insert(ignore_permissions=True)
 		self._todos.append(foreign.name)
 		frappe.set_user(PLAIN_USER)
 		self.assertRaises(
@@ -304,16 +306,20 @@ class TestActivityFeed(_TriggersApiTestCase):
 		"""One row the plain user can see (their own ToDo) and one they cannot
 		(a Server Script target they lack read on / that does not exist)."""
 		marker = f"vis-{frappe.generate_hash(length=8)}"
-		todo = frappe.get_doc({
-			"doctype": "ToDo", "description": "visible target", "allocated_to": PLAIN_USER,
-		}).insert(ignore_permissions=True)
+		todo = frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"description": "visible target",
+				"allocated_to": PLAIN_USER,
+			}
+		).insert(ignore_permissions=True)
 		self._todos.append(todo.name)
-		visible = self._insert_activity_row(
-			trigger=marker, target_doctype="ToDo", target_docname=todo.name
-		)
+		visible = self._insert_activity_row(trigger=marker, target_doctype="ToDo", target_docname=todo.name)
 		hidden = self._insert_activity_row(
-			trigger=marker, target_doctype="Server Script",
-			target_docname="no-such-script-zz", status="Failed",
+			trigger=marker,
+			target_doctype="Server Script",
+			target_docname="no-such-script-zz",
+			status="Failed",
 		)
 		return marker, visible, hidden
 
@@ -344,9 +350,7 @@ class TestActivityFeed(_TriggersApiTestCase):
 
 	def test_unknown_filter_and_sort_throw(self):
 		frappe.set_user(PLAIN_USER)
-		self.assertRaises(
-			frappe.ValidationError, list_activity_page, filters=frappe.as_json({"bogus": 1})
-		)
+		self.assertRaises(frappe.ValidationError, list_activity_page, filters=frappe.as_json({"bogus": 1}))
 		self.assertRaises(frappe.ValidationError, list_activity_page, sort_field="summary")
 		self.assertRaises(
 			frappe.ValidationError, list_activity_page, filters=frappe.as_json({"status": "Nope"})

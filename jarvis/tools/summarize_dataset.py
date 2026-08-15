@@ -10,6 +10,7 @@ Pure-Python (``statistics`` stdlib); no pandas, no subprocess. It only
 summarizes data passed in (no DB access of its own), so it inherits whatever
 permission scoping produced that data.
 """
+
 import hashlib
 import math
 import statistics
@@ -20,8 +21,8 @@ from jarvis.exceptions import InvalidArgumentError
 _MAX_ROWS = 100_000
 _MAX_COLS = 200
 _DEFAULT_TOP_N = 5
-_KEY_MAX = 256      # strings longer than this are hashed for the counting key
-_DISPLAY_MAX = 80   # but a `top` value is shown truncated to keep output small
+_KEY_MAX = 256  # strings longer than this are hashed for the counting key
+_DISPLAY_MAX = 80  # but a `top` value is shown truncated to keep output small
 
 
 def summarize_dataset(rows: list, columns: list | None = None, top_n: int = 5) -> dict:

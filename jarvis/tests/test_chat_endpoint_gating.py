@@ -49,6 +49,13 @@ _GUARD_CALL_SUBSTRS = (
 	# fact gated harder than the sweep's own baseline.
 	"require_jarvis_admin",
 	"require_skill_reviewer",  # PART 2 TASK 12: skill-reviewer/admin gate (org-wide apply)
+	# Admin-level access CHECK (bool), the analogue of has_jarvis_access below. The
+	# reviewer-or-admin endpoints (agents_api.promote_installation /
+	# demote_installation) gate in-body on `me != doc.reviewer and not
+	# has_jarvis_admin_access(me)` -> frappe.throw(PermissionError) — a gate STRICTER
+	# than require_jarvis_user (the caller must be the named reviewer or a Jarvis
+	# Admin), so without this entry the sweep false-positived them as ungated.
+	"has_jarvis_admin_access",
 	"_require_system_user",
 	"only_for",  # frappe.only_for(...) — an SM/role gate, stricter than Jarvis User
 	"_guard",  # learned_api._guard / _admin_guard (reviewer/admin role gate)

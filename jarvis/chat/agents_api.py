@@ -14,24 +14,35 @@ Enable / schedule are pure DB writes (no container restart — O6); only Apply
 """
 
 import frappe
-from jarvis.permissions import (
-	has_jarvis_admin_access, require_jarvis_admin, require_jarvis_user,
-)
 from frappe import _
 
-from jarvis._session import impersonate
+from jarvis._session import authenticated_user, impersonate
+from jarvis.chat import coverage_reasons as cr
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.agent_catalog import build_agent_push_payload
 from jarvis.chat.filebox import _clamp_page, _lk
 from jarvis.chat.macro_scheduler import compute_next_run
+from jarvis.permissions import (
+	has_jarvis_admin_access,
+	require_jarvis_admin,
+	require_jarvis_user,
+)
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
 RUN = "Jarvis Agent Run"
 FINDING = "Jarvis Agent Finding"
 ACTIVITY = "Jarvis Agent Activity"
+DASHBOARD = "Jarvis Dashboard"
+PROVENANCE = "Jarvis Agent Provenance Event"
 ALLOWED_ROLE = "Jarvis Agent Allowed Role"
 _SETTINGS = "Jarvis Settings"
+
+# PP-6 — the stage-maximum global activation ceiling. The initial ceiling is 1
+# (every customer starts with a single live module); a Jarvis Admin may raise it
+# to 2 (this maximum) with a recorded reviewer-capacity justification. No path to
+# 3+ exists at this stage.
+_ACTIVATION_CEILING_MAX = 2
 _PUSH_JOB_ID = "jarvis_agent_skills_push"
 _LOCK_NAME = "jarvis_agent_skills_push"
 
@@ -41,6 +52,11 @@ _ADMIN_STATUSES = ("Published", "Coming Soon", "Deprecated")
 # Never meaningful as an agent restriction ("All" == unrestricted; the other two
 # are identities, not grantable roles) and never offered in the admin picker.
 _NON_SELECTABLE_ROLES = ("Administrator", "Guest", "All")
+
+# #672: how long a manual "Run now" waits for the per-installation dispatch lock
+# before refusing. Long enough to swallow an ordinary overlap with the hourly sweep,
+# short enough that a human never sits on a spinner.
+DISPATCH_LOCK_WAIT_S = 5.0
 
 
 # --------------------------------------------------------------------------- #
@@ -115,9 +131,20 @@ def _enriched_catalog() -> list[dict]:
 	listings = frappe.get_all(
 		LISTING,
 		fields=[
-			"name", "agent_slug", "title", "description", "category", "nature",
-			"version", "publisher", "status", "rule_pack", "default_schedule",
-			"validated_for_fy", "tools_required", "modified",
+			"name",
+			"agent_slug",
+			"title",
+			"description",
+			"category",
+			"nature",
+			"version",
+			"publisher",
+			"status",
+			"rule_pack",
+			"default_schedule",
+			"validated_for_fy",
+			"tools_required",
+			"modified",
 		],
 		order_by="status asc, title asc",
 	)
@@ -127,9 +154,16 @@ def _enriched_catalog() -> list[dict]:
 			INSTALLATION,
 			filters={"owner": me},
 			fields=[
-				"name", "agent", "enabled", "installed_version", "sync_status",
-				"schedule_enabled", "schedule_frequency", "schedule_time",
-				"next_run_at", "last_run_at",
+				"name",
+				"agent",
+				"enabled",
+				"installed_version",
+				"sync_status",
+				"schedule_enabled",
+				"schedule_frequency",
+				"schedule_time",
+				"next_run_at",
+				"last_run_at",
 			],
 		)
 	}
@@ -158,9 +192,7 @@ def _enriched_catalog() -> list[dict]:
 		)
 		allowed_roles = roles_map.get(lst.name, [])
 		lst["allowed_roles"] = allowed_roles
-		lst["allowed"] = (
-			1 if (is_sm or not allowed_roles or my_roles.intersection(allowed_roles)) else 0
-		)
+		lst["allowed"] = 1 if (is_sm or not allowed_roles or my_roles.intersection(allowed_roles)) else 0
 		lst["install_count"] = install_counts.get(lst.name, 0)
 		out.append(lst)
 	return out
@@ -211,8 +243,7 @@ def list_agents_page(
 			r
 			for r in rows
 			if any(
-				q in str(r.get(k) or "").lower()
-				for k in ("title", "description", "category", "agent_slug")
+				q in str(r.get(k) or "").lower() for k in ("title", "description", "category", "agent_slug")
 			)
 		]
 
@@ -276,9 +307,18 @@ def get_agent(agent_slug: str) -> dict:
 		INSTALLATION,
 		filters={"owner": me, "agent": listing.name},
 		fields=[
-			"name", "enabled", "installed_version", "installed_at", "config",
-			"sync_status", "synced_at", "schedule_enabled", "schedule_frequency",
-			"schedule_time", "next_run_at", "last_run_at",
+			"name",
+			"enabled",
+			"installed_version",
+			"installed_at",
+			"config",
+			"sync_status",
+			"synced_at",
+			"schedule_enabled",
+			"schedule_frequency",
+			"schedule_time",
+			"next_run_at",
+			"last_run_at",
 		],
 		limit=1,
 	)
@@ -314,16 +354,34 @@ def get_installations() -> list[dict]:
 		INSTALLATION,
 		filters={"owner": me},
 		fields=[
-			"name", "agent", "enabled", "installed_version", "installed_at",
-			"config", "sync_status", "synced_at", "schedule_enabled",
-			"schedule_frequency", "schedule_time", "next_run_at", "last_run_at",
+			"name",
+			"agent",
+			"enabled",
+			# PP-4: the activation state + named reviewer + promotion stamp so the SPA
+			# can surface a customer's SHADOW installations as a distinct set and wire the
+			# promote/demote actions (the reviewer's "one clear action") to them.
+			"activation_state",
+			"reviewer",
+			"promoted_by",
+			"promoted_at",
+			"installed_version",
+			"installed_at",
+			"config",
+			"sync_status",
+			"synced_at",
+			"schedule_enabled",
+			"schedule_frequency",
+			"schedule_time",
+			"next_run_at",
+			"last_run_at",
 		],
 		order_by="modified desc",
 	)
 	for r in rows:
-		meta = frappe.db.get_value(
-			LISTING, r.agent, ["title", "nature", "status", "version"], as_dict=True
-		) or {}
+		meta = (
+			frappe.db.get_value(LISTING, r.agent, ["title", "nature", "status", "version"], as_dict=True)
+			or {}
+		)
 		r["title"] = meta.get("title")
 		r["nature"] = meta.get("nature")
 		r["listing_status"] = meta.get("status")
@@ -386,8 +444,18 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 		frappe.throw(_("Status must be one of: {0}.").format(", ".join(_ADMIN_STATUSES)))
 	doc = frappe.get_doc(LISTING, agent_slug)
 	doc.check_permission("write")
+	before = doc.status
 	doc.status = status
 	doc.save()
+	# #457: status is a PUSH-VISIBLE property — ``build_agent_push_payload`` emits
+	# only Published listings — so changing it changes the container's roster just
+	# as install/enable does. Without this the SPA showed no "Apply pending" after a
+	# deprecate, so the roster and the DB silently disagreed until some unrelated
+	# mutation re-dirtied the flag. Only on an actual change, and only when some
+	# install would have carried the slug: a status flip on an agent nobody enabled
+	# pushes exactly the same payload.
+	if before != doc.status and frappe.db.exists(INSTALLATION, {"agent": doc.name, "enabled": 1}):
+		_mark_catalog_dirty()
 	frappe.db.commit()
 	return {"ok": True, "status": doc.status}
 
@@ -417,27 +485,48 @@ def get_agent_admin_overview() -> dict:
 	for i in frappe.get_all(
 		INSTALLATION,
 		fields=[
-			"name", "agent", "owner", "enabled", "schedule_enabled",
-			"schedule_frequency", "next_run_at", "last_run_at", "sync_status",
+			"name",
+			"agent",
+			"owner",
+			"run_as_user",
+			"enabled",
+			"schedule_enabled",
+			"schedule_frequency",
+			"next_run_at",
+			"last_run_at",
+			"sync_status",
 		],
 		order_by="owner asc, creation asc",
 	):
-		installs_by_agent.setdefault(i.agent, []).append({
-			"installation": i.name,
-			"owner": i.owner,
-			"enabled": int(i.enabled or 0),
-			"schedule_enabled": int(i.schedule_enabled or 0),
-			"schedule_frequency": i.schedule_frequency,
-			"next_run_at": str(i.next_run_at) if i.next_run_at else None,
-			"last_run_at": str(i.last_run_at) if i.last_run_at else None,
-			"sync_status": i.sync_status,
-		})
+		installs_by_agent.setdefault(i.agent, []).append(
+			{
+				"installation": i.name,
+				"owner": i.owner,
+				# R1-S2: the EXECUTING identity, distinct from the row owner. A blank
+				# one is a legacy/misconfigured row — the dispatch paths refuse to run
+				# it (R1-F3) — so an admin reading an Apply or run failure needs to see
+				# WHICH row it is here, rather than having to open raw Desk.
+				"run_as_user": i.run_as_user or None,
+				"enabled": int(i.enabled or 0),
+				"schedule_enabled": int(i.schedule_enabled or 0),
+				"schedule_frequency": i.schedule_frequency,
+				"next_run_at": str(i.next_run_at) if i.next_run_at else None,
+				"last_run_at": str(i.last_run_at) if i.last_run_at else None,
+				"sync_status": i.sync_status,
+			}
+		)
 
 	listings = frappe.get_all(
 		LISTING,
 		fields=[
-			"name", "agent_slug", "title", "nature", "category", "status",
-			"version", "validated_for_fy",
+			"name",
+			"agent_slug",
+			"title",
+			"nature",
+			"category",
+			"status",
+			"version",
+			"validated_for_fy",
 		],
 		order_by="status asc, title asc",
 	)
@@ -462,15 +551,44 @@ def _mark_catalog_dirty() -> None:
 	mutation it annotates."""
 	try:
 		frappe.db.set_single_value(_SETTINGS, "agent_catalog_dirty", 1)
-		frappe.db.set_single_value(
-			_SETTINGS,
-			"agent_catalog_version",
-			frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, "agent_catalog_version")) + 1,
-		)
+		_bump_catalog_version()
 	except Exception:
-		frappe.log_error(
-			title="Jarvis: agent catalog dirty flag failed", message=frappe.get_traceback()
-		)
+		frappe.log_error(title="Jarvis: agent catalog dirty flag failed", message=frappe.get_traceback())
+
+
+def _bump_catalog_version() -> None:
+	"""Increment ``agent_catalog_version`` in ONE statement (#458).
+
+	The obvious read-modify-write (``get_single_value`` + ``set_single_value``)
+	loses updates: two mutations racing both read V and both write V+1, so the
+	second mutation leaves the version looking untouched. The push worker's TOCTOU
+	recheck compares against that version, so a lost increment is exactly the case
+	where the worker clears the dirty flag for a change that never made the
+	payload.
+
+	Frappe stores one Single field as one ``tabSingles`` row, so a single
+	``UPDATE ... SET value = value + 1`` runs under that row's write lock and
+	cannot lose an increment however the two writers interleave.
+	``set_single_value`` survives only as the SEED path: a Single field that was
+	never written has no ``tabSingles`` row at all, and the UPDATE above would
+	silently match nothing.
+	"""
+	params = {"dt": _SETTINGS, "field": "agent_catalog_version"}
+	frappe.db.sql(
+		"""UPDATE `tabSingles`
+		SET `value` = CAST(COALESCE(NULLIF(`value`, ''), '0') AS UNSIGNED) + 1
+		WHERE `doctype` = %(dt)s AND `field` = %(field)s""",
+		params,
+	)
+	if not frappe.db.sql(
+		"""SELECT 1 FROM `tabSingles` WHERE `doctype` = %(dt)s AND `field` = %(field)s LIMIT 1""",
+		params,
+	):
+		frappe.db.set_single_value(_SETTINGS, "agent_catalog_version", 1)
+	# Raw SQL bypasses both the Single's redis document cache and
+	# ``frappe.db.value_cache``, which would otherwise keep serving the
+	# pre-increment value for the rest of this request.
+	frappe.clear_document_cache(_SETTINGS, _SETTINGS)
 
 
 @frappe.whitelist()
@@ -482,14 +600,25 @@ def install_agent(agent_slug: str) -> dict:
 	server-side (System Manager always allowed)."""
 	listing = frappe.get_doc(LISTING, agent_slug)  # All-role read
 	me = frappe.session.user
+	# FIX 11: an agent runs AS a named user (run_as_user defaults to the installer),
+	# and the identity guard fail-closes on Administrator/Guest. Catch that here with
+	# an actionable message instead of letting doc.insert() surface the raw validation
+	# throw ("Run-as user must be an existing, enabled, non-system user").
+	if me in ("Administrator", "Guest"):
+		frappe.throw(_("Log in as a named user, or map a run-as user — agents cannot run as Administrator."))
 	if not _user_allowed_for_agent(listing, me):
-		frappe.throw(
-			_("Your roles do not permit installing this agent."), frappe.PermissionError
-		)
+		frappe.throw(_("Your roles do not permit installing this agent."), frappe.PermissionError)
 	if listing.status != "Published":
 		frappe.throw(_("This agent is not available to install."))
 	if frappe.db.exists(INSTALLATION, {"owner": me, "agent": listing.name}):
 		frappe.throw(_("You have already installed this agent."))
+	# R5-J8: refuse when the listing's min_apps are not all installed / a required
+	# DocType is absent (typed reason app_absent_or_ineligible). The controller
+	# validate() re-enforces this on every surface; catch it here for a clean,
+	# pre-insert message. A non-installable capability produces no install row.
+	from jarvis.chat.agent_installability import assert_installable
+
+	assert_installable(listing.name)
 
 	sched = {}
 	try:
@@ -500,16 +629,40 @@ def install_agent(agent_slug: str) -> dict:
 	if freq not in _FREQUENCIES:
 		freq = "daily"
 
-	doc = frappe.get_doc({
-		"doctype": INSTALLATION,
-		"agent": listing.name,
-		"enabled": 0,
-		"installed_version": listing.version,
-		"installed_at": frappe.utils.now(),
-		"schedule_enabled": int(sched.get("schedule_enabled") or 0),
-		"schedule_frequency": freq,
-	})
-	doc.insert()  # owner = me; validate() runs the cap/uniqueness checks
+	doc = frappe.get_doc(
+		{
+			"doctype": INSTALLATION,
+			"agent": listing.name,
+			"enabled": 0,
+			# Phase 1 identity: the agent runs AS this user (every jarvis__* read is
+			# permission-bounded to them). Defaults to the installer — a self-map,
+			# which the controller's escalation guard always permits. An admin may
+			# retarget it later via set_run_as_user.
+			"run_as_user": me,
+			# PP-4: every capability activates per customer in preview/SHADOW first,
+			# with the installer as the initial named reviewer (retargetable by an
+			# admin). The controller also defaults reviewer + forbids a non-shadow
+			# birth, but set it explicitly here so the install intent is on the record.
+			"activation_state": "shadow",
+			"reviewer": me,
+			"installed_version": listing.version,
+			"installed_at": frappe.utils.now(),
+			"schedule_enabled": int(sched.get("schedule_enabled") or 0),
+			"schedule_frequency": freq,
+		}
+	)
+	try:
+		doc.insert()  # owner = me; validate() runs the cap/uniqueness/run-as checks
+	except frappe.UniqueValidationError:
+		# #460: the (owner, agent) unique index is the authority — the two
+		# ``frappe.db.exists`` checks above it (here and in the controller) cannot
+		# serialize a double-submit, so the LOSER of that race arrives here. Frappe
+		# has already queued its generic "owner_agent must be unique" msgprint from
+		# ``show_unique_validation_message``; drop it and re-raise the same friendly
+		# message the non-racing path gives, so a double click reads as an ordinary
+		# "already installed" rather than a 500.
+		frappe.clear_last_message()
+		frappe.throw(_("You have already installed this agent."))
 	# No _mark_catalog_dirty(): installs start enabled=0, so the container's
 	# ENABLED set is unchanged — only enable/disable (and uninstalling an
 	# ENABLED install) make an Apply pending.
@@ -530,6 +683,13 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	bundle only reaches the container on the next Apply)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
+	# R5-J8: never enable a non-installable capability (a min_apps dependency
+	# absent at install, or one that vanished after install and was reconciled to
+	# installable=0). Disabling is always allowed.
+	if int(enabled or 0):
+		from jarvis.chat.agent_installability import assert_installable
+
+		assert_installable(doc.agent)
 	doc.enabled = int(enabled or 0)
 	doc.save()
 	_mark_catalog_dirty()
@@ -554,6 +714,12 @@ def set_schedule(
 	Recomputes ``next_run_at`` when the schedule is enabled."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
+	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
+	# non-installable capability (a scheduled run would only fail its preflight).
+	if int(schedule_enabled or 0):
+		from jarvis.chat.agent_installability import assert_installable
+
+		assert_installable(doc.agent)
 	if schedule_enabled is not None:
 		doc.schedule_enabled = int(schedule_enabled or 0)
 	if schedule_frequency is not None:
@@ -587,10 +753,10 @@ def set_schedule(
 
 @frappe.whitelist()
 def set_config(installation: str, config: str) -> dict:
-	"""Persist an installed auditor's engagement / materiality config JSON — a
-	pure DB write (O6: no restart; consumed by compute_materiality / run_scrutiny
-	on the next audit). Owner-gated (S3). Validates the payload is a JSON object
-	(keys: benchmark_value, percentage, engagement_risk_level, rounding_step, …)."""
+	"""Persist an installed agent's engagement config JSON — a pure DB write
+	(O6: no restart; the delegate reads it on its installation on the next run).
+	Owner-gated (S3). Validates the payload is a JSON object (keys: benchmark_value,
+	percentage, engagement_risk_level, rounding_step, company, …)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	try:
@@ -606,7 +772,7 @@ def set_config(installation: str, config: str) -> dict:
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
 		installation=doc.name,
 		action="config_changed",
-		# Key names only — engagement/materiality VALUES stay out of the feed.
+		# Key names only — engagement config VALUES stay out of the feed.
 		detail=", ".join(sorted(parsed)) or None,
 	)
 	frappe.db.commit()
@@ -614,19 +780,117 @@ def set_config(installation: str, config: str) -> dict:
 
 
 @frappe.whitelist()
+def set_run_as_user(installation: str, user: str) -> dict:
+	"""Map an installed agent's RUN-AS identity — the user every ``jarvis__*``
+	ERP read is permission-bounded to (Phase 1 identity). Owner-gated (S3:
+	``check_permission("write")``) for WHO may touch the row; the ESCALATION guard
+	(who may map WHICH user) lives in the controller ``validate()`` so it holds on
+	Desk/test writes too — a non-admin may only map to themselves, any cross-user
+	mapping needs Jarvis Admin, and binding to a System Manager needs a System
+	Manager. Mirrors ``set_config``: check_permission, set, then save so
+	validate() enforces the guard. Pure DB write (no restart)."""
+	doc = frappe.get_doc(INSTALLATION, installation)
+	doc.check_permission("write")  # S3 owner-gate
+	doc.run_as_user = user
+	# validate() runs the A4 escalation + A12 permission guard; on_update() writes the
+	# cross-user-mapping audit row (FIX 10 — the audit now lives in the controller so
+	# it fires on EVERY write surface, Desk / import / bulk / direct save, not just
+	# this SPA endpoint; a self-map is correctly not audited).
+	doc.save()
+	frappe.db.commit()
+	return {
+		"ok": True,
+		"data": {
+			"name": doc.name,
+			"run_as_user": doc.run_as_user,
+			"scoped_visibility": int(doc.scoped_visibility or 0),
+		},
+	}
+
+
+def _installation_finding_names(run_names: list) -> set:
+	"""#455 — the findings an uninstall cascade may destroy: ONLY those this
+	installation's own runs CREATED.
+
+	Membership is read off the finding's creation stamps, ``run`` and
+	``first_seen_run``. Both are written once at insert
+	(``agent_runs.record_delegate_run``) and are frozen by the finding controller
+	thereafter, so they are the one durable statement of which installation
+	produced the row.
+
+	``last_seen_run`` is deliberately NOT a membership signal even though it too
+	points at a run. It is the only run pointer the engine ever re-points, and the
+	recurrence bump that re-points it matches on ``(owner, agent, fingerprint)``.
+	Under PP-4 a shadow installation's findings are re-homed to the REVIEWER, so a
+	reviewer who also runs their own installation of the same agent can have a
+	DIFFERENT owner's finding bumped onto one of their runs (#454). Treating that
+	as membership would re-open exactly the cross-owner sweep this function
+	exists to close: a bumped row was, by construction, created by somebody else's
+	installation.
+
+	The old ``{"agent": ..., "owner": ["in", [owner, reviewer]]}`` filter is gone
+	entirely. Nothing constrains a reviewer to a single installation (PP-6
+	institutionalises the opposite, see ``_verify_reviewer_two_pack_capacity``), so
+	that clause matched — and ``force=True`` destroyed — live findings belonging to
+	other customers.
+
+	Findings with NO surviving run pointer (a pre-run-tracking row, or one whose
+	runs were already deleted) are left ALONE. There is no evidence tying such a row
+	to this installation rather than to any other install of the same agent, and
+	guessing is what caused #455. An orphan is visible and removable from Desk;
+	another customer's destroyed audit history is neither.
+	"""
+	if not run_names:
+		return set()
+	names = set()
+	for field in ("run", "first_seen_run"):
+		names.update(
+			frappe.get_all(FINDING, filters={field: ["in", run_names]}, pluck="name", ignore_permissions=True)
+		)
+	return names
+
+
+def _detach_last_seen_run(run_names: list) -> None:
+	"""Re-point any SURVIVING finding whose ``last_seen_run`` lands in the runs this
+	cascade is about to force-delete.
+
+	A survivor here is by definition another installation's row that the #454
+	recurrence bump attached to one of our runs. Leaving the pointer would dangle
+	it: ``get_findings``' run drill-down INNER JOINs ``last_seen_run``, so the row
+	would vanish from its real owner's history, and Frappe's link validation would
+	reject that owner's next acknowledge/resolve save outright. Falling back to the
+	row's own ``first_seen_run`` (which belongs to ITS installation and survives, or
+	is empty) keeps the recurrence pointer truthful and the row usable.
+
+	Raw ``db.set_value`` — ``last_seen_run`` is a frozen audit field, so this must
+	bypass the finding controller exactly as the recurrence bump does.
+	"""
+	if not run_names:
+		return
+	for row in frappe.get_all(
+		FINDING,
+		filters={"last_seen_run": ["in", run_names]},
+		fields=["name", "first_seen_run"],
+		ignore_permissions=True,
+	):
+		frappe.db.set_value(
+			FINDING, row.name, "last_seen_run", row.first_seen_run or None, update_modified=False
+		)
+
+
+@frappe.whitelist()
 def uninstall_agent(installation: str) -> dict:
 	"""Delete an installation (owner-gated) plus its run + finding history —
 	bottom-up, mirroring ``macros_api.delete_macro``: findings link runs (via
 	``run`` / ``first_seen_run`` / ``last_seen_run``) and runs link the
-	installation, so leaving either behind would block the delete with
-	LinkExistsError. One install is one (owner, agent) pair, so the owner's
-	findings for the agent go, PLUS (belt-and-braces) any finding whose run
-	pointers land in this install's runs. The ``uninstalled`` activity row is
-	written FIRST — it is Link-free by design, so the history survives the
-	cascade. The bundle leaves the container on the next Apply (the fleet
-	endpoint does a full reconcile); the dirty flag records that an Apply is
-	now pending — but only when the install was ENABLED (a disabled install
-	was never in the pushed set, so removing it changes nothing)."""
+	installation. The cascade is scoped STRICTLY BY INSTALLATION MEMBERSHIP, the
+	way ``_rehome_installation_outputs`` scopes it, never by a broad
+	``(agent, owner)`` match (#455 — see ``_installation_finding_names``). The
+	``uninstalled`` activity row is written FIRST — it is Link-free by design, so
+	the history survives the cascade. The bundle leaves the container on the next
+	Apply (the fleet endpoint does a full reconcile); the dirty flag records that
+	an Apply is now pending — but only when the install was ENABLED (a disabled
+	install was never in the pushed set, so removing it changes nothing)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("delete")  # S3 owner-gate before touching linked rows
 	log_activity(
@@ -635,17 +899,24 @@ def uninstall_agent(installation: str) -> dict:
 		installation=doc.name,
 		action="uninstalled",
 	)
-	run_names = frappe.get_all(RUN, filters={"installation": doc.name}, pluck="name")
-	finding_names = set(
-		frappe.get_all(FINDING, filters={"owner": doc.owner, "agent": doc.agent}, pluck="name")
-	)
-	if run_names:
-		for field in ("run", "first_seen_run", "last_seen_run"):
-			finding_names.update(
-				frappe.get_all(FINDING, filters={field: ["in", run_names]}, pluck="name")
-			)
-	for name in finding_names:
-		frappe.delete_doc(FINDING, name, ignore_permissions=True, force=True)
+	# PP-4: a shadow installation's runs/findings are re-homed to the REVIEWER (not
+	# the installer owner), so the owner-scoped permission-query hook would hide them
+	# from this owner-initiated cascade and leave orphans that block the delete.
+	# ignore_permissions here finds every row regardless of its current visibility
+	# owner; the delete itself is already ignore_permissions + owner-gated above.
+	run_names = frappe.get_all(RUN, filters={"installation": doc.name}, pluck="name", ignore_permissions=True)
+	for name in _installation_finding_names(run_names):
+		# The guard flag rides through ``delete_doc``'s ``flags`` argument, which is
+		# applied to the fetched doc BEFORE ``on_trash`` runs — so the controller can
+		# re-derive membership itself and refuse a row this cascade has no claim on.
+		frappe.delete_doc(
+			FINDING,
+			name,
+			ignore_permissions=True,
+			force=True,
+			flags={"jarvis_uninstall_installation": doc.name},
+		)
+	_detach_last_seen_run(run_names)
 	for name in run_names:
 		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	frappe.delete_doc(INSTALLATION, installation)  # honors if_owner
@@ -656,53 +927,504 @@ def uninstall_agent(installation: str) -> dict:
 
 
 @frappe.whitelist()
-def run_agent_now(installation: str) -> dict:
+def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	"""Manual trigger: enqueue an audit turn NOW via the SAME code path the
 	scheduler uses (``agent_scheduler._launch_audit``), executed UNDER THE
-	INSTALLATION OWNER's identity — never the triggering user's.
+	INSTALLATION's RUN-AS USER identity — never the triggering user's.
+
+	``options`` is a small per-launch payload (JSON string or dict). The only key
+	today is ``source_apps`` — the list of custom apps this run may read source
+	from (CX5-2). It is REQUIRED for the ``custom-app-learning`` agent (whose whole
+	job is shipping customer source to the configured model provider) and every
+	name is validated against the installed learnable custom apps before launch:
+	"installed" is not consent, so an admin authorises the exact apps, per run. The
+	validated selection is stamped server-side into the run's ``scope_json`` (the
+	tools' authorization) and PERSISTED on the installation
+	(``source_apps_json``) so a scheduled re-learn reuses the same explicit
+	selection instead of running unbounded.
 
 	``check_permission`` gates WHO may trigger (owner, or a System Manager);
 	but the audit's ``jarvis__*`` tool calls must always be scoped to the
-	installation OWNER's permissions, so a System Manager triggering another
-	owner's audit cannot run ERP reads with elevated rights. This mirrors the
-	scheduler's S1 identity hinge on the manual path."""
+	installation's ``run_as_user`` permissions, so a System Manager triggering
+	another owner's audit cannot run ERP reads with elevated rights. This mirrors
+	the scheduler's S1 identity hinge on the manual path. Run/finding ROW
+	ownership stays the human owner (``_launch_audit``); only the ERP-read
+	identity is the run-as user; and the TRIGGERING human is recorded separately as
+	the run's immutable ``initiating_human`` (JF-021) — three distinct identities."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3: who may trigger
-	# RBAC: the audit executes AS the installation OWNER, so it is the OWNER's
-	# roles that must permit the agent (covers both a self-run by a user who
-	# lost the role, and an SM triggering an install whose owner lost it — the
-	# manual analogue of the scheduler's role skip). SM-owned installs pass via
-	# the System Manager bypass inside the helper.
-	if not _user_allowed_for_agent(doc.agent, doc.owner):
+	# R1-F3: no ``or doc.owner`` fallback. A blank run-as user is a MISCONFIGURED
+	# install, and defaulting to the row owner would run this audit's ERP reads as
+	# an identity the A4 escalation guard never litigated — a privilege grant
+	# nobody reviewed. Refuse explicitly (and before the RBAC helper, which would
+	# otherwise be asked to rule on an empty user) so the operator sees WHICH row
+	# is wrong instead of getting a silent owner-privileged run.
+	run_as = (doc.run_as_user or "").strip()
+	if not run_as:
 		frappe.throw(
-			_("The installation owner's roles do not permit running this agent."),
+			_(
+				"This agent has no run-as user, so there is no identity to run it as. Set a "
+				"run-as user on the installation, or disable it."
+			)
+		)
+	# RBAC: the audit executes AS the RUN-AS user, so it is THAT identity's roles
+	# that must permit the agent (gotcha #8 — the executing identity is gated, not
+	# the triggerer). SM run-as users pass via the System Manager bypass inside the
+	# helper.
+	if not _user_allowed_for_agent(doc.agent, run_as):
+		frappe.throw(
+			_("The run-as user's roles do not permit running this agent."),
 			frappe.PermissionError,
 		)
 	if not doc.enabled:
 		frappe.throw(_("Enable the agent before running it."))
-	if frappe.db.get_value(LISTING, doc.agent, "nature") != "Auditor":
+	# R5-J8: refuse an on-demand run for a non-installable capability — a required
+	# app/DocType that was absent at install or vanished afterward means the run
+	# has no data to evaluate (typed reason app_absent_or_ineligible).
+	from jarvis.chat.agent_installability import assert_installable
+
+	assert_installable(doc.agent)
+	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
+	nature = listing.get("nature")
+	if nature not in ("Auditor", "Scribe"):
 		frappe.throw(
-			_("Only auditor agents run on demand; operators draft through the Approval Board.")
+			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
 		)
-	from jarvis.chat.agent_scheduler import _launch_audit, _valid_owner
+	# #457: an unpublished listing is not deployed — the push drops it from the
+	# container roster, so a manual run would reach a delegate that does not exist
+	# and only fail three hours later as a mislabelled timeout. ``_launch_audit``
+	# refuses it authoritatively; refuse here too, before the budget check and the
+	# source-app persistence, so the operator gets the real reason and no side
+	# effects.
+	if (listing.get("status") or "") != "Published":
+		frappe.throw(
+			_(
+				"This agent is no longer published ({0}), so it is not deployed to run. "
+				"Uninstall it, or ask an admin to publish it again."
+			).format(listing.get("status") or "unknown")
+		)
+	# CX5-5: a SHADOW installation means "run it, but its output is not live yet" —
+	# an auditor's findings sit in a shadow set for a reviewer. A scribe has no such
+	# holding pen: it writes the LIVE Org wiki directly, with no confirmation gate,
+	# so letting one run in shadow would make the shadow state a lie. Refuse until
+	# the install is promoted.
+	if nature == "Scribe" and (doc.activation_state or "shadow") == "shadow":
+		frappe.throw(
+			_(
+				"This agent writes to the Org wiki directly, so it cannot run while the "
+				"installation is in shadow. Promote it to live to run it."
+			)
+		)
+	from jarvis.chat.agent_scheduler import (
+		_is_app_learning,
+		_launch_audit,
+		_over_run_budget,
+		_valid_owner,
+	)
+
+	# CX5-2: the Custom App Learning agent's explicit, per-run app authorization.
+	# Refuse the launch outright when the admin named no app — a run with an empty
+	# selection would reach the container and read nothing, wasting a run and a
+	# budget slot while looking like a silent failure.
+	source_apps = None
+	if _is_app_learning(doc.agent):
+		from jarvis.learning import app_source
+
+		selection = (frappe.parse_json(options) if isinstance(options, str) else options) or {}
+		if not isinstance(selection, dict):
+			selection = {}
+		try:
+			source_apps = app_source.validate_source_apps(selection.get("source_apps") or [])
+		except ValueError as e:
+			frappe.throw(
+				_(
+					"Select which custom apps this run may read before starting it — {0}. "
+					"Their source code is sent to the configured AI model provider."
+				).format(str(e))
+			)
+		# Persist the validated selection so the SCHEDULED path has a durable, explicit
+		# authorization to reuse (it has no human to ask) instead of running unbounded.
+		frappe.db.set_value(
+			INSTALLATION, doc.name, "source_apps_json", frappe.as_json(source_apps), update_modified=False
+		)
+
+	# A14: the manual path shares the SAME per-installation + per-tenant monthly
+	# budget as the scheduler (counting manual + scheduled runs together), so a
+	# manual "Run now" loop cannot drain the subscription the scheduler is capped
+	# against. Checked before dispatch; a plain COUNT, identity-agnostic.
+	over, why = _over_run_budget(installation)
+	if over:
+		frappe.throw(
+			_(
+				"Monthly agent-run budget reached ({0}). Runs resume next month, or an "
+				"admin can raise the budget in Jarvis Settings."
+			).format(why)
+		)
 
 	# Fail-closed identity guard: refuse to run an audit AS Administrator / Guest /
-	# a disabled user ON SOMEONE ELSE'S behalf (the escalation a System Manager could
-	# otherwise cause, and the unattended risk the scheduler faces). An owner running
-	# their OWN install manually is attended + same-identity, so it is allowed — this
-	# is how a single-admin dev / self-host box runs audits at all.
-	if not _valid_owner(doc.owner) and doc.owner != frappe.session.user:
-		frappe.throw(_("Cannot run this audit as the installation's owner (identity guard)."))
+	# a disabled RUN-AS user ON SOMEONE ELSE'S behalf (the escalation a System
+	# Manager could otherwise cause, and the unattended risk the scheduler faces).
+	# A user running their OWN self-mapped install manually is attended +
+	# same-identity, so it is allowed — this is how a single-admin dev box runs
+	# audits at all.
+	if not _valid_owner(run_as) and run_as != frappe.session.user:
+		frappe.throw(_("Cannot run this audit as its run-as user (identity guard)."))
 
 	original_user = frappe.session.user
-	# impersonate is session-safe (a bare frappe.set_user in this HTTP path
-	# would gut the caller's cookie session and log them out) and no-ops when
-	# the owner IS the caller (self-owned manual run).
-	with impersonate(doc.owner if doc.owner != original_user else None):
-		if doc.owner != original_user:
-			doc = frappe.get_doc(INSTALLATION, installation)  # re-fetch under owner
-		result = _launch_audit(doc, trigger="manual")
+	# JF-021: the run's IMMUTABLE launch provenance identity, captured HERE — before
+	# the impersonation below — and passed EXPLICITLY into the launch. _launch_audit
+	# used to read frappe.session.user, which by then is the RUN-AS user: every manual
+	# run a System Manager triggered on someone else's install permanently recorded the
+	# wrong person in a field no correction can reach. This is never a client argument
+	# (run_agent_now takes no such parameter) and the launch re-derives + verifies it
+	# against the authenticated session user, so it can only confirm, never forge.
+	triggering_human = authenticated_user()
+	# #672: the manual path takes the SAME per-installation dispatch lock as the cron
+	# sweep, and refuses to start a second CONCURRENT audit of one installation.
+	# Without the lock the two paths were an unguarded check-then-act on shared state:
+	# a Run Now landing in the same tick as the hourly sweep had both pass every gate
+	# above and both launch, so one customer paid twice out of one A14 budget for two
+	# audits of the same books. A short wait rather than an immediate refusal, because
+	# the common overlap is a launch already in progress that finishes in well under a
+	# second; only a genuinely concurrent dispatch reaches the refusal.
+	from jarvis._redis_lock import redis_lock
+	from jarvis.chat.agent_scheduler import DISPATCH_LOCK_TTL_S, _dispatch_lock_name, _live_run
+
+	with redis_lock(
+		_dispatch_lock_name(installation),
+		timeout_s=DISPATCH_LOCK_TTL_S,
+		blocking_timeout_s=DISPATCH_LOCK_WAIT_S,
+	) as acquired:
+		if not acquired:
+			frappe.throw(_("A run for this agent is already starting. Try again in a moment."))
+		# Freshness-bounded (see agent_scheduler._live_run), so a wedged run cannot
+		# lock the button out until the 3h reaper clears it.
+		if _live_run(installation):
+			frappe.throw(
+				_(
+					"This agent is already running. Wait for the current run to finish "
+					"before starting another one."
+				)
+			)
+		# impersonate is session-safe (a bare frappe.set_user in this HTTP path
+		# would gut the caller's cookie session and log them out) and no-ops when
+		# the run-as user IS the caller (self-mapped manual run). get_doc does NOT
+		# enforce read perms, so the re-fetch under the run-as user is safe even when
+		# run_as is not the (if_owner) row owner.
+		with impersonate(run_as if run_as != original_user else None):
+			if run_as != original_user:
+				doc = frappe.get_doc(INSTALLATION, installation)  # re-fetch under run_as
+			result = _launch_audit(
+				doc, trigger="manual", source_apps=source_apps, initiating_human=triggering_human
+			)
 	return {"ok": True, "data": result}
+
+
+# --------------------------------------------------------------------------- #
+# PP-4 shadow activation + PP-6 global activation budget
+# --------------------------------------------------------------------------- #
+def _has_ceiling_grant(customer: str) -> bool:
+	"""PP-6 — True iff a Jarvis Admin has recorded an ``activation_ceiling_raised``
+	provenance grant BOUND TO THIS CUSTOMER. The grant is stored on the append-only
+	ledger, keyed to the customer via ``result_link_doctype='User' / result_link_name
+	=<owner>`` — never a global singleton — so a raise justified by ONE customer's
+	reviewer can never silently unlock a second live module for every other customer
+	on the site (the exact detachment the global-singleton read caused)."""
+	if not customer:
+		return False
+	return bool(
+		frappe.db.exists(
+			PROVENANCE,
+			{
+				"event_type": "activation_ceiling_raised",
+				"result_link_doctype": "User",
+				"result_link_name": customer,
+			},
+		)
+	)
+
+
+def _activation_ceiling(customer: str) -> int:
+	"""PP-6 — the LIVE-module ceiling FOR THIS CUSTOMER. Base 1 (every customer starts
+	with a single live module); raised to the stage maximum only for a customer who
+	has a recorded per-customer grant (``_has_ceiling_grant``). Per-customer, never a
+	site-wide singleton — the budget is a per-customer ceiling (Round-4 condition 2),
+	so its raise must bind to the customer it was justified for."""
+	return _ACTIVATION_CEILING_MAX if _has_ceiling_grant(customer) else 1
+
+
+def _verify_reviewer_two_pack_capacity(customer: str) -> str:
+	"""PP-6 reviewer-capacity gate (system-verified, not free text): a second live
+	module needs a named reviewer who can own it, so require this customer to have a
+	single named ``reviewer`` who is the reviewer-of-record across installations
+	spanning at least TWO DISTINCT packs. Returns that reviewer; throws if none
+	qualifies.
+
+	R5-J11(c): pack identity is the listing's CANONICAL ``rule_pack`` (a curated
+	pack-membership name synced from the registry) and NOTHING ELSE — the former
+	agent-slug fallback is gone. Two agents in the SAME pack (or two agents whose
+	listings declare NO pack) therefore no longer masquerade as two packs: an empty/
+	missing pack id contributes nothing, so competency is never inferred from agent
+	count (codex R5-P1-02)."""
+	rows = frappe.get_all(INSTALLATION, filters={"owner": customer}, fields=["reviewer", "agent"])
+	packs_by_reviewer: dict[str, set] = {}
+	for r in rows:
+		if not r.reviewer:
+			continue
+		pack = (frappe.db.get_value(LISTING, r.agent, "rule_pack") or "").strip()
+		if not pack:
+			continue  # no canonical pack -> contributes nothing (never the slug)
+		packs_by_reviewer.setdefault(r.reviewer, set()).add(pack)
+	for reviewer, packs in packs_by_reviewer.items():
+		if len(packs) >= 2:
+			return reviewer
+	frappe.throw(
+		_(
+			"No named reviewer for this customer covers two packs. A second live module "
+			"needs a reviewer who is the reviewer-of-record on installations spanning at "
+			"least two distinct packs before the activation ceiling may be raised."
+		)
+	)
+
+
+def _append_provenance_event(**fields) -> str:
+	"""PP-5 — append ONE immutable provenance event. The controller enforces
+	append-only + stamps ``occurred_at``; this is the only ledger writer Phase C
+	needs (``agent_promoted_to_live`` on promotion, ``activation_ceiling_raised`` on
+	a budget raise). ignore_permissions — trusted server infrastructure, exactly
+	like the finding/run inserts (the ledger perm grants create to System Manager
+	only, but a reviewer/admin action legitimately records one)."""
+	doc = frappe.get_doc({"doctype": PROVENANCE, **fields})
+	doc.flags.ignore_permissions = True
+	doc.insert(ignore_permissions=True)
+	return doc.name
+
+
+def _rehome_installation_outputs(inst, to_owner: str) -> None:
+	"""PP-4 — move the VISIBILITY ownership of this installation's already-persisted
+	runs / findings / dashboards / activity to ``to_owner``: the reviewer while
+	shadow, the installer once promoted to live. The agent permission-query hooks
+	and the dashboard scope condition gate reads on ``owner``/``target_user``, so
+	re-homing is how promotion OPENS the owner surface (and demotion re-closes it).
+	Raw ``db.set_value`` bypasses the finding/run immutability controllers. Rows are
+	located precisely by installation membership (never a broad owner+agent match
+	that could sweep a different install of the same agent).
+
+	#615: findings come from :func:`_installation_finding_names`, the SAME membership
+	rule the uninstall cascade uses since #455/#612, rather than a local variant that
+	also accepted ``last_seen_run``. That extra pointer is not a membership signal: it
+	is the only run pointer the engine re-points, and the recurrence bump that
+	re-points it matches on ``(owner, agent, fingerprint)``, so under PP-4 shadow
+	re-homing it can attach ANOTHER owner's finding to one of our runs. A row reachable
+	only through it was, by construction, created by somebody else's installation.
+
+	The consequence here differs from #455 and is why this needed its own fix: the
+	cascade DELETED such a row, while this path rewrites its visibility ``owner``. So
+	the failure was a foreign customer's finding silently appearing under the wrong
+	owner rather than disappearing."""
+	run_names = frappe.get_all(
+		RUN, filters={"installation": inst.name}, pluck="name", ignore_permissions=True
+	)
+	dash_names = set()
+	finding_names = _installation_finding_names(run_names)
+	if run_names:
+		for r in frappe.get_all(
+			RUN, filters={"name": ["in", run_names]}, fields=["dashboard"], ignore_permissions=True
+		):
+			if r.dashboard:
+				dash_names.add(r.dashboard)
+	for rn in run_names:
+		frappe.db.set_value(RUN, rn, "owner", to_owner, update_modified=False)
+	for fn in finding_names:
+		frappe.db.set_value(FINDING, fn, "owner", to_owner, update_modified=False)
+	for dn in dash_names:
+		frappe.db.set_value(
+			DASHBOARD, dn, {"owner": to_owner, "target_user": to_owner}, update_modified=False
+		)
+	for an in frappe.get_all(
+		ACTIVITY, filters={"installation": inst.name}, pluck="name", ignore_permissions=True
+	):
+		frappe.db.set_value(ACTIVITY, an, "owner", to_owner, update_modified=False)
+
+
+@frappe.whitelist()
+def promote_installation(installation: str, justification: str | None = None) -> dict:
+	"""PP-4 — promote a shadow installation to LIVE by the named reviewer's explicit
+	sign-off. This is the SINGLE choke point PP-4 (calibration) and PP-6 (budget)
+	both enforce:
+
+	  * Authority: the named ``reviewer`` (their sign-off), or an authorised approver
+	    (Jarvis Admin / System Manager). NOT the owner surface — ``check_permission``
+	    gates on ``if_owner`` and the reviewer may not be the owner, so authority is
+	    checked explicitly here.
+	  * PP-6 budget: refuse when this customer already has ``activation_module_ceiling``
+	    live modules (global across all packs, per customer; default 1).
+	  * Records who/when (``promoted_by``/``promoted_at``, track_changes audited) and
+	    writes an append-only ``agent_promoted_to_live`` provenance event.
+	  * Re-homes the installation's runs/findings/dashboards to the owner so the
+	    owner surface + attestation become available only AFTER sign-off."""
+	from jarvis._redis_lock import redis_lock
+
+	doc = frappe.get_doc(INSTALLATION, installation)
+	me = frappe.session.user
+	if me != doc.reviewer and not has_jarvis_admin_access(me):
+		frappe.throw(
+			_("Only the named reviewer or a Jarvis Admin may promote this installation to live."),
+			frappe.PermissionError,
+		)
+	if doc.activation_state == "live":
+		frappe.throw(_("This installation is already live."))
+
+	# PP-6 activation-budget enforcement must be RACE-FREE: the read-check-flip below
+	# (count live -> compare to ceiling -> save live) is a TOCTOU window. Two concurrent
+	# promotions for the same customer would both read live_count=0 against ceiling 1 and
+	# both flip to live, exceeding the per-customer ceiling. Serialize every activation
+	# change for a customer on a redis lock keyed on the OWNER, and — inside the lock —
+	# force a fresh transaction snapshot (``commit`` ends the REPEATABLE-READ snapshot the
+	# earlier ``get_doc`` opened, so the count reflects any promotion another request has
+	# committed) before re-reading state and re-checking the ceiling.
+	owner = doc.owner
+	with redis_lock(f"jarvis_agent_activation:{owner}", timeout_s=30, blocking_timeout_s=10.0) as acquired:
+		if not acquired:
+			frappe.throw(
+				_("Another activation change for this customer is in progress — please retry in a moment.")
+			)
+		frappe.db.commit()  # fresh snapshot under the lock (defeats stale REPEATABLE-READ count)
+		doc = frappe.get_doc(INSTALLATION, installation)  # re-read the row under the lock
+		if doc.activation_state == "live":
+			frappe.throw(_("This installation is already live."))
+
+		ceiling = _activation_ceiling(owner)
+		live_count = frappe.db.count(INSTALLATION, {"owner": owner, "activation_state": "live"})
+		if live_count >= ceiling:
+			frappe.throw(
+				_(
+					"Activation budget reached: this customer already has {0} live module(s) and the "
+					"activation ceiling is {1}. The initial budget is a single live module; a Jarvis Admin "
+					"can raise the ceiling to {2} once the reviewer covers a second pack."
+				).format(live_count, ceiling, _ACTIVATION_CEILING_MAX)
+			)
+
+		doc.activation_state = "live"
+		doc.promoted_by = me
+		doc.promoted_at = frappe.utils.now()
+		doc.flags.promoting = True  # authorises the shadow->live transition guard
+		doc.save(ignore_permissions=True)
+
+		_rehome_installation_outputs(doc, owner)
+		event = _append_provenance_event(
+			event_type="agent_promoted_to_live",
+			agent=doc.agent,
+			installation=doc.name,
+			preparation_mode="live",
+			reviewing_human=me,
+			detail=((justification or "").strip()[:500] or None),
+		)
+		log_activity(
+			agent=doc.agent,
+			agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
+			installation=doc.name,
+			action="promoted_to_live",
+			detail=f"signed off by {me}",
+			owner=owner,
+		)
+		frappe.db.commit()
+	return {
+		"ok": True,
+		"data": {
+			"name": doc.name,
+			"activation_state": "live",
+			"promoted_by": me,
+			"promoted_at": str(doc.promoted_at),
+			"provenance_event": event,
+		},
+	}
+
+
+@frappe.whitelist()
+def demote_installation(installation: str, reason: str | None = None) -> dict:
+	"""PP-4 — the demotion / kill path: send a live installation back to SHADOW
+	(re-closing the owner surface, freeing a global activation-budget slot). Same
+	authority as promotion (named reviewer or a Jarvis Admin). Clears the promotion
+	stamp and re-homes outputs back to the reviewer-only surface; audited via
+	track_changes + the activity feed."""
+	doc = frappe.get_doc(INSTALLATION, installation)
+	me = frappe.session.user
+	if me != doc.reviewer and not has_jarvis_admin_access(me):
+		frappe.throw(
+			_("Only the named reviewer or a Jarvis Admin may demote this installation."),
+			frappe.PermissionError,
+		)
+	if doc.activation_state != "live":
+		frappe.throw(_("This installation is not live."))
+	doc.activation_state = "shadow"
+	doc.promoted_by = None
+	doc.promoted_at = None
+	doc.flags.demoting = True  # authorises the live->shadow transition guard
+	doc.save(ignore_permissions=True)
+	_rehome_installation_outputs(doc, doc.reviewer or doc.owner)
+	log_activity(
+		agent=doc.agent,
+		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
+		installation=doc.name,
+		action="demoted_to_shadow",
+		detail=((reason or "").strip()[:140] or f"by {me}"),
+		owner=doc.owner,
+	)
+	frappe.db.commit()
+	return {"ok": True, "data": {"name": doc.name, "activation_state": "shadow"}}
+
+
+@frappe.whitelist()
+def raise_activation_ceiling(customer: str, justification: str, new_ceiling: int = 2) -> dict:
+	"""PP-6 — raise the activation ceiling from 1 to 2 (the stage maximum) FOR ONE
+	NAMED CUSTOMER. Restricted to a Jarvis Admin. The raise is per-customer, never a
+	site-wide singleton: it must name the ``customer`` (owner) being raised, is granted
+	only when that customer's named reviewer is system-verified to cover two packs'
+	competency (``_verify_reviewer_two_pack_capacity`` — the reviewer-capacity signal,
+	not a free-text claim), and is recorded as an append-only ``activation_ceiling_raised``
+	provenance event bound to the customer (who / when / customer / reviewer /
+	justification / new ceiling). Any value above 2 is rejected — no path to 3+ here."""
+	require_jarvis_admin()
+	just = (justification or "").strip()
+	if not just:
+		frappe.throw(_("A reviewer-capacity justification is required to raise the activation ceiling."))
+	nc = frappe.utils.cint(new_ceiling)
+	if nc != _ACTIVATION_CEILING_MAX:
+		frappe.throw(
+			_("The activation ceiling may be raised only to {0} (the stage maximum).").format(
+				_ACTIVATION_CEILING_MAX
+			)
+		)
+	customer = (customer or "").strip()
+	if not customer or not frappe.db.exists("User", customer):
+		frappe.throw(_("Name the customer (installation owner) whose activation ceiling is being raised."))
+	# System-verified reviewer-capacity gate (not just a free-text justification): a
+	# second live module needs a named reviewer who can own it.
+	reviewer = _verify_reviewer_two_pack_capacity(customer)
+	me = frappe.session.user
+	# The grant lives ONLY on the append-only ledger, bound to this customer via
+	# result_link_doctype/name — no global singleton is written, so the raise cannot
+	# leak a second live module to any other customer. Idempotent: one grant per
+	# customer already lifts _activation_ceiling(customer) to the maximum.
+	event = _append_provenance_event(
+		event_type="activation_ceiling_raised",
+		initiating_human=me,
+		reviewing_human=reviewer,
+		result_link_doctype="User",
+		result_link_name=customer,
+		detail=f"activation_module_ceiling -> {nc} for {customer}; reviewer {reviewer}; {just}"[:500],
+	)
+	frappe.db.commit()
+	return {
+		"ok": True,
+		"data": {
+			"customer": customer,
+			"reviewer": reviewer,
+			"activation_module_ceiling": nc,
+			"provenance_event": event,
+		},
+	}
 
 
 # --------------------------------------------------------------------------- #
@@ -715,10 +1437,44 @@ def _count(doctype: str, filters: dict, or_filters: list | None = None) -> int:
 	``fields``, so the search path plucks names — bounded because it is already
 	owner-scoped AND search-narrowed."""
 	if or_filters:
-		return len(
-			frappe.get_all(doctype, filters=filters, or_filters=or_filters, pluck="name")
-		)
+		return len(frappe.get_all(doctype, filters=filters, or_filters=or_filters, pluck="name"))
 	return frappe.db.count(doctype, filters=filters)
+
+
+_RUN_LIST_FIELDS = [
+	"name",
+	"agent",
+	"installation",
+	"trigger",
+	"status",
+	"started_at",
+	"finished_at",
+	"conversation",
+	"findings_count",
+	"blocker_count",
+	"error",
+	"coverage_note",
+	# Custom App Learning scribe runs render a pages tally (+ links) instead of a
+	# findings count; empty/0 for auditor/operator runs.
+	"pages_written",
+	"pages_json",
+]
+
+
+def _stamp_run_nature(rows: list[dict]) -> list[dict]:
+	"""Stamp each run row with its agent's ``nature`` (one query for the whole
+	page) so the SPA can render a scribe run's pages tally instead of a findings
+	count without an N+1."""
+	agents = {r.get("agent") for r in rows if r.get("agent")}
+	if not agents:
+		return rows
+	natures = {
+		d.name: d.nature
+		for d in frappe.get_all(LISTING, filters={"name": ["in", list(agents)]}, fields=["name", "nature"])
+	}
+	for r in rows:
+		r["nature"] = natures.get(r.get("agent"))
+	return rows
 
 
 @frappe.whitelist()
@@ -729,17 +1485,14 @@ def list_runs(agent: str | None = None, limit: int = 50) -> list[dict]:
 	filters = {"owner": me}
 	if agent:
 		filters["agent"] = agent
-	return frappe.get_all(
+	rows = frappe.get_all(
 		RUN,
 		filters=filters,
-		fields=[
-			"name", "agent", "installation", "trigger", "status", "started_at",
-			"finished_at", "conversation", "findings_count", "blocker_count",
-			"error", "coverage_note",
-		],
+		fields=list(_RUN_LIST_FIELDS),
 		order_by="creation desc",
 		limit=int(limit or 50),
 	)
+	return _stamp_run_nature(rows)
 
 
 @frappe.whitelist()
@@ -777,15 +1530,12 @@ def list_runs_page(
 		RUN,
 		filters=filters,
 		or_filters=or_filters,
-		fields=[
-			"name", "agent", "installation", "trigger", "status", "started_at",
-			"finished_at", "conversation", "findings_count", "blocker_count",
-			"error", "coverage_note",
-		],
+		fields=list(_RUN_LIST_FIELDS),
 		order_by="started_at desc, creation desc",
 		limit_start=start,
 		limit_page_length=pl,
 	)
+	_stamp_run_nature(rows)
 	return {
 		"rows": rows,
 		"total": total,
@@ -811,7 +1561,7 @@ def list_findings(
 	headers stay honest at scale.
 
 	``run`` means "the findings that run OBSERVED", not "rows whose ``run`` field
-	is that run": ``record_scrutiny_run`` dedupes re-detections into the EXISTING
+	is that run": ``record_delegate_run`` dedupes re-detections into the EXISTING
 	Finding row (bumping ``last_seen_run``), so filtering on the ``run`` column
 	alone returns rows only for the FIRST run that discovered each finding while
 	the newer Run's ``findings_count`` still counts them. Dedupe only ever bumps
@@ -874,9 +1624,38 @@ def list_findings(
 		FINDING,
 		filters=filters,
 		fields=[
-			"name", "run", "agent", "rule_id", "severity", "title", "detail_md",
-			"section", "effective_date", "disclaimer", "ref_doctype", "ref_name",
-			"amount", "state", "first_seen_run", "last_seen_run", "modified",
+			"name",
+			"run",
+			"agent",
+			"rule_id",
+			"severity",
+			# PP-1: the immutable result class + its class-conditional metadata ride on
+			# EVERY read row so the SPA can label the class beside the amount and mark a
+			# derived_candidate / legal_scenario as unconfirmed — a candidate must never
+			# render indistinguishable from an observed_fact on the primary triage surface.
+			"result_class",
+			"confidence",
+			"match_basis",
+			"false_positive_path",
+			"confirmation_status",
+			"rule_version",
+			"assumptions",
+			"known_exceptions",
+			"source",
+			"reviewer",
+			"outcome_provenance",
+			"title",
+			"detail_md",
+			"section",
+			"effective_date",
+			"disclaimer",
+			"ref_doctype",
+			"ref_name",
+			"amount",
+			"state",
+			"first_seen_run",
+			"last_seen_run",
+			"modified",
 		],
 		order_by="modified desc",
 		limit_start=start,
@@ -885,6 +1664,18 @@ def list_findings(
 	# Derived recurrence label: dedupe only ever bumps ``last_seen_run`` while a
 	# finding stays open, so a span wider than one run means it recurred.
 	for r in rows:
+		# PP-1 strong-verb gate on the READ path (angle-6): the stored authored
+		# ``title``/``detail_md`` is served through the SAME shared helper the fallback
+		# dashboard uses, so a "saved/recovered/prevented" token on any row that is NOT a
+		# confirmed_outcome with a resolving provenance link is neutralised server-side —
+		# no read surface (this list, FindingsPanel's v-html) can emit an unearned strong
+		# verb, and the guard holds by construction, not author discipline.
+		_rc = r.get("result_class")
+		_op = r.get("outcome_provenance")
+		if r.get("title"):
+			r["title"] = cr.render_value_text(r["title"], _rc, outcome_provenance=_op)
+		if r.get("detail_md"):
+			r["detail_md"] = cr.render_value_text(r["detail_md"], _rc, outcome_provenance=_op)
 		if r.state == "resolved":
 			r["recurrence"] = "resolved"
 		elif r.first_seen_run and r.first_seen_run != r.last_seen_run:
@@ -946,8 +1737,14 @@ def list_agent_activity_page(
 		filters=filters,
 		or_filters=or_filters,
 		fields=[
-			"name", "agent", "agent_title", "installation", "action", "run",
-			"detail", "creation",
+			"name",
+			"agent",
+			"agent_title",
+			"installation",
+			"action",
+			"run",
+			"detail",
+			"creation",
 		],
 		order_by="creation desc",
 		limit_start=start,
@@ -978,17 +1775,18 @@ def take_finding_to_chat(finding: str) -> dict:
 	from jarvis.chat.api import send_message
 
 	title = (doc.title or doc.rule_id or "finding").strip()
-	conv = frappe.get_doc({
-		"doctype": "Jarvis Conversation",
-		"title": f"Finding: {title}"[:140],
-		"status": "Active",
-	})
+	conv = frappe.get_doc(
+		{
+			"doctype": "Jarvis Conversation",
+			"title": f"Finding: {title}"[:140],
+			"status": "Active",
+		}
+	)
 	conv.insert()  # owned by the current user; respects perms
 	frappe.db.commit()
 
 	parts = [
-		f"I want to act on audit finding {doc.name} "
-		f"(rule {doc.rule_id}, severity: {doc.severity}).",
+		f"I want to act on audit finding {doc.name} (rule {doc.rule_id}, severity: {doc.severity}).",
 		f"Finding: {title}",
 	]
 	if doc.ref_doctype and doc.ref_name:
@@ -1130,10 +1928,28 @@ def _enqueued_push_agent_skills() -> None:
 			# flag below — the change missed this payload; a later Apply
 			# reconciles it.
 			version = frappe.utils.cint(
-				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version")
+				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False)
 			)
 			payload = build_agent_push_payload()
 			admin_client.post_push_agent_skills(agent_skills=payload)
+			# #458: END THIS WORKER'S TRANSACTION before the recheck, or the recheck
+			# cannot see a mutation at all and the guard above is inert. Two layers
+			# hid it: ``get_single_value`` defaults to ``cache=True`` and serves
+			# ``frappe.db.value_cache``, which is invalidated ONLY by commit/rollback;
+			# and under REPEATABLE READ every plain SELECT in this transaction reads
+			# the snapshot taken before the push, so even ``cache=False`` would
+			# re-read the snapshot value. Committing clears both. Exactly the reason
+			# ``promote_installation`` commits before ITS re-read.
+			#
+			# SAFE HERE and nowhere earlier: at this point the worker has written
+			# NOTHING (the version read and ``build_agent_push_payload`` are pure
+			# reads, and ``admin_client`` is pure HTTP), so this commits an empty
+			# transaction and can leave no half-written state. It also sits AFTER the
+			# push, so it can never commit a status implying a push that did not
+			# happen. The terminal write below is a single ``set_value`` in the fresh
+			# transaction, still covered by the try/except/finally and the trailing
+			# commit, so the "status is never left pending" invariant is unchanged.
+			frappe.db.commit()
 			values = {
 				"agent_skills_synced_at": frappe.utils.now(),
 				"agent_skills_sync_status": f"ok (applied {len(payload)} via admin)",
@@ -1141,10 +1957,10 @@ def _enqueued_push_agent_skills() -> None:
 			# The container now matches the DB — clear the dirty flag ONLY on a
 			# successful push whose payload saw every mutation (version
 			# unchanged); failures and mid-push mutations leave it set.
-			if (
-				frappe.utils.cint(frappe.db.get_single_value(_SETTINGS, "agent_catalog_version"))
-				== version
-			):
+			fresh = frappe.utils.cint(
+				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False)
+			)
+			if fresh == version:
 				values["agent_catalog_dirty"] = 0
 			frappe.db.set_value(_SETTINGS, _SETTINGS, values)
 			terminal_written = True

@@ -31,7 +31,7 @@ queue-``long`` worker (``_process_all``, job_id ``jarvis_chat_mining``) that:
 	 (``update_modified=False`` — a background write must never trip the
 	 Settings on_update sync).
 
-Deliberately NOT gated on self-host: the mining, question minting and the
+Deliberately ungated on deployment: the mining, question minting and the
 downstream note ingest are all bench-side; only the learned-skill container
 push is (separately) managed-only (the ``voice_facts.process_daily`` precedent).
 

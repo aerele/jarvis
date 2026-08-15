@@ -21,15 +21,15 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from jarvis import admin_client
-from jarvis.exceptions import OpenclawUnreachableError
+from jarvis.exceptions import AgentUnreachableError
 
 
 @dataclass(frozen=True)
 class ChatDeviceCredentials:
 	device_id: str
-	public_key: str            # base64url, no padding
+	public_key: str  # base64url, no padding
 	private_key: Ed25519PrivateKey
-	device_token: str          # bearer for auth.deviceToken at connect
+	device_token: str  # bearer for auth.deviceToken at connect
 
 
 def _b64u(raw: bytes) -> str:
@@ -60,8 +60,9 @@ def _load_private_key(b64u: str) -> Ed25519PrivateKey:
 	return Ed25519PrivateKey.from_private_bytes(_b64u_decode(b64u))
 
 
-def _save_credentials(*, settings_doc, private_key_b64u: str, public_key_b64u: str,
-					  device_id: str, device_token: str) -> None:
+def _save_credentials(
+	*, settings_doc, private_key_b64u: str, public_key_b64u: str, device_id: str, device_token: str
+) -> None:
 	# chat_device_private_key / chat_device_token are Password fields; db_set
 	# writes exactly what it's given straight into tabSingles with no
 	# encryption (only Document.save()'s _save_passwords path encrypts a
@@ -107,7 +108,7 @@ def ensure_paired() -> ChatDeviceCredentials:
 	"""Return current chat device credentials, generating + registering them
 	if missing. Idempotent: a fully-populated Settings row is reused as-is.
 
-	Raises OpenclawUnreachableError if pairing fails (no creds to fall back
+	Raises AgentUnreachableError if pairing fails (no creds to fall back
 	to - the caller has no way to chat without them, so we surface the error
 	cleanly instead of half-persisting an unusable state).
 
@@ -142,8 +143,10 @@ def _generate_and_pair_under_lock() -> ChatDeviceCredentials:
 	from jarvis._redis_lock import redis_lock
 
 	with redis_lock(
-		"chat_device_initial_pair", timeout_s=60, blocking_timeout_s=30.0,
-	) as acquired:
+		"chat_device_initial_pair",
+		timeout_s=60,
+		blocking_timeout_s=30.0,
+	) as _acquired:  # deliberately unchecked - see below
 		# Re-check inside the lock window. The winner of a contended cold-
 		# start has already populated Jarvis Settings; followers read those
 		# creds and return without a second pair_chat_device round-trip.
@@ -169,20 +172,22 @@ def _generate_and_pair() -> ChatDeviceCredentials:
 	duplicating the keypair generation logic.
 	"""
 	priv, _pub_raw, pub_b64u, device_id = _generate_keypair()
-	priv_b64u = _b64u(priv.private_bytes(
-		encoding=serialization.Encoding.Raw,
-		format=serialization.PrivateFormat.Raw,
-		encryption_algorithm=serialization.NoEncryption(),
-	))
+	priv_b64u = _b64u(
+		priv.private_bytes(
+			encoding=serialization.Encoding.Raw,
+			format=serialization.PrivateFormat.Raw,
+			encryption_algorithm=serialization.NoEncryption(),
+		)
+	)
 
 	try:
 		resp = admin_client.pair_chat_device(public_key=pub_b64u, device_id=device_id)
 	except Exception as e:
-		raise OpenclawUnreachableError(f"chat device pairing failed: {e}") from e
+		raise AgentUnreachableError(f"chat device pairing failed: {e}") from e
 
 	device_token = (resp or {}).get("device_token") or ""
 	if not device_token:
-		raise OpenclawUnreachableError("admin pair_chat_device returned no device_token")
+		raise AgentUnreachableError("admin pair_chat_device returned no device_token")
 
 	settings = frappe.get_single("Jarvis Settings")
 	_save_credentials(
@@ -193,8 +198,10 @@ def _generate_and_pair() -> ChatDeviceCredentials:
 		device_token=device_token,
 	)
 	return ChatDeviceCredentials(
-		device_id=device_id, public_key=pub_b64u,
-		private_key=priv, device_token=device_token,
+		device_id=device_id,
+		public_key=pub_b64u,
+		private_key=priv,
+		device_token=device_token,
 	)
 
 
@@ -231,10 +238,12 @@ def rotate_chat_device() -> dict:
 	(which STAYS SM-only via ``api.rotate_agent_token``).
 	"""
 	from jarvis.permissions import require_jarvis_admin
+
 	require_jarvis_admin()
 	creds = _generate_and_pair()
 	frappe.logger().info(
-		"chat_device.rotate: new device_id=%s", creds.device_id,
+		"chat_device.rotate: new device_id=%s",
+		creds.device_id,
 	)
 	return {"ok": True, "data": {"device_id": creds.device_id}}
 
@@ -258,6 +267,37 @@ def clear_credentials() -> None:
 	clear_settings_password(settings, "chat_device_private_key")
 	clear_settings_password(settings, "chat_device_token")
 	frappe.db.commit()
+
+
+def session_device_is_stale(row_device_id: str, current_device_id: str) -> bool:
+	"""True iff a chat session's snapshotted ``chat_device_id`` no longer
+	matches the bench's CURRENT pairing.
+
+	Shared by two call sites so they can never drift:
+	  - ``jarvis.api.call_tool`` (the security guard): rejects a plugin
+	    call over a stale session with 401, bounding a leaked-session-key
+	    replay to the window before the next re-pair. That guard must
+	    NEVER auto-heal itself here - doing so would let a leaked session
+	    key survive a re-pair, defeating the whole point of the check.
+	  - ``jarvis.chat.turn_handler.handle_chat_send`` (the recovery): at
+	    the START of a new turn, on the browser-authenticated path (not
+	    the plugin's replayable session key), a stale binding means the
+	    conversation's existing agent session was minted under a device
+	    pairing that no longer exists. Treating it like "no session yet"
+	    mints a FRESH one under the current pairing so the conversation
+	    keeps working without a customer support ticket. The old,
+	    stale-bound session row is left alone and stays dead - the
+	    security property above is untouched.
+
+	Both blank values pass through as "not stale" (pre-migration row /
+	pre-pairing bench), matching the historical backwards-compat rule in
+	``call_tool``.
+	"""
+	row = (row_device_id or "").strip()
+	current = (current_device_id or "").strip()
+	if not row or not current:
+		return False
+	return row != current
 
 
 def update_device_token(new_token: str, *, device_id: str) -> bool:
@@ -291,7 +331,9 @@ def update_device_token(new_token: str, *, device_id: str) -> bool:
 		return False
 
 	with redis_lock(
-		"chat_device_pair_repair", timeout_s=30, blocking_timeout_s=5.0,
+		"chat_device_pair_repair",
+		timeout_s=30,
+		blocking_timeout_s=5.0,
 	) as acquired:
 		if not acquired:
 			return False
@@ -315,9 +357,17 @@ def _normalize_metadata(value: str) -> str:
 
 
 def build_payload_v3(
-	*, device_id: str, client_id: str, client_mode: str, role: str,
-	scopes: list[str], signed_at_ms: int, device_token: str, nonce: str,
-	platform: str = "linux", device_family: str = "",
+	*,
+	device_id: str,
+	client_id: str,
+	client_mode: str,
+	role: str,
+	scopes: list[str],
+	signed_at_ms: int,
+	device_token: str,
+	nonce: str,
+	platform: str = "linux",
+	device_family: str = "",
 ) -> str:
 	"""Byte-for-byte mirror of openclaw's buildDeviceAuthPayloadV3.
 
@@ -325,19 +375,21 @@ def build_payload_v3(
 	'device-signature' rejection on connect - the only fragile spot in
 	the whole transport rewrite, hence the explicit comment + the
 	corresponding test in tests/test_chat_device.py."""
-	return "|".join([
-		"v3",
-		device_id,
-		client_id,
-		client_mode,
-		role,
-		",".join(scopes),
-		str(signed_at_ms),
-		device_token or "",
-		nonce,
-		_normalize_metadata(platform),
-		_normalize_metadata(device_family),
-	])
+	return "|".join(
+		[
+			"v3",
+			device_id,
+			client_id,
+			client_mode,
+			role,
+			",".join(scopes),
+			str(signed_at_ms),
+			device_token or "",
+			nonce,
+			_normalize_metadata(platform),
+			_normalize_metadata(device_family),
+		]
+	)
 
 
 def sign_payload(private_key: Ed25519PrivateKey, payload: str) -> str:

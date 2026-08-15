@@ -1,0 +1,12 @@
+# Revisions that changed formatting only. `git blame` skips them so it still
+# points at whoever last changed the CODE, not at the reformat.
+#
+# Local setup (once per clone):
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub honours this file automatically in its blame view.
+
+# chore: reformat with ruff-format, prettier and eslint --fix (2026-07-17)
+# 585 files. The pre-commit config had existed for a long time but the hook was
+# never installed, so the tree had drifted from the formatters it declared.
+de407e54bfacec7ab836f9c863a3519f058fda72

@@ -44,7 +44,7 @@ from jarvis.www.jarvis_mobile import get_context
 
 # Stands in for the built worker. Content is irrelevant to the renderer — it
 # serves bytes — so this only has to be recognisable in an assertion.
-FIXTURE_SW = b'/* built worker */ self.skipWaiting()\n'
+FIXTURE_SW = b"/* built worker */ self.skipWaiting()\n"
 
 
 def _resolve(path: str) -> str:

@@ -144,6 +144,75 @@ body {
 	-webkit-tap-highlight-color: transparent;
 }
 
+/* Touch feel. The grey/blue box that flashes when you tap or type on a phone is
+   the UA's tap-highlight plus its native focus ring. The rule above only covered
+   <body>, and each control cleared its own ring in a scoped block, so anything
+   that missed one — buttons, chips, sheet rows — still flashed. Reset both
+   app-wide instead of per component.
+
+   :focus-visible is what keeps this accessible: pointers get no ring, keyboards
+   still get a clear one. A blanket `outline: none` would strip focus for keyboard
+   users entirely.
+
+   touch-action: manipulation drops the UA's 300ms wait for a double-tap-to-zoom
+   that this app never wants, so taps register immediately. */
+* {
+	-webkit-tap-highlight-color: transparent;
+}
+
+button,
+input,
+textarea,
+select,
+a,
+[role="button"],
+[tabindex] {
+	touch-action: manipulation;
+}
+
+/* iOS paints its own inset shadow and rounding on form controls otherwise. */
+input,
+textarea,
+select {
+	-webkit-appearance: none;
+	appearance: none;
+	font-family: inherit;
+}
+
+/* The caret and the selection are the last two things the UA still tints its
+   own way: iOS draws both in system blue (#007AFF), which appears nowhere in
+   this palette, so tapping a field flashed a stray blue line against the
+   violet accent. Tie both to the accent instead. */
+input,
+textarea {
+	caret-color: var(--accent-solid);
+}
+
+::selection {
+	background: var(--accent-bg);
+	color: var(--ink9);
+}
+
+:focus {
+	outline: none;
+}
+
+/* frappe-ui's preflight paints a focus RING on form controls with box-shadow
+   (--tw-ring-color: #007BE0) and re-asserts border-color, so every reset that
+   only cleared `outline` left a stray blue rectangle around a tapped field.
+   Kill the ring itself; :focus-visible below still gives keyboards a real one. */
+input:focus,
+textarea:focus,
+select:focus {
+	box-shadow: none;
+	border-color: inherit;
+}
+
+:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
 /* A phone app scrolls its panes, never the document. The shell owns the top
    safe area (rather than each screen's bar) so anything stacked up there — the
    install strip, then the bar — clears the notch without double padding. */

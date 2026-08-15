@@ -39,9 +39,7 @@ class JarvisChatMessage(Document):
 			return
 		if not self.conversation:
 			return
-		owner = frappe.db.get_value(
-			"Jarvis Conversation", self.conversation, "owner"
-		)
+		owner = frappe.db.get_value("Jarvis Conversation", self.conversation, "owner")
 		if owner and owner != frappe.session.user:
 			frappe.throw(
 				_("You can only post messages to your own conversations."),

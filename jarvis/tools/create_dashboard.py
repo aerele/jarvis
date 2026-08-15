@@ -5,6 +5,7 @@ saved Dashboard the customer can open. Runs under the calling user:
 ``doc.insert()`` enforces create permission on Dashboard, and Frappe validates
 the chart/card links.
 """
+
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
@@ -37,7 +38,7 @@ def create_dashboard(
 		if not name:
 			raise InvalidArgumentError("each chart needs a 'chart' name")
 		doc.append("charts", {"chart": name, "width": width if width in _WIDTHS else "Half"})
-	for cd in (cards or []):
+	for cd in cards or []:
 		card = cd.get("card") if isinstance(cd, dict) else cd
 		if card:
 			doc.append("cards", {"card": card})

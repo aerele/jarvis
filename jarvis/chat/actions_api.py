@@ -45,10 +45,7 @@ def _child_columns(child_doctype: str) -> list[dict]:
 	the Desk grid shows), falling back to the first 4 editable fields when the
 	child marks none."""
 	meta = frappe.get_meta(child_doctype)
-	editable = [
-		df for df in meta.fields
-		if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES
-	]
+	editable = [df for df in meta.fields if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES]
 	listed = [df for df in editable if df.in_list_view]
 	return [_field_dict(df) for df in (listed or editable[:4])]
 
@@ -115,13 +112,14 @@ def load_doc(doctype: str, name: str) -> dict:
 	tables = {}
 	for tf, spec in fm["tables"].items():
 		cols = [c["fieldname"] for c in spec["columns"]]
-		tables[tf] = [
-			{c: row.get(c) for c in cols} for row in (doc.get(tf) or [])
-		]
+		tables[tf] = [{c: row.get(c) for c in cols} for row in (doc.get(tf) or [])]
 	return {
-		"ok": True, "doctype": doctype, "name": name,
+		"ok": True,
+		"doctype": doctype,
+		"name": name,
 		"docstatus": int(doc.docstatus or 0),
-		"values": values, "tables": tables,
+		"values": values,
+		"tables": tables,
 	}
 
 
@@ -151,8 +149,7 @@ def _owns_conversation(conversation: str) -> bool:
 	continuation turn there. Unlike ``_require_own_conversation`` this returns
 	False instead of raising - the write has already executed, so a non-owned
 	target must be skipped gracefully, not turned into a post-write 500."""
-	return bool(conversation) and frappe.db.get_value(
-		CONV, conversation, "owner") == frappe.session.user
+	return bool(conversation) and frappe.db.get_value(CONV, conversation, "owner") == frappe.session.user
 
 
 def _receipt_text(verb: str, doctype: str, name: str, submitted: int = 0) -> str:
@@ -161,25 +158,41 @@ def _receipt_text(verb: str, doctype: str, name: str, submitted: int = 0) -> str
 	return f"{_RECEIPT[verb]} {doctype} {name}."
 
 
-def _append_receipt(conversation: str, verb: str, doctype: str, name: str,
-					args: dict, text: str) -> None:
+def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args: dict, text: str) -> None:
 	"""Tool message first (feeds the SPA's docRefs → the receipt's doc id
 	linkifies to Desk), then a short assistant receipt the agent also sees in
 	the transcript on its next turn - so it never re-applies the change."""
-	frappe.get_doc({
-		"doctype": MSG, "conversation": conversation, "seq": _next_seq(conversation),
-		"role": "tool", "streaming": 0,
-		"tool_name": f"{verb}_doc",
-		"tool_args": frappe.as_json(args),
-		"tool_result": frappe.as_json({"ok": True, "data": {"doctype": doctype, "name": name}}),
-		"tool_status": "completed",
-	}).insert(ignore_permissions=True)
-	frappe.get_doc({
-		"doctype": MSG, "conversation": conversation, "seq": _next_seq(conversation),
-		"role": "assistant", "content": text, "streaming": 0,
-	}).insert(ignore_permissions=True)
-	frappe.db.set_value(CONV, conversation, "last_active_at", frappe.utils.now(),
-						update_modified=False)
+	frappe.get_doc(
+		{
+			"doctype": MSG,
+			"conversation": conversation,
+			"seq": _next_seq(conversation),
+			"role": "tool",
+			"streaming": 0,
+			"tool_name": f"{verb}_doc",
+			"tool_args": frappe.as_json(args),
+			"tool_result": frappe.as_json({"ok": True, "data": {"doctype": doctype, "name": name}}),
+			"tool_status": "completed",
+			# This row DID come from a confirmation card - the human pressed Confirm on
+			# the draft - so mark it and let the SPA render the same receipt chip (with
+			# its open-in-Desk shortcut) that the gated path gets. Without this it fell
+			# into the Activity accordion, so a confirmed DELETE offered a shortcut to a
+			# record that no longer exists while a confirmed CREATE offered none to a
+			# record that does.
+			"action_outcome": "confirmed",
+		}
+	).insert(ignore_permissions=True)
+	frappe.get_doc(
+		{
+			"doctype": MSG,
+			"conversation": conversation,
+			"seq": _next_seq(conversation),
+			"role": "assistant",
+			"content": text,
+			"streaming": 0,
+		}
+	).insert(ignore_permissions=True)
+	frappe.db.set_value(CONV, conversation, "last_active_at", frappe.utils.now(), update_modified=False)
 
 
 @frappe.whitelist()
@@ -210,7 +223,8 @@ def apply_action(action: dict | str | None = None) -> dict:
 	if verb in _CONFIRM_VERBS:
 		raise InvalidArgumentError(
 			f"{verb!r} is a confirm-as-proposed action; approve it through the "
-			"confirmation card, not the draft-edit path.")
+			"confirmation card, not the draft-edit path."
+		)
 	if verb not in _EDIT_VERBS:
 		raise InvalidArgumentError(f"unsupported verb {verb!r}")
 	if not doctype:
@@ -224,8 +238,11 @@ def apply_action(action: dict | str | None = None) -> dict:
 	# The audit/receipt args, built up front (independent of the write outcome);
 	# a create fills in its real `name` after insert. For create the args are
 	# {doctype, values}; for update {doctype, name, changes}.
-	args = ({"doctype": doctype, "values": values} if verb == "create"
-			else {"doctype": doctype, "name": name, "changes": values})
+	args = (
+		{"doctype": doctype, "values": values}
+		if verb == "create"
+		else {"doctype": doctype, "name": name, "changes": values}
+	)
 
 	# Surface a failed apply through the SAME {ok:false, error} envelope the
 	# model/confirm paths use (rich detail + hint), instead of leaking Frappe's
@@ -235,38 +252,52 @@ def apply_action(action: dict | str | None = None) -> dict:
 	try:
 		if verb == "create":
 			from jarvis.tools.create_doc import create_doc
+
 			res = create_doc(doctype, values)
 			name = res.get("name")
 			if do_submit:
 				# Submit of the JUST-created draft the human authored (the same
 				# payload they saw) - low risk, kept as part of the draft-editor UX.
 				from jarvis.tools.submit_doc import submit_doc
+
 				submit_doc(doctype, name)
 		else:  # update
 			from jarvis.tools.update_doc import update_doc
+
 			update_doc(doctype, name, values)
 	except Exception as e:
 		envelope = api._translate_write_error(e, mark)
 		if envelope is None:
 			# Unexpected - audit + re-raise so a real bug still surfaces as a 500
 			# (never enveloped, never leaks a traceback to the client).
-			audit.record(tool=f"apply_action.{verb}_doc", args=args, ok=False,
-						 error_code=type(e).__name__, error_message=str(e))
+			audit.record(
+				tool=f"apply_action.{verb}_doc",
+				args=args,
+				ok=False,
+				error_code=type(e).__name__,
+				error_message=str(e),
+			)
 			raise
 		# A RETURNED envelope makes Frappe commit at end-of-request; roll back so
 		# a partial create+submit (create ok, submit failed) leaves NO changes -
 		# the SPA's "No changes were saved" line stays truthful.
 		frappe.db.rollback()
 		err_obj = envelope["error"]
-		audit.record(tool=f"apply_action.{verb}_doc", args=args, ok=False,
-					 error_code=err_obj["code"], error_message=err_obj["message"])
+		audit.record(
+			tool=f"apply_action.{verb}_doc",
+			args=args,
+			ok=False,
+			error_code=err_obj["code"],
+			error_message=err_obj["message"],
+		)
 		return envelope
 
 	# Audit as a human-authored write, distinct from a model tool call. The
 	# actor (frappe.session.user) is captured by audit.record; the tool label
 	# marks the human-edit origin.
-	audit.record(tool=f"apply_action.{verb}_doc", args=args, ok=True,
-				 result={"doctype": doctype, "name": name})
+	audit.record(
+		tool=f"apply_action.{verb}_doc", args=args, ok=True, result={"doctype": doctype, "name": name}
+	)
 
 	frappe.db.commit()
 	receipt = _receipt_text(verb, doctype, name, do_submit)
@@ -277,17 +308,31 @@ def apply_action(action: dict | str | None = None) -> dict:
 		# The mutation is already committed - a receipt hiccup must not
 		# report failure (the SPA would retry and duplicate the create).
 		frappe.log_error(title="apply_action receipt failed", message=frappe.get_traceback())
+	# SUX-3: acknowledge the synchronous write IMMEDIATELY ("Change saved"),
+	# decoupled from the reply queue - the continuation turn below then renders
+	# the standard queued chip with its position. Flag-gated + best-effort.
+	from jarvis.chat import admission
+
+	admission.publish_action_confirmed(conversation)
+	_cont = None
 	if do_continue:
 		try:
-			enqueue_continuation(conversation, receipt)
+			_cont = enqueue_continuation(conversation, receipt)
 		except Exception:
 			# Best-effort like the receipt: the write is committed, and the
 			# user can always nudge the agent manually if dispatch hiccups.
-			frappe.log_error(title="apply_action continuation failed",
-							 message=frappe.get_traceback())
+			frappe.log_error(title="apply_action continuation failed", message=frappe.get_traceback())
 	slug = doctype.lower().replace(" ", "-")
-	return {"ok": True, "verb": verb, "name": name,
-			"doc_url": f"/app/{slug}/{name}"}
+	resp = {"ok": True, "verb": verb, "name": name, "doc_url": f"/app/{slug}/{name}"}
+	# SUX-3/SUXI-2: when the continuation turn queued (all slots taken), thread
+	# its run_id + position so the SPA renders the standard queued chip instead
+	# of the card vanishing into silence after the "Change saved" ack clears.
+	if _cont and _cont.get("queued"):
+		resp["queued"] = True
+		resp["queued_position"] = _cont.get("queued_position")
+		resp["run_id"] = _cont.get("run_id")
+		resp["message_id"] = _cont.get("message_id")
+	return resp
 
 
 _INVALID_CONFIRM = {
@@ -297,6 +342,41 @@ _INVALID_CONFIRM = {
 		"message": "This confirmation is no longer valid.",
 	},
 }
+
+_CONFIRMATION_UNAVAILABLE = {
+	"ok": False,
+	"error": {
+		"type": "ConfirmationUnavailableError",
+		"message": (
+			"Confirmation storage is temporarily unavailable. Nothing was changed "
+			"by this request. Keep this card and try again shortly."
+		),
+	},
+}
+
+_CONFIRMATION_OUTCOME_UNKNOWN = {
+	"ok": False,
+	"error": {
+		"type": "ConfirmationOutcomeUnknownError",
+		"message": (
+			"The confirmation token's storage outcome could not be verified. The "
+			"business action was not run by this request. Refresh the confirmations "
+			"before trying again."
+		),
+	},
+}
+
+
+def _confirmation_storage_error(exc) -> dict:
+	"""Stable user envelope for a Redis failure; never mislabel it as expiry."""
+	from jarvis.chat import pending_confirm
+
+	frappe.logger("jarvis.pending_confirm").error(
+		"confirmation endpoint stopped before the business action: %s", type(exc).__name__
+	)
+	if isinstance(exc, pending_confirm.PendingConfirmOutcomeUnknown):
+		return _CONFIRMATION_OUTCOME_UNKNOWN
+	return _CONFIRMATION_UNAVAILABLE
 
 
 @frappe.whitelist()
@@ -313,10 +393,8 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 
 	Identity model (issue #186, #1/#5/#6): the gate binds the token to the
 	CONVERSATION OWNER - the human whose browser is subscribed and who clicks
-	Confirm. That is ``frappe.session.user`` here in BOTH deployment modes (in
-	self-host the operator's browser session is the conversation owner, not the
-	restricted tool user), so we consume under the session user directly - no
-	per-mode owner resolution. ``consume`` re-validates owner + conversation
+	Confirm. That is ``frappe.session.user`` here, so we consume under the
+	session user directly. ``consume`` re-validates owner + conversation
 	atomically and single-uses the token; a wrong-owner caller learns nothing
 	and does NOT burn the token.
 
@@ -328,11 +406,34 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	actually run.
 
 	Execution scope (#6): the confirmed write executes AS the stored
-	``exec_user`` (the scoped model-execution identity - the tool user in
-	self-host), so a confirm can never exceed the model path's permission scope.
+	``exec_user`` (the scoped model-execution identity), so a confirm can never
+	exceed the model path's permission scope.
 	The switch goes through ``impersonate`` (session-safe), so the confirming
 	browser session's sid + data are always restored - a bare ``frappe.set_user``
 	would gut the cookie session and log the user out.
+	"""
+	return _confirm_core(token, conversation)
+
+
+def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = False) -> dict:
+	"""The confirmation itself, with no HTTP surface of its own.
+
+	Two human paths reach it: the Confirm button (``confirm_tool`` above) and a
+	typed approval in the composer (``jarvis.chat.api.send_message``). Both are
+	the same authenticated session user acting on the same card, so they share
+	one implementation rather than one calling the other's whitelisted endpoint.
+
+	Every guarantee stays below this line, not in the callers: Guest refusal,
+	owner + conversation binding, the atomic single-use ``consume``, execution
+	under the stored ``exec_user``, the transcript receipt and the continuation
+	turn. A second entry point therefore cannot weaken the gate, and two racing
+	approvals (a click and a typed one) still resolve to exactly one winner.
+
+	``batch``: this card is one of several being approved together. The write, the
+	receipt chip and every guard still run per card, so nothing about the gate is
+	relaxed; only the follow-up turn is deferred. The receipt line is returned as
+	``receipt_text`` for the caller to fold into ONE continuation covering the
+	whole batch, instead of N turns queueing against each other.
 	"""
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
@@ -341,17 +442,19 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	from jarvis.chat import pending_confirm
 
 	token = (token or "").strip()
-	record = pending_confirm.peek(token)
-	if not record:
-		return _INVALID_CONFIRM
+	try:
+		record = pending_confirm.peek(token, strict=True)
+		if not record:
+			return _INVALID_CONFIRM
 
-	# Real conversation guard (#11): if the caller passed the conversation the
-	# click came from, enforce it; otherwise fall back to the record's own
-	# conversation (owner + single-use remain the guarantees).
-	passed_conv = (conversation or "").strip()
-	guard_conv = passed_conv if passed_conv else record.get("conversation")
-	record = pending_confirm.consume(
-		token, owner=frappe.session.user, conversation=guard_conv)
+		# Real conversation guard (#11): if the caller passed the conversation the
+		# click came from, enforce it; otherwise fall back to the record's own
+		# conversation (owner + single-use remain the guarantees).
+		passed_conv = (conversation or "").strip()
+		guard_conv = passed_conv if passed_conv else record.get("conversation")
+		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		return _confirmation_storage_error(exc)
 	if not record:
 		return _INVALID_CONFIRM
 
@@ -375,18 +478,26 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 		# through to a graceful failure envelope: the "failed" receipt + continuation
 		# below still fire, so the user sees it and the agent learns.
 		frappe.db.rollback()
-		frappe.log_error(title="confirm_tool dispatch crashed",
-						 message=frappe.get_traceback())
-		result = api._error(
-			"InternalError",
-			"the confirmed action failed unexpectedly and was not saved")
+		frappe.log_error(
+			title="confirm dispatch crashed",
+			message=f"token={token} conversation={guard_conv}\n{frappe.get_traceback()}",
+		)
+		result = api._error("InternalError", "the confirmed action failed unexpectedly and was not saved")
+
+	# Slice B: bind a Jarvis Import Announcement so the import's completion is
+	# announced back into this chat unprompted. Best-effort + self-gating (tool ==
+	# run_import + ok); binds to the token's OWN guarded conversation (PC-4), never
+	# the client-supplied passed_conv.
+	from jarvis.chat import import_announce
+
+	import_announce.bind_after_run_import(record, result)
 
 	# Leave a transcript receipt (#7) so a confirmed delete/submit/email shows on
 	# reload, matching the inline model-write path's tool card. Best-effort: the
 	# write already committed, so a receipt hiccup must not report failure.
 	# Attach to the conversation the click came from (``passed_conv``) when the
-	# token itself was minted conversation-less (F1: a managed session_key lookup
-	# miss / self-host ambiguous concurrency), but only when the caller OWNS that
+	# token itself was minted conversation-less (F1: a session_key lookup miss),
+	# but only when the caller OWNS that
 	# conversation (passed_conv is client-supplied - never inject into another
 	# user's chat). A true headless caller with no owned conversation just skips.
 	conv = record.get("conversation")
@@ -400,12 +511,17 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 		# persistent summary rather than vanishing.
 		try:
 			api.persist_tool_receipt(
-				conv, record["tool"], record["args"], result,
+				conv,
+				record["tool"],
+				record["args"],
+				result,
 				action_outcome="confirmed" if ok else "failed",
 			)
 		except Exception:
-			frappe.log_error(title="confirm_tool receipt failed",
-							 message=frappe.get_traceback())
+			frappe.log_error(
+				title="confirm receipt failed",
+				message=f"token={token} conversation={conv}\n{frappe.get_traceback()}",
+			)
 
 		# Continue the agent's plan: the model was told only "awaiting the
 		# user's confirmation" and stopped, so without this turn it never
@@ -414,12 +530,38 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 		# continue flag here, and the post-write acknowledgment is part of
 		# the persona's write recipes. On failure the rolled-back-write scaffold
 		# makes the agent explain + stop instead of auto-retrying. Best-effort.
+		# SUX-3: on a SUCCESSFUL confirm, acknowledge the write immediately so
+		# the card doesn't vanish into silence while the continuation queues.
+		# A failed confirm skips this - the failed scaffold explains instead.
+		if ok:
+			from jarvis.chat import admission
+
+			admission.publish_action_confirmed(conv)
+		# In a batch the caller owns the follow-up: N cards approved in one breath
+		# must produce ONE continuation carrying all N receipts, not N turns racing
+		# each other through admission. The receipt line rides out on the envelope
+		# so the caller can compose them.
+		if batch:
+			if isinstance(result, dict):
+				result["receipt_text"] = _confirm_receipt_text(record, result)
+			return result
+		_cont = None
 		try:
-			enqueue_continuation(
-				conv, _confirm_receipt_text(record, result), failed=not ok)
+			_cont = enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
 		except Exception:
-			frappe.log_error(title="confirm_tool continuation failed",
-							 message=frappe.get_traceback())
+			frappe.log_error(
+				title="confirm continuation failed",
+				message=f"token={token} conversation={conv}\n{frappe.get_traceback()}",
+			)
+		# SUX-3/SUXI-2: thread the queued continuation's position onto a SUCCESSFUL
+		# confirm result so the SPA shows the queued chip (the card doesn't vanish
+		# into silence while the continuation sits queued). A failed confirm keeps
+		# its error envelope untouched.
+		if ok and isinstance(result, dict) and _cont and _cont.get("queued"):
+			result["queued"] = True
+			result["queued_position"] = _cont.get("queued_position")
+			result["run_id"] = _cont.get("run_id")
+			result["message_id"] = _cont.get("message_id")
 
 	return result
 
@@ -449,8 +591,10 @@ def _dismiss_note(tool: str, args: dict) -> str:
 	turn fires now."""
 	from jarvis.api import _describe_call
 
-	return (f"the user declined the pending action ({_describe_call(tool, args)}); "
-			"it was NOT performed - do not assume it ran, and do not retry unless asked")
+	return (
+		f"the user declined the pending action ({_describe_call(tool, args)}); "
+		"it was NOT performed - do not assume it ran, and do not retry unless asked"
+	)
 
 
 @frappe.whitelist()
@@ -478,16 +622,18 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	from jarvis.chat import pending_confirm
 
 	token = (token or "").strip()
-	record = pending_confirm.peek(token)
-	if not record:
-		return {"ok": True, "data": {"status": "already_handled"}}
+	try:
+		record = pending_confirm.peek(token, strict=True)
+		if not record:
+			return {"ok": True, "data": {"status": "already_handled"}}
 
-	# Same owner + conversation binding as confirm_tool: consume atomically so a
-	# concurrent Confirm and Discard cannot both win.
-	passed_conv = (conversation or "").strip()
-	guard_conv = passed_conv if passed_conv else record.get("conversation")
-	record = pending_confirm.consume(
-		token, owner=frappe.session.user, conversation=guard_conv)
+		# Same owner + conversation binding as confirm_tool: consume atomically so a
+		# concurrent Confirm and Discard cannot both win.
+		passed_conv = (conversation or "").strip()
+		guard_conv = passed_conv if passed_conv else record.get("conversation")
+		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		return _confirmation_storage_error(exc)
 	if not record:
 		return {"ok": True, "data": {"status": "already_handled"}}
 
@@ -504,15 +650,14 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 		try:
 			api.persist_tool_receipt(conv, tool, args, None, action_outcome="discarded")
 		except Exception:
-			frappe.log_error(title="dismiss_tool receipt failed",
-							 message=frappe.get_traceback())
+			frappe.log_error(title="dismiss_tool receipt failed", message=frappe.get_traceback())
 		# Correct the agent's stale pending_confirmation memory on its next turn.
 		try:
 			from jarvis.chat import agent_notes
+
 			agent_notes.append(conv, _dismiss_note(tool, args))
 		except Exception:
-			frappe.log_error(title="dismiss_tool note failed",
-							 message=frappe.get_traceback())
+			frappe.log_error(title="dismiss_tool note failed", message=frappe.get_traceback())
 
 	return {"ok": True, "data": {"status": "discarded", "tool": tool}}
 
@@ -532,36 +677,15 @@ def list_pending_confirmations(conversation: str | None = None) -> dict:
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
 
-	from jarvis.api import _describe_call
 	from jarvis.chat import pending_confirm
 
 	conv = (conversation or "").strip() or None
-	records = pending_confirm.list_for_owner(frappe.session.user, conversation=conv)
-	items = []
-	for r in records:
-		# Per-record guard (F3): a single malformed record must NOT 500 the whole
-		# endpoint - that would blind resync of EVERY card until TTL. Skip + log
-		# the bad one; surface the rest.
-		try:
-			tool = r.get("tool")
-			args = r.get("args") or {}
-			items.append({
-				"token": r.get("token"),
-				"tool": tool,
-				# Return the PARK-TIME preview verbatim (F2). Recomputing it here
-				# via _pending_preview re-runs the sandboxed dry-run, whose inline
-				# on_submit/on_cancel side effects are NOT sandboxed and would
-				# re-fire on every reload/reconnect/tab-wake/post-confirm. Tokens
-				# minted before preview was stored carry None (summary still
-				# describes the action); no dry-run is ever run on this path.
-				"preview": r.get("preview"),
-				"summary": _describe_call(tool, args),
-				"conversation": r.get("conversation"),
-				"run_id": r.get("run_id"),
-				"expires_at": r.get("expires_at"),
-			})
-		except Exception:
-			frappe.log_error(
-				title="list_pending_confirmations record skipped",
-				message=frappe.get_traceback())
+	# Same client-facing item shape the action:pending event and the run:end
+	# terminal use (pending_confirm.list_items_for_owner) so the three cannot drift
+	# and no internal field leaks. The park-time preview is returned verbatim (F2 -
+	# never a re-run dry-run) and the per-record F3 guard both live in the helper.
+	try:
+		items = pending_confirm.list_items_for_owner(frappe.session.user, conversation=conv, strict=True)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		return _confirmation_storage_error(exc)
 	return {"ok": True, "data": {"pending": items}}

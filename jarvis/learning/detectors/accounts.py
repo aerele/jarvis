@@ -228,6 +228,7 @@ WHERE pi.docstatus = 1
 LIMIT {HARD_ROW_LIMIT}
 """
 
+
 _PARTY_PASSES = {
 	"Customer": {"sql": _customer_segment_sql, "tax_kind": "sales", "rule_field": "sales_tax_template"},
 	"Supplier": {"sql": _supplier_segment_sql, "tax_kind": "purchase", "rule_field": "purchase_tax_template"},
@@ -306,14 +307,16 @@ def _discover_segment_fields(patterndb) -> list[dict]:
 		)
 		if score is None:
 			continue
-		ranked[dt].append((
-			(0 if fieldtype == "Select" else 1, -score, str(fieldname)),
-			{
-				"dt": dt,
-				"fieldname": str(fieldname),
-				"label": (r.get("label") or str(fieldname)),
-			},
-		))
+		ranked[dt].append(
+			(
+				(0 if fieldtype == "Select" else 1, -score, str(fieldname)),
+				{
+					"dt": dt,
+					"fieldname": str(fieldname),
+					"label": (r.get("label") or str(fieldname)),
+				},
+			)
+		)
 	out: list[dict] = []
 	for dt in sorted(ranked):
 		best = sorted(ranked[dt], key=lambda kv: kv[0])
@@ -412,8 +415,7 @@ def postprocess_party_tax_template(rows, spec, company, patterndb, params):
 			if r.get("antecedent") and r.get("party"):
 				seg_parties[r["antecedent"]].add(r["party"])
 		raws = [
-			r for r in raws
-			if len(seg_parties.get(r.get("antecedent_value"), ())) >= _MIN_SEGMENT_PARTIES
+			r for r in raws if len(seg_parties.get(r.get("antecedent_value"), ())) >= _MIN_SEGMENT_PARTIES
 		]
 		if not raws:
 			continue
@@ -436,20 +438,17 @@ def postprocess_party_tax_template(rows, spec, company, patterndb, params):
 			if party and cons:
 				per_party[party][cons] += 1
 		template_by_party = {
-			p: max(c.items(), key=lambda kv: (kv[1], str(kv[0])))[0]
-			for p, c in per_party.items()
+			p: max(c.items(), key=lambda kv: (kv[1], str(kv[0])))[0] for p, c in per_party.items()
 		}
 		units_by_party = {p: sum(c.values()) for p, c in per_party.items()}
-		states = _normalize_state_map(
-			_party_state_map(patterndb, dt, list(template_by_party))
-		)
+		states = _normalize_state_map(_party_state_map(patterndb, dt, list(template_by_party)))
 		states = _filter_confound_states(states, template_by_party, units_by_party)
 		confound = _state_predicts_template(states, template_by_party)
 
 		for raw in raws:
 			segment_value = str(raw.get("antecedent_value") or "")
 			if segment_value.startswith(seg_prefix):
-				segment_value = segment_value[len(seg_prefix):]
+				segment_value = segment_value[len(seg_prefix) :]
 			raw["skill_bullet_vars"] = {
 				"party_doctype": dt,
 				"field_label": label,
@@ -513,9 +512,7 @@ def postprocess_je_usage(rows, spec, company, patterndb, params):
 	if str(mode) == _je_voucher_type_default():
 		return out  # "Journal entries are usually 'Journal Entry' entries"
 	exceptions = [
-		{"unit": uid, "value": vt, "month": month_key(d)}
-		for uid, (vt, d, _c) in units.items()
-		if vt != mode
+		{"unit": uid, "value": vt, "month": month_key(d)} for uid, (vt, d, _c) in units.items() if vt != mode
 	][:20]
 	raw = evaluate_segment(
 		spec,

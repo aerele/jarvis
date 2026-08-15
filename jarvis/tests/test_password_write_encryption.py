@@ -3,9 +3,9 @@
 Frappe only encrypts a Password field (into __Auth) when the value passes
 through Document._save_passwords() - i.e. a real doc.save(). Several flows
 here deliberately write via db_set to avoid re-triggering on_update's admin
-sync (onboarding.write_connection, chat/device.py, api.rotate_agent_token,
-selfhost.save_self_hosted); before the fix each of those wrote the raw
-secret straight into the Single's row in tabSingles.
+sync (onboarding.write_connection, chat/device.py, api.rotate_agent_token);
+before the fix each of those wrote the raw secret straight into the Single's
+row in tabSingles.
 
 These tests pin the fixed behavior of jarvis._password_utils and every
 call site:
@@ -45,11 +45,6 @@ _PLAIN_FIELDS = (
 	"agent_token_issued_at",
 	"chat_device_id",
 	"chat_device_public_key",
-	"deployment_mode",
-	"selfhost_stream",
-	"selfhost_last_validated_at",
-	"selfhost_last_validation",
-	"selfhost_tool_user",
 )
 
 
@@ -65,8 +60,7 @@ def _raw_singles_value(field: str) -> str | None:
 def _auth_row(field: str):
 	"""The raw __Auth row for a Jarvis Settings password field (or None)."""
 	rows = frappe.db.sql(
-		"select `password`, `encrypted` from `__Auth` "
-		"where doctype=%s and name=%s and fieldname=%s",
+		"select `password`, `encrypted` from `__Auth` where doctype=%s and name=%s and fieldname=%s",
 		(SETTINGS, SETTINGS, field),
 	)
 	return rows[0] if rows else None
@@ -94,8 +88,7 @@ class _SecretsSnapshotTestCase(FrappeTestCase):
 	def tearDownClass(cls):
 		try:
 			for field, raw in cls._raw_snapshot.items():
-				frappe.db.set_single_value(SETTINGS, field, raw or "",
-				                           update_modified=False)
+				frappe.db.set_single_value(SETTINGS, field, raw or "", update_modified=False)
 			for field, row in cls._auth_snapshot.items():
 				frappe.db.sql(
 					"delete from `__Auth` where doctype=%s and name=%s and fieldname=%s",
@@ -108,8 +101,9 @@ class _SecretsSnapshotTestCase(FrappeTestCase):
 						(SETTINGS, SETTINGS, field, row[0], row[1]),
 					)
 			for field, value in cls._plain_snapshot.items():
-				frappe.db.set_single_value(SETTINGS, field, value if value is not None else "",
-				                           update_modified=False)
+				frappe.db.set_single_value(
+					SETTINGS, field, value if value is not None else "", update_modified=False
+				)
 			frappe.db.commit()
 		finally:
 			super().tearDownClass()
@@ -119,6 +113,7 @@ class _SecretsSnapshotTestCase(FrappeTestCase):
 		# Each test starts with every password field fully absent (no column
 		# value, no __Auth row) so cross-test residue can't mask a regression.
 		from frappe.utils.password import remove_encrypted_password
+
 		for field in _ALL_PASSWORD_FIELDS:
 			frappe.db.set_single_value(SETTINGS, field, "", update_modified=False)
 			remove_encrypted_password(SETTINGS, SETTINGS, field)
@@ -127,32 +122,37 @@ class _SecretsSnapshotTestCase(FrappeTestCase):
 	def assert_encrypted_at_rest(self, field: str, secret: str):
 		"""The core Fix-1 invariant: raw column masked, get_password intact."""
 		raw = _raw_singles_value(field)
-		self.assertNotEqual(raw, secret,
-		                    f"{field}: raw tabSingles column must NOT hold the plaintext secret")
-		self.assertTrue(_is_masked(raw),
-		                f"{field}: raw tabSingles column must be an all-asterisk mask, got {raw!r}")
+		self.assertNotEqual(raw, secret, f"{field}: raw tabSingles column must NOT hold the plaintext secret")
+		self.assertTrue(
+			_is_masked(raw), f"{field}: raw tabSingles column must be an all-asterisk mask, got {raw!r}"
+		)
 		s = frappe.get_single(SETTINGS)
-		self.assertEqual(s.get_password(field, raise_exception=False), secret,
-		                 f"{field}: get_password must still return the secret")
+		self.assertEqual(
+			s.get_password(field, raise_exception=False),
+			secret,
+			f"{field}: get_password must still return the secret",
+		)
 		auth = _auth_row(field)
-		self.assertTrue(auth and auth[1] == 1,
-		                f"{field}: __Auth must hold an encrypted=1 row")
-		self.assertNotEqual(auth[0], secret,
-		                    f"{field}: __Auth.password must be the ENCRYPTED form, not plaintext")
+		self.assertTrue(auth and auth[1] == 1, f"{field}: __Auth must hold an encrypted=1 row")
+		self.assertNotEqual(
+			auth[0], secret, f"{field}: __Auth.password must be the ENCRYPTED form, not plaintext"
+		)
 
 
 class TestOnboardingWriteConnection(_SecretsSnapshotTestCase):
 	def test_write_connection_encrypts_all_password_fields(self):
 		from jarvis import onboarding
 
-		onboarding.write_connection({
-			"api_key": "native-key-abc123",
-			"api_secret": "native-secret-def456",
-			"customer": "cust@example.com",
-			"customer_password": "grant-pass-xyz789",
-			"agent_url": "http://127.0.0.1:19000",
-			"agent_token": "agent-tok-0011223344",
-		})
+		onboarding.write_connection(
+			{
+				"api_key": "native-key-abc123",
+				"api_secret": "native-secret-def456",
+				"customer": "cust@example.com",
+				"customer_password": "grant-pass-xyz789",
+				"agent_url": "http://127.0.0.1:19000",
+				"agent_token": "agent-tok-0011223344",
+			}
+		)
 
 		self.assert_encrypted_at_rest("jarvis_admin_api_key", "native-key-abc123")
 		self.assert_encrypted_at_rest("jarvis_admin_api_secret", "native-secret-def456")
@@ -169,10 +169,13 @@ class TestOnboardingWriteConnection(_SecretsSnapshotTestCase):
 		from jarvis import onboarding
 
 		onboarding.write_connection({"customer": "only-email@example.com"})
-		for field in ("jarvis_admin_api_key", "jarvis_admin_api_secret",
-		              "jarvis_admin_customer_password", "agent_token"):
-			self.assertFalse(_raw_singles_value(field),
-			                 f"{field}: must stay empty on a partial payload")
+		for field in (
+			"jarvis_admin_api_key",
+			"jarvis_admin_api_secret",
+			"jarvis_admin_customer_password",
+			"agent_token",
+		):
+			self.assertFalse(_raw_singles_value(field), f"{field}: must stay empty on a partial payload")
 			self.assertIsNone(_auth_row(field))
 
 
@@ -210,20 +213,23 @@ class TestChatDeviceCredentialWrites(_SecretsSnapshotTestCase):
 		)
 		# Pre-condition: secrets are retrievable.
 		s = frappe.get_single(SETTINGS)
-		self.assertEqual(s.get_password("chat_device_token", raise_exception=False),
-		                 "tok-to-revoke")
+		self.assertEqual(s.get_password("chat_device_token", raise_exception=False), "tok-to-revoke")
 
 		chat_device.clear_credentials()
 
 		s = frappe.get_single(SETTINGS)
-		self.assertFalse(s.get_password("chat_device_private_key", raise_exception=False),
-		                 "revoked private key must NOT be readable after clear_credentials")
-		self.assertFalse(s.get_password("chat_device_token", raise_exception=False),
-		                 "revoked device token must NOT be readable after clear_credentials")
-		self.assertIsNone(_auth_row("chat_device_private_key"),
-		                  "__Auth row for chat_device_private_key must be removed")
-		self.assertIsNone(_auth_row("chat_device_token"),
-		                  "__Auth row for chat_device_token must be removed")
+		self.assertFalse(
+			s.get_password("chat_device_private_key", raise_exception=False),
+			"revoked private key must NOT be readable after clear_credentials",
+		)
+		self.assertFalse(
+			s.get_password("chat_device_token", raise_exception=False),
+			"revoked device token must NOT be readable after clear_credentials",
+		)
+		self.assertIsNone(
+			_auth_row("chat_device_private_key"), "__Auth row for chat_device_private_key must be removed"
+		)
+		self.assertIsNone(_auth_row("chat_device_token"), "__Auth row for chat_device_token must be removed")
 		self.assertFalse(s.chat_device_id)
 		self.assertFalse(s.chat_device_public_key)
 
@@ -239,8 +245,7 @@ class TestChatDeviceCredentialWrites(_SecretsSnapshotTestCase):
 			device_token="tok-original",
 		)
 
-		self.assertTrue(
-			chat_device.update_device_token("tok-rotated-by-gateway", device_id="dev-current"))
+		self.assertTrue(chat_device.update_device_token("tok-rotated-by-gateway", device_id="dev-current"))
 		self.assert_encrypted_at_rest("chat_device_token", "tok-rotated-by-gateway")
 
 
@@ -259,28 +264,12 @@ class TestRotateAgentToken(_SecretsSnapshotTestCase):
 		self.assert_encrypted_at_rest("agent_token", new_token)
 
 
-class TestSaveSelfHostedToken(_SecretsSnapshotTestCase):
-	def test_save_self_hosted_encrypts_agent_token(self):
-		"""The audit-missed site: a self-hosted bench persisted the
-		customer-supplied openclaw bearer token via bare db_set."""
-		from jarvis import selfhost
-
-		ok_result = {"ok": True, "checks": [], "openclaw_version": None, "models": ["m1"]}
-		with patch("jarvis.selfhost.validate_connection", return_value=ok_result):
-			out = selfhost.save_self_hosted(
-				base_url="http://127.0.0.1:18789", token="selfhost-bearer-tok-42")
-
-		self.assertTrue(out["ok"], f"save must succeed, got: {out}")
-		self.assert_encrypted_at_rest("agent_token", "selfhost-bearer-tok-42")
-		s = frappe.get_single(SETTINGS)
-		self.assertEqual(s.deployment_mode, "Self-Hosted")
-
-
 class TestV111EncryptPlaintextPatch(_SecretsSnapshotTestCase):
 	"""The v1_11 migration: plaintext column values move to __Auth + mask."""
 
 	def _execute_patch(self):
 		from jarvis.patches import v1_13_encrypt_plaintext_settings_passwords as patch_mod
+
 		patch_mod.execute()
 
 	def test_plaintext_values_are_encrypted_and_masked(self):
@@ -303,6 +292,7 @@ class TestV111EncryptPlaintextPatch(_SecretsSnapshotTestCase):
 	def test_patch_skips_empty_and_masked_fields(self):
 		# One field already in the CORRECT post-fix state...
 		from frappe.utils.password import set_encrypted_password
+
 		set_encrypted_password(SETTINGS, SETTINGS, "already-good-secret", "agent_token")
 		frappe.db.set_single_value(SETTINGS, "agent_token", "*" * 10, update_modified=False)
 		# ...everything else empty.
@@ -313,19 +303,23 @@ class TestV111EncryptPlaintextPatch(_SecretsSnapshotTestCase):
 		# The masked field must be untouched: encrypting the MASK over the
 		# stored secret would destroy the credential.
 		s = frappe.get_single(SETTINGS)
-		self.assertEqual(s.get_password("agent_token", raise_exception=False),
-		                 "already-good-secret",
-		                 "patch must NOT re-encrypt the mask over the real secret")
+		self.assertEqual(
+			s.get_password("agent_token", raise_exception=False),
+			"already-good-secret",
+			"patch must NOT re-encrypt the mask over the real secret",
+		)
 		# Empty fields stay empty - no __Auth rows conjured from nothing.
 		for field in _ALL_PASSWORD_FIELDS:
 			if field == "agent_token":
 				continue
-			self.assertIsNone(_auth_row(field),
-			                  f"{field}: patch must not create __Auth rows for empty fields")
+			self.assertIsNone(
+				_auth_row(field), f"{field}: patch must not create __Auth rows for empty fields"
+			)
 
 	def test_patch_is_idempotent(self):
-		frappe.db.set_single_value(SETTINGS, "jarvis_admin_api_key",
-		                           "plain-key-run-twice", update_modified=False)
+		frappe.db.set_single_value(
+			SETTINGS, "jarvis_admin_api_key", "plain-key-run-twice", update_modified=False
+		)
 		frappe.db.commit()
 
 		self._execute_patch()
@@ -334,7 +328,7 @@ class TestV111EncryptPlaintextPatch(_SecretsSnapshotTestCase):
 		self.assert_encrypted_at_rest("jarvis_admin_api_key", "plain-key-run-twice")
 
 	def test_patch_purges_stale_auth_row_behind_empty_column(self):
-		"""The pre-fix clear paths (clear_credentials, selfhost blank-token)
+		"""The pre-fix clear path (clear_credentials)
 		db_set("") the column WITHOUT remove_encrypted_password, so the
 		REVOKED secret survived in __Auth - and get_password falls through to
 		__Auth whenever the column is falsy, resurrecting it. The patch must
@@ -361,7 +355,7 @@ class TestV111EncryptPlaintextPatch(_SecretsSnapshotTestCase):
 			s.get_password("chat_device_token", raise_exception=False),
 			"patch must purge the stale __Auth row behind an empty column",
 		)
-		self.assertIsNone(_auth_row("chat_device_token"),
-		                  "__Auth row must be gone after the patch")
-		self.assertFalse(_raw_singles_value("chat_device_token"),
-		                 "column must stay empty - nothing to backfill")
+		self.assertIsNone(_auth_row("chat_device_token"), "__Auth row must be gone after the patch")
+		self.assertFalse(
+			_raw_singles_value("chat_device_token"), "column must stay empty - nothing to backfill"
+		)

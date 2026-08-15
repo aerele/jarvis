@@ -1,4 +1,4 @@
-import { ref } from "vue"
+import { ref } from "vue";
 
 /**
  * The install prompt, captured the moment Chrome offers it.
@@ -15,24 +15,24 @@ import { ref } from "vue"
  * The event fires at most once per page load, so it must be stashed rather than
  * waited for: calling prompt() later is what actually opens the install dialog.
  */
-export const installPrompt = ref(null)
+export const installPrompt = ref(null);
 
 // True once the app is running as an installed app — there is nothing left to offer.
 export function isStandalone() {
 	return (
 		window.matchMedia("(display-mode: standalone)").matches ||
 		window.navigator.standalone === true
-	)
+	);
 }
 
 window.addEventListener("beforeinstallprompt", (e) => {
 	// Suppress Chrome's own mini-infobar; we surface the offer in-app instead.
-	e.preventDefault()
-	installPrompt.value = e
-})
+	e.preventDefault();
+	installPrompt.value = e;
+});
 
 // Chrome fires this after a successful install; drop the stale event so the
 // banner doesn't linger on the next navigation.
 window.addEventListener("appinstalled", () => {
-	installPrompt.value = null
-})
+	installPrompt.value = null;
+});

@@ -31,91 +31,96 @@ import frappe
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools import require_doctype_and_name
 from jarvis.tools._bulk import run_atomic_batch
+from jarvis.tools._delegate_write_caps import enforce_update
 
 # Fields Frappe maintains itself or that govern DocType identity. An LLM
 # rewriting these would corrupt the row.
-PROTECTED_FIELDS = frozenset({
-    "name",
-    "owner",
-    "creation",
-    "modified",
-    "modified_by",
-    "doctype",
-    "docstatus",
-    "idx",
-    "parent",
-    "parentfield",
-    "parenttype",
-})
+PROTECTED_FIELDS = frozenset(
+	{
+		"name",
+		"owner",
+		"creation",
+		"modified",
+		"modified_by",
+		"doctype",
+		"docstatus",
+		"idx",
+		"parent",
+		"parentfield",
+		"parenttype",
+	}
+)
 
 
 def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.document.Document":
-    """Guards (non-empty changes, no protected fields, write perm) + apply +
-    save for ONE doc. Returns the saved Document. Shared by the single and
-    batch paths so they never drift."""
-    if not isinstance(changes, dict) or not changes:
-        raise InvalidArgumentError("changes must be a non-empty dict")
+	"""Guards (non-empty changes, no protected fields, write perm) + apply +
+	save for ONE doc. Returns the saved Document. Shared by the single and
+	batch paths so they never drift."""
+	if not isinstance(changes, dict) or not changes:
+		raise InvalidArgumentError("changes must be a non-empty dict")
 
-    protected = sorted(set(changes.keys()) & PROTECTED_FIELDS)
-    if protected:
-        raise InvalidArgumentError(
-            f"refusing to write protected field(s): {', '.join(protected)}"
-        )
+	protected = sorted(set(changes.keys()) & PROTECTED_FIELDS)
+	if protected:
+		raise InvalidArgumentError(f"refusing to write protected field(s): {', '.join(protected)}")
 
-    if not frappe.has_permission(doctype, ptype="write", doc=name):
-        raise PermissionDeniedError(
-            f"no write permission on {doctype} '{name}'"
-        )
+	# R5-J9: bind a DELEGATE agent's update to its declared writes[] contract BEFORE
+	# the Frappe permission check below (a no-op for non-delegate callers). An auditor
+	# is refused outright; an operator may update only a declared doctype, only a draft
+	# (docstatus==0), and only a row owned by its run-as identity.
+	enforce_update(doctype, name)
 
-    doc = frappe.get_doc(doctype, name)  # raises DoesNotExistError if missing
-    for field, value in changes.items():
-        doc.set(field, value)
-    doc.save()  # runs DocType validate() and on_update hooks
-    return doc
+	if not frappe.has_permission(doctype, ptype="write", doc=name):
+		raise PermissionDeniedError(f"no write permission on {doctype} '{name}'")
+
+	doc = frappe.get_doc(doctype, name)  # raises DoesNotExistError if missing
+	for field, value in changes.items():
+		doc.set(field, value)
+	doc.save()  # runs DocType validate() and on_update hooks
+	return doc
 
 
 def update_doc(
-    doctype: str,
-    name: str | None = None,
-    changes: dict | None = None,
-    updates: list | None = None,
+	doctype: str,
+	name: str | None = None,
+	changes: dict | None = None,
+	updates: list | None = None,
 ) -> dict:
-    """Apply changes to one document - or a whole batch when ``updates`` is given.
+	"""Apply changes to one document - or a whole batch when ``updates`` is given.
 
-    Single: returns the saved document as a dict (matching ``get_doc``'s shape).
-    Batch: returns ``{"doctype","updated":[name,...],"count":N}``.
+	Single: returns the saved document as a dict (matching ``get_doc``'s shape).
+	Batch: returns ``{"doctype","updated":[name,...],"count":N}``.
 
-    Raises:
-      - InvalidArgumentError on empty args, empty changes, attempts to write
-        protected fields (per item, for a batch)
-      - PermissionDeniedError when the calling user lacks write on a record
-      - frappe.DoesNotExistError when a record doesn't exist
-      - frappe.ValidationError when a DocType's own validate() rejects
-    """
-    if updates is not None:
-        return _update_batch(doctype, updates)
+	Raises:
+	  - InvalidArgumentError on empty args, empty changes, attempts to write
+	    protected fields (per item, for a batch)
+	  - PermissionDeniedError when the calling user lacks write on a record
+	  - frappe.DoesNotExistError when a record doesn't exist
+	  - frappe.ValidationError when a DocType's own validate() rejects
+	"""
+	if updates is not None:
+		return _update_batch(doctype, updates)
 
-    require_doctype_and_name(doctype, name)
-    doc = _update_one(doctype, name, changes)
-    doc.apply_fieldlevel_read_permissions()
-    return doc.as_dict()
+	require_doctype_and_name(doctype, name)
+	doc = _update_one(doctype, name, changes)
+	doc.apply_fieldlevel_read_permissions()
+	return doc.as_dict()
 
 
 def _update_batch(doctype: str, updates: list) -> dict:
-    """Save every ``{"name","changes"}`` in ``updates`` atomically (one doctype,
-    per-doc changes). All saves run in one savepoint: if any fails, the whole
-    batch rolls back and nothing is committed."""
-    if not doctype:
-        raise InvalidArgumentError("doctype is required")
-    if not isinstance(updates, list) or not updates:
-        raise InvalidArgumentError("updates must be a non-empty list of {name, changes}")
-    for i, item in enumerate(updates):
-        if not isinstance(item, dict) or not item.get("name"):
-            raise InvalidArgumentError(f"updates[{i}] must be a dict with a name + changes")
+	"""Save every ``{"name","changes"}`` in ``updates`` atomically (one doctype,
+	per-doc changes). All saves run in one savepoint: if any fails, the whole
+	batch rolls back and nothing is committed."""
+	if not doctype:
+		raise InvalidArgumentError("doctype is required")
+	if not isinstance(updates, list) or not updates:
+		raise InvalidArgumentError("updates must be a non-empty list of {name, changes}")
+	for i, item in enumerate(updates):
+		if not isinstance(item, dict) or not item.get("name"):
+			raise InvalidArgumentError(f"updates[{i}] must be a dict with a name + changes")
 
-    def _do(item: dict) -> str:
-        _update_one(doctype, item["name"], item.get("changes"))
-        return item["name"]
+	def _do(item: dict) -> str:
+		_update_one(doctype, item["name"], item.get("changes"))
+		return item["name"]
 
-    updated = run_atomic_batch(updates, _do, label=lambda u: u.get("name"))
-    return {"doctype": doctype, "updated": updated, "count": len(updated)}
+	updated = run_atomic_batch(updates, _do, label=lambda u: u.get("name"))
+	return {"doctype": doctype, "updated": updated, "count": len(updated)}

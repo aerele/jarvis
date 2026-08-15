@@ -15,7 +15,8 @@ const EDGE_KINDS = {
 };
 
 export function overlayFilter(data, overlay) {
-	const nodes = data.nodes || [], edges = data.edges || [];
+	const nodes = data.nodes || [],
+		edges = data.edges || [];
 	if (overlay === "demand") return { nodes, edges, gaps: data.gaps };
 	const nk = NODE_KINDS[overlay] || NODE_KINDS.knowledge;
 	const ek = EDGE_KINDS[overlay] || EDGE_KINDS.knowledge;
@@ -40,16 +41,21 @@ function _ball(seeds, edges, hops) {
 	let frontier = [...keep];
 	for (let h = 0; h < hops; h++) {
 		const next = [];
-		for (const id of frontier) for (const nb of (adj[id] || [])) {
-			if (!keep.has(nb)) { keep.add(nb); next.push(nb); }
-		}
+		for (const id of frontier)
+			for (const nb of adj[id] || []) {
+				if (!keep.has(nb)) {
+					keep.add(nb);
+					next.push(nb);
+				}
+			}
 		frontier = next;
 	}
 	return keep;
 }
 
 export function egoGraph(data, focusId, hops = 2) {
-	const nodes = data.nodes || [], edges = data.edges || [];
+	const nodes = data.nodes || [],
+		edges = data.edges || [];
 	if (!focusId || !nodes.some((n) => n.id === focusId)) return data;
 	const keep = _ball([focusId], edges, hops);
 	return {
@@ -62,7 +68,8 @@ export function egoGraph(data, focusId, hops = 2) {
 export function searchGraph(data, query, hops = 1) {
 	const q = (query || "").trim().toLowerCase();
 	if (!q) return data;
-	const nodes = data.nodes || [], edges = data.edges || [];
+	const nodes = data.nodes || [],
+		edges = data.edges || [];
 	const seeds = nodes
 		.filter((n) => (n.label || n.id).toLowerCase().includes(q) || (n.slug || "").includes(q))
 		.map((n) => n.id);
@@ -76,10 +83,14 @@ export function searchGraph(data, query, hops = 1) {
 }
 
 export function collapseClusters(data, metrics, communities, expanded) {
-	const nodes = data.nodes || [], edges = data.edges || [];
+	const nodes = data.nodes || [],
+		edges = data.edges || [];
 	expanded = expanded || new Set();
 	const commOf = (id) => (metrics[id] ? metrics[id].community : null);
-	const displayId = {}, out = [], size = {}, seen = new Set();
+	const displayId = {},
+		out = [],
+		size = {},
+		seen = new Set();
 	for (const n of nodes) {
 		if (n.kind !== "page") continue; // topic map = pages only
 		const c = String(commOf(n.id));
@@ -92,21 +103,32 @@ export function collapseClusters(data, metrics, communities, expanded) {
 			size[cid] = (size[cid] || 0) + 1;
 			if (!seen.has(cid)) {
 				seen.add(cid);
-				out.push({ id: cid, kind: "cluster", cluster: true, community: c,
-					label: (communities[c] || {}).label || `Cluster ${c}` });
+				out.push({
+					id: cid,
+					kind: "cluster",
+					cluster: true,
+					community: c,
+					label: (communities[c] || {}).label || `Cluster ${c}`,
+				});
 			}
 		}
 	}
 	for (const n of out) if (n.kind === "cluster") n.weight = size[n.id];
-	const byKey = {}, outEdges = [];
+	const byKey = {},
+		outEdges = [];
 	for (const e of edges) {
 		if (e.kind !== "links-to") continue;
-		const s = displayId[e.source], t = displayId[e.target];
+		const s = displayId[e.source],
+			t = displayId[e.target];
 		if (!s || !t || s === t) continue;
 		const key = s < t ? s + "|" + t : t + "|" + s;
-		if (byKey[key]) { byKey[key].weight += 1; continue; }
+		if (byKey[key]) {
+			byKey[key].weight += 1;
+			continue;
+		}
 		const edge = { source: s, target: t, kind: "cluster-link", weight: 1 };
-		byKey[key] = edge; outEdges.push(edge);
+		byKey[key] = edge;
+		outEdges.push(edge);
 	}
 	return { nodes: out, edges: outEdges, gaps: data.gaps };
 }

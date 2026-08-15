@@ -50,9 +50,7 @@ class TestCreateDocs(FrappeTestCase):
 
 	def test_protected_field_rejected(self):
 		with self.assertRaises(InvalidArgumentError):
-			create_docs(
-				[{"doctype": "ToDo", "values": {"description": "x", "owner": "a@b.c"}}]
-			)
+			create_docs([{"doctype": "ToDo", "values": {"description": "x", "owner": "a@b.c"}}])
 
 	def test_notes_default_empty(self):
 		out = create_docs([{"doctype": "ToDo", "values": {"description": "jarvis-batch-n"}}])

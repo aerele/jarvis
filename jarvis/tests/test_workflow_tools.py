@@ -168,7 +168,9 @@ class TestApplyWorkflowAction(FrappeTestCase):
 		with (
 			patch(f"{AWA}.get_workflow_name", return_value="WF"),
 			patch("frappe.get_doc", return_value=doc),
-			patch(f"{AWA}.apply_workflow", side_effect=frappe.ValidationError("Self approval is not allowed")),
+			patch(
+				f"{AWA}.apply_workflow", side_effect=frappe.ValidationError("Self approval is not allowed")
+			),
 		):
 			with self.assertRaises(frappe.ValidationError) as ctx:
 				apply_workflow_action("Leave Application", "LA-001", "Approve")

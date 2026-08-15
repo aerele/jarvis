@@ -34,17 +34,19 @@ def _mk(suffix, *, owner=OWNER, enabled=1, managed=0, skill_name=None):
 	validation, same as test_compiler's fixture) so a test can exceed
 	MAX_SKILLS_PER_PUSH."""
 	d = frappe.new_doc(SKILL)
-	d.update({
-		"skill_name": skill_name or f"jcsp-{suffix}",
-		"description": "cap fixture",
-		"instructions": "body",
-		"enabled": enabled,
-		"user_invocable": 0,
-		# Org scope: only Org skills join the shared container push (security
-		# review PART 2 TASK 10 made User the default, which is never pushed).
-		"scope": "Org",
-		"managed_by_learning": managed,
-	})
+	d.update(
+		{
+			"skill_name": skill_name or f"jcsp-{suffix}",
+			"description": "cap fixture",
+			"instructions": "body",
+			"enabled": enabled,
+			"user_invocable": 0,
+			# Org scope: only Org skills join the shared container push (security
+			# review PART 2 TASK 10 made User the default, which is never pushed).
+			"scope": "Org",
+			"managed_by_learning": managed,
+		}
+	)
 	# db_insert stamps owner with the session user unless creation is already
 	# set; pre-stamp both so the fixture owner sticks.
 	d.creation = d.modified = frappe.utils.now()
@@ -130,17 +132,13 @@ class TestBuildPushPayloadCap(FrappeTestCase):
 		# whatever else this site holds.
 		for i in range(26):
 			_mk(f"apply-{i:02d}")
-		before = frappe.db.get_single_value(
-			SETTINGS, "custom_skills_sync_status", cache=False
-		)
+		before = frappe.db.get_single_value(SETTINGS, "custom_skills_sync_status", cache=False)
 		with self.assertRaises(frappe.ValidationError) as ctx:
 			custom_skills_api.apply_custom_skills()
 		self.assertIn("exceed the push cap of 25", str(ctx.exception))
 		# The throw happens BEFORE the pending-status write and the enqueue:
 		# nothing was marked, nothing was pushed.
-		after = frappe.db.get_single_value(
-			SETTINGS, "custom_skills_sync_status", cache=False
-		)
+		after = frappe.db.get_single_value(SETTINGS, "custom_skills_sync_status", cache=False)
 		self.assertEqual(after, before)
 
 
@@ -150,12 +148,8 @@ class TestUnattendedPushGraceful(FrappeTestCase):
 
 	def setUp(self):
 		super().setUp()
-		self._status0 = frappe.db.get_single_value(
-			SETTINGS, "custom_skills_sync_status", cache=False
-		)
-		self._synced0 = frappe.db.get_single_value(
-			SETTINGS, "custom_skills_synced_at", cache=False
-		)
+		self._status0 = frappe.db.get_single_value(SETTINGS, "custom_skills_sync_status", cache=False)
+		self._synced0 = frappe.db.get_single_value(SETTINGS, "custom_skills_synced_at", cache=False)
 
 	def tearDown(self):
 		_cleanup_fixture_rows()
@@ -180,9 +174,7 @@ class TestUnattendedPushGraceful(FrappeTestCase):
 			patch.object(frappe, "log_error") as log,
 		):
 			custom_skills_api._enqueued_push_custom_skills()  # must not raise
-		status = frappe.db.get_single_value(
-			SETTINGS, "custom_skills_sync_status", cache=False
-		)
+		status = frappe.db.get_single_value(SETTINGS, "custom_skills_sync_status", cache=False)
 		self.assertEqual(status, "failed: unexpected error; see Error Log")
 		titles = [c.kwargs.get("title") for c in log.call_args_list]
 		self.assertIn("Jarvis: custom-skills push failed", titles)
@@ -204,9 +196,7 @@ class TestUnattendedPushGraceful(FrappeTestCase):
 		):
 			custom_skills_api._enqueued_push_custom_skills()
 		self.assertEqual(len(seen["skills"]), MAX_SKILLS_PER_PUSH)
-		status = frappe.db.get_single_value(
-			SETTINGS, "custom_skills_sync_status", cache=False
-		)
+		status = frappe.db.get_single_value(SETTINGS, "custom_skills_sync_status", cache=False)
 		self.assertTrue(status.startswith("ok (applied 25"), status)
 		titles = [c.kwargs.get("title") for c in log.call_args_list]
 		self.assertIn("Jarvis: custom-skills push truncated", titles)

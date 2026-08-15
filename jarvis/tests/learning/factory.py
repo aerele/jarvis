@@ -136,7 +136,9 @@ def _insert(doctype, name, fields, docstatus=1, creation=None, children=None):
 	doc.flags.name_set = True
 	doc.docstatus = docstatus
 	doc.db_insert()
-	ts = creation or (str(fields.get("posting_date") or fields.get("transaction_date") or "2025-09-01") + " 10:00:00")
+	ts = creation or (
+		str(fields.get("posting_date") or fields.get("transaction_date") or "2025-09-01") + " 10:00:00"
+	)
 	frappe.db.set_value(doctype, name, {"creation": ts, "modified": ts}, update_modified=False)
 	for childfield, (child_dt, rows) in (children or {}).items():
 		for i, row in enumerate(rows):
@@ -294,9 +296,17 @@ def _selling_alpha() -> None:
 				children={
 					"items": (
 						"Sales Invoice Item",
-						[{"item_code": "_JPL-ItemElec", "item_name": "_JPL-ItemElec",
-						  "item_group": item_group, "warehouse": warehouse, "uom": uom,
-						  "qty": 1, "rate": 100}],
+						[
+							{
+								"item_code": "_JPL-ItemElec",
+								"item_name": "_JPL-ItemElec",
+								"item_group": item_group,
+								"warehouse": warehouse,
+								"uom": uom,
+								"qty": 1,
+								"rate": 100,
+							}
+						],
 					)
 				},
 			)
@@ -310,15 +320,24 @@ def _buying_alpha() -> None:
 	def po(idx, supplier, item_code, item_group, taxes, lines=1):
 		name = f"{PREFIX}PO-A-{idx:04d}"
 		rows = [
-			{"item_code": item_code, "item_group": item_group, "qty": 1, "rate": 10,
-			 "schedule_date": _day(idx)}
+			{
+				"item_code": item_code,
+				"item_group": item_group,
+				"qty": 1,
+				"rate": 10,
+				"schedule_date": _day(idx),
+			}
 			for _ in range(lines)
 		]
 		_insert(
 			"Purchase Order",
 			name,
-			{"supplier": supplier, "company": ALPHA, "transaction_date": _day(idx),
-			 "taxes_and_charges": taxes},
+			{
+				"supplier": supplier,
+				"company": ALPHA,
+				"transaction_date": _day(idx),
+				"taxes_and_charges": taxes,
+			},
 			children={"items": ("Purchase Order Item", rows)},
 		)
 
@@ -346,13 +365,28 @@ def _buying_alpha() -> None:
 		_insert(
 			"Purchase Invoice",
 			name,
-			{"supplier": "_JPL-BoltSupply", "company": ALPHA,
-			 "posting_date": _day(k), "update_stock": 1,
-			 "payment_terms_template": "Net 15"},
-			children={"items": ("Purchase Invoice Item", [
-				{"item_code": "_JPL-ItemStock", "item_name": "_JPL-ItemStock",
-				 "item_group": "Fasteners", "enable_deferred_expense": 0,
-				 "qty": 1, "rate": 10}])},
+			{
+				"supplier": "_JPL-BoltSupply",
+				"company": ALPHA,
+				"posting_date": _day(k),
+				"update_stock": 1,
+				"payment_terms_template": "Net 15",
+			},
+			children={
+				"items": (
+					"Purchase Invoice Item",
+					[
+						{
+							"item_code": "_JPL-ItemStock",
+							"item_name": "_JPL-ItemStock",
+							"item_group": "Fasteners",
+							"enable_deferred_expense": 0,
+							"qty": 1,
+							"rate": 10,
+						}
+					],
+				)
+			},
 		)
 	# AcmeNonStock's realized terms MATCH its Supplier master ("Net 30") - the
 	# suppression trap; its Services lines book deferred expense (the
@@ -363,13 +397,28 @@ def _buying_alpha() -> None:
 		_insert(
 			"Purchase Invoice",
 			name,
-			{"supplier": "_JPL-AcmeNonStock", "company": ALPHA,
-			 "posting_date": _day(34 + k), "update_stock": 1,
-			 "payment_terms_template": "Net 30"},
-			children={"items": ("Purchase Invoice Item", [
-				{"item_code": "_JPL-ItemNonStock", "item_name": "_JPL-ItemNonStock",
-				 "item_group": "Services", "enable_deferred_expense": 1,
-				 "qty": 1, "rate": 10}])},
+			{
+				"supplier": "_JPL-AcmeNonStock",
+				"company": ALPHA,
+				"posting_date": _day(34 + k),
+				"update_stock": 1,
+				"payment_terms_template": "Net 30",
+			},
+			children={
+				"items": (
+					"Purchase Invoice Item",
+					[
+						{
+							"item_code": "_JPL-ItemNonStock",
+							"item_name": "_JPL-ItemNonStock",
+							"item_group": "Services",
+							"enable_deferred_expense": 1,
+							"qty": 1,
+							"rate": 10,
+						}
+					],
+				)
+			},
 		)
 
 
@@ -383,15 +432,22 @@ def _accounts_alpha() -> None:
 		["Cash"] * 30 + ["Bank Draft"] * 2,  # Pay
 	)
 	idx = 0
-	for ptype, modes in zip(("Receive", "Pay"), plan):
+	for ptype, modes in zip(("Receive", "Pay"), plan, strict=True):
 		for mode in modes:
 			name = f"{PREFIX}PE-A-{idx:04d}"
 			_insert(
 				"Payment Entry",
 				name,
-				{"payment_type": ptype, "mode_of_payment": mode, "company": ALPHA,
-				 "posting_date": _day(idx), "party_type": "Customer",
-				 "party": "_JPL-DealerD", "paid_amount": 100, "received_amount": 100},
+				{
+					"payment_type": ptype,
+					"mode_of_payment": mode,
+					"company": ALPHA,
+					"posting_date": _day(idx),
+					"party_type": "Customer",
+					"party": "_JPL-DealerD",
+					"paid_amount": 100,
+					"received_amount": 100,
+				},
 			)
 			idx += 1
 
@@ -402,9 +458,13 @@ def _accounts_alpha() -> None:
 		_insert(
 			"Quotation",
 			name,
-			{"company": ALPHA, "transaction_date": td,
-			 "valid_till": frappe.utils.add_days(td, 15),
-			 "quotation_to": "Customer", "party_name": "_JPL-DealerD"},
+			{
+				"company": ALPHA,
+				"transaction_date": td,
+				"valid_till": frappe.utils.add_days(td, 15),
+				"quotation_to": "Customer",
+				"party_name": "_JPL-DealerD",
+			},
 		)
 
 
@@ -419,11 +479,25 @@ def _stock_alpha() -> None:
 		_insert(
 			"Stock Entry",
 			name,
-			{"company": ALPHA, "posting_date": _day(idx),
-			 "purpose": "Material Transfer", "stock_entry_type": "Material Transfer"},
-			children={"items": ("Stock Entry Detail", [
-				{"s_warehouse": "WH-Alpha-Main", "t_warehouse": "WH-Alpha-Bulk",
-				 "item_code": "_JPL-ItemStock", "qty": 1}])},
+			{
+				"company": ALPHA,
+				"posting_date": _day(idx),
+				"purpose": "Material Transfer",
+				"stock_entry_type": "Material Transfer",
+			},
+			children={
+				"items": (
+					"Stock Entry Detail",
+					[
+						{
+							"s_warehouse": "WH-Alpha-Main",
+							"t_warehouse": "WH-Alpha-Bulk",
+							"item_code": "_JPL-ItemStock",
+							"qty": 1,
+						}
+					],
+				)
+			},
 		)
 		idx += 1
 	for _ in range(30):
@@ -431,11 +505,25 @@ def _stock_alpha() -> None:
 		_insert(
 			"Stock Entry",
 			name,
-			{"company": ALPHA, "posting_date": _day(idx),
-			 "purpose": "Material Receipt", "stock_entry_type": "Material Receipt"},
-			children={"items": ("Stock Entry Detail", [
-				{"s_warehouse": "", "t_warehouse": "WH-Alpha-Main",
-				 "item_code": "_JPL-ItemStock", "qty": 1}])},
+			{
+				"company": ALPHA,
+				"posting_date": _day(idx),
+				"purpose": "Material Receipt",
+				"stock_entry_type": "Material Receipt",
+			},
+			children={
+				"items": (
+					"Stock Entry Detail",
+					[
+						{
+							"s_warehouse": "",
+							"t_warehouse": "WH-Alpha-Main",
+							"item_code": "_JPL-ItemStock",
+							"qty": 1,
+						}
+					],
+				)
+			},
 		)
 		idx += 1
 
@@ -485,8 +573,13 @@ def _selective_pricing() -> None:
 		_insert(
 			"Item Price",
 			name,
-			{"customer": f"{PREFIX}IPCust{j}", "price_list": "Dealer Pricing",
-			 "item_code": "_JPL-ItemStock", "selling": 1, "price_list_rate": 100 + j},
+			{
+				"customer": f"{PREFIX}IPCust{j}",
+				"price_list": "Dealer Pricing",
+				"item_code": "_JPL-ItemStock",
+				"selling": 1,
+				"price_list_rate": 100 + j,
+			},
 			docstatus=0,
 		)
 
@@ -502,12 +595,31 @@ def _beta_traps() -> None:
 		_insert(
 			"Sales Invoice",
 			name,
-			{"customer": f"{PREFIX}BetaCust{i % 6}", "customer_group": "Wholesale",
-			 "selling_price_list": "Standard Selling", "payment_terms_template": "Net 30",
-			 "letter_head": "", "tc_name": "", "company": BETA, "posting_date": _day(i)},
-			children={"items": ("Sales Invoice Item", [
-				{"item_code": "_JPL-ItemElec", "item_name": "_JPL-ItemElec",
-				 "item_group": "Electronics", "warehouse": warehouse, "qty": 1, "rate": 100}])},
+			{
+				"customer": f"{PREFIX}BetaCust{i % 6}",
+				"customer_group": "Wholesale",
+				"selling_price_list": "Standard Selling",
+				"payment_terms_template": "Net 30",
+				"letter_head": "",
+				"tc_name": "",
+				"company": BETA,
+				"posting_date": _day(i),
+			},
+			children={
+				"items": (
+					"Sales Invoice Item",
+					[
+						{
+							"item_code": "_JPL-ItemElec",
+							"item_name": "_JPL-ItemElec",
+							"item_group": "Electronics",
+							"warehouse": warehouse,
+							"qty": 1,
+							"rate": 100,
+						}
+					],
+				)
+			},
 		)
 	# vanilla-default quotations (valid +1 month, spread over days so only the
 	# system-default gate suppresses them, not the spread gate).
@@ -517,9 +629,13 @@ def _beta_traps() -> None:
 		_insert(
 			"Quotation",
 			name,
-			{"company": BETA, "transaction_date": td,
-			 "valid_till": frappe.utils.add_days(td, 30),
-			 "quotation_to": "Customer", "party_name": f"{PREFIX}BetaCust{i % 6}"},
+			{
+				"company": BETA,
+				"transaction_date": td,
+				"valid_till": frappe.utils.add_days(td, 30),
+				"quotation_to": "Customer",
+				"party_name": f"{PREFIX}BetaCust{i % 6}",
+			},
 		)
 	# go-live burst: 35 PIs, all one day and one creation second -> spread gate.
 	burst_ts = "2025-10-01 03:00:00"
@@ -528,8 +644,12 @@ def _beta_traps() -> None:
 		_insert(
 			"Purchase Invoice",
 			name,
-			{"supplier": f"{PREFIX}BetaSup", "company": BETA,
-			 "posting_date": "2025-10-01", "update_stock": 1},
+			{
+				"supplier": f"{PREFIX}BetaSup",
+				"company": BETA,
+				"posting_date": "2025-10-01",
+				"update_stock": 1,
+			},
 			creation=burst_ts,
 		)
 
@@ -548,9 +668,12 @@ def _journal_entries_alpha() -> None:
 		_insert(
 			"Journal Entry",
 			name,
-			{"voucher_type": "Bank Entry", "company": ALPHA,
-			 "posting_date": _day(idx),
-			 "from_template": "" if manual else EXPECT["je_template"]},
+			{
+				"voucher_type": "Bank Entry",
+				"company": ALPHA,
+				"posting_date": _day(idx),
+				"from_template": "" if manual else EXPECT["je_template"],
+			},
 		)
 		idx += 1
 	for _ in range(4):
@@ -558,8 +681,12 @@ def _journal_entries_alpha() -> None:
 		_insert(
 			"Journal Entry",
 			name,
-			{"voucher_type": "Journal Entry", "company": ALPHA,
-			 "posting_date": _day(idx), "from_template": ""},
+			{
+				"voucher_type": "Journal Entry",
+				"company": ALPHA,
+				"posting_date": _day(idx),
+				"from_template": "",
+			},
 		)
 		idx += 1
 
@@ -571,13 +698,11 @@ def _manufacturing_alpha() -> None:
 	# BOM masters: Widget's flagged default is BOM-DEF but 22/24 Work Orders
 	# use BOM-ALT (the divergence to learn); Elec's WOs all use the flagged
 	# default (the suppression trap).
-	for bom, item in (("_JPL-BOM-DEF", "_JPL-ItemWidget"),
-	                  ("_JPL-BOM-ELEC", "_JPL-ItemElec")):
+	for bom, item in (("_JPL-BOM-DEF", "_JPL-ItemWidget"), ("_JPL-BOM-ELEC", "_JPL-ItemElec")):
 		_insert(
 			"BOM",
 			bom,
-			{"item": item, "is_default": 1, "is_active": 1, "company": ALPHA,
-			 "quantity": 1},
+			{"item": item, "is_default": 1, "is_active": 1, "company": ALPHA, "quantity": 1},
 		)
 	idx = 0
 	for j in range(24):
@@ -586,8 +711,7 @@ def _manufacturing_alpha() -> None:
 		_insert(
 			"Work Order",
 			name,
-			{"production_item": "_JPL-ItemWidget", "bom_no": bom, "company": ALPHA,
-			 "qty": 1},
+			{"production_item": "_JPL-ItemWidget", "bom_no": bom, "company": ALPHA, "qty": 1},
 			creation=f"{_day(idx)} 10:00:00",
 		)
 		idx += 1
@@ -596,8 +720,7 @@ def _manufacturing_alpha() -> None:
 		_insert(
 			"Work Order",
 			name,
-			{"production_item": "_JPL-ItemElec", "bom_no": "_JPL-BOM-ELEC",
-			 "company": ALPHA, "qty": 1},
+			{"production_item": "_JPL-ItemElec", "bom_no": "_JPL-BOM-ELEC", "company": ALPHA, "qty": 1},
 			creation=f"{_day(idx)} 10:00:00",
 		)
 		idx += 1
@@ -609,10 +732,15 @@ def _manufacturing_alpha() -> None:
 def _timesheets_alpha() -> None:
 	# Consulting billed at 1500 with NO configured rate (proposes); Support
 	# billed at 800 with a MATCHING Activity Type master (suppression trap).
-	_insert("Activity Type", "_JPL-Consulting",
-	        {"activity_type": "_JPL-Consulting", "billing_rate": 0}, docstatus=0)
-	_insert("Activity Type", "_JPL-Support",
-	        {"activity_type": "_JPL-Support", "billing_rate": 800}, docstatus=0)
+	_insert(
+		"Activity Type",
+		"_JPL-Consulting",
+		{"activity_type": "_JPL-Consulting", "billing_rate": 0},
+		docstatus=0,
+	)
+	_insert(
+		"Activity Type", "_JPL-Support", {"activity_type": "_JPL-Support", "billing_rate": 800}, docstatus=0
+	)
 	idx = 0
 	for activity, rate, count in (("_JPL-Consulting", 1500, 32), ("_JPL-Support", 800, 30)):
 		for _ in range(count):
@@ -622,9 +750,12 @@ def _timesheets_alpha() -> None:
 				name,
 				{"company": ALPHA},
 				creation=f"{_day(idx)} 09:00:00",
-				children={"time_logs": ("Timesheet Detail", [
-					{"activity_type": activity, "billing_rate": rate,
-					 "is_billable": 1, "hours": 1}])},
+				children={
+					"time_logs": (
+						"Timesheet Detail",
+						[{"activity_type": activity, "billing_rate": rate, "is_billable": 1, "hours": 1}],
+					)
+				},
 			)
 			idx += 1
 
@@ -653,13 +784,29 @@ def _gamma_multiplant() -> None:
 			_insert(
 				"Sales Invoice",
 				name,
-				{"customer": f"{PREFIX}GDim{ordinal % 4}", "customer_group": "Wholesale",
-				 "company": GAMMA, "posting_date": _day(ordinal)},
-				children={"items": ("Sales Invoice Item", [
-					{"item_code": "_JPL-ItemElec", "item_name": "_JPL-ItemElec",
-					 "item_group": item_group, "warehouse": warehouse,
-					 "cost_center": cost_center, "enable_deferred_revenue": deferred,
-					 "qty": 1, "rate": 100}])},
+				{
+					"customer": f"{PREFIX}GDim{ordinal % 4}",
+					"customer_group": "Wholesale",
+					"company": GAMMA,
+					"posting_date": _day(ordinal),
+				},
+				children={
+					"items": (
+						"Sales Invoice Item",
+						[
+							{
+								"item_code": "_JPL-ItemElec",
+								"item_name": "_JPL-ItemElec",
+								"item_group": item_group,
+								"warehouse": warehouse,
+								"cost_center": cost_center,
+								"enable_deferred_revenue": deferred,
+								"qty": 1,
+								"rate": 100,
+							}
+						],
+					)
+				},
 			)
 			ordinal += 1
 
@@ -680,15 +827,20 @@ def _gamma_tax_segments() -> None:
 	_insert(
 		"Custom Field",
 		f"{PREFIX}CF-Customer-territory",
-		{"dt": "Customer", "fieldname": "territory", "fieldtype": "Link",
-		 "label": "Territory", "reqd": 0, "hidden": 0},
+		{
+			"dt": "Customer",
+			"fieldname": "territory",
+			"fieldtype": "Link",
+			"label": "Territory",
+			"reqd": 0,
+			"hidden": 0,
+		},
 		docstatus=0,
 	)
 	_insert(
 		"Tax Rule",
 		f"{PREFIX}TR-South",
-		{"tax_type": "Sales", "sales_tax_template": EXPECT["south_tax_template"],
-		 "company": GAMMA},
+		{"tax_type": "Sales", "sales_tax_template": EXPECT["south_tax_template"], "company": GAMMA},
 		docstatus=0,
 	)
 
@@ -703,28 +855,35 @@ def _gamma_tax_segments() -> None:
 			_insert(
 				"Customer",
 				cust,
-				{"customer_name": cust, "customer_group": "Wholesale",
-				 "territory": territory},
+				{"customer_name": cust, "customer_group": "Wholesale", "territory": territory},
 				docstatus=0,
 			)
 			addr = f"{PREFIX}ADDR-{tag}-{cust[-1]}"
 			_insert(
 				"Address",
 				addr,
-				{"address_title": cust, "address_type": "Billing",
-				 "address_line1": "1 Main Rd", "city": "City",
-				 "state": state, "country": "India"},
+				{
+					"address_title": cust,
+					"address_type": "Billing",
+					"address_line1": "1 Main Rd",
+					"city": "City",
+					"state": state,
+					"country": "India",
+				},
 				docstatus=0,
-				children={"links": ("Dynamic Link", [
-					{"link_doctype": "Customer", "link_name": cust}])},
+				children={"links": ("Dynamic Link", [{"link_doctype": "Customer", "link_name": cust}])},
 			)
 		for j in range(32):
 			name = f"{PREFIX}SI-GT-{tag}-{j:04d}"
 			_insert(
 				"Sales Invoice",
 				name,
-				{"customer": customers[j % 8], "customer_group": "Wholesale",
-				 "taxes_and_charges": template, "company": GAMMA,
-				 "posting_date": _day(ordinal)},
+				{
+					"customer": customers[j % 8],
+					"customer_group": "Wholesale",
+					"taxes_and_charges": template,
+					"company": GAMMA,
+					"posting_date": _day(ordinal),
+				},
 			)
 			ordinal += 1

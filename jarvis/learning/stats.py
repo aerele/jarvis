@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime
 import math
+from itertools import pairwise
 
 # Strength bands on the Wilson LOWER bound, not raw k/n (plan section 4.1).
 BAND_HIGH = 0.90
@@ -177,10 +178,7 @@ def fisher_exact_greater(k: int, n: int, K: int, N: int) -> float:
 	if k <= lo:
 		return 1.0  # the tail is the whole support
 	log_denom = _log_binom(N, n)
-	terms = [
-		math.exp(_log_binom(K, x) + _log_binom(N - K, n - x) - log_denom)
-		for x in range(k, hi + 1)
-	]
+	terms = [math.exp(_log_binom(K, x) + _log_binom(N - K, n - x) - log_denom) for x in range(k, hi + 1)]
 	return min(max(math.fsum(terms), 0.0), 1.0)
 
 
@@ -276,7 +274,7 @@ def collapse_bursts(timestamps, max_gap_s: int = 1) -> int:
 	if not ts:
 		return 0
 	units = 1
-	for prev, cur in zip(ts, ts[1:]):
+	for prev, cur in pairwise(ts):
 		if (cur - prev).total_seconds() > max_gap_s:
 			units += 1
 	return units
@@ -379,8 +377,7 @@ def cluster_exceptions(
 				"total": len(rows),
 				"share": share,
 				"note": (
-					f"{count} of {len(rows)} exceptions concentrate in "
-					f"{axis} {value} - sub-rule candidate"
+					f"{count} of {len(rows)} exceptions concentrate in {axis} {value} - sub-rule candidate"
 				),
 			}
 	return best

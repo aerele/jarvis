@@ -1,6 +1,6 @@
 <script setup>
-import CanvasFrame from "./CanvasFrame.vue"
-import { fileExt, previewKind } from "../lib/canvas"
+import CanvasFrame from "./CanvasFrame.vue";
+import { fileExt, previewKind } from "../lib/canvas";
 
 // A message's `canvas` items: attached images, generated images, and agent
 // artifacts (charts, diagrams, PDFs, spreadsheets). The PWA used to ignore this
@@ -13,8 +13,8 @@ import { fileExt, previewKind } from "../lib/canvas"
 const props = defineProps({
 	items: { type: Array, default: () => [] },
 	messageName: { type: String, required: true },
-})
-const emit = defineEmits(["open"])
+});
+const emit = defineEmits(["open"]);
 </script>
 
 <template>
@@ -24,7 +24,16 @@ const emit = defineEmits(["open"])
 			     private file just works. (The native app has to attach headers.) -->
 			<img :src="item.file_url" :alt="item.title || 'Image'" loading="lazy" />
 			<span class="jv-thumb-tag">
-				<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+				<svg
+					viewBox="0 0 24 24"
+					width="11"
+					height="11"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
 					<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
 				</svg>
 				{{ item.title || "Image" }}
@@ -39,7 +48,16 @@ const emit = defineEmits(["open"])
 
 		<button v-else class="jv-artifact" @click="emit('open', item)">
 			<span class="jv-artifact-icon">
-				<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+				<svg
+					viewBox="0 0 24 24"
+					width="17"
+					height="17"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.8"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
 					<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
 					<path d="M14 2v6h6" />
 				</svg>
@@ -48,7 +66,15 @@ const emit = defineEmits(["open"])
 				<span class="jv-artifact-title">{{ item.title || "Attachment" }}</span>
 				<span class="jv-artifact-sub">{{ fileExt(item) }} · open preview</span>
 			</span>
-			<svg class="jv-artifact-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+			<svg
+				class="jv-artifact-chev"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
 				<path d="m9 18 6-6-6-6" />
 			</svg>
 		</button>

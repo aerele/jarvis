@@ -69,7 +69,9 @@
 						target="_blank"
 						rel="noopener"
 						class="shrink-0 text-ink-gray-5 hover:text-ink-gray-8"
-						:aria-label="'Open ' + row.target_doctype + ' ' + row.target_docname + ' in Desk'"
+						:aria-label="
+							'Open ' + row.target_doctype + ' ' + row.target_docname + ' in Desk'
+						"
 						@click.stop
 					>
 						<FeatherIcon name="external-link" class="size-3.5" />
@@ -84,7 +86,12 @@
 			</template>
 
 			<template #cell-action_type="{ row }">
-				<Badge v-if="row.action_type === 'Script'" variant="subtle" theme="blue" label="Script" />
+				<Badge
+					v-if="row.action_type === 'Script'"
+					variant="subtle"
+					theme="blue"
+					label="Script"
+				/>
 				<span
 					v-else-if="row.action_type === 'LLM'"
 					class="inline-flex h-5 select-none items-center whitespace-nowrap rounded-full bg-surface-violet-1 px-1.5 text-xs text-ink-violet-1"
@@ -121,35 +128,35 @@
 // backend ships that field on rows). Realtime: "trigger:activity" frames silently
 // refresh page 1 when the viewer sits unfiltered on it (the MacrosList
 // live-refresh manner); admin stat strip from activity_stats.
-import { ref, computed, watch, inject, onMounted, onBeforeUnmount } from "vue"
-import { Badge, FeatherIcon, Tooltip } from "frappe-ui"
-import ListPage from "@/components/list/ListPage.vue"
-import { useListPage } from "@/composables/useListPage"
-import { timeAgo, exactDate } from "@/utils/datetime"
-import ActivityDetailDialog from "./ActivityDetailDialog.vue"
-import * as apiTriggers from "@/api/triggers"
+import { ref, computed, watch, inject, onMounted, onBeforeUnmount } from "vue";
+import { Badge, FeatherIcon, Tooltip } from "frappe-ui";
+import ListPage from "@/components/list/ListPage.vue";
+import { useListPage } from "@/composables/useListPage";
+import { timeAgo, exactDate } from "@/utils/datetime";
+import ActivityDetailDialog from "./ActivityDetailDialog.vue";
+import * as apiTriggers from "@/api/triggers";
 
 const props = defineProps({
 	caps: { type: Object, default: () => ({}) }, // get_triggers_caps payload
 	initialTrigger: { type: String, default: "" }, // ?trigger= deep link
-})
+});
 
-const socket = inject("$socket", null)
+const socket = inject("$socket", null);
 
 // ── list config ──────────────────────────────────────────────────────────────
-const STATUS_THEME = { Success: "green", Failed: "red", Blocked: "orange", Skipped: "gray" }
+const STATUS_THEME = { Success: "green", Failed: "red", Blocked: "orange", Skipped: "gray" };
 const STATUS_OPTIONS = [
 	{ label: "All statuses", value: "" },
 	{ label: "Success", value: "Success" },
 	{ label: "Failed", value: "Failed" },
 	{ label: "Blocked", value: "Blocked" },
 	{ label: "Skipped", value: "Skipped" },
-]
+];
 const ACTION_OPTIONS = [
 	{ label: "All actions", value: "" },
 	{ label: "Script", value: "Script" },
 	{ label: "LLM", value: "LLM" },
-]
+];
 
 // Event gets 10.5rem so the longest label ("Before Save (blockable)") shows
 // its qualifier instead of clipping.
@@ -161,7 +168,7 @@ const columns = [
 	{ label: "Action", key: "action_type", width: "5rem" },
 	{ label: "Summary", key: "summary", width: 2 },
 	{ label: "When", key: "creation", width: "7rem" },
-]
+];
 
 // search + the text-y filters ride the quick strip (FilterButton only builds
 // select/daterange rows); trigger id is filterable for the ?trigger= deep link.
@@ -170,13 +177,13 @@ const quickFilters = computed(() => [
 	{ key: "status", label: "Status", type: "select", options: STATUS_OPTIONS },
 	{ key: "target_doctype", label: "DocType (exact)", type: "text" },
 	{ key: "trigger", label: "Trigger id", type: "text" },
-])
+]);
 const filterDefs = computed(() => [
 	{ key: "status", label: "Status", type: "select", options: STATUS_OPTIONS },
 	{ key: "action_type", label: "Action", type: "select", options: ACTION_OPTIONS },
 	{ key: "doc_event", label: "Event", type: "select", options: eventOptions.value },
 	{ key: "daterange", label: "Date", type: "daterange" },
-])
+]);
 
 // backend _ACTIVITY_SORTABLE whitelist (unknown fields THROW):
 // creation · status · target_doctype
@@ -184,8 +191,8 @@ const sortOptions = [
 	{ label: "When", value: "creation" },
 	{ label: "Status", value: "status" },
 	{ label: "DocType", value: "target_doctype" },
-]
-const DEFAULT_SORT = { field: "creation", dir: "desc" }
+];
+const DEFAULT_SORT = { field: "creation", dir: "desc" };
 
 const {
 	rows,
@@ -203,58 +210,60 @@ const {
 	refreshKeep,
 } = useListPage({
 	fetchFn: (p) => {
-		const { search: q, ...rest } = p.filters || {}
-		return apiTriggers.listActivityPage({ ...p, search: q || p.search || "", filters: rest })
+		const { search: q, ...rest } = p.filters || {};
+		return apiTriggers.listActivityPage({ ...p, search: q || p.search || "", filters: rest });
 	},
 	defaultSort: DEFAULT_SORT,
 	storageKey: "trigger-activity",
 	initialFilters: props.initialTrigger ? { trigger: props.initialTrigger } : {},
-})
+});
 
 function reload() {
-	resetLoad()
-	loadStats()
+	resetLoad();
+	loadStats();
 }
 
 // ── caps.events → labels ─────────────────────────────────────────────────────
 const eventOptions = computed(() => [
 	{ label: "All events", value: "" },
 	...(props.caps.events || []).map((e) => ({ label: e.label, value: e.value })),
-])
+]);
 function eventLabel(value) {
-	const hit = (props.caps.events || []).find((e) => e.value === value)
-	return (hit && hit.label) || value || "-"
+	const hit = (props.caps.events || []).find((e) => e.value === value);
+	return (hit && hit.label) || value || "-";
 }
 
 // Desk deep link - the ApprovalsBoard refUrl slug recipe
 function deskUrl(row) {
-	const dt = String(row.target_doctype || "").toLowerCase().replace(/ /g, "-")
-	return `/app/${dt}/${encodeURIComponent(row.target_docname || "")}`
+	const dt = String(row.target_doctype || "")
+		.toLowerCase()
+		.replace(/ /g, "-");
+	return `/app/${dt}/${encodeURIComponent(row.target_docname || "")}`;
 }
 
 // ── row detail dialog ────────────────────────────────────────────────────────
-const detailOpen = ref(false)
-const detailRow = ref(null)
+const detailOpen = ref(false);
+const detailRow = ref(null);
 function openRow(row) {
-	detailRow.value = row
-	detailOpen.value = true
+	detailRow.value = row;
+	detailOpen.value = true;
 }
 
 // ── admin stat strip ─────────────────────────────────────────────────────────
-const stats = ref(null)
+const stats = ref(null);
 const statsLine = computed(() => {
 	// activity_stats data: {last_24h: {Success, Failed, Blocked, Skipped},
 	// total_rows} for admins, {} for others (by_status accepted defensively -
 	// the draft contract's name for the same map)
-	const s = stats.value || {}
-	const by = s.last_24h || s.by_status
-	if (!by || !Object.keys(by).length) return ""
-	return `Last 24h: ${by.Success || 0} ok · ${by.Failed || 0} failed`
-})
+	const s = stats.value || {};
+	const by = s.last_24h || s.by_status;
+	if (!by || !Object.keys(by).length) return "";
+	return `Last 24h: ${by.Success || 0} ok · ${by.Failed || 0} failed`;
+});
 async function loadStats() {
-	if (!props.caps.can_manage) return
+	if (!props.caps.can_manage) return;
 	try {
-		stats.value = (await apiTriggers.activityStats()) || null
+		stats.value = (await apiTriggers.activityStats()) || null;
 	} catch (e) {
 		// best-effort strip; the list is the real surface
 	}
@@ -263,10 +272,10 @@ async function loadStats() {
 watch(
 	() => props.caps.can_manage,
 	(v) => {
-		if (v) loadStats()
+		if (v) loadStats();
 	},
 	{ immediate: true }
-)
+);
 
 // ── realtime: new activity rows land silently on an unfiltered page 1 ────────
 // Coalesced: a bulk save fires one trigger:activity frame per doc — the first
@@ -276,23 +285,23 @@ watch(
 // only viewers whose stat strip renders.
 const unfilteredFirstPage = computed(
 	() => !Object.keys(filters).length && rows.value.length <= pageLength.value
-)
-let rtTimer = null
+);
+let rtTimer = null;
 function onEvent(p) {
-	if (!p || p.kind !== "trigger:activity") return
-	if (rtTimer) return
+	if (!p || p.kind !== "trigger:activity") return;
+	if (rtTimer) return;
 	rtTimer = setTimeout(() => {
-		rtTimer = null
-		if (unfilteredFirstPage.value) refreshKeep()
-		if (props.caps.can_manage) loadStats()
-	}, 1500)
+		rtTimer = null;
+		if (unfilteredFirstPage.value) refreshKeep();
+		if (props.caps.can_manage) loadStats();
+	}, 1500);
 }
 
 onMounted(() => {
-	socket && socket.on && socket.on("jarvis:event", onEvent)
-})
+	socket && socket.on && socket.on("jarvis:event", onEvent);
+});
 onBeforeUnmount(() => {
-	socket && socket.off && socket.off("jarvis:event", onEvent)
-	clearTimeout(rtTimer)
-})
+	socket && socket.off && socket.off("jarvis:event", onEvent);
+	clearTimeout(rtTimer);
+});
 </script>

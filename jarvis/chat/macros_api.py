@@ -9,12 +9,13 @@ commit). Execution itself lives in ``jarvis.chat.macros``.
 import re
 
 import frappe
-from jarvis.permissions import require_jarvis_user
 from frappe import _
+
+from jarvis.chat import list_filters
+from jarvis.permissions import require_jarvis_user
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
-MSG = "Jarvis Chat Message"
 
 
 def _parse_steps(steps) -> list[dict]:
@@ -33,13 +34,15 @@ def _parse_steps(steps) -> list[dict]:
 		prompt = (s.get("prompt") or "").strip()
 		if not prompt:
 			continue
-		rows.append({
-			"label": (s.get("label") or "").strip(),
-			"prompt": prompt,
-			"model_override": (s.get("model_override") or "").strip(),
-			"thinking_override": (s.get("thinking_override") or "").strip(),
-			"skills": frappe.as_json(_clean_step_skills(s.get("skills"))),
-		})
+		rows.append(
+			{
+				"label": (s.get("label") or "").strip(),
+				"prompt": prompt,
+				"model_override": (s.get("model_override") or "").strip(),
+				"thinking_override": (s.get("thinking_override") or "").strip(),
+				"skills": frappe.as_json(_clean_step_skills(s.get("skills"))),
+			}
+		)
 	return rows
 
 
@@ -88,9 +91,19 @@ def list_macros() -> list[dict]:
 		MACRO,
 		filters={"owner": frappe.session.user},
 		fields=[
-			"name", "macro_name", "description", "enabled", "stop_on_error",
-			"schedule_enabled", "schedule_frequency", "schedule_time",
-			"next_run_at", "last_run_at", "modified", "merged_prompt", "merge_status",
+			"name",
+			"macro_name",
+			"description",
+			"enabled",
+			"stop_on_error",
+			"schedule_enabled",
+			"schedule_frequency",
+			"schedule_time",
+			"next_run_at",
+			"last_run_at",
+			"modified",
+			"merged_prompt",
+			"merge_status",
 		],
 		order_by="macro_name asc",
 	)
@@ -104,76 +117,34 @@ def list_macros() -> list[dict]:
 # ADDITIVE: list_macros (above) STAYS for the Settings → Macro-runs dropdown.
 # --------------------------------------------------------------------------- #
 _MACROS_SORTABLE = {
-	"macro_name": "macro_name", "modified": "modified",
-	"last_run_at": "last_run_at", "next_run_at": "next_run_at",
+	"macro_name": "macro_name",
+	"modified": "modified",
+	"last_run_at": "last_run_at",
+	"next_run_at": "next_run_at",
 }
 _MACROS_FILTERS = {"enabled", "schedule_enabled", "schedule_frequency"}
 _FREQUENCIES = {"daily", "weekly", "monthly"}
 
 
-def _lk(s: str) -> str:
-	"""Escape LIKE wildcards in user search input (``\\`` is the default escape)."""
-	return (s or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _clamp_page(start, page_length) -> tuple[int, int]:
-	try:
-		start = max(0, int(start or 0))
-	except (TypeError, ValueError):
-		start = 0
-	try:
-		pl = int(page_length or 20)
-	except (TypeError, ValueError):
-		pl = 20
-	return start, max(1, min(pl, 100))
-
-
-def _bool01(v) -> int:
-	try:
-		iv = int(v)
-	except (TypeError, ValueError):
-		frappe.throw(_("Filter value must be 0 or 1."))
-	if iv not in (0, 1):
-		frappe.throw(_("Filter value must be 0 or 1."))
-	return iv
-
-
-def _load_filters(filters, allowed: set) -> dict:
-	if isinstance(filters, str):
-		if filters.strip():
-			try:
-				raw = frappe.parse_json(filters)
-			except Exception:
-				raw = {}
-		else:
-			raw = {}
-	else:
-		raw = filters or {}
-	if not isinstance(raw, dict):
-		raw = {}
-	out: dict = {}
-	for k, v in raw.items():
-		if k not in allowed:
-			frappe.throw(_("Unknown filter: {0}").format(k))
-		if v in (None, ""):
-			continue
-		out[k] = v
-	return out
-
-
-def _order_by(sort_field, sort_dir, sortable: dict, default_field, default_dir, prefix="") -> str:
-	col = sortable.get(sort_field or "")
-	if not col:
-		return f"{prefix}`{sortable[default_field]}` {default_dir}, {prefix}`name` asc"
-	d = "desc" if (sort_dir or "").lower() == "desc" else "asc"
-	return f"{prefix}`{col}` {d}, {prefix}`name` asc"
+# C08-5: ``_lk`` / ``_clamp_page`` / ``_bool01`` / ``_load_filters`` /
+# ``_order_by`` were copied into six list modules and had begun to drift. The
+# canonical implementations now live in ``jarvis.chat.list_filters``. The private
+# names stay bound here because triggers_api / dashboards_api / app_learning_api
+# import them FROM this module and migrate in their own wave.
+_lk = list_filters.escape_like
+_clamp_page = list_filters.clamp_page
+_bool01 = list_filters.bool01
+_load_filters = list_filters.load_legacy_filters
+_order_by = list_filters.order_by
 
 
 @frappe.whitelist()
 @require_jarvis_user
+@list_filters.filter_errors_to_envelope
 def list_macros_page(
 	search: str = "",
 	filters: str | dict | None = None,
+	filters_v2: str | list | None = None,
 	sort_field: str = "",
 	sort_dir: str = "",
 	start: int = 0,
@@ -181,36 +152,43 @@ def list_macros_page(
 ) -> dict:
 	"""Owner-scoped macros, server-side search/filter/sort/paginate (no step
 	bodies; ``merged_prompt`` body omitted — ``has_summary`` replaces it). Envelope
-	``{rows, total, has_more, start, page_length}``."""
+	``{rows, total, has_more, start, page_length}``.
+
+	``filters_v2`` (plan 08 §6.2) is ADDITIVE: the canonical clause list, validated
+	and compiled against this caller's schema by ``jarvis.chat.list_filters``.
+	Legacy ``filters`` keeps working unchanged for the compatibility window. The
+	owner predicate below is a server-authored condition on the query object, so a
+	user clause can only ever narrow it — never widen it (C08-5).
+	"""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
 	f = _load_filters(filters, _MACROS_FILTERS)
 
-	conds = ["owner = %(me)s"]
-	params: dict = {"me": me, "start": start, "page_length": pl}
+	q = list_filters.new_query("macros")
+	q.server_condition("owner = %(me)s", me=me)
 
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(macro_name LIKE %(q)s OR description LIKE %(q)s)")
+		q.server_condition("(macro_name LIKE %(q)s OR description LIKE %(q)s)", q=f"%{_lk(search)}%")
 	if "enabled" in f:
-		params["enabled"] = _bool01(f["enabled"])
-		conds.append("enabled = %(enabled)s")
+		q.server_condition("enabled = %(enabled)s", enabled=_bool01(f["enabled"]))
 	if "schedule_enabled" in f:
-		params["schedule_enabled"] = _bool01(f["schedule_enabled"])
-		conds.append("schedule_enabled = %(schedule_enabled)s")
+		q.server_condition(
+			"schedule_enabled = %(schedule_enabled)s", schedule_enabled=_bool01(f["schedule_enabled"])
+		)
 	if "schedule_frequency" in f:
 		if f["schedule_frequency"] not in _FREQUENCIES:
 			frappe.throw(_("Invalid schedule_frequency filter."))
-		params["schedule_frequency"] = f["schedule_frequency"]
-		conds.append("schedule_frequency = %(schedule_frequency)s")
+		q.server_condition(
+			"schedule_frequency = %(schedule_frequency)s", schedule_frequency=f["schedule_frequency"]
+		)
 
-	where = " AND ".join(conds)
+	q.apply(filters_v2)
+	where = q.where()
+	params = q.params({"start": start, "page_length": pl})
 	order = _order_by(sort_field, sort_dir, _MACROS_SORTABLE, "macro_name", "asc")
 
-	total = frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params
-	)[0][0]
-	rows = frappe.db.sql(
+	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params)[0][0]
+	rows = list_filters.bounded_sql(
 		f"""SELECT name, macro_name, description, enabled, stop_on_error,
 		schedule_enabled, schedule_frequency, schedule_time, next_run_at,
 		last_run_at, modified, merge_status,
@@ -219,7 +197,8 @@ def list_macros_page(
 		WHERE {where}
 		ORDER BY {order}
 		LIMIT %(page_length)s OFFSET %(start)s""",
-		params, as_dict=True,
+		params,
+		as_dict=True,
 	)
 
 	names = [r.name for r in rows]
@@ -228,7 +207,8 @@ def list_macros_page(
 		for x in frappe.db.sql(
 			"""SELECT parent, COUNT(*) n FROM `tabJarvis Macro Step`
 			WHERE parent IN %(names)s GROUP BY parent""",
-			{"names": tuple(names)}, as_dict=True,
+			{"names": tuple(names)},
+			as_dict=True,
 		):
 			step_counts[x.parent] = x.n
 	for r in rows:
@@ -300,17 +280,19 @@ def create_macro(
 ) -> dict:
 	"""Create a macro. Validation (name/steps/caps) runs in the doctype validate().
 	Per-step tagged skills arrive INSIDE each step dict (``steps[].skills``)."""
-	doc = frappe.get_doc({
-		"doctype": MACRO,
-		"macro_name": macro_name,
-		"description": description or "",
-		"enabled": int(enabled or 0),
-		"stop_on_error": int(stop_on_error or 0),
-		"schedule_enabled": int(schedule_enabled or 0),
-		"schedule_frequency": schedule_frequency or "daily",
-		"schedule_time": schedule_time or None,
-		"steps": _parse_steps(steps),
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": MACRO,
+			"macro_name": macro_name,
+			"description": description or "",
+			"enabled": int(enabled or 0),
+			"stop_on_error": int(stop_on_error or 0),
+			"schedule_enabled": int(schedule_enabled or 0),
+			"schedule_frequency": schedule_frequency or "daily",
+			"schedule_time": schedule_time or None,
+			"steps": _parse_steps(steps),
+		}
+	)
 	doc.insert()
 	frappe.db.commit()
 	return {"ok": True, "data": {"name": doc.name, "macro_name": doc.macro_name}}
@@ -407,9 +389,7 @@ def delete_macros_bulk(names: str | list | None = None) -> dict:
 			skipped.append({"name": n, "reason": "not permitted"})
 		except Exception:
 			# Never leak internal exception text to the client — log server-side.
-			frappe.log_error(
-				title="Jarvis: bulk macro delete failed", message=frappe.get_traceback()
-			)
+			frappe.log_error(title="Jarvis: bulk macro delete failed", message=frappe.get_traceback())
 			skipped.append({"name": n, "reason": "error"})
 	frappe.db.commit()
 	return {"deleted": deleted, "skipped": skipped}
@@ -456,7 +436,7 @@ def get_macro_run(run: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Run history dashboard (settings → Macro runs)
 # --------------------------------------------------------------------------- #
-_RUN_STATUSES = {"queued", "running", "completed", "failed", "stopped"}
+_RUN_STATUSES = {"queued", "running", "waiting_capacity", "completed", "failed", "stopped"}
 
 
 @frappe.whitelist()
@@ -481,9 +461,7 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 		conditions.append("r.macro = %(macro)s")
 		params["macro"] = macro
 	where = " AND ".join(conditions)
-	total = frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tabJarvis Macro Run` r WHERE {where}", params
-	)[0][0]
+	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Macro Run` r WHERE {where}", params)[0][0]
 	rows = frappe.db.sql(
 		f"""
 		SELECT r.name, r.macro, COALESCE(m.macro_name, r.macro) AS macro_name,
@@ -513,8 +491,7 @@ def macro_run_stats() -> dict:
 	excluded from the rate (but still counted in ``total``)."""
 	owner = {"owner": frappe.session.user}
 	rows = frappe.db.sql(
-		"SELECT status, COUNT(*) AS n FROM `tabJarvis Macro Run` "
-		"WHERE owner = %(owner)s GROUP BY status",
+		"SELECT status, COUNT(*) AS n FROM `tabJarvis Macro Run` WHERE owner = %(owner)s GROUP BY status",
 		owner,
 		as_dict=True,
 	)
@@ -522,9 +499,9 @@ def macro_run_stats() -> dict:
 	completed = by.get("completed", 0)
 	failed = by.get("failed", 0)
 	finished = completed + failed
-	last = frappe.db.sql(
-		"SELECT MAX(creation) FROM `tabJarvis Macro Run` WHERE owner = %(owner)s", owner
-	)[0][0]
+	last = frappe.db.sql("SELECT MAX(creation) FROM `tabJarvis Macro Run` WHERE owner = %(owner)s", owner)[0][
+		0
+	]
 	return {
 		"total": sum(by.values()),
 		"completed": completed,
@@ -541,8 +518,14 @@ def macro_run_stats() -> dict:
 # Macro merge — summarize a 2+ step sequence into one prompt (spec:
 # docs/superpowers/specs/2026-07-03-macro-merge-design.md). The LLM does the
 # merging via the persona /macro-merge skill in a throwaway archived
-# conversation; these endpoints are the deterministic plumbing around it.
+# conversation; this endpoint kicks it off. The SPA reads the result straight
+# off the Macro doc (merge_status/merged_prompt) once the worker's advance
+# hook applies it — there is no separate poll/apply/discard surface.
 # --------------------------------------------------------------------------- #
+# NOTE: _MERGE_RE has no caller in THIS module — jarvis.chat.macros
+# (_apply_merge_after_turn, off-limits here) lazily imports it to parse the
+# assistant reply's ```jarvis-macro-merge``` block. Keep it even though it
+# looks locally dead.
 _MERGE_RE = re.compile(r"```jarvis-macro-merge[ \t]*\n([\s\S]*?)```")
 
 _MERGE_INSTRUCTION = (
@@ -559,14 +542,6 @@ _MERGE_INSTRUCTION = (
 )
 
 
-def _own_conversation(conversation: str) -> None:
-	owner = frappe.db.get_value("Jarvis Conversation", conversation, "owner")
-	if not owner:
-		frappe.throw(_("Unknown conversation."))
-	if owner != frappe.session.user:
-		frappe.throw(_("Not your conversation."), frappe.PermissionError)
-
-
 @frappe.whitelist()
 @require_jarvis_user
 def summarize_macro(name: str) -> dict:
@@ -578,118 +553,61 @@ def summarize_macro(name: str) -> dict:
 	steps = doc.steps or []
 	if len(steps) < 2:
 		frappe.throw(_("Nothing to merge — the macro has fewer than 2 steps."))
-	conv = frappe.get_doc({
-		"doctype": "Jarvis Conversation",
-		"title": f"Merge: {doc.macro_name}"[:140],
-		"status": "Active",  # enqueue against Active; hidden right after
-	})
+	conv = frappe.get_doc(
+		{
+			"doctype": "Jarvis Conversation",
+			"title": f"Merge: {doc.macro_name}"[:140],
+			"status": "Active",  # enqueue against Active; hidden right after
+		}
+	)
 	conv.flags.ignore_permissions = True
 	conv.insert()
-	payload = [
-		{"n": i + 1, "label": s.label or "", "prompt": s.prompt or ""}
-		for i, s in enumerate(steps)
-	]
+	payload = [{"n": i + 1, "label": s.label or "", "prompt": s.prompt or ""} for i, s in enumerate(steps)]
 	from jarvis.chat import api as chat_api
 
 	prompt = _MERGE_INSTRUCTION + frappe.as_json(payload) + "\n\nApply these skills: /macro-merge"
-	chat_api._enqueue_turn(conv.name, prompt)
+	# Mark the macro "summarizing" BEFORE dispatch: run_macro refuses while pending, and
+	# the worker's advance hook applies the summary when this turn finishes. Dispatch can
+	# complete the turn inline (before _enqueue_turn even returns), so writing "pending"
+	# after dispatch loses the race — the advance hook's lookup misses and silently no-ops.
+	# Writing it first guarantees a completed turn always finds the macro already waiting.
+	frappe.db.set_value(
+		MACRO,
+		name,
+		{
+			"merge_status": "pending",
+			"merge_conversation": conv.name,
+		},
+		update_modified=False,
+	)
+	frappe.db.commit()
+	out = chat_api._enqueue_turn(conv.name, prompt)
+	# CDX-19: the site's turn queue was momentarily full, so the merge turn was NOT dispatched
+	# (its seed was cleaned up). Roll back the "pending" mark set above — there is no summary
+	# turn coming for it to wait on (get_macro_merge would poll pending forever otherwise).
+	# The merge is a one-shot user action (not a chained run), so the honest disposition is a
+	# retryable rejection: tear down the throwaway conversation, clear the mark, and let the
+	# user re-click.
+	if isinstance(out, dict) and out.get("overloaded"):
+		try:
+			frappe.delete_doc("Jarvis Conversation", conv.name, ignore_permissions=True, force=True)
+			frappe.db.set_value(
+				MACRO,
+				name,
+				{
+					"merge_status": "",
+					"merge_conversation": "",
+				},
+				update_modified=False,
+			)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+		return {
+			"ok": False,
+			"reason": out.get("reason") or _("The site is busy — please try again in a moment."),
+		}
 	# Hide from the sidebar (list_conversations skips Archived).
-	frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived",
-						update_modified=False)
-	# Mark the macro "summarizing": run_macro refuses while pending, and the
-	# worker's advance hook applies the summary when this turn finishes — so
-	# the flow completes even if the browser tab is gone.
-	frappe.db.set_value(MACRO, name, {
-		"merge_status": "pending",
-		"merge_conversation": conv.name,
-	}, update_modified=False)
+	frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)
 	frappe.db.commit()
 	return {"ok": True, "conversation": conv.name}
-
-
-@frappe.whitelist()
-@require_jarvis_user
-def get_macro_merge(conversation: str) -> dict:
-	"""Poll target for the merge turn: pending → ready(merge)/error."""
-	_own_conversation(conversation)
-	rows = frappe.get_all(
-		MSG,
-		filters={"conversation": conversation, "role": "assistant"},
-		fields=["content", "streaming", "error"],
-		order_by="seq desc", limit=1,
-	)
-	m = rows[0] if rows else None
-	if m and (m.error or "").strip():
-		return {"status": "error", "error": m.error}
-	if not m or m.streaming or not (m.content or "").strip():
-		return {"status": "pending"}
-	mt = _MERGE_RE.search(m.content)
-	if not mt:
-		return {"status": "error", "error": "no merge block in the reply"}
-	try:
-		merge = frappe.parse_json(mt.group(1).strip())
-	except Exception:
-		merge = None
-	if not isinstance(merge, dict):
-		return {"status": "error", "error": "unparsable merge block"}
-	return {"status": "ready", "merge": {
-		"mergeable": bool(merge.get("mergeable")),
-		"reason": str(merge.get("reason") or ""),
-		"merged_prompt": str(merge.get("merged_prompt") or ""),
-		"dependencies": merge.get("dependencies") if isinstance(merge.get("dependencies"), list) else [],
-	}}
-
-
-@frappe.whitelist()
-@require_jarvis_user
-def apply_macro_merge(name: str, merged_prompt: str, conversation: str = "") -> dict:
-	"""Store ``merged_prompt`` (possibly user-edited) on the macro. The step
-	sequence STAYS as the editable source of truth — but when a merged prompt
-	is set, ``run_macro`` runs IT as a single turn instead of chaining the
-	steps. Cleans up the merge conversation best-effort."""
-	doc = frappe.get_doc(MACRO, name)
-	doc.check_permission("write")
-	merged_prompt = (merged_prompt or "").strip()
-	if not merged_prompt:
-		frappe.throw(_("Merged prompt is empty."))
-	doc.merged_prompt = merged_prompt
-	doc.merge_status = "ready"
-	doc.merge_conversation = ""
-	doc.save()
-	frappe.db.commit()
-	if conversation:
-		try:
-			discard_macro_merge(conversation)
-		except Exception:
-			pass  # best-effort cleanup; the conversation is archived anyway
-	return {"ok": True, "merged": True, "step_count": len(doc.steps or [])}
-
-
-@frappe.whitelist()
-@require_jarvis_user
-def clear_macro_merge(name: str) -> dict:
-	"""Remove the stored merged prompt so the step sequence runs again."""
-	doc = frappe.get_doc(MACRO, name)
-	doc.check_permission("write")
-	doc.merged_prompt = ""
-	doc.merge_status = ""
-	doc.merge_conversation = ""
-	doc.save()
-	frappe.db.commit()
-	return {"ok": True}
-
-
-@frappe.whitelist()
-@require_jarvis_user
-def discard_macro_merge(conversation: str) -> dict:
-	"""Delete the throwaway merge conversation + its messages (Keep sequence /
-	unmergeable / error paths). Best-effort: if a link blocks the delete the
-	conversation stays archived, which is invisible anyway."""
-	_own_conversation(conversation)
-	frappe.db.delete(MSG, {"conversation": conversation})
-	try:
-		frappe.delete_doc("Jarvis Conversation", conversation, force=True, ignore_permissions=True)
-	except Exception:
-		pass
-	frappe.db.commit()
-	return {"ok": True}

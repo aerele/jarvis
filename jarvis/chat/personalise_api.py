@@ -40,14 +40,16 @@ from __future__ import annotations
 import json
 
 import frappe
+from frappe import _
+from frappe.utils import cint, now_datetime
+
+from jarvis import compat
 from jarvis.permissions import (
 	has_jarvis_admin_access,
 	is_skill_reviewer,
 	require_jarvis_admin,
 	require_jarvis_user,
 )
-from frappe import _
-from frappe.utils import cint, now_datetime
 
 QUESTION = "Jarvis Personalise Question"
 RULE = "Jarvis Personalise Question Rule"
@@ -243,12 +245,17 @@ def get_skills_area_caps() -> dict:
 	me = frappe.session.user
 
 	stt_enabled = False
+	# WHY it is off (ok|off|unconfigured|error): only `unconfigured` is an actionable
+	# gap worth showing the user as a faded recorder; the rest stay hidden.
+	stt_state = "error"
 	try:
 		from jarvis.chat import voice
 
 		stt_enabled = bool(voice.stt_config())
+		stt_state = voice.stt_state()
 	except Exception:
 		stt_enabled = False
+		stt_state = "error"
 
 	unanswered_count = frappe.db.count(QUESTION, {"user": me, "status": "Unanswered"})
 	# Any non-Deleted question, any status - the SPA uses this to tell a
@@ -262,6 +269,7 @@ def get_skills_area_caps() -> dict:
 		"analysis": has_jarvis_admin_access(),
 		"review": is_skill_reviewer(),
 		"stt_enabled": stt_enabled,
+		"stt_state": stt_state,
 		"unanswered_count": unanswered_count,
 		"questions_total": questions_total,
 		"personalise_enabled": _single_bool("personalise_enabled", True),
@@ -517,9 +525,10 @@ def _extract_attachment_text(file_name: str | None) -> str:
 		ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
 		if ext in _ATTACHMENT_BINARY_EXT:
 			return ""
-		raw = fdoc.get_content(encodings=[])
-		if isinstance(raw, str):
-			raw = raw.encode("utf-8", "replace")
+		# Raw bytes, on either Frappe major: get_content(encodings=[]) is a
+		# TypeError on Frappe 15, and the except below swallowed it, so every
+		# note attachment silently extracted to empty text.
+		raw = compat.file_bytes(fdoc)
 		if len(raw) > _ATTACHMENT_EXTRACT_MAX_BYTES:
 			return ""
 		# Attachment bytes are just as untrusted as fetched web content, so

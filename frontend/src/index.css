@@ -3,6 +3,22 @@
    win cascade ties against everything declared here. */
 @import "frappe-ui/style.css"; /* = Inter font + @tailwind base/components/utilities */
 
+/* ===== mobile viewport helpers ============================================
+   `h-dvh-safe` is the app-shell height. 100vh first as the fallback, then
+   100dvh (dynamic viewport height) overrides it where supported, so mobile
+   browser chrome and the on-screen keyboard shrink the app instead of pushing
+   the composer off-screen. Kept as a hand-rolled utility (not Tailwind's
+   `h-dvh`) precisely for that layered fallback in one class. */
+.h-dvh-safe {
+	height: 100vh;
+	height: 100dvh;
+}
+/* Bottom safe-area padding for the phone home-indicator, additive to whatever
+   padding the element already carries. */
+.jv-safe-bottom {
+	padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
 /* ===== §2.4 preflight compensations (chat surface) =========================
    Preflight + @tailwindcss/forms restyle bare elements globally; the jv-*
    chat surface predates Tailwind and relies on a handful of UA defaults.
@@ -62,9 +78,40 @@
    `outline: none` does not suppress it. */
 .jv-root :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus,
 .jv-ob-root :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus {
-	outline: revert;
+	outline: none;
 	box-shadow: none;
 	border-color: revert;
+}
+/* App-wide, but ONLY the plugin's class-strategy targets (.form-input /
+   .form-select). Those are used by frappe-ui internals like Autocomplete's search
+   box, which carry NO focus border/shadow of their own, so they leak the blue on
+   every surface. Neutralise just those. This is deliberately NOT extended to bare
+   input/textarea/select app-wide: frappe-ui's own TextInput/Select self-protect
+   (they set focus:border/shadow/ring themselves), and a blanket reset stripped
+   that and left a bare UA-grey border on plain click focus. */
+:root :where(.form-input, .form-select):focus {
+	outline: none;
+	box-shadow: none;
+	border-color: revert;
+}
+/* `outline: revert` used to sit above, which was the wrong tool: revert rolls the
+   property back to the USER-AGENT sheet, and the UA's rule for a focused input is
+   the browser's own blue focus ring. So the line meant to suppress a blue ring was
+   the thing painting one - a blue rectangle drawn tight around the inner input,
+   which inside a bordered wrapper (JvCombo) reads as a box inside a box.
+   Suppressing it outright would cost keyboard users their focus indicator, so the
+   ring is re-drawn here in the app's own accent, and only for :focus-visible, so a
+   mouse click leaves the field clean while Tab still shows where you are. */
+.jv-root
+	:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible,
+.jv-ob-root
+	:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 1px;
+}
+:root :where(.form-input, .form-select):focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 1px;
 }
 
 /* ===== §2.5 theme bridge: dark value overrides =============================
@@ -91,6 +138,25 @@
 	--ink-gray-6: #9a9aa5;
 	--ink-gray-5: #7e7e8a;
 	--ink-gray-4: #6a6a74;
+}
+
+/* App-wide keyboard-focus outline (app-shell sidebar controls: SidebarLink,
+   Sidebar's reset-order/edit-toggle buttons, UserMenu, AppShell's mobile
+   hamburger). Suppresses the browser's default outline on a mouse click,
+   restores it only for :focus-visible (keyboard) navigation, in the app's
+   --focus-ring token instead of the browser's own blue. One definition so
+   every sidebar control shares it instead of a copy-pasted Tailwind
+   arbitrary-value string. */
+.jv-focus-ring {
+	outline: none;
+}
+.jv-focus-ring:focus {
+	outline: none;
+	transition: none;
+}
+.jv-focus-ring:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 2px;
 }
 
 /* "Go to Desk" header button (LayoutHeader, variant=outline): black-inversion

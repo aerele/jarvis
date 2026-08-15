@@ -22,7 +22,18 @@
 					aria-label="Dismiss"
 					@click.stop="dismissToast(t.id)"
 				>
-					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+					<svg
+						width="13"
+						height="13"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
+						<path d="M18 6 6 18M6 6l12 12" />
+					</svg>
 				</button>
 			</div>
 		</TransitionGroup>
@@ -35,14 +46,14 @@
 // title + body + click-through to the event's page. Semantic tokens only, so
 // it tracks light/dark like the rest of the shell. Distinct from ChatView's
 // jv-notes (status feedback) and jv-toast (proactive card inside the chat pane).
-import JarvisMark from "@/components/JarvisMark.vue"
-import { useToasts, dismissToast } from "./globalNotifier"
+import JarvisMark from "@/components/JarvisMark.vue";
+import { useToasts, dismissToast } from "./globalNotifier";
 
-const toasts = useToasts()
+const toasts = useToasts();
 
 function open(t) {
-	if (t.onClick) t.onClick()
-	dismissToast(t.id)
+	if (t.onClick) t.onClick();
+	dismissToast(t.id);
 }
 </script>
 

@@ -72,9 +72,9 @@ def _ensure_user(email: str, roles: tuple = ()) -> str:
 
 def _ensure_role(name: str) -> str:
 	if not frappe.db.exists("Role", name):
-		frappe.get_doc(
-			{"doctype": "Role", "role_name": name, "desk_access": 1, "is_custom": 1}
-		).insert(ignore_permissions=True)
+		frappe.get_doc({"doctype": "Role", "role_name": name, "desk_access": 1, "is_custom": 1}).insert(
+			ignore_permissions=True
+		)
 	return name
 
 
@@ -170,7 +170,11 @@ class _PipelineFixture(FrappeTestCase):
 	def _user_questions(self, user, **filters):
 		f = {"user": user}
 		f.update(filters)
-		return frappe.get_all(QUESTION, filters=f, fields=["name", "origin", "status", "source_pattern", "source_config", "context_md", "question"])
+		return frappe.get_all(
+			QUESTION,
+			filters=f,
+			fields=["name", "origin", "status", "source_pattern", "source_config", "context_md", "question"],
+		)
 
 
 # --------------------------------------------------------------------------- #
@@ -213,14 +217,10 @@ class TestPatternQuestionMaterialization(_PipelineFixture):
 
 	def test_daily_cap_defers_overflow(self):
 		orig_cap = frappe.db.get_single_value(SETTINGS, "personalise_daily_question_cap")
-		frappe.db.set_single_value(
-			SETTINGS, "personalise_daily_question_cap", 2, update_modified=False
-		)
+		frappe.db.set_single_value(SETTINGS, "personalise_daily_question_cap", 2, update_modified=False)
 		try:
 			for i in range(3):
-				jlp = self._jlp(
-					f"Fact number {i} about A.", {"source": "voice", "users": [USER_A]}
-				)
+				jlp = self._jlp(f"Fact number {i} about A.", {"source": "voice", "users": [USER_A]})
 				questions.maybe_materialize_for_pattern(jlp.name)
 			learning = frappe.get_all(
 				QUESTION,
@@ -240,7 +240,8 @@ class TestPatternQuestionMaterialization(_PipelineFixture):
 			detector_id="approval-threshold",
 		)
 		with mock.patch.object(
-			questions, "_users_with_role",
+			questions,
+			"_users_with_role",
 			side_effect=lambda role: [ADMIN_USER] if role == "Jarvis Admin" else [],
 		):
 			questions.maybe_materialize_for_pattern(jlp.name)
@@ -254,12 +255,8 @@ class TestPatternQuestionMaterialization(_PipelineFixture):
 		b = self._jlp("Backstop fact two.", {"source": "voice", "users": [USER_B]})
 		out = questions.materialize_questions_daily()
 		self.assertGreaterEqual(out["created"], 2)
-		self.assertEqual(
-			self._user_questions(USER_A)[0]["source_pattern"], a.name
-		)
-		self.assertEqual(
-			self._user_questions(USER_B)[0]["source_pattern"], b.name
-		)
+		self.assertEqual(self._user_questions(USER_A)[0]["source_pattern"], a.name)
+		self.assertEqual(self._user_questions(USER_B)[0]["source_pattern"], b.name)
 		# Re-running mints nothing new (coarse "no linked question" filter).
 		again = questions.materialize_questions_daily()
 		self.assertEqual(again["created"], 0)
@@ -290,16 +287,12 @@ class TestPatternQuestionMaterialization(_PipelineFixture):
 		# Per-user cap is independent: USER_A is already at cap, USER_B is not, so a
 		# shared pattern asks only USER_B (A's overflow waits for a later run).
 		orig_cap = frappe.db.get_single_value(SETTINGS, "personalise_daily_question_cap")
-		frappe.db.set_single_value(
-			SETTINGS, "personalise_daily_question_cap", 1, update_modified=False
-		)
+		frappe.db.set_single_value(SETTINGS, "personalise_daily_question_cap", 1, update_modified=False)
 		try:
 			filler = self._jlp("Filler fact for A.", {"source": "voice", "users": [USER_A]})
 			questions.maybe_materialize_for_pattern(filler.name)  # USER_A spends their slot
 			self.assertEqual(len(self._user_questions(USER_A)), 1)
-			shared = self._jlp(
-				"Shared fact for A and B.", {"source": "voice", "users": [USER_A, USER_B]}
-			)
+			shared = self._jlp("Shared fact for A and B.", {"source": "voice", "users": [USER_A, USER_B]})
 			out = questions.maybe_materialize_for_pattern(shared.name)
 			self.assertEqual(out["created"], 1)  # only USER_B
 			self.assertEqual(len(self._user_questions(USER_A, source_pattern=shared.name)), 0)
@@ -329,7 +322,8 @@ class TestRuleQuestionMaterialization(_PipelineFixture):
 	def test_org_scope_fans_out_to_jarvis_user_and_sm(self):
 		rule = self._rule(context_md="some context")
 		with mock.patch.object(
-			questions, "_users_with_role",
+			questions,
+			"_users_with_role",
 			side_effect=lambda role: {"Jarvis User": [USER_A], "System Manager": [USER_B]}.get(role, []),
 		):
 			out = questions.materialize_rule_questions(rule.name)
@@ -356,7 +350,8 @@ class TestRuleQuestionMaterialization(_PipelineFixture):
 	def test_role_scope_only_targets_role_holders(self):
 		rule = self._rule(scope="Role", target_role=TEST_ROLE)
 		with mock.patch.object(
-			questions, "_users_with_role",
+			questions,
+			"_users_with_role",
 			side_effect=lambda role: [USER_A] if role == TEST_ROLE else [],
 		):
 			questions.materialize_rule_questions(rule.name)
@@ -416,9 +411,7 @@ class TestScopeAwareWikiUpsert(_PipelineFixture):
 		]
 
 	def test_org_path_unchanged(self):
-		applied, failed = wiki.apply_extracted_page_updates(
-			self._update("- org line"), "voice", USER_A
-		)
+		applied, failed = wiki.apply_extracted_page_updates(self._update("- org line"), "voice", USER_A)
 		self.assertEqual((applied, failed), (1, 0))
 		doc = frappe.get_doc(WIKI, {"slug": "persqp-scope-test"})
 		self.assertEqual(doc.get("scope") or "Org", "Org")
@@ -427,8 +420,11 @@ class TestScopeAwareWikiUpsert(_PipelineFixture):
 
 	def test_user_scope_forks_to_suffixed_personal_page(self):
 		applied, failed = wiki.apply_extracted_page_updates(
-			self._update("- private line"), "voice", USER_A,
-			default_scope="User", target_user=USER_A,
+			self._update("- private line"),
+			"voice",
+			USER_A,
+			default_scope="User",
+			target_user=USER_A,
 		)
 		self.assertEqual((applied, failed), (1, 0))
 		# No Org page was created.
@@ -442,12 +438,18 @@ class TestScopeAwareWikiUpsert(_PipelineFixture):
 
 	def test_user_scope_reingest_merges_same_page(self):
 		wiki.apply_extracted_page_updates(
-			self._update("- first"), "voice", USER_A,
-			default_scope="User", target_user=USER_A,
+			self._update("- first"),
+			"voice",
+			USER_A,
+			default_scope="User",
+			target_user=USER_A,
 		)
 		wiki.apply_extracted_page_updates(
-			self._update("- second"), "voice", USER_A,
-			default_scope="User", target_user=USER_A,
+			self._update("- second"),
+			"voice",
+			USER_A,
+			default_scope="User",
+			target_user=USER_A,
 		)
 		slug = wiki.user_scope_slug("persqp-scope-test", USER_A)
 		pages = frappe.get_all(WIKI, filters={"slug": ["like", "persqp-scope-test%"]}, pluck="name")
@@ -467,9 +469,7 @@ class TestScopeAwareWikiUpsert(_PipelineFixture):
 			wiki.user_scope_slug("persqp-scope-test", USER_A),
 			wiki.user_scope_slug("persqp-scope-test", USER_B),
 		)
-		self.assertEqual(
-			len(frappe.get_all(WIKI, filters={"slug": ["like", "persqp-scope-test%"]})), 2
-		)
+		self.assertEqual(len(frappe.get_all(WIKI, filters={"slug": ["like", "persqp-scope-test%"]})), 2)
 
 
 # --------------------------------------------------------------------------- #
@@ -613,7 +613,8 @@ class TestSingleNoteIngest(_PipelineFixture):
 		self.assertEqual(out["applied"], 1)
 		# personalise:processed receipt fired to the owner with the page listed.
 		receipts = [
-			c.args[1] for c in pub.call_args_list
+			c.args[1]
+			for c in pub.call_args_list
 			if len(c.args) >= 2 and c.args[1].get("kind") == "personalise:processed"
 		]
 		self.assertTrue(receipts)
@@ -651,9 +652,7 @@ class TestSingleNoteIngest(_PipelineFixture):
 			attachment="/private/files/persqp.pdf",
 			extracted_text="Distinctive extracted marker phrase seven.",
 		)
-		with mock.patch(
-			"jarvis.chat.voice.openrouter_complete", return_value="[]"
-		) as m:
+		with mock.patch("jarvis.chat.voice.openrouter_complete", return_value="[]") as m:
 			voice_facts.process_single_note(note)
 		# The extraction prompt (user message) carried the extracted_text.
 		self.assertTrue(m.call_args, "extraction was not called")
@@ -663,9 +662,7 @@ class TestSingleNoteIngest(_PipelineFixture):
 
 	def test_failed_extraction_leaves_note_new(self):
 		note = self._note()
-		with mock.patch(
-			"jarvis.chat.voice.openrouter_complete", side_effect=frappe.ValidationError("down")
-		):
+		with mock.patch("jarvis.chat.voice.openrouter_complete", side_effect=frappe.ValidationError("down")):
 			voice_facts.process_single_note(note)
 		self.assertEqual(frappe.db.get_value(NOTE, note.name, "status"), "New")
 
@@ -738,8 +735,10 @@ class TestCrossSourceMerge(_PipelineFixture):
 			row = frappe._dict(name=f"note-{owner}-{personalise}", creation="2026-07-01 00:00:00")
 			batch = {"owner": owner, "personalise": personalise, "notes": [row]}
 			fact = {
-				"statement": stmt, "domain": self.DOMAIN,
-				"names_party": False, "kind": "context",
+				"statement": stmt,
+				"domain": self.DOMAIN,
+				"names_party": False,
+				"kind": "context",
 			}
 			voice_facts._merge_fact(facts, fact, batch)
 		return list(facts.values())

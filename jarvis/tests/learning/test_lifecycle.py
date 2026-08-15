@@ -57,9 +57,9 @@ def _candidate(pattern_key=KEY, **over):
 class TestLifecycle(FrappeTestCase):
 	def setUp(self):
 		super().setUp()
-		self.run = frappe.get_doc(
-			{"doctype": RUN, "trigger": "manual", "status": "Running"}
-		).insert(ignore_permissions=True)
+		self.run = frappe.get_doc({"doctype": RUN, "trigger": "manual", "status": "Running"}).insert(
+			ignore_permissions=True
+		)
 		frappe.local._jarvis_overlap_index = None
 
 	def tearDown(self):
@@ -101,7 +101,9 @@ class TestLifecycle(FrappeTestCase):
 		lifecycle.upsert_candidate(_candidate(), self.run)
 		name = self._row().name
 		frappe.db.set_value(
-			JLP, name, {"draft_edited": 1, "skill_draft": "- SM edited rule."},
+			JLP,
+			name,
+			{"draft_edited": 1, "skill_draft": "- SM edited rule."},
 			update_modified=False,
 		)
 		lifecycle.upsert_candidate(_candidate(skill_draft="- fresh detector text."), self.run)
@@ -114,7 +116,9 @@ class TestLifecycle(FrappeTestCase):
 		lifecycle.upsert_candidate(_candidate(), self.run)
 		name = self._row().name
 		frappe.db.set_value(
-			JLP, name, {"draft_polished": 1, "skill_draft": "- polished wording."},
+			JLP,
+			name,
+			{"draft_polished": 1, "skill_draft": "- polished wording."},
 			update_modified=False,
 		)
 		out = lifecycle.upsert_candidate(
@@ -133,7 +137,9 @@ class TestLifecycle(FrappeTestCase):
 		lifecycle.upsert_candidate(_candidate(), self.run)
 		name = self._row().name
 		frappe.db.set_value(
-			JLP, name, {"draft_polished": 1, "skill_draft": "- polished wording."},
+			JLP,
+			name,
+			{"draft_polished": 1, "skill_draft": "- polished wording."},
 			update_modified=False,
 		)
 		lifecycle.upsert_candidate(
@@ -153,7 +159,9 @@ class TestLifecycle(FrappeTestCase):
 		lifecycle.upsert_candidate(_candidate(strength_band="High"), self.run)
 		name = self._row().name
 		frappe.db.set_value(
-			JLP, name, {"flag_band_cap": "Low", "strength_band": "Low"},
+			JLP,
+			name,
+			{"flag_band_cap": "Low", "strength_band": "Low"},
 			update_modified=False,
 		)
 		lifecycle.upsert_candidate(_candidate(strength_band="High"), self.run)
@@ -177,9 +185,7 @@ class TestLifecycle(FrappeTestCase):
 	def test_rejected_reappears_on_band_rise(self):
 		lifecycle.upsert_candidate(_candidate(), self.run)
 		self._reject(strength_band="Medium", support_n=40, review_note="not now")
-		out = lifecycle.upsert_candidate(
-			_candidate(strength_band="High", wilson_low=0.95), self.run
-		)
+		out = lifecycle.upsert_candidate(_candidate(strength_band="High", wilson_low=0.95), self.run)
 		self.assertEqual(out, "created")
 		row = self._row()
 		self.assertEqual(row.status, "Proposed")
@@ -189,9 +195,7 @@ class TestLifecycle(FrappeTestCase):
 	def test_rejected_reappears_on_support_growth(self):
 		lifecycle.upsert_candidate(_candidate(), self.run)
 		self._reject(strength_band="Medium", support_n=40)
-		out = lifecycle.upsert_candidate(
-			_candidate(strength_band="Medium", support_n=70), self.run
-		)
+		out = lifecycle.upsert_candidate(_candidate(strength_band="Medium", support_n=70), self.run)
 		self.assertEqual(out, "created")
 		self.assertEqual(self._row().status, "Proposed")
 
@@ -212,7 +216,9 @@ class TestLifecycle(FrappeTestCase):
 		name = self._row().name
 		past = str(add_to_date(now_datetime(), days=-1).date())
 		frappe.db.set_value(
-			JLP, name, {"status": "Snoozed", "snoozed_until": past, "surfaced": 1},
+			JLP,
+			name,
+			{"status": "Snoozed", "snoozed_until": past, "surfaced": 1},
 			update_modified=False,
 		)
 		res = lifecycle.snooze_expiry()
@@ -244,14 +250,16 @@ class TestLifecycle(FrappeTestCase):
 	def test_overlap_warning_set_against_enabled_custom_skill(self):
 		# Low-level insert bypasses the per-owner cap (this dev site is near it).
 		d = frappe.new_doc(SKILL)
-		d.update({
-			"skill_name": OVERLAP_SKILL,
-			"description": "Supplier ThreadCo supplies only non-stock items handling",
-			"instructions": "Body about supplier non-stock items handling.",
-			"enabled": 1,
-			"user_invocable": 0,
-			"managed_by_learning": 0,
-		})
+		d.update(
+			{
+				"skill_name": OVERLAP_SKILL,
+				"description": "Supplier ThreadCo supplies only non-stock items handling",
+				"instructions": "Body about supplier non-stock items handling.",
+				"enabled": 1,
+				"user_invocable": 0,
+				"managed_by_learning": 0,
+			}
+		)
 		d.owner = "Administrator"
 		d.name = "lc-overlap-row"
 		d.flags.name_set = True
@@ -278,19 +286,24 @@ class TestRevalidateActive(FrappeTestCase):
 		# Notification Log.for_user is a Link, so the recipient must exist
 		# (get_users_with_role is mocked; roles are irrelevant here).
 		if not frappe.db.exists("User", cls.SM):
-			u = frappe.get_doc({
-				"doctype": "User", "email": cls.SM,
-				"first_name": "lc-drift-sm", "send_welcome_email": 0, "enabled": 1,
-			})
+			u = frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": cls.SM,
+					"first_name": "lc-drift-sm",
+					"send_welcome_email": 0,
+					"enabled": 1,
+				}
+			)
 			u.flags.ignore_permissions = True
 			u.insert()
 			frappe.db.commit()
 
 	def setUp(self):
 		super().setUp()
-		self.run = frappe.get_doc(
-			{"doctype": RUN, "trigger": "manual", "status": "Running"}
-		).insert(ignore_permissions=True)
+		self.run = frappe.get_doc({"doctype": RUN, "trigger": "manual", "status": "Running"}).insert(
+			ignore_permissions=True
+		)
 		frappe.local._jarvis_overlap_index = None
 
 	def tearDown(self):
@@ -316,9 +329,7 @@ class TestRevalidateActive(FrappeTestCase):
 		return name
 
 	def _reval(self, result):
-		with mock.patch(
-			"jarvis.learning.executor.run_detector", return_value=result
-		) as rd:
+		with mock.patch("jarvis.learning.executor.run_detector", return_value=result) as rd:
 			out = lifecycle.revalidate_active(self.run, patterndb=object())
 		return out, rd
 
@@ -326,8 +337,13 @@ class TestRevalidateActive(FrappeTestCase):
 	def test_matched_candidate_refreshes_stats_in_place(self):
 		self._live(status="Active")
 		fresh = _candidate(
-			support_n=60, n_rows=61, exception_n=1,
-			confidence_pct=97.0, wilson_low=0.91, gap=0.4, strength_band="High",
+			support_n=60,
+			n_rows=61,
+			exception_n=1,
+			confidence_pct=97.0,
+			wilson_low=0.91,
+			gap=0.4,
+			strength_band="High",
 		)
 		out, _rd = self._reval(DetectorResult([fresh], None))
 		row = self._row()
@@ -343,7 +359,9 @@ class TestRevalidateActive(FrappeTestCase):
 	def test_drift_never_touches_an_edited_draft(self):
 		name = self._live(status="Approved")
 		frappe.db.set_value(
-			JLP, name, {"draft_edited": 1, "skill_draft": "- SM edited rule."},
+			JLP,
+			name,
+			{"draft_edited": 1, "skill_draft": "- SM edited rule."},
 			update_modified=False,
 		)
 		fresh = _candidate(support_n=80, skill_draft="- fresh detector text.")
@@ -357,9 +375,7 @@ class TestRevalidateActive(FrappeTestCase):
 	def test_confidence_drop_marks_stale_and_notifies(self):
 		self._live(status="Active")
 		fresh = _candidate(confidence_pct=71.0, wilson_low=0.55, strength_band="Low")
-		with mock.patch(
-			"frappe.utils.user.get_users_with_role", return_value=[self.SM]
-		):
+		with mock.patch("frappe.utils.user.get_users_with_role", return_value=[self.SM]):
 			out, _rd = self._reval(DetectorResult([fresh], None))
 		row = self._row()
 		self.assertEqual(row.status, "Stale")
@@ -368,9 +384,7 @@ class TestRevalidateActive(FrappeTestCase):
 		self.assertAlmostEqual(row.confidence_pct, 71.0, places=1)  # fresh truth kept
 		self.assertTrue(row.last_validated_at)
 		self.assertEqual(out["staled"], 1)
-		subjects = frappe.get_all(
-			"Notification Log", filters={"for_user": self.SM}, pluck="subject"
-		)
+		subjects = frappe.get_all("Notification Log", filters={"for_user": self.SM}, pluck="subject")
 		self.assertTrue(any("stale" in (s or "").lower() for s in subjects))
 
 	def test_undetectable_marks_stale(self):
@@ -395,9 +409,7 @@ class TestRevalidateActive(FrappeTestCase):
 		# 0.80 drift floor (detection gates on confidence + precision, not on
 		# wilson >= 0.80). Re-detecting it with the SAME numbers is not drift:
 		# it must never be staled on a floor stricter than admission.
-		self._live(
-			status="Active", confidence_pct=90.0, wilson_low=0.74, strength_band="Low"
-		)
+		self._live(status="Active", confidence_pct=90.0, wilson_low=0.74, strength_band="Low")
 		fresh = _candidate(confidence_pct=90.0, wilson_low=0.74, strength_band="Low")
 		out, _rd = self._reval(DetectorResult([fresh], None))
 		row = self._row()
@@ -411,9 +423,7 @@ class TestRevalidateActive(FrappeTestCase):
 		# name the actual trigger - never the bogus "dropped 95% -> 95%".
 		self._live(status="Active")  # stored wilson_low 0.85
 		fresh = _candidate(confidence_pct=95.0, wilson_low=0.70, strength_band="Low")
-		with mock.patch(
-			"frappe.utils.user.get_users_with_role", return_value=[self.SM]
-		):
+		with mock.patch("frappe.utils.user.get_users_with_role", return_value=[self.SM]):
 			out, _rd = self._reval(DetectorResult([fresh], None))
 		row = self._row()
 		self.assertEqual(row.status, "Stale")
@@ -426,12 +436,12 @@ class TestRevalidateActive(FrappeTestCase):
 		# clamps to flag_band_cap so a demotion survives re-validation.
 		name = self._live(status="Active")
 		frappe.db.set_value(
-			JLP, name, {"flag_band_cap": "Low", "strength_band": "Low"},
+			JLP,
+			name,
+			{"flag_band_cap": "Low", "strength_band": "Low"},
 			update_modified=False,
 		)
-		fresh = _candidate(
-			support_n=60, confidence_pct=97.0, wilson_low=0.91, strength_band="High"
-		)
+		fresh = _candidate(support_n=60, confidence_pct=97.0, wilson_low=0.91, strength_band="High")
 		out, _rd = self._reval(DetectorResult([fresh], None))
 		row = self._row()
 		self.assertEqual(row.status, "Active")
@@ -470,9 +480,9 @@ class TestRevalidateActiveMined(FrappeTestCase):
 
 	def setUp(self):
 		super().setUp()
-		self.run = frappe.get_doc(
-			{"doctype": RUN, "trigger": "manual", "status": "Running"}
-		).insert(ignore_permissions=True)
+		self.run = frappe.get_doc({"doctype": RUN, "trigger": "manual", "status": "Running"}).insert(
+			ignore_permissions=True
+		)
 		frappe.local._jarvis_overlap_index = None
 
 	def tearDown(self):
@@ -505,11 +515,12 @@ class TestRevalidateActiveMined(FrappeTestCase):
 
 	def _reval_mined(self, mined):
 		"""Run the mined path and prove the checker is never re-run."""
-		with mock.patch(
-			"jarvis.learning.executor.run_detector",
-			side_effect=AssertionError("mined path must not run the checker"),
-		), mock.patch(
-			"frappe.utils.user.get_users_with_role", return_value=[]
+		with (
+			mock.patch(
+				"jarvis.learning.executor.run_detector",
+				side_effect=AssertionError("mined path must not run the checker"),
+			),
+			mock.patch("frappe.utils.user.get_users_with_role", return_value=[]),
 		):
 			return lifecycle.revalidate_active(self.run, mined=mined)
 
@@ -566,7 +577,8 @@ class TestRevalidateActiveMined(FrappeTestCase):
 		# behaviour, so the pattern goes Stale with the divergence reason.
 		self._live(status="Active")
 		fresh = _candidate(
-			confidence_pct=95.0, wilson_low=0.85,
+			confidence_pct=95.0,
+			wilson_low=0.85,
 			evidence={
 				"antecedent": "ThreadCo",
 				"recency": "behavior changed around 2026-04-01",
@@ -584,11 +596,10 @@ class TestRevalidateActiveMined(FrappeTestCase):
 		# the recent behaviour, so the same divergence must not loop the row
 		# back to Stale every night.
 		name = self._live(status="Active")
-		frappe.db.set_value(
-			JLP, name, {"reviewed_at": now_datetime()}, update_modified=False
-		)
+		frappe.db.set_value(JLP, name, {"reviewed_at": now_datetime()}, update_modified=False)
 		fresh = _candidate(
-			confidence_pct=95.0, wilson_low=0.85,
+			confidence_pct=95.0,
+			wilson_low=0.85,
 			evidence={
 				"antecedent": "ThreadCo",
 				"recency": "behavior changed around 2026-04-01",
@@ -620,11 +631,15 @@ class TestRevalidateActiveMined(FrappeTestCase):
 			rows = []
 			for i in range(count):
 				day = frappe.utils.add_days(start, i)
-				rows.append({
-					"unit_id": f"{supplier}-{tag}-{i}", "antecedent": supplier,
-					"consequent": consequent, "day": day,
-					"created": f"{day} 10:00:00",
-				})
+				rows.append(
+					{
+						"unit_id": f"{supplier}-{tag}-{i}",
+						"antecedent": supplier,
+						"consequent": consequent,
+						"day": day,
+						"created": f"{day} 10:00:00",
+					}
+				)
 			return rows
 
 		rows = batch("SupGrand", "OldGST", "2025-01-01", 150, "old")
@@ -677,16 +692,320 @@ class TestSurfacingSortKey(FrappeTestCase):
 	def test_within_class_band_then_support(self):
 		high = {"effective_sensitivity": "B", "strength_band": "High", "support_n": 10}
 		med = {"effective_sensitivity": "B", "strength_band": "Medium", "support_n": 999}
-		self.assertEqual(
-			sorted([med, high], key=lifecycle.surfacing_sort_key), [high, med]
-		)
+		self.assertEqual(sorted([med, high], key=lifecycle.surfacing_sort_key), [high, med])
 		a_small = {"effective_sensitivity": "A", "strength_band": "High", "support_n": 5}
 		a_big = {"effective_sensitivity": "A", "strength_band": "High", "support_n": 50}
-		self.assertEqual(
-			sorted([a_small, a_big], key=lifecycle.surfacing_sort_key), [a_big, a_small]
-		)
+		self.assertEqual(sorted([a_small, a_big], key=lifecycle.surfacing_sort_key), [a_big, a_small])
 
 	def test_c_class_also_counts_as_party(self):
 		c = {"effective_sensitivity": "C", "strength_band": "Low", "support_n": 1}
 		a = {"effective_sensitivity": "A", "strength_band": "High", "support_n": 999}
 		self.assertEqual(sorted([a, c], key=lifecycle.surfacing_sort_key), [c, a])
+
+
+# --------------------------------------------------------------------------- #
+# #482: an approved pattern's reviewed text is frozen
+# --------------------------------------------------------------------------- #
+A_KEY = "_lc-482-key"
+
+# The real wording pair skill_drafts ships for buy-supplier-stockness: the
+# executor swaps to the strict "-only" variant purely on evidence thresholds
+# (n >= 60, zero exceptions), which IMPROVES every drift axis, so no staling
+# check based on statistics can ever intervene.
+TENDENCY_DRAFT = (
+	'- Supplier "ThreadCo" mostly supplies non-stock items: default is_stock_item to 0 '
+	"and flag if a stock item appears. Evidence: 96.6% of 58 Purchase Receipt since 2024-09. "
+	"2 known exceptions (see board)."
+)
+STRICT_DRAFT = (
+	'- Supplier "ThreadCo" supplies only non-stock items: default is_stock_item to 0 '
+	"and flag if any stock item appears. Evidence: 100% of 75 Purchase Receipt since 2024-11."
+)
+TENDENCY_STATEMENT = "Supplier ThreadCo usually supplies non-stock items."
+STRICT_STATEMENT = "Supplier ThreadCo supplies only non-stock items."
+
+
+def _a_class(**over):
+	"""An A-class candidate: only A-class rows are approvable AND compilable."""
+	fields = {
+		"pattern_key": A_KEY,
+		"sensitivity": "A",
+		"effective_sensitivity": "A",
+		"pattern_statement": TENDENCY_STATEMENT,
+		"skill_draft": TENDENCY_DRAFT,
+	}
+	fields.update(over)
+	return _candidate(**fields)
+
+
+class TestApprovedDraftFreeze(FrappeTestCase):
+	"""#482. A reviewer approves a pattern; the next nightly run re-detects the
+	same pattern_key and rewrites ``skill_draft`` in place. Before the fix the
+	compiler read that live field, so the org ran wording nobody reviewed."""
+
+	def setUp(self):
+		super().setUp()
+		self.run = frappe.get_doc({"doctype": RUN, "trigger": "manual", "status": "Running"}).insert(
+			ignore_permissions=True
+		)
+		frappe.local._jarvis_overlap_index = None
+		frappe.local.jarvis_redraft_stale = []
+
+	def tearDown(self):
+		frappe.db.delete(JLP_ROLE, {"parenttype": JLP})
+		frappe.db.delete(JLP, {"pattern_key": ["like", "_lc-%"]})
+		frappe.db.delete(RUN, {"name": self.run.name})
+		frappe.local._jarvis_overlap_index = None
+		frappe.local.jarvis_redraft_stale = []
+		frappe.db.commit()
+		super().tearDown()
+
+	def _row(self):
+		name = frappe.db.exists(JLP, {"pattern_key": A_KEY})
+		return frappe.get_doc(JLP, name) if name else None
+
+	def _propose_and_approve(self, edited=None):
+		"""Mine the pattern, then approve it through the real board endpoint."""
+		from jarvis.chat import learned_api
+
+		lifecycle.upsert_candidate(_a_class(), self.run)
+		name = self._row().name
+		learned_api.approve_learned_pattern(name, edited_skill_draft=edited)
+		return name
+
+	def _compiled_body(self):
+		from jarvis.learning import compiler
+
+		return (compiler.compile_domain_skills().get("buying") or {}).get("body", "")
+
+	# --- the reviewed text is what ships ------------------------------------ #
+	def test_plain_approve_then_redetection_still_compiles_the_approved_text(self):
+		# A plain "looks good" approve leaves draft_edited=0, which is exactly
+		# the row whose skill_draft the nightly refresh overwrites.
+		name = self._propose_and_approve()
+		self.assertEqual(self._row().draft_edited, 0)
+		self.assertEqual(self._row().approved_draft, TENDENCY_DRAFT)
+
+		# Re-detection restates the SAME rule with fresher measurements, and a
+		# pattern_statement that moved with them.
+		refreshed = TENDENCY_DRAFT.replace("96.6% of 58", "97.4% of 77")
+		lifecycle.upsert_candidate(
+			_a_class(
+				skill_draft=refreshed,
+				pattern_statement="Supplier ThreadCo usually supplies non-stock items (77 receipts).",
+				support_n=77,
+			),
+			self.run,
+		)
+
+		row = self._row()
+		self.assertEqual(row.status, "Approved", "an evidence refresh must not move the row")
+		self.assertEqual(row.skill_draft, refreshed, "the live draft still tracks what is detected")
+		self.assertEqual(row.approved_draft, TENDENCY_DRAFT, "the reviewed text must not move")
+
+		from jarvis.learning import compiler
+
+		bullet = compiler.preview_bullet(name)
+		self.assertIn("96.6% of 58", bullet)
+		self.assertNotIn("97.4% of 77", bullet)
+		body = self._compiled_body()
+		self.assertIn("96.6% of 58", body)
+		self.assertNotIn("97.4% of 77", body)
+
+	def test_unsnapshotted_row_falls_back_to_the_live_draft(self):
+		# Rows approved before #482 shipped (and before the backfill patch ran)
+		# must still compile - the compiler falls back to skill_draft.
+		name = self._propose_and_approve()
+		frappe.db.set_value(JLP, name, {"approved_draft": ""}, update_modified=False)
+		from jarvis.learning import compiler
+
+		self.assertIn("96.6% of 58", compiler.preview_bullet(name))
+
+	# --- the materially-changed case ---------------------------------------- #
+	def test_material_rule_change_stales_the_row_naming_both_wordings(self):
+		# The airtight case: "mostly supplies" -> "supplies only" while every
+		# statistical drift axis improves. The approved text is not rewritten
+		# AND the new wording is not shipped: the row goes back to the board.
+		name = self._propose_and_approve()
+		out = lifecycle.upsert_candidate(
+			_a_class(
+				skill_draft=STRICT_DRAFT,
+				pattern_statement=STRICT_STATEMENT,
+				support_n=75,
+				exception_n=0,
+				confidence_pct=100.0,
+				wilson_low=0.95,
+			),
+			self.run,
+		)
+		self.assertEqual(out, "updated")
+
+		row = self._row()
+		self.assertEqual(row.status, "Stale")
+		self.assertEqual(row.approved_draft, TENDENCY_DRAFT)
+		self.assertTrue(row.stale_reason.startswith(lifecycle.REDRAFT_STALE_PREFIX))
+		self.assertIn("mostly supplies non-stock items", row.stale_reason)
+		self.assertIn("supplies only non-stock items", row.stale_reason)
+		self.assertNotIn("Evidence:", row.stale_reason, "the reason compares rules, not numbers")
+
+		# Stale drops out of the compile: neither wording ships unreviewed.
+		body = self._compiled_body()
+		self.assertNotIn("ThreadCo", body)
+		self.assertNotIn(name, body)
+
+	def test_active_row_is_staled_too(self):
+		# An Active row is already IN the pushed body, so it must go back to the
+		# board (and out of the next Apply) rather than be silently reworded.
+		name = self._propose_and_approve()
+		frappe.db.set_value(JLP, name, {"status": "Active"}, update_modified=False)
+		lifecycle.upsert_candidate(
+			_a_class(skill_draft=STRICT_DRAFT, pattern_statement=STRICT_STATEMENT), self.run
+		)
+		row = self._row()
+		self.assertEqual(row.status, "Stale")
+		self.assertEqual(row.approved_draft, TENDENCY_DRAFT)
+
+	def test_evidence_only_change_never_stales(self):
+		# The numbers move on EVERY run; only the rule sentence decides.
+		self._propose_and_approve()
+		lifecycle.upsert_candidate(
+			_a_class(
+				skill_draft=TENDENCY_DRAFT.replace("96.6% of 58", "95.1% of 61"),
+				support_n=61,
+			),
+			self.run,
+		)
+		row = self._row()
+		self.assertEqual(row.status, "Approved")
+		self.assertFalse(row.stale_reason)
+
+	def test_sm_edited_approval_is_never_redraft_staled(self):
+		# An SM-edited draft is already frozen against the refresh and is not a
+		# template render, so comparing it to one would stale it every night.
+		name = self._propose_and_approve(edited="- ThreadCo: never default a stock item on this supplier.")
+		self.assertEqual(frappe.db.get_value(JLP, name, "draft_edited"), 1)
+		lifecycle.upsert_candidate(
+			_a_class(skill_draft=STRICT_DRAFT, pattern_statement=STRICT_STATEMENT), self.run
+		)
+		row = self._row()
+		self.assertEqual(row.status, "Approved")
+		self.assertEqual(row.approved_draft, "- ThreadCo: never default a stock item on this supplier.")
+
+	def test_polished_approval_is_never_redraft_staled(self):
+		name = self._propose_and_approve()
+		frappe.db.set_value(JLP, name, {"draft_polished": 1}, update_modified=False)
+		lifecycle.upsert_candidate(
+			_a_class(skill_draft=STRICT_DRAFT, pattern_statement=STRICT_STATEMENT), self.run
+		)
+		self.assertEqual(self._row().status, "Approved")
+
+	def test_proposed_row_is_never_redraft_staled(self):
+		# Nothing was approved yet: the refresh is the whole point of the board.
+		lifecycle.upsert_candidate(_a_class(), self.run)
+		lifecycle.upsert_candidate(
+			_a_class(skill_draft=STRICT_DRAFT, pattern_statement=STRICT_STATEMENT), self.run
+		)
+		row = self._row()
+		self.assertEqual(row.status, "Proposed")
+		self.assertEqual(row.skill_draft, STRICT_DRAFT)
+
+	def test_re_approving_accepts_the_new_wording_and_clears_the_reason(self):
+		# The staled row must be actionable, not a dead end: Stale -> Approved is
+		# a legal transition and re-approval re-freezes the CURRENT text.
+		from jarvis.chat import learned_api
+
+		name = self._propose_and_approve()
+		lifecycle.upsert_candidate(
+			_a_class(skill_draft=STRICT_DRAFT, pattern_statement=STRICT_STATEMENT), self.run
+		)
+		learned_api.approve_learned_pattern(name)
+		row = self._row()
+		self.assertEqual(row.status, "Approved")
+		self.assertEqual(row.approved_draft, STRICT_DRAFT)
+		self.assertFalse(row.stale_reason)
+
+	def test_unapprove_clears_the_snapshot(self):
+		from jarvis.chat import learned_api
+
+		name = self._propose_and_approve()
+		learned_api.unapprove_learned_pattern(name)
+		row = self._row()
+		self.assertEqual(row.status, "Proposed")
+		self.assertFalse(row.approved_draft)
+
+	# --- one notification per run ------------------------------------------- #
+	def test_redraft_stales_ride_the_single_summary_notification(self):
+		self._propose_and_approve()
+		lifecycle.upsert_candidate(
+			_a_class(skill_draft=STRICT_DRAFT, pattern_statement=STRICT_STATEMENT), self.run
+		)
+		with mock.patch("jarvis.learning.lifecycle._notify_stale") as notify:
+			out = lifecycle.revalidate_active(self.run, mined={})
+		self.assertEqual(notify.call_count, 1)
+		lines = notify.call_args[0][0]
+		self.assertEqual(len(lines), 1)
+		self.assertIn(lifecycle.REDRAFT_STALE_PREFIX, lines[0])
+		self.assertGreaterEqual(out["staled"], 1)
+
+	# --- the rule/evidence split -------------------------------------------- #
+	def test_rule_sentence_strips_the_bullet_marker_and_evidence_tail(self):
+		self.assertEqual(
+			lifecycle.rule_sentence("- Do the thing. Evidence: 96% of 10 Sales Invoice since 2024-01."),
+			"Do the thing.",
+		)
+		self.assertEqual(lifecycle.rule_sentence("  - Do   the thing.  "), "Do the thing.")
+		self.assertEqual(lifecycle.rule_sentence(None), "")
+
+
+class TestApprovedDraftBackfill(FrappeTestCase):
+	"""The v2_12 patch freezes the reviewed text of rows approved before the
+	snapshot field existed. Patches can rerun, so it must be idempotent."""
+
+	KEYS = ("_lc-bf-approved", "_lc-bf-active", "_lc-bf-proposed")
+
+	def setUp(self):
+		super().setUp()
+		self.run = frappe.get_doc({"doctype": RUN, "trigger": "manual", "status": "Running"}).insert(
+			ignore_permissions=True
+		)
+		frappe.local._jarvis_overlap_index = None
+
+	def tearDown(self):
+		frappe.db.delete(JLP_ROLE, {"parenttype": JLP})
+		frappe.db.delete(JLP, {"pattern_key": ["like", "_lc-%"]})
+		frappe.db.delete(RUN, {"name": self.run.name})
+		frappe.local._jarvis_overlap_index = None
+		frappe.db.commit()
+		super().tearDown()
+
+	def _legacy_row(self, key, status, draft):
+		lifecycle.upsert_candidate(_candidate(pattern_key=key, skill_draft=draft), self.run)
+		name = frappe.db.exists(JLP, {"pattern_key": key})
+		frappe.db.set_value(JLP, name, {"status": status, "approved_draft": None}, update_modified=False)
+		return name
+
+	def test_backfill_freezes_approved_rows_only_and_is_idempotent(self):
+		from jarvis.patches.v2_12_backfill_approved_draft import execute as backfill
+
+		approved = self._legacy_row(self.KEYS[0], "Approved", "- approved rule. Evidence: 90% of 10 x.")
+		active = self._legacy_row(self.KEYS[1], "Active", "- active rule. Evidence: 91% of 11 x.")
+		proposed = self._legacy_row(self.KEYS[2], "Proposed", "- proposed rule. Evidence: 92% of 12 x.")
+
+		backfill()
+		self.assertEqual(
+			frappe.db.get_value(JLP, approved, "approved_draft"), "- approved rule. Evidence: 90% of 10 x."
+		)
+		self.assertEqual(
+			frappe.db.get_value(JLP, active, "approved_draft"), "- active rule. Evidence: 91% of 11 x."
+		)
+		self.assertFalse(
+			frappe.db.get_value(JLP, proposed, "approved_draft"),
+			"an un-reviewed row has nothing to freeze",
+		)
+
+		# Re-run after the live draft moved on: the frozen text must not follow.
+		frappe.db.set_value(JLP, approved, {"skill_draft": "- REWRITTEN."}, update_modified=False)
+		backfill()
+		self.assertEqual(
+			frappe.db.get_value(JLP, approved, "approved_draft"), "- approved rule. Evidence: 90% of 10 x."
+		)

@@ -3,162 +3,287 @@
 // and pipe tables (rendered into the imported design's table look via the
 // .jv-md classes in ChatView's styles).
 function esc(s) {
-	return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]))
+	return String(s).replace(
+		/[&<>"]/g,
+		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
+	);
+}
+
+// A site-relative Desk path the agent cites after creating/locating a record,
+// e.g. "/app/dashboard-view/Customer-Item Manufacturing Priority". Worth a
+// clickable link either way it shows up: alone inside a code span (the agent's
+// usual way of citing one) or as bare text. Docnames routinely contain spaces,
+// so the href percent-encodes them while the visible text stays exactly what
+// the agent wrote.
+const APP_PATH_RE = /^\/app\/\S[^\n]*$/;
+
+function appPathHref(path) {
+	return path.replace(/ /g, "%20");
+}
+
+function appPathLink(path) {
+	return `<a href="${esc(
+		appPathHref(path)
+	)}" target="_blank" rel="noopener" class="jv-md-link">${esc(path)}</a>`;
 }
 
 function inline(s) {
-	let t = esc(s)
-	t = t.replace(/`([^`]+)`/g, '<code class="jv-md-code">$1</code>')
-	t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>")
-	t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-	t = t.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
-	t = t.replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" class="jv-md-link">$1</a>')
-	return t
+	// Stash inline code spans behind a NUL sentinel FIRST, so none of the transforms
+	// below touch content meant to render verbatim: the <br> re-permit, and also
+	// **bold**/*em*/~~del~~/links (which previously leaked into code-span text, e.g.
+	// `a*b*c` rendered a stray <em>). Restored last, HTML-escaped. NUL never occurs in
+	// agent/user text, so it can't collide with real content.
+	const codes = [];
+	// Bare (non-code) "/app/..." paths get the same sentinel treatment, so bold/em/
+	// link transforms below can't mangle a slash-heavy path. Only triggers after
+	// start-of-string/whitespace/an opening bracket or quote, so a path segment
+	// inside a full external URL ("https://x.com/app/foo") is never mistaken for a
+	// site-relative one. Bare text has no delimiter marking where a (possibly
+	// space-containing) path ends, so it stops at the first whitespace and trims
+	// trailing sentence punctuation; a docname with embedded spaces still comes
+	// through correctly when the agent wraps it in backticks, as in the bug's own
+	// evidence. The match also excludes ]/[/( so it can't run past the end of
+	// enclosing markdown link syntax ("[/app/foo](https://...)") and swallow the
+	// whole thing as one "path" — the restore pass below separately guards against
+	// nesting a second <a> inside a link built around that syntax.
+	const appLinks = [];
+	let t = String(s)
+		// Strip NUL first so attacker-supplied input can't collide with the sentinel below.
+		.replace(/\u0000/g, "")
+		.replace(/`([^`]+)`/g, (_m, c) => {
+			codes.push(c);
+			return `\u0000C${codes.length - 1}\u0000`;
+		})
+		.replace(/(^|[\s([{"'])(\/app\/[^\s<>"')\]\[(\u0000]+)/g, (_m, pre, rawPath) => {
+			let path = rawPath;
+			let trail = "";
+			while (path.length > "/app/".length && /[.,;:!?)\]}'"]/.test(path[path.length - 1])) {
+				trail = path[path.length - 1] + trail;
+				path = path.slice(0, -1);
+			}
+			appLinks.push(path);
+			return pre + `\u0000A${appLinks.length - 1}\u0000` + trail;
+		});
+	t = esc(t);
+	// esc() escaped ALL html (XSS-safe for LLM output). Re-permit ONLY a bare,
+	// attribute-less <br> (also <br/> and <br />): it's the standard way to line-break
+	// inside a GFM table cell, which agents rely on, and it's inert — no attributes
+	// means no script/handler/URL surface. The attribute form (&lt;br onload=...&gt;)
+	// deliberately stays escaped, so the safe posture holds.
+	t = t.replace(/&lt;br\s*\/?&gt;/gi, "<br>");
+	t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+	t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+	t = t.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
+	t = t.replace(
+		/\[([^\]]+)\]\((https?:[^)]+)\)/g,
+		'<a href="$2" target="_blank" rel="noopener" class="jv-md-link">$1</a>'
+	);
+	// Restore both sentinel kinds in ONE pass that tracks whether we're already
+	// inside an <a> the http(s) link transform above just built (e.g. an agent
+	// citing "[/app/foo](https://docs...)" or "[`/app/foo`](https://docs...)" -
+	// the /app/ path IS that link's own text). Wrapping it in a SECOND <a> there
+	// would nest anchors, which a browser resolves by silently closing the outer
+	// one - the external link goes dead and only the inner path stays clickable.
+	// So inside an anchor a sentinel restores to its inert form (plain text /
+	// <code>) same as it always did pre-linkification; only outside one does it
+	// become its own link. Mirrors the inAnchor walk ChatView's linkifyDocs()
+	// already uses for the same reason.
+	let inAnchor = 0;
+	t = t.replace(
+		/(<a\b[^>]*>)|(<\/a>)|(?:\u0000A(\d+)\u0000)|(?:\u0000C(\d+)\u0000)/g,
+		(_m, aOpen, aClose, appIdx, codeIdx) => {
+			if (aOpen) {
+				inAnchor++;
+				return aOpen;
+			}
+			if (aClose) {
+				inAnchor = Math.max(0, inAnchor - 1);
+				return aClose;
+			}
+			if (appIdx !== undefined) {
+				const path = appLinks[Number(appIdx)];
+				return inAnchor ? esc(path) : appPathLink(path);
+			}
+			// Restore code spans, escaping their raw content so it renders verbatim
+			// (a <br>, **bold**, etc. inside backticks shows as literal text, not
+			// markup). A code span whose ENTIRE content is a site-relative
+			// "/app/..." path becomes a link instead - that's the agent's usual way
+			// of citing where it put something, and a plain grey code box reads as
+			// inert text, which is exactly the bug (the user missed a link and
+			// re-asked for the dashboard). Anything else inside backticks stays a
+			// literal code span; arbitrary code is never auto-linked.
+			const raw = codes[Number(codeIdx)];
+			const trimmed = raw.trim();
+			return !inAnchor && APP_PATH_RE.test(trimmed)
+				? appPathLink(trimmed)
+				: `<code class="jv-md-code">${esc(raw)}</code>`;
+		}
+	);
+	return t;
 }
 
 function renderTable(rows) {
-	const cells = (r) => r.replace(/^\||\|$/g, "").split("|").map((c) => c.trim())
-	const head = cells(rows[0])
-	const aligns = cells(rows[1]).map((s) => (/^:-+:$/.test(s) ? "center" : /-+:$/.test(s) ? "right" : "left"))
-	const body = rows.slice(2).map(cells)
-	let h = '<div class="jv-md-tablewrap"><table class="jv-md-table"><thead><tr>'
-	head.forEach((c, i) => (h += `<th style="text-align:${aligns[i] || "left"}">${inline(c)}</th>`))
-	h += "</tr></thead><tbody>"
+	const cells = (r) =>
+		r
+			.replace(/^\||\|$/g, "")
+			.split("|")
+			.map((c) => c.trim());
+	const head = cells(rows[0]);
+	const aligns = cells(rows[1]).map((s) =>
+		/^:-+:$/.test(s) ? "center" : /-+:$/.test(s) ? "right" : "left"
+	);
+	const body = rows.slice(2).map(cells);
+	let h = '<div class="jv-md-tablewrap"><table class="jv-md-table"><thead><tr>';
+	head.forEach(
+		(c, i) => (h += `<th style="text-align:${aligns[i] || "left"}">${inline(c)}</th>`)
+	);
+	h += "</tr></thead><tbody>";
 	body.forEach((r) => {
-		h += "<tr>"
-		r.forEach((c, i) => (h += `<td style="text-align:${aligns[i] || "left"}">${inline(c)}</td>`))
-		h += "</tr>"
-	})
-	return h + "</tbody></table></div>"
+		h += "<tr>";
+		r.forEach(
+			(c, i) => (h += `<td style="text-align:${aligns[i] || "left"}">${inline(c)}</td>`)
+		);
+		h += "</tr>";
+	});
+	return h + "</tbody></table></div>";
 }
 
 // Build (possibly nested) list HTML from a run of list-item lines, nesting by
 // leading-space indent. A deeper indent nests inside the current item; a mixed
 // bullet/number type at the same indent starts a fresh sibling list.
 function renderListBlock(items) {
-	let html = ""
-	const stack = [] // [{ indent, tag }], innermost last
+	let html = "";
+	const stack = []; // [{ indent, tag }], innermost last
 	for (const it of items) {
 		while (stack.length && it.indent < stack[stack.length - 1].indent) {
-			html += `</li></${stack.pop().tag}>`
+			html += `</li></${stack.pop().tag}>`;
 		}
-		const top = stack[stack.length - 1]
+		const top = stack[stack.length - 1];
 		if (top && it.indent === top.indent) {
 			if (top.tag !== it.tag) {
-				html += `</li></${stack.pop().tag}>`
-				html += `<${it.tag} class="jv-md-list"><li>`
-				stack.push({ indent: it.indent, tag: it.tag })
+				html += `</li></${stack.pop().tag}>`;
+				html += `<${it.tag} class="jv-md-list"><li>`;
+				stack.push({ indent: it.indent, tag: it.tag });
 			} else {
-				html += "</li><li>"
+				html += "</li><li>";
 			}
 		} else {
-			html += `<${it.tag} class="jv-md-list"><li>`
-			stack.push({ indent: it.indent, tag: it.tag })
+			html += `<${it.tag} class="jv-md-list"><li>`;
+			stack.push({ indent: it.indent, tag: it.tag });
 		}
-		html += inline(it.text)
+		html += inline(it.text);
 	}
-	while (stack.length) html += `</li></${stack.pop().tag}>`
-	return html
+	while (stack.length) html += `</li></${stack.pop().tag}>`;
+	return html;
 }
 
 export function renderMarkdown(src) {
-	if (!src) return ""
-	const lines = String(src).replace(/\r\n/g, "\n").split("\n")
-	const out = []
-	let i = 0
-	let para = []
+	if (!src) return "";
+	const lines = String(src).replace(/\r\n/g, "\n").split("\n");
+	const out = [];
+	let i = 0;
+	let para = [];
 	const flushPara = () => {
 		if (para.length) {
-			out.push(`<p class="jv-md-p">${inline(para.join(" "))}</p>`)
-			para = []
+			out.push(`<p class="jv-md-p">${inline(para.join(" "))}</p>`);
+			para = [];
 		}
-	}
+	};
 	while (i < lines.length) {
-		const line = lines[i]
+		const line = lines[i];
 		// fenced code block: ``` or ```lang - mermaid renders as a diagram,
 		// everything else as a styled code block.
-		const fence = line.match(/^\s*```\s*([\w-]*)\s*$/)
+		const fence = line.match(/^\s*```\s*([\w-]*)\s*$/);
 		if (fence) {
-			flushPara()
-			const lang = (fence[1] || "").toLowerCase()
-			const body = []
-			i++
-			while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i++])
-			i++ // consume closing fence
-			const code = body.join("\n")
+			flushPara();
+			const lang = (fence[1] || "").toLowerCase();
+			const body = [];
+			i++;
+			while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i++]);
+			i++; // consume closing fence
+			const code = body.join("\n");
 			if (lang === "mermaid") {
-				out.push(`<div class="jv-mermaid">${esc(code)}</div>`)
+				out.push(`<div class="jv-mermaid">${esc(code)}</div>`);
 			} else {
-				out.push(`<pre class="jv-md-pre"><code>${esc(code)}</code></pre>`)
+				out.push(`<pre class="jv-md-pre"><code>${esc(code)}</code></pre>`);
 			}
-			continue
+			continue;
 		}
 		// table: a header row followed by a |---| separator
-		if (/\|/.test(line) && i + 1 < lines.length && /^\s*\|?[\s:-]+\|[\s:|-]*$/.test(lines[i + 1])) {
-			flushPara()
-			const tbl = [line, lines[i + 1]]
-			i += 2
-			while (i < lines.length && /\|/.test(lines[i]) && lines[i].trim()) tbl.push(lines[i++])
-			out.push(renderTable(tbl))
-			continue
+		if (
+			/\|/.test(line) &&
+			i + 1 < lines.length &&
+			/^\s*\|?[\s:-]+\|[\s:|-]*$/.test(lines[i + 1])
+		) {
+			flushPara();
+			const tbl = [line, lines[i + 1]];
+			i += 2;
+			while (i < lines.length && /\|/.test(lines[i]) && lines[i].trim())
+				tbl.push(lines[i++]);
+			out.push(renderTable(tbl));
+			continue;
 		}
 		// ATX headings (#-####): wiki page bodies lead with them, and a
 		// knowledge base that shows raw hashes reads as broken.
-		const heading = line.match(/^\s*(#{1,4})\s+(.*)/)
+		const heading = line.match(/^\s*(#{1,4})\s+(.*)/);
 		if (heading) {
-			flushPara()
-			const level = Math.min(heading[1].length + 2, 6)
-			out.push(`<h${level} class="jv-md-h">${inline(heading[2])}</h${level}>`)
-			i++
-			continue
+			flushPara();
+			const level = Math.min(heading[1].length + 2, 6);
+			out.push(`<h${level} class="jv-md-h">${inline(heading[2])}</h${level}>`);
+			i++;
+			continue;
 		}
 		// blockquote: one or more consecutive `>` lines.
 		if (/^\s*>\s?/.test(line)) {
-			flushPara()
-			const q = []
+			flushPara();
+			const q = [];
 			while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
-				q.push(lines[i].replace(/^\s*>\s?/, ""))
-				i++
+				q.push(lines[i].replace(/^\s*>\s?/, ""));
+				i++;
 			}
-			out.push(`<blockquote class="jv-md-quote">${inline(q.join(" "))}</blockquote>`)
-			continue
+			out.push(`<blockquote class="jv-md-quote">${inline(q.join(" "))}</blockquote>`);
+			continue;
 		}
 		// bullet / numbered lists, indent-nested.
 		if (/^(\s*)([-*]|\d+\.)\s+/.test(line)) {
-			flushPara()
-			const items = []
+			flushPara();
+			const items = [];
 			while (i < lines.length) {
-				const m = lines[i].match(/^(\s*)([-*]|\d+\.)\s+(.*)/)
+				const m = lines[i].match(/^(\s*)([-*]|\d+\.)\s+(.*)/);
 				if (m) {
-					items.push({ indent: m[1].length, tag: /\d/.test(m[2]) ? "ol" : "ul", text: m[3] })
-					i++
-					continue
+					items.push({
+						indent: m[1].length,
+						tag: /\d/.test(m[2]) ? "ol" : "ul",
+						text: m[3],
+					});
+					i++;
+					continue;
 				}
 				// A blank line inside a list (a "loose" list, common in agent
 				// output) does NOT end it: keep the same list only if another
 				// list item follows. A real paragraph after the blank ends it,
 				// so "1. a\n\n2. b" is ONE <ol> (1, 2), not two that both show 1.
 				if (!lines[i].trim()) {
-					let j = i + 1
-					while (j < lines.length && !lines[j].trim()) j++
+					let j = i + 1;
+					while (j < lines.length && !lines[j].trim()) j++;
 					if (j < lines.length && /^(\s*)([-*]|\d+\.)\s+/.test(lines[j])) {
-						i = j
-						continue
+						i = j;
+						continue;
 					}
 				}
-				break
+				break;
 			}
-			out.push(renderListBlock(items))
-			continue
+			out.push(renderListBlock(items));
+			continue;
 		}
 		if (!line.trim()) {
-			flushPara()
-			i++
-			continue
+			flushPara();
+			i++;
+			continue;
 		}
-		para.push(line.trim())
-		i++
+		para.push(line.trim());
+		i++;
 	}
-	flushPara()
-	return out.join("\n")
+	flushPara();
+	return out.join("\n");
 }

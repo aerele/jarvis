@@ -19,7 +19,7 @@ on:
     - cron: "0 2 * * *"        # 02:00 UTC nightly — picks up version-16 drift within a day
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [develop]
     paths:
       - ".github/docker/Dockerfile.ci-base"
       - ".github/workflows/ci-base-image.yml"
@@ -31,7 +31,7 @@ on:
 concurrency:
   # Keyed on ref so a PR build never cancels the nightly publish. Only PR builds are cancellable:
   # a cancelled run reads as neutral rather than failed, so cancelling a publish would silently
-  # leave `:v16` stale with nothing marked red — the same reasoning ci.yml uses to protect main.
+  # leave `:v16` stale with nothing marked red — the same reasoning ci.yml uses to protect develop.
   group: ci-base-image-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 

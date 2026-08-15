@@ -72,9 +72,7 @@ def _custom_doctypes(modules: dict[str, str]) -> list[dict]:
 	if modules:
 		filter_sets.append({"module": ("in", list(modules))})
 	for filters in filter_sets:
-		for row in frappe.get_all(
-			"DocType", filters=filters, fields=fields, limit_page_length=0
-		):
+		for row in frappe.get_all("DocType", filters=filters, fields=fields, limit_page_length=0):
 			row = dict(row)
 			for flag in ("istable", "issingle", "is_submittable"):
 				row[flag] = cint(row.get(flag))
@@ -102,8 +100,7 @@ def _core_customizations(custom_dt_names: set[str]) -> list[dict]:
 		if row.get("module") and row["module"] in known_modules:
 			continue
 		entry = by_dt.setdefault(
-			dt, {"doctype": dt, "custom_field_count": 0, "notable_fields": [],
-				"property_setter_count": 0}
+			dt, {"doctype": dt, "custom_field_count": 0, "notable_fields": [], "property_setter_count": 0}
 		)
 		entry["custom_field_count"] += 1
 		if len(entry["notable_fields"]) < _MAX_NOTABLE_FIELDS and _is_notable(row):
@@ -111,15 +108,12 @@ def _core_customizations(custom_dt_names: set[str]) -> list[dict]:
 
 	ps_counts = Counter(
 		r["doc_type"]
-		for r in frappe.get_all(
-			"Property Setter", fields=["doc_type"], limit_page_length=0
-		)
+		for r in frappe.get_all("Property Setter", fields=["doc_type"], limit_page_length=0)
 		if r.get("doc_type") and r["doc_type"] not in custom_dt_names
 	)
 	for dt, n in ps_counts.items():
 		entry = by_dt.setdefault(
-			dt, {"doctype": dt, "custom_field_count": 0, "notable_fields": [],
-				"property_setter_count": 0}
+			dt, {"doctype": dt, "custom_field_count": 0, "notable_fields": [], "property_setter_count": 0}
 		)
 		entry["property_setter_count"] = n
 	return sorted(by_dt.values(), key=lambda e: e["doctype"])
@@ -152,8 +146,11 @@ def _workflows() -> list[dict]:
 	for s in states:
 		states_by_wf.setdefault(s["parent"], []).append(s["state"])
 	return [
-		{"name": w["name"], "doctype": w.get("document_type") or "",
-			"states": states_by_wf.get(w["name"], [])}
+		{
+			"name": w["name"],
+			"doctype": w.get("document_type") or "",
+			"states": states_by_wf.get(w["name"], []),
+		}
 		for w in wf_rows
 	]
 
@@ -210,9 +207,7 @@ def _scripts_summary(custom_dt_names: set[str]) -> dict:
 			continue  # scripts on custom doctypes are part of that doctype's story
 		server[key] += 1
 	client = Counter()
-	for row in frappe.get_all(
-		"Client Script", filters={"enabled": 1}, fields=["dt"], limit_page_length=0
-	):
+	for row in frappe.get_all("Client Script", filters={"enabled": 1}, fields=["dt"], limit_page_length=0):
 		key = row.get("dt") or ""
 		if key in custom_dt_names:
 			continue

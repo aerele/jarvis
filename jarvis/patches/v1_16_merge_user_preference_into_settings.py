@@ -4,6 +4,7 @@ guarded by table existence, so it no-ops on a fresh CI DB where the old table
 was never created. Runs before v1_17 drops the old DocType."""
 
 import frappe
+
 from jarvis.chat.usage import get_or_create_user_settings
 
 

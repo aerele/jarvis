@@ -23,9 +23,7 @@ def fence_for_user(data: dict, user: str | None = None) -> dict:
 			return True
 		if doctype not in verdicts:
 			try:
-				verdicts[doctype] = bool(
-					frappe.has_permission(doctype, ptype="read", user=user)
-				)
+				verdicts[doctype] = bool(frappe.has_permission(doctype, ptype="read", user=user))
 			except Exception:
 				verdicts[doctype] = False
 		return verdicts[doctype]
@@ -33,31 +31,19 @@ def fence_for_user(data: dict, user: str | None = None) -> dict:
 	return {
 		"apps": list(data.get("apps") or []),
 		"modules": dict(data.get("modules") or {}),
-		"custom_doctypes": [
-			d for d in (data.get("custom_doctypes") or []) if can_read(d.get("name"))
-		],
+		"custom_doctypes": [d for d in (data.get("custom_doctypes") or []) if can_read(d.get("name"))],
 		"core_customizations": [
 			c for c in (data.get("core_customizations") or []) if can_read(c.get("doctype"))
 		],
-		"workflows": [
-			w for w in (data.get("workflows") or []) if can_read(w.get("doctype"))
-		],
-		"reports": [
-			r for r in (data.get("reports") or []) if can_read(r.get("doctype"))
-		],
-		"print_formats": [
-			p for p in (data.get("print_formats") or []) if can_read(p.get("doctype"))
-		],
+		"workflows": [w for w in (data.get("workflows") or []) if can_read(w.get("doctype"))],
+		"reports": [r for r in (data.get("reports") or []) if can_read(r.get("doctype"))],
+		"print_formats": [p for p in (data.get("print_formats") or []) if can_read(p.get("doctype"))],
 		"scripts": {
 			"server": {
-				k: v
-				for k, v in ((data.get("scripts") or {}).get("server") or {}).items()
-				if can_read(k)
+				k: v for k, v in ((data.get("scripts") or {}).get("server") or {}).items() if can_read(k)
 			},
 			"client": {
-				k: v
-				for k, v in ((data.get("scripts") or {}).get("client") or {}).items()
-				if can_read(k)
+				k: v for k, v in ((data.get("scripts") or {}).get("client") or {}).items() if can_read(k)
 			},
 		},
 	}

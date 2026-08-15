@@ -46,6 +46,7 @@ def desk_action(check_user_arg: str | None = None):
 	attach_to_doc. Other tools (update_comment) have a different
 	signature and don't fit.
 	"""
+
 	def _deco(fn):
 		@wraps(fn)
 		def _wrapped(doctype: str, name: str | None = None, *args, **kwargs):
@@ -68,6 +69,7 @@ def desk_action(check_user_arg: str | None = None):
 				# 3rd; follow_document: user is optional kwarg), so we
 				# bind via the wrapped function's argspec.
 				import inspect
+
 				sig = inspect.signature(fn)
 				bound = sig.bind_partial(doctype, name, *args, **kwargs)
 				bound.apply_defaults()
@@ -75,5 +77,7 @@ def desk_action(check_user_arg: str | None = None):
 				if user and not frappe.db.exists("User", user):
 					raise InvalidArgumentError(f"unknown User: {user}")
 			return fn(doctype, name, *args, **kwargs)
+
 		return _wrapped
+
 	return _deco

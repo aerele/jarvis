@@ -47,9 +47,7 @@ def customizations_clause() -> str:
 		cache.set_value(_CLAUSE_CACHE_KEY, clause, expires_in_sec=_CLAUSE_TTL_S)
 		return clause
 	except Exception:
-		frappe.log_error(
-			title="customizations clause build failed", message=frappe.get_traceback()
-		)
+		frappe.log_error(title="customizations clause build failed", message=frappe.get_traceback())
 		return ""
 
 
@@ -84,9 +82,7 @@ def _compose(apps: list[str], shown: int, counts_part: str) -> str:
 		if shown <= 0:
 			bits.append(f"{len(apps)} custom apps")
 		elif len(apps) > shown:
-			bits.append(
-				f"custom app(s) {', '.join(apps[:shown])} +{len(apps) - shown} more"
-			)
+			bits.append(f"custom app(s) {', '.join(apps[:shown])} +{len(apps) - shown} more")
 		else:
 			bits.append(f"custom app(s) {', '.join(apps)}")
 	if counts_part:
@@ -99,11 +95,7 @@ def _counts(modules: set[str]) -> tuple[int, int, int]:
 	reduced to counts."""
 	names = set(frappe.get_all("DocType", filters={"custom": 1}, pluck="name"))
 	if modules:
-		names |= set(
-			frappe.get_all(
-				"DocType", filters={"module": ("in", list(modules))}, pluck="name"
-			)
-		)
+		names |= set(frappe.get_all("DocType", filters={"module": ("in", list(modules))}, pluck="name"))
 	known_modules = sp_apps.known_module_names()
 	cf_doctypes = {
 		r["dt"]
@@ -112,8 +104,7 @@ def _counts(modules: set[str]) -> tuple[int, int, int]:
 			filters={"is_system_generated": 0},
 			fields=["dt", "module"],
 		)
-		if r.get("dt") and r["dt"] not in names
-		and not (r.get("module") and r["module"] in known_modules)
+		if r.get("dt") and r["dt"] not in names and not (r.get("module") and r["module"] in known_modules)
 	}
 	n_workflows = frappe.db.count("Workflow", {"is_active": 1})
 	return len(names), len(cf_doctypes), cint(n_workflows)

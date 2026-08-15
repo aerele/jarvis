@@ -3,15 +3,15 @@ app_title = "Jarvis"
 app_publisher = "Aerele"
 app_description = "AI superpowers for Frappe/ERPNext"
 app_email = "navin@aerele.in"
-app_license = "MIT"
+app_license = "AGPL-3.0-only"
 
 
 # ---------------------------------------------------------------------------
 # Per-session bootinfo
 # ---------------------------------------------------------------------------
-# Frappe calls this once per page load. We use it to expose
-# ``frappe.boot.jarvis_sandbox_mode`` so JS can branch on sandbox state
-# without a round-trip back to the server.
+# Frappe calls this once per page load. We use it to expose onboarding /
+# access state (see jarvis/boot.py) so JS can branch on it without a
+# round-trip back to the server.
 boot_session = "jarvis.boot.set_jarvis_boot"
 
 # ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ boot_session = "jarvis.boot.set_jarvis_boot"
 # change this string + ship a new release.
 # (``DEFAULT_ADMIN_URL`` is re-exported by ``jarvis.admin_client`` so existing
 # imports keep working - resolved lazily via module __getattr__ below.)
-_DEFAULT_ADMIN_URL_FALLBACK = "https://admin.klerk.in"
+_DEFAULT_ADMIN_URL_FALLBACK = "https://fleet.klerk.in"
 
 
 def get_default_admin_url() -> str:
@@ -58,22 +58,24 @@ def __getattr__(name: str):
 		return get_default_admin_url()
 	raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+
 # ---------------------------------------------------------------------------
 # OAuth client IDs - one per supported chat-subscription provider
 # ---------------------------------------------------------------------------
-# These are openclaw's hardcoded CLI client IDs. We use them (not Aerele-owned
+# These are agent's hardcoded CLI client IDs. We use them (not Aerele-owned
 # PKCE clients) so the refresh tokens our device flow issues are compatible
-# with pi-ai's refresh path inside the container - openclaw's codex provider
+# with pi-ai's refresh path inside the container - agent's codex provider
 # refreshes against the same client_id we used to mint.
 #
 # Source:
 #   OpenAI: openclaw/extensions/openai/openai-codex-device-code.ts:5
 #   Google Gemini: bundled with @google/gemini-cli; override via env if it drifts.
 #
-# Anthropic Claude is deliberately absent - openclaw has no compatible
+# Anthropic Claude is deliberately absent - agent has no compatible
 # adapter for Claude Pro/Max subscriptions.
 def _env_or_default(name: str, default: str) -> str:
 	import os
+
 	return (os.environ.get(name, "") or "").strip() or default
 
 
@@ -148,14 +150,24 @@ def get_oauth_client_secret(provider: str) -> str:
 		# Imported lazily so the node_modules walk only runs when a
 		# Google OAuth call asks for it.
 		from jarvis.oauth.gemini_cli_secret import extract_gemini_cli_secret
+
 		return extract_gemini_cli_secret()
 	return ""
+
 
 # Includes in <head>
 # ------------------
 # Brand styling for the Desk shell (loaded on every desk page).
 app_include_css = ["/assets/jarvis/css/jarvis-brand.css"]
-app_include_js = ["jarvis_immersive.bundle.js", "jarvis_widget.bundle.js", "jarvis_onboarding_llm.bundle.js", "jarvis_onboarding_banner.bundle.js"]
+app_include_js = [
+	"jarvis_immersive.bundle.js",
+	"jarvis_widget.bundle.js",
+	"jarvis_onboarding_llm.bundle.js",
+	"jarvis_onboarding_banner.bundle.js",
+	# Captures uncaught JS on the Desk Jarvis surfaces and exposes
+	# window.jarvisReportError() for caught-and-shown errors (widget / onboarding).
+	"jarvis_error_reporter.bundle.js",
+]
 
 # Separate frappe-ui Vue SPA (apps/jarvis/frontend) served at /jarvis. The
 # catch-all routes every /jarvis/* deep link to the www/jarvis page so the
@@ -174,25 +186,61 @@ website_route_rules = [
 	{"from_route": "/jarvis-mobile", "to_route": "jarvis_mobile"},
 	{"from_route": "/jarvis-mobile/<path:app_path>", "to_route": "jarvis_mobile"},
 	{"from_route": "/jarvis-no-access", "to_route": "jarvis_no_access"},
+	# Payment-gateway return landing. Hyphenated for the URL a gateway is
+	# configured with; the page itself is www/jarvis_pay_return.py. See that
+	# file for why the redirect cannot point at the wizard directly (SameSite).
+	{"from_route": "/jarvis-pay-return", "to_route": "jarvis_pay_return"},
 ]
 
 # Serves the PWA's service worker at the root-level /jarvis-mobile.sw.js, which
 # is the only way it can claim a scope covering the app. See jarvis/pwa.py — the
 # route is deliberately outside the /jarvis-mobile/ catch-all above.
-page_renderer = ["jarvis.pwa.ServiceWorkerRenderer"]
+# ManifestRenderer serves the per-tenant whitelabel manifest at the root-level
+# /jarvis-mobile.webmanifest (same catch-all reasoning).
+page_renderer = [
+	"jarvis.pwa.ServiceWorkerRenderer",
+	"jarvis.pwa.ManifestRenderer",
+]
 
 # The agents marketplace lives at the SPA route /jarvis/agents; keep the
 # friendlier top-level /jarvis-agents spelling working as a redirect.
 website_redirects = [
 	{"source": "/jarvis-agents", "target": "/jarvis/agents"},
+	# The retired /app/jarvis-account desk billing page. This is NOT only for
+	# stale bookmarks: admin-v2 still mails renewal links built as
+	# "{site}/app/jarvis-account?billing=1"
+	# (jarvis_admin_v2/billing/notifications.py), so this URL is live traffic
+	# from a repo that has not been changed.
+	#
+	# BOTH spellings are listed on purpose. Frappe core itself redirects
+	# "/app/(.*)" to "/desk/\1" (frappe/hooks.py), and get_hooks returns frappe's
+	# rules FIRST, so core wins the /app form and the request arrives here a
+	# second time as /desk/jarvis-account - which is the entry that actually
+	# fires today. The /app entry is the belt to that braces: if core ever stops
+	# rewriting, this keeps working without another migration.
+	#
+	# No forward_query_parameters: the old "?billing=1" flag only told the desk
+	# page to open on its billing tab, and the new route is billing already.
+	{"source": "/app/jarvis-account", "target": "/jarvis/billing"},
+	{"source": "/desk/jarvis-account", "target": "/jarvis/billing"},
 ]
 
 # Session hooks
 # --------------
 
-# 2026-07 latency plan, Phase 1.4: kick off a (debounced) prefix warm-up on
-# login so the provider prompt cache is warm before the chat page even loads.
-on_session_creation = ["jarvis.chat.prewarm.warm_on_login"]
+# No prefix warm-up on login (removed in #548). It billed an upstream LLM
+# request against the tenant's own quota for EVERY login to the site, including
+# desk and API logins by users who never open chat, to buy a sub-second head
+# start on a prefill the chat-surface load already begins. The chat-surface load
+# (jarvis.chat.prewarm.enqueue_warm_if_due, from list_conversations) is now the
+# only prewarm trigger. Do not add a login hook or a timer back without a
+# measured warm-vs-cold first_delta_ms split - see jarvis/chat/prewarm.py.
+
+# A fresh install runs THIS and never after_migrate, so anything a day-1 site
+# needs that DocType sync does not produce has to be seeded here: the roles no
+# DocType names ("Knowledge Wiki Manager", the two support roles) plus the
+# Personalisation Settings defaults. See jarvis/install.py.
+after_install = "jarvis.install.after_install"
 
 # Keep the Agents Marketplace catalog (Jarvis Agent Listing) in lockstep with
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
@@ -205,8 +253,12 @@ after_migrate = [
 	# Voice & Wiki: seed the Settings Check defaults (row-existence probe;
 	# an unset Check reads 0 on v16, so defaults must be materialized).
 	"jarvis.learning.voice_facts.after_migrate",
-	# Wiki v2: seed the Knowledge Wiki Manager role (idempotent; best-effort).
-	# Migrate follows a fresh install, so this covers both.
+	# Wiki v2 + Skills-area roles and the Personalisation Settings defaults
+	# (idempotent; best-effort). NOT reached by a fresh install: install_app
+	# runs after_install, never after_migrate. The Jarvis* roles survive that
+	# anyway because DocType sync auto-creates any role named in a permission
+	# row, but "Knowledge Wiki Manager" is named in no DocType, so it appears
+	# only once a migrate has run.
 	"jarvis.learning.roles.after_migrate",
 	# Customizations clause: installed apps only change via migrate.
 	"jarvis.chat.customizations_clause.after_migrate",
@@ -222,6 +274,20 @@ scheduler_events = {
 	"cron": {
 		"*/5 * * * *": [
 			"jarvis.chat.stale_scan.scan_and_mark_errored",
+			# Phase-0 admission backstop (chat concurrency, WP-0): reclaim lost
+			# reservations, reconcile dispatching Turn rows against Message truth,
+			# age-out stale queued turns, then re-promote. Cheap no-op when no
+			# non-terminal Turn rows exist (so it costs one COUNT when the feature
+			# is off or idle).
+			"jarvis.chat.admission.sweep",
+			# Relay Pump backstop (chat concurrency, WP-1c): the LAST-RESORT
+			# recovery path for the one gap the sender-driven ensure_pump cannot
+			# cover — a turn committed, the pump then died, and no new send arrives
+			# to revive it. Scans ALL nonterminal Turn states per-shard (age-out,
+			# prepare-deadline reclaim, deadline park, finalize re-enqueue) then
+			# ensure_pump for any shard with live work. Cheap no-op (one DISTINCT)
+			# when no non-terminal Turn rows exist.
+			"jarvis.chat.pump.watchdog",
 			# Onboarding convergence safety net (review P0-2): when an LLM
 			# apply parked at "pending: admin applying config" (admin accepted
 			# it and its reconcile is converging server-side), probe
@@ -229,33 +295,70 @@ scheduler_events = {
 			# moment chat_readiness reads Ready. Without this, a pending apply
 			# that outlives the in-job 120s poll is a permanent dead-end.
 			"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings.reconcile_pending_llm_sync",
-			# 2026-07 latency plan, Phase 1.4: was */30, which left the
-			# provider prompt cache (5-10 min retention) cold for most of
-			# each half-hour. Every 5 min + a 4-min cooldown in prewarm.py
-			# keeps the prefix warm continuously while there is recent chat
-			# activity (the function itself gates on activity).
-			"jarvis.chat.prewarm.keep_warm_if_active",
+			# Workspace-reset convergence backstop: if the customer closed the tab
+			# mid-reset, pull the new container's connection once admin reports
+			# Ready (same shape as reconcile_pending_llm_sync above).
+			"jarvis.onboarding.reconcile_pending_workspace_reset",
+			# NO periodic prefix keep-warm here (removed in #548). Every tick
+			# billed an upstream LLM request against the tenant's own quota,
+			# and its activity gate was inverted: it fired only when chat
+			# traffic had ALREADY warmed the provider cache for free, and
+			# no-opped on the idle benches where a cold prefix is possible.
+			# A timer cannot know a turn is coming, which is the premise of
+			# warming, so it has no correct interval - not a shorter one.
+			# Chat-concurrency CDX-19 backstop: re-attempt macro runs parked in
+			# `waiting_capacity` (a step could not be admitted because the site's turn
+			# queue was momentarily full). A deferred step dispatches no turn, so the
+			# turn-end chaining hook never fires for it — this cron is its ONLY resume
+			# path. Bounded per run (capacity_attempts), then the run fails honestly.
+			# Cheap no-op (one indexed status query) when nothing is parked.
+			"jarvis.chat.macros.resume_waiting_capacity_runs",
+			# Forward tenant errors (UI + jarvis-only code-level exceptions) to the
+			# admin control plane for the per-tenant Errors feed. Off the hot path,
+			# self-gating (skips un-onboarded), never raises. Cheap
+			# no-op when there is nothing new to push.
+			"jarvis.error_push.push_error_rollup",
+			# GAP 1 dead-man's-switch (Track B): UNCONDITIONAL bench-liveness heartbeat to
+			# the control plane every tick — its silence is how the CP detects a dead
+			# scheduler (a live scheduler that fails to POST = the tenant went dark).
+			# Self-gating (skips un-onboarded), never raises. Cheap: two indexed reads.
+			"jarvis.chat.heartbeat.push_bench_heartbeat",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
+			# Slice B auto-tell: the CORRECTNESS GUARANTEE for import-completion
+			# announcements (the after_job hook is only a latency shortcut and cannot
+			# survive a worker/container death). Drains a bounded worklist of
+			# un-announced Data Imports, posts each finished/blocked/stuck/dead one into
+			# its chat, and self-gates cheaply (one COUNT) when nothing is pending.
+			"jarvis.chat.import_announce.announce_finished_imports",
 		],
-		"*/10 * * * *": [
-			# Learn-from-custom-apps tick: starts due Queued runs (one active
-			# run bench-wide), recovers stale ones and cleans up old snapshot
-			# zips. Self-gating + never raises; the real work runs on queue
-			# "long" (see jarvis/learning/app_analysis.py).
-			"jarvis.learning.app_analysis.tick",
-		],
+		# Learn-from-custom-apps has been REPLACED by the Custom App Learning
+		# *scribe* delegate agent (marketplace slug ``custom-app-learning``): it
+		# reads custom-app source and writes the wiki in the container, on demand,
+		# instead of the chat-batch pipeline. The engine
+		# (``jarvis.learning.app_analysis``), its API and the ``Jarvis App Learning
+		# Run`` doctype stay physically present (rollback safety + historical run
+		# rows). Full removal is a tracked fast-follow.
+		#
+		# CA3-5 (rollback-operable): ``app_analysis.tick`` is registered but SELF-GATES
+		# on ``_legacy_retired()`` — it returns immediately while the pipeline is retired
+		# (the default), so this cron is a cheap no-op in production, and its only job is
+		# to make the rollback path (conf ``jarvis_app_learning_reenable``) actually
+		# operable: when re-enabled, this tick is the scheduler entry that starts due
+		# Queued runs and drives stale-run recovery. ``schedule_app_learning`` is
+		# likewise conditional (refuses while retired, schedules when re-enabled).
+		"*/10 * * * *": ["jarvis.learning.app_analysis.tick"],
 		"*/15 * * * *": [
 			# Behavioural pattern learning tick. Hooks cron is app-static
 			# (per-site rows are reset on migrate), so the window is
 			# self-enforced: the tick bails on the site_config kill switch,
-			# the enabled flag, self-host and outside-window times.
+			# the enabled flag and outside-window times.
 			"jarvis.learning.orchestrator.tick",
 		],
 	},
 	"hourly": [
-		# Session lifecycle: free dormant conversations' openclaw sessions, reap
+		# Session lifecycle: free dormant conversations' agent sessions, reap
 		# abandoned empty chats, and reap orphaned throwaway sessions
 		# (title/prewarm/polish, deleted conversations). Batch-capped; bench
 		# history untouched.
@@ -273,16 +376,34 @@ scheduler_events = {
 		# render a "reconnect" banner instead of "Connected" until the
 		# user hits a ProviderAuthError mid-chat.
 		"jarvis.oauth.cron.poll_oauth_refresh_status",
-		# Fire any scheduled macros whose next_run_at has passed.
+		# Fire any scheduled macros whose next_run_at has passed. Identity-safe
+		# (never binds an unattended turn to Administrator or a disabled owner),
+		# entitlement- and budget-gated, and it advances the schedule only when
+		# the slot was really consumed. See jarvis/chat/macro_scheduler.py.
 		"jarvis.chat.macro_scheduler.run_due_macros",
+		# #471 backstop: fail macro runs stuck `running` with no forward progress.
+		# A dispatch that raised leaves no turn behind, so the turn-end chaining
+		# hook that terminalizes a run never fires for it. Deliberately parked
+		# `waiting_capacity` runs are NOT candidates — they have their own bounded
+		# resume cron (`resume_waiting_capacity_runs`, above).
+		"jarvis.chat.macros.reap_stale_macro_runs",
 		# Fire any due scheduled auditor agents. Identity-safe (runs each audit
 		# as its owner, never Administrator); budget-capped; advances only on a
 		# successful enqueue. See jarvis/chat/agent_scheduler.py.
 		"jarvis.chat.agent_scheduler.run_due_agent_audits",
+		# A8 backstop: fail agent runs stuck `running` past the max duration and
+		# tear down their orphaned per-run session bearers (a crashed delegate
+		# would otherwise leave a live session credential forever).
+		"jarvis.chat.agent_scheduler.reap_stale_agent_runs",
 		# Recovery-completeness batch: spike alarm if the 24h recovered-turn
 		# rate is high enough to suggest a sick gateway (deduped to roughly
 		# once a day inside the function).
 		"jarvis.chat.turn_recovery.recovery_rate_watch",
+		# Plan-05 D2 (review P0-04): revoke + erase expired, unsaved pending OAuth
+		# captures so an abandoned chat-subscription sign-in never leaves a live
+		# provider token at rest. Retries transient revoke failures under a bounded
+		# attempt ceiling, then alerts.
+		"jarvis.oauth.pending_capture.sweep_expired",
 	],
 	"daily": [
 		"jarvis.onboarding.sync_connection",
@@ -312,6 +433,18 @@ scheduler_events = {
 		# Daily append of org-wide graph totals to Jarvis Wiki Graph History (one
 		# row/day) — the measured Knowledge-Evolution series for the Evolution tab.
 		"jarvis.chat.wiki_graph.record_history_snapshot",
+		# Architecture A (fleet usage spec §3/§5): best-effort daily push of the
+		# bench's month-to-date per-user + per-model usage rollup to admin. Self-
+		# gating (skips unconfigured / not-onboarded); never raises.
+		"jarvis.chat.usage_push.push_usage_rollup",
+		# JF-016 hygiene: revocation only flips `enabled`, so the mobile-device
+		# table is append-only without this. Deletes DISABLED rows past the
+		# 90-day retention window; live credentials are never touched.
+		"jarvis.mobile.device_auth.prune_revoked_devices",
+		# Errors hygiene: delete Jarvis Client Error rows already forwarded to
+		# admin past the retention window (the durable record lives in the admin's
+		# Jarvis Tenant Error). Keeps the local buffer small.
+		"jarvis.error_push.prune_pushed_client_errors",
 	],
 	"weekly": [
 		# Wiki v2 health check: deterministic lint over Active pages
@@ -320,6 +453,17 @@ scheduler_events = {
 		"jarvis.learning.wiki_lint.scheduled_lint",
 	],
 }
+
+# ---------------------------------------------------------------------------
+# Per-device mobile credentials (JF-016)
+# ---------------------------------------------------------------------------
+# The Jarvis mobile app authenticates with a REVOCABLE per-device token
+# (`Authorization: token jmd:<token_id>:<secret>`) instead of the user's
+# account-wide Frappe api_key/api_secret. Core's api-key parser declines a
+# three-segment token, so this hook — which Frappe runs right after it — is
+# what resolves the token to a user. Cheap for every other request: one header
+# read plus a prefix test. See jarvis/mobile/device_auth.py.
+auth_hooks = ["jarvis.mobile.device_auth.authenticate_device_token"]
 
 # Python type annotations on whitelisted endpoints
 # ------------------------------------------------
@@ -370,6 +514,18 @@ doc_events["Jarvis Personalise Question Rule"] = {
 	"on_update": "jarvis.learning.questions.on_rule_update",
 }
 
+# Phase-0 admission (chat concurrency, WP-0): a deleted conversation must not
+# leave orphaned Jarvis Chat Turn rows behind (they would linger as ghost queued/
+# dispatching rows in the admission shard). Cascade-delete them on trash.
+doc_events["Jarvis Conversation"] = {
+	"on_trash": [
+		"jarvis.chat.admission.on_conversation_trash",
+		# Slice B: delete the conversation's Jarvis Import Announcement rows so the
+		# Link never blocks deletion (LinkExistsError) or orphans the poll.
+		"jarvis.chat.import_announce.on_conversation_trash",
+	],
+}
+
 # ---------------------------------------------------------------------------
 # Jarvis Triggers (user-defined doc-event automations)
 # ---------------------------------------------------------------------------
@@ -380,8 +536,14 @@ doc_events["Jarvis Personalise Question Rule"] = {
 _TRIGGER_DISPATCH = "jarvis.triggers.engine.dispatch"
 _star_doc_events = doc_events.setdefault("*", {})
 for _trigger_event in (
-	"validate", "before_submit", "after_insert", "on_update",
-	"on_submit", "on_cancel", "on_trash", "on_update_after_submit",
+	"validate",
+	"before_submit",
+	"after_insert",
+	"on_update",
+	"on_submit",
+	"on_cancel",
+	"on_trash",
+	"on_update_after_submit",
 ):
 	_existing_handlers = _star_doc_events.get(_trigger_event)
 	if _existing_handlers is None:
@@ -396,7 +558,19 @@ for _trigger_event in (
 # clear_old_logs mirrors core's WebhookRequestLog).
 default_log_clearing_doctypes = {
 	"Jarvis Trigger Activity": 90,
+	# Slice B: reap TERMINAL (announced=1) import-announcement rows after 30 days.
+	# The controller's clear_old_logs filters announced=1 AND modified<cutoff, so a
+	# still-live (announced=0) row is never swept.
+	"Jarvis Import Announcement": 30,
 }
+
+# Slice B fast-path: runs in the `finally` of EVERY background job on the bench (Frappe
+# calls it with no surrounding try/except), so the handler MUST stay import-safe on every
+# version and MUST NEVER raise - see import_announce.on_after_job. When a Data Import job
+# ends it enqueues a scoped completion-classify so a finished import pings in seconds.
+# LATENCY-ONLY; the `*/2` poll (scheduler_events) is the correctness guarantee and must
+# never be removed even though it looks redundant once the hook is working.
+after_job = ["jarvis.chat.import_announce.on_after_job"]
 
 # ---------------------------------------------------------------------------
 # Wiki page scoping (wiki v2)
@@ -422,18 +596,22 @@ has_permission = {
 # Approval). Matrix + SQL fragments live in jarvis/chat/chat_permissions.py.
 # The doctype permission rows carry role "Jarvis User" (not "All"), so the role
 # is genuinely load-bearing: revoking it denies all four via REST.
-permission_query_conditions.update({
-	"Jarvis Conversation": "jarvis.chat.chat_permissions.conversation_query_conditions",
-	"Jarvis Chat Message": "jarvis.chat.chat_permissions.message_query_conditions",
-	"Jarvis Approval Request": "jarvis.chat.chat_permissions.approval_query_conditions",
-	"Jarvis Voice Note": "jarvis.chat.chat_permissions.voice_note_query_conditions",
-})
-has_permission.update({
-	"Jarvis Conversation": "jarvis.chat.chat_permissions.has_conversation_permission",
-	"Jarvis Chat Message": "jarvis.chat.chat_permissions.has_message_permission",
-	"Jarvis Approval Request": "jarvis.chat.chat_permissions.has_approval_permission",
-	"Jarvis Voice Note": "jarvis.chat.chat_permissions.has_voice_note_permission",
-})
+permission_query_conditions.update(
+	{
+		"Jarvis Conversation": "jarvis.chat.chat_permissions.conversation_query_conditions",
+		"Jarvis Chat Message": "jarvis.chat.chat_permissions.message_query_conditions",
+		"Jarvis Approval Request": "jarvis.chat.chat_permissions.approval_query_conditions",
+		"Jarvis Voice Note": "jarvis.chat.chat_permissions.voice_note_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis Conversation": "jarvis.chat.chat_permissions.has_conversation_permission",
+		"Jarvis Chat Message": "jarvis.chat.chat_permissions.has_message_permission",
+		"Jarvis Approval Request": "jarvis.chat.chat_permissions.has_approval_permission",
+		"Jarvis Voice Note": "jarvis.chat.chat_permissions.has_voice_note_permission",
+	}
+)
 
 # ---------------------------------------------------------------------------
 # Skills / Personalise scoping (security review PART 2)
@@ -445,14 +623,18 @@ has_permission.update({
 # user_can_use_skill rule).
 # TASK 17: Jarvis Personalise Question scoped on the `user` field (not `owner`)
 # so generic REST matches the API's user-based scoping and survives drift.
-permission_query_conditions.update({
-	"Jarvis Custom Skill": "jarvis.chat.skill_permissions.skill_query_conditions",
-	"Jarvis Personalise Question": "jarvis.chat.personalise_permissions.personalise_question_query_conditions",
-})
-has_permission.update({
-	"Jarvis Custom Skill": "jarvis.chat.skill_permissions.has_skill_permission",
-	"Jarvis Personalise Question": "jarvis.chat.personalise_permissions.has_personalise_question_permission",
-})
+permission_query_conditions.update(
+	{
+		"Jarvis Custom Skill": "jarvis.chat.skill_permissions.skill_query_conditions",
+		"Jarvis Personalise Question": "jarvis.chat.personalise_permissions.personalise_question_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis Custom Skill": "jarvis.chat.skill_permissions.has_skill_permission",
+		"Jarvis Personalise Question": "jarvis.chat.personalise_permissions.has_personalise_question_permission",
+	}
+)
 
 # ---------------------------------------------------------------------------
 # File Box / Macros / Agents scoping (security review PART 3)
@@ -469,23 +651,27 @@ has_permission.update({
 # TASK 29: the four owner/installer-scoped agent doctypes (Installation, Run,
 # Finding, Activity). The Listing catalog stays All-readable (no owner hook); its
 # skill_bundle IP is permlevel-guarded (TASK 33) instead.
-permission_query_conditions.update({
-	"File": "jarvis.chat.file_permissions.file_query_conditions",
-	"Jarvis Macro": "jarvis.chat.macro_permissions.macro_query_conditions",
-	"Jarvis Macro Run": "jarvis.chat.macro_permissions.macro_run_query_conditions",
-	"Jarvis Agent Installation": "jarvis.chat.agent_permissions.installation_query_conditions",
-	"Jarvis Agent Run": "jarvis.chat.agent_permissions.run_query_conditions",
-	"Jarvis Agent Finding": "jarvis.chat.agent_permissions.finding_query_conditions",
-	"Jarvis Agent Activity": "jarvis.chat.agent_permissions.activity_query_conditions",
-})
-has_permission.update({
-	"Jarvis Macro": "jarvis.chat.macro_permissions.has_macro_permission",
-	"Jarvis Macro Run": "jarvis.chat.macro_permissions.has_macro_run_permission",
-	"Jarvis Agent Installation": "jarvis.chat.agent_permissions.has_installation_permission",
-	"Jarvis Agent Run": "jarvis.chat.agent_permissions.has_run_permission",
-	"Jarvis Agent Finding": "jarvis.chat.agent_permissions.has_finding_permission",
-	"Jarvis Agent Activity": "jarvis.chat.agent_permissions.has_activity_permission",
-})
+permission_query_conditions.update(
+	{
+		"File": "jarvis.chat.file_permissions.file_query_conditions",
+		"Jarvis Macro": "jarvis.chat.macro_permissions.macro_query_conditions",
+		"Jarvis Macro Run": "jarvis.chat.macro_permissions.macro_run_query_conditions",
+		"Jarvis Agent Installation": "jarvis.chat.agent_permissions.installation_query_conditions",
+		"Jarvis Agent Run": "jarvis.chat.agent_permissions.run_query_conditions",
+		"Jarvis Agent Finding": "jarvis.chat.agent_permissions.finding_query_conditions",
+		"Jarvis Agent Activity": "jarvis.chat.agent_permissions.activity_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis Macro": "jarvis.chat.macro_permissions.has_macro_permission",
+		"Jarvis Macro Run": "jarvis.chat.macro_permissions.has_macro_run_permission",
+		"Jarvis Agent Installation": "jarvis.chat.agent_permissions.has_installation_permission",
+		"Jarvis Agent Run": "jarvis.chat.agent_permissions.has_run_permission",
+		"Jarvis Agent Finding": "jarvis.chat.agent_permissions.has_finding_permission",
+		"Jarvis Agent Activity": "jarvis.chat.agent_permissions.has_activity_permission",
+	}
+)
 
 # ---------------------------------------------------------------------------
 # Per-user settings / usage scoping (security review PART 4 REVISED, TASK 52)
@@ -500,12 +686,16 @@ has_permission.update({
 # frappe.get_all, which hardcodes ignore_permissions=True and therefore sees all
 # rows regardless of this hook — the admin bypass here matters for the
 # permission-checked frappe.get_list / generic-REST surface, not for that fn.)
-permission_query_conditions.update({
-	"Jarvis User Settings": "jarvis.chat.user_settings_permissions.user_settings_query_conditions",
-})
-has_permission.update({
-	"Jarvis User Settings": "jarvis.chat.user_settings_permissions.has_user_settings_permission",
-})
+permission_query_conditions.update(
+	{
+		"Jarvis User Settings": "jarvis.chat.user_settings_permissions.user_settings_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis User Settings": "jarvis.chat.user_settings_permissions.has_user_settings_permission",
+	}
+)
 
 # ---------------------------------------------------------------------------
 # Jarvis Trigger scoping
@@ -516,12 +706,16 @@ has_permission.update({
 # has NO hooks: its doctype perms are SM-only and
 # jarvis.chat.triggers_api.list_activity_page serves visibility-filtered rows
 # (read access on the target doc) to everyone else.
-permission_query_conditions.update({
-	"Jarvis Trigger": "jarvis.chat.trigger_permissions.trigger_query_conditions",
-})
-has_permission.update({
-	"Jarvis Trigger": "jarvis.chat.trigger_permissions.has_trigger_permission",
-})
+permission_query_conditions.update(
+	{
+		"Jarvis Trigger": "jarvis.chat.trigger_permissions.trigger_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis Trigger": "jarvis.chat.trigger_permissions.has_trigger_permission",
+	}
+)
 
 # ---------------------------------------------------------------------------
 # Jarvis Dashboard scoping
@@ -532,10 +726,13 @@ has_permission.update({
 # tier. The create-time scope-widening gate (plain users may not create
 # Org/Role dashboards) lives in the DocType controller — "create" reaches the
 # hook without a doc.
-permission_query_conditions.update({
-	"Jarvis Dashboard": "jarvis.chat.dashboard_permissions.dashboard_query_conditions",
-})
-has_permission.update({
-	"Jarvis Dashboard": "jarvis.chat.dashboard_permissions.has_dashboard_permission",
-})
-
+permission_query_conditions.update(
+	{
+		"Jarvis Dashboard": "jarvis.chat.dashboard_permissions.dashboard_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis Dashboard": "jarvis.chat.dashboard_permissions.has_dashboard_permission",
+	}
+)

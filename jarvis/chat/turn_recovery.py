@@ -1,7 +1,7 @@
 """Scheduler-driven recovery for managed chat turns that the bench abandoned.
 
 A long turn can outrun the bench's WS cap, or its RQ worker can be hard-killed
-(SIGTERM at the 720s job cap, OOM, crash, deploy). openclaw keeps running the
+(SIGTERM at the 720s job cap, OOM, crash, deploy). agent keeps running the
 turn and persists the result regardless. So instead of falsely erroring, the
 turn is left `streaming=1, recovering=1` and this job finalizes it from the
 gateway's durable transcript.
@@ -18,15 +18,17 @@ Design notes (from the 2026-06-30 review):
   recovering=1), so overlapping cycles cannot double-deliver.
 - is_run_active is read ONCE per cycle (sessions.list is expensive), not per row.
 """
+
 from __future__ import annotations
 
 import contextlib
-from typing import Iterator
+from collections.abc import Iterator
 
 import frappe
 
+from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.events import publish_to_user
-from jarvis.chat.openclaw_client import OpenclawSession
+from jarvis.chat.seq_watermark import wm_expr
 
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
@@ -54,10 +56,10 @@ _RATE_WATCH_DEDUPE_HOURS = 20
 
 
 @contextlib.contextmanager
-def _recovery_connection(gateway_url: str) -> Iterator[OpenclawSession]:
+def _recovery_connection(gateway_url: str) -> Iterator[AgentSession]:
 	"""A dedicated short-lived connection for recovery. NEVER the shared pool
-	(openclaw_session_pool is single-turn-exclusive and not concurrency-safe)."""
-	sess = OpenclawSession.connect(gateway_url)
+	(agent_session_pool is single-turn-exclusive and not concurrency-safe)."""
+	sess = AgentSession.connect(gateway_url)
 	try:
 		yield sess
 	finally:
@@ -89,6 +91,7 @@ def _latest_assistant_text(messages: list, *, min_seq: int = 0, max_seq: int | N
 	completed in the same conversation would steal the newer turn's answer
 	(observed live 2026-07-03: the parked row recovered with the next
 	question's reply). Messages with seq > max_seq belong to a later turn."""
+
 	def seq(m):
 		return ((m or {}).get("__openclaw") or {}).get("seq", 0)
 
@@ -104,9 +107,12 @@ def _latest_assistant_text(messages: list, *, min_seq: int = 0, max_seq: int | N
 			return c
 		if isinstance(c, list):
 			parts = [
-				b.get("text", "") for b in c
-				if isinstance(b, dict) and b.get("type") == "text"
-				and isinstance(b.get("text"), str) and b.get("text")
+				b.get("text", "")
+				for b in c
+				if isinstance(b, dict)
+				and b.get("type") == "text"
+				and isinstance(b.get("text"), str)
+				and b.get("text")
 			]
 			joined = "\n".join(p for p in parts if p.strip())
 			if joined.strip():
@@ -124,8 +130,7 @@ def _conditional_clear(name: str, fields: dict) -> bool:
 	set_clause = ", ".join(f"`{k}` = %({k})s" for k in fields)
 	params = dict(fields, name=name)
 	frappe.db.sql(
-		f"UPDATE `tab{MSG}` SET {set_clause} "
-		f"WHERE name = %(name)s AND streaming = 1 AND recovering = 1",
+		f"UPDATE `tab{MSG}` SET {set_clause} WHERE name = %(name)s AND streaming = 1 AND recovering = 1",
 		params,
 	)
 	# Read rowcount BEFORE commit (commit can reset the cursor).
@@ -165,20 +170,43 @@ def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 def _finalize(row: dict, text: str) -> None:
 	"""Authoritative completion (conditional + idempotent): overwrite content
 	from the raw snapshot, clear the flags, then publish for any live viewer."""
-	if not _conditional_clear(row["name"], {
-		"content": text, "streaming": 0, "recovering": 0, "error": "",
-		"was_recovered": 1,
-	}):
+	if not _conditional_clear(
+		row["name"],
+		{
+			"content": text,
+			"streaming": 0,
+			"recovering": 0,
+			"error": "",
+			"was_recovered": 1,
+		},
+	):
 		return  # another cycle already finalized this row
 	conv, owner, name = row["conversation"], row["owner"], row["name"]
-	publish_to_user(owner, {
-		"kind": "assistant:delta", "conversation_id": conv,
-		"message_id": name, "text": text, "run_id": "recovered",
-	})
-	publish_to_user(owner, {
-		"kind": "run:end", "conversation_id": conv,
-		"message_id": name, "run_id": "recovered",
-	})
+	# Phase-0 admission: a recovered turn is a terminal settlement of the
+	# conversation's dispatching Turn row - close it (done) + promote the next
+	# queued turn. Flag-gated + best-effort inside admission (a flag-off bench is
+	# unaffected). Keyed by conversation because recovery works off Message
+	# rows and per-conversation single-flight makes the dispatching turn unique.
+	_admission_settle_conv(conv, "done")
+	publish_to_user(
+		owner,
+		{
+			"kind": "assistant:delta",
+			"conversation_id": conv,
+			"message_id": name,
+			"text": text,
+			"run_id": "recovered",
+		},
+	)
+	publish_to_user(
+		owner,
+		{
+			"kind": "run:end",
+			"conversation_id": conv,
+			"message_id": name,
+			"run_id": "recovered",
+		},
+	)
 	_advance_macro(conv, errored=False)
 
 	# Best-effort: a recovered long turn is exactly the kind that produced
@@ -190,9 +218,11 @@ def _finalize(row: dict, text: str) -> None:
 		from jarvis.chat import turn_handler
 
 		turn_handler.persist_rich_outputs(
-			name, conv, row["owner"], "recovered",
-			int(frappe.utils.get_datetime(row["creation"]).timestamp() * 1000)
-			if row.get("creation") else 0,
+			name,
+			conv,
+			row["owner"],
+			"recovered",
+			int(frappe.utils.get_datetime(row["creation"]).timestamp() * 1000) if row.get("creation") else 0,
 		)
 	except Exception:
 		frappe.log_error(
@@ -203,14 +233,13 @@ def _finalize(row: dict, text: str) -> None:
 	# A recovered turn completed like any other, so it earns the same post-
 	# turn wiki nudge as the worker's clean exit. Fire-and-forget: all gates
 	# re-check inside the short-queue job; a failure never affects recovery.
-	# Cheap pre-gate mirrors the clean-exit path so wiki-off / self-host
-	# deployments never spawn the per-turn job (owner is the only sender
-	# identity a recovered turn carries).
+	# Cheap pre-gate mirrors the clean-exit path so wiki-off deployments never
+	# spawn the per-turn job (owner is the only sender identity a recovered turn
+	# carries).
 	try:
-		from jarvis import selfhost
 		from jarvis.chat import wiki
 
-		if not selfhost.is_self_hosted() and wiki.wiki_enabled():
+		if wiki.wiki_enabled():
 			frappe.enqueue(
 				"jarvis.chat.wiki.maybe_nudge",
 				queue="short",
@@ -225,19 +254,42 @@ def _finalize(row: dict, text: str) -> None:
 		)
 
 
+def _admission_settle_conv(conversation: str, state: str, error: str | None = None) -> None:
+	"""Phase-0 admission recovery hook (flag-gated + best-effort)."""
+	try:
+		from jarvis.chat import admission
+
+		admission.settle_conversation_dispatching(conversation, state, error=error)
+	except Exception:
+		frappe.log_error(title="admission recovery settle", message=frappe.get_traceback())
+
+
 def _error(row: dict, message: str) -> None:
-	if not _conditional_clear(row["name"], {
-		"streaming": 0, "recovering": 0, "error": message, "was_recovered": 1,
-	}):
+	if not _conditional_clear(
+		row["name"],
+		{
+			"streaming": 0,
+			"recovering": 0,
+			"error": message,
+			"was_recovered": 1,
+		},
+	):
 		return
-	publish_to_user(row["owner"], {
-		"kind": "run:error", "conversation_id": row["conversation"],
-		"message_id": row["name"], "run_id": "recovered", "error": message,
-	})
+	_admission_settle_conv(row["conversation"], "errored", message)
+	publish_to_user(
+		row["owner"],
+		{
+			"kind": "run:error",
+			"conversation_id": row["conversation"],
+			"message_id": row["name"],
+			"run_id": "recovered",
+			"error": message,
+		},
+	)
 	_advance_macro(row["conversation"], errored=True)
 
 
-def _active_map(sess: OpenclawSession) -> dict:
+def _active_map(sess: AgentSession) -> dict:
 	"""One sessions.list per cycle -> {session_key: hasActiveRun}. Replaces the
 	per-row is_run_active call (#13)."""
 	res = sess._request("sessions.list", {}, timeout_s=10)
@@ -250,18 +302,13 @@ def _active_map(sess: OpenclawSession) -> dict:
 
 def recover_pending_turns(limit: int = 20) -> dict:
 	"""Scheduler entry: finalize managed turns stuck in the recovering state."""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return {"skipped": "self-hosted"}
-
 	# Query rows FIRST (so we never load Settings on an empty bench, #14).
 	# Ordered conversation, seq DESC so the first row per conversation is the
 	# latest (used for the no-bleed dedup, #2).
 	rows = frappe.db.sql(
-		"""
+		f"""
 		SELECT m.name, m.conversation, c.session_key, c.owner,
-			   m.recovery_started_at, m.seq, m.openclaw_seq_watermark, m.creation
+			   m.recovery_started_at, m.seq, {wm_expr("m.")} AS agent_seq_watermark, m.creation
 		FROM `tabJarvis Chat Message` m
 		JOIN `tabJarvis Conversation` c ON c.name = m.conversation
 		WHERE m.streaming = 1 AND m.recovering = 1
@@ -298,8 +345,7 @@ def recover_pending_turns(limit: int = 20) -> dict:
 	eligible = list(eligible.values())
 
 	settings = frappe.get_single("Jarvis Settings")
-	gateway_url = (settings.agent_url or "").replace(
-		"http://", "ws://").replace("https://", "wss://")
+	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	if not gateway_url:
 		return {"checked": len(rows), **counts, "skipped": "no gateway"}
 
@@ -325,7 +371,7 @@ def recover_pending_turns(limit: int = 20) -> dict:
 	return {"checked": len(rows), **counts}
 
 
-def _recover_one(sess: OpenclawSession, row: dict, active: dict) -> str:
+def _recover_one(sess: AgentSession, row: dict, active: dict) -> str:
 	"""Drive one eligible (latest-per-conversation) recovering row. Returns
 	'finalized' | 'active' | 'waiting'. Ceiling/error is handled by the caller
 	and the unconditional backstop, not here."""
@@ -339,7 +385,7 @@ def _recover_one(sess: OpenclawSession, row: dict, active: dict) -> str:
 	messages = sess.get_session_messages(session_key, limit=50)
 	text = _latest_assistant_text(
 		messages,
-		min_seq=row.get("openclaw_seq_watermark") or 0,
+		min_seq=row.get("agent_seq_watermark") or 0,
 		max_seq=_next_turn_watermark(row["conversation"], row["seq"]),
 	)
 	if text:
@@ -356,11 +402,11 @@ def _next_turn_watermark(conversation: str, seq: int) -> int | None:
 	(or none with a usable watermark) - then the window stays open-ended,
 	which matches the common single-in-flight-turn case."""
 	val = frappe.db.sql(
-		"""
-		SELECT MIN(openclaw_seq_watermark)
+		f"""
+		SELECT MIN({wm_expr()})
 		FROM `tabJarvis Chat Message`
 		WHERE conversation = %(conv)s AND role = 'assistant'
-		  AND seq > %(seq)s AND openclaw_seq_watermark > 0
+		  AND seq > %(seq)s AND {wm_expr()} > 0
 		""",
 		{"conv": conversation, "seq": seq},
 	)[0][0]
@@ -373,14 +419,10 @@ def recover_now(conversation_id: str) -> str:
 	does not wait for the cron. Dedicated connection - the pooled WS may be
 	the very thing that just died. Idempotent vs the cron via
 	_conditional_clear inside _finalize/_error."""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return "skipped"
 	rows = frappe.db.sql(
-		"""
+		f"""
 		SELECT m.name, m.conversation, c.session_key, c.owner,
-			   m.recovery_started_at, m.seq, m.openclaw_seq_watermark, m.creation
+			   m.recovery_started_at, m.seq, {wm_expr("m.")} AS agent_seq_watermark, m.creation
 		FROM `tabJarvis Chat Message` m
 		JOIN `tabJarvis Conversation` c ON c.name = m.conversation
 		WHERE m.streaming = 1 AND m.recovering = 1
@@ -396,8 +438,7 @@ def recover_now(conversation_id: str) -> str:
 		return "skipped"
 	row = rows[0]
 	settings = frappe.get_single("Jarvis Settings")
-	gateway_url = (settings.agent_url or "").replace(
-		"http://", "ws://").replace("https://", "wss://")
+	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	if not gateway_url:
 		return "skipped"
 	try:
@@ -423,11 +464,6 @@ def recovery_rate_watch() -> None:
 	it - deduped against an existing Error Log with the same title in the
 	last _RATE_WATCH_DEDUPE_HOURS hours, so a sustained problem alarms
 	roughly once a day rather than every hour this cron fires."""
-	from jarvis import selfhost
-
-	if selfhost.is_self_hosted():
-		return
-
 	since_24h = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-24)
 	row = frappe.db.sql(
 		"""
@@ -446,9 +482,7 @@ def recovery_rate_watch() -> None:
 		return
 
 	title = "chat: high recovered-turn rate"
-	since_dedupe = frappe.utils.add_to_date(
-		frappe.utils.now_datetime(), hours=-_RATE_WATCH_DEDUPE_HOURS
-	)
+	since_dedupe = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-_RATE_WATCH_DEDUPE_HOURS)
 	existing = frappe.db.sql(
 		"""
 		SELECT name FROM `tabError Log`

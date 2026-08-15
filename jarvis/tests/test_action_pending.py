@@ -22,9 +22,13 @@ class TestActionPendingEvent(FrappeTestCase):
 	def test_park_publishes_action_pending_to_owner_with_token(self):
 		desc = "jarvis-test-action-pending-park-030"
 		with patch("jarvis.chat.events.publish_to_user") as pub:
-			r = api._run_tool("create_doc", {
-				"doctype": "ToDo", "values": {"description": desc},
-			})
+			r = api._run_tool(
+				"create_doc",
+				{
+					"doctype": "ToDo",
+					"values": {"description": desc},
+				},
+			)
 		self.assertEqual(r["data"]["status"], "pending_confirmation")
 		# Exactly one action:pending event, published to the owner.
 		pub.assert_called_once()
@@ -45,9 +49,13 @@ class TestActionPendingEvent(FrappeTestCase):
 	def test_model_facing_return_still_has_no_token(self):
 		desc = "jarvis-test-action-pending-no-token-031"
 		with patch("jarvis.chat.events.publish_to_user") as pub:
-			r = api._run_tool("create_doc", {
-				"doctype": "ToDo", "values": {"description": desc},
-			})
+			r = api._run_tool(
+				"create_doc",
+				{
+					"doctype": "ToDo",
+					"values": {"description": desc},
+				},
+			)
 		token = pub.call_args[0][1]["token"]
 		self.assertNotIn("token", r["data"])
 		self.assertNotIn(token, frappe.as_json(r))
@@ -56,9 +64,13 @@ class TestActionPendingEvent(FrappeTestCase):
 	def test_published_token_confirms_end_to_end(self):
 		desc = "jarvis-test-action-pending-e2e-032"
 		with patch("jarvis.chat.events.publish_to_user") as pub:
-			r = api._run_tool("create_doc", {
-				"doctype": "ToDo", "values": {"description": desc},
-			})
+			r = api._run_tool(
+				"create_doc",
+				{
+					"doctype": "ToDo",
+					"values": {"description": desc},
+				},
+			)
 		self.assertEqual(r["data"]["status"], "pending_confirmation")
 		token = pub.call_args[0][1]["token"]
 		self.assertFalse(frappe.db.exists("ToDo", {"description": desc}))
@@ -77,12 +89,17 @@ class TestActionPendingEvent(FrappeTestCase):
 			captured["token"] = token
 			return token
 
-		with patch("jarvis.chat.pending_confirm.mint", side_effect=spy), \
-				patch("jarvis.chat.events.publish_to_user",
-					  side_effect=RuntimeError("boom")):
-			r = api._run_tool("create_doc", {
-				"doctype": "ToDo", "values": {"description": desc},
-			})
+		with (
+			patch("jarvis.chat.pending_confirm.mint", side_effect=spy),
+			patch("jarvis.chat.events.publish_to_user", side_effect=RuntimeError("boom")),
+		):
+			r = api._run_tool(
+				"create_doc",
+				{
+					"doctype": "ToDo",
+					"values": {"description": desc},
+				},
+			)
 		# No exception escaped the gate, and it still reports the park.
 		self.assertTrue(r["ok"])
 		self.assertEqual(r["data"]["status"], "pending_confirmation")

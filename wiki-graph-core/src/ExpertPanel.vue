@@ -9,7 +9,9 @@
 				<span class="wg-meta">{{ r.score }}</span>
 			</li>
 		</ol>
-		<div v-if="selectedSlug" class="wg-hint text-muted">go-to people for <code>{{ selectedSlug }}</code></div>
+		<div v-if="selectedSlug" class="wg-hint text-muted">
+			go-to people for <code>{{ selectedSlug }}</code>
+		</div>
 	</div>
 </template>
 
@@ -33,13 +35,44 @@ export default {
 </script>
 
 <style scoped>
-.wg-exp { border: 1px solid var(--border-color, #e2e6ea); border-radius: 8px; padding: 12px; }
-.wg-h { font-weight: 600; margin-bottom: 6px; }
-.wg-exp-list { list-style: none; margin: 0; padding: 0; }
-.wg-exp-list li { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 2px 0; }
-.wg-rank { width: 16px; color: var(--text-muted, #aaa); font-size: 11px; }
-.wg-user { flex: 1; }
-.wg-meta { color: var(--text-muted, #999); font-size: 11px; }
-.wg-hint { font-size: 11px; margin-top: 6px; }
-.wg-empty { font-size: 12px; }
+.wg-exp {
+	border: 1px solid var(--border-color, #e2e6ea);
+	border-radius: 8px;
+	padding: 12px;
+}
+.wg-h {
+	font-weight: 600;
+	margin-bottom: 6px;
+}
+.wg-exp-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.wg-exp-list li {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 12px;
+	padding: 2px 0;
+}
+.wg-rank {
+	width: 16px;
+	color: var(--text-muted, #aaa);
+	font-size: 11px;
+}
+.wg-user {
+	flex: 1;
+}
+.wg-meta {
+	color: var(--text-muted, #999);
+	font-size: 11px;
+}
+.wg-hint {
+	font-size: 11px;
+	margin-top: 6px;
+}
+.wg-empty {
+	font-size: 12px;
+}
 </style>

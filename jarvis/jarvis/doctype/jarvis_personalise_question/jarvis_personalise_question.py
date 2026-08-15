@@ -63,9 +63,7 @@ class JarvisPersonaliseQuestion(Document):
 		if not self.question:
 			frappe.throw(_("Question text is required."))
 		if len(self.question) > MAX_QUESTION_LEN:
-			frappe.throw(
-				_("Question must be at most {0} characters.").format(MAX_QUESTION_LEN)
-			)
+			frappe.throw(_("Question must be at most {0} characters.").format(MAX_QUESTION_LEN))
 
 	def _validate_status(self):
 		# Self-heal a blank/None status to the default rather than relying on

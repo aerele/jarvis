@@ -24,6 +24,7 @@ neither turn drained) can never be dropped by the other turn's clear. The drain
 (``read``) is an unlocked snapshot on purpose - a note appended after it has a
 new id that no in-flight clear will match.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -57,7 +58,9 @@ def _locked(conversation: str) -> list:
 
 def _write(conversation: str, entries: list) -> None:
 	frappe.db.set_value(
-		CONV, conversation, _FIELD,
+		CONV,
+		conversation,
+		_FIELD,
 		frappe.as_json(entries) if entries else None,
 		update_modified=False,
 	)

@@ -1,175 +1,323 @@
 <template>
-	<div class="jv-settings-body">
-		<div class="jv-usr-head">
-			<div class="jv-set-sec" style="margin:0;">Team usage</div>
-			<button class="jv-btn jv-btn--sm jv-btn--ghost" :disabled="syncing" @click="onSync">
-				<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2v6h6M21 12a9 9 0 1 1-3-6.7L21 8" /></svg>
-				{{ syncing ? "Syncing…" : "Sync from agent" }}
-			</button>
+	<SettingsPane
+		title="User usage"
+		description="Per-user token usage and limits across this workspace."
+		:error="syncReason"
+	>
+		<template #actions>
+			<Button
+				variant="subtle"
+				iconLeft="refresh-cw"
+				:label="syncing ? 'Syncing…' : 'Sync from agent'"
+				:loading="syncing"
+				@click="onSync"
+			/>
+		</template>
+
+		<!-- Load failure keeps its own inline recovery rather than the pane-level
+		     error slot, which belongs to the sync action above. -->
+		<div v-if="loadError" class="flex flex-col items-center gap-3 py-12 text-center">
+			<FeatherIcon name="alert-triangle" class="size-8 text-ink-gray-4" />
+			<span class="text-base text-ink-gray-6">Could not load usage.</span>
+			<Button
+				variant="subtle"
+				label="Retry"
+				iconLeft="refresh-cw"
+				:loading="loading"
+				@click="loadUsers"
+			/>
 		</div>
 
-		<div v-if="syncReason" class="jv-run-err" style="margin-bottom:12px;">
-			<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" /><path d="M12 9v4M12 17h.01" /></svg>
-			{{ syncReason }}
-		</div>
-		<div v-else-if="syncResult" class="jv-set-hint" style="color:var(--green);margin-bottom:12px;">{{ syncResult }}</div>
+		<p v-else-if="loading && !users.length" class="text-p-base text-ink-gray-6">Loading…</p>
 
-		<div v-if="loadError" class="jv-mon-note">
-			Could not load usage. <button type="button" class="jv-mon-retry" @click="loadUsers">Retry</button>
+		<div v-else-if="!users.length" class="flex flex-col items-center gap-2 py-12 text-center">
+			<FeatherIcon name="users" class="size-8 text-ink-gray-4" />
+			<span class="text-base text-ink-gray-6">No users with settings or usage yet.</span>
 		</div>
-		<div v-else-if="loading && !users.length" class="jv-mon-note">Loading…</div>
-		<div v-else-if="!users.length" class="jv-set-empty" style="text-align:center;padding:30px 0;">No users with settings or usage yet.</div>
 
 		<template v-else>
-			<div class="jv-usr-row jv-usr-headrow">
+			<!-- Column ratios carried over from the stylesheet this pane used to
+			     ship (1.5 / 1.8 / 1.3 / 0.9). -->
+			<div
+				class="grid items-center gap-3.5 pb-2 text-xs font-medium text-ink-gray-5"
+				style="grid-template-columns: 1.5fr 1.8fr 1.3fr 0.9fr"
+			>
 				<div>User</div>
-				<div>This month</div>
-				<div>Monthly limit</div>
+				<div>Usage</div>
+				<div>Token limit</div>
 				<div>Last activity</div>
 			</div>
-			<div v-for="u in users" :key="u.user" class="jv-usr-row">
-				<div class="jv-usr-id">
-					<div class="jv-usr-name">{{ u.full_name || u.user }}</div>
-					<div class="jv-usr-email">{{ u.user }}</div>
+
+			<template v-for="u in users" :key="u.user">
+				<div
+					class="grid items-center gap-3.5 border-t py-3"
+					style="grid-template-columns: 1.5fr 1.8fr 1.3fr 0.9fr"
+				>
+					<div class="flex min-w-0 items-center gap-1.5">
+						<button
+							v-if="(u.per_model || []).length"
+							type="button"
+							class="flex size-5 shrink-0 items-center justify-center rounded text-ink-gray-5 hover:bg-surface-gray-2"
+							@click="toggle(u.user)"
+							:aria-expanded="!!expanded[u.user]"
+							:aria-label="`Per-model usage for ${u.full_name || u.user}`"
+						>
+							<FeatherIcon
+								name="chevron-right"
+								class="size-3.5 transition-transform"
+								:class="{ 'rotate-90': expanded[u.user] }"
+							/>
+						</button>
+						<span v-else class="size-5 shrink-0" />
+						<div class="min-w-0">
+							<div class="truncate text-sm font-medium text-ink-gray-8">
+								{{ u.full_name || u.user }}
+							</div>
+							<div class="truncate text-xs text-ink-gray-5">{{ u.user }}</div>
+						</div>
+					</div>
+
+					<div>
+						<template v-if="u.monthly_token_limit > 0">
+							<div class="h-1.5 overflow-hidden rounded-full bg-surface-gray-3">
+								<div
+									class="h-full bg-surface-gray-7"
+									:style="{ width: pct(u) + '%' }"
+								/>
+							</div>
+							<div class="mt-1 text-xs text-ink-gray-5">
+								{{ fmtTokens(u.total_tokens) }} of
+								{{ fmtTokens(u.monthly_token_limit) }} · {{ pct(u) }}%
+							</div>
+						</template>
+						<div v-else class="text-xs text-ink-gray-5">
+							{{ fmtTokens(u.total_tokens) }} total · unlimited
+						</div>
+					</div>
+
+					<div class="flex items-center gap-2">
+						<FormControl
+							type="number"
+							size="sm"
+							class="min-w-0 flex-1"
+							v-model.number="u._limitDraft"
+							:disabled="u._saving"
+							placeholder="0 = unlimited"
+						/>
+						<Button
+							variant="subtle"
+							size="sm"
+							label="Save"
+							:loading="u._saving"
+							:disabled="
+								u._saving ||
+								Number(u._limitDraft || 0) === Number(u.monthly_token_limit || 0)
+							"
+							@click="saveLimit(u)"
+						/>
+					</div>
+
+					<div class="text-xs text-ink-gray-5">
+						{{ u.last_usage_at ? timeAgo(u.last_usage_at) : "—" }}
+					</div>
 				</div>
-				<div class="jv-usr-meter">
-					<template v-if="u.monthly_token_limit > 0">
-						<div class="jv-usage-bar"><div class="jv-usage-fill" :style="{ width: pct(u) + '%' }"></div></div>
-						<div class="jv-set-hint">{{ fmtTokens(u.month_tokens) }} / {{ fmtTokens(u.monthly_token_limit) }} · {{ pct(u) }}%</div>
-					</template>
-					<div v-else class="jv-set-hint">{{ fmtTokens(u.month_tokens) }} this month · unlimited</div>
-					<div class="jv-usr-totalhint">{{ fmtTokens(u.total_tokens) }} total</div>
+
+				<div v-if="expanded[u.user]" class="border-t bg-surface-gray-1 px-3 py-2">
+					<div
+						v-for="m in u.per_model || []"
+						:key="m.model"
+						class="grid items-center gap-3.5 py-2"
+						style="grid-template-columns: 1.2fr 1.8fr 1.3fr"
+					>
+						<div class="truncate text-sm text-ink-gray-7">
+							{{ modelDisplayLabel(m.model) }}
+						</div>
+						<div>
+							<template v-if="m.monthly_token_limit > 0">
+								<div class="h-1.5 overflow-hidden rounded-full bg-surface-gray-3">
+									<div
+										class="h-full bg-surface-gray-7"
+										:style="{ width: modelPct(m) + '%' }"
+									/>
+								</div>
+								<div class="mt-1 text-xs text-ink-gray-5">
+									{{ fmtTokens(m.month_tokens) }} of
+									{{ fmtTokens(m.monthly_token_limit) }} · {{ modelPct(m) }}%
+								</div>
+							</template>
+							<div v-else class="text-xs text-ink-gray-5">
+								{{ fmtTokens(m.month_tokens) }} · unlimited
+							</div>
+						</div>
+						<div class="flex items-center gap-2">
+							<FormControl
+								type="number"
+								size="sm"
+								class="min-w-0 flex-1"
+								v-model.number="m._limitDraft"
+								:disabled="m._saving"
+								placeholder="0 = unlimited"
+							/>
+							<Button
+								variant="subtle"
+								size="sm"
+								label="Save"
+								:loading="m._saving"
+								:disabled="
+									m._saving ||
+									Number(m._limitDraft || 0) ===
+										Number(m.monthly_token_limit || 0)
+								"
+								@click="saveModelLimit(u, m)"
+							/>
+						</div>
+					</div>
 				</div>
-				<div class="jv-usr-limit">
-					<input
-						type="number" min="0" step="1000" class="jv-usr-limitinput"
-						v-model.number="u._limitDraft" :disabled="u._saving" placeholder="0 = unlimited"
-					/>
-					<button
-						class="jv-btn jv-btn--sm jv-btn--ghost"
-						:disabled="u._saving || Number(u._limitDraft || 0) === Number(u.monthly_token_limit || 0)"
-						@click="saveLimit(u)"
-					>{{ u._saving ? "…" : "Save" }}</button>
-				</div>
-				<div class="jv-usr-last">{{ u.last_usage_at ? timeAgo(u.last_usage_at) : "—" }}</div>
-			</div>
+			</template>
 		</template>
-	</div>
+	</SettingsPane>
 </template>
 
 <script setup>
-// Tenant-admin usage table (design doc §6, §4 admin_* endpoints). Gated at
-// the SettingsDialog level by window.is_jarvis_admin — the server re-checks
-// require_jarvis_admin() independently on every call here, so a stale client
-// gate can only hide the nav item, never bypass the real permission.
-import { ref, onMounted } from "vue"
-import { toast } from "frappe-ui"
-import { timeAgo } from "@/utils/datetime"
-import * as api from "@/api"
+// Tenant-admin usage table (fleet usage spec §7). Gated at the SettingsDialog
+// level by window.is_jarvis_admin — the server re-checks require_jarvis_admin()
+// independently on every call, so a stale client gate can only hide the nav
+// item, never bypass the real permission.
+import { ref, reactive, onMounted } from "vue";
+import { Button, FeatherIcon, FormControl, toast } from "frappe-ui";
+import { timeAgo } from "@/utils/datetime";
+import { modelDisplayLabel } from "@/utils/usageModel";
+import SettingsPane from "@/components/settings/SettingsPane.vue";
+import * as api from "@/api";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
+const users = ref([]);
+const loading = ref(false);
+const loadError = ref(false);
+const expanded = reactive({});
+
+function toggle(user) {
+	expanded[user] = !expanded[user];
 }
 
-const users = ref([])
-const loading = ref(false)
-const loadError = ref(false)
-
 async function loadUsers() {
-	loading.value = true
-	loadError.value = false
+	loading.value = true;
+	loadError.value = false;
 	try {
-		const res = await api.adminListUserUsage()
+		const res = await api.adminListUserUsage();
 		if (res && res.ok === false) {
-			loadError.value = true
-			return
+			loadError.value = true;
+			return;
 		}
-		const rows = (res && res.data) || []
-		// _limitDraft is the editable copy the number input binds to; kept
-		// separate from monthly_token_limit so the Save button can tell when
-		// the row is dirty (and revert cleanly if the request fails).
-		users.value = rows.map((u) => ({ ...u, _limitDraft: u.monthly_token_limit || 0, _saving: false }))
+		const rows = (res && res.data) || [];
+		users.value = rows.map((u) => ({
+			...u,
+			_limitDraft: u.monthly_token_limit || 0,
+			_saving: false,
+			per_model: (u.per_model || []).map((m) => ({
+				...m,
+				_limitDraft: m.monthly_token_limit || 0,
+				_saving: false,
+			})),
+		}));
 	} catch (e) {
-		loadError.value = true
+		loadError.value = true;
 	} finally {
-		loading.value = false
+		loading.value = false;
 	}
 }
 
 function fmtTokens(n) {
-	n = Number(n || 0)
-	if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M"
-	if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k"
-	return String(n)
+	n = Number(n || 0);
+	if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+	if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+	return String(n);
 }
+// All-time: compares against total_tokens (the cumulative, never-reset
+// counter), not month_tokens. See jarvis.chat.policy._over_total_limit.
 function pct(u) {
-	if (!u || !u.monthly_token_limit) return 0
-	return Math.min(100, Math.round((Number(u.month_tokens || 0) / Number(u.monthly_token_limit)) * 100))
+	if (!u || !u.monthly_token_limit) return 0;
+	return Math.min(
+		100,
+		Math.round((Number(u.total_tokens || 0) / Number(u.monthly_token_limit)) * 100)
+	);
+}
+function modelPct(m) {
+	if (!m || !m.monthly_token_limit) return 0;
+	return Math.min(
+		100,
+		Math.round((Number(m.month_tokens || 0) / Number(m.monthly_token_limit)) * 100)
+	);
 }
 
 async function saveLimit(u) {
-	const val = Math.max(0, Math.round(Number(u._limitDraft) || 0))
-	u._saving = true
+	const val = Math.max(0, Math.round(Number(u._limitDraft) || 0));
+	u._saving = true;
 	try {
-		const res = await api.adminSetUserLimit(u.user, val)
+		const res = await api.adminSetUserLimit(u.user, val);
 		if (res && res.ok === false) {
-			toast.error(res.reason || "Could not update the limit.")
-			return
+			toast.error(res.reason || "Could not update the limit.");
+			return;
 		}
-		const d = (res && res.data) || {}
-		u.monthly_token_limit = d.monthly_token_limit != null ? d.monthly_token_limit : val
-		u._limitDraft = u.monthly_token_limit
-		toast.success("Limit updated")
+		const d = (res && res.data) || {};
+		u.monthly_token_limit = d.monthly_token_limit != null ? d.monthly_token_limit : val;
+		u._limitDraft = u.monthly_token_limit;
+		toast.success("Limit updated");
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		u._saving = false
+		u._saving = false;
 	}
 }
 
-// "Sync from agent" — sweeps the openclaw gateway's sessions.list to refresh
-// per-session snapshots, then reloads the table. admin_sync_usage can return
-// {ok:false, reason:"gateway_unreachable"} (agent container down/unpaired) —
-// surfaced verbatim rather than a generic error, since it's actionable.
-const syncing = ref(false)
-const syncReason = ref("")
-const syncResult = ref("")
+async function saveModelLimit(u, m) {
+	const val = Math.max(0, Math.round(Number(m._limitDraft) || 0));
+	m._saving = true;
+	try {
+		const res = await api.adminSetUserModelLimit(u.user, m.model, val);
+		if (res && res.ok === false) {
+			toast.error(res.reason || "Could not update the model limit.");
+			return;
+		}
+		const d = (res && res.data) || {};
+		m.monthly_token_limit = d.monthly_token_limit != null ? d.monthly_token_limit : val;
+		m._limitDraft = m.monthly_token_limit;
+		toast.success(`Limit updated for ${modelDisplayLabel(m.model)}`);
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		m._saving = false;
+	}
+}
+
+// "Sync from agent" — sweeps the agent gateway's sessions.list to refresh
+// per-session snapshots, then reloads the table. Success reports through a
+// toast rather than the old green inline note (design.md §5 anti-pattern 16);
+// failure rides the pane-level error slot.
+const syncing = ref(false);
+const syncReason = ref("");
 async function onSync() {
-	syncing.value = true
-	syncReason.value = ""
-	syncResult.value = ""
+	syncing.value = true;
+	syncReason.value = "";
 	try {
-		const res = await api.adminSyncUsage()
+		const res = await api.adminSyncUsage();
 		if (res && res.ok === false) {
-			syncReason.value = res.reason || "Sync failed."
-			return
+			syncReason.value = res.reason || "Sync failed.";
+			return;
 		}
-		const d = (res && res.data) || {}
-		syncResult.value = `Synced ${d.synced_sessions ?? 0} session${d.synced_sessions === 1 ? "" : "s"} · ${d.users_updated ?? 0} user${d.users_updated === 1 ? "" : "s"} updated`
-		await loadUsers()
+		const d = (res && res.data) || {};
+		toast.success(
+			`Synced ${d.synced_sessions ?? 0} session${d.synced_sessions === 1 ? "" : "s"}, ${
+				d.users_updated ?? 0
+			} user${d.users_updated === 1 ? "" : "s"} updated`
+		);
+		await loadUsers();
 	} catch (e) {
-		syncReason.value = errMsg(e)
+		syncReason.value = errMsg(e);
 	} finally {
-		syncing.value = false
+		syncing.value = false;
 	}
 }
 
-onMounted(loadUsers)
+onMounted(loadUsers);
 </script>
-
-<style scoped>
-.jv-usr-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
-.jv-usr-row { display: grid; grid-template-columns: 1.5fr 1.8fr 1.3fr 0.9fr; gap: 14px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); }
-.jv-usr-row:last-child { border-bottom: 0; }
-.jv-usr-headrow { padding-top: 0; padding-bottom: 8px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-3); }
-.jv-usr-id { display: flex; flex-direction: column; gap: 2px; }
-.jv-usr-name { font-size: 13.5px; font-weight: 600; color: var(--text); }
-.jv-usr-email { font-size: 11.5px; color: var(--text-3); margin-top: 1px; }
-.jv-usr-meter .jv-usage-bar { margin-top: 0; }
-.jv-usr-totalhint { font-size: 11px; color: var(--text-3); margin-top: 4px; }
-.jv-usr-limit { display: flex; align-items: center; gap: 6px; }
-.jv-usr-limitinput { width: 74px; flex: none; padding: 6px 8px; font-size: 12.5px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); font-family: inherit; box-sizing: border-box; }
-.jv-usr-limitinput:focus { outline: none; border-color: var(--cta-bd); }
-.jv-usr-limitinput::-webkit-outer-spin-button, .jv-usr-limitinput::-webkit-inner-spin-button { margin: 0; }
-.jv-usr-last { font-size: 12px; color: var(--text-3); text-align: right; }
-</style>

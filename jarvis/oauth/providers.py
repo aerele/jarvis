@@ -4,6 +4,7 @@ Used by jarvis.oauth.api to drive the paste-back OAuth flow against
 the provider's own /oauth/authorize endpoint, with the codex-CLI-specific
 parameter set that auth.openai.com requires for codex's client_id.
 """
+
 import base64
 import json
 from urllib.parse import urlencode
@@ -19,59 +20,59 @@ class UnknownProviderError(JarvisError):
 _PROVIDER_OAUTH_MAP: dict[str, dict] = {
 	"OpenAI": {
 		"authorize": "https://auth.openai.com/oauth/authorize",
-		"token":     "https://auth.openai.com/oauth/token",
-		"userinfo":  "https://api.openai.com/v1/userinfo",
-		"scope":     "openid profile email offline_access api.connectors.read api.connectors.invoke",
+		"token": "https://auth.openai.com/oauth/token",
+		"userinfo": "https://api.openai.com/v1/userinfo",
+		"scope": "openid profile email offline_access api.connectors.read api.connectors.invoke",
 		# POOL sign-ins (CLIProxyAPI subscription accounts) MUST use the
 		# codex-CLI scope set - no connectors scopes. The connectors scope
 		# yields an access_token with aud=https://api.openai.com/v1 (fine for
-		# openclaw's codex app-server, which is why the DIRECT flow keeps it),
+		# agent's codex app-server, which is why the DIRECT flow keeps it),
 		# but cli-proxy-api's codex backend needs aud=chatgpt.com/backend-api
 		# and rejects the connectors-audience token: the account loads, then
 		# /v1/models returns [] and every call 502s "unknown provider".
 		# Live-verified 2026-07-03; this scope set is exactly what
 		# cli-proxy-api's own --codex-login requests.
 		"pool_scope": "openid email profile offline_access",
-		# openclaw_provider keys the auth-profiles.json entry that openclaw
+		# agent_provider keys the auth-profiles.json entry that agent
 		# looks up at request time. After fix/oauth-model-provider-key on
 		# fleet-agent + fix/chat-worker-mapped-model-provider on this app,
-		# openclaw queries by the MODEL-provider key ("openai"), not the
+		# agent queries by the MODEL-provider key ("openai"), not the
 		# OAuth flow id ("openai-codex"). The OAuth login flow itself uses
 		# the metadata above (authorize URL, scopes, codex-cli params); only
 		# the storage/lookup identity is the mapped name.
-		"openclaw_provider": "openai",
+		"agent_provider": "openai",
 		# codex-cli-specific authorize params - auth.openai.com returns a
 		# generic "unknown_error" page mid-flow without these.
 		"extra_authorize_params": {
 			"id_token_add_organizations": "true",
-			"codex_cli_simplified_flow":   "true",
-			"originator":                  "codex_cli_rs",
+			"codex_cli_simplified_flow": "true",
+			"originator": "codex_cli_rs",
 		},
 	},
 	"Google Gemini": {
 		"authorize": "https://accounts.google.com/o/oauth2/v2/auth",
-		"token":     "https://oauth2.googleapis.com/token",
+		"token": "https://oauth2.googleapis.com/token",
 		# Use Google's standard userinfo endpoint - the bundled gemini-cli
 		# OAuth client doesn't have `openid` registered, so no id_token comes
 		# back. Email is fetched via Bearer-authenticated userinfo instead.
-		"userinfo":  "https://www.googleapis.com/oauth2/v1/userinfo?alt=json",
+		"userinfo": "https://www.googleapis.com/oauth2/v1/userinfo?alt=json",
 		# Scopes MUST match what the bundled gemini-cli OAuth client has
 		# registered in its Google Cloud Console consent screen. Verified
 		# against openclaw/extensions/google/oauth.shared.ts:19-23.
 		# `https://www.googleapis.com/auth/generative-language` is NOT a real
 		# Google OAuth scope - Google returns Error 403 restricted_client
 		# "Unregistered scope(s) in the request" if anything else is sent.
-		"scope":     "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
+		"scope": "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
 		# Gemini OAuth tokens are read by the `gemini` binary which
-		# openclaw spawns via the CliBackend registered at
+		# agent spawns via the CliBackend registered at
 		# extensions/google/cli-backend.ts:16 (id "google-gemini-cli").
 		# auth-profiles.json must key the credential by this exact id -
-		# mapping to "google" makes openclaw's CLI dispatch path miss the
+		# mapping to "google" makes agent's CLI dispatch path miss the
 		# stored credential (different lookup key).
-		"openclaw_provider": "google-gemini-cli",
+		"agent_provider": "google-gemini-cli",
 		"extra_authorize_params": {
 			"access_type": "offline",
-			"prompt":      "consent",
+			"prompt": "consent",
 		},
 	},
 	# xAI Grok — SAME authorization_code + PKCE paste-back flow as codex. The
@@ -81,13 +82,25 @@ _PROVIDER_OAUTH_MAP: dict[str, dict] = {
 	# client, so client_secret stays empty. Pooled accounts feed cli-proxy-api's
 	# `xai` channel; there is no distinct pool_scope (one scope constant).
 	"xAI Grok": {
-		"authorize":   "https://auth.x.ai/oauth2/authorize",
-		"token":       "https://auth.x.ai/oauth2/token",
-		"userinfo":    "https://auth.x.ai/oauth2/userinfo",
-		"scope":       "openid profile email offline_access grok-cli:access api:access",
-		"openclaw_provider": "xai",
+		"authorize": "https://auth.x.ai/oauth2/authorize",
+		"token": "https://auth.x.ai/oauth2/token",
+		"userinfo": "https://auth.x.ai/oauth2/userinfo",
+		"scope": "openid profile email offline_access grok-cli:access api:access",
+		"agent_provider": "xai",
 		"redirect_uri": "http://127.0.0.1:56121/callback",
 		"requires_nonce": True,
+		# xAI's approval screen hands the customer a BARE authorization code to
+		# copy rather than bouncing them to a callback URL they can lift from the
+		# address bar. cli-proxy-api hits the same wall: its xai prompt reads
+		# "Paste the xAI callback Token", where the claude channel's reads "Paste
+		# the Claude callback URL". A bare code carries no `state`, so
+		# _exchange_and_build_blob skips the state compare for this provider.
+		# That is safe HERE AND ONLY HERE: the token exchange always sends this
+		# nonce's PKCE `code_verifier` (S256), so a code minted for anyone else's
+		# authorize request cannot be redeemed against it - PKCE already supplies
+		# the request binding that state would. Do NOT set this on a provider
+		# that returns a real callback URL.
+		"code_only_paste": True,
 		"extra_authorize_params": {"plan": "generic", "referrer": "cli-proxy-api"},
 	},
 	# Kimi (Moonshot) — DEVICE-CODE flow (RFC 8628), NOT paste-back: there is no
@@ -96,10 +109,10 @@ _PROVIDER_OAUTH_MAP: dict[str, dict] = {
 	# shows user_code + verification_uri and polls poll_pool_account_signin.
 	# Public device client (no secret, no PKCE). Custom X-Msh-* headers required.
 	"Kimi (Moonshot)": {
-		"grant_type":    "device_code",
+		"grant_type": "device_code",
 		"device_authorization": "https://auth.kimi.com/api/oauth/device_authorization",
-		"token":         "https://auth.kimi.com/api/oauth/token",
-		"openclaw_provider": "kimi",
+		"token": "https://auth.kimi.com/api/oauth/token",
+		"agent_provider": "kimi",
 		"device_headers": {"X-Msh-Platform": "cli-proxy-api", "X-Msh-Version": "1.0.0"},
 		"poll_interval_s": 5,
 	},
@@ -121,6 +134,29 @@ def is_oauth_provider(label: str) -> bool:
 	return entry is not None and entry.get("grant_type") != "device_code"
 
 
+def accepts_bare_code(label: str) -> bool:
+	"""True when ``label``'s approval screen hands back a BARE authorization code
+	instead of a callback URL, so the paste box must take the code on its own.
+
+	Only xAI sets ``code_only_paste``. See the comment on that key for why
+	skipping the ``state`` compare is sound for a bare code (PKCE binds it) and
+	why no URL-returning provider may opt in.
+	"""
+	return bool(_PROVIDER_OAUTH_MAP.get(label, {}).get("code_only_paste"))
+
+
+def agent_provider_for(label: str) -> str:
+	"""The ``agent_provider`` (cliproxy upstream id — ``openai`` /
+	``google-gemini-cli`` / ``xai`` / ``kimi``) for a subscription provider label,
+	or "" when the label is not a known OAuth/subscription provider.
+
+	Metadata only: unlike ``get_provider`` it never resolves the client id/secret,
+	so it is cheap enough for the chat hot path (``_catalog_models_for_pool`` maps
+	a catalog entry's ``subscription_label`` to the upstream a pool row carries).
+	"""
+	return (_PROVIDER_OAUTH_MAP.get(label) or {}).get("agent_provider", "")
+
+
 def get_provider(label: str) -> dict:
 	"""Look up provider metadata, including the lazy-resolved client_id +
 	client_secret. ``client_secret`` is an empty string for PKCE-only
@@ -136,9 +172,9 @@ def get_provider(label: str) -> dict:
 
 
 def extract_account_id(provider: str, access_token: str) -> str:
-	"""Pull openclaw's `accountId` claim out of the access JWT.
+	"""Pull agent's `accountId` claim out of the access JWT.
 
-	openclaw's codex auth resolver gates on this field: profiles without
+	agent's codex auth resolver gates on this field: profiles without
 	an accountId are treated as unusable and chat fails with "No API key
 	found for provider openai". See openclaw/docs/concepts/oauth.md step
 	6 of the codex OAuth exchange.
@@ -170,14 +206,20 @@ def extract_account_id(provider: str, access_token: str) -> str:
 	return value if isinstance(value, str) else ""
 
 
-def build_authorize_url(*, provider: str, redirect_uri: str,
-                         code_challenge: str, state: str,
-                         pool: bool = False, oidc_nonce: str = "") -> str:
+def build_authorize_url(
+	*,
+	provider: str,
+	redirect_uri: str,
+	code_challenge: str,
+	state: str,
+	pool: bool = False,
+	oidc_nonce: str = "",
+) -> str:
 	"""Construct the /oauth/authorize URL with all required parameters.
 
 	``pool=True`` selects the provider's ``pool_scope`` when it defines one
 	(subscription-pool accounts consumed by cli-proxy-api need a different
-	token audience than the direct openclaw flow - see the OpenAI entry).
+	token audience than the direct agent flow - see the OpenAI entry).
 
 	``oidc_nonce`` is added to the authorize params only for providers that set
 	``requires_nonce`` (xAI's authorize endpoint 400s without a fresh nonce, the

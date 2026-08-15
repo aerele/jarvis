@@ -1,0 +1,809 @@
+// The orchestrator: everything the reducer is not allowed to do. Every side
+// effect is injected, so this file can assert the rules that only show up in a
+// sequence - the navigate-to-pay decision, check-on-failure after a return, a
+// superseded attempt's loop stopping, a rate limit that does not become a retry.
+//
+// plan-09 WS7 (the admin-hosted checkout cutover): the flow opens NO gateway
+// sheet. A payable answer carries a pay-page token + the bench's OWN attested
+// origin, and the customer is TOP-LEVEL NAVIGATED to `{origin}/jarvis-checkout#t=
+// <token>` via the injected `navigate`. There is NO FALLBACK: a token with no
+// attested origin, or a pre-cutover admin's raw handles with no token, fails
+// closed and navigates nothing.
+
+import { describe, test, expect, vi } from "vitest";
+
+import { CODES } from "@/onboarding/paymentCodes";
+import { STATES, canNavigateToPay } from "@/onboarding/paymentMachine";
+import {
+	useBillingDetails,
+	STORAGE_PROMISE_SAVED,
+	STORAGE_PROMISE_LOCAL,
+} from "@/onboarding/useBillingDetails";
+import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
+
+const ORIGIN = "https://fleet.klerk.in";
+
+const ENVELOPE = (data, over = {}) => ({
+	status: 200,
+	body: { message: { ok: true, contract_version: 2, data, context: {}, ...over } },
+});
+const REFUSAL = (error, status = 409) => ({
+	status,
+	body: { message: { ok: false, error, context: {} } },
+});
+
+// A navigable pay-page token answer (the cutover shape): token + bench origin +
+// admin's attestation, injected by onboarding_contract.augment_pay_page.
+const TOKEN_DATA = (over = {}) => ({
+	code: CODES.PAYMENT_PAGE_REDIRECT,
+	attempt_id: "att_1",
+	generation: 1,
+	payment_provider: "razorpay",
+	pay_page_token: "tok_1",
+	pay_origin: ORIGIN,
+	pay_origin_attested: true,
+	can_check_status: true,
+	...over,
+});
+
+function makeApi(over = {}) {
+	return {
+		startSignup: vi.fn(async () => ENVELOPE(TOKEN_DATA())),
+		getOnboardingState: vi.fn(async () =>
+			ENVELOPE({
+				code: CODES.PAYMENT_CONFIRMATION_PENDING,
+				attempt_id: "att_1",
+				generation: 1,
+			})
+		),
+		initiateSignupPayment: vi.fn(async () =>
+			ENVELOPE(TOKEN_DATA({ generation: 2, pay_page_token: "tok_2" }))
+		),
+		checkSignupPaymentStatus: vi.fn(async () =>
+			ENVELOPE({
+				code: CODES.PAYMENT_CONFIRMATION_PENDING,
+				attempt_id: "att_1",
+				generation: 1,
+				gateway_consulted: true,
+			})
+		),
+		syncConnection: vi.fn(async () => ({ synced: true })),
+		...over,
+	};
+}
+
+function makeFlow(over = {}) {
+	const api = over.api || makeApi();
+	const navigate = over.navigate || vi.fn();
+	const store = new Map();
+	const flow = createPaymentFlow({
+		api,
+		navigate,
+		sleep: over.sleep || (async () => {}),
+		now: over.now || (() => 1_000_000),
+		storage: { get: (k) => store.get(k) || null, set: (k, v) => store.set(k, v) },
+		strict: true,
+		...over.options,
+	});
+	return { flow, api, navigate };
+}
+
+// ---------------------------------------------------------------------------
+describe("the first payment: navigate to the admin-hosted pay page", () => {
+	test("a review submit signs up once and top-level-navigates to the built URL", async () => {
+		const { flow, api, navigate } = makeFlow();
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+		});
+		expect(api.startSignup).toHaveBeenCalledTimes(1);
+		expect(navigate).toHaveBeenCalledTimes(1);
+		expect(navigate).toHaveBeenCalledWith({
+			url: `${ORIGIN}/jarvis-checkout#t=tok_1`,
+			attemptId: "att_1",
+		});
+		// The machine records we left for the pay page.
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		expect(flow.state.value.illegalTransitions).toBe(0);
+	});
+
+	test("a review submit forwards partner_code as a top-level field, not inside billing", async () => {
+		const { flow, api } = makeFlow();
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			provider: "razorpay",
+			partner_code: "PARTNER-1",
+		});
+		expect(api.startSignup).toHaveBeenCalledWith(
+			expect.objectContaining({ partner_code: "PARTNER-1" }),
+			expect.anything()
+		);
+	});
+
+	test("a signup still awaiting verification navigates nothing", async () => {
+		const api = makeApi({
+			startSignup: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+					pending_verification: true,
+					attempt_id: "att_1",
+					generation: 0,
+					can_initiate_payment: false,
+				})
+			),
+		});
+		const { flow, navigate } = makeFlow({ api });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+		expect(navigate).not.toHaveBeenCalled();
+	});
+
+	test("money parked for reconciliation refuses the signup submit itself", async () => {
+		const api = makeApi({
+			startSignup: vi.fn(async () =>
+				REFUSAL({
+					code: CODES.BENCH_AWAITING_RECONCILIATION,
+					message: "we're still confirming a payment on this signup",
+					recovery: "check_status",
+				})
+			),
+		});
+		const { flow, navigate } = makeFlow({ api });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(navigate).not.toHaveBeenCalled();
+		expect(flow.state.value.awaitingReconciliation).toBe(true);
+		expect(flow.state.value.canInitiate).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("NO FALLBACK: nothing navigates without an attested token", () => {
+	test("a token with an UNATTESTED origin fails closed and navigates nothing", async () => {
+		const api = makeApi({
+			startSignup: vi.fn(async () => ENVELOPE(TOKEN_DATA({ pay_origin_attested: false }))),
+		});
+		const { flow, navigate } = makeFlow({ api });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(navigate).not.toHaveBeenCalled();
+		expect(flow.state.value.value).toBe(STATES.FAILED_TERMINAL);
+		expect(flow.state.value.code).toBe(CODES.BENCH_PAY_ORIGIN_UNCONFIGURED);
+	});
+
+	test("a token with NO configured origin fails closed", async () => {
+		const api = makeApi({
+			startSignup: vi.fn(async () =>
+				ENVELOPE(TOKEN_DATA({ pay_origin: "", pay_origin_attested: false }))
+			),
+		});
+		const { flow, navigate } = makeFlow({ api });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(navigate).not.toHaveBeenCalled();
+		expect(flow.state.value.code).toBe(CODES.BENCH_PAY_ORIGIN_UNCONFIGURED);
+	});
+
+	test("a pre-cutover admin's RAW HANDLES with no token never navigate (upgrade-required hold)", async () => {
+		// The flow's decoder maps raw-handles-no-token to CLIENT_UPGRADE_REQUIRED; the
+		// reducer renders an honest terminal hold and the flow navigates nothing.
+		const api = makeApi({
+			startSignup: vi.fn(async () =>
+				ENVELOPE({
+					// no `code`, no token: a flat legacy answer carrying raw handles
+					attempt_id: "att_1",
+					generation: 1,
+					payment_provider: "razorpay",
+					razorpay_order_id: "order_1",
+					razorpay_key_id: "k",
+				})
+			),
+		});
+		const { flow, navigate } = makeFlow({ api });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(navigate).not.toHaveBeenCalled();
+		expect(flow.state.value.value).toBe(STATES.FAILED_TERMINAL);
+		expect(flow.state.value.code).toBe(CODES.CLIENT_UPGRADE_REQUIRED);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("one navigation, ever, per intent state", () => {
+	test("a burst of submit clicks produces exactly one signup and one navigate", async () => {
+		const { flow, api, navigate } = makeFlow();
+		await Promise.all([
+			flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" }),
+			flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" }),
+			flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" }),
+		]);
+		expect(api.startSignup).toHaveBeenCalledTimes(1);
+		expect(navigate).toHaveBeenCalledTimes(1);
+	});
+
+	test("navigateToPay is a no-op once we have already navigated (checkout_open)", async () => {
+		const { flow, navigate } = makeFlow();
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(navigate).toHaveBeenCalledTimes(1);
+		// A direct re-call cannot double-navigate: checkout_open is not navigable.
+		const ok = flow.navigateToPay();
+		expect(ok).toBe(false);
+		expect(navigate).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("initiate (the authenticated retry)", () => {
+	test("a navigable initiate navigates, and the SPA sends NO idempotency key", async () => {
+		const { flow, api, navigate } = makeFlow();
+		await flow.initiatePayment({ plan: "pro", provider: "razorpay" });
+		expect(navigate).toHaveBeenCalledTimes(1);
+		expect(navigate).toHaveBeenCalledWith({
+			url: `${ORIGIN}/jarvis-checkout#t=tok_2`,
+			attemptId: "att_1",
+		});
+		const [args] = api.initiateSignupPayment.mock.calls[0];
+		expect(args).not.toHaveProperty("idempotency_key");
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("verification continues in one round trip", () => {
+	test("a verified, now-navigable signup navigates on the same click", async () => {
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () => ENVELOPE(TOKEN_DATA())),
+		});
+		const { flow, navigate } = makeFlow({ api });
+		await flow.verifyAndContinue();
+		expect(navigate).toHaveBeenCalledTimes(1);
+	});
+
+	test("a still-unverified signup navigates nothing and keeps its own copy", async () => {
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+					pending_verification: true,
+					attempt_id: "att_1",
+					generation: 0,
+				})
+			),
+		});
+		const { flow, navigate } = makeFlow({ api });
+		await flow.verifyAndContinue();
+		expect(navigate).not.toHaveBeenCalled();
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+	});
+
+	test("the verify button guards its own round trip (a triple-click is one call, one navigate)", async () => {
+		const api = makeApi({ getOnboardingState: vi.fn(async () => ENVELOPE(TOKEN_DATA())) });
+		const { flow, navigate } = makeFlow({ api });
+		await Promise.all([
+			flow.verifyAndContinue(),
+			flow.verifyAndContinue(),
+			flow.verifyAndContinue(),
+		]);
+		expect(api.getOnboardingState).toHaveBeenCalledTimes(1);
+		expect(navigate).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// jarvis#297 P0-2a: the email-verification dead end - resend + change email.
+// ---------------------------------------------------------------------------
+describe("resend the verification link", () => {
+	test("a successful resend reports {sent:true} and starts the cooldown", async () => {
+		const api = makeApi({
+			resendVerification: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+					pending_verification: true,
+					attempt_id: "att_1",
+					generation: 0,
+					can_resend_verification: true,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, now: () => 1_000_000 });
+		const out = await flow.resendVerification();
+		expect(out).toEqual({ sent: true });
+		expect(flow.state.value.resendCooldownUntil).toBe(1_030_000);
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+	});
+
+	test("a failed resend reports {sent:false} and starts no cooldown", async () => {
+		const api = makeApi({
+			resendVerification: vi.fn(async () => ({ status: 0, body: null, networkError: true })),
+		});
+		const { flow } = makeFlow({ api });
+		const out = await flow.resendVerification();
+		expect(out).toEqual({ sent: false });
+		expect(flow.state.value.resendCooldownUntil).toBe(0);
+	});
+
+	test("the resend button guards its own round trip (a triple-click is one call)", async () => {
+		const api = makeApi({
+			resendVerification: vi.fn(async () =>
+				ENVELOPE({ code: CODES.SIGNUP_VERIFICATION_REQUIRED, pending_verification: true })
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await Promise.all([
+			flow.resendVerification(),
+			flow.resendVerification(),
+			flow.resendVerification(),
+		]);
+		expect(api.resendVerification).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("change the email address and restart verification (jarvis#297 P0-2a)", () => {
+	test("restart from VERIFICATION_REQUIRED, then a fresh submit with the corrected address re-requests verification", async () => {
+		const api = makeApi({
+			startSignup: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+					pending_verification: true,
+					attempt_id: "att_typo",
+					generation: 0,
+					email: "typo@exmaple.com",
+				})
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.submitReview({ email: "typo@exmaple.com", company: "Acme", plan: "pro" });
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+
+		// "Use a different email": restart is safe here (canSafelyRestart) because
+		// no gateway object exists yet on this code - the reset lands back on a
+		// fresh review, exactly like any other restart-safe code.
+		const { reset } = flow.restart();
+		expect(reset).toBe(true);
+		expect(flow.state.value.value).toBe(STATES.REVIEW);
+
+		// The corrected address is a DIFFERENT (email, company) pair from admin's
+		// point of view, so it is a fresh signup, not the duplicate-resume path -
+		// it lands on its own new VERIFICATION_REQUIRED, not a re-serve of the
+		// old attempt.
+		api.startSignup.mockResolvedValueOnce(
+			ENVELOPE({
+				code: CODES.SIGNUP_VERIFICATION_REQUIRED,
+				pending_verification: true,
+				attempt_id: "att_fixed",
+				generation: 0,
+				email: "real@example.com",
+			})
+		);
+		await flow.submitReview({ email: "real@example.com", company: "Acme", plan: "pro" });
+		expect(flow.state.value.value).toBe(STATES.VERIFICATION_REQUIRED);
+		expect(flow.state.value.summary.email).toBe("real@example.com");
+		expect(api.startSignup).toHaveBeenCalledTimes(2);
+	});
+
+	test("restart is refused while a real payment could still be behind the code", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.checkStatus();
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+		const { reset } = flow.restart();
+		expect(reset).toBe(false);
+		expect(flow.state.value.value).toBe(STATES.UNKNOWN);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("the machine decides what navigates", () => {
+	test("a GENERATION-FENCED answer navigates nothing (the reducer refused it)", async () => {
+		// Seed a live intent at generation 5.
+		const api = makeApi({
+			startSignup: vi.fn(async () => ENVELOPE(TOKEN_DATA({ generation: 5 }))),
+			// A retry whose answer is a LOSING generation of the same attempt: the
+			// reducer ignores it outright, so it is not navigable and nothing navigates.
+			initiateSignupPayment: vi.fn(async () =>
+				ENVELOPE(TOKEN_DATA({ generation: 1, pay_page_token: "stale" }))
+			),
+			// The reconcile after the return must not itself supersede the intent.
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 5,
+				})
+			),
+		});
+		const { flow, navigate } = makeFlow({ api });
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" }); // → CHECKOUT_OPEN
+		await flow.returnFromCheckout(); // → UNKNOWN (gen 5)
+		navigate.mockClear();
+		await flow.initiatePayment({ plan: "pro" });
+		expect(navigate).not.toHaveBeenCalled();
+		expect(canNavigateToPay(flow.state.value)).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("the rate limit", () => {
+	test("a 429 cools the check down and never becomes a payment", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				REFUSAL({ code: CODES.PAYMENT_CHECK_RATE_LIMITED, retry_after_seconds: 30 }, 429)
+			),
+		});
+		const { flow, navigate } = makeFlow({ api });
+		await flow.checkStatus();
+		expect(flow.state.value.checkCooldownUntil).toBeGreaterThan(0);
+		expect(navigate).not.toHaveBeenCalled();
+	});
+
+	test("a 429 is NOT a check the customer got an answer to (no support tick)", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				REFUSAL({ code: CODES.PAYMENT_CHECK_RATE_LIMITED, retry_after_seconds: 5 }, 429)
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.checkStatus();
+		expect(flow.state.value.supportChecks.checks).toBe(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("check-on-failure keeps the fact that matters (P0-1)", () => {
+	test("a check that discovers the payment landed advances to paid", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.checkStatus();
+		expect(flow.state.value.value).toBe(STATES.PAID);
+	});
+
+	test("parked money learned by a check suppresses the pay affordance", async () => {
+		const api = makeApi({
+			checkSignupPaymentStatus: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+					can_initiate_payment: true,
+					awaiting_manual_reconciliation: true,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.checkStatus();
+		expect(flow.state.value.awaitingReconciliation).toBe(true);
+		expect(flow.state.value.canInitiate).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("return from the pay page (P0-2)", () => {
+	test("returnFromCheckout leaves checkout_open for a reconciled unknown", async () => {
+		const { flow, api } = makeFlow();
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		const out = await flow.returnFromCheckout();
+		expect(out.returned).toBe(true);
+		// It reconciled server truth (the mandatory check ran).
+		expect(api.checkSignupPaymentStatus).toHaveBeenCalled();
+	});
+
+	test("returnFromCheckout is a no-op when we never navigated away", async () => {
+		const { flow } = makeFlow();
+		const out = await flow.returnFromCheckout();
+		expect(out.returned).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("cancelInFlight", () => {
+	test("a cancel mid-verify does not strand the busy flag", async () => {
+		let release;
+		const api = makeApi({
+			getOnboardingState: vi.fn(() => new Promise((r) => (release = r))),
+		});
+		const { flow } = makeFlow({ api });
+		const p = flow.verifyAndContinue();
+		// Let `deadlined` call the api (it invokes fn on a microtask) so `release` is set.
+		await new Promise((r) => setTimeout(r, 0));
+		flow.cancelInFlight();
+		release(ENVELOPE(TOKEN_DATA()));
+		await p;
+		expect(flow.state.value.busy).toBe(null);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("the mount contract", () => {
+	test("day one renders a fresh start, never 'contact support'", async () => {
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({ code: CODES.BENCH_NO_SIGNUP_CONTEXT })
+			),
+		});
+		const { flow } = makeFlow({ api });
+		const truth = await flow.hydrate();
+		expect(truth.notStarted).toBe(true);
+		expect(flow.state.value.value).toBe(STATES.REVIEW);
+	});
+
+	test("an unpaid mid-flight signup is NOT paid, whatever the local credentials say", async () => {
+		const { flow } = makeFlow();
+		const truth = await flow.hydrate();
+		expect(truth.paid).toBe(false);
+	});
+
+	test("an Active subscription is paid", async () => {
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api });
+		const truth = await flow.hydrate();
+		expect(truth.paid).toBe(true);
+	});
+
+	test("when the control plane cannot be reached, paid is UNKNOWN - not false", async () => {
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () => ({ status: 0, body: null, networkError: true })),
+		});
+		const { flow } = makeFlow({ api });
+		const truth = await flow.hydrate();
+		expect(truth.paid).toBe(null);
+	});
+
+	test("a FROZEN checkout_open on mount takes the safe return exit and reconciles", async () => {
+		// Simulate a bfcache-restored instance already in checkout_open, then hydrate.
+		const { flow, api } = makeFlow();
+		await flow.submitReview({ email: "a@b.com", company: "Acme", plan: "pro" });
+		expect(flow.state.value.value).toBe(STATES.CHECKOUT_OPEN);
+		api.getOnboardingState.mockClear();
+		await flow.hydrate();
+		// It left checkout_open via the explicit exit and read server truth.
+		expect(flow.state.value.value).not.toBe(STATES.CHECKOUT_OPEN);
+		expect(api.getOnboardingState).toHaveBeenCalled();
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("the support handoff", () => {
+	test("checks against one attempt eventually offer a human", async () => {
+		const { flow } = makeFlow();
+		for (let i = 0; i < 6; i++) await flow.checkStatus();
+		expect(flow.state.value.supportOffered).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+describe("the provisioning poll", () => {
+	test("refuses to run twice at once", async () => {
+		let release;
+		const api = makeApi({
+			syncConnection: vi.fn(() => new Promise((r) => (release = r))),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api });
+		await flow.hydrate(); // → paid
+		const p1 = flow.waitForProvisioning();
+		const p2 = flow.waitForProvisioning();
+		expect(await p2).toEqual({ status: "already_running" });
+		release({ synced: true });
+		await p1;
+	});
+
+	// The per-tick observation the page renders its phase from. Before this the
+	// poll swallowed tenant_status on every non-ready tick, so the screen had
+	// nothing to say for 90 seconds.
+	test("reports what each tick observed, including a tick that answered nothing", async () => {
+		const answers = [null, { synced: false, tenant_status: "pending" }, { synced: true }];
+		let i = 0;
+		const api = makeApi({
+			syncConnection: vi.fn(async () => {
+				const a = answers[i++];
+				if (a === null) throw new Error("network");
+				return a;
+			}),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		await flow.hydrate();
+		const seen = [];
+		const out = await flow.waitForProvisioning({ onObservation: (o) => seen.push(o) });
+
+		expect(out).toEqual({ status: "ready" });
+		expect(seen).toEqual([
+			{ answered: false, tenantStatus: "" },
+			{ answered: true, tenantStatus: "pending" },
+			{ answered: true, tenantStatus: "" },
+		]);
+	});
+
+	// Rendering must never be able to break the wait.
+	test("an observer that throws does not stop the poll", async () => {
+		const api = makeApi({
+			syncConnection: vi.fn(async () => ({ synced: true })),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		await flow.hydrate();
+		const out = await flow.waitForProvisioning({
+			onObservation: () => {
+				throw new Error("render blew up");
+			},
+		});
+		expect(out).toEqual({ status: "ready" });
+	});
+
+	test("no observer at all is still a valid call", async () => {
+		const api = makeApi({
+			syncConnection: vi.fn(async () => ({ synced: true })),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		await flow.hydrate();
+		expect(await flow.waitForProvisioning()).toEqual({ status: "ready" });
+	});
+
+	test("stops when its attempt is superseded", async () => {
+		const api = makeApi({
+			syncConnection: vi.fn(async () => ({ synced: false })),
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_ALREADY_ACTIVE,
+					attempt_id: "att_1",
+					generation: 1,
+				})
+			),
+		});
+		const { flow } = makeFlow({ api, sleep: async () => {} });
+		await flow.hydrate();
+		const p = flow.waitForProvisioning();
+		flow.cancelInFlight();
+		expect(await p).toEqual({ status: "superseded" });
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Plan 01: the billing round-trip. The customer's contact/address/city/GSTIN
+// ride the FIRST signup call (a guest has no session for the authenticated
+// update_billing facade), and the "kept with your account" promise stays honest
+// until admin acknowledges the durable write with billing_saved:true. These wire
+// the flow to a REAL useBillingDetails so the end-to-end promise flip is proven.
+function memStorage() {
+	const m = new Map();
+	return {
+		getItem: (k) => (m.has(k) ? m.get(k) : null),
+		setItem: (k, v) => m.set(k, String(v)),
+		removeItem: (k) => m.delete(k),
+	};
+}
+
+describe("Plan 01: billing rides the first signup", () => {
+	test("a fresh signup sends the billing object and a billing_saved ack flips the promise", async () => {
+		const billing = useBillingDetails({ site: "s", user: "u", storage: memStorage() });
+		billing.setUserValue("contact", "+91 99999 88888");
+		billing.setUserValue("city", "Chennai");
+		const built = billing.buildBilling();
+		expect(billing.promiseCopy.value).toBe(STORAGE_PROMISE_LOCAL);
+
+		const api = makeApi({
+			startSignup: vi.fn(async () => ENVELOPE(TOKEN_DATA({ billing_saved: true }))),
+		});
+		const { flow } = makeFlow({
+			api,
+			options: { onBillingSaved: (saved) => billing.markBillingSaved(saved) },
+		});
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			billing: built,
+		});
+
+		// The billing object rode start_signup...
+		expect(api.startSignup).toHaveBeenCalledWith(
+			expect.objectContaining({ billing: built }),
+			expect.anything()
+		);
+		// ...and the durable-write ack flipped the promise to the truthful copy.
+		expect(billing.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED);
+	});
+
+	test("no ack leaves the honest local copy and the local snapshot intact", async () => {
+		const storage = memStorage();
+		const billing = useBillingDetails({ site: "s", user: "u", storage });
+		billing.setUserValue("contact", "+91 99999 88888");
+		const built = billing.buildBilling();
+
+		// A token answer with NO billing_saved (an older admin that ignores the kwarg).
+		const api = makeApi({ startSignup: vi.fn(async () => ENVELOPE(TOKEN_DATA())) });
+		const { flow } = makeFlow({
+			api,
+			options: { onBillingSaved: (saved) => billing.markBillingSaved(saved) },
+		});
+		await flow.submitReview({
+			email: "a@b.com",
+			company: "Acme",
+			plan: "pro",
+			billing: built,
+		});
+
+		expect(api.startSignup).toHaveBeenCalledWith(
+			expect.objectContaining({ billing: built }),
+			expect.anything()
+		);
+		expect(billing.promiseCopy.value).toBe(STORAGE_PROMISE_LOCAL);
+		// The transitional local snapshot survives an un-acknowledged signup.
+		expect(storage.getItem(billing.storageKey)).toBeTruthy();
+	});
+
+	test("resume hydrates admin's billing snapshot (cross-device recovery)", async () => {
+		const billing = useBillingDetails({ site: "s", user: "u", storage: memStorage() });
+		const summary = { contact_number: "+91 90000 00000", city: "Chennai" };
+		const api = makeApi({
+			getOnboardingState: vi.fn(async () =>
+				ENVELOPE({
+					code: CODES.PAYMENT_CONFIRMATION_PENDING,
+					attempt_id: "att_1",
+					generation: 1,
+					billing: summary,
+				})
+			),
+		});
+		const { flow } = makeFlow({
+			api,
+			options: { onServerBilling: (s) => billing.hydrateServerSnapshot(s) },
+		});
+		await flow.hydrate();
+
+		expect(billing.fields.contact.value).toBe("+91 90000 00000");
+		expect(billing.fields.city.value).toBe("Chennai");
+		// A stored snapshot is by definition persisted, so the promise is truthful.
+		expect(billing.promiseCopy.value).toBe(STORAGE_PROMISE_SAVED);
+	});
+});

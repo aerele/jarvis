@@ -254,13 +254,32 @@ def _admin_bank_users() -> list[str]:
 
 
 def _users_with_role(role: str) -> list[str]:
+	"""Enabled holders of ``role``, minus service identities and Website users.
+
+	The user_type filter is deliberate and not redundant with the role check: a
+	stale "Jarvis User" Has Role row can outlive the gate on any bench that
+	granted the role before ``has_jarvis_access`` began requiring a System User.
+	Filtering here keeps every targeting set aligned with the gate itself, rather
+	than depending on a one-time revoke patch having cleaned the rows up."""
 	from frappe.utils.user import get_users_with_role
 
 	try:
 		found = set(get_users_with_role(role))
+		candidates = sorted(u for u in found if u and u not in _EXCLUDE_USERS)
+		if not candidates:
+			return []
+		# Indexed primary-key IN lookup, and the caller already runs a per-user
+		# db.exists in its own loop, so this is not a meaningful added cost.
+		system_users = set(
+			frappe.get_all(
+				"User",
+				filters={"name": ["in", candidates], "user_type": "System User"},
+				pluck="name",
+			)
+		)
 	except Exception:
 		return []
-	return sorted(u for u in found if u and u not in _EXCLUDE_USERS)
+	return [u for u in candidates if u in system_users]
 
 
 def _learning_questions_today(user: str) -> int:

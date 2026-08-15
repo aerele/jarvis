@@ -20,6 +20,7 @@ Fixture: ``Note`` is a core doctype whose "Desk User" DocPerm grants
 plain Desk User who creates+owns a Note has "share" permission on THAT
 Note, while a second, unrelated Desk User does not.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -34,14 +35,16 @@ OUTSIDER = "jv-unshare-outsider@example.com"
 
 def _ensure_user(email: str) -> str:
 	if not frappe.db.exists("User", email):
-		frappe.get_doc({
-			"doctype": "User",
-			"email": email,
-			"first_name": email.split("@")[0],
-			"send_welcome_email": 0,
-			"enabled": 1,
-			"user_type": "System User",
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": email.split("@")[0],
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "System User",
+			}
+		).insert(ignore_permissions=True)
 	user = frappe.get_doc("User", email)
 	# Fresh test-bench users may inherit System Manager - strip it so these
 	# are genuinely "normal" (non-System-Manager) users, matching the
@@ -71,14 +74,20 @@ class TestUnshareDocPermissionBoundary(FrappeTestCase):
 		"""As OWNER (a plain Desk User): create a Note - if_owner gives OWNER
 		"share" on it - and share it with RECIPIENT. Returns the note name."""
 		frappe.set_user(OWNER)
-		note = frappe.get_doc({
-			"doctype": "Note", "title": "jv-unshare-test-note", "content": "hello",
-		}).insert()
+		note = frappe.get_doc(
+			{
+				"doctype": "Note",
+				"title": "jv-unshare-test-note",
+				"content": "hello",
+			}
+		).insert()
 		frappe.share.add(doctype="Note", name=note.name, user=RECIPIENT, read=1)
-		self.assertTrue(frappe.db.exists(
-			"DocShare",
-			{"share_doctype": "Note", "share_name": note.name, "user": RECIPIENT},
-		))
+		self.assertTrue(
+			frappe.db.exists(
+				"DocShare",
+				{"share_doctype": "Note", "share_name": note.name, "user": RECIPIENT},
+			)
+		)
 		return note.name
 
 	def test_owner_who_shared_can_unshare_without_permission_error(self):
@@ -90,12 +99,13 @@ class TestUnshareDocPermissionBoundary(FrappeTestCase):
 		note_name = self._make_shared_note()
 		# Still acting as OWNER.
 		out = unshare_doc("Note", note_name, RECIPIENT)
-		self.assertEqual(
-			out, {"doctype": "Note", "name": note_name, "user": RECIPIENT})
-		self.assertFalse(frappe.db.exists(
-			"DocShare",
-			{"share_doctype": "Note", "share_name": note_name, "user": RECIPIENT},
-		))
+		self.assertEqual(out, {"doctype": "Note", "name": note_name, "user": RECIPIENT})
+		self.assertFalse(
+			frappe.db.exists(
+				"DocShare",
+				{"share_doctype": "Note", "share_name": note_name, "user": RECIPIENT},
+			)
+		)
 
 	def test_user_without_share_permission_on_target_is_denied(self):
 		"""A Desk User with no relationship to the Note (not owner, not
@@ -107,7 +117,9 @@ class TestUnshareDocPermissionBoundary(FrappeTestCase):
 			unshare_doc("Note", note_name, RECIPIENT)
 		# Nothing was removed by the denied attempt.
 		frappe.set_user(OWNER)
-		self.assertTrue(frappe.db.exists(
-			"DocShare",
-			{"share_doctype": "Note", "share_name": note_name, "user": RECIPIENT},
-		))
+		self.assertTrue(
+			frappe.db.exists(
+				"DocShare",
+				{"share_doctype": "Note", "share_name": note_name, "user": RECIPIENT},
+			)
+		)

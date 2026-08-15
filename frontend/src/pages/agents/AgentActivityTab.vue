@@ -19,7 +19,10 @@
 			<div v-if="loading && !rows.length" class="py-10 text-center text-sm text-ink-gray-5">
 				Loading activity…
 			</div>
-			<div v-else-if="error && !rows.length" class="py-10 text-center text-sm text-ink-red-4">
+			<div
+				v-else-if="error && !rows.length"
+				class="py-10 text-center text-sm text-ink-red-4"
+			>
 				{{ error }}
 			</div>
 			<div
@@ -35,7 +38,9 @@
 
 			<div v-else class="divide-y">
 				<div v-for="r in rows" :key="r.name" class="flex items-start gap-3 py-3">
-					<div class="grid size-8 shrink-0 place-items-center rounded-full bg-surface-gray-2">
+					<div
+						class="grid size-8 shrink-0 place-items-center rounded-full bg-surface-gray-2"
+					>
 						<FeatherIcon
 							:name="actionIcon(r.action)"
 							class="size-4"
@@ -47,14 +52,18 @@
 							<span class="text-base font-medium text-ink-gray-8">
 								{{ r.agent_title || r.agent }}
 							</span>
-							<span class="text-sm text-ink-gray-5">{{ actionLabel(r.action) }}</span>
+							<span class="text-sm text-ink-gray-5">{{
+								actionLabel(r.action)
+							}}</span>
 						</div>
 						<div v-if="r.detail" class="mt-0.5 truncate text-sm text-ink-gray-6">
 							{{ r.detail }}
 						</div>
 					</div>
 					<Tooltip :text="exactDate(r.creation)">
-						<span class="shrink-0 text-sm text-ink-gray-5">{{ timeAgo(r.creation) }}</span>
+						<span class="shrink-0 text-sm text-ink-gray-5">{{
+							timeAgo(r.creation)
+						}}</span>
 					</Tooltip>
 				</div>
 			</div>
@@ -77,10 +86,10 @@
 // its own debounced search and its own ListFooter, so AgentsList only mounts
 // it when #activity is active (lazy first fetch via useListPage's onMounted).
 // Rows are Link-free snapshots: {agent_title, action, detail, creation, run}.
-import { FeatherIcon, FormControl, ListFooter, Tooltip } from "frappe-ui"
-import { useListPage } from "@/composables/useListPage"
-import { timeAgo, exactDate } from "@/utils/datetime"
-import { listAgentActivityPage } from "@/api/agents"
+import { FeatherIcon, FormControl, ListFooter, Tooltip } from "frappe-ui";
+import { useListPage } from "@/composables/useListPage";
+import { timeAgo, exactDate } from "@/utils/datetime";
+import { listAgentActivityPage } from "@/api/agents";
 
 // per-action Feather icon + label + ink color (lifecycle verbs from
 // agents_api.list_agent_activity_page)
@@ -93,17 +102,26 @@ const ACTIONS = {
 	config_changed: { icon: "sliders", label: "Configuration changed" },
 	run_started: { icon: "play", label: "Run started" },
 	run_completed: { icon: "check-circle", label: "Run completed", color: "text-ink-green-3" },
-	run_partial: { icon: "alert-triangle", label: "Run completed with issues", color: "text-ink-amber-3" },
+	run_partial: {
+		icon: "alert-triangle",
+		label: "Run completed with issues",
+		color: "text-ink-amber-3",
+	},
 	run_failed: { icon: "x-circle", label: "Run failed", color: "text-ink-red-4" },
-}
+};
 function actionIcon(a) {
-	return (ACTIONS[a] || {}).icon || "activity"
+	return (ACTIONS[a] || {}).icon || "activity";
 }
 function actionLabel(a) {
-	return (ACTIONS[a] || {}).label || String(a || "").split("_").join(" ")
+	return (
+		(ACTIONS[a] || {}).label ||
+		String(a || "")
+			.split("_")
+			.join(" ")
+	);
 }
 function actionColor(a) {
-	return (ACTIONS[a] || {}).color || "text-ink-gray-5"
+	return (ACTIONS[a] || {}).color || "text-ink-gray-5";
 }
 
 // useListPage adapter: {search, start, page_length} → listAgentActivityPage
@@ -112,5 +130,5 @@ const { rows, total, loading, error, search, pageLength, loadMore } = useListPag
 	fetchFn: (p) =>
 		listAgentActivityPage({ search: p.search, start: p.start, page_length: p.page_length }),
 	storageKey: "agents-activity",
-})
+});
 </script>

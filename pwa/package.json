@@ -6,7 +6,8 @@
   "description": "Installable mobile PWA for Jarvis, served at /jarvis-mobile. Same stack as the Frappe HR PWA (Vue 3 + frappe-ui + Vite + vite-plugin-pwa/workbox + Tailwind). Distinct from the desktop SPA under frontend/ (served at /jarvis): this is the phone surface, a port of the jarvis_mobile React Native app.",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "node --test src/lib/*.test.js"
   },
   "dependencies": {
     "frappe-ui": "0.1.278",

@@ -30,19 +30,26 @@ _BAD_USER = "no-such-user@invalid.example"
 
 class TestCreateDocBulk(FrappeTestCase):
 	def test_docs_batch_creates_all_lean(self):
-		out = create_doc(docs=[
-			{"doctype": "ToDo", "values": {"description": "jbulk-create-a"}},
-			{"doctype": "ToDo", "values": {"description": "jbulk-create-b"}},
-		])
+		out = create_doc(
+			docs=[
+				{"doctype": "ToDo", "values": {"description": "jbulk-create-a"}},
+				{"doctype": "ToDo", "values": {"description": "jbulk-create-b"}},
+			]
+		)
 		self.assertEqual(len(out["created"]), 2)
 		self.assertTrue(frappe.db.exists("ToDo", {"description": "jbulk-create-a"}))
 
 	def test_docs_batch_atomic_rollback(self):
 		with self.assertRaises(Exception):
-			create_doc(docs=[
-				{"doctype": "ToDo", "values": {"description": "jbulk-create-ok"}},
-				{"doctype": "ToDo", "values": {"description": "jbulk-create-bad", "assigned_by": _BAD_USER}},
-			])
+			create_doc(
+				docs=[
+					{"doctype": "ToDo", "values": {"description": "jbulk-create-ok"}},
+					{
+						"doctype": "ToDo",
+						"values": {"description": "jbulk-create-bad", "assigned_by": _BAD_USER},
+					},
+				]
+			)
 		self.assertFalse(frappe.db.exists("ToDo", {"description": "jbulk-create-ok"}))
 
 
@@ -52,10 +59,13 @@ class TestUpdateDocBulk(FrappeTestCase):
 
 	def test_updates_batch_applies_all_lean(self):
 		a, b = self._todo("jbulk-upd-a"), self._todo("jbulk-upd-b")
-		out = update_doc("ToDo", updates=[
-			{"name": a, "changes": {"priority": "High"}},
-			{"name": b, "changes": {"priority": "Low"}},
-		])
+		out = update_doc(
+			"ToDo",
+			updates=[
+				{"name": a, "changes": {"priority": "High"}},
+				{"name": b, "changes": {"priority": "Low"}},
+			],
+		)
 		self.assertEqual(out["doctype"], "ToDo")
 		self.assertEqual(out["count"], 2)
 		self.assertEqual(set(out["updated"]), {a, b})
@@ -64,10 +74,13 @@ class TestUpdateDocBulk(FrappeTestCase):
 	def test_updates_batch_atomic_rollback(self):
 		a, b = self._todo("jbulk-upd-ok"), self._todo("jbulk-upd-bad")
 		with self.assertRaises(Exception):
-			update_doc("ToDo", updates=[
-				{"name": a, "changes": {"priority": "High"}},
-				{"name": b, "changes": {"assigned_by": _BAD_USER}},  # bad Link -> save fails
-			])
+			update_doc(
+				"ToDo",
+				updates=[
+					{"name": a, "changes": {"priority": "High"}},
+					{"name": b, "changes": {"assigned_by": _BAD_USER}},  # bad Link -> save fails
+				],
+			)
 		# first update must have rolled back
 		self.assertNotEqual(frappe.db.get_value("ToDo", a, "priority"), "High")
 
@@ -116,6 +129,7 @@ class TestSubmitDocBulkWiring(FrappeTestCase):
 			if name == "SI-2":
 				raise InvalidArgumentError("boom on SI-2")
 			return object()
+
 		with patch("jarvis.tools.submit_doc._submit_one", side_effect=_side):
 			with self.assertRaises(InvalidArgumentError):
 				submit_doc("Sales Invoice", names=["SI-1", "SI-2", "SI-3"])
@@ -175,6 +189,7 @@ class TestCollabBulk(FrappeTestCase):
 
 	def test_add_tag_batch_tags_all(self):
 		from jarvis.tools.add_tag import add_tag
+
 		a, b = self._todo("jbulk-tag-a"), self._todo("jbulk-tag-b")
 		out = add_tag("ToDo", tag="q3-review", names=[a, b])
 		self.assertEqual(out["count"], 2)
@@ -184,6 +199,7 @@ class TestCollabBulk(FrappeTestCase):
 
 	def test_add_tag_batch_atomic_rollback_on_unknown(self):
 		from jarvis.tools.add_tag import add_tag
+
 		a = self._todo("jbulk-tag-ok")
 		with self.assertRaises(Exception):
 			add_tag("ToDo", tag="q3-review", names=[a, "ToDo-nope-xyz"])
@@ -214,11 +230,13 @@ class TestBulkWriteGating(FrappeTestCase):
 
 	def test_read_batch_is_capped(self):
 		from jarvis.tools.get_doc import get_doc
+
 		with self.assertRaises(InvalidArgumentError):
 			get_doc("ToDo", names=[f"x-{i}" for i in range(21)])
 
 	def test_bulk_workflow_refuses_queue_in_background(self):
 		from jarvis.tools.apply_workflow_action import apply_workflow_action
+
 		with (
 			patch("jarvis.tools.apply_workflow_action.get_workflow_name", return_value="WF"),
 			patch("frappe.get_meta", return_value=frappe._dict(queue_in_background=1)),

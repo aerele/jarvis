@@ -1,5 +1,5 @@
-import frappeUIPreset from "frappe-ui/tailwind"
-import { frappeUIContentGlobs } from "./scripts/frappe-ui-content.mjs"
+import frappeUIPreset from "frappe-ui/tailwind";
+import { frappeUIContentGlobs } from "./scripts/frappe-ui-content.mjs";
 
 export default {
 	presets: [frappeUIPreset],
@@ -22,4 +22,4 @@ export default {
 	// are used. Widen the pattern again if a feature starts composing
 	// !text-*/!bg-* class names at runtime.
 	safelist: [{ pattern: /!(text-ink|bg-surface)-/, variants: ["hover", "active"] }],
-}
+};

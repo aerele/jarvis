@@ -44,14 +44,18 @@ def _ensure_user(email: str) -> str:
 
 	ensure_jarvis_user_role()
 	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email,
-			"first_name": email.split("@")[0],
-			"send_welcome_email": 0, "enabled": 1,
-			# System User so the chat-surface access gate (which now requires a
-			# Desk user + the Jarvis User role) admits the fixture.
-			"user_type": "System User",
-		})
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": email.split("@")[0],
+				"send_welcome_email": 0,
+				"enabled": 1,
+				# System User so the chat-surface access gate (which now requires a
+				# Desk user + the Jarvis User role) admits the fixture.
+				"user_type": "System User",
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert()
 		frappe.db.commit()
@@ -101,11 +105,16 @@ def _clear_meta(doctype: str, name: str) -> None:
 
 
 def _attach_file(doctype: str, name: str, file_name: str) -> str:
-	f = frappe.get_doc({
-		"doctype": "File", "file_name": file_name,
-		"attached_to_doctype": doctype, "attached_to_name": name,
-		"is_private": 1, "content": "docmeta test content",
-	})
+	f = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": file_name,
+			"attached_to_doctype": doctype,
+			"attached_to_name": name,
+			"is_private": 1,
+			"content": "docmeta test content",
+		}
+	)
 	f.flags.ignore_permissions = True
 	f.insert(ignore_permissions=True)
 	frappe.db.commit()
@@ -121,20 +130,30 @@ class TestDocmetaApi(unittest.TestCase):
 
 		# One fixture doc per allowlisted doctype, owned by USER_A.
 		with _as(USER_A):
-			skill = frappe.get_doc({
-				"doctype": SKILL, "skill_name": "dm-skill-a",
-				"description": "docmeta fixture", "instructions": "do the thing",
-				"enabled": 1, "user_invocable": 1,
-			})
+			skill = frappe.get_doc(
+				{
+					"doctype": SKILL,
+					"skill_name": "dm-skill-a",
+					"description": "docmeta fixture",
+					"instructions": "do the thing",
+					"enabled": 1,
+					"user_invocable": 1,
+				}
+			)
 			skill.flags.ignore_validate = True
 			skill.insert(ignore_permissions=True)
 			cls.skill = skill.name
 
-			macro = frappe.get_doc({
-				"doctype": MACRO, "macro_name": "dm-macro-a", "description": "m",
-				"enabled": 1, "stop_on_error": 1,
-				"steps": [{"label": "s1", "prompt": "prompt 1"}],
-			})
+			macro = frappe.get_doc(
+				{
+					"doctype": MACRO,
+					"macro_name": "dm-macro-a",
+					"description": "m",
+					"enabled": 1,
+					"stop_on_error": 1,
+					"steps": [{"label": "s1", "prompt": "prompt 1"}],
+				}
+			)
 			macro.flags.ignore_validate = True
 			macro.insert(ignore_permissions=True)
 			cls.macro = macro.name
@@ -143,21 +162,35 @@ class TestDocmetaApi(unittest.TestCase):
 			conv.insert(ignore_permissions=True)
 			cls.conv = conv.name
 
-			appr = frappe.get_doc({
-				"doctype": APPROVAL, "title": "dm-appr-a", "status": "Pending",
-				"document_type": "Purchase Invoice", "conversation": cls.conv,
-				"question": "ok?", "context_md": "ctx", "options": '["Yes","No"]',
-			})
+			appr = frappe.get_doc(
+				{
+					"doctype": APPROVAL,
+					"title": "dm-appr-a",
+					"status": "Pending",
+					"document_type": "Purchase Invoice",
+					"conversation": cls.conv,
+					"question": "ok?",
+					"context_md": "ctx",
+					"options": '["Yes","No"]',
+				}
+			)
 			appr.insert(ignore_permissions=True)
 			cls.approval = appr.name
 
 		# Approval owned by Administrator whose CONVERSATION is owned by USER_A
 		# (the decide()-parity case: conv-owner may act on a foreign-owned row).
-		admin_appr = frappe.get_doc({
-			"doctype": APPROVAL, "title": "dm-appr-admin", "status": "Pending",
-			"document_type": "Sales Invoice", "conversation": cls.conv,
-			"question": "confirm?", "context_md": "ctx", "options": '["Yes","No"]',
-		})
+		admin_appr = frappe.get_doc(
+			{
+				"doctype": APPROVAL,
+				"title": "dm-appr-admin",
+				"status": "Pending",
+				"document_type": "Sales Invoice",
+				"conversation": cls.conv,
+				"question": "confirm?",
+				"context_md": "ctx",
+				"options": '["Yes","No"]',
+			}
+		)
 		admin_appr.insert(ignore_permissions=True)
 		frappe.db.commit()
 		cls.admin_approval = admin_appr.name
@@ -165,17 +198,27 @@ class TestDocmetaApi(unittest.TestCase):
 		# Agent installation owned by USER_A (direct insert: validate() only
 		# enforces uniqueness + cap, and this avoids role-restriction state).
 		agent_catalog.sync_agent_listings()
-		slug = "audit-auditor"
+		slug = "close-auditor"
 		if not frappe.db.exists(LISTING, slug):
 			slug = frappe.get_all(LISTING, filters={"status": "Published"}, pluck="name", limit=1)[0]
+		# close-auditor requires GL Entry / Account / Company read (install A12-gate);
+		# grant it so the self-mapped install validates.
+		if frappe.db.exists("Role", "Accounts User"):
+			frappe.get_doc("User", USER_A).add_roles("Accounts User")
+			frappe.clear_cache(user=USER_A)
 		for n in frappe.get_all(INSTALLATION, filters={"owner": USER_A}, pluck="name"):
 			frappe.delete_doc(INSTALLATION, n, force=True, ignore_permissions=True)
 		with _as(USER_A):
-			inst = frappe.get_doc({
-				"doctype": INSTALLATION, "agent": slug, "enabled": 0,
-				"installed_version": frappe.db.get_value(LISTING, slug, "version"),
-				"installed_at": frappe.utils.now(),
-			})
+			inst = frappe.get_doc(
+				{
+					"doctype": INSTALLATION,
+					"agent": slug,
+					"enabled": 0,
+					"run_as_user": frappe.session.user,  # self-map (reqd since Phase 1 identity)
+					"installed_version": frappe.db.get_value(LISTING, slug, "version"),
+					"installed_at": frappe.utils.now(),
+				}
+			)
 			inst.insert(ignore_permissions=True)
 		frappe.db.commit()
 		cls.installation = inst.name
@@ -249,8 +292,7 @@ class TestDocmetaApi(unittest.TestCase):
 			meta = docmeta_api.get_docmeta(MACRO, self.macro)
 		self.assertEqual(
 			set(meta.keys()),
-			{"comments", "assignees", "liked_by", "liked", "attachments",
-			 "shares", "created", "modified"},
+			{"comments", "assignees", "liked_by", "liked", "attachments", "shares", "created", "modified"},
 		)
 		self.assertEqual(
 			set(meta["comments"][0].keys()),
@@ -283,9 +325,7 @@ class TestDocmetaApi(unittest.TestCase):
 
 	def test_approval_conversation_owner_allowed(self):
 		# admin_approval.owner == Administrator; its conversation belongs to A.
-		self.assertEqual(
-			frappe.db.get_value(APPROVAL, self.admin_approval, "owner"), "Administrator"
-		)
+		self.assertEqual(frappe.db.get_value(APPROVAL, self.admin_approval, "owner"), "Administrator")
 		with _as(USER_A):
 			meta = docmeta_api.get_docmeta(APPROVAL, self.admin_approval)
 			self.assertEqual(meta["created"]["owner"], "Administrator")
@@ -304,13 +344,28 @@ class TestDocmetaApi(unittest.TestCase):
 		with _as(USER_A):
 			assignees = docmeta_api.toggle_assignment(MACRO, self.macro, USER_B, "add")
 		self.assertEqual([a["user"] for a in assignees], [USER_B])
-		self.assertTrue(frappe.db.exists("ToDo", {
-			"reference_type": MACRO, "reference_name": self.macro,
-			"allocated_to": USER_B, "status": "Open",
-		}))
-		self.assertTrue(frappe.db.exists("DocShare", {
-			"share_doctype": MACRO, "share_name": self.macro, "user": USER_B, "read": 1,
-		}))
+		self.assertTrue(
+			frappe.db.exists(
+				"ToDo",
+				{
+					"reference_type": MACRO,
+					"reference_name": self.macro,
+					"allocated_to": USER_B,
+					"status": "Open",
+				},
+			)
+		)
+		self.assertTrue(
+			frappe.db.exists(
+				"DocShare",
+				{
+					"share_doctype": MACRO,
+					"share_name": self.macro,
+					"user": USER_B,
+					"read": 1,
+				},
+			)
+		)
 		# The assignee can now READ the bundle ...
 		with _as(USER_B):
 			meta = docmeta_api.get_docmeta(MACRO, self.macro)
@@ -330,14 +385,27 @@ class TestDocmetaApi(unittest.TestCase):
 			assignees = docmeta_api.toggle_assignment(MACRO, self.macro, USER_B, "remove")
 		self.assertEqual(assignees, [])
 		self.assertEqual(
-			frappe.db.get_value("ToDo", {
-				"reference_type": MACRO, "reference_name": self.macro, "allocated_to": USER_B,
-			}, "status"),
+			frappe.db.get_value(
+				"ToDo",
+				{
+					"reference_type": MACRO,
+					"reference_name": self.macro,
+					"allocated_to": USER_B,
+				},
+				"status",
+			),
 			"Cancelled",
 		)
-		self.assertFalse(frappe.db.exists("DocShare", {
-			"share_doctype": MACRO, "share_name": self.macro, "user": USER_B,
-		}))
+		self.assertFalse(
+			frappe.db.exists(
+				"DocShare",
+				{
+					"share_doctype": MACRO,
+					"share_name": self.macro,
+					"user": USER_B,
+				},
+			)
+		)
 		with _as(USER_B), self.assertRaises(frappe.PermissionError):
 			docmeta_api.get_docmeta(MACRO, self.macro)
 
@@ -384,9 +452,16 @@ class TestDocmetaApi(unittest.TestCase):
 			with self.assertRaises(frappe.ValidationError):
 				docmeta_api.toggle_share(MACRO, self.macro, USER_B, "remove")
 		# the read grant survives the refused removal
-		self.assertTrue(frappe.db.exists("DocShare", {
-			"share_doctype": MACRO, "share_name": self.macro, "user": USER_B,
-		}))
+		self.assertTrue(
+			frappe.db.exists(
+				"DocShare",
+				{
+					"share_doctype": MACRO,
+					"share_name": self.macro,
+					"user": USER_B,
+				},
+			)
+		)
 
 	# ------------------------------------------------------------------ #
 	# share/assign marker convention (notify_by_email disambiguation)
@@ -461,11 +536,15 @@ class TestDocmetaApi(unittest.TestCase):
 	def test_comment_on_disallowed_reference_rejected(self):
 		# A Comment living on a NON-allowlisted doctype can't be touched here,
 		# even by a System Manager.
-		stray = frappe.get_doc({
-			"doctype": "Comment", "comment_type": "Comment",
-			"reference_doctype": CONV, "reference_name": self.conv,
-			"content": "stray",
-		}).insert(ignore_permissions=True)
+		stray = frappe.get_doc(
+			{
+				"doctype": "Comment",
+				"comment_type": "Comment",
+				"reference_doctype": CONV,
+				"reference_name": self.conv,
+				"content": "stray",
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
 		try:
 			with self.assertRaises(frappe.PermissionError):
@@ -515,19 +594,33 @@ class TestDocmetaApi(unittest.TestCase):
 			self.assertEqual(liked, [USER_A])
 			self.assertTrue(docmeta_api.get_docmeta(MACRO, self.macro)["liked"])
 		# desk parity: a "Like" trace Comment row exists (and is NOT in comments)
-		self.assertTrue(frappe.db.exists("Comment", {
-			"comment_type": "Like", "reference_doctype": MACRO,
-			"reference_name": self.macro, "owner": USER_A,
-		}))
+		self.assertTrue(
+			frappe.db.exists(
+				"Comment",
+				{
+					"comment_type": "Like",
+					"reference_doctype": MACRO,
+					"reference_name": self.macro,
+					"owner": USER_A,
+				},
+			)
+		)
 		with _as(USER_A):
 			self.assertEqual(docmeta_api.get_docmeta(MACRO, self.macro)["comments"], [])
 			liked = docmeta_api.toggle_like(MACRO, self.macro, 0)
 			self.assertEqual(liked, [])
 			self.assertFalse(docmeta_api.get_docmeta(MACRO, self.macro)["liked"])
-		self.assertFalse(frappe.db.exists("Comment", {
-			"comment_type": "Like", "reference_doctype": MACRO,
-			"reference_name": self.macro, "owner": USER_A,
-		}))
+		self.assertFalse(
+			frappe.db.exists(
+				"Comment",
+				{
+					"comment_type": "Like",
+					"reference_doctype": MACRO,
+					"reference_name": self.macro,
+					"owner": USER_A,
+				},
+			)
+		)
 
 	def test_toggle_like_idempotent(self):
 		with _as(USER_A):

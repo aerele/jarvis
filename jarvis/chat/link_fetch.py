@@ -3,7 +3,7 @@ DESIGN.md sections 4 / 5b / 6b).
 
 Before this module, there was NO general-purpose URL-fetch capability
 anywhere in this app (research/processing.md section (c): every existing
-``requests.*`` call is internal/infra - self-host probes, the tenant's own
+``requests.*`` call is internal/infra - LLM key probes, the tenant's own
 container gateway, OpenRouter, OAuth token exchange - never an arbitrary
 customer-supplied URL). A Link-kind Personalise note is the first feature
 that fetches content the CALLER chose, from wherever it points, so the SSRF
@@ -69,6 +69,7 @@ string. Pure exception-vs-string-return split, no silent partial results.
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 import socket
 from urllib.parse import urljoin, urlparse
@@ -96,10 +97,38 @@ _METADATA_IPS = {"169.254.169.254"}
 _USER_AGENT = "JarvisLinkFetch/1.0 (+personalise-note-capture)"
 
 
+# Failure classes carried on LinkFetchError.kind. The distinction that matters
+# to a caller is WHETHER THE REMOTE END EVER SPOKE: the first three kinds mean
+# this bench never got a byte back, which says nothing about the endpoint
+# itself, only about what this network can reach. jarvis.llm_key_probe turns
+# exactly that split into its "could not verify from here" verdict instead of
+# calling a container-only endpoint a failure (#680), so classify at the raise
+# site - matching on the message text would break the day one is reworded.
+ERR_INVALID_URL = "invalid_url"  # caller's URL is unusable (scheme/host/empty)
+ERR_UNRESOLVED = "unresolved"  # DNS gave us nothing
+ERR_BLOCKED_ADDRESS = "blocked_address"  # SSRF guard refused the resolved address
+ERR_CONNECT_FAILED = "connect_failed"  # socket/TLS/timeout before any response
+ERR_RESPONSE = "response"  # the remote DID answer; we rejected what it said
+
+# The three kinds that mean "this bench could not reach the endpoint at all".
+UNREACHABLE_KINDS = frozenset({ERR_UNRESOLVED, ERR_BLOCKED_ADDRESS, ERR_CONNECT_FAILED})
+
+
 class LinkFetchError(Exception):
 	"""Raised for any guard rejection or fetch failure. Callers treat this
 	(and any other exception this module might let through, defensively) as
-	"skip extraction, keep the note" - see the module docstring."""
+	"skip extraction, keep the note" - see the module docstring.
+
+	``kind`` is one of the ``ERR_*`` constants above. It defaults to
+	``ERR_RESPONSE`` rather than to an unreachable kind so that anything
+	constructed without an explicit class is treated as a definitive answer,
+	never silently softened into "we could not check" - a caller that grants
+	leniency on the unreachable kinds must only do so where this module really
+	said the network failed."""
+
+	def __init__(self, message: str, *, kind: str = ERR_RESPONSE):
+		super().__init__(message)
+		self.kind = kind
 
 
 # --------------------------------------------------------------------------- #
@@ -138,19 +167,20 @@ def _validate_host(hostname: str) -> list[str]:
 	extract`` connect to an address it already checked instead of letting the
 	HTTP client resolve the name a second, unchecked time."""
 	if not hostname:
-		raise LinkFetchError("URL has no host to validate.")
+		raise LinkFetchError("URL has no host to validate.", kind=ERR_INVALID_URL)
 	try:
 		infos = socket.getaddrinfo(hostname, None)
 	except Exception as exc:
-		raise LinkFetchError(f"Could not resolve host: {hostname}") from exc
+		raise LinkFetchError(f"Could not resolve host: {hostname}", kind=ERR_UNRESOLVED) from exc
 	if not infos:
-		raise LinkFetchError(f"Could not resolve host: {hostname}")
+		raise LinkFetchError(f"Could not resolve host: {hostname}", kind=ERR_UNRESOLVED)
 	addrs: list[str] = []
 	for info in infos:
 		addr = info[4][0]
 		if _is_blocked_ip(addr):
 			raise LinkFetchError(
-				f"Host {hostname} resolves to a disallowed address ({addr})."
+				f"Host {hostname} resolves to a disallowed address ({addr}).",
+				kind=ERR_BLOCKED_ADDRESS,
 			)
 		addrs.append(addr)
 	return addrs
@@ -163,9 +193,11 @@ def _validate_url(url: str):
 	safe as any)."""
 	parsed = urlparse(url)
 	if parsed.scheme not in _ALLOWED_SCHEMES:
-		raise LinkFetchError(f"URL scheme must be http or https (got {parsed.scheme!r}).")
+		raise LinkFetchError(
+			f"URL scheme must be http or https (got {parsed.scheme!r}).", kind=ERR_INVALID_URL
+		)
 	if not parsed.hostname:
-		raise LinkFetchError("URL has no host.")
+		raise LinkFetchError("URL has no host.", kind=ERR_INVALID_URL)
 	vetted = _validate_host(parsed.hostname)
 	return parsed, vetted[0]
 
@@ -249,47 +281,84 @@ def _host_header(hostname: str, port: int, scheme: str) -> str:
 	return hostname if port == default else f"{hostname}:{port}"
 
 
-def _open_pinned(parsed, ip: str, timeout: int):
-	"""Open a GET pinned to the already-vetted ``ip`` - the DNS-rebind defense
-	the module docstring describes. The socket connects straight to ``ip`` via
-	a fresh single-use ``urllib3`` pool whose host IS the IP, so no second
-	resolution of ``parsed.hostname`` can ever divert the connection. TLS still
-	verifies against the ORIGINAL hostname (SNI ``server_hostname`` + cert
-	``assert_hostname``) and the ``Host:`` header carries it too, so virtual
-	hosts and certificate checks keep working. Returns ``(response, pool)``;
-	the caller owns closing both."""
+def _build_pool(scheme: str, ip: str, port: int, hostname: str, timeout: int):
+	"""The pinned single-use urllib3 pool: the socket goes to ``ip``, while TLS
+	still verifies against the ORIGINAL ``hostname`` (SNI + cert check).
+
+	Split out of ``_open_pinned`` so the pool can be built - and its connection
+	actually constructed - in a test without a network round trip. It could not
+	be, when this was inline, and that is precisely how the bug below survived:
+	every test in test_link_fetch.py stubs ``_open_pinned`` wholesale, so the
+	real pool construction was never once executed in CI.
+
+	``server_hostname`` is a CONNECTION kwarg, not a pool one. urllib3 v2 pools
+	collect their surplus **kwargs into ``self.conn_kw`` and splat that onto the
+	connection, so it must be passed as a PLAIN kwarg here. Passing a literal
+	``conn_kw={"server_hostname": ...}`` (as this did until now) gets collected
+	one level too deep - ``conn_kw={"conn_kw": {...}}`` - and every https fetch
+	dies with ``TypeError: HTTPSConnection.__init__() got an unexpected keyword
+	argument 'conn_kw'``. That TypeError is neither HTTPError nor OSError, so
+	``fetch_and_extract``'s except clause does not catch it either."""
+	pool_timeout = urllib3.Timeout(connect=timeout, read=timeout)
+	if scheme != "https":
+		return urllib3.HTTPConnectionPool(host=ip, port=port, timeout=pool_timeout, retries=False)
+	return urllib3.HTTPSConnectionPool(
+		host=ip,
+		port=port,
+		assert_hostname=hostname,
+		cert_reqs="CERT_REQUIRED",
+		ca_certs=certifi.where(),
+		timeout=pool_timeout,
+		retries=False,
+		server_hostname=hostname,
+	)
+
+
+def _open_pinned(
+	parsed,
+	ip: str,
+	timeout: int,
+	*,
+	method: str = "GET",
+	body: bytes | None = None,
+	extra_headers: dict | None = None,
+):
+	"""Open a request pinned to the already-vetted ``ip`` - the DNS-rebind
+	defense the module docstring describes. The socket connects straight to
+	``ip`` via a fresh single-use ``urllib3`` pool whose host IS the IP, so no
+	second resolution of ``parsed.hostname`` can ever divert the connection.
+	TLS still verifies against the ORIGINAL hostname (SNI ``server_hostname``
+	+ cert ``assert_hostname``) and the ``Host:`` header carries it too, so
+	virtual hosts and certificate checks keep working. Returns
+	``(response, pool)``; the caller owns closing both.
+
+	``method``/``body``/``extra_headers`` default to a bare GET (every
+	original caller here, ``fetch_and_extract``) - ``request_pinned`` below
+	is the only caller that overrides them, for a JSON POST probe."""
 	hostname = parsed.hostname
 	scheme = parsed.scheme
 	port = parsed.port or (443 if scheme == "https" else 80)
 	target = parsed.path or "/"
 	if parsed.query:
 		target += "?" + parsed.query
-	headers = {"User-Agent": _USER_AGENT, "Host": _host_header(hostname, port, scheme)}
-	pool_timeout = urllib3.Timeout(connect=timeout, read=timeout)
-	if scheme == "https":
-		pool = urllib3.HTTPSConnectionPool(
-			host=ip,
-			port=port,
-			assert_hostname=hostname,
-			cert_reqs="CERT_REQUIRED",
-			ca_certs=certifi.where(),
-			timeout=pool_timeout,
-			retries=False,
-			# ``server_hostname`` is a CONNECTION kwarg (not a pool one) in
-			# urllib3 v2, so it rides in via ``conn_kw`` - this is what aims SNI
-			# at the real hostname while the socket goes to the pinned IP.
-			conn_kw={"server_hostname": hostname},
-		)
-	else:
-		pool = urllib3.HTTPConnectionPool(
-			host=ip,
-			port=port,
-			timeout=pool_timeout,
-			retries=False,
-		)
+	# extra_headers first, THEN the computed Host/User-Agent - never the other way
+	# round. Host in particular is part of the DNS-rebind defense's bookkeeping
+	# (it must always name the ORIGINAL hostname the address was vetted for, not
+	# whatever a caller's headers dict happens to carry); request_pinned's caller
+	# passes its own headers through here as extra_headers, and nothing stops a
+	# future caller from including a "Host" key, so this order stays defensive
+	# even though today's only extra_headers callers never set one. (The actual
+	# TCP/TLS destination is pinned independently via host=ip / assert_hostname
+	# below, so this was never an SSRF bypass - just correctness hardening for a
+	# general-purpose entry point.)
+	headers = dict(extra_headers or {})
+	headers["User-Agent"] = _USER_AGENT
+	headers["Host"] = _host_header(hostname, port, scheme)
+	pool = _build_pool(scheme, ip, port, hostname, timeout)
 	resp = pool.urlopen(
-		"GET",
+		method,
 		target,
+		body=body,
 		headers=headers,
 		redirect=False,
 		preload_content=False,
@@ -316,7 +385,7 @@ def fetch_and_extract(
 	docstring for why this raises instead of returning ``""``."""
 	current = (url or "").strip()
 	if not current:
-		raise LinkFetchError("No URL given.")
+		raise LinkFetchError("No URL given.", kind=ERR_INVALID_URL)
 
 	redirects = 0
 	while True:
@@ -324,7 +393,7 @@ def fetch_and_extract(
 		try:
 			resp, pool = _open_pinned(parsed, ip, timeout)
 		except (urllib3.exceptions.HTTPError, OSError) as exc:
-			raise LinkFetchError(f"Fetch failed: {exc}") from exc
+			raise LinkFetchError(f"Fetch failed: {exc}", kind=ERR_CONNECT_FAILED) from exc
 
 		try:
 			if resp.status in _REDIRECT_STATUSES:
@@ -342,9 +411,7 @@ def fetch_and_extract(
 
 			content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
 			if not content_type.startswith("text/"):
-				raise LinkFetchError(
-					f"Unsupported content-type: {content_type or 'unknown'}."
-				)
+				raise LinkFetchError(f"Unsupported content-type: {content_type or 'unknown'}.")
 
 			body = _read_capped(resp, max_bytes)
 		finally:
@@ -353,3 +420,67 @@ def fetch_and_extract(
 
 		text = _neutralize(_extract_text(body, content_type))
 		return text[:MAX_EXTRACTED_LEN]
+
+
+# --------------------------------------------------------------------------- #
+# generic pinned request (non-GET, non-text/html callers)
+# --------------------------------------------------------------------------- #
+def request_pinned(
+	url: str,
+	*,
+	method: str = "GET",
+	headers: dict | None = None,
+	json_body: dict | None = None,
+	timeout: int = TIMEOUT_S_DEFAULT,
+	max_bytes: int = MAX_BYTES_DEFAULT,
+) -> tuple[int, dict, bytes]:
+	"""SSRF-guarded HTTP request for a caller that needs something other than
+	``fetch_and_extract``'s GET + ``text/*``-only shape - e.g.
+	``jarvis.llm_key_probe``'s provider API-key test, which POSTs a JSON body
+	to a CUSTOMER-SUPPLIED ``base_url`` (an OpenAI-Compatible / GLM-Z.ai /
+	self-hosted vLLM endpoint) and needs the provider's raw error body back,
+	not extracted page text.
+
+	Reuses this module's guard exactly (see the module docstring): scheme
+	allowlist + every resolved address checked via ``_validate_url``, then the
+	connection is PINNED to that one vetted address so a DNS record that
+	changes between the check and the connect can't divert the socket - the
+	same TOCTOU defense ``fetch_and_extract`` relies on. Unlike
+	``fetch_and_extract`` this does NOT follow redirects (a 3xx from a JSON
+	API is returned to the caller as-is - chasing HTML-style redirect chains
+	is not this entry point's job) and does NOT restrict the response
+	content-type (JSON APIs reply ``application/json``, not ``text/*``).
+
+	Returns ``(status_code, headers, body_bytes)`` - the body is READ AND
+	CAPPED at ``max_bytes`` (via ``_read_capped``, same as the fetch path) but
+	otherwise handed back raw; the caller owns parsing/scrubbing it.
+
+	Raises :class:`LinkFetchError` for a blocked scheme/host (SSRF) or any
+	network failure. The raised message never includes ``headers`` or
+	``json_body`` - callers routinely pass a secret (e.g. an
+	``Authorization`` header), and that secret must never end up in an
+	exception string a caller might log.
+	"""
+	current = (url or "").strip()
+	if not current:
+		raise LinkFetchError("No URL given.", kind=ERR_INVALID_URL)
+
+	parsed, ip = _validate_url(current)
+
+	body: bytes | None = None
+	hdrs = dict(headers or {})
+	if json_body is not None:
+		body = json.dumps(json_body).encode("utf-8")
+		hdrs.setdefault("Content-Type", "application/json")
+
+	try:
+		resp, pool = _open_pinned(parsed, ip, timeout, method=method, body=body, extra_headers=hdrs)
+	except (urllib3.exceptions.HTTPError, OSError) as exc:
+		raise LinkFetchError(f"Request failed: {exc}", kind=ERR_CONNECT_FAILED) from exc
+
+	try:
+		data = _read_capped(resp, max_bytes)
+		return resp.status, dict(resp.headers), data
+	finally:
+		resp.close()
+		pool.close()

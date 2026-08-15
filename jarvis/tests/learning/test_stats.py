@@ -8,6 +8,7 @@ arithmetic (fractions.Fraction over math.comb) and hardcoded the same way.
 """
 
 import datetime
+from itertools import pairwise
 
 from frappe.tests.utils import FrappeTestCase
 
@@ -254,8 +255,13 @@ class TestRecencyGuard(FrappeTestCase):
 		# own c_min while the full window still passes -> divergence.
 		self.assertEqual(
 			recency_divergence(
-				0.95, 0.85, full_mode="30 Days", recent_mode="30 Days",
-				recent_n=20, recent_established_share=0.85, c_min=0.90,
+				0.95,
+				0.85,
+				full_mode="30 Days",
+				recent_mode="30 Days",
+				recent_n=20,
+				recent_established_share=0.85,
+				c_min=0.90,
 			),
 			"recent_differs",
 		)
@@ -264,8 +270,13 @@ class TestRecencyGuard(FrappeTestCase):
 		# 9 recent units is under RECENCY_MIN_RECENT_UNITS (10): noise, no fire.
 		self.assertIsNone(
 			recency_divergence(
-				0.95, 0.85, full_mode="30 Days", recent_mode="30 Days",
-				recent_n=9, recent_established_share=0.85, c_min=0.90,
+				0.95,
+				0.85,
+				full_mode="30 Days",
+				recent_mode="30 Days",
+				recent_n=9,
+				recent_established_share=0.85,
+				c_min=0.90,
 			)
 		)
 
@@ -273,8 +284,13 @@ class TestRecencyGuard(FrappeTestCase):
 		# recent confidence for the established consequent still >= c_min.
 		self.assertIsNone(
 			recency_divergence(
-				0.97, 0.92, full_mode="30 Days", recent_mode="30 Days",
-				recent_n=25, recent_established_share=0.92, c_min=0.90,
+				0.97,
+				0.92,
+				full_mode="30 Days",
+				recent_mode="30 Days",
+				recent_n=25,
+				recent_established_share=0.92,
+				c_min=0.90,
 			)
 		)
 
@@ -283,8 +299,13 @@ class TestRecencyGuard(FrappeTestCase):
 		# owns that case; the secondary recency signal stays quiet.
 		self.assertIsNone(
 			recency_divergence(
-				0.85, 0.80, full_mode="30 Days", recent_mode="30 Days",
-				recent_n=25, recent_established_share=0.80, c_min=0.90,
+				0.85,
+				0.80,
+				full_mode="30 Days",
+				recent_mode="30 Days",
+				recent_n=25,
+				recent_established_share=0.80,
+				c_min=0.90,
 			)
 		)
 
@@ -374,7 +395,7 @@ class TestFisherExact(FrappeTestCase):
 
 	def test_monotone_decreasing_in_k(self):
 		ps = [fisher_exact_greater(k, 20, 60, 200) for k in range(0, 21)]
-		for weaker, stronger in zip(ps, ps[1:]):
+		for weaker, stronger in pairwise(ps):
 			self.assertGreaterEqual(weaker, stronger)
 
 	def test_zero_margin_K_is_one(self):

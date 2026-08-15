@@ -16,8 +16,8 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import openclaw_session_pool
-from jarvis.chat import turn_handler, worker
+from jarvis.chat import agent_session_pool, turn_handler, worker
+from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -38,7 +38,7 @@ class TestHandleChatSendAcceptsPayloadDict(FrappeTestCase):
 	"""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -52,22 +52,26 @@ class TestHandleChatSendAcceptsPayloadDict(FrappeTestCase):
 	def test_payload_dict_drives_a_full_turn(self):
 		fake_sess = MagicMock()
 		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
-		fake_sess.relay_turn_events.return_value = _fake_event_stream([
-			{"kind": "lifecycle", "phase": "start"},
-			{"kind": "assistant", "text": "ok", "delta": "ok"},
-			{"kind": "lifecycle", "phase": "end"},
-			{"kind": "relay:final", "text": None},
-		])
+		fake_sess.relay_turn_events.return_value = _fake_event_stream(
+			[
+				{"kind": "lifecycle", "phase": "start"},
+				{"kind": "assistant", "text": "ok", "delta": "ok"},
+				{"kind": "lifecycle", "phase": "end"},
+				{"kind": "relay:final", "text": None},
+			]
+		)
 		with patch(
-			"jarvis.chat.openclaw_session_pool.OpenclawSession.connect",
+			"jarvis.chat.agent_session_pool.AgentSession.connect",
 			return_value=fake_sess,
 		):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
-				turn_handler.handle_chat_send({
-					"conversation_id": self.conv,
-					"message_id": self.user_msg,
-					"run_id": "r-payload",
-				})
+				turn_handler.handle_chat_send(
+					{
+						"conversation_id": self.conv,
+						"message_id": self.user_msg,
+						"run_id": "r-payload",
+					}
+				)
 
 		# The assistant placeholder was created, content was persisted,
 		# streaming flipped off. (Behavioural depth lives in
@@ -93,23 +97,88 @@ class TestHandleChatSendAcceptsPayloadDict(FrappeTestCase):
 		must treat them as None and not blow up on missing keys."""
 		fake_sess = MagicMock()
 		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
-		fake_sess.relay_turn_events.return_value = _fake_event_stream([
-			{"kind": "lifecycle", "phase": "end"},
-			{"kind": "relay:final", "text": None},
-		])
+		fake_sess.relay_turn_events.return_value = _fake_event_stream(
+			[
+				{"kind": "lifecycle", "phase": "end"},
+				{"kind": "relay:final", "text": None},
+			]
+		)
 		with patch(
-			"jarvis.chat.openclaw_session_pool.OpenclawSession.connect",
+			"jarvis.chat.agent_session_pool.AgentSession.connect",
 			return_value=fake_sess,
 		):
 			with patch("jarvis.chat.worker.publish_to_user"):
-				turn_handler.handle_chat_send({
-					"conversation_id": self.conv,
-					"message_id": self.user_msg,
-					"run_id": "r-optional",
-				})
+				turn_handler.handle_chat_send(
+					{
+						"conversation_id": self.conv,
+						"message_id": self.user_msg,
+						"run_id": "r-optional",
+					}
+				)
 		# Reached this line without KeyError: the payload contract for
 		# the optional fields holds.
 		self.assertTrue(True)
+
+	def test_stale_device_binding_remints_the_session(self):
+		"""jarvis #712: a conversation's session_key was minted under a
+		device pairing that no longer exists (a tenant re-pair happened
+		after this conversation's first turn). Reusing it would leave
+		every tool call on this conversation 401ing forever (jarvis.api's
+		guard deliberately never self-heals). handle_chat_send must treat
+		it like "no session yet" and mint a fresh one under the CURRENT
+		pairing instead."""
+		SESSION = "Jarvis Chat Session"
+		old_key = frappe.db.get_value("Jarvis Conversation", self.conv, "session_key")
+		frappe.get_doc(
+			{
+				"doctype": SESSION,
+				"session_key": old_key,
+				"user": TEST_USER,
+				"chat_device_id": "old-device-before-repair",
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+
+		settings = frappe.get_single("Jarvis Settings")
+		original_device_id = settings.chat_device_id
+		settings.db_set("chat_device_id", "new-device-after-repair")
+		frappe.db.commit()
+
+		fake_sess = MagicMock()
+		fake_sess.create_session.return_value = "agent:freshly-minted"
+		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
+		fake_sess.relay_turn_events.return_value = _fake_event_stream(
+			[
+				{"kind": "lifecycle", "phase": "end"},
+				{"kind": "relay:final", "text": None},
+			]
+		)
+		try:
+			with patch(
+				"jarvis.chat.agent_session_pool.AgentSession.connect",
+				return_value=fake_sess,
+			):
+				with patch("jarvis.chat.worker.publish_to_user"):
+					turn_handler.handle_chat_send(
+						{
+							"conversation_id": self.conv,
+							"message_id": self.user_msg,
+							"run_id": "r-stale-repair",
+						}
+					)
+
+			fake_sess.create_session.assert_called_once()
+			new_key = frappe.db.get_value("Jarvis Conversation", self.conv, "session_key")
+			self.assertEqual(new_key, "agent:freshly-minted")
+			self.assertNotEqual(new_key, old_key)
+			new_row_device = frappe.db.get_value(SESSION, {"session_key": new_key}, "chat_device_id")
+			self.assertEqual(new_row_device, "new-device-after-repair")
+		finally:
+			settings.db_set("chat_device_id", original_device_id)
+			frappe.db.commit()
+			frappe.db.delete(SESSION, {"session_key": old_key})
+			frappe.db.delete(SESSION, {"session_key": "agent:freshly-minted"})
+			frappe.db.commit()
 
 
 class TestRunAgentTurnShimForwardsToHandleChatSend(FrappeTestCase):
@@ -164,18 +233,24 @@ class TestOrgLocaleClause(unittest.TestCase):
 		# deterministic on sites that carry a real Fiscal Year; pass ``fiscal``
 		# (a dict) to opt into a mocked FY, default raises -> no fy clause.
 		fy_kwargs = {"return_value": fiscal} if fiscal is not None else {"side_effect": RuntimeError("no fy")}
-		with patch("frappe.defaults.get_global_default", return_value=company), \
-			patch("frappe.get_cached_value", side_effect=lambda dt, name, field: cached.get(field, "")), \
-			patch("frappe.db.get_single_value", side_effect=lambda dt, field: singles.get(field, "")), \
-			patch("frappe.db.get_default", return_value=default), \
-			patch("erpnext.accounts.utils.get_fiscal_year", **fy_kwargs):
+		with (
+			patch("frappe.defaults.get_global_default", return_value=company),
+			patch("frappe.get_cached_value", side_effect=lambda dt, name, field: cached.get(field, "")),
+			patch("frappe.db.get_single_value", side_effect=lambda dt, field: singles.get(field, "")),
+			patch("frappe.db.get_default", return_value=default),
+			patch("erpnext.accounts.utils.get_fiscal_year", **fy_kwargs),
+		):
 			return turn_handler._org_locale_clause()
 
 	def test_full_company_locale(self):
 		clause = self._run(
 			company="Acme Ltd",
 			cached={"country": "India", "default_currency": "INR"},
-			singles={"date_format": "dd-mm-yyyy", "number_format": "#,##,###.##", "time_zone": "Asia/Kolkata"},
+			singles={
+				"date_format": "dd-mm-yyyy",
+				"number_format": "#,##,###.##",
+				"time_zone": "Asia/Kolkata",
+			},
 		)
 		self.assertTrue(clause.startswith("; "))
 		self.assertIn("org: Acme Ltd (India, INR)", clause)
@@ -228,3 +303,143 @@ class TestOrgLocaleClause(unittest.TestCase):
 
 	def test_empty_site_yields_empty_clause(self):
 		self.assertEqual(self._run(company=None, default=None), "")
+
+
+class TestClassifyError(unittest.TestCase):
+	"""_classify_error is the single, shared source for a turn error's `code`
+	(#702) - settlement.py, pump.py and prepare.py all delegate to it, and
+	frontend/src/lib/errors.js mirrors it for the no-`code` reload path. Pure
+	string classification, no DB/site access, mirroring TestOrgLocaleClause
+	above."""
+
+	def test_the_702_string_is_gateway_not_internal(self):
+		# The exact wire text observed in #702: the agent's own generic wording
+		# for a mid-run failure that was actually a device-pairing file caught
+		# mid-rewrite, nothing to do with the network. Must NOT fall into
+		# "unreachable" (that is reserved for OUR OWN failure to reach the
+		# gateway) and must NOT fall into "internal" (that headline offers no
+		# next step; "gateway" tells the customer to retry).
+		code = turn_handler._classify_error("LLM request failed: network connection error.")
+		self.assertEqual(code, "gateway")
+		self.assertNotEqual(code, "unreachable")
+		self.assertNotEqual(code, "internal")
+
+	def test_our_own_unreachable_gateway_stays_unreachable(self):
+		# A genuine pre-ack transport failure (WE couldn't reach the agent) is a
+		# DIFFERENT failure surface than #702's mid-run gateway hiccup and must
+		# keep its own code - retrying the same way won't help either, but the
+		# customer-facing story ("I couldn't reach the assistant") is honest
+		# about what actually happened.
+		self.assertEqual(turn_handler._classify_error("ws open failed: connect ECONNREFUSED"), "unreachable")
+		exc = AgentUnreachableError("agent WS closed: 1006")
+		self.assertEqual(turn_handler._classify_error("agent WS closed: 1006", exc=exc), "unreachable")
+
+	def test_provider_rejection_stays_provider(self):
+		# An upstream LLM provider's own decline (quota/billing/rate limit) is
+		# actionable in a way a retry is not - must not collapse into "gateway".
+		code = turn_handler._classify_error(
+			"Google Generative AI API error (429): You exceeded your current quota."
+		)
+		self.assertEqual(code, "provider")
+
+	def test_connection_timed_out_is_unreachable_not_timeout(self):
+		# "connection timed out" names a transport failure (we could not reach
+		# the gateway), not a generic timeout (the model took too long). Must
+		# agree with classifyTurnErrorCode in frontend/src/lib/errors.js, which
+		# already put this phrase under "unreachable".
+		self.assertEqual(turn_handler._classify_error("connection timed out"), "unreachable")
+
+	def test_worker_backstop_text_stays_internal_on_a_reload(self):
+		# turn_handler's outer `except Exception` backstop stamps code="internal"
+		# directly (bypassing this function) on the LIVE event; a reloaded
+		# conversation only has the persisted string and must reclassify it the
+		# same way, not fall into the new "gateway" default.
+		code = turn_handler._classify_error("unexpected worker error: TypeError")
+		self.assertEqual(code, "internal")
+
+	def test_recovery_and_timeout_unaffected_by_the_new_default(self):
+		self.assertEqual(
+			turn_handler._classify_error("Run did not finish within the recovery window."),
+			"recovery-expired",
+		)
+		self.assertEqual(turn_handler._classify_error("request timed out after 30s"), "timeout")
+		exc = AgentUnreachableError("chat.send timed out", code="turn-timeout")
+		self.assertEqual(turn_handler._classify_error("chat.send timed out", exc=exc), "timeout")
+
+	def test_three_distinct_customer_actions_are_actually_distinct(self):
+		# #702 requirement: a genuine network/timeout failure, a provider
+		# rejection, and a transient gateway fault must not collapse into the
+		# same code (which is what drives the headline+hint in errors.js).
+		codes = {
+			turn_handler._classify_error("ws open failed"),
+			turn_handler._classify_error("insufficient credit"),
+			turn_handler._classify_error("LLM request failed: network connection error."),
+		}
+		self.assertEqual(codes, {"unreachable", "provider", "gateway"})
+
+	def test_empty_and_none_degrade_to_gateway_not_a_crash(self):
+		self.assertEqual(turn_handler._classify_error(""), "gateway")
+		self.assertEqual(turn_handler._classify_error(None), "gateway")
+
+	def test_a_definite_pre_ack_rejection_stays_unreachable_when_exc_is_passed(self):
+		# #702 review: pump._handle_ack_failure holds an AgentUnreachableError for
+		# a definite pre-ack rejection (e.g. "policy_denied", no keyword match in
+		# the text). Passing that exc through (as turn_handler's own equivalent
+		# pre-ack path already does) must classify it "unreachable", not fall
+		# into the new mid-run "gateway" default meant for a run that already
+		# started.
+		exc = AgentUnreachableError("chat.send rejected: policy_denied: nope")
+		code = turn_handler._classify_error("chat.send rejected: policy_denied: nope", exc=exc)
+		self.assertEqual(code, "unreachable")
+
+
+class TestPumpClassifyErrorForwardsExc(unittest.TestCase):
+	"""pump._classify_error (#702 review): must forward `exc` to
+	turn_handler._classify_error rather than only ever guessing from text, or
+	a definite pre-ack rejection it holds an AgentUnreachableError for
+	silently drops that signal and falls into the "gateway" default."""
+
+	def test_exc_is_forwarded_and_changes_the_result(self):
+		from jarvis.chat import pump
+		from jarvis.exceptions import AgentUnreachableError as AUE
+
+		text = "chat.send rejected: policy_denied: nope"
+		self.assertEqual(pump._classify_error(text), "gateway", "text alone has no keyword match")
+		self.assertEqual(
+			pump._classify_error(text, AUE(text)),
+			"unreachable",
+			"the same text with `exc` passed must match turn_handler's own pre-ack path",
+		)
+
+
+class TestPrepareErrorCodeOverride(FrappeTestCase):
+	"""prepare._prepare_error's `code` param (#702 review): a caller that
+	already knows the cause (a local bug, not a gateway/relay signal) must be
+	able to skip _classify_error's guess entirely - otherwise a generic
+	message like "Could not prepare the message." falls into the "gateway"
+	default and tells the customer a bug in our own code is a brief hiccup
+	worth retrying."""
+
+	def _run(self, *, code=None, error="boom"):
+		from jarvis.chat import prepare
+
+		published = {}
+		with (
+			patch("jarvis.chat.turn_state.prepare_errored", return_value=True),
+			patch(
+				"jarvis.chat.turn_state.publish_fenced",
+				side_effect=lambda *a, **kw: published.update(kw),
+			),
+			patch("frappe.db.set_value"),
+			patch("frappe.db.commit"),
+		):
+			prepare._prepare_error("run1", 1, "msg1", "conv1", "user1", error, code=code)
+		return published
+
+	def test_explicit_code_bypasses_classification(self):
+		published = self._run(code="internal", error="Could not prepare the message.")
+		self.assertEqual(published.get("code"), "internal")
+
+	def test_no_explicit_code_falls_back_to_classify_error(self):
+		published = self._run(error="insufficient credit")
+		self.assertEqual(published.get("code"), "provider")

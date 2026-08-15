@@ -1,13 +1,22 @@
 <script setup>
 // "This answer used your Pricing skill." Small provenance chips, from the
 // agent's ```jarvis-skill``` block.
-const props = defineProps({ names: { type: Array, default: () => [] } })
+const props = defineProps({ names: { type: Array, default: () => [] } });
 </script>
 
 <template>
 	<div v-if="props.names.length" class="jv-skills">
 		<span v-for="n in props.names" :key="n" class="jv-skill-chip">
-			<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+			<svg
+				viewBox="0 0 24 24"
+				width="11"
+				height="11"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.9"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
 				<path d="M12 2 4 7v10l8 5 8-5V7z" />
 				<path d="M12 22V12M12 12 4 7M12 12l8-5" />
 			</svg>

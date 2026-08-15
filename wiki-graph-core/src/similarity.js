@@ -6,22 +6,27 @@
 // hints, which is how a sparse LLM-wiki starts to densify).
 
 const STOP = new Set(
-	("the a an of on in to for and or but with without from by as at is are was were be been "
-	+ "this that these those it its i we you they he she our your their my his her no not into "
-	+ "over under about above below up down out off then than so if else per via etc has have "
-	+ "had will shall may can could should would do does did what when where which who whom why").split(" ")
+	(
+		"the a an of on in to for and or but with without from by as at is are was were be been " +
+		"this that these those it its i we you they he she our your their my his her no not into " +
+		"over under about above below up down out off then than so if else per via etc has have " +
+		"had will shall may can could should would do does did what when where which who whom why"
+	).split(" ")
 );
 
 function tokenize(text) {
 	const out = [];
-	for (const t of String(text || "").toLowerCase().split(/[^a-z0-9]+/)) {
+	for (const t of String(text || "")
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)) {
 		if (t.length > 2 && !STOP.has(t)) out.push(t);
 	}
 	return out;
 }
 
 function _vectorize(pages) {
-	const docs = [], df = new Map();
+	const docs = [],
+		df = new Map();
 	for (const p of pages) {
 		const toks = tokenize([p.label, p.summary].filter(Boolean).join(" "));
 		if (!toks.length) continue; // skip empty content (R8)
@@ -76,7 +81,9 @@ export function computeSimilarity(nodes, opts = {}) {
 			.sort((a, b) => b[1] - a[1])
 			.slice(0, topK)
 			.map(([j, s]) => ({
-				id: docs[j].id, slug: docs[j].slug, label: docs[j].label,
+				id: docs[j].id,
+				slug: docs[j].slug,
+				label: docs[j].label,
 				score: Math.round(s * 100) / 100,
 			}));
 		if (ranked.length) similar[docs[i].slug] = ranked;
@@ -91,13 +98,15 @@ export function suggestionsFromSimilar(similar, nodes, edges, opts = {}) {
 		if (e.kind !== "links-to") continue;
 		linked.add(e.source < e.target ? `${e.source}|${e.target}` : `${e.target}|${e.source}`);
 	}
-	const label = {}, idBySlug = {};
+	const label = {},
+		idBySlug = {};
 	for (const n of nodes || []) {
 		if (n.kind !== "page") continue;
 		label[n.id] = n.label || n.slug;
 		idBySlug[n.slug] = n.id;
 	}
-	const seen = new Set(), out = [];
+	const seen = new Set(),
+		out = [];
 	for (const [slug, sims] of Object.entries(similar)) {
 		const a = idBySlug[slug];
 		for (const s of sims) {
@@ -106,7 +115,14 @@ export function suggestionsFromSimilar(similar, nodes, edges, opts = {}) {
 			const key = a < b ? `${a}|${b}` : `${b}|${a}`;
 			if (linked.has(key) || seen.has(key)) continue;
 			seen.add(key);
-			out.push({ a, b, aLabel: label[a], bLabel: s.label, score: s.score, source: "content" });
+			out.push({
+				a,
+				b,
+				aLabel: label[a],
+				bLabel: s.label,
+				score: s.score,
+				source: "content",
+			});
 		}
 	}
 	return out.sort((x, y) => y.score - x.score).slice(0, opts.max || 12);

@@ -69,8 +69,7 @@ LIMIT {HARD_ROW_LIMIT}
 """
 
 CUSTOMER_TERMS_MASTER_SQL = (
-	"SELECT c.name AS name, c.payment_terms AS payment_terms "
-	"FROM `tabCustomer` c WHERE c.name IN %(names)s"
+	"SELECT c.name AS name, c.payment_terms AS payment_terms FROM `tabCustomer` c WHERE c.name IN %(names)s"
 )
 
 # --- S5 baseline for quotation validity (unit = distinct Quotation) -----------
@@ -211,9 +210,7 @@ def postprocess_quotation_validity(rows, spec, company, patterndb, params):
 	days = [d for _g, d, _c in units.values()]
 	created = [c for _g, _d, c in units.values()]
 	exceptions = [
-		{"unit": uid, "value": g, "month": month_key(d)}
-		for uid, (g, d, _c) in units.items()
-		if g != mode
+		{"unit": uid, "value": g, "month": month_key(d)} for uid, (g, d, _c) in units.items() if g != mode
 	][:20]
 	raw = evaluate_segment(
 		spec,
@@ -353,9 +350,7 @@ def postprocess_tc_letterhead(rows, spec, company, patterndb, params):
 		days = [d for _v, d, _c in units.values()]
 		created = [c for _v, _d, c in units.values()]
 		exceptions = [
-			{"unit": uid, "value": v, "month": month_key(d)}
-			for uid, (v, d, _c) in units.items()
-			if v != mode
+			{"unit": uid, "value": v, "month": month_key(d)} for uid, (v, d, _c) in units.items() if v != mode
 		][:20]
 		raw = evaluate_segment(
 			spec,
@@ -421,9 +416,9 @@ def postprocess_customer_print_format(rows, spec, company, patterndb, params):
 	watermark = snapshots.read_watermark(detector_id, runner=patterndb.sql_select)
 	events, _last, _rows_read = snapshots.stream_print_events(patterndb.sql_select, watermark)
 	live = [
-		e for e in events
-		if (company is None or e.get("company") == company)
-		and (not window_start or e["day"] >= window_start)
+		e
+		for e in events
+		if (company is None or e.get("company") == company) and (not window_start or e["day"] >= window_start)
 	]
 	for payload in snapshots.aggregate_events(live).values():
 		combined = snapshots.merge_payloads(combined, payload)
@@ -486,46 +481,48 @@ def postprocess_customer_print_format(rows, spec, company, patterndb, params):
 			if other != fmt
 		][:20]
 
-		out.append({
-			"antecedent_value": party,
-			"consequent_value": fmt,
-			"k": k,
-			"n_units": n_party,
-			"n_rows": n_raw,
-			"exception_n": n_party - k,
-			"confidence": confidence,
-			"wilson_low": wl,
-			"gap": confidence - base_rate,
-			"band": band,
-			"temporal_spread": _temporal_spread(day_list),
-			"evidence": {
-				"antecedent": party,
-				"consequent": fmt,
+		out.append(
+			{
+				"antecedent_value": party,
+				"consequent_value": fmt,
 				"k": k,
 				"n_units": n_party,
 				"n_rows": n_raw,
 				"exception_n": n_party - k,
-				"confidence": round(confidence, 4),
-				"base_rate": round(base_rate, 4),
-				"gap": round(confidence - base_rate, 4),
-				"wilson_low": round(wl, 4),
+				"confidence": confidence,
+				"wilson_low": wl,
+				"gap": confidence - base_rate,
 				"band": band,
-				"sql_shape": "S4",
-				"log_depth_days": depth_days,
-				"log_depth_note": depth_note,
-				"snapshot_periods": snapshot_periods,
-				"snapshot_events": snapshot_events,
-				"live_events": len(live),
-				"formats": {f: int((a or {}).get("eff") or 0) for f, a in formats.items()},
-			},
-			"exceptions": exceptions,
-			"exceptions_cluster": None,
-			"names_party": True,
-			"skill_template": template,
-			"skill_bullet_vars": {"customer": party, "print_format": fmt},
-			"statement": None,
-			"rule": None,
-			"since_date": str(first_day or "")[:7],
-			"unit_doctype": "print events",
-		})
+				"temporal_spread": _temporal_spread(day_list),
+				"evidence": {
+					"antecedent": party,
+					"consequent": fmt,
+					"k": k,
+					"n_units": n_party,
+					"n_rows": n_raw,
+					"exception_n": n_party - k,
+					"confidence": round(confidence, 4),
+					"base_rate": round(base_rate, 4),
+					"gap": round(confidence - base_rate, 4),
+					"wilson_low": round(wl, 4),
+					"band": band,
+					"sql_shape": "S4",
+					"log_depth_days": depth_days,
+					"log_depth_note": depth_note,
+					"snapshot_periods": snapshot_periods,
+					"snapshot_events": snapshot_events,
+					"live_events": len(live),
+					"formats": {f: int((a or {}).get("eff") or 0) for f, a in formats.items()},
+				},
+				"exceptions": exceptions,
+				"exceptions_cluster": None,
+				"names_party": True,
+				"skill_template": template,
+				"skill_bullet_vars": {"customer": party, "print_format": fmt},
+				"statement": None,
+				"rule": None,
+				"since_date": str(first_day or "")[:7],
+				"unit_doctype": "print events",
+			}
+		)
 	return out

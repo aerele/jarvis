@@ -1,19 +1,19 @@
 <script setup>
-import { watch } from "vue"
+import { watch } from "vue";
 
 // Bottom sheet — the phone's dialog. A centred modal is a desktop idiom; on a
 // phone the thumb is at the bottom, so that is where a decision belongs.
-const props = defineProps({ open: { type: Boolean, default: false } })
-const emit = defineEmits(["close"])
+const props = defineProps({ open: { type: Boolean, default: false } });
+const emit = defineEmits(["close"]);
 
 // While a sheet is up the thread behind it must not scroll under the user's
 // finger.
 watch(
 	() => props.open,
 	(open) => {
-		document.body.style.overflow = open ? "hidden" : ""
-	},
-)
+		document.body.style.overflow = open ? "hidden" : "";
+	}
+);
 </script>
 
 <template>

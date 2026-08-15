@@ -27,7 +27,7 @@ At the TRANSPORT -- the exact layer a mock replaces. This matters, and getting i
 easy: a guard placed in ``admin_client._do_post`` (say) fires even when the test has
 already patched ``requests.post``, so it breaks tests that were never unsafe. Dozens of
 existing tests patch the transport and then call the function under test precisely to
-exercise its own logic -- ``test_chat_openclaw_client`` calls ``OpenclawSession.connect``
+exercise its own logic -- ``test_chat_agent_client`` calls ``AgentSession.connect``
 directly, because ``connect`` IS the unit under test.
 
 So the rule is: block only what actually reaches the wire.
@@ -43,6 +43,7 @@ quietly changed test outcomes across the suite.
 
 Escape hatch: ``JARVIS_ALLOW_REAL_NETWORK_IN_TESTS=1`` for a deliberate e2e run.
 """
+
 import os
 
 _ALLOW_ENV = "JARVIS_ALLOW_REAL_NETWORK_IN_TESTS"
@@ -50,14 +51,13 @@ _ALLOW_ENV = "JARVIS_ALLOW_REAL_NETWORK_IN_TESTS"
 _MSG = (
 	"BLOCKED: this test tried to open a REAL network connection to {target!r}.\n"
 	"\n"
-	"The test suite must not reach a live admin, fleet-agent, openclaw container, or "
+	"The test suite must not reach a live admin, fleet-agent, agent container, or "
 	"upstream provider. On a developer's bench those are RUNNING, and a test that reaches "
 	"them pushes its fixtures into a real tenant -- rewriting its LLM pool and deleting "
 	"OAuth credentials, with no undo. That is not hypothetical; it happened.\n"
 	"\n"
 	"Mock the transport your code uses (requests.post / websocket.create_connection / "
-	"urlopen). If you genuinely mean to hit the network, run with "
-	+ _ALLOW_ENV + "=1."
+	"urlopen). If you genuinely mean to hit the network, run with " + _ALLOW_ENV + "=1."
 )
 
 
@@ -77,7 +77,7 @@ def _install_network_block() -> None:
 	except Exception:  # pragma: no cover - never break collection over the guard itself
 		pass
 
-	# --- websocket: openclaw's gateway socket -----------------------------------------
+	# --- websocket: agent's gateway socket -----------------------------------------
 	try:
 		import websocket
 
@@ -94,9 +94,7 @@ def _install_network_block() -> None:
 		from urllib3.connectionpool import HTTPConnectionPool
 
 		def _blocked_urlopen(self, method, url, *a, **kw):
-			raise ConnectionRefusedError(
-				_MSG.format(target=f"{self.host}:{self.port}{url}")
-			)
+			raise ConnectionRefusedError(_MSG.format(target=f"{self.host}:{self.port}{url}"))
 
 		HTTPConnectionPool.urlopen = _blocked_urlopen
 	except Exception:  # pragma: no cover

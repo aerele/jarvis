@@ -138,9 +138,7 @@ class TestAmendDocHappyPath(FrappeTestCase):
 		so the agent can tell the user what needs fixing."""
 		source = _fake_source(docstatus=2)
 		new_doc = _fake_copy()
-		new_doc.insert.side_effect = frappe.ValidationError(
-			"Tax rate has expired"
-		)
+		new_doc.insert.side_effect = frappe.ValidationError("Tax rate has expired")
 		with patch("frappe.get_meta", return_value=_fake_meta()):
 			with patch("frappe.has_permission", return_value=True):
 				with patch("frappe.get_doc", return_value=source):

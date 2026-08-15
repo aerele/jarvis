@@ -1,7 +1,7 @@
 """Jarvis Custom Skill DocType controller.
 
 One row per customer-authored skill. Each row renders to a SKILL.md that is
-pushed into the customer's openclaw container (under ``openclaw_state/
+pushed into the customer's agent container (under ``openclaw_state/
 custom_skills/custom-<slug>/SKILL.md``) and loaded ALONGSIDE the shared
 read-only persona skills. Rows are owned by the Frappe user who created them
 (``if_owner`` permission); the push itself is bench-global (a Jarvis bench maps
@@ -20,7 +20,7 @@ from frappe.model.document import Document
 
 # A skill_name is a bare slug the customer authors (e.g. "invoicing"). It is
 # lowercased and must be hyphen-separated alphanumerics. Everywhere it reaches
-# openclaw it is prefixed with ``custom-`` (see chat/custom_skills.py) so it can
+# agent it is prefixed with ``custom-`` (see chat/custom_skills.py) so it can
 # never collide with a shared persona skill name.
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MIN_SLUG_LEN = 3
@@ -48,9 +48,7 @@ def _clear_personal_clause_cache(owner: str | None) -> None:
 	try:
 		from jarvis.chat.custom_skills import personal_skills_cache_key
 
-		frappe.cache().delete_value(
-			personal_skills_cache_key(owner or frappe.session.user)
-		)
+		frappe.cache().delete_value(personal_skills_cache_key(owner or frappe.session.user))
 	except Exception:
 		pass
 
@@ -106,9 +104,7 @@ def user_can_use_skill(skill, user: str | None = None, user_roles: list[str] | N
 	if scope == "User":
 		# Private: owner/shared/SM already handled above.
 		return False
-	allowed = set(
-		_child_values(skill, "allowed_roles", "role", "Jarvis Custom Skill Allowed Role")
-	)
+	allowed = set(_child_values(skill, "allowed_roles", "role", "Jarvis Custom Skill Allowed Role"))
 	if scope == "Role":
 		target_role = (skill.get("target_role") or "").strip()
 		if target_role and target_role in roles:
@@ -150,16 +146,55 @@ class JarvisCustomSkill(Document):
 		self._validate_scope()
 		self._guard_new_scope()
 		self._guard_scope_change()
+		self._guard_content_change()
 		self._validate_lengths()
 		self._validate_unique_per_owner()
+		self._validate_shared_slug_unique()
 		self._validate_owner_cap()
 		self._guard_managed_flag()
 
 	def on_update(self):
 		_clear_personal_clause_cache(self.owner)
+		self._sync_slug_reservation()
 
 	def on_trash(self):
 		_clear_personal_clause_cache(self.owner)
+		self._release_slug_reservation()
+
+	def _sync_slug_reservation(self):
+		"""Keep the DB-unique shared-slug reservation (SR4-2) in step with this row on
+		EVERY write path - on_update fires on both insert and save, so the SPA, the
+		Desk, the tools, the promotion approval and the insight-apply create all pass
+		through here. A shared (Role/Org) skill RESERVES its slug: the reservation
+		doctype's name IS the slug, so the primary key makes a duplicate shared slug
+		impossible regardless of path or concurrency - the hard guarantee under the fast
+		belt query in ``_validate_shared_slug_unique``. A rename releases the old slug
+		and reserves the new one; narrowing back to User releases it via the old-slug
+		branch below. A merely-disabled shared skill KEEPS its reservation - the slug
+		stays claimed so re-enabling it can never collide."""
+		from jarvis.chat.custom_skills import release_shared_slug, reserve_shared_slug
+
+		new_slug = (self.skill_name or "").strip().lower()
+		new_shared = self.scope in ("Role", "Org")
+		before = self.get_doc_before_save()
+		if before is not None:
+			old_slug = (before.skill_name or "").strip().lower()
+			# On a rename, or when this row narrows out of the shared scopes, drop the
+			# reservation it previously held under its old slug. release_shared_slug is a
+			# no-op unless THIS row is the recorded holder, so a User row never releases a
+			# shared row's reservation.
+			if old_slug and (old_slug != new_slug or not new_shared):
+				release_shared_slug(old_slug, self.name)
+		if new_shared and new_slug:
+			reserve_shared_slug(new_slug, self.name)
+
+	def _release_slug_reservation(self):
+		"""Release this row's shared-slug reservation when it is deleted (SR4-2). Keyed
+		on the holder pointer, so deleting a User row that shadows a shared slug is a
+		safe no-op."""
+		from jarvis.chat.custom_skills import release_shared_slug
+
+		release_shared_slug((self.skill_name or "").strip().lower(), self.name)
 
 	def _validate_scope(self):
 		# Scope ladder {User, Role, Org} (security review PART 2 TASK 10). NEW rows
@@ -179,8 +214,34 @@ class JarvisCustomSkill(Document):
 			self.target_role = (self.target_role or "").strip() or None
 			if not self.target_role:
 				frappe.throw(_("Role-scope skills need a Target Role."))
-			# allowed_roles stays meaningful for compiler-managed rows only; an
-			# authored Role skill's audience is target_role.
+			# The audience of a Role skill is its ``allowed_roles`` set; ``target_role``
+			# is the primary and MUST be one of them. Every path that answers "which
+			# skills may this user invoke" (``_role_scoped_invocable_names`` + the /slug
+			# clause + the list query) matches on the child rows, and ``user_can_use_skill``
+			# OR-s target_role with the allowed_roles intersection - so mirroring here is
+			# what keeps the invocation plane honest.
+			#
+			# Multi-role (issue #478 extended): a promotion materializes the FULL role
+			# set with target_role = its first, and we KEEP that set. But a single-role
+			# create, or a Desk/REST re-target where target_role is changed to a role NOT
+			# in the current set, self-heals to exactly ``[target_role]`` - so re-pointing
+			# still drops stale roles the reviewer targeted away from, and a mismatched or
+			# empty set can never leave the audience wider than intended. Compiler-managed
+			# rows are pinned to Org scope and never reach this branch, so their multi-role
+			# allowed_roles is untouched.
+			existing = [
+				(r.role or "").strip() for r in (self.get("allowed_roles") or []) if (r.role or "").strip()
+			]
+			if self.target_role in existing:
+				seen: set[str] = set()
+				ordered: list[str] = []
+				for r in existing:
+					if r not in seen:
+						seen.add(r)
+						ordered.append(r)
+				self.set("allowed_roles", [{"role": r} for r in ordered])
+			else:
+				self.set("allowed_roles", [{"role": self.target_role}])
 		elif self.scope == "User":
 			# A private skill has no role audience — clear both so a stray
 			# allowed_roles/target_role can never leak it to role-holders (TASK 13
@@ -213,8 +274,10 @@ class JarvisCustomSkill(Document):
 			return
 		if self.scope in ("Role", "Org") and not self._scope_change_authorized():
 			frappe.throw(
-				_("New skills are private (User scope); promoting to Role or Org "
-				  "needs a reviewer's approval."),
+				_(
+					"New skills are private (User scope); promoting to Role or Org "
+					"needs a reviewer's approval."
+				),
 				frappe.PermissionError,
 			)
 
@@ -227,9 +290,7 @@ class JarvisCustomSkill(Document):
 		writes save with ignore_permissions=True."""
 		if self.is_new():
 			return
-		prev = frappe.db.get_value(
-			self.doctype, self.name, ["scope", "target_role"], as_dict=True
-		)
+		prev = frappe.db.get_value(self.doctype, self.name, ["scope", "target_role"], as_dict=True)
 		if not prev:
 			return
 		prev_scope = (prev.scope or "").strip() or "Org"
@@ -246,8 +307,48 @@ class JarvisCustomSkill(Document):
 		if is_owner and rank.get(self.scope, 2) < rank.get(prev_scope, 2):
 			return
 		frappe.throw(
-			_("Only a reviewer can widen the scope or change the audience of an "
-			  "existing skill. Request a promotion instead."),
+			_(
+				"Only a reviewer can widen the scope or change the audience of an "
+				"existing skill. Request a promotion instead."
+			),
+			frappe.PermissionError,
+		)
+
+	def _guard_content_change(self):
+		"""Only a reviewer (or the compiler) may change the CONTENT of an existing
+		Role/Org skill — the instructions, description or user-invocable flag the
+		shared audience runs. Without this, a promotion could be approved against a
+		reviewed body and then have its instructions rewritten afterwards (or a hidden
+		tail slipped in) with no second review — the four-eyes bypass Codex flagged
+		(CDX-SP-1). Siblings _guard_new_scope / _guard_scope_change bind the SCOPE to
+		review; this binds the CONTENT. Runs regardless of ignore_permissions (like
+		the scope guard) because the reviewer promotion / insight-apply writes save
+		with ignore_permissions=True. A private (User) skill is unguarded — its owner
+		edits it freely; only widening to Role/Org needs a reviewer, and the guard
+		then locks that reviewed content."""
+		if self.is_new():
+			return
+		if self.scope not in ("Role", "Org"):
+			return
+		if self._scope_change_authorized():
+			return
+		prev = frappe.db.get_value(
+			self.doctype, self.name, ["instructions", "description", "user_invocable"], as_dict=True
+		)
+		if not prev:
+			return
+		changed = (
+			(self.instructions or "") != (prev.instructions or "")
+			or (self.description or "") != (prev.description or "")
+			or int(self.user_invocable or 0) != int(prev.user_invocable or 0)
+		)
+		if not changed:
+			return
+		frappe.throw(
+			_(
+				"Only a reviewer can change the content of a shared (Role/Org) skill. "
+				"Narrow it back to private to edit it, then request a fresh promotion."
+			),
 			frappe.PermissionError,
 		)
 
@@ -257,9 +358,7 @@ class JarvisCustomSkill(Document):
 			frappe.throw(_("Skill name is required."))
 		if self.skill_name.startswith(RESERVED_PREFIX):
 			frappe.throw(
-				_("Skill name must not start with '{0}' (added automatically).").format(
-					RESERVED_PREFIX
-				)
+				_("Skill name must not start with '{0}' (added automatically).").format(RESERVED_PREFIX)
 			)
 		# ``learned-`` is engine-only: the compiler authors ``learned-<domain>``
 		# rows as Administrator under the engine flag; block every other author so
@@ -269,16 +368,11 @@ class JarvisCustomSkill(Document):
 		):
 			frappe.throw(
 				_(
-					"Skill name must not start with '{0}' (reserved for skills the "
-					"learning engine manages)."
+					"Skill name must not start with '{0}' (reserved for skills the learning engine manages)."
 				).format(LEARNED_PREFIX)
 			)
 		if not (MIN_SLUG_LEN <= len(self.skill_name) <= MAX_SLUG_LEN):
-			frappe.throw(
-				_("Skill name must be {0}-{1} characters.").format(
-					MIN_SLUG_LEN, MAX_SLUG_LEN
-				)
-			)
+			frappe.throw(_("Skill name must be {0}-{1} characters.").format(MIN_SLUG_LEN, MAX_SLUG_LEN))
 		if not SLUG_RE.fullmatch(self.skill_name):
 			frappe.throw(
 				_(
@@ -297,15 +391,25 @@ class JarvisCustomSkill(Document):
 		if len(self.description) > MAX_DESC_LEN:
 			frappe.throw(_("Description must be at most {0} characters.").format(MAX_DESC_LEN))
 		if len(self.instructions) > MAX_INSTR_LEN:
-			frappe.throw(
-				_("Instructions must be at most {0} characters.").format(MAX_INSTR_LEN)
-			)
+			frappe.throw(_("Instructions must be at most {0} characters.").format(MAX_INSTR_LEN))
 
 	def _validate_unique_per_owner(self):
 		# Frappe's field-level ``unique`` is global, not per-owner; enforce
 		# (owner, skill_name) uniqueness here so two customers can both have a
 		# skill named "invoicing".
 		owner = self.owner or frappe.session.user
+		# R2-SP-3a: a reviewer-approved promotion materializes the shared copy under
+		# the SYSTEM identity (MANAGED_OWNER), but frappe's insert forces ``owner`` to
+		# the acting reviewer's session before this validate runs, then the endpoint
+		# reassigns it. Validate uniqueness against the FINAL system owner instead, so
+		# (a) the check catches a real duplicate Administrator-owned shared slug BEFORE
+		# commit (never insert-then-reassign into a collision), and (b) a reviewer who
+		# happens to own a private skill of the same slug does not spuriously block a
+		# legitimate promotion.
+		if frappe.flags.jarvis_promotion_materialize:
+			from jarvis.chat.custom_skills import MANAGED_OWNER
+
+			owner = MANAGED_OWNER
 		clash = frappe.db.exists(
 			"Jarvis Custom Skill",
 			{
@@ -317,15 +421,61 @@ class JarvisCustomSkill(Document):
 		if clash:
 			frappe.throw(_("You already have a skill named '{0}'.").format(self.skill_name))
 
+	def _validate_shared_slug_unique(self):
+		# R3-SP-1: GLOBAL uniqueness of ``skill_name`` among SHARED (Role/Org) skills.
+		# ``_validate_unique_per_owner`` above only enforces ``(owner, skill_name)``;
+		# but the container writes ONE ``custom-<slug>`` dir per authored slug, so at
+		# most one SHARED copy may carry a given slug REGARDLESS of owner. Two shared
+		# rows with the same slug reached through DIFFERENT authorized paths — a
+		# System-Manager-owned direct Org create + an Administrator-owned promoted copy,
+		# or an insight-apply-created Role row + a promotion — would collide on that one
+		# dir and corrupt the push budget. So enforce the true invariant here: it runs
+		# on EVERY shared-scope create/rename (not just promotion), since ``validate``
+		# fires on every insert/save through the SPA, the Desk, the tools or a test.
+		#
+		# Only a NEW duplicate is blocked; an in-place UPDATE of an existing shared row
+		# (insight-apply, a supersede-in-place promotion) excludes SELF via ``name !=``,
+		# so legitimately editing the one shared copy of a slug is never blocked.
+		#
+		# ``("in", ("Role", "Org", ""))`` — not ``("not in", ("User", "Personal"))`` —
+		# because db_query wraps the ``in`` operator in ``ifnull(scope, '')``, so a
+		# legacy NULL-scope row (which means Org) matches the ``""`` entry; a ``!=`` /
+		# ``not in`` would silently drop those NULL rows (NULL != 'User' is NULL, not
+		# true), letting a legacy-shadowed duplicate slip through.
+		if self.scope not in ("Role", "Org"):
+			return
+		clash = frappe.get_all(
+			SKILL_DOCTYPE,
+			filters={
+				"skill_name": self.skill_name,
+				"scope": ("in", ("Role", "Org", "")),
+				"name": ("!=", self.name or ""),
+			},
+			pluck="name",
+			limit=1,
+		)
+		if clash:
+			frappe.throw(
+				_(
+					"A shared skill named '{0}' already exists. Two Role/Org skills cannot "
+					"share a name — rename one, or edit the existing shared skill instead."
+				).format(self.skill_name)
+			)
+
 	def _validate_owner_cap(self):
 		if not self.is_new():
+			return
+		# The reviewer-approved promotion materializes the shared Role/Org copy under
+		# a system owner (see custom_skills_api.decide_skill_promotion); that copy is
+		# not user hoarding, and the org-wide push budget (MAX_SKILLS_PER_PUSH) already
+		# bounds the shared catalog, so the per-owner cap must not block a legitimate
+		# approval once the system identity accumulates enough promoted skills.
+		if frappe.flags.jarvis_promotion_materialize:
 			return
 		owner = self.owner or frappe.session.user
 		count = frappe.db.count("Jarvis Custom Skill", {"owner": owner})
 		if count >= MAX_SKILLS_PER_OWNER:
-			frappe.throw(
-				_("You can have at most {0} custom skills.").format(MAX_SKILLS_PER_OWNER)
-			)
+			frappe.throw(_("You can have at most {0} custom skills.").format(MAX_SKILLS_PER_OWNER))
 
 	def _guard_managed_flag(self):
 		"""``managed_by_learning`` is engine-owned (plan section 6.6 security).

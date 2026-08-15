@@ -1,4 +1,4 @@
-"""RQ job: stream one agent turn from openclaw to DB + realtime.
+"""RQ job: stream one agent turn from agent to DB + realtime.
 
 Today this is the default chat path: ``jarvis.chat.api.send_message``
 enqueues, RQ workers pick up, this function runs. The actual turn
@@ -34,10 +34,11 @@ from jarvis.chat.events import publish_to_user
 from jarvis.chat.turn_handler import (
 	_ASSISTANT_BATCH_INTERVAL_MS,
 	_ASSISTANT_BATCH_SIZE,
-	_AssistantContentBatcher,
 	_IMAGE_EXT,
 	_MAX_INLINE_CHARS,
-	_PROVIDER_LABEL_TO_OPENCLAW_ID,
+	_PROVIDER_LABEL_TO_AGENT_ID,
+	POOL_VIRTUAL_MODEL,
+	_AssistantContentBatcher,
 	_create_assistant_placeholder,
 	_handle_event,
 	_handle_event_inner,
@@ -48,7 +49,6 @@ from jarvis.chat.turn_handler import (
 	_session_model_for,
 	_to_managed_attachments,
 	_vision_enabled,
-	POOL_VIRTUAL_MODEL,
 	handle_chat_send,
 )
 
@@ -58,15 +58,13 @@ MSG = "Jarvis Chat Message"
 __all__ = [
 	"CONV",
 	"MSG",
-	"handle_chat_send",
-	"publish_to_user",
-	"run_agent_turn",
+	"POOL_VIRTUAL_MODEL",
 	"_ASSISTANT_BATCH_INTERVAL_MS",
 	"_ASSISTANT_BATCH_SIZE",
-	"_AssistantContentBatcher",
 	"_IMAGE_EXT",
 	"_MAX_INLINE_CHARS",
-	"_PROVIDER_LABEL_TO_OPENCLAW_ID",
+	"_PROVIDER_LABEL_TO_AGENT_ID",
+	"_AssistantContentBatcher",
 	"_create_assistant_placeholder",
 	"_handle_event",
 	"_handle_event_inner",
@@ -77,13 +75,19 @@ __all__ = [
 	"_session_model_for",
 	"_to_managed_attachments",
 	"_vision_enabled",
-	"POOL_VIRTUAL_MODEL",
+	"handle_chat_send",
+	"publish_to_user",
+	"run_agent_turn",
 ]
 
 
 def run_agent_turn(
-	conversation_id: str, message_id: str, run_id: str, attachments=None,
-	context=None, enqueued_at_ms=None,
+	conversation_id: str,
+	message_id: str,
+	run_id: str,
+	attachments=None,
+	context=None,
+	enqueued_at_ms=None,
 ) -> None:
 	"""RQ entry point. Thin shim around ``handle_chat_send``.
 
@@ -98,11 +102,13 @@ def run_agent_turn(
 	the handler can log queue_wait_ms (latency plan, Phase 0). Deploys that
 	add this kwarg must restart workers (RQ workers don't hot-reload).
 	"""
-	handle_chat_send({
-		"conversation_id": conversation_id,
-		"message_id": message_id,
-		"run_id": run_id,
-		"attachments": attachments,
-		"context": context,
-		"enqueued_at_ms": enqueued_at_ms,
-	})
+	handle_chat_send(
+		{
+			"conversation_id": conversation_id,
+			"message_id": message_id,
+			"run_id": run_id,
+			"attachments": attachments,
+			"context": context,
+			"enqueued_at_ms": enqueued_at_ms,
+		}
+	)

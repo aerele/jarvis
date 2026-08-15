@@ -38,25 +38,31 @@ def _ensure_role() -> bool:
 	(so tearDown only drops a role this test introduced)."""
 	if frappe.db.exists("Role", JARVIS_ROLE):
 		return False
-	frappe.get_doc({
-		"doctype": "Role", "role_name": JARVIS_ROLE,
-		"desk_access": 1, "is_custom": 1,
-	}).insert(ignore_permissions=True)
+	frappe.get_doc(
+		{
+			"doctype": "Role",
+			"role_name": JARVIS_ROLE,
+			"desk_access": 1,
+			"is_custom": 1,
+		}
+	).insert(ignore_permissions=True)
 	return True
 
 
 def _ensure_user(email: str, roles: tuple[str, ...] = ()) -> None:
 	"""Create a disposable enabled System User (idempotent) and attach ``roles``."""
 	if not frappe.db.exists("User", email):
-		frappe.get_doc({
-			"doctype": "User",
-			"email": email,
-			"first_name": "Jarvis",
-			"last_name": "AccessTest",
-			"enabled": 1,
-			"send_welcome_email": 0,
-			"user_type": "System User",
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "Jarvis",
+				"last_name": "AccessTest",
+				"enabled": 1,
+				"send_welcome_email": 0,
+				"user_type": "System User",
+			}
+		).insert(ignore_permissions=True)
 	if roles:
 		frappe.get_doc("User", email).add_roles(*roles)
 

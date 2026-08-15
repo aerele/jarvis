@@ -21,12 +21,21 @@ Pattern fields:
 
     {
       "detector_id":          str,   # registry id, e.g. "buy-supplier-stockness"
-      "pattern_key":          str,   # REQUIRED, unique dedupe key (detector + company + antecedent + consequent)
+      # REQUIRED, unique dedupe key: sha1(detector_id | antecedent_value |
+      # company) - see executor._pattern_key. The CONSEQUENT is NOT part of the
+      # key (a detector emits at most one candidate per antecedent, so there is
+      # no duplicate to collide with), which also means a later run can carry a
+      # DIFFERENT consequent into the SAME row. Approved rows are protected
+      # from that by approved_draft + lifecycle's redraft staling (#482).
+      "pattern_key":          str,
       "domain":               str,   # selling|buying|stock|accounts|projects|org
       "company":              str|None,
       "roles":                list[str],   # detected role names -> Jarvis Learned Pattern Role child rows (insert only)
       "pattern_statement":    str,   # REQUIRED, plain-English sentence
       "skill_draft":          str,   # REQUIRED, deterministic template body (never overwritten once draft_edited=1)
+                                     # NOTE: this is the LIVE draft. What an
+                                     # approved pattern COMPILES from is the
+                                     # frozen approved_draft snapshot (#482).
       "support_n":            int,   # n_units (independent units, never child rows)
       "n_rows":               int,   # raw rows (drill-down only)
       "exception_n":          int,
@@ -99,9 +108,8 @@ class PatternWriteFenceError(Exception):
 def _fenced_write(doctype: str) -> None:
 	"""Assert an engine write targets an allowlisted doctype (plan §5.4)."""
 	if doctype not in ALLOWED_WRITE_DOCTYPES:
-		raise PatternWriteFenceError(
-			f"pattern engine write to non-allowlisted doctype: {doctype!r}"
-		)
+		raise PatternWriteFenceError(f"pattern engine write to non-allowlisted doctype: {doctype!r}")
+
 
 # Stop this far before the RQ worker timeout so a unit's writes finish cleanly.
 _RUN_BUDGET_BUFFER_S = 120
@@ -230,8 +238,16 @@ def _execute(run_name: str) -> tuple[str, str]:
 		from jarvis.learning import registry
 	except Exception:
 		note = "Detector registry is not available; run could not start."
-		_finalize_run(run_name, status="Failed", counts=None, skipped=None,
-					  errors=None, doctypes=None, remaining=None, note=note)
+		_finalize_run(
+			run_name,
+			status="Failed",
+			counts=None,
+			skipped=None,
+			errors=None,
+			doctypes=None,
+			remaining=None,
+			note=note,
+		)
 		return (f"Failed: {note}", scan_mode)
 
 	companies = frappe.get_all("Company", pluck="name")
@@ -243,8 +259,16 @@ def _execute(run_name: str) -> tuple[str, str]:
 
 	if not units:
 		note = _no_units_note(companies, active_companies)
-		_finalize_run(run_name, status="Completed", counts=_zero_counts(),
-					  skipped=None, errors=None, doctypes=None, remaining=None, note=note)
+		_finalize_run(
+			run_name,
+			status="Completed",
+			counts=_zero_counts(),
+			skipped=None,
+			errors=None,
+			doctypes=None,
+			remaining=None,
+			note=note,
+		)
 		return (f"Completed: {note}", scan_mode)
 
 	row_budget = int(_settings_value("pattern_row_budget_per_night") or DEFAULT_ROW_BUDGET)
@@ -253,6 +277,7 @@ def _execute(run_name: str) -> tuple[str, str]:
 	# Phase 2 per-family FDR: persist only BH survivors; additive after the
 	# executor gates (plan 4.1). Rejections are surfaced in the coverage note.
 	from jarvis.learning.fdr import DetectorFamilyBuffer
+
 	fdr_buffer = DetectorFamilyBuffer()
 
 	# Drift re-validation consumes the mining pass's own fresh candidates
@@ -281,8 +306,12 @@ def _execute(run_name: str) -> tuple[str, str]:
 		attempted += 1
 		try:
 			unit = _read_and_persist(
-				spec, company, run,
-				fdr_buffer=fdr_buffer, mined=mined_units, watch=drift_watch,
+				spec,
+				company,
+				run,
+				fdr_buffer=fdr_buffer,
+				mined=mined_units,
+				watch=drift_watch,
 			)
 		except Exception:
 			error_count += 1
@@ -290,11 +319,13 @@ def _execute(run_name: str) -> tuple[str, str]:
 				title=f"jarvis pattern detector failed: {detector_id} / {company}",
 				message=frappe.get_traceback(),
 			)
-			errors.append({
-				"detector_id": detector_id,
-				"company": company,
-				"error": _short_error(),
-			})
+			errors.append(
+				{
+					"detector_id": detector_id,
+					"company": company,
+					"error": _short_error(),
+				}
+			)
 			_touch_detector_state(detector_id, last_error=_short_error(), last_run_at=now_datetime())
 			continue
 
@@ -351,11 +382,13 @@ def _execute(run_name: str) -> tuple[str, str]:
 			title=f"jarvis pattern learning: final FDR flush failed on {run_name}",
 			message=frappe.get_traceback(),
 		)
-		errors.append({
-			"detector_id": fdr_buffer.pending_detector_id,
-			"company": None,
-			"error": _short_error(),
-		})
+		errors.append(
+			{
+				"detector_id": fdr_buffer.pending_detector_id,
+				"company": None,
+				"error": _short_error(),
+			}
+		)
 	if final_family:
 		persisted = _persist_survivors(final_family.survivors, run, final_family.detector_id)
 		for key in ("created", "updated", "duplicates"):
@@ -376,6 +409,7 @@ def _execute(run_name: str) -> tuple[str, str]:
 	# folds new rows into the monthly aggregates so evidence outlives log
 	# truncation.
 	from jarvis.learning import snapshots
+
 	snapshots.ingest_print_log(run=run, paused=bool(paused_note))
 
 	# Surfacing (band-then-support, >=1 per domain). Wave C may override.
@@ -459,8 +493,16 @@ def _execute(run_name: str) -> tuple[str, str]:
 # --------------------------------------------------------------------------- #
 # per-unit read (fenced) + persist (unfenced)
 # --------------------------------------------------------------------------- #
-def _read_and_persist(spec, company, run, fdr_buffer=None, mined=None, watch=None) -> dict:
+def _read_and_persist(spec, company, run, fdr_buffer, mined=None, watch=None) -> dict:
+	"""``fdr_buffer`` has no default (jarvis#483): pass a live ``DetectorFamilyBuffer``
+	to apply the per-family BH-FDR pass (fdr.py), or the ``fdr.NO_FDR`` sentinel to
+	deliberately skip it. Omitting the argument, or passing ``None`` out of habit,
+	used to silently persist every raw candidate with zero multiple-testing
+	correction - that fail-open default is gone; both now fail loudly instead
+	(a ``TypeError`` on omission, an ``AttributeError`` on a stray ``None``).
+	"""
 	from jarvis.learning.executor import PER_DETECTOR_CANDIDATE_CAP, run_detector
+	from jarvis.learning.fdr import NO_FDR
 
 	frappe.db.commit()  # no pending writes before opening the READ ONLY fence
 	with read_only_transaction() as pdb:
@@ -499,7 +541,7 @@ def _read_and_persist(spec, company, run, fdr_buffer=None, mined=None, watch=Non
 	# persisted survivors; the delta is explained in the run's coverage note.
 	to_persist = norm["candidates"]
 	persist_detector_id = _spec_id(spec)
-	if fdr_buffer is not None:
+	if fdr_buffer is not NO_FDR:
 		released = fdr_buffer.add(_spec_id(spec), norm["candidates"])
 		to_persist = list(released.survivors) if released else []
 		if released is not None:
@@ -545,11 +587,13 @@ def _persist_survivors(candidates, run, detector_id) -> dict:
 				title=f"jarvis pattern persist failed: {detector_id or 'unknown detector'}",
 				message=frappe.get_traceback(),
 			)
-			failures.append({
-				"detector_id": detector_id,
-				"company": cand.get("company") if isinstance(cand, dict) else None,
-				"error": _short_error(),
-			})
+			failures.append(
+				{
+					"detector_id": detector_id,
+					"company": cand.get("company") if isinstance(cand, dict) else None,
+					"error": _short_error(),
+				}
+			)
 			continue
 		if outcome == "created":
 			created += 1
@@ -676,6 +720,10 @@ def _apply_evidence(doc, cand: dict, run, *, is_new: bool) -> None:
 	# Never overwrite an SM-edited draft (draft_edited freezes it, plan 6.5)
 	# or an LLM-polished one (draft_polished - the polished wording must
 	# survive re-detection and approval; evidence below stays un-frozen).
+	# An APPROVED row's draft is still refreshed here on purpose: the reviewed
+	# text lives in the untouched approved_draft snapshot (what the compiler
+	# ships), so skill_draft stays the current detected wording that the board
+	# diffs against, and lifecycle stales the row when the two diverge (#482).
 	if is_new or not (doc.draft_edited or doc.get("draft_polished")):
 		doc.skill_draft = (cand.get("skill_draft") or "").strip() or doc.pattern_statement
 
@@ -686,9 +734,7 @@ def _apply_evidence(doc, cand: dict, run, *, is_new: bool) -> None:
 	doc.wilson_low = _as_float(cand.get("wilson_low"))
 	doc.gap = _as_float(cand.get("gap"))
 	# Correction-loop ceiling: clamp the recomputed band to flag_band_cap.
-	doc.strength_band = weaker_of(
-		cand.get("strength_band"), None if is_new else doc.get("flag_band_cap")
-	)
+	doc.strength_band = weaker_of(cand.get("strength_band"), None if is_new else doc.get("flag_band_cap"))
 	doc.temporal_spread = _as_json(cand.get("temporal_spread"))
 	doc.evidence = _as_json(cand.get("evidence"))
 	doc.exceptions_cluster = cand.get("exceptions_cluster")
@@ -699,7 +745,7 @@ def _apply_evidence(doc, cand: dict, run, *, is_new: bool) -> None:
 
 	if is_new:
 		doc.first_seen_run = run.name
-		for role in (cand.get("roles") or []):
+		for role in cand.get("roles") or []:
 			if role:
 				doc.append("roles", {"role": role})
 
@@ -724,6 +770,7 @@ def _promote_surfaced(run_name: str) -> None:
 	# Party-specific personalization is ranked ahead of config cleanup, then band,
 	# then support_n (plan 6.4 - debt-heavy sites must not bury the marquee wins).
 	from jarvis.learning import lifecycle
+
 	rows.sort(key=lifecycle.surfacing_sort_key)
 
 	chosen_names: list = []
@@ -847,9 +894,7 @@ def _serialize_remaining(units) -> list:
 def _pause_reason(run, started_mono: float, rows_scanned: int, row_budget: int):
 	now = now_datetime()
 	# Window end (scheduled only; manual bypasses the window, plan 5.2).
-	if run.trigger != "manual" and should_pause_for_window(
-		run.window_start_used, run.window_end_used, now
-	):
+	if run.trigger != "manual" and should_pause_for_window(run.window_start_used, run.window_end_used, now):
 		return "Reached the analysis-window boundary; remaining detectors deferred to the next run."
 	# Enabled flag applies to both scheduled and manual runs.
 	if not _feature_enabled():
@@ -857,10 +902,7 @@ def _pause_reason(run, started_mono: float, rows_scanned: int, row_budget: int):
 	if (time.monotonic() - started_mono) >= MAX_RUN_SECONDS:
 		return "Approaching the worker time budget; remaining detectors deferred to the next run."
 	if row_budget and rows_scanned >= row_budget:
-		return (
-			f"Nightly row budget ({row_budget}) exhausted; remaining detectors "
-			f"deferred to the next run."
-		)
+		return f"Nightly row budget ({row_budget}) exhausted; remaining detectors deferred to the next run."
 	return None
 
 
@@ -930,13 +972,15 @@ def _touch_detector_state(detector_id, *, rows_scanned_add: int = 0, **fields) -
 			if payload:
 				frappe.db.set_value(DETECTOR_STATE, detector_id, payload, update_modified=False)
 		else:
-			doc = frappe.get_doc({
-				"doctype": DETECTOR_STATE,
-				"detector_id": detector_id,
-				"enabled": 1,
-				"rows_scanned_total": int(rows_scanned_add or 0),
-				**{k: v for k, v in payload.items() if k != "rows_scanned_total"},
-			})
+			doc = frappe.get_doc(
+				{
+					"doctype": DETECTOR_STATE,
+					"detector_id": detector_id,
+					"enabled": 1,
+					"rows_scanned_total": int(rows_scanned_add or 0),
+					**{k: v for k, v in payload.items() if k != "rows_scanned_total"},
+				}
+			)
 			doc.insert(ignore_permissions=True)
 	except Exception:
 		# State bookkeeping must never fail the analysis run.
@@ -960,13 +1004,15 @@ def _notify_system_managers(run_name, error_count: int, attempted: int) -> None:
 		if not user or user in ("Administrator", "Guest"):
 			continue
 		try:
-			frappe.get_doc({
-				"doctype": "Notification Log",
-				"for_user": user,
-				"type": "Alert",
-				"subject": subject,
-				"email_content": msg,
-			}).insert(ignore_permissions=True)
+			frappe.get_doc(
+				{
+					"doctype": "Notification Log",
+					"for_user": user,
+					"type": "Alert",
+					"subject": subject,
+					"email_content": msg,
+				}
+			).insert(ignore_permissions=True)
 		except Exception:
 			pass
 	try:

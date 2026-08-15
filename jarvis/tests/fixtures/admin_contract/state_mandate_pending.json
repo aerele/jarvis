@@ -1,0 +1,38 @@
+{
+  "contract_version": 2,
+  "name": "state_mandate_pending",
+  "description": "Authenticated state poll for a Cashfree AUTOPAY signup awaiting mandate authorization. TOKEN-SHAPED (plan-09 §0.4): the live intent is served as pay_page_token + pay_origin_digest, never the raw mandate id / browser session token / app id + env - the bench navigates to the admin-hosted pay page with the token. Only the token's and digest's presence is pinned (per-run / origin-derived).",
+  "endpoint": "jarvis_admin_v2.billing.signup.get_signup_payment_state",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.pay_page_token",
+    "body.message.data.pay_origin_digest",
+    "body.message.data.payment_last_checked_at",
+    "body.message.data.attempt_id"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "PAYMENT_CONFIRMATION_PENDING",
+        "pending_verification": false,
+        "payment_provider": "cashfree",
+        "amount_inr": 999.0,
+        "plan": {
+          "name": "oc-test-cf-monthly",
+          "label": "oc-test-cf-monthly"
+        },
+        "signup_fee_inr": 0.0,
+        "due_today_inr": 999.0,
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "pay_page_token": "pit_placeholder",
+        "pay_origin_digest": "digest_placeholder",
+        "payment_last_checked_at": "2026-08-01 00:00:00.000000",
+        "attempt_id": "att_placeholder",
+        "generation": 1
+      }
+    }
+  }
+}

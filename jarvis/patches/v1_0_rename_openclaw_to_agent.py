@@ -19,78 +19,77 @@ rows in `__Auth` for Password-type fields.
 
 import frappe
 
-
 RENAMES = [
-    ("openclaw_endpoint", "jarvis_admin_url"),
-    ("openclaw_api_key", "jarvis_admin_api_key"),
-    ("openclaw_gateway_url", "agent_url"),
-    ("openclaw_gateway_token", "agent_token"),
-    ("openclaw_compose_dir", "agent_compose_dir"),
-    ("openclaw_config_path", "agent_config_path"),
-    ("openclaw_llm_key_path", "agent_llm_key_path"),
+	("openclaw_endpoint", "jarvis_admin_url"),
+	("openclaw_api_key", "jarvis_admin_api_key"),
+	("openclaw_gateway_url", "agent_url"),
+	("openclaw_gateway_token", "agent_token"),
+	("openclaw_compose_dir", "agent_compose_dir"),
+	("openclaw_config_path", "agent_config_path"),
+	("openclaw_llm_key_path", "agent_llm_key_path"),
 ]
 
 # Password fields whose values also live in __Auth and must be renamed there.
 PASSWORD_RENAMES = {
-    "openclaw_api_key": "jarvis_admin_api_key",
-    "openclaw_gateway_token": "agent_token",
+	"openclaw_api_key": "jarvis_admin_api_key",
+	"openclaw_gateway_token": "agent_token",
 }
 
 
 def execute():
-    """Rename each field's row in tabSingles + matching row in __Auth."""
-    doctype = "Jarvis Settings"
+	"""Rename each field's row in tabSingles + matching row in __Auth."""
+	doctype = "Jarvis Settings"
 
-    for old_name, new_name in RENAMES:
-        # Skip if no row exists under the old name (fresh install, or
-        # patch already applied).
-        existing = frappe.db.sql(
-            "SELECT 1 FROM tabSingles WHERE doctype = %s AND field = %s LIMIT 1",
-            (doctype, old_name),
-        )
-        if not existing:
-            continue
+	for old_name, new_name in RENAMES:
+		# Skip if no row exists under the old name (fresh install, or
+		# patch already applied).
+		existing = frappe.db.sql(
+			"SELECT 1 FROM tabSingles WHERE doctype = %s AND field = %s LIMIT 1",
+			(doctype, old_name),
+		)
+		if not existing:
+			continue
 
-        # If a row already exists under the new name, drop the old one
-        # to avoid a UNIQUE constraint conflict.
-        already_renamed = frappe.db.sql(
-            "SELECT 1 FROM tabSingles WHERE doctype = %s AND field = %s LIMIT 1",
-            (doctype, new_name),
-        )
-        if already_renamed:
-            frappe.db.sql(
-                "DELETE FROM tabSingles WHERE doctype = %s AND field = %s",
-                (doctype, old_name),
-            )
-        else:
-            frappe.db.sql(
-                "UPDATE tabSingles SET field = %s WHERE doctype = %s AND field = %s",
-                (new_name, doctype, old_name),
-            )
+		# If a row already exists under the new name, drop the old one
+		# to avoid a UNIQUE constraint conflict.
+		already_renamed = frappe.db.sql(
+			"SELECT 1 FROM tabSingles WHERE doctype = %s AND field = %s LIMIT 1",
+			(doctype, new_name),
+		)
+		if already_renamed:
+			frappe.db.sql(
+				"DELETE FROM tabSingles WHERE doctype = %s AND field = %s",
+				(doctype, old_name),
+			)
+		else:
+			frappe.db.sql(
+				"UPDATE tabSingles SET field = %s WHERE doctype = %s AND field = %s",
+				(new_name, doctype, old_name),
+			)
 
-    # __Auth stores encrypted password values keyed by (doctype, name, fieldname).
-    # For Single DocTypes the `name` is the DocType name itself.
-    for old_name, new_name in PASSWORD_RENAMES.items():
-        existing = frappe.db.sql(
-            "SELECT 1 FROM `__Auth` WHERE doctype = %s AND name = %s AND fieldname = %s LIMIT 1",
-            (doctype, doctype, old_name),
-        )
-        if not existing:
-            continue
-        already_renamed = frappe.db.sql(
-            "SELECT 1 FROM `__Auth` WHERE doctype = %s AND name = %s AND fieldname = %s LIMIT 1",
-            (doctype, doctype, new_name),
-        )
-        if already_renamed:
-            frappe.db.sql(
-                "DELETE FROM `__Auth` WHERE doctype = %s AND name = %s AND fieldname = %s",
-                (doctype, doctype, old_name),
-            )
-        else:
-            frappe.db.sql(
-                "UPDATE `__Auth` SET fieldname = %s WHERE doctype = %s AND name = %s AND fieldname = %s",
-                (new_name, doctype, doctype, old_name),
-            )
+	# __Auth stores encrypted password values keyed by (doctype, name, fieldname).
+	# For Single DocTypes the `name` is the DocType name itself.
+	for old_name, new_name in PASSWORD_RENAMES.items():
+		existing = frappe.db.sql(
+			"SELECT 1 FROM `__Auth` WHERE doctype = %s AND name = %s AND fieldname = %s LIMIT 1",
+			(doctype, doctype, old_name),
+		)
+		if not existing:
+			continue
+		already_renamed = frappe.db.sql(
+			"SELECT 1 FROM `__Auth` WHERE doctype = %s AND name = %s AND fieldname = %s LIMIT 1",
+			(doctype, doctype, new_name),
+		)
+		if already_renamed:
+			frappe.db.sql(
+				"DELETE FROM `__Auth` WHERE doctype = %s AND name = %s AND fieldname = %s",
+				(doctype, doctype, old_name),
+			)
+		else:
+			frappe.db.sql(
+				"UPDATE `__Auth` SET fieldname = %s WHERE doctype = %s AND name = %s AND fieldname = %s",
+				(new_name, doctype, doctype, old_name),
+			)
 
-    frappe.db.commit()
-    frappe.clear_cache(doctype=doctype)
+	frappe.db.commit()
+	frappe.clear_cache(doctype=doctype)

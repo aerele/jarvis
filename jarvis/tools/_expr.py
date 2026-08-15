@@ -35,16 +35,17 @@ of the DSL rollout adds entries without restructuring. Phase 1
 populates the date family; Phases 2-4 add NULL/arithmetic,
 conditional, and string families.
 """
+
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import frappe
 from pypika import functions as fn
 from pypika.terms import Field, Term
 
 from jarvis.exceptions import InvalidArgumentError
-
 
 # Maximum nesting depth for expression trees. Caps runaway agent
 # payloads. 4 is enough for the realistic compositions:
@@ -86,9 +87,16 @@ _ARG_KINDS = ("expr", "field", "literal", "any")
 
 # Recognised date_part / date_trunc units. The first arg of these
 # functions is a literal restricted to this set.
-_DATE_UNITS = frozenset({
-	"year", "month", "quarter", "week", "day", "fiscal_year",
-})
+_DATE_UNITS = frozenset(
+	{
+		"year",
+		"month",
+		"quarter",
+		"week",
+		"day",
+		"fiscal_year",
+	}
+)
 
 
 # ---- Phase 1: date functions ----------------------------------------
@@ -129,9 +137,7 @@ def _build_date_part(args: list, dialect: str) -> Term:
 		fmt = _strftime_fmt.get(unit)
 		if fmt is None:
 			# Quarter: ceil(month/3). Build from strftime('%m').
-			month_expr = fn.Cast(
-				fn.Function("strftime", "%m", x), "INTEGER"
-			)
+			month_expr = fn.Cast(fn.Function("strftime", "%m", x), "INTEGER")
 			return fn.Function(
 				"CAST",
 				fn.Function("CEIL", month_expr / 3),
@@ -178,8 +184,7 @@ def _build_date_trunc(args: list, dialect: str) -> Term:
 		mod = _modifier.get(unit)
 		if mod is None:
 			raise InvalidArgumentError(
-				f"date_trunc({unit!r}, ...) not supported on SQLite; "
-				f"use one of: year, month, day"
+				f"date_trunc({unit!r}, ...) not supported on SQLite; use one of: year, month, day"
 			)
 		return fn.Function("date", x, mod)
 	# MariaDB: build YYYY-MM-01 (etc.) via DATE_FORMAT.
@@ -191,8 +196,7 @@ def _build_date_trunc(args: list, dialect: str) -> Term:
 	fmt_str = _fmt.get(unit)
 	if fmt_str is None:
 		raise InvalidArgumentError(
-			f"date_trunc({unit!r}, ...) not supported on MariaDB; "
-			f"use one of: year, month, day"
+			f"date_trunc({unit!r}, ...) not supported on MariaDB; use one of: year, month, day"
 		)
 	return fn.Function(
 		"STR_TO_DATE",
@@ -222,14 +226,15 @@ def _build_date_add(args: list, dialect: str) -> Term:
 		raise InvalidArgumentError("date_add(x, n, unit): n must be an integer")
 	unit = unit.lower()
 	if unit == "fiscal_year":
-		raise InvalidArgumentError(
-			"date_add(..., 'fiscal_year') is not yet supported"
-		)
+		raise InvalidArgumentError("date_add(..., 'fiscal_year') is not yet supported")
 	if dialect == "sqlite":
 		# date(x, '+N months') style.
 		_singular = {
-			"year": "years", "month": "months", "quarter": "months",
-			"week": "days", "day": "days",
+			"year": "years",
+			"month": "months",
+			"quarter": "months",
+			"week": "days",
+			"day": "days",
 		}
 		multiplier = {"quarter": 3, "week": 7}.get(unit, 1)
 		actual_n = n * multiplier
@@ -238,9 +243,7 @@ def _build_date_add(args: list, dialect: str) -> Term:
 		return fn.Function("date", x, modifier)
 	# MariaDB / Postgres: DATE_ADD(x, INTERVAL N UNIT).
 	# pypika exposes Function for arbitrary calls.
-	return fn.Function(
-		"DATE_ADD", x, fn.LiteralValue(f"INTERVAL {n} {unit.upper()}")
-	)
+	return fn.Function("DATE_ADD", x, fn.LiteralValue(f"INTERVAL {n} {unit.upper()}"))
 
 
 _register(
@@ -291,6 +294,7 @@ def _build_binop(op: str):
 	"""Factory for binary arithmetic builders. pypika.Field supports
 	Python operators, so the build is just ``a OP b``. Order of
 	args matches the spec (a, b)."""
+
 	def _b(args: list, dialect: str) -> Term:
 		a, b = args
 		if op == "+":
@@ -302,6 +306,7 @@ def _build_binop(op: str):
 		if op == "/":
 			return a / b
 		raise RuntimeError(f"unreachable binop {op!r}")
+
 	return _b
 
 
@@ -324,12 +329,14 @@ def _build_round(args: list, dialect: str) -> Term:
 	/ SQLite (all accept the same 2-arg signature)."""
 	x, digits = args
 	from pypika.terms import Function
+
 	return Function("ROUND", x, digits)
 
 
 def _build_ceil(args: list, dialect: str) -> Term:
 	(x,) = args
 	from pypika.terms import Function
+
 	# MariaDB/Postgres use CEIL; SQLite uses CEIL via the math
 	# extension (loaded by default in 3.35+). Stick with CEIL across
 	# the board; production is MariaDB anyway.
@@ -385,8 +392,7 @@ _register("floor", arity=(1, 1), args=["expr"], builder=_build_floor)
 # translator instead of calling the registry's builder directly.
 def _build_case_stub(args: list, dialect: str) -> Term:
 	raise RuntimeError(
-		"_build_case_stub should be unreachable - build_expr routes "
-		"the 'case' function to its own translator"
+		"_build_case_stub should be unreachable - build_expr routes the 'case' function to its own translator"
 	)
 
 
@@ -442,6 +448,7 @@ def _build_substring(args: list, dialect: str) -> Term:
 	dialects."""
 	x, start, length = args
 	from pypika.terms import Function
+
 	return Function("SUBSTRING", x, start, length)
 
 
@@ -471,12 +478,7 @@ def is_expr_node(node: Any) -> bool:
 	dict carrying one of the three top-level keys). Used by callers
 	in ``query.py`` to distinguish expression entries from bare-string
 	field references and legacy aggregate dicts."""
-	return (
-		isinstance(node, dict)
-		and (
-			"fn" in node or "field" in node or "literal" in node
-		)
-	)
+	return isinstance(node, dict) and ("fn" in node or "field" in node or "literal" in node)
 
 
 def validate_expr(node: Any, depth: int = 1) -> None:
@@ -495,27 +497,18 @@ def validate_expr(node: Any, depth: int = 1) -> None:
 	alias_map exists, so we restrict ourselves to structural checks.
 	"""
 	if depth > MAX_EXPR_DEPTH:
-		raise InvalidArgumentError(
-			f"expression nesting exceeds the {MAX_EXPR_DEPTH}-level cap"
-		)
+		raise InvalidArgumentError(f"expression nesting exceeds the {MAX_EXPR_DEPTH}-level cap")
 	if not isinstance(node, dict):
-		raise InvalidArgumentError(
-			f"expression node must be a dict, got {type(node).__name__}"
-		)
+		raise InvalidArgumentError(f"expression node must be a dict, got {type(node).__name__}")
 	# Leaf nodes: field, literal.
 	if "field" in node:
 		if not isinstance(node["field"], str) or not node["field"]:
-			raise InvalidArgumentError(
-				"expression {field: ...} must carry a non-empty string"
-			)
+			raise InvalidArgumentError("expression {field: ...} must carry a non-empty string")
 		# Disallow other keys alongside ``field`` to keep the shape
 		# disambiguous (and force the agent to compose via fn nodes).
 		other = set(node) - {"field"}
 		if other:
-			raise InvalidArgumentError(
-				f"expression {{field: ...}} cannot also carry "
-				f"{sorted(other)!r}"
-			)
+			raise InvalidArgumentError(f"expression {{field: ...}} cannot also carry {sorted(other)!r}")
 		return
 	if "literal" in node:
 		# ``literal`` accepts any scalar (string, int, float, bool, None).
@@ -523,41 +516,28 @@ def validate_expr(node: Any, depth: int = 1) -> None:
 		v = node["literal"]
 		if isinstance(v, (dict, list)):
 			raise InvalidArgumentError(
-				"expression {literal: ...} must carry a scalar "
-				"(string / number / bool / None)"
+				"expression {literal: ...} must carry a scalar (string / number / bool / None)"
 			)
 		other = set(node) - {"literal"}
 		if other:
-			raise InvalidArgumentError(
-				f"expression {{literal: ...}} cannot also carry "
-				f"{sorted(other)!r}"
-			)
+			raise InvalidArgumentError(f"expression {{literal: ...}} cannot also carry {sorted(other)!r}")
 		return
 	# Function call.
 	if "fn" not in node:
-		raise InvalidArgumentError(
-			"expression node must carry one of: 'fn', 'field', 'literal'"
-		)
+		raise InvalidArgumentError("expression node must carry one of: 'fn', 'field', 'literal'")
 	name = node["fn"]
 	if not isinstance(name, str):
 		raise InvalidArgumentError("expression 'fn' must be a string")
 	if name not in _REGISTRY:
-		raise InvalidArgumentError(
-			f"unknown DSL function {name!r}; known: {sorted(_REGISTRY)}"
-		)
+		raise InvalidArgumentError(f"unknown DSL function {name!r}; known: {sorted(_REGISTRY)}")
 	entry = _REGISTRY[name]
 	args = node.get("args") or []
 	if not isinstance(args, list):
-		raise InvalidArgumentError(
-			f"expression {name!r} args must be a list"
-		)
+		raise InvalidArgumentError(f"expression {name!r} args must be a list")
 	arity_min, arity_max = entry["arity"]
 	if len(args) < arity_min or (arity_max is not None and len(args) > arity_max):
 		max_s = "infinity" if arity_max is None else arity_max
-		raise InvalidArgumentError(
-			f"expression {name!r} takes {arity_min}..{max_s} args, "
-			f"got {len(args)}"
-		)
+		raise InvalidArgumentError(f"expression {name!r} takes {arity_min}..{max_s} args, got {len(args)}")
 	# CASE special shape: args are clause dicts, not expression nodes.
 	# Each clause is either {"when": <pred>, "then": <expr>} OR
 	# {"else": <expr>}. At most one "else", and it must be terminal.
@@ -568,9 +548,7 @@ def validate_expr(node: Any, depth: int = 1) -> None:
 	expected_kinds = entry.get("args", [])
 	uniform = entry.get("args_uniform")
 	for i, a in enumerate(args):
-		kind = expected_kinds[i] if i < len(expected_kinds) else (
-			uniform if uniform else "any"
-		)
+		kind = expected_kinds[i] if i < len(expected_kinds) else (uniform if uniform else "any")
 		_check_arg_kind(name, i, kind, a)
 		# Literal-value constraint (e.g. date_part's unit set).
 		constraints = entry.get("literal_constraint") or {}
@@ -583,8 +561,7 @@ def validate_expr(node: Any, depth: int = 1) -> None:
 				v_normalized = v
 			if v_normalized not in allowed:
 				raise InvalidArgumentError(
-					f"expression {name!r} arg {i} must be one of "
-					f"{sorted(allowed)!r}, got {v!r}"
+					f"expression {name!r} arg {i} must be one of {sorted(allowed)!r}, got {v!r}"
 				)
 		# Recurse for sub-expressions.
 		validate_expr(a, depth=depth + 1)
@@ -608,46 +585,34 @@ def _validate_case_clauses(clauses: list, depth: int) -> None:
 	"""
 	if not clauses:
 		raise InvalidArgumentError(
-			"case requires at least one clause "
-			"({when: ..., then: ...} or {else: ...})"
+			"case requires at least one clause ({when: ..., then: ...} or {else: ...})"
 		)
 	seen_else = False
 	for i, clause in enumerate(clauses):
 		if not isinstance(clause, dict):
-			raise InvalidArgumentError(
-				f"case clause {i} must be a dict, got {type(clause).__name__}"
-			)
+			raise InvalidArgumentError(f"case clause {i} must be a dict, got {type(clause).__name__}")
 		if "else" in clause:
 			if seen_else:
 				raise InvalidArgumentError("case can have at most one 'else'")
 			if i != len(clauses) - 1:
-				raise InvalidArgumentError(
-					"case 'else' clause must be the last entry"
-				)
+				raise InvalidArgumentError("case 'else' clause must be the last entry")
 			seen_else = True
 			other = set(clause) - {"else"}
 			if other:
-				raise InvalidArgumentError(
-					f"case 'else' clause cannot also carry {sorted(other)!r}"
-				)
+				raise InvalidArgumentError(f"case 'else' clause cannot also carry {sorted(other)!r}")
 			validate_expr(clause["else"], depth=depth + 1)
 			continue
 		# Otherwise expect when/then.
 		if "when" not in clause or "then" not in clause:
 			raise InvalidArgumentError(
-				f"case clause {i} must carry both 'when' and 'then' "
-				f"(or be a terminal {{else: ...}} clause)"
+				f"case clause {i} must carry both 'when' and 'then' (or be a terminal {{else: ...}} clause)"
 			)
 		other = set(clause) - {"when", "then"}
 		if other:
-			raise InvalidArgumentError(
-				f"case clause {i} cannot also carry {sorted(other)!r}"
-			)
+			raise InvalidArgumentError(f"case clause {i} cannot also carry {sorted(other)!r}")
 		pred = clause["when"]
 		if not isinstance(pred, dict):
-			raise InvalidArgumentError(
-				f"case clause {i} 'when' must be a predicate dict"
-			)
+			raise InvalidArgumentError(f"case clause {i} 'when' must be a predicate dict")
 		if pred.get("op") in ("exists", "not exists"):
 			raise InvalidArgumentError(
 				f"case clause {i} 'when' cannot use 'exists'/'not exists' "
@@ -661,31 +626,27 @@ def _check_arg_kind(fn_name: str, idx: int, expected_kind: str, node: Any) -> No
 	declared expectation. ``expected_kind`` is one of _ARG_KINDS."""
 	if not isinstance(node, dict):
 		raise InvalidArgumentError(
-			f"expression {fn_name!r} arg {idx} must be a dict, "
-			f"got {type(node).__name__}"
+			f"expression {fn_name!r} arg {idx} must be a dict, got {type(node).__name__}"
 		)
 	if expected_kind == "any":
 		return
 	if expected_kind == "literal":
 		if "literal" not in node:
 			raise InvalidArgumentError(
-				f"expression {fn_name!r} arg {idx} must be a literal "
-				f"({{literal: ...}})"
+				f"expression {fn_name!r} arg {idx} must be a literal ({{literal: ...}})"
 			)
 		return
 	if expected_kind == "field":
 		if "field" not in node:
 			raise InvalidArgumentError(
-				f"expression {fn_name!r} arg {idx} must be a field "
-				f"reference ({{field: 'alias.col'}})"
+				f"expression {fn_name!r} arg {idx} must be a field reference ({{field: 'alias.col'}})"
 			)
 		return
 	if expected_kind == "expr":
 		# Any of the three node kinds is acceptable.
 		if not is_expr_node(node):
 			raise InvalidArgumentError(
-				f"expression {fn_name!r} arg {idx} must be a "
-				f"{{fn|field|literal}} node"
+				f"expression {fn_name!r} arg {idx} must be a {{fn|field|literal}} node"
 			)
 		return
 	raise RuntimeError(f"unreachable: bad expected_kind {expected_kind!r}")
@@ -729,8 +690,7 @@ def build_expr(
 	if name == "case":
 		if build_predicate is None:
 			raise RuntimeError(
-				"build_expr requires a build_predicate callback when the "
-				"tree contains a 'case' node"
+				"build_expr requires a build_predicate callback when the tree contains a 'case' node"
 			)
 		return _build_case(node.get("args") or [], resolve_field, build_predicate)
 	entry = _REGISTRY[name]
@@ -759,6 +719,7 @@ def _build_case(
 	expr}`` call .when(build_predicate(pred), build_expr(expr)); for
 	the terminal ``{"else": expr}`` call .else_(build_expr(expr))."""
 	from pypika.terms import Case
+
 	case = Case()
 	for clause in clauses:
 		if "else" in clause:
@@ -778,6 +739,7 @@ def _literal_term(v: Any) -> Term:
 	literal needs to BE the expression (e.g. ``then: {"literal": 0}``
 	in CASE), we need an explicit Term wrapper."""
 	from pypika.terms import ValueWrapper
+
 	return ValueWrapper(v)
 
 
@@ -786,9 +748,7 @@ def _current_dialect() -> str:
 	``frappe.local.conf.db_type`` with a MariaDB default for sites
 	that haven't set the field explicitly (older Frappe versions
 	default to MariaDB)."""
-	db_type = getattr(frappe.local, "conf", {}).get("db_type") if (
-		hasattr(frappe, "local")
-	) else None
+	db_type = getattr(frappe.local, "conf", {}).get("db_type") if (hasattr(frappe, "local")) else None
 	if db_type in ("mariadb", "postgres", "sqlite"):
 		return db_type
 	# Default. Production is MariaDB.

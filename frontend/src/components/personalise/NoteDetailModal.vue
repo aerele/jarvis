@@ -2,11 +2,7 @@
 	<Dialog v-model="show" :options="{ size: 'xl' }">
 		<template #body-title>
 			<div v-if="note" class="flex flex-wrap items-center gap-2">
-				<Badge
-					:theme="kindBadge.theme"
-					:variant="kindBadge.variant"
-					:label="note.kind"
-				/>
+				<Badge :theme="kindBadge.theme" :variant="kindBadge.variant" :label="note.kind" />
 				<span class="text-base font-medium text-ink-gray-8">{{ originText }}</span>
 				<span class="text-sm text-ink-gray-5">· {{ exactDate(note.creation) }}</span>
 			</div>
@@ -15,7 +11,7 @@
 
 		<template #body-content>
 			<div v-if="loading" class="py-8 text-center">
-				<LoadingIndicator class="size-5 text-ink-gray-5" />
+				<JvSpinner />
 			</div>
 			<template v-else-if="note">
 				<!-- full transcript / caption, the user's own words -->
@@ -57,7 +53,11 @@
 						     links (a link here would mislead by dumping the user on the
 						     Wiki tab root, not the named page) - see §17 -->
 						<ul class="mt-1.5 flex flex-col gap-1">
-							<li v-for="p in note.wiki_pages" :key="p.slug" class="text-sm text-ink-gray-8">
+							<li
+								v-for="p in note.wiki_pages"
+								:key="p.slug"
+								class="text-sm text-ink-gray-8"
+							>
 								{{ p.title || p.slug }}
 							</li>
 						</ul>
@@ -122,31 +122,22 @@
 //
 //   @changed - fired after a successful delete, so the owning NotesView (or
 //   any other host) knows to refetch its list. No payload.
-import { ref, computed, watch } from "vue"
-import { useRouter } from "vue-router"
-import {
-	Badge,
-	Button,
-	Dialog,
-	FeatherIcon,
-	LoadingIndicator,
-	toast,
-	confirmDialog,
-} from "frappe-ui"
-import { exactDate } from "@/utils/datetime"
-import { getNote, deleteNote } from "@/api/personalise"
+import { ref, computed, watch } from "vue";
+import { useRouter } from "vue-router";
+import { Badge, Button, Dialog, FeatherIcon, toast, confirmDialog } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
+import { exactDate } from "@/utils/datetime";
+import { getNote, deleteNote } from "@/api/personalise";
+import { agentName } from "@/branding";
+import { errHtml } from "@/lib/errors";
 
-const router = useRouter()
+const router = useRouter();
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
 	name: { type: String, default: "" },
-})
-const emit = defineEmits(["update:modelValue", "changed", "reanswer"])
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
+});
+const emit = defineEmits(["update:modelValue", "changed", "reanswer"]);
 
 // Same theme map as NotesView's row badges - kept as a local copy (not a
 // shared import) because NotesView's is inline too; both are small enough
@@ -157,55 +148,55 @@ const KIND_BADGE = {
 	Voice: { theme: "blue", variant: "subtle" },
 	Attachment: { theme: "orange", variant: "subtle" },
 	Link: { theme: "blue", variant: "outline" },
-}
+};
 
 const show = computed({
 	get: () => props.modelValue,
 	set: (v) => emit("update:modelValue", v),
-})
+});
 
-const note = ref(null)
-const loading = ref(false)
-const deleting = ref(false)
+const note = ref(null);
+const loading = ref(false);
+const deleting = ref(false);
 
 const kindBadge = computed(
 	() => KIND_BADGE[note.value && note.value.kind] || { theme: "gray", variant: "subtle" }
-)
+);
 const originText = computed(() => {
-	if (!note.value) return ""
-	return note.value.question_text ? `Answers: "${note.value.question_text}"` : "Free note"
-})
+	if (!note.value) return "";
+	return note.value.question_text ? `Answers: "${note.value.question_text}"` : "Free note";
+});
 // The `attachment` field is a raw Attach file_url (e.g. "/private/files/
 // report.pdf?abc123") - there's no separate file_name in get_note's payload,
 // so derive a readable name from the URL the same way DocMetaPanel falls
 // back to `f.file_url` when `f.file_name` is absent.
 const attachmentName = computed(() => {
-	const url = note.value && note.value.attachment
-	if (!url) return ""
+	const url = note.value && note.value.attachment;
+	if (!url) return "";
 	try {
-		return decodeURIComponent(url.split("/").pop().split("?")[0]) || url
+		return decodeURIComponent(url.split("/").pop().split("?")[0]) || url;
 	} catch (e) {
-		return url
+		return url;
 	}
-})
+});
 
 watch(
 	() => props.modelValue,
 	(open) => {
-		if (open) load()
+		if (open) load();
 	}
-)
+);
 
 async function load() {
-	note.value = null
-	loading.value = true
+	note.value = null;
+	loading.value = true;
 	try {
-		note.value = await getNote(props.name)
+		note.value = await getNote(props.name);
 	} catch (e) {
-		show.value = false
-		toast.error(errMsg(e))
+		show.value = false;
+		toast.error(errHtml(e));
 	} finally {
-		loading.value = false
+		loading.value = false;
 	}
 }
 
@@ -214,33 +205,33 @@ function confirmDelete() {
 		title: "Delete this note?",
 		message:
 			note.value && note.value.status === "Processed"
-				? "This removes the note from your list. Knowledge Jarvis already extracted from it is kept."
-				: "This note hasn't been processed yet - Jarvis won't learn from it if you delete it now.",
+				? `This removes the note from your list. Knowledge ${agentName} already extracted from it is kept.`
+				: `This note hasn't been processed yet - ${agentName} won't learn from it if you delete it now.`,
 		onConfirm: async ({ hideDialog }) => {
-			deleting.value = true
+			deleting.value = true;
 			try {
-				await deleteNote(props.name)
-				hideDialog()
-				show.value = false
-				toast.success("Note deleted")
-				emit("changed")
+				await deleteNote(props.name);
+				hideDialog();
+				show.value = false;
+				toast.success("Note deleted");
+				emit("changed");
 			} catch (e) {
-				toast.error(errMsg(e))
+				toast.error(errHtml(e));
 			} finally {
-				deleting.value = false
+				deleting.value = false;
 			}
 		},
-	})
+	});
 }
 
 function onReanswer() {
-	if (!note.value || !note.value.question) return
-	emit("reanswer", note.value.question)
-	show.value = false
+	if (!note.value || !note.value.question) return;
+	emit("reanswer", note.value.question);
+	show.value = false;
 }
 
 function openWiki() {
-	show.value = false
-	router.push({ name: "SkillsList", hash: "#wiki" })
+	show.value = false;
+	router.push({ name: "SkillsList", hash: "#wiki" });
 }
 </script>

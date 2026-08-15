@@ -122,19 +122,23 @@ def upsert_monthly(detector_id: str, period: str, company: str | None, payload_d
 			update_modified=False,
 		)
 		return name
-	doc = frappe.get_doc({
-		"doctype": SNAPSHOT,
-		"detector_id": detector_id,
-		"period": period,
-		"company": company,
-		"payload": frappe.as_json(payload_dict),
-		"rows_ingested": int(payload_dict.get("rows_ingested") or 0),
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": SNAPSHOT,
+			"detector_id": detector_id,
+			"period": period,
+			"company": company,
+			"payload": frappe.as_json(payload_dict),
+			"rows_ingested": int(payload_dict.get("rows_ingested") or 0),
+		}
+	)
 	doc.insert(ignore_permissions=True)
 	return doc.name
 
 
-def read_all(detector_id: str, company: str | None = None, runner=None, window_start: str | None = None) -> dict:
+def read_all(
+	detector_id: str, company: str | None = None, runner=None, window_start: str | None = None
+) -> dict:
 	"""One merged payload across the detector's monthly snapshot rows.
 
 	``company`` filters to one company (None = all); ``window_start``
@@ -178,9 +182,7 @@ def merge_payloads(base: dict | None, extra: dict | None) -> dict:
 			continue
 		for party, formats in (payload.get("counts") or {}).items():
 			for fmt, agg in (formats or {}).items():
-				dst = out["counts"].setdefault(party, {}).setdefault(
-					fmt, {"n": 0, "eff": 0, "days": {}}
-				)
+				dst = out["counts"].setdefault(party, {}).setdefault(fmt, {"n": 0, "eff": 0, "days": {}})
 				dst["n"] += int((agg or {}).get("n") or 0)
 				dst["eff"] += int((agg or {}).get("eff") or 0)
 				for day, count in ((agg or {}).get("days") or {}).items():
@@ -278,15 +280,17 @@ def resolve_print_events(rows, runner) -> list:
 		if not hit:
 			continue
 		created = str(r.get("created"))
-		events.append({
-			"party_type": "Customer",
-			"party": hit.get("party"),
-			"print_format": fmt,
-			"company": hit.get("company"),
-			"created": created,
-			"day": created[:10],
-			"period": created[:7],
-		})
+		events.append(
+			{
+				"party_type": "Customer",
+				"party": hit.get("party"),
+				"print_format": fmt,
+				"company": hit.get("company"),
+				"created": created,
+				"day": created[:10],
+				"period": created[:7],
+			}
+		)
 	return events
 
 
@@ -296,7 +300,7 @@ def parse_print_format(page) -> str | None:
 	text = str(page or "").strip()
 	if not text.startswith(PRINT_PAGE_PREFIX):
 		return None
-	return text[len(PRINT_PAGE_PREFIX):].strip() or None
+	return text[len(PRINT_PAGE_PREFIX) :].strip() or None
 
 
 def aggregate_events(events) -> dict:
@@ -438,11 +442,7 @@ def _window_closed(run) -> bool:
 	try:
 		from jarvis.learning.orchestrator import should_pause_for_window
 
-		return bool(
-			should_pause_for_window(
-				run.window_start_used, run.window_end_used, now_datetime()
-			)
-		)
+		return bool(should_pause_for_window(run.window_start_used, run.window_end_used, now_datetime()))
 	except Exception:
 		return False
 
@@ -464,10 +464,12 @@ def _advance_watermark(detector_id: str, watermark: str, rows_read: int) -> None
 			update_modified=False,
 		)
 	else:
-		frappe.get_doc({
-			"doctype": DETECTOR_STATE,
-			"detector_id": detector_id,
-			"enabled": 1,
-			"last_watermark": watermark,
-			"rows_scanned_total": int(rows_read),
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": DETECTOR_STATE,
+				"detector_id": detector_id,
+				"enabled": 1,
+				"last_watermark": watermark,
+				"rows_scanned_total": int(rows_read),
+			}
+		).insert(ignore_permissions=True)

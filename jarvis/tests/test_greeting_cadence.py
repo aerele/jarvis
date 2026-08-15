@@ -35,15 +35,17 @@ def _ensure_test_user(user: str = TEST_USER) -> None:
 	"""Create the fixture System User if missing; idempotent."""
 	if frappe.db.exists("User", user):
 		return
-	doc = frappe.get_doc({
-		"doctype": "User",
-		"email": user,
-		"first_name": "Jarvis",
-		"last_name": "Greeting",
-		"enabled": 1,
-		"send_welcome_email": 0,
-		"user_type": "System User",
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": "User",
+			"email": user,
+			"first_name": "Jarvis",
+			"last_name": "Greeting",
+			"enabled": 1,
+			"send_welcome_email": 0,
+			"user_type": "System User",
+		}
+	)
 	doc.insert(ignore_permissions=True)
 	doc.add_roles("System Manager")
 	frappe.db.commit()
@@ -104,9 +106,7 @@ class _GreetingTestCase(FrappeTestCase):
 		frappe.db.set_value(PREF, {"user": TEST_USER}, "business_greeting_chat_count", count)
 
 	def _count(self) -> int:
-		return frappe.utils.cint(
-			frappe.db.get_value(PREF, TEST_USER, "business_greeting_chat_count")
-		)
+		return frappe.utils.cint(frappe.db.get_value(PREF, TEST_USER, "business_greeting_chat_count"))
 
 
 class TestIncrement(_GreetingTestCase):
@@ -124,9 +124,7 @@ class TestIncrement(_GreetingTestCase):
 		self.assertEqual(second, first)
 		self.assertEqual(self._count(), 1)
 		# And no second conversation leaked from the focus path.
-		self.assertEqual(
-			len(frappe.get_all(CONV, filters={"owner": TEST_USER})), 1
-		)
+		self.assertEqual(len(frappe.get_all(CONV, filters={"owner": TEST_USER})), 1)
 
 	def test_counter_failure_never_breaks_chat_creation(self):
 		"""A raising increment_new_chat_count is swallowed: chat creation
@@ -146,7 +144,8 @@ class TestCadence(_GreetingTestCase):
 		for count, expected in ((1, False), (2, False), (3, True), (4, False), (6, True)):
 			self._set_count(count)
 			self.assertEqual(
-				maybe_greet()["show_card"], expected,
+				maybe_greet()["show_card"],
+				expected,
 				f"count={count} should give show_card={expected}",
 			)
 
@@ -172,11 +171,13 @@ class TestDurabilityAndSuppression(_GreetingTestCase):
 	def test_business_note_suppresses(self):
 		"""Any Business voice note the user already wrote stops the greeting,
 		even on a multiple-of-three chat."""
-		frappe.get_doc({
-			"doctype": NOTE,
-			"transcript": "We are a bakery in Chennai; wholesale to cafes.",
-			"context_type": "Business",
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": NOTE,
+				"transcript": "We are a bakery in Chennai; wholesale to cafes.",
+				"context_type": "Business",
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
 		self._set_count(3)
 		self.assertFalse(maybe_greet()["show_card"])

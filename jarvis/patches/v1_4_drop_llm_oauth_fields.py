@@ -8,9 +8,9 @@ on Jarvis Settings.
 Safe because no production tenant ever completed a subscription connect
 under the prior bench-driven flow (no real OAuth client IDs ever landed).
 """
+
 import frappe
 from frappe.utils.password import remove_encrypted_password
-
 
 _FIELDS = [
 	"llm_oauth_refresh_token",
@@ -31,9 +31,7 @@ def execute():
 			pass
 		# Drop the column from the table.
 		try:
-			frappe.db.sql(
-				f"ALTER TABLE `tabJarvis Settings` DROP COLUMN `{field}`"
-			)
+			frappe.db.sql(f"ALTER TABLE `tabJarvis Settings` DROP COLUMN `{field}`")
 		except Exception:
 			pass  # column may already be gone
 	frappe.db.commit()

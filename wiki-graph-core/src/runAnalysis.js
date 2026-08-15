@@ -3,7 +3,8 @@
 // or fail. Callers just `await runAnalysis(data)`.
 import { fullAnalysis } from "./analysis.js";
 
-let _worker = null, _seq = 0;
+let _worker = null,
+	_seq = 0;
 const _pending = new Map();
 
 function _ensureWorker() {
@@ -36,10 +37,18 @@ export function runAnalysis(data) {
 	// data is a Vue reactive proxy (computed over reactive state) — postMessage
 	// throws DataCloneError on Proxy, so send a plain-JSON clone instead
 	let plain;
-	try { plain = JSON.parse(JSON.stringify(data)); } catch (_) { plain = data; }
+	try {
+		plain = JSON.parse(JSON.stringify(data));
+	} catch (_) {
+		plain = data;
+	}
 	const id = ++_seq;
 	return new Promise((resolve, reject) => {
 		_pending.set(id, { resolve, reject });
 		w.postMessage({ id, data: plain });
-	}).catch(() => fullAnalysis(data)).finally(() => { _pending.delete(id); }); // any worker error → sync
+	})
+		.catch(() => fullAnalysis(data))
+		.finally(() => {
+			_pending.delete(id);
+		}); // any worker error → sync
 }

@@ -9,9 +9,9 @@ the deterministic turn-context injection for a role-matched user.
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.tests.learning import factory
-from jarvis.learning import orchestrator, engine, compiler
 from jarvis.chat import learned_api
+from jarvis.learning import compiler, engine, orchestrator
+from jarvis.tests.learning import factory
 
 
 class TestPatternLearningE2E(FrappeTestCase):
@@ -23,16 +23,12 @@ class TestPatternLearningE2E(FrappeTestCase):
 		# park them so managed-skill inserts / apply can run, restore in teardown.
 		# Production managed sites have Administrator owning ~0 skills, so no parking
 		# is needed there (test-environment isolation only).
-		cls._parked = frappe.get_all(
-			"Jarvis Custom Skill", filters={"enabled": 1}, pluck="name"
-		)
+		cls._parked = frappe.get_all("Jarvis Custom Skill", filters={"enabled": 1}, pluck="name")
 		for n in cls._parked:
 			frappe.db.set_value("Jarvis Custom Skill", n, "enabled", 0, update_modified=False)
 		factory.wipe()
 		factory.build(commit=True)
-		frappe.get_single("Jarvis Settings").db_set(
-			"pattern_learning_enabled", 1, update_modified=False
-		)
+		frappe.get_single("Jarvis Settings").db_set("pattern_learning_enabled", 1, update_modified=False)
 		# clear any prior proposals for a deterministic count
 		frappe.flags.jarvis_pattern_engine = True
 		for n in frappe.get_all("Jarvis Learned Pattern", pluck="name"):
@@ -48,6 +44,15 @@ class TestPatternLearningE2E(FrappeTestCase):
 		for n in getattr(cls, "_parked", []):
 			if frappe.db.exists("Jarvis Custom Skill", n):
 				frappe.db.set_value("Jarvis Custom Skill", n, "enabled", 1, update_modified=False)
+		# drop the dedicated role users this suite owns (best-effort; the helper
+		# self-heals their roles on the next run, so a link-blocked delete is fine)
+		for _role in ("Sales User", "Accounts User"):
+			_email = f"e2e-{_role.lower().replace(' ', '-')}@example.com"
+			if frappe.db.exists("User", _email):
+				try:
+					frappe.delete_doc("User", _email, force=True, ignore_permissions=True)
+				except Exception:
+					pass
 		frappe.db.commit()
 		super().tearDownClass()
 
@@ -70,9 +75,11 @@ class TestPatternLearningE2E(FrappeTestCase):
 		)
 		self.assertGreater(len(props), 0, "engine must produce at least one proposal")
 		self._props = props
-		print(f"[E2E] proposals={len(props)} "
-		      f"A={sum(p.effective_sensitivity=='A' for p in props)} "
-		      f"B={sum(p.effective_sensitivity=='B' for p in props)}")
+		print(
+			f"[E2E] proposals={len(props)} "
+			f"A={sum(p.effective_sensitivity == 'A' for p in props)} "
+			f"B={sum(p.effective_sensitivity == 'B' for p in props)}"
+		)
 
 		# 3. API envelope shape
 		env = learned_api.list_learned_patterns_page()
@@ -100,10 +107,7 @@ class TestPatternLearningE2E(FrappeTestCase):
 
 		# 6. compile: only A-class content reaches the pushed body
 		bodies = compiler.compile_domain_skills()
-		compiled = {
-			d: (b.get("body") if isinstance(b, dict) else b) or ""
-			for d, b in bodies.items()
-		}
+		compiled = {d: (b.get("body") if isinstance(b, dict) else b) or "" for d, b in bodies.items()}
 		self.assertTrue(any(compiled.values()), "at least one A-class domain must compile a body")
 		joined = "\n".join(compiled.values())
 		# no stats jargon and no em-dashes in pushed bodies (plan 6.3)
@@ -119,18 +123,23 @@ class TestPatternLearningE2E(FrappeTestCase):
 		frappe.set_user("Administrator")
 		slug = "learned-selling"
 		if frappe.db.exists("Jarvis Custom Skill", {"skill_name": slug}):
-			frappe.delete_doc("Jarvis Custom Skill", frappe.db.get_value(
-				"Jarvis Custom Skill", {"skill_name": slug}, "name"), force=True)
-		doc = frappe.get_doc({
-			"doctype": "Jarvis Custom Skill",
-			"skill_name": slug,
-			"description": "Learned selling habits for this org.",
-			"instructions": "# Learned selling habits\n- test rule",
-			"enabled": 1,
-			"user_invocable": 0,
-			"managed_by_learning": 1,
-			"allowed_roles": [{"role": "Sales User"}],
-		})
+			frappe.delete_doc(
+				"Jarvis Custom Skill",
+				frappe.db.get_value("Jarvis Custom Skill", {"skill_name": slug}, "name"),
+				force=True,
+			)
+		doc = frappe.get_doc(
+			{
+				"doctype": "Jarvis Custom Skill",
+				"skill_name": slug,
+				"description": "Learned selling habits for this org.",
+				"instructions": "# Learned selling habits\n- test rule",
+				"enabled": 1,
+				"user_invocable": 0,
+				"managed_by_learning": 1,
+				"allowed_roles": [{"role": "Sales User"}],
+			}
+		)
 		doc.flags.ignore_permissions = True
 		# This dev bench's Administrator owns ~121 skills (over the per-owner cap);
 		# skip the cap validation for this managed fixture. Production Administrator
@@ -147,6 +156,16 @@ class TestPatternLearningE2E(FrappeTestCase):
 			sales_clause = clause_fn(_user_with_role("Sales User"))
 			self.assertIn("learned-selling", sales_clause)
 			self.assertNotIn("custom-learned-selling", sales_clause)
+			# ...and in the FETCH sub-clause, not the installed one (#479). The row
+			# carries allowed_roles, so it is deliberately never written into the
+			# shared container; asserting only "the slug appears somewhere" passed
+			# either way and would not have caught the move.
+			self.assertIn(
+				"; these learned skills apply to you but are not loaded in this session: learned-selling",
+				sales_clause,
+			)
+			self.assertNotIn("; apply these learned skills:", sales_clause)
+			self.assertIn("jarvis__get_skill", sales_clause)
 			# a user without it does not
 			acct_clause = clause_fn(_user_with_role("Accounts User"))
 			self.assertNotIn("learned-selling", acct_clause)
@@ -158,21 +177,41 @@ class TestPatternLearningE2E(FrappeTestCase):
 
 
 def _user_with_role(role):
-	"""Return an existing enabled user holding `role`, or Administrator as a fallback."""
-	users = frappe.get_all(
-		"Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent", limit=5
-	)
-	for u in users:
-		if u not in ("Administrator", "Guest") and frappe.db.get_value("User", u, "enabled"):
-			return u
-	# create a throwaway user for the role
+	"""Return a dedicated, enabled test user holding EXACTLY ``role``.
+
+	Turn-injection scoping is asserted both ways, so the mismatched-role user
+	must hold the target role yet be NEITHER privileged (Administrator / System
+	Manager, which ``learned_skill_clause`` auto-passes) NOR a holder of the
+	positive role. An ambient bench user cannot promise that: on a shared dev
+	box - or a multi-module CI run where an earlier suite commits fixtures - the
+	first ``Has Role`` match for e.g. "Accounts User" is frequently a user that
+	also carries System Manager, which folds every managed skill into the clause
+	and defeats scoping (the historical flake: acct_clause == sales_clause). So
+	we own the user outright - deterministic email, roles reconciled to exactly
+	the target, enabled, per-user roles cache dropped - making the assertion
+	independent of suite ordering and ambient residue.
+	"""
 	email = f"e2e-{role.lower().replace(' ', '-')}@example.com"
-	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email, "first_name": "E2E",
-			"roles": [{"role": role}], "enabled": 1,
-		})
+	if frappe.db.exists("User", email):
+		u = frappe.get_doc("User", email)
+		u.enabled = 1
+		u.set("roles", [{"role": role}])
+		u.flags.ignore_permissions = True
+		u.save()
+	else:
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "E2E",
+				"roles": [{"role": role}],
+				"enabled": 1,
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert()
-		frappe.db.commit()
+	frappe.db.commit()
+	# roles ride frappe.get_roles' per-user redis cache, which is NOT bypassed
+	# under in_test; drop it so learned_skill_clause reads the reconciled set.
+	frappe.clear_cache(user=email)
 	return email

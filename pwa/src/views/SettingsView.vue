@@ -1,46 +1,47 @@
 <script setup>
-import { computed, onMounted, ref } from "vue"
-import AppBar from "../components/AppBar.vue"
-import Sheet from "../components/Sheet.vue"
-import * as api from "../api"
-import { EFFORT, prefs, setPrefs } from "../lib/prefs"
-import { applyTheme, theme } from "../lib/theme"
+import { computed, onMounted, ref } from "vue";
+import AppBar from "../components/AppBar.vue";
+import Sheet from "../components/Sheet.vue";
+import * as api from "../api";
+import { EFFORT, prefs, setPrefs } from "../lib/prefs";
+import { applyTheme, theme } from "../lib/theme";
+import { agentName } from "@/branding";
 
 // Settings, as the native app has them: Chat (default model + effort),
 // Appearance, Notifications. No "open full workspace" — this is the workspace.
-const settings = ref(null)
-const modelSheet = ref(false)
-const notifyError = ref("")
+const settings = ref(null);
+const modelSheet = ref(false);
+const notifyError = ref("");
 
 const THEMES = [
 	{ value: "light", label: "Light" },
 	{ value: "dark", label: "Dark" },
 	{ value: "system", label: "System" },
-]
+];
 
 const models = computed(() => {
-	const s = settings.value
-	if (!s) return []
-	const pool = s.pool_models || []
+	const s = settings.value;
+	if (!s) return [];
+	const pool = s.pool_models || [];
 	if (pool.length) {
-		const seen = new Set()
-		const out = []
+		const seen = new Set();
+		const out = [];
 		for (const r of pool) {
-			if (!r.model || seen.has(r.model)) continue
-			seen.add(r.model)
-			out.push(r.model)
+			if (!r.model || seen.has(r.model)) continue;
+			seen.add(r.model);
+			out.push(r.model);
 		}
-		return out
+		return out;
 	}
-	return s.subscription_models?.[s.llm_provider] || []
-})
+	return s.subscription_models?.[s.llm_provider] || [];
+});
 
-const currentModel = computed(() => prefs.defaultModel || settings.value?.llm_model || "")
+const currentModel = computed(() => prefs.defaultModel || settings.value?.llm_model || "");
 
 function pick(m) {
 	// Tapping the current one clears the override — back to the workspace default.
-	setPrefs({ defaultModel: m === prefs.defaultModel ? "" : m })
-	modelSheet.value = false
+	setPrefs({ defaultModel: m === prefs.defaultModel ? "" : m });
+	modelSheet.value = false;
 }
 
 // A toggle that promises a notification has to be able to deliver one. Ask for
@@ -48,30 +49,30 @@ function pick(m) {
 // every browser now punishes, and a toggle that silently does nothing is worse
 // than no toggle.
 async function toggleNotify(key) {
-	notifyError.value = ""
-	const turningOn = !prefs[key]
+	notifyError.value = "";
+	const turningOn = !prefs[key];
 	if (turningOn && "Notification" in window && Notification.permission !== "granted") {
-		const res = await Notification.requestPermission()
+		const res = await Notification.requestPermission();
 		if (res !== "granted") {
 			notifyError.value =
 				res === "denied"
 					? "Notifications are blocked for this site in your browser settings."
-					: "Notifications need your permission."
-			return
+					: "Notifications need your permission.";
+			return;
 		}
 	}
-	setPrefs({ [key]: turningOn })
+	setPrefs({ [key]: turningOn });
 }
 
-const notifySupported = "Notification" in window
+const notifySupported = "Notification" in window;
 
 onMounted(async () => {
 	try {
-		settings.value = await api.getChatUiSettings()
+		settings.value = await api.getChatUiSettings();
 	} catch {
 		/* the rest of the screen still works */
 	}
-})
+});
 </script>
 
 <template>
@@ -84,7 +85,16 @@ onMounted(async () => {
 				<span>Default model</span>
 				<span class="jv-row-right">
 					<strong>{{ currentModel || "Workspace default" }}</strong>
-					<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<svg
+						viewBox="0 0 24 24"
+						width="15"
+						height="15"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<path d="m9 18 6-6-6-6" />
 					</svg>
 				</span>
@@ -123,29 +133,55 @@ onMounted(async () => {
 			<div class="jv-card">
 				<div class="jv-row">
 					<span>Task finished</span>
-					<button class="jv-toggle" :class="{ 'is-on': prefs.notifyDone }" role="switch" :aria-checked="prefs.notifyDone" @click="toggleNotify('notifyDone')">
+					<button
+						class="jv-toggle"
+						:class="{ 'is-on': prefs.notifyDone }"
+						role="switch"
+						:aria-checked="prefs.notifyDone"
+						@click="toggleNotify('notifyDone')"
+					>
 						<span />
 					</button>
 				</div>
 				<div class="jv-row is-last">
 					<span>Needs your decision</span>
-					<button class="jv-toggle" :class="{ 'is-on': prefs.notifyDecision }" role="switch" :aria-checked="prefs.notifyDecision" @click="toggleNotify('notifyDecision')">
+					<button
+						class="jv-toggle"
+						:class="{ 'is-on': prefs.notifyDecision }"
+						role="switch"
+						:aria-checked="prefs.notifyDecision"
+						@click="toggleNotify('notifyDecision')"
+					>
 						<span />
 					</button>
 				</div>
 			</div>
 			<div v-if="notifyError" class="jv-err">{{ notifyError }}</div>
-			<p class="jv-hint">Jarvis only buzzes when this tab isn't the one you're looking at.</p>
+			<p class="jv-hint">
+				{{ agentName }} only buzzes when this tab isn't the one you're looking at.
+			</p>
 		</template>
 	</div>
 
 	<Sheet :open="modelSheet" @close="modelSheet = false">
 		<div class="jv-msheet">
 			<div class="jv-msheet-title">Default model</div>
-			<div v-if="!models.length" class="jv-mnone">No models published for your workspace yet.</div>
+			<div v-if="!models.length" class="jv-mnone">
+				No models published for your workspace yet.
+			</div>
 			<button v-for="m in models" :key="m" class="jv-mrow" @click="pick(m)">
 				<span>{{ m }}</span>
-				<svg v-if="m === currentModel" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+				<svg
+					v-if="m === currentModel"
+					viewBox="0 0 24 24"
+					width="17"
+					height="17"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2.4"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
 					<path d="M20 6 9 17l-5-5" />
 				</svg>
 			</button>

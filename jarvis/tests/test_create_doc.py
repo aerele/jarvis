@@ -58,6 +58,7 @@ class TestCreateDocValidation(FrappeTestCase):
 		"""autoname=prompt DocTypes pass `name` in values - don't refuse it
 		at the validation layer. (Note doesn't use prompt-autoname, so this
 		ends up auto-generated, but the validation must not throw.)"""
+
 		def fake_perm(*a, **kw):
 			return True
 
@@ -65,14 +66,19 @@ class TestCreateDocValidation(FrappeTestCase):
 			class _Stub:
 				def __init__(self):
 					self._values = {}
+
 				def set(self, f, v):
 					self._values[f] = v
+
 				def insert(self):
 					pass
+
 				def apply_fieldlevel_read_permissions(self):
 					pass
+
 				def as_dict(self):
 					return {"doctype": dt, "name": "generated", **self._values}
+
 			return _Stub()
 
 		with patch("frappe.has_permission", side_effect=fake_perm):

@@ -1,8 +1,69 @@
 import frappe
 
-from jarvis.permissions import has_jarvis_access, has_jarvis_admin_access
+from jarvis import release_notice
+from jarvis.permissions import (
+	grant_default_support,
+	has_jarvis_access,
+	has_jarvis_admin_access,
+	support_scope,
+)
 
 no_cache = 1
+
+_SUPPORT_AVAILABLE_CACHE_KEY = "jarvis:support_state"
+_SUPPORT_AVAILABLE_TTL_S = 300
+# R1-7: negative-cache a transient CP blip for a shorter window so support reappears promptly.
+_SUPPORT_UNAVAILABLE_TTL_S = 60
+
+# Support states the SPA understands. Only ``unconfigured`` is an ACTIONABLE gap (an
+# operator can still set support up), so that is the one the UI shows as a disabled,
+# explained entry; every other unavailable state hides support exactly as before.
+SUPPORT_OK = "ok"
+SUPPORT_UNCONFIGURED = "unconfigured"
+SUPPORT_OFF = "off"
+SUPPORT_ERROR = "error"
+
+
+def _support_state() -> str:
+	"""Fleet-wide support state, Redis-cached (P8) so boot never blocks on a CP round-trip.
+	Uses support_status (relaxed auth) — NOT get_connection, which 403s suspended customers (P7).
+
+	Returns one of ``ok`` / ``unconfigured`` / ``off`` / ``error``. The CP has always known
+	which of those it means; the bench used to collapse them into one boolean, so a
+	transient CP blip was indistinguishable from "support was never set up" and both just
+	hid the button. ``error`` is kept distinct precisely so a self-healing blip does NOT
+	render as "support is not set up" — it stays hidden and retries in a minute.
+
+	A CP too old to send ``reason`` degrades safely: unavailable-without-a-reason is
+	treated as ``off`` (hide), which is exactly today's behaviour."""
+	cache = frappe.cache()
+	cached = cache.get_value(_SUPPORT_AVAILABLE_CACHE_KEY)
+	if cached:
+		return cached
+	try:
+		from jarvis import admin_client
+
+		res = admin_client.support_status(timeout_s=8) or {}
+		if res.get("available"):
+			state = SUPPORT_OK
+		else:
+			reason = (res.get("reason") or "").strip()
+			# Only a reason we KNOW is trusted; anything else (incl. an old CP that sends
+			# none) falls back to the pre-existing hide-it behaviour.
+			state = reason if reason in (SUPPORT_UNCONFIGURED, SUPPORT_OFF) else SUPPORT_OFF
+	except Exception:
+		state = SUPPORT_ERROR
+	# R1-7 unchanged: EVERY unavailable state keeps the short TTL, so support appears
+	# within a minute of an operator configuring it or flipping the switch on.
+	ttl = _SUPPORT_AVAILABLE_TTL_S if state == SUPPORT_OK else _SUPPORT_UNAVAILABLE_TTL_S
+	cache.set_value(_SUPPORT_AVAILABLE_CACHE_KEY, state, expires_in_sec=ttl)
+	return state
+
+
+def _support_available() -> bool:
+	"""Back-compat boolean: support is usable. Kept as its own name because other
+	surfaces (and the PWA) read the boot flag by that meaning."""
+	return _support_state() == SUPPORT_OK
 
 
 def get_context(context):
@@ -12,7 +73,9 @@ def get_context(context):
 	# but unauthorized user is sent to the branded /jarvis-no-access page instead.
 	# Follows Frappe's www redirect idiom.
 	if not has_jarvis_access():
-		frappe.local.flags.redirect_location = "/app" if frappe.session.user == "Guest" else "/jarvis-no-access"
+		frappe.local.flags.redirect_location = (
+			"/app" if frappe.session.user == "Guest" else "/jarvis-no-access"
+		)
 		raise frappe.Redirect
 
 	# frappe-ui's jinjaBootData plugin emits `window["<key>"] = {{ boot[key]|tojson }}`
@@ -39,5 +102,38 @@ def get_context(context):
 		# first routed render on a settings request.
 		"time_zone": frappe.utils.get_system_timezone(),
 	}
+
+	# Whitelabel branding (Phase 2): tenant-admin-set identity, shipped to every
+	# user in boot so the SPA renders the custom name/logo/favicon with no round
+	# trip. Blank => the frontend falls back to the Jarvis defaults.
+	_brand = (
+		frappe.get_cached_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			["agent_name", "brand_logo", "brand_favicon"],
+			as_dict=True,
+		)
+		or {}
+	)
+	context.boot["agent_name"] = _brand.get("agent_name") or ""
+	context.boot["brand_logo_url"] = _brand.get("brand_logo") or ""
+	context.boot["brand_favicon_url"] = _brand.get("brand_favicon") or ""
+
+	# Release notice (operator-authored): the SPA shows a full-page interstitial
+	# when this bench is behind the latest jarvis version. Up-to-date => no gate.
+	context.boot["release_notice"] = release_notice.boot_payload()
+
+	# Support panel gating (Plan 3 B5). Lazy-grant the default support role to this chat user so
+	# support isn't dark (P2 — grant_default_support clears the role cache so support_scope sees
+	# it in this same request), then expose both the per-user access flag and the fleet kill switch.
+	grant_default_support()
+	context.boot["has_support_access"] = support_scope() is not None
+	# Both flags, deliberately: `support_available` keeps its exact boolean meaning for
+	# every existing reader, and `support_state` lets the SPA tell an actionable
+	# "unconfigured" (show the entry disabled + explained) from "off"/"error" (hide).
+	state = _support_state()
+	context.boot["support_state"] = state
+	context.boot["support_available"] = state == SUPPORT_OK
+
 	frappe.db.commit()
 	return context

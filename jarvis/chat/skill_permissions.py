@@ -74,9 +74,7 @@ def skill_query_conditions(user: str | None = None) -> str:
 			f"and ar.parenttype = {frappe.db.escape(SKILL)} and ar.`role` in ({role_list})))"
 		)
 		# Role-scope via target_role.
-		clauses.append(
-			f"({table}.`scope` = 'Role' and {table}.`target_role` in ({role_list}))"
-		)
+		clauses.append(f"({table}.`scope` = 'Role' and {table}.`target_role` in ({role_list}))")
 	return "(" + " or ".join(clauses) + ")"
 
 

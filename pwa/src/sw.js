@@ -13,13 +13,13 @@
  * / may claim any narrower scope, so the worker controls exactly the app and
  * nothing else — never the Desk.
  */
-import { precacheAndRoute, cleanupOutdatedCaches, matchPrecache } from "workbox-precaching"
-import { clientsClaim } from "workbox-core"
-import { NavigationRoute, registerRoute, setCatchHandler } from "workbox-routing"
-import { NetworkOnly } from "workbox-strategies"
+import { precacheAndRoute, cleanupOutdatedCaches, matchPrecache } from "workbox-precaching";
+import { clientsClaim } from "workbox-core";
+import { NavigationRoute, registerRoute, setCatchHandler } from "workbox-routing";
+import { NetworkOnly } from "workbox-strategies";
 
-const BASE = "/assets/jarvis/pwa/"
-const OFFLINE_URL = `${BASE}offline.html`
+const BASE = "/assets/jarvis/pwa/";
+const OFFLINE_URL = `${BASE}offline.html`;
 
 // Every precache URL must be ABSOLUTE. Workbox resolves relative entries against
 // the worker's own location, and this worker is served from the site root
@@ -34,19 +34,19 @@ const OFFLINE_URL = `${BASE}offline.html`
 // happened ("bad-precaching-response: /manifest.webmanifest, status 404").
 // Normalising here makes the worker correct regardless of plugin ordering.
 const precacheManifest = (self.__WB_MANIFEST || []).map((entry) => {
-	const e = typeof entry === "string" ? { url: entry, revision: null } : entry
-	return e.url.startsWith("/") ? e : { ...e, url: BASE + e.url.replace(/^\.?\//, "") }
-})
+	const e = typeof entry === "string" ? { url: entry, revision: null } : entry;
+	return e.url.startsWith("/") ? e : { ...e, url: BASE + e.url.replace(/^\.?\//, "") };
+});
 
 // JS/CSS/icons + the offline card. index.html is excluded at build (see
 // vite.config.js): the real shell is Jinja-rendered per request.
-precacheAndRoute(precacheManifest)
-cleanupOutdatedCaches()
+precacheAndRoute(precacheManifest);
+cleanupOutdatedCaches();
 
 // Navigations always go to the network — the shell carries a fresh CSRF token
 // and boot data, so serving a cached copy would hand the app a dead token.
 // When the network is gone, setCatchHandler below answers with the offline card.
-registerRoute(new NavigationRoute(new NetworkOnly(), { allowlist: [/^\/jarvis-mobile/] }))
+registerRoute(new NavigationRoute(new NetworkOnly(), { allowlist: [/^\/jarvis-mobile/] }));
 
 // Anything the routes above threw on. A failed navigation gets the offline card
 // (this is what makes the app openable from the home screen with no network);
@@ -54,13 +54,13 @@ registerRoute(new NavigationRoute(new NetworkOnly(), { allowlist: [/^\/jarvis-mo
 // routed at all, so they never touch the cache.
 setCatchHandler(async ({ request }) => {
 	if (request.mode === "navigate") {
-		const offline = await matchPrecache(OFFLINE_URL)
-		if (offline) return offline
+		const offline = await matchPrecache(OFFLINE_URL);
+		if (offline) return offline;
 	}
-	return Response.error()
-})
+	return Response.error();
+});
 
 // registerType: "autoUpdate" — a new build takes over on next load instead of
 // leaving the user on a stale bundle behind a "reload?" prompt.
-self.skipWaiting()
-clientsClaim()
+self.skipWaiting();
+clientsClaim();

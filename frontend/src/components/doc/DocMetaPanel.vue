@@ -7,7 +7,11 @@
 			<Tooltip text="Click to copy">
 				<button class="cursor-copy truncate" @click="copyName">{{ docName }}</button>
 			</Tooltip>
-			<Button variant="ghost" :tooltip="meta.liked ? 'Unlike' : 'Like'" @click="docmeta.toggleLike()">
+			<Button
+				variant="ghost"
+				:tooltip="meta.liked ? 'Unlike' : 'Like'"
+				@click="docmeta.toggleLike()"
+			>
 				<template #icon>
 					<FeatherIcon
 						name="heart"
@@ -25,7 +29,12 @@
 					<div class="text-sm text-ink-gray-5">Assignees</div>
 					<Popover v-if="canWrite" placement="bottom-end">
 						<template #target="{ togglePopover }">
-							<Button variant="ghost" icon="plus" :tooltip="'Add assignee'" @click="togglePopover()" />
+							<Button
+								variant="ghost"
+								icon="plus"
+								:tooltip="'Add assignee'"
+								@click="togglePopover()"
+							/>
 						</template>
 						<template #body>
 							<div
@@ -38,7 +47,12 @@
 										class="flex h-6 items-center gap-1 rounded bg-surface-gray-2 px-2 text-sm text-ink-gray-8"
 									>
 										<span class="truncate">{{ a.full_name || a.user }}</span>
-										<Button variant="ghost" icon="x" class="!h-4 !w-4" @click="docmeta.unassign(a.user)" />
+										<Button
+											variant="ghost"
+											icon="x"
+											class="!h-4 !w-4"
+											@click="docmeta.unassign(a.user)"
+										/>
 									</div>
 								</div>
 								<Autocomplete
@@ -92,7 +106,10 @@
 						class="flex items-center justify-between gap-2 rounded p-1.5 text-base hover:bg-surface-gray-1"
 					>
 						<div class="flex min-w-0 items-center gap-2">
-							<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-5" />
+							<FeatherIcon
+								name="file-text"
+								class="size-4 shrink-0 text-ink-gray-5"
+							/>
 							<a
 								:href="f.file_url"
 								target="_blank"
@@ -103,7 +120,9 @@
 							</a>
 						</div>
 						<div class="flex shrink-0 items-center gap-1">
-							<span class="text-sm text-ink-gray-5">{{ convertSize(f.file_size) }}</span>
+							<span class="text-sm text-ink-gray-5">{{
+								convertSize(f.file_size)
+							}}</span>
 							<Button
 								v-if="canWrite"
 								variant="ghost"
@@ -126,7 +145,12 @@
 					<div class="text-sm text-ink-gray-5">Shared with</div>
 					<Popover v-if="canWrite" placement="bottom-end">
 						<template #target="{ togglePopover }">
-							<Button variant="ghost" icon="plus" :tooltip="'Share with a user'" @click="togglePopover()" />
+							<Button
+								variant="ghost"
+								icon="plus"
+								:tooltip="'Share with a user'"
+								@click="togglePopover()"
+							/>
 						</template>
 						<template #body>
 							<div
@@ -151,7 +175,9 @@
 									:options="shareableOptions"
 									:modelValue="null"
 									placeholder="Share with…"
-									@update:modelValue="(opt) => opt && docmeta.toggleShare(opt.value, 'add')"
+									@update:modelValue="
+										(opt) => opt && docmeta.toggleShare(opt.value, 'add')
+									"
 								/>
 							</div>
 						</template>
@@ -179,7 +205,9 @@
 					Created by {{ meta.created.full_name || meta.created.owner }} ·
 					{{ timeAgo(meta.created.creation) }}
 				</div>
-				<div v-if="meta.modified" class="mt-1">Modified {{ timeAgo(meta.modified.modified) }}</div>
+				<div v-if="meta.modified" class="mt-1">
+					Modified {{ timeAgo(meta.modified.modified) }}
+				</div>
 			</div>
 		</div>
 	</div>
@@ -190,7 +218,7 @@
 // docname/like row · assignees (hidden on skills) · attachments · shared-with
 // (Macro/Approval/Agent Installation) · #extra · byline. All mutations go
 // through the shared useDocmeta object passed in by the page.
-import { ref, computed, watch } from "vue"
+import { ref, computed, watch } from "vue";
 import {
 	Avatar,
 	Autocomplete,
@@ -201,65 +229,66 @@ import {
 	Tooltip,
 	confirmDialog,
 	toast,
-} from "frappe-ui"
-import { listShareableUsers } from "@/api"
-import { timeAgo } from "@/utils/datetime"
+} from "frappe-ui";
+import { listShareableUsers } from "@/api";
+import { timeAgo } from "@/utils/datetime";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	docmeta: { type: Object, required: true }, // useDocmeta() object
 	canWrite: { type: Boolean, default: false },
-})
+});
 
-const SHARE_DOCTYPES = ["Jarvis Macro", "Jarvis Approval Request", "Jarvis Agent Installation"]
+const SHARE_DOCTYPES = ["Jarvis Macro", "Jarvis Approval Request", "Jarvis Agent Installation"];
 
-const meta = computed(() => props.docmeta.meta)
-const docName = computed(() => props.docmeta.name)
-const assignees = computed(() => (meta.value && meta.value.assignees) || [])
-const attachments = computed(() => (meta.value && meta.value.attachments) || [])
-const shares = computed(() => (meta.value && meta.value.shares) || [])
+const meta = computed(() => props.docmeta.meta);
+const docName = computed(() => props.docmeta.name);
+const assignees = computed(() => (meta.value && meta.value.assignees) || []);
+const attachments = computed(() => (meta.value && meta.value.attachments) || []);
+const shares = computed(() => (meta.value && meta.value.shares) || []);
 
 // §14 DA-09: skills keep the child-table share model; no assignees block
-const showAssignees = computed(() => props.docmeta.doctype !== "Jarvis Custom Skill")
-const showShares = computed(() => SHARE_DOCTYPES.includes(props.docmeta.doctype))
+const showAssignees = computed(() => props.docmeta.doctype !== "Jarvis Custom Skill");
+const showShares = computed(() => SHARE_DOCTYPES.includes(props.docmeta.doctype));
 
 // ── people pickers (one fetch, lazily once the panel is writable) ─────────────
-const users = ref([])
-let usersLoaded = false
+const users = ref([]);
+let usersLoaded = false;
 watch(
 	() => props.canWrite,
 	async (v) => {
-		if (!v || usersLoaded) return
-		usersLoaded = true
+		if (!v || usersLoaded) return;
+		usersLoaded = true;
 		try {
-			users.value = (await listShareableUsers()) || []
+			users.value = (await listShareableUsers()) || [];
 		} catch (e) {
-			usersLoaded = false // retry on next write-mode entry
+			usersLoaded = false; // retry on next write-mode entry
 		}
 	},
 	{ immediate: true }
-)
+);
 
 const assignableOptions = computed(() => {
-	const taken = new Set(assignees.value.map((a) => a.user))
+	const taken = new Set(assignees.value.map((a) => a.user));
 	return users.value
 		.filter((u) => !taken.has(u.name))
-		.map((u) => ({ label: u.full_name || u.name, value: u.name }))
-})
+		.map((u) => ({ label: u.full_name || u.name, value: u.name }));
+});
 const shareableOptions = computed(() => {
-	const taken = new Set(shares.value.map((s) => s.user))
-	if (meta.value && meta.value.created) taken.add(meta.value.created.owner)
+	const taken = new Set(shares.value.map((s) => s.user));
+	if (meta.value && meta.value.created) taken.add(meta.value.created.owner);
 	return users.value
 		.filter((u) => !taken.has(u.name))
-		.map((u) => ({ label: u.full_name || u.name, value: u.name }))
-})
+		.map((u) => ({ label: u.full_name || u.name, value: u.name }));
+});
 
 // ── docname copy ──────────────────────────────────────────────────────────────
 async function copyName() {
 	try {
-		await navigator.clipboard.writeText(docName.value)
-		toast.success("Copied")
+		await navigator.clipboard.writeText(docName.value);
+		toast.success("Copied");
 	} catch (e) {
-		toast.error("Couldn't copy to clipboard")
+		toast.error("Couldn't copy to clipboard");
 	}
 }
 
@@ -269,47 +298,54 @@ function confirmDeleteAttachment(f) {
 		title: "Delete attachment?",
 		message: `Delete "${esc(f.file_name || f.file_url)}"? This can't be undone.`,
 		onConfirm: async ({ hideDialog }) => {
-			await props.docmeta.deleteAttachment(f.name)
-			hideDialog()
+			await props.docmeta.deleteAttachment(f.name);
+			hideDialog();
 		},
-	})
+	});
 }
 
 // O3: stock upload_file can reject (mimetype allowlist for website users,
 // if_owner write on approvals) - surface the server message as a toast and
 // show the allowed-types caveat as an inline hint.
-const uploadHint = ref("")
+const uploadHint = ref("");
 function onUploadError(e) {
-	toast.error(uploadErrMsg(e))
+	toast.error(uploadErrMsg(e));
 	uploadHint.value =
-		"Portal accounts can attach JPG, PNG, GIF, PDF, TXT, CSV and MS Office files only."
+		"Portal accounts can attach JPG, PNG, GIF, PDF, TXT, CSV and MS Office files only.";
 }
+// Result goes to toast.error(), which binds `message` with v-html, so this
+// returns ESCAPED html rather than plain text. The _server_messages branch is
+// left as-is on purpose: Frappe has already escaped that payload once, so it
+// renders correctly (and inertly) in that sink, and escaping it a second time
+// would show the entities literally.
 function uploadErrMsg(e) {
-	if (e && e.messages && e.messages[0]) return e.messages[0]
 	if (e && e._server_messages) {
 		try {
-			return JSON.parse(JSON.parse(e._server_messages)[0]).message
+			return JSON.parse(JSON.parse(e._server_messages)[0]).message;
 		} catch (err) {
 			/* fall through */
 		}
 	}
-	return (e && e.message) || "Upload failed"
+	return errHtml(e, "Upload failed");
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 function esc(s) {
-	return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]))
+	return String(s).replace(
+		/[&<>"]/g,
+		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
+	);
 }
 function convertSize(bytes) {
-	const n = Number(bytes)
-	if (!n || n <= 0) return ""
-	const units = ["B", "KB", "MB", "GB"]
-	let v = n
-	let i = 0
+	const n = Number(bytes);
+	if (!n || n <= 0) return "";
+	const units = ["B", "KB", "MB", "GB"];
+	let v = n;
+	let i = 0;
 	while (v >= 1024 && i < units.length - 1) {
-		v /= 1024
-		i++
+		v /= 1024;
+		i++;
 	}
-	return `${i === 0 || v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`
+	return `${i === 0 || v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 </script>

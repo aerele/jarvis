@@ -1,0 +1,41 @@
+{
+  "contract_version": 2,
+  "name": "state_mandate_pending_razorpay",
+  "description": "Authenticated state poll for a RAZORPAY autopay signup awaiting mandate authorization. TOKEN-SHAPED (plan-09 §0.4): both gateways' mandates are now served identically as pay_page_token + pay_origin_digest - the raw subscription id / key id never crosses the wire, and the bench navigates to the admin-hosted pay page with the token. The trial disclosure fields (effective_first_charge_at / effective_trial_days) still ride the response.",
+  "endpoint": "jarvis_admin_v2.billing.signup.get_signup_payment_state",
+  "http_status": 200,
+  "volatile": [
+    "body.message.data.pay_page_token",
+    "body.message.data.pay_origin_digest",
+    "body.message.data.effective_first_charge_at",
+    "body.message.data.payment_last_checked_at",
+    "body.message.data.attempt_id"
+  ],
+  "body": {
+    "message": {
+      "ok": true,
+      "data": {
+        "contract_version": 2,
+        "code": "PAYMENT_CONFIRMATION_PENDING",
+        "pending_verification": false,
+        "payment_provider": "razorpay",
+        "amount_inr": 999.0,
+        "plan": {
+          "name": "oc-test-rzp-monthly",
+          "label": "oc-test-rzp-monthly"
+        },
+        "signup_fee_inr": 0.0,
+        "due_today_inr": 0.0,
+        "effective_first_charge_at": 0,
+        "effective_trial_days": 14,
+        "email": "oc-test-a@example.com",
+        "company": "Acme",
+        "pay_page_token": "pit_placeholder",
+        "pay_origin_digest": "digest_placeholder",
+        "payment_last_checked_at": "2026-08-01 00:00:00.000000",
+        "attempt_id": "att_placeholder",
+        "generation": 1
+      }
+    }
+  }
+}

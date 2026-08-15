@@ -122,11 +122,13 @@ def _seed_detector_state() -> None:
 		# Idempotent: only insert missing rows; never clobber an operator's
 		# enabled flag or a stream watermark.
 		if not frappe.db.exists(DETECTOR_STATE, detector_id):
-			doc = frappe.get_doc({
-				"doctype": DETECTOR_STATE,
-				"detector_id": detector_id,
-				"enabled": 1,
-			})
+			doc = frappe.get_doc(
+				{
+					"doctype": DETECTOR_STATE,
+					"detector_id": detector_id,
+					"enabled": 1,
+				}
+			)
 			doc.insert(ignore_permissions=True)
 			created += 1
 	if created:
@@ -182,7 +184,7 @@ def _access_log_signal() -> dict:
 	retention_days = None
 	try:
 		ls = frappe.get_single("Log Settings")
-		for row in (ls.get("logs_to_clear") or []):
+		for row in ls.get("logs_to_clear") or []:
 			if row.get("ref_doctype") == "Access Log":
 				retention_days = row.get("days")
 				break
@@ -284,13 +286,15 @@ def _set_not_applicable(detector_id: str, flag: bool, reason: str | None) -> Non
 					update["last_error"] = None
 			frappe.db.set_value(DETECTOR_STATE, detector_id, update, update_modified=False)
 		else:
-			frappe.get_doc({
-				"doctype": DETECTOR_STATE,
-				"detector_id": detector_id,
-				"enabled": 1,
-				"not_applicable": 1 if flag else 0,
-				"last_error": reason if flag else None,
-			}).insert(ignore_permissions=True)
+			frappe.get_doc(
+				{
+					"doctype": DETECTOR_STATE,
+					"detector_id": detector_id,
+					"enabled": 1,
+					"not_applicable": 1 if flag else 0,
+					"last_error": reason if flag else None,
+				}
+			).insert(ignore_permissions=True)
 	except Exception:
 		pass
 
@@ -333,13 +337,11 @@ def _custom_schema_coverage() -> dict:
 			continue
 		if spec.get("doctype"):
 			read_doctypes.add(spec["doctype"])
-		for guard in (spec.get("field_guards") or []):
+		for guard in spec.get("field_guards") or []:
 			if isinstance(guard, (list, tuple)) and guard:
 				read_doctypes.add(guard[0])
 	try:
-		custom_doctypes = frappe.get_all(
-			"DocType", filters={"custom": 1, "istable": 0}, pluck="name"
-		)
+		custom_doctypes = frappe.get_all("DocType", filters={"custom": 1, "istable": 0}, pluck="name")
 	except Exception:
 		custom_doctypes = []
 	invisible = [d for d in custom_doctypes if d not in read_doctypes]
@@ -453,16 +455,20 @@ def _set_data_starved(detector_id: str, is_starved: bool) -> None:
 	try:
 		if frappe.db.exists(DETECTOR_STATE, detector_id):
 			frappe.db.set_value(
-				DETECTOR_STATE, detector_id, {"data_starved": 1 if is_starved else 0},
+				DETECTOR_STATE,
+				detector_id,
+				{"data_starved": 1 if is_starved else 0},
 				update_modified=False,
 			)
 		else:
-			frappe.get_doc({
-				"doctype": DETECTOR_STATE,
-				"detector_id": detector_id,
-				"enabled": 1,
-				"data_starved": 1 if is_starved else 0,
-			}).insert(ignore_permissions=True)
+			frappe.get_doc(
+				{
+					"doctype": DETECTOR_STATE,
+					"detector_id": detector_id,
+					"enabled": 1,
+					"data_starved": 1 if is_starved else 0,
+				}
+			).insert(ignore_permissions=True)
 	except Exception:
 		pass
 

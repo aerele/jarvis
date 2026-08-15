@@ -30,6 +30,27 @@ from contextlib import contextmanager
 
 import frappe
 
+# The pre-impersonation (authenticated) session user for this request/job, parked
+# on frappe.local so it dies with the request. Set by ``impersonate`` only.
+_AUTH_USER_ATTR = "jarvis_authenticated_user"
+
+
+def authenticated_user() -> str:
+	"""The user this request/job AUTHENTICATED as - the session user BEFORE any
+	:func:`impersonate` switch (the OUTERMOST one, when switches nest).
+
+	Provenance must never be read from ambient session state after an identity
+	switch: inside ``impersonate`` ``frappe.session.user`` is the impersonated
+	identity, so stamping it records the wrong human. Callers that record WHO
+	acted read it from here instead.
+
+	Falls back to the live session user when nothing is impersonating, so a plain
+	request path (or a background job) answers the same question correctly. Only
+	:func:`impersonate` maintains the marker - a bare ``frappe.set_user`` switch
+	is invisible to it, which is the other reason HTTP paths must use this seam.
+	"""
+	return getattr(frappe.local, _AUTH_USER_ATTR, None) or frappe.session.user
+
 
 @contextmanager
 def impersonate(user: str | None):
@@ -54,12 +75,19 @@ def impersonate(user: str | None):
 	# frappe.set_user REPLACES local.session.data with a fresh dict rather than
 	# mutating it, so this reference to the original inner dict stays valid.
 	orig_data = frappe.session.data
+	# Remember who the request was authenticated as, for authenticated_user(). The
+	# OUTERMOST switch wins (nested impersonation must not re-anchor the identity on
+	# an already-impersonated user), and the previous marker - not None - is what the
+	# finally restores, so unwinding a nested switch leaves the outer one intact.
+	outer_auth = getattr(frappe.local, _AUTH_USER_ATTR, None)
 	# set_user is inside the try so a mid-switch failure still restores the
 	# caller's session in the finally (never leave it gutted / half-switched).
 	try:
+		setattr(frappe.local, _AUTH_USER_ATTR, outer_auth or orig_user)
 		frappe.set_user(user)
 		yield
 	finally:
+		setattr(frappe.local, _AUTH_USER_ATTR, outer_auth)
 		frappe.set_user(orig_user)
 		frappe.local.session.sid = orig_sid
 		frappe.local.session.data = orig_data

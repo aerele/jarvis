@@ -1,5 +1,6 @@
 import frappe
 
+from jarvis import release_notice
 from jarvis.permissions import has_jarvis_access
 
 no_cache = 1
@@ -34,5 +35,21 @@ def get_context(context):
 		"frappe_user_id": frappe.session.user,
 		"frappe_full_name": frappe.utils.get_fullname(frappe.session.user),
 	}
+	# Whitelabel branding (Phase 4): shipped to the PWA so it renders the custom
+	# name/logo and patches the tab title/favicon. Blank => Jarvis defaults.
+	_brand = (
+		frappe.get_cached_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			["agent_name", "brand_logo", "brand_favicon"],
+			as_dict=True,
+		)
+		or {}
+	)
+	context.boot["agent_name"] = _brand.get("agent_name") or ""
+	context.boot["brand_logo_url"] = _brand.get("brand_logo") or ""
+	context.boot["brand_favicon_url"] = _brand.get("brand_favicon") or ""
+	# Release notice (operator-authored) — same interstitial on the PWA path.
+	context.boot["release_notice"] = release_notice.boot_payload()
 	frappe.db.commit()
 	return context

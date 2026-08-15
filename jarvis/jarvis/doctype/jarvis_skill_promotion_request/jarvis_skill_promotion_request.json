@@ -10,9 +10,14 @@
   "field_order": [
     "skill",
     "skill_name",
+    "instructions_snapshot",
+    "description_snapshot",
+    "user_invocable_snapshot",
+    "snapshotted",
     "from_scope",
     "to_scope",
     "target_role",
+    "target_roles",
     "note",
     "status",
     "reviewer",
@@ -40,6 +45,35 @@
       "description": "The skill's authored slug at request time (for the reviewer board)."
     },
     {
+      "fieldname": "instructions_snapshot",
+      "fieldtype": "Long Text",
+      "label": "Instructions Snapshot",
+      "read_only": 1,
+      "description": "Immutable full copy of the skill's instructions at request time. The reviewer decides on THIS (not a truncated live excerpt), and approval promotes exactly this snapshot - so an edit after review can never change what the Role/Org audience receives."
+    },
+    {
+      "fieldname": "description_snapshot",
+      "fieldtype": "Small Text",
+      "label": "Description Snapshot",
+      "read_only": 1,
+      "description": "The skill's description at request time (promoted alongside the instructions snapshot)."
+    },
+    {
+      "fieldname": "user_invocable_snapshot",
+      "fieldtype": "Check",
+      "label": "User Invocable Snapshot",
+      "read_only": 1,
+      "description": "The skill's user-invocable flag at request time (promoted alongside the snapshot)."
+    },
+    {
+      "fieldname": "snapshotted",
+      "fieldtype": "Check",
+      "label": "Snapshotted",
+      "default": "0",
+      "read_only": 1,
+      "description": "Immutable full-snapshot presence marker (R3-SP-4): set to 1 at request time once all three content fields (instructions, description, user-invocable) were captured. A stored Check 0 is indistinguishable from 'omitted', so this marker — not the user_invocable_snapshot value — is what approval checks to tell a full snapshot from a legacy/partial request. Approval is refused unless the marker is present, exactly like a missing-instructions request."
+    },
+    {
       "fieldname": "from_scope",
       "fieldtype": "Select",
       "label": "From Scope",
@@ -63,7 +97,16 @@
       "label": "Target Role",
       "options": "Role",
       "depends_on": "eval:doc.to_scope=='Role'",
-      "mandatory_depends_on": "eval:doc.to_scope=='Role'"
+      "mandatory_depends_on": "eval:doc.to_scope=='Role'",
+      "description": "Primary target role (the first of target_roles). Kept for backward compatibility and single-role display; the full audience is target_roles."
+    },
+    {
+      "fieldname": "target_roles",
+      "fieldtype": "Table",
+      "label": "Target Roles",
+      "options": "Jarvis Custom Skill Allowed Role",
+      "depends_on": "eval:doc.to_scope=='Role'",
+      "description": "Roles this request asks to share the skill with (Role scope). One approved request materializes a Role skill whose allowed_roles is this whole set; target_role holds the first as the primary."
     },
     {
       "fieldname": "note",

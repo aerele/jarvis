@@ -16,10 +16,10 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.permissions import ensure_jarvis_user_role
-from jarvis.chat import openclaw_session_pool
+from jarvis.chat import agent_session_pool
 from jarvis.chat.api import create_conversation, send_message, set_auto_apply
 from jarvis.chat.worker import run_agent_turn
+from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -46,15 +46,17 @@ def _ensure_non_admin_user() -> None:
 			frappe.get_doc("User", NON_ADMIN_USER).add_roles("Jarvis User")
 			frappe.db.commit()
 		return
-	doc = frappe.get_doc({
-		"doctype": "User",
-		"email": NON_ADMIN_USER,
-		"first_name": "Plain",
-		"last_name": "User",
-		"enabled": 1,
-		"send_welcome_email": 0,
-		"user_type": "System User",
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": "User",
+			"email": NON_ADMIN_USER,
+			"first_name": "Plain",
+			"last_name": "User",
+			"enabled": 1,
+			"send_welcome_email": 0,
+			"user_type": "System User",
+		}
+	)
 	doc.insert(ignore_permissions=True)
 	doc.add_roles("Jarvis User")
 	frappe.db.commit()
@@ -77,7 +79,7 @@ class TestSetAutoApplyGating(FrappeTestCase):
 	"""set_auto_apply: owner-scoped + admin-gated to enable."""
 
 	def setUp(self):
-		_ensure_test_user()            # TEST_USER has System Manager
+		_ensure_test_user()  # TEST_USER has System Manager
 		_ensure_non_admin_user()
 		self._orig_user = frappe.session.user
 
@@ -92,9 +94,7 @@ class TestSetAutoApplyGating(FrappeTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			set_auto_apply(conv, 1)
 		# The flag must stay 0 - the write never happened.
-		self.assertEqual(
-			int(frappe.db.get_value(CONV, conv, "auto_apply") or 0), 0
-		)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "auto_apply") or 0), 0)
 
 	def test_admin_enables_own_conversation(self):
 		conv = _make_conv(TEST_USER)
@@ -112,9 +112,7 @@ class TestSetAutoApplyGating(FrappeTestCase):
 		frappe.set_user(TEST_USER)
 		with self.assertRaises(frappe.PermissionError):
 			set_auto_apply(conv, 1)
-		self.assertEqual(
-			int(frappe.db.get_value(CONV, conv, "auto_apply") or 0), 0
-		)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "auto_apply") or 0), 0)
 
 	def test_disable_allowed_for_owner_without_admin(self):
 		# Owner (non-admin) turning it OFF is always allowed - no admin needed.
@@ -123,9 +121,7 @@ class TestSetAutoApplyGating(FrappeTestCase):
 		res = set_auto_apply(conv, 0)
 		self.assertTrue(res["ok"])
 		self.assertEqual(res["data"]["auto_apply"], 0)
-		self.assertEqual(
-			int(frappe.db.get_value(CONV, conv, "auto_apply") or 0), 0
-		)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "auto_apply") or 0), 0)
 
 	def test_unknown_conversation_raises(self):
 		frappe.set_user(TEST_USER)
@@ -144,7 +140,7 @@ class TestAutoApplyControllerGuard(FrappeTestCase):
 	"""
 
 	def setUp(self):
-		_ensure_test_user()            # TEST_USER has System Manager
+		_ensure_test_user()  # TEST_USER has System Manager
 		_ensure_non_admin_user()
 		self._orig_user = frappe.session.user
 
@@ -160,9 +156,7 @@ class TestAutoApplyControllerGuard(FrappeTestCase):
 		doc.auto_apply = 1
 		with self.assertRaises(frappe.PermissionError):
 			doc.save()
-		self.assertEqual(
-			int(frappe.db.get_value(CONV, conv, "auto_apply") or 0), 0
-		)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "auto_apply") or 0), 0)
 
 	def test_system_manager_save_can_enable(self):
 		conv = _make_conv(TEST_USER)
@@ -193,9 +187,7 @@ class TestAutoApplyControllerGuard(FrappeTestCase):
 		doc.title = "renamed by owner"
 		doc.save()  # should not raise
 		self.assertEqual(frappe.db.get_value(CONV, conv, "title"), "renamed by owner")
-		self.assertEqual(
-			int(frappe.db.get_value(CONV, conv, "auto_apply") or 0), 0
-		)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "auto_apply") or 0), 0)
 
 	def test_set_auto_apply_admin_enable_still_works(self):
 		# Regression: set_auto_apply's frappe.db.set_value path bypasses the
@@ -221,7 +213,8 @@ class TestGateAutoApplyBypass(FrappeTestCase):
 		_cleanup_user_conversations(TEST_USER)
 		_cleanup_user_conversations(NON_ADMIN_USER)
 		for name in frappe.get_all(
-			"ToDo", filters={"description": ("like", "jarvis-autoapply-%")},
+			"ToDo",
+			filters={"description": ("like", "jarvis-autoapply-%")},
 			pluck="name",
 		):
 			frappe.delete_doc("ToDo", name, ignore_permissions=True, force=True)
@@ -235,9 +228,14 @@ class TestGateAutoApplyBypass(FrappeTestCase):
 		conv = _make_conv(TEST_USER)
 		self._enable(conv)
 		desc = "jarvis-autoapply-exec-001"
-		r = api._run_tool("create_doc", {
-			"doctype": "ToDo", "values": {"description": desc},
-		}, conversation=conv)
+		r = api._run_tool(
+			"create_doc",
+			{
+				"doctype": "ToDo",
+				"values": {"description": desc},
+			},
+			conversation=conv,
+		)
 		self.assertTrue(r["ok"])
 		# NOT parked - the row exists and there is no pending status.
 		self.assertNotEqual(r["data"].get("status"), "pending_confirmation")
@@ -246,14 +244,22 @@ class TestGateAutoApplyBypass(FrappeTestCase):
 	def test_update_doc_executes_immediately_when_on(self):
 		conv = _make_conv(TEST_USER)
 		self._enable(conv)
-		todo = frappe.get_doc({
-			"doctype": "ToDo", "description": "jarvis-autoapply-upd-006",
-		}).insert(ignore_permissions=True)
+		todo = frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"description": "jarvis-autoapply-upd-006",
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
-		r = api._run_tool("update_doc", {
-			"doctype": "ToDo", "name": todo.name,
-			"changes": {"description": "jarvis-autoapply-upd-006-changed"},
-		}, conversation=conv)
+		r = api._run_tool(
+			"update_doc",
+			{
+				"doctype": "ToDo",
+				"name": todo.name,
+				"changes": {"description": "jarvis-autoapply-upd-006-changed"},
+			},
+			conversation=conv,
+		)
 		self.assertTrue(r["ok"])
 		# create/update are the ONLY auto-applyable tools -> fast-path, no park.
 		self.assertNotEqual(r["data"].get("status"), "pending_confirmation")
@@ -268,13 +274,21 @@ class TestGateAutoApplyBypass(FrappeTestCase):
 		# non-destructive write - the Fix 1 tightening closes that.)
 		conv = _make_conv(TEST_USER)
 		self._enable(conv)
-		todo = frappe.get_doc({
-			"doctype": "ToDo", "description": "jarvis-autoapply-submit-007",
-		}).insert(ignore_permissions=True)
+		todo = frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"description": "jarvis-autoapply-submit-007",
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
-		r = api._run_tool("submit_doc", {
-			"doctype": "ToDo", "name": todo.name,
-		}, conversation=conv)
+		r = api._run_tool(
+			"submit_doc",
+			{
+				"doctype": "ToDo",
+				"name": todo.name,
+			},
+			conversation=conv,
+		)
 		self.assertEqual(r["data"]["status"], "pending_confirmation")
 
 	def test_run_method_still_parks_when_on(self):
@@ -285,9 +299,13 @@ class TestGateAutoApplyBypass(FrappeTestCase):
 		conv = _make_conv(TEST_USER)
 		self._enable(conv)
 		with patch("jarvis.api.dispatch") as disp:
-			r = api._run_tool("run_method", {
-				"method": "frappe.ping",
-			}, conversation=conv)
+			r = api._run_tool(
+				"run_method",
+				{
+					"method": "frappe.ping",
+				},
+				conversation=conv,
+			)
 		self.assertEqual(r["data"]["status"], "pending_confirmation")
 		self.assertFalse(disp.called)
 
@@ -295,36 +313,48 @@ class TestGateAutoApplyBypass(FrappeTestCase):
 		conv = _make_conv(TEST_USER)
 		self._enable(conv)
 		# Something to (attempt to) delete.
-		todo = frappe.get_doc({
-			"doctype": "ToDo", "description": "jarvis-autoapply-del-002",
-		}).insert(ignore_permissions=True)
+		todo = frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"description": "jarvis-autoapply-del-002",
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
-		r = api._run_tool("delete_doc", {
-			"doctype": "ToDo", "name": todo.name,
-		}, conversation=conv)
+		r = api._run_tool(
+			"delete_doc",
+			{
+				"doctype": "ToDo",
+				"name": todo.name,
+			},
+			conversation=conv,
+		)
 		# Destructive tools ALWAYS park, even with auto_apply ON.
 		self.assertEqual(r["data"]["status"], "pending_confirmation")
 		self.assertTrue(frappe.db.exists("ToDo", todo.name))
 
 	def test_reversible_write_parks_when_off(self):
-		conv = _make_conv(TEST_USER)   # auto_apply defaults to 0
+		conv = _make_conv(TEST_USER)  # auto_apply defaults to 0
 		desc = "jarvis-autoapply-off-003"
-		r = api._run_tool("create_doc", {
-			"doctype": "ToDo", "values": {"description": desc},
-		}, conversation=conv)
+		r = api._run_tool(
+			"create_doc",
+			{
+				"doctype": "ToDo",
+				"values": {"description": desc},
+			},
+			conversation=conv,
+		)
 		self.assertEqual(r["data"]["status"], "pending_confirmation")
 		self.assertFalse(frappe.db.exists("ToDo", {"description": desc}))
 
 	def test_auto_apply_fires_when_actor_differs_from_owner(self):
-		# #5: the bypass now compares auto_apply against owner_user (the
-		# CONVERSATION OWNER) rather than the acting session user, so it fires in
-		# self-host where the acting user (the restricted tool user) differs from
-		# the operator who owns the conversation and enabled auto-apply. Modelled
-		# here by acting as a DIFFERENT user than the conversation owner: the
+		# #5: the bypass compares auto_apply against owner_user (the CONVERSATION
+		# OWNER) rather than the acting session user, so it fires when the acting
+		# user differs from the owner who enabled auto-apply. Modelled here by
+		# acting as a DIFFERENT user than the conversation owner: the
 		# reversible write fast-paths (reaches dispatch, does not park) and runs
 		# under the acting/exec user's scope. dispatch is spied so the test is
 		# not coupled to the exec user's DocType permissions.
-		conv = _make_conv(TEST_USER)   # owner (operator) enabled auto-apply
+		conv = _make_conv(TEST_USER)  # owner (operator) enabled auto-apply
 		self._enable(conv)
 		acting = {}
 
@@ -336,9 +366,14 @@ class TestGateAutoApplyBypass(FrappeTestCase):
 		frappe.set_user(NON_ADMIN_USER)  # the distinct exec/tool user
 		try:
 			with patch("jarvis.api.dispatch", side_effect=_spy):
-				r = api._run_tool("create_doc", {
-					"doctype": "ToDo", "values": {"description": "cross-004"},
-				}, conversation=conv)
+				r = api._run_tool(
+					"create_doc",
+					{
+						"doctype": "ToDo",
+						"values": {"description": "cross-004"},
+					},
+					conversation=conv,
+				)
 		finally:
 			frappe.set_user(TEST_USER)
 		# Fast-pathed to execution (not parked) - owner_user enabled the flag.
@@ -349,13 +384,17 @@ class TestGateAutoApplyBypass(FrappeTestCase):
 		self.assertEqual(acting["user"], NON_ADMIN_USER)
 
 	def test_bypass_off_when_conversation_empty(self):
-		# No conversation binding (and no active turn) -> conv resolves to ""
-		# -> auto_apply cannot be trusted -> parks.
+		# No conversation binding -> conv resolves to "" -> auto_apply cannot be
+		# trusted -> parks.
 		desc = "jarvis-autoapply-empty-005"
-		with patch("jarvis.selfhost.get_active_turn", return_value=None):
-			r = api._run_tool("create_doc", {
-				"doctype": "ToDo", "values": {"description": desc},
-			}, conversation=None)
+		r = api._run_tool(
+			"create_doc",
+			{
+				"doctype": "ToDo",
+				"values": {"description": desc},
+			},
+			conversation=None,
+		)
 		self.assertEqual(r["data"]["status"], "pending_confirmation")
 		self.assertFalse(frappe.db.exists("ToDo", {"description": desc}))
 
@@ -364,7 +403,7 @@ class TestTurnContextReflectsFlag(FrappeTestCase):
 	"""The turn_handler [Context: ...] line reflects THIS conversation's flag."""
 
 	def setUp(self):
-		openclaw_session_pool._POOL.clear()
+		agent_session_pool._POOL.clear()
 		_ensure_test_user()
 		self._orig_user = frappe.session.user
 		frappe.set_user(TEST_USER)
@@ -397,7 +436,7 @@ class TestTurnContextReflectsFlag(FrappeTestCase):
 		def _fake_checkout(url):
 			yield fake_sess
 
-		with patch("jarvis.chat.openclaw_session_pool.checkout", _fake_checkout):
+		with patch("jarvis.chat.agent_session_pool.checkout", _fake_checkout):
 			with patch("jarvis.chat.worker.publish_to_user"):
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 		first = fake_sess.chat_send.call_args_list[0]
@@ -405,17 +444,13 @@ class TestTurnContextReflectsFlag(FrappeTestCase):
 		return pos[1] if len(pos) >= 2 else first.kwargs.get("message")
 
 	def test_context_line_on_when_flag_set(self):
-		frappe.db.set_value(
-			CONV, self.conv, "auto_apply", 1, update_modified=False
-		)
+		frappe.db.set_value(CONV, self.conv, "auto_apply", 1, update_modified=False)
 		frappe.db.commit()
 		msg = self._capture_message_sent()
 		self.assertIn("auto-apply changes: ON", msg)
 
 	def test_context_line_absent_when_flag_clear(self):
-		frappe.db.set_value(
-			CONV, self.conv, "auto_apply", 0, update_modified=False
-		)
+		frappe.db.set_value(CONV, self.conv, "auto_apply", 0, update_modified=False)
 		frappe.db.commit()
 		msg = self._capture_message_sent()
 		self.assertNotIn("auto-apply changes: ON", msg)

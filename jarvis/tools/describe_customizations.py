@@ -7,21 +7,27 @@ fenced/rendered output site-wide (hands every user the widest view).
 
 from __future__ import annotations
 
-import frappe  # noqa: F401 - session user default rides frappe via fence
+import frappe
 
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.site_profile.collect import collect_profile
 from jarvis.site_profile.fence import fence_for_user
 from jarvis.site_profile.render import EMPTY_MESSAGE, apply_scope_match, render_profile_md
 
-_SCOPES = frozenset({
-	"apps", "doctypes", "custom_fields", "workflows", "reports",
-	"print_formats", "scripts",
-})
+_SCOPES = frozenset(
+	{
+		"apps",
+		"doctypes",
+		"custom_fields",
+		"workflows",
+		"reports",
+		"print_formats",
+		"scripts",
+	}
+)
 
 _SCOPED_EMPTY = (
-	"No customizations match the requested scope/filter. "
-	"Call without scope/match for the full index."
+	"No customizations match the requested scope/filter. Call without scope/match for the full index."
 )
 
 
@@ -61,8 +67,7 @@ def _parse_scope(scope) -> set[str] | None:
 	unknown = sorted(set(parts) - _SCOPES)
 	if unknown:
 		raise InvalidArgumentError(
-			f"unknown scope value(s): {', '.join(unknown)}; "
-			f"allowed: {', '.join(sorted(_SCOPES))}"
+			f"unknown scope value(s): {', '.join(unknown)}; allowed: {', '.join(sorted(_SCOPES))}"
 		)
 	return set(parts)
 

@@ -20,17 +20,18 @@
 </template>
 
 <script setup>
-import { computed } from "vue"
-import Banner from "./Banner.vue"
+import { computed } from "vue";
+import Banner from "./Banner.vue";
 
 const props = defineProps({
 	// The envelope's `error` object, or a plain message string (fallback path).
 	error: { type: [Object, String], default: () => ({}) },
-})
+});
 
 // Plain-language headline keyed by the wire `code`. This is the ACTION-failure
-// axis - distinct from ChatView's run/transport ERROR_HEADLINES, kept separate
-// on purpose.
+// axis - distinct from ChatView's run/transport taxonomy (lib/errors.js
+// turnErrorInfo, formerly ChatView's own ERROR_HEADLINES before #702), kept
+// separate on purpose.
 const HEADLINES = {
 	PermissionDeniedError: "You don't have permission to do this",
 	InvalidArgumentError: "Some values need attention",
@@ -38,15 +39,15 @@ const HEADLINES = {
 	NoDataError: "Nothing to do here",
 	ResultTooLargeError: "That result is too large to return",
 	ToolNotFoundError: "That action isn't available",
-}
+};
 
 const err = computed(() => {
-	const e = props.error
-	if (typeof e === "string") return { message: e }
-	return e || {}
-})
+	const e = props.error;
+	if (typeof e === "string") return { message: e };
+	return e || {};
+});
 
-const headline = computed(() => HEADLINES[err.value.code] || "Something went wrong")
+const headline = computed(() => HEADLINES[err.value.code] || "Something went wrong");
 </script>
 
 <style scoped>

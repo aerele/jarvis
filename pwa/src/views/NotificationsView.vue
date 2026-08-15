@@ -1,16 +1,17 @@
 <script setup>
-import { computed } from "vue"
-import { useRouter } from "vue-router"
-import { store } from "../store"
-import { feed, markAllRead, markRead } from "../lib/notifications"
+import { computed } from "vue";
+import { useRouter } from "vue-router";
+import { store } from "../store";
+import { feed, markAllRead, markRead } from "../lib/notifications";
+import { agentName } from "@/branding";
 
 // What Jarvis did while you were somewhere else. Split New / Earlier, exactly as
 // the native app does — an unread task is a thing to act on, a read one is
 // history, and mixing them makes both harder to read.
-const router = useRouter()
+const router = useRouter();
 
-const fresh = computed(() => feed.items.filter((i) => !i.read))
-const earlier = computed(() => feed.items.filter((i) => i.read))
+const fresh = computed(() => feed.items.filter((i) => !i.read));
+const earlier = computed(() => feed.items.filter((i) => i.read));
 
 const VISUAL = {
 	"task-finished": { cls: "is-green", icon: "M20 6 9 17l-5-5" },
@@ -23,31 +24,40 @@ const VISUAL = {
 		cls: "is-accent",
 		icon: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
 	},
-}
-const visual = (kind) => VISUAL[kind] || VISUAL["new-conversation"]
+};
+const visual = (kind) => VISUAL[kind] || VISUAL["new-conversation"];
 
 function relTime(at) {
-	const diff = (Date.now() - at) / 1000
-	if (diff < 60) return "now"
-	if (diff < 3600) return `${Math.floor(diff / 60)}m`
-	if (diff < 86400) return `${Math.floor(diff / 3600)}h`
-	if (diff < 604800) return `${Math.floor(diff / 86400)}d`
-	return new Date(at).toLocaleDateString(undefined, { day: "numeric", month: "short" })
+	const diff = (Date.now() - at) / 1000;
+	if (diff < 60) return "now";
+	if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+	if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+	if (diff < 604800) return `${Math.floor(diff / 86400)}d`;
+	return new Date(at).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
 // A notification is a pointer, not a place: tapping it takes you to the chat it
 // came from. An approval in particular can only be answered there.
 function open(item) {
-	markRead(item.id)
-	if (item.conversation) router.push(`/c/${item.conversation}`)
-	else router.push("/")
+	markRead(item.id);
+	if (item.conversation) router.push(`/c/${item.conversation}`);
+	else router.push("/");
 }
 </script>
 
 <template>
 	<div class="jv-bar">
 		<button class="jv-icon-btn" aria-label="Back" @click="router.back()">
-			<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+			<svg
+				viewBox="0 0 24 24"
+				width="20"
+				height="20"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.9"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
 				<path d="m15 18-6-6 6-6" />
 			</svg>
 		</button>
@@ -58,13 +68,24 @@ function open(item) {
 	<div class="jv-scroll jv-pad">
 		<div v-if="!feed.items.length" class="jv-empty">
 			<span class="jv-empty-icon">
-				<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-					<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0" />
+				<svg
+					viewBox="0 0 24 24"
+					width="22"
+					height="22"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.7"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
+					<path
+						d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"
+					/>
 				</svg>
 			</span>
 			<div style="font-size: 15px; font-weight: 600; color: var(--ink9)">Nothing yet</div>
 			<div style="font-size: 14px; line-height: 1.5">
-				Finished tasks, decisions Jarvis needs and new conversations land here.
+				Finished tasks, decisions {{ agentName }} needs and new conversations land here.
 			</div>
 		</div>
 
@@ -73,7 +94,16 @@ function open(item) {
 				<div class="jv-label">New</div>
 				<button v-for="n in fresh" :key="n.id" class="jv-notif" @click="open(n)">
 					<span class="jv-notif-icon" :class="visual(n.kind).cls">
-						<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<svg
+							viewBox="0 0 24 24"
+							width="17"
+							height="17"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
 							<path :d="visual(n.kind).icon" />
 						</svg>
 						<span class="jv-unread" />
@@ -86,7 +116,16 @@ function open(item) {
 						<span class="jv-notif-body">{{ n.body }}</span>
 						<span v-if="n.conversation" class="jv-notif-cta">
 							Open chat
-							<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+							<svg
+								viewBox="0 0 24 24"
+								width="13"
+								height="13"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
 								<path d="m9 18 6-6-6-6" />
 							</svg>
 						</span>
@@ -96,9 +135,23 @@ function open(item) {
 
 			<template v-if="earlier.length">
 				<div class="jv-label">Earlier</div>
-				<button v-for="n in earlier" :key="n.id" class="jv-notif is-earlier" @click="open(n)">
+				<button
+					v-for="n in earlier"
+					:key="n.id"
+					class="jv-notif is-earlier"
+					@click="open(n)"
+				>
 					<span class="jv-notif-icon" :class="visual(n.kind).cls">
-						<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<svg
+							viewBox="0 0 24 24"
+							width="17"
+							height="17"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
 							<path :d="visual(n.kind).icon" />
 						</svg>
 					</span>

@@ -20,9 +20,13 @@ NOTE_DT = "Note"
 
 
 def _make_note(title: str = "jarvis-delete-test") -> str:
-	doc = frappe.get_doc({
-		"doctype": NOTE_DT, "title": title, "content": "to be deleted",
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": NOTE_DT,
+			"title": title,
+			"content": "to be deleted",
+		}
+	)
 	doc.insert(ignore_permissions=True)
 	frappe.db.commit()
 	return doc.name

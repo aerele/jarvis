@@ -15,7 +15,8 @@
 						icon="external-link"
 						label="Open ERPNext Desk"
 						:tooltip="'Open ERPNext Desk'"
-						class="jv-deskbtn" @click="openDesk"
+						class="jv-deskbtn"
+						@click="openDesk"
 					/>
 					<slot name="right-header" />
 				</div>
@@ -28,18 +29,18 @@
 // CRM's LayoutHeader (R2 §1): pages teleport their header content into the
 // shell's #app-header strip. `showHeader` flips in nextTick so the Teleport
 // target exists before we render into it.
-import { ref, nextTick, onMounted } from "vue"
-import { Button } from "frappe-ui"
+import { ref, nextTick, onMounted } from "vue";
+import { Button } from "frappe-ui";
 
 // Persistent "Go to Desk" (same behavior as ChatView's openErpDesk).
 function openDesk() {
-	window.open("/app", "_blank")
+	window.open("/app", "_blank");
 }
 
-const showHeader = ref(false)
+const showHeader = ref(false);
 onMounted(() => {
 	nextTick(() => {
-		showHeader.value = true
-	})
-})
+		showHeader.value = true;
+	});
+});
 </script>

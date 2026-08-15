@@ -15,10 +15,10 @@
 				v-if="phase === 'loading'"
 				class="flex flex-col items-center gap-2 py-10 text-center"
 			>
-				<LoadingIndicator class="size-5 text-ink-gray-5" />
+				<JvSpinner />
 				<span class="max-w-sm text-sm text-ink-gray-6">
-					Drafting - Jarvis is matching this insight against your custom skills and writing
-					the update. This takes a few seconds.
+					Drafting - {{ agentName }} is matching this insight against your custom skills
+					and writing the update. This takes a few seconds.
 				</span>
 			</div>
 
@@ -27,8 +27,10 @@
 				v-else-if="phase === 'none'"
 				class="mt-3 flex items-start gap-2 rounded-lg border border-outline-gray-2 bg-surface-gray-1 px-3 py-2 text-sm text-ink-gray-7"
 			>
-				<FeatherIcon name="info" class="mt-0.5 size-4 shrink-0" />
-				<span>{{ draft.reason || "This insight is not worth folding into a skill." }}</span>
+				<FeatherIcon name="info" class="size-4 shrink-0" />
+				<span>{{
+					draft.reason || "This insight is not worth folding into a skill."
+				}}</span>
 			</div>
 
 			<!-- verdict: update an existing skill -->
@@ -48,7 +50,9 @@
 							:key="i"
 							class="whitespace-pre-wrap"
 							:class="l.changed ? 'rounded-sm bg-surface-red-1' : ''"
-						>{{ l.line || " " }}</div>
+						>
+							{{ l.line || " " }}
+						</div>
 					</div>
 				</div>
 				<div class="mt-3">
@@ -61,7 +65,9 @@
 							:key="i"
 							class="whitespace-pre-wrap"
 							:class="l.changed ? 'rounded-sm bg-surface-green-1' : ''"
-						>{{ l.line || " " }}</div>
+						>
+							{{ l.line || " " }}
+						</div>
 					</div>
 				</div>
 			</template>
@@ -80,7 +86,8 @@
 					<div class="mb-1 text-sm text-ink-gray-5">Instructions</div>
 					<pre
 						class="max-h-56 overflow-y-auto whitespace-pre-wrap rounded border bg-surface-gray-1 px-3 py-2 text-sm text-ink-gray-8"
-					>{{ newSkill.instructions }}</pre>
+						>{{ newSkill.instructions }}</pre
+					>
 				</div>
 			</template>
 
@@ -88,8 +95,8 @@
 				v-if="phase === 'update' || phase === 'create'"
 				class="mt-3 text-sm text-ink-gray-5"
 			>
-				Confirming saves the skill only - it reaches your assistant with the next
-				skills push.
+				Confirming saves the skill only - it reaches your assistant with the next skills
+				push.
 			</p>
 		</template>
 
@@ -139,28 +146,27 @@
 // acknowledged with an applied-to-skill note; the change then rides the
 // normal Skills-tab apply (no auto-push). Self-contained like ShareDialog:
 // owns its busy refs; the parent refreshes on @applied.
-import { reactive, ref, computed, watch } from "vue"
-import { Badge, Button, Dialog, FeatherIcon, LoadingIndicator, toast } from "frappe-ui"
+import { reactive, ref, computed, watch } from "vue";
+import { Badge, Button, Dialog, FeatherIcon, toast } from "frappe-ui";
+import JvSpinner from "@/components/JvSpinner.vue";
 import {
 	draftInsightSkillUpdate,
 	applyInsightSkillUpdate,
 	acknowledgeLearnedPattern,
-} from "@/api/learning"
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
+} from "@/api/learning";
+import { agentName } from "@/branding";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
 	pattern: { type: Object, default: () => ({}) }, // board row: {name, pattern_statement, ...}
-})
+});
 
-const emit = defineEmits(["update:modelValue", "applied"])
+const emit = defineEmits(["update:modelValue", "applied"]);
 
-const phase = ref("loading") // loading | none | update | create
-const applying = ref(false)
-const acknowledging = ref(false)
+const phase = ref("loading"); // loading | none | update | create
+const applying = ref(false);
+const acknowledging = ref(false);
 const draft = reactive({
 	reason: "",
 	action: "",
@@ -168,22 +174,22 @@ const draft = reactive({
 	before_instructions: "",
 	updated_instructions: "",
 	new_skill: null,
-})
+});
 // monotonic open counter: a draft resolving after close (or a re-open) is dropped
-let loadSeq = 0
+let loadSeq = 0;
 
 watch(
 	() => props.modelValue,
 	(open) => {
-		if (open) load()
+		if (open) load();
 	}
-)
+);
 
 async function load() {
-	const seq = ++loadSeq
-	phase.value = "loading"
-	applying.value = false
-	acknowledging.value = false
+	const seq = ++loadSeq;
+	phase.value = "loading";
+	applying.value = false;
+	acknowledging.value = false;
 	Object.assign(draft, {
 		reason: "",
 		action: "",
@@ -191,14 +197,14 @@ async function load() {
 		before_instructions: "",
 		updated_instructions: "",
 		new_skill: null,
-	})
+	});
 	try {
-		const r = await draftInsightSkillUpdate(props.pattern.name)
-		if (seq !== loadSeq || !props.modelValue) return
+		const r = await draftInsightSkillUpdate(props.pattern.name);
+		if (seq !== loadSeq || !props.modelValue) return;
 		if (!r || r.ok === false) {
-			toast.error((r && r.reason) || "Could not draft a skill update.")
-			emit("update:modelValue", false)
-			return
+			toast.error((r && r.reason) || "Could not draft a skill update.");
+			emit("update:modelValue", false);
+			return;
 		}
 		Object.assign(draft, {
 			reason: r.reason || "",
@@ -207,21 +213,21 @@ async function load() {
 			before_instructions: r.before_instructions || "",
 			updated_instructions: r.updated_instructions || "",
 			new_skill: r.new_skill || null,
-		})
+		});
 		phase.value =
 			!r.worth_applying || r.action === "none"
 				? "none"
 				: r.action === "create"
-					? "create"
-					: "update"
+				? "create"
+				: "update";
 	} catch (e) {
-		if (seq !== loadSeq) return
-		toast.error(errMsg(e))
-		emit("update:modelValue", false)
+		if (seq !== loadSeq) return;
+		toast.error(errHtml(e));
+		emit("update:modelValue", false);
 	}
 }
 
-const newSkill = computed(() => draft.new_skill || {})
+const newSkill = computed(() => draft.new_skill || {});
 
 // Cheap line-level diff: a line is highlighted when its trimmed text does not
 // appear anywhere on the other side. Not a real diff (moved/duplicated lines
@@ -229,34 +235,39 @@ const newSkill = computed(() => draft.new_skill || {})
 // Single-paragraph instructions (the common case) degrade to "everything
 // changed" under a line diff, so fall back to sentence segments there.
 function segments(text, splitSentences) {
-	const s = String(text || "")
-	if (!splitSentences) return s.split("\n")
-	return s.split(/(?<=[.!?])\s+/)
+	const s = String(text || "");
+	if (!splitSentences) return s.split("\n");
+	return s.split(/(?<=[.!?])\s+/);
 }
 function diffLines(text, otherText) {
 	const bothMultiline =
-		String(text || "").trim().includes("\n") && String(otherText || "").trim().includes("\n")
-	const bySentence = !bothMultiline
+		String(text || "")
+			.trim()
+			.includes("\n") &&
+		String(otherText || "")
+			.trim()
+			.includes("\n");
+	const bySentence = !bothMultiline;
 	const other = new Set(
 		segments(otherText, bySentence)
 			.map((l) => l.trim())
 			.filter(Boolean)
-	)
+	);
 	return segments(text, bySentence).map((line) => ({
 		line,
 		changed: !!line.trim() && !other.has(line.trim()),
-	}))
+	}));
 }
 const currentLines = computed(() =>
 	diffLines(draft.before_instructions, draft.updated_instructions)
-)
+);
 const proposedLines = computed(() =>
 	diffLines(draft.updated_instructions, draft.before_instructions)
-)
+);
 
 async function confirmApply() {
-	if (applying.value) return
-	applying.value = true
+	if (applying.value) return;
+	applying.value = true;
 	try {
 		const payload =
 			phase.value === "create"
@@ -265,42 +276,42 @@ async function confirmApply() {
 						action: "update",
 						skill_name: draft.skill_name,
 						updated_instructions: draft.updated_instructions,
-					}
-		const r = await applyInsightSkillUpdate(props.pattern.name, payload)
+				  };
+		const r = await applyInsightSkillUpdate(props.pattern.name, payload);
 		if (r && r.ok === false) {
-			toast.error(r.reason || "Could not apply the insight.")
-			return // dialog stays open
+			toast.error(r.reason || "Could not apply the insight.");
+			return; // dialog stays open
 		}
 		const skill =
-			(r && r.skill_name) || draft.skill_name || newSkill.value.skill_name || "skill"
+			(r && r.skill_name) || draft.skill_name || newSkill.value.skill_name || "skill";
 		toast.success(
 			phase.value === "create"
 				? `Skill “${skill}” created. It reaches your assistant with the next skills push.`
 				: `Skill “${skill}” updated. The change reaches your assistant with the next skills push.`
-		)
-		emit("applied", { skill_name: skill })
-		emit("update:modelValue", false)
+		);
+		emit("applied", { skill_name: skill });
+		emit("update:modelValue", false);
 	} catch (e) {
-		toast.error(errMsg(e)) // dialog stays open for retry / cancel
+		toast.error(errHtml(e)); // dialog stays open for retry / cancel
 	} finally {
-		applying.value = false
+		applying.value = false;
 	}
 }
 
 // The verdict said "not worth applying": offer the ordinary B/C disposition
 // without a round-trip back to the board.
 async function acknowledgeInstead() {
-	if (acknowledging.value) return
-	acknowledging.value = true
+	if (acknowledging.value) return;
+	acknowledging.value = true;
 	try {
-		await acknowledgeLearnedPattern(props.pattern.name)
-		toast.success("Acknowledged")
-		emit("applied", { acknowledged: true })
-		emit("update:modelValue", false)
+		await acknowledgeLearnedPattern(props.pattern.name);
+		toast.success("Acknowledged");
+		emit("applied", { acknowledged: true });
+		emit("update:modelValue", false);
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		acknowledging.value = false
+		acknowledging.value = false;
 	}
 }
 </script>

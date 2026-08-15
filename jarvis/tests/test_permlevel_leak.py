@@ -56,21 +56,28 @@ SECRET_TOTAL = 918273.0
 
 def _ensure_role(name: str) -> None:
 	if not frappe.db.exists("Role", name):
-		frappe.get_doc({
-			"doctype": "Role", "role_name": name, "desk_access": 1, "is_custom": 1,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Role",
+				"role_name": name,
+				"desk_access": 1,
+				"is_custom": 1,
+			}
+		).insert(ignore_permissions=True)
 
 
 def _ensure_user(email: str, roles: tuple) -> None:
 	if not frappe.db.exists("User", email):
-		frappe.get_doc({
-			"doctype": "User",
-			"email": email,
-			"first_name": email.split("@")[0],
-			"send_welcome_email": 0,
-			"enabled": 1,
-			"user_type": "System User",
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": email.split("@")[0],
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "System User",
+			}
+		).insert(ignore_permissions=True)
 	user = frappe.get_doc("User", email)
 	if user.user_type != "System User":
 		frappe.db.set_value("User", email, "user_type", "System User", update_modified=False)
@@ -112,12 +119,24 @@ def _ensure_doctype() -> None:
 		],
 		permissions=[
 			{
-				"role": ROLE_BASE, "permlevel": 0, "read": 1, "write": 1, "create": 1,
-				"submit": 1, "cancel": 1, "amend": 1,
+				"role": ROLE_BASE,
+				"permlevel": 0,
+				"read": 1,
+				"write": 1,
+				"create": 1,
+				"submit": 1,
+				"cancel": 1,
+				"amend": 1,
 			},
 			{
-				"role": ROLE_PRIV, "permlevel": 0, "read": 1, "write": 1, "create": 1,
-				"submit": 1, "cancel": 1, "amend": 1,
+				"role": ROLE_PRIV,
+				"permlevel": 0,
+				"read": 1,
+				"write": 1,
+				"create": 1,
+				"submit": 1,
+				"cancel": 1,
+				"amend": 1,
 			},
 			{"role": ROLE_PRIV, "permlevel": 1, "read": 1, "write": 1},
 		],
@@ -307,17 +326,13 @@ class TestPreviewDocPermlevelLeak(PermlevelLeakTestCase):
 
 	def test_restricted_user_does_not_see_restricted_field(self):
 		with _as(USER_RESTRICTED):
-			result = preview_doc(
-				DT_NAME, {FIELD_PUBLIC: "visible", FIELD_RESTRICTED: "guessed-value"}
-			)
+			result = preview_doc(DT_NAME, {FIELD_PUBLIC: "visible", FIELD_RESTRICTED: "guessed-value"})
 		self.assertTrue(result["valid"])
 		self.assertNotIn(FIELD_RESTRICTED, result["resolved"])
 
 	def test_privileged_user_sees_restricted_field(self):
 		with _as(USER_PRIVILEGED):
-			result = preview_doc(
-				DT_NAME, {FIELD_PUBLIC: "visible", FIELD_RESTRICTED: "guessed-value"}
-			)
+			result = preview_doc(DT_NAME, {FIELD_PUBLIC: "visible", FIELD_RESTRICTED: "guessed-value"})
 		self.assertTrue(result["valid"])
 		self.assertEqual(result["resolved"][FIELD_RESTRICTED], "guessed-value")
 

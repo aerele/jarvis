@@ -1,0 +1,169 @@
+{
+  "key": "graphite",
+  "label": "Graphite",
+  "schema_version": 1,
+  "dark": true,
+  "accent": "#8ab4f8",
+  "palette": [
+    "#8ab4f8",
+    "#4ade80",
+    "#fbbf24",
+    "#f87171",
+    "#c084fc",
+    "#22d3ee",
+    "#fb923c",
+    "#a3e635"
+  ],
+  "semantic": {
+    "positive": "#4ade80",
+    "negative": "#f87171",
+    "warning": "#fbbf24",
+    "info": "#8ab4f8"
+  },
+  "render_tokens": {
+    "bg": "#191919",
+    "surface": "#222222",
+    "surface-2": "#2a2a2a",
+    "ink": "#ececec",
+    "heading": "#ececec",
+    "muted": "#9a9a9a",
+    "line": "#333333",
+    "accent": "#8ab4f8",
+    "positive": "#4ade80",
+    "negative": "#f87171",
+    "warning": "#fbbf24",
+    "info": "#8ab4f8",
+    "radius": "10px",
+    "shadow": "none",
+    "font": "-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,sans-serif",
+    "font-display": "-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,sans-serif"
+  },
+  "type_scale": {
+    "display": {
+      "px": 32,
+      "weight": 700,
+      "line_height": 1.15,
+      "letter_spacing": "-0.02em"
+    },
+    "h1": {
+      "px": 24,
+      "weight": 700,
+      "line_height": 1.2,
+      "letter_spacing": "-0.01em"
+    },
+    "h2": {
+      "px": 18,
+      "weight": 600,
+      "line_height": 1.3,
+      "letter_spacing": "-0.005em"
+    },
+    "h3": {
+      "px": 15,
+      "weight": 600,
+      "line_height": 1.35,
+      "letter_spacing": "0"
+    },
+    "label": {
+      "px": 13,
+      "weight": 600,
+      "line_height": 1.3,
+      "letter_spacing": "0.01em"
+    },
+    "body": {
+      "px": 14,
+      "weight": 400,
+      "line_height": 1.5,
+      "letter_spacing": "0"
+    },
+    "caption": {
+      "px": 12,
+      "weight": 400,
+      "line_height": 1.4,
+      "letter_spacing": "0"
+    }
+  },
+  "spacing": {
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius": {
+    "sm": 6,
+    "md": 10,
+    "lg": 14,
+    "pill": 999
+  },
+  "border": {
+    "hairline": 1,
+    "medium": 2
+  },
+  "layout": {
+    "page_max_width": 1200,
+    "gutter": 24,
+    "kpi_columns": 4,
+    "kpi_min_px": 200,
+    "chart_columns": 2,
+    "chart_min_px": 320,
+    "breakpoints": {
+      "sm": 640,
+      "md": 768,
+      "lg": 1024,
+      "xl": 1280
+    }
+  },
+  "a11y": {
+    "text_contrast_min": 4.5,
+    "ui_contrast_min": 3.0
+  },
+  "component_classes": [
+    "jd-page",
+    "jd-page-header",
+    "jd-subtitle",
+    "jd-kpi-row",
+    "jd-kpi",
+    "jd-kpi-label",
+    "jd-kpi-value",
+    "jd-kpi-delta",
+    "jd-card",
+    "jd-chart-card",
+    "jd-card-header",
+    "jd-card-footnote",
+    "jd-chart-grid",
+    "jd-table",
+    "jd-empty",
+    "jd-error"
+  ],
+  "validator": {
+    "allowed_color_hexes": [
+      "#191919",
+      "#222222",
+      "#2a2a2a",
+      "#ececec",
+      "#9a9a9a",
+      "#333333",
+      "#8ab4f8",
+      "#4ade80",
+      "#f87171",
+      "#fbbf24",
+      "#c084fc",
+      "#22d3ee",
+      "#fb923c",
+      "#a3e635"
+    ],
+    "allowed_font_families": [
+      "-apple-system",
+      "blinkmacsystemfont",
+      "segoe ui",
+      "roboto",
+      "helvetica neue",
+      "arial",
+      "sans-serif",
+      "system-ui",
+      "ui-sans-serif"
+    ]
+  }
+}

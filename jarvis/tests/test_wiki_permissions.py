@@ -70,10 +70,14 @@ def _ensure_user(email: str, roles: tuple = ()) -> str:
 
 def _ensure_role(role_name: str) -> str:
 	if not frappe.db.exists("Role", role_name):
-		frappe.get_doc({
-			"doctype": "Role", "role_name": role_name,
-			"desk_access": 1, "is_custom": 1,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Role",
+				"role_name": role_name,
+				"desk_access": 1,
+				"is_custom": 1,
+			}
+		).insert(ignore_permissions=True)
 		frappe.db.commit()
 	return role_name
 
@@ -93,16 +97,18 @@ def _delete_test_pages():
 
 
 def _make_page(slug, page_type, scope="Org", target_role=None, target_user=None, **kwargs):
-	doc = frappe.get_doc({
-		"doctype": WIKI,
-		"slug": slug,
-		"title": kwargs.pop("title", slug),
-		"page_type": page_type,
-		"scope": scope,
-		"target_role": target_role,
-		"target_user": target_user,
-		**kwargs,
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": WIKI,
+			"slug": slug,
+			"title": kwargs.pop("title", slug),
+			"page_type": page_type,
+			"scope": scope,
+			"target_role": target_role,
+			"target_user": target_user,
+			**kwargs,
+		}
+	)
 	doc.insert(ignore_permissions=True)
 	return doc
 
@@ -125,13 +131,17 @@ class WikiPermTestCase(FrappeTestCase):
 		_ensure_user(USER_ADMIN, roles=(JARVIS_ADMIN_ROLE, TEST_ROLE))
 		_ensure_user(USER_SM, roles=("System Manager",))
 		# USER_PLAIN stands for a user WITHOUT Jarvis app access. Fixtures persist
-		# across runs and the one-time grant patch may have granted "Jarvis User",
-		# so strip every Jarvis/curator role to exercise the no-access case
-		# (reads Org, writes nothing).
-		frappe.db.delete("Has Role", {
-			"parenttype": "User", "parent": USER_PLAIN,
-			"role": ["in", (JARVIS_USER_ROLE, JARVIS_ADMIN_ROLE, wiki_permissions.WIKI_MANAGER_ROLE)],
-		})
+		# across runs and an earlier case may have left "Jarvis User" on it, so
+		# strip every Jarvis/curator role to exercise the no-access case (reads
+		# Org, writes nothing).
+		frappe.db.delete(
+			"Has Role",
+			{
+				"parenttype": "User",
+				"parent": USER_PLAIN,
+				"role": ["in", (JARVIS_USER_ROLE, JARVIS_ADMIN_ROLE, wiki_permissions.WIKI_MANAGER_ROLE)],
+			},
+		)
 		frappe.clear_cache(user=USER_PLAIN)
 		frappe.db.commit()
 
@@ -146,9 +156,7 @@ class WikiPermTestCase(FrappeTestCase):
 		self.other_role_page = _make_page(
 			f"process--{SLUG_MARK}-other", "Process", scope="Role", target_role=OTHER_ROLE
 		)
-		self.my_page = _make_page(
-			f"people--{SLUG_MARK}-mine", "People", scope="User", target_user=USER_KW
-		)
+		self.my_page = _make_page(f"people--{SLUG_MARK}-mine", "People", scope="User", target_user=USER_KW)
 		self.their_page = _make_page(
 			f"people--{SLUG_MARK}-theirs", "People", scope="User", target_user=USER_KW_MGR
 		)
@@ -172,12 +180,11 @@ class TestScopeModel(WikiPermTestCase):
 		# "Knowledge Wiki User" is retired and no longer seeded.
 		for role in (
 			wiki_permissions.WIKI_MANAGER_ROLE,
-			JARVIS_USER_ROLE, JARVIS_ADMIN_ROLE,
+			JARVIS_USER_ROLE,
+			JARVIS_ADMIN_ROLE,
 		):
 			self.assertTrue(frappe.db.exists("Role", role))
-			self.assertEqual(
-				frappe.db.get_value("Role", role, "desk_access"), 1, role
-			)
+			self.assertEqual(frappe.db.get_value("Role", role, "desk_access"), 1, role)
 
 	def test_org_scope_carries_no_targets(self):
 		self.assertEqual(self.org_page.scope, "Org")
@@ -187,15 +194,11 @@ class TestScopeModel(WikiPermTestCase):
 
 	def test_user_scope_slug_gets_audience_suffix(self):
 		# localpart of wiki-perm-kwuser@example.com, scrubbed
-		self.assertEqual(
-			self.my_page.name, f"people--{SLUG_MARK}-mine--u-wiki-perm-kwuser"
-		)
+		self.assertEqual(self.my_page.name, f"people--{SLUG_MARK}-mine--u-wiki-perm-kwuser")
 		self.assertEqual(self.my_page.slug, self.my_page.name)
 
 	def test_role_scope_slug_gets_audience_suffix(self):
-		self.assertEqual(
-			self.role_page.name, f"process--{SLUG_MARK}-role--r-wiki-perm-test-role"
-		)
+		self.assertEqual(self.role_page.name, f"process--{SLUG_MARK}-role--r-wiki-perm-test-role")
 
 	def test_suffix_not_doubled_when_caller_presuffixed(self):
 		doc = _make_page(
@@ -220,25 +223,29 @@ class TestScopeModel(WikiPermTestCase):
 
 	def test_target_user_defaults_to_creator(self):
 		with _as(USER_KW):
-			doc = frappe.get_doc({
-				"doctype": WIKI,
-				"slug": f"people--{SLUG_MARK}-default",
-				"title": "default target",
-				"page_type": "People",
-				"scope": "User",
-			})
+			doc = frappe.get_doc(
+				{
+					"doctype": WIKI,
+					"slug": f"people--{SLUG_MARK}-default",
+					"title": "default target",
+					"page_type": "People",
+					"scope": "User",
+				}
+			)
 			doc.insert(ignore_permissions=True)
 		self.assertEqual(doc.target_user, USER_KW)
 		self.assertTrue(doc.name.endswith("--u-wiki-perm-kwuser"))
 
 	def test_role_scope_requires_target_role(self):
-		doc = frappe.get_doc({
-			"doctype": WIKI,
-			"slug": f"process--{SLUG_MARK}-notarget",
-			"title": "no target",
-			"page_type": "Process",
-			"scope": "Role",
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": WIKI,
+				"slug": f"process--{SLUG_MARK}-notarget",
+				"title": "no target",
+				"page_type": "Process",
+				"scope": "Role",
+			}
+		)
 		with self.assertRaises(frappe.ValidationError):
 			doc.insert(ignore_permissions=True)
 
@@ -263,18 +270,14 @@ class TestScopeModel(WikiPermTestCase):
 			doc = frappe.get_doc(WIKI, self.my_page.name)
 			doc.body_md = "- my private note"
 			doc.save(ignore_permissions=True)
-		self.assertIn(
-			"my private note", frappe.db.get_value(WIKI, self.my_page.name, "body_md")
-		)
+		self.assertIn("my private note", frappe.db.get_value(WIKI, self.my_page.name, "body_md"))
 
 	def test_sm_can_rescope(self):
 		with _as(USER_SM):
 			doc = frappe.get_doc(WIKI, self.role_page.name)
 			doc.target_role = OTHER_ROLE
 			doc.save()
-		self.assertEqual(
-			frappe.db.get_value(WIKI, self.role_page.name, "target_role"), OTHER_ROLE
-		)
+		self.assertEqual(frappe.db.get_value(WIKI, self.role_page.name, "target_role"), OTHER_ROLE)
 
 
 # --------------------------------------------------------------------------- #
@@ -284,16 +287,18 @@ class TestVisibility(WikiPermTestCase):
 	def _visible_names(self, user) -> set:
 		cond = wiki_permissions.visible_scope_condition(user)
 		rows = frappe.db.sql(
-			"select name from `tabJarvis Wiki Page` "
-			f"where slug like %s and {cond}",
+			f"select name from `tabJarvis Wiki Page` where slug like %s and {cond}",
 			(f"%{SLUG_MARK}%",),
 		)
 		return {r[0] for r in rows}
 
 	def test_sm_reads_everything(self):
 		for page in (
-			self.org_page, self.role_page, self.other_role_page,
-			self.my_page, self.their_page,
+			self.org_page,
+			self.role_page,
+			self.other_role_page,
+			self.my_page,
+			self.their_page,
 		):
 			self.assertTrue(wiki_permissions.can_read_page(page, USER_SM), page.name)
 
@@ -316,21 +321,24 @@ class TestVisibility(WikiPermTestCase):
 		# Pre-v2 rows: scope NULL. Bypass the ORM so normalization can't fill it.
 		frappe.db.set_value(WIKI, self.org_page.name, "scope", None, update_modified=False)
 		page = frappe.db.get_value(
-			WIKI, self.org_page.name,
-			["name", "scope", "target_role", "target_user"], as_dict=True,
+			WIKI,
+			self.org_page.name,
+			["name", "scope", "target_role", "target_user"],
+			as_dict=True,
 		)
 		self.assertTrue(wiki_permissions.can_read_page(page, USER_PLAIN))
 		self.assertIn(self.org_page.name, self._visible_names(USER_PLAIN))
 
 	def test_visible_scope_condition_sql(self):
 		all_names = {
-			self.org_page.name, self.role_page.name, self.other_role_page.name,
-			self.my_page.name, self.their_page.name,
+			self.org_page.name,
+			self.role_page.name,
+			self.other_role_page.name,
+			self.my_page.name,
+			self.their_page.name,
 		}
 		self.assertEqual(self._visible_names(USER_PLAIN), {self.org_page.name})
-		self.assertEqual(
-			self._visible_names(USER_KW), {self.org_page.name, self.my_page.name}
-		)
+		self.assertEqual(self._visible_names(USER_KW), {self.org_page.name, self.my_page.name})
 		self.assertEqual(
 			self._visible_names(USER_KW_MGR),
 			{self.org_page.name, self.role_page.name, self.their_page.name},
@@ -348,9 +356,7 @@ class TestVisibility(WikiPermTestCase):
 		self.assertEqual(names, {self.org_page.name})
 		with _as(USER_KW_MGR):
 			names = set(frappe.get_list(WIKI, filters=filters, pluck="name"))
-		self.assertEqual(
-			names, {self.org_page.name, self.role_page.name, self.their_page.name}
-		)
+		self.assertEqual(names, {self.org_page.name, self.role_page.name, self.their_page.name})
 
 	def test_has_permission_hook_enforces_visibility(self):
 		my_doc = frappe.get_doc(WIKI, self.my_page.name)
@@ -393,9 +399,7 @@ class TestWriteMatrix(WikiPermTestCase):
 	def test_target_user_without_jarvis_user_cannot_edit(self):
 		# USER_PLAIN holds no Jarvis role: reads their own page (target
 		# visibility) but cannot write it — own-page editing needs Jarvis User.
-		page = _make_page(
-			f"people--{SLUG_MARK}-plain", "People", scope="User", target_user=USER_PLAIN
-		)
+		page = _make_page(f"people--{SLUG_MARK}-plain", "People", scope="User", target_user=USER_PLAIN)
 		self.assertTrue(wiki_permissions.can_read_page(page, USER_PLAIN))
 		self.assertFalse(wiki_permissions.can_edit_page(page, USER_PLAIN))
 
@@ -409,9 +413,7 @@ class TestWriteMatrix(WikiPermTestCase):
 				)
 
 	def test_creatable_scopes(self):
-		self.assertEqual(
-			wiki_permissions.creatable_scopes(USER_SM), ["Org", "Role", "User"]
-		)
+		self.assertEqual(wiki_permissions.creatable_scopes(USER_SM), ["Org", "Role", "User"])
 		self.assertEqual(wiki_permissions.creatable_scopes(USER_KW_MGR), ["Role", "User"])
 		# Jarvis Admin inherits Manager -> Role + User.
 		self.assertEqual(wiki_permissions.creatable_scopes(USER_ADMIN), ["Role", "User"])
@@ -425,9 +427,14 @@ class TestWriteMatrix(WikiPermTestCase):
 		# platform "Jarvis User"/"Jarvis Admin" roles are excluded for the same
 		# reason.
 		blocked_roles = (
-			"Administrator", "Guest", "All",
-			"Desk User", "System Manager", "Website Manager",
-			JARVIS_USER_ROLE, JARVIS_ADMIN_ROLE,
+			"Administrator",
+			"Guest",
+			"All",
+			"Desk User",
+			"System Manager",
+			"Website Manager",
+			JARVIS_USER_ROLE,
+			JARVIS_ADMIN_ROLE,
 		)
 		sm_roles = wiki_permissions.manageable_roles(USER_SM)
 		self.assertIn(TEST_ROLE, sm_roles)
@@ -459,9 +466,5 @@ class TestWriteMatrix(WikiPermTestCase):
 		# ...but Desk/ORM write perms stay SM-only by design: human edits flow
 		# through the SPA endpoints, which check the matrix then save with
 		# ignore_permissions.
-		self.assertFalse(
-			bool(frappe.has_permission(WIKI, ptype="write", doc=my_doc, user=USER_KW))
-		)
-		self.assertTrue(
-			bool(frappe.has_permission(WIKI, ptype="write", doc=my_doc, user=USER_SM))
-		)
+		self.assertFalse(bool(frappe.has_permission(WIKI, ptype="write", doc=my_doc, user=USER_KW)))
+		self.assertTrue(bool(frappe.has_permission(WIKI, ptype="write", doc=my_doc, user=USER_SM)))

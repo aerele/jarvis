@@ -113,8 +113,7 @@ LIMIT {HARD_ROW_LIMIT}
 """
 
 SUPPLIER_TERMS_MASTER_SQL = (
-	"SELECT s.name AS name, s.payment_terms AS payment_terms "
-	"FROM `tabSupplier` s WHERE s.name IN %(names)s"
+	"SELECT s.name AS name, s.payment_terms AS payment_terms FROM `tabSupplier` s WHERE s.name IN %(names)s"
 )
 
 

@@ -1,0 +1,282 @@
+<template>
+	<!-- With a label: a column so the text sits under the spinner and the whole
+	     thing is announced once, as a single status region. -->
+	<div v-if="label" class="jv-spin-stack" role="status" aria-live="polite">
+		<span class="jv-spin" :class="tier" :style="rootStyle" aria-hidden="true">
+			<span class="jv-spin-halo"></span>
+			<span class="jv-spin-dots"><i></i><i></i><i></i></span>
+			<span class="jv-spin-core">
+				<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+					<path :d="BRAND_STAR_PATH" />
+				</svg>
+			</span>
+		</span>
+		<span class="jv-spin-label">{{ label }}</span>
+	</div>
+
+	<!-- Without a label: just the spinner, so it drops into a button or a table
+	     cell without an extra wrapper affecting layout. -->
+	<span
+		v-else
+		class="jv-spin"
+		:class="tier"
+		:style="rootStyle"
+		role="status"
+		aria-label="Loading"
+	>
+		<span class="jv-spin-halo"></span>
+		<span class="jv-spin-dots"><i></i><i></i><i></i></span>
+		<span class="jv-spin-core">
+			<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+				<path :d="BRAND_STAR_PATH" />
+			</svg>
+		</span>
+	</span>
+</template>
+
+<script setup>
+/**
+ * JvSpinner - the ONE loading indicator in Jarvis.
+ *
+ * Distilled from the onboarding completion animation (SetupNeuralNet.vue): the
+ * same four-point spark, the same breathing halo and inward-orbiting pulse
+ * dots, minus the twelve ERP module labels. Using the one mark for every wait
+ * in the product means a customer waiting on a Connect and a customer waiting
+ * on their workspace being built are looking at the same product, not two.
+ *
+ * Every layer follows currentColor rather than the brand gradient (jarvis#559):
+ * the spark, its dots and its halo all tint to one colour. By default that
+ * colour is the brand accent (--brand-2), so a plain <JvSpinner /> reads as the
+ * Jarvis mark rather than as flat black-on-white text. The spark itself is
+ * always drawn at full strength; the halo and core backdrop behind it are a
+ * soft, partial-opacity wash of the same colour, so the spark reads clearly
+ * against them on ANY surface without ever needing to know what colour it is.
+ *
+ * A caller on a surface where the brand tone would not read - a spinner sitting
+ * inside a filled primary button, say, whose background is already near the
+ * brand tone - passes `color="currentColor"` (or any explicit colour) to opt
+ * back into inheriting the surrounding text colour, exactly as before.
+ *
+ * Do not add a second spinner. If a surface cannot fit this one, resize the
+ * surface.
+ */
+import { computed } from "vue";
+import { BRAND_STAR_PATH } from "@/lib/brand";
+
+/**
+ * MIN_SIZE is a hard floor, not a default.
+ *
+ * Below 20px the spark has to render inside a disc of roughly seven pixels and
+ * turns to mush, and the halo stops reading as a glow and starts reading as a
+ * blurred edge. Rather than ship a degraded mark at small sizes (which would
+ * mean maintaining a second, stripped-down spinner and losing the single-mark
+ * property), the product simply never draws one smaller. This costs nothing in
+ * practice: 20px is already the most common loading size in the app.
+ */
+const MIN_SIZE = 20;
+
+/** Below this, fine detail is eased back so it does not read as noise. */
+const LG_SIZE = 36;
+
+const props = defineProps({
+	size: { type: Number, default: MIN_SIZE },
+	/** Optional caption rendered beneath the spinner and announced politely. */
+	label: { type: String, default: "" },
+	/**
+	 * The tint every layer follows. Defaults to the brand accent so the spinner
+	 * reads as the Jarvis mark. Pass "currentColor" (or any CSS colour) on a
+	 * surface where the brand tone would not stand out - e.g. inside a filled
+	 * primary button - to inherit the surrounding text colour instead.
+	 */
+	color: { type: String, default: "var(--brand-2)" },
+});
+
+const resolvedSize = computed(() => {
+	if (props.size < MIN_SIZE) {
+		if (import.meta.env.DEV) {
+			console.warn(
+				`[JvSpinner] size ${props.size} is below the ${MIN_SIZE}px floor and was clamped. ` +
+					`The brand spark is not legible below ${MIN_SIZE}px. Resize the container rather ` +
+					`than the spinner.`
+			);
+		}
+		return MIN_SIZE;
+	}
+	return props.size;
+});
+
+/**
+ * Tier is derived, never passed in. A caller that could choose its own tier
+ * could pick one that does not match its size, which is the only way this
+ * component can render wrong.
+ */
+const tier = computed(() => (resolvedSize.value < LG_SIZE ? "jv-spin--md" : "jv-spin--lg"));
+
+const rootStyle = computed(() => ({
+	"--jv-spin-size": `${resolvedSize.value}px`,
+	color: props.color,
+}));
+</script>
+
+<style scoped>
+.jv-spin-stack {
+	display: inline-flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 12px;
+}
+.jv-spin-label {
+	font-size: 13.5px;
+	color: var(--text-2, #56555f);
+	text-align: center;
+}
+
+.jv-spin {
+	position: relative;
+	display: inline-block;
+	flex: none;
+	vertical-align: middle;
+	width: var(--jv-spin-size);
+	height: var(--jv-spin-size);
+}
+
+/* The halo is the "breathing" of the onboarding core. It sits slightly outside
+   the footprint, so the element is allowed to overflow its own box. A partial-
+   opacity wash of currentColor, not a solid fill, so it never has to fight the
+   spark on top of it for contrast (jarvis#559). */
+.jv-spin-halo {
+	position: absolute;
+	inset: -6%;
+	border-radius: 50%;
+	background: radial-gradient(
+		circle,
+		color-mix(in srgb, currentColor 30%, transparent) 0%,
+		transparent 68%
+	);
+	animation: jv-spin-breathe 2.2s ease-in-out infinite;
+}
+
+.jv-spin-core {
+	position: absolute;
+	border-radius: 50%;
+	display: grid;
+	place-items: center;
+	/* Same partial-opacity currentColor wash as the halo: a backdrop for the
+	   spark, not a competing colour. The spark (fill="currentColor" on the svg
+	   above) is drawn at full strength on top, so it always reads clearly
+	   against this regardless of what colour the caller is using. */
+	background: color-mix(in srgb, currentColor 16%, transparent);
+	box-shadow: 0 2px 7px color-mix(in srgb, currentColor 35%, transparent);
+}
+.jv-spin-core svg {
+	width: 62%;
+	height: 62%;
+}
+
+.jv-spin-dots {
+	position: absolute;
+	inset: 0;
+	animation: jv-spin-rotate 1.5s linear infinite;
+}
+.jv-spin-dots i {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	border-radius: 50%;
+	animation: jv-spin-twinkle 1.5s ease-in-out infinite;
+}
+/* Staggered so the three dots do not pulse in unison, which reads as a
+   flashing ring rather than as motion. */
+.jv-spin-dots i:nth-child(2) {
+	animation-delay: -0.5s;
+}
+.jv-spin-dots i:nth-child(3) {
+	animation-delay: -1s;
+}
+
+/* --- md tier (20 to 35px): halo eased back, tighter glow falloff so the dots
+       stay as dots instead of blooming into each other at small sizes. --- */
+.jv-spin--md .jv-spin-halo {
+	opacity: 0.55;
+}
+.jv-spin--md .jv-spin-core {
+	inset: 25%;
+}
+.jv-spin--md .jv-spin-dots i {
+	width: calc(var(--jv-spin-size) * 0.16);
+	height: calc(var(--jv-spin-size) * 0.16);
+	margin: calc(var(--jv-spin-size) * -0.08);
+	background: radial-gradient(circle, currentColor 0%, currentColor 55%, transparent 88%);
+}
+.jv-spin--md .jv-spin-dots i:nth-child(1) {
+	transform: rotate(0deg) translateY(calc(var(--jv-spin-size) * -0.45));
+}
+.jv-spin--md .jv-spin-dots i:nth-child(2) {
+	transform: rotate(120deg) translateY(calc(var(--jv-spin-size) * -0.45));
+}
+.jv-spin--md .jv-spin-dots i:nth-child(3) {
+	transform: rotate(240deg) translateY(calc(var(--jv-spin-size) * -0.45));
+}
+
+/* --- lg tier (36px+): full detail, exactly the onboarding core. --- */
+.jv-spin--lg .jv-spin-core {
+	inset: 26%;
+}
+.jv-spin--lg .jv-spin-dots i {
+	width: calc(var(--jv-spin-size) * 0.15);
+	height: calc(var(--jv-spin-size) * 0.15);
+	margin: calc(var(--jv-spin-size) * -0.075);
+	background: radial-gradient(circle, currentColor 0%, currentColor 42%, transparent 74%);
+}
+.jv-spin--lg .jv-spin-dots i:nth-child(1) {
+	transform: rotate(0deg) translateY(calc(var(--jv-spin-size) * -0.47));
+}
+.jv-spin--lg .jv-spin-dots i:nth-child(2) {
+	transform: rotate(120deg) translateY(calc(var(--jv-spin-size) * -0.47));
+}
+.jv-spin--lg .jv-spin-dots i:nth-child(3) {
+	transform: rotate(240deg) translateY(calc(var(--jv-spin-size) * -0.47));
+}
+
+@keyframes jv-spin-rotate {
+	to {
+		transform: rotate(360deg);
+	}
+}
+@keyframes jv-spin-breathe {
+	0%,
+	100% {
+		transform: scale(0.82);
+		opacity: 0.5;
+	}
+	50% {
+		transform: scale(1.12);
+		opacity: 1;
+	}
+}
+@keyframes jv-spin-twinkle {
+	0%,
+	100% {
+		opacity: 0.5;
+	}
+	50% {
+		opacity: 1;
+	}
+}
+
+/* One calm static frame, matching how SetupNeuralNet.vue handles the same
+   preference. The mark still reads as "working"; it just stops moving. */
+@media (prefers-reduced-motion: reduce) {
+	.jv-spin-halo,
+	.jv-spin-dots,
+	.jv-spin-dots i {
+		animation: none;
+	}
+	.jv-spin-halo {
+		opacity: 0.8;
+	}
+	.jv-spin-dots i {
+		opacity: 1;
+	}
+}
+</style>

@@ -23,8 +23,8 @@ that tick), and the card naturally returns on the next multiple-of-three chat.
 import frappe
 from frappe.utils import cint
 
-from jarvis.chat.voice_notes_api import _require_system_user
 from jarvis.chat.usage import get_or_create_user_settings
+from jarvis.chat.voice_notes_api import _require_system_user
 
 PREF = "Jarvis User Settings"
 NOTE = "Jarvis Voice Note"

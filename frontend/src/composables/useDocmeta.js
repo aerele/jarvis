@@ -7,140 +7,150 @@
 //
 // Returned as reactive() (house style, like stores/shell.js) so consumers read
 // plain properties: `docmeta.meta.comments`, `docmeta.loading`.
-import { reactive, ref, isRef, watch } from "vue"
-import { toast } from "frappe-ui"
-import { session } from "@/data/session"
-import * as apiDocmeta from "@/api/docmeta"
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
+import { reactive, ref, isRef, watch } from "vue";
+import { toast } from "frappe-ui";
+import { session } from "@/data/session";
+import * as apiDocmeta from "@/api/docmeta";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 export function useDocmeta(doctype, name) {
 	// plain string (B4/B5 contract) or a ref (detail pages whose route param
 	// can change in-place) both work.
-	const nameRef = isRef(name) ? name : ref(name)
+	const nameRef = isRef(name) ? name : ref(name);
 
-	const meta = ref(null) // get_docmeta bundle (§8.1 + §14 F1 shares)
-	const loading = ref(false)
-	const error = ref("")
+	const meta = ref(null); // get_docmeta bundle (§8.1 + §14 F1 shares)
+	const loading = ref(false);
+	const error = ref("");
 
 	async function reload() {
-		if (!nameRef.value) return
-		loading.value = true
+		if (!nameRef.value) return;
+		loading.value = true;
 		try {
-			meta.value = (await apiDocmeta.getDocmeta(doctype, nameRef.value)) || null
-			error.value = ""
+			meta.value = (await apiDocmeta.getDocmeta(doctype, nameRef.value)) || null;
+			error.value = "";
 		} catch (e) {
-			error.value = errMsg(e)
+			error.value = errMsg(e);
 		} finally {
-			loading.value = false
+			loading.value = false;
 		}
 	}
 
 	// ── comments ────────────────────────────────────────────────────────────────
 	async function addComment(html) {
 		try {
-			const row = await apiDocmeta.addComment(doctype, nameRef.value, html)
-			if (meta.value && row) meta.value.comments = [...(meta.value.comments || []), row]
-			return row || null
+			const row = await apiDocmeta.addComment(doctype, nameRef.value, html);
+			if (meta.value && row) meta.value.comments = [...(meta.value.comments || []), row];
+			return row || null;
 		} catch (e) {
-			toast.error(errMsg(e))
-			return null
+			toast.error(errHtml(e));
+			return null;
 		}
 	}
 
 	async function updateComment(id, html) {
 		try {
-			const row = await apiDocmeta.updateComment(id, html)
+			const row = await apiDocmeta.updateComment(id, html);
 			if (meta.value && row) {
 				meta.value.comments = (meta.value.comments || []).map((c) =>
 					c.name === id ? { ...c, ...row } : c
-				)
+				);
 			}
-			return true
+			return true;
 		} catch (e) {
-			toast.error(errMsg(e))
-			return false
+			toast.error(errHtml(e));
+			return false;
 		}
 	}
 
 	async function deleteComment(id) {
 		try {
-			await apiDocmeta.deleteComment(id)
-			if (meta.value) meta.value.comments = (meta.value.comments || []).filter((c) => c.name !== id)
-			return true
+			await apiDocmeta.deleteComment(id);
+			if (meta.value)
+				meta.value.comments = (meta.value.comments || []).filter((c) => c.name !== id);
+			return true;
 		} catch (e) {
-			toast.error(errMsg(e))
-			return false
+			toast.error(errHtml(e));
+			return false;
 		}
 	}
 
 	// ── like (optimistic flip; server list is authoritative) ────────────────────
 	async function toggleLike() {
-		if (!meta.value) return
-		const next = meta.value.liked ? 0 : 1
-		meta.value.liked = !!next
+		if (!meta.value) return;
+		const next = meta.value.liked ? 0 : 1;
+		meta.value.liked = !!next;
 		try {
-			const likedBy = (await apiDocmeta.toggleLike(doctype, nameRef.value, next)) || []
-			meta.value.liked_by = likedBy
-			meta.value.liked = likedBy.includes(session.user)
+			const likedBy = (await apiDocmeta.toggleLike(doctype, nameRef.value, next)) || [];
+			meta.value.liked_by = likedBy;
+			meta.value.liked = likedBy.includes(session.user);
 		} catch (e) {
-			meta.value.liked = !next
-			toast.error(errMsg(e))
+			meta.value.liked = !next;
+			toast.error(errHtml(e));
 		}
 	}
 
 	// ── assignees (response replaces the list) ──────────────────────────────────
 	async function assign(user) {
 		try {
-			const assignees = await apiDocmeta.toggleAssignment(doctype, nameRef.value, user, "add")
-			if (meta.value && Array.isArray(assignees)) meta.value.assignees = assignees
-			return true
+			const assignees = await apiDocmeta.toggleAssignment(
+				doctype,
+				nameRef.value,
+				user,
+				"add"
+			);
+			if (meta.value && Array.isArray(assignees)) meta.value.assignees = assignees;
+			return true;
 		} catch (e) {
-			toast.error(errMsg(e))
-			return false
+			toast.error(errHtml(e));
+			return false;
 		}
 	}
 
 	async function unassign(user) {
 		try {
-			const assignees = await apiDocmeta.toggleAssignment(doctype, nameRef.value, user, "remove")
-			if (meta.value && Array.isArray(assignees)) meta.value.assignees = assignees
-			return true
+			const assignees = await apiDocmeta.toggleAssignment(
+				doctype,
+				nameRef.value,
+				user,
+				"remove"
+			);
+			if (meta.value && Array.isArray(assignees)) meta.value.assignees = assignees;
+			return true;
 		} catch (e) {
-			toast.error(errMsg(e))
-			return false
+			toast.error(errHtml(e));
+			return false;
 		}
 	}
 
 	// ── shares (§14 F1) ─────────────────────────────────────────────────────────
 	async function toggleShare(user, action = "add") {
 		try {
-			const res = await apiDocmeta.toggleShare(doctype, nameRef.value, user, action)
+			const res = await apiDocmeta.toggleShare(doctype, nameRef.value, user, action);
 			if (Array.isArray(res)) {
-				if (meta.value) meta.value.shares = res
+				if (meta.value) meta.value.shares = res;
 			} else {
-				await reload() // defensive: no list in the response → refetch
+				await reload(); // defensive: no list in the response → refetch
 			}
-			return true
+			return true;
 		} catch (e) {
-			toast.error(errMsg(e))
-			return false
+			toast.error(errHtml(e));
+			return false;
 		}
 	}
 
 	// ── attachments ─────────────────────────────────────────────────────────────
 	async function deleteAttachment(fileName) {
 		try {
-			await apiDocmeta.deleteAttachment(doctype, nameRef.value, fileName)
+			await apiDocmeta.deleteAttachment(doctype, nameRef.value, fileName);
 			if (meta.value) {
-				meta.value.attachments = (meta.value.attachments || []).filter((f) => f.name !== fileName)
+				meta.value.attachments = (meta.value.attachments || []).filter(
+					(f) => f.name !== fileName
+				);
 			}
-			return true
+			return true;
 		} catch (e) {
-			toast.error(errMsg(e))
-			return false
+			toast.error(errHtml(e));
+			return false;
 		}
 	}
 
@@ -159,19 +169,19 @@ export function useDocmeta(doctype, name) {
 					creation: fileDoc.creation,
 					owner: fileDoc.owner,
 				},
-			]
+			];
 		} else {
-			reload()
+			reload();
 		}
 	}
 
 	watch(nameRef, (v, old) => {
 		if (v !== old) {
-			meta.value = null
-			reload()
+			meta.value = null;
+			reload();
 		}
-	})
-	reload()
+	});
+	reload();
 
 	return reactive({
 		doctype,
@@ -189,5 +199,5 @@ export function useDocmeta(doctype, name) {
 		toggleShare,
 		deleteAttachment,
 		afterUpload,
-	})
+	});
 }

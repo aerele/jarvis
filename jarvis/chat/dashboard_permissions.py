@@ -127,14 +127,11 @@ def visible_scope_condition(user: str | None = None) -> str:
 	roles = [r for r in frappe.get_roles(user) if r]
 	if roles:
 		role_list = ", ".join(frappe.db.escape(r) for r in roles)
-		clauses.append(
-			f"({table}.`scope` = 'Role' and {table}.`target_role` in ({role_list}))"
-		)
+		clauses.append(f"({table}.`scope` = 'Role' and {table}.`target_role` in ({role_list}))")
 	# Blank/NULL scope is PRIVATE — it rides the target_user clause (and the
 	# owner clause above), never the Org one.
 	clauses.append(
-		f"(coalesce({table}.`scope`, '') in ('', 'User') "
-		f"and {table}.`target_user` = {escaped_user})"
+		f"(coalesce({table}.`scope`, '') in ('', 'User') and {table}.`target_user` = {escaped_user})"
 	)
 	return "(" + " or ".join(clauses) + ")"
 

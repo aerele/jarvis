@@ -50,8 +50,13 @@ def run_llm_action(
 		TRIGGER,
 		trigger,
 		[
-			"name", "enabled", "trigger_name", "action_type", "owner",
-			"llm_instruction", "llm_daily_cap",
+			"name",
+			"enabled",
+			"trigger_name",
+			"action_type",
+			"owner",
+			"llm_instruction",
+			"llm_daily_cap",
 		],
 		as_dict=True,
 	)
@@ -95,16 +100,12 @@ def run_llm_action(
 	from jarvis.chat.turn_handler import _fence_untrusted
 
 	instruction = (row.llm_instruction or "").strip()
-	fenced = _fence_untrusted(
-		snapshot_json or "{}", f"{doctype} {docname} snapshot"
-	)
+	fenced = _fence_untrusted(snapshot_json or "{}", f"{doctype} {docname} snapshot")
 	messages = [
 		{"role": "system", "content": _SYSTEM_PROMPT},
 		{
 			"role": "user",
-			"content": (
-				f"{instruction}\n\nDocument ({doctype} {docname}, event: {doc_event}):\n{fenced}"
-			),
+			"content": (f"{instruction}\n\nDocument ({doctype} {docname}, event: {doc_event}):\n{fenced}"),
 		},
 	]
 

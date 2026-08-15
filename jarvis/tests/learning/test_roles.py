@@ -47,12 +47,14 @@ class TestRolesForDoctype(FrappeTestCase):
 		if frappe.db.exists("Role", name):
 			frappe.db.set_value("Role", name, {"desk_access": desk_access, "disabled": disabled})
 			return
-		frappe.get_doc({
-			"doctype": "Role",
-			"role_name": name,
-			"desk_access": desk_access,
-			"disabled": disabled,
-		}).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Role",
+				"role_name": name,
+				"desk_access": desk_access,
+				"disabled": disabled,
+			}
+		).insert(ignore_permissions=True)
 
 	def _docperm(self, role, *, name_suffix="", **fields):
 		d = frappe.new_doc("DocPerm")

@@ -8,9 +8,18 @@
  "field_order": [
   "agent",
   "enabled",
+  "run_as_user",
+  "scoped_visibility",
+  "activation_state",
+  "reviewer",
+  "promoted_by",
+  "promoted_at",
+  "installable",
+  "not_installable_reason",
   "installed_version",
   "installed_at",
   "config",
+  "source_apps_json",
   "sync_status",
   "synced_at",
   "schedule_section",
@@ -38,6 +47,23 @@
    "description": "When on, the installed bundle is pushed to the container on the next Apply and the agent's scheduled audits fire. Toggling this is a pure DB write (no container restart)."
   },
   {
+   "fieldname": "run_as_user",
+   "fieldtype": "Link",
+   "label": "Run As User",
+   "options": "User",
+   "mandatory_depends_on": "eval:doc.enabled",
+   "in_list_view": 1,
+   "description": "The Frappe user this agent's runs execute AS: every jarvis__* ERP read is permission-bounded to this user (company scope, role perms), decoupled from the row owner. Required to ENABLE the install (enforced in validate(); a disabled install runs nothing, and legacy rows carrying no run-as user must stay disableable). A non-admin installer may only map the agent to run as themselves; any cross-user mapping needs Jarvis Admin, and binding to a System Manager needs a System Manager. Defaults to the installer."
+  },
+  {
+   "default": "0",
+   "fieldname": "scoped_visibility",
+   "fieldtype": "Check",
+   "label": "Scoped Visibility",
+   "read_only": 1,
+   "description": "Set when the run-as user carries a User Permission on a GL-linked dimension (Account, Cost Center, Project, Fiscal Year, Finance Book, party) other than Company: aggregates this user sees are record-scoped, not the full company GL. Coverage-gated auto-resolve must never fire on a scoped run (A12/A16)."
+  },
+  {
    "fieldname": "installed_version",
    "fieldtype": "Data",
    "label": "Installed Version",
@@ -53,7 +79,14 @@
    "fieldname": "config",
    "fieldtype": "Long Text",
    "label": "Config (JSON)",
-   "description": "Engagement / materiality inputs for this install (benchmark, percentage, engagement_risk_level, company, ...). Consumed by compute_materiality / run_scrutiny."
+   "description": "Engagement inputs for this install (benchmark, percentage, engagement_risk_level, company, ...). The delegate reads it on its installation on the next run."
+  },
+  {
+   "fieldname": "source_apps_json",
+   "fieldtype": "Small Text",
+   "label": "Authorized Source Apps (JSON)",
+   "read_only": 1,
+   "description": "CX5-2 — Custom App Learning only: the JSON list of custom apps an admin explicitly authorized this installation to read source from, set by run_agent_now from the launching admin's selection. Scheduled runs REUSE this selection and are SKIPPED when it is empty (a scribe never reads unbounded)."
   },
   {
    "fieldname": "sync_status",
@@ -104,11 +137,64 @@
    "fieldtype": "Datetime",
    "label": "Last Run At",
    "read_only": 1
+  },
+  {
+   "default": "shadow",
+   "fieldname": "activation_state",
+   "fieldtype": "Select",
+   "label": "Activation State",
+   "options": "shadow\nlive",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "PP-4 — every capability activates per customer in preview/shadow first. In shadow, findings/dashboards are reviewer-visible only and NO clean/compliant attestation renders. Flips to live ONLY via the reviewer promotion path (PP-6 global activation budget gates the flip)."
+  },
+  {
+   "fieldname": "reviewer",
+   "fieldtype": "Link",
+   "label": "Reviewer",
+   "options": "User",
+   "reqd": 1,
+   "in_standard_filter": 1,
+   "description": "PP-4 — the named reviewer who sees shadow output and signs off on promotion to live. Backfilled to run_as_user on legacy rows."
+  },
+  {
+   "fieldname": "promoted_by",
+   "fieldtype": "Link",
+   "label": "Promoted By",
+   "options": "User",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "PP-4 — set on promotion to live; must equal reviewer or an authorised approver."
+  },
+  {
+   "fieldname": "promoted_at",
+   "fieldtype": "Datetime",
+   "label": "Promoted At",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "PP-4 — when the installation was promoted from shadow to live."
+  },
+  {
+   "default": "1",
+   "fieldname": "installable",
+   "fieldtype": "Check",
+   "label": "Installable",
+   "read_only": 1,
+   "description": "PP-3 — 0 when a min_apps dependency is unmet / edition ineligible (a NOT-INSTALLABLE install-time state, never a run result). A non-installable capability produces no run and no finding."
+  },
+  {
+   "fieldname": "not_installable_reason",
+   "fieldtype": "Select",
+   "label": "Not Installable Reason",
+   "options": "\napp_absent_or_ineligible\npermission_slice\nconfiguration_missing\nrecord_coverage_insufficient\nsource_stale\nrule_expired\nexternal_evidence_absent\nrun_truncated_watermark\nunsupported_customisation",
+   "read_only": 1,
+   "depends_on": "eval:doc.installable==0",
+   "description": "PP-3 — the typed reason (closed enum, mainly app_absent_or_ineligible) when installable == 0. Distinct from any run coverage reason."
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-07-04 20:30:00.000000",
+ "modified": "2026-07-25 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Agent Installation",

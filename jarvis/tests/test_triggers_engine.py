@@ -70,32 +70,36 @@ class _TriggerTestCase(FrappeTestCase):
 		return doc
 
 	def _make_llm_trigger(self, condition="", event="on_update", cap=100, enabled=1):
-		doc = frappe.get_doc({
-			"doctype": TRIGGER,
-			"trigger_name": f"llm-{frappe.generate_hash(length=8)}",
-			"target_doctype": "ToDo",
-			"doc_event": event,
-			"condition": condition,
-			"action_type": "LLM",
-			"llm_instruction": "Check this todo for problems.",
-			"llm_daily_cap": cap,
-			"enabled": enabled,
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": TRIGGER,
+				"trigger_name": f"llm-{frappe.generate_hash(length=8)}",
+				"target_doctype": "ToDo",
+				"doc_event": event,
+				"condition": condition,
+				"action_type": "LLM",
+				"llm_instruction": "Check this todo for problems.",
+				"llm_daily_cap": cap,
+				"enabled": enabled,
+			}
+		)
 		doc.insert(ignore_permissions=True)
 		self._triggers.append(doc.name)
 		return doc
 
 	def _make_script_trigger(self, body="x = 1", event="on_update", condition=""):
 		with patch(CTRL_MOD + ".is_safe_exec_enabled", return_value=True):
-			doc = frappe.get_doc({
-				"doctype": TRIGGER,
-				"trigger_name": f"script-{frappe.generate_hash(length=8)}",
-				"target_doctype": "ToDo",
-				"doc_event": event,
-				"condition": condition,
-				"action_type": "Script",
-				"script_body": body,
-			})
+			doc = frappe.get_doc(
+				{
+					"doctype": TRIGGER,
+					"trigger_name": f"script-{frappe.generate_hash(length=8)}",
+					"target_doctype": "ToDo",
+					"doc_event": event,
+					"condition": condition,
+					"action_type": "Script",
+					"script_body": body,
+				}
+			)
 			doc.insert(ignore_permissions=True)
 		self._triggers.append(doc.name)
 		return doc
@@ -162,11 +166,18 @@ class TestTriggerValidation(_TriggerTestCase):
 		# Review P0 (security): a client-supplied server_script pointing at an
 		# arbitrary Server Script must be rejected, never acted on.
 		import frappe as _f
-		victim = _f.get_doc({
-			"doctype": "Server Script", "name": f"qa-victim-{_f.generate_hash(length=6)}",
-			"script_type": "DocType Event", "reference_doctype": "ToDo",
-			"doctype_event": "After Save", "script": "x = 1", "disabled": 1,
-		})
+
+		victim = _f.get_doc(
+			{
+				"doctype": "Server Script",
+				"name": f"qa-victim-{_f.generate_hash(length=6)}",
+				"script_type": "DocType Event",
+				"reference_doctype": "ToDo",
+				"doctype_event": "After Save",
+				"script": "x = 1",
+				"disabled": 1,
+			}
+		)
 		victim.flags.ignore_validate = True
 		victim.insert(ignore_permissions=True)
 		self._server_scripts = getattr(self, "_server_scripts", [])
@@ -336,16 +347,13 @@ class TestDispatch(_TriggerTestCase):
 		# End-to-end through the real doc_events wiring: a validate-event
 		# script that frappe.throw()s must block the ToDo insert, and the
 		# Blocked activity must ride an enqueue (it survives the rollback).
-		trig = self._make_script_trigger(
-			body='frappe.throw("blocked by trigger test")', event="validate"
-		)
+		trig = self._make_script_trigger(body='frappe.throw("blocked by trigger test")', event="validate")
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "should be blocked"})
 		with patch(EXEC_FLAG, return_value=True), patch("frappe.enqueue") as enq:
 			with self.assertRaises(frappe.ValidationError):
 				todo.insert(ignore_permissions=True)
 		blocked = [
-			c for c in enq.call_args_list
-			if c.args and c.args[0] == "jarvis.triggers.engine.write_activity"
+			c for c in enq.call_args_list if c.args and c.args[0] == "jarvis.triggers.engine.write_activity"
 		]
 		self.assertEqual(len(blocked), 1)
 		self.assertEqual(blocked[0].kwargs.get("status"), "Blocked")
@@ -365,9 +373,7 @@ class TestDispatch(_TriggerTestCase):
 		# Review P2: a ValidationError raised on a POST event (on_update) must
 		# NOT block/rollback the user's save — only validate/before_submit block.
 		todo = self._make_todo()
-		trig = self._make_script_trigger(
-			body='frappe.throw("would block")', event="on_update"
-		)
+		trig = self._make_script_trigger(body='frappe.throw("would block")', event="on_update")
 		with patch(EXEC_FLAG, return_value=True):
 			engine.dispatch(todo, "on_update")  # must not raise
 		rows = self._activities(trig.name)
@@ -376,9 +382,7 @@ class TestDispatch(_TriggerTestCase):
 
 	def test_blocked_message_is_prefixed_with_trigger_name(self):
 		# Review P2: the blocked user should be told which automation stopped them.
-		trig = self._make_script_trigger(
-			body='frappe.throw("no discounts")', event="validate"
-		)
+		self._make_script_trigger(body='frappe.throw("no discounts")', event="validate")
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "blocked"})
 		with patch(EXEC_FLAG, return_value=True), patch("frappe.enqueue"):
 			try:

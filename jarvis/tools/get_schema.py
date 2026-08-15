@@ -14,6 +14,7 @@ def _cache_key(doctype: str, verbose) -> str:
 	shape change; old keys age out at the TTL."""
 	return f"jarvis_schema:v{_SCHEMA_CACHE_VERSION}:{doctype}:{int(bool(verbose))}"
 
+
 # Identity: emitted unconditionally because a record without them is anonymous.
 # Every other property is emitted ONLY when the DocType configures it to a truthy
 # value - including label / options / reqd, which used to be emitted always. A
@@ -28,12 +29,26 @@ _IDENTITY_PROPS = ("fieldname", "fieldtype")
 # defines. Never useful to the agent, and some values (creation/modified) are
 # datetimes that would not survive the JSON hop anyway. is_custom_field is
 # meta-merge provenance, re-emitted as `is_custom` explicitly in _field_record.
-_ROW_META_PROPS = frozenset({
-	"name", "owner", "creation", "modified", "modified_by", "parent",
-	"parentfield", "parenttype", "idx", "docstatus", "doctype",
-	"oldfieldname", "oldfieldtype", "__islocal", "__unsaved",
-	"is_custom_field",
-})
+_ROW_META_PROPS = frozenset(
+	{
+		"name",
+		"owner",
+		"creation",
+		"modified",
+		"modified_by",
+		"parent",
+		"parentfield",
+		"parenttype",
+		"idx",
+		"docstatus",
+		"doctype",
+		"oldfieldname",
+		"oldfieldtype",
+		"__islocal",
+		"__unsaved",
+		"is_custom_field",
+	}
+)
 
 # Presentation-only: these change how Desk PAINTS a field and can never affect
 # what a write may contain, so for the agent they are pure context cost.
@@ -43,15 +58,35 @@ _ROW_META_PROPS = frozenset({
 # excluding this set brings that to ~1.07x while keeping every property that can
 # change what the agent may write. That matters - the slim default exists because
 # of the 2026-06-22 gpt-5.5 context overflow, so growth here has to earn itself.
-_UI_ONLY_PROPS = frozenset({
-	"allow_bulk_edit", "allow_in_quick_entry", "bold", "collapsible",
-	"collapsible_depends_on", "columns", "documentation_url", "hide_border",
-	"hide_days", "hide_seconds", "hide_toolbar", "in_global_search",
-	"in_preview", "make_attachment_public", "print_hide",
-	"print_hide_if_no_value", "print_width", "remember_last_selected_value",
-	"report_hide", "search_index", "show_dashboard",
-	"show_description_on_click", "sort_options", "translatable", "width",
-})
+_UI_ONLY_PROPS = frozenset(
+	{
+		"allow_bulk_edit",
+		"allow_in_quick_entry",
+		"bold",
+		"collapsible",
+		"collapsible_depends_on",
+		"columns",
+		"documentation_url",
+		"hide_border",
+		"hide_days",
+		"hide_seconds",
+		"hide_toolbar",
+		"in_global_search",
+		"in_preview",
+		"make_attachment_public",
+		"print_hide",
+		"print_hide_if_no_value",
+		"print_width",
+		"remember_last_selected_value",
+		"report_hide",
+		"search_index",
+		"show_dashboard",
+		"show_description_on_click",
+		"sort_options",
+		"translatable",
+		"width",
+	}
+)
 
 _SKIP_PROPS = _ROW_META_PROPS | _UI_ONLY_PROPS | frozenset(_IDENTITY_PROPS)
 

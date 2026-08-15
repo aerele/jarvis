@@ -71,8 +71,8 @@ SKILL_TEMPLATES: dict[str, dict[str, str]] = {
 		"statement": 'Item group "{item_group}" usually ships from warehouse "{warehouse}".',
 	},
 	"stock-entry-route": {
-		"rule": '{purpose} stock entries usually run the route {route}.',
-		"statement": '{purpose} stock entries usually move stock {route}.',
+		"rule": "{purpose} stock entries usually run the route {route}.",
+		"statement": "{purpose} stock entries usually move stock {route}.",
 	},
 	"mode-of-payment": {
 		"rule": '{payment_type} entries usually use mode of payment "{mode}".',
@@ -177,7 +177,7 @@ def _safe_format(template: str, variables: dict) -> str:
 	placeholder instead) and stringifies values. Deterministic; no eval."""
 
 	class _Default(dict):
-		def __missing__(self, key):  # noqa: D401 - str.format_map hook
+		def __missing__(self, key):
 			return "{" + key + "}"
 
 	safe_vars = {k: ("" if v is None else str(v)) for k, v in (variables or {}).items()}

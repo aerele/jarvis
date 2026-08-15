@@ -103,11 +103,20 @@ def compute(records: list) -> dict:
 		"conversations_touching_custom": len(custom_target_convs),
 		"activation_rate": activation_rate,
 		"tool_calls": tool_calls,
-		"tool_duration_ms": {"p50": percentile(tool_duration_ms, 50), "p95": percentile(tool_duration_ms, 95)},
-		"tool_result_chars": {"p50": percentile(tool_result_chars, 50), "p95": percentile(tool_result_chars, 95)},
+		"tool_duration_ms": {
+			"p50": percentile(tool_duration_ms, 50),
+			"p95": percentile(tool_duration_ms, 95),
+		},
+		"tool_result_chars": {
+			"p50": percentile(tool_result_chars, 50),
+			"p95": percentile(tool_result_chars, 95),
+		},
 		"turns": {"custom": turns_custom, "non_custom": turns_non_custom},
 		"turn_duration_ms": {
-			"custom": {"p50": percentile(turn_duration_custom, 50), "p95": percentile(turn_duration_custom, 95)},
+			"custom": {
+				"p50": percentile(turn_duration_custom, 50),
+				"p95": percentile(turn_duration_custom, 95),
+			},
 			"non_custom": {
 				"p50": percentile(turn_duration_non_custom, 50),
 				"p95": percentile(turn_duration_non_custom, 95),

@@ -73,8 +73,11 @@
 						</div>
 
 						<!-- cards -->
-						<div v-if="board.loading && !board.rows.length" class="grid place-items-center py-12">
-							<LoadingIndicator class="size-5 text-ink-gray-5" />
+						<div
+							v-if="board.loading && !board.rows.length"
+							class="grid place-items-center py-12"
+						>
+							<JvSpinner />
 						</div>
 
 						<div
@@ -82,9 +85,16 @@
 							class="grid place-items-center py-12 text-center"
 						>
 							<div class="max-w-md space-y-2">
-								<FeatherIcon :name="emptyState.icon" class="mx-auto size-9 text-ink-gray-4" />
-								<div class="text-base font-medium text-ink-gray-8">{{ emptyState.title }}</div>
-								<div class="text-p-base text-ink-gray-6">{{ emptyState.body }}</div>
+								<FeatherIcon
+									:name="emptyState.icon"
+									class="mx-auto size-9 text-ink-gray-4"
+								/>
+								<div class="text-base font-medium text-ink-gray-8">
+									{{ emptyState.title }}
+								</div>
+								<div class="text-p-base text-ink-gray-6">
+									{{ emptyState.body }}
+								</div>
 							</div>
 						</div>
 
@@ -101,21 +111,29 @@
 							>
 								<div class="flex flex-col gap-1">
 									<OriginBadge :origin="row.origin" />
-									<div class="mt-1 text-base text-ink-gray-9">{{ row.question }}</div>
+									<div class="mt-1 text-base text-ink-gray-9">
+										{{ row.question }}
+									</div>
 									<div class="text-sm text-ink-gray-5">
 										<Tooltip :text="exactDate(row.created)">
 											<span>{{ timeAgo(row.created) }}</span>
 										</Tooltip>
-										<template v-if="row.status === 'Answered' && row.answered_at">
+										<template
+											v-if="row.status === 'Answered' && row.answered_at"
+										>
 											· answered {{ timeAgo(row.answered_at) }}
 										</template>
-										<template v-else-if="row.status === 'Ignored'"> · set aside</template>
+										<template v-else-if="row.status === 'Ignored'">
+											· set aside</template
+										>
 									</div>
 								</div>
 								<div class="mt-3 flex flex-wrap items-center gap-2">
 									<Button
 										variant="solid"
-										:label="row.status === 'Answered' ? 'Answer again' : 'Answer'"
+										:label="
+											row.status === 'Answered' ? 'Answer again' : 'Answer'
+										"
 										@click="selectQuestion(row)"
 									/>
 									<Button
@@ -135,10 +153,7 @@
 							</div>
 
 							<!-- footer: N of M + Load more -->
-							<div
-								v-if="board.total"
-								class="flex items-center justify-between pt-1"
-							>
+							<div v-if="board.total" class="flex items-center justify-between pt-1">
 								<span class="text-sm text-ink-gray-5">
 									{{ board.rows.length }} of {{ board.total }}
 								</span>
@@ -168,7 +183,7 @@
 							<template v-if="selected">
 								<OriginBadge :origin="selected.origin" />
 								<div class="mt-3 text-sm font-semibold text-ink-gray-9">
-									What Jarvis noticed
+									What {{ agentName }} noticed
 								</div>
 								<div
 									v-if="selected.context_md"
@@ -176,8 +191,8 @@
 									v-html="contextHtml"
 								/>
 								<div v-else class="mt-2 text-p-base text-ink-gray-6">
-									Jarvis didn't attach any extra detail to this one — just answer in your own
-									words below.
+									{{ agentName }} didn't attach any extra detail to this one —
+									just answer in your own words below.
 								</div>
 
 								<div
@@ -190,8 +205,8 @@
 										>
 									</div>
 									<div class="mt-0.5 text-xs text-ink-gray-5">
-										Answering again adds a new note — Jarvis uses your latest answer. Your
-										earlier note stays in Notes.
+										Answering again adds a new note — {{ agentName }} uses your
+										latest answer. Your earlier note stays in Notes.
 									</div>
 								</div>
 							</template>
@@ -199,10 +214,11 @@
 							<!-- nothing selected: warm guidance + the mental model -->
 							<template v-else>
 								<div class="text-base font-semibold text-ink-gray-9">
-									Teach Jarvis how you work
+									Teach {{ agentName }} how you work
 								</div>
 								<p class="mt-1 text-p-base text-ink-gray-6">
-									Answer a question on the left, or just say anything in the box below.
+									Answer a question on the left, or just say anything in the box
+									below.
 								</p>
 
 								<!-- Questions → Notes → Wiki → Skills (DESIGN §6 mental model) -->
@@ -210,22 +226,31 @@
 									class="mt-4 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-ink-gray-6"
 								>
 									<span class="font-medium text-ink-gray-9">Questions</span>
-									<FeatherIcon name="arrow-right" class="size-3.5 text-ink-gray-4" />
+									<FeatherIcon
+										name="arrow-right"
+										class="size-3.5 text-ink-gray-4"
+									/>
 									<span class="font-medium text-ink-gray-9">Notes</span>
-									<FeatherIcon name="arrow-right" class="size-3.5 text-ink-gray-4" />
+									<FeatherIcon
+										name="arrow-right"
+										class="size-3.5 text-ink-gray-4"
+									/>
 									<span class="font-medium text-ink-gray-9">Wiki</span>
-									<FeatherIcon name="arrow-right" class="size-3.5 text-ink-gray-4" />
+									<FeatherIcon
+										name="arrow-right"
+										class="size-3.5 text-ink-gray-4"
+									/>
 									<span class="font-medium text-ink-gray-9">Skills</span>
 								</div>
 								<div class="mt-1 text-xs text-ink-gray-5">
-									Jarvis asks · you answer · it remembers · it turns the how-to into reusable
-									skills.
+									{{ agentName }} asks · you answer · it remembers · it turns the
+									how-to into reusable skills.
 								</div>
 
 								<div
 									class="mt-4 text-xs font-medium uppercase tracking-wide text-ink-gray-5"
 								>
-									Things worth telling Jarvis
+									Things worth telling {{ agentName }}
 								</div>
 								<ul class="mt-2 space-y-1 text-p-base text-ink-gray-6">
 									<li v-for="s in SUGGESTIONS" :key="s">{{ s }}</li>
@@ -240,6 +265,7 @@
 			<ChatComposer
 				ref="composer"
 				:stt-enabled="!!caps.stt_enabled"
+				:stt-unconfigured="caps.stt_state === 'unconfigured'"
 				:question="selected"
 				:saving="submitting"
 				@submit="onSubmit"
@@ -275,33 +301,24 @@
 // also refetches on mount so it is self-sufficient. The async "Added to your
 // wiki" receipt rides the shared jarvis:event socket (personalise:processed),
 // the same channel globalNotifier/ChatView subscribe to.
-import {
-	ref,
-	reactive,
-	computed,
-	watch,
-	nextTick,
-	inject,
-	onMounted,
-	onBeforeUnmount,
-} from "vue"
-import { useStorage } from "@vueuse/core"
+import { ref, reactive, computed, watch, nextTick, inject, onMounted, onBeforeUnmount } from "vue";
+import { useStorage } from "@vueuse/core";
 import {
 	Breadcrumbs,
 	Button,
 	FeatherIcon,
 	FormControl,
-	LoadingIndicator,
 	Tooltip,
 	toast,
 	confirmDialog,
-} from "frappe-ui"
-import LayoutHeader from "@/components/LayoutHeader.vue"
-import TabBar from "@/components/list/TabBar.vue"
-import OriginBadge from "@/components/personalise/OriginBadge.vue"
-import ChatComposer from "@/components/personalise/ChatComposer.vue"
-import NotesView from "@/components/personalise/NotesView.vue"
-import PersonalisationSettings from "@/components/personalise/PersonalisationSettings.vue"
+} from "frappe-ui";
+import LayoutHeader from "@/components/LayoutHeader.vue";
+import TabBar from "@/components/list/TabBar.vue";
+import OriginBadge from "@/components/personalise/OriginBadge.vue";
+import ChatComposer from "@/components/personalise/ChatComposer.vue";
+import NotesView from "@/components/personalise/NotesView.vue";
+import PersonalisationSettings from "@/components/personalise/PersonalisationSettings.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import {
 	getSkillsAreaCaps,
 	listQuestionsPage,
@@ -310,37 +327,35 @@ import {
 	ignoreQuestion,
 	deleteQuestion,
 	saveNote,
-} from "@/api/personalise"
-import { renderMarkdown } from "@/markdown"
-import { timeAgo, exactDate } from "@/utils/datetime"
+} from "@/api/personalise";
+import { renderMarkdown } from "@/markdown";
+import { timeAgo, exactDate } from "@/utils/datetime";
+import { agentName } from "@/branding";
+import { errHtml } from "@/lib/errors";
 
-const PAGE = 20
+const PAGE = 20;
 
 // Suggestion prompts (plain-text, from the old Business tab). Shown in the
 // guidance card - click-to-answer lives on the generated questions instead.
 const SUGGESTIONS = [
 	"What does your business do, and who are your customers?",
 	"How does your team use ERPNext day to day?",
-	"Any customisations or quirks Jarvis should know about",
+	`Any customisations or quirks ${agentName} should know about`,
 	"Your month-end rituals and recurring tasks",
 	"Vendors or customers that need special handling",
-	"What you'd love Jarvis to handle for you",
-]
+	`What you'd love ${agentName} to handle for you`,
+];
 
 const STATUS_PILLS = [
 	{ label: "Unanswered", value: "Unanswered" },
 	{ label: "Answered", value: "Answered" },
 	{ label: "Ignored", value: "Ignored" },
-]
+];
 
 const props = defineProps({
 	// optional seed from SkillsPage (F1); the tab refetches caps on mount too.
 	caps: { type: Object, default: () => ({}) },
-})
-
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
+});
 
 // ── caps ─────────────────────────────────────────────────────────────────────
 const caps = reactive({
@@ -355,13 +370,17 @@ const caps = reactive({
 	// cleared their backlog (§16).
 	questions_total: 0,
 	personalise_enabled: true,
-})
-watch(() => props.caps, (v) => Object.assign(caps, v || {}), { immediate: true })
+});
+watch(
+	() => props.caps,
+	(v) => Object.assign(caps, v || {}),
+	{ immediate: true }
+);
 
 async function loadCaps() {
 	try {
-		const c = await getSkillsAreaCaps()
-		Object.assign(caps, c || {})
+		const c = await getSkillsAreaCaps();
+		Object.assign(caps, c || {});
 	} catch (e) {
 		// non-fatal: the parent only mounts this after a desk-user probe passed;
 		// the page stays usable (list + composer still work)
@@ -369,8 +388,8 @@ async function loadCaps() {
 }
 
 // ── sub-tabs ─────────────────────────────────────────────────────────────────
-const subTab = useStorage("jarvis-personalise-tab", "questions")
-const settingsOpen = ref(false)
+const subTab = useStorage("jarvis-personalise-tab", "questions");
+const settingsOpen = ref(false);
 const subTabs = computed(() => [
 	{
 		label: "Questions",
@@ -378,26 +397,26 @@ const subTabs = computed(() => [
 		count: caps.unanswered_count > 0 ? caps.unanswered_count : null,
 	},
 	{ label: "Notes", value: "notes" },
-])
+]);
 function setSubTab(v) {
-	subTab.value = v
-	if (v === "questions" && !board.rows.length && !board.loading) fetchQuestions("reset")
+	subTab.value = v;
+	if (v === "questions" && !board.rows.length && !board.loading) fetchQuestions("reset");
 }
 
 // ── questions list (hand-rolled reqId guard, flat kwargs - NotesPane idiom) ───
-const status = ref("Unanswered")
-const search = ref("")
-const sort = ref("newest")
-const board = reactive({ rows: [], total: 0, hasMore: false, loading: false })
-const selected = ref(null)
-const acting = ref("")
-const contextPane = ref(null)
-let reqId = 0
+const status = ref("Unanswered");
+const search = ref("");
+const sort = ref("newest");
+const board = reactive({ rows: [], total: 0, hasMore: false, loading: false });
+const selected = ref(null);
+const acting = ref("");
+const contextPane = ref(null);
+let reqId = 0;
 
 async function fetchQuestions(mode = "reset") {
-	const my = ++reqId
-	board.loading = true
-	const start = mode === "more" ? board.rows.length : 0
+	const my = ++reqId;
+	board.loading = true;
+	const start = mode === "more" ? board.rows.length : 0;
 	try {
 		const r = await listQuestionsPage({
 			status: status.value,
@@ -405,102 +424,102 @@ async function fetchQuestions(mode = "reset") {
 			sort: sort.value,
 			start,
 			page_length: PAGE,
-		})
-		if (my !== reqId) return
-		const rows = r.rows || []
-		board.rows = mode === "more" ? [...board.rows, ...rows] : rows
-		board.total = r.total || 0
-		board.hasMore = !!r.has_more
+		});
+		if (my !== reqId) return;
+		const rows = r.rows || [];
+		board.rows = mode === "more" ? [...board.rows, ...rows] : rows;
+		board.total = r.total || 0;
+		board.hasMore = !!r.has_more;
 	} catch (e) {
-		if (my === reqId) toast.error(errMsg(e))
+		if (my === reqId) toast.error(errHtml(e));
 	} finally {
-		if (my === reqId) board.loading = false
+		if (my === reqId) board.loading = false;
 	}
 }
 
 function setStatus(v) {
-	if (status.value === v) return
-	status.value = v
-	fetchQuestions("reset")
+	if (status.value === v) return;
+	status.value = v;
+	fetchQuestions("reset");
 }
 function toggleSort() {
-	sort.value = sort.value === "newest" ? "oldest" : "newest"
-	fetchQuestions("reset")
+	sort.value = sort.value === "newest" ? "oldest" : "newest";
+	fetchQuestions("reset");
 }
 
-let searchTimer = null
+let searchTimer = null;
 watch(search, () => {
-	clearTimeout(searchTimer)
-	searchTimer = setTimeout(() => fetchQuestions("reset"), 300)
-})
+	clearTimeout(searchTimer);
+	searchTimer = setTimeout(() => fetchQuestions("reset"), 300);
+});
 
 // ── row actions ──────────────────────────────────────────────────────────────
 function selectQuestion(row) {
-	selected.value = row
+	selected.value = row;
 	nextTick(() => {
-		composer.value?.focus?.()
+		composer.value?.focus?.();
 		// On stacked (below xl) layouts the context pane is order-first'd to the
 		// top of the scroll region; bring it into view so "what Jarvis noticed"
 		// is visible while the (always-visible, bottom-pinned) composer is used.
 		if (window.innerWidth < 1280)
-			contextPane.value?.scrollIntoView?.({ behavior: "smooth", block: "start" })
-	})
+			contextPane.value?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+	});
 }
 
 async function ignore(row) {
-	acting.value = row.name + ":ignore"
+	acting.value = row.name + ":ignore";
 	try {
-		await ignoreQuestion(row.name)
-		toast.success("Set aside — you can still answer it later")
-		if (selected.value?.name === row.name) selected.value = null
-		fetchQuestions("reset")
-		loadCaps()
+		await ignoreQuestion(row.name);
+		toast.success("Set aside — you can still answer it later");
+		if (selected.value?.name === row.name) selected.value = null;
+		fetchQuestions("reset");
+		loadCaps();
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		acting.value = ""
+		acting.value = "";
 	}
 }
 
 function confirmDelete(row) {
 	confirmDialog({
 		title: "Stop asking this?",
-		message: "Jarvis will stop asking this question. This can't be undone.",
+		message: `${agentName} will stop asking this question. This can't be undone.`,
 		onConfirm: async ({ hideDialog }) => {
 			try {
-				await deleteQuestion(row.name)
-				if (selected.value?.name === row.name) selected.value = null
-				toast.success("Removed")
-				hideDialog()
-				fetchQuestions("reset")
-				loadCaps()
+				await deleteQuestion(row.name);
+				if (selected.value?.name === row.name) selected.value = null;
+				toast.success("Removed");
+				hideDialog();
+				fetchQuestions("reset");
+				loadCaps();
 			} catch (e) {
-				toast.error(errMsg(e))
+				toast.error(errHtml(e));
 			}
 		},
-	})
+	});
 }
 
 // ── composer submit ──────────────────────────────────────────────────────────
-const composer = ref(null)
-const submitting = ref(false)
+const composer = ref(null);
+const submitting = ref(false);
 
 async function onSubmit(payload) {
-	submitting.value = true
-	const wasQuestion = !!selected.value
+	submitting.value = true;
+	const wasQuestion = !!selected.value;
 	try {
-		if (wasQuestion) await answerQuestion({ name: selected.value.name, ...payload })
-		else await saveNote({ ...payload, source: "Personalise" })
-		composer.value?.clear?.()
-		toast.success("Saved — Jarvis will use this")
+		if (wasQuestion) await answerQuestion({ name: selected.value.name, ...payload });
+		else await saveNote({ ...payload, source: "Personalise" });
+		composer.value?.clear?.();
+		toast.success(`Saved — ${agentName} will use this`);
 		// answered questions flip to the Answered filter; drop back to free capture
-		selected.value = null
-		if (wasQuestion) fetchQuestions("reset")
-		loadCaps()
+		selected.value = null;
+		if (wasQuestion) fetchQuestions("reset");
+		loadCaps();
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		submitting.value = false
+		submitting.value = false;
 	}
 }
 
@@ -512,63 +531,63 @@ async function onSubmit(payload) {
 // question was deleted/gone - toast and STAY on Notes rather than stranding the
 // user on an unanswerable composer.
 function isDoesNotExist(e) {
-	return !!(e && (e.status === 404 || e.exc_type === "DoesNotExistError"))
+	return !!(e && (e.status === 404 || e.exc_type === "DoesNotExistError"));
 }
 async function onReanswer(payload) {
-	const name = typeof payload === "string" ? payload : payload && payload.name
-	if (!name) return
-	let full
+	const name = typeof payload === "string" ? payload : payload && payload.name;
+	if (!name) return;
+	let full;
 	try {
-		full = await getQuestion(name)
+		full = await getQuestion(name);
 	} catch (e) {
-		if (isDoesNotExist(e)) toast.error("This question is no longer available")
-		else toast.error(errMsg(e))
-		return // stay on the Notes view
+		if (isDoesNotExist(e)) toast.error("This question is no longer available");
+		else toast.error(errHtml(e));
+		return; // stay on the Notes view
 	}
-	subTab.value = "questions"
-	selected.value = full
+	subTab.value = "questions";
+	selected.value = full;
 	// only switch the status filter (and refetch the list) if the fetched row's
 	// status differs from what's showing, so the row appears/highlights in the list
 	if (full.status && full.status !== status.value) {
-		status.value = full.status
-		await fetchQuestions("reset")
-		const row = board.rows.find((r) => r.name === full.name)
-		if (row) selected.value = row
+		status.value = full.status;
+		await fetchQuestions("reset");
+		const row = board.rows.find((r) => r.name === full.name);
+		if (row) selected.value = row;
 	}
-	nextTick(() => composer.value?.focus?.())
+	nextTick(() => composer.value?.focus?.());
 }
 
 // ── refresh (whichever sub-view is active) ───────────────────────────────────
-const notesView = ref(null)
-const refreshing = ref(false)
+const notesView = ref(null);
+const refreshing = ref(false);
 async function refreshAll() {
-	refreshing.value = true
+	refreshing.value = true;
 	try {
-		await loadCaps()
-		if (subTab.value === "questions") await fetchQuestions("reset")
-		else await notesView.value?.reload?.()
+		await loadCaps();
+		if (subTab.value === "questions") await fetchQuestions("reset");
+		else await notesView.value?.reload?.();
 	} finally {
-		refreshing.value = false
+		refreshing.value = false;
 	}
 }
 
 // ── async "Added to your wiki" receipt (personalise:processed) ────────────────
-const socket = inject("$socket", null)
+const socket = inject("$socket", null);
 function onEvent(p) {
-	if (!p || p.kind !== "personalise:processed") return
-	const pages = Array.isArray(p.pages) ? p.pages : []
-	const titles = pages.map((x) => x && x.title).filter(Boolean)
+	if (!p || p.kind !== "personalise:processed") return;
+	const pages = Array.isArray(p.pages) ? p.pages : [];
+	const titles = pages.map((x) => x && x.title).filter(Boolean);
 	toast.info(
 		titles.length
 			? `Added to your wiki: ${titles.join(", ")}`
-			: "Jarvis finished processing your note",
-	)
+			: `${agentName} finished processing your note`
+	);
 }
 
 // ── derived ──────────────────────────────────────────────────────────────────
 const contextHtml = computed(() =>
-	selected.value?.context_md ? renderMarkdown(selected.value.context_md) : "",
-)
+	selected.value?.context_md ? renderMarkdown(selected.value.context_md) : ""
+);
 
 const emptyState = computed(() => {
 	if (search.value.trim())
@@ -576,7 +595,7 @@ const emptyState = computed(() => {
 			icon: "search",
 			title: "No questions match your search",
 			body: "Try a different word, or clear the search to see everything.",
-		}
+		};
 	if (status.value === "Unanswered") {
 		// a brand-new user who has never had ANY question (total across all
 		// statuses is 0) gets a genuine first-run welcome, not a "cleared the
@@ -584,36 +603,36 @@ const emptyState = computed(() => {
 		if (caps.questions_total === 0)
 			return {
 				icon: "message-circle",
-				title: "Jarvis hasn't asked anything yet",
-				body: "Questions appear here as Jarvis learns how you work. You don't have to wait — tell it anything below.",
-			}
+				title: `${agentName} hasn't asked anything yet`,
+				body: `Questions appear here as ${agentName} learns how you work. You don't have to wait — tell it anything below.`,
+			};
 		return {
 			icon: "check-circle",
 			title: "You're all caught up",
-			body: "Jarvis will ask when it learns something new. You can still tell it anything below.",
-		}
+			body: `${agentName} will ask when it learns something new. You can still tell it anything below.`,
+		};
 	}
 	if (status.value === "Answered")
 		return {
 			icon: "message-square",
 			title: "No answered questions yet",
 			body: "When you answer a question, it moves here.",
-		}
+		};
 	return {
 		icon: "moon",
 		title: "Nothing set aside",
 		body: "Questions you ignore wait here — you can still answer them anytime.",
-	}
-})
+	};
+});
 
 // ── init ─────────────────────────────────────────────────────────────────────
 onMounted(() => {
-	loadCaps()
-	fetchQuestions("reset")
-	socket?.on("jarvis:event", onEvent)
-})
+	loadCaps();
+	fetchQuestions("reset");
+	socket?.on("jarvis:event", onEvent);
+});
 onBeforeUnmount(() => {
-	socket?.off("jarvis:event", onEvent)
-	clearTimeout(searchTimer)
-})
+	socket?.off("jarvis:event", onEvent);
+	clearTimeout(searchTimer);
+});
 </script>

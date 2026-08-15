@@ -1,11 +1,8 @@
 <template>
-	<Dialog
-		v-model="show"
-		:options="{ title: (page && page.title) || 'Wiki page', size: 'xl' }"
-	>
+	<Dialog v-model="show" :options="{ title: (page && page.title) || 'Wiki page', size: 'xl' }">
 		<template #body-content>
 			<div v-if="loading" class="py-8 text-center">
-				<LoadingIndicator class="size-5 text-ink-gray-5" />
+				<JvSpinner />
 			</div>
 			<template v-else-if="page">
 				<!-- metadata row: type · scope (+target) · slug · updated · flags -->
@@ -38,6 +35,7 @@
 						label="Conflicting"
 					/>
 					<Badge v-if="page.stale" variant="subtle" theme="orange" label="Stale" />
+					<PromotionStatusChip v-if="myPromo" :req="myPromo" noun="page" />
 				</div>
 
 				<!-- Conflicting gets the same treatment as Stale: a badge alone is
@@ -46,8 +44,8 @@
 					v-if="page.contradiction_flag"
 					class="mt-3 rounded-lg border border-outline-red-2 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
 				>
-					People have reported conflicting facts - look for the "Contradiction
-					flagged" section in the body below.{{
+					People have reported conflicting facts - look for the "Contradiction flagged"
+					section in the body below.{{
 						page.can_edit
 							? " Edit the page to keep the correct version; saving marks the conflict resolved."
 							: " A wiki manager can edit the page to resolve it."
@@ -58,7 +56,9 @@
 					v-if="page.stale"
 					class="mt-3 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
 				>
-					Not confirmed in 90+ days{{ page.can_edit ? " - saving an edit marks it reviewed." : "." }}
+					Not confirmed in 90+ days{{
+						page.can_edit ? " - saving an edit marks it reviewed." : "."
+					}}
 				</div>
 
 				<template v-if="editing">
@@ -138,6 +138,13 @@
 						@click="startEdit"
 					/>
 					<Button
+						v-if="canPromote && !promoPending"
+						variant="subtle"
+						label="Request promotion…"
+						iconLeft="arrow-up-circle"
+						@click="promoDialog = true"
+					/>
+					<Button
 						v-if="page.can_archive && page.status !== 'Archived'"
 						variant="subtle"
 						theme="red"
@@ -166,6 +173,13 @@
 			</div>
 		</template>
 	</Dialog>
+
+	<PromotionRequestDialog
+		v-model="promoDialog"
+		noun="page"
+		:busy="promoBusy"
+		@submit="submitPromotion"
+	/>
 </template>
 
 <script setup>
@@ -177,154 +191,191 @@
 // permanent Delete each sit behind a confirmDialog when `can_archive`. Fetches
 // the page itself whenever it opens (v-model true + slug); emits `refresh`
 // after a save/archive/delete so the owning list refetches.
-import { ref, computed, watch } from "vue"
-import {
-	Badge,
-	Button,
-	Dialog,
-	FormControl,
-	LoadingIndicator,
-	Tooltip,
-	toast,
-	confirmDialog,
-} from "frappe-ui"
-import { renderMarkdown } from "@/markdown"
-import { timeAgo, exactDate } from "@/utils/datetime"
+import { ref, computed, watch } from "vue";
+import { Badge, Button, Dialog, FormControl, Tooltip, toast, confirmDialog } from "frappe-ui";
+import { renderMarkdown } from "@/markdown";
+import { timeAgo, exactDate } from "@/utils/datetime";
 import {
 	getWikiPage,
 	saveWikiPage,
 	archiveWikiPage,
 	restoreWikiPage,
 	deleteWikiPage,
-} from "@/api/wiki"
+	requestWikiPromotion,
+	myWikiPromotion,
+} from "@/api/wiki";
+import JvSpinner from "@/components/JvSpinner.vue";
+import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
+import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
+import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
 	slug: { type: String, default: "" },
-})
-const emit = defineEmits(["update:modelValue", "refresh"])
+});
+const emit = defineEmits(["update:modelValue", "refresh"]);
 
-function errMsg(e) {
-	return (e && ((e.messages && e.messages[0]) || e.message)) || "Something went wrong."
-}
-
-const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" }
+const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" };
 
 const show = computed({
 	get: () => props.modelValue,
 	set: (v) => emit("update:modelValue", v),
-})
+});
 
-const page = ref(null)
-const loading = ref(false)
-const editing = ref(false)
-const previewing = ref(false)
-const editTitle = ref("")
-const editSummary = ref("")
-const editBody = ref("")
-const saving = ref(false)
-const archiving = ref(false)
-const deleting = ref(false)
+const page = ref(null);
+const loading = ref(false);
+const editing = ref(false);
+const previewing = ref(false);
+
+// ── promotion (requester side, Skills-area promotion surfacing) ───────────────
+// The wiki requester side was never wired: request_wiki_promotion existed but had
+// no caller, so the reviewer queue consumed requests nothing could create. Here
+// the owner of a private (User-scope) page can finally file one, into the SAME
+// reviewer queue. A User-scope page is editable only by its owner, so can_edit on
+// a User page ⟺ "mine".
+const myPromo = ref(null);
+const promoDialog = ref(false);
+const promoBusy = ref(false);
+const canPromote = computed(
+	() =>
+		!!page.value &&
+		page.value.scope === "User" &&
+		!!page.value.can_edit &&
+		page.value.status !== "Archived"
+);
+const promoPending = computed(() => !!(myPromo.value && myPromo.value.status === "Pending"));
+
+async function loadMyPromo() {
+	myPromo.value = null;
+	if (!page.value || page.value.scope !== "User" || !page.value.can_edit) return;
+	try {
+		const res = await myWikiPromotion(props.slug);
+		myPromo.value = res && res.status ? res : null;
+	} catch {
+		// best-effort chip
+	}
+}
+
+async function submitPromotion({ to_scope, target_role, note }) {
+	promoBusy.value = true;
+	try {
+		await requestWikiPromotion({ page: props.slug, to_scope, target_role, note });
+		promoDialog.value = false;
+		toast.success("Promotion requested — a reviewer will decide.");
+		await loadMyPromo();
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		promoBusy.value = false;
+	}
+}
+const editTitle = ref("");
+const editSummary = ref("");
+const editBody = ref("");
+const saving = ref(false);
+const archiving = ref(false);
+const deleting = ref(false);
 
 const bodyHtml = computed(() =>
 	page.value && page.value.body_md ? renderMarkdown(page.value.body_md) : ""
-)
+);
 const previewHtml = computed(() =>
 	editBody.value
 		? renderMarkdown(editBody.value)
 		: '<p class="text-ink-gray-5">Nothing to preview yet.</p>'
-)
+);
 const updatedAt = computed(
 	() => (page.value && (page.value.modified || page.value.last_confirmed_at)) || ""
-)
+);
 const scopeTarget = computed(() => {
-	if (!page.value) return ""
-	if (page.value.scope === "Role") return page.value.target_role || ""
-	if (page.value.scope === "User") return page.value.target_user || ""
-	return ""
-})
+	if (!page.value) return "";
+	if (page.value.scope === "Role") return page.value.target_role || "";
+	if (page.value.scope === "User") return page.value.target_user || "";
+	return "";
+});
 // "From a voice note by X, Jul 7" - the page's latest source entry. Pages a
 // pipeline wrote (not a person) earn trust by saying where they came from.
 const provenance = computed(() => {
-	const sources = (page.value && page.value.sources) || []
-	if (!Array.isArray(sources) || !sources.length) return ""
-	const s = sources[sources.length - 1] || {}
+	const sources = (page.value && page.value.sources) || [];
+	if (!Array.isArray(sources) || !sources.length) return "";
+	const s = sources[sources.length - 1] || {};
 	const kindLabel =
-		{ voice: "a voice note", chat: "a chat conversation", edit: "a manual edit" }[
-			s.kind
-		] || (s.kind ? String(s.kind) : "a recorded source")
-	const who = s.user ? ` by ${s.user}` : ""
-	const when = s.date ? `, ${s.date}` : ""
-	const count = sources.length > 1 ? ` · ${sources.length} sources in total` : ""
-	return `Latest source: ${kindLabel}${who}${when}${count}`
-})
+		{ voice: "a voice note", chat: "a chat conversation", edit: "a manual edit" }[s.kind] ||
+		(s.kind ? String(s.kind) : "a recorded source");
+	const who = s.user ? ` by ${s.user}` : "";
+	const when = s.date ? `, ${s.date}` : "";
+	const count = sources.length > 1 ? ` · ${sources.length} sources in total` : "";
+	return `Latest source: ${kindLabel}${who}${when}${count}`;
+});
 
 watch(
 	() => props.modelValue,
 	(open) => {
-		if (open) load()
+		if (open) load();
 	}
-)
+);
 
 async function load() {
-	page.value = null
-	editing.value = false
-	loading.value = true
+	page.value = null;
+	myPromo.value = null;
+	editing.value = false;
+	loading.value = true;
 	try {
-		page.value = await getWikiPage(props.slug)
+		page.value = await getWikiPage(props.slug);
+		loadMyPromo();
 	} catch (e) {
-		show.value = false
-		toast.error(errMsg(e))
+		show.value = false;
+		toast.error(errHtml(e));
 	} finally {
-		loading.value = false
+		loading.value = false;
 	}
 }
 
 function startEdit() {
-	previewing.value = false
-	editTitle.value = (page.value && page.value.title) || ""
-	editSummary.value = (page.value && page.value.summary) || ""
-	editBody.value = (page.value && page.value.body_md) || ""
-	editing.value = true
+	previewing.value = false;
+	editTitle.value = (page.value && page.value.title) || "";
+	editSummary.value = (page.value && page.value.summary) || "";
+	editBody.value = (page.value && page.value.body_md) || "";
+	editing.value = true;
 }
 
 async function save() {
-	saving.value = true
+	saving.value = true;
 	try {
 		await saveWikiPage(props.slug, {
 			title: editTitle.value.trim() || undefined,
 			summary: editSummary.value,
 			body_md: editBody.value,
-		})
+		});
 		// a saved body counts as a review server-side - mirror that locally
 		if (page.value) {
-			if (editTitle.value.trim()) page.value.title = editTitle.value.trim()
-			page.value.summary = editSummary.value
-			page.value.body_md = editBody.value
-			page.value.contradiction_flag = 0
-			page.value.stale = false
+			if (editTitle.value.trim()) page.value.title = editTitle.value.trim();
+			page.value.summary = editSummary.value;
+			page.value.body_md = editBody.value;
+			page.value.contradiction_flag = 0;
+			page.value.stale = false;
 		}
-		editing.value = false
-		toast.success("Page saved")
-		emit("refresh")
+		editing.value = false;
+		toast.success("Page saved");
+		emit("refresh");
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		saving.value = false
+		saving.value = false;
 	}
 }
 
 async function restore() {
-	archiving.value = true
+	archiving.value = true;
 	try {
-		await restoreWikiPage(props.slug)
-		if (page.value) page.value.status = "Active"
-		toast.success("Page restored")
-		emit("refresh")
+		await restoreWikiPage(props.slug);
+		if (page.value) page.value.status = "Active";
+		toast.success("Page restored");
+		emit("refresh");
 	} catch (e) {
-		toast.error(errMsg(e))
+		toast.error(errHtml(e));
 	} finally {
-		archiving.value = false
+		archiving.value = false;
 	}
 }
 
@@ -334,20 +385,20 @@ function confirmArchive() {
 		message:
 			"Archived pages stop appearing in the list and are no longer used as chat context. The record is kept.",
 		onConfirm: async ({ hideDialog }) => {
-			archiving.value = true
+			archiving.value = true;
 			try {
-				await archiveWikiPage(props.slug)
-				hideDialog()
-				show.value = false
-				toast.success("Page archived")
-				emit("refresh")
+				await archiveWikiPage(props.slug);
+				hideDialog();
+				show.value = false;
+				toast.success("Page archived");
+				emit("refresh");
 			} catch (e) {
-				toast.error(errMsg(e))
+				toast.error(errHtml(e));
 			} finally {
-				archiving.value = false
+				archiving.value = false;
 			}
 		},
-	})
+	});
 }
 
 function confirmDelete() {
@@ -355,19 +406,19 @@ function confirmDelete() {
 		title: "Delete this page?",
 		message: "Permanently deletes this page - archiving keeps it recoverable.",
 		onConfirm: async ({ hideDialog }) => {
-			deleting.value = true
+			deleting.value = true;
 			try {
-				await deleteWikiPage(props.slug)
-				hideDialog()
-				show.value = false
-				toast.success("Page deleted")
-				emit("refresh")
+				await deleteWikiPage(props.slug);
+				hideDialog();
+				show.value = false;
+				toast.success("Page deleted");
+				emit("refresh");
 			} catch (e) {
-				toast.error(errMsg(e))
+				toast.error(errHtml(e));
 			} finally {
-				deleting.value = false
+				deleting.value = false;
 			}
 		},
-	})
+	});
 }
 </script>

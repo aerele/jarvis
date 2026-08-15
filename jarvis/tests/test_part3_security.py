@@ -57,10 +57,16 @@ def _ensure_user(email: str, roles: list[str]) -> str:
 
 	ensure_jarvis_user_role()
 	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email, "first_name": PFX,
-			"send_welcome_email": 0, "enabled": 1, "user_type": "System User",
-		})
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": PFX,
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "System User",
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert(ignore_permissions=True)
 	if frappe.db.get_value("User", email, "user_type") != "System User":
@@ -73,8 +79,11 @@ def _ensure_user(email: str, roles: list[str]) -> str:
 	if add:
 		frappe.get_doc("User", email).add_roles(*add)
 	# Drop any stray Jarvis roles OUTSIDER must not hold.
-	strip = [r for r in ("Jarvis User", "Jarvis Skill Reviewer", "Jarvis Admin")
-			 if r not in roles and r in set(frappe.get_roles(email))]
+	strip = [
+		r
+		for r in ("Jarvis User", "Jarvis Skill Reviewer", "Jarvis Admin")
+		if r not in roles and r in set(frappe.get_roles(email))
+	]
 	if strip:
 		frappe.get_doc("User", email).remove_roles(*strip)
 	return email
@@ -92,14 +101,16 @@ def _mk_conv(owner: str, title: str = "p3 conv") -> str:
 
 
 def _mk_file(owner: str, tag: str, attached=None, is_private: int = 1):
-	doc = frappe.get_doc({
-		"doctype": "File",
-		"file_name": f"{tag}.txt",
-		"content": f"content-{tag}",
-		"is_private": is_private,
-		"attached_to_doctype": attached[0] if attached else None,
-		"attached_to_name": attached[1] if attached else None,
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": f"{tag}.txt",
+			"content": f"content-{tag}",
+			"is_private": is_private,
+			"attached_to_doctype": attached[0] if attached else None,
+			"attached_to_name": attached[1] if attached else None,
+		}
+	)
 	doc.flags.ignore_permissions = True
 	doc.insert(ignore_permissions=True)
 	_reassign("File", doc.name, owner)
@@ -107,10 +118,15 @@ def _mk_file(owner: str, tag: str, attached=None, is_private: int = 1):
 
 
 def _mk_macro(owner: str, name: str, **extra):
-	doc = frappe.get_doc({
-		"doctype": MACRO, "macro_name": name, "enabled": 1,
-		"steps": [{"prompt": "do the thing"}], **extra,
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": MACRO,
+			"macro_name": name,
+			"enabled": 1,
+			"steps": [{"prompt": "do the thing"}],
+			**extra,
+		}
+	)
 	doc.flags.ignore_permissions = True
 	doc.insert(ignore_permissions=True)
 	_reassign(MACRO, doc.name, owner)
@@ -118,10 +134,16 @@ def _mk_macro(owner: str, name: str, **extra):
 
 
 def _mk_approval(owner: str, *, conversation=None, status="Pending", **extra):
-	doc = frappe.get_doc({
-		"doctype": APPROVAL, "title": f"{PFX} approval", "question": "Approve?",
-		"status": status, "conversation": conversation, **extra,
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": APPROVAL,
+			"title": f"{PFX} approval",
+			"question": "Approve?",
+			"status": status,
+			"conversation": conversation,
+			**extra,
+		}
+	)
 	doc.flags.ignore_permissions = True
 	doc.insert(ignore_permissions=True)
 	_reassign(APPROVAL, doc.name, owner)
@@ -136,14 +158,32 @@ def _mk_run(owner: str, *, status="completed", agent=AGENT_SLUG):
 	return doc
 
 
-def _mk_finding(owner: str, *, agent=AGENT_SLUG, run=None, severity="blocker",
-				title=f"{PFX}-finding", detail_md="orig detail", amount=1000,
-				first_seen=None, last_seen=None):
-	doc = frappe.get_doc({
-		"doctype": FINDING, "agent": agent, "run": run, "severity": severity,
-		"title": title, "detail_md": detail_md, "amount": amount, "state": "open",
-		"first_seen_run": first_seen, "last_seen_run": last_seen,
-	})
+def _mk_finding(
+	owner: str,
+	*,
+	agent=AGENT_SLUG,
+	run=None,
+	severity="blocker",
+	title=f"{PFX}-finding",
+	detail_md="orig detail",
+	amount=1000,
+	first_seen=None,
+	last_seen=None,
+):
+	doc = frappe.get_doc(
+		{
+			"doctype": FINDING,
+			"agent": agent,
+			"run": run,
+			"severity": severity,
+			"title": title,
+			"detail_md": detail_md,
+			"amount": amount,
+			"state": "open",
+			"first_seen_run": first_seen,
+			"last_seen_run": last_seen,
+		}
+	)
 	doc.flags.ignore_permissions = True
 	doc.insert(ignore_permissions=True)
 	_reassign(FINDING, doc.name, owner)
@@ -159,11 +199,17 @@ class Part3Base(FrappeTestCase):
 		_ensure_user(REVIEWER, ["Jarvis Skill Reviewer"])
 		_ensure_user(OUTSIDER, [])  # System User, no Jarvis role
 		if not frappe.db.exists(LISTING, AGENT_SLUG):
-			frappe.get_doc({
-				"doctype": LISTING, "agent_slug": AGENT_SLUG, "title": "P3 Test Agent",
-				"description": "test", "status": "Published", "nature": "Auditor",
-				"skill_bundle": '[{"path":"SKILL.md","body":"PROPRIETARY VENDOR IP"}]',
-			}).insert(ignore_permissions=True)
+			frappe.get_doc(
+				{
+					"doctype": LISTING,
+					"agent_slug": AGENT_SLUG,
+					"title": "P3 Test Agent",
+					"description": "test",
+					"status": "Published",
+					"nature": "Auditor",
+					"skill_bundle": '[{"path":"SKILL.md","body":"PROPRIETARY VENDOR IP"}]',
+				}
+			).insert(ignore_permissions=True)
 		frappe.db.commit()
 
 	@classmethod
@@ -185,6 +231,11 @@ class Part3Base(FrappeTestCase):
 			(MACRO, {"macro_name": ["like", f"{PFX}%"]}),
 		):
 			for n in frappe.get_all(dt, filters=filt, pluck="name"):
+				if dt == MACRO:
+					# The scheduler now COMMITS a failed Macro Run for a slot it refused
+					# (#471), so that row outlives the rollback above too.
+					for r in frappe.get_all(MACRO_RUN, filters={"macro": n}, pluck="name"):
+						frappe.delete_doc(MACRO_RUN, r, force=True, ignore_permissions=True)
 				frappe.delete_doc(dt, n, force=True, ignore_permissions=True)
 		frappe.db.set_single_value("Jarvis Settings", "agent_skills_sync_status", "")
 		frappe.db.commit()
@@ -205,10 +256,14 @@ class TestFileListScoping(Part3Base):
 		own_np = _mk_file(USER_B, f"{PFX}-b-note", attached=None, is_private=1)
 
 		with _as(USER_B):
-			names = set(frappe.get_list(
-				"File", filters={"file_name": ["like", f"{PFX}-%"]},
-				pluck="name", limit_page_length=0,
-			))
+			names = set(
+				frappe.get_list(
+					"File",
+					filters={"file_name": ["like", f"{PFX}-%"]},
+					pluck="name",
+					limit_page_length=0,
+				)
+			)
 
 		self.assertNotIn(fa.name, names, "leak: B sees A's conversation-attached File")
 		self.assertIn(fb.name, names, "regression: B lost their own conversation File")
@@ -219,8 +274,7 @@ class TestFileListScoping(Part3Base):
 		conv_a = _mk_conv(USER_A)
 		fa = _mk_file(USER_A, f"{PFX}-sm-a", attached=(CONVERSATION, conv_a))
 		with _as("Administrator"):
-			names = set(frappe.get_list(
-				"File", filters={"file_name": ["like", f"{PFX}-sm-%"]}, pluck="name"))
+			names = set(frappe.get_list("File", filters={"file_name": ["like", f"{PFX}-sm-%"]}, pluck="name"))
 		self.assertIn(fa.name, names)
 
 
@@ -231,25 +285,32 @@ class TestMacroScoping(Part3Base):
 	def test_non_jarvis_user_cannot_create_macro(self):
 		with _as(OUTSIDER):
 			with self.assertRaises(frappe.PermissionError):
-				frappe.get_doc({
-					"doctype": MACRO, "macro_name": f"{PFX}-x",
-					"steps": [{"prompt": "hi"}],
-				}).insert()
+				frappe.get_doc(
+					{
+						"doctype": MACRO,
+						"macro_name": f"{PFX}-x",
+						"steps": [{"prompt": "hi"}],
+					}
+				).insert()
 
 	def test_jarvis_user_creates_own_macro(self):
 		with _as(USER_A):
-			m = frappe.get_doc({
-				"doctype": MACRO, "macro_name": f"{PFX}-ok",
-				"steps": [{"prompt": "hi"}],
-			}).insert()
+			m = frappe.get_doc(
+				{
+					"doctype": MACRO,
+					"macro_name": f"{PFX}-ok",
+					"steps": [{"prompt": "hi"}],
+				}
+			).insert()
 		self.assertEqual(m.owner, USER_A)
 
 	def test_macro_list_scoped_to_owner(self):
 		ma = _mk_macro(USER_A, f"{PFX}-listA")
 		mb = _mk_macro(USER_B, f"{PFX}-listB")
 		with _as(USER_B):
-			names = set(frappe.get_list(
-				MACRO, filters={"macro_name": ["like", f"{PFX}-list%"]}, pluck="name"))
+			names = set(
+				frappe.get_list(MACRO, filters={"macro_name": ["like", f"{PFX}-list%"]}, pluck="name")
+			)
 		self.assertIn(mb.name, names)
 		self.assertNotIn(ma.name, names)
 
@@ -258,17 +319,26 @@ class TestMacroScoping(Part3Base):
 		ma = _mk_macro(USER_A, f"{PFX}-mac2")
 		with _as(USER_B):
 			with self.assertRaises(frappe.PermissionError):
-				frappe.get_doc({
-					"doctype": MACRO_RUN, "macro": ma.name, "status": "queued",
-				}).insert()
+				frappe.get_doc(
+					{
+						"doctype": MACRO_RUN,
+						"macro": ma.name,
+						"status": "queued",
+					}
+				).insert()
 
 	def test_scheduler_skips_barred_owner(self):
 		# MAC-1: a due macro owned by a user who lost Jarvis access is skipped.
 		m = _mk_macro(OUTSIDER, f"{PFX}-sched", schedule_enabled=1)
-		frappe.db.set_value(MACRO, m.name, {
-			"schedule_enabled": 1,
-			"next_run_at": add_to_date(now_datetime(), hours=-1),
-		}, update_modified=False)
+		frappe.db.set_value(
+			MACRO,
+			m.name,
+			{
+				"schedule_enabled": 1,
+				"next_run_at": add_to_date(now_datetime(), hours=-1),
+			},
+			update_modified=False,
+		)
 		with patch("jarvis.chat.macros.run_macro") as mock_run:
 			macro_scheduler.run_due_macros()
 		called = [c.args[0] for c in mock_run.call_args_list]
@@ -284,14 +354,19 @@ class TestMacroScoping(Part3Base):
 class TestApprovalForgery(Part3Base):
 	def test_rest_insert_cannot_forge_decided_approval(self):
 		with _as(USER_A):
-			doc = frappe.get_doc({
-				"doctype": APPROVAL, "title": f"{PFX} forge", "question": "q?",
-				"status": "Approved", "decision": "sneaky", "decided_by": USER_B,
-			})
+			doc = frappe.get_doc(
+				{
+					"doctype": APPROVAL,
+					"title": f"{PFX} forge",
+					"question": "q?",
+					"status": "Approved",
+					"decision": "sneaky",
+					"decided_by": USER_B,
+				}
+			)
 			doc.insert()  # perm-checked (generic REST); permlevel strips forged fields
 			name = doc.name
-		row = frappe.db.get_value(
-			APPROVAL, name, ["status", "decision", "decided_by"], as_dict=True)
+		row = frappe.db.get_value(APPROVAL, name, ["status", "decision", "decided_by"], as_dict=True)
 		self.assertEqual(row.status, "Pending")
 		self.assertFalse(row.decision)
 		self.assertFalse(row.decided_by)
@@ -299,10 +374,15 @@ class TestApprovalForgery(Part3Base):
 	def test_validate_invariant_rejects_new_decided_row(self):
 		# Direct proof of the controller invariant (independent of permlevel).
 		with _as(USER_A):
-			doc = frappe.get_doc({
-				"doctype": APPROVAL, "title": f"{PFX} inv", "question": "q?",
-				"status": "Approved", "decision": "x",
-			})
+			doc = frappe.get_doc(
+				{
+					"doctype": APPROVAL,
+					"title": f"{PFX} inv",
+					"question": "q?",
+					"status": "Approved",
+					"decision": "x",
+				}
+			)
 			doc.set("__islocal", 1)  # insert() sets this; validate runs with it set
 			with self.assertRaises(frappe.PermissionError):
 				doc._guard_decided_fields()
@@ -316,9 +396,16 @@ class TestApprovalForgery(Part3Base):
 		appr = _mk_approval(USER_A, conversation=conv, status="Pending")
 		# Server stamp (raw set_value, exactly like decide()'s SQL — bypasses
 		# permlevel), then the owner reads it back through the perm-checked door.
-		frappe.db.set_value(APPROVAL, appr.name, {
-			"status": "Approved", "decision": "ok", "decided_by": USER_A,
-		}, update_modified=False)
+		frappe.db.set_value(
+			APPROVAL,
+			appr.name,
+			{
+				"status": "Approved",
+				"decision": "ok",
+				"decided_by": USER_A,
+			},
+			update_modified=False,
+		)
 		frappe.db.commit()
 
 		# (c) owner CAN now read status/decision/decided_by via client.get.
@@ -345,8 +432,7 @@ class TestApprovalForgery(Part3Base):
 		appr = _mk_approval(USER_A, conversation=conv)
 		with _as(USER_A), patch("jarvis.chat.api.send_message", return_value={"ok": True}):
 			approvals_api.decide(appr.name, "Approve as drafted", 1)
-		row = frappe.db.get_value(
-			APPROVAL, appr.name, ["status", "decision", "decided_by"], as_dict=True)
+		row = frappe.db.get_value(APPROVAL, appr.name, ["status", "decision", "decided_by"], as_dict=True)
 		self.assertEqual(row.status, "Approved")
 		self.assertEqual(row.decided_by, USER_A)
 		self.assertEqual(row.decision, "Approve as drafted")
@@ -362,14 +448,18 @@ class TestCommentTagging(Part3Base):
 			with self.assertRaises(frappe.ValidationError):
 				docmeta_api.toggle_share("Jarvis Macro", m.name, OUTSIDER, "add")
 			docmeta_api.toggle_share("Jarvis Macro", m.name, USER_B, "add")
-		self.assertTrue(frappe.db.exists("DocShare", {
-			"share_doctype": "Jarvis Macro", "share_name": m.name, "user": USER_B}))
+		self.assertTrue(
+			frappe.db.exists(
+				"DocShare", {"share_doctype": "Jarvis Macro", "share_name": m.name, "user": USER_B}
+			)
+		)
 
 	def test_add_comment_strips_mentions(self):
 		m = _mk_macro(USER_A, f"{PFX}-comment")
 		with _as(USER_A):
 			row = docmeta_api.add_comment(
-				"Jarvis Macro", m.name,
+				"Jarvis Macro",
+				m.name,
 				'<div>hi <span class="mention" data-id="carol@example.com">@Carol</span></div>',
 			)
 		content = frappe.db.get_value("Comment", row["name"], "content")
@@ -378,8 +468,7 @@ class TestCommentTagging(Part3Base):
 		self.assertIn("@Carol", content)  # readable text preserved
 		with _as(USER_A):
 			row2 = docmeta_api.add_comment("Jarvis Macro", m.name, "plain body")
-		self.assertEqual(
-			frappe.db.get_value("Comment", row2["name"], "content"), "plain body")
+		self.assertEqual(frappe.db.get_value("Comment", row2["name"], "content"), "plain body")
 
 
 # --------------------------------------------------------------------------- #
@@ -389,16 +478,19 @@ class TestAgentScoping(Part3Base):
 	def test_non_jarvis_user_cannot_install_agent(self):
 		with _as(OUTSIDER):
 			with self.assertRaises(frappe.PermissionError):
-				frappe.get_doc({
-					"doctype": INSTALLATION, "agent": AGENT_SLUG, "enabled": 1,
-				}).insert()
+				frappe.get_doc(
+					{
+						"doctype": INSTALLATION,
+						"agent": AGENT_SLUG,
+						"enabled": 1,
+					}
+				).insert()
 
 	def test_finding_list_scoped_to_owner(self):
 		fa = _mk_finding(USER_A, title=f"{PFX}-fA")
 		fb = _mk_finding(USER_B, title=f"{PFX}-fB")
 		with _as(USER_B):
-			names = set(frappe.get_list(
-				FINDING, filters={"title": ["like", f"{PFX}-f%"]}, pluck="name"))
+			names = set(frappe.get_list(FINDING, filters={"title": ["like", f"{PFX}-f%"]}, pluck="name"))
 		self.assertIn(fb.name, names)
 		self.assertNotIn(fa.name, names)
 
@@ -406,10 +498,12 @@ class TestAgentScoping(Part3Base):
 		with _as(USER_A):  # plain Jarvis User
 			with self.assertRaises(frappe.PermissionError):
 				agents_api.apply_agents()
-		with _as(REVIEWER), \
-			patch("jarvis.chat.agents_api.build_agent_push_payload", return_value=[]), \
-			patch("jarvis.chat.agents_api.frappe.enqueue", MagicMock()), \
-			patch("frappe.db.set_single_value", MagicMock()):
+		with (
+			_as(REVIEWER),
+			patch("jarvis.chat.agents_api.build_agent_push_payload", return_value=[]),
+			patch("jarvis.chat.agents_api.frappe.enqueue", MagicMock()),
+			patch("frappe.db.set_single_value", MagicMock()),
+		):
 			res = agents_api.apply_agents()
 		self.assertTrue(res["ok"])
 
@@ -422,8 +516,7 @@ class TestAgentScoping(Part3Base):
 			doc.amount = 0
 			doc.state = "resolved"
 			doc.save()  # if_owner write
-		row = frappe.db.get_value(
-			FINDING, f.name, ["severity", "detail_md", "amount", "state"], as_dict=True)
+		row = frappe.db.get_value(FINDING, f.name, ["severity", "detail_md", "amount", "state"], as_dict=True)
 		self.assertEqual(row.severity, "blocker", "audit severity was rewritten")
 		self.assertEqual(row.detail_md, "orig detail", "audit detail was erased")
 		self.assertEqual(row.amount, 1000, "audit amount was rewritten")
@@ -451,10 +544,12 @@ class TestAgentScoping(Part3Base):
 			out = agents_api.get_agent(AGENT_SLUG)
 			self.assertNotIn("skill_bundle", out)
 			rows = frappe.get_list(
-				LISTING, filters={"agent_slug": AGENT_SLUG}, fields=["name", "skill_bundle"])
+				LISTING, filters={"agent_slug": AGENT_SLUG}, fields=["name", "skill_bundle"]
+			)
 		self.assertTrue(rows)
 		self.assertNotIn("skill_bundle", rows[0], "skill_bundle leaked to a normal user")
 		with _as("Administrator"):
 			rows2 = frappe.get_list(
-				LISTING, filters={"agent_slug": AGENT_SLUG}, fields=["name", "skill_bundle"])
+				LISTING, filters={"agent_slug": AGENT_SLUG}, fields=["name", "skill_bundle"]
+			)
 		self.assertIn("skill_bundle", rows2[0])

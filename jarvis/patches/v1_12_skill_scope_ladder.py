@@ -14,11 +14,6 @@ def execute():
 	if not frappe.db.has_column("Jarvis Custom Skill", "scope"):
 		return
 	# Personal is the pre-ladder spelling of User.
-	frappe.db.sql(
-		"UPDATE `tabJarvis Custom Skill` SET `scope` = 'User' WHERE `scope` = 'Personal'"
-	)
+	frappe.db.sql("UPDATE `tabJarvis Custom Skill` SET `scope` = 'User' WHERE `scope` = 'Personal'")
 	# Pre-scope rows (NULL/empty) meant Org.
-	frappe.db.sql(
-		"UPDATE `tabJarvis Custom Skill` SET `scope` = 'Org' "
-		"WHERE `scope` IS NULL OR `scope` = ''"
-	)
+	frappe.db.sql("UPDATE `tabJarvis Custom Skill` SET `scope` = 'Org' WHERE `scope` IS NULL OR `scope` = ''")

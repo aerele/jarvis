@@ -9,14 +9,34 @@
   "agent",
   "installation",
   "trigger",
+  "bundle_version",
+  "preparation_mode",
+  "initiating_human",
+  "capability_contract",
+  "tools_allow_json",
+  "capability_nature",
+  "capability_writes_json",
   "status",
+  "result_state",
   "started_at",
   "finished_at",
   "conversation",
   "findings_count",
   "blocker_count",
   "error",
-  "coverage_note"
+  "coverage_note",
+  "session_key",
+  "dashboard",
+  "source_bytes_read",
+  "pages_written",
+  "pages_json",
+  "coverage_json",
+  "scope_json",
+  "wm_row_count",
+  "wm_gl_max_modified",
+  "permission_profile",
+  "integrity_digest",
+  "canvas_ref"
  ],
  "fields": [
   {
@@ -89,7 +109,163 @@
    "fieldname": "coverage_note",
    "fieldtype": "Small Text",
    "label": "Coverage Note",
-   "description": "Why a scan is partial/incomplete (turn envelope hit, materiality unconfigured, etc.). Never let a partial scan read as a clean all-clear."
+   "description": "Why a scan is partial/incomplete (turn envelope hit, engagement inputs unconfigured, etc.). Never let a partial scan read as a clean all-clear."
+  },
+  {
+   "fieldname": "session_key",
+   "fieldtype": "Data",
+   "label": "Session Key",
+   "read_only": 1,
+   "search_index": 1,
+   "description": "The opaque per-run Jarvis Chat Session key minted for this run (e.g. agent:<slug>:<run>). Resolves the run-as user for the delegate's jarvis__* calls. Bearer-sensitive; torn down after the run (Phase 4). Indexed: JF-017 resolves the capability contract from it on EVERY plugin tool call."
+  },
+  {
+   "fieldname": "dashboard",
+   "fieldtype": "Link",
+   "label": "Dashboard",
+   "options": "Jarvis Dashboard",
+   "description": "The saved Jarvis Dashboard this run produced (programmatic Run->Dashboard, Phase 4)."
+  },
+  {
+   "default": "0",
+   "fieldname": "source_bytes_read",
+   "fieldtype": "Int",
+   "label": "Source Bytes Read",
+   "read_only": 1,
+   "description": "CX5-3 — Custom App Learning scribe run only: DURABLE running total of custom-app source bytes this run has been served. read_app_source enforces + advances the per-run byte budget against this row under a lock, so the budget survives a cache outage (fail-closed: an unreadable row refuses the read)."
+  },
+  {
+   "default": "0",
+   "fieldname": "pages_written",
+   "fieldtype": "Int",
+   "label": "Pages Written",
+   "read_only": 1,
+   "description": "Custom App Learning scribe run only: count of wiki pages this run wrote (record_app_wiki tally). The Runs tab renders 'N pages written' from this instead of a findings count."
+  },
+  {
+   "fieldname": "pages_json",
+   "fieldtype": "Small Text",
+   "label": "Wiki Pages JSON",
+   "read_only": 1,
+   "description": "Custom App Learning scribe run only: [{slug, title}] of the wiki pages this run wrote, so the Runs tab can link them."
+  },
+  {
+   "fieldname": "coverage_json",
+   "fieldtype": "Small Text",
+   "label": "Coverage JSON",
+   "read_only": 1,
+   "description": "Per-rule coverage manifest {token: evaluated|not_evaluable(reason)|truncated} written back by the evaluator (A16). Gates coverage-scoped auto-resolve."
+  },
+  {
+   "fieldname": "scope_json",
+   "fieldtype": "Small Text",
+   "label": "Scope JSON",
+   "read_only": 1,
+   "description": "The explicit resolved scope {company, fiscal_year, from_date, to_date, prior_fy_start, prior_fy_end} stamped at launch (A6). Injected verbatim into the run message so the container never infers dates."
+  },
+  {
+   "default": "0",
+   "fieldname": "wm_row_count",
+   "fieldtype": "Int",
+   "label": "Watermark GL Row Count",
+   "read_only": 1,
+   "description": "A17 consistency watermark: count of GL Entry rows for the scope company with posting_date <= to_date, as of launch. Recomputed at writeback; a mismatch marks the run partial (GL changed mid-scan)."
+  },
+  {
+   "fieldname": "wm_gl_max_modified",
+   "fieldtype": "Datetime",
+   "label": "Watermark GL Max Modified",
+   "read_only": 1,
+   "description": "A17 consistency watermark: max(GL Entry.modified) for the scope, as of launch."
+  },
+  {
+   "fieldname": "permission_profile",
+   "fieldtype": "Small Text",
+   "label": "Permission Profile",
+   "read_only": 1,
+   "description": "A summary + sha256 of the run-as user's roles + user-permission keys at launch (A12). Lets a drift between mapping-time and run-time perms be detected."
+  },
+  {
+   "fieldname": "integrity_digest",
+   "fieldtype": "Data",
+   "label": "Integrity Digest",
+   "read_only": 1,
+   "description": "The evaluator's sha256 over its canonicalized findings (A1), passed through record_agent_run. Two runs on unchanged data must produce the same digest — the reproducibility proof stored alongside the run."
+  },
+  {
+   "fieldname": "canvas_ref",
+   "fieldtype": "Small Text",
+   "label": "Canvas Ref",
+   "read_only": 1,
+   "description": "The delegate's saved canvas/dashboard reference reported at writeback. Phase 4's save_dashboard resolves this into the Run.dashboard link."
+  },
+  {
+   "fieldname": "result_state",
+   "fieldtype": "Select",
+   "label": "Result State",
+   "options": "evaluated_clean\npartial\nnot_evaluable\nfailed",
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "PP-2 coverage-verdict axis, distinct from the execution-lifecycle status. Computed at writeback: failed if the run errored; not_evaluable if all required tokens are not_evaluable; partial if any partial gate fired; else evaluated_clean. 'No exceptions were found' may render ONLY when this is evaluated_clean."
+  },
+  {
+   "fieldname": "bundle_version",
+   "fieldtype": "Data",
+   "label": "Bundle Version",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "PP-5 — the agent/bundle version stamped IMMUTABLY at launch (unlike the mutable listing/installation version). Controller set-once: changing it after insert raises."
+  },
+  {
+   "fieldname": "preparation_mode",
+   "fieldtype": "Select",
+   "label": "Preparation Mode",
+   "options": "shadow\nlive",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "PP-5 — snapshot of the installation's activation_state at launch (shadow|live), immutable."
+  },
+  {
+   "fieldname": "initiating_human",
+   "fieldtype": "Link",
+   "label": "Initiating Human",
+   "options": "User",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "PP-5 — the human who triggered a manual run (distinct from the run-as user and from the reassigned owner)."
+  },
+  {
+   "fieldname": "capability_contract",
+   "fieldtype": "Select",
+   "label": "Capability Contract",
+   "options": "\nsnapshot\nlegacy",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "JF-017 — which capability regime governs this run. 'snapshot': the three fields below are the authority (a tool outside tools_allow_json is refused at dispatch). 'legacy': the run predates the guard, so no tools_allow gate applies and the write caps read the live listing. Blank on a run created AFTER the guard landed means no launch stamped it: everything is refused."
+  },
+  {
+   "fieldname": "tools_allow_json",
+   "fieldtype": "Small Text",
+   "label": "Tools Allow JSON",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "JF-017 — the EXACT tools_allow the agent's bundled manifest declared, snapshotted at launch. The bench refuses any jarvis__* call outside it before dispatch, so a compromised container/plugin holding this run's session bearer cannot reach a tool the agent never declared. Immutable once stamped."
+  },
+  {
+   "fieldname": "capability_nature",
+   "fieldtype": "Data",
+   "label": "Capability Nature",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "JF-017 — the listing's nature (auditor|operator|scribe) AT LAUNCH. The delegate write caps read this instead of the mutable listing, so re-naturing a listing mid-run cannot grant an in-flight run new write authority."
+  },
+  {
+   "fieldname": "capability_writes_json",
+   "fieldtype": "Small Text",
+   "label": "Capability Writes JSON",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "JF-017 — the declarative operator write contract ([{doctype, mode}]) AT LAUNCH. The create/update capability gate binds to this snapshot, never to the current Jarvis Agent Listing.writes."
   }
  ],
  "index_web_pages_for_search": 0,

@@ -1,60 +1,60 @@
 <script setup>
-import { onMounted, ref } from "vue"
-import { useRouter } from "vue-router"
-import AppBar from "../components/AppBar.vue"
-import * as api from "../api"
-import { store } from "../store"
-import { relativeTime } from "../lib/time"
+import { onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
+import AppBar from "../components/AppBar.vue";
+import * as api from "../api";
+import { store } from "../store";
+import { relativeTime } from "../lib/time";
 
 // File Box: drop a document and get back a chat that has already read it.
 // This is the screen that most wants to be on a phone — the invoice arrives as a
 // photo, and the desk is somewhere else.
-const router = useRouter()
+const router = useRouter();
 
-const rows = ref([])
-const loaded = ref(false)
-const busy = ref(false)
-const error = ref("")
-const fileEl = ref(null)
+const rows = ref([]);
+const loaded = ref(false);
+const busy = ref(false);
+const error = ref("");
+const fileEl = ref(null);
 
 async function load() {
 	try {
-		const page = await api.listInbound(0, 30)
-		rows.value = page?.rows || []
+		const page = await api.listInbound(0, 30);
+		rows.value = page?.rows || [];
 	} catch (e) {
-		error.value = e?.message || "Couldn't load the file box."
+		error.value = e?.message || "Couldn't load the file box.";
 	} finally {
-		loaded.value = true
+		loaded.value = true;
 	}
 }
 
 async function pick(e) {
-	const files = [...(e.target.files || [])]
-	e.target.value = ""
-	if (!files.length || busy.value) return
+	const files = [...(e.target.files || [])];
+	e.target.value = "";
+	if (!files.length || busy.value) return;
 
-	busy.value = true
-	error.value = ""
+	busy.value = true;
+	error.value = "";
 	try {
 		// Upload, then hand the file to the agent. drop_file opens (and starts) a
 		// conversation about it, so go straight there — the processing IS the chat.
-		const up = await api.uploadFile(files[0])
-		const r = await api.dropFile(up.file_url, up.file_name)
+		const up = await api.uploadFile(files[0]);
+		const r = await api.dropFile(up.file_url, up.file_name);
 		if (r?.ok === false) {
-			error.value = r.reason || "Jarvis couldn't take that file."
-			return
+			error.value = r.reason || "Jarvis couldn't take that file.";
+			return;
 		}
-		store.loadConversations()
-		if (r?.conversation_id) router.push(`/c/${r.conversation_id}`)
-		else await load()
+		store.loadConversations();
+		if (r?.conversation_id) router.push(`/c/${r.conversation_id}`);
+		else await load();
 	} catch (e) {
-		error.value = e?.message || "Couldn't upload that file."
+		error.value = e?.message || "Couldn't upload that file.";
 	} finally {
-		busy.value = false
+		busy.value = false;
 	}
 }
 
-onMounted(load)
+onMounted(load);
 </script>
 
 <template>
@@ -63,14 +63,28 @@ onMounted(load)
 	<div class="jv-scroll">
 		<div class="jv-drop">
 			<div class="jv-drop-icon">
-				<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+				<svg
+					viewBox="0 0 24 24"
+					width="22"
+					height="22"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.7"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
 					<path d="M22 12h-6l-2 3h-4l-2-3H2" />
-					<path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+					<path
+						d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"
+					/>
 				</svg>
 			</div>
 			<div class="jv-drop-text">
 				<strong>Drop a document</strong>
-				<span>A bill, a PO, a photo of a receipt. Jarvis reads it and starts a chat about it.</span>
+				<span
+					>A bill, a PO, a photo of a receipt. Jarvis reads it and starts a chat about
+					it.</span
+				>
 			</div>
 			<input ref="fileEl" type="file" hidden @change="pick" />
 			<button class="jv-primary-btn" :disabled="busy" @click="fileEl.click()">
@@ -91,13 +105,26 @@ onMounted(load)
 					<div class="jv-row-main">
 						<div class="jv-row-title">{{ r.title || "Untitled document" }}</div>
 						<div class="jv-row-sub">
-							<span class="jv-pill" :class="{ 'is-done': /done|complete|processed/i.test(r.status || '') }">
+							<span
+								class="jv-pill"
+								:class="{
+									'is-done': /done|complete|processed/i.test(r.status || ''),
+								}"
+							>
 								{{ r.status || "Pending" }}
 							</span>
 							{{ relativeTime(r.creation) }}
 						</div>
 					</div>
-					<svg class="jv-row-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<svg
+						class="jv-row-chev"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<path d="m9 18 6-6-6-6" />
 					</svg>
 				</button>

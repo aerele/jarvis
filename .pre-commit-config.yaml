@@ -1,4 +1,17 @@
-exclude: 'node_modules|.git'
+# This field is a REGEX, not a glob, and it must be ANCHORED. `.git` here once
+# silently excluded every workflow file - so check-yaml never validated the CI
+# config, the one file where a YAML typo just makes things stop running.
+#
+# ESCAPING THE DOT DOES NOT FIX IT. `\.git` is still unanchored and `.github/`
+# literally begins with `.git`, so it matches too - a second repo hit exactly
+# that variant while rolling this config out. Only `^\.git/` is safe.
+# Verify a change with:
+#   python3 -c "import re; print(bool(re.compile(PATTERN).search('.github/workflows/ci.yml')))"
+#
+# `.git/` itself needs no entry at all: pre-commit is only ever handed TRACKED
+# files, and nothing under `.git/` is tracked. The entry bought nothing and
+# created the bug. node_modules stays as cheap insurance against a force-add.
+exclude: '(^|/)node_modules/'
 default_stages: [pre-commit]
 fail_fast: false
 
@@ -10,6 +23,11 @@ repos:
       - id: trailing-whitespace
         files: "jarvis.*"
         exclude: ".*json$|.*txt$|.*csv|.*md|.*svg"
+      # Work lands on develop through a PR, never a direct commit. Branch
+      # protection is a paid feature on private repos, so this is the local
+      # equivalent - it holds on every machine that runs `pre-commit install`.
+      - id: no-commit-to-branch
+        args: ["--branch", "develop", "--branch", "beta"]
       - id: check-merge-conflict
       - id: check-ast
       - id: check-json

@@ -1,6 +1,6 @@
 """Persist codex-generated images into ERP Files + the message canvas.
 
-openclaw's ``imagegen`` skill writes images onto the container's disk under
+agent's ``imagegen`` skill writes images onto the container's disk under
 ``codex-home/generated_images/`` but neither streams them on the WS turn nor
 serves them over HTTP, so the bench can't catch them the way it catches canvas
 artifacts (see ``jarvis/chat/canvas.py``). Instead, after a turn that used
@@ -34,9 +34,7 @@ def _existing_codex_filenames(conversation_id: str) -> set[str]:
 	per-turn fetch (the buffer can overlap a fast prior turn) never double-saves.
 	"""
 	seen: set[str] = set()
-	for canvas_json in frappe.get_all(
-		MSG, filters={"conversation": conversation_id}, pluck="canvas"
-	):
+	for canvas_json in frappe.get_all(MSG, filters={"conversation": conversation_id}, pluck="canvas"):
 		if not canvas_json:
 			continue
 		try:
@@ -56,9 +54,7 @@ def _safe_filename(codex_name: str) -> str:
 	return "jarvis-image-" + (base[-10:] or "out") + ext
 
 
-def persist_generated_images(
-	assistant_msg_name: str, conversation_id: str, turn_start_ms: int
-) -> list[dict]:
+def persist_generated_images(assistant_msg_name: str, conversation_id: str, turn_start_ms: int) -> list[dict]:
 	"""Fetch images produced this turn, save them as private Files on the
 	assistant message, append to its ``canvas`` JSON, and return the new canvas
 	items (so the caller can publish a ``canvas`` event). Best-effort: returns
@@ -66,9 +62,7 @@ def persist_generated_images(
 	from frappe.utils.file_manager import save_file
 
 	try:
-		media = admin_client.get_generated_media(
-			since_ms=max(0, int(turn_start_ms) - _SKEW_BUFFER_MS)
-		)
+		media = admin_client.get_generated_media(since_ms=max(0, int(turn_start_ms) - _SKEW_BUFFER_MS))
 	except Exception:
 		frappe.log_error(
 			title="chat worker: get_generated_media failed",
@@ -97,13 +91,15 @@ def persist_generated_images(
 				message=frappe.get_traceback(),
 			)
 			continue
-		new_items.append({
-			"name": f.file_url,
-			"title": "Generated image",
-			"type": "image",
-			"file_url": f.file_url,
-			"source": fn,  # codex filename - used for dedup on later turns
-		})
+		new_items.append(
+			{
+				"name": f.file_url,
+				"title": "Generated image",
+				"type": "image",
+				"file_url": f.file_url,
+				"source": fn,  # codex filename - used for dedup on later turns
+			}
+		)
 		seen.add(fn)
 
 	if new_items:

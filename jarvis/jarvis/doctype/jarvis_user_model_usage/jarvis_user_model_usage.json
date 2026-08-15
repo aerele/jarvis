@@ -1,0 +1,58 @@
+{
+  "doctype": "DocType",
+  "name": "Jarvis User Model Usage",
+  "module": "Jarvis",
+  "istable": 1,
+  "custom": 0,
+  "engine": "InnoDB",
+  "field_order": [
+    "model",
+    "month_key",
+    "month_input_tokens",
+    "month_output_tokens",
+    "monthly_token_limit"
+  ],
+  "fields": [
+    {
+      "fieldname": "model",
+      "fieldtype": "Data",
+      "label": "Model",
+      "reqd": 1,
+      "in_list_view": 1,
+      "description": "Bare model id actually used for the recorded turns (from the gateway sessions row)."
+    },
+    {
+      "fieldname": "month_key",
+      "fieldtype": "Data",
+      "label": "Month Key",
+      "in_list_view": 1,
+      "description": "Usage month (YYYY-MM) these counters accumulate into."
+    },
+    {
+      "fieldname": "month_input_tokens",
+      "fieldtype": "Int",
+      "label": "Month Input Tokens",
+      "read_only": 1,
+      "no_copy": 1
+    },
+    {
+      "fieldname": "month_output_tokens",
+      "fieldtype": "Int",
+      "label": "Month Output Tokens",
+      "read_only": 1,
+      "no_copy": 1
+    },
+    {
+      "fieldname": "monthly_token_limit",
+      "fieldtype": "Int",
+      "label": "Monthly Token Limit",
+      "default": "0",
+      "in_list_view": 1,
+      "description": "Per-model monthly cap. 0 = unlimited."
+    }
+  ],
+  "permissions": [],
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "track_changes": 0
+}

@@ -1,0 +1,44 @@
+{
+  "doctype": "DocType",
+  "name": "Jarvis Shared Skill Slug",
+  "module": "Jarvis",
+  "issingle": 0,
+  "custom": 0,
+  "engine": "InnoDB",
+  "autoname": "field:slug",
+  "naming_rule": "By fieldname",
+  "field_order": [
+    "slug",
+    "skill"
+  ],
+  "fields": [
+    {
+      "fieldname": "slug",
+      "fieldtype": "Data",
+      "label": "Slug",
+      "reqd": 1,
+      "unique": 1,
+      "in_list_view": 1,
+      "description": "The bare authored slug a shared (Role/Org) skill reserves. The doctype name IS this slug (autoname field:slug), so the primary-key constraint makes it impossible for two shared skills to carry the same slug regardless of write path or concurrency (SR4-2) - the hard guarantee under the controller uniqueness belt (JarvisCustomSkill._validate_shared_slug_unique)."
+    },
+    {
+      "fieldname": "skill",
+      "fieldtype": "Data",
+      "label": "Skill",
+      "read_only": 1,
+      "description": "Docname of the shared Jarvis Custom Skill currently holding this reservation. Plain Data (not a Link, matching source_skill) so deleting the skill never blocks on the reservation; release is keyed on this pointer so one lineage never yanks another's reservation."
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1
+    }
+  ],
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "track_changes": 0
+}

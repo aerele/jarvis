@@ -1,8 +1,8 @@
-import { defineConfig } from "vite"
-import vue from "@vitejs/plugin-vue"
-import frappeui from "frappe-ui/vite"
-import { VitePWA } from "vite-plugin-pwa"
-import path from "path"
+import { defineConfig } from "vite";
+import vue from "@vitejs/plugin-vue";
+import frappeui from "frappe-ui/vite";
+import { VitePWA } from "vite-plugin-pwa";
+import path from "path";
 
 // The phone surface. Builds to jarvis/public/pwa/ and drops its shell at
 // jarvis/www/jarvis_mobile.html, which Frappe serves at /jarvis-mobile (see
@@ -35,7 +35,8 @@ export default defineConfig({
 				id: "/jarvis-mobile",
 				name: "Jarvis",
 				short_name: "Jarvis",
-				description: "Your AI teammate. Ask for anything across your ERP — in plain language.",
+				description:
+					"Your AI teammate. Ask for anything across your ERP, in plain language.",
 				start_url: "/jarvis-mobile",
 				scope: "/jarvis-mobile",
 				display: "standalone",
@@ -46,10 +47,30 @@ export default defineConfig({
 				// ?v=2 cache-busts the install/home-screen icon after the blue-A →
 				// spark swap (same filenames); bump alongside index.html when icons change.
 				icons: [
-					{ src: "/assets/jarvis/manifest/icon-192.png?v=2", sizes: "192x192", type: "image/png", purpose: "any" },
-					{ src: "/assets/jarvis/manifest/icon-512.png?v=2", sizes: "512x512", type: "image/png", purpose: "any" },
-					{ src: "/assets/jarvis/manifest/icon-192-maskable.png?v=2", sizes: "192x192", type: "image/png", purpose: "maskable" },
-					{ src: "/assets/jarvis/manifest/icon-512-maskable.png?v=2", sizes: "512x512", type: "image/png", purpose: "maskable" },
+					{
+						src: "/assets/jarvis/manifest/icon-192.png?v=2",
+						sizes: "192x192",
+						type: "image/png",
+						purpose: "any",
+					},
+					{
+						src: "/assets/jarvis/manifest/icon-512.png?v=2",
+						sizes: "512x512",
+						type: "image/png",
+						purpose: "any",
+					},
+					{
+						src: "/assets/jarvis/manifest/icon-192-maskable.png?v=2",
+						sizes: "192x192",
+						type: "image/png",
+						purpose: "maskable",
+					},
+					{
+						src: "/assets/jarvis/manifest/icon-512-maskable.png?v=2",
+						sizes: "512x512",
+						type: "image/png",
+						purpose: "maskable",
+					},
 				],
 			},
 			injectManifest: {
@@ -75,14 +96,19 @@ export default defineConfig({
 			// means agent replies look the same on both surfaces. It is a
 			// dependency-free module, so importing across apps costs nothing.
 			"@shared": path.resolve(__dirname, "../frontend/src"),
+			// Surface-agnostic chat modules (the Relay-Pump event fence). They live
+			// under jarvis/public/js rather than frontend/src because the Desk widget
+			// is an esbuild bundle that can only reach that tree — see
+			// jarvis/public/js/shared/pump_fence.mjs.
+			"@jsshared": path.resolve(__dirname, "../jarvis/public/js/shared"),
 		},
 		dedupe: ["vue"],
 	},
 	server: {
-		// @shared reaches outside this app's root.
+		// @shared and @jsshared reach outside this app's root.
 		fs: { allow: [".."] },
 	},
 	optimizeDeps: {
 		include: ["frappe-ui > feather-icons", "engine.io-client"],
 	},
-})
+});

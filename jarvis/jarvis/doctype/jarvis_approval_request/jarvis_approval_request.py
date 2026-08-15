@@ -80,18 +80,20 @@ class JarvisApprovalRequest(Document):
 			and frappe.has_permission(self.ref_doctype, "write", self.ref_name, user=decider)
 		):
 			return
-		comment = frappe.get_doc({
-			"doctype": "Comment",
-			"comment_type": "Comment",
-			"reference_doctype": self.ref_doctype,
-			"reference_name": self.ref_name,
-			"content": (
-				f"Approval <b>{self.name}</b> ({frappe.utils.escape_html(self.title or '')}): "
-				f"<b>{self.status}</b> - {frappe.utils.escape_html(self.decision or '')}"
-			),
-			"comment_email": decider,
-			"comment_by": frappe.utils.get_fullname(decider),
-		})
+		comment = frappe.get_doc(
+			{
+				"doctype": "Comment",
+				"comment_type": "Comment",
+				"reference_doctype": self.ref_doctype,
+				"reference_name": self.ref_name,
+				"content": (
+					f"Approval <b>{self.name}</b> ({frappe.utils.escape_html(self.title or '')}): "
+					f"<b>{self.status}</b> - {frappe.utils.escape_html(self.decision or '')}"
+				),
+				"comment_email": decider,
+				"comment_by": frappe.utils.get_fullname(decider),
+			}
+		)
 		comment.flags.ignore_permissions = True
 		comment.insert(ignore_permissions=True)
 		# owner = the approver, so the trace reads as their action.

@@ -11,6 +11,7 @@ posting date + valuation method + inventory dimensions, and an agent
 walking the ledger by hand will silently miss in-flight cancellations,
 batch / serial reservations, and FIFO chains.
 """
+
 from __future__ import annotations
 
 import frappe
@@ -19,36 +20,36 @@ from jarvis.exceptions import InvalidArgumentError
 
 
 def get_stock_balance(
-    item_code: str,
-    warehouse: str,
-    posting_date: str | None = None,
-    with_valuation_rate: bool = False,
+	item_code: str,
+	warehouse: str,
+	posting_date: str | None = None,
+	with_valuation_rate: bool = False,
 ) -> dict:
-    """Return current stock for ``item_code`` at ``warehouse``.
+	"""Return current stock for ``item_code`` at ``warehouse``.
 
-    ``posting_date`` defaults to today when omitted. Returns
-    ``{qty}`` by default; with ``with_valuation_rate=True`` returns
-    ``{qty, rate}`` where ``rate`` is the FIFO/moving-average rate
-    ERPNext computes alongside the qty (no extra DB pass).
-    """
-    if not item_code:
-        raise InvalidArgumentError("item_code is required")
-    if not warehouse:
-        raise InvalidArgumentError("warehouse is required")
-    if not frappe.db.exists("Item", item_code):
-        raise InvalidArgumentError(f"unknown Item: {item_code}")
-    if not frappe.db.exists("Warehouse", warehouse):
-        raise InvalidArgumentError(f"unknown Warehouse: {warehouse}")
+	``posting_date`` defaults to today when omitted. Returns
+	``{qty}`` by default; with ``with_valuation_rate=True`` returns
+	``{qty, rate}`` where ``rate`` is the FIFO/moving-average rate
+	ERPNext computes alongside the qty (no extra DB pass).
+	"""
+	if not item_code:
+		raise InvalidArgumentError("item_code is required")
+	if not warehouse:
+		raise InvalidArgumentError("warehouse is required")
+	if not frappe.db.exists("Item", item_code):
+		raise InvalidArgumentError(f"unknown Item: {item_code}")
+	if not frappe.db.exists("Warehouse", warehouse):
+		raise InvalidArgumentError(f"unknown Warehouse: {warehouse}")
 
-    from erpnext.stock.utils import get_stock_balance as _gsb
+	from erpnext.stock.utils import get_stock_balance as _gsb
 
-    result = _gsb(
-        item_code=item_code,
-        warehouse=warehouse,
-        posting_date=posting_date,
-        with_valuation_rate=bool(with_valuation_rate),
-    )
-    if with_valuation_rate:
-        qty, rate = result
-        return {"qty": float(qty or 0), "rate": float(rate or 0)}
-    return {"qty": float(result or 0)}
+	result = _gsb(
+		item_code=item_code,
+		warehouse=warehouse,
+		posting_date=posting_date,
+		with_valuation_rate=bool(with_valuation_rate),
+	)
+	if with_valuation_rate:
+		qty, rate = result
+		return {"qty": float(qty or 0), "rate": float(rate or 0)}
+	return {"qty": float(result or 0)}

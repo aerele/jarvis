@@ -5,11 +5,17 @@ import frappe
 from frappe.utils import strip_html
 
 from jarvis import audit, telemetry
-from jarvis._http import validate_bearer as _validate_bearer  # noqa: F401 (kept for callers in mcp.py)
+from jarvis._http import validate_bearer as _validate_bearer
 from jarvis._plugin_auth import PluginAuthError, validate_plugin_request
 from jarvis._session import impersonate
-from jarvis.exceptions import InvalidArgumentError, JarvisError
+from jarvis.exceptions import (
+	CapabilityDeniedError,
+	FeatureDisabledError,
+	InvalidArgumentError,
+	JarvisError,
+)
 from jarvis.permissions import has_jarvis_access
+from jarvis.tools._result_guard import enforce_result_budget
 from jarvis.tools.registry import dispatch
 
 
@@ -28,8 +34,8 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 	   are presented together:
 
 	   - ``X-Jarvis-Token`` - the shared ``agent_token`` secret
-	     (proves the request originated inside the openclaw container)
-	   - ``X-Jarvis-Session`` - the openclaw sessionKey for this conversation
+	     (proves the request originated inside the agent container)
+	   - ``X-Jarvis-Session`` - the agent sessionKey for this conversation
 
 	   The token is validated, then the user is resolved from
 	   ``Jarvis Chat Session`` (the row inserted at session-create time maps
@@ -58,31 +64,6 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 			"user",
 		)
 		if not plugin_user:
-			# Self-hosted benches chat over openclaw's HTTP transport, which
-			# creates no Jarvis Chat Session row. The gateway token was already
-			# validated above (proving the call came from the configured
-			# openclaw), so run the tool as the configured self-host tool user
-			# - a self-hosted bench is single-tenant.
-			from jarvis import selfhost
-			if selfhost.is_self_hosted():
-				# The gateway token was validated above, so a callback reaching
-				# here proves openclaw->Frappe reachability. Bump the marker the
-				# connection probe reads (best-effort; self-host branch only, so
-				# the managed/session path never touches it).
-				selfhost.note_callback_seen()
-				plugin_user = _selfhost_tool_user()
-				if not plugin_user:
-					# Self-hosted, but the tool user is unset (or names a user
-					# that no longer exists). Fail with a clear, fixable
-					# message instead of the opaque "unknown session" below.
-					frappe.local.response.http_status_code = 400
-					return _error(
-						"ConfigurationError",
-						"self-hosted tool user is not configured. Set "
-						"'Self-Host Tool User' in Jarvis Settings to a "
-						"non-admin Frappe user so ERP tools can run.",
-					)
-		if not plugin_user:
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
@@ -96,12 +77,10 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 			)
 
 		# NOTE: no Jarvis-access role gate on the plugin path. It is
-		# machine-authenticated (token/HMAC proves the call came from openclaw),
-		# and `plugin_user` is either the real chat user — already gated when they
-		# started the conversation — or, in self-hosted mode, the non-privileged
-		# self-host tool BOT (which legitimately never holds the role). Gating
-		# here rejected every self-hosted tool call. Per-DocType perms still apply
-		# under _dispatch_from_session.
+		# machine-authenticated (token/HMAC proves the call came from agent),
+		# and `plugin_user` is the real chat user — already gated when they
+		# started the conversation. Per-DocType perms still apply under
+		# _dispatch_from_session.
 
 		# C2 stretch (2026-06-16 review): bind session_key -> bench's
 		# device_id at session-create time, verify on every call. If the
@@ -119,24 +98,40 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 		#      so call_tool doesn't 500 on the first call after a deploy.
 		# Once everyone is migrated the strict check applies uniformly.
 		try:
-			row_device = (frappe.db.get_value(
-				"Jarvis Chat Session",
-				{"session_key": session_key},
-				"chat_device_id",
-			) or "").strip()
+			row_device = (
+				frappe.db.get_value(
+					"Jarvis Chat Session",
+					{"session_key": session_key},
+					"chat_device_id",
+				)
+				or ""
+			).strip()
 		except Exception:
 			row_device = ""
-		if row_device:
-			current_device = (
-				frappe.db.get_single_value("Jarvis Settings", "chat_device_id") or ""
-			).strip()
-			if current_device and row_device != current_device:
-				frappe.local.response.http_status_code = 401
-				return _error(
-					"AuthenticationError",
-					"session is bound to a previous device pairing; "
-					"the bench has re-paired since this session was issued",
-				)
+		current_device = (frappe.db.get_single_value("Jarvis Settings", "chat_device_id") or "").strip()
+		from jarvis.chat.device import session_device_is_stale
+
+		if session_device_is_stale(row_device, current_device):
+			frappe.local.response.http_status_code = 401
+			# jarvis #712: this rejection is deliberate (it bounds a leaked
+			# session key's replay window to the next re-pair) and MUST NOT
+			# self-heal here - that would defeat the check. But left as a bare
+			# 401 it was a SILENT permanent outage: no transcript receipt, no
+			# realtime push, nothing telling the customer to start over. The
+			# turn_handler side (handle_chat_send) mints a fresh session for
+			# the NEXT turn on this conversation, so this call_tool rejection
+			# is expected to be transient in practice - but the in-flight turn
+			# that hit it still needs an honest, visible outcome now.
+			tool_call_id = (_get_header("X-Jarvis-Tool-Call-Id") or "").strip() or None
+			_notify_stale_pairing(session_key=session_key, tool=tool, tool_call_id=tool_call_id)
+			return _error(
+				"AuthenticationError",
+				"session is bound to a previous device pairing; "
+				"the bench has re-paired since this session was issued. "
+				"Do not retry this call - it will keep failing. Tell the "
+				"user in your reply: this conversation needs a restart, "
+				"start a new chat to continue. Then stop.",
+			)
 
 		return _dispatch_from_session(plugin_user, session_key, tool, args)
 
@@ -156,31 +151,6 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 	return _dispatch_current_user(tool, args)
 
 
-def _selfhost_tool_user() -> str | None:
-	"""User that plugin tool calls run under in self-hosted mode.
-
-	Self-hosted openclaw uses the HTTP transport, which has no Jarvis Chat
-	Session → user mapping. The gateway token (X-Jarvis-Token) was already
-	validated, so we run tools as the configured self-host tool user (the
-	bench is single-tenant). Returns None when not self-hosted, unset, or the
-	configured user is not a usable tool user.
-	"""
-	from jarvis import selfhost
-	if not selfhost.is_self_hosted():
-		return None
-	s = frappe.get_single("Jarvis Settings")
-	user = (getattr(s, "selfhost_tool_user", "") or "").strip()
-	# Authoritative guard: the selfhost_tool_user Link field can be edited
-	# directly on Jarvis Settings (bypassing save_self_hosted's validation), so
-	# enforce the invariant HERE - never run jarvis__* tools as Administrator
-	# (bypasses all DocType perms), Guest, or a missing/disabled user, however
-	# the field was set. get_value("enabled") is None for missing, 0 for disabled.
-	if (user and user not in ("Guest", "Administrator")
-			and frappe.db.get_value("User", user, "enabled")):
-		return user
-	return None
-
-
 def _dispatch_current_user(tool: str, args: dict | str | None) -> dict:
 	return _run_tool(tool, args)
 
@@ -196,31 +166,163 @@ def _dispatch_from_session(
 	"""
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
-	with impersonate(user):
-		# Parse args up front so persist_and_publish gets the same
-		# dict shape the tool ran against (or the empty dict on a
-		# malformed-args rejection).
-		try:
-			parsed_args = _parse_args(args)
-		except InvalidArgumentError as e:
-			result = _error("InvalidArgumentError", str(e))
+	from jarvis.tools import _agent_run_ctx, _delegate_capability
+
+	# Expose the caller's session_key to the tool for this dispatch (the LLM
+	# never authors it — it is the delegate's opaque bearer, delivered over the
+	# HTTPS header). record_agent_run resolves its Jarvis Agent Run from it.
+	# R-6: the agent tool-call id, when the plugin sends it (forward-compatible
+	# header), keys the out-of-band receipt idempotency. Absent today => no dedupe,
+	# but the seq race is still fixed under the conversation lock.
+	tool_call_id = (_get_header("X-Jarvis-Tool-Call-Id") or "").strip() or None
+	_agent_run_ctx.set_session_key(session_key)
+	try:
+		with impersonate(user):
+			# JF-017 — the delegate capability gate, BEFORE anything is dispatched.
+			# When this session resolves to a marketplace-agent run, the only tools it
+			# may call are the ones its manifest declared and the bench snapshotted
+			# onto the run at launch. The container's tools.allow is configuration
+			# (fleet renders it into openclaw.json); it is not authorization, so a
+			# compromised container/plugin or a leaked run bearer would otherwise
+			# reach ANY registered tool the run-as user's Frappe roles permit. Fails
+			# closed: a run with no snapshot and no legacy marker is refused outright.
+			# Non-delegate sessions (ordinary chat) resolve to None and are untouched.
+			denial = _delegate_capability.tool_denial(session_key, tool)
+			if denial:
+				code = CapabilityDeniedError.__name__
+				hint = _hint_for(code, "")
+				# The DELEGATE reads this one: the contract vocabulary, and (inside the
+				# message, the only field the plugin relays to the model) the fact that
+				# retrying can never help because the snapshot is fixed for the run.
+				result = _error(code, denial["message"], hint=hint)
+				# What was ATTEMPTED is the forensic value of a refusal, so record the
+				# args too — scrubbed + truncated by audit.record. Parsed only here,
+				# inside the deny branch, so the gate itself stays the first thing that
+				# runs and a malformed-args call is still refused on the contract.
+				try:
+					attempted = _parse_args(args)
+				except JarvisError:
+					attempted = {}
+				audit.record(
+					tool=tool,
+					args=attempted,
+					ok=False,
+					error_code=code,
+					error_message=denial["message"],
+				)
+				# The CUSTOMER reads this one. The transcript receipt renders verbatim
+				# in chat, so it carries plain language plus the remedy — the contract
+				# wording stays in the audit trail and the delegate's envelope above.
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=attempted,
+					result=_error(code, denial["chat_message"], hint=hint),
+					tool_call_id=tool_call_id,
+				)
+				if denial["fatal"]:
+					# This run's contract authorises NOTHING — record_agent_run included
+					# — so it can never finish itself. Terminalize it NOW with the real
+					# reason instead of leaving it "running" for the 3h stale-run sweep
+					# to mislabel as a timeout.
+					from jarvis.chat import agent_scheduler
+
+					agent_scheduler.fail_run(denial["run"], denial["run_error"])
+				return result
+			# Parse args up front so persist_and_publish gets the same
+			# dict shape the tool ran against (or the empty dict on a
+			# malformed-args rejection).
+			try:
+				parsed_args = _parse_args(args)
+			except InvalidArgumentError as e:
+				result = _error("InvalidArgumentError", str(e))
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args={},
+					result=result,
+					tool_call_id=tool_call_id,
+				)
+				return result
+			# Pass the already-parsed dict back through _run_tool. _run_tool's
+			# _parse_args call is idempotent on dicts (no JSON parse path,
+			# legacy-marker strip is also idempotent), so no double-work.
+			# Resolve the conversation for this session up front so the
+			# confirmation gate can bind a parked write to it.
+			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
+			result = _run_tool(tool, parsed_args, conversation=conv)
+			# Agent-boundary model-facing size cap. ONLY on this (agent session)
+			# path - the dashboard builder/desk/external call_tool callers go through
+			# _dispatch_current_user and are deliberately uncapped.
+			if isinstance(result, dict) and result.get("ok"):
+				guarded, event = enforce_result_budget(result["data"], tool=tool)
+				if event:
+					result["data"] = guarded
+					telemetry.record_budget_event(
+						tool=tool,
+						outcome=event["kind"],
+						original_chars=event["original_chars"],
+						shown=event["shown"],
+						total=event["total"],
+					)
 			_persist_and_publish_tool_call(
-				session_key=session_key, tool=tool, args={}, result=result,
+				session_key=session_key,
+				tool=tool,
+				args=parsed_args,
+				result=result,
+				tool_call_id=tool_call_id,
 			)
 			return result
-		# Pass the already-parsed dict back through _run_tool. _run_tool's
-		# _parse_args call is idempotent on dicts (no JSON parse path,
-		# legacy-marker strip is also idempotent), so no double-work.
-		# Resolve the conversation for this session up front so the
-		# confirmation gate can bind a parked write to it (managed mode); the
-		# gate also falls back to the active-turn marker for run_id.
-		conv = frappe.db.get_value(
-			"Jarvis Conversation", {"session_key": session_key}, "name")
-		result = _run_tool(tool, parsed_args, conversation=conv)
+	finally:
+		_agent_run_ctx.clear_session_key()
+
+
+_STALE_PAIRING_DEDUPE_TTL_S = 3600
+
+
+def _notify_stale_pairing(*, session_key: str, tool: str, tool_call_id: str | None = None) -> None:
+	"""Make a stale-device-pairing 401 (jarvis #712) visible to the customer
+	instead of a silent permanent outage: persist a normal tool-error receipt
+	into the conversation transcript and push it over the realtime channel,
+	the same way ``_persist_and_publish_tool_call`` does for an ordinary
+	dispatched call. Best-effort and NEVER raises - this runs on the reject
+	path, so a persistence hiccup here must not turn a clean 401 into a 500.
+
+	Deduped per session_key (cache, ``_STALE_PAIRING_DEDUPE_TTL_S``): every
+	tool call the model makes in the SAME broken turn hits this same
+	rejection, and without a guard each one would write another identical
+	row, burying the transcript. One notice per stale session is enough -
+	the model is told in the wire message not to retry, and the next turn on
+	this conversation gets a freshly re-paired session from turn_handler.
+	"""
+	dedupe_key = f"jarvis:stale_pairing_notified:{session_key}"
+	try:
+		if frappe.cache().get_value(dedupe_key):
+			return
+	except Exception:
+		pass  # cache unavailable - fall through and notify anyway
+	message = (
+		"This conversation's connection is out of date: the assistant was "
+		"re-paired after this chat started, so it can no longer run tools "
+		"here. Please start a new chat to continue."
+	)
+	try:
 		_persist_and_publish_tool_call(
-			session_key=session_key, tool=tool, args=parsed_args, result=result,
+			session_key=session_key,
+			tool=tool,
+			args={},
+			result=_error("AuthenticationError", message),
+			tool_call_id=tool_call_id,
 		)
-		return result
+	except Exception:
+		frappe.log_error(
+			title="call_tool: stale-pairing notice failed",
+			message=frappe.get_traceback(),
+		)
+	try:
+		frappe.cache().set_value(dedupe_key, 1, expires_in_sec=_STALE_PAIRING_DEDUPE_TTL_S)
+	except Exception:
+		pass
 
 
 def _persist_and_publish_tool_call(
@@ -229,6 +331,7 @@ def _persist_and_publish_tool_call(
 	tool: str,
 	args: dict,
 	result: dict,
+	tool_call_id: str | None = None,
 ) -> None:
 	"""Persist a Jarvis Chat Message (role=tool) and publish a realtime event.
 
@@ -236,23 +339,52 @@ def _persist_and_publish_tool_call(
 	"""
 	conv_name = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
 	if not conv_name:
-		# Self-hosted: the openclaw HTTP session key isn't linked to a
-		# conversation. Attribute the tool call to the in-flight self-host
-		# turn (keyed by the tool user = current dispatch user) so the UI
-		# renders the tool card like managed mode. get_active_turn returns
-		# None when 2+ turns are concurrently active for the tool user, so an
-		# ambiguous tool call is dropped rather than mis-filed into - and
-		# realtime-leaked to - the wrong conversation.
-		from jarvis import selfhost
-		turn = selfhost.get_active_turn(frappe.session.user) if selfhost.is_self_hosted() else None
-		conv_name = (turn or {}).get("conversation")
-		if not conv_name:
-			return
-	persist_tool_receipt(conv_name, tool, args, result)
+		return
+	persist_tool_receipt(conv_name, tool, args, result, tool_call_id=tool_call_id)
 
 
-def persist_tool_receipt(conv_name: str, tool: str, args: dict, result: dict | None,
-						 *, action_outcome: str | None = None) -> None:
+def _locked_insert_chat_message(
+	conv_name: str, fields: dict, *, dedupe_filters: dict | None = None
+) -> str | None:
+	"""Allocate the next ``seq`` for ``conv_name`` UNDER a ``Jarvis Conversation``
+	``FOR UPDATE`` lock and insert one ``Jarvis Chat Message`` with ``fields`` merged
+	onto ``{conversation, seq}``. Returns the message name, or ``None`` when
+	``dedupe_filters`` already matches a row (nothing inserted).
+
+	MUST be called inside an ``impersonate(conv_owner)`` block that has already
+	``commit``ed, so this ``FOR UPDATE`` is the first statement of the transaction
+	(REPEATABLE-READ discipline). The caller commits AFTER (releasing the lock) and
+	publishes post-commit. This is the ONE ``FOR UPDATE`` + ``MAX(seq)+1`` critical
+	section in the codebase - shared by ``persist_tool_receipt`` (inline + confirmed
+	receipts) and ``import_announce._post_completion`` (the import auto-tell) so the
+	seq-collision guard is never forked (PC-1)."""
+	frappe.db.sql(
+		"SELECT name FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE",
+		{"c": conv_name},
+	)
+	if dedupe_filters and frappe.db.exists("Jarvis Chat Message", dedupe_filters):
+		return None
+	seq = (
+		frappe.db.sql(
+			"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s",
+			{"c": conv_name},
+		)[0][0]
+		or 0
+	) + 1
+	doc = frappe.get_doc({"doctype": "Jarvis Chat Message", "conversation": conv_name, "seq": seq, **fields})
+	doc.insert(ignore_permissions=True)
+	return doc.name
+
+
+def persist_tool_receipt(
+	conv_name: str,
+	tool: str,
+	args: dict,
+	result: dict | None,
+	*,
+	action_outcome: str | None = None,
+	tool_call_id: str | None = None,
+) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
 	publish the realtime tool:result event, running as the conversation owner so
 	DocType perms allow the insert. Shared by the inline model-write path
@@ -264,7 +396,18 @@ def persist_tool_receipt(conv_name: str, tool: str, args: dict, result: dict | N
 	renders it as an inline receipt chip instead of an Activity-accordion tool
 	row: "confirmed" (ran ok), "failed" (confirmed but errored), or "discarded"
 	(the user declined - nothing ran, so ``result`` may be None/empty). Ordinary
-	inline tool calls pass None and render unchanged."""
+	inline tool calls pass None and render unchanged.
+
+	R-6 (WP-1d) tool-receipt hardening — the receipt is a PRECIOUS out-of-band fact
+	(it must be written even mid-hop, so it stays OUT-of-band with NO epoch fence):
+	  * ``seq`` is allocated UNDER the conversation FOR UPDATE lock (shared with the
+	    assistant-placeholder + user-message seq, D3 Race 1 / D1 #7) so two
+	    concurrent receipts (or a receipt racing the placeholder) never collide on
+	    ``MAX(seq)+1``;
+	  * ``(conversation, tool_call_id)`` is the durable idempotency key — a duplicate
+	    callback for the SAME tool call dedupes instead of double-writing. ``tool_call_id``
+	    is null for legacy callbacks that carry no id (no dedupe then, but
+	    the seq race is still fixed)."""
 	result = result or {}
 	discarded = action_outcome == "discarded"
 	if discarded:
@@ -282,9 +425,11 @@ def persist_tool_receipt(conv_name: str, tool: str, args: dict, result: dict | N
 	if not discarded:
 		try:
 			from jarvis.chat.entities import refs_from_tool
+
 			# refs_from_tool expects the tool's raw data, not the {ok, data} envelope.
 			ref_doctype, ref_name = refs_from_tool(
-				args, result.get("data") if isinstance(result, dict) else None)
+				args, result.get("data") if isinstance(result, dict) else None
+			)
 		except Exception:
 			ref_doctype = ref_name = None
 
@@ -293,28 +438,42 @@ def persist_tool_receipt(conv_name: str, tool: str, args: dict, result: dict | N
 	# caller's cookie session sid + data and log them out).
 	conv_owner = frappe.db.get_value("Jarvis Conversation", conv_name, "owner")
 	with impersonate(conv_owner):
-		from jarvis.chat.api import _next_seq
-		seq = _next_seq(conv_name)
-		doc = frappe.get_doc({
-			"doctype": "Jarvis Chat Message",
-			"conversation": conv_name,
-			"seq": seq,
-			"role": "tool",
-			"tool_name": tool,
-			"tool_args": frappe.as_json(args),
-			"tool_result": frappe.as_json(result) if result else None,
-			"tool_status": status,
-			"action_outcome": action_outcome or None,
-			"ref_doctype": ref_doctype,
-			"ref_name": ref_name,
-			"content": f"{tool} → {action_outcome or status}",
-		})
-		doc.insert(ignore_permissions=True)
+		# R-6: take the conversation FOR UPDATE (canonical rank 2, out-of-band, NO
+		# epoch fence) so the seq allocation + the (conversation, tool_call_id)
+		# dedupe are one serialized critical section — no receipt collides on seq
+		# with a concurrent receipt or the assistant placeholder, and a duplicate
+		# callback for the same tool call is a no-op. Commit-first so the FOR UPDATE
+		# is the first statement (REPEATABLE-READ discipline).
 		frappe.db.commit()
+		msg_name = _locked_insert_chat_message(
+			conv_name,
+			{
+				"role": "tool",
+				"tool_name": tool,
+				"tool_args": frappe.as_json(args),
+				"tool_result": frappe.as_json(result) if result else None,
+				"tool_status": status,
+				"tool_call_id": tool_call_id or None,
+				"action_outcome": action_outcome or None,
+				"ref_doctype": ref_doctype,
+				"ref_name": ref_name,
+				"content": f"{tool} → {action_outcome or status}",
+			},
+			# ``(conversation, tool_call_id)`` dedupe — a duplicate callback for the SAME
+			# tool call is a no-op (R-6 out-of-band idempotency). Null id: no dedupe, but
+			# the seq race is still fixed by the shared FOR UPDATE.
+			dedupe_filters=(
+				{"conversation": conv_name, "tool_call_id": tool_call_id} if tool_call_id else None
+			),
+		)
+		frappe.db.commit()
+		if msg_name is None:
+			# Duplicate callback for the same tool call — already recorded (R-6 idempotent).
+			return
 		publish_realtime_tool_result(
 			user=conv_owner,
 			conversation_id=conv_name,
-			tool_message_id=doc.name,
+			tool_message_id=msg_name,
 			tool_name=tool,
 			args=args,
 			result=result,
@@ -348,16 +507,23 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 	item = {
 		"name": filename,
 		"title": data.get("title") or canvas_mod._title_for(filename, None, typ),
-		"type": typ, "file_url": file_url,
+		"type": typ,
+		"file_url": file_url,
 	}
 	MSG = "Jarvis Chat Message"
 	# Prefer the in-flight (streaming) assistant message; fall back to the latest.
 	rows = frappe.get_all(
-		MSG, filters={"conversation": conv_name, "role": "assistant", "streaming": 1},
-		order_by="seq desc", limit=1, pluck="name",
+		MSG,
+		filters={"conversation": conv_name, "role": "assistant", "streaming": 1},
+		order_by="seq desc",
+		limit=1,
+		pluck="name",
 	) or frappe.get_all(
-		MSG, filters={"conversation": conv_name, "role": "assistant"},
-		order_by="seq desc", limit=1, pluck="name",
+		MSG,
+		filters={"conversation": conv_name, "role": "assistant"},
+		order_by="seq desc",
+		limit=1,
+		pluck="name",
 	)
 	if not rows:
 		return
@@ -438,25 +604,84 @@ def _parse_args(args: dict | str | None) -> dict:
 
 # Mutating tools: audited on every call, and the only tools that accept
 # ``preview`` (a dry-run with every DB write rolled back).
-_WRITE_TOOLS = frozenset({
-	"create_doc", "create_docs", "update_doc", "submit_doc", "cancel_doc", "amend_doc",
-	"delete_doc", "run_method", "apply_workflow_action",
-	"send_email", "add_comment", "update_comment", "share_doc", "unshare_doc",
-	"assign_to", "unassign_from", "add_tag", "remove_tag",
-	"follow_document", "unfollow_document", "attach_to_doc",
-	"create_dashboard_chart", "create_dashboard",
-	"create_custom_skill", "update_wiki",
-	# Audited but NOT gated (see _GATED_WRITES comment below): run_scrutiny's
-	# optional persistence path inserts Jarvis Agent Run/Finding rows, and
-	# download_pdf/export_excel both insert a File doc (download_pdf also
-	# attaches it) - real DB writes that need an audit trail, not a
-	# confirmation card (audit-findings.md F24/F25).
-	"run_scrutiny", "download_pdf", "export_excel",
-})
-_PREVIEWABLE = frozenset({
-	"create_doc", "create_docs", "update_doc", "submit_doc", "cancel_doc",
-	"amend_doc", "delete_doc", "run_method",
-})
+_WRITE_TOOLS = frozenset(
+	{
+		"create_doc",
+		"create_docs",
+		"update_doc",
+		"submit_doc",
+		"cancel_doc",
+		"amend_doc",
+		"delete_doc",
+		"run_method",
+		"run_import",
+		"apply_workflow_action",
+		"send_email",
+		"add_comment",
+		"update_comment",
+		"share_doc",
+		"unshare_doc",
+		"assign_to",
+		"unassign_from",
+		"add_tag",
+		"remove_tag",
+		"follow_document",
+		"unfollow_document",
+		"attach_to_doc",
+		"create_dashboard_chart",
+		"create_dashboard",
+		"create_custom_skill",
+		"update_wiki",
+		# Audited but NOT gated (see _GATED_WRITES comment below):
+		# download_pdf/export_excel both insert a File doc (download_pdf also
+		# attaches it) - real DB writes that need an audit trail, not a
+		# confirmation card (audit-findings.md F24/F25). record_agent_run is the
+		# delegate's Phase-3 findings writeback: it inserts Jarvis Agent Run/Finding
+		# rows deterministically (validated, coverage-scoped) from a detached agent
+		# turn where nobody can click a confirm card, so it is audited but NEVER
+		# gated - the human review happens on the Findings board, not a card.
+		# record_app_wiki is the Custom App Learning scribe delegate's wiki
+		# writeback: like record_agent_run it lands its declared output (wiki
+		# pages) from a detached, unattended turn through a reviewed server funnel
+		# (apply_extracted_page_updates + the controller sanitizer), so it is
+		# audited but NEVER gated (and NOT the gated update_wiki card path).
+		# finish_app_learning_run is the scribe delegate's TERMINAL run finalizer:
+		# it flips the bound Jarvis Agent Run to completed (with the pages tally
+		# record_app_wiki stamped) from a detached turn — audited but NEVER gated
+		# (no card to click), like record_agent_run.
+		# save_agent_dashboard inserts the delegate's Jarvis Dashboard document
+		# (a real DB write of customer-derived audit output) from the same
+		# detached turn as record_agent_run beside it — audited, never gated.
+		"download_pdf",
+		"export_excel",
+		# export_query / report_pdf / export_document all insert a private File
+		# (export_query + report_pdf via the shared save_export_file seam,
+		# export_document via its own save_file) - the same File-write class as
+		# download_pdf/export_excel, so they are audited (never gated: no card, the
+		# artifact is the point). export_query in particular is the highest-throughput
+		# bulk-export path (server-side, up to the row ceiling, never transiting the
+		# visible transcript), so a "who exported what" audit row is load-bearing.
+		"export_query",
+		"report_pdf",
+		"export_document",
+		"record_agent_run",
+		"record_app_wiki",
+		"finish_app_learning_run",
+		"save_agent_dashboard",
+	}
+)
+_PREVIEWABLE = frozenset(
+	{
+		"create_doc",
+		"create_docs",
+		"update_doc",
+		"submit_doc",
+		"cancel_doc",
+		"amend_doc",
+		"delete_doc",
+		"run_method",
+	}
+)
 # Writes that MUST get a human confirmation before executing (issue #186).
 # The lighter mutators in _WRITE_TOOLS (comments/tags/attach/dashboard-create)
 # are intentionally NOT gated - they never fire the card. share_doc/assign_to
@@ -467,15 +692,35 @@ _PREVIEWABLE = frozenset({
 # meaningful for a share grant or a ToDo+notification email, so both fall
 # through to the described-intent park path (like send_email) rather than a
 # sandboxed dry-run.
-_GATED_WRITES = frozenset({
-	"create_doc", "create_docs", "update_doc", "submit_doc", "cancel_doc",
-	"amend_doc", "delete_doc", "run_method", "apply_workflow_action", "send_email",
-	"create_custom_skill", "update_wiki",
-	"share_doc", "assign_to",
-})
+_GATED_WRITES = frozenset(
+	{
+		"create_doc",
+		"create_docs",
+		"update_doc",
+		"submit_doc",
+		"cancel_doc",
+		"amend_doc",
+		"delete_doc",
+		"run_method",
+		"run_import",
+		"apply_workflow_action",
+		"send_email",
+		"create_custom_skill",
+		"update_wiki",
+		"share_doc",
+		"assign_to",
+	}
+)
+# #493: the agent-facing wiki surface, refused wholesale when the operator has
+# switched "Enable Business Wiki" off. Deliberately just the two tools the issue
+# names - record_app_wiki (the app-learning scribe's audited-not-gated writeback)
+# is a different feature's pipeline and is out of scope here.
+_WIKI_TOOLS = frozenset({"read_wiki", "update_wiki"})
 # Irreversible/consequential subset - gated even when a user has auto-apply
 # on (Task 4 uses this; define it here so the sets live together).
-_DESTRUCTIVE = frozenset({"delete_doc", "cancel_doc", "amend_doc", "send_email", "apply_workflow_action"})
+_DESTRUCTIVE = frozenset(
+	{"delete_doc", "cancel_doc", "amend_doc", "send_email", "apply_workflow_action", "run_import"}
+)
 # Writes that auto-apply may fast-path without a confirmation click. Strictly
 # the reversible create/update pair, per spec. submit_doc, run_method and every
 # _DESTRUCTIVE tool ALWAYS park even with auto-apply on: run_method's
@@ -538,10 +783,7 @@ def _bulk_targets(args: dict) -> list:
 	for key in ("updates", "messages"):
 		items = args.get(key)
 		if isinstance(items, list):
-			return [
-				(it.get("name") or it.get("recipients") or "?")
-				for it in items if isinstance(it, dict)
-			]
+			return [(it.get("name") or it.get("recipients") or "?") for it in items if isinstance(it, dict)]
 	docs = args.get("docs")
 	if isinstance(docs, list):
 		return [it.get("doctype", "?") for it in docs if isinstance(it, dict)]
@@ -568,10 +810,12 @@ def _run_preview(tool: str, args: dict) -> dict:
 	return {
 		"preview": True,
 		"would": would,
-		"note": ("Validated with all DB writes rolled back; nothing was "
-				 "committed or queued. Side effects fired directly inside "
-				 "hooks (inline HTTP calls in on_submit / on_cancel) are "
-				 "not sandboxed by preview."),
+		"note": (
+			"Validated with all DB writes rolled back; nothing was "
+			"committed or queued. Side effects fired directly inside "
+			"hooks (inline HTTP calls in on_submit / on_cancel) are "
+			"not sandboxed by preview."
+		),
 	}
 
 
@@ -586,26 +830,6 @@ def _preview_error(e: Exception) -> dict:
 		return _error("PermissionDeniedError", str(e) or "permission denied")
 	# frappe.ValidationError (incl. MandatoryError) / frappe.DuplicateEntryError
 	return _error("InvalidArgumentError", str(e) or type(e).__name__)
-
-
-def _gate_context(conversation: str | None) -> tuple[str, str]:
-	"""Resolve (conversation, run_id) for the in-flight turn so a parked call
-	can be bound to it.
-
-	Primary source is ``selfhost.get_active_turn(current_user)`` - the only
-	place run_id is tracked - which returns ``{conversation, owner, run_id}``
-	for the single unambiguous in-flight turn. An explicit ``conversation``
-	(managed mode resolves it from the session_key upstream) wins for the
-	conversation binding; run_id only ever comes from the active turn. When
-	neither is available (direct-Python calls, ambiguous concurrency) both
-	fall back to "" - the token is then bound by OWNER alone, which is the
-	real security boundary; conversation binding is a secondary replay guard.
-	"""
-	from jarvis import selfhost
-	turn = selfhost.get_active_turn(frappe.session.user) or {}
-	conv = conversation or turn.get("conversation") or ""
-	run_id = turn.get("run_id") or ""
-	return conv, run_id
 
 
 def _describe_call(tool: str, args: dict) -> str:
@@ -629,8 +853,23 @@ def _describe_call(tool: str, args: dict) -> str:
 			parts.append(f"targets=[{shown}]")
 		return " ".join(str(p) for p in parts)
 	parts = [tool]
-	for key in ("doctype", "name", "docname", "target_doctype", "target_name",
-				"method", "action", "recipients", "to", "subject"):
+	for key in (
+		"doctype",
+		"name",
+		"docname",
+		"target_doctype",
+		"target_name",
+		"method",
+		"action",
+		"recipients",
+		"to",
+		"subject",
+		"user",
+		"skill_name",
+		"slug",
+		"title",
+		"scope",
+	):
 		val = a.get(key)
 		if val:
 			parts.append(f"{key}={val}")
@@ -663,17 +902,107 @@ def _pending_preview(tool: str, args: dict) -> dict:
 	# (the resync path reaches _pending_preview directly, bypassing the
 	# _DRY_RUN_ON_PARK branch): they are _DRY_RUN_ON_PARK - rolled back, no
 	# consequential hooks - so exclude them from the bulk described routing.
-	if (tool not in _PREVIEWABLE or tool == "run_method"
-			or (_is_bulk_call(args) and tool not in _DRY_RUN_ON_PARK)):
+	if (
+		tool not in _PREVIEWABLE
+		or tool == "run_method"
+		or (_is_bulk_call(args) and tool not in _DRY_RUN_ON_PARK)
+	):
 		return described
 	try:
 		return _run_preview(tool, args)
-	except (JarvisError, frappe.PermissionError, frappe.ValidationError,
-			frappe.DuplicateEntryError) as e:
+	except (JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError) as e:
 		# The call would fail validation - surface that in the card rather
 		# than blocking the park, so the human sees why before confirming.
 		described["note"] = f"preview unavailable: {e}"
 		return described
+
+
+def _import_park(args: dict) -> tuple[dict | None, dict | None]:
+	"""Park-time validation for ``run_import`` (analogous to the ``_DRY_RUN_ON_PARK``
+	pre-park block, but for a tool that cannot be sandbox-run). Computes the read-only
+	import preview AS THE CALLER and REFUSES - returns an error envelope, mints no token,
+	shows no card - when the import cannot run:
+
+	  * a non-importable doctype (blocked / ``allow_import`` off),
+	  * blocking warnings (invalid values / an unmapped mandatory field / Update-Upsert
+	    without an ID column) - so the human never confirms a card that imports nothing,
+	  * a caller who cannot create Data Imports (usually not a System Manager) - so a
+	    non-admin never gets a confirm-then-fail.
+
+	On success returns ``(None, preview)`` where ``preview`` carries the whole import
+	payload the card renders from (``preview["import"]``) and a described-intent note
+	(so a build_card miss still shows the guaranteed floor, never a blank card)."""
+	from jarvis.tools._import_preview import build_import_preview
+
+	if not isinstance(args, dict):
+		return _error("InvalidArgumentError", "run_import needs arguments"), None
+	# Kill-switch honored AT PARK: refuse before showing a card, never confirm-then-fail.
+	if frappe.conf.get("jarvis_import_disabled"):
+		return (
+			_error(
+				"FeatureDisabledError",
+				"imports are switched off on this site right now; ask an administrator to re-enable them.",
+			),
+			None,
+		)
+	try:
+		prev = build_import_preview(
+			doctype=args.get("doctype"),
+			file_url=args.get("file_url"),
+			filename=args.get("filename"),
+			import_type=args.get("import_type") or "Insert New Records",
+			mapping=args.get("mapping"),
+		)
+	except (JarvisError, frappe.PermissionError, frappe.ValidationError) as e:
+		return _preview_error(e), None
+
+	if not prev.get("importable"):
+		return _error(
+			"InvalidArgumentError", prev.get("reason") or "this doctype does not allow import"
+		), None
+
+	blocking = (prev.get("warnings") or {}).get("blocking") or []
+	if blocking:
+		reasons = "; ".join(b.get("message", "") for b in blocking if b.get("message"))
+		return (
+			_error(
+				"ImportBlockedError",
+				f"the import can't run yet - {reasons}. Fix the file or adjust the column "
+				"mapping (call preview_import to see the details), then try again.",
+			),
+			None,
+		)
+
+	if not prev.get("can_run"):
+		return (
+			_error(
+				"PermissionDeniedError",
+				"you don't have permission to run imports on this site (it needs the Data "
+				"Import create permission, usually System Manager); ask an administrator.",
+			),
+			None,
+		)
+
+	# Thread the RESOLVED file identity into the stored args so confirm imports the EXACT
+	# file the card showed. A bare ``filename`` re-resolves to "most recent readable match"
+	# at confirm and could drift to a different file uploaded meanwhile. ``args`` is the
+	# same dict api.py stores in the confirmation token, so this canonicalizes both.
+	resolved = prev.get("resolved_file_url")
+	if resolved:
+		args["file_url"] = resolved
+		args.pop("filename", None)
+
+	# Nothing here should surface a validation msgprint on the success path.
+	frappe.clear_messages()
+
+	preview = {
+		"preview": False,
+		"described": True,
+		"summary": _describe_call("run_import", args),
+		"note": f"not a dry run - this imports the file into {prev.get('doctype')} on confirm",
+		"import": prev,
+	}
+	return None, preview
 
 
 # --- Enriched write-error translation (shared by the model/confirm path here
@@ -698,8 +1027,21 @@ _ERROR_HINTS = {
 		"administrator to review your permissions."
 	),
 	"InvalidArgumentError": (
-		"Some of the values need attention - check the highlighted fields and "
-		"try again."
+		"Some of the values need attention - check the highlighted fields and try again."
+	),
+	# JF-017. The agent's tool surface is fixed when it is published, so unlike a
+	# permission denial there is nothing the USER can change - the remedy is the
+	# bundle. (The delegate's own "retrying will not help" instruction rides in the
+	# message; the plugin relays only code + message to the model.)
+	"CapabilityDeniedError": (
+		"This agent can only use the tools it was published with. Ask your "
+		"administrator to review the agent's bundle if it needs another one."
+	),
+	# #493. A settings checkbox, not a role, so pointing at permissions would send
+	# the user looking in the wrong place entirely.
+	"FeatureDisabledError": (
+		"This feature is switched off for your workspace. Ask your administrator to "
+		"turn it back on in Jarvis Settings if you need it."
 	),
 }
 # Frappe's User-Permission link denial reads "...not allowed to access this X
@@ -817,8 +1159,9 @@ def _dispatch_and_wrap(tool: str, args: dict, is_write: bool) -> dict:
 		envelope = _translate_write_error(e, mark)
 		if envelope is None:  # unexpected - audit then re-raise to Frappe (500)
 			if is_write:
-				audit.record(tool=tool, args=args, ok=False,
-							 error_code=type(e).__name__, error_message=str(e))
+				audit.record(
+					tool=tool, args=args, ok=False, error_code=type(e).__name__, error_message=str(e)
+				)
 			raise
 		if sp:
 			# Undo this tool's partial writes. Guard against a tool that committed
@@ -830,8 +1173,9 @@ def _dispatch_and_wrap(tool: str, args: dict, is_write: bool) -> dict:
 				pass
 		if is_write:
 			err_obj = envelope["error"]
-			audit.record(tool=tool, args=args, ok=False,
-						 error_code=err_obj["code"], error_message=err_obj["message"])
+			audit.record(
+				tool=tool, args=args, ok=False, error_code=err_obj["code"], error_message=err_obj["message"]
+			)
 		return envelope
 	if sp:
 		try:
@@ -853,8 +1197,7 @@ def dispatch_confirmed(tool: str, args: dict) -> dict:
 	return _dispatch_and_wrap(tool, args, is_write=True)
 
 
-def _run_tool(tool: str, raw_args: dict | str | None,
-			  *, conversation: str | None = None) -> dict:
+def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
 	"""Parse args + dispatch + wrap in the bench's standard envelope.
 
 	The translation layer between tool-level Python exceptions and
@@ -877,6 +1220,20 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 	into one to match the reviewer's "native handler" pattern note
 	from the 2026-06-16 punch list.
 	"""
+	# #493: "Enable Business Wiki" is the operator's only wiki kill switch, so it
+	# must refuse the agent-facing wiki tools too, not only the automatic
+	# behaviours. Checked HERE, ahead of everything, because update_wiki is a
+	# _GATED_WRITES tool: without this it parks a confirmation card on a workspace
+	# whose wiki UI is hidden, and the card's only possible outcome is the very
+	# refusal below. The tools carry the same gate themselves, so no dispatch path
+	# is left open; this one exists to stop the card, not to be the only guard.
+	if tool in _WIKI_TOOLS:
+		from jarvis.chat.wiki import WIKI_DISABLED_MESSAGE, wiki_enabled
+
+		if not wiki_enabled():
+			code = FeatureDisabledError.__name__
+			return _error(code, WIKI_DISABLED_MESSAGE, hint=_hint_for(code, ""))
+
 	is_write = tool in _WRITE_TOOLS
 	try:
 		args = _parse_args(raw_args)
@@ -896,18 +1253,19 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 	# tools therefore always fall through to the gate/park below, which builds
 	# its own preview via _pending_preview - the model never needs (nor is
 	# allowed) preview=True on a gated write.
-	if (isinstance(args, dict) and _as_bool(args.get("preview"))
-			and tool not in _GATED_WRITES
-			and not (is_write and _is_bulk_call(args))):
+	if (
+		isinstance(args, dict)
+		and _as_bool(args.get("preview"))
+		and tool not in _GATED_WRITES
+		and not (is_write and _is_bulk_call(args))
+	):
 		if tool not in _PREVIEWABLE:
-			return _error("InvalidArgumentError",
-						  f"preview is not supported for {tool}")
+			return _error("InvalidArgumentError", f"preview is not supported for {tool}")
 		# A dry-run: surface its validation errors, but never audit - nothing
 		# is committed, so there is no write to record.
 		try:
 			return {"ok": True, "data": _run_preview(tool, args)}
-		except (JarvisError, frappe.PermissionError, frappe.ValidationError,
-				frappe.DuplicateEntryError) as e:
+		except (JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError) as e:
 			return _preview_error(e)
 
 	# Write-safety confirmation gate (issue #186): a gated write is NEVER
@@ -936,7 +1294,8 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 			return _error(
 				"InvalidArgumentError",
 				f"preview is not needed for {tool}: call it directly and the "
-				"bench will show a confirmation card")
+				"bench will show a confirmation card",
+			)
 
 		# Batch cap at PARK (F16): a bulk call over the shared max bounces to the
 		# model now with a split-and-sequence instruction, instead of parking a
@@ -952,15 +1311,22 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 					"InvalidArgumentError",
 					f"too many records in one batch ({batch_n}); the max is "
 					f"{_MAX_BATCH}. Split into batches of {_MAX_BATCH} and confirm "
-					"each one before starting the next.")
+					"each one before starting the next.",
+				)
 
-		conv, run_id = _gate_context(conversation)
+		# The parked call binds to the conversation resolved server-side upstream
+		# (from the session_key). When it is unresolved the token falls back to ""
+		# and is bound by OWNER alone, which is the real security boundary;
+		# conversation binding is a secondary replay guard. ``run_id`` is not
+		# tracked on this path, so the token carries "" and the sibling-run filter
+		# in pending_confirm.clear_for_conversation no-ops.
+		conv = conversation or ""
+		run_id = ""
 		# Two identities (issue #186, #1/#5/#6):
 		#   owner_user = the CONVERSATION OWNER - the human who sees the card,
 		#     clicks Confirm, and whose browser is subscribed. Deliver + bind +
-		#     confirm all key off THIS user. In managed mode it equals the acting
-		#     user; in self-host it is the operator, NOT the restricted tool user
-		#     the gate runs as (frappe.session.user).
+		#     confirm all key off THIS user. In a shared conversation it is the
+		#     owner, not necessarily the acting user (frappe.session.user).
 		#   exec_user = frappe.session.user - the scoped model-execution identity
 		#     the confirmed write must run AS, so a confirm can never exceed the
 		#     model path's permission scope.
@@ -968,8 +1334,8 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 		# resolved (managed direct-Python calls) so the gate still functions.
 		exec_user = frappe.session.user
 		owner_user = (
-			frappe.db.get_value("Jarvis Conversation", conv, "owner")
-			if conv else None) or exec_user
+			frappe.db.get_value("Jarvis Conversation", conv, "owner") if conv else None
+		) or exec_user
 		# Auto-apply bypass (issue #186, Task 4 + #5): the ONLY path where a gated
 		# write runs without a confirmation token. Strictly limited to
 		# {a resolved conversation, admin-enabled auto_apply, an _AUTO_APPLYABLE
@@ -978,9 +1344,8 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 		# run_method, and every destructive tool (delete/cancel/amend/send_email)
 		# - ALWAYS parks, even with auto_apply on.
 		#
-		# conv is never a client claim - it is resolved server-side by
-		# _gate_context above (managed mode from the session_key, self-host from
-		# selfhost.get_active_turn) - so there is no owner to re-check here: an
+		# conv is never a client claim - it is resolved server-side from the
+		# session_key upstream - so there is no owner to re-check here: an
 		# owner comparison against owner_user (itself read from this same conv
 		# a few lines up) would just be comparing one DB read to another read of
 		# the identical field, not a real access-control boundary.
@@ -994,9 +1359,10 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 			# run where nobody can click a confirm card and review happens on
 			# the created Draft + the approval board. Both flags are
 			# server-controlled and admin-gated against generic saves.
-			flags = frappe.db.get_value(
-				"Jarvis Conversation", conv, ["auto_apply", "file_box"],
-				as_dict=True) or {}
+			flags = (
+				frappe.db.get_value("Jarvis Conversation", conv, ["auto_apply", "file_box"], as_dict=True)
+				or {}
+			)
 			if flags.get("auto_apply") or flags.get("file_box"):
 				return dispatch_confirmed(tool, args)
 		# Sequential confirmation (F16): at most ONE live confirmation card per
@@ -1011,16 +1377,27 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 		#   tokens under any filter (F1), so re-filter to record.conversation == conv
 		#   - an unrelated conv-less token (a rare session-resolution miss) must not
 		#   block a legitimate new card here.
-		if conv and any(
+		try:
+			conversation_pending = conv and any(
 				t.get("conversation") == conv
-				for t in pending_confirm.list_for_owner(owner_user, conversation=conv)):
+				for t in pending_confirm.list_for_owner(owner_user, conversation=conv, strict=True)
+			)
+		except pending_confirm.PendingConfirmStorageError:
+			return _error(
+				"ConfirmationUnavailableError",
+				"could not check whether another confirmation is already pending "
+				"(a storage error). Nothing was changed. You may retry this exact "
+				"call once; if it still fails, tell the user and stop - do not loop.",
+			)
+		if conversation_pending:
 			return _error(
 				"ConfirmationPendingError",
 				"a confirmation card for a previous action is still awaiting the "
 				"user in this conversation. Only one runs at a time - do NOT retry "
 				"this call; stop and end your turn now. Once the user confirms the "
 				"pending card you'll get a follow-up turn to continue with the next "
-				"step.")
+				"step.",
+			)
 		# Validate BEFORE parking. For a create/update (build-from-args) write,
 		# run the real call in the rollback sandbox now: a deterministic failure
 		# (missing mandatory field, bad link, no create permission) means the
@@ -1031,11 +1408,23 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 		# preview_doc). Every other gated write (submit/cancel/delete/amend get a
 		# sandboxed preview; send_email/run_method/create_custom_skill/update_wiki
 		# a described-intent one) parks via _pending_preview exactly as before.
-		if tool in _DRY_RUN_ON_PARK:
+		if tool == "run_import":
+			# run_import cannot be sandbox-run (staging + a background job), so it has its
+			# own pre-park validation: refuse a blocked / non-importable / non-admin import
+			# BEFORE minting a token, exactly as _DRY_RUN_ON_PARK refuses a doomed create.
+			rejected, preview = _import_park(args)
+			if rejected is not None:
+				frappe.clear_messages()
+				return rejected
+		elif tool in _DRY_RUN_ON_PARK:
 			try:
 				preview = _run_preview(tool, args)
-			except (JarvisError, frappe.PermissionError,
-					frappe.ValidationError, frappe.DuplicateEntryError) as e:
+			except (
+				JarvisError,
+				frappe.PermissionError,
+				frappe.ValidationError,
+				frappe.DuplicateEntryError,
+			) as e:
 				frappe.clear_messages()
 				return _preview_error(e)
 		else:
@@ -1048,13 +1437,34 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 		# time comes from the module import - a local import here would shadow
 		# it for ALL of _run_tool and break the read path's perf_counter.
 		from jarvis.chat import confirm_card
+
 		if isinstance(preview, dict):
 			preview["card"] = confirm_card.build_card(tool, args, preview)
 		expires_at = int(time.time()) + pending_confirm._TTL_S
-		token = pending_confirm.mint(conversation=conv, owner=owner_user,
-									 tool=tool, args=args, run_id=run_id,
-									 exec_user=exec_user, preview=preview,
-									 expires_at=expires_at)
+		token = pending_confirm.mint(
+			conversation=conv,
+			owner=owner_user,
+			tool=tool,
+			args=args,
+			run_id=run_id,
+			exec_user=exec_user,
+			preview=preview,
+			expires_at=expires_at,
+		)
+		# mint returns None when it could not stage the park (a transient cache
+		# failure that it already rolled back, so nothing is persisted). Do NOT
+		# publish a card against a token whose record does not exist - that card is
+		# un-confirmable and wedges the turn on an "expired" toast. Surface a
+		# RETRYABLE tool error instead: nothing changed, so the model can simply call
+		# the exact same tool again and the confirmation card will appear.
+		if not token:
+			return _error(
+				"ConfirmationUnavailableError",
+				"could not stage the confirmation for this action (a storage error). "
+				"Nothing was changed. You may retry the exact same call once; if it "
+				"still fails, tell the user the confirmation could not be shown right "
+				"now and stop - do not loop.",
+			)
 		# Deliver the token to the human's UI out-of-band, over the realtime
 		# channel, NEVER via the function return below - the model must never
 		# see it. Published to the OWNER (the subscribed browser), not the acting
@@ -1063,16 +1473,23 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 		# in pending_confirm either way, so a retry or a future resync can
 		# still surface it.
 		try:
-			events.publish_to_user(owner_user, {
-				"kind": "action:pending",
-				"token": token,
-				"tool": tool,
-				"preview": preview,
-				"conversation": conv,
-				"run_id": run_id,
-				"summary": _describe_call(tool, args),
-				"expires_at": expires_at,
-			})
+			events.publish_to_user(
+				owner_user,
+				# Same shared item shape the resync endpoint + run:end terminal use, so
+				# the live push can't drift from them (and gets the summary guard too).
+				{
+					"kind": "action:pending",
+					**pending_confirm._pending_item(
+						token=token,
+						tool=tool,
+						args=args,
+						preview=preview,
+						conversation=conv,
+						run_id=run_id,
+						expires_at=expires_at,
+					),
+				},
+			)
 		except Exception:
 			frappe.log_error(
 				title="action:pending publish failed",
@@ -1081,18 +1498,27 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 		# The model-facing return carries the raw preview but NOT the human ``card``
 		# (it is duplicate UX for the model's context; the model gets tool + args +
 		# would already).
-		model_preview = ({k: v for k, v in preview.items() if k != "card"}
-						 if isinstance(preview, dict) else preview)
-		return {"ok": True, "data": {
-			"status": "pending_confirmation", "preview": model_preview, "tool": tool,
-		}}
+		model_preview = (
+			{k: v for k, v in preview.items() if k != "card"} if isinstance(preview, dict) else preview
+		)
+		return {
+			"ok": True,
+			"data": {
+				"status": "pending_confirmation",
+				"preview": model_preview,
+				"tool": tool,
+			},
+		}
 
 	# Read-path telemetry; fast no-op for untracked tools, never raises.
 	t0 = time.perf_counter()
 	result = _dispatch_and_wrap(tool, args, is_write)
 	telemetry.record_tool(
-		tool=tool, args=args, conversation=conversation,
-		duration_ms=int((time.perf_counter() - t0) * 1000), result=result,
+		tool=tool,
+		args=args,
+		conversation=conversation,
+		duration_ms=int((time.perf_counter() - t0) * 1000),
+		result=result,
 	)
 	return result
 
@@ -1102,7 +1528,7 @@ def _run_tool(tool: str, raw_args: dict | str | None,
 # success envelope (returned inline at lines like
 # ``{"ok": True, "data": data}``) is the matching ``ok()`` there if a
 # caller wants it explicitly.
-from jarvis._responses import err as _error  # noqa: E402
+from jarvis._responses import err as _error
 
 
 def _get_header(name: str) -> str:
@@ -1179,46 +1605,62 @@ def rotate_agent_token() -> dict:
 	# holds the old token (fleet-agent rolled back per PR-3A), so both
 	# ends stay in lockstep.
 	from jarvis import admin_client
+
 	try:
 		admin_client.post_rotate_agent_token(new_token=new_token)
 	except admin_client.AdminAuthError as e:
 		frappe.local.response.http_status_code = 502
-		return {"ok": False, "error": {
-			"code": "AdminAuthError",
-			"message": f"admin rejected our credentials: {e}",
-		}}
+		return {
+			"ok": False,
+			"error": {
+				"code": "AdminAuthError",
+				"message": f"admin rejected our credentials: {e}",
+			},
+		}
 	except admin_client.AdminUnreachableError as e:
 		frappe.local.response.http_status_code = 502
-		return {"ok": False, "error": {
-			"code": "AdminUnreachableError",
-			"message": f"admin not reachable: {e}",
-		}}
+		return {
+			"ok": False,
+			"error": {
+				"code": "AdminUnreachableError",
+				"message": f"admin not reachable: {e}",
+			},
+		}
 	except admin_client.AdminRateLimitedError as e:
 		frappe.local.response.http_status_code = 429
-		return {"ok": False, "error": {
-			"code": "RateLimitExceeded",
-			"message": "admin rate-limit hit; retry later",
-			"retry_after_seconds": e.retry_after_seconds,
-		}}
+		return {
+			"ok": False,
+			"error": {
+				"code": "RateLimitExceeded",
+				"message": "admin rate-limit hit; retry later",
+				"retry_after_seconds": e.retry_after_seconds,
+			},
+		}
 	except admin_client.AdminValidationError as e:
 		# Admin raised a Frappe ValidationError - typically a 4xx input
 		# problem the operator can fix (e.g. malformed token; though our
 		# token comes from secrets.token_hex so that's unlikely here).
 		frappe.local.response.http_status_code = 400
-		return {"ok": False, "error": {
-			"code": "AdminValidationError",
-			"message": str(e),
-		}}
+		return {
+			"ok": False,
+			"error": {
+				"code": "AdminValidationError",
+				"message": str(e),
+			},
+		}
 	except Exception as e:
 		frappe.local.response.http_status_code = 502
 		frappe.log_error(
 			title="rotate_agent_token: unexpected admin failure",
 			message=frappe.get_traceback(),
 		)
-		return {"ok": False, "error": {
-			"code": type(e).__name__,
-			"message": f"unexpected error during rotation: {e}",
-		}}
+		return {
+			"ok": False,
+			"error": {
+				"code": type(e).__name__,
+				"message": f"unexpected error during rotation: {e}",
+			},
+		}
 
 	# Admin succeeded -> the container is now running against new_token.
 	# Persist it locally so the bench's future plugin-auth validations

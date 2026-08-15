@@ -15,8 +15,8 @@
 // gray=chat-pattern. Reviewer follow-ups deliberately carry NO attribution in
 // the UI (DESIGN §6 ADOPTED: origin chip reads "From your organisation",
 // asked_by is audit-only) - so "From your reviewer" renders exactly like org.
-import { computed } from "vue"
-import { Badge } from "frappe-ui"
+import { computed } from "vue";
+import { Badge } from "frappe-ui";
 
 const MAP = {
 	// doctype Select values
@@ -29,13 +29,13 @@ const MAP = {
 	org: { label: "From your organisation", theme: "orange" },
 	chat: { label: "From your chat patterns", theme: "gray" },
 	reviewer: { label: "From your organisation", theme: "orange" },
-}
+};
 
 const props = defineProps({
 	origin: { type: String, default: "" },
-})
+});
 
 const meta = computed(
-	() => MAP[props.origin] || { label: props.origin || "Personalise", theme: "gray" },
-)
+	() => MAP[props.origin] || { label: props.origin || "Personalise", theme: "gray" }
+);
 </script>

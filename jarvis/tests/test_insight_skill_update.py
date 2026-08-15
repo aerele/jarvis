@@ -36,15 +36,10 @@ KEY_PREFIX = "isu-test-"
 SLUG_PREFIX = "isu-test-"
 
 TARGET_SLUG = "isu-test-invoicing"
-TARGET_DESC = (
-	"Wholesale discount and shipping charges rules for Acme Traders invoices."
-)
+TARGET_DESC = "Wholesale discount and shipping charges rules for Acme Traders invoices."
 TARGET_INSTR = "# Invoicing\n\n- Check the price list before invoicing."
 
-STATEMENT = (
-	"Acme Traders invoices always apply the wholesale discount tier before "
-	"shipping charges."
-)
+STATEMENT = "Acme Traders invoices always apply the wholesale discount tier before shipping charges."
 
 LLM = "jarvis.chat.voice.openrouter_complete"
 
@@ -56,12 +51,17 @@ def _ensure_non_sm(email: str) -> str:
 	# Same shape as test_learned_api._ensure_non_sm: a System User WITHOUT
 	# System Manager is the realistic unauthorized actor for these endpoints.
 	if not frappe.db.exists("User", email):
-		u = frappe.get_doc({
-			"doctype": "User", "email": email,
-			"first_name": "isu-nonsm", "send_welcome_email": 0, "enabled": 1,
-			"user_type": "System User",
-			"roles": [{"role": "Sales User"}],
-		})
+		u = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "isu-nonsm",
+				"send_welcome_email": 0,
+				"enabled": 1,
+				"user_type": "System User",
+				"roles": [{"role": "Sales User"}],
+			}
+		)
 		u.flags.ignore_permissions = True
 		u.insert()
 		frappe.db.commit()
@@ -85,13 +85,9 @@ def _as(user: str):
 
 
 def _wipe() -> None:
-	for name in frappe.get_all(
-		JLP, filters={"pattern_key": ["like", f"{KEY_PREFIX}%"]}, pluck="name"
-	):
+	for name in frappe.get_all(JLP, filters={"pattern_key": ["like", f"{KEY_PREFIX}%"]}, pluck="name"):
 		frappe.delete_doc(JLP, name, force=True, ignore_permissions=True)
-	for name in frappe.get_all(
-		SKILL, filters={"skill_name": ["like", f"{SLUG_PREFIX}%"]}, pluck="name"
-	):
+	for name in frappe.get_all(SKILL, filters={"skill_name": ["like", f"{SLUG_PREFIX}%"]}, pluck="name"):
 		frappe.delete_doc(SKILL, name, force=True, ignore_permissions=True)
 	frappe.db.commit()
 
@@ -141,15 +137,17 @@ def _mk_skill(
 ) -> str:
 	frappe.flags.jarvis_pattern_engine = bool(managed)
 	try:
-		doc = frappe.get_doc({
-			"doctype": SKILL,
-			"skill_name": slug,
-			"description": description,
-			"instructions": instructions,
-			"scope": scope,
-			"enabled": enabled,
-			"managed_by_learning": 1 if managed else 0,
-		})
+		doc = frappe.get_doc(
+			{
+				"doctype": SKILL,
+				"skill_name": slug,
+				"description": description,
+				"instructions": instructions,
+				"scope": scope,
+				"enabled": enabled,
+				"managed_by_learning": 1 if managed else 0,
+			}
+		)
 		doc.flags.ignore_permissions = True
 		doc.insert(ignore_permissions=True)
 	finally:
@@ -159,29 +157,33 @@ def _mk_skill(
 
 
 def _update_response(slug=TARGET_SLUG, updated="- Updated instructions.") -> str:
-	return json.dumps({
-		"worth_applying": True,
-		"reason": "The insight extends the invoicing skill.",
-		"action": "update",
-		"skill_name": slug,
-		"updated_instructions": updated,
-		"new_skill": None,
-	})
+	return json.dumps(
+		{
+			"worth_applying": True,
+			"reason": "The insight extends the invoicing skill.",
+			"action": "update",
+			"skill_name": slug,
+			"updated_instructions": updated,
+			"new_skill": None,
+		}
+	)
 
 
 def _create_response(slug="isu-test-acme-terms") -> str:
-	return json.dumps({
-		"worth_applying": True,
-		"reason": "No candidate covers Acme billing quirks.",
-		"action": "create",
-		"skill_name": "",
-		"updated_instructions": "",
-		"new_skill": {
-			"skill_name": slug,
-			"description": "Acme Traders billing quirks.",
-			"instructions": "- Always apply the wholesale tier before shipping.",
-		},
-	})
+	return json.dumps(
+		{
+			"worth_applying": True,
+			"reason": "No candidate covers Acme billing quirks.",
+			"action": "create",
+			"skill_name": "",
+			"updated_instructions": "",
+			"new_skill": {
+				"skill_name": slug,
+				"description": "Acme Traders billing quirks.",
+				"instructions": "- Always apply the wholesale tier before shipping.",
+			},
+		}
+	)
 
 
 class TestInsightSkillUpdate(unittest.TestCase):
@@ -208,7 +210,9 @@ class TestInsightSkillUpdate(unittest.TestCase):
 				learned_api.draft_insight_skill_update(name)
 			with self.assertRaises(frappe.PermissionError):
 				learned_api.apply_insight_skill_update(
-					name, "update", skill_name=TARGET_SLUG,
+					name,
+					"update",
+					skill_name=TARGET_SLUG,
 					updated_instructions="- x",
 				)
 
@@ -271,14 +275,16 @@ class TestInsightSkillUpdate(unittest.TestCase):
 
 	def test_draft_none_verdict(self):
 		name = _mk("n1")
-		raw = json.dumps({
-			"worth_applying": False,
-			"reason": "Too transient to keep.",
-			"action": "none",
-			"skill_name": "",
-			"updated_instructions": "",
-			"new_skill": None,
-		})
+		raw = json.dumps(
+			{
+				"worth_applying": False,
+				"reason": "Too transient to keep.",
+				"action": "none",
+				"skill_name": "",
+				"updated_instructions": "",
+				"new_skill": None,
+			}
+		)
 		with mock.patch(LLM, return_value=raw):
 			out = learned_api.draft_insight_skill_update(name)
 		self.assertTrue(out["ok"])
@@ -291,12 +297,11 @@ class TestInsightSkillUpdate(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	def test_candidates_exclude_personal_and_managed(self):
 		_mk_skill()
-		_mk_skill(slug="isu-test-personal", scope="Personal",
-			description=TARGET_DESC, instructions=TARGET_INSTR)
-		_mk_skill(slug="isu-test-managed", managed=1,
-			description=TARGET_DESC, instructions=TARGET_INSTR)
-		_mk_skill(slug="isu-test-disabled", enabled=0,
-			description=TARGET_DESC, instructions=TARGET_INSTR)
+		_mk_skill(
+			slug="isu-test-personal", scope="Personal", description=TARGET_DESC, instructions=TARGET_INSTR
+		)
+		_mk_skill(slug="isu-test-managed", managed=1, description=TARGET_DESC, instructions=TARGET_INSTR)
+		_mk_skill(slug="isu-test-disabled", enabled=0, description=TARGET_DESC, instructions=TARGET_INSTR)
 		name = _mk("cand1")
 		with mock.patch(LLM, return_value=_update_response()) as m:
 			learned_api.draft_insight_skill_update(name)
@@ -337,27 +342,40 @@ class TestInsightSkillUpdate(unittest.TestCase):
 
 	def test_draft_rejects_invalid_new_skill_slug(self):
 		name = _mk("bs1")
-		raw = json.dumps({
-			"worth_applying": True, "reason": "r", "action": "create",
-			"skill_name": "", "updated_instructions": "",
-			"new_skill": {
-				"skill_name": "Bad Slug!", "description": "d", "instructions": "- i",
-			},
-		})
+		raw = json.dumps(
+			{
+				"worth_applying": True,
+				"reason": "r",
+				"action": "create",
+				"skill_name": "",
+				"updated_instructions": "",
+				"new_skill": {
+					"skill_name": "Bad Slug!",
+					"description": "d",
+					"instructions": "- i",
+				},
+			}
+		)
 		with mock.patch(LLM, return_value=raw):
 			out = learned_api.draft_insight_skill_update(name)
 		self.assertFalse(out["ok"])
 
 	def test_draft_rejects_reserved_new_skill_prefix(self):
 		name = _mk("bs2")
-		raw = json.dumps({
-			"worth_applying": True, "reason": "r", "action": "create",
-			"skill_name": "", "updated_instructions": "",
-			"new_skill": {
-				"skill_name": "learned-selling", "description": "d",
-				"instructions": "- i",
-			},
-		})
+		raw = json.dumps(
+			{
+				"worth_applying": True,
+				"reason": "r",
+				"action": "create",
+				"skill_name": "",
+				"updated_instructions": "",
+				"new_skill": {
+					"skill_name": "learned-selling",
+					"description": "d",
+					"instructions": "- i",
+				},
+			}
+		)
 		with mock.patch(LLM, return_value=raw):
 			out = learned_api.draft_insight_skill_update(name)
 		self.assertFalse(out["ok"])
@@ -392,25 +410,22 @@ class TestInsightSkillUpdate(unittest.TestCase):
 		skill = _mk_skill()
 		name = _mk("ap1")
 		out = learned_api.apply_insight_skill_update(
-			name, "update", skill_name=TARGET_SLUG,
+			name,
+			"update",
+			skill_name=TARGET_SLUG,
 			updated_instructions="- New rule text.",
 		)
 		self.assertEqual(out, {"ok": True, "skill_name": TARGET_SLUG})
-		self.assertEqual(
-			frappe.db.get_value(SKILL, skill, "instructions"), "- New rule text."
-		)
+		self.assertEqual(frappe.db.get_value(SKILL, skill, "instructions"), "- New rule text.")
 		row = frappe.db.get_value(
-			JLP, name,
+			JLP,
+			name,
 			["status", "review_note", "materialized_skill", "reviewed_by", "reviewed_at"],
 			as_dict=True,
 		)
 		self.assertEqual(row.status, "Rejected")
-		self.assertEqual(
-			row.review_note, learned_api.APPLIED_NOTE_PREFIX + TARGET_SLUG
-		)
-		self.assertEqual(
-			row.review_note, "Acknowledged - applied to skill: " + TARGET_SLUG
-		)
+		self.assertEqual(row.review_note, learned_api.APPLIED_NOTE_PREFIX + TARGET_SLUG)
+		self.assertEqual(row.review_note, "Acknowledged - applied to skill: " + TARGET_SLUG)
 		self.assertEqual(row.materialized_skill, skill)
 		self.assertEqual(row.reviewed_by, "Administrator")
 		self.assertTrue(row.reviewed_at)
@@ -442,7 +457,9 @@ class TestInsightSkillUpdate(unittest.TestCase):
 		name = _mk("ap4")
 		with self.assertRaises(frappe.ValidationError):
 			learned_api.apply_insight_skill_update(
-				name, "update", skill_name=TARGET_SLUG,
+				name,
+				"update",
+				skill_name=TARGET_SLUG,
 				updated_instructions="x" * 20001,
 			)
 		self.assertEqual(frappe.db.get_value(JLP, name, "status"), "Proposed")
@@ -453,7 +470,8 @@ class TestInsightSkillUpdate(unittest.TestCase):
 	def test_apply_create_creates_org_skill_and_marks_jlp(self):
 		name = _mk("ac1")
 		out = learned_api.apply_insight_skill_update(
-			name, "create",
+			name,
+			"create",
 			new_skill={
 				"skill_name": "isu-test-acme-terms",
 				"description": "Acme Traders billing quirks.",
@@ -465,17 +483,14 @@ class TestInsightSkillUpdate(unittest.TestCase):
 		row = frappe.get_all(
 			SKILL,
 			filters={"skill_name": "isu-test-acme-terms"},
-			fields=["name", "scope", "enabled", "user_invocable", "owner",
-				"managed_by_learning"],
+			fields=["name", "scope", "enabled", "user_invocable", "owner", "managed_by_learning"],
 		)[0]
 		self.assertEqual(row.scope, "Org")
 		self.assertEqual(int(row.enabled), 1)
 		self.assertEqual(int(row.user_invocable), 1)
 		self.assertEqual(int(row.managed_by_learning), 0)
 		self.assertEqual(row.owner, "Administrator")
-		jlp = frappe.db.get_value(
-			JLP, name, ["status", "review_note", "materialized_skill"], as_dict=True
-		)
+		jlp = frappe.db.get_value(JLP, name, ["status", "review_note", "materialized_skill"], as_dict=True)
 		self.assertEqual(jlp.status, "Rejected")
 		self.assertEqual(
 			jlp.review_note,
@@ -488,9 +503,7 @@ class TestInsightSkillUpdate(unittest.TestCase):
 		with self.assertRaises(frappe.ValidationError):
 			learned_api.apply_insight_skill_update(name, "create", new_skill=None)
 		with self.assertRaises(frappe.ValidationError):
-			learned_api.apply_insight_skill_update(
-				name, "create", new_skill={"skill_name": "isu-test-x"}
-			)
+			learned_api.apply_insight_skill_update(name, "create", new_skill={"skill_name": "isu-test-x"})
 		self.assertEqual(frappe.db.get_value(JLP, name, "status"), "Proposed")
 
 	# ------------------------------------------------------------------ #
@@ -527,13 +540,13 @@ class TestInsightSkillUpdate(unittest.TestCase):
 		_mk_skill()
 		name = _mk("sz1", status="Snoozed", snoozed_until="2030-01-01")
 		out = learned_api.apply_insight_skill_update(
-			name, "update", skill_name=TARGET_SLUG,
+			name,
+			"update",
+			skill_name=TARGET_SLUG,
 			updated_instructions="- From snoozed.",
 		)
 		self.assertTrue(out["ok"])
-		row = frappe.db.get_value(
-			JLP, name, ["status", "snoozed_until", "review_note"], as_dict=True
-		)
+		row = frappe.db.get_value(JLP, name, ["status", "snoozed_until", "review_note"], as_dict=True)
 		self.assertEqual(row.status, "Rejected")
 		self.assertFalse(row.snoozed_until)
 		self.assertEqual(row.review_note, learned_api.APPLIED_NOTE_PREFIX + TARGET_SLUG)
@@ -542,7 +555,9 @@ class TestInsightSkillUpdate(unittest.TestCase):
 		_mk_skill()
 		name = _mk("st1", status="Stale", stale_reason="drifted")
 		out = learned_api.apply_insight_skill_update(
-			name, "update", skill_name=TARGET_SLUG,
+			name,
+			"update",
+			skill_name=TARGET_SLUG,
 			updated_instructions="- From stale.",
 		)
 		self.assertTrue(out["ok"])

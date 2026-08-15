@@ -8,11 +8,13 @@ CONV_DOCTYPE = "Jarvis Conversation"
 
 
 def _make_conversation(title: str = "T") -> str:
-	doc = frappe.get_doc({
-		"doctype": CONV_DOCTYPE,
-		"title": title,
-		"status": "Active",
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": CONV_DOCTYPE,
+			"title": title,
+			"status": "Active",
+		}
+	)
 	doc.insert(ignore_permissions=True)
 	frappe.db.commit()
 	return doc.name
@@ -33,9 +35,16 @@ class TestJarvisChatMessageDocType(FrappeTestCase):
 		meta = frappe.get_meta(DOCTYPE)
 		field_names = {f.fieldname for f in meta.fields}
 		expected = {
-			"conversation", "seq", "role", "content",
-			"tool_name", "tool_args", "tool_result", "tool_status",
-			"streaming", "error",
+			"conversation",
+			"seq",
+			"role",
+			"content",
+			"tool_name",
+			"tool_args",
+			"tool_result",
+			"tool_status",
+			"streaming",
+			"error",
 		}
 		missing = expected - field_names
 		self.assertFalse(missing, f"missing fields: {missing}")
@@ -64,14 +73,16 @@ class TestJarvisChatMessageDocType(FrappeTestCase):
 	def test_insert_and_link_to_conversation(self):
 		conv = _make_conversation("link-test")
 		try:
-			msg = frappe.get_doc({
-				"doctype": DOCTYPE,
-				"conversation": conv,
-				"seq": 1,
-				"role": "user",
-				"content": "hello",
-				"streaming": 0,
-			})
+			msg = frappe.get_doc(
+				{
+					"doctype": DOCTYPE,
+					"conversation": conv,
+					"seq": 1,
+					"role": "user",
+					"content": "hello",
+					"streaming": 0,
+				}
+			)
 			msg.insert(ignore_permissions=True)
 			frappe.db.commit()
 			self.assertEqual(msg.conversation, conv)
@@ -110,20 +121,31 @@ class TestJarvisChatMessageDocType(FrappeTestCase):
 		attacker = "cm-inject-attacker@example.test"
 		try:
 			if not frappe.db.exists("User", attacker):
-				frappe.get_doc({
-					"doctype": "User", "email": attacker, "first_name": "atk",
-					"send_welcome_email": 0, "enabled": 1, "user_type": "System User",
-				}).insert(ignore_permissions=True)
+				frappe.get_doc(
+					{
+						"doctype": "User",
+						"email": attacker,
+						"first_name": "atk",
+						"send_welcome_email": 0,
+						"enabled": 1,
+						"user_type": "System User",
+					}
+				).insert(ignore_permissions=True)
 			frappe.get_doc("User", attacker).add_roles("Jarvis User")
 			# conv is owned by Administrator (inserted ignore_permissions); attacker
 			# is a different user, so the injection must be denied.
 			frappe.db.commit()
 			frappe.set_user(attacker)
 			with self.assertRaises(frappe.PermissionError):
-				frappe.get_doc({
-					"doctype": DOCTYPE, "conversation": conv, "seq": 42,
-					"role": "user", "content": "injected",
-				}).insert()
+				frappe.get_doc(
+					{
+						"doctype": DOCTYPE,
+						"conversation": conv,
+						"seq": 42,
+						"role": "user",
+						"content": "injected",
+					}
+				).insert()
 		finally:
 			frappe.set_user("Administrator")
 			_cleanup_conversation(conv)
