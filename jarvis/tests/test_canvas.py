@@ -4,6 +4,7 @@ metadata. Network fetch + File persistence are covered by the worker path.
 """
 
 import unittest
+from unittest.mock import Mock, patch
 
 from jarvis.chat import canvas
 
@@ -77,6 +78,55 @@ class TestCanvasDetection(unittest.TestCase):
 		self.assertEqual(canvas._http_base("ws://127.0.0.1:19002"), "http://127.0.0.1:19002")
 		self.assertEqual(canvas._http_base("wss://host:443/"), "https://host:443")
 		self.assertEqual(canvas._http_base(""), "")
+
+
+class TestGatewayFallbackDetection(unittest.TestCase):
+	"""``_gateway_fakes_missing_canvas_as_ok`` — the sentinel probe that tells a
+	healthy canvas host apart from a gateway that fell through to its own web
+	UI as a catch-all (which answers every path, real or fake, with 200)."""
+
+	def test_healthy_gateway_404s_the_sentinel(self):
+		resp = Mock(status_code=404)
+		with patch("requests.get", return_value=resp) as get:
+			result = canvas._gateway_fakes_missing_canvas_as_ok("ws://127.0.0.1:19000", "tok")
+		self.assertFalse(result)
+		# Probed a name that cannot exist, through the same canvas route.
+		(url,), kwargs = get.call_args
+		self.assertIn("/__openclaw__/canvas/documents/", url)
+		self.assertIn("index.html", url)
+		self.assertEqual(kwargs["headers"]["Authorization"], "Bearer tok")
+
+	def test_broken_gateway_200s_the_sentinel(self):
+		resp = Mock(status_code=200)
+		with patch("requests.get", return_value=resp):
+			result = canvas._gateway_fakes_missing_canvas_as_ok("ws://127.0.0.1:19000", "tok")
+		self.assertTrue(result)
+
+	def test_non_404_error_status_also_counts_as_broken(self):
+		resp = Mock(status_code=500)
+		with patch("requests.get", return_value=resp):
+			result = canvas._gateway_fakes_missing_canvas_as_ok("ws://127.0.0.1:19000", "tok")
+		self.assertTrue(result)
+
+	def test_probe_network_error_is_inconclusive_not_broken(self):
+		with patch("requests.get", side_effect=Exception("boom")):
+			result = canvas._gateway_fakes_missing_canvas_as_ok("ws://127.0.0.1:19000", "tok")
+		self.assertFalse(result)
+
+	def test_missing_agent_url_or_token_short_circuits(self):
+		with patch("requests.get") as get:
+			self.assertFalse(canvas._gateway_fakes_missing_canvas_as_ok("", "tok"))
+			self.assertFalse(canvas._gateway_fakes_missing_canvas_as_ok("ws://x", ""))
+		get.assert_not_called()
+
+	def test_sentinel_name_is_unique_per_call(self):
+		resp = Mock(status_code=404)
+		with patch("requests.get", return_value=resp) as get:
+			canvas._gateway_fakes_missing_canvas_as_ok("ws://127.0.0.1:19000", "tok")
+			canvas._gateway_fakes_missing_canvas_as_ok("ws://127.0.0.1:19000", "tok")
+		first_url = get.call_args_list[0].args[0]
+		second_url = get.call_args_list[1].args[0]
+		self.assertNotEqual(first_url, second_url)
 
 
 if __name__ == "__main__":
