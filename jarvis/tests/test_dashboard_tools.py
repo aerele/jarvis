@@ -238,6 +238,18 @@ class TestCreateDashboardChartChildTablePermissions(FrappeTestCase):
 
 	def test_non_admin_with_parent_read_can_chart_child_table(self):
 		frappe.set_user(self.USER_WITH_ACCESS)
+		# TEMP DIAGNOSTIC (removed before merge): CI has twice denied "create"
+		# on Dashboard Chart for this user despite the role grant; dump why.
+		from frappe import permissions as _fp
+
+		ok = _fp.has_permission("Dashboard Chart", "create", debug=True)
+		print(
+			f"\nDIAG create-perm on 'Dashboard Chart' for {self.USER_WITH_ACCESS}: "
+			f"ok={ok} roles={frappe.get_roles()} "
+			f"custom_docperm_rows={frappe.get_all('Custom DocPerm', filters={'parent': 'Dashboard Chart'}, fields=['role', 'create', 'read', 'permlevel'])} "
+			f"log={_fp._pop_debug_log()}\n",
+			flush=True,
+		)
 		res = create_dashboard_chart(
 			chart_name=_h("JT Perm OK"),
 			document_type=self.CHILD_DT,
