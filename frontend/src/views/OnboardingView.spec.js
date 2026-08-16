@@ -970,6 +970,7 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		wrapper.vm.state.planName = "pro";
 		wrapper.vm.state.paymentProvider = "razorpay";
 		wrapper.vm.state.termsAccepted = false;
+		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
 
 		await wrapper.vm.onPayClick();
 		expect(api.onboardingPaymentApi.startSignup).not.toHaveBeenCalled();

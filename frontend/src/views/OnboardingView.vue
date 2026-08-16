@@ -3369,10 +3369,18 @@ async function onPayClick() {
 	// plan-09 07-c: the CTA is hidden behind the maintenance hold when the flag is
 	// off; guard the handler too so a stray/programmatic click cannot start a signup.
 	if (!state.paymentUiV2) return;
-	if (!state.planName || !state.email || !state.company) {
+	// Plan 01: the normalized billing snapshot rides this first signup call so it
+	// persists server-side while the customer is still a guest. Omitted (undefined,
+	// never an empty object) when nothing was entered, so a blank Details step sends
+	// no billing key at all.
+	const billingPayload = billing.buildBilling();
+	if (!state.planName || !state.email || !state.company || !billingPayload.contact_number) {
 		// A signup with empty args would create a broken record upstream. This is
 		// the fresh-start guard; a resumed session renders from server truth and
-		// uses Initiate, not this button.
+		// uses Initiate, not this button. Contact number is checked here too
+		// (jarvis#888): a resumed session can land directly on Pay with a
+		// pre-change saved state that never collected it, and the server now
+		// requires it - catch that before the throw, same as the other fields.
 		state.detailsErr =
 			"Your signup details are missing. Please go back and pick a plan and enter your details again.";
 		state.step = "details";
@@ -3382,11 +3390,6 @@ async function onPayClick() {
 	// ticked (the real gate), but a programmatic/stray click must not be able to
 	// start a signup admin will reject anyway for lacking acceptance.
 	if (!state.termsAccepted) return;
-	// Plan 01: the normalized billing snapshot rides this first signup call so it
-	// persists server-side while the customer is still a guest. Omitted (undefined,
-	// never an empty object) when nothing was entered, so a blank Details step sends
-	// no billing key at all.
-	const billingPayload = billing.buildBilling();
 	await flow.submitReview({
 		email: state.email,
 		company: state.company,

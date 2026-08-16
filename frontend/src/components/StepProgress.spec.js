@@ -19,21 +19,27 @@ describe("StepProgress bar (default variant)", () => {
 		expect(w.findAll('[role="listitem"]')).toHaveLength(0);
 	});
 
-	it("fills to the completed fraction: completed steps / total", () => {
+	it("fills to the inclusive fraction: (currentIndex + 1) / total", () => {
 		const w = mount(StepProgress, { props: { steps: STEPS, currentIndex: 1 } });
-		// 1 of 3 steps done (currentIndex 1 means step 0 is complete).
+		// 2 of 3 steps filled (currentIndex 1 means step 0 AND the current step 1 fill).
+		expect(w.find(".step-progress-fill").attributes("style")).toContain("width: 66.66");
+		expect(w.find('[role="progressbar"]').attributes("aria-valuenow")).toBe("67");
+	});
+
+	it("fills one step's worth on the first step, not zero", () => {
+		const w = mount(StepProgress, { props: { steps: STEPS, currentIndex: 0 } });
 		expect(w.find(".step-progress-fill").attributes("style")).toContain("width: 33.33");
 		expect(w.find('[role="progressbar"]').attributes("aria-valuenow")).toBe("33");
 	});
 
-	it("renders zero fill on the first step", () => {
-		const w = mount(StepProgress, { props: { steps: STEPS, currentIndex: 0 } });
-		expect(w.find(".step-progress-fill").attributes("style")).toContain("width: 0%");
-		expect(w.find('[role="progressbar"]').attributes("aria-valuenow")).toBe("0");
-	});
-
 	it("renders full fill once every step is complete", () => {
 		const w = mount(StepProgress, { props: { steps: STEPS, currentIndex: 3 } });
+		expect(w.find(".step-progress-fill").attributes("style")).toContain("width: 100%");
+		expect(w.find('[role="progressbar"]').attributes("aria-valuenow")).toBe("100");
+	});
+
+	it("renders full fill when currentIndex signals all-done (-1)", () => {
+		const w = mount(StepProgress, { props: { steps: STEPS, currentIndex: -1 } });
 		expect(w.find(".step-progress-fill").attributes("style")).toContain("width: 100%");
 		expect(w.find('[role="progressbar"]').attributes("aria-valuenow")).toBe("100");
 	});
@@ -58,7 +64,7 @@ describe("StepProgress bar indeterminate state", () => {
 	it("does not pulse and does report aria-valuenow by default", () => {
 		const w = mount(StepProgress, { props: { steps: STEPS, currentIndex: 1 } });
 		expect(w.find(".step-progress-fill--indeterminate").exists()).toBe(false);
-		expect(w.find('[role="progressbar"]').attributes("aria-valuenow")).toBe("33");
+		expect(w.find('[role="progressbar"]').attributes("aria-valuenow")).toBe("67");
 	});
 });
 

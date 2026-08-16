@@ -974,7 +974,10 @@ class TestSignupResumeFallback(FrappeTestCase):
 		self.assertEqual(resume.call_count, 1)
 		self.assertEqual(resume.call_args.args[0], "some-plan")
 		self.assertIsNone(resume.call_args.kwargs.get("provider"))
-		self.assertIsNone(resume.call_args.kwargs.get("billing"))
+		# Forwarded verbatim (_try_resume_pending_signup passes billing=billing
+		# through to resume_pending_signup) - the retry needs the same contact
+		# details the failed attempt carried, not a blank record.
+		self.assertEqual(resume.call_args.kwargs.get("billing"), _BILLING)
 		self.assertEqual(out["razorpay_order_id"], "order_R2")
 
 	def test_duplicate_resumes_though_the_stored_login_can_never_match(self):

@@ -78,7 +78,13 @@ import { computed, useId } from "vue";
 const props = defineProps({
 	/** One entry per step. In variant="steps", `label` is the visible name. */
 	steps: { type: Array, required: true },
-	/** 0-based index of the current step. Steps before it count as complete. */
+	/**
+	 * 0-based index of the current step. The current step counts as filled
+	 * along with every step before it (same rule the variant="steps" rail
+	 * below already uses, `i <= currentIndex`). -1 is the all-done/empty
+	 * sentinel: there is no current step because nothing is left, so the bar
+	 * reads 100%, not 0%.
+	 */
 	currentIndex: { type: Number, required: true },
 	/** Which shape to render: the wait bar (default) or the wizard rail's list. */
 	variant: { type: String, default: "bar", validator: (v) => ["bar", "steps"].includes(v) },
@@ -98,13 +104,16 @@ const props = defineProps({
 
 const labelId = useId();
 
-// Completed steps only - the current step is in progress, not done, so it
-// does not count toward the fill (task's own math: completed / total).
+// Inclusive fill: the current step counts as filled, same as the
+// variant="steps" rail's `i <= currentIndex` segments. currentIndex < 0 is
+// the all-done/empty sentinel (no step is current), so it fills to 100
+// rather than reading as "nothing has happened yet".
 const fillPercent = computed(() => {
 	const total = props.steps.length;
 	if (total <= 0) return 0;
-	const completed = Math.min(Math.max(props.currentIndex, 0), total);
-	return (completed / total) * 100;
+	if (props.currentIndex < 0) return 100;
+	const filled = Math.min(props.currentIndex + 1, total);
+	return Math.min(100, Math.max(0, (filled / total) * 100));
 });
 
 const valueNow = computed(() => Math.round(fillPercent.value));

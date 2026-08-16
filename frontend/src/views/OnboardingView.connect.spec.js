@@ -1699,8 +1699,8 @@ describe("connect wait bar: one smooth bar with a named-step caption", () => {
 		const bar = w.find(".ob-progress").find('[role="progressbar"]');
 		expect(bar.exists()).toBe(true);
 		expect(w.text()).toContain("Step 2 of 6 · Workspace");
-		// 1 of 6 steps complete (Connection), Workspace in progress.
-		expect(bar.attributes("aria-valuenow")).toBe("17");
+		// 2 of 6 steps filled: Connection done, Workspace (the current step) counts too.
+		expect(bar.attributes("aria-valuenow")).toBe("33");
 		w.unmount();
 	});
 
