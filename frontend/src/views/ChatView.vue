@@ -7386,6 +7386,20 @@ const gotoMorph = ref(null);
 watch(streamingGoto, (g) => {
 	if (g) gotoMorph.value = g;
 });
+// The goto block usually lands with the reply's LAST tokens, so without a
+// short hold the morph line gets a sub-frame of screen time before the
+// redirect (measured live: under 400ms, one capture frame). The hold IS the
+// animation's screen time; reduced-motion users skip it and navigate at once.
+const GOTO_MORPH_HOLD_MS = 900;
+let gotoNavTimer = null;
+function dropGotoMorph() {
+	if (gotoNavTimer) {
+		clearTimeout(gotoNavTimer);
+		gotoNavTimer = null;
+	}
+	gotoMorph.value = null;
+}
+onUnmounted(dropGotoMorph);
 // ---- common artifact activity card (jarvis#884) ───────────────────────────
 // Generalizes the #874 dashboard-only live card to any artifact-producing
 // main-chat turn: whichever write tool actually ran (or the builder-origin
@@ -8032,7 +8046,7 @@ function resetRunState() {
 	mention.value = { ...mention.value, open: false };
 	histIdx.value = null;
 	histDraft.value = "";
-	gotoMorph.value = null; // a latch from the chat we are leaving must not follow us in
+	dropGotoMorph(); // a latch (or pending hold-nav) from the chat we are leaving must not follow us in
 }
 // Stash the leaving chat's draft and restore the target chat's own, so unsent
 // text follows its conversation instead of bleeding into the next one. Both the
@@ -8689,9 +8703,9 @@ function onEvent(p) {
 			statusPhase.value = "model";
 			store.streamingConvId = p.conversation_id || currentId.value;
 			// A new turn starting must not inherit the previous turn's morph
-			// latch (jarvis#884) — only THIS turn's own complete goto block may
-			// light it again.
-			gotoMorph.value = null;
+			// latch or its pending hold-navigation (jarvis#884) — only THIS
+			// turn's own complete goto block may light it again.
+			dropGotoMorph();
 			break;
 		case "queue:position":
 			// Phase-0 admission: this queued turn's approximate position shifted
@@ -8941,11 +8955,27 @@ function onEvent(p) {
 							.slice(50)
 							.forEach(([k]) => localStorage.removeItem(k));
 						redirected = true;
-						gotoDashboards(goto.prompt);
+						// Latch explicitly: when the block lands WITH the terminal, the
+						// streaming watcher never saw it, and the hold below is the
+						// morph line's only screen time.
+						gotoMorph.value = goto;
+						const reducedMotion =
+							window.matchMedia &&
+							window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+						if (reducedMotion) {
+							gotoDashboards(goto.prompt);
+						} else {
+							gotoNavTimer = setTimeout(() => {
+								gotoNavTimer = null;
+								// dropGotoMorph() clearing the latch (new turn, chat switch,
+								// unmount) is the cancel signal for this pending navigation.
+								if (gotoMorph.value) gotoDashboards(goto.prompt);
+							}, GOTO_MORPH_HOLD_MS);
+						}
 					}
 				}
 			}
-			if (!redirected) gotoMorph.value = null;
+			if (!redirected) dropGotoMorph();
 			break;
 		}
 		case "message:enriched": {
@@ -9030,7 +9060,7 @@ function onEvent(p) {
 			activeTools.value = [];
 			currentRunId.value = null;
 			store.streamingConvId = null;
-			gotoMorph.value = null; // an errored turn never redirects — drop the latch
+			dropGotoMorph(); // an errored turn never redirects — drop the latch and any pending hold-nav
 			announceSR("That didn't go through. See the error in the chat.");
 			loadConversation(currentId.value);
 			break;
@@ -9081,7 +9111,7 @@ function stopRun() {
 	activeTools.value = [];
 	store.streamingConvId = null;
 	recovering.value = null;
-	gotoMorph.value = null; // a stopped turn never redirects — drop the latch
+	dropGotoMorph(); // a stopped turn never redirects — drop the latch and any pending hold-nav
 	if (cid) api.stopRun(cid, rid).catch(() => {});
 	notify("Stopped.");
 }
