@@ -525,6 +525,35 @@ def test_inline_nonimage_bytes_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
 	assert "base64" not in out.lower()
 
 
+def test_inline_svg_by_extension_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+	# SVG is refused (an inlined data:image/svg+xml is an opaque active-content blob
+	# nh3 can't inspect). A *.svg File is dropped at the mime check, before read.
+	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv()))
+	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
+
+	def _boom(*_a, **_k):
+		raise AssertionError("SVG must be refused before reading it")
+
+	monkeypatch.setattr(furniture.frappe, "get_doc", _boom)
+	out = furniture._inline_letterhead_images('<img src="/files/logo.svg">')
+	assert "<img" not in out.lower()
+
+
+def test_inline_svg_bytes_in_png_name_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+	# SVG bytes smuggled behind a *.png name are refused by the raster-only sniff.
+	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv()))
+	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
+
+	class _Svg:
+		def get_content(self):
+			return b'<svg xmlns="x"><image href="http://169.254.169.254/x"/></svg>'
+
+	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _Svg())
+	out = furniture._inline_letterhead_images('<img src="/files/logo.png">')
+	assert "<img" not in out.lower()
+	assert "169.254" not in out
+
+
 # --- letterhead: resolution + degrade note, site-free via stubs --------------
 
 

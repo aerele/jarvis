@@ -460,7 +460,12 @@ def _resolve_letterhead_img_src(url: str) -> str | None:
 	if size and int(size) > _MAX_LOGO_BYTES:
 		return None
 	mime = mimetypes.guess_type(path)[0] or ""
-	if not mime.startswith("image/"):
+	# RASTER images only. SVG is deliberately refused: an inlined data:image/svg+xml
+	# is an OPAQUE blob nh3 does not look inside, so an SVG carrying <image href>/
+	# <script> would ride into the render and rely on QtWebKit's (untested-here)
+	# SVG-static mode for containment. A raster logo has no such surface. Company
+	# logos are almost always PNG/JPG; an SVG degrades to no logo, not a risk.
+	if not mime.startswith("image/") or mime == "image/svg+xml":
 		return None
 	try:
 		content = frappe.get_doc("File", file_name).get_content()
@@ -470,16 +475,18 @@ def _resolve_letterhead_img_src(url: str) -> str | None:
 		return None
 	if not content or len(content) > _MAX_LOGO_BYTES:
 		return None
-	# Trust the bytes, not the filename extension: a non-image renamed *.png must
-	# not be inlined as data:image/*. (Harmless downstream anyway - the data-only
-	# letterhead gate never fetches - but this keeps the data: label honest.)
+	# Trust the bytes, not the filename extension: a non-image (or an SVG) renamed
+	# *.png must not be inlined as data:image/*. (Harmless downstream anyway - the
+	# data-only letterhead gate never fetches - but this keeps the data: label
+	# honest and keeps active SVG markup out of the render entirely.)
 	if not _looks_like_image(content):
 		return None
 	return f"data:{mime};base64,{base64.b64encode(content).decode('ascii')}"
 
 
 def _looks_like_image(content: bytes) -> bool:
-	"""Cheap magic-byte sniff for the common raster/vector logo formats."""
+	"""Cheap magic-byte sniff for the common RASTER logo formats (SVG is refused -
+	see _resolve_letterhead_img_src)."""
 	head = content[:16]
 	return (
 		head.startswith(b"\x89PNG\r\n\x1a\n")  # png
@@ -487,8 +494,6 @@ def _looks_like_image(content: bytes) -> bool:
 		or head.startswith(b"GIF87a")
 		or head.startswith(b"GIF89a")
 		or (head[:4] == b"RIFF" and content[8:12] == b"WEBP")  # webp
-		or head.lstrip()[:5].lower() == b"<?xml"  # svg (xml-declared)
-		or b"<svg" in head.lower()  # svg (bare)
 		or head.startswith(b"BM")  # bmp
 	)
 
