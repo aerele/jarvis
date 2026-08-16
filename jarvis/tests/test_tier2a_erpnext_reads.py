@@ -425,8 +425,19 @@ def _ensure_company(name: str, abbr: str) -> None:
 				"abbr": abbr,
 				"default_currency": "INR",
 				"country": "India",
+				# COA is skipped above, so this company has NO default inventory
+				# account; perpetual inventory MUST be off or erpnext refuses to
+				# create a Warehouse here ("Please set Account in Warehouse ... or
+				# Default Inventory Account in Company"). This showed up only under
+				# some test-shard orderings; the fixture never posts stock, so
+				# disabling it just lets _ensure_warehouse succeed deterministically.
+				"enable_perpetual_inventory": 0,
 			}
 		).insert(ignore_permissions=True)
+		# Belt-and-suspenders: if a Company hook re-enabled it on insert, force off
+		# before any Warehouse is created against this company.
+		if frappe.db.get_value("Company", name, "enable_perpetual_inventory"):
+			frappe.db.set_value("Company", name, "enable_perpetual_inventory", 0)
 	finally:
 		frappe.local.flags.ignore_chart_of_accounts = False
 
