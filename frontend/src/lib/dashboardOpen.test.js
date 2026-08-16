@@ -781,8 +781,14 @@ test("a pending promotion holds the pane's restore off, exactly as ?edit= does",
 	const body = watcher.slice(0, watcher.indexOf("\n);"));
 	assert.doesNotMatch(body, /promotionPending\.value = true;/);
 	// ...and a mount that will NOT promote releases the setup-time hold, or the
-	// pane's restore stays blocked for the life of the page
-	assert.match(pageSrc, /promotionPending\.value = false;\n\t\tnormalMount\(\);/);
+	// pane's restore stays blocked for the life of the page. Since the
+	// jarvis-goto hand-off (#884), that branch then forks: a goto prefill
+	// starts a CLEAN builder (never the sticky editing restore), everything
+	// else restores as before - but the hold release always comes first.
+	assert.match(
+		pageSrc,
+		/promotionPending\.value = false;\n\t\tif \(gotoText\) \{[\s\S]*?clearBuilder\(\);\n\t\t\} else \{\n\t\t\tnormalMount\(\);\n\t\t\}/
+	);
 });
 
 test("?edit= wins over ?chat=, and says so", () => {
@@ -920,9 +926,11 @@ test("the two identities are bound separately, and the adoption ends where they 
 		/const adoptedRow = useStorage\(`jarvis-dash-adopted-\$\{session\.user \|\| "anon"\}`, ""\);/
 	);
 	// it ends exactly where the row and the canvas become one document again:
-	// the first successful Save, an ?edit= load, or a builder that was cleared
+	// the first successful Save, an ?edit= load, or a builder that was cleared.
+	// loadEdit's own copy moved into applyEditDetail (jarvis#884), which
+	// onDashboardSaved (the pane's own build) also calls directly.
 	assert.match(fnBody(pageSrc, "function onSaved("), /adoptedRow\.value = "";/);
-	assert.match(fnBody(pageSrc, "async function loadEdit("), /adoptedRow\.value = "";/);
+	assert.match(fnBody(pageSrc, "function applyEditDetail("), /adoptedRow\.value = "";/);
 	assert.match(fnBody(pageSrc, "function clearBuilder("), /adoptedRow\.value = "";/);
 	// the send itself takes the pane's prop, so the suppression reaches the agent
 	assert.match(paneSrc, /editingName: \{ type: String, default: "" \},/);
@@ -1073,8 +1081,9 @@ test("an adoption whose artifact is gone falls back to the row it adopted", () =
 	);
 	assert.match(onCanvas, /if \(restore && failedRestores\.has\(message_id\)\) return false;/);
 	// loadEdit is what ends the adoption: the canvas becomes the row's own html,
-	// so the two documents are one again
-	const edit = fnBody(pageSrc, "async function loadEdit(");
+	// so the two documents are one again. Its own state-setting moved into
+	// applyEditDetail (jarvis#884), which it still reaches via confirmDiscard.
+	const edit = fnBody(pageSrc, "function applyEditDetail(");
 	assert.match(edit, /adoptedRow\.value = "";/);
 	assert.match(edit, /canvasMsg\.value = "";/);
 	// a live frame's failure is untouched — it toasts, and there is no stale

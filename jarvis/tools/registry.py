@@ -122,6 +122,13 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"summarize_dataset",
 	"create_dashboard_chart",
 	"create_dashboard",
+	# #884 chat/builder → saved Jarvis Dashboard: the agent authors the full
+	# self-contained dashboard HTML and delivers it here (same "Option A" wire
+	# as save_agent_dashboard — no hosted-canvas gateway fetch). Resolves the
+	# conversation from the caller's session_key; delegates validation to
+	# dashboards_api.save_dashboard; publishes a "dashboard" frame the builder
+	# renders via its saved-row path.
+	"save_dashboard",
 	# Phase-3 delegate writeback: the auditor/operator delegate passes its
 	# deterministic evaluator output here VERBATIM. It resolves the Jarvis Agent
 	# Run from the caller's session_key, validates every finding (token/doctype/
