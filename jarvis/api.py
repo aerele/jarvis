@@ -510,6 +510,14 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 		"type": typ,
 		"file_url": file_url,
 	}
+	# Surface any degrade notes (e.g. a dropped chart, a letterhead that wasn't
+	# found) DETERMINISTICALLY on the card — otherwise a degraded document looks
+	# identical to a clean one and the user only learns of it if the model happens
+	# to narrate it in prose. Kept as a durable card caption (the receipt-chip
+	# convention: state as data, never prose).
+	notes = data.get("notes")
+	if isinstance(notes, list) and notes:
+		item["notes"] = [str(n) for n in notes][:10]
 	MSG = "Jarvis Chat Message"
 	# Prefer the in-flight (streaming) assistant message; fall back to the latest.
 	rows = frappe.get_all(

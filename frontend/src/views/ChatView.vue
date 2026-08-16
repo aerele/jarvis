@@ -1654,6 +1654,22 @@
 											</svg>
 										</button>
 									</div>
+									<!-- degrade notes for this artifact (e.g. a chart whose
+									     placeholder was missing, or a letterhead not found):
+									     shown deterministically so a degraded document is never
+									     visually identical to a clean one. -->
+									<div
+										v-if="cv.notes && cv.notes.length"
+										class="jv-artifact-notes"
+										role="note"
+									>
+										<span
+											v-for="(nt, ni) in cv.notes"
+											:key="ni"
+											class="jv-artifact-note"
+											>{{ nt }}</span
+										>
+									</div>
 								</template>
 								<div v-if="skillsUsedOf(m).length" class="jv-skillused">
 									<span
@@ -12862,6 +12878,22 @@ onUnmounted(() => {
 .jv-artifact-go {
 	color: var(--text-3);
 	flex: none;
+}
+/* degrade notes under an artifact card: quiet, but present — a degraded document
+   must never look identical to a clean one. */
+.jv-artifact-notes {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	margin-top: 4px;
+	max-width: 340px;
+}
+.jv-artifact-note {
+	font-size: 11px;
+	line-height: 1.35;
+	color: var(--text-3);
+	padding-left: 10px;
+	border-left: 2px solid var(--border);
 }
 /* the card plus its follow-on action ("Open in Dashboards"), so the button is a
    SIBLING of the card, never nested inside that <button> */
