@@ -131,6 +131,7 @@ test("readiness: only a paged repair claims support was already notified", () =>
 		"subscription_suspended",
 		"site_replaced",
 		"llm_rejected",
+		"reconnect_required",
 		"container_provisioning",
 		"readiness_unconfirmed",
 		"unmapped",
@@ -167,8 +168,45 @@ test("readiness: only llm_rejected is editable - the three blocked stop cases ar
 		"authority_repair_required",
 		"subscription_suspended",
 		"site_replaced",
+		"reconnect_required",
 	]) {
 		assert.notEqual(readinessPhase({ answered: true, reason }).editable, true, reason);
+	}
+});
+
+// Slice 4b (C10b): an aged onboarding subscription-connect strand. account.py maps
+// admin's chat_readiness == "ReconnectRequired" onto is_ready_for_chat's own
+// "reconnect_required" reason. Waiting cannot heal it (the connect never landed and
+// cannot self-heal), so it STOPS the wait like the suspended/moved verdicts - but the
+// fix is a reconnect the customer takes here, so it carries `reconnect: true` (the
+// action analogue of llm_rejected's `editable`), never the "coming online" spinner.
+test("readiness: reconnect_required stops the wait, offers reconnect, quotes admin verbatim, never claims progress", () => {
+	const detail =
+		"Your AI subscription needs reconnecting. Open Jarvis Settings and reconnect your provider to finish.";
+	const p = readinessPhase({ answered: true, reason: "reconnect_required", detail });
+	assert.equal(p.stop, true);
+	assert.equal(p.reconnect, true);
+	assert.notEqual(p.editable, true); // not the return-to-form case
+	assert.notEqual(p.paged, true); // nobody was notified; the CUSTOMER acts
+	assert.equal(p.kind, PHASE_KIND.NONE);
+	assert.equal(p.detail, detail); // admin's own sentence, never reworded
+	assert.notEqual(p.state, PHASE_STATE.ACTIVE);
+	assert.ok(p.title);
+	assert.doesNotMatch(p.label, /coming online|getting ready|applying|keep (waiting|checking)/i);
+});
+
+test("readiness: only reconnect_required carries the reconnect flag", () => {
+	assert.equal(readinessPhase({ answered: true, reason: "reconnect_required" }).reconnect, true);
+	for (const reason of [
+		"authority_repair_required",
+		"subscription_suspended",
+		"site_replaced",
+		"llm_rejected",
+		"container_provisioning",
+		"readiness_unconfirmed",
+		"unmapped",
+	]) {
+		assert.notEqual(readinessPhase({ answered: true, reason }).reconnect, true, reason);
 	}
 });
 
@@ -237,6 +275,7 @@ test("readiness: no branch ever claims setup is finishing on its own", () => {
 		"subscription_suspended",
 		"site_replaced",
 		"llm_rejected",
+		"reconnect_required",
 		"unmapped",
 	];
 	for (const reason of reasons) {

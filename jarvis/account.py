@@ -482,9 +482,12 @@ def _admin_chat_gate() -> dict:
 	Returns ``{"ready": True, "reason": None}`` UNLESS admin is reachable AND
 	reports a ``chat_readiness`` != ``"Ready"``, in which case
 	``{"ready": False, "reason": <code>, "detail": <admin's sentence>}``. The
-	code is ``"subscription_suspended"`` for ``Suspended`` (renew) and
-	``"container_provisioning"`` otherwise (wait) - kept distinct so a suspended
-	customer isn't told to wait for a container that won't come back.
+	code is ``"authority_repair_required"`` for ``SupportRequired`` (a paged
+	incident, no self-service action), ``"reconnect_required"`` for
+	``ReconnectRequired`` (slice 4b: reconnect the provider), ``"subscription_suspended"``
+	for ``Suspended`` (renew) and ``"container_provisioning"`` otherwise (wait) -
+	each kept distinct so a customer isn't told to wait for a container that won't
+	come back, or to keep spinning on a strand that only a reconnect can clear.
 
 	- v1-tolerance: an ABSENT ``chat_readiness`` key (v1 admin, or a v2 that
 	  doesn't surface it) means the control plane has no opinion → allow.
@@ -552,6 +555,20 @@ def _admin_chat_gate() -> dict:
 			return {
 				"ready": False,
 				"reason": "authority_repair_required",
+				"billing_notice": {},
+				"detail": conn.get("chat_readiness_reason") or "",
+			}
+		# Slice 4b (C10b): an aged onboarding OAuth strand whose subscription connect
+		# never landed. The customer cannot self-heal by waiting - only by reconnecting
+		# their provider - so this MUST NOT bucket into "container_provisioning" below
+		# (which the onboarding UI renders as the endless "bringing your setup online"
+		# spinner). Its own reason surfaces the terminal-STOP-with-Reconnect card;
+		# admin owns the wording via ``chat_readiness_reason``. billing_notice stays
+		# empty like SupportRequired: the action is a reconnect, not a billing banner.
+		if conn["chat_readiness"] == "ReconnectRequired":
+			return {
+				"ready": False,
+				"reason": "reconnect_required",
 				"billing_notice": {},
 				"detail": conn.get("chat_readiness_reason") or "",
 			}

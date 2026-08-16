@@ -68,6 +68,10 @@ vi.mock("@/onboarding/readiness.js", () => ({
 	forgetReady: forgetReadySpy,
 	hasReconnectIntent: () => false,
 	landingStep: ({ resumedStep }) => resumedStep,
+	// Slice 4b: the reconnect STOP card's CTA routes here. The real constant is
+	// "/jarvis/onboarding?reconnect=1"; pin the same literal so the click assertion
+	// below is exercising the true destination, not a placeholder.
+	RECONNECT_INTENT_URL: "/jarvis/onboarding?reconnect=1",
 }));
 
 vi.mock("@/theme", () => ({
@@ -893,6 +897,95 @@ describe("jarvis#727 an unverifiable model has a way out, not only a Retry", () 
 			expect(labels(w)).not.toContain("Use a different model");
 			w.unmount();
 		}
+	});
+
+	// Slice 4b (C10b): admin's chat_readiness == "ReconnectRequired" reaches the
+	// connect wait as is_ready_for_chat's "reconnect_required" reason. It must be a
+	// TERMINAL STOP with a Reconnect action - the honest headline + admin's own
+	// reason + a primary Reconnect CTA - and NEVER the endless "bringing your setup
+	// online" spinner it used to fall into (bucketed as container_provisioning).
+	describe("ReconnectRequired is a terminal STOP, not the endless spinner", () => {
+		const RECONNECT_REASON =
+			"Your AI subscription needs reconnecting. Open Jarvis Settings and reconnect your provider to finish.";
+
+		it("renders the reconnect STOP card with admin's reason, not the spinner", async () => {
+			const w = await mountConnect();
+			w.vm.connectModelChangeOffered = true; // a stale offer from an earlier attempt
+			w.vm.noteReadiness({
+				answered: true,
+				reason: "reconnect_required",
+				detail: RECONNECT_REASON,
+			});
+			await flushPromises();
+
+			expect(w.vm.state.connectPhase).toBe("reconnect");
+			// Not the working/finishing spinner, and not the support-only blocked card.
+			expect(w.vm.state.connectPhase).not.toBe("working");
+			expect(w.vm.state.connectPhase).not.toBe("blocked");
+			expect(w.vm.state.connectTitle).toMatch(/reconnect/i);
+			expect(w.vm.state.connectMessage).toBe(RECONNECT_REASON); // admin's own sentence, verbatim
+			expect(w.vm.connectModelChangeOffered).toBe(false); // a model change fixes nothing here
+			expect(labels(w)).toContain("Reconnect");
+			expect(labels(w)).not.toContain("Use a different model");
+			w.unmount();
+		});
+
+		it("the Reconnect CTA routes to the reconnect wizard entry", async () => {
+			const realLocation = window.location;
+			// jsdom's real window.location.assign is non-configurable; replace the
+			// whole object (same idiom as BillingPage.spec.js).
+			Object.defineProperty(window, "location", {
+				configurable: true,
+				value: { ...window.location, assign: vi.fn() },
+			});
+			try {
+				const w = await mountConnect();
+				w.vm.noteReadiness({
+					answered: true,
+					reason: "reconnect_required",
+					detail: RECONNECT_REASON,
+				});
+				await flushPromises();
+
+				const reconnectBtn = w
+					.findAll("button")
+					.find((b) => (b.attributes("label") || b.text()) === "Reconnect");
+				expect(reconnectBtn).toBeTruthy();
+				await reconnectBtn.trigger("click");
+
+				expect(window.location.assign).toHaveBeenCalledWith(
+					"/jarvis/onboarding?reconnect=1"
+				);
+				w.unmount();
+			} finally {
+				Object.defineProperty(window, "location", {
+					configurable: true,
+					value: realLocation,
+				});
+			}
+		});
+
+		it("stops polling the instant ReconnectRequired is seen (no 40-tick spinner)", async () => {
+			api.isReadyForChat.mockResolvedValue({
+				ready: false,
+				reason: "reconnect_required",
+				detail: RECONNECT_REASON,
+			});
+			vi.useFakeTimers();
+			const w = await mountConnect();
+			api.isReadyForChat.mockClear();
+
+			// READY-but-not-chat-ready starts waitForChatReadiness; its first poll sees
+			// the stop verdict and the loop must end rather than count down 40 ticks.
+			w.vm.onTerminal(readyChatBlockedStatus);
+			await flushPromises();
+			await vi.advanceTimersByTimeAsync(40 * 3000);
+			await flushPromises();
+
+			expect(api.isReadyForChat.mock.calls.length).toBe(1);
+			expect(w.vm.state.connectPhase).toBe("reconnect");
+			w.unmount();
+		});
 	});
 
 	it("an operation-level failure offers the change beside Retry, not instead of it", async () => {

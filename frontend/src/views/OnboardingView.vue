@@ -1568,6 +1568,48 @@
 											</p>
 										</div>
 									</template>
+									<!-- Slice 4b (C10b): the subscription-connect strand that
+										 waiting cannot heal. Unlike the paged authority-repair block
+										 above, the customer CAN act - so this is a real STOP with a
+										 primary Reconnect CTA into the wizard's reconnect entry, and
+										 admin's own reason as the body. Never the "bringing your setup
+										 online" spinner it used to fall into. -->
+									<template v-else-if="state.connectPhase === 'reconnect'">
+										<div class="ob-head">
+											<h1>
+												{{
+													state.connectTitle ||
+													"Your AI subscription needs reconnecting"
+												}}
+											</h1>
+											<p>
+												Waiting won't finish this one. Reconnect your AI
+												subscription to pick up where setup left off.
+											</p>
+										</div>
+										<div class="mx-auto mt-4 max-w-[560px]">
+											<Banner
+												v-if="state.connectMessage"
+												type="warning"
+												:message="state.connectMessage"
+											/>
+											<div class="mt-4 flex flex-wrap justify-center gap-2">
+												<Button
+													variant="solid"
+													label="Reconnect"
+													@click="reconnectFromStall"
+												/>
+											</div>
+											<p
+												class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+											>
+												Not sure why this happened?
+												<button class="ob-link" @click="openSupport">
+													Contact support
+												</button>
+											</p>
+										</div>
+									</template>
 									<!-- A non-ready terminal (retry / superseded / support) or a
 										 deadline timeout: stay HERE with a real recovery action.
 										 Never a "continue anyway" jump into a chat that cannot yet
@@ -1783,7 +1825,12 @@ import {
 	connectHeadline,
 	phaseProgress,
 } from "@/onboarding/waitPhases.js";
-import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
+import {
+	forgetReady,
+	hasReconnectIntent,
+	landingStep,
+	RECONNECT_INTENT_URL,
+} from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
 import { agentName } from "@/branding";
@@ -4117,6 +4164,21 @@ function noteReadiness(o) {
 			"That AI configuration was rejected. Edit your connection and try again.";
 		return stage;
 	}
+	// Slice 4b (C10b): a subscription-connect strand that waiting cannot heal, but
+	// one the customer CAN act on - unlike the paged/suspended/moved blocks below.
+	// Its own phase so the panel carries a primary Reconnect CTA into the wizard's
+	// reconnect entry instead of the support-only dead end, mirroring how `editable`
+	// routes llm_rejected back to the form. `state.finishing` stays true so this card
+	// (which lives under the setup screen's v-show) renders in place of the spinner.
+	// Admin's own sentence (stage.detail) is the body; no model change, because a
+	// rejected model is not the problem here.
+	if (stage.reconnect) {
+		state.connectPhase = "reconnect";
+		state.connectTitle = stage.title || "Your AI subscription needs reconnecting";
+		state.connectMessage = stage.detail;
+		connectModelChangeOffered.value = false;
+		return stage;
+	}
 	// A verdict that waiting cannot resolve is terminal for this wait: stop
 	// polling rather than counting down to a ceiling whose copy invites a retry
 	// that cannot help. Covers a paged authority repair (do nothing, we called
@@ -4201,10 +4263,13 @@ async function waitForChatReadiness() {
 			detail: r && r.detail,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
-		// jarvis#757: stage.editable already returned to the form (noteReadiness
-		// set state.finishing = false) - stop polling THIS tick rather than
-		// sleeping once more on a config the customer may already be re-editing.
-		if (state.connectPhase === "blocked" || stage.editable) return;
+		// Any verdict waiting cannot resolve is terminal for this wait (stage.stop):
+		// the paged/suspended/moved blocks, jarvis#757's editable llm_rejected (which
+		// already returned to the form), and slice 4b's reconnect stop. Stop polling
+		// THIS tick rather than sleeping once more on a state that will not change on
+		// its own. `stage.stop` is exactly this set, so it replaces the older
+		// connectPhase/editable pair without altering their behaviour.
+		if (stage.stop) return;
 		await _sleep(CHAT_READY_INTERVAL_MS);
 	}
 	state.finishing = true;
@@ -4457,8 +4522,9 @@ async function followLegacyReadiness(result) {
 			detail: r && r.detail,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
-		// jarvis#757: see the matching comment in waitForChatReadiness.
-		if (state.connectPhase === "blocked" || stage.editable) return;
+		// See waitForChatReadiness: stage.stop is every verdict waiting cannot resolve
+		// (blocked stops, jarvis#757's editable, slice 4b's reconnect).
+		if (stage.stop) return;
 		if (i < attempts - 1) await _sleep(LEGACY_READY_INTERVAL_MS);
 	}
 	state.finishing = true;
@@ -4574,6 +4640,17 @@ function retryConnect() {
 // that re-follows whatever operation now owns the truth.
 function reloadConnect() {
 	window.location.reload();
+}
+
+// Slice 4b (C10b): the Reconnect CTA on the stalled-subscription STOP card. Same
+// destination as ChatView's own reconnect banner (goReconnect): a hard nav into the
+// wizard's reconnect entry with the intent flag, so a returning customer lands on
+// the code-confirm reconnect path rather than resuming the stalled onboarding. The
+// flag is load-bearing - see RECONNECT_INTENT_URL - and a hard assign (not the
+// in-wizard startReconnect) is used so identity/eligibility is captured fresh on the
+// Details step rather than assumed from a signup that never fully landed.
+function reconnectFromStall() {
+	window.location.assign(RECONNECT_INTENT_URL);
 }
 
 // (An unreferenced `editConnect` lived here: a partial return-to-the-form that

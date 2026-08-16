@@ -192,13 +192,16 @@ export function provisioningPhase({ answered = false, tenantStatus = "" } = {}) 
  *
  * @param {{answered?: boolean, reason?: string, detail?: string}} [last]
  * @returns {{observed: boolean, state: string, label: string, detail: string,
- *   stop: boolean, paged?: boolean, editable?: boolean, title?: string}} `stop`
- *   means waiting cannot resolve this, so the loop must end rather than run to
- *   a ceiling whose copy invites a retry that cannot help. `paged` distinguishes
- *   "support has already been notified, do nothing" from "nobody was notified,
- *   you must act". `editable` (only ever true alongside `stop`) means the fix
- *   is a config change, so the caller must return to the form, not stay on a
- *   dead-end screen.
+ *   stop: boolean, paged?: boolean, editable?: boolean, reconnect?: boolean,
+ *   title?: string}} `stop` means waiting cannot resolve this, so the loop must
+ *   end rather than run to a ceiling whose copy invites a retry that cannot help.
+ *   `paged` distinguishes "support has already been notified, do nothing" from
+ *   "nobody was notified, you must act". `editable` (only ever true alongside
+ *   `stop`) means the fix is a config change, so the caller must return to the
+ *   form, not stay on a dead-end screen. `reconnect` (also only alongside `stop`,
+ *   slice 4b) means the fix is a subscription reconnect, so the caller shows a
+ *   Reconnect CTA into the wizard's reconnect entry rather than a support-only
+ *   dead end.
  */
 export function readinessPhase({ answered = false, reason = "", detail = "" } = {}) {
 	const say = String(detail || "").trim();
@@ -295,6 +298,27 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				detail: say,
 				stop: true,
 				editable: true,
+			};
+		case "reconnect_required":
+			// Slice 4b (C10b): an aged onboarding OAuth strand whose subscription
+			// connect never landed. account.py maps admin's chat_readiness ==
+			// "ReconnectRequired" onto this reason. Waiting cannot heal it - it cannot
+			// self-heal without the customer reconnecting - so it STOPS the wait like
+			// the paged/suspended/moved verdicts above, rather than falling into the
+			// default "coming online" spinner it used to (bucketed as
+			// container_provisioning). But the fix is a reconnect the customer CAN take
+			// here, so `reconnect: true` marks that for the caller, the action analogue
+			// of llm_rejected's `editable`. Not `paged`: nobody was notified, the
+			// customer acts. Admin's own reason (`say`) is the body, never reworded.
+			return {
+				observed: true,
+				state: PHASE_STATE.UNKNOWN,
+				kind: PHASE_KIND.NONE,
+				label: "Your AI subscription needs reconnecting",
+				detail: say,
+				stop: true,
+				reconnect: true,
+				title: "Your AI subscription needs reconnecting",
 			};
 		default:
 			// A reason this build does not know about gets the neutral line. It
