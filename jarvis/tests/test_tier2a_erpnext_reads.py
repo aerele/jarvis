@@ -477,6 +477,13 @@ def _ensure_warehouse(name: str, company: str) -> str:
 			"company": company,
 		}
 	)
+	# Upstream erpnext develop now validates a new Warehouse against the
+	# company's inventory account (Warehouse.validate_inventory_account ->
+	# get_warehouse_account), and this fixture's companies deliberately skip
+	# chart-of-accounts creation - they exist for permission checks, not a
+	# ledger. Use the escape flag upstream provides for exactly this case
+	# (harmless on older erpnext that predates the validation).
+	doc.flags.ignore_inventory_account_validation = True
 	doc.insert(ignore_permissions=True)
 	return doc.name
 
