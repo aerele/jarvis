@@ -361,25 +361,30 @@ class TestSessionProfilePick(FrappeTestCase):
 		)
 		sess = FakeSess()
 		with patch.object(chat_api.frappe, "get_single", return_value=settings):
-			key = chat_api._ensure_session_key(self._USER, sess=sess)
+			key = chat_api._ensure_session_key(self._USER, sess=sess, profile=True)
 
-		self.assertTrue(key.startswith("agent:role-hr:jarvis-chat-"))
+		# ":dashboard:" is the chat-namespace marker session_lifecycle.py's
+		# idle/orphan reaper and session_pin_sweep.py both key off - a key
+		# missing it would leak this gateway session forever.
+		self.assertTrue(key.startswith("agent:role-hr:dashboard:jarvis-chat-"))
 		self.assertEqual(sess.calls, 0)
 		row = frappe.get_doc(SESSION, {"session_key": key})
 		self.assertEqual(row.profile_agent_id, "role-hr")
 		self.assertEqual(row.profile_tier, "standard")
+		self.assertEqual(row.profile_n_tools, 68)
 
 	def test_flag_off_uses_legacy_create_session_path(self):
 		settings = self._fake_settings(enable_role_profiles=False)
 		sess = FakeSess()
 		with patch.object(chat_api.frappe, "get_single", return_value=settings):
-			key = chat_api._ensure_session_key(self._USER, sess=sess)
+			key = chat_api._ensure_session_key(self._USER, sess=sess, profile=True)
 
 		self.assertEqual(sess.calls, 1)
 		self.assertEqual(key, "sess-key-1")
 		row = frappe.get_doc(SESSION, {"session_key": key})
 		self.assertEqual(row.profile_tier, "full")
 		self.assertEqual(row.profile_sets, "")
+		self.assertEqual(row.profile_n_tools, 0)
 
 	def test_flag_on_agent_not_in_pushed_snapshot_falls_back_to_legacy(self):
 		# resolve_profile(self._USER) resolves to role-hr (real HR User role),
@@ -391,10 +396,48 @@ class TestSessionProfilePick(FrappeTestCase):
 		)
 		sess = FakeSess()
 		with patch.object(chat_api.frappe, "get_single", return_value=settings):
-			key = chat_api._ensure_session_key(self._USER, sess=sess)
+			key = chat_api._ensure_session_key(self._USER, sess=sess, profile=True)
 
 		self.assertEqual(sess.calls, 1)
 		self.assertEqual(key, "sess-key-1")
+
+	def test_macro_style_call_profile_false_still_uses_legacy_even_if_resolvable(self):
+		# Coordinator review finding #2 (spec §8 - non-chat sessions always
+		# run `full`): a macro/scheduled dispatch never passes profile=True
+		# (jarvis.chat.macros -> api._enqueue_turn's session-key call keeps
+		# the default). Even with the flag on and a fully resolvable, pushed
+		# profile, `profile=False` (the default - this call omits the kwarg
+		# entirely, exactly like a macro caller would) must still take the
+		# legacy create_session path, because macros.py's own dispatch
+		# try/except relies on this function still THROWING on a
+		# misconfigured agent rather than silently minting an unusable key.
+		settings = self._fake_settings(
+			enable_role_profiles=True,
+			pushed=[{"slug": "role-hr", "skills": ["hrms-hr"], "tools_allow": ["exec"]}],
+		)
+		sess = FakeSess()
+		with patch.object(chat_api.frappe, "get_single", return_value=settings):
+			key = chat_api._ensure_session_key(self._USER, sess=sess)  # profile omitted -> False
+
+		self.assertEqual(sess.calls, 1)
+		self.assertEqual(key, "sess-key-1")
+		row = frappe.get_doc(SESSION, {"session_key": key})
+		self.assertEqual(row.profile_tier, "full")
+
+	def test_profile_true_missing_gateway_config_still_throws(self):
+		# Coordinator review finding #2: the profile (self-addressed) path
+		# skips create_session/sessions.create entirely, but a totally
+		# unconfigured agent must still fail fast here - never silently mint
+		# a session key nothing can ever connect to.
+		settings = self._fake_settings(
+			enable_role_profiles=True,
+			pushed=[{"slug": "role-hr", "skills": ["hrms-hr"], "tools_allow": ["exec"]}],
+		)
+		settings.agent_url = ""
+		settings.get_password = lambda *a, **k: ""
+		with patch.object(chat_api.frappe, "get_single", return_value=settings):
+			with self.assertRaises(frappe.ValidationError):
+				chat_api._ensure_session_key(self._USER, sess=FakeSess(), profile=True)
 
 	def test_missing_flag_attribute_degrades_to_legacy_not_a_crash(self):
 		# Regression: a site whose code deployed ahead of its reload-doctype /
@@ -402,7 +445,9 @@ class TestSessionProfilePick(FrappeTestCase):
 		# Settings doc at all (AttributeError, not a falsy value) - caught
 		# live via jarvis.tests.test_pump_pipeline.TestPumpPipelineE2E before
 		# the getattr guard was added. A missing flag must behave exactly
-		# like flag-off, never break session creation.
+		# like flag-off, never break session creation. profile=True so the
+		# `getattr` guard (short-circuited behind `if profile and ...`) is
+		# actually exercised.
 		settings = SimpleNamespace(
 			chat_device_id="dev-1",
 			agent_url="ws://fake-agent",
@@ -410,12 +455,34 @@ class TestSessionProfilePick(FrappeTestCase):
 		)
 		sess = FakeSess()
 		with patch.object(chat_api.frappe, "get_single", return_value=settings):
-			key = chat_api._ensure_session_key(self._USER, sess=sess)
+			key = chat_api._ensure_session_key(self._USER, sess=sess, profile=True)
 
 		self.assertEqual(sess.calls, 1)
 		self.assertEqual(key, "sess-key-1")
 		row = frappe.get_doc(SESSION, {"session_key": key})
 		self.assertEqual(row.profile_tier, "full")
 
+	def test_missing_pushed_snapshot_attribute_degrades_to_legacy(self):
+		# Narrower sibling of the missing-flag test above: the flag itself IS
+		# present and on, but `role_profiles_pushed` is missing entirely (same
+		# metadata-lag scenario, different field) - _pushed_profile_slugs'
+		# own getattr guard must return an empty set rather than raise, which
+		# routes to the legacy path exactly like an empty/unparseable snapshot
+		# already does.
+		settings = SimpleNamespace(
+			enable_role_profiles=True,
+			chat_device_id="dev-1",
+			agent_url="ws://fake-agent",
+			get_password=lambda *a, **k: "fake-token",
+		)
+		sess = FakeSess()
+		with patch.object(chat_api.frappe, "get_single", return_value=settings):
+			key = chat_api._ensure_session_key(self._USER, sess=sess, profile=True)
+
+		self.assertEqual(sess.calls, 1)
+		self.assertEqual(key, "sess-key-1")
+
 	def test_scrub(self):
+		# scrub is jarvis.chat.entities.scrub, imported (not duplicated) into
+		# api.py; assert it through its use in the self-addressed key shape.
 		self.assertEqual(chat_api.scrub("RP-HR@Example.com"), "rp-hr-example-com")

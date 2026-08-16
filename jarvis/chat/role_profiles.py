@@ -339,15 +339,19 @@ def sync_role_profiles(force: bool = False) -> dict:
 	"""Compute :func:`needed_profiles` and push it to admin only when the set
 	actually changed since the last push (or ``force=True``).
 
-	This is the fallback-discipline boundary for the whole sync (unlike
-	``needed_profiles`` itself, which is deliberately left unwrapped so a real
-	``frappe.get_all`` failure is visible rather than silently read as "no
-	profiles needed"). Everything downstream of that computation - the
-	snapshot comparison, the admin push, the settings stamp - is wrapped in
-	one try/except: a push failure (admin down, rejected, a bug in this
-	function) must never raise into a caller such as a ``User.on_update`` save
-	or the daily scheduler tick. Logged via ``frappe.log_error`` the way other
-	``admin_client`` callers in this app do.
+	This is the fallback-discipline boundary for the whole sync. Unlike
+	``needed_profiles`` itself (which carries no internal guard of its own -
+	a real ``frappe.get_all`` failure there is meant to be visible to a
+	caller that invokes it directly, rather than silently read as "no
+	profiles needed"), this function DOES call ``needed_profiles`` inside its
+	own try/except below, alongside the snapshot comparison, the admin push,
+	and the settings stamp: a failure at ANY of those steps (compute
+	included) must never raise into a caller such as a ``User.on_update``
+	save or the daily scheduler tick. Logged via ``frappe.log_error`` the way
+	other ``admin_client`` callers in this app do, with the title naming
+	which phase failed (``compute`` vs ``push``) so an Error Log entry
+	doesn't need a traceback read to tell a broken role→set mapping apart
+	from an unreachable admin.
 
 	Returns ``{"pushed": bool, "profiles": [...]}``. ``profiles`` is always
 	the freshly computed desired state (even on failure, as long as
@@ -355,8 +359,10 @@ def sync_role_profiles(force: bool = False) -> dict:
 	be live without having to re-derive it.
 	"""
 	profiles: list[dict] = []
+	phase = "compute"
 	try:
 		profiles = needed_profiles()
+		phase = "push"
 
 		last_raw = frappe.db.get_single_value(_SETTINGS, "role_profiles_pushed", cache=False)
 		last = frappe.parse_json(last_raw) if last_raw else None
@@ -377,7 +383,7 @@ def sync_role_profiles(force: bool = False) -> dict:
 		)
 		return {"pushed": True, "profiles": profiles}
 	except Exception:
-		frappe.log_error(title="Jarvis: role-profiles push failed", message=frappe.get_traceback())
+		frappe.log_error(title=f"Jarvis: role-profiles {phase} failed", message=frappe.get_traceback())
 		return {"pushed": False, "profiles": profiles}
 
 

@@ -14,6 +14,7 @@
     "profile_tier",
     "profile_sets",
     "profile_n_skills",
+    "profile_n_tools",
     "created_at",
     "last_seen_at",
     "input_tokens",
@@ -76,6 +77,13 @@
       "label": "Profile Skill Count",
       "read_only": 1,
       "description": "Number of persona skills in the profile addressed at session-create time. 0 for the main/full agent."
+    },
+    {
+      "fieldname": "profile_n_tools",
+      "fieldtype": "Int",
+      "label": "Profile Tool Count",
+      "read_only": 1,
+      "description": "Number of agent tools allowed in the profile addressed at session-create time (jarvis.chat.role_profiles.ProfileChoice.n_tools). 0 for the main/full agent."
     },
     {
       "fieldname": "created_at",
