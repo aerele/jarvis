@@ -35,9 +35,12 @@
 
 					<!-- step rail: flat progress segments with labels (design.md §4.3 —
 					 no numbered circles, no connector lines). Hidden on the intro
-					 tour (chromeless). -->
+					 tour (chromeless). variant="steps" opts out of the 2026-08-16
+					 smooth-bar redesign - the rail is real navigation with four
+					 always-visible names, not one of the wait screens that
+					 redesign targeted (StepProgress.vue's own header comment). -->
 					<div v-if="railIndex >= 0" class="my-4 w-full max-w-[720px]">
-						<StepProgress :steps="RAIL" :current-index="railIndex" />
+						<StepProgress :steps="RAIL" :current-index="railIndex" variant="steps" />
 					</div>
 
 					<div
@@ -1464,28 +1467,29 @@
 												}}
 											</p>
 										</div>
-										<!-- One labeled progress bar for the whole connect wait
-											 (2026-08-14 redesign). The jarvis#726 "Step N of 3" bar
+										<!-- One smooth progress bar for the whole connect wait
+											 (2026-08-16 redesign). The jarvis#726 "Step N of 3" bar
 											 plus phase columns stopped working once the jarvis#840
 											 checklist made it six columns under a 3-count bar: long
 											 wrapping labels and a count that contradicted the list
-											 (user report). The columns are gone; the bar now carries
-											 one SHORT-labeled segment per step and the current step
-											 explains itself in one line below (ob-step-explain).
-											 jarvis#763's "no per-step labels on the wait bars" held
-											 while the columns carried the words next to the bar; with
-											 the columns removed this is the non-duplicating labeled
-											 layout waitPhases.phaseProgress anticipated. Honesty is
-											 unchanged: segments fill only from observed states
-											 (connectSteps), and an UNKNOWN current step pulses
-											 indeterminate instead of filling. -->
+											 (user report). The 2026-08-14 fix replaced the columns
+											 with one SHORT-labeled segment per step, but that just
+											 moved the duplication onto the bar itself - six tiny
+											 labels sitting above six segments read as a duplicated
+											 row of tiles above a bar (user report). The per-step
+											 labels are gone; the caption now names the current step
+											 ("Step 2 of 6 · Workspace") and the current step still
+											 explains itself in one line below (ob-step-explain), so
+											 nothing is said twice. Honesty is unchanged: the fill
+											 reflects only observed states (connectSteps), and an
+											 UNKNOWN current step pulses instead of asserting further
+											 progress. -->
 										<div class="ob-progress">
 											<StepProgress
 												:steps="connectSteps"
 												:current-index="connectProgress.index"
 												:indeterminate="connectProgress.indeterminate"
 												:label="connectProgress.caption"
-												collapse-labels
 											/>
 										</div>
 										<!-- ONE live region over the explanation and admin's own
@@ -4030,8 +4034,10 @@ const connectSteps = computed(() => {
 const connectProgress = computed(() => {
 	const steps = connectSteps.value;
 	// Always hits: the chat step is never "done" (only active or waiting), so
-	// a first not-done step always exists.
-	const index = steps.findIndex((s) => s.state !== "done");
+	// a first not-done step always exists; the clamp is a defensive fallback,
+	// not a state this reaches.
+	const rawIndex = steps.findIndex((s) => s.state !== "done");
+	const index = rawIndex === -1 ? steps.length - 1 : rawIndex;
 	const explain = preflight.running
 		? "Running final checks on your setup."
 		: steps[index].explain;
@@ -4039,7 +4045,9 @@ const connectProgress = computed(() => {
 		index,
 		indeterminate: steps[index].state === "unknown",
 		explain,
-		caption: `Step ${index + 1} of ${steps.length}`,
+		// Names the current step (2026-08-16 redesign) so the caption alone
+		// carries what the removed per-step labels used to say.
+		caption: `Step ${index + 1} of ${steps.length} · ${steps[index].label}`,
 	};
 });
 
@@ -5020,9 +5028,10 @@ onUnmounted(() => {
 	outline-offset: 2px;
 }
 /* ---- staged wait progress bar (jarvis#726, waitPhases.phaseProgress) ----
-   Layout wrapper only - the segments themselves, including the indeterminate
-   pulse on the current one, are StepProgress.vue's (design.md §4.3, one
-   shared component for every stepped indicator in the app).
+   Layout wrapper only - the bar itself, including the indeterminate pulse,
+   is StepProgress.vue's variant="bar" (design.md §4.3, one shared component
+   for every stepped indicator in the app; 2026-08-16 redesign replaced its
+   per-segment columns with one continuous fill).
 
    Width (jarvis wait-phases-horizontal): a live run called the old 420px cap
    "very congested". 75% of the card reads roomy without turning into an
@@ -5030,8 +5039,8 @@ onUnmounted(() => {
    longest phase label ("Applying your AI configuration") still gets a
    sensible column width at 3-up rather than the columns ballooning past what
    the text needs. `.ob-phases` and `.ob-phase-detail` below share the exact
-   same width/gap so the phase columns line up under the bar's segments and
-   the detail line reads as belonging to the same block. */
+   same width/gap so the phase columns line up under the bar and the detail
+   line reads as belonging to the same block. */
 .ob-progress {
 	margin: 0 auto;
 	width: 75%;
@@ -5039,17 +5048,17 @@ onUnmounted(() => {
 }
 
 /* ---- staged wait phases (waitPhases.js), PROVISIONING wait only --------
-   One column per phase, side by side under the bar's segments so the whole
-   block reads as one horizontal progression rather than a bar with an
-   unrelated list under it (jarvis wait-phases-horizontal). Segment one sits
-   above phase one for free: both this row and StepProgress.vue's own row are
-   a 3-up flex with equal (`flex: 1`) children and the same 8px gap over the
-   same width. jarvis#763 rejected per-step labels on the bar itself BECAUSE
-   these columns already carried the words; the CONNECT wait dropped its
-   columns in the 2026-08-14 redesign (six of them under a 3-count bar wrapped
-   into unreadable towers), so its bar is now the labeled, non-duplicating
-   layout that rejection anticipated, and only the provisioning wait still
-   renders this list.
+   One column per phase, side by side under the bar, so the whole block
+   reads as one horizontal progression rather than a bar with an unrelated
+   list under it (jarvis wait-phases-horizontal). The columns line up under
+   the bar because both share the same 75%/640px width and 8px gap, not
+   because the bar itself is still segmented - since the 2026-08-16 redesign
+   the bar above is one continuous fill (StepProgress.vue variant="bar").
+   jarvis#763 rejected per-step labels on the bar itself BECAUSE these
+   columns already carried the words; the CONNECT wait's own six-step bar
+   went through two more rounds after that (the 2026-08-14 labeled-segment
+   layout, then the 2026-08-16 caption-only bar) and only the provisioning
+   wait still renders this column list.
 
    The MODIFIER on each column is the honesty contract, not decoration:
    `active` is only ever set from an observation, `unknown` means a poll
@@ -5248,6 +5257,6 @@ onUnmounted(() => {
 		transition: none;
 	}
 	/* StepProgress.vue owns its own reduced-motion fallback for the
-	   indeterminate segment. */
+	   indeterminate fill/segment pulse. */
 }
 </style>
