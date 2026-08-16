@@ -4,10 +4,10 @@ Spec: ``docs/superpowers/specs/2026-08-16-role-profile-agents-design.md``.
 
 Two independent axes, both curated data (spec §5), never runtime discovery:
 
-* **Tool tier** — the jarvis-plane role decides ``full`` (today's 94 tools)
+* **Tool tier**: the jarvis-plane role decides ``full`` (today's 94 tools)
   vs ``standard`` (68 tools; ``STANDARD_DROP_TOOLS`` is the 26-tool drop
   list, spec §3).
-* **Skill set** — ERPNext roles decide which of the 6 named skill sets
+* **Skill set**: ERPNext roles decide which of the 6 named skill sets
   (``SKILL_SETS``), plus the always-on ``SHARED_CORE_SKILLS``, a user's
   profile includes.
 
@@ -151,7 +151,7 @@ def standard_tools_allow() -> list[str]:
 
 # Everyone gets these regardless of ERPNext role (spec §3): all frappe-*,
 # all jarvis-*, and the domain-neutral erpnext/utility skills that no single
-# role set claims — including erpnext-bulk-transaction, which spans domains
+# role set claims, including erpnext-bulk-transaction, which spans domains
 # and so belongs to no one set.
 SHARED_CORE_SKILLS = frozenset(
 	{
@@ -244,7 +244,7 @@ class ProfileChoice:
 
 
 # agent_id=None means "use main": full tier, no trimming. Never "main" or
-# an "agent-" prefixed slug literal — those are reserved by the fleet side.
+# an "agent-" prefixed slug literal: those are reserved by the fleet side.
 _MAIN_PROFILE = ProfileChoice(agent_id=None, tier="full", set_keys=(), skills=None, n_tools=None)
 
 
@@ -255,6 +255,12 @@ def resolve_profile(user: str) -> ProfileChoice:
 	main agent (spec §3 fallback rule 3). There is no partial trim on error.
 	"""
 	try:
+		if not user:
+			# frappe.get_roles(None) resolves to the *session* user, not "no
+			# user" - that's a different, deterministic case here, not the
+			# fallback path.
+			return _MAIN_PROFILE
+
 		roles = set(frappe.get_roles(user))
 
 		if roles & FULL_TIER_ROLES:
@@ -308,6 +314,6 @@ def needed_profiles() -> list[dict]:
 		profiles[choice.agent_id] = {
 			"slug": choice.agent_id,
 			"skills": list(choice.skills or ()),
-			"tools_allow": tools_allow,
+			"tools_allow": list(tools_allow),
 		}
 	return list(profiles.values())

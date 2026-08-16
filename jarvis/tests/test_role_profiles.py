@@ -5,6 +5,8 @@ Run ONLY with --case (bare --module silently skips TestCases):
   bench --site site.jarvis run-tests --app jarvis --case TestRoleProfiles
 """
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
@@ -48,6 +50,17 @@ class TestRoleProfiles(FrappeTestCase):
 	def test_resolution_error_falls_back_to_main(self):
 		c = role_profiles.resolve_profile(None)  # type: ignore[arg-type]
 		self.assertIsNone(c.agent_id)
+
+	def test_resolution_exception_falls_back_to_main(self):
+		# frappe.get_roles(None) resolves to the session user rather than
+		# raising, so the test above exercises the deterministic `not user`
+		# guard, not the except branch. Force a genuine exception here to
+		# cover the "absolute" fallback rule (spec §3 rule 3) for real.
+		u = self._mk_user("rp-boom@example.com", ["Jarvis User", "HR User"])
+		with patch.object(role_profiles.frappe, "get_roles", side_effect=RuntimeError("boom")):
+			c = role_profiles.resolve_profile(u)
+		self.assertIsNone(c.agent_id)
+		self.assertEqual(c.tier, "full")
 
 	def test_standard_tools_allow_excludes_drops_keeps_features(self):
 		allow = set(role_profiles.standard_tools_allow())
