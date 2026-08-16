@@ -253,9 +253,9 @@ def test_oserror_from_exec_is_clean_and_cleans_temp(fake_wk: _Recorder) -> None:
 def test_render_exception_still_cleans_temp(fake_wk: _Recorder) -> None:
 	fake_wk.returncode = 1
 	fake_wk.stderr = b"boom: qt render blew up"
-	with pytest.raises(InvalidArgumentError) as excinfo:
+	with pytest.raises(InvalidArgumentError):
 		render_pdf("<p>body</p>", header_html="<b>H</b>")
-	assert "boom" in str(excinfo.value)
+	# temp cleaned even on a non-zero exit (this test's point)
 	assert not os.path.exists(fake_wk.path_for("--header-html"))
 
 
@@ -334,12 +334,20 @@ def test_nonpdf_output_raises(fake_wk: _Recorder) -> None:
 		render_pdf("<p>hi</p>", page_numbers=False)
 
 
-def test_nonzero_exit_includes_stderr_tail(fake_wk: _Recorder) -> None:
+def test_nonzero_exit_logs_stderr_but_keeps_it_out_of_user_message(
+	fake_wk: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	# stderr can carry the /tmp/jv-pdf-<hash>.html temp path — it goes to the
+	# Error Log, NOT the user-facing message (which stays clean).
+	logged: list[dict] = []
+	monkeypatch.setattr(furniture.frappe, "log_error", lambda **k: logged.append(k))
 	fake_wk.returncode = 3
-	fake_wk.stderr = b"unique-stderr-signature"
+	fake_wk.stderr = b"unique-stderr-signature /tmp/jv-pdf-abc.html"
 	with pytest.raises(InvalidArgumentError) as excinfo:
 		render_pdf("<p>hi</p>", page_numbers=False)
-	assert "unique-stderr-signature" in str(excinfo.value)
+	assert "unique-stderr-signature" not in str(excinfo.value)
+	assert "3" in str(excinfo.value)  # the exit code is fine to surface
+	assert any("unique-stderr-signature" in str(k.get("message", "")) for k in logged)
 
 
 def test_infra_failure_is_logged(fake_wk: _Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -443,31 +451,78 @@ class _FakeDB:
 		return self._gv(*a, **k)
 
 
+def _file_gv(name="FILE1", size=100):
+	"""A field-aware File.get_value stub: the file_url→name lookup returns ``name``
+	(or None to simulate 'no such File'), and the file_size lookup returns ``size``."""
+
+	def gv(_dt, _filt, field=None, **_k):
+		if field == "file_size":
+			return size
+		return name
+
+	return gv
+
+
+class _PngFile:
+	def get_content(self):
+		return b"\x89PNG\r\n\x1a\nDATA"  # valid PNG magic → passes the image sniff
+
+
 def test_inline_same_site_to_base64_with_perm(monkeypatch: pytest.MonkeyPatch) -> None:
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(lambda *_a, **_k: "FILE1"))
+	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv()))
 	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
-
-	class _F:
-		def get_content(self):
-			return b"\x89PNG\r\n\x1a\nDATA"
-
-	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _F())
+	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _PngFile())
 	out = furniture._inline_letterhead_images('<img src="/files/logo.png">')
 	assert "data:image/png;base64," in out
 	assert "http" not in out.lower()
 
 
 def test_inline_same_site_dropped_without_perm(monkeypatch: pytest.MonkeyPatch) -> None:
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(lambda *_a, **_k: "FILE1"))
+	# get_doc is mocked to SUCCEED so the drop is attributable ONLY to
+	# has_permission=False — if the perm check were removed, this would LEAK a
+	# base64 image and the test would fail (mutation-catching).
+	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv()))
 	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: False)
+	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _PngFile())
 	out = furniture._inline_letterhead_images('<img src="/files/logo.png">')
 	assert "<img" not in out.lower()
+	assert "base64" not in out.lower()
 
 
 def test_inline_unknown_file_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(lambda *_a, **_k: None))
+	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv(name=None)))
+	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
+	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _PngFile())
 	out = furniture._inline_letterhead_images('<img src="/files/missing.png">')
 	assert "<img" not in out.lower()
+
+
+def test_inline_oversized_logo_dropped_before_read(monkeypatch: pytest.MonkeyPatch) -> None:
+	# An oversized File is rejected on its file_size BEFORE get_content is called.
+	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv(size=furniture._MAX_LOGO_BYTES + 1)))
+	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
+
+	def _boom(*_a, **_k):
+		raise AssertionError("get_content must not be called for an oversized logo")
+
+	monkeypatch.setattr(furniture.frappe, "get_doc", _boom)
+	out = furniture._inline_letterhead_images('<img src="/files/huge.png">')
+	assert "<img" not in out.lower()
+
+
+def test_inline_nonimage_bytes_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+	# A file whose bytes are not an image (mislabeled *.png) is not inlined.
+	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv()))
+	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
+
+	class _NotImg:
+		def get_content(self):
+			return b"<html>not an image</html>"
+
+	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _NotImg())
+	out = furniture._inline_letterhead_images('<img src="/files/fake.png">')
+	assert "<img" not in out.lower()
+	assert "base64" not in out.lower()
 
 
 # --- letterhead: resolution + degrade note, site-free via stubs --------------
@@ -522,6 +577,38 @@ def test_resolve_letterhead_no_read_perm_notes(monkeypatch: pytest.MonkeyPatch) 
 	header, _footer, note = resolve_letterhead("Acme")
 	assert header == ""
 	assert note and "Acme" in note
+
+
+def test_resolve_letterhead_strips_remote_image_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+	# The F1 SSRF gate wired through resolve_letterhead: a Letter Head whose content
+	# carries a remote <img>/<link> must come back with NO remote URL (the gate runs
+	# after inlining), while benign text survives.
+	_stub_letterhead(
+		monkeypatch,
+		docs={
+			"Evil": {
+				"content": '<div>Acme<img src="http://169.254.169.254/x">'
+				'<link href="http://evil/x.css"></div>',
+				"footer": "",
+			}
+		},
+	)
+	header, _footer, note = resolve_letterhead("Evil")
+	low = header.lower()
+	assert "169.254" not in low and "evil" not in low
+	assert "<link" not in low
+	assert "Acme" in header
+	assert note is None
+
+
+def test_remove_quietly_suppresses_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+	# A non-FileNotFound OSError (e.g. EPERM) during cleanup must be swallowed so
+	# the finally loop can't abort (leaking the other temp) or mask the real error.
+	def _raise(_p):
+		raise PermissionError("EPERM")
+
+	monkeypatch.setattr(furniture.os, "remove", _raise)
+	furniture._remove_quietly("/tmp/whatever")  # must NOT raise
 
 
 @pytest.mark.skipif(not _HAS_SITE, reason="needs a bench site (get_letter_head / File)")

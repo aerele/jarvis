@@ -20,7 +20,11 @@ import time
 
 import pytest
 
-from jarvis.tools._export.document.sanitizer import _DECOMPOSE_TAGS, sanitize_rich
+from jarvis.tools._export.document.sanitizer import (
+	_DECOMPOSE_TAGS,
+	sanitize_letterhead,
+	sanitize_rich,
+)
 
 # Content-bearing subset of the decompose set: their INNER TEXT must be removed
 # too (not just the tag), so a stripped tag can't leave inert payload text behind.
@@ -39,6 +43,14 @@ _CONTENT_BEARING = (
 	"template",
 	"form",
 	"button",
+	# raw-text / escapable / metadata elements — their content must be DISCARDED,
+	# not merely stripped-tag-keep-text (the module docstring names these). A
+	# hardcoded tuple (NOT derived from _DECOMPOSE_TAGS) so removing one of these
+	# from the decompose set makes the matching case go RED.
+	"title",
+	"textarea",
+	"xmp",
+	"plaintext",
 )
 
 
@@ -66,8 +78,10 @@ def test_decompose_tag_and_attr_stripped(tag: str) -> None:
 def test_decompose_tag_content_removed(tag: str) -> None:
 	"""A content-bearing decompose tag has its INNER TEXT removed, not kept as
 	inert visible text (nh3 alone would keep it - clean_content_tags is what
-	deletes the subtree)."""
-	out = sanitize_rich(f"<{tag}>ZAP_{tag}</{tag}><p>ok</p>")
+	deletes the subtree). The legit sibling is placed BEFORE the tag so a
+	raw-text element like <plaintext>/<xmp> (which consumes everything AFTER it)
+	does not eat it."""
+	out = sanitize_rich(f"<p>ok</p><{tag}>ZAP_{tag}</{tag}>")
 	assert f"ZAP_{tag}" not in out, f"{tag} inner content survived: {out!r}"
 	assert "ok" in out, f"legit sibling content dropped for {tag}: {out!r}"
 
@@ -204,3 +218,54 @@ def test_safe_anchor_hrefs_survive(href: str) -> None:
 	out = sanitize_rich(f"<a {href}>link</a>")
 	assert href in out
 	assert ">link</a>" in out
+
+
+# --- sanitize_letterhead: the F1 SSRF gate (data: images only) ----------------
+
+_DATA_LOGO = "data:image/png;base64,iVBORw0KGgo="
+
+# Every remote/relative image src form + fetch-capable construct that must NOT
+# survive the letterhead gate (each would make wkhtmltopdf fetch server-side).
+_LETTERHEAD_SSRF = [
+	("remote-quoted", '<img src="http://169.254.169.254/x">', ["169.254", "http://"]),
+	("remote-noquote", "<img src=http://evil/x.png>", ["evil"]),
+	("image-alias", '<image src="http://evil/x.png">', ["evil"]),
+	("image-href", '<image href="http://evil/x.png">', ["evil"]),
+	("alt-truncation", '<img alt="a>b" src="http://evil/x.png">', ["evil"]),
+	("protocol-relative", '<img src="//evil/x.png">', ["evil"]),
+	("relative-files", '<img src="/files/logo.png">', ["/files/logo.png"]),
+	("srcset", '<img srcset="http://evil/x 1x">', ["evil"]),
+	("link-css", '<link rel="stylesheet" href="http://evil/x.css">', ["evil", "<link"]),
+	("style-tag-url", "<style>body{background:url(http://evil/x)}</style>", ["evil", "<style"]),
+	("style-attr-url", '<div style="background:url(http://evil/x)">y</div>', ["evil", "style="]),
+	("svg-image", '<svg><image href="http://evil/x"/></svg>', ["evil", "<svg", "<image"]),
+	("iframe", '<iframe src="http://evil/x"></iframe>', ["evil", "<iframe"]),
+	("input-image", '<input type="image" src="http://evil/x">', ["evil", "<input"]),
+	("video-poster", '<video poster="http://evil/x"></video>', ["evil", "<video"]),
+	("object-data", '<object data="http://evil/x"></object>', ["evil", "<object"]),
+	("base-href", '<base href="http://evil/">', ["evil", "<base"]),
+	("meta-refresh", '<meta http-equiv="refresh" content="0;url=http://evil">', ["evil", "<meta"]),
+]
+
+
+@pytest.mark.parametrize(
+	"payload,forbidden", [(p, f) for _, p, f in _LETTERHEAD_SSRF], ids=[c[0] for c in _LETTERHEAD_SSRF]
+)
+def test_letterhead_gate_blocks_ssrf(payload: str, forbidden: list[str]) -> None:
+	out = sanitize_letterhead(payload).lower()
+	for needle in forbidden:
+		assert needle.lower() not in out, f"{needle!r} survived the letterhead gate: {out!r}"
+
+
+def test_letterhead_gate_keeps_data_logo_and_structure() -> None:
+	out = sanitize_letterhead(f'<div class="lh"><img src="{_DATA_LOGO}"><span>Acme Ltd</span></div>')
+	assert "data:image/png;base64," in out  # the inlined logo survives
+	assert "Acme Ltd" in out
+	assert 'class="lh"' in out
+
+
+def test_letterhead_gate_drops_anchor_but_keeps_text() -> None:
+	# <a> is dropped (keeping http on <a href> would re-open the image hole).
+	out = sanitize_letterhead('<a href="http://x">Visit</a>')
+	assert "<a" not in out.lower()
+	assert "Visit" in out

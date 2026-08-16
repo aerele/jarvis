@@ -145,6 +145,32 @@ _URL_SCHEMES = {"http", "https", "mailto"}
 
 _DECOMPOSE_SET = set(_DECOMPOSE_TAGS)
 
+# --- Letterhead gate ---------------------------------------------------------
+# A Letter Head is operator config, but "trusted" must be ENFORCED, not assumed:
+# the render is unauthenticated and wkhtmltopdf fetches any remote resource it
+# finds. So a resolved letterhead (after its same-site logos are already inlined
+# to permission-checked base64 data: URIs by furniture._inline_letterhead_images)
+# passes through this gate, which is sanitize_rich PLUS a single concession: an
+# <img> is allowed, but ONLY with a ``data:`` src.
+#   * ``url_schemes={"data"}`` strips every http/https/file/etc. image src, no
+#     matter how it is written (no-quote, alt-truncation, <image> alias, srcset).
+#   * ``url_relative="deny"`` strips protocol-relative (``//host``) and relative
+#     (``/files/x``) srcs too, which url_schemes alone does NOT catch.
+#   * ``<a>`` is dropped (a letterhead needs no live links, and keeping it would
+#     force http(s) back into url_schemes, re-opening the image hole).
+# Result: the only image that can survive is the inlined data: logo; <link>,
+# <style>, <image>/<svg>, <iframe>, <input type=image>, style="url(...)", etc.
+# are all removed. Verified against a bypass corpus.
+_LETTERHEAD_TAGS = (_ALLOWED_TAGS - {"a"}) | {"img"}
+_LETTERHEAD_ATTRIBUTES = {
+	"*": {"class"},
+	"img": {"src", "alt", "class", "width", "height"},
+	"th": {"colspan", "rowspan", "scope"},
+	"td": {"colspan", "rowspan", "scope"},
+}
+_LETTERHEAD_URL_SCHEMES = {"data"}
+_LETTERHEAD_DECOMPOSE = _DECOMPOSE_SET - {"img"}
+
 
 def sanitize_rich(html: str) -> str:
 	"""Return ``html`` reduced to inert, class-styled structural markup safe to
@@ -164,4 +190,27 @@ def sanitize_rich(html: str) -> str:
 		attributes=_ALLOWED_ATTRIBUTES,
 		url_schemes=_URL_SCHEMES,
 		clean_content_tags=_DECOMPOSE_SET,
+	)
+
+
+def sanitize_letterhead(html: str) -> str:
+	"""Return trusted-but-enforced letterhead HTML safe for the render.
+
+	Same airtight base as ``sanitize_rich`` with ONE concession: an ``<img>`` is
+	allowed, but only with a ``data:`` src (a permission-checked base64 logo that
+	``furniture._inline_letterhead_images`` has already inlined). ``url_schemes``
+	restricted to ``data`` strips every remote/file image src regardless of syntax;
+	``url_relative="deny"`` additionally strips protocol-relative (``//host``) and
+	relative srcs that ``url_schemes`` alone would let through; ``<a>`` is dropped.
+	Everything else fetch-capable (``<link>``/``<style>``/``<image>``/``<svg>``/
+	``<iframe>``/``<input type=image>``/``style="url(...)"`` ...) is removed. So no
+	server-side fetch (SSRF) can be provoked through a letterhead - see the
+	module's letterhead-gate note."""
+	return nh3.clean(
+		html,
+		tags=_LETTERHEAD_TAGS,
+		attributes=_LETTERHEAD_ATTRIBUTES,
+		url_schemes=_LETTERHEAD_URL_SCHEMES,
+		url_relative="deny",
+		clean_content_tags=_LETTERHEAD_DECOMPOSE,
 	)

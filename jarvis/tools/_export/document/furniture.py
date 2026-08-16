@@ -59,7 +59,7 @@ import pdfkit
 
 from jarvis.exceptions import InvalidArgumentError
 
-from .sanitizer import sanitize_rich
+from .sanitizer import sanitize_letterhead, sanitize_rich
 
 _SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
 
@@ -201,14 +201,16 @@ def render_pdf(
 			raise InvalidArgumentError("PDF render could not start — the renderer failed to execute") from exc
 
 		if result.returncode != 0:
+			# stderr can carry the /tmp/jv-pdf-<hash>.html temp path — log it for
+			# operators, but keep it OUT of the user-facing message.
 			tail = (result.stderr or b"").decode("utf-8", "replace").strip()[-500:]
 			_log_infra_failure(f"rich-pdf render exit {result.returncode}", tail)
-			raise InvalidArgumentError(f"PDF render failed (wkhtmltopdf exit {result.returncode}): {tail}")
+			raise InvalidArgumentError(f"PDF render failed (renderer exited {result.returncode})")
 		if not result.stdout:
 			# A zero-byte result is a failed render, never a valid empty PDF.
 			tail = (result.stderr or b"").decode("utf-8", "replace").strip()[-500:]
 			_log_infra_failure("rich-pdf render produced no output", tail)
-			raise InvalidArgumentError(f"PDF render produced no output{(': ' + tail) if tail else ''}")
+			raise InvalidArgumentError("PDF render produced no output")
 		if not result.stdout.startswith(b"%PDF-"):
 			# Non-empty but not a PDF: a corrupt/error render slipping past exit 0.
 			_log_infra_failure(
@@ -397,8 +399,11 @@ def resolve_letterhead(letterhead: str | None) -> tuple[str, str, str | None]:
 		lh = frappe.db.get_value("Letter Head", name, ["content", "footer"], as_dict=True)
 		if not lh:
 			return "", "", (f"letterhead {named!r} not found — rendered without it" if named else None)
-		header = _inline_letterhead_images(lh.get("content") or "")
-		footer = _inline_letterhead_images(lh.get("footer") or "")
+		# Inline same-site logos to permission-checked base64, THEN run the airtight
+		# letterhead gate (nh3, data-only images) so no remote/relative/protocol-
+		# relative src or other fetch-capable markup can reach the renderer.
+		header = sanitize_letterhead(_inline_letterhead_images(lh.get("content") or ""))
+		footer = sanitize_letterhead(_inline_letterhead_images(lh.get("footer") or ""))
 		return header, footer, None
 	except Exception:
 		# Letterhead is a nicety, never a hard failure of the export.
@@ -449,6 +454,14 @@ def _resolve_letterhead_img_src(url: str) -> str | None:
 			break
 	if not file_name or not frappe.has_permission("File", "read", doc=file_name):
 		return None
+	# Reject an oversized logo BEFORE reading it into memory (a user-readable
+	# multi-hundred-MB File referenced in a letterhead must not be slurped first).
+	size = frappe.db.get_value("File", file_name, "file_size")
+	if size and int(size) > _MAX_LOGO_BYTES:
+		return None
+	mime = mimetypes.guess_type(path)[0] or ""
+	if not mime.startswith("image/"):
+		return None
 	try:
 		content = frappe.get_doc("File", file_name).get_content()
 		if isinstance(content, str):
@@ -457,10 +470,27 @@ def _resolve_letterhead_img_src(url: str) -> str | None:
 		return None
 	if not content or len(content) > _MAX_LOGO_BYTES:
 		return None
-	mime = mimetypes.guess_type(path)[0] or ""
-	if not mime.startswith("image/"):
+	# Trust the bytes, not the filename extension: a non-image renamed *.png must
+	# not be inlined as data:image/*. (Harmless downstream anyway - the data-only
+	# letterhead gate never fetches - but this keeps the data: label honest.)
+	if not _looks_like_image(content):
 		return None
 	return f"data:{mime};base64,{base64.b64encode(content).decode('ascii')}"
+
+
+def _looks_like_image(content: bytes) -> bool:
+	"""Cheap magic-byte sniff for the common raster/vector logo formats."""
+	head = content[:16]
+	return (
+		head.startswith(b"\x89PNG\r\n\x1a\n")  # png
+		or head.startswith(b"\xff\xd8\xff")  # jpeg
+		or head.startswith(b"GIF87a")
+		or head.startswith(b"GIF89a")
+		or (head[:4] == b"RIFF" and content[8:12] == b"WEBP")  # webp
+		or head.lstrip()[:5].lower() == b"<?xml"  # svg (xml-declared)
+		or b"<svg" in head.lower()  # svg (bare)
+		or head.startswith(b"BM")  # bmp
+	)
 
 
 def _compose_document(inner: str, css: str) -> str:
@@ -489,8 +519,11 @@ def _write_temp(tmp_dir: str, content: str) -> str:
 
 
 def _remove_quietly(path: str) -> None:
-	"""Best-effort temp-file removal - a missing file is fine (already gone)."""
-	with contextlib.suppress(FileNotFoundError):
+	"""Best-effort temp-file removal. Suppress ANY OSError (a missing file, or an
+	unusual EPERM/read-only tmpdir) - cleanup must never abort the finally loop
+	(leaking the other temp) or replace the real in-flight error with a raw
+	OSError."""
+	with contextlib.suppress(OSError):
 		os.remove(path)
 
 

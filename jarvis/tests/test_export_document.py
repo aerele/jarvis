@@ -13,6 +13,14 @@ Two test tiers live here:
     ``get_pdf``/telemetry touch the site) is mocked, so these run under bare
     pytest from the worktree AND under the bench gate. They are the load-bearing
     proof of the dual-path branch / splice / guard / order / telemetry logic.
+
+Running site-free with BARE pytest: deselect the ``FrappeTestCase`` classes, e.g.
+``-k "not (TestExportDocumentGuards or TestExportDocumentFormats or
+TestExportDocumentSanitization)"``. Otherwise ``FrappeTestCase.setUpClass`` calls
+``frappe.init("test_site")`` (setting ``frappe.local.site`` before failing with
+no real site), which then poisons the site-free guards in the other classes. The
+real bench gate (``bench run-tests``) has a real ``test_site`` and needs no
+deselect.
 """
 
 from __future__ import annotations
@@ -655,3 +663,74 @@ class TestPlainPathBackCompatUnit(_RichBase):
 		self.assertEqual(self.save_plain.call_args.args[1], b"%PDF-plain")
 		self.assertEqual(out["mime_type"], "application/pdf")
 		self.assertNotIn("notes", out)  # plain return shape unchanged (no notes key)
+
+
+class TestBlankAndNoteEdges(_RichBase):
+	def test_entity_whitespace_only_raises_no_data(self):
+		# A doc whose only content is entity-whitespace (&nbsp;) renders blank —
+		# _has_visible_content unescapes entities, so this is caught, not shipped.
+		with self.assertRaises(NoDataError):
+			export_document("<p>&nbsp;&nbsp;</p>", content_is_html=True, theme=True)
+		self.assertFalse(self.render.called)
+
+	def test_chart_only_empty_labels_still_renders(self):
+		# A chart-only doc whose rows carry no label/value still has visible bars —
+		# it must NOT be rejected as blank (bar-chart presence counts as content).
+		out = export_document(
+			"{{chart:0}}",
+			format="pdf",
+			charts=[{"rows": [{"pct": 50}, {"pct": 80}]}],
+		)
+		self.assertTrue(self.render.called)
+		self.assertEqual(out["notes"], [])
+		self.assertIn("bar-chart", self._rich_doc_body())
+
+	def test_token_in_code_with_spec_no_false_not_found_note(self):
+		# A chart referenced ONLY inside a <code> example (left literal) must not be
+		# mis-reported as "placeholder not found" — it IS in the content.
+		out = export_document(
+			"<p>Body</p><pre><code>{{chart:0}}</code></pre>",
+			format="pdf",
+			content_is_html=True,
+			charts=[{"rows": [{"label": "A", "value": "1", "pct": 50}]}],
+		)
+		self.assertEqual(out["notes"], [], out["notes"])
+		self.assertIn("{{chart:0}}", self._rich_doc_body())  # left literal
+
+
+class TestTelemetryDirect(unittest.TestCase):
+	"""Direct coverage of record_export_event's new rich/detail fields (the
+	call-site tests only prove export_document PASSES them; this proves the
+	function actually lands them in the emitted line)."""
+
+	def test_emits_rich_and_detail(self):
+		captured: dict = {}
+		with (
+			patch("jarvis.telemetry._emit", side_effect=lambda e: captured.update(e)),
+			patch("jarvis.telemetry.frappe.utils.now", return_value="2026-01-01 00:00:00"),
+		):
+			from jarvis import telemetry
+
+			telemetry.record_export_event(
+				tool="export_document",
+				fmt="pdf",
+				rows=0,
+				outcome="rejected",
+				rich=True,
+				detail="ValueError: boom",
+			)
+		self.assertEqual(captured.get("kind"), "export")
+		self.assertIs(captured.get("rich"), True)
+		self.assertIn("boom", captured.get("detail", ""))
+
+	def test_omits_rich_and_detail_when_absent(self):
+		captured: dict = {}
+		with (
+			patch("jarvis.telemetry._emit", side_effect=lambda e: captured.update(e)),
+			patch("jarvis.telemetry.frappe.utils.now", return_value="x"),
+		):
+			from jarvis import telemetry
+
+			telemetry.record_export_event(tool="t", fmt="pdf", rows=0)
+		self.assertNotIn("rich", captured)
+		self.assertNotIn("detail", captured)

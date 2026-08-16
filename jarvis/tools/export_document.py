@@ -224,9 +224,12 @@ def export_document(
 		# best-effort: it must never REPLACE the real error (nor break a no-site
 		# unit test), so it is suppressed.
 		with contextlib.suppress(Exception):
+			# Plain traceback only — NOT with_context, which dumps local variable
+			# VALUES (the agent's document content, an inlined base64 logo) into the
+			# operator-readable Error Log.
 			frappe.log_error(
 				title="jarvis.export_document: unexpected render failure",
-				message=frappe.get_traceback(with_context=True),
+				message=frappe.get_traceback(),
 			)
 		telemetry.record_export_event(
 			tool="export_document",
@@ -301,7 +304,7 @@ def _render_rich(
 	# 4. emptiness guard: never emit a blank PDF. Check VISIBLE TEXT, not the raw
 	#    markup string — content that sanitized/spliced down to empty tags
 	#    (e.g. "<p></p>") is a truthy string but a blank document.
-	if not _visible_text(body):
+	if not _has_visible_content(body):
 		raise NoDataError("No content to export after sanitization.")
 	# 5. theme is tool-added AFTER sanitize (agent content never carries styling).
 
@@ -370,11 +373,20 @@ def _guard_chart_rows(charts: list) -> None:
 		)
 
 
-def _visible_text(html_fragment: str) -> str:
-	"""Return the visible text of an HTML fragment (tags stripped, whitespace
-	collapsed) for the emptiness guard — so a childless-tag skeleton reads as
-	empty. Cheap regex strip; this is an emptiness heuristic, not a sanitizer."""
-	return re.sub(r"<[^>]+>", "", html_fragment or "").strip()
+def _has_visible_content(html_fragment: str) -> bool:
+	"""True if the fragment would render something the user can see, for the
+	emptiness guard — so a childless-tag skeleton (``<p></p>``) reads as empty but
+	a real document (or a rendered chart with no text labels) does not.
+
+	Cheap heuristic (not a sanitizer): strip tags, UNESCAPE entities (so a
+	``&nbsp;``-only doc collapses to whitespace and is caught), and check for
+	non-whitespace text — OR the presence of a spliced chart, whose colored bars
+	render even when every row label/value is blank."""
+	body = html_fragment or ""
+	if 'class="bar-chart"' in body:
+		return True
+	text = _html.unescape(re.sub(r"<[^>]+>", "", body))
+	return bool(text.strip())
 
 
 def _short_err(exc: Exception) -> str:
@@ -401,6 +413,11 @@ def _splice_charts(body: str, charts: list, notes: list[str]) -> str:
 	tokens are removed so no literal ``{{chart:N}}`` junk survives."""
 	if not charts and _CHART_TOKEN_RE.search(body) is None:
 		return body
+
+	# Indices whose token appears ANYWHERE in the body (incl. a <code> example or
+	# an attribute), so a chart referenced only in a literal example is not
+	# mis-reported as "placeholder not found".
+	referenced = {int(m.group(1)) for m in _CHART_TOKEN_RE.finditer(body)}
 
 	# Render each spec ONCE (or degrade to a note), keyed by index.
 	rendered: dict[int, str] = {}
@@ -435,7 +452,7 @@ def _splice_charts(body: str, charts: list, notes: list[str]) -> str:
 		node.extract()
 
 	for i in rendered:
-		if i not in seen:
+		if i not in referenced:
 			notes.append(
 				f"chart {i} was provided but its {{{{chart:{i}}}}} placeholder was not found in the content"
 			)
