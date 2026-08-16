@@ -1,6 +1,6 @@
 """Page furniture + the rich-PDF render call (the 2nd, sanitized render path).
 
-``render_pdf`` turns a *already-sanitized* body-HTML fragment into PDF bytes on
+``render_pdf`` turns an *already-sanitized* body-HTML fragment into PDF bytes on
 wkhtmltopdf, wrapping it with header/footer/watermark/letterhead furniture and a
 real, hard render timeout.
 
@@ -18,10 +18,19 @@ strips ``<meta>`` regardless).
 WHY header/footer/watermark are sanitized here too: they are as agent-influenced
 as the body, and wkhtmltopdf will FETCH any ``<img src>``/``<link>`` it finds in a
 ``--header-html``/``--footer-html`` document (a *separate* render), so each runs
-through ``sanitize_rich`` before it is written to a temp file. The letterhead
-header/footer is operator-authored trusted config (a ``Letter Head`` doc) and is
-folded in WITHOUT sanitizing - sanitizing would strip its logo, which is the whole
-point of a letterhead.
+through ``sanitize_rich`` before it is written to a temp file.
+
+WHY the letterhead is resolved OUTSIDE this module (``resolve_letterhead``, called
+from ``export_document._render_rich`` where the ``notes`` channel lives): a
+letterhead is folded in as trusted operator config, but "trusted" must be
+ENFORCED, not assumed - so resolution (a) defaults to the site's default Letter
+Head when the caller named none, (b) checks the impersonated user's READ
+permission on the Letter Head, and (c) neutralises its images: an ``<img>`` with a
+remote ``src`` is DROPPED (wkhtmltopdf would fetch it server-side - the SSRF the
+whole rich path exists to prevent), and a same-site ``/files/`` logo is inlined as
+a permission-checked base64 ``data:`` URI (which also makes it actually render -
+the body is fed via stdin with no base URL, so a relative ``src`` would not
+resolve otherwise). ``render_pdf`` then receives the resolved, safe HTML.
 
 WHY the watermark lives in the HEADER template, not the body: wkhtmltopdf only
 paints a body ``position:fixed`` element on page 1, whereas the header document is
@@ -36,8 +45,11 @@ the temp-file lifecycle. See ``jarvis/tests/test_export_document_furniture.py``.
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -50,6 +62,31 @@ from jarvis.exceptions import InvalidArgumentError
 from .sanitizer import sanitize_rich
 
 _SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
+
+# Header/footer/watermark are agent-influenced; cap them so a runaway model can't
+# hand the pre-render sanitize an unbounded fragment (the body itself is capped in
+# export_document; these are the other agent-controlled inputs).
+_MAX_FURNITURE_CHARS = 20_000
+
+# A letterhead logo is small operator config; refuse to inline anything larger so
+# a base64 blob can't bloat the header document.
+_MAX_LOGO_BYTES = 2_000_000
+
+# Page sizes we forward to wkhtmltopdf (canonical spelling). An unknown size would
+# otherwise reach the CLI and fail the whole render with an opaque exit code.
+_PAGE_SIZES = {
+	"a3": "A3",
+	"a4": "A4",
+	"a5": "A5",
+	"letter": "Letter",
+	"legal": "Legal",
+	"tabloid": "Tabloid",
+}
+
+_MAX_MARGIN_MM = 100
+
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*?/?>", re.IGNORECASE)
+_SRC_RE = re.compile(r"""\bsrc\s*=\s*(?P<q>["'])(?P<url>.*?)(?P=q)""", re.IGNORECASE)
 
 # Self-contained CSS for the header/footer documents - they are SEPARATE
 # wkhtmltopdf renders, so they carry no body/theme styling and must style
@@ -96,34 +133,46 @@ def render_pdf(
 	header_html: str | None = None,
 	footer_html: str | None = None,
 	watermark: str | None = None,
-	letterhead: str | None = None,
+	letterhead_header: str = "",
+	letterhead_footer: str = "",
 	page_numbers: bool = True,
 	timeout: int = 25,
 ) -> bytes:
 	"""Render ``body_html`` (a fragment the caller already sanitized) to PDF bytes
 	via a direct, hard-timed wkhtmltopdf subprocess.
 
-	Header/footer/watermark are agent-influenced and re-sanitized here; letterhead
-	is trusted operator config, folded in as-is. Temp files for the header/footer
+	Header/footer/watermark are agent-influenced and re-sanitized here.
+	``letterhead_header``/``letterhead_footer`` are ALREADY resolved + safe (see
+	``resolve_letterhead``) and folded in as-is. Temp files for the header/footer
 	documents use content-independent ``frappe.generate_hash()`` names and are
 	removed in a ``finally`` that runs on success, error, AND timeout.
 
 	Raises ``InvalidArgumentError`` (clean, user-facing) when the binary is
-	missing, the render times out, wkhtmltopdf exits non-zero, or the output is
-	empty - never a raw ``TimeoutExpired`` and never a partial/zero-byte PDF.
+	missing, an argument is out of range, the render times out, wkhtmltopdf exits
+	non-zero, or the output is empty/not a PDF - never a raw ``TimeoutExpired`` /
+	``OSError`` and never a partial/zero-byte PDF. Every infra-caused failure (a
+	working binary misbehaving) is also written to the Error Log so a systemic
+	regression - e.g. an FC image bump changing wkhtmltopdf's behaviour - is
+	visible to operators rather than silently surfacing as a user-facing rejection
+	forever.
 	"""
 	binary = _resolve_binary()
 	orientation_flag = _normalize_orientation(orientation)
+	page_size = _normalize_page_size(page_size)
+	margins_mm = _normalize_margin(margins_mm)
+	_guard_furniture_len(header_html, footer_html, watermark)
 
-	lh_header, lh_footer = _letterhead_parts(letterhead) if letterhead else ("", "")
-	header_doc = _build_header(header_html, watermark, lh_header)
-	footer_doc = _build_footer(footer_html, page_numbers, lh_footer)
+	header_doc = _build_header(header_html, watermark, letterhead_header)
+	footer_doc = _build_footer(footer_html, page_numbers, letterhead_footer)
 
 	tmp_dir = tempfile.gettempdir()
-	header_file = _write_temp(tmp_dir, header_doc) if header_doc else None
-	footer_file = _write_temp(tmp_dir, footer_doc) if footer_doc else None
-
+	header_file = footer_file = None
 	try:
+		# Temp creation is INSIDE the try so a failure writing the second file
+		# (ENOSPC / fd exhaustion) still runs the finally that removes the first.
+		header_file = _write_temp(tmp_dir, header_doc) if header_doc else None
+		footer_file = _write_temp(tmp_dir, footer_doc) if footer_doc else None
+
 		args = _build_args(
 			binary,
 			page_size=page_size,
@@ -143,14 +192,29 @@ def render_pdf(
 		except subprocess.TimeoutExpired as exc:
 			# Hard bound hit: the child was killed, no usable output. Surface a
 			# clean, actionable error rather than the raw TimeoutExpired.
+			_log_infra_failure("rich-pdf render timed out", f"exceeded {timeout}s")
 			raise InvalidArgumentError(f"PDF render exceeded {timeout}s — reduce content/charts") from exc
+		except OSError as exc:
+			# The resolved binary failed to EXECUTE (not-executable, bad format,
+			# removed between resolve and run, fork failure under memory pressure).
+			_log_infra_failure("rich-pdf binary failed to execute", str(exc))
+			raise InvalidArgumentError("PDF render could not start — the renderer failed to execute") from exc
 
 		if result.returncode != 0:
 			tail = (result.stderr or b"").decode("utf-8", "replace").strip()[-500:]
+			_log_infra_failure(f"rich-pdf render exit {result.returncode}", tail)
 			raise InvalidArgumentError(f"PDF render failed (wkhtmltopdf exit {result.returncode}): {tail}")
 		if not result.stdout:
 			# A zero-byte result is a failed render, never a valid empty PDF.
-			raise InvalidArgumentError("PDF render produced no output")
+			tail = (result.stderr or b"").decode("utf-8", "replace").strip()[-500:]
+			_log_infra_failure("rich-pdf render produced no output", tail)
+			raise InvalidArgumentError(f"PDF render produced no output{(': ' + tail) if tail else ''}")
+		if not result.stdout.startswith(b"%PDF-"):
+			# Non-empty but not a PDF: a corrupt/error render slipping past exit 0.
+			_log_infra_failure(
+				"rich-pdf render output is not a PDF", result.stdout[:80].decode("latin-1", "replace")
+			)
+			raise InvalidArgumentError("PDF render produced invalid output (not a PDF)")
 		return result.stdout
 	finally:
 		for path in (header_file, footer_file):
@@ -164,7 +228,9 @@ def _resolve_binary() -> str:
 	Tries pdfkit's own resolver first (it decodes ``$PDFKIT_...``/PATH lookups and
 	raises ``OSError`` when nothing is found), then ``shutil.which``. A missing
 	binary is EXPECTED in local dev (the real render runs on the FC bench), so the
-	failure is an ``InvalidArgumentError``, not a crash.
+	failure is an ``InvalidArgumentError``, not a crash - but it is also logged, so
+	a binary that goes missing on the FC bench (where it should be present) is
+	visible to operators rather than silently rejecting every render.
 	"""
 	with contextlib.suppress(OSError):
 		raw = pdfkit.configuration().wkhtmltopdf
@@ -174,6 +240,7 @@ def _resolve_binary() -> str:
 	path = shutil.which("wkhtmltopdf")
 	if path:
 		return path
+	_log_infra_failure("rich-pdf binary not found", "wkhtmltopdf missing from PATH and pdfkit config")
 	raise InvalidArgumentError(
 		"wkhtmltopdf binary not found — rich PDF rendering needs wkhtmltopdf "
 		"(present on the Frappe Cloud bench; absent in local dev)"
@@ -187,6 +254,38 @@ def _normalize_orientation(orientation: str) -> str:
 	if value not in ("portrait", "landscape"):
 		raise InvalidArgumentError(f"orientation must be 'portrait' or 'landscape', got {orientation!r}")
 	return value.capitalize()
+
+
+def _normalize_page_size(page_size: str) -> str:
+	"""Validate ``page_size`` against the allowlist and return the canonical
+	spelling wkhtmltopdf expects. Rejects an unknown value with a clean error
+	(consistent with ``orientation``) instead of letting the CLI fail opaquely."""
+	value = str(page_size).strip().lower()
+	if value not in _PAGE_SIZES:
+		raise InvalidArgumentError(
+			f"page_size must be one of {sorted(v for v in _PAGE_SIZES.values())}, got {page_size!r}"
+		)
+	return _PAGE_SIZES[value]
+
+
+def _normalize_margin(margins_mm: int) -> int:
+	"""Validate the margin is a non-negative int within a sane bound. A negative
+	value would produce a ``-50mm`` token wkhtmltopdf's arg parser can mis-read as
+	a flag; an absurd value would leave no printable area."""
+	try:
+		value = int(margins_mm)
+	except (TypeError, ValueError):
+		raise InvalidArgumentError(f"margins_mm must be an integer, got {margins_mm!r}") from None
+	if value < 0 or value > _MAX_MARGIN_MM:
+		raise InvalidArgumentError(f"margins_mm must be between 0 and {_MAX_MARGIN_MM}, got {value}")
+	return value
+
+
+def _guard_furniture_len(header_html, footer_html, watermark) -> None:
+	"""Bound the agent-influenced furniture inputs (the body is capped upstream)."""
+	for label, value in (("header", header_html), ("footer", footer_html), ("watermark", watermark)):
+		if value and len(value) > _MAX_FURNITURE_CHARS:
+			raise InvalidArgumentError(f"{label} exceeds {_MAX_FURNITURE_CHARS} characters")
 
 
 def _build_args(
@@ -239,8 +338,8 @@ def _build_args(
 def _build_header(header_html: str | None, watermark: str | None, letterhead_header: str) -> str:
 	"""Compose the header document, or ``""`` when there is nothing to render.
 
-	Order: trusted letterhead header (as-is) → sanitized agent header → sanitized
-	watermark wrapped in the tool-controlled ``.jv-watermark`` rotate block.
+	Order: resolved-and-safe letterhead header (as-is) → sanitized agent header →
+	sanitized watermark wrapped in the tool-controlled ``.jv-watermark`` block.
 	"""
 	parts = []
 	if letterhead_header:
@@ -256,7 +355,8 @@ def _build_footer(footer_html: str | None, page_numbers: bool, letterhead_footer
 	"""Compose the footer document, or ``""`` when there is nothing to render.
 
 	An explicit ``footer_html`` wins over auto page numbers (they are mutually
-	exclusive); the trusted letterhead footer is always folded in when present.
+	exclusive); the resolved-and-safe letterhead footer is always folded in when
+	present.
 	"""
 	parts = []
 	if letterhead_footer:
@@ -268,17 +368,99 @@ def _build_footer(footer_html: str | None, page_numbers: bool, letterhead_footer
 	return _compose_document("".join(parts), _FURNITURE_CSS) if parts else ""
 
 
-def _letterhead_parts(letterhead: str) -> tuple[str, str]:
-	"""Return ``(header_html, footer_html)`` for a named ``Letter Head``.
+def resolve_letterhead(letterhead: str | None) -> tuple[str, str, str | None]:
+	"""Resolve a letterhead to safe ``(header_html, footer_html, note)``.
 
-	Lazy-imports ``printview`` so this module stays importable without a bench;
-	needs a site, so its direct test is gated. Unit tests stub THIS function to
-	exercise the fold logic site-free.
+	``letterhead`` is a ``Letter Head`` name, or ``None`` to use the site's default
+	Letter Head (``is_default=1``). Enforces the "trusted config" assumption the
+	rich path rests on:
+
+	  * READ-permission checked as the impersonated user (an agent may only use a
+	    Letter Head that user can read).
+	  * Images neutralised via ``_inline_letterhead_images`` - remote ``<img>`` is
+	    DROPPED (no server-side fetch / SSRF), same-site ``/files/`` logos are
+	    inlined as permission-checked base64 ``data:`` URIs.
+
+	``note`` is ``None`` on success (including "no default configured", which is a
+	normal unbranded render), or a degrade message when a NAMED letterhead can't be
+	found / read - so the caller can surface it rather than silently dropping the
+	branding the user asked for. Never raises: any failure yields ``("", "", note)``.
 	"""
-	from frappe.www.printview import get_letter_head
+	named = letterhead if isinstance(letterhead, str) and letterhead.strip() else None
+	try:
+		name = named or frappe.db.get_value("Letter Head", {"is_default": 1}, "name")
+		if not name:
+			# No name given and no default configured → plain, unbranded render.
+			return "", "", None
+		if not frappe.has_permission("Letter Head", "read", doc=name):
+			return "", "", (f"letterhead {named!r} not found — rendered without it" if named else None)
+		lh = frappe.db.get_value("Letter Head", name, ["content", "footer"], as_dict=True)
+		if not lh:
+			return "", "", (f"letterhead {named!r} not found — rendered without it" if named else None)
+		header = _inline_letterhead_images(lh.get("content") or "")
+		footer = _inline_letterhead_images(lh.get("footer") or "")
+		return header, footer, None
+	except Exception:
+		# Letterhead is a nicety, never a hard failure of the export.
+		_log_infra_failure("rich-pdf letterhead resolution failed", f"letterhead={named!r}")
+		return "", "", (f"letterhead {named!r} could not be applied" if named else None)
 
-	parts = get_letter_head(None, no_letterhead=False, letterhead=letterhead) or {}
-	return parts.get("content") or "", parts.get("footer") or ""
+
+def _inline_letterhead_images(html: str) -> str:
+	"""Rewrite each ``<img src>`` in trusted letterhead HTML: keep ``data:`` URIs,
+	inline a same-site ``/files/`` logo as a permission-checked base64 ``data:``
+	URI, and DROP a remote ``<img>`` outright (wkhtmltopdf would fetch it)."""
+	if not html or "<img" not in html.lower():
+		return html
+
+	def _repl(match: re.Match) -> str:
+		tag = match.group(0)
+		src = _SRC_RE.search(tag)
+		if not src:
+			return tag
+		new_src = _resolve_letterhead_img_src(src.group("url"))
+		if new_src is None:
+			return ""  # remote / unresolvable → drop the whole <img>, no fetch
+		return tag[: src.start("url")] + new_src + tag[src.end("url") :]
+
+	return _IMG_TAG_RE.sub(_repl, html)
+
+
+def _resolve_letterhead_img_src(url: str) -> str | None:
+	"""Return a safe ``src`` for a letterhead image, or ``None`` to drop it.
+
+	``data:`` URIs pass through (already inline, no fetch). Remote URLs
+	(``http(s)://`` / protocol-relative) are dropped. A same-site path is resolved
+	to its ``File``, read-permission checked, and returned as a base64 ``data:``
+	URI so wkhtmltopdf never issues a request."""
+	value = (url or "").strip()
+	if not value:
+		return None
+	if value.startswith("data:"):
+		return value
+	if value.lower().startswith(("http://", "https://", "//")):
+		return None
+	path = value.split("?", 1)[0].split("#", 1)[0]
+	candidates = [path] if path.startswith("/") else ["/" + path, path]
+	file_name = None
+	for candidate in candidates:
+		file_name = frappe.db.get_value("File", {"file_url": candidate}, "name")
+		if file_name:
+			break
+	if not file_name or not frappe.has_permission("File", "read", doc=file_name):
+		return None
+	try:
+		content = frappe.get_doc("File", file_name).get_content()
+		if isinstance(content, str):
+			content = content.encode("utf-8")
+	except Exception:
+		return None
+	if not content or len(content) > _MAX_LOGO_BYTES:
+		return None
+	mime = mimetypes.guess_type(path)[0] or ""
+	if not mime.startswith("image/"):
+		return None
+	return f"data:{mime};base64,{base64.b64encode(content).decode('ascii')}"
 
 
 def _compose_document(inner: str, css: str) -> str:
@@ -293,10 +475,16 @@ def _compose_document(inner: str, css: str) -> str:
 
 def _write_temp(tmp_dir: str, content: str) -> str:
 	"""Write ``content`` to a uniquely named temp file (name from
-	``frappe.generate_hash()``, never derived from content) and return its path."""
+	``frappe.generate_hash()``, never derived from content) and return its path. If
+	the write fails mid-stream (ENOSPC), remove the partial file before re-raising -
+	its random name was never returned, so nothing else could ever clean it up."""
 	path = os.path.join(tmp_dir, f"jv-pdf-{frappe.generate_hash()}.html")
-	with open(path, "wb") as fh:
-		fh.write(content.encode("utf-8"))
+	try:
+		with open(path, "wb") as fh:
+			fh.write(content.encode("utf-8"))
+	except Exception:
+		_remove_quietly(path)
+		raise
 	return path
 
 
@@ -304,3 +492,11 @@ def _remove_quietly(path: str) -> None:
 	"""Best-effort temp-file removal - a missing file is fine (already gone)."""
 	with contextlib.suppress(FileNotFoundError):
 		os.remove(path)
+
+
+def _log_infra_failure(title: str, message: str) -> None:
+	"""Write an infra-caused render failure to the Error Log, best-effort. Logging
+	must NEVER replace the real error the caller is about to raise, so every failure
+	here (including a missing site in a unit test) is swallowed."""
+	with contextlib.suppress(Exception):
+		frappe.log_error(title=f"jarvis.rich_pdf: {title}"[:140], message=message or title)

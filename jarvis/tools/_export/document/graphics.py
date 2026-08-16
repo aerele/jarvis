@@ -51,7 +51,7 @@ def css_bar(rows: Sequence[Mapping[str, object] | Sequence[object]]) -> str:
 	for row in rows:
 		label, value, pct = _row_parts(row)
 		width = _clamp_pct(pct)
-		text = f"{html.escape(str(label))} {html.escape(str(value))}"
+		text = f"{_esc(label)} {_esc(value)}"
 		bars.append(f'<div class="bar" style="width:{width}%">{text}</div>')
 	return '<div class="bar-chart">' + "".join(bars) + "</div>"
 
@@ -66,11 +66,11 @@ def kpi_tile(label: str, value: str, delta: str | None = None) -> str:
 	"""
 	parts = [
 		'<div class="kpi-tile">',
-		f'<div class="kpi-label">{html.escape(str(label))}</div>',
-		f'<div class="kpi-value">{html.escape(str(value))}</div>',
+		f'<div class="kpi-label">{_esc(label)}</div>',
+		f'<div class="kpi-value">{_esc(value)}</div>',
 	]
 	if delta is not None:
-		parts.append(f'<div class="kpi-delta">{html.escape(str(delta))}</div>')
+		parts.append(f'<div class="kpi-delta">{_esc(delta)}</div>')
 	parts.append("</div>")
 	return "".join(parts)
 
@@ -129,13 +129,28 @@ def fmt_pct(value: float | int | str | None) -> str:
 	return f'<span class="neg">({formatted}%)</span>' if num < 0 else f"{formatted}%"
 
 
+def _esc(value: object) -> str:
+	"""Escape a text field for embedding, rendering ``None`` as empty rather than
+	the literal string ``"None"`` (parity with ``fmt_amount``'s None handling)."""
+	return "" if value is None else html.escape(str(value))
+
+
 def _row_parts(row: Mapping[str, object] | Sequence[object]) -> tuple[object, object, object]:
 	"""Pull ``(label, value, pct)`` out of a ``css_bar`` row - a mapping with
-	those keys, or a positional 3-item sequence."""
+	those keys, or a positional 3-item sequence.
+
+	The plugin schema types each row as ``Any``, so a runaway/confused model can
+	send an int, ``None``, a string, or a wrong-length sequence. Rather than let a
+	blind unpack raise ``TypeError``/``ValueError`` that escapes the tool as a raw
+	500 (``_splice_charts`` catches this and degrades the chart to a note), reject
+	a malformed row shape with a clear ``ValueError``."""
 	if isinstance(row, Mapping):
 		return row.get("label", ""), row.get("value", ""), row.get("pct", 0)
-	label, value, pct = row
-	return label, value, pct
+	if isinstance(row, Sequence) and not isinstance(row, (str, bytes)) and len(row) == 3:
+		return row[0], row[1], row[2]
+	raise ValueError(
+		f"css_bar row must be a mapping or a 3-item (label, value, pct) sequence, got {type(row).__name__}"
+	)
 
 
 def _clamp_pct(pct: object) -> str:
@@ -143,8 +158,10 @@ def _clamp_pct(pct: object) -> str:
 	``width:N%``.
 
 	Non-numeric or NaN input clamps to 0 (an empty bar, never a broken ``style``
-	attribute); ``+Inf`` clamps to 100. The clamped range never needs scientific
-	notation, so plain ``:g`` formatting is safe.
+	attribute); ``+Inf`` clamps to 100. Uses FIXED (never scientific) notation:
+	``:g`` renders a tiny positive width like ``0.00001`` as ``1e-05``, which old
+	WebKit rejects as an invalid ``width`` and drops - fixed formatting with the
+	trailing zeros trimmed keeps it a plain number.
 	"""
 	try:
 		num = float(pct)
@@ -153,7 +170,7 @@ def _clamp_pct(pct: object) -> str:
 	if math.isnan(num):
 		return "0"
 	num = max(0.0, min(100.0, num))
-	return f"{num:g}"
+	return f"{num:.4f}".rstrip("0").rstrip(".") or "0"
 
 
 def _to_float_or_none(value: object) -> float | None:

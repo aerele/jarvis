@@ -7,10 +7,16 @@ renderer that consumes it (wkhtmltopdf) will FETCH any ``<img src>`` /
 the output of this module must contain no fetch-capable tag and no active markup
 at all - only inert, class-styled structural HTML.
 
-WHY a pure module (imports ONLY ``nh3`` + ``bs4``, never ``frappe``): the
+WHY a pure module (imports ONLY ``nh3``, never ``frappe`` or ``bs4``): the
 sanitizer is the one place a mistake becomes an SSRF/XSS hole, so it is kept
 importable and unit-testable without a running bench - the attack corpus runs in
-plain CI, not only inside a site.
+plain CI, not only inside a site. Depending on a single, Rust-based HTML parser
+(``nh3``/``ammonia``, on ``html5ever``) also means untrusted input is parsed
+ONCE, by the same engine that sanitizes it - a second, different parser ahead of
+it (the previous BeautifulSoup/html5lib pre-pass) is both a parser-differential
+mutation-XSS surface and, in pure Python, quadratic on adversarial nesting depth
+(a 200k-char deeply-nested fragment parsed for ~80s, defeating the render's
+wall-clock budget). ``nh3`` does the same tree construction natively in ~2s.
 
 WHY ``nh3.clean`` directly, NOT ``frappe.utils.sanitize_html``: that helper only
 exposes ``disallowed_tags``; its defaults *allow* ``id``/``name``/``background``/
@@ -20,17 +26,14 @@ JSON or contains no tags. None of that is acceptable here, and none of it is
 configurable through that signature. We call ``nh3.clean`` with an explicit,
 tight allowlist instead.
 
-The pipeline is two layers, mirroring the decompose-then-clean shape Frappe's own
-``clean_email_html`` uses:
-
-  1. ``_strip_unsafe_tags`` - a BeautifulSoup ``decompose`` pre-pass that REMOVES
-     each fetch-capable / active tag together with its subtree. nh3 alone would
-     strip a disallowed tag but KEEP its text, so ``<script>alert(1)</script>``
-     would survive as the visible text ``alert(1)``. Decomposing first deletes
-     the payload cleanly.
-  2. ``nh3.clean`` with a tight tag/attribute/url-scheme allowlist on what
-     remains - the airtight allowlist pass (belt-and-suspenders once the unsafe
-     tags are already gone).
+WHY ``clean_content_tags`` (not a manual decompose pre-pass): nh3's default for a
+disallowed tag is to strip the tag but KEEP its inner text, so
+``<script>alert(1)</script>`` would otherwise survive as the visible text
+``alert(1)``. ``clean_content_tags`` tells nh3 to remove the tag together with
+its subtree - natively, in the same single pass as the allowlist. This is the
+exact parameter ``frappe.utils.html_utils.clean_html``/``clean_email_html`` use
+for the same purpose (frappe's older ``clean_script_and_style``, a
+BeautifulSoup-decompose pass, is deprecated in favour of it).
 
 WHY inline ``style`` is DISALLOWED entirely (classes-only): nh3's
 ``filter_style_properties`` is a property-NAME allowlist ONLY. It does not reject
@@ -42,14 +45,16 @@ need agent-supplied inline style.
 """
 
 import nh3
-from bs4 import BeautifulSoup
 
-# Removed OUTRIGHT (tag + subtree) by the decompose pre-pass rather than left to
-# nh3's allowlist. Every one of these can trigger an out-of-band fetch when
-# wkhtmltopdf renders (img/svg/iframe/object/embed/audio/video/source/link/
-# base), execute (script), inject styling/url() (style), carry metadata refresh
-# (meta), or submit/collect (form/input/button). Removing the whole subtree also
-# deletes the inert-but-visible text nh3 would otherwise keep.
+# Removed OUTRIGHT (tag + subtree) via nh3's ``clean_content_tags`` rather than
+# left to the allowlist (which would keep inner text). Every one of these can
+# trigger an out-of-band fetch when wkhtmltopdf renders (img/svg/iframe/object/
+# embed/audio/video/source/link/base), execute (script), inject styling/url()
+# (style), carry a metadata refresh (meta), or submit/collect (form/input/
+# button). The raw-text / escapable / metadata elements (noscript/template/xmp/
+# plaintext/textarea/title) are here too so their contents are discarded rather
+# than surviving as inert-but-visible escaped junk in a document meant to read
+# as a clean report.
 _DECOMPOSE_TAGS = (
 	"script",
 	"style",
@@ -67,6 +72,12 @@ _DECOMPOSE_TAGS = (
 	"audio",
 	"video",
 	"source",
+	"noscript",
+	"template",
+	"xmp",
+	"plaintext",
+	"textarea",
+	"title",
 )
 
 # The rich structural set an org document needs. Deliberately NO ``img`` - agent
@@ -132,42 +143,25 @@ _ALLOWED_ATTRIBUTES = {
 # renderer the way an ``<img src>`` would be).
 _URL_SCHEMES = {"http", "https", "mailto"}
 
-
-def _strip_unsafe_tags(html: str) -> str:
-	"""Remove (not escape) every tag in ``_DECOMPOSE_TAGS`` together with its
-	subtree, ahead of ``nh3.clean``.
-
-	nh3's own default for a disallowed tag is to strip the tag but keep its inner
-	text, which would leave a ``<script>``'s payload sitting as visible text.
-	Decomposing first deletes the payload. ``BeautifulSoup(html, "html5lib")``
-	parses with the same HTML5 tree-construction algorithm a browser/renderer
-	uses (the safest reading of adversarial input) and always wraps a fragment in
-	its own ``<html><head></head><body>...</body></html>``, so we return the body's
-	inner HTML - ``html`` here is a fragment about to be spliced into the engine's
-	own page shell, not a standalone page.
-	"""
-	soup = BeautifulSoup(html, "html5lib")
-	for tag in soup(list(_DECOMPOSE_TAGS)):
-		tag.decompose()
-	return soup.body.decode_contents() if soup.body else soup.decode_contents()
+_DECOMPOSE_SET = set(_DECOMPOSE_TAGS)
 
 
 def sanitize_rich(html: str) -> str:
 	"""Return ``html`` reduced to inert, class-styled structural markup safe to
 	hand an unauthenticated wkhtmltopdf render.
 
-	Two layers: a BeautifulSoup ``decompose`` pre-pass that deletes every
-	fetch-capable / active tag and its subtree, then ``nh3.clean`` with a tight
-	tag/attribute/url-scheme allowlist. Inline ``style`` is disallowed outright
-	(classes-only) - see the module docstring for why the ``style`` attribute
-	cannot be made airtight via ``filter_style_properties``. No ``<img>``,
-	``on*`` handler, ``id``, ``javascript:``/``data:``/``file:`` url, or event
-	attribute can survive this.
+	One pass: ``nh3.clean`` with a tight tag/attribute/url-scheme allowlist and
+	``clean_content_tags`` (removes every fetch-capable / active / raw-text tag
+	together with its subtree, so a ``<script>``'s payload is deleted, not kept as
+	visible text). Inline ``style`` is disallowed outright (classes-only) - see the
+	module docstring for why the ``style`` attribute cannot be made airtight via
+	``filter_style_properties``. No ``<img>``, ``on*`` handler, ``id``,
+	``javascript:``/``data:``/``file:`` url, or event attribute can survive this.
 	"""
-	stripped = _strip_unsafe_tags(html)
 	return nh3.clean(
-		stripped,
+		html,
 		tags=_ALLOWED_TAGS,
 		attributes=_ALLOWED_ATTRIBUTES,
 		url_schemes=_URL_SCHEMES,
+		clean_content_tags=_DECOMPOSE_SET,
 	)

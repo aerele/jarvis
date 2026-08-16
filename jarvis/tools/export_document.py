@@ -55,7 +55,10 @@ becomes HTML, never whether the result gets sanitized. The rich path uses its
 own, tighter ``sanitize_rich`` (a direct ``nh3.clean``); see that module.
 """
 
+import contextlib
+import html as _html
 import re
+import time
 from collections.abc import Mapping
 
 import frappe
@@ -64,7 +67,7 @@ from frappe.utils.html_utils import sanitize_html
 from jarvis import telemetry
 from jarvis.exceptions import InvalidArgumentError, NoDataError
 from jarvis.tools._export import save_export_file
-from jarvis.tools._export.document.furniture import render_pdf
+from jarvis.tools._export.document.furniture import render_pdf, resolve_letterhead
 from jarvis.tools._export.document.graphics import css_bar
 from jarvis.tools._export.document.sanitizer import sanitize_rich
 from jarvis.tools._export.document.theme import component_css
@@ -93,6 +96,11 @@ _MAX_CONTENT_CHARS = 200_000
 # time out. CSS bars are cheap, so this ceiling is generous.
 _MAX_CHARTS = 20
 
+# Chart COUNT is capped above, but a single chart with millions of rows would
+# still inflate the spliced body without limit (each row is a <div>), defeating
+# _MAX_CONTENT_CHARS. Cap total rows across all charts too.
+_MAX_TOTAL_CHART_ROWS = 2_000
+
 # Hard wall-clock bound handed to the rich renderer's subprocess watchdog. Kept
 # under the plugin's 30s call_tool abort so the bench kills a runaway render
 # before the client gives up (a number, not "<30s").
@@ -101,8 +109,10 @@ _RENDER_TIMEOUT_S = 25
 # {{chart:N}} placeholder token the agent drops into ``content`` where a chart
 # should appear; the tool splices its own generated HTML in at that spot AFTER
 # sanitize (so the tool-controlled markup is trusted). This is the reusable
-# splice mechanism Slice 2 extends for images/QR/logos.
-_CHART_TOKEN_RE = re.compile(r"\{\{chart:(\d+)\}\}")
+# splice mechanism Slice 2 extends for images/QR/logos. Whitespace after the
+# colon is tolerated (a common LLM formatting variance); the index is capped at
+# 3 digits so a pathological ``{{chart:<190k digits>}}`` can never reach int().
+_CHART_TOKEN_RE = re.compile(r"\{\{chart:\s*(\d{1,3})\s*\}\}")
 
 
 def export_document(
@@ -135,9 +145,14 @@ def export_document(
 	sanitized (see the module docstring), image-free by design. Passing any truthy
 	rich kwarg switches to the branded rich path:
 
-	  * ``theme`` — apply the branded component stylesheet.
-	  * ``letterhead`` — a ``Letter Head`` name (str) folded in as trusted config,
-	    or ``True`` to opt into the rich path with no named letterhead.
+	  * ``theme`` — opt into the branded rich path. (The branded component
+	    stylesheet is applied to EVERY rich render regardless; ``theme`` is one of
+	    the activators, not an independent on/off switch for the CSS.)
+	  * ``letterhead`` — a ``Letter Head`` name (str) to brand with, or ``True`` to
+	    opt into the rich path without naming one. On the PDF path a letterhead is
+	    ALWAYS applied when one can be resolved — the named one, else the site's
+	    default ``Letter Head``. Its logo images are read-permission-checked and
+	    base64-inlined; images with a remote URL are dropped (never fetched).
 	  * ``header`` / ``footer`` / ``watermark`` — page furniture (PDF only).
 	  * ``page_size`` / ``orientation`` / ``margins_mm`` / ``page_numbers`` — page
 	    geometry (consumed by the rich path; they do NOT by themselves trigger it).
@@ -164,11 +179,12 @@ def export_document(
 	Do not promise any of these to the user.
 	"""
 	fmt = (format or "pdf").lower()
+	rich = _rich_requested(theme, letterhead, header, footer, watermark, charts)
 	try:
 		_guard_content(content)
 		if fmt not in _FORMATS:
 			raise InvalidArgumentError(f"format must be one of {sorted(_FORMATS)}")
-		if _rich_requested(theme, letterhead, header, footer, watermark, charts):
+		if rich:
 			env = _render_rich(
 				content,
 				fmt,
@@ -192,10 +208,42 @@ def export_document(
 		# Emit on the fail-closed exits too (export_document previously emitted no
 		# telemetry at all — this closes that gap on both success and failure).
 		telemetry.record_export_event(
-			tool="export_document", fmt=fmt, rows=0, mode="sync", outcome=_outcome_for(exc)
+			tool="export_document",
+			fmt=fmt,
+			rows=0,
+			mode="sync",
+			outcome=_outcome_for(exc),
+			rich=rich,
+			detail=_short_err(exc),
 		)
 		raise
-	telemetry.record_export_event(tool="export_document", fmt=fmt, rows=0, mode="sync", outcome=outcome)
+	except Exception as exc:
+		# Any OTHER exception (an unforeseen input, a bug) must not escape as a raw
+		# 500 with no telemetry — that was the observability blind spot the review
+		# found. Log it, record it, and re-raise a clean error. Logging is
+		# best-effort: it must never REPLACE the real error (nor break a no-site
+		# unit test), so it is suppressed.
+		with contextlib.suppress(Exception):
+			frappe.log_error(
+				title="jarvis.export_document: unexpected render failure",
+				message=frappe.get_traceback(with_context=True),
+			)
+		telemetry.record_export_event(
+			tool="export_document",
+			fmt=fmt,
+			rows=0,
+			mode="sync",
+			outcome="rejected",
+			rich=rich,
+			detail=_short_err(exc),
+		)
+		raise InvalidArgumentError(
+			"The document could not be generated due to an unexpected error. "
+			"Simplify the content or charts and try again."
+		) from exc
+	telemetry.record_export_event(
+		tool="export_document", fmt=fmt, rows=0, mode="sync", outcome=outcome, rich=rich
+	)
 	return env
 
 
@@ -235,9 +283,11 @@ def _render_rich(
 	"""The branded rich pipeline: md→HTML → sanitize → post-sanitize chart splice
 	→ emptiness guard → theme-wrap → render/compose → save. Returns the download
 	envelope plus a ``notes`` list carrying every degrade."""
+	start = time.monotonic()
 	charts = charts or []
 	if len(charts) > _MAX_CHARTS:
 		raise InvalidArgumentError(f"charts exceeds the {_MAX_CHARTS}-chart limit")
+	_guard_chart_rows(charts)
 	notes: list[str] = []
 
 	# 1. markdown → HTML BEFORE sanitize (else ![](…)/autolinks regenerate <img>/
@@ -248,11 +298,12 @@ def _render_rich(
 	# 3. splice tool-generated chart HTML into {{chart:N}} tokens (AFTER sanitize —
 	#    this markup is tool-controlled, so it is trusted).
 	body = _splice_charts(body, charts, notes)
-	# 4. emptiness guard: never emit a blank PDF for content that sanitized away.
-	if not body.strip():
+	# 4. emptiness guard: never emit a blank PDF. Check VISIBLE TEXT, not the raw
+	#    markup string — content that sanitized/spliced down to empty tags
+	#    (e.g. "<p></p>") is a truthy string but a blank document.
+	if not _visible_text(body):
 		raise NoDataError("No content to export after sanitization.")
 	# 5. theme is tool-added AFTER sanitize (agent content never carries styling).
-	doc_body = f"<style>{component_css()}</style>{body}"
 
 	if fmt == "html":
 		# No wkhtmltopdf on the HTML path, so page furniture can't be applied —
@@ -261,19 +312,37 @@ def _render_rich(
 		# page numbers are auto-furniture, not caller content.
 		if header or footer or watermark or letterhead:
 			notes.append("furniture (header/footer/watermark) applies only to PDF output")
-		payload = doc_body.encode("utf-8")
+		doc_title = frappe.utils.escape_html(title) if title else "Document"
+		payload = (
+			f"<!doctype html><html><head><meta charset='utf-8'>"
+			f"<title>{doc_title}</title><style>{component_css()}</style></head>"
+			f"<body>{body}</body></html>"
+		).encode()
 	else:
+		# letterhead resolved HERE (notes is in scope): default to the site's
+		# default Letter Head when the caller named none, read-perm checked, images
+		# neutralised. render_pdf receives already-safe HTML.
+		lh_header, lh_footer, lh_note = resolve_letterhead(
+			letterhead if isinstance(letterhead, str) else None
+		)
+		if lh_note:
+			notes.append(lh_note)
+		styled_body = f"<style>{component_css()}</style>{body}"
 		pdf_bytes = render_pdf(
-			doc_body,
+			styled_body,
 			page_size=page_size,
 			orientation=orientation,
 			margins_mm=margins_mm,
 			header_html=header,
 			footer_html=footer,
 			watermark=watermark,
-			letterhead=(letterhead if isinstance(letterhead, str) else None),
+			letterhead_header=lh_header,
+			letterhead_footer=lh_footer,
 			page_numbers=page_numbers,
-			timeout=_RENDER_TIMEOUT_S,
+			# The 25s bound covers the whole render; subtract the pre-render work
+			# (md→HTML, sanitize, splice) already spent so the total stays under
+			# the plugin's 30s call_tool abort.
+			timeout=max(5, _RENDER_TIMEOUT_S - int(time.monotonic() - start)),
 		)
 		payload = pdf_bytes if fmt == "pdf" else _pdf_to_png(pdf_bytes)
 
@@ -285,27 +354,95 @@ def _render_rich(
 	return env
 
 
+def _guard_chart_rows(charts: list) -> None:
+	"""Bound total rows across all charts (chart COUNT is capped separately). A
+	non-sized ``rows`` is skipped here and rejected per-chart later in the splice."""
+	total = 0
+	for spec in charts:
+		rows = spec.get("rows", []) if isinstance(spec, Mapping) else []
+		try:
+			total += len(rows)
+		except TypeError:
+			continue
+	if total > _MAX_TOTAL_CHART_ROWS:
+		raise InvalidArgumentError(
+			f"charts contain {total} rows, exceeding the {_MAX_TOTAL_CHART_ROWS}-row limit"
+		)
+
+
+def _visible_text(html_fragment: str) -> str:
+	"""Return the visible text of an HTML fragment (tags stripped, whitespace
+	collapsed) for the emptiness guard — so a childless-tag skeleton reads as
+	empty. Cheap regex strip; this is an emptiness heuristic, not a sanitizer."""
+	return re.sub(r"<[^>]+>", "", html_fragment or "").strip()
+
+
+def _short_err(exc: Exception) -> str:
+	"""A short, log-safe one-liner for a failure's telemetry ``detail`` field."""
+	return f"{type(exc).__name__}: {exc}"[:200]
+
+
 def _splice_charts(body: str, charts: list, notes: list[str]) -> str:
 	"""Replace each ``{{chart:N}}`` token with ``css_bar`` output for ``charts[N]``.
 
 	Runs AFTER ``sanitize_rich`` so the tool-generated bar markup (which carries a
-	single clamped ``width:N%`` inline style) is trusted and not stripped. A spec
-	whose token is absent, or a token with no matching spec, is reported in
-	``notes`` — never a crash. Orphan tokens are removed so no literal ``{{chart:N}}``
-	junk survives into the document."""
+	single clamped ``width:N%`` inline style) is trusted and not stripped.
+
+	The splice is TREE-AWARE, not a blind string replace: it walks TEXT NODES only
+	(via a bounded ``html.parser`` parse of the already-sanitized, capped body), so
+	a token that happens to sit inside an attribute value (e.g. an ``href``) or
+	inside a ``<pre>``/``<code>`` block (documenting the syntax) is left alone
+	rather than corrupting the tag or replacing a literal example. Each chart's
+	markup is rendered once and inserted by index, so a token appearing inside a
+	chart's own text can never trigger a second substitution.
+
+	Degrades, never crashes: a malformed ``rows`` value, a spec whose token is
+	absent, and a token with no matching spec are each reported in ``notes``. Orphan
+	tokens are removed so no literal ``{{chart:N}}`` junk survives."""
+	if not charts and _CHART_TOKEN_RE.search(body) is None:
+		return body
+
+	# Render each spec ONCE (or degrade to a note), keyed by index.
+	rendered: dict[int, str] = {}
 	for i, spec in enumerate(charts):
-		token = f"{{{{chart:{i}}}}}"
-		if token not in body:
-			notes.append(f"chart {i} was provided but its {token} placeholder was not found in the content")
-			continue
 		rows = spec.get("rows", []) if isinstance(spec, Mapping) else []
-		body = body.replace(token, css_bar(rows))
-	leftovers = sorted({int(m.group(1)) for m in _CHART_TOKEN_RE.finditer(body)})
-	for idx in leftovers:
-		notes.append(f"placeholder {{{{chart:{idx}}}}} has no matching chart spec")
-	if leftovers:
-		body = _CHART_TOKEN_RE.sub("", body)
-	return body
+		try:
+			rendered[i] = css_bar(rows)
+		except Exception:
+			notes.append(f"chart {i} was provided but its rows were malformed and could not be rendered")
+			rendered[i] = ""  # its token is removed rather than left as junk
+
+	from bs4 import BeautifulSoup
+
+	soup = BeautifulSoup(body, "html.parser")
+	seen: set[int] = set()
+	for node in list(soup.find_all(string=_CHART_TOKEN_RE)):
+		if node.find_parent(["pre", "code"]):
+			continue  # a token shown as a literal code example stays literal
+		text = str(node)
+		pieces: list[str] = []
+		last = 0
+		for m in _CHART_TOKEN_RE.finditer(text):
+			idx = int(m.group(1))
+			seen.add(idx)
+			pieces.append(_html.escape(text[last : m.start()]))
+			pieces.append(rendered.get(idx, ""))  # unknown index → drop token
+			last = m.end()
+		pieces.append(_html.escape(text[last:]))
+		fragment = BeautifulSoup("".join(pieces), "html.parser")
+		for child in list(fragment.contents):
+			node.insert_before(child)
+		node.extract()
+
+	for i in rendered:
+		if i not in seen:
+			notes.append(
+				f"chart {i} was provided but its {{{{chart:{i}}}}} placeholder was not found in the content"
+			)
+	for idx in sorted(seen):
+		if idx not in rendered:
+			notes.append(f"placeholder {{{{chart:{idx}}}}} has no matching chart spec")
+	return str(soup)
 
 
 def _outcome_for(exc: Exception) -> str:

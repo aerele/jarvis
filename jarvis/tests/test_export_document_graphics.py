@@ -16,12 +16,16 @@ Two groups:
   ``fmt_money``/``get_number_format`` to site-free stubs.
 """
 
+import html
 import math
 
+import frappe
 import pytest
 
 from jarvis.tools._export.document import graphics
 from jarvis.tools._export.document.graphics import css_bar, fmt_amount, fmt_pct, kpi_tile, rag_chip
+
+_HAS_SITE = bool(getattr(frappe.local, "site", None))
 
 # --- css_bar --------------------------------------------------------------
 
@@ -93,6 +97,41 @@ def test_css_bar_missing_keys_default_safely() -> None:
 	assert 'style="width:0%"' in out
 
 
+@pytest.mark.parametrize("bad", [5, None, True, "abc", [1, 2], [1, 2, 3, 4], object()])
+def test_css_bar_malformed_row_raises(bad: object) -> None:
+	"""A row that is neither a mapping nor a 3-item (label, value, pct) sequence
+	raises ValueError rather than a blind-unpack TypeError/ValueError - so the
+	orchestrator's _splice_charts can catch it and degrade the chart to a note
+	instead of the whole export crashing with a raw 500 and no telemetry."""
+	with pytest.raises(ValueError):
+		css_bar([bad])
+
+
+def test_css_bar_valid_3seq_does_not_raise() -> None:
+	# Exactly three positional items is the legitimate shape and must still work.
+	out = css_bar([[1, 2, 50]])
+	assert '<div class="bar" style="width:50%">1 2</div>' in out
+
+
+def test_css_bar_none_label_value_render_blank_not_none() -> None:
+	out = css_bar([{"label": None, "value": None, "pct": 10}])
+	assert "None" not in out
+	assert '<div class="bar" style="width:10%"> </div>' in out
+
+
+def test_css_bar_tiny_pct_no_scientific_notation() -> None:
+	# 0.00001 formatted with :g would be "1e-05", which old WebKit drops. Fixed
+	# notation renders it as a plain (rounded-to-zero) width.
+	out = css_bar([{"label": "x", "value": "y", "pct": 0.00001}])
+	assert "e-" not in out
+	assert 'style="width:0%"' in out
+
+
+def test_css_bar_fractional_pct_trims_trailing_zeros() -> None:
+	out = css_bar([{"label": "x", "value": "y", "pct": 33.5}])
+	assert 'style="width:33.5%"' in out
+
+
 # --- kpi_tile ---------------------------------------------------------------
 
 
@@ -134,6 +173,12 @@ def test_kpi_tile_escapes_delta() -> None:
 	assert "<script" not in out
 
 
+def test_kpi_tile_none_value_renders_blank_not_none() -> None:
+	out = kpi_tile("Revenue", None)
+	assert "None" not in out
+	assert '<div class="kpi-value"></div>' in out
+
+
 # --- rag_chip -----------------------------------------------------------
 
 
@@ -163,24 +208,31 @@ def test_rag_chip_preserves_original_casing_as_escaped_text() -> None:
 
 # --- fmt_amount / fmt_pct: real integration (needs a Frappe site) -----------
 #
-# Confirmed against this repo's bench-env python (see task report): calling
-# frappe.utils.fmt_money / frappe.utils.data.get_number_format outside a site
-# raises `AttributeError: lang` (frappe.local.lang is unset). These are the
-# true, unstubbed formatting behaviors and belong in the site-backed
-# end-to-end gate, not in this no-site suite.
+# frappe.utils.fmt_money / frappe.utils.data.get_number_format read
+# frappe.local.lang and raise `AttributeError: lang` outside a site. These use
+# ``skipif`` (NOT unconditional ``skip``, which would never run even inside the
+# bench gate) so they DO run once a site is present, and they assert exact
+# DELEGATION to fmt_money rather than a hard-coded locale string - proving
+# fmt_amount/fmt_pct reuse the framework formatter without pinning the test to
+# one site's number-format setting.
 
 
-@pytest.mark.skip(reason="needs bench site — runs in the end-to-end gate")
-def test_fmt_amount_real_lakh_crore_grouping() -> None:
-	# Indian lakh/crore grouping is a site-level number-format setting; this
-	# proves fmt_amount reuses frappe.utils.fmt_money rather than hand-rolling
-	# digit grouping, once a real site/number-format is available.
-	assert fmt_amount(1234567) == "12,34,567.00"  # depends on site's #,##,###.## format
+@pytest.mark.skipif(not _HAS_SITE, reason="needs a bench site (frappe.local.lang)")
+def test_fmt_amount_delegates_to_fmt_money() -> None:
+	from frappe.utils import fmt_money
+
+	# Whatever the site's number format (incl. Indian lakh/crore), fmt_amount must
+	# equal the escaped fmt_money output - i.e. it reuses the framework grouping.
+	assert fmt_amount(1234567) == html.escape(fmt_money(1234567))
 
 
-@pytest.mark.skip(reason="needs bench site — runs in the end-to-end gate")
-def test_fmt_pct_real_precision() -> None:
-	assert fmt_pct(42.5) == "42.50%"
+@pytest.mark.skipif(not _HAS_SITE, reason="needs a bench site (frappe.local.lang)")
+def test_fmt_pct_delegates_at_number_format_precision() -> None:
+	from frappe.utils import fmt_money
+	from frappe.utils.data import get_number_format
+
+	expected = html.escape(fmt_money(42.5, precision=get_number_format().precision)) + "%"
+	assert fmt_pct(42.5) == expected
 
 
 # --- fmt_amount / fmt_pct: edge-case guard logic (no site needed) -----------

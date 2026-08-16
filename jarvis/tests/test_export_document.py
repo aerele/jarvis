@@ -238,6 +238,10 @@ class _RichBase(unittest.TestCase):
 
 	def setUp(self):
 		self.render = patch(f"{_MODULE}.render_pdf", return_value=b"%PDF-1.4 fake").start()
+		# resolve_letterhead touches frappe.db/has_permission (needs a site); it is
+		# unit-tested directly in test_export_document_furniture. Here it is stubbed
+		# to the "no letterhead, no note" default; letterhead-specific tests override.
+		self.resolve_lh = patch(f"{_MODULE}.resolve_letterhead", return_value=("", "", None)).start()
 		self.save_rich = patch(
 			f"{_MODULE}.save_export_file",
 			return_value={
@@ -396,7 +400,7 @@ class TestRichPipeline(_RichBase):
 
 	def test_token_without_spec_adds_note(self):
 		out = export_document(
-			"<p>{{chart:5}}</p>",
+			"<p>Report body</p><p>{{chart:5}}</p>",  # real body + an orphan token
 			format="pdf",
 			content_is_html=True,
 			header="Confidential",  # trigger rich without providing chart 5
@@ -405,9 +409,96 @@ class TestRichPipeline(_RichBase):
 		# the orphan token is not left as literal junk in the document.
 		self.assertNotIn("{{chart:5}}", self._rich_doc_body())
 
+	def test_blank_after_orphan_token_raises_no_data(self):
+		# content that is ONLY an orphan chart token strips to <p></p> — a childless
+		# skeleton — which must be caught as blank, not shipped as an empty PDF.
+		with self.assertRaises(NoDataError):
+			export_document("{{chart:0}}", content_is_html=False, theme=True)
+		self.assertFalse(self.render.called)
+
+	def test_tag_skeleton_blank_raises_no_data(self):
+		with self.assertRaises(NoDataError):
+			export_document("<div><span></span></div>", content_is_html=True, theme=True)
+		self.assertFalse(self.render.called)
+
+	def test_malformed_chart_rows_degrade_to_note_not_crash(self):
+		# A malformed rows shape (the review's top cross-lane finding) degrades the
+		# chart to a note; the export still succeeds, and telemetry still fires.
+		out = export_document(
+			"<p>Body</p><p>{{chart:0}}</p>",
+			format="pdf",
+			content_is_html=True,
+			charts=[{"rows": [[1, 2]]}],  # 2-tuple rows → css_bar would raise
+		)
+		self.assertTrue(self.render.called)
+		self.assertTrue(any("chart 0" in n for n in out["notes"]), out["notes"])
+		self.assertNotIn("{{chart:0}}", self._rich_doc_body())
+
+	def test_total_chart_rows_cap(self):
+		import jarvis.tools.export_document as ed
+
+		big = [{"rows": [{"label": "x", "value": "1", "pct": 1}] * (ed._MAX_TOTAL_CHART_ROWS + 1)}]
+		with self.assertRaises(InvalidArgumentError):
+			export_document(_RICH_MD, format="pdf", charts=big)
+		self.assertFalse(self.render.called)
+
+	def test_token_in_code_block_left_literal(self):
+		# A {{chart:0}} shown inside <code> is documentation, not a placeholder —
+		# it must NOT be spliced (tree-aware, text-node-only splice).
+		export_document(
+			"<p>Docs:</p><pre><code>{{chart:0}}</code></pre>",
+			format="pdf",
+			content_is_html=True,
+			charts=[{"rows": [{"label": "A", "value": "1", "pct": 50}]}],
+		)
+		body = self._rich_doc_body()
+		self.assertIn("{{chart:0}}", body)  # left literal inside code
+		self.assertNotIn("bar-chart", body.split("<code>")[1].split("</code>")[0])
+
+	def test_token_in_attribute_not_corrupted(self):
+		# A token that survives inside an href must not corrupt the tag (the splice
+		# never touches attribute values).
+		with patch(f"{_MODULE}.css_bar", return_value="<div>BAR</div>"):
+			export_document(
+				'<a href="https://x/{{chart:0}}">link</a>',
+				format="pdf",
+				content_is_html=True,
+				charts=[{"rows": [{"label": "A", "value": "1", "pct": 50}]}],
+			)
+		body = self._rich_doc_body()
+		self.assertNotIn('<div>BAR</div>"', body)  # not spliced INTO the href value
+		self.assertIn("link", body)
+
+	def test_chart_value_with_token_no_double_substitution(self):
+		# chart 0's rendered output contains the literal text "{{chart:1}}"; chart 1
+		# must NOT be spliced into chart 0's already-rendered markup.
+		def fake_bar(rows):
+			label = rows[0]["label"] if rows else ""
+			return f"<div>BAR::{label}</div>"
+
+		with patch(f"{_MODULE}.css_bar", side_effect=fake_bar):
+			export_document(
+				"<p>{{chart:0}}</p><p>{{chart:1}}</p>",
+				format="pdf",
+				content_is_html=True,
+				charts=[{"rows": [{"label": "{{chart:1}}", "value": "x", "pct": 1}]}, {"rows": []}],
+			)
+		body = self._rich_doc_body()
+		# chart 0 rendered once with its literal label; chart 1 rendered once.
+		self.assertEqual(body.count("BAR::"), 2)
+
+	def test_unexpected_error_logged_and_reraised_clean(self):
+		# A bug on the rich path (here: sanitize_rich blows up) must not escape as a
+		# raw 500 — it is caught at the boundary, re-raised clean, and telemetried.
+		with patch(f"{_MODULE}.sanitize_rich", side_effect=RuntimeError("boom")):
+			with self.assertRaises(InvalidArgumentError):
+				export_document(_RICH_MD, format="pdf", theme=True)
+		self.assertEqual(self.telemetry.call_args.kwargs["outcome"], "rejected")
+
 	def test_rich_render_passes_furniture_and_caps_to_render_pdf(self):
 		import jarvis.tools.export_document as ed
 
+		self.resolve_lh.return_value = ("<div>LHH</div>", "<div>LHF</div>", None)
 		export_document(
 			_RICH_MD,
 			format="pdf",
@@ -424,18 +515,43 @@ class TestRichPipeline(_RichBase):
 		self.assertEqual(kwargs["header_html"], "H")
 		self.assertEqual(kwargs["footer_html"], "F")
 		self.assertEqual(kwargs["watermark"], "W")
-		self.assertEqual(kwargs["letterhead"], "Standard")
+		# letterhead is RESOLVED (default lookup + read-perm + image inline) into
+		# safe HTML before render_pdf; the name is never forwarded raw.
+		self.assertEqual(kwargs["letterhead_header"], "<div>LHH</div>")
+		self.assertEqual(kwargs["letterhead_footer"], "<div>LHF</div>")
+		self.assertNotIn("letterhead", kwargs)
 		self.assertEqual(kwargs["page_size"], "Letter")
 		self.assertEqual(kwargs["orientation"], "landscape")
 		self.assertEqual(kwargs["margins_mm"], 20)
 		self.assertFalse(kwargs["page_numbers"])
-		self.assertEqual(kwargs["timeout"], ed._RENDER_TIMEOUT_S)
+		# timeout is the render budget minus pre-render work already spent.
+		self.assertLessEqual(kwargs["timeout"], ed._RENDER_TIMEOUT_S)
+		self.assertGreaterEqual(kwargs["timeout"], 5)
 
-	def test_letterhead_bool_not_forwarded_as_name(self):
-		# letterhead=True triggers rich but is NOT a Letter Head name -> None.
+	def test_letterhead_name_resolved_verbatim(self):
+		export_document(_RICH_MD, format="pdf", letterhead="Acme")
+		self.assertEqual(self.resolve_lh.call_args.args[0], "Acme")
+
+	def test_letterhead_bool_resolves_to_default(self):
+		# letterhead=True triggers rich but is NOT a name -> resolve with None so
+		# the site's DEFAULT Letter Head is used.
 		export_document(_RICH_MD, format="pdf", letterhead=True)
-		_, kwargs = self.render.call_args
-		self.assertIsNone(kwargs["letterhead"])
+		self.assertIsNone(self.resolve_lh.call_args.args[0])
+
+	def test_charts_only_rich_render_still_resolves_default_letterhead(self):
+		# A branded render with no letterhead intent still gets the default one.
+		export_document(
+			"body {{chart:0}}",
+			format="pdf",
+			charts=[{"rows": [{"label": "A", "value": "1", "pct": 50}]}],
+		)
+		self.assertTrue(self.resolve_lh.called)
+		self.assertIsNone(self.resolve_lh.call_args.args[0])
+
+	def test_letterhead_not_found_note_surfaced(self):
+		self.resolve_lh.return_value = ("", "", "letterhead 'Ghost' not found — rendered without it")
+		out = export_document(_RICH_MD, format="pdf", letterhead="Ghost")
+		self.assertTrue(any("Ghost" in n for n in out["notes"]), out["notes"])
 
 	def test_notes_field_present_even_when_clean(self):
 		out = export_document(_RICH_MD, format="pdf", theme=True)
@@ -444,13 +560,18 @@ class TestRichPipeline(_RichBase):
 
 class TestFormatMatrix(_RichBase):
 	def test_html_returns_composed_doc_body(self):
-		out = export_document("<p>hello</p>", format="html", content_is_html=True, theme=True)
+		out = export_document("<p>hello</p>", format="html", content_is_html=True, theme=True, title="Q3")
 		self.assertFalse(self.render.called)  # html needs no wkhtmltopdf
 		fname, payload = self.save_rich.call_args.args[0], self.save_rich.call_args.args[1]
 		self.assertTrue(fname.endswith(".html"))
 		text = payload.decode("utf-8")
 		self.assertIn("hello", text)
 		self.assertIn("<style>", text)  # component_css composed in
+		# rich HTML must be a WELL-FORMED standalone document (doctype + charset +
+		# title), not a bare fragment — else non-ASCII renders as mojibake.
+		self.assertIn("<!doctype html>", text.lower())
+		self.assertIn("charset", text.lower())
+		self.assertIn("<title>Q3</title>", text)
 		self.assertEqual(out["notes"], [])
 
 	def test_html_with_furniture_kwarg_adds_ignored_note(self):
@@ -494,6 +615,15 @@ class TestTelemetry(_RichBase):
 		with self.assertRaises(InvalidArgumentError):
 			export_document(_RICH_MD, format="docx")
 		self.assertEqual(self._last_outcome(), "rejected")
+
+	def test_telemetry_carries_rich_flag(self):
+		# The rich path and the byte-preserved plain path must be distinguishable in
+		# the telemetry stream (they would otherwise collapse to one tuple).
+		export_document(_RICH_MD, format="html", theme=True)
+		self.assertIs(self.telemetry.call_args.kwargs["rich"], True)
+		self.telemetry.reset_mock()
+		export_document(_RICH_MD, format="html")
+		self.assertIs(self.telemetry.call_args.kwargs["rich"], False)
 
 
 class TestPlainPathBackCompatUnit(_RichBase):
