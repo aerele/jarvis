@@ -106,8 +106,10 @@ const DATA_TOOLS = new Set([
 // of these are confirmed to fire for a dashboard build (only the finished
 // message's `canvas` array is a verified "published" signal), so a name in
 // here only lights the Publishing tick EARLY — it is never required for the
-// card to reach the finished state.
-const WRITE_TOOLS = new Set(["canvas", "bash", "exec", "image"]);
+// card to reach the finished state. `save_dashboard` is the new builder-tool
+// path (jarvis#884): the agent no longer builds on the agent canvas, it
+// saves a Jarvis Dashboard row directly, so that tool is the write signal now.
+const WRITE_TOOLS = new Set(["canvas", "bash", "exec", "image", "save_dashboard"]);
 
 export const DASHBOARD_BUILD_PHASES = [
 	{ key: "understanding", label: "Understanding" },
@@ -116,7 +118,7 @@ export const DASHBOARD_BUILD_PHASES = [
 	{ key: "publishing", label: "Publishing" },
 ];
 
-function toolBaseName(name) {
+export function toolBaseName(name) {
 	return String(name || "").replace(/^jarvis__/, "");
 }
 
@@ -132,23 +134,34 @@ function toolBaseName(name) {
  * is in — that reports `null` rather than defaulting to "Understanding",
  * because this mount has not actually observed the start.
  *
+ * `dataTools`/`writeTools` default to this file's own dashboard-specific
+ * sets, so every existing caller (this module's tests, DashboardChatPane.vue)
+ * keeps its exact behaviour unchanged. artifactActivityCard.js (jarvis#884)
+ * passes its own generalized sets instead of forking this function, so a
+ * pdf/spreadsheet/image turn reads the identical phase logic through the
+ * same real activeTools/statusPhase/waiting signals.
+ *
  * @param {{activeTools: Array<{name?: string, status?: string}>, statusPhase: string|null, waiting: boolean}} arg
+ * @param {{dataTools?: Set<string>, writeTools?: Set<string>}} [toolSets]
  * @returns {string|null} one of DASHBOARD_BUILD_PHASES' keys, or null
  */
-export function dashboardBuildPhase({ activeTools, statusPhase, waiting }) {
+export function dashboardBuildPhase(
+	{ activeTools, statusPhase, waiting },
+	{ dataTools = DATA_TOOLS, writeTools = WRITE_TOOLS } = {}
+) {
 	const tools = Array.isArray(activeTools) ? activeTools : [];
 	const running = [...tools].reverse().find((t) => t && t.status === "running");
 	if (running) {
 		const base = toolBaseName(running.name);
-		if (WRITE_TOOLS.has(base)) return "publishing";
-		if (DATA_TOOLS.has(base)) return "querying";
+		if (writeTools.has(base)) return "publishing";
+		if (dataTools.has(base)) return "querying";
 		// An unrecognised tool while the turn is a confirmed dashboard build is
 		// still real activity, just not one this map can name precisely —
 		// "Composing" is the safest of the four to sit on, never "done".
 		return "composing";
 	}
 	if (tools.length) {
-		const sawWrite = tools.some((t) => WRITE_TOOLS.has(toolBaseName(t && t.name)));
+		const sawWrite = tools.some((t) => writeTools.has(toolBaseName(t && t.name)));
 		if (sawWrite) return "publishing";
 		return "composing"; // results are in (statusPhase "analyzing") or the reply is streaming
 	}
@@ -156,9 +169,13 @@ export function dashboardBuildPhase({ activeTools, statusPhase, waiting }) {
 	return null;
 }
 
-/** Index into DASHBOARD_BUILD_PHASES for tick rendering; -1 when indeterminate. */
-export function phaseTickIndex(phase) {
-	return DASHBOARD_BUILD_PHASES.findIndex((p) => p.key === phase);
+/**
+ * Index into `phases` for tick rendering; -1 when indeterminate. Defaults to
+ * DASHBOARD_BUILD_PHASES so every existing caller is unchanged; pass the
+ * generalized artifact phase list to tick against that instead.
+ */
+export function phaseTickIndex(phase, phases = DASHBOARD_BUILD_PHASES) {
+	return phases.findIndex((p) => p.key === phase);
 }
 
 // ── the finished canvas -> a compact clickable thumbnail ────────────────────

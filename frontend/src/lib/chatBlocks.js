@@ -5,9 +5,10 @@
  * A reply is not only prose. The agent also emits fenced blocks that OTHER
  * surfaces render as real UI: the draft summary card (```jarvis-action), the
  * confirmation card (```confirm), the clarifying question (```jarvis-ask), the
- * suggestion cards, the skill/macro markers and the charts. Every one of them
- * must be cut out of the markdown body, or the same payload would be drawn
- * twice: once as its card, once as a raw code block underneath it.
+ * suggestion cards, the skill/macro markers, the charts, and the redirect to
+ * another page (```jarvis-goto). Every one of them must be cut out of the
+ * markdown body, or the same payload would be drawn twice: once as its card,
+ * once as a raw code block underneath it.
  *
  * The subtle part is STREAMING. The closing fence is the last thing to arrive,
  * so for as long as a block is still being written there is nothing for a
@@ -35,6 +36,7 @@ export const BLOCK_TAGS = [
 	"jarvis-skill",
 	"jarvis-macro",
 	"jarvis-chart",
+	"jarvis-goto",
 ];
 
 // Completed blocks. `mermaid` is special: only the xychart-beta variant is a

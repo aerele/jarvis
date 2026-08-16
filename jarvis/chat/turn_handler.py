@@ -1568,6 +1568,27 @@ def _dashboard_has_canvas(conversation_id: str) -> bool:
 		return True
 
 
+def _dashboard_saved(conversation_id: str) -> bool:
+	"""Has a ``Jarvis Dashboard`` already been saved from this conversation?
+
+	The #884 delivery path (the ``save_dashboard`` tool) stamps
+	``source_conversation``, so a saved row is the new "the shape is agreed,
+	iterate instead of interviewing" signal — the canvas-item probe above only
+	covers pre-#884 transcripts. Fails to True on any error, same degradation
+	rule as ``_dashboard_has_canvas``.
+	"""
+	if not conversation_id:
+		return False
+	try:
+		return bool(frappe.db.exists("Jarvis Dashboard", {"source_conversation": conversation_id}))
+	except Exception:
+		frappe.log_error(
+			title="dashboards: saved probe failed",
+			message=f"conversation={conversation_id!r}\n\n{frappe.get_traceback()}",
+		)
+		return True
+
+
 def _dashboard_has_asked(conversation_id: str) -> bool:
 	"""Has the assistant already put a ``jarvis-ask`` block in this conversation?
 
@@ -1674,7 +1695,11 @@ def _prepend_doc_context(user_message: str, context, conversation_id: str = "") 
 		# never trap the user in a question loop. Once a canvas exists the wording
 		# below is unchanged from the iterate-only original.
 		clarify_line = ""
-		if not edit_line and not _dashboard_has_canvas(conversation_id):
+		if (
+			not edit_line
+			and not _dashboard_saved(conversation_id)
+			and not _dashboard_has_canvas(conversation_id)
+		):
 			if _dashboard_has_asked(conversation_id):
 				clarify_line = (
 					" You have ALREADY asked your clarifying questions in this conversation, "
@@ -1709,8 +1734,11 @@ def _prepend_doc_context(user_message: str, context, conversation_id: str = "") 
 			"[Context: The user is on the Jarvis Dashboards builder page. They want to "
 			"create or iterate on a dashboard/report. Read and follow the "
 			"jarvis-dashboards skill before acting. Non-negotiable contract: produce "
-			"ONE complete self-contained HTML document per iteration and publish it as "
-			"a hosted canvas embed; no external resources. Live data sources MUST be "
+			"ONE complete self-contained HTML document per iteration and deliver it "
+			"with ONE jarvis__save_dashboard call (first build: dashboard_title + "
+			"html; revisions: name + html - the tool returns the name); never publish "
+			"a hosted canvas embed or [embed] marker; no external resources. Live "
+			"data sources MUST be "
 			"declared inside the HTML exactly as "
 			'<script type="application/json" id="jarvis-sources">{"sources":[{'
 			'"source_name":"<snake_case>","tool":"query|get_list|run_report",'

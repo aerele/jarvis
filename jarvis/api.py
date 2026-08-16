@@ -630,6 +630,11 @@ _WRITE_TOOLS = frozenset(
 		"attach_to_doc",
 		"create_dashboard_chart",
 		"create_dashboard",
+		# #884 chat/builder dashboard delivery: inserts/updates a Jarvis Dashboard
+		# mid-turn. Audited but NEVER gated (like record_agent_run below) - the
+		# build must land without a card for the builder canvas to render it;
+		# scope is pinned to User server-side and the row is one-per-conversation.
+		"save_dashboard",
 		"create_custom_skill",
 		"update_wiki",
 		# Audited but NOT gated (see _GATED_WRITES comment below):
