@@ -285,9 +285,24 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 	assert.match(stopRun, /gotoMorph\.value = null;/);
 	const resetRunState = fnBody(chatSrc, "function resetRunState() {");
 	assert.match(resetRunState, /gotoMorph\.value = null;/);
+	// run:end is the one path that can EITHER navigate (this exact terminal is
+	// the one that fires gotoDashboards) or not (a second tab that lost the
+	// localStorage stamp race, an errored/stopped row, or a was_recovered
+	// replacement whose final text dropped the goto block). The latch must
+	// only survive the navigating case — every other run:end must still drop
+	// it, or a non-navigating terminal leaves the morph line animating
+	// forever with no redirect coming.
 	const runEnd = chatSrc.slice(
 		chatSrc.indexOf('case "run:end": {'),
 		chatSrc.indexOf('case "message:enriched": {')
 	);
-	assert.doesNotMatch(runEnd, /gotoMorph\.value = null;/);
+	assert.match(runEnd, /let redirected = false;/);
+	assert.match(runEnd, /redirected = true;\s*\n\s*gotoDashboards\(goto\.prompt\);/);
+	assert.match(runEnd, /if \(!redirected\) gotoMorph\.value = null;/);
+	// the unconditional clear must come AFTER the redirect gate, not before it
+	assert.ok(
+		runEnd.indexOf("if (!redirected) gotoMorph.value = null;") >
+			runEnd.indexOf("redirected = true;"),
+		"the redirected check must run after the redirect branch, not race it"
+	);
 });

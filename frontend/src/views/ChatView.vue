@@ -8909,6 +8909,17 @@ function onEvent(p) {
 			// same transcript never re-fires it. Only the live socket terminal ever
 			// reaches this branch, so an old message opened again never gets here at
 			// all, but the stamp is the belt-and-braces the spec asks for.
+			//
+			// `redirected` tracks whether THIS run:end is the one that actually
+			// navigates, so the gotoMorph latch below can tell the two cases apart:
+			// the navigating path keeps the latch (it must survive the instant up to
+			// navigation — the whole point of the latch), while every other path
+			// that reaches run:end with the latch still set — a second tab that lost
+			// the race on the localStorage stamp, an errored/stopped terminal, or a
+			// was_recovered replacement whose final text dropped the goto block —
+			// must drop it, or the morph line would animate forever with no
+			// redirect coming.
+			let redirected = false;
 			if (m && !m.error && !m.stopped) {
 				const goto = gotoOf(m);
 				if (goto) {
@@ -8929,10 +8940,12 @@ function onEvent(p) {
 							.sort((a, b) => b[1] - a[1])
 							.slice(50)
 							.forEach(([k]) => localStorage.removeItem(k));
+						redirected = true;
 						gotoDashboards(goto.prompt);
 					}
 				}
 			}
+			if (!redirected) gotoMorph.value = null;
 			break;
 		}
 		case "message:enriched": {
