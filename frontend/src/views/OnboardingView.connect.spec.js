@@ -1673,40 +1673,34 @@ describe("jarvis#752 the connect step shows admin's route verdict while still co
 	});
 });
 
-// 2026-08-14 connect-wait redesign: the phase columns are gone; the connect
-// wait renders ONE labeled six-segment bar (connectSteps) with the current
+// 2026-08-16 connect-wait redesign: the six per-step tiles above the bar are
+// gone too (they read as a duplicated row of tiles above a bar - user
+// report). The connect wait now renders ONE smooth progress bar with a
+// single "Step N of 6 · <step name>" caption above it, and the current
 // step's one-line explanation below it, and admin's own detail sentence
 // (jarvis#752/#754) below that. These tests pin the DOM shape, not pixel
 // layout (jsdom does not compute CSS).
-describe("connect wait bar: six labeled steps with a one-line explanation", () => {
+describe("connect wait bar: one smooth bar with a named-step caption", () => {
 	const QUOTA_REASON = "Your OpenAI account has reached its usage limit. It resets in 2 hours.";
 
-	it("renders six labeled steps and marks the readiness step current while applying", async () => {
+	it("renders one progressbar (no per-step tiles) and names the current step in the caption", async () => {
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
 		await flushPromises();
 
-		// The old ob-phases column list must be gone from the connect screen.
+		// The old ob-phases column list, and the old per-step tiles above the
+		// bar, must both be gone from the connect screen.
 		expect(w.find(".ob-phases").exists()).toBe(false);
+		expect(w.find(".ob-progress").findAll('[role="listitem"]')).toHaveLength(0);
 
-		// Scoped to the wait bar: the top rail is its own StepProgress with its
-		// own aria-current, and must not leak into these assertions.
-		const items = w.find(".ob-progress").findAll('[role="listitem"]');
-		const labels = items.map((i) => i.text());
-		for (const expected of [
-			"Connection",
-			"Workspace",
-			"Tools",
-			"Persona",
-			"Live check",
-			"Chat",
-		]) {
-			expect(labels).toContain(expected);
-		}
-		const current = items.filter((i) => i.attributes("aria-current") === "step");
-		expect(current).toHaveLength(1);
-		expect(current[0].text()).toBe("Workspace");
+		// Scoped to the wait bar: the top rail is its own StepProgress
+		// (variant="steps") and must not leak into this assertion.
+		const bar = w.find(".ob-progress").find('[role="progressbar"]');
+		expect(bar.exists()).toBe(true);
+		expect(w.text()).toContain("Step 2 of 6 · Workspace");
+		// 2 of 6 steps filled: Connection done, Workspace (the current step) counts too.
+		expect(bar.attributes("aria-valuenow")).toBe("33");
 		w.unmount();
 	});
 
@@ -1746,9 +1740,9 @@ describe("connect wait bar: six labeled steps with a one-line explanation", () =
 		w.unmount();
 	});
 
-	it("the bar caption counts all six steps, matching what is drawn", async () => {
-		// The user-reported defect this redesign fixes: a "Step 2 of 3" caption
-		// over six visible items.
+	it("the bar caption counts all six steps, matching the fill fraction", async () => {
+		// An earlier regression showed a "Step 2 of 3" caption over six actual
+		// steps; this pins the count staying in sync with connectSteps.
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
