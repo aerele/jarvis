@@ -1234,6 +1234,29 @@ def post_push_learned_skills(learned_skills: list[dict]) -> dict:
 	)
 
 
+def post_push_role_profiles(role_profiles: list[dict]) -> dict:
+	"""POST the tenant's computed role-based agent profiles to admin -> fleet ->
+	container render (role-profile-agents design, spec §7).
+
+	``role_profiles`` is the list built by
+	``jarvis.chat.role_profiles.needed_profiles`` (each
+	``{slug, skills, tools_allow}`` where ``slug`` is ``role-<set-keys>``). The
+	fleet-agent renders one agent entry per profile into ``agents.list[]`` (the
+	main agent, ``agent_id=None``, is never included here and always renders
+	regardless). An empty list is a valid "no role-based profiles needed"
+	reconcile - every enabled user maps to main.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError
+		(rate-limit shares the rotate-secret bucket).
+	"""
+	return _post(
+		path=_m("api.tenant.push_role_profiles"),
+		body={"role_profiles": role_profiles},
+		timeout_s=180,
+	)
+
+
 def post_agent_run(run_id: str, agent_id: str, session_key: str, message: str, timeout_s: int = 600) -> dict:
 	"""Dispatch ONE marketplace-agent delegate turn: bench → admin → fleet → the
 	customer's container (Phase 2C run relay).

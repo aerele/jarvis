@@ -118,6 +118,8 @@
   "learned_skills_sync_status",
   "agent_catalog_dirty",
   "agent_catalog_version",
+  "role_profiles_pushed",
+  "role_profiles_pushed_at",
   "release_notice_section",
   "release_notice_active",
   "latest_jarvis_version",
@@ -851,6 +853,21 @@
    "fieldtype": "Int",
    "hidden": 1,
    "label": "Agent Catalog Version",
+   "read_only": 1
+  },
+  {
+   "description": "JSON snapshot of the role-based agent profiles last pushed to admin (jarvis.chat.role_profiles.needed_profiles output). Compared against the freshly computed set on every sync to short-circuit an unchanged push.",
+   "fieldname": "role_profiles_pushed",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Role Profiles Pushed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "role_profiles_pushed_at",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Role Profiles Pushed At",
    "read_only": 1
   },
   {

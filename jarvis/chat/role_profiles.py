@@ -11,11 +11,14 @@ Two independent axes, both curated data (spec §5), never runtime discovery:
   (``SKILL_SETS``), plus the always-on ``SHARED_CORE_SKILLS``, a user's
   profile includes.
 
-:func:`resolve_profile` is the only entry point other modules should call.
-It never raises: any failure anywhere falls back to the main agent (spec §3
-fallback rule 3), so a bad role lookup can never leave a user with a broken
-or over-trimmed agent. The mapping itself is fixed data reviewed with the
-app, not something resolved against a live agent container.
+:func:`resolve_profile` is the per-user resolver other modules call to decide
+one user's profile; it never raises: any failure anywhere falls back to the
+main agent (spec §3 fallback rule 3), so a bad role lookup can never leave a
+user with a broken or over-trimmed agent. The mapping itself is fixed data
+reviewed with the app, not something resolved against a live agent
+container. :func:`sync_role_profiles` is the tenant-wide push boundary: it
+computes :func:`needed_profiles` and reconciles it to admin, and is likewise
+built to never raise into a caller.
 """
 
 from __future__ import annotations
@@ -23,6 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import frappe
+
+_SETTINGS = "Jarvis Settings"
 
 # --- Axis 1: tool tier -----------------------------------------------------
 
@@ -318,4 +323,102 @@ def needed_profiles() -> list[dict]:
 			"skills": list(choice.skills or ()),
 			"tools_allow": list(tools_allow),
 		}
-	return list(profiles.values())
+	# Sorted by slug: frappe.get_all("User", ...) above carries no order_by, so
+	# it follows Frappe's default `modified desc` and reorders on any User
+	# save. Without a deterministic output order here, sync_role_profiles's
+	# snapshot comparison (a plain `==` against the last-pushed list) would
+	# read an unchanged profile SET as "changed" on ordering alone, forcing a
+	# spurious re-push.
+	return sorted(profiles.values(), key=lambda p: p["slug"])
+
+
+# --- Push to admin ---------------------------------------------------------
+
+
+def sync_role_profiles(force: bool = False) -> dict:
+	"""Compute :func:`needed_profiles` and push it to admin only when the set
+	actually changed since the last push (or ``force=True``).
+
+	This is the fallback-discipline boundary for the whole sync (unlike
+	``needed_profiles`` itself, which is deliberately left unwrapped so a real
+	``frappe.get_all`` failure is visible rather than silently read as "no
+	profiles needed"). Everything downstream of that computation - the
+	snapshot comparison, the admin push, the settings stamp - is wrapped in
+	one try/except: a push failure (admin down, rejected, a bug in this
+	function) must never raise into a caller such as a ``User.on_update`` save
+	or the daily scheduler tick. Logged via ``frappe.log_error`` the way other
+	``admin_client`` callers in this app do.
+
+	Returns ``{"pushed": bool, "profiles": [...]}``. ``profiles`` is always
+	the freshly computed desired state (even on failure, as long as
+	``needed_profiles`` itself succeeded), so a caller can inspect what SHOULD
+	be live without having to re-derive it.
+	"""
+	profiles: list[dict] = []
+	try:
+		profiles = needed_profiles()
+
+		last_raw = frappe.db.get_single_value(_SETTINGS, "role_profiles_pushed", cache=False)
+		last = frappe.parse_json(last_raw) if last_raw else None
+		if not force and last == profiles:
+			return {"pushed": False, "profiles": profiles}
+
+		from jarvis import admin_client
+
+		admin_client.post_push_role_profiles(role_profiles=profiles)
+
+		frappe.db.set_value(
+			_SETTINGS,
+			_SETTINGS,
+			{
+				"role_profiles_pushed": frappe.as_json(profiles),
+				"role_profiles_pushed_at": frappe.utils.now(),
+			},
+		)
+		return {"pushed": True, "profiles": profiles}
+	except Exception:
+		frappe.log_error(title="Jarvis: role-profiles push failed", message=frappe.get_traceback())
+		return {"pushed": False, "profiles": profiles}
+
+
+def enqueue_sync(after_commit: bool = True) -> bool:
+	"""Debounced queue of a role-profiles resync.
+
+	``after_commit`` defaults True: this is called from the ``User.on_update``
+	doc_event, and the enqueued job opens its own DB connection, so it must
+	not run before the role change that triggered it has actually committed -
+	the same reasoning as ``jarvis.chat.wiki_mirror.enqueue_sync``.
+
+	Suppressed under tests unless ``frappe.flags.jarvis_test_role_profiles_enqueue``
+	is set, also mirroring ``wiki_mirror``: ``frappe.enqueue`` runs its job
+	INLINE under ``frappe.flags.in_test``, so an un-suppressed enqueue here
+	would fire an unmocked admin push on every fixture user insert/update in
+	the test suite.
+
+	Swallows and logs enqueue failures (e.g. Redis down): this is reached from
+	a doc_event, which must never fail a save.
+
+	Returns whether a job was really queued.
+	"""
+	if frappe.flags.in_test and not frappe.flags.jarvis_test_role_profiles_enqueue:
+		return False
+	try:
+		frappe.enqueue(
+			"jarvis.chat.role_profiles.sync_role_profiles",
+			queue="short",
+			job_id="role-profiles-sync",
+			deduplicate=True,
+			enqueue_after_commit=bool(after_commit),
+		)
+		return True
+	except Exception:
+		frappe.log_error(title="Jarvis: role-profiles enqueue failed", message=frappe.get_traceback())
+		return False
+
+
+def on_user_update(doc, method: str | None = None) -> None:
+	"""doc_events hook (``User.on_update``): a role change may change which
+	role-based profile a user needs, so debounce-enqueue a resync. Thin and
+	cheap by design - ``enqueue_sync`` already swallows and logs its own
+	errors, so this never raises into the save path."""
+	enqueue_sync()
