@@ -1,8 +1,10 @@
 """Tests for the role -> agent-profile fixture and resolver (spec
 docs/superpowers/specs/2026-08-16-role-profile-agents-design.md).
 
-Run ONLY with --case (bare --module silently skips TestCases):
-  bench --site site.jarvis run-tests --app jarvis --case TestRoleProfiles
+Run ONLY with --case (bare --module silently skips TestCases), and pair it
+with --module: --case alone walks every test file in the app and errors on
+the first module lacking the class, rather than finding this one.
+  bench --site site.jarvis run-tests --app jarvis --module jarvis.tests.test_role_profiles --case TestRoleProfiles
 """
 
 from unittest.mock import patch

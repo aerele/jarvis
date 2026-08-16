@@ -26,7 +26,7 @@ import frappe
 
 # --- Axis 1: tool tier -----------------------------------------------------
 
-FULL_TIER_ROLES = frozenset({"Jarvis Admin", "System Manager"})
+FULL_TIER_ROLES: frozenset[str] = frozenset({"Jarvis Admin", "System Manager"})
 
 # Verified drop list (26 tools, spec §3): app-learning tools (system-initiated
 # learning runs only, which always run `full`), session/infra tools (zero
@@ -35,7 +35,7 @@ FULL_TIER_ROLES = frozenset({"Jarvis Admin", "System Manager"})
 # persona forbids browser outright), web (no web feature in v1), and the
 # agent's builtin skill-authoring tool (jarvis has its own path via
 # jarvis__create_custom_skill). Copied verbatim from spec §3.
-STANDARD_DROP_TOOLS = frozenset(
+STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 	{
 		"cron",
 		"browser",
@@ -153,7 +153,7 @@ def standard_tools_allow() -> list[str]:
 # all jarvis-*, and the domain-neutral erpnext/utility skills that no single
 # role set claims, including erpnext-bulk-transaction, which spans domains
 # and so belongs to no one set.
-SHARED_CORE_SKILLS = frozenset(
+SHARED_CORE_SKILLS: frozenset[str] = frozenset(
 	{
 		"frappe-automation",
 		"frappe-contacts",
@@ -307,6 +307,8 @@ def needed_profiles() -> list[dict]:
 
 	tools_allow = standard_tools_allow()
 	profiles: dict[str, dict] = {}
+	# One frappe.get_roles call per user (via resolve_profile): N+1, but N is
+	# a tenant's enabled-user headcount, not a global scan, so this is fine.
 	for user in enabled_users:
 		choice = resolve_profile(user)
 		if choice.agent_id is None or choice.agent_id in profiles:
