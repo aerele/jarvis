@@ -93,6 +93,7 @@
   "auto_apply_changes",
   "core_apps_override",
   "enable_customizations_clause",
+  "enable_role_profiles",
   "sync_tab",
   "last_sync_section",
   "last_sync_at",
@@ -690,6 +691,13 @@
    "label": "Enable Customizations Context Clause",
    "default": "1",
    "description": "Adds a one-line, counts-only summary of this site's customizations (custom apps, doctype/field/workflow counts) to every chat turn's context, pointing the agent at jarvis__describe_customizations. Readers treat an unset value as ON."
+  },
+  {
+   "fieldname": "enable_role_profiles",
+   "fieldtype": "Check",
+   "label": "Enable Role-Based Agent Profiles",
+   "default": "0",
+   "description": "When on, a new chat session may be pinned to a role-based agent profile (a reduced tool set plus the matching skill set derived from the user's ERPNext roles) instead of the main agent - but only once that profile has actually been rendered on the agent side (see Role Profiles Pushed below). Off (default): every session uses the main agent, matching pre-role-profiles behavior exactly. Operator intent, not tenant state - not reset between tenancies."
   },
   {
    "fieldname": "sync_tab",

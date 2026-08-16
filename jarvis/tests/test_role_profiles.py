@@ -7,14 +7,19 @@ with --module: --case alone walks every test file in the app and errors on
 the first module lacking the class, rather than finding this one.
   bench --site site.jarvis run-tests --app jarvis --module jarvis.tests.test_role_profiles --case TestRoleProfiles
   bench --site site.jarvis run-tests --app jarvis --module jarvis.tests.test_role_profiles --case TestSyncRoleProfiles
+  bench --site site.jarvis run-tests --app jarvis --module jarvis.tests.test_role_profiles --case TestSessionProfilePick
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import api as chat_api
 from jarvis.chat import role_profiles
+
+SESSION = "Jarvis Chat Session"
 
 
 class TestRoleProfiles(FrappeTestCase):
@@ -239,3 +244,178 @@ class TestSyncRoleProfiles(FrappeTestCase):
 		self.assertFalse(result["pushed"])
 		self.assertEqual(result["profiles"], self._fixture())
 		self.assertEqual(before, after)
+
+	def test_needed_profiles_order_stable_across_differently_ordered_user_listings(self):
+		"""Fold-in from the J2 review: guards the sort fix in
+		``role_profiles.needed_profiles``. Two ``frappe.get_all`` "User"
+		listings that differ ONLY in row order must still produce the
+		identical (list-equal) ``needed_profiles()`` output, since
+		``sync_role_profiles``'s snapshot compare is a plain ``==`` against
+		the previously pushed list - an order-only difference must never read
+		as "changed"."""
+
+		def _resolve(user):
+			if user == "user-hr":
+				return role_profiles.ProfileChoice(
+					agent_id="role-hr",
+					tier="standard",
+					set_keys=("hr",),
+					skills=("hrms-hr",),
+					n_tools=1,
+				)
+			return role_profiles.ProfileChoice(
+				agent_id="role-accounts",
+				tier="standard",
+				set_keys=("accounts",),
+				skills=("erpnext-accounts",),
+				n_tools=1,
+			)
+
+		def _make_get_all(user_order):
+			def _get_all(doctype, filters=None, pluck=None, **kwargs):
+				if doctype == "Has Role":
+					return ["user-hr", "user-accounts"]
+				return list(user_order)
+
+			return _get_all
+
+		with patch.object(role_profiles, "resolve_profile", side_effect=_resolve):
+			with patch.object(frappe, "get_all", side_effect=_make_get_all(["user-hr", "user-accounts"])):
+				first = role_profiles.needed_profiles()
+			with patch.object(frappe, "get_all", side_effect=_make_get_all(["user-accounts", "user-hr"])):
+				second = role_profiles.needed_profiles()
+
+		self.assertEqual(first, second)
+		self.assertEqual([p["slug"] for p in first], ["role-accounts", "role-hr"])
+
+
+class FakeSess:
+	"""Stub pooled ``AgentSession``: counts ``create_session`` calls so tests
+	can assert the flag-gated legacy branch was (or was not) taken."""
+
+	def __init__(self):
+		self.calls = 0
+
+	def create_session(self, label):
+		self.calls += 1
+		return "sess-key-1"
+
+
+class TestSessionProfilePick(FrappeTestCase):
+	"""``jarvis.chat.api._ensure_session_key`` flag-gated profile pick (task
+	J3 / spec docs/superpowers/specs/2026-08-16-role-profile-agents-design.md
+	§9).
+
+	``_ensure_session_key`` ends with a real ``frappe.db.commit()`` (it
+	always has - unrelated to this task), so - like
+	``jarvis.tests.test_pump_pipeline``'s ``_PipelineCase`` - these tests
+	call the real function and clean up their own committed rows in
+	``tearDown`` rather than relying on ``FrappeTestCase``'s per-test
+	savepoint rollback, which a real commit bypasses.
+
+	``Jarvis Settings`` is stood in with a ``SimpleNamespace`` behind
+	``frappe.get_single`` (mirrors ``TestSyncRoleProfiles``'s fake-store
+	approach, adapted for the doc-attribute access ``_ensure_session_key``
+	uses instead of ``frappe.db.get_single_value``); no real Settings row is
+	touched.
+	"""
+
+	_USER = "rp-session-pick@example.com"
+
+	def setUp(self):
+		super().setUp()
+		if not frappe.db.exists("User", self._USER):
+			u = frappe.get_doc({"doctype": "User", "email": self._USER, "first_name": "rp-session-pick"})
+			u.append_roles("Jarvis User", "HR User")
+			u.insert(ignore_permissions=True)
+
+	def tearDown(self):
+		# Real commits happened inside _ensure_session_key; undo them for
+		# real rather than relying on the (already-bypassed) savepoint. Best-
+		# effort (mirrors test_pump_pipeline._PipelineCase): a setUp failure
+		# must surface as ITS OWN error, not get masked by a teardown
+		# DoesNotExistError on a user that was never created.
+		try:
+			frappe.db.delete(SESSION, {"user": self._USER})
+			if frappe.db.exists("User", self._USER):
+				frappe.delete_doc("User", self._USER, force=True, ignore_permissions=True)
+			frappe.db.commit()
+		except Exception:
+			pass
+		super().tearDown()
+
+	@staticmethod
+	def _fake_settings(*, enable_role_profiles, pushed=None):
+		return SimpleNamespace(
+			enable_role_profiles=enable_role_profiles,
+			role_profiles_pushed=frappe.as_json(pushed) if pushed is not None else None,
+			chat_device_id="dev-1",
+			agent_url="ws://fake-agent",
+			get_password=lambda *a, **k: "fake-token",
+		)
+
+	def test_flag_on_pushed_snapshot_has_role_self_addresses_the_agent(self):
+		settings = self._fake_settings(
+			enable_role_profiles=True,
+			pushed=[{"slug": "role-hr", "skills": ["hrms-hr"], "tools_allow": ["exec"]}],
+		)
+		sess = FakeSess()
+		with patch.object(chat_api.frappe, "get_single", return_value=settings):
+			key = chat_api._ensure_session_key(self._USER, sess=sess)
+
+		self.assertTrue(key.startswith("agent:role-hr:jarvis-chat-"))
+		self.assertEqual(sess.calls, 0)
+		row = frappe.get_doc(SESSION, {"session_key": key})
+		self.assertEqual(row.profile_agent_id, "role-hr")
+		self.assertEqual(row.profile_tier, "standard")
+
+	def test_flag_off_uses_legacy_create_session_path(self):
+		settings = self._fake_settings(enable_role_profiles=False)
+		sess = FakeSess()
+		with patch.object(chat_api.frappe, "get_single", return_value=settings):
+			key = chat_api._ensure_session_key(self._USER, sess=sess)
+
+		self.assertEqual(sess.calls, 1)
+		self.assertEqual(key, "sess-key-1")
+		row = frappe.get_doc(SESSION, {"session_key": key})
+		self.assertEqual(row.profile_tier, "full")
+		self.assertEqual(row.profile_sets, "")
+
+	def test_flag_on_agent_not_in_pushed_snapshot_falls_back_to_legacy(self):
+		# resolve_profile(self._USER) resolves to role-hr (real HR User role),
+		# but the pushed snapshot only carries a DIFFERENT profile - never
+		# self-address an agent that may not be rendered on the agent side.
+		settings = self._fake_settings(
+			enable_role_profiles=True,
+			pushed=[{"slug": "role-accounts", "skills": [], "tools_allow": []}],
+		)
+		sess = FakeSess()
+		with patch.object(chat_api.frappe, "get_single", return_value=settings):
+			key = chat_api._ensure_session_key(self._USER, sess=sess)
+
+		self.assertEqual(sess.calls, 1)
+		self.assertEqual(key, "sess-key-1")
+
+	def test_missing_flag_attribute_degrades_to_legacy_not_a_crash(self):
+		# Regression: a site whose code deployed ahead of its reload-doctype /
+		# migrate has no `enable_role_profiles` attribute on the real Jarvis
+		# Settings doc at all (AttributeError, not a falsy value) - caught
+		# live via jarvis.tests.test_pump_pipeline.TestPumpPipelineE2E before
+		# the getattr guard was added. A missing flag must behave exactly
+		# like flag-off, never break session creation.
+		settings = SimpleNamespace(
+			chat_device_id="dev-1",
+			agent_url="ws://fake-agent",
+			get_password=lambda *a, **k: "fake-token",
+		)
+		sess = FakeSess()
+		with patch.object(chat_api.frappe, "get_single", return_value=settings):
+			key = chat_api._ensure_session_key(self._USER, sess=sess)
+
+		self.assertEqual(sess.calls, 1)
+		self.assertEqual(key, "sess-key-1")
+		row = frappe.get_doc(SESSION, {"session_key": key})
+		self.assertEqual(row.profile_tier, "full")
+
+	def test_scrub(self):
+		self.assertEqual(chat_api.scrub("RP-HR@Example.com"), "rp-hr-example-com")
