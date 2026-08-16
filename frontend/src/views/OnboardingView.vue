@@ -2558,6 +2558,11 @@ async function onDetailsSubmit() {
 	// wrong in one pass instead of fixing email only to have the next click
 	// reveal Company was empty too. A bad GSTIN blocks here too, on this same
 	// step, instead of dead-ending at the pay button three screens later.
+	// terms is the deliberate exception: it's checked separately, further down,
+	// AFTER the reconnect branch resolves - batching it in here would gate the
+	// reconnect branch too (item 5), which it must not. A customer with both a
+	// bad GSTIN and an unticked box sees the GSTIN error first and the terms
+	// error only on a second submit; accepted as the cost of that exemption.
 	touchEmailField();
 	touchCompanyField();
 	touchContactField();
@@ -4854,7 +4859,7 @@ onMounted(async () => {
 	// tick, before the awaited prefill below — the discovery loading note must show
 	// from first paint (X4), independent of prefill/company.
 	loadPaymentProviders();
-	// Best-effort terms-page link for the Review & Pay checkbox. Never blocks the
+	// Best-effort terms-page link for the Details-step checkbox. Never blocks the
 	// wizard and never throws into onMounted: a failure just leaves state.termsUrl
 	// empty, which the template renders as plain unlinked "Terms & Conditions" text.
 	getTermsUrl()
