@@ -11,6 +11,7 @@ import { mount, flushPromises } from "@vue/test-utils";
 import { CHECKOUT_NAV_KEY } from "@/onboarding/checkoutNav";
 import { STATES } from "@/onboarding/paymentMachine";
 import { ACTIONS } from "@/onboarding/paymentCodes";
+import { toast } from "frappe-ui";
 
 // A raw {status, body} envelope, exactly what the flow's codec decodes.
 const ENVELOPE = (data, over = {}) => ({
@@ -735,6 +736,10 @@ describe("Returning-customer forced reconnect gate", () => {
 		// Contact number is mandatory on Details now; fill it so onDetailsSubmit's
 		// gate doesn't block these reconnect-flow tests on an unrelated field.
 		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		// The required T&C checkbox now lives on Details too, but these tests are
+		// about the reconnect gate specifically, so tick it by default (a
+		// dedicated test below asserts the reconnect branch does NOT need it).
+		wrapper.vm.state.termsAccepted = true;
 		await flushPromises();
 		return wrapper;
 	}
@@ -746,6 +751,16 @@ describe("Returning-customer forced reconnect gate", () => {
 		await flushPromises();
 		// The await inside onDetailsSubmit resolved eligibility (it was NOT pre-settled
 		// by the debounce) - this is also the race-closure guarantee (C3).
+		expect(api.startAccountReconnect).toHaveBeenCalledWith("back@corp.test", "Corp");
+		expect(wrapper.vm.state.step).toBe("reconnect");
+	});
+
+	it("the required T&C checkbox does NOT gate the reconnect branch - a returning customer reconnecting an existing paid account never went through it before", async () => {
+		api.startAccountReconnect.mockResolvedValue({ request: "req_1" });
+		const wrapper = await detailsView({ eligible: true });
+		wrapper.vm.state.termsAccepted = false; // deliberately unticked
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
 		expect(api.startAccountReconnect).toHaveBeenCalledWith("back@corp.test", "Corp");
 		expect(wrapper.vm.state.step).toBe("reconnect");
 	});
@@ -858,6 +873,7 @@ describe("Returning-customer forced reconnect gate", () => {
 		wrapper.vm.state.company = "Corp";
 		wrapper.vm.state.identityFromUser = true;
 		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		wrapper.vm.state.termsAccepted = true;
 		await wrapper.vm.onDetailsSubmit();
 		await flushPromises();
 		expect(api.startAccountReconnect).not.toHaveBeenCalled();
@@ -948,6 +964,46 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		await flushPromises();
 		expect(wrapper.text()).not.toContain("okay to contact me");
 		expect(wrapper.vm.billing.consent).toBeUndefined();
+	});
+
+	it("Details renders the required T&C checkbox; Pay no longer renders it", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		await flushPromises();
+		expect(wrapper.find("#jv-ob-terms").exists()).toBe(true);
+
+		wrapper.vm.state.step = "pay";
+		await flushPromises();
+		expect(wrapper.find("#jv-ob-terms").exists()).toBe(false);
+	});
+
+	it("Details' Continue is blocked until the required T&C box is ticked, with a visible inline error (not a toast)", async () => {
+		// Not eligible for reconnect - keeps this on the normal Continue path
+		// the T&C gate actually guards (item 5: reconnect is exempt).
+		api.reconnectAvailable.mockResolvedValue({ eligible: false, needs_company: false });
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		wrapper.vm.state.email = "a@b.com";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.identityFromUser = true;
+		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		wrapper.vm.state.termsAccepted = false;
+		await flushPromises();
+
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("details");
+		expect(wrapper.vm.detailsFieldErrors.terms).toBeTruthy();
+		expect(wrapper.text()).toContain(wrapper.vm.detailsFieldErrors.terms);
+		expect(toast.error).not.toHaveBeenCalled();
+
+		wrapper.vm.state.termsAccepted = true;
+		await flushPromises();
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("plan");
 	});
 
 	it("Pay stays disabled until the required T&C box is ticked", async () => {
