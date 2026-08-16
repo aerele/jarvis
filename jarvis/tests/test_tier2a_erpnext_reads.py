@@ -415,7 +415,12 @@ def _ensure_company(name: str, abbr: str) -> None:
 	# Skip default chart-of-accounts / warehouse / tax-template creation -
 	# this fixture only needs a Company row for permission checks, not a
 	# functioning ledger, and CI sites may be missing the fixtures those
-	# hooks depend on (e.g. Warehouse Type "Transit").
+	# hooks depend on (e.g. Warehouse Type "Transit"). For the same reason,
+	# perpetual inventory is off: with no chart of accounts there is no
+	# stock/inventory Account to point a warehouse at, and ERPNext's
+	# Warehouse.validate() now requires one (an Account on the warehouse or
+	# a default_inventory_account on the company) whenever the company has
+	# enable_perpetual_inventory set, which defaults to 1.
 	frappe.local.flags.ignore_chart_of_accounts = True
 	try:
 		frappe.get_doc(
@@ -425,6 +430,7 @@ def _ensure_company(name: str, abbr: str) -> None:
 				"abbr": abbr,
 				"default_currency": "INR",
 				"country": "India",
+				"enable_perpetual_inventory": 0,
 			}
 		).insert(ignore_permissions=True)
 	finally:
