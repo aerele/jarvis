@@ -6,7 +6,7 @@ wkhtmltopdf is ABSENT in local dev (brew removed it), so this suite NEVER runs a
 real render - that is the Frappe Cloud smoke gate. Instead ``subprocess.run`` is
 mocked and ``_resolve_binary`` is stubbed to a fake path, and the assertions
 cover:
-  * the UNCONDITIONAL security/fidelity arg list (parametrized; drop a flag ->
+  * the UNCONDITIONAL security/fidelity arg list (looped; drop a flag ->
     the matching case fails - the mutation target);
   * page-geometry validation (orientation / page_size / margins);
   * header/footer/watermark are run through ``sanitize_rich`` before the temp
@@ -19,15 +19,18 @@ cover:
   * letterhead resolution: image inlining (data kept / remote dropped /
     same-site base64 with perm check) and the not-found degrade note.
 
-The real ``get_letter_head`` + real render are gated (``skipif`` a site) and
+The real ``get_letter_head`` + real render are gated (``skipUnless`` a site) and
 belong to the FC smoke gate.
 """
 
 import os
+import shutil
 import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
 
 import frappe
-import pytest
 
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._export.document import furniture
@@ -87,357 +90,319 @@ class _Recorder:
 		return self.args[self.args.index(flag) + 1]
 
 
-@pytest.fixture
-def fake_wk(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
+class _FurnitureRenderBase(unittest.TestCase):
 	"""Stub the binary resolver + ``subprocess.run`` so ``render_pdf`` runs its
 	full logic (temp files, arg build, cleanup) without a real wkhtmltopdf."""
-	recorder = _Recorder()
-	monkeypatch.setattr(furniture, "_resolve_binary", lambda: "/usr/bin/wkhtmltopdf")
-	monkeypatch.setattr(furniture.subprocess, "run", recorder)
-	return recorder
+
+	def setUp(self) -> None:
+		self.fake_wk = _Recorder()
+		patch.object(furniture, "_resolve_binary", lambda: "/usr/bin/wkhtmltopdf").start()
+		patch.object(furniture.subprocess, "run", self.fake_wk).start()
+		self.addCleanup(patch.stopall)
 
 
 # --- arg list: unconditional security/fidelity flags ------------------------
 
 
-@pytest.mark.parametrize("flag", _REQUIRED_FLAGS)
-def test_required_flag_always_present(flag: str, fake_wk: _Recorder) -> None:
-	# No header/footer/watermark, page numbers off: the leanest render still
-	# carries every security/fidelity flag. Dropping any from _build_args fails
-	# exactly this case (the mutation target).
-	render_pdf("<p>hi</p>", page_numbers=False)
-	assert flag in fake_wk.args
+class TestRequiredFlags(_FurnitureRenderBase):
+	def test_required_flag_always_present(self) -> None:
+		# No header/footer/watermark, page numbers off: the leanest render still
+		# carries every security/fidelity flag. Dropping any from _build_args fails
+		# exactly this case (the mutation target).
+		for flag in _REQUIRED_FLAGS:
+			with self.subTest(flag=flag):
+				render_pdf("<p>hi</p>", page_numbers=False)
+				self.assertIn(flag, self.fake_wk.args)
 
+	def test_encoding_flag_value(self) -> None:
+		render_pdf("<p>hi</p>", page_numbers=False)
+		i = self.fake_wk.args.index("--encoding")
+		self.assertEqual(self.fake_wk.args[i + 1], "utf-8")
 
-def test_encoding_flag_value(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", page_numbers=False)
-	i = fake_wk.args.index("--encoding")
-	assert fake_wk.args[i + 1] == "utf-8"
+	def test_page_size_default_and_custom(self) -> None:
+		render_pdf("<p>hi</p>", page_numbers=False)
+		self.assertEqual(self.fake_wk.args[self.fake_wk.args.index("--page-size") + 1], "A4")
+		render_pdf("<p>hi</p>", page_size="letter", page_numbers=False)
+		# canonicalized spelling
+		self.assertEqual(self.fake_wk.args[self.fake_wk.args.index("--page-size") + 1], "Letter")
 
+	def test_page_size_invalid_raises(self) -> None:
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", page_size="A2", page_numbers=False)
 
-def test_page_size_default_and_custom(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", page_numbers=False)
-	assert fake_wk.args[fake_wk.args.index("--page-size") + 1] == "A4"
-	render_pdf("<p>hi</p>", page_size="letter", page_numbers=False)
-	# canonicalized spelling
-	assert fake_wk.args[fake_wk.args.index("--page-size") + 1] == "Letter"
+	def test_orientation_portrait_default(self) -> None:
+		render_pdf("<p>hi</p>", page_numbers=False)
+		self.assertEqual(self.fake_wk.args[self.fake_wk.args.index("--orientation") + 1], "Portrait")
 
+	def test_orientation_landscape(self) -> None:
+		render_pdf("<p>hi</p>", orientation="landscape", page_numbers=False)
+		self.assertEqual(self.fake_wk.args[self.fake_wk.args.index("--orientation") + 1], "Landscape")
 
-def test_page_size_invalid_raises(fake_wk: _Recorder) -> None:
-	with pytest.raises(InvalidArgumentError):
-		render_pdf("<p>hi</p>", page_size="A2", page_numbers=False)
+	def test_orientation_invalid_raises(self) -> None:
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", orientation="sideways")
 
+	def test_margins_all_four_sides(self) -> None:
+		render_pdf("<p>hi</p>", margins_mm=20, page_numbers=False)
+		for side in ("--margin-top", "--margin-bottom", "--margin-left", "--margin-right"):
+			self.assertEqual(self.fake_wk.args[self.fake_wk.args.index(side) + 1], "20mm")
 
-def test_orientation_portrait_default(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", page_numbers=False)
-	assert fake_wk.args[fake_wk.args.index("--orientation") + 1] == "Portrait"
+	def test_margins_negative_raises(self) -> None:
+		# A negative margin would produce a "-5mm" token wkhtmltopdf could mis-parse
+		# as a flag; reject it app-side like orientation.
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", margins_mm=-5)
 
+	def test_margins_too_large_raises(self) -> None:
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", margins_mm=500)
 
-def test_orientation_landscape(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", orientation="landscape", page_numbers=False)
-	assert fake_wk.args[fake_wk.args.index("--orientation") + 1] == "Landscape"
+	def test_reads_stdin_writes_stdout(self) -> None:
+		render_pdf("<p>hi</p>", page_numbers=False)
+		self.assertEqual(self.fake_wk.args[-2:], ["-", "-"])
 
+	def test_body_passed_as_input_bytes(self) -> None:
+		render_pdf("<p>UNIQUEBODYMARKER</p>", page_numbers=False)
+		self.assertTrue(isinstance(self.fake_wk.input, bytes))
+		self.assertIn(b"UNIQUEBODYMARKER", self.fake_wk.input)
 
-def test_orientation_invalid_raises(fake_wk: _Recorder) -> None:
-	with pytest.raises(InvalidArgumentError):
-		render_pdf("<p>hi</p>", orientation="sideways")
+	def test_timeout_passed_through_to_subprocess(self) -> None:
+		render_pdf("<p>hi</p>", timeout=13, page_numbers=False)
+		self.assertEqual(self.fake_wk.timeout, 13)
 
-
-def test_margins_all_four_sides(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", margins_mm=20, page_numbers=False)
-	for side in ("--margin-top", "--margin-bottom", "--margin-left", "--margin-right"):
-		assert fake_wk.args[fake_wk.args.index(side) + 1] == "20mm"
-
-
-def test_margins_negative_raises(fake_wk: _Recorder) -> None:
-	# A negative margin would produce a "-5mm" token wkhtmltopdf could mis-parse
-	# as a flag; reject it app-side like orientation.
-	with pytest.raises(InvalidArgumentError):
-		render_pdf("<p>hi</p>", margins_mm=-5)
-
-
-def test_margins_too_large_raises(fake_wk: _Recorder) -> None:
-	with pytest.raises(InvalidArgumentError):
-		render_pdf("<p>hi</p>", margins_mm=500)
-
-
-def test_reads_stdin_writes_stdout(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", page_numbers=False)
-	assert fake_wk.args[-2:] == ["-", "-"]
-
-
-def test_body_passed_as_input_bytes(fake_wk: _Recorder) -> None:
-	render_pdf("<p>UNIQUEBODYMARKER</p>", page_numbers=False)
-	assert isinstance(fake_wk.input, bytes)
-	assert b"UNIQUEBODYMARKER" in fake_wk.input
-
-
-def test_timeout_passed_through_to_subprocess(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", timeout=13, page_numbers=False)
-	assert fake_wk.timeout == 13
-
-
-def test_oversized_furniture_rejected(fake_wk: _Recorder) -> None:
-	# Header/footer/watermark are agent-influenced; an unbounded one is refused
-	# before the pre-render sanitize (the body is capped upstream).
-	with pytest.raises(InvalidArgumentError):
-		render_pdf("<p>hi</p>", header_html="x" * 20_001)
+	def test_oversized_furniture_rejected(self) -> None:
+		# Header/footer/watermark are agent-influenced; an unbounded one is refused
+		# before the pre-render sanitize (the body is capped upstream).
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", header_html="x" * 20_001)
 
 
 # --- header/footer/watermark are sanitized before hitting the temp file ------
 
 
-def test_header_is_sanitized(fake_wk: _Recorder) -> None:
-	render_pdf("<p>body</p>", header_html='<img src="http://evil"><script>x</script><b>keepme</b>')
-	content = fake_wk.file_contents["--header-html"]
-	low = content.lower()
-	assert "<img" not in low
-	assert "evil" not in low
-	assert "<script" not in low
-	assert "keepme" in content
+class TestFurnitureSanitization(_FurnitureRenderBase):
+	def test_header_is_sanitized(self) -> None:
+		render_pdf("<p>body</p>", header_html='<img src="http://evil"><script>x</script><b>keepme</b>')
+		content = self.fake_wk.file_contents["--header-html"]
+		low = content.lower()
+		self.assertNotIn("<img", low)
+		self.assertNotIn("evil", low)
+		self.assertNotIn("<script", low)
+		self.assertIn("keepme", content)
 
+	def test_footer_is_sanitized(self) -> None:
+		render_pdf("<p>body</p>", footer_html='<img src="http://evil"><script>x</script><b>footkeep</b>')
+		content = self.fake_wk.file_contents["--footer-html"]
+		low = content.lower()
+		self.assertNotIn("<img", low)
+		self.assertNotIn("evil", low)
+		self.assertNotIn("<script", low)
+		self.assertIn("footkeep", content)
 
-def test_footer_is_sanitized(fake_wk: _Recorder) -> None:
-	render_pdf("<p>body</p>", footer_html='<img src="http://evil"><script>x</script><b>footkeep</b>')
-	content = fake_wk.file_contents["--footer-html"]
-	low = content.lower()
-	assert "<img" not in low
-	assert "evil" not in low
-	assert "<script" not in low
-	assert "footkeep" in content
-
-
-def test_watermark_is_sanitized_and_rotated_in_header(fake_wk: _Recorder) -> None:
-	render_pdf("<p>body</p>", watermark='DRAFT<img src="http://evil"><script>x</script>')
-	content = fake_wk.file_contents["--header-html"]
-	low = content.lower()
-	assert "<img" not in low
-	assert "evil" not in low
-	assert "<script" not in low
-	assert "jv-watermark" in content
-	assert "rotate(-45deg)" in content
-	assert "DRAFT" in content
+	def test_watermark_is_sanitized_and_rotated_in_header(self) -> None:
+		render_pdf("<p>body</p>", watermark='DRAFT<img src="http://evil"><script>x</script>')
+		content = self.fake_wk.file_contents["--header-html"]
+		low = content.lower()
+		self.assertNotIn("<img", low)
+		self.assertNotIn("evil", low)
+		self.assertNotIn("<script", low)
+		self.assertIn("jv-watermark", content)
+		self.assertIn("rotate(-45deg)", content)
+		self.assertIn("DRAFT", content)
 
 
 # --- temp-file lifecycle: created, then removed (success + failures) ---------
 
 
-def test_temp_files_exist_during_call_then_removed(fake_wk: _Recorder) -> None:
-	render_pdf("<p>body</p>", header_html="<b>H</b>", footer_html="<b>F</b>")
-	for flag in ("--header-html", "--footer-html"):
-		path = fake_wk.path_for(flag)
-		assert fake_wk.files_existed[path] is True, f"{flag} temp missing during call"
-		assert not os.path.exists(path), f"{flag} temp not cleaned up after return"
+class TestTempFileLifecycle(_FurnitureRenderBase):
+	def test_temp_files_exist_during_call_then_removed(self) -> None:
+		render_pdf("<p>body</p>", header_html="<b>H</b>", footer_html="<b>F</b>")
+		for flag in ("--header-html", "--footer-html"):
+			path = self.fake_wk.path_for(flag)
+			self.assertTrue(self.fake_wk.files_existed[path], f"{flag} temp missing during call")
+			self.assertFalse(os.path.exists(path), f"{flag} temp not cleaned up after return")
+
+	def test_timeout_cleans_temp_and_raises_clean_error(self) -> None:
+		self.fake_wk.raise_timeout = True
+		with self.assertRaises(InvalidArgumentError) as cm:
+			render_pdf("<p>body</p>", header_html="<b>H</b>", footer_html="<b>F</b>", timeout=7)
+		self.assertIn("7s", str(cm.exception))
+		self.assertFalse(isinstance(cm.exception, subprocess.TimeoutExpired))
+		for flag in ("--header-html", "--footer-html"):
+			self.assertFalse(os.path.exists(self.fake_wk.path_for(flag)))
+
+	def test_oserror_from_exec_is_clean_and_cleans_temp(self) -> None:
+		# The resolved binary fails to EXECUTE (OSError, not TimeoutExpired) → clean
+		# InvalidArgumentError, never a raw OSError, and temp files are cleaned.
+		self.fake_wk.raise_oserror = True
+		with self.assertRaises(InvalidArgumentError) as cm:
+			render_pdf("<p>body</p>", header_html="<b>H</b>")
+		self.assertFalse(isinstance(cm.exception, OSError))
+		self.assertFalse(os.path.exists(self.fake_wk.path_for("--header-html")))
+
+	def test_render_exception_still_cleans_temp(self) -> None:
+		self.fake_wk.returncode = 1
+		self.fake_wk.stderr = b"boom: qt render blew up"
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>body</p>", header_html="<b>H</b>")
+		# temp cleaned even on a non-zero exit (this test's point)
+		self.assertFalse(os.path.exists(self.fake_wk.path_for("--header-html")))
+
+	def test_first_temp_cleaned_when_second_write_fails(self) -> None:
+		# ENOSPC / fd-exhaustion on the SECOND temp write must not orphan the FIRST -
+		# temp creation is inside the try so the finally still cleans it.
+		real_write = furniture._write_temp
+		created: list[str] = []
+		calls = {"n": 0}
+
+		def _wt(tmp_dir: str, content: str) -> str:
+			calls["n"] += 1
+			if calls["n"] == 2:
+				raise OSError("disk full")
+			path = real_write(tmp_dir, content)
+			created.append(path)
+			return path
+
+		patch.object(furniture, "_write_temp", _wt).start()
+		with self.assertRaises(OSError):
+			render_pdf("<p>hi</p>", header_html="<b>H</b>", footer_html="<b>F</b>")
+		self.assertTrue(created, "first temp was never created")
+		self.assertFalse(os.path.exists(created[0]), "first temp leaked when the second write failed")
+
+	def test_two_calls_use_distinct_temp_names(self) -> None:
+		render_pdf("<p>a</p>", header_html="<b>H</b>")
+		first = self.fake_wk.path_for("--header-html")
+		render_pdf("<p>b</p>", header_html="<b>H</b>")
+		second = self.fake_wk.path_for("--header-html")
+		self.assertNotEqual(first, second)
 
 
-def test_timeout_cleans_temp_and_raises_clean_error(fake_wk: _Recorder) -> None:
-	fake_wk.raise_timeout = True
-	with pytest.raises(InvalidArgumentError) as excinfo:
-		render_pdf("<p>body</p>", header_html="<b>H</b>", footer_html="<b>F</b>", timeout=7)
-	assert "7s" in str(excinfo.value)
-	assert not isinstance(excinfo.value, subprocess.TimeoutExpired)
-	for flag in ("--header-html", "--footer-html"):
-		assert not os.path.exists(fake_wk.path_for(flag))
+class TestWriteTempPartialCleanup(unittest.TestCase):
+	def test_write_temp_removes_partial_on_write_failure(self) -> None:
+		class _BadFile:
+			def __enter__(self):
+				return self
 
+			def __exit__(self, *_a):
+				return False
 
-def test_oserror_from_exec_is_clean_and_cleans_temp(fake_wk: _Recorder) -> None:
-	# The resolved binary fails to EXECUTE (OSError, not TimeoutExpired) → clean
-	# InvalidArgumentError, never a raw OSError, and temp files are cleaned.
-	fake_wk.raise_oserror = True
-	with pytest.raises(InvalidArgumentError) as excinfo:
-		render_pdf("<p>body</p>", header_html="<b>H</b>")
-	assert not isinstance(excinfo.value, OSError)
-	assert not os.path.exists(fake_wk.path_for("--header-html"))
+			def write(self, _data):
+				raise OSError("disk full mid-write")
 
-
-def test_render_exception_still_cleans_temp(fake_wk: _Recorder) -> None:
-	fake_wk.returncode = 1
-	fake_wk.stderr = b"boom: qt render blew up"
-	with pytest.raises(InvalidArgumentError):
-		render_pdf("<p>body</p>", header_html="<b>H</b>")
-	# temp cleaned even on a non-zero exit (this test's point)
-	assert not os.path.exists(fake_wk.path_for("--header-html"))
-
-
-def test_first_temp_cleaned_when_second_write_fails(
-	fake_wk: _Recorder, monkeypatch: pytest.MonkeyPatch
-) -> None:
-	# ENOSPC / fd-exhaustion on the SECOND temp write must not orphan the FIRST -
-	# temp creation is inside the try so the finally still cleans it.
-	real_write = furniture._write_temp
-	created: list[str] = []
-	calls = {"n": 0}
-
-	def _wt(tmp_dir: str, content: str) -> str:
-		calls["n"] += 1
-		if calls["n"] == 2:
-			raise OSError("disk full")
-		path = real_write(tmp_dir, content)
-		created.append(path)
-		return path
-
-	monkeypatch.setattr(furniture, "_write_temp", _wt)
-	with pytest.raises(OSError):
-		render_pdf("<p>hi</p>", header_html="<b>H</b>", footer_html="<b>F</b>")
-	assert created, "first temp was never created"
-	assert not os.path.exists(created[0]), "first temp leaked when the second write failed"
-
-
-def test_write_temp_removes_partial_on_write_failure(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-	class _BadFile:
-		def __enter__(self):
-			return self
-
-		def __exit__(self, *_a):
-			return False
-
-		def write(self, _data):
-			raise OSError("disk full mid-write")
-
-	removed: list[str] = []
-	monkeypatch.setattr(furniture, "open", lambda *_a, **_k: _BadFile(), raising=False)
-	monkeypatch.setattr(furniture, "_remove_quietly", lambda p: removed.append(p))
-	with pytest.raises(OSError):
-		furniture._write_temp(str(tmp_path), "content")
-	assert removed, "partial file was not cleaned up on write failure"
-
-
-# --- distinct temp names across calls (generate_hash uniqueness) -------------
-
-
-def test_two_calls_use_distinct_temp_names(fake_wk: _Recorder) -> None:
-	render_pdf("<p>a</p>", header_html="<b>H</b>")
-	first = fake_wk.path_for("--header-html")
-	render_pdf("<p>b</p>", header_html="<b>H</b>")
-	second = fake_wk.path_for("--header-html")
-	assert first != second
+		removed: list[str] = []
+		tmp_dir = tempfile.mkdtemp()
+		self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+		patch.object(furniture, "open", lambda *_a, **_k: _BadFile(), create=True).start()
+		patch.object(furniture, "_remove_quietly", lambda p: removed.append(p)).start()
+		self.addCleanup(patch.stopall)
+		with self.assertRaises(OSError):
+			furniture._write_temp(tmp_dir, "content")
+		self.assertTrue(removed, "partial file was not cleaned up on write failure")
 
 
 # --- output guards -----------------------------------------------------------
 
 
-def test_returns_pdf_bytes_on_success(fake_wk: _Recorder) -> None:
-	out = render_pdf("<p>hi</p>", page_numbers=False)
-	assert out == b"%PDF-1.4 fake pdf bytes"
+class TestOutputGuards(_FurnitureRenderBase):
+	def test_returns_pdf_bytes_on_success(self) -> None:
+		out = render_pdf("<p>hi</p>", page_numbers=False)
+		self.assertEqual(out, b"%PDF-1.4 fake pdf bytes")
 
+	def test_empty_output_raises(self) -> None:
+		self.fake_wk.stdout = b""
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", page_numbers=False)
 
-def test_empty_output_raises(fake_wk: _Recorder) -> None:
-	fake_wk.stdout = b""
-	with pytest.raises(InvalidArgumentError):
-		render_pdf("<p>hi</p>", page_numbers=False)
+	def test_nonpdf_output_raises(self) -> None:
+		# Non-empty but not a PDF (an error page slipping past exit 0) is rejected.
+		self.fake_wk.stdout = b"<html><body>gateway error</body></html>"
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", page_numbers=False)
 
+	def test_nonzero_exit_logs_stderr_but_keeps_it_out_of_user_message(self) -> None:
+		# stderr can carry the /tmp/jv-pdf-<hash>.html temp path — it goes to the
+		# Error Log, NOT the user-facing message (which stays clean).
+		logged: list[dict] = []
+		patch.object(furniture.frappe, "log_error", lambda **k: logged.append(k)).start()
+		self.fake_wk.returncode = 3
+		self.fake_wk.stderr = b"unique-stderr-signature /tmp/jv-pdf-abc.html"
+		with self.assertRaises(InvalidArgumentError) as cm:
+			render_pdf("<p>hi</p>", page_numbers=False)
+		self.assertNotIn("unique-stderr-signature", str(cm.exception))
+		self.assertIn("3", str(cm.exception))  # the exit code is fine to surface
+		self.assertTrue(any("unique-stderr-signature" in str(k.get("message", "")) for k in logged))
 
-def test_nonpdf_output_raises(fake_wk: _Recorder) -> None:
-	# Non-empty but not a PDF (an error page slipping past exit 0) is rejected.
-	fake_wk.stdout = b"<html><body>gateway error</body></html>"
-	with pytest.raises(InvalidArgumentError):
-		render_pdf("<p>hi</p>", page_numbers=False)
-
-
-def test_nonzero_exit_logs_stderr_but_keeps_it_out_of_user_message(
-	fake_wk: _Recorder, monkeypatch: pytest.MonkeyPatch
-) -> None:
-	# stderr can carry the /tmp/jv-pdf-<hash>.html temp path — it goes to the
-	# Error Log, NOT the user-facing message (which stays clean).
-	logged: list[dict] = []
-	monkeypatch.setattr(furniture.frappe, "log_error", lambda **k: logged.append(k))
-	fake_wk.returncode = 3
-	fake_wk.stderr = b"unique-stderr-signature /tmp/jv-pdf-abc.html"
-	with pytest.raises(InvalidArgumentError) as excinfo:
-		render_pdf("<p>hi</p>", page_numbers=False)
-	assert "unique-stderr-signature" not in str(excinfo.value)
-	assert "3" in str(excinfo.value)  # the exit code is fine to surface
-	assert any("unique-stderr-signature" in str(k.get("message", "")) for k in logged)
-
-
-def test_infra_failure_is_logged(fake_wk: _Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
-	# A working binary misbehaving (non-zero exit) must hit the Error Log so a
-	# systemic regression is visible to operators, not only surfaced to the user.
-	logged: list[dict] = []
-	monkeypatch.setattr(furniture.frappe, "log_error", lambda **k: logged.append(k))
-	fake_wk.returncode = 2
-	fake_wk.stderr = b"err"
-	with pytest.raises(InvalidArgumentError):
-		render_pdf("<p>hi</p>", page_numbers=False)
-	assert logged, "infra render failure was not logged"
+	def test_infra_failure_is_logged(self) -> None:
+		# A working binary misbehaving (non-zero exit) must hit the Error Log so a
+		# systemic regression is visible to operators, not only surfaced to the user.
+		logged: list[dict] = []
+		patch.object(furniture.frappe, "log_error", lambda **k: logged.append(k)).start()
+		self.fake_wk.returncode = 2
+		self.fake_wk.stderr = b"err"
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", page_numbers=False)
+		self.assertTrue(logged, "infra render failure was not logged")
 
 
 # --- binary resolution -------------------------------------------------------
 
 
-def test_binary_not_found_raises_clean_error(monkeypatch: pytest.MonkeyPatch) -> None:
-	def _no_config(*_a, **_k):
-		raise OSError("No wkhtmltopdf executable found")
+class TestBinaryResolution(unittest.TestCase):
+	def test_binary_not_found_raises_clean_error(self) -> None:
+		def _no_config(*_a, **_k):
+			raise OSError("No wkhtmltopdf executable found")
 
-	monkeypatch.setattr(furniture.pdfkit, "configuration", _no_config)
-	monkeypatch.setattr(furniture.shutil, "which", lambda _name: None)
-	with pytest.raises(InvalidArgumentError):
-		render_pdf("<p>hi</p>")
+		patch.object(furniture.pdfkit, "configuration", _no_config).start()
+		patch.object(furniture.shutil, "which", lambda _name: None).start()
+		self.addCleanup(patch.stopall)
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>")
 
 
 # --- page numbering ----------------------------------------------------------
 
 
-def test_page_numbers_footer_uses_bracket_vars(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", page_numbers=True)
-	assert "--footer-html" in fake_wk.args
-	content = fake_wk.file_contents["--footer-html"]
-	assert "[page]" in content
-	assert "[topage]" in content
+class TestPageNumbering(_FurnitureRenderBase):
+	def test_page_numbers_footer_uses_bracket_vars(self) -> None:
+		render_pdf("<p>hi</p>", page_numbers=True)
+		self.assertIn("--footer-html", self.fake_wk.args)
+		content = self.fake_wk.file_contents["--footer-html"]
+		self.assertIn("[page]", content)
+		self.assertIn("[topage]", content)
 
+	def test_no_footer_when_page_numbers_off_and_no_footer(self) -> None:
+		render_pdf("<p>hi</p>", page_numbers=False)
+		self.assertNotIn("--footer-html", self.fake_wk.args)
 
-def test_no_footer_when_page_numbers_off_and_no_footer(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", page_numbers=False)
-	assert "--footer-html" not in fake_wk.args
+	def test_no_header_when_nothing_to_render(self) -> None:
+		render_pdf("<p>hi</p>", page_numbers=False)
+		self.assertNotIn("--header-html", self.fake_wk.args)
 
-
-def test_no_header_when_nothing_to_render(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", page_numbers=False)
-	assert "--header-html" not in fake_wk.args
-
-
-def test_explicit_footer_suppresses_auto_page_numbers(fake_wk: _Recorder) -> None:
-	render_pdf("<p>hi</p>", footer_html="<b>my-footer</b>", page_numbers=True)
-	content = fake_wk.file_contents["--footer-html"]
-	assert "my-footer" in content
-	assert "[page]" not in content
+	def test_explicit_footer_suppresses_auto_page_numbers(self) -> None:
+		render_pdf("<p>hi</p>", footer_html="<b>my-footer</b>", page_numbers=True)
+		content = self.fake_wk.file_contents["--footer-html"]
+		self.assertIn("my-footer", content)
+		self.assertNotIn("[page]", content)
 
 
 # --- letterhead: folding (pre-resolved, trusted HTML) -----------------------
 
 
-def test_letterhead_header_footer_folded(fake_wk: _Recorder) -> None:
-	# render_pdf receives ALREADY-RESOLVED, safe letterhead HTML and folds it in
-	# as-is (it is not re-sanitized - the images were neutralised in resolve).
-	render_pdf(
-		"<p>hi</p>",
-		letterhead_header="<div>LH-HEADER-MARK</div>",
-		letterhead_footer="<div>LH-FOOTER-MARK</div>",
-		page_numbers=False,
-	)
-	assert "LH-HEADER-MARK" in fake_wk.file_contents["--header-html"]
-	assert "LH-FOOTER-MARK" in fake_wk.file_contents["--footer-html"]
+class TestLetterheadFolding(_FurnitureRenderBase):
+	def test_letterhead_header_footer_folded(self) -> None:
+		# render_pdf receives ALREADY-RESOLVED, safe letterhead HTML and folds it in
+		# as-is (it is not re-sanitized - the images were neutralised in resolve).
+		render_pdf(
+			"<p>hi</p>",
+			letterhead_header="<div>LH-HEADER-MARK</div>",
+			letterhead_footer="<div>LH-FOOTER-MARK</div>",
+			page_numbers=False,
+		)
+		self.assertIn("LH-HEADER-MARK", self.fake_wk.file_contents["--header-html"])
+		self.assertIn("LH-FOOTER-MARK", self.fake_wk.file_contents["--footer-html"])
 
 
 # --- letterhead: image inlining (the SSRF fix), site-free via stubs ----------
-
-
-def test_inline_keeps_data_uri() -> None:
-	src = '<img src="data:image/png;base64,AAAA">'
-	assert furniture._inline_letterhead_images(src) == src
-
-
-def test_inline_drops_remote_image() -> None:
-	out = furniture._inline_letterhead_images('<p>x</p><img src="http://evil/logo.png"><p>y</p>')
-	assert "<img" not in out.lower()
-	assert "evil" not in out.lower()
-	assert "x" in out and "y" in out
-
-
-def test_inline_drops_protocol_relative_image() -> None:
-	out = furniture._inline_letterhead_images('<img src="//evil/logo.png">')
-	assert "<img" not in out.lower()
-	assert "evil" not in out.lower()
 
 
 class _FakeDB:
@@ -468,96 +433,115 @@ class _PngFile:
 		return b"\x89PNG\r\n\x1a\nDATA"  # valid PNG magic → passes the image sniff
 
 
-def test_inline_same_site_to_base64_with_perm(monkeypatch: pytest.MonkeyPatch) -> None:
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv()))
-	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
-	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _PngFile())
-	out = furniture._inline_letterhead_images('<img src="/files/logo.png">')
-	assert "data:image/png;base64," in out
-	assert "http" not in out.lower()
+class TestInlineLetterheadImages(unittest.TestCase):
+	def test_inline_keeps_data_uri(self) -> None:
+		src = '<img src="data:image/png;base64,AAAA">'
+		self.assertEqual(furniture._inline_letterhead_images(src), src)
 
+	def test_inline_drops_remote_image(self) -> None:
+		out = furniture._inline_letterhead_images('<p>x</p><img src="http://evil/logo.png"><p>y</p>')
+		self.assertNotIn("<img", out.lower())
+		self.assertNotIn("evil", out.lower())
+		self.assertTrue("x" in out and "y" in out)
 
-def test_inline_same_site_dropped_without_perm(monkeypatch: pytest.MonkeyPatch) -> None:
-	# get_doc is mocked to SUCCEED so the drop is attributable ONLY to
-	# has_permission=False — if the perm check were removed, this would LEAK a
-	# base64 image and the test would fail (mutation-catching).
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv()))
-	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: False)
-	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _PngFile())
-	out = furniture._inline_letterhead_images('<img src="/files/logo.png">')
-	assert "<img" not in out.lower()
-	assert "base64" not in out.lower()
+	def test_inline_drops_protocol_relative_image(self) -> None:
+		out = furniture._inline_letterhead_images('<img src="//evil/logo.png">')
+		self.assertNotIn("<img", out.lower())
+		self.assertNotIn("evil", out.lower())
 
+	def test_inline_same_site_to_base64_with_perm(self) -> None:
+		patch.object(furniture.frappe, "db", _FakeDB(_file_gv())).start()
+		patch.object(furniture.frappe, "has_permission", lambda *_a, **_k: True).start()
+		patch.object(furniture.frappe, "get_doc", lambda *_a, **_k: _PngFile()).start()
+		self.addCleanup(patch.stopall)
+		out = furniture._inline_letterhead_images('<img src="/files/logo.png">')
+		self.assertIn("data:image/png;base64,", out)
+		self.assertNotIn("http", out.lower())
 
-def test_inline_unknown_file_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv(name=None)))
-	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
-	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _PngFile())
-	out = furniture._inline_letterhead_images('<img src="/files/missing.png">')
-	assert "<img" not in out.lower()
+	def test_inline_same_site_dropped_without_perm(self) -> None:
+		# get_doc is mocked to SUCCEED so the drop is attributable ONLY to
+		# has_permission=False — if the perm check were removed, this would LEAK a
+		# base64 image and the test would fail (mutation-catching).
+		patch.object(furniture.frappe, "db", _FakeDB(_file_gv())).start()
+		patch.object(furniture.frappe, "has_permission", lambda *_a, **_k: False).start()
+		patch.object(furniture.frappe, "get_doc", lambda *_a, **_k: _PngFile()).start()
+		self.addCleanup(patch.stopall)
+		out = furniture._inline_letterhead_images('<img src="/files/logo.png">')
+		self.assertNotIn("<img", out.lower())
+		self.assertNotIn("base64", out.lower())
 
+	def test_inline_unknown_file_dropped(self) -> None:
+		patch.object(furniture.frappe, "db", _FakeDB(_file_gv(name=None))).start()
+		patch.object(furniture.frappe, "has_permission", lambda *_a, **_k: True).start()
+		patch.object(furniture.frappe, "get_doc", lambda *_a, **_k: _PngFile()).start()
+		self.addCleanup(patch.stopall)
+		out = furniture._inline_letterhead_images('<img src="/files/missing.png">')
+		self.assertNotIn("<img", out.lower())
 
-def test_inline_oversized_logo_dropped_before_read(monkeypatch: pytest.MonkeyPatch) -> None:
-	# An oversized File is rejected on its file_size BEFORE get_content is called.
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv(size=furniture._MAX_LOGO_BYTES + 1)))
-	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
+	def test_inline_oversized_logo_dropped_before_read(self) -> None:
+		# An oversized File is rejected on its file_size BEFORE get_content is called.
+		patch.object(furniture.frappe, "db", _FakeDB(_file_gv(size=furniture._MAX_LOGO_BYTES + 1))).start()
+		patch.object(furniture.frappe, "has_permission", lambda *_a, **_k: True).start()
 
-	def _boom(*_a, **_k):
-		raise AssertionError("get_content must not be called for an oversized logo")
+		def _boom(*_a, **_k):
+			raise AssertionError("get_content must not be called for an oversized logo")
 
-	monkeypatch.setattr(furniture.frappe, "get_doc", _boom)
-	out = furniture._inline_letterhead_images('<img src="/files/huge.png">')
-	assert "<img" not in out.lower()
+		patch.object(furniture.frappe, "get_doc", _boom).start()
+		self.addCleanup(patch.stopall)
+		out = furniture._inline_letterhead_images('<img src="/files/huge.png">')
+		self.assertNotIn("<img", out.lower())
 
+	def test_inline_nonimage_bytes_dropped(self) -> None:
+		# A file whose bytes are not an image (mislabeled *.png) is not inlined.
+		patch.object(furniture.frappe, "db", _FakeDB(_file_gv())).start()
+		patch.object(furniture.frappe, "has_permission", lambda *_a, **_k: True).start()
 
-def test_inline_nonimage_bytes_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
-	# A file whose bytes are not an image (mislabeled *.png) is not inlined.
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv()))
-	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
+		class _NotImg:
+			def get_content(self):
+				return b"<html>not an image</html>"
 
-	class _NotImg:
-		def get_content(self):
-			return b"<html>not an image</html>"
+		patch.object(furniture.frappe, "get_doc", lambda *_a, **_k: _NotImg()).start()
+		self.addCleanup(patch.stopall)
+		out = furniture._inline_letterhead_images('<img src="/files/fake.png">')
+		self.assertNotIn("<img", out.lower())
+		self.assertNotIn("base64", out.lower())
 
-	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _NotImg())
-	out = furniture._inline_letterhead_images('<img src="/files/fake.png">')
-	assert "<img" not in out.lower()
-	assert "base64" not in out.lower()
+	def test_inline_svg_by_extension_refused(self) -> None:
+		# SVG is refused (an inlined data:image/svg+xml is an opaque active-content blob
+		# nh3 can't inspect). A *.svg File is dropped at the mime check, before read.
+		patch.object(furniture.frappe, "db", _FakeDB(_file_gv())).start()
+		patch.object(furniture.frappe, "has_permission", lambda *_a, **_k: True).start()
 
+		def _boom(*_a, **_k):
+			raise AssertionError("SVG must be refused before reading it")
 
-def test_inline_svg_by_extension_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-	# SVG is refused (an inlined data:image/svg+xml is an opaque active-content blob
-	# nh3 can't inspect). A *.svg File is dropped at the mime check, before read.
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv()))
-	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
+		patch.object(furniture.frappe, "get_doc", _boom).start()
+		self.addCleanup(patch.stopall)
+		out = furniture._inline_letterhead_images('<img src="/files/logo.svg">')
+		self.assertNotIn("<img", out.lower())
 
-	def _boom(*_a, **_k):
-		raise AssertionError("SVG must be refused before reading it")
+	def test_inline_svg_bytes_in_png_name_refused(self) -> None:
+		# SVG bytes smuggled behind a *.png name are refused by the raster-only sniff.
+		patch.object(furniture.frappe, "db", _FakeDB(_file_gv())).start()
+		patch.object(furniture.frappe, "has_permission", lambda *_a, **_k: True).start()
 
-	monkeypatch.setattr(furniture.frappe, "get_doc", _boom)
-	out = furniture._inline_letterhead_images('<img src="/files/logo.svg">')
-	assert "<img" not in out.lower()
+		class _Svg:
+			def get_content(self):
+				return b'<svg xmlns="x"><image href="http://169.254.169.254/x"/></svg>'
 
-
-def test_inline_svg_bytes_in_png_name_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-	# SVG bytes smuggled behind a *.png name are refused by the raster-only sniff.
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_file_gv()))
-	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: True)
-
-	class _Svg:
-		def get_content(self):
-			return b'<svg xmlns="x"><image href="http://169.254.169.254/x"/></svg>'
-
-	monkeypatch.setattr(furniture.frappe, "get_doc", lambda *_a, **_k: _Svg())
-	out = furniture._inline_letterhead_images('<img src="/files/logo.png">')
-	assert "<img" not in out.lower()
-	assert "169.254" not in out
+		patch.object(furniture.frappe, "get_doc", lambda *_a, **_k: _Svg()).start()
+		self.addCleanup(patch.stopall)
+		out = furniture._inline_letterhead_images('<img src="/files/logo.png">')
+		self.assertNotIn("<img", out.lower())
+		self.assertNotIn("169.254", out)
 
 
 # --- letterhead: resolution + degrade note, site-free via stubs --------------
 
 
-def _stub_letterhead(monkeypatch, *, default=None, docs=None, perms=True):
+def _stub_letterhead(*, default=None, docs=None, perms=True):
+	"""Patch ``frappe.db``/``has_permission`` to site-free stubs. Patches are
+	started but not stopped - the caller must ``self.addCleanup(patch.stopall)``."""
 	docs = docs or {}
 
 	def _get_value(_dt, filt, _field=None, **_k):
@@ -565,83 +549,82 @@ def _stub_letterhead(monkeypatch, *, default=None, docs=None, perms=True):
 			return default
 		return docs.get(filt)  # named/default-name doc lookup
 
-	monkeypatch.setattr(furniture.frappe, "db", _FakeDB(_get_value))
-	monkeypatch.setattr(furniture.frappe, "has_permission", lambda *_a, **_k: perms)
+	patch.object(furniture.frappe, "db", _FakeDB(_get_value)).start()
+	patch.object(furniture.frappe, "has_permission", lambda *_a, **_k: perms).start()
 
 
-def test_resolve_letterhead_default_used_when_unnamed(monkeypatch: pytest.MonkeyPatch) -> None:
-	_stub_letterhead(
-		monkeypatch,
-		default="Std",
-		docs={"Std": {"content": "<div>HDR</div>", "footer": "<div>FTR</div>"}},
-	)
-	header, footer, note = resolve_letterhead(None)
-	assert "HDR" in header and "FTR" in footer
-	assert note is None
+class TestResolveLetterhead(unittest.TestCase):
+	def test_resolve_letterhead_default_used_when_unnamed(self) -> None:
+		_stub_letterhead(
+			default="Std",
+			docs={"Std": {"content": "<div>HDR</div>", "footer": "<div>FTR</div>"}},
+		)
+		self.addCleanup(patch.stopall)
+		header, footer, note = resolve_letterhead(None)
+		self.assertTrue("HDR" in header and "FTR" in footer)
+		self.assertIsNone(note)
 
+	def test_resolve_letterhead_named(self) -> None:
+		_stub_letterhead(docs={"Acme": {"content": "<div>ACME</div>", "footer": ""}})
+		self.addCleanup(patch.stopall)
+		header, _footer, note = resolve_letterhead("Acme")
+		self.assertIn("ACME", header)
+		self.assertIsNone(note)
 
-def test_resolve_letterhead_named(monkeypatch: pytest.MonkeyPatch) -> None:
-	_stub_letterhead(monkeypatch, docs={"Acme": {"content": "<div>ACME</div>", "footer": ""}})
-	header, _footer, note = resolve_letterhead("Acme")
-	assert "ACME" in header
-	assert note is None
+	def test_resolve_letterhead_no_default_no_note(self) -> None:
+		_stub_letterhead(default=None)
+		self.addCleanup(patch.stopall)
+		header, footer, note = resolve_letterhead(None)
+		self.assertTrue(header == "" and footer == "")
+		self.assertIsNone(note)  # no default configured is a normal unbranded render
 
+	def test_resolve_letterhead_named_not_found_notes(self) -> None:
+		_stub_letterhead(docs={})  # named lookup returns None
+		self.addCleanup(patch.stopall)
+		header, footer, note = resolve_letterhead("Nope")
+		self.assertTrue(header == "" and footer == "")
+		self.assertTrue(note and "Nope" in note)
 
-def test_resolve_letterhead_no_default_no_note(monkeypatch: pytest.MonkeyPatch) -> None:
-	_stub_letterhead(monkeypatch, default=None)
-	header, footer, note = resolve_letterhead(None)
-	assert header == "" and footer == ""
-	assert note is None  # no default configured is a normal unbranded render
+	def test_resolve_letterhead_no_read_perm_notes(self) -> None:
+		_stub_letterhead(docs={"Acme": {"content": "<div>ACME</div>", "footer": ""}}, perms=False)
+		self.addCleanup(patch.stopall)
+		header, _footer, note = resolve_letterhead("Acme")
+		self.assertEqual(header, "")
+		self.assertTrue(note and "Acme" in note)
 
+	def test_resolve_letterhead_strips_remote_image_end_to_end(self) -> None:
+		# The F1 SSRF gate wired through resolve_letterhead: a Letter Head whose content
+		# carries a remote <img>/<link> must come back with NO remote URL (the gate runs
+		# after inlining), while benign text survives.
+		_stub_letterhead(
+			docs={
+				"Evil": {
+					"content": '<div>Acme<img src="http://169.254.169.254/x">'
+					'<link href="http://evil/x.css"></div>',
+					"footer": "",
+				}
+			},
+		)
+		self.addCleanup(patch.stopall)
+		header, _footer, note = resolve_letterhead("Evil")
+		low = header.lower()
+		self.assertTrue("169.254" not in low and "evil" not in low)
+		self.assertNotIn("<link", low)
+		self.assertIn("Acme", header)
+		self.assertIsNone(note)
 
-def test_resolve_letterhead_named_not_found_notes(monkeypatch: pytest.MonkeyPatch) -> None:
-	_stub_letterhead(monkeypatch, docs={})  # named lookup returns None
-	header, footer, note = resolve_letterhead("Nope")
-	assert header == "" and footer == ""
-	assert note and "Nope" in note
+	def test_remove_quietly_suppresses_oserror(self) -> None:
+		# A non-FileNotFound OSError (e.g. EPERM) during cleanup must be swallowed so
+		# the finally loop can't abort (leaking the other temp) or mask the real error.
+		def _raise(_p):
+			raise PermissionError("EPERM")
 
+		patch.object(furniture.os, "remove", _raise).start()
+		self.addCleanup(patch.stopall)
+		furniture._remove_quietly("/tmp/whatever")  # must NOT raise
 
-def test_resolve_letterhead_no_read_perm_notes(monkeypatch: pytest.MonkeyPatch) -> None:
-	_stub_letterhead(monkeypatch, docs={"Acme": {"content": "<div>ACME</div>", "footer": ""}}, perms=False)
-	header, _footer, note = resolve_letterhead("Acme")
-	assert header == ""
-	assert note and "Acme" in note
-
-
-def test_resolve_letterhead_strips_remote_image_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
-	# The F1 SSRF gate wired through resolve_letterhead: a Letter Head whose content
-	# carries a remote <img>/<link> must come back with NO remote URL (the gate runs
-	# after inlining), while benign text survives.
-	_stub_letterhead(
-		monkeypatch,
-		docs={
-			"Evil": {
-				"content": '<div>Acme<img src="http://169.254.169.254/x">'
-				'<link href="http://evil/x.css"></div>',
-				"footer": "",
-			}
-		},
-	)
-	header, _footer, note = resolve_letterhead("Evil")
-	low = header.lower()
-	assert "169.254" not in low and "evil" not in low
-	assert "<link" not in low
-	assert "Acme" in header
-	assert note is None
-
-
-def test_remove_quietly_suppresses_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
-	# A non-FileNotFound OSError (e.g. EPERM) during cleanup must be swallowed so
-	# the finally loop can't abort (leaking the other temp) or mask the real error.
-	def _raise(_p):
-		raise PermissionError("EPERM")
-
-	monkeypatch.setattr(furniture.os, "remove", _raise)
-	furniture._remove_quietly("/tmp/whatever")  # must NOT raise
-
-
-@pytest.mark.skipif(not _HAS_SITE, reason="needs a bench site (get_letter_head / File)")
-def test_resolve_letterhead_real_default() -> None:
-	header, footer, note = resolve_letterhead(None)
-	assert isinstance(header, str) and isinstance(footer, str)
-	assert note is None
+	@unittest.skipUnless(_HAS_SITE, "needs a bench site (get_letter_head / File)")
+	def test_resolve_letterhead_real_default(self) -> None:
+		header, footer, note = resolve_letterhead(None)
+		self.assertTrue(isinstance(header, str) and isinstance(footer, str))
+		self.assertIsNone(note)
