@@ -170,6 +170,46 @@ test("an unmapped tool name while a build is confirmed stays Composing, not done
 	);
 });
 
+test("jarvis#884: dataTools/writeTools are overridable so artifactActivityCard.js can wrap this instead of forking it", () => {
+	const customSets = {
+		dataTools: new Set(["custom_read"]),
+		writeTools: new Set(["custom_write"]),
+	};
+	assert.equal(
+		dashboardBuildPhase(
+			{
+				activeTools: [{ name: "custom_read", status: "running" }],
+				statusPhase: null,
+				waiting: false,
+			},
+			customSets
+		),
+		"querying"
+	);
+	assert.equal(
+		dashboardBuildPhase(
+			{
+				activeTools: [{ name: "custom_write", status: "running" }],
+				statusPhase: null,
+				waiting: false,
+			},
+			customSets
+		),
+		"publishing"
+	);
+	// the DEFAULT sets are unchanged when no override is passed — dashboard
+	// callers (this file's own tests, DashboardChatPane.vue) keep behaving
+	// exactly as before
+	assert.equal(
+		dashboardBuildPhase({
+			activeTools: [{ name: "query", status: "running" }],
+			statusPhase: null,
+			waiting: false,
+		}),
+		"querying"
+	);
+});
+
 test("phaseTickIndex orders the four phases and reports -1 for indeterminate", () => {
 	assert.equal(phaseTickIndex("understanding"), 0);
 	assert.equal(phaseTickIndex("querying"), 1);
@@ -221,29 +261,23 @@ test("a custom source viewport is honoured", () => {
 });
 
 // ---- ChatView wiring: source-fenced, the same precedent as dashboardOpen.test.js ----
+//
+// The live card itself (jarvis#884) moved to the common artifact activity
+// card — see artifactActivityCard.test.js for its wiring fences. What stays
+// true here is narrower: ChatView still imports the thumbnail/origin helpers
+// from THIS module, and dashboardBuildTurn (the builder-origin gate) is still
+// computed the same way, since it is now an INPUT to detectArtifactKind
+// rather than a direct template gate.
 
-test("ChatView imports the build-card helpers and gates the live card on the turn", () => {
+test("ChatView imports the thumbnail/origin helpers from dashboardBuildCard, not a private copy", () => {
 	assert.match(
 		chatSrc,
-		/import \{\s*DASHBOARD_BUILD_PHASES,\s*dashboardBuildPhase,\s*dashboardThumbnailTransform,\s*isDashboardBuildTurn,\s*isDashboardCanvas,\s*phaseTickIndex,\s*\} from "@\/lib\/dashboardBuildCard";/
+		/import \{\s*dashboardThumbnailTransform,\s*isDashboardBuildTurn,\s*isDashboardCanvas,\s*phaseTickIndex,\s*\} from "@\/lib\/dashboardBuildCard";/
 	);
 	const gate = fnBody(chatSrc, "const dashboardBuildTurn = computed(");
 	assert.match(gate, /originPage: originPage\.value,/);
 	assert.match(gate, /originOf: originOf\.value,/);
 	assert.match(gate, /conversation: currentId\.value,/);
-	// the live card and the generic activity line are mutually exclusive —
-	// exactly one of them can render for a given turn. The live card stays
-	// origin-only: a main-chat build has no pre-canvas signal to key on (see
-	// dashboardBuildCard.js's file header), so it degrades to no card rather
-	// than guessing.
-	assert.match(
-		chatSrc,
-		/v-if="dashboardBuildTurn && \(activeTools\.length \|\| waiting\) && !queuedTurn"/
-	);
-	assert.match(
-		chatSrc,
-		/v-if="\s*\(activeTools\.length \|\| waiting\) && !queuedTurn && !dashboardBuildTurn\s*"/
-	);
 });
 
 test("canPromoteDashCanvas combines the builder-origin rule with canvas-presence, and the click-through gates on it too", () => {

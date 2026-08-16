@@ -1800,17 +1800,74 @@
 						</Message>
 					</template>
 
-					<!-- dashboard build: a real progress card keyed to actual tool
-					     activity, never a timer (issue #858). Same turn gate as the
-					     generic activity line below (queued chip wins over both);
-					     mutually exclusive with it so only one ever shows. Phases
-					     light up from real events only — a mount that joined the
-					     turn already in flight (no activeTools seen yet) shows the
-					     honest indeterminate header with no tick lit, rather than
-					     guessing "Understanding". -->
+					<!-- pre-redirect morph line (jarvis#884): the working line morphs
+					     in place the instant the streaming reply's own jarvis-goto
+					     block is complete. Wins over the artifact card and the generic
+					     line below (a goto turn produces no artifact) — see the
+					     gotoMorph latch's own comment for why this renders off the
+					     latch, not off streamingGoto directly. Zero added delay: the
+					     run:end auto-redirect is untouched, this is only the visual for
+					     the beat before it fires (and the instant after, until the
+					     route actually changes). -->
+					<div v-if="gotoMorph && !queuedTurn" style="display: flex; gap: 12px">
+						<JarvisMark
+							:size="28"
+							:radius="7"
+							mood="thinking"
+							style="margin-top: 2px"
+						/>
+						<div style="flex: 1; min-width: 0; padding-top: 3px">
+							<div class="jv-goto-morph" role="status" aria-live="polite">
+								<span class="jv-goto-chevrons" aria-hidden="true">
+									<svg
+										v-for="i in 3"
+										:key="i"
+										class="jv-goto-chevron"
+										:style="{ animationDelay: (i - 1) * 0.15 + 's' }"
+										width="10"
+										height="10"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="2.6"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<path d="M9 6l6 6-6 6" />
+									</svg>
+								</span>
+								<span class="jv-live-shim"
+									>Taking you to the Dashboards builder</span
+								>
+								<svg
+									class="jv-goto-arrow"
+									width="13"
+									height="13"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path d="M5 12h14M13 5l7 7-7 7" />
+								</svg>
+							</div>
+						</div>
+					</div>
+					<!-- common artifact activity card (jarvis#884): one shared card for
+					     any artifact-producing main-chat turn — dashboard (builder
+					     origin, issue #858's own gate), pdf, spreadsheet, or image —
+					     replacing the dashboard-only card issue #874 shipped. Same turn
+					     gate as the generic activity line below (queued chip, and now
+					     the goto morph line, both win over it); mutually exclusive with
+					     the generic line so only one ever shows. Phases light up from
+					     real events only — a mount that joined the turn already in
+					     flight (no activeTools seen yet) shows the honest indeterminate
+					     header with no tick lit, rather than guessing "Understanding". -->
 					<div
-						v-if="dashboardBuildTurn && (activeTools.length || waiting) && !queuedTurn"
-						class="jv-dashbuild"
+						v-if="artifactKind && (activeTools.length || waiting) && !queuedTurn"
+						class="jv-artifact-live"
 						style="display: flex; gap: 12px"
 					>
 						<JarvisMark
@@ -1820,31 +1877,82 @@
 							style="margin-top: 2px"
 						/>
 						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<div class="jv-dashbuild-card" role="status" aria-live="polite">
-								<span class="jv-dashbuild-head">
-									<span class="jv-live-shim">Building dashboard…</span>
+							<div class="jv-artifact-card" role="status" aria-live="polite">
+								<span class="jv-artifact-head">
+									<svg
+										v-if="artifactKind === 'dashboard'"
+										width="14"
+										height="14"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="1.8"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<path d="M18 20V10M12 20V4M6 20v-6" />
+									</svg>
+									<svg
+										v-else-if="artifactKind === 'pdf'"
+										width="14"
+										height="14"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="1.8"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<path
+											d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
+										/>
+										<path d="M14 2v6h6" />
+									</svg>
+									<svg
+										v-else-if="artifactKind === 'spreadsheet'"
+										width="14"
+										height="14"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="1.8"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<rect x="3" y="3" width="18" height="18" rx="2" />
+										<path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
+									</svg>
+									<svg
+										v-else-if="artifactKind === 'image'"
+										width="14"
+										height="14"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="1.8"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<rect x="3" y="3" width="18" height="18" rx="2" />
+										<circle cx="8.5" cy="8.5" r="1.5" />
+										<path d="M21 15l-5-5L5 21" />
+									</svg>
+									<span class="jv-live-shim">{{ artifactTitle }}</span>
 								</span>
-								<ol class="jv-dashbuild-steps">
+								<ol class="jv-artifact-steps">
 									<li
-										v-for="(step, si) in DASHBOARD_BUILD_PHASES"
+										v-for="(step, si) in artifactPhases"
 										:key="step.key"
-										class="jv-dashbuild-step"
+										class="jv-artifact-step"
 										:class="{
-											done:
-												dashboardBuildTickIndex >= 0 &&
-												si < dashboardBuildTickIndex,
-											current: si === dashboardBuildTickIndex,
+											done: artifactTickIndex >= 0 && si < artifactTickIndex,
+											current: si === artifactTickIndex,
 										}"
 									>
-										<span class="jv-dashbuild-tick" aria-hidden="true"></span>
+										<span class="jv-artifact-tick" aria-hidden="true"></span>
 										{{ step.label }}
 									</li>
 								</ol>
-								<div class="jv-dashbuild-skel" aria-hidden="true">
-									<span class="jv-dashbuild-skel-row"></span>
-									<span class="jv-dashbuild-skel-row"></span>
-									<span class="jv-dashbuild-skel-row short"></span>
-								</div>
 							</div>
 						</div>
 					</div>
@@ -1855,7 +1963,10 @@
 					     stray warming spinner masking the chip. -->
 					<div
 						v-if="
-							(activeTools.length || waiting) && !queuedTurn && !dashboardBuildTurn
+							(activeTools.length || waiting) &&
+							!queuedTurn &&
+							!artifactKind &&
+							!gotoMorph
 						"
 						style="display: flex; gap: 12px"
 					>
@@ -4012,13 +4123,17 @@ import { sortPendingCards } from "@/lib/sortPendingCards";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
-	DASHBOARD_BUILD_PHASES,
-	dashboardBuildPhase,
 	dashboardThumbnailTransform,
 	isDashboardBuildTurn,
 	isDashboardCanvas,
 	phaseTickIndex,
 } from "@/lib/dashboardBuildCard";
+import {
+	ARTIFACT_TITLES,
+	artifactBuildPhase,
+	artifactPhaseList,
+	detectArtifactKind,
+} from "@/lib/artifactActivityCard";
 import { pickGreeting } from "@/lib/greeting";
 import { dashboardForConversation } from "@/api/dashboards";
 import {
@@ -7243,14 +7358,59 @@ const dashboardBuildTurn = computed(() =>
 		conversation: currentId.value,
 	})
 );
-const dashboardBuildPhaseKey = computed(() =>
-	dashboardBuildPhase({
+// ---- pre-redirect morph line (jarvis#884) ─────────────────────────────────
+// The moment the turn CURRENTLY streaming into this conversation carries a
+// COMPLETE ```jarvis-goto block, the generic "Working on it…" line morphs in
+// place into a branded "Taking you to the Dashboards builder" line. gotoOf
+// only returns truthy once the closing fence has actually arrived (chatGoto.js
+// requires it), so "complete" falls out of the existing parser for free —
+// nothing here holds back an unterminated block itself.
+//
+// Rendering off `streamingGoto` directly would drop the line the instant
+// run:end flips `m.streaming` false (line ~8668), which lands BEFORE
+// gotoDashboards() fires a few statements later — exactly the "instant
+// between run:end and navigation" the line is required to survive, and a
+// lazy-loaded /dashboards route chunk can turn that instant into a real
+// visible gap. So this is a LATCH: once a turn earns the morph, `gotoMorph`
+// stays truthy until the next turn starts, errors, is stopped, or the
+// conversation is left — never cleared by run:end itself, since surviving
+// that is the entire point.
+const streamingMessage = computed(
+	() => [...messages.value].reverse().find((m) => m.role === "assistant" && m.streaming) || null
+);
+const streamingGoto = computed(() => {
+	const m = streamingMessage.value;
+	return m ? gotoOf(m) : null;
+});
+const gotoMorph = ref(null);
+watch(streamingGoto, (g) => {
+	if (g) gotoMorph.value = g;
+});
+// ---- common artifact activity card (jarvis#884) ───────────────────────────
+// Generalizes the #874 dashboard-only live card to any artifact-producing
+// main-chat turn: whichever write tool actually ran (or the builder-origin
+// dashboard gate above) names the kind, and the SAME real activeTools/
+// statusPhase/waiting signals the generic activity line reads drive its
+// phase. The goto morph line above wins outright — a goto turn produces no
+// artifact — so artifactKind nulls out under the latch rather than needing a
+// second exclusion wired through every consumer below.
+const artifactKind = computed(() =>
+	gotoMorph.value
+		? null
+		: detectArtifactKind(activeTools.value, { dashboardTurn: dashboardBuildTurn.value })
+);
+const artifactTitle = computed(() => ARTIFACT_TITLES[artifactKind.value] || "");
+const artifactPhaseKey = computed(() =>
+	artifactBuildPhase(artifactKind.value, {
 		activeTools: activeTools.value,
 		statusPhase: statusPhase.value,
 		waiting: waiting.value,
 	})
 );
-const dashboardBuildTickIndex = computed(() => phaseTickIndex(dashboardBuildPhaseKey.value));
+const artifactPhases = computed(() => artifactPhaseList(artifactKind.value));
+const artifactTickIndex = computed(() =>
+	phaseTickIndex(artifactPhaseKey.value, artifactPhases.value)
+);
 // Scaled-preview geometry for the finished-canvas thumbnail card (below);
 // fixed source viewport since the canvas itself has no set design width.
 const dashboardThumbGeom = computed(() => dashboardThumbnailTransform(220));
@@ -7872,6 +8032,7 @@ function resetRunState() {
 	mention.value = { ...mention.value, open: false };
 	histIdx.value = null;
 	histDraft.value = "";
+	gotoMorph.value = null; // a latch from the chat we are leaving must not follow us in
 }
 // Stash the leaving chat's draft and restore the target chat's own, so unsent
 // text follows its conversation instead of bleeding into the next one. Both the
@@ -8527,6 +8688,10 @@ function onEvent(p) {
 			waiting.value = true;
 			statusPhase.value = "model";
 			store.streamingConvId = p.conversation_id || currentId.value;
+			// A new turn starting must not inherit the previous turn's morph
+			// latch (jarvis#884) — only THIS turn's own complete goto block may
+			// light it again.
+			gotoMorph.value = null;
 			break;
 		case "queue:position":
 			// Phase-0 admission: this queued turn's approximate position shifted
@@ -8852,6 +9017,7 @@ function onEvent(p) {
 			activeTools.value = [];
 			currentRunId.value = null;
 			store.streamingConvId = null;
+			gotoMorph.value = null; // an errored turn never redirects — drop the latch
 			announceSR("That didn't go through. See the error in the chat.");
 			loadConversation(currentId.value);
 			break;
@@ -8902,6 +9068,7 @@ function stopRun() {
 	activeTools.value = [];
 	store.streamingConvId = null;
 	recovering.value = null;
+	gotoMorph.value = null; // a stopped turn never redirects — drop the latch
 	if (cid) api.stopRun(cid, rid).catch(() => {});
 	notify("Stopped.");
 }
@@ -11082,6 +11249,48 @@ onUnmounted(() => {
 		opacity: 1;
 	}
 }
+/* pre-redirect morph line (jarvis#884): occupies the exact same single-row
+   box as the generic "Working on it…" status line it replaces (same
+   font-size/gap/padding-top), so the transcript never jumps when one morphs
+   into the other. Compositor-friendly only: the chevrons animate
+   transform+opacity, nothing else — no width/height/position/background
+   properties in the keyframe, so the loop never triggers layout or paint
+   beyond the small icons themselves. Disabled under reduced-motion below. */
+.jv-goto-morph {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding-top: 4px;
+	font-size: 12px;
+	color: var(--text-3);
+}
+.jv-goto-chevrons {
+	display: inline-flex;
+	align-items: center;
+	color: var(--cta);
+}
+.jv-goto-chevron {
+	margin-left: -5px;
+	animation: jv-goto-chevron-slide 1s ease-in-out infinite;
+}
+.jv-goto-chevron:first-child {
+	margin-left: 0;
+}
+@keyframes jv-goto-chevron-slide {
+	0%,
+	100% {
+		transform: translateX(0);
+		opacity: 0.4;
+	}
+	50% {
+		transform: translateX(3px);
+		opacity: 1;
+	}
+}
+.jv-goto-arrow {
+	flex: none;
+	color: var(--text-3);
+}
 /* visually-hidden live region for screen-reader announcements (UX #5) */
 .jv-sr {
 	position: absolute;
@@ -11115,10 +11324,14 @@ onUnmounted(() => {
 	.jv-mic-dot {
 		animation: none;
 	}
-	.jv-dashbuild-tick,
-	.jv-dashbuild-skel-row,
+	.jv-artifact-tick,
 	.jv-dash-thumb-loading {
 		animation: none;
+	}
+	.jv-goto-chevron {
+		animation: none;
+		opacity: 1;
+		transform: none;
 	}
 	.jv-settings,
 	.jv-skills-modal {
@@ -12686,6 +12899,14 @@ onUnmounted(() => {
 	background-size: 400% 100%;
 	animation: jv-dashbuild-shimmer 1.6s ease infinite;
 }
+@keyframes jv-dashbuild-shimmer {
+	0% {
+		background-position: 100% 50%;
+	}
+	100% {
+		background-position: 0 50%;
+	}
+}
 .jv-dash-thumb-meta {
 	display: flex;
 	flex-direction: column;
@@ -12709,8 +12930,13 @@ onUnmounted(() => {
 	color: var(--cta);
 }
 
-/* dashboard-build live progress card (issue #858) */
-.jv-dashbuild-card {
+/* common artifact activity card (jarvis#884): one shared card for any
+   artifact-producing main-chat turn (dashboard/pdf/spreadsheet/image),
+   replacing the dashboard-only card issue #874 shipped. Height is fixed from
+   first paint — head row + all four phase rows always render, tick state
+   only changes color/scale, never the row count — so the card never grows
+   once mounted. */
+.jv-artifact-card {
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
@@ -12720,10 +12946,14 @@ onUnmounted(() => {
 	border-radius: 10px;
 	background: var(--surface);
 }
-.jv-dashbuild-head {
+.jv-artifact-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
 	font-size: 12px;
+	color: var(--text-2);
 }
-.jv-dashbuild-steps {
+.jv-artifact-steps {
 	display: flex;
 	flex-direction: column;
 	gap: 4px;
@@ -12731,63 +12961,48 @@ onUnmounted(() => {
 	padding: 0;
 	list-style: none;
 }
-.jv-dashbuild-step {
+.jv-artifact-step {
 	display: flex;
 	align-items: center;
 	gap: 7px;
 	font-size: 11.5px;
 	color: var(--text-3);
 }
-.jv-dashbuild-step.done,
-.jv-dashbuild-step.current {
+.jv-artifact-step.done,
+.jv-artifact-step.current {
 	color: var(--text-2);
 }
-.jv-dashbuild-step.current {
+.jv-artifact-step.current {
 	color: var(--text);
 	font-weight: 550;
 }
-.jv-dashbuild-tick {
+/* Tick "lighting up" is a transform/opacity transition (addendum #2/#8),
+   never a keyframe loop — only the CURRENT tick's gentle pulse (reused
+   jv-live-shim, already opacity-only) is a loop, and that is removed under
+   reduced-motion below. background-color is swapped directly (no
+   transition on it), so a state change is one cheap repaint, not an
+   animated one. */
+.jv-artifact-tick {
 	flex: none;
 	width: 6px;
 	height: 6px;
 	border-radius: 50%;
 	background: var(--border-2);
+	transform: scale(0.7);
+	opacity: 0.8;
+	transition: transform 0.2s ease, opacity 0.2s ease;
 }
-.jv-dashbuild-step.done .jv-dashbuild-tick {
+.jv-artifact-step.done .jv-artifact-tick,
+.jv-artifact-step.current .jv-artifact-tick {
+	transform: scale(1);
+	opacity: 1;
+}
+.jv-artifact-step.done .jv-artifact-tick {
 	background: var(--green);
 }
-.jv-dashbuild-step.current .jv-dashbuild-tick {
+.jv-artifact-step.current .jv-artifact-tick {
 	background: var(--cta);
 	animation: jv-live-shim 1.8s ease-in-out infinite;
-}
-.jv-dashbuild-skel {
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-}
-.jv-dashbuild-skel-row {
-	display: block;
-	height: 8px;
-	border-radius: 4px;
-	background: linear-gradient(
-		90deg,
-		var(--surface-1) 25%,
-		var(--surface-2) 37%,
-		var(--surface-1) 63%
-	);
-	background-size: 400% 100%;
-	animation: jv-dashbuild-shimmer 1.6s ease infinite;
-}
-.jv-dashbuild-skel-row.short {
-	width: 60%;
-}
-@keyframes jv-dashbuild-shimmer {
-	0% {
-		background-position: 100% 50%;
-	}
-	100% {
-		background-position: 0 50%;
-	}
 }
 
 /* confirm / cancel card for a pending ERP-mutating action */
