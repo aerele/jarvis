@@ -276,15 +276,20 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 	);
 	assert.notEqual(chatSrc.indexOf('case "run:start":'), -1);
 	assert.notEqual(chatSrc.indexOf('case "queue:position":'), -1);
-	assert.match(runStart, /gotoMorph\.value = null;/);
+	// every clear site goes through dropGotoMorph(), which also cancels the
+	// pending hold-navigation timer - a cleared latch with a live timer would
+	// still redirect a user who moved on
+	const dropFn = fnBody(chatSrc, "function dropGotoMorph() {");
+	assert.match(dropFn, /clearTimeout\(gotoNavTimer\)/);
+	assert.match(dropFn, /gotoMorph\.value = null;/);
+	assert.match(chatSrc, /onUnmounted\(dropGotoMorph\);/);
+	assert.match(runStart, /dropGotoMorph\(\);/);
 	const runErrorStart = chatSrc.indexOf('case "run:error":');
 	assert.notEqual(runErrorStart, -1);
 	const runError = chatSrc.slice(runErrorStart, runErrorStart + 2000);
-	assert.match(runError, /gotoMorph\.value = null;/);
+	assert.match(runError, /dropGotoMorph\(\);/);
 	const stopRun = fnBody(chatSrc, "function stopRun() {");
-	assert.match(stopRun, /gotoMorph\.value = null;/);
-	const resetRunState = fnBody(chatSrc, "function resetRunState() {");
-	assert.match(resetRunState, /gotoMorph\.value = null;/);
+	assert.match(stopRun, /dropGotoMorph\(\);/);
 	// run:end is the one path that can EITHER navigate (this exact terminal is
 	// the one that fires gotoDashboards) or not (a second tab that lost the
 	// localStorage stamp race, an errored/stopped row, or a was_recovered
@@ -297,12 +302,19 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 		chatSrc.indexOf('case "message:enriched": {')
 	);
 	assert.match(runEnd, /let redirected = false;/);
-	assert.match(runEnd, /redirected = true;\s*\n\s*gotoDashboards\(goto\.prompt\);/);
-	assert.match(runEnd, /if \(!redirected\) gotoMorph\.value = null;/);
+	// the navigating terminal latches explicitly (the block can land WITH the
+	// terminal, unseen by the streaming watcher) and holds ~1s so the morph
+	// line gets real screen time - except under prefers-reduced-motion, where
+	// it navigates at once (there is no animation to show)
+	assert.match(runEnd, /redirected = true;/);
+	assert.match(runEnd, /gotoMorph\.value = goto;/);
+	assert.match(runEnd, /prefers-reduced-motion/);
+	assert.match(runEnd, /GOTO_MORPH_HOLD_MS/);
+	assert.match(runEnd, /if \(gotoMorph\.value\) gotoDashboards\(goto\.prompt\);/);
+	assert.match(runEnd, /if \(!redirected\) dropGotoMorph\(\);/);
 	// the unconditional clear must come AFTER the redirect gate, not before it
 	assert.ok(
-		runEnd.indexOf("if (!redirected) gotoMorph.value = null;") >
-			runEnd.indexOf("redirected = true;"),
+		runEnd.indexOf("if (!redirected) dropGotoMorph();") > runEnd.indexOf("redirected = true;"),
 		"the redirected check must run after the redirect branch, not race it"
 	);
 });
