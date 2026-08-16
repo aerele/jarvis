@@ -63,15 +63,14 @@ const forgetReadySpy = vi.hoisted(() => vi.fn());
 // These specs assert the CONNECT step, so there is never a reconnect intent here:
 // the landing helpers are stubbed to "no intent, keep the resumed step". Mocked
 // explicitly rather than via importOriginal so the real module's graph (api.js ->
-// frappe-ui) stays out of this file.
+// frappe-ui) stays out of this file. Slice 4b note: the reconnect STOP card's CTA
+// no longer hard-navs anywhere (it resets local state back to the connect form in
+// place), so RECONNECT_INTENT_URL is deliberately NOT re-exported here - the view
+// no longer imports it, and the loop it caused is pinned by the form-assertion test.
 vi.mock("@/onboarding/readiness.js", () => ({
 	forgetReady: forgetReadySpy,
 	hasReconnectIntent: () => false,
 	landingStep: ({ resumedStep }) => resumedStep,
-	// Slice 4b: the reconnect STOP card's CTA routes here. The real constant is
-	// "/jarvis/onboarding?reconnect=1"; pin the same literal so the click assertion
-	// below is exercising the true destination, not a placeholder.
-	RECONNECT_INTENT_URL: "/jarvis/onboarding?reconnect=1",
 }));
 
 vi.mock("@/theme", () => ({
@@ -930,39 +929,51 @@ describe("jarvis#727 an unverifiable model has a way out, not only a Retry", () 
 			w.unmount();
 		});
 
-		it("the Reconnect CTA routes to the reconnect wizard entry", async () => {
-			const realLocation = window.location;
-			// jsdom's real window.location.assign is non-configurable; replace the
-			// whole object (same idiom as BillingPage.spec.js).
-			Object.defineProperty(window, "location", {
-				configurable: true,
-				value: { ...window.location, assign: vi.fn() },
+		// The review BLOCKER. The old CTA hard-navved to RECONNECT_INTENT_URL, but every
+		// customer who can see this card is already terminal (they reached PAID ->
+		// PROVISIONING -> connect), and the REAL landingStep DROPS the reconnect intent
+		// when terminal - so the nav resumed straight back to "connect", restarted the
+		// wait, re-observed reconnect_required and re-rendered THIS same card: an
+		// infinite no-op loop. The shipped test missed it because it mocked landingStep
+		// down to ({resumedStep}) => resumedStep. The CTA now re-opens the editable
+		// connect FORM in place so the customer can actually re-run the connect; this
+		// pins that it reaches the form, never the same stop card. Reverting the CTA fix
+		// (back to window.location.assign) reds this: state stays on the reconnect card.
+		it("the Reconnect CTA re-opens the connect FORM in place, never re-renders the stop card", async () => {
+			// Reach the stop card through the real wait, exactly as production does: a
+			// subscription apply completes but chat_readiness is false, the wait polls,
+			// and its first poll observes reconnect_required. finishing is true here, so
+			// the card shows and the form's "Start chatting" footer (v-if !finishing) is
+			// absent.
+			api.isReadyForChat.mockResolvedValue({
+				ready: false,
+				reason: "reconnect_required",
+				detail: RECONNECT_REASON,
 			});
-			try {
-				const w = await mountConnect();
-				w.vm.noteReadiness({
-					answered: true,
-					reason: "reconnect_required",
-					detail: RECONNECT_REASON,
-				});
-				await flushPromises();
+			vi.useFakeTimers();
+			const w = await mountConnect();
+			api.isReadyForChat.mockClear();
 
-				const reconnectBtn = w
-					.findAll("button")
-					.find((b) => (b.attributes("label") || b.text()) === "Reconnect");
-				expect(reconnectBtn).toBeTruthy();
-				await reconnectBtn.trigger("click");
+			w.vm.onTerminal(readyChatBlockedStatus);
+			await flushPromises();
+			expect(w.vm.state.connectPhase).toBe("reconnect");
+			expect(w.vm.state.finishing).toBe(true);
+			expect(labels(w)).not.toContain("Start chatting");
 
-				expect(window.location.assign).toHaveBeenCalledWith(
-					"/jarvis/onboarding?reconnect=1"
-				);
-				w.unmount();
-			} finally {
-				Object.defineProperty(window, "location", {
-					configurable: true,
-					value: realLocation,
-				});
-			}
+			const reconnectBtn = w
+				.findAll("button")
+				.find((b) => (b.attributes("label") || b.text()) === "Reconnect");
+			expect(reconnectBtn).toBeTruthy();
+			await reconnectBtn.trigger("click");
+			await flushPromises();
+
+			// The FORM, not the card. connectPhase back to "" un-renders the stop card;
+			// finishing=false re-shows the editor and its "Start chatting" footer. Both
+			// staying put would BE the loop, which is what the old hard-nav produced.
+			expect(w.vm.state.finishing).toBe(false);
+			expect(w.vm.state.connectPhase).toBe("");
+			expect(labels(w)).toContain("Start chatting");
+			w.unmount();
 		});
 
 		it("stops polling the instant ReconnectRequired is seen (no 40-tick spinner)", async () => {
