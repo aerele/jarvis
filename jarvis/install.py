@@ -15,8 +15,14 @@ absent on such a site before this hook existed:
 Observed live on a freshly reinstalled tenant: all three synced roles present,
 all three of the above missing.
 
-Reuses the migrate-time seeder rather than duplicating it, so the two entry
-points cannot drift. Idempotent: every seeder inside is exists-guarded.
+The Agents Marketplace catalog (``Jarvis Agent Listing``) has the same shape:
+it is synced from the bundled registry ONLY by the ``after_migrate`` hook, so a
+freshly onboarded site shows an empty Agents section until its first later
+migrate. Seeded here too, for the same reason.
+
+Reuses the migrate-time seeders rather than duplicating them, so the two entry
+points cannot drift. Idempotent: every seeder inside is exists-guarded (the
+catalog sync upserts by ``agent_slug``).
 
 Mirrors ``jarvis_admin_v2/install.py``, which exists for the same reason.
 """
@@ -59,4 +65,29 @@ def after_install() -> None:
 			+ ", ".join(missing)
 			+ ". The seeder swallows its own errors; see the 'jarvis wiki roles "
 			"seed failed' Error Log entry for the cause."
+		)
+
+	# The Agents Marketplace catalog (Jarvis Agent Listing) is otherwise seeded
+	# ONLY by the after_migrate hook, which install_app never runs -- so a freshly
+	# onboarded site shows an EMPTY Agents section until its first later migrate
+	# happens to fire the sync. Seed it here, the same as the roles above, so a
+	# day-1 site has the catalog from the moment jarvis is installed.
+	#
+	# Called directly (not agent_catalog.after_migrate, whose wrapper swallows
+	# exceptions -- against this hook's fail-loudly doctrine). Function-local
+	# import to avoid a new module-level import edge (agent_catalog itself
+	# lazy-imports to break a cycle).
+	from jarvis.chat.agent_catalog import sync_agent_listings
+
+	sync_agent_listings()
+	# _load_registry() returns an empty agent list WITHOUT raising if the bundled
+	# registry is missing, so a direct call can still seed nothing silently. The
+	# bundle ships at least one agent, so a 0 count is a real provisioning
+	# failure -- fail the install rather than leave the tenant with a permanently
+	# empty catalog it can only recover from via a manual migrate.
+	if frappe.db.count("Jarvis Agent Listing") == 0:
+		frappe.throw(
+			"jarvis after_install seeded an empty Agents Marketplace catalog. "
+			"The bundled jarvis/agents/registry.json is missing or empty; see the "
+			"'jarvis agent catalog: registry.json missing' Error Log entry."
 		)
