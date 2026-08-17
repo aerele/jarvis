@@ -4,6 +4,8 @@ All HTTP is mocked. Tests verify header construction, error mapping,
 envelope unwrapping, and missing-config handling.
 """
 
+import contextlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -1381,12 +1383,34 @@ class TestClientCapabilityAdvert(FrappeTestCase):
 				self.assertEqual(captured["json"].get("client_capabilities"), _EXPECTED_ADVERT, name)
 
 
+@contextlib.contextmanager
+def _fake_request(*, host: str, user: str = "Administrator"):
+	"""Minimal request + session so get_url's allow_header_override path reads a Host.
+	Restores frappe.local.request + the session user (determinism)."""
+	sentinel = object()
+	prev_request = getattr(frappe.local, "request", sentinel)
+	prev_user = frappe.session.user
+	frappe.local.request = SimpleNamespace(host=host, headers={})
+	frappe.set_user(user)
+	try:
+		yield
+	finally:
+		frappe.set_user(prev_user)
+		if prev_request is sentinel:
+			try:
+				del frappe.local.request
+			except AttributeError:
+				pass
+		else:
+			frappe.local.request = prev_request
+
+
 class TestPublicOriginSweep(FrappeTestCase):
-	"""plan-09 P1-5: the bench half of the ``get_url`` sweep. The ``frappe_site_url``
-	the bench hands admin must NOT be derivable from the request ``Host`` header (a
-	guest could otherwise choose the tenant's recorded site URL / magic-link base).
-	The fix is ``allow_header_override=False`` on the fallback, with a configured
-	``host_name`` preferred."""
+	"""plan-09 P1-5 + plan 2026-08-17: the ``frappe_site_url`` the bench hands admin.
+	Non-signup callers must NOT derive it from the request ``Host`` (a spoofed Host
+	could choose the recorded site URL). ONLY the signup flow (``trust_host=True``)
+	trusts the authenticated Host, forcing https for a real public domain; a configured
+	``host_name`` still wins for everyone."""
 
 	def tearDown(self):
 		_settings_clear_admin()
@@ -1466,6 +1490,81 @@ class TestPublicOriginSweep(FrappeTestCase):
 		self.assertTrue(captured["url"].endswith("billing.reconnect.redeem_reconnect_code"))
 		self.assertEqual(captured["json"]["code"], "ABCD2345")
 		self.assertEqual(captured["json"]["email"], "e@x.com")
+
+	# --- signup-flow Host capture (plan 2026-08-17) ---
+
+	def _pop_host(self):
+		frappe.conf.pop("host_name", None)
+		frappe.conf.pop("hostname", None)
+
+	def test_signup_flow_call_uses_header_override_ON(self):
+		# trust_host=True (signup only) flips get_url to allow_header_override=True.
+		self._pop_host()
+		with patch("frappe.utils.get_url", return_value="https://x.example.com") as gu:
+			admin_client._public_origin(trust_host=True)
+		gu.assert_called_once_with(allow_header_override=True)
+
+	def test_signup_forces_https_on_an_http_real_domain(self):
+		# A real domain reached over http (proxy without XF-Proto) -> https. Mutation: drop the
+		# normalization -> stays http -> reds.
+		self._pop_host()
+		with patch("frappe.utils.get_url", return_value="http://staging-fleet.klerk.in"):
+			out = admin_client._public_origin(trust_host=True)
+		self.assertEqual(out, "https://staging-fleet.klerk.in")
+
+	def test_signup_keeps_dev_local_host_unchanged(self):
+		# A dev .local bench (reserved TLD) must NOT be https-forced / port-dropped. Mutation:
+		# drop the reserved-TLD / isalpha guard -> normalizes -> reds.
+		self._pop_host()
+		with patch("frappe.utils.get_url", return_value="http://jarvis.local:8002"):
+			out = admin_client._public_origin(trust_host=True)
+		self.assertEqual(out, "http://jarvis.local:8002")
+
+	def test_signup_does_not_normalize_a_dotted_ip(self):
+		# A dotted IP literal is not a public domain. Double-guarded by design: the ipaddress check
+		# AND the numeric-last-label isalpha check both reject it (defense-in-depth).
+		self._pop_host()
+		with patch("frappe.utils.get_url", return_value="http://192.168.1.5:8000"):
+			out = admin_client._public_origin(trust_host=True)
+		self.assertEqual(out, "http://192.168.1.5:8000")
+
+	def test_signup_does_not_normalize_an_internal_site_name(self):
+		# staging.v15 - non-alphabetic TLD (v15) - is an internal site name, not a public domain.
+		self._pop_host()
+		with patch("frappe.utils.get_url", return_value="http://staging.v15"):
+			out = admin_client._public_origin(trust_host=True)
+		self.assertEqual(out, "http://staging.v15")
+
+	def test_signup_malformed_host_does_not_raise(self):
+		# A get_url value whose netloc breaks urlsplit must never 500 signup.
+		self._pop_host()
+		with patch("frappe.utils.get_url", return_value="http://[oops"):
+			out = admin_client._public_origin(trust_host=True)  # must not raise
+		self.assertEqual(out, "http://[oops")
+
+	def test_default_ignores_a_spoofed_host_even_when_authenticated(self):
+		# SECURITY (real get_url): the DEFAULT (non-signup) path must NOT trust a spoofed Host,
+		# even under an authenticated session. Mutation: default trust_host to True -> reds.
+		self._pop_host()
+		with _fake_request(host="evil.attacker.com", user="Administrator"):
+			out = admin_client._public_origin()  # default trust_host=False
+		self.assertNotIn("evil.attacker.com", out)
+
+	def test_signup_captures_the_authenticated_host_end_to_end(self):
+		# End-to-end (real get_url): trust_host=True derives the customer's real host from the
+		# request and forces https for a real domain.
+		self._pop_host()
+		with _fake_request(host="staging-fleet.klerk.in", user="Administrator"):
+			out = admin_client._public_origin(trust_host=True)
+		self.assertEqual(out, "https://staging-fleet.klerk.in")
+
+	def test_configured_host_name_wins_over_a_spoofed_host_on_signup(self):
+		# host_name must win even on the trust_host=True path (early return before the Host is
+		# consulted). Guards against a future reorder that lets a spoofed Host beat host_name.
+		frappe.conf["host_name"] = "https://tenant.example.com"
+		with _fake_request(host="evil.attacker.com", user="Administrator"):
+			out = admin_client._public_origin(trust_host=True)
+		self.assertEqual(out, "https://tenant.example.com")
 
 
 class TestPostUpdateLlmCredsAuthMode(FrappeTestCase):
