@@ -95,4 +95,31 @@ describe("SortButton field picker (portal-free menu)", () => {
 		await clear.trigger("click");
 		expect(w.emitted("update:sort").at(-1)[0]).toEqual({ field: "skill_name", dir: "asc" });
 	});
+
+	// The button label bug: at the page default it reads "Sort" (a CTA), but toggling the
+	// direction and returning to the default snapped it back to "Sort" as if sort were cleared.
+	function mountAtDefault() {
+		return mount(SortButton, {
+			props: { sortOptions: OPTIONS, sort: { ...DEFAULT }, defaultSort: DEFAULT },
+		});
+	}
+
+	it("shows the 'Sort' CTA on a pristine list sitting at its default sort", () => {
+		expect(
+			mountAtDefault()
+				.findAll("button")
+				.map((b) => b.text())
+		).toContain("Sort");
+	});
+
+	it("keeps the field label (not 'Sort') after toggling direction back to the default", async () => {
+		const w = mountAtDefault();
+		await w.find('[data-icon="arrow-up"]').trigger("click"); // engage: asc -> desc
+		await w.setProps({ sort: { field: "skill_name", dir: "desc" } });
+		await w.find('[data-icon="arrow-down"]').trigger("click"); // desc -> asc (== default)
+		await w.setProps({ sort: { field: "skill_name", dir: "asc" } });
+		const labels = w.findAll("button").map((b) => b.text());
+		expect(labels).toContain("Name"); // stays the chosen field
+		expect(labels).not.toContain("Sort"); // NOT the cleared-CTA anymore
+	});
 });

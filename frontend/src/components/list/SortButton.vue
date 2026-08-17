@@ -20,7 +20,7 @@
 		<Popover placement="bottom-end">
 			<template #target="{ togglePopover }">
 				<Button
-					:label="isDefault ? 'Sort' : fieldLabel"
+					:label="touched || !isDefault ? fieldLabel : 'Sort'"
 					class="rounded-l-none"
 					@click="togglePopover()"
 				/>
@@ -84,7 +84,7 @@
 // asc/desc toggle joined to the field button ("Sort" at the page default, the
 // field label once chosen); a ghost x reset appears once a non-default sort is
 // active. Emits update:sort {field, dir}.
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { Popover, Button, FeatherIcon } from "frappe-ui";
 
 const props = defineProps({
@@ -108,12 +108,18 @@ const dir = computed(() => props.sort.dir || props.defaultSort.dir || "desc");
 // The field the menu marks as selected: the active sort, else the page default.
 const currentField = computed(() => props.sort.field || props.defaultSort.field || "");
 
+// Once the user engages the sort (picks a field OR flips direction) the button shows the
+// chosen field, even when the values happen to equal the page default - otherwise toggling
+// Name desc->asc snaps the label back to "Sort" as if the sort were cleared. Reset clears it.
+const touched = ref(false);
+
 const fieldLabel = computed(() => {
-	const opt = (props.sortOptions || []).find((o) => o.value === props.sort.field);
-	return (opt && opt.label) || props.sort.field || "Sort";
+	const opt = (props.sortOptions || []).find((o) => o.value === currentField.value);
+	return (opt && opt.label) || currentField.value || "Sort";
 });
 
 function toggleDir() {
+	touched.value = true;
 	// Fall back to the default field so toggling from the untouched default state
 	// (where sort.field may not yet be set by the page) still emits a real field.
 	emit("update:sort", {
@@ -124,11 +130,13 @@ function toggleDir() {
 
 function pickField(field, close) {
 	if (!field) return;
+	touched.value = true;
 	emit("update:sort", { field, dir: props.sort.dir || props.defaultSort.dir || "asc" });
 	if (close) close();
 }
 
 function reset(close) {
+	touched.value = false;
 	emit("update:sort", {
 		field: props.defaultSort.field || "",
 		dir: props.defaultSort.dir || "",
