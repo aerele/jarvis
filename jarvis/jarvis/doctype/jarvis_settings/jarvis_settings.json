@@ -121,6 +121,9 @@
   "agent_catalog_version",
   "role_profiles_pushed",
   "role_profiles_pushed_at",
+  "role_profiles_config",
+  "role_profiles_config_version",
+  "role_profiles_config_synced_at",
   "release_notice_section",
   "release_notice_active",
   "latest_jarvis_version",
@@ -697,7 +700,9 @@
    "fieldtype": "Check",
    "label": "Enable Role-Based Agent Profiles",
    "default": "0",
-   "description": "When on, a new chat session may be pinned to a role-based agent profile (a reduced tool set plus the matching skill set derived from the user's ERPNext roles) instead of the main agent - but only once that profile has actually been rendered on the agent side (see Role Profiles Pushed below). Off (default): every session uses the main agent, matching pre-role-profiles behavior exactly. Operator intent, not tenant state - not reset between tenancies."
+   "read_only": 1,
+   "hidden": 1,
+   "description": "When on, a new chat session may be pinned to a role-based agent profile (a reduced tool set plus the matching skill set derived from the user's ERPNext roles) instead of the main agent - but only once that profile has actually been rendered on the agent side (see Role Profiles Pushed below). Off (default): every session uses the main agent, matching pre-role-profiles behavior exactly. Admin-owned mirror of the pulled role_profiles_config's `enabled` flag (spec B4) - never tenant-controllable; only jarvis.chat.role_profiles.sync_role_profile_config writes it. Reset to 0 between tenancies."
   },
   {
    "fieldname": "sync_tab",
@@ -876,6 +881,29 @@
    "fieldtype": "Datetime",
    "hidden": 1,
    "label": "Role Profiles Pushed At",
+   "read_only": 1
+  },
+  {
+   "description": "Canonical JSON of the admin-owned role-profile config last pulled (jarvis.chat.role_profiles.sync_role_profile_config): skill sets, ERPNext role -> set-key mappings, and the standard tool tier's allow/core lists. Empty when no config has ever been pulled (or the last pull failed with no prior cache) - readers fall back to the code fixture, never to a partial parse.",
+   "fieldname": "role_profiles_config",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Role Profile Config",
+   "read_only": 1
+  },
+  {
+   "description": "Opaque version identifier for the cached role_profiles_config (computed and owned by the admin side, EXCLUDING the enabled flag - the bench never hashes it, only compares it byte-for-byte). Compared against the freshly pulled version on every sync to decide whether a re-push of role profiles is needed.",
+   "fieldname": "role_profiles_config_version",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Role Profile Config Version",
+   "read_only": 1
+  },
+  {
+   "fieldname": "role_profiles_config_synced_at",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Role Profile Config Synced At",
    "read_only": 1
   },
   {

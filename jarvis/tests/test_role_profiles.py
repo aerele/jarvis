@@ -289,6 +289,504 @@ class TestSyncRoleProfiles(FrappeTestCase):
 		self.assertEqual([p["slug"] for p in first], ["role-accounts", "role-hr"])
 
 
+class TestRoleProfileConfigSync(FrappeTestCase):
+	"""``jarvis.chat.role_profiles.sync_role_profile_config`` - the admin-pull
+	+ cache + mirror + conditional re-push boundary (task BJ1).
+
+	Mirrors ``TestSyncRoleProfiles`` above: the three new Settings fields
+	(``role_profiles_config`` / ``_version`` / ``_synced_at``) only exist once
+	a ``bench migrate`` has run for the DocType JSON change in this task, and
+	this shared bench points at a live production tenancy, so the Settings
+	Single is stood in with a plain dict behind ``frappe.db.get_single_value``
+	/ ``set_value`` / ``set_single_value`` rather than written for real.
+	"""
+
+	@staticmethod
+	def _config(version="v1", enabled=True, skill="hrms-hr"):
+		return {
+			"version": version,
+			"enabled": enabled,
+			"sets": {"hr": [skill]},
+			"shared_core": ["frappe-core"],
+			"mappings": {"HR User": "hr"},
+			"tool_tiers": {"standard": {"allow": ["exec", "read"], "core": ["exec"]}},
+		}
+
+	@staticmethod
+	def _fake_store(initial=None):
+		"""Same shape as ``TestSyncRoleProfiles._fake_settings_store``, extended
+		with a ``set_single_value`` fake for the ``enable_role_profiles`` mirror
+		write."""
+		store = dict(initial or {})
+
+		def fake_get_single_value(doctype, fieldname, cache=True):
+			assert doctype == role_profiles._SETTINGS
+			return store.get(fieldname)
+
+		def fake_set_value(doctype, name, values, *args, **kwargs):
+			assert doctype == role_profiles._SETTINGS
+			assert name == role_profiles._SETTINGS
+			store.update(values)
+
+		def fake_set_single_value(doctype, fieldname, value, *args, **kwargs):
+			assert doctype == role_profiles._SETTINGS
+			store[fieldname] = value
+
+		return store, fake_get_single_value, fake_set_value, fake_set_single_value
+
+	def test_success_caches_mirrors_and_pushes_on_version_change(self):
+		store, fake_get, fake_set, fake_set_single = self._fake_store()
+		# admin_client.get_role_profile_config() returns the bare data dict:
+		# _post already unwraps the {"ok", "data"} envelope (jarvis#907
+		# live-verification fix) - mocking the STILL-WRAPPED shape here would
+		# silently mask that bug, exactly as it did before this fix.
+		resp = self._config(version="v1", enabled=True)
+		calls = []
+
+		def fake_sync(**kw):
+			calls.append(("sync", kw))
+			return {"pushed": True, "profiles": []}
+
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(
+				role_profiles, "_invalidate_config_cache", side_effect=lambda: calls.append("invalidate")
+			),
+			patch.object(role_profiles, "sync_role_profiles", side_effect=fake_sync),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		self.assertEqual(frappe.parse_json(store["role_profiles_config"])["version"], "v1")
+		self.assertEqual(store["role_profiles_config_version"], "v1")
+		self.assertIsNotNone(store.get("role_profiles_config_synced_at"))
+		self.assertEqual(store["enable_role_profiles"], 1)
+		# Invalidation must happen BEFORE the forced re-push, so the push
+		# recomputes needed_profiles() from the NEW config, not a value BJ2's
+		# accessor memoized earlier in this same request.
+		self.assertEqual(calls, ["invalidate", ("sync", {"force": True})])
+
+	def test_failed_push_leaves_version_unadvanced_and_reports_synced_false(self):
+		"""Whole-branch review finding 1: a version-changing sync whose forced
+		re-push FAILS must not stamp the new version - stamping it anyway
+		would mean a failed push still reads as fully synced, leaving fleet
+		stale for up to a day before anything retries. The config JSON and
+		mirror are still written (they reflect the freshly validated pull,
+		independent of whether the push to admin/fleet succeeded); only the
+		version field is deliberately left at its old value so the next tick
+		sees a version mismatch again and retries."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"role_profiles_config_version": "v0"}
+		)
+		# admin_client.get_role_profile_config() returns the bare data dict:
+		# _post already unwraps the {"ok", "data"} envelope (jarvis#907
+		# live-verification fix) - mocking the STILL-WRAPPED shape here would
+		# silently mask that bug, exactly as it did before this fix.
+		resp = self._config(version="v1", enabled=True)
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(role_profiles, "_invalidate_config_cache"),
+			patch.object(role_profiles, "sync_role_profiles", return_value={"pushed": False, "profiles": []}),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": False})
+		self.assertEqual(store["role_profiles_config_version"], "v0")  # unadvanced
+		self.assertEqual(frappe.parse_json(store["role_profiles_config"])["version"], "v1")  # still cached
+
+	def test_successful_push_advances_the_stored_version(self):
+		"""Sibling of the failure test above: a version-changing sync whose
+		forced re-push SUCCEEDS does stamp the new version, so the next tick
+		correctly reads no change and stays a no-op."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"role_profiles_config_version": "v0"}
+		)
+		# admin_client.get_role_profile_config() returns the bare data dict:
+		# _post already unwraps the {"ok", "data"} envelope (jarvis#907
+		# live-verification fix) - mocking the STILL-WRAPPED shape here would
+		# silently mask that bug, exactly as it did before this fix.
+		resp = self._config(version="v1", enabled=True)
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(role_profiles, "_invalidate_config_cache"),
+			patch.object(role_profiles, "sync_role_profiles", return_value={"pushed": True, "profiles": []}),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		self.assertEqual(store["role_profiles_config_version"], "v1")
+
+	def test_still_enveloped_response_also_works(self):
+		"""jarvis#907 live-verification fix: ``_post`` already unwraps the
+		``{"ok": True, "data": {...}}`` envelope, so ``get_role_profile_config()``
+		returns the bare data dict in real life - every other test in this
+		class mocks that real (bare) shape. This test is the deliberate
+		exception: it proves ``sync_role_profile_config`` ALSO still accepts a
+		legacy enveloped response (``response.get("data", response)`` unwraps
+		it), so a future transport change back to a wrapping shape would not
+		silently break the sync."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store()
+		enveloped = {"ok": True, "data": self._config(version="v1", enabled=True)}
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=enveloped),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(role_profiles, "_invalidate_config_cache"),
+			patch.object(role_profiles, "sync_role_profiles", return_value={"pushed": True, "profiles": []}),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		self.assertEqual(store["role_profiles_config_version"], "v1")
+		self.assertEqual(frappe.parse_json(store["role_profiles_config"])["version"], "v1")
+
+	def test_unchanged_version_does_not_repush(self):
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"role_profiles_config_version": "v1"}
+		)
+		# admin_client.get_role_profile_config() returns the bare data dict:
+		# _post already unwraps the {"ok", "data"} envelope (jarvis#907
+		# live-verification fix) - mocking the STILL-WRAPPED shape here would
+		# silently mask that bug, exactly as it did before this fix.
+		resp = self._config(version="v1", enabled=True)
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(role_profiles, "_invalidate_config_cache") as mock_invalidate,
+			patch.object(role_profiles, "sync_role_profiles") as mock_sync,
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		mock_invalidate.assert_not_called()
+		mock_sync.assert_not_called()
+		self.assertEqual(store["enable_role_profiles"], 1)
+
+	def test_pull_failure_with_existing_cache_keeps_cache_and_mirror(self):
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={
+				"role_profiles_config": frappe.as_json(self._config(version="v0")),
+				"role_profiles_config_version": "v0",
+				"enable_role_profiles": 1,
+			}
+		)
+		with (
+			patch(
+				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
+			),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+		):
+			before = dict(store)
+			result = role_profiles.sync_role_profile_config()
+			after = dict(store)
+
+		self.assertEqual(result, {"synced": False})
+		self.assertEqual(before, after)
+
+	def test_pull_failure_with_no_cache_mirrors_off(self):
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"enable_role_profiles": 1}  # stale ON from a prior tenancy; no cache present
+		)
+		with (
+			patch(
+				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
+			),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": False})
+		self.assertEqual(store["enable_role_profiles"], 0)
+
+	def test_mirror_off_transition_logs_a_distinct_operator_visible_reason(self):
+		"""Ruling (whole-branch review finding 2): zeroing the mirror on a
+		no-cache failure is spec-mandated (B4) and stays exactly as-is - but a
+		1->0 transition now writes its own log_error entry, distinct from the
+		generic phase-failure log, so an operator can tell "this tenant's
+		flag just went dark because it never synced" apart from every other
+		phase failure without reading a traceback."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"enable_role_profiles": 1}  # stale ON from a prior tenancy; no cache present
+		)
+		with (
+			patch(
+				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
+			),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(frappe, "log_error") as mock_log_error,
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": False})
+		self.assertEqual(store["enable_role_profiles"], 0)
+		titles = [call.kwargs.get("title") for call in mock_log_error.call_args_list]
+		self.assertIn("Jarvis: role-profile-config mirror defaulted OFF", titles)
+
+	def test_mirror_already_off_does_not_log_a_transition(self):
+		"""Sibling of the transition test above: when the mirror is already 0
+		(no transition happening), the distinct log line must not fire - only
+		a real 1->0 flip is operator-visible-worthy."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store(initial={"enable_role_profiles": 0})
+		with (
+			patch(
+				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
+			),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(frappe, "log_error") as mock_log_error,
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": False})
+		titles = [call.kwargs.get("title") for call in mock_log_error.call_args_list]
+		self.assertNotIn("Jarvis: role-profile-config mirror defaulted OFF", titles)
+
+	def test_invalid_payload_is_failure_path_and_leaves_cache_untouched(self):
+		store, fake_get, fake_set, fake_set_single = self._fake_store()
+		bad = {"version": "v1"}  # missing enabled/sets/mappings/tool_tiers; bare shape (no envelope)
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=bad),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": False})
+		self.assertNotIn("role_profiles_config", store)
+		self.assertEqual(store.get("enable_role_profiles", 0), 0)
+
+	def test_invalidate_config_cache_is_safe_noop_when_nothing_memoized(self):
+		role_profiles._invalidate_config_cache()  # must not raise
+
+	def test_validate_rejects_bad_skill_slug_charset(self):
+		bad = self._config()
+		bad["sets"]["hr"] = ["HRMS_HR"]  # uppercase/underscore not allowed
+		self.assertFalse(role_profiles._validate_role_profile_config(bad))
+
+	def test_validate_rejects_core_tool_not_in_allow(self):
+		bad = self._config()
+		bad["tool_tiers"]["standard"]["core"] = ["exec", "not-allowed-tool"]
+		self.assertFalse(role_profiles._validate_role_profile_config(bad))
+
+	def test_validate_rejects_missing_key(self):
+		bad = self._config()
+		del bad["tool_tiers"]
+		self.assertFalse(role_profiles._validate_role_profile_config(bad))
+
+	def test_validate_accepts_well_formed_config(self):
+		self.assertTrue(role_profiles._validate_role_profile_config(self._config()))
+
+	def test_version_change_repush_carries_new_config_skills_in_payload(self):
+		"""BJ1-review obligation 1: prove a version-changing
+		``sync_role_profile_config`` re-push actually carries profiles
+		COMPUTED FROM THE NEW CONFIG, not the code fixture or a value BJ2's
+		accessor memoized earlier. Mocks only the ``admin_client`` transport -
+		``sync_role_profiles`` and ``needed_profiles`` run for real against a
+		real ``Jarvis User`` fixture, so this closes the gap BJ1 could not
+		prove on its own.
+		"""
+		role_profiles._invalidate_config_cache()
+		self.addCleanup(role_profiles._invalidate_config_cache)
+
+		u_email = "rp-cfg-e2e@example.com"
+		if not frappe.db.exists("User", u_email):
+			u = frappe.get_doc({"doctype": "User", "email": u_email, "first_name": "rp-cfg-e2e"})
+			u.append_roles("Jarvis User", "HR User")
+			u.insert(ignore_permissions=True)
+
+		store, fake_get, fake_set, fake_set_single = self._fake_store()
+		new_config = self._config(version="v2", enabled=True)
+		new_config["sets"] = {"hr": ["custom-hr-only-skill"]}
+		# Bare dict, matching what admin_client.get_role_profile_config()
+		# actually returns (_post already unwrapped the envelope).
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=new_config),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch("jarvis.admin_client.post_push_role_profiles", return_value={"ok": True}) as mock_push,
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		mock_push.assert_called_once()
+		pushed = mock_push.call_args.kwargs["role_profiles"]
+		hr_profile = next(p for p in pushed if p["slug"] == "role-hr")
+		self.assertEqual(hr_profile["skills"], sorted({"custom-hr-only-skill", "frappe-core"}))
+
+
+class TestRoleProfileConfigAccessors(FrappeTestCase):
+	"""``jarvis.chat.role_profiles._active_config`` and the accessors it backs
+	(``get_skill_sets`` / ``get_role_to_set`` / ``get_shared_core`` /
+	``get_tools_allow``), plus the callers that switched to them,
+	``resolve_profile`` / ``needed_profiles`` (task BJ2).
+
+	``frappe.local``'s per-request memo is process-lifetime, not per-test, so
+	every test here invalidates it in setUp AND tearDown - belt and braces:
+	``_active_config`` re-reads the version fresh on every call regardless
+	(see its own docstring), but explicit invalidation keeps this class's
+	tests deterministic and keeps a fake ``v1``/``v2`` memo from a mocked
+	context leaking into an unmocked one.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		role_profiles._invalidate_config_cache()
+
+	def tearDown(self):
+		role_profiles._invalidate_config_cache()
+		super().tearDown()
+
+	def _mk_user(self, email, roles):
+		if not frappe.db.exists("User", email):
+			u = frappe.get_doc({"doctype": "User", "email": email, "first_name": email.split("@")[0]})
+			u.append_roles(*roles)
+			u.insert(ignore_permissions=True)
+		return email
+
+	@staticmethod
+	def _config(**overrides):
+		data = {
+			"version": "v1",
+			"enabled": True,
+			"sets": {"hr": ["hrms-hr", "hrms-payroll"]},
+			"shared_core": ["frappe-core"],
+			"mappings": {"HR User": "hr"},
+			"tool_tiers": {"standard": {"allow": ["exec", "read"], "core": ["exec"]}},
+		}
+		data.update(overrides)
+		return data
+
+	@staticmethod
+	def _patched(raw, version="v1"):
+		store = {"role_profiles_config": raw, "role_profiles_config_version": version}
+
+		def fake_get(doctype, fieldname, cache=True):
+			assert doctype == role_profiles._SETTINGS
+			return store.get(fieldname)
+
+		return patch.object(frappe.db, "get_single_value", side_effect=fake_get)
+
+	def test_config_moves_skill_between_sets_and_resolve_profile_honors_it(self):
+		u = self._mk_user("rp-cfg-move@example.com", ["Jarvis User", "HR User"])
+		cfg = self._config(sets={"hr": ["erpnext-projects"]})
+		with self._patched(frappe.as_json(cfg)):
+			c = role_profiles.resolve_profile(u)
+		self.assertEqual(c.agent_id, "role-hr")
+		self.assertIn("erpnext-projects", c.skills)  # moved in by config
+		self.assertNotIn("hrms-hr", c.skills)  # fixture skill absent under override
+
+	def test_corrupt_cache_falls_back_byte_identical_to_no_cache(self):
+		u = self._mk_user("rp-cfg-corrupt@example.com", ["Jarvis User", "HR User"])
+		with self._patched(None):
+			baseline = role_profiles.resolve_profile(u)
+		role_profiles._invalidate_config_cache()
+		with self._patched("{not valid json"):
+			corrupt = role_profiles.resolve_profile(u)
+		self.assertEqual(baseline, corrupt)
+		self.assertEqual(baseline.agent_id, "role-hr")
+
+	def test_unknown_role_in_config_mappings_just_maps(self):
+		# "Translator" is not in the code fixture's ROLE_TO_SET at all - the
+		# config is authority for mappings, so it maps anyway.
+		u = self._mk_user("rp-cfg-unknown-role@example.com", ["Jarvis User", "Translator"])
+		cfg = self._config(mappings={"Translator": "hr"})
+		with self._patched(frappe.as_json(cfg)):
+			c = role_profiles.resolve_profile(u)
+		self.assertEqual(c.agent_id, "role-hr")
+
+	def test_config_missing_key_is_rejected_whole_and_falls_back(self):
+		u = self._mk_user("rp-cfg-missing-key@example.com", ["Jarvis User", "HR User"])
+		cfg = self._config()
+		del cfg["tool_tiers"]
+		with self._patched(frappe.as_json(cfg)):
+			c = role_profiles.resolve_profile(u)
+		self.assertEqual(c.agent_id, "role-hr")
+		self.assertEqual(
+			c.skills,
+			tuple(sorted(role_profiles.SHARED_CORE_SKILLS.union(role_profiles.SKILL_SETS["hr"]))),
+		)
+
+	def test_dangling_mapping_set_key_is_rejected_whole_and_falls_back(self):
+		u = self._mk_user("rp-cfg-dangling@example.com", ["Jarvis User", "HR User"])
+		# "ghost-set" is charset-valid but absent from `sets` - referential
+		# integrity is BJ2's problem, not BJ1's charset check.
+		cfg = self._config(mappings={"HR User": "ghost-set"})
+		with self._patched(frappe.as_json(cfg)):
+			self.assertIsNone(role_profiles._active_config())
+			c = role_profiles.resolve_profile(u)
+		self.assertEqual(c.agent_id, "role-hr")  # fixture mapping, not the dangling config
+		self.assertIn("hrms-hr", c.skills)
+
+	def test_get_tools_allow_honors_config_and_falls_back(self):
+		cfg = self._config(tool_tiers={"standard": {"allow": ["exec"], "core": ["exec"]}})
+		with self._patched(frappe.as_json(cfg)):
+			self.assertEqual(role_profiles.get_tools_allow(), ["exec"])
+		role_profiles._invalidate_config_cache()
+		with self._patched(None):
+			self.assertEqual(role_profiles.get_tools_allow(), role_profiles.standard_tools_allow())
+
+	def test_memo_is_stable_within_request_until_explicit_invalidate(self):
+		"""Deliberate semantic change (whole-branch review, findings 3+4+5):
+		``_active_config`` no longer re-checks ``role_profiles_config_version``
+		on every call - it memoizes on the FIRST read per request and does NOT
+		notice a same-request version bump on its own. Only an explicit
+		``_invalidate_config_cache()`` call (made by
+		``sync_role_profile_config`` itself before its forced re-push) makes a
+		same-request config update visible. This supersedes the old
+		version-keyed auto-refresh behavior: it keeps one
+		``resolve_profile`` / ``needed_profiles`` run on a SINGLE config
+		version by construction, so a mid-run version change can never mix two
+		configs into one resolution."""
+		store = {
+			"role_profiles_config": frappe.as_json(self._config(version="v1")),
+			"role_profiles_config_version": "v1",
+		}
+
+		def fake_get(doctype, fieldname, cache=True):
+			return store.get(fieldname)
+
+		with patch.object(frappe.db, "get_single_value", side_effect=fake_get):
+			first = role_profiles._active_config()
+			self.assertEqual(first["version"], "v1")
+
+			# A same-request version bump WITHOUT invalidation must NOT be
+			# picked up - stability within one logical operation.
+			store["role_profiles_config"] = frappe.as_json(
+				self._config(version="v2", sets={"hr": ["erpnext-projects"]})
+			)
+			store["role_profiles_config_version"] = "v2"
+			still_first = role_profiles._active_config()
+			self.assertEqual(still_first["version"], "v1")
+
+			# Only an explicit invalidate makes the new version visible.
+			role_profiles._invalidate_config_cache()
+			second = role_profiles._active_config()
+
+		self.assertEqual(second["version"], "v2")
+		self.assertEqual(second["sets"]["hr"], ["erpnext-projects"])
+
+
 class FakeSess:
 	"""Stub pooled ``AgentSession``: counts ``create_session`` calls so tests
 	can assert the flag-gated legacy branch was (or was not) taken."""

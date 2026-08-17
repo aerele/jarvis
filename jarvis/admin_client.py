@@ -819,6 +819,31 @@ def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	)
 
 
+def get_role_profile_config(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
+	"""Fetch the admin-owned role-profile config (skill sets, ERPNext role ->
+	set-key mappings, the ``standard`` tool tier's allow/core lists, and the
+	admin-decided ``enabled`` flag) for the daily bench pull
+	(``jarvis.chat.role_profiles.sync_role_profile_config``).
+
+	Wire envelope: the admin answers ``{"ok": True, "data": {version, enabled,
+	sets, shared_core, mappings, tool_tiers}}`` - but ``_post`` (via
+	``_do_post``) already unwraps that envelope on the way out
+	(``envelope.get("data", envelope)``), so what THIS FUNCTION RETURNS to its
+	caller is the bare data dict itself - ``{version, enabled, sets,
+	shared_core, mappings, tool_tiers}`` directly, not the ``{"ok", "data"}``
+	wrapper. Raises the same ``AdminAuthError`` / ``AdminUnreachableError`` /
+	``AdminValidationError`` family as every other admin_client call; an admin
+	predating this endpoint answers Frappe's method-not-found rejection
+	(``is_method_not_found``), which the caller treats identically to any
+	other pull failure - never as an error into the daily scheduler.
+	"""
+	return _post(
+		path=_m("api.tenant.get_role_profile_config"),
+		body={},
+		timeout_s=timeout_s,
+	)
+
+
 # --------------------------------------------------------------------------- #
 # Support panel proxies (Plan 3 B2). The customer bench forwards requesting_user +
 # scope to the control-plane support endpoints, which re-derive the customer from the
