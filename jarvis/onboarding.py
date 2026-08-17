@@ -380,9 +380,9 @@ def capture_onboarding_lead(
 
 @frappe.whitelist()
 def get_terms_url() -> dict:
-	"""The admin-hosted Terms & Conditions URL for the Details-step checkbox
-	link. Best-effort: ``{"url": ""}`` on any failure so the checkbox still
-	renders (with plain unlinked text) when admin is unreachable or unconfigured."""
+	"""The public Terms & Conditions URL (marketing site) for the Details-step
+	checkbox link. Best-effort: ``{"url": ""}`` on any failure so the checkbox
+	still renders (with plain unlinked text)."""
 	try:
 		return {"url": admin_client.terms_url()}
 	except Exception:

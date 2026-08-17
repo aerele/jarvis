@@ -590,17 +590,39 @@ def capture_onboarding_lead(
 		return {"ok": False}
 
 
+# The Terms of Service moved from the admin plane to the public marketing site
+# (jarvis_frappe_cloud); linking it directly skips admin's compatibility 301.
+MARKETING_TERMS_URL = "https://jarvis.aerele.in/terms"
+# Aerele's own stock admin origin. Deliberately a literal, NOT imported from
+# hooks: rebranding is documented as either a jarvis_admin_url override OR
+# editing hooks' fallback constant, and a rebrand of the second kind must not
+# compare equal to "stock" here. The flip side of that independence: if Aerele
+# ever migrates its admin domain, update this literal alongside hooks'
+# fallback. Drift in either direction is benign - the link falls back to
+# <admin>/terms, whose compatibility 301 still lands on the right document.
+_AERELE_STOCK_ADMIN_URL = "https://fleet.klerk.in"
+
+
 def terms_url() -> str:
-	"""The admin-hosted Terms & Conditions page for the Review & Pay checkbox
-	link. Best-effort: returns "" on any failure (no admin URL configured, a
-	malformed one, ...) rather than raising - the checkbox must render, and the
-	view falls back to plain unlinked text when this is empty."""
+	"""The public Terms & Conditions page for the Details-step checkbox link.
+
+	Aerele's stock deployment links the marketing site directly - its admin
+	plane only 301s ``/terms`` there anyway, so the hop is pure latency. A
+	rebranded deployment (admin base resolving anywhere other than Aerele's
+	stock admin, whichever documented rebrand path set it) keeps
+	``<its admin>/terms`` so its own legal page stays authoritative.
+	Best-effort like before: any failure falls back to the marketing URL
+	rather than blanking the checkout's T&C link."""
 	try:
 		settings = frappe.get_single("Jarvis Settings")
 		base = _admin_url(settings)
-		return f"{base}/terms" if base else ""
+		# Case-insensitive: scheme and host are case-insensitive per RFC 3986,
+		# and a differently-cased stock URL must not read as a rebrand.
+		if base and base.lower() != _AERELE_STOCK_ADMIN_URL:
+			return f"{base}/terms"
 	except Exception:
-		return ""
+		pass
+	return MARKETING_TERMS_URL
 
 
 # Admin-owned preset catalog (spec 3.3). Guest-safe fetch (get_plans pattern),

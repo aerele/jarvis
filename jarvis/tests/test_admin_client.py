@@ -2235,3 +2235,49 @@ class TestFixturesCannotDestroySiteCredentials(FrappeTestCase):
 		with patch("frappe.get_single", _REAL_GET_SINGLE):
 			with self.assertRaises(RuntimeError):
 				_settings_clear_admin()
+
+
+class TestTermsUrl(FrappeTestCase):
+	"""terms_url() is the one legal-page URL the checkout flow hands out.
+
+	The terms moved to the public marketing site (2026-08-17): Aerele's stock
+	deployment must link it directly (the admin plane only 301s /terms
+	there), while a rebranded deployment (admin base resolving away from
+	Aerele's stock admin, by either documented rebrand path) keeps its own
+	admin's /terms.
+	"""
+
+	def test_stock_default_links_the_marketing_site_directly(self):
+		with patch.object(admin_client, "_admin_url", return_value=admin_client._AERELE_STOCK_ADMIN_URL):
+			self.assertEqual(admin_client.terms_url(), admin_client.MARKETING_TERMS_URL)
+
+	def test_rebrand_by_editing_hooks_fallback_is_still_a_rebrand(self):
+		"""hooks.py documents a second rebrand path: edit its fallback constant
+		and ship. The stock check must compare against Aerele's literal admin
+		origin, not whatever hooks currently returns, or that rebrand would
+		silently link Aerele's terms."""
+		with (
+			patch("jarvis.hooks._DEFAULT_ADMIN_URL_FALLBACK", "https://erp.reseller.example"),
+			patch.object(admin_client, "_admin_url", return_value="https://erp.reseller.example"),
+		):
+			self.assertEqual(admin_client.terms_url(), "https://erp.reseller.example/terms")
+
+	def test_rebranded_admin_keeps_its_own_terms_page(self):
+		with patch.object(admin_client, "_admin_url", return_value="https://erp.reseller.example"):
+			self.assertEqual(admin_client.terms_url(), "https://erp.reseller.example/terms")
+
+	def test_stock_admin_in_different_case_is_still_stock(self):
+		"""Scheme and host are case-insensitive (RFC 3986); a shouty-cased
+		stock config must not be misread as a rebrand."""
+		with patch.object(admin_client, "_admin_url", return_value="https://Fleet.Klerk.IN"):
+			self.assertEqual(admin_client.terms_url(), admin_client.MARKETING_TERMS_URL)
+
+	def test_unconfigured_admin_falls_back_to_the_marketing_url(self):
+		with patch.object(admin_client, "_admin_url", return_value=""):
+			self.assertEqual(admin_client.terms_url(), admin_client.MARKETING_TERMS_URL)
+
+	def test_a_settings_failure_never_blanks_the_link(self):
+		"""The old implementation returned "" on any failure; the marketing
+		URL is now the worst case, so the checkout link never goes dead."""
+		with patch("frappe.get_single", side_effect=RuntimeError("settings down")):
+			self.assertEqual(admin_client.terms_url(), admin_client.MARKETING_TERMS_URL)
