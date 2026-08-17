@@ -587,8 +587,10 @@
 								 reconnecting an already-paid account never went through this
 								 checkbox before, and reconnect makes no signup call that needs
 								 terms_accepted / contact_consent). payDisabled and onPayClick's
-								 own `!state.termsAccepted` guard stay in place as invariants -
-								 both are already true by the time Pay is reachable. Checkbox's
+								 own `!state.termsAccepted` guard stay in place too, and Pay itself
+								 renders a fallback copy of this same checkbox (needsTermsOnPay)
+								 for a resumed session that reaches Pay without revisiting this
+								 step this mount - see that computed. Checkbox's
 								 own `label` prop only takes plain text (no slot, no markup), so
 								 the link-bearing sentence is a sibling <label for=...> instead -
 								 clicking the embedded <a> navigates without also toggling the box. -->
@@ -1343,11 +1345,40 @@
 									>
 										{{ payLinkDeadline }}
 									</p>
-									<!-- T&C acceptance moved to the Details step (2026-08-16): the
-										 checkbox no longer renders here. payDisabled and onPayClick's
-										 own `!state.termsAccepted` guard below stay in place as
-										 invariants - both are already true by the time Pay is
-										 reachable, since Details' Continue is gated on the same flag. -->
+									<!-- Fallback only: T&C acceptance normally happens on Details
+										 (2026-08-16) and this never renders in that path. It exists
+										 for a resumed session that reaches Pay - S.REVIEW - without
+										 revisiting Details this mount, so the required checkbox is
+										 not just an invariant Details already satisfied. See
+										 needsTermsOnPay. Same markup/id shape as Details' checkbox,
+										 own id so a spec assertion on either can never collide (the
+										 two never render at once - steps are v-if'd). -->
+									<div
+										v-if="needsTermsOnPay"
+										class="mx-auto mt-5 flex max-w-[560px] items-start justify-center gap-2"
+									>
+										<Checkbox
+											id="jv-ob-terms-pay"
+											:model-value="state.termsAccepted"
+											aria-required="true"
+											@update:model-value="(v) => (state.termsAccepted = v)"
+										/>
+										<label
+											for="jv-ob-terms-pay"
+											class="cursor-pointer select-none text-p-sm text-ink-gray-7"
+										>
+											I agree to the
+											<a
+												v-if="state.termsUrl"
+												:href="state.termsUrl"
+												target="_blank"
+												rel="noopener"
+												class="ob-link"
+												@click.stop
+												>Terms &amp; Conditions</a
+											><span v-else>Terms &amp; Conditions</span>
+										</label>
+									</div>
 								</div>
 								<div class="ob-foot">
 									<button
@@ -1982,10 +2013,12 @@ const state = reactive({
 	// re-asked every time the customer lands fresh on this screen, same as it
 	// would be on any checkout. Details' Continue stays blocked until this is
 	// true, and only a literal true is ever sent to start_signup. payDisabled
-	// and onPayClick's own guard keep checking it too (invariants that are
-	// always true by the time Pay is reachable). Accepting it also grants
-	// contact consent (owner decision 2026-08-14): the terms cover being
-	// contacted about the account.
+	// and onPayClick's own guard keep checking it too - not dead invariants,
+	// since a resumed session can reach Pay without revisiting Details this
+	// mount and this resets to false on every fresh mount. needsTermsOnPay
+	// renders a fallback copy of the checkbox on Pay for exactly that case.
+	// Accepting it also grants contact consent (owner decision 2026-08-14):
+	// the terms cover being contacted about the account.
 	termsAccepted: false,
 	// The admin-hosted /terms URL (jarvis.onboarding.get_terms_url), fetched
 	// best-effort on mount so it is already available by the time the Details
@@ -2320,16 +2353,26 @@ const payCta = computed(() => {
 const payProviderReady = computed(() => !!state.paymentProvider);
 // The CTA's full gate, named rather than left as three booleans inline in the
 // template: busy, no confirmed gateway yet, or the required Terms & Conditions
-// box unticked. The third leg is an invariant now, not a live gate - the
-// checkbox itself lives on Details and blocks Continue there, so by the time
-// Pay renders state.termsAccepted is already true. Kept here anyway (per the
-// T&C + lead-capture contract) so a future change to Details' gate fails
-// closed instead of silently reopening this hole.
+// box unticked. The third leg is normally a dead invariant - Details' Continue
+// already required it - but a resumed session can reach Pay without ever
+// revisiting Details this mount (termsAccepted is not persisted, see its
+// declaration), so it still gates for real sometimes. needsTermsOnPay below
+// is what keeps that reachable rather than a dead end.
 // payBusyView is declared further down; safe to close over here since this
 // getter only runs at render, after the whole setup script has executed.
 const payDisabled = computed(
 	() => payBusyView.value || !payProviderReady.value || !state.termsAccepted
 );
+// True on the one Pay sub-screen this can actually happen on (S.REVIEW, the
+// plain "ready to pay" card - every other state renders its own template
+// branch that does not depend on payDisabled at all). A resumed session
+// (reload, or the admin-hosted checkout returning here) can land on this
+// screen with the box unticked and no Details visit this mount, and the
+// checkbox used to live ONLY on Details - so payDisabled's termsAccepted leg
+// permanently disabled the only control on screen, a genuine dead end. This
+// renders the same checkbox here as a fallback, gated tight enough that the
+// normal post-Details flow (termsAccepted already true) never sees it.
+const needsTermsOnPay = computed(() => pay.value.value === S.REVIEW && !state.termsAccepted);
 // #669: how long the checkout link is good for. Reads the machine's own
 // payTokenExpiresInS, which is cleared with the token it belongs to, so this
 // renders nothing the moment the link stops being openable rather than leaving a

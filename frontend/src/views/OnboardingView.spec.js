@@ -966,16 +966,49 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		expect(wrapper.vm.billing.consent).toBeUndefined();
 	});
 
-	it("Details renders the required T&C checkbox; Pay no longer renders it", async () => {
+	it("Details renders the required T&C checkbox; Pay's own copy (distinct id) only shows as a fallback", async () => {
 		const wrapper = mountView();
 		await flushPromises();
 		wrapper.vm.state.step = "details";
 		await flushPromises();
 		expect(wrapper.find("#jv-ob-terms").exists()).toBe(true);
 
+		// Landing on Pay with terms still unticked (the resume case): Details'
+		// own checkbox id is never reused, but the needsTermsOnPay fallback
+		// (its own id) renders since the box has not been ticked this mount.
 		wrapper.vm.state.step = "pay";
 		await flushPromises();
 		expect(wrapper.find("#jv-ob-terms").exists()).toBe(false);
+		expect(wrapper.find("#jv-ob-terms-pay").exists()).toBe(true);
+
+		// Ticked (normal post-Details flow): the fallback has nothing to do.
+		wrapper.vm.state.termsAccepted = true;
+		await flushPromises();
+		expect(wrapper.find("#jv-ob-terms-pay").exists()).toBe(false);
+	});
+
+	it("a resumed session landing directly on Pay (S.REVIEW) with terms unaccepted is not a dead end", async () => {
+		// Reproduces the resume/reconcile paths (reload on Review & Pay, the
+		// checkoutReturn handler): state.step lands on "pay" without a Details
+		// visit this mount, so termsAccepted is still its fresh-mount default.
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.paymentProvider = "razorpay";
+		wrapper.vm.state.step = "pay";
+		await flushPromises();
+
+		expect(wrapper.vm.state.termsAccepted).toBe(false);
+		expect(wrapper.vm.payDisabled).toBe(true);
+
+		// The fallback checkbox is the on-screen recovery - without it this was
+		// a dead end: no control anywhere could clear payDisabled's third leg.
+		const box = wrapper.find("#jv-ob-terms-pay");
+		expect(box.exists()).toBe(true);
+
+		await box.setValue(true);
+		await flushPromises();
+		expect(wrapper.vm.state.termsAccepted).toBe(true);
+		expect(wrapper.vm.payDisabled).toBe(false);
 	});
 
 	it("Details' Continue is blocked until the required T&C box is ticked, with a visible inline error (not a toast)", async () => {
