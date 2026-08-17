@@ -41,12 +41,12 @@
 							</div>
 							<div class="text-base text-ink-gray-5">is</div>
 							<div class="flex-1">
-								<FormControl
+								<PanelSelect
 									v-if="def.type === 'select'"
-									type="select"
 									class="!min-w-[140px]"
+									:aria-label="`Value for ${def.label}`"
 									:options="def.options"
-									:modelValue="filters[def.key] == null ? '' : filters[def.key]"
+									:model-value="filters[def.key] == null ? '' : filters[def.key]"
 									@update:modelValue="(v) => setValue(def, v)"
 								/>
 								<div
@@ -71,13 +71,12 @@
 						</div>
 					</div>
 					<div class="flex items-center justify-between gap-2">
-						<FormControl
+						<PanelSelect
 							v-if="unsetDefs.length"
-							type="select"
 							variant="ghost"
-							class="!text-ink-gray-5"
+							aria-label="Add a filter"
 							:options="addOptions"
-							:modelValue="''"
+							model-value=""
 							@update:modelValue="addFilter"
 						/>
 						<div v-else />
@@ -108,7 +107,8 @@
 // (daterange contributes from_date/to_date keys). Count-chip split trigger,
 // CRM popover anatomy ("Where/And <field> is <control>").
 import { ref, computed } from "vue";
-import { Popover, Button, FormControl, DatePicker } from "frappe-ui";
+import { Popover, Button, DatePicker } from "frappe-ui";
+import PanelSelect from "@/components/list/PanelSelect.vue";
 
 const props = defineProps({
 	filterDefs: { type: Array, default: () => [] }, // [{key,label,type:'select'|'daterange',options}]

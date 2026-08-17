@@ -38,11 +38,15 @@
 						<div
 							class="my-2 w-[320px] rounded-lg bg-surface-modal p-3 shadow-2xl ring-1 ring-black ring-opacity-5"
 						>
-							<FormControl
-								type="select"
-								label="Knowledge language"
+							<!-- PanelSelect, not FormControl select: a reka SelectPortal won't open
+							     inside this settings Popover (same bug fixed in the list filters). -->
+							<label class="mb-1 block text-xs text-ink-gray-5"
+								>Knowledge language</label
+							>
+							<PanelSelect
+								aria-label="Knowledge language"
 								:options="LANGUAGE_OPTIONS"
-								:modelValue="caps.knowledge_language"
+								:model-value="caps.knowledge_language"
 								@update:modelValue="changeLanguage"
 							/>
 							<p class="mt-1 text-p-sm text-ink-gray-5">
@@ -307,6 +311,7 @@ import {
 } from "frappe-ui";
 import { sessionUser } from "@/data/session";
 import ListPage from "@/components/list/ListPage.vue";
+import PanelSelect from "@/components/list/PanelSelect.vue";
 import WikiPageDialog from "@/components/wiki/WikiPageDialog.vue";
 import { useListPage } from "@/composables/useListPage";
 import { wikiListFetch } from "@/pages/list/listFetchers";

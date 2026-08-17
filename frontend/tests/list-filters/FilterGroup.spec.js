@@ -8,7 +8,18 @@ vi.mock("frappe-ui", () => frappeUiStubs());
 vi.mock("@/api", () => ({ searchLink: vi.fn(async () => []) }));
 
 import FilterGroup from "@/components/list/FilterGroup.vue";
+import PanelSelect from "@/components/list/PanelSelect.vue";
 import { clauseForEntry, setOperator, fieldKey } from "@/components/list/filterModel";
+
+// Both the operator AND the select-family value controls are portal-free PanelSelects
+// now (a frappe-ui FormControl select won't open inside the teleported Popover), so
+// read their contract off props / emitted events rather than a <select>/<option> tree.
+// They're told apart by their aria-label: "Condition for …" vs "Value for …".
+const panels = (w) => w.findAllComponents(PanelSelect);
+const operators = (w) =>
+	panels(w).filter((c) => (c.props("ariaLabel") || "").startsWith("Condition"));
+const values = (w) => panels(w).filter((c) => (c.props("ariaLabel") || "").startsWith("Value"));
+const setOp = (op, value) => op.vm.$emit("update:modelValue", value);
 
 /**
  * FilterGroup is CONTROLLED: it never mutates its own clause array, it emits a
@@ -60,18 +71,14 @@ describe("rows", () => {
 
 	it("offers each field's OWN operator list, with the server's default preselected", () => {
 		const w = mountPanel({ clauses: [clauseForEntry(ENABLED), clauseForEntry(CREATION)] });
-		const selects = w.findAll("select");
+		const ops = operators(w);
 		// Check exposes Equals only — the panel must not offer `like` on it.
-		const checkOperators = selects[0].findAll("option").map((o) => o.attributes("value"));
-		expect(checkOperators).toEqual(["="]);
+		expect(ops[0].props("options").map((o) => o.value)).toEqual(["="]);
 		// Datetime's default is Between (D5), and it never offers like/in.
-		const dtOperators = w
-			.findAll("select")[2]
-			.findAll("option")
-			.map((o) => o.attributes("value"));
+		const dtOperators = ops[1].props("options").map((o) => o.value);
 		expect(dtOperators).toContain("Between");
 		expect(dtOperators).not.toContain("like");
-		expect(w.findAll("select")[2].element.value).toBe("Between");
+		expect(ops[1].props("modelValue")).toBe("Between");
 	});
 
 	it("counts COMPLETE clauses, not rows on screen", () => {
@@ -102,8 +109,12 @@ describe("rows", () => {
 describe("value controls, one per family", () => {
 	it("Check → a Yes/No select mapped to 1/0", () => {
 		const w = mountPanel({ clauses: [clauseForEntry(ENABLED)] });
-		const value = w.findAll("select")[1];
-		expect(value.findAll("option").map((o) => [o.text(), o.attributes("value")])).toEqual([
+		// the value control is a portal-free PanelSelect now; read its options off props
+		expect(
+			values(w)[0]
+				.props("options")
+				.map((o) => [o.label, o.value])
+		).toEqual([
 			["Yes", "1"],
 			["No", "0"],
 		]);
@@ -111,12 +122,11 @@ describe("value controls, one per family", () => {
 
 	it("Select → metadata options with the leading blank labelled 'Not set'", () => {
 		const w = mountPanel({ clauses: [clauseForEntry(SCOPE)] });
-		const value = w.findAll("select")[1];
-		expect(value.findAll("option").map((o) => o.text())).toEqual([
-			"Not set",
-			"Org",
-			"Personal",
-		]);
+		expect(
+			values(w)[0]
+				.props("options")
+				.map((o) => o.label)
+		).toEqual(["Not set", "Org", "Personal"]);
 	});
 
 	it("Date/Datetime Between → two bounds, both required", () => {
@@ -155,11 +165,11 @@ describe("value controls, one per family", () => {
 
 	it("`is` → set / not set, whatever the family", () => {
 		const w = mountPanel({ clauses: [setOperator(clauseForEntry(SCOPE), "is")] });
-		const value = w.findAll("select")[1];
-		expect(value.findAll("option").map((o) => o.attributes("value"))).toEqual([
-			"set",
-			"not set",
-		]);
+		expect(
+			values(w)[0]
+				.props("options")
+				.map((o) => o.value)
+		).toEqual(["set", "not set"]);
 	});
 
 	it("`in` over a free-text family → chips, never a comma string (D10)", async () => {
@@ -175,8 +185,9 @@ describe("value controls, one per family", () => {
 
 	it("Timespan → the server's own token list", () => {
 		const w = mountPanel({ clauses: [setOperator(clauseForEntry(CREATION), "Timespan")] });
-		const value = w.findAll("select")[1];
-		const tokens = value.findAll("option").map((o) => o.attributes("value"));
+		const tokens = values(w)[0]
+			.props("options")
+			.map((o) => o.value);
 		expect(tokens).toContain("last week");
 		expect(tokens).toContain("this quarter");
 	});
@@ -212,7 +223,8 @@ describe("editing", () => {
 
 		await w.setProps({ clauses: next });
 		// change only the second row's operator
-		await w.findAll("select")[1].setValue("not like");
+		setOp(operators(w)[1], "not like");
+		await nextTick();
 		expect(lastClauses(w)[0].operator).toBe("like");
 		expect(lastClauses(w)[1].operator).toBe("not like");
 	});
@@ -246,11 +258,13 @@ describe("editing", () => {
 		await w.find('input[type="text"]').setValue("month");
 		expect(w.emitted("update:clauses").at(-1)[1]).toEqual({ immediate: false });
 
-		await w.findAll("select")[0].setValue("=");
+		setOp(operators(w)[0], "="); // a discrete operator pick is immediate
+		await nextTick();
 		expect(w.emitted("update:clauses").at(-1)[1]).toEqual({ immediate: true });
 
 		await w.setProps({ clauses: [clauseForEntry(ENABLED)] });
-		await w.findAll("select")[1].setValue("0");
+		setOp(values(w)[0], "0"); // a discrete Yes/No value pick is immediate too
+		await nextTick();
 		expect(w.emitted("update:clauses").at(-1)[1]).toEqual({ immediate: true });
 	});
 
@@ -450,7 +464,7 @@ describe("accessibility", () => {
 				withValue(CREATION, ["2026-03-01", "2026-04-01"]),
 			],
 		});
-		const labels = w.findAll("select").map((s) => s.attributes("aria-label"));
+		const labels = operators(w).map((op) => op.props("ariaLabel"));
 		expect(labels).toContain("Condition for Created On (filter 1)");
 		expect(labels).toContain("Condition for Created On (filter 2)");
 		expect(labels).toContain("Condition for Description");
@@ -494,7 +508,7 @@ describe("accessibility", () => {
 	it("labels the trigger, every control and every remove button", () => {
 		const w = mountPanel({ clauses: [withValue(DESCRIPTION, "a")] });
 		expect(w.find("button").attributes("aria-label")).toBe("Filter (1 active)");
-		expect(w.find("select").attributes("aria-label")).toBe("Condition for Description");
+		expect(operators(w)[0].props("ariaLabel")).toBe("Condition for Description");
 		expect(w.find('input[type="text"]').attributes("aria-label")).toBe(
 			"Value for Description"
 		);
