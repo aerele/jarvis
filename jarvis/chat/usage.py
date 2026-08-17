@@ -429,7 +429,12 @@ def _turn_tool_call_count(run_id: str | None) -> int:
 		["conversation", "seed_message", "assistant_message"],
 		as_dict=True,
 	)
-	if not turn or not turn.get("conversation") or not turn.get("seed_message") or not turn.get("assistant_message"):
+	if (
+		not turn
+		or not turn.get("conversation")
+		or not turn.get("seed_message")
+		or not turn.get("assistant_message")
+	):
 		return 0
 	seqs = frappe.db.get_all(
 		CHAT_MESSAGE,
