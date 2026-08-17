@@ -1006,6 +1006,19 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		expect(wrapper.vm.state.step).toBe("plan");
 	});
 
+	it("Details' Continue button is faded (disabled) until the T&C box is ticked", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		await flushPromises();
+		wrapper.vm.state.termsAccepted = false;
+		await flushPromises();
+		expect(wrapper.find('button[label="Continue"]').attributes("disabled")).toBeDefined();
+		wrapper.vm.state.termsAccepted = true;
+		await flushPromises();
+		expect(wrapper.find('button[label="Continue"]').attributes("disabled")).toBeUndefined();
+	});
+
 	it("Pay stays disabled until the required T&C box is ticked", async () => {
 		const wrapper = mountView();
 		await flushPromises();
@@ -1047,5 +1060,33 @@ describe("lead-capture + T&C (frozen contract)", () => {
 			expect.objectContaining({ terms_accepted: true, contact_consent: true }),
 			expect.anything()
 		);
+	});
+});
+
+// The recovery/summary card's Reference row and the support-ticket body both show
+// attemptId IN FULL now (owner decision), not the old `…`+last-6 mask.
+describe("payment intent reference is shown in full, not masked", () => {
+	it("intentRef, paySummaryRows and supportContext all carry the full attempt id", async () => {
+		const longAttemptId = "att_2f9c8b17e4a1d3509b";
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: longAttemptId,
+				generation: 1,
+			})
+		);
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.pay.value).toBe(STATES.CONFIRM_REQUIRED);
+		expect(wrapper.vm.pay.attemptId).toBe(longAttemptId);
+
+		// Not truncated, no leading ellipsis - the whole id, unlike the old mask.
+		expect(wrapper.vm.intentRef).toBe(longAttemptId);
+		expect(wrapper.vm.intentRef).not.toContain("…");
+
+		const refRow = wrapper.vm.paySummaryRows.find((r) => r.label === "Reference");
+		expect(refRow?.value).toBe(longAttemptId);
+
+		expect(wrapper.vm.supportContext).toContain(`Reference: ${longAttemptId}`);
 	});
 });

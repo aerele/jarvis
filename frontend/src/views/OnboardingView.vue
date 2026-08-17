@@ -582,55 +582,64 @@
 							</p>
 							<!-- Required T&C acceptance (moved here from Review & Pay 2026-08-16
 								 so lead-contact consent is captured before the Plan-step lead
-								 capture fires). Gates onDetailsSubmit()'s normal Continue path,
-								 not the reconnect side-branch above (a returning customer
-								 reconnecting an already-paid account never went through this
-								 checkbox before, and reconnect makes no signup call that needs
-								 terms_accepted / contact_consent). payDisabled and onPayClick's
-								 own `!state.termsAccepted` guard stay in place as invariants -
-								 both are already true by the time Pay is reachable. Checkbox's
-								 own `label` prop only takes plain text (no slot, no markup), so
-								 the link-bearing sentence is a sibling <label for=...> instead -
-								 clicking the embedded <a> navigates without also toggling the box. -->
-							<div
-								class="mx-auto mt-5 flex max-w-[620px] items-start justify-center gap-2"
-							>
-								<Checkbox
-									id="jv-ob-terms"
-									:model-value="state.termsAccepted"
-									aria-required="true"
-									:aria-invalid="detailsFieldErrors.terms ? 'true' : undefined"
-									:aria-describedby="
-										detailsFieldErrors.terms ? 'jv-ob-terms-err' : undefined
-									"
-									@update:model-value="
-										(v) => {
-											state.termsAccepted = v;
-											clearFieldErrorIfValid('terms', termsError, v);
-										}
-									"
-								/>
-								<label
-									for="jv-ob-terms"
-									class="cursor-pointer select-none text-p-sm text-ink-gray-7"
+								 capture fires). Gates the non-reconnect Continue button below via
+								 `:disabled="!state.termsAccepted"`, not the reconnect side-branch
+								 above (a returning customer reconnecting an already-paid account
+								 never went through this checkbox before, and reconnect makes no
+								 signup call that needs terms_accepted / contact_consent). The
+								 submit-side check in onDetailsSubmit (see termsError) and
+								 payDisabled / onPayClick's own `!state.termsAccepted` guard stay
+								 in place as defensive invariants even though the disabled button
+								 makes them unreachable via normal click - both are already true
+								 by the time Pay is reachable. Checkbox's own `label` prop only
+								 takes plain text (no slot, no markup), so the link-bearing
+								 sentence is a sibling <label for=...> instead - clicking the
+								 embedded <a> navigates without also toggling the box. -->
+							<div class="mb-6">
+								<div
+									class="mx-auto mt-5 flex max-w-[620px] items-start justify-center gap-2"
 								>
-									I agree to the
-									<a
-										v-if="state.termsUrl"
-										:href="state.termsUrl"
-										target="_blank"
-										rel="noopener"
-										class="ob-link"
-										@click.stop
-										>Terms &amp; Conditions</a
-									><span v-else>Terms &amp; Conditions</span>
-								</label>
+									<Checkbox
+										id="jv-ob-terms"
+										:model-value="state.termsAccepted"
+										aria-required="true"
+										:aria-invalid="
+											detailsFieldErrors.terms ? 'true' : undefined
+										"
+										:aria-describedby="
+											detailsFieldErrors.terms
+												? 'jv-ob-terms-err'
+												: undefined
+										"
+										@update:model-value="
+											(v) => {
+												state.termsAccepted = v;
+												clearFieldErrorIfValid('terms', termsError, v);
+											}
+										"
+									/>
+									<label
+										for="jv-ob-terms"
+										class="cursor-pointer select-none text-p-sm text-ink-gray-7"
+									>
+										I agree to the
+										<a
+											v-if="state.termsUrl"
+											:href="state.termsUrl"
+											target="_blank"
+											rel="noopener"
+											class="ob-link"
+											@click.stop
+											>Terms &amp; Conditions</a
+										><span v-else>Terms &amp; Conditions</span>
+									</label>
+								</div>
+								<ErrorMessage
+									id="jv-ob-terms-err"
+									:message="detailsFieldErrors.terms"
+									class="mx-auto mt-1 max-w-[620px] text-center"
+								/>
 							</div>
-							<ErrorMessage
-								id="jv-ob-terms-err"
-								:message="detailsFieldErrors.terms"
-								class="mx-auto mt-1 max-w-[620px] text-center"
-							/>
 							<div class="ob-foot">
 								<button class="ob-back" @click="goBack">
 									<FeatherIcon
@@ -650,6 +659,7 @@
 									variant="solid"
 									label="Continue"
 									:loading="state.detailsSubmitting"
+									:disabled="!state.termsAccepted"
 									@click="onDetailsSubmit"
 								/>
 							</div>
@@ -2530,8 +2540,11 @@ function contactError(value) {
 // gstinError (gstin.js) already treats a blank value as "" (GSTIN is optional).
 // Required T&C checkbox (moved here from Review & Pay 2026-08-16): unlike the
 // other Details fields this isn't touched on blur (a checkbox has none worth
-// hooking), only set by onDetailsSubmit on the non-reconnect Continue path
-// and cleared live by clearFieldErrorIfValid as soon as it's ticked.
+// hooking). The non-reconnect Continue button is now `:disabled` until this is
+// true, so this error string is normally unreachable by click; the check still
+// runs in onDetailsSubmit as a defensive invariant (e.g. a keyboard/programmatic
+// submit that bypasses the disabled button), and is cleared live by
+// clearFieldErrorIfValid as soon as the box is ticked.
 function termsError(value) {
 	return value ? "" : "Please accept the Terms & Conditions to continue.";
 }
@@ -2650,7 +2663,11 @@ async function onDetailsSubmit() {
 	// (which already returned if it applied), so this gate never blocks a
 	// returning customer reconnecting an existing paid account - reconnect
 	// makes no signup call and never needed terms_accepted/contact_consent.
-	// Only the path that actually advances to Plan is gated.
+	// Only the path that actually advances to Plan is gated. The Continue
+	// button is `:disabled` until termsAccepted is true, so in normal use this
+	// is already satisfied by the time we get here; kept as a defensive
+	// invariant against any submit that reaches this function without going
+	// through the disabled button.
 	detailsFieldErrors.terms = termsError(state.termsAccepted);
 	if (detailsFieldErrors.terms) return;
 	// The customer just edited the details behind a FAILED attempt. Without this,
@@ -2879,19 +2896,20 @@ const paySummaryRows = computed(() => {
 			value: paySummaryTrial.value ? "₹0 today" : inrExact(s.dueTodayInr),
 		});
 	}
-	const ref = maskedIntentRef.value;
+	const ref = intentRef.value;
 	if (ref) rows.push({ label: "Reference", value: ref });
 	if (pay.value.lastCheckedAt) {
 		rows.push({ label: "Last checked", value: relativeSince(pay.value.lastCheckedAt) });
 	}
 	return rows;
 });
-// A short, safe intent reference: the attempt id's tail, never a gateway order id
-// or a document name (those stay on admin's side).
-const maskedIntentRef = computed(() => {
-	const id = pay.value.attemptId || "";
-	if (!id) return "";
-	return id.length > 6 ? `…${id.slice(-6)}` : id;
+// The full attempt id, shown in full on the owner's explicit request (was
+// masked to a `…`+last-6 tail before). attemptId is itself already an opaque
+// per-attempt handle admin hands the bench for display - never a gateway order
+// id or a document name (those still stay on admin's side, contract rule 3) -
+// so showing it whole does not leak either.
+const intentRef = computed(() => {
+	return pay.value.attemptId || "";
 });
 function relativeSince(ts) {
 	const t = Date.parse(String(ts).replace(" ", "T"));
@@ -3219,8 +3237,9 @@ const supportTicket = ref("");
 const supportErr = ref("");
 
 // What support needs to act without a round trip, and nothing a customer would be
-// alarmed to read: the coded state, the masked attempt reference the recovery card
-// already shows, and admin's own sentence. No token, no gateway id, no payload.
+// alarmed to read: the coded state, the full attempt reference the recovery card
+// already shows (opaque per-attempt handle, not a gateway id or document name),
+// and admin's own sentence. No token, no gateway id, no payload.
 //
 // Step-aware since the panel now serves both Pay (jarvis#708 hoisted it out of
 // that step) and Connect: a payment code means nothing on a stuck AI-connect
@@ -3240,7 +3259,7 @@ const supportContext = computed(() => {
 		`Payment state: ${pay.value.value || "unknown"}`,
 		`Code: ${pay.value.code || "none"}`,
 	];
-	if (maskedIntentRef.value) rows.push(`Reference: ${maskedIntentRef.value}`);
+	if (intentRef.value) rows.push(`Reference: ${intentRef.value}`);
 	if (pay.value.message) rows.push(`Detail: ${pay.value.message}`);
 	return rows.join("\n");
 });
