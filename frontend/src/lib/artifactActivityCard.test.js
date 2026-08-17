@@ -310,7 +310,7 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 	assert.match(runEnd, /gotoMorph\.value = goto;/);
 	assert.match(runEnd, /prefers-reduced-motion/);
 	assert.match(runEnd, /GOTO_MORPH_HOLD_MS/);
-	assert.match(runEnd, /if \(gotoMorph\.value\) gotoDashboards\(goto\.prompt\);/);
+	assert.match(runEnd, /if \(gotoMorph\.value\) gotoDashboards\(goto\.prompt, m\.name\);/);
 	assert.match(runEnd, /if \(!redirected\) dropGotoMorph\(\);/);
 	// the unconditional clear must come AFTER the redirect gate, not before it
 	assert.ok(

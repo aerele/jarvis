@@ -220,7 +220,7 @@
 					label="Send"
 					:disabled="!draft.trim() || sending || runActive"
 					:loading="sending"
-					@click="send"
+					@click="send()"
 				/>
 			</div>
 		</div>
@@ -262,6 +262,7 @@ import AskCard from "@/components/chat/AskCard.vue";
 import { renderMarkdown } from "@/markdown";
 import { parseAsk } from "@/lib/chatAsk";
 import { builderCanvasFrame } from "@/lib/dashboardRestore";
+import { gotoFiredKey, parseFiredStamp, encodeFiredStamp } from "@/lib/chatGoto";
 import {
 	DASHBOARD_BUILD_PHASES,
 	dashboardBuildPhase,
@@ -615,7 +616,20 @@ function onTranscript(text) {
 // screen, so the follow watcher below must not tear its Thinking indicator down.
 let ownRepoint = false;
 
-async function send() {
+// jarvis#912: the fired stamp's conversation slot (see lib/chatGoto.js) is
+// written here, the one place a send() call learns which conversation a
+// ```jarvis-goto message's hand-off actually landed on - fresh or repointed.
+// `messageId` comes from sendText()'s caller; a message-less send (the
+// ordinary composer, AskCard answers, the save dialog's "fix in chat") passes
+// none and this is a no-op.
+function recordGotoConversation(messageId, conv) {
+	if (!messageId || !conv) return;
+	const key = gotoFiredKey(messageId);
+	const stamp = parseFiredStamp(localStorage.getItem(key));
+	localStorage.setItem(key, encodeFiredStamp(stamp ? stamp.t : Date.now(), conv));
+}
+
+async function send(gotoMessageId = "") {
 	const text = draft.value.trim();
 	if (!text || sending.value || runActive.value) return;
 	sending.value = true;
@@ -644,6 +658,7 @@ async function send() {
 			ownRepoint = true;
 			conversation.value = r.conversation_id;
 		}
+		recordGotoConversation(gotoMessageId, r.conversation_id || conversation.value);
 		runActive.value = true;
 		// This send's own optimistic start - a run:start frame for the same run
 		// arrives moments later and does the same reset, but the ticks should
@@ -702,13 +717,15 @@ watch(conversation, (id, prev) => {
 });
 
 // Post a message into this pane programmatically (the save dialog's "Ask the
-// assistant to fix these" hand-off, AskCard's answer submit). Ignored while a
-// send is already in flight OR a turn is still running for this conversation.
-function sendText(text) {
+// assistant to fix these" hand-off, AskCard's answer submit, a ```jarvis-goto
+// hand-off's seeded first message). Ignored while a send is already in flight
+// OR a turn is still running for this conversation. `gotoMessageId` names the
+// goto message this send answers (jarvis#912) - see recordGotoConversation.
+function sendText(text, gotoMessageId = "") {
 	const t = String(text || "").trim();
 	if (!t || sending.value || runActive.value) return;
 	draft.value = t;
-	send();
+	send(gotoMessageId);
 }
 // Re-issue the transcript's restore frame. The page holds restores off while a
 // ?chat=&canvas= promotion is in flight (an explicit deep-link owns the canvas);

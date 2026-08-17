@@ -782,12 +782,14 @@ test("a pending promotion holds the pane's restore off, exactly as ?edit= does",
 	assert.doesNotMatch(body, /promotionPending\.value = true;/);
 	// ...and a mount that will NOT promote releases the setup-time hold, or the
 	// pane's restore stays blocked for the life of the page. Since the
-	// jarvis-goto hand-off (#884), that branch then forks: a goto prefill
-	// starts a CLEAN builder (never the sticky editing restore), everything
-	// else restores as before - but the hold release always comes first.
+	// jarvis-goto hand-off (#884), that branch then forks: a FIRST-time goto
+	// prefill starts a CLEAN builder (never the sticky editing restore),
+	// everything else restores as before - but the hold release always comes
+	// first. jarvis#912 adds a third fork ahead of it: a REPEAT hand-off
+	// (gotoResume) resumes the recorded conversation instead of either.
 	assert.match(
 		pageSrc,
-		/promotionPending\.value = false;\n\t\tif \(gotoText\) \{[\s\S]*?clearBuilder\(\);\n\t\t\} else \{\n\t\t\tnormalMount\(\);\n\t\t\}/
+		/promotionPending\.value = false;\n\t\tif \(gotoResume\) \{[\s\S]*?resumeGotoHandoff\(gotoResume\.conv, gotoResume\.text, gotoMessageId\);\n\t\t\} else if \(gotoText\) \{[\s\S]*?clearBuilder\(\);\n\t\t\} else \{\n\t\t\tnormalMount\(\);\n\t\t\}/
 	);
 });
 
@@ -805,6 +807,111 @@ test("?edit= wins over ?chat=, and says so", () => {
 	// the mount path makes the same call
 	assert.match(pageSrc, /if \(routeEdit && routeChat\) \{\n\t\tconsole\.warn\(/);
 	assert.match(pageSrc, /if \(!routeEdit && routeChat && routeCanvas\) \{/);
+});
+
+// ---- jarvis#912: a repeat ```jarvis-goto hand-off resumes, not rebuilds ----
+//
+// One dashboard build used to produce several builder conversations: the
+// live auto-redirect (run:end, guarded by the fired stamp) built the first
+// one correctly, but the "Continue in Dashboards" card has no per-click
+// guard and stayed clickable on every later visit to the transcript. Each
+// extra click ran DashboardsPage's onMounted -> clearBuilder() -> sendText(),
+// which wiped the sticky builder conversation and posted the seeded prompt as
+// a message with conversation="" - a brand-new agent session (~78k tokens)
+// every time. The fix stashes which builder conversation the FIRST hand-off
+// for a given message landed on (the fired stamp - see chatGoto.test.js for
+// its shape) and has every later trigger for that SAME message resume it.
+
+test("gotoDashboards passes the message id through to the fired-stamp lookup", () => {
+	// see chatGoto.test.js for gotoDashboards' own body assertions - this only
+	// pins that BOTH call sites (the live redirect, the card button) pass the
+	// message id the stamp is keyed on, or the lookup has nothing to key off.
+	assert.match(chatSrc, /gotoDashboards\(goto\.prompt, m\.name\);/);
+	assert.match(chatSrc, /@click="gotoDashboards\(gotoOf\(m\)\.prompt, m\.name\)"/);
+});
+
+test("send() learns the conversation a goto hand-off landed on and stamps it", () => {
+	assert.match(
+		paneSrc,
+		/import \{ gotoFiredKey, parseFiredStamp, encodeFiredStamp \} from "@\/lib\/chatGoto";/
+	);
+	const record = fnBody(paneSrc, "function recordGotoConversation(");
+	assert.match(record, /if \(!messageId \|\| !conv\) return;/);
+	assert.match(record, /const key = gotoFiredKey\(messageId\);/);
+	// the fired-AT timestamp survives being upgraded to carry a conversation -
+	// only a stamp this send() itself just wrote (Date.now() fallback) invents
+	// a new one
+	assert.match(record, /const stamp = parseFiredStamp\(localStorage\.getItem\(key\)\);/);
+	assert.match(
+		record,
+		/localStorage\.setItem\(key, encodeFiredStamp\(stamp \? stamp\.t : Date\.now\(\), conv\)\);/
+	);
+	const send = fnBody(paneSrc, "async function send(");
+	assert.match(send, /async function send\(gotoMessageId = ""\)/);
+	// stamped with whatever conversation this send actually landed on - the
+	// REPOINTED id when send_message() opened a fresh one, the sticky one
+	// otherwise - not blindly the pre-send value
+	assert.match(
+		send,
+		/recordGotoConversation\(gotoMessageId, r\.conversation_id \|\| conversation\.value\);/
+	);
+	// sendText forwards it, and the Send button/Enter-key paths (message-less
+	// ordinary sends) pass none, which is a no-op inside recordGotoConversation
+	assert.match(paneSrc, /function sendText\(text, gotoMessageId = ""\)/);
+	assert.match(fnBody(paneSrc, "function sendText("), /send\(gotoMessageId\);/);
+});
+
+test("the page resolves a goto hand-off into resume/build/plain-restore, in that order", () => {
+	// gotoResume only when the STAMP names a conversation - `resume` alone
+	// (set by gotoDashboards whenever messageId was passed, even before a
+	// conversation exists) is not enough on its own.
+	assert.match(
+		pageSrc,
+		/const gotoResume =\n\t\tgotoClaimsCanvas && dashboardPrefill\.resume && dashboardPrefill\.conv\n\t\t\t\? \{ conv: dashboardPrefill\.conv, text: String\(dashboardPrefill\.text \|\| ""\)\.trim\(\) \}\n\t\t\t: null;/
+	);
+	// a FIRST-time hand-off (autoSend, no recorded conversation yet) still
+	// takes the pre-#912 clearBuilder() + sendText() path
+	assert.match(
+		pageSrc,
+		/const gotoText =\n\t\tgotoClaimsCanvas && !gotoResume && dashboardPrefill\.autoSend\n\t\t\t\? String\(dashboardPrefill\.text \|\| ""\)\.trim\(\)\n\t\t\t: "";/
+	);
+	const mount = fnBody(pageSrc, "onMounted(async () => {");
+	assert.match(mount, /if \(gotoResume\) \{/);
+	assert.match(mount, /resumeGotoHandoff\(gotoResume\.conv, gotoResume\.text, gotoMessageId\);/);
+	// gotoResume is checked BEFORE gotoText, so a repeat trigger can never fall
+	// through to a fresh clearBuilder() build
+	assert.ok(
+		mount.indexOf("if (gotoResume) {") < mount.indexOf("} else if (gotoText) {"),
+		"resume must be checked ahead of the fresh-build branch"
+	);
+	// the seeded first message (a first-time hand-off only) also carries the
+	// message id through, so ITS OWN send() records the stamp
+	assert.match(mount, /chatPane\.value\.sendText\(gotoText, gotoMessageId\);/);
+});
+
+test("resumeGotoHandoff repoints the sticky conversation, verified against the server first", () => {
+	const resume = fnBody(pageSrc, "async function resumeGotoHandoff(");
+	assert.match(resume, /await getDashboardConversation\(conv\);/);
+	// success (or a transient blip - not isGoneError): repoint, the pane's own
+	// watch(conversation, ...) tears the old thread down and loads the new one
+	assert.match(resume, /chatConv\.value = conv;/);
+	assert.match(resume, /dashDataMode\.value = "auto";/);
+});
+
+test("a recorded-but-deleted conversation falls back to a fresh build, and forgets the stale mapping", () => {
+	const resume = fnBody(pageSrc, "async function resumeGotoHandoff(");
+	assert.match(resume, /if \(isGoneError\(e\)\) \{/);
+	// the stamp named a conversation that is gone - remove the whole stamp
+	// (not just its conv half) so this degrades to a first-time hand-off,
+	// exactly as if the message had never fired before
+	assert.match(resume, /localStorage\.removeItem\(gotoFiredKey\(messageId\)\);/);
+	assert.match(resume, /clearBuilder\(\);/);
+	assert.match(resume, /chatPane\.value\.sendText\(text, messageId\);/);
+	// the fallback branch returns before the repoint below runs - never both
+	assert.ok(
+		resume.indexOf("return;") < resume.lastIndexOf("chatConv.value = conv;"),
+		"the deleted-conversation fallback must not also repoint onto the dead id"
+	);
 });
 
 test("the promotion is validated against the transcript, not the link", () => {

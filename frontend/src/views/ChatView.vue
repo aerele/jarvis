@@ -1474,7 +1474,11 @@
 								     here with ```jarvis-goto. Stays clickable in history so an
 								     old transcript still has a way through, even though the
 								     redirect itself only auto-fires once, live (see gotoDashboards
-								     / the run:end handler). -->
+								     / the run:end handler). jarvis#912: every click on an old card
+								     hands off through the same fired-stamp lookup as the live
+								     redirect, so a second/third click resumes the builder
+								     conversation the first hand-off created instead of starting a
+								     new one. -->
 								<div v-if="gotoOf(m)" class="jv-macrocard">
 									<div class="jv-macrocard-ic">
 										<svg
@@ -1500,7 +1504,7 @@
 									</div>
 									<button
 										class="jv-macrocard-btn"
-										@click="gotoDashboards(gotoOf(m).prompt)"
+										@click="gotoDashboards(gotoOf(m).prompt, m.name)"
 									>
 										Open Dashboards
 									</button>
@@ -4130,7 +4134,7 @@ import AskCard from "@/components/chat/AskCard.vue";
 import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.vue";
 import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
-import { parseGoto } from "@/lib/chatGoto";
+import { parseGoto, gotoFiredKey, parseFiredStamp, encodeFiredStamp } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { shouldFollowBottom } from "@/lib/chatScroll";
@@ -6022,8 +6026,25 @@ function gotoOf(m) {
 // Shared by the card's button and the run:end auto-redirect below: stash the
 // restated request for the Dashboards builder to pick up on its own mount,
 // then navigate there.
-function gotoDashboards(prompt) {
-	setDashboardPrefill({ text: prompt, autoSend: true });
+//
+// jarvis#912: the card button has no per-click guard (the run:end
+// auto-redirect fires once, live, but the card stays clickable on every
+// later visit to the transcript), so a second/third click used to build a
+// brand-new builder conversation each time - discarding the in-progress one
+// and burning a fresh ~78k-token agent session per click. The fired stamp
+// (see lib/chatGoto.js) now remembers which builder conversation the FIRST
+// hand-off for this message landed on: a later trigger navigates there
+// instead of building again. `messageId` is optional only for callers that
+// predate #912's stamp lookup; every real caller below passes it.
+function gotoDashboards(prompt, messageId) {
+	const stamp = messageId
+		? parseFiredStamp(localStorage.getItem(gotoFiredKey(messageId)))
+		: null;
+	if (stamp && stamp.conv) {
+		setDashboardPrefill({ text: prompt, resume: true, conv: stamp.conv, messageId });
+	} else {
+		setDashboardPrefill({ text: prompt, autoSend: true, messageId });
+	}
 	router.push("/dashboards");
 }
 // Canonicalised at the single _ACTION_RE parse point so every consumer (render
@@ -8953,9 +8974,13 @@ function onEvent(p) {
 			if (m && !m.error && !m.stopped) {
 				const goto = gotoOf(m);
 				if (goto) {
-					const firedKey = "jarvis:goto-fired:" + m.name;
+					const firedKey = gotoFiredKey(m.name);
 					if (!localStorage.getItem(firedKey)) {
-						localStorage.setItem(firedKey, String(Date.now()));
+						// No conversation id yet - send_message() has not run, so this
+						// is a bare "fired" stamp exactly like pre-#912. The pane fills
+						// in the conversation once it learns one (see
+						// DashboardChatPane.vue's send()).
+						localStorage.setItem(firedKey, encodeFiredStamp(Date.now()));
 						// Bounded stamp set: these keys are write-once per redirect and
 						// would otherwise accumulate for the life of the origin. Keep
 						// the newest ~50 (the live-turn gate above is the real guard;
@@ -8963,8 +8988,10 @@ function onEvent(p) {
 						const stamps = [];
 						for (let i = 0; i < localStorage.length; i++) {
 							const k = localStorage.key(i);
-							if (k && k.startsWith("jarvis:goto-fired:"))
-								stamps.push([k, Number(localStorage.getItem(k)) || 0]);
+							if (k && k.startsWith("jarvis:goto-fired:")) {
+								const parsed = parseFiredStamp(localStorage.getItem(k));
+								stamps.push([k, parsed ? parsed.t : 0]);
+							}
 						}
 						stamps
 							.sort((a, b) => b[1] - a[1])
@@ -8979,13 +9006,13 @@ function onEvent(p) {
 							window.matchMedia &&
 							window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 						if (reducedMotion) {
-							gotoDashboards(goto.prompt);
+							gotoDashboards(goto.prompt, m.name);
 						} else {
 							gotoNavTimer = setTimeout(() => {
 								gotoNavTimer = null;
 								// dropGotoMorph() clearing the latch (new turn, chat switch,
 								// unmount) is the cancel signal for this pending navigation.
-								if (gotoMorph.value) gotoDashboards(goto.prompt);
+								if (gotoMorph.value) gotoDashboards(goto.prompt, m.name);
 							}, GOTO_MORPH_HOLD_MS);
 						}
 					}

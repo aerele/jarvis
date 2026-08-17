@@ -213,6 +213,7 @@ import { getCanvas } from "@/api";
 import { agentName } from "@/branding";
 import { getDashboardsCaps, getDashboard, getDashboardConversation } from "@/api/dashboards";
 import { takeDashboardPrefill } from "@/composables/dashboardPrefill";
+import { gotoFiredKey } from "@/lib/chatGoto";
 import { builderCanvasFrame } from "@/lib/dashboardRestore";
 import {
 	adoptionIdentity,
@@ -748,6 +749,40 @@ function isGoneError(e) {
 	);
 }
 
+// jarvis#912: resuming a ```jarvis-goto hand-off that already has a recorded
+// builder conversation (the fired stamp carries one - see lib/chatGoto.js and
+// gotoDashboards in ChatView.vue), instead of building a duplicate. Verified
+// against the server first, the same way resumeAdoption verifies a sticky
+// name: a repeat click racing the row's deletion, or a stamp left over from a
+// conversation the user has since removed, must not repoint onto nothing.
+//
+// A transient failure keeps the stamp and repoints anyway - the pane's own
+// loadTranscript() retries the fetch and degrades to isGone there if the blip
+// turns out to be permanent, exactly as an ordinary chatConv repoint would.
+async function resumeGotoHandoff(conv, text, messageId) {
+	try {
+		await getDashboardConversation(conv);
+	} catch (e) {
+		if (isGoneError(e)) {
+			// Gone - forget the stale mapping and fall back to a fresh build,
+			// exactly the path a first-time hand-off for this message takes.
+			if (messageId) localStorage.removeItem(gotoFiredKey(messageId));
+			clearBuilder();
+			nextTick(() => {
+				if (chatPane.value && chatPane.value.sendText)
+					chatPane.value.sendText(text, messageId);
+			});
+			return;
+		}
+	}
+	// Same repoint idiom applyEditDetail uses for `d.source_conversation`: the
+	// pane's own watch(conversation, ...) does the rest (clears the thread on
+	// screen, loads the resumed one). Nothing is unsaved yet on a fresh mount,
+	// so no discard confirm.
+	chatConv.value = conv;
+	dashDataMode.value = "auto";
+}
+
 // The third mount path: coming back to an ADOPTED promotion (resumesAdoption
 // above). What was on the canvas is the transcript's build, NEWER than the row
 // it adopted, so loadEdit is the wrong restore - it would answer with the row's
@@ -1111,10 +1146,20 @@ onMounted(async () => {
 	// canvas - an ?edit= target or a ?chat=&canvas= promotion IS what the user
 	// asked to land on, and a queued prompt must not race a message into
 	// whatever thread that resolves to instead.
+	const gotoClaimsCanvas = !routeEdit && !(routeChat && routeCanvas) && !!dashboardPrefill;
+	// jarvis#912: a REPEAT hand-off for a message that already built a builder
+	// conversation resumes it instead - see resumeGotoHandoff above. `text`
+	// rides along on this shape too, as the fallback build if that conversation
+	// turns out to have been deleted.
+	const gotoResume =
+		gotoClaimsCanvas && dashboardPrefill.resume && dashboardPrefill.conv
+			? { conv: dashboardPrefill.conv, text: String(dashboardPrefill.text || "").trim() }
+			: null;
 	const gotoText =
-		!routeEdit && !(routeChat && routeCanvas) && dashboardPrefill && dashboardPrefill.autoSend
+		gotoClaimsCanvas && !gotoResume && dashboardPrefill.autoSend
 			? String(dashboardPrefill.text || "").trim()
 			: "";
+	const gotoMessageId = gotoClaimsCanvas ? dashboardPrefill.messageId || "" : "";
 	if (!routeEdit && routeChat && routeCanvas) {
 		promoteFromChat(routeChat, routeCanvas, { fallback: normalMount, dash: routeDash });
 	} else {
@@ -1122,12 +1167,16 @@ onMounted(async () => {
 		// present): release the hold taken at setup, or the pane's restore stays
 		// blocked for the life of the page.
 		promotionPending.value = false;
-		if (gotoText) {
-			// A goto hand-off is always a NEW build. Restoring the sticky editing
-			// target (or the previous thread under it) would land the seeded
-			// request as a revision of an older dashboard, so start clean instead
-			// of normalMount(). Nothing is unsaved at this instant - the page just
-			// mounted - so no discard confirm.
+		if (gotoResume) {
+			// Resuming an existing thread, not building - normalMount() (the
+			// sticky editing target) would fight it for the canvas.
+			resumeGotoHandoff(gotoResume.conv, gotoResume.text, gotoMessageId);
+		} else if (gotoText) {
+			// A first-time goto hand-off is always a NEW build. Restoring the
+			// sticky editing target (or the previous thread under it) would land
+			// the seeded request as a revision of an older dashboard, so start
+			// clean instead of normalMount(). Nothing is unsaved at this instant -
+			// the page just mounted - so no discard confirm.
 			clearBuilder();
 		} else {
 			normalMount();
@@ -1135,7 +1184,8 @@ onMounted(async () => {
 	}
 	if (gotoText) {
 		nextTick(() => {
-			if (chatPane.value && chatPane.value.sendText) chatPane.value.sendText(gotoText);
+			if (chatPane.value && chatPane.value.sendText)
+				chatPane.value.sendText(gotoText, gotoMessageId);
 		});
 	}
 });

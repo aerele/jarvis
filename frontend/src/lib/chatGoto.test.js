@@ -16,7 +16,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseGoto, GOTO_RE } from "./chatGoto.js";
+import {
+	parseGoto,
+	GOTO_RE,
+	gotoFiredKey,
+	parseFiredStamp,
+	encodeFiredStamp,
+} from "./chatGoto.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const chatViewSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
@@ -79,9 +85,38 @@ test("chatBlocks strips jarvis-goto from the visible prose", () => {
 });
 
 test("ChatView parses goto through the shared module, not a private copy", () => {
-	assert.match(chatViewSrc, /import \{ parseGoto \} from "@\/lib\/chatGoto";/);
+	assert.match(
+		chatViewSrc,
+		/import \{ parseGoto, gotoFiredKey, parseFiredStamp, encodeFiredStamp \} from "@\/lib\/chatGoto";/
+	);
 	const gotoOf = fnBody(chatViewSrc, "function gotoOf(m)");
 	assert.match(gotoOf, /return parseGoto\(\(m && m\.content\) \|\| ""\);/);
+});
+
+// ---- the fired-stamp shape (jarvis#912) ------------------------------------
+
+test("gotoFiredKey namespaces on the message id", () => {
+	assert.equal(gotoFiredKey("msg-1"), "jarvis:goto-fired:msg-1");
+});
+
+test("a bare pre-#912 timestamp still parses, with no conversation known", () => {
+	assert.deepEqual(parseFiredStamp("1723890000000"), { t: 1723890000000, conv: "" });
+});
+
+test("an unreadable/missing stamp parses to null", () => {
+	assert.equal(parseFiredStamp(null), null);
+	assert.equal(parseFiredStamp(""), null);
+	assert.equal(parseFiredStamp("not a number"), null);
+});
+
+test("encodeFiredStamp writes the bare pre-#912 shape until a conversation is known", () => {
+	assert.equal(encodeFiredStamp(123), "123");
+	assert.deepEqual(parseFiredStamp(encodeFiredStamp(123)), { t: 123, conv: "" });
+});
+
+test("encodeFiredStamp/parseFiredStamp round-trip once a conversation is recorded", () => {
+	const encoded = encodeFiredStamp(456, "conv-9");
+	assert.deepEqual(parseFiredStamp(encoded), { t: 456, conv: "conv-9" });
 });
 
 test("the card renders the restated prompt and one button that hands off to the builder", () => {
@@ -89,7 +124,7 @@ test("the card renders the restated prompt and one button that hands off to the 
 	assert.match(chatViewSrc, /Continue in Dashboards/);
 	// prettier may wrap the interpolation onto its own line, so match loosely
 	assert.match(chatViewSrc, /\{\{\s*gotoOf\(m\)\.prompt\s*\}\}/);
-	assert.match(chatViewSrc, /@click="gotoDashboards\(gotoOf\(m\)\.prompt\)"/);
+	assert.match(chatViewSrc, /@click="gotoDashboards\(gotoOf\(m\)\.prompt, m\.name\)"/);
 });
 
 test("gotoDashboards stashes the prefill and navigates to the builder", () => {
@@ -97,9 +132,28 @@ test("gotoDashboards stashes the prefill and navigates to the builder", () => {
 		chatViewSrc,
 		/import \{ setDashboardPrefill \} from "@\/composables\/dashboardPrefill";/
 	);
-	const fn = fnBody(chatViewSrc, "function gotoDashboards(prompt)");
-	assert.match(fn, /setDashboardPrefill\(\{ text: prompt, autoSend: true \}\);/);
+	const fn = fnBody(chatViewSrc, "function gotoDashboards(prompt, messageId)");
+	assert.match(fn, /setDashboardPrefill\(\{ text: prompt, autoSend: true, messageId \}\);/);
 	assert.match(fn, /router\.push\("\/dashboards"\);/);
+});
+
+// jarvis#912: a repeat hand-off for a message that already has a recorded
+// builder conversation must navigate there instead of building again. See
+// dashboardOpen.test.js for the DashboardsPage/DashboardChatPane side of the
+// mechanism (recording the mapping, resuming it, the deleted-conversation
+// fallback).
+test("gotoDashboards resumes the recorded conversation for a repeat hand-off", () => {
+	const fn = fnBody(chatViewSrc, "function gotoDashboards(prompt, messageId)");
+	assert.match(fn, /const stamp = messageId/);
+	assert.match(
+		fn,
+		/\? parseFiredStamp\(localStorage\.getItem\(gotoFiredKey\(messageId\)\)\)\n\t\t: null;/
+	);
+	assert.match(fn, /if \(stamp && stamp\.conv\) \{/);
+	assert.match(
+		fn,
+		/setDashboardPrefill\(\{ text: prompt, resume: true, conv: stamp\.conv, messageId \}\);/
+	);
 });
 
 test("run:end auto-fires the redirect at most once, and never for an errored or stopped turn", () => {
@@ -110,10 +164,10 @@ test("run:end auto-fires the redirect at most once, and never for an errored or 
 	assert.match(runEnd, /if \(m && !m\.error && !m\.stopped\) \{/);
 	assert.match(runEnd, /const goto = gotoOf\(m\);/);
 	// durable stamp, keyed per message, checked before it is set
-	assert.match(runEnd, /const firedKey = "jarvis:goto-fired:" \+ m\.name;/);
+	assert.match(runEnd, /const firedKey = gotoFiredKey\(m\.name\);/);
 	const stampIdx = runEnd.indexOf("localStorage.getItem(firedKey)");
 	const setIdx = runEnd.indexOf("localStorage.setItem(firedKey,");
-	const gotoIdx = runEnd.indexOf("gotoDashboards(goto.prompt);");
+	const gotoIdx = runEnd.indexOf("gotoDashboards(goto.prompt, m.name);");
 	assert.notEqual(stampIdx, -1);
 	assert.ok(stampIdx < setIdx, "the stamp must be checked before it is written");
 	assert.ok(setIdx < gotoIdx, "the stamp must be written before the redirect fires");
