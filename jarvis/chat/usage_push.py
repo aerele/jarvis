@@ -20,10 +20,6 @@ from jarvis.exceptions import AdminAuthError
 USER_SETTINGS = usage.USER_SETTINGS
 MODEL_USAGE = usage.MODEL_USAGE
 MODEL_USAGE_FIELD = usage.MODEL_USAGE_FIELD
-TURN_USAGE = usage.TURN_USAGE
-CHAT_SESSION = usage.CHAT_SESSION
-CHAT_MESSAGE = usage.CHAT_MESSAGE
-CONVERSATION = "Jarvis Conversation"
 
 # Hard cap on users per push (spec §7). Bounds payload size; extra users are
 # dropped (highest-usage first kept) and the truncation is logged.
