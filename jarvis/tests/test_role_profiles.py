@@ -289,6 +289,176 @@ class TestSyncRoleProfiles(FrappeTestCase):
 		self.assertEqual([p["slug"] for p in first], ["role-accounts", "role-hr"])
 
 
+class TestRoleProfileConfigSync(FrappeTestCase):
+	"""``jarvis.chat.role_profiles.sync_role_profile_config`` - the admin-pull
+	+ cache + mirror + conditional re-push boundary (task BJ1).
+
+	Mirrors ``TestSyncRoleProfiles`` above: the three new Settings fields
+	(``role_profiles_config`` / ``_version`` / ``_synced_at``) only exist once
+	a ``bench migrate`` has run for the DocType JSON change in this task, and
+	this shared bench points at a live production tenancy, so the Settings
+	Single is stood in with a plain dict behind ``frappe.db.get_single_value``
+	/ ``set_value`` / ``set_single_value`` rather than written for real.
+	"""
+
+	@staticmethod
+	def _config(version="v1", enabled=True, skill="hrms-hr"):
+		return {
+			"version": version,
+			"enabled": enabled,
+			"sets": {"hr": [skill]},
+			"shared_core": ["frappe-core"],
+			"mappings": {"HR User": "hr"},
+			"tool_tiers": {"standard": {"allow": ["exec", "read"], "core": ["exec"]}},
+		}
+
+	@staticmethod
+	def _fake_store(initial=None):
+		"""Same shape as ``TestSyncRoleProfiles._fake_settings_store``, extended
+		with a ``set_single_value`` fake for the ``enable_role_profiles`` mirror
+		write."""
+		store = dict(initial or {})
+
+		def fake_get_single_value(doctype, fieldname, cache=True):
+			assert doctype == role_profiles._SETTINGS
+			return store.get(fieldname)
+
+		def fake_set_value(doctype, name, values, *args, **kwargs):
+			assert doctype == role_profiles._SETTINGS
+			assert name == role_profiles._SETTINGS
+			store.update(values)
+
+		def fake_set_single_value(doctype, fieldname, value, *args, **kwargs):
+			assert doctype == role_profiles._SETTINGS
+			store[fieldname] = value
+
+		return store, fake_get_single_value, fake_set_value, fake_set_single_value
+
+	def test_success_caches_mirrors_and_pushes_on_version_change(self):
+		store, fake_get, fake_set, fake_set_single = self._fake_store()
+		resp = {"ok": True, "data": self._config(version="v1", enabled=True)}
+		calls = []
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(
+				role_profiles, "_invalidate_config_cache", side_effect=lambda: calls.append("invalidate")
+			),
+			patch.object(
+				role_profiles, "sync_role_profiles", side_effect=lambda **kw: calls.append(("sync", kw))
+			),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		self.assertEqual(frappe.parse_json(store["role_profiles_config"])["version"], "v1")
+		self.assertEqual(store["role_profiles_config_version"], "v1")
+		self.assertIsNotNone(store.get("role_profiles_config_synced_at"))
+		self.assertEqual(store["enable_role_profiles"], 1)
+		# Invalidation must happen BEFORE the forced re-push, so the push
+		# recomputes needed_profiles() from the NEW config, not a value BJ2's
+		# accessor memoized earlier in this same request.
+		self.assertEqual(calls, ["invalidate", ("sync", {"force": True})])
+
+	def test_unchanged_version_does_not_repush(self):
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"role_profiles_config_version": "v1"}
+		)
+		resp = {"ok": True, "data": self._config(version="v1", enabled=True)}
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(role_profiles, "_invalidate_config_cache") as mock_invalidate,
+			patch.object(role_profiles, "sync_role_profiles") as mock_sync,
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		mock_invalidate.assert_not_called()
+		mock_sync.assert_not_called()
+		self.assertEqual(store["enable_role_profiles"], 1)
+
+	def test_pull_failure_with_existing_cache_keeps_cache_and_mirror(self):
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={
+				"role_profiles_config": frappe.as_json(self._config(version="v0")),
+				"role_profiles_config_version": "v0",
+				"enable_role_profiles": 1,
+			}
+		)
+		with (
+			patch(
+				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
+			),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+		):
+			before = dict(store)
+			result = role_profiles.sync_role_profile_config()
+			after = dict(store)
+
+		self.assertEqual(result, {"synced": False})
+		self.assertEqual(before, after)
+
+	def test_pull_failure_with_no_cache_mirrors_off(self):
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"enable_role_profiles": 1}  # stale ON from a prior tenancy; no cache present
+		)
+		with (
+			patch(
+				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
+			),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": False})
+		self.assertEqual(store["enable_role_profiles"], 0)
+
+	def test_invalid_payload_is_failure_path_and_leaves_cache_untouched(self):
+		store, fake_get, fake_set, fake_set_single = self._fake_store()
+		bad = {"ok": True, "data": {"version": "v1"}}  # missing enabled/sets/mappings/tool_tiers
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=bad),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": False})
+		self.assertNotIn("role_profiles_config", store)
+		self.assertEqual(store.get("enable_role_profiles", 0), 0)
+
+	def test_invalidate_config_cache_is_safe_noop_when_nothing_memoized(self):
+		role_profiles._invalidate_config_cache()  # must not raise
+
+	def test_validate_rejects_bad_skill_slug_charset(self):
+		bad = self._config()
+		bad["sets"]["hr"] = ["HRMS_HR"]  # uppercase/underscore not allowed
+		self.assertFalse(role_profiles._validate_role_profile_config(bad))
+
+	def test_validate_rejects_core_tool_not_in_allow(self):
+		bad = self._config()
+		bad["tool_tiers"]["standard"]["core"] = ["exec", "not-allowed-tool"]
+		self.assertFalse(role_profiles._validate_role_profile_config(bad))
+
+	def test_validate_rejects_missing_key(self):
+		bad = self._config()
+		del bad["tool_tiers"]
+		self.assertFalse(role_profiles._validate_role_profile_config(bad))
+
+	def test_validate_accepts_well_formed_config(self):
+		self.assertTrue(role_profiles._validate_role_profile_config(self._config()))
+
+
 class FakeSess:
 	"""Stub pooled ``AgentSession``: counts ``create_session`` calls so tests
 	can assert the flag-gated legacy branch was (or was not) taken."""

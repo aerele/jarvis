@@ -23,6 +23,7 @@ built to never raise into a caller.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import frappe
@@ -428,3 +429,202 @@ def on_user_update(doc, method: str | None = None) -> None:
 	cheap by design - ``enqueue_sync`` already swallows and logs its own
 	errors, so this never raises into the save path."""
 	enqueue_sync()
+
+
+# --- Admin-owned config pull (task BJ1) -------------------------------------
+#
+# The fixture module constants above (SKILL_SETS, ROLE_TO_SET, SHARED_CORE_SKILLS,
+# _STANDARD_TOOLS_ALLOW) remain the code-side fallback forever - fallback
+# discipline is absolute (global constraints): any missing/invalid/partial
+# cached config falls all the way back to the fixture, never a partial
+# application. This section only pulls, validates, caches, and mirrors the
+# admin-owned override; BJ2 is what actually routes fixture reads through it.
+
+# Wire-contract charset rules (frozen, mirrored from the admin editor's own
+# validation - see docs/superpowers/sdd .../global-constraints.md): a config
+# that violates any of these is rejected outright, never partially applied.
+_CONFIG_SKILL_SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+_CONFIG_SET_KEY_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+_CONFIG_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+_CONFIG_JARVIS_TOOL_RE = re.compile(r"^jarvis__[A-Za-z0-9_]+$")
+_CONFIG_TOOL_NAME_MAX_LEN = 200
+
+# frappe.local attribute BJ2's per-request `_active_config()` memo lives on.
+# Documented here (not in role_profiles' BJ2 half, which doesn't exist yet)
+# because this task defines the memo's home and the invalidation hook that
+# clears it; BJ2 reads/writes the same attribute name.
+_CONFIG_MEMO_ATTR = "jarvis_role_profile_config_memo"
+
+
+def _invalidate_config_cache() -> None:
+	"""Clear BJ2's per-request role-profile-config memo (kept on
+	``frappe.local`` at :data:`_CONFIG_MEMO_ATTR`) so a same-request config
+	update is never served stale to the code that reads it afterwards.
+
+	Called by :func:`sync_role_profile_config` immediately BEFORE a
+	version-changing ``sync_role_profiles(force=True)``, so that forced push
+	recomputes :func:`needed_profiles` from the freshly-stored config rather
+	than whatever BJ2's accessor may have already cached earlier in this same
+	request/job.
+
+	Defined here (BJ1) rather than in BJ2 because BJ1 lands first and must not
+	block on BJ2's accessor layer landing later: this is a no-op-safe stub
+	that only clears the attribute if present. BJ2 is free to memoize under
+	this same attribute name; nothing here assumes BJ2 exists yet.
+	"""
+	try:
+		if hasattr(frappe.local, _CONFIG_MEMO_ATTR):
+			delattr(frappe.local, _CONFIG_MEMO_ATTR)
+	except Exception:
+		pass
+
+
+def _valid_skill_slug(value) -> bool:
+	return isinstance(value, str) and bool(_CONFIG_SKILL_SLUG_RE.fullmatch(value))
+
+
+def _valid_set_key(value) -> bool:
+	return isinstance(value, str) and bool(_CONFIG_SET_KEY_RE.fullmatch(value))
+
+
+def _valid_tool_name(value) -> bool:
+	if not isinstance(value, str) or not value or len(value) > _CONFIG_TOOL_NAME_MAX_LEN:
+		return False
+	return bool(_CONFIG_TOOL_NAME_RE.fullmatch(value) or _CONFIG_JARVIS_TOOL_RE.fullmatch(value))
+
+
+def _validate_role_profile_config(data) -> bool:
+	"""Defensive shape + charset validation of the admin-pulled config payload
+	(wire contract: ``{version, enabled, sets, shared_core, mappings,
+	tool_tiers}``). Returns False on ANY structural or charset problem - the
+	caller then takes the failure path and never applies a partial config.
+	Never raises: any unexpected shape (wrong type where a dict/list was
+	assumed) is caught and treated as invalid rather than crashing the sync.
+	"""
+	try:
+		if not isinstance(data, dict):
+			return False
+		version = data.get("version")
+		if not isinstance(version, str) or not version:
+			return False
+		if not isinstance(data.get("enabled"), bool):
+			return False
+
+		sets = data.get("sets")
+		if not isinstance(sets, dict):
+			return False
+		for set_key, skills in sets.items():
+			# "shared-core" is a distinct top-level key (`shared_core`), never a
+			# mappable set - a config that puts it in `sets` too is malformed.
+			if not _valid_set_key(set_key) or set_key == "shared-core":
+				return False
+			if not isinstance(skills, list) or not all(_valid_skill_slug(s) for s in skills):
+				return False
+
+		shared_core = data.get("shared_core")
+		if not isinstance(shared_core, list) or not all(_valid_skill_slug(s) for s in shared_core):
+			return False
+
+		mappings = data.get("mappings")
+		if not isinstance(mappings, dict):
+			return False
+		for role_name, set_key in mappings.items():
+			if not isinstance(role_name, str) or not role_name or not _valid_set_key(set_key):
+				return False
+
+		tool_tiers = data.get("tool_tiers")
+		if not isinstance(tool_tiers, dict):
+			return False
+		standard = tool_tiers.get("standard")
+		if not isinstance(standard, dict):
+			return False
+		allow = standard.get("allow")
+		core = standard.get("core")
+		if not isinstance(allow, list) or not all(_valid_tool_name(t) for t in allow):
+			return False
+		if not isinstance(core, list) or not all(_valid_tool_name(t) for t in core):
+			return False
+		# core-flagged tools are a subset of the allow list by construction
+		# (global constraints: core rows can't be un-flagged/deleted); a
+		# payload violating that is malformed, not a partial-truth to accept.
+		if not set(core).issubset(set(allow)):
+			return False
+
+		return True
+	except Exception:
+		return False
+
+
+def sync_role_profile_config() -> dict:
+	"""Pull the admin-owned role-profile config, cache it, mirror the
+	admin-decided ``enable_role_profiles`` flag, and re-push role profiles
+	when the config's identity (``version``) changed since the last pull.
+
+	Never raises: this runs from the daily scheduler tick (and can be called
+	ad hoc via ``bench execute``), so every failure mode degrades rather than
+	propagates - logged once via ``frappe.log_error`` with a phase-tagged
+	title (mirrors :func:`sync_role_profiles`'s own convention) so an Error
+	Log entry doesn't need a traceback read to tell "admin unreachable" apart
+	from "admin sent a malformed payload".
+
+	Last-known-good rule (plan-binding): a transient failure (pull OR
+	validation) with an EXISTING cached config leaves BOTH the cache and the
+	``enable_role_profiles`` mirror untouched - a blip in admin reachability
+	must never silently disable a previously-synced tenant. A failure with NO
+	cache yet mirrors the flag OFF - nothing has ever been confirmed, so
+	there is no last-known-good state to preserve. This also covers an old
+	bench against an admin that predates this endpoint (method-not-found):
+	compat rule says that must leave the cache absent and the mirror OFF.
+
+	On success (version changed): invalidates BJ2's per-request config memo
+	BEFORE forcing a re-push, so the push recomputes :func:`needed_profiles`
+	from the NEW config rather than a value memoized earlier this request.
+
+	Returns ``{"synced": bool}``.
+	"""
+	phase = "pull"
+	try:
+		from jarvis import admin_client
+
+		response = admin_client.get_role_profile_config()
+		phase = "validate"
+		data = response.get("data") if isinstance(response, dict) else None
+		if not _validate_role_profile_config(data):
+			raise ValueError("invalid or malformed role-profile config payload")
+
+		phase = "store"
+		version = data["version"]
+		previous_version = frappe.db.get_single_value(_SETTINGS, "role_profiles_config_version", cache=False)
+
+		frappe.db.set_value(
+			_SETTINGS,
+			_SETTINGS,
+			{
+				"role_profiles_config": frappe.as_json(data),
+				"role_profiles_config_version": version,
+				"role_profiles_config_synced_at": frappe.utils.now(),
+			},
+		)
+		frappe.db.set_single_value(_SETTINGS, "enable_role_profiles", 1 if data["enabled"] else 0)
+
+		if version != previous_version:
+			phase = "push"
+			_invalidate_config_cache()
+			sync_role_profiles(force=True)
+
+		return {"synced": True}
+	except Exception:
+		try:
+			has_cache = bool(frappe.db.get_single_value(_SETTINGS, "role_profiles_config", cache=False))
+		except Exception:
+			has_cache = False
+		if not has_cache:
+			try:
+				frappe.db.set_single_value(_SETTINGS, "enable_role_profiles", 0)
+			except Exception:
+				pass
+		frappe.log_error(
+			title=f"Jarvis: role-profile-config {phase} failed",
+			message=frappe.get_traceback(),
+		)
+		return {"synced": False}

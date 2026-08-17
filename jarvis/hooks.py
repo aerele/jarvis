@@ -450,6 +450,13 @@ scheduler_events = {
 		# jarvis.chat.usage.record_turn_usage); without a sweep it grows
 		# forever. 90-day retention, same shape as the two prune jobs above.
 		"jarvis.chat.usage.prune_turn_usage",
+		# Role-profile-config bench pull (task BJ1): daily pull of the
+		# admin-owned skill-set/mapping/tool-tier config + the admin-decided
+		# enabled flag, cached and mirrored onto Jarvis Settings. Kept
+		# adjacent to the push entry below by convention only - ordering
+		# between the two does not matter for correctness, since a
+		# version-changing pull triggers its own forced re-push inline.
+		"jarvis.chat.role_profiles.sync_role_profile_config",
 		# Role-profile agents reconcile backstop: the User.on_update hook
 		# enqueues a resync on every role change, but a debounced job can be
 		# dropped (Redis down, a worker restart mid-run). Daily catches the
