@@ -79,12 +79,11 @@ def _build_rollup(cap: int = _MAX_USERS) -> tuple[dict, bool]:
 	truncated = len(rows) > cap
 	rows = rows[:cap]
 	per_model_by_user = _per_model_totals([s.user for s in rows], month)
-	turn_sums_by_user = _turn_usage_user_sums(start, next_month)
-	profile_by_user = _turn_usage_user_profile(start, next_month)
-	top_tools_by_user = _top_tools_by_user(start, next_month)
+	turn_aggregates_by_user = _turn_usage_user_aggregates(start, next_month)
+	top_tools_by_user, tool_calls_by_user, top_tools_tenant = _tool_message_aggregates(start, next_month)
 	users = []
 	for s in rows:
-		sums = turn_sums_by_user.get(s.user, {})
+		agg = turn_aggregates_by_user.get(s.user, {})
 		users.append(
 			{
 				"email": s.user,
@@ -92,12 +91,15 @@ def _build_rollup(cap: int = _MAX_USERS) -> tuple[dict, bool]:
 				"tokens_out": int(s.month_output_tokens or 0),
 				"total_tokens": int(s.month_tokens or 0),
 				"per_model": per_model_by_user.get(s.user, {}),
-				"profile": profile_by_user.get(s.user, "full"),
-				"turns": sums.get("turns", 0),
-				"cache_read": sums.get("cache_read", 0),
-				"cache_write": sums.get("cache_write", 0),
-				"cache_reported": sums.get("cache_reported", False),
-				"tool_calls": sums.get("tool_calls", 0),
+				"profile": agg.get("profile", "full"),
+				"turns": agg.get("turns", 0),
+				"cache_read": agg.get("cache_read", 0),
+				"cache_write": agg.get("cache_write", 0),
+				"cache_reported": agg.get("cache_reported", False),
+				# Deliberately from _tool_message_aggregates (the SAME
+				# role=tool-message population top_tools counts), NOT from
+				# Turn Usage - see that function's docstring (finding #2).
+				"tool_calls": tool_calls_by_user.get(s.user, 0),
 				"top_tools": top_tools_by_user.get(s.user, []),
 			}
 		)
@@ -105,7 +107,7 @@ def _build_rollup(cap: int = _MAX_USERS) -> tuple[dict, bool]:
 		"month_key": month,
 		"users": users,
 		"by_profile": _by_profile(start, next_month),
-		"top_tools": _top_tools_tenant(start, next_month),
+		"top_tools": top_tools_tenant,
 	}
 	return rollup, truncated
 
@@ -143,46 +145,34 @@ def _normalize_profile(raw: str | None) -> str:
 	return "full"
 
 
-def _turn_usage_user_sums(start: str, next_month: str) -> dict[str, dict]:
-	"""Per-user turns / cache / tool_calls sums for the month, ONE grouped
-	query (no N+1 over users). Blank-user rows (U1: VALID_ZERO turns with an
-	unmapped session, documented on the Jarvis Turn Usage DocType) are
-	excluded - every rollup aggregate over this table must filter them."""
+def _turn_usage_user_aggregates(start: str, next_month: str) -> dict[str, dict]:
+	"""Per-user turns / cache sums AND profile attribution for the month, ONE
+	grouped query (``GROUP BY user, profile_agent_id``) instead of two
+	separate scans of the same table/window (review finding #6). Blank-user
+	rows (U1: VALID_ZERO turns with an unmapped session, documented on the
+	Jarvis Turn Usage DocType) are excluded - every rollup aggregate over
+	this table must filter them.
+
+	Profile: most-frequent ``profile_agent_id`` this month, mapped to the
+	payload's "full" spelling; ties broken by the most recent turn. ``ORDER
+	BY user, cnt DESC, last_seen DESC`` puts each user's winning row first,
+	so ``setdefault`` only ever sets ``profile`` from that first row while
+	every row (winner or not) still folds into the running sums below.
+
+	NOTE: does NOT return ``tool_calls`` - see ``_tool_message_aggregates``
+	(review finding #2): a user's ``tool_calls`` must describe the SAME
+	role=tool-message population ``top_tools`` counts (including
+	errored/in-flight turns), not Turn Usage's per-COMPLETED-turn count."""
 	out: dict[str, dict] = {}
 	for r in frappe.db.sql(
 		"""
 		SELECT user,
-			   COUNT(*) AS turns,
+			   profile_agent_id,
+			   COUNT(*) AS cnt,
+			   MAX(creation) AS last_seen,
 			   SUM(cache_read) AS cache_read,
 			   SUM(cache_write) AS cache_write,
-			   MAX(cache_reported) AS cache_reported,
-			   SUM(tool_calls) AS tool_calls
-		FROM `tabJarvis Turn Usage`
-		WHERE user != '' AND day >= %(start)s AND day < %(next_month)s
-		GROUP BY user
-		""",
-		{"start": start, "next_month": next_month},
-		as_dict=True,
-	):
-		out[r.user] = {
-			"turns": int(r.turns or 0),
-			"cache_read": int(r.cache_read or 0),
-			"cache_write": int(r.cache_write or 0),
-			"cache_reported": bool(r.cache_reported),
-			"tool_calls": int(r.tool_calls or 0),
-		}
-	return out
-
-
-def _turn_usage_user_profile(start: str, next_month: str) -> dict[str, str]:
-	"""Each user's most-frequent ``profile_agent_id`` this month, mapped to the
-	payload's "full" spelling; ties broken by the most recent turn. ONE grouped
-	query (``GROUP BY user, profile_agent_id``, ordered ``count DESC, last_seen
-	DESC``) - the first row seen per user in that order is the winner."""
-	winners: dict[str, str] = {}
-	for r in frappe.db.sql(
-		"""
-		SELECT user, profile_agent_id, COUNT(*) AS cnt, MAX(creation) AS last_seen
+			   MAX(cache_reported) AS cache_reported
 		FROM `tabJarvis Turn Usage`
 		WHERE user != '' AND day >= %(start)s AND day < %(next_month)s
 		GROUP BY user, profile_agent_id
@@ -191,8 +181,21 @@ def _turn_usage_user_profile(start: str, next_month: str) -> dict[str, str]:
 		{"start": start, "next_month": next_month},
 		as_dict=True,
 	):
-		winners.setdefault(r.user, _normalize_profile(r.profile_agent_id))
-	return winners
+		bucket = out.setdefault(
+			r.user,
+			{
+				"profile": _normalize_profile(r.profile_agent_id),
+				"turns": 0,
+				"cache_read": 0,
+				"cache_write": 0,
+				"cache_reported": False,
+			},
+		)
+		bucket["turns"] += int(r.cnt or 0)
+		bucket["cache_read"] += int(r.cache_read or 0)
+		bucket["cache_write"] += int(r.cache_write or 0)
+		bucket["cache_reported"] = bucket["cache_reported"] or bool(r.cache_reported)
+	return out
 
 
 def _by_profile(start: str, next_month: str) -> list[dict]:
@@ -200,14 +203,19 @@ def _by_profile(start: str, next_month: str) -> list[dict]:
 	Turn Usage, plus n_skills / n_tools - static per profile, read off any
 	Chat Session row referenced by this month's turns for that profile (LEFT
 	JOIN + MAX, no N+1 and no "most recent session" ordering to get right).
-	Raw ``profile_agent_id`` values are merged AFTER mapping to the payload
-	name (""/an invalid value both fold into "full") so the payload never
-	carries two rows for the same profile."""
+
+	Grouped by (user, profile_agent_id) - NOT profile_agent_id alone - so
+	``users`` is deduplicated AFTER mapping to the payload's profile name
+	(review finding #1): a user whose rows split across raw values that both
+	normalize to the same bucket (e.g. "" and an invalid value both folding
+	into "full") must be counted once, which a raw ``COUNT(DISTINCT user)``
+	grouped by the UNMAPPED ``profile_agent_id`` cannot do."""
+	bucket_users: dict[str, set[str]] = {}
 	merged: dict[str, dict] = {}
 	for r in frappe.db.sql(
 		"""
-		SELECT tu.profile_agent_id AS profile_agent_id,
-			   COUNT(DISTINCT tu.user) AS users,
+		SELECT tu.user AS user,
+			   tu.profile_agent_id AS profile_agent_id,
 			   COUNT(*) AS turns,
 			   SUM(tu.tokens_in) AS tokens_in,
 			   SUM(tu.tokens_out) AS tokens_out,
@@ -217,7 +225,7 @@ def _by_profile(start: str, next_month: str) -> list[dict]:
 		FROM `tabJarvis Turn Usage` tu
 		LEFT JOIN `tabJarvis Chat Session` cs ON cs.session_key = tu.session_key
 		WHERE tu.user != '' AND tu.day >= %(start)s AND tu.day < %(next_month)s
-		GROUP BY tu.profile_agent_id
+		GROUP BY tu.user, tu.profile_agent_id
 		""",
 		{"start": start, "next_month": next_month},
 		as_dict=True,
@@ -236,25 +244,49 @@ def _by_profile(start: str, next_month: str) -> list[dict]:
 				"n_tools": 0,
 			},
 		)
-		bucket["users"] += int(r.users or 0)
+		bucket_users.setdefault(profile, set()).add(r.user)
 		bucket["turns"] += int(r.turns or 0)
 		bucket["tokens_in"] += int(r.tokens_in or 0)
 		bucket["tokens_out"] += int(r.tokens_out or 0)
 		bucket["cache_read"] += int(r.cache_read or 0)
 		bucket["n_skills"] = max(bucket["n_skills"], int(r.n_skills or 0))
 		bucket["n_tools"] = max(bucket["n_tools"], int(r.n_tools or 0))
+	for profile, bucket in merged.items():
+		bucket["users"] = len(bucket_users[profile])
 	return sorted(merged.values(), key=lambda b: b["turns"], reverse=True)
 
 
-def _top_tools_by_user(start: str, next_month: str) -> dict[str, list[dict]]:
-	"""Per-user top-``_TOP_TOOLS_USER_CAP`` tool-call counts this month, ONE
-	query (no N+1 over users). Tool names come from the STRUCTURED
-	``tool_name`` field on role=tool ``Jarvis Chat Message`` rows (read at the
-	insert site - ``jarvis.chat.pump._insert_tool_start_row`` - not parsed
-	from the content prefix; a distinct field already carries the name).
-	Attribution is via each message's conversation OWNER - Jarvis Chat
-	Message carries no direct user field, and the brief pins this route."""
-	by_user: dict[str, list[dict]] = {}
+def _tool_message_aggregates(
+	start: str, next_month: str
+) -> tuple[dict[str, list[dict]], dict[str, int], list[dict]]:
+	"""ONE scan of role=tool ``Jarvis Chat Message`` rows this month, deriving
+	THREE results from the same grouped result set instead of two separate
+	table scans (review finding #5 - the tenant-wide total no longer re-scans
+	the table, it is summed from the per-user rows below):
+
+	  * per-user top-``_TOP_TOOLS_USER_CAP`` tool lists (count desc, name asc)
+	  * per-user UNCAPPED tool-call totals - deliberately the SAME population
+	    ``top_tools`` counts: ALL role=tool messages this month, INCLUDING
+	    errored/in-flight turns (review finding #2). This is NOT Turn Usage's
+	    per-COMPLETED-turn ``tool_calls`` sum - that field only ever counts
+	    turns that reached ``record_turn_usage``, so without this fix a user
+	    could show ``tool_calls=0`` with a non-empty ``top_tools`` for the
+	    same month. Turn Usage's own per-turn ``tool_calls`` field (seq-bounded
+	    to ONE turn, written at record time by ``usage._write_turn_usage_row``)
+	    is a different, unrelated field and is untouched by this change.
+	  * tenant-wide top-``_TOP_TOOLS_TENANT_CAP`` list, summed across users.
+
+	Tool names come from the STRUCTURED ``tool_name`` field on role=tool rows
+	(read at the insert site - ``jarvis.chat.pump._insert_tool_start_row`` -
+	not parsed from the content prefix; a distinct field already carries the
+	name). Attribution is via each message's conversation OWNER - Jarvis Chat
+	Message carries no direct user field, and the brief pins this route. A
+	message whose conversation has no resolvable owner (INNER JOIN miss) is
+	excluded from all three results, same as a message with no owner was
+	already excluded from the per-user results before this change."""
+	top_tools_by_user: dict[str, list[dict]] = {}
+	tool_calls_by_user: dict[str, int] = {}
+	tenant_counts: dict[str, int] = {}
 	for r in frappe.db.sql(
 		"""
 		SELECT c.owner AS user, m.tool_name AS tool, COUNT(*) AS cnt
@@ -273,34 +305,15 @@ def _top_tools_by_user(start: str, next_month: str) -> dict[str, list[dict]]:
 		if not _valid_tool_name(r.tool):
 			frappe.logger("jarvis.usage_push").warning("dropping invalid tool name %r from rollup", r.tool)
 			continue
-		bucket = by_user.setdefault(r.user, [])
+		count = int(r.cnt or 0)
+		tool_calls_by_user[r.user] = tool_calls_by_user.get(r.user, 0) + count
+		bucket = top_tools_by_user.setdefault(r.user, [])
 		if len(bucket) < _TOP_TOOLS_USER_CAP:
-			bucket.append({"tool": r.tool, "count": int(r.cnt or 0)})
-	return by_user
-
-
-def _top_tools_tenant(start: str, next_month: str) -> list[dict]:
-	"""Tenant-wide top-``_TOP_TOOLS_TENANT_CAP`` tool-call counts this month,
-	across ALL users (no owner join needed - unlike ``_top_tools_by_user``,
-	nothing here is attributed per user)."""
-	counts: dict[str, int] = {}
-	for r in frappe.db.sql(
-		"""
-		SELECT tool_name AS tool, COUNT(*) AS cnt
-		FROM `tabJarvis Chat Message`
-		WHERE role = 'tool' AND tool_name IS NOT NULL AND tool_name != ''
-		  AND creation >= %(start)s AND creation < %(next_month)s
-		GROUP BY tool_name
-		""",
-		{"start": start, "next_month": next_month},
-		as_dict=True,
-	):
-		if not _valid_tool_name(r.tool):
-			frappe.logger("jarvis.usage_push").warning("dropping invalid tool name %r from rollup", r.tool)
-			continue
-		counts[r.tool] = int(r.cnt or 0)
-	ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-	return [{"tool": tool, "count": count} for tool, count in ranked[:_TOP_TOOLS_TENANT_CAP]]
+			bucket.append({"tool": r.tool, "count": count})
+		tenant_counts[r.tool] = tenant_counts.get(r.tool, 0) + count
+	ranked = sorted(tenant_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+	top_tools_tenant = [{"tool": tool, "count": count} for tool, count in ranked[:_TOP_TOOLS_TENANT_CAP]]
+	return top_tools_by_user, tool_calls_by_user, top_tools_tenant
 
 
 def _per_model_totals(users: list[str], month: str) -> dict[str, dict[str, dict]]:

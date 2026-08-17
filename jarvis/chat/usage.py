@@ -227,15 +227,29 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 		input_tokens = int(raw_in or 0)
 		output_tokens = int(raw_out or 0)
 		delta = input_tokens + output_tokens
+		# CDX-review: ONE session fetch (user + profile_agent_id + profile_tier)
+		# covers both branches below - the RECORDED path used to fetch only
+		# `user` here and `_write_turn_usage_row` re-queried the same row for
+		# the two profile fields; VALID_ZERO relied on that same internal
+		# re-query. Widened + threaded through instead (review finding #3).
+		session = (
+			frappe.db.get_value(
+				CHAT_SESSION,
+				{"session_key": session_key},
+				["user", "profile_agent_id", "profile_tier"],
+				as_dict=True,
+			)
+			or {}
+		)
+		user = session.get("user") or ""
 		if delta <= 0:
 			# Task U1: attribution is still worth recording even though there is
 			# no token delta - the turn happened and this is the only record of
 			# WHO it happened for. Isolated + never raises (see the docstring).
-			_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens)
+			_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
 			return USAGE_VALID_ZERO
 		context_tokens = int(row.get("totalTokens") or 0)
 
-		user = frappe.db.get_value(CHAT_SESSION, {"session_key": session_key}, "user")
 		if not user:
 			# CDX-6: a FRESH POSITIVE token delta with no `Jarvis Chat Session` user
 			# mapping is unattributed real usage, NOT legitimate zero — it must NOT be
@@ -333,7 +347,7 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 		# Task U1: the per-turn usage row, same isolation as the per-model
 		# write just above - a failure here must not lose the aggregate delta
 		# already applied in this transaction, so it only logs and continues.
-		_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens)
+		_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
 		frappe.db.commit()
 		return USAGE_RECORDED
 	except Exception:
@@ -352,8 +366,16 @@ def _write_turn_usage_row(
 	run_id: str | None,
 	tokens_in: int,
 	tokens_out: int,
+	session: dict,
 ) -> None:
 	"""Best-effort ``Jarvis Turn Usage`` row (task U1, usage-dashboard Part A).
+
+	``session`` is the ``Jarvis Chat Session`` row (``user`` /
+	``profile_agent_id`` / ``profile_tier``) the caller already fetched ONCE
+	(review finding #3 - this used to re-query the same session by
+	``session_key`` a second time; the caller's single fetch now covers both
+	call sites). May be ``{}`` when the session mapping is missing (blank-user
+	attribution row, U1's VALID_ZERO/unmapped-session case).
 
 	Wrapped end-to-end so a failure here can NEVER change ``record_turn_usage``'s
 	returned outcome or raise into the turn - the same isolation the per-model
@@ -370,15 +392,6 @@ def _write_turn_usage_row(
 	until a later agent-runtime build adds one. Re-run the Step-1 live probe from
 	the task-U1 brief to check."""
 	try:
-		session = (
-			frappe.db.get_value(
-				CHAT_SESSION,
-				{"session_key": session_key},
-				["user", "profile_agent_id", "profile_tier"],
-				as_dict=True,
-			)
-			or {}
-		)
 		model, _provider = resolved_model_identity(row)
 		fields = {
 			"run_id": run_id or "",
@@ -416,11 +429,13 @@ def _turn_tool_call_count(run_id: str | None) -> int:
 	"""Count of ``role=tool`` ``Jarvis Chat Message`` rows belonging to the turn
 	named ``run_id``, or 0 when ``run_id`` is absent or unresolvable.
 
-	``Jarvis Chat Message`` carries no direct run/turn link, so this reuses the
-	seq-bounded idiom ``jarvis.chat.entities.entities_for_turn`` already applies
-	for the same reason: tool rows strictly after the turn's ``seed_message``
-	and at-or-before its ``assistant_message`` (by ``seq``, within the same
-	conversation) belong to this turn and no other."""
+	``Jarvis Chat Message`` carries no direct run/turn link, so this MIRRORS
+	(does not call - the filter shapes differ: this needs both a seq LOWER and
+	UPPER bound and no ``ref_doctype`` requirement, see the sibling comment on
+	``jarvis.chat.entities.entities_for_turn``) the same seq-bounded idiom that
+	function applies for the same reason: tool rows strictly after the turn's
+	``seed_message`` and at-or-before its ``assistant_message`` (by ``seq``,
+	within the same conversation) belong to this turn and no other."""
 	if not run_id:
 		return 0
 	turn = frappe.db.get_value(
@@ -446,17 +461,14 @@ def _turn_tool_call_count(run_id: str | None) -> int:
 	asst_seq = seq_by_name.get(turn["assistant_message"])
 	if seed_seq is None or asst_seq is None:
 		return 0
-	return len(
-		frappe.get_all(
-			CHAT_MESSAGE,
-			filters=[
-				["conversation", "=", turn["conversation"]],
-				["role", "=", "tool"],
-				["seq", ">", seed_seq],
-				["seq", "<=", asst_seq],
-			],
-			pluck="name",
-		)
+	return frappe.db.count(
+		CHAT_MESSAGE,
+		filters=[
+			["conversation", "=", turn["conversation"]],
+			["role", "=", "tool"],
+			["seq", ">", seed_seq],
+			["seq", "<=", asst_seq],
+		],
 	)
 
 

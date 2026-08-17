@@ -261,11 +261,16 @@ def _seed_turn_row(
 	cache_reported: int = 0,
 	tool_calls: int = 0,
 	creation=None,
+	day=None,
 ) -> str:
 	"""Insert a bare Jarvis Turn Usage row (task U2 rollup tests): the rollup
 	builder consumes these rows directly, so seeding them straight (rather
 	than round-tripping through record_turn_usage's gateway-row shape) keeps
-	the fixtures focused on the aggregation being tested."""
+	the fixtures focused on the aggregation being tested. ``day`` defaults to
+	today (the real current month); pass an explicit day to land a row in a
+	synthetic month a test has pinned via current_month_key, keeping it
+	isolated from this bench's real Turn Usage traffic in the real current
+	month (see test_empty_month_yields_old_shape_plus_empty_new_fields)."""
 	doc = frappe.get_doc(
 		{
 			"doctype": TURN_USAGE,
@@ -280,7 +285,7 @@ def _seed_turn_row(
 			"cache_write": cache_write,
 			"cache_reported": cache_reported,
 			"tool_calls": tool_calls,
-			"day": frappe.utils.today(),
+			"day": day or frappe.utils.today(),
 			"run_id": "",
 		}
 	)
@@ -383,6 +388,9 @@ class TestUsageRollup(FrappeTestCase):
 			cache_read=2,
 			cache_write=1,
 			cache_reported=1,
+			# Turn Usage's OWN tool_calls (per-turn, seq-bounded) is a
+			# different field from the rollup's per-user tool_calls - see
+			# test_tool_calls_reflects_tool_messages_not_turn_usage below.
 			tool_calls=3,
 		)
 		_seed_turn_row(
@@ -407,7 +415,26 @@ class TestUsageRollup(FrappeTestCase):
 		# bool OR over the month's rows - one row reported, one did not.
 		self.assertTrue(u["cache_reported"])
 		self.assertIs(u["cache_reported"], True)
-		self.assertEqual(u["tool_calls"], 4)
+		# No Chat Message role=tool rows were seeded, so the rollup's
+		# tool_calls (sourced from Chat Message, not Turn Usage - review
+		# finding #2) is 0 despite Turn Usage rows carrying tool_calls=3/1.
+		self.assertEqual(u["tool_calls"], 0)
+
+	# -- (b2) tool_calls tracks Chat Message, not Turn Usage (finding #2) --- #
+	def test_tool_calls_reflects_tool_messages_not_turn_usage(self):
+		self._seed_settings(USER_A, 10)
+		# A completed turn whose OWN Turn Usage row says tool_calls=5 - this
+		# must NOT leak into the rollup's per-user tool_calls.
+		_seed_turn_row("agent:tu-roll-tc1", USER_A, profile_agent_id="role-hr", tool_calls=5)
+		rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		self.assertEqual(users[USER_A]["tool_calls"], 0)
+		# Now add role=tool messages (the population top_tools/tool_calls
+		# actually describe) - tool_calls must track THIS count instead.
+		_seed_tool_messages(USER_A, "rollup-fixture-toolcalls", ["get_list", "get_list", "read_doc"])
+		rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		self.assertEqual(users[USER_A]["tool_calls"], 3)
 
 	# -- (c) blank profile_agent_id maps to "full" --------------------------- #
 	def test_blank_profile_maps_to_full(self):
@@ -479,6 +506,27 @@ class TestUsageRollup(FrappeTestCase):
 		self.assertEqual(by_profile["role-p2"]["n_skills"], 2)
 		self.assertEqual(by_profile["role-p2"]["n_tools"], 3)
 
+	# -- (f2) by_profile users dedups a user split across raw values that --- #
+	# -- both normalize to the same bucket (finding #1) --------------------- #
+	def test_by_profile_users_deduped_after_normalization(self):
+		# Pinned to a synthetic month (see test_empty_month_...): this bench's
+		# real Turn Usage traffic in the ACTUAL current month already has
+		# other users landing in the "full" bucket, which would make a users
+		# count assertion against the real month flaky/wrong.
+		with patch("jarvis.chat.usage.current_month_key", return_value="2000-02"):
+			self._seed_settings(USER_A, 10)
+			# "" and an invalid raw profile_agent_id (fails the role-*
+			# validator) both normalize to "full" - the SAME user must only
+			# be counted once.
+			_seed_turn_row("agent:tu-roll-norm1", USER_A, profile_agent_id="", day="2000-02-10")
+			_seed_turn_row(
+				"agent:tu-roll-norm2", USER_A, profile_agent_id="not-a-valid-profile", day="2000-02-11"
+			)
+			rollup, _ = usage_push._build_rollup()
+		by_profile = {b["profile"]: b for b in rollup["by_profile"]}
+		self.assertEqual(by_profile["full"]["users"], 1)
+		self.assertEqual(by_profile["full"]["turns"], 2)
+
 	# -- (g) top_tools: per-user ordering by count, cap 10 -------------------- #
 	def test_top_tools_per_user_ordering_and_cap(self):
 		self._seed_settings(USER_A, 10)
@@ -493,6 +541,9 @@ class TestUsageRollup(FrappeTestCase):
 		self.assertEqual(len(top), 10)
 		self.assertEqual([t["tool"] for t in top], sorted(names)[:10])
 		self.assertTrue(all(t["count"] == 1 for t in top))
+		# tool_calls is the UNCAPPED total (11), not len(top_tools) (10) -
+		# the cap only bounds the list, not the count (findings #2 / #5).
+		self.assertEqual(users[USER_A]["tool_calls"], 11)
 
 	def test_top_tools_ordering_by_count(self):
 		self._seed_settings(USER_A, 10)
