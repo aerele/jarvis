@@ -354,16 +354,12 @@ def capture_onboarding_lead(
 	``site_origin`` sent here is advisory only - admin_client overwrites it with
 	this bench's own server-derived public origin before it ever reaches admin.
 
-	A non-blank ``email`` that fails ``validate_email_address`` is dropped
-	silently (no admin call, no exception) rather than forwarded - this is
-	fire-and-forget with nothing to show the customer, so a malformed address
-	just never becomes a lead instead of surfacing anywhere. A blank/missing
-	email is left to admin_client as before (unchanged from prior behaviour).
+	A malformed ``email`` is still forwarded to admin_client, same as before -
+	admin validates on its own side, and this bench dropping the attempt would
+	just hide it from operator follow-up instead of catching anything.
 	"""
 	try:
 		require_jarvis_admin()
-		if email and not validate_email_address(email, throw=False):
-			return {"ok": False}
 		return admin_client.capture_onboarding_lead(
 			email,
 			company=company,
@@ -1009,7 +1005,12 @@ def start_signup(
 	# it (onboarding_contract.update below, admin_client.signup) - a malformed
 	# address is cheap to catch here with an actionable message rather than
 	# surfacing as an opaque admin-side rejection several calls later.
-	if not validate_email_address(email, throw=False):
+	# validate_email_address parses ADDRESS LISTS and returns the valid subset,
+	# so a compound string like "not-an-email, real@x.com" comes back truthy
+	# with just the embedded address - comparing it back against the full
+	# (stripped) input is what actually enforces a single well-formed address.
+	sanitized_email = validate_email_address(email or "", throw=False)
+	if not sanitized_email or sanitized_email != (email or "").strip():
 		frappe.throw("Enter a valid email address.")
 	_require_admin_url()
 	# Money the gateway is holding that an operator has not been able to place

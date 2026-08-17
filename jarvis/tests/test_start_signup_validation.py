@@ -42,3 +42,38 @@ class TestStartSignupEmailValidation(FrappeTestCase):
 					billing={"contact_number": "+91 90000 00000"},
 					terms_accepted=True,
 				)
+
+	def test_compound_address_list_rejected(self):
+		"""validate_email_address parses ADDRESS LISTS and returns the valid
+		subset, so a compound string with one embedded valid address used to come
+		back truthy and let the ORIGINAL (invalid) string through. A single
+		well-formed address is now required."""
+		with patch(
+			"jarvis.onboarding.admin_client.signup",
+			side_effect=AssertionError("admin_client.signup should never be reached"),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				onboarding.start_signup(
+					email="not-an-email, real@x.com",
+					company="Acme",
+					plan="pro",
+					billing={"contact_number": "+91 90000 00000"},
+					terms_accepted=True,
+				)
+
+	def test_single_valid_address_passes_the_guard(self):
+		"""A well-formed single address must clear the email guard and reach the
+		next gate (_require_admin_url) - proven by patching THAT to raise, the same
+		ordering technique the other tests in this file use for admin_client.signup."""
+		with patch(
+			"jarvis.onboarding._require_admin_url",
+			side_effect=AssertionError("reached _require_admin_url"),
+		):
+			with self.assertRaisesRegex(AssertionError, "reached _require_admin_url"):
+				onboarding.start_signup(
+					email="real@x.com",
+					company="Acme",
+					plan="pro",
+					billing={"contact_number": "+91 90000 00000"},
+					terms_accepted=True,
+				)
