@@ -1568,6 +1568,48 @@
 											</p>
 										</div>
 									</template>
+									<!-- Slice 4b (C10b): the subscription-connect strand that
+										 waiting cannot heal. Unlike the paged authority-repair block
+										 above, the customer CAN act - so this is a real STOP with a
+										 primary Reconnect CTA into the wizard's reconnect entry, and
+										 admin's own reason as the body. Never the "bringing your setup
+										 online" spinner it used to fall into. -->
+									<template v-else-if="state.connectPhase === 'reconnect'">
+										<div class="ob-head">
+											<h1>
+												{{
+													state.connectTitle ||
+													"Your AI subscription needs reconnecting"
+												}}
+											</h1>
+											<p>
+												Waiting won't finish this one. Reconnect your AI
+												subscription to pick up where setup left off.
+											</p>
+										</div>
+										<div class="mx-auto mt-4 max-w-[560px]">
+											<Banner
+												v-if="state.connectMessage"
+												type="warning"
+												:message="state.connectMessage"
+											/>
+											<div class="mt-4 flex flex-wrap justify-center gap-2">
+												<Button
+													variant="solid"
+													label="Reconnect"
+													@click="reconnectFromStall"
+												/>
+											</div>
+											<p
+												class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+											>
+												Not sure why this happened?
+												<button class="ob-link" @click="openSupport">
+													Contact support
+												</button>
+											</p>
+										</div>
+									</template>
 									<!-- A non-ready terminal (retry / superseded / support) or a
 										 deadline timeout: stay HERE with a real recovery action.
 										 Never a "continue anyway" jump into a chat that cannot yet
@@ -3710,25 +3752,28 @@ const setupTitle = computed(() =>
 // `blocked` panel, and a different model provably cannot resolve any of them.
 const connectModelChangeOffered = ref(false);
 
-// The escape hatch itself: back to the Connect form with the customer's own
-// choice still in it. The editor is v-show'd, never v-if'd, so its state - the
-// provider, the model, a passing key probe - is still mounted and simply
-// becomes visible again; there is nothing to re-fetch or re-fill.
+// Return to the editable Connect form in place, with the customer's own choice
+// still in it. The editor is v-show'd, never v-if'd, so its state - the provider,
+// the model, a passing key probe - is still mounted and simply becomes visible
+// again; there is nothing to re-fetch or re-fill. `blockReason` is the inline
+// banner above the editor that says why they are back and what to do next.
 //
-// It has to be in-wizard. Settings is the obvious home for "add another model",
-// but it is unreachable from here by construction: `llm_pool_provisioning`,
+// Shared by both in-wizard escapes out of the wait: the jarvis#727 model-change
+// (chooseDifferentModel) and slice 4b's Reconnect CTA (reconnectFromStall). It has
+// to be in-wizard for both. Settings is the obvious home for "reconnect / add a
+// model", but it is unreachable from here by construction: `llm_pool_provisioning`,
 // `llm_provisioning` and `readiness_unconfirmed` are all in readiness.js's
 // NOT_ONBOARDED_REASONS, so AppShell's `showGate` renders the full-screen
 // onboarding poster over every route except this one. A "go to Settings" link
 // would put the customer back on this wizard by a longer path.
 //
-// The three forgets are load-bearing, not tidying. The customer is about to
-// submit a DIFFERENT configuration, so this attempt's idempotency key must not
-// survive: admin dedupes on it and would hand back the very operation that
-// never converged. currentOpId must go with it, or retryConnect would re-follow
-// that dead operation instead of saving the new config (enterSaveRefusal, the
-// one terminal that can be reached next, never clears it).
-function chooseDifferentModel() {
+// The forgets are load-bearing, not tidying. The customer is about to submit a
+// FRESH configuration, so this attempt's idempotency key must not survive: admin
+// dedupes on it and would hand back the very operation that never converged.
+// currentOpId must go with it, or retryConnect would re-follow that dead operation
+// instead of saving the new config (enterSaveRefusal, the one terminal that can be
+// reached next, never clears it).
+function returnToConnectForm(blockReason) {
 	stopRetryCountdown();
 	forgetIdem();
 	opStore.forget();
@@ -3744,14 +3789,20 @@ function chooseDifferentModel() {
 	state.connectSupportOffered = false;
 	state.retryAfter = 0;
 	connectModelChangeOffered.value = false;
-	// Says what was observed - the wait ended without setup finishing - and never
-	// that the chosen model is broken, which nothing here established.
-	state.connectBlockReason =
-		"Setup didn't finish with the AI connection you chose, and waiting hasn't cleared it. Pick a different model and start again.";
+	state.connectBlockReason = blockReason;
 	// Any wait still sleeping between polls stops on its next tick (both loops
 	// re-check this), so a late ceiling cannot yank the customer back out of the
 	// form they were just returned to.
 	state.finishing = false;
+}
+
+// The jarvis#727 escape. The block reason says what was observed - the wait ended
+// without setup finishing - and never that the chosen model is broken, which
+// nothing here established.
+function chooseDifferentModel() {
+	returnToConnectForm(
+		"Setup didn't finish with the AI connection you chose, and waiting hasn't cleared it. Pick a different model and start again."
+	);
 }
 
 function ensureController() {
@@ -4117,6 +4168,21 @@ function noteReadiness(o) {
 			"That AI configuration was rejected. Edit your connection and try again.";
 		return stage;
 	}
+	// Slice 4b (C10b): a subscription-connect strand that waiting cannot heal, but
+	// one the customer CAN act on - unlike the paged/suspended/moved blocks below.
+	// Its own phase so the panel carries a primary Reconnect CTA into the wizard's
+	// reconnect entry instead of the support-only dead end, mirroring how `editable`
+	// routes llm_rejected back to the form. `state.finishing` stays true so this card
+	// (which lives under the setup screen's v-show) renders in place of the spinner.
+	// Admin's own sentence (stage.detail) is the body; no model change, because a
+	// rejected model is not the problem here.
+	if (stage.reconnect) {
+		state.connectPhase = "reconnect";
+		state.connectTitle = stage.title || "Your AI subscription needs reconnecting";
+		state.connectMessage = stage.detail;
+		connectModelChangeOffered.value = false;
+		return stage;
+	}
 	// A verdict that waiting cannot resolve is terminal for this wait: stop
 	// polling rather than counting down to a ceiling whose copy invites a retry
 	// that cannot help. Covers a paged authority repair (do nothing, we called
@@ -4166,12 +4232,11 @@ async function waitForChatReadiness() {
 	readinessSeen.value = null;
 	for (let i = 0; i < CHAT_READY_ATTEMPTS; i++) {
 		if (navigated.value) return;
-		// A blocked verdict is terminal for this wait (admin paged a human): stop
-		// polling rather than counting down to a ceiling whose exhaustion copy
-		// would invite the retry this state must not offer.
-		if (state.connectPhase === "blocked") return;
-		// The customer took the jarvis#727 escape back to the editor. This wait is
-		// about the configuration they just left behind, so its ceiling must not
+		// No pre-tick "blocked" guard: a blocked verdict is set by noteReadiness only
+		// alongside stage.stop, and this loop already returns on stage.stop in the same
+		// tick that observes it (below), so it can never sleep and re-enter here blocked.
+		// The customer took the jarvis#727 / slice-4b escape back to the editor. This
+		// wait is about the configuration they just left behind, so its ceiling must not
 		// fire and pull them back out of the form.
 		if (!state.finishing) return;
 		// The memoized verdict is what the router guard will read moments from now, so
@@ -4201,10 +4266,13 @@ async function waitForChatReadiness() {
 			detail: r && r.detail,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
-		// jarvis#757: stage.editable already returned to the form (noteReadiness
-		// set state.finishing = false) - stop polling THIS tick rather than
-		// sleeping once more on a config the customer may already be re-editing.
-		if (state.connectPhase === "blocked" || stage.editable) return;
+		// Any verdict waiting cannot resolve is terminal for this wait (stage.stop):
+		// the paged/suspended/moved blocks, jarvis#757's editable llm_rejected (which
+		// already returned to the form), and slice 4b's reconnect stop. Stop polling
+		// THIS tick rather than sleeping once more on a state that will not change on
+		// its own. `stage.stop` is exactly this set, so it replaces the older
+		// connectPhase/editable pair without altering their behaviour.
+		if (stage.stop) return;
 		await _sleep(CHAT_READY_INTERVAL_MS);
 	}
 	state.finishing = true;
@@ -4431,8 +4499,9 @@ async function followLegacyReadiness(result) {
 	readinessSeen.value = null;
 	for (let i = 0; i < attempts; i++) {
 		if (navigated.value) return;
-		if (state.connectPhase === "blocked") return;
-		// The jarvis#727 escape took the customer back to the editor - see
+		// No pre-tick "blocked" guard - see waitForChatReadiness: stage.stop below ends
+		// the wait in the same tick a blocked/stop verdict is observed.
+		// The jarvis#727 / slice-4b escape took the customer back to the editor - see
 		// waitForChatReadiness for why this wait must not outlive it.
 		if (!state.finishing) return;
 		let r = null;
@@ -4457,8 +4526,9 @@ async function followLegacyReadiness(result) {
 			detail: r && r.detail,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
-		// jarvis#757: see the matching comment in waitForChatReadiness.
-		if (state.connectPhase === "blocked" || stage.editable) return;
+		// See waitForChatReadiness: stage.stop is every verdict waiting cannot resolve
+		// (blocked stops, jarvis#757's editable, slice 4b's reconnect).
+		if (stage.stop) return;
 		if (i < attempts - 1) await _sleep(LEGACY_READY_INTERVAL_MS);
 	}
 	state.finishing = true;
@@ -4574,6 +4644,24 @@ function retryConnect() {
 // that re-follows whatever operation now owns the truth.
 function reloadConnect() {
 	window.location.reload();
+}
+
+// Slice 4b (C10b): the Reconnect CTA on the stalled-subscription STOP card. It
+// re-opens the editable Connect form IN PLACE so the customer can re-run the
+// subscription connect right here - success navigates to chat, a genuine re-strand
+// brings this card back, a too-old host fails clean (S1). It deliberately does NOT
+// hard-nav to RECONNECT_INTENT_URL (the old behaviour): every customer who can see
+// this card is already terminal (they reached PAID -> PROVISIONING -> connect), and
+// landingStep DROPS the reconnect intent when terminal, so that nav resumed straight
+// back to "connect", restarted the wait, re-observed reconnect_required and
+// re-rendered this exact card - an infinite no-op loop. The fix is local to this
+// step; landingStep's terminal guard is correct for the ChatView site_replaced flow
+// and is left alone. Same fresh-attempt reset as chooseDifferentModel (returnToConnectForm
+// drops the stalled operation so the next Start is genuinely new).
+function reconnectFromStall() {
+	returnToConnectForm(
+		"Reconnect your AI subscription below, then start again to finish setting up."
+	);
 }
 
 // (An unreferenced `editConnect` lived here: a partial return-to-the-form that
