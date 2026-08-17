@@ -441,10 +441,23 @@ def _render_letterhead(tpl: str, ctx: dict) -> str:
 	template, keeping its static HTML (a logo ``<img>``) while dropping the tags."""
 	if not tpl:
 		return ""
+	if len(tpl) > _MAX_FURNITURE_CHARS:
+		# A letterhead this large is broken/abuse. Rendering it — and the residual
+		# scrub, whose regex is superlinear on a long run of unclosed ``{{`` — would
+		# be unbounded CPU, and this runs BEFORE render_pdf's subprocess timeout, so
+		# it would pin the worker. Drop the block (a real letterhead is tiny).
+		_log_infra_failure("rich-pdf letterhead too large to render", f"{len(tpl)} chars")
+		return ""
 	if "{{" in tpl or "{%" in tpl:
 		try:
 			tpl = frappe.render_template(tpl, ctx)
 		except Exception:
+			# render_template's error path appends the traceback to
+			# ``frappe.message_log`` BEFORE raising; catching the exception does not
+			# undo that, so a broken-letterhead traceback could ride out to the
+			# caller via ``_server_messages``. Clear it.
+			with contextlib.suppress(Exception):
+				frappe.clear_last_message()
 			_log_infra_failure("rich-pdf letterhead template render failed", "")
 		tpl = _JINJA_RE.sub("", tpl)
 	return tpl

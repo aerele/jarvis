@@ -691,8 +691,39 @@ class TestRenderLetterheadTemplate(unittest.TestCase):
 			raise RuntimeError("no doc context")
 
 		patch.object(furniture.frappe, "render_template", _boom).start()
+		patch.object(furniture.frappe, "clear_last_message", lambda: None).start()
 		self.addCleanup(patch.stopall)
 		out = furniture._render_letterhead('<img src="data:x"> {% if y %}{{ y }}{% endif %}', {})
 		self.assertNotIn("{%", out)
 		self.assertNotIn("{{", out)
 		self.assertIn("<img", out)  # static logo survives the fallback
+
+	def test_oversized_letterhead_dropped_without_hang(self) -> None:
+		# A pathological unclosed-{{ run must be dropped on size BEFORE the
+		# superlinear residual scrub (it runs pre-render, outside the render
+		# timeout). Guard: this returns quickly, not in O(n^2).
+		import time
+
+		called: list = []
+		patch.object(furniture.frappe, "render_template", lambda *_a, **_k: called.append(1) or "").start()
+		self.addCleanup(patch.stopall)
+		huge = "{{" * (furniture._MAX_FURNITURE_CHARS)  # >> the cap
+		start = time.monotonic()
+		out = furniture._render_letterhead(huge, {})
+		self.assertEqual(out, "")
+		self.assertEqual(called, [])  # never even reached render_template / scrub
+		self.assertLess(time.monotonic() - start, 1.0)
+
+	def test_render_error_clears_leaked_message(self) -> None:
+		# render_template's error path appends its traceback to message_log before
+		# raising; _render_letterhead must clear it so it can't leak to the caller.
+		cleared: list = []
+
+		def _boom(*_a, **_k):
+			raise RuntimeError("Jinja Template Error")
+
+		patch.object(furniture.frappe, "render_template", _boom).start()
+		patch.object(furniture.frappe, "clear_last_message", lambda: cleared.append(1)).start()
+		self.addCleanup(patch.stopall)
+		furniture._render_letterhead("<b>{{ x }}</b>", {})
+		self.assertEqual(cleared, [1])
