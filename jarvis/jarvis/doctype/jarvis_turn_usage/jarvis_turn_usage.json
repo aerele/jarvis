@@ -1,0 +1,141 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-08-17 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "run_id",
+  "session_key",
+  "user",
+  "profile_agent_id",
+  "profile_tier",
+  "model",
+  "tokens_in",
+  "tokens_out",
+  "cache_read",
+  "cache_write",
+  "cache_reported",
+  "tool_calls",
+  "day"
+ ],
+ "fields": [
+  {
+   "fieldname": "run_id",
+   "fieldtype": "Data",
+   "label": "Run ID",
+   "search_index": 1,
+   "in_list_view": 1,
+   "description": "Jarvis Chat Turn.name (run_id) this row attributes to. Not schema-unique: record_turn_usage's NEVER-raises contract must never fail an insert on a duplicate-key error, so any at-most-once guarantee is enforced by the caller (finalize's usage_recorded CAS), not by this table."
+  },
+  {
+   "fieldname": "session_key",
+   "fieldtype": "Data",
+   "label": "Session Key",
+   "search_index": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Data",
+   "label": "User",
+   "search_index": 1,
+   "in_list_view": 1,
+   "description": "Snapshot of Jarvis Chat Session.user at write time (Data, not a Link, matching this table's other snapshot fields)."
+  },
+  {
+   "fieldname": "profile_agent_id",
+   "fieldtype": "Data",
+   "label": "Profile Agent ID",
+   "description": "Jarvis Chat Session.profile_agent_id snapshot. Empty string means the main/full agent (no role profile)."
+  },
+  {
+   "fieldname": "profile_tier",
+   "fieldtype": "Data",
+   "label": "Profile Tier",
+   "default": "full",
+   "description": "Jarvis Chat Session.profile_tier snapshot; defaults to \"full\" when the session carries no tier (pre-role-profile sessions)."
+  },
+  {
+   "fieldname": "model",
+   "fieldtype": "Data",
+   "label": "Model",
+   "in_list_view": 1,
+   "description": "usage.resolved_model_identity(row) for this turn - the same decode the aggregate + per-model accrual use, so this row's credit can never disagree with them."
+  },
+  {
+   "fieldname": "tokens_in",
+   "fieldtype": "Int",
+   "label": "Tokens In",
+   "default": "0",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "tokens_out",
+   "fieldtype": "Int",
+   "label": "Tokens Out",
+   "default": "0",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "cache_read",
+   "fieldtype": "Int",
+   "label": "Cache Read",
+   "default": "0",
+   "description": "0 when the gateway build in use does not report cache token fields on sessions.list rows (verified empty against a live gateway on 2026-08-17; re-check resolved_model_identity's neighbouring cache decode if a later runtime adds cache*Tokens keys)."
+  },
+  {
+   "fieldname": "cache_write",
+   "fieldtype": "Int",
+   "label": "Cache Write",
+   "default": "0",
+   "description": "See cache_read: 0 under the same no-cache-fields-reported condition."
+  },
+  {
+   "fieldname": "cache_reported",
+   "fieldtype": "Check",
+   "label": "Cache Reported",
+   "default": "0",
+   "description": "True only when the gateway row actually carried cache token fields for this turn. False means cache_read/cache_write are NOT a real zero measurement - the admin UI must render \"n/a\", not 0, when this is unchecked."
+  },
+  {
+   "fieldname": "tool_calls",
+   "fieldtype": "Int",
+   "label": "Tool Calls",
+   "default": "0",
+   "in_list_view": 1,
+   "description": "Count of role=tool Jarvis Chat Message rows in this turn's conversation, seq-bounded between the turn's seed_message and assistant_message (Jarvis Chat Message carries no direct run/turn link - jarvis.chat.entities.entities_for_turn uses the same seq-bounded idiom)."
+  },
+  {
+   "fieldname": "day",
+   "fieldtype": "Date",
+   "label": "Day",
+   "search_index": 1,
+   "in_list_view": 1,
+   "description": "Calendar day (site timezone) the turn was recorded, for daily rollups and the 90-day prune job."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-17 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Turn Usage",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "role": "Jarvis Admin"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

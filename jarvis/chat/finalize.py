@@ -374,7 +374,7 @@ def _effect_usage(ctx: _Ctx) -> None:
 	# cycle (subject to the bounded force-done budget, which logs the undercount at
 	# the cap). `recorded` / `valid_zero` return normally: the guard commits with the
 	# effect (done), never double-counting the soft monthly cap on a later replay.
-	outcome = _usage.record_turn_usage(session_key, row)
+	outcome = _usage.record_turn_usage(session_key, row, run_id=ctx.run_id)
 	if outcome == _usage.USAGE_RETRY:
 		raise _UsageRetry(f"usage not fresh for {ctx.run_id} (session {session_key})")
 
