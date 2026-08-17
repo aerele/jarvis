@@ -1474,7 +1474,11 @@
 								     here with ```jarvis-goto. Stays clickable in history so an
 								     old transcript still has a way through, even though the
 								     redirect itself only auto-fires once, live (see gotoDashboards
-								     / the run:end handler). -->
+								     / the run:end handler). jarvis#912: every click on an old card
+								     hands off through the same fired-stamp lookup as the live
+								     redirect, so a second/third click resumes the builder
+								     conversation the first hand-off created instead of starting a
+								     new one. -->
 								<div v-if="gotoOf(m)" class="jv-macrocard">
 									<div class="jv-macrocard-ic">
 										<svg
@@ -1500,7 +1504,7 @@
 									</div>
 									<button
 										class="jv-macrocard-btn"
-										@click="gotoDashboards(gotoOf(m).prompt)"
+										@click="gotoDashboards(gotoOf(m).prompt, m.name)"
 									>
 										Open Dashboards
 									</button>
@@ -4130,7 +4134,7 @@ import AskCard from "@/components/chat/AskCard.vue";
 import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.vue";
 import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
-import { parseGoto } from "@/lib/chatGoto";
+import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { shouldFollowBottom } from "@/lib/chatScroll";
@@ -6022,8 +6026,54 @@ function gotoOf(m) {
 // Shared by the card's button and the run:end auto-redirect below: stash the
 // restated request for the Dashboards builder to pick up on its own mount,
 // then navigate there.
-function gotoDashboards(prompt) {
-	setDashboardPrefill({ text: prompt, autoSend: true });
+//
+// jarvis#912: the card button has no per-click guard (the run:end
+// auto-redirect fires once, live, but the card stays clickable on every
+// later visit to the transcript), so a second/third click used to build a
+// brand-new builder conversation each time - discarding the in-progress one
+// and burning a fresh ~78k-token agent session per click. The fired stamp
+// (see lib/chatGoto.js) now remembers which builder conversation the FIRST
+// hand-off for this message landed on: a later trigger navigates there
+// instead of building again. `messageId` is optional only for callers that
+// predate #912's stamp lookup; every real caller below passes it.
+//
+// jarvis#912 round 2: TWO triggers for the same message this close together
+// (a double-click - the card still has no per-click guard) used to both read
+// "no stamp" and each start a build. claimGotoFire() closes that: it is the
+// ONE place a fresh build ever gets stamped, so the second caller in the
+// window always sees the first one's claim, whichever of the two fired
+// first. When the claim is already someone else's and no conversation is
+// recorded yet (that someone's send() is still in flight), this only
+// navigates - the prefill slot is left alone so the claimant's own payload
+// (set moments earlier, in the same tick or the one before) is what the
+// single resulting mount actually consumes.
+function gotoDashboards(prompt, messageId) {
+	const key = messageId ? gotoFiredKey(messageId) : null;
+	const claim = key ? claimGotoFire(localStorage.getItem(key)) : { build: true };
+	if (claim.build) {
+		if (key) {
+			localStorage.setItem(key, claim.stamp);
+			// Bounded stamp set: these keys are write-once per redirect and
+			// would otherwise accumulate for the life of the origin. Keep the
+			// newest ~50 (the fired-stamp check above is the real guard; this
+			// only defends reloads of RECENT transcripts).
+			const stamps = [];
+			for (let i = 0; i < localStorage.length; i++) {
+				const k = localStorage.key(i);
+				if (k && k.startsWith("jarvis:goto-fired:")) {
+					const parsed = parseFiredStamp(localStorage.getItem(k));
+					stamps.push([k, parsed ? parsed.t : 0]);
+				}
+			}
+			stamps
+				.sort((a, b) => b[1] - a[1])
+				.slice(50)
+				.forEach(([k]) => localStorage.removeItem(k));
+		}
+		setDashboardPrefill({ text: prompt, autoSend: true, messageId });
+	} else if (claim.conv) {
+		setDashboardPrefill({ text: prompt, resume: true, conv: claim.conv, messageId });
+	}
 	router.push("/dashboards");
 }
 // Canonicalised at the single _ACTION_RE parse point so every consumer (render
@@ -8940,6 +8990,12 @@ function onEvent(p) {
 			// reaches this branch, so an old message opened again never gets here at
 			// all, but the stamp is the belt-and-braces the spec asks for.
 			//
+			// jarvis#912 round 2: this check is READ-ONLY. The stamp itself is
+			// claimed inside gotoDashboards (via claimGotoFire - see lib/chatGoto.js)
+			// now, the one place a manual card click races through too, so there is
+			// exactly one place a fresh build ever gets stamped. Left here, this
+			// still stops the morph from replaying for a message already handled.
+			//
 			// `redirected` tracks whether THIS run:end is the one that actually
 			// navigates, so the gotoMorph latch below can tell the two cases apart:
 			// the navigating path keeps the latch (it must survive the instant up to
@@ -8952,42 +9008,24 @@ function onEvent(p) {
 			let redirected = false;
 			if (m && !m.error && !m.stopped) {
 				const goto = gotoOf(m);
-				if (goto) {
-					const firedKey = "jarvis:goto-fired:" + m.name;
-					if (!localStorage.getItem(firedKey)) {
-						localStorage.setItem(firedKey, String(Date.now()));
-						// Bounded stamp set: these keys are write-once per redirect and
-						// would otherwise accumulate for the life of the origin. Keep
-						// the newest ~50 (the live-turn gate above is the real guard;
-						// the stamp only defends reloads of RECENT transcripts).
-						const stamps = [];
-						for (let i = 0; i < localStorage.length; i++) {
-							const k = localStorage.key(i);
-							if (k && k.startsWith("jarvis:goto-fired:"))
-								stamps.push([k, Number(localStorage.getItem(k)) || 0]);
-						}
-						stamps
-							.sort((a, b) => b[1] - a[1])
-							.slice(50)
-							.forEach(([k]) => localStorage.removeItem(k));
-						redirected = true;
-						// Latch explicitly: when the block lands WITH the terminal, the
-						// streaming watcher never saw it, and the hold below is the
-						// morph line's only screen time.
-						gotoMorph.value = goto;
-						const reducedMotion =
-							window.matchMedia &&
-							window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-						if (reducedMotion) {
-							gotoDashboards(goto.prompt);
-						} else {
-							gotoNavTimer = setTimeout(() => {
-								gotoNavTimer = null;
-								// dropGotoMorph() clearing the latch (new turn, chat switch,
-								// unmount) is the cancel signal for this pending navigation.
-								if (gotoMorph.value) gotoDashboards(goto.prompt);
-							}, GOTO_MORPH_HOLD_MS);
-						}
+				if (goto && !localStorage.getItem(gotoFiredKey(m.name))) {
+					redirected = true;
+					// Latch explicitly: when the block lands WITH the terminal, the
+					// streaming watcher never saw it, and the hold below is the
+					// morph line's only screen time.
+					gotoMorph.value = goto;
+					const reducedMotion =
+						window.matchMedia &&
+						window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+					if (reducedMotion) {
+						gotoDashboards(goto.prompt, m.name);
+					} else {
+						gotoNavTimer = setTimeout(() => {
+							gotoNavTimer = null;
+							// dropGotoMorph() clearing the latch (new turn, chat switch,
+							// unmount) is the cancel signal for this pending navigation.
+							if (gotoMorph.value) gotoDashboards(goto.prompt, m.name);
+						}, GOTO_MORPH_HOLD_MS);
 					}
 				}
 			}
