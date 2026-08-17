@@ -1699,7 +1699,7 @@ defineExpose({ load, startNewChat, convId });
 	--jv-warn-bd: #f3e0bb;
 }
 .jvp-panel--dark {
-	--jv-surface: #1e1d23;
+	--jv-surface: #16161a;
 	--jv-rule: #2a2833;
 	--jv-rule-2: #2e2c36;
 	--jv-ink: #eceaf2;
