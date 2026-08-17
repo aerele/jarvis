@@ -629,6 +629,16 @@ function recordGotoConversation(messageId, conv) {
 	localStorage.setItem(key, encodeFiredStamp(stamp ? stamp.t : Date.now(), conv));
 }
 
+// jarvis#912 round 2: undo the provisional claim gotoDashboards (ChatView.vue)
+// writes before a goto-seeded send() ever starts. A send that fails never
+// reaches recordGotoConversation above, so without this the claim would sit
+// there un-resolved - within its freshness window (claimGotoFire) that just
+// reads as "still in flight" and self-heals, but permanently blocking a retry
+// is not worth waiting out a window for when the failure is known right here.
+function forgetGotoClaim(messageId) {
+	if (messageId) localStorage.removeItem(gotoFiredKey(messageId));
+}
+
 async function send(gotoMessageId = "") {
 	const text = draft.value.trim();
 	if (!text || sending.value || runActive.value) return;
@@ -651,6 +661,7 @@ async function send(gotoMessageId = "") {
 			// rejected (single-flight guard / usage cap) - nothing persisted
 			messages.value = messages.value.filter((m) => m.name !== tmpName);
 			if (!draft.value) draft.value = text;
+			forgetGotoClaim(gotoMessageId);
 			toast.error(r.reason || "Couldn't send your message.");
 			return;
 		}
@@ -671,6 +682,7 @@ async function send(gotoMessageId = "") {
 	} catch (e) {
 		messages.value = messages.value.filter((m) => m.name !== tmpName);
 		if (!draft.value) draft.value = text;
+		forgetGotoClaim(gotoMessageId);
 		toast.error(errHtml(e));
 	} finally {
 		sending.value = false;

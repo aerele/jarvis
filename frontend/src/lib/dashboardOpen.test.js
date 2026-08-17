@@ -861,6 +861,26 @@ test("send() learns the conversation a goto hand-off landed on and stamps it", (
 	assert.match(fnBody(paneSrc, "function sendText("), /send\(gotoMessageId\);/);
 });
 
+// jarvis#912 round 2, finding #3: gotoDashboards claims the fired-stamp
+// BEFORE this send() ever starts (see chatGoto.test.js's claimGotoFire
+// tests). A send that fails never reaches recordGotoConversation above, so
+// without this the claim would sit there un-resolved until its freshness
+// window lapses - fine for a dead tab, but needlessly slow for a failure this
+// function already knows about right here.
+test("send() forgets the goto claim on both failure exits, so a retry is not stuck behind it", () => {
+	const claim = fnBody(paneSrc, "function forgetGotoClaim(");
+	assert.match(claim, /if \(messageId\) localStorage\.removeItem\(gotoFiredKey\(messageId\)\);/);
+	const send = fnBody(paneSrc, "async function send(");
+	assert.equal((send.match(/forgetGotoClaim\(gotoMessageId\);/g) || []).length, 2);
+	// the rejected (r.ok === false) exit
+	const rejectedIdx = send.indexOf("if (r.ok === false) {");
+	const rejectedBranch = send.slice(rejectedIdx, send.indexOf("return;", rejectedIdx));
+	assert.match(rejectedBranch, /forgetGotoClaim\(gotoMessageId\);/);
+	// the thrown/network-failure exit
+	const catchBranch = send.slice(send.indexOf("} catch (e) {"));
+	assert.match(catchBranch, /forgetGotoClaim\(gotoMessageId\);/);
+});
+
 test("the page resolves a goto hand-off into resume/build/plain-restore, in that order", () => {
 	// gotoResume only when the STAMP names a conversation - `resume` alone
 	// (set by gotoDashboards whenever messageId was passed, even before a
