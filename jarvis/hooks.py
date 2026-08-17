@@ -445,6 +445,11 @@ scheduler_events = {
 		# admin past the retention window (the durable record lives in the admin's
 		# Jarvis Tenant Error). Keeps the local buffer small.
 		"jarvis.error_push.prune_pushed_client_errors",
+		# Usage-dashboard Part A (task U1): Jarvis Turn Usage is an append-only
+		# per-turn accounting row written on every completed turn (see
+		# jarvis.chat.usage.record_turn_usage); without a sweep it grows
+		# forever. 90-day retention, same shape as the two prune jobs above.
+		"jarvis.chat.usage.prune_turn_usage",
 		# Role-profile agents reconcile backstop: the User.on_update hook
 		# enqueues a resync on every role change, but a debounced job can be
 		# dropped (Redis down, a worker restart mid-run). Daily catches the
