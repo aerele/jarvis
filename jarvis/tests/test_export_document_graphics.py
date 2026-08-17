@@ -37,9 +37,16 @@ class TestCssBar(unittest.TestCase):
 		self.assertTrue(out.startswith('<div class="bar-chart">'))
 		self.assertTrue(out.endswith("</div>"))
 
-	def test_css_bar_bar_class_and_width(self) -> None:
+	def test_css_bar_row_structure_label_bar_value(self) -> None:
+		# label + value sit BESIDE the bar (their own columns), NOT crammed inside
+		# the colored bar (the old flat layout overlapped in the render).
 		out = css_bar([{"label": "Q1", "value": "10", "pct": 50}])
-		self.assertIn('<div class="bar" style="width:50%">Q1 10</div>', out)
+		self.assertIn('<div class="bar-row">', out)
+		self.assertIn('<span class="bar-label">Q1</span>', out)
+		self.assertIn('<span class="bar-track"><span class="bar" style="width:50%"></span></span>', out)
+		self.assertIn('<span class="bar-value">10</span>', out)
+		# the bar itself carries NO text (would overflow a narrow bar)
+		self.assertNotIn('style="width:50%">Q1', out)
 
 	def test_css_bar_width_clamps_low(self) -> None:
 		out = css_bar([{"label": "x", "value": "y", "pct": -5}])
@@ -73,11 +80,13 @@ class TestCssBar(unittest.TestCase):
 
 	def test_css_bar_accepts_positional_tuple_rows(self) -> None:
 		out = css_bar([("Q1", "10", 50)])
-		self.assertIn('<div class="bar" style="width:50%">Q1 10</div>', out)
+		self.assertIn('<span class="bar-label">Q1</span>', out)
+		self.assertIn('style="width:50%"', out)
+		self.assertIn('<span class="bar-value">10</span>', out)
 
 	def test_css_bar_multiple_rows(self) -> None:
 		out = css_bar([{"label": "A", "value": "1", "pct": 10}, {"label": "B", "value": "2", "pct": 90}])
-		self.assertEqual(out.count('<div class="bar"'), 2)
+		self.assertEqual(out.count('<div class="bar-row">'), 2)
 
 	def test_css_bar_empty_rows(self) -> None:
 		self.assertEqual(css_bar([]), '<div class="bar-chart"></div>')
@@ -99,12 +108,16 @@ class TestCssBar(unittest.TestCase):
 	def test_css_bar_valid_3seq_does_not_raise(self) -> None:
 		# Exactly three positional items is the legitimate shape and must still work.
 		out = css_bar([[1, 2, 50]])
-		self.assertIn('<div class="bar" style="width:50%">1 2</div>', out)
+		self.assertIn('<span class="bar-label">1</span>', out)
+		self.assertIn('style="width:50%"', out)
+		self.assertIn('<span class="bar-value">2</span>', out)
 
 	def test_css_bar_none_label_value_render_blank_not_none(self) -> None:
 		out = css_bar([{"label": None, "value": None, "pct": 10}])
 		self.assertNotIn("None", out)
-		self.assertIn('<div class="bar" style="width:10%"> </div>', out)
+		self.assertIn('<span class="bar-label"></span>', out)
+		self.assertIn('<span class="bar-value"></span>', out)
+		self.assertIn('style="width:10%"', out)
 
 	def test_css_bar_tiny_pct_no_scientific_notation(self) -> None:
 		# 0.00001 formatted with :g would be "1e-05", which old WebKit drops. Fixed

@@ -38,22 +38,28 @@ _RAG_STATUSES = ("red", "amber", "green")
 
 
 def css_bar(rows: Sequence[Mapping[str, object] | Sequence[object]]) -> str:
-	"""Render an inert CSS bar chart: a ``.bar-chart`` wrapper holding one ``.bar``
-	per row, per Task 2's contract classes.
+	"""Render an inert CSS bar chart as ``.bar-row`` blocks, each a three-column
+	line: ``.bar-label`` (name) · ``.bar-track`` holding the width-set ``.bar`` ·
+	``.bar-value`` (the figure). This is the structure ``theme.THEME_CSS`` styles;
+	the label and value sit BESIDE the bar, never as text crammed inside it.
 
-	Each row supplies ``label``, ``value`` (rendered as escaped text, joined as
-	``"{label} {value}"``) and ``pct`` (the bar's width, clamped to 0-100 - the
-	only number that reaches the inline ``style`` attribute). A row may be a
-	mapping with those three keys, or a positional ``(label, value, pct)``
-	sequence.
+	Each row supplies ``label``, ``value`` (both escaped text) and ``pct`` (the
+	bar's width, clamped to 0-100 - the only number reaching an inline ``style``).
+	A row may be a mapping with those three keys, or a positional
+	``(label, value, pct)`` sequence.
 	"""
-	bars = []
+	rows_html = []
 	for row in rows:
 		label, value, pct = _row_parts(row)
 		width = _clamp_pct(pct)
-		text = f"{_esc(label)} {_esc(value)}"
-		bars.append(f'<div class="bar" style="width:{width}%">{text}</div>')
-	return '<div class="bar-chart">' + "".join(bars) + "</div>"
+		rows_html.append(
+			'<div class="bar-row">'
+			f'<span class="bar-label">{_esc(label)}</span>'
+			f'<span class="bar-track"><span class="bar" style="width:{width}%"></span></span>'
+			f'<span class="bar-value">{_esc(value)}</span>'
+			"</div>"
+		)
+	return '<div class="bar-chart">' + "".join(rows_html) + "</div>"
 
 
 def kpi_tile(label: str, value: str, delta: str | None = None) -> str:

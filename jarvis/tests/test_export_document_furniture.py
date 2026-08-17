@@ -363,26 +363,40 @@ class TestBinaryResolution(unittest.TestCase):
 
 
 class TestPageNumbering(_FurnitureRenderBase):
-	def test_page_numbers_footer_uses_bracket_vars(self) -> None:
+	def test_page_numbers_use_text_footer_not_html(self) -> None:
+		# Page numbers go through the TEXT footer (--footer-center), which
+		# substitutes [page]/[topage] in wkhtmltopdf's C++ layer and so works under
+		# --disable-javascript. An HTML footer's bracket substitution needs JS, so
+		# it would print a literal "[page]" (the staging-smoke bug).
 		render_pdf("<p>hi</p>", page_numbers=True)
-		self.assertIn("--footer-html", self.fake_wk.args)
-		content = self.fake_wk.file_contents["--footer-html"]
-		self.assertIn("[page]", content)
-		self.assertIn("[topage]", content)
+		self.assertNotIn("--footer-html", self.fake_wk.args)
+		self.assertIn("--footer-center", self.fake_wk.args)
+		i = self.fake_wk.args.index("--footer-center")
+		self.assertEqual(self.fake_wk.args[i + 1], "Page [page] of [topage]")
 
 	def test_no_footer_when_page_numbers_off_and_no_footer(self) -> None:
 		render_pdf("<p>hi</p>", page_numbers=False)
 		self.assertNotIn("--footer-html", self.fake_wk.args)
+		self.assertNotIn("--footer-center", self.fake_wk.args)
 
 	def test_no_header_when_nothing_to_render(self) -> None:
 		render_pdf("<p>hi</p>", page_numbers=False)
 		self.assertNotIn("--header-html", self.fake_wk.args)
 
-	def test_explicit_footer_suppresses_auto_page_numbers(self) -> None:
+	def test_html_footer_wins_over_text_page_numbers(self) -> None:
+		# An explicit footer (or a letterhead footer) needs --footer-html; it and
+		# the text footer are mutually exclusive, so auto page numbers are omitted.
 		render_pdf("<p>hi</p>", footer_html="<b>my-footer</b>", page_numbers=True)
+		self.assertIn("--footer-html", self.fake_wk.args)
+		self.assertNotIn("--footer-center", self.fake_wk.args)
 		content = self.fake_wk.file_contents["--footer-html"]
 		self.assertIn("my-footer", content)
-		self.assertNotIn("[page]", content)
+
+	def test_letterhead_footer_uses_html_footer(self) -> None:
+		render_pdf("<p>hi</p>", letterhead_footer="<div>LH-FOOT</div>", page_numbers=True)
+		self.assertIn("--footer-html", self.fake_wk.args)
+		self.assertNotIn("--footer-center", self.fake_wk.args)
+		self.assertIn("LH-FOOT", self.fake_wk.file_contents["--footer-html"])
 
 
 # --- letterhead: folding (pre-resolved, trusted HTML) -----------------------
@@ -571,6 +585,21 @@ class TestResolveLetterhead(unittest.TestCase):
 		self.assertIn("ACME", header)
 		self.assertIsNone(note)
 
+	def test_resolve_letterhead_jinja_never_leaks_raw(self) -> None:
+		# The staging-smoke bug: a Jinja Letter Head folded in raw leaked
+		# {% if %}/{{ }} into the PDF. Even in the worst case (render leaves the
+		# tags), the residual scrub must remove them; static text survives.
+		_stub_letterhead(
+			default="Std",
+			docs={"Std": {"content": "<div>{% if x %}{{ x }}{% endif %}Acme Ltd</div>", "footer": ""}},
+		)
+		self.addCleanup(patch.stopall)
+		with patch.object(furniture.frappe, "render_template", lambda tpl, ctx: tpl):
+			header, _footer, _note = resolve_letterhead(None)
+		self.assertNotIn("{%", header)
+		self.assertNotIn("{{", header)
+		self.assertIn("Acme Ltd", header)
+
 	def test_resolve_letterhead_no_default_no_note(self) -> None:
 		_stub_letterhead(default=None)
 		self.addCleanup(patch.stopall)
@@ -628,3 +657,73 @@ class TestResolveLetterhead(unittest.TestCase):
 		header, footer, note = resolve_letterhead(None)
 		self.assertTrue(isinstance(header, str) and isinstance(footer, str))
 		self.assertIsNone(note)
+
+
+class TestRenderLetterheadTemplate(unittest.TestCase):
+	"""_render_letterhead: render a Letter Head's Jinja, then scrub residual tags."""
+
+	def test_non_jinja_passthrough_does_not_render(self) -> None:
+		called: list = []
+
+		def _spy(*_a, **_k):
+			called.append(1)
+			return ""
+
+		patch.object(furniture.frappe, "render_template", _spy).start()
+		self.addCleanup(patch.stopall)
+		out = furniture._render_letterhead("<div>plain logo</div>", {})
+		self.assertEqual(out, "<div>plain logo</div>")
+		self.assertEqual(called, [])  # no template markers → render_template skipped
+
+	def test_renders_then_scrubs_residual(self) -> None:
+		patch.object(
+			furniture.frappe, "render_template", lambda t, c: "<b>Acme</b>{% stray %}keep{{ x }}"
+		).start()
+		self.addCleanup(patch.stopall)
+		out = furniture._render_letterhead("<b>{{ company }}</b>", {})
+		self.assertNotIn("{%", out)
+		self.assertNotIn("{{", out)
+		self.assertIn("Acme", out)
+		self.assertIn("keep", out)
+
+	def test_render_error_falls_back_to_stripped_raw(self) -> None:
+		def _boom(*_a, **_k):
+			raise RuntimeError("no doc context")
+
+		patch.object(furniture.frappe, "render_template", _boom).start()
+		patch.object(furniture.frappe, "clear_last_message", lambda: None).start()
+		self.addCleanup(patch.stopall)
+		out = furniture._render_letterhead('<img src="data:x"> {% if y %}{{ y }}{% endif %}', {})
+		self.assertNotIn("{%", out)
+		self.assertNotIn("{{", out)
+		self.assertIn("<img", out)  # static logo survives the fallback
+
+	def test_oversized_letterhead_dropped_without_hang(self) -> None:
+		# A pathological unclosed-{{ run must be dropped on size BEFORE the
+		# superlinear residual scrub (it runs pre-render, outside the render
+		# timeout). Guard: this returns quickly, not in O(n^2).
+		import time
+
+		called: list = []
+		patch.object(furniture.frappe, "render_template", lambda *_a, **_k: called.append(1) or "").start()
+		self.addCleanup(patch.stopall)
+		huge = "{{" * (furniture._MAX_FURNITURE_CHARS)  # >> the cap
+		start = time.monotonic()
+		out = furniture._render_letterhead(huge, {})
+		self.assertEqual(out, "")
+		self.assertEqual(called, [])  # never even reached render_template / scrub
+		self.assertLess(time.monotonic() - start, 1.0)
+
+	def test_render_error_clears_leaked_message(self) -> None:
+		# render_template's error path appends its traceback to message_log before
+		# raising; _render_letterhead must clear it so it can't leak to the caller.
+		cleared: list = []
+
+		def _boom(*_a, **_k):
+			raise RuntimeError("Jinja Template Error")
+
+		patch.object(furniture.frappe, "render_template", _boom).start()
+		patch.object(furniture.frappe, "clear_last_message", lambda: cleared.append(1)).start()
+		self.addCleanup(patch.stopall)
+		furniture._render_letterhead("<b>{{ x }}</b>", {})
+		self.assertEqual(cleared, [1])
