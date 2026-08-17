@@ -178,6 +178,7 @@ const QUICK_CLAUSES = { enabled: "enabled" };
 const sortOptions = [
 	{ label: "Name", value: "skill_name" },
 	{ label: "Updated", value: "modified" },
+	{ label: "Created", value: "creation" },
 	{ label: "Enabled", value: "enabled" },
 ];
 const DEFAULT_SORT = { field: "skill_name", dir: "asc" };

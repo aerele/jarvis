@@ -29,13 +29,35 @@
 				<div
 					class="my-2 min-w-60 rounded-lg bg-surface-modal p-2 shadow-2xl ring-1 ring-black ring-opacity-5"
 				>
-					<FormControl
-						type="select"
-						label="Sort by"
-						:options="sortOptions"
-						:modelValue="sort.field || defaultSort.field || ''"
-						@update:modelValue="(v) => pickField(v, close)"
-					/>
+					<!-- A portal-free radio menu, NOT a frappe-ui Select: that renders its
+					     options through a reka SelectPortal, whose click counts as OUTSIDE
+					     this Popover and dismisses it before a field can be picked - so only
+					     the default field was ever reachable. In-popover buttons stay in the
+					     Popover's own DOM, so it stays open until pickField() closes it. -->
+					<div
+						id="sort-by-heading"
+						class="px-2 pb-1 text-xs font-medium text-ink-gray-5"
+					>
+						Sort by
+					</div>
+					<div role="menu" aria-labelledby="sort-by-heading" class="flex flex-col">
+						<button
+							v-for="opt in sortOptions"
+							:key="opt.value"
+							type="button"
+							role="menuitemradio"
+							:aria-checked="opt.value === currentField"
+							class="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-base text-ink-gray-8 hover:bg-surface-gray-2 focus:outline-none focus-visible:bg-surface-gray-2"
+							@click="pickField(opt.value, close)"
+						>
+							<span class="truncate">{{ opt.label }}</span>
+							<FeatherIcon
+								v-if="opt.value === currentField"
+								name="check"
+								class="size-4 text-ink-gray-7"
+							/>
+						</button>
+					</div>
 					<div class="mt-2 flex justify-end border-t pt-2">
 						<Button
 							variant="ghost"
@@ -63,7 +85,7 @@
 // field label once chosen); a ghost x reset appears once a non-default sort is
 // active. Emits update:sort {field, dir}.
 import { computed } from "vue";
-import { Popover, Button, FormControl } from "frappe-ui";
+import { Popover, Button, FeatherIcon } from "frappe-ui";
 
 const props = defineProps({
 	sortOptions: { type: Array, default: () => [] }, // [{label, value}]
@@ -82,6 +104,9 @@ const isDefault = computed(
 // Effective direction: the active sort's dir, else the page default, else desc.
 // The always-visible toggle needs a value even before the user has changed sort.
 const dir = computed(() => props.sort.dir || props.defaultSort.dir || "desc");
+
+// The field the menu marks as selected: the active sort, else the page default.
+const currentField = computed(() => props.sort.field || props.defaultSort.field || "");
 
 const fieldLabel = computed(() => {
 	const opt = (props.sortOptions || []).find((o) => o.value === props.sort.field);

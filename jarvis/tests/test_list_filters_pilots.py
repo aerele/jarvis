@@ -469,3 +469,63 @@ class TestErrorCodesOnTheWire(unittest.TestCase):
 		contract still throws, which is what its existing callers expect."""
 		with _as(USER_A), self.assertRaises(frappe.ValidationError):
 			self._request("jarvis.chat.macros_api.list_macros_page", filters='{"bogus_key": 1}')
+
+
+class TestSkillsSortableColumns(unittest.TestCase):
+	"""The skills list must sort by its datetime columns, not just Name (jarvis#900+):
+	the reachable frontend sort options (skill_name, modified, creation, enabled) each
+	have to be honored server-side, and anything else falls back to the Name default."""
+
+	def _order(self, field, direction="asc"):
+		from jarvis.chat.custom_skills_api import _SKILLS_SORTABLE
+
+		return list_filters.order_by(field, direction, _SKILLS_SORTABLE, "skill_name", "asc")
+
+	def test_created_datetime_is_a_sortable_column(self):
+		# Killing mutation: drop "creation" from _SKILLS_SORTABLE -> this falls back to
+		# skill_name asc and the assertion reds.
+		self.assertEqual(self._order("creation", "desc"), "`creation` desc, `name` asc")
+
+	def test_updated_datetime_is_a_sortable_column(self):
+		self.assertEqual(self._order("modified", "desc"), "`modified` desc, `name` asc")
+
+	def test_an_unknown_sort_field_falls_back_to_name(self):
+		self.assertEqual(self._order("description"), "`skill_name` asc, `name` asc")
+
+	def test_creation_sort_actually_reorders_rows_end_to_end(self):
+		# Real endpoint proof (mirrors test_feature_pages_api.test_sort_creation_default_desc):
+		# three skills with KNOWN, distinct creation times -> sort_field=creation returns them
+		# in creation order, not the skill_name default. Names are chosen so name-order and
+		# creation-order differ, so a fallback-to-name would be visible.
+		names = ["lfp-cr-c", "lfp-cr-a", "lfp-cr-b"]  # insert order != alpha order
+		try:
+			with _as(USER_A):
+				for n in names:
+					frappe.get_doc(
+						{
+							"doctype": SKILL,
+							"skill_name": n,
+							"description": "creation-sort e2e fixture",
+							"instructions": "creation-sort e2e fixture instructions",
+							"scope": "User",
+							"enabled": 1,
+						}
+					).insert(ignore_permissions=True)
+			for i, n in enumerate(names):
+				frappe.db.set_value(
+					SKILL, {"skill_name": n}, "creation", f"2026-01-0{i + 1} 00:00:00", update_modified=False
+				)
+			frappe.db.commit()
+			with _as(USER_A):
+				desc = list_custom_skills_page(sort_field="creation", sort_dir="desc")
+				asc = list_custom_skills_page(sort_field="creation", sort_dir="asc")
+			desc_names = [r["skill_name"] for r in desc["rows"] if r["skill_name"] in names]
+			asc_names = [r["skill_name"] for r in asc["rows"] if r["skill_name"] in names]
+			# creation order is insert order (c, a, b); desc = newest first (b, a, c)
+			self.assertEqual(asc_names, ["lfp-cr-c", "lfp-cr-a", "lfp-cr-b"])
+			self.assertEqual(desc_names, ["lfp-cr-b", "lfp-cr-a", "lfp-cr-c"])
+		finally:
+			for n in names:
+				for nm in frappe.get_all(SKILL, filters={"skill_name": n}, pluck="name"):
+					frappe.delete_doc(SKILL, nm, force=True, ignore_permissions=True)
+			frappe.db.commit()
