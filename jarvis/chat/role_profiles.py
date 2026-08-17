@@ -272,15 +272,18 @@ def resolve_profile(user: str) -> ProfileChoice:
 		if roles & FULL_TIER_ROLES:
 			return _MAIN_PROFILE
 
-		matched = sorted({ROLE_TO_SET[role] for role in roles if role in ROLE_TO_SET})
+		role_to_set = get_role_to_set()
+		matched = sorted({role_to_set[role] for role in roles if role in role_to_set})
 		if not matched:
 			# No mapped ERPNext role: conservatively keep full tier / all
 			# skills in v1 rather than guess-trim (spec §3 fallback rule 2).
 			return _MAIN_PROFILE
 
-		skills = tuple(sorted(SHARED_CORE_SKILLS.union(*(SKILL_SETS[key] for key in matched))))
+		skill_sets = get_skill_sets()
+		shared_core = get_shared_core()
+		skills = tuple(sorted(shared_core.union(*(skill_sets[key] for key in matched))))
 		agent_id = "role-" + "+".join(matched)
-		allow = standard_tools_allow()
+		allow = get_tools_allow()
 		return ProfileChoice(
 			agent_id=agent_id,
 			tier="standard",
@@ -311,7 +314,7 @@ def needed_profiles() -> list[dict]:
 		pluck="name",
 	)
 
-	tools_allow = standard_tools_allow()
+	tools_allow = get_tools_allow()
 	profiles: dict[str, dict] = {}
 	# One frappe.get_roles call per user (via resolve_profile): N+1, but N is
 	# a tenant's enabled-user headcount, not a global scan, so this is fine.
@@ -553,6 +556,103 @@ def _validate_role_profile_config(data) -> bool:
 		return True
 	except Exception:
 		return False
+
+
+# --- Config-override accessor layer (task BJ2) ------------------------------
+#
+# Every fixture read below routes through these accessors: cached-config
+# value when a validated config is active for this request, else the module
+# fixture constant. Fallback is all-or-nothing (global constraints) - a
+# config that is charset-valid but structurally broken (e.g. a dangling
+# mapping set_key) is rejected here just as hard as one that fails BJ1's
+# type/charset check.
+
+
+def _mappings_reference_known_sets(data: dict) -> bool:
+	"""Referential integrity beyond BJ1's charset/shape check
+	(:func:`_validate_role_profile_config`): a config whose ``mappings`` point
+	at a ``set_key`` absent from ``sets`` is charset-valid but broken - left
+	unchecked, ``resolve_profile`` would KeyError on the dangling reference.
+	Rejected here so the caller takes the whole-config fallback path, never a
+	partial application. Never raises: any unexpected shape is treated as
+	invalid rather than crashing the accessor.
+	"""
+	try:
+		known_sets = set(data["sets"].keys())
+		return all(set_key in known_sets for set_key in data["mappings"].values())
+	except Exception:
+		return False
+
+
+def _active_config() -> dict | None:
+	"""The validated, cached admin config for this request, or ``None`` when
+	no config is cached or it fails validation. Memoized on ``frappe.local``
+	at :data:`_CONFIG_MEMO_ATTR`, keyed on the current
+	``role_profiles_config_version`` so a version change mid-request - whether
+	via an explicit :func:`_invalidate_config_cache` call or a same-request DB
+	write this function simply notices on its next call - is never served
+	stale.
+
+	Never raises: any DB, JSON, or validation problem here is a fixture-
+	fallback signal to the accessors below, not an exception a caller has to
+	handle. This is what lets :func:`resolve_profile`'s try/except stay
+	untouched by BJ2 - the accessors it calls can't raise.
+	"""
+	try:
+		version = frappe.db.get_single_value(_SETTINGS, "role_profiles_config_version", cache=False)
+		if hasattr(frappe.local, _CONFIG_MEMO_ATTR):
+			memo_version, memo_config = getattr(frappe.local, _CONFIG_MEMO_ATTR)
+			if memo_version == version:
+				return memo_config
+
+		config = None
+		raw = frappe.db.get_single_value(_SETTINGS, "role_profiles_config", cache=False)
+		if raw:
+			data = frappe.parse_json(raw)
+			if _validate_role_profile_config(data) and _mappings_reference_known_sets(data):
+				config = data
+
+		setattr(frappe.local, _CONFIG_MEMO_ATTR, (version, config))
+		return config
+	except Exception:
+		return None
+
+
+def get_skill_sets() -> dict[str, frozenset[str]]:
+	"""Set-key -> skill-slug membership: the cached config's ``sets`` when a
+	config is active, else the module fixture (:data:`SKILL_SETS`)."""
+	config = _active_config()
+	if config is None:
+		return SKILL_SETS
+	return {set_key: frozenset(skills) for set_key, skills in config["sets"].items()}
+
+
+def get_role_to_set() -> dict[str, str]:
+	"""ERPNext role name -> set key: the cached config's ``mappings`` when a
+	config is active, else the module fixture (:data:`ROLE_TO_SET`)."""
+	config = _active_config()
+	if config is None:
+		return ROLE_TO_SET
+	return dict(config["mappings"])
+
+
+def get_shared_core() -> frozenset[str]:
+	"""Always-on skill slugs: the cached config's ``shared_core`` when a
+	config is active, else the module fixture (:data:`SHARED_CORE_SKILLS`)."""
+	config = _active_config()
+	if config is None:
+		return SHARED_CORE_SKILLS
+	return frozenset(config["shared_core"])
+
+
+def get_tools_allow() -> list[str]:
+	"""The ``standard``-tier tool allow list: the cached config's
+	``tool_tiers.standard.allow`` when a config is active, else the module
+	fixture (:func:`standard_tools_allow`)."""
+	config = _active_config()
+	if config is None:
+		return standard_tools_allow()
+	return list(config["tool_tiers"]["standard"]["allow"])
 
 
 def sync_role_profile_config() -> dict:

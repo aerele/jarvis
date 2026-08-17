@@ -458,6 +458,181 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 	def test_validate_accepts_well_formed_config(self):
 		self.assertTrue(role_profiles._validate_role_profile_config(self._config()))
 
+	def test_version_change_repush_carries_new_config_skills_in_payload(self):
+		"""BJ1-review obligation 1: prove a version-changing
+		``sync_role_profile_config`` re-push actually carries profiles
+		COMPUTED FROM THE NEW CONFIG, not the code fixture or a value BJ2's
+		accessor memoized earlier. Mocks only the ``admin_client`` transport -
+		``sync_role_profiles`` and ``needed_profiles`` run for real against a
+		real ``Jarvis User`` fixture, so this closes the gap BJ1 could not
+		prove on its own.
+		"""
+		role_profiles._invalidate_config_cache()
+		self.addCleanup(role_profiles._invalidate_config_cache)
+
+		u_email = "rp-cfg-e2e@example.com"
+		if not frappe.db.exists("User", u_email):
+			u = frappe.get_doc({"doctype": "User", "email": u_email, "first_name": "rp-cfg-e2e"})
+			u.append_roles("Jarvis User", "HR User")
+			u.insert(ignore_permissions=True)
+
+		store, fake_get, fake_set, fake_set_single = self._fake_store()
+		new_config = self._config(version="v2", enabled=True)
+		new_config["sets"] = {"hr": ["custom-hr-only-skill"]}
+		resp = {"ok": True, "data": new_config}
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch("jarvis.admin_client.post_push_role_profiles", return_value={"ok": True}) as mock_push,
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		mock_push.assert_called_once()
+		pushed = mock_push.call_args.kwargs["role_profiles"]
+		hr_profile = next(p for p in pushed if p["slug"] == "role-hr")
+		self.assertEqual(hr_profile["skills"], sorted({"custom-hr-only-skill", "frappe-core"}))
+
+
+class TestRoleProfileConfigAccessors(FrappeTestCase):
+	"""``jarvis.chat.role_profiles._active_config`` and the accessors it backs
+	(``get_skill_sets`` / ``get_role_to_set`` / ``get_shared_core`` /
+	``get_tools_allow``), plus the callers that switched to them,
+	``resolve_profile`` / ``needed_profiles`` (task BJ2).
+
+	``frappe.local``'s per-request memo is process-lifetime, not per-test, so
+	every test here invalidates it in setUp AND tearDown - belt and braces:
+	``_active_config`` re-reads the version fresh on every call regardless
+	(see its own docstring), but explicit invalidation keeps this class's
+	tests deterministic and keeps a fake ``v1``/``v2`` memo from a mocked
+	context leaking into an unmocked one.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		role_profiles._invalidate_config_cache()
+
+	def tearDown(self):
+		role_profiles._invalidate_config_cache()
+		super().tearDown()
+
+	def _mk_user(self, email, roles):
+		if not frappe.db.exists("User", email):
+			u = frappe.get_doc({"doctype": "User", "email": email, "first_name": email.split("@")[0]})
+			u.append_roles(*roles)
+			u.insert(ignore_permissions=True)
+		return email
+
+	@staticmethod
+	def _config(**overrides):
+		data = {
+			"version": "v1",
+			"enabled": True,
+			"sets": {"hr": ["hrms-hr", "hrms-payroll"]},
+			"shared_core": ["frappe-core"],
+			"mappings": {"HR User": "hr"},
+			"tool_tiers": {"standard": {"allow": ["exec", "read"], "core": ["exec"]}},
+		}
+		data.update(overrides)
+		return data
+
+	@staticmethod
+	def _patched(raw, version="v1"):
+		store = {"role_profiles_config": raw, "role_profiles_config_version": version}
+
+		def fake_get(doctype, fieldname, cache=True):
+			assert doctype == role_profiles._SETTINGS
+			return store.get(fieldname)
+
+		return patch.object(frappe.db, "get_single_value", side_effect=fake_get)
+
+	def test_config_moves_skill_between_sets_and_resolve_profile_honors_it(self):
+		u = self._mk_user("rp-cfg-move@example.com", ["Jarvis User", "HR User"])
+		cfg = self._config(sets={"hr": ["erpnext-projects"]})
+		with self._patched(frappe.as_json(cfg)):
+			c = role_profiles.resolve_profile(u)
+		self.assertEqual(c.agent_id, "role-hr")
+		self.assertIn("erpnext-projects", c.skills)  # moved in by config
+		self.assertNotIn("hrms-hr", c.skills)  # fixture skill absent under override
+
+	def test_corrupt_cache_falls_back_byte_identical_to_no_cache(self):
+		u = self._mk_user("rp-cfg-corrupt@example.com", ["Jarvis User", "HR User"])
+		with self._patched(None):
+			baseline = role_profiles.resolve_profile(u)
+		role_profiles._invalidate_config_cache()
+		with self._patched("{not valid json"):
+			corrupt = role_profiles.resolve_profile(u)
+		self.assertEqual(baseline, corrupt)
+		self.assertEqual(baseline.agent_id, "role-hr")
+
+	def test_unknown_role_in_config_mappings_just_maps(self):
+		# "Translator" is not in the code fixture's ROLE_TO_SET at all - the
+		# config is authority for mappings, so it maps anyway.
+		u = self._mk_user("rp-cfg-unknown-role@example.com", ["Jarvis User", "Translator"])
+		cfg = self._config(mappings={"Translator": "hr"})
+		with self._patched(frappe.as_json(cfg)):
+			c = role_profiles.resolve_profile(u)
+		self.assertEqual(c.agent_id, "role-hr")
+
+	def test_config_missing_key_is_rejected_whole_and_falls_back(self):
+		u = self._mk_user("rp-cfg-missing-key@example.com", ["Jarvis User", "HR User"])
+		cfg = self._config()
+		del cfg["tool_tiers"]
+		with self._patched(frappe.as_json(cfg)):
+			c = role_profiles.resolve_profile(u)
+		self.assertEqual(c.agent_id, "role-hr")
+		self.assertEqual(
+			c.skills,
+			tuple(sorted(role_profiles.SHARED_CORE_SKILLS.union(role_profiles.SKILL_SETS["hr"]))),
+		)
+
+	def test_dangling_mapping_set_key_is_rejected_whole_and_falls_back(self):
+		u = self._mk_user("rp-cfg-dangling@example.com", ["Jarvis User", "HR User"])
+		# "ghost-set" is charset-valid but absent from `sets` - referential
+		# integrity is BJ2's problem, not BJ1's charset check.
+		cfg = self._config(mappings={"HR User": "ghost-set"})
+		with self._patched(frappe.as_json(cfg)):
+			self.assertIsNone(role_profiles._active_config())
+			c = role_profiles.resolve_profile(u)
+		self.assertEqual(c.agent_id, "role-hr")  # fixture mapping, not the dangling config
+		self.assertIn("hrms-hr", c.skills)
+
+	def test_get_tools_allow_honors_config_and_falls_back(self):
+		cfg = self._config(tool_tiers={"standard": {"allow": ["exec"], "core": ["exec"]}})
+		with self._patched(frappe.as_json(cfg)):
+			self.assertEqual(role_profiles.get_tools_allow(), ["exec"])
+		role_profiles._invalidate_config_cache()
+		with self._patched(None):
+			self.assertEqual(role_profiles.get_tools_allow(), role_profiles.standard_tools_allow())
+
+	def test_memo_keyed_on_version_picks_up_change_without_explicit_invalidate(self):
+		"""Design point: the memo is keyed on ``role_profiles_config_version``,
+		not just present/absent - a same-request write that bumps the version
+		must be picked up even without a separate ``_invalidate_config_cache``
+		call."""
+		store = {
+			"role_profiles_config": frappe.as_json(self._config(version="v1")),
+			"role_profiles_config_version": "v1",
+		}
+
+		def fake_get(doctype, fieldname, cache=True):
+			return store.get(fieldname)
+
+		with patch.object(frappe.db, "get_single_value", side_effect=fake_get):
+			first = role_profiles._active_config()
+			self.assertEqual(first["version"], "v1")
+
+			store["role_profiles_config"] = frappe.as_json(
+				self._config(version="v2", sets={"hr": ["erpnext-projects"]})
+			)
+			store["role_profiles_config_version"] = "v2"
+			second = role_profiles._active_config()
+
+		self.assertEqual(second["version"], "v2")
+		self.assertEqual(second["sets"]["hr"], ["erpnext-projects"])
+
 
 class FakeSess:
 	"""Stub pooled ``AgentSession``: counts ``create_session`` calls so tests
