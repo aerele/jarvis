@@ -872,20 +872,36 @@ def _launch_audit(
 		)
 		frappe.db.commit()
 		raise
-	except Exception:
+	except Exception as e:
 		# The dispatch call itself failed, and CONFIRMEDLY: nothing was sent (a clean
 		# refusal / connect timeout), a 4xx rejection, or an auth denial. Mark THIS
 		# Run failed (mirror _record_failed's writeback onto the already-created
 		# "running" row so it is never orphaned), then re-raise so the caller's
 		# retry/notify path runs (scheduler: no next_run_at advance -> retry next
 		# hour; run_agent_now: surfaces the error to the UI).
+		#
+		# One confirmed failure has a self-service fix, so translate it rather than
+		# leaving a raw fleet 502: the fleet-agent's "agent_id '<x>' is not an
+		# installed delegate on <container>" means the agent is ENABLED on the bench
+		# but its skill was never pushed to the container. Enabling only flags the
+		# catalog dirty; the skill reaches the container on APPLY. So the operator
+		# skipped (or has a pending) "Apply catalog changes" -- tell them that
+		# instead of a stack trace.
+		not_applied = "not an installed delegate" in str(e)
+		if not_applied:
+			error_msg = _(
+				"This agent is not loaded on your container yet. Open the Agents page, "
+				"click “Apply catalog changes” to push it, then run it again."
+			)
+		else:
+			error_msg = "agent-run dispatch failed; see Error Log"
 		frappe.db.set_value(
 			RUN,
 			run.name,
 			{
 				"status": "failed",
 				"finished_at": frappe.utils.now(),
-				"error": "agent-run dispatch failed; see Error Log",
+				"error": error_msg,
 			},
 			update_modified=False,
 		)
@@ -898,6 +914,12 @@ def _launch_audit(
 			title=f"jarvis agent-run dispatch failed: {run.name}",
 			message=frappe.get_traceback(),
 		)
+		if not_applied:
+			# Surface the actionable message straight to the SPA (a clean user error),
+			# not the raw AdminUnreachableError 502/500 the fleet verb produced. The
+			# failed Run + session teardown above are already committed, so this only
+			# swaps which exception the caller re-raises.
+			frappe.throw(error_msg, title=_("Agent not applied"))
 		raise
 	return {"run": run.name, "conversation": conv.name, "session_key": session_key}
 
