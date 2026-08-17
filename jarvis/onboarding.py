@@ -5,7 +5,7 @@ never holds admin creds). admin_client returns already-unwrapped admin data."""
 import json
 
 import frappe
-from frappe.utils import cint
+from frappe.utils import cint, validate_email_address
 
 from jarvis import admin_client, onboarding_contract, release_notice
 from jarvis.exceptions import (
@@ -353,9 +353,17 @@ def capture_onboarding_lead(
 	surfaces to the customer.
 	``site_origin`` sent here is advisory only - admin_client overwrites it with
 	this bench's own server-derived public origin before it ever reaches admin.
+
+	A non-blank ``email`` that fails ``validate_email_address`` is dropped
+	silently (no admin call, no exception) rather than forwarded - this is
+	fire-and-forget with nothing to show the customer, so a malformed address
+	just never becomes a lead instead of surfacing anywhere. A blank/missing
+	email is left to admin_client as before (unchanged from prior behaviour).
 	"""
 	try:
 		require_jarvis_admin()
+		if email and not validate_email_address(email, throw=False):
+			return {"ok": False}
 		return admin_client.capture_onboarding_lead(
 			email,
 			company=company,
@@ -372,7 +380,7 @@ def capture_onboarding_lead(
 
 @frappe.whitelist()
 def get_terms_url() -> dict:
-	"""The admin-hosted Terms & Conditions URL for the Review & Pay checkbox
+	"""The admin-hosted Terms & Conditions URL for the Details-step checkbox
 	link. Best-effort: ``{"url": ""}`` on any failure so the checkbox still
 	renders (with plain unlinked text) when admin is unreachable or unconfigured."""
 	try:
@@ -982,8 +990,9 @@ def start_signup(
 	falsy value) and ``contact_consent`` (optional) are the T&C + lead-capture
 	frozen contract's two new kwargs. Threaded straight through to
 	``admin_client.signup`` unconditionally; the SPA only ever calls this with
-	``terms_accepted: true`` (the Review & Pay checkbox gates the Pay click), and
-	``terms_version`` is stamped SERVER-SIDE by admin — this bench never sends one.
+	``terms_accepted: true`` (the Details-step checkbox gates the Continue that
+	reaches Plan and, downstream, this call), and ``terms_version`` is stamped
+	SERVER-SIDE by admin — this bench never sends one.
 
 	Two response shapes depending on admin's
 	``require_email_verification`` flag:
@@ -996,6 +1005,12 @@ def start_signup(
 	    bench so the poll endpoint can authenticate.
 	"""
 	require_jarvis_admin()
+	# Light shape check on the caller-typed email, before anything else touches
+	# it (onboarding_contract.update below, admin_client.signup) - a malformed
+	# address is cheap to catch here with an actionable message rather than
+	# surfacing as an opaque admin-side rejection several calls later.
+	if not validate_email_address(email, throw=False):
+		frappe.throw("Enter a valid email address.")
 	_require_admin_url()
 	# Money the gateway is holding that an operator has not been able to place
 	# stops the WHOLE endpoint, not just the resume half below. The context is

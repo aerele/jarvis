@@ -79,3 +79,26 @@ class TestCaptureOnboardingLead(FrappeTestCase):
 		finally:
 			frappe.set_user("Administrator")
 		self.assertEqual(out, {"ok": False})
+
+	def test_invalid_email_is_dropped_silently_without_calling_admin(self):
+		"""A malformed email must never reach admin_client, and must never raise -
+		this endpoint is fire-and-forget with nothing to show the customer, so a
+		bad address just never becomes a lead."""
+		with patch(
+			"jarvis.onboarding.admin_client.capture_onboarding_lead",
+			side_effect=AssertionError("admin_client.capture_onboarding_lead should never be reached"),
+		) as mock_capture:
+			out = onboarding.capture_onboarding_lead(email="not-an-email", company="Acme", step="plan")
+		self.assertEqual(out, {"ok": False})
+		mock_capture.assert_not_called()
+
+	def test_blank_email_still_forwards_as_before(self):
+		"""A blank/missing email is left to admin_client exactly like before this
+		change - only a NON-blank, malformed address is newly screened out."""
+		with patch(
+			"jarvis.onboarding.admin_client.capture_onboarding_lead",
+			return_value={"ok": False},
+		) as mock_capture:
+			out = onboarding.capture_onboarding_lead(email="", company="Acme", step="plan")
+		self.assertEqual(out, {"ok": False})
+		mock_capture.assert_called_once()

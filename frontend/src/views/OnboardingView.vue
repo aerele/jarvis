@@ -363,11 +363,12 @@
 										/>
 									</div>
 									<!-- No separate contact-consent checkbox here (owner decision
-										 2026-08-14): consent to be contacted is part of the Terms &
-										 Conditions accepted at Review & Pay, where onPayClick sends
-										 contact_consent alongside terms_accepted. Consequence: a lead
-										 captured at the Plan step carries no consent until the
-										 customer accepts the terms. -->
+										 2026-08-14): consent to be contacted rides the T&C checkbox
+										 below (moved onto this step 2026-08-16), and onPayClick still
+										 sends contact_consent alongside terms_accepted. Consequence: a
+										 lead captured at the Plan step carries no consent until the
+										 customer accepts the terms, which now happens on THIS step
+										 before Plan is ever reached. -->
 									<!-- JvCombo (shared, out of scope) has no declared aria-invalid /
 										 aria-describedby / blur props, and does not spread $attrs onto
 										 its inner <input>, so those attrs would silently land on its
@@ -579,6 +580,57 @@
 									Enter it here</button
 								>.
 							</p>
+							<!-- Required T&C acceptance (moved here from Review & Pay 2026-08-16
+								 so lead-contact consent is captured before the Plan-step lead
+								 capture fires). Gates onDetailsSubmit()'s normal Continue path,
+								 not the reconnect side-branch above (a returning customer
+								 reconnecting an already-paid account never went through this
+								 checkbox before, and reconnect makes no signup call that needs
+								 terms_accepted / contact_consent). payDisabled and onPayClick's
+								 own `!state.termsAccepted` guard stay in place as invariants -
+								 both are already true by the time Pay is reachable. Checkbox's
+								 own `label` prop only takes plain text (no slot, no markup), so
+								 the link-bearing sentence is a sibling <label for=...> instead -
+								 clicking the embedded <a> navigates without also toggling the box. -->
+							<div
+								class="mx-auto mt-5 flex max-w-[620px] items-start justify-center gap-2"
+							>
+								<Checkbox
+									id="jv-ob-terms"
+									:model-value="state.termsAccepted"
+									aria-required="true"
+									:aria-invalid="detailsFieldErrors.terms ? 'true' : undefined"
+									:aria-describedby="
+										detailsFieldErrors.terms ? 'jv-ob-terms-err' : undefined
+									"
+									@update:model-value="
+										(v) => {
+											state.termsAccepted = v;
+											clearFieldErrorIfValid('terms', termsError, v);
+										}
+									"
+								/>
+								<label
+									for="jv-ob-terms"
+									class="cursor-pointer select-none text-p-sm text-ink-gray-7"
+								>
+									I agree to the
+									<a
+										v-if="state.termsUrl"
+										:href="state.termsUrl"
+										target="_blank"
+										rel="noopener"
+										class="ob-link"
+										@click.stop
+										>Terms &amp; Conditions</a
+									><span v-else>Terms &amp; Conditions</span>
+								</label>
+							</div>
+							<ErrorMessage
+								id="jv-ob-terms-err"
+								:message="detailsFieldErrors.terms"
+								class="mx-auto mt-1 max-w-[620px] text-center"
+							/>
 							<div class="ob-foot">
 								<button class="ob-back" @click="goBack">
 									<FeatherIcon
@@ -1291,38 +1343,11 @@
 									>
 										{{ payLinkDeadline }}
 									</p>
-									<!-- Required T&C acceptance (lead-capture + T&C frozen contract).
-										 Pay stays disabled until this is ticked; terms_accepted rides
-										 start_signup, and admin stamps the version server-side - this
-										 view never sends one. Checkbox's own `label` prop only takes
-										 plain text (no slot, no markup), so the link-bearing sentence is
-										 a sibling <label for=...> instead - clicking the embedded <a>
-										 navigates without also toggling the box. -->
-									<div
-										class="mx-auto mt-3.5 flex max-w-[560px] items-start justify-center gap-2"
-									>
-										<Checkbox
-											id="jv-ob-terms"
-											:model-value="state.termsAccepted"
-											aria-required="true"
-											@update:model-value="(v) => (state.termsAccepted = v)"
-										/>
-										<label
-											for="jv-ob-terms"
-											class="cursor-pointer select-none text-p-sm text-ink-gray-7"
-										>
-											I agree to the
-											<a
-												v-if="state.termsUrl"
-												:href="state.termsUrl"
-												target="_blank"
-												rel="noopener"
-												class="ob-link"
-												@click.stop
-												>Terms &amp; Conditions</a
-											><span v-else>Terms &amp; Conditions</span>
-										</label>
-									</div>
+									<!-- T&C acceptance moved to the Details step (2026-08-16): the
+										 checkbox no longer renders here. payDisabled and onPayClick's
+										 own `!state.termsAccepted` guard below stay in place as
+										 invariants - both are already true by the time Pay is
+										 reachable, since Details' Continue is gated on the same flag. -->
 								</div>
 								<div class="ob-foot">
 									<button
@@ -1951,16 +1976,22 @@ const state = reactive({
 	reconnectDirect: false,
 	reconnectEmail: "",
 	paymentProvider: "", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
-	// Required Review & Pay checkbox (T&C + lead-capture frozen contract). NOT
-	// localStorage-persisted - a legal acceptance is re-asked every time the
-	// customer lands fresh on this screen, same as it would be on any checkout.
-	// Pay stays disabled until this is true, and only a literal true is ever
-	// sent to start_signup. Accepting it also grants contact consent (owner
-	// decision 2026-08-14): the terms cover being contacted about the account.
+	// Required Details-step checkbox (T&C + lead-capture contract; moved off
+	// Review & Pay 2026-08-16 so consent is captured before the Plan-step lead
+	// capture fires). NOT localStorage-persisted - a legal acceptance is
+	// re-asked every time the customer lands fresh on this screen, same as it
+	// would be on any checkout. Details' Continue stays blocked until this is
+	// true, and only a literal true is ever sent to start_signup. payDisabled
+	// and onPayClick's own guard keep checking it too (invariants that are
+	// always true by the time Pay is reachable). Accepting it also grants
+	// contact consent (owner decision 2026-08-14): the terms cover being
+	// contacted about the account.
 	termsAccepted: false,
 	// The admin-hosted /terms URL (jarvis.onboarding.get_terms_url), fetched
-	// best-effort on mount. Empty when admin is unreachable/unconfigured - the
-	// checkbox label then renders plain unlinked text instead of a dead link.
+	// best-effort on mount so it is already available by the time the Details
+	// step (the second screen) renders. Empty when admin is unreachable/
+	// unconfigured - the checkbox label then renders plain unlinked text
+	// instead of a dead link.
 	termsUrl: "",
 	// Gateways the operator has actually enabled, narrowed to what this build can
 	// render. Starts EMPTY and stays empty on a discovery failure (plan 02 P2-6):
@@ -2288,8 +2319,12 @@ const payCta = computed(() => {
 // the CTA is disabled until then and the unavailable/retry note stands in for it.
 const payProviderReady = computed(() => !!state.paymentProvider);
 // The CTA's full gate, named rather than left as three booleans inline in the
-// template (T&C + lead-capture frozen contract adds the third leg): busy,
-// no confirmed gateway yet, or the required Terms & Conditions box unticked.
+// template: busy, no confirmed gateway yet, or the required Terms & Conditions
+// box unticked. The third leg is an invariant now, not a live gate - the
+// checkbox itself lives on Details and blocks Continue there, so by the time
+// Pay renders state.termsAccepted is already true. Kept here anyway (per the
+// T&C + lead-capture contract) so a future change to Details' gate fails
+// closed instead of silently reopening this hole.
 // payBusyView is declared further down; safe to close over here since this
 // getter only runs at render, after the whole setup script has executed.
 const payDisabled = computed(
@@ -2493,13 +2528,20 @@ function contactError(value) {
 	return (value || "").trim() ? "" : "Enter a contact number.";
 }
 // gstinError (gstin.js) already treats a blank value as "" (GSTIN is optional).
+// Required T&C checkbox (moved here from Review & Pay 2026-08-16): unlike the
+// other Details fields this isn't touched on blur (a checkbox has none worth
+// hooking), only set by onDetailsSubmit on the non-reconnect Continue path
+// and cleared live by clearFieldErrorIfValid as soon as it's ticked.
+function termsError(value) {
+	return value ? "" : "Please accept the Terms & Conditions to continue.";
+}
 
 // Details-step field errors, one bucket per field so each renders under its
 // OWN input via ErrorMessage instead of a single shared bar at the bottom with
 // no tie to what's wrong. Set all at once by onDetailsSubmit (every failure
 // shown together, not one submit per error); state.detailsErr stays reserved
 // for genuinely form-wide messages (see onPayClick's missing-details guard).
-const detailsFieldErrors = reactive({ email: "", company: "", contact: "", gstin: "" });
+const detailsFieldErrors = reactive({ email: "", company: "", contact: "", gstin: "", terms: "" });
 function touchEmailField() {
 	detailsFieldErrors.email = emailError(state.email);
 }
@@ -2558,6 +2600,11 @@ async function onDetailsSubmit() {
 	// wrong in one pass instead of fixing email only to have the next click
 	// reveal Company was empty too. A bad GSTIN blocks here too, on this same
 	// step, instead of dead-ending at the pay button three screens later.
+	// terms is the deliberate exception: it's checked separately, further down,
+	// AFTER the reconnect branch resolves - batching it in here would gate the
+	// reconnect branch too (item 5), which it must not. A customer with both a
+	// bad GSTIN and an unticked box sees the GSTIN error first and the terms
+	// error only on a second submit; accepted as the cost of that exemption.
 	touchEmailField();
 	touchCompanyField();
 	touchContactField();
@@ -2599,6 +2646,13 @@ async function onDetailsSubmit() {
 	} finally {
 		state.detailsSubmitting = false;
 	}
+	// Required T&C acceptance: checked here, AFTER the reconnect branch above
+	// (which already returned if it applied), so this gate never blocks a
+	// returning customer reconnecting an existing paid account - reconnect
+	// makes no signup call and never needed terms_accepted/contact_consent.
+	// Only the path that actually advances to Plan is gated.
+	detailsFieldErrors.terms = termsError(state.termsAccepted);
+	if (detailsFieldErrors.terms) return;
 	// The customer just edited the details behind a FAILED attempt. Without this,
 	// walking forward from here landed them straight back on the old failure card
 	// with no new request made at all: the machine was still parked on the failed
@@ -3428,9 +3482,9 @@ async function onPayClick() {
 		state.step = "details";
 		return;
 	}
-	// Belt-and-suspenders: the Pay button is already disabled until this is
-	// ticked (the real gate), but a programmatic/stray click must not be able to
-	// start a signup admin will reject anyway for lacking acceptance.
+	// Belt-and-suspenders: Details' Continue is already gated on this (the real
+	// gate now), but a programmatic/stray click must not be able to start a
+	// signup admin will reject anyway for lacking acceptance.
 	if (!state.termsAccepted) return;
 	await flow.submitReview({
 		email: state.email,
@@ -3441,11 +3495,10 @@ async function onPayClick() {
 		// Top-level kwarg, parallel to nothing else here - NOT part of `billing`.
 		// Trimmed + undefined-when-blank so a blank field sends no key at all.
 		partner_code: state.partnerCode?.trim() || undefined,
-		// T&C + lead-capture frozen contract: only ever true here (the checkbox
-		// gates this click). contact_consent is granted BY the T&C acceptance
-		// itself (owner decision 2026-08-14, replacing the separate Details-step
-		// checkbox), so it is the same literal true, recorded at the exact moment
-		// identity is real.
+		// T&C + lead-capture contract: only ever true here (Details' Continue
+		// already required it). contact_consent is granted BY the T&C
+		// acceptance itself (owner decision 2026-08-14), so it is the same
+		// literal true, recorded at the exact moment identity is real.
 		terms_accepted: true,
 		contact_consent: true,
 	});
@@ -4894,7 +4947,7 @@ onMounted(async () => {
 	// tick, before the awaited prefill below — the discovery loading note must show
 	// from first paint (X4), independent of prefill/company.
 	loadPaymentProviders();
-	// Best-effort terms-page link for the Review & Pay checkbox. Never blocks the
+	// Best-effort terms-page link for the Details-step checkbox. Never blocks the
 	// wizard and never throws into onMounted: a failure just leaves state.termsUrl
 	// empty, which the template renders as plain unlinked "Terms & Conditions" text.
 	getTermsUrl()
