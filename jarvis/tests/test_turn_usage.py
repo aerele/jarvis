@@ -15,7 +15,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import usage
+from jarvis.chat import usage, usage_push
 
 USETT = "Jarvis User Settings"
 SESSION = "Jarvis Chat Session"
@@ -25,7 +25,8 @@ CHAT_TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
 
 USER_A = "jarvis-turnusage-a@example.test"
-_ALL_USERS = (USER_A,)
+USER_B = "jarvis-turnusage-b@example.test"
+_ALL_USERS = (USER_A, USER_B)
 
 
 def _ensure_user(email: str) -> None:
@@ -59,9 +60,16 @@ def _make_session(session_key: str, user: str, *, profile_agent_id: str = "", pr
 def _cleanup() -> None:
 	for name in frappe.get_all(TURN_USAGE, filters={"user": ["in", list(_ALL_USERS)]}, pluck="name"):
 		frappe.delete_doc(TURN_USAGE, name, ignore_permissions=True, force=True)
+	# Blank-user Turn Usage fixtures (unmapped-session rollup test) aren't
+	# caught by the user filter above - clean by the shared session_key prefix
+	# every fixture in this file uses instead.
+	for name in frappe.get_all(TURN_USAGE, filters={"session_key": ["like", "agent:tu-%"]}, pluck="name"):
+		frappe.delete_doc(TURN_USAGE, name, ignore_permissions=True, force=True)
 	for name in frappe.get_all(CHAT_TURN, filters={"relay_target_id": ["like", "test-turnusage-%"]}, pluck="name"):
 		frappe.delete_doc(CHAT_TURN, name, ignore_permissions=True, force=True)
-	for name in frappe.get_all(CONV, filters={"title": ["like", "turnusage-fixture%"]}, pluck="name"):
+	for name in frappe.get_all(
+		CONV, filters={"title": ["like", "turnusage-fixture%"]}, pluck="name"
+	) + frappe.get_all(CONV, filters={"title": ["like", "rollup-fixture%"]}, pluck="name"):
 		for msg in frappe.get_all(MSG, filters={"conversation": name}, pluck="name"):
 			frappe.delete_doc(MSG, msg, ignore_permissions=True, force=True)
 		frappe.delete_doc(CONV, name, ignore_permissions=True, force=True)
@@ -239,3 +247,293 @@ class TestTurnUsage(FrappeTestCase):
 		usage.record_turn_usage("agent:tu-norun", self._row(inputTokens=1, outputTokens=1, totalTokens=10))
 		tool_calls = frappe.db.get_value(TURN_USAGE, {"session_key": "agent:tu-norun"}, "tool_calls")
 		self.assertEqual(tool_calls, 0)
+
+
+def _seed_turn_row(
+	session_key: str,
+	user: str,
+	*,
+	profile_agent_id: str = "",
+	tokens_in: int = 0,
+	tokens_out: int = 0,
+	cache_read: int = 0,
+	cache_write: int = 0,
+	cache_reported: int = 0,
+	tool_calls: int = 0,
+	creation=None,
+) -> str:
+	"""Insert a bare Jarvis Turn Usage row (task U2 rollup tests): the rollup
+	builder consumes these rows directly, so seeding them straight (rather
+	than round-tripping through record_turn_usage's gateway-row shape) keeps
+	the fixtures focused on the aggregation being tested."""
+	doc = frappe.get_doc(
+		{
+			"doctype": TURN_USAGE,
+			"session_key": session_key,
+			"user": user,
+			"profile_agent_id": profile_agent_id,
+			"profile_tier": "full",
+			"model": "gpt-5.5",
+			"tokens_in": tokens_in,
+			"tokens_out": tokens_out,
+			"cache_read": cache_read,
+			"cache_write": cache_write,
+			"cache_reported": cache_reported,
+			"tool_calls": tool_calls,
+			"day": frappe.utils.today(),
+			"run_id": "",
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	if creation is not None:
+		# Controls the tie-break ("most recent turn wins") deterministically -
+		# ORM inserts a few lines apart can otherwise land in the same second.
+		frappe.db.set_value(TURN_USAGE, doc.name, "creation", creation, update_modified=False)
+	frappe.db.commit()
+	return doc.name
+
+
+def _seed_tool_messages(owner: str, title: str, tool_names: list[str]) -> None:
+	"""One Jarvis Conversation (owned by ``owner``) with one role=tool message
+	per entry in ``tool_names`` (repeat a name to raise its count). Frappe
+	stamps ``owner`` from the session user at insert (Administrator, here) -
+	same trap ``get_or_create_user_settings`` works around - so it is forced
+	back to ``owner`` afterwards; the rollup's top_tools attribution reads
+	exactly this field."""
+	conv = frappe.get_doc({"doctype": CONV, "title": title, "status": "Active"})
+	conv.insert(ignore_permissions=True)
+	frappe.db.set_value(CONV, conv.name, "owner", owner, update_modified=False)
+	for i, tool_name in enumerate(tool_names, start=1):
+		frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": conv.name,
+				"seq": i,
+				"role": "tool",
+				"content": "",
+				"tool_name": tool_name,
+				"tool_status": "completed",
+			}
+		).insert(ignore_permissions=True)
+	frappe.db.commit()
+
+
+class TestUsageRollup(FrappeTestCase):
+	"""Task U2: the MTD rollup builder's profile/cache/tool-call extension.
+	Hermetic like TestTurnUsage - fixtures are disposable and committed rows
+	(Turn Usage inserts, conversation/message inserts) are removed in
+	tearDown via the shared ``_cleanup``."""
+
+	def setUp(self):
+		self._orig_user = frappe.session.user
+		frappe.set_user("Administrator")
+		_ensure_user(USER_A)
+		_ensure_user(USER_B)
+		_cleanup()
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_cleanup()
+		frappe.db.commit()
+		frappe.set_user(self._orig_user)
+
+	def _seed_settings(self, user: str, tokens: int) -> None:
+		"""A Jarvis User Settings row for the CURRENT month - the rollup's
+		users[] list is settings-sourced (task U1's builder), so a user with
+		no settings row this month never appears there even if Turn Usage
+		rows exist for them."""
+		doc = usage.get_or_create_user_settings(user)
+		frappe.db.set_value(
+			USETT,
+			doc.name,
+			{
+				"usage_month": usage.current_month_key(),
+				"month_input_tokens": tokens,
+				"month_output_tokens": tokens,
+				"month_tokens": tokens * 2,
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+	# -- (a) empty month: old shape + empty/zero new fields ------------------ #
+	def test_empty_month_yields_old_shape_plus_empty_new_fields(self):
+		# This bench is live-used (real Turn Usage rows land from actual dev
+		# chat traffic), so the CURRENT month is never genuinely empty here -
+		# pin the builder to a month key no fixture or real traffic can have
+		# written to, which is what "empty month" actually needs to exercise.
+		with patch("jarvis.chat.usage.current_month_key", return_value="2000-01"):
+			rollup, truncated = usage_push._build_rollup()
+		self.assertFalse(truncated)
+		self.assertEqual(rollup["month_key"], "2000-01")
+		self.assertEqual(rollup["users"], [])
+		self.assertEqual(rollup["by_profile"], [])
+		self.assertEqual(rollup["top_tools"], [])
+
+	# -- (b) per-user sums + profile attribution + cache_reported ----------- #
+	def test_per_user_sums_and_profile_attribution(self):
+		self._seed_settings(USER_A, 100)
+		_seed_turn_row(
+			"agent:tu-roll-a1",
+			USER_A,
+			profile_agent_id="role-hr",
+			tokens_in=10,
+			tokens_out=5,
+			cache_read=2,
+			cache_write=1,
+			cache_reported=1,
+			tool_calls=3,
+		)
+		_seed_turn_row(
+			"agent:tu-roll-a2",
+			USER_A,
+			profile_agent_id="role-hr",
+			tokens_in=4,
+			tokens_out=1,
+			cache_read=0,
+			cache_write=0,
+			cache_reported=0,
+			tool_calls=1,
+		)
+		rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		self.assertIn(USER_A, users)
+		u = users[USER_A]
+		self.assertEqual(u["profile"], "role-hr")
+		self.assertEqual(u["turns"], 2)
+		self.assertEqual(u["cache_read"], 2)
+		self.assertEqual(u["cache_write"], 1)
+		# bool OR over the month's rows - one row reported, one did not.
+		self.assertTrue(u["cache_reported"])
+		self.assertIs(u["cache_reported"], True)
+		self.assertEqual(u["tool_calls"], 4)
+
+	# -- (c) blank profile_agent_id maps to "full" --------------------------- #
+	def test_blank_profile_maps_to_full(self):
+		self._seed_settings(USER_A, 10)
+		_seed_turn_row("agent:tu-roll-full", USER_A, profile_agent_id="")
+		rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		self.assertEqual(users[USER_A]["profile"], "full")
+
+	# -- (d) profile tie -> most recent turn wins ---------------------------- #
+	def test_profile_tie_breaks_to_most_recent_turn(self):
+		self._seed_settings(USER_A, 10)
+		older = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-10)
+		newer = frappe.utils.now_datetime()
+		# role-p1: 2 turns, both older. role-p2: 2 turns, one newer - equal
+		# counts, role-p2's most recent turn is later, so role-p2 wins.
+		_seed_turn_row("agent:tu-roll-tie1", USER_A, profile_agent_id="role-p1", creation=older)
+		_seed_turn_row(
+			"agent:tu-roll-tie2",
+			USER_A,
+			profile_agent_id="role-p1",
+			creation=frappe.utils.add_to_date(older, minutes=1),
+		)
+		_seed_turn_row("agent:tu-roll-tie3", USER_A, profile_agent_id="role-p2", creation=older)
+		_seed_turn_row("agent:tu-roll-tie4", USER_A, profile_agent_id="role-p2", creation=newer)
+		rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		self.assertEqual(users[USER_A]["profile"], "role-p2")
+
+	# -- (e) blank-user Turn Usage rows are filtered out everywhere ---------- #
+	def test_blank_user_rows_are_filtered(self):
+		self._seed_settings(USER_A, 10)
+		_seed_turn_row("agent:tu-roll-a", USER_A, profile_agent_id="role-hr", tokens_in=1, tokens_out=1)
+		_seed_turn_row("agent:tu-roll-blank", "", profile_agent_id="role-hr", tokens_in=999, tokens_out=999)
+		rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		self.assertEqual(users[USER_A]["turns"], 1)
+		by_profile = {b["profile"]: b for b in rollup["by_profile"]}
+		self.assertEqual(by_profile["role-hr"]["turns"], 1)
+		self.assertEqual(by_profile["role-hr"]["tokens_in"], 1)
+
+	# -- (f) by_profile: users/turns/token sums + n_skills/n_tools ----------- #
+	def test_by_profile_block(self):
+		self._seed_settings(USER_A, 10)
+		self._seed_settings(USER_B, 10)
+		_make_session("agent:tu-roll-p1", USER_A, profile_agent_id="role-p1", profile_tier="full")
+		frappe.db.set_value(
+			SESSION, {"session_key": "agent:tu-roll-p1"}, {"profile_n_skills": 4, "profile_n_tools": 7}
+		)
+		_make_session("agent:tu-roll-p2", USER_B, profile_agent_id="role-p2", profile_tier="full")
+		frappe.db.set_value(
+			SESSION, {"session_key": "agent:tu-roll-p2"}, {"profile_n_skills": 2, "profile_n_tools": 3}
+		)
+		_seed_turn_row(
+			"agent:tu-roll-p1", USER_A, profile_agent_id="role-p1", tokens_in=10, tokens_out=5, cache_read=1
+		)
+		_seed_turn_row(
+			"agent:tu-roll-p2", USER_B, profile_agent_id="role-p2", tokens_in=20, tokens_out=8, cache_read=3
+		)
+		rollup, _ = usage_push._build_rollup()
+		by_profile = {b["profile"]: b for b in rollup["by_profile"]}
+		self.assertEqual(by_profile["role-p1"]["users"], 1)
+		self.assertEqual(by_profile["role-p1"]["turns"], 1)
+		self.assertEqual(by_profile["role-p1"]["tokens_in"], 10)
+		self.assertEqual(by_profile["role-p1"]["tokens_out"], 5)
+		self.assertEqual(by_profile["role-p1"]["cache_read"], 1)
+		self.assertEqual(by_profile["role-p1"]["n_skills"], 4)
+		self.assertEqual(by_profile["role-p1"]["n_tools"], 7)
+		self.assertEqual(by_profile["role-p2"]["n_skills"], 2)
+		self.assertEqual(by_profile["role-p2"]["n_tools"], 3)
+
+	# -- (g) top_tools: per-user ordering by count, cap 10 -------------------- #
+	def test_top_tools_per_user_ordering_and_cap(self):
+		self._seed_settings(USER_A, 10)
+		names = []
+		for i in range(1, 12):  # 11 distinct tools, tied count (1 each) -> alpha order, cap 10
+			name = f"cap_tool_{i:02d}"
+			names.append(name)
+		_seed_tool_messages(USER_A, "rollup-fixture-cap", names)
+		rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		top = users[USER_A]["top_tools"]
+		self.assertEqual(len(top), 10)
+		self.assertEqual([t["tool"] for t in top], sorted(names)[:10])
+		self.assertTrue(all(t["count"] == 1 for t in top))
+
+	def test_top_tools_ordering_by_count(self):
+		self._seed_settings(USER_A, 10)
+		_seed_tool_messages(
+			USER_A,
+			"rollup-fixture-order",
+			["get_list"] * 3 + ["read_doc"] * 2 + ["submit_doc"] * 1,
+		)
+		rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		top = users[USER_A]["top_tools"]
+		self.assertEqual(
+			top,
+			[
+				{"tool": "get_list", "count": 3},
+				{"tool": "read_doc", "count": 2},
+				{"tool": "submit_doc", "count": 1},
+			],
+		)
+
+	def test_top_tools_drops_invalid_names(self):
+		self._seed_settings(USER_A, 10)
+		_seed_tool_messages(
+			USER_A,
+			"rollup-fixture-invalid",
+			["get_list", "bad tool!", "jarvis__" + ("x" * 80)],
+		)
+		rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		tools = {t["tool"] for t in users[USER_A]["top_tools"]}
+		self.assertIn("get_list", tools)
+		self.assertIn("jarvis__" + ("x" * 80), tools)
+		self.assertNotIn("bad tool!", tools)
+
+	# -- (h) top_tools: tenant-wide top 15 ------------------------------------ #
+	def test_top_tools_tenant_wide_cap(self):
+		self._seed_settings(USER_A, 10)
+		self._seed_settings(USER_B, 10)
+		names = [f"tenant_tool_{i:02d}" for i in range(1, 17)]  # 16 distinct, tied count
+		_seed_tool_messages(USER_A, "rollup-fixture-tenant-a", names[:8])
+		_seed_tool_messages(USER_B, "rollup-fixture-tenant-b", names[8:])
+		rollup, _ = usage_push._build_rollup()
+		self.assertEqual(len(rollup["top_tools"]), 15)
+		self.assertEqual([t["tool"] for t in rollup["top_tools"]], sorted(names)[:15])
