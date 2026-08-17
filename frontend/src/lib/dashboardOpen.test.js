@@ -892,15 +892,16 @@ test("the page resolves a goto hand-off into resume/build/plain-restore, in that
 test("resumeGotoHandoff repoints the sticky conversation, verified against the server first", () => {
 	const resume = fnBody(pageSrc, "async function resumeGotoHandoff(");
 	assert.match(resume, /await getDashboardConversation\(conv\);/);
-	// success (or a transient blip - not isGoneError): repoint, the pane's own
-	// watch(conversation, ...) tears the old thread down and loads the new one
+	// success (or a transient blip - not isMissingConversation): repoint, the
+	// pane's own watch(conversation, ...) tears the old thread down and loads
+	// the new one
 	assert.match(resume, /chatConv\.value = conv;/);
 	assert.match(resume, /dashDataMode\.value = "auto";/);
 });
 
 test("a recorded-but-deleted conversation falls back to a fresh build, and forgets the stale mapping", () => {
 	const resume = fnBody(pageSrc, "async function resumeGotoHandoff(");
-	assert.match(resume, /if \(isGoneError\(e\)\) \{/);
+	assert.match(resume, /if \(isMissingConversation\(e\)\) \{/);
 	// the stamp named a conversation that is gone - remove the whole stamp
 	// (not just its conv half) so this degrades to a first-time hand-off,
 	// exactly as if the message had never fired before
@@ -912,6 +913,41 @@ test("a recorded-but-deleted conversation falls back to a fresh build, and forge
 		resume.indexOf("return;") < resume.lastIndexOf("chatConv.value = conv;"),
 		"the deleted-conversation fallback must not also repoint onto the dead id"
 	);
+});
+
+// jarvis#912 round 2, finding #1: resumeGotoHandoff used to reuse isGoneError
+// (row-deletion semantics: 404 OR a permission error) to decide the
+// conversation is gone. A conversation-specific 403 is not evidence of that -
+// a transient auth hiccup, a scope change - so it must NOT take the
+// fresh-build fallback above; isMissingConversation is narrower on purpose.
+test("resumeGotoHandoff's own gone-check excludes permission errors, unlike isGoneError", () => {
+	assert.match(
+		fnBody(pageSrc, "function isMissingConversation("),
+		/return !!\(e && \(e\.status === 404 \|\| e\.exc_type === "DoesNotExistError"\)\);/
+	);
+	assert.doesNotMatch(fnBody(pageSrc, "function isMissingConversation("), /isPermissionError/);
+	// isGoneError itself is untouched - other callers (resumeAdoption, openSave,
+	// promoteFromChat's adoption) still want the row-deletion semantics
+	assert.match(fnBody(pageSrc, "function isGoneError("), /isPermissionError\(e\)/);
+});
+
+// jarvis#912 round 2, finding #2: resumeGotoHandoff repointed chatConv but
+// never cleared editSeed - left set from setup (a sticky ?edit target, or
+// none), onCanvas's restore guard (builderHtml || editSeed ||
+// promotionPending) refused to put the resumed build's canvas up at all.
+test("resumeGotoHandoff clears the fields that would block the resumed canvas from restoring", () => {
+	const resume = fnBody(pageSrc, "async function resumeGotoHandoff(");
+	assert.match(resume, /editSeed\.value = "";\n\tbuilderHtml\.value = "";/);
+	// cleared before the repoint, and never via clearBuilder() (that would also
+	// wipe chatConv/the conversation this function exists to resume)
+	assert.ok(
+		resume.indexOf('editSeed.value = "";') < resume.indexOf("chatConv.value = conv;"),
+		"editSeed must be cleared before the repoint, or a restore racing it could still be blocked"
+	);
+	const onCanvasGuard = fnBody(pageSrc, "async function onCanvas(").match(
+		/if \(restore && \(builderHtml\.value \|\| editSeed\.value \|\| promotionPending\.value\)\) return false;/
+	);
+	assert.ok(onCanvasGuard, "onCanvas's restore guard must still be exactly what this resets");
 });
 
 test("the promotion is validated against the transcript, not the link", () => {

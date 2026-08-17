@@ -749,6 +749,16 @@ function isGoneError(e) {
 	);
 }
 
+// resumeGotoHandoff's own gone-check, narrower than isGoneError above: a
+// conversation-specific 403 is not evidence the conversation was deleted (a
+// transient auth hiccup, a scope change), so treating it the same as a 404
+// forgot the stamp and silently started a fresh build over an in-progress one
+// instead of just retrying (#912 round 2, finding #1). Only a genuine
+// does-not-exist degrades to a fresh build.
+function isMissingConversation(e) {
+	return !!(e && (e.status === 404 || e.exc_type === "DoesNotExistError"));
+}
+
 // jarvis#912: resuming a ```jarvis-goto hand-off that already has a recorded
 // builder conversation (the fired stamp carries one - see lib/chatGoto.js and
 // gotoDashboards in ChatView.vue), instead of building a duplicate. Verified
@@ -763,7 +773,7 @@ async function resumeGotoHandoff(conv, text, messageId) {
 	try {
 		await getDashboardConversation(conv);
 	} catch (e) {
-		if (isGoneError(e)) {
+		if (isMissingConversation(e)) {
 			// Gone - forget the stale mapping and fall back to a fresh build,
 			// exactly the path a first-time hand-off for this message takes.
 			if (messageId) localStorage.removeItem(gotoFiredKey(messageId));
@@ -774,7 +784,20 @@ async function resumeGotoHandoff(conv, text, messageId) {
 			});
 			return;
 		}
+		// Anything else (403, network blip, ...) falls through to the repoint
+		// below instead of forgetting the stamp - the pane's own loadTranscript()
+		// surfaces the failure (it retries, then degrades to its own gone-check)
+		// so a transient hiccup never silently drops the in-progress build.
 	}
+	// A resumed conversation is a different document than whatever this mount's
+	// setup seeded editSeed from (a sticky ?edit target, or nothing): left set,
+	// onCanvas's restore guard (builderHtml || editSeed || promotionPending)
+	// refuses to put the resumed build's canvas up at all (#912 round 2,
+	// finding #2). Reset only the two fields that guard checks - not the rest
+	// of what clearBuilder resets, which would also wipe the conversation this
+	// function exists to resume.
+	editSeed.value = "";
+	builderHtml.value = "";
 	// Same repoint idiom applyEditDetail uses for `d.source_conversation`: the
 	// pane's own watch(conversation, ...) does the rest (clears the thread on
 	// screen, loads the resumed one). Nothing is unsaved yet on a fresh mount,
