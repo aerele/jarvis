@@ -93,6 +93,7 @@
   "auto_apply_changes",
   "core_apps_override",
   "enable_customizations_clause",
+  "enable_role_profiles",
   "sync_tab",
   "last_sync_section",
   "last_sync_at",
@@ -118,6 +119,8 @@
   "learned_skills_sync_status",
   "agent_catalog_dirty",
   "agent_catalog_version",
+  "role_profiles_pushed",
+  "role_profiles_pushed_at",
   "release_notice_section",
   "release_notice_active",
   "latest_jarvis_version",
@@ -690,6 +693,13 @@
    "description": "Adds a one-line, counts-only summary of this site's customizations (custom apps, doctype/field/workflow counts) to every chat turn's context, pointing the agent at jarvis__describe_customizations. Readers treat an unset value as ON."
   },
   {
+   "fieldname": "enable_role_profiles",
+   "fieldtype": "Check",
+   "label": "Enable Role-Based Agent Profiles",
+   "default": "0",
+   "description": "When on, a new chat session may be pinned to a role-based agent profile (a reduced tool set plus the matching skill set derived from the user's ERPNext roles) instead of the main agent - but only once that profile has actually been rendered on the agent side (see Role Profiles Pushed below). Off (default): every session uses the main agent, matching pre-role-profiles behavior exactly. Operator intent, not tenant state - not reset between tenancies."
+  },
+  {
    "fieldname": "sync_tab",
    "fieldtype": "Tab Break",
    "label": "Sync & Status"
@@ -851,6 +861,21 @@
    "fieldtype": "Int",
    "hidden": 1,
    "label": "Agent Catalog Version",
+   "read_only": 1
+  },
+  {
+   "description": "JSON snapshot of the role-based agent profiles last pushed to admin (jarvis.chat.role_profiles.needed_profiles output). Compared against the freshly computed set on every sync to short-circuit an unchanged push.",
+   "fieldname": "role_profiles_pushed",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Role Profiles Pushed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "role_profiles_pushed_at",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Role Profiles Pushed At",
    "read_only": 1
   },
   {

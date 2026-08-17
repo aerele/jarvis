@@ -10,6 +10,11 @@
     "session_key",
     "user",
     "chat_device_id",
+    "profile_agent_id",
+    "profile_tier",
+    "profile_sets",
+    "profile_n_skills",
+    "profile_n_tools",
     "created_at",
     "last_seen_at",
     "input_tokens",
@@ -44,6 +49,41 @@
       "label": "Chat Device ID",
       "read_only": 1,
       "description": "Snapshot of Jarvis Settings.chat_device_id at session-create time. C2 stretch: if the bench re-pairs (device_id changes), all prior session_keys become invalid - even a leaked session_key + leaked agent_token can no longer impersonate after a routine re-pair."
+    },
+    {
+      "fieldname": "profile_agent_id",
+      "fieldtype": "Data",
+      "label": "Profile Agent ID",
+      "read_only": 1,
+      "description": "Role-based agent profile addressed at session-create time (jarvis.chat.role_profiles.ProfileChoice.agent_id). Empty when the session used the main/full agent - Enable Role-Based Agent Profiles off, an unmapped role, or the profile not yet rendered on the agent side."
+    },
+    {
+      "fieldname": "profile_tier",
+      "fieldtype": "Data",
+      "label": "Profile Tier",
+      "read_only": 1,
+      "description": "\"full\" or \"standard\" - the tool tier of the profile addressed at session-create time."
+    },
+    {
+      "fieldname": "profile_sets",
+      "fieldtype": "Data",
+      "label": "Profile Skill Sets",
+      "read_only": 1,
+      "description": "Comma-joined skill-set keys (e.g. \"accounts,hr\") that made up this session's profile. Empty for the main/full agent."
+    },
+    {
+      "fieldname": "profile_n_skills",
+      "fieldtype": "Int",
+      "label": "Profile Skill Count",
+      "read_only": 1,
+      "description": "Number of persona skills in the profile addressed at session-create time. 0 for the main/full agent."
+    },
+    {
+      "fieldname": "profile_n_tools",
+      "fieldtype": "Int",
+      "label": "Profile Tool Count",
+      "read_only": 1,
+      "description": "Number of agent tools allowed in the profile addressed at session-create time (jarvis.chat.role_profiles.ProfileChoice.n_tools). 0 for the main/full agent."
     },
     {
       "fieldname": "created_at",

@@ -445,6 +445,12 @@ scheduler_events = {
 		# admin past the retention window (the durable record lives in the admin's
 		# Jarvis Tenant Error). Keeps the local buffer small.
 		"jarvis.error_push.prune_pushed_client_errors",
+		# Role-profile agents reconcile backstop: the User.on_update hook
+		# enqueues a resync on every role change, but a debounced job can be
+		# dropped (Redis down, a worker restart mid-run). Daily catches the
+		# drift; short-circuits to a no-op push when the computed profile
+		# set already matches what admin last received.
+		"jarvis.chat.role_profiles.sync_role_profiles",
 	],
 	"weekly": [
 		# Wiki v2 health check: deterministic lint over Active pages
@@ -512,6 +518,15 @@ doc_events["Jarvis Wiki Page"] = {
 # save, inactive rules no-op).
 doc_events["Jarvis Personalise Question Rule"] = {
 	"on_update": "jarvis.learning.questions.on_rule_update",
+}
+
+# Role-profile agents (spec 2026-08-16-role-profile-agents): a role change on
+# a User may change which role-based agent profile they resolve to, so
+# debounce-enqueue a resync on every save. Thin and self-suppressing (never
+# raises, never sprays RQ jobs under tests): see
+# jarvis.chat.role_profiles.on_user_update / enqueue_sync.
+doc_events["User"] = {
+	"on_update": "jarvis.chat.role_profiles.on_user_update",
 }
 
 # Phase-0 admission (chat concurrency, WP-0): a deleted conversation must not
