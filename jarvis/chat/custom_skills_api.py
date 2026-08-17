@@ -190,7 +190,12 @@ def _attach_shared_by(rows: list) -> None:
 # Paginated list (frozen envelope) — chat-features-page-migration-design §2.2.
 # ADDITIVE: list_custom_skills (above) STAYS for the composer "/" autocomplete.
 # --------------------------------------------------------------------------- #
-_SKILLS_SORTABLE = {"skill_name": "skill_name", "modified": "modified", "enabled": "enabled"}
+_SKILLS_SORTABLE = {
+	"skill_name": "skill_name",
+	"modified": "modified",
+	"creation": "creation",
+	"enabled": "enabled",
+}
 _SKILLS_FILTERS = {"scope", "enabled", "user_invocable"}
 
 
