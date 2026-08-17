@@ -220,11 +220,9 @@ _RESERVED_TLDS = frozenset(
 
 
 def _is_real_public_host(host: str) -> bool:
-	"""True for a routable public domain (so we can safely force https on it), False for a
-	dev/internal host we must leave as-is. Public = dotted, not localhost, not an IP literal,
-	and an alphabetic non-reserved TLD. Rejects ``jarvis.local`` (reserved), ``staging.v15``
-	(non-alpha TLD), IPv4/IPv6 literals, and bare hostnames. (IDN ``xn--`` TLDs read as
-	non-public and keep their request scheme - an accepted minor limitation.)"""
+	"""A routable public domain (safe to force https on) vs a dev/internal host to leave as-is:
+	dotted, not localhost, not an IP literal, alphabetic non-reserved TLD. Rejects jarvis.local
+	(reserved), staging.v15 (non-alpha TLD), IPs, bare hosts; IDN xn-- reads non-public (keeps its scheme)."""
 	if not host or "." not in host:
 		return False
 	if host == "localhost" or host.endswith(".localhost"):
@@ -239,21 +237,14 @@ def _is_real_public_host(host: str) -> bool:
 
 
 def _public_origin(trust_host: bool = False) -> str:
-	"""A public site origin for the ``frappe_site_url`` this bench hands admin.
+	"""The public origin the bench sends admin as ``frappe_site_url``. A configured ``host_name``
+	(https) always wins; else ``get_url`` derives it from the request Host only when
+	``allow_header_override`` is on.
 
-	A configured ``host_name`` (validated https) always wins. Otherwise ``get_url`` derives
-	the host from the request ``Host`` header only when ``allow_header_override`` is on.
-
-	``trust_host`` is passed True by ONE caller - ``signup`` - and False everywhere else. All
-	onboarding endpoints are authenticated (``require_jarvis_admin``), but only signup creates
-	a NEW account, so trusting the admin's own request Host is self-scoped there. Reconnect /
-	replacement / lead target an EXISTING account by email, a different trust context, so they
-	keep header override OFF - a spoofed Host cannot choose their recorded site URL. On the
-	signup path a real public domain reached over http (proxy without X-Forwarded-Proto) is
-	normalized to https. Residual (low): a require_jarvis_admin admin can put a lookalike https
-	origin into their OWN welcome email via a crafted Host - a slightly broader reach than the
-	host_name config lever, but still self-scoped, admin-re-validated, and never the base of the
-	verification magic link (that uses admin's own origin)."""
+	Only ``signup`` passes ``trust_host=True`` - a NEW account, so trusting the authenticated
+	admin's own Host is self-scoped. Reconnect / replacement / lead keep it OFF: they target an
+	EXISTING account by email, so a spoofed Host must not choose its URL. A real public domain
+	reached over http is normalized to https."""
 	from urllib.parse import urlsplit
 
 	host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
@@ -334,8 +325,7 @@ def signup(
 		"email": email,
 		"company_name": company_name,
 		"plan": plan,
-		# signup creates a NEW account -> trust the authenticated admin's own request Host
-		# (self-scoped); reconnect/replacement/lead keep it OFF (they target an existing account).
+		# signup is the only trust_host=True caller (new account, self-scoped).
 		"frappe_site_url": _public_origin(trust_host=True),
 		"supported_providers": list(SUPPORTED_PROVIDERS),
 		"client_capabilities": _client_capabilities(),
