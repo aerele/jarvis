@@ -146,6 +146,21 @@ const menuOptions = computed(() => [
 							onClick: () => shellStore.openSettings(),
 						},
 				  ]),
+			// Support tickets -> the LIST (/support). Distinct from ChatView's header
+			// headset icon, which opens a NEW ticket pre-filled with the current chat;
+			// this entry is the way back to existing tickets. Chat variant only (the
+			// support rail reaches its own list), and gated on supportOn because the
+			// /support routes sit behind supportGuard on the same flags — so it is
+			// never a dead link that bounces the user back to Chat.
+			...(props.variant === "support" || !supportOn
+				? []
+				: [
+						{
+							label: "Support tickets",
+							icon: "life-buoy",
+							onClick: () => router.push({ name: "Support" }),
+						},
+				  ]),
 			...(crossItem.value ? [crossItem.value] : []),
 			{
 				label: "Switch to Desk",
