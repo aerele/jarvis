@@ -825,14 +825,17 @@ def get_role_profile_config(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	admin-decided ``enabled`` flag) for the daily bench pull
 	(``jarvis.chat.role_profiles.sync_role_profile_config``).
 
-	Response envelope: ``{"ok": True, "data": {version, enabled, sets,
-	shared_core, mappings, tool_tiers}}`` - the frozen role-profile-config wire
-	contract shared with the admin-side endpoint. Raises the same
-	``AdminAuthError`` / ``AdminUnreachableError`` / ``AdminValidationError``
-	family as every other admin_client call; an admin predating this endpoint
-	answers Frappe's method-not-found rejection (``is_method_not_found``),
-	which the caller treats identically to any other pull failure - never as
-	an error into the daily scheduler.
+	Wire envelope: the admin answers ``{"ok": True, "data": {version, enabled,
+	sets, shared_core, mappings, tool_tiers}}`` - but ``_post`` (via
+	``_do_post``) already unwraps that envelope on the way out
+	(``envelope.get("data", envelope)``), so what THIS FUNCTION RETURNS to its
+	caller is the bare data dict itself - ``{version, enabled, sets,
+	shared_core, mappings, tool_tiers}`` directly, not the ``{"ok", "data"}``
+	wrapper. Raises the same ``AdminAuthError`` / ``AdminUnreachableError`` /
+	``AdminValidationError`` family as every other admin_client call; an admin
+	predating this endpoint answers Frappe's method-not-found rejection
+	(``is_method_not_found``), which the caller treats identically to any
+	other pull failure - never as an error into the daily scheduler.
 	"""
 	return _post(
 		path=_m("api.tenant.get_role_profile_config"),

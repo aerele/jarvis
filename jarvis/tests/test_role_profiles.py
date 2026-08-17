@@ -336,7 +336,11 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 
 	def test_success_caches_mirrors_and_pushes_on_version_change(self):
 		store, fake_get, fake_set, fake_set_single = self._fake_store()
-		resp = {"ok": True, "data": self._config(version="v1", enabled=True)}
+		# admin_client.get_role_profile_config() returns the bare data dict:
+		# _post already unwraps the {"ok", "data"} envelope (jarvis#907
+		# live-verification fix) - mocking the STILL-WRAPPED shape here would
+		# silently mask that bug, exactly as it did before this fix.
+		resp = self._config(version="v1", enabled=True)
 		calls = []
 
 		def fake_sync(**kw):
@@ -377,7 +381,11 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		store, fake_get, fake_set, fake_set_single = self._fake_store(
 			initial={"role_profiles_config_version": "v0"}
 		)
-		resp = {"ok": True, "data": self._config(version="v1", enabled=True)}
+		# admin_client.get_role_profile_config() returns the bare data dict:
+		# _post already unwraps the {"ok", "data"} envelope (jarvis#907
+		# live-verification fix) - mocking the STILL-WRAPPED shape here would
+		# silently mask that bug, exactly as it did before this fix.
+		resp = self._config(version="v1", enabled=True)
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
@@ -399,7 +407,11 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		store, fake_get, fake_set, fake_set_single = self._fake_store(
 			initial={"role_profiles_config_version": "v0"}
 		)
-		resp = {"ok": True, "data": self._config(version="v1", enabled=True)}
+		# admin_client.get_role_profile_config() returns the bare data dict:
+		# _post already unwraps the {"ok", "data"} envelope (jarvis#907
+		# live-verification fix) - mocking the STILL-WRAPPED shape here would
+		# silently mask that bug, exactly as it did before this fix.
+		resp = self._config(version="v1", enabled=True)
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
@@ -413,11 +425,40 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		self.assertEqual(result, {"synced": True})
 		self.assertEqual(store["role_profiles_config_version"], "v1")
 
+	def test_still_enveloped_response_also_works(self):
+		"""jarvis#907 live-verification fix: ``_post`` already unwraps the
+		``{"ok": True, "data": {...}}`` envelope, so ``get_role_profile_config()``
+		returns the bare data dict in real life - every other test in this
+		class mocks that real (bare) shape. This test is the deliberate
+		exception: it proves ``sync_role_profile_config`` ALSO still accepts a
+		legacy enveloped response (``response.get("data", response)`` unwraps
+		it), so a future transport change back to a wrapping shape would not
+		silently break the sync."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store()
+		enveloped = {"ok": True, "data": self._config(version="v1", enabled=True)}
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=enveloped),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(role_profiles, "_invalidate_config_cache"),
+			patch.object(role_profiles, "sync_role_profiles", return_value={"pushed": True, "profiles": []}),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		self.assertEqual(store["role_profiles_config_version"], "v1")
+		self.assertEqual(frappe.parse_json(store["role_profiles_config"])["version"], "v1")
+
 	def test_unchanged_version_does_not_repush(self):
 		store, fake_get, fake_set, fake_set_single = self._fake_store(
 			initial={"role_profiles_config_version": "v1"}
 		)
-		resp = {"ok": True, "data": self._config(version="v1", enabled=True)}
+		# admin_client.get_role_profile_config() returns the bare data dict:
+		# _post already unwraps the {"ok", "data"} envelope (jarvis#907
+		# live-verification fix) - mocking the STILL-WRAPPED shape here would
+		# silently mask that bug, exactly as it did before this fix.
+		resp = self._config(version="v1", enabled=True)
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
@@ -521,7 +562,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 
 	def test_invalid_payload_is_failure_path_and_leaves_cache_untouched(self):
 		store, fake_get, fake_set, fake_set_single = self._fake_store()
-		bad = {"ok": True, "data": {"version": "v1"}}  # missing enabled/sets/mappings/tool_tiers
+		bad = {"version": "v1"}  # missing enabled/sets/mappings/tool_tiers; bare shape (no envelope)
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=bad),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
@@ -576,9 +617,10 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		store, fake_get, fake_set, fake_set_single = self._fake_store()
 		new_config = self._config(version="v2", enabled=True)
 		new_config["sets"] = {"hr": ["custom-hr-only-skill"]}
-		resp = {"ok": True, "data": new_config}
+		# Bare dict, matching what admin_client.get_role_profile_config()
+		# actually returns (_post already unwrapped the envelope).
 		with (
-			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch("jarvis.admin_client.get_role_profile_config", return_value=new_config),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
 			patch.object(frappe.db, "set_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),

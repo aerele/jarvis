@@ -708,7 +708,13 @@ def sync_role_profile_config() -> dict:
 
 		response = admin_client.get_role_profile_config()
 		phase = "validate"
-		data = response.get("data") if isinstance(response, dict) else None
+		# admin_client._post already unwraps the {"ok": True, "data": {...}}
+		# envelope (jarvis#907 live-verification fix): get_role_profile_config()
+		# returns the bare data dict directly. Tolerate both shapes here in
+		# case the transport ever changes back - response.get("data", response)
+		# reads the bare-dict wire format as-is, and still unwraps a legacy
+		# enveloped response if one is ever received.
+		data = response.get("data", response) if isinstance(response, dict) else None
 		if not _validate_role_profile_config(data):
 			raise ValueError("invalid or malformed role-profile config payload")
 
