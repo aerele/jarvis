@@ -87,9 +87,6 @@ _MAX_MARGIN_MM = 100
 
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*?/?>", re.IGNORECASE)
 _SRC_RE = re.compile(r"""\bsrc\s*=\s*(?P<q>["'])(?P<url>.*?)(?P=q)""", re.IGNORECASE)
-# Residual Jinja tags to scrub AFTER a best-effort render, so a Letter Head's raw
-# template ({% if %} / {{ }}) can never leak into the PDF as literal text.
-_JINJA_RE = re.compile(r"{%.*?%}|{{.*?}}", re.DOTALL)
 
 # Self-contained CSS for the header/footer documents - they are SEPARATE
 # wkhtmltopdf renders, so they carry no body/theme styling and must style
@@ -413,19 +410,15 @@ def resolve_letterhead(letterhead: str | None) -> tuple[str, str, str | None]:
 		lh = frappe.db.get_value("Letter Head", name, ["content", "footer"], as_dict=True)
 		if not lh:
 			return "", "", (f"letterhead {named!r} not found — rendered without it" if named else None)
-		# A Letter Head's content/footer is a Jinja TEMPLATE (company address block,
-		# etc.). Render it first (a composed report has no source doc, so we supply a
-		# best-effort company context; undefined refs blank out) — else the raw
-		# {% if %}/{{ }} leaks into the PDF. THEN inline same-site logos to
-		# permission-checked base64 and run the airtight letterhead gate (nh3,
-		# data-only images) so no remote/relative src or fetch-capable markup remains.
-		ctx = _letterhead_context(name)
-		header = sanitize_letterhead(
-			_inline_letterhead_images(_render_letterhead(lh.get("content") or "", ctx))
-		)
-		footer = sanitize_letterhead(
-			_inline_letterhead_images(_render_letterhead(lh.get("footer") or "", ctx))
-		)
+		# A Letter Head's content/footer is a document-BOUND Jinja template (company
+		# address/contact keyed off the printed doc). A composed report has no such
+		# doc, so rendering it produces "None"/partial junk, and folding it in raw
+		# leaks {% %}/{{ }}. So keep ONLY the brand logo(s) and drop the text: extract
+		# the <img> tags, inline same-site logos to permission-checked base64, and run
+		# the airtight letterhead gate (nh3, data-only images). A tenant that wants
+		# text branding on a report can pass header=/footer= explicitly.
+		header = sanitize_letterhead(_inline_letterhead_images(_letterhead_logos(lh.get("content") or "")))
+		footer = sanitize_letterhead(_inline_letterhead_images(_letterhead_logos(lh.get("footer") or "")))
 		return header, footer, None
 	except Exception:
 		# Letterhead is a nicety, never a hard failure of the export.
@@ -433,53 +426,17 @@ def resolve_letterhead(letterhead: str | None) -> tuple[str, str, str | None]:
 		return "", "", (f"letterhead {named!r} could not be applied" if named else None)
 
 
-def _render_letterhead(tpl: str, ctx: dict) -> str:
-	"""Render a Letter Head Jinja template with ``ctx`` (best-effort), then scrub any
-	residual ``{% %}``/``{{ }}`` so a raw or partially-rendered template can never
-	leak into the PDF as literal text. Non-template content is returned unchanged.
-	Never raises: on a render error, the residual scrub still runs on the raw
-	template, keeping its static HTML (a logo ``<img>``) while dropping the tags."""
-	if not tpl:
+def _letterhead_logos(raw: str) -> str:
+	"""Return only the ``<img>`` logo tags from a Letter Head's HTML, dropping its
+	document-bound Jinja text block (which cannot render cleanly on a doc-less
+	composed report). Bounds the input first: a letterhead larger than the
+	furniture cap is broken/abuse and this runs BEFORE render_pdf's timeout."""
+	if not raw or "<img" not in raw.lower():
 		return ""
-	if len(tpl) > _MAX_FURNITURE_CHARS:
-		# A letterhead this large is broken/abuse. Rendering it — and the residual
-		# scrub, whose regex is superlinear on a long run of unclosed ``{{`` — would
-		# be unbounded CPU, and this runs BEFORE render_pdf's subprocess timeout, so
-		# it would pin the worker. Drop the block (a real letterhead is tiny).
-		_log_infra_failure("rich-pdf letterhead too large to render", f"{len(tpl)} chars")
+	if len(raw) > _MAX_FURNITURE_CHARS:
+		_log_infra_failure("rich-pdf letterhead too large", f"{len(raw)} chars")
 		return ""
-	if "{{" in tpl or "{%" in tpl:
-		try:
-			tpl = frappe.render_template(tpl, ctx)
-		except Exception:
-			# render_template's error path appends the traceback to
-			# ``frappe.message_log`` BEFORE raising; catching the exception does not
-			# undo that, so a broken-letterhead traceback could ride out to the
-			# caller via ``_server_messages``. Clear it.
-			with contextlib.suppress(Exception):
-				frappe.clear_last_message()
-			_log_infra_failure("rich-pdf letterhead template render failed", "")
-		tpl = _JINJA_RE.sub("", tpl)
-	return tpl
-
-
-def _letterhead_context(name: str) -> dict:
-	"""Best-effort Jinja context for a Letter Head on a doc-less composed report:
-	the site's default company + its address/contact block, so a standard company
-	letterhead renders its details instead of blanking. Never raises."""
-	ctx: dict = {"letter_head": name}
-	try:
-		company = frappe.defaults.get_global_default("company") or frappe.db.get_value("Company", {}, "name")
-		if company:
-			ctx["company"] = company
-			ctx["doc"] = frappe._dict({"company": company, "letter_head": name})
-			with contextlib.suppress(Exception):
-				from frappe.contacts.doctype.address.address import get_company_address
-
-				ctx.update(get_company_address(company) or {})
-	except Exception:
-		pass
-	return ctx
+	return "".join(_IMG_TAG_RE.findall(raw))
 
 
 def _inline_letterhead_images(html: str) -> str:
