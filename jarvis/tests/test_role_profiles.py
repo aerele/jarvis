@@ -338,6 +338,11 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		store, fake_get, fake_set, fake_set_single = self._fake_store()
 		resp = {"ok": True, "data": self._config(version="v1", enabled=True)}
 		calls = []
+
+		def fake_sync(**kw):
+			calls.append(("sync", kw))
+			return {"pushed": True, "profiles": []}
+
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
@@ -346,9 +351,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 			patch.object(
 				role_profiles, "_invalidate_config_cache", side_effect=lambda: calls.append("invalidate")
 			),
-			patch.object(
-				role_profiles, "sync_role_profiles", side_effect=lambda **kw: calls.append(("sync", kw))
-			),
+			patch.object(role_profiles, "sync_role_profiles", side_effect=fake_sync),
 		):
 			result = role_profiles.sync_role_profile_config()
 
@@ -361,6 +364,54 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		# recomputes needed_profiles() from the NEW config, not a value BJ2's
 		# accessor memoized earlier in this same request.
 		self.assertEqual(calls, ["invalidate", ("sync", {"force": True})])
+
+	def test_failed_push_leaves_version_unadvanced_and_reports_synced_false(self):
+		"""Whole-branch review finding 1: a version-changing sync whose forced
+		re-push FAILS must not stamp the new version - stamping it anyway
+		would mean a failed push still reads as fully synced, leaving fleet
+		stale for up to a day before anything retries. The config JSON and
+		mirror are still written (they reflect the freshly validated pull,
+		independent of whether the push to admin/fleet succeeded); only the
+		version field is deliberately left at its old value so the next tick
+		sees a version mismatch again and retries."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"role_profiles_config_version": "v0"}
+		)
+		resp = {"ok": True, "data": self._config(version="v1", enabled=True)}
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(role_profiles, "_invalidate_config_cache"),
+			patch.object(role_profiles, "sync_role_profiles", return_value={"pushed": False, "profiles": []}),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": False})
+		self.assertEqual(store["role_profiles_config_version"], "v0")  # unadvanced
+		self.assertEqual(frappe.parse_json(store["role_profiles_config"])["version"], "v1")  # still cached
+
+	def test_successful_push_advances_the_stored_version(self):
+		"""Sibling of the failure test above: a version-changing sync whose
+		forced re-push SUCCEEDS does stamp the new version, so the next tick
+		correctly reads no change and stays a no-op."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"role_profiles_config_version": "v0"}
+		)
+		resp = {"ok": True, "data": self._config(version="v1", enabled=True)}
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(role_profiles, "_invalidate_config_cache"),
+			patch.object(role_profiles, "sync_role_profiles", return_value={"pushed": True, "profiles": []}),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		self.assertEqual(store["role_profiles_config_version"], "v1")
 
 	def test_unchanged_version_does_not_repush(self):
 		store, fake_get, fake_set, fake_set_single = self._fake_store(
@@ -421,6 +472,52 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 
 		self.assertEqual(result, {"synced": False})
 		self.assertEqual(store["enable_role_profiles"], 0)
+
+	def test_mirror_off_transition_logs_a_distinct_operator_visible_reason(self):
+		"""Ruling (whole-branch review finding 2): zeroing the mirror on a
+		no-cache failure is spec-mandated (B4) and stays exactly as-is - but a
+		1->0 transition now writes its own log_error entry, distinct from the
+		generic phase-failure log, so an operator can tell "this tenant's
+		flag just went dark because it never synced" apart from every other
+		phase failure without reading a traceback."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"enable_role_profiles": 1}  # stale ON from a prior tenancy; no cache present
+		)
+		with (
+			patch(
+				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
+			),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(frappe, "log_error") as mock_log_error,
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": False})
+		self.assertEqual(store["enable_role_profiles"], 0)
+		titles = [call.kwargs.get("title") for call in mock_log_error.call_args_list]
+		self.assertIn("Jarvis: role-profile-config mirror defaulted OFF", titles)
+
+	def test_mirror_already_off_does_not_log_a_transition(self):
+		"""Sibling of the transition test above: when the mirror is already 0
+		(no transition happening), the distinct log line must not fire - only
+		a real 1->0 flip is operator-visible-worthy."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store(initial={"enable_role_profiles": 0})
+		with (
+			patch(
+				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
+			),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(frappe, "log_error") as mock_log_error,
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": False})
+		titles = [call.kwargs.get("title") for call in mock_log_error.call_args_list]
+		self.assertNotIn("Jarvis: role-profile-config mirror defaulted OFF", titles)
 
 	def test_invalid_payload_is_failure_path_and_leaves_cache_untouched(self):
 		store, fake_get, fake_set, fake_set_single = self._fake_store()
@@ -607,11 +704,18 @@ class TestRoleProfileConfigAccessors(FrappeTestCase):
 		with self._patched(None):
 			self.assertEqual(role_profiles.get_tools_allow(), role_profiles.standard_tools_allow())
 
-	def test_memo_keyed_on_version_picks_up_change_without_explicit_invalidate(self):
-		"""Design point: the memo is keyed on ``role_profiles_config_version``,
-		not just present/absent - a same-request write that bumps the version
-		must be picked up even without a separate ``_invalidate_config_cache``
-		call."""
+	def test_memo_is_stable_within_request_until_explicit_invalidate(self):
+		"""Deliberate semantic change (whole-branch review, findings 3+4+5):
+		``_active_config`` no longer re-checks ``role_profiles_config_version``
+		on every call - it memoizes on the FIRST read per request and does NOT
+		notice a same-request version bump on its own. Only an explicit
+		``_invalidate_config_cache()`` call (made by
+		``sync_role_profile_config`` itself before its forced re-push) makes a
+		same-request config update visible. This supersedes the old
+		version-keyed auto-refresh behavior: it keeps one
+		``resolve_profile`` / ``needed_profiles`` run on a SINGLE config
+		version by construction, so a mid-run version change can never mix two
+		configs into one resolution."""
 		store = {
 			"role_profiles_config": frappe.as_json(self._config(version="v1")),
 			"role_profiles_config_version": "v1",
@@ -624,10 +728,17 @@ class TestRoleProfileConfigAccessors(FrappeTestCase):
 			first = role_profiles._active_config()
 			self.assertEqual(first["version"], "v1")
 
+			# A same-request version bump WITHOUT invalidation must NOT be
+			# picked up - stability within one logical operation.
 			store["role_profiles_config"] = frappe.as_json(
 				self._config(version="v2", sets={"hr": ["erpnext-projects"]})
 			)
 			store["role_profiles_config_version"] = "v2"
+			still_first = role_profiles._active_config()
+			self.assertEqual(still_first["version"], "v1")
+
+			# Only an explicit invalidate makes the new version visible.
+			role_profiles._invalidate_config_cache()
 			second = role_profiles._active_config()
 
 		self.assertEqual(second["version"], "v2")

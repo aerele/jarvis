@@ -587,11 +587,21 @@ def _mappings_reference_known_sets(data: dict) -> bool:
 def _active_config() -> dict | None:
 	"""The validated, cached admin config for this request, or ``None`` when
 	no config is cached or it fails validation. Memoized on ``frappe.local``
-	at :data:`_CONFIG_MEMO_ATTR`, keyed on the current
-	``role_profiles_config_version`` so a version change mid-request - whether
-	via an explicit :func:`_invalidate_config_cache` call or a same-request DB
-	write this function simply notices on its next call - is never served
-	stale.
+	at :data:`_CONFIG_MEMO_ATTR` for the lifetime of this request/job: the
+	FIRST call reads, parses, and validates the cache exactly once, and every
+	later call in the same request returns that SAME memoized value - it does
+	NOT re-check ``role_profiles_config_version`` on each call. Only an
+	explicit :func:`_invalidate_config_cache` call (made by
+	:func:`sync_role_profile_config` itself, before its own forced re-push)
+	makes a same-request config update visible.
+
+	This is a deliberate stability contract, not an oversight: it makes one
+	``resolve_profile`` / ``needed_profiles`` run see a SINGLE config version
+	by construction - a mid-run version change can never mix two configs into
+	one resolution (which risked a KeyError-driven silent full-profile
+	fallback at the worst possible moment) - and it cuts what used to be an
+	uncached DB read on every one of the four accessor calls down to one read
+	total per request.
 
 	Never raises: any DB, JSON, or validation problem here is a fixture-
 	fallback signal to the accessors below, not an exception a caller has to
@@ -599,11 +609,8 @@ def _active_config() -> dict | None:
 	untouched by BJ2 - the accessors it calls can't raise.
 	"""
 	try:
-		version = frappe.db.get_single_value(_SETTINGS, "role_profiles_config_version", cache=False)
 		if hasattr(frappe.local, _CONFIG_MEMO_ATTR):
-			memo_version, memo_config = getattr(frappe.local, _CONFIG_MEMO_ATTR)
-			if memo_version == version:
-				return memo_config
+			return getattr(frappe.local, _CONFIG_MEMO_ATTR)
 
 		config = None
 		raw = frappe.db.get_single_value(_SETTINGS, "role_profiles_config", cache=False)
@@ -612,47 +619,49 @@ def _active_config() -> dict | None:
 			if _validate_role_profile_config(data) and _mappings_reference_known_sets(data):
 				config = data
 
-		setattr(frappe.local, _CONFIG_MEMO_ATTR, (version, config))
+		setattr(frappe.local, _CONFIG_MEMO_ATTR, config)
 		return config
 	except Exception:
 		return None
 
 
+def _config_or_fixture(key: str, fixture, coerce=lambda value: value):
+	"""Shared shape behind the four accessors below: the cached config's
+	``key`` (passed through ``coerce``) when a config is active for this
+	request, else ``fixture`` verbatim. Never raises: :func:`_active_config`
+	already can't raise, and ``coerce`` only ever runs on an already-validated
+	config value."""
+	config = _active_config()
+	if config is None:
+		return fixture
+	return coerce(config[key])
+
+
 def get_skill_sets() -> dict[str, frozenset[str]]:
 	"""Set-key -> skill-slug membership: the cached config's ``sets`` when a
 	config is active, else the module fixture (:data:`SKILL_SETS`)."""
-	config = _active_config()
-	if config is None:
-		return SKILL_SETS
-	return {set_key: frozenset(skills) for set_key, skills in config["sets"].items()}
+	return _config_or_fixture("sets", SKILL_SETS, lambda sets: {k: frozenset(v) for k, v in sets.items()})
 
 
 def get_role_to_set() -> dict[str, str]:
 	"""ERPNext role name -> set key: the cached config's ``mappings`` when a
 	config is active, else the module fixture (:data:`ROLE_TO_SET`)."""
-	config = _active_config()
-	if config is None:
-		return ROLE_TO_SET
-	return dict(config["mappings"])
+	return _config_or_fixture("mappings", ROLE_TO_SET, dict)
 
 
 def get_shared_core() -> frozenset[str]:
 	"""Always-on skill slugs: the cached config's ``shared_core`` when a
 	config is active, else the module fixture (:data:`SHARED_CORE_SKILLS`)."""
-	config = _active_config()
-	if config is None:
-		return SHARED_CORE_SKILLS
-	return frozenset(config["shared_core"])
+	return _config_or_fixture("shared_core", SHARED_CORE_SKILLS, frozenset)
 
 
 def get_tools_allow() -> list[str]:
 	"""The ``standard``-tier tool allow list: the cached config's
 	``tool_tiers.standard.allow`` when a config is active, else the module
 	fixture (:func:`standard_tools_allow`)."""
-	config = _active_config()
-	if config is None:
-		return standard_tools_allow()
-	return list(config["tool_tiers"]["standard"]["allow"])
+	return _config_or_fixture(
+		"tool_tiers", standard_tools_allow(), lambda tiers: list(tiers["standard"]["allow"])
+	)
 
 
 def sync_role_profile_config() -> dict:
@@ -676,9 +685,20 @@ def sync_role_profile_config() -> dict:
 	bench against an admin that predates this endpoint (method-not-found):
 	compat rule says that must leave the cache absent and the mirror OFF.
 
-	On success (version changed): invalidates BJ2's per-request config memo
-	BEFORE forcing a re-push, so the push recomputes :func:`needed_profiles`
-	from the NEW config rather than a value memoized earlier this request.
+	On a version change: invalidates BJ2's per-request config memo BEFORE
+	forcing a re-push, so the push recomputes :func:`needed_profiles` from the
+	NEW config rather than a value memoized earlier this request. The stored
+	``role_profiles_config_version`` itself is only advanced AFTER that push
+	reports success (``pushed: True`` - under ``force=True`` this is the only
+	non-exceptional outcome, since ``force`` bypasses
+	:func:`sync_role_profiles`'s own unchanged-is-a-noop short circuit, so a
+	``pushed: False`` here is unambiguously a real push failure, never a
+	legitimate no-op). A failed push is treated as this whole sync failing
+	(``{"synced": False}``) and deliberately leaves the OLD version stored -
+	the config JSON and the ``enable_role_profiles`` mirror are already
+	written by this point regardless, but the version field stays behind so
+	the NEXT tick sees ``version != previous_version`` again and retries the
+	push rather than silently going stale for up to a day.
 
 	Returns ``{"synced": bool}``.
 	"""
@@ -701,7 +721,6 @@ def sync_role_profile_config() -> dict:
 			_SETTINGS,
 			{
 				"role_profiles_config": frappe.as_json(data),
-				"role_profiles_config_version": version,
 				"role_profiles_config_synced_at": frappe.utils.now(),
 			},
 		)
@@ -710,7 +729,10 @@ def sync_role_profile_config() -> dict:
 		if version != previous_version:
 			phase = "push"
 			_invalidate_config_cache()
-			sync_role_profiles(force=True)
+			push_result = sync_role_profiles(force=True)
+			if not push_result.get("pushed"):
+				raise RuntimeError("role-profile push failed; config cached but version left unadvanced")
+			frappe.db.set_value(_SETTINGS, _SETTINGS, {"role_profiles_config_version": version})
 
 		return {"synced": True}
 	except Exception:
@@ -720,9 +742,28 @@ def sync_role_profile_config() -> dict:
 			has_cache = False
 		if not has_cache:
 			try:
+				previous_flag = frappe.db.get_single_value(_SETTINGS, "enable_role_profiles", cache=False)
+			except Exception:
+				previous_flag = None
+			try:
 				frappe.db.set_single_value(_SETTINGS, "enable_role_profiles", 0)
 			except Exception:
 				pass
+			if previous_flag:
+				# Ruling (whole-branch review): this zeroing is spec-mandated
+				# (B4 - admin-only ownership; never-synced means OFF; a hand-
+				# set historical value is overwritten by design), not a bug -
+				# but a 1->0 transition deserves its own operator-visible line
+				# distinct from the generic phase-failure log below.
+				frappe.log_error(
+					title="Jarvis: role-profile-config mirror defaulted OFF",
+					message=(
+						"role-profile config never synced (or lost its cache); "
+						"admin-owned enable_role_profiles flag defaulting OFF per "
+						"spec B4 - never tenant-controllable, and there is no "
+						"last-known-good state to preserve without a cache."
+					),
+				)
 		frappe.log_error(
 			title=f"Jarvis: role-profile-config {phase} failed",
 			message=frappe.get_traceback(),
