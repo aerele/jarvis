@@ -13,6 +13,7 @@ Guest calls (signup, get_plans) skip the header entirely; their admin
 endpoints are @frappe.whitelist(allow_guest=True).
 """
 
+import ipaddress
 import re
 import time
 
@@ -201,25 +202,49 @@ def _is_production_bench() -> bool:
 	)
 
 
-def _public_origin() -> str:
-	"""A public site origin for the ``frappe_site_url`` this bench hands admin.
+_RESERVED_TLDS = frozenset(
+	{
+		"local",
+		"localhost",
+		"test",
+		"example",
+		"invalid",
+		"internal",
+		"corp",
+		"home",
+		"lan",
+		"mail",
+		"intranet",
+	}
+)
 
-	The bench half of the plan-09 P1-5 ``get_url`` sweep. A bare
-	``frappe.utils.get_url()`` derives the host from the request ``Host`` header
-	when ``host_name`` is unset (``get_url``'s own ``allow_header_override`` path —
-	proven reachable on this very environment), so a guest spoofing ``Host:`` on a
-	signup / reconnect / replacement-lookup POST could choose the
-	``frappe_site_url`` admin records for this tenant and the base of the magic
-	link admin then mails. The load-bearing fix is ``allow_header_override=False``:
-	it kills that injection vector.
 
-	Resolution order mirrors the admin-side ``admin_public_origin`` (jarvis_admin_v2
-	WS5): a configured ``host_name`` (validated https) wins; otherwise the site
-	fallback from ``get_url`` with header override OFF. An ``http://`` base on a
-	production bench is a misconfiguration — but it is caught at DEPLOY time by the
-	readiness gate, NOT by throwing here: throwing would break signup on any bench
-	where ``host_name`` is unset (every dev bench), and the injection vector is
-	already closed regardless of scheme."""
+def _is_real_public_host(host: str) -> bool:
+	"""A routable public domain (safe to force https on) vs a dev/internal host to leave as-is:
+	dotted, not localhost, not an IP literal, alphabetic non-reserved TLD. Rejects jarvis.local
+	(reserved), staging.v15 (non-alpha TLD), IPs, bare hosts; IDN xn-- reads non-public (keeps its scheme)."""
+	if not host or "." not in host:
+		return False
+	if host == "localhost" or host.endswith(".localhost"):
+		return False
+	try:
+		ipaddress.ip_address(host)
+		return False
+	except ValueError:
+		pass
+	tld = host.rsplit(".", 1)[-1]
+	return tld.isalpha() and tld not in _RESERVED_TLDS
+
+
+def _public_origin(trust_host: bool = False) -> str:
+	"""The public origin the bench sends admin as ``frappe_site_url``. A configured ``host_name``
+	(https) always wins; else ``get_url`` derives it from the request Host only when
+	``allow_header_override`` is on.
+
+	Only ``signup`` passes ``trust_host=True`` - a NEW account, so trusting the authenticated
+	admin's own Host is self-scoped. Reconnect / replacement / lead keep it OFF: they target an
+	EXISTING account by email, so a spoofed Host must not choose its URL. A real public domain
+	reached over http is normalized to https."""
 	from urllib.parse import urlsplit
 
 	host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
@@ -230,7 +255,14 @@ def _public_origin() -> str:
 		if parts.scheme == "https" and parts.hostname and "." in parts.hostname:
 			return f"https://{parts.hostname.lower()}"
 
-	base = (frappe.utils.get_url(allow_header_override=False) or "").rstrip("/")
+	base = (frappe.utils.get_url(allow_header_override=trust_host) or "").rstrip("/")
+	if trust_host:
+		try:
+			host = (urlsplit(base).hostname or "").lower().rstrip(".")
+			if _is_real_public_host(host):
+				return f"https://{host}"
+		except Exception:
+			pass  # never break signup; fall through to the raw base
 	if base.startswith("http://") and _is_production_bench():
 		frappe.logger("jarvis.onboarding").warning(
 			"frappe_site_url resolved to an http base on a production bench; "
@@ -293,7 +325,8 @@ def signup(
 		"email": email,
 		"company_name": company_name,
 		"plan": plan,
-		"frappe_site_url": _public_origin(),
+		# signup is the only trust_host=True caller (new account, self-scoped).
+		"frappe_site_url": _public_origin(trust_host=True),
 		"supported_providers": list(SUPPORTED_PROVIDERS),
 		"client_capabilities": _client_capabilities(),
 		"terms_accepted": terms_accepted,
