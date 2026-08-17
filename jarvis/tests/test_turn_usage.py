@@ -65,7 +65,9 @@ def _cleanup() -> None:
 	# every fixture in this file uses instead.
 	for name in frappe.get_all(TURN_USAGE, filters={"session_key": ["like", "agent:tu-%"]}, pluck="name"):
 		frappe.delete_doc(TURN_USAGE, name, ignore_permissions=True, force=True)
-	for name in frappe.get_all(CHAT_TURN, filters={"relay_target_id": ["like", "test-turnusage-%"]}, pluck="name"):
+	for name in frappe.get_all(
+		CHAT_TURN, filters={"relay_target_id": ["like", "test-turnusage-%"]}, pluck="name"
+	):
 		frappe.delete_doc(CHAT_TURN, name, ignore_permissions=True, force=True)
 	for name in frappe.get_all(
 		CONV, filters={"title": ["like", "turnusage-fixture%"]}, pluck="name"
@@ -168,9 +170,7 @@ class TestTurnUsage(FrappeTestCase):
 		self.assertFalse(frappe.db.exists(TURN_USAGE, {"session_key": "agent:tu-retry"}))
 
 	def test_retry_no_session_mapping_writes_nothing(self):
-		outcome = usage.record_turn_usage(
-			"agent:tu-unmapped", self._row(inputTokens=5, outputTokens=5)
-		)
+		outcome = usage.record_turn_usage("agent:tu-unmapped", self._row(inputTokens=5, outputTokens=5))
 		self.assertEqual(outcome, usage.USAGE_RETRY)
 		self.assertFalse(frappe.db.exists(TURN_USAGE, {"session_key": "agent:tu-unmapped"}))
 
