@@ -482,11 +482,11 @@ function payOutcomeFrom(search) {
 		return "";
 	}
 }
-const SETTLING_OUTCOMES = new Set(["done", "pending"]);
+const CHECK_STATUS_OUTCOMES = new Set(["done", "pending", "failed"]);
 
 onMounted(() => {
 	const payOutcome = payOutcomeFrom(window.location.search);
-	const runCheck = SETTLING_OUTCOMES.has(payOutcome) || payOutcome === "failed";
+	const runCheck = CHECK_STATUS_OUTCOMES.has(payOutcome);
 	// No URL rewrite here. The router already drops the query and hash on mount, so
 	// stripping `pay` was dead code that a spec nonetheless pinned - a test asserting
 	// behaviour the application never exhibits is worse than no test. The healer runs
