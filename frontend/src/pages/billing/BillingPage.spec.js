@@ -1135,14 +1135,53 @@ describe("returning from the pay page", () => {
 		expect(api.checkBillingPayment).toHaveBeenCalledTimes(1);
 	});
 
-	it("does NOT check on an ordinary visit, or on a declined return", async () => {
-		for (const search of ["", "?pay=failed"]) {
-			vi.clearAllMocks();
-			atSearch(search);
-			await mountPage();
-			await flushPromises();
-			expect(api.checkBillingPayment).not.toHaveBeenCalled();
-		}
+	it("does NOT check on an ordinary visit", async () => {
+		atSearch("");
+		await mountPage();
+		await flushPromises();
+		expect(api.checkBillingPayment).not.toHaveBeenCalled();
+	});
+
+	// A false ?pay=failed (server-side race between the gateway and the bench)
+	// used to strand the customer on stale, pre-payment account state until they
+	// manually clicked "Check payment status". Landing here now runs that same
+	// check once, so it self-heals without a manual click.
+	it("runs the healer once on a declined return too, in case the failure was false", async () => {
+		atSearch("?pay=failed");
+		api.checkBillingPayment.mockResolvedValue(rawOk());
+		api.billingPaymentState.mockResolvedValue({ message: { ok: true, data: {} } });
+		await mountPage(baseAccount({ subscription_status: "Expired" }));
+		await flushPromises();
+		expect(api.checkBillingPayment).toHaveBeenCalledTimes(1);
+	});
+
+	// A GENUINE decline must still end in the visible failed presentation, not an
+	// infinite spinner or a settling loop: the one-shot check finds no payment and
+	// settleWithRedirect renders the coded notice exactly as a manual Check would.
+	it("a genuine decline still lands in the failed notice, not a redirect or a loop", async () => {
+		atSearch("?pay=failed");
+		api.checkBillingPayment.mockResolvedValue(rawOk());
+		api.billingPaymentState.mockResolvedValue({ code: "PAYMENT_DECLINED" });
+		const wrapper = await mountPage(baseAccount({ subscription_status: "Expired" }));
+		await flushPromises();
+
+		expect(api.checkBillingPayment).toHaveBeenCalledTimes(1);
+		expect(window.location.assign).not.toHaveBeenCalled();
+		expect(wrapper.vm.codeNotice.code).toBe("PAYMENT_DECLINED");
+	});
+
+	// The false-failed case end to end: the healer converges the race server-side
+	// and the passive re-read answers "already active", the same self-heal a
+	// done/pending return already gets.
+	it("a false failed self-heals to the paid notice when the server actually confirms payment", async () => {
+		atSearch("?pay=failed");
+		api.checkBillingPayment.mockResolvedValue(
+			rawFail(CODES.PAYMENT_ALREADY_ACTIVE, { status: 409 })
+		);
+		const wrapper = await mountPage();
+		await flushPromises();
+
+		expect(wrapper.text()).toContain("Nothing more is owed");
 	});
 });
 
