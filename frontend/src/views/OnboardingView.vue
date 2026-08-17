@@ -1027,6 +1027,19 @@
 									>
 										{{ statusCheckNote }}
 									</p>
+									<!-- The pending-payment auto-poll hit its ceiling with no resolution.
+										 Say so plainly instead of quietly giving up - a manual check
+										 still works, and support is offered above once the check
+										 ceiling was reached. -->
+									<p
+										v-if="pendingPollStuck"
+										class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+										role="status"
+									>
+										We've been checking automatically for a couple of minutes
+										and still don't have an answer. You can check again, or
+										contact support and we'll look into it.
+									</p>
 									<!-- The checkout this signup already has is still open. Say so,
 										 because the alternative the customer would otherwise reach for
 										 (start a new payment) silently leaves the previous Razorpay
@@ -2417,15 +2430,19 @@ const PAID_NEEDS_CONNECT_REASONS = new Set([
 	"llm_setup",
 ]);
 
+// Returns the passive {paid, truthKnown, notStarted} truth flow.hydrate() read
+// (or null on a fail-open), so the caller (onMounted's fresh-mount return heal)
+// can tell whether a mid-flight signup actually exists without re-deriving it
+// from state.step.
 async function reconcileMidFlightSignup() {
 	let truth;
 	try {
 		truth = await flow.hydrate(); // {paid: true|false|null, truthKnown, notStarted}
 	} catch (e) {
-		return; // fail open to the intro tour
+		return null; // fail open to the intro tour
 	}
 	// Day one: no signup on this site. Leave the default intro tour (fresh start).
-	if (truth.notStarted) return;
+	if (truth.notStarted) return truth;
 
 	if (truth.paid === true) {
 		// Paid - so, and only so, the connect shortcut is allowed. Ask readiness
@@ -2441,7 +2458,7 @@ async function reconcileMidFlightSignup() {
 		if (ready && PAID_NEEDS_CONNECT_REASONS.has(ready.reason)) {
 			state.reconciledConnect = true;
 			state.step = "connect";
-			return;
+			return truth;
 		}
 		// Paid but not yet chat-ready (container provisioning): land on Pay, where
 		// the machine renders the paid receipt + "preparing your workspace". A paid
@@ -2449,7 +2466,7 @@ async function reconcileMidFlightSignup() {
 		// through the authenticated update_billing facade, never a fresh guest signup.
 		state.intentExists = true;
 		state.step = "pay";
-		return;
+		return truth;
 	}
 
 	// Not paid, or payment truth could not be established. Either way the connect
@@ -2464,6 +2481,7 @@ async function reconcileMidFlightSignup() {
 		state.intentExists = true;
 		state.step = "pay";
 	}
+	return truth;
 }
 
 // ---- Plan (Choose Your Plan) ------------------------------------------------
@@ -3210,6 +3228,66 @@ async function runStatusCheck() {
 		statusCheckNote.value = "We checked just now, and nothing has changed yet.";
 	}
 }
+
+// ---- pending-payment auto-poll -----------------------------------------------
+// Every other wait in the wizard polls on its own (provisioning 45x2s, readiness
+// 40x3s); this recovery card used to do nothing until the customer clicked Check
+// themselves. UNKNOWN covers PAYMENT_CONFIRMATION_PENDING (the coded wait) and a
+// return from checkout that has not resolved yet - both are "ask again shortly"
+// states, never a dead end.
+//
+// Gentler than the other waits ON PURPOSE: unlike readiness/provisioning,
+// checkStatus asks the real payment gateway and the server rate-limits it
+// (PAYMENT_CHECK_RATE_LIMITED) - so this reads the machine's own cooldown after
+// every check and waits it out before the next attempt, instead of a fixed
+// interval that could poll straight through a 429.
+const PENDING_CHECK_INTERVAL_MS = 15_000;
+const PENDING_CHECK_ATTEMPTS = 8; // ~15s x 8 ≈ 2 minutes
+// Set once the ceiling is reached with no resolution - an honest "we stopped
+// auto-checking" note, never a spinner that quietly gives up. Cleared the moment
+// the state leaves UNKNOWN (resolved) or Pay is left (see restartPendingAutoPoll).
+const pendingPollStuck = ref(false);
+// Bumped on every (re)start AND on every stop, so a run already sleeping/awaiting
+// checkStatus() can tell it has been superseded and quit without touching state
+// that no longer belongs to it (leaving Pay, a fresh CONTRACT_STATE, unmount).
+let pendingPollRun = 0;
+
+async function runPendingAutoPoll(myRun) {
+	for (let i = 0; i < PENDING_CHECK_ATTEMPTS; i++) {
+		await _sleep(PENDING_CHECK_INTERVAL_MS);
+		if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
+		await flow.checkStatus();
+		if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
+		// A rate limit says nothing about the money (see paymentCodes.js) - wait
+		// out the SERVER's own cooldown ON TOP OF the ordinary interval already
+		// elapsed, so the next attempt cannot land inside it and poll straight
+		// through a 429. checkCooldownUntil is whatever the machine is currently
+		// holding (0 on an ordinary answer), so this is a no-op except right after
+		// a rate limit.
+		const waitMs = (pay.value.checkCooldownUntil || 0) - Date.now();
+		if (waitMs > 0) {
+			await _sleep(waitMs);
+			if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
+		}
+	}
+	if (pendingPollRun === myRun && pay.value.value === S.UNKNOWN) {
+		pendingPollStuck.value = true;
+	}
+}
+
+// (Re)starts the poll if - and only if - the machine is genuinely waiting on
+// this signup's payment AND the customer is looking at the Pay step. Called from
+// both the value-watch below (a fresh CONTRACT_STATE) and the step-lifecycle
+// watch (entering/leaving Pay), so either kind of change restarts or stops it
+// the same way; idempotent to call when neither condition holds.
+function restartPendingAutoPoll() {
+	pendingPollRun += 1; // supersede whatever was already running
+	pendingPollStuck.value = false;
+	if (pay.value.value === S.UNKNOWN && state.step === "pay") {
+		runPendingAutoPoll(pendingPollRun);
+	}
+}
+watch(() => pay.value.value, restartPendingAutoPoll);
 
 // ---- "Resend the link" (jarvis#297 P0-2a) -----------------------------------
 // A truthful confirmation line, not a toast that could be missed off-screen -
@@ -4854,10 +4932,17 @@ watch(
 		if (s === "pay" && (prev === "details" || prev === "reconnect")) {
 			reconcileMidFlightSignup();
 		}
+		// Same P1-8 lifecycle discipline for the pending auto-poll: stop it the
+		// instant Pay is left (a late tick must not fire into a hidden step), and
+		// (re)start it on entry if the machine is already sitting in UNKNOWN.
+		restartPendingAutoPoll();
 	}
 );
 onUnmounted(() => {
 	if (cooldownTimer) clearInterval(cooldownTimer);
+	// Stop the pending auto-poll: a sleeping tick otherwise fires a real check
+	// into a torn-down component minutes after navigation away.
+	pendingPollRun += 1;
 	// Invalidate any in-flight client work so a late response cannot touch a
 	// torn-down component (P1-8), and drop the checkout-return listeners.
 	flow.cancelInFlight();
@@ -5002,7 +5087,27 @@ onMounted(async () => {
 		clearExternalCheckoutNav();
 	}
 	try {
-		await reconcileMidFlightSignup();
+		const midFlightTruth = await reconcileMidFlightSignup();
+		// FRESH-MOUNT RETURN HEAL. `checkoutReturn` only proves the pay page sent
+		// the customer back top-level; the passive hydrate above only read admin's
+		// last-known DB row (get_onboarding_state), never asked the gateway. A
+		// fresh mount can never be CHECKOUT_OPEN (paymentMachine.js reinitializes to
+		// REVIEW), so the in-memory RETURNED_FROM_CHECKOUT exit that already asks
+		// the gateway (usePaymentFlow's returnFromCheckout / handleCheckoutReturn)
+		// is unreachable here - this is the ONLY path that converges a fresh-mount
+		// return. Mirrors BillingPage.vue's run-healer-once pattern: exactly one
+		// active check, only when a mid-flight signup exists (nothing to check
+		// otherwise - a day-one visitor's check_signup_payment_status call would
+		// just spend a rate-limited read on an absent subscription row).
+		//
+		// No extra fencing needed beyond that: checkStatus() routes its answer
+		// through the SAME applyContract every other answer takes, so the
+		// attempt/generation fence and the PAID floor already guarantee a stale
+		// answer here can never repaint a newer state and a paid answer is never
+		// undone (paymentMachine.js applyContract).
+		if (checkoutReturn && midFlightTruth && !midFlightTruth.notStarted) {
+			await flow.checkStatus();
+		}
 	} finally {
 		confirmingReturn.value = false;
 	}

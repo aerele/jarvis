@@ -684,8 +684,23 @@ function applyContract(state, decoded, opts) {
 	// Capability flags: honour the backend, then let the reconciliation flag veto
 	// initiate. A code that is definitionally paid/terminal never offers initiate
 	// regardless of what a flag says.
+	//
+	// canInitiate has NO fail-open default here (unlike _backendCanCheck just
+	// below) because an open Pay button on a still-live mandate could authorize a
+	// second one - see PAYMENT_AUTHORIZED_PENDING_CONFIRM's own copy. PAYMENT_DECLINED
+	// is the one code where that caution does not apply: a declined payment can
+	// always be safely retried (admin's own capability rule for it - see
+	// jarvis_admin_v2 billing/signup.py's _capabilities), so an envelope that
+	// happens to omit the flag for THIS code alone (a decoded {ok:false} failure
+	// carries no `data` at all - see paymentCodec.js - or a pre-capability admin)
+	// must not leave a just-declined customer with no way to pay again. Only the
+	// ABSENT case defaults: an explicit `can_initiate_payment: false` still wins.
 	const backendCanInitiate =
-		"can_initiate_payment" in data ? !!data.can_initiate_payment : next.canInitiate;
+		"can_initiate_payment" in data
+			? !!data.can_initiate_payment
+			: code === CODES.PAYMENT_DECLINED
+			? true
+			: next.canInitiate;
 	next._backendCanCheck =
 		"can_check_status" in data
 			? !!data.can_check_status

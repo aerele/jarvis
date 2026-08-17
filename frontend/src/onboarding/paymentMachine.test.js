@@ -224,6 +224,30 @@ test("a decline is retryable and stays on the pay step", () => {
 	assert.equal(s.value, STATES.FAILED_RETRYABLE);
 });
 
+// jarvis onboarding-return-heal: canInitiate has no fail-open default (a live
+// mandate must not offer a blind retry), except for PAYMENT_DECLINED - a
+// declined payment can always be safely retried, so an envelope that omits the
+// flag for THIS code alone must not leave the customer with no way to pay
+// again. Only the ABSENT case defaults; an explicit false still wins.
+test("PAYMENT_DECLINED with no can_initiate_payment key defaults canInitiate to true", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_DECLINED));
+	assert.equal(s.value, STATES.FAILED_RETRYABLE);
+	assert.equal(s.canInitiate, true);
+});
+
+test("an explicit can_initiate_payment: false on PAYMENT_DECLINED is still honoured", () => {
+	const s = reduce(initialState(), at(CODES.PAYMENT_DECLINED, { can_initiate_payment: false }));
+	assert.equal(s.canInitiate, false);
+});
+
+test("a missing can_initiate_payment on a DIFFERENT code is never defaulted true", () => {
+	// Same FAILED_RETRYABLE shape as PAYMENT_DECLINED, but the fail-open scoping
+	// is keyed on the CODE, not the state it lands on.
+	const s = reduce(initialState(), at(CODES.NO_CURRENT_INTENT));
+	assert.equal(s.value, STATES.FAILED_RETRYABLE);
+	assert.equal(s.canInitiate, false);
+});
+
 test("SIGNUP_TERMINAL is terminal: no blind payment retry", () => {
 	const s = reduce(initialState(), at(CODES.SIGNUP_TERMINAL, { can_initiate_payment: true }));
 	assert.equal(s.value, STATES.FAILED_TERMINAL);

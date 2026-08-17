@@ -1090,3 +1090,237 @@ describe("payment intent reference is shown in full, not masked", () => {
 		expect(wrapper.vm.supportContext).toContain(`Reference: ${longAttemptId}`);
 	});
 });
+
+// jarvis onboarding-return-heal, fix 1: the FRESH-MOUNT return heal. `?pay=` on
+// first paint only proves the pay page sent the customer back top-level - the
+// passive hydrate (getOnboardingState) reads admin's last-known DB row, never
+// asks the gateway. A fresh mount can never be CHECKOUT_OPEN (paymentMachine.js
+// always initializes to REVIEW), so the in-memory RETURNED_FROM_CHECKOUT exit
+// (usePaymentFlow.hydrate's own frozen-checkout branch) is unreachable here;
+// these pin the mount-time active check (check_signup_payment_status) that
+// covers this path instead, mirroring BillingPage.vue's run-healer-once shape.
+describe("FRESH-MOUNT RETURN HEAL: a genuine top-level ?pay= return converges once", () => {
+	function atSearch(search) {
+		window.history.pushState(null, "", "/onboarding" + search);
+	}
+	afterEach(() => {
+		window.history.pushState(null, "", "/onboarding");
+	});
+
+	it("runs check_signup_payment_status exactly once when a mid-flight signup exists", async () => {
+		atSearch("?pay=failed");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_1", generation: 1 })
+		);
+		mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("does NOT run the active check on an ordinary visit (no ?pay=)", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_1", generation: 1 })
+		);
+		mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+	});
+
+	it("does NOT run the active check when there is no mid-flight signup (day one)", async () => {
+		atSearch("?pay=done");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "BENCH_NO_SIGNUP_CONTEXT" })
+		);
+		mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+	});
+
+	it("a stale (lower-generation) active answer cannot repaint the newer passive state", async () => {
+		atSearch("?pay=failed");
+		// The passive hydrate already knows generation 5 for this attempt.
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: "att_1",
+				generation: 5,
+			})
+		);
+		// A stale active answer carrying an OLDER generation of the same attempt -
+		// the generation fence must drop it outright, never repainting backward.
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_DECLINED", attempt_id: "att_1", generation: 2 })
+		);
+		const wrapper = mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+		expect(wrapper.vm.pay.value).toBe(STATES.CONFIRM_REQUIRED);
+	});
+
+	it("PAID stays a floor: no later active answer undoes it", async () => {
+		atSearch("?pay=failed");
+		// The passive hydrate already found the signup PAID.
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_ALREADY_ACTIVE", attempt_id: "att_1", generation: 2 })
+		);
+		// An ADVANCED-generation active answer (so the generation fence alone would
+		// let it through) that would otherwise walk the machine back to a decline -
+		// only the paid floor stops this one.
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_DECLINED", attempt_id: "att_1", generation: 3 })
+		);
+		const wrapper = mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+		// PAID is a floor: the machine may keep climbing forward off it (the
+		// paid->provisioning handoff fires on its own watcher), but the declined
+		// answer must never have walked it back to FAILED_RETRYABLE.
+		expect([STATES.PAID, STATES.PROVISIONING, STATES.PROVISIONING_DELAYED]).toContain(
+			wrapper.vm.pay.value
+		);
+	});
+});
+
+// jarvis onboarding-return-heal, fix 2: PAYMENT_CONFIRMATION_PENDING / UNKNOWN
+// used to do nothing on their own - every other wait in the wizard polls itself
+// (provisioning 45x2s, readiness 40x3s). These pin the bounded auto-poll: a
+// gentle interval, a hard ceiling with an honest stuck note, and a backoff on
+// PAYMENT_CHECK_RATE_LIMITED instead of hammering through the server's cooldown.
+describe("pending-payment auto-poll", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("auto-polls without a click and offers support within ~2 minutes", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.pay.value).toBe(STATES.UNKNOWN);
+		// Nothing fires before the first tick - a fresh mount already ran its own
+		// one-shot passive hydrate; the poll adds no immediate second call.
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+
+		// SUPPORT_AFTER_CHECKS is 2 (lowered from 4): two auto-polled ticks, no
+		// manual click, and the existing support-offer machinery (noteStatusCheck)
+		// picks them up the same way it counts a manual Check.
+		await vi.advanceTimersByTimeAsync(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
+
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(2);
+		expect(wrapper.vm.pay.supportOffered).toBe(true);
+	});
+
+	it("stops at the ceiling and shows the honest stuck note, never a silent forever-spinner", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+
+		await vi.advanceTimersByTimeAsync(8 * 15_000); // PENDING_CHECK_ATTEMPTS x interval
+
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(8);
+		expect(wrapper.vm.pendingPollStuck).toBe(true);
+
+		// The ceiling is a hard stop: more elapsed time fires no 9th check.
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(8);
+	});
+
+	it("backs off on a rate limit instead of polling straight through the cooldown", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus
+			.mockResolvedValueOnce({
+				status: 429,
+				body: {
+					message: {
+						ok: false,
+						error: { code: "PAYMENT_CHECK_RATE_LIMITED", retry_after_seconds: 40 },
+						context: {},
+					},
+				},
+			})
+			.mockResolvedValue(
+				ENVELOPE({
+					code: "PAYMENT_CONFIRMATION_PENDING",
+					attempt_id: "att_poll",
+					generation: 1,
+				})
+			);
+		vi.useFakeTimers();
+		mountView();
+		await flushPromises();
+
+		// First tick (t=15s): rate-limited.
+		await vi.advanceTimersByTimeAsync(15_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+
+		// The ordinary interval alone (t=30s) must NOT be enough - the server's
+		// 40s cooldown from the 429 is still running.
+		await vi.advanceTimersByTimeAsync(15_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+
+		// Once the cooldown has fully elapsed, the next attempt fires.
+		await vi.advanceTimersByTimeAsync(40_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(2);
+	});
+
+	it("stops when the customer leaves the Pay step - no late tick into a hidden step", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("pay");
+
+		wrapper.vm.state.step = "details";
+		await flushPromises();
+
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+	});
+});
