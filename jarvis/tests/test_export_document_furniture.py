@@ -568,37 +568,56 @@ def _stub_letterhead(*, default=None, docs=None, perms=True):
 
 
 class TestResolveLetterhead(unittest.TestCase):
-	def test_resolve_letterhead_default_used_when_unnamed(self) -> None:
+	def test_resolve_letterhead_default_logo_kept_text_dropped(self) -> None:
+		# Logo-only: a data: logo survives; the doc-bound text block is dropped.
 		_stub_letterhead(
 			default="Std",
-			docs={"Std": {"content": "<div>HDR</div>", "footer": "<div>FTR</div>"}},
+			docs={
+				"Std": {
+					"content": '<div>HDR<img src="data:image/png;base64,AAAA"></div>',
+					"footer": '<img src="data:image/png;base64,BBBB">FTR',
+				}
+			},
 		)
 		self.addCleanup(patch.stopall)
 		header, footer, note = resolve_letterhead(None)
-		self.assertTrue("HDR" in header and "FTR" in footer)
+		self.assertIn("data:image/png;base64,AAAA", header)
+		self.assertNotIn("HDR", header)  # doc-bound text dropped
+		self.assertIn("data:image/png;base64,BBBB", footer)
+		self.assertNotIn("FTR", footer)
 		self.assertIsNone(note)
 
 	def test_resolve_letterhead_named(self) -> None:
-		_stub_letterhead(docs={"Acme": {"content": "<div>ACME</div>", "footer": ""}})
-		self.addCleanup(patch.stopall)
-		header, _footer, note = resolve_letterhead("Acme")
-		self.assertIn("ACME", header)
-		self.assertIsNone(note)
-
-	def test_resolve_letterhead_jinja_never_leaks_raw(self) -> None:
-		# The staging-smoke bug: a Jinja Letter Head folded in raw leaked
-		# {% if %}/{{ }} into the PDF. Even in the worst case (render leaves the
-		# tags), the residual scrub must remove them; static text survives.
 		_stub_letterhead(
-			default="Std",
-			docs={"Std": {"content": "<div>{% if x %}{{ x }}{% endif %}Acme Ltd</div>", "footer": ""}},
+			docs={"Acme": {"content": '<img src="data:image/png;base64,CCCC">ACME', "footer": ""}}
 		)
 		self.addCleanup(patch.stopall)
-		with patch.object(furniture.frappe, "render_template", lambda tpl, ctx: tpl):
-			header, _footer, _note = resolve_letterhead(None)
+		header, _footer, note = resolve_letterhead("Acme")
+		self.assertIn("data:image/png;base64,CCCC", header)
+		self.assertNotIn("ACME", header)
+		self.assertIsNone(note)
+
+	def test_resolve_letterhead_jinja_never_leaks(self) -> None:
+		# The staging-smoke bug: a doc-bound Jinja Letter Head produced raw {% %}
+		# (folded raw) or "None"/junk (rendered without a doc). Logo-only drops the
+		# entire Jinja text block — no tags, no rendered junk — keeping only a logo.
+		_stub_letterhead(
+			default="Std",
+			docs={
+				"Std": {
+					"content": "<div>{% if x %}{{ company_address }}{% endif %}"
+					'<img src="data:image/png;base64,DDDD"></div>',
+					"footer": "",
+				}
+			},
+		)
+		self.addCleanup(patch.stopall)
+		header, _footer, _note = resolve_letterhead(None)
 		self.assertNotIn("{%", header)
 		self.assertNotIn("{{", header)
-		self.assertIn("Acme Ltd", header)
+		self.assertNotIn("None", header)
+		self.assertNotIn("company_address", header)
+		self.assertIn("data:image/png;base64,DDDD", header)  # logo survives
 
 	def test_resolve_letterhead_no_default_no_note(self) -> None:
 		_stub_letterhead(default=None)
@@ -622,13 +641,15 @@ class TestResolveLetterhead(unittest.TestCase):
 		self.assertTrue(note and "Acme" in note)
 
 	def test_resolve_letterhead_strips_remote_image_end_to_end(self) -> None:
-		# The F1 SSRF gate wired through resolve_letterhead: a Letter Head whose content
-		# carries a remote <img>/<link> must come back with NO remote URL (the gate runs
-		# after inlining), while benign text survives.
+		# The F1 SSRF gate wired through resolve_letterhead: a Letter Head whose
+		# content carries a REMOTE <img> (and a <link>) comes back with NO remote
+		# URL — logo-only extracts the imgs, the remote one is dropped by the inline
+		# step, the <link>/text never survive, and a data: logo is kept.
 		_stub_letterhead(
 			docs={
 				"Evil": {
 					"content": '<div>Acme<img src="http://169.254.169.254/x">'
+					'<img src="data:image/png;base64,EEEE">'
 					'<link href="http://evil/x.css"></div>',
 					"footer": "",
 				}
@@ -639,7 +660,8 @@ class TestResolveLetterhead(unittest.TestCase):
 		low = header.lower()
 		self.assertTrue("169.254" not in low and "evil" not in low)
 		self.assertNotIn("<link", low)
-		self.assertIn("Acme", header)
+		self.assertNotIn("Acme", header)  # doc-bound text dropped (logo-only)
+		self.assertIn("data:image/png;base64,EEEE", header)  # the safe logo survives
 		self.assertIsNone(note)
 
 	def test_remove_quietly_suppresses_oserror(self) -> None:
@@ -659,71 +681,36 @@ class TestResolveLetterhead(unittest.TestCase):
 		self.assertIsNone(note)
 
 
-class TestRenderLetterheadTemplate(unittest.TestCase):
-	"""_render_letterhead: render a Letter Head's Jinja, then scrub residual tags."""
+class TestLetterheadLogos(unittest.TestCase):
+	"""_letterhead_logos: keep only <img> logos from a Letter Head, drop the
+	doc-bound Jinja/text block (a composed report has no doc to render it cleanly,
+	so rendering would leak raw tags or "None"/junk — the staging-smoke defect)."""
 
-	def test_non_jinja_passthrough_does_not_render(self) -> None:
-		called: list = []
-
-		def _spy(*_a, **_k):
-			called.append(1)
-			return ""
-
-		patch.object(furniture.frappe, "render_template", _spy).start()
-		self.addCleanup(patch.stopall)
-		out = furniture._render_letterhead("<div>plain logo</div>", {})
-		self.assertEqual(out, "<div>plain logo</div>")
-		self.assertEqual(called, [])  # no template markers → render_template skipped
-
-	def test_renders_then_scrubs_residual(self) -> None:
-		patch.object(
-			furniture.frappe, "render_template", lambda t, c: "<b>Acme</b>{% stray %}keep{{ x }}"
-		).start()
-		self.addCleanup(patch.stopall)
-		out = furniture._render_letterhead("<b>{{ company }}</b>", {})
+	def test_extracts_img_drops_text_and_jinja(self) -> None:
+		out = furniture._letterhead_logos(
+			"<div>{% if x %}{{ company_address }}{% endif %}Acme Ltd"
+			'<img src="data:image/png;base64,AAAA"></div>'
+		)
+		self.assertIn('src="data:image/png;base64,AAAA"', out)
+		self.assertNotIn("Acme", out)
 		self.assertNotIn("{%", out)
 		self.assertNotIn("{{", out)
-		self.assertIn("Acme", out)
-		self.assertIn("keep", out)
+		self.assertNotIn("company_address", out)
 
-	def test_render_error_falls_back_to_stripped_raw(self) -> None:
-		def _boom(*_a, **_k):
-			raise RuntimeError("no doc context")
+	def test_no_img_returns_empty(self) -> None:
+		self.assertEqual(furniture._letterhead_logos("<div>{{ company }} Just text</div>"), "")
+		self.assertEqual(furniture._letterhead_logos(""), "")
 
-		patch.object(furniture.frappe, "render_template", _boom).start()
-		patch.object(furniture.frappe, "clear_last_message", lambda: None).start()
-		self.addCleanup(patch.stopall)
-		out = furniture._render_letterhead('<img src="data:x"> {% if y %}{{ y }}{% endif %}', {})
-		self.assertNotIn("{%", out)
-		self.assertNotIn("{{", out)
-		self.assertIn("<img", out)  # static logo survives the fallback
+	def test_multiple_imgs_kept_text_between_dropped(self) -> None:
+		out = furniture._letterhead_logos('<img src="/files/a.png"><span>x</span><img src="/files/b.png">')
+		self.assertEqual(out.count("<img"), 2)
+		self.assertNotIn("<span", out)
 
 	def test_oversized_letterhead_dropped_without_hang(self) -> None:
-		# A pathological unclosed-{{ run must be dropped on size BEFORE the
-		# superlinear residual scrub (it runs pre-render, outside the render
-		# timeout). Guard: this returns quickly, not in O(n^2).
 		import time
 
-		called: list = []
-		patch.object(furniture.frappe, "render_template", lambda *_a, **_k: called.append(1) or "").start()
-		self.addCleanup(patch.stopall)
-		huge = "{{" * (furniture._MAX_FURNITURE_CHARS)  # >> the cap
+		huge = "<img>" + "x" * (furniture._MAX_FURNITURE_CHARS + 10)
 		start = time.monotonic()
-		out = furniture._render_letterhead(huge, {})
-		self.assertEqual(out, "")
-		self.assertEqual(called, [])  # never even reached render_template / scrub
+		out = furniture._letterhead_logos(huge)
+		self.assertEqual(out, "")  # over the cap → dropped
 		self.assertLess(time.monotonic() - start, 1.0)
-
-	def test_render_error_clears_leaked_message(self) -> None:
-		# render_template's error path appends its traceback to message_log before
-		# raising; _render_letterhead must clear it so it can't leak to the caller.
-		cleared: list = []
-
-		def _boom(*_a, **_k):
-			raise RuntimeError("Jinja Template Error")
-
-		patch.object(furniture.frappe, "render_template", _boom).start()
-		patch.object(furniture.frappe, "clear_last_message", lambda: cleared.append(1)).start()
-		self.addCleanup(patch.stopall)
-		furniture._render_letterhead("<b>{{ x }}</b>", {})
-		self.assertEqual(cleared, [1])
