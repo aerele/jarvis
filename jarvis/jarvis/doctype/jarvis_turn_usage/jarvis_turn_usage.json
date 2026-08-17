@@ -42,7 +42,7 @@
    "label": "User",
    "search_index": 1,
    "in_list_view": 1,
-   "description": "Snapshot of Jarvis Chat Session.user at write time (Data, not a Link, matching this table's other snapshot fields)."
+   "description": "Snapshot of Jarvis Chat Session.user at write time (Data, not a Link, matching this table's other snapshot fields). Can be empty on a VALID_ZERO turn whose session_key has no Jarvis Chat Session row (no mapping to attribute to) - downstream rollups must filter blank-user rows rather than treating them as a real user."
   },
   {
    "fieldname": "profile_agent_id",

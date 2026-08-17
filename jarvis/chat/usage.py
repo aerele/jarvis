@@ -11,7 +11,7 @@ see ``jarvis.chat.turn_handler`` and the design at
 Three entry points:
   * ``get_or_create_user_settings(user)`` — race-safe lazy row creation with an
     explicit ``owner`` so the ``if_owner`` grant holds when an admin triggers it.
-  * ``record_turn_usage(session_key, row, run_id=None)`` — atomic SQL increments
+  * ``record_turn_usage(session_key, row, run_id=None)`` - atomic SQL increments
     on both the per-user ``Jarvis User Settings`` (month-rollover aware) and the
     cumulative ``Jarvis Chat Session`` fields, plus a best-effort per-turn
     ``Jarvis Turn Usage`` row (usage-dashboard Part A, task U1) carrying the
@@ -48,6 +48,7 @@ TURN_USAGE = "Jarvis Turn Usage"
 CHAT_TURN = "Jarvis Chat Turn"
 CHAT_MESSAGE = "Jarvis Chat Message"
 TURN_USAGE_RETENTION_DAYS = 90
+TURN_USAGE_PRUNE_BATCH_LIMIT = 5000
 
 
 def current_month_key() -> str:
@@ -462,7 +463,9 @@ def prune_turn_usage() -> int:
 	table needs an explicit sweep or it grows forever. Best-effort; never
 	raises out of the scheduler."""
 	cutoff = frappe.utils.add_days(frappe.utils.today(), -TURN_USAGE_RETENTION_DAYS)
-	names = frappe.get_all(TURN_USAGE, filters={"day": ["<", cutoff]}, pluck="name", limit=5000)
+	names = frappe.get_all(
+		TURN_USAGE, filters={"day": ["<", cutoff]}, pluck="name", limit=TURN_USAGE_PRUNE_BATCH_LIMIT
+	)
 	deleted = 0
 	for name in names:
 		try:
