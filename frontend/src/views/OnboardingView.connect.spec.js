@@ -1302,6 +1302,42 @@ describe("jarvis#727 the setup headline follows the live phase", () => {
 	});
 });
 
+describe("connect wait time-expectation note", () => {
+	it("shows the 5-to-10-minute note on the initial working screen", async () => {
+		const w = await mountConnect();
+
+		expect(w.vm.state.connectPhase).toBeFalsy();
+		expect(w.find(".ob-head-note").text()).toContain("5 to 10 minutes");
+		w.unmount();
+	});
+
+	it("keeps showing the note once the operation reaches finishing", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "finishing" });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("finishing");
+		expect(w.find(".ob-head-note").text()).toContain("5 to 10 minutes");
+		w.unmount();
+	});
+
+	it("does not show the note once the wait resolves to a blocked stop", async () => {
+		const w = await mountConnect();
+
+		w.vm.noteReadiness({
+			answered: true,
+			reason: "authority_repair_required",
+			detail: "a person has to look",
+		});
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("blocked");
+		expect(w.find(".ob-head-note").exists()).toBe(false);
+		w.unmount();
+	});
+});
+
 describe("staged readiness phases: the screen renders what the poll observed", () => {
 	// Every one of these 40 polls used to be discarded except the last detail, so
 	// the wait showed one fixed sentence for two minutes.
