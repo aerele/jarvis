@@ -1501,6 +1501,16 @@
 													"We'll take you to chat as soon as your setup is done."
 												}}
 											</p>
+											<!-- Expectation-setting note: this whole template branch IS
+												 the working/finishing wait, so the note is on screen for
+												 all of it, not just the first frame. Its own line, smaller
+												 and greyer than the subtitle above (.ob-head p.ob-head-note
+												 out-specifies the shared .ob-head p rule), so it reads as a
+												 secondary aside, not a second headline. -->
+											<p class="ob-head-note">
+												This usually takes 5 to 10 minutes: we're setting
+												up a private, isolated workspace dedicated to you.
+											</p>
 										</div>
 										<!-- One smooth progress bar for the whole connect wait
 											 (2026-08-16 redesign). The jarvis#726 "Step N of 3" bar
@@ -5151,6 +5161,16 @@ onUnmounted(() => {
 	line-height: 1.5;
 	color: var(--text-2);
 	margin: 0;
+}
+/* The connect wait's expectation-setting note (jarvis onboarding time note):
+   needs the extra class on the specificity to beat .ob-head p above on rule
+   weight, not source order, since it sits right after the subtitle in the
+   same .ob-head block and both are <p> tags. Smaller and greyer than the
+   subtitle by design - a secondary line, not a second headline. */
+.ob-head p.ob-head-note {
+	margin-top: 6px;
+	font-size: 12.5px;
+	color: var(--text-3);
 }
 .ob-foot {
 	display: flex;
