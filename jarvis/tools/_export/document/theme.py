@@ -286,23 +286,40 @@ $indent_rules
 .bar-chart {
 	margin: 10pt 0 16pt;
 }
+/* One row = label | track (holds the bar) | value, kept on a single line so the
+   text never overlaps the bar (nowrap; the three inline-blocks sum to <100%). */
 .bar-chart .bar-row {
 	margin-bottom: 6pt;
+	white-space: nowrap;
 }
 .bar-chart .bar-label {
 	display: inline-block;
-	width: 28%;
+	width: 26%;
 	font-size: 9.5pt;
 	color: $muted;
 	vertical-align: middle;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 .bar-chart .bar-track {
 	display: inline-block;
-	width: 70%;
+	width: 52%;
+	height: 14pt;
 	background: $tint;
 	vertical-align: middle;
+	overflow: hidden;
 }
-/* Color/height only - the tool sets `width` per bar via inline style. */
+.bar-chart .bar-value {
+	display: inline-block;
+	width: 20%;
+	font-size: 9.5pt;
+	text-align: right;
+	vertical-align: middle;
+	white-space: nowrap;
+}
+/* Color/height only - the tool sets `width` per bar via inline style. The bar
+   fills the track height and is empty (label/value live in their own columns). */
 .bar {
 	display: block;
 	height: 14pt;

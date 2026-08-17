@@ -87,6 +87,9 @@ _MAX_MARGIN_MM = 100
 
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*?/?>", re.IGNORECASE)
 _SRC_RE = re.compile(r"""\bsrc\s*=\s*(?P<q>["'])(?P<url>.*?)(?P=q)""", re.IGNORECASE)
+# Residual Jinja tags to scrub AFTER a best-effort render, so a Letter Head's raw
+# template ({% if %} / {{ }}) can never leak into the PDF as literal text.
+_JINJA_RE = re.compile(r"{%.*?%}|{{.*?}}", re.DOTALL)
 
 # Self-contained CSS for the header/footer documents - they are SEPARATE
 # wkhtmltopdf renders, so they carry no body/theme styling and must style
@@ -102,7 +105,6 @@ body {{
 	-webkit-print-color-adjust: exact;
 	print-color-adjust: exact;
 }}
-.jv-pageno {{ text-align: center; }}
 .jv-lh-header, .jv-lh-footer {{ width: 100%; }}
 .jv-watermark {{
 	position: absolute;
@@ -117,11 +119,6 @@ body {{
 	z-index: -1;
 }}
 """
-
-# wkhtmltopdf substitutes the bracket variables ``[page]``/``[topage]`` inside
-# header/footer HTML natively (text replacement, NOT JavaScript) - so page
-# numbering survives ``--disable-javascript``.
-_PAGE_NUMBER_HTML = '<div class="jv-pageno">Page [page] of [topage]</div>'
 
 
 def render_pdf(
@@ -163,7 +160,7 @@ def render_pdf(
 	_guard_furniture_len(header_html, footer_html, watermark)
 
 	header_doc = _build_header(header_html, watermark, letterhead_header)
-	footer_doc = _build_footer(footer_html, page_numbers, letterhead_footer)
+	footer_doc = _build_footer(footer_html, letterhead_footer)
 
 	tmp_dir = tempfile.gettempdir()
 	header_file = footer_file = None
@@ -180,6 +177,7 @@ def render_pdf(
 			margins_mm=margins_mm,
 			header_file=header_file,
 			footer_file=footer_file,
+			page_numbers=page_numbers,
 		)
 		document = _compose_document(body_html, "")
 		try:
@@ -298,12 +296,21 @@ def _build_args(
 	margins_mm: int,
 	header_file: str | None,
 	footer_file: str | None,
+	page_numbers: bool,
 ) -> list[str]:
 	"""Build the exact wkhtmltopdf CLI arg list.
 
 	The leading security/fidelity flags are UNCONDITIONAL - they are present on
 	every render regardless of options (a test asserts each one; dropping any
 	fails it). Body is read from stdin and the PDF written to stdout via ``- -``.
+
+	Page numbers use the TEXT footer (``--footer-center``), NOT an HTML footer:
+	wkhtmltopdf substitutes ``[page]``/``[topage]`` in the text header/footer
+	options in its own C++ layer, which WORKS under ``--disable-javascript`` - the
+	``--footer-html`` bracket substitution relies on JS wkhtmltopdf injects, so it
+	renders a literal ``[page]`` when JS is off. A text footer and an HTML footer
+	are mutually exclusive, so when there IS an HTML footer (a letterhead footer or
+	an explicit ``footer``) it wins and auto page numbers are omitted.
 	"""
 	args = [
 		binary,
@@ -333,6 +340,15 @@ def _build_args(
 		args += ["--header-html", header_file]
 	if footer_file:
 		args += ["--footer-html", footer_file]
+	elif page_numbers:
+		args += [
+			"--footer-center",
+			"Page [page] of [topage]",
+			"--footer-font-size",
+			"8",
+			"--footer-spacing",
+			"4",
+		]
 	args += ["-", "-"]  # stdin in, stdout out
 	return args
 
@@ -353,20 +369,18 @@ def _build_header(header_html: str | None, watermark: str | None, letterhead_hea
 	return _compose_document("".join(parts), _FURNITURE_CSS) if parts else ""
 
 
-def _build_footer(footer_html: str | None, page_numbers: bool, letterhead_footer: str) -> str:
-	"""Compose the footer document, or ``""`` when there is nothing to render.
+def _build_footer(footer_html: str | None, letterhead_footer: str) -> str:
+	"""Compose the HTML footer document, or ``""`` when there is none.
 
-	An explicit ``footer_html`` wins over auto page numbers (they are mutually
-	exclusive); the resolved-and-safe letterhead footer is always folded in when
-	present.
-	"""
+	Holds the resolved-and-safe letterhead footer and/or a sanitized explicit
+	``footer``. Page numbers are NOT here - they go through the text footer in
+	``_build_args`` (see there for why: ``[page]`` substitution needs JS in an HTML
+	footer but not in a text footer)."""
 	parts = []
 	if letterhead_footer:
 		parts.append(f'<div class="jv-lh-footer">{letterhead_footer}</div>')
 	if footer_html:
 		parts.append(f'<div class="jv-footer">{sanitize_rich(footer_html)}</div>')
-	elif page_numbers:
-		parts.append(_PAGE_NUMBER_HTML)
 	return _compose_document("".join(parts), _FURNITURE_CSS) if parts else ""
 
 
@@ -399,16 +413,60 @@ def resolve_letterhead(letterhead: str | None) -> tuple[str, str, str | None]:
 		lh = frappe.db.get_value("Letter Head", name, ["content", "footer"], as_dict=True)
 		if not lh:
 			return "", "", (f"letterhead {named!r} not found — rendered without it" if named else None)
-		# Inline same-site logos to permission-checked base64, THEN run the airtight
-		# letterhead gate (nh3, data-only images) so no remote/relative/protocol-
-		# relative src or other fetch-capable markup can reach the renderer.
-		header = sanitize_letterhead(_inline_letterhead_images(lh.get("content") or ""))
-		footer = sanitize_letterhead(_inline_letterhead_images(lh.get("footer") or ""))
+		# A Letter Head's content/footer is a Jinja TEMPLATE (company address block,
+		# etc.). Render it first (a composed report has no source doc, so we supply a
+		# best-effort company context; undefined refs blank out) — else the raw
+		# {% if %}/{{ }} leaks into the PDF. THEN inline same-site logos to
+		# permission-checked base64 and run the airtight letterhead gate (nh3,
+		# data-only images) so no remote/relative src or fetch-capable markup remains.
+		ctx = _letterhead_context(name)
+		header = sanitize_letterhead(
+			_inline_letterhead_images(_render_letterhead(lh.get("content") or "", ctx))
+		)
+		footer = sanitize_letterhead(
+			_inline_letterhead_images(_render_letterhead(lh.get("footer") or "", ctx))
+		)
 		return header, footer, None
 	except Exception:
 		# Letterhead is a nicety, never a hard failure of the export.
 		_log_infra_failure("rich-pdf letterhead resolution failed", f"letterhead={named!r}")
 		return "", "", (f"letterhead {named!r} could not be applied" if named else None)
+
+
+def _render_letterhead(tpl: str, ctx: dict) -> str:
+	"""Render a Letter Head Jinja template with ``ctx`` (best-effort), then scrub any
+	residual ``{% %}``/``{{ }}`` so a raw or partially-rendered template can never
+	leak into the PDF as literal text. Non-template content is returned unchanged.
+	Never raises: on a render error, the residual scrub still runs on the raw
+	template, keeping its static HTML (a logo ``<img>``) while dropping the tags."""
+	if not tpl:
+		return ""
+	if "{{" in tpl or "{%" in tpl:
+		try:
+			tpl = frappe.render_template(tpl, ctx)
+		except Exception:
+			_log_infra_failure("rich-pdf letterhead template render failed", "")
+		tpl = _JINJA_RE.sub("", tpl)
+	return tpl
+
+
+def _letterhead_context(name: str) -> dict:
+	"""Best-effort Jinja context for a Letter Head on a doc-less composed report:
+	the site's default company + its address/contact block, so a standard company
+	letterhead renders its details instead of blanking. Never raises."""
+	ctx: dict = {"letter_head": name}
+	try:
+		company = frappe.defaults.get_global_default("company") or frappe.db.get_value("Company", {}, "name")
+		if company:
+			ctx["company"] = company
+			ctx["doc"] = frappe._dict({"company": company, "letter_head": name})
+			with contextlib.suppress(Exception):
+				from frappe.contacts.doctype.address.address import get_company_address
+
+				ctx.update(get_company_address(company) or {})
+	except Exception:
+		pass
+	return ctx
 
 
 def _inline_letterhead_images(html: str) -> str:
