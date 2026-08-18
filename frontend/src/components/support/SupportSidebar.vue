@@ -17,7 +17,7 @@
 				     button either) - a permanent CTA here duplicated it. -->
 				<SidebarLink
 					icon="inbox"
-					label="Support tickets"
+					label="Support Tickets"
 					:to="{ name: 'Support' }"
 					:is-collapsed="collapsed"
 					:is-active="isTickets"
@@ -77,7 +77,7 @@ function toggle() {
 	}
 }
 
-// "Support tickets" is active across every support page (list/new/thread); "Jarvis
+// "Support Tickets" is active across every support page (list/new/thread); "Jarvis
 // chat" is the exit link, never active while we're on a support route.
 const isTickets = computed(() => route.path.startsWith("/support"));
 
