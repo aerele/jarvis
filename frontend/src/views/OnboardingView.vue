@@ -2020,11 +2020,12 @@ const state = reactive({
 	// contact consent (owner decision 2026-08-14): the terms cover being
 	// contacted about the account.
 	termsAccepted: false,
-	// The admin-hosted /terms URL (jarvis.onboarding.get_terms_url), fetched
-	// best-effort on mount so it is already available by the time the Details
-	// step (the second screen) renders. Empty when admin is unreachable/
-	// unconfigured - the checkbox label then renders plain unlinked text
-	// instead of a dead link.
+	// The public /terms URL (marketing site, or a rebranded admin's own
+	// /terms), via jarvis.onboarding.get_terms_url, fetched best-effort on
+	// mount so it is already available by the time the Details step (the
+	// second screen) renders. Empty only if that API call itself fails -
+	// the checkbox label then renders plain unlinked text instead of a
+	// dead link.
 	termsUrl: "",
 	// Gateways the operator has actually enabled, narrowed to what this build can
 	// render. Starts EMPTY and stays empty on a discovery failure (plan 02 P2-6):
