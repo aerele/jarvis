@@ -1,6 +1,6 @@
 name: CI base image
 
-# Builds ghcr.io/aerele-rnd/jarvis-ci-base:v16 — a pre-built Frappe bench (frappe + erpnext +
+# Builds ghcr.io/aerele/jarvis-ci-base:v16 — a pre-built Frappe bench (frappe + erpnext +
 # hrms, version-16) plus a SQL dump of a site with all three already installed.
 #
 # Today, every PR run rebuilds that environment from scratch: ~5m26s of a ~7m21s run, identical
@@ -87,8 +87,8 @@ jobs:
           # run_number restarts if the workflow is renamed, so old numbered tags could be
           # silently overwritten by a new incarnation. run_id is unique for the repo, forever.
           tags: |
-            ghcr.io/aerele-rnd/jarvis-ci-base:v16
-            ghcr.io/aerele-rnd/jarvis-ci-base:v16-${{ github.run_id }}
+            ghcr.io/aerele/jarvis-ci-base:v16
+            ghcr.io/aerele/jarvis-ci-base:v16-${{ github.run_id }}
           build-args: |
             FRAPPE_SHA=${{ steps.shas.outputs.frappe }}
             ERPNEXT_SHA=${{ steps.shas.outputs.erpnext }}
@@ -101,7 +101,7 @@ jobs:
       # only proves the dump is non-empty.
       - name: Smoke-test the built image
         run: |
-          docker run --rm ghcr.io/aerele-rnd/jarvis-ci-base:v16 bash -lc '
+          docker run --rm ghcr.io/aerele/jarvis-ci-base:v16 bash -lc '
             set -e
             test -s /opt/ci/test_site.sql
             bytes=$(stat -c%s /opt/ci/test_site.sql)
@@ -122,5 +122,5 @@ jobs:
       - name: Push
         if: github.event_name != 'pull_request'
         run: |
-          docker push ghcr.io/aerele-rnd/jarvis-ci-base:v16
-          docker push ghcr.io/aerele-rnd/jarvis-ci-base:v16-${{ github.run_id }}
+          docker push ghcr.io/aerele/jarvis-ci-base:v16
+          docker push ghcr.io/aerele/jarvis-ci-base:v16-${{ github.run_id }}
