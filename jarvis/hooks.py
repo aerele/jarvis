@@ -1,8 +1,8 @@
 app_name = "jarvis"
 app_title = "Jarvis"
-app_publisher = "Aerele"
-app_description = "AI superpowers for Frappe/ERPNext"
-app_email = "navin@aerele.in"
+app_publisher = "Aerele Technologies Pvt Ltd"
+app_description = "The AI teammate inside ERPNext"
+app_email = "jarvis@aerele.in"
 app_license = "AGPL-3.0-only"
 
 
