@@ -39,7 +39,8 @@ function isInternalCrash(e) {
 // duplication #699 exists to remove, and one that would have failed silently
 // (falling back to the generic sentence) the day the wording changed. Pass the
 // custom sentence in as `fallback` instead.
-export const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
+export const GENERIC_ERROR_MESSAGE =
+	"Something went wrong. Try again, and check back if it keeps happening.";
 
 export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
 	// The server's OWN explicit message always wins, even on a 401/403 (round-4

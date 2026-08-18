@@ -35,9 +35,12 @@
 
 					<!-- step rail: flat progress segments with labels (design.md §4.3 —
 					 no numbered circles, no connector lines). Hidden on the intro
-					 tour (chromeless). -->
+					 tour (chromeless). variant="steps" opts out of the 2026-08-16
+					 smooth-bar redesign - the rail is real navigation with four
+					 always-visible names, not one of the wait screens that
+					 redesign targeted (StepProgress.vue's own header comment). -->
 					<div v-if="railIndex >= 0" class="my-4 w-full max-w-[720px]">
-						<StepProgress :steps="RAIL" :current-index="railIndex" />
+						<StepProgress :steps="RAIL" :current-index="railIndex" variant="steps" />
 					</div>
 
 					<div
@@ -323,24 +326,49 @@
 											:message="detailsFieldErrors.email"
 										/>
 									</div>
-									<FormControl
-										type="tel"
-										variant="outline"
-										label="Contact number (optional)"
-										:model-value="billing.fields.contact.value"
-										@update:model-value="
-											(v) => billing.setUserValue('contact', v)
-										"
-										placeholder="+91 98765 43210"
-										autocomplete="tel"
-										@keydown.enter="onDetailsSubmit"
-									/>
+									<div class="flex flex-col gap-1">
+										<FormControl
+											type="tel"
+											variant="outline"
+											label="Contact number"
+											:model-value="billing.fields.contact.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('contact', v);
+													clearFieldErrorIfValid(
+														'contact',
+														contactError,
+														v
+													);
+												}
+											"
+											placeholder="+91 98765 43210"
+											autocomplete="tel"
+											required
+											aria-required="true"
+											:aria-invalid="
+												detailsFieldErrors.contact ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.contact
+													? 'jv-ob-contact-err'
+													: undefined
+											"
+											@blur="touchContactField"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage
+											id="jv-ob-contact-err"
+											:message="detailsFieldErrors.contact"
+										/>
+									</div>
 									<!-- No separate contact-consent checkbox here (owner decision
-										 2026-08-14): consent to be contacted is part of the Terms &
-										 Conditions accepted at Review & Pay, where onPayClick sends
-										 contact_consent alongside terms_accepted. Consequence: a lead
-										 captured at the Plan step carries no consent until the
-										 customer accepts the terms. -->
+										 2026-08-14): consent to be contacted rides the T&C checkbox
+										 below (moved onto this step 2026-08-16), and onPayClick still
+										 sends contact_consent alongside terms_accepted. Consequence: a
+										 lead captured at the Plan step carries no consent until the
+										 customer accepts the terms, which now happens on THIS step
+										 before Plan is ever reached. -->
 									<!-- JvCombo (shared, out of scope) has no declared aria-invalid /
 										 aria-describedby / blur props, and does not spread $attrs onto
 										 its inner <input>, so those attrs would silently land on its
@@ -552,6 +580,66 @@
 									Enter it here</button
 								>.
 							</p>
+							<!-- Required T&C acceptance (moved here from Review & Pay 2026-08-16
+								 so lead-contact consent is captured before the Plan-step lead
+								 capture fires). Gates the non-reconnect Continue button below via
+								 `:disabled="!state.termsAccepted"`, not the reconnect side-branch
+								 above (a returning customer reconnecting an already-paid account
+								 never went through this checkbox before, and reconnect makes no
+								 signup call that needs terms_accepted / contact_consent). The
+								 submit-side check in onDetailsSubmit (see termsError) and
+								 payDisabled / onPayClick's own `!state.termsAccepted` guard stay
+								 in place as defensive invariants even though the disabled button
+								 makes them unreachable via normal click - both are already true
+								 by the time Pay is reachable. Checkbox's own `label` prop only
+								 takes plain text (no slot, no markup), so the link-bearing
+								 sentence is a sibling <label for=...> instead - clicking the
+								 embedded <a> navigates without also toggling the box. -->
+							<div class="mb-6">
+								<div
+									class="mx-auto mt-5 flex max-w-[620px] items-start justify-center gap-2"
+								>
+									<Checkbox
+										id="jv-ob-terms"
+										:model-value="state.termsAccepted"
+										aria-required="true"
+										:aria-invalid="
+											detailsFieldErrors.terms ? 'true' : undefined
+										"
+										:aria-describedby="
+											detailsFieldErrors.terms
+												? 'jv-ob-terms-err'
+												: undefined
+										"
+										@update:model-value="
+											(v) => {
+												state.termsAccepted = v;
+												clearFieldErrorIfValid('terms', termsError, v);
+											}
+										"
+									/>
+									<label
+										for="jv-ob-terms"
+										class="cursor-pointer select-none text-p-sm text-ink-gray-7"
+									>
+										I agree to the
+										<a
+											v-if="state.termsUrl"
+											:href="state.termsUrl"
+											target="_blank"
+											rel="noopener"
+											class="ob-link"
+											@click.stop
+											>Terms &amp; Conditions</a
+										><span v-else>Terms &amp; Conditions</span>
+									</label>
+								</div>
+								<ErrorMessage
+									id="jv-ob-terms-err"
+									:message="detailsFieldErrors.terms"
+									class="mx-auto mt-1 max-w-[620px] text-center"
+								/>
+							</div>
 							<div class="ob-foot">
 								<button class="ob-back" @click="goBack">
 									<FeatherIcon
@@ -560,8 +648,18 @@
 									/>Back to tour
 								</button>
 								<Button
+									v-if="mustReconnect"
+									variant="solid"
+									label="Reconnect to your workspace"
+									:loading="state.detailsSubmitting || state.payBusy"
+									@click="startReconnect"
+								/>
+								<Button
+									v-else
 									variant="solid"
 									label="Continue"
+									:loading="state.detailsSubmitting"
+									:disabled="!state.termsAccepted"
 									@click="onDetailsSubmit"
 								/>
 							</div>
@@ -929,6 +1027,19 @@
 									>
 										{{ statusCheckNote }}
 									</p>
+									<!-- The pending-payment auto-poll hit its ceiling with no resolution.
+										 Say so plainly instead of quietly giving up - a manual check
+										 still works, and support is offered above once the check
+										 ceiling was reached. -->
+									<p
+										v-if="pendingPollStuck"
+										class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+										role="status"
+									>
+										We've been checking automatically for a couple of minutes
+										and still don't have an answer. You can check again, or
+										contact support and we'll look into it.
+									</p>
 									<!-- The checkout this signup already has is still open. Say so,
 										 because the alternative the customer would otherwise reach for
 										 (start a new payment) silently leaves the previous Razorpay
@@ -1255,38 +1366,11 @@
 									>
 										{{ payLinkDeadline }}
 									</p>
-									<!-- Required T&C acceptance (lead-capture + T&C frozen contract).
-										 Pay stays disabled until this is ticked; terms_accepted rides
-										 start_signup, and admin stamps the version server-side - this
-										 view never sends one. Checkbox's own `label` prop only takes
-										 plain text (no slot, no markup), so the link-bearing sentence is
-										 a sibling <label for=...> instead - clicking the embedded <a>
-										 navigates without also toggling the box. -->
-									<div
-										class="mx-auto mt-3.5 flex max-w-[560px] items-start justify-center gap-2"
-									>
-										<Checkbox
-											id="jv-ob-terms"
-											:model-value="state.termsAccepted"
-											aria-required="true"
-											@update:model-value="(v) => (state.termsAccepted = v)"
-										/>
-										<label
-											for="jv-ob-terms"
-											class="cursor-pointer select-none text-p-sm text-ink-gray-7"
-										>
-											I agree to the
-											<a
-												v-if="state.termsUrl"
-												:href="state.termsUrl"
-												target="_blank"
-												rel="noopener"
-												class="ob-link"
-												@click.stop
-												>Terms &amp; Conditions</a
-											><span v-else>Terms &amp; Conditions</span>
-										</label>
-									</div>
+									<!-- T&C acceptance moved to the Details step (2026-08-16): the
+										 checkbox no longer renders here. payDisabled and onPayClick's
+										 own `!state.termsAccepted` guard below stay in place as
+										 invariants - both are already true by the time Pay is
+										 reachable, since Details' Continue is gated on the same flag. -->
 								</div>
 								<div class="ob-foot">
 									<button
@@ -1330,8 +1414,9 @@
 										your existing subscription, nothing to pay again.
 									</p>
 									<p v-else>
-										Sent to <b>{{ state.email || "your email" }}</b
-										>. Connects this site to your existing subscription,
+										If an account exists for this email, a reconnect code is on
+										its way to <b>{{ state.email || "your email" }}</b
+										>. It connects this site to your existing subscription,
 										nothing to pay again.
 									</p>
 								</div>
@@ -1364,7 +1449,7 @@
 										Single-use, and expires shortly after support issued it.
 									</template>
 									<template v-else-if="state.reconnectResentIn > 0">
-										Sent. You can resend in {{ state.reconnectResentIn }}s.
+										You can resend in {{ state.reconnectResentIn }}s.
 									</template>
 									<template v-else>
 										Didn't get it?
@@ -1429,29 +1514,40 @@
 													"We'll take you to chat as soon as your setup is done."
 												}}
 											</p>
+											<!-- Expectation-setting note: this whole template branch IS
+												 the working/finishing wait, so the note is on screen for
+												 all of it, not just the first frame. Its own line, smaller
+												 and greyer than the subtitle above (.ob-head p.ob-head-note
+												 out-specifies the shared .ob-head p rule), so it reads as a
+												 secondary aside, not a second headline. -->
+											<p class="ob-head-note">
+												This usually takes 5 to 10 minutes: we're setting
+												up a private, isolated workspace dedicated to you.
+											</p>
 										</div>
-										<!-- One labeled progress bar for the whole connect wait
-											 (2026-08-14 redesign). The jarvis#726 "Step N of 3" bar
+										<!-- One smooth progress bar for the whole connect wait
+											 (2026-08-16 redesign). The jarvis#726 "Step N of 3" bar
 											 plus phase columns stopped working once the jarvis#840
 											 checklist made it six columns under a 3-count bar: long
 											 wrapping labels and a count that contradicted the list
-											 (user report). The columns are gone; the bar now carries
-											 one SHORT-labeled segment per step and the current step
-											 explains itself in one line below (ob-step-explain).
-											 jarvis#763's "no per-step labels on the wait bars" held
-											 while the columns carried the words next to the bar; with
-											 the columns removed this is the non-duplicating labeled
-											 layout waitPhases.phaseProgress anticipated. Honesty is
-											 unchanged: segments fill only from observed states
-											 (connectSteps), and an UNKNOWN current step pulses
-											 indeterminate instead of filling. -->
+											 (user report). The 2026-08-14 fix replaced the columns
+											 with one SHORT-labeled segment per step, but that just
+											 moved the duplication onto the bar itself - six tiny
+											 labels sitting above six segments read as a duplicated
+											 row of tiles above a bar (user report). The per-step
+											 labels are gone; the caption now names the current step
+											 ("Step 2 of 6 · Workspace") and the current step still
+											 explains itself in one line below (ob-step-explain), so
+											 nothing is said twice. Honesty is unchanged: the fill
+											 reflects only observed states (connectSteps), and an
+											 UNKNOWN current step pulses instead of asserting further
+											 progress. -->
 										<div class="ob-progress">
 											<StepProgress
 												:steps="connectSteps"
 												:current-index="connectProgress.index"
 												:indeterminate="connectProgress.indeterminate"
 												:label="connectProgress.caption"
-												collapse-labels
 											/>
 										</div>
 										<!-- ONE live region over the explanation and admin's own
@@ -1524,6 +1620,48 @@
 												class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
 											>
 												Want to talk to someone now?
+												<button class="ob-link" @click="openSupport">
+													Contact support
+												</button>
+											</p>
+										</div>
+									</template>
+									<!-- Slice 4b (C10b): the subscription-connect strand that
+										 waiting cannot heal. Unlike the paged authority-repair block
+										 above, the customer CAN act - so this is a real STOP with a
+										 primary Reconnect CTA into the wizard's reconnect entry, and
+										 admin's own reason as the body. Never the "bringing your setup
+										 online" spinner it used to fall into. -->
+									<template v-else-if="state.connectPhase === 'reconnect'">
+										<div class="ob-head">
+											<h1>
+												{{
+													state.connectTitle ||
+													"Your AI subscription needs reconnecting"
+												}}
+											</h1>
+											<p>
+												Waiting won't finish this one. Reconnect your AI
+												subscription to pick up where setup left off.
+											</p>
+										</div>
+										<div class="mx-auto mt-4 max-w-[560px]">
+											<Banner
+												v-if="state.connectMessage"
+												type="warning"
+												:message="state.connectMessage"
+											/>
+											<div class="mt-4 flex flex-wrap justify-center gap-2">
+												<Button
+													variant="solid"
+													label="Reconnect"
+													@click="reconnectFromStall"
+												/>
+											</div>
+											<p
+												class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+											>
+												Not sure why this happened?
 												<button class="ob-link" @click="openSupport">
 													Contact support
 												</button>
@@ -1845,6 +1983,8 @@ const state = reactive({
 	// recovery uses server truth or an honest placeholder, never this unless the
 	// user set it.
 	identityFromUser: false,
+	// Disables the forward action while onDetailsSubmit awaits the eligibility resolve (no double-submit).
+	detailsSubmitting: false,
 	// plan (Choose Your Plan step)
 	plans: [],
 	planName: null,
@@ -1869,16 +2009,23 @@ const state = reactive({
 	reconnectDirect: false,
 	reconnectEmail: "",
 	paymentProvider: "", // gateway chosen on Review & Pay: "razorpay" | "cashfree"
-	// Required Review & Pay checkbox (T&C + lead-capture frozen contract). NOT
-	// localStorage-persisted - a legal acceptance is re-asked every time the
-	// customer lands fresh on this screen, same as it would be on any checkout.
-	// Pay stays disabled until this is true, and only a literal true is ever
-	// sent to start_signup. Accepting it also grants contact consent (owner
-	// decision 2026-08-14): the terms cover being contacted about the account.
+	// Required Details-step checkbox (T&C + lead-capture contract; moved off
+	// Review & Pay 2026-08-16 so consent is captured before the Plan-step lead
+	// capture fires). NOT localStorage-persisted - a legal acceptance is
+	// re-asked every time the customer lands fresh on this screen, same as it
+	// would be on any checkout. Details' Continue stays blocked until this is
+	// true, and only a literal true is ever sent to start_signup. payDisabled
+	// and onPayClick's own guard keep checking it too (invariants that are
+	// always true by the time Pay is reachable). Accepting it also grants
+	// contact consent (owner decision 2026-08-14): the terms cover being
+	// contacted about the account.
 	termsAccepted: false,
-	// The admin-hosted /terms URL (jarvis.onboarding.get_terms_url), fetched
-	// best-effort on mount. Empty when admin is unreachable/unconfigured - the
-	// checkbox label then renders plain unlinked text instead of a dead link.
+	// The public /terms URL (marketing site, or a rebranded admin's own
+	// /terms), via jarvis.onboarding.get_terms_url, fetched best-effort on
+	// mount so it is already available by the time the Details step (the
+	// second screen) renders. Empty only if that API call itself fails -
+	// the checkbox label then renders plain unlinked text instead of a
+	// dead link.
 	termsUrl: "",
 	// Gateways the operator has actually enabled, narrowed to what this build can
 	// render. Starts EMPTY and stays empty on a discovery failure (plan 02 P2-6):
@@ -1992,6 +2139,14 @@ const reconnectInputsReady = computed(
 // wrong guess either hides recovery from someone who needs it, or sends someone
 // who has no account into a code screen no code will ever arrive for.
 const canReconnect = computed(() => reconnectInputsReady.value && state.reconnectEligible);
+// Forced-reconnect gate: an eligible returning (email, company) may ONLY reconnect.
+// Keyed on reconnectIdentity (what the customer typed), never the admin prefill.
+const mustReconnect = computed(
+	() =>
+		canReconnect.value && !!reconnectIdentity.value.email && !!reconnectIdentity.value.company
+);
+// Last (email, company) a request was issued for, so cancel->Continue reuses it (admin caps 5/hr). Not cleared on cancel.
+let reconnectIssued = null;
 
 // Debounced so typing an address doesn't call the plane per keystroke, and
 // cached per (email, company) so going back and forth doesn't re-ask. Fails
@@ -2198,8 +2353,12 @@ const payCta = computed(() => {
 // the CTA is disabled until then and the unavailable/retry note stands in for it.
 const payProviderReady = computed(() => !!state.paymentProvider);
 // The CTA's full gate, named rather than left as three booleans inline in the
-// template (T&C + lead-capture frozen contract adds the third leg): busy,
-// no confirmed gateway yet, or the required Terms & Conditions box unticked.
+// template: busy, no confirmed gateway yet, or the required Terms & Conditions
+// box unticked. The third leg is an invariant now, not a live gate - the
+// checkbox itself lives on Details and blocks Continue there, so by the time
+// Pay renders state.termsAccepted is already true. Kept here anyway (per the
+// T&C + lead-capture contract) so a future change to Details' gate fails
+// closed instead of silently reopening this hole.
 // payBusyView is declared further down; safe to close over here since this
 // getter only runs at render, after the whole setup script has executed.
 const payDisabled = computed(
@@ -2272,15 +2431,19 @@ const PAID_NEEDS_CONNECT_REASONS = new Set([
 	"llm_setup",
 ]);
 
+// Returns the passive {paid, truthKnown, notStarted} truth flow.hydrate() read
+// (or null on a fail-open), so the caller (onMounted's fresh-mount return heal)
+// can tell whether a mid-flight signup actually exists without re-deriving it
+// from state.step.
 async function reconcileMidFlightSignup() {
 	let truth;
 	try {
 		truth = await flow.hydrate(); // {paid: true|false|null, truthKnown, notStarted}
 	} catch (e) {
-		return; // fail open to the intro tour
+		return null; // fail open to the intro tour
 	}
 	// Day one: no signup on this site. Leave the default intro tour (fresh start).
-	if (truth.notStarted) return;
+	if (truth.notStarted) return truth;
 
 	if (truth.paid === true) {
 		// Paid - so, and only so, the connect shortcut is allowed. Ask readiness
@@ -2296,7 +2459,7 @@ async function reconcileMidFlightSignup() {
 		if (ready && PAID_NEEDS_CONNECT_REASONS.has(ready.reason)) {
 			state.reconciledConnect = true;
 			state.step = "connect";
-			return;
+			return truth;
 		}
 		// Paid but not yet chat-ready (container provisioning): land on Pay, where
 		// the machine renders the paid receipt + "preparing your workspace". A paid
@@ -2304,7 +2467,7 @@ async function reconcileMidFlightSignup() {
 		// through the authenticated update_billing facade, never a fresh guest signup.
 		state.intentExists = true;
 		state.step = "pay";
-		return;
+		return truth;
 	}
 
 	// Not paid, or payment truth could not be established. Either way the connect
@@ -2319,6 +2482,7 @@ async function reconcileMidFlightSignup() {
 		state.intentExists = true;
 		state.step = "pay";
 	}
+	return truth;
 }
 
 // ---- Plan (Choose Your Plan) ------------------------------------------------
@@ -2374,8 +2538,8 @@ function onPlanContinue() {
 }
 
 // ---- Details (Your Details) -------------------------------------------------
-// Email + Company are required; GSTIN is validated (gstin.js) but optional -
-// the four billing inputs are provenance-aware state owned by the `billing`
+// Email + Company + Contact number are required; GSTIN is validated (gstin.js)
+// but optional - the four billing inputs are provenance-aware state owned by the `billing`
 // composable (Plan 01): edits are user-owned, the transitional localStorage
 // snapshot is namespaced by site+user and cleared only after admin's
 // billing_saved ack, and a Company change fetches ERP-derived defaults behind
@@ -2396,19 +2560,38 @@ function emailError(value) {
 function companyError(value) {
 	return (value || "").trim() ? "" : "Company name is required.";
 }
+// Contact number is mandatory (non-empty after trim) but not format-checked -
+// see the onboarding brief: no phone-number regex, admin's own normalizer is
+// the source of truth for shape.
+function contactError(value) {
+	return (value || "").trim() ? "" : "Enter a contact number.";
+}
 // gstinError (gstin.js) already treats a blank value as "" (GSTIN is optional).
+// Required T&C checkbox (moved here from Review & Pay 2026-08-16): unlike the
+// other Details fields this isn't touched on blur (a checkbox has none worth
+// hooking). The non-reconnect Continue button is now `:disabled` until this is
+// true, so this error string is normally unreachable by click; the check still
+// runs in onDetailsSubmit as a defensive invariant (e.g. a keyboard/programmatic
+// submit that bypasses the disabled button), and is cleared live by
+// clearFieldErrorIfValid as soon as the box is ticked.
+function termsError(value) {
+	return value ? "" : "Please accept the Terms & Conditions to continue.";
+}
 
 // Details-step field errors, one bucket per field so each renders under its
 // OWN input via ErrorMessage instead of a single shared bar at the bottom with
 // no tie to what's wrong. Set all at once by onDetailsSubmit (every failure
 // shown together, not one submit per error); state.detailsErr stays reserved
 // for genuinely form-wide messages (see onPayClick's missing-details guard).
-const detailsFieldErrors = reactive({ email: "", company: "", gstin: "" });
+const detailsFieldErrors = reactive({ email: "", company: "", contact: "", gstin: "", terms: "" });
 function touchEmailField() {
 	detailsFieldErrors.email = emailError(state.email);
 }
 function touchCompanyField() {
 	detailsFieldErrors.company = companyError(state.company);
+}
+function touchContactField() {
+	detailsFieldErrors.contact = contactError(billing.fields.contact.value);
 }
 function touchGstinField() {
 	detailsFieldErrors.gstin = gstinError(billing.fields.gstin.value);
@@ -2448,7 +2631,9 @@ async function fetchCompanyDefaults() {
 	}
 }
 
-function onDetailsSubmit() {
+async function onDetailsSubmit() {
+	// One submit at a time (the eligibility resolve below is awaited).
+	if (state.detailsSubmitting) return;
 	state.detailsErr = "";
 	state.email = (state.email || "").trim();
 	state.company = (state.company || "").trim();
@@ -2457,10 +2642,22 @@ function onDetailsSubmit() {
 	// wrong in one pass instead of fixing email only to have the next click
 	// reveal Company was empty too. A bad GSTIN blocks here too, on this same
 	// step, instead of dead-ending at the pay button three screens later.
+	// terms is the deliberate exception: it's checked separately, further down,
+	// AFTER the reconnect branch resolves - batching it in here would gate the
+	// reconnect branch too (item 5), which it must not. A customer with both a
+	// bad GSTIN and an unticked box sees the GSTIN error first and the terms
+	// error only on a second submit; accepted as the cost of that exemption.
 	touchEmailField();
 	touchCompanyField();
+	touchContactField();
 	touchGstinField();
-	if (detailsFieldErrors.email || detailsFieldErrors.company || detailsFieldErrors.gstin) return;
+	if (
+		detailsFieldErrors.email ||
+		detailsFieldErrors.company ||
+		detailsFieldErrors.contact ||
+		detailsFieldErrors.gstin
+	)
+		return;
 	billing.persist();
 	// Editing billing after Review & Pay: return straight to Pay, and — once an
 	// intent exists — save the edit through the authenticated update_billing
@@ -2476,6 +2673,32 @@ function onDetailsSubmit() {
 	// reconnect-code step's own error surface so a stale one does not linger.
 	state.payErr = "";
 	statusCheckNote.value = "";
+	// Forced-reconnect gate: an eligible existing (email, company) the customer ASSERTED
+	// may only reconnect. Fresh resolve here (cancelling the debounce) closes the
+	// type-then-Continue race; fails closed (guest signup() 409 still blocks a duplicate).
+	state.detailsSubmitting = true;
+	try {
+		clearTimeout(eligibilityTimer);
+		await refreshReconnectEligibility();
+		const id = reconnectIdentity.value;
+		if (state.reconnectEligible && id.email && id.company) {
+			await startReconnect();
+			return;
+		}
+	} finally {
+		state.detailsSubmitting = false;
+	}
+	// Required T&C acceptance: checked here, AFTER the reconnect branch above
+	// (which already returned if it applied), so this gate never blocks a
+	// returning customer reconnecting an existing paid account - reconnect
+	// makes no signup call and never needed terms_accepted/contact_consent.
+	// Only the path that actually advances to Plan is gated. The Continue
+	// button is `:disabled` until termsAccepted is true, so in normal use this
+	// is already satisfied by the time we get here; kept as a defensive
+	// invariant against any submit that reaches this function without going
+	// through the disabled button.
+	detailsFieldErrors.terms = termsError(state.termsAccepted);
+	if (detailsFieldErrors.terms) return;
 	// The customer just edited the details behind a FAILED attempt. Without this,
 	// walking forward from here landed them straight back on the old failure card
 	// with no new request made at all: the machine was still parked on the failed
@@ -2702,19 +2925,20 @@ const paySummaryRows = computed(() => {
 			value: paySummaryTrial.value ? "₹0 today" : inrExact(s.dueTodayInr),
 		});
 	}
-	const ref = maskedIntentRef.value;
+	const ref = intentRef.value;
 	if (ref) rows.push({ label: "Reference", value: ref });
 	if (pay.value.lastCheckedAt) {
 		rows.push({ label: "Last checked", value: relativeSince(pay.value.lastCheckedAt) });
 	}
 	return rows;
 });
-// A short, safe intent reference: the attempt id's tail, never a gateway order id
-// or a document name (those stay on admin's side).
-const maskedIntentRef = computed(() => {
-	const id = pay.value.attemptId || "";
-	if (!id) return "";
-	return id.length > 6 ? `…${id.slice(-6)}` : id;
+// The full attempt id, shown in full on the owner's explicit request (was
+// masked to a `…`+last-6 tail before). attemptId is itself already an opaque
+// per-attempt handle admin hands the bench for display - never a gateway order
+// id or a document name (those still stay on admin's side, contract rule 3) -
+// so showing it whole does not leak either.
+const intentRef = computed(() => {
+	return pay.value.attemptId || "";
 });
 function relativeSince(ts) {
 	const t = Date.parse(String(ts).replace(" ", "T"));
@@ -3006,6 +3230,66 @@ async function runStatusCheck() {
 	}
 }
 
+// ---- pending-payment auto-poll -----------------------------------------------
+// Every other wait in the wizard polls on its own (provisioning 45x2s, readiness
+// 40x3s); this recovery card used to do nothing until the customer clicked Check
+// themselves. UNKNOWN covers PAYMENT_CONFIRMATION_PENDING (the coded wait) and a
+// return from checkout that has not resolved yet - both are "ask again shortly"
+// states, never a dead end.
+//
+// Gentler than the other waits ON PURPOSE: unlike readiness/provisioning,
+// checkStatus asks the real payment gateway and the server rate-limits it
+// (PAYMENT_CHECK_RATE_LIMITED) - so this reads the machine's own cooldown after
+// every check and waits it out before the next attempt, instead of a fixed
+// interval that could poll straight through a 429.
+const PENDING_CHECK_INTERVAL_MS = 15_000;
+const PENDING_CHECK_ATTEMPTS = 8; // ~15s x 8 ≈ 2 minutes
+// Set once the ceiling is reached with no resolution - an honest "we stopped
+// auto-checking" note, never a spinner that quietly gives up. Cleared the moment
+// the state leaves UNKNOWN (resolved) or Pay is left (see restartPendingAutoPoll).
+const pendingPollStuck = ref(false);
+// Bumped on every (re)start AND on every stop, so a run already sleeping/awaiting
+// checkStatus() can tell it has been superseded and quit without touching state
+// that no longer belongs to it (leaving Pay, a fresh CONTRACT_STATE, unmount).
+let pendingPollRun = 0;
+
+async function runPendingAutoPoll(myRun) {
+	for (let i = 0; i < PENDING_CHECK_ATTEMPTS; i++) {
+		await _sleep(PENDING_CHECK_INTERVAL_MS);
+		if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
+		await flow.checkStatus();
+		if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
+		// A rate limit says nothing about the money (see paymentCodes.js) - wait
+		// out the SERVER's own cooldown ON TOP OF the ordinary interval already
+		// elapsed, so the next attempt cannot land inside it and poll straight
+		// through a 429. checkCooldownUntil is whatever the machine is currently
+		// holding (0 on an ordinary answer), so this is a no-op except right after
+		// a rate limit.
+		const waitMs = (pay.value.checkCooldownUntil || 0) - Date.now();
+		if (waitMs > 0) {
+			await _sleep(waitMs);
+			if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
+		}
+	}
+	if (pendingPollRun === myRun && pay.value.value === S.UNKNOWN) {
+		pendingPollStuck.value = true;
+	}
+}
+
+// (Re)starts the poll if - and only if - the machine is genuinely waiting on
+// this signup's payment AND the customer is looking at the Pay step. Called from
+// both the value-watch below (a fresh CONTRACT_STATE) and the step-lifecycle
+// watch (entering/leaving Pay), so either kind of change restarts or stops it
+// the same way; idempotent to call when neither condition holds.
+function restartPendingAutoPoll() {
+	pendingPollRun += 1; // supersede whatever was already running
+	pendingPollStuck.value = false;
+	if (pay.value.value === S.UNKNOWN && state.step === "pay") {
+		runPendingAutoPoll(pendingPollRun);
+	}
+}
+watch(() => pay.value.value, restartPendingAutoPoll);
+
 // ---- "Resend the link" (jarvis#297 P0-2a) -----------------------------------
 // A truthful confirmation line, not a toast that could be missed off-screen -
 // same reasoning as statusCheckNote above. Only says "sent" when the flow
@@ -3042,8 +3326,9 @@ const supportTicket = ref("");
 const supportErr = ref("");
 
 // What support needs to act without a round trip, and nothing a customer would be
-// alarmed to read: the coded state, the masked attempt reference the recovery card
-// already shows, and admin's own sentence. No token, no gateway id, no payload.
+// alarmed to read: the coded state, the full attempt reference the recovery card
+// already shows (opaque per-attempt handle, not a gateway id or document name),
+// and admin's own sentence. No token, no gateway id, no payload.
 //
 // Step-aware since the panel now serves both Pay (jarvis#708 hoisted it out of
 // that step) and Connect: a payment code means nothing on a stuck AI-connect
@@ -3063,7 +3348,7 @@ const supportContext = computed(() => {
 		`Payment state: ${pay.value.value || "unknown"}`,
 		`Code: ${pay.value.code || "none"}`,
 	];
-	if (maskedIntentRef.value) rows.push(`Reference: ${maskedIntentRef.value}`);
+	if (intentRef.value) rows.push(`Reference: ${intentRef.value}`);
 	if (pay.value.message) rows.push(`Detail: ${pay.value.message}`);
 	return rows.join("\n");
 });
@@ -3288,24 +3573,27 @@ async function onPayClick() {
 	// plan-09 07-c: the CTA is hidden behind the maintenance hold when the flag is
 	// off; guard the handler too so a stray/programmatic click cannot start a signup.
 	if (!state.paymentUiV2) return;
-	if (!state.planName || !state.email || !state.company) {
-		// A signup with empty args would create a broken record upstream. This is
-		// the fresh-start guard; a resumed session renders from server truth and
-		// uses Initiate, not this button.
-		state.detailsErr =
-			"Your signup details are missing. Please go back and pick a plan and enter your details again.";
-		state.step = "details";
-		return;
-	}
-	// Belt-and-suspenders: the Pay button is already disabled until this is
-	// ticked (the real gate), but a programmatic/stray click must not be able to
-	// start a signup admin will reject anyway for lacking acceptance.
-	if (!state.termsAccepted) return;
 	// Plan 01: the normalized billing snapshot rides this first signup call so it
 	// persists server-side while the customer is still a guest. Omitted (undefined,
 	// never an empty object) when nothing was entered, so a blank Details step sends
 	// no billing key at all.
 	const billingPayload = billing.buildBilling();
+	if (!state.planName || !state.email || !state.company || !billingPayload.contact_number) {
+		// A signup with empty args would create a broken record upstream. This is
+		// the fresh-start guard; a resumed session renders from server truth and
+		// uses Initiate, not this button. Contact number is checked here too
+		// (jarvis#888): a resumed session can land directly on Pay with a
+		// pre-change saved state that never collected it, and the server now
+		// requires it - catch that before the throw, same as the other fields.
+		state.detailsErr =
+			"Your signup details are missing. Please go back and pick a plan and enter your details again.";
+		state.step = "details";
+		return;
+	}
+	// Belt-and-suspenders: Details' Continue is already gated on this (the real
+	// gate now), but a programmatic/stray click must not be able to start a
+	// signup admin will reject anyway for lacking acceptance.
+	if (!state.termsAccepted) return;
 	await flow.submitReview({
 		email: state.email,
 		company: state.company,
@@ -3315,11 +3603,10 @@ async function onPayClick() {
 		// Top-level kwarg, parallel to nothing else here - NOT part of `billing`.
 		// Trimmed + undefined-when-blank so a blank field sends no key at all.
 		partner_code: state.partnerCode?.trim() || undefined,
-		// T&C + lead-capture frozen contract: only ever true here (the checkbox
-		// gates this click). contact_consent is granted BY the T&C acceptance
-		// itself (owner decision 2026-08-14, replacing the separate Details-step
-		// checkbox), so it is the same literal true, recorded at the exact moment
-		// identity is real.
+		// T&C + lead-capture contract: only ever true here (Details' Continue
+		// already required it). contact_consent is granted BY the T&C
+		// acceptance itself (owner decision 2026-08-14), so it is the same
+		// literal true, recorded at the exact moment identity is real.
 		terms_accepted: true,
 		contact_consent: true,
 	});
@@ -3369,6 +3656,10 @@ async function resendReconnectCode() {
 		const id = reconnectIdentity.value;
 		const d = await startAccountReconnect(id.email, id.company);
 		state.reconnectRequestId = (d && d.request) || state.reconnectRequestId;
+		// Keep the reuse tracker on the latest request (resend supersedes the old id).
+		if (d && d.request) {
+			reconnectIssued = { email: id.email, company: id.company, requestId: d.request };
+		}
 		state.reconnectCode = "";
 		state.reconnectResentIn = 30;
 		const tick = setInterval(() => {
@@ -3420,6 +3711,17 @@ async function submitReconnectCode() {
 			if (state.step === "reconnect") state.step = "details";
 			return;
 		}
+		if (d && d.status === "renew_payment") {
+			// Recovered a LAPSED account (Expired sub): its container was stopped on expiry, so
+			// there is nothing to ride sync_connection to AND no unfinished checkout to resume. The
+			// code re-authenticated this bench onto the existing account; hand off to the billing
+			// page, which owns the renew flow (pick a plan -> renew() reactivates the EXISTING
+			// subscription + restarts the container -> the bounded recovery poll). A hard nav, like
+			// ACTIONS.BILLING: AppShell's gate re-renders the poster over an in-SPA route.
+			state.payBusy = false;
+			window.location.assign("/jarvis/billing");
+			return;
+		}
 		// Direct mode has no confirmation page (the code came from support) and its
 		// invalid covers a mistyped code OR the wrong registered email, so point the
 		// customer at both — never at a screen they never saw.
@@ -3442,24 +3744,45 @@ async function submitReconnectCode() {
 // code screen. Reachable from Details (a returning customer never has to pick a
 // plan or reach a payment wall) and from a rejected pay attempt.
 async function startReconnect() {
+	// No re-entry while a request is in flight (would mint a second code + burn the 5/hr budget).
+	if (state.payBusy) return;
 	state.payErr = "";
+	state.detailsErr = ""; // any prior Details error is stale once we commit to reconnect
 	state.reconnectCode = "";
 	state.reconnectDirect = false;
 	state.reconnectEmail = "";
-	state.payBusy = true;
+	// Authoritative identity only (P1-7): server truth, or what the customer
+	// themselves typed - never the site-admin prefill.
+	const id = reconnectIdentity.value;
 	// Where to return on Back/cancel: reconnect can be entered from Details
 	// (before any plan is chosen), from the recovery card, and from the review
 	// card's can_reconnect offer.
 	state.reconnectFrom = state.step === "reconnect" ? state.reconnectFrom : state.step;
+	// Cancel -> Continue on the SAME identity reuses the outstanding request (admin caps 5/hr); a stale code -> "Resend".
+	if (
+		reconnectIssued &&
+		reconnectIssued.email === id.email &&
+		reconnectIssued.company === id.company &&
+		reconnectIssued.requestId
+	) {
+		state.reconnectRequestId = reconnectIssued.requestId;
+		state.step = "reconnect";
+		return;
+	}
+	state.payBusy = true;
 	try {
-		// Authoritative identity only (P1-7): server truth, or what the customer
-		// themselves typed - never the site-admin prefill.
-		const id = reconnectIdentity.value;
 		const d = await startAccountReconnect(id.email, id.company);
 		state.reconnectRequestId = (d && d.request) || "";
+		reconnectIssued = {
+			email: id.email,
+			company: id.company,
+			requestId: state.reconnectRequestId,
+		};
 		state.step = "reconnect";
 	} catch (e) {
 		state.payErr = errMsg(e);
+		// Details has no payErr banner + the gate hid the fallback, so surface it here (no silent dead-end).
+		if (state.step === "details") state.detailsErr = state.payErr;
 	} finally {
 		state.payBusy = false;
 	}
@@ -3590,25 +3913,28 @@ const setupTitle = computed(() =>
 // `blocked` panel, and a different model provably cannot resolve any of them.
 const connectModelChangeOffered = ref(false);
 
-// The escape hatch itself: back to the Connect form with the customer's own
-// choice still in it. The editor is v-show'd, never v-if'd, so its state - the
-// provider, the model, a passing key probe - is still mounted and simply
-// becomes visible again; there is nothing to re-fetch or re-fill.
+// Return to the editable Connect form in place, with the customer's own choice
+// still in it. The editor is v-show'd, never v-if'd, so its state - the provider,
+// the model, a passing key probe - is still mounted and simply becomes visible
+// again; there is nothing to re-fetch or re-fill. `blockReason` is the inline
+// banner above the editor that says why they are back and what to do next.
 //
-// It has to be in-wizard. Settings is the obvious home for "add another model",
-// but it is unreachable from here by construction: `llm_pool_provisioning`,
+// Shared by both in-wizard escapes out of the wait: the jarvis#727 model-change
+// (chooseDifferentModel) and slice 4b's Reconnect CTA (reconnectFromStall). It has
+// to be in-wizard for both. Settings is the obvious home for "reconnect / add a
+// model", but it is unreachable from here by construction: `llm_pool_provisioning`,
 // `llm_provisioning` and `readiness_unconfirmed` are all in readiness.js's
 // NOT_ONBOARDED_REASONS, so AppShell's `showGate` renders the full-screen
 // onboarding poster over every route except this one. A "go to Settings" link
 // would put the customer back on this wizard by a longer path.
 //
-// The three forgets are load-bearing, not tidying. The customer is about to
-// submit a DIFFERENT configuration, so this attempt's idempotency key must not
-// survive: admin dedupes on it and would hand back the very operation that
-// never converged. currentOpId must go with it, or retryConnect would re-follow
-// that dead operation instead of saving the new config (enterSaveRefusal, the
-// one terminal that can be reached next, never clears it).
-function chooseDifferentModel() {
+// The forgets are load-bearing, not tidying. The customer is about to submit a
+// FRESH configuration, so this attempt's idempotency key must not survive: admin
+// dedupes on it and would hand back the very operation that never converged.
+// currentOpId must go with it, or retryConnect would re-follow that dead operation
+// instead of saving the new config (enterSaveRefusal, the one terminal that can be
+// reached next, never clears it).
+function returnToConnectForm(blockReason) {
 	stopRetryCountdown();
 	forgetIdem();
 	opStore.forget();
@@ -3624,14 +3950,20 @@ function chooseDifferentModel() {
 	state.connectSupportOffered = false;
 	state.retryAfter = 0;
 	connectModelChangeOffered.value = false;
-	// Says what was observed - the wait ended without setup finishing - and never
-	// that the chosen model is broken, which nothing here established.
-	state.connectBlockReason =
-		"Setup didn't finish with the AI connection you chose, and waiting hasn't cleared it. Pick a different model and start again.";
+	state.connectBlockReason = blockReason;
 	// Any wait still sleeping between polls stops on its next tick (both loops
 	// re-check this), so a late ceiling cannot yank the customer back out of the
 	// form they were just returned to.
 	state.finishing = false;
+}
+
+// The jarvis#727 escape. The block reason says what was observed - the wait ended
+// without setup finishing - and never that the chosen model is broken, which
+// nothing here established.
+function chooseDifferentModel() {
+	returnToConnectForm(
+		"Setup didn't finish with the AI connection you chose, and waiting hasn't cleared it. Pick a different model and start again."
+	);
 }
 
 function ensureController() {
@@ -3917,8 +4249,10 @@ const connectSteps = computed(() => {
 const connectProgress = computed(() => {
 	const steps = connectSteps.value;
 	// Always hits: the chat step is never "done" (only active or waiting), so
-	// a first not-done step always exists.
-	const index = steps.findIndex((s) => s.state !== "done");
+	// a first not-done step always exists; the clamp is a defensive fallback,
+	// not a state this reaches.
+	const rawIndex = steps.findIndex((s) => s.state !== "done");
+	const index = rawIndex === -1 ? steps.length - 1 : rawIndex;
 	const explain = preflight.running
 		? "Running final checks on your setup."
 		: steps[index].explain;
@@ -3926,7 +4260,9 @@ const connectProgress = computed(() => {
 		index,
 		indeterminate: steps[index].state === "unknown",
 		explain,
-		caption: `Step ${index + 1} of ${steps.length}`,
+		// Names the current step (2026-08-16 redesign) so the caption alone
+		// carries what the removed per-step labels used to say.
+		caption: `Step ${index + 1} of ${steps.length} · ${steps[index].label}`,
 	};
 });
 
@@ -3993,6 +4329,21 @@ function noteReadiness(o) {
 			"That AI configuration was rejected. Edit your connection and try again.";
 		return stage;
 	}
+	// Slice 4b (C10b): a subscription-connect strand that waiting cannot heal, but
+	// one the customer CAN act on - unlike the paged/suspended/moved blocks below.
+	// Its own phase so the panel carries a primary Reconnect CTA into the wizard's
+	// reconnect entry instead of the support-only dead end, mirroring how `editable`
+	// routes llm_rejected back to the form. `state.finishing` stays true so this card
+	// (which lives under the setup screen's v-show) renders in place of the spinner.
+	// Admin's own sentence (stage.detail) is the body; no model change, because a
+	// rejected model is not the problem here.
+	if (stage.reconnect) {
+		state.connectPhase = "reconnect";
+		state.connectTitle = stage.title || "Your AI subscription needs reconnecting";
+		state.connectMessage = stage.detail;
+		connectModelChangeOffered.value = false;
+		return stage;
+	}
 	// A verdict that waiting cannot resolve is terminal for this wait: stop
 	// polling rather than counting down to a ceiling whose copy invites a retry
 	// that cannot help. Covers a paged authority repair (do nothing, we called
@@ -4042,12 +4393,11 @@ async function waitForChatReadiness() {
 	readinessSeen.value = null;
 	for (let i = 0; i < CHAT_READY_ATTEMPTS; i++) {
 		if (navigated.value) return;
-		// A blocked verdict is terminal for this wait (admin paged a human): stop
-		// polling rather than counting down to a ceiling whose exhaustion copy
-		// would invite the retry this state must not offer.
-		if (state.connectPhase === "blocked") return;
-		// The customer took the jarvis#727 escape back to the editor. This wait is
-		// about the configuration they just left behind, so its ceiling must not
+		// No pre-tick "blocked" guard: a blocked verdict is set by noteReadiness only
+		// alongside stage.stop, and this loop already returns on stage.stop in the same
+		// tick that observes it (below), so it can never sleep and re-enter here blocked.
+		// The customer took the jarvis#727 / slice-4b escape back to the editor. This
+		// wait is about the configuration they just left behind, so its ceiling must not
 		// fire and pull them back out of the form.
 		if (!state.finishing) return;
 		// The memoized verdict is what the router guard will read moments from now, so
@@ -4077,10 +4427,13 @@ async function waitForChatReadiness() {
 			detail: r && r.detail,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
-		// jarvis#757: stage.editable already returned to the form (noteReadiness
-		// set state.finishing = false) - stop polling THIS tick rather than
-		// sleeping once more on a config the customer may already be re-editing.
-		if (state.connectPhase === "blocked" || stage.editable) return;
+		// Any verdict waiting cannot resolve is terminal for this wait (stage.stop):
+		// the paged/suspended/moved blocks, jarvis#757's editable llm_rejected (which
+		// already returned to the form), and slice 4b's reconnect stop. Stop polling
+		// THIS tick rather than sleeping once more on a state that will not change on
+		// its own. `stage.stop` is exactly this set, so it replaces the older
+		// connectPhase/editable pair without altering their behaviour.
+		if (stage.stop) return;
 		await _sleep(CHAT_READY_INTERVAL_MS);
 	}
 	state.finishing = true;
@@ -4307,8 +4660,9 @@ async function followLegacyReadiness(result) {
 	readinessSeen.value = null;
 	for (let i = 0; i < attempts; i++) {
 		if (navigated.value) return;
-		if (state.connectPhase === "blocked") return;
-		// The jarvis#727 escape took the customer back to the editor - see
+		// No pre-tick "blocked" guard - see waitForChatReadiness: stage.stop below ends
+		// the wait in the same tick a blocked/stop verdict is observed.
+		// The jarvis#727 / slice-4b escape took the customer back to the editor - see
 		// waitForChatReadiness for why this wait must not outlive it.
 		if (!state.finishing) return;
 		let r = null;
@@ -4333,8 +4687,9 @@ async function followLegacyReadiness(result) {
 			detail: r && r.detail,
 		});
 		if (stage.kind !== PHASE_KIND.NONE) sawNamedSubject = true;
-		// jarvis#757: see the matching comment in waitForChatReadiness.
-		if (state.connectPhase === "blocked" || stage.editable) return;
+		// See waitForChatReadiness: stage.stop is every verdict waiting cannot resolve
+		// (blocked stops, jarvis#757's editable, slice 4b's reconnect).
+		if (stage.stop) return;
 		if (i < attempts - 1) await _sleep(LEGACY_READY_INTERVAL_MS);
 	}
 	state.finishing = true;
@@ -4452,6 +4807,24 @@ function reloadConnect() {
 	window.location.reload();
 }
 
+// Slice 4b (C10b): the Reconnect CTA on the stalled-subscription STOP card. It
+// re-opens the editable Connect form IN PLACE so the customer can re-run the
+// subscription connect right here - success navigates to chat, a genuine re-strand
+// brings this card back, a too-old host fails clean (S1). It deliberately does NOT
+// hard-nav to RECONNECT_INTENT_URL (the old behaviour): every customer who can see
+// this card is already terminal (they reached PAID -> PROVISIONING -> connect), and
+// landingStep DROPS the reconnect intent when terminal, so that nav resumed straight
+// back to "connect", restarted the wait, re-observed reconnect_required and
+// re-rendered this exact card - an infinite no-op loop. The fix is local to this
+// step; landingStep's terminal guard is correct for the ChatView site_replaced flow
+// and is left alone. Same fresh-attempt reset as chooseDifferentModel (returnToConnectForm
+// drops the stalled operation so the next Start is genuinely new).
+function reconnectFromStall() {
+	returnToConnectForm(
+		"Reconnect your AI subscription below, then start again to finish setting up."
+	);
+}
+
 // (An unreferenced `editConnect` lived here: a partial return-to-the-form that
 // nothing ever called, because onOpUpdate's REJECTED branch inlines its own.
 // Removed rather than reused by jarvis#727's escape - it dropped neither the
@@ -4560,10 +4933,17 @@ watch(
 		if (s === "pay" && (prev === "details" || prev === "reconnect")) {
 			reconcileMidFlightSignup();
 		}
+		// Same P1-8 lifecycle discipline for the pending auto-poll: stop it the
+		// instant Pay is left (a late tick must not fire into a hidden step), and
+		// (re)start it on entry if the machine is already sitting in UNKNOWN.
+		restartPendingAutoPoll();
 	}
 );
 onUnmounted(() => {
 	if (cooldownTimer) clearInterval(cooldownTimer);
+	// Stop the pending auto-poll: a sleeping tick otherwise fires a real check
+	// into a torn-down component minutes after navigation away.
+	pendingPollRun += 1;
 	// Invalidate any in-flight client work so a late response cannot touch a
 	// torn-down component (P1-8), and drop the checkout-return listeners.
 	flow.cancelInFlight();
@@ -4682,7 +5062,7 @@ onMounted(async () => {
 	// tick, before the awaited prefill below — the discovery loading note must show
 	// from first paint (X4), independent of prefill/company.
 	loadPaymentProviders();
-	// Best-effort terms-page link for the Review & Pay checkbox. Never blocks the
+	// Best-effort terms-page link for the Details-step checkbox. Never blocks the
 	// wizard and never throws into onMounted: a failure just leaves state.termsUrl
 	// empty, which the template renders as plain unlinked "Terms & Conditions" text.
 	getTermsUrl()
@@ -4708,7 +5088,27 @@ onMounted(async () => {
 		clearExternalCheckoutNav();
 	}
 	try {
-		await reconcileMidFlightSignup();
+		const midFlightTruth = await reconcileMidFlightSignup();
+		// FRESH-MOUNT RETURN HEAL. `checkoutReturn` only proves the pay page sent
+		// the customer back top-level; the passive hydrate above only read admin's
+		// last-known DB row (get_onboarding_state), never asked the gateway. A
+		// fresh mount can never be CHECKOUT_OPEN (paymentMachine.js reinitializes to
+		// REVIEW), so the in-memory RETURNED_FROM_CHECKOUT exit that already asks
+		// the gateway (usePaymentFlow's returnFromCheckout / handleCheckoutReturn)
+		// is unreachable here - this is the ONLY path that converges a fresh-mount
+		// return. Mirrors BillingPage.vue's run-healer-once pattern: exactly one
+		// active check, only when a mid-flight signup exists (nothing to check
+		// otherwise - a day-one visitor's check_signup_payment_status call would
+		// just spend a rate-limited read on an absent subscription row).
+		//
+		// No extra fencing needed beyond that: checkStatus() routes its answer
+		// through the SAME applyContract every other answer takes, so the
+		// attempt/generation fence and the PAID floor already guarantee a stale
+		// answer here can never repaint a newer state and a paid answer is never
+		// undone (paymentMachine.js applyContract).
+		if (checkoutReturn && midFlightTruth && !midFlightTruth.notStarted) {
+			await flow.checkStatus();
+		}
 	} finally {
 		confirmingReturn.value = false;
 	}
@@ -4868,6 +5268,16 @@ onUnmounted(() => {
 	color: var(--text-2);
 	margin: 0;
 }
+/* The connect wait's expectation-setting note (jarvis onboarding time note):
+   needs the extra class on the specificity to beat .ob-head p above on rule
+   weight, not source order, since it sits right after the subtitle in the
+   same .ob-head block and both are <p> tags. Smaller and greyer than the
+   subtitle by design - a secondary line, not a second headline. */
+.ob-head p.ob-head-note {
+	margin-top: 6px;
+	font-size: 12.5px;
+	color: var(--text-3);
+}
 .ob-foot {
 	display: flex;
 	align-items: center;
@@ -4907,9 +5317,10 @@ onUnmounted(() => {
 	outline-offset: 2px;
 }
 /* ---- staged wait progress bar (jarvis#726, waitPhases.phaseProgress) ----
-   Layout wrapper only - the segments themselves, including the indeterminate
-   pulse on the current one, are StepProgress.vue's (design.md §4.3, one
-   shared component for every stepped indicator in the app).
+   Layout wrapper only - the bar itself, including the indeterminate pulse,
+   is StepProgress.vue's variant="bar" (design.md §4.3, one shared component
+   for every stepped indicator in the app; 2026-08-16 redesign replaced its
+   per-segment columns with one continuous fill).
 
    Width (jarvis wait-phases-horizontal): a live run called the old 420px cap
    "very congested". 75% of the card reads roomy without turning into an
@@ -4917,8 +5328,8 @@ onUnmounted(() => {
    longest phase label ("Applying your AI configuration") still gets a
    sensible column width at 3-up rather than the columns ballooning past what
    the text needs. `.ob-phases` and `.ob-phase-detail` below share the exact
-   same width/gap so the phase columns line up under the bar's segments and
-   the detail line reads as belonging to the same block. */
+   same width/gap so the phase columns line up under the bar and the detail
+   line reads as belonging to the same block. */
 .ob-progress {
 	margin: 0 auto;
 	width: 75%;
@@ -4926,17 +5337,17 @@ onUnmounted(() => {
 }
 
 /* ---- staged wait phases (waitPhases.js), PROVISIONING wait only --------
-   One column per phase, side by side under the bar's segments so the whole
-   block reads as one horizontal progression rather than a bar with an
-   unrelated list under it (jarvis wait-phases-horizontal). Segment one sits
-   above phase one for free: both this row and StepProgress.vue's own row are
-   a 3-up flex with equal (`flex: 1`) children and the same 8px gap over the
-   same width. jarvis#763 rejected per-step labels on the bar itself BECAUSE
-   these columns already carried the words; the CONNECT wait dropped its
-   columns in the 2026-08-14 redesign (six of them under a 3-count bar wrapped
-   into unreadable towers), so its bar is now the labeled, non-duplicating
-   layout that rejection anticipated, and only the provisioning wait still
-   renders this list.
+   One column per phase, side by side under the bar, so the whole block
+   reads as one horizontal progression rather than a bar with an unrelated
+   list under it (jarvis wait-phases-horizontal). The columns line up under
+   the bar because both share the same 75%/640px width and 8px gap, not
+   because the bar itself is still segmented - since the 2026-08-16 redesign
+   the bar above is one continuous fill (StepProgress.vue variant="bar").
+   jarvis#763 rejected per-step labels on the bar itself BECAUSE these
+   columns already carried the words; the CONNECT wait's own six-step bar
+   went through two more rounds after that (the 2026-08-14 labeled-segment
+   layout, then the 2026-08-16 caption-only bar) and only the provisioning
+   wait still renders this column list.
 
    The MODIFIER on each column is the honesty contract, not decoration:
    `active` is only ever set from an observation, `unknown` means a poll
@@ -5135,6 +5546,6 @@ onUnmounted(() => {
 		transition: none;
 	}
 	/* StepProgress.vue owns its own reduced-motion fallback for the
-	   indeterminate segment. */
+	   indeterminate fill/segment pulse. */
 }
 </style>

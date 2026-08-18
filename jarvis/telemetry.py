@@ -86,25 +86,43 @@ def record_budget_event(
 		pass
 
 
-def record_export_event(tool: str, fmt: str, rows: int, mode: str = "sync", outcome: str = "ok") -> None:
+def record_export_event(
+	tool: str,
+	fmt: str,
+	rows: int,
+	mode: str = "sync",
+	outcome: str = "ok",
+	rich: bool | None = None,
+	detail: str | None = None,
+) -> None:
 	"""One line per server-side export ATTEMPT (export_query etc.): format, row
-	count, sync/background, and ``outcome`` (ok / no_data / denied / rejected).
+	count, sync/background, and ``outcome`` (ok / degraded / no_data / rejected).
 	Emitting on the fail-closed paths too is the point - the refused large exports
 	are exactly the signal that would justify raising the ceiling / building the
-	async path. Routes through the same INFO-pinned logger. Never raises."""
+	async path.
+
+	``rich`` distinguishes export_document's new branded path from its
+	byte-preserved plain path (they would otherwise collapse to one tuple), and
+	``detail`` carries a short failure reason so a systemic regression (a bad chart
+	pattern, a wkhtmltopdf bump) can be reconstructed from the stream rather than
+	guessed. Both are omitted from the line when not supplied. Routes through the
+	same INFO-pinned logger. Never raises."""
 	try:
-		_emit(
-			{
-				"kind": "export",
-				"ts": frappe.utils.now(),
-				"site": getattr(frappe.local, "site", None),
-				"tool": tool,
-				"format": fmt,
-				"rows": int(rows),
-				"mode": mode,
-				"outcome": outcome,
-			}
-		)
+		entry = {
+			"kind": "export",
+			"ts": frappe.utils.now(),
+			"site": getattr(frappe.local, "site", None),
+			"tool": tool,
+			"format": fmt,
+			"rows": int(rows),
+			"mode": mode,
+			"outcome": outcome,
+		}
+		if rich is not None:
+			entry["rich"] = bool(rich)
+		if detail:
+			entry["detail"] = str(detail)[:200]
+		_emit(entry)
 	except Exception:
 		pass
 

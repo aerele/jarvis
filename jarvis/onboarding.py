@@ -5,7 +5,7 @@ never holds admin creds). admin_client returns already-unwrapped admin data."""
 import json
 
 import frappe
-from frappe.utils import cint
+from frappe.utils import cint, validate_email_address
 
 from jarvis import admin_client, onboarding_contract, release_notice
 from jarvis.exceptions import (
@@ -20,6 +20,15 @@ from jarvis.permissions import grant_onboarding_admin, require_jarvis_admin
 # Every admin-side failure admin_client raises. One tuple so the onboarding
 # facade's catch sites cannot drift apart from _surface's.
 _ADMIN_ERRORS = (AdminValidationError, AdminAuthError, AdminUnreachableError, AdminRateLimitedError)
+
+
+def _require_contact_number(billing: dict | None) -> None:
+	"""Contact number is mandatory on the Details step (SPA validation mirrors
+	this), but the SPA is not the only caller of start_signup/update_billing, so
+	the bench enforces it again here rather than trusting the client. No format
+	check - admin's own normalizer is the source of truth for shape."""
+	if not ((billing or {}).get("contact_number") or "").strip():
+		frappe.throw("Contact number is required.")
 
 
 def _require_admin_url() -> None:
@@ -344,9 +353,17 @@ def capture_onboarding_lead(
 	surfaces to the customer.
 	``site_origin`` sent here is advisory only - admin_client overwrites it with
 	this bench's own server-derived public origin before it ever reaches admin.
+
+	A non-blank ``email`` that fails ``validate_email_address`` is dropped
+	silently (no admin call, no exception) rather than forwarded - this is
+	fire-and-forget with nothing to show the customer, so a malformed address
+	just never becomes a lead instead of surfacing anywhere. A blank/missing
+	email is left to admin_client as before (unchanged from prior behaviour).
 	"""
 	try:
 		require_jarvis_admin()
+		if email and not validate_email_address(email, throw=False):
+			return {"ok": False}
 		return admin_client.capture_onboarding_lead(
 			email,
 			company=company,
@@ -363,9 +380,9 @@ def capture_onboarding_lead(
 
 @frappe.whitelist()
 def get_terms_url() -> dict:
-	"""The admin-hosted Terms & Conditions URL for the Review & Pay checkbox
-	link. Best-effort: ``{"url": ""}`` on any failure so the checkbox still
-	renders (with plain unlinked text) when admin is unreachable or unconfigured."""
+	"""The public Terms & Conditions URL (marketing site) for the Details-step
+	checkbox link. Best-effort: ``{"url": ""}`` on any failure so the checkbox
+	still renders (with plain unlinked text)."""
 	try:
 		return {"url": admin_client.terms_url()}
 	except Exception:
@@ -973,8 +990,9 @@ def start_signup(
 	falsy value) and ``contact_consent`` (optional) are the T&C + lead-capture
 	frozen contract's two new kwargs. Threaded straight through to
 	``admin_client.signup`` unconditionally; the SPA only ever calls this with
-	``terms_accepted: true`` (the Review & Pay checkbox gates the Pay click), and
-	``terms_version`` is stamped SERVER-SIDE by admin — this bench never sends one.
+	``terms_accepted: true`` (the Details-step checkbox gates the Continue that
+	reaches Plan and, downstream, this call), and ``terms_version`` is stamped
+	SERVER-SIDE by admin — this bench never sends one.
 
 	Two response shapes depending on admin's
 	``require_email_verification`` flag:
@@ -987,6 +1005,12 @@ def start_signup(
 	    bench so the poll endpoint can authenticate.
 	"""
 	require_jarvis_admin()
+	# Light shape check on the caller-typed email, before anything else touches
+	# it (onboarding_contract.update below, admin_client.signup) - a malformed
+	# address is cheap to catch here with an actionable message rather than
+	# surfacing as an opaque admin-side rejection several calls later.
+	if not validate_email_address(email, throw=False):
+		frappe.throw("Enter a valid email address.")
 	_require_admin_url()
 	# Money the gateway is holding that an operator has not been able to place
 	# stops the WHOLE endpoint, not just the resume half below. The context is
@@ -997,6 +1021,7 @@ def start_signup(
 	# and clears the flag on any answer.
 	if onboarding_contract.awaiting_reconciliation():
 		_refuse_while_money_is_parked()  # always raises
+	_require_contact_number(billing)
 	# The identity the customer TYPED, before admin is asked anything. Two
 	# reasons it is written first: a response lost in transit still leaves the
 	# bench knowing whose signup this was (plan 03's "bench response lost after
@@ -1404,6 +1429,7 @@ def update_billing(billing: dict) -> dict:
 	(``billing_saved`` + normalized ``billing`` summary) un-flattened."""
 	require_jarvis_admin()
 	_require_admin_url()
+	_require_contact_number(billing)
 	return _surface(admin_client.update_pending_billing, billing)
 
 
@@ -1509,6 +1535,13 @@ def _land_reconnect(data: dict) -> dict:
 		}
 	)
 	grant_onboarding_admin()
+	if data.get("renew_required"):
+		# A LAPSED account (Expired subscription): its container was stopped on expiry, so there
+		# is nothing to ride sync_connection to. The wizard must land on plan/pay and Pay must call
+		# renew() - reactivate the EXISTING subscription and restart the container - never resume an
+		# unfinished checkout, never a fresh signup (no new Customer). Distinct from resume_payment,
+		# whose Pay resumes a Pending-Payment checkout.
+		return {"status": "renew_payment"}
 	if (data.get("subscription_status") or "").strip() == "Pending Payment":
 		return {"status": "resume_payment"}
 	return {"status": "connected"}
@@ -1832,10 +1865,15 @@ def finish_payment(payload: dict | str) -> dict:
 
 
 @frappe.whitelist()
-def renew(provider: str | None = None) -> dict:
+def renew(provider: str | None = None, target_plan: str | None = None) -> dict:
 	"""Existing customer initiates a renewal payment; returns a pay-page token
 	the billing page top-level-navigates to (plan-09 WS8). The admin-hosted
 	checkout completes the payment; the webhook/return activates the plan.
+
+	``target_plan``: a lapsed customer may renew ONTO another plan (the reconnect
+	renew flow lets them pick at the plan step). It MUST reach admin - Frappe drops
+	any request kwarg the signature does not name, so leaving it off silently priced
+	every reconnect renewal off the OLD plan.
 
 	Gated on System Manager: initiates a billing transaction tied to the
 	site's admin account.
@@ -1843,7 +1881,9 @@ def renew(provider: str | None = None) -> dict:
 	require_jarvis_admin()
 	# plan-09 WS8: attest the token against the bench's OWN pay origin so
 	# BillingPage can navigate (behaviour-neutral on a non-token answer).
-	return onboarding_contract.augment_pay_page(_surface(admin_client.renew, provider=provider))
+	return onboarding_contract.augment_pay_page(
+		_surface(admin_client.renew, provider=provider, target_plan=target_plan)
+	)
 
 
 _RESETTING_STATUS = "pending: resetting workspace"

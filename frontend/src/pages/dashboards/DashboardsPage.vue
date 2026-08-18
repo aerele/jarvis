@@ -153,6 +153,7 @@
 					:editing-name="agentEditingName"
 					@canvas="onCanvas"
 					@reset="resetBuilder"
+					@dashboard="onDashboardSaved"
 				/>
 			</div>
 
@@ -201,7 +202,7 @@
 // Probe failures follow the TriggersPage rule: a genuine 403 shows the
 // no-access state; a transient 500/network blip retries once and otherwise
 // proceeds with default caps rather than blocking an authorized user.
-import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
 import { Badge, Breadcrumbs, Button, Dialog, Dropdown, FeatherIcon, toast } from "frappe-ui";
@@ -211,6 +212,8 @@ import { session } from "@/data/session";
 import { getCanvas } from "@/api";
 import { agentName } from "@/branding";
 import { getDashboardsCaps, getDashboard, getDashboardConversation } from "@/api/dashboards";
+import { takeDashboardPrefill } from "@/composables/dashboardPrefill";
+import { gotoFiredKey } from "@/lib/chatGoto";
 import { builderCanvasFrame } from "@/lib/dashboardRestore";
 import {
 	adoptionIdentity,
@@ -348,6 +351,14 @@ const routeCanvas = typeof route.query.canvas === "string" ? route.query.canvas 
 // permission-gated get_dashboard, so an unknown or foreign name simply fails and
 // degrades to an identity-less promotion.
 const routeDash = typeof route.query.dash === "string" ? route.query.dash : "";
+// ```jarvis-goto hand-off (main chat -> here, jarvis#884): taken on EVERY
+// mount, the same discipline chatPrefill uses in ChatView, so a stale prompt
+// can never survive to fire on a later, unrelated visit. Sent from onMounted
+// once the caps probe settles - but ONLY when neither deep-link above owns
+// the canvas: an ?edit= or ?chat=&canvas= promotion is what the user actually
+// asked to land on, and a stray prompt must not race a message into that
+// conversation instead.
+const dashboardPrefill = takeDashboardPrefill();
 // A promotion the page owes the user but has not finished, held exactly like
 // `editSeed`: an explicit deep-link owns the canvas, so the chat pane's own
 // transcript restore must not land on it first. The pane's onMounted fires
@@ -620,6 +631,38 @@ function resetBuilder() {
 	});
 }
 
+// The state-setting guts of adopting a saved dashboard's detail as the
+// current document - factored out of loadEdit so a caller that already knows
+// nothing is unsaved (onDashboardSaved, below: the pane's own build landing
+// where its canvas already was) can apply it directly, without the discard
+// confirm every OTHER caller needs wrapped around it.
+//
+// `deepLink` also gates the chatConv repoint below: true for every ordinary
+// caller (?edit=, a fresh loadEdit), but onDashboardSaved passes false and
+// still repoints WHEN `d.source_conversation` is set - which for a row this
+// pane's own conversation just saved is that same conversation, so the write
+// is a same-value no-op against the pane's watcher (it only reacts to an
+// actual change). A future caller that adopts a row built by a DIFFERENT
+// conversation would need its own guard here; onDashboardSaved does not.
+function applyEditDetail(d, { deepLink = true } = {}) {
+	builderHtml.value = d.html || "";
+	editingDetail.value = d;
+	editingSticky.value = d.name;
+	savedName.value = d.name;
+	builderTheme.value = themeKey(d.theme);
+	// the canvas is this document now, not an artifact from the transcript
+	canvasMsg.value = "";
+	// ...so whatever the builder was holding is no longer ahead of its row:
+	// the agent revises this document by name again.
+	adoptedRow.value = "";
+	// resume the build thread, or a fresh one — never the stale sticky
+	// conversation left over from editing a different dashboard.
+	if (deepLink || d.source_conversation) {
+		chatConv.value = d.source_conversation || "";
+		dashDataMode.value = d.dashboard_type === "Connected" ? "live" : "static";
+	}
+}
+
 // ?edit=<name> deep-link: seed the canvas + save dialog from a saved dashboard.
 // Also resume the conversation that built it (so the agent has memory of the
 // document) and seed the data-mode from its derived type, so an edit session
@@ -644,22 +687,7 @@ async function loadEdit(name, { deepLink = true } = {}) {
 			return;
 		}
 		confirmDiscard(() => {
-			builderHtml.value = d.html || "";
-			editingDetail.value = d;
-			editingSticky.value = d.name;
-			savedName.value = d.name;
-			builderTheme.value = themeKey(d.theme);
-			// the canvas is this document now, not an artifact from the transcript
-			canvasMsg.value = "";
-			// ...so whatever the builder was holding is no longer ahead of its row:
-			// the agent revises this document by name again.
-			adoptedRow.value = "";
-			// resume the build thread, or a fresh one — never the stale sticky
-			// conversation left over from editing a different dashboard.
-			if (deepLink || d.source_conversation) {
-				chatConv.value = d.source_conversation || "";
-				dashDataMode.value = d.dashboard_type === "Connected" ? "live" : "static";
-			}
+			applyEditDetail(d, { deepLink });
 			settle();
 		}, settle);
 	} catch (e) {
@@ -669,6 +697,33 @@ async function loadEdit(name, { deepLink = true } = {}) {
 		else editingSticky.value = "";
 		settle();
 	}
+}
+
+// The chat pane just saved a dashboard (the new save_dashboard tool,
+// jarvis#884 - dashboard builds no longer land as a canvas artifact) and told
+// us its name over the realtime channel.
+async function onDashboardSaved({ name } = {}) {
+	if (!name) return;
+	let d = null;
+	try {
+		d = await getDashboard(name);
+	} catch (e) {
+		// The save itself already succeeded server-side (the pane's own
+		// confirmation card said so before this event ever fired); a blip
+		// fetching it back is not worth interrupting the builder over.
+		return;
+	}
+	if (!d || !d.name) return;
+	// The current edit target updating itself (the normal revision loop) adopts
+	// straight away. A DIFFERENT row landing here replaces the on-screen canvas
+	// like any other target, so it rides the same discard confirm as loadEdit -
+	// confirmDiscard is a no-op when nothing unsaved is at stake, which is the
+	// whole first-build case.
+	if (savedName.value && d.name === savedName.value) {
+		applyEditDetail(d, { deepLink: false });
+		return;
+	}
+	confirmDiscard(() => applyEditDetail(d, { deepLink: false }));
 }
 
 // ?edit= also changes WITHOUT a remount — "Edit in builder" on a second
@@ -692,6 +747,63 @@ function isGoneError(e) {
 	return (
 		!!(e && (e.status === 404 || e.exc_type === "DoesNotExistError")) || isPermissionError(e)
 	);
+}
+
+// resumeGotoHandoff's own gone-check, narrower than isGoneError above: a
+// conversation-specific 403 is not evidence the conversation was deleted (a
+// transient auth hiccup, a scope change), so treating it the same as a 404
+// forgot the stamp and silently started a fresh build over an in-progress one
+// instead of just retrying (#912 round 2, finding #1). Only a genuine
+// does-not-exist degrades to a fresh build.
+function isMissingConversation(e) {
+	return !!(e && (e.status === 404 || e.exc_type === "DoesNotExistError"));
+}
+
+// jarvis#912: resuming a ```jarvis-goto hand-off that already has a recorded
+// builder conversation (the fired stamp carries one - see lib/chatGoto.js and
+// gotoDashboards in ChatView.vue), instead of building a duplicate. Verified
+// against the server first, the same way resumeAdoption verifies a sticky
+// name: a repeat click racing the row's deletion, or a stamp left over from a
+// conversation the user has since removed, must not repoint onto nothing.
+//
+// A transient failure keeps the stamp and repoints anyway - the pane's own
+// loadTranscript() retries the fetch and degrades to isGone there if the blip
+// turns out to be permanent, exactly as an ordinary chatConv repoint would.
+async function resumeGotoHandoff(conv, text, messageId) {
+	try {
+		await getDashboardConversation(conv);
+	} catch (e) {
+		if (isMissingConversation(e)) {
+			// Gone - forget the stale mapping and fall back to a fresh build,
+			// exactly the path a first-time hand-off for this message takes.
+			if (messageId) localStorage.removeItem(gotoFiredKey(messageId));
+			clearBuilder();
+			nextTick(() => {
+				if (chatPane.value && chatPane.value.sendText)
+					chatPane.value.sendText(text, messageId);
+			});
+			return;
+		}
+		// Anything else (403, network blip, ...) falls through to the repoint
+		// below instead of forgetting the stamp - the pane's own loadTranscript()
+		// surfaces the failure (it retries, then degrades to its own gone-check)
+		// so a transient hiccup never silently drops the in-progress build.
+	}
+	// A resumed conversation is a different document than whatever this mount's
+	// setup seeded editSeed from (a sticky ?edit target, or nothing): left set,
+	// onCanvas's restore guard (builderHtml || editSeed || promotionPending)
+	// refuses to put the resumed build's canvas up at all (#912 round 2,
+	// finding #2). Reset only the two fields that guard checks - not the rest
+	// of what clearBuilder resets, which would also wipe the conversation this
+	// function exists to resume.
+	editSeed.value = "";
+	builderHtml.value = "";
+	// Same repoint idiom applyEditDetail uses for `d.source_conversation`: the
+	// pane's own watch(conversation, ...) does the rest (clears the thread on
+	// screen, loads the resumed one). Nothing is unsaved yet on a fresh mount,
+	// so no discard confirm.
+	chatConv.value = conv;
+	dashDataMode.value = "auto";
 }
 
 // The third mount path: coming back to an ADOPTED promotion (resumesAdoption
@@ -1053,6 +1165,24 @@ onMounted(async () => {
 	if (routeEdit && routeChat) {
 		console.warn("dashboards: ?edit= wins over ?chat=&canvas=; the promotion is ignored");
 	}
+	// ```jarvis-goto hand-off: honored only when neither deep-link claims the
+	// canvas - an ?edit= target or a ?chat=&canvas= promotion IS what the user
+	// asked to land on, and a queued prompt must not race a message into
+	// whatever thread that resolves to instead.
+	const gotoClaimsCanvas = !routeEdit && !(routeChat && routeCanvas) && !!dashboardPrefill;
+	// jarvis#912: a REPEAT hand-off for a message that already built a builder
+	// conversation resumes it instead - see resumeGotoHandoff above. `text`
+	// rides along on this shape too, as the fallback build if that conversation
+	// turns out to have been deleted.
+	const gotoResume =
+		gotoClaimsCanvas && dashboardPrefill.resume && dashboardPrefill.conv
+			? { conv: dashboardPrefill.conv, text: String(dashboardPrefill.text || "").trim() }
+			: null;
+	const gotoText =
+		gotoClaimsCanvas && !gotoResume && dashboardPrefill.autoSend
+			? String(dashboardPrefill.text || "").trim()
+			: "";
+	const gotoMessageId = gotoClaimsCanvas ? dashboardPrefill.messageId || "" : "";
 	if (!routeEdit && routeChat && routeCanvas) {
 		promoteFromChat(routeChat, routeCanvas, { fallback: normalMount, dash: routeDash });
 	} else {
@@ -1060,7 +1190,26 @@ onMounted(async () => {
 		// present): release the hold taken at setup, or the pane's restore stays
 		// blocked for the life of the page.
 		promotionPending.value = false;
-		normalMount();
+		if (gotoResume) {
+			// Resuming an existing thread, not building - normalMount() (the
+			// sticky editing target) would fight it for the canvas.
+			resumeGotoHandoff(gotoResume.conv, gotoResume.text, gotoMessageId);
+		} else if (gotoText) {
+			// A first-time goto hand-off is always a NEW build. Restoring the
+			// sticky editing target (or the previous thread under it) would land
+			// the seeded request as a revision of an older dashboard, so start
+			// clean instead of normalMount(). Nothing is unsaved at this instant -
+			// the page just mounted - so no discard confirm.
+			clearBuilder();
+		} else {
+			normalMount();
+		}
+	}
+	if (gotoText) {
+		nextTick(() => {
+			if (chatPane.value && chatPane.value.sendText)
+				chatPane.value.sendText(gotoText, gotoMessageId);
+		});
 	}
 });
 </script>

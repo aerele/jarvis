@@ -1394,6 +1394,45 @@ class TestAgentScheduleTimeAndSweepIsolation(FrappeTestCase):
 				stored = frappe.db.get_value(INSTALLATION, name, "schedule_time")
 				self.assertEqual(parse_schedule_seconds(stored), secs)
 
+	def test_microsecond_schedule_time_parses_as_a_time_of_day(self):
+		"""Frappe 15's ``create_new`` stamps EVERY Time field of a new doc with
+		``nowtime()`` unconditionally, formatted with microseconds ("%H:%M:%S.%f"),
+		so a freshly inserted installation reaches ``validate`` holding a value the
+		caller never set. That value IS a real time of day and must parse (the
+		fraction dropped), or no agent could be installed on Frappe 15. Garbage is
+		still refused. Frappe 16 injects the default only for ``default = "now"``
+		fields, so the value is ``None`` there -- which is why CI (Frappe 16) never
+		caught the break."""
+		from jarvis.chat.macro_scheduler import parse_schedule_seconds
+
+		self.assertEqual(parse_schedule_seconds("12:53:02.208095"), 46382)
+		self.assertEqual(parse_schedule_seconds("00:00:00.000000"), 0)
+		self.assertEqual(parse_schedule_seconds("23:59:59.999999"), 86399)
+		# Still rejected: out of range, a fraction on the wrong component, and a
+		# non-digit fraction are all garbage, not a time of day.
+		self.assertIsNone(parse_schedule_seconds("99:00:00.5"))
+		self.assertIsNone(parse_schedule_seconds("12.5:00"))
+		self.assertIsNone(parse_schedule_seconds("12:00:00.abc"))
+
+	def test_install_without_a_schedule_time_is_accepted(self):
+		"""End-to-end regression for the Frappe-15 install break: creating an
+		installation WITHOUT a ``schedule_time`` must not throw. Pre-fix the
+		framework-injected microsecond ``nowtime()`` failed the schedule_time
+		validation and NO agent could be installed on a Frappe-15 customer bench.
+		The stored value must read back as a real time of day or be empty."""
+		from jarvis.chat.macro_scheduler import parse_schedule_seconds
+
+		# _install -> _mk_gate_install -> get_doc(...).insert() with no schedule_time,
+		# so the insert exercises the framework default-injection path.
+		name = self._install()
+		self.assertTrue(frappe.db.exists(INSTALLATION, name))
+		stored = frappe.db.get_value(INSTALLATION, name, "schedule_time")
+		if stored not in (None, ""):
+			self.assertIsNotNone(
+				parse_schedule_seconds(stored),
+				"a framework-injected schedule_time must read back as a time of day",
+			)
+
 	def test_a_row_holding_a_legacy_bad_time_cannot_be_saved_by_the_DB_either(self):
 		"""Review asked whether validating on EVERY save strands a row that already
 		holds a bad value, since ``set_enabled`` / ``set_config`` go through

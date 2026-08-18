@@ -64,9 +64,9 @@ beforeEach(() => {
 });
 
 describe("SupportSidebar", () => {
-	it("offers Support tickets + Jarvis chat nav links, each to the right route", () => {
+	it("offers Support Tickets + Jarvis chat nav links, each to the right route", () => {
 		const w = mountSidebar();
-		expect(linkBy(w, "Support tickets").props("to")).toEqual({ name: "Support" });
+		expect(linkBy(w, "Support Tickets").props("to")).toEqual({ name: "Support" });
 		expect(linkBy(w, "Jarvis chat").props("to")).toEqual({ name: "Chat" });
 	});
 
@@ -75,11 +75,11 @@ describe("SupportSidebar", () => {
 		expect(w.findComponent({ name: "Button" }).exists()).toBe(false);
 	});
 
-	it("marks 'Support tickets' active across support routes, not otherwise", () => {
+	it("marks 'Support Tickets' active across support routes, not otherwise", () => {
 		routePath = "/support/TCK-1";
-		expect(linkBy(mountSidebar(), "Support tickets").props("isActive")).toBe(true);
+		expect(linkBy(mountSidebar(), "Support Tickets").props("isActive")).toBe(true);
 		routePath = "/"; // (contrived — the rail only shows on support routes) pins the computed
-		expect(linkBy(mountSidebar(), "Support tickets").props("isActive")).toBe(false);
+		expect(linkBy(mountSidebar(), "Support Tickets").props("isActive")).toBe(false);
 	});
 
 	it("renders the reused chat user card at the top", () => {
@@ -89,23 +89,23 @@ describe("SupportSidebar", () => {
 	it("collapses/expands on the toggle and persists the choice", async () => {
 		const w = mountSidebar();
 		// starts expanded: labels shown, toggle says "Collapse"
-		expect(linkBy(w, "Support tickets").props("isCollapsed")).toBe(false);
+		expect(linkBy(w, "Support Tickets").props("isCollapsed")).toBe(false);
 		expect(linkBy(w, "Collapse")).toBeTruthy();
 
 		await linkBy(w, "Collapse").trigger("click");
-		expect(linkBy(w, "Support tickets").props("isCollapsed")).toBe(true);
+		expect(linkBy(w, "Support Tickets").props("isCollapsed")).toBe(true);
 		expect(linkBy(w, "Expand")).toBeTruthy(); // label flipped
 		expect(localStorage.getItem("jv-support-sidebar-collapsed")).toBe("1");
 
 		await linkBy(w, "Expand").trigger("click");
-		expect(linkBy(w, "Support tickets").props("isCollapsed")).toBe(false);
+		expect(linkBy(w, "Support Tickets").props("isCollapsed")).toBe(false);
 		expect(localStorage.getItem("jv-support-sidebar-collapsed")).toBe("0");
 	});
 
 	it("starts collapsed when the persisted choice says so", () => {
 		localStorage.setItem("jv-support-sidebar-collapsed", "1");
 		const w = mountSidebar();
-		expect(linkBy(w, "Support tickets").props("isCollapsed")).toBe(true);
+		expect(linkBy(w, "Support Tickets").props("isCollapsed")).toBe(true);
 		expect(w.classes()).toContain("jv-supsb-collapsed");
 	});
 });

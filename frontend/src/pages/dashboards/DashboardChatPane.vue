@@ -72,27 +72,51 @@
 							:key="m.name"
 							:spec="activeAsk"
 							:style="paletteVars"
+							:busy="sending || runActive"
 							@submit="sendText"
 						/>
 					</div>
 				</template>
 
-				<!-- thinking indicator: subtle three-dot pulse while a run is active -->
+				<!-- build progress while a run is active: the same Understanding /
+				     Querying data / Composing / Publishing ticks main chat's live
+				     dashboard-build card shows, once real tool activity names a
+				     phase; a plain three-dot pulse while it is still indeterminate
+				     (a mount that joined a run already in flight, or one that
+				     hasn't seen its first tool yet). -->
 				<div
 					v-if="runActive"
 					role="status"
 					aria-live="polite"
-					class="flex items-center gap-2 pt-1"
+					class="flex items-center gap-3 pt-1"
 				>
-					<span class="flex gap-1" aria-hidden="true">
+					<template v-if="buildTickIndex >= 0">
 						<span
-							v-for="i in 3"
-							:key="i"
-							class="size-1.5 rounded-full bg-surface-gray-5 motion-safe:animate-pulse"
-							:style="{ animationDelay: (i - 1) * 0.18 + 's' }"
-						/>
-					</span>
-					<span class="text-xs text-ink-gray-5">Thinking…</span>
+							v-for="(ph, i) in DASHBOARD_BUILD_PHASES"
+							:key="ph.key"
+							class="flex items-center gap-1.5 text-xs"
+							:class="i <= buildTickIndex ? 'text-ink-gray-7' : 'text-ink-gray-4'"
+						>
+							<span
+								class="size-1.5 rounded-full"
+								:class="
+									i <= buildTickIndex ? 'bg-surface-gray-7' : 'bg-surface-gray-3'
+								"
+							/>
+							{{ ph.label }}
+						</span>
+					</template>
+					<template v-else>
+						<span class="flex gap-1" aria-hidden="true">
+							<span
+								v-for="i in 3"
+								:key="i"
+								class="size-1.5 rounded-full bg-surface-gray-5 motion-safe:animate-pulse"
+								:style="{ animationDelay: (i - 1) * 0.18 + 's' }"
+							/>
+						</span>
+						<span class="text-xs text-ink-gray-5">Thinking…</span>
+					</template>
 				</div>
 			</div>
 		</div>
@@ -139,7 +163,10 @@
 		     disabled gets blurred by the browser, which fires `change` — the
 		     frappe-ui Textarea this used to be listens on `change` too and
 		     re-emitted the PRE-CLEAR value, restoring the message we had just
-		     sent. Only the send button and send() are gated on `sending`. -->
+		     sent. Only the send button and send() are gated on `sending` /
+		     `runActive` — repeat Enter/click while a turn is still running (even
+		     after the POST that started it has long since resolved) must not fire
+		     a second turn for the same conversation. -->
 		<div class="shrink-0 border-t px-4 py-3">
 			<textarea
 				ref="box"
@@ -191,9 +218,9 @@
 				<Button
 					variant="solid"
 					label="Send"
-					:disabled="!draft.trim() || sending"
+					:disabled="!draft.trim() || sending || runActive"
 					:loading="sending"
-					@click="send"
+					@click="send()"
 				/>
 			</div>
 		</div>
@@ -214,10 +241,15 @@
 //                      clears storage and starts fresh.
 //   realtime         → "jarvis:event" frames for OUR conversation schedule a
 //                      debounced (300ms) get_conversation refetch; run:start
-//                      raises run-active, run:end / run:error clear it.
-//                      kind==="canvas" frames for our conversation bubble up
-//                      as emit("canvas", {message_id, items}) - the page pulls
-//                      the html artifact onto the canvas pane.
+//                      raises run-active (and starts tracking tool:start/end
+//                      for the phase ticks below), run:end / run:error clear
+//                      it. kind==="canvas" frames for our conversation bubble
+//                      up as emit("canvas", {message_id, items}) - the page
+//                      pulls the html artifact onto the canvas pane.
+//                      kind==="dashboard" frames (the new save_dashboard tool,
+//                      jarvis#884 - dashboards no longer land as a canvas
+//                      artifact) bubble up as emit("dashboard", {name}) - the
+//                      page loads that saved row as the current document.
 //   no socket        → (?nosocket / headless QA) a bounded refetch ladder after
 //                      each send stands in for the realtime frames.
 import { ref, computed, watch, nextTick, inject, onMounted, onBeforeUnmount } from "vue";
@@ -230,6 +262,12 @@ import AskCard from "@/components/chat/AskCard.vue";
 import { renderMarkdown } from "@/markdown";
 import { parseAsk } from "@/lib/chatAsk";
 import { builderCanvasFrame } from "@/lib/dashboardRestore";
+import { gotoFiredKey, parseFiredStamp, encodeFiredStamp } from "@/lib/chatGoto";
+import {
+	DASHBOARD_BUILD_PHASES,
+	dashboardBuildPhase,
+	phaseTickIndex,
+} from "@/lib/dashboardBuildCard";
 import { useJarvisTheme } from "@/theme";
 import { session } from "@/data/session";
 import { sendDashboardChat, getDashboardConversation } from "@/api/dashboards";
@@ -251,8 +289,10 @@ const props = defineProps({
 
 // canvas: {message_id, items[, restore]} for a canvas frame on our conversation
 // (restore = replayed from the loaded transcript, not a live socket frame);
-// activity: a run ended (the page may refresh lists); reset: New chat clicked.
-const emit = defineEmits(["canvas", "activity", "reset"]);
+// activity: a run ended (the page may refresh lists); reset: New chat clicked;
+// dashboard: {name} - the agent's save_dashboard tool saved a row this turn
+// (jarvis#884), so the page can load it as the current document.
+const emit = defineEmits(["canvas", "activity", "reset", "dashboard"]);
 
 const router = useRouter();
 const socket = inject("$socket", null);
@@ -508,6 +548,24 @@ const sending = ref(false);
 const draft = ref("");
 const box = ref(null);
 
+// ── build phase ticks (issue #884) ───────────────────────────────────────────
+// Same real signals ChatView keeps for its own "Working on it…" line and the
+// live dashboard-build card: tool:start/tool:end for OUR conversation ->
+// activeTools, and whether the run has started but not yet shown its first
+// tool. dashboardBuildPhase never actually reads statusPhase (only whether a
+// tool is running, has run, or nothing has happened yet), so it is passed
+// null here - this pane has no equivalent of ChatView's "analyzing" text.
+const activeTools = ref([]); // {id, name, status}[] for the run in progress
+const waitingFirstTool = ref(false); // true from run:start until the first tool:start
+const buildPhaseKey = computed(() =>
+	dashboardBuildPhase({
+		activeTools: activeTools.value,
+		statusPhase: null,
+		waiting: waitingFirstTool.value,
+	})
+);
+const buildTickIndex = computed(() => phaseTickIndex(buildPhaseKey.value));
+
 // Explicit data-mode toggle (goal requirement): "auto" = one of the questions
 // the agent asks before the first build (it no longer guesses from wording),
 // "static" = baked one-time report, "live" = declared view-time sources.
@@ -558,9 +616,32 @@ function onTranscript(text) {
 // screen, so the follow watcher below must not tear its Thinking indicator down.
 let ownRepoint = false;
 
-async function send() {
+// jarvis#912: the fired stamp's conversation slot (see lib/chatGoto.js) is
+// written here, the one place a send() call learns which conversation a
+// ```jarvis-goto message's hand-off actually landed on - fresh or repointed.
+// `messageId` comes from sendText()'s caller; a message-less send (the
+// ordinary composer, AskCard answers, the save dialog's "fix in chat") passes
+// none and this is a no-op.
+function recordGotoConversation(messageId, conv) {
+	if (!messageId || !conv) return;
+	const key = gotoFiredKey(messageId);
+	const stamp = parseFiredStamp(localStorage.getItem(key));
+	localStorage.setItem(key, encodeFiredStamp(stamp ? stamp.t : Date.now(), conv));
+}
+
+// jarvis#912 round 2: undo the provisional claim gotoDashboards (ChatView.vue)
+// writes before a goto-seeded send() ever starts. A send that fails never
+// reaches recordGotoConversation above, so without this the claim would sit
+// there un-resolved - within its freshness window (claimGotoFire) that just
+// reads as "still in flight" and self-heals, but permanently blocking a retry
+// is not worth waiting out a window for when the failure is known right here.
+function forgetGotoClaim(messageId) {
+	if (messageId) localStorage.removeItem(gotoFiredKey(messageId));
+}
+
+async function send(gotoMessageId = "") {
 	const text = draft.value.trim();
-	if (!text || sending.value) return;
+	if (!text || sending.value || runActive.value) return;
 	sending.value = true;
 	draft.value = "";
 	// optimistic user bubble - reconciled by the next transcript refetch
@@ -580,6 +661,7 @@ async function send() {
 			// rejected (single-flight guard / usage cap) - nothing persisted
 			messages.value = messages.value.filter((m) => m.name !== tmpName);
 			if (!draft.value) draft.value = text;
+			forgetGotoClaim(gotoMessageId);
 			toast.error(r.reason || "Couldn't send your message.");
 			return;
 		}
@@ -587,12 +669,20 @@ async function send() {
 			ownRepoint = true;
 			conversation.value = r.conversation_id;
 		}
+		recordGotoConversation(gotoMessageId, r.conversation_id || conversation.value);
 		runActive.value = true;
+		// This send's own optimistic start - a run:start frame for the same run
+		// arrives moments later and does the same reset, but the ticks should
+		// read "Understanding" from the instant Send is clicked, not lag behind
+		// the socket round trip.
+		activeTools.value = [];
+		waitingFirstTool.value = true;
 		nextTick(scrollBottom);
 		if (!socket) startNoSocketLadder();
 	} catch (e) {
 		messages.value = messages.value.filter((m) => m.name !== tmpName);
 		if (!draft.value) draft.value = text;
+		forgetGotoClaim(gotoMessageId);
 		toast.error(errHtml(e));
 	} finally {
 		sending.value = false;
@@ -639,12 +729,15 @@ watch(conversation, (id, prev) => {
 });
 
 // Post a message into this pane programmatically (the save dialog's "Ask the
-// assistant to fix these" hand-off). Ignored while a send is already in flight.
-function sendText(text) {
+// assistant to fix these" hand-off, AskCard's answer submit, a ```jarvis-goto
+// hand-off's seeded first message). Ignored while a send is already in flight
+// OR a turn is still running for this conversation. `gotoMessageId` names the
+// goto message this send answers (jarvis#912) - see recordGotoConversation.
+function sendText(text, gotoMessageId = "") {
 	const t = String(text || "").trim();
-	if (!t || sending.value) return;
+	if (!t || sending.value || runActive.value) return;
 	draft.value = t;
-	send();
+	send(gotoMessageId);
 }
 // Re-issue the transcript's restore frame. The page holds restores off while a
 // ?chat=&canvas= promotion is in flight (an explicit deep-link owns the canvas);
@@ -669,18 +762,53 @@ function onEvent(p) {
 		emit("canvas", { message_id: p.message_id, items: p.items });
 		return;
 	}
+	// the agent's save_dashboard tool saved a row this turn (jarvis#884) - the
+	// page loads it as the current document, no discard confirm needed since
+	// it is this same chat's own build
+	if (p.kind === "dashboard") {
+		emit("dashboard", { name: p.name });
+		return;
+	}
 	// any frame for OUR conversation refreshes the transcript (debounced)
 	scheduleRefetch();
 	switch (p.kind) {
 		case "run:start":
 			runActive.value = true;
+			activeTools.value = [];
+			waitingFirstTool.value = true;
 			break;
+		case "tool:start": {
+			const id = p.tool_call_id || `${p.tool_name}-${activeTools.value.length}`;
+			activeTools.value = [
+				...activeTools.value,
+				{ id, name: p.tool_name, status: "running" },
+			];
+			waitingFirstTool.value = false;
+			break;
+		}
+		case "tool:end": {
+			// tool_call_id is optional on the wire; tool:start synthesized a
+			// fallback id for an id-less frame, so an id-less end must fall back
+			// too (latest running entry with the same name) or the entry stays
+			// "running" and the phase ticks freeze on it for the rest of the turn.
+			const t =
+				(p.tool_call_id && activeTools.value.find((x) => x.id === p.tool_call_id)) ||
+				[...activeTools.value]
+					.reverse()
+					.find((x) => x.name === p.tool_name && x.status === "running");
+			if (t) t.status = p.status || "completed";
+			break;
+		}
 		case "run:end":
 			runActive.value = false;
+			activeTools.value = [];
+			waitingFirstTool.value = false;
 			emit("activity");
 			break;
 		case "run:error":
 			runActive.value = false;
+			activeTools.value = [];
+			waitingFirstTool.value = false;
 			break;
 	}
 }

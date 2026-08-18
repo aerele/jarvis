@@ -14,8 +14,14 @@
  * and offer to put a person on it instead.
  */
 
-/** Checks against one intent before the support moment is surfaced. */
-export const SUPPORT_AFTER_CHECKS = 4;
+/** Checks against one intent before the support moment is surfaced.
+ *
+ * Lowered from 4 (jarvis onboarding-return-heal): a customer stuck in
+ * PAYMENT_CONFIRMATION_PENDING/UNKNOWN now gets auto-polled (see
+ * OnboardingView's pending auto-poll), so a click-driven ceiling tuned for a
+ * customer who has to press the button four times themselves left an
+ * auto-polled customer waiting far longer than that for the same offer. */
+export const SUPPORT_AFTER_CHECKS = 2;
 
 /** A counter keyed to nothing yet. */
 export function emptyCounter() {

@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import { frappeUiStubs } from "./stubs.js";
+import { SKILLS_SCHEMA, DESCRIPTION, ENABLED } from "./fixtures.js";
+import { clauseForEntry } from "@/components/list/filterModel";
 
 /**
  * FilterGroup against the REAL frappe-ui Popover.
@@ -131,6 +133,78 @@ describe("FilterGroup on the real Popover", () => {
 		await w.find('button[aria-label="Filter"]').trigger("click");
 		await settle();
 		expect(w.emitted("request-schema")).toHaveLength(2);
+		w.unmount();
+	});
+});
+
+// The regression this whole change exists to fix: a FormControl select's reka
+// SelectPortal would NOT open inside the teleported Popover, so the operator was
+// unpickable. PanelSelect keeps the listbox inline; prove it opens + applies
+// against the REAL Popover, which the stubbed specs cannot vouch for.
+describe("FilterGroup operator picker on the real Popover", () => {
+	it("opens the operator listbox in-panel and applies a pick without dismissing it", async () => {
+		const w = mount(FilterGroup, {
+			attachTo: document.body,
+			props: {
+				schema: SKILLS_SCHEMA,
+				schemaState: "ready",
+				clauses: [clauseForEntry(DESCRIPTION)],
+			},
+		});
+		await w.find('button[aria-label="Filter"]').trigger("click");
+		await settle();
+
+		const trigger = document.querySelector('button[aria-label^="Condition for"]');
+		expect(trigger).toBeTruthy();
+		trigger.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		await settle();
+
+		// the listbox is inline in the panel's own DOM - a SelectPortal would not open here
+		const options = document.querySelectorAll('[role="listbox"] [role="option"]');
+		expect(options.length).toBeGreaterThan(1);
+
+		// pick a NON-current operator; the panel must stay open and the clause update
+		const current = w.props("clauses")[0].operator;
+		let target = null;
+		options.forEach((o) => {
+			if (!target && o.getAttribute("aria-selected") === "false") target = o;
+		});
+		target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+		await settle();
+
+		expect(w.emitted("update:clauses").at(-1)[0][0].operator).not.toBe(current);
+		expect(document.querySelectorAll("[data-filter-row]")).toHaveLength(1); // still open
+		w.unmount();
+	});
+
+	// The exact case the owner hit: Enabled -> equals -> No. The Check VALUE select is
+	// also a PanelSelect now; prove its dropdown opens in-panel and applies "No".
+	it("opens the Check value dropdown in-panel and applies 'No' without dismissing", async () => {
+		const w = mount(FilterGroup, {
+			attachTo: document.body,
+			props: {
+				schema: SKILLS_SCHEMA,
+				schemaState: "ready",
+				clauses: [clauseForEntry(ENABLED)],
+			},
+		});
+		await w.find('button[aria-label="Filter"]').trigger("click");
+		await settle();
+
+		const valueTrigger = document.querySelector('button[aria-label^="Value for"]');
+		expect(valueTrigger).toBeTruthy();
+		valueTrigger.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		await settle();
+
+		const options = Array.from(document.querySelectorAll('[role="listbox"] [role="option"]'));
+		expect(options.map((o) => o.textContent.trim())).toEqual(["Yes", "No"]);
+		options
+			.find((o) => o.textContent.includes("No"))
+			.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+		await settle();
+
+		expect(w.emitted("update:clauses").at(-1)[0][0].value).toBe("0"); // No -> "0"
+		expect(document.querySelectorAll("[data-filter-row]")).toHaveLength(1); // still open
 		w.unmount();
 	});
 });

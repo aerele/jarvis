@@ -425,8 +425,19 @@ def _ensure_company(name: str, abbr: str) -> None:
 				"abbr": abbr,
 				"default_currency": "INR",
 				"country": "India",
+				# COA is skipped above, so this company has NO default inventory
+				# account; perpetual inventory MUST be off or erpnext refuses to
+				# create a Warehouse here ("Please set Account in Warehouse ... or
+				# Default Inventory Account in Company"). This showed up only under
+				# some test-shard orderings; the fixture never posts stock, so
+				# disabling it just lets _ensure_warehouse succeed deterministically.
+				"enable_perpetual_inventory": 0,
 			}
 		).insert(ignore_permissions=True)
+		# Belt-and-suspenders: if a Company hook re-enabled it on insert, force off
+		# before any Warehouse is created against this company.
+		if frappe.db.get_value("Company", name, "enable_perpetual_inventory"):
+			frappe.db.set_value("Company", name, "enable_perpetual_inventory", 0)
 	finally:
 		frappe.local.flags.ignore_chart_of_accounts = False
 
@@ -466,6 +477,13 @@ def _ensure_warehouse(name: str, company: str) -> str:
 			"company": company,
 		}
 	)
+	# Upstream erpnext develop now validates a new Warehouse against the
+	# company's inventory account (Warehouse.validate_inventory_account ->
+	# get_warehouse_account), and this fixture's companies deliberately skip
+	# chart-of-accounts creation - they exist for permission checks, not a
+	# ledger. Use the escape flag upstream provides for exactly this case
+	# (harmless on older erpnext that predates the validation).
+	doc.flags.ignore_inventory_account_validation = True
 	doc.insert(ignore_permissions=True)
 	return doc.name
 

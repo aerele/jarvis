@@ -190,3 +190,46 @@ test("the Dashboards builder pane RENDERS the ask instead of swallowing it", () 
 	assert.match(dashPaneSrc, /<AskCard[\s\S]{0,240}:key="m\.name"/);
 	assert.match(chatViewSrc, /<AskCard[\s\S]{0,200}:key="m\.name"/);
 });
+
+// ---- owner-reported: clicking Submit/answer twice fires duplicate answers -
+
+const fnBody = (src, decl) => {
+	const start = src.indexOf(decl);
+	assert.notEqual(start, -1, `source must still define ${decl}`);
+	const end = src.indexOf("\n}", start + decl.length);
+	assert.notEqual(end, -1, `${decl} must close at the top level`);
+	return src.slice(start, end);
+};
+
+test("submit() locks BEFORE emitting, so a second click cannot dispatch a second answer", () => {
+	const submit = fnBody(askCardSrc, "function submit()");
+	const lockAt = submit.indexOf("answered.value = true;");
+	const emitAt = submit.indexOf('emit("submit"');
+	assert.notEqual(lockAt, -1, "submit() must set the answered lock");
+	assert.notEqual(emitAt, -1);
+	assert.ok(lockAt < emitAt, "the lock must be set before the emit (optimistic)");
+	// re-entrant/re-render guard: already answered, or the host is busy, refuses
+	assert.match(submit, /if \(!ready\.value \|\| answered\.value \|\| props\.busy\) return;/);
+});
+
+test("an answered ask stays inert: every control disables on `answered`, not just Submit", () => {
+	// The submit button locks on its own answered flag...
+	assert.match(askCardSrc, /:disabled="!ready \|\| answered \|\| busy"/);
+	// ...and every input a user could still poke after answering is disabled too,
+	// so a re-render from server state can never present a re-editable, re-clickable
+	// card for an ask that was already dispatched.
+	const disabledOnAnswered = (askCardSrc.match(/:disabled="answered"/g) || []).length;
+	assert.equal(
+		disabledOnAnswered,
+		7,
+		"yesno + single/multi option buttons, date, datetime, text, link and Other inputs must all gate on `answered`"
+	);
+});
+
+test("the Submit button also refuses while the host would silently swallow the answer", () => {
+	// AskCard declares the busy prop...
+	assert.match(askCardSrc, /busy: \{ type: Boolean, default: false \}/);
+	// ...both hosts wire their real in-flight signal into it...
+	assert.match(chatViewSrc, /<AskCard[\s\S]{0,200}:busy="sending"/);
+	assert.match(dashPaneSrc, /<AskCard[\s\S]{0,240}:busy="sending \|\| runActive"/);
+});

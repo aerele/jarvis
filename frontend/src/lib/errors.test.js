@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { errMessage, turnErrorInfo } from "./errors.js";
+import { errMessage, turnErrorInfo, GENERIC_ERROR_MESSAGE } from "./errors.js";
 
 test("extracts the first server message when present", () => {
 	assert.equal(errMessage({ messages: ["Settings -> Developer"] }), "Settings -> Developer");
@@ -17,8 +17,8 @@ test("falls back to e.message when there are no server messages", () => {
 });
 
 test("falls back to a generic sentence for a falsy error", () => {
-	assert.equal(errMessage(null), "Something went wrong. Please try again.");
-	assert.equal(errMessage(undefined), "Something went wrong. Please try again.");
+	assert.equal(errMessage(null), GENERIC_ERROR_MESSAGE);
+	assert.equal(errMessage(undefined), GENERIC_ERROR_MESSAGE);
 });
 
 // #696: frappe-ui's call() can itself crash mid-parse (error.exc_type read with
@@ -31,17 +31,17 @@ test("never echoes a raw TypeError's message (the exact #696 crash, current V8 w
 	const msg = errMessage(e);
 	assert.notEqual(msg, e.message);
 	assert.doesNotMatch(msg, /exc_type/);
-	assert.equal(msg, "Something went wrong. Please try again.");
+	assert.equal(msg, GENERIC_ERROR_MESSAGE);
 });
 
 test("never echoes a raw TypeError's message (pre-2021 V8 wording)", () => {
 	const e = new TypeError("Cannot read property 'exc_type' of undefined");
-	assert.equal(errMessage(e), "Something went wrong. Please try again.");
+	assert.equal(errMessage(e), GENERIC_ERROR_MESSAGE);
 });
 
 test("also catches the null-target form of the same crash", () => {
 	const e = new TypeError("Cannot read properties of null (reading 'exc_type')");
-	assert.equal(errMessage(e), "Something went wrong. Please try again.");
+	assert.equal(errMessage(e), GENERIC_ERROR_MESSAGE);
 });
 
 // Round-4 review F2: a blanket `instanceof TypeError` (or Reference/SyntaxError)
@@ -113,7 +113,7 @@ test("a 401 with no usable message gets the same session-expired sentence", () =
 // not somehow trip the 401/403 branch.
 test("the #696 crash shape (no status) falls through to the generic sentence, not session-expired", () => {
 	const e = new TypeError("Cannot read properties of undefined (reading 'exc_type')");
-	assert.equal(errMessage(e), "Something went wrong. Please try again.");
+	assert.equal(errMessage(e), GENERIC_ERROR_MESSAGE);
 });
 
 test("a non-auth status keeps its own message", () => {

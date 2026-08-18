@@ -11,6 +11,7 @@ import { mount, flushPromises } from "@vue/test-utils";
 import { CHECKOUT_NAV_KEY } from "@/onboarding/checkoutNav";
 import { STATES } from "@/onboarding/paymentMachine";
 import { ACTIONS } from "@/onboarding/paymentCodes";
+import { toast } from "frappe-ui";
 
 // A raw {status, body} envelope, exactly what the flow's codec decodes.
 const ENVELOPE = (data, over = {}) => ({
@@ -233,6 +234,29 @@ describe("operator-issued reconnect code: direct redeem vs emailed request", () 
 		await wrapper.vm.submitReconnectCode();
 		expect(api.redeemReconnectCode).toHaveBeenCalledWith("ABCD2345", "known@example.com");
 		expect(api.checkAccountReconnect).not.toHaveBeenCalled();
+	});
+
+	it("a lapsed (renew_payment) landing hands off to the billing page, not Connect", async () => {
+		// The v1 fix for the shipped-gate strand: an Expired account's container was stopped on
+		// expiry, so the code re-authenticates but there is nothing to connect to. The bench must
+		// hand off to /jarvis/billing (the renew surface), never advance to Connect and strand.
+		const assign = vi.fn();
+		const realLocation = window.location;
+		Object.defineProperty(window, "location", {
+			configurable: true,
+			value: { ...realLocation, assign },
+		});
+		api.redeemReconnectCode.mockResolvedValue({ status: "renew_payment" });
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "reconnect";
+		wrapper.vm.state.reconnectDirect = true;
+		wrapper.vm.state.reconnectCode = "ABCD2345";
+		wrapper.vm.state.reconnectEmail = "known@example.com";
+		await wrapper.vm.submitReconnectCode();
+		expect(assign).toHaveBeenCalledWith("/jarvis/billing");
+		expect(wrapper.vm.state.step).not.toBe("connect");
+		Object.defineProperty(window, "location", { configurable: true, value: realLocation });
 	});
 
 	it("request-mode submit polls the started request, never the direct redeem", async () => {
@@ -693,6 +717,207 @@ describe("812: Company field is constrained once ERPNext has real Company record
 	});
 });
 
+// Forced-reconnect gate: an eligible returning (email, company) may only reconnect,
+// keyed on the customer-ASSERTED identity (identityFromUser), never the admin prefill.
+describe("Returning-customer forced reconnect gate", () => {
+	async function detailsView({
+		eligible,
+		needs_company = false,
+		typed = true,
+		company = "Corp",
+	}) {
+		api.reconnectAvailable.mockResolvedValue({ eligible, needs_company });
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		wrapper.vm.state.email = "back@corp.test";
+		wrapper.vm.state.company = company;
+		wrapper.vm.state.identityFromUser = typed; // typed => reconnectIdentity present
+		// Contact number is mandatory on Details now; fill it so onDetailsSubmit's
+		// gate doesn't block these reconnect-flow tests on an unrelated field.
+		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		// The required T&C checkbox now lives on Details too, but these tests are
+		// about the reconnect gate specifically, so tick it by default (a
+		// dedicated test below asserts the reconnect branch does NOT need it).
+		wrapper.vm.state.termsAccepted = true;
+		await flushPromises();
+		return wrapper;
+	}
+
+	it("C1: forces reconnect (no goNext to plan) for an eligible account matching the typed identity", async () => {
+		api.startAccountReconnect.mockResolvedValue({ request: "req_1" });
+		const wrapper = await detailsView({ eligible: true });
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		// The await inside onDetailsSubmit resolved eligibility (it was NOT pre-settled
+		// by the debounce) - this is also the race-closure guarantee (C3).
+		expect(api.startAccountReconnect).toHaveBeenCalledWith("back@corp.test", "Corp");
+		expect(wrapper.vm.state.step).toBe("reconnect");
+	});
+
+	it("the required T&C checkbox does NOT gate the reconnect branch - a returning customer reconnecting an existing paid account never went through it before", async () => {
+		api.startAccountReconnect.mockResolvedValue({ request: "req_1" });
+		const wrapper = await detailsView({ eligible: true });
+		wrapper.vm.state.termsAccepted = false; // deliberately unticked
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).toHaveBeenCalledWith("back@corp.test", "Corp");
+		expect(wrapper.vm.state.step).toBe("reconnect");
+	});
+
+	it("C1: does NOT force reconnect when the eligible email was only prefilled (not typed)", async () => {
+		const wrapper = await detailsView({ eligible: true, typed: false });
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).not.toHaveBeenCalled();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	it("mustReconnect is true only when eligible AND the identity is asserted", async () => {
+		const wrapper = await detailsView({ eligible: true, typed: false });
+		wrapper.vm.state.reconnectEligible = true; // eligible, but prefill-only identity
+		await flushPromises();
+		expect(wrapper.vm.mustReconnect).toBe(false);
+		wrapper.vm.state.identityFromUser = true; // now asserted
+		await flushPromises();
+		expect(wrapper.vm.mustReconnect).toBe(true);
+	});
+
+	it("C2: two rapid submits fire exactly one reconnect request", async () => {
+		let resolveReq;
+		api.startAccountReconnect.mockReturnValue(new Promise((r) => (resolveReq = r)));
+		const wrapper = await detailsView({ eligible: true });
+		const p1 = wrapper.vm.onDetailsSubmit();
+		const p2 = wrapper.vm.onDetailsSubmit(); // second click during the await window
+		resolveReq({ request: "req_1" });
+		await Promise.all([p1, p2]);
+		await flushPromises();
+		expect(api.startAccountReconnect).toHaveBeenCalledTimes(1);
+	});
+
+	it("C2: startReconnect ignores a re-entrant call while a request is in flight", async () => {
+		let resolveReq;
+		api.startAccountReconnect.mockReturnValue(new Promise((r) => (resolveReq = r)));
+		const wrapper = await detailsView({ eligible: true });
+		const p1 = wrapper.vm.startReconnect();
+		const p2 = wrapper.vm.startReconnect(); // e.g. a double-click on the Reconnect button
+		resolveReq({ request: "req_1" });
+		await Promise.all([p1, p2]);
+		await flushPromises();
+		expect(api.startAccountReconnect).toHaveBeenCalledTimes(1);
+	});
+
+	it("C2: two rapid submits on a non-eligible identity reach 'plan', never skipping to 'pay'", async () => {
+		const wrapper = await detailsView({ eligible: false });
+		const p1 = wrapper.vm.onDetailsSubmit();
+		const p2 = wrapper.vm.onDetailsSubmit();
+		await Promise.all([p1, p2]);
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	it("C4: cancel then continue with the same identity reuses the request (no second call)", async () => {
+		api.startAccountReconnect.mockResolvedValue({ request: "req_1" });
+		const wrapper = await detailsView({ eligible: true });
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).toHaveBeenCalledTimes(1);
+		wrapper.vm.cancelReconnect(); // back to details, clears reconnectRequestId
+		await flushPromises();
+		await wrapper.vm.onDetailsSubmit(); // same identity -> reuse, no fresh request
+		await flushPromises();
+		expect(api.startAccountReconnect).toHaveBeenCalledTimes(1);
+		expect(wrapper.vm.state.step).toBe("reconnect");
+		expect(wrapper.vm.state.reconnectRequestId).toBe("req_1");
+	});
+
+	it("C6: needs_company (email under a different company) does NOT gate - advances to plan", async () => {
+		const wrapper = await detailsView({
+			eligible: false,
+			needs_company: true,
+			company: "WrongCo",
+		});
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).not.toHaveBeenCalled();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	it("a brand-new (non-eligible) customer advances normally to plan", async () => {
+		const wrapper = await detailsView({ eligible: false, company: "NewCo" });
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).not.toHaveBeenCalled();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	it("a failed startReconnect on Details surfaces the error (no silent dead-end)", async () => {
+		api.startAccountReconnect.mockRejectedValue(
+			new Error("reconnect requests are rate limited")
+		);
+		const wrapper = await detailsView({ eligible: true });
+		await wrapper.vm.startReconnect();
+		await flushPromises();
+		// Stays on Details (never reached the reconnect screen)...
+		expect(wrapper.vm.state.step).toBe("details");
+		// ...and the failure is VISIBLE on the Details error banner, not swallowed.
+		expect(wrapper.vm.state.detailsErr).toBeTruthy();
+	});
+
+	it("fails closed: an admin error on the eligibility check advances to plan (no gate)", async () => {
+		api.reconnectAvailable.mockRejectedValue(new Error("admin down"));
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		wrapper.vm.state.email = "back@corp.test";
+		wrapper.vm.state.company = "Corp";
+		wrapper.vm.state.identityFromUser = true;
+		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		wrapper.vm.state.termsAccepted = true;
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(api.startAccountReconnect).not.toHaveBeenCalled();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	// Relies on the Button stub's `label` attr falling through to the root <button>.
+	it("renders the Reconnect CTA (not Continue) only when the gate applies", async () => {
+		const wrapper = await detailsView({ eligible: true });
+		wrapper.vm.state.reconnectEligible = true; // as if the debounce has settled
+		await flushPromises();
+		expect(wrapper.find('button[label="Reconnect to your workspace"]').exists()).toBe(true);
+		expect(wrapper.find('button[label="Continue"]').exists()).toBe(false);
+		// A prefill-only (unasserted) identity keeps the normal Continue button.
+		wrapper.vm.state.identityFromUser = false;
+		await flushPromises();
+		expect(wrapper.find('button[label="Reconnect to your workspace"]').exists()).toBe(false);
+		expect(wrapper.find('button[label="Continue"]').exists()).toBe(true);
+	});
+
+	it("resend keeps the reuse tracker on the fresh request, not the superseded one", async () => {
+		api.startAccountReconnect
+			.mockResolvedValueOnce({ request: "req_1" })
+			.mockResolvedValueOnce({ request: "req_2" });
+		const wrapper = await detailsView({ eligible: true });
+		vi.useFakeTimers();
+		try {
+			await wrapper.vm.onDetailsSubmit(); // issues req_1 -> reconnect screen
+			await flushPromises();
+			await wrapper.vm.resendReconnectCode(); // resend -> req_2 (supersedes req_1)
+			await flushPromises();
+			expect(wrapper.vm.state.reconnectRequestId).toBe("req_2");
+			wrapper.vm.cancelReconnect(); // back to Details (clears reconnectRequestId)
+			await flushPromises();
+			await wrapper.vm.onDetailsSubmit(); // same identity -> reuse the FRESH request
+			await flushPromises();
+			expect(wrapper.vm.state.reconnectRequestId).toBe("req_2");
+			expect(api.startAccountReconnect).toHaveBeenCalledTimes(2); // req_1 + resend; no 3rd
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
 describe("lead-capture + T&C (frozen contract)", () => {
 	it("captures a lead on entering the Plan step once email+company are present", async () => {
 		const wrapper = mountView();
@@ -741,6 +966,59 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		expect(wrapper.vm.billing.consent).toBeUndefined();
 	});
 
+	it("Details renders the required T&C checkbox; Pay no longer renders it", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		await flushPromises();
+		expect(wrapper.find("#jv-ob-terms").exists()).toBe(true);
+
+		wrapper.vm.state.step = "pay";
+		await flushPromises();
+		expect(wrapper.find("#jv-ob-terms").exists()).toBe(false);
+	});
+
+	it("Details' Continue is blocked until the required T&C box is ticked, with a visible inline error (not a toast)", async () => {
+		// Not eligible for reconnect - keeps this on the normal Continue path
+		// the T&C gate actually guards (item 5: reconnect is exempt).
+		api.reconnectAvailable.mockResolvedValue({ eligible: false, needs_company: false });
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		wrapper.vm.state.email = "a@b.com";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.identityFromUser = true;
+		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		wrapper.vm.state.termsAccepted = false;
+		await flushPromises();
+
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("details");
+		expect(wrapper.vm.detailsFieldErrors.terms).toBeTruthy();
+		expect(wrapper.text()).toContain(wrapper.vm.detailsFieldErrors.terms);
+		expect(toast.error).not.toHaveBeenCalled();
+
+		wrapper.vm.state.termsAccepted = true;
+		await flushPromises();
+		await wrapper.vm.onDetailsSubmit();
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("plan");
+	});
+
+	it("Details' Continue button is faded (disabled) until the T&C box is ticked", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.step = "details";
+		await flushPromises();
+		wrapper.vm.state.termsAccepted = false;
+		await flushPromises();
+		expect(wrapper.find('button[label="Continue"]').attributes("disabled")).toBeDefined();
+		wrapper.vm.state.termsAccepted = true;
+		await flushPromises();
+		expect(wrapper.find('button[label="Continue"]').attributes("disabled")).toBeUndefined();
+	});
+
 	it("Pay stays disabled until the required T&C box is ticked", async () => {
 		const wrapper = mountView();
 		await flushPromises();
@@ -761,6 +1039,7 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		wrapper.vm.state.planName = "pro";
 		wrapper.vm.state.paymentProvider = "razorpay";
 		wrapper.vm.state.termsAccepted = false;
+		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
 
 		await wrapper.vm.onPayClick();
 		expect(api.onboardingPaymentApi.startSignup).not.toHaveBeenCalled();
@@ -781,5 +1060,267 @@ describe("lead-capture + T&C (frozen contract)", () => {
 			expect.objectContaining({ terms_accepted: true, contact_consent: true }),
 			expect.anything()
 		);
+	});
+});
+
+// The recovery/summary card's Reference row and the support-ticket body both show
+// attemptId IN FULL now (owner decision), not the old `…`+last-6 mask.
+describe("payment intent reference is shown in full, not masked", () => {
+	it("intentRef, paySummaryRows and supportContext all carry the full attempt id", async () => {
+		const longAttemptId = "att_2f9c8b17e4a1d3509b";
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: longAttemptId,
+				generation: 1,
+			})
+		);
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.pay.value).toBe(STATES.CONFIRM_REQUIRED);
+		expect(wrapper.vm.pay.attemptId).toBe(longAttemptId);
+
+		// Not truncated, no leading ellipsis - the whole id, unlike the old mask.
+		expect(wrapper.vm.intentRef).toBe(longAttemptId);
+		expect(wrapper.vm.intentRef).not.toContain("…");
+
+		const refRow = wrapper.vm.paySummaryRows.find((r) => r.label === "Reference");
+		expect(refRow?.value).toBe(longAttemptId);
+
+		expect(wrapper.vm.supportContext).toContain(`Reference: ${longAttemptId}`);
+	});
+});
+
+// jarvis onboarding-return-heal, fix 1: the FRESH-MOUNT return heal. `?pay=` on
+// first paint only proves the pay page sent the customer back top-level - the
+// passive hydrate (getOnboardingState) reads admin's last-known DB row, never
+// asks the gateway. A fresh mount can never be CHECKOUT_OPEN (paymentMachine.js
+// always initializes to REVIEW), so the in-memory RETURNED_FROM_CHECKOUT exit
+// (usePaymentFlow.hydrate's own frozen-checkout branch) is unreachable here;
+// these pin the mount-time active check (check_signup_payment_status) that
+// covers this path instead, mirroring BillingPage.vue's run-healer-once shape.
+describe("FRESH-MOUNT RETURN HEAL: a genuine top-level ?pay= return converges once", () => {
+	function atSearch(search) {
+		window.history.pushState(null, "", "/onboarding" + search);
+	}
+	afterEach(() => {
+		window.history.pushState(null, "", "/onboarding");
+	});
+
+	it("runs check_signup_payment_status exactly once when a mid-flight signup exists", async () => {
+		atSearch("?pay=failed");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_1", generation: 1 })
+		);
+		mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("does NOT run the active check on an ordinary visit (no ?pay=)", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_1", generation: 1 })
+		);
+		mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+	});
+
+	it("does NOT run the active check when there is no mid-flight signup (day one)", async () => {
+		atSearch("?pay=done");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "BENCH_NO_SIGNUP_CONTEXT" })
+		);
+		mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+	});
+
+	it("a stale (lower-generation) active answer cannot repaint the newer passive state", async () => {
+		atSearch("?pay=failed");
+		// The passive hydrate already knows generation 5 for this attempt.
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: "att_1",
+				generation: 5,
+			})
+		);
+		// A stale active answer carrying an OLDER generation of the same attempt -
+		// the generation fence must drop it outright, never repainting backward.
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_DECLINED", attempt_id: "att_1", generation: 2 })
+		);
+		const wrapper = mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+		expect(wrapper.vm.pay.value).toBe(STATES.CONFIRM_REQUIRED);
+	});
+
+	it("PAID stays a floor: no later active answer undoes it", async () => {
+		atSearch("?pay=failed");
+		// The passive hydrate already found the signup PAID.
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_ALREADY_ACTIVE", attempt_id: "att_1", generation: 2 })
+		);
+		// An ADVANCED-generation active answer (so the generation fence alone would
+		// let it through) that would otherwise walk the machine back to a decline -
+		// only the paid floor stops this one.
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_DECLINED", attempt_id: "att_1", generation: 3 })
+		);
+		const wrapper = mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+		// PAID is a floor: the machine may keep climbing forward off it (the
+		// paid->provisioning handoff fires on its own watcher), but the declined
+		// answer must never have walked it back to FAILED_RETRYABLE.
+		expect([STATES.PAID, STATES.PROVISIONING, STATES.PROVISIONING_DELAYED]).toContain(
+			wrapper.vm.pay.value
+		);
+	});
+});
+
+// jarvis onboarding-return-heal, fix 2: PAYMENT_CONFIRMATION_PENDING / UNKNOWN
+// used to do nothing on their own - every other wait in the wizard polls itself
+// (provisioning 45x2s, readiness 40x3s). These pin the bounded auto-poll: a
+// gentle interval, a hard ceiling with an honest stuck note, and a backoff on
+// PAYMENT_CHECK_RATE_LIMITED instead of hammering through the server's cooldown.
+describe("pending-payment auto-poll", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("auto-polls without a click and offers support within ~2 minutes", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.pay.value).toBe(STATES.UNKNOWN);
+		// Nothing fires before the first tick - a fresh mount already ran its own
+		// one-shot passive hydrate; the poll adds no immediate second call.
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+
+		// SUPPORT_AFTER_CHECKS is 2 (lowered from 4): two auto-polled ticks, no
+		// manual click, and the existing support-offer machinery (noteStatusCheck)
+		// picks them up the same way it counts a manual Check.
+		await vi.advanceTimersByTimeAsync(15_000);
+		await vi.advanceTimersByTimeAsync(15_000);
+
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(2);
+		expect(wrapper.vm.pay.supportOffered).toBe(true);
+	});
+
+	it("stops at the ceiling and shows the honest stuck note, never a silent forever-spinner", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+
+		await vi.advanceTimersByTimeAsync(8 * 15_000); // PENDING_CHECK_ATTEMPTS x interval
+
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(8);
+		expect(wrapper.vm.pendingPollStuck).toBe(true);
+
+		// The ceiling is a hard stop: more elapsed time fires no 9th check.
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(8);
+	});
+
+	it("backs off on a rate limit instead of polling straight through the cooldown", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus
+			.mockResolvedValueOnce({
+				status: 429,
+				body: {
+					message: {
+						ok: false,
+						error: { code: "PAYMENT_CHECK_RATE_LIMITED", retry_after_seconds: 40 },
+						context: {},
+					},
+				},
+			})
+			.mockResolvedValue(
+				ENVELOPE({
+					code: "PAYMENT_CONFIRMATION_PENDING",
+					attempt_id: "att_poll",
+					generation: 1,
+				})
+			);
+		vi.useFakeTimers();
+		mountView();
+		await flushPromises();
+
+		// First tick (t=15s): rate-limited.
+		await vi.advanceTimersByTimeAsync(15_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+
+		// The ordinary interval alone (t=30s) must NOT be enough - the server's
+		// 40s cooldown from the 429 is still running.
+		await vi.advanceTimersByTimeAsync(15_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+
+		// Once the cooldown has fully elapsed, the next attempt fires.
+		await vi.advanceTimersByTimeAsync(40_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(2);
+	});
+
+	it("stops when the customer leaves the Pay step - no late tick into a hidden step", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_CONFIRMATION_PENDING",
+				attempt_id: "att_poll",
+				generation: 1,
+			})
+		);
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.state.step).toBe("pay");
+
+		wrapper.vm.state.step = "details";
+		await flushPromises();
+
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
 	});
 });

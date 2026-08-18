@@ -863,7 +863,9 @@ import uuid
 
 from frappe import _
 
+from jarvis.chat import role_profiles
 from jarvis.chat.agent_client import AgentSession
+from jarvis.chat.entities import scrub
 from jarvis.chat.policy import validate_can_send
 
 _INFLIGHT_FRESH_SECONDS = 180
@@ -2995,7 +2997,22 @@ def enqueue_continuation(conversation: str, receipt: str, *, failed: bool = Fals
 	return _enqueue_turn(conversation, scaffold.format(receipt=safe), hidden=True, exempt_overload=True)
 
 
-def _ensure_session_key(user: str, sess: AgentSession | None = None) -> str:
+def _pushed_profile_slugs(settings) -> set[str]:
+	"""Slugs present in the last-pushed role-profiles snapshot
+	(``Jarvis Settings.role_profiles_pushed``, the
+	``jarvis.chat.role_profiles.needed_profiles`` output J2 stamped there).
+	Empty, missing (schema not migrated yet), or unparseable input returns an
+	empty set, which correctly routes every profile pick to the legacy path -
+	never self-address an agent that may not actually be rendered."""
+	raw = getattr(settings, "role_profiles_pushed", None)
+	try:
+		pushed = frappe.parse_json(raw) if raw else []
+	except Exception:
+		return set()
+	return {p.get("slug") for p in (pushed or []) if isinstance(p, dict) and p.get("slug")}
+
+
+def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile: bool = False) -> str:
 	"""Create an agent session for `user`, persist the Chat Session row,
 	and return the session_key. Caller is responsible for storing it on the
 	parent Conversation row.
@@ -3005,18 +3022,72 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None) -> str:
 	connection (turn_handler.handle_chat_send) so the first turn pays ONE
 	handshake, off the browser-blocking path. The ``sess=None`` one-shot
 	branch remains for callers without a pooled connection.
+
+	``profile`` (keyword-only, default False - legacy behavior): opts a
+	caller into the flag-gated profile pick below. Only the two deferred
+	session-creation points the 2026-07 latency plan moved OUT of
+	``send_message`` - ``turn_handler.handle_chat_send`` and
+	``prepare.run_prepare`` - pass ``profile=True``, because those are the
+	only call sites reached exclusively for a genuine first turn of
+	interactive chat: a macro/scheduled turn (``jarvis.chat.macros`` via
+	``api._enqueue_turn``) always mints its session eagerly, synchronously,
+	before either worker path runs, so this function is never reached a
+	second time for it. Spec §8 - non-chat sessions always run `full` - and
+	macros.py's dispatch try/except relies on this function still THROWING
+	on a misconfigured agent (see the config-presence guard below), so the
+	default must stay the exact legacy path, not silently swallow a
+	misconfiguration into a hung run.
+
+	When ``profile`` is True and ``Jarvis Settings.enable_role_profiles`` is
+	on, and ``role_profiles.resolve_profile(user)`` resolves to a role-based
+	agent whose slug is already present in the last-pushed role-profiles
+	snapshot, that agent is addressed directly via the self-addressing
+	session-key contract (agent_scheduler.py:795-815 -
+	``agent:<agent-id>:<key>``; sessions are lazily created, no
+	``sessions.create`` RPC needed), skipping ``create_session`` entirely.
+	Otherwise (``profile=False``, flag off, or no matching rendered profile)
+	falls through to exactly today's path. Either way the Chat Session row
+	records which profile was picked (main/full when none) in the same
+	insert - the observability hook for this pick (spec §9).
 	"""
-	if sess is not None:
+	settings = frappe.get_single("Jarvis Settings")
+	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
+
+	choice = None
+	# getattr, not settings.enable_role_profiles: a site whose code deployed
+	# ahead of its reload-doctype/migrate has no such attribute yet, and a
+	# missing flag must degrade to exactly today's path, never crash session
+	# creation.
+	if profile and getattr(settings, "enable_role_profiles", 0):
+		resolved = role_profiles.resolve_profile(user)
+		if resolved.agent_id is not None and resolved.agent_id in _pushed_profile_slugs(settings):
+			choice = resolved
+		# else: resolved to main (agent_id is None), or resolved to a profile
+		# not yet rendered on the agent side - fall through to the legacy
+		# path rather than self-address an agent that may not exist there.
+
+	if choice is not None:
+		# Keep the legacy config-presence guard even though this path skips
+		# create_session/sessions.create entirely: a totally unconfigured
+		# agent must still fail fast here, not silently mint a key nothing
+		# can ever connect to.
+		gateway_token = settings.get_password("agent_token")
+		if not gateway_url or not gateway_token:
+			frappe.throw(_("agent is not configured"))
+		# ":dashboard:" is the SAME chat-session namespace marker the gateway
+		# stamps into every legacy-minted key - session_lifecycle.py's
+		# _CHAT_NAMESPACE_MARKER (the idle/orphan reaper) and
+		# session_pin_sweep.py's _is_agent_main_key both key off it.
+		# Omitting it here would make this session permanently invisible to
+		# both sweeps, leaking a live gateway session on every profile pick.
+		session_key = f"agent:{choice.agent_id}:dashboard:jarvis-chat-{scrub(user)}-{int(time.time() * 1000)}"
+	elif sess is not None:
 		# Reuse the caller's already-connected (pooled) session — no extra
 		# connect/handshake. Label includes a timestamp because agent
 		# deduplicates sessions by label and rejects collisions.
 		session_key = sess.create_session(label=f"jarvis-chat-{user}-{int(time.time() * 1000)}")
 	else:
-		settings_check = frappe.get_single("Jarvis Settings")
-		gateway_url = (
-			(settings_check.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
-		)
-		gateway_token = settings_check.get_password("agent_token")
+		gateway_token = settings.get_password("agent_token")
 		if not gateway_url or not gateway_token:
 			frappe.throw(_("agent is not configured"))
 
@@ -3025,8 +3096,6 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None) -> str:
 			session_key = one_shot.create_session(label=f"jarvis-chat-{user}-{int(time.time() * 1000)}")
 		finally:
 			one_shot.close()
-
-	settings = frappe.get_single("Jarvis Settings")
 
 	# C2 stretch (2026-06-16 review): snapshot the bench's current
 	# chat_device_id into the Jarvis Chat Session row. On every
@@ -3037,13 +3106,19 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None) -> str:
 	# a leaked-session-key replay attack to "until the next re-pair."
 	current_device_id = (settings.chat_device_id or "").strip()
 
-	# Insert the Chat Session row (plugin's sessionKey → user lookup table)
+	# Insert the Chat Session row (plugin's sessionKey → user lookup table).
+	# profile_* fields record the pick above (main/full when there was none).
 	frappe.get_doc(
 		{
 			"doctype": "Jarvis Chat Session",
 			"session_key": session_key,
 			"user": user,
 			"chat_device_id": current_device_id,
+			"profile_agent_id": choice.agent_id if choice else "",
+			"profile_tier": choice.tier if choice else "full",
+			"profile_sets": ",".join(choice.set_keys) if choice else "",
+			"profile_n_skills": len(choice.skills or ()) if choice else 0,
+			"profile_n_tools": (choice.n_tools or 0) if choice else 0,
 		}
 	).insert(ignore_permissions=True)
 	frappe.db.commit()

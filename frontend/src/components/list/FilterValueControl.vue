@@ -1,8 +1,7 @@
 <template>
 	<!-- Check → Yes/No mapped to 1/0 (plan §5.1) -->
-	<FormControl
+	<PanelSelect
 		v-if="rendered === 'check'"
-		type="select"
 		:aria-label="ariaLabel"
 		:options="YES_NO"
 		:modelValue="scalar"
@@ -12,9 +11,8 @@
 	<!-- Select → metadata options. A LEADING BLANK is a real option meaning
 	     'not set', so it is labelled rather than dropped, and the "no filter"
 	     choice is removing the row - not picking an empty line. -->
-	<FormControl
+	<PanelSelect
 		v-else-if="rendered === 'select'"
-		type="select"
 		:aria-label="ariaLabel"
 		:options="selectChoices"
 		:modelValue="scalar"
@@ -22,18 +20,16 @@
 	/>
 
 	<!-- is set / is not set -->
-	<FormControl
+	<PanelSelect
 		v-else-if="rendered === 'is'"
-		type="select"
 		:aria-label="ariaLabel"
 		:options="IS_OPTIONS"
 		:modelValue="scalar || 'set'"
 		@update:modelValue="(v) => emitValue(v)"
 	/>
 
-	<FormControl
+	<PanelSelect
 		v-else-if="rendered === 'timespan'"
-		type="select"
 		:aria-label="ariaLabel"
 		:options="timespanChoices"
 		:modelValue="scalar"
@@ -219,6 +215,7 @@
 // {display} title we should keep showing).
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { FormControl, Autocomplete, DatePicker, Badge, FeatherIcon } from "frappe-ui";
+import PanelSelect from "@/components/list/PanelSelect.vue";
 import {
 	controlFor,
 	selectControlOptions,

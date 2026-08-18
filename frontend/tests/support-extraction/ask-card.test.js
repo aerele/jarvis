@@ -9,6 +9,7 @@ import { expect, test, vi } from "vitest";
 // resources chain does not resolve under vitest. Only searchLink is used here.
 vi.mock("@/api", () => ({ searchLink: vi.fn(async () => []) }));
 
+import { searchLink } from "@/api";
 import AskCard from "../../src/components/chat/AskCard.vue";
 import { parseAsk } from "../../src/lib/chatAsk.js";
 import { mountWithPalette } from "./fixtures.js";
@@ -69,12 +70,77 @@ test("the picks survive Submit, so a host that refuses the text loses nothing", 
 	await optionNamed(w, "Approve").trigger("click");
 	await submit(w).trigger("click");
 	expect(optionNamed(w, "Open").classes()).toContain("on");
-	expect(submit(w).attributes("disabled")).toBeUndefined();
-	// ...and a second click re-sends the same answers rather than an empty one
+	expect(findCard(w).emitted("submit")).toHaveLength(1);
+});
+
+test("single-submit: once answered, Submit locks and a second click cannot dispatch again", async () => {
+	// Repeat-click / repeat-Enter is the owner-reported bug: the SAME picks
+	// firing a second "submit" is a duplicate answer, not a legitimate resend.
+	const w = mountWithPalette(AskCard, { spec: CHOICES });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	await submit(w).trigger("click");
+	// locked immediately (optimistic) - the button reflects the answered state
+	expect(submit(w).attributes("disabled")).toBeDefined();
+	expect(submit(w).text()).toBe("Answered");
 	await submit(w).trigger("click");
 	const emitted = findCard(w).emitted("submit");
-	expect(emitted).toHaveLength(2);
-	expect(emitted[1][0]).toBe(emitted[0][0]);
+	expect(emitted).toHaveLength(1);
+});
+
+test("an answered ask stays inert: every control locks, not just Submit", async () => {
+	const w = mountWithPalette(AskCard, { spec: CHOICES });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	await submit(w).trigger("click");
+	// clicking a DIFFERENT option after answering must not change the picks -
+	// the card is inert, not just the Submit button
+	await optionNamed(w, "Closed").trigger("click");
+	expect(optionNamed(w, "Open").classes()).toContain("on");
+	expect(optionNamed(w, "Closed").classes()).not.toContain("on");
+});
+
+test("busy=true refuses the dispatch (host would swallow it) without locking the card", async () => {
+	// The busy window (a send in flight, a turn's tail still running) must not
+	// let the card lock on an answer that was never actually accepted - that
+	// would strand the user behind an inert "Answered" card with nothing sent.
+	const w = mountWithPalette(AskCard, { spec: CHOICES, busy: true });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	expect(submit(w).attributes("disabled")).toBeDefined();
+	await submit(w).trigger("click");
+	expect(findCard(w).emitted("submit")).toBeUndefined();
+	// not locked - the button still reads as an unanswered, resubmittable card
+	expect(submit(w).text()).toBe("Submit answers");
+});
+
+test("busy=false lets an otherwise-ready ask actually dispatch", async () => {
+	const w = mountWithPalette(AskCard, { spec: CHOICES, busy: false });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	expect(submit(w).attributes("disabled")).toBeUndefined();
+	await submit(w).trigger("click");
+	expect(findCard(w).emitted("submit")).toHaveLength(1);
+});
+
+test("answering closes an open link-search dropdown for good, not just the input", async () => {
+	// The dropdown's own buttons had no `answered` gate - only @blur closed it,
+	// timing-fragile against a click that lands before the blur does. Focus AND
+	// input both call searchLink (empty query, then "acm"), so mock persistently.
+	searchLink.mockResolvedValue([{ value: "ACME Corp", description: "Customer" }]);
+	const withLink = spec('[{"q":"Which record?","type":"link","doctype":"Customer"}]');
+	const w = mountWithPalette(AskCard, { spec: withLink });
+	const input = w.find("input.jv-ask-field");
+	await input.trigger("focus");
+	await input.setValue("acm");
+	await vi.waitFor(() => expect(w.findAll(".jv-ask-linkmenu button").length).toBeGreaterThan(0));
+	await w.findAll(".jv-ask-linkmenu button")[0].trigger("mousedown");
+	expect(w.find(".jv-ask-linkmenu").exists()).toBe(false);
+	expect(submit(w).attributes("disabled")).toBeUndefined();
+	await submit(w).trigger("click");
+	// re-focusing (or any other path) must not resurrect the dropdown once answered
+	await input.trigger("focus");
+	expect(w.find(".jv-ask-linkmenu").exists()).toBe(false);
 });
 
 test("clicking a picked option unpicks it (and disarms Submit)", async () => {

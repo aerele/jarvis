@@ -11,9 +11,12 @@ see ``jarvis.chat.turn_handler`` and the design at
 Three entry points:
   * ``get_or_create_user_settings(user)`` — race-safe lazy row creation with an
     explicit ``owner`` so the ``if_owner`` grant holds when an admin triggers it.
-  * ``record_turn_usage(session_key, row)`` — atomic SQL increments on both the
-    per-user ``Jarvis User Settings`` (month-rollover aware) and the cumulative
-    ``Jarvis Chat Session`` fields. Never raises into the turn.
+  * ``record_turn_usage(session_key, row, run_id=None)`` - atomic SQL increments
+    on both the per-user ``Jarvis User Settings`` (month-rollover aware) and the
+    cumulative ``Jarvis Chat Session`` fields, plus a best-effort per-turn
+    ``Jarvis Turn Usage`` row (usage-dashboard Part A, task U1) carrying the
+    session's role-profile fields, the resolved model, and a tool-call count.
+    Never raises into the turn.
   * ``refresh_session_snapshots(rows)`` — the admin "sync from agent" sweep;
     refreshes per-session snapshot fields WITHOUT accumulating counters.
 """
@@ -41,6 +44,11 @@ USER_SETTINGS = "Jarvis User Settings"
 CHAT_SESSION = "Jarvis Chat Session"
 MODEL_USAGE = "Jarvis User Model Usage"
 MODEL_USAGE_FIELD = "user_model_usage"
+TURN_USAGE = "Jarvis Turn Usage"
+CHAT_TURN = "Jarvis Chat Turn"
+CHAT_MESSAGE = "Jarvis Chat Message"
+TURN_USAGE_RETENTION_DAYS = 90
+TURN_USAGE_PRUNE_BATCH_LIMIT = 5000
 
 
 def current_month_key() -> str:
@@ -178,13 +186,21 @@ def resolved_model_identity(row: dict | None) -> tuple[str, str]:
 	return (row.get("model") or "").strip(), (row.get("modelProvider") or "").strip()
 
 
-def record_turn_usage(session_key: str, row: dict | None) -> str:
+def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = None) -> str:
 	"""Record one completed turn's token delta from a ``sessions.list`` row.
 
 	``row`` is the gateway row for THIS session (matched by ``key`` upstream).
 	``inputTokens``/``outputTokens`` are last-run values, so the turn delta is
 	their sum; ``totalTokens`` is the context size (snapshot only). A row with
 	``totalTokensFresh`` false/missing, or null token fields, is do-not-record.
+
+	``run_id`` (task U1, usage-dashboard Part A) is the ``Jarvis Chat Turn.name``
+	finalize's usage effect calls this with, threaded through ONLY to attribute
+	the best-effort ``Jarvis Turn Usage`` row and to seq-bound its tool-call
+	count. Optional and defaulted to ``None`` so the standalone-caller contract
+	(tests, and any future non-finalize caller) is unchanged: without it the row
+	still gets written on the RECORDED/VALID_ZERO paths, just with
+	``tool_calls=0`` and a blank ``run_id``.
 
 	CDX-6 — returns an EXPLICIT outcome so a caller (finalize's usage effect) can
 	distinguish a real accrual from a transient no-data read instead of treating a
@@ -211,11 +227,29 @@ def record_turn_usage(session_key: str, row: dict | None) -> str:
 		input_tokens = int(raw_in or 0)
 		output_tokens = int(raw_out or 0)
 		delta = input_tokens + output_tokens
+		# CDX-review: ONE session fetch (user + profile_agent_id + profile_tier)
+		# covers both branches below - the RECORDED path used to fetch only
+		# `user` here and `_write_turn_usage_row` re-queried the same row for
+		# the two profile fields; VALID_ZERO relied on that same internal
+		# re-query. Widened + threaded through instead (review finding #3).
+		session = (
+			frappe.db.get_value(
+				CHAT_SESSION,
+				{"session_key": session_key},
+				["user", "profile_agent_id", "profile_tier"],
+				as_dict=True,
+			)
+			or {}
+		)
+		user = session.get("user") or ""
 		if delta <= 0:
+			# Task U1: attribution is still worth recording even though there is
+			# no token delta - the turn happened and this is the only record of
+			# WHO it happened for. Isolated + never raises (see the docstring).
+			_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
 			return USAGE_VALID_ZERO
 		context_tokens = int(row.get("totalTokens") or 0)
 
-		user = frappe.db.get_value(CHAT_SESSION, {"session_key": session_key}, "user")
 		if not user:
 			# CDX-6: a FRESH POSITIVE token delta with no `Jarvis Chat Session` user
 			# mapping is unattributed real usage, NOT legitimate zero — it must NOT be
@@ -310,6 +344,10 @@ def record_turn_usage(session_key: str, row: dict | None) -> str:
 					title="jarvis usage: per-model write failed",
 					message=frappe.get_traceback(),
 				)
+		# Task U1: the per-turn usage row, same isolation as the per-model
+		# write just above - a failure here must not lose the aggregate delta
+		# already applied in this transaction, so it only logs and continues.
+		_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
 		frappe.db.commit()
 		return USAGE_RECORDED
 	except Exception:
@@ -320,6 +358,141 @@ def record_turn_usage(session_key: str, row: dict | None) -> str:
 		# A partial write is possible; treat a hard failure as retriable so the
 		# finalize usage effect leaves its guard rolled back and re-attempts.
 		return USAGE_RETRY
+
+
+def _write_turn_usage_row(
+	session_key: str,
+	row: dict | None,
+	run_id: str | None,
+	tokens_in: int,
+	tokens_out: int,
+	session: dict,
+) -> None:
+	"""Best-effort ``Jarvis Turn Usage`` row (task U1, usage-dashboard Part A).
+
+	``session`` is the ``Jarvis Chat Session`` row (``user`` /
+	``profile_agent_id`` / ``profile_tier``) the caller already fetched ONCE
+	(review finding #3 - this used to re-query the same session by
+	``session_key`` a second time; the caller's single fetch now covers both
+	call sites). May be ``{}`` when the session mapping is missing (blank-user
+	attribution row, U1's VALID_ZERO/unmapped-session case).
+
+	Wrapped end-to-end so a failure here can NEVER change ``record_turn_usage``'s
+	returned outcome or raise into the turn - the same isolation the per-model
+	attribution write above uses, and for the same reason: this runs between the
+	aggregate UPDATEs and the outer commit (RECORDED path) or before any commit at
+	all (VALID_ZERO path), so a bare exception left to reach the caller would lose
+	real accrual, and a rollback here would be equally wrong (it would
+	deterministically discard the aggregate delta on the RECORDED path).
+
+	cache_read / cache_write / cache_reported: live-checked against a real gateway
+	(tenant jarvis-pool-68b37b, 2026-08-17) - the union of keys across 23 live
+	``sessions.list`` rows carried no cache-token field at all, so these are
+	always ``0 / 0 / False`` (an honest "not reported", not a fabricated zero)
+	until a later agent-runtime build adds one. Re-run the Step-1 live probe from
+	the task-U1 brief to check."""
+	try:
+		model, _provider = resolved_model_identity(row)
+		fields = {
+			"run_id": run_id or "",
+			"session_key": session_key,
+			"user": session.get("user") or "",
+			"profile_agent_id": session.get("profile_agent_id") or "",
+			"profile_tier": session.get("profile_tier") or "full",
+			"model": model,
+			"tokens_in": int(tokens_in or 0),
+			"tokens_out": int(tokens_out or 0),
+			"cache_read": 0,
+			"cache_write": 0,
+			"cache_reported": 0,
+			"tool_calls": _turn_tool_call_count(run_id),
+			"day": frappe.utils.today(),
+		}
+		_insert_turn_usage_row(fields)
+	except Exception:
+		frappe.log_error(
+			title="jarvis usage: turn usage row write failed",
+			message=frappe.get_traceback(),
+		)
+
+
+def _insert_turn_usage_row(fields: dict) -> None:
+	"""Plain ORM insert, one row per call - no race to guard against (contrast
+	the per-model child-row upsert machinery above, which merges concurrent
+	writers on the SAME parent+model+month key). Split out as its own function
+	so tests can monkeypatch just the write and observe that a raise here
+	never escapes ``_write_turn_usage_row``."""
+	frappe.get_doc({"doctype": TURN_USAGE, **fields}).insert(ignore_permissions=True)
+
+
+def _turn_tool_call_count(run_id: str | None) -> int:
+	"""Count of ``role=tool`` ``Jarvis Chat Message`` rows belonging to the turn
+	named ``run_id``, or 0 when ``run_id`` is absent or unresolvable.
+
+	``Jarvis Chat Message`` carries no direct run/turn link, so this MIRRORS
+	(does not call - the filter shapes differ: this needs both a seq LOWER and
+	UPPER bound and no ``ref_doctype`` requirement, see the sibling comment on
+	``jarvis.chat.entities.entities_for_turn``) the same seq-bounded idiom that
+	function applies for the same reason: tool rows strictly after the turn's
+	``seed_message`` and at-or-before its ``assistant_message`` (by ``seq``,
+	within the same conversation) belong to this turn and no other."""
+	if not run_id:
+		return 0
+	turn = frappe.db.get_value(
+		CHAT_TURN,
+		run_id,
+		["conversation", "seed_message", "assistant_message"],
+		as_dict=True,
+	)
+	if (
+		not turn
+		or not turn.get("conversation")
+		or not turn.get("seed_message")
+		or not turn.get("assistant_message")
+	):
+		return 0
+	seqs = frappe.db.get_all(
+		CHAT_MESSAGE,
+		filters={"name": ["in", [turn["seed_message"], turn["assistant_message"]]]},
+		fields=["name", "seq"],
+	)
+	seq_by_name = {r["name"]: r["seq"] for r in seqs}
+	seed_seq = seq_by_name.get(turn["seed_message"])
+	asst_seq = seq_by_name.get(turn["assistant_message"])
+	if seed_seq is None or asst_seq is None:
+		return 0
+	return frappe.db.count(
+		CHAT_MESSAGE,
+		filters=[
+			["conversation", "=", turn["conversation"]],
+			["role", "=", "tool"],
+			["seq", ">", seed_seq],
+			["seq", "<=", asst_seq],
+		],
+	)
+
+
+def prune_turn_usage() -> int:
+	"""Daily scheduler job (``hooks.py``) - delete ``Jarvis Turn Usage`` rows
+	older than ``TURN_USAGE_RETENTION_DAYS``. Mirrors
+	``jarvis.mobile.device_auth.prune_revoked_devices`` /
+	``jarvis.error_push.prune_pushed_client_errors``: an append-only accounting
+	table needs an explicit sweep or it grows forever. Best-effort; never
+	raises out of the scheduler."""
+	cutoff = frappe.utils.add_days(frappe.utils.today(), -TURN_USAGE_RETENTION_DAYS)
+	names = frappe.get_all(
+		TURN_USAGE, filters={"day": ["<", cutoff]}, pluck="name", limit=TURN_USAGE_PRUNE_BATCH_LIMIT
+	)
+	deleted = 0
+	for name in names:
+		try:
+			frappe.delete_doc(TURN_USAGE, name, ignore_permissions=True, force=True, delete_permanently=True)
+			deleted += 1
+		except Exception:
+			frappe.logger("jarvis.usage").warning(f"could not prune turn usage row {name}", exc_info=True)
+	if deleted:
+		frappe.db.commit()
+	return deleted
 
 
 def _next_child_idx(user: str) -> int:

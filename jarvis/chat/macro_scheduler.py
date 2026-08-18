@@ -306,6 +306,17 @@ def parse_schedule_seconds(t) -> int | None:
 	MariaDB's TIME column accepts up to 838:59:59, which is why an out-of-range value
 	could be persisted at all: the storage layer is not the guard here.
 
+	A trailing fractional-seconds component ("HH:MM:SS.ffffff") IS a real time of day
+	and is accepted (the fraction is dropped): on Frappe 15 ``create_new`` stamps EVERY
+	Time field of a new doc with ``nowtime()`` unconditionally, and this version formats
+	it with microseconds ("%H:%M:%S.%f"), so a freshly inserted Jarvis Agent Installation
+	/ Jarvis Macro reaches ``validate`` with a microsecond ``schedule_time`` the caller
+	never set. Frappe 16 injects that default only for ``default = "now"`` fields, so the
+	value is ``None`` there and this path is Frappe-15-only in practice -- which is also
+	why CI (Frappe 16) never caught the install/macro-create break. The ``datetime.time``
+	and ``timedelta`` branches already drop sub-second precision; this keeps the string
+	branch consistent with them. The out-of-range guards below are unchanged.
+
 	``compute_next_run`` is shared with the AGENT scheduler (``agent_scheduler._advance``,
 	``agents_api.set_schedule``, ``agent_runs``), which has the same unguarded shape: the
 	agent sweep calls ``_advance`` from ten sites and only one of them sits inside a try.
@@ -324,6 +335,15 @@ def parse_schedule_seconds(t) -> int | None:
 		parts = str(t).strip().split(":")
 		if len(parts) > 3:
 			return None
+		# Tolerate a fractional-seconds component on the SECONDS part only (see
+		# docstring): "SS.ffffff" -> "SS". The fraction must be digits, or the whole
+		# value is garbage and stays rejected. A fractional part anywhere else
+		# (e.g. "12.5:00") still fails the int() below.
+		if len(parts) == 3 and "." in parts[2]:
+			whole, _, frac = parts[2].partition(".")
+			if not frac.isdigit():
+				return None
+			parts[2] = whole
 		try:
 			nums = [int(p) for p in parts]
 		except ValueError:

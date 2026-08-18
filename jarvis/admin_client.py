@@ -13,6 +13,7 @@ Guest calls (signup, get_plans) skip the header entirely; their admin
 endpoints are @frappe.whitelist(allow_guest=True).
 """
 
+import ipaddress
 import re
 import time
 
@@ -201,25 +202,49 @@ def _is_production_bench() -> bool:
 	)
 
 
-def _public_origin() -> str:
-	"""A public site origin for the ``frappe_site_url`` this bench hands admin.
+_RESERVED_TLDS = frozenset(
+	{
+		"local",
+		"localhost",
+		"test",
+		"example",
+		"invalid",
+		"internal",
+		"corp",
+		"home",
+		"lan",
+		"mail",
+		"intranet",
+	}
+)
 
-	The bench half of the plan-09 P1-5 ``get_url`` sweep. A bare
-	``frappe.utils.get_url()`` derives the host from the request ``Host`` header
-	when ``host_name`` is unset (``get_url``'s own ``allow_header_override`` path —
-	proven reachable on this very environment), so a guest spoofing ``Host:`` on a
-	signup / reconnect / replacement-lookup POST could choose the
-	``frappe_site_url`` admin records for this tenant and the base of the magic
-	link admin then mails. The load-bearing fix is ``allow_header_override=False``:
-	it kills that injection vector.
 
-	Resolution order mirrors the admin-side ``admin_public_origin`` (jarvis_admin_v2
-	WS5): a configured ``host_name`` (validated https) wins; otherwise the site
-	fallback from ``get_url`` with header override OFF. An ``http://`` base on a
-	production bench is a misconfiguration — but it is caught at DEPLOY time by the
-	readiness gate, NOT by throwing here: throwing would break signup on any bench
-	where ``host_name`` is unset (every dev bench), and the injection vector is
-	already closed regardless of scheme."""
+def _is_real_public_host(host: str) -> bool:
+	"""A routable public domain (safe to force https on) vs a dev/internal host to leave as-is:
+	dotted, not localhost, not an IP literal, alphabetic non-reserved TLD. Rejects jarvis.local
+	(reserved), staging.v15 (non-alpha TLD), IPs, bare hosts; IDN xn-- reads non-public (keeps its scheme)."""
+	if not host or "." not in host:
+		return False
+	if host == "localhost" or host.endswith(".localhost"):
+		return False
+	try:
+		ipaddress.ip_address(host)
+		return False
+	except ValueError:
+		pass
+	tld = host.rsplit(".", 1)[-1]
+	return tld.isalpha() and tld not in _RESERVED_TLDS
+
+
+def _public_origin(trust_host: bool = False) -> str:
+	"""The public origin the bench sends admin as ``frappe_site_url``. A configured ``host_name``
+	(https) always wins; else ``get_url`` derives it from the request Host only when
+	``allow_header_override`` is on.
+
+	Only ``signup`` passes ``trust_host=True`` - a NEW account, so trusting the authenticated
+	admin's own Host is self-scoped. Reconnect / replacement / lead keep it OFF: they target an
+	EXISTING account by email, so a spoofed Host must not choose its URL. A real public domain
+	reached over http is normalized to https."""
 	from urllib.parse import urlsplit
 
 	host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
@@ -230,7 +255,14 @@ def _public_origin() -> str:
 		if parts.scheme == "https" and parts.hostname and "." in parts.hostname:
 			return f"https://{parts.hostname.lower()}"
 
-	base = (frappe.utils.get_url(allow_header_override=False) or "").rstrip("/")
+	base = (frappe.utils.get_url(allow_header_override=trust_host) or "").rstrip("/")
+	if trust_host:
+		try:
+			host = (urlsplit(base).hostname or "").lower().rstrip(".")
+			if _is_real_public_host(host):
+				return f"https://{host}"
+		except Exception:
+			pass  # never break signup; fall through to the raw base
 	if base.startswith("http://") and _is_production_bench():
 		frappe.logger("jarvis.onboarding").warning(
 			"frappe_site_url resolved to an http base on a production bench; "
@@ -293,7 +325,8 @@ def signup(
 		"email": email,
 		"company_name": company_name,
 		"plan": plan,
-		"frappe_site_url": _public_origin(),
+		# signup is the only trust_host=True caller (new account, self-scoped).
+		"frappe_site_url": _public_origin(trust_host=True),
 		"supported_providers": list(SUPPORTED_PROVIDERS),
 		"client_capabilities": _client_capabilities(),
 		"terms_accepted": terms_accepted,
@@ -557,17 +590,39 @@ def capture_onboarding_lead(
 		return {"ok": False}
 
 
+# The Terms of Service moved from the admin plane to the public marketing site
+# (jarvis_frappe_cloud); linking it directly skips admin's compatibility 301.
+MARKETING_TERMS_URL = "https://jarvis.aerele.in/terms"
+# Aerele's own stock admin origin. Deliberately a literal, NOT imported from
+# hooks: rebranding is documented as either a jarvis_admin_url override OR
+# editing hooks' fallback constant, and a rebrand of the second kind must not
+# compare equal to "stock" here. The flip side of that independence: if Aerele
+# ever migrates its admin domain, update this literal alongside hooks'
+# fallback. Drift in either direction is benign - the link falls back to
+# <admin>/terms, whose compatibility 301 still lands on the right document.
+_AERELE_STOCK_ADMIN_URL = "https://fleet.klerk.in"
+
+
 def terms_url() -> str:
-	"""The admin-hosted Terms & Conditions page for the Review & Pay checkbox
-	link. Best-effort: returns "" on any failure (no admin URL configured, a
-	malformed one, ...) rather than raising - the checkbox must render, and the
-	view falls back to plain unlinked text when this is empty."""
+	"""The public Terms & Conditions page for the Details-step checkbox link.
+
+	Aerele's stock deployment links the marketing site directly - its admin
+	plane only 301s ``/terms`` there anyway, so the hop is pure latency. A
+	rebranded deployment (admin base resolving anywhere other than Aerele's
+	stock admin, whichever documented rebrand path set it) keeps
+	``<its admin>/terms`` so its own legal page stays authoritative.
+	Best-effort like before: any failure falls back to the marketing URL
+	rather than blanking the checkout's T&C link."""
 	try:
 		settings = frappe.get_single("Jarvis Settings")
 		base = _admin_url(settings)
-		return f"{base}/terms" if base else ""
+		# Case-insensitive: scheme and host are case-insensitive per RFC 3986,
+		# and a differently-cased stock URL must not read as a rebrand.
+		if base and base.lower() != _AERELE_STOCK_ADMIN_URL:
+			return f"{base}/terms"
 	except Exception:
-		return ""
+		pass
+	return MARKETING_TERMS_URL
 
 
 # Admin-owned preset catalog (spec 3.3). Guest-safe fetch (get_plans pattern),
@@ -782,6 +837,31 @@ def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	return _post(
 		path=_m("api.tenant.get_connection"),
 		body={"jarvis_version": __version__},
+		timeout_s=timeout_s,
+	)
+
+
+def get_role_profile_config(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
+	"""Fetch the admin-owned role-profile config (skill sets, ERPNext role ->
+	set-key mappings, the ``standard`` tool tier's allow/core lists, and the
+	admin-decided ``enabled`` flag) for the daily bench pull
+	(``jarvis.chat.role_profiles.sync_role_profile_config``).
+
+	Wire envelope: the admin answers ``{"ok": True, "data": {version, enabled,
+	sets, shared_core, mappings, tool_tiers}}`` - but ``_post`` (via
+	``_do_post``) already unwraps that envelope on the way out
+	(``envelope.get("data", envelope)``), so what THIS FUNCTION RETURNS to its
+	caller is the bare data dict itself - ``{version, enabled, sets,
+	shared_core, mappings, tool_tiers}`` directly, not the ``{"ok", "data"}``
+	wrapper. Raises the same ``AdminAuthError`` / ``AdminUnreachableError`` /
+	``AdminValidationError`` family as every other admin_client call; an admin
+	predating this endpoint answers Frappe's method-not-found rejection
+	(``is_method_not_found``), which the caller treats identically to any
+	other pull failure - never as an error into the daily scheduler.
+	"""
+	return _post(
+		path=_m("api.tenant.get_role_profile_config"),
+		body={},
 		timeout_s=timeout_s,
 	)
 
@@ -1230,6 +1310,29 @@ def post_push_learned_skills(learned_skills: list[dict]) -> dict:
 	return _post(
 		path=_m("api.tenant.push_learned_skills"),
 		body={"learned_skills": learned_skills},
+		timeout_s=180,
+	)
+
+
+def post_push_role_profiles(role_profiles: list[dict]) -> dict:
+	"""POST the tenant's computed role-based agent profiles to admin -> fleet ->
+	container render (role-profile-agents design, spec §7).
+
+	``role_profiles`` is the list built by
+	``jarvis.chat.role_profiles.needed_profiles`` (each
+	``{slug, skills, tools_allow}`` where ``slug`` is ``role-<set-keys>``). The
+	fleet-agent renders one agent entry per profile into ``agents.list[]`` (the
+	main agent, ``agent_id=None``, is never included here and always renders
+	regardless). An empty list is a valid "no role-based profiles needed"
+	reconcile - every enabled user maps to main.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError
+		(rate-limit shares the rotate-secret bucket).
+	"""
+	return _post(
+		path=_m("api.tenant.push_role_profiles"),
+		body={"role_profiles": role_profiles},
 		timeout_s=180,
 	)
 

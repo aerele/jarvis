@@ -113,13 +113,14 @@
 												@update:modelValue="(o) => pickField(i, o)"
 											/>
 										</div>
-										<!-- operator -->
+										<!-- operator: PanelSelect (portal-free, globally themed) - a FormControl
+										     select will not open inside this teleported Popover (its reka SelectPortal);
+										     the component keeps its listbox inline. -->
 										<div class="w-32 shrink-0">
-											<FormControl
-												type="select"
+											<PanelSelect
 												:aria-label="`Condition for ${rowName(i)}`"
 												:options="operatorOptions(clause)"
-												:modelValue="clause.operator"
+												:model-value="clause.operator"
 												@update:modelValue="(v) => pickOperator(i, v)"
 											/>
 										</div>
@@ -226,13 +227,13 @@ import { computed, ref, watch, nextTick } from "vue";
 import {
 	Popover,
 	Button,
-	FormControl,
 	Autocomplete,
 	ErrorMessage,
 	LoadingIndicator,
 	FeatherIcon,
 } from "frappe-ui";
 import FilterValueControl from "@/components/list/FilterValueControl.vue";
+import PanelSelect from "@/components/list/PanelSelect.vue";
 import {
 	schemaIndex,
 	fieldOptions,

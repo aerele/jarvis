@@ -74,7 +74,15 @@ def refs_from_tool(args: dict | None, result) -> tuple[str | None, str | None]:
 def entities_for_turn(conversation: str, after_seq: int) -> list[dict]:
 	"""Distinct ``{"doctype", "name"}`` refs from the conversation's
 	``role=tool`` message rows with ``seq > after_seq`` (newest first, max
-	20). ``after_seq=0`` scans the whole conversation's recent tool rows."""
+	20). ``after_seq=0`` scans the whole conversation's recent tool rows.
+
+	Sibling idiom: ``jarvis.chat.usage._turn_tool_call_count`` mirrors this
+	same seq-bounded "tool rows belong to a turn" reasoning to COUNT tool
+	calls within a turn's exact ``[seed_message, assistant_message]`` seq
+	range, rather than list entity refs after a floor - the filter shapes
+	differ (bounded both sides, no ``ref_doctype`` requirement) so it is not
+	a call to this function, just the same idiom applied to a different
+	question."""
 	if not conversation:
 		return []
 	rows = frappe.get_all(

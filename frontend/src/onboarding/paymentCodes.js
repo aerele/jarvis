@@ -320,7 +320,10 @@ const TABLE = {
 	},
 	[CODES.BENCH_ADMIN_REJECTED]: {
 		headline: "The payment service refused this request.",
-		body: "Nothing was charged. Check the status, or start a new payment.",
+		// Same register as INTENT_HANDLE_UNAVAILABLE's sibling row: name what to do,
+		// not just that nothing was charged. "Refused" alone left the customer no
+		// wiser than the vague catch-all this row exists to replace.
+		body: "Nothing was charged. This is usually temporary. Check the status, or try again if it doesn't clear.",
 		tone: TONE.ALERT,
 		actions: [ACTIONS.CHECK, ACTIONS.INITIATE],
 	},

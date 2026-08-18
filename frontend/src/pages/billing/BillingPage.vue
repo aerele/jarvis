@@ -469,7 +469,12 @@ function onPageShow(e) {
 // The admin pay page appends ?pay=done|failed|pending on its way back here (WS6
 // workspace.OUTCOME_*). done/pending mean money moved and the seams may still be
 // settling, so a plain read can show the customer the very state they just paid
-// to leave - run the healer once. `failed` has nothing to converge on.
+// to leave - run the healer once. A genuine decline is terminal and has nothing
+// to converge on, but the redirect can carry a FALSE `pay=failed` (a server-side
+// race between the gateway and the bench), so failed also gets exactly one
+// status check below - the same action the manual "Check payment status" button
+// runs. A real decline rides the same check straight back to the coded-notice
+// presentation (settleWithRedirect), never a spinner or a second check.
 function payOutcomeFrom(search) {
 	try {
 		return new URLSearchParams(search || "").get("pay") || "";
@@ -477,17 +482,18 @@ function payOutcomeFrom(search) {
 		return "";
 	}
 }
-const SETTLING_OUTCOMES = new Set(["done", "pending"]);
+const CHECK_STATUS_OUTCOMES = new Set(["done", "pending", "failed"]);
 
 onMounted(() => {
-	const settling = SETTLING_OUTCOMES.has(payOutcomeFrom(window.location.search));
+	const payOutcome = payOutcomeFrom(window.location.search);
+	const runCheck = CHECK_STATUS_OUTCOMES.has(payOutcome);
 	// No URL rewrite here. The router already drops the query and hash on mount, so
 	// stripping `pay` was dead code that a spec nonetheless pinned - a test asserting
 	// behaviour the application never exhibits is worse than no test. The healer runs
 	// once from the value read above; a reload cannot re-run it because the parameter
 	// is already gone by then.
 	loadAccount().then(() => {
-		if (settling) doCheckStatus();
+		if (runCheck) doCheckStatus();
 	});
 	window.addEventListener("pageshow", onPageShow);
 });

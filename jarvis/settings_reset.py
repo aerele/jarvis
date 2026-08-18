@@ -75,6 +75,16 @@ CONNECTION = ResetSpec(
 		"agent_skills_sync_status",
 		"learned_skills_sync_status",
 		"wiki_mirror_last_sync_status",
+		# The role-based profile snapshot names agent slugs already deployed
+		# to the PREVIOUS tenancy's container; a reset must not let a fresh
+		# tenancy's first sync read it as "unchanged, no push needed".
+		"role_profiles_pushed",
+		# Same reasoning as role_profiles_pushed above: the cached admin config
+		# and its version identity belong to the PREVIOUS tenancy's admin pull.
+		# Left set, a fresh tenancy's first sync_role_profile_config would read
+		# an unrelated version as "unchanged" and skip its first re-push.
+		"role_profiles_config",
+		"role_profiles_config_version",
 		# Release notice + whitelabel branding of the previous tenancy. The SPA
 		# falls back to "Jarvis" when agent_name is blank.
 		"release_notice_message",
@@ -105,6 +115,8 @@ CONNECTION = ResetSpec(
 		"custom_skills_synced_at",
 		"agent_skills_synced_at",
 		"learned_skills_synced_at",
+		"role_profiles_pushed_at",
+		"role_profiles_config_synced_at",
 		"wiki_mirror_last_synced_at",
 	),
 	zero=(
@@ -115,6 +127,10 @@ CONNECTION = ResetSpec(
 		# connection is accepted on its own terms, not rejected as "older" than
 		# the previous tenancy's generation (review plan 04 P0-5).
 		"tenant_authority_generation",
+		# enable_role_profiles is now an admin-owned mirror (spec B4), not
+		# operator intent - it must not carry the PREVIOUS tenancy's admin
+		# decision into a fresh one with no config pulled yet.
+		"enable_role_profiles",
 	),
 )
 

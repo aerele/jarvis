@@ -114,9 +114,16 @@ test("the page records WHICH message is on the canvas, under the same key", () =
 			onCanvas.indexOf("canvasMsg.value = message_id;"),
 		"the id is recorded for the html that was rendered"
 	);
-	// and dropped whenever the canvas stops being a chat artifact
+	// and dropped whenever the canvas stops being a chat artifact. loadEdit's
+	// own state-setting (jarvis#884) moved into applyEditDetail, which it calls
+	// from inside the discard confirm, so the same guarantee holds, just in a
+	// different function.
 	assert.match(fnBody(pageSrc, "function clearBuilder("), /canvasMsg\.value = "";/);
-	assert.match(fnBody(pageSrc, "async function loadEdit("), /canvasMsg\.value = "";/);
+	assert.match(fnBody(pageSrc, "function applyEditDetail("), /canvasMsg\.value = "";/);
+	assert.match(
+		fnBody(pageSrc, "async function loadEdit("),
+		/applyEditDetail\(d, \{ deepLink \}\);/
+	);
 });
 
 test("a restore never overwrites a live canvas, an ?edit target or a promotion", () => {
@@ -188,8 +195,10 @@ test("a remount restores WHAT WAS BEING EDITED, not just the pixels", () => {
 		pageSrc,
 		/if \(editSeed\.value\) loadEdit\(editSeed\.value, \{ deepLink: !!routeEdit \}\);/
 	);
-	// written by both paths that make this page "the editor of X"...
-	assert.match(fnBody(pageSrc, "async function loadEdit("), /editingSticky\.value = d\.name;/);
+	// written by both paths that make this page "the editor of X"... loadEdit's
+	// own copy moved into applyEditDetail (jarvis#884), which onDashboardSaved
+	// (the pane's own build) also calls directly, bypassing the confirm.
+	assert.match(fnBody(pageSrc, "function applyEditDetail("), /editingSticky\.value = d\.name;/);
 	assert.match(fnBody(pageSrc, "function onSaved("), /editingSticky\.value = detail\.name;/);
 	// ...and dropped by every path that stops editing it
 	assert.match(fnBody(pageSrc, "function clearBuilder("), /editingSticky\.value = "";/);
@@ -357,7 +366,8 @@ test("send() clears the draft up front and restores it only on rejection", () =>
 	const send = fnBody(paneSrc, "async function send(");
 	// guard, clear, optimistic bubble - in that order
 	assert.ok(
-		send.indexOf("if (!text || sending.value) return;") < send.indexOf('draft.value = "";'),
+		send.indexOf("if (!text || sending.value || runActive.value) return;") <
+			send.indexOf('draft.value = "";'),
 		"the in-flight guard must precede the clear"
 	);
 	assert.match(send, /const text = draft\.value\.trim\(\);/);
@@ -370,4 +380,33 @@ test("send() clears the draft up front and restores it only on rejection", () =>
 		send,
 		/messages\.value = messages\.value\.filter\(\(m\) => m\.name !== tmpName\)/
 	);
+});
+
+// ---- owner-reported: repeat Enter/click fires a duplicate turn -----------
+// Three 1-char messages sent 18:57:00-18:57:02 each spawned a turn and wedged
+// the pump: `sending` only spans the POST, so once it resolves (fast) the
+// button and both send entry points re-armed while the agent's turn (tracked
+// by `runActive`) was still running.
+
+test("Send is disabled while a turn is running, not just while posting", () => {
+	const composer = composerOf(paneSrc);
+	const disabledBindings = composer.match(/:disabled="[^"]*"/g) || [];
+	assert.ok(
+		disabledBindings.some((b) => b.includes("sending") && b.includes("runActive")),
+		"the Send button must gate on runActive too, or a duplicate turn can be dispatched once the POST settles"
+	);
+});
+
+test("send() and sendText() refuse to dispatch while a turn is already running", () => {
+	const send = fnBody(paneSrc, "async function send(");
+	assert.match(send, /if \(!text \|\| sending\.value \|\| runActive\.value\) return;/);
+	const sendText = fnBody(paneSrc, "function sendText(");
+	assert.match(sendText, /if \(!t \|\| sending\.value \|\| runActive\.value\) return;/);
+});
+
+test("the ask card is told when the pane would refuse a submit", () => {
+	// AskCard's own single-submit lock only closes half the race: if the host
+	// silently swallows the answer (already sending, or the prior turn hasn't
+	// finished), the card must not lock until the host would actually accept it.
+	assert.match(paneSrc, /<AskCard[\s\S]{0,240}:busy="sending \|\| runActive"/);
 });

@@ -9,6 +9,7 @@ const apiDouble = vi.hoisted(() => ({ searchLink: vi.fn(async () => []) }));
 vi.mock("@/api", () => apiDouble);
 
 import FilterValueControl from "@/components/list/FilterValueControl.vue";
+import PanelSelect from "@/components/list/PanelSelect.vue";
 import { clauseForEntry, setOperator } from "@/components/list/filterModel";
 
 function mountControl(entry, clause, props = {}) {
@@ -330,8 +331,11 @@ describe("multi-value", () => {
 describe("scalar families", () => {
 	it("sentence-cases the timespan menu without touching the wire token", () => {
 		const w = mountControl(CREATION, setOperator(clauseForEntry(CREATION), "Timespan"));
-		const options = w.find("select").findAll("option");
-		const pairs = options.map((o) => [o.text(), o.attributes("value")]);
+		// timespan value is a portal-free PanelSelect now; read its options off props
+		const pairs = w
+			.findComponent(PanelSelect)
+			.props("options")
+			.map((o) => [o.label, o.value]);
 		expect(pairs).toContainEqual(["Last 7 days", "last 7 days"]);
 		expect(pairs).toContainEqual(["This quarter", "this quarter"]);
 	});
@@ -382,7 +386,9 @@ describe("scalar families", () => {
 
 	it("Check emits the 1/0 the compiler expects", async () => {
 		const w = mountControl(ENABLED, clauseForEntry(ENABLED));
-		await w.find("select").setValue("0");
+		// the Check value is a portal-free PanelSelect; a pick emits its update:modelValue
+		w.findComponent(PanelSelect).vm.$emit("update:modelValue", "0");
+		await w.vm.$nextTick();
 		expect(patch(w)).toEqual({ value: "0", display: null, immediate: true });
 	});
 });

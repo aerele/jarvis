@@ -24,6 +24,12 @@ describe("stripBlocks, settled reply", () => {
 		}
 	});
 
+	it("removes a settled jarvis-goto block (jarvis#884: rendered as the redirect card, not raw JSON)", () => {
+		const text =
+			'Sure thing.\n\n```jarvis-goto\n{"page":"dashboards","prompt":"Monthly sales"}\n```\n\nOne moment.';
+		expect(stripBlocks(text)).toBe("Sure thing.\n\nOne moment.");
+	});
+
 	it("removes a jarvis xychart but keeps an ordinary mermaid diagram", () => {
 		const chart = "```mermaid\nxychart-beta\n  title x\n```";
 		const diagram = "```mermaid\ngraph TD;\n  A-->B;\n```";
@@ -57,6 +63,11 @@ describe("stripBlocks, mid-stream", () => {
 			const text = "prose\n\n```" + tag + '\n{"half":';
 			expect(stripBlocks(text, true)).toBe("prose");
 		}
+	});
+
+	it("holds an unterminated jarvis-goto block, so a mid-stream reply never flashes the raw redirect JSON", () => {
+		const text = 'One sec.\n\n```jarvis-goto\n{"page":"dashboards","prompt":"Mon';
+		expect(stripBlocks(text, true)).toBe("One sec.");
 	});
 
 	it("holds a fence whose language tag is still being typed", () => {

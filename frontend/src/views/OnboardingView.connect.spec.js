@@ -63,7 +63,10 @@ const forgetReadySpy = vi.hoisted(() => vi.fn());
 // These specs assert the CONNECT step, so there is never a reconnect intent here:
 // the landing helpers are stubbed to "no intent, keep the resumed step". Mocked
 // explicitly rather than via importOriginal so the real module's graph (api.js ->
-// frappe-ui) stays out of this file.
+// frappe-ui) stays out of this file. Slice 4b note: the reconnect STOP card's CTA
+// no longer hard-navs anywhere (it resets local state back to the connect form in
+// place), so RECONNECT_INTENT_URL is deliberately NOT re-exported here - the view
+// no longer imports it, and the loop it caused is pinned by the form-assertion test.
 vi.mock("@/onboarding/readiness.js", () => ({
 	forgetReady: forgetReadySpy,
 	hasReconnectIntent: () => false,
@@ -895,6 +898,107 @@ describe("jarvis#727 an unverifiable model has a way out, not only a Retry", () 
 		}
 	});
 
+	// Slice 4b (C10b): admin's chat_readiness == "ReconnectRequired" reaches the
+	// connect wait as is_ready_for_chat's "reconnect_required" reason. It must be a
+	// TERMINAL STOP with a Reconnect action - the honest headline + admin's own
+	// reason + a primary Reconnect CTA - and NEVER the endless "bringing your setup
+	// online" spinner it used to fall into (bucketed as container_provisioning).
+	describe("ReconnectRequired is a terminal STOP, not the endless spinner", () => {
+		const RECONNECT_REASON =
+			"Your AI subscription needs reconnecting. Open Jarvis Settings and reconnect your provider to finish.";
+
+		it("renders the reconnect STOP card with admin's reason, not the spinner", async () => {
+			const w = await mountConnect();
+			w.vm.connectModelChangeOffered = true; // a stale offer from an earlier attempt
+			w.vm.noteReadiness({
+				answered: true,
+				reason: "reconnect_required",
+				detail: RECONNECT_REASON,
+			});
+			await flushPromises();
+
+			expect(w.vm.state.connectPhase).toBe("reconnect");
+			// Not the working/finishing spinner, and not the support-only blocked card.
+			expect(w.vm.state.connectPhase).not.toBe("working");
+			expect(w.vm.state.connectPhase).not.toBe("blocked");
+			expect(w.vm.state.connectTitle).toMatch(/reconnect/i);
+			expect(w.vm.state.connectMessage).toBe(RECONNECT_REASON); // admin's own sentence, verbatim
+			expect(w.vm.connectModelChangeOffered).toBe(false); // a model change fixes nothing here
+			expect(labels(w)).toContain("Reconnect");
+			expect(labels(w)).not.toContain("Use a different model");
+			w.unmount();
+		});
+
+		// The review BLOCKER. The old CTA hard-navved to RECONNECT_INTENT_URL, but every
+		// customer who can see this card is already terminal (they reached PAID ->
+		// PROVISIONING -> connect), and the REAL landingStep DROPS the reconnect intent
+		// when terminal - so the nav resumed straight back to "connect", restarted the
+		// wait, re-observed reconnect_required and re-rendered THIS same card: an
+		// infinite no-op loop. The shipped test missed it because it mocked landingStep
+		// down to ({resumedStep}) => resumedStep. The CTA now re-opens the editable
+		// connect FORM in place so the customer can actually re-run the connect; this
+		// pins that it reaches the form, never the same stop card. Reverting the CTA fix
+		// (back to window.location.assign) reds this: state stays on the reconnect card.
+		it("the Reconnect CTA re-opens the connect FORM in place, never re-renders the stop card", async () => {
+			// Reach the stop card through the real wait, exactly as production does: a
+			// subscription apply completes but chat_readiness is false, the wait polls,
+			// and its first poll observes reconnect_required. finishing is true here, so
+			// the card shows and the form's "Start chatting" footer (v-if !finishing) is
+			// absent.
+			api.isReadyForChat.mockResolvedValue({
+				ready: false,
+				reason: "reconnect_required",
+				detail: RECONNECT_REASON,
+			});
+			vi.useFakeTimers();
+			const w = await mountConnect();
+			api.isReadyForChat.mockClear();
+
+			w.vm.onTerminal(readyChatBlockedStatus);
+			await flushPromises();
+			expect(w.vm.state.connectPhase).toBe("reconnect");
+			expect(w.vm.state.finishing).toBe(true);
+			expect(labels(w)).not.toContain("Start chatting");
+
+			const reconnectBtn = w
+				.findAll("button")
+				.find((b) => (b.attributes("label") || b.text()) === "Reconnect");
+			expect(reconnectBtn).toBeTruthy();
+			await reconnectBtn.trigger("click");
+			await flushPromises();
+
+			// The FORM, not the card. connectPhase back to "" un-renders the stop card;
+			// finishing=false re-shows the editor and its "Start chatting" footer. Both
+			// staying put would BE the loop, which is what the old hard-nav produced.
+			expect(w.vm.state.finishing).toBe(false);
+			expect(w.vm.state.connectPhase).toBe("");
+			expect(labels(w)).toContain("Start chatting");
+			w.unmount();
+		});
+
+		it("stops polling the instant ReconnectRequired is seen (no 40-tick spinner)", async () => {
+			api.isReadyForChat.mockResolvedValue({
+				ready: false,
+				reason: "reconnect_required",
+				detail: RECONNECT_REASON,
+			});
+			vi.useFakeTimers();
+			const w = await mountConnect();
+			api.isReadyForChat.mockClear();
+
+			// READY-but-not-chat-ready starts waitForChatReadiness; its first poll sees
+			// the stop verdict and the loop must end rather than count down 40 ticks.
+			w.vm.onTerminal(readyChatBlockedStatus);
+			await flushPromises();
+			await vi.advanceTimersByTimeAsync(40 * 3000);
+			await flushPromises();
+
+			expect(api.isReadyForChat.mock.calls.length).toBe(1);
+			expect(w.vm.state.connectPhase).toBe("reconnect");
+			w.unmount();
+		});
+	});
+
 	it("an operation-level failure offers the change beside Retry, not instead of it", async () => {
 		const w = await mountConnect();
 
@@ -1194,6 +1298,50 @@ describe("jarvis#727 the setup headline follows the live phase", () => {
 		await flushPromises();
 		expect(w.vm.setupTitle).not.toMatch(/workspace/i);
 		expect(w.vm.state.finishSubtitle).not.toMatch(/workspace/i);
+		w.unmount();
+	});
+});
+
+describe("connect wait time-expectation note", () => {
+	it("shows the 5-to-10-minute note on the initial working screen", async () => {
+		const w = await mountConnect();
+
+		// state.finishing gates the working/finishing screen with v-show, which
+		// only toggles CSS display - a bare mountConnect() never sets it, so
+		// asserting against the DOM before this would pass even if the note
+		// were rendered behind a hidden picker screen.
+		w.vm.onOpUpdate({ phase: "applying" });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("working");
+		expect(w.vm.state.finishing).toBe(true);
+		expect(w.find(".ob-head-note").text()).toContain("5 to 10 minutes");
+		w.unmount();
+	});
+
+	it("keeps showing the note once the operation reaches finishing", async () => {
+		const w = await mountConnect();
+
+		w.vm.onOpUpdate({ phase: "finishing" });
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("finishing");
+		expect(w.find(".ob-head-note").text()).toContain("5 to 10 minutes");
+		w.unmount();
+	});
+
+	it("does not show the note once the wait resolves to a blocked stop", async () => {
+		const w = await mountConnect();
+
+		w.vm.noteReadiness({
+			answered: true,
+			reason: "authority_repair_required",
+			detail: "a person has to look",
+		});
+		await flushPromises();
+
+		expect(w.vm.state.connectPhase).toBe("blocked");
+		expect(w.find(".ob-head-note").exists()).toBe(false);
 		w.unmount();
 	});
 });
@@ -1673,40 +1821,34 @@ describe("jarvis#752 the connect step shows admin's route verdict while still co
 	});
 });
 
-// 2026-08-14 connect-wait redesign: the phase columns are gone; the connect
-// wait renders ONE labeled six-segment bar (connectSteps) with the current
+// 2026-08-16 connect-wait redesign: the six per-step tiles above the bar are
+// gone too (they read as a duplicated row of tiles above a bar - user
+// report). The connect wait now renders ONE smooth progress bar with a
+// single "Step N of 6 · <step name>" caption above it, and the current
 // step's one-line explanation below it, and admin's own detail sentence
 // (jarvis#752/#754) below that. These tests pin the DOM shape, not pixel
 // layout (jsdom does not compute CSS).
-describe("connect wait bar: six labeled steps with a one-line explanation", () => {
+describe("connect wait bar: one smooth bar with a named-step caption", () => {
 	const QUOTA_REASON = "Your OpenAI account has reached its usage limit. It resets in 2 hours.";
 
-	it("renders six labeled steps and marks the readiness step current while applying", async () => {
+	it("renders one progressbar (no per-step tiles) and names the current step in the caption", async () => {
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
 		await flushPromises();
 
-		// The old ob-phases column list must be gone from the connect screen.
+		// The old ob-phases column list, and the old per-step tiles above the
+		// bar, must both be gone from the connect screen.
 		expect(w.find(".ob-phases").exists()).toBe(false);
+		expect(w.find(".ob-progress").findAll('[role="listitem"]')).toHaveLength(0);
 
-		// Scoped to the wait bar: the top rail is its own StepProgress with its
-		// own aria-current, and must not leak into these assertions.
-		const items = w.find(".ob-progress").findAll('[role="listitem"]');
-		const labels = items.map((i) => i.text());
-		for (const expected of [
-			"Connection",
-			"Workspace",
-			"Tools",
-			"Persona",
-			"Live check",
-			"Chat",
-		]) {
-			expect(labels).toContain(expected);
-		}
-		const current = items.filter((i) => i.attributes("aria-current") === "step");
-		expect(current).toHaveLength(1);
-		expect(current[0].text()).toBe("Workspace");
+		// Scoped to the wait bar: the top rail is its own StepProgress
+		// (variant="steps") and must not leak into this assertion.
+		const bar = w.find(".ob-progress").find('[role="progressbar"]');
+		expect(bar.exists()).toBe(true);
+		expect(w.text()).toContain("Step 2 of 6 · Workspace");
+		// 2 of 6 steps filled: Connection done, Workspace (the current step) counts too.
+		expect(bar.attributes("aria-valuenow")).toBe("33");
 		w.unmount();
 	});
 
@@ -1746,9 +1888,9 @@ describe("connect wait bar: six labeled steps with a one-line explanation", () =
 		w.unmount();
 	});
 
-	it("the bar caption counts all six steps, matching what is drawn", async () => {
-		// The user-reported defect this redesign fixes: a "Step 2 of 3" caption
-		// over six visible items.
+	it("the bar caption counts all six steps, matching the fill fraction", async () => {
+		// An earlier regression showed a "Step 2 of 3" caption over six actual
+		// steps; this pins the count staying in sync with connectSteps.
 		const w = await mountConnect();
 
 		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });

@@ -317,6 +317,44 @@ class TestAdminChatGate(FrappeTestCase):
 				{"ready": False, "reason": "subscription_suspended", "detail": "", "billing_notice": {}},
 			)
 
+	def test_reconnect_required_is_distinct_from_provisioning(self):
+		"""Slice 4b (C10b): an aged onboarding OAuth strand whose subscription
+		connect never landed must NOT read as "still starting up" (which spins the
+		onboarding UI forever). Its own reason drives the terminal-STOP-with-Reconnect
+		card; admin owns the sentence."""
+		reason = (
+			"Your AI subscription needs reconnecting. Open Jarvis Settings and "
+			"reconnect your provider to finish."
+		)
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={
+				"chat_readiness": "ReconnectRequired",
+				"chat_readiness_reason": reason,
+			},
+		):
+			self.assertEqual(
+				account._admin_chat_gate(),
+				{
+					"ready": False,
+					"reason": "reconnect_required",
+					"detail": reason,
+					"billing_notice": {},
+				},
+			)
+
+	def test_reconnect_required_without_reason_still_classifies(self):
+		"""Older admin sends the state with no sentence — the code must still be the
+		reconnect one; the SPA supplies its own fallback copy."""
+		with patch.object(
+			admin_client, "get_connection", return_value={"chat_readiness": "ReconnectRequired"}
+		):
+			self.assertEqual(
+				account._admin_chat_gate(),
+				{"ready": False, "reason": "reconnect_required", "detail": "", "billing_notice": {}},
+			)
+
 	def test_allows_when_admin_ready(self):
 		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
 			self.assertEqual(
