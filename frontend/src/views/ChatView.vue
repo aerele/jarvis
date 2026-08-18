@@ -334,18 +334,6 @@
 								d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"
 							/>
 						</svg>
-						<!-- Resting badge: a waiting reply has to register while the user is
-						     heads-down in chat. Moved here from UserMenu's avatar (Support
-						     lived only in the menu before) so the dot sits on the control
-						     that actually opens Support. -->
-						<span
-							v-if="supportOn && supportStore.awaitingCount"
-							class="jv-support-dot"
-							:aria-label="`${supportStore.awaitingCount} ${
-								supportStore.awaitingCount === 1 ? 'ticket' : 'tickets'
-							} awaiting your reply`"
-							role="status"
-						/>
 					</button>
 					<button
 						class="jv-iconbtn"
@@ -4468,13 +4456,9 @@ async function openSupport() {
 		explainUnavailable("Support");
 		return;
 	}
-	// A resting badge means tickets are waiting on the user's reply - the click
-	// has to land where those tickets actually are (the old UserMenu entry did
-	// this), not on a blank new-ticket form the badge gave no reason to expect.
-	if (supportStore.awaitingCount) {
-		router.push({ name: "Support" });
-		return;
-	}
+	// This header control is the NEW-TICKET entry point only. The "you have a
+	// waiting reply" signal + its route to the inbox now live solely on the
+	// avatar's resting badge (UserMenu), so the two concerns don't share a button.
 	if (openSupportInFlight) return;
 	openSupportInFlight = true;
 	try {
@@ -10622,18 +10606,6 @@ onUnmounted(() => {
 }
 .jv-iconbtn:hover svg {
 	stroke: var(--surface) !important;
-}
-/* Resting badge on the Support button: mirrors the "Awaiting you" ticket
-   badge's amber, so the same colour means the same thing everywhere. */
-.jv-support-dot {
-	position: absolute;
-	top: 3px;
-	right: 3px;
-	width: 8px;
-	height: 8px;
-	border-radius: 999px;
-	background: var(--amber);
-	border: 1.5px solid var(--surface);
 }
 .jv-ctxbtn:hover {
 	background: var(--surface-2);

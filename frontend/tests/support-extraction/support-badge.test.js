@@ -102,15 +102,27 @@ describe("UserMenu variant (chat vs support)", () => {
 		store.awaitingCount = 0;
 	});
 
-	it("chat (default): title is the agent name; no Support menu item (it lives in ChatView's header icon now, not the dropdown)", () => {
+	it("chat (default): title is the agent name; carries a 'Support tickets' inbox item (the read-path — new-ticket lives in the header icon)", () => {
 		const w = mount(UserMenu, opts);
 		expect(w.text()).toContain(agentName);
 		expect(w.text()).not.toContain(`${agentName} Support`);
 		const labels = menuLabels(w);
-		expect(labels).not.toContain("Support");
+		expect(labels).toContain("Support tickets"); // the inbox read-path (no unread here)
 		expect(labels).not.toContain(`Switch to ${agentName} chat`);
 		expect(labels).toContain("Change theme");
 		expect(labels).toContain("Settings"); // chat/LLM settings belong here
+	});
+
+	it("chat: the Support tickets item carries the awaiting count as a flag", () => {
+		store.awaitingCount = 3;
+		const w = mount(UserMenu, opts);
+		expect(menuLabels(w)).toContain("Support tickets · 3");
+	});
+
+	it("chat: no Support tickets item when support is switched off", () => {
+		window.support_available = false;
+		const w = mount(UserMenu, opts);
+		expect(menuLabels(w).some((l) => l.startsWith("Support tickets"))).toBe(false);
 	});
 
 	it("support: title is '<agent> Support'; menu swaps Support for 'Switch to <agent> chat' and keeps the theme switcher", () => {
@@ -118,7 +130,8 @@ describe("UserMenu variant (chat vs support)", () => {
 		expect(w.text()).toContain(`${agentName} Support`);
 		const labels = menuLabels(w);
 		expect(labels).toContain(`Switch to ${agentName} chat`);
-		expect(labels).not.toContain("Support");
+		// The inbox item is chat-only; on the support rail you're already there.
+		expect(labels.some((l) => l.startsWith("Support tickets"))).toBe(false);
 		expect(labels).toContain("Change theme");
 		// The Jarvis chat/LLM Settings dialog is out of place in the customer portal.
 		expect(labels).not.toContain("Settings");
