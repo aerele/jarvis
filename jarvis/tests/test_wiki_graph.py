@@ -34,6 +34,25 @@ def _delete_pages():
 		frappe.delete_doc(WIKI, name, force=True, ignore_permissions=True)
 
 
+def _manual_links_lock_spy(orig, seen: dict):
+	"""A ``frappe.db.get_value`` side_effect that records ``for_update`` on the
+	``manual_links`` read, so the locking-read tests can assert the mechanism.
+
+	Signature-flexible on purpose: Frappe 15 internals call ``get_value`` with a
+	different positional/keyword mix than 16, so match on values rather than a
+	fixed parameter list, and pass through to ``orig`` verbatim.
+	"""
+
+	def spy(*args, **kwargs):
+		doctype = args[0] if args else kwargs.get("doctype")
+		fieldname = args[2] if len(args) > 2 else kwargs.get("fieldname")
+		if doctype == WIKI and fieldname == "manual_links":
+			seen["for_update"] = kwargs.get("for_update")
+		return orig(*args, **kwargs)
+
+	return spy
+
+
 class WikiGraphTestCase(FrappeTestCase):
 	"""Page fixtures swept by slug prefix, shared by the compute tests and the
 	reader-tool tests below."""
@@ -397,10 +416,7 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 		orig = frappe.db.get_value
 		seen = {}
 
-		def spy(dt, name=None, field=None, *args, **kwargs):
-			if dt == WIKI and field == "manual_links":
-				seen["for_update"] = kwargs.get("for_update")
-			return orig(dt, name, field, *args, **kwargs)
+		spy = _manual_links_lock_spy(orig, seen)
 
 		with patch.object(frappe.db, "get_value", side_effect=spy):
 			wiki_mod.add_wiki_link(p.name, a.name)
@@ -519,10 +535,7 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 		orig = frappe.db.get_value
 		seen = {}
 
-		def spy(dt, name=None, field=None, *args, **kwargs):
-			if dt == WIKI and field == "manual_links":
-				seen["for_update"] = kwargs.get("for_update")
-			return orig(dt, name, field, *args, **kwargs)
+		spy = _manual_links_lock_spy(orig, seen)
 
 		with patch.object(frappe.db, "get_value", side_effect=spy):
 			wiki_mod.remove_wiki_link(p.name, a.name)

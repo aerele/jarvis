@@ -175,7 +175,7 @@ class TestRunImportGating(FrappeTestCase):
 		# scheduler must NOT stage an import that would sit Pending forever.
 		before = frappe.db.count("Data Import")
 		with (
-			patch.object(frappe, "in_test", False),
+			patch("jarvis.compat.in_test", return_value=False),
 			patch.dict(frappe.conf, {"developer_mode": 0}),
 			patch("jarvis.tools.run_import.is_scheduler_inactive", return_value=True),
 		):
