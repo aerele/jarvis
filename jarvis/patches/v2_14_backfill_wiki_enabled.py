@@ -12,8 +12,8 @@ def execute():
 	* A full ``Jarvis Settings.save()`` (onboarding, re-sync, any Desk save) runs
 	  the unset Check through ``get_valid_dict``, which coerces it to 0 and writes
 	  an explicit "0" row - silently disabling the wiki fleet-wide with no admin
-	  action. This mirrors ``v2_11_backfill_home_intro_enabled`` /
-	  ``v2_09_backfill_persona_enabled`` for the sibling kill switch.
+	  action. This mirrors ``v2_09_backfill_persona_enabled`` for the sibling
+	  kill switch.
 	* The #731 scrub trigger fires on a genuine 1 -> 0 change of the toggle. A
 	  bare NULL coerces to 0 on load, so a real disable of a pre-v2 tenant would
 	  read as "0 -> 0" (unchanged) and the scrub would never run - the kill switch

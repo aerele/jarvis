@@ -1902,14 +1902,6 @@ def get_chat_ui_settings() -> dict:
 		# default on), read here AND in _persona_clause so flipping it off both hides
 		# the pill and stops the clause - never a client-only half-switch (N7).
 		"persona_enabled": _persona_feature_enabled(),
-		# Chat-home introduction (the static welcome bubble): the version the SPA
-		# should render. Paired with ``home_intro_seen_version`` below - the bubble
-		# shows only while this is greater. The server owns the number so a client
-		# can neither invent one nor mute a future introduction. When the operator
-		# kill switch is off the version drops to 0, so homeIntroDue is false for
-		# every user and the compact hero shows instead - no SPA change, same
-		# fail-quiet path as an old backend that never sent the key.
-		"home_intro_version": (user_settings_api.HOME_INTRO_VERSION if _home_intro_feature_enabled() else 0),
 		# auto-apply is per-conversation now (issue #186); the frontend reads
 		# ``auto_apply`` from the conversation payload, not this global endpoint.
 	}
@@ -1921,44 +1913,7 @@ def get_chat_ui_settings() -> dict:
 	persona = _current_user_persona()
 	if persona is not None:
 		ui["preferred_persona"] = persona
-	# Same omit-on-failure contract as the persona key, for the same reason: the
-	# SPA shows the introduction only when it can see BOTH numbers, so a transient
-	# read failure leaves the ordinary compact hero rather than re-lecturing a user
-	# who has already been introduced. A user with no settings row reads 0 (never
-	# seen), which is the correct answer, not a failure.
-	seen = _home_intro_seen_version()
-	if seen is not None:
-		ui["home_intro_seen_version"] = seen
 	return ui
-
-
-def _home_intro_feature_enabled() -> bool:
-	"""The first-chat welcome kill switch (``Jarvis Settings.home_intro_enabled``),
-	NULL=ON. Delegates to turn_handler's canonical ``_jarvis_settings_flag_null_on``
-	probe - the same one behind the persona pill - so both kill switches read
-	tabSingles identically ("no row" is the default ON; only a stored 0 is OFF) and
-	neither trips the get_single_value unset-Check-coerces-to-0 trap that would ship
-	the feature OFF for every un-backfilled bench and fresh install. Best-effort
-	(N8): a read failure shows the welcome rather than 500-ing the whole bootstrap."""
-	try:
-		from jarvis.chat.turn_handler import _jarvis_settings_flag_null_on
-
-		return _jarvis_settings_flag_null_on("home_intro_enabled")
-	except Exception:
-		return True
-
-
-def _home_intro_seen_version() -> int | None:
-	"""The caller's acknowledged chat-home introduction version, or None when it
-	cannot be read (missing column in the migrate window, DB error)."""
-	try:
-		return frappe.utils.cint(
-			frappe.db.get_value(
-				"Jarvis User Settings", {"user": frappe.session.user}, "home_intro_seen_version"
-			)
-		)
-	except Exception:
-		return None
 
 
 def _wiki_enabled_flag() -> bool:

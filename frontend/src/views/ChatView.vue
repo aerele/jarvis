@@ -389,20 +389,8 @@
 			     crowds the composer or the send button. "Maybe later" just hides the card
 			     client-side for this chat - the cadence itself is the snooze, so it comes
 			     back on the next multiple-of-three chat with no follow-up question. "Don't
-			     ask again" is the durable, permanent, server-side dismiss.
-			     Suppressed while the first-chat introduction is on screen: both draw
-			     above the welcome column, and stacking a nudge on top of "hello, here
-			     is what I do" is the one place they must never meet. Nothing is
-			     consumed by skipping it — the cadence counter is bumped server-side by
-			     create_or_focus_empty and maybe_greet is a pure reader, so the card
-			     simply returns on the next multiple-of-three chat.
-			     Known edge, accepted: the suppression lifts the instant the first
-			     message lands (showWelcome goes false), so a user whose very first
-			     chat is ALSO a cadence tick sees the card appear as their first turn
-			     starts. It needs the introduction and a multiple-of-three chat count
-			     at the same moment, which the v2_10 backfill leaves to essentially
-			     nobody — a brand-new user's first chat is count 1. -->
-			<div v-if="bizGreeting.show && !showHomeIntro" class="jv-greeting-banner">
+			     ask again" is the durable, permanent, server-side dismiss. -->
+			<div v-if="bizGreeting.show" class="jv-greeting-banner">
 				<div class="jv-nudge" style="margin: 0">
 					<div class="jv-nudge-head">
 						<div class="jv-nudge-q">
@@ -483,45 +471,34 @@
 			     viewports. See the style block for the centre-when-it-fits rationale. -->
 			<div v-else-if="showWelcome" class="jv-welcome-scroll">
 				<div class="jv-welcome-col">
-					<!-- First empty chat home (per user, versioned): the assistant-styled
-					     introduction shows once, then never again. Static presentation only. -->
-					<WelcomeAssistantMessage
-						v-if="showHomeIntro"
-						:speaker="homeIntroSpeakerName"
-						:persona="homeIntroPersona"
-						:firstName="firstName"
-						@seen="ackHomeIntro"
-					/>
 					<!-- The brand mark inline with the greeting, then one line of
 					     orienting copy. The copy earns its place on an empty screen: it
 					     is the only thing that says what this box is for and that the
 					     agent is wired to real ERP data. -->
-					<template v-else>
-						<h1
-							class="jv-welcome-h1"
-							style="
-								display: flex;
-								align-items: center;
-								justify-content: center;
-								gap: 16px;
-								font-size: 40px;
-								font-weight: 640;
-								letter-spacing: -0.03em;
-								margin: 0;
-								overflow-wrap: anywhere;
-							"
-						>
-							<JarvisMark :size="38" :radius="11" style="flex: none" />
-							<span>{{ greeting }}, {{ firstName }}</span>
-						</h1>
-						<p class="jv-welcome-sub">
-							Ask about your ERP data, run a workflow, or draft something.
-							{{ agentName }}
-							is connected to your
-							<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
-							instance.
-						</p>
-					</template>
+					<h1
+						class="jv-welcome-h1"
+						style="
+							display: flex;
+							align-items: center;
+							justify-content: center;
+							gap: 16px;
+							font-size: 40px;
+							font-weight: 640;
+							letter-spacing: -0.03em;
+							margin: 0;
+							overflow-wrap: anywhere;
+						"
+					>
+						<JarvisMark :size="38" :radius="11" style="flex: none" />
+						<span>{{ greeting }}, {{ firstName }}</span>
+					</h1>
+					<p class="jv-welcome-sub">
+						Ask about your ERP data, run a workflow, or draft something.
+						{{ agentName }}
+						is connected to your
+						<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
+						instance.
+					</p>
 					<!-- Starter cards, same shape as the original static ones (tinted icon
 					     tile + label over the prompt). The CONTENT is synthesised from this
 					     user's own recent chat titles when there are any, and falls back to
@@ -529,7 +506,6 @@
 					     They FILL the composer, never send: the do-not-regress rule the old
 					     cards had. -->
 					<div
-						v-if="!showHomeIntro"
 						class="jv-welcome-grid"
 						style="
 							display: grid;
@@ -4119,8 +4095,6 @@ import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
-import WelcomeAssistantMessage from "@/components/chat/WelcomeAssistantMessage.vue";
-import { useHomeIntro } from "@/composables/useHomeIntro";
 import { parseAsk } from "@/lib/chatAsk";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
@@ -5286,11 +5260,8 @@ const DEFAULT_STARTERS = [
 const starterCards = computed(() =>
 	promptSuggestions.value.length ? promptSuggestions.value : DEFAULT_STARTERS
 );
-// A card was chosen. Fills the composer, never sends (do-not-regress). The
-// bounded intro telemetry gets a category token for a default card and the short
-// synthesised label otherwise. Never the prompt text, never user content.
+// A card was chosen. Fills the composer, never sends (do-not-regress).
 function onWelcomeSuggestion(s) {
-	noteWelcomeSuggestion(s.category || s.title || "synthesised");
 	fillInput(s.prompt);
 }
 api.getPromptSuggestions()
@@ -5632,45 +5603,6 @@ const booting = ref(true);
 const showWelcome = computed(
 	() => !booting.value && (!currentId.value || visibleMessages.value.length === 0)
 );
-
-// ---- first-chat introduction (the static assistant-styled welcome bubble) ----
-// The boot/latch/ack transition lives in useHomeIntro (composable) so it can be
-// behaviour-tested without mounting this view. It is resolved ONCE from the boot
-// payload (both numbers land in `ui` before booting flips false, so the bubble
-// can never flash in or out) via initFromBoot() below, then latched for the
-// session: the introduction stays while the user is on an empty chat home and
-// retires the moment any real message is on screen (their first send, or opening
-// a chat that already has content). It never draws over a conversation that has
-// messages (a proactive one included) because showWelcome is false there by
-// definition. The ack is fire-and-forget; a failed ack only means the intro may
-// appear again on a later page load, and must never gate the composer.
-const {
-	showHomeIntro,
-	homeIntroPersona,
-	homeIntroSpeakerName,
-	initFromBoot: initHomeIntro,
-	ackHomeIntro,
-	noteSuggestionSelected: noteWelcomeSuggestion,
-} = useHomeIntro({
-	showWelcome,
-	booting,
-	visibleCount: () => visibleMessages.value.length,
-	ui,
-	isWhitelabeled,
-	agentName,
-	getPersona: () => store.preferredPersona,
-	markSeen: (v) => api.markHomeIntroSeen(v),
-	// Bounded, privacy-free UI telemetry (no message content, no user name). The
-	// backend endpoint hashes the caller and allow-lists the fields; a failure
-	// here never touches chat.
-	emitTelemetry: (event, payload) => {
-		try {
-			api.recordHomeIntroEvent(event, payload);
-		} catch (e) {
-			/* fire-and-forget */
-		}
-	},
-});
 
 // settings/overview derived metrics (all from data we already hold)
 const convCount = computed(() => store.conversations.length);
@@ -10379,9 +10311,6 @@ onMounted(async () => {
 	if (ui.value.preferred_persona !== undefined) {
 		store.setPreferredPersona(ui.value.preferred_persona, { persist: false });
 	}
-	// First-chat introduction, decided here (before booting flips false) so the
-	// welcome column paints its final shape in one go.
-	initHomeIntro();
 	// Offer recovery of any recording a prior session left un-transcribed (a tab
 	// crash / accidental reload) — only when dictation is actually enabled.
 	// _ensureVoiceSession FIRST: it mints _voiceSessionId, which is what excludes
