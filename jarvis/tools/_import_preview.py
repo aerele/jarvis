@@ -23,6 +23,7 @@ import json
 
 import frappe
 
+from jarvis import compat
 from jarvis.chat._record_summary import fmt, is_secret
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools.read_file import _resolve_file
@@ -129,7 +130,7 @@ def build_import_preview(
 
 	# 6. Parse + preview via the ImportFile-level call (transient-safe). Any parse throw
 	#    (empty / non-UTF8 / non-table / malformed) becomes a clean tool error.
-	doc.set_delimiters_flag()
+	compat.set_delimiters_flag(doc)
 	try:
 		importer = doc.get_importer()
 		import_file = importer.import_file
@@ -353,7 +354,7 @@ def _resolve_mapping(mapping: dict, doc) -> dict:
 	drop a mis-keyed override to a harmless ``info`` warning).
 	"""
 	# Parse once without the override to learn the file's header order.
-	doc.set_delimiters_flag()
+	compat.set_delimiters_flag(doc)
 	base_importer = doc.get_importer()
 	headers = [c.header_title for c in base_importer.import_file.header.columns]
 	by_header = {h: i for i, h in enumerate(headers)}

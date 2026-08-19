@@ -29,6 +29,19 @@ import inspect
 import frappe
 
 
+def set_delimiters_flag(data_import_doc) -> None:
+	"""Apply a Data Import's custom CSV delimiter, where the framework supports it.
+
+	Frappe 16 added ``DataImport.set_delimiters_flag()`` (and the custom-delimiter
+	feature it drives); Frappe 15 has neither and always parses with a comma.
+	Calling it unconditionally was an ``AttributeError`` on 15, so skip it there:
+	with no delimiter feature, the default comma parse is already correct.
+	"""
+	fn = getattr(data_import_doc, "set_delimiters_flag", None)
+	if fn is not None:
+		fn()
+
+
 @functools.cache
 def _get_content_takes_encodings(cls) -> bool:
 	"""Does this File class accept ``get_content(encodings=...)``? (Frappe 16)"""

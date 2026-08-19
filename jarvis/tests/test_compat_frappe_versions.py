@@ -284,3 +284,35 @@ class TestItemisedTaxAcrossMajors(FrappeTestCase):
 			self.assertIs(seen["target"], doc)
 		else:
 			self.assertEqual(list(seen["target"]), list(doc.get("taxes")))
+
+
+class TestSetDelimitersFlag(FrappeTestCase):
+	"""``compat.set_delimiters_flag`` probes for the method instead of calling it.
+
+	Frappe 16 added ``DataImport.set_delimiters_flag``; Frappe 15 has no such
+	method, and a Frappe 16 that later drops or renames it looks the same to us.
+	The old code called ``doc.set_delimiters_flag()`` directly and raised
+	``AttributeError`` on any framework lacking it, breaking every import-preview
+	call. Unlike the shims above, this contract is framework-shape-independent
+	(call iff present), so stand-in objects exercise both branches deterministically
+	rather than depending on which major the bench happens to carry.
+	"""
+
+	def test_calls_through_when_the_method_exists(self):
+		class WithFlag:
+			def __init__(self):
+				self.called = 0
+
+			def set_delimiters_flag(self):
+				self.called += 1
+
+		doc = WithFlag()
+		compat.set_delimiters_flag(doc)
+		self.assertEqual(doc.called, 1)
+
+	def test_is_a_noop_when_the_method_is_absent(self):
+		class WithoutFlag:
+			pass
+
+		# Must not raise AttributeError - this is the regression.
+		compat.set_delimiters_flag(WithoutFlag())
