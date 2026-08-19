@@ -118,17 +118,20 @@ def get_oauth_client_id(provider: str) -> str:
 # override via env when upstream rotates.
 #
 # Resolution order for "Google Gemini":
-#   1. JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET env var (operator override)
-#   2. Extract from the gemini-cli npm package shipped as a runtime dep of
-#      this app (see apps/jarvis/package.json - install with `npm install`
-#      inside that dir after bench-getting the app). NOTE: the dep is pinned
-#      to an EXACT version (SEC-008, Aerele-RnD/jarvis-admin#192), so this
-#      no longer auto-tracks upstream rotations - when Google rotates the
-#      embedded secret, either set the env override (step 1) or deliberately
-#      bump the pin in package.json + package-lock.json (keep it in lockstep
-#      with the fleet-agent entrypoint's GEMINI_CLI_VERSION pin).
+#   1. JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET env var — on version-15 this is
+#      the REQUIRED path, not an override: the @google/gemini-cli npm dep is
+#      deliberately absent from this branch's package.json (it needs node
+#      >=20, and v15 benches run node 18 where `bench get-app` installs via
+#      yarn 1, which hard-fails on engines). Set the env var before workers
+#      start (OAUTH_CLIENT_SECRETS is built at import) and keep the value in
+#      lockstep with the client_id above and the fleet-agent entrypoint's
+#      GEMINI_CLI_VERSION pin (SEC-008, Aerele-RnD/jarvis-admin#192).
+#   2. Extract from an installed @google/gemini-cli npm package. Kept as a
+#      fallback for an operator who installs it by hand next to this app;
+#      develop still ships it as a pinned runtime dep.
 #   3. Empty -> the token exchange fails with the explicit
-#      `client_secret is missing` so the operator knows to install + restart.
+#      `client_secret is missing` so the operator knows to set the env var
+#      and restart.
 OAUTH_CLIENT_SECRETS = {
 	"OpenAI": _env_or_default("JARVIS_OPENAI_CODEX_OAUTH_CLIENT_SECRET", ""),
 	"Google Gemini": _env_or_default("JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET", ""),
