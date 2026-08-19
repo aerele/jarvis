@@ -93,22 +93,6 @@ const US = "jarvis.chat.user_settings_api.";
 export const getMySettings = () => call(US + "get_my_settings");
 export const updateMySettings = (p) => call(US + "update_my_settings", p || {});
 export const setUserTheme = (theme) => call(US + "set_user_theme", { theme });
-// Best-effort ack that the chat-home introduction (the static welcome bubble)
-// was shown. Idempotent + monotonic server-side; the caller swallows failures,
-// whose only cost is the introduction appearing once more.
-export const markHomeIntroSeen = (version) =>
-	call(US + "mark_home_intro_seen", { version: version || 0 });
-// Bounded, privacy-free chat-home introduction telemetry (displayed /
-// suggestion_selected / first_prompt). The server allow-lists every field and
-// hashes the caller — no message content, prompt text, or user name is sent.
-// Best-effort: the caller swallows failures, telemetry must never affect chat.
-export const recordHomeIntroEvent = (event, payload) =>
-	call(US + "record_home_intro_event", {
-		event,
-		version: (payload && payload.version) || 0,
-		category: (payload && payload.category) || "",
-		bucket: (payload && payload.bucket) || "",
-	});
 // Persist the sidebar nav order (drag-to-reorder). order = {top:[labels], more:[labels]}.
 export const setSidebarOrder = (order) =>
 	call(US + "set_sidebar_order", { order: JSON.stringify(order || {}) });

@@ -21,8 +21,6 @@
     "sidebar_order",
     "prompt_suggestions",
     "prompt_suggestions_at",
-    "home_intro_seen_version",
-    "home_intro_seen_at",
     "usage_limits_tab",
     "limit_section",
     "monthly_token_limit",
@@ -134,25 +132,6 @@
       "read_only": 1,
       "no_copy": 1,
       "description": "When prompt_suggestions was last synthesised; drives the refresh gate."
-    },
-    {
-      "fieldname": "home_intro_seen_version",
-      "fieldtype": "Int",
-      "label": "Home Intro Seen Version",
-      "default": "0",
-      "permlevel": 1,
-      "read_only": 1,
-      "no_copy": 1,
-      "description": "Highest chat-home introduction version this user has been shown (0 = never). Monotonic; only jarvis.chat.user_settings_api.mark_home_intro_seen writes it (raw SQL, permlevel-bypassing). Permlevel 1: a Jarvis User can read this but a generic owner-level document update CANNOT write it, so a client can neither invent a future version nor mute the next introduction. Bumping HOME_INTRO_VERSION re-shows the introduction once."
-    },
-    {
-      "fieldname": "home_intro_seen_at",
-      "fieldtype": "Datetime",
-      "label": "Home Intro Seen At",
-      "permlevel": 1,
-      "read_only": 1,
-      "no_copy": 1,
-      "description": "When home_intro_seen_version was last advanced. Permlevel 1: server-owned, read-only to a Jarvis User."
     },
     { "fieldname": "usage_limits_tab", "fieldtype": "Tab Break", "label": "Usage & limits" },
     {
