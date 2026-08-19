@@ -20,6 +20,11 @@ dependencies = [
     # but html5lib has no other requirer, so pin all three explicitly for the FC image.
     "tinycss2>=1.1",
     "html5lib>=1.1",
+    # HTML sanitizer for document export (jarvis/tools/_export/document/sanitizer.py).
+    # Declared explicitly: frappe only started shipping nh3 itself in v16, so relying
+    # on the transitive install breaks every Frappe v15 bench at import time. The
+    # range stays inside frappe v16's own "nh3~=0.3.2" pin so the two never conflict.
+    "nh3>=0.2,<0.4",
 ]
 
 [build-system]
