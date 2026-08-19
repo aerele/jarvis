@@ -20,6 +20,14 @@ dependencies = [
     # but html5lib has no other requirer, so pin all three explicitly for the FC image.
     "tinycss2>=1.1",
     "html5lib>=1.1",
+    # HTML sanitizer for document export (jarvis/tools/_export/document/sanitizer.py).
+    # Declared explicitly: frappe only started shipping nh3 itself in v16, so relying
+    # on the transitive install breaks every Frappe v15 bench at import time. The
+    # floor matters: sanitizer.py passes clean_content_tags= on every nh3.clean()
+    # call, and nh3 < 0.2.5 rejects that kwarg with a TypeError. Mirroring frappe
+    # v16's own "nh3~=0.3.2" pin keeps the two ranges identical, so they can never
+    # conflict and a v15 bench resolves the same nh3 a v16 bench gets.
+    "nh3~=0.3.2",
 ]
 
 [build-system]
