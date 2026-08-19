@@ -127,8 +127,28 @@ class TestBeginPasteSignin(_OAuthApiBase):
 		self.assertGreater(len(entry["verifier"]), 40)  # base64url(32 bytes)
 
 	def test_gemini_provider_returns_gemini_url(self):
-		out = oauth_api.begin_paste_signin("Google Gemini", "gemini-2.0-pro")
+		# Pin the secret: whether one resolves for real depends on the machine
+		# (env var / Jarvis Settings / an installed npm package). providers.py
+		# binds the resolver at import, so patch ITS reference, not jarvis.hooks.
+		with patch(
+			"jarvis.oauth.providers.get_oauth_client_secret",
+			return_value="GOCSPX-test",
+		):
+			out = oauth_api.begin_paste_signin("Google Gemini", "gemini-2.0-pro")
 		self.assertIn("accounts.google.com", out["data"]["authorize_url"])
+
+	def test_gemini_without_client_secret_fails_before_redirect(self):
+		# Confidential client: without a secret the token exchange would fail
+		# AFTER the Google consent dance. The begin call must refuse instead,
+		# pointing at the Jarvis Settings field.
+		with patch(
+			"jarvis.oauth.providers.get_oauth_client_secret",
+			return_value="",
+		):
+			out = oauth_api.begin_paste_signin("Google Gemini", "gemini-2.0-pro")
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "provider_not_configured")
+		self.assertIn("Jarvis Settings", out["error"]["message"])
 
 	def test_unknown_provider_rejected(self):
 		out = oauth_api.begin_paste_signin("Anthropic", "claude-3-5")

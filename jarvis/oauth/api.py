@@ -184,6 +184,17 @@ def _begin_signin(provider: str, model: str, *, pool: bool) -> dict:
 			"device_flow_required",
 			"This provider uses a device-code sign-in and can't be connected this way.",
 		)
+	if provider == "Google Gemini" and not p.get("client_secret"):
+		# Google's token endpoint is a confidential client: without the secret
+		# the exchange fails AFTER the user completes the Google consent dance.
+		# Fail here instead, with the fix in the message. Google-only: OpenAI's
+		# empty client_secret is legitimate (pure PKCE).
+		return _err(
+			"provider_not_configured",
+			"Google Gemini sign-in is not configured on this site. Set the Google "
+			"Gemini OAuth Client Secret in Jarvis Settings (Language Model tab), "
+			"then try again.",
+		)
 
 	# GC abandoned sign-ins BEFORE writing the new nonce. Otherwise a
 	# user who loops begin without ever completing (e.g. wizard reload

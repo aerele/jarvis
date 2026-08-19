@@ -117,21 +117,22 @@ def get_oauth_client_id(provider: str) -> str:
 # design (distributed with the upstream CLI), not as real secrets. Operators
 # override via env when upstream rotates.
 #
-# Resolution order for "Google Gemini":
-#   1. JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET env var — on version-15 this is
-#      the REQUIRED path, not an override: the @google/gemini-cli npm dep is
-#      deliberately absent from this branch's package.json (it needs node
-#      >=20, and v15 benches run node 18 where `bench get-app` installs via
-#      yarn 1, which hard-fails on engines). Set the env var before workers
-#      start (OAUTH_CLIENT_SECRETS is built at import) and keep the value in
-#      lockstep with the client_id above and the fleet-agent entrypoint's
-#      GEMINI_CLI_VERSION pin (SEC-008, Aerele-RnD/jarvis-admin#192).
-#   2. Extract from an installed @google/gemini-cli npm package. Kept as a
-#      fallback for an operator who installs it by hand next to this app;
-#      develop still ships it as a pinned runtime dep.
-#   3. Empty -> the token exchange fails with the explicit
-#      `client_secret is missing` so the operator knows to set the env var
-#      and restart.
+# Resolution order for "Google Gemini" (the @google/gemini-cli npm dep is
+# deliberately absent from version-15: it needs node >=20, and v15 benches run
+# node 18 where `bench get-app` installs via yarn 1, which hard-fails on
+# engines):
+#   1. JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET env var (operator override; read
+#      at import, so a change needs a worker restart)
+#   2. Jarvis Settings "Google Gemini OAuth Client Secret" password field —
+#      the normal v15 path. Read per call, so a change applies immediately.
+#      Keep the value in lockstep with the client_id above and the
+#      fleet-agent entrypoint's GEMINI_CLI_VERSION pin (SEC-008,
+#      Aerele-RnD/jarvis-admin#192).
+#   3. Extract from an installed @google/gemini-cli npm package (develop
+#      still ships it as a pinned runtime dep; on v15 only if hand-installed).
+#   4. Empty -> Google Gemini is not offered as a subscription provider
+#      (chat/api._subscription_connect_providers) and a direct sign-in
+#      attempt fails with an instructive error before the Google redirect.
 OAUTH_CLIENT_SECRETS = {
 	"OpenAI": _env_or_default("JARVIS_OPENAI_CODEX_OAUTH_CLIENT_SECRET", ""),
 	"Google Gemini": _env_or_default("JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET", ""),
@@ -144,18 +145,38 @@ OAUTH_CLIENT_SECRETS = {
 def get_oauth_client_secret(provider: str) -> str:
 	"""Return the client_secret for confidential-client OAuth flows. Empty
 	string for PKCE-only providers (OpenAI codex). For Google Gemini falls
-	back to extracting from the installed @google/gemini-cli package if no
-	env var override was supplied."""
+	back to the Jarvis Settings password field, then to extracting from an
+	installed @google/gemini-cli package (see resolution order above)."""
 	val = OAUTH_CLIENT_SECRETS.get(provider, "")
 	if val:
 		return val
 	if provider == "Google Gemini":
+		settings_val = _gemini_secret_from_settings()
+		if settings_val:
+			return settings_val
 		# Imported lazily so the node_modules walk only runs when a
 		# Google OAuth call asks for it.
 		from jarvis.oauth.gemini_cli_secret import extract_gemini_cli_secret
 
 		return extract_gemini_cli_secret()
 	return ""
+
+
+def _gemini_secret_from_settings() -> str:
+	"""The Jarvis Settings "gemini_oauth_client_secret" Password value, or "".
+
+	Best-effort by design: this runs inside a resolution chain whose contract
+	is "empty string means not configured", so a missing column (pre-migrate),
+	a missing Single row, or no database context at all must fall through to
+	the next step, never raise into the OAuth flow. Hence the broad except.
+	"""
+	import frappe
+
+	try:
+		settings = frappe.get_single("Jarvis Settings")
+		return settings.get_password("gemini_oauth_client_secret", raise_exception=False) or ""
+	except Exception:
+		return ""
 
 
 # Includes in <head>

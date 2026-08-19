@@ -480,3 +480,65 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 		providers = {p["provider"] for p in out["subscription_connect_providers"]}
 		self.assertIn("OpenAI", providers)
 		self.assertNotIn("xAI Grok", providers)
+
+	_GOOGLE_CONNECT_PAYLOAD = [
+		{
+			"provider_id": "google",
+			"label": "Google",
+			"subscription_label": "Google Gemini",
+			"auth_profile_id": "google-gemini-cli",
+			"supports_subscription": True,
+			"models": [
+				{
+					"model_id": "gemini-2.5-pro",
+					"label": "gemini-2.5-pro",
+					"tier": "subscription",
+					"is_default": True,
+					"sort_order": 0,
+				}
+			],
+		},
+		{
+			"provider_id": "openai",
+			"label": "OpenAI",
+			"auth_profile_id": "openai",
+			"supports_subscription": True,
+			"models": [
+				{
+					"model_id": "gpt-5.5",
+					"label": "gpt-5.5",
+					"tier": "subscription",
+					"is_default": True,
+					"sort_order": 0,
+				}
+			],
+		},
+	]
+
+	def test_google_connect_hidden_without_a_client_secret(self):
+		# Google is a confidential OAuth client: without a resolvable
+		# client_secret (env var / Jarvis Settings / bundled package) the
+		# connect flow can only fail after the Google consent dance, so the
+		# card must not be offered. OpenAI (pure PKCE, legitimately empty
+		# secret) must stay offered.
+		from jarvis.chat.api import get_model_catalog_ui
+
+		with (
+			patch.object(admin_client, "get_model_catalog", return_value=self._GOOGLE_CONNECT_PAYLOAD),
+			patch("jarvis.hooks.get_oauth_client_secret", return_value=""),
+		):
+			out = get_model_catalog_ui()
+		providers = {p["provider"] for p in out["subscription_connect_providers"]}
+		self.assertNotIn("Google Gemini", providers)
+		self.assertIn("OpenAI", providers)
+
+	def test_google_connect_offered_when_a_client_secret_resolves(self):
+		from jarvis.chat.api import get_model_catalog_ui
+
+		with (
+			patch.object(admin_client, "get_model_catalog", return_value=self._GOOGLE_CONNECT_PAYLOAD),
+			patch("jarvis.hooks.get_oauth_client_secret", return_value="GOCSPX-configured"),
+		):
+			out = get_model_catalog_ui()
+		providers = {p["provider"] for p in out["subscription_connect_providers"]}
+		self.assertIn("Google Gemini", providers)

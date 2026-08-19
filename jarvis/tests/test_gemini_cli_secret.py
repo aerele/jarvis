@@ -133,12 +133,46 @@ class TestGetOauthClientSecretPrecedence(unittest.TestCase):
 		self.assertEqual(out, "GOCSPX-from-env")
 		walker.assert_not_called()
 
-	def test_falls_back_to_node_modules_when_env_unset(self):
+	def test_env_var_wins_over_settings(self):
+		with (
+			patch.dict(
+				hooks.OAUTH_CLIENT_SECRETS,
+				{"Google Gemini": "GOCSPX-from-env"},
+			),
+			patch.object(hooks, "_gemini_secret_from_settings") as settings_read,
+		):
+			out = hooks.get_oauth_client_secret("Google Gemini")
+		self.assertEqual(out, "GOCSPX-from-env")
+		settings_read.assert_not_called()
+
+	def test_settings_field_wins_over_node_modules(self):
+		# The Jarvis Settings password field is the normal v15 path (the npm
+		# dep is absent there); the bundle walk must not run when it is set.
 		with (
 			patch.dict(
 				hooks.OAUTH_CLIENT_SECRETS,
 				{"Google Gemini": ""},
 			),
+			patch.object(
+				hooks,
+				"_gemini_secret_from_settings",
+				return_value="GOCSPX-from-settings",
+			),
+			patch(
+				"jarvis.oauth.gemini_cli_secret.extract_gemini_cli_secret",
+			) as walker,
+		):
+			out = hooks.get_oauth_client_secret("Google Gemini")
+		self.assertEqual(out, "GOCSPX-from-settings")
+		walker.assert_not_called()
+
+	def test_falls_back_to_node_modules_when_env_and_settings_unset(self):
+		with (
+			patch.dict(
+				hooks.OAUTH_CLIENT_SECRETS,
+				{"Google Gemini": ""},
+			),
+			patch.object(hooks, "_gemini_secret_from_settings", return_value=""),
 			patch(
 				"jarvis.oauth.gemini_cli_secret.extract_gemini_cli_secret",
 				return_value="GOCSPX-from-bundle",
@@ -147,6 +181,13 @@ class TestGetOauthClientSecretPrecedence(unittest.TestCase):
 			out = hooks.get_oauth_client_secret("Google Gemini")
 		self.assertEqual(out, "GOCSPX-from-bundle")
 		walker.assert_called_once()
+
+	def test_settings_read_errors_resolve_to_empty(self):
+		# The settings step is best-effort: pre-migrate (no column), no Single
+		# row, or no db context must yield "" and fall through, never raise
+		# into the OAuth flow.
+		with patch("frappe.get_single", side_effect=Exception("no db")):
+			self.assertEqual(hooks._gemini_secret_from_settings(), "")
 
 	def test_other_providers_never_walk_node_modules(self):
 		# Only Google Gemini falls back to the bundle scan; everything

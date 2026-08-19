@@ -1737,12 +1737,22 @@ def _subscription_connect_providers() -> list[dict]:
 	would render a connect button that can never succeed.
 	"""
 	from jarvis import admin_client
+	from jarvis.hooks import get_oauth_client_secret
 
 	out: list[dict] = []
 	for provider in admin_client.get_model_catalog() or []:
 		if not (provider.get("auth_profile_id") or "").strip():
 			continue
 		label = provider.get("subscription_label") or provider.get("label") or ""
+		if label == "Google Gemini" and not get_oauth_client_secret(label):
+			# Google is a confidential OAuth client: connecting needs a
+			# client_secret (env var, Jarvis Settings field, or a bundled
+			# gemini-cli package on develop). Without one the connect flow can
+			# only fail, so don't offer the card. Label-scoped on purpose:
+			# OpenAI's empty secret is legitimate (pure PKCE) and must stay
+			# offered. Already-connected accounts are unaffected; this gates
+			# only the connect list.
+			continue
 		rows = [m for m in provider.get("models") or [] if m.get("tier") == "subscription"]
 		rows.sort(key=lambda m: (m.get("sort_order") or 0, m.get("model_id") or ""))
 		models = [m["model_id"] for m in rows]

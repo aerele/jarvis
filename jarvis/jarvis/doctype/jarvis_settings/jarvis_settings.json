@@ -40,6 +40,7 @@
   "llm_auth_mode",
   "llm_oauth_account_email",
   "llm_oauth_connected_at",
+  "gemini_oauth_client_secret",
   "intelligence_tab",
   "behavioural_learning_section",
   "pattern_learning_enabled",
@@ -349,6 +350,12 @@
    "label": "Connected At",
    "read_only": 1,
    "depends_on": "eval:doc.llm_auth_mode == 'oauth'"
+  },
+  {
+   "fieldname": "gemini_oauth_client_secret",
+   "fieldtype": "Password",
+   "label": "Google Gemini OAuth Client Secret",
+   "description": "Needed only to CONNECT a Google Gemini chat subscription. Paste the GOCSPX-... value Google ships inside its Gemini CLI package (public by design, not a real secret). Until this is set, Google Gemini is not offered as a subscription provider. The JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET environment variable overrides this field when set. Already-connected accounts keep working without it; the value is only used during sign-in."
   },
   {
    "fieldname": "intelligence_tab",
