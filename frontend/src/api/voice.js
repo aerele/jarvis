@@ -44,7 +44,7 @@ function _frappeErr(data, status) {
 // an in-flight upload on teardown.
 export async function transcribeAudio(
 	blob,
-	{ durationS = 0, timeoutMs = TRANSCRIPTION_TIMEOUT_MS, signal } = {},
+	{ durationS = 0, timeoutMs = TRANSCRIPTION_TIMEOUT_MS, signal } = {}
 ) {
 	const fd = new FormData();
 	fd.append("audio", blob, _audioFilename(blob));

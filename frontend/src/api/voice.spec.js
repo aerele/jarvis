@@ -31,7 +31,7 @@ describe("voice transcription request budget", () => {
 				},
 				() => {
 					settled = true;
-				},
+				}
 			);
 			await vi.advanceTimersByTimeAsync(25000);
 			expect(settled).toBe(false);
