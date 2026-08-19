@@ -259,19 +259,14 @@ class _AssistantContentBatcher:
 #     "openai" as the model-provider key. Use "openai" for the chat WS
 #     frame and the embedded codex-harness path handles the dispatch.
 #
-#   - Google Gemini: gemini-cli is registered ONLY as a CliBackend
-#     (openclaw/extensions/google/cli-backend.ts:16 with id
-#     "google-gemini-cli"). Use "google-gemini-cli" verbatim so
-#     isCliProvider returns true and dispatch routes via the CLI backend
-#     to the gemini binary inside the container. Mapping it to "google"
-#     makes isCliProvider return false, dispatch falls into the embedded
-#     path, and agent errors "No API key found for provider 'google'".
+#
+# (Google Gemini's subscription CliBackend path was removed 2026-08-19 when
+# Google discontinued consumer login-with-Google for Gemini.)
 #
 # Only used in oauth mode - api_key mode skips this map and lets
 # agent resolve the single registered models.providers entry.
 _PROVIDER_LABEL_TO_AGENT_ID = {
 	"OpenAI": "openai",
-	"Google Gemini": "google-gemini-cli",
 }
 
 
@@ -299,8 +294,8 @@ def _subscription_agent_provider(settings) -> str | None:
 	leg exists to serve.
 
 	The account's own oauth_blob already carries the agent provider id under its
-	``provider`` key (``"openai"``, ``"google-gemini-cli"`` - baked in when the
-	blob was minted by ``jarvis.oauth.api._exchange_and_build_blob``), so read it
+	``provider`` key (e.g. ``"openai"`` - baked in when the blob was minted by
+	``jarvis.oauth.api._exchange_and_build_blob``), so read it
 	from there instead of standing up a second upstream-to-provider table - see
 	``jarvis_settings.py``'s ``_push_direct_subscription_blob``, which relies on
 	the same key for the same reason.

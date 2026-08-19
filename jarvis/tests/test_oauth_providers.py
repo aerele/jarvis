@@ -28,28 +28,15 @@ class TestGetProvider(unittest.TestCase):
 		self.assertIn("api.connectors.read", p["scope"])
 		self.assertIn("api.connectors.invoke", p["scope"])
 
-	def test_gemini_returns_gemini_cli_metadata(self):
-		p = providers.get_provider("Google Gemini")
-		self.assertEqual(p["authorize"], "https://accounts.google.com/o/oauth2/v2/auth")
-		# Auth storage key matches agent's registered CliBackend id so the
-		# gemini binary finds the OAuth token when agent routes dispatch
-		# via the CLI backend. Mapping to "google" makes agent's
-		# isCliProvider return false and the CLI dispatch path is missed.
-		self.assertEqual(p["agent_provider"], "google-gemini-cli")
-		# Userinfo flipped from None to the Google v1 endpoint after the
-		# scope drift bug fix - the bundled gemini-cli OAuth client doesn't
-		# have `openid` registered, so no id_token comes back and email is
-		# fetched via Bearer-authenticated userinfo instead.
-		self.assertEqual(p["userinfo"], "https://www.googleapis.com/oauth2/v1/userinfo?alt=json")
-		# Lock in the scope contract - matches agent's gemini-cli SCOPES.
-		# Reject the previously-broken `generative-language` and the
-		# `openid`/`email`/`profile` short forms that aren't registered on
-		# the gemini-cli OAuth client.
-		self.assertIn("https://www.googleapis.com/auth/cloud-platform", p["scope"])
-		self.assertIn("https://www.googleapis.com/auth/userinfo.email", p["scope"])
-		self.assertIn("https://www.googleapis.com/auth/userinfo.profile", p["scope"])
-		self.assertNotIn("generative-language", p["scope"])
-		self.assertNotIn("openid", p["scope"])
+	def test_google_gemini_no_longer_an_oauth_provider(self):
+		# Google's chat subscription was removed 2026-08-19 (Google discontinued
+		# consumer login-with-Google for Gemini 2026-06-18); the gemini-cli OAuth
+		# flow is gone from the provider map. Gemini stays available via API key
+		# (a separate, unaffected code path).
+		with self.assertRaises(providers.UnknownProviderError):
+			providers.get_provider("Google Gemini")
+		self.assertFalse(providers.is_oauth_provider("Google Gemini"))
+		self.assertEqual(providers.agent_provider_for("Google Gemini"), "")
 
 	def test_unknown_provider_raises(self):
 		with self.assertRaises(providers.UnknownProviderError):
@@ -104,12 +91,6 @@ class TestExtractAccountId(unittest.TestCase):
 		jwt = _jwt({"https://api.openai.com/auth": {"chatgpt_account_id": 12345}})
 		self.assertEqual(providers.extract_account_id("OpenAI", jwt), "")
 
-	def test_gemini_returns_empty_until_verified_live(self):
-		# Per oauth-implementation.md, Gemini's account-id claim hasn't been
-		# verified against a real account; helper returns "" defensively.
-		jwt = _jwt({"sub": "google-oauth2|123"})
-		self.assertEqual(providers.extract_account_id("Google Gemini", jwt), "")
-
 	def test_unknown_provider_returns_empty(self):
 		jwt = _jwt({"sub": "x"})
 		self.assertEqual(providers.extract_account_id("Anthropic", jwt), "")
@@ -138,16 +119,17 @@ class TestBuildAuthorizeUrl(unittest.TestCase):
 		self.assertEqual(q["codex_cli_simplified_flow"], ["true"])
 		self.assertIn("api.connectors.read", q["scope"][0])
 
-	def test_gemini_authorize_url_requests_offline_access(self):
-		url = providers.build_authorize_url(
-			provider="Google Gemini",
-			redirect_uri="http://localhost:1455/auth/callback",
-			code_challenge="C",
-			state="S",
-		)
-		q = parse_qs(urlparse(url).query)
-		self.assertEqual(q["access_type"], ["offline"])
-		self.assertEqual(q["prompt"], ["consent"])
+	def test_gemini_authorize_url_raises_unknown_provider(self):
+		# Google Gemini's gemini-cli OAuth flow was removed 2026-08-19; building
+		# an authorize URL for it now fails the same way any unknown provider
+		# does, rather than returning a gemini-cli offline-access URL.
+		with self.assertRaises(providers.UnknownProviderError):
+			providers.build_authorize_url(
+				provider="Google Gemini",
+				redirect_uri="http://localhost:1455/auth/callback",
+				code_challenge="C",
+				state="S",
+			)
 
 
 class TestPhase2Providers(unittest.TestCase):
@@ -188,6 +170,7 @@ class TestPhase2Providers(unittest.TestCase):
 		self.assertTrue(providers.is_oauth_provider("xAI Grok"))
 		self.assertFalse(providers.is_oauth_provider("Kimi (Moonshot)"))
 		self.assertFalse(providers.is_oauth_provider("Anthropic"))
+		self.assertFalse(providers.is_oauth_provider("Google Gemini"))
 
 	def test_kimi_is_device_code(self):
 		p = providers.get_provider("Kimi (Moonshot)")
