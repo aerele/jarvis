@@ -397,10 +397,15 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 		orig = frappe.db.get_value
 		seen = {}
 
-		def spy(dt, name=None, field=None, *args, **kwargs):
-			if dt == WIKI and field == "manual_links":
+		def spy(*args, **kwargs):
+			# Signature-flexible: Frappe 15 internals call get_value with a
+			# different positional/keyword mix than 16, so match on values, not
+			# on a fixed parameter list, and pass through verbatim.
+			doctype = args[0] if args else kwargs.get("doctype")
+			fieldname = args[2] if len(args) > 2 else kwargs.get("fieldname")
+			if doctype == WIKI and fieldname == "manual_links":
 				seen["for_update"] = kwargs.get("for_update")
-			return orig(dt, name, field, *args, **kwargs)
+			return orig(*args, **kwargs)
 
 		with patch.object(frappe.db, "get_value", side_effect=spy):
 			wiki_mod.add_wiki_link(p.name, a.name)
@@ -519,10 +524,15 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 		orig = frappe.db.get_value
 		seen = {}
 
-		def spy(dt, name=None, field=None, *args, **kwargs):
-			if dt == WIKI and field == "manual_links":
+		def spy(*args, **kwargs):
+			# Signature-flexible: Frappe 15 internals call get_value with a
+			# different positional/keyword mix than 16, so match on values, not
+			# on a fixed parameter list, and pass through verbatim.
+			doctype = args[0] if args else kwargs.get("doctype")
+			fieldname = args[2] if len(args) > 2 else kwargs.get("fieldname")
+			if doctype == WIKI and fieldname == "manual_links":
 				seen["for_update"] = kwargs.get("for_update")
-			return orig(dt, name, field, *args, **kwargs)
+			return orig(*args, **kwargs)
 
 		with patch.object(frappe.db, "get_value", side_effect=spy):
 			wiki_mod.remove_wiki_link(p.name, a.name)
