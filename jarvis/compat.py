@@ -29,6 +29,34 @@ import inspect
 import frappe
 
 
+def in_test() -> bool:
+	"""True when running under the test runner, on Frappe 15 and 16.
+
+	Frappe 16 exposes a module-level ``frappe.in_test``; Frappe 15 has no such
+	attribute and instead sets ``frappe.flags.in_test``. Reading ``frappe.in_test``
+	directly raised ``AttributeError`` on 15. Keep 16's check as the first operand
+	so its behavior is unchanged, then fall back to 15's flag.
+
+	Call this via the module (``compat.in_test()``) so tests can patch the one
+	seam on both majors; ``mock.patch("frappe.in_test", ...)`` cannot work on 15,
+	where the attribute does not exist to patch.
+	"""
+	return getattr(frappe, "in_test", False) or bool(frappe.flags.get("in_test"))
+
+
+def set_delimiters_flag(data_import_doc) -> None:
+	"""Apply a Data Import's custom CSV delimiter, where the framework supports it.
+
+	Frappe 16 added ``DataImport.set_delimiters_flag()`` (and the custom-delimiter
+	feature it drives); Frappe 15 has neither and always parses with a comma.
+	Calling it unconditionally was an ``AttributeError`` on 15, so skip it there:
+	with no delimiter feature, the default comma parse is already correct.
+	"""
+	fn = getattr(data_import_doc, "set_delimiters_flag", None)
+	if fn is not None:
+		fn()
+
+
 @functools.cache
 def _get_content_takes_encodings(cls) -> bool:
 	"""Does this File class accept ``get_content(encodings=...)``? (Frappe 16)"""
