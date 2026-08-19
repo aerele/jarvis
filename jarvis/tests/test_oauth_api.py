@@ -187,7 +187,13 @@ class TestBeginPasteSignin(_OAuthApiBase):
 		2.0→2.5 bump) doesn't strand this test."""
 		from jarvis._subscription_models import DEFAULT_MODEL
 
-		out = oauth_api.begin_paste_signin("Google Gemini", "gemini-pro")
+		# Pin the secret so the not-configured guard can't trip on CI (no env
+		# var, no Jarvis Settings value, no installed npm package there).
+		with patch(
+			"jarvis.oauth.providers.get_oauth_client_secret",
+			return_value="GOCSPX-test",
+		):
+			out = oauth_api.begin_paste_signin("Google Gemini", "gemini-pro")
 		entry = frappe.cache.hget(_CACHE_KEY, out["data"]["nonce"])
 		self.assertEqual(entry["model"], DEFAULT_MODEL["Google Gemini"])
 		self.assertNotEqual(entry["model"], "gemini-pro")
@@ -1096,7 +1102,12 @@ class TestPoolSigninScope(_OAuthApiBase):
 	def test_pool_signin_provider_without_pool_scope_falls_back(self):
 		# Google Gemini defines no pool_scope -> pool flow uses the normal
 		# scope (the gemini-cli scope set is what its pool path needs too).
-		out = oauth_api.begin_pool_account_signin("Google Gemini", "gemini-2.5-pro")
+		# Secret pinned: see test_gemini_provider_returns_gemini_url.
+		with patch(
+			"jarvis.oauth.providers.get_oauth_client_secret",
+			return_value="GOCSPX-test",
+		):
+			out = oauth_api.begin_pool_account_signin("Google Gemini", "gemini-2.5-pro")
 		url = out["data"]["authorize_url"]
 		self.assertIn("cloud-platform", url)  # the normal gemini-cli scope set
 
