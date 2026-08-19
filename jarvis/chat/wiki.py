@@ -694,7 +694,7 @@ def _maybe_nudge(conversation_id: str, user: str) -> None:
 	if cache.get_value(_NUDGE_OFF_KEY.format(conv=conversation_id), expires=True):
 		return
 	cooldown_key = _NUDGE_COOLDOWN_KEY.format(conv=conversation_id)
-	if cache.get_value(cooldown_key):
+	if cache.get_value(cooldown_key, expires=True):
 		return
 
 	entities = _nudge_entities(conversation_id)

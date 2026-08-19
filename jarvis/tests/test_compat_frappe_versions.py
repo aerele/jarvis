@@ -379,3 +379,28 @@ class TestCacheGetFreshAcrossMajors(FrappeTestCase):
 	def test_missing_key_is_none(self):
 		frappe.cache().delete_value("jarvis-compat-fresh-absent")
 		self.assertIsNone(compat.cache_get_fresh("jarvis-compat-fresh-absent"))
+
+
+class TestCacheGetMemoizedAcrossMajors(FrappeTestCase):
+	"""compat.cache_get_memoized() keeps a TTL-key read memoized in
+	frappe.local.cache for the rest of the request, without the v15 miss-poison."""
+
+	def test_hit_is_memoized_in_local_cache(self):
+		key = "jarvis-compat-memo-probe"
+		cache = frappe.cache()
+		cache.delete_value(key)
+		self.addCleanup(cache.delete_value, key)
+		cache.set_value(key, {"v": 1}, expires_in_sec=60)
+		self.assertEqual(compat.cache_get_memoized(key), {"v": 1})
+		# a real hit is stored back so the next read is a dict lookup
+		self.assertEqual(frappe.local.cache.get(cache.make_key(key)), {"v": 1})
+
+	def test_miss_does_not_poison(self):
+		key = "jarvis-compat-memo-miss"
+		cache = frappe.cache()
+		cache.delete_value(key)
+		self.addCleanup(cache.delete_value, key)
+		self.assertIsNone(compat.cache_get_memoized(key))  # cold miss
+		self.assertNotIn(cache.make_key(key), frappe.local.cache)  # not poisoned
+		cache.set_value(key, {"v": 2}, expires_in_sec=60)
+		self.assertEqual(compat.cache_get_memoized(key), {"v": 2})
