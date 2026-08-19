@@ -14,7 +14,8 @@ match Task 2's ``THEME_CSS`` contract - keep them in lockstep if either side
 changes.
 
 ``fmt_amount``/``fmt_pct`` DO need a Frappe site: they reuse
-``frappe.utils.fmt_money``/``frappe.utils.data.get_number_format`` for
+``frappe.utils.fmt_money`` (and, for ``fmt_pct``'s precision, Frappe 15's
+``frappe.utils.data.get_number_format_info``) for
 locale-correct digit grouping (Indian lakh/crore included) rather than
 hand-rolling grouping logic. Both guard ``None``/``NaN``/``Inf`` explicitly
 ahead of ``fmt_money`` - a naive ``"%.2f" % float("nan")`` renders the literal
@@ -31,10 +32,23 @@ import html
 import math
 from collections.abc import Mapping, Sequence
 
+import frappe
 from frappe.utils import fmt_money
-from frappe.utils.data import get_number_format
+from frappe.utils.data import get_number_format_info
 
 _RAG_STATUSES = ("red", "amber", "green")
+
+
+def number_format_precision() -> int:
+	"""The site number-format's decimal precision, resolved the Frappe 15 way.
+
+	Mirrors ``fmt_money``'s own resolution on Frappe 15 -
+	``get_number_format_info(frappe.db.get_default("number_format") or "#,###.##")``
+	- so ``fmt_pct`` gets exactly the precision the framework computes, without
+	inheriting ``fmt_money``'s currency-precision default.
+	"""
+	fmt = frappe.db.get_default("number_format") or "#,###.##"
+	return get_number_format_info(fmt)[2]
 
 
 def css_bar(rows: Sequence[Mapping[str, object] | Sequence[object]]) -> str:
@@ -119,7 +133,7 @@ def fmt_pct(value: float | int | str | None) -> str:
 	"""Format ``value`` - already a percent number, e.g. ``42.5`` -> ``"42.5%"``
 	- via ``fmt_money`` at the site's own number-format precision.
 
-	Explicitly passes ``get_number_format().precision`` rather than letting
+	Explicitly passes ``number_format_precision()`` rather than letting
 	``fmt_money`` fall back to the system currency-precision default: a percent
 	has nothing to do with currency precision, so decoupling keeps the decimal
 	count locale-correct without accidentally inheriting a currency setting.
@@ -130,7 +144,7 @@ def fmt_pct(value: float | int | str | None) -> str:
 	num = _to_float_or_none(value)
 	if num is None:
 		return "—"
-	precision = get_number_format().precision
+	precision = number_format_precision()
 	formatted = html.escape(fmt_money(abs(num), precision=precision))
 	return f'<span class="neg">({formatted}%)</span>' if num < 0 else f"{formatted}%"
 

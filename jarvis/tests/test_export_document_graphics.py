@@ -6,14 +6,14 @@ Two groups:
 * ``css_bar``/``kpi_tile``/``rag_chip`` are pure (no ``frappe`` import) and run
   WITHOUT a site: ``python -m unittest jarvis.tests.test_export_document_graphics``.
 * ``fmt_amount``/``fmt_pct`` reuse ``frappe.utils.fmt_money`` /
-  ``frappe.utils.data.get_number_format``, both of which read
-  ``frappe.local.lang`` - they raise ``AttributeError: lang`` outside a real
+  ``graphics.number_format_precision``, both of which read a site setting
+  (``frappe.local.lang`` / the site number format) - they raise outside a real
   Frappe site/request context. The real-formatting tests below are marked
   ``skip`` with that reason (verified against this repo's bench-env python,
   see the task report) and belong to the end-to-end/site gate instead. The
   edge-case GUARD logic (None/NaN/Inf/-0.0 handling, before ``fmt_money`` is
   ever reached) is still fully unit-tested here by patching
-  ``fmt_money``/``get_number_format`` to site-free stubs.
+  ``fmt_money``/``number_format_precision`` to site-free stubs.
 """
 
 import html
@@ -197,8 +197,8 @@ class TestRagChip(unittest.TestCase):
 
 # --- fmt_amount / fmt_pct: real integration (needs a Frappe site) -----------
 #
-# frappe.utils.fmt_money / frappe.utils.data.get_number_format read
-# frappe.local.lang and raise `AttributeError: lang` outside a site. These use
+# frappe.utils.fmt_money / graphics.number_format_precision read a site
+# setting and raise outside a site. These use
 # ``skipUnless`` (NOT unconditional ``skip``, which would never run even inside
 # the bench gate) so they DO run once a site is present, and they assert exact
 # DELEGATION to fmt_money rather than a hard-coded locale string - proving
@@ -218,15 +218,14 @@ class TestFmtRealIntegration(unittest.TestCase):
 	@unittest.skipUnless(_HAS_SITE, "needs a bench site (frappe.local.lang)")
 	def test_fmt_pct_delegates_at_number_format_precision(self) -> None:
 		from frappe.utils import fmt_money
-		from frappe.utils.data import get_number_format
 
-		expected = html.escape(fmt_money(42.5, precision=get_number_format().precision)) + "%"
+		expected = html.escape(fmt_money(42.5, precision=graphics.number_format_precision())) + "%"
 		self.assertEqual(fmt_pct(42.5), expected)
 
 
 # --- fmt_amount / fmt_pct: edge-case guard logic (no site needed) -----------
 #
-# fmt_money/get_number_format are patched to site-free stubs so ONLY the
+# fmt_money/number_format_precision are patched to site-free stubs so ONLY the
 # wrapper's own None/NaN/Inf/-0.0/negative-parens guard logic is under test.
 # For the None/NaN/Inf cases the guard returns before ever calling the stub
 # (proven below by asserting the stub was not invoked), so those specific
@@ -235,21 +234,18 @@ class TestFmtRealIntegration(unittest.TestCase):
 
 class TestFmtGuards(unittest.TestCase):
 	def setUp(self) -> None:
-		self.calls = {"fmt_money": [], "get_number_format": 0}
+		self.calls = {"fmt_money": [], "number_format_precision": 0}
 
 		def _fmt_money_stub(amount, precision=None, currency=None, format=None):
 			self.calls["fmt_money"].append((amount, precision, currency))
 			return f"{amount:.2f}"
 
-		class _NF:
-			precision = 2
-
-		def _get_number_format_stub():
-			self.calls["get_number_format"] += 1
-			return _NF()
+		def _number_format_precision_stub():
+			self.calls["number_format_precision"] += 1
+			return 2
 
 		patch.object(graphics, "fmt_money", _fmt_money_stub).start()
-		patch.object(graphics, "get_number_format", _get_number_format_stub).start()
+		patch.object(graphics, "number_format_precision", _number_format_precision_stub).start()
 		self.addCleanup(patch.stopall)
 
 	def test_fmt_amount_none_nan_inf_render_em_dash(self) -> None:
@@ -263,7 +259,7 @@ class TestFmtGuards(unittest.TestCase):
 			with self.subTest(bad=bad):
 				self.assertEqual(fmt_pct(bad), "—")
 				self.assertEqual(self.calls["fmt_money"], [])
-				self.assertEqual(self.calls["get_number_format"], 0)
+				self.assertEqual(self.calls["number_format_precision"], 0)
 
 	def test_fmt_amount_negative_zero_is_not_negative(self) -> None:
 		out = fmt_amount(-0.0)
@@ -309,9 +305,9 @@ class TestFmtGuards(unittest.TestCase):
 
 	def test_fmt_pct_uses_number_format_precision_not_currency_default(self) -> None:
 		fmt_pct(42.5)
-		self.assertEqual(self.calls["get_number_format"], 1)
+		self.assertEqual(self.calls["number_format_precision"], 1)
 		((_amount, precision, _currency),) = self.calls["fmt_money"]
-		self.assertEqual(precision, 2)  # from the stub NumberFormat, not a currency-precision default
+		self.assertEqual(precision, 2)  # from the stub precision, not a currency-precision default
 
 	def test_fmt_amount_string_input_with_commas(self) -> None:
 		out = fmt_amount("1,234.5")
