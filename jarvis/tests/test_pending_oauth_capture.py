@@ -237,32 +237,41 @@ class TestPendingCapture(FrappeTestCase):
 	def test_sweep_gives_up_and_erases_after_max_attempts(self):
 		import requests as _rq
 
-		view = _mk(agent_provider="google-gemini-cli", provider_subject="give-up", account_ref="SUB_gu")
-		name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
-		frappe.db.set_value(
-			DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False
-		)
-		frappe.db.commit()
-		from frappe.utils.password import get_decrypted_password
-
-		with patch("jarvis.oauth.pending_capture.requests.post", side_effect=_rq.RequestException("down")):
-			# One shy of the ceiling: still retryable, ciphertext KEPT for a later try.
-			for _ in range(pc.REVOKE_MAX_ATTEMPTS - 1):
-				pc.sweep_expired()
-			self.assertTrue(
-				get_decrypted_password(DT, name, "encrypted_oauth_blob", raise_exception=False),
-				"ciphertext must survive until the retry ceiling",
+		# Google's revoke endpoint was the only real entry in _REVOKE_ENDPOINTS
+		# and was removed with the Gemini chat subscription (2026-08-19); patch
+		# in a synthetic one so this retry-then-give-up regression stays
+		# covered independent of any specific provider.
+		with patch.dict(pc._REVOKE_ENDPOINTS, {"test-oauth-provider": "https://revoke.example.com/revoke"}):
+			view = _mk(
+				agent_provider="test-oauth-provider", provider_subject="give-up", account_ref="SUB_gu"
 			)
-			# The ceiling sweep gives up: erase the ciphertext so a dead provider cannot
-			# strand a live token here forever.
-			pc.sweep_expired()
-		row = frappe.db.get_value(DT, name, ["revocation_state", "revocation_attempts"], as_dict=True)
-		self.assertEqual(row.revocation_state, "failed")
-		self.assertEqual(int(row.revocation_attempts), pc.REVOKE_MAX_ATTEMPTS)
-		self.assertFalse(
-			get_decrypted_password(DT, name, "encrypted_oauth_blob", raise_exception=False),
-			"ciphertext must be erased once revocation gives up",
-		)
+			name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
+			frappe.db.set_value(
+				DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False
+			)
+			frappe.db.commit()
+			from frappe.utils.password import get_decrypted_password
+
+			with patch(
+				"jarvis.oauth.pending_capture.requests.post", side_effect=_rq.RequestException("down")
+			):
+				# One shy of the ceiling: still retryable, ciphertext KEPT for a later try.
+				for _ in range(pc.REVOKE_MAX_ATTEMPTS - 1):
+					pc.sweep_expired()
+				self.assertTrue(
+					get_decrypted_password(DT, name, "encrypted_oauth_blob", raise_exception=False),
+					"ciphertext must survive until the retry ceiling",
+				)
+				# The ceiling sweep gives up: erase the ciphertext so a dead provider
+				# cannot strand a live token here forever.
+				pc.sweep_expired()
+			row = frappe.db.get_value(DT, name, ["revocation_state", "revocation_attempts"], as_dict=True)
+			self.assertEqual(row.revocation_state, "failed")
+			self.assertEqual(int(row.revocation_attempts), pc.REVOKE_MAX_ATTEMPTS)
+			self.assertFalse(
+				get_decrypted_password(DT, name, "encrypted_oauth_blob", raise_exception=False),
+				"ciphertext must be erased once revocation gives up",
+			)
 
 	# ---- expiry sweep: revoke + erase ----
 
@@ -281,41 +290,57 @@ class TestPendingCapture(FrappeTestCase):
 
 		self.assertFalse(get_decrypted_password(DT, name, "encrypted_oauth_blob", raise_exception=False))
 
+	def test_no_provider_has_a_revoke_endpoint_after_gemini_removal(self):
+		# Google's oauth2.googleapis.com/revoke was the only real entry in
+		# _REVOKE_ENDPOINTS; it was removed along with the Gemini chat
+		# subscription (2026-08-19). openai/xai/kimi publish no revocation
+		# endpoint this integration can verify, so the map is now empty and
+		# every capture resolves to "unsupported" on sweep.
+		self.assertEqual(pc._REVOKE_ENDPOINTS, {})
+		self.assertNotIn("google-gemini-cli", pc._REVOKE_ENDPOINTS)
+
 	def test_sweep_calls_revoke_endpoint_when_one_exists(self):
-		# Route the capture through a provider WITH a revoke endpoint.
-		view = _mk(agent_provider="google-gemini-cli", provider_subject="subj-g", account_ref="SUB_g")
-		name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
-		frappe.db.set_value(
-			DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False
-		)
-		frappe.db.commit()
+		# Route the capture through a provider WITH a revoke endpoint. Google's
+		# was the only real one and was removed with the Gemini chat
+		# subscription (2026-08-19); patch a synthetic one in so this
+		# revoke-call regression stays covered independent of any specific
+		# provider.
+		with patch.dict(pc._REVOKE_ENDPOINTS, {"test-oauth-provider": "https://revoke.example.com/revoke"}):
+			view = _mk(agent_provider="test-oauth-provider", provider_subject="subj-g", account_ref="SUB_g")
+			name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
+			frappe.db.set_value(
+				DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False
+			)
+			frappe.db.commit()
 
-		class _Resp:
-			ok = True
-			status_code = 200
+			class _Resp:
+				ok = True
+				status_code = 200
 
-		with patch("jarvis.oauth.pending_capture.requests.post", return_value=_Resp()) as post:
-			pc.sweep_expired()
-		post.assert_called_once()
-		# The token, not a leak, is what was posted; assert the endpoint + that a
-		# token was sent (value is the real refresh token, by design).
-		self.assertEqual(post.call_args.args[0], "https://oauth2.googleapis.com/revoke")
-		self.assertEqual(frappe.db.get_value(DT, name, "revocation_state"), "revoked")
+			with patch("jarvis.oauth.pending_capture.requests.post", return_value=_Resp()) as post:
+				pc.sweep_expired()
+			post.assert_called_once()
+			# The token, not a leak, is what was posted; assert the endpoint + that a
+			# token was sent (value is the real refresh token, by design).
+			self.assertEqual(post.call_args.args[0], "https://revoke.example.com/revoke")
+			self.assertEqual(frappe.db.get_value(DT, name, "revocation_state"), "revoked")
 
 	def test_sweep_retries_transient_then_gives_up(self):
 		import requests as _rq
 
-		view = _mk(agent_provider="google-gemini-cli", provider_subject="subj-t", account_ref="SUB_t")
-		name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
-		frappe.db.set_value(
-			DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False
-		)
-		frappe.db.commit()
-		with patch(
-			"jarvis.oauth.pending_capture.requests.post",
-			side_effect=_rq.RequestException("boom"),
-		):
-			# One sweep = one attempt; state stays failed and it is retryable next time.
-			pc.sweep_expired()
-		self.assertEqual(frappe.db.get_value(DT, name, "revocation_state"), "failed")
-		self.assertEqual(int(frappe.db.get_value(DT, name, "revocation_attempts")), 1)
+		# Same synthetic-endpoint reasoning as the two tests above.
+		with patch.dict(pc._REVOKE_ENDPOINTS, {"test-oauth-provider": "https://revoke.example.com/revoke"}):
+			view = _mk(agent_provider="test-oauth-provider", provider_subject="subj-t", account_ref="SUB_t")
+			name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
+			frappe.db.set_value(
+				DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False
+			)
+			frappe.db.commit()
+			with patch(
+				"jarvis.oauth.pending_capture.requests.post",
+				side_effect=_rq.RequestException("boom"),
+			):
+				# One sweep = one attempt; state stays failed and it is retryable next time.
+				pc.sweep_expired()
+			self.assertEqual(frappe.db.get_value(DT, name, "revocation_state"), "failed")
+			self.assertEqual(int(frappe.db.get_value(DT, name, "revocation_attempts")), 1)

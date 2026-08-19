@@ -208,10 +208,7 @@ onMounted(async () => {
 // Built-in fallback: subscription providers offered for a fresh DIRECT connect
 // before the catalog fetch lands or if it fails. Model lists mirror
 // jarvis/_subscription_models.py (codex/gemini-cli catalog).
-const FALLBACK_SUB_PROVIDERS = [
-	{ provider: "OpenAI", models: ["gpt-5.5", "gpt-5.4"] },
-	{ provider: "Google Gemini", models: ["gemini-2.5-pro", "gemini-2.5-flash"] },
-];
+const FALLBACK_SUB_PROVIDERS = [{ provider: "OpenAI", models: ["gpt-5.5", "gpt-5.4"] }];
 // Gated server-side on a non-empty auth_profile_id (R7): supports_subscription
 // is true for xai and moonshot too (cliproxy really does serve their
 // subscription models), but only openai/google-gemini-cli support this card's

@@ -126,9 +126,13 @@ class TestBeginPasteSignin(_OAuthApiBase):
 		self.assertIn("state", entry)
 		self.assertGreater(len(entry["verifier"]), 40)  # base64url(32 bytes)
 
-	def test_gemini_provider_returns_gemini_url(self):
+	def test_gemini_provider_is_no_longer_oauth_supported(self):
+		# Google's chat subscription was removed 2026-08-19 (Google discontinued
+		# login-with-Google for Gemini) - begin_paste_signin now rejects it the
+		# same way it rejects any unknown provider.
 		out = oauth_api.begin_paste_signin("Google Gemini", "gemini-2.0-pro")
-		self.assertIn("accounts.google.com", out["data"]["authorize_url"])
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "unknown_provider")
 
 	def test_unknown_provider_rejected(self):
 		out = oauth_api.begin_paste_signin("Anthropic", "claude-3-5")
@@ -158,19 +162,6 @@ class TestBeginPasteSignin(_OAuthApiBase):
 			self.assertEqual(
 				entry["model"], model, f"valid codex model {model!r} should pass through unchanged"
 			)
-
-	def test_gemini_standard_api_model_coerced_to_cli_default(self):
-		"""Same hazard on the Gemini side: a gemini-pro / gemini-1.0-pro from
-		the api_key catalog has to be rewritten to a gemini-cli model before
-		entering the OAuth nonce cache. Assert against the catalogue's
-		DEFAULT_MODEL rather than a literal so a catalogue refresh (e.g. the
-		2.0→2.5 bump) doesn't strand this test."""
-		from jarvis._subscription_models import DEFAULT_MODEL
-
-		out = oauth_api.begin_paste_signin("Google Gemini", "gemini-pro")
-		entry = frappe.cache.hget(_CACHE_KEY, out["data"]["nonce"])
-		self.assertEqual(entry["model"], DEFAULT_MODEL["Google Gemini"])
-		self.assertNotEqual(entry["model"], "gemini-pro")
 
 
 class TestCompletePasteSigninParsing(_OAuthApiBase):
@@ -1074,11 +1065,12 @@ class TestPoolSigninScope(_OAuthApiBase):
 		self.assertIn("api.connectors.invoke", url)
 
 	def test_pool_signin_provider_without_pool_scope_falls_back(self):
-		# Google Gemini defines no pool_scope -> pool flow uses the normal
-		# scope (the gemini-cli scope set is what its pool path needs too).
-		out = oauth_api.begin_pool_account_signin("Google Gemini", "gemini-2.5-pro")
+		# xAI defines no pool_scope -> pool flow uses its normal scope. (Google
+		# Gemini used to be the example here; its chat subscription was removed
+		# 2026-08-19 and it is no longer an OAuth provider at all.)
+		out = oauth_api.begin_pool_account_signin("xAI Grok", "grok-4.3")
 		url = out["data"]["authorize_url"]
-		self.assertIn("cloud-platform", url)  # the normal gemini-cli scope set
+		self.assertIn("grok-cli:access", url)  # xAI's normal (non-pool) scope set
 
 
 class TestIsDirectSubscriptionPredicate(FrappeTestCase):

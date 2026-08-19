@@ -49,32 +49,9 @@ _PROVIDER_OAUTH_MAP: dict[str, dict] = {
 			"originator": "codex_cli_rs",
 		},
 	},
-	"Google Gemini": {
-		"authorize": "https://accounts.google.com/o/oauth2/v2/auth",
-		"token": "https://oauth2.googleapis.com/token",
-		# Use Google's standard userinfo endpoint - the bundled gemini-cli
-		# OAuth client doesn't have `openid` registered, so no id_token comes
-		# back. Email is fetched via Bearer-authenticated userinfo instead.
-		"userinfo": "https://www.googleapis.com/oauth2/v1/userinfo?alt=json",
-		# Scopes MUST match what the bundled gemini-cli OAuth client has
-		# registered in its Google Cloud Console consent screen. Verified
-		# against openclaw/extensions/google/oauth.shared.ts:19-23.
-		# `https://www.googleapis.com/auth/generative-language` is NOT a real
-		# Google OAuth scope - Google returns Error 403 restricted_client
-		# "Unregistered scope(s) in the request" if anything else is sent.
-		"scope": "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
-		# Gemini OAuth tokens are read by the `gemini` binary which
-		# agent spawns via the CliBackend registered at
-		# extensions/google/cli-backend.ts:16 (id "google-gemini-cli").
-		# auth-profiles.json must key the credential by this exact id -
-		# mapping to "google" makes agent's CLI dispatch path miss the
-		# stored credential (different lookup key).
-		"agent_provider": "google-gemini-cli",
-		"extra_authorize_params": {
-			"access_type": "offline",
-			"prompt": "consent",
-		},
-	},
+	# Google Gemini chat SUBSCRIPTION removed 2026-08-19: Google discontinued
+	# consumer login-with-Google for Gemini (2026-06-18), so the gemini-cli OAuth
+	# flow is dead (UNSUPPORTED_CLIENT). Gemini stays available via API key.
 	# xAI Grok — SAME authorization_code + PKCE paste-back flow as codex. The
 	# only deltas: a distinct loopback redirect_uri (xAI's server validates it
 	# as an exact string, so mirror cli-proxy-api's default) and a fresh per-
@@ -160,9 +137,8 @@ def agent_provider_for(label: str) -> str:
 def get_provider(label: str) -> dict:
 	"""Look up provider metadata, including the lazy-resolved client_id +
 	client_secret. ``client_secret`` is an empty string for PKCE-only
-	providers (OpenAI codex); for confidential-client providers (Google
-	Gemini) the resolver falls back to the bundled gemini-cli package when
-	no env override is set."""
+	providers (OpenAI codex); confidential-client providers read it from
+	their ``JARVIS_*_OAUTH_CLIENT_SECRET`` env override."""
 	if label not in _PROVIDER_OAUTH_MAP:
 		raise UnknownProviderError(f"OAuth not supported for provider {label!r}")
 	entry = dict(_PROVIDER_OAUTH_MAP[label])
@@ -180,9 +156,6 @@ def extract_account_id(provider: str, access_token: str) -> str:
 	6 of the codex OAuth exchange.
 
 	OpenAI codex: ``payload["https://api.openai.com/auth"]["chatgpt_account_id"]``.
-	Gemini: claim shape not yet verified against a real Gemini Advanced
-	account; returns ``""`` until that lands (per the live-verification
-	caveat in oauth-implementation.md).
 
 	Best-effort: returns ``""`` on any parse / claim-lookup failure,
 	mirroring ``_fetch_account_email``'s never-raise contract.

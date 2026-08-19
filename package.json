@@ -1,7 +1,7 @@
 {
 	"name": "jarvis",
 	"private": true,
-	"description": "Server-side node deps (gemini-cli for the OAuth confidential-client flow in jarvis/oauth/api.py) + build orchestration for BOTH Vue frontends: the desktop SPA under frontend/ (served at /jarvis) and the mobile PWA under pwa/ (served at /jarvis-mobile). The scripts below are the contract Frappe Cloud's deploy pipeline picks up: `npm install` at this root triggers `postinstall` which installs each frontend's own deps, then `npm run build` (re)installs them and runs both Vite builds, dropping bundles into jarvis/public/{frontend,pwa}/ + jarvis/www/{jarvis,jarvis_mobile}.html. build installs first on purpose, so it is self-contained and picks up newly-added deps (e.g. wiki-graph-core) even when the deploy runs build without a fresh root install. Without these scripts FC pulls the repo and never builds the frontends, so /jarvis and /jarvis-mobile 404 in production.",
+	"description": "Build orchestration for BOTH Vue frontends: the desktop SPA under frontend/ (served at /jarvis) and the mobile PWA under pwa/ (served at /jarvis-mobile). The scripts below are the contract Frappe Cloud's deploy pipeline picks up: `npm install` at this root triggers `postinstall` which installs each frontend's own deps, then `npm run build` (re)installs them and runs both Vite builds, dropping bundles into jarvis/public/{frontend,pwa}/ + jarvis/www/{jarvis,jarvis_mobile}.html. build installs first on purpose, so it is self-contained and picks up newly-added deps (e.g. wiki-graph-core) even when the deploy runs build without a fresh root install. Without these scripts FC pulls the repo and never builds the frontends, so /jarvis and /jarvis-mobile 404 in production.",
 	"scripts": {
 		"postinstall": "npm run install-frontend && npm run install-pwa",
 		"install-graph-core": "cd wiki-graph-core && npm install",
@@ -12,8 +12,5 @@
 		"build": "npm run install-frontend && npm run build-frontend && npm run install-pwa && npm run build-pwa",
 		"build-frontend": "cd frontend && npm run build",
 		"build-pwa": "cd pwa && npm run build"
-	},
-	"dependencies": {
-		"@google/gemini-cli": "0.49.0"
 	}
 }
