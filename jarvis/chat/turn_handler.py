@@ -539,13 +539,13 @@ def _jarvis_settings_flag_null_on(field: str) -> bool:
 	get_single_value, which raises on a missing meta field.
 
 	Deliberately NOT itself best-effort: it lets a read error propagate so each
-	caller owns its own fail-open (both boot readers - ``_persona_feature_enabled``
-	and ``api._home_intro_feature_enabled`` - wrap it and default to ON). And
-	deliberately NOT per-request cached: an admin can flip a switch and the very
-	next reader in the same worker (and the persona tests, which toggle it and
-	re-read within one process) must observe the new value, so a request cache
-	would serve a stale ON/OFF; the probe is one indexed tabSingles read and every
-	caller runs it at most once per request, so there is nothing to coalesce."""
+	caller owns its own fail-open (``_persona_feature_enabled`` wraps it and
+	defaults to ON). And deliberately NOT per-request cached: an admin can flip
+	a switch and the very next reader in the same worker (and the persona tests,
+	which toggle it and re-read within one process) must observe the new value,
+	so a request cache would serve a stale ON/OFF; the probe is one indexed
+	tabSingles read and every caller runs it at most once per request, so there
+	is nothing to coalesce."""
 	row = frappe.db.sql(
 		"select value from tabSingles where doctype=%s and field=%s",
 		("Jarvis Settings", field),
@@ -559,10 +559,9 @@ def persona_feature_enabled() -> bool:
 	"""The persona kill switch (``Jarvis Settings.persona_enabled``), NULL=ON.
 
 	Delegates to the canonical ``_jarvis_settings_flag_null_on`` probe so the pill
-	(boot payload) and the clause read the switch through one implementation, and
-	so the home-intro kill switch cannot drift from it - see that helper for why it
-	is a tabSingles probe and not get_single_value. Read here AND by the boot
-	payload (N7) so the same switch value drives both."""
+	(boot payload) and the clause read the switch through one implementation -
+	see that helper for why it is a tabSingles probe and not get_single_value.
+	Read here AND by the boot payload (N7) so the same switch value drives both."""
 	return _jarvis_settings_flag_null_on("persona_enabled")
 
 
