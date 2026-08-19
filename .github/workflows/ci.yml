@@ -156,7 +156,11 @@ jobs:
   # tests error.
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # From-scratch v15 bench build + the full unsharded suite. Headroom over the
+    # v16 PR job (which restores a baked image and shards 4 ways): as the v15 gap
+    # closes, more tests RUN to completion instead of erroring fast at import, so
+    # the suite got slower, not faster, and a 45 min cap cancelled a healthy run.
+    timeout-minutes: 75
 
     services:
       mariadb:
