@@ -1,48 +1,49 @@
 name: CI
 
-# Runs the jarvis test suite inside ghcr.io/aerele/jarvis-ci-base:v16, which already carries a
-# built bench with frappe + erpnext + hrms (version-16) and /opt/ci/test_site.sql — a dump of a
-# site with all three installed. Everything this job does is jarvis-specific.
+# version-15 branch CI. This branch supports customers on Frappe v15, so the bench-backed
+# test job here builds a *Frappe version-15* environment from scratch (frappe + erpnext +
+# hrms at version-15 HEAD) and runs the jarvis suite against it. Fixes are born on
+# `develop` and cherry-picked here; this workflow is what proves a cherry-pick actually
+# works on v15 instead of merely applying cleanly.
 #
-# It used to build that environment from scratch on every run: ~5m26s of a ~7m21s run, byte-for-byte
-# identical every time. Two things dominated it:
+# Deliberate differences from develop's ci.yml:
 #
-#   - `--skip-assets` gates build_assets() but NOT `yarn install`, which bench runs whenever an app
-#     has a package.json. ~120s/run of npm work the Python suite never reads.
-#   - `install-app erpnext hrms jarvis` cost 116s, of which jarvis was 2.5s.
+#   - No pre-baked ghcr.io/aerele/jarvis-ci-base image: that image is version-16 and its
+#     nightly rebuild schedule only fires from the default branch. PR volume here is low
+#     (cherry-picks), so the ~6 min from-scratch bench build is paid per run instead of
+#     maintaining a second image. If cherry-pick volume ever makes that painful, add a
+#     :v15 tag to ci-base-image.yml on the default branch (Dockerfile.ci-base already
+#     takes FRAPPE_BRANCH / PYTHON_VERSION / NODE_MAJOR build-args) and mirror develop's
+#     container job here.
 #
-# The from-scratch build still runs nightly in ci-nightly.yml, so upstream version-16 breakage is
-# caught within a day — it just no longer sits in the PR critical path. If that job is red and this
-# one is green, suspect upstream rather than the PR.
+#   - One unsharded test run instead of 4 shards + a coverage-combine job: sharding only
+#     pays when per-shard setup is a cheap image pull. From scratch, 4 shards would build
+#     the bench 4 times. Coverage is reported inline (see the test step) with no enforced
+#     floor yet — turn a floor on once the suite is green on v15.
 #
-# What was left after that was one serial step: the test run itself, 304s of a 399s job. It is now
-# sharded 4 ways via `bench run-parallel-tests`, taking the job to ~3m45s. The remaining ~90s is
-# per-shard setup (image pull + site restore) that every leg pays again and that no amount of
-# sharding removes. That floor is exactly why the shard count is 4 and not 8; see the `matrix:`
-# comment for the measured split.
-#
-# Because each shard only covers about a quarter of the code, the coverage floor moved OUT of the
-# test job and into the separate `coverage` job, which combines all four data files and gates once.
+# The lint / frontend jobs are byte-identical to develop's: they never touch a bench, so
+# nothing about them is Frappe-version-specific. Keep them in lockstep when cherry-picking
+# CI changes.
 
 on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [develop]
+    branches: [version-15]
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Never auto-cancel a develop run (cancelled reads as neutral, not failed → hides regressions).
-  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
+  # Never auto-cancel a version-15 run (cancelled reads as neutral, not failed → hides
+  # regressions on the release branch).
+  cancel-in-progress: ${{ github.ref != 'refs/heads/version-15' }}
 
 permissions:
   contents: read
-  packages: read   # to pull the base image from GHCR
 
 jobs:
   # Runs the same .pre-commit-config.yaml the local hook runs, so the checks hold
   # even for a clone where nobody ran `pre-commit install`. Deliberately NOT in
-  # the tests container: this needs only python + node, and it should report in
+  # the tests environment: this needs only python + node, and it should report in
   # under a minute rather than waiting on a bench.
   lint:
     runs-on: ubuntu-latest
@@ -58,18 +59,18 @@ jobs:
       - uses: pre-commit/action@v3.0.1
         env:
           # no-commit-to-branch is a LOCAL guard: it inspects the checked-out
-          # branch name. On `push: branches: [develop]` the checkout IS develop,
-          # so leaving it on would fail this job on every merge. It has no
-          # meaning server-side anyway - the PR requirement is what enforces it.
+          # branch name. On `push: branches: [version-15]` the checkout IS
+          # version-15, so leaving it on would fail this job on every merge. It
+          # has no meaning server-side anyway - the PR requirement is what
+          # enforces it.
           SKIP: no-commit-to-branch
         with:
           extra_args: --all-files --show-diff-on-failure
 
-  # The frontend Vue SPA carries its own two test suites and, until this job, NOTHING ran either of
-  # them on a PR: `frontend/package.json` defines `test` (vitest) and `test:node` (node's built-in
-  # runner), but no workflow invoked them, so a browser-transport regression once shipped green.
-  # This is that gate. It needs only node — no bench, no container — so it reports fast and
-  # independently of the Python shards above.
+  # The frontend Vue SPA carries its own two test suites; this job is their gate. It needs
+  # only node — no bench, no container — so it reports fast and independently of the
+  # Python job below. The SPA is served identically on v15 and v16 sites, so this job is
+  # identical to develop's.
   frontend-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -102,9 +103,8 @@ jobs:
           #   tests/support-extraction/support-thread.test.js
           #
           # It has a single PRE-EXISTING, unrelated failure (a mid-flight ticket-switch reply is
-          # asserted against a two-arg uploadTo() signature that has since grown extra args). That
-          # is out of scope for the CI change that added this job and must NOT be "fixed" here.
-          # Excluding the one file lets the other 27 files (306 tests) gate PRs today. DELETE this
+          # asserted against a two-arg uploadTo() signature that has since grown extra args).
+          # Excluding the one file lets the other files gate PRs today. DELETE this
           # --exclude — re-including the file — the moment that assertion is repaired upstream.
           npm test -- --exclude '**/support-thread.test.js'
 
@@ -120,18 +120,15 @@ jobs:
         env:
           NODE_OPTIONS: --unhandled-rejections=strict
         # These two suites are plain node:test with only sibling-module imports (no npm deps),
-        # so they run from the repo root with bare node - no `npm ci` needed. They were run by
-        # NOTHING in CI before, which is exactly how a Desk-widget confirmation-card ordering
-        # bug (a dropped field that renumbered a typed "confirm N" onto the wrong ERP write)
-        # shipped under a green build. Gate them here.
+        # so they run from the repo root with bare node - no `npm ci` needed.
         run: |
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
-  # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
-  # would slip through green and only surface at Frappe Cloud deploy time as a 404 on /jarvis. This gate
-  # builds the SPA (the /jarvis artifact) the way the deploy does. (The PWA build resolves the bench site
-  # config via a bench-relative path a bare runner lacks, so it is not gated here — a follow-up.)
+  # Builds the SPA (the /jarvis artifact) the way the Frappe Cloud deploy does, so a
+  # Vite/build break surfaces here instead of as a 404 on /jarvis after deploy. (The PWA
+  # build resolves the bench site config via a bench-relative path a bare runner lacks, so
+  # it is not gated here — same follow-up as on develop.)
   frontend-build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -152,81 +149,31 @@ jobs:
       - name: Build the SPA (Vite) — the /jarvis deploy artifact
         run: npm run install-frontend && npm run build-frontend
 
+  # The v15 gate: from-scratch Frappe version-15 bench + the full jarvis suite.
+  #
+  # jarvis's tier-2 tools tests do mock.patch("erpnext...") and mock.patch("hrms..."), which
+  # IMPORT those modules — so both erpnext AND hrms (version-15) must be installed, or those
+  # tests error.
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
-    strategy:
-      # Never fail-fast. The default cancels the surviving shards on the first failure, so
-      # you see one broken shard instead of all of them, and a cancelled leg reports as
-      # neutral rather than failed. That is the same regression-hiding behaviour the
-      # `cancel-in-progress` guard above already exists to avoid.
-      fail-fast: false
-      matrix:
-        # 4 is the balance point, not an arbitrary pick. Frappe shards per test FILE
-        # weighted by that file's `def test_` count, and its splitter is greedy and
-        # order-preserving, so it starves the LAST shard as the count climbs. Measured
-        # against this suite (176 files, 3560 tests):
-        #
-        #   N=2  [1782, 1778]                    spread    4
-        #   N=4  [899, 891, 893, 877]            spread   22
-        #   N=6  [636, 621, 598, 631, 594, 480]  spread  156
-        #
-        # Past 4, the ~90s of per-shard setup below (image pull + site restore, which every
-        # leg pays again) also stops paying for itself: 6 shards costs 4 more runner-minutes
-        # per run to save a further ~20s of wall clock.
-        #
-        # If you change this list, THREE things have to move together, not two:
-        #   1. this list
-        #   2. --total-builds in the test step below
-        #   3. the shard-count guard in the `coverage` job at the bottom of this file
-        # Miss (3) and every run fails with "expected N shard files" long after the change
-        # looks correct.
-        shard: [1, 2, 3, 4]
-
-    container:
-      image: ghcr.io/aerele/jarvis-ci-base:v16
-      # bench hard-exits as root (bench/cli.py -> change_uid: "You should not run this command as
-      # root", exit 1). Actions job containers run as root by default. uid 1001 is both the `ci`
-      # user baked into the image and the runner user that owns the mounted workspace.
-      options: --user 1001
-      env:
-        HOME: /home/ci
-        # ParallelTestRunner.print_result (frappe/parallel_test_runner.py) only fails the
-        # process when CI is set:
-        #
-        #   if self.test_result.failures or self.test_result.errors:
-        #       if os.environ.get("CI"):
-        #           sys.exit(1)
-        #
-        # Actions does inject CI=true, so this is belt-and-braces. But the failure mode it
-        # guards against is a shard reporting GREEN on a failing suite, which is the worst
-        # outcome this workflow could produce. Set it explicitly rather than inherit it.
-        CI: "true"
-      # The package is currently PRIVATE. It is linked to this repo, so GITHUB_TOKEN + `packages:
-      # read` pulls it on same-repo runs (verified). Credentials are harmless once it is public.
-      #
-      # Fork PRs are the gap: their GITHUB_TOKEN is forced read-only and scoped to the fork, and
-      # pulling a private GHCR package with it is unreliable. If this repo ever takes an external
-      # PR, make the package public — that path needs no credentials at all.
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 45
 
     services:
-      # Under `container:`, services are reachable by service id rather than 127.0.0.1, and the
-      # `ports:` mappings the from-scratch workflow needs are unnecessary here.
       mariadb:
         image: mariadb:10.11
         env:
           MARIADB_ROOT_PASSWORD: root
           # Passwordless mysql@localhost user so `healthcheck.sh --su-mysql --connect` works.
           MARIADB_MYSQL_LOCALHOST_USER: "1"
+        ports:
+          - 3306:3306
         options: >-
           --health-cmd="healthcheck.sh --su-mysql --connect --innodb_initialized"
           --health-interval=5s --health-timeout=5s --health-retries=20 --health-start-period=40s
       redis:
         image: redis:7
+        ports:
+          - 6379:6379
         options: >-
           --health-cmd="redis-cli ping"
           --health-interval=5s --health-timeout=5s --health-retries=10
@@ -237,78 +184,103 @@ jobs:
         with:
           path: app
 
-      - name: Record what this run actually tested against
-        working-directory: /opt/frappe-bench
+      - uses: actions/setup-python@v5
+        with:
+          # frappe version-15 pins requires-python ">=3.10,<3.15"; 3.11 is the version
+          # v15 has run on in production the longest, so it is the least surprising pick.
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          # frappe version-15 needs node >= 18. 20 is what Frappe Cloud v15 benches are
+          # moved to for jarvis (@google/gemini-cli at the repo root needs >= 20), so CI
+          # mirrors the deploy target rather than the bare minimum.
+          node-version: "20"
+
+      - name: System deps
         run: |
-          # :v16 is a mutable tag, rebuilt nightly. Two runs an hour apart can therefore test
-          # against different upstream commits, and the tag is overwritten before you could go
-          # look. Without this, a green check is unauditable after the fact.
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client
+          sudo npm install -g yarn
+          pip install "frappe-bench>=5.29,<6"
+
+      - name: Init bench (frappe version-15)
+        run: |
+          bench init --skip-redis-config-generation \
+            --frappe-branch version-15 \
+            --python "$(which python)" \
+            frappe-bench
+          cd frappe-bench
+          bench set-config -g db_host 127.0.0.1
+          # Distinct Redis DB indices per role — Frappe assumes cache/queue/socketio do
+          # not share a keyspace.
+          bench set-config -g redis_cache "redis://127.0.0.1:6379/0"
+          bench set-config -g redis_queue "redis://127.0.0.1:6379/1"
+          bench set-config -g redis_socketio "redis://127.0.0.1:6379/2"
+
+      - name: Get apps (erpnext + hrms at version-15)
+        working-directory: frappe-bench
+        run: |
+          # --skip-assets: backend tests never use the JS bundles; skip erpnext/hrms builds.
+          # Serial on purpose: both get-apps write the shared venv and sites/apps.txt.
+          bench get-app --branch version-15 --skip-assets erpnext
+          bench get-app --branch version-15 --skip-assets hrms
+
+      - name: Add jarvis to the bench
+        working-directory: frappe-bench
+        run: |
+          # Deliberately NOT `bench get-app`: that runs `yarn install --check-files`
+          # whenever an app has a package.json (bench/app.py), which here pulls
+          # @google/gemini-cli and, via postinstall, both Vue frontends' deps — npm work
+          # the Python suite never reads. Same reasoning as develop's ci.yml.
+          cp -r "${GITHUB_WORKSPACE}/app" apps/jarvis
+          ./env/bin/pip install -e apps/jarvis
+          if ! grep -qxF jarvis sites/apps.txt; then
+            # Guard against a no-trailing-newline apps.txt: a naive append would fuse the
+            # last app name with "jarvis" and frappe dies on the merged module name.
+            [ -z "$(tail -c1 sites/apps.txt)" ] || echo >> sites/apps.txt
+            echo jarvis >> sites/apps.txt
+          fi
+
+      - name: Record what this run actually tested against
+        working-directory: frappe-bench
+        run: |
+          # version-15 upstream moves under us; without this a green check is unauditable
+          # after the fact. Read the SHAs from the clones that were actually installed —
+          # an ls-remote taken earlier could drift from what a later clone fetched.
           {
-            echo "### Baked upstream revisions"
+            echo "### Upstream revisions (as cloned)"
             echo
             for app in frappe erpnext hrms; do
               echo "- ${app}: \`$(git -C "apps/${app}" rev-parse HEAD)\`"
             done
           } | tee -a "${GITHUB_STEP_SUMMARY}"
 
-      - name: Point the baked bench at the service containers
-        working-directory: /opt/frappe-bench
+      - name: Create test site + install apps
+        working-directory: frappe-bench
         run: |
-          bench set-config -g db_host mariadb
-          # Distinct Redis DB indices per role — Frappe assumes cache/queue/socketio do not share
-          # a keyspace.
-          bench set-config -g redis_cache "redis://redis:6379/0"
-          bench set-config -g redis_queue "redis://redis:6379/1"
-          bench set-config -g redis_socketio "redis://redis:6379/2"
-
-      - name: Add jarvis to the bench
-        working-directory: /opt/frappe-bench
-        run: |
-          cp -r "${GITHUB_WORKSPACE}/app" apps/jarvis
-          # Deliberately NOT `bench get-app`: that runs `yarn install --check-files` whenever
-          # package.json exists (bench/app.py), which here pulls @google/gemini-cli and, via
-          # postinstall, the whole Vue SPA's deps — 24s the Python suite never reads.
-          ./env/bin/pip install -e apps/jarvis
-          if ! grep -qxF jarvis sites/apps.txt; then
-            # apps.txt ships as "frappe\nerpnext\nhrms" with NO trailing newline. A naive append
-            # yields "hrmsjarvis" and frappe dies with ModuleNotFoundError: No module named
-            # 'hrmsjarvis'. Verified against the real image; do not remove this guard.
-            [ -z "$(tail -c1 sites/apps.txt)" ] || echo >> sites/apps.txt
-            echo jarvis >> sites/apps.txt
-          fi
-
-      - name: Create test site from the baked dump
-        working-directory: /opt/frappe-bench
-        run: |
-          # --source-sql (frappe/commands/site.py) creates the DB + user + site_config.json and
-          # loads the dump, which already has frappe/erpnext/hrms installed. Replaces ~113s of
-          # `install-app erpnext hrms` with a ~6s restore. `bench` defines no new-site of its own,
-          # so this forwards to frappe's, which is where --source-sql lives.
           bench new-site test_site \
-            --db-host mariadb \
+            --db-host 127.0.0.1 \
             --mariadb-user-host-login-scope='%' \
             --mariadb-root-password root \
             --db-root-username root \
-            --admin-password admin \
-            --source-sql /opt/ci/test_site.sql
-          bench --site test_site install-app jarvis
+            --admin-password admin
+          bench --site test_site install-app erpnext hrms jarvis
           bench --site test_site set-config allow_tests true
-          # The full suite creates far more than Frappe's default 60-users/60-min
-          # limit (throttle_user_creation), so a mid-suite fixture insert otherwise
-          # hits "Throttled" (flaky, depends on which module crosses the threshold).
-          # -p stores an INT: throttle_user_creation compares count > limit, and a
-          # string limit raises "TypeError: '>' not supported between int and str".
+          # Full suite creates far more than Frappe's default 60-users/60-min limit
+          # (throttle_user_creation); raise it so no mid-suite fixture insert hits
+          # "Throttled". -p stores an INT (a string limit breaks the count>limit compare).
           bench --site test_site set-config -p throttle_user_limit 100000
 
-      - name: Assert the restored site is what we think it is
-        working-directory: /opt/frappe-bench
+      - name: Assert the site is what we think it is
+        working-directory: frappe-bench
         run: |
-          # Cheap guard against a silently-stale or partial image: if erpnext/hrms did not come
-          # back from the dump, the tier-2 tests would fail later in a much more confusing way.
+          # Fail fast with a clear "missing app" instead of letting a partial install
+          # surface later as confusing tier-2 mock.patch("erpnext...") import errors.
           #
-          # Take the JSON line specifically, and leave stderr on the console. Merging stderr into
-          # stdout and taking `tail -1` would capture any late warning (e.g. a ResourceWarning at
-          # interpreter teardown) instead of the JSON, and fail a perfectly healthy site.
+          # Take the JSON line specifically and leave stderr on the console: merging
+          # stderr and taking `tail -1` would capture any late warning instead of the
+          # JSON, failing a perfectly healthy site.
           apps=$(bench --site test_site execute frappe.get_installed_apps | grep -m1 '^\[') || {
             echo "could not parse installed apps from 'bench execute' output"; exit 1; }
           echo "installed apps: ${apps}"
@@ -316,116 +288,14 @@ jobs:
             echo "${apps}" | grep -q "\"${a}\"" || { echo "missing app: ${a}"; exit 1; }
           done
 
-      - name: Run tests + coverage (shard ${{ matrix.shard }} of 4)
-        working-directory: /opt/frappe-bench
+      - name: Run tests + coverage
+        working-directory: frappe-bench
         run: |
-          # coverage + gevent are already in the image's venv (gevent is needed by
-          # jarvis/realtime/handlers.py with socketio_backend=python, and its tests).
-          #
-          # The coverage flag is spelled --with-coverage on THIS command. run-tests spells
-          # the same thing --coverage (frappe/commands/testing.py). They are two different
-          # click commands; do not "fix" one to match the other.
-          bench --site test_site run-parallel-tests \
-            --app jarvis \
-            --build-number ${{ matrix.shard }} \
-            --total-builds 4 \
-            --with-coverage
-
-      - name: Stash this shard's coverage under a non-hidden name
-        working-directory: /opt/frappe-bench
-        run: |
-          # frappe's CodeCoverage writes the default data file, which lands at
-          # sites/.coverage. Renaming off the leading dot is deliberate: upload-artifact@v4
-          # EXCLUDES hidden files by default, so uploading `.coverage.N` silently produces
-          # an empty artifact and the combine job below then fails on "No data to report"
-          # long after the real cause scrolled past.
-          mv sites/.coverage "sites/coverage-data-${{ matrix.shard }}"
-
-      - name: Upload this shard's coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-${{ matrix.shard }}
-          path: /opt/frappe-bench/sites/coverage-data-${{ matrix.shard }}
-          retention-days: 1
-          if-no-files-found: error
-
-  # The coverage floor cannot be enforced inside a shard: each one exercises roughly a
-  # quarter of the code, so all four would "fail" a 85% gate. Combine first, gate once.
-  #
-  # `needs: tests` against a matrix runs this only when EVERY leg succeeded, which is the
-  # behaviour we want. A failing shard should surface as one honest test failure, not as a
-  # test failure plus a bogus coverage failure caused by the missing quarter.
-  #
-  # Deliberately NOT in the base image: this needs python and `coverage` and nothing else
-  # from the bench, so running it here skips a second 65s image pull.
-  coverage:
-    runs-on: ubuntu-latest
-    needs: tests
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: app
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install coverage
-        run: |
-          # Pinned to match frappe's own constraint (apps/frappe/pyproject.toml:
-          # "coverage~=7.10.0"), which is what the ci-base image's venv resolves and
-          # therefore what WROTE these data files.
-          #
-          # Unpinned, this job installs the newest 7.x (7.13 at the time of writing) and
-          # reads files written by 7.10. That happens to work because coverage's sqlite
-          # schema is stable across 7.x, but a version that cannot read them would NOT fail
-          # this job loudly. See the combine step for why.
-          pip install 'coverage~=7.10.0'
-
-      - name: Download every shard's coverage
-        uses: actions/download-artifact@v4
-        with:
-          pattern: coverage-*
-          merge-multiple: true
-          path: covdata
-
-      - name: Combine and enforce the floor
-        run: |
-          # All four shards ran the same image, so their data files agree on one absolute
-          # source path: /opt/frappe-bench/apps/jarvis. `coverage report` has to read those
-          # sources to count statements, so the checkout is placed at that exact path.
-          # Cheaper and far less fragile than a [paths] remap in a .coveragerc.
-          sudo mkdir -p /opt/frappe-bench/apps
-          sudo cp -r app /opt/frappe-bench/apps/jarvis
-
-          cd covdata
-          echo "shard data files:"; ls -l
-
-          # Guard 1: every shard must have UPLOADED. Keep this count in step with the
-          # matrix list at the top of this file (see the note there: three places move
-          # together).
-          found=$(ls coverage-data-* 2>/dev/null | wc -l)
-          [ "${found}" -eq 4 ] || { echo "expected 4 shard files, got ${found}"; exit 1; }
-
-          # Guard 2: every shard must have been READ. These are different failures, and
-          # guard 1 cannot catch this one, because the file downloads fine and fails later
-          # at read time.
-          #
-          # `coverage combine` is not all-or-nothing. Per file it catches CoverageException,
-          # calls data._warn(...), and carries on; it only raises when NOTHING combined
-          # ("if strict and not combined_any: raise NoDataError"). So one unreadable shard
-          # silently drops a quarter of the data, and --fail-under then passes judgement on
-          # a partial dataset. That is precisely the silent under-report this job exists to
-          # prevent, so treat any warning as fatal rather than advisory.
-          out=$(coverage combine coverage-data-* 2>&1); rc=$?
-          echo "${out}"
-          [ "${rc}" -eq 0 ] || exit "${rc}"
-          if printf '%s' "${out}" | grep -qiE "warning|couldn't use"; then
-            echo "::error::coverage combine could not read every shard; refusing to gate a partial dataset"
-            exit 1
-          fi
-
-          # Enforced coverage floor. Baseline on 2026-07-02 was 87% (incl. test files, with
-          # the 9 quarantined tests skipped). Ratchet UP over time; never down.
-          coverage report --fail-under=85
+          # gevent: needed by jarvis/realtime/handlers.py (socketio_backend=python) and its
+          # tests.
+          ./env/bin/pip install coverage gevent
+          bench --site test_site run-tests --app jarvis --coverage
+          # Report-only for now: the point of this job today is the v15 failure list, and
+          # an enforced floor on a red suite adds a second failure that explains nothing.
+          # Once the suite is green on v15, promote this to --fail-under like develop.
+          ./env/bin/coverage report --data-file=sites/.coverage || true
