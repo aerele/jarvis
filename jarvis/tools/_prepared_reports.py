@@ -49,6 +49,7 @@ from frappe.utils import cint
 from frappe.utils.background_jobs import get_redis_conn
 from frappe.utils.scheduler import is_scheduler_inactive
 
+from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 
 # Cap rows folded into the envelope. A prepared report is the likeliest place to
@@ -326,7 +327,7 @@ def _report_timeout(report_name: str) -> int:
 def _require_worker() -> None:
 	"""Raise if the background queue can't run the report, so we never leave an
 	orphan Queued row. Tests / developer_mode run inline, so skip the check."""
-	if frappe.in_test or frappe.conf.get("developer_mode"):
+	if compat.in_test() or frappe.conf.get("developer_mode"):
 		return
 	if is_scheduler_inactive():
 		raise InvalidArgumentError(

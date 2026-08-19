@@ -164,7 +164,7 @@ class TestRunReportPrepared(FrappeTestCase):
 	def test_scheduler_paused_raises_without_triggering(self):
 		before = frappe.db.count("Prepared Report", {"report_name": PREP_REPORT})
 		with (
-			patch.object(frappe, "in_test", False),
+			patch("jarvis.compat.in_test", return_value=False),
 			patch.dict(frappe.conf, {"developer_mode": 0}),
 			patch("jarvis.tools._prepared_reports.is_scheduler_inactive", return_value=True),
 		):
@@ -175,7 +175,7 @@ class TestRunReportPrepared(FrappeTestCase):
 	def test_queue_unreachable_raises_without_triggering(self):
 		before = frappe.db.count("Prepared Report", {"report_name": PREP_REPORT})
 		with (
-			patch.object(frappe, "in_test", False),
+			patch("jarvis.compat.in_test", return_value=False),
 			patch.dict(frappe.conf, {"developer_mode": 0}),
 			patch("jarvis.tools._prepared_reports.is_scheduler_inactive", return_value=False),
 			patch("jarvis.tools._prepared_reports._queue_reachable", return_value=False),
