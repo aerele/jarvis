@@ -2449,7 +2449,7 @@ def resync_llm() -> dict:
 		return {**get_llm_sync_status(), "outcome": "converged", "leg": ""}
 
 	cache = frappe.cache()
-	if cache.get_value(_RESYNC_COOLDOWN_KEY):
+	if cache.get_value(_RESYNC_COOLDOWN_KEY, expires=True):
 		return {**get_llm_sync_status(), "outcome": "throttled", "leg": ""}
 
 	# Armed only once a push is actually queued. Arming it first would let a call

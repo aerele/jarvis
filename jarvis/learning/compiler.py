@@ -404,7 +404,7 @@ def apply_in_progress() -> bool:
 	"""True while an Apply is between compile and its post-flip commit - the
 	un-approve TOCTOU window. ``learned_api.unapprove_learned_pattern`` reads it."""
 	try:
-		return bool(frappe.cache().get_value(_APPLY_MARKER))
+		return bool(frappe.cache().get_value(_APPLY_MARKER, expires=True))
 	except Exception:
 		return False
 

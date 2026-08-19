@@ -640,7 +640,7 @@ def get_preset_catalog() -> list:
 	from jarvis._preset_catalog import BUNDLED_PRESET_CATALOG
 
 	cache = frappe.cache()
-	cached = cache.get_value(_PRESET_CATALOG_CACHE_KEY)
+	cached = cache.get_value(_PRESET_CATALOG_CACHE_KEY, expires=True)
 	if cached:
 		return cached
 	try:
@@ -711,12 +711,12 @@ def _fetch_model_catalog() -> list:
 	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
 
 	cache = frappe.cache()
-	cached = cache.get_value(_MODEL_CATALOG_CACHE_KEY)
+	cached = cache.get_value(_MODEL_CATALOG_CACHE_KEY, expires=True)
 	if cached:
 		return cached
 	# A recent failure short-circuits the network entirely. Without this, a
 	# hanging admin costs every chat send a full timeout.
-	if cache.get_value(_MODEL_CATALOG_FAIL_KEY):
+	if cache.get_value(_MODEL_CATALOG_FAIL_KEY, expires=True):
 		return BUNDLED_MODEL_CATALOG
 	try:
 		catalog = _post_guest(
@@ -767,7 +767,7 @@ def get_stt_config() -> dict | None:
 	slow/down admin can't make every SPA load pay a fresh round-trip.
 	Never raises."""
 	cache = frappe.cache()
-	cached = cache.get_value(_STT_CONFIG_CACHE_KEY)
+	cached = cache.get_value(_STT_CONFIG_CACHE_KEY, expires=True)
 	if cached == _STT_CONFIG_MISS:
 		return None
 	if cached:
@@ -1926,7 +1926,7 @@ def _admin_access_token(settings, admin_url: str, *, force_refresh: bool = False
 		return None
 
 	cache = frappe.cache()
-	cached = {} if force_refresh else (cache.get_value(_OAUTH_CACHE_KEY) or {})
+	cached = {} if force_refresh else (cache.get_value(_OAUTH_CACHE_KEY, expires=True) or {})
 	access = cached.get("access_token")
 	if access and (cached.get("access_expires_at", 0) - _OAUTH_EXPIRY_SKEW_S) > time.time():
 		return access
