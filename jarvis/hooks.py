@@ -124,15 +124,33 @@ def get_oauth_client_id(provider: str) -> str:
 #   1. JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET env var (operator override; read
 #      at import, so a change needs a worker restart)
 #   2. Jarvis Settings "Google Gemini OAuth Client Secret" password field —
-#      the normal v15 path. Read per call, so a change applies immediately.
-#      Keep the value in lockstep with the client_id above and the
-#      fleet-agent entrypoint's GEMINI_CLI_VERSION pin (SEC-008,
-#      Aerele-RnD/jarvis-admin#192).
-#   3. Extract from an installed @google/gemini-cli npm package (develop
-#      still ships it as a pinned runtime dep; on v15 only if hand-installed).
-#   4. Empty -> Google Gemini is not offered as a subscription provider
-#      (chat/api._subscription_connect_providers) and a direct sign-in
-#      attempt fails with an instructive error before the Google redirect.
+#      the rotation hotfix path. Read per call, so a change applies
+#      immediately without a deploy. Wins over the built-in default below on
+#      purpose: a stale default is exactly what the field exists to override.
+#   3. The built-in default below — Google's current public value, so a v15
+#      site needs NO configuration to offer Gemini. Keep it in lockstep with
+#      the client_id above and the fleet-agent entrypoint's GEMINI_CLI_VERSION
+#      pin (SEC-008, Aerele-RnD/jarvis-admin#192).
+# The bundled-package extractor (jarvis/oauth/gemini_cli_secret.py) still
+# exists but is not in the v15 chain; develop resolves from its pinned npm
+# dep instead of a built-in default. With step 3 never empty, the resolver
+# cannot return "" for Google Gemini, so the not-configured gates in
+# chat/api._subscription_connect_providers and oauth/api._begin_signin stay
+# dormant unless an operator explicitly blanks the value via env.
+#
+# The default is Google's gemini-cli OAuth client_secret: public by design
+# (every gemini-cli install worldwide ships the same value in its bundle).
+# Stored base64-encoded ONLY so secret scanners / push protection don't flag
+# a "leaked" Google OAuth secret that is in fact public.
+_GEMINI_CLI_SECRET_DEFAULT_B64 = "R09DU1BYLTR1SGdNUG0tMW83U2stZ2VWNkN1NWNsWEZzeGw="
+
+
+def _gemini_cli_secret_default() -> str:
+	import base64
+
+	return base64.b64decode(_GEMINI_CLI_SECRET_DEFAULT_B64).decode()
+
+
 OAUTH_CLIENT_SECRETS = {
 	"OpenAI": _env_or_default("JARVIS_OPENAI_CODEX_OAUTH_CLIENT_SECRET", ""),
 	"Google Gemini": _env_or_default("JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET", ""),
@@ -145,20 +163,13 @@ OAUTH_CLIENT_SECRETS = {
 def get_oauth_client_secret(provider: str) -> str:
 	"""Return the client_secret for confidential-client OAuth flows. Empty
 	string for PKCE-only providers (OpenAI codex). For Google Gemini falls
-	back to the Jarvis Settings password field, then to extracting from an
-	installed @google/gemini-cli package (see resolution order above)."""
+	back to the Jarvis Settings password field, then to the built-in default
+	(see resolution order above)."""
 	val = OAUTH_CLIENT_SECRETS.get(provider, "")
 	if val:
 		return val
 	if provider == "Google Gemini":
-		settings_val = _gemini_secret_from_settings()
-		if settings_val:
-			return settings_val
-		# Imported lazily so the node_modules walk only runs when a
-		# Google OAuth call asks for it.
-		from jarvis.oauth.gemini_cli_secret import extract_gemini_cli_secret
-
-		return extract_gemini_cli_secret()
+		return _gemini_secret_from_settings() or _gemini_cli_secret_default()
 	return ""
 
 

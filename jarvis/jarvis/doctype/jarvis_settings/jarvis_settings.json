@@ -355,7 +355,7 @@
    "fieldname": "gemini_oauth_client_secret",
    "fieldtype": "Password",
    "label": "Google Gemini OAuth Client Secret",
-   "description": "Needed only to CONNECT a Google Gemini chat subscription. Paste the GOCSPX-... value Google ships inside its Gemini CLI package (public by design, not a real secret). Until this is set, Google Gemini is not offered as a subscription provider. The JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET environment variable overrides this field when set. Already-connected accounts keep working without it; the value is only used during sign-in."
+   "description": "Normally leave this blank: the app ships Google's current public value (the GOCSPX-... literal Google distributes inside its Gemini CLI package; public by design, not a real secret). Set this only to OVERRIDE the built-in default, e.g. if Google rotates the secret before a new app release ships; a change applies immediately, no restart. The JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET environment variable overrides both. Only used while CONNECTING a Google Gemini chat subscription; already-connected accounts never need it again."
   },
   {
    "fieldname": "intelligence_tab",
