@@ -20,6 +20,7 @@ from jarvis.dev import (
 	_RESET_ZERO_FIELDS,
 	reset_onboarding,
 )
+from jarvis.tests._role_guard import enforced_role_guards
 
 SETTINGS = "Jarvis Settings"
 
@@ -126,7 +127,7 @@ class TestResetOnboardingGuards(FrappeTestCase):
 	def test_rejects_when_non_system_manager(self):
 		# Use a Guest who lacks System Manager role.
 		frappe.set_user("Guest")
-		with self.assertRaises(frappe.PermissionError):
+		with enforced_role_guards(), self.assertRaises(frappe.PermissionError):
 			reset_onboarding()
 
 
@@ -222,7 +223,7 @@ class TestResetOnboardingEndpoint(FrappeTestCase):
 		from jarvis.onboarding import reset_onboarding as endpoint
 
 		frappe.set_user("Guest")
-		with self.assertRaises(frappe.PermissionError):
+		with enforced_role_guards(), self.assertRaises(frappe.PermissionError):
 			endpoint()
 
 	def test_rejects_jarvis_admin_who_is_not_system_manager(self):
@@ -254,7 +255,7 @@ class TestResetOnboardingEndpoint(FrappeTestCase):
 		self.assertNotIn("System Manager", roles)
 
 		frappe.set_user(email)
-		with self.assertRaises(frappe.PermissionError):
+		with enforced_role_guards(), self.assertRaises(frappe.PermissionError):
 			endpoint()
 
 	@patch("jarvis.dev.reset_onboarding", return_value={"ok": True, "data": {}})
