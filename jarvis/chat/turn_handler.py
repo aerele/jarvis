@@ -294,8 +294,8 @@ def _subscription_agent_provider(settings) -> str | None:
 	leg exists to serve.
 
 	The account's own oauth_blob already carries the agent provider id under its
-	``provider`` key (``"openai"``, ``"google-gemini-cli"`` - baked in when the
-	blob was minted by ``jarvis.oauth.api._exchange_and_build_blob``), so read it
+	``provider`` key (e.g. ``"openai"`` - baked in when the blob was minted by
+	``jarvis.oauth.api._exchange_and_build_blob``), so read it
 	from there instead of standing up a second upstream-to-provider table - see
 	``jarvis_settings.py``'s ``_push_direct_subscription_blob``, which relies on
 	the same key for the same reason.

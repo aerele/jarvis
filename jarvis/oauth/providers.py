@@ -123,9 +123,9 @@ def accepts_bare_code(label: str) -> bool:
 
 
 def agent_provider_for(label: str) -> str:
-	"""The ``agent_provider`` (cliproxy upstream id — ``openai`` /
-	``google-gemini-cli`` / ``xai`` / ``kimi``) for a subscription provider label,
-	or "" when the label is not a known OAuth/subscription provider.
+	"""The ``agent_provider`` (cliproxy upstream id — ``openai`` / ``xai`` /
+	``kimi``) for a subscription provider label, or "" when the label is not a
+	known OAuth/subscription provider.
 
 	Metadata only: unlike ``get_provider`` it never resolves the client id/secret,
 	so it is cheap enough for the chat hot path (``_catalog_models_for_pool`` maps

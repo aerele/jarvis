@@ -130,8 +130,8 @@
 				provider (codex), lighter, with no proxy sidecar.
 			</p>
 			<p v-else class="jv-dsub-muted" style="margin: 0 0 12px">
-				Sign in with your existing ChatGPT Plus/Pro or Gemini Advanced account - no API key
-				needed. It's served directly to the provider (codex), not through the proxy.
+				Sign in with your existing ChatGPT Plus/Pro account - no API key needed. It's
+				served directly to the provider (codex), not through the proxy.
 			</p>
 			<div class="jv-dsub-pick">
 				<label class="jv-dsub-field">
@@ -192,7 +192,7 @@ const emit = defineEmits(["reauthorized", "disconnected"]);
 
 // Admin-managed model catalog (jarvis.chat.api.get_model_catalog_ui), fetched
 // on mount. subscription_connect_providers is gated on a non-empty
-// auth_profile_id (R7 - openai + google-gemini-cli today), never on
+// auth_profile_id (R7 - openai today; Gemini's subscription was removed 2026-08-19), never on
 // supports_subscription, so it never offers a provider whose OAuth blob admin
 // would reject. Falls back to the built-in SUB_PROVIDERS literal below when
 // the fetch fails or hasn't landed yet - never blank.
@@ -211,11 +211,11 @@ onMounted(async () => {
 const FALLBACK_SUB_PROVIDERS = [{ provider: "OpenAI", models: ["gpt-5.5", "gpt-5.4"] }];
 // Gated server-side on a non-empty auth_profile_id (R7): supports_subscription
 // is true for xai and moonshot too (cliproxy really does serve their
-// subscription models), but only openai/google-gemini-cli support this card's
-// paste-back connect flow - Kimi is device-code and admin's push_oauth_blob
-// rejects a direct xAI blob outright. Data now, not a literal; the rendered
-// list still stays two entries because the seed only sets auth_profile_id for
-// those two.
+// subscription models), but only openai supports this card's paste-back connect
+// flow - Kimi is device-code and admin's push_oauth_blob rejects a direct xAI
+// blob outright. Google Gemini's subscription was removed 2026-08-19 (Google
+// discontinued login-with-Google), so the seed sets auth_profile_id for openai
+// only and the rendered list is a single entry.
 const SUB_PROVIDERS = computed(() => {
 	const rows = modelCatalog.value.subscription_connect_providers || [];
 	return rows.length ? rows : FALLBACK_SUB_PROVIDERS;

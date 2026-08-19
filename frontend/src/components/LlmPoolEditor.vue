@@ -2482,7 +2482,7 @@ const credTypes = [
 	{
 		value: "subscription",
 		label: "Chat subscription",
-		desc: "Sign in with your ChatGPT or Gemini plan",
+		desc: "Sign in with your ChatGPT plan",
 	},
 	{
 		value: "api_key",
