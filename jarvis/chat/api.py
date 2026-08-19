@@ -1746,13 +1746,13 @@ def _subscription_connect_providers() -> list[dict]:
 		label = provider.get("subscription_label") or provider.get("label") or ""
 		if label == "Google Gemini" and not get_oauth_client_secret(label):
 			# Google is a confidential OAuth client: connecting needs a
-			# client_secret (env var, Jarvis Settings field, or the built-in
-			# default in hooks.py, so in practice this only trips when an
-			# operator explicitly blanks the env var). Without one the connect
-			# flow can only fail, so don't offer the card. Label-scoped:
-			# OpenAI's empty secret is legitimate (pure PKCE) and must stay
-			# offered. Already-connected accounts are unaffected; this gates
-			# only the connect list.
+			# client_secret. On version-15 hooks.py ships a built-in default,
+			# so this gate is dormant in normal use (there is no input that
+			# resolves to ""); it is kept for parity with develop, where the
+			# secret comes from a bundled npm dep that can genuinely be absent,
+			# and as defense-in-depth. Label-scoped: OpenAI's empty secret is
+			# legitimate (pure PKCE) and must stay offered. Already-connected
+			# accounts are unaffected; this gates only the connect list.
 			continue
 		rows = [m for m in provider.get("models") or [] if m.get("tier") == "subscription"]
 		rows.sort(key=lambda m: (m.get("sort_order") or 0, m.get("model_id") or ""))

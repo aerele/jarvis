@@ -133,10 +133,18 @@ def get_oauth_client_id(provider: str) -> str:
 #      pin (SEC-008, Aerele-RnD/jarvis-admin#192).
 # The bundled-package extractor (jarvis/oauth/gemini_cli_secret.py) still
 # exists but is not in the v15 chain; develop resolves from its pinned npm
-# dep instead of a built-in default. With step 3 never empty, the resolver
-# cannot return "" for Google Gemini, so the not-configured gates in
-# chat/api._subscription_connect_providers and oauth/api._begin_signin stay
-# dormant unless an operator explicitly blanks the value via env.
+# dep instead of a built-in default.
+#
+# Step 3 is never empty, so there is NO input that makes this resolver return
+# "" for Google Gemini (blanking the env var just falls through to settings
+# then the default). The not-configured gates in
+# chat/api._subscription_connect_providers and oauth/api._begin_signin are
+# therefore dormant for Google here; they are retained only for structural
+# parity with develop and as defense-in-depth if the built-in default is ever
+# removed. Note this does NOT catch a STALE default (a rotated-but-well-formed
+# secret is non-empty): that surfaces as a Google-side invalid_client after
+# the redirect, exactly as on develop's pinned npm secret. The gate only ever
+# caught an ABSENT secret, which the default now prevents by design.
 #
 # The default is Google's gemini-cli OAuth client_secret: public by design
 # (every gemini-cli install worldwide ships the same value in its bundle).

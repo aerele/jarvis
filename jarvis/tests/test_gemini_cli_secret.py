@@ -1,10 +1,11 @@
 """Tests for the @google/gemini-cli OAuth client_secret extractor and the
-env-var precedence baked into hooks.get_oauth_client_secret.
+resolution precedence in hooks.get_oauth_client_secret.
 
-The extractor only runs for ``Google Gemini`` and only when the operator
-hasn't supplied the env-var override - both gates are pinned here so a
-future refactor can't silently turn the node_modules walk into a
-hot-path cost.
+The extractor (TestExtractGeminiCliSecret) is retained for parity with
+develop, which still resolves the secret from the bundled npm package; on
+version-15 get_oauth_client_secret resolves env -> Jarvis Settings field ->
+built-in default and never calls the extractor. TestGetOauthClientSecretPrecedence
+pins that chain.
 """
 
 import os
@@ -117,22 +118,6 @@ class TestAppRootResolution(unittest.TestCase):
 
 
 class TestGetOauthClientSecretPrecedence(unittest.TestCase):
-	def test_env_var_wins_over_node_modules(self):
-		# When the env-var is supplied, the node_modules walk should
-		# never run - guards the perf hazard on every Google OAuth.
-		with (
-			patch.dict(
-				hooks.OAUTH_CLIENT_SECRETS,
-				{"Google Gemini": "GOCSPX-from-env"},
-			),
-			patch(
-				"jarvis.oauth.gemini_cli_secret.extract_gemini_cli_secret",
-			) as walker,
-		):
-			out = hooks.get_oauth_client_secret("Google Gemini")
-		self.assertEqual(out, "GOCSPX-from-env")
-		walker.assert_not_called()
-
 	def test_env_var_wins_over_settings(self):
 		with (
 			patch.dict(
@@ -145,9 +130,10 @@ class TestGetOauthClientSecretPrecedence(unittest.TestCase):
 		self.assertEqual(out, "GOCSPX-from-env")
 		settings_read.assert_not_called()
 
-	def test_settings_field_wins_over_node_modules(self):
-		# The Jarvis Settings password field is the normal v15 path (the npm
-		# dep is absent there); the bundle walk must not run when it is set.
+	def test_settings_field_wins_over_builtin_default(self):
+		# The settings field is the rotation override: it must beat the
+		# built-in default, else a stale default could never be corrected
+		# without a deploy.
 		with (
 			patch.dict(
 				hooks.OAUTH_CLIENT_SECRETS,
@@ -156,21 +142,19 @@ class TestGetOauthClientSecretPrecedence(unittest.TestCase):
 			patch.object(
 				hooks,
 				"_gemini_secret_from_settings",
-				return_value="GOCSPX-from-settings",
+				return_value="GOCSPX-override",
 			),
-			patch(
-				"jarvis.oauth.gemini_cli_secret.extract_gemini_cli_secret",
-			) as walker,
 		):
 			out = hooks.get_oauth_client_secret("Google Gemini")
-		self.assertEqual(out, "GOCSPX-from-settings")
-		walker.assert_not_called()
+		self.assertEqual(out, "GOCSPX-override")
 
 	def test_builtin_default_when_env_and_settings_unset(self):
-		# Prefix assertion on purpose: exact equality would put the plain
-		# value into a tracked file and trip secret scanners (the constant is
-		# stored base64-encoded for the same reason).
-		prefix = "GOCSPX-"
+		# Assert the exact SHAPE, not the literal value: embedding the value
+		# would re-trip secret scanners (the constant is base64-encoded for the
+		# same reason). Google's client secrets are "GOCSPX-" + 28 url-safe
+		# chars = 35 total, so a truncated/edited constant fails this even
+		# though it still starts with the prefix. Bumping the constant should
+		# force a deliberate update here.
 		with (
 			patch.dict(
 				hooks.OAUTH_CLIENT_SECRETS,
@@ -179,8 +163,7 @@ class TestGetOauthClientSecretPrecedence(unittest.TestCase):
 			patch.object(hooks, "_gemini_secret_from_settings", return_value=""),
 		):
 			out = hooks.get_oauth_client_secret("Google Gemini")
-		self.assertTrue(out.startswith(prefix))
-		self.assertGreater(len(out), len(prefix))
+		self.assertRegex(out, r"\AGOCSPX-[A-Za-z0-9_-]{28}\Z")
 
 	def test_settings_read_errors_resolve_to_empty(self):
 		# The settings step is best-effort: pre-migrate (no column), no Single
@@ -189,18 +172,17 @@ class TestGetOauthClientSecretPrecedence(unittest.TestCase):
 		with patch("frappe.get_single", side_effect=Exception("no db")):
 			self.assertEqual(hooks._gemini_secret_from_settings(), "")
 
-	def test_other_providers_never_walk_node_modules(self):
-		# Only Google Gemini falls back to the bundle scan; everything
-		# else returns the env/empty value directly.
+	def test_other_providers_return_env_value_directly(self):
+		# Only Google Gemini has a settings/built-in fallback; every other
+		# provider returns its env/empty value directly (OpenAI is pure PKCE,
+		# so empty is correct and must stay empty).
 		with (
 			patch.dict(
 				hooks.OAUTH_CLIENT_SECRETS,
 				{"OpenAI": ""},
 			),
-			patch(
-				"jarvis.oauth.gemini_cli_secret.extract_gemini_cli_secret",
-			) as walker,
+			patch.object(hooks, "_gemini_secret_from_settings") as settings_read,
 		):
 			out = hooks.get_oauth_client_secret("OpenAI")
 		self.assertEqual(out, "")
-		walker.assert_not_called()
+		settings_read.assert_not_called()
