@@ -16,10 +16,14 @@ name: CI
 #     takes FRAPPE_BRANCH / PYTHON_VERSION / NODE_MAJOR build-args) and mirror develop's
 #     container job here.
 #
-#   - One unsharded test run instead of 4 shards + a coverage-combine job: sharding only
-#     pays when per-shard setup is a cheap image pull. From scratch, 4 shards would build
-#     the bench 4 times. Coverage is reported inline (see the test step) with no enforced
-#     floor yet — turn a floor on once the suite is green on v15.
+#   - Sharded 4 ways (matrix below), like develop, but WITHOUT a prebaked image: every
+#     shard rebuilds the ~6 min bench from scratch, so this trades 4x build-minutes for a
+#     roughly halved wall-clock. That trade is only worth taking because jarvis is a PUBLIC
+#     repo where Actions minutes are free; on a billed repo the from-scratch rebuild x4
+#     would be the wrong call. The real fix (fast AND cheap) is a prebaked :v15 image per
+#     the note above — add it and each shard's setup becomes a cheap pull like develop's.
+#     Coverage is reported per-shard inline (partial, see the test step) with no enforced
+#     floor yet — turn a combined --fail-under on once the suite is green on v15.
 #
 # The lint / frontend jobs are byte-identical to develop's: they never touch a bench, so
 # nothing about them is Frappe-version-specific. Keep them in lockstep when cherry-picking
@@ -165,6 +169,15 @@ jobs:
     # the suite got slower, not faster, and a 45 min cap cancelled a healthy run.
     timeout-minutes: 75
 
+    strategy:
+      # Never fail-fast: the default cancels surviving shards on the first failure, so you
+      # see one broken shard instead of all of them (a cancelled leg also reports neutral,
+      # hiding a real regression). Each shard rebuilds the bench from scratch — see the
+      # header comment for why that x4 cost is acceptable on this public repo.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
     services:
       mariadb:
         image: mariadb:10.11
@@ -298,14 +311,22 @@ jobs:
             echo "${apps}" | grep -q "\"${a}\"" || { echo "missing app: ${a}"; exit 1; }
           done
 
-      - name: Run tests + coverage
+      - name: Run tests + coverage (shard ${{ matrix.shard }} of 4)
         working-directory: frappe-bench
         run: |
           # gevent: needed by jarvis/realtime/handlers.py (socketio_backend=python) and its
           # tests.
           ./env/bin/pip install coverage gevent
-          bench --site test_site run-tests --app jarvis --coverage
-          # Report-only for now: the point of this job today is the v15 failure list, and
-          # an enforced floor on a red suite adds a second failure that explains nothing.
-          # Once the suite is green on v15, promote this to --fail-under like develop.
+          # run-parallel-tests shards by test FILE across --total-builds, so each
+          # --build-number runs a disjoint quarter of the suite. --with-coverage is this
+          # command's spelling of run-tests' --coverage (different click commands; do not
+          # "fix" one to match the other).
+          bench --site test_site run-parallel-tests \
+            --app jarvis \
+            --build-number ${{ matrix.shard }} \
+            --total-builds 4 \
+            --with-coverage
+          # Report-only, per shard (partial coverage — no cross-shard combine yet). The
+          # point of this job today is still the v15 failure list; an enforced floor on a
+          # red, sharded suite adds noise. Promote to a combined --fail-under once green.
           ./env/bin/coverage report --data-file=sites/.coverage || true
