@@ -21,7 +21,7 @@ import hashlib
 
 import frappe
 
-from jarvis import admin_client, onboarding_contract, release_notice
+from jarvis import admin_client, compat, onboarding_contract, release_notice
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
@@ -501,7 +501,7 @@ def _admin_chat_gate() -> dict:
 	raw = _settings_raw(_GATE_STATE_FIELDS)
 	cache = frappe.cache()
 	cache_key = f"{_CHAT_GATE_CACHE_KEY}:{_gate_revision(raw)}"
-	cached = cache.get_value(cache_key, expires=True)
+	cached = compat.cache_get_memoized(cache_key)
 	if cached:
 		if isinstance(cached, dict) and cached.get("unconfirmed"):
 			return _admin_unreachable_verdict(

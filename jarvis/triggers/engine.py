@@ -31,6 +31,8 @@ import time
 import frappe
 from frappe.utils import cint
 
+from jarvis import compat
+
 TRIGGER = "Jarvis Trigger"
 ACTIVITY = "Jarvis Trigger Activity"
 
@@ -168,7 +170,7 @@ def _triggers_map() -> dict:
 	raise here would take down every request on the site. Triggers simply stay
 	inert until migrate runs; the empty map is NOT cached in Redis so recovery
 	is immediate after migration."""
-	cached = frappe.cache().get_value(_CACHE_KEY, expires=True)
+	cached = compat.cache_get_memoized(_CACHE_KEY)
 	if cached is None:
 		try:
 			cached = _build_triggers_map()

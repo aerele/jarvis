@@ -45,10 +45,10 @@ def cache_get_fresh(key):
 
 	Frappe 16 has ``use_local_cache=False`` for exactly this. Frappe 15 lacks the
 	kwarg (passing it is a ``TypeError``) and has no read-side local-cache bypass,
-	but its ``get_value`` only consults ``local.cache`` for a key that was written
-	there -- and a TTL key never is (``set_value`` with ``expires_in_sec`` skips
-	local.cache on 15), provided reads pass ``expires=True`` so a miss does not
-	poison it. So ``expires=True`` yields the same always-fresh read on 15.
+	so guarantee the fresh read directly: evict any local copy first, then read
+	with ``expires=True`` so the miss-path does not re-populate it. This holds
+	regardless of what any other code path left in ``local.cache``, so callers get
+	the live Redis state even for a key that was locally cached elsewhere.
 
 	Callers use this only for cross-process leases/counters that must never serve a
 	stale in-process copy.
@@ -56,7 +56,26 @@ def cache_get_fresh(key):
 	cache = frappe.cache()
 	if _get_value_supports_use_local_cache():
 		return cache.get_value(key, use_local_cache=False)
+	frappe.local.cache.pop(cache.make_key(key), None)
 	return cache.get_value(key, expires=True)
+
+
+def cache_get_memoized(key):
+	"""``get_value(key)`` for a TTL key that is re-read many times within one
+	request, keeping the per-request local-cache memoization on Frappe 15 and 16.
+
+	Plain ``get_value`` memoizes a hit into ``frappe.local.cache`` only when
+	``expires`` is falsy -- but a bare read of a TTL key poisons ``local.cache``
+	with ``None`` on a miss (Frappe 15), and ``expires=True`` avoids the poison at
+	the cost of that memoization. Bridge both: read with ``expires=True`` (never
+	poison), then store a real hit back into ``local.cache`` by hand, so later
+	reads in the same request are a dict lookup, not a Redis round-trip.
+	"""
+	cache = frappe.cache()
+	val = cache.get_value(key, expires=True)
+	if val is not None:
+		frappe.local.cache[cache.make_key(key)] = val
+	return val
 
 
 def in_test() -> bool:

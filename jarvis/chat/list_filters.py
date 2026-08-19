@@ -64,6 +64,7 @@ from typing import Any
 import frappe
 from frappe import _
 
+from jarvis import compat
 from jarvis.chat import list_registry
 from jarvis.permissions import require_jarvis_user
 
@@ -862,7 +863,7 @@ def _build_schema(view: list_registry.ListView, root: str, user: str) -> dict:
 	fingerprint = _meta_fingerprint(root, user)
 	key = _cache_key(view.view_key, user, fingerprint)
 	try:
-		cached = frappe.cache().get_value(key, expires=True)
+		cached = compat.cache_get_memoized(key)
 	except Exception:
 		cached = None
 	if isinstance(cached, dict) and cached.get("contract_version") == CONTRACT_VERSION:
