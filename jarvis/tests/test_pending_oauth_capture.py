@@ -242,9 +242,7 @@ class TestPendingCapture(FrappeTestCase):
 		# in a synthetic one so this retry-then-give-up regression stays
 		# covered independent of any specific provider.
 		with patch.dict(pc._REVOKE_ENDPOINTS, {"test-oauth-provider": "https://revoke.example.com/revoke"}):
-			view = _mk(
-				agent_provider="test-oauth-provider", provider_subject="give-up", account_ref="SUB_gu"
-			)
+			view = _mk(agent_provider="test-oauth-provider", provider_subject="give-up", account_ref="SUB_gu")
 			name = frappe.db.get_value(DT, {"capture_id": view["capture_id"]}, "name")
 			frappe.db.set_value(
 				DT, name, "expires_at", add_to_date(now_datetime(), minutes=-5), update_modified=False
