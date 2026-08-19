@@ -1070,7 +1070,7 @@ class TestPoolSigninScope(_OAuthApiBase):
 		# 2026-08-19 and it is no longer an OAuth provider at all.)
 		out = oauth_api.begin_pool_account_signin("xAI Grok", "grok-4.3")
 		url = out["data"]["authorize_url"]
-		self.assertIn("grok-cli:access", url)  # xAI's normal (non-pool) scope set
+		self.assertIn("grok-cli%3Aaccess", url)  # xAI's normal (non-pool) scope, url-encoded
 
 
 class TestIsDirectSubscriptionPredicate(FrappeTestCase):
