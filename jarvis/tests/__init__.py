@@ -106,19 +106,24 @@ _install_network_block()
 
 def dumps_like_response(obj, default):
 	"""Serialize the way THIS Frappe serializes an HTTP response body, so a test
-	reproduces the exact ``json_handler`` path production uses: orjson on Frappe 16
-	(``frappe.utils.response`` calls ``orjson_dumps``), stdlib json on Frappe 15
-	(it calls ``json.dumps``). Frappe 15 does not depend on orjson at all.
+	reproduces the exact ``json_handler`` path production uses: orjson on Frappe 16,
+	stdlib json on Frappe 15.
 
-	Returns ``bytes`` or ``str``; ``json.loads`` accepts either. Not hardcoded to
-	orjson because the R9 regression it guards (orjson renders a non-exact-dict
-	Mapping as a list of its KEYS via ``default``) is a v16 production behavior,
-	while v15 must still be exercised through its own real serializer.
+	Discriminate on ``frappe.utils.orjson_dumps`` -- the v16-only symbol that IS the
+	production response serializer (``frappe/utils/response.py`` calls it) -- not on
+	whether ``orjson`` merely imports. Keying on the import would (a) silently mask a
+	broken orjson on v16, where production would be 500ing on its own top-level
+	``import orjson`` while these tests stayed green, and (b) route a v15 run through
+	orjson if the package happened to be present transitively, when v15 production
+	uses stdlib json. This mirrors ``_patch_qb_run``: probe the real framework state.
+
+	Returns ``bytes`` or ``str``; ``json.loads`` accepts either.
 	"""
-	try:
-		import orjson
-	except ImportError:
-		import json
+	import frappe.utils
 
-		return json.dumps(obj, default=default)
-	return orjson.dumps(obj, default=default)
+	orjson_dumps = getattr(frappe.utils, "orjson_dumps", None)
+	if orjson_dumps is not None:
+		return orjson_dumps(obj, default=default)
+	import json
+
+	return json.dumps(obj, default=default)
