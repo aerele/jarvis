@@ -21,6 +21,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat.custom_skills import build_push_payload, prefixed_slug
+from jarvis.tests._role_guard import enforced_role_guards
 
 SKILL = "Jarvis Custom Skill"
 RESV = "Jarvis Shared Skill Slug"
@@ -632,7 +633,7 @@ class TestSkillPromotionSurfacing(Part2Base):
 		# review surface is reviewer-gated end to end).
 		from jarvis.chat import custom_skills_api, learned_api
 
-		with _as(USER_B):
+		with _as(USER_B), enforced_role_guards():
 			with self.assertRaises(frappe.PermissionError):
 				custom_skills_api.list_skill_promotion_requests(status="Pending")
 			with self.assertRaises(frappe.PermissionError):

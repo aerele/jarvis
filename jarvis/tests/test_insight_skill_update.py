@@ -27,6 +27,7 @@ from unittest import mock
 import frappe
 
 from jarvis.chat import learned_api
+from jarvis.tests._role_guard import enforced_role_guards
 
 JLP = "Jarvis Learned Pattern"
 SKILL = "Jarvis Custom Skill"
@@ -205,7 +206,7 @@ class TestInsightSkillUpdate(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	def test_non_sm_is_refused(self):
 		name = _mk("g1")
-		with _as(self.non_sm):
+		with _as(self.non_sm), enforced_role_guards():
 			with self.assertRaises(frappe.PermissionError):
 				learned_api.draft_insight_skill_update(name)
 			with self.assertRaises(frappe.PermissionError):
