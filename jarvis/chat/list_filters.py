@@ -843,7 +843,7 @@ def _log_schema_failure(view_key: str, root: str) -> None:
 	key = f"jarvis:list-filter-schema-fail:{view_key}"
 	try:
 		cache = frappe.cache()
-		if cache.get_value(key):
+		if cache.get_value(key, expires=True):
 			return
 		cache.set_value(key, "1", expires_in_sec=SCHEMA_FAILURE_LOG_TTL)
 	except Exception:
@@ -862,7 +862,7 @@ def _build_schema(view: list_registry.ListView, root: str, user: str) -> dict:
 	fingerprint = _meta_fingerprint(root, user)
 	key = _cache_key(view.view_key, user, fingerprint)
 	try:
-		cached = frappe.cache().get_value(key)
+		cached = frappe.cache().get_value(key, expires=True)
 	except Exception:
 		cached = None
 	if isinstance(cached, dict) and cached.get("contract_version") == CONTRACT_VERSION:
@@ -957,7 +957,7 @@ def _log_flag_misconfig(value: Any) -> None:
 	key = "jarvis:list-filter-flag-misconfig"
 	try:
 		cache = frappe.cache()
-		if cache.get_value(key):
+		if cache.get_value(key, expires=True):
 			return
 		cache.set_value(key, "1", expires_in_sec=FLAG_MISCONFIG_LOG_TTL)
 	except Exception:

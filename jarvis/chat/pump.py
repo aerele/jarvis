@@ -74,6 +74,7 @@ from dataclasses import dataclass, field
 
 import frappe
 
+from jarvis import compat
 from jarvis.chat import turn_state as ts
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import AgentUnreachableError
@@ -678,7 +679,7 @@ def _lease_mirror_live(target: str) -> bool:
 	MariaDB would). A MISSING mirror is NEVER treated as proof of vacancy — the
 	caller falls through to the authoritative MariaDB read (D4-b)."""
 	try:
-		return bool(frappe.cache().get_value(_lease_mirror_key(target), use_local_cache=False))
+		return bool(compat.cache_get_fresh(_lease_mirror_key(target)))
 	except Exception:
 		return False
 
@@ -707,7 +708,7 @@ def _read_last_known_gateway_active(target: str) -> int | None:
 	"""CDX-11: the last-known foreign-usage count if still within its TTL, else None
 	(the observation aged out — treat foreign usage as genuinely unknown)."""
 	try:
-		v = frappe.cache().get_value(_gateway_active_key(target), use_local_cache=False)
+		v = compat.cache_get_fresh(_gateway_active_key(target))
 		if v is None:
 			return None
 		return int(v.decode() if isinstance(v, bytes) else v)
@@ -835,7 +836,7 @@ def _warn_provisioning_if_starved() -> None:
 	try:
 		site = frappe.local.site
 		key = f"jarvis:pump:provision_warn:{site}"
-		if frappe.cache().get_value(key):
+		if frappe.cache().get_value(key, expires=True):
 			return
 		frappe.cache().set_value(key, "1", expires_in_sec=300)
 	except Exception:
@@ -3117,7 +3118,7 @@ def _log_wedged_throttled(target: str, epoch: int) -> None:
 	"""Log a wedged-but-live-lease detection at most once per hour per shard (so a
 	persistently-wedged shard cannot flood the Error Log every watchdog tick)."""
 	key = f"jarvis_pump_wedged_logged::{target}"
-	if frappe.cache().get_value(key):
+	if frappe.cache().get_value(key, expires=True):
 		return
 	frappe.cache().set_value(key, "1", expires_in_sec=_WEDGED_LOG_TTL_S)
 	frappe.log_error(

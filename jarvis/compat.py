@@ -29,6 +29,36 @@ import inspect
 import frappe
 
 
+@functools.cache
+def _get_value_supports_use_local_cache() -> bool:
+	"""Does ``RedisWrapper.get_value`` accept ``use_local_cache=`` (Frappe 16)?"""
+	try:
+		sig = inspect.signature(frappe.cache().get_value)
+		return "use_local_cache" in sig.parameters
+	except (AttributeError, TypeError, ValueError):
+		return False
+
+
+def cache_get_fresh(key):
+	"""``get_value(key)`` that always reads Redis, bypassing the in-process
+	``frappe.local.cache``, on Frappe 15 and 16.
+
+	Frappe 16 has ``use_local_cache=False`` for exactly this. Frappe 15 lacks the
+	kwarg (passing it is a ``TypeError``) and has no read-side local-cache bypass,
+	but its ``get_value`` only consults ``local.cache`` for a key that was written
+	there -- and a TTL key never is (``set_value`` with ``expires_in_sec`` skips
+	local.cache on 15), provided reads pass ``expires=True`` so a miss does not
+	poison it. So ``expires=True`` yields the same always-fresh read on 15.
+
+	Callers use this only for cross-process leases/counters that must never serve a
+	stale in-process copy.
+	"""
+	cache = frappe.cache()
+	if _get_value_supports_use_local_cache():
+		return cache.get_value(key, use_local_cache=False)
+	return cache.get_value(key, expires=True)
+
+
 def in_test() -> bool:
 	"""True when running under the test runner, on Frappe 15 and 16.
 
