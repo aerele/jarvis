@@ -83,7 +83,7 @@ Jarvis supports Frappe 15 and 16.
 Run these commands from your Frappe bench:
 
 ```bash
-bench get-app https://github.com/Aerele-RnD/jarvis.git --branch beta
+bench get-app https://github.com/aerele/jarvis.git --branch main
 bench --site your-site.example install-app jarvis
 ```
 
