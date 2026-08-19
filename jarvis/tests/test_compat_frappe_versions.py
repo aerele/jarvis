@@ -351,3 +351,56 @@ class TestSetDelimitersFlagAcrossMajors(FrappeTestCase):
 
 		# Must not raise on a doc lacking the v16-only method (the Frappe 15 shape).
 		compat.set_delimiters_flag(Doc())
+
+
+class TestCacheGetFreshAcrossMajors(FrappeTestCase):
+	"""compat.cache_get_fresh() reads a TTL key straight from Redis, bypassing the
+	in-process local cache, on Frappe 15 (via expires=True) and 16 (via
+	use_local_cache=False). Guards the v15 local-cache poisoning fix: a cold read
+	must not pin None for a key that set_value later writes."""
+
+	def test_reads_a_ttl_key_written_before(self):
+		key = "jarvis-compat-fresh-probe"
+		frappe.cache().delete_value(key)
+		self.addCleanup(frappe.cache().delete_value, key)
+		frappe.cache().set_value(key, {"v": 1}, expires_in_sec=60)
+		self.assertEqual(compat.cache_get_fresh(key), {"v": 1})
+
+	def test_no_poison_after_cold_miss_then_set(self):
+		"""The exact v15 failure shape: read (miss) -> set(expires) -> read must
+		return the value, not a poisoned None."""
+		key = "jarvis-compat-fresh-poison"
+		frappe.cache().delete_value(key)
+		self.addCleanup(frappe.cache().delete_value, key)
+		self.assertIsNone(compat.cache_get_fresh(key))  # cold miss must not poison
+		frappe.cache().set_value(key, {"v": 2}, expires_in_sec=60)
+		self.assertEqual(compat.cache_get_fresh(key), {"v": 2})
+
+	def test_missing_key_is_none(self):
+		frappe.cache().delete_value("jarvis-compat-fresh-absent")
+		self.assertIsNone(compat.cache_get_fresh("jarvis-compat-fresh-absent"))
+
+
+class TestCacheGetMemoizedAcrossMajors(FrappeTestCase):
+	"""compat.cache_get_memoized() keeps a TTL-key read memoized in
+	frappe.local.cache for the rest of the request, without the v15 miss-poison."""
+
+	def test_hit_is_memoized_in_local_cache(self):
+		key = "jarvis-compat-memo-probe"
+		cache = frappe.cache()
+		cache.delete_value(key)
+		self.addCleanup(cache.delete_value, key)
+		cache.set_value(key, {"v": 1}, expires_in_sec=60)
+		self.assertEqual(compat.cache_get_memoized(key), {"v": 1})
+		# a real hit is stored back so the next read is a dict lookup
+		self.assertEqual(frappe.local.cache.get(cache.make_key(key)), {"v": 1})
+
+	def test_miss_does_not_poison(self):
+		key = "jarvis-compat-memo-miss"
+		cache = frappe.cache()
+		cache.delete_value(key)
+		self.addCleanup(cache.delete_value, key)
+		self.assertIsNone(compat.cache_get_memoized(key))  # cold miss
+		self.assertNotIn(cache.make_key(key), frappe.local.cache)  # not poisoned
+		cache.set_value(key, {"v": 2}, expires_in_sec=60)
+		self.assertEqual(compat.cache_get_memoized(key), {"v": 2})

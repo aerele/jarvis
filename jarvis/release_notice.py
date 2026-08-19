@@ -83,7 +83,7 @@ def check() -> dict:
 	from jarvis import admin_client
 
 	cache = frappe.cache()
-	if not cache.get_value(_CHECK_CACHE_KEY):
+	if not cache.get_value(_CHECK_CACHE_KEY, expires=True):
 		cache.set_value(_CHECK_CACHE_KEY, "1", expires_in_sec=_CHECK_CACHE_TTL_S)
 		try:
 			conn = admin_client.get_connection(timeout_s=8) or {}

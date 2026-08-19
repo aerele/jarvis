@@ -325,7 +325,7 @@ def get_schema(doctype: str, verbose: bool = False, refresh: bool = False) -> di
 	if refresh:
 		clear_cache_for(doctype)  # bust BOTH variants, not just the current one
 	else:
-		cached = cache.get_value(key)
+		cached = cache.get_value(key, expires=True)
 		if cached is not None:
 			return cached
 	result = _build_schema(doctype, verbose)

@@ -144,7 +144,7 @@ def log_stale_once(stored_gen, incoming_gen) -> None:
 	arriving."""
 	key = f"jarvis:tenant_authority_stale:{stored_gen}:{incoming_gen}"
 	cache = frappe.cache()
-	if cache.get_value(key):
+	if cache.get_value(key, expires=True):
 		return
 	cache.set_value(key, 1, expires_in_sec=_STALE_LOG_TTL_S)
 	frappe.log_error(
@@ -167,7 +167,7 @@ def log_invariant_once(gen, stored_handle, incoming_handle) -> None:
 	that persists stays visible to operators."""
 	key = f"jarvis:tenant_authority_invariant:{gen}:{stored_handle}:{incoming_handle}"
 	cache = frappe.cache()
-	if cache.get_value(key):
+	if cache.get_value(key, expires=True):
 		return
 	cache.set_value(key, 1, expires_in_sec=_STALE_LOG_TTL_S)
 	frappe.log_error(

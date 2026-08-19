@@ -193,7 +193,7 @@ def _log_push_failure_throttled() -> None:
 	"""Log an unexpected push failure at most once per hour. Never raises."""
 	try:
 		hour = int(time.time()) // 3600
-		if frappe.cache.get_value(_LOG_THROTTLE_KEY) == hour:
+		if frappe.cache.get_value(_LOG_THROTTLE_KEY, expires=True) == hour:
 			return
 		frappe.cache.set_value(_LOG_THROTTLE_KEY, hour, expires_in_sec=7200)
 		frappe.log_error(title="jarvis errors: rollup push failed", message=frappe.get_traceback())

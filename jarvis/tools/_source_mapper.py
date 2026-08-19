@@ -72,7 +72,7 @@ def _mapper_map(source_doctype: str) -> dict:
 	lookup in ``resolve_mapper`` scrubs the caller's real doctype to match."""
 	cache = frappe.cache()
 	key = mapper_cache_key(source_doctype)
-	hit = cache.get_value(key)
+	hit = cache.get_value(key, expires=True)
 	if hit is not None:
 		return hit
 	out: dict = {}

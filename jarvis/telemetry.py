@@ -153,7 +153,7 @@ def custom_doctype_set() -> frozenset:
 	under-report rather than error."""
 	try:
 		cache = frappe.cache()
-		cached = cache.get_value(DOCTYPE_SET_CACHE_KEY)
+		cached = cache.get_value(DOCTYPE_SET_CACHE_KEY, expires=True)
 		if cached is not None:
 			return frozenset(cached)
 		from jarvis.site_profile import apps as sp_apps
@@ -183,7 +183,7 @@ def _read_and_clear_turn_flag(conversation: str) -> bool:
 	try:
 		cache = frappe.cache()
 		key = _turn_flag_key(conversation)
-		flag = cache.get_value(key)
+		flag = cache.get_value(key, expires=True)
 		if flag:
 			cache.delete_value(key)
 		return bool(flag)

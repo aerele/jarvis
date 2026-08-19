@@ -266,7 +266,7 @@ def _probe_direct_subscription(settings) -> dict:
 	what the customer's real first turn would use."""
 	cache = frappe.cache()
 	cache_key = _probe_cache_key(settings)
-	cached = cache.get_value(cache_key)
+	cached = cache.get_value(cache_key, expires=True)
 	if isinstance(cached, dict) and cached.get("state"):
 		return cached
 	from jarvis.chat.agent_client import AgentSession, AgentUnreachableError, oneshot_run_id
@@ -286,7 +286,7 @@ def _probe_direct_subscription(settings) -> dict:
 	# Claimed only AFTER the no-gateway early return, which bills nothing and
 	# must not leave a 30s "already running" ghost behind (round-5 review).
 	inflight_key = f"{cache_key}:inflight"
-	if cache.get_value(inflight_key):
+	if cache.get_value(inflight_key, expires=True):
 		return {
 			"state": "unknown",
 			"detail": "A live check is already running.",
