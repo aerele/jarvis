@@ -369,16 +369,18 @@ class TestChatUiSettingsServesApiKeyModels(FrappeTestCase):
 		# so an unwrapped Mapping silently serialises to its KEYS: the response
 		# would carry ["OpenAI", ...] instead of {"OpenAI": [...], ...} with no
 		# error raised. chat/api.py must wrap these in dict().
-		import orjson
+		import json
+
 		from frappe.utils.response import json_handler
 
 		from jarvis.chat.api import get_chat_ui_settings
+		from jarvis.tests import dumps_like_response
 
 		with patch.object(admin_client, "get_model_catalog", return_value=_PAYLOAD):
 			out = get_chat_ui_settings()
 		for key in ("subscription_models", "default_models", "api_key_models"):
 			self.assertIsInstance(out[key], dict, f"{key} must be a real dict before serialisation")
-			decoded = orjson.loads(orjson.dumps(out[key], default=json_handler))
+			decoded = json.loads(dumps_like_response(out[key], json_handler))
 			self.assertIsInstance(decoded, dict, f"{key} serialised to a non-object")
 
 	def test_api_key_models_excludes_subscription_rows(self):
@@ -398,10 +400,12 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 		self.addCleanup(_clear_sub_model_cache)
 
 	def test_returns_the_three_catalog_slices_as_json_objects(self):
-		import orjson
+		import json
+
 		from frappe.utils.response import json_handler
 
 		from jarvis.chat.api import get_model_catalog_ui
+		from jarvis.tests import dumps_like_response
 
 		with patch.object(admin_client, "get_model_catalog", return_value=_PAYLOAD):
 			out = get_model_catalog_ui()
@@ -409,7 +413,7 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 			self.assertIn(key, out)
 			# R9: a bare Mapping would serialise to its KEYS with no error.
 			self.assertIsInstance(out[key], dict)
-			self.assertIsInstance(orjson.loads(orjson.dumps(out[key], default=json_handler)), dict)
+			self.assertIsInstance(json.loads(dumps_like_response(out[key], json_handler)), dict)
 
 	def test_kimi_is_keyed_by_its_subscription_label(self):
 		from jarvis.chat.api import get_model_catalog_ui
