@@ -197,18 +197,6 @@ jobs:
           # mirrors the deploy target rather than the bare minimum.
           node-version: "20"
 
-      - name: Record what this run actually tested against
-        run: |
-          # version-15 upstream moves under us; without this a green check is unauditable
-          # after the fact.
-          {
-            echo "### Upstream revisions (version-15 HEAD at run time)"
-            echo
-            for repo in frappe erpnext hrms; do
-              echo "- ${repo}: \`$(git ls-remote "https://github.com/frappe/${repo}.git" version-15 | cut -f1)\`"
-            done
-          } | tee -a "${GITHUB_STEP_SUMMARY}"
-
       - name: System deps
         run: |
           sudo apt-get update
@@ -230,13 +218,43 @@ jobs:
           bench set-config -g redis_queue "redis://127.0.0.1:6379/1"
           bench set-config -g redis_socketio "redis://127.0.0.1:6379/2"
 
-      - name: Get apps (erpnext + hrms at version-15, + jarvis)
+      - name: Get apps (erpnext + hrms at version-15)
         working-directory: frappe-bench
         run: |
           # --skip-assets: backend tests never use the JS bundles; skip erpnext/hrms builds.
+          # Serial on purpose: both get-apps write the shared venv and sites/apps.txt.
           bench get-app --branch version-15 --skip-assets erpnext
           bench get-app --branch version-15 --skip-assets hrms
-          bench get-app "${GITHUB_WORKSPACE}/app" --skip-assets
+
+      - name: Add jarvis to the bench
+        working-directory: frappe-bench
+        run: |
+          # Deliberately NOT `bench get-app`: that runs `yarn install --check-files`
+          # whenever an app has a package.json (bench/app.py), which here pulls
+          # @google/gemini-cli and, via postinstall, both Vue frontends' deps — npm work
+          # the Python suite never reads. Same reasoning as develop's ci.yml.
+          cp -r "${GITHUB_WORKSPACE}/app" apps/jarvis
+          ./env/bin/pip install -e apps/jarvis
+          if ! grep -qxF jarvis sites/apps.txt; then
+            # Guard against a no-trailing-newline apps.txt: a naive append would fuse the
+            # last app name with "jarvis" and frappe dies on the merged module name.
+            [ -z "$(tail -c1 sites/apps.txt)" ] || echo >> sites/apps.txt
+            echo jarvis >> sites/apps.txt
+          fi
+
+      - name: Record what this run actually tested against
+        working-directory: frappe-bench
+        run: |
+          # version-15 upstream moves under us; without this a green check is unauditable
+          # after the fact. Read the SHAs from the clones that were actually installed —
+          # an ls-remote taken earlier could drift from what a later clone fetched.
+          {
+            echo "### Upstream revisions (as cloned)"
+            echo
+            for app in frappe erpnext hrms; do
+              echo "- ${app}: \`$(git -C "apps/${app}" rev-parse HEAD)\`"
+            done
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Create test site + install apps
         working-directory: frappe-bench
@@ -253,6 +271,22 @@ jobs:
           # (throttle_user_creation); raise it so no mid-suite fixture insert hits
           # "Throttled". -p stores an INT (a string limit breaks the count>limit compare).
           bench --site test_site set-config -p throttle_user_limit 100000
+
+      - name: Assert the site is what we think it is
+        working-directory: frappe-bench
+        run: |
+          # Fail fast with a clear "missing app" instead of letting a partial install
+          # surface later as confusing tier-2 mock.patch("erpnext...") import errors.
+          #
+          # Take the JSON line specifically and leave stderr on the console: merging
+          # stderr and taking `tail -1` would capture any late warning instead of the
+          # JSON, failing a perfectly healthy site.
+          apps=$(bench --site test_site execute frappe.get_installed_apps | grep -m1 '^\[') || {
+            echo "could not parse installed apps from 'bench execute' output"; exit 1; }
+          echo "installed apps: ${apps}"
+          for a in frappe erpnext hrms jarvis; do
+            echo "${apps}" | grep -q "\"${a}\"" || { echo "missing app: ${a}"; exit 1; }
+          done
 
       - name: Run tests + coverage
         working-directory: frappe-bench
