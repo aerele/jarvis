@@ -34,14 +34,20 @@ def in_test() -> bool:
 
 	Frappe 16 exposes a module-level ``frappe.in_test``; Frappe 15 has no such
 	attribute and instead sets ``frappe.flags.in_test``. Reading ``frappe.in_test``
-	directly raised ``AttributeError`` on 15. Keep 16's check as the first operand
-	so its behavior is unchanged, then fall back to 15's flag.
+	directly raised ``AttributeError`` on 15.
+
+	Branch on which flag the framework actually maintains, rather than ORing both:
+	on 16 the module attribute is canonical, so a stray ``flags.in_test`` must not
+	widen this to True and let a scheduler-paused guard run work inline in
+	production. On 15 the module attribute is absent, so the flag is authoritative.
 
 	Call this via the module (``compat.in_test()``) so tests can patch the one
 	seam on both majors; ``mock.patch("frappe.in_test", ...)`` cannot work on 15,
 	where the attribute does not exist to patch.
 	"""
-	return getattr(frappe, "in_test", False) or bool(frappe.flags.get("in_test"))
+	if hasattr(frappe, "in_test"):
+		return bool(frappe.in_test)
+	return bool(frappe.flags.get("in_test"))
 
 
 def set_delimiters_flag(data_import_doc) -> None:
