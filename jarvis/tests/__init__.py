@@ -102,3 +102,23 @@ def _install_network_block() -> None:
 
 
 _install_network_block()
+
+
+def dumps_like_response(obj, default):
+	"""Serialize the way THIS Frappe serializes an HTTP response body, so a test
+	reproduces the exact ``json_handler`` path production uses: orjson on Frappe 16
+	(``frappe.utils.response`` calls ``orjson_dumps``), stdlib json on Frappe 15
+	(it calls ``json.dumps``). Frappe 15 does not depend on orjson at all.
+
+	Returns ``bytes`` or ``str``; ``json.loads`` accepts either. Not hardcoded to
+	orjson because the R9 regression it guards (orjson renders a non-exact-dict
+	Mapping as a list of its KEYS via ``default``) is a v16 production behavior,
+	while v15 must still be exercised through its own real serializer.
+	"""
+	try:
+		import orjson
+	except ImportError:
+		import json
+
+		return json.dumps(obj, default=default)
+	return orjson.dumps(obj, default=default)
