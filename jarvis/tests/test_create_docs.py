@@ -22,8 +22,9 @@ class TestCreateDocs(FrappeTestCase):
 		self.assertTrue(frappe.db.exists("ToDo", {"description": "jarvis-batch-b"}))
 
 	def test_rolls_back_whole_batch_on_failure(self):
-		# Second doc has a bad Link (assigned_by -> a non-existent User), which
+		# Second doc has a bad Link (allocated_to -> a non-existent User), which
 		# fails at insert AFTER the first doc inserted. The savepoint must undo it.
+		# (allocated_to not assigned_by; see test_bulk_tools._BAD_USER for why.)
 		with self.assertRaises(Exception):
 			create_docs(
 				[
@@ -32,7 +33,7 @@ class TestCreateDocs(FrappeTestCase):
 						"doctype": "ToDo",
 						"values": {
 							"description": "jarvis-batch-bad",
-							"assigned_by": "no-such-user@invalid.example",
+							"allocated_to": "no-such-user@invalid.example",
 						},
 					},
 				]
@@ -61,6 +62,7 @@ class TestCreateDocs(FrappeTestCase):
 		# clear the commit/rollback callback queues. Without the fix, the first
 		# (successfully-inserted-then-rolled-back) doc's queued after_commit
 		# callbacks survive and would fire on the request's real commit.
+		# Bad Link uses allocated_to (not assigned_by); see test_bulk_tools._BAD_USER.
 		before = len(frappe.db.after_commit._functions)
 		with self.assertRaises(Exception):
 			create_docs(
@@ -70,7 +72,7 @@ class TestCreateDocs(FrappeTestCase):
 						"doctype": "ToDo",
 						"values": {
 							"description": "jarvis-batch-cbq-bad",
-							"assigned_by": "no-such-user@invalid.example",
+							"allocated_to": "no-such-user@invalid.example",
 						},
 					},
 				]

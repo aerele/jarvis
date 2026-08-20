@@ -650,7 +650,11 @@ class TestAgentCatalogPushTOCTOU(FrappeTestCase):
 			WHERE `doctype` = %(dt)s AND `field` = 'agent_catalog_version'""",
 			{"dt": SETTINGS},
 		)
-		frappe.db.value_cache[SETTINGS]["agent_catalog_version"] = 5
+		# Seed a stale cached single value. The singles cache is keyed
+		# value_cache[doctype][fieldname] on both majors, but the doctype
+		# sub-dict is created lazily by the first get_single_value; on Frappe 15
+		# nothing has populated it here yet, so index into it via setdefault.
+		frappe.db.value_cache.setdefault(SETTINGS, {})["agent_catalog_version"] = 5
 		agents_api._bump_catalog_version()
 		self.assertEqual(
 			frappe.utils.cint(_single("agent_catalog_version")),
