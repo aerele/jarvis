@@ -2,7 +2,7 @@
 
 Config resolution (``stt_config``) is two-tier: explicit site_config keys win
 (dev benches: ``jarvis_stt_openrouter_api_key`` + optional
-``jarvis_stt_model`` / ``jarvis_stt_enabled``), else the managed path asks the
+``jarvis_stt_enabled``), else the managed path asks the
 admin app via ``jarvis.admin_client.get_stt_config`` (cached, never raises).
 Transcription itself is one OpenRouter chat-completions call to an audio-capable
 Gemini Flash model. The complete clip is sent as one base64 ``input_audio``
@@ -33,12 +33,13 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _CONNECT_TIMEOUT_S = 10
 _TRANSCRIBE_READ_TIMEOUT_S = 90
 
-# Matches Jarvis Admin Settings.stt_model_id's default; used whenever neither
-# site config nor admin names a model. Gemini 2.5 Flash is intentionally pinned:
+# Jarvis owns the bench dictation model. Admin supplies the enabled state and
+# OpenRouter key, but neither Admin's legacy model field nor a site_config model
+# override may change this transport contract. Gemini 2.5 Flash is intentionally pinned:
 # on the same real Indic recordings, the newer 3.7 Flash falsely content-filtered
 # harmless Hindi and Malayalam speech while 2.5 returned the transcripts. This
 # is independent of the container STT model used by the agent runtime.
-_DEFAULT_STT_MODEL = "google/gemini-2.5-flash"
+_STT_MODEL = "google/gemini-2.5-flash"
 
 # Chat-completions default for openrouter_complete's text callers, overridable
 # per site with ``jarvis_text_model``. It stays separate from the STT model so
@@ -160,7 +161,8 @@ def stt_config() -> dict | None:
 
 	Site config WINS when ``jarvis_stt_openrouter_api_key`` is present
 	(dev benches); the managed path defers to admin's tenant config
-	(Redis-cached in admin_client, errors degrade to None).
+	(Redis-cached in admin_client, errors degrade to None). The model is fixed by
+	this Jarvis release; configuration supplies credentials, not model selection.
 	"""
 	if not _voice_features_enabled():
 		return None
@@ -170,15 +172,13 @@ def stt_config() -> dict | None:
 		# NULL=ON: a bench that set only the key clearly wants STT.
 		if enabled is not None and not cint(enabled):
 			return None
-		model = (frappe.conf.get("jarvis_stt_model") or "").strip()
-		return {"enabled": True, "api_key": key, "model": model or _DEFAULT_STT_MODEL}
+		return {"enabled": True, "api_key": key, "model": _STT_MODEL}
 	from jarvis import admin_client
 
 	cfg = admin_client.get_stt_config()
 	if not cfg or not cfg.get("enabled") or not cfg.get("api_key"):
 		return None
-	model = (cfg.get("model") or "").strip()
-	return {"enabled": True, "api_key": cfg["api_key"], "model": model or _DEFAULT_STT_MODEL}
+	return {"enabled": True, "api_key": cfg["api_key"], "model": _STT_MODEL}
 
 
 # Why STT is unavailable — the UI treats these differently, so collapsing them into one

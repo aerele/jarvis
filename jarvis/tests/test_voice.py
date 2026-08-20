@@ -89,17 +89,17 @@ class TestSttConfig(FrappeTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
 
-	def test_site_config_wins_over_admin(self):
+	def test_site_config_key_wins_over_admin_but_cannot_override_model(self):
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model="test/model-x"):
 			with patch("jarvis.admin_client.get_stt_config") as mock_admin:
 				cfg = voice.stt_config()
-		self.assertEqual(cfg, {"enabled": True, "api_key": TEST_KEY, "model": "test/model-x"})
+		self.assertEqual(cfg, {"enabled": True, "api_key": TEST_KEY, "model": voice._STT_MODEL})
 		mock_admin.assert_not_called()
 
 	def test_site_config_default_model(self):
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model=""):
 			cfg = voice.stt_config()
-		self.assertEqual(cfg["model"], voice._DEFAULT_STT_MODEL)
+		self.assertEqual(cfg["model"], voice._STT_MODEL)
 
 	def test_site_config_disabled_flag(self):
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_enabled=0):
@@ -113,7 +113,7 @@ class TestSttConfig(FrappeTestCase):
 			):
 				cfg = voice.stt_config()
 		self.assertEqual(cfg["api_key"], "admin-key")
-		self.assertEqual(cfg["model"], voice._DEFAULT_STT_MODEL)
+		self.assertEqual(cfg["model"], voice._STT_MODEL)
 
 	def test_admin_disabled_returns_none(self):
 		with _conf(jarvis_stt_openrouter_api_key=""):
@@ -214,10 +214,10 @@ class TestTextModelDecoupledFromStt(FrappeTestCase):
 		frappe.set_user("Administrator")
 
 	def test_default_text_model_is_not_the_stt_model(self):
-		self.assertNotEqual(voice._DEFAULT_TEXT_MODEL, voice._DEFAULT_STT_MODEL)
+		self.assertNotEqual(voice._DEFAULT_TEXT_MODEL, voice._STT_MODEL)
 
 	def test_site_stt_model_does_not_leak_into_completions(self):
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model=voice._DEFAULT_STT_MODEL):
+		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model=voice._STT_MODEL):
 			key, model = voice._credentials()
 		self.assertEqual(key, TEST_KEY)
 		self.assertEqual(model, voice._DEFAULT_TEXT_MODEL)
@@ -226,7 +226,7 @@ class TestTextModelDecoupledFromStt(FrappeTestCase):
 		with _conf(jarvis_stt_openrouter_api_key=""):
 			with patch(
 				"jarvis.admin_client.get_stt_config",
-				return_value={"enabled": True, "api_key": "admin-key", "model": voice._DEFAULT_STT_MODEL},
+				return_value={"enabled": True, "api_key": "admin-key", "model": voice._STT_MODEL},
 			):
 				key, model = voice._credentials()
 		self.assertEqual(key, "admin-key")
@@ -238,7 +238,7 @@ class TestTextModelDecoupledFromStt(FrappeTestCase):
 		self.assertEqual(model, "vendor/chat-model")
 
 	def test_completion_posts_text_model_to_chat_endpoint(self):
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model=voice._DEFAULT_STT_MODEL):
+		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model=voice._STT_MODEL):
 			with patch("jarvis.chat.voice.requests.post", return_value=_ok_completion("ok")) as mock_post:
 				out = voice.openrouter_complete([{"role": "user", "content": "hi"}])
 		self.assertEqual(out, "ok")
@@ -368,7 +368,7 @@ class TestTranscribeAudio(FrappeTestCase):
 
 		self.assertTrue(out["ok"])
 		self.assertEqual(out["text"], "hello world")
-		self.assertEqual(out["model"], "test/model-x")
+		self.assertEqual(out["model"], voice._STT_MODEL)
 		self.assertIsInstance(out["stt_ms"], int)
 
 		self.assertEqual(mock_post.call_args.args[0], voice._OPENROUTER_URL)
@@ -377,7 +377,7 @@ class TestTranscribeAudio(FrappeTestCase):
 		self.assertEqual(kwargs["headers"]["Content-Type"], "application/json")
 		self.assertEqual(kwargs["timeout"], (voice._CONNECT_TIMEOUT_S, voice._TRANSCRIBE_READ_TIMEOUT_S))
 		payload = kwargs["json"]
-		self.assertEqual(payload["model"], "test/model-x")
+		self.assertEqual(payload["model"], voice._STT_MODEL)
 		self.assertEqual(payload["temperature"], 0)
 		parts = payload["messages"][1]["content"]
 		self.assertEqual(parts[1]["type"], "input_audio")
@@ -415,7 +415,7 @@ class TestTranscribeAudio(FrappeTestCase):
 			part = mock_post.call_args.kwargs["json"]["messages"][1]["content"][1]
 			self.assertEqual(part["input_audio"]["format"], expected)
 
-	def test_admin_key_and_model_used_on_the_managed_path(self):
+	def test_admin_key_is_used_but_admin_model_is_ignored_on_the_managed_path(self):
 		with _conf(jarvis_stt_openrouter_api_key=""):
 			with patch(
 				"jarvis.admin_client.get_stt_config",
@@ -424,18 +424,18 @@ class TestTranscribeAudio(FrappeTestCase):
 				with _audio_request():
 					with patch("jarvis.chat.voice.requests.post", return_value=_ok_response()) as mock_post:
 						out = voice.transcribe_audio()
-		self.assertEqual(out["model"], "admin/model")
-		self.assertEqual(mock_post.call_args.kwargs["json"]["model"], "admin/model")
+		self.assertEqual(out["model"], voice._STT_MODEL)
+		self.assertEqual(mock_post.call_args.kwargs["json"]["model"], voice._STT_MODEL)
 		self.assertEqual(mock_post.call_args.kwargs["headers"]["Authorization"], "Bearer admin-key")
 
-	def test_default_model_is_audio_capable_gemini_flash(self):
+	def test_fixed_model_is_audio_capable_gemini_flash(self):
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model=""):
 			with _audio_request():
 				with patch("jarvis.chat.voice.requests.post", return_value=_ok_response()) as mock_post:
 					out = voice.transcribe_audio()
-		self.assertEqual(voice._DEFAULT_STT_MODEL, "google/gemini-2.5-flash")
-		self.assertEqual(out["model"], voice._DEFAULT_STT_MODEL)
-		self.assertEqual(mock_post.call_args.kwargs["json"]["model"], voice._DEFAULT_STT_MODEL)
+		self.assertEqual(voice._STT_MODEL, "google/gemini-2.5-flash")
+		self.assertEqual(out["model"], voice._STT_MODEL)
+		self.assertEqual(mock_post.call_args.kwargs["json"]["model"], voice._STT_MODEL)
 
 	def test_no_speech_response_returns_empty_text_not_an_invention(self):
 		for response in ("", voice._NO_SPEECH, f"`{voice._NO_SPEECH}`", f'"{voice._NO_SPEECH}."'):
