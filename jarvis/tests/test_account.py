@@ -2,6 +2,7 @@
 /jarvis/billing SPA page. admin_client is mocked - these are unit tests of
 the customer-side glue, not of the admin endpoints themselves."""
 
+import datetime
 from unittest.mock import patch
 
 import frappe
@@ -577,11 +578,19 @@ class TestAdminChatGate(FrappeTestCase):
 		raw = account._settings_raw(account._GATE_STATE_FIELDS)
 		self.assertIsNone(raw.get("chat_was_ready_at"))
 		self.assertFalse(account._has_been_chat_ready(raw))
-		self.assertTrue(
-			frappe.db.get_value("Jarvis Settings", "Jarvis Settings", ["chat_was_ready_at"], as_dict=True)[
-				"chat_was_ready_at"
-			],
-			"if this ever reads falsy the cast changed and the raw read can be simplified",
+		# The framed-read cast differs by major: Frappe 16's get_value casts an
+		# empty Datetime single to datetime(1, 1, 1) (a TRUTHY sentinel), while
+		# Frappe 15's specific-fields Single read path applies no cast and returns
+		# None. Pin the intent that matters - an unset marker never reads as a
+		# real, meaningful timestamp - by accepting either representation.
+		framed_read = frappe.db.get_value(
+			"Jarvis Settings", "Jarvis Settings", ["chat_was_ready_at"], as_dict=True
+		)["chat_was_ready_at"]
+		self.assertIn(
+			framed_read,
+			(None, datetime.datetime(1, 1, 1)),
+			"an empty Datetime single must read as None (no cast) or the datetime(1,1,1) "
+			"cast sentinel, never a real timestamp that would make the marker look set",
 		)
 
 	def test_an_established_workspace_needs_its_admin_credentials_too(self):

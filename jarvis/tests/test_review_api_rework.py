@@ -476,7 +476,12 @@ class TestFollowup(unittest.TestCase):
 
 	def test_followup_refused_for_plain(self):
 		p = _mk_pattern("fu4")
-		with _as(PLAIN):
+		# enforced_role_guards(): Frappe 15's only_for() early-returns under
+		# frappe.flags.in_test (a bypass v16 dropped), so without this the role
+		# guard no-ops and the call falls through to a ValidationError instead of
+		# the PermissionError under test. The three sibling PLAIN tests already
+		# wrap this way; this one was the miss.
+		with _as(PLAIN), enforced_role_guards():
 			with self.assertRaises(frappe.PermissionError):
 				learned_api.trigger_followup_question(p, "x")
 

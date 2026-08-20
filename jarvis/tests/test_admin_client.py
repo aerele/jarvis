@@ -12,7 +12,7 @@ import frappe
 import requests
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis import admin_client
+from jarvis import admin_client, compat
 from jarvis.admin_client import (
 	DEFAULT_ADMIN_URL,
 	DEFAULT_TIMEOUT_S,
@@ -2090,9 +2090,13 @@ class TestOAuthBearer(FrappeTestCase):
 		# A token with no usable lifetime must not be cached (else every call
 		# would miss and storm the token endpoint).
 		admin_client._cache_oauth_token({"access_token": "A", "expires_in": 0})
-		self.assertIsNone(frappe.cache().get_value(admin_client._OAUTH_CACHE_KEY))
+		# Read through cache_get_fresh: on Frappe 15 a bare get_value on a miss
+		# poisons frappe.local.cache[key]=None, and a later bare read returns that
+		# poison from local cache before it ever consults expires. cache_get_fresh
+		# evicts the local entry first, so we observe what is actually in redis.
+		self.assertIsNone(compat.cache_get_fresh(admin_client._OAUTH_CACHE_KEY))
 		admin_client._cache_oauth_token({"access_token": "B", "expires_in": 900})
-		self.assertEqual(frappe.cache().get_value(admin_client._OAUTH_CACHE_KEY)["access_token"], "B")
+		self.assertEqual(compat.cache_get_fresh(admin_client._OAUTH_CACHE_KEY)["access_token"], "B")
 		frappe.cache().delete_value(admin_client._OAUTH_CACHE_KEY)
 
 
