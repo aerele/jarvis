@@ -401,6 +401,8 @@ jobs:
             exit 1
           fi
 
-          # Enforced coverage floor, mirrored from the develop/v16 pipeline. Ratchet UP over
-          # time; never down.
-          coverage report --fail-under=85
+          # Enforced coverage floor. The v15 combined baseline measured 81% (lower than
+          # v16's 87% because the v15 suite does not exercise the v16-only code paths:
+          # compat.py's v16 branches, the orjson production serializer, etc.). Floor set one
+          # point under the baseline for run-to-run variance. Ratchet UP over time; never down.
+          coverage report --fail-under=80
