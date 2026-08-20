@@ -149,13 +149,19 @@ jobs:
           node-version: "18.16.0"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: Stub the bench site config the SPA build reads (no bench in CI)
-        # src/socket.js imports sites/common_site_config.json at build time (for the socketio
-        # port); a bare runner has no bench, so provide a minimal stub. Frappe Cloud builds
-        # INSIDE a real bench where this file already exists — this only reproduces that for CI.
+      - name: Stub the bench site config the SPA and PWA builds read (no bench in CI)
+        # Both frontend/src/socket.js and pwa/src/socket.js import
+        # ../../../../sites/common_site_config.json at build time (for the socketio port). A
+        # bare runner has no bench, so stub it. The SPA's Vite resolves that import relative
+        # to its root ($HOME/sites); the PWA resolves it relative to the file (two levels
+        # above the checkout). Create it at both so each build finds it. FC builds inside a
+        # real bench where this file already exists — this only reproduces that for CI.
         run: |
-          mkdir -p "$HOME/sites"
-          printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
+          stub='{"socketio_port": 9000, "developer_mode": 0}'
+          for base in "$HOME" "$(cd pwa/src && cd ../../../../ && pwd)"; do
+            mkdir -p "$base/sites"
+            printf '%s' "$stub" > "$base/sites/common_site_config.json"
+          done
       - name: Build the SPA (Vite) — the /jarvis deploy artifact
         run: npm run install-frontend && npm run build-frontend
       - name: Build the PWA (Vite) — the /jarvis-mobile deploy artifact
