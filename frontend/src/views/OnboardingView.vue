@@ -3083,14 +3083,16 @@ const resending = computed(() => pay.value.busy === "resending");
 const confirmingReturn = ref(false);
 const showConfirming = computed(() => !payBusyView.value && confirmingReturn.value);
 
-// PROOF the customer actually finished checkout on this mount: the pay page
-// appends `?pay=done` ONLY after the Razorpay flow completes (jarvis_admin_v2's
-// billing/checkout/workspace.py vocabulary), and onMounted's readCheckoutOutcome
-// reads it. Set from that "done" outcome and nothing else. It is the discriminator
-// the calm settling hold (showPaymentSettling) gates on, because S.UNKNOWN alone
-// cannot tell a webhook-still-in-flight from a checkout the customer never touched
-// (see paymentCodes.js PAYMENT_CONFIRMATION_PENDING). Without this proof we would
-// never soften the copy; with a `failed`/`pending` return we also don't. In-memory
+// PROOF the customer actually finished checkout on this mount: the pay page appends
+// `?pay=done` (payment confirmed) or `?pay=pending` (authorized, awaiting async
+// confirmation - the auto-pay mandate case) after the Razorpay flow finishes
+// (jarvis_admin_v2's billing/checkout/shell.py outcomeFor vocabulary), and onMounted's
+// readCheckoutOutcome reads it. Set true for done OR pending - both prove the flow
+// finished - and nothing else. It is the discriminator the calm settling hold
+// (showPaymentSettling) gates on, because a pending state alone cannot tell a
+// webhook-still-in-flight from a checkout the customer never touched (see paymentCodes.js
+// PAYMENT_CONFIRMATION_PENDING). Without this proof we never soften the copy; a `failed`
+// return does not soften it either. In-memory
 // for the session: a hard reload strips the param and drops to the recovery card,
 // which is honest (see PR notes), not a regression. Same for the signal-less return
 // paths (bfcache restore / tab-focus regain -> handleCheckoutReturn): they carry no
@@ -5182,11 +5184,16 @@ onMounted(async () => {
 		state.step = "pay";
 		confirmingReturn.value = true;
 	}
-	// Only a `done` return is proof the customer finished the Razorpay flow; a
-	// `failed`/`pending` return must still fall to the recovery card. Gate the calm
-	// settling hold on this, never on S.UNKNOWN alone (which also covers a checkout
-	// nobody touched). See returnedFromCompletedCheckout's declaration.
-	returnedFromCompletedCheckout.value = checkoutReturn === "done";
+	// A `done` OR `pending` return both prove the customer FINISHED the Razorpay flow;
+	// only the outcome differs - `done` = payment confirmed, `pending` = authorized and
+	// awaiting async confirmation. The admin pay page (billing/checkout/shell.py
+	// outcomeFor) returns `pending` for exactly the PAYMENT_AUTHORIZED_PENDING_CONFIRM
+	// auto-pay-mandate case this hold exists for (next_step "poll"/"contact_support"),
+	// so gating on `done` alone missed the PRIMARY path. A `failed` return, or a bare
+	// reload with no ?pay= (a checkout nobody finished), still falls to the recovery
+	// card. See returnedFromCompletedCheckout's declaration.
+	returnedFromCompletedCheckout.value =
+		checkoutReturn === "done" || checkoutReturn === "pending";
 	// Restore the namespaced local billing snapshot FIRST: restored values are
 	// user-owned (local_restore), so the Company-defaults fetch prefillAccount
 	// triggers can only fill fields the customer left blank.

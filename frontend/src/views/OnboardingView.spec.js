@@ -1474,8 +1474,12 @@ describe("post-checkout settling hold (calm wait, not the panic card)", () => {
 	// "Check payment status / Contact support / nothing has changed yet" chrome.
 	const AUTHORIZED_CALM = "there's nothing you need to do";
 	const AUTHORIZED_RECOVERY = "We are watching for it";
-	function mandatePendingAfterDoneReturn() {
-		atSearch("?pay=done");
+	// The auto-pay mandate authorization returns ?pay=PENDING, not ?pay=done - the admin
+	// pay page (billing/checkout/shell.py outcomeFor) emits `pending` for the "authorized,
+	// awaiting confirmation" (next_step poll/contact_support) case. Gating the calm hold on
+	// `done` alone silently missed this whole path; these tests pin the pending return.
+	function mandatePendingReturn() {
+		atSearch("?pay=pending");
 		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
 			ENVELOPE({
 				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
@@ -1493,7 +1497,7 @@ describe("post-checkout settling hold (calm wait, not the panic card)", () => {
 	}
 
 	it("shows the calm 'authorized' screen (not the recovery card) for a pending auto-pay mandate", async () => {
-		mandatePendingAfterDoneReturn();
+		mandatePendingReturn();
 		const wrapper = mountView();
 		await flushPromises();
 
@@ -1532,7 +1536,7 @@ describe("post-checkout settling hold (calm wait, not the panic card)", () => {
 	});
 
 	it("escalates the mandate wait to the recovery card once the auto-poll gives up", async () => {
-		mandatePendingAfterDoneReturn();
+		mandatePendingReturn();
 		vi.useFakeTimers();
 		const wrapper = mountView();
 		await flushPromises();
