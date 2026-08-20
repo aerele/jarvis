@@ -195,7 +195,14 @@ class TestMintReliableIndex(FrappeTestCase):
 		landed. Guards the pop from being dropped (without it the verify reads the
 		stale local copy and falsely passes). Simulate by making the raw redis SET
 		raise ConnectionError, which set_value suppresses."""
-		with patch.object(frappe.cache(), "set", side_effect=redis.exceptions.ConnectionError("write blip")):
+		# set_value writes a TTL key. Frappe 16 always routes that through
+		# cache.set(ex=...), but Frappe 15 calls cache.setex() for expiring writes
+		# and never touches cache.set, so patching set alone would leave the real
+		# SETEX to succeed on v15. Patch both; setex is simply never hit on v16.
+		with (
+			patch.object(frappe.cache(), "set", side_effect=redis.exceptions.ConnectionError("write blip")),
+			patch.object(frappe.cache(), "setex", side_effect=redis.exceptions.ConnectionError("write blip")),
+		):
 			with patch.object(frappe, "log_error") as mock_log:
 				token = self._mint()
 		self.assertIsNone(token, "a swallowed set_value write must be caught by the verify -> rollback")
