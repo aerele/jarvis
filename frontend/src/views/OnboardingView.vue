@@ -3144,16 +3144,35 @@ const showRecovery = computed(
 //   - the machine is on an auto-pollable pending state (isAutoPollable): the coded
 //     PAYMENT_CONFIRMATION_PENDING / PAYMENT_AUTHORIZED_PENDING_CONFIRM waits, or a return
 //     not yet resolved - the same states the auto-poll (runPendingAutoPoll) covers
-//   - the auto-poll has NOT given up (!pendingPollStuck) - once it does, we escalate to
-//     the recovery card with its honest "checked for a couple of minutes" note + support
+//   - the auto-poll has NOT given up (!pendingPollStuck)
 //   - we are not already showing the one-shot confirming spinner or a busy screen
-const showPaymentSettling = computed(
+const showPaymentSettlingCandidate = computed(
 	() =>
 		!payBusyView.value &&
 		!showConfirming.value &&
 		returnedFromCompletedCheckout.value &&
 		!pendingPollStuck.value &&
 		isAutoPollable(pay.value.value)
+);
+// HARD wall-clock ceiling on the calm hold. pendingPollStuck alone is NOT a reliable
+// escape hatch: the server rate-limits the status check (every 429 adds a cooldown the
+// poll must wait out) and browsers throttle background-tab timers, so the poll's "8
+// checks" can take FAR longer than 2 minutes - a customer sat on the calm spinner for
+// ~15 min in testing because pendingPollStuck never fired in time. This deadline flips
+// the hold to the recovery card (with its manual "Check payment status" button) after
+// ~2 min no matter what the poll is doing, so the calm hold can never trap the customer.
+// Measured from when the hold first appears; a re-entry restarts the clock. The Pay-step
+// cooldown ticker updates nowMs every 1s, so this escalates within ~1s of the ceiling.
+const SETTLING_MAX_MS = 120_000;
+const settlingStartedAt = ref(0);
+watch(showPaymentSettlingCandidate, (on) => {
+	settlingStartedAt.value = on ? Date.now() : 0;
+});
+const settlingExpired = computed(
+	() => settlingStartedAt.value > 0 && nowMs.value - settlingStartedAt.value >= SETTLING_MAX_MS
+);
+const showPaymentSettling = computed(
+	() => showPaymentSettlingCandidate.value && !settlingExpired.value
 );
 // The calm-screen copy, keyed off which pending state we are settling. The state's OWN
 // coded headline is used only where it already reads calm: PAYMENT_AUTHORIZED_PENDING_CONFIRM

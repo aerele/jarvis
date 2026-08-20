@@ -1548,4 +1548,40 @@ describe("post-checkout settling hold (calm wait, not the panic card)", () => {
 		expect(wrapper.vm.showRecovery).toBe(true);
 		expect(wrapper.text()).toContain(AUTHORIZED_RECOVERY);
 	});
+
+	// The regression that stranded a customer on the calm spinner for ~15 min: the
+	// server rate-limits the status check, so the auto-poll's 8-check ceiling
+	// (pendingPollStuck) may never fire in a reasonable time. The calm hold MUST still
+	// escalate on a hard ~2 min wall-clock so the customer always gets the manual
+	// "Check payment status" button. Here every check is rate-limited with a long
+	// cooldown, so the poll makes no progress - pendingPollStuck can NOT be the escape.
+	it("escalates on the ~2 min wall-clock even when the auto-poll is stalled by rate-limit cooldowns", async () => {
+		mandatePendingReturn();
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue({
+			status: 429,
+			body: {
+				message: {
+					ok: false,
+					error: { code: "PAYMENT_CHECK_RATE_LIMITED", retry_after_seconds: 300 },
+					context: {},
+				},
+			},
+		});
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+		expect(wrapper.vm.pendingPollStuck).toBe(false);
+
+		// Just before the ceiling: still the calm hold.
+		await vi.advanceTimersByTimeAsync(118_000);
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+
+		// Past the ceiling: escalated to the recovery card WITHOUT pendingPollStuck ever
+		// firing - the wall-clock deadline is the escape, exactly as the fix intends.
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(wrapper.vm.pendingPollStuck).toBe(false);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+		expect(wrapper.vm.showRecovery).toBe(true);
+	});
 });
