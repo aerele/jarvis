@@ -101,7 +101,7 @@ class TestExportDocumentFormats(FrappeTestCase):
 		if not _pdf_backend_ok():
 			self.skipTest("no HTML→PDF backend (wkhtmltopdf) in this environment")
 		m = self._mock()
-		out = export_document(_MD, format="pdf", title="My Report")
+		out = export_document(_MD, format="pdf")
 		fname, payload = _saved(m)
 		self.assertEqual(out["mime_type"], "application/pdf")
 		self.assertTrue(fname.endswith(".pdf"))
@@ -109,13 +109,13 @@ class TestExportDocumentFormats(FrappeTestCase):
 
 	def test_html_is_standalone_and_renders_markdown(self):
 		m = self._mock()
-		out = export_document(_MD, format="html", title="My Report")
+		out = export_document(_MD, format="html")
 		fname, payload = _saved(m)
 		text = payload.decode("utf-8")
 		self.assertEqual(out["mime_type"], "text/html")
 		self.assertTrue(fname.endswith(".html"))
 		self.assertIn("<!doctype html>", text.lower())
-		self.assertIn("<title>My Report</title>", text)
+		self.assertIn("<title>Document</title>", text)  # plain path default (no title)
 		self.assertIn("<table", text)  # markdown table rendered
 		self.assertIn("Revenue", text)
 
@@ -123,7 +123,7 @@ class TestExportDocumentFormats(FrappeTestCase):
 		if not _png_backend_ok():
 			self.skipTest("no PDF→PNG rendering stack (wkhtmltopdf / pypdfium2 / PIL)")
 		m = self._mock()
-		out = export_document(_MD, format="png", title="My Report")
+		out = export_document(_MD, format="png")
 		fname, payload = _saved(m)
 		self.assertEqual(out["mime_type"], "image/png")
 		self.assertTrue(fname.endswith(".png"))
@@ -143,7 +143,7 @@ class TestExportDocumentFormats(FrappeTestCase):
 		if not _pdf_backend_ok():
 			self.skipTest("no HTML→PDF backend (wkhtmltopdf) in this environment")
 		m = self._mock()
-		out = export_document(_MD, title="d")
+		out = export_document(_MD)
 		self.assertEqual(out["mime_type"], "application/pdf")
 		self.assertEqual(_saved(m)[1][:4], b"%PDF")
 
@@ -246,10 +246,13 @@ class _RichBase(unittest.TestCase):
 
 	def setUp(self):
 		self.render = patch(f"{_MODULE}.render_pdf", return_value=b"%PDF-1.4 fake").start()
-		# resolve_letterhead touches frappe.db/has_permission (needs a site); it is
+		# resolve_brand touches frappe.db/has_permission (needs a site); it is
 		# unit-tested directly in test_export_document_furniture. Here it is stubbed
-		# to the "no letterhead, no note" default; letterhead-specific tests override.
-		self.resolve_lh = patch(f"{_MODULE}.resolve_letterhead", return_value=("", "", None)).start()
+		# to the empty "no brand, no note" default; brand-specific tests override.
+		self.resolve_brand = patch(
+			f"{_MODULE}.resolve_brand",
+			return_value={"logo_html": "", "company": None, "address_lines": [], "note": None},
+		).start()
 		self.save_rich = patch(
 			f"{_MODULE}.save_export_file",
 			return_value={
@@ -282,7 +285,7 @@ class TestDualPathBranching(_RichBase):
 	def test_no_rich_kwargs_takes_plain_path(self):
 		# The load-bearing regression: a legacy call renders through the plain
 		# get_pdf path and NEVER touches the rich renderer.
-		export_document(_RICH_MD, format="pdf", title="Legacy")
+		export_document(_RICH_MD, format="pdf")  # content-only: title now activates rich
 		self.assertTrue(self.get_pdf.called)
 		self.assertFalse(self.render.called)
 		self.assertTrue(self.save_plain.called)
@@ -480,7 +483,7 @@ class TestRichPipeline(_RichBase):
 	def test_chart_value_with_token_no_double_substitution(self):
 		# chart 0's rendered output contains the literal text "{{chart:1}}"; chart 1
 		# must NOT be spliced into chart 0's already-rendered markup.
-		def fake_bar(rows):
+		def fake_bar(rows, **kw):
 			label = rows[0]["label"] if rows else ""
 			return f"<div>BAR::{label}</div>"
 
@@ -506,7 +509,12 @@ class TestRichPipeline(_RichBase):
 	def test_rich_render_passes_furniture_and_caps_to_render_pdf(self):
 		import jarvis.tools.export_document as ed
 
-		self.resolve_lh.return_value = ("<div>LHH</div>", "<div>LHF</div>", None)
+		self.resolve_brand.return_value = {
+			"logo_html": '<img src="data:image/png;base64,AAA">',
+			"company": "Acme",
+			"address_lines": [],
+			"note": None,
+		}
 		export_document(
 			_RICH_MD,
 			format="pdf",
@@ -521,15 +529,17 @@ class TestRichPipeline(_RichBase):
 		)
 		_, kwargs = self.render.call_args
 		self.assertEqual(kwargs["header_html"], "H")
-		self.assertEqual(kwargs["footer_html"], "F")
+		# footer is now a plain TEXT zone, not an HTML footer.
+		self.assertEqual(kwargs["footer_text"], "F")
 		self.assertEqual(kwargs["watermark"], "W")
-		# letterhead is RESOLVED (default lookup + read-perm + image inline) into
-		# safe HTML before render_pdf; the name is never forwarded raw.
-		self.assertEqual(kwargs["letterhead_header"], "<div>LHH</div>")
-		self.assertEqual(kwargs["letterhead_footer"], "<div>LHF</div>")
+		# branding rides the running HEADER (built from the resolved brand); the raw
+		# name is never forwarded, and there is no letterhead_* kwarg anymore.
+		self.assertIn("jv-brand-header", kwargs["brand_header"])
+		self.assertIn("data:image/png;base64,AAA", kwargs["brand_header"])
 		self.assertNotIn("letterhead", kwargs)
+		self.assertNotIn("footer_html", kwargs)
 		self.assertEqual(kwargs["page_size"], "Letter")
-		self.assertEqual(kwargs["orientation"], "landscape")
+		self.assertEqual(kwargs["orientation"], "Landscape")  # normalized up front
 		self.assertEqual(kwargs["margins_mm"], 20)
 		self.assertFalse(kwargs["page_numbers"])
 		# timeout is the render budget minus pre-render work already spent.
@@ -538,32 +548,97 @@ class TestRichPipeline(_RichBase):
 
 	def test_letterhead_name_resolved_verbatim(self):
 		export_document(_RICH_MD, format="pdf", letterhead="Acme")
-		self.assertEqual(self.resolve_lh.call_args.args[0], "Acme")
+		self.assertEqual(self.resolve_brand.call_args.args[0], "Acme")
 
 	def test_letterhead_bool_resolves_to_default(self):
 		# letterhead=True triggers rich but is NOT a name -> resolve with None so
-		# the site's DEFAULT Letter Head is used.
+		# the site's DEFAULT Letter Head / Company is used.
 		export_document(_RICH_MD, format="pdf", letterhead=True)
-		self.assertIsNone(self.resolve_lh.call_args.args[0])
+		self.assertIsNone(self.resolve_brand.call_args.args[0])
 
-	def test_charts_only_rich_render_still_resolves_default_letterhead(self):
-		# A branded render with no letterhead intent still gets the default one.
+	def test_charts_only_rich_render_still_resolves_default_brand(self):
+		# A branded render with no letterhead intent still resolves the default brand.
 		export_document(
 			"body {{chart:0}}",
 			format="pdf",
 			charts=[{"rows": [{"label": "A", "value": "1", "pct": 50}]}],
 		)
-		self.assertTrue(self.resolve_lh.called)
-		self.assertIsNone(self.resolve_lh.call_args.args[0])
+		self.assertTrue(self.resolve_brand.called)
+		self.assertIsNone(self.resolve_brand.call_args.args[0])
 
 	def test_letterhead_not_found_note_surfaced(self):
-		self.resolve_lh.return_value = ("", "", "letterhead 'Ghost' not found — rendered without it")
+		self.resolve_brand.return_value = {
+			"logo_html": "",
+			"company": None,
+			"address_lines": [],
+			"note": "letterhead 'Ghost' not found — rendered without it",
+		}
 		out = export_document(_RICH_MD, format="pdf", letterhead="Ghost")
 		self.assertTrue(any("Ghost" in n for n in out["notes"]), out["notes"])
 
 	def test_notes_field_present_even_when_clean(self):
 		out = export_document(_RICH_MD, format="pdf", theme=True)
 		self.assertEqual(out["notes"], [])
+
+
+class TestMastheadAndCover(_RichBase):
+	"""The tool-built masthead, the scalable cover, and numeric-column alignment."""
+
+	def _render_body(self, *, content, **kw):
+		export_document(content, format="pdf", **kw)
+		return self._rich_doc_body()
+
+	def test_title_becomes_tool_built_masthead_not_literal_markdown(self):
+		# The title is a param the tool escapes into a div — the old bug (agent
+		# wrapping markdown in <div class="cover">, so `#`/`**` rendered literally)
+		# cannot happen.
+		body = self._render_body(
+			content="<p>real body</p>", content_is_html=True, theme=True, title="# ERP <x>"
+		)
+		self.assertIn('<div class="doc-title"># ERP &lt;x&gt;</div>', body)
+		self.assertIn("doc-title-block", body)
+		self.assertIn("real body", body)
+
+	def test_subtitle_and_meta_plumb_through(self):
+		body = self._render_body(
+			content="<p>b</p>", content_is_html=True, theme=True, title="T", subtitle="Sub", meta="INR"
+		)
+		self.assertIn('<div class="doc-subtitle">Sub</div>', body)
+		self.assertIn('<div class="doc-meta">INR</div>', body)
+
+	def test_cover_true_forces_full_cover(self):
+		body = self._render_body(content="<p>b</p>", content_is_html=True, theme=True, title="T", cover=True)
+		self.assertIn('<div class="cover">', body)
+
+	def test_cover_false_forces_title_block(self):
+		body = self._render_body(content="<p>b</p>", content_is_html=True, theme=True, title="T", cover=False)
+		self.assertIn("doc-title-block", body)
+		self.assertNotIn('<div class="cover">', body)
+
+	def test_cover_auto_off_for_short_doc(self):
+		body = self._render_body(content="<p>short</p>", content_is_html=True, theme=True, title="T")
+		self.assertNotIn('<div class="cover">', body)
+
+	def test_cover_auto_on_for_long_structured_doc(self):
+		long_body = "<h2>Section</h2><p>" + ("word " * 1500) + "</p>"  # >6000 chars + a heading
+		body = self._render_body(content=long_body, content_is_html=True, theme=True, title="T")
+		self.assertIn('<div class="cover">', body)
+
+	def test_markdown_right_aligned_column_promoted_to_num(self):
+		md = "| Item | Amount |\n|:-----|-------:|\n| A | 100 |\n"
+		body = self._render_body(content=md, theme=True)
+		self.assertIn('class="num"', body)  # numeric column promoted
+		self.assertNotIn('style="text-align', body)  # the inline style was stripped by sanitize
+
+	def test_component_css_built_with_page_geometry(self):
+		with patch(f"{_MODULE}.component_css", return_value="/* css */") as cc:
+			export_document(
+				_RICH_MD, format="pdf", theme=True, page_size="Letter", orientation="landscape", margins_mm=20
+			)
+		# geometry is normalized up front (orientation canonicalized to "Landscape").
+		self.assertEqual(cc.call_args.args, ("Letter", "Landscape", 20))
+		# no brand/header/watermark in this render → header=False (cover not reserved).
+		self.assertFalse(cc.call_args.kwargs["header"])
 
 
 class TestFormatMatrix(_RichBase):
@@ -639,14 +714,15 @@ class TestPlainPathBackCompatUnit(_RichBase):
 	'plain path unchanged' contract is proven under bare pytest too."""
 
 	def _plain_html(self, content, *, content_is_html=False):
-		export_document(content, format="html", content_is_html=content_is_html, title="My Report")
+		# content-only (no title): title now activates the rich path.
+		export_document(content, format="html", content_is_html=content_is_html)
 		return self.save_plain.call_args.args[1].decode("utf-8")
 
 	def test_plain_html_is_standalone_and_renders_markdown(self):
 		text = self._plain_html(_MD)
 		self.assertFalse(self.render.called)
 		self.assertIn("<!doctype html>", text.lower())
-		self.assertIn("<title>My Report</title>", text)
+		self.assertIn("<title>Document</title>", text)  # plain path default (no title)
 		self.assertIn("<table", text)
 		self.assertIn("Revenue", text)
 
@@ -657,7 +733,7 @@ class TestPlainPathBackCompatUnit(_RichBase):
 		self.assertNotIn("<script", html_text)
 
 	def test_plain_pdf_uses_get_pdf_not_rich(self):
-		out = export_document(_MD, format="pdf", title="d")
+		out = export_document(_MD, format="pdf")  # content-only: title now activates rich
 		self.assertTrue(self.get_pdf.called)
 		self.assertFalse(self.render.called)
 		self.assertEqual(self.save_plain.call_args.args[1], b"%PDF-plain")
@@ -734,3 +810,133 @@ class TestTelemetryDirect(unittest.TestCase):
 			telemetry.record_export_event(tool="t", fmt="pdf", rows=0)
 		self.assertNotIn("rich", captured)
 		self.assertNotIn("detail", captured)
+
+
+class TestReviewFixes(_RichBase):
+	"""Locks the /review-loop fix wave for the composed rich path."""
+
+	def test_title_subtitle_meta_cover_activate_rich(self):
+		# Critical: a titled export must reach the rich masthead path (title-only on
+		# the plain path rendered NO visible title).
+		for kw in ({"title": "Q3 Report"}, {"subtitle": "sub"}, {"meta": "INR"}, {"cover": True}):
+			with self.subTest(kw=kw):
+				self.render.reset_mock()
+				self.get_pdf.reset_mock()
+				export_document(_RICH_MD, format="pdf", **kw)
+				self.assertTrue(self.render.called, f"{kw} did not activate the rich path")
+				self.assertFalse(self.get_pdf.called)
+
+	def test_cover_false_alone_stays_plain(self):
+		export_document(_RICH_MD, format="pdf", cover=False)  # falsy → not an activator
+		self.assertTrue(self.get_pdf.called)
+		self.assertFalse(self.render.called)
+
+	def test_chart_title_caption_forwarded_to_css_bar(self):
+		with patch(f"{_MODULE}.css_bar", return_value="<div>BAR</div>") as bar:
+			export_document(
+				"<p>{{chart:0}}</p>",
+				format="pdf",
+				content_is_html=True,
+				charts=[{"rows": [{"label": "A", "value": "1", "pct": 5}], "title": "Rev", "caption": "INR"}],
+			)
+		self.assertEqual(bar.call_args.kwargs.get("title"), "Rev")
+		self.assertEqual(bar.call_args.kwargs.get("caption"), "INR")
+
+	def test_cover_height_reserves_header_when_brand_present(self):
+		# Critical: a running header (brand) → component_css gets header=True so the
+		# cover height accounts for the reserved top margin (no page-2 overflow).
+		self.resolve_brand.return_value = {
+			"logo_html": "",
+			"company": "Acme",
+			"address_lines": [],
+			"note": None,
+		}
+		with patch(f"{_MODULE}.component_css", return_value="/* css */") as cc:
+			export_document(_RICH_MD, format="pdf", theme=True)
+		self.assertTrue(cc.call_args.kwargs["header"])
+
+	def test_brand_and_page_numbers_coexist(self):
+		# The plan's named regression: a brand header AND page numbers both render.
+		self.resolve_brand.return_value = {
+			"logo_html": "",
+			"company": "Acme",
+			"address_lines": [],
+			"note": None,
+		}
+		export_document(_RICH_MD, format="pdf", theme=True)  # page_numbers default True
+		kwargs = self.render.call_args.kwargs
+		self.assertIn("jv-brand-header", kwargs["brand_header"])
+		self.assertTrue(kwargs["page_numbers"])
+
+	def test_masthead_length_guard(self):
+		with self.assertRaises(InvalidArgumentError):
+			export_document("<p>body</p>", content_is_html=True, theme=True, title="x" * 3000)
+		self.assertFalse(self.render.called)
+
+	def test_html_path_validates_geometry_like_pdf(self):
+		# The HTML path now rejects a bad page_size the same as the PDF path.
+		with self.assertRaises(InvalidArgumentError):
+			export_document("<p>b</p>", format="html", content_is_html=True, theme=True, page_size="A2")
+
+
+class TestDecideCover(unittest.TestCase):
+	"""_decide_cover's AND semantics + page-break token detection (pure)."""
+
+	def _long(self):
+		return "<p>" + ("word " * 1500) + "</p>"  # >6000 visible chars
+
+	def test_and_semantics(self):
+		import jarvis.tools.export_document as ed
+
+		self.assertFalse(ed._decide_cover(None, self._long()))  # long, UNstructured → no
+		self.assertFalse(ed._decide_cover(None, "<h2>s</h2><p>short</p>"))  # structured, SHORT → no
+		self.assertTrue(ed._decide_cover(None, "<h2>s</h2>" + self._long()))  # both → yes
+
+	def test_page_break_token_multi_class(self):
+		import jarvis.tools.export_document as ed
+
+		# page-break combined with another class still counts as structure.
+		body = '<div class="section-divider page-break"></div>' + self._long()
+		self.assertTrue(ed._decide_cover(None, body))
+
+	def test_explicit_override(self):
+		import jarvis.tools.export_document as ed
+
+		self.assertTrue(ed._decide_cover(True, ""))
+		self.assertFalse(ed._decide_cover(False, "<h1>x</h1>" + ("y" * 7000)))
+
+
+class TestPromoteTableAlignment(unittest.TestCase):
+	"""_promote_table_alignment right→num, center→text-center, merge/negative (pure)."""
+
+	def test_right_to_num(self):
+		import jarvis.tools.export_document as ed
+
+		self.assertIn('class="num"', ed._promote_table_alignment('<td style="text-align:right;">9</td>'))
+
+	def test_center_to_text_center(self):
+		import jarvis.tools.export_document as ed
+
+		self.assertIn(
+			'class="text-center"', ed._promote_table_alignment('<th style="text-align:center;">H</th>')
+		)
+
+	def test_left_and_no_style_untouched(self):
+		import jarvis.tools.export_document as ed
+
+		out = ed._promote_table_alignment('<td style="text-align:left;">L</td><td>plain</td>')
+		self.assertNotIn("num", out)
+		self.assertNotIn("text-center", out)
+
+	def test_existing_class_merged_not_duplicated(self):
+		import jarvis.tools.export_document as ed
+
+		out = ed._promote_table_alignment('<td class="foo" style="text-align:right;">9</td>')
+		self.assertIn('class="foo num"', out)
+		self.assertEqual(out.count("class="), 1)
+
+	def test_multi_property_style_still_matches(self):
+		import jarvis.tools.export_document as ed
+
+		out = ed._promote_table_alignment('<td style="color:red;text-align:right;">9</td>')
+		self.assertIn('class="num"', out)
