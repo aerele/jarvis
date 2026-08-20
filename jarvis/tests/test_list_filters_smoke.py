@@ -119,9 +119,11 @@ def _whitelisted(module) -> list:
 	for name, fn in vars(module).items():
 		if name.startswith("_") or name in _ALWAYS_SKIP:
 			continue
-		# Frappe records whitelisted functions in a global SET (frappe.whitelisted),
-		# not as an attribute on the function — and it registers the innermost
-		# function, so a decorated endpoint is matched through __wrapped__.
+		# Frappe records whitelisted functions in a global collection
+		# (frappe.whitelisted), not as an attribute on the function, and it
+		# registers the innermost function, so a decorated endpoint is matched
+		# through __wrapped__. That collection is a set on Frappe 16 but a plain
+		# list on Frappe 15, so coerce to a set before intersecting.
 		if not callable(fn):
 			continue
 		candidates = {fn}
@@ -129,7 +131,7 @@ def _whitelisted(module) -> list:
 		while inner is not None:
 			candidates.add(inner)
 			inner = getattr(inner, "__wrapped__", None)
-		if not (candidates & frappe.whitelisted):
+		if not (candidates & set(frappe.whitelisted)):
 			continue
 		if getattr(fn, "__module__", "") != module.__name__:
 			continue  # imported into this module, tested where it lives

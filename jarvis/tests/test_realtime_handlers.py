@@ -27,13 +27,25 @@ from jarvis.realtime import handlers
 
 class _FakeConf:
 	"""Minimal stand-in for frappe.conf in tests. The handler only reads
-	via ``frappe.conf.get(key)``, so we just need a .get implementation."""
+	via ``frappe.conf.get(key)``, so we override that with our mapping.
+
+	On Frappe 15 the dispatch path also reaches low-level framework code that
+	reads real *attributes* off ``frappe.conf`` (``_log_query`` -> ``conf.allow_tests``,
+	``RedisWrapper.make_key`` -> ``conf.db_name``); Frappe 16 doesn't touch those
+	here. Any attribute we don't override delegates to the real conf, captured
+	before ``patch.object`` swaps us in, so those reads still return the true
+	values (never None -- ``db_name`` re-keys the whole cache namespace)."""
 
 	def __init__(self, mapping):
 		self._d = dict(mapping)
+		self._real = frappe.conf
 
 	def get(self, key, default=None):
 		return self._d.get(key, default)
+
+	def __getattr__(self, name):
+		# Only called for attributes not found normally (_d, _real, get).
+		return getattr(self._real, name)
 
 
 class TestMaybeStartChatSubscriber(FrappeTestCase):
