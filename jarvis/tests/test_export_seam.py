@@ -94,10 +94,21 @@ class TestFormulaEscape(FrappeTestCase):
 		for bad in ("=1+1", "+1", "-1", "@x", "\t=cmd", "\r=cmd"):
 			self.assertTrue(escape_formula(bad).startswith("'"), bad)
 
+	def test_whitespace_before_a_trigger_is_still_neutralized(self):
+		# A trigger char hidden behind leading whitespace must still be escaped:
+		# an importer that trims leading whitespace would otherwise evaluate it as
+		# a live formula. Includes the HTML-unwrap shape ("  =HYPERLINK(...)  ")
+		# that surfaced this gap on Frappe 15.
+		for bad in ('  =HYPERLINK("http://evil","x")  ', " +1", "\t -cmd", "   @SUM(1,1)"):
+			self.assertTrue(escape_formula(bad).startswith("'"), bad)
+
 	def test_safe_values_untouched(self):
 		self.assertEqual(escape_formula("Acme Ltd"), "Acme Ltd")
 		self.assertEqual(escape_formula("123"), "123")
 		self.assertEqual(escape_formula(""), "")
+		# Leading whitespace alone (no trigger char once stripped) is not escaped.
+		self.assertEqual(escape_formula("  hello"), "  hello")
+		self.assertEqual(escape_formula("   "), "   ")
 
 	def test_non_strings_pass_through(self):
 		self.assertEqual(escape_formula(42), 42)
