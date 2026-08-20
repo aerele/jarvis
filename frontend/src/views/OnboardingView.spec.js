@@ -1472,7 +1472,7 @@ describe("post-checkout settling hold (calm wait, not the panic card)", () => {
 	// e-NACH mandate. The calm hold + auto-poll must cover this state too, not just the
 	// webhook-lag one - otherwise a customer who just authorized sees the recovery card's
 	// "Check payment status / Contact support / nothing has changed yet" chrome.
-	const AUTHORIZED_CALM = "there's nothing you need to do";
+	const AUTHORIZED_CALM = "we've got it from here";
 	const AUTHORIZED_RECOVERY = "We are watching for it";
 	// The auto-pay mandate authorization returns ?pay=PENDING, not ?pay=done - the admin
 	// pay page (billing/checkout/shell.py outcomeFor) emits `pending` for the "authorized,

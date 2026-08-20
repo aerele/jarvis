@@ -953,8 +953,8 @@
 									<p
 										class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
 									>
-										No need to do anything. Please don't close this page or pay
-										again.
+										Nothing to do here. Please keep this page open and don't
+										pay again.
 									</p>
 								</div>
 							</template>
@@ -3183,10 +3183,11 @@ const showPaymentSettling = computed(
 const settlingCopy = computed(() =>
 	pay.value.value === S.CONFIRM_REQUIRED
 		? {
-				headline: "Your payment is authorized",
+				headline: "You're almost set up",
 				body:
-					"Your bank is confirming the auto-pay mandate, which usually takes a few " +
-					"minutes. We're checking automatically, so there's nothing you need to do.",
+					"Your payment is authorized. We're waiting for a final confirmation from " +
+					"your bank, which usually takes just a few minutes. Sit tight, we've got " +
+					"it from here.",
 		  }
 		: {
 				headline: "Confirming your payment",
