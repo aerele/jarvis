@@ -3190,10 +3190,10 @@ const settlingCopy = computed(() =>
 					"it from here.",
 		  }
 		: {
-				headline: "Confirming your payment",
+				headline: "You're almost set up",
 				body:
-					"You've completed checkout. We're waiting for your payment provider to confirm " +
-					"it, which can take up to a minute, and we're checking automatically.",
+					"You've completed checkout. We're just waiting for your payment provider to " +
+					"confirm it, which usually takes a minute. Sit tight, we've got it from here.",
 		  }
 );
 // role=alert only for an actionable failure; role=status for pending/info
