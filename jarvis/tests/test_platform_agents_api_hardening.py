@@ -456,7 +456,26 @@ class TestUninstallCascadeScope(FrappeTestCase):
 		frappe.db.commit()
 		self._uninstall_a()
 		self.assertTrue(frappe.db.exists(FINDING, self.f_b))
-		self.assertEqual(frappe.db.get_value(FINDING, self.f_b, "last_seen_run"), self.run_b)
+		# DIAGNOSTIC PROBE (v15 #5, DO NOT MERGE): read the true DB row and the
+		# get_all view of f_b post-uninstall, and fold them into the assert message
+		# so the CI failure shows whether first_seen_run survived in the DB (the
+		# detach misread it) or was nulled.
+		_probe_sql = frappe.db.sql(
+			"SELECT name, run, first_seen_run, last_seen_run FROM `tabJarvis Agent Finding` WHERE name=%s",
+			self.f_b,
+			as_dict=True,
+		)
+		_probe_getall = frappe.get_all(
+			FINDING,
+			filters={"name": self.f_b},
+			fields=["name", "run", "first_seen_run", "last_seen_run"],
+			ignore_permissions=True,
+		)
+		self.assertEqual(
+			frappe.db.get_value(FINDING, self.f_b, "last_seen_run"),
+			self.run_b,
+			f"PROBE run_b={self.run_b!r} run_a={self.run_a!r} db_row={_probe_sql!r} getall={_probe_getall!r}",
+		)
 
 	def test_either_creation_stamp_alone_establishes_membership(self):
 		"""``run`` and ``first_seen_run`` are written to the same value today, but the
