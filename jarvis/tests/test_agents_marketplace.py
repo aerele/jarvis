@@ -213,6 +213,49 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(conv_owner, self.owner)
 		self.assertNotEqual(conv_owner, "Administrator")
 
+	def test_run_now_on_unapplied_agent_gives_apply_hint(self):
+		# An agent ENABLED on the bench but not yet pushed to the container produces
+		# the fleet-agent's "not an installed delegate on <container>" 502 (enabling
+		# only flags the catalog dirty; the skill reaches the container on APPLY).
+		# run_agent_now must translate that into an actionable "Apply catalog changes"
+		# message — never a raw 500 — and leave the Run FAILED, not stuck "running".
+		inst_name = _install_as(self.owner, "close-auditor")
+		frappe.db.set_value(INSTALLATION, inst_name, "enabled", 1)
+		agent = frappe.db.get_value(INSTALLATION, inst_name, "agent")
+		frappe.db.commit()
+
+		import jarvis.admin_client as admin_client
+		from jarvis.exceptions import AdminUnreachableError
+
+		orig_run = admin_client.post_agent_run
+
+		def _not_installed(**kw):
+			raise AdminUnreachableError(
+				"admin returned a 502 error: invalid_spec: agent_id "
+				f"'{kw.get('agent_id')}' is not an installed delegate on jarvis-pool-test"
+			)
+
+		admin_client.post_agent_run = _not_installed
+		try:
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				agents_api.run_agent_now(inst_name)
+		finally:
+			admin_client.post_agent_run = orig_run
+
+		self.assertIn("Apply catalog changes", str(ctx.exception))
+		# The run must be terminal FAILED (never left stuck "running") and carry the
+		# same actionable message, not a raw fleet 502.
+		run = frappe.get_all(
+			RUN,
+			filters={"agent": agent, "owner": self.owner},
+			fields=["status", "error"],
+			order_by="creation desc",
+			limit=1,
+		)
+		self.assertTrue(run)
+		self.assertEqual(run[0].status, "failed")
+		self.assertIn("Apply catalog changes", run[0].error or "")
+
 	# ------------------------------------------------------------------ #
 	# (a2) Phase 2C — delegate dispatch routes through admin, not chat
 	# ------------------------------------------------------------------ #
