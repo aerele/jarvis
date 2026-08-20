@@ -144,7 +144,7 @@ export async function uploadFile(file) {
 	return { file_url: f.file_url, file_name: f.file_name || file.name };
 }
 
-// Dictation goes through the SPA's module unchanged: same endpoint, same 25s
-// client cap, same error unwrapping. The mic is a place where two subtly
+// Dictation goes through the SPA's module unchanged: same endpoint, same
+// 150-second client budget, same error unwrapping. The mic is a place where two subtly
 // different clients would be two subtly different bugs.
 export { transcribeAudio } from "@shared/api/voice.js";
