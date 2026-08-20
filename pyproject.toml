@@ -41,9 +41,9 @@ name = "jarvis"
 # supports. erpnext/hrms are deliberately absent - jarvis runs on frappe-only
 # benches (app-gated skills/tools handle the rest).
 #
-# This is the version-15 branch: v15 only. A v16 bench installs from main, which
-# carries the v16 gate; disjoint ranges are what let bench and Frappe Cloud steer
-# each site to the right branch.
+# This is the version-15 branch: v15 only. A v16 bench installs from version-16,
+# which carries the v16 gate; disjoint ranges are what let bench and Frappe Cloud
+# steer each site to the right branch.
 [tool.bench.frappe-dependencies]
 frappe = ">=15.0.0,<16.0.0"
 
