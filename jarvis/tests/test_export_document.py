@@ -246,10 +246,13 @@ class _RichBase(unittest.TestCase):
 
 	def setUp(self):
 		self.render = patch(f"{_MODULE}.render_pdf", return_value=b"%PDF-1.4 fake").start()
-		# resolve_letterhead touches frappe.db/has_permission (needs a site); it is
+		# resolve_brand touches frappe.db/has_permission (needs a site); it is
 		# unit-tested directly in test_export_document_furniture. Here it is stubbed
-		# to the "no letterhead, no note" default; letterhead-specific tests override.
-		self.resolve_lh = patch(f"{_MODULE}.resolve_letterhead", return_value=("", "", None)).start()
+		# to the empty "no brand, no note" default; brand-specific tests override.
+		self.resolve_brand = patch(
+			f"{_MODULE}.resolve_brand",
+			return_value={"logo_html": "", "company": None, "address_lines": [], "note": None},
+		).start()
 		self.save_rich = patch(
 			f"{_MODULE}.save_export_file",
 			return_value={
@@ -506,7 +509,12 @@ class TestRichPipeline(_RichBase):
 	def test_rich_render_passes_furniture_and_caps_to_render_pdf(self):
 		import jarvis.tools.export_document as ed
 
-		self.resolve_lh.return_value = ("<div>LHH</div>", "<div>LHF</div>", None)
+		self.resolve_brand.return_value = {
+			"logo_html": '<img src="data:image/png;base64,AAA">',
+			"company": "Acme",
+			"address_lines": [],
+			"note": None,
+		}
 		export_document(
 			_RICH_MD,
 			format="pdf",
@@ -521,13 +529,15 @@ class TestRichPipeline(_RichBase):
 		)
 		_, kwargs = self.render.call_args
 		self.assertEqual(kwargs["header_html"], "H")
-		self.assertEqual(kwargs["footer_html"], "F")
+		# footer is now a plain TEXT zone, not an HTML footer.
+		self.assertEqual(kwargs["footer_text"], "F")
 		self.assertEqual(kwargs["watermark"], "W")
-		# letterhead is RESOLVED (default lookup + read-perm + image inline) into
-		# safe HTML before render_pdf; the name is never forwarded raw.
-		self.assertEqual(kwargs["letterhead_header"], "<div>LHH</div>")
-		self.assertEqual(kwargs["letterhead_footer"], "<div>LHF</div>")
+		# branding rides the running HEADER (built from the resolved brand); the raw
+		# name is never forwarded, and there is no letterhead_* kwarg anymore.
+		self.assertIn("jv-brand-header", kwargs["brand_header"])
+		self.assertIn("data:image/png;base64,AAA", kwargs["brand_header"])
 		self.assertNotIn("letterhead", kwargs)
+		self.assertNotIn("footer_html", kwargs)
 		self.assertEqual(kwargs["page_size"], "Letter")
 		self.assertEqual(kwargs["orientation"], "landscape")
 		self.assertEqual(kwargs["margins_mm"], 20)
@@ -538,32 +548,94 @@ class TestRichPipeline(_RichBase):
 
 	def test_letterhead_name_resolved_verbatim(self):
 		export_document(_RICH_MD, format="pdf", letterhead="Acme")
-		self.assertEqual(self.resolve_lh.call_args.args[0], "Acme")
+		self.assertEqual(self.resolve_brand.call_args.args[0], "Acme")
 
 	def test_letterhead_bool_resolves_to_default(self):
 		# letterhead=True triggers rich but is NOT a name -> resolve with None so
-		# the site's DEFAULT Letter Head is used.
+		# the site's DEFAULT Letter Head / Company is used.
 		export_document(_RICH_MD, format="pdf", letterhead=True)
-		self.assertIsNone(self.resolve_lh.call_args.args[0])
+		self.assertIsNone(self.resolve_brand.call_args.args[0])
 
-	def test_charts_only_rich_render_still_resolves_default_letterhead(self):
-		# A branded render with no letterhead intent still gets the default one.
+	def test_charts_only_rich_render_still_resolves_default_brand(self):
+		# A branded render with no letterhead intent still resolves the default brand.
 		export_document(
 			"body {{chart:0}}",
 			format="pdf",
 			charts=[{"rows": [{"label": "A", "value": "1", "pct": 50}]}],
 		)
-		self.assertTrue(self.resolve_lh.called)
-		self.assertIsNone(self.resolve_lh.call_args.args[0])
+		self.assertTrue(self.resolve_brand.called)
+		self.assertIsNone(self.resolve_brand.call_args.args[0])
 
 	def test_letterhead_not_found_note_surfaced(self):
-		self.resolve_lh.return_value = ("", "", "letterhead 'Ghost' not found — rendered without it")
+		self.resolve_brand.return_value = {
+			"logo_html": "",
+			"company": None,
+			"address_lines": [],
+			"note": "letterhead 'Ghost' not found — rendered without it",
+		}
 		out = export_document(_RICH_MD, format="pdf", letterhead="Ghost")
 		self.assertTrue(any("Ghost" in n for n in out["notes"]), out["notes"])
 
 	def test_notes_field_present_even_when_clean(self):
 		out = export_document(_RICH_MD, format="pdf", theme=True)
 		self.assertEqual(out["notes"], [])
+
+
+class TestMastheadAndCover(_RichBase):
+	"""The tool-built masthead, the scalable cover, and numeric-column alignment."""
+
+	def _render_body(self, *, content, **kw):
+		export_document(content, format="pdf", **kw)
+		return self._rich_doc_body()
+
+	def test_title_becomes_tool_built_masthead_not_literal_markdown(self):
+		# The title is a param the tool escapes into a div — the old bug (agent
+		# wrapping markdown in <div class="cover">, so `#`/`**` rendered literally)
+		# cannot happen.
+		body = self._render_body(
+			content="<p>real body</p>", content_is_html=True, theme=True, title="# ERP <x>"
+		)
+		self.assertIn('<div class="doc-title"># ERP &lt;x&gt;</div>', body)
+		self.assertIn("doc-title-block", body)
+		self.assertIn("real body", body)
+
+	def test_subtitle_and_meta_plumb_through(self):
+		body = self._render_body(
+			content="<p>b</p>", content_is_html=True, theme=True, title="T", subtitle="Sub", meta="INR"
+		)
+		self.assertIn('<div class="doc-subtitle">Sub</div>', body)
+		self.assertIn('<div class="doc-meta">INR</div>', body)
+
+	def test_cover_true_forces_full_cover(self):
+		body = self._render_body(content="<p>b</p>", content_is_html=True, theme=True, title="T", cover=True)
+		self.assertIn('<div class="cover">', body)
+
+	def test_cover_false_forces_title_block(self):
+		body = self._render_body(content="<p>b</p>", content_is_html=True, theme=True, title="T", cover=False)
+		self.assertIn("doc-title-block", body)
+		self.assertNotIn('<div class="cover">', body)
+
+	def test_cover_auto_off_for_short_doc(self):
+		body = self._render_body(content="<p>short</p>", content_is_html=True, theme=True, title="T")
+		self.assertNotIn('<div class="cover">', body)
+
+	def test_cover_auto_on_for_long_structured_doc(self):
+		long_body = "<h2>Section</h2><p>" + ("word " * 1500) + "</p>"  # >6000 chars + a heading
+		body = self._render_body(content=long_body, content_is_html=True, theme=True, title="T")
+		self.assertIn('<div class="cover">', body)
+
+	def test_markdown_right_aligned_column_promoted_to_num(self):
+		md = "| Item | Amount |\n|:-----|-------:|\n| A | 100 |\n"
+		body = self._render_body(content=md, theme=True)
+		self.assertIn('class="num"', body)  # numeric column promoted
+		self.assertNotIn('style="text-align', body)  # the inline style was stripped by sanitize
+
+	def test_component_css_built_with_page_geometry(self):
+		with patch(f"{_MODULE}.component_css", return_value="/* css */") as cc:
+			export_document(
+				_RICH_MD, format="pdf", theme=True, page_size="Letter", orientation="landscape", margins_mm=20
+			)
+		self.assertEqual(cc.call_args.args, ("Letter", "landscape", 20))
 
 
 class TestFormatMatrix(_RichBase):
