@@ -416,7 +416,7 @@ def personal_skill_clause(user: str | None = None) -> str:
 		return ""
 	cache = frappe.cache()
 	key = personal_skills_cache_key(user)
-	count = cache.get_value(key)
+	count = cache.get_value(key, expires=True)
 	if count is None:
 		# Exact scope match: NULL/empty scope rows are Org and never counted.
 		# "User" is the scope-ladder spelling of the old "Personal" (TASK 10).

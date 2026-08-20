@@ -157,7 +157,7 @@ def _approx_size_cached(app: str, src: str) -> tuple[int, int]:
 	last_run is fetched fresh (cheap + needs freshness)."""
 	cache = frappe.cache()
 	key = f"jarvis:app_learning:size:{app}"
-	cached = cache.get_value(key)
+	cached = cache.get_value(key, expires=True)
 	if isinstance(cached, (list, tuple)) and len(cached) == 2:
 		return int(cached[0]), int(cached[1])
 	val = _approx_size(src)
@@ -304,7 +304,7 @@ def _active_conversations() -> set[str]:
 	"""Conversation ids of non-terminal runs, cached — the turn-end hook runs
 	on EVERY turn, so the common no-run case must cost one redis read."""
 	try:
-		cached = frappe.cache().get_value(_ACTIVE_CONV_CACHE_KEY)
+		cached = frappe.cache().get_value(_ACTIVE_CONV_CACHE_KEY, expires=True)
 	except Exception:
 		cached = None
 	if isinstance(cached, list):

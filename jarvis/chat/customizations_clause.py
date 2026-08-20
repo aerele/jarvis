@@ -40,7 +40,7 @@ def customizations_clause() -> str:
 		if not clause_enabled():
 			return ""
 		cache = frappe.cache()
-		cached = cache.get_value(_CLAUSE_CACHE_KEY)
+		cached = cache.get_value(_CLAUSE_CACHE_KEY, expires=True)
 		if cached is not None:
 			return cached
 		clause = _build_clause()

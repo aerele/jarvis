@@ -297,7 +297,7 @@ def _notify_stale_pairing(*, session_key: str, tool: str, tool_call_id: str | No
 	"""
 	dedupe_key = f"jarvis:stale_pairing_notified:{session_key}"
 	try:
-		if frappe.cache().get_value(dedupe_key):
+		if frappe.cache().get_value(dedupe_key, expires=True):
 			return
 	except Exception:
 		pass  # cache unavailable - fall through and notify anyway
