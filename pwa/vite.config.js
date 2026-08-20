@@ -1,8 +1,18 @@
+import { createRequire } from "node:module";
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import frappeui from "frappe-ui/vite";
 import { VitePWA } from "vite-plugin-pwa";
 import path from "path";
+
+// vite-plugin-pwa lazy-loads workbox-build through an esbuild `require` shim that
+// throws under ESM on Node < 20 ("Dynamic require of workbox-build is not
+// supported"), which broke `bench build` on Frappe Cloud v15 benches (Node
+// 18.16.0). Provide a real CommonJS require so that lookup resolves. Build-time
+// only; the browser bundle is unaffected. Paired with the workbox-build pin in
+// package.json (7.0.0, whose tree stays on the Node-18-safe lru-cache line), this
+// lets the mobile PWA build on Node 18 without forcing customers onto Node 20.
+globalThis.require ??= createRequire(import.meta.url);
 
 // The phone surface. Builds to jarvis/public/pwa/ and drops its shell at
 // jarvis/www/jarvis_mobile.html, which Frappe serves at /jarvis-mobile (see

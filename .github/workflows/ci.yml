@@ -130,10 +130,12 @@ jobs:
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
-  # Builds the SPA (the /jarvis artifact) the way the Frappe Cloud deploy does, so a
-  # Vite/build break surfaces here instead of as a 404 on /jarvis after deploy. (The PWA
-  # build resolves the bench site config via a bench-relative path a bare runner lacks, so
-  # it is not gated here — same follow-up as on develop.)
+  # Builds BOTH deploy artifacts (the /jarvis SPA and the /jarvis-mobile PWA) on Node
+  # 18.16.0 the way the Frappe Cloud v15 deploy does, so a Vite/workbox break surfaces here
+  # instead of as a 404 (or a failed deploy) in production. The PWA reads the bench site
+  # config via a bench-relative path a bare runner lacks; the SPA step stubs that file and
+  # the PWA build reuses it. Node 18 is deliberate: FC v15 benches build on 18.16.0, so a
+  # break that only shows up there must fail here, not at deploy time.
   frontend-build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -147,15 +149,26 @@ jobs:
           node-version: "18.16.0"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: Stub the bench site config the SPA build reads (no bench in CI)
-        # src/socket.js imports sites/common_site_config.json at build time (for the socketio
-        # port); a bare runner has no bench, so provide a minimal stub. Frappe Cloud builds
-        # INSIDE a real bench where this file already exists — this only reproduces that for CI.
+      - name: Stub the bench site config the SPA and PWA builds read (no bench in CI)
+        # Both frontend/src/socket.js and pwa/src/socket.js import
+        # ../../../../sites/common_site_config.json at build time (for the socketio port). A
+        # bare runner has no bench, so stub it. The SPA's Vite resolves that import relative
+        # to its root ($HOME/sites); the PWA resolves it relative to the file (two levels
+        # above the checkout). Create it at both so each build finds it. FC builds inside a
+        # real bench where this file already exists — this only reproduces that for CI.
         run: |
-          mkdir -p "$HOME/sites"
-          printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
+          stub='{"socketio_port": 9000, "developer_mode": 0}'
+          for base in "$HOME" "$(cd pwa/src && cd ../../../../ && pwd)"; do
+            mkdir -p "$base/sites"
+            printf '%s' "$stub" > "$base/sites/common_site_config.json"
+          done
       - name: Build the SPA (Vite) — the /jarvis deploy artifact
         run: npm run install-frontend && npm run build-frontend
+      - name: Build the PWA (Vite) — the /jarvis-mobile deploy artifact
+        # Gated here on Node 18.16.0 (previously skipped) so a PWA/workbox toolchain break
+        # that only shows up on Node 18 fails in CI instead of at Frappe Cloud deploy time.
+        # The stub above satisfies pwa/src/socket.js's bench-config import, same as the SPA.
+        run: npm run install-pwa && npm run build-pwa
 
   # The v15 gate: from-scratch Frappe version-15 bench + the full jarvis suite.
   #
