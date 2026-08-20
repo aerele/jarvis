@@ -1324,3 +1324,110 @@ describe("pending-payment auto-poll", () => {
 		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
 	});
 });
+
+// The panic-page fix: a customer who COMPLETED checkout (?pay=done) and lands on
+// the coded PAYMENT_CONFIRMATION_PENDING wait (UNKNOWN) - because Razorpay's
+// confirmation webhook lags the browser redirect by seconds - must see the calm
+// "Confirming your payment / we're checking automatically" settling hold, NOT the
+// alarming "We have not confirmed this payment / Check the status before doing
+// anything else" recovery card, while the auto-poll works. The recovery card is
+// reached only once the poll gives up (pendingPollStuck). The gate is the completed
+// return, never UNKNOWN alone, so a failed/abandoned return still gets recovery.
+const SETTLING_TEXT = "You've completed checkout";
+const RECOVERY_PENDING_TEXT = "We have not confirmed this payment";
+describe("post-checkout settling hold (calm wait, not the panic card)", () => {
+	function atSearch(search) {
+		window.history.pushState(null, "", "/onboarding" + search);
+	}
+	afterEach(() => {
+		window.history.pushState(null, "", "/onboarding");
+		vi.useRealTimers();
+	});
+
+	// A completed checkout whose webhook has not landed yet: both the passive
+	// hydrate and the mount-time return-heal answer PENDING, so the machine settles
+	// on UNKNOWN with proof-of-completion in hand.
+	function pendingAfterDoneReturn() {
+		atSearch("?pay=done");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+	}
+
+	it("shows the calm settling screen (not the panic card) after a completed checkout", async () => {
+		pendingAfterDoneReturn();
+		const wrapper = mountView();
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.UNKNOWN);
+		expect(wrapper.vm.returnedFromCompletedCheckout).toBe(true);
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+		expect(wrapper.vm.showRecovery).toBe(false);
+		expect(wrapper.text()).toContain(SETTLING_TEXT);
+		expect(wrapper.text()).not.toContain(RECOVERY_PENDING_TEXT);
+	});
+
+	it("gates on the completed return: a ?pay=failed return still gets the recovery card", async () => {
+		atSearch("?pay=failed");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		const wrapper = mountView();
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.UNKNOWN);
+		expect(wrapper.vm.returnedFromCompletedCheckout).toBe(false);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+		expect(wrapper.vm.showRecovery).toBe(true);
+		expect(wrapper.text()).toContain(RECOVERY_PENDING_TEXT);
+		expect(wrapper.text()).not.toContain(SETTLING_TEXT);
+	});
+
+	it("escalates to the recovery card once the auto-poll gives up (~2 min)", async () => {
+		pendingAfterDoneReturn();
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+
+		// Run the auto-poll to its ceiling: early 4s check + 15s x 7 ≈ 2 min.
+		await vi.advanceTimersByTimeAsync(4_000 + 8 * 15_000);
+		expect(wrapper.vm.pendingPollStuck).toBe(true);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+		expect(wrapper.vm.showRecovery).toBe(true);
+	});
+
+	it("leaves the settling hold the moment the payment confirms (poll answers PAID)", async () => {
+		atSearch("?pay=done");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		// Mount-time return-heal still pending; the first auto-poll tick finds it PAID.
+		api.onboardingPaymentApi.checkSignupPaymentStatus
+			.mockResolvedValueOnce(
+				ENVELOPE({
+					code: "PAYMENT_CONFIRMATION_PENDING",
+					attempt_id: "att_s",
+					generation: 1,
+				})
+			)
+			.mockResolvedValue(
+				ENVELOPE({ code: "PAYMENT_ALREADY_ACTIVE", attempt_id: "att_s", generation: 2 })
+			);
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+
+		await vi.advanceTimersByTimeAsync(4_000); // the early first re-check
+		await flushPromises();
+		expect(wrapper.vm.pay.value).not.toBe(STATES.UNKNOWN);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+	});
+});

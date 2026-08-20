@@ -927,6 +927,37 @@
 									</div>
 								</div>
 							</template>
+							<!-- Settling: the customer COMPLETED checkout (pay=done) and the
+								 one-shot reconcile came back still-pending (S.UNKNOWN). Razorpay's
+								 confirmation webhook commonly lags the browser redirect by a few
+								 seconds, so this is the normal happy path, not a failure. Hold a
+								 calm, honest wait while the background auto-poll (runPendingAutoPoll,
+								 ~2 min) confirms, instead of dropping straight to the alarming
+								 recovery card. Escalates to showRecovery only once the poll gives up
+								 (pendingPollStuck) or a real code arrives. Says "confirming", never
+								 "confirmed" - money truth stays server-owned (see paymentCodes.js and
+								 the 84s double-mandate incident that shaped that rule). -->
+							<template v-else-if="showPaymentSettling">
+								<div class="ob-body ob-body--center">
+									<div class="ob-head">
+										<h1 role="status">Confirming your payment</h1>
+										<p>
+											You've completed checkout. We're waiting for your
+											payment provider to confirm it, which can take up to a
+											minute, and we're checking automatically.
+										</p>
+									</div>
+									<div class="mt-2.5 flex justify-center">
+										<JvSpinner :size="56" />
+									</div>
+									<p
+										class="mx-auto mt-4 max-w-[420px] text-center text-p-sm text-ink-gray-5"
+									>
+										No need to do anything. Please don't close this page or pay
+										again.
+									</p>
+								</div>
+							</template>
 							<!-- Recovery: unknown / retryable / terminal / confirm-required /
 								 reconnect. Coded copy + the two named recovery actions in
 								 status-first order. -->
@@ -3052,6 +3083,18 @@ const resending = computed(() => pay.value.busy === "resending");
 const confirmingReturn = ref(false);
 const showConfirming = computed(() => !payBusyView.value && confirmingReturn.value);
 
+// PROOF the customer actually finished checkout on this mount: the pay page
+// appends `?pay=done` ONLY after the Razorpay flow completes (jarvis_admin_v2's
+// billing/checkout/workspace.py vocabulary), and onMounted's readCheckoutOutcome
+// reads it. Set from that "done" outcome and nothing else. It is the discriminator
+// the calm settling hold (showPaymentSettling) gates on, because S.UNKNOWN alone
+// cannot tell a webhook-still-in-flight from a checkout the customer never touched
+// (see paymentCodes.js PAYMENT_CONFIRMATION_PENDING). Without this proof we would
+// never soften the copy; with a `failed`/`pending` return we also don't. In-memory
+// for the session: a hard reload strips the param and drops to the recovery card,
+// which is honest (see PR notes), not a regression.
+const returnedFromCompletedCheckout = ref(false);
+
 /** Hold the confirming screen for the duration of a post-checkout reconcile. */
 async function whileConfirmingReturn(run) {
 	confirmingReturn.value = true;
@@ -3065,11 +3108,34 @@ const showRecovery = computed(
 	() =>
 		!payBusyView.value &&
 		!showConfirming.value &&
+		// The calm settling hold owns the UNKNOWN window right after a completed
+		// checkout; recovery only takes over once that hold releases (poll gave up,
+		// or the state moved on). Everything else here is unchanged.
+		!showPaymentSettling.value &&
 		(pay.value.value === S.UNKNOWN ||
 			pay.value.value === S.FAILED_RETRYABLE ||
 			pay.value.value === S.FAILED_TERMINAL ||
 			pay.value.value === S.CONFIRM_REQUIRED ||
 			pay.value.value === S.RECONNECT)
+);
+// The calm "we're confirming, hang tight" hold shown INSTEAD of the recovery card
+// during the normal post-checkout wait. Conditions, all required:
+//   - the customer actually completed checkout this session (returnedFromCompletedCheckout)
+//   - the machine is on S.UNKNOWN - the coded PAYMENT_CONFIRMATION_PENDING wait, or a
+//     return not yet resolved; the ONLY state the auto-poll (runPendingAutoPoll) covers
+//   - the auto-poll has NOT given up (!pendingPollStuck) - once it does, we escalate to
+//     the recovery card with its honest "checked for a couple of minutes" note + support
+//   - we are not already showing the one-shot confirming spinner or a busy screen
+// Deliberately NOT extended to S.CONFIRM_REQUIRED (PAYMENT_AUTHORIZED_PENDING_CONFIRM):
+// an e-NACH mandate can pend indefinitely with no auto-poll behind it, so a calm spinner
+// there would hang forever - its own copy is already non-alarming. See PR / advisor notes.
+const showPaymentSettling = computed(
+	() =>
+		!payBusyView.value &&
+		!showConfirming.value &&
+		returnedFromCompletedCheckout.value &&
+		!pendingPollStuck.value &&
+		pay.value.value === S.UNKNOWN
 );
 // role=alert only for an actionable failure; role=status for pending/info
 // (plan 02 §a11y - a pending payment announced as an alert on every poll is a
@@ -3243,7 +3309,13 @@ async function runStatusCheck() {
 // every check and waits it out before the next attempt, instead of a fixed
 // interval that could poll straight through a 429.
 const PENDING_CHECK_INTERVAL_MS = 15_000;
-const PENDING_CHECK_ATTEMPTS = 8; // ~15s x 8 ≈ 2 minutes
+// The FIRST re-check is deliberately early: a completed checkout's confirmation
+// webhook usually lands within a few seconds, so this resolves the common case
+// while the customer is still watching the calm settling screen, before the
+// steady 15s cadence ever kicks in. The server's own rate-limit cooldown
+// (checkCooldownUntil, applied below) still protects against a 429.
+const PENDING_FIRST_CHECK_MS = 4_000;
+const PENDING_CHECK_ATTEMPTS = 8; // ~4s + 15s x 7 ≈ 2 minutes
 // Set once the ceiling is reached with no resolution - an honest "we stopped
 // auto-checking" note, never a spinner that quietly gives up. Cleared the moment
 // the state leaves UNKNOWN (resolved) or Pay is left (see restartPendingAutoPoll).
@@ -3255,7 +3327,7 @@ let pendingPollRun = 0;
 
 async function runPendingAutoPoll(myRun) {
 	for (let i = 0; i < PENDING_CHECK_ATTEMPTS; i++) {
-		await _sleep(PENDING_CHECK_INTERVAL_MS);
+		await _sleep(i === 0 ? PENDING_FIRST_CHECK_MS : PENDING_CHECK_INTERVAL_MS);
 		if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
 		await flow.checkStatus();
 		if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
@@ -5041,6 +5113,11 @@ onMounted(async () => {
 		state.step = "pay";
 		confirmingReturn.value = true;
 	}
+	// Only a `done` return is proof the customer finished the Razorpay flow; a
+	// `failed`/`pending` return must still fall to the recovery card. Gate the calm
+	// settling hold on this, never on S.UNKNOWN alone (which also covers a checkout
+	// nobody touched). See returnedFromCompletedCheckout's declaration.
+	returnedFromCompletedCheckout.value = checkoutReturn === "done";
 	// Restore the namespaced local billing snapshot FIRST: restored values are
 	// user-owned (local_restore), so the Company-defaults fetch prefillAccount
 	// triggers can only fill fields the customer left blank.
