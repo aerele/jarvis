@@ -339,7 +339,7 @@ def warm_prefix() -> bool:
 			# sweep still collects it) instead of losing the pointer to the one we
 			# just created, which would leak one every warm, forever.
 			last_key = _warm_last_key()
-			prev = cache.get_value(last_key)
+			prev = cache.get_value(last_key, expires=True)
 			# Remember WHEN as well as WHICH: the next warm needs the fire time to
 			# tell "this predecessor's run finished" from "this predecessor's run
 			# has not started yet", which sessions.list reports identically (issue

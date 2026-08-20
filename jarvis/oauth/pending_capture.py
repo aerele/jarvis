@@ -50,9 +50,10 @@ _HTTP_TIMEOUT = 10
 # resolve to ``unsupported``: the short-lived token is left to expire and the
 # ciphertext is erased on sweep. Extend this map when a provider's endpoint is
 # confirmed.
-_REVOKE_ENDPOINTS = {
-	"google-gemini-cli": "https://oauth2.googleapis.com/revoke",
-}
+# Gemini's google-gemini-cli endpoint was the only entry; it was removed with the
+# Gemini chat subscription (2026-08-19). openai/xai/kimi publish none, so every
+# capture now resolves to ``unsupported`` and the ciphertext is erased on sweep.
+_REVOKE_ENDPOINTS: dict[str, str] = {}
 
 
 class CaptureError(frappe.ValidationError):

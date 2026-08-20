@@ -37,7 +37,7 @@ def _support_state() -> str:
 	A CP too old to send ``reason`` degrades safely: unavailable-without-a-reason is
 	treated as ``off`` (hide), which is exactly today's behaviour."""
 	cache = frappe.cache()
-	cached = cache.get_value(_SUPPORT_AVAILABLE_CACHE_KEY)
+	cached = cache.get_value(_SUPPORT_AVAILABLE_CACHE_KEY, expires=True)
 	if cached:
 		return cached
 	try:

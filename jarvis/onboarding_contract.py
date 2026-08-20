@@ -430,7 +430,7 @@ def _note_missing_field() -> None:
 	seconds; an un-throttled log here would bury the Error Log it is trying to
 	warn through."""
 	cache = frappe.cache()
-	if cache.get_value(_MISSING_FIELD_LOG_KEY):
+	if cache.get_value(_MISSING_FIELD_LOG_KEY, expires=True):
 		return
 	cache.set_value(_MISSING_FIELD_LOG_KEY, 1, expires_in_sec=3600)
 	frappe.log_error(

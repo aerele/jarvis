@@ -123,34 +123,29 @@ class TestBundledCatalogMirrorsAdminSeed(FrappeTestCase):
 		self.assertEqual(by_id["moonshot"]["subscription_label"], "Kimi (Moonshot)")
 		self.assertEqual(by_id["google"]["catalog_id"], "gemini")
 
-	def test_bundle_preserves_the_full_subscription_lists(self):
-		# test_subscription_models.py asserts every active gemini model coerces.
-		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
-		g = next(p for p in BUNDLED_MODEL_CATALOG if p["provider_id"] == "google")
-		subs = [m["model_id"] for m in g["models"] if m["tier"] == "subscription"]
-		self.assertEqual(subs, ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-flash-lite"])
-
-	def test_the_two_gemini_tiers_differ_on_purpose(self):
-		# The tiers still differ on purpose, but NOT the way this test used to
-		# assert. It required "gemini-3.1-flash" on the api_key tier, on the
-		# reasoning that the pinned cliproxy image lacks it while "Google's own
-		# API does serve it". Measured 2026-07-28 against a live Google AI Studio
-		# key, Google does not: the id 404s ("not found for API version v1beta")
-		# and is absent from the 41 generateContent models the API lists. It was
-		# unservable on BOTH tiers, so it belongs on neither.
+	def test_the_gemini_subscription_tier_is_gone(self):
+		# Google's chat subscription was removed 2026-08-19 (Google discontinued
+		# consumer login-with-Google for Gemini 2026-06-18): every gemini model
+		# now lives on the api_key tier only, the subscription tier is empty,
+		# and supports_subscription/renderer_id/auth_profile_id all reflect
+		# there being no OAuth flow left to render.
 		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
 
 		g = next(p for p in BUNDLED_MODEL_CATALOG if p["provider_id"] == "google")
 		api = [m["model_id"] for m in g["models"] if m["tier"] == "api_key"]
 		subs = [m["model_id"] for m in g["models"] if m["tier"] == "subscription"]
+		self.assertEqual(subs, [])
+		self.assertFalse(g["supports_subscription"])
+		self.assertEqual(g["renderer_id"], "")
+		self.assertEqual(g["auth_profile_id"], "")
+		# "gemini-3.1-flash" 404s against a live key (measured 2026-07-28,
+		# "not found for API version v1beta") and stays absent; only the
+		# "-lite" variant is real, and it is now api_key-tier like every model.
 		self.assertNotIn("gemini-3.1-flash", api)
-		self.assertNotIn("gemini-3.1-flash", subs)
-		self.assertIn("gemini-3.1-flash-lite", subs)
-		# The tiers are still not interchangeable: the api_key tier carries the
-		# current flash id, which the pinned image cannot serve.
+		self.assertIn("gemini-3.1-flash-lite", api)
+		self.assertIn("gemini-2.5-pro", api)
+		self.assertIn("gemini-2.5-flash", api)
 		self.assertIn("gemini-3.6-flash", api)
-		self.assertNotIn("gemini-3.6-flash", subs)
 
 	def test_the_gemini_api_key_default_is_servable_on_a_free_key(self):
 		# A new customer's first Gemini key is usually a free-tier one, and Google
@@ -369,16 +364,18 @@ class TestChatUiSettingsServesApiKeyModels(FrappeTestCase):
 		# so an unwrapped Mapping silently serialises to its KEYS: the response
 		# would carry ["OpenAI", ...] instead of {"OpenAI": [...], ...} with no
 		# error raised. chat/api.py must wrap these in dict().
-		import orjson
+		import json
+
 		from frappe.utils.response import json_handler
 
 		from jarvis.chat.api import get_chat_ui_settings
+		from jarvis.tests import dumps_like_response
 
 		with patch.object(admin_client, "get_model_catalog", return_value=_PAYLOAD):
 			out = get_chat_ui_settings()
 		for key in ("subscription_models", "default_models", "api_key_models"):
 			self.assertIsInstance(out[key], dict, f"{key} must be a real dict before serialisation")
-			decoded = orjson.loads(orjson.dumps(out[key], default=json_handler))
+			decoded = json.loads(dumps_like_response(out[key], json_handler))
 			self.assertIsInstance(decoded, dict, f"{key} serialised to a non-object")
 
 	def test_api_key_models_excludes_subscription_rows(self):
@@ -398,10 +395,12 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 		self.addCleanup(_clear_sub_model_cache)
 
 	def test_returns_the_three_catalog_slices_as_json_objects(self):
-		import orjson
+		import json
+
 		from frappe.utils.response import json_handler
 
 		from jarvis.chat.api import get_model_catalog_ui
+		from jarvis.tests import dumps_like_response
 
 		with patch.object(admin_client, "get_model_catalog", return_value=_PAYLOAD):
 			out = get_model_catalog_ui()
@@ -409,7 +408,7 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 			self.assertIn(key, out)
 			# R9: a bare Mapping would serialise to its KEYS with no error.
 			self.assertIsInstance(out[key], dict)
-			self.assertIsInstance(orjson.loads(orjson.dumps(out[key], default=json_handler)), dict)
+			self.assertIsInstance(json.loads(dumps_like_response(out[key], json_handler)), dict)
 
 	def test_kimi_is_keyed_by_its_subscription_label(self):
 		from jarvis.chat.api import get_model_catalog_ui
@@ -438,9 +437,13 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 
 	def test_connect_providers_gate_on_auth_profile_id_not_supports_subscription(self):
 		# R7: supports_subscription is true for xai and moonshot too (cliproxy
-		# really does serve their models), but only openai/google support the
-		# paste-back connect card. Gating on supports_subscription would render
-		# a connect button that can never succeed.
+		# really does serve their models), but only a provider with a real
+		# auth_profile_id supports the paste-back connect card. Gating on
+		# supports_subscription would render a connect button that can never
+		# succeed. Google used to be the other auth_profile_id-bearing example
+		# here; its chat subscription was removed 2026-08-19 (Google
+		# discontinued login-with-Google for Gemini), so its auth_profile_id is
+		# now empty too and it must be excluded exactly like xai.
 		from jarvis.chat.api import get_model_catalog_ui
 
 		payload = [
@@ -474,9 +477,25 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 					}
 				],
 			},
+			{
+				"provider_id": "google",
+				"label": "Google Gemini",
+				"auth_profile_id": "",
+				"supports_subscription": False,
+				"models": [
+					{
+						"model_id": "gemini-3.6-flash",
+						"label": "gemini-3.6-flash",
+						"tier": "api_key",
+						"is_default": True,
+						"sort_order": 0,
+					}
+				],
+			},
 		]
 		with patch.object(admin_client, "get_model_catalog", return_value=payload):
 			out = get_model_catalog_ui()
 		providers = {p["provider"] for p in out["subscription_connect_providers"]}
 		self.assertIn("OpenAI", providers)
 		self.assertNotIn("xAI Grok", providers)
+		self.assertNotIn("Google Gemini", providers)

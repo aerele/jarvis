@@ -1899,7 +1899,7 @@ def _rate_limit_apply() -> None:
 		return
 	me = frappe.session.user
 	key = f"jarvis_apply_agents_rl:{me}"
-	if frappe.cache().get_value(key):
+	if frappe.cache().get_value(key, expires=True):
 		frappe.throw(_("An apply is already in progress — please wait a moment."))
 	frappe.cache().set_value(key, "1", expires_in_sec=5)
 

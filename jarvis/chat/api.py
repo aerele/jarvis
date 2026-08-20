@@ -2585,7 +2585,7 @@ def _turn_queue() -> str:
 	if CHAT_QUEUE not in (frappe.get_conf().get("workers") or {}):
 		return "long"
 	cache_key = "jarvis:turn_queue"
-	cached = frappe.cache().get_value(cache_key)
+	cached = frappe.cache().get_value(cache_key, expires=True)
 	if cached:
 		return cached
 	queue = "long"

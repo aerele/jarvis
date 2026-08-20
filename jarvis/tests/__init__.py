@@ -102,3 +102,28 @@ def _install_network_block() -> None:
 
 
 _install_network_block()
+
+
+def dumps_like_response(obj, default):
+	"""Serialize the way THIS Frappe serializes an HTTP response body, so a test
+	reproduces the exact ``json_handler`` path production uses: orjson on Frappe 16,
+	stdlib json on Frappe 15.
+
+	Discriminate on ``frappe.utils.orjson_dumps`` -- the v16-only symbol that IS the
+	production response serializer (``frappe/utils/response.py`` calls it) -- not on
+	whether ``orjson`` merely imports. Keying on the import would (a) silently mask a
+	broken orjson on v16, where production would be 500ing on its own top-level
+	``import orjson`` while these tests stayed green, and (b) route a v15 run through
+	orjson if the package happened to be present transitively, when v15 production
+	uses stdlib json. This mirrors ``_patch_qb_run``: probe the real framework state.
+
+	Returns ``bytes`` or ``str``; ``json.loads`` accepts either.
+	"""
+	import frappe.utils
+
+	orjson_dumps = getattr(frappe.utils, "orjson_dumps", None)
+	if orjson_dumps is not None:
+		return orjson_dumps(obj, default=default)
+	import json
+
+	return json.dumps(obj, default=default)

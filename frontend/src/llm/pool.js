@@ -93,11 +93,6 @@ export function reorder(list, from, to) {
 // Do NOT add models here to make them selectable: add them in the admin desk.
 const FALLBACK_SUB_MODELS = {
 	openai: ["gpt-5.5", "gpt-5.4"],
-	// "gemini-3.1-flash-lite", not the bare "gemini-3.1-flash". Admin patch v1_21
-	// repointed the seed off that id because it is absent from the pinned cliproxy
-	// image, but this degraded-mode literal was missed, so the fallback kept
-	// offering a subscription model nothing could serve.
-	google: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-flash-lite"],
 	xai: ["grok-4.3", "grok-build-0.1"],
 	kimi: ["kimi-k2.7-code", "kimi-k2.6"],
 };
@@ -105,7 +100,6 @@ const FALLBACK_SUB_MODELS = {
 // Provider label (as admin stores it) -> the upstream key the pool editor uses.
 const LABEL_TO_UPSTREAM = {
 	OpenAI: "openai",
-	"Google Gemini": "google",
 	"xAI Grok": "xai",
 	"Kimi (Moonshot)": "kimi",
 };
