@@ -33,6 +33,11 @@ class TestSeqWatermarkMigration(FrappeTestCase):
 	def _bust_columns_cache():
 		key = f"table_columns::tab{MSG}"
 		frappe.cache.delete_value(key)
+		# Frappe 15 caches table columns in a redis HASH ("table_columns", field
+		# "tab<doctype>"), not the "table_columns::tab<doctype>" string key Frappe
+		# 16 uses. Clear both shapes, else the stale pre-DDL column list survives
+		# and the patch's has-column guard no-ops. hdel is a harmless no-op on v16.
+		frappe.cache.hdel("table_columns", f"tab{MSG}")
 		try:
 			frappe.client_cache.delete_value(key)
 		except Exception:

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis import compat
 from jarvis.chat import session_lifecycle
 from jarvis.chat.agent_client import AgentSession
 
@@ -19,7 +20,13 @@ def _lapse_cooldown(prewarm):
 	a test would be asserting the guard, not the reclaim. Backdating the stamp is
 	what the four-minute cooldown does in production."""
 	frappe.cache().delete_value(prewarm._warm_cooldown_key())
-	pointer = frappe.cache().get_value(prewarm._warm_last_key())
+	# cache_get_fresh, not a bare get_value: the warm-last key is a TTL key
+	# written via set_value (which skips local cache on Frappe 15). A bare read
+	# here would memoize the pre-backdate pointer into frappe.local.cache, and
+	# the product's own later read would then serve that stale copy from local
+	# cache before it consults expires. Evicting the local entry first keeps the
+	# backdated stamp the one that is seen.
+	pointer = compat.cache_get_fresh(prewarm._warm_last_key())
 	if isinstance(pointer, dict):
 		frappe.cache().set_value(
 			prewarm._warm_last_key(),

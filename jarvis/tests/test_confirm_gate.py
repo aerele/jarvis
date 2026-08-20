@@ -919,7 +919,11 @@ class TestCreateDocsGate(FrappeTestCase):
 
 	def test_create_docs_bad_batch_bounces_at_park(self):
 		# A deterministic failure (bad link on the 2nd doc) returns an error to
-		# the model instead of parking a doomed card.
+		# the model instead of parking a doomed card. Use allocated_to, not
+		# assigned_by: assigned_by has a fetch_from sibling on ToDo
+		# (assigned_by_full_name), and Frappe 15's get_invalid_links silently
+		# skips the invalid-link check for such fields; allocated_to has none, so
+		# it bounces on both majors.
 		r = api._run_tool(
 			"create_docs",
 			{
@@ -929,7 +933,7 @@ class TestCreateDocsGate(FrappeTestCase):
 						"doctype": "ToDo",
 						"values": {
 							"description": "jarvis-gate-bad",
-							"assigned_by": "no-such-user@invalid.example",
+							"allocated_to": "no-such-user@invalid.example",
 						},
 					},
 				]

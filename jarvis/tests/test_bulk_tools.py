@@ -25,6 +25,12 @@ from jarvis.tools.delete_doc import delete_doc
 from jarvis.tools.submit_doc import submit_doc
 from jarvis.tools.update_doc import update_doc
 
+# A nonexistent User, used as a deliberately-bad Link value. Target the
+# allocated_to field, NOT assigned_by: ToDo's assigned_by_full_name fetches
+# from assigned_by, and Frappe 15's get_invalid_links silently skips the
+# invalid-link check for any Link field that has a fetch_from sibling (only
+# Frappe 16 raises there). allocated_to has no such sibling, so the check
+# fires identically on both majors.
 _BAD_USER = "no-such-user@invalid.example"
 
 
@@ -46,7 +52,7 @@ class TestCreateDocBulk(FrappeTestCase):
 					{"doctype": "ToDo", "values": {"description": "jbulk-create-ok"}},
 					{
 						"doctype": "ToDo",
-						"values": {"description": "jbulk-create-bad", "assigned_by": _BAD_USER},
+						"values": {"description": "jbulk-create-bad", "allocated_to": _BAD_USER},
 					},
 				]
 			)
@@ -78,7 +84,7 @@ class TestUpdateDocBulk(FrappeTestCase):
 				"ToDo",
 				updates=[
 					{"name": a, "changes": {"priority": "High"}},
-					{"name": b, "changes": {"assigned_by": _BAD_USER}},  # bad Link -> save fails
+					{"name": b, "changes": {"allocated_to": _BAD_USER}},  # bad Link -> save fails
 				],
 			)
 		# first update must have rolled back
