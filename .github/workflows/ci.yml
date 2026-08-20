@@ -140,7 +140,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          # Frappe Cloud v15 benches build the SPA on their default Node 18.16.0, so
+          # build this deploy artifact on that exact version -- a Vite/dep break that
+          # only shows up on Node 18 must fail here, not at FC deploy time.
+          node-version: "18.16.0"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Stub the bench site config the SPA build reads (no bench in CI)
@@ -160,7 +163,11 @@ jobs:
   # tests error.
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # From-scratch v15 bench build + the full unsharded suite. Headroom over the
+    # v16 PR job (which restores a baked image and shards 4 ways): as the v15 gap
+    # closes, more tests RUN to completion instead of erroring fast at import, so
+    # the suite got slower, not faster, and a 45 min cap cancelled a healthy run.
+    timeout-minutes: 75
 
     strategy:
       # Never fail-fast: the default cancels surviving shards on the first failure, so you
@@ -205,10 +212,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # frappe version-15 needs node >= 18. 20 is what Frappe Cloud v15 benches are
-          # moved to for jarvis (@google/gemini-cli at the repo root needs >= 20), so CI
-          # mirrors the deploy target rather than the bare minimum.
-          node-version: "20"
+          # Pin the Frappe Cloud v15 bench default, Node 18.16.0, so CI runs on the
+          # exact runtime the customer bench uses. This is only viable because the
+          # root @google/gemini-cli dep (which demanded Node >= 20) is being dropped
+          # for v15; keeping the bench on 18 rather than bumping FC to 20 is the
+          # chosen strategy. frontend-tests stays on Node 24 -- that is a vitest/jsdom
+          # tooling floor, unrelated to the FC runtime.
+          node-version: "18.16.0"
 
       - name: System deps
         run: |

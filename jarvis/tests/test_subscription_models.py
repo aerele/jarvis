@@ -39,11 +39,12 @@ class TestSubscriptionCatalogue(unittest.TestCase):
 		# additionally locks the R9 rule: production serialises with orjson +
 		# frappe's json_handler, which turns a BARE Mapping into a list of its
 		# KEYS with no error raised.
-		import orjson
 		from frappe.utils.response import json_handler
 
+		from jarvis.tests import dumps_like_response
+
 		json.dumps(dict(cat.SUBSCRIPTION_MODELS))  # must not raise
-		decoded = orjson.loads(orjson.dumps(dict(cat.SUBSCRIPTION_MODELS), default=json_handler))
+		decoded = json.loads(dumps_like_response(dict(cat.SUBSCRIPTION_MODELS), json_handler))
 		self.assertIsInstance(decoded, dict, "catalogue must serialise to a JSON object")
 		for value in cat.SUBSCRIPTION_MODELS.values():
 			self.assertIsInstance(value, list)

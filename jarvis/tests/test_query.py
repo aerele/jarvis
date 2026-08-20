@@ -25,6 +25,22 @@ from jarvis.exceptions import (
 from jarvis.tools.query import ROW_GUARD, query
 
 
+def _patch_qb_run():
+	"""Patch the frappe query-builder's ``.run`` so these tests capture generated
+	SQL without hitting the DB, on Frappe 15 and 16.
+
+	Frappe 16 attaches ``.run`` to the base ``pypika.queries.QueryBuilder``;
+	Frappe 15 attaches it to the dialect subclass (``frappe.qb._BuilderClasss``)
+	and leaves the base without it, so ``patch("pypika...QueryBuilder.run")`` raised
+	AttributeError there. Target whichever class actually carries ``.run``. Returns
+	a fresh single-use patcher per call.
+	"""
+	from pypika.queries import QueryBuilder
+
+	target = QueryBuilder if "run" in QueryBuilder.__dict__ else frappe.qb._BuilderClasss
+	return patch.object(target, "run", return_value=[])
+
+
 class TestQuerySpecValidation(FrappeTestCase):
 	"""Top-of-pipe shape checks. Fail before any DB call."""
 
@@ -128,7 +144,7 @@ class TestQueryPermissions(FrappeTestCase):
 		with (
 			patch("frappe.has_permission", side_effect=fake_has_perm),
 			patch("frappe.database.query.Engine") as fake_engine,
-			patch("pypika.queries.QueryBuilder.run", return_value=[]),
+			_patch_qb_run(),
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
 			query(
@@ -206,7 +222,7 @@ class TestQueryQbTranslation(FrappeTestCase):
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
 			# We let the real qb run; patch only the actual SQL exec.
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]) as _:
+			with _patch_qb_run() as _:
 				result = query(spec)
 		return result["sql"]
 
@@ -316,7 +332,7 @@ class TestQueryPermissionConditionsWoven(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine,
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = sentinel
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				result = query({"from": "DocType", "select": ["name"]})
 
 		self.assertIn("sentinel-marker", result["sql"])
@@ -329,7 +345,7 @@ class TestQueryPermissionConditionsWoven(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine,
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				result = query({"from": "DocType", "select": ["name"]})
 
 		# No WHERE clause should appear when nothing constrains the query.
@@ -429,7 +445,7 @@ class TestQueryV02Additions(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine,
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				result = query(spec)
 		return result["sql"]
 
@@ -920,7 +936,7 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine_cls,
 		):
 			fake_engine_cls.return_value.get_permission_conditions.side_effect = _perm_conds
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				result = query(
 					{
 						"from": "DocType",
@@ -1070,7 +1086,7 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine_cls,
 		):
 			fake_engine_cls.return_value.get_permission_conditions.side_effect = _perm_conds
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				result = query(
 					{
 						"from": "DocType",
@@ -1148,7 +1164,7 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine_cls,
 		):
 			fake_engine_cls.return_value.get_permission_conditions.side_effect = _capture
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				query(
 					{
 						"from": "DocType",
@@ -1184,7 +1200,7 @@ class TestQueryV03ExistsSubquerySecurityHardening(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine_cls,
 		):
 			fake_engine_cls.return_value.get_permission_conditions.side_effect = _capture
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				query(
 					{
 						"from": "DocType",
@@ -1417,7 +1433,7 @@ class TestQueryExprDSLPhase1Dates(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine,
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				result = query(spec)
 		return result["sql"]
 
@@ -1745,7 +1761,7 @@ class TestQueryExprDSLPhase2NullAndArithmetic(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine,
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				result = query(spec)
 		return result["sql"]
 
@@ -1933,7 +1949,7 @@ class TestQueryExprDSLPhase3CaseWhen(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine,
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				result = query(spec)
 		return result["sql"]
 
@@ -2130,7 +2146,7 @@ class TestQueryExprDSLPhase4StringHelpers(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine,
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				result = query(spec)
 		return result["sql"]
 
@@ -2262,7 +2278,7 @@ class TestQuerySqlInjectionHardening(FrappeTestCase):
 			patch("frappe.database.query.Engine") as fake_engine,
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
-			with patch("pypika.queries.QueryBuilder.run", return_value=[]):
+			with _patch_qb_run():
 				result = query(spec)
 		return result["sql"]
 
@@ -2867,7 +2883,7 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 				return_value=[self.PARENT_DT],
 			),
 			patch("frappe.database.query.Engine") as fake_engine,
-			patch("pypika.queries.QueryBuilder.run", return_value=[]),
+			_patch_qb_run(),
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
 			result = query(
@@ -2896,7 +2912,7 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 				return_value=[self.PARENT_DT],
 			),
 			patch("frappe.database.query.Engine") as fake_engine,
-			patch("pypika.queries.QueryBuilder.run", return_value=[]),
+			_patch_qb_run(),
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
 			result = query(
@@ -2934,7 +2950,7 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 				return_value=[self.PARENT_DT],
 			),
 			patch("frappe.database.query.Engine") as fake_engine,
-			patch("pypika.queries.QueryBuilder.run", return_value=[]),
+			_patch_qb_run(),
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
 			result = query(
@@ -3053,7 +3069,7 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 				return_value=[self.PARENT_DT],
 			),
 			patch("frappe.database.query.Engine") as fake_engine,
-			patch("pypika.queries.QueryBuilder.run", return_value=[]),
+			_patch_qb_run(),
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
 			result = query(
@@ -3100,7 +3116,7 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 				return_value=[self.PARENT_DT],
 			),
 			patch("frappe.database.query.Engine") as fake_engine,
-			patch("pypika.queries.QueryBuilder.run", return_value=[]),
+			_patch_qb_run(),
 		):
 			fake_engine.return_value.get_permission_conditions.return_value = None
 			result = query(
