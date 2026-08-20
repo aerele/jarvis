@@ -3092,7 +3092,11 @@ const showConfirming = computed(() => !payBusyView.value && confirmingReturn.val
 // (see paymentCodes.js PAYMENT_CONFIRMATION_PENDING). Without this proof we would
 // never soften the copy; with a `failed`/`pending` return we also don't. In-memory
 // for the session: a hard reload strips the param and drops to the recovery card,
-// which is honest (see PR notes), not a regression.
+// which is honest (see PR notes), not a regression. Same for the signal-less return
+// paths (bfcache restore / tab-focus regain -> handleCheckoutReturn): they carry no
+// ?pay= outcome, so they cannot prove completion and keep the recovery card. The
+// flag is reset to false whenever a checkout (re)opens - see the CHECKOUT_OPEN watch
+// below - so proof from one attempt can never soften a later, unrelated wait.
 const returnedFromCompletedCheckout = ref(false);
 
 /** Hold the confirming screen for the duration of a post-checkout reconcile. */
@@ -3309,11 +3313,15 @@ async function runStatusCheck() {
 // every check and waits it out before the next attempt, instead of a fixed
 // interval that could poll straight through a 429.
 const PENDING_CHECK_INTERVAL_MS = 15_000;
-// The FIRST re-check is deliberately early: a completed checkout's confirmation
-// webhook usually lands within a few seconds, so this resolves the common case
-// while the customer is still watching the calm settling screen, before the
-// steady 15s cadence ever kicks in. The server's own rate-limit cooldown
-// (checkCooldownUntil, applied below) still protects against a 429.
+// The FIRST re-check is deliberately early - but ONLY for a completed-checkout
+// return (returnedFromCompletedCheckout). That is the one case with a physical
+// reason to expect an answer within seconds: the confirmation webhook usually
+// lands just behind the browser redirect, so this resolves it while the customer
+// is still watching the calm settling screen, before the steady 15s cadence kicks
+// in. An in-app pending wait that never left the page has no such reason, so it
+// keeps the ordinary 15s first interval and does not hit the rate-limited endpoint
+// any sooner than before (code review finding 3). The server's own cooldown
+// (checkCooldownUntil, applied below) still protects against a 429 either way.
 const PENDING_FIRST_CHECK_MS = 4_000;
 const PENDING_CHECK_ATTEMPTS = 8; // ~4s + 15s x 7 ≈ 2 minutes
 // Set once the ceiling is reached with no resolution - an honest "we stopped
@@ -3327,7 +3335,11 @@ let pendingPollRun = 0;
 
 async function runPendingAutoPoll(myRun) {
 	for (let i = 0; i < PENDING_CHECK_ATTEMPTS; i++) {
-		await _sleep(i === 0 ? PENDING_FIRST_CHECK_MS : PENDING_CHECK_INTERVAL_MS);
+		await _sleep(
+			i === 0 && returnedFromCompletedCheckout.value
+				? PENDING_FIRST_CHECK_MS
+				: PENDING_CHECK_INTERVAL_MS
+		);
 		if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
 		await flow.checkStatus();
 		if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
@@ -3361,6 +3373,24 @@ function restartPendingAutoPoll() {
 	}
 }
 watch(() => pay.value.value, restartPendingAutoPoll);
+// Clear the completed-checkout proof the instant a (new or resumed) checkout opens.
+// From CHECKOUT_OPEN, the ONLY thing that may re-arm the calm settling hold is a
+// fresh ?pay=done full-navigation return (set in onMounted). This does two things:
+//   - fixes staleness (code review finding 1): the flag can no longer carry proof
+//     from an earlier attempt into a later, unrelated pending wait.
+//   - keeps the signal-less return paths honest (code review bfcache/tab-focus gap):
+//     handleCheckoutReturn -> flow.returnFromCheckout() transits CHECKOUT_OPEN and
+//     carries NO ?pay= outcome, so it must NOT soften the copy - a customer who
+//     alt-tabbed back from an unpaid sheet would otherwise be told "you've completed
+//     checkout". With the flag cleared here, that path lands on the honest recovery
+//     card, exactly as it does today. Softening it would need a completion signal we
+//     do not have on that path (see returnedFromCompletedCheckout's declaration).
+watch(
+	() => pay.value.value,
+	(v) => {
+		if (v === S.CHECKOUT_OPEN) returnedFromCompletedCheckout.value = false;
+	}
+);
 
 // ---- "Resend the link" (jarvis#297 P0-2a) -----------------------------------
 // A truthful confirmation line, not a toast that could be missed off-screen -

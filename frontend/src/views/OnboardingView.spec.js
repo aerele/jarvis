@@ -1430,4 +1430,40 @@ describe("post-checkout settling hold (calm wait, not the panic card)", () => {
 		expect(wrapper.vm.pay.value).not.toBe(STATES.UNKNOWN);
 		expect(wrapper.vm.showPaymentSettling).toBe(false);
 	});
+
+	// Finding 3: the early 4s first re-check is scoped to the completed-checkout
+	// case (a webhook expected within seconds). An in-app pending wait that never
+	// left the page keeps the ordinary 15s first interval and does not hit the
+	// rate-limited endpoint any sooner than before.
+	it("re-checks early (~4s) on the first auto-poll tick after a completed checkout", async () => {
+		pendingAfterDoneReturn();
+		vi.useFakeTimers();
+		mountView();
+		await flushPromises();
+		// The mount-time return-heal already fired one check; clear it so we are
+		// measuring the auto-poll's own first tick.
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockClear();
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the ordinary 15s first interval for an in-app pending wait (no completed checkout)", async () => {
+		// No ?pay= return, so returnedFromCompletedCheckout stays false.
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		vi.useFakeTimers();
+		mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+		// 4s must NOT be enough for the first tick here (unlike the checkout-return case).
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+		// The ordinary 15s interval fires it.
+		await vi.advanceTimersByTimeAsync(11_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+	});
 });
