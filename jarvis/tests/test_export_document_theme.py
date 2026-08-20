@@ -239,6 +239,30 @@ class TestPolishContract(unittest.TestCase):
 		self.assertLess(_h(wide_margin), _h(a4))  # bigger margins -> shorter cover
 		self.assertGreater(_h(a4), 100)
 
+	def test_cover_height_accounts_for_running_header(self):
+		"""With a running header, the cover reserves the extra top margin so it fills
+		the printable page instead of overflowing onto page 2 (the branded-cover bug)."""
+		no_header = theme.cover_height_pt("A4", "portrait", 15, header=False)
+		with_header = theme.cover_height_pt("A4", "portrait", 15, header=True)
+		self.assertLess(with_header, no_header)
+		# exactly HEADER_RESERVE_MM shorter.
+		self.assertAlmostEqual(no_header - with_header, theme.HEADER_RESERVE_MM * theme._MM_TO_PT, delta=0.2)
+		# and component_css threads it through:
+		self.assertNotIn(
+			f"height: {with_header}pt",
+			theme.component_css("A4", "portrait", 15, header=False),
+		)
+
+	def test_cover_height_floor_and_str_coercion(self):
+		# A pathological margin floors at 100pt (never collapses/negative).
+		self.assertEqual(theme.cover_height_pt("A5", "landscape", 95), 100.0)
+		# A non-string page_size / orientation degrades to the A4 fallback, no crash.
+		self.assertGreater(theme.cover_height_pt(123, None, 15), 100)  # type: ignore[arg-type]
+		# A negative margin is clamped (can't inflate the cover past the page).
+		self.assertLessEqual(
+			theme.cover_height_pt("A4", "portrait", -50), theme.cover_height_pt("A4", "portrait", 0)
+		)
+
 	def test_component_css_default_unchanged_by_new_signature(self):
 		"""The new geometry params default to A4/portrait/15mm; the no-arg call and
 		THEME_CSS stay identical (zero regression for existing callers)."""

@@ -100,15 +100,16 @@ def css_bar(
 def _series_class(series: object) -> str:
 	"""Map a row's ``series`` selector to a ` series-N` class suffix, N in 1-4.
 
-	A closed, bounded allowlist (mirrors ``rag_chip``/the theme palette): a value
-	outside 1-4, or non-integer, yields no suffix - the bar keeps the default
-	primary color and no attacker/agent value is ever string-interpolated into a
-	class attribute."""
-	try:
-		n = int(series)
-	except (TypeError, ValueError):
+	A closed, bounded allowlist (mirrors ``rag_chip``/the theme palette): only an
+	actual ``int`` in 1-4 yields a suffix. A non-integer (float like ``2.5``, a
+	string, ``inf``/``nan``), a ``bool``, or an out-of-range int yields ``""`` - the
+	bar keeps the default primary color and no agent value is ever interpolated into
+	a class attribute. Requiring a true ``int`` (rather than ``int(series)``, which
+	would truncate ``2.5`` to a valid ``2`` and raise ``OverflowError`` on ``inf``)
+	honors the "non-integer yields no suffix" contract and is exception-free."""
+	if isinstance(series, bool) or not isinstance(series, int):
 		return ""
-	return f" series-{n}" if 1 <= n <= 4 else ""
+	return f" series-{series}" if 1 <= series <= 4 else ""
 
 
 def kpi_tile(label: str, value: str, delta: str | None = None) -> str:

@@ -344,9 +344,10 @@ class TestCssBarPolish(unittest.TestCase):
 				self.assertIn(f'<span class="bar series-{n}" style="width:10%">', out)
 
 	def test_invalid_series_is_ignored_never_injected(self) -> None:
-		"""A series outside 1-4 or non-int keeps the default bar - never
-		interpolates an attacker/agent value into the class."""
-		for bad in (0, 5, -1, "x", None, "2; }", "<script>"):
+		"""A series outside 1-4, or a non-int (float/inf/str/bool), keeps the default
+		bar - never interpolates an agent value into the class, never raises on inf,
+		never truncates 2.5 -> a valid 2."""
+		for bad in (0, 5, -1, "x", None, "2; }", "<script>", 2.5, float("inf"), True):
 			with self.subTest(series=bad):
 				out = css_bar([{"label": "A", "value": "1", "pct": 10, "series": bad}])
 				self.assertIn('<span class="bar" style="width:10%">', out)
