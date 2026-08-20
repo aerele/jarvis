@@ -20,12 +20,13 @@ as the body, and wkhtmltopdf will FETCH any ``<img src>``/``<link>`` it finds in
 ``--header-html``/``--footer-html`` document (a *separate* render), so each runs
 through ``sanitize_rich`` before it is written to a temp file.
 
-WHY the letterhead is resolved OUTSIDE this module (``resolve_letterhead``, called
-from ``export_document._render_rich`` where the ``notes`` channel lives): a
-letterhead is folded in as trusted operator config, but "trusted" must be
-ENFORCED, not assumed - so resolution (a) defaults to the site's default Letter
-Head when the caller named none, (b) checks the impersonated user's READ
-permission on the Letter Head, and (c) neutralises its images: an ``<img>`` with a
+WHY the brand is resolved here (``resolve_brand`` → ``resolve_letterhead`` +
+``_resolve_company_identity``, called from ``export_document._render_rich`` which
+threads the ``note`` into its ``notes`` channel): a letterhead is folded in as
+trusted operator config, but "trusted" must be ENFORCED, not assumed - so
+resolution (a) defaults to the site's default Letter Head when the caller named
+none, (b) checks the impersonated user's READ permission on the Letter Head, and
+(c) neutralises its images: an ``<img>`` with a
 remote ``src`` is DROPPED (wkhtmltopdf would fetch it server-side - the SSRF the
 whole rich path exists to prevent), and a same-site ``/files/`` logo is inlined as
 a permission-checked base64 ``data:`` URI (which also makes it actually render -
@@ -61,7 +62,7 @@ import pdfkit
 from jarvis.exceptions import InvalidArgumentError
 
 from .sanitizer import sanitize_letterhead, sanitize_rich
-from .theme import cover_height_pt
+from .theme import HEADER_RESERVE_MM, cover_height_pt
 
 _SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
 
@@ -117,7 +118,7 @@ body {{
 .jv-brand-name {{ font-weight: 700; color: #132d47; }}
 .jv-center {{ text-align: center; }}
 .jv-right {{ text-align: right; }}
-.jv-brand-header img, .jv-lh-header img {{ height: 30pt; width: auto; max-width: 100%; }}
+.jv-brand-header img {{ height: 30pt; width: auto; max-width: 100%; }}
 .jv-watermark {{
 	position: absolute;
 	top: {watermark_top_pt:.0f}pt;
@@ -184,15 +185,18 @@ def render_pdf(
 	also written to the Error Log so a systemic regression is visible to operators.
 	"""
 	binary = _resolve_binary()
-	orientation_flag = _normalize_orientation(orientation)
-	page_size = _normalize_page_size(page_size)
-	margins_mm = _normalize_margin(margins_mm)
+	page_size, orientation_flag, margins_mm = normalize_geometry(page_size, orientation, margins_mm)
 	_guard_furniture_len(header_html, footer_text, watermark)
 
+	# A running header exists iff any of brand/agent-header/watermark is present -
+	# the same condition _build_header uses to emit a non-empty doc, and what
+	# reserves the extra top margin (below), so the watermark centers on the real
+	# printable area.
+	has_header = bool(brand_header or header_html or watermark)
 	# Center the watermark vertically for the ACTUAL page geometry (not a fixed
 	# portrait-A4 constant); ~36pt lifts the rotated block so its middle sits on
 	# the page center.
-	watermark_top = cover_height_pt(page_size, orientation_flag, margins_mm) / 2 - 36
+	watermark_top = cover_height_pt(page_size, orientation_flag, margins_mm, header=has_header) / 2 - 36
 	header_doc = _build_header(header_html, watermark, brand_header, watermark_top)
 
 	tmp_dir = tempfile.gettempdir()
@@ -318,6 +322,20 @@ def _guard_furniture_len(header, footer, watermark) -> None:
 			raise InvalidArgumentError(f"{label} exceeds {_MAX_FURNITURE_CHARS} characters")
 
 
+def normalize_geometry(page_size: str, orientation: str, margins_mm: int) -> tuple[str, str, int]:
+	"""Validate + canonicalize page geometry, raising ``InvalidArgumentError`` on a
+	bad value. Public so ``export_document`` can validate ONCE up front (before it
+	builds the geometry-aware CSS) for every output format - so the HTML path
+	rejects a bad page_size/orientation/margin exactly as the PDF path does, instead
+	of silently degrading. ``render_pdf`` calls it too (idempotent), keeping the one
+	source of truth for the allowlists here."""
+	return (
+		_normalize_page_size(page_size),
+		_normalize_orientation(orientation),
+		_normalize_margin(margins_mm),
+	)
+
+
 def _build_args(
 	binary: str,
 	*,
@@ -348,7 +366,7 @@ def _build_args(
 	optional plain-text footer (``--footer-left``) BOTH render - fixing the old
 	mutual-exclusivity where any HTML footer silently dropped "Page X of Y".
 	"""
-	margin_top = margins_mm + 14 if has_header else margins_mm
+	margin_top = margins_mm + HEADER_RESERVE_MM if has_header else margins_mm
 	args = [
 		binary,
 		"--disable-local-file-access",
@@ -426,44 +444,63 @@ def resolve_brand(letterhead: str | None) -> dict:
 	    address (the "no logo -> company name + address" fallback the user asked
 	    for; also the running-header identity). Empty on a frappe-only bench with
 	    no Company, or when unreadable.
-	  * ``note`` - a degrade message when a NAMED letterhead couldn't be applied.
+	  * ``note`` - a degrade message when a NAMED letterhead couldn't be applied,
+	    or when company branding ERRORED (not when it is legitimately absent), so a
+	    real failure reaches the download card + telemetry instead of vanishing.
 
 	Never raises: any failure yields an empty brand and a title-only render.
 	"""
-	logo_html, note = "", None
+	logo_html, footer_logo, note = "", "", None
 	try:
-		logo_html, _footer, note = resolve_letterhead(letterhead)
+		logo_html, footer_logo, note = resolve_letterhead(letterhead)
 	except Exception:
-		logo_html, note = "", None
-	company, address_lines = _resolve_company_identity()
+		# resolve_letterhead is contracted never to raise; if a future change ever
+		# breaks that, degrade to no logo but leave a signal, not a silent swallow.
+		_log_infra_failure("rich-pdf letterhead resolution raised unexpectedly", "")
+		logo_html, footer_logo, note = "", "", None
+	company, address_lines, company_note = _resolve_company_identity()
 	return {
-		"logo_html": logo_html or "",
+		# A Letter Head's logo can live in the header OR the footer field; use either.
+		"logo_html": logo_html or footer_logo or "",
 		"company": company,
 		"address_lines": address_lines,
-		"note": note,
+		# A named-letterhead miss is the more specific message; else the company error.
+		"note": note or company_note,
 	}
 
 
-def _resolve_company_identity() -> tuple[str | None, list[str]]:
-	"""Default Company name + primary-address display lines, mirroring the proven
-	permission-checked chain in ``jarvis.onboarding`` (frappe-only-safe, no ERPNext
-	dependency). Fail-safe: any problem -> ``(None, [])`` and a title-only render."""
+def _resolve_company_identity() -> tuple[str | None, list[str], str | None]:
+	"""Default Company name + primary-address display lines + a degrade NOTE.
+
+	Mirrors the proven permission-checked chain in ``jarvis.onboarding``
+	(frappe-only-safe, no ERPNext dependency). The note is set ONLY on an actual
+	error - never on the legitimate "no Company configured / not readable" case, so
+	a frappe-only bench does not emit a spurious degrade on every render. Fail-safe:
+	a failure yields ``(None, [], note)`` and a title-only render. The company NAME
+	is resolved BEFORE the address, each in its own guard, so a transient address
+	error keeps the name (the masthead identity) instead of dropping it."""
 	try:
 		# Company is an ERPNext doctype; a frappe-only bench has none.
 		if not frappe.db.exists("DocType", "Company"):
-			return None, []
+			return None, [], None
 		company = frappe.defaults.get_user_default("Company") or frappe.defaults.get_global_default("company")
 		if not company:
 			names = [c.name for c in frappe.get_all("Company", fields=["name"], limit=2)]
 			if len(names) == 1:
 				company = names[0]
 		if not company or not frappe.has_permission("Company", "read", doc=company):
-			return None, []
+			return None, [], None
 		company_name = frappe.db.get_value("Company", company, "company_name") or company
-		return company_name, _resolve_company_address_lines(company)
-	except Exception:
-		_log_infra_failure("rich-pdf company identity resolution failed", "")
-		return None, []
+	except Exception as exc:
+		_log_infra_failure("rich-pdf company resolution failed", str(exc))
+		return None, [], "company branding could not be resolved — rendered without it"
+	# The address is a nice-to-have; a transient error here must not drop the name.
+	try:
+		address_lines = _resolve_company_address_lines(company)
+	except Exception as exc:
+		_log_infra_failure("rich-pdf company address resolution failed", str(exc))
+		address_lines = []
+	return company_name, address_lines, None
 
 
 def _resolve_company_address_lines(company: str) -> list[str]:
@@ -471,7 +508,13 @@ def _resolve_company_address_lines(company: str) -> list[str]:
 	builder escapes). Mirrors ``onboarding._resolve_company_billing_address``:
 	frappe-only Dynamic Link query, filter EXPLICITLY on ``is_primary_address=1``
 	(never a shipping/warehouse address dressed up as the header), own read-perm
-	check. Nothing flagged primary -> no address."""
+	check. Nothing flagged primary -> no address.
+
+	NOTE: this deliberately FORKS onboarding's query rather than importing it -
+	importing ``jarvis.onboarding`` would pull its control-plane surface
+	(admin_client / hooks / permissions) into the export package for one small
+	helper. If the primary-address selection rule ever changes, update BOTH here and
+	``onboarding._resolve_company_billing_address``; the fork is covered by tests."""
 	linked = frappe.get_all(
 		"Dynamic Link",
 		filters={"link_doctype": "Company", "link_name": company, "parenttype": "Address"},

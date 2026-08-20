@@ -70,6 +70,7 @@ from jarvis.tools._export import save_export_file
 from jarvis.tools._export.document.furniture import (
 	build_brand_header,
 	build_title_block,
+	normalize_geometry,
 	render_pdf,
 	resolve_brand,
 )
@@ -193,7 +194,7 @@ def export_document(
 	Do not promise any of these to the user.
 	"""
 	fmt = (format or "pdf").lower()
-	rich = _rich_requested(theme, letterhead, header, footer, watermark, charts)
+	rich = _rich_requested(theme, letterhead, header, footer, watermark, charts, title, subtitle, meta, cover)
 	try:
 		_guard_content(content)
 		if fmt not in _FORMATS:
@@ -275,13 +276,35 @@ def _guard_content(content: str) -> None:
 		raise InvalidArgumentError(f"content exceeds {_MAX_CONTENT_CHARS} characters")
 
 
-def _rich_requested(theme, letterhead, header, footer, watermark, charts) -> bool:
+# A masthead line is a short heading, not a document; bound it so a runaway model
+# can't hand build_title_block a megabyte "title" (parity with the furniture caps).
+_MAX_MASTHEAD_CHARS = 2_000
+
+
+def _guard_masthead(title, subtitle, meta) -> None:
+	"""Bound the tool-built masthead fields (title/subtitle/meta)."""
+	for label, value in (("title", title), ("subtitle", subtitle), ("meta", meta)):
+		if isinstance(value, str) and len(value) > _MAX_MASTHEAD_CHARS:
+			raise InvalidArgumentError(f"{label} exceeds {_MAX_MASTHEAD_CHARS} characters")
+
+
+def _rich_requested(
+	theme, letterhead, header, footer, watermark, charts, title, subtitle, meta, cover
+) -> bool:
 	"""Branch on TRUTHY (non-empty) rich kwargs. Geometry kwargs (page_size /
 	orientation / margins_mm / page_numbers) have non-falsy defaults and are NOT
 	activators — only these intent kwargs flip the path, and only when truthy, so
-	``header=""`` / ``charts=[]`` / ``theme=False`` / ``letterhead=None`` stay
-	plain."""
-	return bool(theme or letterhead or header or footer or watermark or charts)
+	``header=""`` / ``charts=[]`` / ``theme=False`` / ``letterhead=None`` /
+	``cover=False`` stay plain.
+
+	``title`` / ``subtitle`` / ``meta`` / ``cover`` ALSO activate: the tool builds a
+	masthead from the title, and the persona no longer hand-writes the title into
+	Markdown, so a titled export MUST render branded (title-only on the plain path
+	would show no title at all). A bare content-only call (no title, no rich kwarg)
+	stays on the byte-preserved plain path."""
+	return bool(
+		theme or letterhead or header or footer or watermark or charts or title or subtitle or meta or cover
+	)
 
 
 def _render_rich(
@@ -314,11 +337,18 @@ def _render_rich(
 	_guard_chart_rows(charts)
 	notes: list[str] = []
 
+	# Validate page geometry up front so BOTH the PDF and HTML paths reject a bad
+	# page_size/orientation/margin identically (previously only render_pdf, on the
+	# PDF path, validated it — the HTML path silently degraded to a fallback).
+	page_size, orientation, margins_mm = normalize_geometry(page_size, orientation, margins_mm)
+	# Bound the masthead text (parity with the header/footer/watermark furniture caps).
+	_guard_masthead(title, subtitle, meta)
+
 	# 1. markdown → HTML BEFORE sanitize (else ![](…)/autolinks regenerate <img>/
 	#    links post-strip); raw HTML is passed straight to the sanitizer. Promote
-	#    md's right-aligned numeric columns (|--:|) to class="num" while the inline
-	#    style is still present — sanitize strips the style but keeps the class, so
-	#    numeric headers/cells stay right-aligned.
+	#    md's aligned columns (|--:| right, |:-:| center) to class="num"/"text-center"
+	#    while the inline style is still present — sanitize strips the style but keeps
+	#    the class, so the alignment (and its header) survive.
 	body = content if content_is_html else _promote_table_alignment(frappe.utils.md_to_html(content))
 	# 2. sanitize the full agent body.
 	body = sanitize_rich(body)
@@ -335,15 +365,21 @@ def _render_rich(
 	brand = resolve_brand(letterhead if isinstance(letterhead, str) else None)
 	if brand.get("note"):
 		notes.append(brand["note"])
+	brand_header = build_brand_header(brand)
 	# 6. tool-built masthead prepended to the body (trusted, class-only, escaped —
 	#    raw markdown can never leak into the title the way it did when the agent
 	#    hand-wrapped markdown in <div class="cover">). Full cover only for a
 	#    long/formal document; a scalable title block otherwise.
 	full_cover = _decide_cover(cover, body)
 	title_block = build_title_block(title, subtitle, meta, brand, full_cover)
-	# 7. theme CSS built for the render's page geometry (the full cover's height
-	#    fills the printable page). Tool-added AFTER sanitize.
-	css = component_css(page_size, orientation, margins_mm)
+	# 7. theme CSS for the render's geometry. `header` reflects whether a running
+	#    header exists (brand / agent header / watermark) so the full cover's height
+	#    accounts for the reserved top margin and fills the page instead of spilling
+	#    onto page 2 (the branded-cover overflow the review caught). The reservation
+	#    is a wkhtmltopdf (PDF) margin concern; the HTML output paints no running
+	#    header, so its cover uses the unreserved height.
+	has_header = bool(brand_header or header or watermark)
+	css = component_css(page_size, orientation, margins_mm, header=has_header and fmt != "html")
 
 	if fmt == "html":
 		# No wkhtmltopdf on the HTML path, so page furniture can't be applied —
@@ -368,7 +404,7 @@ def _render_rich(
 			header_html=header,
 			footer_text=footer,
 			watermark=watermark,
-			brand_header=build_brand_header(brand),
+			brand_header=brand_header,
 			page_numbers=page_numbers,
 			# The 25s bound covers the whole render; subtract the pre-render work
 			# (md→HTML, sanitize, splice) already spent so the total stays under
@@ -417,35 +453,44 @@ def _has_visible_content(html_fragment: str) -> bool:
 	return bool(text.strip())
 
 
-# md_to_html emits inline `text-align:right` on a `|--:|` column's cells; the
-# sanitizer strips inline style, so promote it to class="num" (which survives).
+# md_to_html emits inline `text-align:right|center` on a `|--:|`/`|:-:|` column's
+# cells; the sanitizer strips inline style, so promote it to a surviving class.
 _CELL_TAG_RE = re.compile(r"<(td|th)\b([^>]*)>", re.IGNORECASE)
 _CELL_STYLE_RE = re.compile(r'\bstyle\s*=\s*"([^"]*)"', re.IGNORECASE)
 _CELL_CLASS_RE = re.compile(r'\bclass\s*=\s*"([^"]*)"', re.IGNORECASE)
 _ALIGN_RIGHT_RE = re.compile(r"text-align:\s*right", re.IGNORECASE)
+_ALIGN_CENTER_RE = re.compile(r"text-align:\s*center", re.IGNORECASE)
 
 
 def _promote_table_alignment(html_body: str) -> str:
-	"""Rewrite a right-aligned md table cell's inline style to ``class="num"``.
+	"""Rewrite an aligned md table cell's inline style to a surviving class:
+	``text-align:right`` → ``class="num"``, ``text-align:center`` → ``class="text-center"``.
 
-	Markdown's ``|--:|`` numeric column renders as ``<td style="text-align:right">``;
+	Markdown's ``|--:|``/``|:-:|`` columns render as ``<td style="text-align:…">``;
 	``sanitize_rich`` strips inline ``style`` (classes-only), which would drop the
-	alignment. Promoting it to the ``.num`` class here — BEFORE sanitize — keeps the
-	numbers right-aligned AND their header aligned (theme's ``.num`` now covers
-	``<th>`` too). Only a cell that already carries the right-align style is
-	touched; the sanitizer still removes the style attribute afterwards.
+	alignment (left-aligned columns are already the default, so they need nothing).
+	Promoting it here — BEFORE sanitize — keeps the alignment AND its header aligned
+	(theme's ``.num``/``.text-center`` cover ``<th>`` too). Only a cell that already
+	carries the aligned style is touched; the sanitizer removes the style afterwards.
+	A pre-existing ``class`` (double-quoted, as md emits) is merged, not duplicated.
 	"""
 
 	def _repl(match: "re.Match[str]") -> str:
 		tag, attrs = match.group(1), match.group(2)
 		style = _CELL_STYLE_RE.search(attrs)
-		if not style or not _ALIGN_RIGHT_RE.search(style.group(1)):
+		if not style:
+			return match.group(0)
+		if _ALIGN_RIGHT_RE.search(style.group(1)):
+			promote = "num"
+		elif _ALIGN_CENTER_RE.search(style.group(1)):
+			promote = "text-center"
+		else:
 			return match.group(0)
 		cls = _CELL_CLASS_RE.search(attrs)
 		if cls:
-			attrs = attrs[: cls.start(1)] + (cls.group(1) + " num").strip() + attrs[cls.end(1) :]
+			attrs = attrs[: cls.start(1)] + (cls.group(1) + " " + promote).strip() + attrs[cls.end(1) :]
 		else:
-			attrs = attrs + ' class="num"'
+			attrs = attrs + f' class="{promote}"'
 		return f"<{tag}{attrs}>"
 
 	return _CELL_TAG_RE.sub(_repl, html_body or "")
@@ -456,6 +501,9 @@ def _promote_table_alignment(html_body: str) -> str:
 # long AND structured (a heading, or an explicit page break). ``cover`` overrides.
 _COVER_MIN_CHARS = 6000
 _STRUCTURE_RE = re.compile(r"<h[12]\b", re.IGNORECASE)
+# Match `page-break` as a class TOKEN, so `class="section-divider page-break"`
+# (page-break combined with any other class) counts, not just a sole class.
+_PAGE_BREAK_RE = re.compile(r'class="[^"]*\bpage-break\b[^"]*"', re.IGNORECASE)
 
 
 def _decide_cover(cover: bool | None, body: str) -> bool:
@@ -465,7 +513,7 @@ def _decide_cover(cover: bool | None, body: str) -> bool:
 		return bool(cover)
 	text = _html.unescape(re.sub(r"<[^>]+>", "", body or ""))
 	long_enough = len(text.strip()) >= _COVER_MIN_CHARS
-	structured = bool(_STRUCTURE_RE.search(body or "")) or 'class="page-break"' in (body or "")
+	structured = bool(_STRUCTURE_RE.search(body or "")) or bool(_PAGE_BREAK_RE.search(body or ""))
 	return long_enough and structured
 
 
@@ -502,9 +550,16 @@ def _splice_charts(body: str, charts: list, notes: list[str]) -> str:
 	# Render each spec ONCE (or degrade to a note), keyed by index.
 	rendered: dict[int, str] = {}
 	for i, spec in enumerate(charts):
-		rows = spec.get("rows", []) if isinstance(spec, Mapping) else []
+		is_map = isinstance(spec, Mapping)
+		rows = spec.get("rows", []) if is_map else []
 		try:
-			rendered[i] = css_bar(rows)
+			# Forward the spec's optional title/caption (the plugin schema advertises
+			# them); css_bar escapes them and omits both when absent.
+			rendered[i] = css_bar(
+				rows,
+				title=spec.get("title") if is_map else None,
+				caption=spec.get("caption") if is_map else None,
+			)
 		except Exception:
 			notes.append(f"chart {i} was provided but its rows were malformed and could not be rendered")
 			rendered[i] = ""  # its token is removed rather than left as junk

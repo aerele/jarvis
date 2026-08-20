@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -791,7 +792,7 @@ class TestResolveBrand(unittest.TestCase):
 	def test_logo_from_letterhead_passed_through(self) -> None:
 		with (
 			patch.object(furniture, "resolve_letterhead", lambda _lh: ("<img src='data:x'>", "", None)),
-			patch.object(furniture, "_resolve_company_identity", lambda: (None, [])),
+			patch.object(furniture, "_resolve_company_identity", lambda: (None, [], None)),
 		):
 			brand = furniture.resolve_brand(None)
 		self.assertIn("<img", brand["logo_html"])
@@ -803,9 +804,134 @@ class TestResolveBrand(unittest.TestCase):
 				"resolve_letterhead",
 				lambda _lh: ("", "", "letterhead 'X' not found — rendered without it"),
 			),
-			patch.object(furniture, "_resolve_company_identity", lambda: ("Acme", ["1 St"])),
+			patch.object(furniture, "_resolve_company_identity", lambda: ("Acme", ["1 St"], None)),
 		):
 			brand = furniture.resolve_brand("X")
 		self.assertIn("not found", brand["note"])
 		self.assertEqual(brand["company"], "Acme")
 		self.assertEqual(brand["address_lines"], ["1 St"])
+
+	def test_footer_logo_used_when_header_logo_absent(self):
+		# A Letter Head whose logo lives only in the FOOTER field is still used.
+		with (
+			patch.object(furniture, "resolve_letterhead", lambda _lh: ("", "<img src='data:foot'>", None)),
+			patch.object(furniture, "_resolve_company_identity", lambda: (None, [], None)),
+		):
+			brand = furniture.resolve_brand(None)
+		self.assertIn("data:foot", brand["logo_html"])
+
+	def test_company_error_note_propagates(self):
+		# A real company-resolution ERROR (not legitimate absence) surfaces a note.
+		with (
+			patch.object(furniture, "resolve_letterhead", lambda _lh: ("", "", None)),
+			patch.object(
+				furniture,
+				"_resolve_company_identity",
+				lambda: (None, [], "company branding could not be resolved — rendered without it"),
+			),
+		):
+			brand = furniture.resolve_brand(None)
+		self.assertIn("could not be resolved", brand["note"])
+
+
+class TestCompanyIdentity(unittest.TestCase):
+	"""The security-sensitive company/primary-address resolver (was untested).
+	frappe is mocked wholesale so the branch logic is exercised without a site."""
+
+	def test_address_primary_only_happy_path(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.get_all.side_effect = [["ADDR-1"], ["ADDR-1"]]  # Dynamic Link, then Address
+			fk.has_permission.return_value = True
+			fk.db.get_value.return_value = {
+				"address_line1": "1 St",
+				"address_line2": "",
+				"city": "Bengaluru",
+				"state": "KA",
+				"pincode": "560001",
+				"country": "India",
+			}
+			lines = furniture._resolve_company_address_lines("Acme")
+		self.assertEqual(lines, ["1 St", "Bengaluru, KA, 560001", "India"])
+		# the Address query MUST filter on the primary flag (never a shipping addr).
+		addr_call = fk.get_all.call_args_list[1]
+		self.assertEqual(addr_call.kwargs["filters"]["is_primary_address"], 1)
+		self.assertEqual(addr_call.kwargs["filters"]["disabled"], 0)
+
+	def test_address_perm_denied_returns_empty(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.get_all.side_effect = [["ADDR-1"], ["ADDR-1"]]
+			fk.has_permission.return_value = False  # no Address read perm
+			self.assertEqual(furniture._resolve_company_address_lines("Acme"), [])
+
+	def test_no_primary_address_returns_empty(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.get_all.side_effect = [["ADDR-1"], []]  # linked, but none flagged primary
+			self.assertEqual(furniture._resolve_company_address_lines("Acme"), [])
+
+	def test_no_linked_address_returns_empty(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.get_all.side_effect = [[]]  # no Dynamic Link at all
+			self.assertEqual(furniture._resolve_company_address_lines("Acme"), [])
+
+	def test_partial_address_fields_drops_empties(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.get_all.side_effect = [["ADDR-1"], ["ADDR-1"]]
+			fk.has_permission.return_value = True
+			fk.db.get_value.return_value = {
+				"address_line1": "1 St",
+				"address_line2": None,
+				"city": None,
+				"state": None,
+				"pincode": None,
+				"country": None,
+			}
+			self.assertEqual(furniture._resolve_company_address_lines("Acme"), ["1 St"])
+
+	def test_identity_no_company_doctype_absent_no_note(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.db.exists.return_value = False  # frappe-only bench
+			self.assertEqual(furniture._resolve_company_identity(), (None, [], None))
+
+	def test_identity_no_read_perm_is_absence_not_error(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.db.exists.return_value = True
+			fk.defaults.get_user_default.return_value = "Acme"
+			fk.has_permission.return_value = False
+			self.assertEqual(furniture._resolve_company_identity(), (None, [], None))
+
+	def test_identity_multi_company_no_default_no_pick(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.db.exists.return_value = True
+			fk.defaults.get_user_default.return_value = None
+			fk.defaults.get_global_default.return_value = None
+			fk.get_all.return_value = [types.SimpleNamespace(name="A"), types.SimpleNamespace(name="B")]
+			name, lines, note = furniture._resolve_company_identity()
+		self.assertIsNone(name)  # >1 company, no default → no arbitrary pick
+
+	def test_identity_error_sets_degrade_note(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.db.exists.return_value = True
+			fk.defaults.get_user_default.side_effect = RuntimeError("db down")
+			name, lines, note = furniture._resolve_company_identity()
+		self.assertIsNone(name)
+		self.assertIn("could not be resolved", note)  # ERROR degrades WITH a note
+
+	def test_identity_address_error_keeps_name(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.db.exists.return_value = True
+			fk.defaults.get_user_default.return_value = "Acme"
+			fk.has_permission.return_value = True
+			fk.db.get_value.return_value = "Acme Ltd"
+			with patch.object(furniture, "_resolve_company_address_lines", side_effect=RuntimeError("boom")):
+				name, lines, note = furniture._resolve_company_identity()
+		self.assertEqual(name, "Acme Ltd")  # name kept despite the address failure
+		self.assertEqual(lines, [])
+		self.assertIsNone(note)
+
+
+class TestTextOnly(unittest.TestCase):
+	def test_strips_tags_collapses_whitespace_truncates(self):
+		self.assertEqual(furniture._text_only("<b>Hi</b>   there"), "Hi there")
+		self.assertEqual(furniture._text_only("a\n\n b\t c"), "a b c")
+		self.assertEqual(len(furniture._text_only("x" * 500)), 200)  # 200-char cap
+		self.assertEqual(furniture._text_only(None), "")

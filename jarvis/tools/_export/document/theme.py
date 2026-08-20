@@ -115,21 +115,35 @@ _PAGE_DIMENSIONS_PT = {
 	"TABLOID": (792.0, 1224.0),
 }
 
+# Extra top margin (mm) wkhtmltopdf reserves when a running header exists, so a
+# logo / brand line never overlaps the body. Defined HERE (the pure module) so
+# the ONE "+14mm when a header exists" rule is shared: furniture._build_args uses
+# it for --margin-top, and cover_height_pt subtracts it so the full cover fills
+# the ACTUAL printable area instead of overflowing onto page 2 (the branded-cover
+# bug the review caught).
+HEADER_RESERVE_MM = 14
 
-def cover_height_pt(page_size: str, orientation: str, margins_mm: float) -> float:
-	"""Printable page height in pt = page_height - 2*margin, page-size + orientation
-	aware. Unknown page size falls back to A4; the result is floored at 100pt so a
-	pathological margin can never make the cover collapse or go negative.
 
-	Public (furniture.py reuses it to place the watermark vertically) but still
-	pure - arithmetic on the args only, no ``frappe``."""
-	w, h = _PAGE_DIMENSIONS_PT.get((page_size or "A4").upper(), _PAGE_DIMENSIONS_PT["A4"])
-	if (orientation or "portrait").lower() == "landscape":
+def cover_height_pt(page_size: str, orientation: str, margins_mm: float, header: bool = False) -> float:
+	"""Printable page height in pt = page_height - top_margin - bottom_margin,
+	page-size + orientation aware. When ``header`` is True the top margin includes
+	the ``HEADER_RESERVE_MM`` reservation (matching furniture._build_args), so a
+	branded cover fills the page rather than spilling past ``page-break-after``.
+
+	Unknown page size falls back to A4; ``page_size``/``orientation`` are coerced to
+	str so a mistyped non-string arg degrades to the fallback instead of crashing;
+	the result is floored at 100pt so a pathological margin can never make the cover
+	collapse or go negative. Public (furniture.py reuses it to place the watermark)
+	but still pure - arithmetic on the args only, no ``frappe``."""
+	w, h = _PAGE_DIMENSIONS_PT.get(str(page_size or "A4").upper(), _PAGE_DIMENSIONS_PT["A4"])
+	if str(orientation or "portrait").lower() == "landscape":
 		w, h = h, w
 	try:
-		usable = h - 2 * (float(margins_mm) * _MM_TO_PT)
+		margin = max(0.0, float(margins_mm))
 	except (TypeError, ValueError):
-		usable = h - 2 * (15 * _MM_TO_PT)
+		margin = 15.0
+	top = margin + (HEADER_RESERVE_MM if header else 0)
+	usable = h - (top + margin) * _MM_TO_PT
 	return round(max(usable, 100.0), 1)
 
 
@@ -160,7 +174,7 @@ h1 { font-size: 22pt; line-height: 1.2;  margin: 0 0 8pt; }
 h2 { font-size: 16pt; line-height: 1.25; margin: 20pt 0 7pt; }
 h3 { font-size: 13pt; line-height: 1.3;  margin: 16pt 0 6pt; }
 h4 { font-size: 11.5pt; line-height: 1.35; margin: 14pt 0 5pt; }
-h5 { font-size: 10.5pt; line-height: 1.4; margin: 12pt 0 4pt; color: $ink; }
+h5 { font-size: 11pt; line-height: 1.4; margin: 12pt 0 4pt; color: $dark; }
 h6 {
 	font-size: 9.5pt;
 	line-height: 1.4;
@@ -170,12 +184,15 @@ h6 {
 	color: $muted;
 }
 /* A doc/section opening on a heading gets no dead gap above it. */
-h1:first-child, h2:first-child, h3:first-child { margin-top: 0; }
+h1:first-child, h2:first-child, h3:first-child,
+h4:first-child, h5:first-child, h6:first-child { margin-top: 0; }
 
 /* --- body prose (was untuned WebKit defaults) ------------------------- */
 
 p { margin: 0 0 8pt; max-width: 34em; }
-ul, ol { margin: 0 0 8pt; padding-left: 20pt; }
+/* Cap lists to the same measure as prose so the right edge doesn't go ragged
+   (a bullet list running full-width beside capped paragraphs reads unfinished). */
+ul, ol { margin: 0 0 8pt; padding-left: 20pt; max-width: 34em; }
 li { margin-bottom: 3pt; }
 ul ul, ol ol, ul ol, ol ul { margin: 4pt 0 0; }
 blockquote {
@@ -240,6 +257,10 @@ thead th {
    lines up with its column instead of hanging left. */
 .num, th.num, td.num, thead th.num {
 	text-align: right;
+}
+/* Center a column/cell (md's |:---:| centered column promotes to this). */
+.text-center, th.text-center, td.text-center, thead th.text-center {
+	text-align: center;
 }
 
 /* Alternating body-row shading - opt a table in with class="zebra". Lighter
@@ -469,15 +490,19 @@ $indent_rules
 )
 
 
-def component_css(page_size: str = "A4", orientation: str = "portrait", margins_mm: float = 15) -> str:
+def component_css(
+	page_size: str = "A4", orientation: str = "portrait", margins_mm: float = 15, header: bool = False
+) -> str:
 	"""Return the branded component stylesheet (see module docstring for the full
 	class-name contract).
 
 	Pure string composition - no I/O, no ``frappe``. Deterministic for a given
-	``(page_size, orientation, margins_mm)``. The geometry only affects the full
-	``.cover`` height (``_cover_height_pt``); every other rule is fixed. The
-	default call ``component_css()`` (A4 / portrait / 15mm) is unchanged, so
-	``THEME_CSS`` and legacy no-arg callers keep working.
+	``(page_size, orientation, margins_mm, header)``. The geometry only affects the
+	full ``.cover`` height (``cover_height_pt``); every other rule is fixed.
+	``header`` must reflect whether the render will have a running header (brand /
+	agent header / watermark), so the cover height accounts for the reserved top
+	margin. The default call ``component_css()`` (A4 / portrait / 15mm / no header)
+	is unchanged, so ``THEME_CSS`` and legacy no-arg callers keep working.
 	"""
 	indent_rules = "\n".join(
 		f".indent-{level} {{ padding-left: {level * _INDENT_STEP_PT}pt; }}" for level in _INDENT_LEVELS
@@ -505,7 +530,7 @@ def component_css(page_size: str = "A4", orientation: str = "portrait", margins_
 		s3=_SERIES[2],
 		s4=_SERIES[3],
 		indent_rules=indent_rules,
-		cover_height=cover_height_pt(page_size, orientation, margins_mm),
+		cover_height=cover_height_pt(page_size, orientation, margins_mm, header=header),
 	)
 
 
