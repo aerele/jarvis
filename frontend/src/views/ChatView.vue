@@ -9317,18 +9317,15 @@ function _ensureVoiceSession() {
 		//   * upload — the recorder now encodes at 32 kbps (useDictationRecorder's
 		//     AUDIO_BITS_PER_SECOND), so the 300 s worst-case take is ~1.2 MB, ~10 s on a
 		//     1 Mbps uplink (it was ~4.6 MB / ~37 s at Chrome's measured 129 kbps default).
-		//   * server — ONE transcription attempt now (voice.py `_TRANSCRIBE_ATTEMPTS`), so
-		//     10 s connect + 60 s read = 70 s, not 140. whisper-turbo does 300 s of audio in
-		//     1.2 s; the second attempt doubled the worst case to buy almost nothing.
-		//   * 10 + 70 = ~80 s worst case, against a 150 s client budget — real margin, where
-		//     before it was 177 s of worst case against 150 s and the client aborted calls the
-		//     server was about to finish, then re-uploaded them.
+		//   * server - ONE transcription attempt (voice.py `_TRANSCRIBE_ATTEMPTS`), with
+		//     10 s to connect and 90 s to read the Gemini Flash result.
+		//   * 10 + 100 = ~110 s worst case, against a 150 s client budget - enough margin
+		//     for the browser upload without aborting a provider call that is about to finish.
 		// Aborting early is the expensive mistake: it turns a slow-but-fine transcription into a
 		// failure and pays OpenRouter for work the user never sees.
 		transcribe: async (rec, signal) => {
 			const res = await voice.transcribeAudio(rec.blob, {
 				durationS: rec.durationS,
-				timeoutMs: 150000,
 				signal,
 			});
 			if (res && res.ok === true && typeof res.text === "string") return res.text;
@@ -9393,7 +9390,7 @@ const micRec = useDictationRecorder({
 		const id = _activeRecordingId;
 		_activeRecordingId = null;
 		if (!voiceStore || id == null) return;
-		// WHOLE-TAKE SILENCE GATE (voiceSilenceGate.js). whisper hallucinates confident phrases
+		// WHOLE-TAKE SILENCE GATE (voiceSilenceGate.js). Audio models can hallucinate phrases
 		// ("Thank you.") onto silent audio and the provider exposes no no_speech_prob to filter
 		// on, so a take the recorder MEASURED as inaudible from end to end is never uploaded. It
 		// is NOT deleted: finishSilent() routes it to the same terminal `failed` state an empty
