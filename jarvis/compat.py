@@ -1,9 +1,9 @@
 """Cross-major shims for the Frappe / ERPNext APIs this app calls.
 
-``pyproject.toml`` declares ``frappe = ">=15.0.0,<17.0.0"``, so the customer app
-has to run on both majors. Three APIs moved between 15 and 16 in ways that are
-not backward compatible, and each one was written against 16 and shipped onto
-15 benches, where it raised at call time:
+Jarvis ships separate branches for Frappe 15 and 16. These shims remain on both
+branches so compatibility fixes can be backported safely. Three APIs moved
+between 15 and 16 in ways that are not backward compatible, and each one was
+written against 16 and shipped onto 15 benches, where it raised at call time:
 
 * ``File.get_content`` grew an ``encodings`` kwarg in 16. Passing it on 15 is a
   ``TypeError``, which broke every chat attachment and every ``read_file`` call.
