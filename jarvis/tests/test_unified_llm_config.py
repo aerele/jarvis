@@ -607,13 +607,18 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		settings.preset = None
 		self.assertFalse(compute_pool_mode(settings))
 
-	def test_compute_pool_mode_false_for_a_fresh_lone_google_subscription(self):
-		"""Google is the second renderable upstream (renderer_id google-gemini-cli)."""
+	def test_compute_pool_mode_true_for_a_fresh_lone_google_subscription(self):
+		"""Google's chat subscription was removed 2026-08-19 (Google discontinued
+		login-with-Google for Gemini); the bundled catalog's google row now
+		carries an empty renderer_id (and supports_subscription=False), so
+		google is no longer a direct-renderable upstream. A lone google
+		subscription row (e.g. stale pre-removal tenant data) now takes the
+		pool leg like Kimi/xAI, not the jarvis#715 direct-leg exception."""
 		from jarvis.jarvis.pool_serialize import compute_pool_mode
 
 		settings = _make_settings_with_models([_subscription_model(accounts=[_account(upstream="google")])])
 		settings.preset = None
-		self.assertFalse(compute_pool_mode(settings))
+		self.assertTrue(compute_pool_mode(settings))
 
 	def test_compute_pool_mode_true_for_a_lone_subscription_already_pool_synced(self):
 		"""THE RETROACTIVITY PIN (jarvis#715): an already-provisioned tenant - its
