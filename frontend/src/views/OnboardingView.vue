@@ -928,24 +928,24 @@
 								</div>
 							</template>
 							<!-- Settling: the customer COMPLETED checkout (pay=done) and the
-								 one-shot reconcile came back still-pending (S.UNKNOWN). Razorpay's
-								 confirmation webhook commonly lags the browser redirect by a few
-								 seconds, so this is the normal happy path, not a failure. Hold a
-								 calm, honest wait while the background auto-poll (runPendingAutoPoll,
-								 ~2 min) confirms, instead of dropping straight to the alarming
-								 recovery card. Escalates to showRecovery only once the poll gives up
-								 (pendingPollStuck) or a real code arrives. Says "confirming", never
+								 one-shot reconcile came back still-pending - either
+								 PAYMENT_CONFIRMATION_PENDING (webhook lag, S.UNKNOWN) or
+								 PAYMENT_AUTHORIZED_PENDING_CONFIRM (bank confirming the auto-pay
+								 mandate, S.CONFIRM_REQUIRED - the standard trial/auto-pay path).
+								 Both are the normal happy path, not a failure. Hold a calm, honest
+								 wait while the background auto-poll (runPendingAutoPoll, ~2 min)
+								 confirms, instead of dropping straight to the alarming recovery
+								 card. Escalates to showRecovery only once the poll gives up
+								 (pendingPollStuck) or a real code arrives. Copy is state-keyed
+								 (settlingCopy): only the genuinely-authorized state claims
+								 "authorized"; the webhook-lag state says "confirming", never
 								 "confirmed" - money truth stays server-owned (see paymentCodes.js and
 								 the 84s double-mandate incident that shaped that rule). -->
 							<template v-else-if="showPaymentSettling">
 								<div class="ob-body ob-body--center">
 									<div class="ob-head">
-										<h1 role="status">Confirming your payment</h1>
-										<p>
-											You've completed checkout. We're waiting for your
-											payment provider to confirm it, which can take up to a
-											minute, and we're checking automatically.
-										</p>
+										<h1 role="status">{{ settlingCopy.headline }}</h1>
+										<p>{{ settlingCopy.body }}</p>
 									</div>
 									<div class="mt-2.5 flex justify-center">
 										<JvSpinner :size="56" />
@@ -3108,11 +3108,25 @@ async function whileConfirmingReturn(run) {
 		confirmingReturn.value = false;
 	}
 }
+// The pending states the background auto-poll covers AND the calm settling hold
+// fronts. Kept as ONE predicate so the loop guards, restartPendingAutoPoll and the
+// settling computed can never drift apart:
+//   - S.UNKNOWN                 PAYMENT_CONFIRMATION_PENDING (webhook lag after checkout)
+//   - S.CONFIRM_REQUIRED        PAYMENT_AUTHORIZED_PENDING_CONFIRM (bank confirming the
+//                               auto-pay e-NACH mandate - the standard trial/auto-pay
+//                               signup lands HERE, so it is the primary panic in prod)
+// Both are "authorized/paid, admin just hasn't confirmed yet" waits, never a dead end.
+// CONFIRM_REQUIRED can pend past the ceiling (e-NACH is slow by design); the ceiling +
+// honest escalation below is exactly what bounds it, so the calm hold never hangs
+// forever (the concern that originally kept this state out).
+function isAutoPollable(v) {
+	return v === S.UNKNOWN || v === S.CONFIRM_REQUIRED;
+}
 const showRecovery = computed(
 	() =>
 		!payBusyView.value &&
 		!showConfirming.value &&
-		// The calm settling hold owns the UNKNOWN window right after a completed
+		// The calm settling hold owns the pending window right after a completed
 		// checkout; recovery only takes over once that hold releases (poll gave up,
 		// or the state moved on). Everything else here is unchanged.
 		!showPaymentSettling.value &&
@@ -3125,21 +3139,40 @@ const showRecovery = computed(
 // The calm "we're confirming, hang tight" hold shown INSTEAD of the recovery card
 // during the normal post-checkout wait. Conditions, all required:
 //   - the customer actually completed checkout this session (returnedFromCompletedCheckout)
-//   - the machine is on S.UNKNOWN - the coded PAYMENT_CONFIRMATION_PENDING wait, or a
-//     return not yet resolved; the ONLY state the auto-poll (runPendingAutoPoll) covers
+//   - the machine is on an auto-pollable pending state (isAutoPollable): the coded
+//     PAYMENT_CONFIRMATION_PENDING / PAYMENT_AUTHORIZED_PENDING_CONFIRM waits, or a return
+//     not yet resolved - the same states the auto-poll (runPendingAutoPoll) covers
 //   - the auto-poll has NOT given up (!pendingPollStuck) - once it does, we escalate to
 //     the recovery card with its honest "checked for a couple of minutes" note + support
 //   - we are not already showing the one-shot confirming spinner or a busy screen
-// Deliberately NOT extended to S.CONFIRM_REQUIRED (PAYMENT_AUTHORIZED_PENDING_CONFIRM):
-// an e-NACH mandate can pend indefinitely with no auto-poll behind it, so a calm spinner
-// there would hang forever - its own copy is already non-alarming. See PR / advisor notes.
 const showPaymentSettling = computed(
 	() =>
 		!payBusyView.value &&
 		!showConfirming.value &&
 		returnedFromCompletedCheckout.value &&
 		!pendingPollStuck.value &&
-		pay.value.value === S.UNKNOWN
+		isAutoPollable(pay.value.value)
+);
+// The calm-screen copy, keyed off which pending state we are settling. The state's OWN
+// coded headline is used only where it already reads calm: PAYMENT_AUTHORIZED_PENDING_CONFIRM
+// is a real authorization at the gateway, so "Your payment is authorized" is both true and
+// reassuring. PAYMENT_CONFIRMATION_PENDING's coded headline is the alarming "We have not
+// confirmed this payment" - the whole point of this hold is to NOT show that during the
+// normal wait, so it gets bespoke calm copy instead.
+const settlingCopy = computed(() =>
+	pay.value.value === S.CONFIRM_REQUIRED
+		? {
+				headline: "Your payment is authorized",
+				body:
+					"Your bank is confirming the auto-pay mandate, which usually takes a few " +
+					"minutes. We're checking automatically, so there's nothing you need to do.",
+		  }
+		: {
+				headline: "Confirming your payment",
+				body:
+					"You've completed checkout. We're waiting for your payment provider to confirm " +
+					"it, which can take up to a minute, and we're checking automatically.",
+		  }
 );
 // role=alert only for an actionable failure; role=status for pending/info
 // (plan 02 §a11y - a pending payment announced as an alert on every poll is a
@@ -3340,9 +3373,9 @@ async function runPendingAutoPoll(myRun) {
 				? PENDING_FIRST_CHECK_MS
 				: PENDING_CHECK_INTERVAL_MS
 		);
-		if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
+		if (pendingPollRun !== myRun || !isAutoPollable(pay.value.value)) return;
 		await flow.checkStatus();
-		if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
+		if (pendingPollRun !== myRun || !isAutoPollable(pay.value.value)) return;
 		// A rate limit says nothing about the money (see paymentCodes.js) - wait
 		// out the SERVER's own cooldown ON TOP OF the ordinary interval already
 		// elapsed, so the next attempt cannot land inside it and poll straight
@@ -3352,10 +3385,10 @@ async function runPendingAutoPoll(myRun) {
 		const waitMs = (pay.value.checkCooldownUntil || 0) - Date.now();
 		if (waitMs > 0) {
 			await _sleep(waitMs);
-			if (pendingPollRun !== myRun || pay.value.value !== S.UNKNOWN) return;
+			if (pendingPollRun !== myRun || !isAutoPollable(pay.value.value)) return;
 		}
 	}
-	if (pendingPollRun === myRun && pay.value.value === S.UNKNOWN) {
+	if (pendingPollRun === myRun && isAutoPollable(pay.value.value)) {
 		pendingPollStuck.value = true;
 	}
 }
@@ -3368,9 +3401,15 @@ async function runPendingAutoPoll(myRun) {
 function restartPendingAutoPoll() {
 	pendingPollRun += 1; // supersede whatever was already running
 	pendingPollStuck.value = false;
-	if (pay.value.value === S.UNKNOWN && state.step === "pay") {
+	if (isAutoPollable(pay.value.value) && state.step === "pay") {
 		runPendingAutoPoll(pendingPollRun);
 	}
+	// NOTE: the value-change watch fires restartPendingAutoPoll on a
+	// S.UNKNOWN -> S.CONFIRM_REQUIRED transition too, resetting the loop to its first
+	// tick. So a signup that passes through both waits can sit on the calm hold for up
+	// to ~2 min PER state (~4 min total) before escalating. Acceptable: both are
+	// genuine "authorized/paid, awaiting confirmation" waits, and the escalation is a
+	// ceiling on each, never a forever-spinner.
 }
 watch(() => pay.value.value, restartPendingAutoPoll);
 // Clear the completed-checkout proof the instant a (new or resumed) checkout opens.

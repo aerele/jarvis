@@ -1466,4 +1466,82 @@ describe("post-checkout settling hold (calm wait, not the panic card)", () => {
 		await vi.advanceTimersByTimeAsync(11_000);
 		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
 	});
+
+	// The primary production path: the ₹0 auto-pay authorization lands on
+	// PAYMENT_AUTHORIZED_PENDING_CONFIRM (S.CONFIRM_REQUIRED) while the bank confirms the
+	// e-NACH mandate. The calm hold + auto-poll must cover this state too, not just the
+	// webhook-lag one - otherwise a customer who just authorized sees the recovery card's
+	// "Check payment status / Contact support / nothing has changed yet" chrome.
+	const AUTHORIZED_CALM = "there's nothing you need to do";
+	const AUTHORIZED_RECOVERY = "We are watching for it";
+	function mandatePendingAfterDoneReturn() {
+		atSearch("?pay=done");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: "att_m",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: "att_m",
+				generation: 1,
+			})
+		);
+	}
+
+	it("shows the calm 'authorized' screen (not the recovery card) for a pending auto-pay mandate", async () => {
+		mandatePendingAfterDoneReturn();
+		const wrapper = mountView();
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.CONFIRM_REQUIRED);
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+		expect(wrapper.vm.showRecovery).toBe(false);
+		expect(wrapper.text()).toContain("Your payment is authorized");
+		expect(wrapper.text()).toContain(AUTHORIZED_CALM);
+		// The recovery card's own body / Contact-support chrome must NOT be showing.
+		expect(wrapper.text()).not.toContain(AUTHORIZED_RECOVERY);
+	});
+
+	it("a pending mandate WITHOUT a completed return still gets the recovery card", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: "att_m",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: "att_m",
+				generation: 1,
+			})
+		);
+		const wrapper = mountView();
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.CONFIRM_REQUIRED);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+		expect(wrapper.vm.showRecovery).toBe(true);
+		expect(wrapper.text()).toContain(AUTHORIZED_RECOVERY);
+		expect(wrapper.text()).not.toContain(AUTHORIZED_CALM);
+	});
+
+	it("escalates the mandate wait to the recovery card once the auto-poll gives up", async () => {
+		mandatePendingAfterDoneReturn();
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+
+		await vi.advanceTimersByTimeAsync(4_000 + 8 * 15_000);
+		expect(wrapper.vm.pendingPollStuck).toBe(true);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+		expect(wrapper.vm.showRecovery).toBe(true);
+		expect(wrapper.text()).toContain(AUTHORIZED_RECOVERY);
+	});
 });
