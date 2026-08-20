@@ -67,7 +67,12 @@ from frappe.utils.html_utils import sanitize_html
 from jarvis import telemetry
 from jarvis.exceptions import InvalidArgumentError, NoDataError
 from jarvis.tools._export import save_export_file
-from jarvis.tools._export.document.furniture import render_pdf, resolve_letterhead
+from jarvis.tools._export.document.furniture import (
+	build_brand_header,
+	build_title_block,
+	render_pdf,
+	resolve_brand,
+)
 from jarvis.tools._export.document.graphics import css_bar
 from jarvis.tools._export.document.sanitizer import sanitize_rich
 from jarvis.tools._export.document.theme import component_css
@@ -131,6 +136,9 @@ def export_document(
 	margins_mm: int = 15,
 	page_numbers: bool = True,
 	charts: list | None = None,
+	subtitle: str | None = None,
+	meta: str | None = None,
+	cover: bool | None = None,
 ) -> dict:
 	"""Render ``content`` and return ``{file_url, filename, title, mime_type,
 	size_bytes, name}`` for a private downloadable File (the rich path also adds
@@ -149,11 +157,17 @@ def export_document(
 	    stylesheet is applied to EVERY rich render regardless; ``theme`` is one of
 	    the activators, not an independent on/off switch for the CSS.)
 	  * ``letterhead`` — a ``Letter Head`` name (str) to brand with, or ``True`` to
-	    opt into the rich path without naming one. On the PDF path a letterhead is
-	    ALWAYS applied when one can be resolved — the named one, else the site's
-	    default ``Letter Head``. Its logo images are read-permission-checked and
-	    base64-inlined; images with a remote URL are dropped (never fetched).
-	  * ``header`` / ``footer`` / ``watermark`` — page furniture (PDF only).
+	    opt into the rich path without naming one. Branding is AUTOMATIC on the rich
+	    path via ``resolve_brand``: the default (or named) Letter Head logo, else the
+	    default Company's name + primary address. Logo images are read-permission-
+	    checked and base64-inlined; remote images are dropped (never fetched).
+	  * ``title`` / ``subtitle`` / ``meta`` — the tool builds a clean title masthead
+	    from these (the agent never hand-writes a title, so raw Markdown can't leak).
+	    ``cover`` forces (``True``) / suppresses (``False``) a full cover page; ``None``
+	    auto-picks (a full cover only for a long, structured document).
+	  * ``header`` / ``watermark`` — page furniture (PDF only). ``footer`` is a short
+	    TEXT line at the bottom-left; page numbers always render bottom-right, so a
+	    footer and page numbers coexist (branding rides the running header).
 	  * ``page_size`` / ``orientation`` / ``margins_mm`` / ``page_numbers`` — page
 	    geometry (consumed by the rich path; they do NOT by themselves trigger it).
 	  * ``charts`` — a list of CSS-bar specs (``{"rows": [...]}``); reference each
@@ -199,6 +213,9 @@ def export_document(
 				margins_mm=margins_mm,
 				page_numbers=page_numbers,
 				charts=charts,
+				subtitle=subtitle,
+				meta=meta,
+				cover=cover,
 			)
 			outcome = "degraded" if env["notes"] else "ok"
 		else:
@@ -282,10 +299,14 @@ def _render_rich(
 	margins_mm,
 	page_numbers,
 	charts,
+	subtitle,
+	meta,
+	cover,
 ) -> dict:
-	"""The branded rich pipeline: md→HTML → sanitize → post-sanitize chart splice
-	→ emptiness guard → theme-wrap → render/compose → save. Returns the download
-	envelope plus a ``notes`` list carrying every degrade."""
+	"""The branded rich pipeline: md→HTML → promote-alignment → sanitize →
+	post-sanitize chart splice → emptiness guard → resolve brand → tool-built
+	masthead → theme-wrap → render/compose → save. Returns the download envelope
+	plus a ``notes`` list carrying every degrade."""
 	start = time.monotonic()
 	charts = charts or []
 	if len(charts) > _MAX_CHARTS:
@@ -294,53 +315,60 @@ def _render_rich(
 	notes: list[str] = []
 
 	# 1. markdown → HTML BEFORE sanitize (else ![](…)/autolinks regenerate <img>/
-	#    links post-strip); raw HTML is passed straight to the sanitizer.
-	body = content if content_is_html else frappe.utils.md_to_html(content)
+	#    links post-strip); raw HTML is passed straight to the sanitizer. Promote
+	#    md's right-aligned numeric columns (|--:|) to class="num" while the inline
+	#    style is still present — sanitize strips the style but keeps the class, so
+	#    numeric headers/cells stay right-aligned.
+	body = content if content_is_html else _promote_table_alignment(frappe.utils.md_to_html(content))
 	# 2. sanitize the full agent body.
 	body = sanitize_rich(body)
 	# 3. splice tool-generated chart HTML into {{chart:N}} tokens (AFTER sanitize —
 	#    this markup is tool-controlled, so it is trusted).
 	body = _splice_charts(body, charts, notes)
-	# 4. emptiness guard: never emit a blank PDF. Check VISIBLE TEXT, not the raw
-	#    markup string — content that sanitized/spliced down to empty tags
-	#    (e.g. "<p></p>") is a truthy string but a blank document.
+	# 4. emptiness guard on the BODY: never emit a blank PDF. The tool-built
+	#    masthead (below) is furniture, not content — a title alone is not a
+	#    document — so this checks the body's visible text, not the masthead.
 	if not _has_visible_content(body):
 		raise NoDataError("No content to export after sanitization.")
-	# 5. theme is tool-added AFTER sanitize (agent content never carries styling).
+	# 5. resolve the brand once (default Letter Head logo → else company name +
+	#    address), for the masthead and the running header. Fail-safe.
+	brand = resolve_brand(letterhead if isinstance(letterhead, str) else None)
+	if brand.get("note"):
+		notes.append(brand["note"])
+	# 6. tool-built masthead prepended to the body (trusted, class-only, escaped —
+	#    raw markdown can never leak into the title the way it did when the agent
+	#    hand-wrapped markdown in <div class="cover">). Full cover only for a
+	#    long/formal document; a scalable title block otherwise.
+	full_cover = _decide_cover(cover, body)
+	title_block = build_title_block(title, subtitle, meta, brand, full_cover)
+	# 7. theme CSS built for the render's page geometry (the full cover's height
+	#    fills the printable page). Tool-added AFTER sanitize.
+	css = component_css(page_size, orientation, margins_mm)
 
 	if fmt == "html":
 		# No wkhtmltopdf on the HTML path, so page furniture can't be applied —
-		# surface that rather than silently dropping it. page_numbers is excluded
-		# from this check: its default True would fire on every HTML render, and
-		# page numbers are auto-furniture, not caller content.
-		if header or footer or watermark or letterhead:
+		# surface that rather than silently dropping it (the brand/title masthead
+		# DOES render here, so it is not in this note). page_numbers is excluded:
+		# its default True would fire on every HTML render.
+		if header or footer or watermark:
 			notes.append("furniture (header/footer/watermark) applies only to PDF output")
 		doc_title = frappe.utils.escape_html(title) if title else "Document"
 		payload = (
 			f"<!doctype html><html><head><meta charset='utf-8'>"
-			f"<title>{doc_title}</title><style>{component_css()}</style></head>"
-			f"<body>{body}</body></html>"
+			f"<title>{doc_title}</title><style>{css}</style></head>"
+			f"<body>{title_block}{body}</body></html>"
 		).encode()
 	else:
-		# letterhead resolved HERE (notes is in scope): default to the site's
-		# default Letter Head when the caller named none, read-perm checked, images
-		# neutralised. render_pdf receives already-safe HTML.
-		lh_header, lh_footer, lh_note = resolve_letterhead(
-			letterhead if isinstance(letterhead, str) else None
-		)
-		if lh_note:
-			notes.append(lh_note)
-		styled_body = f"<style>{component_css()}</style>{body}"
+		styled_body = f"<style>{css}</style>{title_block}{body}"
 		pdf_bytes = render_pdf(
 			styled_body,
 			page_size=page_size,
 			orientation=orientation,
 			margins_mm=margins_mm,
 			header_html=header,
-			footer_html=footer,
+			footer_text=footer,
 			watermark=watermark,
-			letterhead_header=lh_header,
-			letterhead_footer=lh_footer,
+			brand_header=build_brand_header(brand),
 			page_numbers=page_numbers,
 			# The 25s bound covers the whole render; subtract the pre-render work
 			# (md→HTML, sanitize, splice) already spent so the total stays under
@@ -387,6 +415,58 @@ def _has_visible_content(html_fragment: str) -> bool:
 		return True
 	text = _html.unescape(re.sub(r"<[^>]+>", "", body))
 	return bool(text.strip())
+
+
+# md_to_html emits inline `text-align:right` on a `|--:|` column's cells; the
+# sanitizer strips inline style, so promote it to class="num" (which survives).
+_CELL_TAG_RE = re.compile(r"<(td|th)\b([^>]*)>", re.IGNORECASE)
+_CELL_STYLE_RE = re.compile(r'\bstyle\s*=\s*"([^"]*)"', re.IGNORECASE)
+_CELL_CLASS_RE = re.compile(r'\bclass\s*=\s*"([^"]*)"', re.IGNORECASE)
+_ALIGN_RIGHT_RE = re.compile(r"text-align:\s*right", re.IGNORECASE)
+
+
+def _promote_table_alignment(html_body: str) -> str:
+	"""Rewrite a right-aligned md table cell's inline style to ``class="num"``.
+
+	Markdown's ``|--:|`` numeric column renders as ``<td style="text-align:right">``;
+	``sanitize_rich`` strips inline ``style`` (classes-only), which would drop the
+	alignment. Promoting it to the ``.num`` class here — BEFORE sanitize — keeps the
+	numbers right-aligned AND their header aligned (theme's ``.num`` now covers
+	``<th>`` too). Only a cell that already carries the right-align style is
+	touched; the sanitizer still removes the style attribute afterwards.
+	"""
+
+	def _repl(match: "re.Match[str]") -> str:
+		tag, attrs = match.group(1), match.group(2)
+		style = _CELL_STYLE_RE.search(attrs)
+		if not style or not _ALIGN_RIGHT_RE.search(style.group(1)):
+			return match.group(0)
+		cls = _CELL_CLASS_RE.search(attrs)
+		if cls:
+			attrs = attrs[: cls.start(1)] + (cls.group(1) + " num").strip() + attrs[cls.end(1) :]
+		else:
+			attrs = attrs + ' class="num"'
+		return f"<{tag}{attrs}>"
+
+	return _CELL_TAG_RE.sub(_repl, html_body or "")
+
+
+# A full cover page suits a long, formal document but is absurd on a one-page
+# letter, so it is opt-in with a conservative auto: only when the body is BOTH
+# long AND structured (a heading, or an explicit page break). ``cover`` overrides.
+_COVER_MIN_CHARS = 6000
+_STRUCTURE_RE = re.compile(r"<h[12]\b", re.IGNORECASE)
+
+
+def _decide_cover(cover: bool | None, body: str) -> bool:
+	"""Whether to render a full cover page. ``cover`` True/False forces it; ``None``
+	is the auto heuristic (long AND structured), leaning to the clean title block."""
+	if cover is not None:
+		return bool(cover)
+	text = _html.unescape(re.sub(r"<[^>]+>", "", body or ""))
+	long_enough = len(text.strip()) >= _COVER_MIN_CHARS
+	structured = bool(_STRUCTURE_RE.search(body or "")) or 'class="page-break"' in (body or "")
+	return long_enough and structured
 
 
 def _short_err(exc: Exception) -> str:

@@ -153,6 +153,112 @@ class TestComponentCss(unittest.TestCase):
 		self.assertFalse(_has_class_token(css, "totally-made-up-class-xyz"))
 
 
+def _rule_body(css: str, selector_regex: str) -> str:
+	"""Return the ``{...}`` body of the first rule whose selector matches."""
+	m = re.search(selector_regex + r"\s*\{([^}]*)\}", css)
+	return m.group(1) if m else ""
+
+
+# New class-name contract added by the template-polish pass.
+_POLISH_CLASSES = [
+	"doc-title-block",
+	"doc-title",
+	"doc-subtitle",
+	"doc-meta",
+	"doc-brand",
+	"brand-name",
+	"brand-addr",
+	"page-break",
+	"bar-chart-title",
+	"bar-chart-caption",
+	"series-1",
+	"series-2",
+	"series-3",
+	"series-4",
+]
+
+
+class TestPolishContract(unittest.TestCase):
+	"""Locks the presentation-ready polish: refined type scale + rhythm, the
+	tool-built title block, the section-divider/page-break split, the computed
+	cover height, and the chart/table alignment fixes."""
+
+	def test_polish_classes_present(self):
+		css = theme.component_css()
+		for class_name in _POLISH_CLASSES:
+			with self.subTest(class_name=class_name):
+				self.assertTrue(
+					_has_class_token(css, class_name), f".{class_name} missing from component_css()"
+				)
+
+	def test_heading_scale_refined_with_top_rhythm(self):
+		"""h2 is 16pt (was an oversized 20pt) AND carries a nonzero TOP margin -
+		the vertical-rhythm fix (the old `margin:0 0 10pt` gave sections no space
+		above)."""
+		css = theme.component_css()
+		body = _rule_body(css, r"(?<![\w.-])h2")
+		self.assertIn("font-size: 16pt", body)
+		m = re.search(r"margin:\s*(\d+)pt", body)
+		self.assertTrue(m and int(m.group(1)) > 0, "h2 must have a nonzero top margin")
+
+	def test_num_right_aligns_the_header_too(self):
+		"""`.num` right-aligns the <th>, not just the <td> - numeric header/number
+		alignment fix."""
+		self.assertIn("th.num", theme.component_css())
+
+	def test_callout_surface_distinct_from_zebra(self):
+		"""The callout card background differs from the zebra stripe, so a callout
+		next to a striped table doesn't read as the same surface."""
+		self.assertNotEqual(theme._CALLOUT_BG, theme._ZEBRA)
+		css = theme.component_css()
+		self.assertIn(theme._CALLOUT_BG, css)
+		self.assertIn(theme._ZEBRA, css)
+
+	def test_section_divider_no_longer_forces_a_page_break(self):
+		"""`.section-divider` is now a rule only; forcing a break moves to
+		`.page-break` (the old auto-break ejected a page on every use)."""
+		css = theme.component_css()
+		self.assertNotIn("page-break-before", _rule_body(css, r"\.section-divider"))
+		self.assertIn("page-break-before", _rule_body(css, r"\.page-break"))
+
+	def test_cover_height_is_page_geometry_aware(self):
+		"""The full cover fills the printable page: its height differs by page size
+		and orientation and margins (the old `height:100%` collapsed to nothing)."""
+		a4 = _rule_body(theme.component_css("A4", "portrait", 15), r"\.cover")
+		letter = _rule_body(theme.component_css("Letter", "portrait", 15), r"\.cover")
+		a4_landscape = _rule_body(theme.component_css("A4", "landscape", 15), r"\.cover")
+		wide_margin = _rule_body(theme.component_css("A4", "portrait", 40), r"\.cover")
+
+		def _h(rule):
+			m = re.search(r"height:\s*([\d.]+)pt", rule)
+			self.assertTrue(m, "cover height not found")
+			return float(m.group(1))
+
+		self.assertNotEqual(_h(a4), _h(letter))
+		self.assertNotEqual(_h(a4), _h(a4_landscape))
+		self.assertLess(_h(wide_margin), _h(a4))  # bigger margins -> shorter cover
+		self.assertGreater(_h(a4), 100)
+
+	def test_component_css_default_unchanged_by_new_signature(self):
+		"""The new geometry params default to A4/portrait/15mm; the no-arg call and
+		THEME_CSS stay identical (zero regression for existing callers)."""
+		self.assertEqual(theme.component_css(), theme.component_css("A4", "portrait", 15))
+		self.assertEqual(theme.THEME_CSS, theme.component_css())
+
+	def test_page_break_inside_avoid_on_grouped_components(self):
+		css = theme.component_css()
+		for sel in (r"\.kpi-tile", r"\.callout", r"\.signature-block"):
+			with self.subTest(sel=sel):
+				self.assertIn("page-break-inside: avoid", _rule_body(css, sel))
+
+	def test_thead_repeats_across_pages(self):
+		self.assertIn("display: table-header-group", _rule_body(theme.component_css(), r"thead"))
+
+	def test_prose_measure_is_capped(self):
+		"""Paragraphs cap their measure (line length) for readability."""
+		self.assertIn("max-width", _rule_body(theme.component_css(), r"(?<![\w.-])p"))
+
+
 class TestThemeModulePurity(unittest.TestCase):
 	def test_theme_module_is_pure(self):
 		"""theme.py must never import frappe - it has to be unit-testable without a
