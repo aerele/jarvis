@@ -316,3 +316,39 @@ class TestFmtGuards(unittest.TestCase):
 	def test_fmt_amount_unparseable_string_renders_em_dash(self) -> None:
 		self.assertEqual(fmt_amount("not-a-number"), "—")
 		self.assertEqual(self.calls["fmt_money"], [])
+
+
+class TestCssBarPolish(unittest.TestCase):
+	"""Additive css_bar polish: title/caption labels + per-row series color.
+	The default (no title/caption/series) must stay byte-identical."""
+
+	def test_default_output_unchanged(self) -> None:
+		rows = [{"label": "Q1", "value": "10", "pct": 50}]
+		self.assertEqual(css_bar(rows), css_bar(rows, title=None, caption=None))
+		out = css_bar(rows)
+		self.assertNotIn("bar-chart-title", out)
+		self.assertNotIn("bar-chart-caption", out)
+		self.assertIn('<span class="bar" style="width:50%">', out)
+
+	def test_title_and_caption_render_escaped_in_order(self) -> None:
+		out = css_bar([{"label": "Q1", "value": "10", "pct": 50}], title="Revenue <x>", caption="in INR")
+		self.assertIn('<div class="bar-chart-title">Revenue &lt;x&gt;</div>', out)
+		self.assertIn('<div class="bar-chart-caption">in INR</div>', out)
+		self.assertLess(out.index("bar-chart-title"), out.index("bar-row"))
+		self.assertGreater(out.index("bar-chart-caption"), out.index("bar-row"))
+
+	def test_series_colors_the_bar(self) -> None:
+		for n in (1, 2, 3, 4):
+			with self.subTest(series=n):
+				out = css_bar([{"label": "A", "value": "1", "pct": 10, "series": n}])
+				self.assertIn(f'<span class="bar series-{n}" style="width:10%">', out)
+
+	def test_invalid_series_is_ignored_never_injected(self) -> None:
+		"""A series outside 1-4, or a non-int (float/inf/str/bool), keeps the default
+		bar - never interpolates an agent value into the class, never raises on inf,
+		never truncates 2.5 -> a valid 2."""
+		for bad in (0, 5, -1, "x", None, "2; }", "<script>", 2.5, float("inf"), True):
+			with self.subTest(series=bad):
+				out = css_bar([{"label": "A", "value": "1", "pct": 10, "series": bad}])
+				self.assertIn('<span class="bar" style="width:10%">', out)
+				self.assertNotIn("series-", out)

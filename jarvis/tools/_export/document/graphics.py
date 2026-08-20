@@ -51,7 +51,12 @@ def number_format_precision() -> int:
 	return get_number_format_info(fmt)[2]
 
 
-def css_bar(rows: Sequence[Mapping[str, object] | Sequence[object]]) -> str:
+def css_bar(
+	rows: Sequence[Mapping[str, object] | Sequence[object]],
+	*,
+	title: str | None = None,
+	caption: str | None = None,
+) -> str:
 	"""Render an inert CSS bar chart as ``.bar-row`` blocks, each a three-column
 	line: ``.bar-label`` (name) · ``.bar-track`` holding the width-set ``.bar`` ·
 	``.bar-value`` (the figure). This is the structure ``theme.THEME_CSS`` styles;
@@ -60,20 +65,51 @@ def css_bar(rows: Sequence[Mapping[str, object] | Sequence[object]]) -> str:
 	Each row supplies ``label``, ``value`` (both escaped text) and ``pct`` (the
 	bar's width, clamped to 0-100 - the only number reaching an inline ``style``).
 	A row may be a mapping with those three keys, or a positional
-	``(label, value, pct)`` sequence.
+	``(label, value, pct)`` sequence. A mapping row may also carry ``series`` (an
+	int 1-4) to color the bar from the categorical palette (grouped charts);
+	anything outside 1-4 is ignored (the bar stays the default primary), never
+	interpolated raw into the class.
+
+	Optional ``title``/``caption`` render an escaped ``.bar-chart-title`` above
+	the rows and a ``.bar-chart-caption`` below them. With neither, and no
+	``series``, the output is byte-identical to the pre-polish single-bar markup,
+	so existing callers and structural tests are unaffected.
 	"""
 	rows_html = []
 	for row in rows:
 		label, value, pct = _row_parts(row)
 		width = _clamp_pct(pct)
+		bar_class = "bar" + (_series_class(row.get("series")) if isinstance(row, Mapping) else "")
 		rows_html.append(
 			'<div class="bar-row">'
 			f'<span class="bar-label">{_esc(label)}</span>'
-			f'<span class="bar-track"><span class="bar" style="width:{width}%"></span></span>'
+			f'<span class="bar-track"><span class="{bar_class}" style="width:{width}%"></span></span>'
 			f'<span class="bar-value">{_esc(value)}</span>'
 			"</div>"
 		)
-	return '<div class="bar-chart">' + "".join(rows_html) + "</div>"
+	parts = ['<div class="bar-chart">']
+	if title:
+		parts.append(f'<div class="bar-chart-title">{_esc(title)}</div>')
+	parts.append("".join(rows_html))
+	if caption:
+		parts.append(f'<div class="bar-chart-caption">{_esc(caption)}</div>')
+	parts.append("</div>")
+	return "".join(parts)
+
+
+def _series_class(series: object) -> str:
+	"""Map a row's ``series`` selector to a ` series-N` class suffix, N in 1-4.
+
+	A closed, bounded allowlist (mirrors ``rag_chip``/the theme palette): only an
+	actual ``int`` in 1-4 yields a suffix. A non-integer (float like ``2.5``, a
+	string, ``inf``/``nan``), a ``bool``, or an out-of-range int yields ``""`` - the
+	bar keeps the default primary color and no agent value is ever interpolated into
+	a class attribute. Requiring a true ``int`` (rather than ``int(series)``, which
+	would truncate ``2.5`` to a valid ``2`` and raise ``OverflowError`` on ``inf``)
+	honors the "non-integer yields no suffix" contract and is exception-free."""
+	if isinstance(series, bool) or not isinstance(series, int):
+		return ""
+	return f" series-{series}" if 1 <= series <= 4 else ""
 
 
 def kpi_tile(label: str, value: str, delta: str | None = None) -> str:
