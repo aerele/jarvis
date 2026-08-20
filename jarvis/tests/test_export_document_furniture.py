@@ -69,10 +69,12 @@ class _Recorder:
 		self.raise_timeout = False
 		self.raise_oserror = False
 
-	def __call__(self, args, input=None, capture_output=False, timeout=None):
+	def __call__(self, args, input=None, capture_output=False, shell=None, timeout=None):
 		self.args = list(args)
 		self.input = input
 		self.timeout = timeout
+		if shell is not False:
+			raise AssertionError("render subprocess must explicitly disable shell execution")
 		for flag in ("--header-html", "--footer-html"):
 			if flag in self.args:
 				path = self.args[self.args.index(flag) + 1]
@@ -130,6 +132,10 @@ class TestRequiredFlags(_FurnitureRenderBase):
 		with self.assertRaises(InvalidArgumentError):
 			render_pdf("<p>hi</p>", page_size="A2", page_numbers=False)
 
+	def test_page_size_cannot_inject_an_option(self) -> None:
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", page_size="A4 --enable-local-file-access", page_numbers=False)
+
 	def test_orientation_portrait_default(self) -> None:
 		render_pdf("<p>hi</p>", page_numbers=False)
 		self.assertEqual(self.fake_wk.args[self.fake_wk.args.index("--orientation") + 1], "Portrait")
@@ -141,6 +147,10 @@ class TestRequiredFlags(_FurnitureRenderBase):
 	def test_orientation_invalid_raises(self) -> None:
 		with self.assertRaises(InvalidArgumentError):
 			render_pdf("<p>hi</p>", orientation="sideways")
+
+	def test_orientation_cannot_inject_an_option(self) -> None:
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", orientation="portrait --enable-javascript")
 
 	def test_margins_all_four_sides(self) -> None:
 		render_pdf("<p>hi</p>", margins_mm=20, page_numbers=False)
@@ -157,6 +167,10 @@ class TestRequiredFlags(_FurnitureRenderBase):
 		with self.assertRaises(InvalidArgumentError):
 			render_pdf("<p>hi</p>", margins_mm=500)
 
+	def test_margin_cannot_inject_an_option(self) -> None:
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>", margins_mm="15 --enable-local-file-access")
+
 	def test_reads_stdin_writes_stdout(self) -> None:
 		render_pdf("<p>hi</p>", page_numbers=False)
 		self.assertEqual(self.fake_wk.args[-2:], ["-", "-"])
@@ -169,6 +183,11 @@ class TestRequiredFlags(_FurnitureRenderBase):
 	def test_timeout_passed_through_to_subprocess(self) -> None:
 		render_pdf("<p>hi</p>", timeout=13, page_numbers=False)
 		self.assertEqual(self.fake_wk.timeout, 13)
+
+	def test_timeout_is_bounded(self) -> None:
+		for timeout in (0, 61, True, "forever"):
+			with self.subTest(timeout=timeout), self.assertRaises(InvalidArgumentError):
+				render_pdf("<p>hi</p>", timeout=timeout, page_numbers=False)
 
 	def test_oversized_furniture_rejected(self) -> None:
 		# Header/footer/watermark are agent-influenced; an unbounded one is refused
@@ -349,14 +368,48 @@ class TestOutputGuards(_FurnitureRenderBase):
 
 class TestBinaryResolution(unittest.TestCase):
 	def test_binary_not_found_raises_clean_error(self) -> None:
-		def _no_config(*_a, **_k):
-			raise OSError("No wkhtmltopdf executable found")
-
-		patch.object(furniture.pdfkit, "configuration", _no_config).start()
 		patch.object(furniture.shutil, "which", lambda _name: None).start()
 		self.addCleanup(patch.stopall)
 		with self.assertRaises(InvalidArgumentError):
 			render_pdf("<p>hi</p>")
+
+	def test_binary_lookup_uses_only_static_name(self) -> None:
+		lookups: list[str] = []
+
+		def _which(name):
+			lookups.append(name)
+			return None
+
+		patch.object(furniture.shutil, "which", _which).start()
+		self.addCleanup(patch.stopall)
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>")
+		self.assertEqual(lookups, ["wkhtmltopdf"])
+
+	def test_wrong_executable_from_path_is_rejected(self) -> None:
+		patch.object(furniture.shutil, "which", lambda _name: "/bin/sh").start()
+		self.addCleanup(patch.stopall)
+		with self.assertRaises(InvalidArgumentError):
+			render_pdf("<p>hi</p>")
+
+	def test_relative_executable_path_is_rejected(self) -> None:
+		with self.assertRaises(ValueError):
+			furniture._validate_binary_path("wkhtmltopdf")
+
+	def test_executable_with_static_name_is_accepted(self) -> None:
+		with tempfile.TemporaryDirectory() as tmp_dir:
+			binary = os.path.join(tmp_dir, "wkhtmltopdf")
+			with open(binary, "wb") as fh:
+				fh.write(b"#!/bin/sh\n")
+			os.chmod(binary, 0o700)
+			self.assertEqual(furniture._validate_binary_path(binary), os.path.realpath(binary))
+
+	def test_disguised_symlink_to_other_executable_is_rejected(self) -> None:
+		with tempfile.TemporaryDirectory() as tmp_dir:
+			binary = os.path.join(tmp_dir, "wkhtmltopdf")
+			os.symlink("/bin/sh", binary)
+			with self.assertRaises(ValueError):
+				furniture._validate_binary_path(binary)
 
 
 # --- page numbering ----------------------------------------------------------
