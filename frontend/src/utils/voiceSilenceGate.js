@@ -1,14 +1,12 @@
 // voiceSilenceGate — the CLIENT-SIDE near-silence gate for voice dictation.
 //
-// whisper-large-v3-turbo deterministically HALLUCINATES on near-silent audio: a 15 s
-// pure-silence webm transcribes as "Thank you." (3/3 on the probe). A dictation nobody
-// actually spoke into — a muted mic, a hot key pressed by accident — would otherwise come
-// back as a confident little phrase the user never said.
+// Audio-capable language models can hallucinate fluent speech from a silent or
+// near-silent recording. A dictation nobody actually spoke into could otherwise
+// come back as a confident phrase the user never said.
 //
-// It CANNOT be filtered server-side: OpenRouter's transcription endpoint does not pass
-// through verbose_json / no_speech_prob (probed — it 400s), and a phrase blocklist was
-// vetoed because it would swallow the same words when a user genuinely dictates them. So the
-// gate lives at the microphone instead: measured near-silence never leaves the browser.
+// A phrase blocklist would also swallow the same phrase when a person genuinely says it.
+// The reliable first defence therefore lives at the microphone: measured near-silence never
+// leaves the browser. The provider prompt's explicit no-speech response is a second defence.
 //
 // Two plain pieces, both dependency-injected so `node --test` can drive them without a
 // browser (the eventFence.js precedent):
