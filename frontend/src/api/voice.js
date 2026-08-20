@@ -6,6 +6,7 @@
 import { call } from "frappe-ui";
 
 const VN = "jarvis.chat.voice_notes_api.";
+export const TRANSCRIPTION_TIMEOUT_MS = 150000;
 
 // Server maps the blob MIME to the model's audio format; the filename only
 // helps werkzeug pick a sane extension.
@@ -36,14 +37,15 @@ function _frappeErr(data, status) {
 
 // Recorded blob → verbatim transcript. Returns {ok, text, stt_ms, model}.
 //
-// timeoutMs is the PER-CALL budget (default 25 s): a hung STT call must not pin the
-// caller's mic UI for the server's full timeout. Chat dictation sends ONE recording per
-// call and passes a much larger budget, sized in ChatView against the upload + the
-// server's own worst case; voiceDictationStore retries a rejected recording once (after
-// a backoff), so a slow transcription degrades to a Retry/Download chip rather than
-// killing the session. An optional `signal` lets the caller cancel an in-flight upload
-// on teardown, or when the user cancels a single transcription.
-export async function transcribeAudio(blob, { durationS = 0, timeoutMs = 25000, signal } = {}) {
+// timeoutMs is the per-call budget. It covers the browser upload plus the server's
+// 10-second connect and 90-second provider read budgets. Every desktop and PWA
+// recorder inherits the same default; the retained chat dictation path may retry a
+// rejected recording once after a backoff. An optional signal lets the caller cancel
+// an in-flight upload on teardown.
+export async function transcribeAudio(
+	blob,
+	{ durationS = 0, timeoutMs = TRANSCRIPTION_TIMEOUT_MS, signal } = {}
+) {
 	const fd = new FormData();
 	fd.append("audio", blob, _audioFilename(blob));
 	fd.append("duration_s", String(Math.round(durationS || 0)));

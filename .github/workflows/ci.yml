@@ -1,6 +1,6 @@
 name: CI
 
-# Runs the jarvis test suite inside ghcr.io/aerele-rnd/jarvis-ci-base:v16, which already carries a
+# Runs the jarvis test suite inside ghcr.io/aerele/jarvis-ci-base:v16, which already carries a
 # built bench with frappe + erpnext + hrms (version-16) and /opt/ci/test_site.sql — a dump of a
 # site with all three installed. Everything this job does is jarvis-specific.
 #
@@ -185,7 +185,7 @@ jobs:
         shard: [1, 2, 3, 4]
 
     container:
-      image: ghcr.io/aerele-rnd/jarvis-ci-base:v16
+      image: ghcr.io/aerele/jarvis-ci-base:v16
       # bench hard-exits as root (bench/cli.py -> change_uid: "You should not run this command as
       # root", exit 1). Actions job containers run as root by default. uid 1001 is both the `ci`
       # user baked into the image and the runner user that owns the mounted workspace.

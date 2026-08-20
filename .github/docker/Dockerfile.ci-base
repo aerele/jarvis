@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# ghcr.io/aerele-rnd/jarvis-ci-base:v16
+# ghcr.io/aerele/jarvis-ci-base:v16
 #
 # A pre-built Frappe bench (frappe + erpnext + hrms, version-16) plus a SQL dump of a site
 # with those three already installed. PR CI consumes this so it only has to install jarvis
@@ -148,7 +148,7 @@ WORKDIR /opt/frappe-bench
 ARG FRAPPE_SHA=unknown
 ARG ERPNEXT_SHA=unknown
 ARG HRMS_SHA=unknown
-LABEL org.opencontainers.image.source="https://github.com/Aerele-RnD/jarvis" \
+LABEL org.opencontainers.image.source="https://github.com/aerele/jarvis" \
       ai.jarvis.frappe-sha="${FRAPPE_SHA}" \
       ai.jarvis.erpnext-sha="${ERPNEXT_SHA}" \
       ai.jarvis.hrms-sha="${HRMS_SHA}"

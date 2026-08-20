@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import datetime
 import io
+from unittest.mock import patch
 
 import frappe
 import openpyxl
@@ -259,7 +260,6 @@ class TestItemisedTaxAcrossMajors(FrappeTestCase):
 		if "erpnext" not in frappe.get_installed_apps():
 			self.skipTest("erpnext not installed on this site")
 		import inspect
-		from unittest.mock import patch
 
 		from erpnext.controllers.taxes_and_totals import get_itemised_tax
 
@@ -284,3 +284,123 @@ class TestItemisedTaxAcrossMajors(FrappeTestCase):
 			self.assertIs(seen["target"], doc)
 		else:
 			self.assertEqual(list(seen["target"]), list(doc.get("taxes")))
+
+
+class TestInTestAcrossMajors(FrappeTestCase):
+	"""Exercise compat.in_test()'s real body, not a mock of it. Frappe 16 keeps a
+	module attribute; Frappe 15 keeps only frappe.flags.in_test."""
+
+	def test_true_under_the_runner(self):
+		# We are running under the test runner right now, on whichever major.
+		self.assertTrue(compat.in_test())
+
+	def test_module_attr_is_authoritative_and_not_widened_by_flag(self):
+		"""On a major that has frappe.in_test (16), a stray flags.in_test must NOT
+		flip the result - that is what would let a paused-scheduler guard run work
+		inline in production."""
+		if not hasattr(frappe, "in_test"):
+			self.skipTest("frappe.in_test absent (Frappe 15) - covered by the fallback test")
+		saved_flag = frappe.flags.get("in_test")
+		try:
+			with patch.object(frappe, "in_test", False):
+				frappe.flags.in_test = True
+				self.assertFalse(compat.in_test())  # flag must not widen it
+			with patch.object(frappe, "in_test", True):
+				frappe.flags.in_test = False
+				self.assertTrue(compat.in_test())
+		finally:
+			frappe.flags.in_test = saved_flag
+
+	def test_falls_back_to_flag_when_module_attr_absent(self):
+		"""Simulate Frappe 15 (no module attribute): the flag is authoritative."""
+		had = hasattr(frappe, "in_test")
+		saved_attr = getattr(frappe, "in_test", None)
+		saved_flag = frappe.flags.get("in_test")
+		try:
+			if had:
+				delattr(frappe, "in_test")
+			frappe.flags.in_test = True
+			self.assertTrue(compat.in_test())
+			frappe.flags.in_test = False
+			self.assertFalse(compat.in_test())
+		finally:
+			if had:
+				frappe.in_test = saved_attr
+			frappe.flags.in_test = saved_flag
+
+
+class TestSetDelimitersFlagAcrossMajors(FrappeTestCase):
+	"""compat.set_delimiters_flag() calls the method on Frappe 16, where DataImport
+	has it, and is a no-op on Frappe 15, where it does not exist."""
+
+	def test_calls_the_method_when_present(self):
+		class Doc:
+			def __init__(self):
+				self.called = False
+
+			def set_delimiters_flag(self):
+				self.called = True
+
+		doc = Doc()
+		compat.set_delimiters_flag(doc)
+		self.assertTrue(doc.called)
+
+	def test_no_op_when_absent(self):
+		class Doc:
+			pass
+
+		# Must not raise on a doc lacking the v16-only method (the Frappe 15 shape).
+		compat.set_delimiters_flag(Doc())
+
+
+class TestCacheGetFreshAcrossMajors(FrappeTestCase):
+	"""compat.cache_get_fresh() reads a TTL key straight from Redis, bypassing the
+	in-process local cache, on Frappe 15 (via expires=True) and 16 (via
+	use_local_cache=False). Guards the v15 local-cache poisoning fix: a cold read
+	must not pin None for a key that set_value later writes."""
+
+	def test_reads_a_ttl_key_written_before(self):
+		key = "jarvis-compat-fresh-probe"
+		frappe.cache().delete_value(key)
+		self.addCleanup(frappe.cache().delete_value, key)
+		frappe.cache().set_value(key, {"v": 1}, expires_in_sec=60)
+		self.assertEqual(compat.cache_get_fresh(key), {"v": 1})
+
+	def test_no_poison_after_cold_miss_then_set(self):
+		"""The exact v15 failure shape: read (miss) -> set(expires) -> read must
+		return the value, not a poisoned None."""
+		key = "jarvis-compat-fresh-poison"
+		frappe.cache().delete_value(key)
+		self.addCleanup(frappe.cache().delete_value, key)
+		self.assertIsNone(compat.cache_get_fresh(key))  # cold miss must not poison
+		frappe.cache().set_value(key, {"v": 2}, expires_in_sec=60)
+		self.assertEqual(compat.cache_get_fresh(key), {"v": 2})
+
+	def test_missing_key_is_none(self):
+		frappe.cache().delete_value("jarvis-compat-fresh-absent")
+		self.assertIsNone(compat.cache_get_fresh("jarvis-compat-fresh-absent"))
+
+
+class TestCacheGetMemoizedAcrossMajors(FrappeTestCase):
+	"""compat.cache_get_memoized() keeps a TTL-key read memoized in
+	frappe.local.cache for the rest of the request, without the v15 miss-poison."""
+
+	def test_hit_is_memoized_in_local_cache(self):
+		key = "jarvis-compat-memo-probe"
+		cache = frappe.cache()
+		cache.delete_value(key)
+		self.addCleanup(cache.delete_value, key)
+		cache.set_value(key, {"v": 1}, expires_in_sec=60)
+		self.assertEqual(compat.cache_get_memoized(key), {"v": 1})
+		# a real hit is stored back so the next read is a dict lookup
+		self.assertEqual(frappe.local.cache.get(cache.make_key(key)), {"v": 1})
+
+	def test_miss_does_not_poison(self):
+		key = "jarvis-compat-memo-miss"
+		cache = frappe.cache()
+		cache.delete_value(key)
+		self.addCleanup(cache.delete_value, key)
+		self.assertIsNone(compat.cache_get_memoized(key))  # cold miss
+		self.assertNotIn(cache.make_key(key), frappe.local.cache)  # not poisoned
+		cache.set_value(key, {"v": 2}, expires_in_sec=60)
+		self.assertEqual(compat.cache_get_memoized(key), {"v": 2})

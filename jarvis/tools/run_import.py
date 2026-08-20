@@ -17,6 +17,7 @@ import json
 import frappe
 from frappe.utils.scheduler import is_scheduler_inactive
 
+from jarvis import compat
 from jarvis.exceptions import FeatureDisabledError, InvalidArgumentError
 from jarvis.tools._import_preview import build_import_preview
 
@@ -60,7 +61,7 @@ def run_import(
 
 	# Refuse cleanly BEFORE creating anything if the scheduler is paused, so a staged
 	# import never sits Pending with nothing to run it. Test / developer_mode run inline.
-	run_now = frappe.in_test or frappe.conf.developer_mode
+	run_now = compat.in_test() or frappe.conf.developer_mode
 	if not run_now and is_scheduler_inactive():
 		# FeatureDisabledError (not InvalidArgumentError): a paused scheduler is an ops
 		# condition, so the model must NOT be nudged to "check the fields and retry" - the

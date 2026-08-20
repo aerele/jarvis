@@ -864,18 +864,24 @@ def _detach_last_seen_run(run_names: list) -> None:
 
 	Raw ``db.set_value`` — ``last_seen_run`` is a frozen audit field, so this must
 	bypass the finding controller exactly as the recurrence bump does.
+
+	``first_seen_run`` is read with a raw ``db.sql`` SELECT, NOT via get_all: on
+	Frappe 15 a get_all projection of this doctype omits that Link field from the
+	result (proven via CI: the raw DB row holds the value, but the get_all dict
+	comes back without the key), so the fallback read was None and the pointer was
+	nulled instead of detached — nulling another installation's live recurrence
+	pointer. Reading name + first_seen_run in one query keeps this a single round
+	trip (not 1+N) and returns the true column values on both majors (Frappe 16
+	returned first_seen_run via get_all; this is equivalent there).
 	"""
 	if not run_names:
 		return
-	for row in frappe.get_all(
-		FINDING,
-		filters={"last_seen_run": ["in", run_names]},
-		fields=["name", "first_seen_run"],
-		ignore_permissions=True,
+	for name, first_seen_run in frappe.db.sql(
+		f"""SELECT name, first_seen_run FROM `tab{FINDING}`
+		WHERE last_seen_run IN %(runs)s""",
+		{"runs": tuple(run_names)},
 	):
-		frappe.db.set_value(
-			FINDING, row.name, "last_seen_run", row.first_seen_run or None, update_modified=False
-		)
+		frappe.db.set_value(FINDING, name, "last_seen_run", first_seen_run or None, update_modified=False)
 
 
 @frappe.whitelist()
@@ -1899,7 +1905,7 @@ def _rate_limit_apply() -> None:
 		return
 	me = frappe.session.user
 	key = f"jarvis_apply_agents_rl:{me}"
-	if frappe.cache().get_value(key):
+	if frappe.cache().get_value(key, expires=True):
 		frappe.throw(_("An apply is already in progress — please wait a moment."))
 	frappe.cache().set_value(key, "1", expires_in_sec=5)
 

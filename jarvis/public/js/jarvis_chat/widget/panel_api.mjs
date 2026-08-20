@@ -9,6 +9,7 @@ const CHAT = "jarvis.chat.api.";
 const ACTIONS = "jarvis.chat.actions_api.";
 const ACCOUNT = "jarvis.account.";
 const ONBOARDING = "jarvis.onboarding.";
+export const TRANSCRIPTION_TIMEOUT_MS = 150000;
 
 function call(method, args) {
   return frappe.call({ method, args: args || {} }).then((r) => r.message);
@@ -83,7 +84,9 @@ export async function transcribeAudio(blob, durationS) {
   fd.append("audio", blob, audioName(blob));
   fd.append("duration_s", String(Math.round(durationS || 0)));
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 25000);
+  // Match the SPA and PWA budget. The browser upload plus the provider's
+  // 90-second read window cannot fit inside the widget's former 25-second cap.
+  const timer = setTimeout(() => ctrl.abort(), TRANSCRIPTION_TIMEOUT_MS);
   try {
     const r = await fetch("/api/method/jarvis.chat.voice.transcribe_audio", {
       method: "POST",

@@ -259,19 +259,14 @@ class _AssistantContentBatcher:
 #     "openai" as the model-provider key. Use "openai" for the chat WS
 #     frame and the embedded codex-harness path handles the dispatch.
 #
-#   - Google Gemini: gemini-cli is registered ONLY as a CliBackend
-#     (openclaw/extensions/google/cli-backend.ts:16 with id
-#     "google-gemini-cli"). Use "google-gemini-cli" verbatim so
-#     isCliProvider returns true and dispatch routes via the CLI backend
-#     to the gemini binary inside the container. Mapping it to "google"
-#     makes isCliProvider return false, dispatch falls into the embedded
-#     path, and agent errors "No API key found for provider 'google'".
+#
+# (Google Gemini's subscription CliBackend path was removed 2026-08-19 when
+# Google discontinued consumer login-with-Google for Gemini.)
 #
 # Only used in oauth mode - api_key mode skips this map and lets
 # agent resolve the single registered models.providers entry.
 _PROVIDER_LABEL_TO_AGENT_ID = {
 	"OpenAI": "openai",
-	"Google Gemini": "google-gemini-cli",
 }
 
 
@@ -299,8 +294,8 @@ def _subscription_agent_provider(settings) -> str | None:
 	leg exists to serve.
 
 	The account's own oauth_blob already carries the agent provider id under its
-	``provider`` key (``"openai"``, ``"google-gemini-cli"`` - baked in when the
-	blob was minted by ``jarvis.oauth.api._exchange_and_build_blob``), so read it
+	``provider`` key (e.g. ``"openai"`` - baked in when the blob was minted by
+	``jarvis.oauth.api._exchange_and_build_blob``), so read it
 	from there instead of standing up a second upstream-to-provider table - see
 	``jarvis_settings.py``'s ``_push_direct_subscription_blob``, which relies on
 	the same key for the same reason.
@@ -539,13 +534,13 @@ def _jarvis_settings_flag_null_on(field: str) -> bool:
 	get_single_value, which raises on a missing meta field.
 
 	Deliberately NOT itself best-effort: it lets a read error propagate so each
-	caller owns its own fail-open (both boot readers - ``_persona_feature_enabled``
-	and ``api._home_intro_feature_enabled`` - wrap it and default to ON). And
-	deliberately NOT per-request cached: an admin can flip a switch and the very
-	next reader in the same worker (and the persona tests, which toggle it and
-	re-read within one process) must observe the new value, so a request cache
-	would serve a stale ON/OFF; the probe is one indexed tabSingles read and every
-	caller runs it at most once per request, so there is nothing to coalesce."""
+	caller owns its own fail-open (``_persona_feature_enabled`` wraps it and
+	defaults to ON). And deliberately NOT per-request cached: an admin can flip
+	a switch and the very next reader in the same worker (and the persona tests,
+	which toggle it and re-read within one process) must observe the new value,
+	so a request cache would serve a stale ON/OFF; the probe is one indexed
+	tabSingles read and every caller runs it at most once per request, so there
+	is nothing to coalesce."""
 	row = frappe.db.sql(
 		"select value from tabSingles where doctype=%s and field=%s",
 		("Jarvis Settings", field),
@@ -559,10 +554,9 @@ def persona_feature_enabled() -> bool:
 	"""The persona kill switch (``Jarvis Settings.persona_enabled``), NULL=ON.
 
 	Delegates to the canonical ``_jarvis_settings_flag_null_on`` probe so the pill
-	(boot payload) and the clause read the switch through one implementation, and
-	so the home-intro kill switch cannot drift from it - see that helper for why it
-	is a tabSingles probe and not get_single_value. Read here AND by the boot
-	payload (N7) so the same switch value drives both."""
+	(boot payload) and the clause read the switch through one implementation -
+	see that helper for why it is a tabSingles probe and not get_single_value.
+	Read here AND by the boot payload (N7) so the same switch value drives both."""
 	return _jarvis_settings_flag_null_on("persona_enabled")
 
 

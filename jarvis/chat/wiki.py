@@ -402,7 +402,7 @@ def _has_active_pages() -> bool:
 	the Jarvis Wiki Page controller on insert/update/trash (the archive path
 	saves through on_update), with a short TTL as the backstop."""
 	cache = frappe.cache()
-	flag = cache.get_value(WIKI_HAS_PAGES_CACHE_KEY)
+	flag = cache.get_value(WIKI_HAS_PAGES_CACHE_KEY, expires=True)
 	if flag is None:
 		flag = 1 if frappe.db.exists(WIKI, {"status": "Active"}) else 0
 		cache.set_value(WIKI_HAS_PAGES_CACHE_KEY, flag, expires_in_sec=_HAS_PAGES_TTL_S)
@@ -691,10 +691,10 @@ def _maybe_nudge(conversation_id: str, user: str) -> None:
 	if not conv or cint(conv.file_box):
 		return
 	cache = frappe.cache()
-	if cache.get_value(_NUDGE_OFF_KEY.format(conv=conversation_id)):
+	if cache.get_value(_NUDGE_OFF_KEY.format(conv=conversation_id), expires=True):
 		return
 	cooldown_key = _NUDGE_COOLDOWN_KEY.format(conv=conversation_id)
-	if cache.get_value(cooldown_key):
+	if cache.get_value(cooldown_key, expires=True):
 		return
 
 	entities = _nudge_entities(conversation_id)

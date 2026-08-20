@@ -1,12 +1,10 @@
 """The client-side near-silence gate for voice dictation, proven by a REAL executable node test
 that lives in the python suite forever (the eventFence / voiceDictationStore precedent).
 
-whisper-large-v3-turbo deterministically HALLUCINATES on near-silent audio — a pure-silence 15 s
-webm transcribes as "Thank you." (3/3 on the probe) — so a recording nobody actually spoke into
-would inject a phrase the user never said into the composer. It cannot be filtered server-side:
-OpenRouter's transcription endpoint does not pass through ``verbose_json`` / ``no_speech_prob``,
-and a phrase blocklist was vetoed because it would swallow the same words when a user genuinely
-dictates them. So the gate is client-side: ``frontend/src/composables/useDictationRecorder.js``
+Audio-capable language models can hallucinate fluent speech from near-silent audio, so a recording
+nobody actually spoke into could inject a phrase the user never said into the composer. A phrase
+blocklist could hide the same words when a user genuinely dictates them. The first gate is
+therefore client-side: ``frontend/src/composables/useDictationRecorder.js``
 runs a WebAudio AnalyserNode on the SAME MediaStream as the MediaRecorder and stamps the finished
 take with the peak RMS seen across the WHOLE recording, and ChatView drops a take measured below
 the threshold WITHOUT an API call — no text, no chip, not a failure. Because the peak is per TAKE,

@@ -20,12 +20,13 @@ as the body, and wkhtmltopdf will FETCH any ``<img src>``/``<link>`` it finds in
 ``--header-html``/``--footer-html`` document (a *separate* render), so each runs
 through ``sanitize_rich`` before it is written to a temp file.
 
-WHY the letterhead is resolved OUTSIDE this module (``resolve_letterhead``, called
-from ``export_document._render_rich`` where the ``notes`` channel lives): a
-letterhead is folded in as trusted operator config, but "trusted" must be
-ENFORCED, not assumed - so resolution (a) defaults to the site's default Letter
-Head when the caller named none, (b) checks the impersonated user's READ
-permission on the Letter Head, and (c) neutralises its images: an ``<img>`` with a
+WHY the brand is resolved here (``resolve_brand`` → ``resolve_letterhead`` +
+``_resolve_company_identity``, called from ``export_document._render_rich`` which
+threads the ``note`` into its ``notes`` channel): a letterhead is folded in as
+trusted operator config, but "trusted" must be ENFORCED, not assumed - so
+resolution (a) defaults to the site's default Letter Head when the caller named
+none, (b) checks the impersonated user's READ permission on the Letter Head, and
+(c) neutralises its images: an ``<img>`` with a
 remote ``src`` is DROPPED (wkhtmltopdf would fetch it server-side - the SSRF the
 whole rich path exists to prevent), and a same-site ``/files/`` logo is inlined as
 a permission-checked base64 ``data:`` URI (which also makes it actually render -
@@ -47,6 +48,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import html
 import mimetypes
 import os
 import re
@@ -60,6 +62,7 @@ import pdfkit
 from jarvis.exceptions import InvalidArgumentError
 
 from .sanitizer import sanitize_letterhead, sanitize_rich
+from .theme import HEADER_RESERVE_MM, cover_height_pt
 
 _SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
 
@@ -87,13 +90,22 @@ _MAX_MARGIN_MM = 100
 
 _IMG_TAG_RE = re.compile(r"<img\b[^>]*?/?>", re.IGNORECASE)
 _SRC_RE = re.compile(r"""\bsrc\s*=\s*(?P<q>["'])(?P<url>.*?)(?P=q)""", re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
 
-# Self-contained CSS for the header/footer documents - they are SEPARATE
-# wkhtmltopdf renders, so they carry no body/theme styling and must style
-# themselves. ``.jv-watermark`` is the tool-controlled rotate/position trick
-# (agent content can never carry a ``style`` attribute - it is class-only after
-# ``sanitize_rich`` - so the rotation must come from here, not the payload).
-_FURNITURE_CSS = f"""
+
+def _furniture_css(watermark_top_pt: float = 340) -> str:
+	"""Self-contained CSS for the running-header document - a SEPARATE wkhtmltopdf
+	render, so it carries no body/theme styling and must style itself.
+
+	Sizes any brand/letterhead logo down to the header strip (a Letter Head logo
+	is authored for Frappe's own print layout, not this band), gives left/center/
+	right helpers, and places the ``.jv-watermark`` for the render's page geometry
+	(``watermark_top_pt`` is computed from page size/orientation so it stays
+	centered on Letter/A3/landscape, not the old portrait-A4-only ``340pt``). The
+	watermark rotate/position is tool-controlled here because agent content can
+	never carry a ``style`` attribute (it is class-only after ``sanitize_rich``).
+	"""
+	return f"""
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{
 	font-family: {_SANS};
@@ -102,10 +114,14 @@ body {{
 	-webkit-print-color-adjust: exact;
 	print-color-adjust: exact;
 }}
-.jv-lh-header, .jv-lh-footer {{ width: 100%; }}
+.jv-brand-header, .jv-header {{ width: 100%; }}
+.jv-brand-name {{ font-weight: 700; color: #132d47; }}
+.jv-center {{ text-align: center; }}
+.jv-right {{ text-align: right; }}
+.jv-brand-header img {{ height: 30pt; width: auto; max-width: 100%; }}
 .jv-watermark {{
 	position: absolute;
-	top: 340pt;
+	top: {watermark_top_pt:.0f}pt;
 	left: 0;
 	right: 0;
 	text-align: center;
@@ -118,6 +134,22 @@ body {{
 """
 
 
+def _esc(value: object) -> str:
+	"""Escape a text field for embedding; ``None`` renders empty, not 'None'."""
+	return "" if value is None else html.escape(str(value))
+
+
+def _text_only(value: str, limit: int = 200) -> str:
+	"""Reduce a footer string to plain, single-line text for a wkhtmltopdf text
+	footer zone (``--footer-left``): strip tags, unescape entities, collapse
+	whitespace, and truncate. Passed to the subprocess as an argv item (no shell),
+	so there is no injection surface; wkhtmltopdf's own ``[page]``-style tokens in
+	the text are harmless."""
+	text = _TAG_RE.sub("", value or "")
+	text = " ".join(html.unescape(text).split())
+	return text[:limit]
+
+
 def render_pdf(
 	body_html: str,
 	*,
@@ -125,47 +157,52 @@ def render_pdf(
 	orientation: str = "portrait",
 	margins_mm: int = 15,
 	header_html: str | None = None,
-	footer_html: str | None = None,
+	footer_text: str | None = None,
 	watermark: str | None = None,
-	letterhead_header: str = "",
-	letterhead_footer: str = "",
+	brand_header: str = "",
 	page_numbers: bool = True,
 	timeout: int = 25,
 ) -> bytes:
 	"""Render ``body_html`` (a fragment the caller already sanitized) to PDF bytes
 	via a direct, hard-timed wkhtmltopdf subprocess.
 
-	Header/footer/watermark are agent-influenced and re-sanitized here.
-	``letterhead_header``/``letterhead_footer`` are ALREADY resolved + safe (see
-	``resolve_letterhead``) and folded in as-is. Temp files for the header/footer
-	documents use content-independent ``frappe.generate_hash()`` names and are
-	removed in a ``finally`` that runs on success, error, AND timeout.
+	Branding lives in the running HTML header: ``brand_header`` is ALREADY
+	tool-built + safe (see ``build_brand_header`` / ``resolve_brand``); an agent
+	``header_html``/``watermark`` is agent-influenced and re-sanitized here. Page
+	numbers and an optional plain-text ``footer_text`` go through wkhtmltopdf TEXT
+	footer zones (``--footer-right``/``--footer-left``) - NOT ``--footer-html`` -
+	because ``[page]``/``[topage]`` substitution runs in wkhtmltopdf's C++ layer
+	(JS-free) and a TEXT footer coexists with a header on the opposite edge, so a
+	branded document keeps its "Page X of Y" instead of the old mutually-exclusive
+	``--footer-html`` silently dropping it. The header temp file uses a
+	content-independent ``frappe.generate_hash()`` name, removed in a ``finally``
+	that runs on success, error, AND timeout.
 
 	Raises ``InvalidArgumentError`` (clean, user-facing) when the binary is
 	missing, an argument is out of range, the render times out, wkhtmltopdf exits
 	non-zero, or the output is empty/not a PDF - never a raw ``TimeoutExpired`` /
-	``OSError`` and never a partial/zero-byte PDF. Every infra-caused failure (a
-	working binary misbehaving) is also written to the Error Log so a systemic
-	regression - e.g. an FC image bump changing wkhtmltopdf's behaviour - is
-	visible to operators rather than silently surfacing as a user-facing rejection
-	forever.
+	``OSError`` and never a partial/zero-byte PDF. Every infra-caused failure is
+	also written to the Error Log so a systemic regression is visible to operators.
 	"""
 	binary = _resolve_binary()
-	orientation_flag = _normalize_orientation(orientation)
-	page_size = _normalize_page_size(page_size)
-	margins_mm = _normalize_margin(margins_mm)
-	_guard_furniture_len(header_html, footer_html, watermark)
+	page_size, orientation_flag, margins_mm = normalize_geometry(page_size, orientation, margins_mm)
+	_guard_furniture_len(header_html, footer_text, watermark)
 
-	header_doc = _build_header(header_html, watermark, letterhead_header)
-	footer_doc = _build_footer(footer_html, letterhead_footer)
+	# A running header exists iff any of brand/agent-header/watermark is present -
+	# the same condition _build_header uses to emit a non-empty doc, and what
+	# reserves the extra top margin (below), so the watermark centers on the real
+	# printable area.
+	has_header = bool(brand_header or header_html or watermark)
+	# Center the watermark vertically for the ACTUAL page geometry (not a fixed
+	# portrait-A4 constant); ~36pt lifts the rotated block so its middle sits on
+	# the page center.
+	watermark_top = cover_height_pt(page_size, orientation_flag, margins_mm, header=has_header) / 2 - 36
+	header_doc = _build_header(header_html, watermark, brand_header, watermark_top)
 
 	tmp_dir = tempfile.gettempdir()
-	header_file = footer_file = None
+	header_file = None
 	try:
-		# Temp creation is INSIDE the try so a failure writing the second file
-		# (ENOSPC / fd exhaustion) still runs the finally that removes the first.
 		header_file = _write_temp(tmp_dir, header_doc) if header_doc else None
-		footer_file = _write_temp(tmp_dir, footer_doc) if footer_doc else None
 
 		args = _build_args(
 			binary,
@@ -173,8 +210,9 @@ def render_pdf(
 			orientation=orientation_flag,
 			margins_mm=margins_mm,
 			header_file=header_file,
-			footer_file=footer_file,
+			footer_text=footer_text,
 			page_numbers=page_numbers,
+			has_header=bool(header_doc),
 		)
 		document = _compose_document(body_html, "")
 		try:
@@ -214,9 +252,8 @@ def render_pdf(
 			raise InvalidArgumentError("PDF render produced invalid output (not a PDF)")
 		return result.stdout
 	finally:
-		for path in (header_file, footer_file):
-			if path:
-				_remove_quietly(path)
+		if header_file:
+			_remove_quietly(header_file)
 
 
 def _resolve_binary() -> str:
@@ -278,11 +315,25 @@ def _normalize_margin(margins_mm: int) -> int:
 	return value
 
 
-def _guard_furniture_len(header_html, footer_html, watermark) -> None:
+def _guard_furniture_len(header, footer, watermark) -> None:
 	"""Bound the agent-influenced furniture inputs (the body is capped upstream)."""
-	for label, value in (("header", header_html), ("footer", footer_html), ("watermark", watermark)):
+	for label, value in (("header", header), ("footer", footer), ("watermark", watermark)):
 		if value and len(value) > _MAX_FURNITURE_CHARS:
 			raise InvalidArgumentError(f"{label} exceeds {_MAX_FURNITURE_CHARS} characters")
+
+
+def normalize_geometry(page_size: str, orientation: str, margins_mm: int) -> tuple[str, str, int]:
+	"""Validate + canonicalize page geometry, raising ``InvalidArgumentError`` on a
+	bad value. Public so ``export_document`` can validate ONCE up front (before it
+	builds the geometry-aware CSS) for every output format - so the HTML path
+	rejects a bad page_size/orientation/margin exactly as the PDF path does, instead
+	of silently degrading. ``render_pdf`` calls it too (idempotent), keeping the one
+	source of truth for the allowlists here."""
+	return (
+		_normalize_page_size(page_size),
+		_normalize_orientation(orientation),
+		_normalize_margin(margins_mm),
+	)
 
 
 def _build_args(
@@ -292,23 +343,30 @@ def _build_args(
 	orientation: str,
 	margins_mm: int,
 	header_file: str | None,
-	footer_file: str | None,
+	footer_text: str | None,
 	page_numbers: bool,
+	has_header: bool,
 ) -> list[str]:
 	"""Build the exact wkhtmltopdf CLI arg list.
 
-	The leading security/fidelity flags are UNCONDITIONAL - they are present on
-	every render regardless of options (a test asserts each one; dropping any
-	fails it). Body is read from stdin and the PDF written to stdout via ``- -``.
+	The leading security/fidelity flags are UNCONDITIONAL - present on every render
+	regardless of options (a test asserts each one; dropping any fails it). Body is
+	read from stdin and the PDF written to stdout via ``- -``.
 
-	Page numbers use the TEXT footer (``--footer-center``), NOT an HTML footer:
-	wkhtmltopdf substitutes ``[page]``/``[topage]`` in the text header/footer
-	options in its own C++ layer, which WORKS under ``--disable-javascript`` - the
-	``--footer-html`` bracket substitution relies on JS wkhtmltopdf injects, so it
-	renders a literal ``[page]`` when JS is off. A text footer and an HTML footer
-	are mutually exclusive, so when there IS an HTML footer (a letterhead footer or
-	an explicit ``footer``) it wins and auto page numbers are omitted.
+	Header: when a header document exists it is ``--header-html`` with a
+	``--header-spacing`` gap, and the TOP margin is expanded by 14mm so a logo /
+	brand line sits in reserved space and never overlaps the body (wkhtmltopdf does
+	NOT auto-grow the top margin for a header).
+
+	Footer: TEXT zones only, never ``--footer-html``. ``[page]``/``[topage]``
+	substitution runs in wkhtmltopdf's C++ layer, which WORKS under
+	``--disable-javascript`` (an HTML footer's bracket substitution needs the JS
+	wkhtmltopdf injects, so it would print a literal ``[page]`` with JS off). Text
+	zones on different edges coexist, so page numbers (``--footer-right``) and an
+	optional plain-text footer (``--footer-left``) BOTH render - fixing the old
+	mutual-exclusivity where any HTML footer silently dropped "Page X of Y".
 	"""
+	margin_top = margins_mm + HEADER_RESERVE_MM if has_header else margins_mm
 	args = [
 		binary,
 		"--disable-local-file-access",
@@ -325,7 +383,7 @@ def _build_args(
 		"--orientation",
 		orientation,
 		"--margin-top",
-		f"{margins_mm}mm",
+		f"{margin_top}mm",
 		"--margin-bottom",
 		f"{margins_mm}mm",
 		"--margin-left",
@@ -334,51 +392,224 @@ def _build_args(
 		f"{margins_mm}mm",
 	]
 	if header_file:
-		args += ["--header-html", header_file]
-	if footer_file:
-		args += ["--footer-html", footer_file]
-	elif page_numbers:
-		args += [
-			"--footer-center",
-			"Page [page] of [topage]",
-			"--footer-font-size",
-			"8",
-			"--footer-spacing",
-			"4",
-		]
+		args += ["--header-html", header_file, "--header-spacing", "4"]
+	footer_args: list[str] = []
+	if footer_text:
+		clean = _text_only(footer_text)
+		if clean:
+			footer_args += ["--footer-left", clean]
+	if page_numbers:
+		footer_args += ["--footer-right", "Page [page] of [topage]"]
+	if footer_args:
+		args += footer_args + ["--footer-font-size", "8", "--footer-spacing", "4"]
 	args += ["-", "-"]  # stdin in, stdout out
 	return args
 
 
-def _build_header(header_html: str | None, watermark: str | None, letterhead_header: str) -> str:
-	"""Compose the header document, or ``""`` when there is nothing to render.
+def _build_header(
+	header_html: str | None, watermark: str | None, brand_header: str, watermark_top_pt: float
+) -> str:
+	"""Compose the running-header document, or ``""`` when there is nothing to
+	render.
 
-	Order: resolved-and-safe letterhead header (as-is) → sanitized agent header →
-	sanitized watermark wrapped in the tool-controlled ``.jv-watermark`` block.
+	Order: the tool-built-and-safe ``brand_header`` (logo, else company name) →
+	sanitized agent ``header_html`` → sanitized watermark wrapped in the
+	tool-controlled ``.jv-watermark`` block. The CSS is built for the render's page
+	geometry so the watermark stays centered.
 	"""
 	parts = []
-	if letterhead_header:
-		parts.append(f'<div class="jv-lh-header">{letterhead_header}</div>')
+	if brand_header:
+		parts.append(brand_header)
 	if header_html:
 		parts.append(f'<div class="jv-header">{sanitize_rich(header_html)}</div>')
 	if watermark:
 		parts.append(f'<div class="jv-watermark">{sanitize_rich(watermark)}</div>')
-	return _compose_document("".join(parts), _FURNITURE_CSS) if parts else ""
+	return _compose_document("".join(parts), _furniture_css(watermark_top_pt)) if parts else ""
 
 
-def _build_footer(footer_html: str | None, letterhead_footer: str) -> str:
-	"""Compose the HTML footer document, or ``""`` when there is none.
+# --- brand resolution + tool-built title block / running header ------------
 
-	Holds the resolved-and-safe letterhead footer and/or a sanitized explicit
-	``footer``. Page numbers are NOT here - they go through the text footer in
-	``_build_args`` (see there for why: ``[page]`` substitution needs JS in an HTML
-	footer but not in a text footer)."""
+
+def resolve_brand(letterhead: str | None) -> dict:
+	"""Resolve the tenant's brand for the composed document, fail-safe.
+
+	Returns ``{"logo_html", "company", "address_lines", "note"}``:
+
+	  * ``logo_html`` - the default (or named) Letter Head's logo, already
+	    permission-checked, image-neutralised (remote dropped) and base64-inlined
+	    by ``resolve_letterhead`` (whose doc-bound Jinja TEXT is deliberately
+	    dropped - it can't render on a doc-less report). Empty when there is no
+	    usable logo.
+	  * ``company`` / ``address_lines`` - the default Company's name + primary
+	    address (the "no logo -> company name + address" fallback the user asked
+	    for; also the running-header identity). Empty on a frappe-only bench with
+	    no Company, or when unreadable.
+	  * ``note`` - a degrade message when a NAMED letterhead couldn't be applied,
+	    or when company branding ERRORED (not when it is legitimately absent), so a
+	    real failure reaches the download card + telemetry instead of vanishing.
+
+	Never raises: any failure yields an empty brand and a title-only render.
+	"""
+	logo_html, footer_logo, note = "", "", None
+	try:
+		logo_html, footer_logo, note = resolve_letterhead(letterhead)
+	except Exception:
+		# resolve_letterhead is contracted never to raise; if a future change ever
+		# breaks that, degrade to no logo but leave a signal, not a silent swallow.
+		_log_infra_failure("rich-pdf letterhead resolution raised unexpectedly", "")
+		logo_html, footer_logo, note = "", "", None
+	company, address_lines, company_note = _resolve_company_identity()
+	return {
+		# A Letter Head's logo can live in the header OR the footer field; use either.
+		"logo_html": logo_html or footer_logo or "",
+		"company": company,
+		"address_lines": address_lines,
+		# A named-letterhead miss is the more specific message; else the company error.
+		"note": note or company_note,
+	}
+
+
+def _resolve_company_identity() -> tuple[str | None, list[str], str | None]:
+	"""Default Company name + primary-address display lines + a degrade NOTE.
+
+	Mirrors the proven permission-checked chain in ``jarvis.onboarding``
+	(frappe-only-safe, no ERPNext dependency). The note is set ONLY on an actual
+	error - never on the legitimate "no Company configured / not readable" case, so
+	a frappe-only bench does not emit a spurious degrade on every render. Fail-safe:
+	a failure yields ``(None, [], note)`` and a title-only render. The company NAME
+	is resolved BEFORE the address, each in its own guard, so a transient address
+	error keeps the name (the masthead identity) instead of dropping it."""
+	try:
+		# Company is an ERPNext doctype; a frappe-only bench has none.
+		if not frappe.db.exists("DocType", "Company"):
+			return None, [], None
+		company = frappe.defaults.get_user_default("Company") or frappe.defaults.get_global_default("company")
+		if not company:
+			names = [c.name for c in frappe.get_all("Company", fields=["name"], limit=2)]
+			if len(names) == 1:
+				company = names[0]
+		if not company or not frappe.has_permission("Company", "read", doc=company):
+			return None, [], None
+		company_name = frappe.db.get_value("Company", company, "company_name") or company
+	except Exception as exc:
+		_log_infra_failure("rich-pdf company resolution failed", str(exc))
+		return None, [], "company branding could not be resolved — rendered without it"
+	# The address is a nice-to-have; a transient error here must not drop the name.
+	try:
+		address_lines = _resolve_company_address_lines(company)
+	except Exception as exc:
+		_log_infra_failure("rich-pdf company address resolution failed", str(exc))
+		address_lines = []
+	return company_name, address_lines, None
+
+
+def _resolve_company_address_lines(company: str) -> list[str]:
+	"""The company's PRIMARY billing Address as display lines (raw text; the
+	builder escapes). Mirrors ``onboarding._resolve_company_billing_address``:
+	frappe-only Dynamic Link query, filter EXPLICITLY on ``is_primary_address=1``
+	(never a shipping/warehouse address dressed up as the header), own read-perm
+	check. Nothing flagged primary -> no address.
+
+	NOTE: this deliberately FORKS onboarding's query rather than importing it -
+	importing ``jarvis.onboarding`` would pull its control-plane surface
+	(admin_client / hooks / permissions) into the export package for one small
+	helper. If the primary-address selection rule ever changes, update BOTH here and
+	``onboarding._resolve_company_billing_address``; the fork is covered by tests."""
+	linked = frappe.get_all(
+		"Dynamic Link",
+		filters={"link_doctype": "Company", "link_name": company, "parenttype": "Address"},
+		pluck="parent",
+	)
+	if not linked:
+		return []
+	primary = frappe.get_all(
+		"Address",
+		filters={"name": ["in", linked], "is_primary_address": 1, "disabled": 0},
+		pluck="name",
+		order_by="modified desc",
+		limit=1,
+	)
+	if not primary or not frappe.has_permission("Address", "read", doc=primary[0]):
+		return []
+	a = frappe.db.get_value(
+		"Address",
+		primary[0],
+		["address_line1", "address_line2", "city", "state", "pincode", "country"],
+		as_dict=True,
+	)
+	if not a:
+		return []
+	line1 = ", ".join(p for p in (a.get("address_line1"), a.get("address_line2")) if p)
+	line2 = ", ".join(p for p in (a.get("city"), a.get("state"), a.get("pincode")) if p)
+	return [x for x in (line1, line2, a.get("country")) if x]
+
+
+def build_title_block(
+	title: str | None,
+	subtitle: str | None = None,
+	meta: str | None = None,
+	brand: dict | None = None,
+	full_cover: bool = False,
+) -> str:
+	"""Build the tool-owned masthead HTML (class-only, every text field escaped),
+	prepended to the body AFTER sanitize. Because the tool builds it from typed
+	params, raw Markdown (``#``/``**``) can never leak into the title the way it
+	did when the agent hand-wrapped Markdown in ``<div class="cover">``.
+
+	``full_cover`` wraps the block in a full-page ``.cover`` (a printable-height,
+	vertically-centered title page); otherwise it is the default ``.doc-title-block``
+	masthead at the top of page 1. Returns ``""`` when there is nothing to show
+	(no title and no brand), so a bare-prose document simply has no masthead.
+	"""
+	inner = _title_block_inner(title, subtitle, meta, brand or {})
+	if not inner:
+		return ""
+	block = f'<div class="doc-title-block">{inner}</div>'
+	if full_cover:
+		return f'<div class="cover"><div class="cover-inner">{block}</div></div>'
+	return block
+
+
+def build_brand_header(brand: dict | None) -> str:
+	"""Compact running-header HTML: the logo when there is one, else the company
+	name (address is too much for a running band). ``""`` when there is no brand."""
+	brand = brand or {}
+	logo = brand.get("logo_html") or ""
+	if logo:
+		return f'<div class="jv-brand-header">{logo}</div>'
+	company = brand.get("company")
+	if company:
+		return f'<div class="jv-brand-header jv-brand-name">{_esc(company)}</div>'
+	return ""
+
+
+def _title_block_inner(title, subtitle, meta, brand: dict) -> str:
 	parts = []
-	if letterhead_footer:
-		parts.append(f'<div class="jv-lh-footer">{letterhead_footer}</div>')
-	if footer_html:
-		parts.append(f'<div class="jv-footer">{sanitize_rich(footer_html)}</div>')
-	return _compose_document("".join(parts), _FURNITURE_CSS) if parts else ""
+	brand_html = _brand_block_html(brand)
+	if brand_html:
+		parts.append(f'<div class="doc-brand">{brand_html}</div>')
+	if title:
+		parts.append(f'<div class="doc-title">{_esc(title)}</div>')
+	if subtitle:
+		parts.append(f'<div class="doc-subtitle">{_esc(subtitle)}</div>')
+	if meta:
+		parts.append(f'<div class="doc-meta">{_esc(meta)}</div>')
+	return "".join(parts)
+
+
+def _brand_block_html(brand: dict) -> str:
+	"""Logo (already safe/inlined) if present, else company name (bold) + address
+	lines (escaped) - the branding precedence the user specified."""
+	logo = brand.get("logo_html") or ""
+	if logo:
+		return f'<div class="brand-logo">{logo}</div>'
+	company = brand.get("company")
+	if not company:
+		return ""
+	parts = [f'<div class="brand-name">{_esc(company)}</div>']
+	for line in brand.get("address_lines") or []:
+		parts.append(f'<div class="brand-addr">{_esc(line)}</div>')
+	return "".join(parts)
 
 
 def resolve_letterhead(letterhead: str | None) -> tuple[str, str, str | None]:

@@ -29,6 +29,7 @@ from pypika.terms import Field
 
 from jarvis import diagnostics
 from jarvis.chat import agents_api, usage
+from jarvis.tests._role_guard import enforced_role_guards
 
 SETTINGS = "Jarvis Settings"
 USER_SETTINGS = "Jarvis User Settings"
@@ -371,10 +372,10 @@ class TestOwnerSmOnlyCapabilities(Part4Base):
 	def test_rotate_agent_token_rejects_non_sm_admin(self):
 		from jarvis import api as jarvis_api
 
-		with _as(ADMIN):
+		with _as(ADMIN), enforced_role_guards():
 			with self.assertRaises(frappe.PermissionError):
 				jarvis_api.rotate_agent_token()
-		with _as(USER_A):
+		with _as(USER_A), enforced_role_guards():
 			with self.assertRaises(frappe.PermissionError):
 				jarvis_api.rotate_agent_token()
 

@@ -17,7 +17,6 @@ import { LOCAL_PROVIDER_IDS, effectiveApiKey } from "./pool.js";
 
 test("defaultSubscriptionModel: falls back to built-in defaults with no catalog", () => {
 	assert.equal(defaultSubscriptionModel("openai"), "gpt-5.5");
-	assert.equal(defaultSubscriptionModel("google"), "gemini-2.5-pro");
 	assert.equal(defaultSubscriptionModel("unknown"), "gpt-5.5");
 	assert.equal(defaultSubscriptionModel(undefined), "gpt-5.5");
 });
@@ -26,19 +25,17 @@ test("defaultSubscriptionModel: a catalog overrides the built-in default", () =>
 	const catalog = { openai: ["gpt-9.9", "gpt-5.5"] };
 	assert.equal(defaultSubscriptionModel("openai", catalog), "gpt-9.9");
 	// an upstream absent from the catalog still falls back
-	assert.equal(defaultSubscriptionModel("google", catalog), "gemini-2.5-pro");
+	assert.equal(defaultSubscriptionModel("unknown", catalog), "gpt-5.5");
 });
 
 test("subModelSuggestions: maps an API subscription_models payload to upstream keys", () => {
 	const apiPayload = {
 		OpenAI: ["gpt-9.9"],
-		"Google Gemini": ["gemini-9.9"],
 		"xAI Grok": ["grok-9.9"],
 		"Kimi (Moonshot)": ["kimi-9.9"],
 	};
 	assert.deepEqual(subModelSuggestions(apiPayload), {
 		openai: ["gpt-9.9"],
-		google: ["gemini-9.9"],
 		xai: ["grok-9.9"],
 		kimi: ["kimi-9.9"],
 	});

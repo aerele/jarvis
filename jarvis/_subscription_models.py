@@ -28,28 +28,17 @@ from collections.abc import Mapping
 
 import frappe
 
+# Google Gemini has no entry: its chat subscription was removed 2026-08-19 (Google
+# discontinued consumer login-with-Google for Gemini). Gemini stays available via
+# API key, which is served from the api_key-tier catalog, not this subscription seed.
 _SEED_SUBSCRIPTION_MODELS: dict[str, list[str]] = {
 	"OpenAI": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
-	# NOT "gemini-3.1-flash": that id is absent from the pinned cliproxy image
-	# (only the -image, -image-preview, -lite and -lite-preview variants are
-	# compiled into its binary), so the subscription tier cannot serve it and a
-	# customer choosing it silently misrouted to the pool primary.
-	# CORRECTED 2026-07-28: the second half of this note used to say the api-key
-	# tier still offers it "because those ids go to Google's real API, which does
-	# serve it". Measured against a live key, Google 404s it there too, so the id
-	# is gone from both tiers. jarvis_admin_v2 enforces this at save time.
-	"Google Gemini": [
-		"gemini-2.5-pro",
-		"gemini-2.5-flash",
-		"gemini-3.1-flash-lite",
-	],
 	"xAI Grok": ["grok-4.3", "grok-build-0.1"],
 	"Kimi (Moonshot)": ["kimi-k2.7-code", "kimi-k2.6"],
 }
 
 _SEED_DEFAULT_MODEL: dict[str, str] = {
 	"OpenAI": "gpt-5.5",
-	"Google Gemini": "gemini-2.5-pro",
 	"xAI Grok": "grok-4.3",
 	"Kimi (Moonshot)": "kimi-k2.7-code",
 }

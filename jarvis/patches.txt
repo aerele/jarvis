@@ -40,9 +40,7 @@ jarvis.patches.v2_08_drop_jarvis_account_page
 jarvis.patches.v2_09_backfill_persona_enabled
 jarvis.patches.v2_09_drop_selfhost_settings_fields
 jarvis.patches.v2_10_rename_openclaw_seq_watermark
-jarvis.patches.v2_10_backfill_home_intro_seen
 jarvis.patches.v2_10_backfill_chat_was_ready_at
-jarvis.patches.v2_11_backfill_home_intro_enabled
 jarvis.patches.v2_12_rename_capture_agent_provider
 jarvis.patches.v2_12_backfill_role_skill_allowed_roles
 jarvis.patches.v2_12_backfill_approved_draft
@@ -52,3 +50,4 @@ jarvis.patches.v2_13_repush_learned_skills_role_gated
 jarvis.patches.v2_13_unique_agent_installation
 jarvis.patches.v2_14_reconcile_token_limit_to_alltime
 jarvis.patches.v2_14_backfill_wiki_enabled
+jarvis.patches.v2_15_reset_removed_gemini_subscription

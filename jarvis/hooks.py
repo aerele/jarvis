@@ -1,8 +1,8 @@
 app_name = "jarvis"
 app_title = "Jarvis"
-app_publisher = "Aerele"
-app_description = "AI superpowers for Frappe/ERPNext"
-app_email = "navin@aerele.in"
+app_publisher = "Aerele Technologies Pvt Ltd"
+app_description = "The AI teammate inside ERPNext"
+app_email = "jarvis@aerele.in"
 app_license = "AGPL-3.0-only"
 
 
@@ -69,8 +69,10 @@ def __getattr__(name: str):
 #
 # Source:
 #   OpenAI: openclaw/extensions/openai/openai-codex-device-code.ts:5
-#   Google Gemini: bundled with @google/gemini-cli; override via env if it drifts.
 #
+# Google Gemini is deliberately absent - its consumer login-with-Google was
+# discontinued by Google 2026-06-18 (subscription removed 2026-08-19); Gemini
+# is available via API key only.
 # Anthropic Claude is deliberately absent - agent has no compatible
 # adapter for Claude Pro/Max subscriptions.
 def _env_or_default(name: str, default: str) -> str:
@@ -83,12 +85,6 @@ OAUTH_CLIENT_IDS = {
 	"OpenAI": _env_or_default(
 		"JARVIS_OPENAI_CODEX_OAUTH_CLIENT_ID",
 		"app_EMoamEEZ73f0CkXaXp7hrann",
-	),
-	"Google Gemini": _env_or_default(
-		"JARVIS_GEMINI_CLI_OAUTH_CLIENT_ID",
-		# Bundled gemini-cli client_id (extract from upstream if drift detected).
-		# Operators set the env var if our embedded default goes stale.
-		"681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
 	),
 	# xAI Grok — public/PKCE client id used by cli-proxy-api's --xai-login.
 	"xAI Grok": _env_or_default(
@@ -111,27 +107,11 @@ def get_oauth_client_id(provider: str) -> str:
 
 
 # OAuth client_secrets. Required for "confidential client" flows even when
-# PKCE is in play - Google's gemini-cli is one (its /token endpoint returns
-# `HTTP 400: client_secret is missing` without it). OpenAI's codex CLI flow
-# is pure PKCE so the secret stays empty there. Treat these as public-by-
-# design (distributed with the upstream CLI), not as real secrets. Operators
-# override via env when upstream rotates.
-#
-# Resolution order for "Google Gemini":
-#   1. JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET env var (operator override)
-#   2. Extract from the gemini-cli npm package shipped as a runtime dep of
-#      this app (see apps/jarvis/package.json - install with `npm install`
-#      inside that dir after bench-getting the app). NOTE: the dep is pinned
-#      to an EXACT version (SEC-008, Aerele-RnD/jarvis-admin#192), so this
-#      no longer auto-tracks upstream rotations - when Google rotates the
-#      embedded secret, either set the env override (step 1) or deliberately
-#      bump the pin in package.json + package-lock.json (keep it in lockstep
-#      with the fleet-agent entrypoint's GEMINI_CLI_VERSION pin).
-#   3. Empty -> the token exchange fails with the explicit
-#      `client_secret is missing` so the operator knows to install + restart.
+# PKCE is in play. OpenAI's codex CLI flow is pure PKCE so the secret stays
+# empty there. Treat these as public-by-design (distributed with the upstream
+# CLI), not as real secrets. Operators override via env when upstream rotates.
 OAUTH_CLIENT_SECRETS = {
 	"OpenAI": _env_or_default("JARVIS_OPENAI_CODEX_OAUTH_CLIENT_SECRET", ""),
-	"Google Gemini": _env_or_default("JARVIS_GEMINI_CLI_OAUTH_CLIENT_SECRET", ""),
 	# xAI (PKCE) + Kimi (device-flow) are public clients — no secret.
 	"xAI Grok": _env_or_default("JARVIS_XAI_OAUTH_CLIENT_SECRET", ""),
 	"Kimi (Moonshot)": _env_or_default("JARVIS_KIMI_OAUTH_CLIENT_SECRET", ""),
@@ -140,19 +120,8 @@ OAUTH_CLIENT_SECRETS = {
 
 def get_oauth_client_secret(provider: str) -> str:
 	"""Return the client_secret for confidential-client OAuth flows. Empty
-	string for PKCE-only providers (OpenAI codex). For Google Gemini falls
-	back to extracting from the installed @google/gemini-cli package if no
-	env var override was supplied."""
-	val = OAUTH_CLIENT_SECRETS.get(provider, "")
-	if val:
-		return val
-	if provider == "Google Gemini":
-		# Imported lazily so the node_modules walk only runs when a
-		# Google OAuth call asks for it.
-		from jarvis.oauth.gemini_cli_secret import extract_gemini_cli_secret
-
-		return extract_gemini_cli_secret()
-	return ""
+	string for PKCE-only providers (OpenAI codex)."""
+	return OAUTH_CLIENT_SECRETS.get(provider, "")
 
 
 # Includes in <head>

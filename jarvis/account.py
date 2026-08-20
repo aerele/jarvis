@@ -21,7 +21,7 @@ import hashlib
 
 import frappe
 
-from jarvis import admin_client, onboarding_contract, release_notice
+from jarvis import admin_client, compat, onboarding_contract, release_notice
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
@@ -501,7 +501,7 @@ def _admin_chat_gate() -> dict:
 	raw = _settings_raw(_GATE_STATE_FIELDS)
 	cache = frappe.cache()
 	cache_key = f"{_CHAT_GATE_CACHE_KEY}:{_gate_revision(raw)}"
-	cached = cache.get_value(cache_key)
+	cached = compat.cache_get_memoized(cache_key)
 	if cached:
 		if isinstance(cached, dict) and cached.get("unconfirmed"):
 			return _admin_unreachable_verdict(
@@ -623,7 +623,7 @@ def _site_replacement() -> dict:
 	"""Cached {replaced, at, moved_to}. Cached both ways: a replaced site would
 	otherwise ask on every gate miss, and an unreplaced one on every admin blip."""
 	cache = frappe.cache()
-	hit = cache.get_value(_REPLACED_CACHE_KEY)
+	hit = cache.get_value(_REPLACED_CACHE_KEY, expires=True)
 	if isinstance(hit, dict):
 		return hit
 	try:
@@ -885,7 +885,7 @@ def _confirm_apply_via_admin(settings, *, is_pool: bool) -> bool:
 	"""
 	try:
 		cache = frappe.cache()
-		if cache.get_value(_APPLY_CONFIRM_MISS_KEY):
+		if cache.get_value(_APPLY_CONFIRM_MISS_KEY, expires=True):
 			return False
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 			_admin_chat_readiness,

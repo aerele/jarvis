@@ -30,6 +30,7 @@ from unittest import mock
 import frappe
 
 from jarvis.chat import learned_api, wiki
+from jarvis.tests._role_guard import enforced_role_guards
 
 JLP = "Jarvis Learned Pattern"
 PQ = "Jarvis Personalise Question"
@@ -297,7 +298,7 @@ class TestReviewGuards(unittest.TestCase):
 			self.assertTrue(out.get("ok"))
 
 	def test_plain_user_refused_everything(self):
-		with _as(PLAIN):
+		with _as(PLAIN), enforced_role_guards():
 			self._assert_refused(self._reviewer_calls())
 			self._assert_refused(self._admin_calls())
 			with self.assertRaises(frappe.PermissionError):
@@ -394,7 +395,7 @@ class TestPromotionFlow(unittest.TestCase):
 
 	def test_decide_promotion_refused_for_plain(self):
 		_page, req = _mk_promo(to_scope="Org")
-		with _as(PLAIN):
+		with _as(PLAIN), enforced_role_guards():
 			with self.assertRaises(frappe.PermissionError):
 				learned_api.decide_promotion(req.name, 1, "x")
 
@@ -475,7 +476,12 @@ class TestFollowup(unittest.TestCase):
 
 	def test_followup_refused_for_plain(self):
 		p = _mk_pattern("fu4")
-		with _as(PLAIN):
+		# enforced_role_guards(): Frappe 15's only_for() early-returns under
+		# frappe.flags.in_test (a bypass v16 dropped), so without this the role
+		# guard no-ops and the call falls through to a ValidationError instead of
+		# the PermissionError under test. The three sibling PLAIN tests already
+		# wrap this way; this one was the miss.
+		with _as(PLAIN), enforced_role_guards():
 			with self.assertRaises(frappe.PermissionError):
 				learned_api.trigger_followup_question(p, "x")
 
@@ -574,7 +580,7 @@ class TestGoToChat(unittest.TestCase):
 
 	def test_go_to_chat_refused_for_plain(self):
 		p = _mk_pattern("gc3")
-		with _as(PLAIN):
+		with _as(PLAIN), enforced_role_guards():
 			with self.assertRaises(frappe.PermissionError):
 				learned_api.go_to_chat_context("pattern", p)
 

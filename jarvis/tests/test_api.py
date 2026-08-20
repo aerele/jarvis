@@ -5,6 +5,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.api import call_tool
+from jarvis.tests._role_guard import enforced_role_guards
 
 
 class TestCallToolStandardAuth(FrappeTestCase):
@@ -944,7 +945,7 @@ class TestRotateAgentTokenEndpoint(FrappeTestCase):
 			frappe.db.commit()
 		try:
 			frappe.set_user(user_email)
-			with self.assertRaises(frappe.PermissionError):
+			with enforced_role_guards(), self.assertRaises(frappe.PermissionError):
 				self._call_rotate()
 		finally:
 			frappe.set_user("Administrator")

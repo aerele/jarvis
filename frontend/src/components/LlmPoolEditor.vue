@@ -2482,7 +2482,7 @@ const credTypes = [
 	{
 		value: "subscription",
 		label: "Chat subscription",
-		desc: "Sign in with your ChatGPT or Gemini plan",
+		desc: "Sign in with your ChatGPT plan",
 	},
 	{
 		value: "api_key",
@@ -2495,7 +2495,6 @@ const credTypes = [
 // this list if the control ever comes back.)
 const upstreamOpts = [
 	{ value: "openai", label: "OpenAI" },
-	{ value: "google", label: "Google Gemini" },
 	{ value: "xai", label: "xAI Grok" },
 	{ value: "kimi", label: "Kimi (Moonshot)" },
 ];
@@ -2504,7 +2503,6 @@ const upstreamOpts = [
 // MUST match jarvis/oauth/providers.py _PROVIDER_OAUTH_MAP keys.
 const UPSTREAM_OAUTH_PROVIDER = {
 	openai: "OpenAI",
-	google: "Google Gemini",
 	xai: "xAI Grok",
 	kimi: "Kimi (Moonshot)",
 };
@@ -3053,7 +3051,6 @@ function copyTextWithFallback(text) {
 // correct logo. Unknown upstream falls back to the raw value, never a wrong vendor.
 const SUB_UPSTREAM_LABELS = {
 	openai: "OpenAI",
-	google: "Google Gemini",
 	xai: "xAI Grok",
 	kimi: "Kimi (Moonshot)",
 };

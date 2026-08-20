@@ -29,6 +29,7 @@ import frappe
 from frappe.utils import add_days, now_datetime
 
 from jarvis.chat import learned_api
+from jarvis.tests._role_guard import enforced_role_guards
 
 JLP = "Jarvis Learned Pattern"
 RUN = "Jarvis Pattern Run"
@@ -181,7 +182,7 @@ class TestLearnedApi(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	def test_non_sm_is_refused(self):
 		_mk("g1")
-		with _as(self.non_sm):
+		with _as(self.non_sm), enforced_role_guards():
 			for call in (
 				lambda: learned_api.list_learned_patterns_page(),
 				lambda: learned_api.pending_learned_count(),

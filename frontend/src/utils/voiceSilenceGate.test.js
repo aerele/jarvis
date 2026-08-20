@@ -4,11 +4,10 @@
 // (`node --test voiceSilenceGate.test.js`) or via the python suite
 // (jarvis/tests/test_voice_silence_gate_client.py subprocess-runs it every CI run).
 //
-// What is being defended: whisper-large-v3-turbo hallucinates a confident phrase onto silent
-// audio ("Thank you." 3/3 on a pure-silence 15 s webm), the provider exposes no no_speech_prob to
-// filter on server-side, and a phrase blocklist was vetoed — so a take nobody spoke into must be
-// dropped in the BROWSER, before any upload. And the counter-invariant that matters more: a take
-// the meter could not measure must ALWAYS be transcribed.
+// What is being defended: audio-capable language models can hallucinate a confident phrase onto
+// silent audio, and a phrase blocklist could hide genuine speech. A take nobody spoke into must
+// be gated before upload. The counter-invariant matters more: a take the meter could not measure
+// must always be transcribed.
 //
 // The gate is now WHOLE-TAKE: one dictation is one recording, so the peak describes the entire
 // recording and a single audible word anywhere in it clears the gate. Only a recording that was

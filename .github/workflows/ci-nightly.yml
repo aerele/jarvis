@@ -3,7 +3,7 @@ name: CI (from scratch)
 # The pre-baked-image escape hatch. This is what .github/workflows/ci.yml used to be: it builds a
 # bench from nothing, fetching frappe/erpnext/hrms at version-16 HEAD.
 #
-# PR CI no longer does this — it consumes ghcr.io/aerele-rnd/jarvis-ci-base:v16, which is rebuilt
+# PR CI no longer does this — it consumes ghcr.io/aerele/jarvis-ci-base:v16, which is rebuilt
 # nightly. That makes PRs fast but means a PR can go green against a *stale* image. This job is the
 # thing that notices: it runs against live upstream every night, so a breaking change in frappe,
 # erpnext or hrms turns this red within a day, decoupled from PR latency.

@@ -24,9 +24,11 @@ belong to the FC smoke gate.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -190,14 +192,16 @@ class TestFurnitureSanitization(_FurnitureRenderBase):
 		self.assertNotIn("<script", low)
 		self.assertIn("keepme", content)
 
-	def test_footer_is_sanitized(self) -> None:
-		render_pdf("<p>body</p>", footer_html='<img src="http://evil"><script>x</script><b>footkeep</b>')
-		content = self.fake_wk.file_contents["--footer-html"]
-		low = content.lower()
-		self.assertNotIn("<img", low)
-		self.assertNotIn("evil", low)
-		self.assertNotIn("<script", low)
-		self.assertIn("footkeep", content)
+	def test_footer_text_is_plain_in_text_zone(self) -> None:
+		# The footer is now a TEXT zone (--footer-left), not an HTML doc: tags are
+		# stripped to plain text so it coexists with the page-number zone, and no
+		# HTML/img can reach a footer render at all.
+		render_pdf("<p>body</p>", footer_text='<img src="http://evil"><b>footkeep</b>')
+		self.assertNotIn("--footer-html", self.fake_wk.args)
+		zone = self.fake_wk.args[self.fake_wk.args.index("--footer-left") + 1]
+		self.assertNotIn("<", zone)
+		self.assertNotIn("evil", zone)
+		self.assertIn("footkeep", zone)
 
 	def test_watermark_is_sanitized_and_rotated_in_header(self) -> None:
 		render_pdf("<p>body</p>", watermark='DRAFT<img src="http://evil"><script>x</script>')
@@ -215,21 +219,20 @@ class TestFurnitureSanitization(_FurnitureRenderBase):
 
 
 class TestTempFileLifecycle(_FurnitureRenderBase):
-	def test_temp_files_exist_during_call_then_removed(self) -> None:
-		render_pdf("<p>body</p>", header_html="<b>H</b>", footer_html="<b>F</b>")
-		for flag in ("--header-html", "--footer-html"):
-			path = self.fake_wk.path_for(flag)
-			self.assertTrue(self.fake_wk.files_existed[path], f"{flag} temp missing during call")
-			self.assertFalse(os.path.exists(path), f"{flag} temp not cleaned up after return")
+	def test_temp_file_exists_during_call_then_removed(self) -> None:
+		# Only the running HEADER is a temp file now (the footer is text zones).
+		render_pdf("<p>body</p>", header_html="<b>H</b>")
+		path = self.fake_wk.path_for("--header-html")
+		self.assertTrue(self.fake_wk.files_existed[path], "--header-html temp missing during call")
+		self.assertFalse(os.path.exists(path), "--header-html temp not cleaned up after return")
 
 	def test_timeout_cleans_temp_and_raises_clean_error(self) -> None:
 		self.fake_wk.raise_timeout = True
 		with self.assertRaises(InvalidArgumentError) as cm:
-			render_pdf("<p>body</p>", header_html="<b>H</b>", footer_html="<b>F</b>", timeout=7)
+			render_pdf("<p>body</p>", header_html="<b>H</b>", timeout=7)
 		self.assertIn("7s", str(cm.exception))
 		self.assertFalse(isinstance(cm.exception, subprocess.TimeoutExpired))
-		for flag in ("--header-html", "--footer-html"):
-			self.assertFalse(os.path.exists(self.fake_wk.path_for(flag)))
+		self.assertFalse(os.path.exists(self.fake_wk.path_for("--header-html")))
 
 	def test_oserror_from_exec_is_clean_and_cleans_temp(self) -> None:
 		# The resolved binary fails to EXECUTE (OSError, not TimeoutExpired) → clean
@@ -247,27 +250,6 @@ class TestTempFileLifecycle(_FurnitureRenderBase):
 			render_pdf("<p>body</p>", header_html="<b>H</b>")
 		# temp cleaned even on a non-zero exit (this test's point)
 		self.assertFalse(os.path.exists(self.fake_wk.path_for("--header-html")))
-
-	def test_first_temp_cleaned_when_second_write_fails(self) -> None:
-		# ENOSPC / fd-exhaustion on the SECOND temp write must not orphan the FIRST -
-		# temp creation is inside the try so the finally still cleans it.
-		real_write = furniture._write_temp
-		created: list[str] = []
-		calls = {"n": 0}
-
-		def _wt(tmp_dir: str, content: str) -> str:
-			calls["n"] += 1
-			if calls["n"] == 2:
-				raise OSError("disk full")
-			path = real_write(tmp_dir, content)
-			created.append(path)
-			return path
-
-		patch.object(furniture, "_write_temp", _wt).start()
-		with self.assertRaises(OSError):
-			render_pdf("<p>hi</p>", header_html="<b>H</b>", footer_html="<b>F</b>")
-		self.assertTrue(created, "first temp was never created")
-		self.assertFalse(os.path.exists(created[0]), "first temp leaked when the second write failed")
 
 	def test_two_calls_use_distinct_temp_names(self) -> None:
 		render_pdf("<p>a</p>", header_html="<b>H</b>")
@@ -363,57 +345,77 @@ class TestBinaryResolution(unittest.TestCase):
 
 
 class TestPageNumbering(_FurnitureRenderBase):
-	def test_page_numbers_use_text_footer_not_html(self) -> None:
-		# Page numbers go through the TEXT footer (--footer-center), which
+	def test_page_numbers_use_text_footer_right_not_html(self) -> None:
+		# Page numbers go through a TEXT footer zone (--footer-right), which
 		# substitutes [page]/[topage] in wkhtmltopdf's C++ layer and so works under
 		# --disable-javascript. An HTML footer's bracket substitution needs JS, so
 		# it would print a literal "[page]" (the staging-smoke bug).
 		render_pdf("<p>hi</p>", page_numbers=True)
 		self.assertNotIn("--footer-html", self.fake_wk.args)
-		self.assertIn("--footer-center", self.fake_wk.args)
-		i = self.fake_wk.args.index("--footer-center")
+		i = self.fake_wk.args.index("--footer-right")
 		self.assertEqual(self.fake_wk.args[i + 1], "Page [page] of [topage]")
 
 	def test_no_footer_when_page_numbers_off_and_no_footer(self) -> None:
 		render_pdf("<p>hi</p>", page_numbers=False)
 		self.assertNotIn("--footer-html", self.fake_wk.args)
-		self.assertNotIn("--footer-center", self.fake_wk.args)
+		self.assertNotIn("--footer-right", self.fake_wk.args)
+		self.assertNotIn("--footer-left", self.fake_wk.args)
 
 	def test_no_header_when_nothing_to_render(self) -> None:
 		render_pdf("<p>hi</p>", page_numbers=False)
 		self.assertNotIn("--header-html", self.fake_wk.args)
 
-	def test_html_footer_wins_over_text_page_numbers(self) -> None:
-		# An explicit footer (or a letterhead footer) needs --footer-html; it and
-		# the text footer are mutually exclusive, so auto page numbers are omitted.
-		render_pdf("<p>hi</p>", footer_html="<b>my-footer</b>", page_numbers=True)
-		self.assertIn("--footer-html", self.fake_wk.args)
-		self.assertNotIn("--footer-center", self.fake_wk.args)
-		content = self.fake_wk.file_contents["--footer-html"]
-		self.assertIn("my-footer", content)
-
-	def test_letterhead_footer_uses_html_footer(self) -> None:
-		render_pdf("<p>hi</p>", letterhead_footer="<div>LH-FOOT</div>", page_numbers=True)
-		self.assertIn("--footer-html", self.fake_wk.args)
-		self.assertNotIn("--footer-center", self.fake_wk.args)
-		self.assertIn("LH-FOOT", self.fake_wk.file_contents["--footer-html"])
-
-
-# --- letterhead: folding (pre-resolved, trusted HTML) -----------------------
-
-
-class TestLetterheadFolding(_FurnitureRenderBase):
-	def test_letterhead_header_footer_folded(self) -> None:
-		# render_pdf receives ALREADY-RESOLVED, safe letterhead HTML and folds it in
-		# as-is (it is not re-sanitized - the images were neutralised in resolve).
-		render_pdf(
-			"<p>hi</p>",
-			letterhead_header="<div>LH-HEADER-MARK</div>",
-			letterhead_footer="<div>LH-FOOTER-MARK</div>",
-			page_numbers=False,
+	def test_footer_text_and_page_numbers_coexist(self) -> None:
+		# THE fix: a text footer and page numbers live on DIFFERENT edges, so a
+		# branded/footed document KEEPS "Page X of Y" (the old --footer-html path
+		# silently dropped it).
+		render_pdf("<p>hi</p>", footer_text="Confidential", page_numbers=True)
+		self.assertNotIn("--footer-html", self.fake_wk.args)
+		self.assertEqual(self.fake_wk.args[self.fake_wk.args.index("--footer-left") + 1], "Confidential")
+		self.assertEqual(
+			self.fake_wk.args[self.fake_wk.args.index("--footer-right") + 1], "Page [page] of [topage]"
 		)
-		self.assertIn("LH-HEADER-MARK", self.fake_wk.file_contents["--header-html"])
-		self.assertIn("LH-FOOTER-MARK", self.fake_wk.file_contents["--footer-html"])
+
+
+# --- brand header folding + spacing (pre-built, trusted HTML) ---------------
+
+
+class TestBrandHeaderFolding(_FurnitureRenderBase):
+	def test_brand_header_folded_into_header_with_spacing(self) -> None:
+		# render_pdf receives ALREADY-BUILT, safe brand-header HTML (a logo, else the
+		# company name) and folds it into the running HTML header as-is.
+		render_pdf(
+			"<p>hi</p>", brand_header="<div class='jv-brand-header'>BRAND-MARK</div>", page_numbers=False
+		)
+		self.assertIn("BRAND-MARK", self.fake_wk.file_contents["--header-html"])
+		self.assertIn("--header-spacing", self.fake_wk.args)
+
+	def test_header_reserves_top_margin(self) -> None:
+		# A header reserves extra top margin so a logo/brand line never overlaps body.
+		render_pdf("<p>hi</p>", brand_header="<div>B</div>", margins_mm=15)
+		ti = self.fake_wk.args.index("--margin-top")
+		self.assertEqual(self.fake_wk.args[ti + 1], "29mm")  # 15 + 14 reserved
+
+	def test_no_header_no_extra_margin_no_spacing(self) -> None:
+		render_pdf("<p>hi</p>", margins_mm=15, page_numbers=False)
+		self.assertNotIn("--header-spacing", self.fake_wk.args)
+		ti = self.fake_wk.args.index("--margin-top")
+		self.assertEqual(self.fake_wk.args[ti + 1], "15mm")
+
+
+class TestWatermarkGeometry(_FurnitureRenderBase):
+	def _wm_top(self, **kw) -> str:
+		render_pdf("<p>hi</p>", watermark="DRAFT", **kw)
+		m = re.search(r"top:\s*(\d+)pt", self.fake_wk.file_contents["--header-html"])
+		self.assertTrue(m, "watermark top not found in header CSS")
+		return m.group(1)
+
+	def test_watermark_top_varies_by_page_size_and_orientation(self) -> None:
+		a4 = self._wm_top(page_size="A4", orientation="portrait")
+		letter = self._wm_top(page_size="Letter", orientation="portrait")
+		landscape = self._wm_top(page_size="A4", orientation="landscape")
+		self.assertNotEqual(a4, letter)  # not the old fixed 340pt
+		self.assertNotEqual(a4, landscape)
 
 
 # --- letterhead: image inlining (the SSRF fix), site-free via stubs ----------
@@ -714,3 +716,222 @@ class TestLetterheadLogos(unittest.TestCase):
 		out = furniture._letterhead_logos(huge)
 		self.assertEqual(out, "")  # over the cap → dropped
 		self.assertLess(time.monotonic() - start, 1.0)
+
+
+# --- tool-built masthead + running header (pure, no site) --------------------
+
+
+class TestTitleBlock(unittest.TestCase):
+	def test_title_is_escaped_and_no_raw_markdown_leaks(self) -> None:
+		out = furniture.build_title_block("# ERP <x> & Co", subtitle="**sub**", meta="INR")
+		# The tool builds a div from the param, so the raw markdown chars are escaped
+		# TEXT, never rendered as a heading (the old <div class="cover">md bug).
+		self.assertIn('<div class="doc-title"># ERP &lt;x&gt; &amp; Co</div>', out)
+		self.assertIn('<div class="doc-subtitle">**sub**</div>', out)
+		self.assertIn('<div class="doc-meta">INR</div>', out)
+		self.assertNotIn("<h1", out)
+
+	def test_default_is_title_block_full_cover_wraps(self) -> None:
+		plain = furniture.build_title_block("T", full_cover=False)
+		self.assertIn('<div class="doc-title-block">', plain)
+		self.assertNotIn('class="cover"', plain)
+		cover = furniture.build_title_block("T", full_cover=True)
+		self.assertIn('<div class="cover"><div class="cover-inner">', cover)
+		self.assertIn('<div class="doc-title-block">', cover)
+
+	def test_empty_when_no_title_and_no_brand(self) -> None:
+		self.assertEqual(furniture.build_title_block(None), "")
+
+	def test_logo_wins_over_company_name(self) -> None:
+		brand = {
+			"logo_html": '<img src="data:image/png;base64,AAA">',
+			"company": "Acme",
+			"address_lines": ["1 St"],
+		}
+		out = furniture.build_title_block("T", brand=brand)
+		self.assertIn('<div class="brand-logo"><img src="data:image/png;base64,AAA">', out)
+		self.assertNotIn("Acme", out)
+
+	def test_company_name_and_address_when_no_logo(self) -> None:
+		brand = {"logo_html": "", "company": "Acme <Ltd>", "address_lines": ["1 St", "City 560001"]}
+		out = furniture.build_title_block("T", brand=brand)
+		self.assertIn('<div class="brand-name">Acme &lt;Ltd&gt;</div>', out)
+		self.assertIn('<div class="brand-addr">1 St</div>', out)
+		self.assertIn('<div class="brand-addr">City 560001</div>', out)
+
+
+class TestBrandRunningHeader(unittest.TestCase):
+	def test_logo_when_present(self) -> None:
+		out = furniture.build_brand_header({"logo_html": "<img src='data:x'>", "company": "Acme"})
+		self.assertIn("jv-brand-header", out)
+		self.assertIn("<img", out)
+
+	def test_company_name_when_no_logo(self) -> None:
+		out = furniture.build_brand_header({"logo_html": "", "company": "Acme <Ltd>"})
+		self.assertIn("jv-brand-name", out)
+		self.assertIn("Acme &lt;Ltd&gt;", out)
+
+	def test_empty_when_no_brand(self) -> None:
+		self.assertEqual(furniture.build_brand_header({}), "")
+		self.assertEqual(furniture.build_brand_header(None), "")
+
+
+class TestResolveBrand(unittest.TestCase):
+	def test_frappe_only_bench_no_company_is_empty_not_crash(self) -> None:
+		# No Company doctype (frappe-only bench) => no company brand, no crash.
+		with (
+			patch.object(furniture, "resolve_letterhead", lambda _lh: ("", "", None)),
+			patch.object(furniture, "frappe") as fk,
+		):
+			fk.db.exists.return_value = False
+			brand = furniture.resolve_brand(None)
+		self.assertEqual(brand["logo_html"], "")
+		self.assertIsNone(brand["company"])
+		self.assertEqual(brand["address_lines"], [])
+
+	def test_logo_from_letterhead_passed_through(self) -> None:
+		with (
+			patch.object(furniture, "resolve_letterhead", lambda _lh: ("<img src='data:x'>", "", None)),
+			patch.object(furniture, "_resolve_company_identity", lambda: (None, [], None)),
+		):
+			brand = furniture.resolve_brand(None)
+		self.assertIn("<img", brand["logo_html"])
+
+	def test_named_letterhead_note_and_company_fallback_propagate(self) -> None:
+		with (
+			patch.object(
+				furniture,
+				"resolve_letterhead",
+				lambda _lh: ("", "", "letterhead 'X' not found — rendered without it"),
+			),
+			patch.object(furniture, "_resolve_company_identity", lambda: ("Acme", ["1 St"], None)),
+		):
+			brand = furniture.resolve_brand("X")
+		self.assertIn("not found", brand["note"])
+		self.assertEqual(brand["company"], "Acme")
+		self.assertEqual(brand["address_lines"], ["1 St"])
+
+	def test_footer_logo_used_when_header_logo_absent(self):
+		# A Letter Head whose logo lives only in the FOOTER field is still used.
+		with (
+			patch.object(furniture, "resolve_letterhead", lambda _lh: ("", "<img src='data:foot'>", None)),
+			patch.object(furniture, "_resolve_company_identity", lambda: (None, [], None)),
+		):
+			brand = furniture.resolve_brand(None)
+		self.assertIn("data:foot", brand["logo_html"])
+
+	def test_company_error_note_propagates(self):
+		# A real company-resolution ERROR (not legitimate absence) surfaces a note.
+		with (
+			patch.object(furniture, "resolve_letterhead", lambda _lh: ("", "", None)),
+			patch.object(
+				furniture,
+				"_resolve_company_identity",
+				lambda: (None, [], "company branding could not be resolved — rendered without it"),
+			),
+		):
+			brand = furniture.resolve_brand(None)
+		self.assertIn("could not be resolved", brand["note"])
+
+
+class TestCompanyIdentity(unittest.TestCase):
+	"""The security-sensitive company/primary-address resolver (was untested).
+	frappe is mocked wholesale so the branch logic is exercised without a site."""
+
+	def test_address_primary_only_happy_path(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.get_all.side_effect = [["ADDR-1"], ["ADDR-1"]]  # Dynamic Link, then Address
+			fk.has_permission.return_value = True
+			fk.db.get_value.return_value = {
+				"address_line1": "1 St",
+				"address_line2": "",
+				"city": "Bengaluru",
+				"state": "KA",
+				"pincode": "560001",
+				"country": "India",
+			}
+			lines = furniture._resolve_company_address_lines("Acme")
+		self.assertEqual(lines, ["1 St", "Bengaluru, KA, 560001", "India"])
+		# the Address query MUST filter on the primary flag (never a shipping addr).
+		addr_call = fk.get_all.call_args_list[1]
+		self.assertEqual(addr_call.kwargs["filters"]["is_primary_address"], 1)
+		self.assertEqual(addr_call.kwargs["filters"]["disabled"], 0)
+
+	def test_address_perm_denied_returns_empty(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.get_all.side_effect = [["ADDR-1"], ["ADDR-1"]]
+			fk.has_permission.return_value = False  # no Address read perm
+			self.assertEqual(furniture._resolve_company_address_lines("Acme"), [])
+
+	def test_no_primary_address_returns_empty(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.get_all.side_effect = [["ADDR-1"], []]  # linked, but none flagged primary
+			self.assertEqual(furniture._resolve_company_address_lines("Acme"), [])
+
+	def test_no_linked_address_returns_empty(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.get_all.side_effect = [[]]  # no Dynamic Link at all
+			self.assertEqual(furniture._resolve_company_address_lines("Acme"), [])
+
+	def test_partial_address_fields_drops_empties(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.get_all.side_effect = [["ADDR-1"], ["ADDR-1"]]
+			fk.has_permission.return_value = True
+			fk.db.get_value.return_value = {
+				"address_line1": "1 St",
+				"address_line2": None,
+				"city": None,
+				"state": None,
+				"pincode": None,
+				"country": None,
+			}
+			self.assertEqual(furniture._resolve_company_address_lines("Acme"), ["1 St"])
+
+	def test_identity_no_company_doctype_absent_no_note(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.db.exists.return_value = False  # frappe-only bench
+			self.assertEqual(furniture._resolve_company_identity(), (None, [], None))
+
+	def test_identity_no_read_perm_is_absence_not_error(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.db.exists.return_value = True
+			fk.defaults.get_user_default.return_value = "Acme"
+			fk.has_permission.return_value = False
+			self.assertEqual(furniture._resolve_company_identity(), (None, [], None))
+
+	def test_identity_multi_company_no_default_no_pick(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.db.exists.return_value = True
+			fk.defaults.get_user_default.return_value = None
+			fk.defaults.get_global_default.return_value = None
+			fk.get_all.return_value = [types.SimpleNamespace(name="A"), types.SimpleNamespace(name="B")]
+			name, lines, note = furniture._resolve_company_identity()
+		self.assertIsNone(name)  # >1 company, no default → no arbitrary pick
+
+	def test_identity_error_sets_degrade_note(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.db.exists.return_value = True
+			fk.defaults.get_user_default.side_effect = RuntimeError("db down")
+			name, lines, note = furniture._resolve_company_identity()
+		self.assertIsNone(name)
+		self.assertIn("could not be resolved", note)  # ERROR degrades WITH a note
+
+	def test_identity_address_error_keeps_name(self):
+		with patch.object(furniture, "frappe") as fk:
+			fk.db.exists.return_value = True
+			fk.defaults.get_user_default.return_value = "Acme"
+			fk.has_permission.return_value = True
+			fk.db.get_value.return_value = "Acme Ltd"
+			with patch.object(furniture, "_resolve_company_address_lines", side_effect=RuntimeError("boom")):
+				name, lines, note = furniture._resolve_company_identity()
+		self.assertEqual(name, "Acme Ltd")  # name kept despite the address failure
+		self.assertEqual(lines, [])
+		self.assertIsNone(note)
+
+
+class TestTextOnly(unittest.TestCase):
+	def test_strips_tags_collapses_whitespace_truncates(self):
+		self.assertEqual(furniture._text_only("<b>Hi</b>   there"), "Hi there")
+		self.assertEqual(furniture._text_only("a\n\n b\t c"), "a b c")
+		self.assertEqual(len(furniture._text_only("x" * 500)), 200)  # 200-char cap
+		self.assertEqual(furniture._text_only(None), "")
