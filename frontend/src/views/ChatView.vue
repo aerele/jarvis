@@ -6856,6 +6856,7 @@ onMounted(() => {
 });
 onUnmounted(() => {
 	if (_expiryTick) clearInterval(_expiryTick);
+	stopPendingPoll();
 	window.removeEventListener("focus", refreshQueuePositionOnFocus);
 });
 function pendingExpiredOf(pa) {
@@ -7032,9 +7033,13 @@ async function discardPending(pa) {
 // conversation switch.
 async function resyncPendingConfirmations(id) {
 	if (!id) return;
-	let items = [];
+	let items = null;
 	try {
 		const r = await api.listPendingConfirmations(id);
+		// ok:false is a transient store blip (the strict owner-index read). Keep
+		// whatever is already on screen and let the next poll tick retry; never
+		// wipe the queue on a single bad read (that was the fail-closed hole that
+		// hid every card the live push missed).
 		if (r && r.ok === false) return;
 		items = (r && r.data && r.data.pending) || [];
 	} catch (e) {
@@ -7042,6 +7047,16 @@ async function resyncPendingConfirmations(id) {
 	}
 	if (currentId.value !== id) return; // navigated away while the request was in flight
 	if (!Array.isArray(items)) return;
+	// Reconcile the on-screen queue to the server's authoritative live set for
+	// THIS conversation: DROP cards the store no longer holds (confirmed/expired,
+	// or a stale token orphaned by a model restage) and ADD any a dropped
+	// action:pending push missed. Cards for other conversations, and in-flight
+	// (busy) confirms, are left untouched. Server truth (not a caught socket
+	// frame) decides what shows.
+	const live = new Set(items.map((it) => it.token));
+	pendingActions.value = pendingActions.value.filter(
+		(pa) => pa.conversation !== id || pa.busy || live.has(pa.token)
+	);
 	for (const it of items) {
 		enqueuePending({
 			conversation: it.conversation || id,
@@ -7053,6 +7068,43 @@ async function resyncPendingConfirmations(id) {
 			expires_at: it.expires_at || null,
 		});
 	}
+}
+
+// Authoritative pull. A confirmation card (and therefore its Confirm button AND
+// the approval_tokens a typed "go ahead" needs) must not depend on catching one
+// best-effort action:pending socket frame. While a turn is live (and for a few
+// ticks after it settles) re-read the parked list from durable server state on
+// a short interval, so a card whose push was dropped still appears within a
+// couple seconds without a manual reload. Self-stops when the chat goes idle so
+// a quiet conversation is not polled forever. Confirming stays sequential
+// server-side (one live card per conversation), so this poll never surfaces more
+// than the flow intends; it just stops losing the one card the chain waits on.
+let _pendingPoll = null;
+let _pendingPollIdle = 0;
+const PENDING_POLL_MS = 2500;
+const PENDING_POLL_TRAILING = 2; // reconciles to run after a run settles, then stop
+function startPendingPoll() {
+	if (_pendingPoll) {
+		_pendingPollIdle = 0; // a fresh signal: reset the idle countdown
+		return;
+	}
+	_pendingPollIdle = 0;
+	_pendingPoll = setInterval(() => {
+		if (!currentId.value) {
+			stopPendingPoll();
+			return;
+		}
+		resyncPendingConfirmations(currentId.value);
+		// Keep polling while a run is live; once it settles, run a couple of
+		// trailing reconciles (a terminal frame can be the dropped one) then stop.
+		if (currentRunId.value) _pendingPollIdle = 0;
+		else if (++_pendingPollIdle > PENDING_POLL_TRAILING) stopPendingPoll();
+	}, PENDING_POLL_MS);
+}
+function stopPendingPoll() {
+	if (_pendingPoll) clearInterval(_pendingPoll);
+	_pendingPoll = null;
+	_pendingPollIdle = 0;
 }
 
 // Resync the queued chip from server truth (SUXI-1). The chip + its Cancel
@@ -8638,6 +8690,9 @@ function onEvent(p) {
 				run_id: p.run_id || null,
 				expires_at: p.expires_at || null,
 			});
+			// Keep pulling server truth for the rest of the turn: if THIS push
+			// arrived but a sibling's was dropped, the poll fills the gap.
+			startPendingPoll();
 		}
 		return;
 	}
@@ -8675,6 +8730,9 @@ function onEvent(p) {
 			currentRunId.value = p.run_id;
 			currentMsgId.value = p.message_id;
 			recovering.value = null;
+			// A live turn can park a confirmation card mid-run; pull the parked
+			// list on a short interval so a dropped action:pending push self-heals.
+			startPendingPoll();
 			// Phase-0 admission: a queued turn just got promoted and is now
 			// streaming — retire the "~N ahead" chip.
 			if (queuedTurn.value && queuedTurn.value.run_id === p.run_id) queuedTurn.value = null;
