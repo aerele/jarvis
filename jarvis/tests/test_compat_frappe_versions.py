@@ -1,8 +1,8 @@
 """Regression tests for the Frappe 15 / 16 shims in :mod:`jarvis.compat`.
 
-``pyproject.toml`` declares ``frappe = ">=15.0.0,<17.0.0"``, but three APIs were
-written against Frappe 16 and shipped onto Frappe 15 benches, where each raised
-at call time and nothing caught it:
+Jarvis ships separate branches for Frappe 15 and 16, with these cross-major
+shims carried on both. Three APIs were written against Frappe 16 and shipped
+onto Frappe 15 benches, where each raised at call time and nothing caught it:
 
 * ``File.get_content(encodings=[])`` is a ``TypeError`` on 15. ``read_file``
   re-raised it as an unhandled HTTP 500 for every file type, and the chat attach
