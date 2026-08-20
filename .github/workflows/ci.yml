@@ -22,8 +22,9 @@ name: CI
 #     repo where Actions minutes are free; on a billed repo the from-scratch rebuild x4
 #     would be the wrong call. The real fix (fast AND cheap) is a prebaked :v15 image per
 #     the note above — add it and each shard's setup becomes a cheap pull like develop's.
-#     Coverage is reported per-shard inline (partial, see the test step) with no enforced
-#     floor yet — turn a combined --fail-under on once the suite is green on v15.
+#     Each shard uploads its coverage data; the `coverage` job at the bottom combines all
+#     four and enforces the floor once (mirroring develop). A per-shard floor is impossible
+#     because each shard only covers about a quarter of the code.
 #
 # The lint / frontend jobs are byte-identical to develop's: they never touch a bench, so
 # nothing about them is Frappe-version-specific. Keep them in lockstep when cherry-picking
@@ -326,7 +327,80 @@ jobs:
             --build-number ${{ matrix.shard }} \
             --total-builds 4 \
             --with-coverage
-          # Report-only, per shard (partial coverage — no cross-shard combine yet). The
-          # point of this job today is still the v15 failure list; an enforced floor on a
-          # red, sharded suite adds noise. Promote to a combined --fail-under once green.
-          ./env/bin/coverage report --data-file=sites/.coverage || true
+
+      - name: Stash this shard's coverage under a non-hidden name
+        working-directory: frappe-bench
+        run: |
+          # frappe's CodeCoverage writes sites/.coverage. Renaming off the leading dot is
+          # deliberate: upload-artifact@v4 EXCLUDES hidden files, so uploading `.coverage`
+          # silently produces an empty artifact and the combine job then fails on "No data
+          # to report" long after the real cause scrolled past.
+          mv sites/.coverage "sites/coverage-data-${{ matrix.shard }}"
+
+      - name: Upload this shard's coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.shard }}
+          path: frappe-bench/sites/coverage-data-${{ matrix.shard }}
+          retention-days: 1
+          if-no-files-found: error
+
+  # The coverage floor cannot be enforced inside a shard: each one exercises roughly a
+  # quarter of the code, so all four would "fail" the gate. Combine the four data files,
+  # then gate once. `needs: tests` against a matrix runs this only when EVERY leg
+  # succeeded, so a failing shard surfaces as one honest test failure, not that plus a
+  # bogus coverage failure from the missing quarter.
+  coverage:
+    runs-on: ubuntu-latest
+    needs: tests
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The test job pip install -e'd jarvis from $GITHUB_WORKSPACE/frappe-bench/apps/
+          # jarvis, so the coverage data files reference that absolute source path. Place
+          # the checkout there so `coverage report` can read the sources it has to count.
+          path: frappe-bench/apps/jarvis
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install coverage
+        # Pin to frappe's own constraint (apps/frappe/pyproject.toml: "coverage~=7.10.0"),
+        # which is what wrote these data files. coverage's sqlite schema is stable across
+        # 7.x, but a version that could not read them must fail loudly, not silently.
+        run: pip install 'coverage~=7.10.0'
+
+      - name: Download every shard's coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+          path: covdata
+
+      - name: Combine and enforce the floor
+        working-directory: covdata
+        run: |
+          echo "shard data files:"; ls -l
+
+          # Guard 1: every shard must have UPLOADED. Keep this count in step with the
+          # matrix list in the tests job above (shard: [1, 2, 3, 4]).
+          found=$(ls coverage-data-* 2>/dev/null | wc -l)
+          [ "${found}" -eq 4 ] || { echo "expected 4 shard files, got ${found}"; exit 1; }
+
+          # Guard 2: every shard must have been READ. `coverage combine` is not
+          # all-or-nothing: per file it catches the error, warns, and carries on, raising
+          # only when NOTHING combined. So one unreadable shard silently drops a quarter and
+          # --fail-under then judges a partial dataset. Treat any warning as fatal.
+          out=$(coverage combine coverage-data-* 2>&1); rc=$?
+          echo "${out}"
+          [ "${rc}" -eq 0 ] || exit "${rc}"
+          if printf '%s' "${out}" | grep -qiE "warning|couldn't use"; then
+            echo "::error::coverage combine could not read every shard; refusing to gate a partial dataset"
+            exit 1
+          fi
+
+          # Enforced coverage floor, mirrored from the develop/v16 pipeline. Ratchet UP over
+          # time; never down.
+          coverage report --fail-under=85
