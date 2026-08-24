@@ -51,7 +51,7 @@
 
 		<!-- loading -->
 		<div v-if="loading" class="flex flex-1 items-center justify-center">
-			<JvSpinner />
+			<JvSpinner :size="48" />
 		</div>
 
 		<!-- §3.8 permission-blocked state -->
