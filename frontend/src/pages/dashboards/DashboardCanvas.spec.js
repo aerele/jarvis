@@ -23,7 +23,7 @@ const echartsGate = vi.hoisted(() => {
 		load: vi.fn(() =>
 			state.mode === "manual"
 				? new Promise((resolve) => state.queue.push(resolve))
-				: Promise.resolve("")
+				: Promise.resolve(""),
 		),
 	};
 });
@@ -37,7 +37,9 @@ const srcdoc = vi.hoisted(() => ({ build: vi.fn((html) => "DOC:" + html) }));
 vi.mock("@/lib/dashboardSrcdoc", () => ({
 	buildSrcdoc: srcdoc.build,
 	parseSourcesBlock: (html) =>
-		String(html || "").includes("sources") ? [{ source_name: "s1", tool: "query", spec: {} }] : [],
+		String(html || "").includes("sources")
+			? [{ source_name: "s1", tool: "query", spec: {} }]
+			: [],
 }));
 
 vi.mock("@/lib/dashboardThemes", () => ({
@@ -59,8 +61,16 @@ const api = vi.hoisted(() => ({
 vi.mock("@/api/dashboards", () => api);
 
 vi.mock("frappe-ui", () => ({
-	Button: { name: "Button", props: ["label", "loading"], template: "<button>{{ label }}</button>" },
-	ErrorMessage: { name: "ErrorMessage", props: ["message"], template: "<div>{{ message }}</div>" },
+	Button: {
+		name: "Button",
+		props: ["label", "loading"],
+		template: "<button>{{ label }}</button>",
+	},
+	ErrorMessage: {
+		name: "ErrorMessage",
+		props: ["message"],
+		template: "<div>{{ message }}</div>",
+	},
 	FeatherIcon: { name: "FeatherIcon", template: "<i />" },
 }));
 vi.mock("@/components/JvSpinner.vue", () => ({
