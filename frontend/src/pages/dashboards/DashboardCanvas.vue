@@ -180,14 +180,14 @@ watch(
 		emit("sources", parseSourcesBlock(h));
 		rebuild();
 	},
-	{ immediate: true },
+	{ immediate: true }
 );
 
 // Theme switches rebuild the document (charts re-init against the new
 // palette) - a full reload is simpler and more reliable than live restyling.
 watch(
 	() => props.theme,
-	() => rebuild(),
+	() => rebuild()
 );
 
 // ── data bridge ──────────────────────────────────────────────────────────────
@@ -230,8 +230,8 @@ async function handleData(d) {
 			e && (e.status === 403 || e.exc_type === "PermissionError")
 				? "PermissionError"
 				: e && (e.status === 404 || e.exc_type === "DoesNotExistError")
-					? "NotFound"
-					: "InternalError";
+				? "NotFound"
+				: "InternalError";
 		reply = { ok: false, error: { code, message: errMsg(e) } };
 	}
 	// Data failures render per-widget INSIDE the iframe (jarvis.renderError) -

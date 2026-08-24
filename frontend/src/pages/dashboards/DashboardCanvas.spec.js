@@ -23,7 +23,7 @@ const echartsGate = vi.hoisted(() => {
 		load: vi.fn(() =>
 			state.mode === "manual"
 				? new Promise((resolve) => state.queue.push(resolve))
-				: Promise.resolve(""),
+				: Promise.resolve("")
 		),
 	};
 });
