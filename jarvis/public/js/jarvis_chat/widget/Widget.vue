@@ -55,6 +55,7 @@
 			aria-hidden="true"
 		></div>
 		<Panel
+			v-if="panelMounted"
 			ref="panelRef"
 			:open="panelOpen"
 			:context="effectiveContext"
@@ -77,6 +78,7 @@ import { panelLayout } from "./panel_anchor.mjs";
 import * as panelSize from "./panel_size.mjs";
 import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import * as fabPos from "./fab_position.mjs";
+import { fabAction } from "./fab_action.mjs";
 import Panel from "./Panel.vue";
 
 // ---- FAB: draggable, edge-snapping, idle-fading launcher button.
@@ -159,6 +161,12 @@ const panelRef = ref(null);
 const isDark = ref(false);
 let unwatchTheme = null;
 const panelOpen = ref(false);
+// The Panel is mounted LAZILY — only once it is first opened — so it never
+// mounts (and never fires its on-mount, access-gated server calls) for a user
+// who lacks Jarvis access: they are redirected by onFabClick before it can
+// open. Latches true on the first open and stays mounted thereafter, so the
+// conversation and the open/close animation survive a close (see fab_action.mjs).
+const panelMounted = ref(false);
 const deskContext = ref(null);
 const contextDismissed = ref(false);
 
@@ -430,16 +438,20 @@ function onFabClick() {
 		return;
 	}
 	wake();
-	if (!hasAccess) {
+	const action = fabAction(hasAccess, window.innerWidth, PANEL_MIN_VIEWPORT_PX);
+	if (action === "no-access") {
+		// A no-access user never opens the panel, so the Panel (and its on-mount
+		// PermissionError-triggering server calls) never mounts — see fab_action.mjs.
 		window.location.assign("/jarvis-no-access");
 		return;
 	}
 	// Below the threshold a 400px panel is most of the screen, so fall back to
 	// the full SPA rather than designing a third layout for it.
-	if (window.innerWidth < PANEL_MIN_VIEWPORT_PX) {
+	if (action === "full") {
 		window.location.assign(FULL_CHAT_URL);
 		return;
 	}
+	panelMounted.value = true; // lazy first mount; a no-op once mounted
 	if (!panelOpen.value) readDeskContext();
 	panelOpen.value = !panelOpen.value;
 }
