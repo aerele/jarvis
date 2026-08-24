@@ -230,12 +230,36 @@ export const RUNTIME_JS = `(function () {
 
 	function boot() {
 		parseSources();
+		function postHeight() {
+			post({ type: "height", height: document.body ? document.body.scrollHeight : 0 });
+		}
 		if (typeof ResizeObserver !== "undefined" && document.body) {
-			new ResizeObserver(function () {
-				post({ type: "height", height: document.body.scrollHeight });
-			}).observe(document.body);
+			new ResizeObserver(postHeight).observe(document.body);
 		}
 		post({ type: "ready" });
+		// Height sync must not depend on the ResizeObserver alone: for a heavy srcdoc
+		// (the ~1MB inlined echarts chunk) it intermittently never fires even once,
+		// and the charts settle at an unpredictable time - later on a COLD load,
+		// where echarts is still downloading/parsing past any fixed timeout. Poll the
+		// body height and report every change until it holds steady, so the parent
+		// grows the frame to the real content height regardless of render timing.
+		if (typeof requestAnimationFrame === "function") requestAnimationFrame(postHeight);
+		var lastH = -1;
+		var stableMs = 0;
+		var elapsedMs = 0;
+		var iv = setInterval(function () {
+			var h = document.body ? document.body.scrollHeight : 0;
+			if (h !== lastH) {
+				lastH = h;
+				stableMs = 0;
+				postHeight();
+			} else {
+				stableMs += 200;
+			}
+			elapsedMs += 200;
+			// Stop once the height has held steady (content settled) or after a hard cap.
+			if ((h > 0 && stableMs >= 1200) || elapsedMs >= 20000) clearInterval(iv);
+		}, 200);
 	}
 	if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
 	else boot();
