@@ -98,19 +98,16 @@ def save_agent_dashboard(
 	run's existing dashboard (idempotent).
 	"""
 	from jarvis.chat import agent_runs
-	from jarvis.tools._agent_run_ctx import get_session_key
+	from jarvis.tools._save_guards import require_html, require_session_key, validation_as_invalid_argument
 
-	if not (html or "").strip():
-		raise InvalidArgumentError("save_agent_dashboard requires a non-empty html document")
+	require_html(html, "save_agent_dashboard")
 
 	# The run is resolved from the CALLER's session bearer, never a model-supplied
 	# id — so a delegate can only ever attach a dashboard to its own run.
-	session_key = get_session_key()
-	if not session_key:
-		raise InvalidArgumentError(
-			"save_agent_dashboard must be called by an agent delegate over its run "
-			"session (no session_key in context)"
-		)
+	session_key = require_session_key(
+		"save_agent_dashboard must be called by an agent delegate over its run "
+		"session (no session_key in context)"
+	)
 
 	run_row = frappe.db.get_value(
 		RUN,
@@ -154,7 +151,10 @@ def save_agent_dashboard(
 	shadow = (inst.get("activation_state") or "shadow") == "shadow"
 	persist_html = _shadow_gate_html(html) if shadow else html
 
-	try:
+	# Caps/scope errors from the DocType controller surface as ValidationError; the
+	# guard gives the delegate a clean, non-fatal message (the run's findings
+	# writeback still proceeds).
+	with validation_as_invalid_argument():
 		dashboard = agent_runs.persist_agent_dashboard(
 			run_doc,
 			inst,
@@ -163,10 +163,6 @@ def save_agent_dashboard(
 			description=description,
 			owner_override=visibility_owner,
 		)
-	except frappe.ValidationError as e:
-		# Caps/scope errors from the DocType controller — give the delegate a
-		# clean, non-fatal message (the run's findings writeback still proceeds).
-		raise InvalidArgumentError(str(e))
 
 	# PP-4 enforcement (1), made effective: Frappe stamps ``owner = session.user`` at
 	# insert (``document.set_user_and_timestamp``), OVERWRITING the pre-set
