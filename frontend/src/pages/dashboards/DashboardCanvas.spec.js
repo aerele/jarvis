@@ -146,3 +146,23 @@ describe("DashboardCanvas data-phase spinner", () => {
 		wrapper.unmount();
 	});
 });
+
+describe("DashboardCanvas re-drive reload (#965)", () => {
+	it("remounts the iframe on a rebuild with identical html (forces a real reload)", async () => {
+		const wrapper = mount(DashboardCanvas, {
+			attachTo: document.body,
+			props: { mode: "builder", html: "static only" },
+		});
+		await flushPromises();
+		const first = wrapper.find("iframe").element;
+
+		// The tab-return re-drive: rebuild() with the SAME html. Assigning an
+		// identical srcdoc string would not reload the frame; a changing :key must.
+		await wrapper.vm.rebuild();
+		await flushPromises();
+		const second = wrapper.find("iframe").element;
+
+		expect(second).not.toBe(first);
+		wrapper.unmount();
+	});
+});

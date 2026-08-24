@@ -39,6 +39,7 @@
 			     runs fully isolated; all data arrives over postMessage. -->
 			<iframe
 				ref="frame"
+				:key="frameKey"
 				:srcdoc="doc"
 				sandbox="allow-scripts"
 				class="w-full border-0"
@@ -97,6 +98,12 @@ const loading = ref(false);
 const building = ref(false);
 const buildError = ref("");
 const frameH = ref(480); // view mode: grown by the iframe's height frames
+// Bumped on every (re)build so the iframe REMOUNTS, not just re-`srcdoc`s. A
+// re-drive (e.g. returning to a builder tab that ran hidden at 0x0) often
+// rebuilds a byte-identical document; assigning the same string to :srcdoc is a
+// no-op in Vue and would not reload the frame, leaving the 0x0 charts blank. A
+// changing :key forces a fresh element that boots against the now-visible size.
+const frameKey = ref(0);
 
 function postToFrame(msg) {
 	const fw = frame.value && frame.value.contentWindow;
@@ -150,6 +157,9 @@ async function rebuild() {
 			echartsSource,
 			theme: THEMES[themeKey(props.theme)],
 		});
+		// Force a fresh iframe even if `doc` is unchanged (see frameKey) - this is
+		// what makes a re-drive actually reload a frame that booted blank at 0x0.
+		frameKey.value++;
 		// Safety valve covers both "frame never posts ready" and "a live source
 		// never resolves" - don't spin forever either way.
 		clearTimeout(readyTimer);
