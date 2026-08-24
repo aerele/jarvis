@@ -54,16 +54,12 @@ def save_dashboard(
 	"""
 	from jarvis.chat import dashboards_api
 	from jarvis.chat.events import publish_to_user
-	from jarvis.tools._agent_run_ctx import get_session_key
+	from jarvis.tools._save_guards import require_html, require_session_key, validation_as_invalid_argument
 
-	if not (html or "").strip():
-		raise InvalidArgumentError("save_dashboard requires a non-empty html document")
-
-	session_key = get_session_key()
-	if not session_key:
-		raise InvalidArgumentError(
-			"save_dashboard must be called from a chat agent session (no session_key in context)"
-		)
+	require_html(html, "save_dashboard")
+	session_key = require_session_key(
+		"save_dashboard must be called from a chat agent session (no session_key in context)"
+	)
 
 	conv = frappe.db.get_value(
 		CONVERSATION,
@@ -98,12 +94,10 @@ def save_dashboard(
 	if description:
 		fields["description"] = description
 
-	try:
+	# Caps, scope, sources shape, and the theme validator all raise ValidationError;
+	# the guard hands the model the message so it can fix the document and re-save.
+	with validation_as_invalid_argument():
 		result = dashboards_api.save_dashboard(payload=frappe.as_json(fields))
-	except frappe.ValidationError as e:
-		# Caps, scope, sources shape, and the theme validator all land here —
-		# hand the model the message so it can fix the document and re-save.
-		raise InvalidArgumentError(str(e))
 
 	detail = (result or {}).get("data") or {}
 	saved_name = detail.get("name")
