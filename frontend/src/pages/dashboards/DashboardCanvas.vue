@@ -37,7 +37,13 @@
 			<!-- sandbox: allow-scripts ONLY (no allow-same-origin, no allow-popups) -
 			     paired with the srcdoc CSP (no network, inline-only) the dashboard
 			     runs fully isolated; all data arrives over postMessage. -->
+			<!-- v-if="doc": render only once the real document exists, so the frame
+			     never mounts on an empty srcdoc it would have to navigate away from
+			     (that empty-first-navigation is intermittently dropped on a cold load,
+			     stranding the frame blank). Paired with :key="frameKey", each element
+			     boots exactly one document in its lifetime. -->
 			<iframe
+				v-if="doc"
 				ref="frame"
 				:key="frameKey"
 				:srcdoc="doc"
@@ -51,7 +57,7 @@
 				v-if="loading"
 				class="absolute inset-0 flex items-center justify-center bg-surface-white/60"
 			>
-				<JvSpinner />
+				<JvSpinner :size="48" />
 			</div>
 		</template>
 	</div>
@@ -67,7 +73,7 @@
 // echarts source only loads (dynamic ?raw import, its own chunk) when the
 // html actually references echarts. The named dashboard theme (--jd-* vars)
 // owns the canvas look; switching it rebuilds the document.
-import { ref, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, watch, onBeforeUnmount } from "vue";
 import { Button, ErrorMessage, FeatherIcon } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { buildSrcdoc, parseSourcesBlock } from "@/lib/dashboardSrcdoc";
@@ -314,7 +320,12 @@ function onMessage(e) {
 	}
 }
 
-onMounted(() => window.addEventListener("message", onMessage));
+// Attach synchronously, NOT in onMounted: when the echarts chunk is already
+// cached, rebuild() resolves its await in a microtask and assigns `doc` (booting
+// the iframe) before onMounted would run - so the iframe's one-shot `ready` could
+// fire before the listener existed, leaving the spinner stuck until the 8s valve.
+// Registering here, during setup, guarantees the listener is in place first.
+window.addEventListener("message", onMessage);
 onBeforeUnmount(() => {
 	window.removeEventListener("message", onMessage);
 	clearTimeout(readyTimer);

@@ -118,6 +118,44 @@ describe("DashboardCanvas rebuild ordering", () => {
 	});
 });
 
+describe("DashboardCanvas single-navigation frame", () => {
+	it("never renders an empty iframe before the document is built", async () => {
+		// Hold rebuild's echarts await open so `doc` stays "" for a beat.
+		echartsGate.setManual();
+		const wrapper = mount(DashboardCanvas, {
+			props: { mode: "view", html: "A echarts", dashboard: { name: "d1" } },
+		});
+		await flushPromises();
+		// A frame mounted now (empty srcdoc) would be a FIRST navigation that the
+		// real document later replaces - and on a cold load that second navigation
+		// is intermittently dropped, stranding the frame on the blank page. So the
+		// frame must not exist until its real document does.
+		expect(wrapper.find("iframe").exists()).toBe(false);
+
+		// Once assembled, the frame appears already carrying the real srcdoc.
+		echartsGate.state.queue[0]("");
+		await flushPromises();
+		const iframe = wrapper.find("iframe");
+		expect(iframe.exists()).toBe(true);
+		expect(iframe.attributes("srcdoc")).toBe("DOC:A echarts");
+	});
+
+	it("grows the view frame to a reported height", async () => {
+		const wrapper = mount(DashboardCanvas, {
+			attachTo: document.body,
+			props: { mode: "view", html: "static only", dashboard: { name: "d1" } },
+		});
+		await flushPromises();
+		// Starts at the 480px floor; the frame is blank until a height frame lands.
+		expect(wrapper.find("iframe").attributes("style")).toContain("height: 480px");
+
+		sendFrameMessage(wrapper, { type: "height", height: 1200 });
+		await flushPromises();
+		expect(wrapper.find("iframe").attributes("style")).toContain("height: 1200px");
+		wrapper.unmount();
+	});
+});
+
 describe("DashboardCanvas data-phase spinner", () => {
 	it("keeps the spinner until a live dashboard's first data batch resolves", async () => {
 		// attachTo: the iframe only gets a real contentWindow (which onMessage
