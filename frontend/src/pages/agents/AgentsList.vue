@@ -130,7 +130,7 @@
 						:key="a.agent_slug"
 						role="button"
 						tabindex="0"
-						class="flex cursor-pointer flex-col rounded-lg border bg-surface-white p-4 transition hover:bg-surface-gray-1"
+						class="flex cursor-pointer flex-col rounded-lg border bg-surface-white p-5 transition hover:bg-surface-gray-1 hover:shadow-sm"
 						@click="openAgent(a)"
 						@keydown.enter.prevent="openAgent(a)"
 						@keydown.space.prevent="openAgent(a)"
@@ -169,7 +169,7 @@
 							</div>
 						</div>
 
-						<p class="mt-3 line-clamp-2 min-h-10 text-base text-ink-gray-6">
+						<p class="mt-3 line-clamp-2 min-h-10 text-base leading-5 text-ink-gray-6">
 							{{ a.description }}
 						</p>
 
