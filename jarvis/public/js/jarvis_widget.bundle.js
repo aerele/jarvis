@@ -16,7 +16,7 @@
 
 import { createApp } from "vue";
 import Widget from "./jarvis_chat/widget/Widget.vue";
-import { shouldHideWidget } from "./jarvis_chat/widget/widget_visibility.mjs";
+import { shouldHideWidget, shouldMountWidget } from "./jarvis_chat/widget/widget_visibility.mjs";
 
 (function () {
 	if (window.__jarvisWidgetBooted) return;
@@ -40,6 +40,10 @@ import { shouldHideWidget } from "./jarvis_chat/widget/widget_visibility.mjs";
 
 	function start() {
 		if (!window.frappe) return;
+		// A user without Jarvis access must never mount the widget — see
+		// shouldMountWidget for why (the Panel's on-mount get_chat_ui_settings()
+		// call pops a PermissionError dialog on every Desk page otherwise).
+		if (!shouldMountWidget(window.frappe?.boot?.jarvis_has_access)) return;
 		window.__jarvisWidgetBooted = true;
 		sync();
 		if (frappe.router && frappe.router.on) frappe.router.on("change", sync);

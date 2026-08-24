@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { shouldHideWidget, HIDE_ON_ROUTES } from "./widget_visibility.mjs";
+import {
+  shouldHideWidget,
+  shouldMountWidget,
+  HIDE_ON_ROUTES,
+} from "./widget_visibility.mjs";
 
 test("shown on a normal desk page", () => {
   assert.equal(shouldHideWidget(["List", "Sales Invoice"]), false);
@@ -41,4 +45,22 @@ test("shown when setup-complete is unknown (older boot payload)", () => {
 
 test("shown on a normal desk page once setup is complete", () => {
   assert.equal(shouldHideWidget(["List", "Sales Invoice"], true), false);
+});
+
+test("not mounted for a user without Jarvis access", () => {
+  // frappe.boot.jarvis_has_access === false (jarvis/boot.py). Mounting would
+  // fire the Panel's on-mount get_chat_ui_settings(), which the server rejects
+  // with a PermissionError dialog on every Desk page for a role-less user.
+  assert.equal(shouldMountWidget(false), false);
+});
+
+test("mounted for a user with Jarvis access", () => {
+  assert.equal(shouldMountWidget(true), true);
+});
+
+test("mounted when access is unknown (older boot payload without the key)", () => {
+  // Strict === false only, so a boot payload missing jarvis_has_access mounts
+  // as before — the server still enforces access on each call; this is UX only.
+  assert.equal(shouldMountWidget(undefined), true);
+  assert.equal(shouldMountWidget(null), true);
 });

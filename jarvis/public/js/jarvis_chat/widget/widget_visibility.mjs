@@ -30,3 +30,17 @@ export function shouldHideWidget(route, siteSetupComplete) {
   if (HIDE_ON_ROUTES.indexOf(page) !== -1) return true;
   return siteSetupComplete === false;
 }
+
+// Whether the widget may be MOUNTED at all for this user — a stronger gate than
+// shouldHideWidget, which only toggles per-route visibility of an ALREADY-mounted
+// widget. A user without Jarvis access must never mount it: the Panel calls
+// get_chat_ui_settings() on mount (Panel.vue onMounted), which the server rejects
+// with a PermissionError for anyone lacking the Jarvis User role — surfacing as a
+// red "Message" dialog on EVERY Desk page load. display:none does not help; the
+// component still mounts and still makes the call, so the gate has to run before
+// mount. `hasAccess` is frappe.boot.jarvis_has_access (jarvis/boot.py — the same
+// has_jarvis_access() verdict the server enforces). Strict === false so an older
+// boot payload without the key still mounts (matches shouldHideWidget's fail-open).
+export function shouldMountWidget(hasAccess) {
+  return hasAccess !== false;
+}
