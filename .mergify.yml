@@ -1,0 +1,45 @@
+# Mergify configuration for the jarvis app: automated backports.
+#
+# What it does: when a PR merged into `develop` carries a `backport-version-15`
+# or a `backport-version-16` label, Mergify opens a backport PR that cherry-picks
+# the same commits onto `version-15` / `version-16`. Add both labels to backport
+# to both branches at once.
+#
+# Timing: the backport PR is created when the source PR is merged. Adding the
+# label to an already-merged PR also works, because Mergify re-evaluates and
+# backports then. So adding the label is enough, before or after merge.
+#
+# Conflicts: if a cherry-pick does not apply cleanly Mergify still opens the PR
+# with the conflict left in place and adds a `conflicts` label; the assigned
+# author resolves it in that PR. CI (.github/workflows/ci.yml) runs on every
+# backport PR like any other, since it triggers on `pull_request` with no base
+# filter.
+#
+# Requirements:
+#   * The Mergify GitHub App must be installed on this repository, otherwise
+#     this file does nothing: https://github.com/apps/mergify
+#   * This file must stay on the repository default branch (`develop`) for
+#     Mergify to read it.
+
+pull_request_rules:
+  - name: backport merged develop PRs to version-15
+    conditions:
+      - base=develop
+      - label=backport-version-15
+    actions:
+      backport:
+        branches:
+          - version-15
+        assignees:
+          - "{{ author }}"
+
+  - name: backport merged develop PRs to version-16
+    conditions:
+      - base=develop
+      - label=backport-version-16
+    actions:
+      backport:
+        branches:
+          - version-16
+        assignees:
+          - "{{ author }}"
