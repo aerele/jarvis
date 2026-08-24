@@ -708,8 +708,8 @@ async function onDashboardSaved({ name } = {}) {
 	try {
 		d = await getDashboard(name);
 	} catch (e) {
-		// The save itself already succeeded server-side (the pane's own
-		// confirmation card said so before this event ever fired); a blip
+		// The save already succeeded server-side — this event only fires after
+		// save_dashboard committed the row and published its frame — so a blip
 		// fetching it back is not worth interrupting the builder over.
 		return;
 	}

@@ -39,6 +39,7 @@
 			     runs fully isolated; all data arrives over postMessage. -->
 			<iframe
 				ref="frame"
+				:key="frameKey"
 				:srcdoc="doc"
 				sandbox="allow-scripts"
 				class="w-full border-0"
@@ -70,6 +71,7 @@ import { ref, watch, onMounted, onBeforeUnmount } from "vue";
 import { Button, ErrorMessage, FeatherIcon } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { buildSrcdoc, parseSourcesBlock } from "@/lib/dashboardSrcdoc";
+import { loadEchartsSource } from "@/lib/dashboardEcharts";
 import { THEMES, DEFAULT_THEME, themeKey } from "@/lib/dashboardThemes";
 import { loadCaptureLib, downloadPng, downloadPdf } from "@/lib/dashboardExport";
 import { runDashboardSource, callDashboardTool } from "@/api/dashboards";
@@ -96,6 +98,12 @@ const loading = ref(false);
 const building = ref(false);
 const buildError = ref("");
 const frameH = ref(480); // view mode: grown by the iframe's height frames
+// Bumped on every (re)build so the iframe REMOUNTS, not just re-`srcdoc`s. A
+// re-drive (e.g. returning to a builder tab that ran hidden at 0x0) often
+// rebuilds a byte-identical document; assigning the same string to :srcdoc is a
+// no-op in Vue and would not reload the frame, leaving the 0x0 charts blank. A
+// changing :key forces a fresh element that boots against the now-visible size.
+const frameKey = ref(0);
 
 function postToFrame(msg) {
 	const fw = frame.value && frame.value.contentWindow;
@@ -103,39 +111,66 @@ function postToFrame(msg) {
 }
 
 // ── srcdoc assembly ──────────────────────────────────────────────────────────
+// rebuild() is async (it awaits the echarts chunk) and fires from three racing
+// triggers: the html watcher, the theme watcher, and the builder page's
+// tab-visibility re-drive. Without ordering, a SLOWER earlier rebuild can
+// resolve last and reassign `doc` after a newer one already booted its iframe -
+// re-navigating the frame to a stale document, which is the intermittent blank
+// canvas. `rebuildSeq` is that ordering: each call takes a ticket and a call
+// that has been superseded across its await bails instead of clobbering.
 let readyTimer = null;
+let rebuildSeq = 0;
+// Data-phase loading (the spinner): live dashboards keep spinning past the
+// iframe's DOM-parse `ready` until their first data batch resolves; static
+// dashboards (no declared sources) have nothing more to wait for.
+let readyFired = false;
+let firstDataSettled = false;
+let hasSources = false;
+let pendingData = 0;
+
+function stopLoading() {
+	loading.value = false;
+	clearTimeout(readyTimer);
+}
+
 async function rebuild() {
 	if (!props.html) {
 		doc.value = "";
 		emit("state", "empty");
 		return;
 	}
+	const gen = ++rebuildSeq;
 	building.value = true;
 	buildError.value = "";
 	loading.value = true;
+	readyFired = false;
+	firstDataSettled = false;
+	pendingData = 0;
+	hasSources = parseSourcesBlock(props.html).length > 0;
 	emit("state", "loading");
 	try {
-		let echartsSource = "";
-		if (/\becharts\b/i.test(props.html)) {
-			// Filesystem-relative ?raw import: echarts' exports map blocks bare
-			// deep imports; the raw source ships as its own lazy chunk.
-			const mod = await import("../../../node_modules/echarts/dist/echarts.min.js?raw");
-			echartsSource = (mod && mod.default) || "";
-		}
+		const echartsSource = await loadEchartsSource(props.html);
+		// A newer rebuild started while we awaited - drop this stale result so it
+		// can't re-navigate the frame out from under the current document.
+		if (gen !== rebuildSeq) return;
 		doc.value = buildSrcdoc(props.html, {
 			echartsSource,
 			theme: THEMES[themeKey(props.theme)],
 		});
-		// Safety valve: if the frame never posts ready (user script threw before
-		// our runtime's DOMContentLoaded, etc.) don't spin forever.
+		// Force a fresh iframe even if `doc` is unchanged (see frameKey) - this is
+		// what makes a re-drive actually reload a frame that booted blank at 0x0.
+		frameKey.value++;
+		// Safety valve covers both "frame never posts ready" and "a live source
+		// never resolves" - don't spin forever either way.
 		clearTimeout(readyTimer);
-		readyTimer = setTimeout(() => (loading.value = false), 8000);
+		readyTimer = setTimeout(stopLoading, 8000);
 	} catch (e) {
+		if (gen !== rebuildSeq) return;
 		buildError.value = errMsg(e);
-		loading.value = false;
+		stopLoading();
 		emit("state", "error");
 	} finally {
-		building.value = false;
+		if (gen === rebuildSeq) building.value = false;
 	}
 }
 
@@ -167,6 +202,7 @@ function dataPayload(data) {
 }
 
 async function handleData(d) {
+	pendingData++;
 	let reply;
 	try {
 		// call_tool dispatches kwargs: query takes its DSL object under the
@@ -201,6 +237,13 @@ async function handleData(d) {
 	// Data failures render per-widget INSIDE the iframe (jarvis.renderError) -
 	// never a toast out here.
 	postToFrame({ type: "data:result", id: d.id, ...reply });
+	// First drained data batch after `ready` clears the spinner. Only the initial
+	// load shows it - later ad-hoc data calls don't re-raise it (no flicker).
+	pendingData = Math.max(0, pendingData - 1);
+	if (readyFired && !firstDataSettled && pendingData === 0) {
+		firstDataSettled = true;
+		stopLoading();
+	}
 }
 
 // ── export (lib injection + downloads live in lib/dashboardExport) ───────────
@@ -245,9 +288,14 @@ function onMessage(e) {
 	const d = e.data;
 	if (!d || d.jarvis !== 1) return;
 	if (d.type === "ready") {
-		clearTimeout(readyTimer);
-		loading.value = false;
+		readyFired = true;
 		emit("state", "ready");
+		// Static dashboards are done at DOM parse; live ones keep the spinner
+		// until handleData drains their first data batch (or the 8s valve fires).
+		if (!hasSources) {
+			firstDataSettled = true;
+			stopLoading();
+		}
 	} else if (d.type === "height") {
 		if (props.mode === "view") frameH.value = Math.max(480, Math.ceil(d.height || 0));
 	} else if (d.type === "data") {
