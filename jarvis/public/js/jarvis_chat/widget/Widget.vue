@@ -54,7 +54,13 @@
 			:class="{ 'jvw-backdrop--show': leaving }"
 			aria-hidden="true"
 		></div>
+		<!-- Lazily mounted: the Panel does not exist until the first open (v-if on
+		     panelMounted), so its onMounted fetches (get_chat_ui_settings /
+		     readiness) never fire on plain Desk page loads - and never pop the
+		     "You need the Jarvis User role" dialog for a role-less System User.
+		     It STAYS mounted after that; see onFabClick for the mount->reveal. -->
 		<Panel
+			v-if="panelMounted"
 			ref="panelRef"
 			:open="panelOpen"
 			:context="effectiveContext"
@@ -70,13 +76,14 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { FULL_CHAT_URL, conversationUrl, PANEL_MIN_VIEWPORT_PX } from "./config.mjs";
 import { contextFromRoute } from "./desk_context.mjs";
 import { panelLayout } from "./panel_anchor.mjs";
 import * as panelSize from "./panel_size.mjs";
 import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import * as fabPos from "./fab_position.mjs";
+import { fabAction, panelTogglePlan } from "./fab_action.mjs";
 import Panel from "./Panel.vue";
 
 // ---- FAB: draggable, edge-snapping, idle-fading launcher button.
@@ -159,6 +166,11 @@ const panelRef = ref(null);
 const isDark = ref(false);
 let unwatchTheme = null;
 const panelOpen = ref(false);
+// The Panel is v-if'd on this: it mounts on the FIRST open and then STAYS mounted
+// (keep-mounted, so the conversation/scroll/draft survive a close->reopen - a bare
+// v-if="panelOpen" would tear all that down on every close). Latches true on the
+// first open; onFabClick owns the two-phase mount->reveal.
+const panelMounted = ref(false);
 const deskContext = ref(null);
 const contextDismissed = ref(false);
 
@@ -255,7 +267,7 @@ function readDeskContext() {
 }
 
 function closePanel() {
-	panelOpen.value = false;
+	panelOpen.value = false; // hide only - panelMounted stays true (the latch)
 	fabEl.value?.focus();
 }
 
@@ -430,18 +442,40 @@ function onFabClick() {
 		return;
 	}
 	wake();
-	if (!hasAccess) {
+	const action = fabAction(hasAccess, window.innerWidth, PANEL_MIN_VIEWPORT_PX);
+	if (action === "no-access") {
+		// A no-access user never opens the panel, so the Panel (and its on-mount,
+		// access-gated get_chat_ui_settings()/readiness calls that PermissionError
+		// for a role-less user) never mounts - no red dialog. See fab_action.mjs.
 		window.location.assign("/jarvis-no-access");
 		return;
 	}
-	// Below the threshold a 400px panel is most of the screen, so fall back to
-	// the full SPA rather than designing a third layout for it.
-	if (window.innerWidth < PANEL_MIN_VIEWPORT_PX) {
+	if (action === "full") {
+		// Below the threshold a 400px panel is most of the screen, so fall back to
+		// the full SPA rather than designing a third layout for it.
 		window.location.assign(FULL_CHAT_URL);
 		return;
 	}
-	if (!panelOpen.value) readDeskContext();
-	panelOpen.value = !panelOpen.value;
+	const plan = panelTogglePlan({ mounted: panelMounted.value, open: panelOpen.value });
+	if (plan.mount) panelMounted.value = true;
+	if (plan.deferReveal) {
+		// FIRST open: the Panel just mounted CLOSED; flip it open on the NEXT tick so
+		// Panel.vue's non-immediate watch(props.open) observes false->true and runs
+		// the first-open load() (conversation restore), ensureRealtime() and focus.
+		// Revealing in this same tick makes the Panel mount already-open, the watch
+		// never fires, and the panel opens blank (first send mints a NEW conversation).
+		// Scheduled BEFORE the throw-prone readDeskContext() below so a context-read
+		// failure can never strand the panel unopened. Do NOT collapse the two ticks.
+		nextTick(() => {
+			panelOpen.value = plan.open;
+		});
+		readDeskContext();
+		return;
+	}
+	// Already mounted: a plain open/close toggle. Re-read the record context when
+	// opening (never on close), matching the old read-context-before-open behaviour.
+	if (plan.readContext) readDeskContext();
+	panelOpen.value = plan.open;
 }
 
 // Re-clamps the FAB into the (possibly resized) dockable band; ratio-based
