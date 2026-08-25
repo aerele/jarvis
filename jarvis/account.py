@@ -538,6 +538,10 @@ def _admin_chat_gate() -> dict:
 	# Refresh the locally-mirrored release notice on this gate's cadence so an
 	# active user sees an activate/clear without waiting for the daily sync.
 	release_notice.persist(conn.get("release_notice") or {})
+	# Same cadence: mirror the CP-owned egress redaction rules for the chat backstop.
+	from jarvis.chat import egress_rules
+
+	egress_rules.persist(conn.get("redaction_patterns"))
 	notice = conn.get("billing_notice") or {}
 	if "chat_readiness" in conn and conn["chat_readiness"] != "Ready":
 		# Authority-repair incident (review plan 04 P0-6): admin's strict resolver

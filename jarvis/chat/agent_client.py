@@ -48,6 +48,7 @@ import websocket
 
 _logger = logging.getLogger(__name__)
 
+from jarvis.chat import egress_rules
 from jarvis.chat.device import (
 	ChatDeviceCredentials,
 	build_payload_v3,
@@ -307,6 +308,10 @@ def _chat_final_text(payload: dict) -> str | None:
 	msg = payload.get("message")
 	if not isinstance(msg, dict):
 		return None
+	# PURE extractor: returns the RAW final text so failed-final classification
+	# (_chat_final_failed's exact-string sentinel check) sees un-redacted content.
+	# Redaction + the once-per-turn tripwire happen at the call sites, on the value
+	# actually surfaced, AFTER the failed-final branch is ruled out.
 	c = msg.get("content")
 	if isinstance(c, str):
 		return c or None
@@ -379,7 +384,11 @@ def failed_final_error(detail: str | None = None) -> str:
 	d = (detail or "").strip()
 	if not d or any(marker in d.lower() for marker in _ERROR_DETAIL_REROUTE_MARKERS):
 		return FAILED_FINAL_ERROR
-	return f"The assistant could not complete this response: {d[:_ERROR_DETAIL_MAX_CHARS]}"
+	# The provider detail is runtime-authored prose - scrub the brand family before
+	# it reaches the customer (silent; error banners don't tripwire).
+	return egress_rules.redact(
+		f"The assistant could not complete this response: {d[:_ERROR_DETAIL_MAX_CHARS]}"
+	)
 
 
 def _chat_final_failed(payload: dict, text: str | None) -> bool:
@@ -993,13 +1002,15 @@ class AgentSession:
 							"error": failed_final_error(failure_detail),
 						}
 						return
-					yield {"kind": "relay:final", "text": text}
+					# Not a failed-final -> redact the surfaced reply + fire the
+					# once-per-turn tripwire (classification above ran on raw text).
+					yield {"kind": "relay:final", "text": egress_rules.redact_and_flag(text, run_id=run_id)}
 					return
 				if state in ("error", "aborted"):
 					yield {
 						"kind": "relay:error",
 						"state": state,
-						"error": payload.get("errorMessage") or state,
+						"error": egress_rules.redact(payload.get("errorMessage") or state),
 					}
 					return
 				continue  # delta (150ms cumulative mirror) and unknown states: ignore

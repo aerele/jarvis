@@ -115,3 +115,28 @@ class TestRedactEgress(unittest.TestCase):
 		self.assertEqual(len(compiled), 1)
 		out, hit = redact_egress("valid here", compiled, "Jarvis")
 		self.assertTrue(hit)
+
+	def test_full_removal_falls_back_to_name(self):
+		# INVARIANT: a non-empty input never collapses to empty. A reply that is
+		# ENTIRELY remove-match content (a lone glyph / a bare env token) falls back
+		# to the replacement name instead of "" (else the card blanks / recovery hangs).
+		rules = _rules((r"🦞", MODE_REMOVE), (r"ACMEBOT_[A-Z]+", MODE_REMOVE))
+		out, hit = redact_egress("🦞", rules, "Jarvis")
+		self.assertEqual(out, "Jarvis")
+		self.assertTrue(hit)
+		self.assertEqual(redact_egress("ACMEBOT_TOKEN", rules, "Jarvis")[0], "Jarvis")
+		# whitespace around a removed token also collapses -> name (never a blank card)
+		self.assertEqual(redact_egress("🦞   ", rules, "Jarvis")[0], "Jarvis")
+
+	def test_empty_input_stays_empty(self):
+		# The no-collapse invariant applies only to non-empty input; "" stays "".
+		self.assertEqual(redact_egress("", _rules((r"acme", MODE_NAME)), "Jarvis"), ("", False))
+
+	def test_whitespace_only_replacement_falls_back(self):
+		self.assertEqual(redact_egress("acmebot", _rules((r"acmebot", MODE_NAME)), "   ")[0], "Jarvis")
+
+	def test_compile_rules_tolerates_non_list(self):
+		# A corrupt cache blob (non-iterable) must not raise out of compile_rules.
+		self.assertEqual(compile_rules(123), [])
+		self.assertEqual(compile_rules(None), [])
+		self.assertEqual(compile_rules({"a": 1}), [])

@@ -39,9 +39,14 @@ def compile_rules(raw_rules) -> list:
 	A rule is SKIPPED (never fatal, so one bad config entry can't disable the whole
 	redactor) when its pattern does not compile, when its mode is unknown, or when
 	it can match the EMPTY string (which would otherwise insert the replacement at
-	every position and corrupt the reply)."""
+	every position and corrupt the reply). The empty-match check catches literal
+	zero-width patterns (e.g. ``a*``) but not a pure lookaround (``(?<=x)``); those
+	are accepted under the operator-authored trust model (patterns are code-reviewed
+	control-plane config, never customer input)."""
 	compiled = []
-	for entry in raw_rules or []:
+	# Tolerate a non-list raw_rules (a malformed cache blob) without raising here —
+	# a truthy non-iterable would otherwise blow up the whole compile.
+	for entry in raw_rules if isinstance(raw_rules, (list, tuple)) else []:
 		try:
 			pattern, mode = entry
 			if mode not in (MODE_NAME, MODE_REMOVE):
@@ -61,6 +66,9 @@ def redact_egress(text, rules, replacement=None):
 	Returns ``(redacted_text, hit)`` where ``hit`` is True iff the text actually
 	changed (the caller's tripwire reads ``hit``; computed by comparison, not by a
 	match count, so a replace-with-same-value never fires a spurious tripwire).
+	INVARIANT: a non-empty input never returns empty — content that reduces entirely
+	to nothing falls back to the whitelabel name (see below), so a delivered message
+	is never blanked by redaction.
 
 	TOTAL / FAIL-OPEN: any error returns ``(text, False)`` unchanged - a redactor
 	bug must never break message delivery on the hot path. The match is inserted via
@@ -85,6 +93,13 @@ def redact_egress(text, rules, replacement=None):
 				out = compiled.sub(lambda _m, r=repl: r, out)
 			if out == before:
 				break
+		# INVARIANT: a non-empty input never collapses to nothing. A reply / error /
+		# recovered text that was ENTIRELY brand tokens (a lone glyph, a bare brand
+		# URL) would otherwise blank the chat card and, on the recovery path, be read
+		# as "no output yet" and hang the turn to a false timeout. Substitute the
+		# whitelabel name so the message stays non-empty.
+		if text.strip() and not out.strip():
+			out = name
 		return (out, out != text)
 	except Exception:
 		return (text, False)
