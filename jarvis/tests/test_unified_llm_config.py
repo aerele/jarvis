@@ -399,6 +399,79 @@ class TestProviderNormalization(FrappeTestCase):
 			f"expected a base_url error for a zai_coding row with no base_url, got: {errors}",
 		)
 
+	# ------------------------------------------------------------------ #
+	# jarvis#767: blank base_url on groq/deepseek is backfilled from the
+	# bundled catalog's default_base_url, so the emitted pool spec never
+	# asks cliproxy to guess an endpoint. Deliberately narrowed to just
+	# these two providers (the issue's exact scope) - every other catalog
+	# provider with a default_base_url (openai, mistral, xai, zai, ...)
+	# keeps today's behavior: a blank base_url stays blank in the spec.
+	# ------------------------------------------------------------------ #
+
+	def test_groq_blank_base_url_is_backfilled_from_catalog(self):
+		from jarvis.jarvis.pool_serialize import build_pool_payload
+
+		groq = _api_key_model(
+			provider="groq", model="llama-3.3-70b-versatile", base_url="", api_key="gk", order=0
+		)
+		settings = _make_settings_with_models([groq])
+		spec, _api_keys, _ = build_pool_payload(settings)
+		self.assertEqual(spec["models"][0]["base_url"], "https://api.groq.com/openai/v1")
+
+	def test_deepseek_blank_base_url_is_backfilled_from_catalog(self):
+		from jarvis.jarvis.pool_serialize import build_pool_payload
+
+		deepseek = _api_key_model(provider="deepseek", model="deepseek-v4-flash", base_url="", api_key="dk", order=0)
+		settings = _make_settings_with_models([deepseek])
+		spec, _api_keys, _ = build_pool_payload(settings)
+		self.assertEqual(spec["models"][0]["base_url"], "https://api.deepseek.com")
+
+	def test_explicit_base_url_is_never_overridden_by_the_catalog_default(self):
+		# An operator-supplied base_url (even one pointed at a proxy/mirror
+		# that differs from the catalog default) must pass through unchanged
+		# - the backfill only ever fills a BLANK value, never second-guesses one.
+		from jarvis.jarvis.pool_serialize import build_pool_payload
+
+		groq = _api_key_model(
+			provider="groq",
+			model="llama-3.3-70b-versatile",
+			base_url="https://groq.my-mirror.example.com/v1",
+			api_key="gk",
+			order=0,
+		)
+		settings = _make_settings_with_models([groq])
+		spec, _api_keys, _ = build_pool_payload(settings)
+		self.assertEqual(spec["models"][0]["base_url"], "https://groq.my-mirror.example.com/v1")
+
+	def test_validate_models_passes_for_groq_and_deepseek_with_blank_base_url(self):
+		# The backfill happens in build_pool_payload only; validate_models
+		# must already treat groq/deepseek as not requiring an operator-typed
+		# base_url (they were never in the openai_compat/vllm/zai/zai_coding
+		# gate at pool_serialize.py:592), and this fix must not change that.
+		from jarvis.jarvis.pool_serialize import validate_models
+
+		groq = _api_key_model(
+			provider="groq", model="llama-3.3-70b-versatile", base_url="", api_key="gk", order=0
+		)
+		deepseek = _api_key_model(
+			provider="deepseek", model="deepseek-v4-flash", base_url="", api_key="dk", order=1
+		)
+		settings = _make_settings_with_models([groq, deepseek])
+		self.assertEqual(validate_models(settings), [])
+
+	def test_backfill_is_scoped_to_groq_and_deepseek_only(self):
+		# Regression lock for the narrowing: openai has a non-empty
+		# default_base_url in the bundled catalog too, but jarvis#767's
+		# backfill must NOT extend to it (or to any provider besides groq
+		# and deepseek) - a blank base_url on any other provider stays
+		# blank in the emitted spec, exactly like before this fix.
+		from jarvis.jarvis.pool_serialize import build_pool_payload
+
+		openai = _api_key_model(provider="openai", model="gpt-4o", base_url="", api_key="ok", order=0)
+		settings = _make_settings_with_models([openai])
+		spec, _api_keys, _ = build_pool_payload(settings)
+		self.assertNotIn("base_url", spec["models"][0])
+
 
 class TestPoolSerializeFromSettings(FrappeTestCase):
 	"""Task 2: Direct-call tests for build_pool_payload / validate_models / compute_proxy_active."""
