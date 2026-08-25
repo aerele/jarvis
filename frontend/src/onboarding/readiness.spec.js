@@ -21,6 +21,7 @@ const {
 	landingStep,
 	isLlmApplying,
 	isLlmApplyStuck,
+	isContainerUnavailable,
 	RECONNECT_INTENT_URL,
 } = await import("./readiness.js");
 
@@ -84,6 +85,20 @@ describe("readiness verdict ownership", () => {
 		expect(await needsLlmConnection()).toBe(false);
 	});
 
+	it("jarvis#885: surfaces container_unavailable's detail sentence, never the AI CTA", async () => {
+		// A dead container is not a missing LLM credential, so needsLlmConnection
+		// must stay silent for it (its dedicated banner is isContainerUnavailable(),
+		// checked separately by ChatView - see the exhaustive test below for the
+		// mutual-exclusion pin).
+		verdict({
+			ready: false,
+			reason: "container_unavailable",
+			detail: "Your workspace container stopped responding.",
+		});
+		expect(await readinessDetailOf()).toBe("Your workspace container stopped responding.");
+		expect(await needsLlmConnection()).toBe(false);
+	});
+
 	it("leaves subscription_suspended to its own Renew banner", async () => {
 		verdict({ ready: false, reason: "subscription_suspended", detail: "Renew to continue." });
 		expect(await readinessDetailOf()).toBe("");
@@ -112,6 +127,7 @@ describe("readiness verdict ownership", () => {
 			"llm_provisioning",
 			"container_provisioning",
 			"authority_repair_required",
+			"container_unavailable",
 			"subscription_suspended",
 			"llm_applying",
 			"llm_apply_stuck",
@@ -180,6 +196,39 @@ describe("llm_apply_stuck (jarvis#825)", () => {
 		// chat + history and gets a banner, never the setup poster. If this ever
 		// returns true, llm_apply_stuck was wrongly added to NOT_ONBOARDED_REASONS.
 		verdict({ ready: false, reason: "llm_apply_stuck" });
+		expect(await needsOnboarding()).toBe(false);
+	});
+});
+
+/**
+ * jarvis#885: a dead/unhealthy container must be its own honest, outage-framed
+ * banner - NOT the generic "Chat may not work yet" title (readinessDetailOf
+ * still supplies the detail SENTENCE, but isContainerUnavailable is what picks
+ * the banner), and NOT the full-screen onboarding gate (an established
+ * workspace whose container later died keeps its chat + history).
+ */
+describe("container_unavailable (jarvis#885)", () => {
+	it("isContainerUnavailable answers ONLY for its own reason", async () => {
+		verdict({ ready: false, reason: "container_unavailable" });
+		expect(await isContainerUnavailable()).toBe(true);
+		forgetReady();
+		verdict({ ready: false, reason: "container_provisioning" });
+		expect(await isContainerUnavailable()).toBe(false);
+		forgetReady();
+		verdict({ ready: true, reason: null });
+		expect(await isContainerUnavailable()).toBe(false);
+	});
+
+	it("never claims the llm_credentials CTA banner", async () => {
+		verdict({ ready: false, reason: "container_unavailable" });
+		expect(await needsLlmConnection()).toBe(false);
+	});
+
+	it("does NOT trip the full-screen onboarding gate", async () => {
+		// The workspace WAS established (it had a running container that then
+		// died), so it keeps its chat + history and gets a banner, never the
+		// setup poster.
+		verdict({ ready: false, reason: "container_unavailable" });
 		expect(await needsOnboarding()).toBe(false);
 	});
 });

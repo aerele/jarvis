@@ -2372,6 +2372,21 @@
 						</button>
 					</template>
 				</Banner>
+				<!-- jarvis#885: admin's health cron confirmed the serving container is
+					 dead/unhealthy (chat_readiness "Unavailable"), a DIFFERENT fact than
+					 "still starting up". This must be checked BEFORE the generic
+					 notReadyNotice banner below (same specific-before-generic ordering as
+					 noAiConnected above) or its "Chat may not work yet" title would win the
+					 v-else-if race and undersell a dead container as a maybe-slow one. No
+					 CTA: like notReadyNotice, there is nothing to renew or reconnect via us
+					 here - the message IS the admin's own diagnosis. -->
+				<Banner
+					v-else-if="containerUnavailable"
+					type="warning"
+					title="Chat is temporarily unavailable"
+					:message="notReadyNotice || 'We\'re working to bring your workspace back.'"
+					style="margin-bottom: 10px"
+				/>
 				<!-- Not chat-ready for a NON-billing reason (e.g. the connected LLM account
 					 itself is out of quota, or a container is still coming up). No CTA: unlike
 					 a lapsed subscription there's nothing to renew via us here - the detail
@@ -4124,6 +4139,7 @@ import {
 	needsLlmConnection,
 	isLlmApplying,
 	isLlmApplyStuck,
+	isContainerUnavailable,
 	forgetReady,
 } from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
@@ -4225,6 +4241,15 @@ const suspendedNotice = ref(null);
 // onboarding's "Continue to Jarvis" while genuinely not ready used to land here to
 // dead silence - the real reason existed the whole time, nobody rendered it).
 const notReadyNotice = ref("");
+// jarvis#885: true when admin's health cron confirmed the serving container is
+// dead/unhealthy (chat_readiness "Unavailable" -> reason "container_unavailable").
+// Its own flag rather than folding into notReadyNotice: that banner's generic
+// "Chat may not work yet" title undersells a dead container as a maybe-slow one,
+// so this gets its own outage-framed banner, checked BEFORE the generic one in
+// the v-else-if chain below (order pinned the same way noAiConnected is). The
+// message body still reads notReadyNotice's text - readinessDetailOf() now
+// covers this reason too, so admin's own words are never duplicated.
+const containerUnavailable = ref(false);
 // No AI connected at all (is_ready_for_chat reason "llm_credentials"): the customer
 // disconnected their model, or the credential expired. Until now this reason was
 // handled by NEITHER the onboarding gate (correctly - see readiness.js) nor any
@@ -10325,6 +10350,15 @@ onMounted(async () => {
 	readinessDetailOf()
 		.then((detail) => {
 			notReadyNotice.value = detail;
+		})
+		.catch(() => {});
+	// ...and the container_unavailable half (jarvis#885): same fail-open posture,
+	// an unreachable backend just leaves the outage banner off. Rides the same
+	// memoized verdict as notReadyNotice above, so still no extra round trip -
+	// only WHICH banner title wins depends on this flag.
+	isContainerUnavailable()
+		.then((v) => {
+			containerUnavailable.value = v;
 		})
 		.catch(() => {});
 	// ...and the llm_credentials half of the same boot promise. Same fail-open
