@@ -175,6 +175,46 @@ export function validatePool(models, preset) {
 	return { ok: true, error: "" };
 }
 
+// Client-side mirror of admin's `multi_sub_without_backstop` rule (jarvis#934):
+// a pool with 2+ chat-subscription models on DISTINCT upstreams and no
+// non-subscription (API-key) model has no fallback if a subscription is
+// rate-limited or its OAuth session drops - chat just stalls. That used to
+// surface only at apply time, from admin's rejection, well after the second
+// subscription was already wired up (and the OAuth dance already done).
+// Non-blocking: validatePool above stays the hard save-time gate; this is
+// only meant to speak up the moment the invalid combination exists, before
+// the customer has invested in a second sign-in.
+//
+// Two subscriptions on the SAME upstream do NOT warn - failing over between
+// two accounts on one upstream is still a real backstop, just not an
+// api-key one. ANY non-subscription row satisfies the backstop, including a
+// keyless local provider (Ollama/vLLM): the rule is "is there a
+// non-subscription leg to fall back to", not "is there a paid API key".
+//
+// Tolerates both shapes this module deals in, same as deriveMode above: raw
+// editor rows (credentialType + a top-level upstream) and the
+// validatePool/save shape (a `subscription` object, upstream only on its
+// accounts) - so a caller can pass rows straight from the editor with no
+// normalization step.
+export function poolBackstopWarning(models) {
+	const list = Array.isArray(models) ? models : [];
+	const isSubscription = (m) =>
+		!!(
+			m &&
+			(m.subscription || m.credentialType === "subscription" || m.credential_type === "subscription")
+		);
+	const upstreamOf = (m) => {
+		const accounts = (m.subscription && m.subscription.accounts) || m.accounts || [];
+		return m.upstream || (accounts[0] && accounts[0].upstream) || "openai";
+	};
+	const subUpstreams = new Set(list.filter(isSubscription).map(upstreamOf));
+	const hasNonSubscriptionModel = list.some((m) => m && !isSubscription(m));
+	if (subUpstreams.size >= 2 && !hasNonSubscriptionModel) {
+		return "A pool with 2+ subscription providers and no API-key-backed model has no backstop - if a subscription is rate-limited or drops, chat can stall. Add an API-key model as a fallback.";
+	}
+	return "";
+}
+
 // ---- provider id <-> label ------------------------------------------------
 // Ports jarvis_account.js's PROVIDER_LABEL_BY_ID / providerLabel() verbatim
 // (same ids, same labels) so the dropdown in the shared editor matches the

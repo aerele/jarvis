@@ -9,6 +9,7 @@ import {
 	buildCustomModels,
 	reorder,
 	validatePool,
+	poolBackstopWarning,
 } from "./pool.js";
 import { PROVIDER_LABELS, providerLabel, providerId, seedRowsFromConfig } from "./pool.js";
 import { defaultSubscriptionModel, subModelSuggestions } from "./pool.js";
@@ -317,6 +318,121 @@ test("validatePool: Ollama/vLLM don't need a key (label or id, blank api_key)", 
 	assert.equal(
 		validatePool([{ provider: "openai", model: "gpt-5.5", api_key: "" }], null).ok,
 		false
+	);
+});
+test("poolBackstopWarning: fires for 2+ subscription models on distinct upstreams with no backstop", () => {
+	const models = [
+		{
+			provider: "OpenAI",
+			model: "gpt-5.5",
+			upstream: "openai",
+			subscription: { rotation: "sticky", accounts: [] },
+		},
+		{
+			provider: "xAI Grok",
+			model: "grok-4.3",
+			upstream: "xai",
+			subscription: { rotation: "sticky", accounts: [] },
+		},
+	];
+	assert.match(poolBackstopWarning(models), /backstop/i);
+});
+test("poolBackstopWarning: silent for 2 subscription models on the SAME upstream", () => {
+	// Failing over between two accounts on one upstream is still a real
+	// backstop, just not an api-key one - must NOT warn.
+	const models = [
+		{
+			provider: "OpenAI",
+			model: "gpt-5.5",
+			upstream: "openai",
+			subscription: { rotation: "sticky", accounts: [] },
+		},
+		{
+			provider: "OpenAI",
+			model: "gpt-5.4",
+			upstream: "openai",
+			subscription: { rotation: "sticky", accounts: [] },
+		},
+	];
+	assert.equal(poolBackstopWarning(models), "");
+});
+test("poolBackstopWarning: silent when an api-key model backstops 2 distinct-upstream subscriptions", () => {
+	const models = [
+		{
+			provider: "OpenAI",
+			model: "gpt-5.5",
+			upstream: "openai",
+			subscription: { rotation: "sticky", accounts: [] },
+		},
+		{
+			provider: "xAI Grok",
+			model: "grok-4.3",
+			upstream: "xai",
+			subscription: { rotation: "sticky", accounts: [] },
+		},
+		{ provider: "openai", model: "gpt-5.5", api_key: "k" },
+	];
+	assert.equal(poolBackstopWarning(models), "");
+});
+test("poolBackstopWarning: silent when a keyless local provider (Ollama/vLLM) backstops 2 distinct-upstream subscriptions", () => {
+	const models = [
+		{
+			provider: "OpenAI",
+			model: "gpt-5.5",
+			upstream: "openai",
+			subscription: { rotation: "sticky", accounts: [] },
+		},
+		{
+			provider: "xAI Grok",
+			model: "grok-4.3",
+			upstream: "xai",
+			subscription: { rotation: "sticky", accounts: [] },
+		},
+		{ provider: "Ollama (local)", model: "llama3", api_key: "" },
+	];
+	assert.equal(poolBackstopWarning(models), "");
+});
+test("poolBackstopWarning: fires before any account is connected (pre-OAuth add-panel state)", () => {
+	// The whole point of #934: warn at the moment the SECOND subscription
+	// row exists, not after OAuth sign-in has already run - so this must
+	// fire off row.upstream alone, with zero accounts on either row.
+	const models = [
+		{ provider: "OpenAI", model: "gpt-5.5", upstream: "openai", subscription: { accounts: [] } },
+		{ provider: "xAI Grok", model: "grok-4.3", upstream: "xai", subscription: { accounts: [] } },
+	];
+	assert.notEqual(poolBackstopWarning(models), "");
+});
+test("poolBackstopWarning: tolerates raw editor-row shape (credentialType, no `subscription` object)", () => {
+	const rows = [
+		{ credentialType: "subscription", provider: "", model: "gpt-5.5", upstream: "openai", accounts: [] },
+		{ credentialType: "subscription", provider: "", model: "grok-4.3", upstream: "xai", accounts: [] },
+	];
+	assert.notEqual(poolBackstopWarning(rows), "");
+	assert.equal(
+		poolBackstopWarning([...rows, { credentialType: "api_key", provider: "openai", model: "gpt-5.5" }]),
+		""
+	);
+});
+test("poolBackstopWarning: a single subscription model never warns", () => {
+	assert.equal(
+		poolBackstopWarning([
+			{
+				provider: "OpenAI",
+				model: "gpt-5.5",
+				upstream: "openai",
+				subscription: { accounts: [] },
+			},
+		]),
+		""
+	);
+});
+test("poolBackstopWarning: an all-api-key pool never warns", () => {
+	assert.equal(
+		poolBackstopWarning([
+			{ provider: "openai", model: "gpt-5.5", api_key: "k" },
+			{ provider: "xai", model: "grok-4.3", api_key: "k" },
+		]),
+		""
 	);
 });
 test("effectiveApiKey: local providers get a placeholder only when blank and unsaved", () => {
