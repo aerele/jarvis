@@ -282,9 +282,14 @@ class TestOnUpdateAdminDispatch(_SettingsSnapshotTestCase):
 
 		from jarvis.exceptions import AdminAuthError
 
-		# api_key rotation is now a reload-action → post_rotate_llm_secret
+		# api_key rotation is now a reload-action → post_rotate_llm_secret.
+		# #388: a genuine auth failure now propagates out of the in-test
+		# inline sync instead of being swallowed, so .save() raises it - the
+		# terminal status is still written (and durable) before that happens.
 		with patch("jarvis.admin_client.post_rotate_llm_secret", side_effect=AdminAuthError("invalid token")):
-			s = self._save_with_new_api_key("sk-auth-fail-test")
+			with self.assertRaises(AdminAuthError):
+				self._save_with_new_api_key("sk-auth-fail-test")
+		s = frappe.get_doc("Jarvis Settings", "Jarvis Settings")
 		self.assertTrue(s.last_sync_status.startswith("failed: auth:"))
 		self.assertIn("invalid token", s.last_sync_status)
 

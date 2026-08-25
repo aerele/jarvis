@@ -193,6 +193,9 @@ class TestInstalledAppsSync(FrappeTestCase):
 		from jarvis import admin_client
 
 		settings = frappe.get_doc("Jarvis Settings")
+		# AdminAuthError("nope") carries no code/status_code, so it classifies as
+		# a genuine auth failure (#388) and _sync_via_admin re-raises it after
+		# writing the terminal status - it's no longer swallowed.
 		with (
 			patch.object(type(settings), "_resolve_llm_secret_for_push", return_value="sk-test"),
 			patch(
@@ -202,5 +205,6 @@ class TestInstalledAppsSync(FrappeTestCase):
 			patch("frappe.log_error"),
 			patch("jarvis.installed_apps_sync.record_synced_snapshot") as stamp,
 		):
-			settings._sync_via_admin("restart")
+			with self.assertRaises(admin_client.AdminAuthError):
+				settings._sync_via_admin("restart")
 		stamp.assert_not_called()
