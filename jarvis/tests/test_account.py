@@ -384,9 +384,7 @@ class TestAdminChatGate(FrappeTestCase):
 	def test_container_unavailable_without_reason_still_classifies(self):
 		"""Older admin sends the state with no sentence — the code must still be
 		the outage one; the SPA supplies its own fallback copy."""
-		with patch.object(
-			admin_client, "get_connection", return_value={"chat_readiness": "Unavailable"}
-		):
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Unavailable"}):
 			self.assertEqual(
 				account._admin_chat_gate(),
 				{"ready": False, "reason": "container_unavailable", "detail": "", "billing_notice": {}},
