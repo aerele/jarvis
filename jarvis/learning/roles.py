@@ -26,11 +26,9 @@ from frappe.utils import cint
 
 from jarvis.permissions import (
 	JARVIS_ADMIN_ROLE,
-	JARVIS_SUPPORT_USER_ROLE,
 	JARVIS_USER_ROLE,
 	ensure_jarvis_admin_role,
 	ensure_jarvis_user_role,
-	ensure_support_roles,
 )
 
 # _v2: the cached value is now {"roles": [...], "derived": bool}, not a bare
@@ -242,11 +240,6 @@ def after_migrate() -> None:
 		# definition in jarvis/permissions.py. Idempotent.
 		if not frappe.db.exists("Role", JARVIS_ADMIN_ROLE):
 			ensure_jarvis_admin_role()
-			created = True
-		# Support panel roles (single-source in jarvis/permissions.py). The default grant to
-		# chat users happens lazily at boot (www/jarvis.py) so we never mass-iterate users here.
-		if not frappe.db.exists("Role", JARVIS_SUPPORT_USER_ROLE):
-			ensure_support_roles()
 			created = True
 		if created:
 			frappe.db.commit()
