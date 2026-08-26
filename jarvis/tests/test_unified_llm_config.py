@@ -421,7 +421,9 @@ class TestProviderNormalization(FrappeTestCase):
 	def test_deepseek_blank_base_url_is_backfilled_from_catalog(self):
 		from jarvis.jarvis.pool_serialize import build_pool_payload
 
-		deepseek = _api_key_model(provider="deepseek", model="deepseek-v4-flash", base_url="", api_key="dk", order=0)
+		deepseek = _api_key_model(
+			provider="deepseek", model="deepseek-v4-flash", base_url="", api_key="dk", order=0
+		)
 		settings = _make_settings_with_models([deepseek])
 		spec, _api_keys, _ = build_pool_payload(settings)
 		self.assertEqual(spec["models"][0]["base_url"], "https://api.deepseek.com")
