@@ -2,6 +2,7 @@
 
 from unittest.mock import patch
 
+import frappe
 from frappe.tests.utils import FrappeTestCase
 
 import jarvis.account as account
@@ -251,3 +252,128 @@ class TestLlmConfiguredGate(FrappeTestCase):
 			ok, reason = validate_can_send("Administrator")
 		self.assertTrue(ok)
 		self.assertIsNone(reason)
+
+
+# --- agent-token drift self-heal (fix/agent-token-selfheal-on-chat-gate) ---
+#
+# When a tenant is destroyed and reassigned, the new container mints a fresh
+# gateway token and admin's Jarvis Tenant.agent_token is updated, but
+# nothing pushes that to the customer bench - the bench only re-pulls
+# agent_url/agent_token via the DAILY sync_connection cron. _admin_chat_gate
+# already fetches the connection payload on every uncached readiness check, so
+# it reconciles agent_url/agent_token from that SAME payload, diff-gated so a
+# call that changed nothing writes nothing.
+
+_RECONCILE_FIELDS = (
+	"agent_url",
+	"agent_token",
+	"tenant_authority_generation",
+	"tenant_authority_handle",
+)
+
+
+def _snapshot_reconcile_fields() -> dict:
+	s = frappe.get_single("Jarvis Settings")
+	snap = {}
+	for f in _RECONCILE_FIELDS:
+		v = s.get_password(f, raise_exception=False) if f == "agent_token" else s.get(f)
+		snap[f] = v or ""
+	return snap
+
+
+def _restore_reconcile_fields(snap: dict) -> None:
+	from frappe.utils.password import remove_encrypted_password
+
+	# The production write path (write_connection -> set_settings_password)
+	# stores agent_token in __Auth with a masked column, so a column-only
+	# restore would leave a test's token readable via get_password's __Auth
+	# fallback in the NEXT test - same trap test_onboarding_sync.py documents.
+	remove_encrypted_password("Jarvis Settings", "Jarvis Settings", "agent_token")
+	s = frappe.get_single("Jarvis Settings")
+	for f, v in snap.items():
+		s.db_set(f, v, update_modified=False)
+	frappe.db.commit()
+
+
+class TestChatGateReconcilesAgentTokenDrift(FrappeTestCase):
+	"""jarvis.account._admin_chat_gate's opportunistic agent_url/agent_token
+	reconcile. admin_client.get_connection is mocked; the gate cache is busted
+	in setUp/tearDown (same as TestAdminChatGate in test_account.py) so a
+	cached verdict from an earlier test never short-circuits the admin call
+	this reconcile depends on. Jarvis Settings is a Single (never rolled back
+	between tests), so the fields this reconcile touches are snapshotted and
+	restored like test_onboarding_sync.py's _snapshot_settings/_restore_settings."""
+
+	def setUp(self):
+		account._bust_chat_gate()
+		self._snap = _snapshot_reconcile_fields()
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("agent_url", "wss://old-container.example/ws", update_modified=False)
+		from jarvis._password_utils import set_settings_password
+
+		set_settings_password(s, "agent_token", "old-token")
+		# A stored generation lower than every drift-heal payload's, so guard()
+		# ACCEPTs (higher incoming generation) rather than HOLDing on an
+		# equal-generation identity check.
+		s.db_set("tenant_authority_generation", 1, update_modified=False)
+		s.db_set("tenant_authority_handle", "handle-old", update_modified=False)
+		frappe.db.commit()
+
+	def tearDown(self):
+		account._bust_chat_gate()
+		_restore_reconcile_fields(self._snap)
+
+	def test_chat_gate_reconciles_drifted_agent_token(self):
+		"""The drift-heal case: a fleet-side rotation changed the token (and
+		bumped the authority generation, as a real reassign does) but the
+		agent_url is unchanged. After one gate call the new token must be
+		live on Jarvis Settings - no more waiting for the daily cron."""
+		payload = {
+			"agent_url": "wss://old-container.example/ws",
+			"agent_token": "new-token",
+			"tenant_authority_generation": 2,
+			"tenant_authority_handle": "handle-new",
+			"tenant_status": "running",
+		}
+		with patch.object(account.admin_client, "get_connection", return_value=payload):
+			out = account._admin_chat_gate()
+		self.assertTrue(out["ready"])
+		s = frappe.get_single("Jarvis Settings")
+		self.assertEqual(s.get_password("agent_token", raise_exception=False), "new-token")
+
+	def test_no_drift_does_not_write(self):
+		"""Steady state: every field in the payload matches what's already
+		stored, so write_connection must never be called - the reconcile must
+		not bust the chat-gate cache or churn the encrypted agent_token field
+		on a call that changed nothing."""
+		payload = {
+			"agent_url": "wss://old-container.example/ws",
+			"agent_token": "old-token",
+			"tenant_authority_generation": 1,
+			"tenant_authority_handle": "handle-old",
+			"tenant_status": "running",
+		}
+		with (
+			patch.object(account.admin_client, "get_connection", return_value=payload),
+			patch("jarvis.onboarding.write_connection") as wc,
+		):
+			account._admin_chat_gate()
+		wc.assert_not_called()
+
+	def test_reconcile_failure_does_not_break_the_gate(self):
+		"""A reconcile failure must never break the ready-gate: the gate's
+		normal verdict still comes back even when write_connection raises."""
+		payload = {
+			"agent_url": "wss://old-container.example/ws",
+			"agent_token": "new-token",
+			"tenant_authority_generation": 2,
+			"tenant_authority_handle": "handle-new",
+			"tenant_status": "running",
+		}
+		with (
+			patch.object(account.admin_client, "get_connection", return_value=payload),
+			patch("jarvis.onboarding.write_connection", side_effect=RuntimeError("boom")),
+		):
+			out = account._admin_chat_gate()
+		self.assertTrue(out["ready"])
+		self.assertIsNone(out["reason"])

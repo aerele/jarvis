@@ -538,6 +538,32 @@ def _admin_chat_gate() -> dict:
 	# Refresh the locally-mirrored release notice on this gate's cadence so an
 	# active user sees an activate/clear without waiting for the daily sync.
 	release_notice.persist(conn.get("release_notice") or {})
+	# Fleet-side agent-token self-heal. A destroyed-and-reassigned tenant gets a
+	# fresh gateway token on its new container and admin's own record is
+	# updated, but nothing on the fleet side can push that to THIS bench -
+	# the only other path is the DAILY sync_connection cron, so an otherwise
+	# active customer could sit on a stale token (401s on jarvis.api.call_tool)
+	# for up to 24h. This gate already holds a fresh connection payload on
+	# every uncached call, so reconcile agent_url/agent_token from it here too,
+	# on the gate's own cadence. Diff-gated: steady state (every other call)
+	# writes nothing, so this never busts the chat-gate cache or churns the
+	# encrypted agent_token field for no reason. write_connection() runs the
+	# tenant-authority guard() itself, so a stale or divergent payload cannot
+	# regress an already-accepted container - never write agent_token directly.
+	try:
+		if conn.get("agent_url"):
+			settings = frappe.get_single(SETTINGS)
+			current_url = (settings.get("agent_url") or "").strip()
+			current_token = settings.get_password("agent_token", raise_exception=False) or ""
+			incoming_url = (conn.get("agent_url") or "").strip()
+			incoming_token = conn.get("agent_token") or ""
+			if incoming_url != current_url or (incoming_token and incoming_token != current_token):
+				from jarvis.onboarding import write_connection
+
+				write_connection(conn)
+	except Exception:
+		# A reconcile failure must never break the ready-gate.
+		frappe.log_error(title="chat gate: agent-token reconcile failed", message=frappe.get_traceback())
 	notice = conn.get("billing_notice") or {}
 	if "chat_readiness" in conn and conn["chat_readiness"] != "Ready":
 		# Authority-repair incident (review plan 04 P0-6): admin's strict resolver

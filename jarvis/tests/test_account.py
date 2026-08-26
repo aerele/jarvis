@@ -225,8 +225,15 @@ class TestAdminChatGate(FrappeTestCase):
 		self._marker_snap = account._settings_raw(("chat_was_ready_at",)).get("chat_was_ready_at")
 		self._key_snap = _set_stored_connection(True)
 		_set_ready_marker("2026-01-01 00:00:00")
+		# Several tests here mock get_connection with a bare agent_url (no
+		# authority fields), which is not this class's concern - the
+		# agent-token reconcile added on this same gate would otherwise run
+		# write_connection for real and overwrite this site's actual agent_url.
+		self._wc = patch("jarvis.onboarding.write_connection")
+		self._wc.start()
 
 	def tearDown(self):
+		self._wc.stop()
 		account._bust_chat_gate()
 		_set_ready_marker(self._marker_snap)
 		frappe.db.set_value(
@@ -1306,8 +1313,16 @@ class TestExplicitReadyOnlyMarker(FrappeTestCase):
 			account._READY_MARKER_FIELD
 		)
 		_set_ready_marker(None)
+		# test_missing_chat_readiness_allows_but_does_not_mint_the_marker mocks
+		# get_connection with a bare agent_url (no authority fields) - not this
+		# class's concern, and the agent-token reconcile on this same gate
+		# would otherwise run write_connection for real and overwrite this
+		# site's actual agent_url.
+		self._wc = patch("jarvis.onboarding.write_connection")
+		self._wc.start()
 
 	def tearDown(self):
+		self._wc.stop()
 		account._bust_chat_gate()
 		_set_ready_marker(self._marker_snap)
 		frappe.db.set_value(
