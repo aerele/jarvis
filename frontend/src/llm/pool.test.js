@@ -397,19 +397,44 @@ test("poolBackstopWarning: fires before any account is connected (pre-OAuth add-
 	// row exists, not after OAuth sign-in has already run - so this must
 	// fire off row.upstream alone, with zero accounts on either row.
 	const models = [
-		{ provider: "OpenAI", model: "gpt-5.5", upstream: "openai", subscription: { accounts: [] } },
-		{ provider: "xAI Grok", model: "grok-4.3", upstream: "xai", subscription: { accounts: [] } },
+		{
+			provider: "OpenAI",
+			model: "gpt-5.5",
+			upstream: "openai",
+			subscription: { accounts: [] },
+		},
+		{
+			provider: "xAI Grok",
+			model: "grok-4.3",
+			upstream: "xai",
+			subscription: { accounts: [] },
+		},
 	];
 	assert.notEqual(poolBackstopWarning(models), "");
 });
 test("poolBackstopWarning: tolerates raw editor-row shape (credentialType, no `subscription` object)", () => {
 	const rows = [
-		{ credentialType: "subscription", provider: "", model: "gpt-5.5", upstream: "openai", accounts: [] },
-		{ credentialType: "subscription", provider: "", model: "grok-4.3", upstream: "xai", accounts: [] },
+		{
+			credentialType: "subscription",
+			provider: "",
+			model: "gpt-5.5",
+			upstream: "openai",
+			accounts: [],
+		},
+		{
+			credentialType: "subscription",
+			provider: "",
+			model: "grok-4.3",
+			upstream: "xai",
+			accounts: [],
+		},
 	];
 	assert.notEqual(poolBackstopWarning(rows), "");
 	assert.equal(
-		poolBackstopWarning([...rows, { credentialType: "api_key", provider: "openai", model: "gpt-5.5" }]),
+		poolBackstopWarning([
+			...rows,
+			{ credentialType: "api_key", provider: "openai", model: "gpt-5.5" },
+		]),
 		""
 	);
 });

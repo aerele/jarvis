@@ -201,7 +201,9 @@ export function poolBackstopWarning(models) {
 	const isSubscription = (m) =>
 		!!(
 			m &&
-			(m.subscription || m.credentialType === "subscription" || m.credential_type === "subscription")
+			(m.subscription ||
+				m.credentialType === "subscription" ||
+				m.credential_type === "subscription")
 		);
 	const upstreamOf = (m) => {
 		const accounts = (m.subscription && m.subscription.accounts) || m.accounts || [];
