@@ -30,5 +30,7 @@ export function isExpectedCompanyDefaultsMiss(e) {
 	if (!e) return false;
 	if (e.status === 404) return true;
 	const candidates = [e, ...(Array.isArray(e.messages) ? e.messages : [])];
-	return candidates.some((candidate) => envelopeCode(candidate) === "COMPANY_DEFAULTS_NOT_FOUND");
+	return candidates.some(
+		(candidate) => envelopeCode(candidate) === "COMPANY_DEFAULTS_NOT_FOUND"
+	);
 }
