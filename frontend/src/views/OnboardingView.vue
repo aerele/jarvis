@@ -33,6 +33,16 @@
 						>
 					</div>
 
+					<!-- Worker-warning banner: non-blocking, shown above every step (never
+						 gates a CTA). Task 5's boot flag; copy identical to OnboardingGate's. -->
+					<Banner
+						v-if="workerWarning"
+						type="warning"
+						title="Background workers are low"
+						message="Your Jarvis background workers look under-provisioned. Chat may be slow or stall until more workers are running."
+						class="mb-4 w-full max-w-[720px]"
+					/>
+
 					<!-- step rail: flat progress segments with labels (design.md §4.3 —
 					 no numbered circles, no connector lines). Hidden on the intro
 					 tour (chromeless). variant="steps" opts out of the 2026-08-16
@@ -1967,6 +1977,9 @@ const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 // local/non-public host (magic links + agent callbacks can't reach it). The
 // dev bypass (jarvis_allow_localhost_onboarding) already resolves this to true.
 const hostOk = window.jarvis_public_host_ok !== false;
+
+// Non-blocking: warns without gating any step's CTA (Task 5's boot flag).
+const workerWarning = !!window.jarvis_worker_warning;
 
 // The 4 named wizard steps shown on the rail. The intro tour is chromeless
 // (no rail entry).
