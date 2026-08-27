@@ -558,9 +558,39 @@ def _admin_chat_gate() -> dict:
 			incoming_url = (conn.get("agent_url") or "").strip()
 			incoming_token = conn.get("agent_token") or ""
 			if incoming_url != current_url or (incoming_token and incoming_token != current_token):
-				from jarvis.onboarding import write_connection
+				from jarvis import tenant_authority
 
-				write_connection(conn)
+				# Pre-check the PURE guard decision (no I/O, no state advance)
+				# before writing. write_connection ends in an unconditional
+				# _bust_chat_gate, a Redis KEYS scan its own docstring says must
+				# never run on a hot per-request path. A REJECT (stale
+				# generation) or HOLD (equal generation, different handle)
+				# means write_connection would refuse the write anyway, and the
+				# diff above would never resolve, so every later uncached gate
+				# call for this tenant would re-run the bust forever. Only call
+				# it when the payload would actually land.
+				try:
+					outcome = tenant_authority.decide(
+						settings.get(tenant_authority.GEN_FIELD),
+						settings.get(tenant_authority.HANDLE_FIELD) or None,
+						conn.get(tenant_authority.GEN_FIELD),
+						conn.get(tenant_authority.HANDLE_FIELD) or None,
+					)
+				except tenant_authority.AuthorityInvariantError:
+					outcome = None  # HOLD: never write
+				if outcome in (tenant_authority.ACCEPT, tenant_authority.COMPAT):
+					from jarvis.onboarding import write_connection
+
+					write_connection(conn)
+					# write_connection may have moved agent_url/agent_token or
+					# advanced the authority generation, all of which the
+					# cached verdict's identity and the ready-marker's anchor
+					# are keyed on. Reusing the pre-write raw/cache_key below
+					# would stamp the marker with the OLD authority (hard
+					# blocking a healthy, just-healed tenant on a later admin
+					# outage) and cache the verdict under a now-dead revision.
+					raw = _settings_raw(_GATE_STATE_FIELDS)
+					cache_key = f"{_CHAT_GATE_CACHE_KEY}:{_gate_revision(raw)}"
 	except Exception:
 		# A reconcile failure must never break the ready-gate.
 		frappe.log_error(title="chat gate: agent-token reconcile failed", message=frappe.get_traceback())

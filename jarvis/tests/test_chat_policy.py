@@ -269,6 +269,8 @@ _RECONCILE_FIELDS = (
 	"agent_token",
 	"tenant_authority_generation",
 	"tenant_authority_handle",
+	"chat_was_ready_at",
+	"chat_ready_authority",
 )
 
 
@@ -377,3 +379,87 @@ class TestChatGateReconcilesAgentTokenDrift(FrappeTestCase):
 			out = account._admin_chat_gate()
 		self.assertTrue(out["ready"])
 		self.assertIsNone(out["reason"])
+
+	def test_heal_stamps_new_authority_anchor_not_stale(self):
+		"""The reconcile writes a NEW authority generation, so the ready-marker
+		it mints afterwards (chat_readiness: Ready in the same payload) must be
+		bound to the POST-write authority, not the one captured before the
+		write. A marker stamped against the stale (pre-write) authority would
+		mismatch the real current authority the moment it is recomputed - and
+		that mismatch hard-blocks a healthy, just-healed tenant the very next
+		time admin cannot be reached, exactly the outage this marker exists to
+		survive."""
+		# _has_been_chat_ready also requires a present admin key (the OTHER
+		# half of "established" - see test_account.py's _set_stored_connection);
+		# a bare presence mask is enough, no real __Auth secret needed, since
+		# this test's principal term is empty either way and only the
+		# generation term is what's under test.
+		key_field = "jarvis_admin_api_key"
+		prior_key = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", key_field)
+		frappe.db.set_value("Jarvis Settings", "Jarvis Settings", key_field, "*" * 10, update_modified=False)
+		self.addCleanup(
+			lambda: frappe.db.set_value(
+				"Jarvis Settings", "Jarvis Settings", key_field, prior_key, update_modified=False
+			)
+		)
+		payload = {
+			"agent_url": "wss://old-container.example/ws",
+			"agent_token": "new-token",
+			"tenant_authority_generation": 2,
+			"tenant_authority_handle": "handle-new",
+			"chat_readiness": "Ready",
+		}
+		with patch.object(account.admin_client, "get_connection", return_value=payload):
+			out = account._admin_chat_gate()
+		self.assertTrue(out["ready"])
+
+		# Force the SECOND call to read purely off DB state instead of
+		# reusing whatever this call just cached - the same thing a real
+		# uncached load after an outage would do.
+		account._bust_chat_gate()
+		with patch.object(account.admin_client, "get_connection", side_effect=Exception("admin down")):
+			second = account._admin_chat_gate()
+		self.assertTrue(
+			second["ready"],
+			"a tenant just healed by this reconcile must ride the established "
+			"marker through an outage, not hard-block on a stale authority anchor",
+		)
+
+	def test_reject_or_hold_payload_does_not_call_write_connection(self):
+		"""A payload whose authority the guard would REJECT (a stale
+		generation) or HOLD (equal generation, a divergent handle) must never
+		reach write_connection. write_connection ends in an unconditional
+		_bust_chat_gate - a Redis KEYS scan its own docstring says must never
+		run on a hot per-request path - and since the diff never resolves for
+		either outcome, calling it anyway would re-run that scan on EVERY
+		later uncached gate call for this tenant, indefinitely."""
+		# REJECT: incoming generation (0) lower than stored (1).
+		reject_payload = {
+			"agent_url": "wss://old-container.example/ws",
+			"agent_token": "new-token",
+			"tenant_authority_generation": 0,
+			"tenant_authority_handle": "handle-old",
+			"tenant_status": "running",
+		}
+		with (
+			patch.object(account.admin_client, "get_connection", return_value=reject_payload),
+			patch("jarvis.onboarding.write_connection") as wc,
+		):
+			account._admin_chat_gate()
+		wc.assert_not_called()
+
+		# HOLD: same generation (1) as stored, but a DIFFERENT serving handle.
+		account._bust_chat_gate()
+		hold_payload = {
+			"agent_url": "wss://old-container.example/ws",
+			"agent_token": "new-token",
+			"tenant_authority_generation": 1,
+			"tenant_authority_handle": "handle-divergent",
+			"tenant_status": "running",
+		}
+		with (
+			patch.object(account.admin_client, "get_connection", return_value=hold_payload),
+			patch("jarvis.onboarding.write_connection") as wc,
+		):
+			account._admin_chat_gate()
+		wc.assert_not_called()
