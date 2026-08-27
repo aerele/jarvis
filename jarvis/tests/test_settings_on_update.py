@@ -610,10 +610,33 @@ class TestSyncViaAdminDispatch(_SettingsSingletonTestCase):
 		settings.db_set("llm_api_key", "sk-1", update_modified=False)
 		frappe.db.commit()
 		settings.reload()
-		settings._sync_via_admin("reload")
+		# #388: a genuine auth failure (no CUSTOMER_NOT_PAID code) is written
+		# terminally and then re-raised, so the caller sees it instead of a
+		# silently swallowed "success".
+		with self.assertRaises(AdminAuthError):
+			settings._sync_via_admin("reload")
 		settings.reload()
 		self.assertIn("failed", settings.last_sync_status or "")
 		self.assertIn("auth", settings.last_sync_status or "")
+
+	@patch("jarvis.admin_client.post_rotate_llm_secret")
+	def test_admin_auth_error_not_paid_does_not_raise(self, mock_rotate):
+		from jarvis.exceptions import AdminAuthError
+
+		mock_rotate.side_effect = AdminAuthError(
+			"Your subscription is not active.", status_code=403, code="CUSTOMER_NOT_PAID"
+		)
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("llm_api_key", "sk-1", update_modified=False)
+		frappe.db.commit()
+		settings.reload()
+		# The business-rule "not paid" case is expected and recurring - it must
+		# stay non-fatal so it doesn't raise rq failures/alerts on every sync
+		# attempt until the customer pays.
+		settings._sync_via_admin("reload")
+		settings.reload()
+		self.assertIn("failed: not paid", settings.last_sync_status or "")
+		self.assertIn("CUSTOMER_NOT_PAID", settings.last_sync_status or "")
 
 
 class TestOnUpdateAsyncPending(_SettingsSingletonTestCase):
