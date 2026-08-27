@@ -25,12 +25,11 @@ from jarvis.chat.settlement import _error_text
 from jarvis.chat.turn_recovery import _latest_assistant_text
 
 _LOBSTER = "\U0001f99e"
-_RULES = [["acme", "name"], [_LOBSTER, "remove"]]
+_RULES = [["acme", "remove"], [_LOBSTER, "remove"]]
 
 
 def _cache_rules(rules=_RULES):
 	frappe.db.set_value(SETTINGS, SETTINGS, _PATTERNS_FIELD, frappe.as_json(rules), update_modified=False)
-	frappe.db.set_value(SETTINGS, SETTINGS, "agent_name", "", update_modified=False)  # -> "Jarvis"
 	frappe.clear_document_cache(SETTINGS, SETTINGS)
 	egress_rules._invalidate_memo()
 
@@ -41,16 +40,16 @@ class TestParseEventRedaction(FrappeTestCase):
 
 	def test_assistant_text_and_delta_redacted(self):
 		out = parse_event({"stream": "assistant", "data": {"text": "on acme", "delta": "acme"}})
-		self.assertEqual(out["text"], "on Jarvis")
-		self.assertEqual(out["delta"], "Jarvis")
+		self.assertEqual(out["text"], "on ")
+		self.assertEqual(out["delta"], "…")
 
 	def test_tool_title_redacted(self):
 		out = parse_event({"stream": "item", "data": {"kind": "tool", "title": "run acme now"}})
-		self.assertEqual(out["tool_title"], "run Jarvis now")
+		self.assertEqual(out["tool_title"], "run  now")
 
 	def test_lifecycle_error_redacted(self):
 		out = parse_event({"stream": "lifecycle", "data": {"phase": "error", "error": "acme failed"}})
-		self.assertEqual(out["error"], "Jarvis failed")
+		self.assertEqual(out["error"], " failed")
 
 	def test_no_rules_is_passthrough(self):
 		_cache_rules([])
@@ -117,7 +116,7 @@ class TestFinalCallSiteRedaction(FrappeTestCase):
 			mux.dispatch()
 		kind, payload = rec.terminal
 		self.assertEqual(kind, "relay:final")
-		self.assertEqual(payload["text"], "on Jarvis")
+		self.assertEqual(payload["text"], "on ")
 		fire.assert_called_once()
 		self.assertEqual(fire.call_args.kwargs.get("run_id"), "run-xyz")  # OP#4 transcript pointer
 
@@ -130,7 +129,7 @@ class TestFinalCallSiteRedaction(FrappeTestCase):
 		mux.dispatch()
 		kind, payload = rec.terminal
 		self.assertEqual(kind, "relay:error")
-		self.assertEqual(payload["error"], "Jarvis failed")
+		self.assertEqual(payload["error"], " failed")
 
 
 class TestRecoveryRedaction(FrappeTestCase):
@@ -140,27 +139,27 @@ class TestRecoveryRedaction(FrappeTestCase):
 	def test_recovery_string_content_redacted_and_flagged(self):
 		msgs = [{"role": "assistant", "content": "recovered acme"}]
 		with patch.object(egress_rules, "_fire_tripwire") as fire:
-			self.assertEqual(_latest_assistant_text(msgs), "recovered Jarvis")
+			self.assertEqual(_latest_assistant_text(msgs), "recovered ")
 			fire.assert_called_once()
 
 	def test_recovery_block_list_redacted(self):
 		msgs = [{"role": "assistant", "content": [{"type": "text", "text": "back to acme"}]}]
 		with patch.object(egress_rules, "_fire_tripwire"):
-			self.assertEqual(_latest_assistant_text(msgs), "back to Jarvis")
+			self.assertEqual(_latest_assistant_text(msgs), "back to ")
 
 	def test_recovery_bare_text_field_redacted(self):
 		# The third return path: a message with a bare `text` (no `content`).
 		msgs = [{"role": "assistant", "text": "text field acme"}]
 		with patch.object(egress_rules, "_fire_tripwire") as fire:
-			self.assertEqual(_latest_assistant_text(msgs), "text field Jarvis")
+			self.assertEqual(_latest_assistant_text(msgs), "text field ")
 			fire.assert_called_once()
 
-	def test_recovery_all_remove_falls_back_to_name(self):
+	def test_recovery_all_remove_falls_back_to_placeholder(self):
 		# F1 on the recovery path: an all-remove reply must not collapse to "" (which
 		# _recover_one reads as "no output yet" and hangs the turn to a false timeout).
 		msgs = [{"role": "assistant", "content": _LOBSTER}]
 		with patch.object(egress_rules, "_fire_tripwire"):
-			self.assertEqual(_latest_assistant_text(msgs), "Jarvis")
+			self.assertEqual(_latest_assistant_text(msgs), "…")
 
 	def test_recovery_clean_text_does_not_flag(self):
 		msgs = [{"role": "assistant", "content": "all good"}]
@@ -176,10 +175,10 @@ class TestErrorBannerRedaction(FrappeTestCase):
 	def test_failed_final_error_redacts_provider_detail(self):
 		out = failed_final_error("acme gateway error (429): quota exceeded")
 		self.assertNotIn("acme", out.lower())
-		self.assertIn("Jarvis", out)
+		self.assertIn("quota exceeded", out)
 
 	def test_error_text_redacts(self):
-		self.assertEqual(_error_text({"error": "acme exploded"}), "Jarvis exploded")
+		self.assertEqual(_error_text({"error": "acme exploded"}), " exploded")
 
 	def test_error_text_fallback_unaffected(self):
 		self.assertEqual(_error_text({}), "The run ended with an error.")
@@ -219,7 +218,7 @@ class TestPersistWiring(FrappeTestCase):
 		# egress_rules.persist (co-located with the release_notice.persist precedent).
 		from jarvis import onboarding
 
-		conn = {"redaction_patterns": [["x", "name"]], "release_notice": {}, "agent_url": ""}
+		conn = {"redaction_patterns": [["x", "remove"]], "release_notice": {}, "agent_url": ""}
 		with (
 			patch("jarvis.onboarding.require_jarvis_admin"),
 			patch("jarvis.onboarding.frappe.get_single") as gs,
@@ -229,4 +228,4 @@ class TestPersistWiring(FrappeTestCase):
 		):
 			gs.return_value.get_password.return_value = "x"  # api key/secret present
 			onboarding.sync_connection()
-		persist.assert_called_once_with([["x", "name"]])
+		persist.assert_called_once_with([["x", "remove"]])
