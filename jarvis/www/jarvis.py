@@ -2,7 +2,6 @@ import frappe
 
 from jarvis import release_notice
 from jarvis.permissions import (
-	grant_default_support,
 	has_jarvis_access,
 	has_jarvis_admin_access,
 	support_scope,
@@ -123,10 +122,9 @@ def get_context(context):
 	# when this bench is behind the latest jarvis version. Up-to-date => no gate.
 	context.boot["release_notice"] = release_notice.boot_payload()
 
-	# Support panel gating (Plan 3 B5). Lazy-grant the default support role to this chat user so
-	# support isn't dark (P2 — grant_default_support clears the role cache so support_scope sees
-	# it in this same request), then expose both the per-user access flag and the fleet kill switch.
-	grant_default_support()
+	# Support panel gating (Plan 3 B5). Support access rides the base Jarvis roles
+	# (support_scope: Jarvis User => own, Jarvis Admin => all), so there's nothing to grant —
+	# just expose the per-user access flag and the fleet kill switch.
 	context.boot["has_support_access"] = support_scope() is not None
 	# Both flags, deliberately: `support_available` keeps its exact boolean meaning for
 	# every existing reader, and `support_state` lets the SPA tell an actionable
