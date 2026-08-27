@@ -232,7 +232,7 @@ import {
 } from "frappe-ui";
 import { listShareableUsers } from "@/api";
 import { timeAgo } from "@/utils/datetime";
-import { errHtml } from "@/lib/errors";
+import { errHtml, escapeHtml } from "@/lib/errors";
 
 const props = defineProps({
 	docmeta: { type: Object, required: true }, // useDocmeta() object
@@ -296,7 +296,7 @@ async function copyName() {
 function confirmDeleteAttachment(f) {
 	confirmDialog({
 		title: "Delete attachment?",
-		message: `Delete "${esc(f.file_name || f.file_url)}"? This can't be undone.`,
+		message: `Delete "${escapeHtml(f.file_name || f.file_url)}"? This can't be undone.`,
 		onConfirm: async ({ hideDialog }) => {
 			await props.docmeta.deleteAttachment(f.name);
 			hideDialog();
@@ -330,12 +330,6 @@ function uploadErrMsg(e) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-function esc(s) {
-	return String(s).replace(
-		/[&<>"]/g,
-		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
-	);
-}
 function convertSize(bytes) {
 	const n = Number(bytes);
 	if (!n || n <= 0) return "";
