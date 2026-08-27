@@ -263,6 +263,10 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	# raise or clear the release notice, and this is the only refresh an idle
 	# bench gets.
 	release_notice.persist(data.get("release_notice") or {})
+	# Same cadence: mirror the CP-owned egress redaction rules for the chat backstop.
+	from jarvis.chat import egress_rules
+
+	egress_rules.persist(data.get("redaction_patterns"))
 	if data.get("agent_url"):
 		write_connection(data)
 		return {"synced": True, "tenant_status": data.get("tenant_status")}
