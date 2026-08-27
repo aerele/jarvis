@@ -44,6 +44,13 @@ JARVIS_ACCESS_ROLES = ("System Manager", JARVIS_USER_ROLE, JARVIS_ADMIN_ROLE)
 # implicitly allowed by has_jarvis_admin_access).
 JARVIS_ADMIN_ROLES = ("System Manager", JARVIS_ADMIN_ROLE)
 
+# Support panel roles. Support User sees only tickets they raised (scope=own); Support Admin
+# (and System Manager) see the whole tenant's queue (scope=all). Enforced in code here + at
+# the control-plane proxy; no DocPerm rows.
+JARVIS_SUPPORT_USER_ROLE = "Jarvis Support User"
+JARVIS_SUPPORT_ADMIN_ROLE = "Jarvis Support Admin"
+_SUPPORT_ALL_ROLES = ("System Manager", JARVIS_SUPPORT_ADMIN_ROLE)
+
 # Reviewer set authorized for org-wide skill / pattern / wiki effects (security
 # review PART 2, TASK 15 — RATIFIED). Housed in this lightweight module (no heavy
 # imports) so the Jarvis Custom Skill controller / skill_permissions can import it
@@ -269,24 +276,51 @@ def grant_onboarding_admin(user: str | None = None) -> None:
 		frappe.clear_cache(user=user)
 
 
+def ensure_support_roles() -> None:
+	"""Idempotently create the two support panel roles (desk-access)."""
+	for role_name in (JARVIS_SUPPORT_USER_ROLE, JARVIS_SUPPORT_ADMIN_ROLE):
+		if not frappe.db.exists("Role", role_name):
+			frappe.get_doc(
+				{"doctype": "Role", "role_name": role_name, "desk_access": 1, "is_custom": 1}
+			).insert(ignore_permissions=True)
+
+
 def support_scope(user: str | None = None) -> str | None:
-	"""Support access rides the base Jarvis roles — no dedicated support role:
-
-	* ``"all"`` for a Jarvis Admin (also System Manager / Administrator): the whole
-	  organisation's ticket queue.
-	* ``"own"`` for any Jarvis chat user: only the tickets they raised.
-	* ``None`` for anyone without Jarvis access (Guest, portal users).
-
-	The bench forwards this to the control plane as a filter. Admin is checked first
-	so an admin gets ``all``, never ``own``."""
+	"""``"all"`` for System Manager / Support Admin, ``"own"`` for Support User, else ``None``
+	(no support access). The bench forwards this to the control plane as a filter."""
 	user = user or frappe.session.user
-	if user == "Guest":
-		return None
-	if has_jarvis_admin_access(user):
+	roles = set(frappe.get_roles(user))
+	if user == "Administrator" or (set(_SUPPORT_ALL_ROLES) & roles):
 		return "all"
-	if has_jarvis_access(user):
+	if JARVIS_SUPPORT_USER_ROLE in roles:
 		return "own"
 	return None
+
+
+def grant_default_support(user: str | None = None) -> None:
+	"""Grant ``Jarvis Support User`` to a chat user so support isn't dark by default (P2).
+	Idempotent; never Administrator/Guest; only if they hold no support role already."""
+	ensure_support_roles()
+	user = user or frappe.session.user
+	if not user or user in ("Administrator", "Guest"):
+		return
+	if support_scope(user) is not None:
+		return
+	if not frappe.db.exists(
+		"Has Role", {"parenttype": "User", "parent": user, "role": JARVIS_SUPPORT_USER_ROLE}
+	):
+		frappe.get_doc(
+			{
+				"doctype": "Has Role",
+				"parenttype": "User",
+				"parentfield": "roles",
+				"parent": user,
+				"role": JARVIS_SUPPORT_USER_ROLE,
+			}
+		).insert(ignore_permissions=True)
+		# Invalidate the role cache so support_scope() sees the grant in the SAME request
+		# (the lazy grant-at-boot then computes has_support_access right after).
+		frappe.clear_cache(user=user)
 
 
 def require_jarvis_user(fn):

@@ -158,7 +158,12 @@ class TestPersonaliseRoleSeeding(PersonaliseDoctypeTestCase):
 		Nothing in Frappe enforces that agreement, so this test is the guard: if
 		a future Frappe changes what sync stamps, or someone flips a helper back
 		to 1, the mismatch surfaces here instead of silently misdescribing every
-		live site."""
+		live site.
+
+		Deliberately EXCLUDES the two support roles: no DocType names them, so
+		ensure_support_roles genuinely creates them and its is_custom=1 does take
+		effect. That asymmetry is real, and is spelled out here so it does not
+		get "fixed" by accident."""
 		learning_roles.after_migrate()
 		for role in (
 			"Jarvis User",

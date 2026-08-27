@@ -35,6 +35,7 @@ class TestWwwReleaseNotice(FrappeTestCase):
 		with (
 			patch.object(www_desktop, "has_jarvis_access", return_value=True),
 			patch.object(www_desktop, "has_jarvis_admin_access", return_value=False),
+			patch.object(www_desktop, "grant_default_support", lambda: None),
 			patch.object(www_desktop, "support_scope", return_value=None),
 			# _support_state, not _support_available: get_context calls the former now, so
 			# patching the old name left this test making a REAL admin_client round-trip.
