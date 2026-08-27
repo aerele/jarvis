@@ -292,6 +292,13 @@ class TestRunAgentTurnAugmentsMessage(FrappeTestCase):
 		message_sent = positional[1] if len(positional) >= 2 else kwargs.get("message")
 		self.assertIsNotNone(message_sent)
 		self.assertIn("[Context: today is ", message_sent)
+		# Wall-clock time-of-day (HH:MM) rides the date - the agent's PRIMARY clock
+		# now that the built-in session_status tool is denied. Assert the FORMAT.
+		self.assertRegex(message_sent, r"today is \d{4}-\d{2}-\d{2} \d{2}:\d{2} \(\w+\)")
+		# The curated platform-stack versions ride the bracket so the agent answers
+		# "what version / what environment are you" truthfully, jarvis first (its own
+		# identity). jarvis is installed here and carries __version__.
+		self.assertIn("apps: jarvis ", message_sent)
 		# Chat user (conv.owner) is in the same bracket so the agent can
 		# answer "who am I" / "what perms do I have" without round-tripping.
 		self.assertIn(f"chat user: {TEST_USER}", message_sent)

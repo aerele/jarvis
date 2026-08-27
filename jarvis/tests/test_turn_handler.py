@@ -305,6 +305,65 @@ class TestOrgLocaleClause(unittest.TestCase):
 		self.assertEqual(self._run(company=None, default=None), "")
 
 
+class TestAppVersionsClause(unittest.TestCase):
+	"""_app_versions_clause names the CURATED platform-stack apps + versions
+	(jarvis first) in the context line so the agent answers "what version / what
+	environment are you" truthfully - Jarvis as one app among the others in the
+	customer's Frappe/ERPNext bench. Each app's read is isolated; a wider failure
+	degrades to ''."""
+
+	def _run(self, *, installed, versions):
+		# An app NOT in ``versions`` => ``frappe.get_attr`` RAISES AttributeError,
+		# exactly as the real accessor does for an app whose __init__ has no
+		# __version__ (getattr with no default). Mirroring that is what lets these
+		# tests actually exercise the per-app skip path.
+		def fake_get_attr(dotted):
+			app = dotted.split(".", 1)[0]
+			if app not in versions:
+				raise AttributeError(f"module '{app}' has no attribute '__version__'")
+			return versions[app]
+
+		with (
+			patch("frappe.get_installed_apps", return_value=installed),
+			patch("frappe.get_attr", side_effect=fake_get_attr),
+		):
+			return turn_handler._app_versions_clause()
+
+	def test_names_curated_stack_jarvis_first(self):
+		clause = self._run(
+			installed=["frappe", "erpnext", "jarvis", "hrms"],
+			versions={"jarvis": "1.4.0", "frappe": "15.1.0", "erpnext": "15.2.0", "hrms": "15.0.0"},
+		)
+		# Curated order (jarvis first), not install order; india_compliance absent.
+		self.assertEqual(clause, "; apps: jarvis 1.4.0, frappe 15.1.0, erpnext 15.2.0, hrms 15.0.0")
+
+	def test_only_curated_apps_are_named(self):
+		# telephony is installed + versioned but NOT in the platform stack -> omitted.
+		clause = self._run(
+			installed=["frappe", "jarvis", "telephony"],
+			versions={"jarvis": "1.4.0", "frappe": "15.1.0", "telephony": "0.0.1"},
+		)
+		self.assertEqual(clause, "; apps: jarvis 1.4.0, frappe 15.1.0")
+		self.assertNotIn("telephony", clause)
+
+	def test_uninstalled_curated_app_is_skipped(self):
+		clause = self._run(installed=["frappe", "jarvis"], versions={"jarvis": "1.4.0", "frappe": "15.1.0"})
+		self.assertEqual(clause, "; apps: jarvis 1.4.0, frappe 15.1.0")
+
+	def test_one_version_read_failure_skips_only_that_app(self):
+		# frappe is installed but has no resolvable __version__ (get_attr raises);
+		# jarvis still renders - the clause is NOT blanked. Per-app isolation guard.
+		clause = self._run(installed=["jarvis", "frappe"], versions={"jarvis": "1.4.0"})
+		self.assertEqual(clause, "; apps: jarvis 1.4.0")
+
+	def test_no_resolvable_versions_yields_empty_clause(self):
+		self.assertEqual(self._run(installed=["jarvis", "frappe"], versions={}), "")
+
+	def test_installed_apps_failure_yields_empty_clause(self):
+		with patch("frappe.get_installed_apps", side_effect=RuntimeError("boom")):
+			self.assertEqual(turn_handler._app_versions_clause(), "")
+
+
 class TestClassifyError(unittest.TestCase):
 	"""_classify_error is the single, shared source for a turn error's `code`
 	(#702) - settlement.py, pump.py and prepare.py all delegate to it, and
