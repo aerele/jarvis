@@ -8,8 +8,10 @@ this module's contract.
 
 Returns (True, None) on success or (False, reason: str) on rejection. The
 reason is a machine code the SPA maps to a human toast: ``"usage_limit"`` for
-enforcement, ``"subscription_suspended"`` for billing, and
-``"release_update_required"`` while a release rollout is blocking this bench.
+enforcement, ``"subscription_suspended"`` for billing,
+``"release_update_required"`` while a release rollout is blocking this bench,
+and ``"insufficient_workers"`` when the site has confidently zero background
+workers able to run a chat turn.
 """
 
 from __future__ import annotations
@@ -33,6 +35,8 @@ def validate_can_send(user: str, model: str | None = None) -> tuple[bool, str | 
 		return False, "workspace_resetting"
 	if _llm_not_configured():
 		return False, "llm_not_configured"
+	if _insufficient_workers():
+		return False, "insufficient_workers"
 	# Per-model cap: only when a concrete model is known. ``model`` is resolved
 	# in chat.api (which knows the conversation) and passed in as a plain string,
 	# so policy never imports turn_handler (no import cycle). Pool "Auto" resolves
@@ -127,6 +131,34 @@ def _llm_not_configured() -> bool:
 		try:
 			frappe.log_error(
 				title="jarvis policy: llm-configured check failed (allowing send)",
+				message=frappe.get_traceback(),
+			)
+		except Exception:
+			pass
+		return False
+
+
+def _insufficient_workers() -> bool:
+	"""True when the site has CONFIDENTLY zero background workers able to run a
+	chat turn (sustained past a grace window). Without this a send queues against
+	a dead worker lane and hangs with no feedback. Fails OPEN: a probe/import
+	error must never block a paying customer - only chat_worker_status's
+	debounced, confident 0-worker verdict blocks.
+
+	CI runs bench tests with NO live RQ workers, so the 0-worker reading is
+	genuinely confident there and would reject every chat-send test. Like
+	_llm_not_configured, the gate is inert under test unless a suite opts in via
+	``frappe.flags.test_worker_gate``."""
+	if frappe.flags.in_test and not frappe.flags.get("test_worker_gate"):
+		return False
+	try:
+		from jarvis.chat.pump import chat_worker_status
+
+		return bool(chat_worker_status().get("blocked"))
+	except Exception:
+		try:
+			frappe.log_error(
+				title="jarvis policy: worker check failed (allowing send)",
 				message=frappe.get_traceback(),
 			)
 		except Exception:
