@@ -949,9 +949,29 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 		self.assertTrue(out["ready"])
 
 	def test_the_happy_path_is_unchanged(self):
-		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
+		# chat_worker_status is pinned deterministically here (Task 5): the
+		# ready/reason/billing_notice verdict is what this test names as
+		# "unchanged", and the two worker fields it now also carries would
+		# otherwise depend on whatever the test runner's actual worker state
+		# happens to be.
+		with (
+			patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}),
+			patch(
+				"jarvis.chat.pump.chat_worker_status",
+				return_value={"blocked": False, "degraded": False, "workers": 3},
+			),
+		):
 			out = account.is_ready_for_chat()
-		self.assertEqual(out, {"ready": True, "reason": None, "billing_notice": {}})
+		self.assertEqual(
+			out,
+			{
+				"ready": True,
+				"reason": None,
+				"billing_notice": {},
+				"worker_warning": False,
+				"worker_blocked": False,
+			},
+		)
 
 	def test_a_never_configured_subscription_gets_the_missing_verdict_not_provisioning(self):
 		"""jarvis#755 review: a subscription tenant that never configured
@@ -1853,3 +1873,23 @@ class TestBillingPaymentRecovery(FrappeTestCase):
 				account.check_billing_payment_status()
 		state.assert_not_called()
 		check.assert_not_called()
+
+
+class TestReadinessWorkerFields(FrappeTestCase):
+	def test_ready_dict_carries_worker_warning_without_flipping_ready(self):
+		with patch(
+			"jarvis.chat.pump.chat_worker_status",
+			return_value={"blocked": False, "degraded": True, "workers": 1},
+		):
+			r = account.is_ready_for_chat()
+			self.assertIn("worker_warning", r)
+			self.assertTrue(r["worker_warning"])
+			self.assertFalse(r.get("worker_blocked"))
+			# worker health must NOT change the ready/reason verdict
+			self.assertIn("ready", r)
+
+	def test_worker_probe_error_leaves_fields_false(self):
+		with patch("jarvis.chat.pump.chat_worker_status", side_effect=RuntimeError):
+			r = account.is_ready_for_chat()
+			self.assertFalse(r.get("worker_warning"))
+			self.assertFalse(r.get("worker_blocked"))
