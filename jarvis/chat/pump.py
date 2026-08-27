@@ -923,7 +923,7 @@ def _zero_persisted(grace_s: int) -> bool:
 	key = _zero_marker_cache_key()
 	now = now_datetime()
 	try:
-		since = frappe.cache().get_value(key)
+		since = frappe.cache().get_value(key, expires=True)
 		if not since:
 			frappe.cache().set_value(key, now.isoformat(), expires_in_sec=300)
 			return False

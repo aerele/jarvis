@@ -2133,7 +2133,7 @@ class TestConservativeAdmission(_PumpTestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Chat worker-status probe (Task 3 — onboarding guards)
+# Chat worker-status probe (Task 3 - onboarding guards)
 # --------------------------------------------------------------------------- #
 
 
@@ -2184,6 +2184,11 @@ class TestWorkerStatus(FrappeTestCase):  # reuse module base
 		with patch.object(pump, "_probe_worker_count", return_value=0), \
 			patch("jarvis.chat.api._turn_queue", return_value="long"):
 			pump.chat_worker_status()  # sets marker
+		# Age the ORIGINAL marker past grace before the recovery step. If the
+		# recovery reading below fails to clear it, this aged, still-live marker
+		# would make the later fresh 0-reading block IMMEDIATELY (no debounce),
+		# so the final assertion below only holds if recovery actually cleared it.
+		pump._force_zero_marker_age(pump._ZERO_GRACE_S + 5)
 		with patch.object(pump, "_probe_worker_count", return_value=3), \
 			patch.object(pump, "_pump_shape_starves", return_value=False), \
 			patch("jarvis.chat.api._turn_queue", return_value="long"):
