@@ -27,10 +27,6 @@ _SYNCED_AT_FIELD = "redaction_patterns_synced_at"
 #: changes) rather than served stale, while an unchanged blob skips recompilation.
 _MEMO_ATTR = "jarvis_egress_rules_memo"
 
-#: Fallback replacement when the tenant has set no white-label agent name. Matches
-#: the ``agent_name … or "Jarvis"`` resolution used elsewhere (e.g. pwa.py).
-_DEFAULT_NAME = "Jarvis"
-
 
 def persist(patterns) -> None:
 	"""Mirror the CP-sent redaction patterns onto Jarvis Settings.
@@ -90,7 +86,7 @@ def _invalidate_memo() -> None:
 
 
 def get_rules() -> list:
-	"""Compiled ``[(regex, mode), ...]`` from the cached CP patterns.
+	"""Compiled ``[regex, ...]`` (remove-only) from the cached CP patterns.
 
 	Returns ``[]`` when nothing is cached or on ANY error — fail-open: a redactor
 	that cannot load its rules must not break chat, and an empty rule set makes
@@ -112,22 +108,13 @@ def get_rules() -> list:
 		return []
 
 
-def get_replacement_name() -> str:
-	"""The tenant's white-label agent name, or ``"Jarvis"`` — the token the
-	brand-family rules replace matches with. Never raises."""
-	try:
-		return (frappe.db.get_single_value(SETTINGS, "agent_name", cache=True) or "").strip() or _DEFAULT_NAME
-	except Exception:
-		return _DEFAULT_NAME
-
-
 def redact(text):
 	"""Scrub the cached brand-family rules out of ``text`` and return the cleaned
 	text (dropping the tripwire signal). For the streaming / tool-title / error
 	boundaries that must not raise per frame. Total / fail-open: returns ``text``
 	unchanged on any error, and is a fast no-op when no rules are cached."""
 	try:
-		out, _hit = egress_redact.redact_egress(text, get_rules(), get_replacement_name())
+		out, _hit = egress_redact.redact_egress(text, get_rules())
 		return out
 	except Exception:
 		return text
@@ -152,7 +139,7 @@ def redact_and_flag(text, *, conversation=None, run_id=None):
 	try:
 		if not isinstance(text, str) or not text:
 			return text
-		out, hit = egress_redact.redact_egress(text, get_rules(), get_replacement_name())
+		out, hit = egress_redact.redact_egress(text, get_rules())
 		if hit:
 			_fire_tripwire(conversation=conversation, run_id=run_id)
 		return out
