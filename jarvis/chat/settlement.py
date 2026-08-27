@@ -33,6 +33,7 @@ import json
 
 import frappe
 
+from jarvis.chat import egress_rules
 from jarvis.chat import turn_state as ts
 
 TURN = "Jarvis Chat Turn"
@@ -264,16 +265,24 @@ def _coerce_payload(payload):
 
 
 def _final_text(payload) -> str | None:
+	# Redact at this terminal DB-write boundary too, symmetric with _error_text.
+	# Idempotent: every current producer passes an already-redacted value, so this
+	# is a no-op today and only bites a future path that fed settlement raw content.
 	payload = _coerce_payload(payload)
 	if isinstance(payload, dict):
-		return payload.get("text")
+		return egress_rules.redact(payload.get("text"))
 	return None
 
 
 def _error_text(payload) -> str:
+	# Redact the brand family at this terminal boundary too (idempotent - the
+	# upstream relay already redacts - but keeps the DB error column + publish clean
+	# regardless of who calls settlement).
 	payload = _coerce_payload(payload)
 	if isinstance(payload, dict):
-		return payload.get("error") or payload.get("state") or "The run ended with an error."
+		return egress_rules.redact(
+			payload.get("error") or payload.get("state") or "The run ended with an error."
+		)
 	return "The run ended with an error."
 
 

@@ -63,6 +63,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from jarvis.chat import egress_rules
 from jarvis.chat.agent_client import (
 	AgentSession,
 	_build_request_frame,
@@ -549,10 +550,16 @@ class RelayMux:
 					{"state": "failed_final", "error": failed_final_error(lane.failure_detail)},
 				)
 			else:
-				term_kind, term_payload = "relay:final", {"text": text}
+				# Not a failed-final -> redact the surfaced reply + fire the once-
+				# per-turn tripwire (classification above ran on raw text).
+				term_kind = "relay:final"
+				term_payload = {"text": egress_rules.redact_and_flag(text, run_id=lane.run_id)}
 		elif state in ("error", "aborted"):
 			term_kind = "relay:error"
-			term_payload = {"state": state, "error": payload.get("errorMessage") or state}
+			term_payload = {
+				"state": state,
+				"error": egress_rules.redact(payload.get("errorMessage") or state),
+			}
 		else:
 			# chat state=delta (the 150ms cumulative mirror) and unknown states
 			# are ignored — the tokens ride the `agent` frames (mirror of
