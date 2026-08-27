@@ -428,6 +428,38 @@ def _upstream_has_renderer(upstream: str) -> bool:
 	return False
 
 
+_BASE_URL_BACKFILL_PROVIDERS = ("groq", "deepseek")
+
+
+def _catalog_default_base_url(provider: str) -> str:
+	"""Return the bundled catalog's ``default_base_url`` for a normalized
+	``provider`` id, or "" if it is not one of the providers this backfill
+	is scoped to.
+
+	Used to backfill build_pool_payload's emitted base_url when the operator
+	left it blank on an api_key model: without this, cliproxy receives an
+	entry with no endpoint and must guess one, and a wrong guess breaks every
+	chat turn on that model (jarvis#767). Deliberately narrowed to
+	_BASE_URL_BACKFILL_PROVIDERS (the issue's exact scope) rather than every
+	catalog provider with a default_base_url, so this fix cannot change the
+	emitted spec shape for any other provider. Reads the BUNDLED
+	(checked-into-git) catalog like _upstream_has_renderer above, for the
+	same reason: a pure function of stored settings, never a live-fetched
+	admin catalog.
+	"""
+	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+
+	needle = (provider or "").strip().lower()
+	if needle not in _BASE_URL_BACKFILL_PROVIDERS:
+		return ""
+	for entry in BUNDLED_MODEL_CATALOG:
+		pid = (entry.get("provider_id") or "").strip().lower()
+		cid = (entry.get("catalog_id") or "").strip().lower()
+		if needle in (pid, cid):
+			return (entry.get("default_base_url") or "").strip()
+	return ""
+
+
 def _lone_direct_capable(settings) -> bool:
 	"""True when this settings' lone enabled model needs no Bifrost/cliproxy
 	sidecar at all - it can be served entirely by agent's native oauth
@@ -770,9 +802,16 @@ def build_pool_payload(settings):
 			# Also emit provider/base_url for api_key models
 			provider = (m.provider if hasattr(m, "provider") else m.get("provider", "")) or ""
 			base_url = (m.base_url if hasattr(m, "base_url") else m.get("base_url", "")) or ""
+			provider = normalize_provider(provider)
+			# Operator left base_url blank: backfill from the catalog's default
+			# for this provider rather than emitting a spec the proxy must
+			# guess an endpoint for (jarvis#767). Never overrides an
+			# operator-supplied value, and only ever changes the in-memory
+			# entry — the stored doc row is untouched.
+			if not base_url:
+				base_url = _catalog_default_base_url(provider)
 			if base_url:
 				entry["base_url"] = base_url
-			provider = normalize_provider(provider)
 			if provider:
 				# Wire-only collapse (e.g. "zai" -> "openai_compat"): the
 				# stored/displayed identity stays "zai"; only the Bifrost
