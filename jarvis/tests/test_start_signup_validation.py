@@ -77,3 +77,15 @@ class TestOnboardingHostGuard(FrappeTestCase):
 	def test_probe_error_fails_open(self):
 		with patch.object(admin_client, "_public_origin", side_effect=RuntimeError("boom")):
 			self.assertTrue(admin_client._onboarding_host_ok())  # error => allow
+
+	def test_start_signup_blocks_on_localhost(self):
+		# setUp already set frappe.flags.test_host_guard = True.
+		frappe.set_user("Administrator")
+		with patch.object(admin_client, "_public_origin", return_value="http://localhost:8002"), \
+			 patch.dict(frappe.conf, {}, clear=False):
+			frappe.conf.pop("jarvis_allow_localhost_onboarding", None)
+			with self.assertRaisesRegex(frappe.ValidationError, "local or non-public address"):
+				onboarding.start_signup(
+					email="x@acme.com", company="Acme", plan="Pro",
+					terms_accepted=True,
+				)

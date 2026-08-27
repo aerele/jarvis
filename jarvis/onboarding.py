@@ -1016,6 +1016,10 @@ def start_signup(
 	if not validate_email_address(email, throw=False):
 		frappe.throw("Enter a valid email address.")
 	_require_admin_url()
+	# Hard-block onboarding on a local/non-public bench: magic links and agent
+	# callbacks built from this site's URL would silently fail. Dev/e2e benches
+	# set jarvis_allow_localhost_onboarding in site_config to bypass.
+	admin_client.assert_public_onboarding_host()
 	# Money the gateway is holding that an operator has not been able to place
 	# stops the WHOLE endpoint, not just the resume half below. The context is
 	# bench-level, so a raised flag means THIS bench's money is parked — and
