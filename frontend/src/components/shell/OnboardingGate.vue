@@ -21,7 +21,7 @@
 				v-if="workerWarning"
 				type="warning"
 				title="Background workers are low"
-				message="Your Jarvis background workers look under-provisioned. Chat may be slow or stall until more workers are running."
+				:message="`Your ${agentName} background workers look under-provisioned. Chat may be slow or stall until more workers are running.`"
 				class="mb-5"
 			/>
 

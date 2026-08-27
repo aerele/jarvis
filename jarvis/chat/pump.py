@@ -927,6 +927,11 @@ def _zero_persisted(grace_s: int) -> bool:
 		if not since:
 			frappe.cache().set_value(key, now.isoformat(), expires_in_sec=300)
 			return False
+		# Refresh the TTL while zero persists so a lane dead longer than the TTL
+		# never evicts the marker (which would briefly flip the block OFF and
+		# re-arm the grace every ~5 min). `since` is kept anchored to the first
+		# zero reading, so the grace calculation is unchanged.
+		frappe.cache().set_value(key, since, expires_in_sec=300)
 		return time_diff_in_seconds(now, get_datetime(since)) >= grace_s
 	except Exception:
 		return False  # cache trouble => fail OPEN (do not block)
