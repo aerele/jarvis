@@ -469,10 +469,16 @@ class TestProbeWithAStoredKey(_RT3SettingsTestCase):
 		row.api_key = self.STORED
 		row.base_url = "https://api.openai.com/v1"
 		settings.append("models", row)
-		with (
-			mock.patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}),
-			mock.patch("jarvis.admin_client.post_update_llm_creds", return_value={"action": "creds_update"}),
-		):
+		# #388: _sync_via_admin now RE-RAISES a genuine AdminAuthError instead of
+		# swallowing it. Mocking only the two leaf HTTP calls (post_update_llm_pool /
+		# post_update_llm_creds) isn't enough: depending on what a prior test left in
+		# the legacy llm_provider/model/base_url mirror, this save's classifier can
+		# come out "reload" instead of "restart" - and "reload" calls the UNMOCKED
+		# post_rotate_llm_secret, which hits the real (not-onboarded-on-CI)
+		# admin_client._authenticated_post and raises. Mock the whole dispatcher, the
+		# same way TestOnUpdateClassification does: this class tests the key-probe
+		# endpoint, not admin sync, so neither leg should ever touch the network.
+		with mock.patch.object(type(settings), "_sync_via_admin"):
 			settings.save()
 		frappe.db.commit()
 		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
