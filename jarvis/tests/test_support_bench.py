@@ -5,11 +5,8 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis import admin_client
 from jarvis.permissions import (
-	JARVIS_SUPPORT_ADMIN_ROLE,
-	JARVIS_SUPPORT_USER_ROLE,
+	JARVIS_ADMIN_ROLE,
 	JARVIS_USER_ROLE,
-	ensure_support_roles,
-	grant_default_support,
 	support_scope,
 )
 
@@ -20,6 +17,7 @@ def _user(roles):
 			"doctype": "User",
 			"email": f"{frappe.generate_hash(length=8)}@sup.test",
 			"first_name": "S",
+			"user_type": "System User",
 			"send_welcome_email": 0,
 		}
 	)
@@ -29,28 +27,30 @@ def _user(roles):
 
 
 class TestSupportScope(FrappeTestCase):
-	def setUp(self):
-		ensure_support_roles()
+	"""Support access rides the base Jarvis roles: any chat user (Jarvis User) gets
+	own-scope, any admin (Jarvis Admin / System Manager / Administrator) gets all-scope."""
 
-	def test_none_without_role(self):
+	def test_none_without_any_jarvis_role(self):
 		self.assertIsNone(support_scope(_user([])))
 
-	def test_own_for_support_user(self):
-		self.assertEqual(support_scope(_user([JARVIS_SUPPORT_USER_ROLE])), "own")
+	def test_own_for_jarvis_user(self):
+		self.assertEqual(support_scope(_user([JARVIS_USER_ROLE])), "own")
 
-	def test_all_for_support_admin(self):
-		self.assertEqual(support_scope(_user([JARVIS_SUPPORT_ADMIN_ROLE])), "all")
+	def test_all_for_jarvis_admin(self):
+		self.assertEqual(support_scope(_user([JARVIS_ADMIN_ROLE])), "all")
 
-	def test_default_grant_gives_own_to_jarvis_user(self):
-		u = _user([JARVIS_USER_ROLE])
-		self.assertIsNone(support_scope(u))
-		grant_default_support(u)
-		self.assertEqual(support_scope(u), "own")
+	def test_all_for_system_manager(self):
+		self.assertEqual(support_scope(_user(["System Manager"])), "all")
 
-	def test_default_grant_skips_administrator_and_guest(self):
-		for u in ("Administrator", "Guest"):
-			grant_default_support(u)
-			self.assertFalse(frappe.db.exists("Has Role", {"parent": u, "role": JARVIS_SUPPORT_USER_ROLE}))
+	def test_all_for_administrator(self):
+		self.assertEqual(support_scope("Administrator"), "all")
+
+	def test_none_for_guest(self):
+		self.assertIsNone(support_scope("Guest"))
+
+	def test_admin_beats_user_when_holding_both(self):
+		# a user with both roles is an admin → all, never own
+		self.assertEqual(support_scope(_user([JARVIS_USER_ROLE, JARVIS_ADMIN_ROLE])), "all")
 
 
 class TestAdminClientSupport(FrappeTestCase):

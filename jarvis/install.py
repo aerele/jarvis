@@ -10,10 +10,9 @@ DocType sync auto-creates any role named in a permission row
 absent on such a site before this hook existed:
 
   * "Knowledge Wiki Manager"  (wiki curator rights, wiki_permissions.py)
-  * "Jarvis Support User" / "Jarvis Support Admin"  (support panel scope)
 
-Observed live on a freshly reinstalled tenant: all three synced roles present,
-all three of the above missing.
+Observed live on a freshly reinstalled tenant: the synced roles present, the
+one above missing.
 
 The Agents Marketplace catalog (``Jarvis Agent Listing``) has the same shape:
 it is synced from the bundled registry ONLY by the ``after_migrate`` hook, so a
@@ -31,16 +30,11 @@ import frappe
 
 from jarvis.chat.wiki_permissions import WIKI_MANAGER_ROLE
 from jarvis.learning.roles import after_migrate as seed_roles_and_settings
-from jarvis.permissions import JARVIS_SUPPORT_ADMIN_ROLE, JARVIS_SUPPORT_USER_ROLE
 
 # The roles no DocType names, i.e. the ones that exist ONLY because this hook
 # (or a later migrate) seeded them. Verified below because the seeder cannot
 # report its own failure -- see after_install.
-_INSTALL_ONLY_ROLES = (
-	WIKI_MANAGER_ROLE,
-	JARVIS_SUPPORT_USER_ROLE,
-	JARVIS_SUPPORT_ADMIN_ROLE,
-)
+_INSTALL_ONLY_ROLES = (WIKI_MANAGER_ROLE,)
 
 
 def after_install() -> None:
@@ -56,8 +50,7 @@ def after_install() -> None:
 	# when a user hits a permission wall.
 	#
 	# So verify, and fail the install loudly instead. A provisioning run that
-	# fails and gets retried beats a tenant that is silently missing its wiki
-	# and support roles.
+	# fails and gets retried beats a tenant that is silently missing its wiki role.
 	missing = [r for r in _INSTALL_ONLY_ROLES if not frappe.db.exists("Role", r)]
 	if missing:
 		frappe.throw(
