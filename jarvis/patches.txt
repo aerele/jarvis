@@ -51,3 +51,4 @@ jarvis.patches.v2_13_unique_agent_installation
 jarvis.patches.v2_14_reconcile_token_limit_to_alltime
 jarvis.patches.v2_14_backfill_wiki_enabled
 jarvis.patches.v2_15_reset_removed_gemini_subscription
+jarvis.patches.v2_16_retire_support_roles
