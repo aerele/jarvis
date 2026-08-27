@@ -235,6 +235,25 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				detail: say,
 				stop: false,
 			};
+		case "container_unavailable":
+			// jarvis#885: admin's health cron confirmed the serving container is
+			// dead/unhealthy - a DIFFERENT fact than container_provisioning (the two
+			// states are mutually exclusive at the source). Waiting cannot heal a
+			// dead container from here, so this STOPS the wait like the
+			// paged/suspended/moved verdicts above, rather than falling into the
+			// "coming online" active-progress framing right above - telling a
+			// customer whose workspace just died that it is on its way up is false.
+			// Admin's own reason (`say`) is the body, never reworded.
+			return {
+				observed: true,
+				state: PHASE_STATE.UNKNOWN,
+				kind: PHASE_KIND.NONE,
+				label: "Chat is temporarily unavailable",
+				detail: say,
+				stop: true,
+				paged: false,
+				title: "Chat is temporarily unavailable",
+			};
 		case "readiness_unconfirmed":
 			return {
 				observed: true,
