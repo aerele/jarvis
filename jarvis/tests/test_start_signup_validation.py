@@ -8,7 +8,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis import onboarding
+from jarvis import admin_client, onboarding
 
 
 class TestStartSignupEmailValidation(FrappeTestCase):
@@ -42,3 +42,38 @@ class TestStartSignupEmailValidation(FrappeTestCase):
 					billing={"contact_number": "+91 90000 00000"},
 					terms_accepted=True,
 				)
+
+
+class TestOnboardingHostGuard(FrappeTestCase):
+	def setUp(self):
+		frappe.flags.test_host_guard = True  # opt this suite into the real gate
+
+	def tearDown(self):
+		frappe.flags.test_host_guard = False
+
+	def test_localhost_host_is_blocked(self):
+		with (
+			patch.object(admin_client, "_public_origin", return_value="http://localhost:8002"),
+			patch.dict(frappe.conf, {}, clear=False),
+		):
+			frappe.conf.pop("jarvis_allow_localhost_onboarding", None)
+			self.assertFalse(admin_client._onboarding_host_ok())
+			with self.assertRaises(frappe.ValidationError):
+				admin_client.assert_public_onboarding_host()
+
+	def test_bypass_flag_allows_localhost(self):
+		with (
+			patch.object(admin_client, "_public_origin", return_value="http://localhost:8002"),
+			patch.dict(frappe.conf, {"jarvis_allow_localhost_onboarding": 1}),
+		):
+			self.assertTrue(admin_client._onboarding_host_ok())
+			admin_client.assert_public_onboarding_host()  # no raise
+
+	def test_public_host_passes(self):
+		with patch.object(admin_client, "_public_origin", return_value="https://acme.example.com"):
+			self.assertTrue(admin_client._onboarding_host_ok())
+			admin_client.assert_public_onboarding_host()  # no raise
+
+	def test_probe_error_fails_open(self):
+		with patch.object(admin_client, "_public_origin", side_effect=RuntimeError("boom")):
+			self.assertTrue(admin_client._onboarding_host_ok())  # error => allow
