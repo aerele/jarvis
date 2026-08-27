@@ -506,6 +506,42 @@ def _org_locale_clause() -> str:
 	return ("; " + "; ".join(parts)) if parts else ""
 
 
+# The apps a "what version / what environment are you" question is actually
+# about - the Jarvis + ERPNext platform stack, in this order (jarvis FIRST: it is
+# the agent's own identity). DELIBERATELY curated, not every installed app: this
+# clause rides EVERY turn's context, so it stays bounded by construction (like the
+# capping the sibling clauses do) instead of growing with whatever community/custom
+# apps a tenant carries, and it skips apps nobody asks a version for (telephony,
+# webshop, ...). Only the ones actually installed on the site are named.
+_VERSION_APPS: tuple[str, ...] = ("jarvis", "frappe", "erpnext", "hrms", "india_compliance")
+
+
+def _app_versions_clause() -> str:
+	"""The platform-stack app versions, folded into the turn's ``[Context: ...]``
+	line so the agent answers "what version / what environment are you running in"
+	TRUTHFULLY - Jarvis is one app among the others in the customer's Frappe/ERPNext
+	bench - instead of guessing, or naming the runtime beneath it. Reads module
+	``__version__`` only (import-cached, cheap, no DB). Each app's read is isolated:
+	one app lacking ``__version__`` (``frappe.get_attr`` raises ``AttributeError``,
+	it has no default) skips only THAT app, not the whole clause; any wider failure
+	yields '' so a version lookup can never break a turn."""
+	try:
+		installed = set(frappe.get_installed_apps())
+	except Exception:
+		return ""
+	parts = []
+	for app in _VERSION_APPS:
+		if app not in installed:
+			continue
+		try:
+			ver = str(frappe.get_attr(f"{app}.__version__") or "").strip()
+		except Exception:
+			continue
+		if ver:
+			parts.append(f"{app} {ver}")
+	return f"; apps: {', '.join(parts)}" if parts else ""
+
+
 def _assistant_name_clause(settings) -> str:
 	"""Whitelabel assistant name folded into the turn's trusted [Context:] line
 	so the agent refers to itself by the customer's chosen name. "" when unset
@@ -682,7 +718,12 @@ def assemble_prompt(
 	# get_list on User. The persisted user_message in the DB is
 	# unchanged; only the value sent over to agent is augmented.
 	now = frappe.utils.now_datetime()
-	today = now.strftime("%Y-%m-%d (%A)")
+	# Time-of-day (HH:MM) rides the date because this bracket is the agent's
+	# PRIMARY clock - the built-in session_status tool (its only other time
+	# source) is denied for white-label reasons, so the bracket must carry the
+	# wall-clock too. Site-local (now_datetime), matching the tz the locale
+	# clause reports below.
+	today = now.strftime("%Y-%m-%d %H:%M (%A)")
 	# Fold the auto-apply preference into the system context line so the agent
 	# knows whether to confirm mutating ops. Default (off) = confirm; the persona
 	# confirms by default, so we only signal the non-default "auto" mode.
@@ -708,6 +749,10 @@ def assemble_prompt(
 	# Org locale (default Company country/currency + site date/number/tz) so the
 	# agent formats for the org's region instead of defaulting to US conventions.
 	locale_clause = _org_locale_clause()
+	# Installed-app versions (white-label): lets the agent answer "what version /
+	# what environment are you" with the real Frappe/app versions - Jarvis as one
+	# app among the others - instead of guessing or naming the runtime beneath it.
+	versions_clause = _app_versions_clause()
 	# Whitelabel assistant name (Phase 3): folded into the trusted [Context:] line
 	# so the agent refers to itself by the customer's chosen name. "" when unset.
 	assistant_name_clause = _assistant_name_clause(settings)
@@ -794,7 +839,7 @@ def assemble_prompt(
 		# (skill_clause) stays intentional and is not demoted. The
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
-		f"[Context: today is {today}{locale_clause}{assistant_name_clause}{persona_clause}; chat user: {chat_user}"
+		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {chat_user}"
 		f"; conv: {conversation_id}{auto_apply}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"

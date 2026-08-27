@@ -1467,11 +1467,29 @@ class JarvisSettings(Document):
 				self._resync_custom_skills_after_restart()
 				self._resync_learned_skills_after_restart()
 		except admin_client.AdminAuthError as e:
+			# #388: a genuine auth failure (revoked token, bad site secret) was
+			# recorded here and then SWALLOWED - the except body never re-raised,
+			# so the enqueuing rq job returned "success" while the credential push
+			# had actually failed. The one exception is the business-rule 403 this
+			# same exception type also carries (an unpaid/pending customer,
+			# CUSTOMER_NOT_PAID) - that is not an auth defect, it is an expected,
+			# recurring state for a tenant who hasn't paid yet, and raising it would
+			# turn an ordinary billing state into rq failures/alerts on every sync
+			# attempt until they pay. _is_never_paid_403 is the same classifier
+			# get_llm_apply_operation uses (jarvis.account), so the two surfaces
+			# agree on what counts as "not paid" including its old-admin prose
+			# fallback - a raw ``e.code == "CUSTOMER_NOT_PAID"`` check would miss
+			# that compatibility case and misclassify it as a genuine failure.
+			from jarvis.account import _is_never_paid_403
+
+			never_paid = _is_never_paid_403(e)
 			_write_settings_fields(
 				self,
 				{
 					"last_sync_at": frappe.utils.now(),
-					"last_sync_status": f"failed: auth: {e}",
+					"last_sync_status": (
+						"failed: not paid (CUSTOMER_NOT_PAID)" if never_paid else f"failed: auth: {e}"
+					),
 				},
 			)
 			_commit_terminal_sync_status()
@@ -1480,6 +1498,8 @@ class JarvisSettings(Document):
 				title="Jarvis: admin auth failed",
 				message=frappe.get_traceback(),
 			)
+			if not never_paid:
+				raise
 		except admin_client.AdminRejectedError as e:
 			# jarvis #542: admin was REACHED and permanently refused this config
 			# (an unknown provider slug, an unusable spec). The F2 handling below

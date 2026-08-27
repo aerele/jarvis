@@ -65,12 +65,14 @@ def _get_by_slug(slug: str) -> dict:
 	if not name:
 		raise InvalidArgumentError(f"unknown wiki page: {slug}")
 	if not frappe.has_permission(WIKI, ptype="read", doc=name):
-		raise PermissionDeniedError(f"no read permission on {WIKI} {name}")
+		# #733: byte-identical to the missing-row error above — a caller must
+		# not be able to distinguish "no such page" from "exists but private".
+		raise InvalidArgumentError(f"unknown wiki page: {slug}")
 	doc = frappe.get_doc(WIKI, name)
 	# Scope visibility (explicit, on top of the has_permission hook): a Role/
 	# User page is only readable by its audience.
 	if not wiki_permissions.can_read_page(doc, frappe.session.user):
-		raise PermissionDeniedError(f"no read permission on {WIKI} {name}")
+		raise InvalidArgumentError(f"unknown wiki page: {slug}")
 	try:
 		sources = json.loads(doc.sources) if doc.sources else []
 	except Exception:

@@ -134,6 +134,20 @@ class TestForceResync(FrappeTestCase):
 			diagnostics.force_resync(action="reload")
 		sa.assert_called_once_with("reload")
 
+	def test_force_resync_survives_genuine_auth_error(self):
+		"""#388: _sync_via_admin now re-raises a genuine admin auth failure.
+		force_resync is the one SYNCHRONOUS, whitelisted caller with its own
+		{ok/status} JSON contract - it must swallow the raise and still return
+		its status dict (reflecting the terminal status _sync_via_admin wrote)
+		rather than letting the exception blow through the endpoint."""
+		from jarvis.exceptions import AdminAuthError
+
+		cls = frappe.get_single("Jarvis Settings").__class__
+		with patch.object(cls, "_sync_via_admin", side_effect=AdminAuthError("nope")):
+			out = diagnostics.force_resync(action="reload")
+		self.assertEqual(out["action"], "reload")
+		self.assertIn("last_sync_status", out)
+
 
 class TestChatRecoveryStats(FrappeTestCase):
 	"""jarvis.diagnostics.chat_recovery_stats - operator visibility into

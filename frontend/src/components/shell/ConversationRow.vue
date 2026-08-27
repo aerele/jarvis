@@ -56,6 +56,7 @@ import { ref, computed, nextTick } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Button, Dropdown, FeatherIcon, confirmDialog } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
+import { escapeHtml } from "@/lib/errors";
 
 const props = defineProps({
 	conv: { type: Object, required: true }, // {name, title, starred, last_active_at}
@@ -107,18 +108,10 @@ const menuOptions = computed(() => [
 	{ label: "Delete", icon: "trash-2", theme: "red", onClick: confirmDelete },
 ]);
 
-// ConfirmDialog renders `message` with v-html - escape the user-authored title.
-function esc(s) {
-	return String(s).replace(
-		/[&<>"']/g,
-		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
-	);
-}
-
 function confirmDelete() {
 	confirmDialog({
 		title: "Delete chat?",
-		message: `Delete "${esc(props.conv.title || "this chat")}"? This can't be undone.`,
+		message: `Delete "${escapeHtml(props.conv.title || "this chat")}"? This can't be undone.`,
 		onConfirm: ({ hideDialog }) => {
 			store.archiveConversation(props.conv.name);
 			hideDialog();

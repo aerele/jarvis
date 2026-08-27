@@ -26,6 +26,7 @@ from collections.abc import Iterator
 
 import frappe
 
+from jarvis.chat import egress_rules
 from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.events import publish_to_user
 from jarvis.chat.seq_watermark import wm_expr
@@ -78,6 +79,10 @@ def _latest_assistant_text(messages: list, *, min_seq: int = 0, max_seq: int | N
 	plain-string content and the {type:"text", text} block list. Sorted by the
 	transcript seq so the latest turn wins. Every text source is type-guarded.
 
+	SIDE EFFECT: the returned text is run through the white-label egress redactor
+	and, on a redaction hit, fires the once-per-turn tripwire (egress_rules). Call
+	it once per recovered turn — a second call would re-flag (harmlessly folded).
+
 	``min_seq`` is the transcript-seq watermark captured before this turn's
 	chat.send: a message whose seq is <= min_seq predates this turn (or is a
 	previous turn's reply left over from a run that died server-side with
@@ -102,9 +107,12 @@ def _latest_assistant_text(messages: list, *, min_seq: int = 0, max_seq: int | N
 			continue
 		if (m.get("role") or "").lower() != "assistant":
 			continue
+		# The refetched transcript bypasses the live stream, so redact + fire the
+		# once-per-turn tripwire here too (covers both the cron recovery and the
+		# pump recovery tail, which both call this).
 		c = m.get("content")
 		if isinstance(c, str) and c.strip():
-			return c
+			return egress_rules.redact_and_flag(c)
 		if isinstance(c, list):
 			parts = [
 				b.get("text", "")
@@ -116,10 +124,10 @@ def _latest_assistant_text(messages: list, *, min_seq: int = 0, max_seq: int | N
 			]
 			joined = "\n".join(p for p in parts if p.strip())
 			if joined.strip():
-				return joined
+				return egress_rules.redact_and_flag(joined)
 		t = m.get("text")
 		if isinstance(t, str) and t.strip():
-			return t
+			return egress_rules.redact_and_flag(t)
 	return ""
 
 

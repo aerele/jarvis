@@ -15,7 +15,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from jarvis.chat import wiki
-from jarvis.exceptions import PermissionDeniedError
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE
 from jarvis.tools.read_wiki import read_wiki
 from jarvis.tools.update_wiki import update_wiki
@@ -549,8 +549,15 @@ class TestWikiToolVisibility(_WikiScopeFixture):
 		frappe.set_user(PLAIN_USER)
 		page = read_wiki(slug=slugs["org"])
 		self.assertEqual(page["slug"], slugs["org"])
-		with self.assertRaises(PermissionDeniedError):
+		# #733: a foreign private page and a missing page raise the
+		# byte-identical error, so the exception can't be used to learn
+		# a private page exists.
+		with self.assertRaises(InvalidArgumentError) as forbidden:
 			read_wiki(slug=slugs["kwu_user"])
+		self.assertEqual(str(forbidden.exception), f"unknown wiki page: {slugs['kwu_user']}")
+		with self.assertRaises(InvalidArgumentError) as missing:
+			read_wiki(slug="wkscope-missing-slug")
+		self.assertEqual(str(missing.exception), "unknown wiki page: wkscope-missing-slug")
 		# The owner still reads their own page.
 		frappe.set_user(KW_USER)
 		page = read_wiki(slug=slugs["kwu_user"])
@@ -653,11 +660,16 @@ class TestUpdateWikiScope(_WikiScopeFixture):
 	def test_foreign_user_page_not_writable_via_tool(self):
 		slugs = self._plant_matrix_pages()
 		frappe.set_user(PLAIN_USER)
-		with self.assertRaises(PermissionDeniedError):
+		# #733: masked as the same "missing title/page_type" error a create
+		# attempt against a genuinely unknown slug raises — a forbidden
+		# existing page can't be distinguished from one that doesn't exist.
+		with self.assertRaises(InvalidArgumentError) as forbidden:
 			update_wiki(slug=slugs["kwu_user"], append_md="- vandalism")
+		with self.assertRaises(InvalidArgumentError) as missing:
+			update_wiki(slug="wkscope-missing-write-slug", append_md="- vandalism")
+		self.assertEqual(str(forbidden.exception), str(missing.exception))
+		self.assertEqual(str(forbidden.exception), "creating a new wiki page requires title and page_type")
 
 	def test_invalid_scope_rejected(self):
-		from jarvis.exceptions import InvalidArgumentError
-
 		with self.assertRaises(InvalidArgumentError):
 			update_wiki(slug="org--wkscope-x", title="X", page_type="Org", scope="Team")

@@ -472,6 +472,13 @@ class TestProbeWithAStoredKey(_RT3SettingsTestCase):
 		with (
 			mock.patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}),
 			mock.patch("jarvis.admin_client.post_update_llm_creds", return_value={"action": "creds_update"}),
+			# Without a seeded onboarding credential the inline _sync_via_admin raises
+			# AdminAuthError, and residual legacy llm_provider/model state from an earlier
+			# test can route this save down the key-rotation ("reload") path rather than the
+			# creds ("restart") path - so stub every admin push the save might pick, not just
+			# the two above. The probe under test cares only that the key is persisted, not
+			# which sync path the save takes.
+			mock.patch("jarvis.admin_client.post_rotate_llm_secret", return_value={"action": "reload"}),
 		):
 			settings.save()
 		frappe.db.commit()
