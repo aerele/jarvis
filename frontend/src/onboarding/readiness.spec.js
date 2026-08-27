@@ -401,6 +401,74 @@ describe("ChatView banner chain order", () => {
 		// lapsed - never over a retry that just flipped the reason back to applying.
 		expect(applying).toBeLessThan(stuck);
 	});
+
+	it("orders the no-workers banner AFTER suspendedNotice (billing takes precedence, jarvis Task 8)", () => {
+		const suspended = chatSrc.indexOf('v-else-if="suspendedNotice"');
+		const workers = chatSrc.indexOf('v-else-if="workersNotice"');
+		expect(suspended, "ChatView must still render the suspendedNotice banner").not.toBe(-1);
+		expect(workers, "ChatView must render the workersNotice banner").not.toBe(-1);
+		expect(suspended).toBeLessThan(workers);
+	});
+});
+
+/**
+ * jarvis Task 8: insufficient_workers must be a PERSISTENT but SELF-HEALING
+ * banner - unlike suspendedNotice (whose only exit is renewal), a dead worker
+ * lane can come back on its own, and checkReady() is memoized (never re-polls),
+ * so the banner cannot wait on a fresh readiness check to clear. Mounting
+ * ChatView / driving send() is not viable here (same reasoning as the banner
+ * chain order block above and dashboardOpen.test.js), so this pins the wiring
+ * by source, the established technique for this SFC.
+ */
+describe("workersNotice self-heal (jarvis Task 8)", () => {
+	const HERE = path.dirname(fileURLToPath(import.meta.url));
+	const chatSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
+
+	it("raises the persistent banner when retry() is rejected for insufficient_workers", () => {
+		// retry() (~line 8234) sits earlier in the file than send() (~line 8467), so
+		// this is the FIRST occurrence of the reason check.
+		const idx = chatSrc.indexOf('r.reason === "insufficient_workers"');
+		expect(idx, "retry() must check r.reason === insufficient_workers").not.toBe(-1);
+		const nearby = chatSrc.slice(idx, idx + 320);
+		// Sets the persistent banner ref directly, not a toast that would vanish
+		// before the customer can act on it.
+		expect(nearby).toContain("workersNotice.value = WORKERS_BLOCKED_MSG");
+	});
+
+	it("mirrors the same insufficient_workers handling in send()", () => {
+		const first = chatSrc.indexOf('r.reason === "insufficient_workers"');
+		const second = chatSrc.indexOf('r.reason === "insufficient_workers"', first + 1);
+		expect(second, "send() must also check r.reason === insufficient_workers").not.toBe(-1);
+		expect(chatSrc.slice(second, second + 200)).toContain(
+			"workersNotice.value = WORKERS_BLOCKED_MSG"
+		);
+	});
+
+	it("clears the banner on the next successful send (self-heal, no reload)", () => {
+		const idx = chatSrc.indexOf("workersNotice.value = null");
+		expect(idx, "send() must clear workersNotice on a successful response").not.toBe(-1);
+		// Gated on r.ok !== false (a genuinely accepted send), not folded into the
+		// rejection branch that raises the banner.
+		const before = chatSrc.slice(Math.max(0, idx - 120), idx);
+		expect(before).toContain("r.ok !== false");
+	});
+
+	it("never gates canSend on workersNotice (composer must stay enabled to self-heal)", () => {
+		// A disabled composer paired with a memoized (never re-polling) checkReady()
+		// could never recover without a full page reload, contradicting the banner's
+		// own "try again shortly" copy - the server gate, not the client, is the
+		// authority on whether a send is allowed through.
+		const start = chatSrc.indexOf("const canSend = computed(");
+		expect(start, "ChatView must still define canSend").not.toBe(-1);
+		const end = chatSrc.indexOf("\n);", start);
+		expect(chatSrc.slice(start, end)).not.toContain("workersNotice");
+	});
+
+	it("seeds workersNotice from the boot readiness poll's worker_blocked field", () => {
+		const idx = chatSrc.indexOf("r && r.worker_blocked");
+		expect(idx, "the boot checkReady().then() block must read r.worker_blocked").not.toBe(-1);
+		expect(chatSrc.slice(idx, idx + 80)).toContain("WORKERS_BLOCKED_MSG");
+	});
 });
 
 describe("replaced-site banner", () => {

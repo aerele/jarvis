@@ -2343,6 +2343,17 @@
 						<button class="jv-btn jv-btn--sm" @click="goRenew">Renew</button>
 					</template>
 				</Banner>
+				<!-- No live background worker to run a turn. AFTER suspendedNotice (billing
+					 takes precedence) - ORDER MATTERS, pinned by readiness.spec.js. The
+					 composer stays enabled (see canSend): a send re-raises this if the lane
+					 is still dead, or clears it if the worker came back (self-heal). -->
+				<Banner
+					v-else-if="workersNotice"
+					type="warning"
+					title="Chat is paused"
+					:message="workersNotice"
+					style="margin-bottom: 10px"
+				/>
 				<!-- No model configured: the workspace was disconnected, or its credential
 					 expired. The composer is disabled alongside this (see canSend) - every
 					 send would fail at the agent, and letting it be tried just turns a clear
@@ -4234,6 +4245,15 @@ watch(
 // Renew-banner copy when the subscription has lapsed; null while entitled.
 // The composer is disabled alongside it (no send can succeed while stopped).
 const suspendedNotice = ref(null);
+// Chat is blocked because the site has no live background worker to run a turn.
+// Persistent (not a toast), but UNLIKE suspendedNotice the composer stays enabled:
+// checkReady() is memoized and never re-polls, so a disabled composer could never
+// recover without a full reload. Instead this self-heals - a still-dead lane
+// re-raises it on the next rejected send, a recovered lane clears it on the next
+// successful one (see send()). Null while healthy.
+const workersNotice = ref(null);
+const WORKERS_BLOCKED_MSG =
+	"Chat is paused: no background workers are running to handle messages. Please try again shortly.";
 // A DIFFERENT not-ready reason (container_provisioning - e.g. the connected LLM
 // account itself ran out of quota, or a container is still coming up) - never a
 // billing lapse, so it gets its own quiet copy instead of suspendedNotice's "Chat is
@@ -8265,6 +8285,10 @@ async function retry(messageId) {
 			// not a toast that vanishes before they can renew.
 			if (r.reason === "subscription_suspended") {
 				if (!suspendedNotice.value) suspendedNotice.value = SUSPENDED_FALLBACK;
+			} else if (r.reason === "insufficient_workers") {
+				// No live worker to run the retried turn - same persistent, self-healing
+				// banner a blocked send raises (see send()).
+				if (!workersNotice.value) workersNotice.value = WORKERS_BLOCKED_MSG;
 			} else {
 				// e.g. the single-flight guard ("a reply is already in progress").
 				notify(r.reason || "Couldn't retry that.", { type: "error" });
@@ -8514,6 +8538,13 @@ async function send(textArg, resendAck) {
 				});
 				return;
 			}
+			// No live worker to run this turn: raise the persistent, self-healing
+			// banner (composer stays enabled - see canSend/workersNotice) rather than
+			// a toast that vanishes before the lane recovers.
+			if (r.reason === "insufficient_workers") {
+				if (!workersNotice.value) workersNotice.value = WORKERS_BLOCKED_MSG;
+				return;
+			}
 			notify(
 				// Period-neutral copy: "usage_limit" fires from BOTH the all-time
 				// aggregate cap (jarvis.chat.policy._over_total_limit) and the
@@ -8525,6 +8556,9 @@ async function send(textArg, resendAck) {
 				{ type: "error" }
 			);
 			return;
+		}
+		if (r && r.ok !== false) {
+			workersNotice.value = null; // a send got through: workers are back
 		}
 		// Send accepted — the one-shot grounding/prefill context is now consumed.
 		// Cleared HERE, not before the await: a rejected send (r.ok === false, above)
@@ -10341,6 +10375,11 @@ onMounted(async () => {
 			// reason gets its own honest, CTA-less banner below.
 			suspendedNotice.value =
 				r && r.reason === "subscription_suspended" ? suspensionNotice(r) : null;
+			// Seed the workers banner from the same boot verdict. checkReady() is
+			// memoized and never re-polls, so this is a ONE-TIME seed only - the
+			// banner then self-heals through send()'s rejection/success branches,
+			// never through a re-check here.
+			workersNotice.value = r && r.worker_blocked ? WORKERS_BLOCKED_MSG : null;
 		})
 		.catch(() => {});
 	// Same boot promise, the container_provisioning half: readinessDetailOf reads the
