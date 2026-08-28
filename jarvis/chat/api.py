@@ -38,6 +38,26 @@ def _get_owned_conversation(conversation: str):
 	return doc
 
 
+def _reject_send_into_armed_conversation(conv_doc) -> None:
+	"""A macro-run conversation carries ``skip_confirmation=1`` (armed): it is a
+	watchable RUN LOG, not a continuable chat. Refuse an interactive turn-entry
+	(``send_message`` / ``retry_message``) so a human can never inject a turn that
+	runs the armed, uncarded covered set on it - the flag itself (not the
+	owner-deletable Macro Run row) is the human-inert guarantee, and the write gate
+	reads this same flag. Macro STEPS dispatch via ``_enqueue_turn``, not these
+	endpoints, so they are unaffected. Disarming (``skip_confirmation`` -> 0, e.g.
+	when the run ends) reopens the conversation."""
+	if conv_doc and conv_doc.get("skip_confirmation"):
+		from frappe import _
+
+		frappe.throw(
+			_(
+				"This is a macro run - you can watch it, but not chat into it. "
+				"Start a new chat to talk to Jarvis."
+			)
+		)
+
+
 # Every attachment (image or not) is stored as a canvas item on the user message
 # so the SPA and the PWA render it as a clickable, previewable card - images as
 # inline thumbnails, other files as a chip that opens the file preview.
@@ -1285,6 +1305,8 @@ def send_message(
 		conversation = create_or_focus_empty()
 		conv_doc = _get_owned_conversation(conversation)
 
+	_reject_send_into_armed_conversation(conv_doc)
+
 	# A typed go-ahead on a parked confirmation card is the SAME act as clicking
 	# Confirm, so it runs the confirmation instead of becoming a chat turn. Placed
 	# here on purpose: ownership of the conversation is settled, but nothing has
@@ -2372,7 +2394,9 @@ def retry_message(message: str) -> dict:
 	# Ownership is enforced on the PARENT conversation: message rows can be
 	# inserted by the RQ worker under a different session user, so the
 	# conversation's owner is the authority, not the message row's owner.
-	_get_owned_conversation(doc.conversation)
+	# A retry is a human turn-entry too, so an armed macro-run conversation refuses
+	# it (T4): re-running a step there would run the covered set uncarded on demand.
+	_reject_send_into_armed_conversation(_get_owned_conversation(doc.conversation))
 	# Flag ON: a retry racing a live turn QUEUES (accept_or_queue) rather than
 	# rejecting; flag OFF keeps the legacy single-flight reject.
 	if admission.turn_machine_enabled():

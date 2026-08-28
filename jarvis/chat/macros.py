@@ -224,6 +224,16 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	if owner != frappe.session.user:
 		for dt, name in ((CONV, conv.name), (MSG, intro.name), (RUN, run.name)):
 			frappe.db.set_value(dt, name, "owner", owner, update_modified=False)
+	# Arm the run conversation when the macro is armed (doc.skip_confirmation, set
+	# only by a Jarvis Admin - guarded on the macro controller). Stamped via a raw
+	# db.set_value, the File-Box pattern that bypasses the conversation controller's
+	# admin guard: the value derives from the already-admin-gated macro flag, so a
+	# re-check would just refuse a legitimate non-admin owner running their own armed
+	# macro. The gate reads THIS conversation flag; the conversation is human-inert
+	# while set (send_message / retry_message are blocked, T4), so only macro-step
+	# turns ever run on it. Cleared on every run-terminal transition (T5).
+	if doc.skip_confirmation:
+		frappe.db.set_value(CONV, conv.name, "skip_confirmation", 1, update_modified=False)
 	frappe.db.commit()
 
 	# Scheduled runs surface via the proactive "conversation:new" toast; manual

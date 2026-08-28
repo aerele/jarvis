@@ -288,3 +288,107 @@ class TestArmedSkipGate(FrappeTestCase):
 			)
 		self.assertTrue(disp.called, "a bulk covered write skips the batch card when armed")
 		self.assertNotEqual(r["data"].get("status"), "pending_confirmation")
+
+
+class TestRunMacroStampAndInert(FrappeTestCase):
+	"""run_macro stamps the run conversation when the macro is armed; the armed
+	conversation is human-inert (send_message / retry_message refuse it), keyed on
+	the flag itself so deleting the Macro Run row cannot re-open it."""
+
+	MSG = "Jarvis Chat Message"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_non_admin_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for dt in ("Jarvis Macro Run", MACRO, CONV):
+			for name in frappe.get_all(dt, filters={"owner": NON_ADMIN_USER}, pluck="name"):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _run(self, macro_name: str) -> str:
+		from jarvis.chat import macros
+
+		frappe.set_user(NON_ADMIN_USER)
+		with (
+			patch.object(macros, "_run_step"),
+			patch.object(macros, "_run_merged"),
+			patch.object(macros, "entitlement_block", return_value=None),
+		):
+			res = macros.run_macro(macro_name)
+		return res["data"]["conversation"]
+
+	def test_run_macro_stamps_armed_conversation(self):
+		macro = _make_macro(NON_ADMIN_USER, armed=True, name="armed-run")
+		conv = self._run(macro)
+		# A non-admin owner ran their own admin-armed macro: the raw stamp set the
+		# flag without tripping the conversation controller guard.
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skip_confirmation")), 1)
+
+	def test_run_macro_unarmed_does_not_stamp(self):
+		macro = _make_macro(NON_ADMIN_USER, armed=False, name="plain-run")
+		conv = self._run(macro)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skip_confirmation") or 0), 0)
+
+	def test_send_message_rejected_on_armed_conversation(self):
+		from jarvis.chat import api as chat_api
+
+		conv = _make_conv(NON_ADMIN_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		frappe.set_user(NON_ADMIN_USER)
+		with patch.object(chat_api, "validate_can_send", return_value=(True, None)):
+			with self.assertRaises(frappe.ValidationError):
+				chat_api.send_message(conversation=conv, message="let me in")
+
+	def test_send_message_allowed_after_disarm(self):
+		"""Disarming (flag -> 0) re-opens the conversation to interactive sends."""
+		from jarvis.chat import api as chat_api
+
+		conv = _make_conv(NON_ADMIN_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 0, update_modified=False)
+		frappe.set_user(NON_ADMIN_USER)
+		# The reject helper must NOT fire on an unarmed conversation.
+		doc = chat_api._get_owned_conversation(conv)
+		chat_api._reject_send_into_armed_conversation(doc)  # no raise
+
+	def test_armed_conversation_with_no_run_row_still_rejects(self):
+		"""The block keys on the conversation flag, NOT on a Jarvis Macro Run row, so
+		deleting the run (owner has delete rights) cannot re-open an armed conv."""
+		from jarvis.chat import api as chat_api
+
+		conv = _make_conv(NON_ADMIN_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		self.assertFalse(frappe.db.exists("Jarvis Macro Run", {"conversation": conv}))
+		frappe.set_user(NON_ADMIN_USER)
+		doc = chat_api._get_owned_conversation(conv)
+		with self.assertRaises(frappe.ValidationError):
+			chat_api._reject_send_into_armed_conversation(doc)
+
+	def test_retry_message_rejected_on_armed_conversation(self):
+		from jarvis.chat import api as chat_api
+
+		conv = _make_conv(NON_ADMIN_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		msg = frappe.get_doc(
+			{
+				"doctype": self.MSG,
+				"conversation": conv,
+				"seq": 2,
+				"role": "assistant",
+				"content": "boom",
+				"error": "some error",
+			}
+		)
+		msg.flags.ignore_permissions = True
+		msg.insert()
+		frappe.db.commit()
+		frappe.set_user(NON_ADMIN_USER)
+		with patch.object(chat_api, "validate_can_send", return_value=(True, None)):
+			with self.assertRaises(frappe.ValidationError):
+				chat_api.retry_message(msg.name)
