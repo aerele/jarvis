@@ -299,6 +299,38 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	return {"ok": True, "data": {"macro_run": run.name, "conversation": conv.name}}
 
 
+def _armed_run_parked_card(conversation: str, owner: str) -> dict | None:
+	"""The first live confirmation card STRICTLY bound to ``conversation`` (or None).
+
+	An armed macro runs the covered set uncarded, so the ONLY thing that parks a card
+	on its run is an EXCLUDED tool (delete/cancel/amend) - i.e. the D5 stop signal.
+	Mirrors the gate's own strict-conversation filter (a conv-less token surfaces
+	under any filter). A storage error is swallowed to None: a pending-confirm outage
+	must not strand the run - it then advances as before, and the human-inert send
+	block + clear-on-terminal still hold the security line."""
+	from jarvis.chat import pending_confirm
+
+	try:
+		for rec in pending_confirm.list_for_owner(owner, conversation=conversation, strict=True):
+			if rec.get("conversation") == conversation:
+				return rec
+	except Exception:
+		return None
+	return None
+
+
+def _armed_stop_message(current_step: int, parked: dict) -> str:
+	"""D5 stop reason - names the un-clickable action AND the re-run hazard (§7): the
+	covered steps before it already ran, so re-running the whole macro repeats them."""
+	what = parked.get("summary") or parked.get("tool") or "a confirmation"
+	return (
+		f"Stopped at step {current_step + 1}: this step needs a confirmation that can't be "
+		f"shown in an unattended run ({what}). The steps before it already ran, so "
+		f"re-running the whole macro would repeat them - fix this step's data or run it "
+		f"interactively, don't re-run the macro. Nothing after this step ran."
+	)[:500]
+
+
 def advance_after_turn(conversation_id: str, *, errored: bool) -> None:
 	"""Chaining hook, called from ``turn_handler`` after every terminal turn
 	outcome. If the conversation belongs to a ``running`` Macro Run, advance it:
@@ -327,6 +359,27 @@ def advance_after_turn(conversation_id: str, *, errored: bool) -> None:
 			macro_doc = frappe.get_doc(MACRO, run.macro)
 			steps = macro_doc.steps or []
 			total = min(run.total_steps or len(steps), len(steps))
+
+			# D5 (armed runs only): the step that just ran parked a confirmation card.
+			# In an armed run the covered set runs uncarded, so a parked card means an
+			# EXCLUDED tool (delete/cancel/amend) - and this is an unattended run with
+			# nobody to click it. Advancing would report a false "completed" with the
+			# destructive step silently never run. Detect it (a park returns ok:True, so
+			# `errored` is False - the only per-step signal is the parked token itself),
+			# STOP the run with a legible re-run-hazard message, and SWEEP the token so
+			# the card can't be confirmed later and fire an armed continuation turn.
+			# Checked BEFORE the stop_on_error / next_index decisions, so a merged-mode
+			# (single-turn) run is covered too.
+			if frappe.db.get_value(CONV, run.conversation, "skip_confirmation"):
+				owner_user = frappe.db.get_value(CONV, run.conversation, "owner")
+				parked = _armed_run_parked_card(run.conversation, owner_user)
+				if parked:
+					from jarvis.chat import pending_confirm
+
+					_finish(run, "failed", error=_armed_stop_message(run.current_step or 0, parked))
+					pending_confirm.clear_for_conversation(owner_user, run.conversation)
+					_publish_done(run, macro_doc, "failed")
+					return
 
 			if errored and macro_doc.stop_on_error:
 				_finish(run, "failed", error=f"Step {run.current_step} failed.")

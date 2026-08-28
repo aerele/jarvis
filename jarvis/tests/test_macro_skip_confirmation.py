@@ -473,3 +473,119 @@ class TestClearOnTerminal(FrappeTestCase):
 		self.assertTrue(macros._cas_run_status(run_name, "running", "waiting_capacity"))
 		frappe.db.commit()
 		self.assertEqual(self._armed(conv), 1, "a non-terminal transition must not disarm")
+
+
+class TestD5StopAndReport(FrappeTestCase):
+	"""An armed macro whose step parks a card (an excluded delete/cancel/amend) must
+	STOP the run and report - not advance with a false 'completed' - and sweep the
+	token so the card can't be confirmed later. Armed-only; merged mode covered."""
+
+	RUN = "Jarvis Macro Run"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_non_admin_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		from jarvis.chat import pending_confirm
+
+		for conv in frappe.get_all(CONV, filters={"owner": NON_ADMIN_USER}, pluck="name"):
+			try:
+				pending_confirm.clear_for_conversation(NON_ADMIN_USER, conv)
+			except Exception:
+				pass
+		for dt in ("Jarvis Macro Run", MACRO, CONV, "ToDo"):
+			for name in frappe.get_all(dt, filters={"owner": NON_ADMIN_USER}, pluck="name"):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _run_and_conv(self, *, armed: bool, current_step: int = 0, total: int = 1, name="d5-macro"):
+		macro = _make_macro(NON_ADMIN_USER, name=name)
+		frappe.set_user(NON_ADMIN_USER)
+		conv = frappe.get_doc({"doctype": CONV, "title": "d5 run"})
+		conv.flags.ignore_permissions = True
+		conv.insert()
+		if armed:
+			frappe.db.set_value(CONV, conv.name, "skip_confirmation", 1, update_modified=False)
+		run = frappe.get_doc(
+			{
+				"doctype": self.RUN,
+				"macro": macro,
+				"conversation": conv.name,
+				"status": "running",
+				"current_step": current_step,
+				"total_steps": total,
+				"trigger": "manual",
+			}
+		)
+		run.flags.ignore_permissions = True
+		run.insert()
+		frappe.db.commit()
+		return run.name, conv.name
+
+	def _park_delete_card(self, conv: str) -> None:
+		"""Park a real confirmation card on the conversation: delete_doc is excluded,
+		so it parks even on an armed conversation (mints a live pending token)."""
+		frappe.set_user(NON_ADMIN_USER)
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "d5-doomed"}).insert(ignore_permissions=True)
+		frappe.db.commit()
+		r = api._run_tool("delete_doc", {"doctype": "ToDo", "name": todo.name}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+
+	def _pending_count(self, conv: str) -> int:
+		from jarvis.chat import pending_confirm
+
+		return sum(
+			1
+			for rec in pending_confirm.list_for_owner(NON_ADMIN_USER, conversation=conv)
+			if rec.get("conversation") == conv
+		)
+
+	def test_armed_run_stops_and_sweeps_when_step_parks(self):
+		from jarvis.chat import macros
+
+		run_name, conv = self._run_and_conv(armed=True)
+		self._park_delete_card(conv)
+		self.assertEqual(self._pending_count(conv), 1)
+
+		macros.advance_after_turn(conv, errored=False)
+
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "failed")
+		self.assertIn("unattended run", frappe.db.get_value(self.RUN, run_name, "error") or "")
+		self.assertEqual(self._pending_count(conv), 0, "the parked token must be swept")
+
+	def test_armed_merged_run_stops_when_it_would_otherwise_finish(self):
+		"""Merged mode: current_step already at total, so without D5 it would report
+		completed. The detector runs before that decision, so it still stops."""
+		from jarvis.chat import macros
+
+		run_name, conv = self._run_and_conv(armed=True, current_step=1, total=1, name="d5-merged")
+		self._park_delete_card(conv)
+		macros.advance_after_turn(conv, errored=False)
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "failed")
+
+	def test_armed_run_advances_when_no_card(self):
+		from jarvis.chat import macros
+
+		# current_step==total so a clean advance finishes 'completed' (no dispatch).
+		run_name, conv = self._run_and_conv(armed=True, current_step=1, total=1, name="d5-clean")
+		macros.advance_after_turn(conv, errored=False)
+		self.assertEqual(
+			frappe.db.get_value(self.RUN, run_name, "status"), "completed", "no card -> normal advance"
+		)
+
+	def test_non_armed_run_not_stopped_by_d5(self):
+		"""D5 is armed-only: a non-armed run with a parked card is NOT stopped here
+		(the pre-existing behaviour is out of scope) and the card is not swept."""
+		from jarvis.chat import macros
+
+		run_name, conv = self._run_and_conv(armed=False, current_step=1, total=1, name="d5-plain")
+		self._park_delete_card(conv)
+		macros.advance_after_turn(conv, errored=False)
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "completed")
+		self.assertEqual(self._pending_count(conv), 1, "non-armed run must not sweep the card")
