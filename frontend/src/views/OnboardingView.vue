@@ -1974,8 +1974,10 @@ const router = useRouter();
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
 // Server-authoritative: onboarding is blocked when the bench is on a
-// local/non-public host (magic links + agent callbacks can't reach it). The
-// dev bypass (jarvis_allow_localhost_onboarding) already resolves this to true.
+// local/non-public host (magic links + agent callbacks can't reach it).
+// jarvis_public_host_ok is purely host-based (the site's public host_name) -
+// there is no separate dev-bypass flag; a dev/e2e bench opts in by giving
+// itself a public-looking host_name, same as production.
 const hostOk = window.jarvis_public_host_ok !== false;
 
 // Non-blocking: warns without gating any step's CTA (Task 5's boot flag).

@@ -2354,6 +2354,19 @@
 					:message="workersNotice"
 					style="margin-bottom: 10px"
 				/>
+				<!-- Soft counterpart to workersNotice above: worker_warning (degraded /
+					 under-provisioned workers) rather than the hard zero-workers block.
+					 AFTER workersNotice - ORDER MATTERS, pinned by readiness.spec.js: the
+					 block wins the v-else-if race whenever both are true (worker_blocked
+					 implies degraded), so this only ever shows on its own. Non-blocking -
+					 the composer stays enabled (see canSend), this is a heads-up only. -->
+				<Banner
+					v-else-if="workersWarnNotice"
+					type="warning"
+					title="Replies may be slow right now"
+					:message="workersWarnNotice"
+					style="margin-bottom: 10px"
+				/>
 				<!-- No model configured: the workspace was disconnected, or its credential
 					 expired. The composer is disabled alongside this (see canSend) - every
 					 send would fail at the agent, and letting it be tried just turns a clear
@@ -4254,6 +4267,15 @@ const suspendedNotice = ref(null);
 const workersNotice = ref(null);
 const WORKERS_BLOCKED_MSG =
 	"Chat is paused: no background workers are running to handle messages. Please try again shortly.";
+// Soft, non-blocking counterpart to workersNotice above: worker_warning fires
+// when workers are merely under-provisioned/degraded, distinct from the hard
+// worker_blocked zero-workers state. The composer stays enabled - canSend
+// must never gate on this (see the "never gates canSend" test) - this is a
+// heads-up only, not a stop sign. Self-heals the same way workersNotice does:
+// cleared on the next successful retry/send, never re-derived from a re-poll
+// (checkReady() is memoized).
+const workersWarnNotice = ref(null);
+const WORKERS_WARN_MSG = `${agentName} is busier than usual, so answers might take a little longer. You can keep chatting.`;
 // A DIFFERENT not-ready reason (container_provisioning - e.g. the connected LLM
 // account itself ran out of quota, or a container is still coming up) - never a
 // billing lapse, so it gets its own quiet copy instead of suspendedNotice's "Chat is
@@ -8296,6 +8318,7 @@ async function retry(messageId) {
 		}
 		if (r && r.ok !== false) {
 			workersNotice.value = null; // a retry got through: workers are back
+			workersWarnNotice.value = null; // same self-heal for the soft warning
 		}
 	} catch (e) {
 		sending.value = false;
@@ -8562,6 +8585,7 @@ async function send(textArg, resendAck) {
 		}
 		if (r && r.ok !== false) {
 			workersNotice.value = null; // a send got through: workers are back
+			workersWarnNotice.value = null; // same self-heal for the soft warning
 		}
 		// Send accepted — the one-shot grounding/prefill context is now consumed.
 		// Cleared HERE, not before the await: a rejected send (r.ok === false, above)
@@ -10383,6 +10407,10 @@ onMounted(async () => {
 			// banner then self-heals through send()'s rejection/success branches,
 			// never through a re-check here.
 			workersNotice.value = r && r.worker_blocked ? WORKERS_BLOCKED_MSG : null;
+			// Same one-time seed for the soft counterpart: worker_warning is a
+			// distinct, non-blocking degraded-workers signal (see workersWarnNotice
+			// above). It also self-heals through send()/retry() only, never here.
+			workersWarnNotice.value = r && r.worker_warning ? WORKERS_WARN_MSG : null;
 		})
 		.catch(() => {});
 	// Same boot promise, the container_provisioning half: readinessDetailOf reads the
