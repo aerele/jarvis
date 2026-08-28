@@ -392,3 +392,84 @@ class TestRunMacroStampAndInert(FrappeTestCase):
 		with patch.object(chat_api, "validate_can_send", return_value=(True, None)):
 			with self.assertRaises(frappe.ValidationError):
 				chat_api.retry_message(msg.name)
+
+
+class TestClearOnTerminal(FrappeTestCase):
+	"""The armed flag is cleared on EVERY run-terminal transition (T5): _finish,
+	stop_macro_run, and any _cas terminal (reap / resume-compensate); a non-terminal
+	_cas transition leaves it armed."""
+
+	RUN = "Jarvis Macro Run"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_non_admin_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for dt in ("Jarvis Macro Run", MACRO, CONV):
+			for name in frappe.get_all(dt, filters={"owner": NON_ADMIN_USER}, pluck="name"):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _make_run(self, *, armed: bool = True, status: str = "running", name: str = "term-macro"):
+		macro = _make_macro(NON_ADMIN_USER, name=name)
+		frappe.set_user(NON_ADMIN_USER)
+		conv = frappe.get_doc({"doctype": CONV, "title": "run conv"})
+		conv.flags.ignore_permissions = True
+		conv.insert()
+		if armed:
+			frappe.db.set_value(CONV, conv.name, "skip_confirmation", 1, update_modified=False)
+		run = frappe.get_doc(
+			{
+				"doctype": self.RUN,
+				"macro": macro,
+				"conversation": conv.name,
+				"status": status,
+				"current_step": 0,
+				"total_steps": 1,
+				"trigger": "manual",
+			}
+		)
+		run.flags.ignore_permissions = True
+		run.insert()
+		frappe.db.commit()
+		return run.name, conv.name
+
+	def _armed(self, conv) -> int:
+		return int(frappe.db.get_value(CONV, conv, "skip_confirmation") or 0)
+
+	def test_finish_clears_flag(self):
+		from jarvis.chat import macros
+
+		run_name, conv = self._make_run(name="fin-macro")
+		macros._finish(frappe.get_doc(self.RUN, run_name), "completed")
+		self.assertEqual(self._armed(conv), 0)
+
+	def test_stop_macro_run_clears_flag(self):
+		from jarvis.chat import macros
+
+		run_name, conv = self._make_run(name="stop-macro")
+		frappe.set_user(NON_ADMIN_USER)
+		macros.stop_macro_run(run_name)
+		self.assertEqual(self._armed(conv), 0)
+
+	def test_cas_terminal_clears_flag(self):
+		from jarvis.chat import macros
+
+		run_name, conv = self._make_run(name="cas-macro")
+		self.assertTrue(macros._cas_run_status(run_name, "running", "failed"))
+		frappe.db.commit()
+		self.assertEqual(self._armed(conv), 0)
+
+	def test_cas_nonterminal_keeps_flag(self):
+		from jarvis.chat import macros
+
+		run_name, conv = self._make_run(name="cas2-macro")
+		self.assertTrue(macros._cas_run_status(run_name, "running", "waiting_capacity"))
+		frappe.db.commit()
+		self.assertEqual(self._armed(conv), 1, "a non-terminal transition must not disarm")

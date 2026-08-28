@@ -128,19 +128,43 @@ def _cas_run_status(run_name: str, expect: str, new: str, **extra) -> bool:
 	for i, (col, val) in enumerate(extra.items()):
 		sets.append(f"`{col}`=%(x{i})s")
 		params[f"x{i}"] = val
-	return (
+	ok = (
 		_run_cas(
 			f"UPDATE `tab{RUN}` SET {', '.join(sets)} WHERE name=%(n)s AND status=%(expect)s",
 			params,
 		)
 		== 1
 	)
+	# Clear the armed flag on every terminal transition driven through the CAS
+	# (reap, resume-incompatible compensation, ...) - not only via _finish (T5).
+	if ok and new in _TERMINAL_RUN_STATUSES:
+		_disarm_run_conversation(run_name)
+	return ok
 
 
 def _run_status_now(run_name: str) -> str | None:
 	"""The run's CURRENT durable status (its own function so the CDX-22 pre-enqueue eligibility
 	re-check is a clean, patchable seam)."""
 	return frappe.db.get_value(RUN, run_name, "status")
+
+
+_TERMINAL_RUN_STATUSES = ("completed", "failed", "stopped")
+
+
+def _disarm_conversation(conversation: str | None) -> None:
+	"""Clear an armed run conversation's ``skip_confirmation`` when its run reaches a
+	terminal state, so the flag never outlives the run. Belt-and-suspenders on top of
+	the human-inert send-block (T4): the send-block already keeps a lingering flag
+	un-exploitable (send/retry are refused while set), but clearing keeps state clean
+	and stops any re-dispatched turn from running armed after the run is over. No-op
+	when unset. Caller commits (consistent with ``_cas_run_status``)."""
+	if conversation and frappe.db.get_value(CONV, conversation, "skip_confirmation"):
+		frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
+
+
+def _disarm_run_conversation(run_name: str) -> None:
+	"""Disarm by run name (for the _cas terminal paths, which only have the run)."""
+	_disarm_conversation(frappe.db.get_value(RUN, run_name, "conversation"))
 
 
 # --------------------------------------------------------------------------- #
@@ -465,6 +489,7 @@ def stop_macro_run(run_name: str) -> dict:
 		# stoppable too — otherwise the resume cron would keep re-attempting a run the user stopped.
 		if frappe.db.get_value(RUN, run_name, "status") in ("running", "waiting_capacity"):
 			frappe.db.set_value(RUN, run.name, {"status": "stopped", "finished_at": frappe.utils.now()})
+			_disarm_conversation(run.conversation)  # the flag never outlives the run (T5)
 			frappe.db.commit()
 			try:
 				_publish_done(run, frappe.get_doc(MACRO, run.macro), "stopped")
@@ -1041,6 +1066,7 @@ def _finish(run, status: str, error: str | None = None) -> None:
 		run.name,
 		{"status": status, "finished_at": frappe.utils.now(), "error": (error or "")[:500]},
 	)
+	_disarm_conversation(run.conversation)  # the flag never outlives the run (T5)
 	frappe.db.commit()
 
 
