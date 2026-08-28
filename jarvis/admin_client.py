@@ -272,25 +272,40 @@ def _public_origin(trust_host: bool = False) -> str:
 
 
 def _onboarding_host_ok() -> bool:
-	"""True when this bench's public origin is a routable public host. Purely
-	host-based: there is no site_config bypass. Drives the localhost onboarding
-	hard-block. Fails OPEN on any error: a probe failure must never block a
-	legitimate signup - only a CONFIDENT localhost/reserved/IP reading blocks.
+	"""True only when this bench has a CONFIGURED public https host. Reads only
+	site_config ``host_name`` (never the request Host header, which is
+	spoofable), validates it with ``_is_real_public_host``. No ``host_name``, a
+	non-https scheme, or a localhost/reserved/IP ``host_name``, blocks. Drives
+	the localhost onboarding hard-block.
 
 	Dev/e2e benches that need onboarding to work set a public-looking
-	``host_name`` (e.g. ``https://jarvis-e2e.aerele.in``) in site_config, which
-	``_public_origin`` already honors - not a backdoor flag.
+	``host_name`` (e.g. ``https://jarvis-e2e.aerele.in``) in site_config - not
+	a backdoor flag.
 
-	CI runs on a fresh site with a non-public host, so - like
+	CI runs on a fresh site with no configured host, so - like
 	policy._llm_not_configured - the gate is inert under test unless a test opts
 	in via ``frappe.flags.test_host_guard``. Otherwise every existing test that
-	calls start_signup would fail on CI's fresh DB."""
+	calls start_signup would fail on CI's fresh DB.
+
+	Fails OPEN on any error: a probe failure must never block a legitimate
+	signup - only a CONFIDENT localhost/reserved/IP reading blocks."""
 	if frappe.flags.in_test and not frappe.flags.get("test_host_guard"):
 		return True
 	try:
+		host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
+		if not host_name:
+			return False
 		from urllib.parse import urlsplit
 
-		host = (urlsplit(_public_origin(trust_host=True)).hostname or "").lower().rstrip(".")
+		if not host_name.startswith(("http://", "https://")):
+			host_name = "https://" + host_name
+		parts = urlsplit(host_name)
+		if parts.scheme != "https":
+			# Match _public_origin: a non-https host_name is not used there
+			# either (it falls back to the spoofable request Host), so it must
+			# not pass the guard.
+			return False
+		host = (parts.hostname or "").lower().rstrip(".")
 		return _is_real_public_host(host)
 	except Exception:
 		return True
