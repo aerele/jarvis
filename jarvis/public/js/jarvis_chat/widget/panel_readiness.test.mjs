@@ -4,6 +4,7 @@ import {
   classifyReadiness,
   degradedMessage,
   degradedActionable,
+  shouldWarnWorkers,
   SUSPENDED_FALLBACK,
 } from "./panel_readiness.mjs";
 
@@ -197,4 +198,23 @@ test("degradedActionable: a member gets no CTA for a stuck apply", () => {
   );
   assert.equal(out.cta, null);
   assert.match(out.text, /administrator/i);
+});
+
+// worker_warning is a separate, additive signal from the ready/gate/degraded
+// verdict: a workspace can be fully "ready" and still carry a worker warning.
+test("shouldWarnWorkers: true only when the backend flag is explicitly true", () => {
+  assert.equal(shouldWarnWorkers({ ready: true, worker_warning: true }), true);
+  assert.equal(
+    shouldWarnWorkers({ ready: false, reason: "llm_credentials", worker_warning: true }),
+    true
+  );
+  assert.equal(shouldWarnWorkers({ ready: true, worker_warning: false }), false);
+  assert.equal(shouldWarnWorkers({ ready: true }), false);
+});
+
+// Fails CLOSED, the opposite of classifyReadiness's fail-open: a missing or
+// thrown response must never manufacture a warning nobody confirmed.
+test("shouldWarnWorkers: fails CLOSED on a missing response", () => {
+  assert.equal(shouldWarnWorkers(null), false);
+  assert.equal(shouldWarnWorkers(undefined), false);
 });
