@@ -542,6 +542,26 @@ def _app_versions_clause() -> str:
 	return f"; apps: {', '.join(parts)}" if parts else ""
 
 
+# safe_exec (Script Reports / System Console / Server Scripts) only matters on
+# report/script/console turns, so gate the clause on that - most turns pay nothing,
+# like the sibling clauses that return "" when they don't apply.
+_SERVER_SCRIPTS_TRIGGERS = ("report", "script", "console")
+
+
+def _server_scripts_clause(user_message: str) -> str:
+	"""Script Reports on/off for the report-drafting policy, read from the same gate
+	``safe_exec`` checks (``is_safe_exec_enabled``); only on report/script/console
+	turns (else '', a Query-Report default), and '' on any failure."""
+	if not any(t in (user_message or "").lower() for t in _SERVER_SCRIPTS_TRIGGERS):
+		return ""
+	try:
+		from frappe.utils.safe_exec import is_safe_exec_enabled
+
+		return "; server scripts: on" if is_safe_exec_enabled() else "; server scripts: off"
+	except Exception:
+		return ""
+
+
 def _assistant_name_clause(settings) -> str:
 	"""Whitelabel assistant name folded into the turn's trusted [Context:] line
 	so the agent refers to itself by the customer's chosen name. "" when unset
@@ -753,6 +773,9 @@ def assemble_prompt(
 	# what environment are you" with the real Frappe/app versions - Jarvis as one
 	# app among the others - instead of guessing or naming the runtime beneath it.
 	versions_clause = _app_versions_clause()
+	# Script Reports on/off (the safe_exec gate) for the report-drafting policy, only
+	# on report/script/console turns; rides with the org/site clauses below.
+	server_scripts_clause = _server_scripts_clause(user_message)
 	# Whitelabel assistant name (Phase 3): folded into the trusted [Context:] line
 	# so the agent refers to itself by the customer's chosen name. "" when unset.
 	assistant_name_clause = _assistant_name_clause(settings)
@@ -841,7 +864,7 @@ def assemble_prompt(
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {chat_user}"
 		f"; conv: {conversation_id}{auto_apply}{skill_clause}{learned_clause}"
-		f"{wiki_notes_clause}{custom_site_clause}{personal_clause}{notes_clause}]"
+		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"
 	)
