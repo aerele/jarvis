@@ -8,9 +8,13 @@ flags (this file), the gate branch, the run stamp + human-inert block, the
 clear-on-terminal, and D5 stop-and-report.
 """
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis import api
+from jarvis.api import _ARMED_SKIP_COVERED, _ARMED_SKIP_NEVER, _GATED_WRITES
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests.test_auto_apply import (
 	NON_ADMIN_USER,
@@ -185,3 +189,102 @@ class TestMacroSkipConfirmationGuard(FrappeTestCase):
 		doc.skip_confirmation = 0
 		doc.save()
 		self.assertEqual(int(frappe.db.get_value(MACRO, macro, "skip_confirmation") or 0), 0)
+
+
+class TestArmedSkipPartition(FrappeTestCase):
+	"""Fail-closed allowlist: COVERED and NEVER partition _GATED_WRITES exactly.
+	A new gated tool added to neither set makes this RED, forcing a conscious
+	skip-vs-park classification instead of a silent fail-open default."""
+
+	def test_covered_and_never_partition_gated_writes(self):
+		self.assertEqual(_ARMED_SKIP_COVERED & _ARMED_SKIP_NEVER, frozenset(), "sets must be disjoint")
+		self.assertEqual(
+			_ARMED_SKIP_COVERED | _ARMED_SKIP_NEVER,
+			_GATED_WRITES,
+			"every gated write must be classified as covered (skips when armed) or "
+			"never (always parks) - a tool in neither is an unclassified fail-open gap",
+		)
+
+	def test_irreversible_trio_never_skips(self):
+		self.assertEqual(_ARMED_SKIP_NEVER, frozenset({"cancel_doc", "delete_doc", "amend_doc"}))
+
+	def test_run_method_is_covered(self):
+		# run_method gates in ordinary chat but skips inside an armed macro (D5).
+		self.assertIn("run_method", _ARMED_SKIP_COVERED)
+
+
+class TestArmedSkipGate(FrappeTestCase):
+	"""The gate: an armed conversation (skip_confirmation=1) runs the covered set
+	uncarded; the irreversible trio still parks; the kill switch re-gates."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.db.set_value("Jarvis Settings", None, "disable_armed_skip", 0, update_modified=False)
+		frappe.set_user(self._orig)
+
+	def _armed_conv(self) -> str:
+		conv = _make_conv(TEST_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		return conv
+
+	def test_run_method_runs_when_armed(self):
+		conv = self._armed_conv()
+		with patch("jarvis.api.dispatch", return_value={"ok": True}) as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertTrue(disp.called, "armed run_method must reach dispatch, not park")
+		self.assertNotEqual(r["data"].get("status"), "pending_confirmation")
+
+	def test_run_method_parks_when_not_armed(self):
+		conv = _make_conv(TEST_USER)  # skip_confirmation defaults 0
+		with patch("jarvis.api.dispatch") as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertFalse(disp.called)
+
+	def test_send_email_runs_when_armed(self):
+		conv = self._armed_conv()
+		with patch("jarvis.api.dispatch", return_value={"ok": True}) as disp:
+			r = api._run_tool(
+				"send_email",
+				{"recipients": "x@example.com", "subject": "s", "content": "b"},
+				conversation=conv,
+			)
+		self.assertTrue(disp.called)
+		self.assertNotEqual(r["data"].get("status"), "pending_confirmation")
+
+	def test_delete_doc_still_parks_when_armed(self):
+		conv = self._armed_conv()
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "skip-del-x"}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
+		r = api._run_tool("delete_doc", {"doctype": "ToDo", "name": todo.name}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation", "delete always parks")
+		self.assertTrue(frappe.db.exists("ToDo", todo.name))
+
+	def test_kill_switch_regates(self):
+		conv = self._armed_conv()
+		frappe.db.set_value("Jarvis Settings", None, "disable_armed_skip", 1, update_modified=False)
+		with patch("jarvis.api.dispatch") as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation", "kill switch must re-gate")
+		self.assertFalse(disp.called)
+
+	def test_bulk_covered_runs_when_armed(self):
+		conv = self._armed_conv()
+		with patch("jarvis.api.dispatch", return_value={"ok": True}) as disp:
+			r = api._run_tool(
+				"create_docs",
+				{"docs": [{"doctype": "ToDo", "values": {"description": "b1"}}]},
+				conversation=conv,
+			)
+		self.assertTrue(disp.called, "a bulk covered write skips the batch card when armed")
+		self.assertNotEqual(r["data"].get("status"), "pending_confirmation")
