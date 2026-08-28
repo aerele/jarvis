@@ -1412,7 +1412,20 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			and _conv_flags.get("skip_confirmation")
 			and not _armed_skip_disabled()
 		):
-			return dispatch_confirmed(tool, args)
+			result = dispatch_confirmed(tool, args)
+			if tool == "run_import":
+				# The armed branch bypasses _confirm_core, which is where a CONFIRMED
+				# run_import normally gets its completion announcement bound. Bind it here
+				# too so an armed (unattended) import still reports done/failed into the run
+				# log. Synthesize the record from the gate locals (conv + owner_user) - there
+				# is no pending-confirm record on this path. Self-gating + best-effort (it
+				# no-ops on a non-ok result, a missing data_import, or the kill switch).
+				from jarvis.chat.import_announce import bind_after_run_import
+
+				bind_after_run_import(
+					{"tool": "run_import", "conversation": conv, "owner": owner_user}, result
+				)
+			return result
 		# Auto-apply bypass (issue #186, Task 4 + #5): the OTHER path where a gated
 		# write runs without a confirmation token. Strictly limited to
 		# {a resolved conversation, admin-enabled auto_apply, an _AUTO_APPLYABLE

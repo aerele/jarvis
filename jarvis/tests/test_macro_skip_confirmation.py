@@ -589,3 +589,58 @@ class TestD5StopAndReport(FrappeTestCase):
 		macros.advance_after_turn(conv, errored=False)
 		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "completed")
 		self.assertEqual(self._pending_count(conv), 1, "non-armed run must not sweep the card")
+
+
+class TestArmedRunImportAnnouncement(FrappeTestCase):
+	"""An armed run_import bypasses the confirm path, so it must bind its completion
+	announcement itself (T7) - otherwise an unattended import never reports done."""
+
+	ANNOUNCE = "Jarvis Import Announcement"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for di in ("DI-ARMED-TEST-1", "DI-UNARMED-TEST-1"):
+			for name in frappe.get_all(self.ANNOUNCE, filters={"data_import": di}, pluck="name"):
+				frappe.delete_doc(self.ANNOUNCE, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _armed_conv(self) -> str:
+		conv = _make_conv(TEST_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		return conv
+
+	def test_armed_run_import_binds_announcement(self):
+		"""The armed branch must call bind_after_run_import with a synthesized
+		{tool, conversation, owner} record + the wrapped result. (bind's own row
+		creation is existing, separately-tested code that link-validates data_import.)"""
+		conv = self._armed_conv()
+		with (
+			patch("jarvis.api.dispatch", return_value={"data_import": "DI-ARMED-TEST-1"}),
+			patch("jarvis.chat.import_announce.bind_after_run_import") as bind,
+		):
+			r = api._run_tool("run_import", {"filename": "x.csv"}, conversation=conv)
+		self.assertNotEqual(r["data"].get("status"), "pending_confirmation")
+		self.assertTrue(bind.called, "an armed run_import must bind its completion announcement")
+		record, result = bind.call_args[0]
+		self.assertEqual(record["tool"], "run_import")
+		self.assertEqual(record["conversation"], conv)
+		self.assertEqual(record["owner"], TEST_USER)  # the conversation owner
+		self.assertEqual(result["data"]["data_import"], "DI-ARMED-TEST-1")
+
+	def test_armed_non_import_tool_binds_no_announcement(self):
+		# The bind is run_import-specific: another armed covered tool (run_method) runs
+		# uncarded but must NOT create an import announcement.
+		conv = self._armed_conv()
+		before = frappe.db.count(self.ANNOUNCE)
+		with patch("jarvis.api.dispatch", return_value={"ok": True}):
+			api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertEqual(frappe.db.count(self.ANNOUNCE), before)
