@@ -272,18 +272,20 @@ def _public_origin(trust_host: bool = False) -> str:
 
 
 def _onboarding_host_ok() -> bool:
-	"""True when this bench's public origin is a routable public host, OR the dev
-	bypass flag is set. Drives the localhost onboarding hard-block. Fails OPEN on
-	any error: a probe failure must never block a legitimate signup - only a
-	CONFIDENT localhost/reserved/IP reading blocks.
+	"""True when this bench's public origin is a routable public host. Purely
+	host-based: there is no site_config bypass. Drives the localhost onboarding
+	hard-block. Fails OPEN on any error: a probe failure must never block a
+	legitimate signup - only a CONFIDENT localhost/reserved/IP reading blocks.
 
-	CI runs on a fresh site with a non-public host and no bypass flag, so - like
+	Dev/e2e benches that need onboarding to work set a public-looking
+	``host_name`` (e.g. ``https://jarvis-e2e.aerele.in``) in site_config, which
+	``_public_origin`` already honors - not a backdoor flag.
+
+	CI runs on a fresh site with a non-public host, so - like
 	policy._llm_not_configured - the gate is inert under test unless a test opts
 	in via ``frappe.flags.test_host_guard``. Otherwise every existing test that
 	calls start_signup would fail on CI's fresh DB."""
 	if frappe.flags.in_test and not frappe.flags.get("test_host_guard"):
-		return True
-	if frappe.conf.get("jarvis_allow_localhost_onboarding"):
 		return True
 	try:
 		from urllib.parse import urlsplit
@@ -296,8 +298,9 @@ def _onboarding_host_ok() -> bool:
 
 def assert_public_onboarding_host() -> None:
 	"""Hard-block onboarding on a local/non-public bench (magic links + agent
-	callbacks would silently fail). Bypassed by ``jarvis_allow_localhost_onboarding``
-	in site_config for dev/e2e benches. Raises a user-facing ValidationError."""
+	callbacks would silently fail). Purely host-based: dev/e2e benches need a
+	public-looking ``host_name`` in site_config, not a bypass flag. Raises a
+	user-facing ValidationError."""
 	if _onboarding_host_ok():
 		return
 	frappe.throw(

@@ -52,19 +52,17 @@ class TestOnboardingHostGuard(FrappeTestCase):
 		frappe.flags.test_host_guard = False
 
 	def test_localhost_host_is_blocked(self):
-		with (
-			patch.object(admin_client, "_public_origin", return_value="http://localhost:8002"),
-			patch.dict(frappe.conf, {}, clear=False),
-		):
-			frappe.conf.pop("jarvis_allow_localhost_onboarding", None)
+		with patch.object(admin_client, "_public_origin", return_value="http://localhost:8002"):
 			self.assertFalse(admin_client._onboarding_host_ok())
 			with self.assertRaises(frappe.ValidationError):
 				admin_client.assert_public_onboarding_host()
 
-	def test_bypass_flag_allows_localhost(self):
-		with (
-			patch.object(admin_client, "_public_origin", return_value="http://localhost:8002"),
-			patch.dict(frappe.conf, {"jarvis_allow_localhost_onboarding": 1}),
+	def test_public_host_name_allows(self):
+		"""The e2e path: no bypass flag exists any more, so a genuinely public
+		``host_name`` (as e2e sites configure) is what makes onboarding work even
+		when the request itself arrives on localhost."""
+		with patch.object(
+			admin_client, "_public_origin", return_value="https://jarvis-e2e.aerele.in"
 		):
 			self.assertTrue(admin_client._onboarding_host_ok())
 			admin_client.assert_public_onboarding_host()  # no raise
@@ -81,9 +79,7 @@ class TestOnboardingHostGuard(FrappeTestCase):
 	def test_start_signup_blocks_on_localhost(self):
 		# setUp already set frappe.flags.test_host_guard = True.
 		frappe.set_user("Administrator")
-		with patch.object(admin_client, "_public_origin", return_value="http://localhost:8002"), \
-			 patch.dict(frappe.conf, {}, clear=False):
-			frappe.conf.pop("jarvis_allow_localhost_onboarding", None)
+		with patch.object(admin_client, "_public_origin", return_value="http://localhost:8002"):
 			with self.assertRaisesRegex(frappe.ValidationError, "local or non-public address"):
 				onboarding.start_signup(
 					email="x@acme.com", company="Acme", plan="Pro",
