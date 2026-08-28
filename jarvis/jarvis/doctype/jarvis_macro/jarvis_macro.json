@@ -9,6 +9,7 @@
  "field_order": [
   "macro_name",
   "enabled",
+  "skip_confirmation",
   "stop_on_error",
   "description",
   "steps",
@@ -38,6 +39,15 @@
    "default": "1",
    "in_list_view": 1,
    "description": "When off, the macro is a draft: hidden from the run menu and skipped by the scheduler."
+  },
+  {
+   "fieldname": "skip_confirmation",
+   "fieldtype": "Check",
+   "label": "Skip confirmation (run writes uncarded)",
+   "default": "0",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "ADMIN ONLY. When on, this macro's runs execute gated writes WITHOUT a confirmation card - including run_method, send_email and run_import. The irreversible trio (delete/cancel/amend) still parks and STOPS the run. Enabling requires the Jarvis Admin / System Manager role. Trust model: arming trusts this macro's OWNER for its current AND future steps - editing steps does not clear it. Re-running a stopped run repeats earlier steps."
   },
   {
    "fieldname": "stop_on_error",
