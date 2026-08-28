@@ -97,6 +97,52 @@ frappe.ui.form.on("Jarvis Settings", {
 			__("Diagnostics")
 		);
 
+		// Rotates the plugin agent_token (X-Jarvis-Token / Boundary 6). Distinct
+		// from "Reset Agent Pairing" above, which resets the chat-device pairing
+		// (Boundary 5). Use this when tool calls fail plugin-auth with
+		// "invalid X-Jarvis-Token" or "agent_token expired".
+		frm.add_custom_button(
+			__("Rotate Agent Token"),
+			() => {
+				frappe.confirm(
+					__(
+						"Rotate the agent token? A fresh token is pushed to the container, which is briefly recreated (~10–30s downtime). Chat history and the device pairing are preserved. Use this if tool calls fail with an 'invalid X-Jarvis-Token' or 'agent_token expired' error."
+					),
+					() => {
+						frappe
+							.call({
+								method: "jarvis.api.rotate_agent_token",
+								freeze: true,
+								freeze_message: __(
+									"Rotating the agent token and recreating the container…"
+								),
+							})
+							.then((r) => {
+								const m = r.message || {};
+								if (m.ok) {
+									frappe.msgprint({
+										title: __("Agent Token Rotated"),
+										message: __("Rotated at: {0}", [
+											(m.data && m.data.rotated_at) || "(no timestamp)",
+										]),
+										indicator: "green",
+									});
+									frm.reload_doc();
+								} else {
+									const err = m.error || {};
+									frappe.msgprint({
+										title: __("Rotate Failed ({0})", [err.code || "error"]),
+										message: err.message || "unknown",
+										indicator: "red",
+									});
+								}
+							});
+					}
+				);
+			},
+			__("Diagnostics")
+		);
+
 		// Reset onboarding moved to the `bench reset-onboarding` CLI command
 		// (jarvis.commands); a destructive dev reset no longer belongs on the
 		// HTTP form.
