@@ -787,14 +787,11 @@ def _live_worker_count(queue_name: str) -> int:
 	"""Number of RQ workers currently listening on ``queue_name`` (0 on any probe
 	trouble). Same ``get_workers()``/``generate_qname`` path ``api._turn_queue``
 	uses; best-effort — a probe hiccup must never break an enqueue, so the caller
-	treats 0 as "not safely provisioned" and falls back to ``short``."""
-	try:
-		from frappe.utils.background_jobs import generate_qname, get_workers
+	treats 0 as "not safely provisioned" and falls back to ``short``.
 
-		qname = generate_qname(queue_name)
-		return sum(1 for w in get_workers() if qname in (w.queue_names() or []))
-	except Exception:
-		return 0
+	Delegates to ``_probe_worker_count``, which does the identical live probe but
+	returns ``None`` (not 0) on trouble so ITS callers can fail open instead."""
+	return _probe_worker_count(queue_name) or 0
 
 
 def _control_queue() -> str:
@@ -965,7 +962,7 @@ def chat_worker_status() -> dict:
 		degraded = _pump_shape_starves()
 	except Exception:
 		degraded = False
-	return {"blocked": bool(blocked), "degraded": bool(blocked or degraded), "workers": None}
+	return {"blocked": bool(blocked), "degraded": bool(blocked or degraded)}
 
 
 # --------------------------------------------------------------------------- #

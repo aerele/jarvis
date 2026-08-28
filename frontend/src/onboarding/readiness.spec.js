@@ -444,12 +444,33 @@ describe("workersNotice self-heal (jarvis Task 8)", () => {
 		);
 	});
 
-	it("clears the banner on the next successful send (self-heal, no reload)", () => {
-		const idx = chatSrc.indexOf("workersNotice.value = null");
-		expect(idx, "send() must clear workersNotice on a successful response").not.toBe(-1);
-		// Gated on r.ok !== false (a genuinely accepted send), not folded into the
-		// rejection branch that raises the banner.
-		const before = chatSrc.slice(Math.max(0, idx - 120), idx);
+	it("clears the banner on the next successful retry (self-heal, no reload)", () => {
+		// retry() sits earlier in the file than send(), so this is the FIRST
+		// occurrence of the clear.
+		const fnStart = chatSrc.indexOf("async function retry(messageId)");
+		const fnEnd = chatSrc.indexOf("\nasync function send(", fnStart);
+		expect(fnStart, "ChatView must still define retry()").not.toBe(-1);
+		expect(fnEnd, "ChatView must still define send() after retry()").not.toBe(-1);
+		const body = chatSrc.slice(fnStart, fnEnd);
+		const awaitIdx = body.indexOf("await api.retryMessage(messageId)");
+		const idx = body.indexOf("workersNotice.value = null");
+		expect(awaitIdx, "retry() must still await api.retryMessage").not.toBe(-1);
+		expect(idx, "retry() must clear workersNotice on a successful response").not.toBe(-1);
+		// Only AFTER the await (never optimistically, before the server has
+		// actually answered) and gated on r.ok !== false (a genuinely accepted
+		// retry), not folded into the rejection branch that raises the banner.
+		expect(idx).toBeGreaterThan(awaitIdx);
+		const before = body.slice(Math.max(0, idx - 120), idx);
+		expect(before).toContain("r.ok !== false");
+	});
+
+	it("also clears the banner on the next successful send (mirrors retry())", () => {
+		const first = chatSrc.indexOf("workersNotice.value = null");
+		const second = chatSrc.indexOf("workersNotice.value = null", first + 1);
+		expect(second, "send() must also clear workersNotice on a successful response").not.toBe(
+			-1
+		);
+		const before = chatSrc.slice(Math.max(0, second - 120), second);
 		expect(before).toContain("r.ok !== false");
 	});
 

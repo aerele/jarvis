@@ -38,8 +38,8 @@
 					<Banner
 						v-if="workerWarning"
 						type="warning"
-						title="Background workers are low"
-						:message="`Your ${agentName} background workers look under-provisioned. Chat may be slow or stall until more workers are running.`"
+						:title="WORKER_WARNING_TITLE"
+						:message="workerWarningMessage(agentName)"
 						class="mb-4 w-full max-w-[720px]"
 					/>
 
@@ -1945,7 +1945,7 @@ import {
 import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
-import { agentName } from "@/branding";
+import { agentName, WORKER_WARNING_TITLE, workerWarningMessage } from "@/branding";
 import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
 import {
 	STATES as PAY_STATES,

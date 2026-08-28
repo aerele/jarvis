@@ -8294,6 +8294,9 @@ async function retry(messageId) {
 				notify(r.reason || "Couldn't retry that.", { type: "error" });
 			}
 		}
+		if (r && r.ok !== false) {
+			workersNotice.value = null; // a retry got through: workers are back
+		}
 	} catch (e) {
 		sending.value = false;
 		waiting.value = false;

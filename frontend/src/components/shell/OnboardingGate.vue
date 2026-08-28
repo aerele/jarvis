@@ -20,8 +20,8 @@
 			<Banner
 				v-if="workerWarning"
 				type="warning"
-				title="Background workers are low"
-				:message="`Your ${agentName} background workers look under-provisioned. Chat may be slow or stall until more workers are running.`"
+				:title="WORKER_WARNING_TITLE"
+				:message="workerWarningMessage(agentName)"
 				class="mb-5"
 			/>
 
@@ -61,7 +61,7 @@ import { useRouter } from "vue-router";
 import { Button } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
 import Banner from "@/components/Banner.vue";
-import { agentName } from "@/branding";
+import { agentName, WORKER_WARNING_TITLE, workerWarningMessage } from "@/branding";
 
 const router = useRouter();
 
