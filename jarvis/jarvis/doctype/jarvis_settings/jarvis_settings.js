@@ -94,7 +94,12 @@ frappe.ui.form.on("Jarvis Settings", {
 					}
 				);
 			},
-			__("Diagnostics")
+			__("Agent Recovery")
+		)?.attr(
+			"title",
+			__(
+				"Use when the agent rejects the connection (e.g. a device/token mismatch) and chat will not connect. Re-pairs this device; instant, no container downtime."
+			)
 		);
 
 		// Rotates the plugin agent_token (X-Jarvis-Token / Boundary 6). Distinct
@@ -140,7 +145,12 @@ frappe.ui.form.on("Jarvis Settings", {
 					}
 				);
 			},
-			__("Diagnostics")
+			__("Agent Recovery")
+		)?.attr(
+			"title",
+			__(
+				"Use when tool calls fail with 'invalid X-Jarvis-Token' or 'agent_token expired', or after a suspected token leak. Issues a NEW token and recreates the container (~10–30s). System Manager only."
+			)
 		);
 
 		// Reset onboarding moved to the `bench reset-onboarding` CLI command
@@ -191,7 +201,12 @@ frappe.ui.form.on("Jarvis Settings", {
 				});
 				d.show();
 			},
-			__("Diagnostics")
+			__("Agent Recovery")
+		)?.attr(
+			"title",
+			__(
+				"Use when a Settings or LLM-key change has not taken effect, or setup is stuck on 'Applying your AI configuration'. Re-pushes the current config to the container; changes no secrets."
+			)
 		);
 	},
 });
