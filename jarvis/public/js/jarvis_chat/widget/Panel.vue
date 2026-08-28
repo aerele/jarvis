@@ -621,11 +621,7 @@ import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
 import { resizeFrom } from "./panel_size.mjs";
 import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
-import {
-	classifyReadiness,
-	degradedActionable,
-	shouldWarnWorkers,
-} from "./panel_readiness.mjs";
+import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
 import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
 import { sortPendingCards } from "./pending_order.mjs";
 import { ONBOARDING_URL } from "./config.mjs";

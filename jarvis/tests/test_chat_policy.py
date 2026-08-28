@@ -264,13 +264,15 @@ class TestInsufficientWorkers(FrappeTestCase):  # reuse module base
 
 	def test_blocked_returns_reason(self):
 		with patch(
-			"jarvis.chat.pump.chat_worker_status", return_value={"blocked": True, "degraded": True, "workers": 0}
+			"jarvis.chat.pump.chat_worker_status",
+			return_value={"blocked": True, "degraded": True, "workers": 0},
 		):
 			self.assertTrue(policy._insufficient_workers())
 
 	def test_healthy_returns_false(self):
 		with patch(
-			"jarvis.chat.pump.chat_worker_status", return_value={"blocked": False, "degraded": False, "workers": 4}
+			"jarvis.chat.pump.chat_worker_status",
+			return_value={"blocked": False, "degraded": False, "workers": 4},
 		):
 			self.assertFalse(policy._insufficient_workers())
 

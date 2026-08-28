@@ -2149,31 +2149,39 @@ class TestWorkerStatus(FrappeTestCase):  # reuse module base
 			self.assertIsNone(pump._probe_worker_count("long"))
 
 	def test_healthy_is_not_blocked_not_degraded(self):
-		with patch.object(pump, "_probe_worker_count", return_value=4), \
-			patch.object(pump, "_pump_shape_starves", return_value=False), \
-			patch("jarvis.chat.api._turn_queue", return_value="long"):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=4),
+			patch.object(pump, "_pump_shape_starves", return_value=False),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
 			s = pump.chat_worker_status()
 			self.assertFalse(s["blocked"])
 			self.assertFalse(s["degraded"])
 
 	def test_one_worker_degraded_not_blocked(self):
-		with patch.object(pump, "_probe_worker_count", return_value=1), \
-			patch.object(pump, "_pump_shape_starves", return_value=True), \
-			patch("jarvis.chat.api._turn_queue", return_value="long"):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=1),
+			patch.object(pump, "_pump_shape_starves", return_value=True),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
 			s = pump.chat_worker_status()
 			self.assertFalse(s["blocked"])
 			self.assertTrue(s["degraded"])
 
 	def test_probe_error_never_blocks(self):
-		with patch.object(pump, "_probe_worker_count", return_value=None), \
-			patch.object(pump, "_pump_shape_starves", return_value=False), \
-			patch("jarvis.chat.api._turn_queue", return_value="long"):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=None),
+			patch.object(pump, "_pump_shape_starves", return_value=False),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
 			self.assertFalse(pump.chat_worker_status()["blocked"])
 
 	def test_zero_workers_blocks_only_after_grace(self):
-		with patch.object(pump, "_probe_worker_count", return_value=0), \
-			patch.object(pump, "_pump_shape_starves", return_value=True), \
-			patch("jarvis.chat.api._turn_queue", return_value="long"):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=0),
+			patch.object(pump, "_pump_shape_starves", return_value=True),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
 			# first observation: marker set, NOT yet blocked (debounce)
 			self.assertFalse(pump.chat_worker_status()["blocked"])
 			# simulate the marker aging past the grace window
@@ -2181,21 +2189,27 @@ class TestWorkerStatus(FrappeTestCase):  # reuse module base
 			self.assertTrue(pump.chat_worker_status()["blocked"])
 
 	def test_recovery_clears_marker(self):
-		with patch.object(pump, "_probe_worker_count", return_value=0), \
-			patch("jarvis.chat.api._turn_queue", return_value="long"):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=0),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
 			pump.chat_worker_status()  # sets marker
 		# Age the ORIGINAL marker past grace before the recovery step. If the
 		# recovery reading below fails to clear it, this aged, still-live marker
 		# would make the later fresh 0-reading block IMMEDIATELY (no debounce),
 		# so the final assertion below only holds if recovery actually cleared it.
 		pump._force_zero_marker_age(pump._ZERO_GRACE_S + 5)
-		with patch.object(pump, "_probe_worker_count", return_value=3), \
-			patch.object(pump, "_pump_shape_starves", return_value=False), \
-			patch("jarvis.chat.api._turn_queue", return_value="long"):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=3),
+			patch.object(pump, "_pump_shape_starves", return_value=False),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
 			self.assertFalse(pump.chat_worker_status()["blocked"])
 			# marker cleared: a later single 0 must re-arm the grace, not block instantly
-			with patch.object(pump, "_probe_worker_count", return_value=0), \
-				patch.object(pump, "_pump_shape_starves", return_value=True):
+			with (
+				patch.object(pump, "_probe_worker_count", return_value=0),
+				patch.object(pump, "_pump_shape_starves", return_value=True),
+			):
 				self.assertFalse(pump.chat_worker_status()["blocked"])
 
 	def test_zero_still_present_refreshes_ttl(self):

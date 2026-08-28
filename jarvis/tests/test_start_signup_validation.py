@@ -86,9 +86,7 @@ class TestOnboardingHostGuard(FrappeTestCase):
 	def test_public_host_name_allows(self):
 		"""The e2e path: a genuinely public ``host_name`` (as e2e sites configure)
 		is what makes onboarding work, independent of the request's own Host."""
-		with patch.dict(
-			frappe.conf, {"host_name": "https://jarvis-e2e.aerele.in"}, clear=False
-		):
+		with patch.dict(frappe.conf, {"host_name": "https://jarvis-e2e.aerele.in"}, clear=False):
 			self.assertTrue(admin_client._onboarding_host_ok())
 			admin_client.assert_public_onboarding_host()  # no raise
 
@@ -110,6 +108,8 @@ class TestOnboardingHostGuard(FrappeTestCase):
 			frappe.conf.pop("hostname", None)
 			with self.assertRaisesRegex(frappe.ValidationError, "local or non-public address"):
 				onboarding.start_signup(
-					email="x@acme.com", company="Acme", plan="Pro",
+					email="x@acme.com",
+					company="Acme",
+					plan="Pro",
 					terms_accepted=True,
 				)

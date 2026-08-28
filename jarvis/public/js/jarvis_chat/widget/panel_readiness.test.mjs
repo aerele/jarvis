@@ -205,10 +205,17 @@ test("degradedActionable: a member gets no CTA for a stuck apply", () => {
 test("shouldWarnWorkers: true only when the backend flag is explicitly true", () => {
   assert.equal(shouldWarnWorkers({ ready: true, worker_warning: true }), true);
   assert.equal(
-    shouldWarnWorkers({ ready: false, reason: "llm_credentials", worker_warning: true }),
+    shouldWarnWorkers({
+      ready: false,
+      reason: "llm_credentials",
+      worker_warning: true,
+    }),
     true
   );
-  assert.equal(shouldWarnWorkers({ ready: true, worker_warning: false }), false);
+  assert.equal(
+    shouldWarnWorkers({ ready: true, worker_warning: false }),
+    false
+  );
   assert.equal(shouldWarnWorkers({ ready: true }), false);
 });
 
