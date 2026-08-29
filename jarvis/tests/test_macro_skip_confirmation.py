@@ -644,3 +644,102 @@ class TestArmedRunImportAnnouncement(FrappeTestCase):
 		with patch("jarvis.api.dispatch", return_value={"ok": True}):
 			api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
 		self.assertEqual(frappe.db.count(self.ANNOUNCE), before)
+
+
+class TestArmedReceiptProvenance(FrappeTestCase):
+	"""An armed write is a VISIBLE, queryable receipt (T8): the row is labelled
+	action_outcome=auto_applied with the arming macro as armed_by_macro."""
+
+	MSG = "Jarvis Chat Message"
+	RUN = "Jarvis Macro Run"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		from jarvis.tools import _agent_run_ctx
+
+		_agent_run_ctx.take_armed_by_macro()  # never leak a marker between tests
+		frappe.set_user(self._orig)
+		for dt in (self.RUN, MACRO, self.MSG, CONV):
+			for name in frappe.get_all(dt, filters={"owner": TEST_USER}, pluck="name"):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_armed_branch_sets_macro_provenance(self):
+		from jarvis.tools import _agent_run_ctx
+
+		macro = _make_macro(TEST_USER, name="prov-macro")
+		conv = _make_conv(TEST_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		run = frappe.get_doc(
+			{
+				"doctype": self.RUN,
+				"macro": macro,
+				"conversation": conv,
+				"status": "running",
+				"current_step": 0,
+				"total_steps": 1,
+				"trigger": "manual",
+			}
+		)
+		run.flags.ignore_permissions = True
+		run.insert()
+		frappe.db.commit()
+
+		with patch("jarvis.api.dispatch", return_value={"ok": True}):
+			api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		# The armed branch stashed the arming macro; consume it and confirm.
+		self.assertEqual(_agent_run_ctx.take_armed_by_macro(), macro)
+
+	def test_persist_labels_armed_receipt(self):
+		from jarvis.tools import _agent_run_ctx
+
+		conv = _make_conv(TEST_USER)
+		sk = "sk-armed-receipt-test"
+		frappe.db.set_value(CONV, conv, "session_key", sk, update_modified=False)
+		_agent_run_ctx.set_armed_by_macro("MACRO-PROV-X")
+		api._persist_and_publish_tool_call(
+			session_key=sk,
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "x"},
+			result={"ok": True, "data": {}},
+			tool_call_id="tc-armed-1",
+		)
+		row = frappe.get_all(
+			self.MSG,
+			filters={"conversation": conv, "role": "tool", "tool_call_id": "tc-armed-1"},
+			fields=["action_outcome", "armed_by_macro"],
+		)
+		self.assertEqual(len(row), 1)
+		self.assertEqual(row[0].action_outcome, "auto_applied")
+		self.assertEqual(row[0].armed_by_macro, "MACRO-PROV-X")
+		# Consumed: a later ordinary receipt must NOT inherit the label.
+		self.assertIsNone(_agent_run_ctx.take_armed_by_macro())
+
+	def test_ordinary_receipt_not_labelled(self):
+		conv = _make_conv(TEST_USER)
+		sk = "sk-plain-receipt-test"
+		frappe.db.set_value(CONV, conv, "session_key", sk, update_modified=False)
+		# No marker set -> an ordinary inline tool call stays unlabelled.
+		api._persist_and_publish_tool_call(
+			session_key=sk,
+			tool="get_doc",
+			args={},
+			result={"ok": True, "data": {}},
+			tool_call_id="tc-plain-1",
+		)
+		row = frappe.get_all(
+			self.MSG,
+			filters={"conversation": conv, "tool_call_id": "tc-plain-1"},
+			fields=["action_outcome", "armed_by_macro"],
+		)
+		self.assertEqual(len(row), 1)
+		self.assertFalse(row[0].action_outcome)
+		self.assertFalse(row[0].armed_by_macro)

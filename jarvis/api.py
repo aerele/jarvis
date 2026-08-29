@@ -275,6 +275,7 @@ def _dispatch_from_session(
 			return result
 	finally:
 		_agent_run_ctx.clear_session_key()
+		_agent_run_ctx.take_armed_by_macro()  # belt: never leak an armed marker across dispatches
 
 
 _STALE_PAIRING_DEDUPE_TTL_S = 3600
@@ -340,7 +341,25 @@ def _persist_and_publish_tool_call(
 	conv_name = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
 	if not conv_name:
 		return
-	persist_tool_receipt(conv_name, tool, args, result, tool_call_id=tool_call_id)
+	# T8: an armed-skip write set a request-local provenance marker (consume-once).
+	# Label its receipt auto_applied + armed_by_macro so the SPA renders a distinct
+	# "ran without confirmation - armed macro X" chip and the row is queryable, instead
+	# of a silent Activity-accordion tool row.
+	from jarvis.tools import _agent_run_ctx
+
+	armed_by_macro = _agent_run_ctx.take_armed_by_macro()
+	armed_outcome = (
+		"auto_applied" if (armed_by_macro and isinstance(result, dict) and result.get("ok")) else None
+	)
+	persist_tool_receipt(
+		conv_name,
+		tool,
+		args,
+		result,
+		action_outcome=armed_outcome,
+		armed_by_macro=armed_by_macro if armed_outcome else None,
+		tool_call_id=tool_call_id,
+	)
 
 
 def _locked_insert_chat_message(
@@ -383,6 +402,7 @@ def persist_tool_receipt(
 	result: dict | None,
 	*,
 	action_outcome: str | None = None,
+	armed_by_macro: str | None = None,
 	tool_call_id: str | None = None,
 ) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
@@ -455,6 +475,7 @@ def persist_tool_receipt(
 				"tool_status": status,
 				"tool_call_id": tool_call_id or None,
 				"action_outcome": action_outcome or None,
+				"armed_by_macro": armed_by_macro or None,
 				"ref_doctype": ref_doctype,
 				"ref_name": ref_name,
 				"content": f"{tool} → {action_outcome or status}",
@@ -1413,6 +1434,15 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			and not _armed_skip_disabled()
 		):
 			result = dispatch_confirmed(tool, args)
+			# Provenance for the receipt (T8): which armed macro authorized this uncarded
+			# write. Consumed once by the receipt persist, which labels the row
+			# action_outcome=auto_applied + armed_by_macro so an armed write is a visible,
+			# queryable receipt - not silence-by-omission.
+			from jarvis.tools import _agent_run_ctx
+
+			_agent_run_ctx.set_armed_by_macro(
+				frappe.db.get_value("Jarvis Macro Run", {"conversation": conv, "status": "running"}, "macro")
+			)
 			if tool == "run_import":
 				# The armed branch bypasses _confirm_core, which is where a CONFIRMED
 				# run_import normally gets its completion announcement bound. Bind it here
