@@ -271,6 +271,63 @@ def _public_origin(trust_host: bool = False) -> str:
 	return base
 
 
+def _onboarding_host_ok() -> bool:
+	"""True only when this bench has a CONFIGURED public https host. Reads only
+	site_config ``host_name`` (never the request Host header, which is
+	spoofable), validates it with ``_is_real_public_host``. No ``host_name``, a
+	non-https scheme, or a localhost/reserved/IP ``host_name``, blocks. Drives
+	the localhost onboarding hard-block.
+
+	Dev/e2e benches that need onboarding to work set a public-looking
+	``host_name`` (e.g. ``https://jarvis-e2e.aerele.in``) in site_config - not
+	a backdoor flag.
+
+	CI runs on a fresh site with no configured host, so - like
+	policy._llm_not_configured - the gate is inert under test unless a test opts
+	in via ``frappe.flags.test_host_guard``. Otherwise every existing test that
+	calls start_signup would fail on CI's fresh DB.
+
+	Fails OPEN on any error: a probe failure must never block a legitimate
+	signup - only a CONFIDENT localhost/reserved/IP reading blocks."""
+	if frappe.flags.in_test and not frappe.flags.get("test_host_guard"):
+		return True
+	try:
+		host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
+		if not host_name:
+			return False
+		from urllib.parse import urlsplit
+
+		if not host_name.startswith(("http://", "https://")):
+			host_name = "https://" + host_name
+		parts = urlsplit(host_name)
+		if parts.scheme != "https":
+			# Match _public_origin: a non-https host_name is not used there
+			# either (it falls back to the spoofable request Host), so it must
+			# not pass the guard.
+			return False
+		host = (parts.hostname or "").lower().rstrip(".")
+		return _is_real_public_host(host)
+	except Exception:
+		return True
+
+
+def assert_public_onboarding_host() -> None:
+	"""Hard-block onboarding on a local/non-public bench (magic links + agent
+	callbacks would silently fail). Purely host-based: dev/e2e benches need a
+	public-looking ``host_name`` in site_config, not a bypass flag. Raises a
+	user-facing ValidationError."""
+	if _onboarding_host_ok():
+		return
+	frappe.throw(
+		frappe._(
+			"This site is running on a local or non-public address, so sign-in "
+			"links and agent connections cannot reach it. Set a public host_name "
+			"for this site and try again."
+		),
+		title=frappe._("Onboarding is not available here"),
+	)
+
+
 def signup(
 	email: str,
 	company_name: str,

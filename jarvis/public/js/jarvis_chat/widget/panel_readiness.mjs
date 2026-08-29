@@ -201,3 +201,20 @@ export function degradedActionable(
   }
   return { text: degradedMessage(resp, agentName), cta: null };
 }
+
+// A SEPARATE, additive signal from the ready/gate/degraded verdict above:
+// is_ready_for_chat now also returns worker_warning (bool) on an otherwise-usable
+// workspace whose background workers are under-provisioned. It is deliberately
+// non-blocking - unlike a degraded verdict, it never gates the composer or
+// replaces the panel - so it is read independently of classifyReadiness() rather
+// than folded into its three-way return.
+//
+// Fails CLOSED (false) on a missing/thrown response, the opposite of
+// classifyReadiness's fail-OPEN-to-"ready": a check that could not run should
+// produce no banner, not manufacture a warning nobody confirmed. The panel's
+// caller still wraps the isReadyForChat() call in its own try/catch (mirroring
+// how it already resolves `readiness` on a thrown fetch), so this only needs to
+// handle a resp that is present but shaped unexpectedly.
+export function shouldWarnWorkers(resp) {
+  return !!(resp && resp.worker_warning);
+}
