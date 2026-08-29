@@ -14,6 +14,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import has_jarvis_admin_access
+
 MAX_NAME_LEN = 80
 MAX_DESC_LEN = 500
 MAX_STEPS = 25
@@ -28,7 +30,30 @@ class JarvisMacro(Document):
 		self._validate_unique_per_owner()
 		self._validate_owner_cap()
 		self._validate_schedule_time()
+		self._guard_skip_confirmation_enable()
 		self._recompute_next_run()
+
+	def _guard_skip_confirmation_enable(self):
+		"""ARM the macro = run its writes uncarded (the broad covered set, incl.
+		run_method/send_email/run_import; the irreversible trio still parks + stops
+		the run). Only a Jarvis Admin / System Manager may enable it - a plain owner
+		may RUN a macro (``if_owner`` write) but must not self-grant the bypass.
+
+		Only the 0/unset -> 1 transition is gated; disabling and every other edit
+		(including editing steps while it stays on - the arm persists across step
+		edits by design, D6) are free for the owner. Enabling the macro flag is what
+		later drives ``run_macro``'s stamp of the run conversation's own
+		``skip_confirmation`` (guarded there too)."""
+		if not self.skip_confirmation:
+			return
+		previous = self.get_doc_before_save()
+		if previous and bool(previous.skip_confirmation):
+			return
+		if not has_jarvis_admin_access(frappe.session.user):
+			frappe.throw(
+				_("Arming a macro to skip confirmation requires a Jarvis Admin or System Manager role."),
+				frappe.PermissionError,
+			)
 
 	def _validate_name(self):
 		self.macro_name = (self.macro_name or "").strip()

@@ -128,19 +128,43 @@ def _cas_run_status(run_name: str, expect: str, new: str, **extra) -> bool:
 	for i, (col, val) in enumerate(extra.items()):
 		sets.append(f"`{col}`=%(x{i})s")
 		params[f"x{i}"] = val
-	return (
+	ok = (
 		_run_cas(
 			f"UPDATE `tab{RUN}` SET {', '.join(sets)} WHERE name=%(n)s AND status=%(expect)s",
 			params,
 		)
 		== 1
 	)
+	# Clear the armed flag on every terminal transition driven through the CAS
+	# (reap, resume-incompatible compensation, ...) - not only via _finish (T5).
+	if ok and new in _TERMINAL_RUN_STATUSES:
+		_disarm_run_conversation(run_name)
+	return ok
 
 
 def _run_status_now(run_name: str) -> str | None:
 	"""The run's CURRENT durable status (its own function so the CDX-22 pre-enqueue eligibility
 	re-check is a clean, patchable seam)."""
 	return frappe.db.get_value(RUN, run_name, "status")
+
+
+_TERMINAL_RUN_STATUSES = ("completed", "failed", "stopped")
+
+
+def _disarm_conversation(conversation: str | None) -> None:
+	"""Clear an armed run conversation's ``skip_confirmation`` when its run reaches a
+	terminal state, so the flag never outlives the run. Belt-and-suspenders on top of
+	the human-inert send-block (T4): the send-block already keeps a lingering flag
+	un-exploitable (send/retry are refused while set), but clearing keeps state clean
+	and stops any re-dispatched turn from running armed after the run is over. No-op
+	when unset. Caller commits (consistent with ``_cas_run_status``)."""
+	if conversation and frappe.db.get_value(CONV, conversation, "skip_confirmation"):
+		frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
+
+
+def _disarm_run_conversation(run_name: str) -> None:
+	"""Disarm by run name (for the _cas terminal paths, which only have the run)."""
+	_disarm_conversation(frappe.db.get_value(RUN, run_name, "conversation"))
 
 
 # --------------------------------------------------------------------------- #
@@ -224,6 +248,16 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	if owner != frappe.session.user:
 		for dt, name in ((CONV, conv.name), (MSG, intro.name), (RUN, run.name)):
 			frappe.db.set_value(dt, name, "owner", owner, update_modified=False)
+	# Arm the run conversation when the macro is armed (doc.skip_confirmation, set
+	# only by a Jarvis Admin - guarded on the macro controller). Stamped via a raw
+	# db.set_value, the File-Box pattern that bypasses the conversation controller's
+	# admin guard: the value derives from the already-admin-gated macro flag, so a
+	# re-check would just refuse a legitimate non-admin owner running their own armed
+	# macro. The gate reads THIS conversation flag; the conversation is human-inert
+	# while set (send_message / retry_message are blocked, T4), so only macro-step
+	# turns ever run on it. Cleared on every run-terminal transition (T5).
+	if doc.skip_confirmation:
+		frappe.db.set_value(CONV, conv.name, "skip_confirmation", 1, update_modified=False)
 	frappe.db.commit()
 
 	# Scheduled runs surface via the proactive "conversation:new" toast; manual
@@ -265,6 +299,43 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	return {"ok": True, "data": {"macro_run": run.name, "conversation": conv.name}}
 
 
+def _armed_run_parked_card(conversation: str, owner: str) -> dict | None:
+	"""The first live confirmation card STRICTLY bound to ``conversation`` (or None).
+
+	An armed macro runs the covered set uncarded, so the ONLY thing that parks a card
+	on its run is an EXCLUDED tool (delete/cancel/amend) - i.e. the D5 stop signal.
+	Mirrors the gate's own strict-conversation filter (a conv-less token surfaces
+	under any filter). A storage error is swallowed to None: a pending-confirm outage
+	must not strand the run - it then advances as before, and the human-inert send
+	block + clear-on-terminal still hold the security line."""
+	from jarvis.chat import pending_confirm
+
+	try:
+		for rec in pending_confirm.list_for_owner(owner, conversation=conversation, strict=True):
+			if rec.get("conversation") == conversation:
+				return rec
+	except Exception:
+		return None
+	return None
+
+
+def _armed_stop_message(current_step: int, parked: dict) -> str:
+	"""D5 stop reason - names the un-clickable action AND the re-run hazard (§7): the
+	covered steps before it already ran, so re-running the whole macro repeats them.
+
+	``current_step`` is already the 1-based number of the step that just ran and parked
+	(``_run_step`` sets ``current_step = index + 1`` before the turn), so it is used
+	as-is (floored at 1 for the merged/edge case), NOT +1."""
+	step = max(int(current_step or 0), 1)
+	what = parked.get("summary") or parked.get("tool") or "a confirmation"
+	return (
+		f"Stopped at step {step}: this step needs a confirmation that can't be "
+		f"shown in an unattended run ({what}). The steps before it already ran, so "
+		f"re-running the whole macro would repeat them - fix this step's data or run it "
+		f"interactively, don't re-run the macro. Nothing after this step ran."
+	)[:500]
+
+
 def advance_after_turn(conversation_id: str, *, errored: bool) -> None:
 	"""Chaining hook, called from ``turn_handler`` after every terminal turn
 	outcome. If the conversation belongs to a ``running`` Macro Run, advance it:
@@ -293,6 +364,33 @@ def advance_after_turn(conversation_id: str, *, errored: bool) -> None:
 			macro_doc = frappe.get_doc(MACRO, run.macro)
 			steps = macro_doc.steps or []
 			total = min(run.total_steps or len(steps), len(steps))
+
+			# D5 (armed runs only): the step that just ran parked a confirmation card.
+			# In an armed run the covered set runs uncarded, so a parked card means an
+			# EXCLUDED tool (delete/cancel/amend) - and this is an unattended run with
+			# nobody to click it. Advancing would report a false "completed" with the
+			# destructive step silently never run. Detect it (a park returns ok:True, so
+			# `errored` is False - the only per-step signal is the parked token itself),
+			# STOP the run with a legible re-run-hazard message, and SWEEP the token so
+			# the card can't be confirmed later and fire an armed continuation turn.
+			# Checked BEFORE the stop_on_error / next_index decisions, so a merged-mode
+			# (single-turn) run is covered too.
+			if frappe.db.get_value(CONV, run.conversation, "skip_confirmation"):
+				owner_user = frappe.db.get_value(CONV, run.conversation, "owner")
+				parked = _armed_run_parked_card(run.conversation, owner_user)
+				if parked:
+					from jarvis.chat import pending_confirm
+
+					# SWEEP the token FIRST, then terminalize. _finish disarms the
+					# conversation (skip_confirmation -> 0), and the _confirm_core armed
+					# guard keys off that flag - so if we disarmed before sweeping, a Confirm
+					# racing in that window would read flag=0, bypass the guard, and run the
+					# destructive write. Consuming the token first makes a racing Confirm hit
+					# a dead token and be refused regardless of the flag (deterministic).
+					pending_confirm.clear_for_conversation(owner_user, run.conversation)
+					_finish(run, "failed", error=_armed_stop_message(run.current_step or 0, parked))
+					_publish_done(run, macro_doc, "failed")
+					return
 
 			if errored and macro_doc.stop_on_error:
 				_finish(run, "failed", error=f"Step {run.current_step} failed.")
@@ -455,6 +553,7 @@ def stop_macro_run(run_name: str) -> dict:
 		# stoppable too — otherwise the resume cron would keep re-attempting a run the user stopped.
 		if frappe.db.get_value(RUN, run_name, "status") in ("running", "waiting_capacity"):
 			frappe.db.set_value(RUN, run.name, {"status": "stopped", "finished_at": frappe.utils.now()})
+			_disarm_conversation(run.conversation)  # the flag never outlives the run (T5)
 			frappe.db.commit()
 			try:
 				_publish_done(run, frappe.get_doc(MACRO, run.macro), "stopped")
@@ -1031,6 +1130,7 @@ def _finish(run, status: str, error: str | None = None) -> None:
 		run.name,
 		{"status": status, "finished_at": frappe.utils.now(), "error": (error or "")[:500]},
 	)
+	_disarm_conversation(run.conversation)  # the flag never outlives the run (T5)
 	frappe.db.commit()
 
 
