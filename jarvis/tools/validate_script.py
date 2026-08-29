@@ -96,9 +96,27 @@ def _namespace_errors(tree: ast.AST, frappe_keys: set[str]) -> list[str]:
 	return errors
 
 
+def _result_shape_warning(assign: ast.Assign) -> list[str]:
+	"""Flag `result = [columns, ...]` - a Script Report's columns/rows pair must go
+	in `data` (`data = [columns, rows]`), not `result`, or Frappe uses the report's
+	own (empty) columns and renders blank rows."""
+	for tgt in assign.targets:
+		if isinstance(tgt, ast.Name) and tgt.id == "result":
+			val = assign.value
+			if isinstance(val, ast.List) and val.elts:
+				first = val.elts[0]
+				if isinstance(first, ast.Name) and first.id == "columns":
+					return [
+						f"line {assign.lineno}: `result = [columns, ...]` renders a Script Report "
+						"blank - the columns/rows pair goes in `data`: `data = [columns, rows]`."
+					]
+	return []
+
+
 def _ast_scan(tree: ast.AST) -> tuple[list[str], list[str]]:
 	errors: list[str] = []
 	warnings: list[str] = []
+	qb_flagged = False
 	for node in ast.walk(tree):
 		if isinstance(node, (ast.Import, ast.ImportFrom)):
 			errors.append(
@@ -113,12 +131,22 @@ def _ast_scan(tree: ast.AST) -> tuple[list[str], list[str]]:
 					f"line {node.lineno}: `{dotted}` bypasses User Permissions "
 					"(cross-company/branch/dimension leak). Use `frappe.get_list` for every read."
 				)
+			elif dotted and (dotted == "frappe.qb" or dotted.startswith("frappe.qb.")):
+				if not qb_flagged:
+					qb_flagged = True
+					errors.append(
+						f"line {node.lineno}: `frappe.qb` runs raw SQL that bypasses User "
+						"Permissions, and its `Sum`/`Count` helpers aren't in the sandbox "
+						"(NameError). Read via `frappe.get_list` and aggregate in Python."
+					)
 			elif node.attr.startswith("__") and node.attr.endswith("__"):
 				errors.append(f"line {node.lineno}: dunder access `{node.attr}` is blocked in safe_exec.")
 		elif isinstance(node, ast.Name) and node.id in _BANNED_NAMES:
 			errors.append(f"line {node.lineno}: `{node.id}` is not available in safe_exec.")
 		elif isinstance(node, ast.Call):
 			warnings.extend(_agg_field_warnings(node))
+		elif isinstance(node, ast.Assign):
+			warnings.extend(_result_shape_warning(node))
 	return errors, warnings
 
 
@@ -127,14 +155,15 @@ def validate_script(code, script_type=None) -> dict:
 	Frappe's safe_exec sandbox WITHOUT running it. Call this before staging a
 	Server Script / Script Report create, and fix every error before drafting.
 
-	Catches: any `import` / third-party / app-function use, `frappe.get_all` and
-	`frappe.db.sql` (both bypass User Permissions - use `frappe.get_list`),
-	`open`/`eval`/`exec`/`__import__`, dunder access, and any RestrictedPython
-	compile error (the exact compile safe_exec runs). It never executes the code.
-	Also flags `frappe.<attr>` calls outside the safe_exec namespace (e.g.
-	`frappe.defaults` / `frappe.get_user_default` - use `frappe.db.get_default`).
-	Warns (not an error) on SQL functions passed as `get_list` string fields
-	(`sum(...) as x`), which Frappe rejects at query time - aggregate in Python.
+	Catches: any `import` / third-party / app-function use, `frappe.get_all`,
+	`frappe.db.sql`, and `frappe.qb` (all bypass User Permissions - use
+	`frappe.get_list`), `open`/`eval`/`exec`/`__import__`, dunder access, and any
+	RestrictedPython compile error (the exact compile safe_exec runs). It never
+	executes the code. Also flags `frappe.<attr>` calls outside the safe_exec
+	namespace (e.g. `frappe.defaults` / `frappe.get_user_default` - use
+	`frappe.db.get_default`). Warns on SQL functions passed as `get_list` string
+	fields (`sum(...) as x`), and on `result = [columns, ...]` (a Script Report's
+	columns/rows pair goes in `data`, not `result`, or it renders blank).
 
 	- ``code``: the script body (str).
 	- ``script_type``: optional hint ("Script Report", "DocType Event", "API",
