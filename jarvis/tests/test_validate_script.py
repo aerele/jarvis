@@ -92,6 +92,28 @@ class TestValidateScript(unittest.TestCase):
 		self.assertTrue(out["ok"], out["errors"])
 		self.assertEqual(out["errors"], [])
 
+	def test_frappe_qb_is_rejected_as_permission_bypass(self):
+		# frappe.qb runs raw SQL (bypasses User Permissions) + Sum/Count NameError.
+		code = "si = frappe.qb.DocType('Sales Invoice')\nresult = frappe.qb.from_(si).select(si.name).run()\ndata = result\n"
+		out = validate_script(code, script_type="Script Report")
+		self.assertFalse(out["ok"])
+		self.assertTrue(any("frappe.qb" in e for e in out["errors"]))
+		# deduped to a single error even though frappe.qb appears twice
+		self.assertEqual(len([e for e in out["errors"] if "frappe.qb" in e]), 1)
+
+	def test_result_columns_pair_is_warned(self):
+		# result = [columns, rows] renders blank; the pair must go in `data`.
+		code = "columns = [{'label': 'A'}]\nrows = []\nresult = [columns, rows]\n"
+		out = validate_script(code, script_type="Script Report")
+		self.assertTrue(out["ok"], out["errors"])
+		self.assertTrue(any("data" in w and "blank" in w for w in out["warnings"]))
+
+	def test_correct_data_pair_is_not_warned(self):
+		code = "columns = [{'label': 'A'}]\nrows = [{'a': 1}]\ndata = [columns, rows]\n"
+		out = validate_script(code, script_type="Script Report")
+		self.assertTrue(out["ok"], out["errors"])
+		self.assertEqual(out["warnings"], [])
+
 	def test_syntax_error_is_reported(self):
 		out = validate_script("def broken(:\n    pass\n")
 		self.assertFalse(out["ok"])
