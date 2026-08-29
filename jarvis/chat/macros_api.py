@@ -189,7 +189,7 @@ def list_macros_page(
 
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params)[0][0]
 	rows = list_filters.bounded_sql(
-		f"""SELECT name, macro_name, description, enabled, stop_on_error,
+		f"""SELECT name, macro_name, description, enabled, stop_on_error, skip_confirmation,
 		schedule_enabled, schedule_frequency, schedule_time, next_run_at,
 		last_run_at, modified, merge_status,
 		CASE WHEN TRIM(COALESCE(merged_prompt, '')) != '' THEN 1 ELSE 0 END AS has_summary
@@ -238,6 +238,7 @@ def get_macro(name: str) -> dict:
 		"description": doc.description or "",
 		"enabled": int(doc.enabled or 0),
 		"stop_on_error": int(doc.stop_on_error or 0),
+		"skip_confirmation": int(doc.skip_confirmation or 0),
 		"schedule_enabled": int(doc.schedule_enabled or 0),
 		"schedule_frequency": doc.schedule_frequency or "daily",
 		"schedule_time": str(doc.schedule_time or ""),
@@ -274,12 +275,14 @@ def create_macro(
 	steps: str | list | None = None,
 	enabled: int = 1,
 	stop_on_error: int = 1,
+	skip_confirmation: int = 0,
 	schedule_enabled: int = 0,
 	schedule_frequency: str = "daily",
 	schedule_time: str | None = None,
 ) -> dict:
 	"""Create a macro. Validation (name/steps/caps) runs in the doctype validate().
-	Per-step tagged skills arrive INSIDE each step dict (``steps[].skills``)."""
+	Per-step tagged skills arrive INSIDE each step dict (``steps[].skills``). Arming
+	(``skip_confirmation`` 0 -> 1) is admin-gated in the doctype validate()."""
 	doc = frappe.get_doc(
 		{
 			"doctype": MACRO,
@@ -287,6 +290,7 @@ def create_macro(
 			"description": description or "",
 			"enabled": int(enabled or 0),
 			"stop_on_error": int(stop_on_error or 0),
+			"skip_confirmation": int(skip_confirmation or 0),
 			"schedule_enabled": int(schedule_enabled or 0),
 			"schedule_frequency": schedule_frequency or "daily",
 			"schedule_time": schedule_time or None,
@@ -307,6 +311,7 @@ def update_macro(
 	steps: str | list | None = None,
 	enabled: int | None = None,
 	stop_on_error: int | None = None,
+	skip_confirmation: int | None = None,
 	schedule_enabled: int | None = None,
 	schedule_frequency: str | None = None,
 	schedule_time: str | None = None,
@@ -326,6 +331,9 @@ def update_macro(
 		doc.enabled = int(enabled)
 	if stop_on_error is not None:
 		doc.stop_on_error = int(stop_on_error)
+	if skip_confirmation is not None:
+		# The doctype validate() admin-gates a 0 -> 1 transition; a non-admin flip raises.
+		doc.skip_confirmation = int(skip_confirmation)
 	if schedule_enabled is not None:
 		doc.schedule_enabled = int(schedule_enabled)
 	if schedule_frequency is not None:

@@ -871,3 +871,57 @@ class TestReviewHardening(FrappeTestCase):
 		with patch("jarvis.api.dispatch", return_value={"ok": True}):
 			api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
 		self.assertEqual(_agent_run_ctx.take_armed_by_macro(), "an armed macro")
+
+
+class TestMacrosApiSkipConfirmation(FrappeTestCase):
+	"""The macros_api create/update/get thread skip_confirmation (so the SPA editor
+	can set + read it), and arming via the API still hits the admin guard."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_non_admin_user()
+		_ensure_admin_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for owner in (NON_ADMIN_USER, ADMIN_USER):
+			for name in frappe.get_all(MACRO, filters={"owner": owner}, pluck="name"):
+				frappe.delete_doc(MACRO, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_create_macro_armed_by_admin_and_get_carries_it(self):
+		from jarvis.chat.macros_api import create_macro, get_macro
+
+		frappe.set_user(ADMIN_USER)
+		r = create_macro("api-armed", steps=[{"prompt": "do it"}], skip_confirmation=1)
+		name = r["data"]["name"]
+		self.assertEqual(int(frappe.db.get_value(MACRO, name, "skip_confirmation")), 1)
+		self.assertEqual(get_macro(name)["skip_confirmation"], 1)
+
+	def test_create_macro_armed_by_non_admin_rejected(self):
+		from jarvis.chat.macros_api import create_macro
+
+		frappe.set_user(NON_ADMIN_USER)
+		with self.assertRaises(frappe.PermissionError):
+			create_macro("api-armed-bad", steps=[{"prompt": "do it"}], skip_confirmation=1)
+
+	def test_update_macro_arm_rejected_for_non_admin(self):
+		from jarvis.chat.macros_api import create_macro, update_macro
+
+		frappe.set_user(NON_ADMIN_USER)
+		name = create_macro("api-upd", steps=[{"prompt": "do it"}])["data"]["name"]
+		with self.assertRaises(frappe.PermissionError):
+			update_macro(name=name, skip_confirmation=1)
+		self.assertEqual(int(frappe.db.get_value(MACRO, name, "skip_confirmation") or 0), 0)
+
+	def test_update_macro_arm_ok_for_admin(self):
+		from jarvis.chat.macros_api import create_macro, update_macro
+
+		frappe.set_user(ADMIN_USER)
+		name = create_macro("api-upd-admin", steps=[{"prompt": "do it"}])["data"]["name"]
+		update_macro(name=name, skip_confirmation=1)
+		self.assertEqual(int(frappe.db.get_value(MACRO, name, "skip_confirmation")), 1)
