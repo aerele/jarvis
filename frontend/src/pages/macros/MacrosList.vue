@@ -51,6 +51,18 @@
 				/>
 			</template>
 
+			<template #cell-macro_name="{ row }">
+				<div class="flex items-center gap-2">
+					<span class="truncate">{{ row.macro_name }}</span>
+					<Tooltip
+						v-if="row.skip_confirmation"
+						text="Armed: this macro's runs execute writes without a confirmation card (admin-set)."
+					>
+						<Badge variant="subtle" theme="orange" label="Armed" />
+					</Tooltip>
+				</div>
+			</template>
+
 			<template #cell-step_count="{ row }">
 				<div class="flex w-full items-center justify-center text-base text-ink-gray-7">
 					{{ row.step_count || 0 }} {{ (row.step_count || 0) === 1 ? "step" : "steps" }}
