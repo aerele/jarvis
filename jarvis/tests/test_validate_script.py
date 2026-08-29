@@ -19,6 +19,7 @@ class TestValidateScript(unittest.TestCase):
 		out = validate_script(code, script_type="Script Report")
 		self.assertTrue(out["ok"], out["errors"])
 		self.assertEqual(out["errors"], [])
+		self.assertEqual(out["warnings"], [])
 
 	def test_import_is_rejected(self):
 		out = validate_script("import os\nx = 1\n")
@@ -50,6 +51,46 @@ class TestValidateScript(unittest.TestCase):
 		out = validate_script("cls = doc.__class__\n")
 		self.assertFalse(out["ok"])
 		self.assertTrue(any("dunder" in e or "__class__" in e for e in out["errors"]))
+
+	def test_sql_function_field_warns_not_errors(self):
+		# get_list with an SQL function as a string field: compiles fine, so it is a
+		# warning (ok stays True), not an error - Frappe rejects it only at query time.
+		code = "rows = frappe.get_list('Sales Invoice', fields=['customer', 'sum(grand_total) as total'], group_by='customer')\n"
+		out = validate_script(code, script_type="Script Report")
+		self.assertTrue(out["ok"], out["errors"])
+		self.assertEqual(out["errors"], [])
+		self.assertTrue(
+			any("SQL function" in w and "get_list" in w for w in out["warnings"]), out["warnings"]
+		)
+
+	def test_sql_function_outside_fields_is_not_warned(self):
+		# a `sum(` in an unrelated string (a message) must not false-warn.
+		out = validate_script("frappe.msgprint('The sum(x) total is below')\ndata = 1\n")
+		self.assertTrue(out["ok"])
+		self.assertEqual(out["warnings"], [])
+
+	def test_frappe_defaults_is_flagged_as_out_of_namespace(self):
+		# frappe.defaults.* compiles but is None in safe_exec -> runtime NoneType error.
+		out = validate_script("b = frappe.defaults.get_user_default('Branch')\ndata = b\n")
+		self.assertFalse(out["ok"])
+		self.assertTrue(any("frappe.defaults" in e and "safe_exec namespace" in e for e in out["errors"]))
+
+	def test_get_user_default_is_flagged_as_out_of_namespace(self):
+		out = validate_script("c = frappe.get_user_default('Company')\ndata = c\n")
+		self.assertFalse(out["ok"])
+		self.assertTrue(any("frappe.get_user_default" in e for e in out["errors"]))
+
+	def test_valid_frappe_namespace_calls_are_not_flagged(self):
+		# get_list / get_doc / get_meta / db.get_default / utils are all in the namespace.
+		code = (
+			"co = frappe.db.get_default('company')\n"
+			"rows = frappe.get_list('Sales Invoice', fields=['grand_total'], limit_page_length=0)\n"
+			"m = frappe.get_meta('Sales Invoice')\n"
+			"data = rows\n"
+		)
+		out = validate_script(code, script_type="Script Report")
+		self.assertTrue(out["ok"], out["errors"])
+		self.assertEqual(out["errors"], [])
 
 	def test_syntax_error_is_reported(self):
 		out = validate_script("def broken(:\n    pass\n")
