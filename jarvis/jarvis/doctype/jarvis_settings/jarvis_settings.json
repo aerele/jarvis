@@ -89,7 +89,7 @@
   "chat_device_token",
   "agent_tools_section",
   "run_query_doctype_allowlist",
-  "auto_apply_changes",
+  "disable_armed_skip",
   "core_apps_override",
   "enable_customizations_clause",
   "enable_role_profiles",
@@ -668,11 +668,11 @@
    "description": "Defense-in-depth restriction for the run_query agent tool. Comma- or newline-separated list of DocType names. When non-empty, run_query refuses any query referencing a DocType not on this list - even if the calling user has read permission on it through Frappe's normal permission system. Leave empty (default) to allow any DocType the user can read. Use this to lock the agent to a known-good slice of your data (e.g. 'Sales Invoice, Customer, Item, Sales Invoice Item') so a future allowlist bypass in the SQL parser still can't reach the rest of the bench."
   },
   {
-   "fieldname": "auto_apply_changes",
+   "fieldname": "disable_armed_skip",
    "fieldtype": "Check",
-   "label": "Auto-apply changes (skip confirmation)",
+   "label": "Disable armed skip-confirmation (kill switch)",
    "default": "0",
-   "description": "DEPRECATED (issue #186): auto-apply is now per-conversation and admin-gated (Jarvis Conversation.auto_apply). This site-wide Single field is no longer read or written; left in place to avoid a destructive schema change."
+   "description": "Emergency kill switch. When 1, armed macros (Jarvis Macro.skip_confirmation) STOP skipping confirmation cards immediately, site-wide, with no deploy - every covered write re-gates behind its card. The escape hatch if an armed macro ever misbehaves. Default 0."
   },
   {
    "fieldname": "core_apps_override",
