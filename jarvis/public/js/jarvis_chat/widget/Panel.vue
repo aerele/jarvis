@@ -169,6 +169,26 @@
 				</button>
 			</div>
 
+			<!-- Worker-degraded heads-up: a SEPARATE, additive signal from the
+			     readiness gate above (see workerWarning's declaration). Renders ONLY
+			     when readiness === "ready" - chat is fully usable, just maybe a
+			     little slow. "gate" has no thread to warn about, and "degraded"
+			     already shows .jvp-notice below saying replies may FAIL outright;
+			     stacking this "may be a little slower" banner under that would
+			     contradict and undersell the real state, so degraded keeps its own
+			     banner instead of also getting this one. Non-blocking by
+			     construction either way - never disables the composer, never
+			     replaces the conversation below it. Sits above the scrollable thread
+			     so it reads as a thin banner at the top, not inline with any one
+			     message. -->
+			<div
+				v-if="workerWarning && readiness === 'ready'"
+				class="jvp-worker-notice"
+				role="status"
+			>
+				Replies may be a little slower than usual right now.
+			</div>
+
 			<div class="jvp-body" ref="bodyEl" @scroll.passive="onBodyScroll">
 				<!-- Never onboarded (readiness === "gate"): the panel cannot possibly
 				     chat, so the whole body - welcome, history, composer below - is
@@ -601,7 +621,7 @@ import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
 import { resizeFrom } from "./panel_size.mjs";
 import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
-import { classifyReadiness, degradedActionable } from "./panel_readiness.mjs";
+import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
 import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
 import { sortPendingCards } from "./pending_order.mjs";
 import { ONBOARDING_URL } from "./config.mjs";
@@ -907,6 +927,14 @@ const readinessCta = ref(null);
 // True while a Retry (resyncLlm, for a stuck apply - jarvis#825) is in flight, so
 // the CTA shows progress and cannot be double-clicked into the server's throttle.
 const retryingApply = ref(false);
+// SEPARATE, additive signal from `readiness` above: is_ready_for_chat also
+// returns worker_warning (bool) when background workers are under-provisioned
+// but chat still works. Read from the same resolveReadiness() response, but
+// never folds into the ready/gate/degraded verdict - a worker-degraded-but-
+// usable workspace is still "ready" (see panel_readiness.mjs's shouldWarnWorkers),
+// so this needs its own ref and its own template v-if. Fails CLOSED (false) on
+// a missing/thrown response, same as shouldWarnWorkers itself.
+const workerWarning = ref(false);
 // Only an admin who can actually reach the wizard gets the CTA button in the
 // gate state, mirroring OnboardingGate.vue's isSystemManager split. Read off
 // frappe.boot.user.roles - core Frappe bootinfo (User.load_user), already
@@ -1252,11 +1280,13 @@ function refreshReadiness() {
 				readinessNotice.value = "";
 				readinessCta.value = null;
 			}
+			workerWarning.value = shouldWarnWorkers(r);
 		})
 		.catch(() => {
 			readiness.value = classifyReadiness(null);
 			readinessNotice.value = "";
 			readinessCta.value = null;
+			workerWarning.value = false;
 		});
 }
 
@@ -2592,6 +2622,27 @@ defineExpose({ load, startNewChat, convId });
 	height: 26px;
 	padding: 0 11px;
 	font-size: 12px;
+}
+
+/* ---- worker-degraded heads-up (workerWarning) ----
+   A lighter, one-line sibling of .jvp-notice above: same amber "heads-up, not an
+   error" tokens, but no icon/CTA/wrapping body - just a thin strip so it reads as
+   compact and clearly non-blocking. Renders only on a fully "ready" workspace
+   whose workers are merely stretched (see the template v-if) - readiness ===
+   "degraded" already gets .jvp-notice's own "replies may fail" banner, and this
+   lighter "may be a little slower" one would undersell that, so the two never
+   stack. */
+.jvp-worker-notice {
+	flex: none;
+	margin: 10px 15px 0;
+	padding: 6px 11px;
+	border: 1px solid var(--jv-warn-bd);
+	border-radius: 9px;
+	background: var(--jv-warn-bg);
+	color: var(--jv-warn);
+	font-size: 12px;
+	line-height: 1.4;
+	text-align: center;
 }
 
 /* ---- pending write confirmation ---- */
