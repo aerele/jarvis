@@ -42,6 +42,19 @@
 				<path d="M5.6 5.6l12.8 12.8" />
 			</svg>
 			<svg
+				v-else-if="view.icon === 'auto_applied'"
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
+				<path d="M13 2 3 14h7l-1 8 10-12h-7z" />
+			</svg>
+			<svg
 				v-else
 				width="14"
 				height="14"
@@ -58,6 +71,12 @@
 		<div class="jv-receipt-main">
 			<div class="jv-receipt-line">
 				<span class="jv-receipt-title">{{ view.title }}</span>
+				<span
+					v-if="armedMacro"
+					class="jv-receipt-armed"
+					:title="'Ran automatically under the armed macro ' + armedMacro"
+					>· {{ armedMacro }}</span
+				>
 				<a
 					v-if="singleUrl"
 					:href="singleUrl"
@@ -143,6 +162,12 @@ const view = computed(() => {
 	);
 });
 
+// Provenance for an auto_applied (armed-macro) receipt: which macro authorized
+// running this write without a confirmation card.
+const armedMacro = computed(() =>
+	props.message.action_outcome === "auto_applied" ? props.message.armed_by_macro || "" : ""
+);
+
 // A single-record outcome with a Desk link → show a compact "open" affordance
 // (the record name is already in the title). Bulk uses the details expander.
 const singleUrl = computed(() => {
@@ -194,6 +219,15 @@ const ts = computed(() => {
 }
 .jv-receipt-ico.confirmed {
 	color: var(--green);
+}
+.jv-receipt-ico.auto_applied {
+	color: var(--green);
+}
+.jv-receipt-armed {
+	flex: none;
+	font-size: 11px;
+	color: var(--text-3);
+	white-space: nowrap;
 }
 .jv-receipt-ico.discarded {
 	color: var(--text-3);
