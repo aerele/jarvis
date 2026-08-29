@@ -173,7 +173,7 @@ function receiptNames(tool, args, data, outcome) {
 			return data.sent.map((d) => (d && (d.recipients || d.name)) || "").filter(Boolean);
 		if (tool === "send_email" && data.recipients) return [].concat(data.recipients);
 		if (data.name) return [data.name];
-		if (outcome === "confirmed") return [];
+		if (outcome === "confirmed" || outcome === "auto_applied") return [];
 	}
 	if (Array.isArray(args.names)) return args.names.slice();
 	if (Array.isArray(args.updates)) return args.updates.map((u) => u && u.name).filter(Boolean);
@@ -200,10 +200,12 @@ export function receiptView(tool, args, result, outcome) {
 		(Array.isArray(args.docs) && args.docs[0] && args.docs[0].doctype) ||
 		"record";
 	const action = args.action || data.action || "";
+	// auto_applied (an armed macro ran it uncarded) is a real execution, like confirmed.
+	const ran = outcome === "confirmed" || outcome === "auto_applied";
 	const count =
-		outcome === "confirmed" && typeof data.count === "number"
+		ran && typeof data.count === "number"
 			? data.count
-			: outcome === "confirmed"
+			: ran
 			? names.length || argCount(args)
 			: argCount(args);
 
@@ -252,6 +254,12 @@ export function receiptView(tool, args, result, outcome) {
 						count
 				  )} were ${verb.past.toLowerCase()}`
 				: `Failed — ${subject} was not ${verb.past.toLowerCase()}`;
+	} else if (outcome === "auto_applied") {
+		// An armed macro ran this write WITHOUT a confirmation card. Render a distinct
+		// receipt (not an identical "confirmed" chip) so it never reads as a silent run.
+		icon = "auto_applied";
+		tone = "success";
+		title = `${verb.past} ${wfPrefix}${subject} — automatically, no confirmation`;
 	} else {
 		icon = "confirmed";
 		tone = "success";

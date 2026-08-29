@@ -22,6 +22,7 @@ class JarvisConversation(Document):
 	def validate(self):
 		self._guard_auto_apply_enable()
 		self._guard_file_box_enable()
+		self._guard_skip_confirmation_enable()
 
 	def _guard_auto_apply_enable(self):
 		"""Defense-in-depth backstop for the admin-gated ``auto_apply`` flag
@@ -77,5 +78,30 @@ class JarvisConversation(Document):
 		if not has_jarvis_admin_access(frappe.session.user):
 			frappe.throw(
 				_("Enabling File Box mode requires a Jarvis Admin or System Manager role."),
+				frappe.PermissionError,
+			)
+
+	def _guard_skip_confirmation_enable(self):
+		"""``skip_confirmation`` is the flag the write-confirmation gate reads to run
+		a macro's writes uncarded (the BROAD covered set - run_method/send_email/etc.,
+		not just the create/update ``auto_apply`` covers). The one legitimate enabler
+		is an armed macro run (``jarvis.chat.macros.run_macro`` -> raw
+		``frappe.db.set_value``, which bypasses this controller).
+
+		This guards every OTHER path: the field is owner-writable with no
+		permlevel, so a non-admin owner must not flip it 0 -> 1 through a generic
+		``doc.save()`` / ``update_doc`` / ``frappe.client.set_value`` and turn their
+		own chat into an uncarded-write conversation. This is LOAD-BEARING (the gate
+		reads THIS field), not mere defense-in-depth. Only 0/unset -> 1 is gated;
+		disabling and no-op saves stay free for the owner.
+		"""
+		if not self.skip_confirmation:
+			return
+		previous = self.get_doc_before_save()
+		if previous and bool(previous.skip_confirmation):
+			return
+		if not has_jarvis_admin_access(frappe.session.user):
+			frappe.throw(
+				_("Enabling skip-confirmation requires a Jarvis Admin or System Manager role."),
 				frappe.PermissionError,
 			)
