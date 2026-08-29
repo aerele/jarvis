@@ -321,10 +321,15 @@ def _armed_run_parked_card(conversation: str, owner: str) -> dict | None:
 
 def _armed_stop_message(current_step: int, parked: dict) -> str:
 	"""D5 stop reason - names the un-clickable action AND the re-run hazard (§7): the
-	covered steps before it already ran, so re-running the whole macro repeats them."""
+	covered steps before it already ran, so re-running the whole macro repeats them.
+
+	``current_step`` is already the 1-based number of the step that just ran and parked
+	(``_run_step`` sets ``current_step = index + 1`` before the turn), so it is used
+	as-is (floored at 1 for the merged/edge case), NOT +1."""
+	step = max(int(current_step or 0), 1)
 	what = parked.get("summary") or parked.get("tool") or "a confirmation"
 	return (
-		f"Stopped at step {current_step + 1}: this step needs a confirmation that can't be "
+		f"Stopped at step {step}: this step needs a confirmation that can't be "
 		f"shown in an unattended run ({what}). The steps before it already ran, so "
 		f"re-running the whole macro would repeat them - fix this step's data or run it "
 		f"interactively, don't re-run the macro. Nothing after this step ran."
@@ -376,8 +381,14 @@ def advance_after_turn(conversation_id: str, *, errored: bool) -> None:
 				if parked:
 					from jarvis.chat import pending_confirm
 
-					_finish(run, "failed", error=_armed_stop_message(run.current_step or 0, parked))
+					# SWEEP the token FIRST, then terminalize. _finish disarms the
+					# conversation (skip_confirmation -> 0), and the _confirm_core armed
+					# guard keys off that flag - so if we disarmed before sweeping, a Confirm
+					# racing in that window would read flag=0, bypass the guard, and run the
+					# destructive write. Consuming the token first makes a racing Confirm hit
+					# a dead token and be refused regardless of the flag (deterministic).
 					pending_confirm.clear_for_conversation(owner_user, run.conversation)
+					_finish(run, "failed", error=_armed_stop_message(run.current_step or 0, parked))
 					_publish_done(run, macro_doc, "failed")
 					return
 

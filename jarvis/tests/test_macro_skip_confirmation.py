@@ -98,6 +98,11 @@ class TestConversationSkipConfirmationGuard(FrappeTestCase):
 
 	def tearDown(self):
 		frappe.set_user(self._orig)
+		# _make_conv commits, so FrappeTestCase's class-rollback won't undo it.
+		for owner in (NON_ADMIN_USER, ADMIN_USER):
+			for name in frappe.get_all(CONV, filters={"owner": owner}, pluck="name"):
+				frappe.delete_doc(CONV, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
 
 	def test_non_admin_owner_save_cannot_enable(self):
 		conv = _make_conv(NON_ADMIN_USER)
@@ -229,6 +234,10 @@ class TestArmedSkipGate(FrappeTestCase):
 	def tearDown(self):
 		frappe.db.set_value("Jarvis Settings", None, "disable_armed_skip", 0, update_modified=False)
 		frappe.set_user(self._orig)
+		for dt in (CONV, "ToDo"):
+			for name in frappe.get_all(dt, filters={"owner": TEST_USER}, pluck="name"):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
 
 	def _armed_conv(self) -> str:
 		conv = _make_conv(TEST_USER)
@@ -288,6 +297,17 @@ class TestArmedSkipGate(FrappeTestCase):
 			)
 		self.assertTrue(disp.called, "a bulk covered write skips the batch card when armed")
 		self.assertNotEqual(r["data"].get("status"), "pending_confirmation")
+
+	def test_bulk_over_cap_still_bounces_when_armed(self):
+		from jarvis.tools._bulk import _MAX_BATCH
+
+		conv = self._armed_conv()
+		docs = [{"doctype": "ToDo", "values": {"description": f"b{i}"}} for i in range(_MAX_BATCH + 1)]
+		with patch("jarvis.api.dispatch") as disp:
+			r = api._run_tool("create_docs", {"docs": docs}, conversation=conv)
+		self.assertFalse(r["ok"], "an over-size batch must bounce, even when armed")
+		self.assertEqual(r["error"]["code"], "InvalidArgumentError")
+		self.assertFalse(disp.called, "the F16 cap bounces before dispatch, armed or not")
 
 
 class TestRunMacroStampAndInert(FrappeTestCase):
@@ -556,7 +576,10 @@ class TestD5StopAndReport(FrappeTestCase):
 		macros.advance_after_turn(conv, errored=False)
 
 		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "failed")
-		self.assertIn("unattended run", frappe.db.get_value(self.RUN, run_name, "error") or "")
+		err = frappe.db.get_value(self.RUN, run_name, "error") or ""
+		self.assertIn("unattended run", err)
+		# Step number is 1-based and not overshot (current_step floored at 1 here).
+		self.assertIn("Stopped at step 1", err)
 		self.assertEqual(self._pending_count(conv), 0, "the parked token must be swept")
 
 	def test_armed_merged_run_stops_when_it_would_otherwise_finish(self):
@@ -611,6 +634,8 @@ class TestArmedRunImportAnnouncement(FrappeTestCase):
 		for di in ("DI-ARMED-TEST-1", "DI-UNARMED-TEST-1"):
 			for name in frappe.get_all(self.ANNOUNCE, filters={"data_import": di}, pluck="name"):
 				frappe.delete_doc(self.ANNOUNCE, name, force=True, ignore_permissions=True)
+		for name in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			frappe.delete_doc(CONV, name, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
 	def _armed_conv(self) -> str:
@@ -696,7 +721,10 @@ class TestArmedReceiptProvenance(FrappeTestCase):
 		with patch("jarvis.api.dispatch", return_value={"ok": True}):
 			api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
 		# The armed branch stashed the arming macro; consume it and confirm.
-		self.assertEqual(_agent_run_ctx.take_armed_by_macro(), macro)
+		# The marker is the human macro_NAME (Jarvis Macro autoname is a hash), not the
+		# opaque run.macro docname.
+		self.assertNotEqual("prov-macro", macro)  # sanity: name != hash docname
+		self.assertEqual(_agent_run_ctx.take_armed_by_macro(), "prov-macro")
 
 	def test_persist_labels_armed_receipt(self):
 		from jarvis.tools import _agent_run_ctx
@@ -743,6 +771,31 @@ class TestArmedReceiptProvenance(FrappeTestCase):
 		self.assertEqual(len(row), 1)
 		self.assertFalse(row[0].action_outcome)
 		self.assertFalse(row[0].armed_by_macro)
+
+	def test_failed_armed_write_still_labelled_failed_with_provenance(self):
+		"""A FAILED armed write must stay visible: labelled 'failed' (a red chip) with
+		the macro provenance, not collapsed into a silent Activity row."""
+		from jarvis.tools import _agent_run_ctx
+
+		conv = _make_conv(TEST_USER)
+		sk = "sk-armed-fail-test"
+		frappe.db.set_value(CONV, conv, "session_key", sk, update_modified=False)
+		_agent_run_ctx.set_armed_by_macro("MACRO-FAIL-X")
+		api._persist_and_publish_tool_call(
+			session_key=sk,
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "x"},
+			result={"ok": False, "error": {"message": "boom"}},
+			tool_call_id="tc-armed-fail-1",
+		)
+		row = frappe.get_all(
+			self.MSG,
+			filters={"conversation": conv, "tool_call_id": "tc-armed-fail-1"},
+			fields=["action_outcome", "armed_by_macro"],
+		)
+		self.assertEqual(len(row), 1)
+		self.assertEqual(row[0].action_outcome, "failed")
+		self.assertEqual(row[0].armed_by_macro, "MACRO-FAIL-X")
 
 
 class TestReviewHardening(FrappeTestCase):

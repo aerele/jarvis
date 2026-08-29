@@ -348,9 +348,13 @@ def _persist_and_publish_tool_call(
 	from jarvis.tools import _agent_run_ctx
 
 	armed_by_macro = _agent_run_ctx.take_armed_by_macro()
-	armed_outcome = (
-		"auto_applied" if (armed_by_macro and isinstance(result, dict) and result.get("ok")) else None
-	)
+	# A FAILED armed write must still be visible (it ran uncarded, unattended, and
+	# broke - exactly what T8 surfaces): label it "failed" (a red chip carrying the
+	# macro provenance) rather than letting it fall into the collapsed Activity row.
+	if armed_by_macro:
+		armed_outcome = "auto_applied" if (isinstance(result, dict) and result.get("ok")) else "failed"
+	else:
+		armed_outcome = None
 	persist_tool_receipt(
 		conv_name,
 		tool,
@@ -1441,10 +1445,18 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			from jarvis.tools import _agent_run_ctx
 
 			# Always label an armed write (we are in the armed branch, so it IS armed):
-			# fall back to a generic marker if the run-row lookup misses (the abnormal
-			# lingering-flag state) so an armed write is never silently unlabelled.
+			# resolve the human macro_name (Jarvis Macro autoname is a hash, so the run's
+			# `macro` docname is opaque) and fall back to a generic marker if the run-row
+			# lookup misses (the abnormal lingering-flag state) - never silently unlabelled.
+			_armed_run_macro = frappe.db.get_value(
+				"Jarvis Macro Run", {"conversation": conv, "status": "running"}, "macro"
+			)
 			_agent_run_ctx.set_armed_by_macro(
-				frappe.db.get_value("Jarvis Macro Run", {"conversation": conv, "status": "running"}, "macro")
+				(
+					frappe.db.get_value("Jarvis Macro", _armed_run_macro, "macro_name")
+					if _armed_run_macro
+					else None
+				)
 				or "an armed macro"
 			)
 			if tool == "run_import":

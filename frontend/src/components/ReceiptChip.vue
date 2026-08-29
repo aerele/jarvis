@@ -162,11 +162,10 @@ const view = computed(() => {
 	);
 });
 
-// Provenance for an auto_applied (armed-macro) receipt: which macro authorized
-// running this write without a confirmation card.
-const armedMacro = computed(() =>
-	props.message.action_outcome === "auto_applied" ? props.message.armed_by_macro || "" : ""
-);
+// Provenance for an armed-macro receipt: which macro authorized running this write
+// without a confirmation card. Shown on both auto_applied (ran ok) and a failed
+// armed write (labelled "failed" but still carrying the provenance).
+const armedMacro = computed(() => props.message.armed_by_macro || "");
 
 // A single-record outcome with a Desk link → show a compact "open" affordance
 // (the record name is already in the title). Bulk uses the details expander.
@@ -224,10 +223,13 @@ const ts = computed(() => {
 	color: var(--green);
 }
 .jv-receipt-armed {
-	flex: none;
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 	font-size: 11px;
 	color: var(--text-3);
-	white-space: nowrap;
 }
 .jv-receipt-ico.discarded {
 	color: var(--text-3);

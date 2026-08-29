@@ -337,6 +337,17 @@ class TestDropAutoApplyChangesPatch(FrappeTestCase):
 	def _row_count(self, field):
 		return frappe.db.count("Singles", {"doctype": "Jarvis Settings", "field": field})
 
+	def setUp(self):
+		# Snapshot the real sibling (a live run_query defense-in-depth allowlist) we
+		# borrow to prove the patch leaves it untouched, and restore it in tearDown -
+		# so this test can never corrupt it even if a future edit adds a commit.
+		self._sibling_snapshot = frappe.db.get_single_value("Jarvis Settings", self._SIBLING)
+
+	def tearDown(self):
+		frappe.db.set_value(
+			"Jarvis Settings", None, self._SIBLING, self._sibling_snapshot, update_modified=False
+		)
+
 	def test_patch_drops_only_the_dead_row_and_is_idempotent(self):
 		from jarvis.patches.v2_17_drop_auto_apply_changes import execute
 
