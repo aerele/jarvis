@@ -1440,8 +1440,12 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			# queryable receipt - not silence-by-omission.
 			from jarvis.tools import _agent_run_ctx
 
+			# Always label an armed write (we are in the armed branch, so it IS armed):
+			# fall back to a generic marker if the run-row lookup misses (the abnormal
+			# lingering-flag state) so an armed write is never silently unlabelled.
 			_agent_run_ctx.set_armed_by_macro(
 				frappe.db.get_value("Jarvis Macro Run", {"conversation": conv, "status": "running"}, "macro")
+				or "an armed macro"
 			)
 			if tool == "run_import":
 				# The armed branch bypasses _confirm_core, which is where a CONFIRMED

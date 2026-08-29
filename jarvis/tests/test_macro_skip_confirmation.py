@@ -743,3 +743,78 @@ class TestArmedReceiptProvenance(FrappeTestCase):
 		self.assertEqual(len(row), 1)
 		self.assertFalse(row[0].action_outcome)
 		self.assertFalse(row[0].armed_by_macro)
+
+
+class TestReviewHardening(FrappeTestCase):
+	"""Security-review follow-ups: a racing Confirm on an armed conversation is
+	refused (the D5 card waits for the sweep), and an armed write is always labelled
+	even if the run-row lookup misses."""
+
+	RUN = "Jarvis Macro Run"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_non_admin_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+
+	def tearDown(self):
+		from jarvis.chat import pending_confirm
+		from jarvis.tools import _agent_run_ctx
+
+		_agent_run_ctx.take_armed_by_macro()
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": NON_ADMIN_USER}, pluck="name"):
+			try:
+				pending_confirm.clear_for_conversation(NON_ADMIN_USER, conv)
+			except Exception:
+				pass
+		for dt in (self.RUN, MACRO, CONV, "ToDo"):
+			for name in frappe.get_all(dt, filters={"owner": NON_ADMIN_USER}, pluck="name"):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_confirm_refused_on_armed_conversation(self):
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import _confirm_core
+
+		conv = _make_conv(NON_ADMIN_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		frappe.set_user(NON_ADMIN_USER)
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "confirm-race"}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
+		r = api._run_tool("delete_doc", {"doctype": "ToDo", "name": todo.name}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		recs = [
+			t
+			for t in pending_confirm.list_for_owner(NON_ADMIN_USER, conversation=conv)
+			if t.get("conversation") == conv
+		]
+		self.assertEqual(len(recs), 1)
+		token = recs[0]["token"]
+
+		res = _confirm_core(token, conv)
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["type"], "InvalidConfirmation")
+		self.assertTrue(frappe.db.exists("ToDo", todo.name), "the delete must not have run")
+		still = [
+			t
+			for t in pending_confirm.list_for_owner(NON_ADMIN_USER, conversation=conv)
+			if t.get("conversation") == conv
+		]
+		self.assertEqual(len(still), 1, "the token survives (uncomsumed) for the D5 sweep")
+
+	def test_armed_write_labelled_even_without_running_run(self):
+		from jarvis.tools import _agent_run_ctx
+
+		conv = _make_conv(NON_ADMIN_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		# No Jarvis Macro Run bound: the run-row lookup returns None (abnormal state).
+		frappe.set_user(NON_ADMIN_USER)
+		with patch("jarvis.api.dispatch", return_value={"ok": True}):
+			api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertEqual(_agent_run_ctx.take_armed_by_macro(), "an armed macro")
