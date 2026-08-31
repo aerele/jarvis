@@ -6537,9 +6537,12 @@ async function buildDraftModel(a) {
 		verb === "update"
 			? ""
 			: String(
-					((a.fields || []).find((x) => String(x.label || "").toLowerCase() === "name") || {})
-						.value ?? ""
-				);
+					(
+						(a.fields || []).find(
+							(x) => String(x.label || "").toLowerCase() === "name"
+						) || {}
+					).value ?? ""
+			  );
 	return {
 		verb,
 		doctype: a.doctype,
