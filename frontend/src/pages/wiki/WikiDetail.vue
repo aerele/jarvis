@@ -150,8 +150,8 @@
 					v-if="page.contradiction_flag"
 					class="mt-3 rounded-lg border border-outline-red-2 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
 				>
-					People have reported conflicting facts. Look for the "Contradiction
-					flagged" section below.{{
+					People have reported conflicting facts. Look for the "Contradiction flagged"
+					section below.{{
 						page.can_edit
 							? " Edit the page to keep the correct version. Saving marks the conflict resolved."
 							: " A wiki manager can edit the page to resolve it."
@@ -300,6 +300,7 @@ import {
 } from "@/api/wiki";
 import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { WIKI_TYPES, SCOPE_THEME, scrub } from "@/lib/wikiMeta";
 
 const props = defineProps({
 	slug: { type: String, default: "" },
@@ -308,17 +309,6 @@ const props = defineProps({
 
 const router = useRouter();
 
-const WIKI_TYPES = [
-	"Customer",
-	"Supplier",
-	"Item",
-	"Process",
-	"Doctype",
-	"Exception",
-	"Integration",
-	"People",
-	"Org",
-];
 const TYPE_SELECT_OPTIONS = [
 	{ label: "Select a type", value: "" },
 	...WIKI_TYPES.map((t) => ({ label: t === "Org" ? "Org notes" : t, value: t })),
@@ -339,8 +329,6 @@ const SCOPE_LABELS = {
 	Role: "Role - people holding a role",
 	User: "Personal - just me",
 };
-const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" };
-
 // ── caps (creatable scopes + roles, for the create form only) ───────────────
 const caps = reactive({ creatable_scopes: [], manageable_roles: [], is_sm: false });
 // Returns false on a failed call so init() can show a real error instead of
@@ -384,11 +372,6 @@ const roleSelectOptions = computed(() =>
 );
 // Preview of the server-derived slug - mirrors WikiTab's former preview so it
 // never lies about the final page id.
-const scrub = (s) =>
-	String(s || "")
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
 const slugPreview = computed(() => {
 	const base = scrub(form.title);
 	if (!base || !form.page_type) return "";
@@ -460,7 +443,10 @@ const breadcrumbs = computed(() => [
 	{ label: "Wiki", route: { name: "SkillsList", hash: "#wiki" } },
 	props.isNew
 		? { label: "New page", route: { name: "WikiPageNew" } }
-		: { label: pageTitle.value, route: { name: "WikiPageDetail", params: { slug: props.slug } } },
+		: {
+				label: pageTitle.value,
+				route: { name: "WikiPageDetail", params: { slug: props.slug } },
+		  },
 ]);
 
 const bodyHtml = computed(() =>
@@ -510,8 +496,14 @@ const promoPending = computed(() => !!(myPromo.value && myPromo.value.status ===
 async function loadMyPromo() {
 	myPromo.value = null;
 	if (!page.value || page.value.scope !== "User" || !page.value.can_edit) return;
+	// Captured before the await; the loadConversation idiom (ChatView.vue) -
+	// drop the result if the route moved to a different page while this
+	// request was in flight, so a slow response can't clobber the chip for
+	// the page the user actually navigated to.
+	const slug = props.slug;
 	try {
-		const res = await myWikiPromotion(props.slug);
+		const res = await myWikiPromotion(slug);
+		if (props.slug !== slug) return;
 		myPromo.value = res && res.status ? res : null;
 	} catch {
 		// best-effort chip
@@ -679,7 +671,12 @@ watch(() => [props.slug, props.isNew], init, { immediate: true });
 // ── dirty guard (D21, the SkillDetail/MacroDetail precedent) ────────────────
 const dirty = computed(() => {
 	if (props.isNew)
-		return !!(form.title.trim() || form.page_type || form.summary.trim() || form.body_md.trim());
+		return !!(
+			form.title.trim() ||
+			form.page_type ||
+			form.summary.trim() ||
+			form.body_md.trim()
+		);
 	if (!editing.value) return false;
 	return (
 		editTitle.value !== ((page.value && page.value.title) || "") ||

@@ -267,7 +267,7 @@ describe("P1-2 an unreadable link is never a silently unfiltered list", () => {
 		expect(route.query[URL_PARAM]).toBeUndefined();
 		expect(opts.fetchFn.mock.calls.at(-1)[0].filters_v2).toHaveLength(9); // still applied
 		expect(api.filterNotice.value).toBe(
-			"This filter set is too large to share as a link — it is applied, but it is not in the address bar."
+			"This filter set is too large to share as a link. It is applied, but not in the address bar."
 		);
 	});
 

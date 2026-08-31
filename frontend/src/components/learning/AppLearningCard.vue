@@ -4,16 +4,16 @@
 		<div class="mt-0.5 text-sm text-ink-gray-6">
 			Runs as the
 			<span class="font-medium text-ink-gray-8">Custom App Learning</span> agent. It reads
-			the apps <span class="font-medium text-ink-gray-8">you select</span> and writes pages to
-			the Org wiki, updating them each time you rerun. Admins only.
+			the apps <span class="font-medium text-ink-gray-8">you select</span> and writes pages
+			to the Org wiki, updating them each time you rerun. Admins only.
 		</div>
 		<div
 			class="mt-3 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
 		>
 			<FeatherIcon name="alert-triangle" class="size-4 shrink-0" />
 			<span>
-				A run sends the selected apps' source code to your AI provider. Only pick apps
-				you trust.
+				A run sends the selected apps' source code to your AI provider. Only pick apps you
+				trust.
 			</span>
 		</div>
 		<div class="mt-4 flex flex-wrap items-center gap-3">

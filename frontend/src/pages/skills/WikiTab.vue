@@ -213,6 +213,7 @@ import {
 } from "@/api/wiki";
 import { agentName } from "@/branding";
 import { errHtml } from "@/lib/errors";
+import { WIKI_TYPES, SCOPE_THEME } from "@/lib/wikiMeta";
 
 // /skills is a TABBED shell; the `fv2` payload carries its view key so a sibling
 // tab's filters are never half-applied here (judgment C08-7).
@@ -220,22 +221,10 @@ const route = useRoute();
 const router = useRouter();
 
 // ── static config ────────────────────────────────────────────────────────────
-const WIKI_TYPES = [
-	"Customer",
-	"Supplier",
-	"Item",
-	"Process",
-	"Doctype",
-	"Exception",
-	"Integration",
-	"People",
-	"Org",
-];
 const TYPE_OPTIONS = [
 	{ label: "All types", value: "" },
 	...WIKI_TYPES.map((t) => ({ label: t === "Org" ? "Org notes" : t, value: t })),
 ];
-const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" };
 const SCOPE_OPTIONS = [
 	{ label: "All scopes", value: "" },
 	{ label: "Org", value: "org" },

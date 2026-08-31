@@ -124,7 +124,11 @@ describe("WikiDetail doCreate payload (scope/target_role)", () => {
 		w.vm.form.target_role = "Sales User";
 		await w.vm.doCreate();
 		expect(createWikiPage).toHaveBeenCalledWith(
-			expect.objectContaining({ scope: "Role", target_role: "Sales User", page_type: "Process" })
+			expect.objectContaining({
+				scope: "Role",
+				target_role: "Sales User",
+				page_type: "Process",
+			})
 		);
 
 		// scope flips back to Org WITHOUT clearing form.target_role - doCreate's own
