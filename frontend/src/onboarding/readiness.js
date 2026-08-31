@@ -251,12 +251,38 @@ export async function billingNoticeOf() {
 // safe, please don't retry") - never a Renew or Reconnect action, both of which
 // could make it worse. Like container_provisioning it carries the backend's own
 // `detail`, so it belongs here rather than on any billing/AI-connect banner.
+// "container_unavailable" (jarvis#885) also shares this accessor for the
+// detail SENTENCE only - admin's health cron confirmed the container is dead,
+// and its own words are the whole point of this text, same as every other
+// reason here. It does NOT share the "Chat may not work yet" title though:
+// isContainerUnavailable() below gives ChatView its own outage-framed banner,
+// checked before the generic one in the v-else-if chain so it wins.
 export async function readinessDetailOf() {
 	const r = await checkReady();
 	if (!r || r.ready) return "";
-	if (r.reason === "container_provisioning" || r.reason === "authority_repair_required")
+	if (
+		r.reason === "container_provisioning" ||
+		r.reason === "authority_repair_required" ||
+		r.reason === "container_unavailable"
+	)
 		return r.detail || "";
 	return "";
+}
+
+// True when the workspace is not chat-ready because admin's health cron
+// confirmed the serving container is dead/unhealthy (jarvis#885, backend's
+// "Unavailable" chat_readiness). Its own accessor - same "one reason, one
+// accessor" convention as needsLlmConnection below - because this reason needs
+// its own OUTAGE-framed banner ("Chat is temporarily unavailable"), never the
+// generic "Chat may not work yet" title that readinessDetailOf's shared detail
+// text would otherwise fall into. ChatView checks this BEFORE the generic
+// notReadyNotice banner in its v-else-if chain, and still reads the detail
+// SENTENCE off readinessDetailOf above (which now also covers this reason) for
+// the message body - only the title/framing is different, never the source of
+// admin's own words.
+export async function isContainerUnavailable() {
+	const r = await checkReady();
+	return !!(r && !r.ready && r.reason === "container_unavailable");
 }
 
 // True when the workspace is not chat-ready specifically because it has no usable

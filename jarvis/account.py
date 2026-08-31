@@ -485,7 +485,9 @@ def _admin_chat_gate() -> dict:
 	code is ``"authority_repair_required"`` for ``SupportRequired`` (a paged
 	incident, no self-service action), ``"reconnect_required"`` for
 	``ReconnectRequired`` (slice 4b: reconnect the provider), ``"subscription_suspended"``
-	for ``Suspended`` (renew) and ``"container_provisioning"`` otherwise (wait) -
+	for ``Suspended`` (renew), ``"container_unavailable"`` for ``Unavailable``
+	(jarvis#885: admin's health cron confirmed the container is dead/unhealthy -
+	an outage, not a wait) and ``"container_provisioning"`` otherwise (wait) -
 	each kept distinct so a customer isn't told to wait for a container that won't
 	come back, or to keep spinning on a strand that only a reconnect can clear.
 
@@ -569,6 +571,20 @@ def _admin_chat_gate() -> dict:
 			return {
 				"ready": False,
 				"reason": "reconnect_required",
+				"billing_notice": {},
+				"detail": conn.get("chat_readiness_reason") or "",
+			}
+		# admin-v2's health cron marks a container "Unavailable" once it is
+		# confirmed dead/unhealthy - a DIFFERENT fact than "Provisioning"
+		# (the two states are mutually exclusive). Bucketing this into the
+		# generic "container_provisioning" fallback below tells a customer
+		# whose workspace just died that it is "coming online", which is
+		# false and stalls them on a spinner that never resolves. Its own
+		# reason lets the frontend render an honest outage message instead.
+		if conn["chat_readiness"] == "Unavailable":
+			return {
+				"ready": False,
+				"reason": "container_unavailable",
 				"billing_notice": {},
 				"detail": conn.get("chat_readiness_reason") or "",
 			}

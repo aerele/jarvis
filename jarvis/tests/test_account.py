@@ -356,6 +356,40 @@ class TestAdminChatGate(FrappeTestCase):
 				{"ready": False, "reason": "reconnect_required", "detail": "", "billing_notice": {}},
 			)
 
+	def test_container_unavailable_is_distinct_from_provisioning(self):
+		"""jarvis#885: admin-v2's health cron confirmed the serving container is
+		dead/unhealthy - a DIFFERENT fact than "still starting up" (the two states
+		are mutually exclusive at the source). Must not read as
+		"container_provisioning", which tells the customer their workspace is
+		coming online when it is not."""
+		reason = "Your workspace container stopped responding. We're working to restore it."
+		with patch.object(
+			admin_client,
+			"get_connection",
+			return_value={
+				"chat_readiness": "Unavailable",
+				"chat_readiness_reason": reason,
+			},
+		):
+			self.assertEqual(
+				account._admin_chat_gate(),
+				{
+					"ready": False,
+					"reason": "container_unavailable",
+					"detail": reason,
+					"billing_notice": {},
+				},
+			)
+
+	def test_container_unavailable_without_reason_still_classifies(self):
+		"""Older admin sends the state with no sentence — the code must still be
+		the outage one; the SPA supplies its own fallback copy."""
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Unavailable"}):
+			self.assertEqual(
+				account._admin_chat_gate(),
+				{"ready": False, "reason": "container_unavailable", "detail": "", "billing_notice": {}},
+			)
+
 	def test_allows_when_admin_ready(self):
 		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}):
 			self.assertEqual(

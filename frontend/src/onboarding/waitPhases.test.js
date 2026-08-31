@@ -108,10 +108,13 @@ test("readiness: authority_repair_required stops the wait, is paged, quotes admi
 // jarvis/account.py keeps subscription_suspended distinct from
 // container_provisioning precisely "so a suspended customer isn't told to wait
 // for a container that won't come back". site_replaced can never be resolved by
-// waiting either - the account lives on another site now. Both used to fall
-// through to the default and render as active progress.
+// waiting either - the account lives on another site now. jarvis#885 adds
+// container_unavailable to the same list: a confirmed-dead container cannot be
+// waited into life either. All three used to render as active progress -
+// subscription_suspended and site_replaced by falling through to the default,
+// container_unavailable by arriving pre-bucketed as container_provisioning.
 test("readiness: reasons that waiting cannot fix never render as progress", () => {
-	for (const reason of ["subscription_suspended", "site_replaced"]) {
+	for (const reason of ["subscription_suspended", "site_replaced", "container_unavailable"]) {
 		const p = readinessPhase({ answered: true, reason, detail: "why" });
 		assert.equal(p.stop, true, reason);
 		assert.notEqual(p.state, PHASE_STATE.ACTIVE, reason);
@@ -120,6 +123,19 @@ test("readiness: reasons that waiting cannot fix never render as progress", () =
 		assert.equal(p.paged, false, reason);
 		assert.ok(p.title, reason);
 	}
+});
+
+// jarvis#885: a dead container reads distinctly from the generic default, and
+// the container_provisioning phase it must never be confused with.
+test("readiness: container_unavailable is an outage, never the 'coming online' framing", () => {
+	const detail = "Your workspace container stopped responding. We're working to restore it.";
+	const p = readinessPhase({ answered: true, reason: "container_unavailable", detail });
+	assert.equal(p.stop, true);
+	assert.equal(p.detail, detail);
+	assert.equal(p.kind, PHASE_KIND.NONE);
+	assert.notEqual(p.state, PHASE_STATE.ACTIVE);
+	assert.doesNotMatch(p.label, /coming online|getting ready/i);
+	assert.match(p.label + " " + p.title, /unavailable/i);
 });
 
 test("readiness: only a paged repair claims support was already notified", () => {
@@ -133,6 +149,7 @@ test("readiness: only a paged repair claims support was already notified", () =>
 		"llm_rejected",
 		"reconnect_required",
 		"container_provisioning",
+		"container_unavailable",
 		"readiness_unconfirmed",
 		"unmapped",
 	]) {
@@ -169,6 +186,7 @@ test("readiness: only llm_rejected is editable - the three blocked stop cases ar
 		"subscription_suspended",
 		"site_replaced",
 		"reconnect_required",
+		"container_unavailable",
 	]) {
 		assert.notEqual(readinessPhase({ answered: true, reason }).editable, true, reason);
 	}
@@ -203,6 +221,7 @@ test("readiness: only reconnect_required carries the reconnect flag", () => {
 		"site_replaced",
 		"llm_rejected",
 		"container_provisioning",
+		"container_unavailable",
 		"readiness_unconfirmed",
 		"unmapped",
 	]) {
@@ -276,6 +295,7 @@ test("readiness: no branch ever claims setup is finishing on its own", () => {
 		"site_replaced",
 		"llm_rejected",
 		"reconnect_required",
+		"container_unavailable",
 		"unmapped",
 	];
 	for (const reason of reasons) {
@@ -322,6 +342,7 @@ test("setup headline: no unobserved or unnameable phase ever claims a subject", 
 		readinessPhase({ answered: true, reason: "authority_repair_required" }),
 		readinessPhase({ answered: true, reason: "subscription_suspended" }),
 		readinessPhase({ answered: true, reason: "site_replaced" }),
+		readinessPhase({ answered: true, reason: "container_unavailable" }),
 		readinessPhase({ answered: true, reason: "a_reason_this_build_never_heard_of" }),
 		null,
 		undefined,
