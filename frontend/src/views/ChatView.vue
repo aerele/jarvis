@@ -593,6 +593,22 @@
 						gap: 26px;
 					"
 				>
+					<!-- An existing titled conversation (e.g. opened via an agent run's
+					     "Open chat") whose first message hasn't landed yet - render a
+					     quiet placeholder instead of an empty scroll area, since
+					     showWelcome no longer treats this case as a fresh chat. -->
+					<p
+						v-if="!visibleMessages.length"
+						style="
+							margin: 0;
+							padding: 8px 0;
+							font-size: 13px;
+							color: var(--text-3);
+							text-align: center;
+						"
+					>
+						No messages yet.
+					</p>
 					<!-- macro run progress banner -->
 					<div
 						v-if="macroRun && macroRun.conversation === currentId"
@@ -5427,9 +5443,32 @@ const modelsByProvider = computed(() => {
 	return [...groups.entries()].map(([provider, models]) => ({ provider, models }));
 });
 
+// Title of the conversation loadConversation() last fetched, straight from
+// get_conversation's payload. The recent-list (store.conversations) omits
+// zero-message conversations, so a titled-but-empty chat opened via an agent
+// run's "Open chat" is NOT in that list - its title is only knowable from the
+// fetch. Cleared on the new-chat (no id) path so the welcome still shows there.
+const loadedConvTitle = ref("");
 const currentTitle = computed(
-	() => store.conversations.find((c) => c.name === currentId.value)?.title || "New chat"
+	() =>
+		store.conversations.find((c) => c.name === currentId.value)?.title ||
+		loadedConvTitle.value ||
+		"New chat"
 );
+// An EXISTING conversation (e.g. routed to from an agent run's "Open chat")
+// that has a real persisted title - as opposed to a brand-new chat, which is
+// either id-less or still titled the backend's literal "New chat" default
+// (jarvis/chat/api.py's create_conversation). Zero messages on one of these
+// means "not loaded yet" or "titled but empty", never "blank", so showWelcome
+// below must not treat it the same as a fresh chat. The title can come from the
+// recent list OR, for a zero-message conversation the list omits, from the last
+// loadConversation fetch (loadedConvTitle).
+const isExistingTitledConv = computed(() => {
+	if (!currentId.value) return false;
+	const listedTitle = store.conversations.find((c) => c.name === currentId.value)?.title;
+	const title = listedTitle || loadedConvTitle.value;
+	return !!title && title !== "New chat";
+});
 
 // supportOn/supportUnconfigured (the same dual kill-switch router/index.js's
 // supportGuard uses) now live once, near openSupport - this file used to
@@ -5681,7 +5720,9 @@ function prettyJson(s) {
 // screen from flashing on refresh before the open chat appears.
 const booting = ref(true);
 const showWelcome = computed(
-	() => !booting.value && (!currentId.value || visibleMessages.value.length === 0)
+	() =>
+		!booting.value &&
+		(!currentId.value || (visibleMessages.value.length === 0 && !isExistingTitledConv.value))
 );
 
 // settings/overview derived metrics (all from data we already hold)
@@ -7833,6 +7874,7 @@ async function loadConversation(id) {
 		promptHistory.value = [];
 		histIdx.value = null;
 		histDraft.value = "";
+		loadedConvTitle.value = "";
 		return;
 	}
 	const d = await api.getConversation(id);
@@ -7862,6 +7904,9 @@ async function loadConversation(id) {
 	// saved pin always rendered as "Auto" after a reload.
 	modelOverride.value = d?.conversation?.model_override || "";
 	thinkingOverride.value = d?.conversation?.thinking_override || "";
+	// Remember the fetched title so a titled-but-empty conversation (which the
+	// recent list omits) is recognised as existing, not rendered as a new chat.
+	loadedConvTitle.value = d?.conversation?.title || "";
 	// The origin and the conversation it was read for, written as a pair — the
 	// gate compares the second against currentId, so neither is ever trusted
 	// alone. Nothing above blanks them: a refresh of the conversation already on
