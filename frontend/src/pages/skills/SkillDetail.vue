@@ -78,7 +78,7 @@
 					<Switch
 						v-if="!isNew"
 						v-model="form.allow_approve_run"
-						:label="'Allow Approve & run'"
+						label="Allow Approve & run"
 						:description="armDescription"
 						:disabled="armLocked"
 					/>
@@ -265,8 +265,18 @@
 // share this component (isNew prop). Explicit Save (D21) with dirty guard,
 // read-only mode for shared-with-me skills, DocMetaPanel + child-table
 // Shared-with block (#extra) + ShareDialog, sync pill on save/delete.
-import { ref, reactive, computed, watch, shallowRef, nextTick, onMounted } from "vue";
+import {
+	ref,
+	reactive,
+	computed,
+	watch,
+	shallowRef,
+	nextTick,
+	onMounted,
+	onBeforeUnmount,
+} from "vue";
 import { useRouter, onBeforeRouteLeave } from "vue-router";
+import { armToggleLocked, armToggleDescription } from "./approveRunToggle";
 import {
 	Button,
 	Badge,
@@ -365,18 +375,13 @@ const sharedBy = computed(() => (skill.value && skill.value.shared_by) || "");
 // skill can't be armed by this viewer; once it's armed (saved state), the owner
 // may always flip it back off. Mirrors the doctype's _guard_allow_approve_run_
 // enable exactly - and the server guard, not this, is the real authority.
+// Gating + disclosure live in a pure, node-tested module (approveRunToggle.js) so
+// the kill-switch truth table + the run_method-inclusive risk copy are verified
+// without a browser. savedArmed reads the SAVED state (snapshot), not the live
+// form, so toggling doesn't self-unlock the guard.
 const savedArmed = computed(() => !!snapshot.value.allow_approve_run);
-const armLocked = computed(() => readonly.value || (!savedArmed.value && !canArm.value));
-const armDescription = computed(() => {
-	const base =
-		"When on, a run of this skill with 2 or more steps offers a single " +
-		"“Approve & run”: after one approval its create, update, submit, email, " +
-		"workflow, share and assign writes apply without asking each time — delete, " +
-		"cancel and amend still ask. Turning it off takes effect immediately.";
-	return !savedArmed.value && !canArm.value
-		? base + " Only a Jarvis Admin can arm a skill."
-		: base;
-});
+const armLocked = computed(() => armToggleLocked(readonly.value, savedArmed.value, canArm.value));
+const armDescription = computed(() => armToggleDescription(savedArmed.value, canArm.value));
 
 // ── promotion (requester side, Skills-area promotion surfacing) ───────────────
 // The owner of a private (User-scope) skill can ask a reviewer to widen it to a
@@ -547,6 +552,9 @@ async function save() {
 			instructions: form.instructions,
 			user_invocable: form.user_invocable ? 1 : 0,
 			enabled: form.enabled ? 1 : 0,
+			// Inert on create (the switch is hidden while isNew and create_custom_skill
+			// ignores the key) - a skill is never born armed; arming is a post-create
+			// admin edit through the update path. Sent uniformly for the update branch.
 			allow_approve_run: form.allow_approve_run ? 1 : 0,
 		};
 		if (props.isNew) {
@@ -615,6 +623,20 @@ onBeforeRouteLeave((to, from, next) => {
 	// Focus the safe default so Enter/Esc land on it (Esc bubbles to the overlay).
 	nextTick(() => cancelBtn.value?.focus());
 });
+
+// A hard reload / tab close while dirty escapes the in-app route guard above, so
+// an unsaved edit is silently lost. That matters most for the arm toggle: this
+// form is explicit-Save, so flipping the kill switch off does NOT persist until
+// Save - a user who closes the tab believing "off" took effect would leave the
+// skill armed server-side. Mirror AgentsList.vue's native-prompt guard.
+function onBeforeUnload(e) {
+	if (dirty.value) {
+		e.preventDefault();
+		e.returnValue = ""; // Chrome requires returnValue to show the prompt
+	}
+}
+onMounted(() => window.addEventListener("beforeunload", onBeforeUnload));
+onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload));
 
 // Resolve the pending navigation: proceed=true leaves the page, false stays.
 // Idempotent — closing via X/backdrop and a button click can't double-resolve.

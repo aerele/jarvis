@@ -253,6 +253,24 @@ class TestApproveAndRunApiSurface(FrappeTestCase):
 		self.assertEqual(out["allow_approve_run"], 0)
 		self.assertEqual(out["can_arm"], 0)
 
+	def test_get_keys_are_independent_not_lockstep(self):
+		"""`allow_approve_run` (the skill's saved state) and `can_arm` (the VIEWER's
+		admin bit) come from independent sources and must not be swapped/aliased.
+		Exercise the two DIVERGENT cases so a field-swap mutant can't survive by the
+		coincidence that both flags move together in the same-value cases above."""
+		# armed skill, non-admin owner -> armed=1 but can_arm=0
+		armed = _make_skill(NON_ADMIN_USER, armed=True)
+		frappe.set_user(NON_ADMIN_USER)
+		out = custom_skills_api.get_custom_skill(armed)
+		self.assertEqual(out["allow_approve_run"], 1)
+		self.assertEqual(out["can_arm"], 0)
+		# unarmed skill, admin owner -> armed=0 but can_arm=1
+		unarmed = _make_skill(ADMIN_USER)
+		frappe.set_user(ADMIN_USER)
+		out = custom_skills_api.get_custom_skill(unarmed)
+		self.assertEqual(out["allow_approve_run"], 0)
+		self.assertEqual(out["can_arm"], 1)
+
 	def test_update_enable_by_non_admin_owner_is_refused(self):
 		skill = _make_skill(NON_ADMIN_USER)
 		frappe.set_user(NON_ADMIN_USER)
@@ -280,13 +298,18 @@ class TestApproveAndRunApiSurface(FrappeTestCase):
 		custom_skills_api.update_custom_skill(name=skill, description="edited")
 		self.assertEqual(int(frappe.db.get_value(SKILL, skill, "allow_approve_run")), 1)
 
-	def test_update_by_a_non_owner_is_refused_before_the_arm(self):
-		"""A user who is neither owner nor sharee cannot reach the arming field:
-		``_require_skill_owner`` gates every write, so the new param never even
-		reaches the doctype guard. Owner is the admin here, so the refusal is the
-		OWNER gate (not the admin gate) firing on a foreign caller."""
-		skill = _make_skill(ADMIN_USER)
-		frappe.set_user(NON_ADMIN_USER)  # a valid Jarvis user, but NOT the owner
+	def test_arming_someone_elses_skill_is_refused_even_for_an_admin(self):
+		"""A non-owner - even a Jarvis Admin, who holds the admin right the arm-gate
+		itself wants - cannot arm another user's skill through ``update_custom_skill``.
+		This pins the security PROPERTY (a foreign caller is refused, and NOT because
+		it lacks admin), enforced defense-in-depth: ``_require_skill_owner`` rejects it
+		first, and the ORM's own owner-only write gate
+		(``skill_permissions.has_skill_permission``, System Manager excepted) would
+		reject the ``doc.save()`` even if that first check were absent - so removing
+		either single gate alone still fails closed. A non-owner admin arms via Desk
+		instead (see the design)."""
+		skill = _make_skill(NON_ADMIN_USER)  # owned by a non-admin
+		frappe.set_user(ADMIN_USER)  # an admin, but NOT the owner
 		with self.assertRaises(frappe.PermissionError):
 			custom_skills_api.update_custom_skill(name=skill, allow_approve_run=1)
 		self.assertEqual(int(frappe.db.get_value(SKILL, skill, "allow_approve_run") or 0), 0)
