@@ -159,6 +159,31 @@
 				</button>
 			</div>
 
+			<!-- jarvis#934: non-blocking warning for a 2+-subscription pool with no
+			     api-key backstop - deliberately its OWN block (not the red `err`
+			     banner above, which is a hard save failure with a Retry button). This
+			     mirrors admin's `multi_sub_without_backstop` apply-time rule, but
+			     surfaces it here instead: at the moment the invalid combination
+			     exists, before a save is even attempted. -->
+			<div v-if="backstopWarning" class="jv-callout" style="margin-bottom: 12px">
+				<svg
+					width="15"
+					height="15"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.9"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
+					<path
+						d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"
+					/>
+					<path d="M12 9v4M12 17h.01" />
+				</svg>
+				<p>{{ backstopWarning }}</p>
+			</div>
+
 			<!-- template wrapper, not v-if on the row div itself: Vue 3 gives v-if
 			     higher precedence than v-for on the SAME element, so it would run
 			     before `row` exists in scope. See pendingAddUid's doc above for what
@@ -876,6 +901,30 @@
 								"
 							/>
 						</div>
+					</div>
+
+					<!-- jarvis#934: same non-blocking backstop warning as the main list,
+					     surfaced here too so it is seen BEFORE OAuth sign-in starts, not
+					     after. panelRow is already appended to rows.value at this point
+					     (openAdd appends up front), so backstopWarning already reflects
+					     picking this Provider - no separate computation needed. -->
+					<div v-if="backstopWarning" class="jv-callout" style="margin-bottom: 10px">
+						<svg
+							width="15"
+							height="15"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="1.9"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
+							<path
+								d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"
+							/>
+							<path d="M12 9v4M12 17h.01" />
+						</svg>
+						<p>{{ backstopWarning }}</p>
 					</div>
 
 					<!-- Say what this sign-in will actually DO before it starts. The customer
@@ -2187,6 +2236,7 @@ import {
 	seedRowsFromConfig,
 	defaultSubscriptionModel,
 	subModelSuggestions,
+	poolBackstopWarning,
 	apiKeyModelHealth,
 	subscriptionAccountHealth,
 	dirtyAccountHealth,
@@ -2888,6 +2938,23 @@ const missingVendors = computed(() => {
 // preset currently selected (via selectPreset, reused verbatim by the
 // config-section's 'From a preset' source) with vendor keys still missing?"
 const saveBlocked = computed(() => !!selectedPreset.value && missingVendors.value.length > 0);
+
+// jarvis#934: warn the moment the pool becomes 2+ subscriptions on distinct
+// upstreams with no api-key backstop - previously this only surfaced as an
+// apply-time rejection, well after a second OAuth sign-in already happened.
+// Non-blocking (validatePool/buildSavePayload stays the hard gate at Save).
+//
+// isRowEmpty filters out a blank API-key placeholder row (load() seeds one
+// into an empty pool; an abandoned "+ Add a model" can leave one behind) -
+// left in, its mere presence would satisfy hasNonSubscriptionModel and hide
+// the exact warning #934 is about. Subscription rows are kept regardless of
+// emptiness (isRowEmpty calls an accountless one "empty" too) so the warning
+// still fires from the add/connect panel before any OAuth account exists.
+const backstopWarning = computed(() =>
+	poolBackstopWarning(
+		rows.value.filter((r) => r.credentialType === "subscription" || !isRowEmpty(r))
+	)
+);
 
 // Direct/Proxy badge - mirrors jarvis_account.js renderModeBadge().
 // Quick is always Direct (single model); Preset is Proxy once chosen; Custom
