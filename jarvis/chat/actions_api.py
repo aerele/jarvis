@@ -488,6 +488,22 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 			# Same envelope + audit as an inline write - dispatch_confirmed bypasses
 			# the gate so the stored call actually executes instead of parking again.
 			result = api.dispatch_confirmed(record["tool"], record["args"])
+			# run_method returns its target verbatim, unlike get_doc/create_doc which
+			# permlevel-filter before as_dict. Apply the same field-level read filter to
+			# a Document return HERE (still as exec_user), so a permlevel>0 field the
+			# agent can't read is stripped before it reaches the receipt chip or the
+			# model's continuation dump. Best-effort: a filter hiccup must never fail an
+			# already-committed call (that would roll back the write for a cosmetic step).
+			if record["tool"] == "run_method" and isinstance(result, dict) and result.get("ok"):
+				_ret = result.get("data")
+				if hasattr(_ret, "apply_fieldlevel_read_permissions"):
+					try:
+						_ret.apply_fieldlevel_read_permissions()
+					except Exception:
+						frappe.log_error(
+							title="run_method receipt permlevel filter failed",
+							message=frappe.get_traceback(),
+						)
 	except Exception:
 		# F5: an UNEXPECTED (untranslated) exception from the confirmed write would
 		# otherwise 500 with the token ALREADY consumed (GETDEL above) - no receipt,
@@ -588,17 +604,51 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 def _confirm_receipt_text(record: dict, result) -> str:
 	"""Short receipt line for the post-confirm continuation prompt: the call,
 	the created/affected record name when the result carries one, and the
-	outcome (including a bounded error message so the agent can react)."""
+	outcome (including a bounded error message so the agent can react).
+
+	run_method is the exception. It is the generic escape hatch for
+	data-returning whitelisted methods (getters, the make_* mappers), so its
+	whole value IS the returned payload - and because it is a gated write it
+	ALWAYS parks, making this receipt the only way its result reaches the model.
+	A plain "<call> succeeded" leaves the agent blind to the data it was asked
+	to use, so for a SUCCESSFUL run_method we append the FULL returned payload,
+	deliberately UNTRUNCATED - the agent needs all of it to act on the result.
+	It is serialized with frappe.as_json (the same encoder the inline tool path
+	uses at the HTTP boundary), which renders a returned Document via as_dict and
+	datetimes as ISO strings - where stdlib json.dumps(default=str) would emit a
+	useless repr for the make_* mappers' Document returns. Safe despite the
+	payload being attacker-influenceable: enqueue_continuation runs the whole
+	receipt through _safe_label_name (all whitespace - including any pretty-print
+	newlines - collapsed to single spaces, backticks disarmed) and quotes it as
+	inline-code DATA, so it can neither forge the [System] voice nor break out of
+	the code span - the same neutralization the record-name receipt relies on.
+	Serialization never raises out of here (the write already committed): an
+	exotic or circular return value falls back to a plain success line."""
 	from jarvis.api import _describe_call
 
+	is_run_method = record.get("tool") == "run_method"
 	desc = _describe_call(record.get("tool") or "", record.get("args") or {})
 	data = result.get("data") if isinstance(result, dict) else None
-	if isinstance(data, dict) and data.get("name"):
+	# The name-append keeps write receipts terse; run_method dumps the whole
+	# payload below (which already carries any name), so skip it there.
+	if not is_run_method and isinstance(data, dict) and data.get("name"):
 		desc += f" -> {data['name']}"
 	if isinstance(result, dict) and not result.get("ok"):
 		err = result.get("error") or {}
 		msg = str(err.get("message") or "")[:200] if isinstance(err, dict) else ""
 		return f"{desc} FAILED. {msg}".strip()
+	if is_run_method:
+		try:
+			payload = frappe.as_json(data)
+		except Exception:
+			# Post-commit + best-effort, but not silent: log so a method whose return
+			# consistently fails to serialize is diagnosable instead of vanishing.
+			frappe.log_error(
+				title="run_method receipt serialization failed",
+				message=frappe.get_traceback(),
+			)
+			return f"{desc} succeeded (return value could not be serialized for the receipt)."
+		return f"{desc} succeeded. Returned: {payload}"
 	return f"{desc} succeeded."
 
 
