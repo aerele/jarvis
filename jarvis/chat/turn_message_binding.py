@@ -147,7 +147,7 @@ def clear_skill_autorun(conversation: str) -> None:
 		frappe.db.set_value(
 			_CONV,
 			conversation,
-			{"skill_autorun": 0, "skill_autorun_at": None},
+			{"skill_autorun": 0, "skill_autorun_at": None, "skill_autorun_skill": None},
 			update_modified=False,
 		)
 		frappe.db.commit()

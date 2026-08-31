@@ -529,6 +529,106 @@ class TestHandleChatSendBindsTurnMessage(FrappeTestCase):
 
 
 # --------------------------------------------------------------------------- #
+# C1: the bind on the Relay Pump (DEFAULT transport) - prepare.run_prepare
+# --------------------------------------------------------------------------- #
+#
+# In production the pump dispatches turns via prepare.run_prepare -> assemble_prompt,
+# NOT turn_handler.handle_chat_send (which is the legacy transport). The turn->message
+# binding must therefore be installed in run_prepare too, or the offer gate reads no
+# binding on the default path and the whole "Approve & run" feature is inert in prod.
+
+
+class TestPumpPrepareBindsTurnMessage(FrappeTestCase):
+	"""C1: prepare.run_prepare binds THIS turn's seed message under its conversation at
+	turn start, before dispatch - mirrors the handle_chat_send bind test on the pump
+	path. run_prepare bails at (patched) assemble_prompt AFTER the bind fires, so the
+	binding is proven without driving the full session/dispatch machinery."""
+
+	TURN = "Jarvis Chat Turn"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		from jarvis.chat import turn_state as ts
+
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+		self._target = f"pmp-bind-{uuid.uuid4().hex[:10]}"
+		ts._ensure_control_row(self._target)
+		ts.reset_lock_tracking()
+
+	def tearDown(self):
+		from jarvis.chat import turn_state as ts
+
+		ts.reset_lock_tracking()
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			frappe.cache().delete_value(turn_message_binding._key(conv))
+			frappe.db.delete(self.TURN, {"conversation": conv})
+			frappe.db.delete(MSG, {"conversation": conv})
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _queued_turn(self, conv: str, seed: str) -> str:
+		run_id = f"pmp-bind-run-{uuid.uuid4().hex[:8]}"
+		frappe.get_doc(
+			{
+				"doctype": self.TURN,
+				"run_id": run_id,
+				"conversation": conv,
+				"relay_target_id": self._target,
+				"turn_class": "interactive",
+				"state": "queued",
+				"version": 0,
+				"pump_epoch": 0,
+				"seed_message": seed,
+				"reserved": 1,
+				"enqueued_at": frappe.utils.now(),
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		return run_id
+
+	def test_run_prepare_binds_seed_message_before_dispatch(self):
+		"""The bind fires with the turn's genuine (conversation, seed_message). Mutation-
+		verify: removing the bind from run_prepare leaves the mock uncalled - red."""
+		from jarvis.chat import prepare
+
+		conv = _make_conv(TEST_USER)
+		seed = _make_user_msg(conv, TEST_USER, "/someskill do it")
+		run_id = self._queued_turn(conv, seed)
+		bind_mock = MagicMock()
+		with (
+			patch("jarvis.chat.turn_message_binding.bind_turn_message", bind_mock),
+			patch("jarvis.chat.prepare._create_placeholder_locked", return_value="amsg-fake"),
+			patch("jarvis.chat.turn_state.attach_placeholder", return_value=True),
+			patch("jarvis.chat.turn_handler.assemble_prompt", side_effect=RuntimeError("stop here")),
+		):
+			prepare.run_prepare(run_id, self._target)
+		bind_mock.assert_called_once_with(conv, seed)
+
+	def test_real_binding_reads_back_the_seed(self):
+		"""End-to-end (bind NOT patched): after run_prepare, the binding reads back the
+		exact seed message id - proof the pump path leaves a genuine, offer-gate-usable
+		binding."""
+		from jarvis.chat import prepare
+
+		conv = _make_conv(TEST_USER)
+		seed = _make_user_msg(conv, TEST_USER, "/someskill do it")
+		run_id = self._queued_turn(conv, seed)
+		with (
+			patch("jarvis.chat.prepare._create_placeholder_locked", return_value="amsg-fake"),
+			patch("jarvis.chat.turn_state.attach_placeholder", return_value=True),
+			patch("jarvis.chat.turn_handler.assemble_prompt", side_effect=RuntimeError("stop here")),
+		):
+			prepare.run_prepare(run_id, self._target)
+		self.assertEqual(turn_message_binding.current_turn_message_id(conv), seed)
+
+
+# --------------------------------------------------------------------------- #
 # The park-time "Approve & run" OFFER gate (design §3.3)
 # --------------------------------------------------------------------------- #
 #
@@ -543,10 +643,11 @@ OFFER_OWNER = SLUGSET_USER_A
 OFFER_OTHER = SLUGSET_USER_B
 
 
-def _make_user_msg(conv: str, owner: str, content: str) -> str:
+def _make_user_msg(conv: str, owner: str, content: str, *, hidden: bool = False) -> str:
 	"""A real ``role=user`` Jarvis Chat Message on ``conv`` owned by ``owner`` with
 	``content`` - the row the offer gate reads back through the turn->message
-	binding (owner + content drive the slug resolution)."""
+	binding (owner + content drive the slug resolution). ``hidden=True`` marks it a
+	system/continuation turn (which must never re-drive the offer)."""
 	orig = frappe.session.user
 	frappe.set_user(owner)
 	try:
@@ -557,6 +658,7 @@ def _make_user_msg(conv: str, owner: str, content: str) -> str:
 				"seq": 1,
 				"role": "user",
 				"content": content,
+				"hidden": 1 if hidden else 0,
 			}
 		)
 		doc.insert(ignore_permissions=True)
@@ -635,6 +737,29 @@ class TestResolveApproveRunOffer(FrappeTestCase):
 		frappe.set_user(OFFER_OTHER)
 		self.assertEqual(api._resolve_approve_run_offer(conv), (None, None))
 
+	def test_hidden_continuation_message_no_offer(self):
+		"""I8: the offer must anchor on a HUMAN message (design §3.3). A hidden
+		(system / continuation) turn whose content contains a `/armedslug` must NOT
+		re-drive the offer. Mutation-verify: dropping the ``hidden`` guard offers here
+		and flips this red."""
+		_make_skill(OFFER_OWNER, armed=True, name="armed-cont")
+		conv = _make_conv(OFFER_OWNER)
+		msg = _make_user_msg(conv, OFFER_OWNER, "/armed-cont continue the run", hidden=True)
+		turn_message_binding.bind_turn_message(conv, msg)
+		self.assertEqual(api._resolve_approve_run_offer(conv), (None, None))
+
+	def test_exception_is_logged_before_failing_safe(self):
+		"""I3: the blanket ``except Exception -> (None, None)`` must not swallow a
+		failure silently - it runs on EVERY park fleet-wide. A raised resolution logs
+		before returning the fail-safe (None, None). Mutation-verify: removing the
+		log_error call flips this red."""
+		_make_skill(OFFER_OWNER, armed=True, name="armed-boom")
+		conv = self._bound_conv(OFFER_OWNER, "/armed-boom do it")
+		with patch("jarvis.chat.custom_skills.invoked_skill_slugs", side_effect=RuntimeError("boom")):
+			with patch("frappe.log_error") as log:
+				self.assertEqual(api._resolve_approve_run_offer(conv), (None, None))
+		self.assertTrue(log.called, "the swallowed exception must be logged, not silent")
+
 
 class TestApproveRunOfferThroughRunTool(FrappeTestCase):
 	"""End-to-end through the write-confirmation gate (api._run_tool): a parked
@@ -706,6 +831,26 @@ class TestApproveRunOfferThroughRunTool(FrappeTestCase):
 		card = (rec.get("preview") or {}).get("card")
 		self.assertIsInstance(card, dict)
 		self.assertNotIn("approve_run", card)
+
+	def test_never_tool_first_write_gets_no_offer(self):
+		"""I4: even under an armed-skill turn, a _SKILL_AUTORUN_NEVER first write
+		(create_custom_skill) must NOT be stamped with the run offer - approve_and_run
+		would otherwise run a NEVER tool as step 1 and open a run. Mutation-verify:
+		dropping the ``tool in _SKILL_AUTORUN_COVERED`` guard on the offer stamps here
+		and flips this red."""
+		_make_skill(TEST_USER, armed=True, name="runarmed-never")
+		conv = self._bound_conv("/runarmed-never make a skill")
+		r = api._run_tool(
+			"create_custom_skill",
+			{"skill_name": "offer-never-skill", "instructions": "do the thing"},
+			conversation=conv,
+		)
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		rec = self._token_record(conv)
+		self.assertIsNone(rec.get("skill_docname"), "a NEVER tool must never carry a run offer")
+		card = (rec.get("preview") or {}).get("card")
+		if isinstance(card, dict):
+			self.assertNotIn("approve_run", card)
 
 
 # --------------------------------------------------------------------------- #
@@ -804,10 +949,38 @@ class TestStopRunRequestsRunCancel(FrappeTestCase):
 # mints it through approve_and_run; this task tests the READ side).
 
 
-def _stamp_autorun(conv: str, *, at=None) -> None:
-	"""Directly stamp skill_autorun=1 (+ its sliding timestamp) via db_set - the
-	sanctioned raw enable path. ``at`` defaults to now (a fresh, in-TTL run)."""
+_AUTORUN_FIXTURE_SLUG = "autorun-fixture-armed"
+
+
+def _ensure_armed_fixture(owner: str = TEST_USER) -> str:
+	"""Get-or-create a live-ARMED Jarvis Custom Skill (self-healing) whose docname a
+	stamped auto-run points ``skill_autorun_skill`` at, so the gate's live re-check
+	(``allow_approve_run`` off that exact row) finds a really-armed skill. Recreated
+	on demand, so a class tearDown that deletes the owner's skills never leaves an
+	auto-run test pointing at a vanished row."""
+	rows = frappe.get_all(SKILL, filters={"owner": owner, "skill_name": _AUTORUN_FIXTURE_SLUG}, pluck="name")
+	if rows:
+		docname = rows[0]
+		if not frappe.db.get_value(SKILL, docname, "allow_approve_run"):
+			frappe.db.set_value(SKILL, docname, "allow_approve_run", 1, update_modified=False)
+			frappe.db.commit()
+		return docname
+	return _make_skill(owner, armed=True, name=_AUTORUN_FIXTURE_SLUG)
+
+
+def _stamp_autorun(conv: str, *, at=None, skill: str | None = None) -> None:
+	"""Directly stamp skill_autorun=1 (+ its sliding timestamp + the armed skill
+	docname) via db_set - the sanctioned raw enable path. ``at`` defaults to now (a
+	fresh, in-TTL run); ``skill`` defaults to a live-armed fixture so the gate's C2
+	live disarm re-check passes."""
 	frappe.db.set_value(CONV, conv, "skill_autorun", 1, update_modified=False)
+	frappe.db.set_value(
+		CONV,
+		conv,
+		"skill_autorun_skill",
+		skill or _ensure_armed_fixture(frappe.db.get_value(CONV, conv, "owner") or TEST_USER),
+		update_modified=False,
+	)
 	frappe.db.set_value(
 		CONV, conv, "skill_autorun_at", at or frappe.utils.now_datetime(), update_modified=False
 	)
@@ -1023,6 +1196,8 @@ class TestSkillAutorunTTL(FrappeTestCase):
 	def test_no_timestamp_parks(self):
 		conv = _make_conv(TEST_USER)
 		frappe.db.set_value(CONV, conv, "skill_autorun", 1, update_modified=False)
+		# A live-armed skill so the disarm re-check passes and we reach the TTL check.
+		frappe.db.set_value(CONV, conv, "skill_autorun_skill", _ensure_armed_fixture(), update_modified=False)
 		# skill_autorun_at deliberately left NULL
 		frappe.db.commit()
 		with patch("jarvis.api.dispatch_confirmed") as disp:
@@ -1065,9 +1240,73 @@ class TestSkillAutorunHardStop(FrappeTestCase):
 		)
 
 
+class TestSkillAutorunDisarmGate(FrappeTestCase):
+	"""C2 (the kill lever): un-arming the skill mid-run must STOP the auto-run. The
+	gate re-reads allow_approve_run LIVE off skill_autorun_skill before each covered
+	write; a falsy value (un-armed mid-run, or a missing docname) HARD-STOPS -
+	clears skill_autorun and refuses the write WITHOUT dispatching."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		frappe.db.delete(SKILL, {"owner": TEST_USER})
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_unarming_the_skill_midrun_hard_stops_next_covered_write(self):
+		"""Open a run, un-arm the skill (db_set allow_approve_run=0), and the NEXT
+		covered write hard-stops within one write + clears the flag, WITHOUT executing.
+		Mutation target: removing the live re-check flips this red (dispatch fires, flag
+		stays 1)."""
+		docname = _make_skill(TEST_USER, armed=True, name="disarm-midrun")
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv, skill=docname)  # a fresh, in-TTL approved run on THIS skill
+		# The admin un-arms the skill in the middle of the run.
+		frappe.db.set_value(SKILL, docname, "allow_approve_run", 0, update_modified=False)
+		frappe.db.commit()
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertFalse(r["ok"], "a covered write on a disarmed run is refused")
+		self.assertEqual(r["error"]["code"], "RunDisarmedError")
+		self.assertFalse(disp.called, "the write must NOT execute after the skill was disarmed")
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			0,
+			"the disarm hard-stop clears the run flag",
+		)
+
+	def test_missing_skill_docname_hard_stops(self):
+		"""A malformed run (skill_autorun=1 but no skill_autorun_skill) is treated as
+		disarmed - the gate hard-stops rather than auto-running an unattributable write."""
+		conv = _make_conv(TEST_USER)
+		frappe.db.set_value(CONV, conv, "skill_autorun", 1, update_modified=False)
+		frappe.db.set_value(
+			CONV, conv, "skill_autorun_at", frappe.utils.now_datetime(), update_modified=False
+		)
+		# skill_autorun_skill deliberately left NULL.
+		frappe.db.commit()
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "RunDisarmedError")
+		self.assertFalse(disp.called)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
+
 class TestConvFlagsSingleQuery(FrappeTestCase):
-	"""_conv_flags stays ONE get_value even after skill_autorun + skill_autorun_at
-	join it: the gate reads all FIVE conversation flags in a single query."""
+	"""_conv_flags stays ONE get_value even after skill_autorun + skill_autorun_at +
+	skill_autorun_skill join it: the gate reads all SIX conversation flags in a single
+	query."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -1085,7 +1324,7 @@ class TestConvFlagsSingleQuery(FrappeTestCase):
 			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
-	def test_five_flags_read_in_one_query(self):
+	def test_six_flags_read_in_one_query(self):
 		conv = _make_conv(TEST_USER)
 		# Spy on the real DB instance (frappe.db is a LocalProxy over frappe.local.db);
 		# wraps=... records every get_value call yet executes it normally.
@@ -1103,7 +1342,14 @@ class TestConvFlagsSingleQuery(FrappeTestCase):
 		self.assertEqual(len(flag_reads), 1, "the conversation flags must be a SINGLE get_value")
 		self.assertEqual(
 			list(flag_reads[0].args[2]),
-			["auto_apply", "file_box", "skip_confirmation", "skill_autorun", "skill_autorun_at"],
+			[
+				"auto_apply",
+				"file_box",
+				"skip_confirmation",
+				"skill_autorun",
+				"skill_autorun_at",
+				"skill_autorun_skill",
+			],
 		)
 		self.assertTrue(flag_reads[0].kwargs.get("as_dict"), "flags read as_dict")
 
@@ -1158,13 +1404,14 @@ class TestApproveAndRun(FrappeTestCase):
 			frappe.db.delete(SKILL, {"owner": owner})
 			for conv in frappe.get_all(CONV, filters={"owner": owner}, pluck="name"):
 				pending_confirm.clear_for_conversation(owner, conv)
+				turn_message_binding.clear_run_cancel(conv)
 				frappe.db.delete(MSG, {"conversation": conv})
 				frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
 	def test_armed_token_dispatches_step1_opens_run_fires_one_continuation(self):
-		"""The happy path: step 1 dispatches, skill_autorun + skill_autorun_at get set,
-		and EXACTLY ONE (non-failed) continuation fires."""
+		"""The happy path: step 1 dispatches, skill_autorun + skill_autorun_at +
+		skill_autorun_skill get set, and EXACTLY ONE (non-failed) continuation fires."""
 		docname = _make_skill(TEST_USER, armed=True, name="ar-ok")
 		conv = _make_conv(TEST_USER)
 		token = _mint_approve_token(conv, TEST_USER, docname)
@@ -1184,11 +1431,66 @@ class TestApproveAndRun(FrappeTestCase):
 		self.assertTrue(
 			frappe.db.get_value(CONV, conv, "skill_autorun_at"), "the sliding timestamp is stamped"
 		)
+		self.assertEqual(
+			frappe.db.get_value(CONV, conv, "skill_autorun_skill"),
+			docname,
+			"the armed skill docname is stamped for the gate's live disarm re-check",
+		)
 		cont.assert_called_once()
 		self.assertFalse(
 			cont.call_args.kwargs.get("failed"), "the success continuation is not the failed scaffold"
 		)
 		self.assertIsNone(pending_confirm.peek(token), "the token is single-use consumed")
+
+	def test_never_tool_refused_not_consumed_no_run(self):
+		"""I4: a token whose tool is _SKILL_AUTORUN_NEVER (create_custom_skill) is
+		refused WITHOUT consuming - approve_and_run must never execute a NEVER tool as
+		step 1 or open a run. Mutation-verify: dropping the covered-tool refusal
+		dispatches here and flips this red."""
+		docname = _make_skill(TEST_USER, armed=True, name="ar-never")
+		conv = _make_conv(TEST_USER)
+		token = _mint_approve_token(
+			conv,
+			TEST_USER,
+			docname,
+			tool="create_custom_skill",
+			args={"skill_name": "ar-never-step1", "instructions": "do the thing"},
+		)
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			res = actions_api.approve_and_run(token, conv)
+		self.assertFalse(res.get("ok"), "a NEVER tool cannot be approved as a run")
+		self.assertFalse(disp.called, "a NEVER tool must not dispatch as step 1")
+		self.assertIsNotNone(pending_confirm.peek(token), "the refusal does not consume the token")
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
+	def test_stale_run_cancel_key_does_not_kill_the_fresh_run(self):
+		"""I1: a leftover run-cancel key from a PRIOR stop_run must not halt a freshly-
+		opened run. approve_and_run clears the run-cancel signal when it opens the run,
+		so the first covered write of the new run dispatches instead of hard-stopping.
+		Mutation-verify: dropping the clear_run_cancel call leaves the stale signal and
+		the first covered write returns RunHaltedError - flipping this red."""
+		docname = _make_skill(TEST_USER, armed=True, name="ar-stalecancel")
+		conv = _make_conv(TEST_USER)
+		token = _mint_approve_token(conv, TEST_USER, docname)
+		# A stale cancel from a previous stop_run still sits on this conversation.
+		turn_message_binding.request_run_cancel(conv)
+		with (
+			patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}),
+			patch("jarvis.api.persist_tool_receipt"),
+			patch("jarvis.chat.admission.publish_action_confirmed"),
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
+		):
+			res = actions_api.approve_and_run(token, conv)
+		self.assertTrue(res.get("ok"))
+		self.assertFalse(
+			turn_message_binding.is_run_cancel_requested(conv),
+			"opening a fresh run must clear a stale run-cancel signal",
+		)
+		# The first covered write of the fresh run dispatches, NOT hard-stopped.
+		with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}) as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertTrue(r.get("ok"), "the fresh run's first covered write must not be halted")
+		disp.assert_called_once()
 
 	def test_step1_failure_does_not_open_run_fires_failed_continuation(self):
 		"""Mutation target #1: step-1 ok:False must NOT set the flag; the FAILED

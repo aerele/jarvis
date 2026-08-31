@@ -13,6 +13,7 @@ from jarvis.exceptions import (
 	FeatureDisabledError,
 	InvalidArgumentError,
 	JarvisError,
+	RunDisarmedError,
 	RunHaltedError,
 )
 from jarvis.permissions import has_jarvis_access
@@ -929,10 +930,15 @@ def _skill_autorun_slide(conv: str) -> None:
 
 
 def _skill_autorun_clear(conv: str) -> None:
-	"""Hard-stop the approved run: drop skill_autorun so the next covered write
-	re-cards. Committed immediately so the cleared state survives a worker death
-	(a concurrent 0->0 clear is an idempotent no-op)."""
-	frappe.db.set_value("Jarvis Conversation", conv, "skill_autorun", 0, update_modified=False)
+	"""Hard-stop the approved run: drop skill_autorun (+ the armed skill docname it was
+	opened on) so the next covered write re-cards. Committed immediately so the cleared
+	state survives a worker death (a concurrent 0->0 clear is an idempotent no-op)."""
+	frappe.db.set_value(
+		"Jarvis Conversation",
+		conv,
+		{"skill_autorun": 0, "skill_autorun_skill": None},
+		update_modified=False,
+	)
 	frappe.db.commit()
 
 
@@ -1026,8 +1032,15 @@ def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | Non
 		msg_id = current_turn_message_id(conversation)
 		if not msg_id:
 			return None, None
-		msg = frappe.db.get_value("Jarvis Chat Message", msg_id, ["owner", "content"], as_dict=True)
+		msg = frappe.db.get_value("Jarvis Chat Message", msg_id, ["owner", "content", "hidden"], as_dict=True)
 		if not msg or not msg.get("owner") or not msg.get("content"):
+			return None, None
+		# The offer anchors on a HUMAN message (design §3.3 "human-message anchor"):
+		# a hidden (system / continuation) turn - a macro step, a run continuation,
+		# an intake continuation - must NOT re-drive the offer even if its content
+		# echoes a `/armedslug`, or a covered write inside a continuation would keep
+		# re-offering a run the user only approved once.
+		if msg.get("hidden"):
 			return None, None
 		# Resolve under the MESSAGE SENDER, never frappe.session.user / exec_user.
 		slugs = invoked_skill_slugs(msg["content"], user=msg["owner"])
@@ -1039,6 +1052,9 @@ def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | Non
 			return None, None
 		return docname, slug
 	except Exception:
+		# This runs on EVERY park fleet-wide; a swallowed failure must not be silent.
+		# A park is not every-tool-call, so a plain (deduped by title) log is fine.
+		frappe.log_error(title="_resolve_approve_run_offer failed", message=frappe.get_traceback())
 		return None, None
 
 
@@ -1581,14 +1597,22 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		) or exec_user
 		# One flags read shared by the skip-the-card bypasses below (all key off the
 		# conversation row). An empty/unresolved conv -> {} -> every flag OFF (the
-		# safe default: the write parks). skill_autorun + skill_autorun_at ride the
-		# SAME single query (design §3.4): the skill auto-run branch needs both the
-		# flag and its sliding timestamp for the inline TTL check.
+		# safe default: the write parks). skill_autorun + skill_autorun_at +
+		# skill_autorun_skill ride the SAME single query (design §3.4): the skill
+		# auto-run branch needs the flag, its sliding timestamp for the inline TTL
+		# check, and the armed skill docname for the LIVE disarm re-check (C2).
 		_conv_flags = (
 			frappe.db.get_value(
 				"Jarvis Conversation",
 				conv,
-				["auto_apply", "file_box", "skip_confirmation", "skill_autorun", "skill_autorun_at"],
+				[
+					"auto_apply",
+					"file_box",
+					"skip_confirmation",
+					"skill_autorun",
+					"skill_autorun_at",
+					"skill_autorun_skill",
+				],
 				as_dict=True,
 			)
 			if conv
@@ -1667,6 +1691,20 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				turn_message_binding.clear_run_cancel(conv)
 				code = RunHaltedError.__name__
 				return _error(code, "the run was halted - re-approve to continue")
+			# LIVE disarm re-check (C2 - the documented kill lever): re-read
+			# allow_approve_run off the EXACT armed skill docname this run was opened on
+			# (stamped on skill_autorun_skill by approve_and_run). An admin un-arming the
+			# skill mid-run - or a run whose docname is missing/inconsistent - must STOP
+			# the auto-run, not keep skipping cards. When it is falsy, HARD-STOP: clear
+			# the flag and refuse WITHOUT dispatching, within one write, no deploy. Placed
+			# after the cancel-gate and before the TTL/dispatch so it fires on every
+			# would-be uncarded covered write regardless of the run's age.
+			autorun_skill = _conv_flags.get("skill_autorun_skill")
+			if not autorun_skill or not frappe.db.get_value(
+				"Jarvis Custom Skill", autorun_skill, "allow_approve_run"
+			):
+				_skill_autorun_clear(conv)
+				return _error(RunDisarmedError.__name__, "the skill was disarmed - run stopped")
 			# Sliding TTL: auto-run only while the last covered write is recent. If the
 			# timestamp is missing or older than the horizon, DON'T auto-run - fall
 			# through to the normal park below (the reaper, task #42, clears the stale
@@ -1791,7 +1829,15 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# affordance (P0 = just the flag; the plan outline is a later task). Best-effort
 		# + fail-safe: no offer on any doubt, and it NEVER sets the run flag or
 		# auto-runs (that is a later task) - it only decorates this park.
-		skill_docname, skill_slug = _resolve_approve_run_offer(conv)
+		#
+		# Offer ONLY on a _SKILL_AUTORUN_COVERED first write (I4): a destructive /
+		# create_custom_skill park is a _SKILL_AUTORUN_NEVER tool that approve_and_run
+		# refuses to run as step 1, so stamping it would dangle an unusable offer and
+		# invite an approve-a-NEVER-tool click. A NEVER first write parks as an ordinary
+		# card with no run offer.
+		skill_docname, skill_slug = (
+			_resolve_approve_run_offer(conv) if tool in _SKILL_AUTORUN_COVERED else (None, None)
+		)
 		if isinstance(preview, dict):
 			preview["card"] = confirm_card.build_card(tool, args, preview)
 			if skill_docname and isinstance(preview.get("card"), dict):

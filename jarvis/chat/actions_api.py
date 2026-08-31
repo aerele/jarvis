@@ -408,6 +408,17 @@ _APPROVE_RUN_MACRO_CONVERSATION = {
 	},
 }
 
+_APPROVE_RUN_NEVER_TOOL = {
+	"ok": False,
+	"error": {
+		"type": "InvalidConfirmation",
+		"message": (
+			"This step needs its own confirmation and can't be run as part of an approved run. "
+			"Nothing was changed - confirm the step on its own instead."
+		),
+	},
+}
+
 
 def _confirmation_storage_error(exc) -> dict:
 	"""Stable user envelope for a Redis failure; never mislabel it as expiry."""
@@ -509,6 +520,14 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 		if not skill_docname:
 			return _APPROVE_RUN_NOT_RUNNABLE
 
+		# Covered-tool only (I4): approve_and_run executes the parked write as "step 1"
+		# and opens the run behind it. A _SKILL_AUTORUN_NEVER tool (create_custom_skill /
+		# delete / cancel / amend) must never be run that way - the offer gate already
+		# refuses to stamp one, so a stamped NEVER tool means a bug; defend anyway and
+		# refuse WITHOUT consuming (the card stays confirmable through confirm_tool).
+		if record.get("tool") not in api._SKILL_AUTORUN_COVERED:
+			return _APPROVE_RUN_NEVER_TOOL
+
 		# TOCTOU re-check: the skill must be live-armed RIGHT NOW off the EXACT row
 		# the offer stamped (an admin may have un-armed it between the park-time offer
 		# and this click). Read live; refuse without consuming when it is not 1.
@@ -584,13 +603,26 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 	# the one legitimate server enabler). A failed first step sets NOTHING.
 	run_conv = record.get("conversation")
 	if ok and run_conv:
+		# Stamp skill_autorun_skill (C2) so the gate can re-read allow_approve_run LIVE
+		# off THIS exact armed row before each uncarded covered write - un-arming the
+		# skill mid-run then hard-stops the auto-run within one write.
 		frappe.db.set_value(
 			"Jarvis Conversation",
 			run_conv,
-			{"skill_autorun": 1, "skill_autorun_at": frappe.utils.now_datetime()},
+			{
+				"skill_autorun": 1,
+				"skill_autorun_at": frappe.utils.now_datetime(),
+				"skill_autorun_skill": skill_docname,
+			},
 			update_modified=False,
 		)
 		frappe.db.commit()
+		# I1: a leftover run-cancel key from a PRIOR stop_run on this conversation must
+		# not halt the run we just opened. Clear it so the fresh run's first covered
+		# write dispatches instead of hard-stopping on a stale Halt.
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.clear_run_cancel(run_conv)
 
 	# Receipt + continuation, exactly as _confirm_core: attach to the token's own
 	# conversation, or the client-supplied passed_conv ONLY when the token was minted
