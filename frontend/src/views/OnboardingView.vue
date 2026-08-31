@@ -33,6 +33,16 @@
 						>
 					</div>
 
+					<!-- Worker-warning banner: non-blocking, shown above every step (never
+						 gates a CTA). Task 5's boot flag; copy identical to OnboardingGate's. -->
+					<Banner
+						v-if="workerWarning"
+						type="warning"
+						:title="WORKER_WARNING_TITLE"
+						:message="workerWarningMessage(agentName)"
+						class="mb-4 w-full max-w-[720px]"
+					/>
+
 					<!-- step rail: flat progress segments with labels (design.md §4.3 —
 					 no numbered circles, no connector lines). Hidden on the intro
 					 tour (chromeless). variant="steps" opts out of the 2026-08-16
@@ -46,6 +56,24 @@
 					<div
 						class="w-full overflow-hidden rounded-2xl border border-outline-gray-1 bg-surface-white shadow-2xl"
 					>
+						<!-- ===== Local/non-public host block: first in the chain, ahead of
+							 even the support panel, because a blocked host can never
+							 onboard on any step - the server enforces the same block at
+							 start_signup, this just stops the customer from reaching a dead
+							 CTA. ===== -->
+						<section v-if="showHostBlock" class="ob-screen">
+							<div class="ob-body ob-body--center">
+								<div class="ob-head">
+									<h1>Setup isn't available on this address</h1>
+									<p>
+										This site is running on a local or non-public address, so
+										sign-in links and agent connections can't reach it. Ask
+										your administrator to set a public host name for this site,
+										then reload this page.
+									</p>
+								</div>
+							</div>
+						</section>
 						<!-- ===== Contact support: a real ticket, filed from here. Hoisted
 							 above every step (not just Pay, where it started) so ANY screen
 							 that offers the support action - the payment recovery/terminal/
@@ -55,7 +83,7 @@
 							 binds on its own root. The action it replaces was a bare
 							 mailto:, which did nothing at all on a machine with no mail
 							 client. ===== -->
-						<section v-if="supportOpen" class="ob-screen">
+						<section v-else-if="supportOpen" class="ob-screen">
 							<div class="ob-body">
 								<div class="ob-head">
 									<h1>Get help with this</h1>
@@ -1886,7 +1914,7 @@ import {
 import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
-import { agentName } from "@/branding";
+import { agentName, WORKER_WARNING_TITLE, workerWarningMessage } from "@/branding";
 import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
 import {
 	STATES as PAY_STATES,
@@ -1913,6 +1941,16 @@ import { isExpectedCompanyDefaultsMiss } from "@/onboarding/companyDefaultsMiss"
 
 const router = useRouter();
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
+
+// Server-authoritative: onboarding is blocked when the bench is on a
+// local/non-public host (magic links + agent callbacks can't reach it).
+// jarvis_public_host_ok is purely host-based (the site's public host_name) -
+// there is no separate dev-bypass flag; a dev/e2e bench opts in by giving
+// itself a public-looking host_name, same as production.
+const hostOk = window.jarvis_public_host_ok !== false;
+
+// Non-blocking: warns without gating any step's CTA (Task 5's boot flag).
+const workerWarning = !!window.jarvis_worker_warning;
 
 // The 4 named wizard steps shown on the rail. The intro tour is chromeless
 // (no rail entry).
@@ -2363,7 +2401,7 @@ const payProviderReady = computed(() => !!state.paymentProvider);
 // payBusyView is declared further down; safe to close over here since this
 // getter only runs at render, after the whole setup script has executed.
 const payDisabled = computed(
-	() => payBusyView.value || !payProviderReady.value || !state.termsAccepted
+	() => payBusyView.value || !payProviderReady.value || !state.termsAccepted || !hostOk
 );
 // #669: how long the checkout link is good for. Reads the machine's own
 // payTokenExpiresInS, which is cleared with the token it belongs to, so this
@@ -3097,6 +3135,10 @@ const provisioningDelayed = computed(() => pay.value.value === S.PROVISIONING_DE
 // fall back to (owner decision 4). Only replaces the FRESH review card; a customer
 // with real server state (paid, verifying, a recovery) still sees their own state.
 const showMaintenanceHold = computed(() => !state.paymentUiV2 && pay.value.value === S.REVIEW);
+// Unlike showMaintenanceHold (a pay-step-only sub-state), a blocked host can
+// never onboard on any step, so this gates the wizard's top-level v-if chain
+// (rendered before even the intro tour) rather than the pay step's sub-chain.
+const showHostBlock = computed(() => !hostOk);
 
 // The busy-screen line. CHECKOUT_OPEN is the copy MOMENT before the browser
 // top-level-navigates to the admin-hosted pay page (WS7).
@@ -3576,6 +3618,7 @@ watch(
 // once through the flow; the machine takes it from there (verify / checkout /
 // parked-money / duplicate all land on their own sub-screen).
 async function onPayClick() {
+	if (!hostOk) return; // localhost/non-public bench: server rejects signup anyway
 	// plan-09 07-c: the CTA is hidden behind the maintenance hold when the flag is
 	// off; guard the handler too so a stray/programmatic click cannot start a signup.
 	if (!state.paymentUiV2) return;

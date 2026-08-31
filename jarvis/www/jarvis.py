@@ -133,5 +133,22 @@ def get_context(context):
 	context.boot["support_state"] = state
 	context.boot["support_available"] = state == SUPPORT_OK
 
+	# Onboarding guards: the localhost/non-public-host hard-block and the
+	# background-worker health warning, both surfaced up front so the SPA wizard
+	# and readiness banner don't need an extra round trip to learn them. Each
+	# fails to the non-blocking default on any probe error - never falsely gate
+	# or warn the customer off a transient blip.
+	from jarvis import admin_client
+	from jarvis.chat import pump
+
+	try:
+		context.boot["jarvis_public_host_ok"] = admin_client._onboarding_host_ok()
+	except Exception:
+		context.boot["jarvis_public_host_ok"] = True  # never falsely block the wizard
+	try:
+		context.boot["jarvis_worker_warning"] = bool(pump.chat_worker_status().get("degraded"))
+	except Exception:
+		context.boot["jarvis_worker_warning"] = False
+
 	frappe.db.commit()
 	return context

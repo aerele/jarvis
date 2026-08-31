@@ -929,8 +929,11 @@ test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the acc
 	// check. A regression that clears the context as the FIRST statement inside the rejected branch
 	// (unconditionally wiping it on every rejection, reintroducing the jarvis#496 bug) would still
 	// be textually after a bare "if (r && r.ok === false)" search, but sits BEFORE this closing
-	// sequence, so it fails here.
-	const rejectBlockCloseIdx = sendSrc.indexOf("return;\n\t\t}\n\t\t// Send accepted");
+	// sequence, so it fails here. The rejection block's final `return;` and closing brace are
+	// immediately followed by the workers-notice self-heal block's `if`, not directly by the
+	// "// Send accepted" comment (a workersNotice/workersWarnNotice self-heal block now sits
+	// between the two), so anchor on that sibling `if` instead of the comment.
+	const rejectBlockCloseIdx = sendSrc.indexOf("return;\n\t\t}\n\t\tif (r && r.ok !== false) {");
 	const clearIdx = sendSrc.indexOf("_prefillSendContext = null;");
 	assert.ok(
 		awaitIdx > -1 && rejectBlockCloseIdx > -1 && clearIdx > -1,

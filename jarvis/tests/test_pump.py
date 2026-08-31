@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -2129,4 +2129,106 @@ class TestConservativeAdmission(_PumpTestCase):
 		amsgA = self._val(ridA, "assistant_message")
 		self.assertTrue(
 			(frappe.db.get_value(MSG, amsgA, "content") or "").strip(), "deltas applied to the in-flight lane"
+		)
+
+
+# --------------------------------------------------------------------------- #
+# Chat worker-status probe (Task 3 - onboarding guards)
+# --------------------------------------------------------------------------- #
+
+
+class TestWorkerStatus(FrappeTestCase):  # reuse module base
+	def setUp(self):
+		pump._clear_zero_marker()
+
+	def tearDown(self):
+		pump._clear_zero_marker()
+
+	def test_probe_returns_none_on_error(self):
+		with patch("frappe.utils.background_jobs.get_workers", side_effect=RuntimeError):
+			self.assertIsNone(pump._probe_worker_count("long"))
+
+	def test_healthy_is_not_blocked_not_degraded(self):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=4),
+			patch.object(pump, "_pump_shape_starves", return_value=False),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
+			s = pump.chat_worker_status()
+			self.assertFalse(s["blocked"])
+			self.assertFalse(s["degraded"])
+
+	def test_one_worker_degraded_not_blocked(self):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=1),
+			patch.object(pump, "_pump_shape_starves", return_value=True),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
+			s = pump.chat_worker_status()
+			self.assertFalse(s["blocked"])
+			self.assertTrue(s["degraded"])
+
+	def test_probe_error_never_blocks(self):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=None),
+			patch.object(pump, "_pump_shape_starves", return_value=False),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
+			self.assertFalse(pump.chat_worker_status()["blocked"])
+
+	def test_zero_workers_blocks_only_after_grace(self):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=0),
+			patch.object(pump, "_pump_shape_starves", return_value=True),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
+			# first observation: marker set, NOT yet blocked (debounce)
+			self.assertFalse(pump.chat_worker_status()["blocked"])
+			# simulate the marker aging past the grace window
+			pump._force_zero_marker_age(pump._ZERO_GRACE_S + 5)
+			self.assertTrue(pump.chat_worker_status()["blocked"])
+
+	def test_recovery_clears_marker(self):
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=0),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
+			pump.chat_worker_status()  # sets marker
+		# Age the ORIGINAL marker past grace before the recovery step. If the
+		# recovery reading below fails to clear it, this aged, still-live marker
+		# would make the later fresh 0-reading block IMMEDIATELY (no debounce),
+		# so the final assertion below only holds if recovery actually cleared it.
+		pump._force_zero_marker_age(pump._ZERO_GRACE_S + 5)
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=3),
+			patch.object(pump, "_pump_shape_starves", return_value=False),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
+			self.assertFalse(pump.chat_worker_status()["blocked"])
+			# marker cleared: a later single 0 must re-arm the grace, not block instantly
+			with (
+				patch.object(pump, "_probe_worker_count", return_value=0),
+				patch.object(pump, "_pump_shape_starves", return_value=True),
+			):
+				self.assertFalse(pump.chat_worker_status()["blocked"])
+
+	def test_zero_still_present_refreshes_ttl(self):
+		"""When the marker is PRESENT and the reading is still zero, `_zero_persisted`
+		must RE-WRITE it (same `since`, fresh TTL) rather than leaving it untouched.
+		Without the refresh, a lane dead longer than the 300s TTL loses the marker in
+		Redis; the next zero reading re-seeds it from scratch and returns False, briefly
+		flipping the fail-closed chat block OFF for a fresh 20s grace window on a lane
+		that has been dead the whole time. This test fails if the refresh line is
+		removed (set_value would then never be called for a still-present marker)."""
+		fixed_since = "2020-01-01 00:00:00.000000"
+		mock_cache = MagicMock()
+		mock_cache.get_value.return_value = fixed_since
+		with patch.object(pump.frappe, "cache", return_value=mock_cache):
+			result = pump._zero_persisted(pump._ZERO_GRACE_S)
+		# `since` is ancient, so with grace elapsed this must report persisted.
+		self.assertTrue(result)
+		# The marker must be RE-WRITTEN with the SAME `since` and a fresh TTL -
+		# never left untouched while zero readings keep coming in.
+		mock_cache.set_value.assert_called_once_with(
+			pump._zero_marker_cache_key(), fixed_since, expires_in_sec=300
 		)

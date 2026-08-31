@@ -787,14 +787,11 @@ def _live_worker_count(queue_name: str) -> int:
 	"""Number of RQ workers currently listening on ``queue_name`` (0 on any probe
 	trouble). Same ``get_workers()``/``generate_qname`` path ``api._turn_queue``
 	uses; best-effort — a probe hiccup must never break an enqueue, so the caller
-	treats 0 as "not safely provisioned" and falls back to ``short``."""
-	try:
-		from frappe.utils.background_jobs import generate_qname, get_workers
+	treats 0 as "not safely provisioned" and falls back to ``short``.
 
-		qname = generate_qname(queue_name)
-		return sum(1 for w in get_workers() if qname in (w.queue_names() or []))
-	except Exception:
-		return 0
+	Delegates to ``_probe_worker_count``, which does the identical live probe but
+	returns ``None`` (not 0) on trouble so ITS callers can fail open instead."""
+	return _probe_worker_count(queue_name) or 0
 
 
 def _control_queue() -> str:
@@ -859,6 +856,113 @@ def _warn_provisioning_if_starved() -> None:
 		)
 	except Exception:
 		pass
+
+
+# --- Chat worker health (drives onboarding warning + chat send block) ---------
+#
+# Two conditions, deliberately split so the fail-CLOSED chat block is flap-proof
+# on the managed fleet (a rolling worker restart must never block a paying
+# customer):
+#   * DEGRADED  -> warn only. The F1 self-starvation shape (_pump_shape_starves):
+#     turns run but strand for minutes. Surfaced as a non-blocking onboarding
+#     banner; chat still works.
+#   * BLOCKED   -> block sends. CONFIDENT zero live workers on the turn queue,
+#     sustained past a short grace window. This is the only guaranteed-hang shape
+#     (no worker can pick a turn up at all). Never fires on a probe error.
+
+_ZERO_GRACE_S = 20  # a 0 reading must persist this long before it blocks sends
+_ZERO_KEY = "jarvis:workers:zero_since"
+
+
+def _probe_worker_count(queue_name: str) -> "int | None":
+	"""Live RQ worker count on ``queue_name`` - like ``_live_worker_count`` but
+	returns ``None`` (not 0) on any probe trouble, so a caller can tell a
+	CONFIDENT zero apart from a broken probe and fail OPEN on the latter."""
+	try:
+		from frappe.utils.background_jobs import generate_qname, get_workers
+
+		qname = generate_qname(queue_name)
+		return sum(1 for w in get_workers() if qname in (w.queue_names() or []))
+	except Exception:
+		return None
+
+
+def _zero_marker_cache_key() -> str:
+	try:
+		return f"{_ZERO_KEY}:{frappe.local.site}"
+	except Exception:
+		return _ZERO_KEY
+
+
+def _clear_zero_marker() -> None:
+	try:
+		frappe.cache().delete_value(_zero_marker_cache_key())
+	except Exception:
+		pass
+
+
+def _force_zero_marker_age(age_s: int) -> None:
+	"""Test helper: rewind the zero-marker so it reads as ``age_s`` seconds old."""
+	from frappe.utils import add_to_date, now_datetime
+
+	frappe.cache().set_value(
+		_zero_marker_cache_key(),
+		add_to_date(now_datetime(), seconds=-age_s).isoformat(),
+		expires_in_sec=300,
+	)
+
+
+def _zero_persisted(grace_s: int) -> bool:
+	"""True once a 0-worker reading has persisted at least ``grace_s`` seconds.
+	First 0 sets the marker and returns False (debounce)."""
+	from frappe.utils import get_datetime, now_datetime, time_diff_in_seconds
+
+	key = _zero_marker_cache_key()
+	now = now_datetime()
+	try:
+		since = frappe.cache().get_value(key, expires=True)
+		if not since:
+			frappe.cache().set_value(key, now.isoformat(), expires_in_sec=300)
+			return False
+		# Refresh the TTL while zero persists so a lane dead longer than the TTL
+		# never evicts the marker (which would briefly flip the block OFF and
+		# re-arm the grace every ~5 min). `since` is kept anchored to the first
+		# zero reading, so the grace calculation is unchanged.
+		frappe.cache().set_value(key, since, expires_in_sec=300)
+		return time_diff_in_seconds(now, get_datetime(since)) >= grace_s
+	except Exception:
+		return False  # cache trouble => fail OPEN (do not block)
+
+
+def _turn_workers_confidently_zero() -> bool:
+	try:
+		from jarvis.chat.api import _turn_queue
+
+		q = _turn_queue()
+	except Exception:
+		_clear_zero_marker()
+		return False
+	n = _probe_worker_count(q)
+	if n is None:
+		return False  # probe failed => fail OPEN, leave marker untouched
+	if n > 0:
+		_clear_zero_marker()
+		return False
+	return _zero_persisted(_ZERO_GRACE_S)
+
+
+def chat_worker_status() -> dict:
+	"""Worker health for the onboarding warning + chat send block. Fails SAFE:
+	on any trouble reports neither blocked nor degraded."""
+	try:
+		blocked = _turn_workers_confidently_zero()
+	except Exception:
+		blocked = False
+	try:
+		degraded = _pump_shape_starves()
+	except Exception:
+		degraded = False
+	return {"blocked": bool(blocked), "degraded": bool(blocked or degraded)}
 
 
 # --------------------------------------------------------------------------- #
