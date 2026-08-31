@@ -13,6 +13,14 @@ export const brandFaviconUrl = (window.brand_favicon_url || "").trim();
 // decide between "Jarvis" defaults and the tenant brand.
 export const isWhitelabeled = agentName !== DEFAULT_NAME || !!brandLogoUrl;
 
+// Shared worker-warning banner copy: OnboardingGate.vue and OnboardingView.vue
+// both render this Banner for the same degraded-worker signal, and previously
+// hardcoded the identical title + interpolated message in two places.
+export const WORKER_WARNING_TITLE = "Background workers are low";
+export function workerWarningMessage(name) {
+	return `Your ${name} background workers look under-provisioned. Chat may be slow or stall until more workers are running.`;
+}
+
 // Patch the browser-tab title + favicon to the tenant brand. Called once at
 // boot from main.js; safe before mount. Best-effort - never blocks boot.
 export function applyBrandChrome() {

@@ -343,6 +343,14 @@ _INVALID_CONFIRM = {
 	},
 }
 
+_ARMED_RUN_CONFIRM_WITHDRAWN = {
+	"ok": False,
+	"error": {
+		"type": "InvalidConfirmation",
+		"message": "This macro run is stopping; that confirmation was withdrawn and nothing ran.",
+	},
+}
+
 _CONFIRMATION_UNAVAILABLE = {
 	"ok": False,
 	"error": {
@@ -446,6 +454,17 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 		record = pending_confirm.peek(token, strict=True)
 		if not record:
 			return _INVALID_CONFIRM
+
+		# Defense-in-depth (security review): an armed macro-run conversation must have
+		# NO human-confirmable card. The only card that parks there is a D5 excluded
+		# (delete/cancel/amend) write, which stop-and-report sweeps in advance_after_turn.
+		# Refuse a racing Confirm published-at-park before that sweep - WITHOUT consuming
+		# the token, so the sweep still clears it - else the excluded write would run and
+		# fire an armed continuation turn. Keyed on the flag (the single source of truth);
+		# the typed-approval path is already blocked upstream in send_message.
+		token_conv = record.get("conversation")
+		if token_conv and frappe.db.get_value("Jarvis Conversation", token_conv, "skip_confirmation"):
+			return _ARMED_RUN_CONFIRM_WITHDRAWN
 
 		# Real conversation guard (#11): if the caller passed the conversation the
 		# click came from, enforce it; otherwise fall back to the record's own

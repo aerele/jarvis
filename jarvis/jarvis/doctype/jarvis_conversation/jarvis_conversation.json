@@ -68,6 +68,15 @@
    "description": "Set by the File Box drop path. When 1, reversible create/update tool calls execute directly (no confirmation card) because the run is unattended and review happens on the created Draft + the approval board; destructive ops still park. Server-set only; enabling via a generic save requires System Manager, like auto_apply."
   },
   {
+   "fieldname": "skip_confirmation",
+   "fieldtype": "Check",
+   "label": "Skip confirmation (armed macro run)",
+   "default": "0",
+   "hidden": 1,
+   "no_copy": 1,
+   "description": "Set by an armed macro run (Jarvis Macro.skip_confirmation) on its own disposable run conversation. When 1, every covered gated tool call executes without a confirmation card; the irreversible trio (delete/cancel/amend) still parks. The conversation is human-inert while set - interactive send and retry are blocked. Server-set only; enabling via a generic save requires the Jarvis Admin / System Manager role. Cleared when the run reaches a terminal state."
+  },
+  {
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",

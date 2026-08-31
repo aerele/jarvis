@@ -748,6 +748,12 @@ def assemble_prompt(
 	# knows whether to confirm mutating ops. Default (off) = confirm; the persona
 	# confirms by default, so we only signal the non-default "auto" mode.
 	auto_apply = "; auto-apply changes: ON" if conv.auto_apply else ""
+	# Armed macro run: this run's conversation carries skip_confirmation=1 (an admin
+	# armed the macro). Signal the persona to call EVERY write tool directly - incl.
+	# create/update, which it would otherwise route through a jarvis-action card,
+	# leaving armed-skip inert on those two. The bench still enforces the gate; this
+	# only changes which shape the agent emits. Server-set flag, never a client claim.
+	armed_run = "; armed macro run: apply changes directly" if conv.skip_confirmation else ""
 	# Custom-skill invocation: if the user typed /slug for an enabled custom
 	# skill, name it in the system context so the agent activates it
 	# deterministically (the agent has no documented user-invocable trigger).
@@ -863,7 +869,7 @@ def assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {chat_user}"
-		f"; conv: {conversation_id}{auto_apply}{skill_clause}{learned_clause}"
+		f"; conv: {conversation_id}{auto_apply}{armed_run}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"

@@ -38,3 +38,26 @@ def clear_session_key() -> None:
 			delattr(frappe.local, _ATTR)
 		except Exception:
 			setattr(frappe.local, _ATTR, None)
+
+
+_ARMED_ATTR = "jarvis_armed_by_macro"
+
+
+def set_armed_by_macro(macro: str | None) -> None:
+	"""Record that the write just dispatched ran uncarded under an armed macro's
+	skip_confirmation (the gate's armed branch sets this). Read once by the receipt
+	persist so the row is labelled ``auto_applied`` with this macro as provenance."""
+	setattr(frappe.local, _ARMED_ATTR, (macro or "") or None)
+
+
+def take_armed_by_macro() -> str | None:
+	"""Read AND clear the armed-by-macro marker (consume-once), so an armed write's
+	receipt is labelled exactly once and the marker can never leak onto the next,
+	unrelated tool call's receipt in a reused request/worker."""
+	val = getattr(frappe.local, _ARMED_ATTR, None)
+	if hasattr(frappe.local, _ARMED_ATTR):
+		try:
+			delattr(frappe.local, _ARMED_ATTR)
+		except Exception:
+			setattr(frappe.local, _ARMED_ATTR, None)
+	return val

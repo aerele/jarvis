@@ -155,11 +155,25 @@ class TestJarvisSettings(FrappeTestCase):
 			self.assertEqual(self._tab_of(meta, fieldname), "account_tab")
 		for fieldname in (
 			"run_query_doctype_allowlist",
-			"auto_apply_changes",
+			"disable_armed_skip",
 			"core_apps_override",
 			"enable_customizations_clause",
 		):
 			self.assertEqual(self._tab_of(meta, fieldname), "agent_tab")
+
+	def test_dead_auto_apply_changes_field_removed(self):
+		"""The deprecated site-wide auto_apply_changes toggle (issue #186) is gone;
+		the live skip control is the admin-armed per-macro skip_confirmation."""
+		meta = frappe.get_meta("Jarvis Settings")
+		fieldnames = {f.fieldname for f in meta.fields}
+		self.assertNotIn("auto_apply_changes", fieldnames)
+
+	def test_disable_armed_skip_killswitch_present(self):
+		"""The armed-skip kill switch replaced the dead field in the same slot."""
+		meta = frappe.get_meta("Jarvis Settings")
+		field = next((f for f in meta.fields if f.fieldname == "disable_armed_skip"), None)
+		self.assertIsNotNone(field, "disable_armed_skip kill-switch field must exist")
+		self.assertEqual(field.fieldtype, "Check")
 
 	def test_operator_fields_are_readonly(self):
 		"""All 5 operator fields are system-populated and must be read-only."""
@@ -310,3 +324,49 @@ class TestOnUpdateAdminDispatch(_SettingsSnapshotTestCase):
 # TestOnUpdateLocalDispatchWhenAdminUrlEmpty removed: post-unification (2026-05-29)
 # on_update always routes through _sync_via_admin. The bench-local push path
 # is gone; the test exercising it is no longer meaningful.
+
+
+class TestDropAutoApplyChangesPatch(FrappeTestCase):
+	"""v2_17: the leftover tabSingles row for the removed auto_apply_changes field
+	is deleted, keyed on doctype+field so sibling Settings values survive, and the
+	patch is idempotent."""
+
+	_FIELD = "auto_apply_changes"
+	_SIBLING = "run_query_doctype_allowlist"
+
+	def _row_count(self, field):
+		return frappe.db.count("Singles", {"doctype": "Jarvis Settings", "field": field})
+
+	def setUp(self):
+		# Snapshot the real sibling (a live run_query defense-in-depth allowlist) we
+		# borrow to prove the patch leaves it untouched, and restore it in tearDown -
+		# so this test can never corrupt it even if a future edit adds a commit.
+		self._sibling_snapshot = frappe.db.get_single_value("Jarvis Settings", self._SIBLING)
+
+	def tearDown(self):
+		frappe.db.set_value(
+			"Jarvis Settings", None, self._SIBLING, self._sibling_snapshot, update_modified=False
+		)
+
+	def test_patch_drops_only_the_dead_row_and_is_idempotent(self):
+		from jarvis.patches.v2_17_drop_auto_apply_changes import execute
+
+		# Seed a leftover row for the removed field (simulating a pre-migration site)
+		# and make sure a sibling row exists so we can prove it is untouched.
+		frappe.db.delete("Singles", {"doctype": "Jarvis Settings", "field": self._FIELD})
+		frappe.db.set_value("Jarvis Settings", None, self._SIBLING, "Note", update_modified=False)
+		frappe.db.sql(
+			"INSERT INTO tabSingles (doctype, field, value) VALUES (%s, %s, %s)",
+			("Jarvis Settings", self._FIELD, "0"),
+		)
+		self.assertEqual(self._row_count(self._FIELD), 1)
+		self.assertGreaterEqual(self._row_count(self._SIBLING), 1)
+
+		execute()
+
+		self.assertEqual(self._row_count(self._FIELD), 0, "dead row must be deleted")
+		self.assertGreaterEqual(self._row_count(self._SIBLING), 1, "sibling Settings value must survive")
+
+		# Idempotent: a second run on the now-absent row is a clean no-op.
+		execute()
+		self.assertEqual(self._row_count(self._FIELD), 0)
