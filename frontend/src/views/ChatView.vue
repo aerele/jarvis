@@ -2363,7 +2363,7 @@
 				<Banner
 					v-else-if="workersWarnNotice"
 					type="warning"
-					title="Replies may be slow right now"
+					title="Replies may be slow"
 					:message="workersWarnNotice"
 					style="margin-bottom: 10px"
 				/>
@@ -4288,7 +4288,7 @@ const WORKERS_BLOCKED_MSG =
 // cleared on the next successful retry/send, never re-derived from a re-poll
 // (checkReady() is memoized).
 const workersWarnNotice = ref(null);
-const WORKERS_WARN_MSG = `${agentName} is busier than usual, so answers might take a little longer. You can keep chatting.`;
+const WORKERS_WARN_MSG = `${agentName} is low on background workers, so answers may take longer. Add more workers to your bench to speed this up.`;
 // A DIFFERENT not-ready reason (container_provisioning - e.g. the connected LLM
 // account itself ran out of quota, or a container is still coming up) - never a
 // billing lapse, so it gets its own quiet copy instead of suspendedNotice's "Chat is

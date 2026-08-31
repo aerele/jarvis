@@ -171,10 +171,10 @@
 
 			<!-- Worker-degraded heads-up: a SEPARATE, additive signal from the
 			     readiness gate above (see workerWarning's declaration). Renders ONLY
-			     when readiness === "ready" - chat is fully usable, just maybe a
-			     little slow. "gate" has no thread to warn about, and "degraded"
+			     when readiness === "ready" - chat is fully usable, just maybe
+			     slower. "gate" has no thread to warn about, and "degraded"
 			     already shows .jvp-notice below saying replies may FAIL outright;
-			     stacking this "may be a little slower" banner under that would
+			     stacking this "replies may be slow" banner under that would
 			     contradict and undersell the real state, so degraded keeps its own
 			     banner instead of also getting this one. Non-blocking by
 			     construction either way - never disables the composer, never
@@ -186,7 +186,8 @@
 				class="jvp-worker-notice"
 				role="status"
 			>
-				Replies may be a little slower than usual right now.
+				{{ brandName }} is low on background workers, so answers may take longer. Add more
+				workers to your bench to speed this up.
 			</div>
 
 			<div class="jvp-body" ref="bodyEl" @scroll.passive="onBodyScroll">
@@ -2630,7 +2631,7 @@ defineExpose({ load, startNewChat, convId });
    compact and clearly non-blocking. Renders only on a fully "ready" workspace
    whose workers are merely stretched (see the template v-if) - readiness ===
    "degraded" already gets .jvp-notice's own "replies may fail" banner, and this
-   lighter "may be a little slower" one would undersell that, so the two never
+   lighter "replies may be slow" one would undersell that, so the two never
    stack. */
 .jvp-worker-notice {
 	flex: none;
