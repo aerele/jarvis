@@ -11,6 +11,8 @@ import {
 	verbSentence,
 	pendingExpiry,
 	receiptView,
+	isDestructivePlanStep,
+	PLAN_STEP_CAP,
 } from "./actionSummary.js";
 
 const createAction = {
@@ -200,6 +202,46 @@ test("pendingCardOf: null for missing / unknown-kind / non-object cards", () => 
 	assert.equal(pendingCardOf({ preview: { card: "nope" } }), null);
 	assert.equal(pendingCardOf({}), null);
 	assert.equal(pendingCardOf(null), null);
+});
+
+// P1 (skill approve-and-run, §3.5): `card.plan` is an ADDITIVE field on an
+// EXISTING kind - CARD_KINDS itself must stay exactly as it was (a plan never
+// needs its own kind), and pendingCardOf must pass `plan`/`approve_run`
+// through untouched, same as any other card property.
+test("CARD_KINDS parity is UNCHANGED - the plan/approve_run fields are additive, not a new kind", () => {
+	// "skill" (create_custom_skill) is already whitelisted from the macro work;
+	// a runnable-plan card rides an ORDINARY kind (e.g. "create") - it does not
+	// add or need a 14th kind. The full whitelist is pinned by the "every kind
+	// build_card emits is whitelisted" test above; this only pins that a plan
+	// does not require touching that set.
+	assert.equal(pendingCardOf({ preview: { card: { kind: "plan" } } }), null);
+	const card = {
+		kind: "create",
+		doctype: "Sales Invoice",
+		approve_run: true,
+		skill_slug: "close-books",
+		plan: { steps: [{ n: 1, verb: "create", doctype: "Sales Invoice", summary: "x" }] },
+	};
+	const out = pendingCardOf({ preview: { card } });
+	assert.equal(out.approve_run, true);
+	assert.equal(out.skill_slug, "close-books");
+	assert.deepEqual(out.plan, card.plan);
+});
+
+test("isDestructivePlanStep: delete/cancel/amend are destructive, everything else is not", () => {
+	for (const verb of ["delete", "cancel", "amend", "DELETE", "Cancel"]) {
+		assert.equal(isDestructivePlanStep({ verb }), true, verb);
+	}
+	for (const verb of ["create", "update", "submit", "send_email", "run_method", ""]) {
+		assert.equal(isDestructivePlanStep({ verb }), false, verb);
+	}
+	assert.equal(isDestructivePlanStep({}), false);
+	assert.equal(isDestructivePlanStep(null), false);
+});
+
+test("PLAN_STEP_CAP: a positive display cap the outline caps against defensively", () => {
+	assert.equal(typeof PLAN_STEP_CAP, "number");
+	assert.ok(PLAN_STEP_CAP > 0);
 });
 
 test("verbSentence: single names the record, bulk counts + pluralizes", () => {
