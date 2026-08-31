@@ -17,7 +17,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.chat import actions_api, finalize, pending_confirm, turn_message_binding
+from jarvis.chat import actions_api, finalize, pending_confirm, session_lifecycle, turn_message_binding
 from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests.test_auto_apply import (
@@ -1553,3 +1553,136 @@ class TestApprovedRunContextClause(FrappeTestCase):
 		prompt = self._assembled(doc)
 		self.assertNotIn("approved skill run", prompt)
 		self.assertIn("; chat user:", prompt)  # assembly sanity
+
+
+# --------------------------------------------------------------------------- #
+# The stranded-flag reaper (task #42, design §3.4 "Sliding TTL + reaper")
+# --------------------------------------------------------------------------- #
+#
+# A dedicated hourly cron that clears a STRANDED skill_autorun flag - an approved run
+# whose worker died mid-run, so no terminal clear (on_terminal_turn) ever fired and its
+# sliding skill_autorun_at froze. THREE discriminators, ALL required (any one alone would
+# reap something live): (1) no live turn (the exact free_idle_sessions NOT EXISTS
+# streaming/recovering predicate), (2) a stale/NULL sliding timestamp past the reap
+# window (>= the gate TTL), (3) no pending card strictly bound to the conversation (a
+# paused, resumable run). The reaper's home is session_lifecycle, beside free_idle_sessions.
+
+
+def _live_turn_msg(conv: str, *, recovering: bool = False) -> None:
+	"""Insert an in-flight (streaming or recovering) assistant Chat Message for ``conv`` -
+	the live-turn signal the reaper's discriminator #1 must see and refuse to reap."""
+	frappe.get_doc(
+		{
+			"doctype": MSG,
+			"conversation": conv,
+			"seq": 1,
+			"role": "assistant",
+			"content": "",
+			"streaming": 0 if recovering else 1,
+			"recovering": 1 if recovering else 0,
+		}
+	).insert(ignore_permissions=True)
+	frappe.db.commit()
+
+
+class TestStrandedSkillAutorunReaper(FrappeTestCase):
+	"""The reaper quartet (+ a NULL-timestamp variant), mirroring test_macro_scheduler's
+	stranded / progressing / live / paused shape. A stranded flag is CLEARED; a run that
+	is still progressing, has a live turn, or is paused on a parked card is KEPT."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+		# The reap window is a MULTIPLE of the gate TTL; "old" sits well past it so the
+		# staleness discriminator is unambiguously satisfied (deterministic, no freeze_time).
+		self._old = frappe.utils.add_to_date(
+			frappe.utils.now_datetime(),
+			seconds=-(session_lifecycle._REAP_AUTORUN_TTL_MULTIPLE * api._SKILL_AUTORUN_TTL_S + 600),
+		)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.db.delete(MSG, {"conversation": conv})
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _autorun(self, conv: str) -> int:
+		return int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0)
+
+	# --- REAPED: a genuinely stranded flag ---------------------------------- #
+
+	def test_stranded_flag_is_reaped(self):
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv, at=self._old)  # skill_autorun=1, timestamp frozen past the window
+		self.assertGreaterEqual(session_lifecycle.reap_stranded_skill_autorun(), 1)
+		self.assertEqual(self._autorun(conv), 0, "a stranded flag past the reap window must be cleared")
+		# The clear also nulls the sliding timestamp (via clear_skill_autorun).
+		self.assertIsNone(frappe.db.get_value(CONV, conv, "skill_autorun_at"))
+
+	def test_null_timestamp_flag_is_reaped(self):
+		# A flag with NO sliding timestamp is malformed - it can never auto-run (the gate
+		# parks on a missing timestamp) - so it is stranded by definition and reapable.
+		conv = _make_conv(TEST_USER)
+		frappe.db.set_value(CONV, conv, "skill_autorun", 1, update_modified=False)
+		frappe.db.set_value(CONV, conv, "skill_autorun_at", None, update_modified=False)
+		frappe.db.commit()
+		self.assertGreaterEqual(session_lifecycle.reap_stranded_skill_autorun(), 1)
+		self.assertEqual(self._autorun(conv), 0, "a NULL-timestamp flag must be reapable")
+
+	# --- KEPT: each discriminator, one at a time ---------------------------- #
+
+	def test_progressing_run_within_cutoff_is_kept(self):
+		# Discriminator 2 (sliding timestamp): a fresh timestamp means covered writes are
+		# still landing - a live, progressing run, never reaped.
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)  # defaults to now() - inside the window
+		session_lifecycle.reap_stranded_skill_autorun()
+		self.assertEqual(self._autorun(conv), 1, "a progressing run must not be reaped")
+
+	def test_live_streaming_turn_is_kept(self):
+		# Discriminator 1 (no live turn): stale timestamp, but a streaming turn is in flight.
+		# Mutation-verify: dropping the live-turn predicate (SQL NOT EXISTS + the re-read
+		# _has_live_turn) reaps this and turns the test RED.
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv, at=self._old)
+		_live_turn_msg(conv)
+		session_lifecycle.reap_stranded_skill_autorun()
+		self.assertEqual(self._autorun(conv), 1, "a run with a live streaming turn must not be reaped")
+
+	def test_live_recovering_turn_is_kept(self):
+		# The other half of the live-turn predicate: a recovering=1 turn (a worker resuming
+		# the approved run and legitimately continuing to auto-execute) is CORRECT, not stranded.
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv, at=self._old)
+		_live_turn_msg(conv, recovering=True)
+		session_lifecycle.reap_stranded_skill_autorun()
+		self.assertEqual(self._autorun(conv), 1, "a run with a recovering turn must not be reaped")
+
+	def test_paused_on_pending_card_is_kept(self):
+		# Discriminator 3 (no pending card): stale timestamp, no live turn, but a destructive
+		# card is parked - a legitimate PAUSE that resumes on confirm. Mutation-verify:
+		# dropping the pending-card re-check reaps this and turns the test RED.
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv, at=self._old)
+		self.assertIsNotNone(_park_pending_card(conv, TEST_USER), "the paused card must mint")
+		session_lifecycle.reap_stranded_skill_autorun()
+		self.assertEqual(self._autorun(conv), 1, "a run paused on a parked card must not be reaped")
+
+	# --- Registration -------------------------------------------------------- #
+
+	def test_reaper_is_wired_into_hooks_scheduler_events(self):
+		from jarvis import hooks
+
+		self.assertIn(
+			"jarvis.chat.session_lifecycle.reap_stranded_skill_autorun",
+			hooks.scheduler_events["hourly"],
+			"the stranded-flag reaper must be registered as an hourly cron",
+		)
+		self.assertTrue(callable(session_lifecycle.reap_stranded_skill_autorun))

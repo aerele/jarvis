@@ -574,3 +574,180 @@ def reclaim_throwaway_session(
 			time.sleep(RECLAIM_PROBE_DELAY_S)
 	log.debug("throwaway session not confirmed finished, left for the sweep key=%s", session_key)
 	return False
+
+
+# --------------------------------------------------------------------------- #
+# Stranded skill-autorun reaper (skill "Approve & run", design §3.4) — hourly cron
+# --------------------------------------------------------------------------- #
+#
+# An approved skill run stamps ``Jarvis Conversation.skill_autorun=1`` and slides
+# ``skill_autorun_at`` forward on each covered write. Every terminal chokepoint
+# (``turn_message_binding.on_terminal_turn``) clears the flag when the run ends -
+# UNLESS the worker dies mid-run: then no terminal fires, the sliding timestamp
+# FREEZES, and the flag sits durably 1. That is safe (nothing auto-runs unless a
+# NEW turn dispatches, and the gate's inline TTL check parks a covered write once
+# the frozen timestamp is older than ``_SKILL_AUTORUN_TTL_S``), but the flag is
+# now dead weight the terminal clears will never collect. This reaper is the
+# backstop that clears it - the durable equivalent of the macro reaper, for a
+# chat that has no Jarvis Macro Run row to key on.
+
+# The reaper acts only once the frozen (or absent) ``skill_autorun_at`` is older
+# than THIS window, which MUST be >= the gate's ``_SKILL_AUTORUN_TTL_S``: a flag
+# already past that TTL cannot auto-run anyway (the gate parks the write instead,
+# api.py), so clearing it strands nothing live. We use 2x the gate TTL for a full
+# extra-TTL safety margin PAST that no-auto-run point, so the reaper never races a
+# flag that has only just crossed the auto-run horizon. ``_SKILL_AUTORUN_TTL_S`` is
+# read lazily inside the sweep (api is a heavy module - no import-time coupling from
+# this scheduler module).
+_REAP_AUTORUN_TTL_MULTIPLE = 2
+
+# Per-run cap so a backlog of stranded flags drains over a few hourly ticks rather
+# than one long sweep. A stranded flag needs a worker death mid-run, so this is
+# generous headroom, not a hot path.
+_REAP_AUTORUN_BATCH_MAX = 200
+
+
+def _skill_autorun_ttl_s() -> int:
+	"""The gate's sliding-TTL horizon (``api._SKILL_AUTORUN_TTL_S``), read lazily so
+	this scheduler module never imports the heavy ``api`` module at load time. The reap
+	window is a MULTIPLE of this (see ``_REAP_AUTORUN_TTL_MULTIPLE``), keeping the
+	reaper's cutoff provably >= the point past which a flag can no longer auto-run."""
+	from jarvis.api import _SKILL_AUTORUN_TTL_S
+
+	return _SKILL_AUTORUN_TTL_S
+
+
+def reap_stranded_skill_autorun() -> int:
+	"""Hourly cron: clear a STRANDED ``skill_autorun`` flag - an approved skill run whose
+	worker died mid-run, so no terminal clear (``on_terminal_turn``) ever fired and its
+	sliding ``skill_autorun_at`` froze. Returns how many were cleared. Runs as the
+	scheduler (Administrator); never raises out; best-effort per candidate (one bad row
+	must not abort the sweep).
+
+	Distinct from the macro reaper (``macros.reap_stale_macro_runs``): a skill chat has
+	no ``Jarvis Macro Run`` row to key on, so this scans the conversation flag directly.
+	It reuses that reaper's discipline - a cheap SQL scan, then a per-candidate re-read
+	under a redis lock before acting.
+
+	THREE discriminators, ALL required (any one alone would reap something LIVE):
+
+	1. **No live turn** - the exact ``NOT EXISTS (Jarvis Chat Message streaming=1 OR
+	   recovering=1)`` predicate ``_free_idle_sessions`` uses. A ``recovering=1`` turn
+	   that legitimately resumes an approved run and keeps auto-executing is CORRECT,
+	   not stranded (design §3.4 worker-death), and must be left alone.
+	2. **Stale sliding timestamp** - ``skill_autorun_at`` older than the reap window
+	   (>= the gate TTL, see ``_REAP_AUTORUN_TTL_MULTIPLE``) OR NULL. A NULL timestamp is
+	   reapable by design: a flag with no timestamp is malformed and cannot auto-run
+	   (the gate parks a covered write on a missing timestamp), so it is stranded.
+	3. **No pending card** - a per-candidate Python re-check (the tokens live in redis,
+	   not SQL-joinable). A run PAUSED on a parked destructive / ``create_custom_skill``
+	   card is a legitimate pause that resumes on confirm, NOT a stranded run, so its
+	   flag is KEPT (mirrors ``on_terminal_turn``'s predicate + the gate's strict-conv
+	   filter, ``turn_message_binding._has_pending_card``).
+
+	Each candidate is re-read UNDER a per-conversation redis lock and re-checked against
+	ALL THREE discriminators (matching ``reap_stale_macro_runs`` re-read-under-lock), so a
+	run that came back to life between the scan and here - a slide, a fresh turn, a new
+	card - is left alone rather than cleared out from under itself."""
+	reap_after_s = _REAP_AUTORUN_TTL_MULTIPLE * _skill_autorun_ttl_s()
+	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-reap_after_s)
+	candidates = _stranded_autorun_candidates(cutoff)
+	if not candidates:
+		return 0
+	from jarvis._redis_lock import redis_lock
+	from jarvis.chat import turn_message_binding
+
+	reaped = 0
+	for conv in candidates:
+		try:
+			with redis_lock(f"jarvis_skill_autorun:{conv}", timeout_s=60, blocking_timeout_s=0.0) as acquired:
+				if not acquired:
+					# A live clear / slide is inside its own path for this conv right now -
+					# proof of life. Leave it for the next sweep.
+					continue
+				# REPEATABLE-READ discipline (matching reap_stale_macro_runs): commit to
+				# close the scan snapshot so the FOR UPDATE read below sees the row as it
+				# is NOW, not as this connection first saw it during the scan.
+				frappe.db.commit()
+				cur = frappe.db.get_value(
+					CONV,
+					conv,
+					["skill_autorun", "skill_autorun_at", "owner"],
+					as_dict=True,
+					for_update=True,
+				)
+				# Re-check ALL THREE discriminators under the lock; if ANY no longer holds
+				# the run came back to life since the scan - leave it, and commit to release
+				# the row lock (the snapshot was stale).
+				if (
+					not cur
+					or not cur.skill_autorun
+					or not _autorun_is_stale(cur.skill_autorun_at, cutoff)
+					or _has_live_turn(conv)
+					or turn_message_binding._has_pending_card(cur.owner, conv)
+				):
+					frappe.db.commit()
+					continue
+				# clear_skill_autorun writes the row we hold FOR UPDATE and commits,
+				# releasing the lock; it is idempotent (0->0 no-op) and never raises.
+				turn_message_binding.clear_skill_autorun(conv)
+				reaped += 1
+		except Exception:
+			# Roll back the open FOR UPDATE read explicitly so its row lock / any
+			# half-applied state cannot ride to the NEXT candidate's commit.
+			frappe.db.rollback()
+			frappe.log_error(
+				title="session_lifecycle: skill_autorun reaper row failed",
+				message=f"conversation={conv}\n{frappe.get_traceback()}",
+			)
+	return reaped
+
+
+def _stranded_autorun_candidates(cutoff) -> list[str]:
+	"""Conversations whose approved-run flag looks stranded: ``skill_autorun=1``, a stale
+	or NULL sliding timestamp, and NO live turn (the exact ``_free_idle_sessions``
+	live-turn ``NOT EXISTS`` predicate). Its own function so the re-read-under-lock can be
+	exercised against a deliberately stale candidate snapshot in tests (mirrors
+	``macros._stale_run_candidates``)."""
+	return frappe.db.sql_list(
+		"""
+		SELECT c.name
+		FROM `tabJarvis Conversation` c
+		WHERE c.skill_autorun = 1
+		  AND (c.skill_autorun_at IS NULL OR c.skill_autorun_at < %(cutoff)s)
+		  AND NOT EXISTS (
+			SELECT 1 FROM `tabJarvis Chat Message` m
+			WHERE m.conversation = c.name
+			  AND (m.streaming = 1 OR m.recovering = 1)
+		  )
+		ORDER BY c.skill_autorun_at ASC
+		LIMIT %(limit)s
+		""",
+		{"cutoff": cutoff, "limit": _REAP_AUTORUN_BATCH_MAX},
+	)
+
+
+def _autorun_is_stale(skill_autorun_at, cutoff) -> bool:
+	"""True iff the approved-run flag is past the reap window. A NULL timestamp counts as
+	stale by design: a flag with no sliding timestamp is malformed (nothing to auto-run
+	from - the gate parks on a missing timestamp) and must be reapable."""
+	if not skill_autorun_at:
+		return True
+	return frappe.utils.get_datetime(skill_autorun_at) < cutoff
+
+
+def _has_live_turn(conversation: str) -> bool:
+	"""True iff an in-flight turn is streaming or recovering for ``conversation`` - the
+	exact predicate ``_free_idle_sessions`` NOT EXISTS uses, re-checked per candidate
+	under the lock. A ``recovering=1`` turn that resumes an approved run and keeps
+	auto-executing is CORRECT (design §3.4 worker-death), so its flag is never reaped."""
+	return bool(
+		frappe.db.sql(
+			"""
+			SELECT 1 FROM `tabJarvis Chat Message` m
+			WHERE m.conversation = %(c)s AND (m.streaming = 1 OR m.recovering = 1)
+			LIMIT 1
+			""",
+			{"c": conversation},
+		)
+	)
