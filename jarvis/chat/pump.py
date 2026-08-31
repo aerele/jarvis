@@ -863,9 +863,15 @@ def _warn_provisioning_if_starved() -> None:
 # Two conditions, deliberately split so the fail-CLOSED chat block is flap-proof
 # on the managed fleet (a rolling worker restart must never block a paying
 # customer):
-#   * DEGRADED  -> warn only. The F1 self-starvation shape (_pump_shape_starves):
-#     turns run but strand for minutes. Surfaced as a non-blocking onboarding
-#     banner; chat still works.
+#   * DEGRADED  -> warn only. Fires when TOTAL live RQ workers (any queue) < 2,
+#     not the stricter F1 "< 2 `long` workers" shape (_pump_shape_starves) used
+#     by the ops provisioning warning. Rationale: the pump already reroutes
+#     prepare/finalize (control) jobs to `short` when `long` has < 2 workers
+#     (`_control_queue`), so 1 `long` worker plus a second worker to run those
+#     control jobs does NOT strand - the stricter "< 2 `long`" rule over-warned
+#     that case. The strand only truly happens with a single worker doing
+#     everything, so this warns on total headcount instead. Surfaced as a
+#     non-blocking onboarding banner; chat still works.
 #   * BLOCKED   -> block sends. CONFIDENT zero live workers on the turn queue,
 #     sustained past a short grace window. This is the only guaranteed-hang shape
 #     (no worker can pick a turn up at all). Never fires on a probe error.
@@ -951,15 +957,35 @@ def _turn_workers_confidently_zero() -> bool:
 	return _zero_persisted(_ZERO_GRACE_S)
 
 
+def _total_live_workers() -> "int | None":
+	"""Count of ALL live RQ workers on this bench, across every queue - not just
+	the pump's hop/control lanes. Returns ``None`` (not 0) on any probe trouble
+	so the caller fails SAFE (not degraded) rather than reading a broken probe
+	as a real shortage."""
+	try:
+		from frappe.utils.background_jobs import get_workers
+
+		return len(get_workers())
+	except Exception:
+		return None
+
+
 def chat_worker_status() -> dict:
 	"""Worker health for the onboarding warning + chat send block. Fails SAFE:
-	on any trouble reports neither blocked nor degraded."""
+	on any trouble reports neither blocked nor degraded.
+
+	``degraded`` fires on fewer than 2 TOTAL live RQ workers (any queue), not the
+	stricter F1 "< 2 `long` workers" shape - see the block comment above for the
+	rationale (the pump already reroutes control jobs off `long` when it has < 2
+	workers, so that stricter rule over-warned). A blocked state is always at
+	least degraded too."""
 	try:
 		blocked = _turn_workers_confidently_zero()
 	except Exception:
 		blocked = False
 	try:
-		degraded = _pump_shape_starves()
+		n = _total_live_workers()
+		degraded = n is not None and n < 2
 	except Exception:
 		degraded = False
 	return {"blocked": bool(blocked), "degraded": bool(blocked or degraded)}

@@ -2148,45 +2148,86 @@ class TestWorkerStatus(FrappeTestCase):  # reuse module base
 		with patch("frappe.utils.background_jobs.get_workers", side_effect=RuntimeError):
 			self.assertIsNone(pump._probe_worker_count("long"))
 
+	def test_total_live_workers_counts_all_queues(self):
+		fake_workers = [MagicMock(), MagicMock(), MagicMock()]
+		with patch("frappe.utils.background_jobs.get_workers", return_value=fake_workers):
+			self.assertEqual(pump._total_live_workers(), 3)
+
+	def test_total_live_workers_none_on_probe_error(self):
+		with patch("frappe.utils.background_jobs.get_workers", side_effect=RuntimeError):
+			self.assertIsNone(pump._total_live_workers())
+
 	def test_healthy_is_not_blocked_not_degraded(self):
 		with (
 			patch.object(pump, "_probe_worker_count", return_value=4),
-			patch.object(pump, "_pump_shape_starves", return_value=False),
+			patch.object(pump, "_total_live_workers", return_value=4),
 			patch("jarvis.chat.api._turn_queue", return_value="long"),
 		):
 			s = pump.chat_worker_status()
 			self.assertFalse(s["blocked"])
 			self.assertFalse(s["degraded"])
 
-	def test_one_worker_degraded_not_blocked(self):
+	def test_one_total_worker_degraded_not_blocked(self):
+		# 1 TOTAL live worker (any queue) -> degraded, even though the turn queue
+		# itself still shows a live worker (not blocked).
 		with (
 			patch.object(pump, "_probe_worker_count", return_value=1),
-			patch.object(pump, "_pump_shape_starves", return_value=True),
+			patch.object(pump, "_total_live_workers", return_value=1),
 			patch("jarvis.chat.api._turn_queue", return_value="long"),
 		):
 			s = pump.chat_worker_status()
 			self.assertFalse(s["blocked"])
 			self.assertTrue(s["degraded"])
 
+	def test_two_total_workers_not_degraded(self):
+		# The discriminating case: exactly 2 total workers must NOT warn (this is
+		# the F1 "1 long + 1 to run rerouted control jobs" shape that no longer
+		# strands, per `_control_queue`). Fails if the threshold were `<= 2`.
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=2),
+			patch.object(pump, "_total_live_workers", return_value=2),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
+			s = pump.chat_worker_status()
+			self.assertFalse(s["blocked"])
+			self.assertFalse(s["degraded"])
+
+	def test_total_worker_probe_error_not_degraded(self):
+		# Fail-safe: a probe error (_total_live_workers -> None) must never be
+		# read as a real shortage.
+		with (
+			patch.object(pump, "_probe_worker_count", return_value=4),
+			patch.object(pump, "_total_live_workers", return_value=None),
+			patch("jarvis.chat.api._turn_queue", return_value="long"),
+		):
+			s = pump.chat_worker_status()
+			self.assertFalse(s["blocked"])
+			self.assertFalse(s["degraded"])
+
 	def test_probe_error_never_blocks(self):
 		with (
 			patch.object(pump, "_probe_worker_count", return_value=None),
-			patch.object(pump, "_pump_shape_starves", return_value=False),
+			patch.object(pump, "_total_live_workers", return_value=4),
 			patch("jarvis.chat.api._turn_queue", return_value="long"),
 		):
 			self.assertFalse(pump.chat_worker_status()["blocked"])
 
-	def test_zero_workers_blocks_only_after_grace(self):
+	def test_zero_workers_blocks_only_after_grace_and_is_degraded(self):
 		with (
 			patch.object(pump, "_probe_worker_count", return_value=0),
-			patch.object(pump, "_pump_shape_starves", return_value=True),
+			patch.object(pump, "_total_live_workers", return_value=0),
 			patch("jarvis.chat.api._turn_queue", return_value="long"),
 		):
-			# first observation: marker set, NOT yet blocked (debounce)
-			self.assertFalse(pump.chat_worker_status()["blocked"])
+			# first observation: marker set, NOT yet blocked (debounce); 0 total
+			# workers is already degraded regardless of the blocked debounce.
+			s = pump.chat_worker_status()
+			self.assertFalse(s["blocked"])
+			self.assertTrue(s["degraded"])
 			# simulate the marker aging past the grace window
 			pump._force_zero_marker_age(pump._ZERO_GRACE_S + 5)
-			self.assertTrue(pump.chat_worker_status()["blocked"])
+			s = pump.chat_worker_status()
+			self.assertTrue(s["blocked"])
+			self.assertTrue(s["degraded"])  # a blocked state is always at least degraded
 
 	def test_recovery_clears_marker(self):
 		with (
@@ -2201,14 +2242,14 @@ class TestWorkerStatus(FrappeTestCase):  # reuse module base
 		pump._force_zero_marker_age(pump._ZERO_GRACE_S + 5)
 		with (
 			patch.object(pump, "_probe_worker_count", return_value=3),
-			patch.object(pump, "_pump_shape_starves", return_value=False),
+			patch.object(pump, "_total_live_workers", return_value=3),
 			patch("jarvis.chat.api._turn_queue", return_value="long"),
 		):
 			self.assertFalse(pump.chat_worker_status()["blocked"])
 			# marker cleared: a later single 0 must re-arm the grace, not block instantly
 			with (
 				patch.object(pump, "_probe_worker_count", return_value=0),
-				patch.object(pump, "_pump_shape_starves", return_value=True),
+				patch.object(pump, "_total_live_workers", return_value=0),
 			):
 				self.assertFalse(pump.chat_worker_status()["blocked"])
 
