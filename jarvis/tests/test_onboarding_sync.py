@@ -1883,15 +1883,18 @@ class TestAccountReconnect(FrappeTestCase):
 
 	def test_check_ready_persists_rotated_credentials(self):
 		_set_token("")
-		with patch(
-			"jarvis.onboarding.admin_client.get_reconnect_state",
-			return_value={
-				"status": "ready",
-				"api_key": "new-key",
-				"api_secret": "new-secret",
-				"customer": "someone@example.com",
-				"customer_password": "new-pass",
-			},
+		with (
+			patch("jarvis.onboarding.sync_connection"),  # connected branch: don't hit the real admin
+			patch(
+				"jarvis.onboarding.admin_client.get_reconnect_state",
+				return_value={
+					"status": "ready",
+					"api_key": "new-key",
+					"api_secret": "new-secret",
+					"customer": "someone@example.com",
+					"customer_password": "new-pass",
+				},
+			),
 		):
 			out = onboarding.check_account_reconnect("rid-1")
 		self.assertEqual(out["status"], "connected")
@@ -1944,16 +1947,19 @@ class TestAccountReconnect(FrappeTestCase):
 
 	def test_an_active_subscription_status_still_connects(self):
 		_set_token("")
-		with patch(
-			"jarvis.onboarding.admin_client.get_reconnect_state",
-			return_value={
-				"status": "ready",
-				"api_key": "a-key",
-				"api_secret": "a-secret",
-				"customer": "cust-def@jarvis.invalid",
-				"customer_password": "a-pass",
-				"subscription_status": "Active",
-			},
+		with (
+			patch("jarvis.onboarding.sync_connection"),  # connected branch: don't hit the real admin
+			patch(
+				"jarvis.onboarding.admin_client.get_reconnect_state",
+				return_value={
+					"status": "ready",
+					"api_key": "a-key",
+					"api_secret": "a-secret",
+					"customer": "cust-def@jarvis.invalid",
+					"customer_password": "a-pass",
+					"subscription_status": "Active",
+				},
+			),
 		):
 			out = onboarding.check_account_reconnect("rid-1")
 		self.assertEqual(out["status"], "connected")
@@ -1962,15 +1968,18 @@ class TestAccountReconnect(FrappeTestCase):
 		"""Forward compatibility runs one way only: this bench may talk to an admin
 		older than the key. Absent must mean the behaviour that shipped before it."""
 		_set_token("")
-		with patch(
-			"jarvis.onboarding.admin_client.get_reconnect_state",
-			return_value={
-				"status": "ready",
-				"api_key": "o-key",
-				"api_secret": "o-secret",
-				"customer": "cust-ghi@jarvis.invalid",
-				"customer_password": "o-pass",
-			},
+		with (
+			patch("jarvis.onboarding.sync_connection"),  # connected branch: don't hit the real admin
+			patch(
+				"jarvis.onboarding.admin_client.get_reconnect_state",
+				return_value={
+					"status": "ready",
+					"api_key": "o-key",
+					"api_secret": "o-secret",
+					"customer": "cust-ghi@jarvis.invalid",
+					"customer_password": "o-pass",
+				},
+			),
 		):
 			out = onboarding.check_account_reconnect("rid-1")
 		self.assertEqual(out["status"], "connected")
@@ -2012,16 +2021,19 @@ class TestAccountReconnect(FrappeTestCase):
 		"""The request-less path: forward exactly (code, email) to admin and land
 		the returned ready bundle the same way check_account_reconnect does."""
 		_set_token("")
-		with patch(
-			"jarvis.onboarding.admin_client.redeem_reconnect_code",
-			return_value={
-				"status": "ready",
-				"api_key": "rk-key",
-				"api_secret": "rk-secret",
-				"customer": "someone@example.com",
-				"customer_password": "rk-pass",
-			},
-		) as redeem:
+		with (
+			patch("jarvis.onboarding.sync_connection"),  # connected branch: don't hit the real admin
+			patch(
+				"jarvis.onboarding.admin_client.redeem_reconnect_code",
+				return_value={
+					"status": "ready",
+					"api_key": "rk-key",
+					"api_secret": "rk-secret",
+					"customer": "someone@example.com",
+					"customer_password": "rk-pass",
+				},
+			) as redeem,
+		):
 			out = onboarding.redeem_reconnect_code("ABCD2345", "someone@example.com")
 		# email is the second factor - it MUST reach admin (never dropped).
 		redeem.assert_called_once_with("ABCD2345", "someone@example.com")
