@@ -662,8 +662,13 @@ def reap_stranded_skill_autorun() -> int:
 		try:
 			with redis_lock(f"jarvis_skill_autorun:{conv}", timeout_s=60, blocking_timeout_s=0.0) as acquired:
 				if not acquired:
-					# A live clear / slide is inside its own path for this conv right now -
-					# proof of life. Leave it for the next sweep.
+					# No writer ever takes this lock - the gate's slide/clear
+					# (_skill_autorun_slide / _skill_autorun_clear) write straight through
+					# without it. This is reaper-VS-reaper only: another sweep (e.g. an
+					# overrunning previous run, or a manual bench execute) is already
+					# working this conversation right now. Leave it for the next sweep;
+					# the real correctness guards are the 2x-TTL cutoff, _has_live_turn,
+					# and the FOR UPDATE re-read below.
 					continue
 				# REPEATABLE-READ discipline (matching reap_stale_macro_runs): commit to
 				# close the scan snapshot so the FOR UPDATE read below sees the row as it
@@ -700,6 +705,8 @@ def reap_stranded_skill_autorun() -> int:
 				title="session_lifecycle: skill_autorun reaper row failed",
 				message=f"conversation={conv}\n{frappe.get_traceback()}",
 			)
+	if reaped:
+		frappe.logger("jarvis.skill_autorun").info(f"reaped {reaped} stranded skill_autorun flags")
 	return reaped
 
 

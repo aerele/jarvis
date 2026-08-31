@@ -507,7 +507,11 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 	from jarvis import api
 	from jarvis.chat import pending_confirm
 
-	token = (token or "").strip()
+	# Defensive str() coercion (not just `or ""`): both params are unvalidated
+	# client JSON, and a non-string value (a client bug, or a crafted int/dict)
+	# would otherwise blow past `or ""` unchanged - it's truthy - and 500 on
+	# `.strip()`, matching the codebase's usual unvalidated-client-JSON handling.
+	token = str(token or "").strip()
 	try:
 		record = pending_confirm.peek(token, strict=True)
 		if not record:
@@ -547,7 +551,8 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 		# boundary; the conversation is only a SECONDARY replay guard, so NEVER trust
 		# a client-supplied conversation id for authz - guard_conv falls back to the
 		# token's OWN conversation when the caller passes none (mirror _confirm_core).
-		passed_conv = (conversation or "").strip()
+		# str() coercion for the same reason as `token` above - unvalidated client JSON.
+		passed_conv = str(conversation or "").strip()
 		guard_conv = passed_conv if passed_conv else record.get("conversation")
 		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
 	except pending_confirm.PendingConfirmStorageError as exc:

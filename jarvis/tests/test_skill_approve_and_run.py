@@ -669,8 +669,8 @@ def _make_user_msg(conv: str, owner: str, content: str, *, hidden: bool = False)
 
 
 class TestResolveApproveRunOffer(FrappeTestCase):
-	"""api._resolve_approve_run_offer / _armed_skill_docname_for_slug - the pure
-	park-time offer resolution."""
+	"""api._resolve_approve_run_offer / custom_skills.resolve_armed_skill_docname -
+	the pure park-time offer resolution."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -1124,6 +1124,38 @@ class TestSkillAutorunGate(FrappeTestCase):
 		self.assertEqual(r["data"]["status"], "pending_confirmation", "create_custom_skill always parks")
 		self.assertFalse(disp.called)
 
+	def test_oversize_batch_message_is_skill_aware_when_autorun(self):
+		"""Minor (review): under an approved skill run there is no card to confirm -
+		the F16 over-cap bounce must not tell the model to "confirm each one" there."""
+		from jarvis.tools._bulk import _MAX_BATCH
+
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		docs = [{"doctype": "ToDo", "values": {"description": f"o{i}"}} for i in range(_MAX_BATCH + 1)]
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool("create_docs", {"docs": docs}, conversation=conv)
+		self.assertFalse(r["ok"])
+		self.assertFalse(disp.called)
+		self.assertIn("too many records", r["error"]["message"])
+		self.assertNotIn(
+			"confirm each",
+			r["error"]["message"],
+			"nothing to confirm under an approved run - the old wording is wrong here",
+		)
+		self.assertIn("nothing to confirm", r["error"]["message"])
+
+	def test_oversize_batch_message_is_unchanged_when_not_autorun(self):
+		"""Same cap, ordinary (non-autorun) conversation: the original confirm-each
+		wording is unchanged (no regression)."""
+		from jarvis.tools._bulk import _MAX_BATCH
+
+		conv = _make_conv(TEST_USER)  # skill_autorun defaults 0
+		docs = [{"doctype": "ToDo", "values": {"description": f"o{i}"}} for i in range(_MAX_BATCH + 1)]
+		r = api._run_tool("create_docs", {"docs": docs}, conversation=conv)
+		self.assertFalse(r["ok"])
+		self.assertIn("too many records", r["error"]["message"])
+		self.assertIn("confirm each one before starting the next", r["error"]["message"])
+
 
 class TestSkillAutorunCancelGate(FrappeTestCase):
 	"""The cancel-gate (Halt made bench-guaranteed): with the run-cancel signal set,
@@ -1237,6 +1269,21 @@ class TestSkillAutorunHardStop(FrappeTestCase):
 			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
 			0,
 			"a covered write that fails clears the flag so the next write re-cards",
+		)
+
+	def test_dispatch_error_message_notes_the_run_also_ended(self):
+		"""Minor (agent legibility): the tool's own error is annotated so the model
+		sees the approved run ended too, not just that this one call failed."""
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		fail = {"ok": False, "error": {"code": "InvalidArgumentError", "message": "boom"}}
+		with patch("jarvis.api.dispatch_confirmed", return_value=fail):
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertIn("boom", r["error"]["message"], "the tool's own error text must survive")
+		self.assertIn(
+			"approved run has also ended",
+			r["error"]["message"],
+			"the model must be told the run ended too, not just this one call",
 		)
 
 
@@ -1408,6 +1455,34 @@ class TestApproveAndRun(FrappeTestCase):
 				frappe.db.delete(MSG, {"conversation": conv})
 				frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
 		frappe.db.commit()
+
+	def test_non_string_token_does_not_500(self):
+		"""Minor (review): ``token`` is unvalidated client JSON. A non-string value
+		is truthy (so ``token or ""`` leaves it unchanged) and used to raise
+		AttributeError -> 500 on the bare ``.strip()``; it must instead fail closed
+		with the ordinary invalid-confirmation envelope."""
+		res = actions_api.approve_and_run(12345, "some-conv")
+		self.assertEqual(res, actions_api._INVALID_CONFIRM)
+
+	def test_non_string_conversation_does_not_500(self):
+		"""Same defensive coercion, for the ``conversation`` param: a valid token but
+		a non-string ``conversation`` must not AttributeError -> 500 either."""
+		docname = _make_skill(TEST_USER, armed=True, name="ar-nonstr-conv")
+		conv = _make_conv(TEST_USER)
+		token = _mint_approve_token(conv, TEST_USER, docname)
+		with (
+			patch(
+				"jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {"name": "T-1"}}
+			) as disp,
+			patch("jarvis.api.persist_tool_receipt"),
+			patch("jarvis.chat.admission.publish_action_confirmed"),
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
+		):
+			res = actions_api.approve_and_run(token, 67890)
+		# A non-string, non-matching conversation is not "" -> the strict guard
+		# check in `consume` fails it closed as a mismatch, not a crash.
+		disp.assert_not_called()
+		self.assertFalse(res.get("ok"))
 
 	def test_armed_token_dispatches_step1_opens_run_fires_one_continuation(self):
 		"""The happy path: step 1 dispatches, skill_autorun + skill_autorun_at +
@@ -1737,6 +1812,40 @@ class TestNewMessageClearsAutorun(FrappeTestCase):
 			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
 			0,
 			"a genuine new top-level message ends the approved run",
+		)
+
+	def test_busy_reject_leaves_autorun_set_but_real_send_clears_it(self):
+		"""I10: a second-tab/double-click/overload/quota reject creates NO turn, so
+		it must never disarm a live approved run out from under it - only a message
+		that actually falls through to a real send does. Pins the clear's placement
+		AFTER the single-flight busy guard (a no-turn-created early-return)."""
+		from jarvis.chat import api as chat_api
+
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+
+		# The single-flight busy guard rejects BEFORE any user row is created (and
+		# before the clear used to run) - the exact no-turn-created reject I10 covers.
+		with patch("jarvis.chat.api.admission.turn_machine_enabled", return_value=False):
+			with patch("jarvis.chat.api._conversation_busy", return_value=True):
+				res = chat_api.send_message(conv, "are you still working on it?")
+		self.assertEqual(res, {"ok": False, "reason": "a reply is already in progress - hang on a moment"})
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			1,
+			"a no-turn-created busy reject must not clear the run flag",
+		)
+
+		# The SAME conversation, sent for real (no busy guard in the way this time),
+		# DOES clear it - the flag is not stuck, it just survives a reject.
+		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
+			with patch("frappe.enqueue"):
+				res = chat_api.send_message(conv, "make three todos please")
+		self.assertTrue(res["ok"])
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			0,
+			"a genuine send that actually proceeds ends the approved run",
 		)
 
 	def test_consumed_typed_approval_does_not_clear_autorun(self):

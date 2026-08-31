@@ -272,6 +272,67 @@ def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
 	return {s for s in slugs if s in enabled}
 
 
+def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
+	"""The single live-ARMED Jarvis Custom Skill row ``owner`` would invoke by
+	``/slug``, or ``None`` (skill "Approve & run the plan", design §3.3 rule 4).
+
+	Mirrors :func:`invoked_skill_slugs`'s owner/shared/role precedence - the ONE
+	definition of that owned/shared/role-scoped resolution, so the "Approve & run"
+	offer path (``jarvis.api._resolve_approve_run_offer``) and skill invocation can
+	no longer drift apart the way they had (each used to hand-duplicate this query;
+	only :func:`role_scoped_skill_rows` was actually shared). The owner's OWN
+	enabled row wins the invocation; failing that, a shared or role-scoped enabled
+	row. ``allow_approve_run`` is read LIVE off the resolved row and must be 1.
+	Fail-safe on ambiguity - a slug can map to several rows across owned/shared/
+	role-scoped, so ``None`` when the winning tier holds 2+ rows OR when 2+ ARMED
+	invocable rows exist anywhere (an ambiguous arm cannot authorize a run). O(1)-
+	ish: a couple of indexed reads, no per-skill N+1."""
+	# The owner's OWN enabled rows named `slug`.
+	own = {
+		r.name: int(r.allow_approve_run or 0)
+		for r in frappe.get_all(
+			"Jarvis Custom Skill",
+			filters={"enabled": 1, "owner": owner, "skill_name": slug},
+			fields=["name", "allow_approve_run"],
+		)
+	}
+	# Enabled rows SHARED with the owner, or reachable via a role the owner holds,
+	# named `slug` (deduped - a row can be both shared and role-scoped).
+	shared_role: dict[str, int] = {}
+	shared_names = [
+		r.parent
+		for r in frappe.get_all(
+			"Jarvis Custom Skill Share",
+			filters={"user": owner, "parenttype": "Jarvis Custom Skill"},
+			fields=["parent"],
+		)
+	]
+	if shared_names:
+		for r in frappe.get_all(
+			"Jarvis Custom Skill",
+			filters={"enabled": 1, "name": ["in", shared_names], "skill_name": slug},
+			fields=["name", "allow_approve_run"],
+		):
+			shared_role[r.name] = int(r.allow_approve_run or 0)
+	for r in role_scoped_skill_rows(owner, ["name", "skill_name", "allow_approve_run"]):
+		if r.skill_name == slug:
+			shared_role.setdefault(r.name, int(r.allow_approve_run or 0))
+
+	# Precedence: the owner's own row wins; only fall through to shared/role when
+	# the owner has no own row for this slug.
+	tier = own if own else shared_role
+	if len(tier) != 1:
+		return None  # no candidate, or an ambiguous winning tier -> fail safe
+	docname, armed = next(iter(tier.items()))
+	if not armed:
+		return None  # the row the owner would actually invoke is not armed
+	# Global ambiguity guard: refuse if the slug maps to 2+ ARMED invocable rows
+	# anywhere (owned + shared + role), even across tiers.
+	if sum(1 for v in {**shared_role, **own}.values() if v) != 1:
+		return None
+	return docname
+
+
 def invoked_skill_clause(message: str) -> str:
 	"""Return the context-line clause(s) for any enabled custom skills the user
 	invoked via ``/slug`` in ``message``, or ``""`` if none match.

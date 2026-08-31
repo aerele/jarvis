@@ -83,6 +83,7 @@
    "default": "0",
    "hidden": 1,
    "no_copy": 1,
+   "search_index": 1,
    "description": "Set by the approve_and_run endpoint (Jarvis Custom Skill.allow_approve_run), ONLY after the first covered write of the declared plan succeeds. When 1, every covered gated tool call in the explicit _SKILL_AUTORUN_COVERED allowlist executes without a confirmation card, sliding skill_autorun_at forward on each covered write; the irreversible trio (delete/cancel/amend) and create_custom_skill still park and pause the run. Server-set only; enabling via a generic save requires the Jarvis Admin / System Manager role. Cleared at every terminal (turn end, new top-level message, Halt, hard-stop-on-error, destructive/create_custom_skill card dismiss) or by the sliding-TTL reaper."
   },
   {
