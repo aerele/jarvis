@@ -17,7 +17,14 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.chat import actions_api, finalize, pending_confirm, session_lifecycle, turn_message_binding
+from jarvis.chat import (
+	actions_api,
+	custom_skills_api,
+	finalize,
+	pending_confirm,
+	session_lifecycle,
+	turn_message_binding,
+)
 from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests.test_auto_apply import (
@@ -205,6 +212,91 @@ class TestCustomSkillAllowApproveRunGuard(FrappeTestCase):
 		doc = frappe.get_doc(SKILL, skill)
 		doc.instructions = "do a different thing"
 		doc.save()  # must not raise; arm persists
+		self.assertEqual(int(frappe.db.get_value(SKILL, skill, "allow_approve_run")), 1)
+
+
+class TestApproveAndRunApiSurface(FrappeTestCase):
+	"""The SPA-facing arming surface (skill approve-and-run, P2 toggle):
+	``get_custom_skill`` exposes the arm state + a ``can_arm`` admin signal for
+	the editor, and ``update_custom_skill`` accepts ``allow_approve_run`` while
+	routing the 0 -> 1 flip through the SAME doctype guard (never a second copy).
+	The doctype-level guard itself is covered by TestCustomSkillAllowApproveRunGuard;
+	this pins the endpoint wrapper that the SPA actually calls."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_non_admin_user()
+		_ensure_admin_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for owner in (NON_ADMIN_USER, ADMIN_USER):
+			for name in frappe.get_all(SKILL, filters={"owner": owner}, pluck="name"):
+				frappe.delete_doc(SKILL, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_get_exposes_arm_state_and_admin_can_arm(self):
+		skill = _make_skill(ADMIN_USER, armed=True)
+		frappe.set_user(ADMIN_USER)
+		out = custom_skills_api.get_custom_skill(skill)
+		self.assertEqual(out["allow_approve_run"], 1)
+		self.assertEqual(out["can_arm"], 1)  # the Jarvis Admin tier, not only System Manager
+
+	def test_get_reports_can_arm_zero_for_non_admin_owner(self):
+		skill = _make_skill(NON_ADMIN_USER)
+		frappe.set_user(NON_ADMIN_USER)
+		out = custom_skills_api.get_custom_skill(skill)
+		self.assertEqual(out["allow_approve_run"], 0)
+		self.assertEqual(out["can_arm"], 0)
+
+	def test_update_enable_by_non_admin_owner_is_refused(self):
+		skill = _make_skill(NON_ADMIN_USER)
+		frappe.set_user(NON_ADMIN_USER)
+		with self.assertRaises(frappe.PermissionError):
+			custom_skills_api.update_custom_skill(name=skill, allow_approve_run=1)
+		self.assertEqual(int(frappe.db.get_value(SKILL, skill, "allow_approve_run") or 0), 0)
+
+	def test_update_enable_by_admin_owner_arms(self):
+		skill = _make_skill(ADMIN_USER)
+		frappe.set_user(ADMIN_USER)
+		custom_skills_api.update_custom_skill(name=skill, allow_approve_run=1)
+		self.assertEqual(int(frappe.db.get_value(SKILL, skill, "allow_approve_run")), 1)
+
+	def test_update_disable_is_free_for_non_admin_owner(self):
+		skill = _make_skill(NON_ADMIN_USER, armed=True)
+		frappe.set_user(NON_ADMIN_USER)
+		custom_skills_api.update_custom_skill(name=skill, allow_approve_run=0)
+		self.assertEqual(int(frappe.db.get_value(SKILL, skill, "allow_approve_run") or 0), 0)
+
+	def test_update_without_the_param_leaves_the_arm_untouched(self):
+		"""A plain content edit (no allow_approve_run in the payload) must not
+		disturb an armed skill - the ``if allow_approve_run is not None`` gate."""
+		skill = _make_skill(NON_ADMIN_USER, armed=True)
+		frappe.set_user(NON_ADMIN_USER)
+		custom_skills_api.update_custom_skill(name=skill, description="edited")
+		self.assertEqual(int(frappe.db.get_value(SKILL, skill, "allow_approve_run")), 1)
+
+	def test_update_by_a_non_owner_is_refused_before_the_arm(self):
+		"""A user who is neither owner nor sharee cannot reach the arming field:
+		``_require_skill_owner`` gates every write, so the new param never even
+		reaches the doctype guard. Owner is the admin here, so the refusal is the
+		OWNER gate (not the admin gate) firing on a foreign caller."""
+		skill = _make_skill(ADMIN_USER)
+		frappe.set_user(NON_ADMIN_USER)  # a valid Jarvis user, but NOT the owner
+		with self.assertRaises(frappe.PermissionError):
+			custom_skills_api.update_custom_skill(name=skill, allow_approve_run=1)
+		self.assertEqual(int(frappe.db.get_value(SKILL, skill, "allow_approve_run") or 0), 0)
+
+	def test_update_coerces_the_arm_to_a_clean_flag(self):
+		"""A non-0/1 value still lands as a clean Check: an admin passing 5 arms
+		the skill as exactly 1, never a raw 5 (Frappe clamps every Check to 0/1)."""
+		skill = _make_skill(ADMIN_USER)
+		frappe.set_user(ADMIN_USER)
+		custom_skills_api.update_custom_skill(name=skill, allow_approve_run=5)
 		self.assertEqual(int(frappe.db.get_value(SKILL, skill, "allow_approve_run")), 1)
 
 

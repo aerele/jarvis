@@ -26,7 +26,7 @@ from jarvis.chat.custom_skills import (
 	pushable_org_skill_count,
 	role_scoped_skill_rows,
 )
-from jarvis.permissions import require_jarvis_user
+from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 
 SKILL = "Jarvis Custom Skill"
 _SETTINGS = "Jarvis Settings"
@@ -350,6 +350,14 @@ def get_custom_skill(name: str) -> dict:
 		"scope": scope,
 		"target_role": doc.get("target_role") or "",
 		"managed_by_learning": int(doc.get("managed_by_learning") or 0),
+		# "Approve & run" arming (skill approve-and-run, D-CONTROL): the current
+		# state so the editor can show the toggle, plus whether THIS viewer may
+		# ENABLE it. Enabling is Jarvis Admin / System Manager only (the doctype's
+		# _guard_allow_approve_run_enable is the real gate); disabling is free for
+		# the owner (the toggle IS the kill switch). ``can_arm`` only drives the
+		# UI's disable state - the server guard, not this flag, is authoritative.
+		"allow_approve_run": int(doc.get("allow_approve_run") or 0),
+		"can_arm": int(has_jarvis_admin_access(me)),
 	}
 
 
@@ -423,8 +431,16 @@ def update_custom_skill(
 	instructions: str | None = None,
 	user_invocable: int | None = None,
 	enabled: int | None = None,
+	allow_approve_run: int | None = None,
 ) -> dict:
-	"""Update provided fields of a skill (owner-gated)."""
+	"""Update provided fields of a skill (owner-gated).
+
+	``allow_approve_run`` (the "Approve & run" arm) is owner-gated like every
+	other field here, but ENABLING it (0 -> 1) additionally requires a Jarvis
+	Admin / System Manager role - enforced by the doctype's
+	``_guard_allow_approve_run_enable`` in ``validate()`` (called by ``save``
+	below), never here, so the one gate can't drift. Disabling (1 -> 0) is free
+	for the owner: the toggle is the kill switch."""
 	doc = frappe.get_doc(SKILL, name)
 	_require_skill_owner(doc, "edit")
 	if skill_name is not None:
@@ -437,6 +453,8 @@ def update_custom_skill(
 		doc.user_invocable = int(user_invocable)
 	if enabled is not None:
 		doc.enabled = int(enabled)
+	if allow_approve_run is not None:
+		doc.allow_approve_run = int(allow_approve_run)
 	# SR4-2: editing a SHARED (Role/Org) skill - an enable/disable, a rename, a
 	# reviewer content edit - changes the shared push budget or the reserved slug, so
 	# serialize it with promotion approvals on the catalog-wide lock, held THROUGH
