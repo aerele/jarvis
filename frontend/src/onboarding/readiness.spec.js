@@ -401,6 +401,159 @@ describe("ChatView banner chain order", () => {
 		// lapsed - never over a retry that just flipped the reason back to applying.
 		expect(applying).toBeLessThan(stuck);
 	});
+
+	it("orders the no-workers banner AFTER suspendedNotice (billing takes precedence, jarvis Task 8)", () => {
+		const suspended = chatSrc.indexOf('v-else-if="suspendedNotice"');
+		const workers = chatSrc.indexOf('v-else-if="workersNotice"');
+		expect(suspended, "ChatView must still render the suspendedNotice banner").not.toBe(-1);
+		expect(workers, "ChatView must render the workersNotice banner").not.toBe(-1);
+		expect(suspended).toBeLessThan(workers);
+	});
+
+	it("orders the soft workersWarnNotice banner AFTER the hard workersNotice block", () => {
+		// worker_blocked implies degraded, so the hard block must win the
+		// v-else-if race whenever both are true - the soft warning below it in
+		// the chain then only ever shows on its own.
+		const workers = chatSrc.indexOf('v-else-if="workersNotice"');
+		const warn = chatSrc.indexOf('v-else-if="workersWarnNotice"');
+		expect(workers, "ChatView must still render the workersNotice banner").not.toBe(-1);
+		expect(warn, "ChatView must render the workersWarnNotice banner").not.toBe(-1);
+		expect(workers).toBeLessThan(warn);
+	});
+});
+
+/**
+ * jarvis Task 8: insufficient_workers must be a PERSISTENT but SELF-HEALING
+ * banner - unlike suspendedNotice (whose only exit is renewal), a dead worker
+ * lane can come back on its own, and checkReady() is memoized (never re-polls),
+ * so the banner cannot wait on a fresh readiness check to clear. Mounting
+ * ChatView / driving send() is not viable here (same reasoning as the banner
+ * chain order block above and dashboardOpen.test.js), so this pins the wiring
+ * by source, the established technique for this SFC.
+ */
+describe("workersNotice self-heal (jarvis Task 8)", () => {
+	const HERE = path.dirname(fileURLToPath(import.meta.url));
+	const chatSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
+
+	it("raises the persistent banner when retry() is rejected for insufficient_workers", () => {
+		// retry() (~line 8234) sits earlier in the file than send() (~line 8467), so
+		// this is the FIRST occurrence of the reason check.
+		const idx = chatSrc.indexOf('r.reason === "insufficient_workers"');
+		expect(idx, "retry() must check r.reason === insufficient_workers").not.toBe(-1);
+		const nearby = chatSrc.slice(idx, idx + 320);
+		// Sets the persistent banner ref directly, not a toast that would vanish
+		// before the customer can act on it.
+		expect(nearby).toContain("workersNotice.value = WORKERS_BLOCKED_MSG");
+	});
+
+	it("mirrors the same insufficient_workers handling in send()", () => {
+		const first = chatSrc.indexOf('r.reason === "insufficient_workers"');
+		const second = chatSrc.indexOf('r.reason === "insufficient_workers"', first + 1);
+		expect(second, "send() must also check r.reason === insufficient_workers").not.toBe(-1);
+		expect(chatSrc.slice(second, second + 200)).toContain(
+			"workersNotice.value = WORKERS_BLOCKED_MSG"
+		);
+	});
+
+	it("clears the banner on the next successful retry (self-heal, no reload)", () => {
+		// retry() sits earlier in the file than send(), so this is the FIRST
+		// occurrence of the clear.
+		const fnStart = chatSrc.indexOf("async function retry(messageId)");
+		const fnEnd = chatSrc.indexOf("\nasync function send(", fnStart);
+		expect(fnStart, "ChatView must still define retry()").not.toBe(-1);
+		expect(fnEnd, "ChatView must still define send() after retry()").not.toBe(-1);
+		const body = chatSrc.slice(fnStart, fnEnd);
+		const awaitIdx = body.indexOf("await api.retryMessage(messageId)");
+		const idx = body.indexOf("workersNotice.value = null");
+		expect(awaitIdx, "retry() must still await api.retryMessage").not.toBe(-1);
+		expect(idx, "retry() must clear workersNotice on a successful response").not.toBe(-1);
+		// Only AFTER the await (never optimistically, before the server has
+		// actually answered) and gated on r.ok !== false (a genuinely accepted
+		// retry), not folded into the rejection branch that raises the banner.
+		expect(idx).toBeGreaterThan(awaitIdx);
+		const before = body.slice(Math.max(0, idx - 120), idx);
+		expect(before).toContain("r.ok !== false");
+	});
+
+	it("also clears the banner on the next successful send (mirrors retry())", () => {
+		const first = chatSrc.indexOf("workersNotice.value = null");
+		const second = chatSrc.indexOf("workersNotice.value = null", first + 1);
+		expect(second, "send() must also clear workersNotice on a successful response").not.toBe(
+			-1
+		);
+		const before = chatSrc.slice(Math.max(0, second - 120), second);
+		expect(before).toContain("r.ok !== false");
+	});
+
+	it("never gates canSend on workersNotice (composer must stay enabled to self-heal)", () => {
+		// A disabled composer paired with a memoized (never re-polling) checkReady()
+		// could never recover without a full page reload, contradicting the banner's
+		// own "try again shortly" copy - the server gate, not the client, is the
+		// authority on whether a send is allowed through.
+		const start = chatSrc.indexOf("const canSend = computed(");
+		expect(start, "ChatView must still define canSend").not.toBe(-1);
+		const end = chatSrc.indexOf("\n);", start);
+		expect(chatSrc.slice(start, end)).not.toContain("workersNotice");
+	});
+
+	it("seeds workersNotice from the boot readiness poll's worker_blocked field", () => {
+		const idx = chatSrc.indexOf("r && r.worker_blocked");
+		expect(idx, "the boot checkReady().then() block must read r.worker_blocked").not.toBe(-1);
+		expect(chatSrc.slice(idx, idx + 80)).toContain("WORKERS_BLOCKED_MSG");
+	});
+});
+
+/**
+ * Soft, non-blocking counterpart to workersNotice above: is_ready_for_chat's
+ * worker_warning fires for degraded/under-provisioned workers, distinct from
+ * the hard worker_blocked zero-workers state. Same source-proximity technique
+ * as the workersNotice suite (mounting ChatView is not viable here either).
+ */
+describe("workersWarnNotice self-heal (round 2 mainchat warning)", () => {
+	const HERE = path.dirname(fileURLToPath(import.meta.url));
+	const chatSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
+
+	it("seeds workersWarnNotice from the boot readiness poll's worker_warning field", () => {
+		const idx = chatSrc.indexOf("r && r.worker_warning");
+		expect(idx, "the boot checkReady().then() block must read r.worker_warning").not.toBe(-1);
+		expect(chatSrc.slice(idx, idx + 80)).toContain("WORKERS_WARN_MSG");
+	});
+
+	it("clears workersWarnNotice on the next successful retry, alongside workersNotice", () => {
+		const fnStart = chatSrc.indexOf("async function retry(messageId)");
+		const fnEnd = chatSrc.indexOf("\nasync function send(", fnStart);
+		expect(fnStart, "ChatView must still define retry()").not.toBe(-1);
+		expect(fnEnd, "ChatView must still define send() after retry()").not.toBe(-1);
+		const body = chatSrc.slice(fnStart, fnEnd);
+		const idx = body.indexOf("workersWarnNotice.value = null");
+		expect(idx, "retry() must clear workersWarnNotice on a successful response").not.toBe(-1);
+		// Same self-heal spot as workersNotice's own clear, immediately after it.
+		const notice = body.indexOf("workersNotice.value = null");
+		expect(notice).toBeGreaterThan(-1);
+		expect(idx).toBeGreaterThan(notice);
+		expect(idx - notice).toBeLessThan(80);
+	});
+
+	it("also clears workersWarnNotice on the next successful send (mirrors retry())", () => {
+		const first = chatSrc.indexOf("workersWarnNotice.value = null");
+		const second = chatSrc.indexOf("workersWarnNotice.value = null", first + 1);
+		expect(
+			second,
+			"send() must also clear workersWarnNotice on a successful response"
+		).not.toBe(-1);
+		// Sits right after send()'s own workersNotice clear, same as retry() above.
+		const notice = chatSrc.indexOf("workersNotice.value = null", first + 1);
+		expect(notice).toBeGreaterThan(-1);
+		expect(second).toBeGreaterThan(notice);
+		expect(second - notice).toBeLessThan(80);
+	});
+
+	it("never gates canSend on workersWarnNotice (composer must stay enabled - heads-up only)", () => {
+		const start = chatSrc.indexOf("const canSend = computed(");
+		expect(start, "ChatView must still define canSend").not.toBe(-1);
+		const end = chatSrc.indexOf("\n);", start);
+		expect(chatSrc.slice(start, end)).not.toContain("workersWarnNotice");
+	});
 });
 
 describe("replaced-site banner", () => {

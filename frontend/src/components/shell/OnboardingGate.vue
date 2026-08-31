@@ -17,6 +17,14 @@
 				Finish setting up {{ agentName }}
 			</h1>
 
+			<Banner
+				v-if="workerWarning"
+				type="warning"
+				:title="WORKER_WARNING_TITLE"
+				:message="workerWarningMessage(agentName)"
+				class="mb-5"
+			/>
+
 			<p v-if="isSystemManager" class="mb-7 text-p-base text-ink-gray-6">
 				This workspace isn't connected to an AI agent yet. Complete a short setup to start
 				chatting with {{ agentName }} about your ERPNext data.
@@ -52,7 +60,8 @@
 import { useRouter } from "vue-router";
 import { Button } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
-import { agentName } from "@/branding";
+import Banner from "@/components/Banner.vue";
+import { agentName, WORKER_WARNING_TITLE, workerWarningMessage } from "@/branding";
 
 const router = useRouter();
 
@@ -65,6 +74,9 @@ const router = useRouter();
 // gets the "ask your administrator" copy instead. PART 4 REVISED TASK 49(c):
 // widened to the Jarvis Admin tenant-admin tier.
 const isSystemManager = !!(window.is_system_manager || window.is_jarvis_admin);
+
+// Non-blocking: warns without gating either CTA below (Task 5's boot flag).
+const workerWarning = !!window.jarvis_worker_warning;
 
 function goOnboard() {
 	router.push({ name: "Onboarding" });
