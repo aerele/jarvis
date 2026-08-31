@@ -13,6 +13,7 @@ generic ``doc.save()``. Mirrors ``test_macro_skip_confirmation.py`` exactly.
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests.test_auto_apply import (
 	NON_ADMIN_USER,
@@ -224,3 +225,129 @@ class TestApproveAndRunFieldShapes(FrappeTestCase):
 		self.assertEqual(df.default, "0")
 		self.assertEqual(int(df.in_list_view or 0), 1)
 		self.assertEqual(int(df.in_standard_filter or 0), 1)
+
+
+# ── invoked_skill_slugs: the pure, identity-parameterized slug-set helper ────
+#
+# Design doc §3.3: the offer-gate needs (a) the SET of invoked skills to
+# require exactly one and (b) to resolve that set under the message's SENDER,
+# not the ambient exec user a park can run under. These tests pin the helper's
+# contract directly, plus a behavior-preservation check that refactoring
+# invoked_skill_clause to call it did not change the clause it returns.
+
+SLUGSET_USER_A = "jarvis-slugset-a@example.com"
+SLUGSET_USER_B = "jarvis-slugset-b@example.com"
+
+
+def _ensure_slugset_user(email: str) -> None:
+	"""A plain Jarvis chat user (Jarvis User role, no admin) - distinct identities
+	A and B for the invoked_skill_slugs identity-parameterization test."""
+	ensure_jarvis_user_role()
+	if not frappe.db.exists("User", email):
+		doc = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "Slugset",
+				"enabled": 1,
+				"send_welcome_email": 0,
+				"user_type": "System User",
+			}
+		)
+		doc.insert(ignore_permissions=True)
+	if "Jarvis User" not in frappe.get_roles(email):
+		frappe.get_doc("User", email).add_roles("Jarvis User")
+	frappe.db.commit()
+
+
+def _mk_slug_skill(owner: str, slug: str) -> str:
+	"""An enabled, User-scope skill named ``slug`` owned by ``owner`` (the
+	doctype defaults - enabled=1, scope=User - are exactly the shape
+	invoked_skill_slugs's owner branch resolves)."""
+	orig = frappe.session.user
+	frappe.set_user(owner)
+	try:
+		doc = frappe.get_doc(
+			{
+				"doctype": SKILL,
+				"skill_name": slug,
+				"description": "slug-set test skill",
+				"instructions": "do the thing",
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		frappe.db.commit()
+		return doc.name
+	finally:
+		frappe.set_user(orig)
+
+
+class TestInvokedSkillSlugs(FrappeTestCase):
+	"""invoked_skill_slugs(message, *, user) - the pure slug-set primitive that
+	both invoked_skill_clause and the (later) offer-gate share."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_slugset_user(SLUGSET_USER_A)
+		_ensure_slugset_user(SLUGSET_USER_B)
+
+	def setUp(self):
+		self._orig = frappe.session.user
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for owner in (SLUGSET_USER_A, SLUGSET_USER_B):
+			frappe.db.delete(SKILL, {"owner": owner})
+		frappe.db.commit()
+
+	def test_multi_slug_message_returns_the_set_of_both(self):
+		_mk_slug_skill(SLUGSET_USER_A, "slug-a")
+		_mk_slug_skill(SLUGSET_USER_A, "slug-b")
+		self.assertEqual(
+			invoked_skill_slugs("/slug-a and /slug-b please", user=SLUGSET_USER_A),
+			{"slug-a", "slug-b"},
+		)
+
+	def test_zero_when_no_slug_in_the_message_is_invocable_by_user(self):
+		_mk_slug_skill(SLUGSET_USER_A, "owned-by-a-only")
+		# Owned by A, and a slug naming no skill at all - neither is invocable by B.
+		self.assertEqual(
+			invoked_skill_slugs("/owned-by-a-only /not-a-skill-at-all", user=SLUGSET_USER_B),
+			set(),
+		)
+
+	def test_identity_parameterization_keys_on_passed_user_not_session(self):
+		"""A skill enabled/owned by A but not B: invoked in A's message returns
+		{slug} under user=A, empty under user=B - proving resolution keys on the
+		PASSED user. The ambient session is deliberately left on B throughout, so
+		a session-keyed (rather than user-keyed) implementation would fail the
+		very first assertion below."""
+		_mk_slug_skill(SLUGSET_USER_A, "onlya")
+		frappe.set_user(SLUGSET_USER_B)
+		self.assertEqual(invoked_skill_slugs("/onlya go", user=SLUGSET_USER_A), {"onlya"})
+		self.assertEqual(invoked_skill_slugs("/onlya go", user=SLUGSET_USER_B), set())
+
+	def test_incidental_slash_token_ignored_unless_an_enabled_skill_names_it(self):
+		# "see /invoicing-notes" - a prose slash, not an invocation, until a skill
+		# literally named invoicing-notes exists and is enabled for this user.
+		self.assertEqual(invoked_skill_slugs("see /invoicing-notes for details", user=SLUGSET_USER_A), set())
+		_mk_slug_skill(SLUGSET_USER_A, "invoicing-notes")
+		self.assertEqual(
+			invoked_skill_slugs("see /invoicing-notes for details", user=SLUGSET_USER_A),
+			{"invoicing-notes"},
+		)
+
+	def test_invoked_skill_clause_unchanged_for_a_known_invoked_skill(self):
+		"""Behavior-preservation: invoked_skill_clause now delegates its matched
+		set to invoked_skill_slugs(message, user=frappe.session.user), but must
+		still return the EXACT clause string it did before the refactor."""
+		_mk_slug_skill(SLUGSET_USER_A, "clausecheck")
+		frappe.set_user(SLUGSET_USER_A)
+		clause = invoked_skill_clause("/clausecheck run it")
+		self.assertEqual(
+			clause,
+			"; the user invoked these skills, which are not loaded in this session: "
+			"custom-clausecheck - call the jarvis__get_skill tool with each of those "
+			"names to read its instructions, then follow them",
+		)
