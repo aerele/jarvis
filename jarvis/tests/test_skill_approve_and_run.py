@@ -16,7 +16,8 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import turn_message_binding
+from jarvis import api
+from jarvis.chat import pending_confirm, turn_message_binding
 from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests.test_auto_apply import (
@@ -24,9 +25,15 @@ from jarvis.tests.test_auto_apply import (
 	_ensure_non_admin_user,
 	_make_conv,
 )
+from jarvis.tests.test_chat_api import (
+	TEST_USER,
+	_cleanup_user_conversations,
+	_ensure_test_user,
+)
 
 CONV = "Jarvis Conversation"
 SKILL = "Jarvis Custom Skill"
+MSG = "Jarvis Chat Message"
 
 # A Jarvis Admin who is NOT a System Manager - proves the guard admits the
 # Jarvis Admin tier specifically, not only System Manager (edge-case review).
@@ -519,3 +526,183 @@ class TestHandleChatSendBindsTurnMessage(FrappeTestCase):
 				)
 
 		self.assertEqual(turn_message_binding.current_turn_message_id(self.conv), self.user_msg)
+
+
+# --------------------------------------------------------------------------- #
+# The park-time "Approve & run" OFFER gate (design §3.3)
+# --------------------------------------------------------------------------- #
+#
+# api._resolve_approve_run_offer(conversation) decides whether a parked card may
+# offer Approve & run and, if so, returns the ARMED skill (docname, slug) the gate
+# stamps onto the pending-confirm token. Forgery-proof + fail-safe: it offers ONLY
+# when the turn's triggering message (via the turn->message binding) invoked EXACTLY
+# ONE live-armed skill, resolved under the MESSAGE OWNER's identity. This is the
+# OFFER side only - no skill_autorun flag is set and no run is opened here.
+
+OFFER_OWNER = SLUGSET_USER_A
+OFFER_OTHER = SLUGSET_USER_B
+
+
+def _make_user_msg(conv: str, owner: str, content: str) -> str:
+	"""A real ``role=user`` Jarvis Chat Message on ``conv`` owned by ``owner`` with
+	``content`` - the row the offer gate reads back through the turn->message
+	binding (owner + content drive the slug resolution)."""
+	orig = frappe.session.user
+	frappe.set_user(owner)
+	try:
+		doc = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": conv,
+				"seq": 1,
+				"role": "user",
+				"content": content,
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		frappe.db.commit()
+		return doc.name
+	finally:
+		frappe.set_user(orig)
+
+
+class TestResolveApproveRunOffer(FrappeTestCase):
+	"""api._resolve_approve_run_offer / _armed_skill_docname_for_slug - the pure
+	park-time offer resolution."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_slugset_user(OFFER_OWNER)
+		_ensure_slugset_user(OFFER_OTHER)
+
+	def setUp(self):
+		self._orig = frappe.session.user
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for owner in (OFFER_OWNER, OFFER_OTHER):
+			frappe.db.delete(SKILL, {"owner": owner})
+			for conv in frappe.get_all(CONV, filters={"owner": owner}, pluck="name"):
+				frappe.db.delete(MSG, {"conversation": conv})
+				frappe.cache().delete_value(turn_message_binding._key(conv))
+				frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _bound_conv(self, owner: str, content: str) -> str:
+		"""A conversation owned by ``owner`` with a bound triggering user message."""
+		conv = _make_conv(owner)
+		msg = _make_user_msg(conv, owner, content)
+		turn_message_binding.bind_turn_message(conv, msg)
+		return conv
+
+	def test_armed_single_skill_returns_docname_and_slug(self):
+		docname = _make_skill(OFFER_OWNER, armed=True, name="armed-one")
+		conv = self._bound_conv(OFFER_OWNER, "/armed-one do it")
+		self.assertEqual(api._resolve_approve_run_offer(conv), (docname, "armed-one"))
+
+	def test_not_armed_skill_no_offer(self):
+		# The invoked skill exists + is invocable by its owner, but its
+		# allow_approve_run is 0. Mutation-verify: deleting the `if not armed:
+		# return None` guard offers here and flips this red.
+		_make_skill(OFFER_OWNER, armed=False, name="notarmed")
+		conv = self._bound_conv(OFFER_OWNER, "/notarmed do it")
+		self.assertEqual(api._resolve_approve_run_offer(conv), (None, None))
+
+	def test_two_invoked_skills_no_offer_even_when_both_armed(self):
+		# 2+ invoked skills: the run flag is conversation-wide with no per-write
+		# skill attribution, so a co-invoked skill's writes would ride the approval.
+		# Mutation-verify: relaxing `len(slugs) != 1` offers here and flips this red.
+		_make_skill(OFFER_OWNER, armed=True, name="armed-a")
+		_make_skill(OFFER_OWNER, armed=True, name="armed-b")
+		conv = self._bound_conv(OFFER_OWNER, "/armed-a and /armed-b please")
+		self.assertEqual(api._resolve_approve_run_offer(conv), (None, None))
+
+	def test_no_binding_no_offer(self):
+		# An armed skill exists, but nothing bound this conversation's turn.
+		_make_skill(OFFER_OWNER, armed=True, name="armed-nb")
+		conv = _make_conv(OFFER_OWNER)  # deliberately NOT bound
+		self.assertEqual(api._resolve_approve_run_offer(conv), (None, None))
+
+	def test_armed_skill_owned_by_different_user_no_offer(self):
+		# The armed skill is owned by OFFER_OTHER; the triggering message is owned
+		# by OFFER_OWNER, who neither owns nor is shared it. Resolving under the
+		# MESSAGE owner yields no invocable slug -> no offer. The ambient session is
+		# parked on the armed owner, so a session-keyed (rather than message-owner-
+		# keyed) resolution would wrongly offer and flip this red.
+		_make_skill(OFFER_OTHER, armed=True, name="foreign")
+		conv = self._bound_conv(OFFER_OWNER, "/foreign do it")
+		frappe.set_user(OFFER_OTHER)
+		self.assertEqual(api._resolve_approve_run_offer(conv), (None, None))
+
+
+class TestApproveRunOfferThroughRunTool(FrappeTestCase):
+	"""End-to-end through the write-confirmation gate (api._run_tool): a parked
+	create_doc stamps the token + flags the card iff the turn invoked one armed
+	skill. TEST_USER (System Manager) owns the conversation so the park's create_doc
+	dry-run is unencumbered."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+		_cleanup_user_conversations(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		frappe.db.delete(SKILL, {"owner": TEST_USER})
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.cache().delete_value(turn_message_binding._key(conv))
+		_cleanup_user_conversations(TEST_USER)
+		frappe.db.commit()
+
+	def _bound_conv(self, content: str) -> str:
+		conv = _make_conv(TEST_USER)
+		msg = _make_user_msg(conv, TEST_USER, content)
+		turn_message_binding.bind_turn_message(conv, msg)
+		return conv
+
+	def _park_create_todo(self, conv: str, desc: str) -> dict:
+		frappe.set_user(TEST_USER)
+		return api._run_tool(
+			"create_doc",
+			{"doctype": "ToDo", "values": {"description": desc}},
+			conversation=conv,
+		)
+
+	def _token_record(self, conv: str) -> dict:
+		recs = [
+			r
+			for r in pending_confirm.list_for_owner(TEST_USER, conversation=conv)
+			if r.get("conversation") == conv
+		]
+		self.assertEqual(len(recs), 1, "exactly one parked token expected")
+		return recs[0]
+
+	def test_armed_single_skill_stamps_token_and_flags_card(self):
+		docname = _make_skill(TEST_USER, armed=True, name="runarmed")
+		conv = self._bound_conv("/runarmed make a todo")
+		r = self._park_create_todo(conv, "jarvis-approverun-armed-001")
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		rec = self._token_record(conv)
+		self.assertEqual(rec.get("skill_docname"), docname)
+		card = (rec.get("preview") or {}).get("card")
+		self.assertIsInstance(card, dict)
+		self.assertTrue(card.get("approve_run"))
+		self.assertEqual(card.get("skill_slug"), "runarmed")
+
+	def test_unarmed_skill_no_stamp_no_flag(self):
+		_make_skill(TEST_USER, armed=False, name="rununarmed")
+		conv = self._bound_conv("/rununarmed make a todo")
+		r = self._park_create_todo(conv, "jarvis-approverun-unarmed-001")
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		rec = self._token_record(conv)
+		self.assertIsNone(rec.get("skill_docname"))
+		card = (rec.get("preview") or {}).get("card")
+		self.assertIsInstance(card, dict)
+		self.assertNotIn("approve_run", card)

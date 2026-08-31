@@ -875,6 +875,112 @@ def _armed_skip_disabled() -> bool:
 	return bool(frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "disable_armed_skip")))
 
 
+def _armed_skill_docname_for_slug(slug: str, owner: str) -> str | None:
+	"""The single live-ARMED Jarvis Custom Skill row ``owner`` would invoke by
+	``/slug``, or ``None`` (skill "Approve & run the plan", design §3.3 rule 4).
+
+	Mirrors :func:`invoked_skill_slugs`' owner/shared/role precedence: the owner's
+	OWN enabled row wins the invocation; failing that, a shared or role-scoped
+	enabled row. ``allow_approve_run`` is read LIVE off the resolved row and must
+	be 1. Fail-safe on ambiguity - a slug can map to several rows across
+	owned/shared/role-scoped, so ``None`` when the winning tier holds 2+ rows OR
+	when 2+ ARMED invocable rows exist anywhere (an ambiguous arm cannot authorize
+	a run). O(1)-ish: a couple of indexed reads, no per-skill N+1."""
+	from jarvis.chat.custom_skills import role_scoped_skill_rows
+
+	# The owner's OWN enabled rows named `slug`.
+	own = {
+		r.name: int(r.allow_approve_run or 0)
+		for r in frappe.get_all(
+			"Jarvis Custom Skill",
+			filters={"enabled": 1, "owner": owner, "skill_name": slug},
+			fields=["name", "allow_approve_run"],
+		)
+	}
+	# Enabled rows SHARED with the owner, or reachable via a role the owner holds,
+	# named `slug` (deduped - a row can be both shared and role-scoped).
+	shared_role: dict[str, int] = {}
+	shared_names = [
+		r.parent
+		for r in frappe.get_all(
+			"Jarvis Custom Skill Share",
+			filters={"user": owner, "parenttype": "Jarvis Custom Skill"},
+			fields=["parent"],
+		)
+	]
+	if shared_names:
+		for r in frappe.get_all(
+			"Jarvis Custom Skill",
+			filters={"enabled": 1, "name": ["in", shared_names], "skill_name": slug},
+			fields=["name", "allow_approve_run"],
+		):
+			shared_role[r.name] = int(r.allow_approve_run or 0)
+	for r in role_scoped_skill_rows(owner, ["name", "skill_name", "allow_approve_run"]):
+		if r.skill_name == slug:
+			shared_role.setdefault(r.name, int(r.allow_approve_run or 0))
+
+	# Precedence: the owner's own row wins; only fall through to shared/role when
+	# the owner has no own row for this slug.
+	tier = own if own else shared_role
+	if len(tier) != 1:
+		return None  # no candidate, or an ambiguous winning tier -> fail safe
+	docname, armed = next(iter(tier.items()))
+	if not armed:
+		return None  # the row the owner would actually invoke is not armed
+	# Global ambiguity guard: refuse if the slug maps to 2+ ARMED invocable rows
+	# anywhere (owned + shared + role), even across tiers.
+	if sum(1 for v in {**shared_role, **own}.values() if v) != 1:
+		return None
+	return docname
+
+
+def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | None]:
+	"""Decide whether the parked card may offer "Approve & run" and, if so, return
+	the ARMED Jarvis Custom Skill ``(docname, slug)`` to stamp on its token (skill
+	"Approve & run the plan", design §3.3). This is the OFFER side only: it stamps
+	the trust signal so a later ``approve_and_run`` endpoint can authorize off the
+	docname (re-checking arming live). It sets NO run flag and opens NO run.
+
+	Forgery-proof + fail-safe - ALL must hold, else ``(None, None)``:
+
+	1. A turn->message binding exists for this conversation (the exact user message
+	   that triggered the running turn - not a racy "latest hidden=0 message").
+	2. That message resolves to an ``owner`` and ``content``.
+	3. ``content`` invokes EXACTLY ONE custom skill under the MESSAGE OWNER's
+	   identity (never the ambient session / exec user). 2+ invoked skills -> no
+	   offer: the run flag is conversation-wide with no per-write skill
+	   attribution, so a co-invoked (even unarmed) skill's writes would otherwise
+	   ride the approval.
+	4. That one slug resolves to a single live-armed row the owner would invoke
+	   (:func:`_armed_skill_docname_for_slug`).
+
+	Best-effort: any exception -> ``(None, None)``; this is an additive nicety on
+	the hot gate path and must never break the park."""
+	try:
+		if not conversation:
+			return None, None
+		from jarvis.chat.custom_skills import invoked_skill_slugs
+		from jarvis.chat.turn_message_binding import current_turn_message_id
+
+		msg_id = current_turn_message_id(conversation)
+		if not msg_id:
+			return None, None
+		msg = frappe.db.get_value("Jarvis Chat Message", msg_id, ["owner", "content"], as_dict=True)
+		if not msg or not msg.get("owner") or not msg.get("content"):
+			return None, None
+		# Resolve under the MESSAGE SENDER, never frappe.session.user / exec_user.
+		slugs = invoked_skill_slugs(msg["content"], user=msg["owner"])
+		if len(slugs) != 1:
+			return None, None
+		slug = next(iter(slugs))
+		docname = _armed_skill_docname_for_slug(slug, msg["owner"])
+		if not docname:
+			return None, None
+		return docname, slug
+	except Exception:
+		return None, None
+
+
 def _run_preview(tool: str, args: dict) -> dict:
 	"""Dispatch a write tool with all DB effects sandboxed (mechanics in
 	``jarvis.tools._preview_sandbox``, shared with preview_doc). Side effects
@@ -1569,8 +1675,20 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# it for ALL of _run_tool and break the read path's perf_counter.
 		from jarvis.chat import confirm_card
 
+		# "Approve & run" offer (skill "Approve & run the plan", design §3.3): if the
+		# turn was triggered by a message invoking exactly one live-armed custom skill
+		# - resolved forgery-proof under the MESSAGE OWNER via the turn->message
+		# binding - stamp that skill's docname on the token so a later approve_and_run
+		# can authorize off it, and flag the card so the frontend can show the
+		# affordance (P0 = just the flag; the plan outline is a later task). Best-effort
+		# + fail-safe: no offer on any doubt, and it NEVER sets the run flag or
+		# auto-runs (that is a later task) - it only decorates this park.
+		skill_docname, skill_slug = _resolve_approve_run_offer(conv)
 		if isinstance(preview, dict):
 			preview["card"] = confirm_card.build_card(tool, args, preview)
+			if skill_docname and isinstance(preview.get("card"), dict):
+				preview["card"]["approve_run"] = True
+				preview["card"]["skill_slug"] = skill_slug
 		expires_at = int(time.time()) + pending_confirm._TTL_S
 		token = pending_confirm.mint(
 			conversation=conv,
@@ -1581,6 +1699,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			exec_user=exec_user,
 			preview=preview,
 			expires_at=expires_at,
+			skill_docname=skill_docname,
 		)
 		# mint returns None when it could not stage the park (a transient cache
 		# failure that it already rolled back, so nothing is persisted). Do NOT
