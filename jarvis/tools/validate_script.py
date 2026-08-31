@@ -150,6 +150,23 @@ def _ast_scan(tree: ast.AST) -> tuple[list[str], list[str]]:
 	return errors, warnings
 
 
+def _restricted_compile(code: str) -> None:
+	"""Run the exact RestrictedPython compile safe_exec uses, across Frappe
+	versions. v16 exposes ``_compile_code``; older Frappe (v15) does not, so fall
+	back to the ``compile_restricted`` + ``FrappeTransformer`` it wraps - same
+	compile. Raises the compile's ``SyntaxError``; ``ImportError`` only if neither
+	entrypoint is importable (then the caller degrades to the AST scan)."""
+	try:
+		from frappe.utils.safe_exec import _compile_code
+	except ImportError:
+		from frappe.utils.safe_exec import FrappeTransformer
+		from RestrictedPython import compile_restricted
+
+		compile_restricted(code, filename="<validate_script>", policy=FrappeTransformer, mode="exec")
+	else:
+		_compile_code(code, filename="<validate_script>")
+
+
 def validate_script(code, script_type=None) -> dict:
 	"""Static-check a Server Script or a Script Report's ``report_script`` against
 	Frappe's safe_exec sandbox WITHOUT running it. Call this before staging a
@@ -201,12 +218,10 @@ def validate_script(code, script_type=None) -> dict:
 	except Exception:
 		pass
 
-	# The authoritative RestrictedPython compile safe_exec itself uses. Private
-	# frappe helper, so guard it: if it moves, the AST scan above still stands.
+	# The authoritative RestrictedPython compile safe_exec itself uses. Guarded:
+	# if neither entrypoint exists, the AST scan above still stands.
 	try:
-		from frappe.utils.safe_exec import _compile_code
-
-		_compile_code(code, filename="<validate_script>")
+		_restricted_compile(code)
 	except SyntaxError as e:
 		loc = f" (line {e.lineno})" if getattr(e, "lineno", None) else ""
 		errors.append(f"RestrictedPython rejected the script: {e.msg}{loc}")
