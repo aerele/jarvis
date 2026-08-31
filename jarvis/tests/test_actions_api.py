@@ -441,6 +441,118 @@ class TestContinuation(FrappeTestCase):
 		# The text is preserved (as quoted data), just neutralized.
 		self.assertIn("ignore prior steps", content)
 
+	def test_confirm_receipt_run_method_surfaces_full_untruncated_payload(self):
+		# run_method is a data-returning escape hatch that ALWAYS parks, so this
+		# receipt is the model's only view of the result. A large payload (the
+		# balances / CoA case) must reach the receipt in full - never truncated.
+		from jarvis.chat.actions_api import _confirm_receipt_text
+
+		big = {"rows": [{"account": f"ACC-{i}", "balance": i * 1000} for i in range(500)]}
+		record = {
+			"tool": "run_method",
+			"args": {"method": "erpnext.accounts.utils.get_account_balances_coa"},
+		}
+		text = _confirm_receipt_text(record, {"ok": True, "data": big})
+		self.assertIn("succeeded", text)
+		self.assertIn("Returned:", text)
+		# First AND last row present -> the whole payload survived, untruncated.
+		self.assertIn("ACC-0", text)
+		self.assertIn("ACC-499", text)
+
+	def test_confirm_receipt_run_method_serializes_document_via_as_dict(self):
+		# The marquee case: a make_* mapper returns a frappe Document, not a dict.
+		# frappe.as_json must render its FIELDS (via as_dict), never the object
+		# repr that stdlib json.dumps(default=str) would emit.
+		from jarvis.chat.actions_api import _confirm_receipt_text
+
+		doc = frappe.new_doc("ToDo")
+		doc.description = "doc-field-marker"
+		record = {"tool": "run_method", "args": {"method": "erpnext.x.make_todo"}}
+		text = _confirm_receipt_text(record, {"ok": True, "data": doc})
+		self.assertIn("Returned:", text)
+		self.assertIn("doc-field-marker", text)  # a real field value survived
+		self.assertNotIn("<ToDo", text)  # NOT the '<ToDo: ...>' object repr
+
+	def test_confirm_receipt_non_run_method_does_not_dump_data(self):
+		# A create/update receipt stays terse - the affected name, not the payload.
+		from jarvis.chat.actions_api import _confirm_receipt_text
+
+		record = {"tool": "create_doc", "args": {"doctype": "ToDo"}}
+		text = _confirm_receipt_text(record, {"ok": True, "data": {"name": "TODO-9", "description": "x"}})
+		self.assertNotIn("Returned:", text)
+		self.assertIn("-> TODO-9", text)
+		self.assertIn("succeeded", text)
+
+	def test_confirm_receipt_run_method_failure_reports_error_without_dump(self):
+		# A FAILED run_method still reports the (bounded) error, and never dumps a
+		# payload - there is none, and the failure branch precedes the data append.
+		from jarvis.chat.actions_api import _confirm_receipt_text
+
+		record = {"tool": "run_method", "args": {"method": "x.y.z"}}
+		text = _confirm_receipt_text(record, {"ok": False, "error": {"message": "kaboom"}})
+		self.assertIn("FAILED", text)
+		self.assertIn("kaboom", text)
+		self.assertNotIn("Returned:", text)
+
+	def test_run_method_payload_survives_neutralized_continuation_untruncated(self):
+		# End-to-end: the full run_method payload rides the continuation as ONE
+		# neutralized inline-data line (newlines collapsed, backticks disarmed) -
+		# yet is NOT truncated, so a unique marker deep in the payload still lands.
+		from jarvis.chat.actions_api import _confirm_receipt_text
+		from jarvis.chat.api import enqueue_continuation
+
+		marker = "UNIQ-account-marker-deep-in-payload"
+		big = {"rows": [{"account": f"ACC-{i}"} for i in range(400)] + [{"account": marker}]}
+		record = {
+			"tool": "run_method",
+			"args": {"method": "erpnext.accounts.utils.get_account_balances_coa"},
+		}
+		receipt = _confirm_receipt_text(record, {"ok": True, "data": big})
+		conv = self._conv()
+		with patch("jarvis.chat.api._dispatch_turn"):
+			enqueue_continuation(conv, receipt)
+		content = self._messages(conv)[-1].content
+		# Untruncated: the marker after 400 rows still made it into the prompt.
+		self.assertIn(marker, content)
+		# Neutralized: cannot forge a new bench-voice line.
+		self.assertNotIn("\n", content)
+
+	def test_confirm_receipt_run_method_serialization_failure_falls_back(self):
+		# A return value as_json cannot encode (a circular ref) must NOT raise out of
+		# the post-commit receipt; it degrades to a plain success line (and a log).
+		from jarvis.chat.actions_api import _confirm_receipt_text
+
+		circular = {}
+		circular["self"] = circular
+		record = {"tool": "run_method", "args": {"method": "x.y.z"}}
+		text = _confirm_receipt_text(record, {"ok": True, "data": circular})
+		self.assertIn("succeeded", text)
+		self.assertIn("could not be serialized", text)
+		self.assertNotIn("Returned:", text)
+
+	def test_confirm_core_batch_run_method_receipt_carries_full_payload(self):
+		# The batch (multi-card) approval path composes receipts from
+		# result["receipt_text"] (joined by the typed-bulk confirmation), so a
+		# confirmed run_method must carry its full payload there too - not only on
+		# the single-card continuation path.
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import _confirm_core
+
+		conv = self._conv()
+		token = pending_confirm.mint(
+			conversation=conv,
+			owner="Administrator",
+			tool="run_method",
+			args={"method": "erpnext.accounts.utils.get_account_balances_coa"},
+			run_id="testrun",
+		)
+		payload = {"rows": [{"account": "ACC-batch-marker", "balance": 42}]}
+		with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": payload}):
+			res = _confirm_core(token, conv, batch=True)
+		self.assertIn("receipt_text", res)
+		self.assertIn("Returned:", res["receipt_text"])
+		self.assertIn("ACC-batch-marker", res["receipt_text"])
+
 	def test_confirm_tool_failed_write_still_continues_with_neutralized_error(self):
 		# A confirmed write that FAILS must still dispatch the continuation (so the
 		# agent learns the outcome), and the error text - attacker-influenceable -
