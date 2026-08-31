@@ -488,6 +488,22 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 			# Same envelope + audit as an inline write - dispatch_confirmed bypasses
 			# the gate so the stored call actually executes instead of parking again.
 			result = api.dispatch_confirmed(record["tool"], record["args"])
+			# run_method returns its target verbatim, unlike get_doc/create_doc which
+			# permlevel-filter before as_dict. Apply the same field-level read filter to
+			# a Document return HERE (still as exec_user), so a permlevel>0 field the
+			# agent can't read is stripped before it reaches the receipt chip or the
+			# model's continuation dump. Best-effort: a filter hiccup must never fail an
+			# already-committed call (that would roll back the write for a cosmetic step).
+			if record["tool"] == "run_method" and isinstance(result, dict) and result.get("ok"):
+				_ret = result.get("data")
+				if hasattr(_ret, "apply_fieldlevel_read_permissions"):
+					try:
+						_ret.apply_fieldlevel_read_permissions()
+					except Exception:
+						frappe.log_error(
+							title="run_method receipt permlevel filter failed",
+							message=frappe.get_traceback(),
+						)
 	except Exception:
 		# F5: an UNEXPECTED (untranslated) exception from the confirmed write would
 		# otherwise 500 with the token ALREADY consumed (GETDEL above) - no receipt,
@@ -625,6 +641,12 @@ def _confirm_receipt_text(record: dict, result) -> str:
 		try:
 			payload = frappe.as_json(data)
 		except Exception:
+			# Post-commit + best-effort, but not silent: log so a method whose return
+			# consistently fails to serialize is diagnosable instead of vanishing.
+			frappe.log_error(
+				title="run_method receipt serialization failed",
+				message=frappe.get_traceback(),
+			)
 			return f"{desc} succeeded (return value could not be serialized for the receipt)."
 		return f"{desc} succeeded. Returned: {payload}"
 	return f"{desc} succeeded."
