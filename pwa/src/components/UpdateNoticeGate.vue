@@ -32,7 +32,7 @@ onBeforeUnmount(() => clearInterval(timer));
 			</p>
 
 			<button class="jv-nu-btn" :disabled="checking" @click="recheck">
-				{{ checking ? "Checking…" : "I've updated — check again" }}
+				{{ checking ? "Checking…" : "I've updated, check again" }}
 			</button>
 		</div>
 	</div>
