@@ -1685,4 +1685,147 @@ class TestStrandedSkillAutorunReaper(FrappeTestCase):
 			hooks.scheduler_events["hourly"],
 			"the stranded-flag reaper must be registered as an hourly cron",
 		)
+
+
+# --------------------------------------------------------------------------- #
+# skip_confirmation (macro run) vs skill_autorun (approved skill run): two
+# LOOK-ALIKE conversation flags a future editor may be tempted to "generalize"
+# into one guard. They are NOT the same policy - a macro run is a watchable,
+# human-inert RUN LOG (no interactive entry at all); an approved skill run is
+# still an ordinary chat the human can talk into and pause/resume via a
+# destructive-write card. Each test below pins ONE invariant that would break
+# silently if the two flags were ever merged or a guard's key swapped.
+# --------------------------------------------------------------------------- #
+
+
+class TestMacroSkillFlagSeparation(FrappeTestCase):
+	"""Dedicated invariant tests: skip_confirmation and skill_autorun gate the
+	send/confirm/approve_and_run entry points in OPPOSITE ways. Mirrors the
+	corresponding tests in test_macro_skip_confirmation.py where noted."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+		_ensure_non_admin_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for owner in (TEST_USER, NON_ADMIN_USER):
+			for name in frappe.get_all(SKILL, filters={"owner": owner}, pluck="name"):
+				frappe.delete_doc(SKILL, name, force=True, ignore_permissions=True)
+			for name in frappe.get_all("ToDo", filters={"owner": owner}, pluck="name"):
+				frappe.delete_doc("ToDo", name, force=True, ignore_permissions=True)
+			for conv in frappe.get_all(CONV, filters={"owner": owner}, pluck="name"):
+				try:
+					pending_confirm.clear_for_conversation(owner, conv)
+				except Exception:
+					pass
+				frappe.db.delete(MSG, {"conversation": conv})
+				frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_send_block_refuses_skip_confirmation_conv(self):
+		"""INVARIANT: skip_confirmation=1 (a macro run) refuses an interactive send -
+		the conversation is a watchable run log, not a continuable chat. Mirrors
+		test_macro_skip_confirmation.test_send_message_rejected_on_armed_conversation."""
+		from jarvis.chat import api as chat_api
+
+		conv = _make_conv(NON_ADMIN_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		frappe.set_user(NON_ADMIN_USER)
+		with patch.object(chat_api, "validate_can_send", return_value=(True, None)):
+			with self.assertRaises(frappe.ValidationError):
+				chat_api.send_message(conversation=conv, message="let me in")
+
+	def test_send_is_allowed_and_clears_skill_autorun_conv(self):
+		"""INVARIANT (opposite of the test above): skill_autorun=1 (an approved skill
+		run) never blocks an interactive send - a genuine new top-level message is
+		close-trigger #2 (design §3.4 "Other close-triggers") and ENDS the run,
+		leaving skill_autorun 0 rather than refusing the send."""
+		from jarvis.chat.api import send_message
+		from jarvis.tests._transport_helpers import provision_legacy_site
+
+		provision_legacy_site(self)
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		frappe.set_user(TEST_USER)
+		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
+			with patch("frappe.enqueue"):
+				res = send_message(conv, "make three todos please")
+		self.assertTrue(res["ok"], "a skill_autorun conversation must accept an interactive send")
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			0,
+			"a new top-level message closes the approved run",
+		)
+
+	def test_confirm_refused_on_skip_confirmation_conv(self):
+		"""INVARIANT: skip_confirmation=1 withdraws a parked card's confirm too, not
+		just the send entry point - the D5-excluded write waits for the sweep, never
+		the human. Mirrors
+		test_macro_skip_confirmation.TestReviewHardening.test_confirm_refused_on_armed_conversation."""
+		conv = _make_conv(NON_ADMIN_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		frappe.set_user(NON_ADMIN_USER)
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "flag-sep-confirm-race"}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
+		r = api._run_tool("delete_doc", {"doctype": "ToDo", "name": todo.name}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		recs = [
+			t
+			for t in pending_confirm.list_for_owner(NON_ADMIN_USER, conversation=conv)
+			if t.get("conversation") == conv
+		]
+		self.assertEqual(len(recs), 1)
+		token = recs[0]["token"]
+		res = actions_api._confirm_core(token, conv)
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["type"], "InvalidConfirmation")
+		self.assertTrue(frappe.db.exists("ToDo", todo.name), "the delete must not have run")
+
+	def test_confirm_succeeds_on_skill_autorun_conv_d1_resume(self):
+		"""INVARIANT (opposite of the test above): skill_autorun=1 alone must NOT block
+		a confirm - only skip_confirmation does. A D1 destructive write (delete_doc) is
+		excluded from uncarded auto-run and still parks a real card under an approved
+		run (_park_pending_card); confirming that PAUSED card is the RESUME step and
+		must reach dispatch, not be refused. dispatch_confirmed/receipt/continuation are
+		mocked (mirrors TestApproveAndRun's happy path) so only the gate decision is
+		pinned, not delete_doc's own permission plumbing."""
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		frappe.set_user(TEST_USER)
+		token = _park_pending_card(conv, TEST_USER)
+		with (
+			patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}) as disp,
+			patch("jarvis.api.persist_tool_receipt"),
+			patch("jarvis.chat.admission.publish_action_confirmed"),
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
+		):
+			res = actions_api._confirm_core(token, conv)
+		disp.assert_called_once()
+		self.assertTrue(res.get("ok"), "an approved-run D1 resume confirm must succeed, not be refused")
+		self.assertIsNone(pending_confirm.peek(token), "the resumed card is consumed")
+
+	def test_approve_and_run_refused_on_skip_confirmation_conv_both_flags_unreachable(self):
+		"""INVARIANT: approve_and_run refuses a token whose conversation already carries
+		skip_confirmation=1, so a conversation can never end up with BOTH flags set -
+		defense-in-depth pinned independently of TestApproveAndRun's own coverage."""
+		docname = _make_skill(TEST_USER, armed=True, name="flag-sep-ar-macro")
+		conv = _make_conv(TEST_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(TEST_USER)
+		token = _mint_approve_token(conv, TEST_USER, docname)
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			res = actions_api.approve_and_run(token, conv)
+		self.assertFalse(res.get("ok"))
+		self.assertFalse(disp.called, "a skip_confirmation conversation must not open a skill run")
+		self.assertIsNotNone(pending_confirm.peek(token), "the refusal does not consume the token")
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
 		self.assertTrue(callable(session_lifecycle.reap_stranded_skill_autorun))
