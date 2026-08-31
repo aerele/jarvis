@@ -15,12 +15,27 @@ from jarvis import onboarding
 
 def _land(data):
 	"""Drive _land_reconnect with the credential-writing side effects stubbed."""
-	with (
-		patch("jarvis.onboarding.write_connection"),
-		patch("jarvis.onboarding.grant_onboarding_admin"),
-		patch("jarvis.tenant_authority.clear"),
-	):
+	with _land_ctx():
 		return onboarding._land_reconnect(data)
+
+
+def _land_ctx(sync_side_effect=None):
+	"""Stub _land_reconnect's side effects; yield the sync_connection mock."""
+	from contextlib import contextmanager
+
+	@contextmanager
+	def _ctx():
+		with (
+			# get_single only feeds the patched tenant_authority.clear.
+			patch("jarvis.onboarding.frappe.get_single"),
+			patch("jarvis.onboarding.write_connection"),
+			patch("jarvis.onboarding.grant_onboarding_admin"),
+			patch("jarvis.tenant_authority.clear"),
+			patch("jarvis.onboarding.sync_connection", side_effect=sync_side_effect) as sync,
+		):
+			yield sync
+
+	return _ctx()
 
 
 _READY = {
@@ -58,6 +73,36 @@ class TestReconnectRenewLanding(FrappeTestCase):
 	def test_non_ready_bundle_is_surfaced_verbatim(self):
 		# Unchanged: anything not ready (invalid/expired/awaiting_code) passes through untouched.
 		self.assertEqual(_land({"status": "invalid"})["status"], "invalid")
+
+
+class TestReconnectEagerTokenSync(FrappeTestCase):
+	"""A ``connected`` reconnect syncs the token; the no-container outcomes must not."""
+
+	def test_connected_eagerly_syncs_token(self):
+		with _land_ctx() as sync:
+			out = onboarding._land_reconnect({**_READY, "subscription_status": "Active"})
+		self.assertEqual(out["status"], "connected")
+		sync.assert_called_once_with(timeout_s=15)
+
+	def test_renew_payment_does_not_sync(self):
+		# No running container to sync to; the token reconciles later at renew()/finish_payment.
+		with _land_ctx() as sync:
+			out = onboarding._land_reconnect({**_READY, "renew_required": True})
+		self.assertEqual(out["status"], "renew_payment")
+		sync.assert_not_called()
+
+	def test_resume_payment_does_not_sync(self):
+		with _land_ctx() as sync:
+			out = onboarding._land_reconnect({**_READY, "subscription_status": "Pending Payment"})
+		self.assertEqual(out["status"], "resume_payment")
+		sync.assert_not_called()
+
+	def test_sync_failure_still_lands_connected(self):
+		# Best-effort: a transient admin hiccup must not fail the landing (cron/button fall back).
+		with _land_ctx(sync_side_effect=RuntimeError("admin unreachable")) as sync:
+			out = onboarding._land_reconnect({**_READY, "subscription_status": "Active"})
+		self.assertEqual(out["status"], "connected")
+		sync.assert_called_once_with(timeout_s=15)
 
 
 class TestRenewForwardsTargetPlan(FrappeTestCase):
