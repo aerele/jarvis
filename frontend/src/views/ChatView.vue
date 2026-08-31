@@ -3688,7 +3688,7 @@
 								:key="f.fieldname"
 								class="jv-draft-fld"
 								:class="{
-									missing: f.reqd && !String(f.value).trim(),
+									missing: f.reqd && !f.read_only && !String(f.value).trim(),
 									changed: f.changed,
 								}"
 							>
@@ -3697,7 +3697,10 @@
 									}}<span v-if="f.reqd" class="jv-req"> *</span></label
 								>
 								<div class="jv-draft-ctl">
-									<template v-if="f.control === 'link'">
+									<span v-if="f.read_only" class="jv-draft-ro">{{
+										f.value
+									}}</span>
+									<template v-else-if="f.control === 'link'">
 										<input
 											class="jv-action-input"
 											v-model="f.value"
@@ -4113,6 +4116,7 @@ import AskCard from "@/components/chat/AskCard.vue";
 import { parseAsk } from "@/lib/chatAsk";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
+import { coerceOut, coerceRow, isFieldWritable } from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { shouldFollowBottom } from "@/lib/chatScroll";
 import { createRevealer } from "@/lib/streamReveal";
@@ -6699,50 +6703,23 @@ watch(actionFor, () => {
 
 // --- apply wiring: draft panel create/update round-trip via apply_action ---
 
-function _coerceOut(f) {
-	if (f.control === "check") return f.value === "Yes" ? 1 : 0;
-	if (f.control === "number") return f.value === "" ? "" : Number(f.value);
-	return f.value;
-}
-function _coerceRow(t, r, verb) {
-	const out = {};
-	for (const c of t.columns) {
-		// Match the main-field rule (applyDraft): on CREATE, fill a read_only
-		// child column that carries a value; every other verb strips it. Both
-		// update call sites (current rows pass 'update', the origJson baseline
-		// omits verb) are verb !== "create", so update keeps stripping.
-		if (c.read_only && verb !== "create") continue;
-		let v = r[c.fieldname];
-		if (v === "" || v == null) continue;
-		if (["Int", "Float", "Currency", "Percent"].includes(c.fieldtype)) v = Number(v);
-		if (c.fieldtype === "Check") v = Number(v) ? 1 : 0;
-		out[c.fieldname] = v;
-	}
-	return out;
-}
-
 async function applyDraft(submitFlag, model = draftPanel.value) {
 	const p = model;
 	if (!p || p.applying) return;
 	const values = {};
 	for (const f of p.fields) {
-		// read_only is a form-UI flag, not a write barrier: the agent's direct
-		// create_doc already sets read_only fields (e.g. Error Log method/error),
-		// so on a CREATE a confirm card fills a read_only field the agent PROPOSED
-		// a value for, rather than silently dropping it. Gate on `proposed`, not
-		// just "non-empty": an unproposed reqd read_only Check renders as "No"/0 and
-		// would otherwise clobber a schema default of 1. UPDATE always strips
-		// read_only - a confirm card must not overwrite a server-managed field on an
-		// existing doc. permlevel>0 fields stay guarded by Frappe's insert-time
-		// reset (see test_permlevel_leak: TestCreateDocPermlevelWriteReset).
-		if (f.read_only && !(p.verb === "create" && f.proposed)) continue;
+		// read_only gating + coercion live in lib/draftApply (unit-tested there): a
+		// read_only field is submitted only when the agent proposed it on a create;
+		// permlevel>0 fields stay guarded by Frappe's insert-time reset (see
+		// test_permlevel_leak: TestCreateDocPermlevelWriteReset).
+		if (!isFieldWritable(f, p.verb)) continue;
 		const changed = String(f.value) !== String(f.orig);
 		if (p.verb === "create" ? String(f.value).trim() !== "" : changed)
-			values[f.fieldname] = _coerceOut(f);
+			values[f.fieldname] = coerceOut(f);
 	}
 	for (const t of p.tables) {
 		const rows = t.rows
-			.map((r) => _coerceRow(t, r, p.verb))
+			.map((r) => coerceRow(t, r, p.verb))
 			.filter((r) => Object.keys(r).length);
 		if (p.verb === "create") {
 			if (rows.length) values[t.fieldname] = rows;
@@ -6750,7 +6727,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			JSON.stringify(rows) !==
 			JSON.stringify(
 				(JSON.parse(t.origJson) || []).map((r) =>
-					_coerceRow(
+					coerceRow(
 						t,
 						Object.fromEntries(
 							Object.entries(r).map(([k, v]) => [k, v == null ? "" : String(v)])
@@ -14202,6 +14179,15 @@ onUnmounted(() => {
 }
 .jv-draft-ctl {
 	position: relative;
+}
+/* A read_only main field is shown, not editable: a muted static value (mirrors the
+   child-grid jv-grid-ro treatment) so the user can't type into a field the confirm
+   would discard. A proposed read_only value still shows here for review. */
+.jv-draft-ro {
+	display: inline-block;
+	padding: 4px 0;
+	color: var(--text-3);
+	word-break: break-word;
 }
 .jv-draft-table-title {
 	font-size: 12px;
