@@ -10,9 +10,13 @@ BEARING backstop that a plain owner cannot self-grant either bypass through a
 generic ``doc.save()``. Mirrors ``test_macro_skip_confirmation.py`` exactly.
 """
 
+import uuid
+from unittest.mock import MagicMock, patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import turn_message_binding
 from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests.test_auto_apply import (
@@ -351,3 +355,167 @@ class TestInvokedSkillSlugs(FrappeTestCase):
 			"custom-clausecheck - call the jarvis__get_skill tool with each of those "
 			"names to read its instructions, then follow them",
 		)
+
+
+# --------------------------------------------------------------------------- #
+# Turn -> triggering-message binding (design §3.3, security-C1)
+# --------------------------------------------------------------------------- #
+#
+# A conversation-keyed Redis binding, written at TURN START, that lets a later
+# park-time offer-gate identify the EXACT user message that triggered the
+# running turn - defeating the "latest hidden=0 message" race (a second tab's
+# committed-but-queued send). Correctness rests on admission's one-in-flight-
+# turn-per-conversation guarantee: the last writer of the key IS the running
+# turn. This block covers ONLY the two helpers + the handle_chat_send call site
+# (the offer-gate / token stamp / terminal clears are tasks #38/#41).
+
+
+def _uniq_conv() -> str:
+	"""A synthetic conversation id - the binding is a bare Redis key, so the
+	helper tests need no real Jarvis Conversation row. Unique per call so tests
+	never collide through Redis or the per-request local cache."""
+	return f"tmb-{uuid.uuid4()}"
+
+
+class TestTurnMessageBindingHelpers(FrappeTestCase):
+	"""bind_turn_message / current_turn_message_id against ``frappe.cache()``."""
+
+	def setUp(self):
+		self._conv = _uniq_conv()
+
+	def tearDown(self):
+		# Don't leak the Redis key (or its per-request local-cache mirror).
+		frappe.cache().delete_value(turn_message_binding._key(self._conv))
+
+	def test_bind_then_read_returns_the_id(self):
+		turn_message_binding.bind_turn_message(self._conv, "msg-alpha")
+		self.assertEqual(turn_message_binding.current_turn_message_id(self._conv), "msg-alpha")
+
+	def test_second_bind_overwrites(self):
+		"""A new turn on the same conversation replaces the prior binding - the
+		key always reflects the turn currently running."""
+		turn_message_binding.bind_turn_message(self._conv, "msg-first")
+		turn_message_binding.bind_turn_message(self._conv, "msg-second")
+		self.assertEqual(turn_message_binding.current_turn_message_id(self._conv), "msg-second")
+
+	def test_read_returns_none_when_unset(self):
+		self.assertIsNone(turn_message_binding.current_turn_message_id(self._conv))
+
+	def test_read_returns_none_after_delete(self):
+		turn_message_binding.bind_turn_message(self._conv, "msg-gone")
+		frappe.cache().delete_value(turn_message_binding._key(self._conv))
+		self.assertIsNone(turn_message_binding.current_turn_message_id(self._conv))
+
+	def test_ttl_is_set_on_the_key(self):
+		"""The key carries a positive expiry (staleness backstop), bounded by the
+		configured TTL - a live binding never lingers forever if a clear is
+		missed."""
+		turn_message_binding.bind_turn_message(self._conv, "msg-ttl")
+		cache = frappe.cache()
+		raw = cache.make_key(turn_message_binding._key(self._conv))
+		ttl = cache.ttl(raw)  # remaining seconds; -1 = no expiry, -2 = missing
+		self.assertGreater(ttl, 0)
+		self.assertLessEqual(ttl, turn_message_binding._TTL_S)
+
+	def test_empty_args_are_noops(self):
+		"""A missing conversation or message id binds nothing (and reads None)."""
+		turn_message_binding.bind_turn_message(self._conv, "")
+		self.assertIsNone(turn_message_binding.current_turn_message_id(self._conv))
+		turn_message_binding.bind_turn_message("", "msg-x")
+		self.assertIsNone(turn_message_binding.current_turn_message_id(""))
+
+
+class TestHandleChatSendBindsTurnMessage(FrappeTestCase):
+	"""The call site: handle_chat_send binds THIS turn's genuine triggering
+	message under its conversation, BEFORE the agent is dispatched."""
+
+	def setUp(self):
+		from jarvis.chat import agent_session_pool
+		from jarvis.tests.test_chat_api import (
+			TEST_USER,
+			_cleanup_user_conversations,
+			_ensure_test_user,
+		)
+		from jarvis.tests.test_chat_worker import _make_conversation_with_user_message
+
+		agent_session_pool._POOL.clear()
+		_ensure_test_user()
+		self._orig_user = frappe.session.user
+		frappe.set_user(TEST_USER)
+		_cleanup_user_conversations()
+		self.conv, self.user_msg = _make_conversation_with_user_message("hello")
+
+	def tearDown(self):
+		from jarvis.tests.test_chat_api import _cleanup_user_conversations
+
+		frappe.cache().delete_value(turn_message_binding._key(self.conv))
+		_cleanup_user_conversations()
+		frappe.set_user(self._orig_user)
+
+	def _fake_session(self):
+		from jarvis.tests.test_chat_worker import _fake_event_stream
+
+		sess = MagicMock()
+		sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
+		sess.relay_turn_events.return_value = _fake_event_stream(
+			[
+				{"kind": "lifecycle", "phase": "start"},
+				{"kind": "assistant", "text": "ok", "delta": "ok"},
+				{"kind": "lifecycle", "phase": "end"},
+				{"kind": "relay:final", "text": None},
+			]
+		)
+		return sess
+
+	def test_bind_invoked_with_conv_and_message_before_dispatch(self):
+		"""bind_turn_message(conversation, message_id) fires with the payload's
+		genuine (conversation_id, message_id) and strictly BEFORE the agent
+		session connect (the dispatch)."""
+		from jarvis.chat import turn_handler
+
+		order: list[str] = []
+		bind_mock = MagicMock(side_effect=lambda *a, **k: order.append("bind"))
+
+		def _connect(*a, **k):
+			order.append("connect")
+			return self._fake_session()
+
+		with patch("jarvis.chat.turn_message_binding.bind_turn_message", bind_mock):
+			with patch(
+				"jarvis.chat.agent_session_pool.AgentSession.connect",
+				side_effect=_connect,
+			):
+				with patch("jarvis.chat.worker.publish_to_user"):
+					turn_handler.handle_chat_send(
+						{
+							"conversation_id": self.conv,
+							"message_id": self.user_msg,
+							"run_id": "r-bind",
+						}
+					)
+
+		bind_mock.assert_called_once_with(self.conv, self.user_msg)
+		self.assertIn("bind", order)
+		self.assertIn("connect", order)
+		self.assertLess(order.index("bind"), order.index("connect"))
+
+	def test_real_binding_reflects_the_turns_genuine_trigger(self):
+		"""End-to-end (bind NOT patched): after a stubbed turn, the binding reads
+		back the exact ``message_id`` the turn ran on - proof the bound id is the
+		turn's genuine trigger, not a racy table lookup."""
+		from jarvis.chat import turn_handler
+
+		with patch(
+			"jarvis.chat.agent_session_pool.AgentSession.connect",
+			return_value=self._fake_session(),
+		):
+			with patch("jarvis.chat.worker.publish_to_user"):
+				turn_handler.handle_chat_send(
+					{
+						"conversation_id": self.conv,
+						"message_id": self.user_msg,
+						"run_id": "r-bind-real",
+					}
+				)
+
+		self.assertEqual(turn_message_binding.current_turn_message_id(self.conv), self.user_msg)

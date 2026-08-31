@@ -970,6 +970,26 @@ def handle_chat_send(payload: dict) -> None:
 
 	conv = frappe.get_doc(CONV, conversation_id)
 	user = conv.owner
+	# Turn -> triggering-message binding (skill "Approve & run", design §3.3):
+	# stamp THIS turn's triggering message under its conversation at turn start,
+	# BEFORE the agent is dispatched / any tool call can park. ``message_id`` is
+	# the genuine seed of this turn - a real Jarvis Chat Message row (the user's
+	# top-level send, or a continuation's row from ``_enqueue_turn``); it is the
+	# same id ``assemble_prompt`` reads for content+owner below. Admission enforces
+	# one in-flight turn per conversation, so the conversation-keyed binding
+	# reflects the running turn, immune to a second tab's committed-but-queued
+	# send. A later offer-gate reads this to identify the exact triggering message
+	# (task #41 adds explicit terminal clears; per-turn overwrite + TTL bound
+	# staleness until then). Best-effort: a binding failure must not kill the turn.
+	try:
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.bind_turn_message(conversation_id, message_id)
+	except Exception:
+		frappe.log_error(
+			title="turn_message_binding: bind_turn_message failed",
+			message=frappe.get_traceback(),
+		)
 	# User-message intake: the user replied, so any Pending chat-sourced
 	# approval materialized from a previous ```jarvis-ask fence is answered
 	# in chat now — flip it to Answered so the board never offers a stale
