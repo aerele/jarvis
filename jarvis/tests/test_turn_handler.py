@@ -364,6 +364,31 @@ class TestAppVersionsClause(unittest.TestCase):
 			self.assertEqual(turn_handler._app_versions_clause(), "")
 
 
+class TestServerScriptsClause(unittest.TestCase):
+	"""_server_scripts_clause: gated to report/script/console turns; on/off from
+	is_safe_exec_enabled, '' otherwise / on failure."""
+
+	def test_enabled_yields_on(self):
+		with patch("frappe.utils.safe_exec.is_safe_exec_enabled", return_value=True):
+			self.assertEqual(turn_handler._server_scripts_clause("create a report"), "; server scripts: on")
+
+	def test_disabled_yields_off(self):
+		with patch("frappe.utils.safe_exec.is_safe_exec_enabled", return_value=False):
+			self.assertEqual(
+				turn_handler._server_scripts_clause("build a query report"), "; server scripts: off"
+			)
+
+	def test_non_report_turn_skips_the_gate(self):
+		# No report/script/console word -> "" without even hitting the gate.
+		with patch("frappe.utils.safe_exec.is_safe_exec_enabled", return_value=True) as gate:
+			self.assertEqual(turn_handler._server_scripts_clause("hi, show me overdue invoices"), "")
+			gate.assert_not_called()
+
+	def test_gate_error_yields_empty(self):
+		with patch("frappe.utils.safe_exec.is_safe_exec_enabled", side_effect=RuntimeError("boom")):
+			self.assertEqual(turn_handler._server_scripts_clause("script report please"), "")
+
+
 class TestClassifyError(unittest.TestCase):
 	"""_classify_error is the single, shared source for a turn error's `code`
 	(#702) - settlement.py, pump.py and prepare.py all delegate to it, and
