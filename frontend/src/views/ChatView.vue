@@ -3688,17 +3688,19 @@
 								:key="f.fieldname"
 								class="jv-draft-fld"
 								:class="{
-									missing: f.reqd && !f.read_only && !String(f.value).trim(),
+									missing: isFieldMissing(f),
 									changed: f.changed,
 								}"
 							>
 								<label
 									>{{ f.label
-									}}<span v-if="f.reqd" class="jv-req"> *</span></label
+									}}<span v-if="f.reqd && !f.read_only" class="jv-req">
+										*</span
+									></label
 								>
 								<div class="jv-draft-ctl">
 									<span v-if="f.read_only" class="jv-draft-ro">{{
-										f.value
+										readonlyDisplay(f)
 									}}</span>
 									<template v-else-if="f.control === 'link'">
 										<input
@@ -4116,7 +4118,14 @@ import AskCard from "@/components/chat/AskCard.vue";
 import { parseAsk } from "@/lib/chatAsk";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
-import { coerceOut, coerceRow, isFieldWritable } from "@/lib/draftApply";
+import {
+	checkToYesNo,
+	coerceOut,
+	coerceRow,
+	isFieldMissing,
+	isFieldWritable,
+	readonlyDisplay,
+} from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { shouldFollowBottom } from "@/lib/chatScroll";
 import { createRevealer } from "@/lib/streamReveal";
@@ -6245,10 +6254,6 @@ function _actField(meta, label) {
 	}
 	return null;
 }
-function _checkToYesNo(v) {
-	const s = typeof v === "string" ? v.toLowerCase() : v;
-	return ["1", 1, "yes", "true", true, "on"].includes(s) ? "Yes" : "No";
-}
 // --- Record draft panel: the action JSON is the draft; edits are local; apply
 // posts to actions_api (no LLM round-trip). ---
 const draftPanel = ref(null);
@@ -6357,7 +6362,7 @@ function _panelField(metaField, value) {
 	if (["date", "datetime", "time"].includes(control)) v = _normDateVal(metaField.fieldtype, v);
 	let orig = v;
 	if (control === "check") {
-		v = _checkToYesNo(v);
+		v = checkToYesNo(v);
 		orig = v;
 	}
 	if (control === "select" && Array.isArray(options) && v && !options.includes(v))
@@ -6440,7 +6445,7 @@ async function buildDraftModel(a) {
 		pf.proposed = has; // agent set a value for this field (vs. shown only because reqd)
 		if (verb === "update")
 			pf.orig =
-				baseV == null ? "" : String(pf.control === "check" ? _checkToYesNo(baseV) : baseV);
+				baseV == null ? "" : String(pf.control === "check" ? checkToYesNo(baseV) : baseV);
 		pf.changed = verb === "update" && String(pf.value) !== String(pf.orig);
 		fields.push(pf);
 		seen.add(f.fieldname);
@@ -6731,7 +6736,8 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 						t,
 						Object.fromEntries(
 							Object.entries(r).map(([k, v]) => [k, v == null ? "" : String(v)])
-						)
+						),
+						"update"
 					)
 				)
 			)
@@ -14186,7 +14192,7 @@ onUnmounted(() => {
 .jv-draft-ro {
 	display: inline-block;
 	padding: 4px 0;
-	color: var(--text-3);
+	color: var(--text-2);
 	word-break: break-word;
 }
 .jv-draft-table-title {

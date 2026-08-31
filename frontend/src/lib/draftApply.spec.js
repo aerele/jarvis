@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { coerceOut, coerceRow, isFieldWritable } from "./draftApply";
+import {
+	checkToYesNo,
+	coerceOut,
+	coerceRow,
+	isFieldMissing,
+	isFieldWritable,
+	readonlyDisplay,
+} from "./draftApply";
 
 describe("isFieldWritable", () => {
 	it("create: a read_only field the agent PROPOSED is written", () => {
@@ -15,6 +22,50 @@ describe("isFieldWritable", () => {
 	it("a non-read_only field is always writable", () => {
 		expect(isFieldWritable({ read_only: 0, proposed: false }, "create")).toBe(true);
 		expect(isFieldWritable({ read_only: 0, proposed: false }, "update")).toBe(true);
+	});
+});
+
+describe("isFieldMissing", () => {
+	it("required + editable + empty -> missing", () => {
+		expect(isFieldMissing({ reqd: 1, read_only: 0, value: "" })).toBe(true);
+	});
+	it("required + read_only + empty -> NOT missing (user can't fill it)", () => {
+		expect(isFieldMissing({ reqd: 1, read_only: 1, value: "" })).toBe(false);
+	});
+	it("required + editable + filled -> not missing", () => {
+		expect(isFieldMissing({ reqd: 1, read_only: 0, value: "x" })).toBe(false);
+	});
+	it("not required -> never missing", () => {
+		expect(isFieldMissing({ reqd: 0, read_only: 0, value: "" })).toBe(false);
+	});
+});
+
+describe("readonlyDisplay", () => {
+	it("empty -> em dash", () => {
+		expect(readonlyDisplay({ value: "" })).toBe("—");
+		expect(readonlyDisplay({ value: null })).toBe("—");
+	});
+	it("datetime -> T swapped for a space", () => {
+		expect(readonlyDisplay({ control: "datetime", value: "2026-08-31T14:30" })).toBe(
+			"2026-08-31 14:30"
+		);
+	});
+	it("other controls pass through verbatim", () => {
+		expect(readonlyDisplay({ control: "data", value: "hello" })).toBe("hello");
+		expect(readonlyDisplay({ control: "date", value: "2026-08-31" })).toBe("2026-08-31");
+	});
+});
+
+describe("checkToYesNo", () => {
+	it("truthy tokens -> Yes", () => {
+		for (const v of ["1", 1, "yes", "Yes", "true", true, "on"]) {
+			expect(checkToYesNo(v)).toBe("Yes");
+		}
+	});
+	it("everything else -> No", () => {
+		for (const v of ["0", 0, "", "no", false, "2"]) {
+			expect(checkToYesNo(v)).toBe("No");
+		}
 	});
 });
 
@@ -43,20 +94,25 @@ describe("coerceRow", () => {
 		const t = { columns: [col({ read_only: 1 })] };
 		expect(coerceRow(t, { c: "v" }, "update")).toEqual({});
 	});
+	it("verb omitted (origJson baseline) strips read_only, same as update", () => {
+		const t = { columns: [col({ read_only: 1 })] };
+		expect(coerceRow(t, { c: "v" })).toEqual({});
+	});
 	it("empty / null cells are skipped", () => {
 		const t = { columns: [col(), { fieldname: "d", fieldtype: "Data" }] };
 		expect(coerceRow(t, { c: "", d: null }, "create")).toEqual({});
 	});
-	it("Check: truthy string tokens normalize to 1 (not Number(v) -> 0)", () => {
+	it("Check: truthy tokens normalize to 1 (not Number(v) -> 0)", () => {
 		const t = { columns: [{ fieldname: "c", fieldtype: "Check", read_only: 0 }] };
-		expect(coerceRow(t, { c: "Yes" }, "create")).toEqual({ c: 1 });
-		expect(coerceRow(t, { c: "true" }, "create")).toEqual({ c: 1 });
-		expect(coerceRow(t, { c: "1" }, "create")).toEqual({ c: 1 });
-		expect(coerceRow(t, { c: 1 }, "create")).toEqual({ c: 1 });
+		for (const v of ["Yes", "true", "on", "1", 1, true]) {
+			expect(coerceRow(t, { c: v }, "create")).toEqual({ c: 1 });
+		}
 		expect(coerceRow(t, { c: "No" }, "create")).toEqual({ c: 0 });
 	});
 	it("numeric fieldtypes coerce to Number", () => {
-		const t = { columns: [{ fieldname: "n", fieldtype: "Float", read_only: 0 }] };
-		expect(coerceRow(t, { n: "3.5" }, "create")).toEqual({ n: 3.5 });
+		for (const ft of ["Int", "Float", "Currency", "Percent"]) {
+			const t = { columns: [{ fieldname: "n", fieldtype: ft, read_only: 0 }] };
+			expect(coerceRow(t, { n: "3.5" }, "create")).toEqual({ n: 3.5 });
+		}
 	});
 });
