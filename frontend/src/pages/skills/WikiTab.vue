@@ -103,17 +103,6 @@
 				/>
 			</template>
 
-			<!-- persistent orientation: the teaching copy otherwise lives only in
-			     the empty state, which real first-visits on a grown wiki never see -->
-			<template #banner>
-				<p class="mb-2 text-p-sm text-ink-gray-5">
-					The wiki is the knowledge {{ agentName }} keeps about your business -
-					customers, suppliers, processes, conventions. It grows from chat and voice
-					notes; {{ agentName }}
-					cites it when answering.
-				</p>
-			</template>
-
 			<template #cell-title="{ row }">
 				<div class="flex items-center gap-2 overflow-hidden">
 					<div class="truncate text-base">{{ row.title || row.slug }}</div>
@@ -189,99 +178,6 @@
 				</div>
 			</template>
 		</ListPage>
-
-		<WikiPageDialog v-model="pageDialog.show" :slug="pageDialog.slug" @refresh="refreshKeep" />
-
-		<!-- New page dialog: scope options limited to what the caller may create;
-		     the server derives (and suffixes) the slug from type + title -->
-		<Dialog v-model="createDialog.show" :options="{ title: 'New wiki page', size: 'md' }">
-			<template #body-content>
-				<div class="flex flex-col gap-3">
-					<FormControl
-						type="text"
-						label="Title"
-						placeholder="e.g. Acme Industries payment terms"
-						:modelValue="createDialog.title"
-						@update:modelValue="(v) => (createDialog.title = v)"
-					/>
-					<div class="flex flex-col gap-1">
-						<FormControl
-							type="select"
-							label="Type"
-							:options="TYPE_SELECT_OPTIONS"
-							:modelValue="createDialog.page_type"
-							@update:modelValue="(v) => (createDialog.page_type = v)"
-						/>
-						<p
-							v-if="TYPE_HELP[createDialog.page_type]"
-							class="text-p-sm text-ink-gray-5"
-						>
-							{{ TYPE_HELP[createDialog.page_type] }}
-						</p>
-					</div>
-					<FormControl
-						type="select"
-						label="Scope"
-						:options="scopeSelectOptions"
-						:modelValue="createDialog.scope"
-						@update:modelValue="(v) => (createDialog.scope = v)"
-					/>
-					<div v-if="createDialog.scope === 'Role'" class="flex flex-col gap-1">
-						<span class="block text-xs text-ink-gray-5">Role</span>
-						<!-- Autocomplete: SMs see every targetable role (~dozens);
-						     a plain select is unusable at that size -->
-						<Autocomplete
-							placeholder="Search roles"
-							:options="roleSelectOptions"
-							:modelValue="createDialog.target_role"
-							@update:modelValue="
-								(v) => (createDialog.target_role = (v && v.value) || '')
-							"
-						/>
-						<p v-if="!caps.is_sm" class="text-p-sm text-ink-gray-5">
-							You can share knowledge with roles you hold yourself; an administrator
-							can target any role.
-						</p>
-					</div>
-					<FormControl
-						type="textarea"
-						label="Summary (optional)"
-						:rows="2"
-						:placeholder="`One or two lines ${agentName} can cite in chat context`"
-						:modelValue="createDialog.summary"
-						@update:modelValue="(v) => (createDialog.summary = v)"
-					/>
-					<FormControl
-						type="textarea"
-						label="Content (markdown, optional)"
-						:rows="5"
-						placeholder="What should this page say? You can also add content later."
-						:modelValue="createDialog.body_md"
-						@update:modelValue="(v) => (createDialog.body_md = v)"
-					/>
-					<p v-if="slugPreview" class="text-p-sm text-ink-gray-5">
-						Page id: {{ slugPreview }}
-					</p>
-				</div>
-			</template>
-			<template #actions>
-				<div class="flex flex-col gap-1.5">
-					<div class="flex items-center gap-2">
-						<Button
-							variant="solid"
-							label="Create"
-							:loading="createDialog.saving"
-							:disabled="!canCreate"
-							@click="doCreate"
-						/>
-						<Button label="Cancel" @click="createDialog.show = false" />
-					</div>
-					<p v-if="!canCreate && createMissing" class="text-p-sm text-ink-gray-5">
-						{{ createMissing }}
-					</p>
-				</div>
-			</template>
-		</Dialog>
 	</div>
 </template>
 
@@ -290,36 +186,24 @@
 // knowledge base Jarvis maintains, now scope-aware (Org / Role / User pages,
 // server-side visibility). Standard ListPage + useListPage kit (FilesList
 // precedent): server pagination, debounced search, scope / type / attention
-// quick filters. Rows open WikiPageDialog (view/edit/archive gated by the
-// server's can_edit/can_archive flags); a trailing actions column offers
-// Archive (Restore on the Archived view) and permanent Delete inline for
-// rows the caller may manage. "New page" shows for anyone whose
-// creatable_scopes isn't empty; SMs also get the settings popover (knowledge
-// language, mirror sync, health check).
+// quick filters. A row click navigates to the routed WikiDetail page
+// (pages/wiki/WikiDetail.vue, view/edit/archive gated by the server's
+// can_edit/can_archive flags); a trailing actions column offers Archive
+// (Restore on the Archived view) and permanent Delete inline for rows the
+// caller may manage. "New page" navigates to WikiDetail's create route and
+// shows for anyone whose creatable_scopes isn't empty; SMs also get the
+// settings popover (knowledge language, mirror sync, health check).
 import { reactive, ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import {
-	Autocomplete,
-	Badge,
-	Button,
-	Dialog,
-	FormControl,
-	Popover,
-	Tooltip,
-	toast,
-	confirmDialog,
-} from "frappe-ui";
-import { sessionUser } from "@/data/session";
+import { Badge, Button, Popover, Tooltip, toast, confirmDialog } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import PanelSelect from "@/components/list/PanelSelect.vue";
-import WikiPageDialog from "@/components/wiki/WikiPageDialog.vue";
 import { useListPage } from "@/composables/useListPage";
 import { wikiListFetch } from "@/pages/list/listFetchers";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import {
 	getWikiCaps,
-	createWikiPage,
 	archiveWikiPage,
 	restoreWikiPage,
 	deleteWikiPage,
@@ -351,10 +235,6 @@ const TYPE_OPTIONS = [
 	{ label: "All types", value: "" },
 	...WIKI_TYPES.map((t) => ({ label: t === "Org" ? "Org notes" : t, value: t })),
 ];
-const TYPE_SELECT_OPTIONS = [
-	{ label: "Select a type", value: "" },
-	...WIKI_TYPES.map((t) => ({ label: t === "Org" ? "Org notes" : t, value: t })),
-];
 const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" };
 const SCOPE_OPTIONS = [
 	{ label: "All scopes", value: "" },
@@ -373,27 +253,10 @@ const TYPE_LABELS = { Org: "Org notes" };
 function typeLabel(t) {
 	return TYPE_LABELS[t] || t;
 }
-// one-line explanations for the create dialog's Type select
-const TYPE_HELP = {
-	Customer: "One specific customer's quirks - payment habits, contacts, gotchas.",
-	Supplier: "One specific supplier's quirks - lead times, terms, who to call.",
-	Item: "One item or item group - variants, storage, known issues.",
-	Process: "A procedure as your org actually runs it - steps, owners, exceptions.",
-	Doctype: "Org-wide conventions on a document type, e.g. Sales Invoice habits.",
-	Exception: "A known edge case or standing workaround.",
-	Integration: "An external system your org connects to and its rules.",
-	People: "Who does what - approvers, escalation paths, contacts.",
-	Org: "General org-level facts that fit nowhere else.",
-};
 const LANGUAGE_OPTIONS = [
 	{ label: "English (recommended)", value: "English" },
 	{ label: "Original language", value: "Original" },
 ];
-const SCOPE_LABELS = {
-	Org: "Org - visible to everyone",
-	Role: "Role - people holding a role",
-	User: "Personal - just me",
-};
 
 const columns = [
 	{ label: "Title", key: "title", width: 3 },
@@ -460,10 +323,7 @@ const emptyState = computed(() => {
 		return {
 			icon: "book-open",
 			title: "No personal pages yet",
-			description:
-				`Personal pages are knowledge only you and ${agentName} share - shortcuts, ` +
-				'preferences, your own working notes. Use "New page" and pick the ' +
-				"Personal scope to create your first one.",
+			description: `Personal pages are private to you and ${agentName}. Pick Personal scope in "New page" to create one.`,
 		};
 	// Panel clauses count as "filtered" too. Without this a panel-only narrowing
 	// to zero rows claimed "No wiki pages yet" — on a knowledge base that reads
@@ -478,11 +338,7 @@ const emptyState = computed(() => {
 	return {
 		icon: "book-open",
 		title: "No wiki pages yet",
-		description:
-			`The wiki is the knowledge base ${agentName} keeps about your business - customers, ` +
-			"suppliers, items and processes. It grows on its own as people answer chat " +
-			"nudges and record voice notes on the Business tab; pages appear here as " +
-			`${agentName} learns.`,
+		description: `${agentName} builds this from chat and voice notes. Use "New page" to add one yourself.`,
 	};
 });
 
@@ -534,14 +390,12 @@ async function loadCaps() {
 	}
 }
 
-// ── page viewer dialog ───────────────────────────────────────────────────────
-const pageDialog = reactive({ show: false, slug: "" });
+// ── row click / "New page" navigate to the routed wiki detail page ──────────
 function openRow(row) {
-	openPage(row.slug || row.name);
+	router.push({ name: "WikiPageDetail", params: { slug: row.slug || row.name } });
 }
-function openPage(slug) {
-	pageDialog.slug = slug;
-	pageDialog.show = true;
+function openCreate() {
+	router.push({ name: "WikiPageNew" });
 }
 
 // ── row actions (archive / restore / delete) ─────────────────────────────────
@@ -592,93 +446,6 @@ function confirmDelete(row) {
 			await runRowAction(row, deleteWikiPage, "Page deleted");
 		},
 	});
-}
-
-// ── create dialog ────────────────────────────────────────────────────────────
-const createDialog = reactive({
-	show: false,
-	title: "",
-	page_type: "",
-	scope: "Org",
-	target_role: "",
-	summary: "",
-	body_md: "",
-	saving: false,
-});
-
-const scopeSelectOptions = computed(() =>
-	(caps.creatable_scopes || []).map((s) => ({ label: SCOPE_LABELS[s] || s, value: s }))
-);
-const roleSelectOptions = computed(() =>
-	(caps.manageable_roles || []).map((r) => ({ label: r, value: r }))
-);
-// Preview of the server-derived slug (`<type>--<scrubbed-title>` plus the
-// controller's audience suffix for non-Org scopes) - mirror it fully so the
-// preview never lies about the final page id.
-const scrub = (s) =>
-	String(s || "")
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-const slugPreview = computed(() => {
-	const base = scrub(createDialog.title);
-	if (!base || !createDialog.page_type) return "";
-	let slug = `${createDialog.page_type.toLowerCase()}--${base}`;
-	if (createDialog.scope === "User")
-		slug += `--u-${scrub(String(sessionUser() || "").split("@")[0]) || "me"}`;
-	else if (createDialog.scope === "Role" && createDialog.target_role)
-		slug += `--r-${scrub(createDialog.target_role)}`;
-	return slug;
-});
-const canCreate = computed(
-	() =>
-		!!createDialog.title.trim() &&
-		!!createDialog.page_type &&
-		!!createDialog.scope &&
-		(createDialog.scope !== "Role" || !!createDialog.target_role)
-);
-const createMissing = computed(() => {
-	const missing = [];
-	if (!createDialog.title.trim()) missing.push("a title");
-	if (!createDialog.page_type) missing.push("a type");
-	if (createDialog.scope === "Role" && !createDialog.target_role) missing.push("a role");
-	return missing.length ? `Still needed: ${missing.join(", ")}.` : "";
-});
-
-function openCreate() {
-	createDialog.title = "";
-	createDialog.page_type = "";
-	createDialog.scope = caps.creatable_scopes[0] || "Org";
-	createDialog.target_role = "";
-	createDialog.summary = "";
-	createDialog.body_md = "";
-	createDialog.show = true;
-}
-
-async function doCreate() {
-	createDialog.saving = true;
-	try {
-		const res = await createWikiPage({
-			title: createDialog.title.trim(),
-			page_type: createDialog.page_type,
-			scope: createDialog.scope,
-			target_role: createDialog.scope === "Role" ? createDialog.target_role : "",
-			summary: createDialog.summary,
-			body_md: createDialog.body_md,
-		});
-		if (res && res.ok === false) {
-			toast.error(res.reason || "Could not create the page.");
-		} else {
-			createDialog.show = false;
-			toast.success("Page created");
-			resetLoad();
-			openPage(res.slug);
-		}
-	} catch (e) {
-		toast.error(errHtml(e));
-	} finally {
-		createDialog.saving = false;
-	}
 }
 
 // ── SM extras (settings popover) ─────────────────────────────────────────────
