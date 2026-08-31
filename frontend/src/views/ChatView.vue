@@ -6475,6 +6475,7 @@ async function buildDraftModel(a) {
 		// Show: agent-proposed fields + required fields + (update) filled fields the agent referenced
 		if (!has && !f.reqd) continue;
 		const pf = _panelField(f, has ? proposed[f.fieldname] : baseV);
+		pf.proposed = has; // agent set a value for this field (vs. shown only because reqd)
 		if (verb === "update")
 			pf.orig =
 				baseV == null ? "" : String(pf.control === "check" ? _checkToYesNo(baseV) : baseV);
@@ -6745,10 +6746,14 @@ function _coerceOut(f) {
 	if (f.control === "number") return f.value === "" ? "" : Number(f.value);
 	return f.value;
 }
-function _coerceRow(t, r) {
+function _coerceRow(t, r, verb) {
 	const out = {};
 	for (const c of t.columns) {
-		if (c.read_only) continue;
+		// Match the main-field rule (applyDraft): on CREATE, fill a read_only
+		// child column that carries a value; every other verb strips it. Both
+		// update call sites (current rows pass 'update', the origJson baseline
+		// omits verb) are verb !== "create", so update keeps stripping.
+		if (c.read_only && verb !== "create") continue;
 		let v = r[c.fieldname];
 		if (v === "" || v == null) continue;
 		if (["Int", "Float", "Currency", "Percent"].includes(c.fieldtype)) v = Number(v);
@@ -6763,13 +6768,24 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 	if (!p || p.applying) return;
 	const values = {};
 	for (const f of p.fields) {
-		if (f.read_only) continue;
+		// read_only is a form-UI flag, not a write barrier: the agent's direct
+		// create_doc already sets read_only fields (e.g. Error Log method/error),
+		// so on a CREATE a confirm card fills a read_only field the agent PROPOSED
+		// a value for, rather than silently dropping it. Gate on `proposed`, not
+		// just "non-empty": an unproposed reqd read_only Check renders as "No"/0 and
+		// would otherwise clobber a schema default of 1. UPDATE always strips
+		// read_only - a confirm card must not overwrite a server-managed field on an
+		// existing doc. permlevel>0 fields stay guarded by Frappe's insert-time
+		// reset (see test_permlevel_leak: TestCreateDocPermlevelWriteReset).
+		if (f.read_only && !(p.verb === "create" && f.proposed)) continue;
 		const changed = String(f.value) !== String(f.orig);
 		if (p.verb === "create" ? String(f.value).trim() !== "" : changed)
 			values[f.fieldname] = _coerceOut(f);
 	}
 	for (const t of p.tables) {
-		const rows = t.rows.map((r) => _coerceRow(t, r)).filter((r) => Object.keys(r).length);
+		const rows = t.rows
+			.map((r) => _coerceRow(t, r, p.verb))
+			.filter((r) => Object.keys(r).length);
 		if (p.verb === "create") {
 			if (rows.length) values[t.fieldname] = rows;
 		} else if (

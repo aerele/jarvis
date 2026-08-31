@@ -357,3 +357,43 @@ class TestPreviewDocTotalsPermlevelLeak(PermlevelLeakTestCase):
 			result = preview_doc(DT_NAME, {FIELD_PUBLIC: "visible"})
 		self.assertTrue(result["valid"])
 		self.assertEqual(float(result["totals"][FIELD_TOTAL]), SECRET_TOTAL)
+
+
+class TestCreateDocPermlevelWriteReset(PermlevelLeakTestCase):
+	"""Write-side guard for the SPA change that stops stripping read_only fields
+	from a CREATE confirm payload (ChatView ``applyDraft``): read_only is a
+	form-UI flag, not a write barrier, so an agent-proposed read_only field now
+	reaches ``create_doc`` from the confirm card. read_only and permlevel are
+	orthogonal, and the security boundary is Frappe's WRITE-side permlevel reset
+	inside ``doc.insert()``: a caller without permlevel-1 write CANNOT persist a
+	value to a permlevel-1 field even by passing it explicitly - Frappe silently
+	resets it to the field default. This proves that guard (which create_doc
+	relies on) still holds, so widening what the card sends cannot become a
+	permlevel write hole.
+
+	NB: assert the PERSISTED value (raw ``frappe.db.get_value``), not the
+	returned dict - create_doc permlevel-read-filters its return, so the
+	restricted field always reads back None there regardless of what was stored
+	(that read-side leak is covered by TestCreateDocPermlevelLeak)."""
+
+	def test_restricted_user_cannot_persist_permlevel_field(self):
+		with _as(USER_RESTRICTED):
+			result = create_doc(
+				doctype=DT_NAME,
+				values={FIELD_PUBLIC: "created", FIELD_RESTRICTED: "attacker-supplied"},
+			)
+			name = result["name"]
+		# Raw DB read (permlevel does not gate frappe.db) - what actually landed.
+		stored = frappe.db.get_value(DT_NAME, name, FIELD_RESTRICTED)
+		self.assertEqual(stored, SECRET_VALUE)  # reset to default, NOT the caller's value
+		self.assertNotEqual(stored, "attacker-supplied")
+
+	def test_privileged_user_can_persist_permlevel_field(self):
+		with _as(USER_PRIVILEGED):
+			result = create_doc(
+				doctype=DT_NAME,
+				values={FIELD_PUBLIC: "created", FIELD_RESTRICTED: "legit-value"},
+			)
+			name = result["name"]
+		stored = frappe.db.get_value(DT_NAME, name, FIELD_RESTRICTED)
+		self.assertEqual(stored, "legit-value")
