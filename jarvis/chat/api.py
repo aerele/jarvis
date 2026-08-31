@@ -1320,6 +1320,24 @@ def send_message(
 		if _typed is not None:
 			return _typed
 
+	# A genuine new top-level message ENDS any approved skill run on this conversation
+	# (skill "Approve & run", design §3.4 "Other close-triggers"): it is not a covered
+	# write, so the run is over. Placed structurally AFTER the typed-approval
+	# early-return above so a CONSUMED typed approval (a destructive-pause RESUME) never
+	# reaches here - only a message that falls through to an ordinary turn clears the
+	# flag. hidden=1 continuations never reach send_message (they go via _enqueue_turn),
+	# so they are excluded by construction. Guarded on the in-memory flag so an ordinary
+	# send does no needless work. Clear it on the LOADED doc too (a conv_doc.save()
+	# below would otherwise re-persist the stale in-memory 1), and via the helper (which
+	# commits immediately + drops the redis run-state) so an early return before that
+	# save still ends the run. clear_skill_autorun is itself best-effort.
+	if conv_doc.skill_autorun:
+		conv_doc.skill_autorun = 0
+		conv_doc.skill_autorun_at = None
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.clear_skill_autorun(conversation)
+
 	# Single-flight guard: reject a second concurrent turn on the same
 	# conversation (extra tab / double-send / a retry racing a live turn) -
 	# they would otherwise run in parallel on the same agent session. Placed

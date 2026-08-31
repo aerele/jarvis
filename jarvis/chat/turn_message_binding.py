@@ -116,3 +116,102 @@ def clear_run_cancel(conversation: str) -> None:
 	if not conversation:
 		return
 	frappe.cache().delete_value(_run_cancel_key(conversation))
+
+
+# --------------------------------------------------------------------------- #
+# Ending an approved skill run (skill "Approve & run", design §3.4 "Clear")
+# --------------------------------------------------------------------------- #
+#
+# The auto-run branch (jarvis.api._run_tool) already clears ``skill_autorun`` on a
+# failed covered write (hard-stop-on-error) and on a Halt (the cancel-gate). The
+# REMAINING clears - a turn's terminal settlement, a new top-level message, and a
+# dismiss of the paused card - live here so every clear site drops the SAME run
+# state through one implementation.
+
+_CONV = "Jarvis Conversation"
+
+
+def clear_skill_autorun(conversation: str) -> None:
+	"""Best-effort: END an approved skill run on ``conversation``.
+
+	Drops ``skill_autorun`` (+ its sliding ``skill_autorun_at`` timestamp) and cleans
+	up this conversation's ephemeral run state - the turn->message binding and any
+	run-cancel signal (a stale cancel must not halt a later re-approved run). Committed
+	immediately (mirroring the flag's ``db_set``+commit pattern) so the ended state
+	survives a worker death; idempotent (a 0->0 clear is a no-op). NEVER raises: an
+	end-of-run cleanup must not break its caller (a terminal settlement, a new send,
+	or a dismiss)."""
+	if not conversation:
+		return
+	try:
+		frappe.db.set_value(
+			_CONV,
+			conversation,
+			{"skill_autorun": 0, "skill_autorun_at": None},
+			update_modified=False,
+		)
+		frappe.db.commit()
+	except Exception:
+		try:
+			frappe.log_error(title="clear_skill_autorun failed", message=frappe.get_traceback())
+		except Exception:
+			pass
+	# The ephemeral redis run-state for this conversation is now stale - drop both keys.
+	try:
+		frappe.cache().delete_value(_key(conversation))
+	except Exception:
+		pass
+	clear_run_cancel(conversation)
+
+
+def _has_pending_card(owner: str | None, conversation: str) -> bool:
+	"""True iff a pending confirmation card is STRICTLY bound to ``conversation``.
+
+	Mirrors the gate's strict-conversation filter (``jarvis.api._run_tool``): a
+	conversation-less token (a rare session-resolution miss) surfaces under any
+	filter, so re-filter to ``record.conversation == conversation`` - it must never
+	count as this conversation's pause. Lazy import (no import cycle: pending_confirm
+	does not import this module)."""
+	if not owner:
+		return False
+	from jarvis.chat import pending_confirm
+
+	return any(
+		t.get("conversation") == conversation
+		for t in pending_confirm.list_for_owner(owner, conversation=conversation, strict=True)
+	)
+
+
+def on_terminal_turn(conversation: str) -> None:
+	"""Terminal-turn hook (design §3.4 "Clear"): at a turn's terminal settlement, END
+	an approved skill run UNLESS it is merely PAUSED on a parked card.
+
+	Installed at ALL THREE terminal chokepoints (``turn_handler._advance_macro``,
+	``finalize._effect_macro_advance``, ``turn_recovery._advance_macro``) because the
+	Relay Pump - the DEFAULT transport - settles turns through ``finalize``, NOT
+	``turn_handler`` (correctness-C1): a clear living only in ``turn_handler`` would
+	never fire on the default path.
+
+	Predicate: the run ends iff there is NO pending confirmation card strictly bound
+	to this conversation. A pending card means a covered write's sibling destructive /
+	create_custom_skill / bulk-light step PARKED - a legitimate PAUSE that resumes on
+	confirm - so the flag is KEPT (the resume auto-runs the rest). A read-only no-op
+	on a conversation not in an approved run. Best-effort: never raises into the
+	terminal settlement path (a lookup failure KEEPS the flag - safer than ending a
+	live/paused run; the TTL + reaper are the backstop)."""
+	if not conversation:
+		return
+	try:
+		row = frappe.db.get_value(_CONV, conversation, ["owner", "skill_autorun"], as_dict=True)
+		if not row or not row.get("skill_autorun"):
+			return  # not an approved run - nothing to end
+		if _has_pending_card(row.get("owner"), conversation):
+			return  # PAUSED on a parked card - keep the flag so the resume auto-runs
+		clear_skill_autorun(conversation)
+	except Exception:
+		try:
+			frappe.log_error(
+				title="on_terminal_turn skill_autorun clear failed", message=frappe.get_traceback()
+			)
+		except Exception:
+			pass

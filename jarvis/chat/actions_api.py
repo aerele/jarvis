@@ -940,6 +940,14 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 			agent_notes.append(conv, _dismiss_note(tool, args))
 		except Exception:
 			frappe.log_error(title="dismiss_tool note failed", message=frappe.get_traceback())
+		# Dismissing the paused card ENDS any approved skill run (skill "Approve & run",
+		# design §3.4): the user declined the paused destructive / create_custom_skill
+		# step, so the run is over. Guarded on the flag so an ordinary discard does no
+		# needless write; clear_skill_autorun is itself best-effort.
+		if frappe.db.get_value("Jarvis Conversation", conv, "skill_autorun"):
+			from jarvis.chat import turn_message_binding
+
+			turn_message_binding.clear_skill_autorun(conv)
 
 	return {"ok": True, "data": {"status": "discarded", "tool": tool}}
 

@@ -17,7 +17,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.chat import actions_api, pending_confirm, turn_message_binding
+from jarvis.chat import actions_api, finalize, pending_confirm, turn_message_binding
 from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests.test_auto_apply import (
@@ -1274,3 +1274,282 @@ class TestApproveAndRun(FrappeTestCase):
 		frappe.set_user(TEST_USER)
 		self.assertIsNotNone(pending_confirm.peek(token), "a wrong-owner probe does NOT burn the token")
 		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
+
+# --------------------------------------------------------------------------- #
+# The REMAINING skill_autorun clears + the [Context:] agent signal
+# (design §3.4 "Clear" + "Other close-triggers" + the [Context:] signal)
+# --------------------------------------------------------------------------- #
+#
+# The auto-run branch (task #39) already owns the hard-stop-on-error and the Halt
+# cancel-gate clears. THIS block covers the four clears the branch does NOT own:
+#   * on_terminal_turn - the turn-terminal clear, installed at all THREE chokepoints.
+#     The Relay Pump is the DEFAULT transport and settles turns through
+#     finalize._effect_macro_advance, NOT turn_handler (correctness-C1), so a clear
+#     living only in turn_handler would never fire on the default path;
+#   * a new top-level message (send_message) - a genuine new instruction ends the run,
+#     but a CONSUMED typed approval (a destructive-pause resume) must NOT;
+#   * a dismiss of the paused card (dismiss_tool) - declining the step ends the run;
+# plus the "approved skill run" [Context:] clause folded into assemble_prompt.
+
+
+def _park_pending_card(conv: str, owner: str) -> str | None:
+	"""Mint a parked destructive card strictly bound to ``conv`` (a legit PAUSE of an
+	approved run) so on_terminal_turn sees a pending card and KEEPS the flag."""
+	return pending_confirm.mint(
+		conversation=conv,
+		owner=owner,
+		exec_user=owner,
+		tool="delete_doc",
+		args={"doctype": "ToDo", "name": "AUTORUN-PAUSE-X"},
+		run_id="",
+	)
+
+
+class TestTerminalTurnClear(FrappeTestCase):
+	"""turn_message_binding.on_terminal_turn, wired at all THREE terminal chokepoints:
+	finalize._effect_macro_advance (the DEFAULT pump path), turn_handler._advance_macro
+	(legacy) and turn_recovery._advance_macro (park-and-recover). An approved run with
+	no pending card is ENDED at the terminal; a run PAUSED on a parked card is KEPT."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			turn_message_binding.clear_run_cancel(conv)
+			frappe.cache().delete_value(turn_message_binding._key(conv))
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _ctx(self, conv: str, *, errored: bool = False):
+		"""A finalize._Ctx just rich enough for _effect_macro_advance (it reads only
+		.conversation + .errored; the macro/app-learning hooks no-op on a plain conv)."""
+		return finalize._Ctx(
+			run_id="r-fin", turn={}, conversation=conv, owner=TEST_USER, errored=errored, payload={}
+		)
+
+	def test_pump_finalize_clears_autorun_when_no_pending_card(self):
+		"""THE correctness-C1 regression: the clear fires on the DEFAULT pump path
+		(finalize), not just the legacy worker. Mutation-verify: installing the clear
+		ONLY in turn_handler (not finalize) flips this RED."""
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		finalize._effect_macro_advance(self._ctx(conv))
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			0,
+			"the DEFAULT pump path (finalize) must end the approved run at the terminal",
+		)
+
+	def test_pump_finalize_keeps_autorun_when_a_card_is_pending(self):
+		"""A run PAUSED on a parked card must survive the terminal (the resume
+		auto-runs). Mutation-verify: making the predicate ignore pending cards flips
+		this RED."""
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		_park_pending_card(conv, TEST_USER)
+		finalize._effect_macro_advance(self._ctx(conv))
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			1,
+			"a run paused on a parked card must NOT be ended at the terminal",
+		)
+
+	def test_legacy_advance_macro_clears_autorun(self):
+		from jarvis.chat import turn_handler
+
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		turn_handler._advance_macro(conv, errored=False)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
+	def test_recovery_advance_macro_clears_autorun(self):
+		from jarvis.chat import turn_recovery
+
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		turn_recovery._advance_macro(conv, errored=False)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
+	def test_clear_nulls_timestamp_and_run_state(self):
+		"""Ending the run drops the sliding timestamp and the transport-independent
+		run-cancel signal too (so a stale cancel can't halt a later re-approved run)."""
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		turn_message_binding.request_run_cancel(conv)
+		turn_message_binding.on_terminal_turn(conv)
+		self.assertIsNone(frappe.db.get_value(CONV, conv, "skill_autorun_at"))
+		self.assertFalse(turn_message_binding.is_run_cancel_requested(conv))
+
+	def test_on_terminal_turn_noops_for_non_autorun_conv(self):
+		"""A conversation not in an approved run is untouched (a read-only no-op)."""
+		conv = _make_conv(TEST_USER)  # skill_autorun defaults 0
+		turn_message_binding.on_terminal_turn(conv)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
+
+class TestNewMessageClearsAutorun(FrappeTestCase):
+	"""A genuine new top-level message ends the approved run (send_message), but a
+	CONSUMED typed approval - a destructive-pause RESUME - must NOT clear it."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		_cleanup_user_conversations(TEST_USER)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_new_top_level_message_clears_autorun(self):
+		from jarvis.chat.api import send_message
+		from jarvis.tests._transport_helpers import provision_legacy_site
+
+		provision_legacy_site(self)
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		# An ordinary instruction (NOT an approval phrase) falls through the
+		# typed-approval gate to an ordinary turn, which ends the prior run.
+		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
+			with patch("frappe.enqueue"):
+				res = send_message(conv, "make three todos please")
+		self.assertTrue(res["ok"])
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			0,
+			"a genuine new top-level message ends the approved run",
+		)
+
+	def test_consumed_typed_approval_does_not_clear_autorun(self):
+		"""A typed approval that CONSUMES a parked card returns early from send_message,
+		BEFORE the clear - so a destructive-pause resume keeps the flag and auto-runs
+		the rest. Pins the clear's placement structurally after the typed-approval
+		early-return."""
+		from jarvis.chat import api as chat_api
+
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		with patch("jarvis.chat.api._typed_confirmation", return_value={"ok": True, "confirmed": True}):
+			res = chat_api.send_message(conv, "go ahead")
+		self.assertEqual(res, {"ok": True, "confirmed": True}, "the typed approval returns early")
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			1,
+			"a consumed typed-approval RESUME must NOT clear the run flag",
+		)
+
+
+class TestDismissClearsAutorun(FrappeTestCase):
+	"""Dismissing the paused card ends the approved run (the user declined the step)."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_dismiss_of_paused_card_clears_autorun(self):
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		token = _park_pending_card(conv, TEST_USER)
+		res = actions_api.dismiss_tool(token, conv)
+		self.assertEqual(res["data"]["status"], "discarded")
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			0,
+			"declining the paused step ends the approved run",
+		)
+
+	def test_dismiss_on_plain_conversation_is_unaffected(self):
+		"""A dismiss on a conversation NOT in an approved run leaves skill_autorun 0
+		(no regression on the ordinary discard path)."""
+		conv = _make_conv(TEST_USER)  # skill_autorun defaults 0
+		token = _park_pending_card(conv, TEST_USER)
+		res = actions_api.dismiss_tool(token, conv)
+		self.assertEqual(res["data"]["status"], "discarded")
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
+
+class TestApprovedRunContextClause(FrappeTestCase):
+	"""The [Context:] agent signal: assemble_prompt folds an "approved skill run"
+	clause into the trusted bracket iff the conversation's skill_autorun is set."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			frappe.db.delete(MSG, {"conversation": conv})
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _assembled(self, conv_doc) -> str:
+		"""Run the shared, read-only assemble_prompt (the ONE place the [Context:]
+		bracket is built) for a real user message on conv_doc; return the prompt."""
+		from jarvis.chat.turn_handler import assemble_prompt
+
+		msg = frappe.get_doc(
+			{"doctype": MSG, "conversation": conv_doc.name, "seq": 1, "role": "user", "content": "hello"}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		ap = assemble_prompt(
+			conv_doc,
+			message_id=msg.name,
+			conversation_id=conv_doc.name,
+			context={},
+			attachments=[],
+			user=TEST_USER,
+		)
+		return ap.user_message
+
+	def test_clause_present_when_autorun_set(self):
+		conv = _make_conv(TEST_USER)
+		doc = frappe.get_doc(CONV, conv)
+		# assemble_prompt reads conv.skill_autorun off the passed doc (like armed_run
+		# reads conv.skip_confirmation), so an in-memory set exercises the branch.
+		doc.skill_autorun = 1
+		prompt = self._assembled(doc)
+		self.assertIn("approved skill run: apply the plan's covered writes directly", prompt)
+		# One clause only - a duplicated fold would still satisfy assertIn.
+		self.assertEqual(prompt.count("approved skill run:"), 1)
+
+	def test_clause_absent_when_autorun_unset(self):
+		conv = _make_conv(TEST_USER)
+		doc = frappe.get_doc(CONV, conv)  # skill_autorun defaults 0
+		prompt = self._assembled(doc)
+		self.assertNotIn("approved skill run", prompt)
+		self.assertIn("; chat user:", prompt)  # assembly sanity

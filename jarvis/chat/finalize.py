@@ -304,6 +304,13 @@ def _effect_macro_advance(ctx: _Ctx) -> None:
 	from jarvis.learning import app_analysis
 
 	app_analysis.on_turn_end(ctx.conversation, errored=ctx.errored)
+	# End an approved skill run at this terminal unless it is paused on a parked card
+	# (skill "Approve & run", design §3.4). THIS is the DEFAULT pump path (the Relay
+	# Pump does NOT go through turn_handler), so the clear MUST land here too
+	# (correctness-C1). on_terminal_turn is internally best-effort (never raises).
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.on_terminal_turn(ctx.conversation)
 
 
 def _effect_auto_title(ctx: _Ctx) -> None:
