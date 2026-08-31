@@ -239,9 +239,12 @@ def write_connection(data: dict) -> None:
 
 
 @frappe.whitelist()
-def sync_connection() -> dict:
+def sync_connection(timeout_s: int | None = None) -> dict:
 	"""Pull the container connection from admin and store it. Daily scheduled +
-	the page's 'Sync connection' button. No-op until onboarded/assigned.
+	the page's 'Sync connection' button + the reconnect landing. No-op until
+	onboarded/assigned.
+
+	``timeout_s`` bounds the admin fetch (None = default); the reconnect landing passes a short one.
 
 	Gated on System Manager: writes admin credentials and container connection
 	into Jarvis Settings (jarvis_admin_api_key, agent_url, agent_token). The
@@ -254,7 +257,8 @@ def sync_connection() -> dict:
 	api_secret = settings.get_password("jarvis_admin_api_secret", raise_exception=False) or ""
 	if not (api_key and api_secret):
 		return {"synced": False, "reason": "not onboarded"}
-	data = admin_client.get_connection()
+	get_conn_kwargs = {} if timeout_s is None else {"timeout_s": timeout_s}
+	data = admin_client.get_connection(**get_conn_kwargs)
 	# Outside the agent_url branch: a payload without one must still be able to
 	# raise or clear the release notice, and this is the only refresh an idle
 	# bench gets.
@@ -1544,6 +1548,13 @@ def _land_reconnect(data: dict) -> dict:
 		return {"status": "renew_payment"}
 	if (data.get("subscription_status") or "").strip() == "Pending Payment":
 		return {"status": "resume_payment"}
+	# The reconnect just rotated agent_token admin-side; pull it NOW (short budget,
+	# best-effort) not on the daily cron, or every call_tool 401s for up to a day.
+	# require_jarvis_admin (sync_connection's gate) already passed at the entry.
+	try:
+		sync_connection(timeout_s=15)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "reconnect: eager agent_token sync failed")
 	return {"status": "connected"}
 
 
