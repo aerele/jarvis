@@ -375,6 +375,40 @@ _CONFIRMATION_OUTCOME_UNKNOWN = {
 }
 
 
+# ── "Approve & run" refusals (skill "Approve & run the plan", design §3.3/§3.4) ──
+# Stable "nothing changed" envelopes for approve_and_run. Each is returned WITHOUT
+# consuming the token (the card stays confirmable the ordinary way), mirroring the
+# non-consuming armed-refusal in _confirm_core.
+_APPROVE_RUN_NOT_RUNNABLE = {
+	"ok": False,
+	"error": {
+		"type": "InvalidConfirmation",
+		"message": (
+			"This card can't be approved as a run - confirm the step on its own instead. Nothing was changed."
+		),
+	},
+}
+
+_APPROVE_RUN_NOT_ARMED = {
+	"ok": False,
+	"error": {
+		"type": "InvalidConfirmation",
+		"message": (
+			"This skill is no longer set up for Approve & run. Nothing was changed - "
+			"confirm the step on its own instead."
+		),
+	},
+}
+
+_APPROVE_RUN_MACRO_CONVERSATION = {
+	"ok": False,
+	"error": {
+		"type": "InvalidConfirmation",
+		"message": "Approve & run isn't available in an armed macro run. Nothing was changed.",
+	},
+}
+
+
 def _confirmation_storage_error(exc) -> dict:
 	"""Stable user envelope for a Redis failure; never mislabel it as expiry."""
 	from jarvis.chat import pending_confirm
@@ -421,6 +455,185 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	would gut the cookie session and log the user out.
 	"""
 	return _confirm_core(token, conversation)
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def approve_and_run(token: str, conversation: str | None = None) -> dict:
+	"""Open an APPROVED skill run: confirm step 1 AND arm the conversation's
+	``skill_autorun`` flag so the run's covered writes then execute uncarded.
+
+	A SIBLING of ``confirm_tool`` (design §3.3; precedent ``apply_action``), NOT a
+	``confirm_tool`` overload. It shares confirm_tool's spine - owner-bound
+	single-use ``consume``, execution under the stored ``exec_user``, the transcript
+	receipt + one continuation - but adds two things a plain confirm never does:
+
+	  * it is valid ONLY for a card the park-time offer gate stamped with a
+	    ``skill_docname`` (an armed ``/slug`` run); a plain card must go through
+	    ``confirm_tool``; and
+	  * on step-1 SUCCESS it raw-sets ``Jarvis Conversation.skill_autorun=1`` (+ the
+	    sliding ``skill_autorun_at``) BEFORE enqueueing the continuation, so the
+	    resuming worker's gate runs the plan's covered writes directly. A FAILED
+	    first step opens NO run (the flag is never set) - the user re-invokes.
+
+	Fail-closed refusals (correctness-C2 + security) - each returns a stable
+	"nothing changed" envelope and consumes NOTHING: a missing token; a token that
+	carries no ``skill_docname``; a skill whose ``allow_approve_run`` is no longer 1
+	(a live TOCTOU re-check - un-armed between the offer and this click); or a token
+	whose conversation is a ``skip_confirmation`` (armed-macro) run (defense-in-
+	depth: makes a both-flags conversation unreachable by construction, mirroring the
+	non-consuming armed-refusal in ``_confirm_core``).
+
+	Human cookie-session only (whitelisted, gated, not the plugin path).
+
+	NOTE (P0): the step-1 receipt is the STANDARD confirmed/failed receipt shared
+	with ``confirm_tool``; the distinct skill-run provenance LABEL (``armed_by``
+	skill) is a later task.
+	"""
+	if frappe.session.user == "Guest":
+		raise frappe.PermissionError("authentication required")
+
+	from jarvis import api
+	from jarvis.chat import pending_confirm
+
+	token = (token or "").strip()
+	try:
+		record = pending_confirm.peek(token, strict=True)
+		if not record:
+			return _INVALID_CONFIRM
+
+		# Runnable-offer only: a token with no skill_docname was never offered
+		# Approve & run (a plain card goes through confirm_tool). Refuse WITHOUT
+		# consuming so the card stays confirmable the ordinary way.
+		skill_docname = record.get("skill_docname")
+		if not skill_docname:
+			return _APPROVE_RUN_NOT_RUNNABLE
+
+		# TOCTOU re-check: the skill must be live-armed RIGHT NOW off the EXACT row
+		# the offer stamped (an admin may have un-armed it between the park-time offer
+		# and this click). Read live; refuse without consuming when it is not 1.
+		if not frappe.db.get_value("Jarvis Custom Skill", skill_docname, "allow_approve_run"):
+			return _APPROVE_RUN_NOT_ARMED
+
+		# Defense-in-depth (design §3.4.1): the token's conversation must NOT be an
+		# armed macro run (skip_confirmation=1). This closes the endpoint door so a
+		# both-flags-in-one-conversation state is unreachable by construction, not
+		# merely by UI convention. Refuse without consuming (mirror _confirm_core
+		# actions_api armed-refusal), keyed on the flag (the single source of truth).
+		token_conv = record.get("conversation")
+		if token_conv and frappe.db.get_value("Jarvis Conversation", token_conv, "skip_confirmation"):
+			return _APPROVE_RUN_MACRO_CONVERSATION
+
+		# Owner-bound, single-use consume. The OWNER is the real authorization
+		# boundary; the conversation is only a SECONDARY replay guard, so NEVER trust
+		# a client-supplied conversation id for authz - guard_conv falls back to the
+		# token's OWN conversation when the caller passes none (mirror _confirm_core).
+		passed_conv = (conversation or "").strip()
+		guard_conv = passed_conv if passed_conv else record.get("conversation")
+		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
+	except pending_confirm.PendingConfirmStorageError as exc:
+		return _confirmation_storage_error(exc)
+	if not record:
+		return _INVALID_CONFIRM
+
+	# STEP 1: execute the parked write AS the scoped exec_user the gate stored,
+	# restoring the clicking session afterwards no matter what (mirror _confirm_core).
+	exec_user = record.get("exec_user") or record.get("owner") or frappe.session.user
+	try:
+		with impersonate(exec_user):
+			result = api.dispatch_confirmed(record["tool"], record["args"])
+			# run_method returns its target verbatim; apply the same field-level read
+			# filter _confirm_core does so a permlevel>0 field the agent can't read is
+			# stripped before it reaches the receipt / continuation. Best-effort - a
+			# filter hiccup must never fail an already-committed call.
+			if record["tool"] == "run_method" and isinstance(result, dict) and result.get("ok"):
+				_ret = result.get("data")
+				if hasattr(_ret, "apply_fieldlevel_read_permissions"):
+					try:
+						_ret.apply_fieldlevel_read_permissions()
+					except Exception:
+						frappe.log_error(
+							title="approve_and_run run_method receipt permlevel filter failed",
+							message=frappe.get_traceback(),
+						)
+	except Exception:
+		# An UNEXPECTED (untranslated) exception from the confirmed write would 500
+		# with the token ALREADY consumed. Roll back the partial write, log it, and
+		# fall through to the FAILED receipt + continuation (mirror _confirm_core F5).
+		# ok stays False below, so the run is NOT opened.
+		frappe.db.rollback()
+		frappe.log_error(
+			title="approve_and_run dispatch crashed",
+			message=f"token={token} conversation={guard_conv}\n{frappe.get_traceback()}",
+		)
+		result = api._error("InternalError", "the confirmed action failed unexpectedly and was not saved")
+
+	ok = isinstance(result, dict) and bool(result.get("ok"))
+
+	# Announce a step-1 run_import's completion back into the chat (mirror
+	# _confirm_core). Self-gating + best-effort (no-ops unless tool == run_import +
+	# ok); binds to the token's OWN conversation, never the client-supplied conv.
+	from jarvis.chat import import_announce
+
+	import_announce.bind_after_run_import(record, result)
+
+	# Open the run ONLY on step-1 success, and BEFORE the continuation so the
+	# resuming worker's gate/assemble_prompt sees skill_autorun (design §3.4). Raw
+	# db.set_value on the token's OWN conversation is the SANCTIONED enable path that
+	# bypasses the owner-save guard (the guard blocks a generic owner save; this is
+	# the one legitimate server enabler). A failed first step sets NOTHING.
+	run_conv = record.get("conversation")
+	if ok and run_conv:
+		frappe.db.set_value(
+			"Jarvis Conversation",
+			run_conv,
+			{"skill_autorun": 1, "skill_autorun_at": frappe.utils.now_datetime()},
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+	# Receipt + continuation, exactly as _confirm_core: attach to the token's own
+	# conversation, or the client-supplied passed_conv ONLY when the token was minted
+	# conversation-less AND the caller owns that conversation (a skill_docname token
+	# is always conversation-bound, so the fallback is a belt-and-suspenders mirror).
+	conv = record.get("conversation")
+	if not conv and _owns_conversation(passed_conv):
+		conv = passed_conv
+	if conv:
+		try:
+			api.persist_tool_receipt(
+				conv,
+				record["tool"],
+				record["args"],
+				result,
+				action_outcome="confirmed" if ok else "failed",
+			)
+		except Exception:
+			frappe.log_error(
+				title="approve_and_run receipt failed",
+				message=f"token={token} conversation={conv}\n{frappe.get_traceback()}",
+			)
+		if ok:
+			from jarvis.chat import admission
+
+			admission.publish_action_confirmed(conv)
+		# ONE continuation: the plan's next step (on ok) or the rolled-back-write
+		# scaffold (on failure - explain + stop, do not auto-retry).
+		_cont = None
+		try:
+			_cont = enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
+		except Exception:
+			frappe.log_error(
+				title="approve_and_run continuation failed",
+				message=f"token={token} conversation={conv}\n{frappe.get_traceback()}",
+			)
+		if ok and isinstance(result, dict) and _cont and _cont.get("queued"):
+			result["queued"] = True
+			result["queued_position"] = _cont.get("queued_position")
+			result["run_id"] = _cont.get("run_id")
+			result["message_id"] = _cont.get("message_id")
+
+	return result
 
 
 def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = False) -> dict:

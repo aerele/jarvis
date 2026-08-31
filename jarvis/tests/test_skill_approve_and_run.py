@@ -17,7 +17,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.chat import pending_confirm, turn_message_binding
+from jarvis.chat import actions_api, pending_confirm, turn_message_binding
 from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests.test_auto_apply import (
@@ -1106,3 +1106,171 @@ class TestConvFlagsSingleQuery(FrappeTestCase):
 			["auto_apply", "file_box", "skip_confirmation", "skill_autorun", "skill_autorun_at"],
 		)
 		self.assertTrue(flag_reads[0].kwargs.get("as_dict"), "flags read as_dict")
+
+
+# --------------------------------------------------------------------------- #
+# approve_and_run: the sibling endpoint that opens an approved skill run
+# (design §3.3 approve_and_run bullet, §3.4 the "approve_and_run order", §3.4.1)
+# --------------------------------------------------------------------------- #
+#
+# It mirrors _confirm_core (owner-bound single-use consume, execution under the
+# stored exec_user, receipt + one continuation) but dispatches STEP 1 and sets
+# skill_autorun ONLY on step-1 success, BEFORE enqueueing the continuation. It is
+# valid ONLY for a token the offer gate stamped with a skill_docname, re-checks the
+# skill's arming LIVE (TOCTOU), and refuses a skip_confirmation (macro) conversation
+# so the both-flags state is unreachable. All these tests mock dispatch_confirmed /
+# the receipt / continuation so they assert the ORDER + the flag decision, not the
+# tool internals.
+
+
+def _mint_approve_token(conv: str, owner: str, docname: str | None, *, tool="run_method", args=None) -> str:
+	"""Mint a pending-confirm token as the offer gate would - stamped with
+	``skill_docname`` when ``docname`` is given (a runnable offer), or None (a plain
+	card). Owner + exec_user are ``owner``; the tool defaults to run_method (a
+	covered write) so the mocked dispatch stands in for a real step 1."""
+	return pending_confirm.mint(
+		conversation=conv,
+		owner=owner,
+		exec_user=owner,
+		tool=tool,
+		args=args if args is not None else {"method": "frappe.ping"},
+		run_id="",
+		skill_docname=docname,
+	)
+
+
+class TestApproveAndRun(FrappeTestCase):
+	"""The approve_and_run endpoint end-to-end (dispatch mocked)."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+		_ensure_non_admin_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for owner in (TEST_USER, NON_ADMIN_USER):
+			frappe.db.delete(SKILL, {"owner": owner})
+			for conv in frappe.get_all(CONV, filters={"owner": owner}, pluck="name"):
+				pending_confirm.clear_for_conversation(owner, conv)
+				frappe.db.delete(MSG, {"conversation": conv})
+				frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_armed_token_dispatches_step1_opens_run_fires_one_continuation(self):
+		"""The happy path: step 1 dispatches, skill_autorun + skill_autorun_at get set,
+		and EXACTLY ONE (non-failed) continuation fires."""
+		docname = _make_skill(TEST_USER, armed=True, name="ar-ok")
+		conv = _make_conv(TEST_USER)
+		token = _mint_approve_token(conv, TEST_USER, docname)
+		with (
+			patch(
+				"jarvis.api.dispatch_confirmed",
+				return_value={"ok": True, "data": {"doctype": "ToDo", "name": "T-1"}},
+			) as disp,
+			patch("jarvis.api.persist_tool_receipt"),
+			patch("jarvis.chat.admission.publish_action_confirmed"),
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}) as cont,
+		):
+			res = actions_api.approve_and_run(token, conv)
+		disp.assert_called_once()
+		self.assertTrue(res.get("ok"))
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun")), 1, "the run opens on ok")
+		self.assertTrue(
+			frappe.db.get_value(CONV, conv, "skill_autorun_at"), "the sliding timestamp is stamped"
+		)
+		cont.assert_called_once()
+		self.assertFalse(
+			cont.call_args.kwargs.get("failed"), "the success continuation is not the failed scaffold"
+		)
+		self.assertIsNone(pending_confirm.peek(token), "the token is single-use consumed")
+
+	def test_step1_failure_does_not_open_run_fires_failed_continuation(self):
+		"""Mutation target #1: step-1 ok:False must NOT set the flag; the FAILED
+		continuation fires. Making the flag-set unconditional flips this red."""
+		docname = _make_skill(TEST_USER, armed=True, name="ar-fail")
+		conv = _make_conv(TEST_USER)
+		token = _mint_approve_token(conv, TEST_USER, docname)
+		fail = {"ok": False, "error": {"code": "InvalidArgumentError", "message": "boom"}}
+		with (
+			patch("jarvis.api.dispatch_confirmed", return_value=fail) as disp,
+			patch("jarvis.api.persist_tool_receipt"),
+			patch("jarvis.chat.admission.publish_action_confirmed"),
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}) as cont,
+		):
+			res = actions_api.approve_and_run(token, conv)
+		disp.assert_called_once()
+		self.assertFalse(res.get("ok"), "the failing result is returned")
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			0,
+			"a failed first step opens NO run (the flag is never set)",
+		)
+		cont.assert_called_once()
+		self.assertTrue(cont.call_args.kwargs.get("failed"), "the failed continuation scaffold fires")
+		self.assertIsNone(pending_confirm.peek(token), "the token is burned on failure (user re-invokes)")
+
+	def test_no_skill_docname_refused_not_consumed_no_flag(self):
+		"""A plain card (no skill_docname) is refused WITHOUT consuming and never
+		dispatches - it must go through confirm_tool."""
+		conv = _make_conv(TEST_USER)
+		token = _mint_approve_token(conv, TEST_USER, None)  # plain card
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			res = actions_api.approve_and_run(token, conv)
+		self.assertFalse(res.get("ok"))
+		self.assertFalse(disp.called, "a non-runnable card must not dispatch")
+		self.assertIsNotNone(pending_confirm.peek(token), "the token is NOT consumed")
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
+	def test_unarmed_between_stamp_and_click_refused(self):
+		"""TOCTOU: the skill was armed at offer time but an admin un-armed it before
+		the click - the live re-check refuses without consuming."""
+		docname = _make_skill(TEST_USER, armed=True, name="ar-toctou")
+		conv = _make_conv(TEST_USER)
+		token = _mint_approve_token(conv, TEST_USER, docname)
+		# Admin un-arms the skill AFTER the offer was stamped on the token.
+		frappe.db.set_value(SKILL, docname, "allow_approve_run", 0, update_modified=False)
+		frappe.db.commit()
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			res = actions_api.approve_and_run(token, conv)
+		self.assertFalse(res.get("ok"))
+		self.assertFalse(disp.called, "an un-armed skill must not dispatch")
+		self.assertIsNotNone(pending_confirm.peek(token), "the un-armed refusal does not consume")
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
+	def test_skip_confirmation_conversation_refused(self):
+		"""Mutation target #2: a skip_confirmation (armed-macro) conversation is
+		refused without consuming - making both flags unreachable by construction.
+		Removing the skip_confirmation refusal flips this red (dispatch fires / token
+		consumed)."""
+		docname = _make_skill(TEST_USER, armed=True, name="ar-macro")
+		conv = _make_conv(TEST_USER)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		frappe.db.commit()
+		token = _mint_approve_token(conv, TEST_USER, docname)
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			res = actions_api.approve_and_run(token, conv)
+		self.assertFalse(res.get("ok"))
+		self.assertFalse(disp.called, "a macro-run conversation must not open a skill run")
+		self.assertIsNotNone(pending_confirm.peek(token), "the skip_confirmation refusal does not consume")
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
+	def test_other_user_cannot_consume_owners_token(self):
+		"""Owner-bound: a different logged-in Jarvis user cannot consume TEST_USER's
+		token - consume rejects on owner mismatch without burning it, no run opens."""
+		docname = _make_skill(TEST_USER, armed=True, name="ar-owner")
+		conv = _make_conv(TEST_USER)
+		token = _mint_approve_token(conv, TEST_USER, docname)
+		frappe.set_user(NON_ADMIN_USER)
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			res = actions_api.approve_and_run(token, conv)
+		self.assertFalse(res.get("ok"), "a non-owner is refused")
+		self.assertFalse(disp.called, "a non-owner must not dispatch the write")
+		frappe.set_user(TEST_USER)
+		self.assertIsNotNone(pending_confirm.peek(token), "a wrong-owner probe does NOT burn the token")
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
