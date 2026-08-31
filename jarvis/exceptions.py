@@ -37,6 +37,20 @@ class FeatureDisabledError(JarvisError):
 	"""
 
 
+class RunHaltedError(JarvisError):
+	"""Skill "Approve & run" (design §3.4, the Halt cancel-gate): the covered write
+	was REFUSED because the approved run was halted. ``stop_run`` sets a transport-
+	independent run-cancel signal; the auto-run branch reads it before each covered
+	write and, when set, clears ``skill_autorun`` and returns THIS instead of
+	executing - so Halt stops the chain within one write, bench-guaranteed, without
+	depending on the container honouring ``chat_abort``.
+
+	Never re-raised into a 500 - the gate returns it as a ``{ok:false}`` envelope so
+	the model sees a clean "the run was halted - re-approve to continue" and stops
+	rather than looping. The answer is FIXED until the user re-approves, so retrying
+	the same call can never turn it into a yes."""
+
+
 class InvalidArgumentError(JarvisError):
 	"""Raised when tool arguments fail validation."""
 

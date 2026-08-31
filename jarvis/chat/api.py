@@ -2506,6 +2506,16 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		pending_confirm.clear_for_conversation(frappe.session.user, conversation, run_id)
 	except Exception:
 		frappe.log_error(title="stop_run token sweep", message=frappe.get_traceback())
+	# Skill "Approve & run" Halt cancel-gate (design §3.4): set the transport-
+	# independent run-cancel signal so an in-flight skill auto-run chain hard-stops
+	# at the bench within one covered write - in BOTH pump and legacy mode, and
+	# independent of whether the container honours the chat_abort above. Best-effort.
+	try:
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.request_run_cancel(conversation)
+	except Exception:
+		frappe.log_error(title="stop_run run-cancel signal", message=frappe.get_traceback())
 	if not conv.session_key:
 		return {"ok": True}  # nothing running yet
 	settings = frappe.get_cached_doc("Jarvis Settings")

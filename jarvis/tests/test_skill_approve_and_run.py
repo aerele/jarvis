@@ -706,3 +706,403 @@ class TestApproveRunOfferThroughRunTool(FrappeTestCase):
 		card = (rec.get("preview") or {}).get("card")
 		self.assertIsInstance(card, dict)
 		self.assertNotIn("approve_run", card)
+
+
+# --------------------------------------------------------------------------- #
+# The transport-independent run-cancel signal (design §3.4, the Halt cancel-gate)
+# --------------------------------------------------------------------------- #
+#
+# stop_run's turn-level abort is best-effort and never reaches the bench tool path
+# (every cancel reader lives in the turn-settlement layer). The auto-run branch is
+# the ONE place a bench-guaranteed Halt can land, so it needs a cancel signal that
+# works in BOTH pump and legacy mode: a bare Redis key, set by stop_run, read by
+# the gate before each covered write. A SHORT TTL - a cancel only matters during an
+# active run.
+
+
+class TestRunCancelSignalHelpers(FrappeTestCase):
+	"""request_run_cancel / is_run_cancel_requested / clear_run_cancel."""
+
+	def setUp(self):
+		self._conv = _uniq_conv()
+
+	def tearDown(self):
+		turn_message_binding.clear_run_cancel(self._conv)
+
+	def test_request_then_is_requested_true(self):
+		self.assertFalse(turn_message_binding.is_run_cancel_requested(self._conv))
+		turn_message_binding.request_run_cancel(self._conv)
+		self.assertTrue(turn_message_binding.is_run_cancel_requested(self._conv))
+
+	def test_clear_resets_the_signal(self):
+		turn_message_binding.request_run_cancel(self._conv)
+		turn_message_binding.clear_run_cancel(self._conv)
+		self.assertFalse(turn_message_binding.is_run_cancel_requested(self._conv))
+
+	def test_unset_reads_false(self):
+		self.assertFalse(turn_message_binding.is_run_cancel_requested(self._conv))
+
+	def test_empty_conversation_is_a_noop(self):
+		turn_message_binding.request_run_cancel("")
+		self.assertFalse(turn_message_binding.is_run_cancel_requested(""))
+
+	def test_short_ttl_is_set_on_the_key(self):
+		"""The signal carries a positive, SHORT expiry (bounded by the run-cancel
+		TTL) - it must not linger past the run it was meant to interrupt."""
+		turn_message_binding.request_run_cancel(self._conv)
+		cache = frappe.cache()
+		raw = cache.make_key(turn_message_binding._run_cancel_key(self._conv))
+		ttl = cache.ttl(raw)  # remaining seconds; -1 = no expiry, -2 = missing
+		self.assertGreater(ttl, 0)
+		self.assertLessEqual(ttl, turn_message_binding._RUN_CANCEL_TTL_S)
+
+
+class TestStopRunRequestsRunCancel(FrappeTestCase):
+	"""The wiring: stop_run sets the run-cancel signal (beside its token sweep) so
+	the auto-run cancel-gate halts the chain, in pump and legacy mode alike."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+		_cleanup_user_conversations(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			turn_message_binding.clear_run_cancel(conv)
+		_cleanup_user_conversations(TEST_USER)
+		frappe.db.commit()
+
+	def test_stop_run_sets_the_run_cancel_signal(self):
+		# A session_key-less conversation: stop_run returns right after its token
+		# sweep (where request_run_cancel sits), so no gateway is needed.
+		from jarvis.chat import api as chat_api
+
+		conv = _make_conv(TEST_USER)
+		self.assertFalse(turn_message_binding.is_run_cancel_requested(conv))
+		res = chat_api.stop_run(conv)
+		self.assertTrue(res.get("ok"))
+		self.assertTrue(
+			turn_message_binding.is_run_cancel_requested(conv),
+			"stop_run must set the transport-independent run-cancel signal",
+		)
+
+
+# --------------------------------------------------------------------------- #
+# The skill auto-run gate branch (design §3.4, task #39 - the READ side)
+# --------------------------------------------------------------------------- #
+#
+# In _run_tool, AFTER the macro armed-skip branch (macro-first for deterministic
+# provenance): a conversation in an approved run (skill_autorun=1) runs the explicit
+# _SKILL_AUTORUN_COVERED allowlist uncarded, gated on a SLIDING TTL and a cancel-gate.
+# The flag is db_set directly here - the sanctioned raw-set enable path (task #40
+# mints it through approve_and_run; this task tests the READ side).
+
+
+def _stamp_autorun(conv: str, *, at=None) -> None:
+	"""Directly stamp skill_autorun=1 (+ its sliding timestamp) via db_set - the
+	sanctioned raw enable path. ``at`` defaults to now (a fresh, in-TTL run)."""
+	frappe.db.set_value(CONV, conv, "skill_autorun", 1, update_modified=False)
+	frappe.db.set_value(
+		CONV, conv, "skill_autorun_at", at or frappe.utils.now_datetime(), update_modified=False
+	)
+	frappe.db.commit()
+
+
+def _pending_for(conv: str, user: str) -> int:
+	return len(
+		[r for r in pending_confirm.list_for_owner(user, conversation=conv) if r.get("conversation") == conv]
+	)
+
+
+class TestSkillAutorunPartition(FrappeTestCase):
+	"""Fail-closed allowlist: _SKILL_AUTORUN_COVERED and _SKILL_AUTORUN_NEVER
+	partition _GATED_WRITES exactly. A future gated tool filed in NEITHER set makes
+	this RED, forcing a conscious auto-run-vs-park classification - this path has no
+	kill switch, so a new tool must never silently become auto-runnable."""
+
+	def test_covered_and_never_partition_gated_writes(self):
+		self.assertEqual(
+			api._SKILL_AUTORUN_COVERED & api._SKILL_AUTORUN_NEVER,
+			frozenset(),
+			"covered and never must be disjoint",
+		)
+		self.assertEqual(
+			api._SKILL_AUTORUN_COVERED | api._SKILL_AUTORUN_NEVER,
+			api._GATED_WRITES,
+			"every gated write must be classified covered (auto-runs in an approved "
+			"run) or never (always parks) - a tool in neither is a fail-open gap",
+		)
+
+	def test_every_covered_member_is_a_gated_write(self):
+		self.assertLessEqual(api._SKILL_AUTORUN_COVERED, api._GATED_WRITES)
+
+	def test_covered_is_the_exact_expected_set(self):
+		self.assertEqual(
+			api._SKILL_AUTORUN_COVERED,
+			frozenset(
+				{
+					"create_doc",
+					"create_docs",
+					"update_doc",
+					"submit_doc",
+					"run_import",
+					"apply_workflow_action",
+					"send_email",
+					"share_doc",
+					"assign_to",
+					"update_wiki",
+					"run_method",
+				}
+			),
+		)
+
+	def test_never_set_is_the_trio_plus_create_custom_skill(self):
+		self.assertEqual(
+			api._SKILL_AUTORUN_NEVER,
+			frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill"}),
+		)
+
+	def test_create_custom_skill_is_not_covered_here_though_the_macro_covers_it(self):
+		# The explicit divergence from the macro's _ARMED_SKIP_COVERED (D-COVERED).
+		self.assertNotIn("create_custom_skill", api._SKILL_AUTORUN_COVERED)
+		self.assertIn("create_custom_skill", api._ARMED_SKIP_COVERED)
+
+	def test_run_method_is_covered(self):
+		self.assertIn("run_method", api._SKILL_AUTORUN_COVERED)
+
+
+class TestSkillAutorunGate(FrappeTestCase):
+	"""The auto-run branch: an approved run (skill_autorun=1, fresh timestamp) runs
+	the covered set uncarded and slides the timestamp; the irreversible trio +
+	create_custom_skill still park; a plain skill_autorun=0 conversation parks
+	exactly as today (no regression)."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+		for dt in (CONV, "ToDo"):
+			for name in frappe.get_all(dt, filters={"owner": TEST_USER}, pluck="name"):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_covered_write_runs_uncarded_and_slides_timestamp(self):
+		stamped = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-100)
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv, at=stamped)
+		with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}) as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		disp.assert_called_once()
+		self.assertTrue(r["ok"])
+		self.assertNotEqual((r.get("data") or {}).get("status"), "pending_confirmation")
+		self.assertEqual(_pending_for(conv, TEST_USER), 0, "no token is minted on the auto-run path")
+		new_at = frappe.utils.get_datetime(frappe.db.get_value(CONV, conv, "skill_autorun_at"))
+		self.assertGreater(
+			new_at, frappe.utils.get_datetime(stamped), "a successful covered write slides the timestamp"
+		)
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun")), 1, "flag stays armed after a success"
+		)
+
+	def test_plain_conversation_parks_no_regression(self):
+		conv = _make_conv(TEST_USER)  # skill_autorun defaults 0
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertFalse(disp.called)
+
+	def test_delete_doc_still_parks_when_autorun(self):
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "autorun-del-x"}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool("delete_doc", {"doctype": "ToDo", "name": todo.name}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation", "delete always parks")
+		self.assertFalse(disp.called)
+		self.assertTrue(frappe.db.exists("ToDo", todo.name))
+
+	def test_create_custom_skill_still_parks_when_autorun(self):
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool(
+				"create_custom_skill",
+				{"skill_name": "autorun-never-skill", "instructions": "do the thing"},
+				conversation=conv,
+			)
+		self.assertEqual(r["data"]["status"], "pending_confirmation", "create_custom_skill always parks")
+		self.assertFalse(disp.called)
+
+
+class TestSkillAutorunCancelGate(FrappeTestCase):
+	"""The cancel-gate (Halt made bench-guaranteed): with the run-cancel signal set,
+	a covered write is REFUSED (RunHaltedError) without executing, and skill_autorun
+	is cleared - the chain stops within one write."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			turn_message_binding.clear_run_cancel(conv)
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_cancel_requested_refuses_covered_write_and_clears_flag(self):
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		turn_message_binding.request_run_cancel(conv)
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertFalse(r["ok"], "a halted covered write is refused")
+		self.assertEqual(r["error"]["code"], "RunHaltedError")
+		self.assertFalse(disp.called, "the write must NOT execute after Halt")
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0, "Halt clears the flag"
+		)
+		self.assertFalse(turn_message_binding.is_run_cancel_requested(conv), "the consumed signal is cleared")
+
+
+class TestSkillAutorunTTL(FrappeTestCase):
+	"""The sliding TTL: an approved run whose last covered write is older than the
+	TTL parks (does not auto-run); a run with no timestamp parks."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_ttl_expired_parks(self):
+		stale = frappe.utils.add_to_date(
+			frappe.utils.now_datetime(), seconds=-(api._SKILL_AUTORUN_TTL_S + 60)
+		)
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv, at=stale)
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation", "a TTL-expired run parks")
+		self.assertFalse(disp.called)
+
+	def test_no_timestamp_parks(self):
+		conv = _make_conv(TEST_USER)
+		frappe.db.set_value(CONV, conv, "skill_autorun", 1, update_modified=False)
+		# skill_autorun_at deliberately left NULL
+		frappe.db.commit()
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation", "no timestamp -> park")
+		self.assertFalse(disp.called)
+
+
+class TestSkillAutorunHardStop(FrappeTestCase):
+	"""Hard-stop-on-error: the first covered dispatch returning ok:False clears
+	skill_autorun (subsequent writes re-card) and returns that failure."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_dispatch_error_clears_the_flag(self):
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		fail = {"ok": False, "error": {"code": "InvalidArgumentError", "message": "boom"}}
+		with patch("jarvis.api.dispatch_confirmed", return_value=fail) as disp:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		disp.assert_called_once()
+		self.assertFalse(r["ok"], "the failing result is returned to the model")
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			0,
+			"a covered write that fails clears the flag so the next write re-cards",
+		)
+
+
+class TestConvFlagsSingleQuery(FrappeTestCase):
+	"""_conv_flags stays ONE get_value even after skill_autorun + skill_autorun_at
+	join it: the gate reads all FIVE conversation flags in a single query."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_five_flags_read_in_one_query(self):
+		conv = _make_conv(TEST_USER)
+		# Spy on the real DB instance (frappe.db is a LocalProxy over frappe.local.db);
+		# wraps=... records every get_value call yet executes it normally.
+		spy = MagicMock(wraps=frappe.local.db.get_value)
+		with patch.object(frappe.local.db, "get_value", spy):
+			api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		flag_reads = [
+			c
+			for c in spy.call_args_list
+			if len(c.args) >= 3
+			and c.args[0] == CONV
+			and isinstance(c.args[2], (list, tuple))
+			and "skill_autorun" in c.args[2]
+		]
+		self.assertEqual(len(flag_reads), 1, "the conversation flags must be a SINGLE get_value")
+		self.assertEqual(
+			list(flag_reads[0].args[2]),
+			["auto_apply", "file_box", "skip_confirmation", "skill_autorun", "skill_autorun_at"],
+		)
+		self.assertTrue(flag_reads[0].kwargs.get("as_dict"), "flags read as_dict")

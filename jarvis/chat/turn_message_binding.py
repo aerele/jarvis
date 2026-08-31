@@ -69,3 +69,50 @@ def current_turn_message_id(conversation: str) -> str | None:
 	if not conversation:
 		return None
 	return frappe.cache().get_value(_key(conversation), expires=True)
+
+
+# --------------------------------------------------------------------------- #
+# The transport-independent run-cancel signal (skill "Approve & run", design §3.4)
+# --------------------------------------------------------------------------- #
+#
+# ``stop_run``'s abort is turn-level + best-effort and never reaches the bench tool
+# path (every cancel reader lives in the turn-settlement layer), so an in-flight
+# skill auto-run chain would keep executing covered writes at the bench. The fix is
+# a bench-visible cancel signal the auto-run branch (``jarvis.api._run_tool``) reads
+# before EACH covered write, hard-stopping the chain within one write. It must work
+# in BOTH pump and legacy transport, so it lives here as a bare Redis key set by
+# ``stop_run``, not on any turn-machine row. A SHORT TTL: a cancel is only meaningful
+# while a run is active - a stale key must not halt a fresh, re-approved run minutes
+# later. It is also cleared explicitly the moment the gate consumes it.
+_RUN_CANCEL_TTL_S = 120
+
+_RUN_CANCEL_PREFIX = "jarvis:run_cancel:"
+
+
+def _run_cancel_key(conversation: str) -> str:
+	return _RUN_CANCEL_PREFIX + conversation
+
+
+def request_run_cancel(conversation: str) -> None:
+	"""Set the run-cancel signal for ``conversation`` (called by ``stop_run``,
+	best-effort). A no-op on a missing conversation - there is nothing to halt."""
+	if not conversation:
+		return
+	frappe.cache().set_value(_run_cancel_key(conversation), "1", expires_in_sec=_RUN_CANCEL_TTL_S)
+
+
+def is_run_cancel_requested(conversation: str) -> bool:
+	"""True iff a run cancel is currently requested for ``conversation``. Read by
+	the auto-run cancel-gate before each covered write. ``expires=True`` so the read
+	honours the short TTL and does not pin the value in the per-request local cache."""
+	if not conversation:
+		return False
+	return bool(frappe.cache().get_value(_run_cancel_key(conversation), expires=True))
+
+
+def clear_run_cancel(conversation: str) -> None:
+	"""Drop the run-cancel signal - called the instant the gate consumes it (so a
+	single Halt refuses exactly one covered write, not every later re-approved run)."""
+	if not conversation:
+		return
+	frappe.cache().delete_value(_run_cancel_key(conversation))

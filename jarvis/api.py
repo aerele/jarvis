@@ -13,6 +13,7 @@ from jarvis.exceptions import (
 	FeatureDisabledError,
 	InvalidArgumentError,
 	JarvisError,
+	RunHaltedError,
 )
 from jarvis.permissions import has_jarvis_access
 from jarvis.tools._result_guard import enforce_result_budget
@@ -795,6 +796,47 @@ _ARMED_SKIP_COVERED = frozenset(
 	}
 )
 _ARMED_SKIP_NEVER = frozenset({"cancel_doc", "delete_doc", "amend_doc"})
+# Skill "Approve & run the plan" (design §3.4, D-COVERED): a conversation in an
+# APPROVED skill run (Jarvis Conversation.skill_autorun=1, stamped by the
+# approve_and_run endpoint on step-1 success) runs THESE covered writes without a
+# confirmation card. Like _ARMED_SKIP_COVERED this is an EXPLICIT fail-CLOSED
+# allowlist, NOT `_ARMED_SKIP_COVERED - {...}`: a new gated tool must NOT become
+# auto-runnable by default (this path has no site-wide kill switch, so an
+# unclassified tool defaults to carding). It DIVERGES from the macro set in ONE
+# tool: create_custom_skill is COVERED for a macro but NEVER here - a skill that
+# writes another skill is a consequential meta-write the user should still confirm.
+# The irreversible trio (delete/cancel/amend) + create_custom_skill make up
+# _SKILL_AUTORUN_NEVER and always park (a park mid-run is a legit PAUSE that
+# resumes on confirm). The partition invariant (test_covered_and_never_partition_
+# gated_writes) asserts COVERED and NEVER are disjoint and together == _GATED_WRITES,
+# so a gated tool filed in neither turns that test RED until a human classifies it.
+_SKILL_AUTORUN_COVERED = frozenset(
+	{
+		"create_doc",
+		"create_docs",
+		"update_doc",
+		"submit_doc",
+		"run_import",
+		"apply_workflow_action",
+		"send_email",
+		"share_doc",
+		"assign_to",
+		"update_wiki",
+		"run_method",
+	}
+)
+_SKILL_AUTORUN_NEVER = frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill"})
+# Sliding-TTL horizon for an approved run: the auto-run branch runs a covered write
+# uncarded only while the LAST covered write (skill_autorun_at, which slides forward
+# on each success) is within this window. It must comfortably EXCEED the longest idle
+# gap between two consecutive covered writes - a model round-trip + latency + a
+# non-covered intervening step - which is minutes, so 900s (matching the confirm
+# token TTL) is ample. A stranded flag (worker died -> writes stop -> timestamp
+# freezes) therefore falls out of the window within the TTL and is cleared by the
+# reaper (task #42). This TTL bounds a normal idle gap, NOT a runaway - that is
+# bounded by the destructive carve-out, hard-stop-on-error, the Halt cancel-gate,
+# and per-skill un-arm.
+_SKILL_AUTORUN_TTL_S = 900
 # Gated writes we dry-run in the sandbox AT PARK TIME and BLOCK on if the dry-run
 # fails, so a deterministic failure (missing mandatory field, bad link, no create
 # permission) is returned to the model BEFORE a confirmation card is shown instead
@@ -873,6 +915,25 @@ def _armed_skip_disabled() -> bool:
 	write re-gates behind its card immediately, no deploy - the escape hatch if an
 	armed macro misbehaves. Read only when an armed covered write is about to skip."""
 	return bool(frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "disable_armed_skip")))
+
+
+def _skill_autorun_slide(conv: str) -> None:
+	"""Advance the sliding last-write timestamp after a covered auto-run write, and
+	commit immediately (mirroring the macro's per-step row write). Committing now
+	means a worker death right after this write leaves an ACCURATE freeze-point, so
+	the sliding-TTL reaper (task #42) reaps the stranded run at the right time."""
+	frappe.db.set_value(
+		"Jarvis Conversation", conv, "skill_autorun_at", frappe.utils.now_datetime(), update_modified=False
+	)
+	frappe.db.commit()
+
+
+def _skill_autorun_clear(conv: str) -> None:
+	"""Hard-stop the approved run: drop skill_autorun so the next covered write
+	re-cards. Committed immediately so the cleared state survives a worker death
+	(a concurrent 0->0 clear is an idempotent no-op)."""
+	frappe.db.set_value("Jarvis Conversation", conv, "skill_autorun", 0, update_modified=False)
+	frappe.db.commit()
 
 
 def _armed_skill_docname_for_slug(slug: str, owner: str) -> str | None:
@@ -1518,12 +1579,17 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		owner_user = (
 			frappe.db.get_value("Jarvis Conversation", conv, "owner") if conv else None
 		) or exec_user
-		# One flags read shared by the two skip-the-card bypasses below (both key off
-		# the conversation row). An empty/unresolved conv -> {} -> every flag OFF (the
-		# safe default: the write parks).
+		# One flags read shared by the skip-the-card bypasses below (all key off the
+		# conversation row). An empty/unresolved conv -> {} -> every flag OFF (the
+		# safe default: the write parks). skill_autorun + skill_autorun_at ride the
+		# SAME single query (design §3.4): the skill auto-run branch needs both the
+		# flag and its sliding timestamp for the inline TTL check.
 		_conv_flags = (
 			frappe.db.get_value(
-				"Jarvis Conversation", conv, ["auto_apply", "file_box", "skip_confirmation"], as_dict=True
+				"Jarvis Conversation",
+				conv,
+				["auto_apply", "file_box", "skip_confirmation", "skill_autorun", "skill_autorun_at"],
+				as_dict=True,
 			)
 			if conv
 			else None
@@ -1578,6 +1644,48 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					{"tool": "run_import", "conversation": conv, "owner": owner_user}, result
 				)
 			return result
+		# Skill "Approve & run" auto-run bypass (design §3.4): a conversation in an
+		# APPROVED skill run (skill_autorun=1, stamped by approve_and_run on step-1
+		# success) runs the explicit _SKILL_AUTORUN_COVERED allowlist uncarded, sliding
+		# skill_autorun_at forward on each covered write. Placed AFTER the macro branch
+		# so a (structurally-unreachable, but defense-in-depth) both-flags conversation
+		# resolves as a macro run for deterministic provenance. The irreversible trio +
+		# create_custom_skill are NOT covered here, so they fall through to park + PAUSE
+		# the run. Narrower than the macro's _ARMED_SKIP_COVERED (no create_custom_skill)
+		# and additionally gated on a SLIDING TTL + a bench-guaranteed Halt cancel-gate.
+		if tool in _SKILL_AUTORUN_COVERED and _conv_flags.get("skill_autorun"):
+			from jarvis.chat import turn_message_binding
+
+			# Cancel-gate FIRST (the Halt compensating control): stop_run sets a
+			# transport-independent run-cancel signal; if it is set, HARD-STOP this
+			# covered write - clear the flag, clear the signal, and REFUSE the write
+			# WITHOUT executing it. This is what makes Halt stop the auto-run chain
+			# within one write, bench-guaranteed, regardless of the container honouring
+			# chat_abort. Checked before the TTL so a halted stale run still stops here.
+			if turn_message_binding.is_run_cancel_requested(conv):
+				_skill_autorun_clear(conv)
+				turn_message_binding.clear_run_cancel(conv)
+				code = RunHaltedError.__name__
+				return _error(code, "the run was halted - re-approve to continue")
+			# Sliding TTL: auto-run only while the last covered write is recent. If the
+			# timestamp is missing or older than the horizon, DON'T auto-run - fall
+			# through to the normal park below (the reaper, task #42, clears the stale
+			# flag; a park here is a safe, correct pause).
+			autorun_at = _conv_flags.get("skill_autorun_at")
+			if (
+				autorun_at
+				and (frappe.utils.now_datetime() - frappe.utils.get_datetime(autorun_at)).total_seconds()
+				<= _SKILL_AUTORUN_TTL_S
+			):
+				result = dispatch_confirmed(tool, args)
+				# Hard-stop-on-error: the first covered ok:False clears the flag so the
+				# next write re-cards; a success slides the timestamp forward.
+				if result.get("ok"):
+					_skill_autorun_slide(conv)
+				else:
+					_skill_autorun_clear(conv)
+				return result
+			# TTL-expired / no timestamp: fall through to the normal park.
 		# Auto-apply bypass (issue #186, Task 4 + #5): the OTHER path where a gated
 		# write runs without a confirmation token. Strictly limited to
 		# {a resolved conversation, admin-enabled auto_apply, an _AUTO_APPLYABLE
