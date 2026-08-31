@@ -517,6 +517,42 @@ class TestContinuation(FrappeTestCase):
 		# Neutralized: cannot forge a new bench-voice line.
 		self.assertNotIn("\n", content)
 
+	def test_confirm_receipt_run_method_serialization_failure_falls_back(self):
+		# A return value as_json cannot encode (a circular ref) must NOT raise out of
+		# the post-commit receipt; it degrades to a plain success line (and a log).
+		from jarvis.chat.actions_api import _confirm_receipt_text
+
+		circular = {}
+		circular["self"] = circular
+		record = {"tool": "run_method", "args": {"method": "x.y.z"}}
+		text = _confirm_receipt_text(record, {"ok": True, "data": circular})
+		self.assertIn("succeeded", text)
+		self.assertIn("could not be serialized", text)
+		self.assertNotIn("Returned:", text)
+
+	def test_confirm_core_batch_run_method_receipt_carries_full_payload(self):
+		# The batch (multi-card) approval path composes receipts from
+		# result["receipt_text"] (joined by the typed-bulk confirmation), so a
+		# confirmed run_method must carry its full payload there too - not only on
+		# the single-card continuation path.
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import _confirm_core
+
+		conv = self._conv()
+		token = pending_confirm.mint(
+			conversation=conv,
+			owner="Administrator",
+			tool="run_method",
+			args={"method": "erpnext.accounts.utils.get_account_balances_coa"},
+			run_id="testrun",
+		)
+		payload = {"rows": [{"account": "ACC-batch-marker", "balance": 42}]}
+		with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": payload}):
+			res = _confirm_core(token, conv, batch=True)
+		self.assertIn("receipt_text", res)
+		self.assertIn("Returned:", res["receipt_text"])
+		self.assertIn("ACC-batch-marker", res["receipt_text"])
+
 	def test_confirm_tool_failed_write_still_continues_with_neutralized_error(self):
 		# A confirmed write that FAILS must still dispatch the continuation (so the
 		# agent learns the outcome), and the error text - attacker-influenceable -
