@@ -186,8 +186,8 @@
 				class="jvp-worker-notice"
 				role="status"
 			>
-				{{ brandName }} is low on background workers, so answers may take
-				longer. Add more workers to your bench to speed this up.
+				{{ brandName }} is low on background workers, so answers may take longer. Add more
+				workers to your bench to speed this up.
 			</div>
 
 			<div class="jvp-body" ref="bodyEl" @scroll.passive="onBodyScroll">
