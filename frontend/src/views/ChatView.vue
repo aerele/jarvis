@@ -6529,10 +6529,24 @@ async function buildDraftModel(a) {
 			origJson: JSON.stringify(verb === "update" ? baseRows : null),
 		});
 	}
+	// A Prompt-autonamed DocType (e.g. Server Script) carries its document name as a
+	// proposed "name" field, not a real DocField, so it never lands in `fields`.
+	// Capture it here so applyDraft sends it as `name` (the backend folds it into
+	// the create values). Field/series-named DocTypes have no such field -> "".
+	const proposedCreateName =
+		verb === "update"
+			? ""
+			: String(
+					(
+						(a.fields || []).find(
+							(x) => String(x.label || "").toLowerCase() === "name"
+						) || {}
+					).value ?? ""
+			  );
 	return {
 		verb,
 		doctype: a.doctype,
-		docName: verb === "update" ? a.name || "" : "",
+		docName: verb === "update" ? a.name || "" : proposedCreateName,
 		title: a.title || "",
 		titleField: meta.title_field || "",
 		submittable: !!meta.is_submittable,

@@ -233,6 +233,20 @@ def apply_action(action: dict | str | None = None) -> dict:
 		raise InvalidArgumentError("conversation is required")
 	_require_own_conversation(conversation)
 
+	# A Prompt-autonamed DocType (e.g. Server Script) has NO `name` FIELD - the
+	# human-entered document name arrives only as `name`, never inside `values`
+	# (the panel builds values from DocFields). Fold it in for a create so the doc
+	# gets a name; without this the insert fails "Please set the document name".
+	# That error is raised ONLY by _prompt_autoname (frappe/model/naming.py), for
+	# autoname.startswith("prompt") - i.e. "Set by user". Every other naming rule
+	# either derives the name from a field already in `values` (By fieldname / By
+	# Naming Series) or auto-generates it (Autoincrement / Expression / Random /
+	# UUID / By script), so it needs no fold and folding could override it. Match
+	# Frappe's own check exactly so the scope stays correct.
+	if verb == "create" and name and "name" not in values:
+		if (frappe.get_meta(doctype).autoname or "").lower().startswith("prompt"):
+			values = {**values, "name": name}
+
 	from jarvis import api
 
 	# The audit/receipt args, built up front (independent of the write outcome);
