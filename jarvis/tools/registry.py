@@ -45,6 +45,10 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# Batch, atomic create for a doc's missing dependencies (one gated card).
 	"create_docs",
 	"preview_doc",
+	# Read-only: static-check a Server Script / Script Report body against the
+	# safe_exec sandbox (imports, get_all/db.sql, RestrictedPython compile) before
+	# staging its create. See the frappe-scripting skill.
+	"validate_script",
 	# CSV / file import: preview_import (read-only) shows what a raw file load would
 	# produce; run_import (gated) stages a Frappe Data Import and starts it. For data
 	# that needs any processing first, create_doc(docs=[...]) stays the path - import
