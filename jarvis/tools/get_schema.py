@@ -244,6 +244,15 @@ def clear_schema_cache(doc, method=None) -> None:
 		clear_cache_for(dt)
 
 
+def _parent_doctypes(child: str) -> list[str]:
+	"""DocTypes that embed ``child`` as a Table / Table MultiSelect field - the
+	parents whose read permission actually governs access to this child table."""
+	tbl = ["Table", "Table MultiSelect"]
+	std = frappe.get_all("DocField", filters={"fieldtype": ["in", tbl], "options": child}, pluck="parent")
+	custom = frappe.get_all("Custom Field", filters={"fieldtype": ["in", tbl], "options": child}, pluck="dt")
+	return list({p for p in (std + custom) if p})
+
+
 def get_schema(doctype: str, verbose: bool = False, refresh: bool = False) -> dict:
 	"""Return live meta for a DocType: identity + the write-relevant
 	doctype-level flags + the field list.
@@ -317,7 +326,15 @@ def get_schema(doctype: str, verbose: bool = False, refresh: bool = False) -> di
 	if not frappe.db.exists("DocType", doctype):
 		raise InvalidArgumentError(f"unknown DocType: {doctype}")
 
-	if not frappe.has_permission(doctype, ptype="read"):
+	# A child (istable) DocType carries NO standalone read perm - it is only ever
+	# reached through the parent that embeds it, whose verbose schema already
+	# exposes these very fields. So gate it on the parent(s), not on itself, or
+	# the agent can never read a child-table schema (e.g. Report Column /
+	# Report Filter while building a Report create) even as a System Manager.
+	allowed = frappe.has_permission(doctype, ptype="read")
+	if not allowed and frappe.get_meta(doctype).istable:
+		allowed = any(frappe.has_permission(p, ptype="read") for p in _parent_doctypes(doctype))
+	if not allowed:
 		raise PermissionDeniedError(f"no read permission on {doctype}")
 
 	cache = frappe.cache()

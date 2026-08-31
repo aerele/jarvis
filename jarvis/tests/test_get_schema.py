@@ -108,6 +108,49 @@ class TestGetSchema(FrappeTestCase):
 		finally:
 			frappe.set_user("Administrator")
 
+	def test_child_doctype_schema_allowed_via_parent_read_permission(self):
+		# A child (istable) DocType has NO standalone read perm, so get_schema must
+		# gate it on a parent that embeds it - otherwise the agent can never read a
+		# child-table schema (Report Column / Report Filter) to build a Report create.
+		user_email = "reportreader@example.com"
+		if not frappe.db.exists("User", user_email):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": user_email,
+					"first_name": "Report",
+					"send_welcome_email": 0,
+					"roles": [{"role": "System Manager"}],
+				}
+			).insert(ignore_permissions=True)
+		frappe.set_user(user_email)
+		try:
+			# no standalone read on the child, but Report (its parent) is readable
+			self.assertFalse(frappe.has_permission("Report Column", ptype="read"))
+			schema = get_schema(doctype="Report Column", refresh=True)
+			self.assertTrue(schema.get("fields"))
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_child_doctype_schema_denied_when_no_parent_is_readable(self):
+		# The roleless user can't read Report, so can't read its child schema either.
+		user_email = "schemaless@example.com"
+		if not frappe.db.exists("User", user_email):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": user_email,
+					"first_name": "Schemaless",
+					"send_welcome_email": 0,
+				}
+			).insert(ignore_permissions=True)
+		frappe.set_user(user_email)
+		try:
+			with self.assertRaises(PermissionDeniedError):
+				get_schema(doctype="Report Column", refresh=True)
+		finally:
+			frappe.set_user("Administrator")
+
 
 class _StubField:
 	"""Stands in for a meta DocField: _field_record only needs the five core
