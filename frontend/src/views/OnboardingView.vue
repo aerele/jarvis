@@ -1909,6 +1909,7 @@ import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
 import { readCookie } from "@/lib/user";
 import { useBillingDetails, billingEditAction } from "@/onboarding/useBillingDetails";
 import { gstinError, GSTIN_PLACEHOLDER } from "@/onboarding/gstin";
+import { isExpectedCompanyDefaultsMiss } from "@/onboarding/companyDefaultsMiss";
 
 const router = useRouter();
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
@@ -2626,8 +2627,13 @@ async function fetchCompanyDefaults() {
 		if (resp && resp.ok) billing.applyDefaults(resp, gen, company);
 	} catch (e) {
 		// COMPANY_DEFAULTS_FORBIDDEN / _NOT_FOUND surface as a 4xx (thrown here);
-		// nothing to apply. Presence-only report, no PII.
-		reportError({ surface: "onboarding", error_code: "company_defaults", message: "" });
+		// nothing to apply. _NOT_FOUND is EXPECTED noise - this fires on every
+		// keystroke of a Company that hasn't resolved yet (debounced, but still
+		// constant), so it is never reported; genuinely unexpected failures
+		// (FORBIDDEN, network, 5xx) still are. Presence-only report, no PII.
+		if (!isExpectedCompanyDefaultsMiss(e)) {
+			reportError({ surface: "onboarding", error_code: "company_defaults", message: "" });
+		}
 	}
 }
 
