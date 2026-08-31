@@ -2131,3 +2131,146 @@ class TestMacroSkillFlagSeparation(FrappeTestCase):
 		self.assertIsNotNone(pending_confirm.peek(token), "the refusal does not consume the token")
 		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
 		self.assertTrue(callable(session_lifecycle.reap_stranded_skill_autorun))
+
+
+# --------------------------------------------------------------------------- #
+# The shared gate-branch covered-write CORE (api._run_covered_write). The macro
+# and skill gate branches had DRIFTED: the skill branch (I9) leaked permlevel>0
+# fields from a run_method Document return and (I5) dropped the step-2+ run_import
+# completion announcement, and (I2) no gate branch stamped a queryable receipt
+# provenance for a skill run. The four findings are now applied identically on
+# both branches via _run_covered_write; these tests pin them on the SKILL path,
+# end-to-end through the gate (api._run_tool), not the confirm path.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeRunMethodDoc:
+	"""Stand-in for a run_method Document return carrying a permlevel>0 field.
+	``apply_fieldlevel_read_permissions`` models Frappe's real permlevel stripping (the
+	real method is Frappe's own, separately tested) by nulling the restricted field, so
+	the test can assert the gate actually INVOKED the filter on the auto-run path."""
+
+	def __init__(self):
+		self.name = "FAKE-RM-DOC-1"
+		self.valuation_rate = 999.0  # a permlevel>0 field that must never reach the model
+		self.filtered = False
+
+	def apply_fieldlevel_read_permissions(self):
+		self.valuation_rate = None
+		self.filtered = True
+
+
+class TestSkillAutorunCoveredWriteCore(FrappeTestCase):
+	"""The four findings (I9 read-filter, I5 import announce, I2 receipt provenance)
+	pinned on the SKILL auto-run gate branch, driven through api._run_tool so the whole
+	gate -> _run_covered_write path is exercised, not the confirm path."""
+
+	ANN = "Jarvis Import Announcement"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+		# A real Data Import to be the announcement's Link target (staged, never run) so
+		# bind_after_run_import's link validation passes and a row is actually created.
+		di = frappe.new_doc("Data Import")
+		di.reference_doctype = "Contact"  # a core doctype with allow_import=1
+		di.import_type = "Insert New Records"
+		di.mute_emails = 1
+		di.insert(ignore_permissions=True)
+		cls.di_name = di.name
+		frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.db.delete(cls.ANN, {"data_import": cls.di_name})
+		if frappe.db.exists("Data Import", cls.di_name):
+			frappe.delete_doc("Data Import", cls.di_name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		from jarvis.tools import _agent_run_ctx
+
+		# Never leak a provenance marker between tests (consume-once, both kinds).
+		_agent_run_ctx.take_armed_by_skill()
+		_agent_run_ctx.take_armed_by_macro()
+		frappe.set_user(self._orig)
+		frappe.db.delete(self.ANN)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.db.delete(MSG, {"conversation": conv})
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	# I9 - run_method permlevel read-filter --------------------------------------
+	def test_run_method_document_return_is_permlevel_filtered(self):
+		"""A run_method whose confirmed dispatch returns a Document has the field-level
+		read filter applied on the AUTO-RUN path, so a permlevel>0 field the agent can't
+		read is stripped before it reaches the receipt / model context. MUTATION: drop
+		``_apply_run_method_read_filter`` from ``_run_covered_write`` -> this goes red."""
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		doc = _FakeRunMethodDoc()
+		with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": doc}) as disp:
+			r = api._run_tool("run_method", {"method": "some.method"}, conversation=conv)
+		disp.assert_called_once()
+		self.assertTrue(r["ok"])
+		self.assertTrue(doc.filtered, "the gate must invoke the run_method read-filter under skill autorun")
+		self.assertIsNone(doc.valuation_rate, "the permlevel-restricted field must be stripped, not leaked")
+
+	# I5 - run_import completion announcement ------------------------------------
+	def test_run_import_autorun_binds_completion_announcement(self):
+		"""A run_import auto-run at step 2+ (through the GATE branch, NOT approve_and_run)
+		binds a Jarvis Import Announcement so an unattended import still reports done -
+		the skill branch had dropped this. MUTATION: drop the run_import announce from
+		``_run_covered_write`` -> this goes red."""
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		with patch("jarvis.api.dispatch", return_value={"data_import": self.di_name}):
+			r = api._run_tool("run_import", {"filename": "x.csv"}, conversation=conv)
+		self.assertNotEqual(
+			(r.get("data") or {}).get("status"), "pending_confirmation", "the covered import ran uncarded"
+		)
+		self.assertTrue(
+			frappe.db.exists(self.ANN, {"data_import": self.di_name}),
+			"a step-2+ run_import auto-run must bind its completion announcement",
+		)
+
+	# I2 - queryable receipt provenance ------------------------------------------
+	def test_autorun_receipt_carries_skill_provenance_label(self):
+		"""An uncarded covered write under an approved skill run leaves a VISIBLE,
+		queryable receipt: action_outcome=auto_applied + armed_by_skill=<skill docname>
+		(NOT armed_by_macro). End-to-end: the gate branch stamps the provenance marker,
+		the receipt persist consumes it and labels the row."""
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		sk = "sk-skill-prov-test"
+		frappe.db.set_value(CONV, conv, "session_key", sk, update_modified=False)
+		frappe.db.commit()
+		docname = frappe.db.get_value(CONV, conv, "skill_autorun_skill")
+		self.assertTrue(docname, "the stamped run points at an armed skill docname")
+		with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}):
+			api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		# The gate stashed the skill provenance marker; the receipt persist (the model
+		# path's inline-write persist) consumes it and labels the receipt.
+		api._persist_and_publish_tool_call(
+			session_key=sk,
+			tool="run_method",
+			args={"method": "frappe.ping"},
+			result={"ok": True, "data": {}},
+			tool_call_id="tc-skill-prov-1",
+		)
+		row = frappe.get_all(
+			MSG,
+			filters={"conversation": conv, "role": "tool", "tool_call_id": "tc-skill-prov-1"},
+			fields=["action_outcome", "armed_by_skill", "armed_by_macro"],
+		)
+		self.assertEqual(len(row), 1)
+		self.assertEqual(row[0].action_outcome, "auto_applied")
+		self.assertEqual(row[0].armed_by_skill, docname, "the receipt carries the armed skill docname")
+		self.assertFalse(row[0].armed_by_macro, "a skill run must NOT be mislabelled as an armed macro")

@@ -278,6 +278,7 @@ def _dispatch_from_session(
 	finally:
 		_agent_run_ctx.clear_session_key()
 		_agent_run_ctx.take_armed_by_macro()  # belt: never leak an armed marker across dispatches
+		_agent_run_ctx.take_armed_by_skill()  # belt: same for the approved-skill-run marker
 
 
 _STALE_PAIRING_DEDUPE_TTL_S = 3600
@@ -349,11 +350,16 @@ def _persist_and_publish_tool_call(
 	# of a silent Activity-accordion tool row.
 	from jarvis.tools import _agent_run_ctx
 
+	# An uncarded auto-run write carries EITHER a macro provenance (armed macro's
+	# skip_confirmation) or a skill provenance (approved run's skill_autorun) - never
+	# both (the gate branches are mutually exclusive, macro-first). Consume both markers
+	# (consume-once) so neither leaks onto the next, unrelated call in a reused worker.
 	armed_by_macro = _agent_run_ctx.take_armed_by_macro()
+	armed_by_skill = _agent_run_ctx.take_armed_by_skill()
 	# A FAILED armed write must still be visible (it ran uncarded, unattended, and
 	# broke - exactly what T8 surfaces): label it "failed" (a red chip carrying the
-	# macro provenance) rather than letting it fall into the collapsed Activity row.
-	if armed_by_macro:
+	# provenance) rather than letting it fall into the collapsed Activity row.
+	if armed_by_macro or armed_by_skill:
 		armed_outcome = "auto_applied" if (isinstance(result, dict) and result.get("ok")) else "failed"
 	else:
 		armed_outcome = None
@@ -364,6 +370,7 @@ def _persist_and_publish_tool_call(
 		result,
 		action_outcome=armed_outcome,
 		armed_by_macro=armed_by_macro if armed_outcome else None,
+		armed_by_skill=armed_by_skill if armed_outcome else None,
 		tool_call_id=tool_call_id,
 	)
 
@@ -409,6 +416,7 @@ def persist_tool_receipt(
 	*,
 	action_outcome: str | None = None,
 	armed_by_macro: str | None = None,
+	armed_by_skill: str | None = None,
 	tool_call_id: str | None = None,
 ) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
@@ -482,6 +490,7 @@ def persist_tool_receipt(
 				"tool_call_id": tool_call_id or None,
 				"action_outcome": action_outcome or None,
 				"armed_by_macro": armed_by_macro or None,
+				"armed_by_skill": armed_by_skill or None,
 				"ref_doctype": ref_doctype,
 				"ref_name": ref_name,
 				"content": f"{tool} → {action_outcome or status}",
@@ -1456,6 +1465,80 @@ def dispatch_confirmed(tool: str, args: dict) -> dict:
 	return _dispatch_and_wrap(tool, args, is_write=True)
 
 
+def _apply_run_method_read_filter(tool: str, result) -> None:
+	"""I9/I6: ``run_method`` returns its target Document verbatim (unlike get_doc /
+	create_doc, which permlevel-filter before ``as_dict``). Strip permlevel>0 fields the
+	acting agent cannot read from that Document return BEFORE it reaches the receipt chip
+	or the model's continuation dump - otherwise a rate/valuation leaks into the model
+	context on an uncarded auto-run.
+
+	Best-effort: a filter hiccup must never fail an already-committed write (that would
+	roll it back for a cosmetic step). Shared by the confirmed paths
+	(``_confirm_core`` / ``approve_and_run``) and the gate-branch auto-run core
+	(``_run_covered_write``) so the filter is written ONCE, not triple-maintained (I6)."""
+	if tool != "run_method" or not (isinstance(result, dict) and result.get("ok")):
+		return
+	_ret = result.get("data")
+	if hasattr(_ret, "apply_fieldlevel_read_permissions"):
+		try:
+			_ret.apply_fieldlevel_read_permissions()
+		except Exception:
+			frappe.log_error(
+				title="run_method receipt permlevel filter failed",
+				message=frappe.get_traceback(),
+			)
+
+
+def _run_covered_write(
+	tool: str,
+	args: dict,
+	*,
+	conv: str,
+	owner_user: str,
+	provenance_kind: str,
+	provenance_name: str | None,
+) -> dict:
+	"""Shared core for a gate-branch COVERED WRITE that runs uncarded under an armed
+	macro (``skip_confirmation``) or an approved skill run (``skill_autorun``).
+
+	The two gate branches drifted apart (each hand-rolled the dispatch + a subset of the
+	cross-cutting steps), so the review found real gaps - the skill branch leaked
+	permlevel fields and dropped a step-2+ import announcement. This helper is the ONE
+	place the cross-cutting core lives, applied identically on both branches:
+
+	  1. ``dispatch_confirmed`` the stored call;
+	  2. I9 - run_method permlevel read-filter (strip fields the agent can't read);
+	  3. I5 - run_import completion announcement (the gate-branch twin of the confirm
+	     path's ``bind_after_run_import``, so an uncarded/unattended import still reports
+	     done - the skill branch had dropped this);
+	  4. I2 - provenance marker (consume-once) so the receipt persist labels the row
+	     ``auto_applied`` + a queryable ``armed_by_macro`` / ``armed_by_skill``.
+
+	Callers keep their OWN pre-dispatch guards (macro: kill-switch; skill: cancel-gate +
+	live-disarm re-check + sliding TTL) and their OWN post-dispatch flag handling (skill:
+	slide/clear on ``result.ok``). This helper is ONLY the dispatch + filter + announce +
+	provenance core - deliberately not the receipt/continuation settlement tail."""
+	result = dispatch_confirmed(tool, args)
+	_apply_run_method_read_filter(tool, result)
+	if tool == "run_import" and isinstance(result, dict) and result.get("ok"):
+		# The gate branch bypasses _confirm_core, where a confirmed run_import normally
+		# binds its completion announcement. Synthesize the record from the gate locals
+		# (there is no pending-confirm record here); bind is self-gating + best-effort.
+		from jarvis.chat.import_announce import bind_after_run_import
+
+		bind_after_run_import({"tool": "run_import", "conversation": conv, "owner": owner_user}, result)
+	from jarvis.tools import _agent_run_ctx
+
+	# I2: stash the arming provenance for the receipt persist (consume-once). macro and
+	# skill use distinct markers so the receipt chip / audit field never mislabels one as
+	# the other (a skill run is NOT "armed macro X").
+	if provenance_kind == "macro":
+		_agent_run_ctx.set_armed_by_macro(provenance_name)
+	elif provenance_kind == "skill":
+		_agent_run_ctx.set_armed_by_skill(provenance_name)
+	return result
+
+
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
 	"""Parse args + dispatch + wrap in the bench's standard envelope.
 
@@ -1633,41 +1716,30 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			and _conv_flags.get("skip_confirmation")
 			and not _armed_skip_disabled()
 		):
-			result = dispatch_confirmed(tool, args)
 			# Provenance for the receipt (T8): which armed macro authorized this uncarded
-			# write. Consumed once by the receipt persist, which labels the row
-			# action_outcome=auto_applied + armed_by_macro so an armed write is a visible,
-			# queryable receipt - not silence-by-omission.
-			from jarvis.tools import _agent_run_ctx
-
-			# Always label an armed write (we are in the armed branch, so it IS armed):
-			# resolve the human macro_name (Jarvis Macro autoname is a hash, so the run's
-			# `macro` docname is opaque) and fall back to a generic marker if the run-row
-			# lookup misses (the abnormal lingering-flag state) - never silently unlabelled.
+			# write. Always label an armed write (we are in the armed branch, so it IS
+			# armed): resolve the human macro_name (Jarvis Macro autoname is a hash, so the
+			# run's `macro` docname is opaque) and fall back to a generic marker if the
+			# run-row lookup misses (the abnormal lingering-flag state) - never silently
+			# unlabelled. The covered-write CORE (dispatch + run_method read-filter +
+			# run_import announcement + provenance stash) is shared with the skill branch
+			# via _run_covered_write so the two can never drift apart again.
 			_armed_run_macro = frappe.db.get_value(
 				"Jarvis Macro Run", {"conversation": conv, "status": "running"}, "macro"
 			)
-			_agent_run_ctx.set_armed_by_macro(
-				(
-					frappe.db.get_value("Jarvis Macro", _armed_run_macro, "macro_name")
-					if _armed_run_macro
-					else None
-				)
-				or "an armed macro"
+			_macro_name = (
+				frappe.db.get_value("Jarvis Macro", _armed_run_macro, "macro_name")
+				if _armed_run_macro
+				else None
+			) or "an armed macro"
+			return _run_covered_write(
+				tool,
+				args,
+				conv=conv,
+				owner_user=owner_user,
+				provenance_kind="macro",
+				provenance_name=_macro_name,
 			)
-			if tool == "run_import":
-				# The armed branch bypasses _confirm_core, which is where a CONFIRMED
-				# run_import normally gets its completion announcement bound. Bind it here
-				# too so an armed (unattended) import still reports done/failed into the run
-				# log. Synthesize the record from the gate locals (conv + owner_user) - there
-				# is no pending-confirm record on this path. Self-gating + best-effort (it
-				# no-ops on a non-ok result, a missing data_import, or the kill switch).
-				from jarvis.chat.import_announce import bind_after_run_import
-
-				bind_after_run_import(
-					{"tool": "run_import", "conversation": conv, "owner": owner_user}, result
-				)
-			return result
 		# Skill "Approve & run" auto-run bypass (design §3.4): a conversation in an
 		# APPROVED skill run (skill_autorun=1, stamped by approve_and_run on step-1
 		# success) runs the explicit _SKILL_AUTORUN_COVERED allowlist uncarded, sliding
@@ -1715,7 +1787,19 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				and (frappe.utils.now_datetime() - frappe.utils.get_datetime(autorun_at)).total_seconds()
 				<= _SKILL_AUTORUN_TTL_S
 			):
-				result = dispatch_confirmed(tool, args)
+				# The covered-write CORE (dispatch + run_method read-filter + run_import
+				# announcement + provenance stash) is shared with the macro branch via
+				# _run_covered_write so the two can never drift; the skill run's provenance is
+				# the armed skill docname (queryable as armed_by_skill). The slide/clear below
+				# is skill-only post-dispatch handling and stays in this branch.
+				result = _run_covered_write(
+					tool,
+					args,
+					conv=conv,
+					owner_user=owner_user,
+					provenance_kind="skill",
+					provenance_name=autorun_skill,
+				)
 				# Hard-stop-on-error: the first covered ok:False clears the flag so the
 				# next write re-cards; a success slides the timestamp forward.
 				if result.get("ok"):

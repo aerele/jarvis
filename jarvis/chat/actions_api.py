@@ -561,20 +561,11 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 	try:
 		with impersonate(exec_user):
 			result = api.dispatch_confirmed(record["tool"], record["args"])
-			# run_method returns its target verbatim; apply the same field-level read
-			# filter _confirm_core does so a permlevel>0 field the agent can't read is
-			# stripped before it reaches the receipt / continuation. Best-effort - a
-			# filter hiccup must never fail an already-committed call.
-			if record["tool"] == "run_method" and isinstance(result, dict) and result.get("ok"):
-				_ret = result.get("data")
-				if hasattr(_ret, "apply_fieldlevel_read_permissions"):
-					try:
-						_ret.apply_fieldlevel_read_permissions()
-					except Exception:
-						frappe.log_error(
-							title="approve_and_run run_method receipt permlevel filter failed",
-							message=frappe.get_traceback(),
-						)
+			# run_method returns its target verbatim; strip permlevel>0 fields the agent
+			# can't read before they reach the receipt / continuation. Shared with the gate
+			# branches (_run_covered_write) + _confirm_core via one helper (I6) so this
+			# filter is not triple-maintained. Best-effort - a hiccup never fails the call.
+			api._apply_run_method_read_filter(record["tool"], result)
 	except Exception:
 		# An UNEXPECTED (untranslated) exception from the confirmed write would 500
 		# with the token ALREADY consumed. Roll back the partial write, log it, and
@@ -628,6 +619,10 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 	# conversation, or the client-supplied passed_conv ONLY when the token was minted
 	# conversation-less AND the caller owns that conversation (a skill_docname token
 	# is always conversation-bound, so the fallback is a belt-and-suspenders mirror).
+	# DEFERRED FOLLOW-UP (I6): this settlement TAIL (receipt + continuation) is still
+	# duplicated between approve_and_run and _confirm_core. Only the small run_method
+	# read-filter + the run_import announce are de-duplicated in this pass; extracting the
+	# shared settlement tail is a larger, riskier refactor left for a later change.
 	conv = record.get("conversation")
 	if not conv and _owns_conversation(passed_conv):
 		conv = passed_conv
@@ -734,21 +729,12 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 			# the gate so the stored call actually executes instead of parking again.
 			result = api.dispatch_confirmed(record["tool"], record["args"])
 			# run_method returns its target verbatim, unlike get_doc/create_doc which
-			# permlevel-filter before as_dict. Apply the same field-level read filter to
-			# a Document return HERE (still as exec_user), so a permlevel>0 field the
-			# agent can't read is stripped before it reaches the receipt chip or the
-			# model's continuation dump. Best-effort: a filter hiccup must never fail an
-			# already-committed call (that would roll back the write for a cosmetic step).
-			if record["tool"] == "run_method" and isinstance(result, dict) and result.get("ok"):
-				_ret = result.get("data")
-				if hasattr(_ret, "apply_fieldlevel_read_permissions"):
-					try:
-						_ret.apply_fieldlevel_read_permissions()
-					except Exception:
-						frappe.log_error(
-							title="run_method receipt permlevel filter failed",
-							message=frappe.get_traceback(),
-						)
+			# permlevel-filter before as_dict. Strip permlevel>0 fields the agent can't read
+			# from a Document return HERE (still as exec_user), before they reach the receipt
+			# chip or the model's continuation dump. Shared with the gate branches
+			# (_run_covered_write) + approve_and_run via one helper (I6) so this filter is
+			# not triple-maintained. Best-effort - a hiccup never fails the committed call.
+			api._apply_run_method_read_filter(record["tool"], result)
 	except Exception:
 		# F5: an UNEXPECTED (untranslated) exception from the confirmed write would
 		# otherwise 500 with the token ALREADY consumed (GETDEL above) - no receipt,
