@@ -192,7 +192,7 @@
 						aria-label="Voice input is not set up on this workspace"
 						@click="
 							toast.info(
-								`Voice input isn't set up on this workspace yet — ask your administrator.`
+								`Voice input isn't set up on this workspace yet. Ask your administrator.`
 							)
 						"
 					>
@@ -507,7 +507,7 @@ async function approve(pa) {
 			toast.error(
 				keepCard
 					? r.error.message
-					: "Couldn't confirm — it may have expired. Ask again in the chat."
+					: "Couldn't confirm. It may have expired. Ask again in the chat."
 			);
 		}
 	} catch (e) {

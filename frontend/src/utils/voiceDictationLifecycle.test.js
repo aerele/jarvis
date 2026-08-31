@@ -197,7 +197,7 @@ test("ChatView mirrors every fragment and transcribes the assembled take exactly
 	);
 	assert.match(
 		body,
-		/Recording stopped at the 5-minute limit — transcribing what you said\./,
+		/Recording stopped at the 5-minute limit\. Transcribing what you said\./,
 		"the cap's toast must say the audio is being used, not lost"
 	);
 });
@@ -253,7 +253,7 @@ test("the done-recording captureSentInPayload → acknowledge release is untouch
 test("the failed chip and its Retry tooltip branch on sentWithout", () => {
 	assert.match(
 		src,
-		/\? `Recording \$\{len\} didn't transcribe — your last message went without it\$\{why\}`\n\t\t: `Recording \$\{len\} didn't transcribe\$\{why\}`;/,
+		/\? `Recording \$\{len\} didn't transcribe, your last message went without it\$\{why\}`\n\t\t: `Recording \$\{len\} didn't transcribe\$\{why\}`;/,
 		"identical copy for both states is exactly what makes a correctly-retained chip read as stuck"
 	);
 	assert.match(
@@ -344,12 +344,12 @@ test("a measured-silent take is RETAINED and actionable — it is never deleted 
 	);
 	assert.match(
 		src,
-		/notify\("Nothing was heard — try closer to the microphone\.", \{ type: "info" \}\);/,
+		/notify\("Nothing was heard\. Try closer to the microphone\.", \{ type: "info" \}\);/,
 		"…and the user is still told, in the moment, what happened"
 	);
 	assert.match(
 		src,
-		/if \(f\.noSpeech\) return `Recording \$\{len\} — nothing was heard`;/,
+		/if \(f\.noSpeech\) return `Recording \$\{len\}, nothing was heard`;/,
 		"the chip must say what happened rather than the riddle 'didn't transcribe'"
 	);
 	assert.match(
@@ -368,7 +368,7 @@ test("the recovery banner names the recording's length and hides Transcribe when
 	);
 	assert.match(
 		src,
-		/can't be rebuilt \(\$\{len\}\) — its first fragment is missing/,
+		/can't be rebuilt \(\$\{len\}\), its first fragment is missing/,
 		"a take with no fragment 0 has no initialisation segment — say so rather than fail on click"
 	);
 	const banner = src.slice(
@@ -427,7 +427,7 @@ test("the un-saveable-audio chip has a way out, and its confirm names the real r
 	);
 	assert.match(
 		src,
-		/"This audio could not be saved to disk — discarding loses it\./,
+		/"This audio could not be saved to disk, discarding loses it\./,
 		"the copy must not borrow the durable case's reassurance: there is no second copy here"
 	);
 });

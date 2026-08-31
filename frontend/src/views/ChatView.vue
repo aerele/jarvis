@@ -606,7 +606,7 @@
 						<template v-if="macroRun.status === 'running'">
 							<span class="jv-macrobar-dot spin"></span>
 							<span class="jv-macrobar-txt"
-								>Running macro — step {{ macroRun.step }}/{{ macroRun.total
+								>Running macro, step {{ macroRun.step }}/{{ macroRun.total
 								}}<template v-if="macroRun.label"
 									>: {{ macroRun.label }}</template
 								></span
@@ -1375,7 +1375,7 @@
 											‹
 										</button>
 										<span class="jv-cards-pginfo"
-											>{{ cardPageOf(m) * CARD_PAGE_SIZE + 1 }}–{{
+											>{{ cardPageOf(m) * CARD_PAGE_SIZE + 1 }}-{{
 												Math.min(
 													(cardPageOf(m) + 1) * CARD_PAGE_SIZE,
 													cardsOf(m).cards.length
@@ -1732,7 +1732,7 @@
 										v-if="!m.streaming && enrichmentPending.has(m.name)"
 										class="jv-meta"
 										style="opacity: 0.6"
-										title="Finishing up — attachments and extras are still being added"
+										title="Finishing up. Attachments and extras are still being added"
 									>
 										<span>Finishing…</span>
 									</div>
@@ -2690,7 +2690,7 @@
 											ui.stt_enabled
 												? startNudgeMic()
 												: notify(
-														`Voice notes aren't set up on this workspace — ask your administrator.`,
+														`Voice notes aren't set up on this workspace. Ask your administrator.`,
 														{ type: 'info' }
 												  )
 										"
@@ -2851,7 +2851,7 @@
 									}}
 									<button
 										class="jv-voicechip-quiet"
-										title="Stop waiting for this transcription — the recording is kept, with Retry and Download"
+										title="Stop waiting for this transcription. The recording is kept, with Retry and Download"
 										aria-label="Cancel this transcription"
 										@click="cancelTranscribing(t.id)"
 									>
@@ -3143,7 +3143,7 @@
 								"
 								@click="
 									notify(
-										`No wiki pages yet — I'll ask when something's worth remembering, or add one in Wiki.`,
+										`No wiki pages yet. I'll ask when something's worth remembering, or add one in Wiki.`,
 										{ type: 'info' }
 									)
 								"
@@ -3169,7 +3169,7 @@
 								class="jv-iconbtn"
 								:title="
 									groundNextTurn
-										? 'Wiki grounding armed — your next message will be answered from the wiki (click to turn off)'
+										? 'Wiki grounding armed. Your next message will be answered from the wiki (click to turn off)'
 										: 'Ground your next message on the org wiki'
 								"
 								@click="groundNextTurn = !groundNextTurn"
@@ -3304,7 +3304,7 @@
 									>
 									<button
 										class="jv-mic-cancel"
-										title="Cancel recording (Esc) — throws this whole recording away; text already in the box is kept"
+										title="Cancel recording (Esc). Throws this whole recording away; text already in the box is kept"
 										aria-label="Cancel recording"
 										@click="cancelMic"
 									>
@@ -3771,7 +3771,7 @@
 												"
 											>
 												<b>{{ it.value }}</b
-												><span v-if="it.label"> — {{ it.label }}</span>
+												><span v-if="it.label">: {{ it.label }}</span>
 											</button>
 										</div>
 									</template>
@@ -3911,7 +3911,7 @@
 														>
 															<b>{{ it.value }}</b
 															><span v-if="it.label">
-																— {{ it.label }}</span
+																: {{ it.label }}</span
 															>
 														</button>
 													</div>
@@ -5177,8 +5177,8 @@ function goRenew() {
 }
 const recoveringLabel = computed(() =>
 	recovering.value && recovering.value.reason === "compacting"
-		? "That was a big one — reorganizing the conversation and retrying…"
-		: "Reconnecting — your answer will appear here when it's ready."
+		? "That was a big one, reorganizing the conversation and retrying…"
+		: "Reconnecting. Your answer will appear here when it's ready."
 );
 // Failure taxonomy → a plain-language headline + "what you can do" hint. The
 // raw string still shows behind "Show details". `code` comes from the live
@@ -5196,7 +5196,7 @@ const recoveringLabel = computed(() =>
 // (lib/errors.js); a done reply renders normally), kept so the mapping is
 // complete for WP-1 (SUXI-7).
 const TURN_STATE_COPY = {
-	queued: (pos) => (pos && pos > 0 ? `Queued — ~${pos} ahead` : "Queued"),
+	queued: (pos) => (pos && pos > 0 ? `Queued, ~${pos} ahead` : "Queued"),
 	// SUXF-3: the pump introduces a queued->preparing->ready window (prompt assembly
 	// + session bootstrap) between "queued" and the stream. Give it copy so the chip
 	// reads "Starting…" instead of freezing on a stale "~N ahead" / going silent.
@@ -5451,7 +5451,7 @@ const wikiEmpty = computed(() => ui.value?.wiki_state === "empty");
 // One message shape for every not-set-up feature, so the wording cannot drift between
 // the surfaces (a user with STT off sees the nudge mic and the composer mic at once).
 function explainUnavailable(feature) {
-	notify(`${feature} isn't set up on this workspace yet — ask your administrator.`, {
+	notify(`${feature} isn't set up on this workspace yet. Ask your administrator.`, {
 		type: "info",
 	});
 }
@@ -5694,7 +5694,7 @@ const assistantMsgCount = computed(
 );
 const avgTokensPerMsg = computed(() => {
 	const n = msgCount.value;
-	if (!usage.value || !n) return "—";
+	if (!usage.value || !n) return "-";
 	return fmtTokens(Math.round((usage.value.chat_tokens || 0) / n));
 });
 const starredCount = computed(() => store.conversations.filter((c) => c.starred).length);
@@ -6226,7 +6226,7 @@ function answerConfirm(ok, label) {
 	// Echo the card's own wording so the transcript reads like what the user
 	// clicked ("Yes — Confirm and save") instead of a canned "go ahead".
 	const l = (label || "").trim();
-	send(ok ? (l ? `Yes — ${l}` : "Yes, go ahead.") : "No, cancel that.");
+	send(ok ? (l ? `Yes: ${l}` : "Yes, go ahead.") : "No, cancel that.");
 }
 
 // --- Field-control helpers shared by the confirm card and the record draft
@@ -6818,7 +6818,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			// (rich detail + hint, and nothing was saved) instead of throwing a
 			// raw Frappe 403/417. Keep the panel open so the values are editable.
 			p.applying = false;
-			p.error = r.error || { message: "Could not save — check the values." };
+			p.error = r.error || { message: "Could not save. Check the values." };
 			return;
 		}
 		closeDraftPanel();
@@ -7002,8 +7002,8 @@ async function confirmPending(pa) {
 				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
 				notify(
 					expired
-						? "This confirmation expired — tell me the action again to retry it."
-						: "Couldn't confirm — it may have been handled in another tab. Refresh, or ask me to try again.",
+						? "This confirmation expired. Tell me the action again to retry it."
+						: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again.",
 					{ type: "error" }
 				);
 				return;
@@ -8192,7 +8192,7 @@ async function selectConversation(id) {
 // the extracted reason so a non-string Frappe error payload can't throw inside the
 // caller's catch and re-swallow the very failure we're trying to report.
 function notifyActionError(prefix, e) {
-	notify(`${prefix} — ${String(errMessage(e)).replace(/\.$/, "")}. Try again.`, {
+	notify(`${prefix}: ${String(errMessage(e)).replace(/\.$/, "")}. Try again.`, {
 		type: "error",
 	});
 }
@@ -9366,7 +9366,7 @@ const voiceBusyCount = computed(
 // careful about everywhere else.
 const voiceSendBlockReason = computed(() => {
 	if (micState.value === "recording")
-		return "Stop the dictation first — its words are still coming.";
+		return "Stop the dictation first. Its words are still coming.";
 	if (voiceBusyCount.value > 0)
 		return "Waiting for the dictation to land in the box (or cancel it below).";
 	return "";
@@ -9530,7 +9530,7 @@ function _onVoicePersistFail() {
 	if (micState.value !== "recording") return;
 	void stopMic();
 	notify(
-		"Couldn't safely save your voice audio on this device (storage may be full or private mode). Recording stopped — download the recording to keep it, or retry once you've freed space.",
+		"Couldn't safely save your voice audio on this device (storage may be full or private mode). Recording stopped. Download the recording to keep it, or retry once you've freed space.",
 		{ type: "error" }
 	);
 }
@@ -9559,7 +9559,7 @@ const micRec = useDictationRecorder({
 		// transcribed, and one audible word anywhere in the take clears the gate.
 		if (isNearSilent(take.peakRms)) {
 			voiceStore.finishSilent(id, take);
-			notify("Nothing was heard — try closer to the microphone.", { type: "info" });
+			notify("Nothing was heard. Try closer to the microphone.", { type: "info" });
 			return;
 		}
 		voiceStore.finish(id, take);
@@ -9574,7 +9574,7 @@ const micRec = useDictationRecorder({
 	// transcribed rather than refused after the fact.
 	onAutoStop: () => {
 		micState.value = "idle";
-		notify("Recording stopped at the 5-minute limit — transcribing what you said.", {
+		notify("Recording stopped at the 5-minute limit. Transcribing what you said.", {
 			type: "info",
 		});
 	},
@@ -9582,7 +9582,7 @@ const micRec = useDictationRecorder({
 	// mid-sentence surprise explained only afterwards.
 	onNearCap: (secondsLeft) => {
 		notify(
-			`${secondsLeft} seconds left before the 5-minute limit — finish your sentence and stop when you're ready.`,
+			`${secondsLeft} seconds left before the 5-minute limit. Finish your sentence and stop when you're ready.`,
 			{ type: "info" }
 		);
 	},
@@ -9656,22 +9656,22 @@ async function cancelMic() {
 // would be a riddle and the honest verb is "transcribe it anyway".
 const failedChipLabel = (f) => {
 	const len = _fmtClock(f.durationS);
-	if (f.noSpeech) return `Recording ${len} — nothing was heard`;
+	if (f.noSpeech) return `Recording ${len}, nothing was heard`;
 	// WHY it failed, from the server's own (secret-scrubbed) message: a permanent fault
 	// ("Speech-to-text is not enabled on this site.") and a transient blip are otherwise
 	// indistinguishable, so users Retry-loop the same upload forever and report nothing useful.
 	const why = f.error ? ` · ${f.error}` : "";
 	return f.sentWithout
-		? `Recording ${len} didn't transcribe — your last message went without it${why}`
+		? `Recording ${len} didn't transcribe, your last message went without it${why}`
 		: `Recording ${len} didn't transcribe${why}`;
 };
 const failedChipTitle = (f) => (f.error ? `Reason: ${f.error}` : "");
 const failedChipRetryLabel = (f) => (f.noSpeech ? "Transcribe anyway" : "Retry");
 const failedChipRetryTitle = (f) =>
 	f.sentWithout
-		? "Transcribe again — the words go into your current draft, not the message that already went"
+		? "Transcribe again. The words go into your current draft, not the message that already went"
 		: f.noSpeech
-		? "Send it for transcription anyway — nothing audible was measured, but the measurement can be wrong"
+		? "Send it for transcription anyway. Nothing audible was measured, but the measurement can be wrong"
 		: "Transcribe this recording again";
 function retryRecording(id) {
 	if (voiceStore) voiceStore.retry(id);
@@ -9696,7 +9696,7 @@ async function discardUnpersistedRecording(id) {
 	const ok = await confirm({
 		title: "Discard this recording?",
 		message:
-			"This audio could not be saved to disk — discarding loses it. It exists only in this tab, so a reload would lose it too. Download it first if you want to keep it.",
+			"This audio could not be saved to disk, discarding loses it. It exists only in this tab, so a reload would lose it too. Download it first if you want to keep it.",
 		danger: true,
 		confirmLabel: "Discard",
 		cancelLabel: "Keep",
@@ -9816,7 +9816,7 @@ const recoveryLabel = (t) => {
 	const len = _fmtClock(t.durationS || 0);
 	return t.complete
 		? `A recording from your last session wasn't transcribed (${len})`
-		: `A recording from your last session can't be rebuilt (${len}) — its first fragment is missing`;
+		: `A recording from your last session can't be rebuilt (${len}), its first fragment is missing`;
 };
 function recoverTake(t) {
 	// Never recover while recording: the composer is already filling from a live take, and the
@@ -9935,7 +9935,7 @@ const nudgeLabels = computed(() =>
 );
 const nudgeRec = useAudioRecorder({
 	onAutoStop: (r) => {
-		notify("Recording stopped at the 5-minute limit — transcribing.", { type: "info" });
+		notify("Recording stopped at the 5-minute limit. Transcribing.", { type: "info" });
 		_nudgeTranscribe(r);
 	},
 });
@@ -9968,7 +9968,7 @@ async function _nudgeTranscribe(r) {
 		const res = await voice.transcribeAudio(r.blob, { durationS: r.durationS });
 		const text = ((res && res.text) || "").trim();
 		if (!text) {
-			notify("Nothing was transcribed — try again closer to the microphone.", {
+			notify("Nothing was transcribed. Try again closer to the microphone.", {
 				type: "info",
 			});
 			if (nudge.value) nudge.value.mode = "idle";
@@ -10023,7 +10023,7 @@ async function saveNudgeNote() {
 			entities: JSON.stringify(n.entities || []),
 			source: "Chat Nudge",
 		});
-		notify(`Noted — ${agentName} will remember this`, { type: "success" });
+		notify(`Noted, ${agentName} will remember this`, { type: "success" });
 		nudge.value = null;
 	} catch (e) {
 		n.saving = false;
@@ -10038,7 +10038,7 @@ function dismissNudge() {
 	if (n) voice.dismissWikiNudge(n.conversationId).catch(() => {});
 	// the dismissal mutes a week of nudges here — say so, once, or users
 	// won't know they opted out
-	notify("Okay — won't ask again in this chat for a week.");
+	notify("Okay, won't ask again in this chat for a week.");
 }
 
 // ---- attachments ----
