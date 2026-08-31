@@ -588,17 +588,45 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 def _confirm_receipt_text(record: dict, result) -> str:
 	"""Short receipt line for the post-confirm continuation prompt: the call,
 	the created/affected record name when the result carries one, and the
-	outcome (including a bounded error message so the agent can react)."""
+	outcome (including a bounded error message so the agent can react).
+
+	run_method is the exception. It is the generic escape hatch for
+	data-returning whitelisted methods (getters, the make_* mappers), so its
+	whole value IS the returned payload - and because it is a gated write it
+	ALWAYS parks, making this receipt the only way its result reaches the model.
+	A plain "<call> succeeded" leaves the agent blind to the data it was asked
+	to use, so for a SUCCESSFUL run_method we append the FULL returned payload,
+	deliberately UNTRUNCATED - the agent needs all of it to act on the result.
+	It is serialized with frappe.as_json (the same encoder the inline tool path
+	uses at the HTTP boundary), which renders a returned Document via as_dict and
+	datetimes as ISO strings - where stdlib json.dumps(default=str) would emit a
+	useless repr for the make_* mappers' Document returns. Safe despite the
+	payload being attacker-influenceable: enqueue_continuation runs the whole
+	receipt through _safe_label_name (all whitespace - including any pretty-print
+	newlines - collapsed to single spaces, backticks disarmed) and quotes it as
+	inline-code DATA, so it can neither forge the [System] voice nor break out of
+	the code span - the same neutralization the record-name receipt relies on.
+	Serialization never raises out of here (the write already committed): an
+	exotic or circular return value falls back to a plain success line."""
 	from jarvis.api import _describe_call
 
+	is_run_method = record.get("tool") == "run_method"
 	desc = _describe_call(record.get("tool") or "", record.get("args") or {})
 	data = result.get("data") if isinstance(result, dict) else None
-	if isinstance(data, dict) and data.get("name"):
+	# The name-append keeps write receipts terse; run_method dumps the whole
+	# payload below (which already carries any name), so skip it there.
+	if not is_run_method and isinstance(data, dict) and data.get("name"):
 		desc += f" -> {data['name']}"
 	if isinstance(result, dict) and not result.get("ok"):
 		err = result.get("error") or {}
 		msg = str(err.get("message") or "")[:200] if isinstance(err, dict) else ""
 		return f"{desc} FAILED. {msg}".strip()
+	if is_run_method:
+		try:
+			payload = frappe.as_json(data)
+		except Exception:
+			return f"{desc} succeeded (return value could not be serialized for the receipt)."
+		return f"{desc} succeeded. Returned: {payload}"
 	return f"{desc} succeeded."
 
 
