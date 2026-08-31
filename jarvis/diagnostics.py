@@ -89,11 +89,23 @@ def force_resync(action: str = "reload") -> dict:
 	require_jarvis_admin()
 	if action not in ("reload", "restart"):
 		raise frappe.ValidationError(f"invalid action {action!r}; expected reload or restart")
+	from jarvis import admin_client
+
 	settings = frappe.get_single("Jarvis Settings")
 	# Always the admin path: the legacy local-agent sync was retired with
 	# the managed fleet (its method no longer exists), and _sync_via_admin
 	# surfaces its own clear error on an unconfigured bench.
-	settings._sync_via_admin(action)
+	try:
+		settings._sync_via_admin(action)
+	except admin_client.AdminAuthError:
+		# #388: _sync_via_admin now re-raises a genuine (non-"not paid") auth
+		# failure instead of swallowing it, so the RQ-enqueued caller sees it.
+		# This is the one SYNCHRONOUS, whitelisted caller with a JSON {ok, ...}
+		# contract of its own to preserve - _sync_via_admin already wrote the
+		# terminal "failed: auth: ..." status onto Settings before raising, so
+		# swallow here and let the reload below report it the same way every
+		# other outcome of this endpoint is reported.
+		pass
 	settings.reload()
 	return {
 		"action": action,
