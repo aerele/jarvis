@@ -3712,16 +3712,21 @@
 								:key="f.fieldname"
 								class="jv-draft-fld"
 								:class="{
-									missing: f.reqd && !String(f.value).trim(),
+									missing: isFieldMissing(f),
 									changed: f.changed,
 								}"
 							>
 								<label
 									>{{ f.label
-									}}<span v-if="f.reqd" class="jv-req"> *</span></label
+									}}<span v-if="f.reqd && !f.read_only" class="jv-req">
+										*</span
+									></label
 								>
 								<div class="jv-draft-ctl">
-									<template v-if="f.control === 'link'">
+									<span v-if="f.read_only" class="jv-draft-ro">{{
+										readonlyDisplay(f)
+									}}</span>
+									<template v-else-if="f.control === 'link'">
 										<input
 											class="jv-action-input"
 											v-model="f.value"
@@ -4137,6 +4142,14 @@ import AskCard from "@/components/chat/AskCard.vue";
 import { parseAsk } from "@/lib/chatAsk";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
+import {
+	checkToYesNo,
+	coerceOut,
+	coerceRow,
+	isFieldMissing,
+	isFieldWritable,
+	readonlyDisplay,
+} from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { shouldFollowBottom } from "@/lib/chatScroll";
 import { createRevealer } from "@/lib/streamReveal";
@@ -6283,10 +6296,6 @@ function _actField(meta, label) {
 	}
 	return null;
 }
-function _checkToYesNo(v) {
-	const s = typeof v === "string" ? v.toLowerCase() : v;
-	return ["1", 1, "yes", "true", true, "on"].includes(s) ? "Yes" : "No";
-}
 // --- Record draft panel: the action JSON is the draft; edits are local; apply
 // posts to actions_api (no LLM round-trip). ---
 const draftPanel = ref(null);
@@ -6395,7 +6404,7 @@ function _panelField(metaField, value) {
 	if (["date", "datetime", "time"].includes(control)) v = _normDateVal(metaField.fieldtype, v);
 	let orig = v;
 	if (control === "check") {
-		v = _checkToYesNo(v);
+		v = checkToYesNo(v);
 		orig = v;
 	}
 	if (control === "select" && Array.isArray(options) && v && !options.includes(v))
@@ -6475,9 +6484,10 @@ async function buildDraftModel(a) {
 		// Show: agent-proposed fields + required fields + (update) filled fields the agent referenced
 		if (!has && !f.reqd) continue;
 		const pf = _panelField(f, has ? proposed[f.fieldname] : baseV);
+		pf.proposed = has; // agent set a value for this field (vs. shown only because reqd)
 		if (verb === "update")
 			pf.orig =
-				baseV == null ? "" : String(pf.control === "check" ? _checkToYesNo(baseV) : baseV);
+				baseV == null ? "" : String(pf.control === "check" ? checkToYesNo(baseV) : baseV);
 		pf.changed = verb === "update" && String(pf.value) !== String(pf.orig);
 		fields.push(pf);
 		seen.add(f.fieldname);
@@ -6754,47 +6764,36 @@ watch(actionFor, () => {
 
 // --- apply wiring: draft panel create/update round-trip via apply_action ---
 
-function _coerceOut(f) {
-	if (f.control === "check") return f.value === "Yes" ? 1 : 0;
-	if (f.control === "number") return f.value === "" ? "" : Number(f.value);
-	return f.value;
-}
-function _coerceRow(t, r) {
-	const out = {};
-	for (const c of t.columns) {
-		if (c.read_only) continue;
-		let v = r[c.fieldname];
-		if (v === "" || v == null) continue;
-		if (["Int", "Float", "Currency", "Percent"].includes(c.fieldtype)) v = Number(v);
-		if (c.fieldtype === "Check") v = Number(v) ? 1 : 0;
-		out[c.fieldname] = v;
-	}
-	return out;
-}
-
 async function applyDraft(submitFlag, model = draftPanel.value) {
 	const p = model;
 	if (!p || p.applying) return;
 	const values = {};
 	for (const f of p.fields) {
-		if (f.read_only) continue;
+		// read_only gating + coercion live in lib/draftApply (unit-tested there): a
+		// read_only field is submitted only when the agent proposed it on a create;
+		// permlevel>0 fields stay guarded by Frappe's insert-time reset (see
+		// test_permlevel_leak: TestCreateDocPermlevelWriteReset).
+		if (!isFieldWritable(f, p.verb)) continue;
 		const changed = String(f.value) !== String(f.orig);
 		if (p.verb === "create" ? String(f.value).trim() !== "" : changed)
-			values[f.fieldname] = _coerceOut(f);
+			values[f.fieldname] = coerceOut(f);
 	}
 	for (const t of p.tables) {
-		const rows = t.rows.map((r) => _coerceRow(t, r)).filter((r) => Object.keys(r).length);
+		const rows = t.rows
+			.map((r) => coerceRow(t, r, p.verb))
+			.filter((r) => Object.keys(r).length);
 		if (p.verb === "create") {
 			if (rows.length) values[t.fieldname] = rows;
 		} else if (
 			JSON.stringify(rows) !==
 			JSON.stringify(
 				(JSON.parse(t.origJson) || []).map((r) =>
-					_coerceRow(
+					coerceRow(
 						t,
 						Object.fromEntries(
 							Object.entries(r).map(([k, v]) => [k, v == null ? "" : String(v)])
-						)
+						),
+						"update"
 					)
 				)
 			)
@@ -14270,6 +14269,15 @@ onUnmounted(() => {
 }
 .jv-draft-ctl {
 	position: relative;
+}
+/* A read_only main field is shown, not editable: a muted static value (mirrors the
+   child-grid jv-grid-ro treatment) so the user can't type into a field the confirm
+   would discard. A proposed read_only value still shows here for review. */
+.jv-draft-ro {
+	display: inline-block;
+	padding: 4px 0;
+	color: var(--text-2);
+	word-break: break-word;
 }
 .jv-draft-table-title {
 	font-size: 12px;
