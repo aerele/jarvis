@@ -2383,3 +2383,309 @@ class TestSkillAutorunCoveredWriteCore(FrappeTestCase):
 		self.assertEqual(row[0].action_outcome, "auto_applied")
 		self.assertEqual(row[0].armed_by_skill, docname, "the receipt carries the armed skill docname")
 		self.assertFalse(row[0].armed_by_macro, "a skill run must NOT be mislabelled as an armed macro")
+
+
+# --------------------------------------------------------------------------- #
+# Testing-lane review follow-ups: real (non-mocked) end-to-end coverage of
+# approve_and_run + the gate branch, the macro-first cross-fire invariant
+# (design §3.4.1), the flag-set-BEFORE-continuation ordering, the "no pending
+# card AT ALL" (not "no destructive card") terminal predicate, and the
+# foreign-conversation guard on approve_and_run.
+# --------------------------------------------------------------------------- #
+
+
+class TestApproveAndRunRealIntegration(FrappeTestCase):
+	"""End-to-end with ``dispatch_confirmed`` NOT mocked: a real armed-skill token,
+	minted through the actual park/offer path, actually executes its write. Mirrors
+	test_confirm_gate.TestConfirmTool.test_confirm_executes_and_is_single_use (a real
+	create_doc, confirmed, then the ToDo is asserted to exist) but for approve_and_run
+	and the auto-run gate branch."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+		_cleanup_user_conversations(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		frappe.db.delete(SKILL, {"owner": TEST_USER})
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			turn_message_binding.clear_run_cancel(conv)
+			frappe.cache().delete_value(turn_message_binding._key(conv))
+			frappe.db.delete(MSG, {"conversation": conv})
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		for name in frappe.get_all("ToDo", filters={"owner": TEST_USER}, pluck="name"):
+			frappe.delete_doc("ToDo", name, force=True, ignore_permissions=True)
+		_cleanup_user_conversations(TEST_USER)
+		frappe.db.commit()
+
+	def test_real_create_doc_park_then_approve_and_run_executes_it(self):
+		"""T1(a): mint the token through the REAL offer path (a create_doc parked
+		under a turn that invoked exactly one armed skill), then drive approve_and_run
+		with NO dispatch_confirmed mock. The ToDo must actually exist afterwards, the
+		run must actually open, and exactly one continuation must fire."""
+		docname = _make_skill(TEST_USER, armed=True, name="ar-real-e2e")
+		conv = _make_conv(TEST_USER)
+		msg = _make_user_msg(conv, TEST_USER, "/ar-real-e2e make a todo")
+		turn_message_binding.bind_turn_message(conv, msg)
+		desc = "jarvis-approverun-real-e2e-001"
+		park = api._run_tool(
+			"create_doc", {"doctype": "ToDo", "values": {"description": desc}}, conversation=conv
+		)
+		self.assertEqual(park["data"]["status"], "pending_confirmation")
+		recs = [
+			r
+			for r in pending_confirm.list_for_owner(TEST_USER, conversation=conv)
+			if r.get("conversation") == conv
+		]
+		self.assertEqual(len(recs), 1, "exactly one parked token")
+		self.assertEqual(recs[0].get("skill_docname"), docname, "the real offer stamped this token")
+		token = recs[0]["token"]
+
+		with patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}) as cont:
+			res = actions_api.approve_and_run(token, conv)
+
+		self.assertTrue(res.get("ok"), res)
+		self.assertTrue(frappe.db.exists("ToDo", {"description": desc}), "the REAL create_doc must have run")
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun")), 1, "the run opened")
+		self.assertEqual(
+			frappe.db.get_value(CONV, conv, "skill_autorun_skill"),
+			docname,
+			"skill_autorun_skill points at the armed skill for the gate's live disarm re-check",
+		)
+		cont.assert_called_once()
+
+	def test_real_gate_branch_auto_executes_create_doc_uncarded(self):
+		"""T1(b): the gate branch itself, driven for real (no dispatch_confirmed
+		mock), under an already-approved run: a covered create_doc runs immediately -
+		the ToDo actually exists - and mints NO pending-confirm token at all (it
+		auto-executed, uncarded)."""
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		desc = "jarvis-approverun-real-e2e-002"
+		r = api._run_tool(
+			"create_doc", {"doctype": "ToDo", "values": {"description": desc}}, conversation=conv
+		)
+		self.assertTrue(r.get("ok"), r)
+		self.assertNotEqual((r.get("data") or {}).get("status"), "pending_confirmation")
+		self.assertTrue(frappe.db.exists("ToDo", {"description": desc}), "the REAL create_doc ran uncarded")
+		self.assertEqual(_pending_for(conv, TEST_USER), 0, "no token is minted on the auto-run path")
+
+
+class TestMacroFirstCrossFire(FrappeTestCase):
+	"""T2 (design §3.4.1): BOTH skip_confirmation (macro) and skill_autorun (skill)
+	raw-set on ONE conversation - a state the sanctioned endpoints each independently
+	refuse to produce, but the gate's own branch ORDER must still resolve it
+	deterministically macro-first, so a future refactor that swaps branch order
+	silently reclassifies every armed write. Pinned by patching the shared covered-
+	write core and asserting it is invoked with provenance_kind="macro" (never
+	"skill") when both flags are live."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		frappe.db.delete(SKILL, {"owner": TEST_USER})
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_both_flags_set_macro_wins_deterministically(self):
+		docname = _make_skill(TEST_USER, armed=True, name="crossfire-skill")
+		conv = _make_conv(TEST_USER)
+		# run_method is covered by BOTH sets, so the choice below is a real branch
+		# decision, not an accident of one tool only being in one allowlist.
+		self.assertIn("run_method", api._ARMED_SKIP_COVERED)
+		self.assertIn("run_method", api._SKILL_AUTORUN_COVERED)
+		# Raw db_set BOTH flags directly - never through the sanctioned endpoints,
+		# each of which refuses to produce this state - so the gate's branch ORDER
+		# itself is what's under test, not either arming path.
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		frappe.db.set_value(CONV, conv, "skill_autorun", 1, update_modified=False)
+		frappe.db.set_value(CONV, conv, "skill_autorun_skill", docname, update_modified=False)
+		frappe.db.set_value(
+			CONV, conv, "skill_autorun_at", frappe.utils.now_datetime(), update_modified=False
+		)
+		frappe.db.commit()
+		with patch("jarvis.api._run_covered_write", return_value={"ok": True, "data": {}}) as covered:
+			r = api._run_tool("run_method", {"method": "frappe.ping"}, conversation=conv)
+		covered.assert_called_once()
+		self.assertEqual(
+			covered.call_args.kwargs.get("provenance_kind"),
+			"macro",
+			"macro-first: the gate's macro branch is checked before the skill branch",
+		)
+		self.assertTrue(r.get("ok"))
+
+
+class TestApproveAndRunFlagSetBeforeContinuation(FrappeTestCase):
+	"""Minor (design §3.4 ordering): approve_and_run's continuation must fire AFTER
+	skill_autorun already reads 1 in the DB - the resuming worker's gate has to see the
+	open run the moment it acts on the continuation. Pinned via a side_effect on the
+	enqueue_continuation mock that reads the LIVE db value at the exact moment it
+	fires, rather than trusting call order alone."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		frappe.db.delete(SKILL, {"owner": TEST_USER})
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_flag_already_one_at_the_moment_the_continuation_fires(self):
+		docname = _make_skill(TEST_USER, armed=True, name="ar-order-check")
+		conv = _make_conv(TEST_USER)
+		token = _mint_approve_token(conv, TEST_USER, docname)
+		seen = {}
+
+		def _observe(*args, **kwargs):
+			seen["flag_at_enqueue"] = int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0)
+			return {}
+
+		with (
+			patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}),
+			patch("jarvis.api.persist_tool_receipt"),
+			patch("jarvis.chat.admission.publish_action_confirmed"),
+			patch("jarvis.chat.actions_api.enqueue_continuation", side_effect=_observe) as cont,
+		):
+			res = actions_api.approve_and_run(token, conv)
+		self.assertTrue(res.get("ok"))
+		cont.assert_called_once()
+		self.assertEqual(
+			seen.get("flag_at_enqueue"),
+			1,
+			"skill_autorun must already read 1 in the DB at the moment the continuation is enqueued",
+		)
+
+
+class TestTerminalTurnKeepsFlagOnBulkLightWritePause(FrappeTestCase):
+	"""Minor (review): the on_terminal_turn / reaper predicate is "no pending card AT
+	ALL", not "no DESTRUCTIVE card". A bulk add_comment (names=[...]) is not itself a
+	_GATED_WRITES tool, but a BULK call ALWAYS parks (one card per batch, even for an
+	otherwise-ungated light write) - a legitimate, non-destructive PAUSE. The terminal
+	clear must KEEP the flag on it exactly like it keeps it on a destructive pause
+	(mirrors TestTerminalTurnClear.test_pump_finalize_keeps_autorun_when_a_card_is_pending)."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		for name in frappe.get_all("ToDo", filters={"owner": TEST_USER}, pluck="name"):
+			frappe.delete_doc("ToDo", name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _ctx(self, conv: str):
+		return finalize._Ctx(
+			run_id="r-fin-bulk", turn={}, conversation=conv, owner=TEST_USER, errored=False, payload={}
+		)
+
+	def test_bulk_light_write_pause_keeps_the_flag(self):
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		t1 = frappe.get_doc({"doctype": "ToDo", "description": "bulk-pause-1"}).insert(
+			ignore_permissions=True
+		)
+		t2 = frappe.get_doc({"doctype": "ToDo", "description": "bulk-pause-2"}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
+		self.assertNotIn(
+			"add_comment", api._GATED_WRITES, "add_comment is ordinarily UNGATED - the BULK shape parks it"
+		)
+		r = api._run_tool(
+			"add_comment",
+			{"doctype": "ToDo", "names": [t1.name, t2.name], "content": "bulk note"},
+			conversation=conv,
+		)
+		self.assertEqual(r["data"]["status"], "pending_confirmation", "a bulk light write still parks a card")
+		self.assertEqual(_pending_for(conv, TEST_USER), 1)
+		finalize._effect_macro_advance(self._ctx(conv))
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			1,
+			"a non-destructive BULK-LIGHT-WRITE pause must also KEEP the flag - the "
+			"predicate is 'no pending card at all', not 'no destructive card'",
+		)
+
+
+class TestApproveAndRunForeignConversation(FrappeTestCase):
+	"""approve_and_run's ``conversation`` param is client-supplied. A caller who owns
+	both the token's own conversation and a SECOND, unrelated one they also own must
+	not be able to open a run by pointing the token at that foreign conversation:
+	guard_conv resolves to the client-supplied (foreign) conversation, which mismatches
+	the token's stored one, so consume refuses and the whole call is refused - no run
+	opens on the foreign conversation (or the token's own one either, since the call
+	never got past the guard). Mirrors test_confirm_gate.TestRealConversationGuard.
+	test_mismatched_conversation_rejected_and_token_not_burned for confirm_tool."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		frappe.db.delete(SKILL, {"owner": TEST_USER})
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_conversation_param_naming_a_different_conv_refuses_and_opens_no_run(self):
+		docname = _make_skill(TEST_USER, armed=True, name="ar-foreign-conv")
+		token_conv = _make_conv(TEST_USER)
+		foreign_conv = _make_conv(TEST_USER)  # a second, real, owned conversation
+		token = _mint_approve_token(token_conv, TEST_USER, docname)
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			res = actions_api.approve_and_run(token, foreign_conv)
+		self.assertFalse(res.get("ok"), "a token pointed at a non-matching conversation is refused")
+		self.assertFalse(disp.called, "no step-1 dispatch on a foreign-conversation call")
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, foreign_conv, "skill_autorun") or 0),
+			0,
+			"no run opens on the foreign conversation",
+		)
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, token_conv, "skill_autorun") or 0),
+			0,
+			"no run opens on the token's own conversation either - the call was refused outright",
+		)
+		self.assertIsNotNone(pending_confirm.peek(token), "the mismatch refusal does not consume the token")
