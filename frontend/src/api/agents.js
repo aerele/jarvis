@@ -59,6 +59,10 @@ export const listAgentActivityPage = (p = {}) =>
 // -> { ok, conversation, run_id, reason }
 export const takeFindingToChat = (finding) => call(AG + "take_finding_to_chat", { finding });
 
+// #1061/#1062 operator stop: terminalize a RUNNING run early (idempotent on an
+// already-terminal one). -> { ok, status, idempotent? }
+export const stopAgentRun = (run) => call(AG + "stop_agent_run", { run });
+
 // ── PP-4 shadow -> live activation (jarvis#456) ──────────────────────────────
 // get_agent's `installation` shape is frozen (§8.3) and two in-flight PRs
 // (#620/#612) are independently editing agents_api.py/agent_runs.py, so this

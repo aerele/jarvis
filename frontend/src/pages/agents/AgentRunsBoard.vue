@@ -172,7 +172,7 @@
 						</span>
 					</div>
 				</div>
-				<FindingsPanel v-else :run="selectedRun" />
+				<FindingsPanel v-else :run="selectedRun" @stopped="refreshKeep" />
 			</div>
 		</div>
 	</div>
@@ -203,7 +203,13 @@ const props = defineProps({
 // is an orthogonal axis rendered separately as the "Preview" pill/banner above.
 // A shadow run must never read the same as a live one. preparation_mode is
 // supplied per row by list_runs_page (agents_api.py) — see cross-file note.
-const STATUS_THEME = { running: "blue", completed: "green", partial: "orange", failed: "red" };
+const STATUS_THEME = {
+	running: "blue",
+	completed: "green",
+	partial: "orange",
+	failed: "red",
+	stopped: "gray",
+};
 const STATUS_OPTIONS = [
 	{ label: "All statuses", value: "" },
 	{ label: "Running", value: "running" },
@@ -250,6 +256,27 @@ const emptyState = computed(() => {
 	};
 });
 
+// ── #1062 C3: poll the rail every 10s while any VISIBLE run is running, so a
+// running run's status/counters update without a manual refresh. This is the
+// ONE refresh path for the runs list - it extends the visibilitychange
+// machinery below (started/stopped from the same rows watcher, cleared on
+// unmount and on tab-hidden) rather than adding a second interval alongside
+// it. The tick itself re-checks visibility too (belt-and-braces against a
+// missed visibilitychange event) and skips a request already in flight.
+let pollTimer = null;
+function startPoll() {
+	if (pollTimer) return;
+	pollTimer = setInterval(() => {
+		if (!loading.value && document.visibilityState === "visible") refreshKeep();
+	}, 10000);
+}
+function stopPoll() {
+	if (pollTimer) {
+		clearInterval(pollTimer);
+		pollTimer = null;
+	}
+}
+
 // ── selection (local - runs live under the agent's hash tab, no :id route) ──
 const selectedRun = ref(null);
 const selectedId = computed(() => (selectedRun.value && selectedRun.value.name) || "");
@@ -269,6 +296,13 @@ watch(rows, (r) => {
 		selectedRun.value = again || r[0] || null;
 	} else if (r.length) {
 		selectRun(r[0]);
+	}
+	// start/stop the poll from the SAME rows change that already drives
+	// selection - see the comment above startPoll/stopPoll.
+	if (r.some((x) => x.status === "running") && document.visibilityState === "visible") {
+		startPoll();
+	} else {
+		stopPoll();
 	}
 });
 
@@ -295,10 +329,20 @@ async function reload(opts = {}) {
 }
 defineExpose({ reload });
 
-// freshness: refetch the loaded window on tab-visible (running → completed)
+// freshness: refetch the loaded window on tab-visible (running → completed),
+// and resume the poll (#1062 C3) if a running run is still in the loaded
+// window; a hidden tab stops it outright rather than let it fire unseen.
 function onVisibility() {
-	if (document.visibilityState === "visible") refreshKeep();
+	if (document.visibilityState === "visible") {
+		refreshKeep();
+		if (rows.value.some((x) => x.status === "running")) startPoll();
+	} else {
+		stopPoll();
+	}
 }
 onMounted(() => document.addEventListener("visibilitychange", onVisibility));
-onBeforeUnmount(() => document.removeEventListener("visibilitychange", onVisibility));
+onBeforeUnmount(() => {
+	document.removeEventListener("visibilitychange", onVisibility);
+	stopPoll();
+});
 </script>

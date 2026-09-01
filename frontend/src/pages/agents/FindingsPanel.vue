@@ -18,11 +18,23 @@
 				@click="router.push('/dashboards/' + run.dashboard)"
 			/>
 			<Button
-				v-if="run.conversation"
+				v-if="run.conversation && run.status !== 'running'"
 				variant="subtle"
 				label="Open Chat"
 				iconLeft="message-circle"
 				@click="router.push('/c/' + run.conversation)"
+			/>
+			<!-- #1062 C2: no confirm dialog - stop is safe (soft) and idempotent
+			     server-side (a concurrent finish/second click just reports the
+			     terminal state it actually reached). -->
+			<Button
+				v-if="run.status === 'running'"
+				variant="subtle"
+				theme="red"
+				label="Stop"
+				iconLeft="square"
+				:loading="stopping"
+				@click="stopRun"
 			/>
 		</div>
 		<div class="mt-1 flex flex-wrap items-center gap-1.5 text-sm text-ink-gray-5">
@@ -84,8 +96,23 @@
 					<FeatherIcon name="external-link" class="size-3.5 shrink-0 text-ink-gray-5" />
 				</a>
 			</div>
-			<div v-else-if="run.status === 'running'" class="mt-2 py-6 text-sm text-ink-gray-5">
-				Run in progress - pages appear here as they are written.
+			<div
+				v-else-if="run.status === 'running'"
+				class="mt-2 flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center"
+			>
+				<span class="text-sm text-ink-gray-6">Running for {{ elapsedLabel }}</span>
+				<span class="text-sm text-ink-gray-5"
+					>Run in progress - pages appear here as they are written.</span
+				>
+				<div
+					v-if="recentActivity.length"
+					class="mt-2 w-full max-w-sm divide-y overflow-hidden rounded-lg border text-left"
+				>
+					<div v-for="a in recentActivity" :key="a.name" class="px-3 py-2 text-sm">
+						<span class="text-ink-gray-8">{{ activityLabel(a) }}</span>
+						<span class="text-ink-gray-5"> · {{ timeAgo(a.creation) }}</span>
+					</div>
+				</div>
 			</div>
 			<div v-else class="mt-2 py-6 text-sm text-ink-gray-5">
 				No wiki pages were written this run.
@@ -128,6 +155,27 @@
 			<!-- persistent fetch-error state: a failed load must never read as "No findings" -->
 			<div v-else-if="loadError && !rows.length" class="py-8 text-sm text-ink-red-4">
 				{{ loadError }}
+			</div>
+			<!-- running-run progress (#1062 C3): only while there is no findings
+			     snapshot yet - a running run that already recorded findings shows
+			     them normally below, same as before. -->
+			<div
+				v-else-if="!rows.length && run.status === 'running'"
+				class="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center"
+			>
+				<span class="text-sm text-ink-gray-6">Running for {{ elapsedLabel }}</span>
+				<span class="text-sm text-ink-gray-5"
+					>Run in progress - findings appear when it completes.</span
+				>
+				<div
+					v-if="recentActivity.length"
+					class="mt-2 w-full max-w-sm divide-y overflow-hidden rounded-lg border text-left"
+				>
+					<div v-for="a in recentActivity" :key="a.name" class="px-3 py-2 text-sm">
+						<span class="text-ink-gray-8">{{ activityLabel(a) }}</span>
+						<span class="text-ink-gray-5"> · {{ timeAgo(a.creation) }}</span>
+					</div>
+				</div>
 			</div>
 			<div v-else-if="!rows.length" class="py-8 text-sm text-ink-gray-5">
 				{{ emptyText }}
@@ -291,15 +339,15 @@
 // Discuss in chat (take_finding_to_chat → /c/:id), Open document, and the
 // open/acknowledged/resolved state select → setFindingState (optimistic).
 // No remediation text is ever fabricated - only what the run persisted.
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import Banner from "@/components/Banner.vue";
-import { timeAgo, exactDate, formatDate } from "@/utils/datetime";
+import { timeAgo, exactDate, formatDate, toLocalMs, fmtElapsed } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
 import * as api from "@/api";
-import { takeFindingToChat } from "@/api/agents";
+import { takeFindingToChat, stopAgentRun, listAgentActivityPage } from "@/api/agents";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
@@ -313,10 +361,19 @@ const props = defineProps({
 	// appear (cross-file — see report notes).
 	run: { type: Object, required: true },
 });
+// stopped: the parent (AgentRunsBoard) owns the run list - refresh it after a
+// successful stop so the rail's status/badge picks up the terminal state.
+const emit = defineEmits(["stopped"]);
 
 const router = useRouter();
 
-const STATUS_THEME = { running: "blue", completed: "green", partial: "orange", failed: "red" };
+const STATUS_THEME = {
+	running: "blue",
+	completed: "green",
+	partial: "orange",
+	failed: "red",
+	stopped: "gray",
+};
 const SEVERITY_THEME = { blocker: "red", warning: "orange", note: "gray" };
 const SEVERITY_ORDER = ["blocker", "warning", "note"];
 const SEVERITY_LABEL = { blocker: "Blockers", warning: "Warnings", note: "Notes" };
@@ -347,7 +404,65 @@ const loadError = ref("");
 const stateFilter = ref("");
 const busy = ref("");
 const chatBusy = ref("");
+const stopping = ref(false);
 const expanded = ref(new Set());
+
+// ── #1062 C3: running-run progress (deliberately downscoped - NO per-step
+// timeline). A ticking elapsed-time label + the agent's recent activity feed,
+// so a running run reads as "alive" instead of a static "in progress" line. ──
+const nowTick = ref(Date.now());
+const recentActivity = ref([]);
+let elapsedTimer = null;
+let activityTimer = null;
+
+const elapsedLabel = computed(() => {
+	const startMs = props.run && toLocalMs(props.run.started_at);
+	if (startMs == null) return fmtElapsed(0);
+	return fmtElapsed((nowTick.value - startMs) / 1000);
+});
+
+// list_agent_activity_page filters by agent (slug) / installation, not by run
+// (jarvis#1062 code map) - these are this AGENT's recent lifecycle events, not
+// strictly this run's, so the label below says so rather than implying a
+// per-run timeline this deliberately does not build.
+async function loadRecentActivity() {
+	if (!props.run || !props.run.agent) return;
+	try {
+		const res = await listAgentActivityPage({ agent: props.run.agent, page_length: 5 });
+		recentActivity.value = (res && res.rows) || [];
+	} catch {
+		// best-effort supplementary context - a failed fetch must not break the
+		// running-progress display, which still has the elapsed timer.
+	}
+}
+function startRunningProgress() {
+	if (elapsedTimer) return; // already running
+	nowTick.value = Date.now();
+	elapsedTimer = setInterval(() => (nowTick.value = Date.now()), 1000);
+	loadRecentActivity();
+	activityTimer = setInterval(loadRecentActivity, 10000);
+}
+function stopRunningProgress() {
+	if (elapsedTimer) {
+		clearInterval(elapsedTimer);
+		elapsedTimer = null;
+	}
+	if (activityTimer) {
+		clearInterval(activityTimer);
+		activityTimer = null;
+	}
+}
+onBeforeUnmount(stopRunningProgress);
+
+// short, human label for an activity row - no icon/verb catalog (that lives in
+// AgentActivityTab); this is a supplementary glance, not a second feed to keep
+// in sync with it.
+function activityLabel(a) {
+	if (a.detail) return a.detail;
+	return String(a.action || "activity")
+		.split("_")
+		.join(" ");
+}
 
 const runLabel = computed(() =>
 	props.run && props.run.started_at ? timeAgo(props.run.started_at) : props.run.name
@@ -380,9 +495,9 @@ const scribePages = computed(() => {
 function wikiUrl(slug) {
 	return `/app/jarvis-wiki-page/${encodeURIComponent(slug)}`;
 }
+// "running" is handled by its own branch above (#1062 C3 progress display) -
+// this only ever renders for a run that has already finished (or stopped).
 const emptyText = computed(() => {
-	if (props.run.status === "running")
-		return "Run in progress - findings appear when it completes.";
 	if (props.run.status === "failed") return "This run recorded no findings.";
 	return `No ${stateFilter.value ? stateFilter.value + " " : ""}findings for this run.`;
 });
@@ -470,7 +585,12 @@ function loadMore() {
 // refresh and object identity alone must not re-fetch findings.
 watch(
 	[() => props.run && props.run.name, () => props.run && props.run.status],
-	([name], [prevName] = []) => {
+	([name, status], [prevName] = []) => {
+		// running-progress timers: independent of the findings reload below, and
+		// evaluated first so the state-filter early-return further down never
+		// skips it.
+		if (status === "running") startRunningProgress();
+		else stopRunningProgress();
 		if (name !== prevName) {
 			rows.value = [];
 			total.value = 0;
@@ -532,6 +652,21 @@ async function moveFinding(f, state) {
 		toast.error(errHtml(e));
 	} finally {
 		busy.value = "";
+	}
+}
+
+// ── #1062 C2: operator stop (soft, idempotent server-side - no confirm) ─────
+async function stopRun() {
+	if (stopping.value || props.run.status !== "running") return;
+	stopping.value = true;
+	try {
+		await stopAgentRun(props.run.name);
+		toast.success("Run stopped");
+		emit("stopped");
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		stopping.value = false;
 	}
 }
 
