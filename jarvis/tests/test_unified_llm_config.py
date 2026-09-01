@@ -3389,7 +3389,7 @@ class TestFT4bValidateModelsNeverRaises(_RT3SettingsTestCase):
 
 # ---------------------------------------------------------------------------
 # JARVIS-2026-07-08 onboarding-audit fixes: durable sync status + honest
-# pool readiness. (Faults (a)/(c) of the incident + the split-brain gate.)
+# pool readiness. (Faults (a)/(c) of the incident + the state-mismatch gate.)
 # ---------------------------------------------------------------------------
 
 from unittest.mock import patch
