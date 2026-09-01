@@ -540,7 +540,7 @@ def _admin_chat_gate() -> dict:
 	# Refresh the locally-mirrored release notice on this gate's cadence so an
 	# active user sees an activate/clear without waiting for the daily sync.
 	release_notice.persist(conn.get("release_notice") or {})
-	# Same cadence: mirror the CP-owned egress redaction rules for the chat backstop.
+	# Same cadence: mirror the backend-owned egress redaction rules for the chat backstop.
 	from jarvis.chat import egress_rules
 
 	egress_rules.persist(conn.get("redaction_patterns"))
@@ -792,7 +792,7 @@ def _ready_verdict() -> dict:
 	# keeps serving its previous config. A fresh tenant whose FIRST sync
 	# is still pending or failed is NOT ready: sending them to chat
 	# guarantees failing turns while onboarding still shows "provisioning"
-	# (JARVIS-2026-07-08 split-brain).
+	# (JARVIS-2026-07-08 state mismatch).
 	#
 	# Deliberately NOT a last_sync_status check: that field is shared with
 	# the single-model sync, so a stale legacy "ok (reload via admin)" from
