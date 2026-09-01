@@ -191,6 +191,16 @@ export const applyAction = (action) =>
 // keep on screen because the business action did not run in that request.
 export const confirmTool = (token, conversation) =>
 	call(AC + "confirm_tool", { token, conversation: conversation || "" });
+// "Approve & run" (skill approve-and-run, P1): a SIBLING of confirm_tool, not an
+// overload - it confirms this card's step 1 AND opens the armed skill's
+// uninterrupted run, so the covered writes after this one execute with receipts
+// instead of parking their own cards. Same {ok,...}/InvalidConfirmation/
+// storage-unavailable envelope as confirmTool (jarvis/chat/actions_api.py
+// approve_and_run). Only reachable from a card whose preview.card.approve_run is
+// true, and only from its own button - never from the typed "go ahead" path
+// (that stays confirm-only, see ChatView.vue's approvalTokens comment).
+export const approveAndRun = (token, conversation) =>
+	call(AC + "approve_and_run", { token, conversation: conversation || "" });
 // Discard a parked ERP write by its one-time token: consumes the token (so it
 // can't replay or re-surface on reload), leaves a durable "discarded" receipt
 // chip in the transcript, and queues a note so the agent's next turn learns it

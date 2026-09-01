@@ -416,10 +416,22 @@
 						>{{ p.summary || "Jarvis wants to make a change." }}
 					</div>
 					<div class="jvp-pending-acts">
-						<button class="jvp-btn-subtle" type="button" @click="$emit('open-full')">
+						<!-- P1, skill approve-and-run (§3.5): this panel has NO rich-card
+						     or plan renderer, so a runnable card (approve_run) must NOT
+						     offer its own Confirm here - that would silently spend the
+						     card as a plain single-step confirm and the user would never
+						     see the plan or the Approve & run choice. Deflect to the full
+						     chat instead, and make that deflect the PRIMARY action so it
+						     reads as the thing to do, not a secondary escape hatch. -->
+						<button
+							:class="p.approve_run ? 'jvp-btn-solid' : 'jvp-btn-subtle'"
+							type="button"
+							@click="$emit('open-full')"
+						>
 							Review in full chat
 						</button>
 						<button
+							v-if="!p.approve_run"
 							class="jvp-btn-solid"
 							type="button"
 							:disabled="resolving === p.token"
@@ -622,7 +634,13 @@ import { renderReply } from "./panel_markdown.mjs";
 import { resizeFrom } from "./panel_size.mjs";
 import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
 import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
-import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
+import {
+	emptyStream,
+	applyEvent,
+	applyEventEx,
+	visibleMessages,
+	pendingApproveRun,
+} from "./chat_stream.mjs";
 import { sortPendingCards } from "./pending_order.mjs";
 import { ONBOARDING_URL } from "./config.mjs";
 import {
@@ -1157,6 +1175,10 @@ async function load() {
 					// token) the same way the server does; without it a typed
 					// "confirm N" can select a different card than shown.
 					expires_at: r.expires_at ?? null,
+					// Same text-only signal the live push carries (chat_stream.mjs) -
+					// a resync must not silently lose it and fall back to offering a
+					// plain Confirm on a runnable card (P1, skill approve-and-run).
+					approve_run: pendingApproveRun(r.preview),
 				})),
 			};
 		} catch (e) {

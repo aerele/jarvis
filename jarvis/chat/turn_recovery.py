@@ -173,6 +173,12 @@ def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 			title="turn_recovery: app-learning turn hook failed",
 			message=frappe.get_traceback(),
 		)
+	# End an approved skill run at this park-and-recover terminal unless it is paused
+	# on a parked card (skill "Approve & run", design §3.4). on_terminal_turn is
+	# internally best-effort (never raises).
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.on_terminal_turn(conversation_id)
 
 
 def _finalize(row: dict, text: str) -> None:

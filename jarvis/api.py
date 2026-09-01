@@ -13,6 +13,8 @@ from jarvis.exceptions import (
 	FeatureDisabledError,
 	InvalidArgumentError,
 	JarvisError,
+	RunDisarmedError,
+	RunHaltedError,
 )
 from jarvis.permissions import has_jarvis_access
 from jarvis.tools._result_guard import enforce_result_budget
@@ -276,6 +278,7 @@ def _dispatch_from_session(
 	finally:
 		_agent_run_ctx.clear_session_key()
 		_agent_run_ctx.take_armed_by_macro()  # belt: never leak an armed marker across dispatches
+		_agent_run_ctx.take_armed_by_skill()  # belt: same for the approved-skill-run marker
 
 
 _STALE_PAIRING_DEDUPE_TTL_S = 3600
@@ -347,11 +350,16 @@ def _persist_and_publish_tool_call(
 	# of a silent Activity-accordion tool row.
 	from jarvis.tools import _agent_run_ctx
 
+	# An uncarded auto-run write carries EITHER a macro provenance (armed macro's
+	# skip_confirmation) or a skill provenance (approved run's skill_autorun) - never
+	# both (the gate branches are mutually exclusive, macro-first). Consume both markers
+	# (consume-once) so neither leaks onto the next, unrelated call in a reused worker.
 	armed_by_macro = _agent_run_ctx.take_armed_by_macro()
+	armed_by_skill = _agent_run_ctx.take_armed_by_skill()
 	# A FAILED armed write must still be visible (it ran uncarded, unattended, and
 	# broke - exactly what T8 surfaces): label it "failed" (a red chip carrying the
-	# macro provenance) rather than letting it fall into the collapsed Activity row.
-	if armed_by_macro:
+	# provenance) rather than letting it fall into the collapsed Activity row.
+	if armed_by_macro or armed_by_skill:
 		armed_outcome = "auto_applied" if (isinstance(result, dict) and result.get("ok")) else "failed"
 	else:
 		armed_outcome = None
@@ -362,6 +370,7 @@ def _persist_and_publish_tool_call(
 		result,
 		action_outcome=armed_outcome,
 		armed_by_macro=armed_by_macro if armed_outcome else None,
+		armed_by_skill=armed_by_skill if armed_outcome else None,
 		tool_call_id=tool_call_id,
 	)
 
@@ -407,6 +416,7 @@ def persist_tool_receipt(
 	*,
 	action_outcome: str | None = None,
 	armed_by_macro: str | None = None,
+	armed_by_skill: str | None = None,
 	tool_call_id: str | None = None,
 ) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
@@ -480,6 +490,7 @@ def persist_tool_receipt(
 				"tool_call_id": tool_call_id or None,
 				"action_outcome": action_outcome or None,
 				"armed_by_macro": armed_by_macro or None,
+				"armed_by_skill": armed_by_skill or None,
 				"ref_doctype": ref_doctype,
 				"ref_name": ref_name,
 				"content": f"{tool} → {action_outcome or status}",
@@ -795,6 +806,47 @@ _ARMED_SKIP_COVERED = frozenset(
 	}
 )
 _ARMED_SKIP_NEVER = frozenset({"cancel_doc", "delete_doc", "amend_doc"})
+# Skill "Approve & run the plan" (design §3.4, D-COVERED): a conversation in an
+# APPROVED skill run (Jarvis Conversation.skill_autorun=1, stamped by the
+# approve_and_run endpoint on step-1 success) runs THESE covered writes without a
+# confirmation card. Like _ARMED_SKIP_COVERED this is an EXPLICIT fail-CLOSED
+# allowlist, NOT `_ARMED_SKIP_COVERED - {...}`: a new gated tool must NOT become
+# auto-runnable by default (this path has no site-wide kill switch, so an
+# unclassified tool defaults to carding). It DIVERGES from the macro set in ONE
+# tool: create_custom_skill is COVERED for a macro but NEVER here - a skill that
+# writes another skill is a consequential meta-write the user should still confirm.
+# The irreversible trio (delete/cancel/amend) + create_custom_skill make up
+# _SKILL_AUTORUN_NEVER and always park (a park mid-run is a legit PAUSE that
+# resumes on confirm). The partition invariant (test_covered_and_never_partition_
+# gated_writes) asserts COVERED and NEVER are disjoint and together == _GATED_WRITES,
+# so a gated tool filed in neither turns that test RED until a human classifies it.
+_SKILL_AUTORUN_COVERED = frozenset(
+	{
+		"create_doc",
+		"create_docs",
+		"update_doc",
+		"submit_doc",
+		"run_import",
+		"apply_workflow_action",
+		"send_email",
+		"share_doc",
+		"assign_to",
+		"update_wiki",
+		"run_method",
+	}
+)
+_SKILL_AUTORUN_NEVER = frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill"})
+# Sliding-TTL horizon for an approved run: the auto-run branch runs a covered write
+# uncarded only while the LAST covered write (skill_autorun_at, which slides forward
+# on each success) is within this window. It must comfortably EXCEED the longest idle
+# gap between two consecutive covered writes - a model round-trip + latency + a
+# non-covered intervening step - which is minutes, so 900s (matching the confirm
+# token TTL) is ample. A stranded flag (worker died -> writes stop -> timestamp
+# freezes) therefore falls out of the window within the TTL and is cleared by the
+# reaper (task #42). This TTL bounds a normal idle gap, NOT a runaway - that is
+# bounded by the destructive carve-out, hard-stop-on-error, the Halt cancel-gate,
+# and per-skill un-arm.
+_SKILL_AUTORUN_TTL_S = 900
 # Gated writes we dry-run in the sandbox AT PARK TIME and BLOCK on if the dry-run
 # fails, so a deterministic failure (missing mandatory field, bad link, no create
 # permission) is returned to the model BEFORE a confirmation card is shown instead
@@ -873,6 +925,89 @@ def _armed_skip_disabled() -> bool:
 	write re-gates behind its card immediately, no deploy - the escape hatch if an
 	armed macro misbehaves. Read only when an armed covered write is about to skip."""
 	return bool(frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "disable_armed_skip")))
+
+
+def _skill_autorun_slide(conv: str) -> None:
+	"""Advance the sliding last-write timestamp after a covered auto-run write, and
+	commit immediately (mirroring the macro's per-step row write). Committing now
+	means a worker death right after this write leaves an ACCURATE freeze-point, so
+	the sliding-TTL reaper (task #42) reaps the stranded run at the right time."""
+	frappe.db.set_value(
+		"Jarvis Conversation", conv, "skill_autorun_at", frappe.utils.now_datetime(), update_modified=False
+	)
+	frappe.db.commit()
+
+
+def _skill_autorun_clear(conv: str) -> None:
+	"""Hard-stop the approved run: drop skill_autorun (+ the armed skill docname it was
+	opened on) so the next covered write re-cards. Committed immediately so the cleared
+	state survives a worker death (a concurrent 0->0 clear is an idempotent no-op)."""
+	frappe.db.set_value(
+		"Jarvis Conversation",
+		conv,
+		{"skill_autorun": 0, "skill_autorun_skill": None},
+		update_modified=False,
+	)
+	frappe.db.commit()
+
+
+def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | None]:
+	"""Decide whether the parked card may offer "Approve & run" and, if so, return
+	the ARMED Jarvis Custom Skill ``(docname, slug)`` to stamp on its token (skill
+	"Approve & run the plan", design §3.3). This is the OFFER side only: it stamps
+	the trust signal so a later ``approve_and_run`` endpoint can authorize off the
+	docname (re-checking arming live). It sets NO run flag and opens NO run.
+
+	Forgery-proof + fail-safe - ALL must hold, else ``(None, None)``:
+
+	1. A turn->message binding exists for this conversation (the exact user message
+	   that triggered the running turn - not a racy "latest hidden=0 message").
+	2. That message resolves to an ``owner`` and ``content``.
+	3. ``content`` invokes EXACTLY ONE custom skill under the MESSAGE OWNER's
+	   identity (never the ambient session / exec user). 2+ invoked skills -> no
+	   offer: the run flag is conversation-wide with no per-write skill
+	   attribution, so a co-invoked (even unarmed) skill's writes would otherwise
+	   ride the approval.
+	4. That one slug resolves to a single live-armed row the owner would invoke
+	   (:func:`jarvis.chat.custom_skills.resolve_armed_skill_docname` - the same
+	   owned/shared/role-scoped resolution :func:`invoked_skill_slugs` uses, so the
+	   two can never drift apart).
+
+	Best-effort: any exception -> ``(None, None)``; this is an additive nicety on
+	the hot gate path and must never break the park."""
+	try:
+		if not conversation:
+			return None, None
+		from jarvis.chat.custom_skills import invoked_skill_slugs, resolve_armed_skill_docname
+		from jarvis.chat.turn_message_binding import current_turn_message_id
+
+		msg_id = current_turn_message_id(conversation)
+		if not msg_id:
+			return None, None
+		msg = frappe.db.get_value("Jarvis Chat Message", msg_id, ["owner", "content", "hidden"], as_dict=True)
+		if not msg or not msg.get("owner") or not msg.get("content"):
+			return None, None
+		# The offer anchors on a HUMAN message (design §3.3 "human-message anchor"):
+		# a hidden (system / continuation) turn - a macro step, a run continuation,
+		# an intake continuation - must NOT re-drive the offer even if its content
+		# echoes a `/armedslug`, or a covered write inside a continuation would keep
+		# re-offering a run the user only approved once.
+		if msg.get("hidden"):
+			return None, None
+		# Resolve under the MESSAGE SENDER, never frappe.session.user / exec_user.
+		slugs = invoked_skill_slugs(msg["content"], user=msg["owner"])
+		if len(slugs) != 1:
+			return None, None
+		slug = next(iter(slugs))
+		docname = resolve_armed_skill_docname(slug, msg["owner"])
+		if not docname:
+			return None, None
+		return docname, slug
+	except Exception:
+		# This runs on EVERY park fleet-wide; a swallowed failure must not be silent.
+		# A park is not every-tool-call, so a plain (deduped by title) log is fine.
+		frappe.log_error(title="_resolve_approve_run_offer failed", message=frappe.get_traceback())
+		return None, None
 
 
 def _run_preview(tool: str, args: dict) -> dict:
@@ -1273,6 +1408,80 @@ def dispatch_confirmed(tool: str, args: dict) -> dict:
 	return _dispatch_and_wrap(tool, args, is_write=True)
 
 
+def _apply_run_method_read_filter(tool: str, result) -> None:
+	"""I9/I6: ``run_method`` returns its target Document verbatim (unlike get_doc /
+	create_doc, which permlevel-filter before ``as_dict``). Strip permlevel>0 fields the
+	acting agent cannot read from that Document return BEFORE it reaches the receipt chip
+	or the model's continuation dump - otherwise a rate/valuation leaks into the model
+	context on an uncarded auto-run.
+
+	Best-effort: a filter hiccup must never fail an already-committed write (that would
+	roll it back for a cosmetic step). Shared by the confirmed paths
+	(``_confirm_core`` / ``approve_and_run``) and the gate-branch auto-run core
+	(``_run_covered_write``) so the filter is written ONCE, not triple-maintained (I6)."""
+	if tool != "run_method" or not (isinstance(result, dict) and result.get("ok")):
+		return
+	_ret = result.get("data")
+	if hasattr(_ret, "apply_fieldlevel_read_permissions"):
+		try:
+			_ret.apply_fieldlevel_read_permissions()
+		except Exception:
+			frappe.log_error(
+				title="run_method receipt permlevel filter failed",
+				message=frappe.get_traceback(),
+			)
+
+
+def _run_covered_write(
+	tool: str,
+	args: dict,
+	*,
+	conv: str,
+	owner_user: str,
+	provenance_kind: str,
+	provenance_name: str | None,
+) -> dict:
+	"""Shared core for a gate-branch COVERED WRITE that runs uncarded under an armed
+	macro (``skip_confirmation``) or an approved skill run (``skill_autorun``).
+
+	The two gate branches drifted apart (each hand-rolled the dispatch + a subset of the
+	cross-cutting steps), so the review found real gaps - the skill branch leaked
+	permlevel fields and dropped a step-2+ import announcement. This helper is the ONE
+	place the cross-cutting core lives, applied identically on both branches:
+
+	  1. ``dispatch_confirmed`` the stored call;
+	  2. I9 - run_method permlevel read-filter (strip fields the agent can't read);
+	  3. I5 - run_import completion announcement (the gate-branch twin of the confirm
+	     path's ``bind_after_run_import``, so an uncarded/unattended import still reports
+	     done - the skill branch had dropped this);
+	  4. I2 - provenance marker (consume-once) so the receipt persist labels the row
+	     ``auto_applied`` + a queryable ``armed_by_macro`` / ``armed_by_skill``.
+
+	Callers keep their OWN pre-dispatch guards (macro: kill-switch; skill: cancel-gate +
+	live-disarm re-check + sliding TTL) and their OWN post-dispatch flag handling (skill:
+	slide/clear on ``result.ok``). This helper is ONLY the dispatch + filter + announce +
+	provenance core - deliberately not the receipt/continuation settlement tail."""
+	result = dispatch_confirmed(tool, args)
+	_apply_run_method_read_filter(tool, result)
+	if tool == "run_import" and isinstance(result, dict) and result.get("ok"):
+		# The gate branch bypasses _confirm_core, where a confirmed run_import normally
+		# binds its completion announcement. Synthesize the record from the gate locals
+		# (there is no pending-confirm record here); bind is self-gating + best-effort.
+		from jarvis.chat.import_announce import bind_after_run_import
+
+		bind_after_run_import({"tool": "run_import", "conversation": conv, "owner": owner_user}, result)
+	from jarvis.tools import _agent_run_ctx
+
+	# I2: stash the arming provenance for the receipt persist (consume-once). macro and
+	# skill use distinct markers so the receipt chip / audit field never mislabels one as
+	# the other (a skill run is NOT "armed macro X").
+	if provenance_kind == "macro":
+		_agent_run_ctx.set_armed_by_macro(provenance_name)
+	elif provenance_kind == "skill":
+		_agent_run_ctx.set_armed_by_skill(provenance_name)
+	return result
+
+
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
 	"""Parse args + dispatch + wrap in the bench's standard envelope.
 
@@ -1383,11 +1592,25 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		if _is_bulk_call(args):
 			batch_n = _bulk_len(args)
 			if batch_n > _MAX_BATCH:
+				# Skill-aware wording (minor, review): under an approved skill run there
+				# is no card to confirm - the covered allowlist runs uncarded - so telling
+				# the model to "confirm each one" is actively wrong there. A cheap read
+				# (this is a one-shot park-time rejection, not a hot loop) picks the
+				# matching instruction; everything else about F16 (the cap itself) is
+				# unchanged.
+				if conversation and frappe.db.get_value("Jarvis Conversation", conversation, "skill_autorun"):
+					next_step = (
+						f"Split into batches of {_MAX_BATCH}; the approved run keeps executing "
+						"each batch automatically before the next one starts - there is nothing "
+						"to confirm."
+					)
+				else:
+					next_step = (
+						f"Split into batches of {_MAX_BATCH} and confirm each one before starting the next."
+					)
 				return _error(
 					"InvalidArgumentError",
-					f"too many records in one batch ({batch_n}); the max is "
-					f"{_MAX_BATCH}. Split into batches of {_MAX_BATCH} and confirm "
-					"each one before starting the next.",
+					f"too many records in one batch ({batch_n}); the max is {_MAX_BATCH}. {next_step}",
 				)
 
 		# The parked call binds to the conversation resolved server-side upstream
@@ -1412,12 +1635,25 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		owner_user = (
 			frappe.db.get_value("Jarvis Conversation", conv, "owner") if conv else None
 		) or exec_user
-		# One flags read shared by the two skip-the-card bypasses below (both key off
-		# the conversation row). An empty/unresolved conv -> {} -> every flag OFF (the
-		# safe default: the write parks).
+		# One flags read shared by the skip-the-card bypasses below (all key off the
+		# conversation row). An empty/unresolved conv -> {} -> every flag OFF (the
+		# safe default: the write parks). skill_autorun + skill_autorun_at +
+		# skill_autorun_skill ride the SAME single query (design §3.4): the skill
+		# auto-run branch needs the flag, its sliding timestamp for the inline TTL
+		# check, and the armed skill docname for the LIVE disarm re-check (C2).
 		_conv_flags = (
 			frappe.db.get_value(
-				"Jarvis Conversation", conv, ["auto_apply", "file_box", "skip_confirmation"], as_dict=True
+				"Jarvis Conversation",
+				conv,
+				[
+					"auto_apply",
+					"file_box",
+					"skip_confirmation",
+					"skill_autorun",
+					"skill_autorun_at",
+					"skill_autorun_skill",
+				],
+				as_dict=True,
 			)
 			if conv
 			else None
@@ -1437,41 +1673,105 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			and _conv_flags.get("skip_confirmation")
 			and not _armed_skip_disabled()
 		):
-			result = dispatch_confirmed(tool, args)
 			# Provenance for the receipt (T8): which armed macro authorized this uncarded
-			# write. Consumed once by the receipt persist, which labels the row
-			# action_outcome=auto_applied + armed_by_macro so an armed write is a visible,
-			# queryable receipt - not silence-by-omission.
-			from jarvis.tools import _agent_run_ctx
-
-			# Always label an armed write (we are in the armed branch, so it IS armed):
-			# resolve the human macro_name (Jarvis Macro autoname is a hash, so the run's
-			# `macro` docname is opaque) and fall back to a generic marker if the run-row
-			# lookup misses (the abnormal lingering-flag state) - never silently unlabelled.
+			# write. Always label an armed write (we are in the armed branch, so it IS
+			# armed): resolve the human macro_name (Jarvis Macro autoname is a hash, so the
+			# run's `macro` docname is opaque) and fall back to a generic marker if the
+			# run-row lookup misses (the abnormal lingering-flag state) - never silently
+			# unlabelled. The covered-write CORE (dispatch + run_method read-filter +
+			# run_import announcement + provenance stash) is shared with the skill branch
+			# via _run_covered_write so the two can never drift apart again.
 			_armed_run_macro = frappe.db.get_value(
 				"Jarvis Macro Run", {"conversation": conv, "status": "running"}, "macro"
 			)
-			_agent_run_ctx.set_armed_by_macro(
-				(
-					frappe.db.get_value("Jarvis Macro", _armed_run_macro, "macro_name")
-					if _armed_run_macro
-					else None
-				)
-				or "an armed macro"
+			_macro_name = (
+				frappe.db.get_value("Jarvis Macro", _armed_run_macro, "macro_name")
+				if _armed_run_macro
+				else None
+			) or "an armed macro"
+			return _run_covered_write(
+				tool,
+				args,
+				conv=conv,
+				owner_user=owner_user,
+				provenance_kind="macro",
+				provenance_name=_macro_name,
 			)
-			if tool == "run_import":
-				# The armed branch bypasses _confirm_core, which is where a CONFIRMED
-				# run_import normally gets its completion announcement bound. Bind it here
-				# too so an armed (unattended) import still reports done/failed into the run
-				# log. Synthesize the record from the gate locals (conv + owner_user) - there
-				# is no pending-confirm record on this path. Self-gating + best-effort (it
-				# no-ops on a non-ok result, a missing data_import, or the kill switch).
-				from jarvis.chat.import_announce import bind_after_run_import
+		# Skill "Approve & run" auto-run bypass (design §3.4): a conversation in an
+		# APPROVED skill run (skill_autorun=1, stamped by approve_and_run on step-1
+		# success) runs the explicit _SKILL_AUTORUN_COVERED allowlist uncarded, sliding
+		# skill_autorun_at forward on each covered write. Placed AFTER the macro branch
+		# so a (structurally-unreachable, but defense-in-depth) both-flags conversation
+		# resolves as a macro run for deterministic provenance. The irreversible trio +
+		# create_custom_skill are NOT covered here, so they fall through to park + PAUSE
+		# the run. Narrower than the macro's _ARMED_SKIP_COVERED (no create_custom_skill)
+		# and additionally gated on a SLIDING TTL + a bench-guaranteed Halt cancel-gate.
+		if tool in _SKILL_AUTORUN_COVERED and _conv_flags.get("skill_autorun"):
+			from jarvis.chat import turn_message_binding
 
-				bind_after_run_import(
-					{"tool": "run_import", "conversation": conv, "owner": owner_user}, result
+			# Cancel-gate FIRST (the Halt compensating control): stop_run sets a
+			# transport-independent run-cancel signal; if it is set, HARD-STOP this
+			# covered write - clear the flag, clear the signal, and REFUSE the write
+			# WITHOUT executing it. This is what makes Halt stop the auto-run chain
+			# within one write, bench-guaranteed, regardless of the container honouring
+			# chat_abort. Checked before the TTL so a halted stale run still stops here.
+			if turn_message_binding.is_run_cancel_requested(conv):
+				_skill_autorun_clear(conv)
+				turn_message_binding.clear_run_cancel(conv)
+				code = RunHaltedError.__name__
+				return _error(code, "the run was halted - re-approve to continue")
+			# LIVE disarm re-check (C2 - the documented kill lever): re-read
+			# allow_approve_run off the EXACT armed skill docname this run was opened on
+			# (stamped on skill_autorun_skill by approve_and_run). An admin un-arming the
+			# skill mid-run - or a run whose docname is missing/inconsistent - must STOP
+			# the auto-run, not keep skipping cards. When it is falsy, HARD-STOP: clear
+			# the flag and refuse WITHOUT dispatching, within one write, no deploy. Placed
+			# after the cancel-gate and before the TTL/dispatch so it fires on every
+			# would-be uncarded covered write regardless of the run's age.
+			autorun_skill = _conv_flags.get("skill_autorun_skill")
+			if not autorun_skill or not frappe.db.get_value(
+				"Jarvis Custom Skill", autorun_skill, "allow_approve_run"
+			):
+				_skill_autorun_clear(conv)
+				return _error(RunDisarmedError.__name__, "the skill was disarmed - run stopped")
+			# Sliding TTL: auto-run only while the last covered write is recent. If the
+			# timestamp is missing or older than the horizon, DON'T auto-run - fall
+			# through to the normal park below (the reaper, task #42, clears the stale
+			# flag; a park here is a safe, correct pause).
+			autorun_at = _conv_flags.get("skill_autorun_at")
+			if (
+				autorun_at
+				and (frappe.utils.now_datetime() - frappe.utils.get_datetime(autorun_at)).total_seconds()
+				<= _SKILL_AUTORUN_TTL_S
+			):
+				# The covered-write CORE (dispatch + run_method read-filter + run_import
+				# announcement + provenance stash) is shared with the macro branch via
+				# _run_covered_write so the two can never drift; the skill run's provenance is
+				# the armed skill docname (queryable as armed_by_skill). The slide/clear below
+				# is skill-only post-dispatch handling and stays in this branch.
+				result = _run_covered_write(
+					tool,
+					args,
+					conv=conv,
+					owner_user=owner_user,
+					provenance_kind="skill",
+					provenance_name=autorun_skill,
 				)
-			return result
+				# Hard-stop-on-error: the first covered ok:False clears the flag so the
+				# next write re-cards; a success slides the timestamp forward. On failure,
+				# append a one-line note to the tool's OWN error so the model (and the
+				# transcript) sees that the approved run also ended - not just that this
+				# one call failed - so it re-cards the next covered write instead of
+				# retrying it uncarded (agent legibility).
+				if result.get("ok"):
+					_skill_autorun_slide(conv)
+				else:
+					_skill_autorun_clear(conv)
+					err_obj = result.get("error")
+					if isinstance(err_obj, dict) and err_obj.get("message"):
+						err_obj["message"] += " The approved run has also ended - re-approve to continue."
+				return result
+			# TTL-expired / no timestamp: fall through to the normal park.
 		# Auto-apply bypass (issue #186, Task 4 + #5): the OTHER path where a gated
 		# write runs without a confirmation token. Strictly limited to
 		# {a resolved conversation, admin-enabled auto_apply, an _AUTO_APPLYABLE
@@ -1569,8 +1869,28 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# it for ALL of _run_tool and break the read path's perf_counter.
 		from jarvis.chat import confirm_card
 
+		# "Approve & run" offer (skill "Approve & run the plan", design §3.3): if the
+		# turn was triggered by a message invoking exactly one live-armed custom skill
+		# - resolved forgery-proof under the MESSAGE OWNER via the turn->message
+		# binding - stamp that skill's docname on the token so a later approve_and_run
+		# can authorize off it, and flag the card so the frontend can show the
+		# affordance (P0 = just the flag; the plan outline is a later task). Best-effort
+		# + fail-safe: no offer on any doubt, and it NEVER sets the run flag or
+		# auto-runs (that is a later task) - it only decorates this park.
+		#
+		# Offer ONLY on a _SKILL_AUTORUN_COVERED first write (I4): a destructive /
+		# create_custom_skill park is a _SKILL_AUTORUN_NEVER tool that approve_and_run
+		# refuses to run as step 1, so stamping it would dangle an unusable offer and
+		# invite an approve-a-NEVER-tool click. A NEVER first write parks as an ordinary
+		# card with no run offer.
+		skill_docname, skill_slug = (
+			_resolve_approve_run_offer(conv) if tool in _SKILL_AUTORUN_COVERED else (None, None)
+		)
 		if isinstance(preview, dict):
 			preview["card"] = confirm_card.build_card(tool, args, preview)
+			if skill_docname and isinstance(preview.get("card"), dict):
+				preview["card"]["approve_run"] = True
+				preview["card"]["skill_slug"] = skill_slug
 		expires_at = int(time.time()) + pending_confirm._TTL_S
 		token = pending_confirm.mint(
 			conversation=conv,
@@ -1581,6 +1901,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			exec_user=exec_user,
 			preview=preview,
 			expires_at=expires_at,
+			skill_docname=skill_docname,
 		)
 		# mint returns None when it could not stage the park (a transient cache
 		# failure that it already rolled back, so nothing is persisted). Do NOT
