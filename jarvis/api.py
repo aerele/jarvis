@@ -275,6 +275,7 @@ def _dispatch_from_session(
 			return result
 	finally:
 		_agent_run_ctx.clear_session_key()
+		_agent_run_ctx.take_armed_by_macro()  # belt: never leak an armed marker across dispatches
 
 
 _STALE_PAIRING_DEDUPE_TTL_S = 3600
@@ -340,7 +341,29 @@ def _persist_and_publish_tool_call(
 	conv_name = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
 	if not conv_name:
 		return
-	persist_tool_receipt(conv_name, tool, args, result, tool_call_id=tool_call_id)
+	# T8: an armed-skip write set a request-local provenance marker (consume-once).
+	# Label its receipt auto_applied + armed_by_macro so the SPA renders a distinct
+	# "ran without confirmation - armed macro X" chip and the row is queryable, instead
+	# of a silent Activity-accordion tool row.
+	from jarvis.tools import _agent_run_ctx
+
+	armed_by_macro = _agent_run_ctx.take_armed_by_macro()
+	# A FAILED armed write must still be visible (it ran uncarded, unattended, and
+	# broke - exactly what T8 surfaces): label it "failed" (a red chip carrying the
+	# macro provenance) rather than letting it fall into the collapsed Activity row.
+	if armed_by_macro:
+		armed_outcome = "auto_applied" if (isinstance(result, dict) and result.get("ok")) else "failed"
+	else:
+		armed_outcome = None
+	persist_tool_receipt(
+		conv_name,
+		tool,
+		args,
+		result,
+		action_outcome=armed_outcome,
+		armed_by_macro=armed_by_macro if armed_outcome else None,
+		tool_call_id=tool_call_id,
+	)
 
 
 def _locked_insert_chat_message(
@@ -383,6 +406,7 @@ def persist_tool_receipt(
 	result: dict | None,
 	*,
 	action_outcome: str | None = None,
+	armed_by_macro: str | None = None,
 	tool_call_id: str | None = None,
 ) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
@@ -455,6 +479,7 @@ def persist_tool_receipt(
 				"tool_status": status,
 				"tool_call_id": tool_call_id or None,
 				"action_outcome": action_outcome or None,
+				"armed_by_macro": armed_by_macro or None,
 				"ref_doctype": ref_doctype,
 				"ref_name": ref_name,
 				"content": f"{tool} → {action_outcome or status}",
@@ -740,6 +765,36 @@ _DESTRUCTIVE = frozenset(
 # default-unrestricted allowlist under auto-apply + a prompt injection would be
 # an unconfirmed arbitrary whitelisted method call, so it never fast-paths.
 _AUTO_APPLYABLE = frozenset({"create_doc", "update_doc"})
+# Armed-skip (macro skip-confirmation): an admin-armed macro (Jarvis Macro
+# .skip_confirmation, stamped onto its run conversation's skip_confirmation) runs
+# these WITHOUT a confirmation card - the BROAD covered set, far wider than the
+# create/update-only _AUTO_APPLYABLE, and INCLUDING run_method (which gates in
+# ordinary chat; skips only inside an armed macro). This is an explicit ALLOWLIST,
+# NOT `_GATED_WRITES - _ARMED_SKIP_NEVER`: a new gated tool must NOT become
+# armed-skippable by default. The partition invariant (test_armed_skip_partition)
+# asserts COVERED and NEVER are disjoint and together == _GATED_WRITES, so adding a
+# gated tool to neither set turns that test RED until a human consciously files it.
+# The irreversible trio (_ARMED_SKIP_NEVER) always parks; an armed macro that hits
+# one stops the run (D5). Bulk covered writes DO skip; the F16 over-size cap still
+# bounces them. A gated tool NOT in COVERED (e.g. a bulk light write) parks in an
+# armed run like any other excluded write.
+_ARMED_SKIP_COVERED = frozenset(
+	{
+		"create_doc",
+		"create_docs",
+		"update_doc",
+		"submit_doc",
+		"run_method",
+		"run_import",
+		"apply_workflow_action",
+		"send_email",
+		"share_doc",
+		"assign_to",
+		"create_custom_skill",
+		"update_wiki",
+	}
+)
+_ARMED_SKIP_NEVER = frozenset({"cancel_doc", "delete_doc", "amend_doc"})
 # Gated writes we dry-run in the sandbox AT PARK TIME and BLOCK on if the dry-run
 # fails, so a deterministic failure (missing mandatory field, bad link, no create
 # permission) is returned to the model BEFORE a confirmation card is shown instead
@@ -810,6 +865,14 @@ def _as_bool(value) -> bool:
 	if isinstance(value, str):
 		return value.strip().lower() in ("1", "true", "yes", "on")
 	return bool(value)
+
+
+def _armed_skip_disabled() -> bool:
+	"""Site-wide kill switch for admin-armed macro skip-confirmation. When the
+	operator flips ``Jarvis Settings.disable_armed_skip`` on, every armed covered
+	write re-gates behind its card immediately, no deploy - the escape hatch if an
+	armed macro misbehaves. Read only when an armed covered write is about to skip."""
+	return bool(frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "disable_armed_skip")))
 
 
 def _run_preview(tool: str, args: dict) -> dict:
@@ -1349,13 +1412,72 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		owner_user = (
 			frappe.db.get_value("Jarvis Conversation", conv, "owner") if conv else None
 		) or exec_user
-		# Auto-apply bypass (issue #186, Task 4 + #5): the ONLY path where a gated
+		# One flags read shared by the two skip-the-card bypasses below (both key off
+		# the conversation row). An empty/unresolved conv -> {} -> every flag OFF (the
+		# safe default: the write parks).
+		_conv_flags = (
+			frappe.db.get_value(
+				"Jarvis Conversation", conv, ["auto_apply", "file_box", "skip_confirmation"], as_dict=True
+			)
+			if conv
+			else None
+		) or {}
+		# Armed-skip bypass (macro skip-confirmation): an admin-armed macro's run
+		# conversation carries skip_confirmation=1 (stamped by run_macro), so the
+		# BROAD covered set - incl. run_method / submit / send_email / run_import -
+		# runs uncarded. This is distinct from and wider than the create/update-only
+		# auto_apply below. The irreversible trio (delete/cancel/amend) is NOT in
+		# _ARMED_SKIP_COVERED, so it falls through to park (an armed macro that hits
+		# one stops the run - D5). Cheap frozenset membership test first; the
+		# kill-switch Settings read runs only when a covered write is actually armed.
+		# Bulk covered writes skip too (an automation must not stall on a batch card);
+		# the F16 over-size cap above still bounces an oversized batch.
+		if (
+			tool in _ARMED_SKIP_COVERED
+			and _conv_flags.get("skip_confirmation")
+			and not _armed_skip_disabled()
+		):
+			result = dispatch_confirmed(tool, args)
+			# Provenance for the receipt (T8): which armed macro authorized this uncarded
+			# write. Consumed once by the receipt persist, which labels the row
+			# action_outcome=auto_applied + armed_by_macro so an armed write is a visible,
+			# queryable receipt - not silence-by-omission.
+			from jarvis.tools import _agent_run_ctx
+
+			# Always label an armed write (we are in the armed branch, so it IS armed):
+			# resolve the human macro_name (Jarvis Macro autoname is a hash, so the run's
+			# `macro` docname is opaque) and fall back to a generic marker if the run-row
+			# lookup misses (the abnormal lingering-flag state) - never silently unlabelled.
+			_armed_run_macro = frappe.db.get_value(
+				"Jarvis Macro Run", {"conversation": conv, "status": "running"}, "macro"
+			)
+			_agent_run_ctx.set_armed_by_macro(
+				(
+					frappe.db.get_value("Jarvis Macro", _armed_run_macro, "macro_name")
+					if _armed_run_macro
+					else None
+				)
+				or "an armed macro"
+			)
+			if tool == "run_import":
+				# The armed branch bypasses _confirm_core, which is where a CONFIRMED
+				# run_import normally gets its completion announcement bound. Bind it here
+				# too so an armed (unattended) import still reports done/failed into the run
+				# log. Synthesize the record from the gate locals (conv + owner_user) - there
+				# is no pending-confirm record on this path. Self-gating + best-effort (it
+				# no-ops on a non-ok result, a missing data_import, or the kill switch).
+				from jarvis.chat.import_announce import bind_after_run_import
+
+				bind_after_run_import(
+					{"tool": "run_import", "conversation": conv, "owner": owner_user}, result
+				)
+			return result
+		# Auto-apply bypass (issue #186, Task 4 + #5): the OTHER path where a gated
 		# write runs without a confirmation token. Strictly limited to
 		# {a resolved conversation, admin-enabled auto_apply, an _AUTO_APPLYABLE
-		# (reversible create/update) tool}. An empty/unresolved conv is treated
-		# as OFF (safe default). Everything outside create/update - submit_doc,
-		# run_method, and every destructive tool (delete/cancel/amend/send_email)
-		# - ALWAYS parks, even with auto_apply on.
+		# (reversible create/update) tool}. Everything outside create/update -
+		# submit_doc, and every destructive tool (delete/cancel/amend/send_email) -
+		# ALWAYS parks under auto_apply (only armed-skip above runs the wider set).
 		#
 		# conv is never a client claim - it is resolved server-side from the
 		# session_key upstream - so there is no owner to re-check here: an
@@ -1372,11 +1494,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			# run where nobody can click a confirm card and review happens on
 			# the created Draft + the approval board. Both flags are
 			# server-controlled and admin-gated against generic saves.
-			flags = (
-				frappe.db.get_value("Jarvis Conversation", conv, ["auto_apply", "file_box"], as_dict=True)
-				or {}
-			)
-			if flags.get("auto_apply") or flags.get("file_box"):
+			if _conv_flags.get("auto_apply") or _conv_flags.get("file_box"):
 				return dispatch_confirmed(tool, args)
 		# Sequential confirmation (F16): at most ONE live confirmation card per
 		# conversation. If one is already awaiting the user here, REFUSE to park a

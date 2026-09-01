@@ -271,3 +271,33 @@ test("receiptView: a create links the record it made", () => {
 	);
 	assert.ok(v.targets[0].url.includes("TASK-0002"));
 });
+
+test("receiptView: an auto_applied (armed macro) write is a DISTINCT receipt, not a plain confirmed", () => {
+	const v = receiptView(
+		"submit_doc",
+		{ doctype: "Sales Order", name: "SO-0001" },
+		{ ok: true, data: {} },
+		"auto_applied"
+	);
+	assert.equal(v.icon, "auto_applied");
+	assert.equal(v.tone, "success");
+	assert.notEqual(v.icon, "confirmed");
+	assert.match(v.title, /no confirmation/);
+});
+
+test("receiptView: auto_applied counts like a real execution (from data), not the args", () => {
+	const v = receiptView(
+		"create_doc",
+		{ doctype: "Task" },
+		{
+			ok: true,
+			data: {
+				doctype: "Task",
+				name: "TASK-9001",
+				created: [{ doctype: "Task", name: "TASK-9001" }],
+			},
+		},
+		"auto_applied"
+	);
+	assert.ok(v.targets[0].url.includes("TASK-9001"));
+});
