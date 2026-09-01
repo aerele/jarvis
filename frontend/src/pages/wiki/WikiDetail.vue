@@ -114,8 +114,11 @@
 
 			<!-- ── existing page: view (rendered markdown) or edit ── -->
 			<template v-else-if="page">
-				<!-- metadata row: type · scope (+target) · slug · updated · flags -->
-				<div class="flex flex-wrap items-center gap-2 text-sm">
+				<!-- metadata row: type · scope (+target) · slug · updated · flags.
+				     View mode shows these as a labeled Details section below (reads
+				     like the create form); this compact strip stays as edit-mode
+				     context only. -->
+				<div v-if="editing" class="flex flex-wrap items-center gap-2 text-sm">
 					<Badge
 						variant="outline"
 						theme="gray"
@@ -227,20 +230,101 @@
 					</DocSection>
 				</template>
 				<template v-else>
-					<p v-if="page.summary" class="mt-3 text-sm text-ink-gray-6">
-						{{ page.summary }}
-					</p>
-					<!-- renderMarkdown from @/markdown (escapes HTML first - safe) -->
-					<div
-						v-if="page.body_md"
-						class="prose prose-sm mt-3 max-w-none"
-						v-html="bodyHtml"
-					/>
-					<p v-else class="mt-3 text-sm text-ink-gray-5">No content yet.</p>
-					<!-- provenance: where Jarvis learned this - earns trust and edits -->
-					<p v-if="provenance" class="mt-3 border-t pt-2 text-p-sm text-ink-gray-5">
-						{{ provenance }}
-					</p>
+					<!-- Labeled read view: same field shape as the create form so a
+					     saved page reads as a filled-in form, not a bare blob. -->
+					<DocSection label="Details">
+						<dl class="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+							<div>
+								<dt class="text-xs text-ink-gray-5">Type</dt>
+								<dd class="mt-1 text-base text-ink-gray-8">
+									{{ page.page_type === "Org" ? "Org notes" : page.page_type }}
+								</dd>
+							</div>
+							<div>
+								<dt class="text-xs text-ink-gray-5">Scope</dt>
+								<dd class="mt-1 flex flex-wrap items-center gap-2">
+									<Badge
+										variant="subtle"
+										:theme="SCOPE_THEME[page.scope] || 'gray'"
+										:label="page.scope || 'Org'"
+									/>
+									<span v-if="scopeTarget" class="text-sm text-ink-gray-6"
+										>for {{ scopeTarget }}</span
+									>
+								</dd>
+							</div>
+							<div>
+								<dt class="text-xs text-ink-gray-5">Page id</dt>
+								<dd class="mt-1 break-all text-base text-ink-gray-8">
+									{{ page.slug }}
+								</dd>
+							</div>
+							<div>
+								<dt class="text-xs text-ink-gray-5">Updated</dt>
+								<dd class="mt-1 text-base text-ink-gray-8">
+									<Tooltip v-if="updatedAt" :text="exactDate(updatedAt)">
+										<span>{{ timeAgo(updatedAt) }}</span>
+									</Tooltip>
+									<span v-else>Not recorded</span>
+								</dd>
+							</div>
+							<div
+								v-if="
+									page.status === 'Archived' ||
+									page.contradiction_flag ||
+									page.stale
+								"
+								class="sm:col-span-2"
+							>
+								<dt class="text-xs text-ink-gray-5">Status</dt>
+								<dd class="mt-1 flex flex-wrap gap-2">
+									<Badge
+										v-if="page.status === 'Archived'"
+										variant="subtle"
+										theme="gray"
+										label="Archived"
+									/>
+									<Badge
+										v-if="page.contradiction_flag"
+										variant="subtle"
+										theme="red"
+										label="Conflicting"
+									/>
+									<Badge
+										v-if="page.stale"
+										variant="subtle"
+										theme="orange"
+										label="Stale"
+									/>
+								</dd>
+							</div>
+							<div class="sm:col-span-2">
+								<dt class="text-xs text-ink-gray-5">Summary</dt>
+								<dd v-if="page.summary" class="mt-1 text-sm text-ink-gray-8">
+									{{ page.summary }}
+								</dd>
+								<dd v-else class="mt-1 text-sm text-ink-gray-5">
+									No summary yet.
+								</dd>
+							</div>
+							<div class="sm:col-span-2">
+								<dt class="text-xs text-ink-gray-5">Content</dt>
+								<!-- renderMarkdown from @/markdown (escapes HTML first - safe) -->
+								<dd
+									v-if="page.body_md"
+									class="prose prose-sm mt-1 max-w-none"
+									v-html="bodyHtml"
+								/>
+								<dd v-else class="mt-1 text-sm text-ink-gray-5">
+									No content yet.
+								</dd>
+							</div>
+						</dl>
+						<!-- provenance: where Jarvis learned this - earns trust and edits -->
+						<p v-if="provenance" class="mt-4 border-t pt-2 text-p-sm text-ink-gray-5">
+							{{ provenance }}
+						</p>
+					</DocSection>
 				</template>
 			</template>
 		</template>
