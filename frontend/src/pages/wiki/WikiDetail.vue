@@ -231,8 +231,9 @@
 				</template>
 				<template v-else>
 					<!-- Labeled read view: same field shape as the create form so a
-					     saved page reads as a filled-in form, not a bare blob. -->
-					<DocSection label="Details">
+					     saved page reads as a filled-in form, not a bare blob. Plain
+					     container, not a collapsible section - a read page just shows. -->
+					<div class="mt-2">
 						<dl class="grid gap-x-6 gap-y-4 sm:grid-cols-2">
 							<div>
 								<dt class="text-xs text-ink-gray-5">Type</dt>
@@ -324,7 +325,7 @@
 						<p v-if="provenance" class="mt-4 border-t pt-2 text-p-sm text-ink-gray-5">
 							{{ provenance }}
 						</p>
-					</DocSection>
+					</div>
 				</template>
 			</template>
 		</template>
