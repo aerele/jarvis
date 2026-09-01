@@ -123,6 +123,8 @@
   "role_profiles_config",
   "role_profiles_config_version",
   "role_profiles_config_synced_at",
+  "redaction_patterns",
+  "redaction_patterns_synced_at",
   "release_notice_section",
   "release_notice_active",
   "latest_jarvis_version",
@@ -896,6 +898,21 @@
    "fieldtype": "Datetime",
    "hidden": 1,
    "label": "Role Profile Config Synced At",
+   "read_only": 1
+  },
+  {
+   "description": "Canonical JSON array of the control-plane-owned egress redaction rules ([pattern, mode] pairs) last pulled via get_connection and applied to the agent's outbound chat text by jarvis.chat.egress_rules. Empty until the first pull; readers fail open (no redaction) when empty or unparseable. Owned by the control plane - only the sync path writes it.",
+   "fieldname": "redaction_patterns",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Egress Redaction Patterns",
+   "read_only": 1
+  },
+  {
+   "fieldname": "redaction_patterns_synced_at",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Egress Redaction Patterns Synced At",
    "read_only": 1
   },
   {

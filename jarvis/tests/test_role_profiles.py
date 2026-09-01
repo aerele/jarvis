@@ -73,7 +73,7 @@ class TestRoleProfiles(FrappeTestCase):
 
 	def test_standard_tools_allow_excludes_drops_keeps_features(self):
 		allow = set(role_profiles.standard_tools_allow())
-		self.assertEqual(len(allow), 68)
+		self.assertEqual(len(allow), 67)
 		for kept in (
 			"exec",
 			"read",
@@ -93,18 +93,19 @@ class TestRoleProfiles(FrappeTestCase):
 			"browser",
 			"web_search",
 			"sessions_spawn",
+			"session_status",
 			"jarvis__record_agent_run",
 			"skill_workshop",
 		):
 			self.assertNotIn(dropped, allow)
 
 	def test_tool_universe_is_94(self):
-		# standard_tools_allow() (68) + STANDARD_DROP_TOOLS (26) must
+		# standard_tools_allow() (67) + STANDARD_DROP_TOOLS (27) must
 		# reconstruct the full evidence-captured 94-tool universe with no
 		# overlap and no gap (spec §2).
 		allow = set(role_profiles.standard_tools_allow())
 		drop = set(role_profiles.STANDARD_DROP_TOOLS)
-		self.assertEqual(len(drop), 26)
+		self.assertEqual(len(drop), 27)
 		self.assertEqual(allow & drop, set())
 		self.assertEqual(len(allow | drop), 94)
 
@@ -869,7 +870,7 @@ class TestSessionProfilePick(FrappeTestCase):
 		row = frappe.get_doc(SESSION, {"session_key": key})
 		self.assertEqual(row.profile_agent_id, "role-hr")
 		self.assertEqual(row.profile_tier, "standard")
-		self.assertEqual(row.profile_n_tools, 68)
+		self.assertEqual(row.profile_n_tools, 67)
 
 	def test_flag_off_uses_legacy_create_session_path(self):
 		settings = self._fake_settings(enable_role_profiles=False)
