@@ -5460,15 +5460,13 @@ const currentTitle = computed(
 // either id-less or still titled the backend's literal "New chat" default
 // (jarvis/chat/api.py's create_conversation). Zero messages on one of these
 // means "not loaded yet" or "titled but empty", never "blank", so showWelcome
-// below must not treat it the same as a fresh chat. The title can come from the
-// recent list OR, for a zero-message conversation the list omits, from the last
-// loadConversation fetch (loadedConvTitle).
-const isExistingTitledConv = computed(() => {
-	if (!currentId.value) return false;
-	const listedTitle = store.conversations.find((c) => c.name === currentId.value)?.title;
-	const title = listedTitle || loadedConvTitle.value;
-	return !!title && title !== "New chat";
-});
+// below must not treat it the same as a fresh chat. currentTitle already
+// resolves the title from the recent list OR, for a zero-message conversation
+// the list omits, from the last loadConversation fetch (loadedConvTitle), so
+// reuse it as the single source rather than re-deriving the lookup here.
+const isExistingTitledConv = computed(
+	() => !!currentId.value && currentTitle.value !== "New chat"
+);
 
 // supportOn/supportUnconfigured (the same dual kill-switch router/index.js's
 // supportGuard uses) now live once, near openSupport - this file used to
@@ -8282,6 +8280,11 @@ async function newChat() {
 	// and a later send can release the records by the real scope instead of stranding them (R2-2/R3-2).
 	if (currentId.value) _promoteNewChatScope(currentId.value);
 	messages.value = [];
+	// A brand-new chat is not in the recent list and loadConversation does not
+	// run here (the route watcher no-ops), so clear the last-loaded title;
+	// otherwise isExistingTitledConv keeps the previous conversation's title and
+	// suppresses the welcome screen on the fresh chat.
+	loadedConvTitle.value = "";
 	// loadConversation is the only other writer and the route watcher no-ops here
 	// (currentId already equals this id), so without this the previous chat's
 	// origin survives onto a brand-new one — and the first html the agent draws
