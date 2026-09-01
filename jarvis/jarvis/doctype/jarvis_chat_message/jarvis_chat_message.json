@@ -25,6 +25,7 @@
     "tool_call_id",
     "action_outcome",
     "armed_by_macro",
+    "armed_by_skill",
     "ref_doctype",
     "ref_name",
     "canvas",
@@ -157,7 +158,7 @@
       "options": "\nconfirmed\ndiscarded\nfailed\nauto_applied",
       "read_only": 1,
       "depends_on": "eval:doc.role=='tool'",
-      "description": "Set on tool rows that originated from a confirmation card OR ran under an armed macro: 'confirmed' (user clicked Confirm and the write ran), 'discarded' (user declined - nothing ran), 'failed' (confirmed but the write errored/rolled back), or 'auto_applied' (ran WITHOUT a card under an armed macro's skip_confirmation - see armed_by_macro). Non-empty => the SPA renders this row as an inline receipt chip instead of an Activity-accordion tool row. Empty on ordinary (non-carded) tool calls."
+      "description": "Set on tool rows that originated from a confirmation card OR ran under an armed macro / approved skill run: 'confirmed' (user clicked Confirm and the write ran), 'discarded' (user declined - nothing ran), 'failed' (confirmed but the write errored/rolled back), or 'auto_applied' (ran WITHOUT a card under an armed macro's skip_confirmation or an approved skill run's skill_autorun - see armed_by_macro / armed_by_skill). Non-empty => the SPA renders this row as an inline receipt chip instead of an Activity-accordion tool row. Empty on ordinary (non-carded) tool calls."
     },
     {
       "fieldname": "armed_by_macro",
@@ -167,6 +168,15 @@
       "no_copy": 1,
       "depends_on": "eval:doc.action_outcome=='auto_applied'",
       "description": "On an armed-skip tool row (action_outcome='auto_applied'), the name of the Jarvis Macro whose skip_confirmation authorized running this write without a confirmation card. Provenance for the audit trail and the receipt label; empty otherwise."
+    },
+    {
+      "fieldname": "armed_by_skill",
+      "fieldtype": "Data",
+      "label": "Armed By Skill",
+      "read_only": 1,
+      "no_copy": 1,
+      "depends_on": "eval:doc.action_outcome=='auto_applied'",
+      "description": "On an approved-skill-run tool row (action_outcome='auto_applied'), the Jarvis Custom Skill docname whose skill_autorun authorized running this covered write without a confirmation card. Provenance for the audit trail and the receipt label so 'which writes ran under an approved skill run' is queryable; empty otherwise."
     },
     {
       "fieldname": "ref_doctype",

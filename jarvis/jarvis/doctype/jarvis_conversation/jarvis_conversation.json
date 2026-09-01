@@ -77,6 +77,32 @@
    "description": "Set by an armed macro run (Jarvis Macro.skip_confirmation) on its own disposable run conversation. When 1, every covered gated tool call executes without a confirmation card; the irreversible trio (delete/cancel/amend) still parks. The conversation is human-inert while set - interactive send and retry are blocked. Server-set only; enabling via a generic save requires the Jarvis Admin / System Manager role. Cleared when the run reaches a terminal state."
   },
   {
+   "fieldname": "skill_autorun",
+   "fieldtype": "Check",
+   "label": "Skill auto-run (approved skill run)",
+   "default": "0",
+   "hidden": 1,
+   "no_copy": 1,
+   "search_index": 1,
+   "description": "Set by the approve_and_run endpoint (Jarvis Custom Skill.allow_approve_run), ONLY after the first covered write of the declared plan succeeds. When 1, every covered gated tool call in the explicit _SKILL_AUTORUN_COVERED allowlist executes without a confirmation card, sliding skill_autorun_at forward on each covered write; the irreversible trio (delete/cancel/amend) and create_custom_skill still park and pause the run. Server-set only; enabling via a generic save requires the Jarvis Admin / System Manager role. Cleared at every terminal (turn end, new top-level message, Halt, hard-stop-on-error, destructive/create_custom_skill card dismiss) or by the sliding-TTL reaper."
+  },
+  {
+   "fieldname": "skill_autorun_at",
+   "fieldtype": "Datetime",
+   "label": "Skill Auto-run At",
+   "hidden": 1,
+   "no_copy": 1,
+   "description": "Sliding last-write timestamp for skill_autorun - set on the approving step-1 success and advanced to now() on every subsequent covered write. The sliding TTL reaper reads THIS field (not the row's modified time) to reap a stranded run. Server-set only (db_set)."
+  },
+  {
+   "fieldname": "skill_autorun_skill",
+   "fieldtype": "Data",
+   "label": "Skill Auto-run Skill",
+   "hidden": 1,
+   "no_copy": 1,
+   "description": "The armed Jarvis Custom Skill DOCNAME whose approved run stamped skill_autorun on this conversation - set by approve_and_run alongside skill_autorun=1 (from the token's skill_docname). The write-confirmation gate re-reads allow_approve_run LIVE off THIS row before each uncarded covered write, so un-arming the skill mid-run hard-stops the auto-run within one write (the documented kill lever). Server-set only (db_set)."
+  },
+  {
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",

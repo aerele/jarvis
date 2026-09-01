@@ -123,3 +123,33 @@ describe("the card advertises both ways to approve", () => {
 		expect(src).toContain("sortPendingCards(");
 	});
 });
+
+describe("a typed go-ahead is deliberately confirm-only (never approve_and_run)", () => {
+	// D-TRIGGER (skill approve-and-run, §3.5): the typed shortcut pins to
+	// step-by-step. approve_and_run is reachable ONLY through a runnable card's
+	// own "Approve & run" button - a typed phrase must never open one, however
+	// many gated writes it declares.
+	it("documents the pin at the approvalTokens send site", () => {
+		expect(src).toContain(
+			"const approvalTokens = visiblePendingActions.value.map((a) => a.token);"
+		);
+		expect(src).toContain("Deliberately confirm-only (step-by-step)");
+	});
+
+	it("calls api.approveAndRun from exactly one place - approveAndRunPending, never send()", () => {
+		const callSites = src.split("api.approveAndRun(").length - 1;
+		expect(callSites).toBe(1);
+		const fnAt = src.indexOf("async function approveAndRunPending(pa)");
+		expect(fnAt).toBeGreaterThan(-1);
+		// The one call site sits AFTER the function's own declaration, i.e. inside
+		// its body - not inside send()/onTypedConfirmResolved above it.
+		expect(src.indexOf("api.approveAndRun(")).toBeGreaterThan(fnAt);
+	});
+
+	it("gives approveAndRunPending its own busy token, never reusing pa.busy alone to pick a label", () => {
+		// Two buttons (Step-by-step / Approve & run) now share one card's pa.busy -
+		// without a second signal neither button could tell which one is running.
+		expect(src).toContain("const approveRunBusyToken = ref(null);");
+		expect(src).toContain("approveRunBusyToken.value = token;");
+	});
+});

@@ -23,6 +23,7 @@ class JarvisConversation(Document):
 		self._guard_auto_apply_enable()
 		self._guard_file_box_enable()
 		self._guard_skip_confirmation_enable()
+		self._guard_skill_autorun_enable()
 
 	def _guard_auto_apply_enable(self):
 		"""Defense-in-depth backstop for the admin-gated ``auto_apply`` flag
@@ -103,5 +104,31 @@ class JarvisConversation(Document):
 		if not has_jarvis_admin_access(frappe.session.user):
 			frappe.throw(
 				_("Enabling skip-confirmation requires a Jarvis Admin or System Manager role."),
+				frappe.PermissionError,
+			)
+
+	def _guard_skill_autorun_enable(self):
+		"""``skill_autorun`` is the flag the write-confirmation gate reads to run an
+		approved skill's writes uncarded (the explicit ``_SKILL_AUTORUN_COVERED``
+		allowlist - see the "Approve & run" design doc D-COVERED/D-CONTROL). The one
+		legitimate enabler is ``approve_and_run`` (a Jarvis Custom Skill armed via its
+		own ``allow_approve_run`` guard), and only AFTER the first covered write of the
+		declared plan succeeds -> raw ``frappe.db.set_value``, which bypasses this
+		controller.
+
+		This guards every OTHER path: the field is owner-writable with no permlevel,
+		so a non-admin owner must not flip it 0 -> 1 through a generic ``doc.save()`` /
+		``update_doc`` / ``frappe.client.set_value`` and turn their own chat into an
+		uncarded-write conversation. This is LOAD-BEARING (the gate reads THIS field),
+		not mere defense-in-depth. Only 0/unset -> 1 is gated; disabling and no-op
+		saves stay free for the owner."""
+		if not self.skill_autorun:
+			return
+		previous = self.get_doc_before_save()
+		if previous and bool(previous.skill_autorun):
+			return
+		if not has_jarvis_admin_access(frappe.session.user):
+			frappe.throw(
+				_("Enabling skill auto-run requires a Jarvis Admin or System Manager role."),
 				frappe.PermissionError,
 			)

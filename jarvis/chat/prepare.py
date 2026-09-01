@@ -74,6 +74,20 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	frappe.db.commit()
 	version = int(turn["version"]) + 1
 
+	# Turn -> triggering-message binding (skill "Approve & run", design §3.3, correctness-C1):
+	# the Relay Pump is the DEFAULT transport and dispatches turns THROUGH this prepare job,
+	# NOT turn_handler.handle_chat_send - so the bind must be installed here too, or the
+	# park-time offer gate reads no binding on the default path and the whole feature is
+	# inert in prod. Bind THIS turn's seed message under its conversation now, at turn start,
+	# AFTER winning the claim (only the running turn binds) and BEFORE any tool call can
+	# park. Best-effort: a binding failure must never break the prepare/dispatch pipeline.
+	try:
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.bind_turn_message(conversation, turn["seed_message"])
+	except Exception:
+		frappe.log_error(title="prepare.bind_turn_message", message=frappe.get_traceback())
+
 	conv = frappe.get_doc(CONV, conversation)
 	owner = conv.owner
 	chat_user = frappe.db.get_value(MSG, turn["seed_message"], "owner") or owner
