@@ -26,12 +26,14 @@ Run:
 from __future__ import annotations
 
 import json
+import time
 from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, add_to_date, now_datetime
 
+from jarvis import admin_client
 from jarvis.chat import agent_scheduler, agents_api
 
 LISTING = "Jarvis Agent Listing"
@@ -338,3 +340,165 @@ class TestStopAgentRun(RunLifecycleTestCase):
 		self._stop(run)
 		self.assertFalse(frappe.db.exists(SESSION, {"session_key": key}))
 		self.assertNotEqual(self._status(run), "running")
+
+
+# --------------------------------------------------------------------------- #
+# A3 — poll_dispatched_runs
+# --------------------------------------------------------------------------- #
+# Comfortably past POLL_GRACE_SECONDS, so the row is a candidate for the sweep.
+DISPATCHED_S = agent_scheduler.POLL_GRACE_SECONDS + 180
+
+
+class TestPollDispatchedRuns(RunLifecycleTestCase):
+	def _poll(self, states: dict) -> list:
+		"""Run the sweep with the admin relay stubbed per run id. Returns the run ids it
+		was asked about, so a test can assert a run was NEVER polled.
+
+		Anything not named in ``states`` answers "still running" — this is a shared site
+		and other modules leave ``running`` rows behind, which the site-wide sweep would
+		otherwise judge on this test's fixture."""
+		asked: list = []
+
+		def _status(run_id):
+			asked.append(run_id)
+			state = states.get(run_id, {"status": "running"})
+			if isinstance(state, Exception):
+				raise state
+			return state
+
+		with patch.object(admin_client, "get_agent_run_status", side_effect=_status):
+			agent_scheduler.poll_dispatched_runs()
+		return asked
+
+	def _relayed(self, state: dict) -> dict:
+		"""Admin's own success envelope around the fleet run-state — the shape the bench
+		really receives (``api/_responses._ok``), one level deeper than
+		``admin_client.get_agent_run_status``'s docstring reads."""
+		return {"ok": True, "data": state}
+
+	def _fleet_failed(self, message: str) -> dict:
+		return self._relayed({"status": "failed", "error": {"code": "run_failed", "message": message}})
+
+	def _fleet_completed(self, *, finished_ago_s: float) -> dict:
+		# The fleet stamps finished_at as a UNIX epoch float.
+		return self._relayed(
+			{"status": "completed", "finished_at": time.time() - finished_ago_s, "error": None}
+		)
+
+	# ------------------------------------------------------------------ #
+	def test_a_fleet_failure_is_surfaced_with_its_real_message(self):
+		"""The whole point of polling: the customer reads what actually broke, not the
+		reaper's "exceeded max duration" three hours later."""
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S)
+		self._poll({run: self._fleet_failed("delegate exec died: exit 137")})
+
+		row = frappe.db.get_value(RUN, run, ["status", "error", "finished_at"], as_dict=True)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("exit 137", row.error)
+		self.assertTrue(row.finished_at)
+
+	def test_a_young_run_is_never_polled(self):
+		"""A fresh dispatch is left alone entirely — no admin round trip per run per
+		tick while the delegate is still starting up."""
+		inst = self._install()
+		run = self._run(inst, age_s=10)
+		asked = self._poll({run: self._fleet_failed("should never be read")})
+		self.assertNotIn(run, asked)
+		self.assertEqual(self._status(run), "running")
+
+	def test_a_stopped_run_is_never_reopened_by_a_later_fleet_flip(self):
+		"""The bench stop is authoritative. The fleet may report the same run failed
+		seconds later; the compare-and-set on ``status='running'`` is what keeps the
+		operator's verdict."""
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S, status="stopped")
+		self._poll({run: self._fleet_failed("late fleet failure")})
+		self.assertEqual(self._status(run), "stopped")
+
+	def test_an_unreachable_admin_leaves_every_run_alone(self):
+		"""A transport fault is never a verdict — the 3h reaper stays the backstop."""
+		from jarvis.exceptions import AdminUnreachableError
+
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S)
+		self._poll({run: AdminUnreachableError("admin is down")})
+		self.assertEqual(self._status(run), "running")
+
+	def test_a_lost_run_record_is_left_alone_while_young(self):
+		"""A 404 from the host may just mean the state file is not visible yet
+		(container mid-restart), so a young run is not condemned on it."""
+		from jarvis.exceptions import AdminUnreachableError
+
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S)
+		self._poll({run: AdminUnreachableError("unknown agent run RUN-1")})
+		self.assertEqual(self._status(run), "running")
+
+	def test_a_lost_run_record_fails_the_run_once_it_is_old(self):
+		from jarvis.exceptions import AdminUnreachableError
+
+		inst = self._install()
+		run = self._run(inst, age_s=agent_scheduler.MISSING_RECORD_FALLBACK_SECONDS + 60)
+		self._poll({run: AdminUnreachableError("unknown agent run RUN-1")})
+
+		row = frappe.db.get_value(RUN, run, ["status", "error"], as_dict=True)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("no record of this run", row.error)
+
+	def test_a_just_finished_run_is_given_its_writeback_grace(self):
+		"""Anchored on the HOST's finish time, not the run's age: this run is hours old
+		and finished ten seconds ago, so its writeback is still plausibly in flight."""
+		inst = self._install()
+		run = self._run(inst, age_s=agent_scheduler.STALE_RUN_AFTER_SECONDS - 60)
+		self._poll({run: self._fleet_completed(finished_ago_s=10)})
+		self.assertEqual(self._status(run), "running")
+
+	def test_a_finished_run_whose_writeback_never_came_fails_honestly(self):
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S)
+		self._poll({run: self._fleet_completed(finished_ago_s=agent_scheduler.WRITEBACK_GRACE_SECONDS + 60)})
+
+		row = frappe.db.get_value(RUN, run, ["status", "error"], as_dict=True)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("delegate finished without recording results", row.error)
+
+	def test_a_scribe_with_pages_is_completed_not_failed(self):
+		"""CA-4: the pages are already durably written, so a scribe that merely forgot to
+		call finish is an honest SUCCESS. The poll must reach the same ruling the reaper
+		does — they share the transition helper precisely so they cannot diverge."""
+		inst = self._install(SCRIBE_SLUG)
+		run = self._run(inst, slug=SCRIBE_SLUG, age_s=DISPATCHED_S, pages_written=4)
+		self._poll({run: self._fleet_completed(finished_ago_s=agent_scheduler.WRITEBACK_GRACE_SECONDS + 60)})
+		self.assertEqual(self._status(run), "completed")
+
+	def test_a_scribe_with_a_zero_tally_is_rebuilt_from_page_provenance(self):
+		"""CA2-3: a stored tally of 0 is rebuilt from the pages themselves before any
+		verdict, so real work is never failed away on a false zero."""
+		inst = self._install(SCRIBE_SLUG)
+		run = self._run(inst, slug=SCRIBE_SLUG, age_s=DISPATCHED_S, pages_written=0)
+		meta = {"count": 2, "pages": [{"slug": "a", "title": "A"}, {"slug": "b", "title": "B"}]}
+		with patch("jarvis.tools.record_app_wiki.reconcile_run_pages", return_value=meta) as recon:
+			self._poll(
+				{run: self._fleet_completed(finished_ago_s=agent_scheduler.WRITEBACK_GRACE_SECONDS + 60)}
+			)
+		recon.assert_called_once_with(run)
+
+		row = frappe.db.get_value(RUN, run, ["status", "pages_written"], as_dict=True)
+		self.assertEqual(row.status, "completed")
+		self.assertEqual(row.pages_written, 2)
+
+	def test_a_still_running_fleet_state_is_left_alone(self):
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S)
+		self._poll({run: self._relayed({"status": "running"})})
+		self.assertEqual(self._status(run), "running")
+
+	def test_an_unenveloped_run_state_is_read_too(self):
+		"""The relay shape is a cross-repo contract. Misreading the wrapper would leave
+		every poll seeing a blank status and terminalizing nothing — silently — so both
+		the enveloped and the bare state must be understood."""
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S)
+		self._poll({run: {"status": "failed", "error": {"message": "bare shape"}}})
+		self.assertEqual(self._status(run), "failed")

@@ -33,6 +33,7 @@ review:
 trigger takes the EXACT same code path as the scheduler.
 """
 
+import time
 from datetime import timedelta
 
 import frappe
@@ -68,6 +69,34 @@ MIN_AGENT_RUN_BUDGET_MONTHLY = 31
 # dead. Keep the two answers to "is this run alive?" on one number, or a run becomes
 # too old to count as live and too young to be reaped.
 STALE_RUN_AFTER_SECONDS = 3 * 3600
+
+# #1061 run poll (jarvis#1058). The reaper above is a 3h BACKSTOP; these are the
+# cutoffs of the 5-minute sweep that asks the fleet what actually happened, so a run
+# whose delegate died after dispatch is terminalized in minutes with its REAL error
+# instead of three hours later as a duration timeout it never hit.
+#
+# POLL_GRACE_SECONDS — how long a fresh dispatch is left alone. Below this the fleet
+# state is still ``queued``/``running`` in the normal case, so polling only costs an
+# admin round trip per run per tick.
+POLL_GRACE_SECONDS = 120
+# WRITEBACK_GRACE_SECONDS — how long the bench waits, AFTER the delegate finished, for
+# ``record_agent_run`` to land before calling the run finished-without-results. Measured
+# from the FLEET's ``finished_at``, never from the run's own age: a two-hour scribe is
+# already far past any grace the instant its fleet state flips to completed, and failing
+# it with the writeback seconds in flight would mislabel a success.
+WRITEBACK_GRACE_SECONDS = 600
+# MISSING_RECORD_FALLBACK_SECONDS — a 404 from the fleet ("unknown agent run") means the
+# host has NO record: either the run never landed, or its state file was pruned. Both are
+# indistinguishable from here, so a young run is left alone (the state file may not be
+# visible yet / the container may be mid-restart) and only an old one is failed.
+MISSING_RECORD_FALLBACK_SECONDS = 1800
+# The fleet-agent's own 404 text for a run it has no state file for
+# (``jarvis_fleet_agent/main.py``: ``NotFoundError(f"unknown agent run {run_id}")``),
+# relayed to the bench through admin as an Admin*Error message. Matched as a SUBSTRING,
+# the same idiom as the "not an installed delegate" translation in ``_launch_audit`` —
+# admin does not re-code this refusal, so the fleet's sentence is the only signal. A
+# CROSS-REPO literal: renaming it fleet-side turns every lost run back into a 3h reap.
+_FLEET_UNKNOWN_RUN = "unknown agent run"
 
 # #672: TTL on the per-installation DISPATCH lock, which is held across the slot
 # claim AND the whole launch, including the admin call (admin_client.DEFAULT_TIMEOUT_S
@@ -392,84 +421,19 @@ def reap_stale_agent_runs() -> int:
 	scan and its transition here. Each candidate is therefore re-read under a ROW LOCK
 	and transitioned with a COMPARE-AND-SET on ``status='running'``: a row a concurrent
 	finish already moved off running is LEFT ALONE, and the per-run session is torn down
-	only AFTER the transition is won + committed."""
-	from jarvis.chat import agent_runs
-	from jarvis.tools.record_app_wiki import reconcile_run_pages
-
+	only AFTER the transition is won + committed. That whole locked transition lives in
+	``_terminalize_stuck_run``, shared with the #1061 poll so the two sweeps cannot
+	drift apart on it."""
 	cutoff = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
 	reaped = 0
 	for r in _stale_candidates(cutoff):
 		try:
-			# Re-read under a ROW LOCK immediately before deciding. The row lock serializes
-			# against a concurrent record_app_wiki/finish (both write this row), so the
-			# status + tally we act on are current, not the possibly-stale scan snapshot.
-			cur = frappe.db.get_value(
-				RUN,
+			if _terminalize_stuck_run(
 				r.name,
-				["status", "pages_written", "agent", "session_key", "owner", "installation"],
-				as_dict=True,
-				for_update=True,
-			)
-			if not cur or cur.status != "running":
-				# A concurrent finish already moved it off running — leave it alone (never
-				# overwrite a completed run with failed). Release the lock and move on.
-				frappe.db.commit()
-				continue
-			nature = (frappe.db.get_value(LISTING, cur.agent, "nature") or "").strip().title()
-			pages = int(cur.pages_written or 0)
-			pages_meta = None
-			if nature == "Scribe" and pages == 0:
-				# CA2-3 fallback: rebuild the tally from page provenance before failing a
-				# scribe run whose stored tally reads zero, so real work is never lost.
-				pages_meta = reconcile_run_pages(r.name)
-				if pages_meta is None:
-					# CA3-4: the provenance QUERY failed — the true page count is UNKNOWN.
-					# Neither terminalization is safe (completing with 0 would drop real
-					# pages; failing would mislabel a success), so leave the run running and
-					# retry on the next sweep. Release the row lock and move on.
-					frappe.db.commit()
-					continue
-				pages = pages_meta["count"]
-			if nature == "Scribe" and pages > 0:
-				# Server-owned terminalization: the pages are already durably written,
-				# so this is an honest SUCCESS the model merely never finalized. Complete
-				# it with its tally rather than failing real work.
-				values = {"status": "completed", "finished_at": frappe.utils.now()}
-				if pages_meta is not None:
-					# CA3-4: the tally was rebuilt from provenance (the stored one read 0) —
-					# PERSIST the reconciled ``pages_written`` + ``pages_json`` in the SAME
-					# locked terminalization write, so a run completed off provenance shows
-					# its real page count + list in the durable tally + the Runs UI, never 0.
-					values["pages_written"] = pages
-					values["pages_json"] = frappe.as_json(pages_meta["pages"])[:60000]
-				frappe.db.set_value(RUN, r.name, values, update_modified=False)
-				frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
-				agent_runs.teardown_run_session(cur.session_key)
-				log_activity(
-					agent=cur.agent,
-					agent_title=frappe.db.get_value(LISTING, cur.agent, "title"),
-					installation=cur.installation,
-					action="run_completed",
-					run=r.name,
-					detail=f"reconciled to completed: scribe wrote {pages} page(s); finish not called",
-					owner=cur.owner,
-				)
-				frappe.db.commit()
-				reaped += 1
-				continue
-			# The row lock is already held and the compare-and-set above has already
-			# established that the row is still ``running``, so this goes straight to
-			# the shared terminalization tail.
-			_terminalize_failed(
-				r.name,
-				agent=cur.agent,
-				installation=cur.installation,
-				session_key=cur.session_key,
-				owner=cur.owner,
 				error="run exceeded max duration; reaped by the stale-run sweep (A8 backstop)",
 				detail="reaped: run exceeded max duration",
-			)
-			reaped += 1
+			):
+				reaped += 1
 		except Exception:
 			frappe.log_error(
 				title=f"jarvis agent: stale-run reap failed: {r.name}",
@@ -478,14 +442,112 @@ def reap_stale_agent_runs() -> int:
 	return reaped
 
 
+def _terminalize_stuck_run(run_name: str, *, error: str, detail: str) -> bool:
+	"""Terminalize ONE run that is still ``running`` when it should not be. Returns True
+	iff this call is the one that transitioned it.
+
+	Shared by both sweeps that terminalize from the outside — the 3h stale-run reaper
+	(A8) and the 5-minute fleet poll (#1061). One copy on purpose: they differ only in
+	WHEN they decide a run is stuck and in the sentence they record, never in how the
+	transition is made, and two copies of a compare-and-set are two chances to drift.
+
+	Re-reads under a ROW LOCK immediately before deciding. The row lock serializes
+	against a concurrent ``record_app_wiki``/``finish`` (both write this row), so the
+	status + tally acted on are current, not a possibly-stale scan snapshot; a row a
+	concurrent finish already moved off ``running`` is LEFT ALONE (never overwrite a
+	real outcome with failed), which is also what makes an operator's ``stopped`` win.
+
+	CA-4 (server-owned scribe completion): a Custom App Learning *scribe* whose durable
+	page tally proves it SUCCEEDED is reconciled to ``completed`` rather than mislabelled
+	``failed`` — completion must not depend on the model remembering to call finish."""
+	from jarvis.chat import agent_runs
+	from jarvis.tools.record_app_wiki import reconcile_run_pages
+
+	cur = frappe.db.get_value(
+		RUN,
+		run_name,
+		["status", "pages_written", "agent", "session_key", "owner", "installation"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not cur or cur.status != "running":
+		# A concurrent finish / stop already moved it off running — leave it alone.
+		# Release the lock and move on.
+		frappe.db.commit()
+		return False
+	nature = (frappe.db.get_value(LISTING, cur.agent, "nature") or "").strip().title()
+	pages = int(cur.pages_written or 0)
+	pages_meta = None
+	if nature == "Scribe" and pages == 0:
+		# CA2-3 fallback: rebuild the tally from page provenance before failing a
+		# scribe run whose stored tally reads zero, so real work is never lost.
+		pages_meta = reconcile_run_pages(run_name)
+		if pages_meta is None:
+			# CA3-4: the provenance QUERY failed — the true page count is UNKNOWN.
+			# Neither terminalization is safe (completing with 0 would drop real
+			# pages; failing would mislabel a success), so leave the run running and
+			# retry on the next sweep. Release the row lock and move on.
+			frappe.db.commit()
+			return False
+		pages = pages_meta["count"]
+	if nature == "Scribe" and pages > 0:
+		# Server-owned terminalization: the pages are already durably written,
+		# so this is an honest SUCCESS the model merely never finalized. Complete
+		# it with its tally rather than failing real work.
+		values = {"status": "completed", "finished_at": frappe.utils.now()}
+		if pages_meta is not None:
+			# CA3-4: the tally was rebuilt from provenance (the stored one read 0) —
+			# PERSIST the reconciled ``pages_written`` + ``pages_json`` in the SAME
+			# locked terminalization write, so a run completed off provenance shows
+			# its real page count + list in the durable tally + the Runs UI, never 0.
+			values["pages_written"] = pages
+			values["pages_json"] = frappe.as_json(pages_meta["pages"])[:60000]
+		frappe.db.set_value(RUN, run_name, values, update_modified=False)
+		frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
+		agent_runs.teardown_run_session(cur.session_key)
+		log_activity(
+			agent=cur.agent,
+			agent_title=frappe.db.get_value(LISTING, cur.agent, "title"),
+			installation=cur.installation,
+			action="run_completed",
+			run=run_name,
+			detail=f"reconciled to completed: scribe wrote {pages} page(s); finish not called",
+			owner=cur.owner,
+		)
+		frappe.db.commit()
+		return True
+	# The row lock is already held and the compare-and-set above has already
+	# established that the row is still ``running``, so this goes straight to
+	# the shared terminalization tail.
+	_terminalize_failed(
+		run_name,
+		agent=cur.agent,
+		installation=cur.installation,
+		session_key=cur.session_key,
+		owner=cur.owner,
+		error=error,
+		detail=detail,
+	)
+	return True
+
+
 def _stale_candidates(cutoff) -> list:
-	"""Runs stuck ``running`` past ``cutoff`` — the reaper's candidate set. Factored so
-	the CA2-4 compare-and-set (re-read under a row lock before transitioning) can be
-	exercised against a deliberately-stale candidate snapshot in tests."""
+	"""Runs stuck ``running`` past ``cutoff`` — the candidate set of BOTH outside-in
+	sweeps (the A8 reaper at 3h, the #1061 poll at 2 minutes; only the cutoff differs).
+	Factored so the CA2-4 compare-and-set (re-read under a row lock before
+	transitioning) can be exercised against a deliberately-stale snapshot in tests."""
 	return frappe.get_all(
 		RUN,
 		filters={"status": "running", "started_at": ["<", cutoff]},
-		fields=["name", "session_key", "owner", "agent", "installation", "pages_written"],
+		fields=[
+			"name",
+			"session_key",
+			"owner",
+			"agent",
+			"installation",
+			"pages_written",
+			"started_at",
+		],
 	)
 
 
@@ -578,6 +640,186 @@ def fail_run(run_name: str, error: str, *, detail: str | None = None) -> bool:
 			message=frappe.get_traceback(),
 		)
 		return False
+
+
+# --------------------------------------------------------------------------- #
+# #1061 dispatched-run poll (jarvis#1058) — hooks cron, every 5 minutes
+# --------------------------------------------------------------------------- #
+def poll_dispatched_runs() -> int:
+	"""Ask the fleet what actually happened to each run the bench still believes is
+	``running``, and terminalize the ones that are over. Returns the count transitioned.
+	Runs as Administrator (scheduler); best-effort, never raises out.
+
+	The bench used to learn a run's outcome from exactly ONE source: the delegate's own
+	``record_agent_run`` writeback. A delegate that died after dispatch — a container
+	restart, a stale gateway roster (jarvis#1058), an exec failure the fleet recorded but
+	nobody read — therefore left the row ``running`` for three hours, blocking every
+	further run of that installation behind the #672 liveness guard, before the reaper
+	relabelled it "exceeded max duration": a timeout it never hit, and a diagnosis that
+	sent the customer looking in the wrong place.
+
+	This closes that loop from the other side. It NEVER touches a row that is not still
+	``running``: every terminal write goes through ``fail_run`` /
+	``_terminalize_stuck_run``, which re-read under a row lock and compare-and-set on
+	``status='running'``. So an operator's ``stop_agent_run``, a real writeback and this
+	sweep can race freely — the first to win the lock decides, and a later fleet flip can
+	never overwrite a stopped or completed run.
+
+	The reaper stays: it is the backstop for everything this cannot see (admin down, the
+	relay itself broken), which is why an unreachable admin here is a SKIP, never a
+	failure verdict."""
+	from jarvis import admin_client
+
+	now = now_datetime()
+	cutoff = now - timedelta(seconds=POLL_GRACE_SECONDS)
+	terminalized = 0
+	unreachable = 0
+	for r in _stale_candidates(cutoff):
+		# Per-run fault isolation (the health_check 1020 lesson): one poisoned row must
+		# never abort the sweep and starve every run behind it.
+		try:
+			try:
+				state = _polled_state(admin_client.get_agent_run_status(r.name))
+			except Exception as e:
+				# Deliberately caught by MESSAGE, not by class. A relayed fleet 404 arrives
+				# as an Admin*Error whose class is shared with genuine transport faults
+				# (AdminRejectedError IS an AdminUnreachableError), so branching on the
+				# class first would swallow every lost-record case forever.
+				if _FLEET_UNKNOWN_RUN not in str(e).lower():
+					unreachable += 1  # transport / admin fault: skip, the reaper backstops
+					continue
+				state = {"status": "missing"}
+			if _reconcile_polled_run(r, state, now):
+				terminalized += 1
+		except Exception:
+			frappe.log_error(
+				title=f"jarvis agent: run poll failed: {r.name}",
+				message=frappe.get_traceback(),
+			)
+	if unreachable:
+		# ONE line per sweep, not one per run: an admin outage would otherwise write an
+		# Error Log row for every in-flight run every five minutes.
+		frappe.log_error(
+			title="jarvis agent: run poll could not reach admin",
+			message=(
+				f"{unreachable} dispatched run(s) left unpolled this sweep; their state is "
+				"unchanged and the stale-run reaper remains the backstop."
+			),
+		)
+	return terminalized
+
+
+def _polled_state(payload) -> dict:
+	"""The fleet's run-state record out of whatever the relay returned.
+
+	``admin_client._do_post`` already peels Frappe's ``message`` wrapper, but admin's OWN
+	success envelope survives it: ``api.tenant.agent_run_status`` returns
+	``{"ok": True, "data": {<run state>}}``, so the state sits one level further down than
+	``admin_client.get_agent_run_status``'s docstring suggests. Reading only the envelope
+	would be just as brittle in the other direction, so accept both shapes — a poll that
+	misreads the wrapper sees a blank status and silently never terminalizes anything,
+	which is the failure mode this whole sweep exists to remove."""
+	if not isinstance(payload, dict):
+		return {}
+	data = payload.get("data")
+	if isinstance(data, dict) and ("status" in data or "run_id" in data):
+		return data
+	return payload
+
+
+def _reconcile_polled_run(row, state: dict, now) -> bool:
+	"""Decide what the fleet's run-state means for a bench row still ``running``, and
+	transition it if it is over. Returns True iff this call terminalized it.
+
+	``state`` is the fleet's run-state record relayed verbatim through admin
+	(``{run_id, status: queued|running|completed|failed, error, finished_at, ...}``),
+	plus the synthetic ``missing`` this module uses for a relayed 404."""
+	status = (state.get("status") or "").strip().lower()
+
+	if status == "missing":
+		# The host has NO record of this run. Either it never landed, or its state file
+		# was pruned. Indistinguishable from here, so age is the only honest tiebreak:
+		# a young run may simply not be visible yet (container mid-restart, a state
+		# write not yet flushed) and is left alone.
+		if _run_age_seconds(row, now) < MISSING_RECORD_FALLBACK_SECONDS:
+			return False
+		return fail_run(
+			row.name,
+			"the agent host has no record of this run; it never started or its state was lost",
+			detail="polled: no run record on the host",
+		)
+
+	if status == "failed":
+		# The delegate really failed and the fleet knows why. Surface THAT sentence, not
+		# a generic one: this is the whole point of polling rather than waiting for the
+		# reaper's "exceeded max duration".
+		return fail_run(
+			row.name,
+			_fleet_error_message(state),
+			detail="polled: the delegate reported a failure",
+		)
+
+	if status != "completed":
+		# queued / running / anything unrecognised: still in flight as far as the host is
+		# concerned. Leave it alone — an unknown state is never a verdict.
+		return False
+
+	# Finished on the host, still ``running`` on the bench: the writeback is either in
+	# flight or it is never coming. Wait out the grace before deciding, measured from the
+	# host's own finish time (see WRITEBACK_GRACE_SECONDS).
+	if _writeback_grace_age(state, row, now) < WRITEBACK_GRACE_SECONDS:
+		return False
+	# Past the grace. A scribe whose durable page tally proves it wrote real pages is
+	# COMPLETED, not failed — the shared helper owns that ruling, exactly as the reaper
+	# gets it.
+	return _terminalize_stuck_run(
+		row.name,
+		error="delegate finished without recording results",
+		detail="polled: delegate finished without recording results",
+	)
+
+
+def _fleet_error_message(state: dict) -> str:
+	"""The delegate's real failure sentence out of the fleet run-state ``error``
+	(``{code, message}``), falling back to something honest rather than empty — an
+	error field the customer reads as blank is worse than a generic sentence."""
+	err = state.get("error")
+	if isinstance(err, dict):
+		msg = (err.get("message") or "").strip() or (err.get("code") or "").strip()
+		if msg:
+			return msg[:140]
+	elif isinstance(err, str) and err.strip():
+		return err.strip()[:140]
+	return "the agent host reported this run as failed"
+
+
+def _run_age_seconds(row, now) -> float:
+	"""Seconds since the bench dispatched this run. 0.0 when ``started_at`` is unreadable
+	— which reads as "too young to judge", the fail-safe direction for every caller here."""
+	try:
+		return (now - frappe.utils.get_datetime(row.started_at)).total_seconds()
+	except Exception:
+		return 0.0
+
+
+def _writeback_grace_age(state: dict, row, now) -> float:
+	"""Seconds since the DELEGATE finished — what the writeback grace must be measured
+	from. Anchoring it on the run's own age would fail any run longer than the grace the
+	instant its fleet state flipped to completed, with the writeback still seconds in
+	flight, which is precisely the long scribe run this sweep must not mislabel.
+
+	The fleet stamps ``finished_at`` as a UNIX epoch float (fleet-agent
+	``agent_run.new_run_state``). Falls back to the bench-side run age only when the
+	relayed state carries none."""
+	finished = state.get("finished_at")
+	if finished is not None:
+		try:
+			delta = time.time() - float(finished)
+		except (TypeError, ValueError):
+			delta = -1.0
+		if delta >= 0:
+			return delta
+	return _run_age_seconds(row, now)
 
 
 # --------------------------------------------------------------------------- #

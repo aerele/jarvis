@@ -292,6 +292,14 @@ scheduler_events = {
 			# scheduler (a live scheduler that fails to POST = the tenant went dark).
 			# Self-gating (skips un-onboarded), never raises. Cheap: two indexed reads.
 			"jarvis.chat.heartbeat.push_bench_heartbeat",
+			# #1061: ask the fleet what actually happened to each run the bench still
+			# believes is `running`, and terminalize the ones that are over with their
+			# REAL error. Without it the only source of a run's outcome was the
+			# delegate's own writeback, so a delegate that died after dispatch sat
+			# `running` for three hours (blocking every further run of that
+			# installation) before the reaper below mislabelled it a duration timeout.
+			# Cheap no-op (one indexed status query) when nothing is in flight.
+			"jarvis.chat.agent_scheduler.poll_dispatched_runs",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
