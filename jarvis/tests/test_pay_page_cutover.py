@@ -68,7 +68,7 @@ class TestAugmentPayPage(FrappeTestCase):
 		self.assertTrue(out["pay_origin_attested"])
 
 	def test_token_with_a_MISMATCHED_digest_is_NOT_attested(self):
-		# The digest assertion: a split-brain (the bench's admin URL is one origin,
+		# The digest assertion: a state mismatch (the bench's admin URL is one origin,
 		# admin minted a token for another) fails closed - never navigates.
 		out = oc.augment_pay_page({"pay_page_token": "tok", "pay_origin_digest": "deadbeef"})
 		self.assertEqual(out["pay_origin"], self.ORIGIN)
