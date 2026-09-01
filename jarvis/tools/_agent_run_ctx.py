@@ -61,3 +61,28 @@ def take_armed_by_macro() -> str | None:
 		except Exception:
 			setattr(frappe.local, _ARMED_ATTR, None)
 	return val
+
+
+_ARMED_SKILL_ATTR = "jarvis_armed_by_skill"
+
+
+def set_armed_by_skill(skill: str | None) -> None:
+	"""Record that the write just dispatched ran uncarded under an approved skill run's
+	skill_autorun (the gate's skill-autorun branch sets this). Read once by the receipt
+	persist so the row is labelled ``auto_applied`` with this skill docname as
+	provenance - the twin of :func:`set_armed_by_macro` for the skill path (design
+	§3.5), so "which writes ran under an approved skill run" is queryable for support."""
+	setattr(frappe.local, _ARMED_SKILL_ATTR, (skill or "") or None)
+
+
+def take_armed_by_skill() -> str | None:
+	"""Read AND clear the armed-by-skill marker (consume-once), so an approved-run
+	write's receipt is labelled exactly once and the marker can never leak onto the
+	next, unrelated tool call's receipt in a reused request/worker."""
+	val = getattr(frappe.local, _ARMED_SKILL_ATTR, None)
+	if hasattr(frappe.local, _ARMED_SKILL_ATTR):
+		try:
+			delattr(frappe.local, _ARMED_SKILL_ATTR)
+		except Exception:
+			setattr(frappe.local, _ARMED_SKILL_ATTR, None)
+	return val

@@ -34,6 +34,16 @@ export function emptyStream() {
 // Empty-content assistant rows are dropped for the same reason: they are the
 // shell of a turn whose payload lives in canvas items the panel does not show,
 // and they would otherwise paint as blank bubbles.
+// Whether a parked write's card offers "Approve & run" (P1, skill
+// approve-and-run - preview.card.approve_run, jarvis/api.py). The widget is
+// text-only and has NO rich-card/plan renderer (design §3.5), so it reads only
+// this one boolean off the preview it already receives on the wire - never the
+// plan/steps themselves - purely to decide whether to deflect to "Review in
+// full chat" instead of quietly offering its own plain per-card Confirm.
+export function pendingApproveRun(preview) {
+  return !!(preview && preview.card && preview.card.approve_run);
+}
+
 export function visibleMessages(messages) {
   if (!Array.isArray(messages)) return [];
   return messages.filter(
@@ -139,6 +149,9 @@ function applyAdmitted(s, p) {
         // ("confirm 2"). Dropping it makes orderedPending fall back to token
         // order, which disagrees with the server and can run the wrong card.
         expires_at: p.expires_at ?? null,
+        // Text-only signal (see pendingApproveRun) - never the preview/plan
+        // itself, so the widget stays a plain confirm/deflect surface.
+        approve_run: pendingApproveRun(p.preview),
       });
       return s;
 

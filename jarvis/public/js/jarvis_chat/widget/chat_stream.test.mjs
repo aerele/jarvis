@@ -5,6 +5,7 @@ import {
   applyEvent,
   applyEventEx,
   visibleMessages,
+  pendingApproveRun,
 } from "./chat_stream.mjs";
 
 // `tool` rows are the MOST common role in a real conversation (508 of 1201 on
@@ -148,7 +149,60 @@ test("action:pending queues a confirmation, ignoring duplicate tokens", () => {
     tool: "create_doc",
     summary: "Create ToDo",
     expires_at: 1700,
+    approve_run: false,
   });
+});
+
+// P1 (skill approve-and-run, §3.5): the widget is text-only and has no rich
+// plan renderer, so it carries only this one boolean off the preview it
+// already receives on the wire - never the plan/steps themselves.
+test("action:pending carries approve_run as a plain boolean, never the preview itself", () => {
+  const s = applyEvent(emptyStream(), {
+    kind: "action:pending",
+    token: "t1",
+    tool: "run_method",
+    summary: "Run a skill step",
+    preview: {
+      card: { kind: "method", approve_run: true, skill_slug: "close-books" },
+    },
+  });
+  assert.equal(s.pending[0].approve_run, true);
+  assert.equal(
+    s.pending[0].preview,
+    undefined,
+    "the widget must not carry the rich preview"
+  );
+});
+
+test("action:pending: approve_run is false for an ordinary card, a missing card, and no preview at all", () => {
+  const noPreview = applyEvent(emptyStream(), {
+    kind: "action:pending",
+    token: "t1",
+  });
+  assert.equal(noPreview.pending[0].approve_run, false);
+
+  const noCard = applyEvent(emptyStream(), {
+    kind: "action:pending",
+    token: "t2",
+    preview: { would: {} },
+  });
+  assert.equal(noCard.pending[0].approve_run, false);
+
+  const notArmed = applyEvent(emptyStream(), {
+    kind: "action:pending",
+    token: "t3",
+    preview: { card: { kind: "create" } },
+  });
+  assert.equal(notArmed.pending[0].approve_run, false);
+});
+
+test("pendingApproveRun: reads preview.card.approve_run, safe on junk input", () => {
+  assert.equal(pendingApproveRun({ card: { approve_run: true } }), true);
+  assert.equal(pendingApproveRun({ card: { approve_run: false } }), false);
+  assert.equal(pendingApproveRun({ card: {} }), false);
+  assert.equal(pendingApproveRun({}), false);
+  assert.equal(pendingApproveRun(null), false);
+  assert.equal(pendingApproveRun(undefined), false);
 });
 
 test("action:pending carries expires_at so numbered typed approval sorts by mint time", () => {

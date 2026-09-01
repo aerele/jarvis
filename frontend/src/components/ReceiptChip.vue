@@ -77,6 +77,12 @@
 					:title="'Ran automatically under the armed macro ' + armedMacro"
 					>· {{ armedMacro }}</span
 				>
+				<span
+					v-if="armedSkill"
+					class="jv-receipt-armed"
+					:title="'Ran automatically under the approved skill run ' + armedSkill"
+					>· {{ armedSkill }}</span
+				>
 				<a
 					v-if="singleUrl"
 					:href="singleUrl"
@@ -166,6 +172,10 @@ const view = computed(() => {
 // without a confirmation card. Shown on both auto_applied (ran ok) and a failed
 // armed write (labelled "failed" but still carrying the provenance).
 const armedMacro = computed(() => props.message.armed_by_macro || "");
+// Provenance for an approved-skill-run receipt: which armed `/slug` skill's
+// "Approve & run" authorized this write without its own confirmation card.
+// Mutually exclusive with armedMacro (jarvis/api.py never sets both).
+const armedSkill = computed(() => props.message.armed_by_skill || "");
 
 // A single-record outcome with a Desk link → show a compact "open" affordance
 // (the record name is already in the title). Bulk uses the details expander.

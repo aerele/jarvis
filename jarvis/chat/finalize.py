@@ -295,6 +295,18 @@ def _effect_chat_asks(ctx: _Ctx) -> None:
 
 
 def _effect_macro_advance(ctx: _Ctx) -> None:
+	# End an approved skill run at this terminal unless it is paused on a parked card
+	# (skill "Approve & run", design §3.4). THIS is the DEFAULT pump path (the Relay
+	# Pump does NOT go through turn_handler), so the clear MUST land here too
+	# (correctness-C1). on_terminal_turn is internally best-effort (never raises), so
+	# it is run FIRST, before its siblings below: it is self-contained and cannot
+	# perturb them, whereas a sibling that deterministically raises (and the effect
+	# runner then force-dones this effect) would otherwise skip the clear entirely -
+	# ending it here first means that ordering accident can never strand the flag.
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.on_terminal_turn(ctx.conversation)
+
 	# Macro chaining + app-learning turn hook (D1 #46/#47). Runs on BOTH success and
 	# error/cancel (the macro must advance/abort either way — matches legacy
 	# _advance_macro). Each has its own per-run redis lock (idempotent).

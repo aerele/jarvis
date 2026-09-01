@@ -139,11 +139,13 @@ def mint(
 	exec_user: str | None = None,
 	preview: dict | None = None,
 	expires_at: int | None = None,
+	skill_docname: str | None = None,
 ) -> str | None:
 	"""Store a pending call and return a fresh single-use token
 	(secrets.token_urlsafe(24)). The stored record carries conversation,
 	owner, tool, args (the full dict - this is the authoritative payload
-	that will execute), args_hash, run_id, exec_user, preview. TTL _TTL_S.
+	that will execute), args_hash, run_id, exec_user, preview, skill_docname.
+	TTL _TTL_S.
 	Returns the token, or ``None`` when the park could not be stored (a transient
 	cache failure): the record+index must BOTH land or the caller must treat it as
 	a retryable failure and publish NO card - a token whose record does not exist is
@@ -160,6 +162,13 @@ def mint(
 	key off this identity. ``exec_user`` is the scoped model-execution identity
 	the confirmed write must run AS (so a confirm can never exceed the model
 	path's permission scope). It defaults to ``owner`` when omitted.
+
+	``skill_docname`` is the "Approve & run" trust stamp (skill "Approve & run
+	the plan", design §3.3): when the gate offers Approve & run on this card it
+	stamps the resolved Jarvis Custom Skill docname here, so a later
+	``approve_and_run`` endpoint can authorize the run off THIS exact row
+	(re-checking its arming live). ``None`` on every ordinary park - the token
+	then carries no offer and Approve & run is unavailable for it.
 	"""
 	token = secrets.token_urlsafe(24)
 	record = {
@@ -171,6 +180,7 @@ def mint(
 		"args_hash": args_hash(tool, args),
 		"run_id": run_id,
 		"preview": preview,
+		"skill_docname": skill_docname,
 		# Wall-clock expiry (epoch seconds) so the SPA can show a real countdown
 		# and distinguish a genuine TTL lapse from other confirm failures (F15).
 		# Defaults to now + TTL when the caller does not pass one, so every record
