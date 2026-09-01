@@ -4177,6 +4177,7 @@ import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import { parseAsk } from "@/lib/chatAsk";
+import { shouldHideActivityTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import {
@@ -5569,8 +5570,9 @@ const activityByAssistant = computed(() => {
 			cur = m.name;
 			if (!map[cur]) map[cur] = [];
 		}
-		// action_outcome rows are receipt chips shown inline, not accordion tool calls.
-		else if (m.role === "tool" && cur && !m.action_outcome)
+		// action_outcome rows are receipt chips shown inline, not accordion tool calls;
+		// no-I/O openclaw built-ins (read/exec/…) would expand to nothing — drop those too.
+		else if (m.role === "tool" && cur && !m.action_outcome && !shouldHideActivityTool(m))
 			(map[cur] || (map[cur] = [])).push(m);
 	}
 	return map;
