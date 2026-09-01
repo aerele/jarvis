@@ -44,9 +44,14 @@ pwa/components.d.ts
 # OS
 .DS_Store
 
-# Brainstorm mockups + design specs (local working docs — never commit)
+# Brainstorm mockups + design specs (local working docs — never commit).
+# This app ships publicly; internal design/plan/decision docs live in the admin
+# repo, never here. Patterns catch them at the repo root AND nested (jarvis/docs).
 .superpowers/
 docs/superpowers/
+**/docs/superpowers/
+jarvis/docs/
+*.plan.md
 
 # Local virtualenvs + logs
 .venv/
