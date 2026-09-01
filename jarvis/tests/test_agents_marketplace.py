@@ -513,11 +513,14 @@ class TestAgentsMarketplace(unittest.TestCase):
 			admin_client.post_agent_run = orig_run
 
 	def test_list_agents_allowed_flags_and_roles_roundtrip(self):
-		# jarvis#1062 D2: list_agents (via _enriched_catalog) now HIDES a
-		# role-restricted row for a non-admin outright, instead of returning it
-		# disabled with allowed=0 — a blocked user gets no row at all. An admin
-		# keeps EXACT parity with pre-D2 behavior: every row, `allowed` computed
-		# the same way, `allowed_roles` still present.
+		# jarvis#1062 D2 (revised): list_agents (via _enriched_catalog) now
+		# HIDES a role-restricted row for a non-admin who has NOT installed
+		# it, instead of returning it disabled with allowed=0 - a blocked,
+		# never-installed user gets no row at all (an already-installed row
+		# survives a later restriction regardless - see
+		# test_installed_row_survives_a_role_revoked_after_install). An admin
+		# keeps EXACT parity with pre-D2 behavior: every row, `allowed`
+		# computed the same way, `allowed_roles` still present.
 		res = None
 		frappe.set_user("Administrator")
 		res = agents_api.set_agent_roles("close-auditor", [ROLE_X])
@@ -530,8 +533,12 @@ class TestAgentsMarketplace(unittest.TestCase):
 			finally:
 				frappe.set_user("Administrator")
 
+		# self.other never installed close-auditor (setUp clears installs) and
+		# lacks ROLE_X -> hidden.
 		blocked = _row(self.other)
-		self.assertIsNone(blocked, "a role-restricted row must be HIDDEN from a blocked user, not disabled")
+		self.assertIsNone(
+			blocked, "a role-restricted, never-installed row must be HIDDEN from a blocked user"
+		)
 
 		permitted = _row(self.owner)
 		self.assertIsNotNone(permitted)
@@ -579,6 +586,37 @@ class TestAgentsMarketplace(unittest.TestCase):
 		finally:
 			frappe.db.set_value(LISTING, "close-auditor", "status", "Published")
 			frappe.db.commit()
+
+	def test_installed_row_survives_a_role_revoked_after_install(self):
+		# jarvis#1062 D2 (revised): role gating governs DISCOVERY and RUNNING,
+		# not managing what you already installed — otherwise a role revoked
+		# after install stranded the owner with no UI path to uninstall it.
+		# self.other installs while UNRESTRICTED, then the listing is
+		# restricted to a role self.other does not hold.
+		inst_name = _install_as(self.other, "close-auditor")
+		self._restrict("close-auditor", [ROLE_X])
+		try:
+			frappe.set_user(self.other)
+			try:
+				# still listed - honestly disabled (allowed=0), not hidden.
+				row = next((r for r in agents_api.list_agents() if r["name"] == "close-auditor"), None)
+				self.assertIsNotNone(row, "an installed row must survive a role revoked after install")
+				self.assertEqual(row["allowed"], 0)
+
+				# still readable.
+				out = agents_api.get_agent("close-auditor")
+				self.assertEqual(out["agent_slug"], "close-auditor")
+				self.assertEqual(out["allowed"], 0)
+
+				# still uninstallable (uninstall is owner-gated, never
+				# allowed_roles-gated - the one way out of the stranded state).
+				res = agents_api.uninstall_agent(inst_name)
+				self.assertTrue(res["ok"])
+				self.assertFalse(frappe.db.exists(INSTALLATION, inst_name))
+			finally:
+				frappe.set_user("Administrator")
+		finally:
+			self._restrict("close-auditor", [])
 
 	def test_get_agent_throws_permission_error_when_hidden(self):
 		# Role-restricted: a caller outside the allowed set gets a PermissionError,

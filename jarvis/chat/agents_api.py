@@ -202,18 +202,20 @@ def _enriched_catalog() -> list[dict]:
 		lst["allowed"] = 1 if (is_sm or not allowed_roles or my_roles.intersection(allowed_roles)) else 0
 		lst["install_count"] = install_counts.get(lst.name, 0)
 		out.append(lst)
-	# jarvis#1062 D2: a non-admin never sees a row it may not act on — hide it
-	# outright rather than render it disabled. Hidden iff the role restriction
-	# excludes them (allowed == 0) OR the listing is not yet Published and this
-	# caller has not installed it (Draft/Coming Soon/Deprecated are registry /
-	# lifecycle states, not something to browse to before an admin ships it —
-	# unless this caller already has it installed, so an existing install never
-	# disappears out from under its owner on a status change). Admin display
+	# jarvis#1062 D2 (revised): a non-admin never sees a row it may not
+	# DISCOVER, but a row it already INSTALLED stays visible regardless of role
+	# restriction — role gating governs marketplace discovery and running, not
+	# managing what you already have. Without this carve-out, a role revoked
+	# after install stranded the owner: the row vanished from their own
+	# Installed tab and get_agent 403'd, leaving no UI path to uninstall it.
+	# Hidden (not-installed) iff role-restricted (allowed == 0) OR not yet
+	# Published (Draft/Coming Soon/Deprecated are registry / lifecycle states,
+	# not something to discover before an admin ships them). Admin display
 	# parity is untouched: an admin (is_sm) always sees every row, `allowed`
 	# computed exactly as before. The ONE choke point both list_agents and
 	# list_agents_page share, so neither can drift from the other.
 	if not is_sm:
-		out = [r for r in out if r["allowed"] and (r["status"] == "Published" or r["installed"])]
+		out = [r for r in out if r["installed"] or (r["allowed"] and r["status"] == "Published")]
 		for r in out:
 			r.pop("allowed_roles", None)
 	return out
@@ -300,11 +302,14 @@ def get_agent(agent_slug: str) -> dict:
 	is_sm = has_jarvis_admin_access(me)
 	allowed = _user_allowed_for_agent(listing, me)
 	installed_by_caller = bool(frappe.db.exists(INSTALLATION, {"owner": me, "agent": listing.name}))
-	# jarvis#1062 D2: the same visibility gate as list_agents/list_agents_page
-	# (_enriched_catalog), applied to the single-agent read — a row hidden from
-	# the catalog must not be reachable by knowing (or guessing) its slug either.
-	# Admin display parity is untouched: an admin (is_sm) always passes.
-	if not is_sm and (not allowed or (listing.status != "Published" and not installed_by_caller)):
+	# jarvis#1062 D2 (revised): the same visibility gate as list_agents/
+	# list_agents_page (_enriched_catalog) — a row hidden from the catalog must
+	# not be reachable by knowing (or guessing) its slug either — EXCEPT an
+	# installed row always passes, so a role revoked after install never
+	# strands the owner without a way to read (and uninstall) their own
+	# install. Admin display parity is untouched: an admin (is_sm) always
+	# passes.
+	if not is_sm and not installed_by_caller and (not allowed or listing.status != "Published"):
 		frappe.throw(_("You do not have access to this agent."), frappe.PermissionError)
 
 	out: dict = {
