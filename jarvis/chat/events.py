@@ -16,6 +16,8 @@ from typing import Any
 
 import frappe
 
+from jarvis.chat import egress_rules
+
 CHANNEL = "jarvis:event"
 
 
@@ -29,7 +31,7 @@ def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 	if stream == "lifecycle":
 		out: dict[str, Any] = {"kind": "lifecycle", "phase": data.get("phase")}
 		if data.get("error"):
-			out["error"] = data["error"]
+			out["error"] = egress_rules.redact(data["error"])
 		return out
 
 	if stream == "item":
@@ -49,14 +51,18 @@ def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 		# through so the chat's live status line can say WHAT is being
 		# fetched without the bench parsing raw args.
 		if data.get("title"):
-			out["tool_title"] = data["title"]
+			out["tool_title"] = egress_rules.redact(data["title"])
 		return out
 
 	if stream == "assistant":
+		# Redact the live stream (both transports funnel through here). Silent — no
+		# tripwire per frame; the once-per-turn tripwire fires at the final-text and
+		# recovery extractors. `text` is cumulative, so a brand token split across
+		# deltas is contiguous here and matches.
 		return {
 			"kind": "assistant",
-			"text": data.get("text", ""),
-			"delta": data.get("delta", ""),
+			"text": egress_rules.redact(data.get("text", "")),
+			"delta": egress_rules.redact(data.get("delta", "")),
 		}
 
 	return None

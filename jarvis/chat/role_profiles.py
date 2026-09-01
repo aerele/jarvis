@@ -5,8 +5,10 @@ Spec: ``docs/superpowers/specs/2026-08-16-role-profile-agents-design.md``.
 Two independent axes, both curated data (spec §5), never runtime discovery:
 
 * **Tool tier**: the jarvis-plane role decides ``full`` (today's 94 tools)
-  vs ``standard`` (68 tools; ``STANDARD_DROP_TOOLS`` is the 26-tool drop
-  list, spec §3).
+  vs ``standard`` (67 tools; ``STANDARD_DROP_TOOLS`` is the 27-tool drop
+  list). Spec §3 sized these 68/26; ``session_status`` was later pulled to the
+  drop list (denied fleet-wide for the white-label leak, not a tier call), so
+  the split is 67/27 with the 94-tool universe unchanged.
 * **Skill set**: ERPNext roles decide which of the 6 named skill sets
   (``SKILL_SETS``), plus the always-on ``SHARED_CORE_SKILLS``, a user's
   profile includes.
@@ -34,7 +36,8 @@ _SETTINGS = "Jarvis Settings"
 
 FULL_TIER_ROLES: frozenset[str] = frozenset({"Jarvis Admin", "System Manager"})
 
-# Verified drop list (26 tools, spec §3): app-learning tools (system-initiated
+# Verified drop list (27 tools; 26 per spec §3, plus session_status pulled here
+# for the fleet-wide white-label deny): app-learning tools (system-initiated
 # learning runs only, which always run `full`), session/infra tools (zero
 # references in live-tenant transcripts), file-editing tools (skills only
 # need `exec` + `read`), cron/browser (Frappe-side scheduling covers cron;
@@ -55,6 +58,7 @@ STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 		"sessions_list",
 		"sessions_history",
 		"sessions_yield",
+		"session_status",  # denied globally (white-label leak); not for the standard tier
 		"subagents",
 		"nodes",
 		"gateway",
@@ -143,13 +147,13 @@ _STANDARD_TOOLS_ALLOW = [
 	"message",
 	"pdf",
 	"read",
-	"session_status",
 	"update_goal",
 ]
 
 
 def standard_tools_allow() -> list[str]:
-	"""The 68-tool allow list for the ``standard`` tier (spec §3)."""
+	"""The 67-tool allow list for the ``standard`` tier (spec §3 sized 68;
+	session_status pulled to the drop list for the fleet-wide white-label deny)."""
 	return list(_STANDARD_TOOLS_ALLOW)
 
 
