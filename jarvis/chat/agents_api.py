@@ -47,6 +47,13 @@ _PUSH_JOB_ID = "jarvis_agent_skills_push"
 _LOCK_NAME = "jarvis_agent_skills_push"
 
 _FREQUENCIES = ("daily", "weekly", "monthly")
+# #1061: every value the Jarvis Agent Run ``status`` Select accepts — the one list the
+# SPA's run-history filter is validated against. ``stopped`` is TERMINAL (an operator
+# ended the run early); it is deliberately NOT a synonym for ``failed``, because a
+# stopped run is neither a delegate fault nor a duration timeout and must not be
+# reported to the customer as either. Keep in lockstep with the DocType's Select
+# options — a value missing here is a filter the Runs page silently refuses.
+_RUN_STATUSES = ("running", "completed", "partial", "failed", "stopped")
 # Statuses a bench admin may set via set_listing_status (Draft is registry-only).
 _ADMIN_STATUSES = ("Published", "Coming Soon", "Deprecated")
 # Never meaningful as an agent restriction ("All" == unrestricted; the other two
@@ -1523,7 +1530,7 @@ def list_runs_page(
 	if agent:
 		filters["agent"] = agent
 	if status:
-		if status not in ("running", "completed", "partial", "failed"):
+		if status not in _RUN_STATUSES:
 			frappe.throw(_("Invalid status filter."))
 		filters["status"] = status
 	or_filters = []
