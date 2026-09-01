@@ -145,10 +145,6 @@
 						/>
 					</div>
 				</div>
-				<div v-if="!agent.allowed" class="mt-3 text-sm text-ink-gray-5">
-					Available to: {{ (agent.allowed_roles || []).join(", ") || "-" }} - ask your
-					administrator.
-				</div>
 			</div>
 
 			<TabBar class="shrink-0" :tabs="tabs" :modelValue="tab" @update:modelValue="setTab" />
