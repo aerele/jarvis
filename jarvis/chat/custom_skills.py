@@ -217,12 +217,130 @@ def fetch_required_clause(lead_in: str, names) -> str:
 	)
 
 
+def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
+	"""Return the bare ``/slug`` tokens in ``message`` that resolve to a custom
+	skill ``user`` may invoke: owned by ``user``, shared with ``user``, or
+	reachable via a role ``user`` holds (the ``matched`` set
+	:func:`invoked_skill_clause` folds into its context clause).
+
+	PURE identity parameter, not ambient session: resolved entirely under the
+	passed ``user``, never ``frappe.session.user``. A caller that must reason
+	about an explicit identity other than whoever is logged in right now (e.g.
+	the sender of a specific past message, which can differ from the exec user
+	a background continuation runs under) gets a truthful answer either way.
+	This is the single source of truth for "which skill(s) did this message
+	invoke" — no prose-clause parsing required.
+	"""
+	if not message or "/" not in message:
+		return set()
+	slugs = {s.lower() for s in _INVOKE_RE.findall(message)}
+	if not slugs:
+		return set()
+	# Only skills `user` OWNS or was SHARED with can be invoked by slug — so a
+	# skill shared with specific people isn't triggerable by others (even though
+	# it lives in the customer's shared container). Auto-pick by description is
+	# still bench-global (a container-level limitation).
+	enabled = {
+		r.skill_name
+		for r in frappe.get_all(
+			"Jarvis Custom Skill", filters={"enabled": 1, "owner": user}, fields=["skill_name"]
+		)
+	}
+	shared_names = [
+		r.parent
+		for r in frappe.get_all(
+			"Jarvis Custom Skill Share",
+			filters={"user": user, "parenttype": "Jarvis Custom Skill"},
+			fields=["parent"],
+		)
+	]
+	if shared_names:
+		enabled |= {
+			r.skill_name
+			for r in frappe.get_all(
+				"Jarvis Custom Skill",
+				filters={"enabled": 1, "name": ["in", shared_names]},
+				fields=["skill_name"],
+			)
+		}
+	# Allowed Roles (plan section 6.6): a skill scoped to a role via allowed_roles
+	# is invocable by a matching-role user even without an explicit share. Purely
+	# additive - a skill with EMPTY allowed_roles is unchanged (owner/shared only),
+	# and managed learned skills are excluded here (they auto-inject, see
+	# learned_skill_clause).
+	enabled |= _role_scoped_invocable_names(user)
+	return {s for s in slugs if s in enabled}
+
+
+def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
+	"""The single live-ARMED Jarvis Custom Skill row ``owner`` would invoke by
+	``/slug``, or ``None`` (skill "Approve & run the plan", design §3.3 rule 4).
+
+	Mirrors :func:`invoked_skill_slugs`'s owner/shared/role precedence - the ONE
+	definition of that owned/shared/role-scoped resolution, so the "Approve & run"
+	offer path (``jarvis.api._resolve_approve_run_offer``) and skill invocation can
+	no longer drift apart the way they had (each used to hand-duplicate this query;
+	only :func:`role_scoped_skill_rows` was actually shared). The owner's OWN
+	enabled row wins the invocation; failing that, a shared or role-scoped enabled
+	row. ``allow_approve_run`` is read LIVE off the resolved row and must be 1.
+	Fail-safe on ambiguity - a slug can map to several rows across owned/shared/
+	role-scoped, so ``None`` when the winning tier holds 2+ rows OR when 2+ ARMED
+	invocable rows exist anywhere (an ambiguous arm cannot authorize a run). O(1)-
+	ish: a couple of indexed reads, no per-skill N+1."""
+	# The owner's OWN enabled rows named `slug`.
+	own = {
+		r.name: int(r.allow_approve_run or 0)
+		for r in frappe.get_all(
+			"Jarvis Custom Skill",
+			filters={"enabled": 1, "owner": owner, "skill_name": slug},
+			fields=["name", "allow_approve_run"],
+		)
+	}
+	# Enabled rows SHARED with the owner, or reachable via a role the owner holds,
+	# named `slug` (deduped - a row can be both shared and role-scoped).
+	shared_role: dict[str, int] = {}
+	shared_names = [
+		r.parent
+		for r in frappe.get_all(
+			"Jarvis Custom Skill Share",
+			filters={"user": owner, "parenttype": "Jarvis Custom Skill"},
+			fields=["parent"],
+		)
+	]
+	if shared_names:
+		for r in frappe.get_all(
+			"Jarvis Custom Skill",
+			filters={"enabled": 1, "name": ["in", shared_names], "skill_name": slug},
+			fields=["name", "allow_approve_run"],
+		):
+			shared_role[r.name] = int(r.allow_approve_run or 0)
+	for r in role_scoped_skill_rows(owner, ["name", "skill_name", "allow_approve_run"]):
+		if r.skill_name == slug:
+			shared_role.setdefault(r.name, int(r.allow_approve_run or 0))
+
+	# Precedence: the owner's own row wins; only fall through to shared/role when
+	# the owner has no own row for this slug.
+	tier = own if own else shared_role
+	if len(tier) != 1:
+		return None  # no candidate, or an ambiguous winning tier -> fail safe
+	docname, armed = next(iter(tier.items()))
+	if not armed:
+		return None  # the row the owner would actually invoke is not armed
+	# Global ambiguity guard: refuse if the slug maps to 2+ ARMED invocable rows
+	# anywhere (owned + shared + role), even across tiers.
+	if sum(1 for v in {**shared_role, **own}.values() if v) != 1:
+		return None
+	return docname
+
+
 def invoked_skill_clause(message: str) -> str:
 	"""Return the context-line clause(s) for any enabled custom skills the user
 	invoked via ``/slug`` in ``message``, or ``""`` if none match.
 
-	TWO clause shapes, because only SOME invocable skills physically exist in the
-	container (issue #477):
+	The matched set is :func:`invoked_skill_slugs`, resolved under the current
+	chat user (``frappe.session.user``) — this function's job is purely to turn
+	that set into the two clause shapes below, because only SOME invocable
+	skills physically exist in the container (issue #477):
 
 	* skills the push actually writes (Org scope, no ``allowed_roles``, inside
 	  ``MAX_SKILLS_PER_PUSH``, see :func:`pushed_skill_names`) keep the original
@@ -241,46 +359,7 @@ def invoked_skill_clause(message: str) -> str:
 	The clause is folded INTO the worker's leading ``[Context: ...]`` line,
 	which the persona's AGENTS.md tells the agent to treat as system, not user.
 	"""
-	if not message or "/" not in message:
-		return ""
-	slugs = {s.lower() for s in _INVOKE_RE.findall(message)}
-	if not slugs:
-		return ""
-	# Only skills the current chat user OWNS or was SHARED with can be invoked by
-	# slug — so a skill shared with specific people isn't triggerable by others
-	# (even though it lives in the customer's shared container). Auto-pick by
-	# description is still bench-global (a container-level limitation).
-	me = frappe.session.user
-	enabled = {
-		r.skill_name
-		for r in frappe.get_all(
-			"Jarvis Custom Skill", filters={"enabled": 1, "owner": me}, fields=["skill_name"]
-		)
-	}
-	shared_names = [
-		r.parent
-		for r in frappe.get_all(
-			"Jarvis Custom Skill Share",
-			filters={"user": me, "parenttype": "Jarvis Custom Skill"},
-			fields=["parent"],
-		)
-	]
-	if shared_names:
-		enabled |= {
-			r.skill_name
-			for r in frappe.get_all(
-				"Jarvis Custom Skill",
-				filters={"enabled": 1, "name": ["in", shared_names]},
-				fields=["skill_name"],
-			)
-		}
-	# Allowed Roles (plan section 6.6): a skill scoped to a role via allowed_roles
-	# is invocable by a matching-role user even without an explicit share. Purely
-	# additive - a skill with EMPTY allowed_roles is unchanged (owner/shared only),
-	# and managed learned skills are excluded here (they auto-inject, see
-	# learned_skill_clause).
-	enabled |= _role_scoped_invocable_names(me)
-	matched = sorted(s for s in slugs if s in enabled)
+	matched = sorted(invoked_skill_slugs(message, user=frappe.session.user))
 	if not matched:
 		return ""
 	installed = pushed_skill_names()

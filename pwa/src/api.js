@@ -109,6 +109,11 @@ export const listPendingConfirmations = (conversation) =>
 	});
 export const confirmTool = (token, conversation) =>
 	call("jarvis.chat.actions_api.confirm_tool", { token, conversation: conversation || "" });
+// "Approve & run" (skill approve-and-run, P1) - the sibling of confirm_tool that
+// also opens the armed skill's uninterrupted run. Same envelope as confirmTool.
+// Reachable only from a card whose preview.card.approve_run is true.
+export const approveAndRun = (token, conversation) =>
+	call("jarvis.chat.actions_api.approve_and_run", { token, conversation: conversation || "" });
 
 // ── Draft writes (the ```jarvis-action``` card) ─────────────────────────────
 // The other half of the write story, and the one the phone was missing entirely:

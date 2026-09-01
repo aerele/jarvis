@@ -312,6 +312,10 @@ async function send() {
 			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
 			// Numbers a typed approval selects by must resolve against the cards on
 			// screen, in this order, not a list the server re-fetches at send time.
+			// Deliberately confirm-only (step-by-step): this forwards to confirm_tool
+			// server-side, never approve_and_run - that stays reachable only through
+			// a runnable card's own Approve & run button in DecisionSheet (P1, skill
+			// approve-and-run, §3.5).
 			approvalTokens: orderedPending.value.map((p) => p.token),
 		});
 		// The server read this as a go-ahead on the parked card and ran the

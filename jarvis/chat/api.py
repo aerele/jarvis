@@ -1375,6 +1375,29 @@ def send_message(
 	if not ok:
 		return {"ok": False, "reason": reason}
 
+	# A genuine new top-level message ENDS any approved skill run on this conversation
+	# (skill "Approve & run", design §3.4 "Other close-triggers"): it is not a covered
+	# write, so the run is over. Placed structurally AFTER (a) the typed-approval
+	# early-return above, so a CONSUMED typed approval (a destructive-pause RESUME)
+	# never reaches here, and (b) EVERY no-turn-created reject above this point - the
+	# single-flight busy/overload guard, an invalid model_override/thinking_override,
+	# and the validate_can_send quota/billing re-check (I10). A second tab, a
+	# double-click, an overloaded shard, or a quota reject creates NO turn, so it must
+	# never disarm a live approved run out from under it; only a message that actually
+	# falls through to a real send reaches here. hidden=1 continuations never reach
+	# send_message (they go via _enqueue_turn), so they are excluded by construction.
+	# Guarded on the in-memory flag so an ordinary send does no needless work. Clear
+	# it on the LOADED doc too (the conv_doc.save() below would otherwise re-persist
+	# the stale in-memory 1), and via the helper (which commits immediately + drops
+	# the redis run-state) so an early return before that save still ends the run.
+	# clear_skill_autorun is itself best-effort.
+	if conv_doc.skill_autorun:
+		conv_doc.skill_autorun = 0
+		conv_doc.skill_autorun_at = None
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.clear_skill_autorun(conversation)
+
 	# Every attachment is stored as a canvas item so both the SPA and the PWA
 	# render it as a clickable, previewable card (images inline, other files as a
 	# preview chip). The visible message text is just what the user typed - it can
@@ -2506,6 +2529,16 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		pending_confirm.clear_for_conversation(frappe.session.user, conversation, run_id)
 	except Exception:
 		frappe.log_error(title="stop_run token sweep", message=frappe.get_traceback())
+	# Skill "Approve & run" Halt cancel-gate (design §3.4): set the transport-
+	# independent run-cancel signal so an in-flight skill auto-run chain hard-stops
+	# at the bench within one covered write - in BOTH pump and legacy mode, and
+	# independent of whether the container honours the chat_abort above. Best-effort.
+	try:
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.request_run_cancel(conversation)
+	except Exception:
+		frappe.log_error(title="stop_run run-cancel signal", message=frappe.get_traceback())
 	if not conv.session_key:
 		return {"ok": True}  # nothing running yet
 	settings = frappe.get_cached_doc("Jarvis Settings")
