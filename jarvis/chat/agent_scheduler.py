@@ -1172,12 +1172,30 @@ def _launch_audit(
 		# catalog dirty; the skill reaches the container on APPLY. So the operator
 		# skipped (or has a pending) "Apply catalog changes" -- tell them that
 		# instead of a stack trace.
+		#
+		# jarvis#1062: "them" is not always someone who CAN apply it. The catalog
+		# push needs a reviewer role (Jarvis Skill Reviewer / Jarvis Admin / System
+		# Manager — is_skill_reviewer), and ``frappe.session.user`` here is the
+		# installation's RUN-AS user (this function runs impersonated — see the
+		# Phase 1 identity note above), so a non-reviewer owner gets a message that
+		# points at their administrator instead of a button they cannot see. This
+		# branch is also reached from the hourly cron sweep (run_due_agent_audits),
+		# where the run-as user is equally not a human operator — harmless, since
+		# the copy still correctly tells that owner who to ask.
 		not_applied = "not an installed delegate" in str(e)
 		if not_applied:
-			error_msg = _(
-				"This agent is not loaded on your container yet. Open the Agents page, "
-				"click “Apply catalog changes” to push it, then run it again."
-			)
+			from jarvis.permissions import is_skill_reviewer
+
+			if is_skill_reviewer(frappe.session.user):
+				error_msg = _(
+					"This agent is not loaded on your container yet. Open the Agents page, "
+					"click “Apply catalog changes” to push it, then run it again."
+				)
+			else:
+				error_msg = _(
+					"This agent is not ready on your workspace yet. Ask your administrator "
+					"to apply catalog changes."
+				)
 		else:
 			error_msg = "agent-run dispatch failed; see Error Log"
 		frappe.db.set_value(

@@ -213,13 +213,12 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(conv_owner, self.owner)
 		self.assertNotEqual(conv_owner, "Administrator")
 
-	def test_run_now_on_unapplied_agent_gives_apply_hint(self):
-		# An agent ENABLED on the bench but not yet pushed to the container produces
-		# the fleet-agent's "not an installed delegate on <container>" 502 (enabling
-		# only flags the catalog dirty; the skill reaches the container on APPLY).
-		# run_agent_now must translate that into an actionable "Apply catalog changes"
-		# message — never a raw 500 — and leave the Run FAILED, not stuck "running".
-		inst_name = _install_as(self.owner, "close-auditor")
+	def _run_now_on_unapplied_agent(self, owner):
+		"""Shared drive for the "not an installed delegate" translation (jarvis#1062
+		D1): install+enable as ``owner``, stub the fleet 502, and assert the Run
+		lands terminal FAILED with the translated message (never a raw 500 or a
+		stuck "running" row). Returns the raised exception's message."""
+		inst_name = _install_as(owner, "close-auditor")
 		frappe.db.set_value(INSTALLATION, inst_name, "enabled", 1)
 		agent = frappe.db.get_value(INSTALLATION, inst_name, "agent")
 		frappe.db.commit()
@@ -242,19 +241,38 @@ class TestAgentsMarketplace(unittest.TestCase):
 		finally:
 			admin_client.post_agent_run = orig_run
 
-		self.assertIn("Apply catalog changes", str(ctx.exception))
 		# The run must be terminal FAILED (never left stuck "running") and carry the
 		# same actionable message, not a raw fleet 502.
 		run = frappe.get_all(
 			RUN,
-			filters={"agent": agent, "owner": self.owner},
+			filters={"agent": agent, "owner": owner},
 			fields=["status", "error"],
 			order_by="creation desc",
 			limit=1,
 		)
 		self.assertTrue(run)
 		self.assertEqual(run[0].status, "failed")
-		self.assertIn("Apply catalog changes", run[0].error or "")
+		return str(ctx.exception), run[0].error or ""
+
+	def test_run_now_on_unapplied_agent_gives_apply_hint_to_a_reviewer(self):
+		# self.admin is a System Manager (a skill reviewer) — the run-as identity
+		# _launch_audit impersonates is the reviewer set that CAN act on the
+		# button, so it keeps the actionable "Apply catalog changes" copy, in both
+		# the raised message and the persisted run.error.
+		exc_msg, run_error = self._run_now_on_unapplied_agent(self.admin)
+		self.assertIn("Apply catalog changes", exc_msg)
+		self.assertIn("Apply catalog changes", run_error)
+
+	def test_run_now_on_unapplied_agent_tells_a_non_reviewer_to_ask_an_admin(self):
+		# self.owner holds only ROLE_X — not a reviewer — so is_skill_reviewer(the
+		# impersonated run-as user) is False: the message must not name a button
+		# this owner cannot see, and must point them at an administrator instead,
+		# in both the raised message and the persisted run.error.
+		exc_msg, run_error = self._run_now_on_unapplied_agent(self.owner)
+		self.assertNotIn("Apply catalog changes", exc_msg)
+		self.assertIn("Ask your administrator", exc_msg)
+		self.assertNotIn("Apply catalog changes", run_error)
+		self.assertIn("Ask your administrator", run_error)
 
 	# ------------------------------------------------------------------ #
 	# (a2) Phase 2C — delegate dispatch routes through admin, not chat
