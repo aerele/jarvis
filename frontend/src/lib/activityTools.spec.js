@@ -1,77 +1,49 @@
 import { describe, it, expect } from "vitest";
-import { shouldHideActivityTool } from "./activityTools.js";
+import { isCustomerFacingTool, shouldHideActivityTool } from "./activityTools.js";
 
-// A role=tool receipt row as it reaches activityByAssistant.
+// A role=tool receipt row as it reaches activityByAssistant (persisted; tool_name has NO prefix).
 const row = (o) => ({ role: "tool", ...o });
 
-describe("shouldHideActivityTool", () => {
-	it("hides a completed built-in with no input/output (read/exec/bash/canvas)", () => {
-		for (const name of ["read", "exec", "bash", "canvas"]) {
-			expect(
-				shouldHideActivityTool(row({ tool_name: name, tool_status: "completed" }))
-			).toBe(true);
+// isCustomerFacingTool is for the LIVE stream, whose event names KEEP the jarvis__ prefix.
+describe("isCustomerFacingTool (live event names — prefixed)", () => {
+	it("is true only for a jarvis__-prefixed name", () => {
+		expect(isCustomerFacingTool("jarvis__find_skills")).toBe(true);
+		expect(isCustomerFacingTool("jarvis__read_wiki")).toBe(true);
+	});
+
+	it("is false for built-ins and for missing names", () => {
+		for (const name of ["read", "exec", "bash", "canvas", "", null, undefined]) {
+			expect(isCustomerFacingTool(name)).toBe(false);
+		}
+	});
+});
+
+// shouldHideActivityTool is for the SETTLED accordion, whose persisted names are prefix-stripped,
+// so it keys off captured I/O: built-ins carry only name+status; jarvis__* tools carry args+result.
+describe("shouldHideActivityTool (settled rows — keyed on I/O)", () => {
+	it("hides an internal built-in (no args, no result) — any status incl. failure", () => {
+		for (const tool_status of ["completed", "running", "error", "failed", null, undefined]) {
+			expect(shouldHideActivityTool(row({ tool_name: "read", tool_status }))).toBe(true);
 		}
 	});
 
-	it("hides a still-running built-in with no I/O (never shown; the live indicator covers it)", () => {
-		expect(shouldHideActivityTool(row({ tool_name: "read", tool_status: "running" }))).toBe(
-			true
-		);
-	});
-
-	it("keeps a FAILED built-in so the failure surfaces — any status that is not completed/running", () => {
-		for (const status of ["error", "failed", "cancelled"]) {
-			expect(shouldHideActivityTool(row({ tool_name: "exec", tool_status: status }))).toBe(
-				false
-			);
-		}
-	});
-
-	it("keeps a built-in with ambiguous (null/undefined) status — errs toward visible", () => {
-		expect(shouldHideActivityTool(row({ tool_name: "exec", tool_status: null }))).toBe(false);
-		expect(shouldHideActivityTool(row({ tool_name: "exec" }))).toBe(false);
-	});
-
-	it("never hides a jarvis__* platform tool, even with empty I/O", () => {
+	it("keeps a jarvis tool that captured a result (persisted name has no prefix)", () => {
 		expect(
-			shouldHideActivityTool(
-				row({
-					tool_name: "jarvis__find_skills",
-					tool_status: "completed",
-					tool_result: '{"ok":true}',
-				})
-			)
+			shouldHideActivityTool(row({ tool_name: "find_skills", tool_result: '{"ok":true}' }))
 		).toBe(false);
 		expect(
-			shouldHideActivityTool(
-				row({ tool_name: "jarvis__read_wiki", tool_status: "completed" })
-			)
+			shouldHideActivityTool(row({ tool_name: "read_wiki", tool_args: '{"q":"x"}' }))
 		).toBe(false);
 	});
 
-	it("keeps a built-in that captured input OR output", () => {
-		expect(
-			shouldHideActivityTool(
-				row({ tool_name: "exec", tool_status: "completed", tool_args: '{"cmd":"ls"}' })
-			)
-		).toBe(false);
-		expect(
-			shouldHideActivityTool(
-				row({ tool_name: "read", tool_status: "completed", tool_result: '{"bytes":10}' })
-			)
-		).toBe(false);
+	it("keeps any row that captured args OR result", () => {
+		expect(shouldHideActivityTool(row({ tool_name: "x", tool_args: '{"a":1}' }))).toBe(false);
+		expect(shouldHideActivityTool(row({ tool_name: "x", tool_result: "[]" }))).toBe(false);
 	});
 
-	it("treats empty-string args/result as no I/O", () => {
+	it("treats empty-string args/result as no I/O (hidden)", () => {
 		expect(
-			shouldHideActivityTool(
-				row({
-					tool_name: "read",
-					tool_status: "completed",
-					tool_args: "",
-					tool_result: "",
-				})
-			)
+			shouldHideActivityTool(row({ tool_name: "read", tool_args: "", tool_result: "" }))
 		).toBe(true);
 	});
 
