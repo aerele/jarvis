@@ -1134,6 +1134,135 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# #1061 — the operator's soft stop
+# --------------------------------------------------------------------------- #
+def _guard_run_control(run_doc) -> None:
+	"""Who may STOP a run: exactly who may START one.
+
+	Deliberately NOT ``run_doc.check_permission("write")``. Jarvis User holds READ
+	ONLY (``if_owner``) on Jarvis Agent Run — the rows are server-owned, and granting
+	write so the owner could stop one would also let any customer rewrite a run's
+	status, error and result by hand, which is the audit trail. So the gate is the one
+	``run_agent_now`` already uses: WRITE on the run's own Jarvis Agent Installation
+	(its owner, or a System Manager). A run with no installation (a legacy row, or a
+	``_record_failed`` skip row) falls back to the run's own ``if_owner`` read gate,
+	which is still an ownership check — ``get_doc`` alone enforces neither."""
+	if run_doc.installation and frappe.db.exists(INSTALLATION, run_doc.installation):
+		frappe.get_doc(INSTALLATION, run_doc.installation).check_permission("write")
+		return
+	run_doc.check_permission("read")
+
+
+def _try_abort_gateway_session(session_key: str | None, run: str) -> None:
+	"""Best-effort hard abort of the delegate's gateway session. NEVER raises.
+
+	The soft stop (the terminal row + the revoked session bearer) is the guarantee;
+	this is the opportunistic other half. Mirrors ``chat/api.stop_run``'s abort — the
+	same ``agent_session_pool`` checkout against the same Settings gateway URL.
+
+	EXPECTED TO BE A NO-OP TODAY, on purpose: an agent run is dispatched container-side
+	as ``gateway call agent --expect-final`` on the cron lane, not as an interactive chat
+	session, so the gateway most likely has no abortable chat turn under this key and
+	answers with an error we swallow. It is wired anyway because it costs one bounded
+	call, it is the correct thing the moment the run lane grows an abort verb, and the
+	stop is already complete without it."""
+	key = (session_key or "").strip()
+	if not key:
+		return
+	try:
+		settings = frappe.get_cached_doc(_SETTINGS)
+		gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
+		if not gateway_url:
+			return
+		from jarvis.chat import agent_session_pool
+
+		with agent_session_pool.checkout(gateway_url) as sess:
+			sess.chat_abort(key, run)
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis agent: stop gateway abort failed (run stays stopped): {run}",
+			message=frappe.get_traceback(),
+		)
+
+
+@frappe.whitelist()
+def stop_agent_run(run: str) -> dict:
+	"""Stop a RUNNING agent run: terminalize it ``stopped``, revoke its session bearer
+	and best-effort abort its gateway session. Idempotent on an already-terminal run.
+
+	Before this, a dispatched run the delegate never finalized (a dead container, a
+	stale roster, a wedged turn) had no operator exit at all: it sat ``running`` for
+	three hours, held the installation's #672 liveness guard so no further run could
+	start, and was finally relabelled by the reaper as a duration timeout it never hit
+	(jarvis#1058).
+
+	Same concurrency discipline as ``agent_scheduler.fail_run``: commit first so the
+	``FOR UPDATE`` opens a fresh read view, then a COMPARE-AND-SET on
+	``status='running'`` under the row lock. That ordering is what makes a stop WIN
+	over a later fleet flip — ``poll_dispatched_runs`` and the reaper both re-read
+	under the same lock and transition only from ``running``, so neither can overwrite
+	a stopped row, and ``record_agent_run``'s writeback is already inert on a run that
+	is not ``running``.
+
+	SLOT PARITY (#672): stopping does NOT hand the schedule slot back. ``_claim_slot``
+	consumed the installation's ``next_run_at``/``last_run_at`` BEFORE the dispatch,
+	and neither the reaper nor ``_terminalize_failed`` ever unclaims it — a run that
+	really started spent its slot, and resurrecting it here would re-dispatch the same
+	slot on the next hourly tick. The A14 monthly BUDGET is a separate ledger and
+	deliberately differs from ``failed``: ``_runs_this_month`` excludes only ``failed``
+	rows (because every skip path writes one, which would make the cap
+	self-perpetuating), and that reasoning does not extend to an operator act. A
+	stopped run really did occupy the container, so it COUNTS — otherwise
+	start-then-stop would be an unlimited free-run loop around the budget."""
+	doc = frappe.get_doc(RUN, run)
+	_guard_run_control(doc)
+
+	frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
+	row = frappe.db.get_value(
+		RUN,
+		run,
+		["status", "session_key", "agent", "installation", "owner"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not row:
+		frappe.db.commit()
+		frappe.throw(_("That run no longer exists."), frappe.DoesNotExistError)
+	if row.status != "running":
+		# Already terminal — a concurrent finish, reap or a second click. Release the
+		# row lock and report the state it actually reached; never overwrite it.
+		frappe.db.commit()
+		return {"ok": True, "status": row.status, "idempotent": True}
+
+	stop_error = _("Stopped by operator.")
+	frappe.db.set_value(
+		RUN,
+		run,
+		{"status": "stopped", "finished_at": frappe.utils.now(), "error": stop_error[:140]},
+		update_modified=False,
+	)
+	frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
+	# The session bearer must not outlive the run: with the row gone the delegate's
+	# late jarvis__* calls (record_agent_run included) resolve no identity and 401,
+	# so nothing it does after this can write back onto the stopped run.
+	from jarvis.chat import agent_runs
+
+	agent_runs.teardown_run_session(row.session_key)
+	_try_abort_gateway_session(row.session_key, run)
+	log_activity(
+		agent=row.agent,
+		agent_title=frappe.db.get_value(LISTING, row.agent, "title") if row.agent else "",
+		installation=row.installation,
+		action="run_stopped",
+		run=run,
+		detail=f"stopped by {frappe.session.user}",
+		owner=row.owner,
+	)
+	frappe.db.commit()
+	return {"ok": True, "status": "stopped"}
+
+
+# --------------------------------------------------------------------------- #
 # PP-4 shadow activation + PP-6 global activation budget
 # --------------------------------------------------------------------------- #
 def _has_ceiling_grant(customer: str) -> bool:

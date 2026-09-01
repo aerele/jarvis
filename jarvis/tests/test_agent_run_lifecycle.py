@@ -26,6 +26,7 @@ Run:
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -219,3 +220,121 @@ class TestStoppedStatusIsTerminal(RunLifecycleTestCase):
 		run = self._run(inst, status="stopped", age_s=agent_scheduler.STALE_RUN_AFTER_SECONDS + 60)
 		cutoff = add_to_date(now_datetime(), seconds=-agent_scheduler.STALE_RUN_AFTER_SECONDS)
 		self.assertNotIn(run, [r.name for r in agent_scheduler._stale_candidates(cutoff)])
+
+
+# --------------------------------------------------------------------------- #
+# A2 — stop_agent_run
+# --------------------------------------------------------------------------- #
+class TestStopAgentRun(RunLifecycleTestCase):
+	def _stop(self, run: str, *, as_user: str | None = None) -> dict:
+		"""Call the endpoint with the gateway abort stubbed out — it is best-effort and
+		its own test covers it; every other assertion here is about the durable state."""
+		user = as_user or self.owner
+		frappe.set_user(user)
+		try:
+			with patch.object(agents_api, "_try_abort_gateway_session"):
+				return agents_api.stop_agent_run(run)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_stop_terminalizes_a_running_run(self):
+		inst = self._install()
+		run = self._run(inst)
+		out = self._stop(run)
+
+		self.assertEqual(out["status"], "stopped")
+		row = frappe.db.get_value(RUN, run, ["status", "finished_at", "error"], as_dict=True)
+		self.assertEqual(row.status, "stopped")
+		self.assertTrue(row.finished_at)
+		self.assertIn("Stopped by operator", row.error)
+
+	def test_stop_revokes_the_run_session_bearer(self):
+		"""The bearer must not outlive the run: a late tool call from a delegate that is
+		still winding down must resolve no identity and 401, so nothing it does can write
+		back onto the stopped run."""
+		inst = self._install()
+		run = self._run(inst)
+		key = frappe.db.get_value(RUN, run, "session_key")
+		self.assertTrue(frappe.db.exists(SESSION, {"session_key": key}))
+		self._stop(run)
+		self.assertFalse(frappe.db.exists(SESSION, {"session_key": key}))
+
+	def test_stop_logs_the_activity(self):
+		inst = self._install()
+		run = self._run(inst)
+		self._stop(run)
+		rows = frappe.get_all(
+			ACTIVITY, filters={"run": run}, fields=["action", "owner"], ignore_permissions=True
+		)
+		self.assertEqual([r.action for r in rows], ["run_stopped"])
+		self.assertEqual(rows[0].owner, self.owner)
+
+	def test_stop_leaves_the_claimed_schedule_slot_consumed(self):
+		"""SLOT PARITY with the reaper: ``_claim_slot`` spent the slot BEFORE dispatch and
+		no terminalization hands it back, so a stopped run must not resurrect it — that
+		would re-dispatch the same slot on the next hourly tick."""
+		inst = self._install()
+		before = self._slot(inst)
+		run = self._run(inst)
+		self._stop(run)
+		self.assertEqual(self._slot(inst), before)
+
+	def test_a_stopped_run_still_counts_against_the_monthly_budget(self):
+		"""Deliberately UNLIKE ``failed`` (which A14 excludes so a skip path cannot make
+		the cap self-perpetuating): a stopped run really occupied the container, so
+		start-then-stop must not be an unlimited free-run loop around the budget."""
+		inst = self._install()
+		run = self._run(inst)
+		self._stop(run)
+		self.assertEqual(agent_scheduler._runs_this_month(installation=inst), 1)
+
+	def test_stop_is_idempotent_on_a_terminal_run(self):
+		"""A second click, or a stop racing a finish, must report the state the run
+		actually reached and never overwrite it."""
+		inst = self._install()
+		run = self._run(inst, status="completed")
+		out = self._stop(run)
+		self.assertEqual(out, {"ok": True, "status": "completed", "idempotent": True})
+		self.assertEqual(self._status(run), "completed")
+
+	def test_stop_refuses_a_non_owner(self):
+		inst = self._install()
+		run = self._run(inst)
+		with self.assertRaises(frappe.PermissionError):
+			self._stop(run, as_user=self.stranger)
+		self.assertEqual(self._status(run), "running")
+
+	def test_a_broken_gateway_abort_never_undoes_the_stop(self):
+		"""The soft stop is the guarantee; the gateway abort is opportunistic. The run
+		lane is dispatched with ``--expect-final`` rather than as a chat session, so this
+		call is expected to be a no-op in production — it must never raise out."""
+		inst = self._install()
+		run = self._run(inst)
+
+		class _Boom:
+			def __enter__(self):
+				raise RuntimeError("gateway down")
+
+			def __exit__(self, *a):
+				return False
+
+		frappe.set_user(self.owner)
+		try:
+			with patch("jarvis.chat.agent_session_pool.checkout", return_value=_Boom()):
+				out = agents_api.stop_agent_run(run)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(out["status"], "stopped")
+		self.assertEqual(self._status(run), "stopped")
+
+	def test_a_late_writeback_has_no_run_to_land_on(self):
+		"""``record_agent_run`` resolves its run SOLELY by the session_key on its bearer
+		row, and refuses anything that is not ``running``. Both doors are shut after a
+		stop: the bearer row is gone (so the lookup finds no run at all) and the status
+		is terminal (so even a surviving bearer would hit the idempotency branch)."""
+		inst = self._install()
+		run = self._run(inst)
+		key = frappe.db.get_value(RUN, run, "session_key")
+		self._stop(run)
+		self.assertFalse(frappe.db.exists(SESSION, {"session_key": key}))
+		self.assertNotEqual(self._status(run), "running")
