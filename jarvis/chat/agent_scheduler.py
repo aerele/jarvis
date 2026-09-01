@@ -97,6 +97,12 @@ MISSING_RECORD_FALLBACK_SECONDS = 1800
 # admin does not re-code this refusal, so the fleet's sentence is the only signal. A
 # CROSS-REPO literal: renaming it fleet-side turns every lost run back into a 3h reap.
 _FLEET_UNKNOWN_RUN = "unknown agent run"
+# Circuit breaker on the poll's outbound calls. The sweep is SEQUENTIAL and each admin
+# call can block for admin_client.DEFAULT_TIMEOUT_S (150s), so with admin down three
+# in-flight runs already outlast the 5-minute cron interval and sweeps start stacking.
+# Two consecutive transport failures is enough evidence that the RELAY is down rather
+# than any one run being odd, so the sweep abandons the rest of the tick.
+MAX_CONSECUTIVE_POLL_FAILURES = 2
 
 # #672: TTL on the per-installation DISPATCH lock, which is held across the slot
 # claim AND the whole launch, including the admin call (admin_client.DEFAULT_TIMEOUT_S
@@ -459,10 +465,15 @@ def _terminalize_stuck_run(run_name: str, *, error: str, detail: str) -> bool:
 
 	CA-4 (server-owned scribe completion): a Custom App Learning *scribe* whose durable
 	page tally proves it SUCCEEDED is reconciled to ``completed`` rather than mislabelled
-	``failed`` — completion must not depend on the model remembering to call finish."""
+	``failed`` — completion must not depend on the model remembering to call finish. This
+	ruling belongs to the run's OWN durable evidence, not to the reason the caller decided
+	the run was stuck, which is why EVERY outside-in terminalization comes through here:
+	pages already written are pages already written, whether the sweep's trigger was the
+	3h clock, a fleet-reported failure, or a lost fleet record."""
 	from jarvis.chat import agent_runs
 	from jarvis.tools.record_app_wiki import reconcile_run_pages
 
+	frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
 	cur = frappe.db.get_value(
 		RUN,
 		run_name,
@@ -672,9 +683,12 @@ def poll_dispatched_runs() -> int:
 
 	now = now_datetime()
 	cutoff = now - timedelta(seconds=POLL_GRACE_SECONDS)
+	candidates = _stale_candidates(cutoff)
 	terminalized = 0
 	unreachable = 0
-	for r in _stale_candidates(cutoff):
+	consecutive = 0
+	abandoned = 0
+	for i, r in enumerate(candidates):
 		# Per-run fault isolation (the health_check 1020 lesson): one poisoned row must
 		# never abort the sweep and starve every run behind it.
 		try:
@@ -686,9 +700,23 @@ def poll_dispatched_runs() -> int:
 				# (AdminRejectedError IS an AdminUnreachableError), so branching on the
 				# class first would swallow every lost-record case forever.
 				if _FLEET_UNKNOWN_RUN not in str(e).lower():
-					unreachable += 1  # transport / admin fault: skip, the reaper backstops
+					# Transport / admin fault: skip this run, the reaper backstops it.
+					unreachable += 1
+					consecutive += 1
+					if consecutive >= MAX_CONSECUTIVE_POLL_FAILURES:
+						# CIRCUIT BREAKER. Each call can block for admin_client's full
+						# DEFAULT_TIMEOUT_S (150s), and this sweep is sequential on a 5-minute
+						# cron, so with admin down even three in-flight runs push one tick past
+						# the next and the sweeps stack — an outage would spend the scheduler
+						# on calls that are all going to time out anyway. Two consecutive
+						# transport failures is enough evidence that the relay, not the run, is
+						# the problem: abandon the rest of the sweep and let the next tick
+						# retry from the top.
+						abandoned = len(candidates) - (i + 1)
+						break
 					continue
 				state = {"status": "missing"}
+			consecutive = 0  # a readable answer (a relayed 404 included) closes the breaker
 			if _reconcile_polled_run(r, state, now):
 				terminalized += 1
 		except Exception:
@@ -702,8 +730,10 @@ def poll_dispatched_runs() -> int:
 		frappe.log_error(
 			title="jarvis agent: run poll could not reach admin",
 			message=(
-				f"{unreachable} dispatched run(s) left unpolled this sweep; their state is "
-				"unchanged and the stale-run reaper remains the backstop."
+				f"{unreachable} dispatched run(s) failed to poll and {abandoned} more were "
+				f"left unattempted (breaker opened after {MAX_CONSECUTIVE_POLL_FAILURES} "
+				"consecutive transport failures). No run state was changed; the next tick "
+				"retries and the stale-run reaper remains the backstop."
 			),
 		)
 	return terminalized
@@ -736,6 +766,12 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 	plus the synthetic ``missing`` this module uses for a relayed 404."""
 	status = (state.get("status") or "").strip().lower()
 
+	# Every terminal branch below goes through ``_terminalize_stuck_run``, never through
+	# ``fail_run`` directly: the CA-4 scribe ruling is keyed on the run's OWN durable page
+	# tally, not on why the sweep decided the run was over. Calling fail_run here stamped
+	# ``failed`` on a scribe that had already written its pages, while the reaper
+	# reconciled the identical row to ``completed`` — the same run reported two different
+	# outcomes depending on which sweep reached it first.
 	if status == "missing":
 		# The host has NO record of this run. Either it never landed, or its state file
 		# was pruned. Indistinguishable from here, so age is the only honest tiebreak:
@@ -743,9 +779,9 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 		# write not yet flushed) and is left alone.
 		if _run_age_seconds(row, now) < MISSING_RECORD_FALLBACK_SECONDS:
 			return False
-		return fail_run(
+		return _terminalize_stuck_run(
 			row.name,
-			"the agent host has no record of this run; it never started or its state was lost",
+			error="the agent host has no record of this run; it never started or its state was lost",
 			detail="polled: no run record on the host",
 		)
 
@@ -753,9 +789,9 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 		# The delegate really failed and the fleet knows why. Surface THAT sentence, not
 		# a generic one: this is the whole point of polling rather than waiting for the
 		# reaper's "exceeded max duration".
-		return fail_run(
+		return _terminalize_stuck_run(
 			row.name,
-			_fleet_error_message(state),
+			error=_fleet_error_message(state),
 			detail="polled: the delegate reported a failure",
 		)
 

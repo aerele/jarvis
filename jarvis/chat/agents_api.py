@@ -1179,9 +1179,12 @@ def _try_abort_gateway_session(session_key: str | None, run: str) -> None:
 		with agent_session_pool.checkout(gateway_url) as sess:
 			sess.chat_abort(key, run)
 	except Exception:
-		frappe.log_error(
-			title=f"jarvis agent: stop gateway abort failed (run stays stopped): {run}",
-			message=frappe.get_traceback(),
+		# Deliberately the LOGGER, not frappe.log_error. Failing here is the DOCUMENTED
+		# expected outcome described above, so an Error Log row would be written on
+		# essentially every stop — training operators to ignore the one surface where a
+		# real fault would show. The stop itself is already complete and committed.
+		frappe.logger("jarvis.agents").info(
+			f"stop gateway abort did not land for run {run} (run stays stopped): {frappe.get_traceback()}"
 		)
 
 

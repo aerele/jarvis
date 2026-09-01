@@ -197,6 +197,14 @@ class TestStoppedStatusIsTerminal(RunLifecycleTestCase):
 		options = frappe.get_meta(RUN).get_field("status").options.split("\n")
 		self.assertIn("stopped", options)
 
+	def test_the_accepted_status_list_matches_the_doctype(self):
+		"""``agents_api._RUN_STATUSES`` is hand-maintained and is what the Runs page
+		validates a filter against, so a status added to the DocType and forgotten here
+		is a value the customer can see on a row but never filter by — and one removed
+		from the DocType and left here is a filter that silently matches nothing."""
+		options = {o.strip() for o in frappe.get_meta(RUN).get_field("status").options.split("\n")}
+		self.assertEqual(set(agents_api._RUN_STATUSES), options - {""})
+
 	def test_run_history_filter_accepts_stopped(self):
 		"""The Runs page must be able to filter on the new status — an accepted value
 		the list endpoint refuses is a status the customer can never look up."""
@@ -350,24 +358,25 @@ DISPATCHED_S = agent_scheduler.POLL_GRACE_SECONDS + 180
 
 
 class TestPollDispatchedRuns(RunLifecycleTestCase):
-	def _poll(self, states: dict) -> list:
+	def _poll(self, states: dict, default=None) -> list:
 		"""Run the sweep with the admin relay stubbed per run id. Returns the run ids it
-		was asked about, so a test can assert a run was NEVER polled.
+		was asked about, so a test can assert a run was NEVER polled (or count the calls
+		the circuit breaker allowed).
 
-		Anything not named in ``states`` answers "still running" — this is a shared site
-		and other modules leave ``running`` rows behind, which the site-wide sweep would
-		otherwise judge on this test's fixture."""
+		``default`` answers every run not named in ``states``, and defaults to "still
+		running" — this is a shared site and other modules leave ``running`` rows behind,
+		which the site-wide sweep would otherwise judge on this test's fixture."""
 		asked: list = []
 
 		def _status(run_id):
 			asked.append(run_id)
-			state = states.get(run_id, {"status": "running"})
+			state = states.get(run_id, default if default is not None else {"status": "running"})
 			if isinstance(state, Exception):
 				raise state
 			return state
 
 		with patch.object(admin_client, "get_agent_run_status", side_effect=_status):
-			agent_scheduler.poll_dispatched_runs()
+			self.terminalized = agent_scheduler.poll_dispatched_runs()
 		return asked
 
 	def _relayed(self, state: dict) -> dict:
@@ -502,3 +511,65 @@ class TestPollDispatchedRuns(RunLifecycleTestCase):
 		run = self._run(inst, age_s=DISPATCHED_S)
 		self._poll({run: {"status": "failed", "error": {"message": "bare shape"}}})
 		self.assertEqual(self._status(run), "failed")
+
+	# ------------------------------------------------------------------ #
+	# CA-4 parity: the scribe ruling is keyed on the run's own durable pages,
+	# NEVER on which sweep reached it or why.
+	# ------------------------------------------------------------------ #
+	def test_a_fleet_failed_scribe_with_pages_is_completed_not_failed(self):
+		"""A scribe that wrote its pages and then crashed late is a SUCCESS the delegate
+		merely never finalized. Failing it here would report the same row two different
+		ways depending on whether the poll or the 3h reaper got to it first."""
+		inst = self._install(SCRIBE_SLUG)
+		run = self._run(inst, slug=SCRIBE_SLUG, age_s=DISPATCHED_S, pages_written=5)
+		self._poll({run: self._fleet_failed("delegate exec died: exit 137")})
+		self.assertEqual(self._status(run), "completed")
+
+	def test_a_lost_record_scribe_with_pages_is_completed_not_failed(self):
+		"""Same ruling when the host lost the run record entirely: the pages are in the
+		wiki either way, and a pruned state file is not evidence the work never happened."""
+		from jarvis.exceptions import AdminUnreachableError
+
+		inst = self._install(SCRIBE_SLUG)
+		run = self._run(
+			inst,
+			slug=SCRIBE_SLUG,
+			age_s=agent_scheduler.MISSING_RECORD_FALLBACK_SECONDS + 60,
+			pages_written=3,
+		)
+		self._poll({run: AdminUnreachableError("unknown agent run RUN-1")})
+		self.assertEqual(self._status(run), "completed")
+
+	def test_a_fleet_failed_auditor_still_fails(self):
+		"""The CA-4 carve-out is for scribes with durable pages ONLY — an auditor has no
+		such evidence and must still be failed with the delegate's real message."""
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S, pages_written=4)
+		self._poll({run: self._fleet_failed("evaluator blew up")})
+
+		row = frappe.db.get_value(RUN, run, ["status", "error"], as_dict=True)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("evaluator blew up", row.error)
+
+	# ------------------------------------------------------------------ #
+	# outage circuit breaker
+	# ------------------------------------------------------------------ #
+	def test_the_sweep_stops_calling_admin_after_two_transport_failures(self):
+		"""The sweep is sequential and each admin call can block for the client's full
+		150s timeout, so with admin down a handful of in-flight runs would outlast the
+		5-minute cron interval and sweeps would stack. Two consecutive transport failures
+		is enough evidence that the relay, not any one run, is the problem."""
+		from jarvis.exceptions import AdminUnreachableError
+
+		inst = self._install()
+		runs = [self._run(inst, age_s=DISPATCHED_S) for _ in range(3)]
+
+		with patch.object(frappe, "log_error") as logged:
+			asked = self._poll({}, default=AdminUnreachableError("admin is down"))
+
+		self.assertEqual(len(asked), agent_scheduler.MAX_CONSECUTIVE_POLL_FAILURES)
+		self.assertEqual(self.terminalized, 0)
+		# ONE aggregate line for the whole sweep, never one per run.
+		self.assertEqual(logged.call_count, 1)
+		for run in runs:
+			self.assertEqual(self._status(run), "running")
