@@ -38,6 +38,23 @@
 					<PromotionStatusChip v-if="myPromo" :req="myPromo" noun="page" />
 				</div>
 
+				<!-- What this page documents: a deep link to the ERP record it's about. -->
+				<div v-if="refUrl" class="mt-2 flex items-center gap-1.5 text-sm text-ink-gray-5">
+					<span>About</span>
+					<a
+						:href="refUrl"
+						target="_blank"
+						rel="noopener"
+						class="flex min-w-0 items-center gap-1 text-ink-gray-8 hover:underline"
+					>
+						<span class="truncate">{{ page.ref_doctype }} · {{ page.ref_name }}</span>
+						<FeatherIcon
+							name="external-link"
+							class="size-3.5 shrink-0 text-ink-gray-5"
+						/>
+					</a>
+				</div>
+
 				<!-- Conflicting gets the same treatment as Stale: a badge alone is
 				     a red dead-end with no explanation or resolution path -->
 				<div
@@ -192,7 +209,16 @@
 // the page itself whenever it opens (v-model true + slug); emits `refresh`
 // after a save/archive/delete so the owning list refetches.
 import { ref, computed, watch } from "vue";
-import { Badge, Button, Dialog, FormControl, Tooltip, toast, confirmDialog } from "frappe-ui";
+import {
+	Badge,
+	Button,
+	Dialog,
+	FeatherIcon,
+	FormControl,
+	Tooltip,
+	toast,
+	confirmDialog,
+} from "frappe-ui";
 import { renderMarkdown } from "@/markdown";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import {
@@ -292,6 +318,13 @@ const scopeTarget = computed(() => {
 	if (page.value.scope === "Role") return page.value.target_role || "";
 	if (page.value.scope === "User") return page.value.target_user || "";
 	return "";
+});
+// The ERP record this page documents (ref_doctype/ref_name) as a Desk deep link -
+// same doctype-route transform as ActivityDetailDialog's target link.
+const refUrl = computed(() => {
+	if (!page.value || !page.value.ref_doctype || !page.value.ref_name) return "";
+	const dt = page.value.ref_doctype.toLowerCase().replace(/ /g, "-");
+	return `/app/${dt}/${encodeURIComponent(page.value.ref_name)}`;
 });
 // "From a voice note by X, Jul 7" - the page's latest source entry. Pages a
 // pipeline wrote (not a person) earn trust by saying where they came from.

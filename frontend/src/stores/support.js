@@ -50,6 +50,11 @@ export function badgeFor(status) {
 	return { label: "Open", theme: "gray", variant: "solid" };
 }
 
+// priorityBadge lives in the dependency-free supportBadges module so it stays
+// unit-testable (importing this store drags in frappe-ui + @/api); re-exported
+// here so `from "@/stores/support"` keeps resolving it.
+export { priorityBadge } from "./supportBadges";
+
 const tickets = ref([]);
 const ticketsLoading = ref(false);
 const ticketsError = ref("");

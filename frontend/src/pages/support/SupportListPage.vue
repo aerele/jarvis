@@ -72,6 +72,16 @@
 				/>
 			</template>
 
+			<template #cell-priority="{ row }">
+				<Badge
+					v-if="priorityBadge(row.priority)"
+					:variant="priorityBadge(row.priority).variant"
+					:theme="priorityBadge(row.priority).theme"
+					:label="priorityBadge(row.priority).label"
+				/>
+				<span v-else class="text-base text-ink-gray-4">-</span>
+			</template>
+
 			<template #cell-modified="{ row }">
 				<div class="flex w-full items-center justify-end">
 					<Tooltip v-if="row.modified" :text="exactDate(row.modified)">
@@ -92,7 +102,7 @@ import { Badge, Button, Tooltip } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import SupportShell from "@/components/support/SupportShell.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
-import { useSupportStore, badgeFor } from "@/stores/support";
+import { useSupportStore, badgeFor, priorityBadge } from "@/stores/support";
 
 const router = useRouter();
 const store = useSupportStore();
@@ -113,6 +123,7 @@ const ALL_COLUMNS = [
 	{ label: "Subject", key: "subject", width: 3 },
 	{ label: "Ticket", key: "name", width: "9rem" },
 	{ label: "Status", key: "status", width: "8rem" },
+	{ label: "Priority", key: "priority", width: "7rem" },
 	{ label: "Updated", key: "modified", width: "8rem", align: "right" },
 ];
 
@@ -142,12 +153,23 @@ onUnmounted(() => {
 // hid Subject/Status/Updated so "Ticket" is the only column left, the mobile
 // drop must not remove it as well and render an empty grid.
 const userHiddenCols = useStorage("jarvis-cols-support", []);
+// Priority is self-activating: the control plane only began returning `priority`
+// after a later deploy, so until a row actually carries it we omit the column
+// rather than render an all-blank one that reads as broken. It lights up on its
+// own the moment the data arrives.
+const hasPriority = computed(() => store.tickets.some((t) => t.priority));
+// Secondary fixed-width columns shed below ~640px so Ticket+Status+Priority+Updated
+// don't overflow a phone. Both `name` and `priority` are in the drop set.
+const NARROW_DROP = ["name", "priority"];
 const columns = computed(() => {
-	if (!isNarrow.value) return ALL_COLUMNS;
-	const otherVisible = ALL_COLUMNS.some(
-		(c) => c.key !== "name" && !userHiddenCols.value.includes(c.key)
+	const base = ALL_COLUMNS.filter((c) => c.key !== "priority" || hasPriority.value);
+	if (!isNarrow.value) return base;
+	// Guard against zero visible columns: if the user has already hidden everything
+	// except the drop-set columns, keep the full set rather than render an empty grid.
+	const survivors = base.filter(
+		(c) => !NARROW_DROP.includes(c.key) && !userHiddenCols.value.includes(c.key)
 	);
-	return otherVisible ? ALL_COLUMNS.filter((c) => c.key !== "name") : ALL_COLUMNS;
+	return survivors.length ? base.filter((c) => !NARROW_DROP.includes(c.key)) : base;
 });
 
 // Search rides the quick-filter strip as a text control, exactly as every other
