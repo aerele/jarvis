@@ -202,6 +202,20 @@ def _enriched_catalog() -> list[dict]:
 		lst["allowed"] = 1 if (is_sm or not allowed_roles or my_roles.intersection(allowed_roles)) else 0
 		lst["install_count"] = install_counts.get(lst.name, 0)
 		out.append(lst)
+	# jarvis#1062 D2: a non-admin never sees a row it may not act on — hide it
+	# outright rather than render it disabled. Hidden iff the role restriction
+	# excludes them (allowed == 0) OR the listing is not yet Published and this
+	# caller has not installed it (Draft/Coming Soon/Deprecated are registry /
+	# lifecycle states, not something to browse to before an admin ships it —
+	# unless this caller already has it installed, so an existing install never
+	# disappears out from under its owner on a status change). Admin display
+	# parity is untouched: an admin (is_sm) always sees every row, `allowed`
+	# computed exactly as before. The ONE choke point both list_agents and
+	# list_agents_page share, so neither can drift from the other.
+	if not is_sm:
+		out = [r for r in out if r["allowed"] and (r["status"] == "Published" or r["installed"])]
+		for r in out:
+			r.pop("allowed_roles", None)
 	return out
 
 
@@ -284,6 +298,14 @@ def get_agent(agent_slug: str) -> dict:
 	# PART 4 REVISED, TASK 49(d): the Admin-tab signal (all_roles rider) rides for
 	# Jarvis Admins too — the SPA derives isSM from all_roles' presence.
 	is_sm = has_jarvis_admin_access(me)
+	allowed = _user_allowed_for_agent(listing, me)
+	installed_by_caller = bool(frappe.db.exists(INSTALLATION, {"owner": me, "agent": listing.name}))
+	# jarvis#1062 D2: the same visibility gate as list_agents/list_agents_page
+	# (_enriched_catalog), applied to the single-agent read — a row hidden from
+	# the catalog must not be reachable by knowing (or guessing) its slug either.
+	# Admin display parity is untouched: an admin (is_sm) always passes.
+	if not is_sm and (not allowed or (listing.status != "Published" and not installed_by_caller)):
+		frappe.throw(_("You do not have access to this agent."), frappe.PermissionError)
 
 	out: dict = {
 		"name": listing.name,
@@ -305,7 +327,7 @@ def get_agent(agent_slug: str) -> dict:
 		"default_schedule": listing.default_schedule,
 		"validated_for_fy": listing.validated_for_fy,
 		"allowed_roles": [row.role for row in (listing.allowed_roles or [])],
-		"allowed": 1 if _user_allowed_for_agent(listing, me) else 0,
+		"allowed": 1 if allowed else 0,
 		"install_count": frappe.db.count(INSTALLATION, {"agent": listing.name}),
 		"installation": None,
 	}

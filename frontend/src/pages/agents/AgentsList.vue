@@ -197,11 +197,6 @@
 								label="Update available"
 							/>
 						</div>
-
-						<div v-if="!a.allowed" class="mt-2 text-sm text-ink-gray-5">
-							Available to: {{ (a.allowed_roles || []).join(", ") || "-" }} - ask
-							your administrator.
-						</div>
 					</div>
 				</div>
 			</div>

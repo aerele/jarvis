@@ -513,6 +513,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 			admin_client.post_agent_run = orig_run
 
 	def test_list_agents_allowed_flags_and_roles_roundtrip(self):
+		# jarvis#1062 D2: list_agents (via _enriched_catalog) now HIDES a
+		# role-restricted row for a non-admin outright, instead of returning it
+		# disabled with allowed=0 — a blocked user gets no row at all. An admin
+		# keeps EXACT parity with pre-D2 behavior: every row, `allowed` computed
+		# the same way, `allowed_roles` still present.
 		res = None
 		frappe.set_user("Administrator")
 		res = agents_api.set_agent_roles("close-auditor", [ROLE_X])
@@ -521,23 +526,101 @@ class TestAgentsMarketplace(unittest.TestCase):
 		def _row(user):
 			frappe.set_user(user)
 			try:
-				return next(r for r in agents_api.list_agents() if r["name"] == "close-auditor")
+				return next((r for r in agents_api.list_agents() if r["name"] == "close-auditor"), None)
 			finally:
 				frappe.set_user("Administrator")
 
 		blocked = _row(self.other)
-		self.assertEqual(blocked["allowed"], 0)
-		self.assertEqual(blocked["allowed_roles"], [ROLE_X])
-		permitted = _row(self.owner)
-		self.assertEqual(permitted["allowed"], 1)
-		sm = _row(self.admin)  # System Manager: always allowed
-		self.assertEqual(sm["allowed"], 1)
+		self.assertIsNone(blocked, "a role-restricted row must be HIDDEN from a blocked user, not disabled")
 
-		# [] clears the restriction -> unrestricted for everyone.
+		permitted = _row(self.owner)
+		self.assertIsNotNone(permitted)
+		self.assertEqual(permitted["allowed"], 1)
+		# non-admin payload: allowed_roles is stripped entirely (D2 knock-on) —
+		# nothing left for the removed "Available to: ..." card branch to read.
+		self.assertNotIn("allowed_roles", permitted)
+
+		sm = _row(self.admin)  # System Manager: admin parity — sees the row + allowed_roles
+		self.assertIsNotNone(sm)
+		self.assertEqual(sm["allowed"], 1)
+		self.assertEqual(sm["allowed_roles"], [ROLE_X])
+
+		# [] clears the restriction -> unrestricted for everyone; the row reappears
+		# for the previously-blocked user (still no allowed_roles key — non-admin).
 		res = agents_api.set_agent_roles("close-auditor", [])
 		self.assertEqual(res["allowed_roles"], [])
-		self.assertEqual(_row(self.other)["allowed"], 1)
-		self.assertEqual(_row(self.other)["allowed_roles"], [])
+		reappeared = _row(self.other)
+		self.assertIsNotNone(reappeared)
+		self.assertEqual(reappeared["allowed"], 1)
+		self.assertNotIn("allowed_roles", reappeared)
+
+	def test_draft_listing_hidden_from_non_admin_unless_installed(self):
+		# jarvis#1062 D2: Draft/Coming Soon/Deprecated are registry / lifecycle
+		# states a non-admin should not browse to before an admin ships them — but
+		# an installed instance must not vanish out from under its own installer.
+		_install_as(self.owner, "close-auditor")
+		frappe.db.set_value(LISTING, "close-auditor", "status", "Draft")
+		frappe.db.commit()
+
+		def _row(user):
+			frappe.set_user(user)
+			try:
+				return next((r for r in agents_api.list_agents() if r["name"] == "close-auditor"), None)
+			finally:
+				frappe.set_user("Administrator")
+
+		try:
+			# self.other never installed it -> hidden while Draft.
+			self.assertIsNone(_row(self.other))
+			# self.owner installed it -> stays visible to its own installer.
+			self.assertIsNotNone(_row(self.owner))
+			# Admin parity: unaffected by the Draft-hiding rule.
+			self.assertIsNotNone(_row(self.admin))
+		finally:
+			frappe.db.set_value(LISTING, "close-auditor", "status", "Published")
+			frappe.db.commit()
+
+	def test_get_agent_throws_permission_error_when_hidden(self):
+		# Role-restricted: a caller outside the allowed set gets a PermissionError,
+		# not a 404 or a quiet payload — the same visibility the catalog enforces.
+		self._restrict("close-auditor", [ROLE_X])
+		try:
+			frappe.set_user(self.other)  # lacks ROLE_X
+			try:
+				with self.assertRaises(frappe.PermissionError):
+					agents_api.get_agent("close-auditor")
+			finally:
+				frappe.set_user("Administrator")
+			# self.owner holds ROLE_X -> still readable.
+			frappe.set_user(self.owner)
+			try:
+				out = agents_api.get_agent("close-auditor")
+			finally:
+				frappe.set_user("Administrator")
+			self.assertEqual(out["agent_slug"], "close-auditor")
+		finally:
+			self._restrict("close-auditor", [])
+
+		# Draft + never installed by this caller -> also a PermissionError.
+		frappe.db.set_value(LISTING, "close-auditor", "status", "Draft")
+		frappe.db.commit()
+		try:
+			frappe.set_user(self.other)
+			try:
+				with self.assertRaises(frappe.PermissionError):
+					agents_api.get_agent("close-auditor")
+			finally:
+				frappe.set_user("Administrator")
+			# Admin parity: a System Manager still reads it fine while Draft.
+			frappe.set_user(self.admin)
+			try:
+				out = agents_api.get_agent("close-auditor")
+			finally:
+				frappe.set_user("Administrator")
+			self.assertEqual(out["status"], "Draft")
+		finally:
+			frappe.db.set_value(LISTING, "close-auditor", "status", "Published")
+			frappe.db.commit()
 
 	# ------------------------------------------------------------------ #
 	# (f) RBAC — admin endpoints are System Manager ONLY
