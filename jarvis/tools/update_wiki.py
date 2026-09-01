@@ -125,7 +125,15 @@ def update_wiki(
 		# here + ignore_permissions replace the old doctype-perm probe, since
 		# write moved off Desk User). Role/User pages follow the human matrix.
 		if (doc.get("scope") or "Org") != "Org" and not wiki_permissions.can_edit_page(doc, user):
-			raise PermissionDeniedError(f"no write permission on {WIKI} {name}")
+			# #733: never let a forbidden existing page fall through to the
+			# create branch below — hitting the unique-slug duplicate-key
+			# error there would be an even louder existence leak. Mask it
+			# the same way a genuinely unknown slug is handled: the same
+			# missing-title/page_type message when a create was not even
+			# attempted, otherwise the same "unknown" message read_wiki uses.
+			if not (title and str(title).strip()) or not page_type:
+				raise InvalidArgumentError("creating a new wiki page requires title and page_type")
+			raise InvalidArgumentError(f"unknown wiki page: {slug}")
 		created = False
 		if title and str(title).strip():
 			doc.title = str(title).strip()[:140]
