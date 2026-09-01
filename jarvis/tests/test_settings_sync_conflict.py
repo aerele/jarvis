@@ -36,7 +36,7 @@ inside ``frappe.db.sql`` at the statement that can still conflict after the fix
 (the ``tabSingles`` DELETE). It is still raised from Python: MariaDB never sees
 the statement, so no test here exercises a genuine engine-produced ER_CHECKREAD,
 and nothing here would catch a divergence between the real error and this
-reconstruction. That is the same limitation the admin-plane fix
+reconstruction. That is the same limitation the backend fix
 (jarvis-admin-v2 PR #264) recorded, and it is not fixable in this repo's CI: CI runs
 MariaDB 10.11, which has no ``innodb_snapshot_isolation`` at all and cannot raise
 1020 for this reason under any query. Reproducing the real error needs MariaDB
