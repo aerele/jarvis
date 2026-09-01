@@ -1,4 +1,4 @@
-"""GAP 1 (Track B) — the bench heartbeat emitter (dead-man's-switch, data-plane half)."""
+"""GAP 1 (Track B) — the bench heartbeat emitter (dead-man's-switch, bench-side half)."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ class TestBenchHeartbeatPush(_PumpTestCase):
 			heartbeat.push_bench_heartbeat()  # must not raise
 
 	def test_b3_silent_on_admin_validation_error(self):
-		"""A 4xx from the CP — INCLUDING the ingest endpoint not existing yet (before Track
+		"""A 4xx from the backend — INCLUDING the ingest endpoint not existing yet (before Track
 		C ships) — is silently swallowed, never logged fleet-wide."""
 		with (
 			patch.object(heartbeat, "_admin_configured", return_value=True),

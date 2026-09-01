@@ -2245,7 +2245,7 @@ class TestTermsUrl(FrappeTestCase):
 	"""terms_url() is the one legal-page URL the checkout flow hands out.
 
 	The terms moved to the public marketing site (2026-08-17): Aerele's stock
-	deployment must link it directly (the admin plane only 301s /terms
+	deployment must link it directly (the backend only 301s /terms
 	there), while a rebranded deployment (admin base resolving away from
 	Aerele's stock admin, by either documented rebrand path) keeps its own
 	admin's /terms.
