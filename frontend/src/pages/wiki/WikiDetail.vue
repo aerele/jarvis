@@ -170,7 +170,7 @@
 				</div>
 
 				<template v-if="editing">
-					<DocSection label="Edit page">
+					<div class="mt-2">
 						<div class="space-y-4">
 							<FormControl
 								type="text"
@@ -227,7 +227,7 @@
 								>
 							</p>
 						</div>
-					</DocSection>
+					</div>
 				</template>
 				<template v-else>
 					<!-- Labeled read view: same field shape as the create form so a
