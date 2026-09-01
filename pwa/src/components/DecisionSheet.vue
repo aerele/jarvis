@@ -20,6 +20,11 @@ const emit = defineEmits(["close", "resolved"]);
 
 const state = ref("review"); // review | busy | approved | denied
 const error = ref("");
+// Which of the two approve buttons is in flight, so a runnable card's pair
+// (Step-by-step / Approve & run) can each show their OWN busy state instead of
+// `state === "busy"` alone leaving both looking identical (P1, skill
+// approve-and-run, §3.5).
+const approveMode = ref("step"); // "step" | "run"
 
 // Fresh card → fresh sheet.
 watch(
@@ -67,12 +72,24 @@ function deny() {
 	emit("resolved", props.action.token, "denied");
 }
 
-async function approve() {
+// mode "step" (default, low-friction): confirmTool, exactly as before - this
+// is what a plain card's single Approve button, and a runnable card's own
+// Step-by-step button, both call. mode "run" (deliberate, only offered when
+// the card's approve_run is true): approveAndRun, the sibling endpoint that
+// ALSO opens the armed skill's uninterrupted run. Same {ok,...}/
+// InvalidConfirmation/storage-unavailable envelope either way, so this one
+// function covers both without the two paths drifting in what a failure looks
+// like to the user.
+async function approve(mode = "step") {
 	if (state.value === "busy") return;
 	error.value = "";
 	state.value = "busy";
+	approveMode.value = mode;
 	try {
-		const r = await api.confirmTool(props.action.token, props.action.conversation);
+		const r =
+			mode === "run"
+				? await api.approveAndRun(props.action.token, props.action.conversation)
+				: await api.confirmTool(props.action.token, props.action.conversation);
 		if (r && r.ok === false) {
 			// The token is single-use and short-lived: a stale card must say so
 			// rather than look like a failure the user can retry.
@@ -159,17 +176,39 @@ async function approve() {
 					<div v-if="error" class="jv-derror">{{ error }}</div>
 				</div>
 
-				<div class="jv-dactions">
+				<div class="jv-dactions" :class="{ 'jv-dactions--run': card?.approve_run }">
 					<button class="jv-btn is-ghost" :disabled="state === 'busy'" @click="deny">
 						Deny
 					</button>
+					<!-- Step-by-step stays the plain, low-friction confirm - same call as
+					     a non-runnable card's Approve, just relabeled when a plan is on
+					     offer (D-TRIGGER). Default focus, never Approve & run. -->
 					<button
 						class="jv-btn is-primary jv-dapprove"
 						:disabled="state === 'busy' || expired"
-						@click="approve"
+						@click="approve('step')"
 					>
-						<span v-if="state === 'busy'" class="jv-spinner" />
-						<span v-else>Approve</span>
+						<span
+							v-if="state === 'busy' && approveMode !== 'run'"
+							class="jv-spinner"
+						/>
+						<span v-else>{{ card?.approve_run ? "Step-by-step" : "Approve" }}</span>
+					</button>
+				</div>
+				<!-- Approve & run: the deliberate, open-ended choice - its own row
+				     below the default Deny/Step-by-step pair, amber-accented (clear,
+				     not alarming), never the default focus. -->
+				<div v-if="card?.approve_run" class="jv-drun-row">
+					<button
+						class="jv-btn is-run jv-drunbtn"
+						:disabled="state === 'busy' || expired"
+						@click="approve('run')"
+					>
+						<span
+							v-if="state === 'busy' && approveMode === 'run'"
+							class="jv-spinner"
+						/>
+						<span v-else>▶ Approve &amp; run</span>
 					</button>
 				</div>
 			</template>
@@ -262,6 +301,23 @@ async function approve() {
 	flex: none;
 	padding: 12px 20px 16px;
 	border-top: 1px solid var(--border);
+}
+/* A runnable card adds the Approve & run row right below - tighten this row's
+   own bottom padding so the two read as one connected action block. */
+.jv-dactions--run {
+	padding-bottom: 6px;
+}
+.jv-drun-row {
+	flex: none;
+	padding: 0 20px 16px;
+}
+.jv-drunbtn {
+	width: 100%;
+}
+.jv-btn.is-run {
+	background: var(--amber-bg);
+	color: var(--amber);
+	border: 1px solid var(--amber);
 }
 .jv-btn {
 	height: 48px;

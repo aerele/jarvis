@@ -356,6 +356,14 @@ scheduler_events = {
 		# `waiting_capacity` runs are NOT candidates — they have their own bounded
 		# resume cron (`resume_waiting_capacity_runs`, above).
 		"jarvis.chat.macros.reap_stale_macro_runs",
+		# Skill "Approve & run" backstop (design §3.4): clear a STRANDED skill_autorun
+		# flag — an approved skill run whose worker died mid-run, so no terminal clear
+		# fired and its sliding timestamp froze. A skill chat has no Jarvis Macro Run row
+		# to key on (that is what reap_stale_macro_runs sweeps), so this scans the
+		# conversation flag directly, past the sliding TTL, with the same no-live-turn +
+		# no-pending-card discriminators the gate and on_terminal_turn use. Cheap no-op
+		# (one indexed flag scan) when nothing is stranded.
+		"jarvis.chat.session_lifecycle.reap_stranded_skill_autorun",
 		# Fire any due scheduled auditor agents. Identity-safe (runs each audit
 		# as its owner, never Administrator); budget-capped; advances only on a
 		# successful enqueue. See jarvis/chat/agent_scheduler.py.

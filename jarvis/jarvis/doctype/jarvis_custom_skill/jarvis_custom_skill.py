@@ -18,6 +18,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import has_jarvis_admin_access
+
 # A skill_name is a bare slug the customer authors (e.g. "invoicing"). It is
 # lowercased and must be hyphen-separated alphanumerics. Everywhere it reaches
 # agent it is prefixed with ``custom-`` (see chat/custom_skills.py) so it can
@@ -152,6 +154,7 @@ class JarvisCustomSkill(Document):
 		self._validate_shared_slug_unique()
 		self._validate_owner_cap()
 		self._guard_managed_flag()
+		self._guard_allow_approve_run_enable()
 
 	def on_update(self):
 		_clear_personal_clause_cache(self.owner)
@@ -494,5 +497,31 @@ class JarvisCustomSkill(Document):
 		if new_val or new_val != old_val:
 			frappe.throw(
 				_("Only the learning engine can set 'Managed by Learning'."),
+				frappe.PermissionError,
+			)
+
+	def _guard_allow_approve_run_enable(self):
+		"""``allow_approve_run`` arms this skill for the "Approve & run" flow
+		(design doc D-CONTROL): once armed, a declared 2+-step plan run of this
+		skill offers a single approval that opens an uncarded run of the explicit
+		``_SKILL_AUTORUN_COVERED`` allowlist for the rest of that run (mirrors the
+		macro's ``skip_confirmation`` arming - see ``jarvis_macro._guard_skip_
+		confirmation_enable``). Only a Jarvis Admin / System Manager may enable
+		it - a plain owner may author and invoke their own skill but must not
+		self-grant the autorun bypass.
+
+		Only the 0/unset -> 1 transition is gated; disabling and every other edit
+		(including editing instructions while it stays on - the arm persists
+		across content edits by design, same D6 trust model as the macro) are
+		free for the owner. The toggle IS the kill switch: un-arming is instant,
+		admin-only to turn on, free to turn off, no deploy needed."""
+		if not self.allow_approve_run:
+			return
+		previous = self.get_doc_before_save()
+		if previous and bool(previous.allow_approve_run):
+			return
+		if not has_jarvis_admin_access(frappe.session.user):
+			frappe.throw(
+				_("Enabling Approve & run requires a Jarvis Admin or System Manager role."),
 				frappe.PermissionError,
 			)

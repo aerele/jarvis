@@ -14,6 +14,7 @@
 import { computed } from "vue";
 
 import { verbSentence } from "@shared/lib/actionSummary.js";
+import PlanOutline from "./PlanOutline.vue";
 
 const props = defineProps({
 	card: { type: Object, required: true },
@@ -499,6 +500,10 @@ function tableNote(t) {
 				Unmapped columns ignored: {{ card.columns.unmapped.join(", ") }}
 			</div>
 		</template>
+
+		<!-- Full-plan outline (P1, additive `card.plan`, no new CARD_KIND): OUTSIDE
+		     the kind switch above so it renders beside whatever kind step 1 is. -->
+		<PlanOutline v-if="card.plan?.steps?.length" :plan="card.plan" />
 
 		<details v-if="details" class="jv-pc-details">
 			<summary>Details</summary>
