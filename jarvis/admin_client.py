@@ -1327,13 +1327,6 @@ def post_push_agent_skills(agent_skills: list[dict]) -> dict:
 	restarts the container so agent re-scans ``workspace/skills``. An empty
 	list is a valid "remove all agent skills" reconcile.
 
-	NOTE: the admin endpoint ``jarvis_admin.api.tenant.push_agent_skills`` and the
-	fleet ``PUT /v1/containers/{name}/agent-skills`` are the B5 half of this work
-	(a sibling of the custom-skills chain). Until they ship this raises
-	``AdminValidationError`` (unknown method), which ``apply_agents`` records as a
-	terminal ``failed:`` status — the bench-side path is complete and structured
-	identically to ``post_push_custom_skills``.
-
 	Raises:
 		AdminAuthError, AdminUnreachableError, AdminValidationError
 		(rate-limit shares the rotate-secret bucket).
