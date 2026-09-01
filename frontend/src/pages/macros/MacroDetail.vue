@@ -65,6 +65,16 @@
 						description="Stop the chain if a step fails - otherwise it keeps going after an error."
 						:disabled="saving"
 					/>
+					<Switch
+						v-model="form.skip_confirmation"
+						label="Skip confirmation (run writes uncarded)"
+						:description="
+							canArm
+								? 'Admin only. This macro\'s runs execute writes WITHOUT a confirmation card - including run_method, send_email and run_import. delete/cancel/amend still park and stop the run. Arming trusts the owner for current and future steps.'
+								: 'Admin only - a Jarvis Admin or System Manager can arm this macro to run its writes without a confirmation card.'
+						"
+						:disabled="saving || !canArm"
+					/>
 				</div>
 			</DocSection>
 
@@ -229,6 +239,7 @@ const form = reactive({
 	description: "",
 	enabled: true,
 	stop_on_error: true,
+	skip_confirmation: false,
 	schedule_enabled: false,
 	schedule_frequency: "daily",
 	schedule_time: "09:00",
@@ -247,6 +258,11 @@ const docmeta = shallowRef(null); // useDocmeta instance (persisted macros only)
 const mergePending = computed(() => mergeStatus.value === "pending");
 const stepsWithPrompt = computed(() => form.steps.filter((s) => (s.prompt || "").trim()).length);
 
+// Arming a macro to skip confirmation is admin-only (the backend re-checks
+// require_jarvis_admin, so this is a UX gate, not the security boundary); a
+// non-admin sees the toggle disabled with the reason instead of a throw-on-save.
+const canArm = !!(window.is_jarvis_admin || window.is_system_manager);
+
 const dirty = computed(() => {
 	const snap = snapshot.value;
 	if (!snap || loading.value) return false;
@@ -255,6 +271,7 @@ const dirty = computed(() => {
 		(form.description || "") !== snap.description ||
 		(form.enabled ? 1 : 0) !== snap.enabled ||
 		(form.stop_on_error ? 1 : 0) !== snap.stop_on_error ||
+		(form.skip_confirmation ? 1 : 0) !== snap.skip_confirmation ||
 		(form.schedule_enabled ? 1 : 0) !== snap.schedule_enabled ||
 		(form.schedule_frequency || "daily") !== snap.schedule_frequency ||
 		(form.schedule_time || "") !== snap.schedule_time ||
@@ -319,6 +336,7 @@ function seed(data) {
 	form.description = data.description || "";
 	form.enabled = data.enabled == null ? true : !!data.enabled;
 	form.stop_on_error = !!data.stop_on_error;
+	form.skip_confirmation = !!data.skip_confirmation;
 	form.schedule_enabled = !!data.schedule_enabled;
 	form.schedule_frequency = data.schedule_frequency || "daily";
 	form.schedule_time = toHHMM(data.schedule_time) || "09:00";
@@ -332,6 +350,7 @@ function seed(data) {
 		description: form.description,
 		enabled: form.enabled ? 1 : 0,
 		stop_on_error: form.stop_on_error ? 1 : 0,
+		skip_confirmation: form.skip_confirmation ? 1 : 0,
 		schedule_enabled: form.schedule_enabled ? 1 : 0,
 		schedule_frequency: form.schedule_frequency,
 		schedule_time: form.schedule_time,
@@ -406,6 +425,7 @@ async function save() {
 			steps,
 			enabled: form.enabled ? 1 : 0,
 			stop_on_error: form.stop_on_error ? 1 : 0,
+			skip_confirmation: form.skip_confirmation ? 1 : 0,
 			schedule_enabled: form.schedule_enabled ? 1 : 0,
 			schedule_frequency: form.schedule_frequency || "daily",
 			schedule_time: form.schedule_time || "09:00",

@@ -454,3 +454,15 @@ class TestTurnContextReflectsFlag(FrappeTestCase):
 		frappe.db.commit()
 		msg = self._capture_message_sent()
 		self.assertNotIn("auto-apply changes: ON", msg)
+
+	def test_context_line_shows_armed_run_when_skip_confirmation_set(self):
+		# The armed-macro signal tells the persona to call create/update directly so
+		# the bench's armed-skip gate runs them uncarded (else it is inert on those two).
+		frappe.db.set_value(CONV, self.conv, "skip_confirmation", 1, update_modified=False)
+		frappe.db.commit()
+		msg = self._capture_message_sent()
+		self.assertIn("armed macro run: apply changes directly", msg)
+
+	def test_context_line_no_armed_run_when_flag_clear(self):
+		msg = self._capture_message_sent()  # skip_confirmation defaults 0
+		self.assertNotIn("armed macro run", msg)
