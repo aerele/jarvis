@@ -130,12 +130,7 @@
 							theme="green"
 							label="Live"
 						/>
-						<span
-							v-else-if="activation"
-							class="inline-flex h-5 shrink-0 select-none items-center whitespace-nowrap rounded-full bg-surface-violet-1 px-2 text-xs text-ink-violet-1"
-						>
-							Shadow (preview)
-						</span>
+						<ShadowChip v-else-if="activation" label="Shadow (preview)" />
 						<Switch
 							v-if="installation"
 							label="Enabled"
@@ -413,12 +408,28 @@
 							<ListRows />
 						</template>
 						<template #cell="{ column, row, item, align }">
-							<Badge
-								v-if="column.key === 'enabled'"
-								variant="subtle"
-								:theme="row.enabled ? 'green' : 'gray'"
-								:label="row.enabled ? 'Enabled' : 'Disabled'"
-							/>
+							<template v-if="column.key === 'state'">
+								<!-- State precedence, most-actionable first: Blocked > Disabled >
+								     Live > Shadow. `installable` is a last-reconciled STORED flag
+								     (see get_agent_admin_overview), so Blocked reads "as last
+								     reconciled" rather than claiming a live guarantee. -->
+								<Tooltip v-if="!row.installable" :text="blockedReason(row)">
+									<Badge variant="subtle" theme="orange" label="Blocked" />
+								</Tooltip>
+								<Badge
+									v-else-if="!row.enabled"
+									variant="subtle"
+									theme="gray"
+									label="Disabled"
+								/>
+								<Badge
+									v-else-if="row.activation_state === 'live'"
+									variant="subtle"
+									theme="green"
+									label="Live"
+								/>
+								<ShadowChip v-else label="Shadow" />
+							</template>
 							<div
 								v-else-if="column.key === 'run_as_user'"
 								class="truncate text-base"
@@ -495,6 +506,7 @@ import {
 	ListRowItem,
 	Switch,
 	TimePicker,
+	Tooltip,
 	confirmDialog,
 	toast,
 } from "frappe-ui";
@@ -506,6 +518,7 @@ import ActivationPanel from "@/pages/agents/ActivationPanel.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
+import ShadowChip from "@/components/ShadowChip.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import { session } from "@/data/session";
 import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
@@ -537,10 +550,31 @@ const INSTALL_COLUMNS = [
 	// misconfigured row that every dispatch path refuses to run, so it is surfaced
 	// here (as a badge) to give an admin an in-product path to the offending row.
 	{ label: "Runs as", key: "run_as_user", width: 2 },
-	{ label: "Enabled", key: "enabled", width: "7rem" },
+	{ label: "State", key: "state", width: "8rem" },
 	{ label: "Last run", key: "last_run_at", width: "8rem" },
 	{ label: "Sync", key: "sync_status", width: "7rem" },
 ];
+
+// not_installable_reason is a machine enum; humanise it for the admin's Blocked
+// tooltip. Unknown values fall back to a de-underscored form so a newly-added
+// reason still reads rather than showing a raw token.
+const REASON_LABELS = {
+	app_absent_or_ineligible: "Required app is missing or ineligible",
+	permission_slice: "Missing a required permission",
+	configuration_missing: "Configuration is incomplete",
+	record_coverage_insufficient: "Not enough records to run on",
+	source_stale: "Source data is stale",
+	rule_expired: "An activation rule has expired",
+	external_evidence_absent: "Required external evidence is absent",
+	run_truncated_watermark: "A prior run was truncated",
+	unsupported_customisation: "An unsupported customisation blocks it",
+};
+function blockedReason(row) {
+	const r = row.not_installable_reason;
+	const human = r ? REASON_LABELS[r] || r.replace(/_/g, " ") : "";
+	// "as last reconciled": installable is a stored flag, not a live re-check.
+	return human ? `Can't run (as last reconciled): ${human}.` : "Can't run, as last reconciled.";
+}
 
 // ── data ──────────────────────────────────────────────────────────────────────
 const agent = ref(null); // get_agent payload (§8.3)
