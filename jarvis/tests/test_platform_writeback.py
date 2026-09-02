@@ -345,7 +345,7 @@ class TestPP2FalseCleanUnreachable(FrappeTestCase):
 			result_state="partial",
 		)
 		# remove the banner substring entirely
-		banner_marker = "Partial run — "
+		banner_marker = "Partial run - "
 		self.assertIn(banner_marker, html)
 		stripped = html.split(banner_marker)[0] + html.split(banner_marker)[1].split("</div>", 1)[1]
 		self.assertIn('data-result-state="partial"', stripped)

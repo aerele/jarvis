@@ -983,10 +983,10 @@ def _launch_audit(
 	# run-as guard above, and ORDERED AFTER the authorization check for the same
 	# reason it precedes the bundle-configuration check below.
 	if (listing.status or "") != "Published":
+		# #1062 polish: one sentence, one action.
 		frappe.throw(
 			_(
-				"This agent is no longer published ({0}), so it is not deployed to run. "
-				"Uninstall it, or ask an admin to publish it again — nothing was started."
+				"This agent is no longer published ({0}); uninstall it or ask an admin to republish it."
 			).format(listing.status or "unknown")
 		)
 
@@ -1006,7 +1006,7 @@ def _launch_audit(
 			_(
 				"This agent's bundle declares no tools, so the run would be refused at "
 				"every step and could never finish. Reinstall or update the agent, or "
-				"contact support — nothing was started."
+				"contact support: nothing was started."
 			)
 		)
 
@@ -1189,7 +1189,7 @@ def _launch_audit(
 			if is_skill_reviewer(owner):
 				error_msg = _(
 					"This agent is not loaded on your container yet. Open the Agents page, "
-					"click “Apply catalog changes” to push it, then run it again."
+					'click "Apply catalog changes" to push it, then run it again.'
 				)
 			else:
 				error_msg = _(
@@ -1582,7 +1582,7 @@ def _notify_owner(owner: str, row, reason: str | None = None) -> None:
 				),
 				"email_content": (
 					(
-						f"A scheduled agent run was skipped — {reason}. Runs resume next "
+						f"A scheduled agent run was skipped: {reason}. Runs resume next "
 						"month, or ask an admin to raise the monthly agent-run budget in "
 						"Jarvis Settings."
 					)

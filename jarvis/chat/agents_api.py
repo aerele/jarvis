@@ -664,7 +664,7 @@ def install_agent(agent_slug: str) -> dict:
 	# an actionable message instead of letting doc.insert() surface the raw validation
 	# throw ("Run-as user must be an existing, enabled, non-system user").
 	if me in ("Administrator", "Guest"):
-		frappe.throw(_("Log in as a named user, or map a run-as user — agents cannot run as Administrator."))
+		frappe.throw(_("Log in as a named user, or map a run-as user: agents cannot run as Administrator."))
 	if not _user_allowed_for_agent(listing, me):
 		frappe.throw(_("Your roles do not permit installing this agent."), frappe.PermissionError)
 	if listing.status != "Published":
@@ -1103,7 +1103,7 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 		except ValueError as e:
 			frappe.throw(
 				_(
-					"Select which custom apps this run may read before starting it — {0}. "
+					"Select which custom apps this run may read before starting it: {0}. "
 					"Their source code is sent to the configured AI model provider."
 				).format(str(e))
 			)
@@ -1119,11 +1119,9 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	# against. Checked before dispatch; a plain COUNT, identity-agnostic.
 	over, why = _over_run_budget(installation)
 	if over:
+		# #1062 polish: one sentence, one action - an admin can raise it now.
 		frappe.throw(
-			_(
-				"Monthly agent-run budget reached ({0}). Runs resume next month, or an "
-				"admin can raise the budget in Jarvis Settings."
-			).format(why)
+			_("Monthly agent-run budget reached ({0}); an admin can raise it in Jarvis Settings.").format(why)
 		)
 
 	# Fail-closed identity guard: refuse to run an audit AS Administrator / Guest /
@@ -1484,7 +1482,7 @@ def promote_installation(installation: str, justification: str | None = None) ->
 	with redis_lock(f"jarvis_agent_activation:{owner}", timeout_s=30, blocking_timeout_s=10.0) as acquired:
 		if not acquired:
 			frappe.throw(
-				_("Another activation change for this customer is in progress — please retry in a moment.")
+				_("Another activation change for this customer is in progress. Please retry in a moment.")
 			)
 		frappe.db.commit()  # fresh snapshot under the lock (defeats stale REPEATABLE-READ count)
 		doc = frappe.get_doc(INSTALLATION, installation)  # re-read the row under the lock
@@ -1494,12 +1492,13 @@ def promote_installation(installation: str, justification: str | None = None) ->
 		ceiling = _activation_ceiling(owner)
 		live_count = frappe.db.count(INSTALLATION, {"owner": owner, "activation_state": "live"})
 		if live_count >= ceiling:
+			# #1062 polish: one sentence, one action - no UI exists to raise the
+			# ceiling, so don't point at one; demoting a live module is the actual
+			# available action.
 			frappe.throw(
 				_(
-					"Activation budget reached: this customer already has {0} live module(s) and the "
-					"activation ceiling is {1}. The initial budget is a single live module; a Jarvis Admin "
-					"can raise the ceiling to {2} once the reviewer covers a second pack."
-				).format(live_count, ceiling, _ACTIVATION_CEILING_MAX)
+					"Activation budget reached ({0} of {1} live); demote a module before promoting another."
+				).format(live_count, ceiling)
 			)
 
 		doc.activation_state = "live"
@@ -2101,7 +2100,7 @@ def _rate_limit_apply() -> None:
 	me = frappe.session.user
 	key = f"jarvis_apply_agents_rl:{me}"
 	if frappe.cache().get_value(key, expires=True):
-		frappe.throw(_("An apply is already in progress — please wait a moment."))
+		frappe.throw(_("An apply is already in progress. Please wait a moment."))
 	frappe.cache().set_value(key, "1", expires_in_sec=5)
 
 

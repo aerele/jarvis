@@ -237,7 +237,7 @@ class TestPP4ShadowVisibility(FrappeTestCase):
 			"T", [], {"blocker": 0, "warning": 0, "note": 0}, "", result_state="evaluated_clean", shadow=True
 		)
 		self.assertNotIn("No exceptions were found", html)
-		self.assertNotIn("Evaluated — clean coverage", html)
+		self.assertNotIn("Evaluated: clean coverage", html)
 		self.assertIn("Preview (shadow)", html)
 		self.assertIn('data-result-state="shadow"', html)
 
