@@ -540,6 +540,8 @@ import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
 import { renderMarkdown } from "@/markdown";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { parseListField } from "@/lib/parseListField";
+import { categoryTitle } from "@/lib/agentCategory";
 
 const props = defineProps({
 	slug: { type: String, required: true },
@@ -899,34 +901,14 @@ const descriptionHtml = computed(() =>
 );
 const needs = computed(() => {
 	if (!agent.value) return [];
-	const out = [];
-	for (const key of ["tools_required", "min_apps"]) {
-		let v = agent.value[key];
-		if (typeof v === "string" && v.trim()) {
-			try {
-				v = JSON.parse(v);
-			} catch (e) {
-				v = null;
-			}
-		}
-		if (Array.isArray(v)) out.push(...v.map(String));
-	}
-	return out;
+	return ["tools_required", "min_apps"].flatMap((key) => parseListField(agent.value[key]));
 });
-// jarvis#1062 polish: same parse shape as `needs`, its own field/heading -
-// doctypes_required (A12) is a distinct concept (records read, not tools/apps).
-const readsRecords = computed(() => {
-	if (!agent.value) return [];
-	let v = agent.value.doctypes_required;
-	if (typeof v === "string" && v.trim()) {
-		try {
-			v = JSON.parse(v);
-		} catch (e) {
-			v = null;
-		}
-	}
-	return Array.isArray(v) ? v.map(String) : [];
-});
+// jarvis#1062 polish: shares parseListField with `needs`, its own field/
+// heading - doctypes_required (A12) is a distinct concept (records read,
+// not tools/apps).
+const readsRecords = computed(() =>
+	agent.value ? parseListField(agent.value.doctypes_required) : []
+);
 const defaultScheduleText = computed(() => {
 	let s = {};
 	try {
@@ -938,17 +920,6 @@ const defaultScheduleText = computed(() => {
 	if (!freq) return "None - runs on demand.";
 	return s.schedule_enabled ? `On by default · ${freq}` : `Off by default · suggested ${freq}`;
 });
-// jarvis#1062 polish: `agent.category` is already the real label the backend
-// sends (sync_agent_listings maps the registry domain, agent_catalog.py) -
-// this is just the "no category yet" fallback + a defensive prettifier for a
-// raw slug a pre-migrate row might still carry until the next catalog sync.
-function categoryTitle(value) {
-	return String(value || "Other")
-		.split("-")
-		.map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-		.join(" ");
-}
-
 // ── Configure: schedule ───────────────────────────────────────────────────────
 const sched = ref({ enabled: false, frequency: "daily", time: "09:00" });
 const savingSchedule = ref(false);

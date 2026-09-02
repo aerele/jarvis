@@ -276,6 +276,7 @@ import * as agentsApi from "@/api/agents";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { agentsEmptyState, shouldProbeWholeCatalog } from "@/lib/agentsEmptyState";
 import { errHtml } from "@/lib/errors";
+import { categoryTitle } from "@/lib/agentCategory";
 
 const route = useRoute();
 const router = useRouter();
@@ -378,16 +379,6 @@ const categoryOptions = computed(() => {
 // ── display helpers ──────────────────────────────────────────────────────────
 function openAgent(a) {
 	router.push("/agents/" + a.agent_slug);
-}
-// jarvis#1062 polish: `a.category` is already the real label the backend
-// sends (sync_agent_listings maps the registry domain) - this is just the
-// "no category yet" fallback + a defensive prettifier for a raw slug a
-// pre-migrate row might still carry until the next catalog sync.
-function categoryTitle(value) {
-	return String(value || "Other")
-		.split("-")
-		.map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-		.join(" ");
 }
 function logoText(a) {
 	return String(a.title || a.agent_slug || "?")
