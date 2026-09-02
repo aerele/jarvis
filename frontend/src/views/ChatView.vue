@@ -5118,9 +5118,8 @@ function onVisibilityChange() {
 	if (document.hidden) flushReveal();
 }
 const activeTools = ref([]); // [{ id, name, status }] for the in-flight run
-// The live "is the agent working" gating stays on the full activeTools; the customer-facing
-// COUNT + current-tool name exclude internal built-ins so the live tally matches the settled
-// accordion (both count only jarvis__* tools — no 3→2 jump when a built-in finishes).
+// Live COUNT + current-tool name exclude the agent's built-ins so the tally matches the
+// settled accordion (no 3→2 jump); raw activeTools still drives the "is working" gating.
 const visibleActiveTools = computed(() =>
 	activeTools.value.filter((t) => isCustomerFacingTool(t.name))
 );
@@ -5581,8 +5580,7 @@ const activityByAssistant = computed(() => {
 			cur = m.name;
 			if (!map[cur]) map[cur] = [];
 		}
-		// action_outcome rows are receipt chips shown inline, not accordion tool calls;
-		// no-I/O agent built-ins (read/exec/…) would expand to nothing — drop those too.
+		// action_outcome rows show inline as chips; no-I/O agent built-ins expand to nothing — skip both.
 		else if (m.role === "tool" && cur && !m.action_outcome && !shouldHideActivityTool(m))
 			(map[cur] || (map[cur] = [])).push(m);
 	}

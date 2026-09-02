@@ -1,10 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { isCustomerFacingTool, shouldHideActivityTool } from "./activityTools.js";
 
-// A role=tool receipt row as it reaches activityByAssistant (persisted; tool_name has NO prefix).
 const row = (o) => ({ role: "tool", ...o });
 
-// isCustomerFacingTool is for the LIVE stream, whose event names KEEP the jarvis__ prefix.
 describe("isCustomerFacingTool (live event names — prefixed)", () => {
 	it("is true only for a jarvis__-prefixed name", () => {
 		expect(isCustomerFacingTool("jarvis__find_skills")).toBe(true);
@@ -18,8 +16,6 @@ describe("isCustomerFacingTool (live event names — prefixed)", () => {
 	});
 });
 
-// shouldHideActivityTool is for the SETTLED accordion, whose persisted names are prefix-stripped,
-// so it keys off captured I/O: built-ins carry only name+status; jarvis__* tools carry args+result.
 describe("shouldHideActivityTool (settled rows — keyed on I/O)", () => {
 	it("hides an internal built-in (no args, no result) — any status incl. failure", () => {
 		for (const tool_status of ["completed", "running", "error", "failed", null, undefined]) {
