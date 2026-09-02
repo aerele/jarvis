@@ -270,6 +270,23 @@ def record_agent_run(
 		rows_consumed=rows_consumed_val,
 	)
 
+	# STEP TIMELINE (#1062): the run's closing step. Recorded HERE rather than by
+	# the generic per-tool hook in ``jarvis.api`` for two reasons: only this
+	# function knows how many findings actually PERSISTED (invalid rows are dropped
+	# above, so the evaluator's own list would overcount), and the writeback flips
+	# the run off ``running``, so a post-call status-gated resolution would find no
+	# run to narrate. Owner-pinned - this tool runs impersonated as the run-as user.
+	from jarvis.chat.agent_run_steps import record_step
+
+	count = frappe.utils.cint(run_doc.findings_count)
+	record_step(
+		run_doc.name,
+		kind="writeback",
+		label=f"Recorded {count} finding{'' if count == 1 else 's'}",
+		detail=(f"{len(dropped)} row{'' if len(dropped) == 1 else 's'} dropped" if dropped else None),
+		owner=run_doc.owner,
+	)
+
 	return {
 		"run": run_doc.name,
 		"status": run_doc.status,

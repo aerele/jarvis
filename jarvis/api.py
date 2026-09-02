@@ -168,6 +168,7 @@ def _dispatch_from_session(
 	"""
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
+	from jarvis.chat import agent_run_steps
 	from jarvis.tools import _agent_run_ctx, _delegate_capability
 
 	# Expose the caller's session_key to the tool for this dispatch (the LLM
@@ -252,7 +253,31 @@ def _dispatch_from_session(
 			# Resolve the conversation for this session up front so the
 			# confirmation gate can bind a parked write to it.
 			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
-			result = _run_tool(tool, parsed_args, conversation=conv)
+			# STEP TIMELINE (#1062): resolve the running agent run BEFORE the tool
+			# executes. record_agent_run flips the run off ``running`` from inside
+			# the tool, so a status-gated lookup afterwards would find nothing for
+			# the very call that finishes the run. An ordinary chat session resolves
+			# to None here and nothing below does anything.
+			step_run = agent_run_steps.running_run_for_session(session_key)
+			started_ms = time.monotonic()
+			try:
+				result = _run_tool(tool, parsed_args, conversation=conv)
+			except Exception:
+				# A tool that raised past _run_tool's envelope translation is a real
+				# fault; the run still deserves an honest step saying the attempt
+				# happened and failed. The re-raise is untouched.
+				_record_tool_step(step_run, tool, parsed_args, None, ok=False, started_ms=started_ms)
+				raise
+			# Recorded BEFORE the result budget trims the payload, so a step's row
+			# count is the count the tool actually returned, not the truncated one.
+			_record_tool_step(
+				step_run,
+				tool,
+				parsed_args,
+				result.get("data") if isinstance(result, dict) else None,
+				ok=bool(isinstance(result, dict) and result.get("ok")),
+				started_ms=started_ms,
+			)
 			# Agent-boundary model-facing size cap. ONLY on this (agent session)
 			# path - the dashboard builder/desk/external call_tool callers go through
 			# _dispatch_current_user and are deliberately uncapped.
@@ -279,6 +304,48 @@ def _dispatch_from_session(
 		_agent_run_ctx.clear_session_key()
 		_agent_run_ctx.take_armed_by_macro()  # belt: never leak an armed marker across dispatches
 		_agent_run_ctx.take_armed_by_skill()  # belt: same for the approved-skill-run marker
+
+
+#: The findings writeback narrates ITSELF (``record_agent_run`` records a
+#: ``writeback`` step naming the finding count it actually persisted), so the
+#: generic per-tool hook below skips it rather than writing a second row for the
+#: same act.
+_SELF_NARRATING_TOOLS = frozenset({"record_agent_run"})
+
+
+def _record_tool_step(step_run, tool: str, args, data, *, ok: bool, started_ms: float) -> None:
+	"""Append one ``tool`` step to a delegate run's timeline (#1062).
+
+	``step_run`` is the ``{name, owner}`` resolved before dispatch, or None when
+	the caller is not a delegate - in which case this is a no-op, so ordinary
+	chat is untouched. Best-effort throughout: narrating a tool call must never
+	be able to fail it.
+	"""
+	if not step_run:
+		return
+	try:
+		from jarvis.chat import agent_run_steps
+
+		if agent_run_steps.bare_tool(tool) in _SELF_NARRATING_TOOLS:
+			return
+		label, detail = agent_run_steps.humanize_tool_call(tool, args, data if ok else None)
+		agent_run_steps.record_step(
+			step_run.get("name"),
+			kind="tool",
+			tool=tool,
+			label=label,
+			detail=detail,
+			status="ok" if ok else "error",
+			duration_ms=int((time.monotonic() - started_ms) * 1000),
+			owner=step_run.get("owner"),
+		)
+	except Exception:
+		try:
+			frappe.logger("jarvis.agents").warning(
+				f"run-step hook failed for tool {tool}: {frappe.get_traceback()}"
+			)
+		except Exception:
+			pass
 
 
 _STALE_PAIRING_DEDUPE_TTL_S = 3600

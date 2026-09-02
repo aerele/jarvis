@@ -541,6 +541,16 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 		"the edit-history feed of ONE wiki page — a per-document timeline, not a "
 		"collection (the chat equivalent of a form's version history)"
 	),
+	# jarvis#1062: the live step timeline of ONE agent run, rendered inside that
+	# run's own panel. The same shape as get_wiki_graph_history above — a
+	# per-document timeline read whole (capped at RUN_STEPS_CAP, ordered by the
+	# run's own `seq`), with no filter, sort or page contract to migrate. The
+	# browsable agent surfaces are the registered agent_runs / agent_findings /
+	# agent_activity views.
+	"jarvis.chat.agents_api.list_run_steps": (
+		"the step timeline of ONE agent run — a per-document timeline read whole, "
+		"not a filterable document-list view"
+	),
 	"jarvis.chat.triggers_api.activity_stats": (
 		"aggregate counters over Trigger Activity (a stats rollup), not a row "
 		"collection — the browsable feed is the registered trigger_activity view"

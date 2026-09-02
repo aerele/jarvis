@@ -32,6 +32,7 @@ from jarvis.permissions import (
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
 RUN = "Jarvis Agent Run"
+RUN_STEP = "Jarvis Agent Run Step"
 FINDING = "Jarvis Agent Finding"
 ACTIVITY = "Jarvis Agent Activity"
 DASHBOARD = "Jarvis Dashboard"
@@ -2159,6 +2160,59 @@ def list_findings(
 		"page_length": pl,
 		"severity_counts": severity_counts,
 	}
+
+
+#: Hard ceiling on one run's timeline. A run makes tens of tool calls, not
+#: hundreds; the cap exists so a pathological (or looping) run can never make the
+#: SPA's 5s poll expensive. The UI polls the whole list, so there is no cursor.
+RUN_STEPS_CAP = 200
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def list_run_steps(run: str) -> dict:
+	"""One run's STEP TIMELINE, oldest first: ``{steps, count}``.
+
+	Steps are what the bench OBSERVED the run do - the launch dispatch, each
+	``jarvis__*`` tool call the delegate made over its own session bearer, and the
+	findings writeback. They carry shapes, never row contents (see
+	``jarvis.chat.agent_run_steps``), so they are safe to render wherever the run
+	itself is.
+
+	Gated exactly like :func:`list_findings`: the raw ``get_value`` below bypasses
+	permissions, so a run the caller neither owns nor administers returns an EMPTY
+	timeline - identical to an unknown run, never an existence oracle. Ordered by
+	``seq`` (creation is only the tiebreak: two steps can land inside the same
+	second and must still read in the order they happened)."""
+	empty: dict = {"steps": [], "count": 0}
+	if not run:
+		return empty
+	me = frappe.session.user
+	run_row = frappe.db.get_value(RUN, run, ["name", "owner"], as_dict=True)
+	if not run_row:
+		return empty
+	if run_row.owner != me and not has_jarvis_admin_access(me):
+		return empty
+	steps = frappe.get_all(
+		RUN_STEP,
+		filters={"run": run_row.name},
+		fields=[
+			"name",
+			"seq",
+			"kind",
+			"tool",
+			"label",
+			"detail",
+			"status",
+			"duration_ms",
+			"occurred_at",
+			"creation",
+		],
+		order_by="seq asc, creation asc",
+		limit_page_length=RUN_STEPS_CAP,
+		ignore_permissions=True,
+	)
+	return {"steps": steps, "count": len(steps)}
 
 
 @frappe.whitelist()
