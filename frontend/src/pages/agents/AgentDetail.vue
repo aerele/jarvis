@@ -151,6 +151,24 @@
 				<div v-if="installation && !agent.allowed" class="mt-3 text-sm text-ink-gray-5">
 					Your roles do not permit running this agent. Ask your administrator.
 				</div>
+				<!-- jarvis#1062 polish: the same visible-hint treatment for the other
+				     two reasons Run Now can be disabled - a tooltip alone is easy to
+				     miss. -->
+				<div
+					v-else-if="installation && !installation.enabled"
+					class="mt-3 text-sm text-ink-gray-5"
+				>
+					Enable this agent to run it.
+				</div>
+				<div v-else-if="shadowScribeBlocked" class="mt-3 text-sm text-ink-gray-5">
+					Still in shadow preview - promote it to live under Configure first
+				</div>
+				<!-- jarvis#1062 polish: the install-failure toast auto-dismisses in
+				     ~2s - keep the reason visible under the Install button until the
+				     next attempt. -->
+				<div v-if="!installation && installError" class="mt-3 text-sm text-ink-red-4">
+					{{ installError }}
+				</div>
 			</div>
 
 			<TabBar class="shrink-0" :tabs="tabs" :modelValue="tab" @update:modelValue="setTab" />
@@ -170,6 +188,23 @@
 						<div class="mt-2 flex flex-wrap gap-1.5">
 							<code
 								v-for="t in needs"
+								:key="t"
+								class="rounded bg-surface-gray-2 px-1.5 py-0.5 font-mono text-xs text-ink-gray-7"
+							>
+								{{ t }}
+							</code>
+						</div>
+					</div>
+					<!-- jarvis#1062 polish: doctypes_required (A12) rides in get_agent's
+					     payload but was never shown - a customer had no way to see which
+					     records the run-as user must be able to read. -->
+					<div v-if="readsRecords.length" class="mt-8">
+						<div class="text-base font-medium text-ink-gray-9">
+							Reads these records
+						</div>
+						<div class="mt-2 flex flex-wrap gap-1.5">
+							<code
+								v-for="t in readsRecords"
 								:key="t"
 								class="rounded bg-surface-gray-2 px-1.5 py-0.5 font-mono text-xs text-ink-gray-7"
 							>
@@ -663,6 +698,9 @@ watch(tabs, (list) => {
 
 // ── header actions ────────────────────────────────────────────────────────────
 const installing = ref(false);
+// jarvis#1062 polish: the toast auto-dismisses after ~2s, easy to miss - keep
+// a persistent inline echo under the Install button until the next attempt.
+const installError = ref("");
 const canInstall = computed(
 	() => !!(agent.value && agent.value.allowed && agent.value.status === "Published")
 );
@@ -678,6 +716,7 @@ const installTooltip = computed(() => {
 async function install() {
 	if (installing.value || !canInstall.value) return;
 	installing.value = true;
+	installError.value = "";
 	const p = api.installAgent(props.slug);
 	toast.promise(p, {
 		loading: "Installing…",
@@ -687,6 +726,7 @@ async function install() {
 	try {
 		await p;
 	} catch (e) {
+		installError.value = errMsg(e);
 		installing.value = false;
 		return;
 	}
@@ -850,6 +890,20 @@ const needs = computed(() => {
 		if (Array.isArray(v)) out.push(...v.map(String));
 	}
 	return out;
+});
+// jarvis#1062 polish: same parse shape as `needs`, its own field/heading -
+// doctypes_required (A12) is a distinct concept (records read, not tools/apps).
+const readsRecords = computed(() => {
+	if (!agent.value) return [];
+	let v = agent.value.doctypes_required;
+	if (typeof v === "string" && v.trim()) {
+		try {
+			v = JSON.parse(v);
+		} catch (e) {
+			v = null;
+		}
+	}
+	return Array.isArray(v) ? v.map(String) : [];
 });
 const defaultScheduleText = computed(() => {
 	let s = {};
