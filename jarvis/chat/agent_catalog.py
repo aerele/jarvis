@@ -31,6 +31,38 @@ LISTING = "Jarvis Agent Listing"
 _AGENTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents")
 _REGISTRY_PATH = os.path.join(_AGENTS_DIR, "registry.json")
 
+# jarvis#1062 polish: no registry agent declares an explicit ``category`` today
+# (see ``sync_agent_listings`` below) - every listing's Category facet is
+# derived from ``domain``, which is a bare registry code (``ap``, ``hrms-payroll``,
+# ...), not something to show a customer. Map the known codes to real labels;
+# an unrecognised one still reads as English via the title-cased fallback.
+_DOMAIN_CATEGORY_LABELS = {
+	"ap": "Accounts Payable",
+	"ar": "Accounts Receivable",
+	"crm": "CRM",
+	"hrms": "HR and Payroll",
+	"hrms_payroll": "HR and Payroll",
+	"gst": "GST Compliance",
+	"gst_compliance": "GST Compliance",
+	"inventory": "Inventory",
+	"accounting": "Accounting",
+	"close": "Close and Reporting",
+	"india_compliance": "India Compliance",
+	"measurement": "Measurement",
+	"inventory_count": "Inventory Count",
+}
+
+
+def _category_from_domain(domain) -> str:
+	"""A registry ``domain`` code -> a display label for the marketplace's
+	Category facet. Falls back to a readable title-case (underscores as
+	spaces) for a domain outside the known set, rather than leaking the raw
+	registry slug."""
+	key = str(domain or "").strip().lower().replace("-", "_")
+	if not key:
+		return ""
+	return _DOMAIN_CATEGORY_LABELS.get(key) or key.replace("_", " ").title()
+
 
 # --------------------------------------------------------------------------- #
 # registry loading (bundled only — never a network fetch)
@@ -80,7 +112,10 @@ def sync_agent_listings() -> dict:
 			"agent_slug": slug,
 			"title": a.get("title") or slug,
 			"description": a.get("description") or "",
-			"category": a.get("domain") or a.get("category") or "",
+			# jarvis#1062 polish: an explicit registry ``category`` wins if ever
+			# declared; otherwise map ``domain`` to a real label instead of
+			# storing the bare registry code.
+			"category": (a.get("category") or "").strip() or _category_from_domain(a.get("domain")),
 			"nature": (a.get("nature") or "").strip().title() or "Auditor",
 			"delivery": delivery,
 			"version": a.get("version") or "",

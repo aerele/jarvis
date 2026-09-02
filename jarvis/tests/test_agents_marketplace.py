@@ -419,6 +419,34 @@ class TestAgentsMarketplace(unittest.TestCase):
 			self.assertFalse(has_body, f"{slug} (delegate) leaked a skill body into the DB")
 
 	# ------------------------------------------------------------------ #
+	# (d3) jarvis#1062 polish — category derived from domain, mapped to a
+	# real label instead of a bare registry code
+	# ------------------------------------------------------------------ #
+	def test_category_from_domain_uses_the_real_label_map(self):
+		self.assertEqual(agent_catalog._category_from_domain("ap"), "Accounts Payable")
+		self.assertEqual(agent_catalog._category_from_domain("ar"), "Accounts Receivable")
+		self.assertEqual(agent_catalog._category_from_domain("crm"), "CRM")
+		self.assertEqual(agent_catalog._category_from_domain("hrms-payroll"), "HR and Payroll")
+		self.assertEqual(agent_catalog._category_from_domain("gst-compliance"), "GST Compliance")
+		self.assertEqual(agent_catalog._category_from_domain("inventory"), "Inventory")
+		self.assertEqual(agent_catalog._category_from_domain("accounting"), "Accounting")
+		self.assertEqual(agent_catalog._category_from_domain("close"), "Close and Reporting")
+		self.assertEqual(agent_catalog._category_from_domain("india-compliance"), "India Compliance")
+		self.assertEqual(agent_catalog._category_from_domain("measurement"), "Measurement")
+		self.assertEqual(agent_catalog._category_from_domain("inventory-count"), "Inventory Count")
+
+	def test_category_from_domain_falls_back_to_title_case_for_unknown_codes(self):
+		self.assertEqual(agent_catalog._category_from_domain("bank-recon"), "Bank Recon")
+		self.assertEqual(agent_catalog._category_from_domain("helpdesk"), "Helpdesk")
+		self.assertEqual(agent_catalog._category_from_domain(""), "")
+		self.assertEqual(agent_catalog._category_from_domain(None), "")
+
+	def test_sync_agent_listings_writes_the_mapped_category_not_the_raw_domain(self):
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(frappe.db.get_value(LISTING, "close-auditor", "category"), "Close and Reporting")
+		self.assertEqual(frappe.db.get_value(LISTING, "bank-recon-operator", "category"), "Bank Recon")
+
+	# ------------------------------------------------------------------ #
 	# (d2) Phase 0A — delegate agent stub + body-free enablement signal
 	# ------------------------------------------------------------------ #
 	def test_delegate_agent_ships_stub_and_enablement_signal(self):
