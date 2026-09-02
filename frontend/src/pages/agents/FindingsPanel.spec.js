@@ -295,3 +295,23 @@ describe("C3: running-run progress - ticking elapsed time + recent activity", ()
 		expect(apiAgents.listAgentActivityPage.mock.calls.length).toBeGreaterThan(callsAfterMount);
 	});
 });
+
+describe("stopped run explanation (jarvis#1062 polish)", () => {
+	it("shows the error row for a stopped run with a recorded error", async () => {
+		const w = mountPanel(baseRun({ status: "stopped", error: "operator stopped it" }));
+		await flushPromises();
+		expect(w.text()).toContain("operator stopped it");
+	});
+
+	it("falls back to a stopped-specific message when no error was recorded", async () => {
+		const w = mountPanel(baseRun({ status: "stopped", error: "" }));
+		await flushPromises();
+		expect(w.text()).toContain("This run was stopped before it reported findings.");
+	});
+
+	it("does not render the failed-run fallback text for a stopped run", async () => {
+		const w = mountPanel(baseRun({ status: "stopped", error: "" }));
+		await flushPromises();
+		expect(w.text()).not.toContain("This run failed before recording findings.");
+	});
+});

@@ -128,14 +128,20 @@
 				:message="`Partial scan - ${coverageNote}. Treat gaps as unreviewed, not clean.`"
 			/>
 
-			<!-- failed run: surface the error; no findings snapshot was recorded.
-				 x-circle, not Banner's fixed error icon: see the scribe branch above. -->
+			<!-- failed/stopped run: surface the error; no findings snapshot was
+				 recorded. x-circle, not Banner's fixed error icon: see the scribe
+				 branch above. -->
 			<div
-				v-if="run.status === 'failed'"
+				v-if="run.status === 'failed' || run.status === 'stopped'"
 				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-red-1 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
 			>
 				<FeatherIcon name="x-circle" class="size-4 shrink-0" />
-				<span>{{ run.error || "This run failed before recording findings." }}</span>
+				<span>{{
+					run.error ||
+					(run.status === "stopped"
+						? "This run was stopped before it reported findings."
+						: "This run failed before recording findings.")
+				}}</span>
 			</div>
 
 			<!-- state-filter chips (all/open/acknowledged/resolved) -->
@@ -504,6 +510,7 @@ function wikiUrl(slug) {
 // this only ever renders for a run that has already finished (or stopped).
 const emptyText = computed(() => {
 	if (props.run.status === "failed") return "This run recorded no findings.";
+	if (props.run.status === "stopped") return "This run was stopped before it reported findings.";
 	return `No ${stateFilter.value ? stateFilter.value + " " : ""}findings for this run.`;
 });
 
