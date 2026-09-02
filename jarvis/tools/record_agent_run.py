@@ -276,14 +276,16 @@ def record_agent_run(
 	# above, so the evaluator's own list would overcount), and the writeback flips
 	# the run off ``running``, so a post-call status-gated resolution would find no
 	# run to narrate. Owner-pinned - this tool runs impersonated as the run-as user.
-	from jarvis.chat.agent_run_steps import record_step
+	from jarvis.chat.agent_run_steps import plural, record_step
 
 	count = frappe.utils.cint(run_doc.findings_count)
 	record_step(
 		run_doc.name,
 		kind="writeback",
-		label=f"Recorded {count} finding{'' if count == 1 else 's'}",
-		detail=(f"{len(dropped)} row{'' if len(dropped) == 1 else 's'} dropped" if dropped else None),
+		# `plural` is the shared phrasing helper every other step uses, so the
+		# closing step counts things the same way the rest of the timeline does.
+		label=f"Recorded {plural(count, 'finding')}",
+		detail=(f"{plural(len(dropped), 'row')} dropped" if dropped else None),
 		owner=run_doc.owner,
 	)
 

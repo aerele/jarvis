@@ -190,7 +190,12 @@ def _dispatch_from_session(
 			# reach ANY registered tool the run-as user's Frappe roles permit. Fails
 			# closed: a run with no snapshot and no legacy marker is refused outright.
 			# Non-delegate sessions (ordinary chat) resolve to None and are untouched.
-			denial = _delegate_capability.tool_denial(session_key, tool)
+			# ONE run-row read per plugin tool call: the capability contract is
+			# resolved here and handed to both consumers - the gate below and the
+			# #1062 step timeline further down, which needs the run's name, owner and
+			# status. A non-delegate session resolves to None and both are no-ops.
+			cap = _delegate_capability.resolve(session_key)
+			denial = _delegate_capability.tool_denial(session_key, tool, cap=cap)
 			if denial:
 				code = CapabilityDeniedError.__name__
 				hint = _hint_for(code, "")
@@ -253,12 +258,13 @@ def _dispatch_from_session(
 			# Resolve the conversation for this session up front so the
 			# confirmation gate can bind a parked write to it.
 			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
-			# STEP TIMELINE (#1062): resolve the running agent run BEFORE the tool
-			# executes. record_agent_run flips the run off ``running`` from inside
-			# the tool, so a status-gated lookup afterwards would find nothing for
-			# the very call that finishes the run. An ordinary chat session resolves
-			# to None here and nothing below does anything.
-			step_run = agent_run_steps.running_run_for_session(session_key)
+			# STEP TIMELINE (#1062): the run to file this call's step against, taken
+			# from the contract resolved above - BEFORE the tool executes.
+			# record_agent_run flips the run off ``running`` from inside the tool, so
+			# reading its status afterwards would find nothing for the very call that
+			# finishes the run. An ordinary chat session yields None and nothing below
+			# does anything.
+			step_run = agent_run_steps.step_target(cap)
 			started_ms = time.monotonic()
 			try:
 				result = _run_tool(tool, parsed_args, conversation=conv)
@@ -363,6 +369,12 @@ def _record_tool_step(
 		label, detail = agent_run_steps.humanize_tool_call(tool, args, data if ok else None)
 		if not ok:
 			detail = agent_run_steps.error_detail(error_message) or detail
+		elif agent_run_steps.is_pending_confirmation(data):
+			# A gated write returns ok but was only PARKED - the confirmation card is
+			# still sitting in front of a human. Narrating it as done would claim a
+			# write that may never happen, which is the one lie a timeline must not
+			# tell.
+			label, detail = agent_run_steps.pending_confirmation_step(label)
 		agent_run_steps.record_step(
 			step_run.get("name"),
 			kind="tool",

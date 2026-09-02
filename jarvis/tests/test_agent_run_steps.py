@@ -54,7 +54,14 @@ CONVERSATION = "Jarvis Conversation"
 SLUG = "rs-auditor"
 # Two reads plus the writeback pair: enough surface for the dispatch hook tests
 # without widening what a real auditor may do.
-TOOLS_ALLOW = ["jarvis__get_schema", "jarvis__get_list", "jarvis__record_agent_run", "canvas", "message"]
+TOOLS_ALLOW = [
+	"jarvis__get_schema",
+	"jarvis__get_list",
+	"jarvis__update_wiki",  # a GATED write - the parked-confirmation step needs one
+	"jarvis__record_agent_run",
+	"canvas",
+	"message",
+]
 
 
 def _mk_user(email: str, roles=("System Manager",)) -> str:
@@ -236,14 +243,23 @@ class TestRecordStep(FrappeTestCase):
 		with mock.patch.object(frappe, "get_doc", side_effect=RuntimeError("db down")):
 			self.assertIsNone(agent_run_steps.record_step(self.run, kind="note", label="x"))
 
-	def test_running_run_for_session_resolves_only_a_running_run(self):
-		got = agent_run_steps.running_run_for_session(self.key)
+	def test_step_target_reads_the_run_off_the_capability_contract(self):
+		"""The step's run comes from the contract the dispatcher already resolved -
+		that reuse is what keeps a tool call at one run-row read."""
+		cap = _delegate_capability.resolve(self.key)
+		got = agent_run_steps.step_target(cap)
 		self.assertEqual(got["name"], self.run)
 		self.assertEqual(got["owner"], self.owner)
+
+	def test_step_target_ignores_a_run_that_is_no_longer_running(self):
+		"""A bearer replayed after the run finished must not extend its history."""
 		frappe.db.set_value(RUN, self.run, "status", "completed", update_modified=False)
-		self.assertIsNone(agent_run_steps.running_run_for_session(self.key))
-		self.assertIsNone(agent_run_steps.running_run_for_session("not-an-agent-session"))
-		self.assertIsNone(agent_run_steps.running_run_for_session(None))
+		self.assertIsNone(agent_run_steps.step_target(_delegate_capability.resolve(self.key)))
+
+	def test_step_target_of_a_non_delegate_is_none(self):
+		self.assertIsNone(agent_run_steps.step_target(_delegate_capability.resolve("plain-chat")))
+		self.assertIsNone(agent_run_steps.step_target(None))
+		self.assertIsNone(agent_run_steps.step_target({}))
 
 
 # --------------------------------------------------------------------------- #
@@ -266,11 +282,31 @@ class TestHumanizeToolCall(unittest.TestCase):
 		)
 		self.assertEqual(label, "Read Journal Entry JV-0007")
 
-	def test_get_doc_batch_counts_documents(self):
+	def test_get_doc_batch_counts_the_documents_actually_returned(self):
+		"""The REQUESTED count is a wish. A batch that asked for three and was
+		permitted two must say two."""
 		label, _ = agent_run_steps.humanize_tool_call(
-			"get_doc", {"doctype": "ToDo", "names": ["a", "b", "c"]}, {"count": 3}
+			"get_doc",
+			{"doctype": "ToDo", "names": ["a", "b", "c"]},
+			{"doctype": "ToDo", "docs": [{"name": "a"}, {"name": "b"}], "count": 2},
+		)
+		self.assertEqual(label, "Read ToDo, 2 documents")
+
+	def test_get_doc_batch_falls_back_to_the_requested_count(self):
+		"""When the payload exposes no count of its own, the request is the only
+		honest number available."""
+		label, _ = agent_run_steps.humanize_tool_call(
+			"get_doc", {"doctype": "ToDo", "names": ["a", "b", "c"]}, {"ok": True}
 		)
 		self.assertEqual(label, "Read ToDo, 3 documents")
+
+	def test_an_unresolved_batch_claims_no_documents(self):
+		"""THE defect: a failed batch used to report the requested count as though
+		it had read them."""
+		label, _ = agent_run_steps.humanize_tool_call(
+			"get_doc", {"doctype": "ToDo", "names": ["a", "b", "c"]}, None
+		)
+		self.assertEqual(label, "Looked up ToDo")
 
 	def test_run_report_names_the_report_and_counts_result_rows(self):
 		label, detail = agent_run_steps.humanize_tool_call(
@@ -292,11 +328,12 @@ class TestHumanizeToolCall(unittest.TestCase):
 		)
 		self.assertEqual(label, "Checked balance for Debtors - AB")
 
-	def test_record_agent_run_counts_the_findings(self):
-		label, _ = agent_run_steps.humanize_tool_call(
-			"jarvis__record_agent_run", {"findings": [{}, {}]}, {"findings_count": 2}
-		)
-		self.assertEqual(label, "Recorded 2 findings")
+	def test_plural_is_the_one_way_a_count_is_phrased(self):
+		"""The writeback step builds its own label from this helper, so the closing
+		step counts things exactly the way every other step does."""
+		self.assertEqual(agent_run_steps.plural(0, "finding"), "0 findings")
+		self.assertEqual(agent_run_steps.plural(1, "finding"), "1 finding")
+		self.assertEqual(agent_run_steps.plural(2, "finding"), "2 findings")
 
 	def test_save_agent_dashboard_has_fixed_copy(self):
 		label, _ = agent_run_steps.humanize_tool_call("save_agent_dashboard", {}, {"dashboard": "D-1"})
@@ -531,6 +568,78 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 		self.assertFalse(res["ok"], res)
 		self.assertEqual(res["error"]["code"], "CapabilityDeniedError")
 		self.assertEqual(_steps(self.run), [])
+
+	def test_a_delegate_tool_call_reads_the_run_row_exactly_once(self):
+		"""The capability gate and the timeline both need the run row. They share
+		ONE read - this is the hot path of every plugin tool call, and it used to
+		fetch the same row twice."""
+		real_get_value = frappe.db.get_value
+		run_reads = []
+
+		def counting(doctype, *a, **kw):
+			if doctype == RUN:
+				run_reads.append(a[0] if a else kw.get("filters"))
+			return real_get_value(doctype, *a, **kw)
+
+		with mock.patch.object(frappe.db, "get_value", side_effect=counting):
+			res = self._dispatch(self.key, "get_schema", {"doctype": "ToDo"})
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(len(run_reads), 1, run_reads)
+		self.assertEqual(len(_steps(self.run)), 1)
+
+	def test_an_ordinary_chat_session_costs_one_lookup_and_no_more(self):
+		"""The control: non-agent chat is almost all of this endpoint's traffic. It
+		pays the single lookup that discovers there is no delegate run, and nothing
+		for the timeline on top of it."""
+		real_get_value = frappe.db.get_value
+		run_reads = []
+
+		def counting(doctype, *a, **kw):
+			if doctype == RUN:
+				run_reads.append(1)
+			return real_get_value(doctype, *a, **kw)
+
+		with mock.patch.object(frappe.db, "get_value", side_effect=counting):
+			res = self._dispatch("chat-session-with-no-agent-run", "get_schema", {"doctype": "ToDo"})
+		self.assertTrue(res["ok"], res)
+		# one lookup to discover there is no delegate run, and nothing more
+		self.assertEqual(len(run_reads), 1, run_reads)
+
+	def test_a_parked_gated_write_reads_as_a_proposal_not_an_act(self):
+		"""A gated write returns ok but only PARKS a confirmation card. Narrating it
+		as done would claim a write that may never happen."""
+		with mock.patch.object(
+			api,
+			"_run_tool",
+			return_value={"ok": True, "data": {"status": "pending_confirmation", "token": "t"}},
+		):
+			res = self._dispatch(self.key, "update_wiki", {"slug": "cash-flow"})
+		self.assertTrue(res["ok"], res)
+		row = _steps(self.run)[0]
+		self.assertEqual(row.kind, "tool")
+		self.assertEqual(row.status, "ok")
+		self.assertEqual(row.label, "Proposed Update Wiki, awaiting confirmation")
+		self.assertEqual(row.detail, "waiting for a human to confirm")
+
+	def test_the_writeback_step_reports_the_count_that_persisted(self):
+		"""The real writeback path (not the humanize table it was moved out of):
+		record_agent_run writes its own step, phrased with the shared `plural`."""
+		from jarvis.tools import record_agent_run as rar
+
+		run_doc = frappe.get_doc(RUN, self.run)
+		run_doc.findings_count = 3
+		run_doc.blocker_count = 0
+		with mock.patch("jarvis.chat.agent_runs.record_delegate_run", return_value=run_doc):
+			_agent_run_ctx.set_session_key(self.key)
+			try:
+				rar.record_agent_run(findings=[], coverage={})
+			finally:
+				_agent_run_ctx.clear_session_key()
+		rows = _steps(self.run)
+		self.assertEqual(len(rows), 1, rows)
+		self.assertEqual(rows[0].kind, "writeback")
+		self.assertEqual(rows[0].label, "Recorded 3 findings")
+		self.assertEqual(rows[0].owner, self.run_as)
 
 	def test_a_broken_step_hook_never_breaks_the_tool_call(self):
 		with mock.patch.object(agent_run_steps, "record_step", side_effect=RuntimeError("nope")):

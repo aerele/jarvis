@@ -38,6 +38,13 @@ DETAIL_MAX = 500
 #: enough to paste a traceback or a payload into the customer's view.
 ERROR_DETAIL_MAX = 300
 
+#: A parked write (``_run_tool`` returns ok with ``data.status ==
+#: "pending_confirmation"``) has not happened yet - a human still has to press
+#: the button. Narrating it as a completed action would be a lie, and the most
+#: consequential kind: the timeline would claim a write that may never occur.
+PENDING_CONFIRMATION_STATUS = "pending_confirmation"
+PENDING_CONFIRMATION_DETAIL = "waiting for a human to confirm"
+
 #: Bench-internal bookkeeping DocTypes an agent reads to orient itself before it
 #: touches any ERP data. Their real names are implementation vocabulary the
 #: customer has never seen and their row names are opaque hashes, so a step names
@@ -165,25 +172,24 @@ def run_owner(run_name: str) -> str | None:
 		return None
 
 
-def running_run_for_session(session_key: str | None) -> dict | None:
-	"""``{name, owner}`` of the RUNNING agent run bound to ``session_key``, or None.
+def step_target(cap) -> dict | None:
+	"""``{name, owner}`` of the run a step should be filed against, or None.
 
-	The same resolution ``record_agent_run`` uses: the run is found from the
-	CALLER's opaque session bearer, never from anything the model could author,
-	so a delegate can only ever narrate its own run. An ordinary chat session
-	resolves to None and the caller does nothing."""
-	key = (session_key or "").strip()
-	if not key:
+	``cap`` is the delegate capability contract ``_delegate_capability.resolve``
+	already produced for this dispatch - the run is resolved there from the
+	CALLER's opaque session bearer, never from anything the model could author, so
+	a delegate can only ever narrate its own run. Reusing that result is what keeps
+	a plugin tool call at ONE run-row read instead of two.
+
+	None (do nothing) for an ordinary chat session, and equally for a run that is
+	no longer ``running``: a bearer replayed after the run finished must not be
+	able to append to its history."""
+	if not isinstance(cap, dict):
 		return None
-	try:
-		return frappe.db.get_value(
-			RUN,
-			{"session_key": key, "status": "running"},
-			["name", "owner"],
-			as_dict=True,
-		)
-	except Exception:
+	if cap.get("status") != "running":
 		return None
+	name = cap.get("run")
+	return {"name": name, "owner": cap.get("owner")} if name else None
 
 
 # --------------------------------------------------------------------------- #
@@ -204,7 +210,10 @@ def _n_rows(result) -> int | None:
 	return None
 
 
-def _plural(n: int, word: str) -> str:
+def plural(n: int, word: str) -> str:
+	"""``1 finding`` / ``3 findings``. Public because the writeback step in
+	``jarvis.tools.record_agent_run`` builds its own label and must phrase a count
+	exactly the way every other step does."""
 	return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
@@ -239,6 +248,19 @@ def _is_single(doctype: str) -> bool:
 		return False
 
 
+def is_pending_confirmation(data) -> bool:
+	"""True when a tool returned OK but only PARKED a gated write for a human."""
+	return isinstance(data, dict) and data.get("status") == PENDING_CONFIRMATION_STATUS
+
+
+def pending_confirmation_step(action: str) -> tuple[str, str]:
+	"""``(label, detail)`` for a parked write: it was proposed, not done."""
+	return (
+		_clip(f"Proposed {action}, awaiting confirmation", LABEL_MAX),
+		PENDING_CONFIRMATION_DETAIL,
+	)
+
+
 def error_detail(message) -> str:
 	"""The FIRST line of a tool's error message, clipped to
 	:data:`ERROR_DETAIL_MAX` - what failed, without a traceback or a payload."""
@@ -267,7 +289,13 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 
 	The copy is deliberately about SHAPES - the DocType read, the report run, how
 	many rows came back. It never quotes a value out of the payload, so a step is
-	as safe to render as the run itself."""
+	as safe to render as the run itself.
+
+	There is deliberately NO ``record_agent_run`` case: the writeback narrates
+	itself from inside the tool (only it knows how many findings survived
+	validation), and ``jarvis.api._SELF_NARRATING_TOOLS`` short-circuits before
+	reaching here, so a case for it could only ever be dead code that disagrees
+	with the row actually written."""
 	name = bare_tool(tool)
 	args = args if isinstance(args, dict) else {}
 	label = ""
@@ -282,9 +310,9 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 			# the label as the plain sentence the customer reads.
 			label = internal
 			if n is not None:
-				detail = _plural(n, "row")
+				detail = plural(n, "row")
 		else:
-			label = f"Read {doctype}" + (f", {_plural(n, 'row')}" if n is not None else "")
+			label = f"Read {doctype}" + (f", {plural(n, 'row')}" if n is not None else "")
 	elif name == "get_doc":
 		doctype = args.get("doctype") or "document"
 		target = args.get("name")
@@ -297,9 +325,15 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 			# Never the record name here either: an internal row's name is an opaque
 			# hash that means nothing to the customer and states nothing true.
 			label = internal
-		elif not target and isinstance(args.get("names"), list):
-			n = len(args["names"])
-			label = f"Read {doctype}, {_plural(n, 'document')}"
+		elif not target and isinstance(args.get("names"), list) and resolved:
+			# The REQUESTED count is a wish, not an outcome: a batch that asked for
+			# five and was permitted three must not read "Read ToDo, 5 documents".
+			# Prefer what actually came back; fall back to the request only when the
+			# payload exposes no count of its own.
+			n = _n_rows(result)
+			if n is None:
+				n = len(args["names"])
+			label = f"Read {doctype}, {plural(n, 'document')}"
 		elif _is_single(doctype):
 			# A Single's name IS its doctype - "Read Stock Settings", never twice.
 			label = f"Read {doctype}"
@@ -315,7 +349,7 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 		label = f"Ran report {args.get('report_name') or ''}".strip()
 		n = _n_rows(result)
 		if n is not None:
-			detail = _plural(n, "row")
+			detail = plural(n, "row")
 	elif name == "query":
 		doctype = _query_doctype(args)
 		internal = internal_doctype_label(doctype)
@@ -325,15 +359,10 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 			label = f"Queried {doctype}".strip() if doctype else "Ran a query"
 		n = _n_rows(result)
 		if n is not None:
-			detail = _plural(n, "row")
+			detail = plural(n, "row")
 	elif name == "get_balance_on":
 		account = args.get("account") or args.get("party") or ""
 		label = f"Checked balance for {account}".strip() if account else "Checked a balance"
-	elif name == "record_agent_run":
-		n = _n_rows(args.get("findings"))
-		if n is None and isinstance(result, dict):
-			n = result.get("findings_count")
-		label = f"Recorded {_plural(int(n), 'finding')}" if isinstance(n, int) else "Recorded findings"
 	elif name == "save_agent_dashboard":
 		label = "Saved dashboard"
 	else:

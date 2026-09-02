@@ -135,7 +135,7 @@ const rows = computed(() => {
 		const prev = out[out.length - 1];
 		if (prev && sameStep(prev, s) && withinWindow(prev.last_at, s)) {
 			prev.repeats += 1;
-			prev.duration_ms = (Number(prev.duration_ms) || 0) + (Number(s.duration_ms) || 0);
+			prev.duration_ms = sumDurations(prev.duration_ms, s.duration_ms);
 			prev.last_at = stepTime(s);
 			prev.occurred_at = s.occurred_at;
 			prev.creation = s.creation;
@@ -151,6 +151,12 @@ const countLabel = computed(() =>
 	props.steps.length === 1 ? "1 step" : `${props.steps.length} steps`
 );
 
+// Two steps that both recorded NO duration must stay "no duration", not become a
+// measured 0 - the same distinction durationLabel keeps.
+function sumDurations(a, b) {
+	if (a == null && b == null) return null;
+	return (Number(a) || 0) + (Number(b) || 0);
+}
 function sameStep(a, b) {
 	return (
 		(a.tool || "") === (b.tool || "") &&
@@ -184,9 +190,14 @@ function stepTime(s) {
 }
 // Sub-second steps are the common case, so ms below a second and one decimal
 // above it - never a bare "0s" that reads as "did not happen".
+//
+// A measured 0 is DATA (a step that completed inside the timer's resolution) and
+// renders "0ms"; only a missing duration renders nothing. Testing truthiness
+// conflated the two and silently dropped the fastest steps' timing.
 function durationLabel(s) {
+	if (s.duration_ms == null || s.duration_ms === "") return "";
 	const ms = Number(s.duration_ms);
-	if (!ms || isNaN(ms) || ms < 0) return "";
+	if (isNaN(ms) || ms < 0) return "";
 	return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 </script>

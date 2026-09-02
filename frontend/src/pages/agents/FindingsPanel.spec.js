@@ -448,6 +448,29 @@ describe("C3c: consecutive identical steps collapse into one row", () => {
 		expect(w.text()).toContain("no permission to read Sales Invoice");
 	});
 
+	it("renders a measured 0ms rather than dropping it, but nothing for a missing one", async () => {
+		apiAgents.listRunSteps.mockResolvedValue({
+			steps: [
+				{ ...STEPS[1], name: "Z1", duration_ms: 0, occurred_at: "2026-09-01 10:00:00" },
+				{
+					...STEPS[0],
+					name: "Z2",
+					label: "Dispatched to the agent",
+					duration_ms: null,
+					occurred_at: "2026-09-01 10:00:20",
+				},
+			],
+			count: 2,
+		});
+		const w = mountPanel(baseRun({ status: "running" }));
+		await flushPromises();
+		// a step that finished inside the timer's resolution still reports a time
+		expect(w.text()).toContain("0ms");
+		// ...while a step that recorded none reports nothing at all
+		expect(w.text()).not.toContain("nullms");
+		expect(w.text()).not.toContain("NaN");
+	});
+
 	it("marks only the last COLLAPSED row as current", async () => {
 		apiAgents.listRunSteps.mockResolvedValue({ steps: repeated(3), count: 3 });
 		const w = mountPanel(baseRun({ status: "running" }));
