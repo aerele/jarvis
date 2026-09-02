@@ -80,17 +80,22 @@
 			</div>
 			<span v-if="!userDraft.length" class="text-sm text-ink-gray-4">No people</span>
 		</div>
-		<!-- focusin (which bubbles, unlike focus) and a click both prime the menu, so
-		     opening the picker shows people straight away instead of an empty box that
-		     only fills once you guess a letter. Handled on a wrapper rather than by
-		     giving JvCombo a new event, so the shared component is untouched. -->
+		<!-- The SAME frappe-ui Autocomplete as the roles picker above, so the two
+		     halves of one statement look and behave alike; its popover is portaled
+		     (reka PopoverPortal) with a solid bg-surface-modal, so it cannot be
+		     clipped by this section's grid track or read through to the copy below.
+		     Remote-backed: @update:query drives a debounced search_users call and
+		     :options is re-fed from the response. focusin (which bubbles, unlike
+		     focus) and click prime it with the empty query on open, so the first 20
+		     people are there instead of an empty box that only fills once you guess
+		     a letter. -->
 		<div class="mt-2 w-72" @focusin="primeUserMenu" @click="primeUserMenu">
-			<JvCombo
-				:modelValue="userQuery"
+			<Autocomplete
 				:options="userOptions"
-				allow-custom
-				placeholder="Search people…"
-				@update:modelValue="onUserPick"
+				:modelValue="null"
+				placeholder="Add a person…"
+				@update:query="onUserQuery"
+				@update:modelValue="(opt) => opt && addUser(opt.value)"
 			/>
 		</div>
 
@@ -127,7 +132,6 @@
 <script setup>
 import { computed, ref, watch, onBeforeUnmount } from "vue";
 import { Autocomplete, Button, toast } from "frappe-ui";
-import JvCombo from "@/components/JvCombo.vue";
 import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
 import { errHtml } from "@/lib/errors";
@@ -244,21 +248,24 @@ async function runSearch(q) {
 		if (seq === searchSeq) userResults.value = [];
 	}
 }
-function onUserPick(v) {
-	const value = v || "";
-	// JvCombo in allow-custom mode emits both keystrokes and the chosen option, so
-	// a value matching a fetched user IS the selection.
-	if (userResults.value.some((u) => u.name === value)) {
-		if (!userDraft.value.includes(value)) userDraft.value = [...userDraft.value, value];
-		userQuery.value = "";
-		userResults.value = [];
-		userMenuPrimed.value = false; // reopening should offer people again
-		return;
-	}
-	userQuery.value = value;
+// Autocomplete owns its own search box and reports what was typed; selection is a
+// separate event, so unlike the previous free-text combobox there is no need to
+// guess whether a value is a keystroke or a pick.
+function onUserQuery(q) {
+	userQuery.value = q || "";
 	userMenuPrimed.value = true; // typing owns the menu from here
 	clearTimeout(searchTimer);
-	searchTimer = setTimeout(() => runSearch(value), 200);
+	searchTimer = setTimeout(() => runSearch(userQuery.value), 200);
+}
+
+function addUser(value) {
+	if (!value) return;
+	if (!userDraft.value.includes(value)) userDraft.value = [...userDraft.value, value];
+	// Selected people drop out of userOptions, so refetch on the next open rather
+	// than showing a menu one entry short of what the server would return.
+	userQuery.value = "";
+	userResults.value = [];
+	userMenuPrimed.value = false;
 }
 function removeUser(u) {
 	userDraft.value = userDraft.value.filter((x) => x !== u);
@@ -346,5 +353,14 @@ function reset() {
 	userDraft.value = [...savedUsers.value];
 }
 
-defineExpose({ dirty, roleDraft, userDraft, pending, onUserPick, userOptions, primeUserMenu });
+defineExpose({
+	dirty,
+	roleDraft,
+	userDraft,
+	pending,
+	userOptions,
+	primeUserMenu,
+	onUserQuery,
+	addUser,
+});
 </script>
