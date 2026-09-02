@@ -1,17 +1,35 @@
-import { describe, it, expect, vi } from "vitest";
-import { mount } from "@vue/test-utils";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { mount, flushPromises } from "@vue/test-utils";
 
 /**
- * jarvis#1062 polish - ConfigForm.vue's empty-configuration state used to say
- * "No configuration set yet - add keys under Advanced (JSON)." with no hint
- * of what a key actually does. Replaced with an explanation plus a compact
- * reference of the settings the run path really reads (verified against
- * agent_scope.py's _resolve and the set_config docstring in agents_api.py) -
- * and the Advanced (JSON) helper now shows a worked example instead of a
- * vague "arrays/objects live here".
+ * jarvis#1062 owner feedback: the code-key reference list (no inputs) was not
+ * user friendly. ConfigForm.vue now renders a REAL form for the known
+ * engagement settings (CONFIG_FIELD_SET, @/lib/agentConfigFields) - link
+ * pickers for Company/Fiscal year, a date pair, number inputs, a select -
+ * always rendered, with the merge semantics unchanged: known fields win on
+ * matching keys, an unrecognised key survives untouched in Advanced (JSON),
+ * and an empty field means the key is absent from the saved config.
  */
 
+const api = vi.hoisted(() => ({ searchLink: vi.fn().mockResolvedValue([]) }));
+vi.mock("@/api", () => api);
+
 vi.mock("frappe-ui", () => ({
+	Autocomplete: {
+		name: "Autocomplete",
+		props: ["options", "modelValue", "placeholder"],
+		emits: ["update:query", "update:modelValue"],
+		template: `<div>
+			<input :placeholder="placeholder" @input="$emit('update:query', $event.target.value)" />
+			<button
+				v-for="o in options"
+				:key="o.value"
+				:data-option="o.value"
+				type="button"
+				@click="$emit('update:modelValue', o)"
+			>{{ o.label }}</button>
+		</div>`,
+	},
 	Button: {
 		name: "Button",
 		props: ["label", "loading"],
@@ -25,15 +43,34 @@ vi.mock("frappe-ui", () => ({
 	},
 	FormControl: {
 		name: "FormControl",
-		props: ["modelValue", "type", "label"],
+		props: ["modelValue", "type", "label", "options", "description"],
 		emits: ["update:modelValue"],
-		template: `<textarea v-if="type === 'textarea'" :data-label="label" :value="modelValue" @input="$emit('update:modelValue', $event.target.value)" /><input v-else :data-label="label" :value="modelValue" @input="$emit('update:modelValue', $event.target.value)" />`,
-	},
-	Switch: {
-		name: "Switch",
-		props: ["modelValue", "label"],
-		emits: ["update:modelValue"],
-		template: `<button :data-label="label" @click="$emit('update:modelValue', !modelValue)">{{ label }}</button>`,
+		template: `<div>
+			<span class="fc-label">{{ label }}</span>
+			<select
+				v-if="type === 'select'"
+				:data-label="label"
+				:value="modelValue"
+				@change="$emit('update:modelValue', $event.target.value)"
+			>
+				<option v-for="o in options" :key="o.value" :value="o.value">{{ o.label }}</option>
+			</select>
+			<textarea
+				v-else-if="type === 'textarea'"
+				:data-label="label"
+				:value="modelValue"
+				@input="$emit('update:modelValue', $event.target.value)"
+			/>
+			<input
+				v-else
+				:data-label="label"
+				:type="type"
+				:value="modelValue"
+				@input="$emit('update:modelValue', $event.target.value)"
+			/>
+			<slot name="suffix" />
+			<p v-if="description">{{ description }}</p>
+		</div>`,
 	},
 }));
 
@@ -43,78 +80,140 @@ function mountForm(config = {}, extraProps = {}) {
 	return mount(ConfigForm, { props: { config, saving: false, ...extraProps } });
 }
 
-describe("empty state: explanation + reference list", () => {
-	it("shows the explanation instead of the old vague sentence", () => {
+function field(w, label) {
+	return w.find(`[data-label="${label}"]`);
+}
+
+beforeEach(() => {
+	vi.clearAllMocks();
+	api.searchLink.mockResolvedValue([]);
+});
+
+describe("the known-settings form always renders, config empty or not", () => {
+	it("renders every field with an empty config", () => {
 		const w = mountForm({});
 		expect(w.text()).toContain(
-			"Engagement settings this agent reads when it runs. Leave a setting empty to use the default."
+			"Settings this agent reads when it runs. Leave a field empty to use the default."
 		);
-		expect(w.text()).not.toContain("No configuration set yet");
+		expect(w.text()).toContain("Company");
+		expect(w.text()).toContain("Fiscal year");
+		expect(w.text()).toContain("Period from");
+		expect(w.text()).toContain("Period to");
+		expect(w.text()).toContain("Materiality benchmark amount");
+		expect(w.text()).toContain("Materiality percentage");
+		expect(w.text()).toContain("Engagement risk level");
+		expect(w.text()).toContain("Rounding step");
+		// the old code-key reference list (a <code> chip per key) is gone
+		expect(w.find("code").exists()).toBe(false);
 	});
 
-	it("lists every config key the run path actually reads, with its default/description", () => {
+	it("shows each field's help text", () => {
 		const w = mountForm({});
-		const text = w.text();
-		// company / fiscal_year / from_date / to_date (agent_scope.py _resolve)
-		expect(text).toContain("company");
-		expect(text).toContain("Company to audit; default: your default company");
-		expect(text).toContain("fiscal_year");
-		expect(text).toContain("Fiscal year to cover; default: the current one");
-		expect(text).toContain("from_date / to_date");
-		expect(text).toContain("Explicit period; overrides fiscal_year");
-		// benchmark_value / percentage / engagement_risk_level / rounding_step
-		// (set_config docstring, agents_api.py)
-		expect(text).toContain("benchmark_value / percentage");
-		expect(text).toContain("Materiality");
-		expect(text).toContain("engagement_risk_level");
-		expect(text).toContain("low / medium / high");
-		expect(text).toContain("rounding_step");
-		expect(text).toContain("Round-number plug detection step");
-	});
-
-	it("does not show the reference list once a real config value exists", () => {
-		const w = mountForm({ company: "Acme Ltd" });
-		expect(w.text()).not.toContain("Engagement settings this agent reads when it runs");
+		expect(w.text()).toContain("Defaults to your default company");
+		expect(w.text()).toContain("Defaults to the current fiscal year");
+		expect(w.text()).toContain("Optional; overrides the fiscal year");
+		expect(w.text()).toContain("Used to judge which differences matter");
+		expect(w.text()).toContain(
+			"Auditors report checks as not evaluable when materiality is unset"
+		);
+		expect(w.text()).toContain("Step used to detect round-number plugs");
 	});
 });
 
-describe("Advanced (JSON) helper text", () => {
-	it("shows a worked example instead of the old generic sentence", () => {
-		const w = mountForm({});
-		expect(w.text()).toContain(
-			'Enter values as JSON, for example {"company": "Acme Ltd", "benchmark_value": 1000000, "percentage": 5}. Form fields above win on matching keys.'
-		);
-	});
-});
-
-describe("existing ConfigForm behaviour is unchanged", () => {
-	it("seeds scalar fields as form controls and complex values into Advanced", () => {
+describe("existing values pre-fill every field", () => {
+	it("seeds the form from the installation's current config", () => {
 		const w = mountForm({
 			company: "Acme Ltd",
-			enabled_flag: true,
+			fiscal_year: "2026",
+			from_date: "2026-04-01",
+			to_date: "2027-03-31",
+			benchmark_value: 1000000,
+			percentage: 5,
+			engagement_risk_level: "medium",
 			rounding_step: 100,
-			nested: { a: 1 },
 		});
-		expect(w.find('input[data-label="Company"]').exists()).toBe(true);
-		expect(w.find('[data-label="Enabled Flag"]').exists()).toBe(true);
-		expect(w.find('input[data-label="Rounding Step"]').exists()).toBe(true);
-		const textarea = w.find("textarea");
-		expect(textarea.exists()).toBe(true);
-		expect(JSON.parse(textarea.element.value)).toEqual({ nested: { a: 1 } });
+		expect(field(w, "Period from").element.value).toBe("2026-04-01");
+		expect(field(w, "Period to").element.value).toBe("2027-03-31");
+		expect(field(w, "Materiality benchmark amount").element.value).toBe("1000000");
+		expect(field(w, "Materiality percentage").element.value).toBe("5");
+		expect(field(w, "Engagement risk level").element.value).toBe("medium");
+		expect(field(w, "Rounding step").element.value).toBe("100");
+		// Company/Fiscal year (Autocomplete) show the current value as the picked option
+		expect(w.text()).toContain("Acme Ltd");
 	});
+});
 
-	it("merges form fields over the advanced JSON on save, form fields winning", async () => {
-		const w = mountForm({ company: "Acme Ltd" });
-		await w.find('input[data-label="Company"]').setValue("New Co");
-		await w.find('[data-label="Save configuration"]').trigger("click");
-		expect(w.emitted("save")[0][0]).toEqual({ company: "New Co" });
-	});
-
-	it("rejects invalid Advanced JSON without emitting save", async () => {
+describe("saving produces the right JSON", () => {
+	it("typing values into every field and saving merges them", async () => {
 		const w = mountForm({});
-		await w.find("textarea").setValue("{not json");
+		await field(w, "Period from").setValue("2026-04-01");
+		await field(w, "Period to").setValue("2027-03-31");
+		await field(w, "Materiality benchmark amount").setValue("1000000");
+		await field(w, "Materiality percentage").setValue("5");
+		await field(w, "Engagement risk level").setValue("high");
+		await field(w, "Rounding step").setValue("100");
 		await w.find('[data-label="Save configuration"]').trigger("click");
-		expect(w.emitted("save")).toBeUndefined();
-		expect(w.find(".error").text()).toContain("Advanced JSON is not valid");
+
+		expect(w.emitted("save")[0][0]).toEqual({
+			from_date: "2026-04-01",
+			to_date: "2027-03-31",
+			benchmark_value: 1000000,
+			percentage: 5,
+			engagement_risk_level: "high",
+			rounding_step: 100,
+		});
+	});
+
+	it("picking a Company/Fiscal year option saves the picked value", async () => {
+		api.searchLink.mockResolvedValue([{ value: "Acme Ltd" }]);
+		const w = mountForm({});
+		// primes on focus/click, per-field Autocomplete
+		const companyBox = w.findAll("input[placeholder^='Search']")[0];
+		await companyBox.trigger("focusin");
+		await flushPromises();
+		const pick = w.find('button[data-option="Acme Ltd"]');
+		expect(pick.exists()).toBe(true);
+		await pick.trigger("click");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({ company: "Acme Ltd" });
+	});
+});
+
+describe("clearing a field drops its key", () => {
+	it("clearing a populated field omits it from the saved config", async () => {
+		const w = mountForm({ rounding_step: 100, percentage: 5 });
+		await field(w, "Rounding step").setValue("");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		const saved = w.emitted("save")[0][0];
+		expect(saved).not.toHaveProperty("rounding_step");
+		expect(saved.percentage).toBe(5);
+	});
+
+	it("re-picking Company to a different value saves the new one, not a stale key", async () => {
+		api.searchLink.mockResolvedValue([{ value: "Other Co" }]);
+		const w = mountForm({ company: "Acme Ltd" });
+		expect(w.text()).toContain("Acme Ltd");
+		const companyBox = w.findAll("input[placeholder^='Search']")[0];
+		await companyBox.trigger("focusin");
+		await flushPromises();
+		await w.find('button[data-option="Other Co"]').trigger("click");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({ company: "Other Co" });
+	});
+});
+
+describe("an unknown config key survives untouched in Advanced (JSON)", () => {
+	it("seeds an unrecognised key into Advanced, not a form field", () => {
+		const w = mountForm({ company: "Acme Ltd", custom_flag: true, nested: { a: 1 } });
+		const textarea = w.find("textarea");
+		const advanced = JSON.parse(textarea.element.value);
+		expect(advanced).toEqual({ custom_flag: true, nested: { a: 1 } });
+	});
+
+	it("keeps the unknown key on save alongside the known fields", async () => {
+		const w = mountForm({ custom_flag: true });
+		await field(w, "Rounding step").setValue("50");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({ custom_flag: true, rounding_step: 50 });
 	});
 });
