@@ -85,16 +85,16 @@ DISPATCH_LOCK_WAIT_S = 5.0
 # admin had to notice and narrow it. Now nothing is reachable until an admin says
 # who may reach it.
 #
-# The one intentional carve-out is the LEGACY leg of ``build_agent_push_payload``
-# (``legacy_empty_allows``): an install that works TODAY must keep working after
-# the upgrade even if the grandfather patch has not run yet.
+# There is no carve-out: every gate, including the container-push roster, asks
+# this one predicate. Existing installs survive the upgrade through the
+# ``v2_18_agent_access_grandfather`` patch, which runs during migrate before
+# anything can apply.
 def _is_allowed(
 	allowed_roles,
 	allowed_users,
 	user: str,
 	user_roles: set[str] | None = None,
 	is_admin: bool | None = None,
-	legacy_empty_allows: bool = False,
 ) -> bool:
 	"""The ONE access predicate, pure over its inputs.
 
@@ -103,9 +103,9 @@ def _is_allowed(
 	this, so the flag a user is shown and the gate they hit can never disagree —
 	they used to be two hand-kept copies of the same boolean expression.
 
-	``legacy_empty_allows`` restores the PRE-#1062 reading of an empty pair
-	("no restriction recorded" == everyone), and exists for exactly one caller:
-	the enabled-install leg of the container push. See its comment there.
+	Every caller gets the SAME answer, including the container-push roster: a
+	roster that admitted more than dispatch would advertise agents the bench then
+	refuses to run.
 	"""
 	if is_admin is None:
 		is_admin = has_jarvis_admin_access(user)
@@ -119,15 +119,13 @@ def _is_allowed(
 	if user in (allowed_users or []):
 		return True
 	if not (allowed_roles or []):
-		# Deny by default — UNLESS the caller asked for the legacy reading AND no
-		# named user was recorded either.
-		return bool(legacy_empty_allows and not (allowed_users or []))
+		return False  # deny by default
 	if user_roles is None:
 		user_roles = set(frappe.get_roles(user))
 	return bool(user_roles.intersection(allowed_roles))
 
 
-def _user_allowed_for_agent(listing, user: str | None = None, legacy_empty_allows: bool = False) -> bool:
+def _user_allowed_for_agent(listing, user: str | None = None) -> bool:
 	"""True iff ``user`` may install / run the agent.
 
 	Allowed iff the user is named in ``allowed_users`` OR their roles intersect
@@ -151,7 +149,7 @@ def _user_allowed_for_agent(listing, user: str | None = None, legacy_empty_allow
 	else:
 		roles = [row.role for row in (listing.get("allowed_roles") or [])]
 		users = [row.user for row in (listing.get("allowed_users") or [])]
-	return _is_allowed(roles, users, user, legacy_empty_allows=legacy_empty_allows)
+	return _is_allowed(roles, users, user)
 
 
 def _allowed_roles_map() -> dict[str, list[str]]:
@@ -585,11 +583,19 @@ def set_agent_access(
 	for u in users_clean:
 		if u in ("Administrator", "Guest"):
 			frappe.throw(_("User {0} cannot be granted agent access.").format(u))
-		enabled = frappe.db.get_value("User", u, "enabled")
-		if enabled is None:
-			frappe.throw(_("User {0} does not exist.").format(u))
-		if not enabled:
-			frappe.throw(_("User {0} is disabled and cannot be granted agent access.").format(u))
+	if users_clean:
+		# ONE query for the whole submitted set, not a get_value per name: this is an
+		# admin picking a handful of people, but the loop shape is what turns into an
+		# N+1 the first time somebody pastes a department into it.
+		known = {
+			r.name: r.enabled
+			for r in frappe.get_all("User", filters={"name": ("in", users_clean)}, fields=["name", "enabled"])
+		}
+		for u in users_clean:
+			if u not in known:
+				frappe.throw(_("User {0} does not exist.").format(u))
+			if not known[u]:
+				frappe.throw(_("User {0} is disabled and cannot be granted agent access.").format(u))
 
 	doc = frappe.get_doc(LISTING, agent_slug)
 	doc.check_permission("write")

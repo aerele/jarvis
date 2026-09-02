@@ -189,8 +189,11 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	     applies once (the tenant-wide restart is the admin's cost to accept), and
 	     the allowed users can then self-install and run it WITHOUT each install
 	     triggering another restart of everyone's workspace.
-	  2. ENABLED INSTALLS — the historical leg, kept so that nothing running today
-	     stops running the moment this ships. See ``legacy_empty_allows`` below.
+	  2. ENABLED INSTALLS — the historical leg, gated exactly as leg 1 is. Under
+	     deny-by-default it is largely SUBSUMED by leg 1 (an install can only pass
+	     the access gate on a listing that carries a grant, and such a listing is
+	     already shipped by leg 1); it still governs the per-owner build, which
+	     skips leg 1, and it still applies the per-INSTALL disqualifiers below.
 
 	Bench-global by design (one bench == one customer == one container). ``owner``
 	scopes the payload to one owner's enabled installs and is used only by tests;
@@ -207,15 +210,11 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	reasoning): an enabled install with a BLANK run-as user is EXCLUDED too —
 	R1-F3 refuses it at every dispatch path.
 
-	That install-leg gate runs in ``legacy_empty_allows`` mode: a listing with NO
-	roles and NO users still admits its enabled installs here. This is the
-	grandfather guarantee, and it is deliberately WIDER than what dispatch will
-	honour after the inversion. The accepted consequence: on a tenant that upgrades
-	before ``v2_18_agent_access_grandfather`` runs — or where an admin clears both
-	allow lists on an agent that still has enabled installs — the delegate stays in
-	the container roster while ``run_agent_now`` / ``_sweep_one`` refuse it. A
-	roster entry nobody can dispatch is inert; the opposite error (dropping a
-	working customer's agent mid-upgrade) is a live outage.
+	Both legs use the ONE access predicate, so the roster can never admit what
+	dispatch would refuse. Existing installs keep working across the upgrade
+	because ``v2_18_agent_access_grandfather`` runs during migrate, before anything
+	can apply — the grandfather guarantee lives in the patch, not in a looser gate
+	here.
 
 	Installs are per-(owner, agent) but the payload is bench-global and keyed by
 	SLUG, so two users each enabling the SAME agent are ONE entry, not two —
@@ -223,7 +222,23 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	gates)."""
 	# Lazy import — agents_api imports build_agent_push_payload from this module
 	# at module level, so a top-level back-import would be circular.
-	from jarvis.chat.agents_api import _user_allowed_for_agent
+	from jarvis.chat.agents_api import _allowed_roles_map, _allowed_users_map, _is_allowed
+
+	# The whole catalog's grants in TWO queries, shared by both legs. The install
+	# leg used to call ``_user_allowed_for_agent`` per row, which is itself an N+1
+	# over both child tables — and this function runs twice per Apply.
+	roles_map = _allowed_roles_map()
+	users_map = _allowed_users_map()
+	granted = set(roles_map) | set(users_map)
+	# Memoized per distinct run-as identity: several installs commonly share one.
+	_identity_cache: dict[str, tuple[set[str], bool]] = {}
+
+	def _identity(user: str):
+		if user not in _identity_cache:
+			from jarvis.permissions import has_jarvis_admin_access
+
+			_identity_cache[user] = (set(frappe.get_roles(user)), has_jarvis_admin_access(user))
+		return _identity_cache[user]
 
 	# Delegate metadata (tools_allow / timeout_s / nature / model) lives in the
 	# BUNDLED registry, never the customer DB; the enablement signal echoes it so
@@ -325,11 +340,16 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		# while the run-as user kept it was dropped from the roster yet still
 		# dispatched (the reported phantom run), and the mirror case advertised a
 		# delegate the bench would refuse to run at every cadence.
-		# ``legacy_empty_allows``: the GRANDFATHER leg. A listing with neither an
-		# allowed role nor an allowed user is closed everywhere else, but an install
-		# that was already enabled here keeps its roster entry — see the docstring
-		# for the divergence this consciously accepts.
-		if not _user_allowed_for_agent(row.agent, row.run_as_user, legacy_empty_allows=True):
+		# Gated on the RUN-AS user under the SAME deny-by-default predicate the
+		# dispatch paths use, from the batched maps above.
+		run_as_roles, run_as_is_admin = _identity(row.run_as_user)
+		if not _is_allowed(
+			roles_map.get(row.agent, []),
+			users_map.get(row.agent, []),
+			row.run_as_user,
+			user_roles=run_as_roles,
+			is_admin=run_as_is_admin,
+		):
 			continue
 
 		# Every gate has passed, so this agent is emitted and no later row for it can
@@ -354,7 +374,6 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 			fields=["name", "agent_slug"],
 			order_by="name asc",
 		)
-		granted = _listings_with_any_grant()
 		for lst in allowed_listings:
 			if lst.name in seen_agents or lst.name not in granted:
 				continue
@@ -391,26 +410,6 @@ def _enablement_signal(agent_slug: str, reg_by_slug: dict) -> dict:
 		"timeout_s": meta.get("timeout_s"),
 		"nature": (meta.get("nature") or "").strip().lower(),
 	}
-
-
-def _listings_with_any_grant() -> set[str]:
-	"""Listing docnames carrying at least one allowed role OR one allowed user.
-
-	Two queries for the whole catalog rather than ``_user_allowed_for_agent`` per
-	listing, which is an N+1 over both child tables and runs twice per Apply."""
-	granted: set[str] = set()
-	for doctype, parentfield in (
-		("Jarvis Agent Allowed Role", "allowed_roles"),
-		("Jarvis Agent Allowed User", "allowed_users"),
-	):
-		granted.update(
-			frappe.get_all(
-				doctype,
-				filters={"parenttype": LISTING, "parentfield": parentfield},
-				pluck="parent",
-			)
-		)
-	return granted
 
 
 def registry_timeout_s(agent_slug: str, default: int = 600) -> int:

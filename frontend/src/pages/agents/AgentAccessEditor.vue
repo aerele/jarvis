@@ -133,6 +133,7 @@ import JvCombo from "@/components/JvCombo.vue";
 import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
 import { errHtml } from "@/lib/errors";
+import { humaniseSyncStatus } from "@/lib/syncStatus";
 
 const props = defineProps({
 	slug: { type: String, required: true },
@@ -162,14 +163,23 @@ const saving = ref(false);
 // silently disagree until some unrelated mutation pushes.
 const applyNow = ref(true);
 
-// A new agent (or a reload of this one) reseeds both the baseline and the draft.
+// A props refresh always updates the BASELINE - that is the server's current
+// truth - but only reseeds the drafts when there is nothing to lose. The parent
+// reloads the agent for unrelated reasons (toggling Enabled calls load() and
+// reassigns `agent`), and blowing away a half-finished access edit because of a
+// switch somewhere else on the page is silent data loss. When the drafts are
+// kept, `dirty` is recomputed against the new baseline, so the indicator stays
+// honest: an edit that now matches what the server holds reads as clean.
 watch(
 	() => [props.roles, props.users],
 	() => {
+		const wasDirty = dirty.value;
 		savedRoles.value = [...props.roles];
 		savedUsers.value = [...props.users];
-		roleDraft.value = [...props.roles];
-		userDraft.value = [...props.users];
+		if (!wasDirty) {
+			roleDraft.value = [...props.roles];
+			userDraft.value = [...props.users];
+		}
 	}
 );
 
@@ -201,6 +211,10 @@ function removeRole(r) {
 const userQuery = ref("");
 const userResults = ref([]);
 let searchTimer = null;
+// Monotonic request id: a slower earlier lookup must not overwrite a newer one.
+// Typing "an" then "ann" and having "an" land second would repopulate the menu
+// with results for a prefix the admin has already moved past.
+let searchSeq = 0;
 
 const userOptions = computed(() => {
 	const taken = new Set(userDraft.value);
@@ -213,12 +227,15 @@ const userOptions = computed(() => {
 });
 
 async function runSearch(q) {
+	const seq = ++searchSeq;
 	try {
-		userResults.value = (await apiAgents.searchUsers(q)) || [];
+		const rows = (await apiAgents.searchUsers(q)) || [];
+		if (seq === searchSeq) userResults.value = rows;
 	} catch {
 		// A failed lookup must not blank the picker mid-typing; the admin can still
-		// finish typing an address they already know.
-		userResults.value = [];
+		// finish typing an address they already know. Still ordered: a stale error
+		// must not clear results a newer request has already delivered.
+		if (seq === searchSeq) userResults.value = [];
 	}
 }
 function onUserPick(v) {
@@ -266,11 +283,16 @@ async function pollUntilTerminal() {
 		return;
 	}
 	pending.value = false;
-	const status = String(s.last_sync_status || "");
-	if (status.startsWith("failed")) {
-		// The reason must survive as the message, not be flattened to "apply
-		// failed" - it is the only thing that says WHY the workspace refused it.
-		toast.error(status.replace(/^failed:\s*/, "") || "Apply failed.");
+	// Classified by the shared humaniser, not by a local "failed:" prefix strip, so
+	// this toast cannot drift from the apply pill on the catalog page - the two
+	// report the same pipeline and used to parse its status two different ways.
+	const human = humaniseSyncStatus(s.last_sync_status);
+	if (human.kind === "failed") {
+		// The DETAIL is the only thing that says WHY the workspace refused it, so it
+		// has to survive rather than being flattened to "apply failed".
+		toast.error(
+			human.detail ? `Access saved, but applying it failed - ${human.detail}` : human.text
+		);
 		return;
 	}
 	toast.success("Access saved and applied.");
@@ -313,5 +335,5 @@ function reset() {
 	userDraft.value = [...savedUsers.value];
 }
 
-defineExpose({ dirty, roleDraft, userDraft, applyNow, pending });
+defineExpose({ dirty, roleDraft, userDraft, applyNow, pending, onUserPick, userOptions });
 </script>
