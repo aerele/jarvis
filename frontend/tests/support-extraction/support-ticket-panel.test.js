@@ -128,21 +128,21 @@ describe("SupportTicketPanel — populated", () => {
 });
 
 describe("SupportTicketPanel — no meta yet", () => {
-	it("falls back to — for every field and shows no Reply / no SLA badge", () => {
+	it("falls back to - for every field and shows no Reply / no SLA badge", () => {
 		storeDouble.thread.meta = null;
 		const w = mountPanel();
 		expect(w.text()).toContain("Ticket details");
-		expect(w.text()).toContain("—");
+		expect(w.text()).toContain("-");
 		expect(w.findAll("button").some((b) => b.text() === "Reply")).toBe(false);
 		expect(badges(w).length).toBe(0); // no status/SLA badges without data
 	});
 
-	it("shows — for a missing individual field (e.g. Team) while others render", () => {
+	it("shows - for a missing individual field (e.g. Team) while others render", () => {
 		storeDouble.thread.meta = { ...FULL_META, agent_group: null };
 		const w = mountPanel();
 		expect(w.text()).toContain("High"); // priority still there
-		// Team row falls back to —
+		// Team row falls back to -
 		const teamRow = w.findAll(".jv-suptp-row").find((r) => r.text().includes("Team"));
-		expect(teamRow.text()).toContain("—");
+		expect(teamRow.text()).toContain("-");
 	});
 });

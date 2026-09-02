@@ -1019,7 +1019,7 @@ async function promoteFromChat(conversation, messageId, { fallback = null, dash 
 		// happened instead of failing silently.
 		if (!rendered) {
 			builderHtml.value = "";
-			toast.error("Couldn't load that dashboard's content — it may have expired.");
+			toast.error("Couldn't load that dashboard's content. It may have expired.");
 		}
 		promotionPending.value = false;
 		// Settled: release the re-entrancy key, exactly as giveUp does. It guards
