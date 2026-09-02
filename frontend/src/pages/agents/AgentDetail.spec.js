@@ -38,9 +38,10 @@ const apiDocmeta = vi.hoisted(() => ({
 vi.mock("@/api/docmeta", () => apiDocmeta);
 
 const router = vi.hoisted(() => ({ push: vi.fn() }));
+const routeMock = vi.hoisted(() => ({ hash: "", name: "AgentDetail", query: {}, params: {} }));
 vi.mock("vue-router", () => ({
 	useRouter: () => router,
-	useRoute: () => ({ hash: "", name: "AgentDetail", query: {}, params: {} }),
+	useRoute: () => routeMock,
 }));
 
 const sessionMock = vi.hoisted(() => ({ session: { user: "owner@example.com" } }));
@@ -196,6 +197,7 @@ async function mountDetail(agentFixture, activation = null) {
 beforeEach(() => {
 	vi.clearAllMocks();
 	sessionMock.session.user = "owner@example.com";
+	routeMock.hash = "";
 });
 
 describe("Run Now disabled reasons get a visible hint, not only a tooltip", () => {
@@ -325,5 +327,19 @@ describe("Overview Access panel: roster for admins only, never for a non-admin (
 		);
 		expect(w.text()).toContain("Access");
 		expect(w.text()).toContain("Accounts User");
+	});
+});
+
+describe("Configure tab: two-column layout on lg+ (jarvis#1062 polish, matches the Admin tab)", () => {
+	it("wraps Schedule/Comments and Configuration in the same grid-cols-1 lg:grid-cols-2 pattern as Admin", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
+		);
+		const grid = w.find(".grid.grid-cols-1.gap-10.lg\\:grid-cols-2.lg\\:items-start");
+		expect(grid.exists()).toBe(true);
+		// Schedule (left) and Configuration (right) both land inside it.
+		expect(grid.text()).toContain("Schedule");
+		expect(grid.text()).toContain("Configuration");
 	});
 });
