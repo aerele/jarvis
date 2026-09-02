@@ -43,7 +43,8 @@ vi.mock("vue-router", () => ({
 	useRoute: () => ({ hash: "", name: "AgentDetail", query: {}, params: {} }),
 }));
 
-vi.mock("@/data/session", () => ({ session: { user: "owner@example.com" } }));
+const sessionMock = vi.hoisted(() => ({ session: { user: "owner@example.com" } }));
+vi.mock("@/data/session", () => sessionMock);
 
 // frappe-ui's ESM entry does not resolve under vitest (see LlmPoolEditor.spec.js).
 vi.mock("frappe-ui", () => ({
@@ -194,6 +195,7 @@ async function mountDetail(agentFixture, activation = null) {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	sessionMock.session.user = "owner@example.com";
 });
 
 describe("Run Now disabled reasons get a visible hint, not only a tooltip", () => {
@@ -265,6 +267,38 @@ describe("install-failure reason stays visible until the next attempt", () => {
 		await installBtn().trigger("click");
 		await flushPromises();
 		expect(w.text()).not.toContain("no seats left");
+	});
+});
+
+describe("Install is disabled for an Administrator session (jarvis#1062 polish)", () => {
+	it("disables the Install button and shows the visible hint", async () => {
+		sessionMock.session.user = "Administrator";
+		const w = await mountDetail(baseAgent({ installation: null }));
+		const installBtn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Install");
+		expect(installBtn.attributes("disabled")).not.toBeUndefined();
+		expect(w.text()).toContain("Log in as a named user to install this agent.");
+	});
+
+	it("a click while disabled never calls installAgent", async () => {
+		sessionMock.session.user = "Administrator";
+		const w = await mountDetail(baseAgent({ installation: null }));
+		const installBtn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Install");
+		await installBtn.trigger("click");
+		await flushPromises();
+		expect(api.installAgent).not.toHaveBeenCalled();
+	});
+
+	it("a named (non-Administrator) user sees no such hint and can install", async () => {
+		const w = await mountDetail(baseAgent({ installation: null }));
+		const installBtn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Install");
+		expect(installBtn.attributes("disabled")).toBeUndefined();
+		expect(w.text()).not.toContain("Log in as a named user to install this agent.");
 	});
 });
 

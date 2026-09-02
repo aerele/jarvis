@@ -160,6 +160,16 @@
 				<div v-else-if="shadowScribeBlocked" class="mt-3 text-sm text-ink-gray-5">
 					Still in shadow preview - promote it to live under Configure first
 				</div>
+				<!-- jarvis#1062 polish: install_agent refuses an Administrator run-as
+				     identity server-side ("agents cannot run as Administrator") - fail
+				     this visibly instead of letting the click round-trip into a
+				     toast-only refusal. -->
+				<div
+					v-if="!installation && isAdministratorSession"
+					class="mt-3 text-sm text-ink-gray-5"
+				>
+					Log in as a named user to install this agent.
+				</div>
 				<!-- jarvis#1062 polish: the install-failure toast auto-dismisses in
 				     ~2s - keep the reason visible under the Install button until the
 				     next attempt. -->
@@ -546,6 +556,7 @@ import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
 import { renderMarkdown } from "@/markdown";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { session } from "@/data/session";
 import { parseListField } from "@/lib/parseListField";
 import { categoryTitle } from "@/lib/agentCategory";
 
@@ -726,11 +737,24 @@ const installing = ref(false);
 // jarvis#1062 polish: the toast auto-dismisses after ~2s, easy to miss - keep
 // a persistent inline echo under the Install button until the next attempt.
 const installError = ref("");
+// jarvis#1062 polish: install_agent refuses a run-as identity of
+// Administrator ("agents cannot run as Administrator") - read the session
+// user the same way @/data/session already exposes it elsewhere, and
+// disable Install client-side instead of letting the click round-trip into
+// a toast-only refusal.
+const isAdministratorSession = computed(() => session.user === "Administrator");
 const canInstall = computed(
-	() => !!(agent.value && agent.value.allowed && agent.value.status === "Published")
+	() =>
+		!!(
+			agent.value &&
+			agent.value.allowed &&
+			agent.value.status === "Published" &&
+			!isAdministratorSession.value
+		)
 );
 const installTooltip = computed(() => {
 	if (!agent.value || canInstall.value) return "";
+	if (isAdministratorSession.value) return "Log in as a named user to install this agent.";
 	// Never the roster: get_agent strips allowed_roles/allowed_users for non-admins,
 	// and naming who DOES have access is admin information anyway.
 	if (!agent.value.allowed)
