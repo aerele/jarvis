@@ -106,18 +106,24 @@ def record_step(
 ) -> str | None:
 	"""Append ONE step to ``run_name``'s timeline. Returns its name, or None.
 
-	``owner`` pins the row to the human who owns the run. It has to be passed
-	explicitly and applied AFTER the insert, exactly like
-	``agent_activity.log_activity``: every caller here runs impersonated as the
-	run-as user (the plugin dispatcher) or as the scheduler's Administrator, and
-	``insert()`` stamps ``owner = frappe.session.user`` - so without this the
-	owner-scoped (``if_owner``) timeline would be invisible to the very customer
-	it is for.
+	``owner`` pins the row to the human who owns the run, and is applied AFTER the
+	insert exactly like ``agent_activity.log_activity``. This is not optional
+	bookkeeping: ``Document.insert`` stamps ``owner = frappe.session.user``
+	UNCONDITIONALLY (``set_user_and_timestamp`` assigns it, it does not defer to a
+	pre-set value), and every caller here runs impersonated as the run-as user or
+	as the scheduler's Administrator. Left alone, the owner-scoped (``if_owner``)
+	timeline would be invisible to the very customer it is for.
+
+	Omit ``owner`` and it is resolved from the RUN row instead. A step belongs to
+	whoever owns the run, never to whoever happened to be executing - so the
+	fallback is the rule restated, not a guess, and no future caller can leak a
+	step to the session user by forgetting the argument.
 
 	NEVER raises: a failed narration is logged and swallowed."""
 	if not run_name:
 		return None
 	try:
+		owner = owner or run_owner(run_name)
 		doc = frappe.get_doc(
 			{
 				"doctype": STEP,

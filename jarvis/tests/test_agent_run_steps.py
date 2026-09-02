@@ -98,13 +98,26 @@ def _mk_listing(slug: str) -> None:
 	).insert(ignore_permissions=True)
 
 
+def _pin_owner(doctype: str, name: str, owner: str) -> None:
+	"""Set a row's owner AFTER insert.
+
+	``Document.insert`` stamps ``owner = frappe.session.user`` unconditionally
+	(``set_user_and_timestamp`` assigns it rather than deferring to a pre-set
+	value), so ``doc.owner = someone`` before ``insert()`` is silently discarded.
+	Every fixture here builds rows as Administrator, so without this the whole
+	cast would be owned by Administrator and every ``if_owner`` assertion below
+	would be testing nothing. Production hits the same rule, which is why
+	``_launch_audit`` and ``log_activity`` both re-stamp owner this same way."""
+	frappe.db.set_value(doctype, name, "owner", owner, update_modified=False)
+
+
 def _mk_run(slug: str, owner: str, session_key: str, status: str = "running") -> str:
 	inst = frappe.get_doc(
 		{"doctype": INSTALLATION, "agent": slug, "run_as_user": owner, "activation_state": "shadow"}
 	)
-	inst.owner = owner
 	inst.flags.ignore_permissions = True
 	inst.insert(ignore_permissions=True)
+	_pin_owner(INSTALLATION, inst.name, owner)
 	run = frappe.get_doc(
 		{
 			"doctype": RUN,
@@ -120,10 +133,9 @@ def _mk_run(slug: str, owner: str, session_key: str, status: str = "running") ->
 			"capability_writes_json": json.dumps([]),
 		}
 	)
-	run.owner = owner
 	run.flags.ignore_permissions = True
 	run.insert(ignore_permissions=True)
-	frappe.db.set_value(RUN, run.name, "owner", owner, update_modified=False)
+	_pin_owner(RUN, run.name, owner)
 	return run.name
 
 
@@ -196,6 +208,13 @@ class TestRecordStep(FrappeTestCase):
 		(if_owner) timeline it exists for."""
 		frappe.set_user("Administrator")
 		agent_run_steps.record_step(self.run, kind="note", label="pinned", owner=self.owner)
+		self.assertEqual(_steps(self.run)[0].owner, self.owner)
+
+	def test_owner_falls_back_to_the_run_owner_when_not_passed(self):
+		"""A caller that forgets ``owner`` must not leak the step to whoever is
+		executing. A step belongs to whoever owns the RUN, always."""
+		frappe.set_user("Administrator")
+		agent_run_steps.record_step(self.run, kind="note", label="no explicit owner")
 		self.assertEqual(_steps(self.run)[0].owner, self.owner)
 
 	def test_label_and_detail_are_clipped(self):
@@ -675,9 +694,15 @@ class TestLaunchRecordsDispatchedStep(unittest.TestCase):
 				"enabled": 1,
 			}
 		)
-		inst.owner = self.OWNER
 		inst.flags.ignore_permissions = True
 		inst.insert(ignore_permissions=True)
+		# THE CI failure this fixture caused: the pre-insert `inst.owner = OWNER`
+		# was discarded, so the installation belonged to Administrator, and
+		# _launch_audit (which correctly reads `owner = inst.owner`) pinned the run
+		# AND its first step to Administrator. Re-read so the doc handed to the
+		# launch carries the owner the database now holds.
+		_pin_owner(INSTALLATION, inst.name, self.OWNER)
+		inst = frappe.get_doc(INSTALLATION, inst.name)
 		frappe.db.commit()
 
 		orig = admin_client.post_agent_run
@@ -698,6 +723,11 @@ class TestLaunchRecordsDispatchedStep(unittest.TestCase):
 
 	def test_launch_opens_the_timeline_with_a_dispatched_step(self):
 		result = self._launch()
+		# Guard the PREMISE first. The step below can only be owner-pinned if the
+		# launch itself was, and a fixture whose installation quietly reverts to
+		# Administrator (Document.insert discards a pre-set owner - see _pin_owner)
+		# would otherwise fail on the step and read as a bug in the step code.
+		self.assertEqual(frappe.db.get_value(RUN, result["run"], "owner"), self.OWNER)
 		rows = _steps(result["run"])
 		self.assertEqual(len(rows), 1, rows)
 		self.assertEqual(rows[0].kind, "dispatched")
