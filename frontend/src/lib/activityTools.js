@@ -1,4 +1,4 @@
-// Customer-facing (jarvis__* platform) tools vs. internal openclaw built-ins
+// Customer-facing (jarvis__* platform) tools vs. the agent's internal built-ins
 // (read/exec/bash/canvas/…). Both the live "N tools" counter and the settled activity
 // accordion must count only the customer-facing tools, so the two never disagree (no 3→2
 // jump when a built-in finishes). The catch: the tool_name is represented DIFFERENTLY in

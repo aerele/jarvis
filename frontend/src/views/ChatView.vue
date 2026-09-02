@@ -5582,7 +5582,7 @@ const activityByAssistant = computed(() => {
 			if (!map[cur]) map[cur] = [];
 		}
 		// action_outcome rows are receipt chips shown inline, not accordion tool calls;
-		// no-I/O openclaw built-ins (read/exec/…) would expand to nothing — drop those too.
+		// no-I/O agent built-ins (read/exec/…) would expand to nothing — drop those too.
 		else if (m.role === "tool" && cur && !m.action_outcome && !shouldHideActivityTool(m))
 			(map[cur] || (map[cur] = [])).push(m);
 	}
