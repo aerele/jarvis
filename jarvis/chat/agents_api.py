@@ -932,7 +932,7 @@ def install_agent(agent_slug: str) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "agent": listing.name}}
 
 
-def _check_installation_write(doc, ptype: str = "write") -> None:
+def _check_installation_write(doc, ptype: str = "write") -> bool:
 	"""Who may mutate an installation: its OWNER, or a tenant admin (jarvis#1062).
 
 	The owner half is the DocType's ``if_owner`` row, enforced through
@@ -948,10 +948,18 @@ def _check_installation_write(doc, ptype: str = "write") -> None:
 	for a reason that has nothing to do with agent access. An admin's authority to
 	disable, stop or uninstall a runaway install should not be contingent on that,
 	so it is stated directly.
+
+	Returns True when the ADMIN half authorised the call. The caller needs that:
+	``doc.save()`` and ``frappe.delete_doc()`` re-run the very check we just
+	bypassed, so an admin authorised here would be refused a line later. Passing
+	``ignore_permissions`` on that write is safe precisely because authority has
+	already been established, in the open, right here - the same reasoning
+	``promote_installation`` uses.
 	"""
 	if has_jarvis_admin_access():
-		return
+		return True
 	doc.check_permission(ptype)
+	return False
 
 
 @frappe.whitelist()
@@ -959,7 +967,7 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	"""Enable/disable an installed agent — a pure DB write (O6: NO restart; the
 	bundle only reaches the container on the next Apply)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
-	_check_installation_write(doc)  # S3 owner-gate, or a tenant admin
+	via_admin = _check_installation_write(doc)  # S3 owner-gate, or a tenant admin
 	# R5-J8: never enable a non-installable capability (a min_apps dependency
 	# absent at install, or one that vanished after install and was reconciled to
 	# installable=0). Disabling is always allowed.
@@ -968,7 +976,7 @@ def set_enabled(installation: str, enabled: int) -> dict:
 
 		assert_installable(doc.agent)
 	doc.enabled = int(enabled or 0)
-	doc.save()
+	doc.save(ignore_permissions=via_admin)
 	_mark_catalog_dirty()
 	log_activity(
 		agent=doc.agent,
@@ -1175,7 +1183,7 @@ def uninstall_agent(installation: str) -> dict:
 	an Apply is now pending — but only when the install was ENABLED (a disabled
 	install was never in the pushed set, so removing it changes nothing)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
-	_check_installation_write(doc, "delete")  # S3 owner-gate (or admin) first
+	via_admin = _check_installation_write(doc, "delete")  # S3 owner-gate (or admin)
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
@@ -1202,7 +1210,8 @@ def uninstall_agent(installation: str) -> dict:
 	_detach_last_seen_run(run_names)
 	for name in run_names:
 		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
-	frappe.delete_doc(INSTALLATION, installation)  # honors if_owner
+	# honors if_owner for an owner; the admin path was authorised above.
+	frappe.delete_doc(INSTALLATION, installation, ignore_permissions=via_admin)
 	if doc.enabled:
 		_mark_catalog_dirty()
 	frappe.db.commit()
