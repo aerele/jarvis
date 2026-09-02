@@ -206,6 +206,179 @@
 					<p v-if="noOtherPlans" class="mt-4 text-p-sm text-ink-gray-6">
 						There are no other plans available on your account right now.
 					</p>
+
+					<!-- Billing details (Phase 3b): editable for a direct customer;
+					     a read-only "billed through <partner>" notice for a reseller. -->
+					<section
+						v-if="profile || profileErr"
+						class="mt-8 rounded-lg border border-outline-gray-1 p-5"
+					>
+						<h2 class="text-lg font-semibold text-ink-gray-9">Billing details</h2>
+						<div v-if="profileErr">
+							<ErrorMessage :message="profileErr" />
+							<Button
+								class="mt-3"
+								variant="subtle"
+								label="Try again"
+								@click="loadBillingProfile"
+							/>
+						</div>
+						<template v-else-if="profile.bill_to === 'partner'">
+							<p class="mt-2 text-p-base text-ink-gray-6">
+								Your subscription is billed through
+								<span class="font-medium text-ink-gray-8">{{
+									profile.partner_name
+								}}</span
+								>. For invoices and billing queries, please contact them<span
+									v-if="profile.partner_email"
+								>
+									at {{ profile.partner_email }}</span
+								>.
+							</p>
+						</template>
+						<template v-else>
+							<p class="mt-1 text-p-sm text-ink-gray-6">
+								Used on your GST invoices. Changes apply to future invoices.
+							</p>
+							<p v-if="profile.account_email" class="mt-2 text-p-sm text-ink-gray-6">
+								Invoices are emailed to
+								<span class="font-medium text-ink-gray-8">{{
+									profile.account_email
+								}}</span
+								>.
+							</p>
+							<div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+								<FormControl
+									label="Contact person"
+									:model-value="billingForm.contact_person"
+									@update:model-value="(v) => (billingForm.contact_person = v)"
+								/>
+								<FormControl
+									label="Contact number"
+									:model-value="billingForm.contact_number"
+									@update:model-value="(v) => (billingForm.contact_number = v)"
+								/>
+								<FormControl
+									class="sm:col-span-2"
+									label="Billing address"
+									placeholder="Street, area"
+									:model-value="billingForm.address_line1"
+									@update:model-value="(v) => (billingForm.address_line1 = v)"
+								/>
+								<FormControl
+									class="sm:col-span-2"
+									label="Address line 2"
+									placeholder="Landmark, area (optional)"
+									:model-value="billingForm.address_line2"
+									@update:model-value="(v) => (billingForm.address_line2 = v)"
+								/>
+								<FormControl
+									label="City"
+									placeholder="Chennai"
+									:model-value="billingForm.city"
+									@update:model-value="(v) => (billingForm.city = v)"
+								/>
+								<FormControl
+									label="Pincode"
+									placeholder="600001"
+									:model-value="billingForm.pincode"
+									@update:model-value="(v) => (billingForm.pincode = v)"
+								/>
+								<FormControl
+									v-if="billingIsIndia"
+									type="select"
+									label="State"
+									:options="billingStateOptions"
+									:model-value="billingForm.state"
+									@update:model-value="(v) => (billingForm.state = v)"
+								/>
+								<FormControl
+									v-else
+									type="text"
+									label="State / Region"
+									:model-value="billingForm.state"
+									@update:model-value="(v) => (billingForm.state = v)"
+								/>
+								<FormControl
+									type="select"
+									label="Country"
+									:options="billingCountryOptions"
+									:model-value="billingForm.country || 'India'"
+									@update:model-value="(v) => (billingForm.country = v)"
+								/>
+								<FormControl
+									label="GSTIN"
+									placeholder="33ABCDE1234F1Z7"
+									:model-value="billingForm.gstin"
+									@update:model-value="
+										(v) => (billingForm.gstin = (v || '').toUpperCase())
+									"
+								/>
+							</div>
+							<div class="mt-4 flex items-center gap-3">
+								<Button
+									variant="solid"
+									label="Save billing details"
+									:loading="billingSaving"
+									@click="saveBillingDetails"
+								/>
+								<span v-if="billingSaved" class="text-p-sm text-ink-green-3"
+									>Saved.</span
+								>
+							</div>
+							<ErrorMessage class="mt-2" :message="billingErr" />
+						</template>
+					</section>
+
+					<!-- Invoices (Phase 3b) -->
+					<section class="mt-6 rounded-lg border border-outline-gray-1 p-5">
+						<h2 class="text-lg font-semibold text-ink-gray-9">Invoices</h2>
+						<div v-if="invoicesLoading" class="flex justify-center py-6">
+							<JvSpinner :size="24" label="Loading invoices…" />
+						</div>
+						<template v-else>
+							<ErrorMessage v-if="invoicesErr" :message="invoicesErr" />
+							<p
+								v-else-if="!invoices.length"
+								class="mt-2 text-p-base text-ink-gray-6"
+							>
+								No invoices yet. Your GST invoice will appear here after your next
+								payment.
+							</p>
+							<div v-else class="mt-3 divide-y divide-outline-gray-1">
+								<div
+									v-for="inv in invoices"
+									:key="inv.erp_name"
+									class="flex items-center justify-between py-3"
+								>
+									<div>
+										<div class="text-base font-medium text-ink-gray-8">
+											{{ inv.invoice_no }}
+										</div>
+										<div class="text-p-sm text-ink-gray-6">
+											<span v-if="inv.date">{{ inv.date }}</span
+											><span v-if="inv.date && inv.total_inr != null">
+												&middot; </span
+											><span v-if="inv.total_inr != null">{{
+												inrExact(inv.total_inr)
+											}}</span>
+										</div>
+									</div>
+									<Button
+										variant="subtle"
+										iconLeft="download"
+										:label="
+											downloadingErp === inv.erp_name
+												? 'Preparing…'
+												: 'Download'
+										"
+										:loading="downloadingErp === inv.erp_name"
+										@click="onDownloadInvoice(inv.erp_name)"
+									/>
+								</div>
+							</div>
+						</template>
+					</section>
 				</template>
 			</div>
 		</div>
@@ -278,8 +451,8 @@
  * The admin-hosted page + the gateway webhook are authoritative; on return this
  * page just re-reads the account.
  */
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from "vue";
-import { Badge, Breadcrumbs, Button, Dialog, ErrorMessage } from "frappe-ui";
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { Badge, Breadcrumbs, Button, Dialog, ErrorMessage, FormControl } from "frappe-ui";
 import * as api from "@/api";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
@@ -454,6 +627,171 @@ async function loadAccount() {
 		loading.value = false;
 	}
 }
+
+// ---- Invoices + billing details (Phase 3b) --------------------------------
+const invoices = ref([]);
+const invoicesLoading = ref(true);
+const invoicesErr = ref("");
+const downloadingErp = ref("");
+const profile = ref(null);
+const profileErr = ref("");
+const billingForm = reactive({
+	contact_person: "",
+	contact_number: "",
+	address_line1: "",
+	address_line2: "",
+	city: "",
+	state: "",
+	pincode: "",
+	country: "India",
+	gstin: "",
+});
+const billingSaving = ref(false);
+const billingSaved = ref(false);
+const billingErr = ref("");
+
+// Inlined (not @/onboarding/indianStates, which arrives with the onboarding
+// State/Country PR): the GST states for the billing-details Select. Dedupe once
+// that file reaches develop.
+const BILLING_STATES = [
+	"Jammu and Kashmir",
+	"Himachal Pradesh",
+	"Punjab",
+	"Chandigarh",
+	"Uttarakhand",
+	"Haryana",
+	"Delhi",
+	"Rajasthan",
+	"Uttar Pradesh",
+	"Bihar",
+	"Sikkim",
+	"Arunachal Pradesh",
+	"Nagaland",
+	"Manipur",
+	"Mizoram",
+	"Tripura",
+	"Meghalaya",
+	"Assam",
+	"West Bengal",
+	"Jharkhand",
+	"Odisha",
+	"Chhattisgarh",
+	"Madhya Pradesh",
+	"Gujarat",
+	"Dadra and Nagar Haveli and Daman and Diu",
+	"Maharashtra",
+	"Karnataka",
+	"Goa",
+	"Lakshadweep",
+	"Kerala",
+	"Tamil Nadu",
+	"Puducherry",
+	"Andaman and Nicobar Islands",
+	"Telangana",
+	"Andhra Pradesh",
+	"Ladakh",
+	"Other Territory",
+];
+const BILLING_COUNTRIES = [
+	"India",
+	"United States",
+	"United Kingdom",
+	"United Arab Emirates",
+	"Singapore",
+	"Australia",
+	"Canada",
+	"Germany",
+	"Other",
+];
+const billingStateOptions = [
+	{ label: "Select state…", value: "" },
+	...BILLING_STATES.map((s) => ({ label: s, value: s })),
+];
+const billingCountryOptions = BILLING_COUNTRIES.map((c) => ({ label: c, value: c }));
+const billingIsIndia = computed(
+	() => (billingForm.country || "India").trim().toLowerCase() === "india"
+);
+
+async function loadInvoices() {
+	invoicesLoading.value = true;
+	invoicesErr.value = "";
+	try {
+		invoices.value = (await api.getInvoices()) || [];
+	} catch (e) {
+		invoicesErr.value = errMsg(e);
+	} finally {
+		invoicesLoading.value = false;
+	}
+}
+
+async function loadBillingProfile() {
+	profileErr.value = "";
+	try {
+		const p = (await api.getBillingProfile()) || {};
+		profile.value = p;
+		if (p.bill_to === "customer" && p.billing) {
+			for (const k of Object.keys(billingForm)) {
+				if (p.billing[k] != null && p.billing[k] !== "") billingForm[k] = p.billing[k];
+			}
+			if (!billingForm.country) billingForm.country = "India";
+		}
+	} catch (e) {
+		// Surface it (this is the customer's tax-invoice party): the card shows the
+		// error + a retry rather than silently vanishing on a transient failure.
+		profileErr.value = errMsg(e);
+	}
+}
+
+// "Saved." (or a prior error) must not linger next to freshly-edited, unsaved fields.
+watch(billingForm, () => {
+	billingSaved.value = false;
+	if (billingErr.value) billingErr.value = "";
+});
+
+async function saveBillingDetails() {
+	billingSaving.value = true;
+	billingErr.value = "";
+	billingSaved.value = false;
+	try {
+		const payload = {};
+		for (const [k, v] of Object.entries(billingForm)) {
+			payload[k] = (v || "").trim(); // present-but-empty clears; the server normalizer validates
+		}
+		const out = await api.updateBillingDetails(payload);
+		billingSaved.value = true;
+		if (out && out.billing) {
+			for (const k of Object.keys(billingForm)) {
+				billingForm[k] = out.billing[k] || (k === "country" ? "India" : "");
+			}
+		}
+	} catch (e) {
+		billingErr.value = errMsg(e);
+	} finally {
+		billingSaving.value = false;
+	}
+}
+
+async function onDownloadInvoice(erpName) {
+	downloadingErp.value = erpName;
+	try {
+		const res = await api.downloadInvoice(erpName);
+		if (res && res.content_b64) {
+			const bytes = Uint8Array.from(atob(res.content_b64), (c) => c.charCodeAt(0));
+			const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+			const a = document.createElement("a");
+			a.href = url;
+			a.download = res.filename || "invoice.pdf";
+			document.body.appendChild(a);
+			a.click();
+			a.remove();
+			setTimeout(() => URL.revokeObjectURL(url), 5000);
+		}
+	} catch (e) {
+		invoicesErr.value = errMsg(e);
+	} finally {
+		downloadingErp.value = "";
+	}
+}
 // Returning from the admin-hosted pay page (WS8). A fresh navigation re-runs
 // onMounted and re-reads below; a bfcache back-button restores the DOM WITHOUT
 // re-mounting, which would strand the frozen "Taking you to the secure payment
@@ -498,6 +836,11 @@ onMounted(() => {
 	window.addEventListener("pageshow", onPageShow);
 });
 onBeforeUnmount(() => window.removeEventListener("pageshow", onPageShow));
+// Invoices + billing details load on mount, independent of the plan read above.
+onMounted(() => {
+	loadInvoices();
+	loadBillingProfile();
+});
 
 // ---- the confirm step -------------------------------------------------------
 // One dialog serves every flow. `run` is the function to call on confirm, so

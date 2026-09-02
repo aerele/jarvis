@@ -573,6 +573,27 @@ def get_billing_payment_state() -> dict:
 	return _post(path=_m("api.account.get_billing_payment_state"), body={})
 
 
+def get_invoices() -> list:
+	"""The customer's own submitted GST invoices for the billing page (Phase 3b)."""
+	return _post(path=_m("api.invoices.get_invoices"), body={})
+
+
+def download_invoice(erp_name: str) -> dict:
+	"""Base64 PDF of one of the customer's invoices; admin re-verifies ownership."""
+	return _post(path=_m("api.invoices.get_invoice_pdf"), body={"erp_name": erp_name})
+
+
+def get_billing_profile() -> dict:
+	"""The billing-details card: an editable party for a direct customer, or a
+	read-only 'billed through <partner>' notice for a reseller-billed customer."""
+	return _post(path=_m("api.invoices.get_billing_profile"), body={})
+
+
+def update_billing_details(billing) -> dict:
+	"""Save a direct customer's billing party (validated admin-side)."""
+	return _post(path=_m("api.invoices.update_billing_details"), body={"billing": billing})
+
+
 def check_billing_payment_status() -> dict:
 	"""Provider-truth check on the current BILLING checkout, converged through the
 	same apply seam as the browser confirm and the webhook. Never creates or
