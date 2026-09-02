@@ -25,10 +25,9 @@ CONV = "Jarvis Conversation"
 
 _RATINGS = {"up", "down"}
 _MAX_NOTE = 1000
-#: The openclaw session UUID lives as the last segment of a composite session_key
-#: like "agent:main:dashboard:<uuid>"; the admin transcript viewer keys on the
-#: bare UUID (fleet.transcripts._SESSION_ID_RE). Empty when absent/malformed - the
-#: rating still records, only the Support deep-link is best-effort.
+#: The agent session UUID lives as the last segment of a composite session_key
+#: like "agent:main:dashboard:<uuid>". Empty when absent/malformed - the rating
+#: still records; only the admin-side deep-link is best-effort.
 _SESSION_UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 
 
@@ -80,7 +79,7 @@ def submit_feedback(message_id: str, rating: str, note: str | None = None) -> di
 
 
 def _session_uuid(session_key: str | None) -> str:
-	"""Bare openclaw session UUID from a composite session_key, or "" when absent."""
+	"""Bare agent session UUID from a composite session_key, or "" when absent."""
 	tail = (session_key or "").rsplit(":", 1)[-1]
 	return tail if _SESSION_UUID_RE.match(tail) else ""
 
