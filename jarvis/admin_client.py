@@ -1779,6 +1779,15 @@ def push_bench_heartbeat(heartbeat: dict) -> dict:
 	return _post(path=_m("api.tenant.ingest_bench_heartbeat"), body={"heartbeat": heartbeat})
 
 
+def push_chat_feedback(item: dict) -> dict:
+	"""Push one chat-reply rating (thumbs up/down + optional note) to admin for the
+	tenant-wise Feedback dashboard. Admin upserts on (tenant, message). Called
+	best-effort from jarvis.chat.feedback.submit_feedback, which swallows failures
+	so a lost rating never blocks the tap.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
+	return _post(path=_m("api.tenant.ingest_chat_feedback"), body={"item": item})
+
+
 def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int = 30) -> dict:
 	"""POST customer's chat device pubkey to admin; admin asks the fleet-agent
 	to write a PairedDevice record into the customer's agent container and
