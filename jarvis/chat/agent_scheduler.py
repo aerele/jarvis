@@ -1175,18 +1175,18 @@ def _launch_audit(
 		#
 		# jarvis#1062: "them" is not always someone who CAN apply it. The catalog
 		# push needs a reviewer role (Jarvis Skill Reviewer / Jarvis Admin / System
-		# Manager — is_skill_reviewer), and ``frappe.session.user`` here is the
-		# installation's RUN-AS user (this function runs impersonated — see the
-		# Phase 1 identity note above), so a non-reviewer owner gets a message that
-		# points at their administrator instead of a button they cannot see. This
-		# branch is also reached from the hourly cron sweep (run_due_agent_audits),
-		# where the run-as user is equally not a human operator — harmless, since
-		# the copy still correctly tells that owner who to ask.
+		# Manager — is_skill_reviewer). Branch on the INSTALLATION OWNER, never
+		# ``frappe.session.user``: by this point the session is impersonated as the
+		# run-as user (Phase 1 identity, see above), which is deliberately decoupled
+		# from the owner (R1-F3) and is not even always a human. The OWNER is who
+		# actually reads this message back on the Runs board (the Run row's owner is
+		# always the installation owner, never the run-as user), on both the manual
+		# and the cron path (run_due_agent_audits sweeps by owner too).
 		not_applied = "not an installed delegate" in str(e)
 		if not_applied:
 			from jarvis.permissions import is_skill_reviewer
 
-			if is_skill_reviewer(frappe.session.user):
+			if is_skill_reviewer(owner):
 				error_msg = _(
 					"This agent is not loaded on your container yet. Open the Agents page, "
 					"click “Apply catalog changes” to push it, then run it again."

@@ -216,6 +216,7 @@ const STATUS_OPTIONS = [
 	{ label: "Completed", value: "completed" },
 	{ label: "Partial", value: "partial" },
 	{ label: "Failed", value: "failed" },
+	{ label: "Stopped", value: "stopped" },
 ];
 
 // ── rail data: useListPage + adapter onto listRunsPage's tab-less shape ──────

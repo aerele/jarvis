@@ -110,8 +110,17 @@ function mountPanel(run) {
 	return mount(FindingsPanel, { props: { run } });
 }
 
+function setVisibility(state) {
+	Object.defineProperty(document, "visibilityState", {
+		value: state,
+		writable: true,
+		configurable: true,
+	});
+}
+
 beforeEach(() => {
 	vi.clearAllMocks();
+	setVisibility("visible");
 	api.listAgentFindings.mockResolvedValue({
 		rows: [],
 		total: 0,
@@ -266,5 +275,23 @@ describe("C3: running-run progress - ticking elapsed time + recent activity", ()
 		const w = mountPanel(baseRun({ status: "running" }));
 		await flushPromises();
 		expect(w.text()).not.toContain("Running for");
+	});
+
+	it("skips the 10s activity re-fetch while the tab is hidden, and resumes once visible", async () => {
+		vi.useFakeTimers();
+		setVisibility("visible");
+		mountPanel(baseRun({ status: "running" }));
+		await flushPromises();
+		const callsAfterMount = apiAgents.listAgentActivityPage.mock.calls.length;
+
+		setVisibility("hidden");
+		await vi.advanceTimersByTimeAsync(30000);
+		await flushPromises();
+		expect(apiAgents.listAgentActivityPage.mock.calls.length).toBe(callsAfterMount);
+
+		setVisibility("visible");
+		await vi.advanceTimersByTimeAsync(10000);
+		await flushPromises();
+		expect(apiAgents.listAgentActivityPage.mock.calls.length).toBeGreaterThan(callsAfterMount);
 	});
 });

@@ -440,7 +440,12 @@ function startRunningProgress() {
 	nowTick.value = Date.now();
 	elapsedTimer = setInterval(() => (nowTick.value = Date.now()), 1000);
 	loadRecentActivity();
-	activityTimer = setInterval(loadRecentActivity, 10000);
+	// #1062 review fix: skip the fetch while the tab is hidden, mirroring the
+	// rows-poll guard in AgentRunsBoard.vue - a backgrounded tab should not
+	// burn a request every 10s here either.
+	activityTimer = setInterval(() => {
+		if (document.visibilityState === "visible") loadRecentActivity();
+	}, 10000);
 }
 function stopRunningProgress() {
 	if (elapsedTimer) {

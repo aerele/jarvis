@@ -56,6 +56,12 @@ _FREQUENCIES = ("daily", "weekly", "monthly")
 _RUN_STATUSES = ("running", "completed", "partial", "failed", "stopped")
 # Statuses a bench admin may set via set_listing_status (Draft is registry-only).
 _ADMIN_STATUSES = ("Published", "Coming Soon", "Deprecated")
+# jarvis#1062 D2: statuses a non-admin may DISCOVER (browse to without having
+# installed it) - Published (live) and Coming Soon (the SPA's deliberate teaser:
+# AgentsList's "Coming Soon" badge, AgentDetail's "Coming soon" install tooltip).
+# Draft (registry-only, never shipped) and Deprecated (sunset) are excluded UNLESS
+# the caller already installed it - see _enriched_catalog / get_agent.
+_DISCOVERABLE_STATUSES = ("Published", "Coming Soon")
 # Never meaningful as an agent restriction ("All" == unrestricted; the other two
 # are identities, not grantable roles) and never offered in the admin picker.
 _NON_SELECTABLE_ROLES = ("Administrator", "Guest", "All")
@@ -208,14 +214,16 @@ def _enriched_catalog() -> list[dict]:
 	# managing what you already have. Without this carve-out, a role revoked
 	# after install stranded the owner: the row vanished from their own
 	# Installed tab and get_agent 403'd, leaving no UI path to uninstall it.
-	# Hidden (not-installed) iff role-restricted (allowed == 0) OR not yet
-	# Published (Draft/Coming Soon/Deprecated are registry / lifecycle states,
-	# not something to discover before an admin ships them). Admin display
-	# parity is untouched: an admin (is_sm) always sees every row, `allowed`
-	# computed exactly as before. The ONE choke point both list_agents and
-	# list_agents_page share, so neither can drift from the other.
+	# Hidden (not-installed) iff role-restricted (allowed == 0) OR the status
+	# isn't discoverable (_DISCOVERABLE_STATUSES — Draft/Deprecated are
+	# registry / lifecycle states, not something to discover before an admin
+	# ships or sunsets them; Coming Soon IS discoverable — it is the SPA's
+	# deliberate teaser). Admin display parity is untouched: an admin (is_sm)
+	# always sees every row, `allowed` computed exactly as before. The ONE
+	# choke point both list_agents and list_agents_page share, so neither can
+	# drift from the other.
 	if not is_sm:
-		out = [r for r in out if r["installed"] or (r["allowed"] and r["status"] == "Published")]
+		out = [r for r in out if r["installed"] or (r["allowed"] and r["status"] in _DISCOVERABLE_STATUSES)]
 		for r in out:
 			r.pop("allowed_roles", None)
 	return out
@@ -307,9 +315,15 @@ def get_agent(agent_slug: str) -> dict:
 	# not be reachable by knowing (or guessing) its slug either — EXCEPT an
 	# installed row always passes, so a role revoked after install never
 	# strands the owner without a way to read (and uninstall) their own
-	# install. Admin display parity is untouched: an admin (is_sm) always
-	# passes.
-	if not is_sm and not installed_by_caller and (not allowed or listing.status != "Published"):
+	# install. Coming Soon is DISCOVERABLE (_DISCOVERABLE_STATUSES — the SPA's
+	# deliberate teaser), so it passes like Published; Draft/Deprecated still
+	# need the install carve-out. Admin display parity is untouched: an admin
+	# (is_sm) always passes.
+	if (
+		not is_sm
+		and not installed_by_caller
+		and (not allowed or listing.status not in _DISCOVERABLE_STATUSES)
+	):
 		frappe.throw(_("You do not have access to this agent."), frappe.PermissionError)
 
 	out: dict = {

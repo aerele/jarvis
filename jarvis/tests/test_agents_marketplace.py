@@ -213,12 +213,19 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(conv_owner, self.owner)
 		self.assertNotEqual(conv_owner, "Administrator")
 
-	def _run_now_on_unapplied_agent(self, owner):
+	def _run_now_on_unapplied_agent(self, *, owner, run_as):
 		"""Shared drive for the "not an installed delegate" translation (jarvis#1062
-		D1): install+enable as ``owner``, stub the fleet 502, and assert the Run
+		D1): install as ``owner``, then redirect run_as_user to ``run_as`` - a
+		DIFFERENT identity when the two diverge, which is what pins the fix.
+		``_launch_audit`` runs impersonated AS run_as (R1-F3: deliberately
+		decoupled from the owner), so a caller passing owner != run_as proves the
+		message follows the OWNER (who actually reads it back on the Runs board),
+		never the impersonated session. Stubs the fleet 502 and asserts the Run
 		lands terminal FAILED with the translated message (never a raw 500 or a
-		stuck "running" row). Returns the raised exception's message."""
+		stuck "running" row). Returns (raised exception message, persisted
+		run.error)."""
 		inst_name = _install_as(owner, "close-auditor")
+		frappe.db.set_value(INSTALLATION, inst_name, "run_as_user", run_as, update_modified=False)
 		frappe.db.set_value(INSTALLATION, inst_name, "enabled", 1)
 		agent = frappe.db.get_value(INSTALLATION, inst_name, "agent")
 		frappe.db.commit()
@@ -254,21 +261,23 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(run[0].status, "failed")
 		return str(ctx.exception), run[0].error or ""
 
-	def test_run_now_on_unapplied_agent_gives_apply_hint_to_a_reviewer(self):
-		# self.admin is a System Manager (a skill reviewer) — the run-as identity
-		# _launch_audit impersonates is the reviewer set that CAN act on the
-		# button, so it keeps the actionable "Apply catalog changes" copy, in both
-		# the raised message and the persisted run.error.
-		exc_msg, run_error = self._run_now_on_unapplied_agent(self.admin)
+	def test_run_now_on_unapplied_agent_follows_the_owner_not_the_impersonated_run_as(self):
+		# self.admin (System Manager, a reviewer) OWNS the install; the RUN-AS
+		# identity _launch_audit impersonates is self.owner (ROLE_X only, NOT a
+		# reviewer). The copy must still be the actionable reviewer copy, because
+		# it follows the OWNER - a regression back to frappe.session.user (the
+		# impersonated run-as) would flip this to the non-reviewer copy instead.
+		exc_msg, run_error = self._run_now_on_unapplied_agent(owner=self.admin, run_as=self.owner)
 		self.assertIn("Apply catalog changes", exc_msg)
 		self.assertIn("Apply catalog changes", run_error)
 
-	def test_run_now_on_unapplied_agent_tells_a_non_reviewer_to_ask_an_admin(self):
-		# self.owner holds only ROLE_X — not a reviewer — so is_skill_reviewer(the
-		# impersonated run-as user) is False: the message must not name a button
-		# this owner cannot see, and must point them at an administrator instead,
-		# in both the raised message and the persisted run.error.
-		exc_msg, run_error = self._run_now_on_unapplied_agent(self.owner)
+	def test_run_now_on_unapplied_agent_tells_a_non_reviewer_owner_to_ask_an_admin(self):
+		# self.owner (ROLE_X only, NOT a reviewer) OWNS the install; the RUN-AS
+		# identity _launch_audit impersonates is self.admin (a reviewer). The
+		# message must still be the non-reviewer copy, because it follows the
+		# OWNER - proving the branch does not read the impersonated run-as
+		# session even when THAT identity happens to be a reviewer.
+		exc_msg, run_error = self._run_now_on_unapplied_agent(owner=self.owner, run_as=self.admin)
 		self.assertNotIn("Apply catalog changes", exc_msg)
 		self.assertIn("Ask your administrator", exc_msg)
 		self.assertNotIn("Apply catalog changes", run_error)
@@ -562,9 +571,12 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertNotIn("allowed_roles", reappeared)
 
 	def test_draft_listing_hidden_from_non_admin_unless_installed(self):
-		# jarvis#1062 D2: Draft/Coming Soon/Deprecated are registry / lifecycle
-		# states a non-admin should not browse to before an admin ships them — but
-		# an installed instance must not vanish out from under its own installer.
+		# jarvis#1062 D2: Draft is a registry-only lifecycle state (never
+		# shipped) a non-admin should not browse to before an admin publishes
+		# it — but an installed instance must not vanish out from under its own
+		# installer. (Coming Soon is a DIFFERENT case — see
+		# test_coming_soon_listing_is_discoverable_but_draft_is_not — it is the
+		# SPA's deliberate teaser and stays visible to everyone.)
 		_install_as(self.owner, "close-auditor")
 		frappe.db.set_value(LISTING, "close-auditor", "status", "Draft")
 		frappe.db.commit()
@@ -583,6 +595,50 @@ class TestAgentsMarketplace(unittest.TestCase):
 			self.assertIsNotNone(_row(self.owner))
 			# Admin parity: unaffected by the Draft-hiding rule.
 			self.assertIsNotNone(_row(self.admin))
+		finally:
+			frappe.db.set_value(LISTING, "close-auditor", "status", "Published")
+			frappe.db.commit()
+
+	def test_coming_soon_listing_is_discoverable_but_draft_is_not(self):
+		# jarvis#1062 D2 (review fix): D2's original cut hid EVERY non-Published,
+		# not-installed row, which also hid Coming Soon - the SPA is explicitly
+		# built to show it as a teaser (AgentsList's "Coming Soon" badge,
+		# AgentDetail's "Coming soon" install tooltip). Coming Soon must be
+		# discoverable by a non-admin who never installed it; Draft must not.
+		frappe.db.set_value(LISTING, "close-auditor", "status", "Coming Soon")
+		frappe.db.commit()
+
+		def _row(user):
+			frappe.set_user(user)
+			try:
+				return next((r for r in agents_api.list_agents() if r["name"] == "close-auditor"), None)
+			finally:
+				frappe.set_user("Administrator")
+
+		try:
+			# self.other never installed it -> still visible (Coming Soon is
+			# discoverable), and get_agent reads it too (never installed, never
+			# role-restricted here).
+			row = _row(self.other)
+			self.assertIsNotNone(row, "a Coming Soon listing must be discoverable, not hidden")
+			self.assertEqual(row["status"], "Coming Soon")
+			frappe.set_user(self.other)
+			try:
+				out = agents_api.get_agent("close-auditor")
+			finally:
+				frappe.set_user("Administrator")
+			self.assertEqual(out["status"], "Coming Soon")
+
+			# Draft, by contrast, still hides for the same never-installed caller.
+			frappe.db.set_value(LISTING, "close-auditor", "status", "Draft")
+			frappe.db.commit()
+			self.assertIsNone(_row(self.other))
+			frappe.set_user(self.other)
+			try:
+				with self.assertRaises(frappe.PermissionError):
+					agents_api.get_agent("close-auditor")
+			finally:
+				frappe.set_user("Administrator")
 		finally:
 			frappe.db.set_value(LISTING, "close-auditor", "status", "Published")
 			frappe.db.commit()

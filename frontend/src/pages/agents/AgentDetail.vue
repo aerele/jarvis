@@ -145,6 +145,12 @@
 						/>
 					</div>
 				</div>
+				<!-- #1062 review fix: an installed-but-not-allowed row (role revoked
+				     after install) must say so visibly, not only via the disabled Run
+				     button's tooltip - a tooltip is easy to miss entirely. -->
+				<div v-if="installation && !agent.allowed" class="mt-3 text-sm text-ink-gray-5">
+					Your roles do not permit running this agent. Ask your administrator.
+				</div>
 			</div>
 
 			<TabBar class="shrink-0" :tabs="tabs" :modelValue="tab" @update:modelValue="setTab" />
