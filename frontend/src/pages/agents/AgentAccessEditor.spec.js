@@ -42,16 +42,8 @@ vi.mock("frappe-ui", () => ({
 	Autocomplete: {
 		name: "Autocomplete",
 		props: ["options", "modelValue", "placeholder"],
-		emits: ["update:modelValue"],
+		emits: ["update:modelValue", "update:query"],
 		template: "<div class='autocomplete'></div>",
-	},
-}));
-vi.mock("@/components/JvCombo.vue", () => ({
-	default: {
-		name: "JvCombo",
-		props: ["modelValue", "options", "allowCustom", "placeholder"],
-		emits: ["update:modelValue"],
-		template: "<div class='jvcombo'></div>",
 	},
 }));
 vi.mock("@/lib/errors", () => ({ errHtml: (e) => String((e && e.message) || e) }));
@@ -74,6 +66,10 @@ function editor(props = {}) {
 }
 
 const saveBtn = (w) => w.find('[data-test="save-access"]');
+// Roles first, People second - the same frappe-ui Autocomplete in both slots, which
+// is the point of the change: one control, one behaviour.
+const pickers = (w) => w.findAllComponents({ name: "Autocomplete" });
+const peoplePicker = (w) => pickers(w)[1];
 
 beforeEach(() => {
 	vi.useFakeTimers();
@@ -308,9 +304,9 @@ describe("out-of-order user searches", () => {
 			]);
 
 		const w = editor();
-		w.vm.onUserPick("ne");
+		peoplePicker(w).vm.$emit("update:query", "ne");
 		await vi.advanceTimersByTimeAsync(200);
-		w.vm.onUserPick("newe");
+		peoplePicker(w).vm.$emit("update:query", "newe");
 		await vi.advanceTimersByTimeAsync(200);
 		await flushPromises();
 
@@ -323,6 +319,15 @@ describe("out-of-order user searches", () => {
 });
 
 describe("opening the people picker", () => {
+	it("uses the same Autocomplete as the roles picker, not a bespoke widget", () => {
+		// Standing directive: SPA UI is frappe-ui, and a control must match the one
+		// beside it. This also fixed a transparent hand-rolled popup that read
+		// through onto the helper text and the Save button.
+		const w = editor();
+		expect(pickers(w)).toHaveLength(2);
+		expect(peoplePicker(w).props("placeholder")).toBe("Add a person…");
+	});
+
 	it("fetches with the current (empty) query and renders the results", async () => {
 		// The picker used to sit empty until the admin guessed a letter; search_users
 		// answers an empty term with the first 20 enabled users, which is the "who is
@@ -336,7 +341,28 @@ describe("opening the people picker", () => {
 		await flushPromises();
 
 		expect(agentsApi.searchUsers).toHaveBeenCalledWith("");
-		expect(w.vm.userOptions.map((o) => o.value)).toEqual(["bo@example.com", "cy@example.com"]);
+		// Fed to the picker as its options, in frappe-ui's {label, value} shape.
+		expect(
+			peoplePicker(w)
+				.props("options")
+				.map((o) => o.value)
+		).toEqual(["bo@example.com", "cy@example.com"]);
+	});
+
+	it("debounces typing into a remote search and adds the pick as a chip", async () => {
+		agentsApi.searchUsers.mockResolvedValue([{ name: "dee@example.com", full_name: "Dee" }]);
+		const w = editor();
+
+		peoplePicker(w).vm.$emit("update:query", "de");
+		expect(agentsApi.searchUsers).not.toHaveBeenCalled(); // debounced, not per keystroke
+		await vi.advanceTimersByTimeAsync(200);
+		await flushPromises();
+		expect(agentsApi.searchUsers).toHaveBeenCalledWith("de");
+
+		peoplePicker(w).vm.$emit("update:modelValue", { label: "Dee", value: "dee@example.com" });
+		await flushPromises();
+		expect(w.vm.userDraft).toContain("dee@example.com");
+		expect(w.findAll('[data-test="user-chip"]').length).toBe(2);
 	});
 
 	it("does not refetch while the menu is already primed", async () => {
@@ -354,7 +380,7 @@ describe("opening the people picker", () => {
 		w.vm.primeUserMenu();
 		await flushPromises();
 
-		w.vm.onUserPick("bo@example.com"); // selects, and clears the menu
+		w.vm.addUser("bo@example.com"); // selects, and clears the menu
 		expect(w.vm.userDraft).toContain("bo@example.com");
 
 		w.vm.primeUserMenu();
