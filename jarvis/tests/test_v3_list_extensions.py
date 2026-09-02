@@ -440,6 +440,8 @@ class TestGetAgent(unittest.TestCase):
 		self.assertIsNotNone(res["installation"])
 		self.assertEqual(res["installation"]["name"], self.installation)
 		self.assertNotIn("all_roles", res)  # SM-only payload
+		self.assertNotIn("allowed_roles", res)  # admin-only payload (#1062 polish)
+		self.assertIn("doctypes_required", res)
 		self.assertEqual(res["install_count"], frappe.db.count(INSTALLATION, {"agent": self.slug}))
 		self.assertGreaterEqual(res["install_count"], 1)
 
@@ -449,7 +451,7 @@ class TestGetAgent(unittest.TestCase):
 		self.assertIsNone(res["installation"])
 		self.assertNotIn("all_roles", res)
 		self.assertIn("allowed", res)
-		self.assertIn("allowed_roles", res)
+		self.assertNotIn("allowed_roles", res)  # #1062 polish: admin-only now
 
 	def test_sm_gets_all_roles(self):
 		res = agents_api.get_agent(self.slug)  # Administrator
@@ -457,10 +459,15 @@ class TestGetAgent(unittest.TestCase):
 		self.assertTrue(isinstance(res["all_roles"], list) and res["all_roles"])
 		for banned in ("Administrator", "Guest", "All"):
 			self.assertNotIn(banned, res["all_roles"])
+		self.assertIn("allowed_roles", res)  # an admin still sees who is allowed
 
-	def test_unknown_agent_throws(self):
-		with self.assertRaises(frappe.DoesNotExistError):
+	def test_unknown_agent_throws_a_clean_not_found(self):
+		"""A bad slug must read like the access-refusal path (#1062 polish) - not
+		leak the doctype name or confirm the slug is a real one."""
+		with self.assertRaises(frappe.DoesNotExistError) as ctx:
 			agents_api.get_agent("v3-no-such-agent")
+		self.assertIn("Agent not found.", str(ctx.exception))
+		self.assertNotIn("Jarvis Agent Listing", str(ctx.exception))
 
 	def test_list_agents_rows_gain_install_count(self):
 		with _as(USER_A):

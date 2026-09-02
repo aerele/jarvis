@@ -132,16 +132,11 @@
 				 recorded. x-circle, not Banner's fixed error icon: see the scribe
 				 branch above. -->
 			<div
-				v-if="run.status === 'failed' || run.status === 'stopped'"
+				v-if="run.status === 'failed' || (run.status === 'stopped' && run.error)"
 				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-red-1 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
 			>
 				<FeatherIcon name="x-circle" class="size-4 shrink-0" />
-				<span>{{
-					run.error ||
-					(run.status === "stopped"
-						? "This run was stopped before it reported findings."
-						: "This run failed before recording findings.")
-				}}</span>
+				<span>{{ run.error || "This run failed before recording findings." }}</span>
 			</div>
 
 			<!-- state-filter chips (all/open/acknowledged/resolved) -->

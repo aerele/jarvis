@@ -303,7 +303,13 @@ def get_agent(agent_slug: str) -> dict:
 	(DESIGN-V3 §8.3 / D39). Any authenticated user may read (listing perms =
 	All read); the ``installation`` block is the caller's own install or None.
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
-	listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
+	try:
+		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
+	except frappe.DoesNotExistError:
+		# jarvis#1062 polish: a raw "Jarvis Agent Listing <slug> not found" leaks the
+		# doctype name and confirms the slug is a plausible one; a clean, generic
+		# message avoids giving an enumeration probe anything to key off.
+		frappe.throw(_("Agent not found."), frappe.DoesNotExistError)
 	me = frappe.session.user
 	# PART 4 REVISED, TASK 49(d): the Admin-tab signal (all_roles rider) rides for
 	# Jarvis Admins too — the SPA derives isSM from all_roles' presence.
@@ -346,10 +352,15 @@ def get_agent(agent_slug: str) -> dict:
 		"default_schedule": listing.default_schedule,
 		"validated_for_fy": listing.validated_for_fy,
 		"allowed_roles": [row.role for row in (listing.allowed_roles or [])],
+		"doctypes_required": listing.doctypes_required,
 		"allowed": 1 if allowed else 0,
 		"install_count": frappe.db.count(INSTALLATION, {"agent": listing.name}),
 		"installation": None,
 	}
+	# allowed_roles is an access-control detail; only an admin needs to see it
+	# (jarvis#1062 polish - a non-admin viewer got it for free before this).
+	if not is_sm:
+		out.pop("allowed_roles", None)
 
 	inst = frappe.get_all(
 		INSTALLATION,

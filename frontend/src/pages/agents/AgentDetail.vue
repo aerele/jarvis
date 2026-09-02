@@ -232,7 +232,7 @@
 							{{ agent.validated_for_fy || "-" }}
 						</div>
 					</div>
-					<div>
+					<div v-if="'allowed_roles' in agent">
 						<div class="text-sm font-medium text-ink-gray-5">Allowed roles</div>
 						<div class="mt-1 flex flex-wrap gap-1.5">
 							<template v-if="(agent.allowed_roles || []).length">
@@ -668,7 +668,9 @@ const canInstall = computed(
 );
 const installTooltip = computed(() => {
 	if (!agent.value || canInstall.value) return "";
-	if (!agent.value.allowed)
+	// allowed_roles is an admin-only field (#1062 polish) - a non-admin viewer's
+	// payload simply won't carry it, so fall through to the generic message.
+	if (!agent.value.allowed && "allowed_roles" in agent.value)
 		return "Restricted to: " + ((agent.value.allowed_roles || []).join(", ") || "-");
 	return agent.value.status === "Coming Soon" ? "Coming soon" : "Not available to install";
 });
