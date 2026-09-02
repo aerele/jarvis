@@ -261,6 +261,22 @@ class TestRecordStep(FrappeTestCase):
 		self.assertIsNone(agent_run_steps.step_target(None))
 		self.assertIsNone(agent_run_steps.step_target({}))
 
+	def test_step_target_tolerates_a_stubbed_contract(self):
+		"""Tests stub the dispatch path's collaborators wholesale. A stub must mean
+		"no step", never an exception out of the dispatcher."""
+		self.assertIsNone(agent_run_steps.step_target("conv1"))
+		self.assertIsNone(agent_run_steps.step_target(mock.MagicMock()))
+
+	def test_resolve_treats_a_wholesale_stubbed_get_value_as_a_non_delegate(self):
+		"""THE CI regression: test_api's budget cases patch frappe.db.get_value to
+		return ONE fixed string for every lookup on the dispatch path. That used to
+		be harmless because resolve only ran behind tool_denial, which those tests
+		also patch. It now runs directly, so a stubbed row must make the caller a
+		non-delegate instead of raising AttributeError out of the dispatcher."""
+		with mock.patch.object(frappe.db, "get_value", return_value="conv1"):
+			self.assertIsNone(_delegate_capability.resolve(self.key))
+			self.assertIsNone(_delegate_capability.tool_denial(self.key, "get_list"))
+
 
 # --------------------------------------------------------------------------- #
 # humanize_tool_call

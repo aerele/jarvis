@@ -225,22 +225,31 @@ def resolve(session_key: str | None = None) -> dict | None:
 		],
 		as_dict=True,
 	)
-	if not run or not run.agent:
+	# Shape-checked, not just truthiness-checked. ``as_dict=True`` yields a
+	# frappe._dict or None in production, so the isinstance arm is unreachable
+	# there - but ``frappe.db.get_value`` is a seam tests stub WHOLESALE (test_api's
+	# budget cases patch it to return one fixed string for every lookup on the
+	# dispatch path), and this function now runs on that path directly rather than
+	# only behind ``tool_denial``. A stub must make the caller a non-delegate, never
+	# an AttributeError out of the dispatcher. ``.get`` below for the same reason: a
+	# plain dict stub has no attribute access.
+	if not isinstance(run, dict) or not run.get("agent"):
 		return None  # no delegate run bound -> not a delegate; leave the caller untouched
 
 	base = {
-		"run": run.name,
-		"owner": run.owner,
-		"status": run.status,
-		"agent": run.agent,
+		"run": run.get("name"),
+		"owner": run.get("owner"),
+		"status": run.get("status"),
+		"agent": run.get("agent"),
 		"run_as": frappe.session.user,
 	}
-	contract = (run.capability_contract or "").strip().lower()
+	contract = (run.get("capability_contract") or "").strip().lower()
 
-	if contract == CONTRACT_LEGACY or (not contract and _is_pre_patch(run.creation)):
+	if contract == CONTRACT_LEGACY or (not contract and _is_pre_patch(run.get("creation"))):
 		# Pre-JF-017 run: nature/writes come from the live listing, as they did
 		# before the snapshot existed, and no tools_allow gate applies.
-		listing = frappe.db.get_value(LISTING, run.agent, ["nature", "writes"], as_dict=True) or {}
+		listing = frappe.db.get_value(LISTING, run.get("agent"), ["nature", "writes"], as_dict=True) or {}
+		listing = listing if isinstance(listing, dict) else {}
 		return {
 			**base,
 			"legacy": True,
@@ -259,9 +268,9 @@ def resolve(session_key: str | None = None) -> dict | None:
 	return {
 		**base,
 		"legacy": False,
-		"tools_allow": _parse_list(run.tools_allow_json),
-		"nature": (run.capability_nature or "").strip().lower(),
-		"writes": parse_writes(run.capability_writes_json),
+		"tools_allow": _parse_list(run.get("tools_allow_json")),
+		"nature": (run.get("capability_nature") or "").strip().lower(),
+		"writes": parse_writes(run.get("capability_writes_json")),
 	}
 
 
@@ -313,7 +322,12 @@ def tool_denial(session_key: str | None, tool: str, cap=_UNRESOLVED) -> dict | N
 	contract is resolved here, exactly as before.
 	"""
 	cap = resolve(session_key) if cap is _UNRESOLVED else cap
-	if cap is None or cap["legacy"]:
+	# Shape-checked like resolve's own row guard: a non-delegate (None) and a
+	# stubbed/mocked cap both mean "nothing to enforce here", which is what a
+	# patched resolve already produced before the contract was passed in. ``.get``
+	# so a cap missing the key is treated as NOT legacy, i.e. enforced - the
+	# fail-closed direction.
+	if not isinstance(cap, dict) or cap.get("legacy"):
 		return None
 	allowed = bench_tools(cap["tools_allow"])
 	name = normalize_tool(tool)
