@@ -647,7 +647,7 @@ def search_users(q: str | None = None) -> list[dict]:
 	rejects is worse than not offering it."""
 	require_jarvis_admin()
 	term = (q or "").strip()
-	filters = {"enabled": 1, "name": ("not in", ("Administrator", "Guest"))}
+	filters = {"enabled": 1, "name": ("not in", ["Administrator", "Guest"])}
 	or_filters = {"name": ("like", f"%{term}%"), "full_name": ("like", f"%{term}%")} if term else None
 	return frappe.get_all(
 		"User",

@@ -555,7 +555,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 		# computed the same way, `allowed_roles` still present.
 		res = None
 		frappe.set_user("Administrator")
-		res = agents_api.set_agent_roles("close-auditor", [ROLE_X])
+		# set_agent_ACCESS, not the set_agent_roles shim: the shim preserves
+		# allowed_users by design, and setUp grants this module's cast by name -
+		# so the shim would leave self.other named and the "blocked" assertion
+		# below would pass on a listing that in fact still admits them.
+		res = agents_api.set_agent_access("close-auditor", roles=[ROLE_X], users=[])
 		self.assertEqual(res["allowed_roles"], [ROLE_X])
 
 		def _row(user):
@@ -684,8 +688,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 		# jarvis#1062 D2 (revised): role gating governs DISCOVERY and RUNNING,
 		# not managing what you already installed — otherwise a role revoked
 		# after install stranded the owner with no UI path to uninstall it.
-		# self.other installs while UNRESTRICTED, then the listing is
-		# restricted to a role self.other does not hold.
+		# self.other installs while ALLOWED (setUp grants this module's cast by
+		# name), then the listing is narrowed to a role self.other does not hold.
 		inst_name = _install_as(self.other, "close-auditor")
 		self._restrict("close-auditor", [ROLE_X])
 		try:
@@ -730,7 +734,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 				frappe.set_user("Administrator")
 			self.assertEqual(out["agent_slug"], "close-auditor")
 		finally:
-			self._restrict("close-auditor", [])
+			# Re-grant rather than merely clearing: under deny-by-default an empty
+			# pair is itself a refusal, and the Draft assertion below would then pass
+			# for the wrong reason - on the status gate it is not testing.
+			self._restrict("close-auditor", ["Jarvis User"])
 
 		# Draft + never installed by this caller -> also a PermissionError.
 		frappe.db.set_value(LISTING, "close-auditor", "status", "Draft")
@@ -802,6 +809,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 
 		row = next(l for l in out["listings"] if l["agent_slug"] == "close-auditor")
 		self.assertEqual(row["allowed_roles"], [ROLE_X])
+		# jarvis#1062: the overview feeds the admin Access editor, so it must carry
+		# BOTH halves of the grant. The named grants come from setUp; the shim above
+		# preserves them, which is the behaviour a cached older SPA build depends on.
+		self.assertIn("allowed_users", row)
+		self.assertIn(self.owner, row["allowed_users"])
 		self.assertEqual(row["status"], "Published")
 		install_row = next(i for i in row["installs"] if i["installation"] == inst)
 		self.assertEqual(install_row["owner"], self.owner)
@@ -956,7 +968,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 		payload = agent_catalog.build_agent_push_payload(owner=self.owner)
 		self.assertEqual(payload, [])
 
-		self._restrict("close-auditor", [])  # clear -> included again
+		# Clearing every grant CLOSES the listing, yet the enabled install is still
+		# pushed: that is the deliberate grandfather leg (legacy_empty_allows in
+		# build_agent_push_payload), so an upgrade cannot drop a working customer's
+		# agent from the container roster mid-flight.
+		self._restrict("close-auditor", [])
 		payload = agent_catalog.build_agent_push_payload(owner=self.owner)
 		self.assertTrue(any(p["slug"] == "agent-close-auditor" for p in payload))
 
