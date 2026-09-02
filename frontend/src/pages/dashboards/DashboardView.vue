@@ -320,7 +320,7 @@ function onShared(fresh) {
 function discussInChat() {
 	const title = (detail.value && detail.value.dashboard_title) || props.id;
 	setChatPrefill({
-		text: `Let's discuss the dashboard "${title}" — what does it show and what stands out?`,
+		text: `Let's discuss the dashboard "${title}". What does it show and what stands out?`,
 		autoSend: true,
 		context: { doctype: "Jarvis Dashboard", name: props.id },
 	});

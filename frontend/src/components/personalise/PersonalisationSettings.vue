@@ -395,7 +395,7 @@ function userLabel(id) {
 	return (u && u.label) || id;
 }
 function scopeLabel(rule) {
-	if (rule.scope === "Role") return `Role: ${rule.target_role || "—"}`;
+	if (rule.scope === "Role") return `Role: ${rule.target_role || "-"}`;
 	if (rule.scope === "User") return `Person: ${userLabel(rule.target_user)}`;
 	return "Everyone";
 }
@@ -517,7 +517,7 @@ async function saveEditor() {
 function confirmDeleteRule(rule) {
 	confirmDialog({
 		title: "Delete this question?",
-		message: `Removes this configured question. Questions ${agentName} already asked people from this rule stay in their own banks — this only stops new ones.`,
+		message: `Removes this configured question. Questions ${agentName} already asked people from this rule stay in their own banks. This only stops new ones.`,
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				await deleteQuestionRule(rule.name);
@@ -589,7 +589,7 @@ async function generateNow() {
 	try {
 		const res = await generateChatQuestionsNow();
 		if (res && res.ok) {
-			toast.success("Mining recent chats — new questions will appear shortly.");
+			toast.success("Mining recent chats. New questions will appear shortly.");
 			// The job runs in the background (queue 'long'); poll the last-run
 			// status a few times so the line under the button reflects the result
 			// ("… N questions" or "no new chat activity") without reopening the dialog.
