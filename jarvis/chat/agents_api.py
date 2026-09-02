@@ -2241,12 +2241,12 @@ def take_finding_to_chat(finding: str) -> dict:
 	doc = frappe.get_doc(FINDING, finding)
 	doc.check_permission("read")  # S3 owner-gate (owner via if_owner, or SM)
 
-	from jarvis.chat.api import send_message
+	from jarvis.chat.api import CONV, MSG, send_message
 
 	title = (doc.title or doc.rule_id or "finding").strip()
 	conv = frappe.get_doc(
 		{
-			"doctype": "Jarvis Conversation",
+			"doctype": CONV,
 			"title": f"Finding: {title}"[:140],
 			"status": "Active",
 		}
@@ -2273,8 +2273,25 @@ def take_finding_to_chat(finding: str) -> dict:
 		"documents or remediation steps the data does not support."
 	)
 	res = send_message(conversation=conv.name, message="\n".join(parts))
+	if not res.get("ok"):
+		# jarvis#1062 polish: the conversation above is committed BEFORE the seed
+		# is attempted, so a validate_can_send failure (no model configured, over
+		# quota, ...) left an orphaned, empty "Finding: ..." conversation behind on
+		# every failed click. Clean it up - and any partial seed message, belt-
+		# and-suspenders: send_message's own overload-race path already deletes
+		# its own Message row before returning ok:False - so a failed seed leaves
+		# no trace, mirroring filebox._cascade's cleanup shape.
+		frappe.db.delete(MSG, {"conversation": conv.name})
+		frappe.delete_doc(CONV, conv.name, ignore_permissions=True, force=True)
+		frappe.db.commit()
+		return {
+			"ok": False,
+			"conversation": None,
+			"run_id": res.get("run_id"),
+			"reason": res.get("reason"),
+		}
 	return {
-		"ok": bool(res.get("ok")),
+		"ok": True,
 		"conversation": conv.name,
 		"run_id": res.get("run_id"),
 		"reason": res.get("reason"),
