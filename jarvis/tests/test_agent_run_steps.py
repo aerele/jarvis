@@ -358,8 +358,12 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 
 	def test_a_raising_tool_still_raises_and_still_leaves_an_error_step(self):
 		"""A fault past _run_tool's envelope translation is a real bug: it must
-		still reach Frappe's handler, and the run must still say the attempt
-		happened."""
+		still reach Frappe's handler, and the step must be ATTEMPTED on the way
+		out. In a real request the handler then rolls the transaction back and
+		takes the row with it - deliberately, since committing to save it would
+		also flush the raising tool's partial writes. The step that SURVIVES a
+		tool failure is the ok=False envelope one above, which is how a tool
+		error normally arrives."""
 		with mock.patch.object(api, "_run_tool", side_effect=RuntimeError("boom")):
 			with self.assertRaises(RuntimeError):
 				self._dispatch(self.key, "get_list", {"doctype": "ToDo"})
@@ -398,6 +402,12 @@ class TestListRunSteps(FrappeTestCase):
 	def setUpClass(cls):
 		super().setUpClass()
 		frappe.set_user("Administrator")
+		# CI runs a fresh DB: the role the timeline's if_owner read depends on has
+		# to exist before a user can be given it (the local bench is role-polluted
+		# and hides this).
+		from jarvis.permissions import ensure_jarvis_user_role
+
+		ensure_jarvis_user_role()
 		cls.owner = _mk_user("rs-mine@example.com", roles=("Jarvis User",))
 		cls.stranger = _mk_user("rs-stranger@example.com", roles=("Jarvis User",))
 		frappe.db.commit()

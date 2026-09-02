@@ -221,7 +221,7 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 			n = len(args["names"])
 			label = f"Read {doctype}, {_plural(n, 'document')}"
 		else:
-			label = f"Read {doctype} {target}".strip()
+			label = f"Read {doctype}" + (f" {target}" if target else "")
 	elif name == "run_report":
 		label = f"Ran report {args.get('report_name') or ''}".strip()
 		n = _n_rows(result)

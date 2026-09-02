@@ -264,8 +264,13 @@ def _dispatch_from_session(
 				result = _run_tool(tool, parsed_args, conversation=conv)
 			except Exception:
 				# A tool that raised past _run_tool's envelope translation is a real
-				# fault; the run still deserves an honest step saying the attempt
-				# happened and failed. The re-raise is untouched.
+				# fault; try to leave an honest step saying the attempt happened and
+				# failed. Strictly best-effort: on a true 500 Frappe's request handler
+				# rolls the whole transaction back and takes this row with it, and
+				# committing here to save it would also flush whatever partial writes
+				# the raising tool made. The step that MATTERS is the ok=False envelope
+				# path below, which is how a tool error normally arrives. The re-raise
+				# is untouched either way.
 				_record_tool_step(step_run, tool, parsed_args, None, ok=False, started_ms=started_ms)
 				raise
 			# Recorded BEFORE the result budget trims the payload, so a step's row
