@@ -94,7 +94,7 @@
 					<div class="flex items-center justify-between py-2">
 						<span class="text-sm text-ink-gray-6">User</span>
 						<span class="truncate text-base text-ink-gray-8">{{
-							row.event_user || "-"
+							row.event_user || "System"
 						}}</span>
 					</div>
 					<div class="h-px bg-surface-gray-2" />

@@ -37,7 +37,7 @@ export function isFieldMissing(field) {
 // for the native picker, which the span has no chrome to reformat).
 export function readonlyDisplay(field) {
 	const v = field.value == null ? "" : String(field.value);
-	if (v === "") return "—";
+	if (v === "") return "-";
 	if (field.control === "datetime") return v.replace("T", " ");
 	return v;
 }

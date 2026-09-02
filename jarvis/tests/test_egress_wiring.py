@@ -214,7 +214,7 @@ class TestPersistWiring(FrappeTestCase):
 		egress_rules._invalidate_memo()
 
 	def test_sync_connection_forwards_patterns_to_persist(self):
-		# The recurring scheduled sync must forward the CP-sent redaction_patterns to
+		# The recurring scheduled sync must forward the backend-sent redaction_patterns to
 		# egress_rules.persist (co-located with the release_notice.persist precedent).
 		from jarvis import onboarding
 

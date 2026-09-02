@@ -30,7 +30,7 @@ function roleList(r) {
 function targetLabel(r) {
 	if (r.to_scope !== "Role") return "Org";
 	const roles = roleList(r);
-	if (!roles.length) return "Role: —";
+	if (!roles.length) return "Role: -";
 	if (roles.length === 1) return `Role: ${roles[0]}`;
 	// Keep the chip compact: first two roles, then an overflow count.
 	const shown = roles.slice(0, 2).join(", ");
@@ -58,7 +58,7 @@ const tip = computed(() => {
 	if (status.value === "Pending")
 		return `Requested to promote this ${props.noun} to ${targetLabel(
 			r
-		)} — awaiting a reviewer.`;
+		)}, awaiting a reviewer.`;
 	const who = r.reviewer_name || r.reviewer || "a reviewer";
 	const when = r.decided_at ? ` ${timeAgo(r.decided_at)}` : "";
 	const note = (r.decision_note || "").trim();

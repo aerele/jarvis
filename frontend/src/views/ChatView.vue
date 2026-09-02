@@ -593,6 +593,22 @@
 						gap: 26px;
 					"
 				>
+					<!-- An existing titled conversation (e.g. opened via an agent run's
+					     "Open chat") whose first message hasn't landed yet - render a
+					     quiet placeholder instead of an empty scroll area, since
+					     showWelcome no longer treats this case as a fresh chat. -->
+					<p
+						v-if="!visibleMessages.length"
+						style="
+							margin: 0;
+							padding: 8px 0;
+							font-size: 13px;
+							color: var(--text-3);
+							text-align: center;
+						"
+					>
+						No messages yet.
+					</p>
 					<!-- macro run progress banner -->
 					<div
 						v-if="macroRun && macroRun.conversation === currentId"
@@ -606,7 +622,7 @@
 						<template v-if="macroRun.status === 'running'">
 							<span class="jv-macrobar-dot spin"></span>
 							<span class="jv-macrobar-txt"
-								>Running macro — step {{ macroRun.step }}/{{ macroRun.total
+								>Running macro, step {{ macroRun.step }}/{{ macroRun.total
 								}}<template v-if="macroRun.label"
 									>: {{ macroRun.label }}</template
 								></span
@@ -1375,7 +1391,7 @@
 											‹
 										</button>
 										<span class="jv-cards-pginfo"
-											>{{ cardPageOf(m) * CARD_PAGE_SIZE + 1 }}–{{
+											>{{ cardPageOf(m) * CARD_PAGE_SIZE + 1 }}-{{
 												Math.min(
 													(cardPageOf(m) + 1) * CARD_PAGE_SIZE,
 													cardsOf(m).cards.length
@@ -1732,7 +1748,7 @@
 										v-if="!m.streaming && enrichmentPending.has(m.name)"
 										class="jv-meta"
 										style="opacity: 0.6"
-										title="Finishing up — attachments and extras are still being added"
+										title="Finishing up. Attachments and extras are still being added"
 									>
 										<span>Finishing…</span>
 									</div>
@@ -2727,7 +2743,7 @@
 											ui.stt_enabled
 												? startNudgeMic()
 												: notify(
-														`Voice notes aren't set up on this workspace — ask your administrator.`,
+														`Voice notes aren't set up on this workspace. Ask your administrator.`,
 														{ type: 'info' }
 												  )
 										"
@@ -2888,7 +2904,7 @@
 									}}
 									<button
 										class="jv-voicechip-quiet"
-										title="Stop waiting for this transcription — the recording is kept, with Retry and Download"
+										title="Stop waiting for this transcription. The recording is kept, with Retry and Download"
 										aria-label="Cancel this transcription"
 										@click="cancelTranscribing(t.id)"
 									>
@@ -3180,7 +3196,7 @@
 								"
 								@click="
 									notify(
-										`No wiki pages yet — I'll ask when something's worth remembering, or add one in Wiki.`,
+										`No wiki pages yet. I'll ask when something's worth remembering, or add one in Wiki.`,
 										{ type: 'info' }
 									)
 								"
@@ -3206,7 +3222,7 @@
 								class="jv-iconbtn"
 								:title="
 									groundNextTurn
-										? 'Wiki grounding armed — your next message will be answered from the wiki (click to turn off)'
+										? 'Wiki grounding armed. Your next message will be answered from the wiki (click to turn off)'
 										: 'Ground your next message on the org wiki'
 								"
 								@click="groundNextTurn = !groundNextTurn"
@@ -3341,7 +3357,7 @@
 									>
 									<button
 										class="jv-mic-cancel"
-										title="Cancel recording (Esc) — throws this whole recording away; text already in the box is kept"
+										title="Cancel recording (Esc). Throws this whole recording away; text already in the box is kept"
 										aria-label="Cancel recording"
 										@click="cancelMic"
 									>
@@ -3808,7 +3824,7 @@
 												"
 											>
 												<b>{{ it.value }}</b
-												><span v-if="it.label"> — {{ it.label }}</span>
+												><span v-if="it.label">: {{ it.label }}</span>
 											</button>
 										</div>
 									</template>
@@ -3948,7 +3964,7 @@
 														>
 															<b>{{ it.value }}</b
 															><span v-if="it.label">
-																— {{ it.label }}</span
+																: {{ it.label }}</span
 															>
 														</button>
 													</div>
@@ -5214,8 +5230,8 @@ function goRenew() {
 }
 const recoveringLabel = computed(() =>
 	recovering.value && recovering.value.reason === "compacting"
-		? "That was a big one — reorganizing the conversation and retrying…"
-		: "Reconnecting — your answer will appear here when it's ready."
+		? "That was a big one, reorganizing the conversation and retrying…"
+		: "Reconnecting. Your answer will appear here when it's ready."
 );
 // Failure taxonomy → a plain-language headline + "what you can do" hint. The
 // raw string still shows behind "Show details". `code` comes from the live
@@ -5233,7 +5249,7 @@ const recoveringLabel = computed(() =>
 // (lib/errors.js); a done reply renders normally), kept so the mapping is
 // complete for WP-1 (SUXI-7).
 const TURN_STATE_COPY = {
-	queued: (pos) => (pos && pos > 0 ? `Queued — ~${pos} ahead` : "Queued"),
+	queued: (pos) => (pos && pos > 0 ? `Queued, ~${pos} ahead` : "Queued"),
 	// SUXF-3: the pump introduces a queued->preparing->ready window (prompt assembly
 	// + session bootstrap) between "queued" and the stream. Give it copy so the chip
 	// reads "Starting…" instead of freezing on a stale "~N ahead" / going silent.
@@ -5464,8 +5480,29 @@ const modelsByProvider = computed(() => {
 	return [...groups.entries()].map(([provider, models]) => ({ provider, models }));
 });
 
+// Title of the conversation loadConversation() last fetched, straight from
+// get_conversation's payload. The recent-list (store.conversations) omits
+// zero-message conversations, so a titled-but-empty chat opened via an agent
+// run's "Open chat" is NOT in that list - its title is only knowable from the
+// fetch. Cleared on the new-chat (no id) path so the welcome still shows there.
+const loadedConvTitle = ref("");
 const currentTitle = computed(
-	() => store.conversations.find((c) => c.name === currentId.value)?.title || "New chat"
+	() =>
+		store.conversations.find((c) => c.name === currentId.value)?.title ||
+		loadedConvTitle.value ||
+		"New chat"
+);
+// An EXISTING conversation (e.g. routed to from an agent run's "Open chat")
+// that has a real persisted title - as opposed to a brand-new chat, which is
+// either id-less or still titled the backend's literal "New chat" default
+// (jarvis/chat/api.py's create_conversation). Zero messages on one of these
+// means "not loaded yet" or "titled but empty", never "blank", so showWelcome
+// below must not treat it the same as a fresh chat. currentTitle already
+// resolves the title from the recent list OR, for a zero-message conversation
+// the list omits, from the last loadConversation fetch (loadedConvTitle), so
+// reuse it as the single source rather than re-deriving the lookup here.
+const isExistingTitledConv = computed(
+	() => !!currentId.value && currentTitle.value !== "New chat"
 );
 
 // supportOn/supportUnconfigured (the same dual kill-switch router/index.js's
@@ -5488,7 +5525,7 @@ const wikiEmpty = computed(() => ui.value?.wiki_state === "empty");
 // One message shape for every not-set-up feature, so the wording cannot drift between
 // the surfaces (a user with STT off sees the nudge mic and the composer mic at once).
 function explainUnavailable(feature) {
-	notify(`${feature} isn't set up on this workspace yet — ask your administrator.`, {
+	notify(`${feature} isn't set up on this workspace yet. Ask your administrator.`, {
 		type: "info",
 	});
 }
@@ -5718,7 +5755,9 @@ function prettyJson(s) {
 // screen from flashing on refresh before the open chat appears.
 const booting = ref(true);
 const showWelcome = computed(
-	() => !booting.value && (!currentId.value || visibleMessages.value.length === 0)
+	() =>
+		!booting.value &&
+		(!currentId.value || (visibleMessages.value.length === 0 && !isExistingTitledConv.value))
 );
 
 // settings/overview derived metrics (all from data we already hold)
@@ -5731,7 +5770,7 @@ const assistantMsgCount = computed(
 );
 const avgTokensPerMsg = computed(() => {
 	const n = msgCount.value;
-	if (!usage.value || !n) return "—";
+	if (!usage.value || !n) return "-";
 	return fmtTokens(Math.round((usage.value.chat_tokens || 0) / n));
 });
 const starredCount = computed(() => store.conversations.filter((c) => c.starred).length);
@@ -6263,7 +6302,7 @@ function answerConfirm(ok, label) {
 	// Echo the card's own wording so the transcript reads like what the user
 	// clicked ("Yes — Confirm and save") instead of a canned "go ahead".
 	const l = (label || "").trim();
-	send(ok ? (l ? `Yes — ${l}` : "Yes, go ahead.") : "No, cancel that.");
+	send(ok ? (l ? `Yes: ${l}` : "Yes, go ahead.") : "No, cancel that.");
 }
 
 // --- Field-control helpers shared by the confirm card and the record draft
@@ -6855,7 +6894,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			// (rich detail + hint, and nothing was saved) instead of throwing a
 			// raw Frappe 403/417. Keep the panel open so the values are editable.
 			p.applying = false;
-			p.error = r.error || { message: "Could not save — check the values." };
+			p.error = r.error || { message: "Could not save. Check the values." };
 			return;
 		}
 		closeDraftPanel();
@@ -7044,8 +7083,8 @@ async function confirmPending(pa) {
 				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
 				notify(
 					expired
-						? "This confirmation expired — tell me the action again to retry it."
-						: "Couldn't confirm — it may have been handled in another tab. Refresh, or ask me to try again.",
+						? "This confirmation expired. Tell me the action again to retry it."
+						: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again.",
 					{ type: "error" }
 				);
 				return;
@@ -7944,6 +7983,7 @@ async function loadConversation(id) {
 		promptHistory.value = [];
 		histIdx.value = null;
 		histDraft.value = "";
+		loadedConvTitle.value = "";
 		return;
 	}
 	const d = await api.getConversation(id);
@@ -7973,6 +8013,9 @@ async function loadConversation(id) {
 	// saved pin always rendered as "Auto" after a reload.
 	modelOverride.value = d?.conversation?.model_override || "";
 	thinkingOverride.value = d?.conversation?.thinking_override || "";
+	// Remember the fetched title so a titled-but-empty conversation (which the
+	// recent list omits) is recognised as existing, not rendered as a new chat.
+	loadedConvTitle.value = d?.conversation?.title || "";
 	// The origin and the conversation it was read for, written as a pair — the
 	// gate compares the second against currentId, so neither is ever trusted
 	// alone. Nothing above blanks them: a refresh of the conversation already on
@@ -8303,7 +8346,7 @@ async function selectConversation(id) {
 // the extracted reason so a non-string Frappe error payload can't throw inside the
 // caller's catch and re-swallow the very failure we're trying to report.
 function notifyActionError(prefix, e) {
-	notify(`${prefix} — ${String(errMessage(e)).replace(/\.$/, "")}. Try again.`, {
+	notify(`${prefix}: ${String(errMessage(e)).replace(/\.$/, "")}. Try again.`, {
 		type: "error",
 	});
 }
@@ -8348,6 +8391,11 @@ async function newChat() {
 	// and a later send can release the records by the real scope instead of stranding them (R2-2/R3-2).
 	if (currentId.value) _promoteNewChatScope(currentId.value);
 	messages.value = [];
+	// A brand-new chat is not in the recent list and loadConversation does not
+	// run here (the route watcher no-ops), so clear the last-loaded title;
+	// otherwise isExistingTitledConv keeps the previous conversation's title and
+	// suppresses the welcome screen on the fresh chat.
+	loadedConvTitle.value = "";
 	// loadConversation is the only other writer and the route watcher no-ops here
 	// (currentId already equals this id), so without this the previous chat's
 	// origin survives onto a brand-new one — and the first html the agent draws
@@ -9482,7 +9530,7 @@ const voiceBusyCount = computed(
 // careful about everywhere else.
 const voiceSendBlockReason = computed(() => {
 	if (micState.value === "recording")
-		return "Stop the dictation first — its words are still coming.";
+		return "Stop the dictation first. Its words are still coming.";
 	if (voiceBusyCount.value > 0)
 		return "Waiting for the dictation to land in the box (or cancel it below).";
 	return "";
@@ -9646,7 +9694,7 @@ function _onVoicePersistFail() {
 	if (micState.value !== "recording") return;
 	void stopMic();
 	notify(
-		"Couldn't safely save your voice audio on this device (storage may be full or private mode). Recording stopped — download the recording to keep it, or retry once you've freed space.",
+		"Couldn't safely save your voice audio on this device (storage may be full or private mode). Recording stopped. Download the recording to keep it, or retry once you've freed space.",
 		{ type: "error" }
 	);
 }
@@ -9675,7 +9723,7 @@ const micRec = useDictationRecorder({
 		// transcribed, and one audible word anywhere in the take clears the gate.
 		if (isNearSilent(take.peakRms)) {
 			voiceStore.finishSilent(id, take);
-			notify("Nothing was heard — try closer to the microphone.", { type: "info" });
+			notify("Nothing was heard. Try closer to the microphone.", { type: "info" });
 			return;
 		}
 		voiceStore.finish(id, take);
@@ -9690,7 +9738,7 @@ const micRec = useDictationRecorder({
 	// transcribed rather than refused after the fact.
 	onAutoStop: () => {
 		micState.value = "idle";
-		notify("Recording stopped at the 5-minute limit — transcribing what you said.", {
+		notify("Recording stopped at the 5-minute limit. Transcribing what you said.", {
 			type: "info",
 		});
 	},
@@ -9698,7 +9746,7 @@ const micRec = useDictationRecorder({
 	// mid-sentence surprise explained only afterwards.
 	onNearCap: (secondsLeft) => {
 		notify(
-			`${secondsLeft} seconds left before the 5-minute limit — finish your sentence and stop when you're ready.`,
+			`${secondsLeft} seconds left before the 5-minute limit. Finish your sentence and stop when you're ready.`,
 			{ type: "info" }
 		);
 	},
@@ -9772,22 +9820,22 @@ async function cancelMic() {
 // would be a riddle and the honest verb is "transcribe it anyway".
 const failedChipLabel = (f) => {
 	const len = _fmtClock(f.durationS);
-	if (f.noSpeech) return `Recording ${len} — nothing was heard`;
+	if (f.noSpeech) return `Recording ${len}, nothing was heard`;
 	// WHY it failed, from the server's own (secret-scrubbed) message: a permanent fault
 	// ("Speech-to-text is not enabled on this site.") and a transient blip are otherwise
 	// indistinguishable, so users Retry-loop the same upload forever and report nothing useful.
 	const why = f.error ? ` · ${f.error}` : "";
 	return f.sentWithout
-		? `Recording ${len} didn't transcribe — your last message went without it${why}`
+		? `Recording ${len} didn't transcribe, your last message went without it${why}`
 		: `Recording ${len} didn't transcribe${why}`;
 };
 const failedChipTitle = (f) => (f.error ? `Reason: ${f.error}` : "");
 const failedChipRetryLabel = (f) => (f.noSpeech ? "Transcribe anyway" : "Retry");
 const failedChipRetryTitle = (f) =>
 	f.sentWithout
-		? "Transcribe again — the words go into your current draft, not the message that already went"
+		? "Transcribe again. The words go into your current draft, not the message that already went"
 		: f.noSpeech
-		? "Send it for transcription anyway — nothing audible was measured, but the measurement can be wrong"
+		? "Send it for transcription anyway. Nothing audible was measured, but the measurement can be wrong"
 		: "Transcribe this recording again";
 function retryRecording(id) {
 	if (voiceStore) voiceStore.retry(id);
@@ -9812,7 +9860,7 @@ async function discardUnpersistedRecording(id) {
 	const ok = await confirm({
 		title: "Discard this recording?",
 		message:
-			"This audio could not be saved to disk — discarding loses it. It exists only in this tab, so a reload would lose it too. Download it first if you want to keep it.",
+			"This audio could not be saved to disk, discarding loses it. It exists only in this tab, so a reload would lose it too. Download it first if you want to keep it.",
 		danger: true,
 		confirmLabel: "Discard",
 		cancelLabel: "Keep",
@@ -9932,7 +9980,7 @@ const recoveryLabel = (t) => {
 	const len = _fmtClock(t.durationS || 0);
 	return t.complete
 		? `A recording from your last session wasn't transcribed (${len})`
-		: `A recording from your last session can't be rebuilt (${len}) — its first fragment is missing`;
+		: `A recording from your last session can't be rebuilt (${len}), its first fragment is missing`;
 };
 function recoverTake(t) {
 	// Never recover while recording: the composer is already filling from a live take, and the
@@ -10051,7 +10099,7 @@ const nudgeLabels = computed(() =>
 );
 const nudgeRec = useAudioRecorder({
 	onAutoStop: (r) => {
-		notify("Recording stopped at the 5-minute limit — transcribing.", { type: "info" });
+		notify("Recording stopped at the 5-minute limit. Transcribing.", { type: "info" });
 		_nudgeTranscribe(r);
 	},
 });
@@ -10084,7 +10132,7 @@ async function _nudgeTranscribe(r) {
 		const res = await voice.transcribeAudio(r.blob, { durationS: r.durationS });
 		const text = ((res && res.text) || "").trim();
 		if (!text) {
-			notify("Nothing was transcribed — try again closer to the microphone.", {
+			notify("Nothing was transcribed. Try again closer to the microphone.", {
 				type: "info",
 			});
 			if (nudge.value) nudge.value.mode = "idle";
@@ -10139,7 +10187,7 @@ async function saveNudgeNote() {
 			entities: JSON.stringify(n.entities || []),
 			source: "Chat Nudge",
 		});
-		notify(`Noted — ${agentName} will remember this`, { type: "success" });
+		notify(`Noted, ${agentName} will remember this`, { type: "success" });
 		nudge.value = null;
 	} catch (e) {
 		n.saving = false;
@@ -10154,7 +10202,7 @@ function dismissNudge() {
 	if (n) voice.dismissWikiNudge(n.conversationId).catch(() => {});
 	// the dismissal mutes a week of nudges here — say so, once, or users
 	// won't know they opted out
-	notify("Okay — won't ask again in this chat for a week.");
+	notify("Okay, won't ask again in this chat for a week.");
 }
 
 // ---- attachments ----

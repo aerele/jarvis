@@ -714,9 +714,9 @@ function countOf(labels) {
 // because "your link is stale" and "there is no link" are different problems:
 // one leaves a shareable address behind, the other never had one.
 export const URL_TOO_LARGE_NOTICE =
-	"This filter set is too large to share as a link — the address bar keeps the last shareable one.";
+	"This filter set is too large to share as a link. The address bar keeps the last shareable one.";
 export const URL_TOO_LARGE_UNSHARED_NOTICE =
-	"This filter set is too large to share as a link — it is applied, but it is not in the address bar.";
+	"This filter set is too large to share as a link. It is applied, but not in the address bar.";
 
 // ── server error codes → what the panel does about it ───────────────────────
 export const ERR_UNKNOWN_VIEW = "list_filter_unknown_view";
@@ -775,7 +775,7 @@ const FALLBACK_COPY = {
 	[ERR_TOO_MANY_VALUES]: "Too many values in one condition.",
 	[ERR_SCHEMA_UNAVAILABLE]: "Filters are unavailable for this list right now.",
 	[ERR_QUERY_TOO_EXPENSIVE]:
-		"That filter is too broad to run on this list — narrow it and try again.",
+		"That filter is too broad to run on this list. Narrow it and try again.",
 };
 
 function envelopeIn(candidate) {

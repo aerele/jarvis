@@ -263,7 +263,7 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	# raise or clear the release notice, and this is the only refresh an idle
 	# bench gets.
 	release_notice.persist(data.get("release_notice") or {})
-	# Same cadence: mirror the CP-owned egress redaction rules for the chat backstop.
+	# Same cadence: mirror the backend-owned egress redaction rules for the chat backstop.
 	from jarvis.chat import egress_rules
 
 	egress_rules.persist(data.get("redaction_patterns"))
@@ -820,7 +820,7 @@ def save_llm_pool(
 # credentials, but they are cleared deliberately: is_ready_for_chat treats a
 # stamped marker as "this tenant has applied at least once, so keep chat open
 # through a transient pending". Leaving them set would let the NEXT connection
-# open chat before its first apply is confirmed - exactly the split-brain the
+# open chat before its first apply is confirmed - exactly the state mismatch the
 # markers exist to prevent. A disconnect ends that history.
 _DISCONNECTED_LLM_FIELDS = {
 	"llm_provider": "",

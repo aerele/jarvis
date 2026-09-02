@@ -359,7 +359,7 @@
 											variant="ghost"
 											label="Ignore"
 											iconLeft="bell-off"
-											:tooltip="'Dismiss without acting — the assistant is not told anything'"
+											:tooltip="'Dismiss without acting. The assistant is not told anything'"
 											:loading="dismissing"
 											:disabled="deciding !== null"
 											@click="submitDismiss"
@@ -423,8 +423,8 @@
 									<div class="mt-2 text-sm text-ink-gray-5">
 										{{
 											chatAnswerOnly
-												? "This question needs a longer answer — continue in chat."
-												: "Tag a colleague to view and comment — only you (or an admin) can approve."
+												? "This question needs a longer answer. Continue in chat."
+												: "Tag a colleague to view and comment. Only you (or an admin) can approve."
 										}}
 									</div>
 								</div>
@@ -903,7 +903,7 @@ async function submitDismiss() {
 		}
 		note.value = "";
 		selectedOption.value = "";
-		toast.success("Ignored — the assistant was not notified");
+		toast.success("Ignored. The assistant was not notified");
 		store.refreshApprovalsCount();
 		if ((filters.status || "Pending") === "Pending") advanceAfterDecide(id);
 		else loadRecord(id, { keep: true });
