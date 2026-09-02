@@ -103,7 +103,7 @@ describe("Link search", () => {
 		expect(w.findComponent({ name: "Autocomplete" }).exists()).toBe(false);
 		const input = w.find('input[type="text"]');
 		expect(input.exists()).toBe(true);
-		expect(w.text()).toContain("Can't search User — enter the name directly.");
+		expect(w.text()).toContain("Can't search User. Enter the name directly.");
 		await input.setValue("someone@x.com");
 		expect(patch(w)).toEqual({ value: "someone@x.com", display: null, immediate: false });
 	});
@@ -120,7 +120,7 @@ describe("Link search", () => {
 		await new Promise((r) => setTimeout(r, 350));
 		await flushPromises();
 		expect(w.find('input[type="text"]').exists()).toBe(true);
-		expect(w.text()).toContain("No User matched — enter the name directly.");
+		expect(w.text()).toContain("No User matched. Enter the name directly.");
 
 		await w.setProps({
 			entry: { ...OWNER, fieldname: "modified_by", label: "Last Updated By" },
@@ -141,7 +141,7 @@ describe("Link search", () => {
 		await new Promise((r) => setTimeout(r, 350));
 		await flushPromises();
 		expect(w.findComponent({ name: "Autocomplete" }).exists()).toBe(false);
-		expect(w.text()).toContain("No User matched — enter the name directly.");
+		expect(w.text()).toContain("No User matched. Enter the name directly.");
 
 		// the correction is typed into the fallback input, which keeps searching
 		apiDouble.searchLink.mockResolvedValue([{ value: "ann@x.com", label: "Ann" }]);
@@ -288,7 +288,7 @@ describe("multi-value", () => {
 		await input.setValue("c");
 		await input.trigger("keydown", { key: "Enter" });
 		expect(w.emitted("update:value")).toBeUndefined();
-		expect(w.text()).toContain("Limit reached — 2 values is the maximum.");
+		expect(w.text()).toContain("Limit reached. 2 values is the maximum.");
 		expect(input.element.value).toBe("c");
 	});
 
@@ -300,7 +300,7 @@ describe("multi-value", () => {
 		]);
 		await w.vm.$nextTick();
 		expect(patch(w).value).toEqual(["Org"]);
-		expect(w.text()).toContain("Limit reached — only the first 1 values are used.");
+		expect(w.text()).toContain("Limit reached. Only the first 1 values are used.");
 	});
 
 	it("stops at the server's per-condition value cap", async () => {

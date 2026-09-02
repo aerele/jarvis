@@ -24,16 +24,16 @@ SUPPORT_ERROR = "error"
 
 
 def _support_state() -> str:
-	"""Fleet-wide support state, Redis-cached (P8) so boot never blocks on a CP round-trip.
+	"""Fleet-wide support state, Redis-cached (P8) so boot never blocks on a backend round-trip.
 	Uses support_status (relaxed auth) — NOT get_connection, which 403s suspended customers (P7).
 
-	Returns one of ``ok`` / ``unconfigured`` / ``off`` / ``error``. The CP has always known
+	Returns one of ``ok`` / ``unconfigured`` / ``off`` / ``error``. The backend has always known
 	which of those it means; the bench used to collapse them into one boolean, so a
-	transient CP blip was indistinguishable from "support was never set up" and both just
+	transient backend blip was indistinguishable from "support was never set up" and both just
 	hid the button. ``error`` is kept distinct precisely so a self-healing blip does NOT
 	render as "support is not set up" — it stays hidden and retries in a minute.
 
-	A CP too old to send ``reason`` degrades safely: unavailable-without-a-reason is
+	A backend too old to send ``reason`` degrades safely: unavailable-without-a-reason is
 	treated as ``off`` (hide), which is exactly today's behaviour."""
 	cache = frappe.cache()
 	cached = cache.get_value(_SUPPORT_AVAILABLE_CACHE_KEY, expires=True)

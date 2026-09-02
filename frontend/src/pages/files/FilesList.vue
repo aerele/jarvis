@@ -123,7 +123,7 @@
 					v-if="row.behind_chat && row.status === 'processing'"
 					variant="subtle"
 					theme="gray"
-					label="Waiting — behind chat"
+					label="Waiting (behind chat)"
 				/>
 				<Badge
 					v-else

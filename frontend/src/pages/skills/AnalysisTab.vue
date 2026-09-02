@@ -133,9 +133,7 @@
 							>No analysis runs yet</span
 						>
 						<span class="max-w-sm text-p-base text-ink-gray-6">
-							Run your first analysis to mine this site's history for behavioural
-							patterns. Findings become Personalise questions for the people
-							involved; anything skill-shaped also lands pending in Review.
+							Run your first analysis to find patterns in your team's history.
 						</span>
 					</div>
 
@@ -225,8 +223,8 @@
 						</div>
 
 						<div class="text-sm text-ink-gray-6">
-							Findings become Personalise questions for the people involved once the
-							run finishes; anything skill-shaped also lands pending in
+							Findings become Personalise questions once a run finishes. Skill-shaped
+							ones also land pending in
 							<button class="text-ink-gray-8 underline" @click="goReview">
 								Review</button
 							>.
@@ -245,7 +243,7 @@
 				<!-- ══════════════ Personalisation questions pointer ══════════════ -->
 				<!-- Discoverability for the gear-gated Settings dialog (DESIGN.md §6
 				     ADOPTED: "gear on Personalise (admin-only) AND a link card on
-				     Analysis tab"). This card only navigates the hash — the gear on
+				     Analysis tab"). This card only navigates the hash - the gear on
 				     PersonaliseTab.vue is what actually opens the dialog (its
 				     `settingsOpen` ref lives there, not here); see this file's report
 				     note on why that's the deliberately simple wiring. -->
@@ -256,8 +254,8 @@
 								Personalisation questions
 							</div>
 							<div class="mt-0.5 text-sm text-ink-gray-6">
-								Configure what {{ agentName }} asks your team — org-wide, per role,
-								or one person at a time — on the Personalise tab.
+								Configure what {{ agentName }} asks your team (org-wide, per role,
+								or per person) on the Personalise tab.
 							</div>
 						</div>
 						<Button
@@ -274,7 +272,7 @@
 </template>
 
 <script setup>
-// AnalysisTab — the pattern-learning settings + run telemetry, the "Analysis"
+// AnalysisTab - the pattern-learning settings + run telemetry, the "Analysis"
 // tab inside the Skills page (Skills IA v2). Split out of the old LearningTab:
 // this file owns the Settings card (enable / window / max proposals / Save),
 // the Run-now control (top-right, confirm popup, dynamic first-run label) and
@@ -455,7 +453,7 @@ function runNow() {
 	confirmDialog({
 		title: "Run analysis now?",
 		message:
-			"Runs a full pattern analysis immediately, bypassing the nightly window. It scans this site's history and can add database load during business hours. New findings become Personalise questions once the run finishes; skill-shaped ones land pending on the Review tab.",
+			"Runs now instead of waiting for the nightly window. This can add load to your database. New findings become Personalise questions, and skill-shaped ones land pending in Review.",
 		onConfirm: async ({ hideDialog }) => {
 			runningNow.value = true;
 			try {

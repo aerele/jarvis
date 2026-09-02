@@ -700,7 +700,7 @@ class TestWatchdog(_PumpTestCase):
 
 	def test_b1_watchdog_early_return_does_not_stamp(self):
 		"""B1 (GAP 1): an early exit (target enumeration fails) must NOT stamp completion,
-		so the bench heartbeat's watchdog age keeps growing and the CP still sees a stalled
+		so the bench heartbeat's watchdog age keeps growing and the backend still sees a stalled
 		cron rather than a falsely-fresh one."""
 		key = "jarvis_pump_watchdog_last_completed"
 		old = "2020-01-01 00:00:00"

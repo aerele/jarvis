@@ -21,7 +21,7 @@
 			</p>
 
 			<button class="jv-gate-btn" :disabled="checking" @click="recheck">
-				{{ checking ? "Checking…" : "I've updated — check again" }}
+				{{ checking ? "Checking…" : "I've updated, check again" }}
 			</button>
 		</div>
 	</div>

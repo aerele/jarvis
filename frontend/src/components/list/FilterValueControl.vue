@@ -317,7 +317,7 @@ function emitList(next) {
 	const capped = next.slice(0, props.maxValues);
 	limitNote.value =
 		next.length > capped.length
-			? `Limit reached — only the first ${props.maxValues} values are used.`
+			? `Limit reached. Only the first ${props.maxValues} values are used.`
 			: "";
 	emit("update:value", { value: capped, immediate: true });
 }
@@ -364,7 +364,7 @@ function commitChip() {
 	// successful add whose chip failed to render, and the user retypes the same
 	// value and watches it vanish again.
 	if (list.value.length >= props.maxValues) {
-		chipNote.value = `Limit reached — ${props.maxValues} values is the maximum.`;
+		chipNote.value = `Limit reached. ${props.maxValues} values is the maximum.`;
 		return;
 	}
 	if (list.value.includes(text)) {
@@ -444,14 +444,14 @@ async function loadLinks(query) {
 			// Nothing came back for something the user actually typed: the picker
 			// has no more to offer, so hand them the input that can still express
 			// the filter rather than an empty dropdown.
-			linkFallbackReason.value = `No ${doctype} matched — enter the name directly.`;
+			linkFallbackReason.value = `No ${doctype} matched. Enter the name directly.`;
 		}
 	} catch (e) {
 		// A caller who may not search this DocType gets no suggestions; the clause
 		// is still usable by typing a name, so fall back instead of failing.
 		if (seq === linkSeq) {
 			linkOptions.value = [];
-			linkFallbackReason.value = `Can't search ${doctype} — enter the name directly.`;
+			linkFallbackReason.value = `Can't search ${doctype}. Enter the name directly.`;
 		}
 	} finally {
 		if (seq === linkSeq) linkLoading.value = false;

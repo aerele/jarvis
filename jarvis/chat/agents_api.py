@@ -724,6 +724,9 @@ def get_agent_admin_overview() -> dict:
 			"owner",
 			"run_as_user",
 			"enabled",
+			"activation_state",
+			"installable",
+			"not_installable_reason",
 			"schedule_enabled",
 			"schedule_frequency",
 			"next_run_at",
@@ -742,6 +745,14 @@ def get_agent_admin_overview() -> dict:
 				# WHICH row it is here, rather than having to open raw Desk.
 				"run_as_user": i.run_as_user or None,
 				"enabled": int(i.enabled or 0),
+				# Promotion axis. Null legacy rows are Shadow everywhere in the backend
+				# (coalesced), so match that here rather than invent an "unknown" state.
+				"activation_state": i.activation_state or "shadow",
+				# Last-reconciled install state (a STORED flag refreshed on after_migrate
+				# by reconcile_installations — NOT a live re-evaluation). The SPA words
+				# the Blocked hint as "as last reconciled" so it never claims live truth.
+				"installable": int(i.installable or 0),
+				"not_installable_reason": i.not_installable_reason or None,
 				"schedule_enabled": int(i.schedule_enabled or 0),
 				"schedule_frequency": i.schedule_frequency,
 				"next_run_at": str(i.next_run_at) if i.next_run_at else None,

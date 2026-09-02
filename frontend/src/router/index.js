@@ -36,6 +36,23 @@ const routes = [
 		component: () => import("@/pages/skills/SkillDetail.vue"),
 		props: true,
 	},
+	// Wiki detail/create page (replaces the old WikiTab create Dialog +
+	// components/wiki/WikiPageDialog.vue popup): the SkillDetail/SkillNew
+	// shape, one level deeper so it can't collide with /skills/:id (different
+	// segment count). "new" is registered BEFORE ":slug" so it can't be
+	// shadowed (the Macros/Triggers precedent).
+	{
+		path: "/skills/wiki/new",
+		name: "WikiPageNew",
+		component: () => import("@/pages/wiki/WikiDetail.vue"),
+		props: { isNew: true },
+	},
+	{
+		path: "/skills/wiki/:slug",
+		name: "WikiPageDetail",
+		component: () => import("@/pages/wiki/WikiDetail.vue"),
+		props: true,
+	},
 	// First-run wizard (managed signup) — System-Manager
 	// only; guard redirects others to Chat. Reached via the chat welcome card
 	// or the desk banner, not a forced redirect (see beforeEach below).
