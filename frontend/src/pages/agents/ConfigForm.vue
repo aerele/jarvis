@@ -1,7 +1,26 @@
 <template>
 	<div>
-		<div v-if="!fields.length && !hasAdvanced" class="text-sm text-ink-gray-5">
-			No configuration set yet - add keys under Advanced (JSON).
+		<div v-if="!fields.length && !hasAdvanced" class="text-sm text-ink-gray-6">
+			<p>
+				Engagement settings this agent reads when it runs. Leave a setting empty to use the
+				default.
+			</p>
+			<dl class="mt-3 space-y-2.5">
+				<div
+					v-for="k in CONFIG_KEY_REFERENCE"
+					:key="k.key"
+					class="flex flex-col gap-0.5 sm:flex-row sm:gap-3"
+				>
+					<dt class="shrink-0 sm:w-44">
+						<code
+							class="rounded bg-surface-gray-2 px-1.5 py-0.5 font-mono text-xs text-ink-gray-7"
+						>
+							{{ k.key }}
+						</code>
+					</dt>
+					<dd class="text-ink-gray-5">{{ k.description }}</dd>
+				</div>
+			</dl>
 		</div>
 
 		<div v-if="fields.length" class="space-y-4">
@@ -39,8 +58,8 @@
 				@update:modelValue="onAdvancedInput"
 			/>
 			<div class="mt-1 text-xs text-ink-gray-5">
-				Array/object values and new keys are edited here; form fields above win on matching
-				keys.
+				Enter values as JSON, for example {"company": "Acme Ltd", "benchmark_value":
+				1000000, "percentage": 5}. Form fields above win on matching keys.
 			</div>
 			<ErrorMessage class="mt-2" :message="advancedError" />
 		</DocSection>
@@ -61,6 +80,27 @@
 import { ref, computed, watch } from "vue";
 import { Button, ErrorMessage, FormControl, Switch } from "frappe-ui";
 import DocSection from "@/components/doc/DocSection.vue";
+
+// jarvis#1062 polish: the empty state used to say "add keys under Advanced
+// (JSON)" with no hint of WHAT to add. This reference is the actual set the
+// run path reads today - verified against agent_scope.py's _resolve
+// (company/fiscal_year/from_date/to_date) and the set_config docstring in
+// agents_api.py (benchmark_value/percentage/engagement_risk_level/
+// rounding_step) - not a schema. A per-agent DECLARED config schema (so this
+// list is generated, not hand-maintained, and a listing can add its own
+// keys) is #1063; this stays a hand-maintained reference until then.
+const CONFIG_KEY_REFERENCE = [
+	{ key: "company", description: "Company to audit; default: your default company" },
+	{ key: "fiscal_year", description: "Fiscal year to cover; default: the current one" },
+	{ key: "from_date / to_date", description: "Explicit period; overrides fiscal_year" },
+	{
+		key: "benchmark_value / percentage",
+		description:
+			"Materiality: benchmark amount and percentage; auditors report checks as not evaluable when unset",
+	},
+	{ key: "engagement_risk_level", description: "low / medium / high" },
+	{ key: "rounding_step", description: "Round-number plug detection step" },
+];
 
 const props = defineProps({
 	config: { type: Object, default: () => ({}) }, // parsed installation config

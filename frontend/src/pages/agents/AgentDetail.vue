@@ -306,11 +306,8 @@
 			</div>
 
 			<!-- ── Configure (installed; §14 F3 + D28 comments) ── -->
-			<div
-				v-else-if="tab === 'configure' && installation"
-				class="max-w-2xl shrink-0 space-y-10 px-5 py-6"
-			>
-				<section v-if="canReview">
+			<div v-else-if="tab === 'configure' && installation" class="shrink-0 px-5 py-6">
+				<section v-if="canReview" class="mb-10 max-w-2xl">
 					<ActivationPanel
 						:installation-name="installation.name"
 						:agent-title="agent.title"
@@ -325,55 +322,69 @@
 					/>
 				</section>
 
-				<section>
-					<div class="text-base font-medium text-ink-gray-9">Schedule</div>
-					<div class="mt-3 space-y-4">
-						<Switch
-							label="Run automatically"
-							:modelValue="sched.enabled"
-							@update:modelValue="(v) => (sched.enabled = v)"
-						/>
-						<div v-if="sched.enabled" class="grid grid-cols-2 gap-4">
-							<FormControl
-								type="select"
-								label="Frequency"
-								:options="FREQUENCY_OPTIONS"
-								:modelValue="sched.frequency"
-								@update:modelValue="(v) => (sched.frequency = v)"
-							/>
-							<div>
-								<FormLabel label="Time" class="mb-1.5" />
-								<TimePicker
-									:modelValue="sched.time"
-									placeholder="09:00"
-									@update:modelValue="(v) => (sched.time = v)"
+				<!-- Schedule + Comments read together on the left (you'd want to see
+				     what a reviewer said while touching the schedule); Configuration
+				     on the right - the same 2-col-on-lg+ pattern as the Admin tab, so
+				     the width it claims back from a stacked max-w-2xl column isn't
+				     left empty here either. -->
+				<div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-start">
+					<div class="min-w-0 space-y-10">
+						<section>
+							<div class="text-base font-medium text-ink-gray-9">Schedule</div>
+							<div class="mt-3 space-y-4">
+								<Switch
+									label="Run automatically"
+									:modelValue="sched.enabled"
+									@update:modelValue="(v) => (sched.enabled = v)"
+								/>
+								<div v-if="sched.enabled" class="grid grid-cols-2 gap-4">
+									<FormControl
+										type="select"
+										label="Frequency"
+										:options="FREQUENCY_OPTIONS"
+										:modelValue="sched.frequency"
+										@update:modelValue="(v) => (sched.frequency = v)"
+									/>
+									<div>
+										<FormLabel label="Time" class="mb-1.5" />
+										<TimePicker
+											:modelValue="sched.time"
+											placeholder="09:00"
+											@update:modelValue="(v) => (sched.time = v)"
+										/>
+									</div>
+								</div>
+								<div
+									v-if="installation.next_run_at"
+									class="text-sm text-ink-gray-5"
+								>
+									Next run: {{ fmtDt(installation.next_run_at) }}
+								</div>
+								<Button
+									label="Save schedule"
+									:loading="savingSchedule"
+									@click="saveSchedule"
 								/>
 							</div>
-						</div>
-						<div v-if="installation.next_run_at" class="text-sm text-ink-gray-5">
-							Next run: {{ fmtDt(installation.next_run_at) }}
-						</div>
-						<Button
-							label="Save schedule"
-							:loading="savingSchedule"
-							@click="saveSchedule"
-						/>
+						</section>
+
+						<section class="border-t pt-6">
+							<CommentsSection :docmeta="docmeta" :can-comment="true" />
+						</section>
 					</div>
-				</section>
 
-				<section>
-					<div class="text-base font-medium text-ink-gray-9">Configuration</div>
-					<ConfigForm
-						class="mt-3"
-						:config="parsedConfig"
-						:saving="savingConfig"
-						@save="saveConfig"
-					/>
-				</section>
-
-				<section class="border-t pt-6">
-					<CommentsSection :docmeta="docmeta" :can-comment="true" />
-				</section>
+					<div class="min-w-0">
+						<section>
+							<div class="text-base font-medium text-ink-gray-9">Configuration</div>
+							<ConfigForm
+								class="mt-3"
+								:config="parsedConfig"
+								:saving="savingConfig"
+								@save="saveConfig"
+							/>
+						</section>
+					</div>
+				</div>
 			</div>
 
 			<!-- ── Runs (installed): two-pane master-detail board ── -->

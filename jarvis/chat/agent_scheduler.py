@@ -807,6 +807,23 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 		# concerned. Leave it alone — an unknown state is never a verdict.
 		return False
 
+	# The host can report a clean ``done`` while its OWN result says the turn never
+	# really finished - a gateway timeout/abort still writes a "done" run-state (the
+	# process exited), with the honest verdict buried in ``result`` instead. Read
+	# there BEFORE the writeback grace: waiting it out just delays the same "delegate
+	# finished without recording results" non-answer by five more minutes, discarding
+	# the real reason (``result.reply``) the gateway already handed us.
+	result = state.get("result")
+	if isinstance(result, dict):
+		gateway_status = result.get("gateway_status")
+		aborted = gateway_status not in ("ok", "completed", "", None) or result.get("summary") == "aborted"
+		if aborted:
+			return _terminalize_stuck_run(
+				row.name,
+				error=_gateway_abort_error_message(result, gateway_status),
+				detail=f"polled: gateway reported {gateway_status}",
+			)
+
 	# Finished on the host, still ``running`` on the bench: the writeback is either in
 	# flight or it is never coming. Wait out the grace before deciding, measured from the
 	# host's own finish time (see WRITEBACK_GRACE_SECONDS).
@@ -820,6 +837,19 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 		error="delegate finished without recording results",
 		detail="polled: delegate finished without recording results",
 	)
+
+
+def _gateway_abort_error_message(result: dict, gateway_status) -> str:
+	"""The delegate's real abort sentence out of the fleet result's ``reply`` - its
+	first line, trimmed to the same 140-char budget every polled error uses - falling
+	back to a generic-but-honest sentence naming the gateway status when there is no
+	reply to read."""
+	reply = result.get("reply")
+	if isinstance(reply, str) and reply.strip():
+		first_line = reply.strip().splitlines()[0].strip()
+		if first_line:
+			return first_line[:140]
+	return f"the agent turn was aborted by the gateway ({gateway_status})"
 
 
 def _fleet_error_message(state: dict) -> str:
