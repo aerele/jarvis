@@ -186,7 +186,7 @@ def stt_config() -> dict | None:
 STT_OK = "ok"
 STT_OFF = "off"  # an admin deliberately turned voice features off
 STT_UNCONFIGURED = "unconfigured"  # no key anywhere — an admin can still set it up
-STT_ERROR = "error"  # transient: the CP lookup blew up; self-heals
+STT_ERROR = "error"  # transient: the backend lookup blew up; self-heals
 
 
 def stt_state() -> str:

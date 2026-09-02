@@ -1,9 +1,9 @@
-"""GAP 1 (Track B) — the bench heartbeat emitter: the data-plane half of the
+"""GAP 1 (Track B) — the bench heartbeat emitter: the bench-side half of the
 scheduler dead-man's-switch.
 
-An UNCONDITIONAL ``*/5`` cron POSTs a small liveness VECTOR to the control plane on
+An UNCONDITIONAL ``*/5`` cron POSTs a small liveness VECTOR to the backend on
 every tick — even with zero turns and zero errors. That unconditional cadence IS the
-switch: if the site scheduler dies, the POSTs stop and the CP (Track C) alarms on the
+switch: if the site scheduler dies, the POSTs stop and the backend (Track C) alarms on the
 tenant's silence. The vector also carries symptom signals so a scheduler that is alive
 but whose recovery machinery is wedged is still visible:
 
@@ -94,10 +94,10 @@ def push_bench_heartbeat() -> None:
 
 		admin_client.push_bench_heartbeat(bench_liveness_vector())
 	except (AdminAuthError, AdminUnreachableError, AdminRateLimitedError, AdminValidationError):
-		# Best-effort telemetry: ANY push the CP does not accept — not onboarded, admin
+		# Best-effort telemetry: ANY push the backend does not accept — not onboarded, admin
 		# down, throttled, or a 4xx (INCLUDING the ingest endpoint not existing yet, before
 		# Track C ships, and any rejected payload) — is not a bench-side actionable bug.
-		# Stay silent: the CP's dead-man's-switch alarms on the ABSENCE of heartbeats, so a
+		# Stay silent: the backend's dead-man's-switch alarms on the ABSENCE of heartbeats, so a
 		# rejected one is harmless, and logging it would spam the Error Log fleet-wide.
 		return
 	except Exception:
