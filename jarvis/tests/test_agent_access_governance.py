@@ -568,16 +568,22 @@ class TestAdminInstallControl(AccessGovernanceCase):
 	def test_jarvis_admin_can_disable_another_owners_install(self):
 		"""Jarvis Admin held READ ONLY on Jarvis Agent Installation, so a tenant
 		admin could see a runaway install and do nothing about it."""
-		# Preconditions, asserted rather than assumed: this test failed once because
-		# the DocPerm row had not reached the DB, and the bare PermissionError said
-		# nothing about which of the two halves was missing.
+		# Preconditions, asserted rather than assumed. These caught the real story
+		# once already: the role IS held and the DocPerm merge DOES grant write, yet
+		# check_permission still refused - because it also runs the document through
+		# has_user_permission, which a shared site can trip for reasons unrelated to
+		# agent access. That is why the endpoints gate the admin path explicitly
+		# (_check_installation_write) and the DocPerm row is defence in depth for
+		# Desk and generic REST rather than the thing this test rides on.
 		self.assertIn("Jarvis Admin", frappe.get_roles(self.admin))
 		self.assertNotIn("System Manager", frappe.get_roles(self.admin))  # must not pass via SM
 		self.assertEqual(
 			frappe.permissions.get_role_permissions(INSTALLATION, user=self.admin).get("write"),
 			1,
 			"Jarvis Admin has no non-owner write on Jarvis Agent Installation - the "
-			"DocPerm row in the DocType JSON has not reached this database",
+			"DocPerm row in the DocType JSON has not reached this database (Desk and "
+			"generic REST would be broken for a tenant admin even though the "
+			"endpoints below still work)",
 		)
 		inst = _mk_install(self.named)
 		frappe.db.set_value(INSTALLATION, inst, "enabled", 1, update_modified=False)

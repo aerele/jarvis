@@ -932,12 +932,34 @@ def install_agent(agent_slug: str) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "agent": listing.name}}
 
 
+def _check_installation_write(doc, ptype: str = "write") -> None:
+	"""Who may mutate an installation: its OWNER, or a tenant admin (jarvis#1062).
+
+	The owner half is the DocType's ``if_owner`` row, enforced through
+	``check_permission`` exactly as before — ``get_doc`` alone does NOT enforce
+	``if_owner`` (S3).
+
+	The admin half is checked HERE, in app code, rather than being left to the
+	Jarvis Admin DocPerm row alone. That row exists and is correct (it is what a
+	tenant admin needs for Desk and generic REST), but ``check_permission`` is not
+	only a role check: ``get_doc_permissions`` also runs the document through
+	``has_user_permission``, so on a site where anything has created a User
+	Permission touching this doctype's link fields, a legitimate admin is refused
+	for a reason that has nothing to do with agent access. An admin's authority to
+	disable, stop or uninstall a runaway install should not be contingent on that,
+	so it is stated directly.
+	"""
+	if has_jarvis_admin_access():
+		return
+	doc.check_permission(ptype)
+
+
 @frappe.whitelist()
 def set_enabled(installation: str, enabled: int) -> dict:
 	"""Enable/disable an installed agent — a pure DB write (O6: NO restart; the
 	bundle only reaches the container on the next Apply)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
-	doc.check_permission("write")  # S3 owner-gate
+	_check_installation_write(doc)  # S3 owner-gate, or a tenant admin
 	# R5-J8: never enable a non-installable capability (a min_apps dependency
 	# absent at install, or one that vanished after install and was reconciled to
 	# installable=0). Disabling is always allowed.
@@ -1153,7 +1175,7 @@ def uninstall_agent(installation: str) -> dict:
 	an Apply is now pending — but only when the install was ENABLED (a disabled
 	install was never in the pushed set, so removing it changes nothing)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
-	doc.check_permission("delete")  # S3 owner-gate before touching linked rows
+	_check_installation_write(doc, "delete")  # S3 owner-gate (or admin) first
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
@@ -1396,7 +1418,7 @@ def _guard_run_control(run_doc) -> None:
 	``_record_failed`` skip row) falls back to the run's own ``if_owner`` read gate,
 	which is still an ownership check — ``get_doc`` alone enforces neither."""
 	if run_doc.installation and frappe.db.exists(INSTALLATION, run_doc.installation):
-		frappe.get_doc(INSTALLATION, run_doc.installation).check_permission("write")
+		_check_installation_write(frappe.get_doc(INSTALLATION, run_doc.installation))
 		return
 	run_doc.check_permission("read")
 
