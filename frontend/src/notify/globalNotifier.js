@@ -209,7 +209,7 @@ export function attachGlobalNotifier({ socket, router }) {
 				signal({
 					conv,
 					title: convTitle(conv) || agentName,
-					body: `${agentName} needs your confirmation` + (tool ? " — " + tool : ""),
+					body: `${agentName} needs your confirmation` + (tool ? ": " + tool : ""),
 					tag: "jarvis-" + (conv || "confirm"),
 					open: () => go(conv ? "/c/" + conv : "/"),
 				});
@@ -256,10 +256,10 @@ export function attachGlobalNotifier({ socket, router }) {
 						: "Trigger fired";
 				const body =
 					status === "Failed"
-						? `${what} hit an error — open the activity log for details.`
+						? `${what} hit an error. Open the activity log for details.`
 						: status === "Blocked"
 						? `${what} blocked a document from saving.`
-						: `${what} ran — see the activity log for what it found.`;
+						: `${what} ran. See the activity log for what it found.`;
 				const open = () => go("/triggers#activity");
 				// like conversation:new, hand-rolled: signal() would swallow a
 				// conv-less toast on non-chat routes (null === onScreenConv()).

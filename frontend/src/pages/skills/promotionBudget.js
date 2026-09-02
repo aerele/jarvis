@@ -35,10 +35,10 @@ export function formatPushProjection(projection) {
 		if (projection.promoted_dropped) {
 			tail =
 				`On the next unattended sync the skill you're approving (${projection.promoted_slug}) ` +
-				`is the one dropped — skills sort by name and it falls past the ${budget}-skill cut.`;
+				`is the one dropped, skills sort by name and it falls past the ${budget}-skill cut.`;
 		} else if (dropped.length) {
 			tail =
-				`On the next unattended sync an EXISTING shared skill is dropped instead — ` +
+				`On the next unattended sync an EXISTING shared skill is dropped instead, ` +
 				`${droppedList} (skills sort by name), NOT the one you're approving.`;
 		}
 		return {
@@ -57,7 +57,7 @@ export function formatPushProjection(projection) {
 			projection,
 			message:
 				`Approving fills the shared container to ${projection.projected_count} of ${budget} ` +
-				`pushable Org skills — the last free slot in the push budget.`,
+				`pushable Org skills, the last free slot in the push budget.`,
 		};
 	}
 

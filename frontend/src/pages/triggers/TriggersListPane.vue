@@ -21,7 +21,7 @@
 			icon: 'git-branch',
 			title: 'No triggers yet',
 			description:
-				'Ask in the chat on the left — e.g. \'Warn me when a Sales Invoice over 1 lakh is submitted\'',
+				'Ask in the chat on the left, e.g. \'Warn me when a Sales Invoice over 1 lakh is submitted\'',
 		}"
 		@update:filters="setFilters"
 		@update:filter-clauses="setClauses"

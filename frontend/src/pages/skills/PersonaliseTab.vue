@@ -191,8 +191,8 @@
 									v-html="contextHtml"
 								/>
 								<div v-else class="mt-2 text-p-base text-ink-gray-6">
-									{{ agentName }} didn't attach any extra detail to this one —
-									just answer in your own words below.
+									{{ agentName }} didn't attach any extra detail to this one.
+									Just answer in your own words below.
 								</div>
 
 								<div
@@ -205,7 +205,7 @@
 										>
 									</div>
 									<div class="mt-0.5 text-xs text-ink-gray-5">
-										Answering again adds a new note — {{ agentName }} uses your
+										Answering again adds a new note. {{ agentName }} uses your
 										latest answer. Your earlier note stays in Notes.
 									</div>
 								</div>
@@ -470,7 +470,7 @@ async function ignore(row) {
 	acting.value = row.name + ":ignore";
 	try {
 		await ignoreQuestion(row.name);
-		toast.success("Set aside — you can still answer it later");
+		toast.success("Set aside. You can still answer it later");
 		if (selected.value?.name === row.name) selected.value = null;
 		fetchQuestions("reset");
 		loadCaps();
@@ -511,7 +511,7 @@ async function onSubmit(payload) {
 		if (wasQuestion) await answerQuestion({ name: selected.value.name, ...payload });
 		else await saveNote({ ...payload, source: "Personalise" });
 		composer.value?.clear?.();
-		toast.success(`Saved — ${agentName} will use this`);
+		toast.success(`Saved. ${agentName} will use this`);
 		// answered questions flip to the Answered filter; drop back to free capture
 		selected.value = null;
 		if (wasQuestion) fetchQuestions("reset");
@@ -604,7 +604,7 @@ const emptyState = computed(() => {
 			return {
 				icon: "message-circle",
 				title: `${agentName} hasn't asked anything yet`,
-				body: `Questions appear here as ${agentName} learns how you work. You don't have to wait — tell it anything below.`,
+				body: `Questions appear here as ${agentName} learns how you work. You don't have to wait, tell it anything below.`,
 			};
 		return {
 			icon: "check-circle",
@@ -621,7 +621,7 @@ const emptyState = computed(() => {
 	return {
 		icon: "moon",
 		title: "Nothing set aside",
-		body: "Questions you ignore wait here — you can still answer them anytime.",
+		body: "Questions you ignore wait here. You can still answer them anytime.",
 	};
 });
 

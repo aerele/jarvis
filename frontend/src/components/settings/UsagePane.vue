@@ -78,7 +78,7 @@
 		</p>
 		<div class="mt-4 grid grid-cols-3 gap-4">
 			<div class="rounded-md border p-4">
-				<div class="text-2xl font-medium text-ink-gray-8">{{ s ? s.msgCount : "—" }}</div>
+				<div class="text-2xl font-medium text-ink-gray-8">{{ s ? s.msgCount : "-" }}</div>
 				<div class="mt-1 text-sm text-ink-gray-6">Messages</div>
 				<div class="mt-1 text-xs text-ink-gray-5">
 					{{ s ? `${s.userMsgCount} you, ${s.assistantMsgCount} Jarvis` : "no chat" }}
@@ -86,20 +86,20 @@
 			</div>
 			<div class="rounded-md border p-4">
 				<div class="text-2xl font-medium text-ink-gray-8">
-					{{ usage ? usage.chat_tool_calls : "—" }}
+					{{ usage ? usage.chat_tool_calls : "-" }}
 				</div>
 				<div class="mt-1 text-sm text-ink-gray-6">Tool calls</div>
 				<div class="mt-1 text-xs text-ink-gray-5">this chat</div>
 			</div>
 			<div class="rounded-md border p-4">
 				<div class="text-2xl font-medium text-ink-gray-8">
-					{{ s ? s.avgTokensPerMsg : "—" }}
+					{{ s ? s.avgTokensPerMsg : "-" }}
 				</div>
 				<div class="mt-1 text-sm text-ink-gray-6">Avg tokens per msg</div>
 				<div class="mt-1 text-xs text-ink-gray-5">this chat</div>
 			</div>
 			<div class="rounded-md border p-4">
-				<div class="text-2xl font-medium text-ink-gray-8">{{ s ? s.convCount : "—" }}</div>
+				<div class="text-2xl font-medium text-ink-gray-8">{{ s ? s.convCount : "-" }}</div>
 				<div class="mt-1 text-sm text-ink-gray-6">Conversations</div>
 				<div class="mt-1 text-xs text-ink-gray-5">
 					{{ s ? `${s.starredCount} starred` : "no chat" }}
@@ -107,7 +107,7 @@
 			</div>
 			<div class="rounded-md border p-4">
 				<div class="text-2xl font-medium text-ink-gray-8">
-					{{ usage ? fmtTokens(usage.chat_tokens) : "—" }}
+					{{ usage ? fmtTokens(usage.chat_tokens) : "-" }}
 				</div>
 				<div class="mt-1 text-sm text-ink-gray-6">This chat</div>
 				<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
@@ -121,7 +121,7 @@
 			<template v-if="!hasMeasured">
 				<div class="rounded-md border p-4">
 					<div class="text-2xl font-medium text-ink-gray-8">
-						{{ usage ? fmtTokens(usage.month_tokens) : "—" }}
+						{{ usage ? fmtTokens(usage.month_tokens) : "-" }}
 					</div>
 					<div class="mt-1 text-sm text-ink-gray-6">
 						{{ usage ? usage.month_label : "This month" }}
@@ -130,7 +130,7 @@
 				</div>
 				<div class="rounded-md border p-4">
 					<div class="text-2xl font-medium text-ink-gray-8">
-						{{ usage ? fmtTokens(usage.total_tokens) : "—" }}
+						{{ usage ? fmtTokens(usage.total_tokens) : "-" }}
 					</div>
 					<div class="mt-1 text-sm text-ink-gray-6">All time</div>
 					<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
@@ -142,7 +142,7 @@
 			     tools and its search catalogue. Labelled so the three are not read as
 			     one drifting number (#551). -->
 			<div class="rounded-md border p-4">
-				<div class="text-2xl font-medium text-ink-gray-8">{{ s ? s.toolCount : "—" }}</div>
+				<div class="text-2xl font-medium text-ink-gray-8">{{ s ? s.toolCount : "-" }}</div>
 				<div class="mt-1 text-sm text-ink-gray-6">ERP tools</div>
 				<div class="mt-1 text-xs text-ink-gray-5">Jarvis can run here</div>
 			</div>

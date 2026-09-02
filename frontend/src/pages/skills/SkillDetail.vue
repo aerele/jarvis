@@ -423,7 +423,7 @@ async function submitPromotion({ to_scope, target_role, target_roles, note }) {
 			note,
 		});
 		promoDialog.value = false;
-		toast.success("Promotion requested — a reviewer will decide.");
+		toast.success("Promotion requested. A reviewer will decide.");
 		await loadMyPromo();
 	} catch (e) {
 		toast.error(errHtml(e));
