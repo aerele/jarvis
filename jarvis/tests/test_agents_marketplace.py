@@ -13,6 +13,7 @@ import unittest
 import frappe
 
 from jarvis.chat import agent_catalog, agent_scheduler, agents_api
+from jarvis.tests._agent_access import allow_listing_for, clear_listing_access
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -22,6 +23,16 @@ ALLOWED_ROLE = "Jarvis Agent Allowed Role"
 
 ROLE_X = "Jarvis Agent Test Role X"
 ROLE_Y = "Jarvis Agent Test Role Y"
+
+# Every catalog agent this module installs, runs or pushes. Granted to the whole
+# cast in setUp because access is deny-by-default (jarvis#1062); allow_listing_for
+# no-ops on a slug this site's registry does not carry.
+_MODULE_SLUGS = (
+	"close-auditor",
+	"bank-recon-operator",
+	"ledger-scrutiny-auditor",
+	"custom-app-learning",
+)
 
 
 def _ensure_role(role_name: str) -> str:
@@ -134,8 +145,15 @@ class TestAgentsMarketplace(unittest.TestCase):
 			for owner in (self.owner, self.other, self.admin):
 				for n in frappe.get_all(dt, filters={"owner": owner}, pluck="name"):
 					frappe.delete_doc(dt, n, force=True, ignore_permissions=True)
-		# Clear any role restriction left by a previous test (bench-admin state).
-		frappe.db.delete(ALLOWED_ROLE, {"parenttype": LISTING, "parentfield": "allowed_roles"})
+		# jarvis#1062: access is DENY BY DEFAULT, so clearing the allow rows is no
+		# longer a way to make the catalog reachable - it is how you CLOSE it. Reset
+		# to a known state, then grant this module's cast by name so the tests whose
+		# subject is NOT access control (install, run, schedule, push) reach the code
+		# they mean to exercise. The RBAC tests below narrow it again via _restrict.
+		clear_listing_access()
+		for slug in _MODULE_SLUGS:
+			for u in (self.owner, self.other, self.admin):
+				allow_listing_for(slug, user=u)
 		frappe.db.commit()
 
 	def tearDown(self):
@@ -460,10 +478,15 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# (e) RBAC — role-gated install / run (server-side enforcement)
 	# ------------------------------------------------------------------ #
 	def _restrict(self, slug: str, roles: list) -> None:
+		"""Set the listing's access to exactly ``roles`` and NO named users.
+
+		Both halves, because setUp grants this module's cast by name: leaving those
+		rows in place would make every "restricted to ROLE_X" assertion below pass
+		for a reason that has nothing to do with the role."""
 		original = frappe.session.user
 		frappe.set_user("Administrator")
 		try:
-			agents_api.set_agent_roles(slug, roles)
+			agents_api.set_agent_access(slug, roles=roles, users=[])
 		finally:
 			frappe.set_user(original)
 
@@ -561,14 +584,28 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(sm["allowed"], 1)
 		self.assertEqual(sm["allowed_roles"], [ROLE_X])
 
-		# [] clears the restriction -> unrestricted for everyone; the row reappears
-		# for the previously-blocked user (still no allowed_roles key — non-admin).
-		res = agents_api.set_agent_roles("close-auditor", [])
+		# jarvis#1062: clearing the roles no longer means "unrestricted". With no
+		# roles and no users the listing is CLOSED, so the blocked user stays hidden
+		# - this is the inversion, asserted directly.
+		res = agents_api.set_agent_access("close-auditor", roles=[], users=[])
 		self.assertEqual(res["allowed_roles"], [])
-		reappeared = _row(self.other)
-		self.assertIsNotNone(reappeared)
-		self.assertEqual(reappeared["allowed"], 1)
-		self.assertNotIn("allowed_roles", reappeared)
+		self.assertEqual(res["allowed_users"], [])
+		self.assertIsNone(
+			_row(self.other),
+			"clearing every grant CLOSES the listing; it must not reopen it to everyone",
+		)
+		# An admin still sees it (admin parity), and still sees the empty roster.
+		closed_for_admin = _row(self.admin)
+		self.assertIsNotNone(closed_for_admin)
+		self.assertEqual(closed_for_admin["allowed"], 1)
+		self.assertEqual(closed_for_admin["allowed_roles"], [])
+
+		# Naming the user directly is the OTHER way in - no role involved.
+		agents_api.set_agent_access("close-auditor", roles=[], users=[self.other])
+		by_name = _row(self.other)
+		self.assertIsNotNone(by_name, "a user named in allowed_users must see the row")
+		self.assertEqual(by_name["allowed"], 1)
+		self.assertNotIn("allowed_users", by_name)  # roster is admin-only
 
 	def test_draft_listing_hidden_from_non_admin_unless_installed(self):
 		# jarvis#1062 D2: Draft is a registry-only lifecycle state (never

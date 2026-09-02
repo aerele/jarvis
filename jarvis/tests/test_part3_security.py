@@ -24,6 +24,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, get_datetime, now_datetime
 
 from jarvis.chat import agents_api, approvals_api, docmeta_api, macro_scheduler
+from jarvis.tests._agent_access import allow_listing_for
 
 CONVERSATION = "Jarvis Conversation"
 MACRO = "Jarvis Macro"
@@ -210,6 +211,10 @@ class Part3Base(FrappeTestCase):
 					"skill_bundle": '[{"path":"SKILL.md","body":"PROPRIETARY VENDOR IP"}]',
 				}
 			).insert(ignore_permissions=True)
+		# jarvis#1062: deny-by-default access. USER_A reads this listing through
+		# get_agent (the skill_bundle-hiding test), which now 403s an ungranted
+		# non-admin before it can assert anything about the payload.
+		allow_listing_for(AGENT_SLUG, roles=["Jarvis User"])
 		frappe.db.commit()
 
 	@classmethod

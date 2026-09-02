@@ -36,6 +36,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_catalog, agent_installability, agent_scheduler, agents_api
+from jarvis.tests._agent_access import allow_listing_for
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -87,6 +88,13 @@ def _mk_listing(slug: str, *, min_apps=None, doctypes_required=None) -> str:
 			"rule_tokens": json.dumps([]),
 		}
 	).insert(ignore_permissions=True)
+	# jarvis#1062: a fresh listing is CLOSED (no roles, no users), and this module's
+	# only actor is a plain Jarvis User. Granted here rather than per test because
+	# the listings are built inside the test bodies, and because the subject of
+	# every one of them is INSTALLABILITY - an access refusal arriving first would
+	# make them assert the wrong refusal (and, for the two expecting
+	# ValidationError, the wrong exception type entirely).
+	allow_listing_for(slug, roles=["Jarvis User"])
 	return slug
 
 
