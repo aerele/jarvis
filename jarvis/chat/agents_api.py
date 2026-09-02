@@ -25,7 +25,6 @@ from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import (
 	has_jarvis_admin_access,
 	is_skill_reviewer,
-	require_jarvis_access,
 	require_jarvis_admin,
 	require_jarvis_user,
 )
@@ -1638,7 +1637,17 @@ def _require_activation_authority(user: str) -> None:
 
 	``promoted_by``/``promoted_at`` still record WHO signed off, and the
 	installation's ``reviewer`` field still names who is accountable for it; only
-	the authority to flip the switch changed."""
+	the authority to flip the switch changed.
+
+	This is the ONLY gate on promote/demote, deliberately: it is the same set
+	``apply_agents`` requires, and like that endpoint it is NOT additionally
+	stacked under a Jarvis User check. A reviewer may hold Jarvis Skill Reviewer
+	and nothing else - reviewing is a job, not a seat on the chat surface - and
+	requiring Jarvis User as well would lock exactly that person out of the one
+	action the role exists for. The earlier worry it would have addressed (a user
+	whose Jarvis access was revoked keeping authority through the ``reviewer``
+	field) is moot now that authority comes from a reviewing ROLE, which is
+	revoked the same way any other role is."""
 	if not (is_skill_reviewer(user) or has_jarvis_admin_access(user)):
 		frappe.throw(
 			_("Only a reviewer or a Jarvis Admin may change an installation's activation state."),
@@ -1665,7 +1674,6 @@ def promote_installation(installation: str, justification: str | None = None) ->
 	    owner surface + attestation become available only AFTER sign-off."""
 	from jarvis._redis_lock import redis_lock
 
-	require_jarvis_access()
 	doc = frappe.get_doc(INSTALLATION, installation)
 	me = frappe.session.user
 	_require_activation_authority(me)
@@ -1742,10 +1750,9 @@ def promote_installation(installation: str, justification: str | None = None) ->
 def demote_installation(installation: str, reason: str | None = None) -> dict:
 	"""PP-4 — the demotion / kill path: send a live installation back to SHADOW
 	(re-closing the owner surface, freeing a global activation-budget slot). Same
-	authority as promotion (named reviewer or a Jarvis Admin). Clears the promotion
+	authority as promotion (the reviewer set). Clears the promotion
 	stamp and re-homes outputs back to the reviewer-only surface; audited via
 	track_changes + the activity feed."""
-	require_jarvis_access()
 	doc = frappe.get_doc(INSTALLATION, installation)
 	me = frappe.session.user
 	_require_activation_authority(me)

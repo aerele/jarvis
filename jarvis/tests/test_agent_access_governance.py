@@ -105,6 +105,10 @@ class AccessGovernanceCase(unittest.TestCase):
 		cls.roled = _ensure_user("agov-roled@example.com", ("Jarvis User", ROLE_GRANTED))
 		cls.admin = _ensure_user("agov-admin@example.com", ("Jarvis User", "Jarvis Admin"))
 		cls.reviewer = _ensure_user("agov-reviewer@example.com", ("Jarvis User", REVIEWER_ROLE))
+		# Reviewing is a job, not a seat on the chat surface: this fixture holds the
+		# reviewing role and NOTHING else, which is the shape promote/demote must
+		# admit (see _require_activation_authority).
+		cls.reviewer_only = _ensure_user("agov-reviewer-only@example.com", (REVIEWER_ROLE,))
 		_mk_listing()
 		frappe.db.commit()
 
@@ -484,6 +488,30 @@ class TestActivationAuthority(AccessGovernanceCase):
 		self.assertEqual(frappe.db.get_value(INSTALLATION, inst, "activation_state"), "live")
 		# WHO signed off is still recorded - only the authority to do it changed.
 		self.assertEqual(frappe.db.get_value(INSTALLATION, inst, "promoted_by"), self.reviewer)
+
+	def test_a_reviewer_without_jarvis_user_can_still_promote(self):
+		"""Promote is gated on the reviewer set ALONE, like apply_agents.
+
+		Stacking a Jarvis User check on top would lock out exactly the person the
+		Jarvis Skill Reviewer role exists for. Asserted with a user who deliberately
+		holds no other Jarvis role."""
+		self.assertNotIn("Jarvis User", frappe.get_roles(self.reviewer_only))
+		inst = _mk_install(self.named, reviewer=self.named)
+		self._as(self.reviewer_only)
+		res = agents_api.promote_installation(inst, justification="reviewed, clean")
+		self.assertTrue(res["ok"])
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(INSTALLATION, inst, "activation_state"), "live")
+		self.assertEqual(frappe.db.get_value(INSTALLATION, inst, "promoted_by"), self.reviewer_only)
+
+	def test_a_reviewer_without_jarvis_user_can_still_demote(self):
+		inst = _mk_install(self.named, reviewer=self.named)
+		frappe.set_user(self.reviewer_only)
+		agents_api.promote_installation(inst)
+		res = agents_api.demote_installation(inst, reason="false positives")
+		frappe.set_user("Administrator")
+		self.assertTrue(res["ok"])
+		self.assertEqual(frappe.db.get_value(INSTALLATION, inst, "activation_state"), "shadow")
 
 	def test_the_named_reviewer_alone_cannot_demote(self):
 		inst = _mk_install(self.named, reviewer=self.named)
