@@ -24,7 +24,8 @@
   "skill_bundle",
   "default_schedule",
   "validated_for_fy",
-  "allowed_roles"
+  "allowed_roles",
+  "allowed_users"
  ],
  "fields": [
   {
@@ -150,7 +151,14 @@
    "fieldtype": "Table MultiSelect",
    "label": "Allowed Roles",
    "options": "Jarvis Agent Allowed Role",
-   "description": "Roles allowed to install/run this agent. Empty = unrestricted (any user). System Manager is always allowed. Bench-admin state — NEVER written by the catalog sync."
+   "description": "Roles allowed to install/run this agent. Access is DENY BY DEFAULT: a listing with no allowed roles AND no allowed users is reachable by Jarvis Admins only. Bench-admin state — NEVER written by the catalog sync."
+  },
+  {
+   "fieldname": "allowed_users",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Users",
+   "options": "Jarvis Agent Allowed User",
+   "description": "Named users allowed to install/run this agent, on top of any allowed roles. Access is DENY BY DEFAULT: a listing with no allowed roles AND no allowed users is reachable by Jarvis Admins only. Bench-admin state — NEVER written by the catalog sync."
   }
  ],
  "index_web_pages_for_search": 0,

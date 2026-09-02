@@ -222,8 +222,10 @@
    "write": 1
   },
   {
+   "delete": 1,
    "read": 1,
-   "role": "Jarvis Admin"
+   "role": "Jarvis Admin",
+   "write": 1
   }
  ],
  "sort_field": "modified",

@@ -172,7 +172,7 @@ AGENT_PREFIX = "agent-"
 
 
 def build_agent_push_payload(owner: str | None = None) -> list[dict]:
-	"""Collect the ENABLED installed agents into the fleet push payload.
+	"""Collect the container's agent roster into the fleet push payload.
 
 	Every entry is a body-free DELEGATE ENABLEMENT SIGNAL (A2): ``{slug,
 	delivery:"delegate", tools_allow, model, timeout_s, nature}`` where ``slug``
@@ -181,19 +181,41 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	pushes it to fleet (Phase 2C). ``tools_allow``/``timeout_s``/``nature``/``model``
 	echo the BUNDLED registry (metadata, not IP) so admin can render the delegate.
 
-	Bench-global by design (one bench == one customer == one container), so all
-	enabled installs on the site are pushed; ``owner`` is accepted only to scope
-	tests. An empty list is a valid "remove all agent skills" reconcile.
+	The roster is the UNION of two legs, deduped by slug:
 
-	RBAC (defense in depth): an enabled install whose RUN-AS user's roles no longer
-	permit the agent is EXCLUDED from the push — the scheduler / run-now gates
-	already refuse to run it, but its enablement signal must not reach the
-	container either. The run-as user, not the owner, is the identity that decides
-	(#457): it is the one every dispatch gate applies, so gating the push on
-	anything else advertises a roster the bench will not honour. Identity (CX1-1,
-	the same reasoning): an enabled install with a BLANK run-as user is EXCLUDED
-	too — R1-F3 refuses it at every dispatch path, so pushing it would advertise an
-	agent this bench can never run.
+	  1. ALLOWED LISTINGS (jarvis#1062) — every Published, installable listing an
+	     admin has granted to at least one role or named user. This is the leg that
+	     makes the product work: under deny-by-default an admin ALLOWS an agent and
+	     applies once (the tenant-wide restart is the admin's cost to accept), and
+	     the allowed users can then self-install and run it WITHOUT each install
+	     triggering another restart of everyone's workspace.
+	  2. ENABLED INSTALLS — the historical leg, kept so that nothing running today
+	     stops running the moment this ships. See ``legacy_empty_allows`` below.
+
+	Bench-global by design (one bench == one customer == one container). ``owner``
+	scopes the payload to one owner's enabled installs and is used only by tests;
+	the allowed-listings leg is skipped when it is set, because "this owner's
+	roster" is not a statement about listings nobody installed. An empty list is a
+	valid "remove all agent skills" reconcile.
+
+	RBAC (defense in depth): an enabled install whose RUN-AS user may no longer use
+	the agent is EXCLUDED from the push — the scheduler / run-now gates already
+	refuse to run it, but its enablement signal must not reach the container
+	either. The run-as user, not the owner, is the identity that decides (#457): it
+	is the one every dispatch gate applies, so gating the push on anything else
+	advertises a roster the bench will not honour. Identity (CX1-1, the same
+	reasoning): an enabled install with a BLANK run-as user is EXCLUDED too —
+	R1-F3 refuses it at every dispatch path.
+
+	That install-leg gate runs in ``legacy_empty_allows`` mode: a listing with NO
+	roles and NO users still admits its enabled installs here. This is the
+	grandfather guarantee, and it is deliberately WIDER than what dispatch will
+	honour after the inversion. The accepted consequence: on a tenant that upgrades
+	before ``v2_18_agent_access_grandfather`` runs — or where an admin clears both
+	allow lists on an agent that still has enabled installs — the delegate stays in
+	the container roster while ``run_agent_now`` / ``_sweep_one`` refuse it. A
+	roster entry nobody can dispatch is inert; the opposite error (dropping a
+	working customer's agent mid-upgrade) is a live outage.
 
 	Installs are per-(owner, agent) but the payload is bench-global and keyed by
 	SLUG, so two users each enabling the SAME agent are ONE entry, not two —
@@ -303,7 +325,11 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		# while the run-as user kept it was dropped from the roster yet still
 		# dispatched (the reported phantom run), and the mirror case advertised a
 		# delegate the bench would refuse to run at every cadence.
-		if not _user_allowed_for_agent(row.agent, row.run_as_user):
+		# ``legacy_empty_allows``: the GRANDFATHER leg. A listing with neither an
+		# allowed role nor an allowed user is closed everywhere else, but an install
+		# that was already enabled here keeps its roster entry — see the docstring
+		# for the divergence this consciously accepts.
+		if not _user_allowed_for_agent(row.agent, row.run_as_user, legacy_empty_allows=True):
 			continue
 
 		# Every gate has passed, so this agent is emitted and no later row for it can
@@ -312,22 +338,79 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		# it carries NO per-install data — so every row for an agent would yield a
 		# byte-identical entry.
 		seen_agents.add(row.agent)
-		slug = f"{AGENT_PREFIX}{listing.agent_slug}"
+		payload.append(_enablement_signal(listing.agent_slug, reg_by_slug))
 
-		# A2 enablement signal — body-free. Admin resolves the SKILL from the
-		# private bundle store by slug (Phase 2C). The body NEVER leaves it.
-		meta = reg_by_slug.get(listing.agent_slug) or {}
-		payload.append(
-			{
-				"slug": slug,
-				"delivery": "delegate",
-				"tools_allow": meta.get("tools_allow") or [],
-				"model": meta.get("model") or None,
-				"timeout_s": meta.get("timeout_s"),
-				"nature": (meta.get("nature") or "").strip().lower(),
-			}
+	# ── Leg 1: ALLOWED LISTINGS (jarvis#1062) ──────────────────────────────────
+	# Appended AFTER the install leg so ``seen_agents`` already holds everything
+	# that leg emitted and this one only adds slugs it did not. Skipped entirely
+	# for an owner-scoped build (see the docstring) — a listing nobody installed
+	# belongs to no owner.
+	if not owner:
+		from jarvis.chat.agent_installability import evaluate_installability
+
+		allowed_listings = frappe.get_all(
+			LISTING,
+			filters={"status": "Published"},
+			fields=["name", "agent_slug"],
+			order_by="name asc",
 		)
+		granted = _listings_with_any_grant()
+		for lst in allowed_listings:
+			if lst.name in seen_agents or lst.name not in granted:
+				continue
+			# Same reasoning as the install leg's ``installable`` check: an agent
+			# whose min_apps / required DocTypes are absent has no data to evaluate,
+			# so advertising its delegate would seat a roster entry every dispatch
+			# path refuses. No install row exists here, so the site is evaluated
+			# directly rather than read off a reconciled per-install flag.
+			if not evaluate_installability(lst.name)[0]:
+				continue
+			seen_agents.add(lst.name)
+			payload.append(_enablement_signal(lst.agent_slug, reg_by_slug))
+
+	# Stable order regardless of which leg contributed an entry: the payload is a
+	# FULL RECONCILE that admin/fleet diffs against the container's current roster,
+	# and an entry moving between legs must not read as a change.
+	payload.sort(key=lambda e: e["slug"])
 	return payload
+
+
+def _enablement_signal(agent_slug: str, reg_by_slug: dict) -> dict:
+	"""The A2 enablement signal for one agent — body-free.
+
+	Admin resolves the SKILL from the private bundle store by slug (Phase 2C); the
+	body NEVER leaves it. Derived purely from the slug plus the BUNDLED registry,
+	which is why both legs of the roster can share it and why de-duping by slug is
+	safe: two sources for the same agent yield a byte-identical entry."""
+	meta = reg_by_slug.get(agent_slug) or {}
+	return {
+		"slug": f"{AGENT_PREFIX}{agent_slug}",
+		"delivery": "delegate",
+		"tools_allow": meta.get("tools_allow") or [],
+		"model": meta.get("model") or None,
+		"timeout_s": meta.get("timeout_s"),
+		"nature": (meta.get("nature") or "").strip().lower(),
+	}
+
+
+def _listings_with_any_grant() -> set[str]:
+	"""Listing docnames carrying at least one allowed role OR one allowed user.
+
+	Two queries for the whole catalog rather than ``_user_allowed_for_agent`` per
+	listing, which is an N+1 over both child tables and runs twice per Apply."""
+	granted: set[str] = set()
+	for doctype, parentfield in (
+		("Jarvis Agent Allowed Role", "allowed_roles"),
+		("Jarvis Agent Allowed User", "allowed_users"),
+	):
+		granted.update(
+			frappe.get_all(
+				doctype,
+				filters={"parenttype": LISTING, "parentfield": parentfield},
+				pluck="parent",
+			)
+		)
+	return granted
 
 
 def registry_timeout_s(agent_slug: str, default: int = 600) -> int:
