@@ -436,17 +436,33 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(agent_catalog._category_from_domain("india-compliance"), "India Compliance")
 		self.assertEqual(agent_catalog._category_from_domain("measurement"), "Measurement")
 		self.assertEqual(agent_catalog._category_from_domain("inventory-count"), "Inventory Count")
+		self.assertEqual(agent_catalog._category_from_domain("bank-recon"), "Bank and Reconciliation")
+		self.assertEqual(agent_catalog._category_from_domain("tds-compliance"), "TDS Compliance")
+		self.assertEqual(agent_catalog._category_from_domain("helpdesk"), "Helpdesk")
+		self.assertEqual(agent_catalog._category_from_domain("knowledge"), "Knowledge Base")
+
+	def test_every_registry_domain_has_an_explicit_label_not_the_title_case_fallback(self):
+		"""Every ``domain`` the bundled registry actually declares must resolve
+		through ``_DOMAIN_CATEGORY_LABELS`` - the title-cased fallback exists for
+		a domain that has not shipped yet, never for a real one (a fallback label
+		reads worse: "Tds Compliance" instead of "TDS Compliance")."""
+		reg = agent_catalog._load_registry()
+		domains = {(a.get("domain") or "").strip().lower().replace("-", "_") for a in reg.get("agents") or []}
+		domains.discard("")
+		unmapped = domains - set(agent_catalog._DOMAIN_CATEGORY_LABELS)
+		self.assertEqual(unmapped, set(), f"registry domain(s) with no explicit category label: {unmapped}")
 
 	def test_category_from_domain_falls_back_to_title_case_for_unknown_codes(self):
-		self.assertEqual(agent_catalog._category_from_domain("bank-recon"), "Bank Recon")
-		self.assertEqual(agent_catalog._category_from_domain("helpdesk"), "Helpdesk")
+		self.assertEqual(agent_catalog._category_from_domain("widget-foo"), "Widget Foo")
 		self.assertEqual(agent_catalog._category_from_domain(""), "")
 		self.assertEqual(agent_catalog._category_from_domain(None), "")
 
 	def test_sync_agent_listings_writes_the_mapped_category_not_the_raw_domain(self):
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(frappe.db.get_value(LISTING, "close-auditor", "category"), "Close and Reporting")
-		self.assertEqual(frappe.db.get_value(LISTING, "bank-recon-operator", "category"), "Bank Recon")
+		self.assertEqual(
+			frappe.db.get_value(LISTING, "bank-recon-operator", "category"), "Bank and Reconciliation"
+		)
 
 	# ------------------------------------------------------------------ #
 	# (d4) jarvis#1062 polish: Published operator listings with no dispatch

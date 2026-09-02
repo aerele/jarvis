@@ -50,6 +50,11 @@ _DOMAIN_CATEGORY_LABELS = {
 	"india_compliance": "India Compliance",
 	"measurement": "Measurement",
 	"inventory_count": "Inventory Count",
+	"bank_recon": "Bank and Reconciliation",
+	"tds": "TDS Compliance",
+	"tds_compliance": "TDS Compliance",
+	"helpdesk": "Helpdesk",
+	"knowledge": "Knowledge Base",
 }
 
 

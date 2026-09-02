@@ -279,13 +279,6 @@ import { errHtml } from "@/lib/errors";
 const route = useRoute();
 const router = useRouter();
 
-// Display metadata mirroring jarvis/agents/registry.json domains (unknown slugs
-// fall back to a prettified slug).
-const DOMAINS = [
-	{ slug: "close", title: "Close & Reporting" },
-	{ slug: "bank-recon", title: "Bank & Reconciliation" },
-];
-
 // ── hash-synced tabs (AgentDetail pattern; no hash = Featured) ───────────────
 const TABS = [
 	{ label: "Featured", value: "featured" },
@@ -351,9 +344,11 @@ watch([tab, category, sortChoice], ([t]) => {
 	resetLoad();
 });
 
-// ── category select options (distinct catalog categories, DOMAINS titles) ────
-// One cheap list_agents() call feeds the distinct set - server pages can't
-// (a page only sees its slice); DOMAINS is the fallback until/if it loads.
+// ── category select options (distinct catalog categories) ────────────────────
+// One cheap list_agents() call feeds the distinct set - server pages can't (a
+// page only sees its slice). sync_agent_listings (agent_catalog.py) already
+// sends a real label ("Accounts Payable", not "ap") as `category`, so this
+// list IS the display label - no separate frontend title map to keep in sync.
 const catalogCategories = ref(null);
 async function loadCategories() {
 	try {
@@ -361,21 +356,21 @@ async function loadCategories() {
 		const seen = new Set();
 		const out = [];
 		for (const a of all) {
-			const slug = a.category || "other";
-			if (seen.has(slug)) continue;
-			seen.add(slug);
-			out.push(slug);
+			const label = a.category || "Other";
+			if (seen.has(label)) continue;
+			seen.add(label);
+			out.push(label);
 		}
 		if (out.length) catalogCategories.value = out;
 	} catch (e) {
-		// keep the DOMAINS fallback - the select must not break the page
+		// no fallback list - "All categories" alone still renders a usable select
 	}
 }
 const categoryOptions = computed(() => {
-	const slugs = catalogCategories.value || DOMAINS.map((d) => d.slug);
+	const labels = catalogCategories.value || [];
 	return [
 		{ label: "All categories", value: "" },
-		...slugs.map((s) => ({ label: categoryTitle(s), value: s })),
+		...labels.map((l) => ({ label: l, value: l })),
 	];
 });
 
@@ -414,10 +409,12 @@ const emptyState = computed(() => {
 function openAgent(a) {
 	router.push("/agents/" + a.agent_slug);
 }
-function categoryTitle(slug) {
-	const d = DOMAINS.find((x) => x.slug === slug);
-	if (d) return d.title;
-	return String(slug || "other")
+// jarvis#1062 polish: `a.category` is already the real label the backend
+// sends (sync_agent_listings maps the registry domain) - this is just the
+// "no category yet" fallback + a defensive prettifier for a raw slug a
+// pre-migrate row might still carry until the next catalog sync.
+function categoryTitle(value) {
+	return String(value || "Other")
 		.split("-")
 		.map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
 		.join(" ");

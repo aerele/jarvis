@@ -558,11 +558,6 @@ const props = defineProps({
 const route = useRoute();
 const router = useRouter();
 
-// display metadata (mirrors AgentsList / registry.json domains)
-const DOMAINS = [
-	{ slug: "close", title: "Close & Reporting" },
-	{ slug: "bank-recon", title: "Bank & Reconciliation" },
-];
 const FREQUENCY_OPTIONS = [
 	{ label: "Daily", value: "daily" },
 	{ label: "Weekly", value: "weekly" },
@@ -916,10 +911,12 @@ const defaultScheduleText = computed(() => {
 	if (!freq) return "None - runs on demand.";
 	return s.schedule_enabled ? `On by default · ${freq}` : `Off by default · suggested ${freq}`;
 });
-function categoryTitle(slug) {
-	const d = DOMAINS.find((x) => x.slug === slug);
-	if (d) return d.title;
-	return String(slug || "other")
+// jarvis#1062 polish: `agent.category` is already the real label the backend
+// sends (sync_agent_listings maps the registry domain, agent_catalog.py) -
+// this is just the "no category yet" fallback + a defensive prettifier for a
+// raw slug a pre-migrate row might still carry until the next catalog sync.
+function categoryTitle(value) {
+	return String(value || "Other")
 		.split("-")
 		.map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
 		.join(" ");
