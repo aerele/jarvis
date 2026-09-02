@@ -683,8 +683,12 @@ async function discussInChat(f) {
 	chatBusy.value = f.name;
 	try {
 		const res = (await takeFindingToChat(f.name)) || {};
-		if (!res.conversation) {
-			throw new Error(res.reason || "Could not open a conversation for this finding.");
+		// take_finding_to_chat always creates the conversation, even when
+		// seeding it (send_message) fails - so `ok`, not `conversation`, is the
+		// real success signal (#1062 polish: this used to navigate regardless).
+		if (!res.ok) {
+			toast.error(errHtml(res.reason || "Could not open this finding in chat."));
+			return;
 		}
 		router.push("/c/" + res.conversation);
 	} catch (e) {

@@ -315,3 +315,77 @@ describe("stopped run explanation (jarvis#1062 polish)", () => {
 		expect(w.text()).not.toContain("This run failed before recording findings.");
 	});
 });
+
+describe("Discuss in chat honors ok/reason, not just conversation (jarvis#1062 polish)", () => {
+	function findingRow() {
+		return {
+			name: "F1",
+			rule_id: "R1",
+			severity: "blocker",
+			title: "A finding",
+			state: "open",
+			amount: null,
+			recurrence: "new",
+			detail_md: "",
+		};
+	}
+
+	async function expandAndDiscuss(w) {
+		await flushPromises();
+		const row = w.find('[role="button"]');
+		await row.trigger("click");
+		await flushPromises();
+		const btn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Discuss in chat");
+		await btn.trigger("click");
+		await flushPromises();
+	}
+
+	it("does not navigate and toasts the reason when ok is false", async () => {
+		api.listAgentFindings.mockResolvedValue({
+			rows: [findingRow()],
+			total: 1,
+			has_more: false,
+			severity_counts: { blocker: 1 },
+		});
+		apiAgents.takeFindingToChat.mockResolvedValue({
+			ok: false,
+			conversation: "CONV-9",
+			reason: "No LLM configured for this container.",
+		});
+		const w = mountPanel(baseRun({ status: "completed" }));
+		await expandAndDiscuss(w);
+		expect(router.push).not.toHaveBeenCalled();
+		const { toast } = await import("frappe-ui");
+		expect(toast.error).toHaveBeenCalledWith("No LLM configured for this container.");
+	});
+
+	it("falls back to a generic message when ok is false with no reason", async () => {
+		api.listAgentFindings.mockResolvedValue({
+			rows: [findingRow()],
+			total: 1,
+			has_more: false,
+			severity_counts: { blocker: 1 },
+		});
+		apiAgents.takeFindingToChat.mockResolvedValue({ ok: false, conversation: "CONV-9" });
+		const w = mountPanel(baseRun({ status: "completed" }));
+		await expandAndDiscuss(w);
+		expect(router.push).not.toHaveBeenCalled();
+		const { toast } = await import("frappe-ui");
+		expect(toast.error).toHaveBeenCalledWith("Could not open this finding in chat.");
+	});
+
+	it("navigates to the conversation when ok is true", async () => {
+		api.listAgentFindings.mockResolvedValue({
+			rows: [findingRow()],
+			total: 1,
+			has_more: false,
+			severity_counts: { blocker: 1 },
+		});
+		apiAgents.takeFindingToChat.mockResolvedValue({ ok: true, conversation: "CONV-9" });
+		const w = mountPanel(baseRun({ status: "completed" }));
+		await expandAndDiscuss(w);
+		expect(router.push).toHaveBeenCalledWith("/c/CONV-9");
+	});
+});
