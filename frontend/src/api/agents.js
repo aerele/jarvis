@@ -55,6 +55,13 @@ export const listAgentActivityPage = (p = {}) =>
 		page_length: p.page_length || 20,
 	});
 
+// One run's STEP TIMELINE, oldest first (jarvis#1062): what the bench observed
+// the run do - the launch dispatch, each jarvis__* tool the delegate called back
+// with, and the findings writeback. Steps carry shapes (DocType names, report
+// names, counts), never row contents. Ownership-gated server-side; a run the
+// caller cannot read returns an empty timeline. -> { steps: [...], count }
+export const listRunSteps = (run) => call(AG + "list_run_steps", { run });
+
 // Seed a new conversation from a finding and land the user in live chat.
 // -> { ok, conversation, run_id, reason }
 export const takeFindingToChat = (finding) => call(AG + "take_finding_to_chat", { finding });

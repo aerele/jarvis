@@ -53,6 +53,13 @@
 			</template>
 		</div>
 
+		<!-- Step timeline (jarvis#1062): the run's own narration, full width and
+		     directly under the header so it reads as part of the run, not as a
+		     placeholder inside an empty findings list. Deliberately OUTSIDE the
+		     scribe/auditor branches - both natures take the same steps - and kept
+		     after the run finishes (collapsed) so a completed run is inspectable. -->
+		<RunStepTimeline :steps="steps" :status="run.status" :elapsed="elapsedLabel" />
+
 		<!-- Scribe run: a Custom App Learning agent writes wiki pages, not findings.
 		     Show the pages it wrote (with links) instead of a findings list, so a
 		     successful run reads as "N pages written", never a failure / "0 findings". -->
@@ -96,23 +103,10 @@
 					<FeatherIcon name="external-link" class="size-3.5 shrink-0 text-ink-gray-5" />
 				</a>
 			</div>
-			<div
-				v-else-if="run.status === 'running'"
-				class="mt-2 flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center"
-			>
-				<span class="text-sm text-ink-gray-6">Running for {{ elapsedLabel }}</span>
-				<span class="text-sm text-ink-gray-5"
-					>Run in progress - pages appear here as they are written.</span
-				>
-				<div
-					v-if="recentActivity.length"
-					class="mt-2 w-full max-w-sm divide-y overflow-hidden rounded-lg border text-left"
-				>
-					<div v-for="a in recentActivity" :key="a.name" class="px-3 py-2 text-sm">
-						<span class="text-ink-gray-8">{{ activityLabel(a) }}</span>
-						<span class="text-ink-gray-5"> · {{ timeAgo(a.creation) }}</span>
-					</div>
-				</div>
+			<!-- the running state is the timeline above; this line only says where
+			     the pages will land -->
+			<div v-else-if="run.status === 'running'" class="mt-2 py-6 text-sm text-ink-gray-5">
+				Wiki pages appear here as they are written.
 			</div>
 			<div v-else class="mt-2 py-6 text-sm text-ink-gray-5">
 				No wiki pages were written this run.
@@ -157,26 +151,13 @@
 			<div v-else-if="loadError && !rows.length" class="py-8 text-sm text-ink-red-4">
 				{{ loadError }}
 			</div>
-			<!-- running-run progress (#1062 C3): only while there is no findings
-			     snapshot yet - a running run that already recorded findings shows
-			     them normally below, same as before. -->
+			<!-- a running run with no snapshot yet: the timeline above carries the
+			     progress, so this only says where the findings will land -->
 			<div
 				v-else-if="!rows.length && run.status === 'running'"
-				class="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center"
+				class="py-8 text-sm text-ink-gray-5"
 			>
-				<span class="text-sm text-ink-gray-6">Running for {{ elapsedLabel }}</span>
-				<span class="text-sm text-ink-gray-5"
-					>Run in progress - findings appear when it completes.</span
-				>
-				<div
-					v-if="recentActivity.length"
-					class="mt-2 w-full max-w-sm divide-y overflow-hidden rounded-lg border text-left"
-				>
-					<div v-for="a in recentActivity" :key="a.name" class="px-3 py-2 text-sm">
-						<span class="text-ink-gray-8">{{ activityLabel(a) }}</span>
-						<span class="text-ink-gray-5"> · {{ timeAgo(a.creation) }}</span>
-					</div>
-				</div>
+				Findings appear here when the run completes.
 			</div>
 			<div v-else-if="!rows.length" class="py-8 text-sm text-ink-gray-5">
 				{{ emptyText }}
@@ -345,10 +326,11 @@ import { useRouter } from "vue-router";
 import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import Banner from "@/components/Banner.vue";
+import RunStepTimeline from "./RunStepTimeline.vue";
 import { timeAgo, exactDate, formatDate, toLocalMs, fmtElapsed } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
 import * as api from "@/api";
-import { takeFindingToChat, stopAgentRun, listAgentActivityPage } from "@/api/agents";
+import { takeFindingToChat, stopAgentRun, listRunSteps } from "@/api/agents";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
@@ -408,13 +390,17 @@ const chatBusy = ref("");
 const stopping = ref(false);
 const expanded = ref(new Set());
 
-// ── #1062 C3: running-run progress (deliberately downscoped - NO per-step
-// timeline). A ticking elapsed-time label + the agent's recent activity feed,
-// so a running run reads as "alive" instead of a static "in progress" line. ──
+// ── #1062: the per-run STEP TIMELINE. A ticking elapsed-time label plus the
+// steps the bench observed THIS run take (list_run_steps), so a running run
+// reads as alive and step-by-step instead of a static "in progress" line. The
+// steps outlive the run: a finished one keeps them behind a collapsed
+// disclosure, which is why they are fetched for a terminal run too. ──────────
 const nowTick = ref(Date.now());
-const recentActivity = ref([]);
+const steps = ref([]);
 let elapsedTimer = null;
-let activityTimer = null;
+let stepsTimer = null;
+
+const STEPS_POLL_MS = 5000;
 
 const elapsedLabel = computed(() => {
 	const startMs = props.run && toLocalMs(props.run.started_at);
@@ -422,53 +408,44 @@ const elapsedLabel = computed(() => {
 	return fmtElapsed((nowTick.value - startMs) / 1000);
 });
 
-// list_agent_activity_page filters by agent (slug) / installation, not by run
-// (jarvis#1062 code map) - these are this AGENT's recent lifecycle events, not
-// strictly this run's, so the label below says so rather than implying a
-// per-run timeline this deliberately does not build.
-async function loadRecentActivity() {
-	if (!props.run || !props.run.agent) return;
+// Monotonic request id, like the findings load: rapid rail clicks must not land
+// another run's steps on the pinned run.
+let stepsReqId = 0;
+async function loadSteps() {
+	if (!props.run || !props.run.name) return;
+	const id = ++stepsReqId;
 	try {
-		const res = await listAgentActivityPage({ agent: props.run.agent, page_length: 5 });
-		recentActivity.value = (res && res.rows) || [];
+		const res = await listRunSteps(props.run.name);
+		if (id !== stepsReqId) return;
+		steps.value = (res && res.steps) || [];
 	} catch {
-		// best-effort supplementary context - a failed fetch must not break the
-		// running-progress display, which still has the elapsed timer.
+		// Best-effort narration: a failed fetch leaves the last steps on screen and
+		// the elapsed timer ticking. It must never turn a healthy run into an error
+		// state - the findings load owns that.
 	}
 }
-function startRunningProgress() {
+function startStepsPoll() {
 	if (elapsedTimer) return; // already running
 	nowTick.value = Date.now();
 	elapsedTimer = setInterval(() => (nowTick.value = Date.now()), 1000);
-	loadRecentActivity();
-	// #1062 review fix: skip the fetch while the tab is hidden, mirroring the
-	// rows-poll guard in AgentRunsBoard.vue - a backgrounded tab should not
-	// burn a request every 10s here either.
-	activityTimer = setInterval(() => {
-		if (document.visibilityState === "visible") loadRecentActivity();
-	}, 10000);
+	loadSteps();
+	// Visibility-guarded, mirroring the rows poll in AgentRunsBoard.vue: a
+	// backgrounded tab must not burn a request every 5s.
+	stepsTimer = setInterval(() => {
+		if (document.visibilityState === "visible") loadSteps();
+	}, STEPS_POLL_MS);
 }
-function stopRunningProgress() {
+function stopStepsPoll() {
 	if (elapsedTimer) {
 		clearInterval(elapsedTimer);
 		elapsedTimer = null;
 	}
-	if (activityTimer) {
-		clearInterval(activityTimer);
-		activityTimer = null;
+	if (stepsTimer) {
+		clearInterval(stepsTimer);
+		stepsTimer = null;
 	}
 }
-onBeforeUnmount(stopRunningProgress);
-
-// short, human label for an activity row - no icon/verb catalog (that lives in
-// AgentActivityTab); this is a supplementary glance, not a second feed to keep
-// in sync with it.
-function activityLabel(a) {
-	if (a.detail) return a.detail;
-	return String(a.action || "activity")
-		.split("_")
-		.join(" ");
-}
+onBeforeUnmount(stopStepsPoll);
 
 const runLabel = computed(() =>
 	props.run && props.run.started_at ? timeAgo(props.run.started_at) : props.run.name
@@ -592,12 +569,24 @@ function loadMore() {
 // refresh and object identity alone must not re-fetch findings.
 watch(
 	[() => props.run && props.run.name, () => props.run && props.run.status],
-	([name, status], [prevName] = []) => {
-		// running-progress timers: independent of the findings reload below, and
-		// evaluated first so the state-filter early-return further down never
-		// skips it.
-		if (status === "running") startRunningProgress();
-		else stopRunningProgress();
+	([name, status], [prevName, prevStatus] = []) => {
+		// Step timeline: independent of the findings reload below, and evaluated
+		// first so the state-filter early-return further down never skips it.
+		if (name !== prevName) steps.value = [];
+		if (status === "running") {
+			// switching from one running run to another must re-arm the poll, not
+			// leave it pointed at the previous run's elapsed clock
+			if (name !== prevName) stopStepsPoll();
+			startStepsPoll();
+		} else {
+			stopStepsPoll();
+			// One last fetch on the flip to terminal: the closing writeback step
+			// lands in the same instant the status changes, so stopping the interval
+			// alone would leave the timeline permanently one step short. A run
+			// selected while already finished takes this branch too, which is what
+			// fills its collapsed "Steps (N)" disclosure.
+			if (name && (name !== prevName || prevStatus === "running")) loadSteps();
+		}
 		if (name !== prevName) {
 			rows.value = [];
 			total.value = 0;

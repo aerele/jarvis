@@ -11,8 +11,9 @@ import { mount, flushPromises } from "@vue/test-utils";
  *   C2. A running run offers Stop -> stop_agent_run(run.name); success toasts
  *       and asks the parent (AgentRunsBoard) to refresh; failure toasts the
  *       error and leaves the run showing running.
- *   C3. A running run with no findings/pages yet shows a ticking elapsed-time
- *       label and the agent's recent activity, instead of a static sentence.
+ *   C3. A run shows its STEP TIMELINE - a ticking elapsed-time label plus the
+ *       steps the bench observed this run take (list_run_steps), polled every
+ *       5s while running and kept, collapsed, once it is over.
  */
 
 const api = vi.hoisted(() => ({
@@ -24,7 +25,7 @@ vi.mock("@/api", () => api);
 const apiAgents = vi.hoisted(() => ({
 	takeFindingToChat: vi.fn(),
 	stopAgentRun: vi.fn(),
-	listAgentActivityPage: vi.fn(),
+	listRunSteps: vi.fn(),
 }));
 vi.mock("@/api/agents", () => apiAgents);
 
@@ -110,6 +111,32 @@ function mountPanel(run) {
 	return mount(FindingsPanel, { props: { run } });
 }
 
+// list_run_steps rows: the launch dispatch plus one humanized tool call
+const STEPS = [
+	{
+		name: "S1",
+		seq: 1,
+		kind: "dispatched",
+		tool: "",
+		label: "Dispatched to the agent",
+		detail: "trigger: manual",
+		status: "ok",
+		duration_ms: null,
+		occurred_at: "2026-09-01 10:00:00",
+	},
+	{
+		name: "S2",
+		seq: 2,
+		kind: "tool",
+		tool: "get_list",
+		label: "Read Sales Invoice, 12 rows",
+		detail: "",
+		status: "ok",
+		duration_ms: 340,
+		occurred_at: "2026-09-01 10:00:04",
+	},
+];
+
 function setVisibility(state) {
 	Object.defineProperty(document, "visibilityState", {
 		value: state,
@@ -127,7 +154,7 @@ beforeEach(() => {
 		has_more: false,
 		severity_counts: {},
 	});
-	apiAgents.listAgentActivityPage.mockResolvedValue({ rows: [], total: 0, has_more: false });
+	apiAgents.listRunSteps.mockResolvedValue({ steps: [], count: 0 });
 });
 
 afterEach(() => {
@@ -199,7 +226,7 @@ describe("C2: Stop is reachable while running and idempotent-safe (no confirm)",
 	});
 });
 
-describe("C3: running-run progress - ticking elapsed time + recent activity", () => {
+describe("C3: the run step timeline - ticking elapsed time + observed steps", () => {
 	it("shows a ticking elapsed-time label instead of the static placeholder", async () => {
 		vi.useFakeTimers();
 		// setSystemTime only stamps Date.now() - only advanceTimersByTimeAsync
@@ -223,27 +250,29 @@ describe("C3: running-run progress - ticking elapsed time + recent activity", ()
 		expect(w.text()).toContain("01:05");
 	});
 
-	it("fetches and renders the agent's recent activity while running", async () => {
-		apiAgents.listAgentActivityPage.mockResolvedValue({
-			rows: [
-				{
-					name: "ACT-1",
-					action: "run_started",
-					detail: "",
-					creation: "2026-09-01 10:00:00",
-				},
-			],
-			total: 1,
-			has_more: false,
-		});
-		const w = mountPanel(baseRun({ status: "running" }));
+	it("fetches and renders THIS run's steps while it is running", async () => {
+		apiAgents.listRunSteps.mockResolvedValue({ steps: STEPS, count: 2 });
+		const w = mountPanel(baseRun({ status: "running", name: "RUN-0042" }));
 		await flushPromises();
 
-		expect(apiAgents.listAgentActivityPage).toHaveBeenCalledWith({
-			agent: "close-auditor",
-			page_length: 5,
-		});
-		expect(w.text()).toContain("run started");
+		expect(apiAgents.listRunSteps).toHaveBeenCalledWith("RUN-0042");
+		expect(w.text()).toContain("Dispatched to the agent");
+		expect(w.text()).toContain("Read Sales Invoice, 12 rows");
+		expect(w.text()).toContain("2 steps");
+	});
+
+	it("marks the latest step as current while running, and only that one", async () => {
+		apiAgents.listRunSteps.mockResolvedValue({ steps: STEPS, count: 2 });
+		const w = mountPanel(baseRun({ status: "running" }));
+		await flushPromises();
+		const now = w.findAll(".badge").filter((b) => b.text() === "Now");
+		expect(now.length).toBe(1);
+	});
+
+	it("shows the empty state before the first step lands", async () => {
+		const w = mountPanel(baseRun({ status: "running" }));
+		await flushPromises();
+		expect(w.text()).toContain("Dispatched to the agent, waiting for the first step");
 	});
 
 	it("keeps the scribe placeholder wording distinct from the auditor one", async () => {
@@ -254,45 +283,116 @@ describe("C3: running-run progress - ticking elapsed time + recent activity", ()
 		expect(w.text()).toContain("pages appear here as they are written");
 	});
 
-	it("stops ticking after the component unmounts (no leaked interval)", async () => {
+	it("stops polling after the component unmounts (no leaked interval)", async () => {
 		vi.useFakeTimers();
 		const w = mountPanel(baseRun({ status: "running" }));
 		await flushPromises();
-		const callsBeforeUnmount = apiAgents.listAgentActivityPage.mock.calls.length;
+		const before = apiAgents.listRunSteps.mock.calls.length;
 		w.unmount();
 		await vi.advanceTimersByTimeAsync(30000);
 		await flushPromises();
-		expect(apiAgents.listAgentActivityPage.mock.calls.length).toBe(callsBeforeUnmount);
+		expect(apiAgents.listRunSteps.mock.calls.length).toBe(before);
 	});
 
-	it("does not show the running-progress block once findings exist", async () => {
+	it("keeps the timeline on screen once findings exist", async () => {
 		api.listAgentFindings.mockResolvedValue({
 			rows: [{ name: "F1", severity: "blocker", title: "x", state: "open" }],
 			total: 1,
 			has_more: false,
 			severity_counts: { blocker: 1 },
 		});
+		apiAgents.listRunSteps.mockResolvedValue({ steps: STEPS, count: 2 });
 		const w = mountPanel(baseRun({ status: "running" }));
 		await flushPromises();
-		expect(w.text()).not.toContain("Running for");
+		expect(w.text()).toContain("Running for");
+		expect(w.text()).toContain("Read Sales Invoice, 12 rows");
 	});
 
-	it("skips the 10s activity re-fetch while the tab is hidden, and resumes once visible", async () => {
+	it("skips the 5s re-fetch while the tab is hidden, and resumes once visible", async () => {
 		vi.useFakeTimers();
 		setVisibility("visible");
 		mountPanel(baseRun({ status: "running" }));
 		await flushPromises();
-		const callsAfterMount = apiAgents.listAgentActivityPage.mock.calls.length;
+		const callsAfterMount = apiAgents.listRunSteps.mock.calls.length;
 
 		setVisibility("hidden");
 		await vi.advanceTimersByTimeAsync(30000);
 		await flushPromises();
-		expect(apiAgents.listAgentActivityPage.mock.calls.length).toBe(callsAfterMount);
+		expect(apiAgents.listRunSteps.mock.calls.length).toBe(callsAfterMount);
 
 		setVisibility("visible");
-		await vi.advanceTimersByTimeAsync(10000);
+		await vi.advanceTimersByTimeAsync(5000);
 		await flushPromises();
-		expect(apiAgents.listAgentActivityPage.mock.calls.length).toBeGreaterThan(callsAfterMount);
+		expect(apiAgents.listRunSteps.mock.calls.length).toBeGreaterThan(callsAfterMount);
+	});
+});
+
+describe("C3b: a finished run keeps its timeline, collapsed", () => {
+	it("fetches steps once for a terminal run and does not poll", async () => {
+		vi.useFakeTimers();
+		apiAgents.listRunSteps.mockResolvedValue({ steps: STEPS, count: 2 });
+		mountPanel(baseRun({ status: "completed" }));
+		await flushPromises();
+		expect(apiAgents.listRunSteps).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(30000);
+		await flushPromises();
+		expect(apiAgents.listRunSteps).toHaveBeenCalledTimes(1);
+	});
+
+	it("renders a collapsed Steps (N) disclosure that opens on click", async () => {
+		apiAgents.listRunSteps.mockResolvedValue({ steps: STEPS, count: 2 });
+		const w = mountPanel(baseRun({ status: "completed" }));
+		await flushPromises();
+
+		expect(w.text()).toContain("Steps (2)");
+		expect(w.text()).not.toContain("Read Sales Invoice, 12 rows");
+
+		const disclosure = w.findAll("button").find((b) => b.text().includes("Steps (2)"));
+		await disclosure.trigger("click");
+		expect(w.text()).toContain("Read Sales Invoice, 12 rows");
+	});
+
+	it("re-fetches once on the flip from running to terminal, then stops", async () => {
+		vi.useFakeTimers();
+		const w = mountPanel(baseRun({ status: "running" }));
+		await flushPromises();
+		const whileRunning = apiAgents.listRunSteps.mock.calls.length;
+
+		await w.setProps({ run: baseRun({ status: "completed" }) });
+		await flushPromises();
+		const afterFlip = apiAgents.listRunSteps.mock.calls.length;
+		expect(afterFlip).toBe(whileRunning + 1);
+
+		await vi.advanceTimersByTimeAsync(30000);
+		await flushPromises();
+		expect(apiAgents.listRunSteps.mock.calls.length).toBe(afterFlip);
+	});
+
+	it("shows an error step in the red tone", async () => {
+		apiAgents.listRunSteps.mockResolvedValue({
+			steps: [
+				{
+					name: "S1",
+					seq: 1,
+					kind: "tool",
+					tool: "run_report",
+					label: "Ran report Trial Balance",
+					detail: "",
+					status: "error",
+					duration_ms: 40,
+					occurred_at: "2026-09-01 10:00:01",
+				},
+			],
+			count: 1,
+		});
+		const w = mountPanel(baseRun({ status: "completed" }));
+		await flushPromises();
+		await w
+			.findAll("button")
+			.find((b) => b.text().includes("Steps (1)"))
+			.trigger("click");
+		expect(w.html()).toContain("text-ink-red-4");
 	});
 });
 
