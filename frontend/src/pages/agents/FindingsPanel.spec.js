@@ -369,7 +369,7 @@ describe("C3b: a finished run keeps its timeline, collapsed", () => {
 		expect(apiAgents.listRunSteps.mock.calls.length).toBe(afterFlip);
 	});
 
-	it("shows an error step in the red tone", async () => {
+	it("shows an error step in the red tone, with the tool's message", async () => {
 		apiAgents.listRunSteps.mockResolvedValue({
 			steps: [
 				{
@@ -378,7 +378,7 @@ describe("C3b: a finished run keeps its timeline, collapsed", () => {
 					kind: "tool",
 					tool: "run_report",
 					label: "Ran report Trial Balance",
-					detail: "",
+					detail: "unknown Report: Trial Balance",
 					status: "error",
 					duration_ms: 40,
 					occurred_at: "2026-09-01 10:00:01",
@@ -393,6 +393,66 @@ describe("C3b: a finished run keeps its timeline, collapsed", () => {
 			.find((b) => b.text().includes("Steps (1)"))
 			.trigger("click");
 		expect(w.html()).toContain("text-ink-red-4");
+		// a bare red row explains nothing - the failure has to say what failed
+		expect(w.text()).toContain("unknown Report: Trial Balance");
+	});
+});
+
+describe("C3c: consecutive identical steps collapse into one row", () => {
+	function repeated(n, overrides = {}) {
+		return Array.from({ length: n }, (_, i) => ({
+			name: `R${i}`,
+			seq: i + 1,
+			kind: "tool",
+			tool: "get_list",
+			label: "Read Sales Invoice, 12 rows",
+			detail: "",
+			status: "ok",
+			duration_ms: 100,
+			occurred_at: `2026-09-01 10:00:0${i}`,
+			...overrides,
+		}));
+	}
+
+	it("folds a repeated read into a single row with an xN count", async () => {
+		apiAgents.listRunSteps.mockResolvedValue({ steps: repeated(3), count: 3 });
+		const w = mountPanel(baseRun({ status: "running" }));
+		await flushPromises();
+
+		expect(w.text()).toContain("x3");
+		// one rendered row, but the header still reports every recorded step
+		expect(w.text().match(/Read Sales Invoice, 12 rows/g).length).toBe(1);
+		expect(w.text()).toContain("3 steps");
+	});
+
+	it("does not fold steps more than 5s apart", async () => {
+		const steps = repeated(2);
+		steps[1].occurred_at = "2026-09-01 10:00:30";
+		apiAgents.listRunSteps.mockResolvedValue({ steps, count: 2 });
+		const w = mountPanel(baseRun({ status: "running" }));
+		await flushPromises();
+
+		expect(w.text()).not.toContain("x2");
+		expect(w.text().match(/Read Sales Invoice, 12 rows/g).length).toBe(2);
+	});
+
+	it("never folds a failure into a success", async () => {
+		const steps = repeated(2);
+		steps[1].status = "error";
+		steps[1].detail = "no permission to read Sales Invoice";
+		apiAgents.listRunSteps.mockResolvedValue({ steps, count: 2 });
+		const w = mountPanel(baseRun({ status: "running" }));
+		await flushPromises();
+
+		expect(w.text()).not.toContain("x2");
+		expect(w.text()).toContain("no permission to read Sales Invoice");
+	});
+
+	it("marks only the last COLLAPSED row as current", async () => {
+		apiAgents.listRunSteps.mockResolvedValue({ steps: repeated(3), count: 3 });
+		const w = mountPanel(baseRun({ status: "running" }));
+		await flushPromises();
+		expect(w.findAll(".badge").filter((b) => b.text() === "Now").length).toBe(1);
 	});
 });
 

@@ -2181,9 +2181,15 @@ def list_run_steps(run: str) -> dict:
 
 	Gated exactly like :func:`list_findings`: the raw ``get_value`` below bypasses
 	permissions, so a run the caller neither owns nor administers returns an EMPTY
-	timeline - identical to an unknown run, never an existence oracle. Ordered by
-	``seq`` (creation is only the tiebreak: two steps can land inside the same
-	second and must still read in the order they happened)."""
+	timeline - identical to an unknown run, never an existence oracle.
+
+	Ordered by ``occurred_at`` (``creation`` breaks the tie), and the ``seq`` in
+	the RESPONSE is renumbered 1..n over that order. The stored ``seq`` is written
+	unlocked by ``record_step`` - a delegate firing tool calls in parallel reads
+	the same MAX(seq) twice and both rows land on the same number (observed live:
+	2,2,2 then 3,3). Putting a write barrier on the hot path of every plugin tool
+	call to order a decoration is the wrong trade, so the ordering contract lives
+	HERE instead, where it costs nothing and duplicates can never reach the UI."""
 	empty: dict = {"steps": [], "count": 0}
 	if not run:
 		return empty
@@ -2208,10 +2214,12 @@ def list_run_steps(run: str) -> dict:
 			"occurred_at",
 			"creation",
 		],
-		order_by="seq asc, creation asc",
+		order_by="occurred_at asc, creation asc",
 		limit_page_length=RUN_STEPS_CAP,
 		ignore_permissions=True,
 	)
+	for position, step in enumerate(steps, start=1):
+		step["seq"] = position
 	return {"steps": steps, "count": len(steps)}
 
 

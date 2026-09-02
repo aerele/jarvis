@@ -33,6 +33,25 @@ RUN = "Jarvis Agent Run"
 #: Small Text we keep short so the timeline row stays one glanceable line).
 LABEL_MAX = 140
 DETAIL_MAX = 500
+#: A failed step carries the tool's own error message so the timeline explains
+#: what went wrong. First line only, and short: enough to name the fault, never
+#: enough to paste a traceback or a payload into the customer's view.
+ERROR_DETAIL_MAX = 300
+
+#: Bench-internal bookkeeping DocTypes an agent reads to orient itself before it
+#: touches any ERP data. Their real names are implementation vocabulary the
+#: customer has never seen and their row names are opaque hashes, so a step names
+#: the ACT instead of the record: "Read engagement configuration", never
+#: "Read Jarvis Agent Installation 8f3ac1...". Anything else under the same
+#: prefix is a doctype this map has not been taught, so it degrades to the
+#: honest generic rather than leaking a name.
+_INTERNAL_DOCTYPE_LABELS = {
+	"Jarvis Agent Installation": "Read engagement configuration",
+	"Jarvis Agent Listing": "Read agent definition",
+	"Jarvis Agent Run": "Checked run state",
+}
+_INTERNAL_DOCTYPE_PREFIX = "Jarvis Agent "
+_INTERNAL_DOCTYPE_FALLBACK = "Read agent metadata"
 
 #: Tool names arrive from the agent registry as ``jarvis__get_list``; the bench
 #: dispatches the bare name. Both forms normalize to the bare one.
@@ -53,11 +72,16 @@ def bare_tool(tool) -> str:
 def _next_seq(run_name: str) -> int:
 	"""1-based position of the next step of ``run_name``.
 
-	MAX(seq)+1 rather than a row COUNT: a step is never deleted, but a count
-	would silently renumber from 1 if one ever were, and two rows sharing a seq
-	is exactly the ambiguity the column exists to remove. The gateway drives one
-	tool call at a time per run, so no lock is needed; ``list_run_steps`` orders
-	by ``seq, creation`` anyway so even a tie reads in insert order."""
+	MAX(seq)+1 rather than a row COUNT, so a deleted row can never renumber the
+	rest. It is deliberately UNLOCKED and therefore best-effort: a delegate that
+	fires tool calls in parallel reads the same MAX in two requests and both
+	write the same seq (observed live on the bench - 2,2,2 then 3,3). Taking a
+	lock here would put a write barrier on the hot path of every plugin tool call
+	to order a decoration, which is the wrong trade.
+
+	So the stored ``seq`` is a hint, not the contract. ``list_run_steps`` orders
+	by ``occurred_at`` and RE-NUMBERS the response 1..n, which is what the UI
+	renders - duplicates in the column can never reach a customer."""
 	try:
 		row = frappe.db.sql(
 			"select max(seq) from `tabJarvis Agent Run Step` where run = %s",
@@ -185,6 +209,39 @@ def _title_case(tool: str) -> str:
 	return " ".join(part.capitalize() for part in bare_tool(tool).split("_") if part) or "Step"
 
 
+def internal_doctype_label(doctype) -> str | None:
+	"""The customer-facing phrasing for a read of a bench-internal DocType, or
+	None when it is ordinary ERP data the customer knows by name (and may see)."""
+	name = str(doctype or "").strip()
+	if not name:
+		return None
+	if name in _INTERNAL_DOCTYPE_LABELS:
+		return _INTERNAL_DOCTYPE_LABELS[name]
+	return _INTERNAL_DOCTYPE_FALLBACK if name.startswith(_INTERNAL_DOCTYPE_PREFIX) else None
+
+
+def _is_single(doctype: str) -> bool:
+	"""True for a Single DocType (Stock Settings, Selling Settings, ...).
+
+	A Single's document name IS its doctype, so ``get_doc("Stock Settings")``
+	rendered as "Read <doctype> <name>" reads "Read Stock Settings Stock
+	Settings". Metadata is cached, and an unknown/bogus doctype (exactly the
+	failed-lookup case) simply answers False."""
+	try:
+		return bool(frappe.get_meta(doctype).issingle)
+	except Exception:
+		return False
+
+
+def error_detail(message) -> str:
+	"""The FIRST line of a tool's error message, clipped to
+	:data:`ERROR_DETAIL_MAX` - what failed, without a traceback or a payload."""
+	text = str(message or "").strip()
+	if not text:
+		return ""
+	return text.splitlines()[0].strip()[:ERROR_DETAIL_MAX]
+
+
 def _query_doctype(args: dict) -> str:
 	"""The ``from`` DocType of a structured query spec (``query`` tool)."""
 	spec = args.get("spec")
@@ -213,15 +270,41 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 	if name == "get_list":
 		doctype = args.get("doctype") or "records"
 		n = _n_rows(result)
-		label = f"Read {doctype}" + (f", {_plural(n, 'row')}" if n is not None else "")
+		internal = internal_doctype_label(doctype)
+		if internal:
+			# The count is a shape, so it survives - but on the second line, leaving
+			# the label as the plain sentence the customer reads.
+			label = internal
+			if n is not None:
+				detail = _plural(n, "row")
+		else:
+			label = f"Read {doctype}" + (f", {_plural(n, 'row')}" if n is not None else "")
 	elif name == "get_doc":
 		doctype = args.get("doctype") or "document"
 		target = args.get("name")
-		if not target and isinstance(args.get("names"), list):
+		internal = internal_doctype_label(doctype)
+		# A record NAME is model-supplied: it is whatever the delegate guessed, and a
+		# wrong guess is exactly what produced "Read Company ignore" on the bench. So
+		# the name is only ever shown once the document actually came back.
+		resolved = isinstance(result, dict) and bool(result)
+		if internal:
+			# Never the record name here either: an internal row's name is an opaque
+			# hash that means nothing to the customer and states nothing true.
+			label = internal
+		elif not target and isinstance(args.get("names"), list):
 			n = len(args["names"])
 			label = f"Read {doctype}, {_plural(n, 'document')}"
+		elif _is_single(doctype):
+			# A Single's name IS its doctype - "Read Stock Settings", never twice.
+			label = f"Read {doctype}"
+		elif resolved and target:
+			label = f"Read {doctype} {target}"
+		elif resolved:
+			label = f"Read {doctype}"
 		else:
-			label = f"Read {doctype}" + (f" {target}" if target else "")
+			# The lookup did not resolve. Say what was attempted, not what was read;
+			# the error itself lands in `detail` (see the api.py step hook).
+			label = f"Looked up {doctype}"
 	elif name == "run_report":
 		label = f"Ran report {args.get('report_name') or ''}".strip()
 		n = _n_rows(result)
@@ -229,7 +312,11 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 			detail = _plural(n, "row")
 	elif name == "query":
 		doctype = _query_doctype(args)
-		label = f"Queried {doctype}".strip() if doctype else "Ran a query"
+		internal = internal_doctype_label(doctype)
+		if internal:
+			label = internal
+		else:
+			label = f"Queried {doctype}".strip() if doctype else "Ran a query"
 		n = _n_rows(result)
 		if n is not None:
 			detail = _plural(n, "row")

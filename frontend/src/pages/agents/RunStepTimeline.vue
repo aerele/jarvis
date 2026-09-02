@@ -28,7 +28,7 @@
 		     title line, muted detail, relative time on the right). -->
 		<div v-if="expanded" class="mt-2 divide-y overflow-hidden rounded-lg border">
 			<div
-				v-for="(s, i) in steps"
+				v-for="(s, i) in rows"
 				:key="s.name"
 				class="flex items-start gap-3 px-3 py-2.5"
 				:class="isCurrent(i) ? 'bg-surface-gray-1' : ''"
@@ -45,6 +45,9 @@
 							:class="s.status === 'error' ? 'text-ink-red-4' : 'text-ink-gray-8'"
 						>
 							{{ s.label }}
+						</span>
+						<span v-if="s.repeats > 1" class="text-sm text-ink-gray-5">
+							x{{ s.repeats }}
 						</span>
 						<Badge v-if="isCurrent(i)" variant="subtle" theme="blue" label="Now" />
 					</div>
@@ -81,9 +84,14 @@
 // marked "Now". Once it is terminal the whole thing collapses behind a
 // "Steps (N)" disclosure, so a finished run stays inspectable without the
 // timeline competing with its findings.
+//
+// Consecutive IDENTICAL steps fold into a single row with an "xN" count (see
+// COLLAPSE_WINDOW_MS): an agent that polls one read in a loop otherwise buries
+// every step that actually differs. The fold is presentation only - the bench
+// keeps one row per step, and the header count still reports them all.
 import { ref, computed } from "vue";
 import { Badge, FeatherIcon, Tooltip } from "frappe-ui";
-import { timeAgo, exactDate } from "@/utils/datetime";
+import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
 
 const props = defineProps({
 	// rows from agents_api.list_run_steps: {name, seq, kind, tool, label,
@@ -108,16 +116,60 @@ const KIND_COLOR = {
 	writeback: "text-ink-green-3",
 };
 
+// An agent polling the same read in a loop produced eight identical rows in a
+// row on the bench, which buries the steps that actually differ. Consecutive
+// IDENTICAL rows within this window fold into one "x8". The identity includes
+// status and detail, not just tool+label, so a failure is never folded into a
+// success and an error's message is never dropped behind a repeat count. The DB
+// keeps every row; this is presentation only.
+const COLLAPSE_WINDOW_MS = 5000;
+
 const open = ref(false);
 
 const isRunning = computed(() => props.status === "running");
+
+// [{...lastStepOfTheGroup, name: firstName, repeats, duration_ms: summed}]
+const rows = computed(() => {
+	const out = [];
+	for (const s of props.steps) {
+		const prev = out[out.length - 1];
+		if (prev && sameStep(prev, s) && withinWindow(prev.last_at, s)) {
+			prev.repeats += 1;
+			prev.duration_ms = (Number(prev.duration_ms) || 0) + (Number(s.duration_ms) || 0);
+			prev.last_at = stepTime(s);
+			prev.occurred_at = s.occurred_at;
+			prev.creation = s.creation;
+			continue;
+		}
+		out.push({ ...s, repeats: 1, last_at: stepTime(s) });
+	}
+	return out;
+});
+
 const expanded = computed(() => props.steps.length > 0 && (isRunning.value || open.value));
 const countLabel = computed(() =>
 	props.steps.length === 1 ? "1 step" : `${props.steps.length} steps`
 );
 
+function sameStep(a, b) {
+	return (
+		(a.tool || "") === (b.tool || "") &&
+		(a.label || "") === (b.label || "") &&
+		(a.status || "") === (b.status || "") &&
+		(a.detail || "") === (b.detail || "")
+	);
+}
+// Unparseable timestamps must not silently glue unrelated rows together, so an
+// unknown gap is treated as outside the window.
+function withinWindow(prevAt, s) {
+	const a = toLocalMs(prevAt);
+	const b = toLocalMs(stepTime(s));
+	if (a == null || b == null) return false;
+	return b - a <= COLLAPSE_WINDOW_MS;
+}
+
 function isCurrent(index) {
-	return isRunning.value && index === props.steps.length - 1;
+	return isRunning.value && index === rows.value.length - 1;
 }
 function stepIcon(s) {
 	if (s.status === "error") return "x-circle";

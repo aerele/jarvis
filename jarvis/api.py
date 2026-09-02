@@ -262,7 +262,7 @@ def _dispatch_from_session(
 			started_ms = time.monotonic()
 			try:
 				result = _run_tool(tool, parsed_args, conversation=conv)
-			except Exception:
+			except Exception as exc:
 				# A tool that raised past _run_tool's envelope translation is a real
 				# fault; try to leave an honest step saying the attempt happened and
 				# failed. Strictly best-effort: on a true 500 Frappe's request handler
@@ -271,17 +271,31 @@ def _dispatch_from_session(
 				# the raising tool made. The step that MATTERS is the ok=False envelope
 				# path below, which is how a tool error normally arrives. The re-raise
 				# is untouched either way.
-				_record_tool_step(step_run, tool, parsed_args, None, ok=False, started_ms=started_ms)
+				_record_tool_step(
+					step_run,
+					tool,
+					parsed_args,
+					None,
+					ok=False,
+					started_ms=started_ms,
+					error_message=str(exc),
+				)
 				raise
 			# Recorded BEFORE the result budget trims the payload, so a step's row
 			# count is the count the tool actually returned, not the truncated one.
+			_ok = bool(isinstance(result, dict) and result.get("ok"))
 			_record_tool_step(
 				step_run,
 				tool,
 				parsed_args,
 				result.get("data") if isinstance(result, dict) else None,
-				ok=bool(isinstance(result, dict) and result.get("ok")),
+				ok=_ok,
 				started_ms=started_ms,
+				error_message=(
+					((result.get("error") or {}).get("message") or "")
+					if (not _ok and isinstance(result, dict))
+					else ""
+				),
 			)
 			# Agent-boundary model-facing size cap. ONLY on this (agent session)
 			# path - the dashboard builder/desk/external call_tool callers go through
@@ -318,13 +332,26 @@ def _dispatch_from_session(
 _SELF_NARRATING_TOOLS = frozenset({"record_agent_run"})
 
 
-def _record_tool_step(step_run, tool: str, args, data, *, ok: bool, started_ms: float) -> None:
+def _record_tool_step(
+	step_run,
+	tool: str,
+	args,
+	data,
+	*,
+	ok: bool,
+	started_ms: float,
+	error_message: str = "",
+) -> None:
 	"""Append one ``tool`` step to a delegate run's timeline (#1062).
 
 	``step_run`` is the ``{name, owner}`` resolved before dispatch, or None when
 	the caller is not a delegate - in which case this is a no-op, so ordinary
 	chat is untouched. Best-effort throughout: narrating a tool call must never
 	be able to fail it.
+
+	On a failure the label stays the humanized ACTION and ``error_message``
+	becomes the detail, so the timeline says both what was attempted and why it
+	did not work instead of leaving a bare red row the customer cannot act on.
 	"""
 	if not step_run:
 		return
@@ -334,6 +361,8 @@ def _record_tool_step(step_run, tool: str, args, data, *, ok: bool, started_ms: 
 		if agent_run_steps.bare_tool(tool) in _SELF_NARRATING_TOOLS:
 			return
 		label, detail = agent_run_steps.humanize_tool_call(tool, args, data if ok else None)
+		if not ok:
+			detail = agent_run_steps.error_detail(error_message) or detail
 		agent_run_steps.record_step(
 			step_run.get("name"),
 			kind="tool",

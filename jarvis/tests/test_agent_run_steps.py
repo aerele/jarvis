@@ -20,7 +20,13 @@ What is proven here:
   * ``_launch_audit`` opens the timeline with a ``dispatched`` step only after the
     fleet accepted the turn;
   * ``list_run_steps`` is ownership-gated: a foreign run reads as an empty
-    timeline, never as an existence oracle.
+    timeline, never as an existence oracle;
+  * duplicate stored ``seq`` values (the unlocked MAX+1 race, seen live) never
+    reach the UI: the response is ordered by ``occurred_at`` and renumbered;
+  * bench-internal DocTypes read as plain English and never leak a record name;
+  * a Single DocType is not named twice, an unresolved lookup says "Looked up"
+    rather than claiming a read, and a failed step carries the tool's own error
+    message in ``detail``.
 
 Run:
   bench --site patterntest.localhost run-tests --app jarvis \
@@ -119,6 +125,18 @@ def _mk_run(slug: str, owner: str, session_key: str, status: str = "running") ->
 	run.insert(ignore_permissions=True)
 	frappe.db.set_value(RUN, run.name, "owner", owner, update_modified=False)
 	return run.name
+
+
+def _steps_by_seq(run: str) -> list:
+	"""Raw rows in STORED seq order (creation breaks the tie) - the pre-renumber
+	view, which is what the seq-race tests need to poke at."""
+	return frappe.get_all(
+		STEP,
+		filters={"run": run},
+		fields=["name", "seq", "kind", "label", "occurred_at"],
+		order_by="seq asc, creation asc",
+		ignore_permissions=True,
+	)
 
 
 def _steps(run: str) -> list:
@@ -286,6 +304,88 @@ class TestHumanizeToolCall(unittest.TestCase):
 		self.assertNotIn("Aerele", label + detail)
 		self.assertNotIn("900000", label + detail)
 
+	# ---- bench-internal DocTypes read as plain English -------------------- #
+	def test_internal_doctypes_are_named_by_what_they_are(self):
+		""" "Jarvis Agent Installation" is implementation vocabulary the customer
+		has never seen. The step names the ACT instead."""
+		cases = {
+			"Jarvis Agent Installation": "Read engagement configuration",
+			"Jarvis Agent Listing": "Read agent definition",
+			"Jarvis Agent Run": "Checked run state",
+			"Jarvis Agent Finding": "Read agent metadata",
+			"Jarvis Agent Provenance Event": "Read agent metadata",
+		}
+		for doctype, expected in cases.items():
+			label, _ = agent_run_steps.humanize_tool_call("get_list", {"doctype": doctype}, [{}])
+			self.assertEqual(label, expected, doctype)
+
+	def test_an_internal_read_never_shows_the_record_name(self):
+		label, _ = agent_run_steps.humanize_tool_call(
+			"get_doc",
+			{"doctype": "Jarvis Agent Installation", "name": "8f3ac1de99"},
+			{"name": "8f3ac1de99"},
+		)
+		self.assertEqual(label, "Read engagement configuration")
+		self.assertNotIn("8f3ac1de99", label)
+
+	def test_an_internal_list_keeps_its_row_count_on_the_second_line(self):
+		label, detail = agent_run_steps.humanize_tool_call(
+			"get_list", {"doctype": "Jarvis Agent Run"}, [{}, {}, {}]
+		)
+		self.assertEqual(label, "Checked run state")
+		self.assertEqual(detail, "3 rows")
+
+	def test_an_internal_query_is_mapped_too(self):
+		label, _ = agent_run_steps.humanize_tool_call(
+			"query", {"spec": {"from": "Jarvis Agent Listing"}}, {"rows": []}
+		)
+		self.assertEqual(label, "Read agent definition")
+
+	def test_an_ordinary_erp_doctype_is_untouched(self):
+		"""The control: the mapping must not swallow the DocTypes the customer
+		does know by name."""
+		label, _ = agent_run_steps.humanize_tool_call("get_list", {"doctype": "Sales Invoice"}, [{}, {}])
+		self.assertEqual(label, "Read Sales Invoice, 2 rows")
+
+	# ---- Singles, and names that did not resolve -------------------------- #
+	def test_a_single_doctype_is_not_named_twice(self):
+		""" "Read System Settings System Settings" - a Single's document name IS
+		its doctype."""
+		label, _ = agent_run_steps.humanize_tool_call(
+			"get_doc",
+			{"doctype": "System Settings", "name": "System Settings"},
+			{"name": "System Settings"},
+		)
+		self.assertEqual(label, "Read System Settings")
+
+	def test_an_unresolved_lookup_says_what_was_attempted(self):
+		"""The record name is MODEL-supplied. A wrong guess produced "Read Company
+		ignore" on the bench; an unresolved lookup must not claim a read at all."""
+		label, _ = agent_run_steps.humanize_tool_call(
+			"get_doc", {"doctype": "Company", "name": "ignore"}, None
+		)
+		self.assertEqual(label, "Looked up Company")
+
+	def test_a_resolved_lookup_still_names_the_document(self):
+		label, _ = agent_run_steps.humanize_tool_call(
+			"get_doc", {"doctype": "Company", "name": "Aerele"}, {"name": "Aerele"}
+		)
+		self.assertEqual(label, "Read Company Aerele")
+
+	# ---- error detail ------------------------------------------------------ #
+	def test_error_detail_keeps_the_first_line_only(self):
+		self.assertEqual(
+			agent_run_steps.error_detail("unknown Report: Foo\nTraceback (most recent call last):"),
+			"unknown Report: Foo",
+		)
+
+	def test_error_detail_is_clipped(self):
+		self.assertEqual(len(agent_run_steps.error_detail("x" * 900)), agent_run_steps.ERROR_DETAIL_MAX)
+
+	def test_error_detail_of_nothing_is_empty(self):
+		self.assertEqual(agent_run_steps.error_detail(None), "")
+		self.assertEqual(agent_run_steps.error_detail("   "), "")
+
 	def test_labels_and_details_are_clipped(self):
 		label, _ = agent_run_steps.humanize_tool_call("get_list", {"doctype": "D" * 400}, [])
 		self.assertLessEqual(len(label), agent_run_steps.LABEL_MAX)
@@ -355,6 +455,31 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 		self.assertEqual(len(rows), 1, rows)
 		self.assertEqual(rows[0].status, "error")
 		self.assertEqual(rows[0].label, "Read ToDo")
+
+	def test_an_error_step_carries_the_tools_own_message(self):
+		"""A bare red row the customer cannot act on is not an explanation. The
+		label stays the humanized ACTION; the tool's message becomes the detail."""
+		with mock.patch.object(
+			api,
+			"_run_tool",
+			return_value={
+				"ok": False,
+				"error": {"code": "InvalidArgumentError", "message": "unknown Report: Foo"},
+			},
+		):
+			self._dispatch(self.key, "get_list", {"doctype": "ToDo"})
+		row = _steps(self.run)[0]
+		self.assertEqual(row.label, "Read ToDo")
+		self.assertEqual(row.detail, "unknown Report: Foo")
+
+	def test_an_error_detail_is_the_first_line_only(self):
+		with mock.patch.object(
+			api,
+			"_run_tool",
+			return_value={"ok": False, "error": {"message": "boom\nTraceback: secret"}},
+		):
+			self._dispatch(self.key, "get_list", {"doctype": "ToDo"})
+		self.assertEqual(_steps(self.run)[0].detail, "boom")
 
 	def test_a_raising_tool_still_raises_and_still_leaves_an_error_step(self):
 		"""A fault past _run_tool's envelope translation is a real bug: it must
@@ -448,6 +573,47 @@ class TestListRunSteps(FrappeTestCase):
 		admin = _mk_user("rs-admin@example.com", roles=("Jarvis User", "System Manager"))
 		frappe.set_user(admin)
 		self.assertEqual(agents_api.list_run_steps(self.run)["count"], 2)
+
+	def test_duplicate_stored_seq_is_renumbered_in_the_response(self):
+		"""THE live defect: record_step's MAX(seq)+1 is unlocked, so parallel tool
+		calls land on the same number (2,2,2 then 3,3 on the bench). The stored
+		column may collide; what the UI reads must not."""
+		third = agent_run_steps.record_step(
+			self.run, kind="tool", tool="get_doc", label="Read ToDo T-1", owner=self.owner
+		)
+		# force the collision the race produces, and pin the true order via
+		# occurred_at (the column the response now sorts on)
+		frappe.db.set_value(STEP, third, "seq", 2, update_modified=False)
+		for name, occurred in zip(
+			[s.name for s in _steps_by_seq(self.run)],
+			["2026-09-02 10:00:00.000000", "2026-09-02 10:00:01.000000", "2026-09-02 10:00:02.000000"],
+			strict=False,
+		):
+			frappe.db.set_value(STEP, name, "occurred_at", occurred, update_modified=False)
+
+		frappe.set_user(self.owner)
+		res = agents_api.list_run_steps(self.run)
+		self.assertEqual([s["seq"] for s in res["steps"]], [1, 2, 3])
+		self.assertEqual(
+			[s["label"] for s in res["steps"]],
+			["Dispatched to the agent", "Read ToDo, 2 rows", "Read ToDo T-1"],
+		)
+
+	def test_the_response_is_ordered_by_when_the_step_happened(self):
+		"""Ordering is occurred_at, not the racy stored seq: a step stamped later
+		reads later even when its seq says otherwise."""
+		frappe.set_user("Administrator")
+		rows = _steps_by_seq(self.run)
+		frappe.db.set_value(
+			STEP, rows[0].name, "occurred_at", "2026-09-02 11:00:00.000000", update_modified=False
+		)
+		frappe.db.set_value(
+			STEP, rows[1].name, "occurred_at", "2026-09-02 10:00:00.000000", update_modified=False
+		)
+		frappe.set_user(self.owner)
+		res = agents_api.list_run_steps(self.run)
+		self.assertEqual([s["kind"] for s in res["steps"]], ["tool", "dispatched"])
+		self.assertEqual([s["seq"] for s in res["steps"]], [1, 2])
 
 	def test_a_blank_run_is_an_empty_timeline(self):
 		frappe.set_user(self.owner)
