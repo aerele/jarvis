@@ -3125,7 +3125,7 @@ function sourceChip(row) {
 	if (!row) return "";
 	if (row.credentialType === "subscription")
 		return "Subscription · " + (SUB_UPSTREAM_LABELS[row.upstream] || row.upstream || "OpenAI");
-	return "API key · " + (row.provider || "—");
+	return "API key · " + (row.provider || "-");
 }
 
 // ---- master-detail config section (!singleMode only) --------------------
@@ -3684,7 +3684,7 @@ async function removeDirect() {
 }
 
 // What the list row shows in the model cell.
-// This used to be `row.model || row.provider || '—'`, which was wrong for a
+// This used to be `row.model || row.provider || '-'`, which was wrong for a
 // SUBSCRIPTION row: `provider` belongs to the api-key shape and is never cleared
 // when the row is switched to a subscription, so whatever api-key provider was
 // last picked (or none - newRow() now seeds `provider: ""`, not a default like
@@ -3694,7 +3694,7 @@ async function removeDirect() {
 function rowModelLabel(row) {
 	if (row.model) return row.model;
 	if (row.credentialType === "subscription") return "Model not set";
-	return row.provider || "—";
+	return row.provider || "-";
 }
 
 // A subscription row with 2+ accounts expands into a model row + one sub-row per

@@ -134,7 +134,7 @@ describe("GeneralPane Status badge, member seat", () => {
 		expect(b.theme).not.toBe("green");
 		expect(b.label).not.toBe("Connected");
 		expect(b.theme).toBe("gray");
-		expect(b.label).toBe("—");
+		expect(b.label).toBe("-");
 	});
 
 	// The other half of "fail closed": a state the SPA has no mapping for must
@@ -273,7 +273,7 @@ describe("GeneralPane Status badge, admin seat", () => {
 		api.getLlmConnectionStatus.mockImplementation(PENDING);
 		const w = await mountAs({ admin: true });
 		expect(badge(w).theme).not.toBe("green");
-		expect(badge(w)).toEqual({ label: "—", theme: "gray" });
+		expect(badge(w)).toEqual({ label: "-", theme: "gray" });
 	});
 
 	// disconnected stays an admin-only distinction: a member gets "down" for the

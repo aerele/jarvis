@@ -42,8 +42,8 @@ describe("isFieldMissing", () => {
 
 describe("readonlyDisplay", () => {
 	it("empty -> em dash", () => {
-		expect(readonlyDisplay({ value: "" })).toBe("—");
-		expect(readonlyDisplay({ value: null })).toBe("—");
+		expect(readonlyDisplay({ value: "" })).toBe("-");
+		expect(readonlyDisplay({ value: null })).toBe("-");
 	});
 	it("datetime -> T swapped for a space", () => {
 		expect(readonlyDisplay({ control: "datetime", value: "2026-08-31T14:30" })).toBe(
