@@ -2261,7 +2261,44 @@
 							<ActionError :error="pa.error" />
 						</div>
 						<div class="jv-action-foot">
+							<template v-if="pendingCardOf(pa)?.approve_run">
+								<!-- Step-by-step stays THIS card's plain confirm - the
+								     low-friction default, first in tab order, so a plain
+								     click/Enter takes the safe per-card path (D-TRIGGER). -->
+								<button
+									class="jv-action-primary"
+									:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
+									:title="
+										convStreaming
+											? 'Waiting for the current reply to finish'
+											: ''
+									"
+									@click="confirmPending(pa)"
+								>
+									<span v-if="pa.busy && approveRunBusyToken !== pa.token"
+										>Confirming…</span
+									><span v-else>Step-by-step</span>
+								</button>
+								<!-- Approve & run opens an open-ended run (D-RUN): the
+								     deliberate choice, so it gets its own noticeable-but-not-
+								     alarming amber affordance, never the primary/first slot. -->
+								<button
+									class="jv-action-runall"
+									:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
+									:title="
+										convStreaming
+											? 'Waiting for the current reply to finish'
+											: 'Approves this step and runs the rest of the plan without asking again'
+									"
+									@click="approveAndRunPending(pa)"
+								>
+									<span v-if="pa.busy && approveRunBusyToken === pa.token"
+										>Running…</span
+									><span v-else>▶ Approve &amp; run</span>
+								</button>
+							</template>
 							<button
+								v-else
 								class="jv-action-primary"
 								:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
 								:title="
@@ -6895,6 +6932,11 @@ function discardDraft() {
 // confirmable card + busy/error state. Each item:
 // { conversation, token, tool, summary, preview, run_id, busy, error }.
 const pendingActions = ref([]);
+// Which card's Approve & run is in flight. pa.busy alone disables BOTH of a
+// runnable card's buttons (so a double-click can't fire twice) but can't say
+// WHICH one is running - this is just the label disambiguator (P1, skill
+// approve-and-run).
+const approveRunBusyToken = ref(null);
 
 // Only the cards belonging to the conversation on screen render (a parked write
 // from another chat must not show here). The queue is already pruned to the
@@ -7077,6 +7119,75 @@ async function confirmPending(pa) {
 	} finally {
 		const card = cardById();
 		if (card) card.busy = false;
+	}
+}
+// Approve & run (P1, skill approve-and-run): modeled on confirmPending above,
+// but calling the SIBLING endpoint jarvis.chat.actions_api.approve_and_run,
+// which both confirms this card's step 1 AND opens the armed skill's
+// uninterrupted run (D-RUN) - covered writes after this one then execute with
+// receipts instead of parking their own cards. Same {ok,...}/
+// InvalidConfirmation/storage-unavailable envelope as confirm_tool, so the
+// {ok:false} handling below mirrors confirmPending's verbatim - the two must
+// not drift in what a failure looks like to the user. Only reachable from this
+// card's own "Approve & run" button - never from the typed go-ahead path.
+async function approveAndRunPending(pa) {
+	if (!pa || pa.busy) return;
+	// Same defense in depth as confirmPending (#223): never dispatch while the
+	// parent turn is still streaming this conversation.
+	if (convStreaming.value) return;
+	const token = pa.token;
+	const cardById = () => pendingActions.value.find((x) => x.token === token);
+	pa.busy = true;
+	pa.error = null;
+	approveRunBusyToken.value = token;
+	try {
+		const r = await api.approveAndRun(token, pa.conversation || currentId.value || "");
+		if (r && r.ok === false) {
+			if (confirmationStorageUnavailable(r)) {
+				const card = cardById();
+				if (card) card.error = r.error;
+				notify(r.error.message, { type: "error" });
+				return;
+			}
+			if (r.error && r.error.type === "InvalidConfirmation") {
+				removePending(token);
+				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
+				notify(
+					expired
+						? "This confirmation expired — tell me the action again to retry it."
+						: "Couldn't confirm — it may have been handled in another tab. Refresh, or ask me to try again.",
+					{ type: "error" }
+				);
+				return;
+			}
+			// The token was consumed and step 1 failed - approve_and_run never opens
+			// the run on a failed first step (§3.4), so this is exactly confirmPending's
+			// spent-card path: a durable "failed" receipt chip is already persisted.
+			removePending(token);
+			await loadConversation(currentId.value);
+			store.loadConversations();
+			return;
+		}
+		// Success - the run's own writes surface via the turn's normal tool/stream
+		// events as they happen; reload to be sure the transcript reflects step 1.
+		removePending(token);
+		await loadConversation(currentId.value);
+		store.loadConversations();
+		if (r && r.queued) {
+			queuedTurn.value = {
+				run_id: r.run_id,
+				message_id: r.message_id,
+				position: r.queued_position || null,
+			};
+			sending.value = true;
+		}
+	} catch (e) {
+		const card = cardById();
+		if (card) card.error = { message: errMessage(e, "Could not start the run.") };
+	} finally {
+		const card = cardById();
+		if (card) card.busy = false;
+		approveRunBusyToken.value = null;
 	}
 }
 // Resolution shared by the typed go-ahead and the Confirm button, so the two
@@ -8549,6 +8660,11 @@ async function send(textArg, resendAck) {
 		if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
 		// The confirmation cards currently on screen, in the order the numbers are
 		// shown, so a typed "confirm 2" binds to the card the user actually sees.
+		// Deliberately confirm-only (step-by-step): send_message forwards these
+		// tokens to confirm_tool server-side, never approve_and_run - a typed
+		// go-ahead can only ever resolve a card one confirm at a time. Approve & run
+		// is reachable ONLY through the card's own button (approveAndRunPending),
+		// by design (the typed shortcut pins to step-by-step, §3.5).
 		const approvalTokens = visiblePendingActions.value.map((a) => a.token);
 		const r = await api.sendMessage(
 			sentFrom,
@@ -13885,6 +14001,30 @@ onUnmounted(() => {
 	color: var(--surface);
 	border-color: var(--text);
 }
+/* "Approve & run" (P1, skill approve-and-run): the deliberate, open-ended
+   choice beside the low-friction "Step-by-step" primary. Amber-accented, the
+   same "attention" tone the pending card's own border and F15 legacy note
+   already use elsewhere - noticeable, not alarming (that's reserved for
+   Discard's red). Never first in tab order. */
+.jv-action-runall {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 550;
+	padding: 8px 13px;
+	border-radius: 8px;
+	cursor: pointer;
+	background: var(--amber-bg);
+	color: var(--amber);
+	border: 1px solid var(--amber-bd);
+}
+.jv-action-runall:hover {
+	background: var(--amber);
+	color: #fff;
+	border-color: var(--amber);
+}
 .jv-action-2nd {
 	display: inline-flex;
 	align-items: center;
@@ -14049,7 +14189,8 @@ onUnmounted(() => {
 	margin: 2px 0;
 }
 .jv-action-primary:disabled,
-.jv-action-discard:disabled {
+.jv-action-discard:disabled,
+.jv-action-runall:disabled {
 	opacity: 0.55;
 	cursor: default;
 }

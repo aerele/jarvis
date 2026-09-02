@@ -101,6 +101,17 @@
 				<span v-else class="text-base text-ink-gray-4">-</span>
 			</template>
 
+			<template #cell-event_user="{ row }">
+				<!-- Blank actor = an automated / system-initiated event; show "System"
+				     (matches the detail dialog's User row) rather than an empty cell. -->
+				<div
+					class="truncate text-base text-ink-gray-7"
+					:title="row.event_user || 'System'"
+				>
+					{{ row.event_user || "System" }}
+				</div>
+			</template>
+
 			<template #cell-summary="{ row }">
 				<div class="truncate text-base text-ink-gray-7" :title="row.summary || undefined">
 					{{ row.summary || "-" }}
@@ -160,15 +171,29 @@ const ACTION_OPTIONS = [
 
 // Event gets 10.5rem so the longest label ("Before Save (blockable)") shows
 // its qualifier instead of clipping.
-const columns = [
+const BASE_COLUMNS = [
 	{ label: "Status", key: "status", width: "6rem" },
 	{ label: "Trigger", key: "trigger_label", width: 2 },
 	{ label: "Target", key: "target", width: 2 },
 	{ label: "Event", key: "doc_event", width: "10.5rem" },
 	{ label: "Action", key: "action_type", width: "5rem" },
+	// "User", not "By": matches the detail dialog's own KV label for this field
+	// and the all-nouns column convention.
+	{ label: "User", key: "event_user", width: "9rem" },
 	{ label: "Summary", key: "summary", width: 2 },
 	{ label: "When", key: "creation", width: "7rem" },
 ];
+// The actor also shows in the row's detail dialog, so below ~640px - where this
+// 8-column row would overflow - we shed the User column rather than force a
+// horizontal scroll (matchMedia mirrors SupportListPage's narrow-drop).
+const isNarrow = ref(false);
+let narrowMq = null;
+function onNarrowChange(e) {
+	isNarrow.value = e.matches;
+}
+const columns = computed(() =>
+	isNarrow.value ? BASE_COLUMNS.filter((c) => c.key !== "event_user") : BASE_COLUMNS
+);
 
 // search + the text-y filters ride the quick strip (FilterButton only builds
 // select/daterange rows); trigger id is filterable for the ?trigger= deep link.
@@ -299,9 +324,15 @@ function onEvent(p) {
 
 onMounted(() => {
 	socket && socket.on && socket.on("jarvis:event", onEvent);
+	if (typeof window !== "undefined" && window.matchMedia) {
+		narrowMq = window.matchMedia("(max-width: 640px)");
+		isNarrow.value = narrowMq.matches;
+		narrowMq.addEventListener("change", onNarrowChange);
+	}
 });
 onBeforeUnmount(() => {
 	socket && socket.off && socket.off("jarvis:event", onEvent);
 	clearTimeout(rtTimer);
+	if (narrowMq) narrowMq.removeEventListener("change", onNarrowChange);
 });
 </script>

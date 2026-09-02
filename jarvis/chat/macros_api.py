@@ -474,7 +474,7 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 		f"""
 		SELECT r.name, r.macro, COALESCE(m.macro_name, r.macro) AS macro_name,
 		       r.conversation, r.status, r.current_step, r.total_steps,
-		       r.`trigger` AS `trigger`, r.creation, r.started_at, r.finished_at, r.error,
+		       r.`trigger` AS `trigger`, r.creation, r.started_at, r.finished_at, r.error, r.run_mode,
 		       CASE WHEN r.started_at IS NOT NULL AND r.finished_at IS NOT NULL
 		            THEN TIMESTAMPDIFF(SECOND, r.started_at, r.finished_at)
 		       END AS duration_s

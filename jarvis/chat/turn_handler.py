@@ -664,6 +664,11 @@ def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 		app_analysis.on_turn_end(conversation_id, errored=errored)
 	except Exception:
 		frappe.log_error(title="jarvis app-learning turn hook failed", message=frappe.get_traceback())
+	# End an approved skill run at this terminal unless it is paused on a parked card
+	# (skill "Approve & run", design §3.4). on_terminal_turn is internally best-effort.
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.on_terminal_turn(conversation_id)
 
 
 def _admission_settle(run_id: str, state: str, error: str | None = None) -> None:
@@ -754,6 +759,20 @@ def assemble_prompt(
 	# leaving armed-skip inert on those two. The bench still enforces the gate; this
 	# only changes which shape the agent emits. Server-set flag, never a client claim.
 	armed_run = "; armed macro run: apply changes directly" if conv.skip_confirmation else ""
+	# Approved skill run (skill "Approve & run the plan", design §3.4): this conversation
+	# carries skill_autorun=1 (an approve_and_run opened the run on step-1 success). Tell
+	# the agent to apply the plan's covered writes directly with receipts; the
+	# irreversible trio + create_custom_skill still park and PAUSE the run. This is the
+	# app half of the signal - harmless without the persona clause (P2), which teaches the
+	# model to react. Server-set flag, never a client claim; folded like armed_run.
+	autorun_run = (
+		(
+			"; approved skill run: apply the plan's covered writes directly, summarize with "
+			"receipts; delete/cancel/amend and new-skill writes still park and pause the run"
+		)
+		if conv.skill_autorun
+		else ""
+	)
 	# Custom-skill invocation: if the user typed /slug for an enabled custom
 	# skill, name it in the system context so the agent activates it
 	# deterministically (the agent has no documented user-invocable trigger).
@@ -869,7 +888,7 @@ def assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {chat_user}"
-		f"; conv: {conversation_id}{auto_apply}{armed_run}{skill_clause}{learned_clause}"
+		f"; conv: {conversation_id}{auto_apply}{armed_run}{autorun_run}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"
@@ -970,6 +989,26 @@ def handle_chat_send(payload: dict) -> None:
 
 	conv = frappe.get_doc(CONV, conversation_id)
 	user = conv.owner
+	# Turn -> triggering-message binding (skill "Approve & run", design §3.3):
+	# stamp THIS turn's triggering message under its conversation at turn start,
+	# BEFORE the agent is dispatched / any tool call can park. ``message_id`` is
+	# the genuine seed of this turn - a real Jarvis Chat Message row (the user's
+	# top-level send, or a continuation's row from ``_enqueue_turn``); it is the
+	# same id ``assemble_prompt`` reads for content+owner below. Admission enforces
+	# one in-flight turn per conversation, so the conversation-keyed binding
+	# reflects the running turn, immune to a second tab's committed-but-queued
+	# send. A later offer-gate reads this to identify the exact triggering message
+	# (task #41 adds explicit terminal clears; per-turn overwrite + TTL bound
+	# staleness until then). Best-effort: a binding failure must not kill the turn.
+	try:
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.bind_turn_message(conversation_id, message_id)
+	except Exception:
+		frappe.log_error(
+			title="turn_message_binding: bind_turn_message failed",
+			message=frappe.get_traceback(),
+		)
 	# User-message intake: the user replied, so any Pending chat-sourced
 	# approval materialized from a previous ```jarvis-ask fence is answered
 	# in chat now — flip it to Answered so the board never offers a stale

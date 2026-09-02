@@ -72,6 +72,16 @@
 						description="Show in the chat / menu so users can trigger it directly."
 						:disabled="readonly"
 					/>
+					<!-- "Approve & run" arming (skill approve-and-run, D-CONTROL):
+					     admin-only to turn ON, free to turn OFF (the kill switch).
+					     Only meaningful on a saved skill, so hidden while creating. -->
+					<Switch
+						v-if="!isNew"
+						v-model="form.allow_approve_run"
+						label="Allow Approve & run"
+						:description="armDescription"
+						:disabled="armLocked"
+					/>
 				</div>
 			</DocSection>
 
@@ -255,8 +265,18 @@
 // share this component (isNew prop). Explicit Save (D21) with dirty guard,
 // read-only mode for shared-with-me skills, DocMetaPanel + child-table
 // Shared-with block (#extra) + ShareDialog, sync pill on save/delete.
-import { ref, reactive, computed, watch, shallowRef, nextTick, onMounted } from "vue";
+import {
+	ref,
+	reactive,
+	computed,
+	watch,
+	shallowRef,
+	nextTick,
+	onMounted,
+	onBeforeUnmount,
+} from "vue";
 import { useRouter, onBeforeRouteLeave } from "vue-router";
+import { armToggleLocked, armToggleDescription } from "./approveRunToggle";
 import {
 	Button,
 	Badge,
@@ -296,7 +316,14 @@ const router = useRouter();
 // the chat surface / Settings dialog rather than frappe-ui's default styling.
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 const DOCTYPE = "Jarvis Custom Skill";
-const FIELDS = ["skill_name", "description", "instructions", "user_invocable", "enabled"];
+const FIELDS = [
+	"skill_name",
+	"description",
+	"instructions",
+	"user_invocable",
+	"enabled",
+	"allow_approve_run",
+];
 
 // ── state ────────────────────────────────────────────────────────────────────
 const skill = ref(null); // last server copy (null while new)
@@ -310,7 +337,13 @@ const form = reactive({
 	instructions: "",
 	user_invocable: true,
 	enabled: true,
+	allow_approve_run: false,
 });
+// Whether THIS viewer may ENABLE "Approve & run" (Jarvis Admin / System Manager).
+// Server-provided (get_custom_skill.can_arm); the doctype guard is the real gate,
+// this only drives the toggle's disabled state. Disabling is always free for the
+// owner, so it gates only the off -> on flip of an unarmed skill.
+const canArm = ref(false);
 const snapshot = ref({ ...form }); // saved-state copy (ref so `dirty` recomputes when reset after save)
 
 const docmeta = shallowRef(null); // useDocmeta instance (own skills only)
@@ -335,6 +368,20 @@ onMounted(async () => {
 const canEdit = computed(() => props.isNew || !!(skill.value && skill.value.can_edit));
 const readonly = computed(() => !canEdit.value || saving.value);
 const sharedBy = computed(() => (skill.value && skill.value.shared_by) || "");
+
+// "Approve & run" arming (skill approve-and-run, D-CONTROL). Enabling (off -> on)
+// is Jarvis Admin / System Manager only; disabling is always free for the owner -
+// the toggle IS the kill switch. So the switch is locked ONLY when an UNARMED
+// skill can't be armed by this viewer; once it's armed (saved state), the owner
+// may always flip it back off. Mirrors the doctype's _guard_allow_approve_run_
+// enable exactly - and the server guard, not this, is the real authority.
+// Gating + disclosure live in a pure, node-tested module (approveRunToggle.js) so
+// the kill-switch truth table + the run_method-inclusive risk copy are verified
+// without a browser. savedArmed reads the SAVED state (snapshot), not the live
+// form, so toggling doesn't self-unlock the guard.
+const savedArmed = computed(() => !!snapshot.value.allow_approve_run);
+const armLocked = computed(() => armToggleLocked(readonly.value, savedArmed.value, canArm.value));
+const armDescription = computed(() => armToggleDescription(savedArmed.value, canArm.value));
 
 // ── promotion (requester side, Skills-area promotion surfacing) ───────────────
 // The owner of a private (User-scope) skill can ask a reviewer to widen it to a
@@ -428,6 +475,7 @@ function seed(data) {
 	form.instructions = data.instructions || "";
 	form.user_invocable = !!data.user_invocable;
 	form.enabled = !!data.enabled;
+	form.allow_approve_run = !!data.allow_approve_run;
 	snapshot.value = { ...form };
 }
 
@@ -439,6 +487,7 @@ async function init() {
 	shares.value = [];
 	shareOpen.value = false;
 	docmeta.value = null;
+	canArm.value = false;
 	if (props.isNew) {
 		skill.value = null;
 		seed({ user_invocable: 1, enabled: 1 });
@@ -449,6 +498,7 @@ async function init() {
 	try {
 		const full = await api.getCustomSkill(props.id);
 		skill.value = full;
+		canArm.value = !!full.can_arm;
 		seed(full);
 		if (full.can_edit) {
 			docmeta.value = useDocmeta(DOCTYPE, props.id);
@@ -502,6 +552,10 @@ async function save() {
 			instructions: form.instructions,
 			user_invocable: form.user_invocable ? 1 : 0,
 			enabled: form.enabled ? 1 : 0,
+			// Inert on create (the switch is hidden while isNew and create_custom_skill
+			// ignores the key) - a skill is never born armed; arming is a post-create
+			// admin edit through the update path. Sent uniformly for the update branch.
+			allow_approve_run: form.allow_approve_run ? 1 : 0,
 		};
 		if (props.isNew) {
 			const res = (await api.createCustomSkill(payload)) || {};
@@ -569,6 +623,20 @@ onBeforeRouteLeave((to, from, next) => {
 	// Focus the safe default so Enter/Esc land on it (Esc bubbles to the overlay).
 	nextTick(() => cancelBtn.value?.focus());
 });
+
+// A hard reload / tab close while dirty escapes the in-app route guard above, so
+// an unsaved edit is silently lost. That matters most for the arm toggle: this
+// form is explicit-Save, so flipping the kill switch off does NOT persist until
+// Save - a user who closes the tab believing "off" took effect would leave the
+// skill armed server-side. Mirror AgentsList.vue's native-prompt guard.
+function onBeforeUnload(e) {
+	if (dirty.value) {
+		e.preventDefault();
+		e.returnValue = ""; // Chrome requires returnValue to show the prompt
+	}
+}
+onMounted(() => window.addEventListener("beforeunload", onBeforeUnload));
+onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload));
 
 // Resolve the pending navigation: proceed=true leaves the page, false stays.
 // Idempotent — closing via X/backdrop and a button click can't double-resolve.

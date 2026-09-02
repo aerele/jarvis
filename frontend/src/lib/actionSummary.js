@@ -110,6 +110,24 @@ export function pendingExpiry(expiresAt, nowMs) {
 	return { expired: secondsLeft <= 0, secondsLeft };
 }
 
+// ── Plan outline (P1 additive `card.plan` field, skill approve-and-run) ────
+// A parked card's `plan.steps[]` ({n, verb, doctype, summary}) is agent-DECLARED
+// intent, not a fabricated preview - the server's own verb classification is
+// what decides which steps still gate, never the model's caption. A step is
+// destructive (still cards when reached, even under an approved run) iff its
+// verb is one of the three the backend NEVER auto-runs (_SKILL_AUTORUN_NEVER /
+// the delete/cancel/amend trio, jarvis/api.py). Pure + shared: both PlanOutline
+// templates (SPA + PWA) import this so the destructive cue can't drift between
+// them.
+const DESTRUCTIVE_PLAN_VERBS = new Set(["delete", "cancel", "amend"]);
+export function isDestructivePlanStep(step) {
+	return DESTRUCTIVE_PLAN_VERBS.has(String((step && step.verb) || "").toLowerCase());
+}
+// Client-side display cap, mirroring the server's own F16 batch cap pattern
+// (count + "+N more"). The server may already cap steps before it ever reaches
+// the wire, but the outline caps again defensively rather than trusting it.
+export const PLAN_STEP_CAP = 20;
+
 // ── Post-action receipt chips ───────────────────────────────────────────────
 // A gated write, once the user clicks Confirm or Discard, is replaced by a
 // DURABLE receipt chip instead of the card vanishing. These pure helpers turn

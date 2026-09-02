@@ -269,6 +269,25 @@
 									<span v-else>Not recorded</span>
 								</dd>
 							</div>
+							<div v-if="refUrl" class="sm:col-span-2">
+								<dt class="text-xs text-ink-gray-5">About</dt>
+								<dd class="mt-1">
+									<a
+										:href="refUrl"
+										target="_blank"
+										rel="noopener"
+										class="inline-flex min-w-0 items-center gap-1 text-base text-ink-gray-8 hover:underline"
+									>
+										<span class="truncate"
+											>{{ page.ref_doctype }} · {{ page.ref_name }}</span
+										>
+										<FeatherIcon
+											name="external-link"
+											class="size-3.5 shrink-0 text-ink-gray-5"
+										/>
+									</a>
+								</dd>
+							</div>
 							<div
 								v-if="
 									page.status === 'Archived' ||
@@ -360,6 +379,7 @@ import {
 	Badge,
 	Button,
 	Dropdown,
+	FeatherIcon,
 	FormControl,
 	Tooltip,
 	toast,
@@ -550,6 +570,13 @@ const scopeTarget = computed(() => {
 	if (page.value.scope === "Role") return page.value.target_role || "";
 	if (page.value.scope === "User") return page.value.target_user || "";
 	return "";
+});
+// The ERP record this page documents (ref_doctype/ref_name) as a Desk deep link -
+// same doctype-route transform as ActivityDetailDialog's target link.
+const refUrl = computed(() => {
+	if (!page.value || !page.value.ref_doctype || !page.value.ref_name) return "";
+	const dt = page.value.ref_doctype.toLowerCase().replace(/ /g, "-");
+	return `/app/${dt}/${encodeURIComponent(page.value.ref_name)}`;
 });
 // "From a voice note by X, Jul 7" - the page's latest source entry.
 const provenance = computed(() => {

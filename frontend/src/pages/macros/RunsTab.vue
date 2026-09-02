@@ -61,11 +61,27 @@
 			</template>
 			<template #cell="{ column, row, item, align }">
 				<template v-if="column.key === 'status'">
-					<Badge
-						variant="subtle"
-						:theme="RUN_THEMES[row.status] || 'gray'"
-						:label="statusLabel(row.status)"
-					/>
+					<div class="flex items-center gap-1.5">
+						<Badge
+							variant="subtle"
+							:theme="RUN_THEMES[row.status] || 'gray'"
+							:label="statusLabel(row.status)"
+						/>
+						<!-- A run that errored explains itself: hover = short error,
+						     click = dialog with the full error + finish time + run mode.
+						     Keyed on `error` PRESENCE, not status, so a user-cancelled
+						     `stopped` run (empty error) shows no affordance. @click.stop so
+						     it never bubbles into openRow's conversation navigation. -->
+						<Tooltip v-if="row.error" :text="shortError(row.error)">
+							<button
+								type="button"
+								class="flex text-ink-gray-5 hover:text-ink-gray-7"
+								@click.stop.prevent="openError(row)"
+							>
+								<FeatherIcon name="info" class="size-3.5" />
+							</button>
+						</Tooltip>
+					</div>
 				</template>
 				<template v-else-if="column.key === 'started_at'">
 					<Tooltip :text="exactDate(row.started_at || row.creation)">
@@ -136,6 +152,31 @@
 			@update:modelValue="(v) => (pageLength = v)"
 			@loadMore="loadMore"
 		/>
+
+		<!-- failure detail (purpose-built, NOT the shared triggers dialog): a run's
+		     error can be a full traceback, so it earns a dialog over a tooltip alone. -->
+		<Dialog v-model="errDialog.show" :options="{ title: errDialogTitle, size: 'lg' }">
+			<template #body-content>
+				<div v-if="errDialog.row" class="flex flex-col gap-3">
+					<div class="flex flex-wrap gap-x-6 gap-y-1 text-sm text-ink-gray-6">
+						<span v-if="errDialog.row.macro_name">{{ errDialog.row.macro_name }}</span>
+						<span v-if="errDialog.row.finished_at">
+							Finished {{ timeAgo(errDialog.row.finished_at) }}
+						</span>
+						<span v-if="runModeLabel(errDialog.row.run_mode)">
+							{{ runModeLabel(errDialog.row.run_mode) }} run
+						</span>
+					</div>
+					<div>
+						<div class="mb-1 text-sm font-medium text-ink-gray-7">Error</div>
+						<pre
+							class="max-h-80 overflow-auto whitespace-pre-wrap rounded-md bg-surface-gray-2 p-3 text-xs text-ink-gray-8"
+							>{{ errDialog.row.error }}</pre
+						>
+					</div>
+				</div>
+			</template>
+		</Dialog>
 	</div>
 </template>
 
@@ -159,6 +200,7 @@ import {
 	Button,
 	Badge,
 	FormControl,
+	Dialog,
 	FeatherIcon,
 	Tooltip,
 	toast,
@@ -214,6 +256,11 @@ const macro = ref("");
 const pageLength = useStorage("jarvis-pl-macro-runs", 20);
 const stats = ref(null);
 const macrosList = ref([]); // macro filter dropdown (list_macros)
+// failure-detail dialog (RunsTab-local; a run's error can be a full traceback)
+const errDialog = ref({ show: false, row: null });
+const errDialogTitle = computed(() =>
+	errDialog.value.row && errDialog.value.row.status === "stopped" ? "Run stopped" : "Run failed"
+);
 
 const macroOptions = computed(() => [
 	{ label: "All macros", value: "" },
@@ -313,6 +360,10 @@ function openRow(row) {
 	if (row.conversation) router.push("/c/" + row.conversation);
 }
 
+function openError(row) {
+	errDialog.value = { show: true, row };
+}
+
 async function stopRun(row) {
 	try {
 		await api.stopMacroRun(row.name);
@@ -358,5 +409,22 @@ function fmtDuration(sec) {
 	if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
 	const h = Math.floor(m / 60);
 	return `${h}h ${m % 60}m`;
+}
+// run_mode is a stored Select with no default: NULL on legacy/parked runs, so
+// render nothing rather than "null".
+function runModeLabel(m) {
+	if (m === "merged") return "Merged";
+	if (m === "stepped") return "Stepped";
+	return "";
+}
+// First non-blank line of the error, clipped - the tooltip is the teaser; the
+// dialog carries the full text.
+function shortError(e) {
+	if (!e) return "";
+	const first =
+		String(e)
+			.split("\n")
+			.find((l) => l.trim()) || "";
+	return first.length > 140 ? first.slice(0, 139) + "…" : first;
 }
 </script>
