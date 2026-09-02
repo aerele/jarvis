@@ -108,6 +108,13 @@ const ACTIONS = {
 		color: "text-ink-amber-3",
 	},
 	run_failed: { icon: "x-circle", label: "Run failed", color: "text-ink-red-4" },
+	run_stopped: { icon: "square", label: "Run stopped" },
+	promoted_to_live: {
+		icon: "arrow-up-circle",
+		label: "Promoted to live",
+		color: "text-ink-green-3",
+	},
+	demoted_to_shadow: { icon: "eye", label: "Returned to preview", color: "text-ink-violet-1" },
 };
 function actionIcon(a) {
 	return (ACTIONS[a] || {}).icon || "activity";

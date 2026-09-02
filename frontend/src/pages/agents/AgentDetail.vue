@@ -778,9 +778,11 @@ function confirmUninstall() {
 	const name = installation.value.name;
 	confirmDialog({
 		title: `Uninstall ${agent.value.title}?`,
-		// the backend cascade-deletes findings → runs → installation
+		// the backend cascade-deletes findings → runs → installation, but never
+		// touches a run's linked Jarvis Dashboard (#1062 polish - the warning was
+		// overclaiming what actually gets deleted).
 		message:
-			"This removes the agent and ALL of its run history and findings. This can't be undone.",
+			"This removes the agent and its run history and findings; saved dashboards are kept. This can't be undone.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				await api.uninstallAgent(name);
