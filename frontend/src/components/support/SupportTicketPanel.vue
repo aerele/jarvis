@@ -2,7 +2,7 @@
 	<aside class="jv-suptp">
 		<!-- Read-only "Ticket details" panel (Helpdesk TicketCustomerSidebar). Reads
 		     store.thread.meta (carried by get_thread), so it works for deep-linked
-		     tickets too. Every field falls back to "—" when meta is absent/loading.
+		     tickets too. Every field falls back to "-" when meta is absent/loading.
 		     (Comment kept inside the root to avoid a multi-root fragment.) -->
 		<div class="jv-suptp-head">Ticket details</div>
 
@@ -27,7 +27,7 @@
 			<div class="jv-suptp-row">
 				<span class="jv-suptp-label">Ticket ID</span>
 				<span class="jv-suptp-value" :class="{ 'jv-suptp-empty': !meta?.name }">
-					{{ meta?.name || "—" }}
+					{{ meta?.name || "-" }}
 				</span>
 			</div>
 			<div class="jv-suptp-row">
@@ -39,7 +39,7 @@
 						:theme="statusBadge.theme"
 						:label="statusBadge.label"
 					/>
-					<span v-else class="jv-suptp-empty">—</span>
+					<span v-else class="jv-suptp-empty">-</span>
 				</span>
 			</div>
 			<div v-for="s in slaRows" :key="s.title" class="jv-suptp-row">
@@ -51,7 +51,7 @@
 						:theme="s.badge.theme"
 						:label="s.badge.label"
 					/>
-					<span v-else class="jv-suptp-empty">—</span>
+					<span v-else class="jv-suptp-empty">-</span>
 				</span>
 			</div>
 		</div>
@@ -60,7 +60,7 @@
 			<div v-for="f in fieldRows" :key="f.label" class="jv-suptp-row">
 				<span class="jv-suptp-label">{{ f.label }}</span>
 				<span class="jv-suptp-value" :class="{ 'jv-suptp-empty': !f.value }">
-					{{ f.value || "—" }}
+					{{ f.value || "-" }}
 				</span>
 			</div>
 		</div>

@@ -970,7 +970,7 @@
 											v-if="isMyPromo(p)"
 											class="basis-full text-sm text-ink-gray-5"
 										>
-											You requested this — another reviewer must decide it.
+											You requested this. Another reviewer must decide it.
 										</span>
 									</template>
 									<template v-else>
@@ -1227,7 +1227,7 @@
 											v-if="isMyPromo(p)"
 											class="basis-full text-sm text-ink-gray-5"
 										>
-											You requested this — another reviewer must decide it.
+											You requested this. Another reviewer must decide it.
 										</span>
 									</template>
 									<template v-else>
@@ -1683,7 +1683,7 @@
 		<Dialog v-model="askDialog.show" :options="{ title: 'Ask the user', size: 'md' }">
 			<template #body-content>
 				<p class="text-sm text-ink-gray-6">
-					The user will see this as an ordinary question from your organisation — no
+					The user will see this as an ordinary question from your organisation, with no
 					reviewer name. It lands in their Personalise questions.
 				</p>
 				<FormControl
@@ -1720,7 +1720,7 @@
 			<template #body-content>
 				<p class="text-sm text-ink-gray-6">
 					The requester's personal page stays intact. Let them know why this won't be
-					published — they can revise and request again.
+					published. They can revise and request again.
 				</p>
 				<FormControl
 					type="textarea"
@@ -1755,7 +1755,7 @@
 			<template #body-content>
 				<p class="text-sm text-ink-gray-6">
 					The requester's private skill stays intact. Let them know why this won't be
-					widened — they can revise and request again.
+					widened. They can revise and request again.
 				</p>
 				<FormControl
 					type="textarea"
@@ -2246,7 +2246,7 @@ function togglePromoBody(name) {
 	promoExpanded[name] = !promoExpanded[name];
 }
 function toScopeLabel(p) {
-	return p.to_scope === "Role" ? `Role: ${p.target_role || "—"}` : p.to_scope || "Org";
+	return p.to_scope === "Role" ? `Role: ${p.target_role || "-"}` : p.to_scope || "Org";
 }
 // Four-eyes cue (shared by the wiki + skill queues): the viewing reviewer
 // authored this request, so the server will reject their own decide. Disable
@@ -2268,12 +2268,12 @@ function isMyPromo(p) {
 // the concrete visibility implication (who can now read the page). Every
 // untrusted value is HTML-escaped — the message renders through v-html (SAR-1).
 function approvePromotion(p) {
-	const target = p.to_scope === "Role" ? `Role: ${esc(p.target_role || "—")}` : "Org";
+	const target = p.to_scope === "Role" ? `Role: ${esc(p.target_role || "-")}` : "Org";
 	const who = p.to_scope === "Role" ? "that role" : "everyone";
 	confirmDialog({
 		title: "Approve promotion?",
 		message:
-			`This publishes “${esc(p.page_title)}” to ${target} — visible to ${who}. ` +
+			`This publishes “${esc(p.page_title)}” to ${target}, visible to ${who}. ` +
 			"The requester's personal page stays intact.",
 		onConfirm: async ({ hideDialog }) => {
 			hideDialog();
@@ -2367,7 +2367,7 @@ async function approveSkillPromotion(p) {
 	const kept = keptRolesFor(p);
 	const target =
 		p.to_scope === "Role"
-			? `Role${kept.length === 1 ? "" : "s"}: ${esc(kept.join(", ") || "—")}`
+			? `Role${kept.length === 1 ? "" : "s"}: ${esc(kept.join(", ") || "-")}`
 			: "Org";
 	const who =
 		p.to_scope === "Role" ? (kept.length === 1 ? "that role" : "those roles") : "everyone";
@@ -2389,7 +2389,7 @@ async function approveSkillPromotion(p) {
 	// budget warning folds in as plain "Note:" copy (no ⚠ glyph — design.md:563;
 	// the on-card banner already carries the colored warning).
 	let message =
-		`This publishes “${esc(p.skill_name)}” to ${target} — usable by ${who} — as a shared ` +
+		`This publishes “${esc(p.skill_name)}” to ${target}, usable by ${who}, as a shared ` +
 		"copy of exactly the reviewed content. Your original private skill stays intact and " +
 		"editable; the shared copy is locked to reviewers.";
 	if (p.description_snapshot) message += ` Description: “${esc(p.description_snapshot)}”.`;
@@ -2430,7 +2430,7 @@ async function decideSkillPromo(p, approve, note, ackProjection = null, approved
 			// R2-SP-5: the shared catalog moved since the reviewer's ack, so the
 			// server published NOTHING. Refresh the row's projection and re-open the
 			// approve confirm with the NEW impact — a fresh preflight + ack.
-			toast.error(r.reason || "The push impact changed — please confirm again.");
+			toast.error(r.reason || "The push impact changed. Please confirm again.");
 			const merged = { ...p, push_projection: r.push_projection || p.push_projection };
 			const i = skillPromo.rows.findIndex((x) => x.name === p.name);
 			if (i !== -1) skillPromo.rows[i] = merged;
@@ -2448,7 +2448,7 @@ async function decideSkillPromo(p, approve, note, ackProjection = null, approved
 		// skill (if any) the push actually drops — so we name it instead of a generic
 		// toast (R2-SP-5). A clean approval / any reject shows the plain success.
 		const done = formatPushProjection(r && r.push_projection);
-		if (approve && done) toast.success(`Skill promotion approved — ${done.message}`);
+		if (approve && done) toast.success(`Skill promotion approved. ${done.message}`);
 		else toast.success(approve ? "Skill promotion approved" : "Skill promotion rejected");
 		fetchSkillPromotions("reset");
 		emit("changed");
