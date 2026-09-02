@@ -421,7 +421,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 			self.assertFalse(has_body, f"{slug} (delegate) leaked a skill body into the DB")
 
 	# ------------------------------------------------------------------ #
-	# (d3) jarvis#1062 polish — category derived from domain, mapped to a
+	# (d3) jarvis#1062 polish: category derived from domain, mapped to a
 	# real label instead of a bare registry code
 	# ------------------------------------------------------------------ #
 	def test_category_from_domain_uses_the_real_label_map(self):
@@ -449,7 +449,7 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(frappe.db.get_value(LISTING, "bank-recon-operator", "category"), "Bank Recon")
 
 	# ------------------------------------------------------------------ #
-	# (d4) jarvis#1062 polish — Published operator listings with no dispatch
+	# (d4) jarvis#1062 polish: Published operator listings with no dispatch
 	# path were flipped to Coming Soon in the registry; a re-sync must carry
 	# an already-deployed Published row down with it.
 	# ------------------------------------------------------------------ #
