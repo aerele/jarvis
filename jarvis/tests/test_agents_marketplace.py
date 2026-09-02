@@ -1042,11 +1042,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 		payload = agent_catalog.build_agent_push_payload(owner=self.owner)
 		self.assertEqual(payload, [])
 
-		# Clearing every grant CLOSES the listing, yet the enabled install is still
-		# pushed: that is the deliberate grandfather leg (legacy_empty_allows in
-		# build_agent_push_payload), so an upgrade cannot drop a working customer's
-		# agent from the container roster mid-flight.
-		self._restrict("close-auditor", [])
+		# Re-widening to a role the owner DOES hold includes it again. Not `[]`:
+		# under deny-by-default an empty pair is a refusal, not "unrestricted", so
+		# clearing would assert the opposite of what this step means.
+		self._restrict("close-auditor", ["Jarvis User"])
 		payload = agent_catalog.build_agent_push_payload(owner=self.owner)
 		self.assertTrue(any(p["slug"] == "agent-close-auditor" for p in payload))
 
@@ -1090,7 +1089,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
 
 		# ...and once BOTH rows qualify again it is still ONE entry, not two.
-		self._restrict("close-auditor", [])
+		# "Jarvis User" (which both fixtures hold), not `[]`: clearing now CLOSES.
+		self._restrict("close-auditor", ["Jarvis User"])
 		payload = agent_catalog.build_agent_push_payload()
 		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
 
@@ -1157,32 +1157,56 @@ class TestAgentsMarketplace(unittest.TestCase):
 			reference |= {p["slug"] for p in agent_catalog.build_agent_push_payload(owner=o)}
 
 		payload = agent_catalog.build_agent_push_payload()
-		self.assertEqual({p["slug"] for p in payload}, reference)
+		# SUBSET, not equality (jarvis#1062): the bench-global build also carries the
+		# allowed-listing leg - every granted Published listing, installed or not -
+		# which a per-owner build deliberately skips, so the oracle cannot see those
+		# slugs. The claim under test is unchanged: the short-circuit must never LOSE
+		# a slug the per-owner builds prove is due.
+		self.assertLessEqual(reference, {p["slug"] for p in payload})
 		# ...and still exactly one entry per slug.
 		slugs = [p["slug"] for p in payload]
 		self.assertEqual(len(slugs), len(set(slugs)), f"duplicate slug in payload: {slugs}")
 		self.assertIn("agent-close-auditor", reference)
 		self.assertIn("agent-ledger-scrutiny-auditor", reference)
 
-	def test_push_payload_short_circuit_skips_the_per_row_rbac_query(self):
-		"""The RBAC gate (an N+1 on the allowed-role child table) is evaluated once
-		per distinct AGENT, not once per install row."""
+	def test_push_payload_reads_the_access_tables_once_not_per_row(self):
+		"""The access gate is answered from TWO batched queries, not per install row.
+
+		It used to call ``_user_allowed_for_agent`` per row, which is itself an N+1
+		over both child tables, and this function runs twice per Apply. The maps are
+		now built once and shared with the allowed-listing leg; the per-row helper
+		must not be reached at all."""
 		self._enable_for(self.owner, "close-auditor")
 		self._enable_for(self.other, "close-auditor")
 		self._enable_for(self.admin, "close-auditor")
 
-		calls = []
-		orig = agents_api._user_allowed_for_agent
-		agents_api._user_allowed_for_agent = lambda listing, user=None: (
-			calls.append(listing) or orig(listing, user)
-		)
+		counts = {"roles": 0, "users": 0}
+		orig_roles = agents_api._allowed_roles_map
+		orig_users = agents_api._allowed_users_map
+		orig_gate = agents_api._user_allowed_for_agent
+
+		def _roles():
+			counts["roles"] += 1
+			return orig_roles()
+
+		def _users():
+			counts["users"] += 1
+			return orig_users()
+
+		def _gate(*a, **kw):
+			raise AssertionError("per-row access query in the push payload (N+1 regression)")
+
+		agents_api._allowed_roles_map = _roles
+		agents_api._allowed_users_map = _users
+		agents_api._user_allowed_for_agent = _gate
 		try:
 			payload = agent_catalog.build_agent_push_payload()
 		finally:
-			agents_api._user_allowed_for_agent = orig
+			agents_api._allowed_roles_map = orig_roles
+			agents_api._allowed_users_map = orig_users
+			agents_api._user_allowed_for_agent = orig_gate
 
-		close_calls = [c for c in calls if c == "close-auditor"]
-		self.assertEqual(len(close_calls), 1, f"RBAC gate re-run per install row: {calls}")
+		self.assertEqual(counts, {"roles": 1, "users": 1})
 		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
 
 	# ------------------------------------------------------------------ #
@@ -1436,7 +1460,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 
 		# Blanking the OTHER row too (no valid install left) drops the slug — proof
 		# the entry above came from the qualifying sibling, not from a leaky gate.
+		# Asserted on the per-OWNER builds: those skip the allowed-listing leg, which
+		# would otherwise ship this (granted, Published) slug on its own and say
+		# nothing about the install gate this test is actually about.
 		frappe.db.set_value(INSTALLATION, max(a, b), "run_as_user", None, update_modified=False)
 		frappe.db.commit()
-		payload = agent_catalog.build_agent_push_payload()
-		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 0)
+		for o in (self.owner, self.other):
+			payload = agent_catalog.build_agent_push_payload(owner=o)
+			self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 0)

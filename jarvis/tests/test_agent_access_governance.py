@@ -21,6 +21,7 @@ import json
 import unittest
 
 import frappe
+import frappe.permissions
 
 from jarvis.chat import agent_catalog, agents_api
 from jarvis.patches import v2_18_agent_access_grandfather as grandfather
@@ -111,6 +112,21 @@ class AccessGovernanceCase(unittest.TestCase):
 		cls.reviewer_only = _ensure_user("agov-reviewer-only@example.com", (REVIEWER_ROLE,))
 		_mk_listing()
 		frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		# The listing is bench-global state: leg 1 of build_agent_push_payload ships
+		# every GRANTED Published listing, so leaving this one behind (granted by a
+		# test that did not clean up) puts an unexpected slug in other modules'
+		# roster assertions. Shared-site hygiene, not politeness.
+		frappe.set_user("Administrator")
+		for name in frappe.get_all(INSTALLATION, filters={"agent": SLUG}, pluck="name"):
+			frappe.delete_doc(INSTALLATION, name, force=True, ignore_permissions=True)
+		clear_listing_access(SLUG)
+		if frappe.db.exists(LISTING, SLUG):
+			frappe.delete_doc(LISTING, SLUG, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		super().tearDownClass()
 
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -423,16 +439,33 @@ class TestPushRoster(AccessGovernanceCase):
 	def test_an_unallowed_uninstalled_listing_does_not_ship(self):
 		self.assertNotIn(f"agent-{SLUG}", self._slugs())
 
-	def test_an_enabled_install_of_a_closed_listing_still_ships(self):
-		"""Grandfather semantics, deliberately wider than dispatch.
+	def test_an_enabled_install_of_a_closed_listing_does_not_ship(self):
+		"""The roster admits exactly what dispatch admits.
 
-		A tenant that upgrades before the patch runs must not lose the agent from
-		its roster mid-flight. The roster entry is inert if dispatch refuses it; the
-		opposite error is a live outage."""
+		An enabled install on a CLOSED listing is refused by run_agent_now and by
+		_sweep_one, so advertising its delegate would seat a roster entry the bench
+		will never honour - the #457 mismatch. The upgrade is protected by the
+		grandfather PATCH (which runs during migrate, before anything can apply),
+		not by a looser gate here - see the test below."""
 		inst = _mk_install(self.named)
 		frappe.db.set_value(INSTALLATION, inst, "enabled", 1, update_modified=False)
 		frappe.db.commit()
 		self.assertFalse(agents_api._user_allowed_for_agent(SLUG, self.named))
+		self.assertNotIn(f"agent-{SLUG}", self._slugs())
+
+	def test_a_grandfathered_install_ships(self):
+		"""The upgrade path, end to end: install, close the listing (what the
+		inversion does to every shipped agent), run the patch, and the customer's
+		agent is back in the roster."""
+		allow_listing_for(SLUG, user=self.named)
+		inst = _mk_install(self.named)
+		frappe.db.set_value(INSTALLATION, inst, "enabled", 1, update_modified=False)
+		clear_listing_access(SLUG)
+		self.assertNotIn(f"agent-{SLUG}", self._slugs())
+
+		grandfather.grandfather_existing_installs()
+
+		self.assertTrue(agents_api._user_allowed_for_agent(SLUG, self.named))
 		self.assertIn(f"agent-{SLUG}", self._slugs())
 
 	def test_a_restricted_listing_still_excludes_a_blocked_run_as_user(self):
@@ -444,7 +477,13 @@ class TestPushRoster(AccessGovernanceCase):
 		frappe.db.set_value(INSTALLATION, inst, "enabled", 1, update_modified=False)
 		allow_listing_for(SLUG, roles=[ROLE_GRANTED])  # self.named does not hold it
 		frappe.db.commit()
-		self.assertNotIn(f"agent-{SLUG}", self._slugs())
+		# The blocked install contributes nothing: asserted on the per-OWNER build,
+		# which skips the allowed-listing leg.
+		self.assertEqual([e["slug"] for e in agent_catalog.build_agent_push_payload(owner=self.named)], [])
+		# The grant itself is real, though - the listing ships on its own account,
+		# so holders of ROLE_GRANTED can install and run it. Leg 1 and leg 2 answer
+		# different questions and both matter.
+		self.assertIn(f"agent-{SLUG}", self._slugs())
 
 	def test_only_published_listings_ship(self):
 		allow_listing_for(SLUG, roles=[ROLE_GRANTED])
@@ -529,6 +568,23 @@ class TestAdminInstallControl(AccessGovernanceCase):
 	def test_jarvis_admin_can_disable_another_owners_install(self):
 		"""Jarvis Admin held READ ONLY on Jarvis Agent Installation, so a tenant
 		admin could see a runaway install and do nothing about it."""
+		# Preconditions, asserted rather than assumed. These caught the real story
+		# once already: the role IS held and the DocPerm merge DOES grant write, yet
+		# check_permission still refused - because it also runs the document through
+		# has_user_permission, which a shared site can trip for reasons unrelated to
+		# agent access. That is why the endpoints gate the admin path explicitly
+		# (_check_installation_write) and the DocPerm row is defence in depth for
+		# Desk and generic REST rather than the thing this test rides on.
+		self.assertIn("Jarvis Admin", frappe.get_roles(self.admin))
+		self.assertNotIn("System Manager", frappe.get_roles(self.admin))  # must not pass via SM
+		self.assertEqual(
+			frappe.permissions.get_role_permissions(INSTALLATION, user=self.admin).get("write"),
+			1,
+			"Jarvis Admin has no non-owner write on Jarvis Agent Installation - the "
+			"DocPerm row in the DocType JSON has not reached this database (Desk and "
+			"generic REST would be broken for a tenant admin even though the "
+			"endpoints below still work)",
+		)
 		inst = _mk_install(self.named)
 		frappe.db.set_value(INSTALLATION, inst, "enabled", 1, update_modified=False)
 		frappe.db.commit()

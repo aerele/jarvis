@@ -234,7 +234,12 @@ describe("apply progress", () => {
 		await saveBtn(w).trigger("click");
 		await flushPromises();
 
-		expect(toast.error).toHaveBeenCalledWith("workspace refused the roster");
+		// Classified by the real humaniseSyncStatus (not mocked here on purpose:
+		// the point is that this toast and the catalog's apply pill read the same
+		// status the same way).
+		expect(toast.error).toHaveBeenCalledWith(
+			expect.stringContaining("workspace refused the roster")
+		);
 		expect(toast.success).not.toHaveBeenCalled();
 		expect(w.find('[data-test="apply-pending"]').exists()).toBe(false);
 	});
@@ -250,5 +255,71 @@ describe("apply progress", () => {
 		expect(toast.error).toHaveBeenCalledWith("You need the Jarvis Admin role");
 		expect(w.vm.roleDraft).toEqual(["Stock User"]);
 		expect(w.find('[data-test="access-dirty"]').exists()).toBe(true);
+	});
+});
+
+describe("a props refresh mid-edit", () => {
+	it("keeps unsaved draft edits and stays dirty", async () => {
+		// The parent reloads the agent for unrelated reasons - toggling Enabled
+		// calls load() and reassigns `agent` - and that used to silently discard a
+		// half-finished access edit.
+		const w = editor();
+		w.vm.roleDraft = ["Stock User"];
+		await flushPromises();
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(true);
+
+		await w.setProps({ roles: ["Accounts Manager"], users: [...SAVED_USERS] });
+		await flushPromises();
+
+		expect(w.vm.roleDraft).toEqual(["Stock User"]);
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(true);
+	});
+
+	it("reseeds the drafts when there is nothing to lose", async () => {
+		const w = editor();
+		await w.setProps({ roles: ["Accounts Manager"], users: [] });
+		await flushPromises();
+
+		expect(w.vm.roleDraft).toEqual(["Accounts Manager"]);
+		expect(w.vm.userDraft).toEqual([]);
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(false);
+	});
+
+	it("a kept draft that now matches the new baseline reads as clean", async () => {
+		// dirty is recomputed against the NEW baseline, so the indicator never
+		// claims an unsaved change that the server already holds.
+		const w = editor();
+		w.vm.roleDraft = ["Stock User"];
+		await flushPromises();
+		await w.setProps({ roles: ["Stock User"], users: [...SAVED_USERS] });
+		await flushPromises();
+
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(false);
+	});
+});
+
+describe("out-of-order user searches", () => {
+	it("ignores a slow earlier response that lands after a newer one", async () => {
+		// Typing "ne" then "newe" and having "ne" resolve second used to repopulate
+		// the menu with results for a prefix the admin had already moved past.
+		let resolveFirst;
+		agentsApi.searchUsers
+			.mockImplementationOnce(() => new Promise((r) => (resolveFirst = r)))
+			.mockImplementationOnce(async () => [
+				{ name: "newer@example.com", full_name: "Newer" },
+			]);
+
+		const w = editor();
+		w.vm.onUserPick("ne");
+		await vi.advanceTimersByTimeAsync(200);
+		w.vm.onUserPick("newe");
+		await vi.advanceTimersByTimeAsync(200);
+		await flushPromises();
+
+		// The newer request has already landed; now the stale one answers.
+		resolveFirst([{ name: "stale@example.com", full_name: "Stale" }]);
+		await flushPromises();
+
+		expect(w.vm.userOptions.map((o) => o.value)).toEqual(["newer@example.com"]);
 	});
 });

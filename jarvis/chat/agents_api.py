@@ -85,16 +85,16 @@ DISPATCH_LOCK_WAIT_S = 5.0
 # admin had to notice and narrow it. Now nothing is reachable until an admin says
 # who may reach it.
 #
-# The one intentional carve-out is the LEGACY leg of ``build_agent_push_payload``
-# (``legacy_empty_allows``): an install that works TODAY must keep working after
-# the upgrade even if the grandfather patch has not run yet.
+# There is no carve-out: every gate, including the container-push roster, asks
+# this one predicate. Existing installs survive the upgrade through the
+# ``v2_18_agent_access_grandfather`` patch, which runs during migrate before
+# anything can apply.
 def _is_allowed(
 	allowed_roles,
 	allowed_users,
 	user: str,
 	user_roles: set[str] | None = None,
 	is_admin: bool | None = None,
-	legacy_empty_allows: bool = False,
 ) -> bool:
 	"""The ONE access predicate, pure over its inputs.
 
@@ -103,9 +103,9 @@ def _is_allowed(
 	this, so the flag a user is shown and the gate they hit can never disagree —
 	they used to be two hand-kept copies of the same boolean expression.
 
-	``legacy_empty_allows`` restores the PRE-#1062 reading of an empty pair
-	("no restriction recorded" == everyone), and exists for exactly one caller:
-	the enabled-install leg of the container push. See its comment there.
+	Every caller gets the SAME answer, including the container-push roster: a
+	roster that admitted more than dispatch would advertise agents the bench then
+	refuses to run.
 	"""
 	if is_admin is None:
 		is_admin = has_jarvis_admin_access(user)
@@ -119,15 +119,13 @@ def _is_allowed(
 	if user in (allowed_users or []):
 		return True
 	if not (allowed_roles or []):
-		# Deny by default — UNLESS the caller asked for the legacy reading AND no
-		# named user was recorded either.
-		return bool(legacy_empty_allows and not (allowed_users or []))
+		return False  # deny by default
 	if user_roles is None:
 		user_roles = set(frappe.get_roles(user))
 	return bool(user_roles.intersection(allowed_roles))
 
 
-def _user_allowed_for_agent(listing, user: str | None = None, legacy_empty_allows: bool = False) -> bool:
+def _user_allowed_for_agent(listing, user: str | None = None) -> bool:
 	"""True iff ``user`` may install / run the agent.
 
 	Allowed iff the user is named in ``allowed_users`` OR their roles intersect
@@ -151,7 +149,7 @@ def _user_allowed_for_agent(listing, user: str | None = None, legacy_empty_allow
 	else:
 		roles = [row.role for row in (listing.get("allowed_roles") or [])]
 		users = [row.user for row in (listing.get("allowed_users") or [])]
-	return _is_allowed(roles, users, user, legacy_empty_allows=legacy_empty_allows)
+	return _is_allowed(roles, users, user)
 
 
 def _allowed_roles_map() -> dict[str, list[str]]:
@@ -596,11 +594,19 @@ def set_agent_access(
 	for u in users_clean:
 		if u in ("Administrator", "Guest"):
 			frappe.throw(_("User {0} cannot be granted agent access.").format(u))
-		enabled = frappe.db.get_value("User", u, "enabled")
-		if enabled is None:
-			frappe.throw(_("User {0} does not exist.").format(u))
-		if not enabled:
-			frappe.throw(_("User {0} is disabled and cannot be granted agent access.").format(u))
+	if users_clean:
+		# ONE query for the whole submitted set, not a get_value per name: this is an
+		# admin picking a handful of people, but the loop shape is what turns into an
+		# N+1 the first time somebody pastes a department into it.
+		known = {
+			r.name: r.enabled
+			for r in frappe.get_all("User", filters={"name": ("in", users_clean)}, fields=["name", "enabled"])
+		}
+		for u in users_clean:
+			if u not in known:
+				frappe.throw(_("User {0} does not exist.").format(u))
+			if not known[u]:
+				frappe.throw(_("User {0} is disabled and cannot be granted agent access.").format(u))
 
 	doc = frappe.get_doc(LISTING, agent_slug)
 	doc.check_permission("write")
@@ -937,12 +943,42 @@ def install_agent(agent_slug: str) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "agent": listing.name}}
 
 
+def _check_installation_write(doc, ptype: str = "write") -> bool:
+	"""Who may mutate an installation: its OWNER, or a tenant admin (jarvis#1062).
+
+	The owner half is the DocType's ``if_owner`` row, enforced through
+	``check_permission`` exactly as before — ``get_doc`` alone does NOT enforce
+	``if_owner`` (S3).
+
+	The admin half is checked HERE, in app code, rather than being left to the
+	Jarvis Admin DocPerm row alone. That row exists and is correct (it is what a
+	tenant admin needs for Desk and generic REST), but ``check_permission`` is not
+	only a role check: ``get_doc_permissions`` also runs the document through
+	``has_user_permission``, so on a site where anything has created a User
+	Permission touching this doctype's link fields, a legitimate admin is refused
+	for a reason that has nothing to do with agent access. An admin's authority to
+	disable, stop or uninstall a runaway install should not be contingent on that,
+	so it is stated directly.
+
+	Returns True when the ADMIN half authorised the call. The caller needs that:
+	``doc.save()`` and ``frappe.delete_doc()`` re-run the very check we just
+	bypassed, so an admin authorised here would be refused a line later. Passing
+	``ignore_permissions`` on that write is safe precisely because authority has
+	already been established, in the open, right here - the same reasoning
+	``promote_installation`` uses.
+	"""
+	if has_jarvis_admin_access():
+		return True
+	doc.check_permission(ptype)
+	return False
+
+
 @frappe.whitelist()
 def set_enabled(installation: str, enabled: int) -> dict:
 	"""Enable/disable an installed agent — a pure DB write (O6: NO restart; the
 	bundle only reaches the container on the next Apply)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
-	doc.check_permission("write")  # S3 owner-gate
+	via_admin = _check_installation_write(doc)  # S3 owner-gate, or a tenant admin
 	# R5-J8: never enable a non-installable capability (a min_apps dependency
 	# absent at install, or one that vanished after install and was reconciled to
 	# installable=0). Disabling is always allowed.
@@ -952,7 +988,7 @@ def set_enabled(installation: str, enabled: int) -> dict:
 		assert_installable(doc.agent)
 	before = int(doc.enabled or 0)
 	doc.enabled = int(enabled or 0)
-	doc.save()
+	doc.save(ignore_permissions=via_admin)
 	# jarvis#1062 polish: only an ACTUAL flip changes the pushed bundle set - a
 	# no-op call (already-enabled row re-enabled, e.g. a stale/duplicate toggle)
 	# must not dirty the catalog and nag the SPA's leave-guard over nothing.
@@ -1164,7 +1200,7 @@ def uninstall_agent(installation: str) -> dict:
 	an Apply is now pending — but only when the install was ENABLED (a disabled
 	install was never in the pushed set, so removing it changes nothing)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
-	doc.check_permission("delete")  # S3 owner-gate before touching linked rows
+	via_admin = _check_installation_write(doc, "delete")  # S3 owner-gate (or admin)
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
@@ -1191,7 +1227,8 @@ def uninstall_agent(installation: str) -> dict:
 	_detach_last_seen_run(run_names)
 	for name in run_names:
 		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
-	frappe.delete_doc(INSTALLATION, installation)  # honors if_owner
+	# honors if_owner for an owner; the admin path was authorised above.
+	frappe.delete_doc(INSTALLATION, installation, ignore_permissions=via_admin)
 	if doc.enabled:
 		_mark_catalog_dirty()
 	frappe.db.commit()
@@ -1405,7 +1442,7 @@ def _guard_run_control(run_doc) -> None:
 	``_record_failed`` skip row) falls back to the run's own ``if_owner`` read gate,
 	which is still an ownership check — ``get_doc`` alone enforces neither."""
 	if run_doc.installation and frappe.db.exists(INSTALLATION, run_doc.installation):
-		frappe.get_doc(INSTALLATION, run_doc.installation).check_permission("write")
+		_check_installation_write(frappe.get_doc(INSTALLATION, run_doc.installation))
 		return
 	run_doc.check_permission("read")
 

@@ -28,7 +28,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_scheduler, agents_api
-from jarvis.tests._agent_access import allow_listing_for
+from jarvis.tests._agent_access import allow_listing_for, clear_listing_access
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -1268,10 +1268,27 @@ class TestSetListingStatusMarksCatalogDirty(FrappeTestCase):
 
 	def test_status_change_with_no_enabled_install_is_not_dirty(self):
 		"""The payload is identical either way, so do not manufacture a pending
-		Apply (and a container restart) out of nothing."""
+		Apply (and a container restart) out of nothing.
+
+		The listing must carry NO grant either (jarvis#1062): a granted listing is
+		in the roster whether or not anyone installed it, so a status flip on one
+		DOES change the payload - see the sibling test below. _mk_listing grants
+		Jarvis User so the module's other tests can install, hence the reset here."""
+		clear_listing_access(self.SLUG)
 		agents_api.set_listing_status(self.SLUG, "Deprecated")
 		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
 		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 3)
+
+	def test_status_change_with_a_grant_but_no_install_is_dirty(self):
+		"""jarvis#1062: the roster is no longer "enabled installs" alone.
+
+		An allowed Published listing ships with zero installations, so
+		publishing/deprecating one really does move the container roster and must
+		show as a pending Apply - the exact #457 class of bug (roster and DB
+		silently disagreeing) in its new shape."""
+		allow_listing_for(self.SLUG, roles=["Jarvis User"])
+		agents_api.set_listing_status(self.SLUG, "Deprecated")
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
 
 	def test_setting_the_same_status_is_not_dirty(self):
 		_mk_gate_install(self.owner, self.SLUG, self.owner)

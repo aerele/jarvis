@@ -59,6 +59,9 @@ _GUARD_CALL_SUBSTRS = (
 	"has_jarvis_admin_access",
 	# jarvis#1062: the reviewer-or-admin activation gate promote/demote delegate to.
 	"_require_activation_authority",
+	# jarvis#1062: the installation write gate (owner via check_permission, or a
+	# tenant admin) that set_enabled / uninstall_agent / the run-control guard use.
+	"_check_installation_write",
 	"_require_system_user",
 	"only_for",  # frappe.only_for(...) — an SM/role gate, stricter than Jarvis User
 	"_guard",  # learned_api._guard / _admin_guard (reviewer/admin role gate)
