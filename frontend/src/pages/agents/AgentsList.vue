@@ -45,7 +45,8 @@
 			</template>
 		</LayoutHeader>
 
-		<!-- 4 hash-synced tabs (no hash = Featured; #available/#installed/#activity) -->
+		<!-- hash-synced tabs: 4 for an admin/reviewer (no hash = Featured), 2 for a
+		     plain user (Agents relabelling Available + Activity; no hash = Agents) -->
 		<TabBar class="shrink-0" :tabs="TABS" :model-value="tab" @update:model-value="setTab" />
 
 		<!-- persistent apply-failure banner: the reason must survive the toast and
@@ -281,24 +282,53 @@ import { categoryTitle } from "@/lib/agentCategory";
 const route = useRoute();
 const router = useRouter();
 
-// ── hash-synced tabs (AgentDetail pattern; no hash = Featured) ───────────────
-const TABS = [
+// ── Reviewer / admin capability probe (PART 3 remediation): apply_agents needs
+// the skill-reviewer set (Jarvis Skill Reviewer | Jarvis Admin | System
+// Manager), NOT System Manager. get_agents_caps().review drives the Apply
+// button so a reviewer-only System User (no SM) can see and use it; a plain
+// Jarvis User gets review=false and no button. Decoupled from the SM-only
+// cross-owner getAgentAdminOverview data. Declared here, ahead of the
+// hash-synced tabs below, because applyHash() (called synchronously at setup)
+// already needs isPrivileged.
+const canApply = ref(false);
+// The tenant-admin half of the same probe: it decides which EMPTY-STATE copy
+// is truthful (see emptyState) and, with canApply, which tab set renders -
+// never what the list contains, which stays server-side in _enriched_catalog.
+const canAdminister = ref(false);
+// jarvis#1062 polish: an admin or a reviewer keeps the full catalog chrome;
+// everyone else's access is deny-by-default (agentsEmptyState.js), so
+// Featured/Installed are two more tabs pointing at nothing for them.
+const isPrivileged = computed(() => canAdminister.value || canApply.value);
+
+// ── hash-synced tabs (AgentDetail pattern; no hash = the privileged default) ─
+const FULL_TABS = [
 	{ label: "Featured", value: "featured" },
 	{ label: "Available", value: "available" },
 	{ label: "Installed", value: "installed" },
 	{ label: "Activity", value: "activity" },
 ];
+// A plain user's "Agents" IS the available catalog - same value, relabelled -
+// so every value/tab -> query mapping below (AGENT_TABS, listAgentsPage,
+// emptyState, shouldProbeWholeCatalog) needs no separate branch for them.
+const PLAIN_TABS = [
+	{ label: "Agents", value: "available" },
+	{ label: "Activity", value: "activity" },
+];
+const TABS = computed(() => (isPrivileged.value ? FULL_TABS : PLAIN_TABS));
 const AGENT_TABS = ["featured", "available", "installed"];
 
 const tab = ref("featured");
+function defaultTab() {
+	return isPrivileged.value ? "featured" : "available";
+}
 function applyHash() {
 	const h = (route.hash || "").replace(/^#/, "");
-	tab.value = TABS.some((t) => t.value === h) ? h : "featured";
+	tab.value = TABS.value.some((t) => t.value === h) ? h : defaultTab();
 }
 function setTab(v) {
 	if (tab.value === v) return;
 	tab.value = v;
-	router.push({ hash: v === "featured" ? "" : "#" + v });
+	router.push({ hash: v === defaultTab() ? "" : "#" + v });
 }
 applyHash();
 // back/forward restores the tab
@@ -308,6 +338,13 @@ watch(
 		if (route.name === "AgentsList") applyHash();
 	}
 );
+// Caps resolve async (probeCaps, below), so the very first applyHash() above
+// ran before isPrivileged was known. Re-validate once it is, so a deep link
+// to an admin-only tab (#installed, say) for a caller who turns out to be a
+// plain user falls back to Agents instead of sitting on a blank panel, and a
+// caller who turns out to be privileged gets Featured back instead of being
+// stuck on the plain default.
+watch(isPrivileged, () => applyHash());
 
 // ── catalog list: useListPage adapter over list_agents_page ─────────────────
 // The adapter closes over tab/category/sortChoice and maps useListPage's
@@ -390,17 +427,8 @@ function installsLabel(n) {
 	return `${c} install${c === 1 ? "" : "s"}`;
 }
 
-// ── Reviewer capability probe (PART 3 remediation): apply_agents needs the
-// skill-reviewer set (Jarvis Skill Reviewer | Jarvis Admin | System Manager),
-// NOT System Manager. get_agents_caps().review drives the Apply button so a
-// reviewer-only System User (no SM) can see and use it; a plain Jarvis User
-// gets review=false and no button. Decoupled from the SM-only cross-owner
-// getAgentAdminOverview data. ─────────────────────────────────────────────────
-const canApply = ref(false);
-// The tenant-admin half of the same probe: it decides only which EMPTY-STATE copy
-// is truthful (see emptyState), never what the list contains - that filtering is
-// server-side in _enriched_catalog.
-const canAdminister = ref(false);
+// canApply/canAdminister are declared above (near TABS - applyHash() needs
+// isPrivileged synchronously at setup); this just resolves them.
 async function probeCaps() {
 	try {
 		const caps = (await agentsApi.getAgentsCaps()) || {};
