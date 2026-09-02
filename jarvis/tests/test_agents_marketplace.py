@@ -404,10 +404,12 @@ class TestAgentsMarketplace(unittest.TestCase):
 		count2 = frappe.db.count(LISTING)
 		self.assertEqual(count1, count2)  # no dup rows on re-sync
 		self.assertEqual(r2["created"], 0)  # nothing created the second time
-		# The registry ships exactly the two delegate agents.
 		published = set(frappe.get_all(LISTING, filters={"status": "Published"}, pluck="name"))
 		self.assertIn("close-auditor", published)
-		self.assertIn("bank-recon-operator", published)
+		# jarvis#1062 polish: bank-recon-operator has no dispatch path yet and was
+		# flipped to Coming Soon in the registry - it must follow on sync, not
+		# stay Published.
+		self.assertEqual(frappe.db.get_value(LISTING, "bank-recon-operator", "status"), "Coming Soon")
 		# Every shipped agent is delegate and BODY-FREE: the proprietary SKILL must
 		# NEVER be stored in the customer DB (A2) — it lives only in the admin
 		# bundle store.
@@ -445,6 +447,34 @@ class TestAgentsMarketplace(unittest.TestCase):
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(frappe.db.get_value(LISTING, "close-auditor", "category"), "Close and Reporting")
 		self.assertEqual(frappe.db.get_value(LISTING, "bank-recon-operator", "category"), "Bank Recon")
+
+	# ------------------------------------------------------------------ #
+	# (d4) jarvis#1062 polish — Published operator listings with no dispatch
+	# path were flipped to Coming Soon in the registry; a re-sync must carry
+	# an already-deployed Published row down with it.
+	# ------------------------------------------------------------------ #
+	def test_dispatchless_operators_downgrade_to_coming_soon_on_resync(self):
+		operator_slugs = [
+			"ap-3way-match-operator",
+			"ar-collections-operator",
+			"bank-recon-operator",
+			"cycle-count-planner-operator",
+			"reorder-replenishment-operator",
+		]
+		agent_catalog.sync_agent_listings()
+		# Simulate the pre-change deployed state, as if synced before the flip.
+		for slug in operator_slugs:
+			frappe.db.set_value(LISTING, slug, "status", "Published", update_modified=False)
+		frappe.db.commit()
+
+		agent_catalog.sync_agent_listings()
+
+		for slug in operator_slugs:
+			self.assertEqual(
+				frappe.db.get_value(LISTING, slug, "status"),
+				"Coming Soon",
+				f"{slug} must follow the registry's Coming Soon status on re-sync",
+			)
 
 	# ------------------------------------------------------------------ #
 	# (d2) Phase 0A — delegate agent stub + body-free enablement signal
