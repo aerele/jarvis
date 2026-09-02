@@ -403,6 +403,19 @@ const emptyState = computed(() => {
 			cta: true,
 		};
 	}
+	// jarvis#1062: for a NON-ADMIN the available tab is access-filtered
+	// server-side, so zero rows almost never means "the catalog is empty" - it
+	// means nothing has been granted to them yet. Saying the catalog is empty
+	// sends them to look for a bug that is not there; naming the one action that
+	// unblocks them is the honest copy. Admins keep the original message, because
+	// for them an empty list really is an empty catalog.
+	if (!canAdminister.value) {
+		return {
+			title: "No agents available to you",
+			description: "No agents have been made available to you yet. Ask your administrator.",
+			cta: false,
+		};
+	}
 	return {
 		title: "No agents available",
 		description: "The catalog is empty right now.",
@@ -439,16 +452,22 @@ function installsLabel(n) {
 // gets review=false and no button. Decoupled from the SM-only cross-owner
 // getAgentAdminOverview data. ─────────────────────────────────────────────────
 const canApply = ref(false);
+// The tenant-admin half of the same probe: it decides only which EMPTY-STATE copy
+// is truthful (see emptyState), never what the list contains - that filtering is
+// server-side in _enriched_catalog.
+const canAdminister = ref(false);
 async function probeCaps() {
 	try {
 		const caps = (await agentsApi.getAgentsCaps()) || {};
 		canApply.value = !!caps.review;
+		canAdminister.value = !!caps.admin;
 		if (canApply.value) {
 			await loadSyncStatus();
 			if (sync.pending) startSyncPoll();
 		}
 	} catch (e) {
 		canApply.value = false;
+		canAdminister.value = false;
 	}
 }
 

@@ -125,13 +125,15 @@
 						     is discussed - not only in the passive Runs-tab "Preview" pill
 						     (jarvis#456). The action itself lives in Configure. -->
 						<Badge
-							v-if="activation && activation.activation_state === 'live'"
+							v-if="
+								canReview && activation && activation.activation_state === 'live'
+							"
 							variant="subtle"
 							theme="green"
 							label="Live"
 						/>
 						<span
-							v-else-if="activation"
+							v-else-if="canReview && activation"
 							class="inline-flex h-5 shrink-0 select-none items-center whitespace-nowrap rounded-full bg-surface-violet-1 px-2 text-xs text-ink-violet-1"
 						>
 							Shadow (preview)
@@ -149,7 +151,7 @@
 				     after install) must say so visibly, not only via the disabled Run
 				     button's tooltip - a tooltip is easy to miss entirely. -->
 				<div v-if="installation && !agent.allowed" class="mt-3 text-sm text-ink-gray-5">
-					Your roles do not permit running this agent. Ask your administrator.
+					You do not have access to run this agent. Ask your administrator.
 				</div>
 			</div>
 
@@ -233,18 +235,27 @@
 						</div>
 					</div>
 					<div>
-						<div class="text-sm font-medium text-ink-gray-5">Allowed roles</div>
-						<div class="mt-1 flex flex-wrap gap-1.5">
-							<template v-if="(agent.allowed_roles || []).length">
+						<div class="text-sm font-medium text-ink-gray-5">Access</div>
+						<!-- Admins see the roster; everyone else sees only whether THEY
+						     are allowed - who else has access is admin information. -->
+						<div v-if="isSM" class="mt-1 flex flex-wrap gap-1.5">
+							<template v-if="accessGrants.length">
 								<Badge
-									v-for="r in agent.allowed_roles"
-									:key="r"
+									v-for="g in accessGrants"
+									:key="g"
 									variant="subtle"
 									theme="gray"
-									:label="r"
+									:label="g"
 								/>
 							</template>
-							<span v-else class="text-base text-ink-gray-8">Everyone</span>
+							<span v-else class="text-base text-ink-gray-8">Admins only</span>
+						</div>
+						<div v-else class="mt-1 text-base text-ink-gray-8">
+							{{
+								agent.allowed
+									? "You have access"
+									: "No access - ask your administrator"
+							}}
 						</div>
 					</div>
 					<div>
@@ -259,7 +270,7 @@
 				v-else-if="tab === 'configure' && installation"
 				class="max-w-2xl shrink-0 space-y-10 px-5 py-6"
 			>
-				<section>
+				<section v-if="canReview">
 					<ActivationPanel
 						:installation-name="installation.name"
 						:agent-title="agent.title"
@@ -330,6 +341,7 @@
 				v-else-if="tab === 'runs' && installation"
 				ref="runsBoard"
 				:agent-name="agent.name"
+				:can-review="canReview"
 			/>
 
 			<!-- ── Admin (SM only; server enforces every call). Listing status is
@@ -339,47 +351,13 @@
 				v-else-if="tab === 'admin' && isSM"
 				class="max-w-2xl shrink-0 space-y-10 px-5 py-6"
 			>
-				<section>
-					<div class="text-base font-medium text-ink-gray-9">Allowed roles</div>
-					<div class="mt-2 text-sm text-ink-gray-5">
-						Role gating is enforced server-side on every path. An empty list means
-						everyone.
-					</div>
-					<div class="mt-3 flex flex-wrap gap-1.5">
-						<div
-							v-for="r in roleDraft"
-							:key="r"
-							class="flex h-6 items-center gap-1 rounded bg-surface-gray-2 px-2 text-sm text-ink-gray-8"
-						>
-							<span class="truncate">{{ r }}</span>
-							<Button
-								variant="ghost"
-								icon="x"
-								class="!h-4 !w-4"
-								:label="'Remove role ' + r"
-								@click="removeRole(r)"
-							/>
-						</div>
-						<span v-if="!roleDraft.length" class="text-sm text-ink-gray-4">
-							Everyone - no restriction
-						</span>
-					</div>
-					<div class="mt-3 w-72">
-						<Autocomplete
-							:options="roleOptions"
-							:modelValue="null"
-							placeholder="Add a role…"
-							@update:modelValue="(opt) => opt && addRole(opt.value)"
-						/>
-					</div>
-					<div v-if="rolesDirty" class="mt-3 flex items-center gap-2">
-						<Button label="Save roles" :loading="savingRoles" @click="saveRoles" />
-						<Button label="Reset" variant="ghost" @click="resetRoles" />
-						<span v-if="!roleDraft.length" class="text-sm text-ink-gray-5">
-							Saving with none selected clears the restriction.
-						</span>
-					</div>
-				</section>
+				<AgentAccessEditor
+					:slug="props.slug"
+					:roles="agent.allowed_roles || []"
+					:users="agent.allowed_users || []"
+					:all-roles="agent.all_roles || []"
+					@saved="onAccessSaved"
+				/>
 
 				<section>
 					<div class="text-base font-medium text-ink-gray-9">
@@ -477,12 +455,11 @@
 // hash-synced tabs. Overview (markdown description + static facts panel) ·
 // Configure (schedule / ConfigForm / CommentsSection on the installation, D28)
 // · Runs (AgentRunsBoard: two-pane runs rail → findings pane) · Admin
-// (SM-only: roles editor + installs overview; listing status is registry.json
-// publisher state and intentionally has no tenant control here).
+// (admin-only: the Access editor + installs overview; listing status is
+// registry.json publisher state and intentionally has no tenant control here).
 import { ref, computed, watch, nextTick } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
-	Autocomplete,
 	Badge,
 	Breadcrumbs,
 	Button,
@@ -505,11 +482,11 @@ import TabBar from "@/components/list/TabBar.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
 import AgentRunsBoard from "@/pages/agents/AgentRunsBoard.vue";
 import ActivationPanel from "@/pages/agents/ActivationPanel.vue";
+import AgentAccessEditor from "@/pages/agents/AgentAccessEditor.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
-import { session } from "@/data/session";
 import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
 import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
@@ -616,12 +593,23 @@ watch(
 	{ immediate: true }
 );
 
-// The named reviewer's sign-off, or a Jarvis Admin (agents_api mirrors this
-// server-side - this only decides whether to show the button, never grants
-// the action itself).
-const canActOnActivation = computed(
-	() => !!activation.value && (session.user === activation.value.reviewer || isSM.value)
-);
+// ── reviewer capability (jarvis#1062) ────────────────────────────────────────
+// The reviewer set (Jarvis Skill Reviewer / Jarvis Admin / System Manager), read
+// from get_agents_caps().review - the SAME capability apply_agents and
+// promote_installation gate on, so the button appears exactly when the call
+// would succeed. It replaced `session.user === activation.reviewer`: install_agent
+// stamps reviewer = the installer, so that test made every installer their own
+// approver and put the whole shadow/attestation vocabulary in front of people who
+// have no say over it. A plain user now sees nothing about shadow at all.
+const canReview = ref(false);
+(async () => {
+	try {
+		canReview.value = !!((await apiAgents.getAgentsCaps()) || {}).review;
+	} catch {
+		canReview.value = false; // fail closed: no control, no shadow copy
+	}
+})();
+const canActOnActivation = computed(() => !!activation.value && canReview.value);
 function onActivationChanged(next) {
 	activation.value = next;
 }
@@ -668,8 +656,10 @@ const canInstall = computed(
 );
 const installTooltip = computed(() => {
 	if (!agent.value || canInstall.value) return "";
+	// Never the roster: get_agent strips allowed_roles/allowed_users for non-admins,
+	// and naming who DOES have access is admin information anyway.
 	if (!agent.value.allowed)
-		return "Restricted to: " + ((agent.value.allowed_roles || []).join(", ") || "-");
+		return "You do not have access to this agent. Ask your administrator.";
 	return agent.value.status === "Coming Soon" ? "Coming soon" : "Not available to install";
 });
 
@@ -725,9 +715,14 @@ const runTooltip = computed(() => {
 	if (nature !== "Auditor" && nature !== "Scribe")
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
-	if (!agent.value.allowed) return "Your roles do not permit this agent";
+	if (!agent.value.allowed) return "You do not have access to this agent";
+	// The shadow vocabulary is reviewer language (jarvis#1062): a plain user has
+	// no promote control and no say in the sign-off, so telling them to go and
+	// promote it names an action they cannot take.
 	if (shadowScribeBlocked.value)
-		return "Still in shadow preview - promote it to live under Configure first";
+		return canReview.value
+			? "Still in shadow preview - promote it to live under Configure first"
+			: "Not yet enabled for live runs - ask your administrator";
 	return nature === "Scribe" ? "Run this agent now" : "Run this audit now";
 });
 
@@ -966,53 +961,18 @@ const adminListing = computed(() => {
 });
 const installRows = computed(() => (adminListing.value && adminListing.value.installs) || []);
 
-// roles editor (Autocomplete over all_roles → chips → Save)
-const roleDraft = ref([]);
-const savingRoles = ref(false);
-watch(
-	() => agent.value && agent.value.allowed_roles,
-	(v) => {
-		roleDraft.value = [...(v || [])];
-	},
-	{ immediate: true }
-);
-const roleOptions = computed(() => {
-	const all = (agent.value && agent.value.all_roles) || [];
-	const taken = new Set(roleDraft.value);
-	return all.filter((r) => !taken.has(r)).map((r) => ({ label: r, value: r }));
-});
-const rolesDirty = computed(() => {
-	const a = [...roleDraft.value].sort().join("|");
-	const b = [...((agent.value && agent.value.allowed_roles) || [])].sort().join("|");
-	return a !== b;
-});
-function addRole(r) {
-	if (!roleDraft.value.includes(r)) roleDraft.value = [...roleDraft.value, r];
-}
-function removeRole(r) {
-	roleDraft.value = roleDraft.value.filter((x) => x !== r);
-}
-function resetRoles() {
-	roleDraft.value = [...((agent.value && agent.value.allowed_roles) || [])];
-}
-async function saveRoles() {
-	if (savingRoles.value) return;
-	savingRoles.value = true;
-	try {
-		const r = await api.setAgentRoles(props.slug, roleDraft.value);
-		agent.value.allowed_roles = (r && r.allowed_roles) || [];
-		roleDraft.value = [...agent.value.allowed_roles];
-		toast.success(
-			agent.value.allowed_roles.length
-				? "Roles saved"
-				: "Restriction cleared - available to everyone"
-		);
-		load(); // refresh allowed/lock state
-	} catch (e) {
-		toast.error(errHtml(e));
-	} finally {
-		savingRoles.value = false;
-	}
+// ── access (jarvis#1062) ──────────────────────────────────────────────────────
+// The editor itself is AgentAccessEditor.vue; the detail page only owns the
+// saved value, so the Overview summary and the Admin tab cannot disagree.
+const accessGrants = computed(() => [
+	...((agent.value && agent.value.allowed_roles) || []),
+	...((agent.value && agent.value.allowed_users) || []),
+]);
+function onAccessSaved(next) {
+	if (!agent.value) return;
+	agent.value.allowed_roles = next.allowed_roles || [];
+	agent.value.allowed_users = next.allowed_users || [];
+	load(); // re-read `allowed` - an admin can lock themselves out of the user surface
 }
 
 // ── formatting helpers ────────────────────────────────────────────────────────

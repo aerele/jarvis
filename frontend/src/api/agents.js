@@ -90,3 +90,23 @@ export const promoteInstallation = (installation, justification) =>
 	call(AG + "promote_installation", { installation, justification: justification || "" });
 export const demoteInstallation = (installation, reason) =>
 	call(AG + "demote_installation", { installation, reason: reason || "" });
+
+// ── Access governance (jarvis#1062) ──────────────────────────────────────────
+// Replaces BOTH allow lists atomically. Access is deny-by-default: saving with
+// two empty lists CLOSES the agent to everyone but an admin, it does not reopen
+// it to everyone. `apply` additionally pushes the roster to the workspace (one
+// restart) - it belongs on the admin's action, never on a user's install.
+// -> { ok, allowed_roles: [str], allowed_users: [str], applied: bool }
+export const setAgentAccess = (agent_slug, roles, users, apply) =>
+	call(AG + "set_agent_access", {
+		agent_slug,
+		roles: JSON.stringify(roles || []),
+		users: JSON.stringify(users || []),
+		apply: apply ? 1 : 0,
+	});
+
+// Type-ahead source for the Access editor's user picker: enabled, named users
+// only (no Administrator/Guest - set_agent_access refuses them), capped at 20
+// server-side. Admin-gated, like the editor it feeds.
+// -> [{ name, full_name }]
+export const searchUsers = (q) => call(AG + "search_users", { q: q || "" });

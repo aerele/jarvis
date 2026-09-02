@@ -92,7 +92,7 @@
 							     frappe-ui 0.1.278, so this reuses the app's violet-pill
 							     recipe (see triggers/TriggersListPane.vue). -->
 							<span
-								v-if="row.preparation_mode === 'shadow'"
+								v-if="canReview && row.preparation_mode === 'shadow'"
 								class="mt-0.5 inline-flex h-5 shrink-0 select-none items-center whitespace-nowrap rounded-full bg-surface-violet-1 px-1.5 text-xs text-ink-violet-1"
 							>
 								Preview
@@ -150,7 +150,7 @@
 				     not only in the detached fallback-dashboard HTML. Shown whenever the
 				     selected run was prepared in shadow, above the findings pane. -->
 				<div
-					v-if="selectedRun && selectedRun.preparation_mode === 'shadow'"
+					v-if="canReview && selectedRun && selectedRun.preparation_mode === 'shadow'"
 					class="flex items-start gap-2 border-b bg-surface-violet-1 px-6 py-2.5 text-sm text-ink-violet-1"
 				>
 					<FeatherIcon name="eye" class="size-4 shrink-0" />
@@ -196,6 +196,12 @@ import * as apiAgents from "@/api/agents";
 
 const props = defineProps({
 	agentName: { type: String, required: true }, // listing docname (list_runs_page filter)
+	// jarvis#1062: shadow/attestation is REVIEWER vocabulary. The pill and the
+	// banner below explain a distinction only a reviewer can act on (they hold the
+	// promote control), so a plain user sees neither - not a softened version of
+	// them, none. Defaults false so a caller that forgets the prop under-discloses
+	// rather than leaking the reviewer surface.
+	canReview: { type: Boolean, default: false },
 });
 
 // lifecycle status (did the run finish) is ONE axis; PP-4 preparation_mode
