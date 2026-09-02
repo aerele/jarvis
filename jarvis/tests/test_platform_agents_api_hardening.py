@@ -1252,6 +1252,69 @@ class TestSetListingStatusMarksCatalogDirty(FrappeTestCase):
 		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
 
 
+class TestSetEnabledMarksCatalogDirtyOnlyOnAChange(FrappeTestCase):
+	"""jarvis#1062 polish: a no-op ``set_enabled`` call (re-enabling an
+	already-enabled row, or disabling an already-disabled one) was dirtying the
+	catalog unconditionally, unlike every other push-visible mutation here
+	(``set_listing_status`` above) - the SPA's leave-guard then nagged with a
+	native beforeunload prompt even though nothing the next Apply would push
+	had actually changed."""
+
+	SLUG = PREFIX + "enableddirty"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-enableddirty-owner@example.com")
+		_mk_listing(cls.SLUG)
+		cls._saved = {k: _single(k) for k in ("agent_catalog_dirty", "agent_catalog_version")}
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		for k, v in cls._saved.items():
+			frappe.db.set_single_value(SETTINGS, k, v)
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.set_value(LISTING, self.SLUG, "status", "Published", update_modified=False)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_dirty", 0)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_version", 3)
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.commit()
+
+	def test_re_enabling_an_already_enabled_install_is_not_dirty(self):
+		inst = _mk_gate_install(self.owner, self.SLUG, self.owner)  # starts enabled=1
+		frappe.db.commit()
+		agents_api.set_enabled(inst, 1)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 3)
+
+	def test_disabling_an_already_disabled_install_is_not_dirty(self):
+		inst = _mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.set_value(INSTALLATION, inst, "enabled", 0, update_modified=False)
+		frappe.db.commit()
+		agents_api.set_enabled(inst, 0)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 3)
+
+	def test_an_actual_flip_still_marks_dirty(self):
+		"""Control: the fix must not have swallowed the real case."""
+		inst = _mk_gate_install(self.owner, self.SLUG, self.owner)  # starts enabled=1
+		frappe.db.commit()
+		agents_api.set_enabled(inst, 0)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 4)
+
+
 # --------------------------------------------------------------------------- #
 # #648 — schedule_time is validated on every surface, and one bad installation
 # cannot abort the whole hourly agent sweep (the agent twin of #472)

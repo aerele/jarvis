@@ -749,9 +749,15 @@ def set_enabled(installation: str, enabled: int) -> dict:
 		from jarvis.chat.agent_installability import assert_installable
 
 		assert_installable(doc.agent)
+	before = int(doc.enabled or 0)
 	doc.enabled = int(enabled or 0)
 	doc.save()
-	_mark_catalog_dirty()
+	# jarvis#1062 polish: only an ACTUAL flip changes the pushed bundle set - a
+	# no-op call (already-enabled row re-enabled, e.g. a stale/duplicate toggle)
+	# must not dirty the catalog and nag the SPA's leave-guard over nothing.
+	# Mirrors set_listing_status's before/after check above.
+	if before != doc.enabled:
+		_mark_catalog_dirty()
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
