@@ -609,6 +609,17 @@ export const billingPaymentState = () => call("jarvis.account.get_billing_paymen
 export const checkBillingPayment = (opts) =>
 	rawOnboardingCall("jarvis.account.check_billing_payment_status", {}, opts);
 
+// GST invoices + billing details for the billing page (Phase 3b). getInvoices lists the
+// customer's own invoices; downloadInvoice returns a base64 PDF (admin re-verifies ownership).
+// getBillingProfile/updateBillingDetails drive the editable billing-details card (a partner-
+// billed customer gets a read-only "billed through <partner>" and cannot edit).
+export const getInvoices = () => call("jarvis.account.get_invoices");
+export const downloadInvoice = (erpName) =>
+	call("jarvis.account.download_invoice", { erp_name: erpName });
+export const getBillingProfile = () => call("jarvis.account.get_billing_profile");
+export const updateBillingDetails = (billing) =>
+	call("jarvis.account.update_billing_details", { billing });
+
 // File input: upload to Frappe's File doctype, return {file_url, file_name}.
 export async function uploadFile(file) {
 	const fd = new FormData();
