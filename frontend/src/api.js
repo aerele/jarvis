@@ -17,6 +17,15 @@ export const getCanvas = (message, name, dark) =>
 export const previewFile = (fileUrl) =>
 	call("jarvis.chat.api.preview_file", { file_url: fileUrl });
 export const createOrFocusEmpty = () => call("jarvis.chat.api.create_or_focus_empty");
+// Post-reply feedback: a thumbs up/down (+ optional note on a down) on one
+// assistant reply. Best-effort - the bench derives the metadata server-side and
+// forwards it to the admin fleet dashboard; the tap never blocks on that.
+export const submitFeedback = (message, rating, note) =>
+	call("jarvis.chat.feedback.submit_feedback", {
+		message_id: message,
+		rating,
+		note: note || "",
+	});
 export const archiveConversation = (conversation) =>
 	call("jarvis.chat.api.archive_conversation", { conversation });
 // Danger zone: permanently delete ALL of the user's conversations + messages.
