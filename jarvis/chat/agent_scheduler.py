@@ -97,6 +97,13 @@ MISSING_RECORD_FALLBACK_SECONDS = 1800
 # admin does not re-code this refusal, so the fleet's sentence is the only signal. A
 # CROSS-REPO literal: renaming it fleet-side turns every lost run back into a 3h reap.
 _FLEET_UNKNOWN_RUN = "unknown agent run"
+# The fleet-agent's words for a run that ENDED CLEANLY on the host. Its dispatch worker
+# stamps ``done`` when the container-side turn returns (fleet-agent ``main.py``,
+# ``_dispatch_agent_run``); ``completed`` is accepted too so a relay or a future fleet
+# that normalises the word cannot silently turn every clean exit back into "still in
+# flight" (the mistake this constant replaces: the poll originally matched only
+# ``completed`` and would never have seen a real ``done``).
+_FLEET_FINISHED_STATUSES = ("done", "completed")
 # Circuit breaker on the poll's outbound calls. The sweep is SEQUENTIAL and each admin
 # call can block for admin_client.DEFAULT_TIMEOUT_S (150s), so with admin down three
 # in-flight runs already outlast the 5-minute cron interval and sweeps start stacking.
@@ -795,7 +802,7 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 			detail="polled: the delegate reported a failure",
 		)
 
-	if status != "completed":
+	if status not in _FLEET_FINISHED_STATUSES:
 		# queued / running / anything unrecognised: still in flight as far as the host is
 		# concerned. Leave it alone — an unknown state is never a verdict.
 		return False

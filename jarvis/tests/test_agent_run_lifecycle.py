@@ -388,11 +388,10 @@ class TestPollDispatchedRuns(RunLifecycleTestCase):
 	def _fleet_failed(self, message: str) -> dict:
 		return self._relayed({"status": "failed", "error": {"code": "run_failed", "message": message}})
 
-	def _fleet_completed(self, *, finished_ago_s: float) -> dict:
-		# The fleet stamps finished_at as a UNIX epoch float.
-		return self._relayed(
-			{"status": "completed", "finished_at": time.time() - finished_ago_s, "error": None}
-		)
+	def _fleet_completed(self, *, finished_ago_s: float, status: str = "done") -> dict:
+		# The fleet stamps finished_at as a UNIX epoch float, and its word for a clean
+		# exit is ``done`` (fleet-agent main.py, _dispatch_agent_run) - NOT ``completed``.
+		return self._relayed({"status": status, "finished_at": time.time() - finished_ago_s, "error": None})
 
 	# ------------------------------------------------------------------ #
 	def test_a_fleet_failure_is_surfaced_with_its_real_message(self):
@@ -454,6 +453,20 @@ class TestPollDispatchedRuns(RunLifecycleTestCase):
 		row = frappe.db.get_value(RUN, run, ["status", "error"], as_dict=True)
 		self.assertEqual(row.status, "failed")
 		self.assertIn("no record of this run", row.error)
+
+	def test_the_relay_word_completed_is_read_like_the_fleet_word_done(self):
+		"""``done`` is what the fleet writes; ``completed`` must mean the same thing so a
+		normalising relay can never turn a clean exit back into "still in flight"."""
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S)
+		self._poll(
+			{
+				run: self._fleet_completed(
+					finished_ago_s=agent_scheduler.WRITEBACK_GRACE_SECONDS + 60, status="completed"
+				)
+			}
+		)
+		self.assertEqual(self._status(run), "failed")
 
 	def test_a_just_finished_run_is_given_its_writeback_grace(self):
 		"""Anchored on the HOST's finish time, not the run's age: this run is hours old
