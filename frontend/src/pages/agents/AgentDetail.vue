@@ -377,108 +377,114 @@
 			<!-- ── Admin (SM only; server enforces every call). Listing status is
 			     publisher/catalog state curated in registry.json (it reverts on the
 			     next deploy) - deliberately NOT editable here. ── -->
-			<div
-				v-else-if="tab === 'admin' && isSM"
-				class="max-w-2xl shrink-0 space-y-10 px-5 py-6"
-			>
-				<AgentAccessEditor
-					:slug="props.slug"
-					:roles="agent.allowed_roles || []"
-					:users="agent.allowed_users || []"
-					:all-roles="agent.all_roles || []"
-					@saved="onAccessSaved"
-				/>
+			<div v-else-if="tab === 'admin' && isSM" class="shrink-0 px-5 py-6">
+				<!-- Access and Installs are read together - you grant, then look at who
+				     actually has it - and the page had them stacked in a 2xl column that
+				     left most of the width empty. Side by side on lg+, stacked below,
+				     with the gap doing the separating that space-y-10 used to. -->
+				<div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-start">
+					<AgentAccessEditor
+						:slug="props.slug"
+						:roles="agent.allowed_roles || []"
+						:users="agent.allowed_users || []"
+						:all-roles="agent.all_roles || []"
+						@saved="onAccessSaved"
+					/>
 
-				<section>
-					<div class="text-base font-medium text-ink-gray-9">
-						Installs ({{ installRows.length }})
-					</div>
-					<div v-if="adminLoading && !adminData" class="mt-3 text-sm text-ink-gray-5">
-						Loading installs…
-					</div>
-					<div v-else-if="!installRows.length" class="mt-3 text-sm text-ink-gray-5">
-						No installs yet.
-					</div>
-					<ListView
-						v-else
-						class="mt-3"
-						:columns="INSTALL_COLUMNS"
-						:rows="installRows"
-						row-key="installation"
-						:options="{
-							selectable: false,
-							rowHeight: 40,
-							resizeColumn: false,
-							showTooltip: true,
-						}"
-					>
-						<template #default>
-							<ListHeader>
-								<ListHeaderItem
-									v-for="column in INSTALL_COLUMNS"
-									:key="column.key"
-									:item="column"
-								/>
-							</ListHeader>
-							<ListRows />
-						</template>
-						<template #cell="{ column, row, item, align }">
-							<template v-if="column.key === 'state'">
-								<!-- State precedence, most-actionable first: Blocked > Disabled >
-								     Live > Shadow. `installable` is a last-reconciled STORED flag
-								     (see get_agent_admin_overview), so Blocked reads "as last
-								     reconciled" rather than claiming a live guarantee. -->
-								<Tooltip v-if="!row.installable" :text="blockedReason(row)">
-									<Badge variant="subtle" theme="orange" label="Blocked" />
-								</Tooltip>
-								<Badge
-									v-else-if="!row.enabled"
-									variant="subtle"
-									theme="gray"
-									label="Disabled"
-								/>
-								<Badge
-									v-else-if="row.activation_state === 'live'"
-									variant="subtle"
-									theme="green"
-									label="Live"
-								/>
-								<ShadowChip v-else label="Shadow" />
+					<section class="min-w-0">
+						<div class="text-base font-medium text-ink-gray-9">
+							Installs ({{ installRows.length }})
+						</div>
+						<div
+							v-if="adminLoading && !adminData"
+							class="mt-3 text-sm text-ink-gray-5"
+						>
+							Loading installs…
+						</div>
+						<div v-else-if="!installRows.length" class="mt-3 text-sm text-ink-gray-5">
+							No installs yet.
+						</div>
+						<ListView
+							v-else
+							class="mt-3"
+							:columns="INSTALL_COLUMNS"
+							:rows="installRows"
+							row-key="installation"
+							:options="{
+								selectable: false,
+								rowHeight: 40,
+								resizeColumn: false,
+								showTooltip: true,
+							}"
+						>
+							<template #default>
+								<ListHeader>
+									<ListHeaderItem
+										v-for="column in INSTALL_COLUMNS"
+										:key="column.key"
+										:item="column"
+									/>
+								</ListHeader>
+								<ListRows />
 							</template>
-							<div
-								v-else-if="column.key === 'run_as_user'"
-								class="truncate text-base"
-							>
-								<span v-if="row.run_as_user">{{ row.run_as_user }}</span>
-								<Badge
+							<template #cell="{ column, row, item, align }">
+								<template v-if="column.key === 'state'">
+									<!-- State precedence, most-actionable first: Blocked > Disabled >
+									     Live > Shadow. `installable` is a last-reconciled STORED flag
+									     (see get_agent_admin_overview), so Blocked reads "as last
+									     reconciled" rather than claiming a live guarantee. -->
+									<Tooltip v-if="!row.installable" :text="blockedReason(row)">
+										<Badge variant="subtle" theme="orange" label="Blocked" />
+									</Tooltip>
+									<Badge
+										v-else-if="!row.enabled"
+										variant="subtle"
+										theme="gray"
+										label="Disabled"
+									/>
+									<Badge
+										v-else-if="row.activation_state === 'live'"
+										variant="subtle"
+										theme="green"
+										label="Live"
+									/>
+									<ShadowChip v-else label="Shadow" />
+								</template>
+								<div
+									v-else-if="column.key === 'run_as_user'"
+									class="truncate text-base"
+								>
+									<span v-if="row.run_as_user">{{ row.run_as_user }}</span>
+									<Badge
+										v-else
+										variant="subtle"
+										theme="orange"
+										label="No run-as user"
+									/>
+								</div>
+								<div
+									v-else-if="column.key === 'last_run_at'"
+									class="truncate text-base"
+								>
+									{{ row.last_run_at ? timeAgo(row.last_run_at) : "-" }}
+								</div>
+								<div
+									v-else-if="column.key === 'sync_status'"
+									class="truncate text-base"
+								>
+									{{ row.sync_status || "-" }}
+								</div>
+								<ListRowItem
 									v-else
-									variant="subtle"
-									theme="orange"
-									label="No run-as user"
+									:column="column"
+									:row="row"
+									:item="item"
+									:align="align"
 								/>
-							</div>
-							<div
-								v-else-if="column.key === 'last_run_at'"
-								class="truncate text-base"
-							>
-								{{ row.last_run_at ? timeAgo(row.last_run_at) : "-" }}
-							</div>
-							<div
-								v-else-if="column.key === 'sync_status'"
-								class="truncate text-base"
-							>
-								{{ row.sync_status || "-" }}
-							</div>
-							<ListRowItem
-								v-else
-								:column="column"
-								:row="row"
-								:item="item"
-								:align="align"
-							/>
-						</template>
-					</ListView>
-				</section>
+							</template>
+						</ListView>
+					</section>
+				</div>
 			</div>
 		</div>
 

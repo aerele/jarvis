@@ -80,7 +80,11 @@
 			</div>
 			<span v-if="!userDraft.length" class="text-sm text-ink-gray-4">No people</span>
 		</div>
-		<div class="mt-2 w-72">
+		<!-- focusin (which bubbles, unlike focus) and a click both prime the menu, so
+		     opening the picker shows people straight away instead of an empty box that
+		     only fills once you guess a letter. Handled on a wrapper rather than by
+		     giving JvCombo a new event, so the shared component is untouched. -->
+		<div class="mt-2 w-72" @focusin="primeUserMenu" @click="primeUserMenu">
 			<JvCombo
 				:modelValue="userQuery"
 				:options="userOptions"
@@ -90,20 +94,14 @@
 			/>
 		</div>
 
-		<!-- apply + save -->
-		<label class="mt-5 flex max-w-md items-start gap-2 text-sm text-ink-gray-7">
-			<input
-				type="checkbox"
-				data-test="apply-now"
-				class="mt-0.5"
-				:checked="applyNow"
-				@change="applyNow = $event.target.checked"
-			/>
-			<span>
-				Apply to workspace now (restarts your workspace for about 30 seconds; active chats
-				are interrupted)
-			</span>
-		</label>
+		<!-- Saving always applies, so the cost is stated as a fact rather than
+		     offered as a choice: an access change that is saved but not loaded is a
+		     half-done action, and the roster and the database silently disagreeing
+		     is the #457 class of bug this feature keeps having to design around. -->
+		<p data-test="apply-note" class="mt-5 max-w-md text-sm text-ink-gray-5">
+			Saving loads this agent on your workspace. If the set of loaded agents changes, the
+			workspace restarts for about 30 seconds and active chats are interrupted.
+		</p>
 
 		<div class="mt-4 flex items-center gap-2">
 			<Button
@@ -158,10 +156,6 @@ const savedUsers = ref([...props.users]);
 const roleDraft = ref([...props.roles]);
 const userDraft = ref([...props.users]);
 const saving = ref(false);
-// Defaults ON: an access change the admin cannot see take effect is the thing
-// they came here to do, and leaving it unapplied is how a roster and a DB
-// silently disagree until some unrelated mutation pushes.
-const applyNow = ref(true);
 
 // A props refresh always updates the BASELINE - that is the server's current
 // truth - but only reseeds the drafts when there is nothing to lose. The parent
@@ -215,6 +209,18 @@ let searchTimer = null;
 // Typing "an" then "ann" and having "an" land second would repopulate the menu
 // with results for a prefix the admin has already moved past.
 let searchSeq = 0;
+// Whether the menu has been filled for the CURRENT query. Reset whenever the
+// results are cleared, so reopening after a pick fetches again.
+const userMenuPrimed = ref(false);
+
+function primeUserMenu() {
+	if (userMenuPrimed.value) return;
+	userMenuPrimed.value = true;
+	// The current query, which is usually empty - search_users answers an empty
+	// term with the first 20 enabled users, which is exactly the "who is there?"
+	// an admin opening the picker is asking.
+	runSearch(userQuery.value);
+}
 
 const userOptions = computed(() => {
 	const taken = new Set(userDraft.value);
@@ -246,9 +252,11 @@ function onUserPick(v) {
 		if (!userDraft.value.includes(value)) userDraft.value = [...userDraft.value, value];
 		userQuery.value = "";
 		userResults.value = [];
+		userMenuPrimed.value = false; // reopening should offer people again
 		return;
 	}
 	userQuery.value = value;
+	userMenuPrimed.value = true; // typing owns the menu from here
 	clearTimeout(searchTimer);
 	searchTimer = setTimeout(() => runSearch(value), 200);
 }
@@ -301,13 +309,14 @@ async function pollUntilTerminal() {
 async function save() {
 	if (saving.value || !dirty.value) return;
 	saving.value = true;
-	const wantApply = applyNow.value;
 	try {
+		// Always applies. The endpoint keeps its `apply` parameter defaulting to
+		// false for API compatibility, so this passes it explicitly.
 		const res = await apiAgents.setAgentAccess(
 			props.slug,
 			roleDraft.value,
 			userDraft.value,
-			wantApply
+			true
 		);
 		const nextRoles = (res && res.allowed_roles) || [];
 		const nextUsers = (res && res.allowed_users) || [];
@@ -321,7 +330,9 @@ async function save() {
 			stopPoll();
 			pollUntilTerminal();
 		} else {
-			toast.success("Access saved. Apply catalog changes to make it runnable.");
+			// Defensive: with apply always requested the server should report
+			// applied. If it ever declines, say so rather than implying it is live.
+			toast.success("Access saved, but not loaded yet. Use Apply catalog changes.");
 		}
 	} catch (e) {
 		toast.error(errHtml(e));
@@ -335,5 +346,5 @@ function reset() {
 	userDraft.value = [...savedUsers.value];
 }
 
-defineExpose({ dirty, roleDraft, userDraft, applyNow, pending, onUserPick, userOptions });
+defineExpose({ dirty, roleDraft, userDraft, pending, onUserPick, userOptions, primeUserMenu });
 </script>
