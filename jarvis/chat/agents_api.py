@@ -1644,6 +1644,10 @@ _RUN_LIST_FIELDS = [
 	# findings count; empty/0 for auditor/operator runs.
 	"pages_written",
 	"pages_json",
+	# PP-4 shadow/preview pill + attestation banner (AgentRunsBoard.vue) and the
+	# "Open dashboard" action (FindingsPanel.vue) both key off these.
+	"preparation_mode",
+	"dashboard",
 ]
 
 

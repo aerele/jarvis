@@ -217,6 +217,22 @@ class TestStoppedStatusIsTerminal(RunLifecycleTestCase):
 			frappe.set_user("Administrator")
 		self.assertIn(run, [r["name"] for r in rows])
 
+	def test_run_list_row_carries_preparation_mode_and_dashboard(self):
+		"""AgentRunsBoard's Preview pill/attestation banner and FindingsPanel's "Open
+		dashboard" button both key off these two fields on the row the list endpoint
+		returns: a row missing either key can never render them."""
+		inst = self._install()
+		run = self._run(inst, preparation_mode="shadow")
+		frappe.set_user(self.owner)
+		try:
+			rows = agents_api.list_runs_page()["rows"]
+		finally:
+			frappe.set_user("Administrator")
+		row = next(r for r in rows if r["name"] == run)
+		self.assertIn("preparation_mode", row)
+		self.assertIn("dashboard", row)
+		self.assertEqual(row["preparation_mode"], "shadow")
+
 	def test_stopped_run_is_not_live(self):
 		"""#672's liveness guard is keyed on ``status='running'``, so a stopped run must
 		not keep the installation's Run-now button (and the cron sweep) locked out."""
