@@ -2021,7 +2021,8 @@
 								v-if="
 									!showActivityDetail ||
 									(waiting && !currentTool) ||
-									(!currentTool && statusPhase)
+									(!currentTool && statusPhase) ||
+									(!currentTool && !doneCount)
 								"
 								role="status"
 								aria-live="polite"
@@ -4177,6 +4178,7 @@ import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import { parseAsk } from "@/lib/chatAsk";
+import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import {
@@ -5116,13 +5118,22 @@ function onVisibilityChange() {
 	if (document.hidden) flushReveal();
 }
 const activeTools = ref([]); // [{ id, name, status }] for the in-flight run
+// Live COUNT + current-tool name exclude the agent's built-ins so the tally matches the
+// settled accordion (no 3→2 jump); raw activeTools still drives the "is working" gating.
+const visibleActiveTools = computed(() =>
+	activeTools.value.filter((t) => isCustomerFacingTool(t.name))
+);
 // Live activity shows ONE tool at a time: the most-recently-started tool that's
 // still running, plus a compact count of the ones already finished this turn.
 const currentTool = computed(
-	() => [...activeTools.value].reverse().find((t) => t.status === "running") || null
+	() => [...visibleActiveTools.value].reverse().find((t) => t.status === "running") || null
 );
-const doneCount = computed(() => activeTools.value.filter((t) => t.status !== "running").length);
-const failedCount = computed(() => activeTools.value.filter((t) => t.status === "error").length);
+const doneCount = computed(
+	() => visibleActiveTools.value.filter((t) => t.status !== "running").length
+);
+const failedCount = computed(
+	() => visibleActiveTools.value.filter((t) => t.status === "error").length
+);
 // ── Live status line ────────────────────────────────────────────────────────
 // Real progress instead of a blanket "Thinking…": phase transitions come from
 // the run's realtime events (run:start → tool:start/end → assistant:delta).
@@ -5569,8 +5580,8 @@ const activityByAssistant = computed(() => {
 			cur = m.name;
 			if (!map[cur]) map[cur] = [];
 		}
-		// action_outcome rows are receipt chips shown inline, not accordion tool calls.
-		else if (m.role === "tool" && cur && !m.action_outcome)
+		// action_outcome rows show inline as chips; no-I/O agent built-ins expand to nothing — skip both.
+		else if (m.role === "tool" && cur && !m.action_outcome && !shouldHideActivityTool(m))
 			(map[cur] || (map[cur] = [])).push(m);
 	}
 	return map;
