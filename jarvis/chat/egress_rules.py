@@ -29,10 +29,10 @@ _MEMO_ATTR = "jarvis_egress_rules_memo"
 
 
 def persist(patterns) -> None:
-	"""Mirror the CP-sent redaction patterns onto Jarvis Settings.
+	"""Mirror the backend-sent redaction patterns onto Jarvis Settings.
 
-	LAST-KNOWN-GOOD: ``patterns is None`` (the CP omitted the key — a degraded/
-	pending/suspended connection payload, or a control plane predating this
+	LAST-KNOWN-GOOD: ``patterns is None`` (the backend omitted the key — a degraded/
+	pending/suspended connection payload, or a backend predating this
 	feature) is treated as "no update", NOT as "clear" — a transient degraded poll
 	must never wipe a working backstop. Only an explicit list (including ``[]``, the
 	deliberate kill-switch) is written.

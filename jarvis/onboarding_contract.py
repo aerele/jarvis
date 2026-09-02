@@ -389,7 +389,7 @@ def augment_pay_page(data: dict) -> dict:
 	    from it; empty fails closed.
 	  * ``pay_origin_attested`` — True iff ``pay_origin`` is set AND its sha256
 	    digest equals admin's non-navigable ``pay_origin_digest`` (§R P0-3). The
-	    frontend refuses to navigate unless this is True, so a config split-brain
+	    frontend refuses to navigate unless this is True, so a config state mismatch
 	    (bench pointed at one origin, admin minted a token for another) fails
 	    closed instead of sending the customer to the wrong host.
 

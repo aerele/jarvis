@@ -1,7 +1,7 @@
 """Bench-side media proxy (Plan 3 B4).
 
-download streams a Helpdesk file from the control plane back to the browser (same-origin, so the
-SPA can point <img>/<a> at it). upload reads the posted file, base64s it, and forwards to the CP
+download streams a Helpdesk file from the backend back to the browser (same-origin, so the
+SPA can point <img>/<a> at it). upload reads the posted file, base64s it, and forwards to the backend
 (which decodes, caps, allowlist-checks, and attaches it to the ticket). Role-gated like api.py.
 """
 
@@ -44,7 +44,7 @@ def download(ticket: str, file_url: str):
 @frappe.whitelist()
 def upload(ticket: str, comm: str | None = None) -> dict:
 	# comm (optional): the reply Communication this upload belongs to. Frappe maps the multipart form
-	# field onto it, same as `ticket`. Forwarded to the CP, which attaches the File to that Communication
+	# field onto it, same as `ticket`. Forwarded to the backend, which attaches the File to that Communication
 	# (so it renders inline) after re-checking the comm belongs to the ticket.
 	scope = _scope()
 	f = frappe.request.files.get("file") if frappe.request else None
