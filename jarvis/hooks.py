@@ -288,7 +288,7 @@ scheduler_events = {
 			# no-op when there is nothing new to push.
 			"jarvis.error_push.push_error_rollup",
 			# GAP 1 dead-man's-switch (Track B): UNCONDITIONAL bench-liveness heartbeat to
-			# the control plane every tick — its silence is how the CP detects a dead
+			# the backend every tick — its silence is how the backend detects a dead
 			# scheduler (a live scheduler that fails to POST = the tenant went dark).
 			# Self-gating (skips un-onboarded), never raises. Cheap: two indexed reads.
 			"jarvis.chat.heartbeat.push_bench_heartbeat",

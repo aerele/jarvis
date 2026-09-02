@@ -96,7 +96,7 @@
 
 			<div class="min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-4">
 				<div
-					v-if="loading && !rows.length"
+					v-if="(loading || probingCatalog) && !rows.length"
 					class="py-10 text-center text-sm text-ink-gray-5"
 				>
 					Loading the catalog…
@@ -274,6 +274,7 @@ import { useListPage } from "@/composables/useListPage";
 import * as api from "@/api";
 import * as agentsApi from "@/api/agents";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
+import { agentsEmptyState, shouldProbeWholeCatalog } from "@/lib/agentsEmptyState";
 import { errHtml } from "@/lib/errors";
 
 const route = useRoute();
@@ -374,37 +375,6 @@ const categoryOptions = computed(() => {
 	];
 });
 
-// ── empty states (per-TAB copy - "catalog is empty" only when it truly is) ───
-const filtersActive = computed(() => !!(search.value || category.value));
-const emptyState = computed(() => {
-	if (filtersActive.value) {
-		return {
-			title: "No agents match",
-			description: "Try clearing the search or category filter.",
-			cta: false,
-		};
-	}
-	if (tab.value === "featured") {
-		return {
-			title: "No featured agents yet",
-			description: "Browse the Available tab for the full catalog.",
-			cta: true,
-		};
-	}
-	if (tab.value === "installed") {
-		return {
-			title: "You haven't installed any agents yet",
-			description: "Browse the catalog and install one to get started.",
-			cta: true,
-		};
-	}
-	return {
-		title: "No agents available",
-		description: "The catalog is empty right now.",
-		cta: false,
-	};
-});
-
 // ── display helpers ──────────────────────────────────────────────────────────
 function openAgent(a) {
 	router.push("/agents/" + a.agent_slug);
@@ -436,18 +406,80 @@ function installsLabel(n) {
 // gets review=false and no button. Decoupled from the SM-only cross-owner
 // getAgentAdminOverview data. ─────────────────────────────────────────────────
 const canApply = ref(false);
+// The tenant-admin half of the same probe: it decides only which EMPTY-STATE copy
+// is truthful (see emptyState), never what the list contains - that filtering is
+// server-side in _enriched_catalog.
+const canAdminister = ref(false);
 async function probeCaps() {
 	try {
 		const caps = (await agentsApi.getAgentsCaps()) || {};
 		canApply.value = !!caps.review;
+		canAdminister.value = !!caps.admin;
 		if (canApply.value) {
 			await loadSyncStatus();
 			if (sync.pending) startSyncPoll();
 		}
 	} catch (e) {
 		canApply.value = false;
+		canAdminister.value = false;
 	}
 }
+
+// ── empty states ─────────────────────────────────────────────────────────────
+// The decision itself is a pure function in @/lib/agentsEmptyState (tested
+// there). Here we only supply what it needs, including the lazily-probed
+// "does this caller have ANY agents at all" signal below.
+const filtersActive = computed(() => !!(search.value || category.value));
+const emptyState = computed(() =>
+	agentsEmptyState({
+		tab: tab.value,
+		filtersActive: filtersActive.value,
+		canAdminister: canAdminister.value,
+		wholeCatalogEmpty: wholeCatalogEmpty.value,
+	})
+);
+
+// ── "is this caller's whole catalog empty?" (jarvis#1062) ────────────────────
+// null until probed. ONE call answers it for every tab: server-side the
+// available tab is `status != Deprecated or installed`, so it is a superset of
+// both featured (Published only) and installed - a zero total there means the
+// caller can see no agent anywhere, which is the only thing we need to know.
+const wholeCatalogEmpty = ref(null);
+const probingCatalog = ref(false);
+
+async function probeWholeCatalog() {
+	probingCatalog.value = true;
+	try {
+		const res = (await agentsApi.listAgentsPage({ tab: "available", page_length: 1 })) || {};
+		wholeCatalogEmpty.value = (res.total || 0) === 0;
+	} catch {
+		// Fail to the per-tab copy rather than asserting an access problem we
+		// could not confirm.
+		wholeCatalogEmpty.value = false;
+	} finally {
+		probingCatalog.value = false;
+	}
+}
+
+watch(
+	[tab, rows, loading, filtersActive, canAdminister],
+	() => {
+		if (
+			shouldProbeWholeCatalog({
+				tab: tab.value,
+				loading: loading.value,
+				rowCount: rows.value.length,
+				filtersActive: filtersActive.value,
+				canAdminister: canAdminister.value,
+				wholeCatalogEmpty: wholeCatalogEmpty.value,
+				probing: probingCatalog.value,
+			})
+		) {
+			probeWholeCatalog();
+		}
+	},
+	{ immediate: true, deep: false }
+);
 
 // ── apply pipeline status (SyncPill pattern: 3s poll while pending) ──────────
 // dirty = the enabled set changed since the last successful Apply - drives the

@@ -13,6 +13,7 @@ import unittest
 import frappe
 
 from jarvis.chat import agent_catalog, agent_scheduler, agents_api
+from jarvis.tests._agent_access import allow_listing_for, clear_listing_access
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -22,6 +23,16 @@ ALLOWED_ROLE = "Jarvis Agent Allowed Role"
 
 ROLE_X = "Jarvis Agent Test Role X"
 ROLE_Y = "Jarvis Agent Test Role Y"
+
+# Every catalog agent this module installs, runs or pushes. Granted to the whole
+# cast in setUp because access is deny-by-default (jarvis#1062); allow_listing_for
+# no-ops on a slug this site's registry does not carry.
+_MODULE_SLUGS = (
+	"close-auditor",
+	"bank-recon-operator",
+	"ledger-scrutiny-auditor",
+	"custom-app-learning",
+)
 
 
 def _ensure_role(role_name: str) -> str:
@@ -134,8 +145,15 @@ class TestAgentsMarketplace(unittest.TestCase):
 			for owner in (self.owner, self.other, self.admin):
 				for n in frappe.get_all(dt, filters={"owner": owner}, pluck="name"):
 					frappe.delete_doc(dt, n, force=True, ignore_permissions=True)
-		# Clear any role restriction left by a previous test (bench-admin state).
-		frappe.db.delete(ALLOWED_ROLE, {"parenttype": LISTING, "parentfield": "allowed_roles"})
+		# jarvis#1062: access is DENY BY DEFAULT, so clearing the allow rows is no
+		# longer a way to make the catalog reachable - it is how you CLOSE it. Reset
+		# to a known state, then grant this module's cast by name so the tests whose
+		# subject is NOT access control (install, run, schedule, push) reach the code
+		# they mean to exercise. The RBAC tests below narrow it again via _restrict.
+		clear_listing_access()
+		for slug in _MODULE_SLUGS:
+			for u in (self.owner, self.other, self.admin):
+				allow_listing_for(slug, user=u)
 		frappe.db.commit()
 
 	def tearDown(self):
@@ -534,10 +552,15 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# (e) RBAC — role-gated install / run (server-side enforcement)
 	# ------------------------------------------------------------------ #
 	def _restrict(self, slug: str, roles: list) -> None:
+		"""Set the listing's access to exactly ``roles`` and NO named users.
+
+		Both halves, because setUp grants this module's cast by name: leaving those
+		rows in place would make every "restricted to ROLE_X" assertion below pass
+		for a reason that has nothing to do with the role."""
 		original = frappe.session.user
 		frappe.set_user("Administrator")
 		try:
-			agents_api.set_agent_roles(slug, roles)
+			agents_api.set_agent_access(slug, roles=roles, users=[])
 		finally:
 			frappe.set_user(original)
 
@@ -606,7 +629,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 		# computed the same way, `allowed_roles` still present.
 		res = None
 		frappe.set_user("Administrator")
-		res = agents_api.set_agent_roles("close-auditor", [ROLE_X])
+		# set_agent_ACCESS, not the set_agent_roles shim: the shim preserves
+		# allowed_users by design, and setUp grants this module's cast by name -
+		# so the shim would leave self.other named and the "blocked" assertion
+		# below would pass on a listing that in fact still admits them.
+		res = agents_api.set_agent_access("close-auditor", roles=[ROLE_X], users=[])
 		self.assertEqual(res["allowed_roles"], [ROLE_X])
 
 		def _row(user):
@@ -635,14 +662,28 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(sm["allowed"], 1)
 		self.assertEqual(sm["allowed_roles"], [ROLE_X])
 
-		# [] clears the restriction -> unrestricted for everyone; the row reappears
-		# for the previously-blocked user (still no allowed_roles key — non-admin).
-		res = agents_api.set_agent_roles("close-auditor", [])
+		# jarvis#1062: clearing the roles no longer means "unrestricted". With no
+		# roles and no users the listing is CLOSED, so the blocked user stays hidden
+		# - this is the inversion, asserted directly.
+		res = agents_api.set_agent_access("close-auditor", roles=[], users=[])
 		self.assertEqual(res["allowed_roles"], [])
-		reappeared = _row(self.other)
-		self.assertIsNotNone(reappeared)
-		self.assertEqual(reappeared["allowed"], 1)
-		self.assertNotIn("allowed_roles", reappeared)
+		self.assertEqual(res["allowed_users"], [])
+		self.assertIsNone(
+			_row(self.other),
+			"clearing every grant CLOSES the listing; it must not reopen it to everyone",
+		)
+		# An admin still sees it (admin parity), and still sees the empty roster.
+		closed_for_admin = _row(self.admin)
+		self.assertIsNotNone(closed_for_admin)
+		self.assertEqual(closed_for_admin["allowed"], 1)
+		self.assertEqual(closed_for_admin["allowed_roles"], [])
+
+		# Naming the user directly is the OTHER way in - no role involved.
+		agents_api.set_agent_access("close-auditor", roles=[], users=[self.other])
+		by_name = _row(self.other)
+		self.assertIsNotNone(by_name, "a user named in allowed_users must see the row")
+		self.assertEqual(by_name["allowed"], 1)
+		self.assertNotIn("allowed_users", by_name)  # roster is admin-only
 
 	def test_draft_listing_hidden_from_non_admin_unless_installed(self):
 		# jarvis#1062 D2: Draft is a registry-only lifecycle state (never
@@ -721,8 +762,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 		# jarvis#1062 D2 (revised): role gating governs DISCOVERY and RUNNING,
 		# not managing what you already installed — otherwise a role revoked
 		# after install stranded the owner with no UI path to uninstall it.
-		# self.other installs while UNRESTRICTED, then the listing is
-		# restricted to a role self.other does not hold.
+		# self.other installs while ALLOWED (setUp grants this module's cast by
+		# name), then the listing is narrowed to a role self.other does not hold.
 		inst_name = _install_as(self.other, "close-auditor")
 		self._restrict("close-auditor", [ROLE_X])
 		try:
@@ -767,7 +808,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 				frappe.set_user("Administrator")
 			self.assertEqual(out["agent_slug"], "close-auditor")
 		finally:
-			self._restrict("close-auditor", [])
+			# Re-grant rather than merely clearing: under deny-by-default an empty
+			# pair is itself a refusal, and the Draft assertion below would then pass
+			# for the wrong reason - on the status gate it is not testing.
+			self._restrict("close-auditor", ["Jarvis User"])
 
 		# Draft + never installed by this caller -> also a PermissionError.
 		frappe.db.set_value(LISTING, "close-auditor", "status", "Draft")
@@ -839,6 +883,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 
 		row = next(l for l in out["listings"] if l["agent_slug"] == "close-auditor")
 		self.assertEqual(row["allowed_roles"], [ROLE_X])
+		# jarvis#1062: the overview feeds the admin Access editor, so it must carry
+		# BOTH halves of the grant. The named grants come from setUp; the shim above
+		# preserves them, which is the behaviour a cached older SPA build depends on.
+		self.assertIn("allowed_users", row)
+		self.assertIn(self.owner, row["allowed_users"])
 		self.assertEqual(row["status"], "Published")
 		install_row = next(i for i in row["installs"] if i["installation"] == inst)
 		self.assertEqual(install_row["owner"], self.owner)
@@ -993,7 +1042,11 @@ class TestAgentsMarketplace(unittest.TestCase):
 		payload = agent_catalog.build_agent_push_payload(owner=self.owner)
 		self.assertEqual(payload, [])
 
-		self._restrict("close-auditor", [])  # clear -> included again
+		# Clearing every grant CLOSES the listing, yet the enabled install is still
+		# pushed: that is the deliberate grandfather leg (legacy_empty_allows in
+		# build_agent_push_payload), so an upgrade cannot drop a working customer's
+		# agent from the container roster mid-flight.
+		self._restrict("close-auditor", [])
 		payload = agent_catalog.build_agent_push_payload(owner=self.owner)
 		self.assertTrue(any(p["slug"] == "agent-close-auditor" for p in payload))
 

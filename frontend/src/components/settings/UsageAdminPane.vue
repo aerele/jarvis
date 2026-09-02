@@ -118,7 +118,7 @@
 					</div>
 
 					<div class="text-xs text-ink-gray-5">
-						{{ u.last_usage_at ? timeAgo(u.last_usage_at) : "—" }}
+						{{ u.last_usage_at ? timeAgo(u.last_usage_at) : "-" }}
 					</div>
 				</div>
 

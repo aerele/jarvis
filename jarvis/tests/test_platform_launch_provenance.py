@@ -31,6 +31,7 @@ import frappe
 
 from jarvis._session import authenticated_user, impersonate
 from jarvis.chat import agent_catalog, agent_scheduler, agents_api
+from jarvis.tests._agent_access import allow_listing_for
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -97,6 +98,11 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
 		self._cleanup()
+		# jarvis#1062: _cleanup() drops every allow row site-wide, so the grant has
+		# to be re-applied per test rather than once in setUpClass. Granted to the
+		# Jarvis User ROLE, which covers both the owner and the run-as identity -
+		# the two the install and dispatch gates litigate.
+		allow_listing_for(AGENT, roles=["Jarvis User"])
 		# Stub the fleet dispatch so _launch_audit completes without a live fleet.
 		import jarvis.admin_client as admin_client
 

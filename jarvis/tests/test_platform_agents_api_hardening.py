@@ -28,6 +28,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_scheduler, agents_api
+from jarvis.tests._agent_access import allow_listing_for
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -36,6 +37,10 @@ ACTIVITY = "Jarvis Agent Activity"
 FINDING = "Jarvis Agent Finding"
 PROVENANCE = "Jarvis Agent Provenance Event"
 SETTINGS = "Jarvis Settings"
+
+# The reviewing role promote/demote demands (JARVIS_REVIEWER_ROLES). Created by
+# DocType sync - one DocType names it - so it exists on a fresh CI site.
+_REVIEWER_ROLE = "Jarvis Skill Reviewer"
 
 PREFIX = "hardening-h-"
 
@@ -76,6 +81,12 @@ def _mk_listing(slug: str) -> str:
 	else:
 		# A listing left by an earlier run may predate the rule_pack field.
 		frappe.db.set_value(LISTING, slug, "rule_pack", f"pack-{slug}", update_modified=False)
+	# jarvis#1062: a listing is CLOSED until somebody is allowed, and every fixture
+	# user in this module is a plain Jarvis User. Granted to the ROLE, not by name,
+	# so _restrict() below - which REPLACES allowed_roles - still takes the grant
+	# away when a test means to lock the agent down. Granting by name would leave a
+	# residue that made those gate assertions pass for the wrong reason.
+	allow_listing_for(slug, roles=["Jarvis User"])
 	return slug
 
 
@@ -271,6 +282,12 @@ class TestPerCustomerCeiling(FrappeTestCase):
 		cls.rev_b = _mk_user("h-rev-b@example.com")
 		cls.cust_c = _mk_user("h-cust-c@example.com")
 		cls.rev_c = _mk_user("h-rev-c@example.com")
+		# jarvis#1062: promoting is the reviewer set's act, not the named reviewer's
+		# own. Unconditional (outside _mk_user's exists-guard) - on a shared site the
+		# user may already exist without the role.
+		for r in (cls.rev_a, cls.rev_b, cls.rev_c):
+			frappe.get_doc("User", r).add_roles(_REVIEWER_ROLE)
+			frappe.clear_cache(user=r)
 		for s in cls.ALL:
 			_mk_listing(s)
 		frappe.db.commit()
@@ -335,6 +352,11 @@ class TestPromotionLockSerialization(FrappeTestCase):
 		frappe.set_user("Administrator")
 		cls.owner = _mk_user("h-lock-owner@example.com")
 		cls.reviewer = _mk_user("h-lock-rev@example.com")
+		# jarvis#1062: see TestPerCustomerCeiling - promote authority is the reviewer
+		# set now, so the lock tests need their actor to hold it or they never reach
+		# the lock they are about.
+		frappe.get_doc("User", cls.reviewer).add_roles(_REVIEWER_ROLE)
+		frappe.clear_cache(user=cls.reviewer)
 		_mk_listing(cls.SLUG)
 		frappe.db.commit()
 
@@ -925,8 +947,14 @@ def _set_roles(email: str, role: str, *, held: bool) -> None:
 
 
 def _restrict(slug: str, roles: list[str]) -> None:
+	"""Narrow the listing to exactly ``roles``, and to no named user.
+
+	Both halves (jarvis#1062): leaving allowed_users populated would mean a test
+	that restricts an agent to a role nobody holds still admits everyone named
+	there, and the gate it is asserting would never fire."""
 	doc = frappe.get_doc(LISTING, slug)
 	doc.set("allowed_roles", [{"role": r} for r in roles])
+	doc.set("allowed_users", [])
 	doc.flags.ignore_permissions = True
 	doc.save()
 

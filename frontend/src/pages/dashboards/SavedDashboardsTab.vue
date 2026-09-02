@@ -45,19 +45,7 @@
 		</template>
 
 		<template #cell-scope="{ row }">
-			<Badge
-				v-if="row.scope === 'Role'"
-				variant="subtle"
-				theme="blue"
-				:label="row.target_role || 'Role'"
-			/>
-			<Badge
-				v-else-if="row.scope === 'Org'"
-				variant="subtle"
-				theme="blue"
-				label="Everyone"
-			/>
-			<Badge v-else variant="subtle" theme="gray" label="Private" />
+			<Badge variant="subtle" :theme="visBadge(row).theme" :label="visBadge(row).label" />
 		</template>
 
 		<template #cell-modified="{ row }">
@@ -80,6 +68,7 @@ import ListPage from "@/components/list/ListPage.vue";
 import { useListPage } from "@/composables/useListPage";
 import { dashboardsListFetch } from "@/pages/list/listFetchers";
 import { timeAgo, exactDate } from "@/utils/datetime";
+import { session } from "@/data/session";
 
 // /dashboards is a TABBED route (Builder | Saved): the `fv2` payload carries its
 // view key, and every tab navigation carries the query (judgment C08-7).
@@ -106,6 +95,27 @@ const columns = [
 	{ label: "Owner", key: "owner", width: "10rem" },
 	{ label: "Updated", key: "modified", width: "8rem" },
 ];
+
+// Visibility badge themes match the shared scope convention used across the app
+// (WikiTab / WikiPageDialog / PersonalisationSettings): Org=gray, Role=blue,
+// User=green - replacing this tab's older Org+Role both-blue.
+const SCOPE_THEME = { Org: "gray", Role: "blue", User: "green" };
+// The audience behind the scope, resolved for the current VIEWER. "Just you" is
+// viewer-dependent: it holds only when this row's target_user IS the viewer - an
+// admin looking at someone else's personal dashboard must not read "just you".
+// Empty targets degrade to a sensible label rather than the raw scope word.
+function visBadge(row) {
+	const theme = SCOPE_THEME[row.scope] || "gray";
+	if (row.scope === "Org") return { theme, label: "Everyone" };
+	if (row.scope === "Role") return { theme, label: row.target_role || "Shared with a role" };
+	if (row.scope === "User") {
+		if (row.target_user && row.target_user === session.user)
+			return { theme, label: "Just you" };
+		if (row.target_user) return { theme, label: row.target_user };
+		return { theme, label: "Private" };
+	}
+	return { theme, label: "Private" };
+}
 
 // search rides the quick-filter strip (MacrosList idiom): it lives in the
 // filters object for a controlled input, and fetchFn moves it onto the

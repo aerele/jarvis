@@ -23,6 +23,7 @@ from jarvis.chat import agent_catalog, agents_api, custom_skills_api, macros_api
 from jarvis.chat.approvals_api import get_approval
 from jarvis.chat.custom_skills_api import delete_custom_skills_bulk, list_custom_skills_page
 from jarvis.chat.macros_api import delete_macros_bulk, list_macro_runs, list_macros_page
+from jarvis.tests._agent_access import allow_listing_for
 
 USER_A = "v3-user-a@example.com"
 USER_B = "v3-user-b@example.com"
@@ -404,6 +405,12 @@ class TestGetAgent(unittest.TestCase):
 			for u in (USER_A, USER_B):
 				frappe.get_doc("User", u).add_roles("Accounts User")
 				frappe.clear_cache(user=u)
+		# jarvis#1062: access is deny-by-default, and both fixtures are plain Jarvis
+		# Users. Load-bearing for USER_B, who never installs and so has no
+		# installed-row carve-out to fall back on - get_agent would 403 before the
+		# payload assertions below could run.
+		allow_listing_for(cls.slug, user=USER_A)
+		allow_listing_for(cls.slug, user=USER_B)
 
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -450,8 +457,13 @@ class TestGetAgent(unittest.TestCase):
 			res = agents_api.get_agent(self.slug)
 		self.assertIsNone(res["installation"])
 		self.assertNotIn("all_roles", res)
+		# A non-admin learns whether THEY are allowed...
 		self.assertIn("allowed", res)
-		self.assertNotIn("allowed_roles", res)  # #1062 polish: admin-only now
+		self.assertEqual(res["allowed"], 1)
+		# ...and never WHO ELSE is: jarvis#1062 moved the roster into the admin-only
+		# half of the payload, next to all_roles.
+		self.assertNotIn("allowed_roles", res)
+		self.assertNotIn("allowed_users", res)
 
 	def test_sm_gets_all_roles(self):
 		res = agents_api.get_agent(self.slug)  # Administrator

@@ -173,7 +173,7 @@
 								class="size-4 shrink-0 text-ink-amber-3"
 							/>
 							<span class="text-sm font-medium text-ink-gray-8">
-								Server scripts are disabled on this bench — deterministic actions
+								Server scripts are disabled on this bench. Deterministic actions
 								can't be saved. LLM actions still work.
 							</span>
 						</div>

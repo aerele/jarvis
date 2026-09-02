@@ -647,7 +647,7 @@ def capture_onboarding_lead(
 		return {"ok": False}
 
 
-# The Terms of Service moved from the admin plane to the public marketing site
+# The Terms of Service moved from the backend to the public marketing site
 # (jarvis_frappe_cloud); linking it directly skips admin's compatibility 301.
 MARKETING_TERMS_URL = "https://jarvis.aerele.in/terms"
 # Aerele's own stock admin origin. Deliberately a literal, NOT imported from
@@ -1001,8 +1001,8 @@ def support_upload(
 	scope: str,
 	comm: str | None = None,
 ) -> dict:
-	# Bytes ride b64-in-JSON (the CP media.upload decodes) -> plain _post, no binary helper.
-	# comm (optional): the reply Communication to attach the File to so it renders inline; the CP
+	# Bytes ride b64-in-JSON (the backend's media.upload decodes) -> plain _post, no binary helper.
+	# comm (optional): the reply Communication to attach the File to so it renders inline; the backend
 	# re-checks it belongs to the ticket before honoring it.
 	return _post(
 		path=_m("support.media.upload"),
@@ -1019,7 +1019,7 @@ def support_upload(
 
 
 def support_download(*, ticket: str, file_url: str, requesting_user: str, scope: str):
-	"""Raw streamed fetch of a Helpdesk file via the CP proxy. Returns
+	"""Raw streamed fetch of a Helpdesk file via the backend proxy. Returns
 	(content_bytes, content_type, content_disposition)."""
 	resp = _authenticated_raw(
 		_m("support.media.download"),
@@ -1603,7 +1603,7 @@ def unpair_chat_devices() -> dict:
 # --------------------------------------------------------------------------- #
 def reset_workspace(reason: str = "") -> dict:
 	"""Self-serve container rebuild (keeps customer + subscription + site data).
-	Container-recreate class op — destroy + warm-pool claim happen inline."""
+	Container-recreate class op — destroy + spare-capacity claim happen inline."""
 	return _post(path=_m("api.tenant_request.reset_workspace"), body={"reason": reason}, timeout_s=180)
 
 

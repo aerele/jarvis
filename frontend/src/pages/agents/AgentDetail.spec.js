@@ -268,17 +268,28 @@ describe("install-failure reason stays visible until the next attempt", () => {
 	});
 });
 
-describe("Allowed roles panel renders only when the payload carries the key (jarvis#1062 D2/#1062 polish)", () => {
-	it("hides the panel for a non-admin payload (no allowed_roles key)", async () => {
+describe("Overview Access panel: roster for admins only, never for a non-admin (governance + #1062 polish)", () => {
+	it("shows only the caller's own allowed/not-allowed state for a non-admin payload (no all_roles)", async () => {
 		const fixture = baseAgent();
 		delete fixture.allowed_roles;
+		delete fixture.allowed_users;
 		const w = await mountDetail(fixture);
-		expect(w.text()).not.toContain("Allowed roles");
+		expect(w.text()).toContain("Access");
+		expect(w.text()).toContain("You have access");
+		// never the roster, even if a stray allowed_roles key somehow rode along -
+		// isSM (all_roles presence), not key-presence, gates the roster now.
+		expect(w.text()).not.toContain("Accounts User");
 	});
 
-	it("shows the panel for an admin payload (allowed_roles present)", async () => {
-		const w = await mountDetail(baseAgent({ allowed_roles: ["Accounts User"] }));
-		expect(w.text()).toContain("Allowed roles");
+	it("shows the access roster for an admin payload (all_roles present)", async () => {
+		const w = await mountDetail(
+			baseAgent({
+				all_roles: ["Accounts User", "Jarvis Admin"],
+				allowed_roles: ["Accounts User"],
+				allowed_users: [],
+			})
+		);
+		expect(w.text()).toContain("Access");
 		expect(w.text()).toContain("Accounts User");
 	});
 });

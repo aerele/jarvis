@@ -23,6 +23,7 @@ import unittest
 import frappe
 
 from jarvis.chat import agent_catalog, agent_scheduler, agents_api
+from jarvis.tests._agent_access import allow_listing_for, clear_listing_access
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -153,12 +154,15 @@ class TestAgentIdentity(unittest.TestCase):
 		self._cleanup()
 
 	def _cleanup(self):
-		# A prior test may have left an agent role restriction — clear it so our
-		# users (plain Jarvis Users) can install the unrestricted catalog agent.
-		frappe.db.delete(
-			"Jarvis Agent Allowed Role",
-			{"parenttype": LISTING, "parentfield": "allowed_roles"},
-		)
+		# jarvis#1062 inverted the default: wiping the allow rows no longer leaves the
+		# listing "unrestricted", it CLOSES it. So this resets to a known state and
+		# then re-grants, rather than relying on emptiness to mean access. Granted to
+		# the users by NAME because this module's cast deliberately holds a mix of
+		# roles (plain, Jarvis Admin, System Manager, no-Jarvis-role) and a role grant
+		# would quietly change which of them the identity tests are exercising.
+		clear_listing_access()
+		for u in self.users:
+			allow_listing_for(AGENT, user=u)
 		for dt in (FINDING, RUN, INSTALLATION):
 			for u in self.users:
 				for n in frappe.get_all(dt, filters={"owner": u}, pluck="name"):
@@ -183,6 +187,8 @@ class TestAgentIdentity(unittest.TestCase):
 
 		# Legacy row whose owner is now disabled -> must be skipped, not crash.
 		disabled = _ensure_user("aid-disabled@example.com")
+		# Not in cls.users, so _cleanup's blanket grant does not cover it.
+		allow_listing_for(AGENT, user=disabled)
 		if frappe.db.exists("Role", "Accounts User"):
 			frappe.get_doc("User", disabled).add_roles("Accounts User")  # A12 GL read
 			frappe.clear_cache(user=disabled)
