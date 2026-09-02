@@ -174,31 +174,29 @@ describe("one save carries both lists", () => {
 	});
 });
 
-describe("apply checkbox", () => {
-	it("defaults ON and asks the server to apply", async () => {
+describe("saving always applies", () => {
+	it("offers no opt-out and always asks the server to apply", async () => {
+		// The checkbox is gone on purpose: access that is saved but not loaded is a
+		// half-done action, and the roster silently disagreeing with the database is
+		// the bug class this feature keeps designing around.
 		api.getAgentsSyncStatus.mockResolvedValue({ pending: false, last_sync_status: "ok" });
 		const w = editor();
-		expect(w.find('[data-test="apply-now"]').element.checked).toBe(true);
+		expect(w.find('[data-test="apply-now"]').exists()).toBe(false);
+
 		w.vm.roleDraft = [];
 		await flushPromises();
 		await saveBtn(w).trigger("click");
 		await flushPromises();
+
 		expect(agentsApi.setAgentAccess.mock.calls[0][3]).toBe(true);
 	});
 
-	it("unchecked: no apply, and the toast says the change is not live yet", async () => {
+	it("states the restart cost as a fact rather than a choice", async () => {
 		const w = editor();
-		await w.find('[data-test="apply-now"]').setValue(false);
-		w.vm.roleDraft = [];
-		await flushPromises();
-		await saveBtn(w).trigger("click");
-		await flushPromises();
-
-		expect(agentsApi.setAgentAccess.mock.calls[0][3]).toBe(false);
-		expect(api.getAgentsSyncStatus).not.toHaveBeenCalled();
-		expect(toast.success).toHaveBeenCalledWith(
-			"Access saved. Apply catalog changes to make it runnable."
-		);
+		const note = w.find('[data-test="apply-note"]').text();
+		expect(note).toContain("Saving loads this agent on your workspace");
+		expect(note).toContain("restarts for about 30 seconds");
+		expect(note).toContain("active chats are interrupted");
 	});
 });
 
@@ -321,5 +319,46 @@ describe("out-of-order user searches", () => {
 		await flushPromises();
 
 		expect(w.vm.userOptions.map((o) => o.value)).toEqual(["newer@example.com"]);
+	});
+});
+
+describe("opening the people picker", () => {
+	it("fetches with the current (empty) query and renders the results", async () => {
+		// The picker used to sit empty until the admin guessed a letter; search_users
+		// answers an empty term with the first 20 enabled users, which is the "who is
+		// there?" that opening it is actually asking.
+		agentsApi.searchUsers.mockResolvedValue([
+			{ name: "bo@example.com", full_name: "Bo" },
+			{ name: "cy@example.com", full_name: "Cy" },
+		]);
+		const w = editor();
+		w.vm.primeUserMenu();
+		await flushPromises();
+
+		expect(agentsApi.searchUsers).toHaveBeenCalledWith("");
+		expect(w.vm.userOptions.map((o) => o.value)).toEqual(["bo@example.com", "cy@example.com"]);
+	});
+
+	it("does not refetch while the menu is already primed", async () => {
+		agentsApi.searchUsers.mockResolvedValue([{ name: "bo@example.com", full_name: "Bo" }]);
+		const w = editor();
+		w.vm.primeUserMenu();
+		w.vm.primeUserMenu();
+		await flushPromises();
+		expect(agentsApi.searchUsers).toHaveBeenCalledTimes(1);
+	});
+
+	it("primes again after a pick, so reopening still offers people", async () => {
+		agentsApi.searchUsers.mockResolvedValue([{ name: "bo@example.com", full_name: "Bo" }]);
+		const w = editor();
+		w.vm.primeUserMenu();
+		await flushPromises();
+
+		w.vm.onUserPick("bo@example.com"); // selects, and clears the menu
+		expect(w.vm.userDraft).toContain("bo@example.com");
+
+		w.vm.primeUserMenu();
+		await flushPromises();
+		expect(agentsApi.searchUsers).toHaveBeenCalledTimes(2);
 	});
 });
