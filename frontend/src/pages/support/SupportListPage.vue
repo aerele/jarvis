@@ -229,6 +229,28 @@ watch(
 	{ immediate: true }
 );
 
+// The other direction: keep the URL's ?status= matching a filter change the
+// user makes by hand (quick filter / filter popover), not only the one above.
+// Without this, the sequence that shipped the bug is: the header pill routes
+// here once (?status=awaiting), the user hand-picks a DIFFERENT status (the
+// URL is now stale), they leave for chat, then click the pill again - that
+// pushes the exact same {status:"awaiting"} location, which is NOT a value
+// change from vue-router's point of view, so the watch above never fires and
+// the stale hand-picked filter is left showing. Syncing the URL on every
+// hand-picked change keeps a later pill click a real query change again.
+// router.replace (not push): this is bookkeeping, not a navigation the user
+// should be able to Back through.
+watch(
+	() => filters.status,
+	(status) => {
+		if ((route.query.status || "") === (status || "")) return; // already in sync
+		const nextQuery = { ...route.query };
+		if (status) nextQuery.status = status;
+		else delete nextQuery.status;
+		router.replace({ query: nextQuery });
+	}
+);
+
 function onPageLength(v) {
 	pageLength.value = v;
 	shown.value = v;

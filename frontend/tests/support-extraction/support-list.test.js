@@ -15,8 +15,22 @@ vi.mock("frappe-ui", () => ({
 // component instance on a same-route navigation" case) - a plain object
 // mutation is invisible to Vue's reactivity system.
 const routeDouble = reactive({ query: {} });
+// A shared, stable double (not a fresh {push: vi.fn()} per useRouter() call):
+// the round-trip URL sync test below needs to both inspect replace() calls
+// AND have replace() actually apply the new query onto routeDouble, the same
+// way real vue-router would - otherwise there is no way to drive the
+// "push the identical location a second time" regression scenario at all.
+const routerDouble = {
+	push: vi.fn(),
+	replace: vi.fn((loc) => {
+		if (loc && loc.query) {
+			for (const k of Object.keys(routeDouble.query)) delete routeDouble.query[k];
+			Object.assign(routeDouble.query, loc.query);
+		}
+	}),
+};
 vi.mock("vue-router", () => ({
-	useRouter: () => ({ push: vi.fn() }),
+	useRouter: () => routerDouble,
 	useRoute: () => routeDouble,
 }));
 
@@ -267,6 +281,10 @@ describe("mobile column drop does not empty the grid (fix 4)", () => {
 // list must open pre-filtered rather than making them re-pick the filter they just
 // clicked for.
 describe("deep-link seed from ?status= (header pill preselect)", () => {
+	beforeEach(() => {
+		routerDouble.push.mockClear();
+		routerDouble.replace.mockClear();
+	});
 	afterEach(() => {
 		routeDouble.query = {};
 	});
@@ -332,5 +350,63 @@ describe("deep-link seed from ?status= (header pill preselect)", () => {
 				.props("rows")
 				.map((r) => r.name)
 		).toEqual(["T-4"]); // still the hand-picked "closed" filter, untouched
+	});
+
+	it("keeps the URL's ?status= in sync with a hand-picked filter, so a LATER identical pill click is a real query change again", async () => {
+		// The exact sequence a hard review caught: header pill -> ?status=awaiting
+		// (filter applied) -> user hand-picks a different quick filter (the URL
+		// still says awaiting) -> user leaves for chat and clicks the pill again,
+		// which pushes the SAME {status:"awaiting"} location. Without the URL
+		// staying in sync with the hand pick, that second push is not a value
+		// change to vue-router, the route.query watch never fires, and the STALE
+		// hand-picked filter is left showing instead of "Awaiting you".
+		routeDouble.query = { status: "awaiting" };
+		const w = mountList();
+		expect(
+			w
+				.findComponent(ListPageStub)
+				.props("rows")
+				.map((r) => r.name)
+		).toEqual(["T-2", "T-3"]);
+
+		// The user hand-picks "Closed" - this must sync the URL too.
+		await applyFilters(w, { status: "closed" });
+		await w.vm.$nextTick();
+		expect(routeDouble.query.status).toBe("closed");
+
+		// The user leaves for chat, then clicks the header pill again - same
+		// simulated push as ChatView's goToAwaitingTickets(), landing on the
+		// SAME nominal location the first mount started on.
+		routerDouble.push({ name: "Support", query: { status: "awaiting" } });
+		// Simulate the router actually applying that push (our double's push()
+		// itself is a bare spy - real vue-router would update route.query here).
+		routeDouble.query = { status: "awaiting" };
+		await w.vm.$nextTick();
+
+		expect(
+			w
+				.findComponent(ListPageStub)
+				.props("rows")
+				.map((r) => r.name)
+		).toEqual(["T-2", "T-3"]); // back to "Awaiting you", not stuck on "Closed"
+	});
+
+	it("clears ?status= from the URL when the user picks All by hand", async () => {
+		routeDouble.query = { status: "awaiting" };
+		const w = mountList();
+		await applyFilters(w, {}); // ListPage's own "All" clear (no status key)
+		await w.vm.$nextTick();
+
+		expect(routeDouble.query.status).toBeUndefined();
+	});
+
+	it("does not call router.replace when the filter change already matches the URL (no-op guard)", async () => {
+		routeDouble.query = { status: "awaiting" };
+		const w = mountList();
+		await w.vm.$nextTick();
+
+		// The seed watch itself set filters.status to match route.query.status -
+		// that must not ALSO trigger a redundant replace() back onto the URL.
+		expect(routerDouble.replace).not.toHaveBeenCalled();
 	});
 });

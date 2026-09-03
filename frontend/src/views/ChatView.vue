@@ -4765,12 +4765,16 @@ const supportMenuOptions = computed(() => [
 // it fresh belongs to UserMenu.vue (always mounted alongside chat), so no
 // second poller starts here. But that poller is on a timer, not a mount
 // hook, so the pill's FIRST paint here could be showing a stale/empty count
-// for up to 60s, and worse, could be simply wrong if UserMenu happens not to
-// be mounted (collapsed/off-canvas sidebar on phone). One extra one-shot
-// refresh on this view's own mount closes that gap without adding a second
-// timer. .catch() for the same reason as SupportThreadPage's calls: an
-// un-awaited rejection here would otherwise be unhandled (the real store
-// already catches its own errors, so this is belt-and-braces).
+// for up to 60s. It could also simply be wrong on any load where UserMenu
+// isn't mounted at all (collapsed/off-canvas sidebar on phone), not only
+// that one case. One extra one-shot refresh on this view's own mount closes
+// that gap without adding a second timer. It DOES fire on every normal load
+// alongside UserMenu's own immediate call - refreshAwaiting() in
+// stores/support.js de-dupes concurrent callers into one request, so this
+// never becomes two round trips for the same number. .catch() for the same
+// reason as SupportThreadPage's calls: an un-awaited rejection here would
+// otherwise be unhandled (the real store already catches its own errors, so
+// this is belt-and-braces).
 onMounted(() => {
 	if (supportOn) supportStore.refreshAwaiting().catch(() => {});
 });
