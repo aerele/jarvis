@@ -17,6 +17,13 @@ Keys we set:
   "llm_credentials"``) without a second round trip, so the banner can
   send the second case to the AI models settings pane instead of
   restarting the wizard.
+- ``jarvis_has_been_ready`` - whether this workspace has EVER been
+  confirmed chat-ready (``jarvis.account.has_been_chat_ready``). Some
+  reasons alone are ambiguous: ``llm_pool_provisioning`` /
+  ``llm_provisioning`` fire both for a brand-new tenant whose first sync
+  is still pending AND for an established workspace whose apply-confirmed
+  marker was cleared (e.g. disconnecting all models). This flag is the
+  disambiguator the desk banner needs to pick the right CTA for the two.
 - ``jarvis_has_access`` - whether the current user may reach Jarvis at
   all (``jarvis.permissions.has_jarvis_access``). Lets the desk's
   floating Jarvis button send an unauthorized user to
@@ -50,6 +57,19 @@ def set_jarvis_boot(bootinfo):
 	except Exception:
 		bootinfo.jarvis_onboarded = True  # fail-safe: never nag on a boot error
 		bootinfo.jarvis_ready_reason = ""
+
+	# has_been_chat_ready() is its own fail-safe (returns False on error) and
+	# reads the same lightweight raw-settings fields is_ready_for_chat's own
+	# gates already read - a single extra SQL select, never a second admin
+	# round trip - so this is a plain call, not folded into the try/except
+	# above: a failure in is_ready_for_chat() must not also blank this flag,
+	# and a failure here must not affect jarvis_onboarded/jarvis_ready_reason.
+	try:
+		from jarvis.account import has_been_chat_ready
+
+		bootinfo.jarvis_has_been_ready = bool(has_been_chat_ready())
+	except Exception:
+		bootinfo.jarvis_has_been_ready = False  # fail-safe: never claim established on a boot error
 
 	# Drives the desk's floating Jarvis button: an unauthorized user is routed
 	# to /jarvis-no-access instead of the chat panel opening. Import kept

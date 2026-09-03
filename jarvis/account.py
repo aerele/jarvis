@@ -307,6 +307,31 @@ def _has_been_chat_ready(raw: dict) -> bool:
 	return True
 
 
+def has_been_chat_ready() -> bool:
+	"""Public, fail-safe wrapper around ``_has_been_chat_ready`` for callers
+	outside this module that only need the established/never-established
+	fact - not a full readiness verdict.
+
+	jarvis.boot.set_jarvis_boot is the motivating caller: ``jarvis_ready_reason``
+	alone cannot tell a brand-new tenant whose first sync is still pending from
+	an established workspace whose apply-confirmed marker was cleared - both
+	produce the SAME ``llm_pool_provisioning`` / ``llm_provisioning`` reason
+	(``_provisioning_verdict``'s hard-reason exit fires on either). This is the
+	same lightweight, uncached ``tabSingles`` read (``_settings_raw`` over
+	``_GATE_STATE_FIELDS``) that ``is_ready_for_chat``'s own gates already do on
+	nearly every call - a single extra SQL select, never a second readiness
+	computation or an admin round trip.
+
+	Fails safe to ``False`` on any error, matching every other boot.py flag: a
+	boot-time failure here must degrade to "cannot prove this is established",
+	not silently claim it is.
+	"""
+	try:
+		return _has_been_chat_ready(_settings_raw(_GATE_STATE_FIELDS))
+	except Exception:
+		return False
+
+
 def _marker_is_fresh(current) -> bool:
 	"""Is the stored marker recent enough to leave alone? An unset or unreadable
 	stamp is NOT fresh - rewriting it is how a corrupted value heals."""
