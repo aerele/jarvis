@@ -2249,7 +2249,10 @@ def list_agent_activity_page(
 	``{rows, total, has_more, start, page_length}``). Activity rows are
 	Link-free Data snapshots, so the feed survives the uninstall cascade —
 	``agent`` filters on the slug snapshot, ``action`` on the lifecycle verb.
-	Search matches agent_title/detail (LIKE-escaped)."""
+	Search matches agent_title/detail (LIKE-escaped). Each row also carries a
+	live-joined ``run_status`` (the named run's CURRENT status, not the
+	action verb's point-in-time label; ``None`` when the row names no run or
+	that run no longer exists)."""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
 	filters: dict = {"owner": me}
@@ -2281,6 +2284,23 @@ def list_agent_activity_page(
 		limit_start=start,
 		limit_page_length=pl,
 	)
+	# jarvis#1062: the action verb ("Run started") is a point-in-time label
+	# stamped when the row was written; the row's CURRENT run status (a
+	# "Run started" row whose run later failed) is a live join, not baked
+	# into the snapshot - one batched query for the whole page, never per
+	# row. A row whose run has since been deleted (or that names no run at
+	# all - every non-run action) gets run_status: None, so the SPA renders
+	# no badge rather than a stale or invented one.
+	run_names = {r["run"] for r in rows if r.get("run")}
+	status_by_run = {}
+	if run_names:
+		status_by_run = {
+			d.name: d.status
+			for d in frappe.get_all(RUN, filters={"name": ["in", list(run_names)]}, fields=["name", "status"])
+		}
+	for r in rows:
+		r["run_status"] = status_by_run.get(r["run"]) if r.get("run") else None
+
 	return {
 		"rows": rows,
 		"total": total,

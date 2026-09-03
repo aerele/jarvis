@@ -187,12 +187,14 @@
 // reload({selectNewest: true}) through the exposed handle so the freshly
 // queued run is surfaced and selected even if a facet would hide it.
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { Badge, Button, FeatherIcon, FormControl, Tooltip } from "frappe-ui";
 import FindingsPanel from "@/pages/agents/FindingsPanel.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiAgents from "@/api/agents";
+import { STATUS_THEME } from "@/lib/agentRunStatus";
 
 const props = defineProps({
 	agentName: { type: String, required: true }, // listing docname (list_runs_page filter)
@@ -209,13 +211,8 @@ const props = defineProps({
 // is an orthogonal axis rendered separately as the "Preview" pill/banner above.
 // A shadow run must never read the same as a live one. preparation_mode is
 // supplied per row by list_runs_page (agents_api.py) — see cross-file note.
-const STATUS_THEME = {
-	running: "blue",
-	completed: "green",
-	partial: "orange",
-	failed: "red",
-	stopped: "gray",
-};
+// STATUS_THEME itself lives in @/lib/agentRunStatus so AgentActivityTab's run
+// rows use the identical colours.
 const STATUS_OPTIONS = [
 	{ label: "All statuses", value: "" },
 	{ label: "Running", value: "running" },
@@ -285,11 +282,24 @@ function stopPoll() {
 }
 
 // ── selection (local - runs live under the agent's hash tab, no :id route) ──
+const route = useRoute();
+const router = useRouter();
 const selectedRun = ref(null);
 const selectedId = computed(() => (selectedRun.value && selectedRun.value.name) || "");
 
 function selectRun(row) {
 	selectedRun.value = row;
+}
+
+// jarvis#1062: the Activity feed deep-links a run row here as ?run=<id>
+// (AgentActivityTab.vue). Applied at most once - only while nothing is
+// selected yet, i.e. the very first time rows loads - and cleared from the
+// URL immediately whether or not the id was found in this page, so a
+// refresh or a later facet change never re-triggers it and the query never
+// sits there unsatisfiable.
+function clearRunQuery() {
+	const { run: _run, ...rest } = route.query;
+	router.replace({ query: rest });
 }
 
 // auto-select the first row; on refresh, re-pin the selection to the fresh row
@@ -302,7 +312,10 @@ watch(rows, (r) => {
 		const again = r.find((x) => x.name === selectedRun.value.name);
 		selectedRun.value = again || r[0] || null;
 	} else if (r.length) {
-		selectRun(r[0]);
+		const queryRunId = route.query.run;
+		const wanted = queryRunId ? r.find((x) => x.name === queryRunId) : null;
+		selectRun(wanted || r[0]);
+		if (queryRunId) clearRunQuery();
 	}
 	// start/stop the poll from the SAME rows change that already drives
 	// selection - see the comment above startPoll/stopPoll.
