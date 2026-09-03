@@ -31,7 +31,7 @@ def get_doc(doctype: str, name: str | None = None, names: list | None = None) ->
 		raise InvalidArgumentError(f"unknown doctype: {doctype}")
 
 	if frappe.get_meta(doctype).issingle:
-		return _get_doc_one(doctype, doctype)
+		return _get_single(doctype)
 
 	if names is not None:
 		if not isinstance(names, list) or not names:
@@ -52,6 +52,20 @@ def _get_doc_one(doctype: str, name: str) -> dict:
 		raise PermissionDeniedError(f"no read permission on {doctype} {name}")
 
 	doc = frappe.get_doc(doctype, name)
+	doc.apply_fieldlevel_read_permissions()
+	return doc.as_dict(no_default_fields=False)
+
+
+def _get_single(doctype: str) -> dict:
+	"""Frappe's documented idiom for reading a Single - ``get_single``, not
+	``get_doc(doctype, doctype)`` - plus the same read-permission check and
+	output shaping ``_get_doc_one`` gives every other document. No existence
+	check: a Single always exists (frappe.db.exists special-cases it), and
+	singles carry their own DocPerms, so the permission check still matters."""
+	if not frappe.has_permission(doctype, ptype="read", doc=doctype):
+		raise PermissionDeniedError(f"no read permission on {doctype}")
+
+	doc = frappe.get_single(doctype)
 	doc.apply_fieldlevel_read_permissions()
 	return doc.as_dict(no_default_fields=False)
 
