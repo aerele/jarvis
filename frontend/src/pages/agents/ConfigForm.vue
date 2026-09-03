@@ -1,54 +1,76 @@
 <template>
 	<div>
-		<div v-if="!fields.length && !hasAdvanced" class="text-sm text-ink-gray-6">
-			<p>
-				Engagement settings this agent reads when it runs. Leave a setting empty to use the
-				default.
-			</p>
-			<dl class="mt-3 space-y-2.5">
-				<div
-					v-for="k in CONFIG_KEY_REFERENCE"
-					:key="k.key"
-					class="flex flex-col gap-0.5 sm:flex-row sm:gap-3"
-				>
-					<dt class="shrink-0 sm:w-44">
-						<code
-							class="rounded bg-surface-gray-2 px-1.5 py-0.5 font-mono text-xs text-ink-gray-7"
-						>
-							{{ k.key }}
-						</code>
-					</dt>
-					<dd class="text-ink-gray-5">{{ k.description }}</dd>
-				</div>
-			</dl>
-		</div>
+		<p class="text-sm text-ink-gray-6">
+			Settings this agent reads when it runs. Leave a field empty to use the default.
+		</p>
 
-		<div v-if="fields.length" class="space-y-4">
-			<template v-for="f in fields" :key="f.key">
-				<Switch
-					v-if="f.type === 'boolean'"
-					:label="labelFor(f.key)"
-					:modelValue="f.value"
-					@update:modelValue="(v) => (f.value = v)"
+		<div class="mt-4 space-y-5">
+			<template v-for="f in CONFIG_FIELD_SET" :key="f.key || f.keys.join('-')">
+				<!-- Company / Fiscal year: frappe-ui Autocomplete fed by
+				     frappe.desk.search.search_link - the same whitelisted, generic
+				     Link-picker call every other Link field in this app uses
+				     (FilterValueControl.vue, TriggerDetail.vue). There is no single
+				     reusable <LinkField> component to import; this is that same
+				     small pattern, applied twice. -->
+				<div v-if="f.type === 'link'">
+					<label class="mb-1.5 block text-xs text-ink-gray-5">{{ f.label }}</label>
+					<div @focusin="linkFields[f.key].prime()" @click="linkFields[f.key].prime()">
+						<Autocomplete
+							:options="linkFields[f.key].options.value"
+							:modelValue="linkValue(f.key)"
+							:placeholder="`Search ${f.linkDoctype}…`"
+							@update:query="(q) => linkFields[f.key].onQuery(q)"
+							@update:modelValue="(opt) => onLinkPick(f.key, opt)"
+						/>
+					</div>
+					<p class="mt-1.5 text-p-xs text-ink-gray-5">{{ f.help }}</p>
+				</div>
+
+				<div v-else-if="f.type === 'date-range'">
+					<div class="grid grid-cols-2 gap-4">
+						<FormControl
+							type="date"
+							:label="f.labels[0]"
+							:modelValue="form[f.keys[0]]"
+							@update:modelValue="(v) => (form[f.keys[0]] = v)"
+						/>
+						<FormControl
+							type="date"
+							:label="f.labels[1]"
+							:modelValue="form[f.keys[1]]"
+							@update:modelValue="(v) => (form[f.keys[1]] = v)"
+						/>
+					</div>
+					<p class="mt-1.5 text-p-xs text-ink-gray-5">{{ f.help }}</p>
+				</div>
+
+				<FormControl
+					v-else-if="f.type === 'select'"
+					type="select"
+					:label="f.label"
+					:options="f.options"
+					:description="f.help"
+					:modelValue="form[f.key]"
+					@update:modelValue="(v) => (form[f.key] = v)"
 				/>
+
 				<FormControl
 					v-else-if="f.type === 'number'"
 					type="number"
-					:label="labelFor(f.key)"
-					:modelValue="f.value"
-					@update:modelValue="(v) => (f.value = v)"
-				/>
-				<FormControl
-					v-else
-					type="text"
-					:label="labelFor(f.key)"
-					:modelValue="f.value"
-					@update:modelValue="(v) => (f.value = v)"
-				/>
+					:label="f.label"
+					:description="f.help"
+					:modelValue="form[f.key]"
+					@update:modelValue="(v) => (form[f.key] = v)"
+				>
+					<template v-if="f.suffix" #suffix>
+						<span class="text-ink-gray-5">{{ f.suffix }}</span>
+					</template>
+				</FormControl>
 			</template>
 		</div>
 
-		<!-- §14 F3: arrays/objects + unknown/new keys live in Advanced only -->
+		<!-- §14 F3: any key outside CONFIG_FIELD_SET (unknown, or an array/object
+		     value) lives here only. -->
 		<DocSection label="Advanced (JSON)" :opened="false" class="mt-4">
 			<FormControl
 				type="textarea"
@@ -71,36 +93,26 @@
 </template>
 
 <script setup>
-// ConfigForm - §14 F3: a real form generated from the installation's current
-// config object. boolean → Switch, number → FormControl type=number, string →
-// type=text; array/object values + unknown/new keys live in a collapsed
-// "Advanced (JSON)" DocSection (mono textarea, JSON.parse-validated). Save
-// merges the form values OVER the advanced JSON and emits the merged object;
-// the parent persists via setAgentConfig.
-import { ref, computed, watch } from "vue";
-import { Button, ErrorMessage, FormControl, Switch } from "frappe-ui";
+// ConfigForm - jarvis#1062 owner feedback: the known engagement settings
+// (CONFIG_FIELD_SET, @/lib/agentConfigFields) get real, purpose-built fields -
+// link pickers, dates, numbers, a select - ALWAYS rendered, not a code-key
+// reference list. Everything else (an unrecognised key, or any array/object
+// value) lives in the collapsed "Advanced (JSON)" editor (mono textarea,
+// JSON.parse-validated). Save merges the known fields OVER the advanced JSON
+// (form fields win on matching keys) and emits the merged object; the parent
+// persists via setAgentConfig. An empty field means the key is ABSENT from
+// the saved config, not saved as "" - that is what "leave it to use the
+// default" means server-side.
+import { reactive, ref, watch } from "vue";
+import { Autocomplete, Button, ErrorMessage, FormControl } from "frappe-ui";
 import DocSection from "@/components/doc/DocSection.vue";
-
-// jarvis#1062 polish: the empty state used to say "add keys under Advanced
-// (JSON)" with no hint of WHAT to add. This reference is the actual set the
-// run path reads today - verified against agent_scope.py's _resolve
-// (company/fiscal_year/from_date/to_date) and the set_config docstring in
-// agents_api.py (benchmark_value/percentage/engagement_risk_level/
-// rounding_step) - not a schema. A per-agent DECLARED config schema (so this
-// list is generated, not hand-maintained, and a listing can add its own
-// keys) is #1063; this stays a hand-maintained reference until then.
-const CONFIG_KEY_REFERENCE = [
-	{ key: "company", description: "Company to audit; default: your default company" },
-	{ key: "fiscal_year", description: "Fiscal year to cover; default: the current one" },
-	{ key: "from_date / to_date", description: "Explicit period; overrides fiscal_year" },
-	{
-		key: "benchmark_value / percentage",
-		description:
-			"Materiality: benchmark amount and percentage; auditors report checks as not evaluable when unset",
-	},
-	{ key: "engagement_risk_level", description: "low / medium / high" },
-	{ key: "rounding_step", description: "Round-number plug detection step" },
-];
+import { searchLink } from "@/api";
+import {
+	CONFIG_FIELD_SET,
+	KNOWN_CONFIG_KEYS,
+	CONFIG_FIELD_LABELS,
+	NUMBER_CONFIG_KEYS,
+} from "@/lib/agentConfigFields";
 
 const props = defineProps({
 	config: { type: Object, default: () => ({}) }, // parsed installation config
@@ -109,43 +121,85 @@ const props = defineProps({
 
 const emit = defineEmits(["save"]);
 
-const fields = ref([]); // [{key, type: 'boolean'|'number'|'string', value}]
+// One string per known key - every control (link/date/number/select) binds
+// here as plain text; numbers are validated/coerced only on save.
+const form = reactive({
+	company: "",
+	fiscal_year: "",
+	from_date: "",
+	to_date: "",
+	benchmark_value: "",
+	percentage: "",
+	engagement_risk_level: "",
+	rounding_step: "",
+});
 const advanced = ref("{}");
 const advancedError = ref("");
 
 function seed(cfg) {
-	const scalars = [];
-	const complex = {};
-	for (const [key, value] of Object.entries(cfg || {})) {
-		if (typeof value === "boolean") scalars.push({ key, type: "boolean", value });
-		else if (typeof value === "number")
-			scalars.push({ key, type: "number", value: String(value) });
-		else if (typeof value === "string" || value == null)
-			scalars.push({ key, type: "string", value: value == null ? "" : value });
-		else complex[key] = value; // arrays + objects → Advanced
+	const c = cfg || {};
+	for (const key of Object.keys(form)) {
+		const v = c[key];
+		form[key] = v == null ? "" : String(v);
 	}
-	fields.value = scalars;
-	advanced.value = JSON.stringify(complex, null, 2);
+	const rest = {};
+	for (const [key, value] of Object.entries(c)) {
+		if (!KNOWN_CONFIG_KEYS.has(key)) rest[key] = value;
+	}
+	advanced.value = JSON.stringify(rest, null, 2);
 	advancedError.value = "";
 }
 
 watch(() => props.config, seed, { immediate: true });
-
-const hasAdvanced = computed(() => {
-	const t = advanced.value.trim();
-	return t !== "" && t !== "{}";
-});
 
 function onAdvancedInput(v) {
 	advanced.value = v;
 	advancedError.value = "";
 }
 
-function labelFor(key) {
-	return String(key)
-		.split(/[_-]/)
-		.map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-		.join(" ");
+// ── Company / Fiscal year: debounced + fenced Link search, primed on open ───
+// (mirrors AgentAccessEditor.vue's people picker and FilterValueControl.vue's
+// generic Link control - 300ms debounce, a monotonic sequence so a slow early
+// response can never overwrite a newer one, and the first page loads on
+// focus/click so the menu is never empty before a keystroke.)
+function makeLinkField(doctype) {
+	const options = ref([]);
+	const primed = ref(false);
+	let timer = null;
+	let seq = 0;
+
+	async function runSearch(q) {
+		const mySeq = ++seq;
+		try {
+			const rows = (await searchLink(doctype, q || "")) || [];
+			if (mySeq === seq)
+				options.value = rows.map((r) => ({ label: r.value, value: r.value }));
+		} catch (e) {
+			if (mySeq === seq) options.value = [];
+		}
+	}
+	function prime() {
+		if (primed.value) return;
+		primed.value = true;
+		runSearch("");
+	}
+	function onQuery(q) {
+		primed.value = true;
+		clearTimeout(timer);
+		timer = setTimeout(() => runSearch(q), 300);
+	}
+	return { options, prime, onQuery };
+}
+
+const linkFields = {
+	company: makeLinkField("Company"),
+	fiscal_year: makeLinkField("Fiscal Year"),
+};
+function linkValue(key) {
+	return form[key] ? { label: form[key], value: form[key] } : null;
+}
+function onLinkPick(key, opt) {
+	form[key] = opt && opt.value ? String(opt.value) : "";
 }
 
 function save() {
@@ -164,25 +218,25 @@ function save() {
 			return;
 		}
 	}
-	// 2) form values merge over the JSON (§14 F3)
+	// 2) the known fields merge OVER the JSON; an empty field drops its key
+	// rather than saving "" (§14 F3 / round-2 parity, now covering every known
+	// field, not only numeric ones).
 	const merged = { ...base };
-	for (const f of fields.value) {
-		if (f.type === "boolean") {
-			merged[f.key] = !!f.value;
-		} else if (f.type === "number") {
-			const v = String(f.value ?? "").trim();
-			if (v === "") {
-				delete merged[f.key]; // cleared numeric → drop the key (round-2 parity)
-			} else {
-				const n = Number(v);
-				if (isNaN(n)) {
-					advancedError.value = `"${labelFor(f.key)}" must be a number.`;
-					return;
-				}
-				merged[f.key] = n;
+	for (const key of Object.keys(form)) {
+		const v = String(form[key] ?? "").trim();
+		if (v === "") {
+			delete merged[key];
+			continue;
+		}
+		if (NUMBER_CONFIG_KEYS.includes(key)) {
+			const n = Number(v);
+			if (isNaN(n)) {
+				advancedError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
+				return;
 			}
+			merged[key] = n;
 		} else {
-			merged[f.key] = f.value ?? "";
+			merged[key] = v;
 		}
 	}
 	advancedError.value = "";
