@@ -128,9 +128,6 @@ vi.mock("@/components/LayoutHeader.vue", () => ({
 vi.mock("@/components/list/TabBar.vue", () => ({
 	default: { name: "TabBar", props: ["tabs", "modelValue"], template: "<div />" },
 }));
-vi.mock("@/components/doc/CommentsSection.vue", () => ({
-	default: { name: "CommentsSection", template: "<div />" },
-}));
 vi.mock("@/pages/agents/AgentRunsBoard.vue", () => ({
 	default: { name: "AgentRunsBoard", template: "<div />" },
 }));
@@ -343,7 +340,7 @@ describe("Overview Access panel: roster for admins only, never for a non-admin (
 });
 
 describe("Configure tab: two-column layout on lg+ (jarvis#1062 polish, matches the Admin tab)", () => {
-	it("wraps Schedule/Comments and Configuration in the same grid-cols-1 lg:grid-cols-2 pattern as Admin", async () => {
+	it("wraps Schedule and Configuration in the same grid-cols-1 lg:grid-cols-2 pattern as Admin", async () => {
 		routeMock.hash = "#configure";
 		const w = await mountDetail(
 			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
@@ -354,6 +351,19 @@ describe("Configure tab: two-column layout on lg+ (jarvis#1062 polish, matches t
 		expect(grid.text()).toContain("Schedule");
 		expect(grid.text()).toContain("Configuration");
 	});
+});
+
+// jarvis#1062 owner decision: Comments moved off Configure onto the Run
+// itself (FindingsPanel.vue's new Notes section) - no CommentsSection
+// import remains here, so an accidental re-import would fail this mount
+// outright rather than silently resolving to a stub.
+it("no longer renders Comments on the Configure tab", async () => {
+	routeMock.hash = "#configure";
+	const w = await mountDetail(
+		baseAgent({ installation: installedInstallation({ enabled: 1 }) })
+	);
+	expect(w.findComponent({ name: "CommentsSection" }).exists()).toBe(false);
+	expect(w.text()).not.toContain("Comments");
 });
 
 // owner feedback: "Save schedule" is not always-visible chrome, and the old

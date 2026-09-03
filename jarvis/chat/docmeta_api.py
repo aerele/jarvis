@@ -47,9 +47,20 @@ ALLOWED_DOCTYPES = {
 	"Jarvis Macro",
 	"Jarvis Approval Request",
 	"Jarvis Agent Installation",
+	# jarvis#1062 owner decision: Notes moved OFF the Configure tab (the
+	# installation) onto the Run itself (FindingsPanel.vue) - comments/notes
+	# only, not assignable/shareable (below) - a run is not a work-item to
+	# hand off, just something to leave a note on. `doc.owner` already
+	# resolves correctly here with NO extra gating logic: agent_scheduler.py's
+	# _launch_audit reassigns a Run's `owner` to the INSTALLATION owner at
+	# launch (never Administrator, never the run-as user), for both a manual
+	# and a scheduled run - the exact "owner/admin only" the UI asked for is
+	# already what `_get_gated` below enforces for every allowed doctype.
+	"Jarvis Agent Run",
 }
 # §14 DA-09 / F1: skills keep their child-table share model (it feeds the sync
-# pipeline); ToDo assignment + DocShare sharing are NOT offered on them.
+# pipeline); ToDo assignment + DocShare sharing are NOT offered on them. Runs
+# are comment-only too (see ALLOWED_DOCTYPES above) - deliberately absent here.
 ASSIGNABLE_DOCTYPES = {"Jarvis Macro", "Jarvis Approval Request", "Jarvis Agent Installation"}
 SHAREABLE_DOCTYPES = {"Jarvis Macro", "Jarvis Approval Request", "Jarvis Agent Installation"}
 

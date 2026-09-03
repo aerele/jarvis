@@ -322,13 +322,13 @@
 					/>
 				</section>
 
-				<!-- Schedule + Comments read together on the left (you'd want to see
-				     what a reviewer said while touching the schedule); Configuration
-				     on the right - the same 2-col-on-lg+ pattern as the Admin tab, so
-				     the width it claims back from a stacked max-w-2xl column isn't
-				     left empty here either. -->
+				<!-- Schedule on the left, Configuration on the right - the same
+				     2-col-on-lg+ pattern as the Admin tab, so the width it claims back
+				     from a stacked max-w-2xl column isn't left empty here either.
+				     Comments moved OFF this tab onto the Run itself (owner decision,
+				     jarvis#1062) - a Note now belongs to what it is actually about. -->
 				<div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-start">
-					<div class="min-w-0 space-y-10">
+					<div class="min-w-0">
 						<section>
 							<div class="text-base font-medium text-ink-gray-9">Schedule</div>
 							<div class="mt-3 space-y-4">
@@ -373,10 +373,6 @@
 									@click="saveSchedule"
 								/>
 							</div>
-						</section>
-
-						<section class="border-t pt-6">
-							<CommentsSection :docmeta="docmeta" :can-comment="true" />
 						</section>
 					</div>
 
@@ -541,9 +537,10 @@
 // Marketplace template: de-texted hero (logo · name · one meta line ·
 // one-line tagline · category chips; install count + Enabled switch right) →
 // hash-synced tabs. Overview (markdown description + static facts panel) ·
-// Configure (schedule / ConfigForm / CommentsSection on the installation, D28)
-// · Runs (AgentRunsBoard: two-pane runs rail → findings pane) · Admin
-// (admin-only: the Access editor + installs overview; listing status is
+// Configure (schedule / ConfigForm on the installation, D28) · Runs
+// (AgentRunsBoard: two-pane runs rail → findings pane, which now also carries
+// Notes-on-the-run, jarvis#1062 - Comments moved off this tab entirely) ·
+// Admin (admin-only: the Access editor + installs overview; listing status is
 // registry.json publisher state and intentionally has no tenant control here).
 import { ref, computed, watch, nextTick } from "vue";
 import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
@@ -568,7 +565,6 @@ import {
 } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
-import CommentsSection from "@/components/doc/CommentsSection.vue";
 import AgentRunsBoard from "@/pages/agents/AgentRunsBoard.vue";
 import ActivationPanel from "@/pages/agents/ActivationPanel.vue";
 import AgentAccessEditor from "@/pages/agents/AgentAccessEditor.vue";
@@ -576,7 +572,6 @@ import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import ShadowChip from "@/components/ShadowChip.vue";
-import { useDocmeta } from "@/composables/useDocmeta";
 import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
 import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
@@ -1110,9 +1105,9 @@ async function saveConfig(merged) {
 	}
 }
 
-// ── Configure: comments on the installation (D28, B3 contract) ───────────────
-const instName = computed(() => (installation.value && installation.value.name) || null);
-const docmeta = useDocmeta("Jarvis Agent Installation", instName);
+// jarvis#1062: Comments moved off Configure onto the Run itself
+// (FindingsPanel.vue's new Notes section) - existing installation comments
+// are deliberately left in the DB, unmigrated, just no longer surfaced here.
 
 // ── Admin (SM) ────────────────────────────────────────────────────────────────
 const adminData = ref(null); // {roles, listings} from get_agent_admin_overview

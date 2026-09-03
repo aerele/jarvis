@@ -328,6 +328,21 @@
 				>
 			</div>
 		</template>
+
+		<!-- Notes on THIS run (owner decision, jarvis#1062: moved off the
+		     Configure tab, which was per-installation - a note belongs to what
+		     it is actually about). Every run status, running included; same
+		     CommentsSection/useDocmeta pair the Configure tab used, re-targeted
+		     at "Jarvis Agent Run" + this run's name instead of the
+		     installation. -->
+		<section class="mt-6 border-t pt-6">
+			<CommentsSection
+				:docmeta="runDocmeta"
+				:can-comment="true"
+				heading="Notes"
+				empty-text="No notes on this run yet."
+			/>
+		</section>
 	</div>
 </template>
 
@@ -345,6 +360,8 @@ import { useRouter } from "vue-router";
 import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import Banner from "@/components/Banner.vue";
+import CommentsSection from "@/components/doc/CommentsSection.vue";
+import { useDocmeta } from "@/composables/useDocmeta";
 import { timeAgo, exactDate, formatDate, toLocalMs, fmtElapsed } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
 import * as api from "@/api";
@@ -365,6 +382,19 @@ const props = defineProps({
 // stopped: the parent (AgentRunsBoard) owns the run list - refresh it after a
 // successful stop so the rail's status/badge picks up the terminal state.
 const emit = defineEmits(["stopped"]);
+
+// jarvis#1062: Notes-on-a-run - the SAME useDocmeta/CommentsSection pair the
+// Configure tab used for the installation, re-targeted at the run. A ref
+// (not a plain string) so switching the selected run (this panel is REUSED
+// across rail clicks, not remounted - see the findings watch below) reloads
+// the right run's comments; docmeta_api gates on doc.owner/System Manager,
+// which already resolves correctly for a run (its `owner` is reassigned to
+// the installation owner at launch, never Administrator - agent_scheduler.py
+// _launch_audit).
+const runDocmeta = useDocmeta(
+	"Jarvis Agent Run",
+	computed(() => props.run && props.run.name)
+);
 
 const router = useRouter();
 

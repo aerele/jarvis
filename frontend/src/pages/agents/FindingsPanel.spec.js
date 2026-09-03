@@ -28,6 +28,38 @@ const apiAgents = vi.hoisted(() => ({
 }));
 vi.mock("@/api/agents", () => apiAgents);
 
+// jarvis#1062: Notes-on-a-run reuses useDocmeta/CommentsSection, re-targeted
+// at "Jarvis Agent Run" - mock the network boundary (@/api/docmeta) and use
+// the REAL useDocmeta composable, so a test can assert the exact
+// (doctype, name) it calls through with; CommentsSection itself is stubbed
+// (DOMPurify/Avatar/Dropdown/an async TipTap composer are someone else's
+// coverage - AgentDetail.spec.js stubs it the same way) but the stub reads
+// real `docmeta.meta.comments` and calls the real `docmeta.addComment`.
+const apiDocmeta = vi.hoisted(() => ({
+	getDocmeta: vi.fn(),
+	addComment: vi.fn(),
+	updateComment: vi.fn(),
+	deleteComment: vi.fn(),
+}));
+vi.mock("@/api/docmeta", () => apiDocmeta);
+vi.mock("@/components/doc/CommentsSection.vue", () => ({
+	default: {
+		name: "CommentsSection",
+		props: ["docmeta", "canComment", "heading", "emptyText"],
+		template: `<div class="notes-section">
+			<div class="notes-heading">{{ heading }}</div>
+			<div
+				v-if="!(docmeta.meta && docmeta.meta.comments && docmeta.meta.comments.length)"
+				class="notes-empty"
+			>{{ emptyText }}</div>
+			<div v-for="c in (docmeta.meta && docmeta.meta.comments) || []" :key="c.name" class="note-row">
+				{{ c.content }}
+			</div>
+			<button data-testid="post-note" @click="docmeta.addComment('a note')">post</button>
+		</div>`,
+	},
+}));
+
 const router = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("vue-router", () => ({ useRouter: () => router }));
 
@@ -128,6 +160,16 @@ beforeEach(() => {
 		severity_counts: {},
 	});
 	apiAgents.listAgentActivityPage.mockResolvedValue({ rows: [], total: 0, has_more: false });
+	apiDocmeta.getDocmeta.mockResolvedValue({
+		comments: [],
+		assignees: [],
+		liked_by: [],
+		liked: false,
+		attachments: [],
+		shares: [],
+		created: { owner: "", full_name: "", creation: "" },
+		modified: { modified_by: "", full_name: "", modified: "" },
+	});
 });
 
 afterEach(() => {
@@ -387,5 +429,95 @@ describe("Discuss in chat honors ok/reason, not just conversation (jarvis#1062 p
 		const w = mountPanel(baseRun({ status: "completed" }));
 		await expandAndDiscuss(w);
 		expect(router.push).toHaveBeenCalledWith("/c/CONV-9");
+	});
+});
+
+// jarvis#1062 owner decision: Notes moved off the Configure tab onto the Run
+// itself - the SAME CommentsSection/useDocmeta pair, re-targeted at
+// "Jarvis Agent Run" + this run's name instead of the installation.
+describe("Notes on the run (jarvis#1062)", () => {
+	it("requests the docmeta bundle for THIS run - doctype and name, not the installation", async () => {
+		const w = mountPanel(baseRun({ name: "RUN-NOTES-1", status: "completed" }));
+		await flushPromises();
+		expect(apiDocmeta.getDocmeta).toHaveBeenCalledWith("Jarvis Agent Run", "RUN-NOTES-1");
+		expect(w.find(".notes-heading").text()).toBe("Notes");
+	});
+
+	it("renders the run's existing comments", async () => {
+		apiDocmeta.getDocmeta.mockResolvedValue({
+			comments: [
+				{
+					name: "COMM-1",
+					content: "looked into the flagged ledger entry",
+					owner: "reviewer@example.com",
+					owner_name: "Reviewer",
+					owner_image: "",
+					creation: "2026-09-01 11:00:00",
+					modified: "2026-09-01 11:00:00",
+				},
+			],
+			assignees: [],
+			liked_by: [],
+			liked: false,
+			attachments: [],
+			shares: [],
+			created: { owner: "", full_name: "", creation: "" },
+			modified: { modified_by: "", full_name: "", modified: "" },
+		});
+		const w = mountPanel(baseRun({ status: "completed" }));
+		await flushPromises();
+		expect(w.text()).toContain("looked into the flagged ledger entry");
+		expect(w.find(".notes-empty").exists()).toBe(false);
+	});
+
+	it("shows the empty copy when the run has no notes yet", async () => {
+		const w = mountPanel(baseRun({ status: "completed" }));
+		await flushPromises();
+		expect(w.find(".notes-empty").text()).toBe("No notes on this run yet.");
+	});
+
+	it("posting calls the API with the run's reference (Jarvis Agent Run + this run's name)", async () => {
+		apiDocmeta.addComment.mockResolvedValue({
+			name: "COMM-9",
+			content: "a note",
+			owner: "me@example.com",
+			owner_name: "Me",
+			owner_image: "",
+			creation: "2026-09-01 12:00:00",
+			modified: "2026-09-01 12:00:00",
+		});
+		const w = mountPanel(baseRun({ name: "RUN-NOTES-2", status: "completed" }));
+		await flushPromises();
+		await w.find('[data-testid="post-note"]').trigger("click");
+		await flushPromises();
+		expect(apiDocmeta.addComment).toHaveBeenCalledWith(
+			"Jarvis Agent Run",
+			"RUN-NOTES-2",
+			"a note"
+		);
+	});
+
+	it("renders for a running run too, not only terminal statuses", async () => {
+		const w = mountPanel(baseRun({ status: "running", finished_at: "" }));
+		await flushPromises();
+		expect(w.find(".notes-section").exists()).toBe(true);
+	});
+
+	it("renders below the findings list, for a scribe (Custom App Learning) run too", async () => {
+		const w = mountPanel(
+			baseRun({ status: "completed", nature: "Scribe", pages_written: 1, pages_json: "[]" })
+		);
+		await flushPromises();
+		expect(w.find(".notes-section").exists()).toBe(true);
+	});
+
+	it("switching the selected run reloads Notes for the newly selected run", async () => {
+		const w = mountPanel(baseRun({ name: "RUN-A", status: "completed" }));
+		await flushPromises();
+		expect(apiDocmeta.getDocmeta).toHaveBeenLastCalledWith("Jarvis Agent Run", "RUN-A");
+
+		await w.setProps({ run: baseRun({ name: "RUN-B", status: "completed" }) });
+		await flushPromises();
+		expect(apiDocmeta.getDocmeta).toHaveBeenLastCalledWith("Jarvis Agent Run", "RUN-B");
 	});
 });

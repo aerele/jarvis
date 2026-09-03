@@ -96,7 +96,6 @@ vi.mock("@/pages/agents/AgentAccessEditor.vue", () => ({
 vi.mock("@/markdown", () => ({ renderMarkdown: (s) => s || "" }));
 vi.mock("@/lib/errors", () => ({ errMessage: (e) => String(e), errHtml: (e) => String(e) }));
 vi.mock("@/utils/datetime", () => ({ timeAgo: () => "", exactDate: () => "" }));
-vi.mock("@/composables/useDocmeta", () => ({ useDocmeta: () => ({ meta: { value: null } }) }));
 
 import AgentDetail from "./AgentDetail.vue";
 
@@ -104,7 +103,6 @@ const SLUG = "close-auditor";
 const STUBS = {
 	LayoutHeader: true,
 	TabBar: true,
-	CommentsSection: true,
 	AgentRunsBoard: true,
 	ActivationPanel: true,
 	ConfigForm: true,
