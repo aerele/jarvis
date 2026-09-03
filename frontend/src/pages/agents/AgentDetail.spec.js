@@ -340,30 +340,62 @@ describe("Overview Access panel: roster for admins only, never for a non-admin (
 });
 
 describe("Configure tab: two-column layout on lg+ (jarvis#1062 polish, matches the Admin tab)", () => {
-	it("wraps Schedule and Configuration in the same grid-cols-1 lg:grid-cols-2 pattern as Admin", async () => {
+	it("wraps Configuration and Schedule in the same grid-cols-1 lg:grid-cols-2 pattern as Admin", async () => {
 		routeMock.hash = "#configure";
 		const w = await mountDetail(
 			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
 		);
 		const grid = w.find(".grid.grid-cols-1.gap-10.lg\\:grid-cols-2.lg\\:items-start");
 		expect(grid.exists()).toBe(true);
-		// Schedule (left) and Configuration (right) both land inside it.
 		expect(grid.text()).toContain("Schedule");
 		expect(grid.text()).toContain("Configuration");
 	});
-});
 
-// jarvis#1062 owner decision: Comments moved off Configure onto the Run
-// itself (FindingsPanel.vue's new Notes section) - no CommentsSection
-// import remains here, so an accidental re-import would fail this mount
-// outright rather than silently resolving to a stub.
-it("no longer renders Comments on the Configure tab", async () => {
-	routeMock.hash = "#configure";
-	const w = await mountDetail(
-		baseAgent({ installation: installedInstallation({ enabled: 1 }) })
-	);
-	expect(w.findComponent({ name: "CommentsSection" }).exists()).toBe(false);
-	expect(w.text()).not.toContain("Comments");
+	// owner feedback: Configuration is the primary/left column now that
+	// Comments moved off this tab - Schedule moved to the right. Asserted on
+	// DOM order, not just presence, so a re-swap regresses visibly.
+	it("Configuration is the LEFT/primary column, Schedule is the RIGHT column", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
+		);
+		const grid = w.find(".grid.grid-cols-1.gap-10.lg\\:grid-cols-2.lg\\:items-start");
+		const headings = grid
+			.findAll(".text-base.font-medium.text-ink-gray-9")
+			.map((h) => h.text());
+		expect(headings.indexOf("Configuration")).toBeGreaterThanOrEqual(0);
+		expect(headings.indexOf("Schedule")).toBeGreaterThanOrEqual(0);
+		expect(headings.indexOf("Configuration")).toBeLessThan(headings.indexOf("Schedule"));
+	});
+
+	// owner feedback: same section-heading style as the Admin tab's "Access"
+	// heading (AgentAccessEditor.vue) - text-base font-medium text-ink-gray-9,
+	// on both Configure columns, not just one.
+	it("both column headings match the Admin tab's Access heading style", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
+		);
+		const grid = w.find(".grid.grid-cols-1.gap-10.lg\\:grid-cols-2.lg\\:items-start");
+		const headings = grid.findAll(".text-base.font-medium.text-ink-gray-9");
+		expect(headings.map((h) => h.text())).toEqual(["Configuration", "Schedule"]);
+	});
+
+	// jarvis#1062 owner decision: Comments moved off Configure onto the Run
+	// itself (FindingsPanel.vue's new Notes section) - no CommentsSection
+	// import remains here, so an accidental re-import would fail this mount
+	// outright rather than silently resolving to a stub. Also: no orphaned
+	// divider/empty space is left where Comments used to sit.
+	it("no longer renders Comments on the Configure tab, and left no orphaned divider", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
+		);
+		expect(w.findComponent({ name: "CommentsSection" }).exists()).toBe(false);
+		expect(w.text()).not.toContain("Comments");
+		const grid = w.find(".grid.grid-cols-1.gap-10.lg\\:grid-cols-2.lg\\:items-start");
+		expect(grid.find(".border-t").exists()).toBe(false);
+	});
 });
 
 // owner feedback: "Save schedule" is not always-visible chrome, and the old
