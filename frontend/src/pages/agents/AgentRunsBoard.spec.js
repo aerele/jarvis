@@ -12,6 +12,13 @@ import { mount, flushPromises } from "@vue/test-utils";
 const apiAgents = vi.hoisted(() => ({ listRunsPage: vi.fn() }));
 vi.mock("@/api/agents", () => apiAgents);
 
+const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
+const routeMock = vi.hoisted(() => ({ query: {} }));
+vi.mock("vue-router", () => ({
+	useRouter: () => router,
+	useRoute: () => routeMock,
+}));
+
 // frappe-ui's ESM entry does not resolve under vitest (see LlmPoolEditor.spec.js).
 vi.mock("frappe-ui", () => ({
 	dayjs: () => ({ format: () => "" }),
@@ -88,6 +95,7 @@ function setVisibility(state) {
 beforeEach(() => {
 	vi.clearAllMocks();
 	setVisibility("visible");
+	routeMock.query = {};
 });
 
 afterEach(() => {
@@ -187,5 +195,56 @@ describe("C3: 10s poll while a visible run is running", () => {
 		await vi.advanceTimersByTimeAsync(30000);
 		await flushPromises();
 		expect(apiAgents.listRunsPage.mock.calls.length).toBe(callsAfterMount);
+	});
+});
+
+describe("jarvis#1062: ?run=<id> query-param preselection (deep-linked from the Activity feed)", () => {
+	it("selects the row matching the query instead of the newest row", async () => {
+		routeMock.query = { run: "RUN-0002" };
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ name: "RUN-0001" }), runRow({ name: "RUN-0002" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.findComponent({ name: "FindingsPanel" }).props("run").name).toBe("RUN-0002");
+	});
+
+	it("clears the run param from the URL once applied", async () => {
+		routeMock.query = { run: "RUN-0002", other: "kept" };
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ name: "RUN-0001" }), runRow({ name: "RUN-0002" })])
+		);
+		mountBoard();
+		await flushPromises();
+		expect(router.replace).toHaveBeenCalledWith({ query: { other: "kept" } });
+	});
+
+	it("falls back to the first row (and still clears the query) when the id isn't in this page", async () => {
+		routeMock.query = { run: "RUN-NOT-LOADED" };
+		apiAgents.listRunsPage.mockResolvedValue(envelope([runRow({ name: "RUN-0001" })]));
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.findComponent({ name: "FindingsPanel" }).props("run").name).toBe("RUN-0001");
+		expect(router.replace).toHaveBeenCalledWith({ query: {} });
+	});
+
+	it("is ignored on a later refresh once an explicit selection exists", async () => {
+		routeMock.query = {};
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ name: "RUN-0001" }), runRow({ name: "RUN-0002" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.findComponent({ name: "FindingsPanel" }).props("run").name).toBe("RUN-0001");
+
+		// a query appearing after the initial load (e.g. a stale route object in
+		// a test) must not hijack an already-explicit selection.
+		routeMock.query = { run: "RUN-0002" };
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ name: "RUN-0001" }), runRow({ name: "RUN-0002" })])
+		);
+		await w.vm.reload();
+		await flushPromises();
+		expect(w.findComponent({ name: "FindingsPanel" }).props("run").name).toBe("RUN-0001");
 	});
 });

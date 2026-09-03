@@ -37,7 +37,15 @@
 			</div>
 
 			<div v-else class="divide-y">
-				<div v-for="r in rows" :key="r.name" class="flex items-start gap-3 py-3">
+				<div
+					v-for="r in rows"
+					:key="r.name"
+					role="button"
+					tabindex="0"
+					class="flex cursor-pointer items-start gap-3 py-3 hover:bg-surface-gray-1"
+					@click="openRow(r)"
+					@keydown.enter.prevent="openRow(r)"
+				>
 					<div
 						class="grid size-8 shrink-0 place-items-center rounded-full bg-surface-gray-2"
 					>
@@ -55,8 +63,21 @@
 							<span class="text-sm text-ink-gray-5">{{
 								actionLabel(r.action)
 							}}</span>
+							<!-- jarvis#1062: the action verb is a point-in-time label ("Run
+							     started"); this badge is the run's LIVE status, so a started
+							     run that later failed reads as failed here, not started. -->
+							<Badge
+								v-if="r.run_status"
+								variant="subtle"
+								:theme="STATUS_THEME[r.run_status] || 'gray'"
+								:label="r.run_status"
+							/>
 						</div>
-						<div v-if="r.detail" class="mt-0.5 truncate text-sm text-ink-gray-6">
+						<div
+							v-if="r.detail"
+							class="mt-0.5 truncate text-sm text-ink-gray-6"
+							:title="r.detail"
+						>
 							{{ r.detail }}
 						</div>
 					</div>
@@ -85,11 +106,43 @@
 // useListPage bound to list_agent_activity_page (owner-scoped, newest first),
 // its own debounced search and its own ListFooter, so AgentsList only mounts
 // it when #activity is active (lazy first fetch via useListPage's onMounted).
-// Rows are Link-free snapshots: {agent_title, action, detail, creation, run}.
-import { FeatherIcon, FormControl, ListFooter, Tooltip } from "frappe-ui";
+// Rows are Link-free snapshots: {agent, agent_title, action, detail, creation,
+// run, run_status}. run_status is a live join (agents_api.py), not part of
+// the snapshot itself.
+import { Badge, FeatherIcon, FormControl, ListFooter, Tooltip } from "frappe-ui";
+import { useRouter } from "vue-router";
 import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { listAgentActivityPage } from "@/api/agents";
+import { STATUS_THEME } from "@/lib/agentRunStatus";
+
+const router = useRouter();
+
+// jarvis#1062: a run row (its live status now shown as the badge above)
+// opens straight to that run in the Runs tab; every other lifecycle event
+// (installed, enabled, config_changed, promoted...) has no single run to
+// point at, so it opens the agent's Overview instead. router-driven, never
+// window.location - this stays an in-SPA navigation.
+const RUN_ACTIONS = new Set([
+	"run_started",
+	"run_completed",
+	"run_partial",
+	"run_failed",
+	"run_stopped",
+]);
+function openRow(r) {
+	if (!r || !r.agent) return;
+	if (RUN_ACTIONS.has(r.action) && r.run) {
+		router.push({
+			name: "AgentDetail",
+			params: { slug: r.agent },
+			hash: "#runs",
+			query: { run: r.run },
+		});
+	} else {
+		router.push({ name: "AgentDetail", params: { slug: r.agent }, hash: "#overview" });
+	}
+}
 
 // per-action Feather icon + label + ink color (lifecycle verbs from
 // agents_api.list_agent_activity_page)
