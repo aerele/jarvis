@@ -19,6 +19,8 @@
   "schedule_section",
   "schedule_enabled",
   "schedule_frequency",
+  "schedule_weekday",
+  "schedule_day_of_month",
   "schedule_time",
   "last_run_at",
   "next_run_at"
@@ -107,6 +109,21 @@
    "options": "daily\nweekly\nmonthly",
    "default": "daily",
    "depends_on": "eval:doc.schedule_enabled"
+  },
+  {
+   "fieldname": "schedule_weekday",
+   "fieldtype": "Select",
+   "label": "Day of week",
+   "options": "\nMonday\nTuesday\nWednesday\nThursday\nFriday\nSaturday\nSunday",
+   "depends_on": "eval:doc.schedule_enabled && doc.schedule_frequency=='weekly'",
+   "description": "Which weekday a weekly schedule fires on (defaults to the day of the first fire when unset)."
+  },
+  {
+   "fieldname": "schedule_day_of_month",
+   "fieldtype": "Int",
+   "label": "Day of month",
+   "depends_on": "eval:doc.schedule_enabled && doc.schedule_frequency=='monthly'",
+   "description": "Which day of the month (1-31) a monthly schedule fires on, clamped to the last day of short months (defaults to the day of the first fire when unset)."
   },
   {
    "fieldname": "schedule_time",
