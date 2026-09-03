@@ -25,10 +25,12 @@ vi.mock("@/api/agents", () => agentsApi);
 
 const router = vi.hoisted(() => ({ push: vi.fn() }));
 const route = vi.hoisted(() => ({ hash: "", name: "AgentsList", query: {}, params: {} }));
+// jarvis#1062 E2E defect: AgentsList.vue no longer imports onBeforeRouteLeave
+// (the in-SPA leave-confirm dialog was removed, along with the beforeunload
+// listener - see the no-leave-guard describe block below).
 vi.mock("vue-router", () => ({
 	useRouter: () => router,
 	useRoute: () => route,
-	onBeforeRouteLeave: vi.fn(),
 }));
 
 // jsdom here has no usable localStorage, and useListPage's persisted view
@@ -161,7 +163,7 @@ describe("an admin keeps the full four-tab catalog", () => {
 // dirty (canApply && sync.dirty). Removed outright - nothing is lost by
 // navigating, since the dirty state lives server-side - while the "Changes
 // pending" badge (the honest signal) stays.
-describe("no native beforeunload guard, even when the catalog is dirty", () => {
+describe("no leave-guard of any kind, even when the catalog is dirty (only the badge)", () => {
 	it("never registers a beforeunload listener for a reviewer with unapplied changes", async () => {
 		const addSpy = vi.spyOn(window, "addEventListener");
 		const w = await mountList({
@@ -187,5 +189,18 @@ describe("no native beforeunload guard, even when the catalog is dirty", () => {
 		expect(addSpy.mock.calls.some(([event]) => event === "beforeunload")).toBe(false);
 
 		addSpy.mockRestore();
+	});
+
+	it("renders no leave-confirm Dialog while dirty - the badge is the only signal", async () => {
+		const w = await mountList({
+			caps: { review: true, admin: false },
+			syncStatus: { pending: false, dirty: true, status: "" },
+		});
+		await flushPromises();
+
+		expect(w.text()).toContain("Changes pending");
+		expect(w.text()).not.toContain("Unapplied catalog changes");
+		expect(w.text()).not.toContain("Leave anyway");
+		expect(w.find('[data-label="Leave anyway"]').exists()).toBe(false);
 	});
 });
