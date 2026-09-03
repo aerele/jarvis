@@ -212,7 +212,7 @@
 						v-if="profile || profileErr"
 						class="mt-8 rounded-lg border border-outline-gray-1 p-5"
 					>
-						<h2 class="text-lg font-semibold text-ink-gray-9">Billing details</h2>
+						<h2 class="text-lg font-semibold text-ink-gray-9">Invoicing details</h2>
 						<div v-if="profileErr">
 							<ErrorMessage :message="profileErr" />
 							<Button
@@ -224,16 +224,26 @@
 						</div>
 						<template v-else>
 							<p class="mt-1 text-p-sm text-ink-gray-6">
-								Used on your GST invoices. Changes apply to future invoices.
-							</p>
-							<p v-if="profile.account_email" class="mt-2 text-p-sm text-ink-gray-6">
-								Invoices are emailed to
-								<span class="font-medium text-ink-gray-8">{{
-									profile.account_email
-								}}</span
-								>.
+								The company your GST invoice is raised to. Leave the name/email
+								blank to use your own company and account email. Changes apply to
+								future invoices.
 							</p>
 							<div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+								<FormControl
+									class="sm:col-span-2"
+									label="Invoicing company name"
+									placeholder="Defaults to your company name"
+									:model-value="billingForm.company_name"
+									@update:model-value="(v) => (billingForm.company_name = v)"
+								/>
+								<FormControl
+									class="sm:col-span-2"
+									type="email"
+									label="Invoicing email"
+									:placeholder="profile.account_email || 'billing@company.com'"
+									:model-value="billingForm.email"
+									@update:model-value="(v) => (billingForm.email = v)"
+								/>
 								<FormControl
 									label="Contact person"
 									:model-value="billingForm.contact_person"
@@ -622,6 +632,8 @@ const downloadingErp = ref("");
 const profile = ref(null);
 const profileErr = ref("");
 const billingForm = reactive({
+	company_name: "",
+	email: "",
 	contact_person: "",
 	contact_number: "",
 	address_line1: "",
