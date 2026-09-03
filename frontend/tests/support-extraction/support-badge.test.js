@@ -43,7 +43,14 @@ const opts = {
 	},
 };
 
-describe("UserMenu resting support badge", () => {
+describe("UserMenu resting support badge (removed - see the chat header pill)", () => {
+	// The avatar's resting dot (a bare `[role="status"]` div, fed by this same
+	// store) is GONE: a waiting reply now surfaces on the chat header's
+	// headphones button instead (ChatView.vue's jv-support-btn count pill), so
+	// it registers on the one screen the customer is actually looking at,
+	// rather than a corner of the sidebar. These assertions guard against the
+	// dot coming back by accident; the "Support tickets · N" menu row below is
+	// still the read path and is unaffected.
 	beforeEach(() => {
 		vi.stubGlobal("matchMedia", () => ({
 			matches: false,
@@ -55,34 +62,18 @@ describe("UserMenu resting support badge", () => {
 		store.awaitingCount = 0;
 	});
 
-	it("shows no dot when nothing is awaiting", () => {
+	it("never renders a status dot when nothing is awaiting", () => {
 		const w = mount(UserMenu, opts);
 		expect(w.find('[role="status"]').exists()).toBe(false);
 	});
 
-	it("shows the dot with an accessible label when a reply is waiting", () => {
-		// The whole point of the resting dot: it must register while the user is
-		// heads-down in chat, WITHOUT opening the menu — and a bare coloured dot
-		// is invisible to a screen reader, so the label is not optional. The
-		// count is TICKETS (Replied/Resolved), not individual replies — the
-		// original "N support reply/replies awaiting you" wording misnamed the
-		// unit.
+	it("never renders a status dot even with a reply waiting - that signal moved to the header pill", () => {
 		store.awaitingCount = 2;
 		const w = mount(UserMenu, opts);
-		const dot = w.find('[role="status"]');
-		expect(dot.exists()).toBe(true);
-		expect(dot.attributes("aria-label")).toBe("2 tickets awaiting your reply");
+		expect(w.find('[role="status"]').exists()).toBe(false);
 	});
 
-	it("singularises one ticket", () => {
-		store.awaitingCount = 1;
-		const w = mount(UserMenu, opts);
-		expect(w.find('[role="status"]').attributes("aria-label")).toBe(
-			"1 ticket awaiting your reply"
-		);
-	});
-
-	it("never shows the dot when support is switched off, even with a stale count", () => {
+	it("never renders a status dot when support is switched off, even with a stale count", () => {
 		store.awaitingCount = 5;
 		window.support_available = false;
 		const w = mount(UserMenu, opts);

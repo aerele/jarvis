@@ -326,6 +326,17 @@ async function closeThisTicket() {
 	if (ok) {
 		toast.success("Ticket closed. Reply anytime to reopen it.");
 		await store.loadTickets({ quiet: true });
+		// Closed drops out of the awaiting set (stores/support.js's AWAITING is
+		// Replied/Resolved only) - refresh here too so the header pill's count
+		// doesn't linger on a ticket the customer just closed themselves. Not
+		// awaited: it drives an ambient badge (refreshAwaiting already catches
+		// internally and never rejects - same reasoning as SupportListPage's
+		// onMounted call), and awaiting it here would delay the loadThread
+		// refresh below by one extra CP round trip for no benefit. The .catch
+		// is a second layer of the same belt-and-braces: even though the real
+		// store never rejects, an un-awaited rejection here would otherwise be
+		// an unhandled promise rejection that could crash something unrelated.
+		store.refreshAwaiting().catch(() => {});
 		// Refresh the thread too, so the details panel's status/SLA and the header
 		// badge/Resolve reflect Closed immediately instead of lagging 30s to the
 		// next poll (they read store.thread.meta, which only get_thread repopulates).
@@ -508,6 +519,16 @@ async function send() {
 		}
 
 		await store.loadTickets({ quiet: true });
+		// A customer reply moves the ball back to support (helpdesk_client.py's
+		// post_reply reopens a Resolved/Closed ticket on "Received"), so it drops
+		// out of the awaiting set too - refresh here rather than waiting up to
+		// 60s for UserMenu's poll, so the header pill clears as soon as the
+		// customer actually replies. Not awaited, same reasoning as
+		// closeThisTicket's call above: an ambient badge refresh that already
+		// catches internally must not delay the loadThread refresh that shows
+		// the user their own reply. .catch() for the same belt-and-braces
+		// reason as that call too.
+		store.refreshAwaiting().catch(() => {});
 		// The reply/upload above correctly target tName (the ticket we replied
 		// to), but this DISPLAY refresh must not stomp the thread if the user has
 		// since navigated to a different ticket — if store.thread.ticket no
