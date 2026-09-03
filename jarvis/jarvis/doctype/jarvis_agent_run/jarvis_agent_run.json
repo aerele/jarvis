@@ -66,7 +66,7 @@
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",
-   "options": "running\ncompleted\npartial\nfailed",
+   "options": "running\ncompleted\npartial\nfailed\nstopped",
    "in_list_view": 1,
    "in_standard_filter": 1
   },
