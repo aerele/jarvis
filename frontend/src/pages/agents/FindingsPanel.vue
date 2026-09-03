@@ -1,7 +1,11 @@
 <template>
 	<div class="mx-auto w-full max-w-3xl px-6 py-6">
-		<!-- run header -->
-		<div class="flex items-center gap-3">
+		<!-- run header. jarvis#1062 P2-12 (production-readiness audit):
+		     flex-wrap - the status badge + up to 3 action buttons had nowhere
+		     to go on a narrow screen except squeeze the title down to
+		     nothing; they now wrap to their own line instead, title kept
+		     full-width and truncating on its own line above them. -->
+		<div class="flex flex-wrap items-center gap-3">
 			<h2 class="min-w-0 flex-1 truncate text-lg font-semibold text-ink-gray-9">
 				Run {{ runLabel }}
 			</h2>
@@ -72,7 +76,9 @@
 				class="mt-4"
 				type="warning"
 				:message="`${coverageNote}.`"
-			/>
+			>
+				<TechnicalDetails :details="coverageDetails" />
+			</Banner>
 
 			<div class="mt-5 text-base font-medium text-ink-gray-9">
 				{{ scribePages.length || run.pages_written || 0 }} wiki page{{
@@ -126,7 +132,9 @@
 				class="mt-4"
 				type="warning"
 				:message="`Partial scan - ${coverageNote}. Treat gaps as unreviewed, not clean.`"
-			/>
+			>
+				<TechnicalDetails :details="coverageDetails" />
+			</Banner>
 
 			<!-- failed/stopped run: surface the error; no findings snapshot was
 				 recorded. x-circle, not Banner's fixed error icon: see the scribe
@@ -194,12 +202,14 @@
 				<div class="mt-2 divide-y overflow-hidden rounded-lg border">
 					<div v-for="f in group.rows" :key="f.name">
 						<!-- collapsed row (div, not button - it hosts the state select);
-					     role/tabindex + enter/space keep it keyboard-operable -->
+					     role/tabindex + enter/space keep it keyboard-operable.
+					     jarvis#1062 P1-5: focus-visible ring added - none of this was
+					     there before, so tabbing to a finding row was invisible. -->
 						<div
 							role="button"
 							tabindex="0"
 							:aria-expanded="isExpanded(f.name)"
-							class="flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-gray-1"
+							class="flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
 							@click="toggleExpand(f.name)"
 							@keydown.enter.prevent="toggleExpand(f.name)"
 							@keydown.space.prevent="toggleExpand(f.name)"
@@ -215,9 +225,10 @@
 								:theme="SEVERITY_THEME[f.severity] || 'gray'"
 								:label="severityBadgeLabel(f.severity)"
 							/>
-							<span class="w-20 shrink-0 truncate font-mono text-sm text-ink-gray-5">
-								{{ f.rule_id || "-" }}
-							</span>
+							<!-- jarvis#1062 P0-2/P1-3: the rule code used to sit here as an
+							     unlabeled, truncated monospace column - engineering output
+							     ahead of the human summary. It now lives ONLY in the
+							     expanded finding's "Technical details" block, labelled. -->
 							<span class="min-w-0 flex-1 truncate text-base text-ink-gray-8">
 								{{ f.title }}
 							</span>
@@ -251,11 +262,15 @@
 							v-if="isExpanded(f.name)"
 							class="border-t bg-surface-gray-1 px-4 py-3"
 						>
-							<!-- O1: renderMarkdown from @/markdown (escapes HTML first - safe) -->
+							<!-- O1: renderMarkdown from @/markdown (escapes HTML first - safe).
+							     jarvis#1062 P0-2: the machine tokens findingDisplay() lifted
+							     out (rule codes, boolean eval flags, not_evaluable class
+							     counts, DocType.field refs) render ONLY in Technical details
+							     below - never in this primary sentence. -->
 							<div
-								v-if="f.detail_md"
+								v-if="findingDisplay(f).text"
 								class="prose prose-sm max-w-none"
-								v-html="renderMarkdown(f.detail_md)"
+								v-html="renderMarkdown(findingDisplay(f).text)"
 							/>
 							<div v-else class="text-sm text-ink-gray-5">
 								No further detail recorded.
@@ -289,6 +304,11 @@
 							>
 								{{ caveatText(f) }}
 							</div>
+
+							<!-- jarvis#1062 P0-2/P1-3: rule code, evaluation flags,
+							     not_evaluable class counts and DocType.field references -
+							     collapsed, labelled, monospace. Never inline above. -->
+							<TechnicalDetails class="mt-1" :details="findingDisplay(f).details" />
 
 							<div class="mt-3 flex items-center gap-2">
 								<Button
@@ -361,9 +381,11 @@ import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-
 import JvSpinner from "@/components/JvSpinner.vue";
 import Banner from "@/components/Banner.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
+import TechnicalDetails from "@/components/doc/TechnicalDetails.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import { timeAgo, exactDate, formatDate, toLocalMs, fmtElapsed } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
+import { extractTechnicalDetails } from "@/lib/findingText";
 import * as api from "@/api";
 import { takeFindingToChat, stopAgentRun, listAgentActivityPage } from "@/api/agents";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
@@ -509,11 +531,16 @@ const coverageWarning = computed(
 		props.run.status === "partial" ||
 		(!!props.run.coverage_note && props.run.status !== "failed")
 );
+// jarvis#1062 P0-2: coverage_note is bundle-generated too - the same
+// extraction as findings' detail_md, so a rule code / DocType.field
+// reference in the coverage sentence lands in coverageDetails, never inline.
+const coverageExtract = computed(() => extractTechnicalDetails(props.run.coverage_note));
 const coverageNote = computed(() => {
-	const note = String(props.run.coverage_note || "").trim();
+	const note = coverageExtract.value.text.trim();
 	// the sentence supplies its own terminal punctuation
 	return note.replace(/[.\s]+$/, "") || "some records were not reviewed";
 });
+const coverageDetails = computed(() => coverageExtract.value.details);
 
 // Scribe runs (Custom App Learning) write wiki pages, not findings: render the
 // pages tally + links instead of the findings machinery.
@@ -736,6 +763,20 @@ function refUrl(row) {
 		.toLowerCase()
 		.replace(/ /g, "-");
 	return `/app/${dt}/${encodeURIComponent(row.ref_name)}`;
+}
+// jarvis#1062 P0-2/P1-3: the primary sentence a reviewer reads, plus every
+// machine token pulled out of it (rule code, eval flags, not_evaluable class
+// counts, DocType.field refs) as a flat labelled list for the collapsed
+// "Technical details" block. f.rule_id is a SEPARATE structured field (not
+// necessarily repeated inside detail_md's prose) - folded in here too,
+// de-duplicated against whatever extraction already found.
+function findingDisplay(f) {
+	const { text, details } = extractTechnicalDetails(f && f.detail_md);
+	const all = [...details];
+	if (f && f.rule_id && !all.some((d) => d.value === f.rule_id)) {
+		all.unshift({ label: "Rule", value: f.rule_id });
+	}
+	return { text, details: all };
 }
 // "Statutory basis: {section} (effective {date}). {disclaimer}" - only the
 // pieces the run recorded

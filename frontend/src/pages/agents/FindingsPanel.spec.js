@@ -106,7 +106,11 @@ vi.mock("@/components/Banner.vue", () => ({
 	default: {
 		name: "Banner",
 		props: ["type", "message"],
-		template: `<div class="banner">{{ message }}</div>`,
+		// jarvis#1062 P0-2: the default slot is real Banner.vue's own
+		// "details expander" extension point (its own doc comment) - render
+		// it here too, or a TechnicalDetails passed into it would silently
+		// never appear under test.
+		template: `<div class="banner">{{ message }}<slot /></div>`,
 	},
 }));
 vi.mock("@/markdown", () => ({ renderMarkdown: (s) => s }));
@@ -519,5 +523,168 @@ describe("Notes on the run (jarvis#1062)", () => {
 		await w.setProps({ run: baseRun({ name: "RUN-B", status: "completed" }) });
 		await flushPromises();
 		expect(apiDocmeta.getDocmeta).toHaveBeenLastCalledWith("Jarvis Agent Run", "RUN-B");
+	});
+});
+
+// jarvis#1062 P0-2/P1-3 (production-readiness audit): demote engineering
+// output. The row shows the human title first, never an unlabeled truncated
+// rule-code column; the expanded finding shows the (token-cleaned) prose
+// first, with rule code / eval flags / not_evaluable counts / DocType.field
+// refs collapsed into a labelled "Technical details" block; the coverage
+// banner reads as a plain sentence with its own codes in the same block.
+describe("Findings demote engineering output (jarvis#1062 P0-2/P1-3)", () => {
+	function techFinding(overrides = {}) {
+		return {
+			name: "F1",
+			rule_id: "nsv-grad-7d92",
+			severity: "blocker",
+			title: "data-trust grade for Goods In Transit - ATD",
+			state: "open",
+			amount: null,
+			recurrence: "new",
+			detail_md:
+				"data-trust grade for Goods In Transit - ATD: FLAGGED (clears reorder gate: False). " +
+				"A derived-candidate summary of observed-fact counts; graded on the classes that " +
+				"evaluated, with 1 class(es) not_evaluable. Reorder is held for any non-clean warehouse.",
+			...overrides,
+		};
+	}
+
+	async function mountWithFinding(row, mountOptions = {}) {
+		api.listAgentFindings.mockResolvedValue({
+			rows: [row],
+			total: 1,
+			has_more: false,
+			severity_counts: { blocker: 1 },
+		});
+		const w = mount(FindingsPanel, {
+			props: { run: baseRun({ status: "completed" }) },
+			...mountOptions,
+		});
+		await flushPromises();
+		return w;
+	}
+
+	it("the collapsed row never shows the rule code - no unlabeled monospace column", async () => {
+		const w = await mountWithFinding(techFinding());
+		const row = w.find('[role="button"]');
+		expect(row.text()).not.toContain("nsv-grad-7d92");
+		expect(row.text()).toContain("data-trust grade for Goods In Transit - ATD");
+	});
+
+	it("expanding shows the human title/summary first, machine tokens stripped from the sentence", async () => {
+		const w = await mountWithFinding(techFinding());
+		await w.find('[role="button"]').trigger("click");
+		await flushPromises();
+
+		const prose = w.find(".prose");
+		expect(prose.text()).not.toContain("nsv-grad-7d92");
+		expect(prose.text()).not.toContain("clears reorder gate");
+		expect(prose.text()).not.toContain("not_evaluable");
+		expect(prose.text()).not.toContain("class(es)");
+		expect(prose.text()).toContain("data-trust grade for Goods In Transit");
+	});
+
+	it("the rule code, flag and not_evaluable count all land in a collapsed Technical details block", async () => {
+		// attachTo: document.body - isVisible() (via getComputedStyle) needs a
+		// connected tree to resolve v-show's inline display toggle reliably.
+		const w = await mountWithFinding(techFinding(), { attachTo: document.body });
+		await w.find('[role="button"]').trigger("click");
+		await flushPromises();
+
+		expect(w.text()).toContain("Technical details");
+		// collapsed by default - DocSection's own v-show, not removed from the DOM
+		const dl = w.find("dl");
+		expect(dl.exists()).toBe(true);
+		expect(dl.isVisible()).toBe(false);
+		expect(dl.text()).toContain("nsv-grad-7d92");
+		expect(dl.text()).toContain("clears reorder gate: False");
+		expect(dl.text()).toContain("1 class");
+
+		// opening it makes the same content visible, still nowhere near the
+		// primary sentence above
+		const detailsHeader = w.findAll("button").find((b) => b.text() === "Technical details");
+		await detailsHeader.trigger("click");
+		expect(w.find("dl").isVisible()).toBe(true);
+		w.unmount();
+	});
+
+	it("a finding with no machine tokens in its prose shows no Technical details block beyond a bare rule_id", async () => {
+		const w = await mountWithFinding(
+			techFinding({ rule_id: "", detail_md: "Everything about this looks fine." })
+		);
+		await w.find('[role="button"]').trigger("click");
+		await flushPromises();
+		expect(w.find("dl").exists()).toBe(false);
+	});
+
+	it("the coverage/warning banner reads as a plain sentence, with its own code in the details block", async () => {
+		const w = mountPanel(
+			baseRun({
+				status: "partial",
+				coverage_note:
+					"not evaluable: nsv-tieout-7d92: Configure no account<->warehouse mapping " +
+					"is populated for any scoped warehouse (Warehouse.account empty)",
+			})
+		);
+		await flushPromises();
+
+		// the MESSAGE prop specifically (not the whole banner's rendered text,
+		// which also includes the nested TechnicalDetails slot by design) -
+		// this is the actual "primary sentence" a reviewer reads first.
+		const bannerComponent = w.findComponent({ name: "Banner" });
+		const message = bannerComponent.props("message");
+		expect(message).not.toContain("nsv-tieout-7d92");
+		expect(message).not.toContain("Warehouse.account");
+		expect(message).toContain("Partial scan");
+		expect(message).toContain("not evaluable");
+
+		const banner = w.find(".banner");
+		const dl = banner.find("dl");
+		expect(dl.exists()).toBe(true);
+		expect(dl.text()).toContain("nsv-tieout-7d92");
+		expect(dl.text()).toContain("Warehouse.account");
+	});
+});
+
+// jarvis#1062 P1-5 (production-readiness audit): the finding row is a plain
+// role="button" div - no default browser outline, and none was added.
+describe("finding row keyboard focus (jarvis#1062 P1-5)", () => {
+	it("carries a focus-visible ring", async () => {
+		api.listAgentFindings.mockResolvedValue({
+			rows: [
+				{
+					name: "F1",
+					rule_id: "R1",
+					severity: "blocker",
+					title: "A finding",
+					state: "open",
+					amount: null,
+					recurrence: "new",
+					detail_md: "",
+				},
+			],
+			total: 1,
+			has_more: false,
+			severity_counts: { blocker: 1 },
+		});
+		const w = mountPanel(baseRun({ status: "completed" }));
+		await flushPromises();
+		const row = w.find('[role="button"]');
+		expect(row.exists()).toBe(true);
+		expect(row.classes()).toContain("focus-visible:ring-2");
+		expect(row.classes()).toContain("focus-visible:ring-outline-gray-3");
+	});
+});
+
+// jarvis#1062 P2-12 (production-readiness audit): the status badge + up to
+// 3 action buttons had nowhere to go on a narrow screen except squeeze the
+// title down to nothing.
+describe("run header wraps instead of squeezing the title (jarvis#1062 P2-12)", () => {
+	it("the header row carries flex-wrap", async () => {
+		const w = mountPanel(baseRun({ status: "completed" }));
+		await flushPromises();
+		const header = w.find(".flex.flex-wrap.items-center.gap-3");
+		expect(header.exists()).toBe(true);
 	});
 });

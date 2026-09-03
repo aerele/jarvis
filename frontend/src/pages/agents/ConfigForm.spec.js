@@ -94,9 +94,10 @@ vi.mock("frappe-ui", () => ({
 
 import ConfigForm from "./ConfigForm.vue";
 
-function mountForm(config = {}, extraProps = {}) {
+function mountForm(config = {}, extraProps = {}, mountOptions = {}) {
 	return mount(ConfigForm, {
 		props: { config, configKeys: ALL_AGENT_SPECIFIC_PATHS, saving: false, ...extraProps },
+		...mountOptions,
 	});
 }
 
@@ -230,6 +231,63 @@ describe("clearing a field drops its key", () => {
 		await w.find('button[data-option="Other Co"]').trigger("click");
 		await w.find('[data-label="Save configuration"]').trigger("click");
 		expect(w.emitted("save")[0][0]).toEqual({ company: "Other Co" });
+	});
+});
+
+// jarvis#1062 P0-1 (production-readiness audit): the Advanced (JSON) panel
+// re-collapsed when clicked inside its own expanded textarea, with the
+// chevron desynced from the content's real open/closed state. Not
+// reproduced here - DocSection.vue's toggle was already scoped to the
+// header only (header and content are siblings, never ancestor/descendant)
+// - but the header is now a real, keyboard-reachable <button> and the
+// content wrapper carries its own @click.stop as defensive hardening.
+// These specs document and lock in the required behavior either way.
+describe("Advanced (JSON) panel: a content click never re-collapses it (jarvis#1062 P0-1)", () => {
+	function openAdvanced(w) {
+		return w.find(".border-t button").trigger("click");
+	}
+	function chevron(w) {
+		return w.find(".lucide-chevron-right");
+	}
+
+	it("starts collapsed (chevron not rotated, textarea not visible)", () => {
+		const w = mountForm({});
+		expect(chevron(w).classes()).not.toContain("rotate-90");
+		expect(w.find("textarea").isVisible()).toBe(false);
+	});
+
+	it("opens on a header click - chevron rotates, textarea becomes visible", async () => {
+		const w = mountForm({});
+		await openAdvanced(w);
+		expect(chevron(w).classes()).toContain("rotate-90");
+		expect(w.find("textarea").isVisible()).toBe(true);
+	});
+
+	it("a click INSIDE the open textarea keeps it open and does not desync the chevron", async () => {
+		const w = mountForm({}, {}, { attachTo: document.body });
+		await openAdvanced(w);
+		const textarea = w.find("textarea");
+		await textarea.trigger("click");
+		// jsdom does not perform default actions (focus-on-click) for a
+		// dispatched synthetic click the way a real browser does - call the
+		// native focus() a real click would trigger, so the assertion below
+		// reflects what a user actually experiences.
+		textarea.element.focus();
+		await w.vm.$nextTick();
+
+		expect(w.find("textarea").isVisible()).toBe(true);
+		expect(chevron(w).classes()).toContain("rotate-90");
+		expect(document.activeElement).toBe(textarea.element);
+		w.unmount();
+	});
+
+	it("clicking the header again still closes it (toggle still works after a content click)", async () => {
+		const w = mountForm({});
+		await openAdvanced(w);
+		await w.find("textarea").trigger("click");
+		await openAdvanced(w);
+		expect(w.find("textarea").isVisible()).toBe(false);
+		expect(chevron(w).classes()).not.toContain("rotate-90");
 	});
 });
 
