@@ -33,6 +33,11 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
+    # `edited` is what GitHub sends when a PR's BASE is changed in the UI. Without it a PR
+    # retargeted from develop to version-16-hotfix would merge with checks that never ran
+    # against the branch it lands on. The job-level `if` below keeps title and body edits
+    # from re-running the matrix: only an edit that carries `changes.base` counts.
+    types: [opened, synchronize, reopened, edited]
   push:
     # version-15 is the stable line customers install from; version-15-hotfix is where its
     # backports collect until a release merges them into it. See CONTRIBUTING.md.
@@ -53,6 +58,7 @@ jobs:
   # the tests environment: this needs only python + node, and it should report in
   # under a minute rather than waiting on a bench.
   lint:
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -79,6 +85,7 @@ jobs:
   # Python job below. The SPA is served identically on v15 and v16 sites, so this job is
   # identical to develop's.
   frontend-tests:
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -139,6 +146,7 @@ jobs:
   # the PWA build reuses it. Node 18 is deliberate: FC v15 benches build on 18.16.0, so a
   # break that only shows up there must fail here, not at deploy time.
   frontend-build:
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -178,6 +186,7 @@ jobs:
   # IMPORT those modules — so both erpnext AND hrms (version-15) must be installed, or those
   # tests error.
   tests:
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     # From-scratch v15 bench build + the full unsharded suite. Headroom over the
     # v16 PR job (which restores a baked image and shards 4 ways): as the v15 gap
