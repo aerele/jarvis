@@ -148,3 +148,25 @@ class TestGetDoc(FrappeTestCase):
 				get_doc(doctype="Customer", name="Jarvis Test Customer")
 		finally:
 			frappe.set_user("Administrator")
+
+	def test_single_doctype_still_enforces_read_permission(self):
+		"""#1062: frappe.get_single skips no permission check of its own - a
+		Single carries real DocPerms (Stock Settings: Stock Manager / Sales
+		User only), so a user holding neither must still be refused, not
+		waved through because reading a Single takes no name to gate on."""
+		user_email = "docless@example.com"
+		if not frappe.db.exists("User", user_email):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": user_email,
+					"first_name": "Docless",
+					"send_welcome_email": 0,
+				}
+			).insert(ignore_permissions=True)
+		frappe.set_user(user_email)
+		try:
+			with self.assertRaises(PermissionDeniedError):
+				get_doc(doctype="Stock Settings")
+		finally:
+			frappe.set_user("Administrator")
