@@ -121,6 +121,7 @@ vi.mock("@/lib/errors", () => ({
 }));
 
 import FindingsPanel from "./FindingsPanel.vue";
+import * as findingText from "@/lib/findingText";
 
 function baseRun(overrides = {}) {
 	return {
@@ -801,6 +802,33 @@ describe("Findings demote engineering output (jarvis#1062 P0-2/P1-3)", () => {
 		await w.find('[role="button"]').trigger("click");
 		await flushPromises();
 		expect(w.find("dl").exists()).toBe(false);
+	});
+
+	// Review fix: findingDisplay(f) used to be called 2-3 times per expanded
+	// row straight from the template (the v-if, the v-html source, and
+	// TechnicalDetails' :details prop), re-running the regex extraction pass
+	// each time. It is now memoized per finding (by f.name) in a computed
+	// Map, so extractTechnicalDetails runs exactly once per finding no
+	// matter how many places its result is read.
+	it("extracts a finding's technical details exactly once, however many times the expanded row reads it", async () => {
+		const spy = vi.spyOn(findingText, "extractTechnicalDetails");
+		spy.mockClear();
+		const w = await mountWithFinding(techFinding());
+		const callsAfterMount = spy.mock.calls.length;
+
+		await w.find('[role="button"]').trigger("click"); // expand - reads text, v-html source, details
+		await flushPromises();
+		// exactly one MORE call than after mount (the finding's own detail_md) -
+		// not the 2-3 a naive per-read call would add.
+		expect(spy.mock.calls.length).toBe(callsAfterMount + 1);
+
+		await w.find('[role="button"]').trigger("click"); // collapse
+		await w.find('[role="button"]').trigger("click"); // re-expand
+		await flushPromises();
+		// re-expanding the SAME finding does not re-run the extraction either -
+		// it is still the same computed Map entry.
+		expect(spy.mock.calls.length).toBe(callsAfterMount + 1);
+		spy.mockRestore();
 	});
 
 	it("the coverage/warning banner reads as a plain sentence, with its own code in the details block", async () => {

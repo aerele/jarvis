@@ -226,6 +226,7 @@ import {
 	TIMESPANS,
 } from "@/components/list/filterModel";
 import { searchLink } from "@/api";
+import { useLinkSearch } from "@/composables/useLinkSearch";
 
 const props = defineProps({
 	entry: { type: Object, default: null }, // schema field entry
@@ -383,22 +384,71 @@ function removeChip(i) {
 }
 
 // ── Link search (debounced + fenced) ────────────────────────────────────────
+// Shared debounce + fence + prime pattern (jarvis#1062, see useLinkSearch) -
 // 300ms debounce and a monotonic sequence, exactly like the DocType picker in
 // TriggerDetail: without the fence a slow "ab" response lands after "abcd" and
 // the dropdown shows options for a query the user has already moved past.
 const LINK_PAGE_LENGTH = 20; // plan §9's Link suggestion cap
-const linkOptions = ref([]);
-const linkLoading = ref(false);
 const linkTargetName = computed(() => linkTarget(props.entry));
 // Why the picker gave up, or "" while it is still useful.
 const linkFallbackReason = ref("");
 const linkFallback = computed(() => !linkTargetName.value || !!linkFallbackReason.value);
-let linkTimer = null;
-let linkSeq = 0;
+
+const linkSearch = useLinkSearch(
+	async (query) => {
+		const doctype = linkTargetName.value;
+		if (!doctype) return [];
+		// P1-06: pass WHERE this Link is used (its schema entry's own doctype +
+		// fieldname) so a custom search_link hook / user-permission rule can key
+		// off it. Untrusted context — the server still enforces the target's read
+		// permission — and the values come from the shared schema, not the client.
+		return searchLink(
+			doctype,
+			query,
+			LINK_PAGE_LENGTH,
+			props.entry && props.entry.doctype,
+			props.entry && props.entry.fieldname
+		);
+	},
+	{
+		mapper: (rows) =>
+			rows.map((r) => ({
+				// Title when the DocType has one, name otherwise; the VALUE is
+				// always the stable document name, which is what the filter submits.
+				label: r.label || r.value,
+				value: String(r.value),
+				description:
+					r.label && r.label !== r.value ? String(r.value) : r.description || "",
+			})),
+		onSettled({ rows, query, error }) {
+			const doctype = linkTargetName.value;
+			if (error) {
+				// A caller who may not search this DocType gets no suggestions; the
+				// clause is still usable by typing a name, so fall back instead of
+				// failing.
+				linkFallbackReason.value = `Can't search ${doctype}. Enter the name directly.`;
+				return;
+			}
+			if (rows.length) {
+				// Rows came back, so the picker is useful again. Clearing HERE
+				// rather than eagerly means the control never flickers while a
+				// query is in flight — and a typo downgrades the row only for as
+				// long as the typo lasts.
+				linkFallbackReason.value = "";
+			} else if (String(query || "").trim()) {
+				// Nothing came back for something the user actually typed: the
+				// picker has no more to offer, so hand them the input that can
+				// still express the filter rather than an empty dropdown.
+				linkFallbackReason.value = `No ${doctype} matched. Enter the name directly.`;
+			}
+		},
+	}
+);
+const linkOptions = linkSearch.options;
+const linkLoading = linkSearch.loading;
 
 function onLinkQuery(query) {
-	clearTimeout(linkTimer);
-	linkTimer = setTimeout(() => loadLinks(query || ""), 300);
+	linkSearch.onQuery(query);
 }
 
 // The picker opens with the first page already in it. Without this the dropdown
@@ -406,57 +456,8 @@ function onLinkQuery(query) {
 // DocType they were about to browse. Rows only mount when the panel opens, so
 // this costs one search per Link row per panel open.
 onMounted(() => {
-	if (control.value === "link" || control.value === "multi-link") loadLinks("");
+	if (control.value === "link" || control.value === "multi-link") linkSearch.prime();
 });
-
-async function loadLinks(query) {
-	const doctype = linkTargetName.value;
-	if (!doctype) return;
-	const seq = ++linkSeq;
-	linkLoading.value = true;
-	try {
-		// P1-06: pass WHERE this Link is used (its schema entry's own doctype +
-		// fieldname) so a custom search_link hook / user-permission rule can key
-		// off it. Untrusted context — the server still enforces the target's read
-		// permission — and the values come from the shared schema, not the client.
-		const rows = await searchLink(
-			doctype,
-			query,
-			LINK_PAGE_LENGTH,
-			props.entry && props.entry.doctype,
-			props.entry && props.entry.fieldname
-		);
-		if (seq !== linkSeq) return; // stale - a newer keystroke superseded this
-		linkOptions.value = (rows || []).map((r) => ({
-			// Title when the DocType has one, name otherwise; the VALUE is always
-			// the stable document name, which is what the filter submits.
-			label: r.label || r.value,
-			value: String(r.value),
-			description: r.label && r.label !== r.value ? String(r.value) : r.description || "",
-		}));
-		if (linkOptions.value.length) {
-			// Rows came back, so the picker is useful again. Clearing HERE rather
-			// than on entry to loadLinks means the control never flickers while a
-			// query is in flight — and it means a typo downgrades the row only for
-			// as long as the typo lasts.
-			linkFallbackReason.value = "";
-		} else if (String(query || "").trim()) {
-			// Nothing came back for something the user actually typed: the picker
-			// has no more to offer, so hand them the input that can still express
-			// the filter rather than an empty dropdown.
-			linkFallbackReason.value = `No ${doctype} matched. Enter the name directly.`;
-		}
-	} catch (e) {
-		// A caller who may not search this DocType gets no suggestions; the clause
-		// is still usable by typing a name, so fall back instead of failing.
-		if (seq === linkSeq) {
-			linkOptions.value = [];
-			linkFallbackReason.value = `Can't search ${doctype}. Enter the name directly.`;
-		}
-	} finally {
-		if (seq === linkSeq) linkLoading.value = false;
-	}
-}
 
 const linkModel = computed(() => {
 	if (control.value === "multi-link") return listModel.value;
@@ -495,16 +496,13 @@ function onListPick(options) {
 watch(
 	() => [props.clause.doctype, props.clause.fieldname, props.clause.operator].join("|"),
 	() => {
-		linkSeq += 1;
-		linkOptions.value = [];
-		linkLoading.value = false;
+		linkSearch.reprime(); // fences the old target's in-flight search, clears options
 		linkFallbackReason.value = "";
 		draft.value = "";
 		chipNote.value = "";
 		limitNote.value = "";
-		clearTimeout(linkTimer);
-		if (control.value === "link" || control.value === "multi-link") loadLinks("");
+		if (control.value === "link" || control.value === "multi-link") linkSearch.prime();
 	}
 );
-onBeforeUnmount(() => clearTimeout(linkTimer));
+onBeforeUnmount(() => linkSearch.cleanup());
 </script>

@@ -18,7 +18,9 @@
  * Conservative on purpose: unmatched text is returned untouched. A markdown
  * link's `(url)` is never mistaken for a flag - the boolean-flag pattern
  * requires a literal ": True"/": False" inside the parens, which a URL never
- * contains.
+ * contains - and a capitalised URL host inside a markdown link's target
+ * (e.g. "Example.com") is never mistaken for a DocType.field reference; see
+ * DOCTYPE_FIELD_RE below.
  */
 
 // Rule ids in this codebase have an exact shape: <prefix>-<name>-<hex4>,
@@ -35,7 +37,29 @@
 const RULE_CODE_RE = /\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+-([0-9a-f]{4}))\b/g;
 const FLAG_RE = /\(([A-Za-z][\w\s]*:\s*(?:True|False))\)/g;
 const CLASS_COUNT_RE = /,?\s*with\s+(\d+)\s+class\(es\)\s+not_evaluable\b/gi;
-const DOCTYPE_FIELD_RE = /\b([A-Z][A-Za-z]+\.[a-z][a-z_]*)\b/g;
+// DocType names are Title Case, one word ("Warehouse") in every example
+// observed in bundle prose; the field after the dot is always lower
+// snake_case. A multiword allowance was tried (per review suggestion, for
+// "Stock Ledger Entry.account") and reverted: bundle prose is imperative and
+// sentence-initial-capitalised constantly ("Configure Warehouse.account
+// first."), and there is no syntactic way to tell a real multiword DocType
+// name from an ordinary capitalised sentence-starter sitting in front of a
+// one-word reference - "Configure Warehouse.account" is indistinguishable
+// from "Stock Ledger Entry.account" by shape alone, and the former is far
+// more common here. Single-word only, so it never reaches backwards past a
+// word that isn't actually part of the reference.
+//
+// Review finding: a bare "[A-Z][A-Za-z]+\.[a-z]+" also matches a capitalised
+// URL host sitting inside a markdown link's target, e.g. "Example.com" in
+// "[the policy](https://Example.com/x)" - stripping it mangled the link.
+// Guarded on both sides against exactly that shape: not preceded by "//" (a
+// URL scheme/host) or "](" (a markdown link's target opening), and not
+// immediately followed by "/" (the rest of that URL) or ")" (the link's
+// closing paren) - a real DocType.field reference in running prose never
+// borders a URL like that. (The trailing guard's cost: "(Warehouse.account)"
+// with no space before the ")" is no longer extracted either - the same
+// heuristic the review asked for, applied evenly.)
+const DOCTYPE_FIELD_RE = /(?<!\/\/|\]\()\b([A-Z][A-Za-z]+\.[a-z][a-z_]*)\b(?![/)])/g;
 const RAW_TOKEN_RE = /\bnot_evaluable\b/g;
 
 /**

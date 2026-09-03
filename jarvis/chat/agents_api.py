@@ -584,9 +584,11 @@ def set_agent_access(
 
 	Roles are validated against the Role doctype; the non-grantable
 	Administrator/Guest/All are rejected ("All" would be a backdoor re-grant of the
-	old everyone-by-default). Users must exist and be ENABLED — a disabled user is
-	how an offboarded person is revoked, so recording one as allowed would write a
-	grant that outlives the offboarding."""
+	old everyone-by-default). A newly ADDED user must exist and be ENABLED — a
+	disabled user is how an offboarded person is revoked, so recording one as
+	allowed would write a grant that outlives the offboarding. Users already on the
+	list are carried forward without that check: see the comment there for why
+	re-validating them breaks unrelated edits."""
 	require_jarvis_admin()
 	roles_clean = _parse_name_list(roles, _("roles"))
 	users_clean = _parse_name_list(users, _("users"))
@@ -596,22 +598,53 @@ def set_agent_access(
 			frappe.throw(_("Role {0} cannot be used to grant agent access.").format(r))
 		if not frappe.db.exists("Role", r):
 			frappe.throw(_("Role {0} does not exist.").format(r))
-	for u in users_clean:
+	# Validation applies to what this call ADDS, never to what it merely carries
+	# forward. An agent granted to someone who has since been offboarded holds a
+	# row naming a DISABLED user, and grandfathered rows can name users who were
+	# later deleted outright. Re-validating those would make an unrelated edit -
+	# adding one role, or the set_agent_roles shim passing the existing people
+	# through untouched - fail with a message about somebody the admin never
+	# mentioned, and leave them no way to change the roles at all.
+	current_users = set(
+		frappe.get_all(
+			ALLOWED_USER,
+			filters={"parenttype": LISTING, "parentfield": "allowed_users", "parent": agent_slug},
+			pluck="user",
+		)
+	)
+	added = [u for u in users_clean if u not in current_users]
+	for u in added:
 		if u in ("Administrator", "Guest"):
 			frappe.throw(_("User {0} cannot be granted agent access.").format(u))
-	if users_clean:
-		# ONE query for the whole submitted set, not a get_value per name: this is an
+	if added:
+		# ONE query for the whole added set, not a get_value per name: this is an
 		# admin picking a handful of people, but the loop shape is what turns into an
 		# N+1 the first time somebody pastes a department into it.
 		known = {
 			r.name: r.enabled
-			for r in frappe.get_all("User", filters={"name": ("in", users_clean)}, fields=["name", "enabled"])
+			for r in frappe.get_all("User", filters={"name": ("in", added)}, fields=["name", "enabled"])
 		}
-		for u in users_clean:
+		for u in added:
 			if u not in known:
 				frappe.throw(_("User {0} does not exist.").format(u))
 			if not known[u]:
 				frappe.throw(_("User {0} is disabled and cannot be granted agent access.").format(u))
+	# Kept rows are left exactly as they are, with ONE exception: a name whose User
+	# row is gone would fail the child table's Link validation and block the save
+	# outright, so it is dropped and logged rather than raised. A disabled user is
+	# NOT dropped - disabling is reversible, and silently discarding the grant would
+	# turn a temporary suspension into a permanent revocation nobody recorded.
+	kept = [u for u in users_clean if u in current_users]
+	if kept:
+		alive = set(frappe.get_all("User", filters={"name": ("in", kept)}, pluck="name"))
+		vanished = [u for u in kept if u not in alive]
+		if vanished:
+			frappe.logger("jarvis").info(
+				f"agent access {agent_slug}: dropping allowed_users rows for deleted "
+				f"user(s) {', '.join(vanished)}"
+			)
+			gone = set(vanished)
+			users_clean = [u for u in users_clean if u not in gone]
 
 	doc = frappe.get_doc(LISTING, agent_slug)
 	doc.check_permission("write")

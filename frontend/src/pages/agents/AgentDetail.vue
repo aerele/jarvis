@@ -7,11 +7,19 @@
 				     the agent loaded, then get replaced by its real title - a
 				     visible, jarring swap. An empty crumb + a skeleton bar
 				     (item.loading, via Breadcrumbs' own #suffix slot) now render
-				     until the title is actually known; nothing ever flashes. -->
+				     until the title is actually known; nothing ever flashes.
+				     Review fix: a failed load() left `agent` null forever, so a
+				     bare load failure showed a blank crumb AND a permanently
+				     spinning skeleton next to the error panel below. `error` set
+				     falls back to the slug (the old, pre-P1-6 behaviour) and
+				     stops the skeleton - there is nothing left to wait for. -->
 				<Breadcrumbs
 					:items="[
 						{ label: 'Agents', route: { name: 'AgentsList' } },
-						{ label: agent ? agent.title || slug : '', loading: !agent },
+						{
+							label: agent ? agent.title || props.slug : error ? props.slug : '',
+							loading: !agent && !error,
+						},
 					]"
 				>
 					<template #suffix="{ item }">

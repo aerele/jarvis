@@ -80,6 +80,45 @@ describe("extractTechnicalDetails", () => {
 		expect(details).toEqual([]);
 	});
 
+	it("never mangles a markdown link whose host happens to be capitalised", () => {
+		const { text, details } = extractTechnicalDetails(
+			"See [the policy](https://Example.com/policy) for details."
+		);
+		expect(text).toBe("See [the policy](https://Example.com/policy) for details.");
+		expect(details).toEqual([]);
+	});
+
+	it("never mangles a capitalised host in a protocol-less markdown link target either", () => {
+		const { text, details } = extractTechnicalDetails("See [the policy](Example.com/policy).");
+		expect(text).toBe("See [the policy](Example.com/policy).");
+		expect(details).toEqual([]);
+	});
+
+	it("still extracts a real DocType.field reference sitting next to a markdown link", () => {
+		const { text, details } = extractTechnicalDetails(
+			"See [the policy](https://example.com/policy) - Warehouse.account is empty."
+		);
+		expect(text).not.toContain("Warehouse.account");
+		expect(details).toContainEqual({ label: "Field reference", value: "Warehouse.account" });
+	});
+
+	it("never pulls a preceding capitalised sentence-starter into a one-word DocType.field reference", () => {
+		// A multiword allowance was tried and reverted: bundle prose is
+		// imperative and sentence-initial-capitalised constantly ("Configure
+		// Warehouse.account first."), and there is no syntactic way to tell a
+		// real multiword DocType name from an ordinary capitalised word sitting
+		// in front of a one-word reference.
+		const { text, details } = extractTechnicalDetails("Configure Warehouse.account first.");
+		expect(text).toBe("Configure first.");
+		expect(details).toContainEqual({ label: "Field reference", value: "Warehouse.account" });
+	});
+
+	it("does not extract a DocType.field reference with no space before its closing paren (the URL-guard's own cost)", () => {
+		const { text, details } = extractTechnicalDetails("(Warehouse.account)");
+		expect(text).toBe("(Warehouse.account)");
+		expect(details).toEqual([]);
+	});
+
 	it("handles the exact audit-screenshot coverage-note text without throwing, and pulls out both the rule code and the field reference", () => {
 		const raw =
 			"not evaluable: nsv-tieout-7d92: Configure no account<->warehouse mapping is populated for any scoped warehouse (Warehouse.account empty)";

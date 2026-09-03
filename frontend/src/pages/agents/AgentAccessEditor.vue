@@ -136,6 +136,7 @@ import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
 import { errHtml } from "@/lib/errors";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
+import { useLinkSearch } from "@/composables/useLinkSearch";
 
 const props = defineProps({
 	slug: { type: String, required: true },
@@ -205,30 +206,21 @@ function removeRole(r) {
 
 // ── user type-ahead ──────────────────────────────────────────────────────────
 // Remote, not a local filter over a preloaded directory: a tenant's user list is
-// unbounded and search_users caps at 20 server-side.
-const userQuery = ref("");
-const userResults = ref([]);
-let searchTimer = null;
-// Monotonic request id: a slower earlier lookup must not overwrite a newer one.
-// Typing "an" then "ann" and having "an" land second would repopulate the menu
-// with results for a prefix the admin has already moved past.
-let searchSeq = 0;
-// Whether the menu has been filled for the CURRENT query. Reset whenever the
-// results are cleared, so reopening after a pick fetches again.
-const userMenuPrimed = ref(false);
+// unbounded and search_users caps at 20 server-side. Shared debounce + fence +
+// prime pattern (jarvis#1062, see useLinkSearch) - 200ms here, this site's own
+// interval from before the extraction, kept as-is.
+const userSearch = useLinkSearch((q) => apiAgents.searchUsers(q), { debounceMs: 200 });
 
 function primeUserMenu() {
-	if (userMenuPrimed.value) return;
-	userMenuPrimed.value = true;
 	// The current query, which is usually empty - search_users answers an empty
 	// term with the first 20 enabled users, which is exactly the "who is there?"
 	// an admin opening the picker is asking.
-	runSearch(userQuery.value);
+	userSearch.prime();
 }
 
 const userOptions = computed(() => {
 	const taken = new Set(userDraft.value);
-	return userResults.value
+	return userSearch.options.value
 		.filter((u) => !taken.has(u.name))
 		.map((u) => ({
 			value: u.name,
@@ -236,26 +228,11 @@ const userOptions = computed(() => {
 		}));
 });
 
-async function runSearch(q) {
-	const seq = ++searchSeq;
-	try {
-		const rows = (await apiAgents.searchUsers(q)) || [];
-		if (seq === searchSeq) userResults.value = rows;
-	} catch {
-		// A failed lookup must not blank the picker mid-typing; the admin can still
-		// finish typing an address they already know. Still ordered: a stale error
-		// must not clear results a newer request has already delivered.
-		if (seq === searchSeq) userResults.value = [];
-	}
-}
 // Autocomplete owns its own search box and reports what was typed; selection is a
 // separate event, so unlike the previous free-text combobox there is no need to
 // guess whether a value is a keystroke or a pick.
 function onUserQuery(q) {
-	userQuery.value = q || "";
-	userMenuPrimed.value = true; // typing owns the menu from here
-	clearTimeout(searchTimer);
-	searchTimer = setTimeout(() => runSearch(userQuery.value), 200);
+	userSearch.onQuery(q);
 }
 
 function addUser(value) {
@@ -263,9 +240,7 @@ function addUser(value) {
 	if (!userDraft.value.includes(value)) userDraft.value = [...userDraft.value, value];
 	// Selected people drop out of userOptions, so refetch on the next open rather
 	// than showing a menu one entry short of what the server would return.
-	userQuery.value = "";
-	userResults.value = [];
-	userMenuPrimed.value = false;
+	userSearch.reprime();
 }
 function removeUser(u) {
 	userDraft.value = userDraft.value.filter((x) => x !== u);
@@ -281,7 +256,7 @@ function stopPoll() {
 }
 onBeforeUnmount(() => {
 	stopPoll();
-	clearTimeout(searchTimer);
+	userSearch.cleanup();
 });
 
 async function pollUntilTerminal() {
