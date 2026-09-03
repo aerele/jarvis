@@ -48,7 +48,7 @@
 			     recoverable on hover -->
 			<template #cell-trigger_label="{ row }">
 				<div
-					class="truncate text-base font-medium text-ink-gray-8"
+					class="truncate text-base font-medium text-ink-gray-9"
 					:title="row.trigger_label || row.trigger"
 				>
 					{{ row.trigger_label || row.trigger }}

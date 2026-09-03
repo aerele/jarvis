@@ -114,7 +114,9 @@
 			<template #cell-title="{ row }">
 				<div class="flex items-center gap-2 overflow-hidden">
 					<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-5" />
-					<div class="truncate text-base">{{ stripTitle(row.title) }}</div>
+					<div class="truncate text-base font-medium text-ink-gray-9">
+						{{ stripTitle(row.title) }}
+					</div>
 				</div>
 			</template>
 

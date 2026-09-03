@@ -30,6 +30,7 @@ class JarvisMacro(Document):
 		self._validate_unique_per_owner()
 		self._validate_owner_cap()
 		self._validate_schedule_time()
+		self._validate_schedule_day_of_month()
 		self._guard_skip_confirmation_enable()
 		self._recompute_next_run()
 
@@ -118,6 +119,16 @@ class JarvisMacro(Document):
 
 		validate_schedule_time_or_throw(self.schedule_time)
 
+	def _validate_schedule_day_of_month(self):
+		"""#653: refuse a ``schedule_day_of_month`` outside 1-31, same reasoning and
+		timing as ``_validate_schedule_time`` above (a Select-field weekday is
+		range-checked by the framework's own ``_validate_selects``; this Int field is
+		not, so the check is explicit here). Shared with ``JarvisAgentInstallation``
+		via ``macro_scheduler.validate_schedule_day_of_month_or_throw``."""
+		from jarvis.chat.macro_scheduler import validate_schedule_day_of_month_or_throw
+
+		validate_schedule_day_of_month_or_throw(self.schedule_day_of_month)
+
 	def _recompute_next_run(self):
 		"""Keep ``next_run_at`` in sync with the schedule fields. The scheduler
 		(``jarvis.chat.macro_scheduler``) advances it after each run via a raw
@@ -131,12 +142,19 @@ class JarvisMacro(Document):
 			or self.has_value_changed("schedule_enabled")
 			or self.has_value_changed("schedule_frequency")
 			or self.has_value_changed("schedule_time")
+			or self.has_value_changed("schedule_weekday")
+			or self.has_value_changed("schedule_day_of_month")
 			or not self.next_run_at
 		)
 		if changed:
 			from jarvis.chat.macro_scheduler import compute_next_run
 
-			self.next_run_at = compute_next_run(self.schedule_frequency, self.schedule_time)
+			self.next_run_at = compute_next_run(
+				self.schedule_frequency,
+				self.schedule_time,
+				weekday=self.schedule_weekday,
+				day_of_month=self.schedule_day_of_month,
+			)
 
 
 def on_doctype_update():

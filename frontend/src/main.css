@@ -200,3 +200,40 @@ body {
 .PopoverContent {
 	z-index: 120;
 }
+
+/* jarvis#653: frappe-ui's FormControl type="select" (reka-ui's SelectContent
+   under the hood) sets NO height cap on its popover. With few options that is
+   invisible; the Schedule section's monthly Day control (1st..31st, 31 rows)
+   grew the popover past the bottom of the viewport with no way to reach the
+   later rows - page scroll does not move a portaled popover, and there was
+   no internal scrollbar to scroll instead.
+
+   [data-slot="content-body"] is the wrapper div Select renders (see its own
+   scoped <style> block below), but Combobox and MultiSelect ALSO render an
+   element with that same data-slot, and both already cap their own inner
+   viewport (max-h-60/overflow-auto in ComboboxResults.vue) plus carry a
+   search input. A first version of this rule matched all three: on a short
+   viewport (about 500px, where 40vh is only 200px) that produced two nested
+   scroll regions, with Combobox/MultiSelect's search input scrolling away
+   independently of its own results below it.
+
+   The selector below scopes to Select ONLY. reka-ui's SelectContentImpl sets
+   role="listbox" on the popover's own outer element (an ANCESTOR of
+   [data-slot="content-body"], not the element itself - see
+   reka-ui/src/Select/SelectContentImpl.vue); neither ComboboxContentImpl nor
+   MultiSelect (built on the same ComboboxContent) ever sets that role
+   anywhere in their DOM. Verified by reading both trees in node_modules
+   rather than assumed - `role="listbox"` does not appear once in
+   reka-ui/src/Combobox/ or frappe-ui/src/components/MultiSelect/.
+
+   overflow-y is !important because Select's own class list already carries
+   `overflow-hidden` (Tailwind, same specificity as this attribute selector)
+   and load order between the two stylesheets is not something to rely on.
+
+   App-wide for the same reason as the two rules above: every plain Select in
+   the app (not just this one page) portals identically and none of them
+   wants an unreachable tail once its option list is long enough. */
+[role="listbox"] [data-slot="content-body"] {
+	max-height: 40vh;
+	overflow-y: auto !important;
+}

@@ -275,7 +275,13 @@
 							:modelValue="sched.enabled"
 							@update:modelValue="(v) => (sched.enabled = v)"
 						/>
-						<div v-if="sched.enabled" class="grid grid-cols-2 gap-4">
+						<div
+							v-if="sched.enabled"
+							:class="[
+								'grid gap-4',
+								sched.frequency === 'daily' ? 'grid-cols-2' : 'grid-cols-3',
+							]"
+						>
 							<FormControl
 								type="select"
 								label="Frequency"
@@ -291,11 +297,38 @@
 									@update:modelValue="(v) => (sched.time = v)"
 								/>
 							</div>
+							<!-- weekly -> weekday name, monthly -> day of month; hidden for
+							     daily. Copies the Frequency control above exactly (same
+							     FormControl type=select shape) - jarvis#653. Monthly's 31
+							     rows overflow this Select's popover with no cap of its own
+							     (frappe-ui's Select sets no max-height on its content, unlike
+							     Combobox/Autocomplete/MultiSelect) - the fix lives in
+							     src/main.css's [role="listbox"] [data-slot="content-body"]
+							     rule, app-wide for every plain Select, not here (nothing to
+							     add on this control itself). -->
+							<FormControl
+								v-if="sched.frequency !== 'daily'"
+								type="select"
+								label="Day"
+								:options="dayOptions"
+								:modelValue="sched.day"
+								@update:modelValue="(v) => (sched.day = v)"
+							/>
 						</div>
 						<div v-if="installation.next_run_at" class="text-sm text-ink-gray-5">
 							Next run: {{ fmtDt(installation.next_run_at) }}
 						</div>
+						<!-- owner feedback: the committed schedule, shown only while the form
+						     matches what is actually saved (scheduleDirty false) - editing any
+						     control hides this and reveals Save instead. -->
+						<div v-if="scheduleSummary" class="text-sm text-ink-gray-5">
+							{{ scheduleSummary }}
+						</div>
+						<!-- Save is not always-on chrome - it appears only once the form
+						     actually differs from the saved installation, and disappears
+						     again once a save lands. -->
 						<Button
+							v-if="scheduleDirty"
 							label="Save schedule"
 							:loading="savingSchedule"
 							@click="saveSchedule"
@@ -526,6 +559,12 @@ import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
 import { renderMarkdown } from "@/markdown";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import {
+	WEEKDAY_OPTIONS,
+	DAY_OF_MONTH_OPTIONS,
+	deriveScheduleDay,
+	scheduleAnchorPhrase,
+} from "@/lib/scheduleAnchor";
 
 const props = defineProps({
 	slug: { type: String, required: true },
@@ -900,22 +939,112 @@ function categoryTitle(slug) {
 }
 
 // ── Configure: schedule ───────────────────────────────────────────────────────
-const sched = ref({ enabled: false, frequency: "daily", time: "09:00" });
+const sched = ref({ enabled: false, frequency: "daily", time: "09:00", day: "" });
 const savingSchedule = ref(false);
+// jarvis#653: weekly -> weekday names, monthly -> 1..31 (ordinal labels) - the
+// Day control's own option list, keyed off the DRAFT frequency so it flips the
+// instant Frequency changes, before any save.
+const dayOptions = computed(() =>
+	sched.value.frequency === "weekly" ? WEEKDAY_OPTIONS : DAY_OF_MONTH_OPTIONS
+);
+// jarvis#653: guards the interactive-frequency-change watcher below from firing
+// off the SEED watch's own frequency+day assignment (which legitimately sets
+// day to "" for a legacy row with no anchor saved - the defaulting watcher must
+// not treat that as "needs a default"). True for exactly the synchronous
+// pre-flush window the seed watch's own effect runs in; nextTick clears it once
+// the DOM update (and any watcher chained off THIS assignment) has settled.
+let seedingSchedule = false;
 // seed once per installation (a background reload must not clobber edits)
 watch(
 	() => installation.value && installation.value.name,
 	(name) => {
 		if (!name) return;
+		seedingSchedule = true;
 		const inst = installation.value;
+		const freq = inst.schedule_frequency || "daily";
 		sched.value = {
 			enabled: !!inst.schedule_enabled,
-			frequency: inst.schedule_frequency || "daily",
+			frequency: freq,
 			time: timeHHMM(inst.schedule_time) || "09:00",
+			day: deriveScheduleDay(freq, inst.schedule_weekday, inst.schedule_day_of_month),
 		};
+		nextTick(() => {
+			seedingSchedule = false;
+		});
 	},
 	{ immediate: true }
 );
+// jarvis#653: an interactive Frequency change (NOT the seed above, guarded off
+// by `seedingSchedule`) needs its OWN default day - "Monday" for weekly, the
+// 1st for monthly - so the Day select never shows a visible option ("Monday")
+// while the model is empty (a phantom selection that would silently save
+// nothing). Only fills in when the current day does not already belong to the
+// new frequency's own option set, so switching away and back keeps whatever
+// the owner picked.
+watch(
+	() => sched.value.frequency,
+	(freq) => {
+		if (seedingSchedule) return;
+		if (freq === "weekly" && !WEEKDAY_OPTIONS.some((o) => o.value === sched.value.day)) {
+			sched.value.day = "Monday";
+		} else if (
+			freq === "monthly" &&
+			!DAY_OF_MONTH_OPTIONS.some((o) => o.value === sched.value.day)
+		) {
+			sched.value.day = "1";
+		}
+	}
+);
+// owner feedback: the ACTUAL saved shape, in `sched`'s own shape, derived
+// live off `installation` (not a second seeded ref) - so it tracks a
+// successful save's post-`load()` refresh for free, with no manual
+// dirty-reset bookkeeping to get wrong.
+const savedSched = computed(() => {
+	const inst = installation.value;
+	const freq = (inst && inst.schedule_frequency) || "daily";
+	return {
+		enabled: !!(inst && inst.schedule_enabled),
+		frequency: freq,
+		time: timeHHMM(inst && inst.schedule_time) || "09:00",
+		day: deriveScheduleDay(
+			freq,
+			inst && inst.schedule_weekday,
+			inst && inst.schedule_day_of_month
+		),
+	};
+});
+const scheduleDirty = computed(
+	() =>
+		sched.value.enabled !== savedSched.value.enabled ||
+		sched.value.frequency !== savedSched.value.frequency ||
+		// timeHHMM()-normalize both sides - TimePicker's own modelValue may
+		// carry seconds ("10:30:00"), while savedSched.time is already
+		// normalized to "HH:MM"; comparing raw would leave Save stuck visible
+		// after a successful time-only save (the two would never look equal).
+		timeHHMM(sched.value.time) !== savedSched.value.time ||
+		// both sides are always the SAME string shape (deriveScheduleDay / a
+		// native select's modelValue), so a plain compare is enough - no
+		// int-vs-string mismatch to normalize the way schedule_day_of_month
+		// arrives from the server.
+		sched.value.day !== savedSched.value.day
+);
+// "Scheduled monthly on the 15th at 9:00 am. Next run: Sat, Oct 3, 2026 9:00 AM"
+// (or, with no day anchor saved, the plain legacy wording: "Scheduled monthly
+// at 9:00 am. ...") - the SAVED frequency/time/day (never the unsaved draft)
+// plus the existing next_run_at rendering (fmtDt); empty while dirty (would
+// describe a state that no longer matches the form), when nothing is actually
+// scheduled, or when the SAVED schedule is off (a legacy/stale next_run_at
+// must not be narrated as a live schedule - "saved AND enabled").
+const scheduleSummary = computed(() => {
+	if (scheduleDirty.value || !savedSched.value.enabled) return "";
+	const nextRunAt = installation.value && installation.value.next_run_at;
+	if (!nextRunAt) return "";
+	const anchor = scheduleAnchorPhrase(savedSched.value.frequency, savedSched.value.day);
+	return (
+		`Scheduled ${savedSched.value.frequency}${anchor ? ` ${anchor}` : ""} ` +
+		`at ${formatTime12h(savedSched.value.time)}. Next run: ${fmtDt(nextRunAt)}`
+	);
+});
 
 async function saveSchedule() {
 	if (!installation.value || savingSchedule.value) return;
@@ -925,6 +1054,9 @@ async function saveSchedule() {
 			schedule_enabled: sched.value.enabled ? 1 : 0,
 			schedule_frequency: sched.value.frequency,
 			schedule_time: sched.value.time || "",
+			schedule_weekday: sched.value.frequency === "weekly" ? sched.value.day || "" : "",
+			schedule_day_of_month:
+				sched.value.frequency === "monthly" ? Number(sched.value.day) || 0 : 0,
 		});
 		toast.success("Schedule saved");
 		await load();
