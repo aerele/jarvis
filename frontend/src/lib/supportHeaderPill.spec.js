@@ -31,40 +31,16 @@ describe("supportAwaitingPhrase", () => {
 	});
 });
 
-const isAwaiting = (s) => s === "Replied" || s === "Resolved";
-
 describe("supportAwaitingRoute", () => {
-	it("routes to the list with the awaiting quick filter when count is not 1", () => {
-		expect(supportAwaitingRoute(3, [], isAwaiting)).toEqual({
-			name: "Support",
-			query: { status: "awaiting" },
-		});
-	});
-
-	it("routes straight to the single ticket when count is 1 and exactly one local row matches", () => {
-		const tickets = [
-			{ name: "T-1", status: "Open" },
-			{ name: "T-2", status: "Replied" },
-		];
-		expect(supportAwaitingRoute(1, tickets, isAwaiting)).toEqual({
-			name: "SupportTicket",
-			params: { ticket: "T-2" },
-		});
-	});
-
-	it("falls back to the list when count is 1 but the local ticket list has not loaded", () => {
-		expect(supportAwaitingRoute(1, [], isAwaiting)).toEqual({
-			name: "Support",
-			query: { status: "awaiting" },
-		});
-	});
-
-	it("falls back to the list when count is 1 but two local rows match (stale/mismatched cache)", () => {
-		const tickets = [
-			{ name: "T-1", status: "Resolved" },
-			{ name: "T-2", status: "Replied" },
-		];
-		expect(supportAwaitingRoute(1, tickets, isAwaiting)).toEqual({
+	// A shortcut here once routed straight to a single ticket's thread when
+	// the awaiting_count total was 1 and the store's already-loaded ticket
+	// list agreed. Dropped (hard review finding): awaitingCount is polled
+	// every 60s while store.tickets is only populated by an actual visit to a
+	// Support page and never re-fetched here, so the two numbers can drift
+	// and the "confident" match could route to a ticket that is no longer the
+	// one awaiting a reply. The list route is now the only route, always.
+	it("always routes to the list with the awaiting quick filter", () => {
+		expect(supportAwaitingRoute()).toEqual({
 			name: "Support",
 			query: { status: "awaiting" },
 		});

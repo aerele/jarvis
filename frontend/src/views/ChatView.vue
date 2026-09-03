@@ -341,9 +341,21 @@
 										d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"
 									/>
 								</svg>
-								<span class="jv-support-pill bg-surface-red-5">{{
-									supportPillLabel
-								}}</span>
+								<span
+									class="jv-support-pill bg-surface-red-5"
+									role="status"
+									aria-live="polite"
+								>
+									<span aria-hidden="true">{{ supportPillLabel }}</span>
+									<!-- sr-only: the button's own aria-label already carries this
+									     phrase for a focused/click read, but role="status" here is
+									     what makes it ANNOUNCE on its own while the user is heads-
+									     down typing elsewhere in chat - the same job the removed
+									     avatar dot's role="status" did. jv-sr is the same visually-
+									     hidden utility the turn-completion live region (srMessage,
+									     below in this template) uses. -->
+									<span class="jv-sr">{{ supportAwaitingPhraseText }}</span>
+								</span>
 							</button>
 						</template>
 					</Dropdown>
@@ -4718,13 +4730,7 @@ const supportAwaitingPhraseText = computed(() =>
 	supportAwaitingPhrase(supportAwaitingCount.value)
 );
 function goToAwaitingTickets() {
-	router.push(
-		supportAwaitingRoute(
-			supportAwaitingCount.value,
-			supportStore.tickets,
-			supportStore.isAwaiting
-		)
-	);
+	router.push(supportAwaitingRoute());
 }
 const supportMenuOptions = computed(() => [
 	{
@@ -4755,6 +4761,19 @@ const supportMenuOptions = computed(() => [
 		],
 	},
 ]);
+// This view only READS supportStore.awaitingCount - the 60s poll that keeps
+// it fresh belongs to UserMenu.vue (always mounted alongside chat), so no
+// second poller starts here. But that poller is on a timer, not a mount
+// hook, so the pill's FIRST paint here could be showing a stale/empty count
+// for up to 60s, and worse, could be simply wrong if UserMenu happens not to
+// be mounted (collapsed/off-canvas sidebar on phone). One extra one-shot
+// refresh on this view's own mount closes that gap without adding a second
+// timer. .catch() for the same reason as SupportThreadPage's calls: an
+// un-awaited rejection here would otherwise be unhandled (the real store
+// already catches its own errors, so this is belt-and-braces).
+onMounted(() => {
+	if (supportOn) supportStore.refreshAwaiting().catch(() => {});
+});
 // One-shot "ground on wiki": when armed, the NEXT message carries a
 // context.ground_wiki flag so the backend injects relevant wiki page bodies
 // into that turn. Cleared after each send (see send()).

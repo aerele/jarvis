@@ -121,13 +121,6 @@ const STATUS_OPTIONS = [
 ];
 const KNOWN_STATUS_VALUES = STATUS_OPTIONS.map((o) => o.value).filter(Boolean);
 
-// Deep-link seed (?status=) - same recipe as ApprovalsBoard's initialStatus
-// (route.query validated against the known quick-filter values, read once at
-// setup rather than watched). The chat header's ticket-count pill routes here
-// with ?status=awaiting so the list opens pre-filtered instead of showing
-// everything and making the user re-pick the filter they just clicked for.
-const initialStatus = KNOWN_STATUS_VALUES.includes(route.query.status) ? route.query.status : "";
-
 const ALL_COLUMNS = [
 	{ label: "Subject", key: "subject", width: 3 },
 	{ label: "Ticket", key: "name", width: "9rem" },
@@ -205,7 +198,7 @@ const sortOptions = [
 ];
 const DEFAULT_SORT = { field: "modified", dir: "desc" };
 
-const filters = reactive(initialStatus ? { status: initialStatus } : {});
+const filters = reactive({});
 const sort = ref({ ...DEFAULT_SORT });
 const pageLength = ref(20);
 const shown = ref(20);
@@ -215,6 +208,26 @@ function setFilters(next) {
 	for (const k of Object.keys(filters)) delete filters[k];
 	Object.assign(filters, next || {});
 }
+
+// Deep-link seed (?status=). NOT a one-time setup read: AppShell's single
+// router-view reuses THIS component instance across a same-route navigation
+// (e.g. the chat header pill's "Tickets awaiting reply" row pushing
+// {name:"Support", query:{status:"awaiting"}} while the user is already on
+// /support with some other filter picked) - setup only runs once per mount,
+// so a plain "read route.query.status at setup" misses every later arrival
+// at the same route. `immediate: true` covers the first mount too, so this
+// replaces that old one-shot seed rather than sitting alongside it. Unknown
+// values are ignored (filters.status is left as the user set it) rather than
+// cleared, so a stray/foreign query param can never blank out a filter picked
+// by hand - same as ApprovalsBoard's initialStatus validation, just re-run on
+// every arrival instead of once.
+watch(
+	() => route.query.status,
+	(status) => {
+		if (KNOWN_STATUS_VALUES.includes(status)) setFilters({ ...filters, status });
+	},
+	{ immediate: true }
+);
 
 function onPageLength(v) {
 	pageLength.value = v;

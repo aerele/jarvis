@@ -9,8 +9,12 @@ vi.mock("frappe-ui", () => ({
 }));
 // query is mutated per-test (see the route-query preselect describe block
 // below); useRoute() must keep returning the SAME object so a mount picks
-// up whatever the test set on it just before mounting.
-const routeDouble = { query: {} };
+// up whatever the test set on it just before mounting. reactive(), not a
+// plain object: the page's watch(() => route.query.status, ...) needs a
+// tracked dependency to react to a mutation made AFTER mount (the "reused
+// component instance on a same-route navigation" case) - a plain object
+// mutation is invisible to Vue's reactivity system.
+const routeDouble = reactive({ query: {} });
 vi.mock("vue-router", () => ({
 	useRouter: () => ({ push: vi.fn() }),
 	useRoute: () => routeDouble,
@@ -294,5 +298,39 @@ describe("deep-link seed from ?status= (header pill preselect)", () => {
 				.props("rows")
 				.map((r) => r.name)
 		).toHaveLength(5);
+	});
+
+	// AppShell's single router-view reuses THIS component instance across a
+	// same-route navigation (clicking the header pill's list link while
+	// already on /support does not remount the page), so the seed must be a
+	// live watch, not a one-time setup read - regression guard for that.
+	it("re-applies a NEW ?status= value on an already-mounted instance (reused router-view case)", async () => {
+		const w = mountList(); // no query - starts on "All"
+		expect(w.findComponent(ListPageStub).props("rows")).toHaveLength(5);
+
+		routeDouble.query.status = "awaiting";
+		await w.vm.$nextTick();
+
+		expect(
+			w
+				.findComponent(ListPageStub)
+				.props("rows")
+				.map((r) => r.name)
+		).toEqual(["T-2", "T-3"]);
+	});
+
+	it("does not clear a hand-picked filter when the route query later carries an unknown status", async () => {
+		const w = mountList();
+		await applyFilters(w, { status: "closed" }); // the user picks a filter by hand
+
+		routeDouble.query.status = "not-a-real-status";
+		await w.vm.$nextTick();
+
+		expect(
+			w
+				.findComponent(ListPageStub)
+				.props("rows")
+				.map((r) => r.name)
+		).toEqual(["T-4"]); // still the hand-picked "closed" filter, untouched
 	});
 });

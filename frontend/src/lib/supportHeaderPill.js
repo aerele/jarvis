@@ -21,21 +21,16 @@ export function supportAwaitingPhrase(count) {
 }
 
 // Where the header menu's "Tickets awaiting reply" row sends the viewer.
-// Straight to the one ticket's thread ONLY when both numbers agree: the
-// backend's awaiting_count total is exactly 1, AND the store's already-loaded
-// ticket list (loadTickets() - never fetched here, so this stays cheap) shows
-// exactly one row matching it. `tickets`/`isAwaiting` are passed in rather
-// than importing the store, so this stays pure and testable with a plain
-// array + a plain predicate. Anything short of that confident match - the
-// list not loaded yet, or a mismatch between the two counts - falls back to
-// the full list rather than guessing which ticket, or making a fresh network
-// call just to resolve one click.
-export function supportAwaitingRoute(count, tickets, isAwaiting) {
-	if (count === 1) {
-		const matches = (tickets || []).filter((t) => isAwaiting(t.status));
-		if (matches.length === 1) {
-			return { name: "SupportTicket", params: { ticket: matches[0].name } };
-		}
-	}
+//
+// A previous version routed straight to a ticket's thread when the count was
+// exactly 1 and the store's already-loaded ticket list agreed on which one.
+// Dropped: awaitingCount is a 60s-polled number (UserMenu's timer) while
+// store.tickets is only populated by an actual visit to a Support page and is
+// never re-fetched here, so the two can drift - a customer could reply on
+// another tab, or a second ticket could get a reply between the poll and the
+// click, and the "confident" single match would then route to a ticket that
+// is no longer (or never uniquely) the one awaiting a reply. The list route
+// is always correct, so it is the only route.
+export function supportAwaitingRoute() {
 	return { name: "Support", query: { status: "awaiting" } };
 }
