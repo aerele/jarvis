@@ -198,6 +198,8 @@ function installedInstallation(overrides = {}) {
 		synced_at: "",
 		schedule_enabled: 0,
 		schedule_frequency: "",
+		schedule_weekday: null,
+		schedule_day_of_month: null,
 		schedule_time: null,
 		next_run_at: null,
 		last_run_at: null,
@@ -581,6 +583,189 @@ describe("Configure tab: Schedule section - Save visibility, dirty tracking, sav
 		await flushPromises();
 
 		expect(scheduleSaveBtn(w)).toBeFalsy();
+	});
+
+	// jarvis#653: the weekly/monthly Day control - copies the Frequency
+	// FormControl exactly. `label` is not a declared prop on the FormControl
+	// stub, so it falls through as a plain attribute on the stub's single root
+	// element (a bare <select>) - a reliable way to pick the Day control out
+	// from the Frequency one, since the stub renders no <option>s for either
+	// (asserting the native <select>'s own .value would just read back "",
+	// which is why these check the component's modelValue/options PROPS
+	// instead of the DOM value).
+	function dayControl(w) {
+		return w
+			.findAllComponents({ name: "FormControl" })
+			.find((c) => c.attributes("label") === "Day");
+	}
+
+	it("no Day select for daily", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "daily",
+					schedule_time: "09:00:00",
+				}),
+			})
+		);
+		expect(dayControl(w)).toBeFalsy();
+	});
+
+	it("Day select renders with weekday options for weekly", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "weekly",
+					schedule_weekday: "Wednesday",
+					schedule_time: "09:00:00",
+				}),
+			})
+		);
+		const day = dayControl(w);
+		expect(day).toBeTruthy();
+		expect(day.props("modelValue")).toBe("Wednesday");
+		expect(day.props("options").map((o) => o.value)).toEqual([
+			"Monday",
+			"Tuesday",
+			"Wednesday",
+			"Thursday",
+			"Friday",
+			"Saturday",
+			"Sunday",
+		]);
+	});
+
+	it("Day select renders with day-of-month options for monthly", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "monthly",
+					schedule_day_of_month: 15,
+					schedule_time: "09:00:00",
+				}),
+			})
+		);
+		const day = dayControl(w);
+		expect(day).toBeTruthy();
+		expect(day.props("modelValue")).toBe("15");
+		expect(day.props("options")).toHaveLength(31);
+		expect(day.props("options")[14]).toEqual({ label: "15th", value: "15" });
+	});
+
+	it("save payload carries schedule_weekday for a weekly schedule", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "weekly",
+					schedule_weekday: "Friday",
+					schedule_time: "09:00:00",
+				}),
+			})
+		);
+		// dirty it with a time edit so Save appears, then save
+		await w.find('[data-testid="time-picker"]').trigger("click");
+		const btn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Save schedule");
+		api.setAgentSchedule.mockResolvedValue({
+			ok: true,
+			data: { name: "INST-1", next_run_at: null },
+		});
+		await btn.trigger("click");
+		await flushPromises();
+		expect(api.setAgentSchedule).toHaveBeenCalledWith(
+			"INST-1",
+			expect.objectContaining({
+				schedule_frequency: "weekly",
+				schedule_weekday: "Friday",
+				schedule_day_of_month: 0,
+			})
+		);
+	});
+
+	it("save payload carries schedule_day_of_month for a monthly schedule", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "monthly",
+					schedule_day_of_month: 15,
+					schedule_time: "09:00:00",
+				}),
+			})
+		);
+		await w.find('[data-testid="time-picker"]').trigger("click");
+		const btn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Save schedule");
+		api.setAgentSchedule.mockResolvedValue({
+			ok: true,
+			data: { name: "INST-1", next_run_at: null },
+		});
+		await btn.trigger("click");
+		await flushPromises();
+		expect(api.setAgentSchedule).toHaveBeenCalledWith(
+			"INST-1",
+			expect.objectContaining({
+				schedule_frequency: "monthly",
+				schedule_weekday: "",
+				schedule_day_of_month: 15,
+			})
+		);
+	});
+
+	it("summary line names the weekday for weekly", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "weekly",
+					schedule_weekday: "Monday",
+					schedule_time: "09:00:00",
+					next_run_at: "2026-10-05 09:00:00",
+				}),
+			})
+		);
+		const summary = w
+			.findAll("div.text-sm.text-ink-gray-5")
+			.find((d) => d.text().startsWith("Scheduled"));
+		expect(summary.text()).toContain("Scheduled weekly on Monday at 9:00 am.");
+	});
+
+	it("summary line names the ordinal day for monthly", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "monthly",
+					schedule_day_of_month: 15,
+					schedule_time: "09:00:00",
+					next_run_at: "2026-10-15 09:00:00",
+				}),
+			})
+		);
+		const summary = w
+			.findAll("div.text-sm.text-ink-gray-5")
+			.find((d) => d.text().startsWith("Scheduled"));
+		expect(summary.text()).toContain("Scheduled monthly on the 15th at 9:00 am.");
 	});
 
 	it("saved and enabled (clean): shows the one-line summary in the muted style", async () => {

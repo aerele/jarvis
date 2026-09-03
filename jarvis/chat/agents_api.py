@@ -238,6 +238,8 @@ def _enriched_catalog() -> list[dict]:
 				"sync_status",
 				"schedule_enabled",
 				"schedule_frequency",
+				"schedule_weekday",
+				"schedule_day_of_month",
 				"schedule_time",
 				"next_run_at",
 				"last_run_at",
@@ -262,6 +264,8 @@ def _enriched_catalog() -> list[dict]:
 		lst["installed_version"] = inst.installed_version if inst else None
 		lst["schedule_enabled"] = int(inst.schedule_enabled) if inst else 0
 		lst["schedule_frequency"] = inst.schedule_frequency if inst else None
+		lst["schedule_weekday"] = inst.schedule_weekday if inst else None
+		lst["schedule_day_of_month"] = (inst.schedule_day_of_month or None) if inst else None
 		lst["schedule_time"] = str(inst.schedule_time) if (inst and inst.schedule_time) else None
 		lst["next_run_at"] = str(inst.next_run_at) if (inst and inst.next_run_at) else None
 		lst["update_available"] = (
@@ -450,6 +454,8 @@ def get_agent(agent_slug: str) -> dict:
 			"synced_at",
 			"schedule_enabled",
 			"schedule_frequency",
+			"schedule_weekday",
+			"schedule_day_of_month",
 			"schedule_time",
 			"next_run_at",
 			"last_run_at",
@@ -460,6 +466,7 @@ def get_agent(agent_slug: str) -> dict:
 		i = inst[0]
 		i["enabled"] = int(i.enabled or 0)
 		i["schedule_enabled"] = int(i.schedule_enabled or 0)
+		i["schedule_day_of_month"] = i.schedule_day_of_month or None
 		i["schedule_time"] = str(i.schedule_time) if i.schedule_time else None
 		i["next_run_at"] = str(i.next_run_at) if i.next_run_at else None
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
@@ -510,6 +517,8 @@ def get_installations() -> list[dict]:
 			"synced_at",
 			"schedule_enabled",
 			"schedule_frequency",
+			"schedule_weekday",
+			"schedule_day_of_month",
 			"schedule_time",
 			"next_run_at",
 			"last_run_at",
@@ -784,6 +793,8 @@ def get_agent_admin_overview() -> dict:
 			"not_installable_reason",
 			"schedule_enabled",
 			"schedule_frequency",
+			"schedule_weekday",
+			"schedule_day_of_month",
 			"next_run_at",
 			"last_run_at",
 			"sync_status",
@@ -810,6 +821,8 @@ def get_agent_admin_overview() -> dict:
 				"not_installable_reason": i.not_installable_reason or None,
 				"schedule_enabled": int(i.schedule_enabled or 0),
 				"schedule_frequency": i.schedule_frequency,
+				"schedule_weekday": i.schedule_weekday or None,
+				"schedule_day_of_month": i.schedule_day_of_month or None,
 				"next_run_at": str(i.next_run_at) if i.next_run_at else None,
 				"last_run_at": str(i.last_run_at) if i.last_run_at else None,
 				"sync_status": i.sync_status,
@@ -892,6 +905,35 @@ def _bump_catalog_version() -> None:
 	frappe.clear_document_cache(_SETTINGS, _SETTINGS)
 
 
+def _default_schedule_weekday(sched: dict) -> str | None:
+	"""#653: resolve a listing's ``default_schedule`` weekday anchor, tolerantly
+	- an admin-authored default must never break an install (the controller's
+	own ``validate()`` is the throwing gate for a user-entered value; a bad
+	default here just falls back to "no anchor set" instead).
+
+	Reuses ``macro_scheduler._normalize_weekday``, the SAME reader every other
+	weekday input (the SPA, ``set_schedule``, the DocType controllers) goes
+	through - a listing default is not exempt from accepting the ISO-int form
+	(1-7) those callers all accept; a bespoke string-only check here silently
+	dropped a valid int weekday instead of resolving it. That reader returns a
+	0-6 index (Monday=0); convert it back to the Select field's own weekday
+	name for storage. Extracted as its own function (rather than inlined in
+	``install_agent``) so it is unit-testable without a DB fixture."""
+	from jarvis.chat.macro_scheduler import _WEEKDAY_NAMES, _normalize_weekday
+
+	idx = _normalize_weekday(sched.get("schedule_weekday"))
+	return _WEEKDAY_NAMES[idx] if idx is not None else None
+
+
+def _default_schedule_day_of_month(sched: dict) -> int | None:
+	"""#653 twin of ``_default_schedule_weekday``, for the monthly anchor."""
+	try:
+		day = int(sched.get("schedule_day_of_month"))
+	except (TypeError, ValueError):
+		return None
+	return day if 1 <= day <= 31 else None
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def install_agent(agent_slug: str) -> dict:
@@ -932,6 +974,12 @@ def install_agent(agent_slug: str) -> dict:
 	freq = str(sched.get("schedule_frequency") or "daily").strip().lower()
 	if freq not in _FREQUENCIES:
 		freq = "daily"
+	# #653: the two weekly/monthly anchors ride the same default_schedule JSON,
+	# tolerantly - an admin-authored listing default must never BREAK an install
+	# (the controller's own validate() is the throwing gate for a user-entered
+	# value; a bad default here just falls back to "no anchor set" instead).
+	weekday = _default_schedule_weekday(sched)
+	day_of_month = _default_schedule_day_of_month(sched)
 
 	doc = frappe.get_doc(
 		{
@@ -953,6 +1001,8 @@ def install_agent(agent_slug: str) -> dict:
 			"installed_at": frappe.utils.now(),
 			"schedule_enabled": int(sched.get("schedule_enabled") or 0),
 			"schedule_frequency": freq,
+			"schedule_weekday": weekday,
+			"schedule_day_of_month": day_of_month,
 		}
 	)
 	try:
@@ -1049,12 +1099,19 @@ def set_schedule(
 	schedule_enabled: int | None = None,
 	schedule_frequency: str | None = None,
 	schedule_time: str | None = None,
+	schedule_weekday: str | None = None,
+	schedule_day_of_month: int | None = None,
 ) -> dict:
 	"""Set an installed agent's audit schedule — pure DB write (O6: no restart).
 	Recomputes ``next_run_at`` when the schedule is enabled; CLEARS it when the
 	schedule is turned off (jarvis#1062 E2E defect: it previously kept the last
 	computed value, so the Configure tab kept showing a stale "Next run: ..."
-	after disabling the schedule)."""
+	after disabling the schedule).
+
+	``schedule_weekday``/``schedule_day_of_month`` (#653) are the weekly/monthly
+	anchors - optional, and only meaningful for their own frequency; the doctype's
+	own ``validate()`` re-checks both ranges (a Desk edit or data import bypasses
+	this endpoint entirely, so the range check cannot live here alone)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
@@ -1072,9 +1129,20 @@ def set_schedule(
 		doc.schedule_frequency = freq
 	if schedule_time is not None:
 		doc.schedule_time = schedule_time or None
+	if schedule_weekday is not None:
+		doc.schedule_weekday = schedule_weekday or None
+	if schedule_day_of_month is not None:
+		# cint (not the raw arg) so a stray "" or a non-numeric SPA payload lands
+		# on the doctype's own 1-31 validate() rather than a TypeError here.
+		doc.schedule_day_of_month = frappe.utils.cint(schedule_day_of_month) or None
 
 	if doc.schedule_enabled:
-		doc.next_run_at = compute_next_run(doc.schedule_frequency, doc.schedule_time)
+		doc.next_run_at = compute_next_run(
+			doc.schedule_frequency,
+			doc.schedule_time,
+			weekday=doc.schedule_weekday,
+			day_of_month=doc.schedule_day_of_month,
+		)
 	else:
 		doc.next_run_at = None
 	doc.save()
