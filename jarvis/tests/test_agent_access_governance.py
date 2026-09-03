@@ -307,6 +307,60 @@ class TestSetAgentAccess(AccessGovernanceCase):
 			frappe.db.set_value("User", self.named, "enabled", 1, update_modified=False)
 			frappe.db.commit()
 
+	def test_a_stale_disabled_grant_does_not_block_an_unrelated_edit(self):
+		"""Validation applies to what a call ADDS, not to what it carries forward.
+
+		Somebody granted access and later offboarded leaves a row naming a DISABLED
+		user. Re-validating the whole submitted list made an edit that never
+		mentioned them - changing a role, or the set_agent_roles shim passing the
+		existing people through - fail with a message about that person, and left
+		the admin no way to change the roles at all."""
+		allow_listing_for(SLUG, user=self.named)
+		frappe.db.set_value("User", self.named, "enabled", 0, update_modified=False)
+		frappe.db.commit()
+		try:
+			self._as(self.admin)
+			# The shim: roles only, users forwarded untouched.
+			res = agents_api.set_agent_roles(SLUG, [ROLE_GRANTED])
+			self.assertEqual(res["allowed_roles"], [ROLE_GRANTED])
+			# ...and the stale grant is still there, not silently revoked: disabling
+			# is reversible, so dropping it would make a suspension permanent.
+			frappe.set_user("Administrator")
+			detail = agents_api.get_agent(SLUG)
+			self.assertIn(self.named, detail["allowed_users"])
+		finally:
+			frappe.set_user("Administrator")
+			frappe.db.set_value("User", self.named, "enabled", 1, update_modified=False)
+			frappe.db.commit()
+
+	def test_adding_a_disabled_user_still_raises(self):
+		"""The relaxation above is scoped to CARRIED-FORWARD names only."""
+		frappe.db.set_value("User", self.named, "enabled", 0, update_modified=False)
+		frappe.db.commit()
+		try:
+			self._as(self.admin)
+			with self.assertRaises(frappe.ValidationError):
+				agents_api.set_agent_access(SLUG, roles=[], users=[self.named])
+		finally:
+			frappe.set_user("Administrator")
+			frappe.db.set_value("User", self.named, "enabled", 1, update_modified=False)
+			frappe.db.commit()
+
+	def test_a_grant_naming_a_deleted_user_is_dropped_not_raised(self):
+		"""A deleted user cannot stay: the child table's Link validation would
+		refuse the save outright and block every future access edit. It is dropped
+		(and logged) rather than raised, which is the one case where carrying a row
+		forward is impossible."""
+		ghost = _ensure_user("agov-ghost@example.com")
+		allow_listing_for(SLUG, user=ghost)
+		frappe.delete_doc("User", ghost, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+		self._as(self.admin)
+		res = agents_api.set_agent_access(SLUG, roles=[ROLE_GRANTED], users=[ghost])
+		self.assertEqual(res["allowed_roles"], [ROLE_GRANTED])
+		self.assertNotIn(ghost, res["allowed_users"])
+
 	def test_accepts_json_strings_from_the_http_layer(self):
 		# Over HTTP both lists arrive as JSON strings, not lists.
 		self._as(self.admin)
