@@ -47,6 +47,7 @@ class JarvisAgentInstallation(Document):
 		self._validate_owner_cap()
 		self._validate_run_as_user()
 		self._validate_schedule_time()
+		self._validate_schedule_day_of_month()
 		self._validate_schedule_budget()
 		self._guard_activation_transition()
 
@@ -169,6 +170,18 @@ class JarvisAgentInstallation(Document):
 		from jarvis.chat.macro_scheduler import validate_schedule_time_or_throw
 
 		validate_schedule_time_or_throw(self.schedule_time)
+
+	def _validate_schedule_day_of_month(self):
+		"""#653: the agent twin of ``JarvisMacro._validate_schedule_day_of_month`` —
+		refuse a ``schedule_day_of_month`` outside 1-31 on every save surface, for the
+		same reason ``_validate_schedule_time`` above gives (a Desk edit / data import /
+		direct ``doc.save()`` all bypass ``agents_api.set_schedule``). The weekday Select
+		is range-checked by the framework's own ``_validate_selects``; this Int field is
+		not, so the check is explicit. Shared rule lives in ``macro_scheduler`` so this
+		controller and ``JarvisMacro`` cannot drift apart."""
+		from jarvis.chat.macro_scheduler import validate_schedule_day_of_month_or_throw
+
+		validate_schedule_day_of_month_or_throw(self.schedule_day_of_month)
 
 	def _validate_schedule_budget(self):
 		"""A14: warn (do not hard-block) when an enabled schedule's expected monthly

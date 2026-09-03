@@ -21,6 +21,7 @@ the macro's owner (so the result conversation is theirs) and advancing
   try/except, so one bad row aborted the sweep for every other macro on the bench.
 """
 
+import calendar
 import datetime
 
 import frappe
@@ -98,7 +99,16 @@ def run_due_macros() -> None:
 	due = frappe.get_all(
 		MACRO,
 		filters={"schedule_enabled": 1, "next_run_at": ["<=", now]},
-		fields=["name", "macro_name", "owner", "enabled", "schedule_frequency", "schedule_time"],
+		fields=[
+			"name",
+			"macro_name",
+			"owner",
+			"enabled",
+			"schedule_frequency",
+			"schedule_time",
+			"schedule_weekday",
+			"schedule_day_of_month",
+		],
 	)
 	if not due:
 		return
@@ -219,7 +229,15 @@ def _consume_slot(m, now, *, stamp_last_run: bool = True) -> None:
 	``stamp_last_run=False`` moves the schedule on WITHOUT claiming a run happened:
 	``last_run_at`` is what the SPA renders as "last run", so stamping it for a slot
 	nothing executed is the #471 "the UI reports success" limb."""
-	values = {"next_run_at": compute_next_run(m.schedule_frequency, m.schedule_time, from_dt=now)}
+	values = {
+		"next_run_at": compute_next_run(
+			m.schedule_frequency,
+			m.schedule_time,
+			from_dt=now,
+			weekday=m.schedule_weekday,
+			day_of_month=m.schedule_day_of_month,
+		)
+	}
 	if stamp_last_run:
 		values["last_run_at"] = now
 	frappe.db.set_value(MACRO, m.name, values, update_modified=False)
@@ -274,20 +292,56 @@ def _notify_owner(m, reason: str) -> None:
 	)
 
 
-def compute_next_run(frequency: str, schedule_time, from_dt=None) -> datetime.datetime:
+_WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def compute_next_run(
+	frequency: str,
+	schedule_time,
+	from_dt=None,
+	weekday: str | int | None = None,
+	day_of_month: int | None = None,
+) -> datetime.datetime:
 	"""Next fire time strictly after ``from_dt`` (default now) at ``schedule_time``
 	on the given ``frequency`` (daily/weekly/monthly).
 
-	TOTAL by construction (#472): ``_time_to_seconds`` can only return a real time of
-	day, so ``base.replace(hour=...)`` can no longer raise ``ValueError`` on a value
-	that reached the row before this validation existed. That matters because the
-	function is called from the cron's bookkeeping, where a raise skipped every macro
-	after the offending one."""
+	``weekday`` (weekly) and ``day_of_month`` (monthly) are optional anchors
+	(#653): when given, the next occurrence lands ON that weekday / day of month
+	rather than simply +7 days / +1 month from ``from_dt``. Omitted or invalid
+	entirely (either argument), the function falls back to the original plain
+	advance — every existing caller that does not pass them keeps its old
+	behaviour verbatim.
+
+	TOTAL by construction (#472, extended by #653 to the two new anchors):
+	``_time_to_seconds`` can only return a real time of day, and
+	``_normalize_weekday``/``_normalize_day_of_month`` can only return a valid
+	index or ``None`` — never raise — so a garbage anchor is treated the same as
+	an absent one. That matters because the function is called from the cron's
+	bookkeeping, where a raise skipped every macro/install after the offending
+	one."""
 	base = get_datetime(from_dt) if from_dt else now_datetime()
 	secs = _time_to_seconds(schedule_time)
-	cand = base.replace(hour=secs // 3600, minute=(secs % 3600) // 60, second=0, microsecond=0)
+	hour, minute = secs // 3600, (secs % 3600) // 60
+	freq = str(frequency or "daily").strip().lower()
+	weekday_idx = _normalize_weekday(weekday) if freq == "weekly" else None
+	day = _normalize_day_of_month(day_of_month) if freq == "monthly" else None
+
+	if weekday_idx is not None:
+		cand = _weekly_candidate(base, hour, minute, weekday_idx)
+		while cand <= base:
+			cand = _weekly_candidate(cand + datetime.timedelta(days=1), hour, minute, weekday_idx)
+		return cand
+
+	if day is not None:
+		cand = _monthly_candidate(base, hour, minute, day)
+		while cand <= base:
+			anchor = add_to_date(cand.replace(day=1), months=1)
+			cand = _monthly_candidate(anchor, hour, minute, day)
+		return cand
+
+	cand = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
 	while cand <= base:
-		cand = _advance(cand, frequency)
+		cand = _advance(cand, freq)
 	return cand
 
 
@@ -297,6 +351,61 @@ def _advance(dt: datetime.datetime, frequency: str) -> datetime.datetime:
 	if frequency == "monthly":
 		return add_to_date(dt, months=1)
 	return add_to_date(dt, days=1)
+
+
+def _weekly_candidate(
+	base_date: datetime.datetime, hour: int, minute: int, weekday_idx: int
+) -> datetime.datetime:
+	"""The occurrence of ``weekday_idx`` (0=Monday..6=Sunday, ``datetime.weekday()``
+	convention) at ``hour``:``minute`` in the week containing ``base_date`` — which
+	may fall BEFORE ``base_date`` itself; the caller's ``while cand <= base`` loop
+	is what pushes it into the following week when that happens."""
+	delta = (weekday_idx - base_date.weekday()) % 7
+	day = base_date + datetime.timedelta(days=delta)
+	return day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _monthly_candidate(base_date: datetime.datetime, hour: int, minute: int, day: int) -> datetime.datetime:
+	"""The occurrence of day-of-month ``day`` (1-31) at ``hour``:``minute`` in
+	``base_date``'s own month, clamped to that month's last day (#653: day 31 in
+	February lands on the 28th/29th)."""
+	last_day = calendar.monthrange(base_date.year, base_date.month)[1]
+	return base_date.replace(day=min(day, last_day), hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _normalize_weekday(value) -> int | None:
+	"""Weekday index (0=Monday..6=Sunday) from a weekday name (case-insensitive,
+	matching the Select field's options) or an ISO weekday int (1=Monday..7=Sunday).
+	``None`` for anything else — a missing, blank, or garbage value included — so
+	the caller falls back to the plain +7-days advance (#653, extending #472's
+	TOTAL guarantee to this anchor)."""
+	if value is None or value == "":
+		return None
+	if isinstance(value, str):
+		name = value.strip().capitalize()
+		if name in _WEEKDAY_NAMES:
+			return _WEEKDAY_NAMES.index(name)
+		try:
+			value = int(value)
+		except ValueError:
+			return None
+	try:
+		n = int(value)
+	except (TypeError, ValueError):
+		return None
+	return n - 1 if 1 <= n <= 7 else None
+
+
+def _normalize_day_of_month(value) -> int | None:
+	"""1-31, or ``None`` for anything else — including the ``0`` an unset Int
+	field reads as (Frappe coerces a blank Int to 0, not ``None``) and any
+	garbage that reached the row before validation existed (#653, same TOTAL
+	shape as ``_normalize_weekday``)."""
+	try:
+		n = int(value)
+	except (TypeError, ValueError):
+		return None
+	return n if 1 <= n <= 31 else None
 
 
 def parse_schedule_seconds(t) -> int | None:
@@ -381,6 +490,23 @@ def validate_schedule_time_or_throw(value) -> None:
 		frappe.throw(
 			frappe._("Schedule time must be a time of day between 00:00:00 and 23:59:59."),
 			title=frappe._("Invalid schedule time"),
+		)
+
+
+def validate_schedule_day_of_month_or_throw(value) -> None:
+	"""Refuse a ``schedule_day_of_month`` that is not 1-31, with the field error the
+	SPA renders. Companion to ``validate_schedule_time_or_throw`` — same ONE-definition
+	reasoning, called by both ``JarvisMacro`` and ``JarvisAgentInstallation`` (#653).
+
+	``0`` is exempt alongside ``None``/``""``: Frappe coerces a blank Int field to
+	``0`` rather than ``None``, so an unset value reaches here as ``0`` on every
+	normal save path — that is "not set", not "the 0th day"."""
+	if value in (None, "", 0):
+		return
+	if _normalize_day_of_month(value) is None:
+		frappe.throw(
+			frappe._("Day of month must be between 1 and 31."),
+			title=frappe._("Invalid schedule day"),
 		)
 
 

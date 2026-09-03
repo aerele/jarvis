@@ -581,3 +581,136 @@ class TestScheduleTimeValidation(MacroSchedulerBase):
 			with self.subTest(bad=bad):
 				nxt = macro_scheduler.compute_next_run("daily", bad)
 				self.assertEqual((nxt.hour, nxt.minute), (9, 0))
+
+
+class TestScheduleDayOfMonthValidation(MacroSchedulerBase):
+	"""The #653 twin of ``TestScheduleTimeValidation`` above: ``schedule_day_of_month``
+	is an Int field Frappe never range-checks on its own, so a bad value must be
+	refused the same way an out-of-range ``schedule_time`` is."""
+
+	def _save(self, tag: str, day_of_month, frequency: str = "monthly"):
+		doc = frappe.get_doc(
+			{
+				"doctype": MACRO,
+				"macro_name": f"{PFX}-{tag}",
+				"enabled": 1,
+				"schedule_enabled": 1,
+				"schedule_frequency": frequency,
+				"schedule_day_of_month": day_of_month,
+				"steps": [{"prompt": "p1"}],
+			}
+		)
+		doc.flags.ignore_permissions = True
+		doc.insert()
+		return doc
+
+	def test_out_of_range_day_of_month_is_refused_cleanly(self):
+		for bad in (0, 32, -1, 100):
+			with self.subTest(bad=bad):
+				with self.assertRaises(frappe.ValidationError):
+					self._save(f"bad-{bad}", bad)
+
+	def test_valid_days_of_month_are_accepted_and_scheduled(self):
+		for good in (1, 15, 31):
+			with self.subTest(good=good):
+				doc = self._save(f"ok-{good}", good)
+				self.assertTrue(doc.next_run_at, "a valid day must still produce a next_run_at")
+
+	def test_unset_day_of_month_is_exempt(self):
+		# An Int field left blank reaches validate() as 0, not None - "not set",
+		# never "the 0th day" (#653's exemption, mirroring the empty-string exemption
+		# schedule_time gets).
+		doc = self._save("unset", None)
+		self.assertTrue(doc.next_run_at)
+
+	def test_out_of_range_weekday_select_is_refused_by_the_framework(self):
+		# schedule_weekday is a Select field - Frappe's own _validate_selects()
+		# refuses a value outside its options list, so no bespoke throw is needed
+		# here (unlike the Int field above).
+		doc = frappe.get_doc(
+			{
+				"doctype": MACRO,
+				"macro_name": f"{PFX}-bad-weekday",
+				"enabled": 1,
+				"schedule_enabled": 1,
+				"schedule_frequency": "weekly",
+				"schedule_weekday": "Blursday",
+				"steps": [{"prompt": "p1"}],
+			}
+		)
+		doc.flags.ignore_permissions = True
+		with self.assertRaises(frappe.ValidationError):
+			doc.insert()
+
+
+class TestComputeNextRunAnchors(FrappeTestCase):
+	"""Pure arithmetic, no DB writes needed - the anchors compute_next_run gained
+	for #653 (weekly weekday, monthly day-of-month), and the TOTAL guarantee
+	(#472) extended to cover them: a missing, None, or garbage anchor value must
+	fall back to the plain +7-days / +1-month advance and never raise."""
+
+	def test_weekly_anchor_skips_to_next_occurrence_when_todays_has_passed(self):
+		# Monday 10:00, target Monday 09:00 -> already passed today, so next Monday.
+		nxt = macro_scheduler.compute_next_run(
+			"weekly", "09:00:00", from_dt="2026-09-07 10:00:00", weekday="Monday"
+		)
+		self.assertEqual(nxt.strftime("%A"), "Monday")
+		self.assertEqual(nxt.date().isoformat(), "2026-09-14")
+
+	def test_weekly_anchor_same_day_when_the_time_has_not_passed_yet(self):
+		nxt = macro_scheduler.compute_next_run(
+			"weekly", "09:00:00", from_dt="2026-09-07 08:00:00", weekday="Monday"
+		)
+		self.assertEqual(nxt.date().isoformat(), "2026-09-07")
+
+	def test_weekly_anchor_picks_a_different_weekday(self):
+		nxt = macro_scheduler.compute_next_run(
+			"weekly", "09:00:00", from_dt="2026-09-07 08:00:00", weekday="Friday"
+		)
+		self.assertEqual(nxt.strftime("%A"), "Friday")
+		self.assertEqual(nxt.date().isoformat(), "2026-09-11")
+
+	def test_monthly_anchor_clamps_day_31_in_february_then_returns_to_31_in_march(self):
+		# 2026 is not a leap year: Feb has 28 days.
+		feb = macro_scheduler.compute_next_run(
+			"monthly", "09:00:00", from_dt="2026-01-31 09:00:01", day_of_month=31
+		)
+		self.assertEqual(feb.date().isoformat(), "2026-02-28")
+
+		mar = macro_scheduler.compute_next_run("monthly", "09:00:00", from_dt=str(feb), day_of_month=31)
+		self.assertEqual(mar.date().isoformat(), "2026-03-31")
+
+	def test_monthly_anchor_clamps_to_29_in_a_leap_february(self):
+		nxt = macro_scheduler.compute_next_run(
+			"monthly", "09:00:00", from_dt="2028-01-31 09:00:01", day_of_month=31
+		)
+		self.assertEqual(nxt.date().isoformat(), "2028-02-29")
+
+	def test_no_anchor_falls_back_to_the_plain_advance(self):
+		# Same shape every pre-#653 caller still uses: weekday/day_of_month omitted.
+		weekly = macro_scheduler.compute_next_run("weekly", "09:00:00", from_dt="2026-09-07 10:00:00")
+		self.assertEqual(weekly.date().isoformat(), "2026-09-14")
+		monthly = macro_scheduler.compute_next_run("monthly", "09:00:00", from_dt="2026-01-31 10:00:00")
+		self.assertEqual(monthly.date().isoformat(), "2026-02-28")
+
+	def test_garbage_anchors_never_raise_and_fall_back_to_the_plain_advance(self):
+		for weekday in ("Blursday", 0, 8, "", [], {}):
+			with self.subTest(weekday=weekday):
+				nxt = macro_scheduler.compute_next_run(
+					"weekly", "09:00:00", from_dt="2026-09-07 10:00:00", weekday=weekday
+				)
+				self.assertEqual(nxt.date().isoformat(), "2026-09-14")
+		for day in (0, 32, -1, "abc", None, [], {}):
+			with self.subTest(day=day):
+				nxt = macro_scheduler.compute_next_run(
+					"monthly", "09:00:00", from_dt="2026-01-31 10:00:00", day_of_month=day
+				)
+				self.assertEqual(nxt.date().isoformat(), "2026-02-28")
+
+	def test_a_garbage_schedule_time_still_never_raises_alongside_a_valid_anchor(self):
+		# #472's TOTAL guarantee and #653's anchors compose: a bad time AND a good
+		# anchor together still fall back cleanly (09:00 default time).
+		nxt = macro_scheduler.compute_next_run(
+			"weekly", "not-a-time", from_dt="2026-09-07 10:00:00", weekday="Monday"
+		)
+		self.assertEqual((nxt.hour, nxt.minute), (9, 0))

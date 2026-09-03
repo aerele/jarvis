@@ -153,6 +153,7 @@ import { useListPage } from "@/composables/useListPage";
 import { macrosListFetch } from "@/pages/list/listFetchers";
 import RunsTab from "./RunsTab.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
+import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
 import { errHtml } from "@/lib/errors";
@@ -345,7 +346,12 @@ onBeforeUnmount(() => {
 // ── cell helpers ─────────────────────────────────────────────────────────────
 function scheduleLabel(row) {
 	const freq = row.schedule_frequency || "scheduled";
-	const label = freq.charAt(0).toUpperCase() + freq.slice(1);
+	let label = freq.charAt(0).toUpperCase() + freq.slice(1);
+	// jarvis#653: "Weekly on Monday" / "Monthly on the 15th" when the row has an
+	// anchor saved; unchanged ("Weekly") for a legacy row with none.
+	const day = deriveScheduleDay(freq, row.schedule_weekday, row.schedule_day_of_month);
+	const anchor = scheduleAnchorPhrase(freq, day);
+	if (anchor) label = `${label} ${anchor}`;
 	const t = toHHMM(row.schedule_time);
 	return t ? `${label} · ${t}` : label;
 }
