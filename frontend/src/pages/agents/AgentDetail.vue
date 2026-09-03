@@ -618,6 +618,12 @@ function blockedReason(row) {
 // ── data ──────────────────────────────────────────────────────────────────────
 const agent = ref(null); // get_agent payload (§8.3)
 const error = ref("");
+// jarvis#1062 fix: Configure/Runs only exist once `installation` resolves
+// (tabs computed, below) - true only after this first settles (success or
+// error). applyHash() reads this to tell "the hash names a tab that does
+// not exist YET" (still loading - wait) apart from "...that never will"
+// (settled - give up to Overview for real).
+const initialLoadSettled = ref(false);
 
 async function load() {
 	try {
@@ -627,7 +633,10 @@ async function load() {
 		error.value = errMsg(e);
 	}
 }
-load().then(applyHash);
+load().then(() => {
+	initialLoadSettled.value = true;
+	applyHash();
+});
 watch(
 	() => props.slug,
 	() => {
@@ -635,7 +644,11 @@ watch(
 		error.value = "";
 		adminData.value = null;
 		activation.value = null;
-		load().then(applyHash);
+		initialLoadSettled.value = false;
+		load().then(() => {
+			initialLoadSettled.value = true;
+			applyHash();
+		});
 	}
 );
 
@@ -724,7 +737,21 @@ const tabs = computed(() => {
 
 function applyHash() {
 	const h = (route.hash || "").replace(/^#/, "");
-	tab.value = tabs.value.some((t) => t.value === h) ? h : "overview";
+	if (!h) {
+		tab.value = "overview";
+		return;
+	}
+	if (tabs.value.some((t) => t.value === h)) {
+		tab.value = h;
+		return;
+	}
+	// h names a tab that is not in the set RIGHT NOW - Configure/Runs need
+	// `installation`, which is only known once the async get_agent fetch
+	// resolves. Only a settled load makes "not in tabs.value" a real verdict;
+	// until then, leave tab.value alone (the page shows "Loading agent…"
+	// regardless) rather than lock in Overview and drop the requested tab -
+	// load()/the slug watcher re-run applyHash() once settled.
+	if (initialLoadSettled.value) tab.value = "overview";
 }
 function setTab(v) {
 	if (tab.value === v && route.hash === "#" + v) return;

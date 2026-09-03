@@ -298,8 +298,15 @@ function selectRun(row) {
 // refresh or a later facet change never re-triggers it and the query never
 // sits there unsatisfiable.
 function clearRunQuery() {
+	// jarvis#1062 fix: router.replace({query}) alone is a PARTIAL location - it
+	// does not implicitly keep the current hash, it DROPS it (verified against
+	// the real vue-router: {query} alone resolves to the bare path, no hash at
+	// all). That silently knocked AgentDetail off the Runs tab back to Overview
+	// a moment after landing on it - route.hash changing to "" is exactly what
+	// its own hash watcher treats as "go to the default tab". Pass hash back
+	// explicitly so this is a query-only edit, not a hash-clearing one too.
 	const { run: _run, ...rest } = route.query;
-	router.replace({ query: rest });
+	router.replace({ hash: route.hash, query: rest });
 }
 
 // auto-select the first row; on refresh, re-pin the selection to the fresh row

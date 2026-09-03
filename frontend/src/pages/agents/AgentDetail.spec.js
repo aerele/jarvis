@@ -343,3 +343,70 @@ describe("Configure tab: two-column layout on lg+ (jarvis#1062 polish, matches t
 		expect(grid.text()).toContain("Configuration");
 	});
 });
+
+describe("jarvis#1062 fix: a #runs deep link survives the pending agent/installation fetch", () => {
+	it("lands on Runs (not Overview) once installation resolves, from a hash requested before load", async () => {
+		routeMock.hash = "#runs";
+		routeMock.query = { run: "RUN-9" };
+		let resolveFetch;
+		apiAgents.getAgent.mockReturnValue(
+			new Promise((res) => {
+				resolveFetch = res;
+			})
+		);
+		apiAgents.getInstallationActivation.mockResolvedValue(null);
+
+		const w = mount(AgentDetail, { props: { slug: "close-auditor" } });
+		await flushPromises();
+		// Still loading - AgentRunsBoard cannot exist yet (no installation to
+		// gate it on), but the hash must not have been thrown away either.
+		expect(w.text()).toContain("Loading agent");
+		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(false);
+		expect(routeMock.query.run).toBe("RUN-9");
+
+		resolveFetch(baseAgent({ installation: installedInstallation({ enabled: 1 }) }));
+		await flushPromises();
+		await flushPromises();
+
+		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(true);
+		// AgentDetail's own job stops at landing on the right tab - it must not
+		// have consumed/cleared the run query itself; that is AgentRunsBoard's
+		// job (see AgentRunsBoard.spec.js), and it needs the query intact when
+		// it mounts.
+		expect(routeMock.query.run).toBe("RUN-9");
+	});
+
+	it("a non-run hash (#overview) is unaffected - resolves immediately, no wait needed", async () => {
+		routeMock.hash = "#overview";
+		routeMock.query = {};
+		let resolveFetch;
+		apiAgents.getAgent.mockReturnValue(
+			new Promise((res) => {
+				resolveFetch = res;
+			})
+		);
+		apiAgents.getInstallationActivation.mockResolvedValue(null);
+
+		const w = mount(AgentDetail, { props: { slug: "close-auditor" } });
+		await flushPromises();
+		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(false);
+
+		resolveFetch(baseAgent({ installation: installedInstallation({ enabled: 1 }) }));
+		await flushPromises();
+		await flushPromises();
+
+		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(false);
+		expect(w.findComponent({ name: "ConfigForm" }).exists()).toBe(false);
+	});
+
+	it("an eventually-invalid hash still falls back to Overview once the load truly settles", async () => {
+		routeMock.hash = "#nonexistent-tab";
+		routeMock.query = {};
+		const w = await mountDetail(
+			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
+		);
+		// "nonexistent-tab" was never going to exist - overview wins once the
+		// load has settled, same as before this fix.
+		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(false);
+	});
+});
