@@ -1,0 +1,98 @@
+name: Release guard
+
+# Stable branches (version-N) accept exactly one kind of PR: the release PR from their own
+# hotfix branch (version-N-hotfix). Backports target the hotfix branch; a release is the
+# merge of hotfix into stable. This job fails any other PR into a stable branch, and on a
+# release PR it also fails unless __version__ moved up and matches the line. See
+# CONTRIBUTING.md.
+#
+# Enforcement is a repo-settings matter, not this file's: the job only blocks a merge once
+# `release-source` is listed as a required status check on the version-* rulesets. Until
+# then it is advisory, a red check a reviewer has to notice.
+#
+# Two deliberate choices:
+#   * pull_request_target, not pull_request: the workflow then comes from the BASE branch's
+#     copy of this file, so a head branch that predates it, or a fork that deletes it, does
+#     not silently produce "no check". Safe here because nothing is checked out and no
+#     head code runs; the job only reads event fields and, for a release PR, fetches one
+#     file through the API.
+#   * Its own workflow, not a job in ci.yml: `edited` is the event GitHub sends when a
+#     PR's BASE is changed. Retargeting a green PR from develop to version-16 must re-run
+#     this check, but re-running the whole test matrix on every title edit would be waste.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+# Repeated `edited` events (title tweaks, a double retarget) supersede each other.
+concurrency:
+  group: release-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  release-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      BASE: ${{ github.base_ref }}
+      HEAD: ${{ github.head_ref }}
+      HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      THIS_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: A retargeted PR must be pushed to or reopened before it can merge
+        # ci.yml does not run on `edited` (see the note there), so after a base change its
+        # green checks describe the OLD base. Fail here until a push or a close/reopen
+        # makes CI run against the new one; both events re-run this job too.
+        if: github.event.action == 'edited' && github.event.changes.base != null
+        run: |
+          echo "::error::Base changed from ${{ github.event.changes.base.ref.from }} to $BASE. CI has not run against the new base: push a commit or close and reopen this PR."
+          exit 1
+
+      - name: Only version-N-hotfix (same repo) may open a PR into version-N
+        run: |
+          case "$BASE" in
+            version-[0-9]*-hotfix) echo "hotfix base: any head is allowed"; exit 0 ;;
+            version-[0-9]*) ;;
+            *) echo "not a stable base: nothing to check"; exit 0 ;;
+          esac
+          if [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            echo "::error::PRs into $BASE must come from a branch in $THIS_REPO, not a fork (got $HEAD_REPO:$HEAD)."
+            exit 1
+          fi
+          if [ "$HEAD" != "${BASE}-hotfix" ]; then
+            echo "::error::PRs into $BASE must come from ${BASE}-hotfix (got $HEAD). Retarget this PR to ${BASE}-hotfix; a release is cut by merging ${BASE}-hotfix into $BASE."
+            exit 1
+          fi
+          echo "release PR: $HEAD -> $BASE"
+
+      - name: A release PR must raise __version__ and stay on its line
+        # Runs only for the release-PR shape (a non-release PR into a stable branch already
+        # failed above; a non-stable base skips). A release that ships without the bump
+        # leaves every bench on it stuck behind the control plane's release notice, with
+        # nothing to dismiss it. Read through the API: nothing is checked out here.
+        if: startsWith(github.base_ref, 'version-') && !endsWith(github.base_ref, '-hotfix')
+        run: |
+          read_version() {
+            gh api "repos/$THIS_REPO/contents/jarvis/__init__.py?ref=$1" --jq .content \
+              | base64 -d | sed -n 's/^__version__ = "\([^"]*\)".*/\1/p'
+          }
+          base_v="$(read_version "$BASE_SHA")"
+          head_v="$(read_version "$HEAD_SHA")"
+          line="${BASE#version-}"
+          echo "base $base_v -> head $head_v (line $line)"
+          if [ -z "$head_v" ]; then
+            echo "::error::could not read __version__ from jarvis/__init__.py on $HEAD"; exit 1
+          fi
+          if [ "${head_v%%.*}" != "$line" ]; then
+            echo "::error::__version__ $head_v is not on the $line.x line of $BASE"; exit 1
+          fi
+          if [ "$(printf '%s\n%s\n' "$base_v" "$head_v" | sort -V | tail -1)" != "$head_v" ] || [ "$base_v" = "$head_v" ]; then
+            echo "::error::__version__ must move up on a release PR: $BASE has $base_v, $HEAD has $head_v. Bump jarvis/__init__.py on $HEAD first."; exit 1
+          fi
+          echo "version bump ok"

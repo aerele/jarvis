@@ -2,8 +2,10 @@
 #
 # What it does: when a PR merged into `develop` carries a `backport-version-15`
 # or a `backport-version-16` label, Mergify opens a backport PR that cherry-picks
-# the same commits onto `version-15` / `version-16`. Add both labels to backport
-# to both branches at once.
+# the same commits onto `version-15-hotfix` / `version-16-hotfix`. Add both labels
+# to backport to both lines at once. Backports never target the stable branches
+# (`version-15` / `version-16`) directly: those only take the release PR that
+# merges the hotfix branch into them. See CONTRIBUTING.md.
 #
 # Timing: the backport PR is created when the source PR is merged. Adding the
 # label to an already-merged PR also works, because Mergify re-evaluates and
@@ -29,7 +31,7 @@ pull_request_rules:
     actions:
       backport:
         branches:
-          - version-15
+          - version-15-hotfix
         assignees:
           - "{{ author }}"
 
@@ -40,6 +42,6 @@ pull_request_rules:
     actions:
       backport:
         branches:
-          - version-16
+          - version-16-hotfix
         assignees:
           - "{{ author }}"
