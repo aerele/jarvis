@@ -44,6 +44,13 @@
 	// mounted under createWebHistory("/jarvis")), used by the renew-plan CTA.
 	// Same hand-kept-in-sync constraint as AI_MODELS_SETTINGS_URL above.
 	var BILLING_URL = "/jarvis/billing";
+	// The wizard resumes whatever step was last persisted unless the URL
+	// explicitly says otherwise - a bare /jarvis/onboarding link lands a
+	// reconnecting customer back on that stale step, not the reconnect offer.
+	// Must match readiness.js's RECONNECT_INTENT_URL (hasReconnectIntent() is
+	// what OnboardingView.vue checks), same hand-kept-in-sync constraint as the
+	// two constants above.
+	var RECONNECT_INTENT_URL = "/jarvis/onboarding?reconnect=1";
 	// Floor between server re-checks for the chatty triggers (route change,
 	// tab focus). A bfcache restore bypasses it: that is the exact moment the
 	// flag is most likely stale and the user is looking straight at it.
@@ -51,33 +58,36 @@
 	var lastCheckAt = 0;
 	var checking = false;
 
-	// jarvis#<this PR>: reasons that mean "an established workspace's control
-	// plane is between states" (still provisioning, a confirmed outage, an
-	// unresolved authority incident, or an account moved to a different site) -
-	// none of them are fixed by anything a Desk nudge can offer, and every one
-	// is reachable only AFTER is_ready_for_chat's local signup+credential
-	// checks already passed (account.py's _admin_chat_gate, or - for the two
-	// provisioning reasons - an established workspace whose apply-confirmed
-	// marker was cleared without a fresh apply timestamp to soften it into
-	// llm_applying/llm_apply_stuck). Sending any of these through the
-	// never-onboarded "Set up Jarvis" pitch would be exactly the bug this table
-	// exists to fix, and there is no honest, specific copy for them yet worth
-	// writing a whole bubble around - so the nudge stays quiet instead. The SPA
-	// gate (frontend/src/onboarding/readiness.js's NOT_ONBOARDED_REASONS) never
-	// force-redirects any of these either; it is the authority for which
-	// reasons truly mean "no history to protect" and this list is deliberately
-	// the complement of that.
+	// Reasons that mean "an established workspace's control plane is between
+	// states" (still mid-apply, a confirmed outage, an unresolved authority
+	// incident, or an account moved to a different site) - none of them are
+	// fixed by anything a Desk nudge can offer, every one is reachable only
+	// AFTER is_ready_for_chat's local signup+credential checks already passed
+	// (account.py's _admin_chat_gate), and there is no honest, specific copy
+	// for them yet worth writing a whole bubble around - so the nudge stays
+	// quiet instead. The SPA gate (frontend/src/onboarding/readiness.js's
+	// NOT_ONBOARDED_REASONS) never force-redirects any of these either.
+	//
+	// Deliberately NOT here: llm_pool_provisioning / llm_provisioning. Those
+	// two ALSO cover the exact "disconnected all models, apply-confirmed
+	// marker cleared with no fresh apply timestamp to soften it into
+	// llm_applying" shape for an established workspace (account.py's
+	// _provisioning_verdict), and nothing else on the Desk offers that
+	// workspace a CTA - suppressing them here would leave it with no way
+	// back in. See nudgeVariant()'s own case for the two.
 	var SUPPRESSED_REASONS = [
-		// jarvis C2 (pre-existing): an established workspace's first pool/direct
+		// Pre-existing (jarvis C2): an established workspace's first pool/direct
 		// leg is mid-apply.
 		"llm_applying",
 		"container_provisioning",
 		"container_unavailable",
-		"llm_pool_provisioning",
-		"llm_provisioning",
 		"authority_repair_required",
 		"site_replaced",
 	];
+
+	function isSuppressedReason(reason) {
+		return SUPPRESSED_REASONS.indexOf(reason || "") !== -1;
+	}
 
 	// ERPNext's own setup wizard must be finished first: completing it creates
 	// the first Company. Until then the desk IS the setup wizard, so nudging the
@@ -116,7 +126,7 @@
 		// entirely for those rather than routing them through nudgeVariant(): an
 		// established workspace between states needs no Desk nudge at all, and
 		// the "Set up Jarvis" fallback pitch would be actively wrong for it.
-		if (SUPPRESSED_REASONS.indexOf(frappe.boot.jarvis_ready_reason || "") !== -1) return false;
+		if (isSuppressedReason(frappe.boot.jarvis_ready_reason)) return false;
 		if (!erpnextSetupComplete()) return false;
 		// A second, sturdier setup signal alongside the sysdefaults flag above:
 		// the Company count (jarvis_site_setup_complete, set in jarvis.boot)
@@ -301,8 +311,12 @@
 		// only reachable after signup + credentials passed once. The recovery is
 		// the wizard's OWN reconnect step (OnboardingView.vue's
 		// startAccountReconnect / can_reconnect offer) - there is no equivalent
-		// action in Settings, so this still points at /jarvis/onboarding, but
-		// with honest copy instead of the never-set-up "meet Jarvis" pitch below.
+		// action in Settings, so this still points at the wizard, but with honest
+		// copy instead of the never-set-up "meet Jarvis" pitch below, and at
+		// RECONNECT_INTENT_URL rather than a bare /jarvis/onboarding: without the
+		// reconnect=1 flag OnboardingView.vue resumes whatever step was last
+		// persisted instead of rendering the reconnect offer, landing this
+		// customer on the wrong screen.
 		if (reason === "reconnect_required") {
 			return {
 				name: agentName,
@@ -312,7 +326,27 @@
 					agentName +
 					" can't reply right now. Reconnect to pick up where you left off.",
 				ctaLabel: "Reconnect →",
-				href: "/jarvis/onboarding",
+				href: RECONNECT_INTENT_URL,
+			};
+		}
+		// account.py's _provisioning_verdict: an established workspace (one
+		// _has_been_chat_ready has already confirmed) whose apply-confirmed
+		// marker was cleared - e.g. "disconnect AI model connections" in pool or
+		// subscription mode - and whose last_sync_requested_at is either unset or
+		// too stale to soften this into llm_applying/llm_apply_stuck. Unlike
+		// those two soft reasons this is not necessarily still converging, so
+		// point at Settings to check/redo the connection rather than promising a
+		// Retry that may have nothing in flight to retry.
+		if (reason === "llm_pool_provisioning" || reason === "llm_provisioning") {
+			return {
+				name: agentName,
+				aria: "Check " + agentName + " AI models",
+				text:
+					"Your AI model connection is not finished applying, so " +
+					agentName +
+					" can't reply yet. Check it in Settings.",
+				ctaLabel: "Check AI models →",
+				href: AI_MODELS_SETTINGS_URL,
 			};
 		}
 		// Every other reason keeps the original never-set-up pitch and
@@ -513,7 +547,7 @@
 	// createRequire) - a real browser has no `module` global, so this is inert
 	// in production and does not change what ships to the Desk.
 	if (typeof module !== "undefined" && module.exports) {
-		module.exports = { nudgeVariant: nudgeVariant };
+		module.exports = { nudgeVariant: nudgeVariant, isSuppressedReason: isSuppressedReason };
 	}
 
 	if (window.frappe && window.frappe.router) {

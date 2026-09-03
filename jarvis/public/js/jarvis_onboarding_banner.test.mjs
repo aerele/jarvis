@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // jarvis_onboarding_banner.bundle.js is a plain script loaded via
 // app_include_js (not an ES module), so it cannot be `import`ed the way the
@@ -22,7 +24,10 @@ globalThis.document = { addEventListener: () => {} };
 globalThis.frappe = undefined;
 
 const require = createRequire(import.meta.url);
-const { nudgeVariant } = require("./jarvis_onboarding_banner.bundle.js");
+const {
+  nudgeVariant,
+  isSuppressedReason,
+} = require("./jarvis_onboarding_banner.bundle.js");
 
 function setReason(reason, agentName) {
   globalThis.frappe = {
@@ -39,13 +44,25 @@ test("nudgeVariant: subscription_suspended renews via billing, never the wizard"
   assert.doesNotMatch(v.href, /onboarding/);
 });
 
-test("nudgeVariant: reconnect_required uses honest copy, not the never-set-up pitch", () => {
+test("nudgeVariant: reconnect_required carries the reconnect intent flag, not a bare wizard link", () => {
   setReason("reconnect_required", "Nova");
   const v = nudgeVariant();
   assert.equal(v.ctaLabel, "Reconnect →");
-  assert.equal(v.href, "/jarvis/onboarding");
+  assert.equal(v.href, "/jarvis/onboarding?reconnect=1");
+  assert.match(v.href, /[?&]reconnect=1(&|$)/);
   assert.match(v.text, /reconnecting/);
   assert.doesNotMatch(v.text, /Hey/);
+});
+
+test("nudgeVariant: llm_pool_provisioning and llm_provisioning point at AI models settings, not the wizard", () => {
+  for (const reason of ["llm_pool_provisioning", "llm_provisioning"]) {
+    setReason(reason, "Nova");
+    const v = nudgeVariant();
+    assert.equal(v.ctaLabel, "Check AI models →", `reason=${reason}`);
+    assert.equal(v.href, "/jarvis/?settings=aimodels", `reason=${reason}`);
+    assert.match(v.text, /Nova/, `reason=${reason}`);
+    assert.doesNotMatch(v.href, /onboarding/, `reason=${reason}`);
+  }
 });
 
 test("nudgeVariant: llm_credentials and llm_apply_stuck are unchanged", () => {
@@ -83,6 +100,67 @@ test("nudgeVariant: white-label - only the never-set-up pitch says literal Jarvi
   setReason("reconnect_required", "Nova");
   assert.equal(nudgeVariant().name, "Nova");
 
+  setReason("llm_pool_provisioning", "Nova");
+  assert.equal(nudgeVariant().name, "Nova");
+
   setReason("signup", "Nova");
   assert.equal(nudgeVariant().name, "Jarvis");
+});
+
+test("isSuppressedReason: the outage/incident reasons hide the nudge entirely", () => {
+  for (const reason of [
+    "llm_applying",
+    "container_provisioning",
+    "container_unavailable",
+    "authority_repair_required",
+    "site_replaced",
+  ]) {
+    assert.equal(isSuppressedReason(reason), true, `reason=${reason}`);
+  }
+});
+
+test("isSuppressedReason: every reason with its own nudgeVariant() is never suppressed", () => {
+  for (const reason of [
+    "llm_credentials",
+    "llm_apply_stuck",
+    "subscription_suspended",
+    "reconnect_required",
+    "llm_pool_provisioning",
+    "llm_provisioning",
+    "signup",
+    "llm_setup",
+    "llm_rejected",
+    "readiness_unconfirmed",
+    "",
+    "some_future_reason",
+  ]) {
+    assert.equal(isSuppressedReason(reason), false, `reason=${reason}`);
+  }
+});
+
+// Route-drift guards: nudgeVariant()'s destinations are strings hand-kept in
+// sync with the SPA router rather than imported (this bundle cannot import
+// from frontend/src - see the module comment in the bundle itself), so a
+// route rename on the SPA side would silently 404 the CTA instead of failing
+// anywhere. Reading the source files as text and asserting on the literal
+// each constant was copied from turns that into a loud CI failure.
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+
+test("BILLING_URL: frontend/src/router/index.js still registers /billing", () => {
+  const routerSrc = readFileSync(
+    `${repoRoot}/frontend/src/router/index.js`,
+    "utf8"
+  );
+  assert.match(routerSrc, /path:\s*"\/billing"/);
+});
+
+test("RECONNECT_INTENT_URL: frontend/src/onboarding/readiness.js still exports the same literal", () => {
+  const readinessSrc = readFileSync(
+    `${repoRoot}/frontend/src/onboarding/readiness.js`,
+    "utf8"
+  );
+  assert.match(
+    readinessSrc,
+    /RECONNECT_INTENT_URL\s*=\s*"\/jarvis\/onboarding\?reconnect=1"/
+  );
 });
