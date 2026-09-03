@@ -32,15 +32,23 @@ name: CI
 
 on:
   workflow_dispatch:
+  # Default PR types only, deliberately without `edited` (the event a base retarget sends).
+  # Listening to it and skipping the jobs on title edits was tried and is a trap: a skipped
+  # job still posts a "skipped" check run, GitHub reads the LATEST check per name, and a
+  # skipped check satisfies a required check, so a title edit after a red run would mask
+  # the failure. release-guard.yml instead fails a PR whose base changed until it is pushed
+  # to or reopened, which is what makes this workflow run against the new base.
   pull_request:
   push:
-    branches: [version-15]
+    # version-15 is the stable line customers install from; version-15-hotfix is where its
+    # backports collect until a release merges them into it. See CONTRIBUTING.md.
+    branches: [version-15, version-15-hotfix]
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Never auto-cancel a version-15 run (cancelled reads as neutral, not failed → hides
-  # regressions on the release branch).
-  cancel-in-progress: ${{ github.ref != 'refs/heads/version-15' }}
+  # Only auto-cancel PR runs. A cancelled run on a long-lived branch reads as neutral, not
+  # failed, which hides regressions on the release line.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -64,8 +72,8 @@ jobs:
       - uses: pre-commit/action@v3.0.1
         env:
           # no-commit-to-branch is a LOCAL guard: it inspects the checked-out
-          # branch name. On `push: branches: [version-15]` the checkout IS
-          # version-15, so leaving it on would fail this job on every merge. It
+          # branch name. On a `push` event the checkout IS the guarded branch,
+          # so leaving it on would fail this job on every merge. It
           # has no meaning server-side anyway - the PR requirement is what
           # enforces it.
           SKIP: no-commit-to-branch
