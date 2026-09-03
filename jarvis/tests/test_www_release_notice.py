@@ -5,9 +5,10 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.tests._release_versions import NEWER
 from jarvis.www import jarvis as www_desktop
 from jarvis.www import jarvis_mobile as www_mobile
+
+NEWER = "99.0.0"  # above any installed version, so the notice reads as active
 
 _FIELDS = (
 	"release_notice_active",

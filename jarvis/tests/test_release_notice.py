@@ -6,7 +6,12 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import __version__, release_notice
-from jarvis.tests._release_versions import NEWER, NEWER_2
+
+# A notice is active only while its version is above the installed one. A fixed
+# far-future sentinel reads as "newer" on every line (0.0.1 on develop, 16.x and
+# 15.x on the stable branches) without depending on the parser under test.
+NEWER = "99.0.0"
+NEWER_2 = "99.0.1"
 
 _FIELDS = (
 	"release_notice_active",
@@ -111,3 +116,24 @@ class TestBootPayload(FrappeTestCase):
 		self.assertFalse(p["active"])
 		self.assertEqual(p["version"], "")
 		self.assertEqual(p["message"], "")
+
+
+class TestVersionParse(FrappeTestCase):
+	"""_version is the parser both sides of the self-clear compare go through,
+	so pin its edge cases directly rather than through the notice tests."""
+
+	def test_dotted_ints(self):
+		self.assertEqual(release_notice._version("16.2.0"), (16, 2, 0))
+
+	def test_short_and_long_forms_pad_or_truncate(self):
+		self.assertEqual(release_notice._version("16.2"), (16, 2, 0))
+		self.assertEqual(release_notice._version("16.2.0.7"), (16, 2, 0))
+
+	def test_unparseable_is_zero(self):
+		for raw in ("", None, "abc", "16.2.0rc1", "v16.2.0"):
+			self.assertEqual(release_notice._version(raw), (0, 0, 0), raw)
+
+	def test_unparseable_never_lifts_the_notice(self):
+		with patch.object(release_notice, "__version__", "16.2.0rc1"):
+			self.assertFalse(release_notice._already_current("16.2.0"))
+		self.assertFalse(release_notice._already_current("garbage"))

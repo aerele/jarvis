@@ -27,6 +27,11 @@ on:
 permissions:
   contents: read
 
+# Repeated `edited` events (title tweaks, a double retarget) supersede each other.
+concurrency:
+  group: release-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   release-source:
     runs-on: ubuntu-latest
@@ -43,12 +48,16 @@ jobs:
       - name: Only version-N-hotfix (same repo) may open a PR into version-N
         run: |
           case "$BASE" in
-            version-*-hotfix) echo "hotfix base: any head is allowed"; exit 0 ;;
-            version-*) ;;
+            version-[0-9]*-hotfix) echo "hotfix base: any head is allowed"; exit 0 ;;
+            version-[0-9]*) ;;
             *) echo "not a stable base: nothing to check"; exit 0 ;;
           esac
-          if [ "$HEAD" != "${BASE}-hotfix" ] || [ "$HEAD_REPO" != "$THIS_REPO" ]; then
-            echo "::error::PRs into $BASE must come from ${BASE}-hotfix in $THIS_REPO (got $HEAD_REPO:$HEAD). Retarget this PR to ${BASE}-hotfix; a release is cut by merging ${BASE}-hotfix into $BASE."
+          if [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            echo "::error::PRs into $BASE must come from a branch in $THIS_REPO, not a fork (got $HEAD_REPO:$HEAD)."
+            exit 1
+          fi
+          if [ "$HEAD" != "${BASE}-hotfix" ]; then
+            echo "::error::PRs into $BASE must come from ${BASE}-hotfix (got $HEAD). Retarget this PR to ${BASE}-hotfix; a release is cut by merging ${BASE}-hotfix into $BASE."
             exit 1
           fi
           echo "release PR: $HEAD -> $BASE"

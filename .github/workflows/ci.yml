@@ -27,6 +27,11 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
+    # `edited` is what GitHub sends when a PR's BASE is changed in the UI. Without it a PR
+    # retargeted from develop to version-16-hotfix would merge with checks that never ran
+    # against the branch it lands on. The job-level `if` below keeps title and body edits
+    # from re-running the matrix: only an edit that carries `changes.base` counts.
+    types: [opened, synchronize, reopened, edited]
   push:
     # develop is where work lands; version-16 is the stable line customers install from and
     # version-16-hotfix is where its backports collect until a release merges them into it.
@@ -49,6 +54,7 @@ jobs:
   # the tests container: this needs only python + node, and it should report in
   # under a minute rather than waiting on a bench.
   lint:
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -75,6 +81,7 @@ jobs:
   # This is that gate. It needs only node — no bench, no container — so it reports fast and
   # independently of the Python shards above.
   frontend-tests:
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -137,6 +144,7 @@ jobs:
   # builds the SPA (the /jarvis artifact) the way the deploy does. (The PWA build resolves the bench site
   # config via a bench-relative path a bare runner lacks, so it is not gated here — a follow-up.)
   frontend-build:
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -157,6 +165,7 @@ jobs:
         run: npm run install-frontend && npm run build-frontend
 
   tests:
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
