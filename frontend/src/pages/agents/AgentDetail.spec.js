@@ -79,7 +79,18 @@ vi.mock("frappe-ui", () => ({
 		props: ["label", "theme", "variant"],
 		template: `<span class="badge" :data-theme="theme">{{ label }}</span>`,
 	},
-	Breadcrumbs: { name: "Breadcrumbs", props: ["items"], template: "<div />" },
+	Breadcrumbs: {
+		name: "Breadcrumbs",
+		props: ["items"],
+		// jarvis#1062 P1-6: render each item's label + its #suffix scoped slot
+		// (the skeleton bar), matching frappe-ui's real Breadcrumbs API closely
+		// enough to test the loading-crumb behavior.
+		template: `<div>
+			<span v-for="(item, i) in items" :key="i" class="crumb" :data-loading="!!item.loading">
+				{{ item.label }}<slot name="suffix" :item="item" />
+			</span>
+		</div>`,
+	},
 	Button: {
 		name: "Button",
 		props: ["label", "disabled", "loading", "variant", "theme", "iconLeft", "tooltip"],
@@ -755,5 +766,37 @@ describe("jarvis#1062 fix: a #runs deep link survives the pending agent/installa
 		// "nonexistent-tab" was never going to exist - overview wins once the
 		// load has settled, same as before this fix.
 		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(false);
+	});
+});
+
+// jarvis#1062 P1-6 (production-readiness audit): the breadcrumb used to
+// flash the raw slug before the agent loaded.
+describe("Breadcrumb: no slug flash while the agent is loading (jarvis#1062 P1-6)", () => {
+	it("shows an empty, loading crumb (skeleton) before the agent resolves - never the raw slug", async () => {
+		let resolveFetch;
+		apiAgents.getAgent.mockReturnValue(
+			new Promise((res) => {
+				resolveFetch = res;
+			})
+		);
+		apiAgents.getInstallationActivation.mockResolvedValue(null);
+		const w = mount(AgentDetail, { props: { slug: "negative-stock-valuation-auditor" } });
+		await flushPromises();
+
+		const crumbs = w.findAll(".crumb");
+		const lastCrumb = crumbs[crumbs.length - 1];
+		expect(lastCrumb.text()).not.toContain("negative-stock-valuation-auditor");
+		expect(lastCrumb.attributes("data-loading")).toBe("true");
+
+		resolveFetch(baseAgent({ agent_slug: "negative-stock-valuation-auditor" }));
+		await flushPromises();
+	});
+
+	it("shows the real title, loading marker gone, once the agent resolves", async () => {
+		const w = await mountDetail(baseAgent({ title: "Negative-Stock & Valuation Auditor" }));
+		const crumbs = w.findAll(".crumb");
+		const lastCrumb = crumbs[crumbs.length - 1];
+		expect(lastCrumb.text()).toContain("Negative-Stock & Valuation Auditor");
+		expect(lastCrumb.attributes("data-loading")).toBe("false");
 	});
 });

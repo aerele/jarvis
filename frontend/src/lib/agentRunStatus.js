@@ -14,3 +14,24 @@ export const STATUS_THEME = {
 	failed: "red",
 	stopped: "gray",
 };
+
+/**
+ * jarvis#1062 P1-7 (production-readiness audit): a failed run and a stopped
+ * run both showed "0 findings" in the runs rail, with nothing distinguishing
+ * one from the other short of opening the run. A short, row-level reason:
+ * the first 60 chars of the recorded error for a failed run (truncated with
+ * an ellipsis, never the full trace - that lives in FindingsPanel's own
+ * failed-run banner), or the fixed "Stopped by operator." for a stopped run
+ * (an operator action, not a failure - no error text implied or needed).
+ * "" for every other status, so the row's v-if simply omits the line.
+ */
+export function runReason(row) {
+	if (!row) return "";
+	if (row.status === "failed") {
+		const err = String(row.error || "").trim();
+		if (!err) return "This run failed.";
+		return err.length > 60 ? err.slice(0, 60).trimEnd() + "…" : err;
+	}
+	if (row.status === "stopped") return "Stopped by operator.";
+	return "";
+}

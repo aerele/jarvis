@@ -167,3 +167,49 @@ describe("the detail line clamps to one line with the full text in a title", () 
 		expect(detail.text()).toBe(longNote);
 	});
 });
+
+// jarvis#1062 P1-5 (production-readiness audit): keyboard focus was
+// invisible here, same as every other role="button" row in this app.
+describe("activity row keyboard focus (jarvis#1062 P1-5)", () => {
+	it("carries a focus-visible ring", async () => {
+		const w = await mountTab([activityRow()]);
+		const row = w.find('[role="button"]');
+		expect(row.exists()).toBe(true);
+		expect(row.classes()).toContain("focus-visible:ring-2");
+		expect(row.classes()).toContain("focus-visible:ring-outline-gray-3");
+	});
+});
+
+// jarvis#1062 P2-9 (production-readiness audit): the empty Activity tab told
+// an Administrator session to wait for installs/schedule changes/runs to
+// show up - which never happens, since Administrator cannot install agents.
+describe("empty state names the Administrator case (jarvis#1062 P2-9)", () => {
+	it("shows the Administrator-specific copy when session.user is Administrator", async () => {
+		const { session } = await import("@/data/session");
+		const original = session.user;
+		session.user = "Administrator";
+		try {
+			const w = await mountTab([]);
+			expect(w.text()).toContain("Administrator cannot install agents.");
+			expect(w.text()).toContain("Sign in as a named user.");
+			expect(w.text()).not.toContain(
+				"Installs, schedule changes and runs will show up here."
+			);
+		} finally {
+			session.user = original;
+		}
+	});
+
+	it("shows the ordinary copy for a named user", async () => {
+		const { session } = await import("@/data/session");
+		const original = session.user;
+		session.user = "owner@example.com";
+		try {
+			const w = await mountTab([]);
+			expect(w.text()).toContain("Installs, schedule changes and runs will show up here.");
+			expect(w.text()).not.toContain("Administrator cannot install agents.");
+		} finally {
+			session.user = original;
+		}
+	});
+});

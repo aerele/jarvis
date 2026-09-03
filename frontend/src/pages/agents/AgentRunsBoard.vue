@@ -23,16 +23,27 @@
 			<Button :tooltip="'Refresh'" icon="refresh-cw" :loading="loading" @click="reload()" />
 		</div>
 
-		<div class="flex min-h-0 flex-1">
+		<!-- jarvis#1062 P2-12 (production-readiness audit): this was a plain
+		     `flex` row with a HARD w-[360px] rail and no min-w-0 on the details
+		     pane - at a narrow viewport (390px) that overflowed the page
+		     horizontally instead of collapsing. Stacked below lg (rail on top,
+		     capped height, its own scroll; details pane below, full width);
+		     side-by-side at lg+, unchanged from before. -->
+		<div class="flex min-h-0 flex-1 flex-col lg:flex-row">
 			<!-- LEFT rail: run history on a standing gray-1 surface so the selected
 			     row's white chip + shadow reads in light mode (§15.2 pattern) -->
-			<div class="w-[360px] shrink-0 overflow-y-auto border-r bg-surface-gray-1">
+			<div
+				class="max-h-[40vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
+			>
 				<template v-if="rows.length">
 					<div class="flex flex-col divide-y">
+						<!-- jarvis#1062 P1-5 (production-readiness audit): a raw <button>
+						     with no focus-visible ring - keyboard tabbing through the
+						     runs rail was invisible. -->
 						<button
 							v-for="row in rows"
 							:key="row.name"
-							class="flex w-full items-start gap-3 px-4 py-3 text-left"
+							class="flex w-full items-start gap-3 px-4 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
 							:class="
 								row.name === selectedId
 									? 'bg-surface-selected shadow-sm'
@@ -71,6 +82,21 @@
 											row.blocker_count === 1 ? "" : "s"
 										}}
 									</span>
+								</div>
+								<!-- jarvis#1062 P1-7 (production-readiness audit): failed and
+								     stopped both showed "0 findings" with nothing to tell them
+								     apart without opening the run. A short reason line now
+								     distinguishes them right in the row. -->
+								<div
+									v-if="runReason(row)"
+									class="mt-1 truncate text-sm"
+									:class="
+										row.status === 'failed'
+											? 'text-ink-red-4'
+											: 'text-ink-gray-5'
+									"
+								>
+									{{ runReason(row) }}
 								</div>
 							</div>
 							<!-- partial scans carry an extra indicator so truncated coverage
@@ -143,8 +169,11 @@
 				</div>
 			</div>
 
-			<!-- RIGHT pane: the selected run's findings -->
-			<div class="flex-1 overflow-y-auto">
+			<!-- RIGHT pane: the selected run's findings. min-w-0 - a flex item
+			     otherwise floors at its content's natural width (a long finding
+			     title, an action-button row), which is how the row overflowed
+			     the page instead of the CONTENT wrapping/scrolling in place. -->
+			<div class="min-w-0 flex-1 overflow-y-auto">
 				<!-- PP-4 shadow banner: the honest "Preview (shadow) - not a compliant
 				     attestation" statement must live in the reviewer's primary screen,
 				     not only in the detached fallback-dashboard HTML. Shown whenever the
@@ -194,7 +223,7 @@ import JvSpinner from "@/components/JvSpinner.vue";
 import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiAgents from "@/api/agents";
-import { STATUS_THEME } from "@/lib/agentRunStatus";
+import { STATUS_THEME, runReason } from "@/lib/agentRunStatus";
 
 const props = defineProps({
 	agentName: { type: String, required: true }, // listing docname (list_runs_page filter)

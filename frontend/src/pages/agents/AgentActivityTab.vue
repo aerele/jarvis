@@ -31,18 +31,29 @@
 			>
 				<FeatherIcon name="activity" class="size-7.5 text-ink-gray-5" />
 				<span class="mt-2 text-lg font-medium text-ink-gray-8">No activity yet</span>
-				<span class="text-p-base text-ink-gray-6">
+				<!-- jarvis#1062 P2-9 (production-readiness audit): "Installs...
+				     will show up here" reads as an instruction to go install
+				     something, which the Administrator session can never do
+				     (Install is refused server-side, S3 owner-gate) - told
+				     straight instead. -->
+				<span v-if="isAdministrator" class="text-p-base text-ink-gray-6">
+					Administrator cannot install agents. Sign in as a named user.
+				</span>
+				<span v-else class="text-p-base text-ink-gray-6">
 					Installs, schedule changes and runs will show up here.
 				</span>
 			</div>
 
 			<div v-else class="divide-y">
+				<!-- jarvis#1062 P1-5 (production-readiness audit): keyboard focus
+				     was invisible here, same as every other role="button" row in
+				     this app - added the same focus-visible ring. -->
 				<div
 					v-for="r in rows"
 					:key="r.name"
 					role="button"
 					tabindex="0"
-					class="flex cursor-pointer items-start gap-3 py-3 hover:bg-surface-gray-1"
+					class="flex cursor-pointer items-start gap-3 py-3 hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
 					@click="openRow(r)"
 					@keydown.enter.prevent="openRow(r)"
 				>
@@ -109,14 +120,19 @@
 // Rows are Link-free snapshots: {agent, agent_title, action, detail, creation,
 // run, run_status}. run_status is a live join (agents_api.py), not part of
 // the snapshot itself.
+import { computed } from "vue";
 import { Badge, FeatherIcon, FormControl, ListFooter, Tooltip } from "frappe-ui";
 import { useRouter } from "vue-router";
 import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { listAgentActivityPage } from "@/api/agents";
 import { STATUS_THEME } from "@/lib/agentRunStatus";
+import { session } from "@/data/session";
 
 const router = useRouter();
+// jarvis#1062 P2-9: the empty state names the Administrator case specifically
+// - it cannot install, so "will show up here" is never true for that session.
+const isAdministrator = computed(() => session.user === "Administrator");
 
 // jarvis#1062: a run row (its live status now shown as the badge above)
 // opens straight to that run in the Runs tab; every other lifecycle event

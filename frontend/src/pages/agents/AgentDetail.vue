@@ -2,12 +2,26 @@
 	<div class="flex h-full flex-col overflow-hidden">
 		<LayoutHeader>
 			<template #left-header>
+				<!-- jarvis#1062 P1-6 (production-readiness audit): the raw slug
+				     ("negative-stock-valuation-auditor") used to flash here before
+				     the agent loaded, then get replaced by its real title - a
+				     visible, jarring swap. An empty crumb + a skeleton bar
+				     (item.loading, via Breadcrumbs' own #suffix slot) now render
+				     until the title is actually known; nothing ever flashes. -->
 				<Breadcrumbs
 					:items="[
 						{ label: 'Agents', route: { name: 'AgentsList' } },
-						{ label: (agent && agent.title) || slug },
+						{ label: agent ? agent.title || slug : '', loading: !agent },
 					]"
-				/>
+				>
+					<template #suffix="{ item }">
+						<span
+							v-if="item.loading"
+							class="ml-1 inline-block h-4 w-32 animate-pulse rounded bg-surface-gray-3"
+							aria-hidden="true"
+						/>
+					</template>
+				</Breadcrumbs>
 			</template>
 			<template #right-header>
 				<template v-if="agent && !installation">
@@ -491,7 +505,16 @@
 										theme="green"
 										label="Live"
 									/>
-									<ShadowChip v-else label="Shadow" />
+									<!-- jarvis#1062 P2-11 (production-readiness audit): the Blocked
+									     badge just above already explains itself on hover - Shadow
+									     is the only other State value that names a mode without
+									     saying what it means. -->
+									<Tooltip
+										v-else
+										text="Preview mode: runs are visible only to the reviewer until promoted to live."
+									>
+										<ShadowChip label="Shadow" />
+									</Tooltip>
 								</template>
 								<div
 									v-else-if="column.key === 'run_as_user'"

@@ -95,10 +95,10 @@ function selectedTabLabel(w) {
 	return sel.length ? sel[0].text() : null;
 }
 
-async function mountList({ caps = {}, hash = "", syncStatus = null } = {}) {
+async function mountList({ caps = {}, hash = "", syncStatus = null, rows = [] } = {}) {
 	route.hash = hash;
 	agentsApi.getAgentsCaps.mockResolvedValue(caps);
-	agentsApi.listAgentsPage.mockResolvedValue({ rows: [], total: 0, has_more: false });
+	agentsApi.listAgentsPage.mockResolvedValue({ rows, total: rows.length, has_more: false });
 	api.listAgents.mockResolvedValue([]);
 	api.getAgentsSyncStatus.mockResolvedValue(
 		syncStatus || { pending: false, dirty: false, status: "" }
@@ -202,5 +202,87 @@ describe("no leave-guard of any kind, even when the catalog is dirty (only the b
 		expect(w.text()).not.toContain("Unapplied catalog changes");
 		expect(w.text()).not.toContain("Leave anyway");
 		expect(w.find('[data-label="Leave anyway"]').exists()).toBe(false);
+	});
+});
+
+// jarvis#1062 P1-4 (production-readiness audit): a long agent title used to
+// be cut to one truncated line with no way to read the rest.
+describe("catalog card titles: two lines, full name in a title attribute", () => {
+	function longTitleAgent(overrides = {}) {
+		return {
+			agent_slug: "long-title-agent",
+			title: "Statutory Payroll Deposit Status & Compliance Cross-Checking Auditor",
+			status: "Published",
+			publisher: "Aerele",
+			version: "1.0.0",
+			description: "Checks payroll deposits.",
+			install_count: 0,
+			...overrides,
+		};
+	}
+
+	it("renders with line-clamp-2, not a single-line truncate", async () => {
+		const w = await mountList({
+			caps: { review: true, admin: false },
+			rows: [longTitleAgent()],
+		});
+		const title = w.findAll("span").find((s) => s.text() === longTitleAgent().title);
+		expect(title).toBeTruthy();
+		expect(title.classes()).toContain("line-clamp-2");
+		expect(title.classes()).not.toContain("truncate");
+	});
+
+	it("carries the full title in a title attribute for anything two lines still cannot fit", async () => {
+		const w = await mountList({
+			caps: { review: true, admin: false },
+			rows: [longTitleAgent()],
+		});
+		const title = w.findAll("span").find((s) => s.text() === longTitleAgent().title);
+		expect(title.attributes("title")).toBe(longTitleAgent().title);
+	});
+});
+
+// jarvis#1062 P1-5 (production-readiness audit): a plain role="button" div
+// carries no default browser focus outline the way a real <button> would.
+describe("catalog card keyboard focus (jarvis#1062 P1-5)", () => {
+	it("every card carries a focus-visible ring", async () => {
+		const w = await mountList({
+			caps: { review: true, admin: false },
+			rows: [
+				{
+					agent_slug: "close-auditor",
+					title: "Close Auditor",
+					status: "Published",
+					publisher: "Aerele",
+					version: "1.0.0",
+					description: "Checks the close.",
+					install_count: 3,
+				},
+			],
+		});
+		const card = w.find('[role="button"]');
+		expect(card.exists()).toBe(true);
+		expect(card.classes()).toContain("focus-visible:ring-2");
+		expect(card.classes()).toContain("focus-visible:ring-outline-gray-3");
+	});
+});
+
+// jarvis#1062 P2-9 (production-readiness audit): wired through to the real
+// component - agentsEmptyState.spec.js covers the pure-function decision.
+describe("Installed tab empty state names Administrator (jarvis#1062 P2-9)", () => {
+	it("shows the Administrator-specific copy, no install CTA", async () => {
+		const { session } = await import("@/data/session");
+		const original = session.user;
+		session.user = "Administrator";
+		try {
+			const w = await mountList({
+				caps: { review: false, admin: true },
+				hash: "#installed",
+			});
+			expect(w.text()).toContain("Administrator cannot install agents.");
+			expect(w.text()).toContain("Sign in as a named user.");
+		} finally {
+			session.user = original;
+		}
 	});
 });

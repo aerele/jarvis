@@ -257,3 +257,85 @@ describe("jarvis#1062: ?run=<id> query-param preselection (deep-linked from the 
 		expect(w.findComponent({ name: "FindingsPanel" }).props("run").name).toBe("RUN-0001");
 	});
 });
+
+// jarvis#1062 P1-7 (production-readiness audit): failed and stopped runs
+// both showed "0 findings" in the rail with no way to tell them apart
+// without opening the run.
+describe("run rows show a short reason for failed/stopped (jarvis#1062 P1-7)", () => {
+	it("shows the recorded error under a failed run's row", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ status: "failed", error: "LLM timed out after 30s." })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.text()).toContain("LLM timed out after 30s.");
+	});
+
+	it("shows the fixed operator message under a stopped run's row", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(envelope([runRow({ status: "stopped" })]));
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.text()).toContain("Stopped by operator.");
+	});
+
+	it("shows no reason line for a completed or running run", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ status: "completed" }), runRow({ status: "running" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.text()).not.toContain("Stopped by operator.");
+	});
+
+	it("failed and stopped read differently even with identical 0-findings counts", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([
+				runRow({ name: "RUN-F", status: "failed", error: "boom" }),
+				runRow({ name: "RUN-S", status: "stopped" }),
+			])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.text()).toContain("boom");
+		expect(w.text()).toContain("Stopped by operator.");
+	});
+});
+
+// jarvis#1062 P1-5 (production-readiness audit): a raw <button> with no
+// focus-visible ring - keyboard tabbing through the runs rail was invisible.
+describe("run row keyboard focus (jarvis#1062 P1-5)", () => {
+	it("every run row carries a focus-visible ring", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(envelope([runRow()]));
+		const w = mountBoard();
+		await flushPromises();
+		const row = w.find("button.flex.w-full.items-start");
+		expect(row.exists()).toBe(true);
+		expect(row.classes()).toContain("focus-visible:ring-2");
+		expect(row.classes()).toContain("focus-visible:ring-outline-gray-3");
+	});
+});
+
+// jarvis#1062 P2-12 (production-readiness audit): the rail was a hard
+// w-[360px] flex row item with no min-w-0 on the details pane - it
+// overflowed the page horizontally on a narrow viewport instead of
+// collapsing to a stacked layout.
+describe("responsive layout: stacks below lg, no fixed-width overflow (jarvis#1062 P2-12)", () => {
+	it("the rail is full-width and border-b below lg, fixed-width and border-r at lg+", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(envelope([runRow()]));
+		const w = mountBoard();
+		await flushPromises();
+		const rail = w.find(".overflow-y-auto.border-b");
+		expect(rail.exists()).toBe(true);
+		expect(rail.classes()).toContain("w-full");
+		expect(rail.classes()).toContain("lg:w-[360px]");
+		expect(rail.classes()).toContain("lg:border-r");
+	});
+
+	it("the details pane carries min-w-0 so it can shrink instead of forcing overflow", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(envelope([runRow()]));
+		const w = mountBoard();
+		await flushPromises();
+		const pane = w.find(".min-w-0.flex-1.overflow-y-auto");
+		expect(pane.exists()).toBe(true);
+	});
+});
