@@ -20,6 +20,9 @@ vi.mock("frappe-ui/editor-style.css", () => ({}));
 vi.mock("frappe-ui", () => ({
 	Badge: { name: "Badge", template: "<span/>" },
 	Button: {
+		// name so the refresh-on-close test below can pick the Resolve button
+		// out of a tree that has several unlabelled <button> stubs.
+		name: "Button",
 		props: ["label", "disabled", "loading"],
 		template: "<button :disabled='disabled'><slot/></button>",
 	},
@@ -81,6 +84,13 @@ const storeDouble = {
 	loadTickets: vi.fn(),
 	loadThread: vi.fn(),
 	closeTicket: vi.fn(),
+	// async, matching the real store's contract (an `async function`, so it
+	// ALWAYS returns a Promise even though it catches its own errors
+	// internally) - the call sites chain .catch() on this, so a default
+	// double that returns bare `undefined` would throw "Cannot read
+	// properties of undefined (reading 'catch')" in every test that reaches
+	// a successful close/reply and never overrides this mock.
+	refreshAwaiting: vi.fn(async () => {}),
 	reply: vi.fn(async () => true),
 	// Fix 2: uploadTo returns the succeeded FILE REFERENCES, not a count — a
 	// realistic default double is "everything I was given succeeded".
@@ -1043,5 +1053,113 @@ describe("poll / focus / watermark subsystem (fix 3 + 4)", () => {
 		w.unmount();
 		expect(clearSpy).toHaveBeenCalled();
 		clearSpy.mockRestore();
+	});
+});
+
+// The header pill (ChatView.vue) reads store.awaitingCount, which UserMenu's
+// poll only refreshes every 60s - so a reply or a close should refresh it
+// immediately too, rather than leaving the pill stale for up to a minute.
+describe("refreshAwaiting after reply/close (header pill freshness)", () => {
+	// beforeEach, not afterEach: earlier describe blocks in this file freely
+	// reassign storeDouble.reply/closeTicket/etc without restoring them
+	// afterward (the file has no top-level reset), so each test here needs a
+	// known-clean slate on the way IN, not just a courtesy reset on the way
+	// out.
+	beforeEach(() => {
+		storeDouble.closeTicket = vi.fn();
+		storeDouble.reply = vi.fn(async () => true);
+		storeDouble.refreshAwaiting = vi.fn(async () => {});
+		storeDouble.loadThread = vi.fn();
+		storeDouble.loadTickets = vi.fn();
+	});
+
+	it("refreshes the awaiting count after a successful close", async () => {
+		storeDouble.closeTicket = vi.fn(async () => true);
+		const w = mountWith([]);
+
+		const resolveBtn = w
+			.findAllComponents({ name: "Button" })
+			.find((b) => b.props("label") === "Resolve");
+		expect(resolveBtn).toBeTruthy();
+		await resolveBtn.trigger("click");
+		await flushPromises();
+
+		expect(storeDouble.refreshAwaiting).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not refresh the awaiting count when the close call itself fails", async () => {
+		storeDouble.closeTicket = vi.fn(async () => false);
+		const w = mountWith([]);
+
+		const resolveBtn = w
+			.findAllComponents({ name: "Button" })
+			.find((b) => b.props("label") === "Resolve");
+		await resolveBtn.trigger("click");
+		await flushPromises();
+
+		expect(storeDouble.refreshAwaiting).not.toHaveBeenCalled();
+	});
+
+	it("a rejected refreshAwaiting after close does not throw or block the thread refresh", async () => {
+		storeDouble.closeTicket = vi.fn(async () => true);
+		storeDouble.refreshAwaiting = vi.fn(async () => {
+			throw new Error("network blip");
+		});
+		const w = mountWith([]);
+
+		const resolveBtn = w
+			.findAllComponents({ name: "Button" })
+			.find((b) => b.props("label") === "Resolve");
+		// The point of the test: a rejecting refreshAwaiting must not surface as
+		// an unhandled rejection (vitest fails the whole run on one - this is
+		// what the .catch() guard on that call exists to prevent) or stop the
+		// rest of the close flow from completing.
+		await resolveBtn.trigger("click");
+		await flushPromises();
+
+		// The rest of the close flow still ran - the rejection was contained,
+		// not swallowed at the cost of everything after it.
+		expect(storeDouble.loadThread).toHaveBeenCalledWith("T1", { quiet: true });
+	});
+
+	it("refreshes the awaiting count after a successful reply", async () => {
+		const w = mountWith([]);
+		const c = w.findComponent(SupportReplyBox);
+		c.vm.$emit("update:modelValue", "<p>thanks</p>");
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(storeDouble.refreshAwaiting).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not refresh the awaiting count when the reply itself fails", async () => {
+		storeDouble.reply = vi.fn(async () => false);
+		const w = mountWith([]);
+		const c = w.findComponent(SupportReplyBox);
+		c.vm.$emit("update:modelValue", "<p>thanks</p>");
+		await w.vm.$nextTick();
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(storeDouble.refreshAwaiting).not.toHaveBeenCalled();
+	});
+
+	it("a rejected refreshAwaiting after a reply does not throw or block the thread refresh", async () => {
+		storeDouble.refreshAwaiting = vi.fn(async () => {
+			throw new Error("network blip");
+		});
+		const w = mountWith([]);
+		const c = w.findComponent(SupportReplyBox);
+		c.vm.$emit("update:modelValue", "<p>thanks</p>");
+		await w.vm.$nextTick();
+
+		// Same point as the close-side test above: a rejecting refreshAwaiting
+		// must not surface as an unhandled rejection or stop the rest of send()
+		// (the loadThread refresh below) from completing.
+		c.vm.$emit("submit");
+		await flushPromises();
+
+		expect(storeDouble.loadThread).toHaveBeenCalledWith("T1");
 	});
 });
