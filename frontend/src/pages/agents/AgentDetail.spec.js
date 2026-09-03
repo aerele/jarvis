@@ -106,7 +106,15 @@ vi.mock("frappe-ui", () => ({
 		emits: ["update:modelValue"],
 		template: `<button :disabled="disabled" @click="$emit('update:modelValue', !modelValue)">{{ label }}</button>`,
 	},
-	TimePicker: { name: "TimePicker", template: "<div />" },
+	// emit-capable so a time-only edit can be driven in a spec (jarvis#1062
+	// owner feedback: Save must hide again after a time-only save - the
+	// modelValue TimePicker emits can carry seconds, e.g. "10:30:00").
+	TimePicker: {
+		name: "TimePicker",
+		props: ["modelValue", "placeholder"],
+		emits: ["update:modelValue"],
+		template: `<button data-testid="time-picker" @click="$emit('update:modelValue', '10:30:00')">{{ modelValue }}</button>`,
+	},
 }));
 
 // LayoutHeader teleports to #app-header (absent in jsdom here) - a real mount
@@ -119,9 +127,6 @@ vi.mock("@/components/LayoutHeader.vue", () => ({
 }));
 vi.mock("@/components/list/TabBar.vue", () => ({
 	default: { name: "TabBar", props: ["tabs", "modelValue"], template: "<div />" },
-}));
-vi.mock("@/components/doc/CommentsSection.vue", () => ({
-	default: { name: "CommentsSection", template: "<div />" },
 }));
 vi.mock("@/pages/agents/AgentRunsBoard.vue", () => ({
 	default: { name: "AgentRunsBoard", template: "<div />" },
@@ -335,7 +340,7 @@ describe("Overview Access panel: roster for admins only, never for a non-admin (
 });
 
 describe("Configure tab: two-column layout on lg+ (jarvis#1062 polish, matches the Admin tab)", () => {
-	it("wraps Schedule/Comments and Configuration in the same grid-cols-1 lg:grid-cols-2 pattern as Admin", async () => {
+	it("wraps Schedule and Configuration in the same grid-cols-1 lg:grid-cols-2 pattern as Admin", async () => {
 		routeMock.hash = "#configure";
 		const w = await mountDetail(
 			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
@@ -345,6 +350,234 @@ describe("Configure tab: two-column layout on lg+ (jarvis#1062 polish, matches t
 		// Schedule (left) and Configuration (right) both land inside it.
 		expect(grid.text()).toContain("Schedule");
 		expect(grid.text()).toContain("Configuration");
+	});
+});
+
+// jarvis#1062 owner decision: Comments moved off Configure onto the Run
+// itself (FindingsPanel.vue's new Notes section) - no CommentsSection
+// import remains here, so an accidental re-import would fail this mount
+// outright rather than silently resolving to a stub.
+it("no longer renders Comments on the Configure tab", async () => {
+	routeMock.hash = "#configure";
+	const w = await mountDetail(
+		baseAgent({ installation: installedInstallation({ enabled: 1 }) })
+	);
+	expect(w.findComponent({ name: "CommentsSection" }).exists()).toBe(false);
+	expect(w.text()).not.toContain("Comments");
+});
+
+// owner feedback: "Save schedule" is not always-visible chrome, and the old
+// bare "Next run: ..." line becomes a one-line summary of the SAVED
+// schedule ("Scheduled monthly at 9:00 am. Next run: ...").
+describe("Configure tab: Schedule section - Save visibility, dirty tracking, saved-schedule summary", () => {
+	function scheduleSaveBtn(w) {
+		return w.findAll("button").find((b) => b.attributes("data-label") === "Save schedule");
+	}
+	function runAutomaticallyToggle(w) {
+		return w.findAll("button").find((b) => b.text() === "Run automatically");
+	}
+
+	it("Save is hidden when the form matches the saved installation (clean)", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "daily",
+					schedule_time: "09:00:00",
+					next_run_at: "2026-09-10 09:00:00",
+				}),
+			})
+		);
+		expect(scheduleSaveBtn(w)).toBeFalsy();
+	});
+
+	it("Save appears once a control is edited (dirty) - toggling the switch", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({ installation: installedInstallation({ enabled: 1, schedule_enabled: 0 }) })
+		);
+		expect(scheduleSaveBtn(w)).toBeFalsy();
+		await runAutomaticallyToggle(w).trigger("click");
+		expect(scheduleSaveBtn(w)).toBeTruthy();
+	});
+
+	it("Save appears when Frequency/Time change while already on", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "daily",
+					schedule_time: "09:00:00",
+					next_run_at: "2026-09-10 09:00:00",
+				}),
+			})
+		);
+		expect(scheduleSaveBtn(w)).toBeFalsy();
+		const freqSelect = w.find("select");
+		await freqSelect.setValue("weekly");
+		expect(scheduleSaveBtn(w)).toBeTruthy();
+	});
+
+	it("Save disappears again once a save lands (installation refresh clears dirty)", async () => {
+		routeMock.hash = "#configure";
+		apiAgents.getAgent
+			.mockResolvedValueOnce(
+				baseAgent({
+					installation: installedInstallation({ enabled: 1, schedule_enabled: 0 }),
+				})
+			)
+			.mockResolvedValueOnce(
+				baseAgent({
+					installation: installedInstallation({
+						enabled: 1,
+						schedule_enabled: 1,
+						schedule_frequency: "daily",
+						schedule_time: "09:00:00",
+						next_run_at: "2026-09-10 09:00:00",
+					}),
+				})
+			);
+		apiAgents.getInstallationActivation.mockResolvedValue(null);
+		api.setAgentSchedule.mockResolvedValue({
+			ok: true,
+			data: { name: "INST-1", next_run_at: "2026-09-10 09:00:00" },
+		});
+		const w = mount(AgentDetail, { props: { slug: "close-auditor" } });
+		await flushPromises();
+		await flushPromises();
+
+		await runAutomaticallyToggle(w).trigger("click");
+		const btn = scheduleSaveBtn(w);
+		expect(btn).toBeTruthy();
+		await btn.trigger("click");
+		await flushPromises();
+		await flushPromises();
+
+		expect(scheduleSaveBtn(w)).toBeFalsy();
+	});
+
+	it("off and saved (clean): only the toggle shows - no Frequency/Time, no Save", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 0,
+					next_run_at: null,
+				}),
+			})
+		);
+		expect(runAutomaticallyToggle(w)).toBeTruthy();
+		expect(w.find("select").exists()).toBe(false);
+		expect(w.findComponent({ name: "TimePicker" }).exists()).toBe(false);
+		expect(scheduleSaveBtn(w)).toBeFalsy();
+	});
+
+	it("off and saved, but with a stale next_run_at (legacy row): no summary either - saved schedule is off", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 0,
+					next_run_at: "2026-09-10 09:00:00",
+				}),
+			})
+		);
+		expect(w.text()).not.toContain("Scheduled");
+		expect(scheduleSaveBtn(w)).toBeFalsy();
+	});
+
+	it("a time-only edit round-trips through timeHHMM normalization - Save hides after save, not stuck on seconds", async () => {
+		// TimePicker's modelValue can carry seconds ("10:30:00"); savedSched is
+		// normalized ("HH:MM") - scheduleDirty must normalize both sides or
+		// Save never hides after a legitimate time-only save.
+		routeMock.hash = "#configure";
+		apiAgents.getAgent
+			.mockResolvedValueOnce(
+				baseAgent({
+					installation: installedInstallation({
+						enabled: 1,
+						schedule_enabled: 1,
+						schedule_frequency: "daily",
+						schedule_time: "09:00:00",
+						next_run_at: "2026-09-10 09:00:00",
+					}),
+				})
+			)
+			.mockResolvedValueOnce(
+				baseAgent({
+					installation: installedInstallation({
+						enabled: 1,
+						schedule_enabled: 1,
+						schedule_frequency: "daily",
+						schedule_time: "10:30:00",
+						next_run_at: "2026-09-10 10:30:00",
+					}),
+				})
+			);
+		apiAgents.getInstallationActivation.mockResolvedValue(null);
+		api.setAgentSchedule.mockResolvedValue({
+			ok: true,
+			data: { name: "INST-1", next_run_at: "2026-09-10 10:30:00" },
+		});
+		const w = mount(AgentDetail, { props: { slug: "close-auditor" } });
+		await flushPromises();
+		await flushPromises();
+		expect(scheduleSaveBtn(w)).toBeFalsy();
+
+		await w.find('[data-testid="time-picker"]').trigger("click"); // emits "10:30:00"
+		expect(scheduleSaveBtn(w)).toBeTruthy();
+
+		await scheduleSaveBtn(w).trigger("click");
+		await flushPromises();
+		await flushPromises();
+
+		expect(scheduleSaveBtn(w)).toBeFalsy();
+	});
+
+	it("saved and enabled (clean): shows the one-line summary in the muted style", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "monthly",
+					schedule_time: "09:00:00",
+					next_run_at: "2026-10-03 09:00:00",
+				}),
+			})
+		);
+		const summary = w
+			.findAll("div.text-sm.text-ink-gray-5")
+			.find((d) => d.text().startsWith("Scheduled"));
+		expect(summary).toBeTruthy();
+		expect(summary.text()).toContain("Scheduled monthly at 9:00 am.");
+		expect(summary.text()).toContain("Next run:");
+	});
+
+	it("editing a control while a summary is showing hides the summary, not just shows Save", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "monthly",
+					schedule_time: "09:00:00",
+					next_run_at: "2026-10-03 09:00:00",
+				}),
+			})
+		);
+		expect(w.text()).toContain("Scheduled monthly");
+		await w.find("select").setValue("weekly");
+		expect(w.text()).not.toContain("Scheduled monthly");
+		expect(scheduleSaveBtn(w)).toBeTruthy();
 	});
 });
 
@@ -410,9 +643,14 @@ describe("Configure tab: Next run line follows next_run_at, including after disa
 			ok: true,
 			data: { name: "INST-1", next_run_at: null },
 		});
+		// Save is hidden until the form is actually dirty (owner feedback) -
+		// flip the switch off first, which is what makes it appear.
+		const toggle = w.findAll("button").find((b) => b.text() === "Run automatically");
+		await toggle.trigger("click");
 		const saveScheduleBtn = w
 			.findAll("button")
 			.find((b) => b.attributes("data-label") === "Save schedule");
+		expect(saveScheduleBtn).toBeTruthy();
 		await saveScheduleBtn.trigger("click");
 		await flushPromises();
 		await flushPromises();

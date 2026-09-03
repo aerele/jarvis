@@ -309,6 +309,27 @@
 				>
 			</div>
 		</template>
+
+		<!-- Notes on THIS run (owner decision, jarvis#1062: moved off the
+		     Configure tab, which was per-installation - a note belongs to what
+		     it is actually about). Every run status, running included; same
+		     CommentsSection/useDocmeta pair the Configure tab used, re-targeted
+		     at "Jarvis Agent Run" + this run's name instead of the
+		     installation.
+
+		     "Run notes", not "Notes": this panel ALREADY renders a "Notes"
+		     heading a few hundred pixels up - SEVERITY_LABEL.note, the group of
+		     note-severity findings. Two identical headings on one screen meaning
+		     two unrelated things is a collision the merge created, not a naming
+		     preference. -->
+		<section class="mt-6 border-t pt-6">
+			<CommentsSection
+				:docmeta="runDocmeta"
+				:can-comment="true"
+				heading="Run notes"
+				empty-text="No notes on this run yet."
+			/>
+		</section>
 	</div>
 </template>
 
@@ -331,6 +352,8 @@ import RunStepTimeline from "./RunStepTimeline.vue";
 // @/lib/agentRunStatus exists to keep in step with the rail and the Activity
 // feed (jarvis#1062). A second table here is exactly the drift it prevents.
 import { STATUS_THEME } from "@/lib/agentRunStatus";
+import CommentsSection from "@/components/doc/CommentsSection.vue";
+import { useDocmeta } from "@/composables/useDocmeta";
 import { timeAgo, exactDate, formatDate, toLocalMs, fmtElapsed } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
 import * as api from "@/api";
@@ -351,6 +374,19 @@ const props = defineProps({
 // stopped: the parent (AgentRunsBoard) owns the run list - refresh it after a
 // successful stop so the rail's status/badge picks up the terminal state.
 const emit = defineEmits(["stopped"]);
+
+// jarvis#1062: Notes-on-a-run - the SAME useDocmeta/CommentsSection pair the
+// Configure tab used for the installation, re-targeted at the run. A ref
+// (not a plain string) so switching the selected run (this panel is REUSED
+// across rail clicks, not remounted - see the findings watch below) reloads
+// the right run's comments; docmeta_api gates on doc.owner/System Manager,
+// which already resolves correctly for a run (its `owner` is reassigned to
+// the installation owner at launch, never Administrator - agent_scheduler.py
+// _launch_audit).
+const runDocmeta = useDocmeta(
+	"Jarvis Agent Run",
+	computed(() => props.run && props.run.name)
+);
 
 const router = useRouter();
 

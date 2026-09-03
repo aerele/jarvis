@@ -322,13 +322,13 @@
 					/>
 				</section>
 
-				<!-- Schedule + Comments read together on the left (you'd want to see
-				     what a reviewer said while touching the schedule); Configuration
-				     on the right - the same 2-col-on-lg+ pattern as the Admin tab, so
-				     the width it claims back from a stacked max-w-2xl column isn't
-				     left empty here either. -->
+				<!-- Schedule on the left, Configuration on the right - the same
+				     2-col-on-lg+ pattern as the Admin tab, so the width it claims back
+				     from a stacked max-w-2xl column isn't left empty here either.
+				     Comments moved OFF this tab onto the Run itself (owner decision,
+				     jarvis#1062) - a Note now belongs to what it is actually about. -->
 				<div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-start">
-					<div class="min-w-0 space-y-10">
+					<div class="min-w-0">
 						<section>
 							<div class="text-base font-medium text-ink-gray-9">Schedule</div>
 							<div class="mt-3 space-y-4">
@@ -354,22 +354,25 @@
 										/>
 									</div>
 								</div>
-								<div
-									v-if="installation.next_run_at"
-									class="text-sm text-ink-gray-5"
-								>
-									Next run: {{ fmtDt(installation.next_run_at) }}
+								<!-- owner feedback: the committed schedule + its next run, ONE
+								     line, shown only while the form matches what is actually
+								     saved (scheduleDirty false) - editing any control hides
+								     this and reveals Save instead (below). -->
+								<div v-if="scheduleSummary" class="text-sm text-ink-gray-5">
+									{{ scheduleSummary }}
 								</div>
+								<!-- owner feedback: Save is not always-on chrome - it appears
+								     only once the form actually differs from the saved
+								     installation (toggle/frequency/time), and disappears again
+								     once a save lands (scheduleDirty recomputes off
+								     `installation`, which `load()` refreshes post-save). -->
 								<Button
+									v-if="scheduleDirty"
 									label="Save schedule"
 									:loading="savingSchedule"
 									@click="saveSchedule"
 								/>
 							</div>
-						</section>
-
-						<section class="border-t pt-6">
-							<CommentsSection :docmeta="docmeta" :can-comment="true" />
 						</section>
 					</div>
 
@@ -534,9 +537,10 @@
 // Marketplace template: de-texted hero (logo · name · one meta line ·
 // one-line tagline · category chips; install count + Enabled switch right) →
 // hash-synced tabs. Overview (markdown description + static facts panel) ·
-// Configure (schedule / ConfigForm / CommentsSection on the installation, D28)
-// · Runs (AgentRunsBoard: two-pane runs rail → findings pane) · Admin
-// (admin-only: the Access editor + installs overview; listing status is
+// Configure (schedule / ConfigForm on the installation, D28) · Runs
+// (AgentRunsBoard: two-pane runs rail → findings pane, which now also carries
+// Notes-on-the-run, jarvis#1062 - Comments moved off this tab entirely) ·
+// Admin (admin-only: the Access editor + installs overview; listing status is
 // registry.json publisher state and intentionally has no tenant control here).
 import { ref, computed, watch, nextTick } from "vue";
 import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
@@ -561,7 +565,6 @@ import {
 } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
-import CommentsSection from "@/components/doc/CommentsSection.vue";
 import AgentRunsBoard from "@/pages/agents/AgentRunsBoard.vue";
 import ActivationPanel from "@/pages/agents/ActivationPanel.vue";
 import AgentAccessEditor from "@/pages/agents/AgentAccessEditor.vue";
@@ -569,7 +572,6 @@ import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import ShadowChip from "@/components/ShadowChip.vue";
-import { useDocmeta } from "@/composables/useDocmeta";
 import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
 import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
@@ -1017,6 +1019,43 @@ watch(
 	},
 	{ immediate: true }
 );
+// owner feedback: the ACTUAL saved shape, in `sched`'s own shape, derived
+// live off `installation` (not a second seeded ref) - so it tracks a
+// successful save's post-`load()` refresh for free, with no manual
+// dirty-reset bookkeeping to get wrong.
+const savedSched = computed(() => {
+	const inst = installation.value;
+	return {
+		enabled: !!(inst && inst.schedule_enabled),
+		frequency: (inst && inst.schedule_frequency) || "daily",
+		time: timeHHMM(inst && inst.schedule_time) || "09:00",
+	};
+});
+const scheduleDirty = computed(
+	() =>
+		sched.value.enabled !== savedSched.value.enabled ||
+		sched.value.frequency !== savedSched.value.frequency ||
+		// timeHHMM()-normalize both sides - TimePicker's own modelValue may
+		// carry seconds ("10:30:00"), while savedSched.time is already
+		// normalized to "HH:MM"; comparing raw would leave Save stuck visible
+		// after a successful time-only save (the two would never look equal).
+		timeHHMM(sched.value.time) !== savedSched.value.time
+);
+// "Scheduled monthly at 9:00 am. Next run: Sat, Oct 3, 2026 9:00 AM" - the
+// SAVED frequency/time (never the unsaved draft) plus the existing
+// next_run_at rendering (fmtDt); empty while dirty (would describe a state
+// that no longer matches the form), when nothing is actually scheduled, or
+// when the SAVED schedule is off (a legacy/stale next_run_at must not be
+// narrated as a live schedule - "saved AND enabled").
+const scheduleSummary = computed(() => {
+	if (scheduleDirty.value || !savedSched.value.enabled) return "";
+	const nextRunAt = installation.value && installation.value.next_run_at;
+	if (!nextRunAt) return "";
+	return (
+		`Scheduled ${savedSched.value.frequency} at ${formatTime12h(savedSched.value.time)}. ` +
+		`Next run: ${fmtDt(nextRunAt)}`
+	);
+});
 
 async function saveSchedule() {
 	if (!installation.value || savingSchedule.value) return;
@@ -1066,9 +1105,9 @@ async function saveConfig(merged) {
 	}
 }
 
-// ── Configure: comments on the installation (D28, B3 contract) ───────────────
-const instName = computed(() => (installation.value && installation.value.name) || null);
-const docmeta = useDocmeta("Jarvis Agent Installation", instName);
+// jarvis#1062: Comments moved off Configure onto the Run itself
+// (FindingsPanel.vue's new Notes section) - existing installation comments
+// are deliberately left in the DB, unmigrated, just no longer surfaced here.
 
 // ── Admin (SM) ────────────────────────────────────────────────────────────────
 const adminData = ref(null); // {roles, listings} from get_agent_admin_overview
@@ -1147,5 +1186,16 @@ onBeforeRouteLeave((to) => {
 function timeHHMM(s) {
 	const m = /^(\d{1,2}):(\d{2})/.exec(String(s || ""));
 	return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
+}
+// "09:00" → "9:00 am" - mirrors TimePicker's OWN formatDisplay (frappe-ui,
+// use12Hour default) exactly, so the schedule summary line reads the same
+// way the picker itself would show that time.
+function formatTime12h(hhmm) {
+	const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ""));
+	if (!m) return "";
+	const h = parseInt(m[1], 10);
+	const am = h < 12;
+	const h12 = h % 12 === 0 ? 12 : h % 12;
+	return `${h12}:${m[2]} ${am ? "am" : "pm"}`;
 }
 </script>
