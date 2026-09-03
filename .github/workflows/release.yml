@@ -10,8 +10,10 @@ name: Release
 # the Actions tab (workflow_dispatch) without side effects. "Latest" goes only to the highest
 # version-N line, so a v15 release never displaces the v16 one.
 #
-# The token is github-actions[bot]; the "Release tags" ruleset must list the GitHub Actions
-# app (Integration 15368) as a bypass actor or the tag push is refused.
+# The token is github-actions[bot]. The "Release tags" ruleset therefore must NOT carry a
+# tag `creation` rule (GitHub refuses the built-in Actions app as a bypass actor); it keeps
+# `deletion`, `update` and the vN.N.N name pattern, which is what makes a published tag
+# immutable.
 
 on:
   push:
