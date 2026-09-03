@@ -207,8 +207,7 @@
 						There are no other plans available on your account right now.
 					</p>
 
-					<!-- Billing details (Phase 3b): editable for a direct customer;
-					     a read-only "billed through <partner>" notice for a reseller. -->
+					<!-- Billing details (Phase 3b): the customer's own editable GST party. -->
 					<section
 						v-if="profile || profileErr"
 						class="mt-8 rounded-lg border border-outline-gray-1 p-5"
@@ -223,19 +222,6 @@
 								@click="loadBillingProfile"
 							/>
 						</div>
-						<template v-else-if="profile.bill_to === 'partner'">
-							<p class="mt-2 text-p-base text-ink-gray-6">
-								Your subscription is billed through
-								<span class="font-medium text-ink-gray-8">{{
-									profile.partner_name
-								}}</span
-								>. For invoices and billing queries, please contact them<span
-									v-if="profile.partner_email"
-								>
-									at {{ profile.partner_email }}</span
-								>.
-							</p>
-						</template>
 						<template v-else>
 							<p class="mt-1 text-p-sm text-ink-gray-6">
 								Used on your GST invoices. Changes apply to future invoices.
