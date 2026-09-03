@@ -696,44 +696,44 @@ class TestDocmetaApiAgentRun(unittest.TestCase):
 		run.insert()
 		frappe.db.set_value(RUN, run.name, "owner", cls.owner, update_modified=False)
 		frappe.db.commit()
-		cls.run = run.name
+		cls.run_name = run.name
 
 	@classmethod
 	def tearDownClass(cls):
 		frappe.set_user("Administrator")
-		_clear_meta(RUN, cls.run)
-		frappe.delete_doc(RUN, cls.run, force=True, ignore_permissions=True)
+		_clear_meta(RUN, cls.run_name)
+		frappe.delete_doc(RUN, cls.run_name, force=True, ignore_permissions=True)
 		frappe.delete_doc(INSTALLATION, cls.installation, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
 	def setUp(self):
 		frappe.set_user("Administrator")
-		_clear_meta(RUN, self.run)
+		_clear_meta(RUN, self.run_name)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
 
 	def test_run_owner_can_read_and_comment(self):
 		with _as(self.owner):
-			meta = docmeta_api.get_docmeta(RUN, self.run)
+			meta = docmeta_api.get_docmeta(RUN, self.run_name)
 			self.assertEqual(meta["created"]["owner"], self.owner)
-			row = docmeta_api.add_comment(RUN, self.run, "note on this run")
+			row = docmeta_api.add_comment(RUN, self.run_name, "note on this run")
 			self.assertEqual(row["owner"], self.owner)
-			meta = docmeta_api.get_docmeta(RUN, self.run)
+			meta = docmeta_api.get_docmeta(RUN, self.run_name)
 			self.assertEqual([c["name"] for c in meta["comments"]], [row["name"]])
 
 	def test_non_owner_denied_on_a_run(self):
 		with _as(self.other):
 			with self.assertRaises(frappe.PermissionError):
-				docmeta_api.get_docmeta(RUN, self.run)
+				docmeta_api.get_docmeta(RUN, self.run_name)
 			with self.assertRaises(frappe.PermissionError):
-				docmeta_api.add_comment(RUN, self.run, "nope")
+				docmeta_api.add_comment(RUN, self.run_name, "nope")
 
 	def test_system_manager_allowed_on_a_run(self):
 		# Administrator is a System Manager and owns none of this fixture.
-		meta = docmeta_api.get_docmeta(RUN, self.run)
+		meta = docmeta_api.get_docmeta(RUN, self.run_name)
 		self.assertEqual(meta["created"]["owner"], self.owner)
-		row = docmeta_api.add_comment(RUN, self.run, "sm note")
+		row = docmeta_api.add_comment(RUN, self.run_name, "sm note")
 		self.assertEqual(row["owner"], "Administrator")
 
 	def test_run_is_not_assignable_or_shareable(self):
@@ -744,9 +744,9 @@ class TestDocmetaApiAgentRun(unittest.TestCase):
 		BEFORE any owner/write gate - not a PermissionError."""
 		with _as(self.owner):
 			with self.assertRaises(frappe.ValidationError):
-				docmeta_api.toggle_assignment(RUN, self.run, self.other, "add")
+				docmeta_api.toggle_assignment(RUN, self.run_name, self.other, "add")
 			with self.assertRaises(frappe.ValidationError):
-				docmeta_api.toggle_share(RUN, self.run, self.other, "add")
+				docmeta_api.toggle_share(RUN, self.run_name, self.other, "add")
 
 
 if __name__ == "__main__":
