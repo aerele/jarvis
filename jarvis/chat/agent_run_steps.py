@@ -325,6 +325,14 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 			# Never the record name here either: an internal row's name is an opaque
 			# hash that means nothing to the customer and states nothing true.
 			label = internal
+		elif _is_single(doctype):
+			# Checked BEFORE names, mirroring get_doc's own precedence: the tool
+			# short-circuits a Single ahead of name/names, because its one document's
+			# name IS the doctype. So neither a stray name nor the empty names list a
+			# delegate sends when it has nothing sensible to put there changes what
+			# was read - and neither may be allowed to make this label say otherwise
+			# ("Read Stock Settings, 0 documents" was exactly that).
+			label = f"Read {doctype}" if resolved else f"Looked up {doctype}"
 		elif not target and isinstance(args.get("names"), list) and resolved:
 			# The REQUESTED count is a wish, not an outcome: a batch that asked for
 			# five and was permitted three must not read "Read ToDo, 5 documents".
@@ -334,9 +342,6 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 			if n is None:
 				n = len(args["names"])
 			label = f"Read {doctype}, {plural(n, 'document')}"
-		elif _is_single(doctype):
-			# A Single's name IS its doctype - "Read Stock Settings", never twice.
-			label = f"Read {doctype}"
 		elif resolved and target:
 			label = f"Read {doctype} {target}"
 		elif resolved:

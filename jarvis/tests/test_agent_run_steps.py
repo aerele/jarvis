@@ -430,6 +430,23 @@ class TestHumanizeToolCall(unittest.TestCase):
 		)
 		self.assertEqual(label, "Read System Settings")
 
+	def test_a_single_ignores_a_stray_name_or_an_empty_names_list(self):
+		"""get_doc short-circuits a Single AHEAD of name/names (#1062), because its
+		one document's name IS the doctype. A delegate with nothing sensible to put
+		there sends "" or [] - and the step must still read as the one document it
+		actually got, never "Read System Settings, 0 documents"."""
+		for args in (
+			{"doctype": "System Settings", "names": []},
+			{"doctype": "System Settings", "names": ["bogus", "also-bogus"]},
+			{"doctype": "System Settings", "name": "x"},
+		):
+			label, _ = agent_run_steps.humanize_tool_call("get_doc", args, {"name": "System Settings"})
+			self.assertEqual(label, "Read System Settings", args)
+
+	def test_a_single_that_did_not_resolve_claims_no_read(self):
+		label, _ = agent_run_steps.humanize_tool_call("get_doc", {"doctype": "System Settings"}, None)
+		self.assertEqual(label, "Looked up System Settings")
+
 	def test_an_unresolved_lookup_says_what_was_attempted(self):
 		"""The record name is MODEL-supplied. A wrong guess produced "Read Company
 		ignore" on the bench; an unresolved lookup must not claim a read at all."""
