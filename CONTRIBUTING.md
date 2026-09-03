@@ -22,9 +22,11 @@ inside the app.
   `develop` in its own PR so it is not lost on the next backport.
 - A release is one PR, `version-N-hotfix` -> `version-N`, titled `chore: release vN.x.y`,
   merged with a merge commit. Before opening it, bump `__version__` in `jarvis/__init__.py`
-  on the hotfix branch (feature backports bump minor, fix-only bumps patch). After the
-  merge, push an annotated tag `vN.x.y` on the merge commit and publish a GitHub Release
-  with generated notes from the previous tag.
+  on the hotfix branch (feature backports bump minor, fix-only bumps patch). On merge the
+  `Release` workflow (`.github/workflows/release.yml`) tags the merge commit `vN.x.y` and
+  publishes a GitHub Release with notes generated from the previous tag on that line.
+  Check the Releases page afterwards; if the run failed, re-run it from the Actions tab.
+  It resumes whatever step was missing (tag, Release, or nothing).
 - Never push directly to any of these five branches; everything lands through a PR.
   The `version-N` rulesets enforce this today, and the `version-N-hotfix` rulesets should
   match them (PR required, no force-push, no deletion).
