@@ -354,13 +354,20 @@
 										/>
 									</div>
 								</div>
-								<div
-									v-if="installation.next_run_at"
-									class="text-sm text-ink-gray-5"
-								>
-									Next run: {{ fmtDt(installation.next_run_at) }}
+								<!-- owner feedback: the committed schedule + its next run, ONE
+								     line, shown only while the form matches what is actually
+								     saved (scheduleDirty false) - editing any control hides
+								     this and reveals Save instead (below). -->
+								<div v-if="scheduleSummary" class="text-sm text-ink-gray-5">
+									{{ scheduleSummary }}
 								</div>
+								<!-- owner feedback: Save is not always-on chrome - it appears
+								     only once the form actually differs from the saved
+								     installation (toggle/frequency/time), and disappears again
+								     once a save lands (scheduleDirty recomputes off
+								     `installation`, which `load()` refreshes post-save). -->
 								<Button
+									v-if="scheduleDirty"
 									label="Save schedule"
 									:loading="savingSchedule"
 									@click="saveSchedule"
@@ -1017,6 +1024,43 @@ watch(
 	},
 	{ immediate: true }
 );
+// owner feedback: the ACTUAL saved shape, in `sched`'s own shape, derived
+// live off `installation` (not a second seeded ref) - so it tracks a
+// successful save's post-`load()` refresh for free, with no manual
+// dirty-reset bookkeeping to get wrong.
+const savedSched = computed(() => {
+	const inst = installation.value;
+	return {
+		enabled: !!(inst && inst.schedule_enabled),
+		frequency: (inst && inst.schedule_frequency) || "daily",
+		time: timeHHMM(inst && inst.schedule_time) || "09:00",
+	};
+});
+const scheduleDirty = computed(
+	() =>
+		sched.value.enabled !== savedSched.value.enabled ||
+		sched.value.frequency !== savedSched.value.frequency ||
+		// timeHHMM()-normalize both sides - TimePicker's own modelValue may
+		// carry seconds ("10:30:00"), while savedSched.time is already
+		// normalized to "HH:MM"; comparing raw would leave Save stuck visible
+		// after a successful time-only save (the two would never look equal).
+		timeHHMM(sched.value.time) !== savedSched.value.time
+);
+// "Scheduled monthly at 9:00 am. Next run: Sat, Oct 3, 2026 9:00 AM" - the
+// SAVED frequency/time (never the unsaved draft) plus the existing
+// next_run_at rendering (fmtDt); empty while dirty (would describe a state
+// that no longer matches the form), when nothing is actually scheduled, or
+// when the SAVED schedule is off (a legacy/stale next_run_at must not be
+// narrated as a live schedule - "saved AND enabled").
+const scheduleSummary = computed(() => {
+	if (scheduleDirty.value || !savedSched.value.enabled) return "";
+	const nextRunAt = installation.value && installation.value.next_run_at;
+	if (!nextRunAt) return "";
+	return (
+		`Scheduled ${savedSched.value.frequency} at ${formatTime12h(savedSched.value.time)}. ` +
+		`Next run: ${fmtDt(nextRunAt)}`
+	);
+});
 
 async function saveSchedule() {
 	if (!installation.value || savingSchedule.value) return;
@@ -1147,5 +1191,16 @@ onBeforeRouteLeave((to) => {
 function timeHHMM(s) {
 	const m = /^(\d{1,2}):(\d{2})/.exec(String(s || ""));
 	return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
+}
+// "09:00" → "9:00 am" - mirrors TimePicker's OWN formatDisplay (frappe-ui,
+// use12Hour default) exactly, so the schedule summary line reads the same
+// way the picker itself would show that time.
+function formatTime12h(hhmm) {
+	const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ""));
+	if (!m) return "";
+	const h = parseInt(m[1], 10);
+	const am = h < 12;
+	const h12 = h % 12 === 0 ? 12 : h % 12;
+	return `${h12}:${m[2]} ${am ? "am" : "pm"}`;
 }
 </script>
