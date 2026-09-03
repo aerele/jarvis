@@ -605,7 +605,10 @@ class TestScheduleDayOfMonthValidation(MacroSchedulerBase):
 		return doc
 
 	def test_out_of_range_day_of_month_is_refused_cleanly(self):
-		for bad in (0, 32, -1, 100):
+		# 0 is deliberately NOT here: Frappe coerces a blank Int field to 0 (not
+		# None), so the validator exempts it as "unset", not "the 0th day" - see
+		# test_unset_day_of_month_is_exempt below.
+		for bad in (32, -1, 100):
 			with self.subTest(bad=bad):
 				with self.assertRaises(frappe.ValidationError):
 					self._save(f"bad-{bad}", bad)
@@ -619,9 +622,12 @@ class TestScheduleDayOfMonthValidation(MacroSchedulerBase):
 	def test_unset_day_of_month_is_exempt(self):
 		# An Int field left blank reaches validate() as 0, not None - "not set",
 		# never "the 0th day" (#653's exemption, mirroring the empty-string exemption
-		# schedule_time gets).
-		doc = self._save("unset", None)
-		self.assertTrue(doc.next_run_at)
+		# schedule_time gets). Both the None a caller might pass and the literal 0
+		# Frappe coerces it to must be accepted, not refused.
+		for unset in (None, 0):
+			with self.subTest(unset=unset):
+				doc = self._save(f"unset-{unset}", unset)
+				self.assertTrue(doc.next_run_at)
 
 	def test_out_of_range_weekday_select_is_refused_by_the_framework(self):
 		# schedule_weekday is a Select field - Frappe's own _validate_selects()
@@ -761,6 +767,7 @@ class TestDefaultScheduleAnchors(FrappeTestCase):
 		# carries an ISO-int weekday must land on the installation AS ITS NAME, not
 		# be silently dropped.
 		from jarvis.chat import agents_api
+		from jarvis.tests._agent_access import allow_listing_for, clear_listing_access
 
 		listing_name = frappe.db.get_value("Jarvis Agent Listing", {"agent_slug": "close-auditor"}, "name")
 		if not listing_name:
@@ -775,6 +782,12 @@ class TestDefaultScheduleAnchors(FrappeTestCase):
 			update_modified=False,
 		)
 		frappe.db.commit()
+		# Agent access is deny-by-default (jarvis#1062 / PR #1095) - grant this
+		# test's user access to the listing the same way test_agents_marketplace
+		# and test_platform_agents_api_hardening do, or install_agent refuses
+		# with a PermissionError before ever reaching the schedule handling this
+		# test is about. _ensure_user already grants the Jarvis User role.
+		allow_listing_for(listing_name, roles=["Jarvis User"])
 		original_user = frappe.session.user
 		try:
 			frappe.set_user(owner)
@@ -787,6 +800,7 @@ class TestDefaultScheduleAnchors(FrappeTestCase):
 			self.assertEqual(weekday, "Wednesday")
 		finally:
 			frappe.set_user(original_user)
+			clear_listing_access(listing_name)
 			frappe.db.delete("Jarvis Agent Installation", {"owner": owner, "agent": listing_name})
 			frappe.db.set_value(
 				"Jarvis Agent Listing",
