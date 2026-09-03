@@ -40,12 +40,44 @@
 	// bundle is loaded via app_include_js and cannot import from the widget
 	// module graph, so the string is kept in sync here by hand.
 	var AI_MODELS_SETTINGS_URL = "/jarvis/?settings=aimodels";
+	// The SPA's billing page (frontend/src/router/index.js's "Billing" route,
+	// mounted under createWebHistory("/jarvis")), used by the renew-plan CTA.
+	// Same hand-kept-in-sync constraint as AI_MODELS_SETTINGS_URL above.
+	var BILLING_URL = "/jarvis/billing";
 	// Floor between server re-checks for the chatty triggers (route change,
 	// tab focus). A bfcache restore bypasses it: that is the exact moment the
 	// flag is most likely stale and the user is looking straight at it.
 	var RECHECK_MIN_MS = 30 * 1000;
 	var lastCheckAt = 0;
 	var checking = false;
+
+	// jarvis#<this PR>: reasons that mean "an established workspace's control
+	// plane is between states" (still provisioning, a confirmed outage, an
+	// unresolved authority incident, or an account moved to a different site) -
+	// none of them are fixed by anything a Desk nudge can offer, and every one
+	// is reachable only AFTER is_ready_for_chat's local signup+credential
+	// checks already passed (account.py's _admin_chat_gate, or - for the two
+	// provisioning reasons - an established workspace whose apply-confirmed
+	// marker was cleared without a fresh apply timestamp to soften it into
+	// llm_applying/llm_apply_stuck). Sending any of these through the
+	// never-onboarded "Set up Jarvis" pitch would be exactly the bug this table
+	// exists to fix, and there is no honest, specific copy for them yet worth
+	// writing a whole bubble around - so the nudge stays quiet instead. The SPA
+	// gate (frontend/src/onboarding/readiness.js's NOT_ONBOARDED_REASONS) never
+	// force-redirects any of these either; it is the authority for which
+	// reasons truly mean "no history to protect" and this list is deliberately
+	// the complement of that.
+	var SUPPRESSED_REASONS = [
+		// jarvis C2 (pre-existing): an established workspace's first pool/direct
+		// leg is mid-apply.
+		"llm_applying",
+		"container_provisioning",
+		"container_unavailable",
+		"llm_pool_provisioning",
+		"llm_provisioning",
+		"authority_repair_required",
+		"site_replaced",
+	];
 
 	// ERPNext's own setup wizard must be finished first: completing it creates
 	// the first Company. Until then the desk IS the setup wizard, so nudging the
@@ -78,14 +110,13 @@
 	function shouldShow() {
 		if (!window.frappe || !frappe.boot) return false;
 		if (frappe.boot.jarvis_onboarded !== false) return false;
-		// jarvis C2: is_ready_for_chat itself returns ready:false for the soft
-		// "llm_applying" reason (an established workspace's first pool/direct leg
-		// is mid-apply), so jarvis_onboarded reads exactly like a never-set-up
-		// workspace here - but it is not one. Suppress the nudge entirely rather
-		// than routing it through nudgeVariant()'s reconnect copy: an established
-		// workspace mid-apply needs no Desk nudge at all, and the "Set up Jarvis"
-		// fallback pitch would be actively wrong for it.
-		if ((frappe.boot.jarvis_ready_reason || "") === "llm_applying") return false;
+		// is_ready_for_chat returns ready:false for several reasons that read
+		// exactly like a never-set-up workspace here (jarvis_onboarded === false)
+		// but are not one - see SUPPRESSED_REASONS above. Suppress the nudge
+		// entirely for those rather than routing them through nudgeVariant(): an
+		// established workspace between states needs no Desk nudge at all, and
+		// the "Set up Jarvis" fallback pitch would be actively wrong for it.
+		if (SUPPRESSED_REASONS.indexOf(frappe.boot.jarvis_ready_reason || "") !== -1) return false;
 		if (!erpnextSetupComplete()) return false;
 		// A second, sturdier setup signal alongside the sysdefaults flag above:
 		// the Company count (jarvis_site_setup_complete, set in jarvis.boot)
@@ -247,8 +278,62 @@
 				action: "resync",
 			};
 		}
-		// Every other reason (never onboarded, or an empty/unknown reason from an
-		// older boot payload) keeps the original pitch and destination.
+		// account.py only ever returns this once signup + credentials have
+		// already passed once (account._admin_chat_gate is the sole caller), so
+		// a lapsed subscription always means "was working, now paused" - never
+		// "never got that far". Renew is the one action that can fix it; the
+		// wizard's signup step cannot (jarvis review: it would dead-end at the
+		// duplicate-signup guard).
+		if (reason === "subscription_suspended") {
+			return {
+				name: agentName,
+				aria: "Renew " + agentName,
+				text:
+					"Your plan has lapsed, so " +
+					agentName +
+					" is paused. Renew to pick up where you left off.",
+				ctaLabel: "Renew plan →",
+				href: BILLING_URL,
+			};
+		}
+		// Slice 4b (C10b): the subscription leg's OAuth strand aged out mid-connect
+		// (account.py maps admin's chat_readiness "ReconnectRequired" here), also
+		// only reachable after signup + credentials passed once. The recovery is
+		// the wizard's OWN reconnect step (OnboardingView.vue's
+		// startAccountReconnect / can_reconnect offer) - there is no equivalent
+		// action in Settings, so this still points at /jarvis/onboarding, but
+		// with honest copy instead of the never-set-up "meet Jarvis" pitch below.
+		if (reason === "reconnect_required") {
+			return {
+				name: agentName,
+				aria: "Reconnect " + agentName,
+				text:
+					"Your AI subscription needs reconnecting, so " +
+					agentName +
+					" can't reply right now. Reconnect to pick up where you left off.",
+				ctaLabel: "Reconnect →",
+				href: "/jarvis/onboarding",
+			};
+		}
+		// Every other reason keeps the original never-set-up pitch and
+		// destination - deliberately, not just by omission:
+		//   - "signup" / "" / unrecognised: no admin api_key yet, or an older
+		//     boot payload with nothing to classify.
+		//   - "llm_setup": account.py's own docstring guarantees this fires ONLY
+		//     for a workspace that never finished onboarding (no LLM config ever
+		//     confirmed AND the subscription never went Active) - a half-created
+		//     signup, not an established one. Both frontend/src/onboarding/
+		//     readiness.js and the widget's panel_readiness.mjs gate on it as
+		//     "never onboarded" for the same reason.
+		//   - "llm_rejected": a first sync admin explicitly refused. Established
+		//     precedent (panel_readiness.mjs's own comment) is that "the desk
+		//     onboarding banner routes it to setup too" so the three desk
+		//     surfaces (SPA gate, widget, this nudge) agree - do not special-case
+		//     it here without updating that comment and the other two surfaces.
+		//   - "readiness_unconfirmed": account.py guarantees this only for a
+		//     workspace nothing has ever confirmed ready (an established one
+		//     fails OPEN through the same outage instead - _admin_unreachable_
+		//     verdict) - so it never fires on a workspace with history either.
 		return {
 			name: "Jarvis",
 			aria: "Set up Jarvis",
@@ -419,6 +504,16 @@
 		document.addEventListener("visibilitychange", function () {
 			if (document.visibilityState === "visible") syncAndVerify(false);
 		});
+	}
+
+	// Test-only export: this file is a plain script loaded via app_include_js
+	// (see the module comment at the top), not an ES module, so it cannot be
+	// `import`ed the way the widget's *.mjs files are. `module` only exists
+	// under CommonJS (node:test, which the sibling *.test.mjs file uses via
+	// createRequire) - a real browser has no `module` global, so this is inert
+	// in production and does not change what ships to the Desk.
+	if (typeof module !== "undefined" && module.exports) {
+		module.exports = { nudgeVariant: nudgeVariant };
 	}
 
 	if (window.frappe && window.frappe.router) {
