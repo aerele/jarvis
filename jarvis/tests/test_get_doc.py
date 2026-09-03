@@ -79,6 +79,84 @@ class TestGetDoc(FrappeTestCase):
 		with self.assertRaises(InvalidArgumentError):
 			get_doc(doctype="Customer", name="Definitely Not A Customer")
 
+	def test_unknown_doc_error_is_instructive(self):
+		"""#1062: was "unknown Customer: <name>" - a delegate reading this had no
+		next move. Names the DocType/name and points at the tool that finds
+		valid ones."""
+		with self.assertRaises(InvalidArgumentError) as ctx:
+			get_doc(doctype="Customer", name="Definitely Not A Customer")
+		self.assertEqual(
+			str(ctx.exception),
+			"No Customer named 'Definitely Not A Customer'. Use get_list to find valid names first.",
+		)
+
+	def test_missing_name_error_is_instructive(self):
+		"""#1062: a non-single doctype with no name/names gets told the actual
+		calling convention, including the single-doctype escape hatch."""
+		with self.assertRaises(InvalidArgumentError) as ctx:
+			get_doc(doctype="Customer")
+		self.assertEqual(
+			str(ctx.exception),
+			"Pass name (one document) or names (a non-empty list). For a single "
+			"record like Stock Settings call get_doc with only the doctype.",
+		)
+
+	def test_empty_names_list_error_is_instructive(self):
+		"""names=[] is the other shape of "nothing to identify a document with" -
+		same instructive message, not the old "must be a non-empty list"."""
+		with self.assertRaises(InvalidArgumentError) as ctx:
+			get_doc(doctype="Customer", names=[])
+		self.assertIn("Pass name (one document) or names", str(ctx.exception))
+
+	# ------------------------------------------------------------------ #
+	# #1062 live evidence: a delegate calling get_doc on a Single (Stock
+	# Settings) with names=[] or a bogus name got "names must be a non-empty
+	# list of document names" / "unknown Stock Settings: x" - wasted tool
+	# calls on a doctype that has exactly one document and needs no name at
+	# all.
+	# ------------------------------------------------------------------ #
+	def test_single_doctype_returns_its_one_document_without_a_name(self):
+		result = get_doc(doctype="Stock Settings")
+		self.assertEqual(result["name"], "Stock Settings")
+		self.assertEqual(result["doctype"], "Stock Settings")
+
+	def test_single_doctype_ignores_a_bogus_name(self):
+		"""name/names are meaningless for a Single - a delegate with nothing
+		sensible to pass must still get the one document that exists, not a
+		404 on a name it invented."""
+		result = get_doc(doctype="Stock Settings", name="this-name-does-not-exist")
+		self.assertEqual(result["name"], "Stock Settings")
+
+	def test_single_doctype_ignores_an_empty_names_list(self):
+		result = get_doc(doctype="Stock Settings", names=[])
+		self.assertEqual(result["name"], "Stock Settings")
+
+	def test_single_doctype_with_names_returns_the_batch_envelope(self):
+		"""Review fix: the Single short-circuit used to return the plain
+		document dict even when `names` was passed, silently ignoring that
+		the caller asked for the batch shape. A non-empty `names` on a
+		Single now gets the same {doctype, docs, count} envelope any other
+		doctype's batch call gets, wrapping that one document - names'
+		CONTENT is still meaningless (a Single has exactly one document,
+		whose name IS the doctype), only its presence switches the shape."""
+		result = get_doc(doctype="Stock Settings", names=["this-name-does-not-exist"])
+		self.assertEqual(result["doctype"], "Stock Settings")
+		self.assertEqual(result["count"], 1)
+		self.assertEqual(len(result["docs"]), 1)
+		self.assertEqual(result["docs"][0]["name"], "Stock Settings")
+
+	def test_single_doctype_without_names_still_returns_the_flat_dict(self):
+		"""The other half of the same fix: `name`/no-args at all must keep
+		the pre-existing flat-dict shape - only an explicit non-empty
+		`names` switches to the batch envelope."""
+		result = get_doc(doctype="Stock Settings")
+		self.assertNotIn("docs", result)
+		self.assertEqual(result["name"], "Stock Settings")
+
+		result = get_doc(doctype="Stock Settings", name="whatever")
+		self.assertNotIn("docs", result)
+		self.assertEqual(result["name"], "Stock Settings")
+
 	def test_permission_check_blocks_unauthorized_user(self):
 		user_email = "docless@example.com"
 		if not frappe.db.exists("User", user_email):
@@ -94,5 +172,27 @@ class TestGetDoc(FrappeTestCase):
 		try:
 			with self.assertRaises(PermissionDeniedError):
 				get_doc(doctype="Customer", name="Jarvis Test Customer")
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_single_doctype_still_enforces_read_permission(self):
+		"""#1062: frappe.get_single skips no permission check of its own - a
+		Single carries real DocPerms (Stock Settings: Stock Manager / Sales
+		User only), so a user holding neither must still be refused, not
+		waved through because reading a Single takes no name to gate on."""
+		user_email = "docless@example.com"
+		if not frappe.db.exists("User", user_email):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": user_email,
+					"first_name": "Docless",
+					"send_welcome_email": 0,
+				}
+			).insert(ignore_permissions=True)
+		frappe.set_user(user_email)
+		try:
+			with self.assertRaises(PermissionDeniedError):
+				get_doc(doctype="Stock Settings")
 		finally:
 			frappe.set_user("Administrator")

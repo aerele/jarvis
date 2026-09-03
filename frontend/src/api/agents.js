@@ -55,9 +55,20 @@ export const listAgentActivityPage = (p = {}) =>
 		page_length: p.page_length || 20,
 	});
 
+// One run's STEP TIMELINE, oldest first (jarvis#1062): what the bench observed
+// the run do - the launch dispatch, each jarvis__* tool the delegate called back
+// with, and the findings writeback. Steps carry shapes (DocType names, report
+// names, counts), never row contents. Ownership-gated server-side; a run the
+// caller cannot read returns an empty timeline. -> { steps: [...], count }
+export const listRunSteps = (run) => call(AG + "list_run_steps", { run });
+
 // Seed a new conversation from a finding and land the user in live chat.
 // -> { ok, conversation, run_id, reason }
 export const takeFindingToChat = (finding) => call(AG + "take_finding_to_chat", { finding });
+
+// #1061/#1062 operator stop: terminalize a RUNNING run early (idempotent on an
+// already-terminal one). -> { ok, status, idempotent? }
+export const stopAgentRun = (run) => call(AG + "stop_agent_run", { run });
 
 // ── PP-4 shadow -> live activation (jarvis#456) ──────────────────────────────
 // get_agent's `installation` shape is frozen (§8.3) and two in-flight PRs
@@ -86,3 +97,23 @@ export const promoteInstallation = (installation, justification) =>
 	call(AG + "promote_installation", { installation, justification: justification || "" });
 export const demoteInstallation = (installation, reason) =>
 	call(AG + "demote_installation", { installation, reason: reason || "" });
+
+// ── Access governance (jarvis#1062) ──────────────────────────────────────────
+// Replaces BOTH allow lists atomically. Access is deny-by-default: saving with
+// two empty lists CLOSES the agent to everyone but an admin, it does not reopen
+// it to everyone. `apply` additionally pushes the roster to the workspace (one
+// restart) - it belongs on the admin's action, never on a user's install.
+// -> { ok, allowed_roles: [str], allowed_users: [str], applied: bool }
+export const setAgentAccess = (agent_slug, roles, users, apply) =>
+	call(AG + "set_agent_access", {
+		agent_slug,
+		roles: JSON.stringify(roles || []),
+		users: JSON.stringify(users || []),
+		apply: apply ? 1 : 0,
+	});
+
+// Type-ahead source for the Access editor's user picker: enabled, named users
+// only (no Administrator/Guest - set_agent_access refuses them), capped at 20
+// server-side. Admin-gated, like the editor it feeds.
+// -> [{ name, full_name }]
+export const searchUsers = (q) => call(AG + "search_users", { q: q || "" });

@@ -40,7 +40,7 @@ TOK_A = "tok_rg_a"
 TOK_B = "tok_rg_b"
 
 CLEAN_SENTENCE = "No exceptions were found"
-CLEAN_HEADING = "Evaluated — clean coverage"
+CLEAN_HEADING = "Evaluated: clean coverage"
 
 
 def _mk_user(email: str) -> str:

@@ -17,12 +17,13 @@ from jarvis.exceptions import InvalidArgumentError
 def require_doctype_and_name(doctype: str, name: str) -> None:
 	"""Reject empty doctype / name with InvalidArgumentError.
 
-	Six tools (amend_doc, cancel_doc, delete_doc, get_doc, submit_doc,
-	update_doc) all start with the identical two-line guard; the
-	2026-06-16 review flagged this as duplicated prologue. Factored
-	here so future tools that take a (doctype, name) pair have one
-	place to import from and changes to the rejection message land
-	in one site.
+	Five tools (amend_doc, cancel_doc, delete_doc, submit_doc, update_doc) all
+	start with the identical two-line guard; the 2026-06-16 review flagged
+	this as duplicated prologue. Factored here so future tools that take a
+	(doctype, name) pair have one place to import from and changes to the
+	rejection message land in one site. get_doc (#1062) dropped out: its
+	name/names two-mode API and the Single-doctype short-circuit need their
+	own guard, so it no longer imports this helper.
 	"""
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")

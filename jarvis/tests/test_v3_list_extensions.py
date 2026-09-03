@@ -23,6 +23,7 @@ from jarvis.chat import agent_catalog, agents_api, custom_skills_api, macros_api
 from jarvis.chat.approvals_api import get_approval
 from jarvis.chat.custom_skills_api import delete_custom_skills_bulk, list_custom_skills_page
 from jarvis.chat.macros_api import delete_macros_bulk, list_macro_runs, list_macros_page
+from jarvis.tests._agent_access import allow_listing_for
 
 USER_A = "v3-user-a@example.com"
 USER_B = "v3-user-b@example.com"
@@ -404,6 +405,12 @@ class TestGetAgent(unittest.TestCase):
 			for u in (USER_A, USER_B):
 				frappe.get_doc("User", u).add_roles("Accounts User")
 				frappe.clear_cache(user=u)
+		# jarvis#1062: access is deny-by-default, and both fixtures are plain Jarvis
+		# Users. Load-bearing for USER_B, who never installs and so has no
+		# installed-row carve-out to fall back on - get_agent would 403 before the
+		# payload assertions below could run.
+		allow_listing_for(cls.slug, user=USER_A)
+		allow_listing_for(cls.slug, user=USER_B)
 
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -440,6 +447,8 @@ class TestGetAgent(unittest.TestCase):
 		self.assertIsNotNone(res["installation"])
 		self.assertEqual(res["installation"]["name"], self.installation)
 		self.assertNotIn("all_roles", res)  # SM-only payload
+		self.assertNotIn("allowed_roles", res)  # admin-only payload (#1062 polish)
+		self.assertIn("doctypes_required", res)
 		self.assertEqual(res["install_count"], frappe.db.count(INSTALLATION, {"agent": self.slug}))
 		self.assertGreaterEqual(res["install_count"], 1)
 
@@ -448,8 +457,13 @@ class TestGetAgent(unittest.TestCase):
 			res = agents_api.get_agent(self.slug)
 		self.assertIsNone(res["installation"])
 		self.assertNotIn("all_roles", res)
+		# A non-admin learns whether THEY are allowed...
 		self.assertIn("allowed", res)
-		self.assertIn("allowed_roles", res)
+		self.assertEqual(res["allowed"], 1)
+		# ...and never WHO ELSE is: jarvis#1062 moved the roster into the admin-only
+		# half of the payload, next to all_roles.
+		self.assertNotIn("allowed_roles", res)
+		self.assertNotIn("allowed_users", res)
 
 	def test_sm_gets_all_roles(self):
 		res = agents_api.get_agent(self.slug)  # Administrator
@@ -457,10 +471,15 @@ class TestGetAgent(unittest.TestCase):
 		self.assertTrue(isinstance(res["all_roles"], list) and res["all_roles"])
 		for banned in ("Administrator", "Guest", "All"):
 			self.assertNotIn(banned, res["all_roles"])
+		self.assertIn("allowed_roles", res)  # an admin still sees who is allowed
 
-	def test_unknown_agent_throws(self):
-		with self.assertRaises(frappe.DoesNotExistError):
+	def test_unknown_agent_throws_a_clean_not_found(self):
+		"""A bad slug must read like the access-refusal path (#1062 polish) - not
+		leak the doctype name or confirm the slug is a real one."""
+		with self.assertRaises(frappe.DoesNotExistError) as ctx:
 			agents_api.get_agent("v3-no-such-agent")
+		self.assertIn("Agent not found.", str(ctx.exception))
+		self.assertNotIn("Jarvis Agent Listing", str(ctx.exception))
 
 	def test_list_agents_rows_gain_install_count(self):
 		with _as(USER_A):

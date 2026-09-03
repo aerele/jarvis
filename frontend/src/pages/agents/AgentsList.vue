@@ -45,7 +45,8 @@
 			</template>
 		</LayoutHeader>
 
-		<!-- 4 hash-synced tabs (no hash = Featured; #available/#installed/#activity) -->
+		<!-- hash-synced tabs: 4 for an admin/reviewer (no hash = Featured), 2 for a
+		     plain user (Agents relabelling Available + Activity; no hash = Agents) -->
 		<TabBar class="shrink-0" :tabs="TABS" :model-value="tab" @update:model-value="setTab" />
 
 		<!-- persistent apply-failure banner: the reason must survive the toast and
@@ -96,7 +97,7 @@
 
 			<div class="min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-4">
 				<div
-					v-if="loading && !rows.length"
+					v-if="(loading || probingCatalog) && !rows.length"
 					class="py-10 text-center text-sm text-ink-gray-5"
 				>
 					Loading the catalog…
@@ -125,12 +126,17 @@
 				</div>
 
 				<div v-else class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+					<!-- jarvis#1062 P1-5 (production-readiness audit): keyboard focus
+					     on a card was invisible - a plain role="button" div carries no
+					     default browser outline the way a real <button> would, and had
+					     no explicit ring either. focus-visible:outline-none first, or
+					     the ring stacks on top of a still-visible default outline. -->
 					<div
 						v-for="a in rows"
 						:key="a.agent_slug"
 						role="button"
 						tabindex="0"
-						class="flex cursor-pointer flex-col rounded-lg border bg-surface-white p-5 transition hover:bg-surface-gray-1 hover:shadow-sm"
+						class="flex cursor-pointer flex-col rounded-lg border bg-surface-white p-5 transition hover:bg-surface-gray-1 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3"
 						@click="openAgent(a)"
 						@keydown.enter.prevent="openAgent(a)"
 						@keydown.space.prevent="openAgent(a)"
@@ -143,8 +149,18 @@
 								{{ logoText(a) }}
 							</div>
 							<div class="min-w-0 flex-1">
-								<div class="flex items-center gap-2">
-									<span class="truncate text-base font-semibold text-ink-gray-9">
+								<!-- jarvis#1062 P1-4 (production-readiness audit): a single-line
+								     truncate cut long agent names off mid-word with no way to
+								     read the rest. Two lines now (line-clamp-2), :title carries
+								     the full name for anything a second line still can't fit;
+								     items-start (not -center) keeps a status badge pinned to the
+								     title's first line rather than drifting to the middle of a
+								     wrapped block. -->
+								<div class="flex items-start gap-2">
+									<span
+										class="line-clamp-2 text-base font-semibold text-ink-gray-9"
+										:title="a.title"
+									>
 										{{ a.title }}
 									</span>
 									<Badge
@@ -197,11 +213,6 @@
 								label="Update available"
 							/>
 						</div>
-
-						<div v-if="!a.allowed" class="mt-2 text-sm text-ink-gray-5">
-							Available to: {{ (a.allowed_roles || []).join(", ") || "-" }} - ask
-							your administrator.
-						</div>
 					</div>
 				</div>
 			</div>
@@ -215,32 +226,6 @@
 				@loadMore="loadMore"
 			/>
 		</template>
-
-		<!-- leave-guard: SM with unapplied catalog changes (dirty) -->
-		<Dialog
-			v-model="leaveDialog.show"
-			:options="{ title: 'Unapplied catalog changes' }"
-			@close="resolveLeave(false)"
-		>
-			<template #body-content>
-				<p class="text-p-base text-ink-gray-6">
-					You have unapplied catalog changes. Apply them now, or leave anyway? Your
-					changes stay saved either way - they only reach the assistant after an Apply.
-				</p>
-			</template>
-			<template #actions>
-				<div class="flex items-center gap-2">
-					<Button
-						variant="solid"
-						label="Apply & leave"
-						:loading="applying"
-						@click="applyAndLeave"
-					/>
-					<Button label="Leave anyway" @click="resolveLeave(true)" />
-					<Button variant="ghost" label="Stay" @click="resolveLeave(false)" />
-				</div>
-			</template>
-		</Dialog>
 	</div>
 </template>
 
@@ -255,17 +240,19 @@
 //   Activity - the owner's lifecycle feed (AgentActivityTab, self-contained).
 // Reviewer/SM header action: prominent "Apply catalog changes" driven by
 // get_agents_sync_status().dirty (install/uninstall/enable since the last
-// successful Apply), with SyncPill-style pending/failed polling, plus a
-// route-leave + beforeunload guard while dirty. Gated on the skill-reviewer
-// capability (get_agents_caps().review) since apply_agents needs the reviewer
-// set, not System Manager.
+// successful Apply), with SyncPill-style pending/failed polling. jarvis#1062
+// E2E defect (both a beforeunload listener AND an in-SPA route-leave confirm
+// dialog used to nag while dirty): the dirty state lives server-side and
+// nothing is lost by navigating away, so BOTH leave-guards are removed - the
+// "Changes pending" badge above is the only signal now. Gated on the
+// skill-reviewer capability (get_agents_caps().review) since apply_agents
+// needs the reviewer set, not System Manager.
 import { reactive, ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
-import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
 	Badge,
 	Breadcrumbs,
 	Button,
-	Dialog,
 	FeatherIcon,
 	FormControl,
 	ListFooter,
@@ -279,36 +266,61 @@ import { useListPage } from "@/composables/useListPage";
 import * as api from "@/api";
 import * as agentsApi from "@/api/agents";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
+import { agentsEmptyState, shouldProbeWholeCatalog } from "@/lib/agentsEmptyState";
 import { errHtml } from "@/lib/errors";
+import { categoryTitle } from "@/lib/agentCategory";
+import { session } from "@/data/session";
 
 const route = useRoute();
 const router = useRouter();
 
-// Display metadata mirroring jarvis/agents/registry.json domains (unknown slugs
-// fall back to a prettified slug).
-const DOMAINS = [
-	{ slug: "close", title: "Close & Reporting" },
-	{ slug: "bank-recon", title: "Bank & Reconciliation" },
-];
+// ── Reviewer / admin capability probe (PART 3 remediation): apply_agents needs
+// the skill-reviewer set (Jarvis Skill Reviewer | Jarvis Admin | System
+// Manager), NOT System Manager. get_agents_caps().review drives the Apply
+// button so a reviewer-only System User (no SM) can see and use it; a plain
+// Jarvis User gets review=false and no button. Decoupled from the SM-only
+// cross-owner getAgentAdminOverview data. Declared here, ahead of the
+// hash-synced tabs below, because applyHash() (called synchronously at setup)
+// already needs isPrivileged.
+const canApply = ref(false);
+// The tenant-admin half of the same probe: it decides which EMPTY-STATE copy
+// is truthful (see emptyState) and, with canApply, which tab set renders -
+// never what the list contains, which stays server-side in _enriched_catalog.
+const canAdminister = ref(false);
+// jarvis#1062 polish: an admin or a reviewer keeps the full catalog chrome;
+// everyone else's access is deny-by-default (agentsEmptyState.js), so
+// Featured/Installed are two more tabs pointing at nothing for them.
+const isPrivileged = computed(() => canAdminister.value || canApply.value);
 
-// ── hash-synced tabs (AgentDetail pattern; no hash = Featured) ───────────────
-const TABS = [
+// ── hash-synced tabs (AgentDetail pattern; no hash = the privileged default) ─
+const FULL_TABS = [
 	{ label: "Featured", value: "featured" },
 	{ label: "Available", value: "available" },
 	{ label: "Installed", value: "installed" },
 	{ label: "Activity", value: "activity" },
 ];
+// A plain user's "Agents" IS the available catalog - same value, relabelled -
+// so every value/tab -> query mapping below (AGENT_TABS, listAgentsPage,
+// emptyState, shouldProbeWholeCatalog) needs no separate branch for them.
+const PLAIN_TABS = [
+	{ label: "Agents", value: "available" },
+	{ label: "Activity", value: "activity" },
+];
+const TABS = computed(() => (isPrivileged.value ? FULL_TABS : PLAIN_TABS));
 const AGENT_TABS = ["featured", "available", "installed"];
 
 const tab = ref("featured");
+function defaultTab() {
+	return isPrivileged.value ? "featured" : "available";
+}
 function applyHash() {
 	const h = (route.hash || "").replace(/^#/, "");
-	tab.value = TABS.some((t) => t.value === h) ? h : "featured";
+	tab.value = TABS.value.some((t) => t.value === h) ? h : defaultTab();
 }
 function setTab(v) {
 	if (tab.value === v) return;
 	tab.value = v;
-	router.push({ hash: v === "featured" ? "" : "#" + v });
+	router.push({ hash: v === defaultTab() ? "" : "#" + v });
 }
 applyHash();
 // back/forward restores the tab
@@ -318,6 +330,13 @@ watch(
 		if (route.name === "AgentsList") applyHash();
 	}
 );
+// Caps resolve async (probeCaps, below), so the very first applyHash() above
+// ran before isPrivileged was known. Re-validate once it is, so a deep link
+// to an admin-only tab (#installed, say) for a caller who turns out to be a
+// plain user falls back to Agents instead of sitting on a blank panel, and a
+// caller who turns out to be privileged gets Featured back instead of being
+// stuck on the plain default.
+watch(isPrivileged, () => applyHash());
 
 // ── catalog list: useListPage adapter over list_agents_page ─────────────────
 // The adapter closes over tab/category/sortChoice and maps useListPage's
@@ -356,9 +375,11 @@ watch([tab, category, sortChoice], ([t]) => {
 	resetLoad();
 });
 
-// ── category select options (distinct catalog categories, DOMAINS titles) ────
-// One cheap list_agents() call feeds the distinct set - server pages can't
-// (a page only sees its slice); DOMAINS is the fallback until/if it loads.
+// ── category select options (distinct catalog categories) ────────────────────
+// One cheap list_agents() call feeds the distinct set - server pages can't (a
+// page only sees its slice). sync_agent_listings (agent_catalog.py) already
+// sends a real label ("Accounts Payable", not "ap") as `category`, so this
+// list IS the display label - no separate frontend title map to keep in sync.
 const catalogCategories = ref(null);
 async function loadCategories() {
 	try {
@@ -366,66 +387,27 @@ async function loadCategories() {
 		const seen = new Set();
 		const out = [];
 		for (const a of all) {
-			const slug = a.category || "other";
-			if (seen.has(slug)) continue;
-			seen.add(slug);
-			out.push(slug);
+			const label = a.category || "Other";
+			if (seen.has(label)) continue;
+			seen.add(label);
+			out.push(label);
 		}
 		if (out.length) catalogCategories.value = out;
 	} catch (e) {
-		// keep the DOMAINS fallback - the select must not break the page
+		// no fallback list - "All categories" alone still renders a usable select
 	}
 }
 const categoryOptions = computed(() => {
-	const slugs = catalogCategories.value || DOMAINS.map((d) => d.slug);
+	const labels = catalogCategories.value || [];
 	return [
 		{ label: "All categories", value: "" },
-		...slugs.map((s) => ({ label: categoryTitle(s), value: s })),
+		...labels.map((l) => ({ label: l, value: l })),
 	];
-});
-
-// ── empty states (per-TAB copy - "catalog is empty" only when it truly is) ───
-const filtersActive = computed(() => !!(search.value || category.value));
-const emptyState = computed(() => {
-	if (filtersActive.value) {
-		return {
-			title: "No agents match",
-			description: "Try clearing the search or category filter.",
-			cta: false,
-		};
-	}
-	if (tab.value === "featured") {
-		return {
-			title: "No featured agents yet",
-			description: "Browse the Available tab for the full catalog.",
-			cta: true,
-		};
-	}
-	if (tab.value === "installed") {
-		return {
-			title: "You haven't installed any agents yet",
-			description: "Browse the catalog and install one to get started.",
-			cta: true,
-		};
-	}
-	return {
-		title: "No agents available",
-		description: "The catalog is empty right now.",
-		cta: false,
-	};
 });
 
 // ── display helpers ──────────────────────────────────────────────────────────
 function openAgent(a) {
 	router.push("/agents/" + a.agent_slug);
-}
-function categoryTitle(slug) {
-	const d = DOMAINS.find((x) => x.slug === slug);
-	if (d) return d.title;
-	return String(slug || "other")
-		.split("-")
-		.map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-		.join(" ");
 }
 function logoText(a) {
 	return String(a.title || a.agent_slug || "?")
@@ -437,25 +419,82 @@ function installsLabel(n) {
 	return `${c} install${c === 1 ? "" : "s"}`;
 }
 
-// ── Reviewer capability probe (PART 3 remediation): apply_agents needs the
-// skill-reviewer set (Jarvis Skill Reviewer | Jarvis Admin | System Manager),
-// NOT System Manager. get_agents_caps().review drives the Apply button so a
-// reviewer-only System User (no SM) can see and use it; a plain Jarvis User
-// gets review=false and no button. Decoupled from the SM-only cross-owner
-// getAgentAdminOverview data. ─────────────────────────────────────────────────
-const canApply = ref(false);
+// canApply/canAdminister are declared above (near TABS - applyHash() needs
+// isPrivileged synchronously at setup); this just resolves them.
 async function probeCaps() {
 	try {
 		const caps = (await agentsApi.getAgentsCaps()) || {};
 		canApply.value = !!caps.review;
+		canAdminister.value = !!caps.admin;
 		if (canApply.value) {
 			await loadSyncStatus();
 			if (sync.pending) startSyncPoll();
 		}
 	} catch (e) {
 		canApply.value = false;
+		canAdminister.value = false;
 	}
 }
+
+// ── empty states ─────────────────────────────────────────────────────────────
+// The decision itself is a pure function in @/lib/agentsEmptyState (tested
+// there). Here we only supply what it needs, including the lazily-probed
+// "does this caller have ANY agents at all" signal below.
+const filtersActive = computed(() => !!(search.value || category.value));
+// jarvis#1062 P2-9: the Installed tab's empty state names the Administrator
+// case specifically - it cannot install, no matter caps.admin.
+const isAdministrator = computed(() => session.user === "Administrator");
+const emptyState = computed(() =>
+	agentsEmptyState({
+		tab: tab.value,
+		filtersActive: filtersActive.value,
+		canAdminister: canAdminister.value,
+		isAdministrator: isAdministrator.value,
+		wholeCatalogEmpty: wholeCatalogEmpty.value,
+	})
+);
+
+// ── "is this caller's whole catalog empty?" (jarvis#1062) ────────────────────
+// null until probed. ONE call answers it for every tab: server-side the
+// available tab is `status != Deprecated or installed`, so it is a superset of
+// both featured (Published only) and installed - a zero total there means the
+// caller can see no agent anywhere, which is the only thing we need to know.
+const wholeCatalogEmpty = ref(null);
+const probingCatalog = ref(false);
+
+async function probeWholeCatalog() {
+	probingCatalog.value = true;
+	try {
+		const res = (await agentsApi.listAgentsPage({ tab: "available", page_length: 1 })) || {};
+		wholeCatalogEmpty.value = (res.total || 0) === 0;
+	} catch {
+		// Fail to the per-tab copy rather than asserting an access problem we
+		// could not confirm.
+		wholeCatalogEmpty.value = false;
+	} finally {
+		probingCatalog.value = false;
+	}
+}
+
+watch(
+	[tab, rows, loading, filtersActive, canAdminister],
+	() => {
+		if (
+			shouldProbeWholeCatalog({
+				tab: tab.value,
+				loading: loading.value,
+				rowCount: rows.value.length,
+				filtersActive: filtersActive.value,
+				canAdminister: canAdminister.value,
+				wholeCatalogEmpty: wholeCatalogEmpty.value,
+				probing: probingCatalog.value,
+			})
+		) {
+			probeWholeCatalog();
+		}
+	},
+	{ immediate: true, deep: false }
+);
 
 // ── apply pipeline status (SyncPill pattern: 3s poll while pending) ──────────
 // dirty = the enabled set changed since the last successful Apply - drives the
@@ -517,45 +556,19 @@ async function applyCatalog() {
 	}
 }
 
-// ── leave-guard: can-apply + dirty (unapplied catalog changes) ───────────────
-const leaveDialog = reactive({ show: false, next: null });
-
-onBeforeRouteLeave((to, from, next) => {
-	// drilling into /agents/:slug stays inside the agents area - don't nag
-	if (!canApply.value || !sync.dirty || String(to.path || "").startsWith("/agents"))
-		return next();
-	leaveDialog.next = next;
-	leaveDialog.show = true;
-});
-
-function resolveLeave(go) {
-	const n = leaveDialog.next;
-	leaveDialog.next = null; // idempotent: Dialog @close re-fires after buttons
-	leaveDialog.show = false;
-	if (n) n(go);
-}
-
-async function applyAndLeave() {
-	const ok = await applyCatalog();
-	// apply request failed → stay so the SM can retry (error already toasted)
-	resolveLeave(ok);
-}
-
-// hard reloads / tab close while dirty → native browser prompt
-function onBeforeUnload(e) {
-	if (canApply.value && sync.dirty) {
-		e.preventDefault();
-		e.returnValue = ""; // Chrome requires returnValue to show the prompt
-	}
-}
+// jarvis#1062 E2E defect: this file used to carry TWO leave-guards while the
+// catalog was dirty (canApply && sync.dirty) - a beforeunload listener
+// firing the native "leave site?" prompt on ordinary SPA navigation, and an
+// in-SPA onBeforeRouteLeave confirm dialog nagging on route changes. Both
+// removed outright: the dirty state lives server-side (get_agents_sync_status)
+// and nothing is lost by navigating away - the "Changes pending" badge above
+// is the honest, non-blocking signal instead.
 
 onMounted(() => {
 	probeCaps();
 	loadCategories();
-	window.addEventListener("beforeunload", onBeforeUnload);
 });
 onBeforeUnmount(() => {
-	window.removeEventListener("beforeunload", onBeforeUnload);
 	stopSyncPoll();
 });
 </script>

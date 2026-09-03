@@ -28,6 +28,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_scheduler, agents_api
+from jarvis.tests._agent_access import allow_listing_for, clear_listing_access
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -36,6 +37,10 @@ ACTIVITY = "Jarvis Agent Activity"
 FINDING = "Jarvis Agent Finding"
 PROVENANCE = "Jarvis Agent Provenance Event"
 SETTINGS = "Jarvis Settings"
+
+# The reviewing role promote/demote demands (JARVIS_REVIEWER_ROLES). Created by
+# DocType sync - one DocType names it - so it exists on a fresh CI site.
+_REVIEWER_ROLE = "Jarvis Skill Reviewer"
 
 PREFIX = "hardening-h-"
 
@@ -76,6 +81,12 @@ def _mk_listing(slug: str) -> str:
 	else:
 		# A listing left by an earlier run may predate the rule_pack field.
 		frappe.db.set_value(LISTING, slug, "rule_pack", f"pack-{slug}", update_modified=False)
+	# jarvis#1062: a listing is CLOSED until somebody is allowed, and every fixture
+	# user in this module is a plain Jarvis User. Granted to the ROLE, not by name,
+	# so _restrict() below - which REPLACES allowed_roles - still takes the grant
+	# away when a test means to lock the agent down. Granting by name would leave a
+	# residue that made those gate assertions pass for the wrong reason.
+	allow_listing_for(slug, roles=["Jarvis User"])
 	return slug
 
 
@@ -271,6 +282,12 @@ class TestPerCustomerCeiling(FrappeTestCase):
 		cls.rev_b = _mk_user("h-rev-b@example.com")
 		cls.cust_c = _mk_user("h-cust-c@example.com")
 		cls.rev_c = _mk_user("h-rev-c@example.com")
+		# jarvis#1062: promoting is the reviewer set's act, not the named reviewer's
+		# own. Unconditional (outside _mk_user's exists-guard) - on a shared site the
+		# user may already exist without the role.
+		for r in (cls.rev_a, cls.rev_b, cls.rev_c):
+			frappe.get_doc("User", r).add_roles(_REVIEWER_ROLE)
+			frappe.clear_cache(user=r)
 		for s in cls.ALL:
 			_mk_listing(s)
 		frappe.db.commit()
@@ -335,6 +352,11 @@ class TestPromotionLockSerialization(FrappeTestCase):
 		frappe.set_user("Administrator")
 		cls.owner = _mk_user("h-lock-owner@example.com")
 		cls.reviewer = _mk_user("h-lock-rev@example.com")
+		# jarvis#1062: see TestPerCustomerCeiling - promote authority is the reviewer
+		# set now, so the lock tests need their actor to hold it or they never reach
+		# the lock they are about.
+		frappe.get_doc("User", cls.reviewer).add_roles(_REVIEWER_ROLE)
+		frappe.clear_cache(user=cls.reviewer)
 		_mk_listing(cls.SLUG)
 		frappe.db.commit()
 
@@ -925,8 +947,14 @@ def _set_roles(email: str, role: str, *, held: bool) -> None:
 
 
 def _restrict(slug: str, roles: list[str]) -> None:
+	"""Narrow the listing to exactly ``roles``, and to no named user.
+
+	Both halves (jarvis#1062): leaving allowed_users populated would mean a test
+	that restricts an agent to a role nobody holds still admits everyone named
+	there, and the gate it is asserting would never fire."""
 	doc = frappe.get_doc(LISTING, slug)
 	doc.set("allowed_roles", [{"role": r} for r in roles])
+	doc.set("allowed_users", [])
 	doc.flags.ignore_permissions = True
 	doc.save()
 
@@ -1240,16 +1268,96 @@ class TestSetListingStatusMarksCatalogDirty(FrappeTestCase):
 
 	def test_status_change_with_no_enabled_install_is_not_dirty(self):
 		"""The payload is identical either way, so do not manufacture a pending
-		Apply (and a container restart) out of nothing."""
+		Apply (and a container restart) out of nothing.
+
+		The listing must carry NO grant either (jarvis#1062): a granted listing is
+		in the roster whether or not anyone installed it, so a status flip on one
+		DOES change the payload - see the sibling test below. _mk_listing grants
+		Jarvis User so the module's other tests can install, hence the reset here."""
+		clear_listing_access(self.SLUG)
 		agents_api.set_listing_status(self.SLUG, "Deprecated")
 		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
 		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 3)
+
+	def test_status_change_with_a_grant_but_no_install_is_dirty(self):
+		"""jarvis#1062: the roster is no longer "enabled installs" alone.
+
+		An allowed Published listing ships with zero installations, so
+		publishing/deprecating one really does move the container roster and must
+		show as a pending Apply - the exact #457 class of bug (roster and DB
+		silently disagreeing) in its new shape."""
+		allow_listing_for(self.SLUG, roles=["Jarvis User"])
+		agents_api.set_listing_status(self.SLUG, "Deprecated")
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
 
 	def test_setting_the_same_status_is_not_dirty(self):
 		_mk_gate_install(self.owner, self.SLUG, self.owner)
 		frappe.db.commit()
 		agents_api.set_listing_status(self.SLUG, "Published")
 		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
+
+
+class TestSetEnabledMarksCatalogDirtyOnlyOnAChange(FrappeTestCase):
+	"""jarvis#1062 polish: a no-op ``set_enabled`` call (re-enabling an
+	already-enabled row, or disabling an already-disabled one) was dirtying the
+	catalog unconditionally, unlike every other push-visible mutation here
+	(``set_listing_status`` above) - the SPA's leave-guard then nagged with a
+	native beforeunload prompt even though nothing the next Apply would push
+	had actually changed."""
+
+	SLUG = PREFIX + "enableddirty"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("h-enableddirty-owner@example.com")
+		_mk_listing(cls.SLUG)
+		cls._saved = {k: _single(k) for k in ("agent_catalog_dirty", "agent_catalog_version")}
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		for k, v in cls._saved.items():
+			frappe.db.set_single_value(SETTINGS, k, v)
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.set_value(LISTING, self.SLUG, "status", "Published", update_modified=False)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_dirty", 0)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_version", 3)
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_wipe([self.SLUG])
+		frappe.db.commit()
+
+	def test_re_enabling_an_already_enabled_install_is_not_dirty(self):
+		inst = _mk_gate_install(self.owner, self.SLUG, self.owner)  # starts enabled=1
+		frappe.db.commit()
+		agents_api.set_enabled(inst, 1)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 3)
+
+	def test_disabling_an_already_disabled_install_is_not_dirty(self):
+		inst = _mk_gate_install(self.owner, self.SLUG, self.owner)
+		frappe.db.set_value(INSTALLATION, inst, "enabled", 0, update_modified=False)
+		frappe.db.commit()
+		agents_api.set_enabled(inst, 0)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 3)
+
+	def test_an_actual_flip_still_marks_dirty(self):
+		"""Control: the fix must not have swallowed the real case."""
+		inst = _mk_gate_install(self.owner, self.SLUG, self.owner)  # starts enabled=1
+		frappe.db.commit()
+		agents_api.set_enabled(inst, 0)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_version")), 4)
 
 
 # --------------------------------------------------------------------------- #

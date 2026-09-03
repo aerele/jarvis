@@ -66,3 +66,17 @@ export function dayLabel(d) {
 	if (diff > 1 && diff < 7) return dj.format("dddd");
 	return dj.format("D MMMM");
 }
+
+// A ticking elapsed-time label (jarvis#1062 C2/C3's running-run progress
+// display) - mm:ss under an hour, h:mm at/above it. Pure (no dayjs - the
+// caller supplies whole seconds, typically from toLocalMs(started_at)).
+// Negative/NaN input clamps to 0 (a clock started just before the caller's
+// first tick must never print a negative duration).
+export function fmtElapsed(totalSeconds) {
+	const sec = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+	const h = Math.floor(sec / 3600);
+	const m = Math.floor((sec % 3600) / 60);
+	const s = sec % 60;
+	const pad = (n) => String(n).padStart(2, "0");
+	return h > 0 ? `${h}:${pad(m)}` : `${pad(m)}:${pad(s)}`;
+}

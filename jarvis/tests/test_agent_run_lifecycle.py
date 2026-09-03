@@ -217,6 +217,22 @@ class TestStoppedStatusIsTerminal(RunLifecycleTestCase):
 			frappe.set_user("Administrator")
 		self.assertIn(run, [r["name"] for r in rows])
 
+	def test_run_list_row_carries_preparation_mode_and_dashboard(self):
+		"""AgentRunsBoard's Preview pill/attestation banner and FindingsPanel's "Open
+		dashboard" button both key off these two fields on the row the list endpoint
+		returns: a row missing either key can never render them."""
+		inst = self._install()
+		run = self._run(inst, preparation_mode="shadow")
+		frappe.set_user(self.owner)
+		try:
+			rows = agents_api.list_runs_page()["rows"]
+		finally:
+			frappe.set_user("Administrator")
+		row = next(r for r in rows if r["name"] == run)
+		self.assertIn("preparation_mode", row)
+		self.assertIn("dashboard", row)
+		self.assertEqual(row["preparation_mode"], "shadow")
+
 	def test_stopped_run_is_not_live(self):
 		"""#672's liveness guard is keyed on ``status='running'``, so a stopped run must
 		not keep the installation's Run-now button (and the cron sweep) locked out."""
@@ -388,10 +404,22 @@ class TestPollDispatchedRuns(RunLifecycleTestCase):
 	def _fleet_failed(self, message: str) -> dict:
 		return self._relayed({"status": "failed", "error": {"code": "run_failed", "message": message}})
 
-	def _fleet_completed(self, *, finished_ago_s: float, status: str = "done") -> dict:
+	def _fleet_completed(
+		self, *, finished_ago_s: float, status: str = "done", result: dict | None = None
+	) -> dict:
 		# The fleet stamps finished_at as a UNIX epoch float, and its word for a clean
 		# exit is ``done`` (fleet-agent main.py, _dispatch_agent_run) - NOT ``completed``.
-		return self._relayed({"status": status, "finished_at": time.time() - finished_ago_s, "error": None})
+		# ``result`` (#1061 polish): a gateway timeout/abort still reports a clean
+		# "done" run-state - the honest verdict rides in result.gateway_status/summary
+		# instead of the top-level status.
+		return self._relayed(
+			{
+				"status": status,
+				"finished_at": time.time() - finished_ago_s,
+				"error": None,
+				"result": result,
+			}
+		)
 
 	# ------------------------------------------------------------------ #
 	def test_a_fleet_failure_is_surfaced_with_its_real_message(self):
@@ -474,6 +502,64 @@ class TestPollDispatchedRuns(RunLifecycleTestCase):
 		inst = self._install()
 		run = self._run(inst, age_s=agent_scheduler.STALE_RUN_AFTER_SECONDS - 60)
 		self._poll({run: self._fleet_completed(finished_ago_s=10)})
+		self.assertEqual(self._status(run), "running")
+
+	# ------------------------------------------------------------------ #
+	# #1061 polish - a gateway timeout/abort still reports "done" on the fleet
+	# side; the honest verdict rides in result.gateway_status/summary and must
+	# terminalize immediately, not wait out the writeback grace for a
+	# generic "delegate finished without recording results".
+	# ------------------------------------------------------------------ #
+	def test_a_gateway_timeout_fails_immediately_with_its_own_reply(self):
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S)
+		# finished 5s ago - well inside WRITEBACK_GRACE_SECONDS, proving this does
+		# NOT wait out the grace like a normal clean finish would.
+		self._poll(
+			{
+				run: self._fleet_completed(
+					finished_ago_s=5,
+					result={
+						"reply": "LLM request timed out.\nsome further detail on another line",
+						"gateway_status": "timeout",
+						"summary": "aborted",
+					},
+				)
+			}
+		)
+		row = frappe.db.get_value(RUN, run, ["status", "error"], as_dict=True)
+		self.assertEqual(row.status, "failed")
+		self.assertEqual(row.error, "LLM request timed out.")
+
+	def test_summary_aborted_with_no_reply_falls_back_to_a_generic_sentence(self):
+		inst = self._install()
+		run = self._run(inst, age_s=DISPATCHED_S)
+		self._poll(
+			{
+				run: self._fleet_completed(
+					finished_ago_s=5,
+					result={"reply": "", "gateway_status": "ok", "summary": "aborted"},
+				)
+			}
+		)
+		row = frappe.db.get_value(RUN, run, ["status", "error"], as_dict=True)
+		self.assertEqual(row.status, "failed")
+		self.assertEqual(row.error, "the agent turn was aborted by the gateway (ok)")
+
+	def test_a_normal_done_result_still_honours_the_writeback_grace(self):
+		"""Control: an ordinary clean result (gateway_status ok, no aborted summary)
+		must not trip the new immediate-fail path - it still waits out the grace
+		exactly as before."""
+		inst = self._install()
+		run = self._run(inst, age_s=agent_scheduler.STALE_RUN_AFTER_SECONDS - 60)
+		self._poll(
+			{
+				run: self._fleet_completed(
+					finished_ago_s=10,
+					result={"reply": "all good", "gateway_status": "ok", "summary": "ok"},
+				)
+			}
+		)
 		self.assertEqual(self._status(run), "running")
 
 	def test_a_finished_run_whose_writeback_never_came_fails_honestly(self):

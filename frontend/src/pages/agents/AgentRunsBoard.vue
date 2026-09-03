@@ -23,16 +23,27 @@
 			<Button :tooltip="'Refresh'" icon="refresh-cw" :loading="loading" @click="reload()" />
 		</div>
 
-		<div class="flex min-h-0 flex-1">
+		<!-- jarvis#1062 P2-12 (production-readiness audit): this was a plain
+		     `flex` row with a HARD w-[360px] rail and no min-w-0 on the details
+		     pane - at a narrow viewport (390px) that overflowed the page
+		     horizontally instead of collapsing. Stacked below lg (rail on top,
+		     capped height, its own scroll; details pane below, full width);
+		     side-by-side at lg+, unchanged from before. -->
+		<div class="flex min-h-0 flex-1 flex-col lg:flex-row">
 			<!-- LEFT rail: run history on a standing gray-1 surface so the selected
 			     row's white chip + shadow reads in light mode (§15.2 pattern) -->
-			<div class="w-[360px] shrink-0 overflow-y-auto border-r bg-surface-gray-1">
+			<div
+				class="max-h-[40vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
+			>
 				<template v-if="rows.length">
 					<div class="flex flex-col divide-y">
+						<!-- jarvis#1062 P1-5 (production-readiness audit): a raw <button>
+						     with no focus-visible ring - keyboard tabbing through the
+						     runs rail was invisible. -->
 						<button
 							v-for="row in rows"
 							:key="row.name"
-							class="flex w-full items-start gap-3 px-4 py-3 text-left"
+							class="flex w-full items-start gap-3 px-4 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
 							:class="
 								row.name === selectedId
 									? 'bg-surface-selected shadow-sm'
@@ -72,6 +83,21 @@
 										}}
 									</span>
 								</div>
+								<!-- jarvis#1062 P1-7 (production-readiness audit): failed and
+								     stopped both showed "0 findings" with nothing to tell them
+								     apart without opening the run. A short reason line now
+								     distinguishes them right in the row. -->
+								<div
+									v-if="runReason(row)"
+									class="mt-1 truncate text-sm"
+									:class="
+										row.status === 'failed'
+											? 'text-ink-red-4'
+											: 'text-ink-gray-5'
+									"
+								>
+									{{ runReason(row) }}
+								</div>
 							</div>
 							<!-- partial scans carry an extra indicator so truncated coverage
 							     never blends in with clean completed runs -->
@@ -92,7 +118,7 @@
 							     frappe-ui 0.1.278, so this reuses the app's violet-pill
 							     recipe (see triggers/TriggersListPane.vue). -->
 							<span
-								v-if="row.preparation_mode === 'shadow'"
+								v-if="canReview && row.preparation_mode === 'shadow'"
 								class="mt-0.5 inline-flex h-5 shrink-0 select-none items-center whitespace-nowrap rounded-full bg-surface-violet-1 px-1.5 text-xs text-ink-violet-1"
 							>
 								Preview
@@ -143,14 +169,17 @@
 				</div>
 			</div>
 
-			<!-- RIGHT pane: the selected run's findings -->
-			<div class="flex-1 overflow-y-auto">
+			<!-- RIGHT pane: the selected run's findings. min-w-0 - a flex item
+			     otherwise floors at its content's natural width (a long finding
+			     title, an action-button row), which is how the row overflowed
+			     the page instead of the CONTENT wrapping/scrolling in place. -->
+			<div class="min-w-0 flex-1 overflow-y-auto">
 				<!-- PP-4 shadow banner: the honest "Preview (shadow) - not a compliant
 				     attestation" statement must live in the reviewer's primary screen,
 				     not only in the detached fallback-dashboard HTML. Shown whenever the
 				     selected run was prepared in shadow, above the findings pane. -->
 				<div
-					v-if="selectedRun && selectedRun.preparation_mode === 'shadow'"
+					v-if="canReview && selectedRun && selectedRun.preparation_mode === 'shadow'"
 					class="flex items-start gap-2 border-b bg-surface-violet-1 px-6 py-2.5 text-sm text-ink-violet-1"
 				>
 					<FeatherIcon name="eye" class="size-4 shrink-0" />
@@ -172,7 +201,7 @@
 						</span>
 					</div>
 				</div>
-				<FindingsPanel v-else :run="selectedRun" />
+				<FindingsPanel v-else :run="selectedRun" @stopped="refreshKeep" />
 			</div>
 		</div>
 	</div>
@@ -187,15 +216,23 @@
 // reload({selectNewest: true}) through the exposed handle so the freshly
 // queued run is surfaced and selected even if a facet would hide it.
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { Badge, Button, FeatherIcon, FormControl, Tooltip } from "frappe-ui";
 import FindingsPanel from "@/pages/agents/FindingsPanel.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiAgents from "@/api/agents";
+import { STATUS_THEME, runReason } from "@/lib/agentRunStatus";
 
 const props = defineProps({
 	agentName: { type: String, required: true }, // listing docname (list_runs_page filter)
+	// jarvis#1062: shadow/attestation is REVIEWER vocabulary. The pill and the
+	// banner below explain a distinction only a reviewer can act on (they hold the
+	// promote control), so a plain user sees neither - not a softened version of
+	// them, none. Defaults false so a caller that forgets the prop under-discloses
+	// rather than leaking the reviewer surface.
+	canReview: { type: Boolean, default: false },
 });
 
 // lifecycle status (did the run finish) is ONE axis; PP-4 preparation_mode
@@ -203,13 +240,15 @@ const props = defineProps({
 // is an orthogonal axis rendered separately as the "Preview" pill/banner above.
 // A shadow run must never read the same as a live one. preparation_mode is
 // supplied per row by list_runs_page (agents_api.py) — see cross-file note.
-const STATUS_THEME = { running: "blue", completed: "green", partial: "orange", failed: "red" };
+// STATUS_THEME itself lives in @/lib/agentRunStatus so AgentActivityTab's run
+// rows use the identical colours.
 const STATUS_OPTIONS = [
 	{ label: "All statuses", value: "" },
 	{ label: "Running", value: "running" },
 	{ label: "Completed", value: "completed" },
 	{ label: "Partial", value: "partial" },
 	{ label: "Failed", value: "failed" },
+	{ label: "Stopped", value: "stopped" },
 ];
 
 // ── rail data: useListPage + adapter onto listRunsPage's tab-less shape ──────
@@ -250,12 +289,53 @@ const emptyState = computed(() => {
 	};
 });
 
+// ── #1062 C3: poll the rail every 10s while any VISIBLE run is running, so a
+// running run's status/counters update without a manual refresh. This is the
+// ONE refresh path for the runs list - it extends the visibilitychange
+// machinery below (started/stopped from the same rows watcher, cleared on
+// unmount and on tab-hidden) rather than adding a second interval alongside
+// it. The tick itself re-checks visibility too (belt-and-braces against a
+// missed visibilitychange event) and skips a request already in flight.
+let pollTimer = null;
+function startPoll() {
+	if (pollTimer) return;
+	pollTimer = setInterval(() => {
+		if (!loading.value && document.visibilityState === "visible") refreshKeep();
+	}, 10000);
+}
+function stopPoll() {
+	if (pollTimer) {
+		clearInterval(pollTimer);
+		pollTimer = null;
+	}
+}
+
 // ── selection (local - runs live under the agent's hash tab, no :id route) ──
+const route = useRoute();
+const router = useRouter();
 const selectedRun = ref(null);
 const selectedId = computed(() => (selectedRun.value && selectedRun.value.name) || "");
 
 function selectRun(row) {
 	selectedRun.value = row;
+}
+
+// jarvis#1062: the Activity feed deep-links a run row here as ?run=<id>
+// (AgentActivityTab.vue). Applied at most once - only while nothing is
+// selected yet, i.e. the very first time rows loads - and cleared from the
+// URL immediately whether or not the id was found in this page, so a
+// refresh or a later facet change never re-triggers it and the query never
+// sits there unsatisfiable.
+function clearRunQuery() {
+	// jarvis#1062 fix: router.replace({query}) alone is a PARTIAL location - it
+	// does not implicitly keep the current hash, it DROPS it (verified against
+	// the real vue-router: {query} alone resolves to the bare path, no hash at
+	// all). That silently knocked AgentDetail off the Runs tab back to Overview
+	// a moment after landing on it - route.hash changing to "" is exactly what
+	// its own hash watcher treats as "go to the default tab". Pass hash back
+	// explicitly so this is a query-only edit, not a hash-clearing one too.
+	const { run: _run, ...rest } = route.query;
+	router.replace({ hash: route.hash, query: rest });
 }
 
 // auto-select the first row; on refresh, re-pin the selection to the fresh row
@@ -268,7 +348,17 @@ watch(rows, (r) => {
 		const again = r.find((x) => x.name === selectedRun.value.name);
 		selectedRun.value = again || r[0] || null;
 	} else if (r.length) {
-		selectRun(r[0]);
+		const queryRunId = route.query.run;
+		const wanted = queryRunId ? r.find((x) => x.name === queryRunId) : null;
+		selectRun(wanted || r[0]);
+		if (queryRunId) clearRunQuery();
+	}
+	// start/stop the poll from the SAME rows change that already drives
+	// selection - see the comment above startPoll/stopPoll.
+	if (r.some((x) => x.status === "running") && document.visibilityState === "visible") {
+		startPoll();
+	} else {
+		stopPoll();
 	}
 });
 
@@ -295,10 +385,20 @@ async function reload(opts = {}) {
 }
 defineExpose({ reload });
 
-// freshness: refetch the loaded window on tab-visible (running → completed)
+// freshness: refetch the loaded window on tab-visible (running → completed),
+// and resume the poll (#1062 C3) if a running run is still in the loaded
+// window; a hidden tab stops it outright rather than let it fire unseen.
 function onVisibility() {
-	if (document.visibilityState === "visible") refreshKeep();
+	if (document.visibilityState === "visible") {
+		refreshKeep();
+		if (rows.value.some((x) => x.status === "running")) startPoll();
+	} else {
+		stopPoll();
+	}
 }
 onMounted(() => document.addEventListener("visibilitychange", onVisibility));
-onBeforeUnmount(() => document.removeEventListener("visibilitychange", onVisibility));
+onBeforeUnmount(() => {
+	document.removeEventListener("visibilitychange", onVisibility);
+	stopPoll();
+});
 </script>

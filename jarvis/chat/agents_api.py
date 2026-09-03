@@ -24,6 +24,7 @@ from jarvis.chat.filebox import _clamp_page, _lk
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import (
 	has_jarvis_admin_access,
+	is_skill_reviewer,
 	require_jarvis_admin,
 	require_jarvis_user,
 )
@@ -31,11 +32,13 @@ from jarvis.permissions import (
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
 RUN = "Jarvis Agent Run"
+RUN_STEP = "Jarvis Agent Run Step"
 FINDING = "Jarvis Agent Finding"
 ACTIVITY = "Jarvis Agent Activity"
 DASHBOARD = "Jarvis Dashboard"
 PROVENANCE = "Jarvis Agent Provenance Event"
 ALLOWED_ROLE = "Jarvis Agent Allowed Role"
+ALLOWED_USER = "Jarvis Agent Allowed User"
 _SETTINGS = "Jarvis Settings"
 
 # PP-6 — the stage-maximum global activation ceiling. The initial ceiling is 1
@@ -56,6 +59,12 @@ _FREQUENCIES = ("daily", "weekly", "monthly")
 _RUN_STATUSES = ("running", "completed", "partial", "failed", "stopped")
 # Statuses a bench admin may set via set_listing_status (Draft is registry-only).
 _ADMIN_STATUSES = ("Published", "Coming Soon", "Deprecated")
+# jarvis#1062 D2: statuses a non-admin may DISCOVER (browse to without having
+# installed it) - Published (live) and Coming Soon (the SPA's deliberate teaser:
+# AgentsList's "Coming Soon" badge, AgentDetail's "Coming soon" install tooltip).
+# Draft (registry-only, never shipped) and Deprecated (sunset) are excluded UNLESS
+# the caller already installed it - see _enriched_catalog / get_agent.
+_DISCOVERABLE_STATUSES = ("Published", "Coming Soon")
 # Never meaningful as an agent restriction ("All" == unrestricted; the other two
 # are identities, not grantable roles) and never offered in the admin picker.
 _NON_SELECTABLE_ROLES = ("Administrator", "Guest", "All")
@@ -67,35 +76,81 @@ DISPATCH_LOCK_WAIT_S = 5.0
 
 
 # --------------------------------------------------------------------------- #
-# role-based access (RBAC)
+# access governance (Interim A, jarvis#1062) — DENY BY DEFAULT
 # --------------------------------------------------------------------------- #
+# The model: an admin ALLOWS each agent for a set of ROLES (``allowed_roles``)
+# and/or a set of NAMED USERS (``allowed_users``). A listing with NEITHER is not
+# "unrestricted", it is CLOSED — reachable by Jarvis Admins / System Managers
+# only. That inversion is the whole point of this change: before it, every newly
+# synced listing shipped wide open to every Jarvis User on the tenant, and an
+# admin had to notice and narrow it. Now nothing is reachable until an admin says
+# who may reach it.
+#
+# There is no carve-out: every gate, including the container-push roster, asks
+# this one predicate. Existing installs survive the upgrade through the
+# ``v2_18_agent_access_grandfather`` patch, which runs during migrate before
+# anything can apply.
+def _is_allowed(
+	allowed_roles,
+	allowed_users,
+	user: str,
+	user_roles: set[str] | None = None,
+	is_admin: bool | None = None,
+) -> bool:
+	"""The ONE access predicate, pure over its inputs.
+
+	Both ``_user_allowed_for_agent`` (the server-side gate) and
+	``_enriched_catalog`` (the ``allowed`` display flag on every catalog row) call
+	this, so the flag a user is shown and the gate they hit can never disagree —
+	they used to be two hand-kept copies of the same boolean expression.
+
+	Every caller gets the SAME answer, including the container-push roster: a
+	roster that admitted more than dispatch would advertise agents the bench then
+	refuses to run.
+	"""
+	if is_admin is None:
+		is_admin = has_jarvis_admin_access(user)
+	if is_admin:
+		# PART 4 REVISED, TASK 49: admin parity — a Jarvis Admin / System Manager is
+		# ALWAYS allowed, in lockstep with the ``allowed`` display flag so an admin
+		# never sees an agent as installable but 403s on install. Checked FIRST now:
+		# under deny-by-default the empty-pair case is a denial, and an admin must
+		# not be denied by it.
+		return True
+	if user in (allowed_users or []):
+		return True
+	if not (allowed_roles or []):
+		return False  # deny by default
+	if user_roles is None:
+		user_roles = set(frappe.get_roles(user))
+	return bool(user_roles.intersection(allowed_roles))
+
+
 def _user_allowed_for_agent(listing, user: str | None = None) -> bool:
 	"""True iff ``user`` may install / run the agent.
 
-	Allowed iff the listing has NO ``allowed_roles`` rows (empty = unrestricted)
-	OR the user's roles intersect them. System Manager is ALWAYS allowed.
-	``listing`` may be a Jarvis Agent Listing doc or its name (agent_slug).
-	Fail-closed on the restricted side: an unknown user has no roles beyond
-	Guest/All, which never satisfy a restriction.
+	Allowed iff the user is named in ``allowed_users`` OR their roles intersect
+	``allowed_roles``. A listing carrying NEITHER is closed to everyone but a
+	Jarvis Admin / System Manager (deny by default). ``listing`` may be a Jarvis
+	Agent Listing doc or its name (agent_slug). Fail-closed: an unknown user has
+	no roles beyond Guest/All and appears in no allow list.
 	"""
 	user = user or frappe.session.user
 	if isinstance(listing, str):
-		allowed = frappe.get_all(
+		roles = frappe.get_all(
 			ALLOWED_ROLE,
 			filters={"parenttype": LISTING, "parent": listing},
 			pluck="role",
 		)
+		users = frappe.get_all(
+			ALLOWED_USER,
+			filters={"parenttype": LISTING, "parent": listing},
+			pluck="user",
+		)
 	else:
-		allowed = [row.role for row in (listing.get("allowed_roles") or [])]
-	if not allowed:
-		return True
-	# PART 4 REVISED, TASK 49: admin parity — a Jarvis Admin / System Manager is
-	# ALWAYS allowed, in lockstep with the widened ``allowed`` display flag so an
-	# admin never sees an agent as installable but 403s on install.
-	if has_jarvis_admin_access(user):
-		return True
-	roles = set(frappe.get_roles(user))
-	return bool(roles.intersection(allowed))
+		roles = [row.role for row in (listing.get("allowed_roles") or [])]
+		users = [row.user for row in (listing.get("allowed_users") or [])]
+	return _is_allowed(roles, users, user)
 
 
 def _allowed_roles_map() -> dict[str, list[str]]:
@@ -111,6 +166,19 @@ def _allowed_roles_map() -> dict[str, list[str]]:
 	return out
 
 
+def _allowed_users_map() -> dict[str, list[str]]:
+	"""All listings' allowed_users child rows in ONE query: {listing_name: [user, ...]}."""
+	out: dict[str, list[str]] = {}
+	for row in frappe.get_all(
+		ALLOWED_USER,
+		filters={"parenttype": LISTING, "parentfield": "allowed_users"},
+		fields=["parent", "user"],
+		order_by="parent asc, idx asc",
+	):
+		out.setdefault(row.parent, []).append(row.user)
+	return out
+
+
 # --------------------------------------------------------------------------- #
 # catalog + install state (read)
 # --------------------------------------------------------------------------- #
@@ -118,9 +186,10 @@ def _allowed_roles_map() -> dict[str, list[str]]:
 @require_jarvis_user
 def list_agents() -> list[dict]:
 	"""The full catalog plus THIS owner's install/enable/schedule state per
-	agent. Read-only — the catalog is visible to every logged-in user. Each row
-	also carries ``allowed_roles`` (empty = unrestricted) and ``allowed`` (0/1
-	for the CURRENT user; System Manager is always 1) — display state only, the
+	agent. Read-only, but ACCESS-FILTERED: a non-admin sees only rows they are
+	allowed for (or already installed). Each row carries ``allowed`` (0/1 for the
+	CURRENT user; a Jarvis Admin is always 1); ``allowed_roles`` /
+	``allowed_users`` ride along for admins ONLY — display state either way, the
 	real gate is server-side in install_agent / run_agent_now / the scheduler."""
 	return _enriched_catalog()
 
@@ -131,6 +200,7 @@ def _enriched_catalog() -> list[dict]:
 	never drift from the legacy full list."""
 	me = frappe.session.user
 	roles_map = _allowed_roles_map()
+	users_map = _allowed_users_map()
 	my_roles = set(frappe.get_roles(me))
 	# PART 4 REVISED, TASK 49(d): admin display parity — a Jarvis Admin sees every
 	# agent card as ``allowed`` (and _user_allowed_for_agent lets them install).
@@ -198,10 +268,36 @@ def _enriched_catalog() -> list[dict]:
 			1 if inst and inst.installed_version and inst.installed_version != lst.version else 0
 		)
 		allowed_roles = roles_map.get(lst.name, [])
+		allowed_users = users_map.get(lst.name, [])
 		lst["allowed_roles"] = allowed_roles
-		lst["allowed"] = 1 if (is_sm or not allowed_roles or my_roles.intersection(allowed_roles)) else 0
+		lst["allowed_users"] = allowed_users
+		# ONE predicate with the server-side gate (``_is_allowed``) — this used to be
+		# a hand-copied boolean and drifted from ``_user_allowed_for_agent`` the
+		# moment either changed.
+		lst["allowed"] = 1 if _is_allowed(allowed_roles, allowed_users, me, my_roles, is_admin=is_sm) else 0
 		lst["install_count"] = install_counts.get(lst.name, 0)
 		out.append(lst)
+	# jarvis#1062 D2 (revised): a non-admin never sees a row it may not
+	# DISCOVER, but a row it already INSTALLED stays visible regardless of role
+	# restriction — role gating governs marketplace discovery and running, not
+	# managing what you already have. Without this carve-out, a role revoked
+	# after install stranded the owner: the row vanished from their own
+	# Installed tab and get_agent 403'd, leaving no UI path to uninstall it.
+	# Hidden (not-installed) iff role-restricted (allowed == 0) OR the status
+	# isn't discoverable (_DISCOVERABLE_STATUSES — Draft/Deprecated are
+	# registry / lifecycle states, not something to discover before an admin
+	# ships or sunsets them; Coming Soon IS discoverable — it is the SPA's
+	# deliberate teaser). Admin display parity is untouched: an admin (is_sm)
+	# always sees every row, `allowed` computed exactly as before. The ONE
+	# choke point both list_agents and list_agents_page share, so neither can
+	# drift from the other.
+	if not is_sm:
+		out = [r for r in out if r["installed"] or (r["allowed"] and r["status"] in _DISCOVERABLE_STATUSES)]
+		for r in out:
+			# WHO ELSE has access is admin-only information: a plain user learns
+			# whether THEY are allowed (the ``allowed`` flag), never the roster.
+			r.pop("allowed_roles", None)
+			r.pop("allowed_users", None)
 	return out
 
 
@@ -279,11 +375,34 @@ def get_agent(agent_slug: str) -> dict:
 	(DESIGN-V3 §8.3 / D39). Any authenticated user may read (listing perms =
 	All read); the ``installation`` block is the caller's own install or None.
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
-	listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
+	try:
+		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
+	except frappe.DoesNotExistError:
+		# jarvis#1062 polish: a raw "Jarvis Agent Listing <slug> not found" leaks the
+		# doctype name and confirms the slug is a plausible one; a clean, generic
+		# message avoids giving an enumeration probe anything to key off.
+		frappe.throw(_("Agent not found."), frappe.DoesNotExistError)
 	me = frappe.session.user
 	# PART 4 REVISED, TASK 49(d): the Admin-tab signal (all_roles rider) rides for
 	# Jarvis Admins too — the SPA derives isSM from all_roles' presence.
 	is_sm = has_jarvis_admin_access(me)
+	allowed = _user_allowed_for_agent(listing, me)
+	installed_by_caller = bool(frappe.db.exists(INSTALLATION, {"owner": me, "agent": listing.name}))
+	# jarvis#1062 D2 (revised): the same visibility gate as list_agents/
+	# list_agents_page (_enriched_catalog) — a row hidden from the catalog must
+	# not be reachable by knowing (or guessing) its slug either — EXCEPT an
+	# installed row always passes, so a role revoked after install never
+	# strands the owner without a way to read (and uninstall) their own
+	# install. Coming Soon is DISCOVERABLE (_DISCOVERABLE_STATUSES — the SPA's
+	# deliberate teaser), so it passes like Published; Draft/Deprecated still
+	# need the install carve-out. Admin display parity is untouched: an admin
+	# (is_sm) always passes.
+	if (
+		not is_sm
+		and not installed_by_caller
+		and (not allowed or listing.status not in _DISCOVERABLE_STATUSES)
+	):
+		frappe.throw(_("You do not have access to this agent."), frappe.PermissionError)
 
 	out: dict = {
 		"name": listing.name,
@@ -304,8 +423,16 @@ def get_agent(agent_slug: str) -> dict:
 		# engine read it via generic REST / get_doc.
 		"default_schedule": listing.default_schedule,
 		"validated_for_fy": listing.validated_for_fy,
-		"allowed_roles": [row.role for row in (listing.allowed_roles or [])],
-		"allowed": 1 if _user_allowed_for_agent(listing, me) else 0,
+		# jarvis#1062 polish: doctypes_required (A12) so Overview can render
+		# "Reads these records" - unrelated to the access-roster fields below,
+		# which governance gates on is_sm further down (never added for a
+		# non-admin, not added-then-popped).
+		"doctypes_required": listing.doctypes_required,
+		# jarvis#1063 (jarvis-only half): which agent-specific config keys this
+		# agent's bundle actually reads - ConfigForm.vue only renders the
+		# corresponding fields when their key is in this list.
+		"config_keys": listing.config_keys,
+		"allowed": 1 if allowed else 0,
 		"install_count": frappe.db.count(INSTALLATION, {"agent": listing.name}),
 		"installation": None,
 	}
@@ -339,6 +466,11 @@ def get_agent(agent_slug: str) -> dict:
 		out["installation"] = i
 
 	if is_sm:
+		# The ACCESS ROSTER (who may use this agent) is admin-only, exactly like the
+		# ``all_roles`` picker source that rides with it. A non-admin gets only the
+		# ``allowed`` boolean above: whether THEY are allowed, never who else is.
+		out["allowed_roles"] = [row.role for row in (listing.allowed_roles or [])]
+		out["allowed_users"] = [row.user for row in (listing.allowed_users or [])]
 		out["all_roles"] = [
 			r
 			for r in frappe.get_all(
@@ -399,46 +531,186 @@ def get_installations() -> list[dict]:
 # --------------------------------------------------------------------------- #
 # admin surface (Jarvis Admin / System Manager — every check server-side)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
-def set_agent_roles(agent_slug: str, roles: str | list | None = None) -> dict:
-	"""Restrict an agent listing to a set of Roles. Jarvis Admin / System Manager
-	(PART 4 REVISED, TASK 45; needs the Jarvis Admin write:1 row on Jarvis Agent
-	Listing — TASK 47 — for the perm-checked save).
+def _parse_name_list(raw, what: str) -> list[str]:
+	"""A JSON array (or already-decoded list) of names -> a trimmed, deduped list.
 
-	``roles`` is a JSON array of Role names; ``[]`` clears the restriction
-	(unrestricted). Roles are validated against the Role doctype; the
-	non-grantable Administrator/Guest/All are rejected (All would silently mean
-	unrestricted — force the explicit empty list instead)."""
-	require_jarvis_admin()
-	parsed = roles
+	``None`` is the empty list, so "clear this side of the grant" is expressible.
+	Anything else is a client bug and throws rather than being coerced: silently
+	dropping a malformed entry from an ACCESS list would grant or revoke access
+	nobody asked for."""
+	parsed = raw
 	if isinstance(parsed, str):
 		try:
 			parsed = frappe.parse_json(parsed)
 		except Exception:
-			frappe.throw(_("roles must be a JSON array of Role names."))
+			frappe.throw(_("{0} must be a JSON array of names.").format(what))
 	if parsed is None:
 		parsed = []
 	if not isinstance(parsed, list):
-		frappe.throw(_("roles must be a JSON array of Role names."))
-
+		frappe.throw(_("{0} must be a JSON array of names.").format(what))
 	clean: list[str] = []
-	for r in parsed:
-		if not isinstance(r, str) or not r.strip():
-			frappe.throw(_("roles must be a JSON array of Role names."))
-		r = r.strip()
+	for item in parsed:
+		if not isinstance(item, str) or not item.strip():
+			frappe.throw(_("{0} must be a JSON array of names.").format(what))
+		item = item.strip()
+		if item not in clean:
+			clean.append(item)
+	return clean
+
+
+@frappe.whitelist()
+def set_agent_access(
+	agent_slug: str,
+	roles: str | list | None = None,
+	users: str | list | None = None,
+	apply: str | int | bool | None = None,
+) -> dict:
+	"""Set WHO may install and run an agent: a set of Roles and a set of named Users.
+
+	Jarvis Admin / System Manager (needs the Jarvis Admin write:1 row on Jarvis
+	Agent Listing for the perm-checked save). Access is DENY BY DEFAULT
+	(jarvis#1062): saving with BOTH lists empty CLOSES the agent to everyone but
+	an admin — it does not reopen it to everyone, which is what the same call used
+	to mean.
+
+	Both tables are REPLACED atomically in one save, so an admin who moves a
+	person from a role grant to a named grant never passes through a moment where
+	they hold both or neither.
+
+	``apply`` (default false) additionally pushes the new roster to the container.
+	It belongs on the ADMIN's action, deliberately: the push restarts the tenant's
+	workspace for everyone, which is a cost only an admin can knowingly accept —
+	never something a user's own install may trigger.
+
+	Roles are validated against the Role doctype; the non-grantable
+	Administrator/Guest/All are rejected ("All" would be a backdoor re-grant of the
+	old everyone-by-default). A newly ADDED user must exist and be ENABLED — a
+	disabled user is how an offboarded person is revoked, so recording one as
+	allowed would write a grant that outlives the offboarding. Users already on the
+	list are carried forward without that check: see the comment there for why
+	re-validating them breaks unrelated edits."""
+	require_jarvis_admin()
+	roles_clean = _parse_name_list(roles, _("roles"))
+	users_clean = _parse_name_list(users, _("users"))
+
+	for r in roles_clean:
 		if r in _NON_SELECTABLE_ROLES:
-			frappe.throw(_("Role {0} cannot be used as an agent restriction.").format(r))
+			frappe.throw(_("Role {0} cannot be used to grant agent access.").format(r))
 		if not frappe.db.exists("Role", r):
 			frappe.throw(_("Role {0} does not exist.").format(r))
-		if r not in clean:
-			clean.append(r)
+	# Validation applies to what this call ADDS, never to what it merely carries
+	# forward. An agent granted to someone who has since been offboarded holds a
+	# row naming a DISABLED user, and grandfathered rows can name users who were
+	# later deleted outright. Re-validating those would make an unrelated edit -
+	# adding one role, or the set_agent_roles shim passing the existing people
+	# through untouched - fail with a message about somebody the admin never
+	# mentioned, and leave them no way to change the roles at all.
+	current_users = set(
+		frappe.get_all(
+			ALLOWED_USER,
+			filters={"parenttype": LISTING, "parentfield": "allowed_users", "parent": agent_slug},
+			pluck="user",
+		)
+	)
+	added = [u for u in users_clean if u not in current_users]
+	for u in added:
+		if u in ("Administrator", "Guest"):
+			frappe.throw(_("User {0} cannot be granted agent access.").format(u))
+	if added:
+		# ONE query for the whole added set, not a get_value per name: this is an
+		# admin picking a handful of people, but the loop shape is what turns into an
+		# N+1 the first time somebody pastes a department into it.
+		known = {
+			r.name: r.enabled
+			for r in frappe.get_all("User", filters={"name": ("in", added)}, fields=["name", "enabled"])
+		}
+		for u in added:
+			if u not in known:
+				frappe.throw(_("User {0} does not exist.").format(u))
+			if not known[u]:
+				frappe.throw(_("User {0} is disabled and cannot be granted agent access.").format(u))
+	# Kept rows are left exactly as they are, with ONE exception: a name whose User
+	# row is gone would fail the child table's Link validation and block the save
+	# outright, so it is dropped and logged rather than raised. A disabled user is
+	# NOT dropped - disabling is reversible, and silently discarding the grant would
+	# turn a temporary suspension into a permanent revocation nobody recorded.
+	kept = [u for u in users_clean if u in current_users]
+	if kept:
+		alive = set(frappe.get_all("User", filters={"name": ("in", kept)}, pluck="name"))
+		vanished = [u for u in kept if u not in alive]
+		if vanished:
+			frappe.logger("jarvis").info(
+				f"agent access {agent_slug}: dropping allowed_users rows for deleted "
+				f"user(s) {', '.join(vanished)}"
+			)
+			gone = set(vanished)
+			users_clean = [u for u in users_clean if u not in gone]
 
 	doc = frappe.get_doc(LISTING, agent_slug)
 	doc.check_permission("write")
-	doc.set("allowed_roles", [{"role": r} for r in clean])
+	doc.set("allowed_roles", [{"role": r} for r in roles_clean])
+	doc.set("allowed_users", [{"user": u} for u in users_clean])
 	doc.save()
+	# The allow lists are PUSH-VISIBLE now (build_agent_push_payload ships every
+	# allowed listing, not only the enabled-install set), so an access change moves
+	# the container roster exactly as install/enable does and must show as pending.
+	_mark_catalog_dirty()
 	frappe.db.commit()
-	return {"ok": True, "allowed_roles": [row.role for row in doc.allowed_roles]}
+
+	applied = False
+	if frappe.utils.cint(apply):
+		# Authority is already established: require_jarvis_admin above is a strict
+		# subset of the skill-reviewer set apply_agents gates on.
+		_enqueue_apply()
+		applied = True
+	return {
+		"ok": True,
+		"allowed_roles": [row.role for row in doc.allowed_roles],
+		"allowed_users": [row.user for row in doc.allowed_users],
+		"applied": applied,
+	}
+
+
+@frappe.whitelist()
+def set_agent_roles(agent_slug: str, roles: str | list | None = None) -> dict:
+	"""Compat shim over ``set_agent_access`` — sets the ROLE half, users untouched.
+
+	Kept because it is the shipped endpoint name and an older SPA build may still
+	be cached in a customer's browser after deploy. It reads the current
+	``allowed_users`` and passes them straight back, so calling it can never
+	silently revoke a named grant made through the new Access editor."""
+	require_jarvis_admin()
+	current_users = frappe.get_all(
+		ALLOWED_USER,
+		filters={"parenttype": LISTING, "parentfield": "allowed_users", "parent": agent_slug},
+		order_by="idx asc",
+		pluck="user",
+	)
+	res = set_agent_access(agent_slug, roles=roles, users=current_users)
+	return {"ok": True, "allowed_roles": res["allowed_roles"]}
+
+
+@frappe.whitelist()
+def search_users(q: str | None = None) -> list[dict]:
+	"""Enabled, named users matching ``q`` for the admin Access picker.
+
+	Jarvis Admin / System Manager: the endpoint enumerates the tenant's people, so
+	it carries the same gate as the editor it feeds. Capped at 20 rows — it backs a
+	type-ahead, not a directory export. Administrator/Guest are excluded because
+	``set_agent_access`` refuses them anyway, and offering an option the save
+	rejects is worse than not offering it."""
+	require_jarvis_admin()
+	term = (q or "").strip()
+	filters = {"enabled": 1, "name": ("not in", ["Administrator", "Guest"])}
+	or_filters = {"name": ("like", f"%{term}%"), "full_name": ("like", f"%{term}%")} if term else None
+	return frappe.get_all(
+		"User",
+		filters=filters,
+		or_filters=or_filters,
+		fields=["name", "full_name"],
+		order_by="full_name asc, name asc",
+		limit=20,
+	)
 
 
 @frappe.whitelist()
@@ -461,7 +733,16 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 	# mutation re-dirtied the flag. Only on an actual change, and only when some
 	# install would have carried the slug: a status flip on an agent nobody enabled
 	# pushes exactly the same payload.
-	if before != doc.status and frappe.db.exists(INSTALLATION, {"agent": doc.name, "enabled": 1}):
+	# jarvis#1062: the roster is no longer "enabled installs" alone — an ALLOWED
+	# listing ships even with zero installs — so a status flip on an allowed but
+	# uninstalled agent also moves the container roster. Without widening this the
+	# #457 bug returns in a new shape: the SPA shows no "Apply pending" and the
+	# roster silently disagrees with the DB until an unrelated mutation re-dirties.
+	if before != doc.status and (
+		frappe.db.exists(INSTALLATION, {"agent": doc.name, "enabled": 1})
+		or frappe.db.exists(ALLOWED_ROLE, {"parenttype": LISTING, "parent": doc.name})
+		or frappe.db.exists(ALLOWED_USER, {"parenttype": LISTING, "parent": doc.name})
+	):
 		_mark_catalog_dirty()
 	frappe.db.commit()
 	return {"ok": True, "status": doc.status}
@@ -488,6 +769,7 @@ def get_agent_admin_overview() -> dict:
 	]
 
 	roles_map = _allowed_roles_map()
+	users_map = _allowed_users_map()
 	installs_by_agent: dict[str, list[dict]] = {}
 	for i in frappe.get_all(
 		INSTALLATION,
@@ -550,6 +832,7 @@ def get_agent_admin_overview() -> dict:
 	)
 	for lst in listings:
 		lst["allowed_roles"] = roles_map.get(lst.name, [])
+		lst["allowed_users"] = users_map.get(lst.name, [])
 		lst["installs"] = installs_by_agent.get(lst.name, [])
 
 	return {"roles": roles, "listings": listings}
@@ -613,9 +896,9 @@ def _bump_catalog_version() -> None:
 @require_jarvis_user
 def install_agent(agent_slug: str) -> dict:
 	"""Install a Published agent for the current user. The doctype validate()
-	enforces the per-owner cap + (owner, agent) uniqueness. Role-gated: a user
-	whose roles do not intersect the listing's allowed_roles is refused
-	server-side (System Manager always allowed)."""
+	enforces the per-owner cap + (owner, agent) uniqueness. Access-gated (deny by
+	default): a user an admin has not allowed for this agent — by role or by name —
+	is refused server-side (Jarvis Admin / System Manager always allowed)."""
 	listing = frappe.get_doc(LISTING, agent_slug)  # All-role read
 	me = frappe.session.user
 	# FIX 11: an agent runs AS a named user (run_as_user defaults to the installer),
@@ -623,9 +906,12 @@ def install_agent(agent_slug: str) -> dict:
 	# an actionable message instead of letting doc.insert() surface the raw validation
 	# throw ("Run-as user must be an existing, enabled, non-system user").
 	if me in ("Administrator", "Guest"):
-		frappe.throw(_("Log in as a named user, or map a run-as user — agents cannot run as Administrator."))
+		frappe.throw(_("Log in as a named user, or map a run-as user: agents cannot run as Administrator."))
 	if not _user_allowed_for_agent(listing, me):
-		frappe.throw(_("Your roles do not permit installing this agent."), frappe.PermissionError)
+		frappe.throw(
+			_("You do not have access to this agent. Ask your administrator."),
+			frappe.PermissionError,
+		)
 	if listing.status != "Published":
 		frappe.throw(_("This agent is not available to install."))
 	if frappe.db.exists(INSTALLATION, {"owner": me, "agent": listing.name}):
@@ -695,12 +981,42 @@ def install_agent(agent_slug: str) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "agent": listing.name}}
 
 
+def _check_installation_write(doc, ptype: str = "write") -> bool:
+	"""Who may mutate an installation: its OWNER, or a tenant admin (jarvis#1062).
+
+	The owner half is the DocType's ``if_owner`` row, enforced through
+	``check_permission`` exactly as before — ``get_doc`` alone does NOT enforce
+	``if_owner`` (S3).
+
+	The admin half is checked HERE, in app code, rather than being left to the
+	Jarvis Admin DocPerm row alone. That row exists and is correct (it is what a
+	tenant admin needs for Desk and generic REST), but ``check_permission`` is not
+	only a role check: ``get_doc_permissions`` also runs the document through
+	``has_user_permission``, so on a site where anything has created a User
+	Permission touching this doctype's link fields, a legitimate admin is refused
+	for a reason that has nothing to do with agent access. An admin's authority to
+	disable, stop or uninstall a runaway install should not be contingent on that,
+	so it is stated directly.
+
+	Returns True when the ADMIN half authorised the call. The caller needs that:
+	``doc.save()`` and ``frappe.delete_doc()`` re-run the very check we just
+	bypassed, so an admin authorised here would be refused a line later. Passing
+	``ignore_permissions`` on that write is safe precisely because authority has
+	already been established, in the open, right here - the same reasoning
+	``promote_installation`` uses.
+	"""
+	if has_jarvis_admin_access():
+		return True
+	doc.check_permission(ptype)
+	return False
+
+
 @frappe.whitelist()
 def set_enabled(installation: str, enabled: int) -> dict:
 	"""Enable/disable an installed agent — a pure DB write (O6: NO restart; the
 	bundle only reaches the container on the next Apply)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
-	doc.check_permission("write")  # S3 owner-gate
+	via_admin = _check_installation_write(doc)  # S3 owner-gate, or a tenant admin
 	# R5-J8: never enable a non-installable capability (a min_apps dependency
 	# absent at install, or one that vanished after install and was reconciled to
 	# installable=0). Disabling is always allowed.
@@ -708,9 +1024,15 @@ def set_enabled(installation: str, enabled: int) -> dict:
 		from jarvis.chat.agent_installability import assert_installable
 
 		assert_installable(doc.agent)
+	before = int(doc.enabled or 0)
 	doc.enabled = int(enabled or 0)
-	doc.save()
-	_mark_catalog_dirty()
+	doc.save(ignore_permissions=via_admin)
+	# jarvis#1062 polish: only an ACTUAL flip changes the pushed bundle set - a
+	# no-op call (already-enabled row re-enabled, e.g. a stale/duplicate toggle)
+	# must not dirty the catalog and nag the SPA's leave-guard over nothing.
+	# Mirrors set_listing_status's before/after check above.
+	if before != doc.enabled:
+		_mark_catalog_dirty()
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
@@ -729,7 +1051,10 @@ def set_schedule(
 	schedule_time: str | None = None,
 ) -> dict:
 	"""Set an installed agent's audit schedule — pure DB write (O6: no restart).
-	Recomputes ``next_run_at`` when the schedule is enabled."""
+	Recomputes ``next_run_at`` when the schedule is enabled; CLEARS it when the
+	schedule is turned off (jarvis#1062 E2E defect: it previously kept the last
+	computed value, so the Configure tab kept showing a stale "Next run: ..."
+	after disabling the schedule)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
@@ -750,6 +1075,8 @@ def set_schedule(
 
 	if doc.schedule_enabled:
 		doc.next_run_at = compute_next_run(doc.schedule_frequency, doc.schedule_time)
+	else:
+		doc.next_run_at = None
 	doc.save()
 	log_activity(
 		agent=doc.agent,
@@ -765,7 +1092,10 @@ def set_schedule(
 	frappe.db.commit()
 	return {
 		"ok": True,
-		"data": {"name": doc.name, "next_run_at": str(doc.next_run_at or "")},
+		"data": {
+			"name": doc.name,
+			"next_run_at": str(doc.next_run_at) if doc.next_run_at else None,
+		},
 	}
 
 
@@ -773,8 +1103,18 @@ def set_schedule(
 def set_config(installation: str, config: str) -> dict:
 	"""Persist an installed agent's engagement config JSON — a pure DB write
 	(O6: no restart; the delegate reads it on its installation on the next run).
-	Owner-gated (S3). Validates the payload is a JSON object (keys: benchmark_value,
-	percentage, engagement_risk_level, rounding_step, company, …)."""
+	Owner-gated (S3). Validates the payload is a JSON object.
+
+	Generic and agent-agnostic here on purpose — the SHAPE of "keys" is a
+	per-agent bundle contract, not a bench one (jarvis#1063: the shape lives
+	in each listing's ``config_keys``, dot-paths for a nested key). The
+	universal scope keys are flat top-level (company, fiscal_year, from_date,
+	to_date — agent_scope.py's ``_resolve``); close-auditor's materiality
+	inputs are nested under a top-level ``materiality`` object
+	(``materiality.benchmark_value`` / ``.percentage`` /
+	``.engagement_risk_level`` / ``.rounding_step`` — verified against
+	jarvis-agents/agents/close-auditor/evaluate.py's ``_materiality_pl_balance``,
+	the only bundle that reads any agent-specific config today)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	try:
@@ -916,7 +1256,7 @@ def uninstall_agent(installation: str) -> dict:
 	an Apply is now pending — but only when the install was ENABLED (a disabled
 	install was never in the pushed set, so removing it changes nothing)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
-	doc.check_permission("delete")  # S3 owner-gate before touching linked rows
+	via_admin = _check_installation_write(doc, "delete")  # S3 owner-gate (or admin)
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
@@ -943,7 +1283,8 @@ def uninstall_agent(installation: str) -> dict:
 	_detach_last_seen_run(run_names)
 	for name in run_names:
 		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
-	frappe.delete_doc(INSTALLATION, installation)  # honors if_owner
+	# honors if_owner for an owner; the admin path was authorised above.
+	frappe.delete_doc(INSTALLATION, installation, ignore_permissions=via_admin)
 	if doc.enabled:
 		_mark_catalog_dirty()
 	frappe.db.commit()
@@ -997,7 +1338,7 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	# helper.
 	if not _user_allowed_for_agent(doc.agent, run_as):
 		frappe.throw(
-			_("The run-as user's roles do not permit running this agent."),
+			_("The run-as user does not have access to this agent. Ask your administrator."),
 			frappe.PermissionError,
 		)
 	if not doc.enabled:
@@ -1062,7 +1403,7 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 		except ValueError as e:
 			frappe.throw(
 				_(
-					"Select which custom apps this run may read before starting it — {0}. "
+					"Select which custom apps this run may read before starting it: {0}. "
 					"Their source code is sent to the configured AI model provider."
 				).format(str(e))
 			)
@@ -1078,11 +1419,9 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	# against. Checked before dispatch; a plain COUNT, identity-agnostic.
 	over, why = _over_run_budget(installation)
 	if over:
+		# #1062 polish: one sentence, one action - an admin can raise it now.
 		frappe.throw(
-			_(
-				"Monthly agent-run budget reached ({0}). Runs resume next month, or an "
-				"admin can raise the budget in Jarvis Settings."
-			).format(why)
+			_("Monthly agent-run budget reached ({0}); an admin can raise it in Jarvis Settings.").format(why)
 		)
 
 	# Fail-closed identity guard: refuse to run an audit AS Administrator / Guest /
@@ -1159,7 +1498,7 @@ def _guard_run_control(run_doc) -> None:
 	``_record_failed`` skip row) falls back to the run's own ``if_owner`` read gate,
 	which is still an ownership check — ``get_doc`` alone enforces neither."""
 	if run_doc.installation and frappe.db.exists(INSTALLATION, run_doc.installation):
-		frappe.get_doc(INSTALLATION, run_doc.installation).check_permission("write")
+		_check_installation_write(frappe.get_doc(INSTALLATION, run_doc.installation))
 		return
 	run_doc.check_permission("read")
 
@@ -1403,16 +1742,49 @@ def _rehome_installation_outputs(inst, to_owner: str) -> None:
 		frappe.db.set_value(ACTIVITY, an, "owner", to_owner, update_modified=False)
 
 
+def _require_activation_authority(user: str) -> None:
+	"""Who may promote an installation to live, or demote it back to shadow.
+
+	The REVIEWER SET (Jarvis Skill Reviewer / Jarvis Admin / System Manager), not
+	the installation's named ``reviewer`` field. jarvis#1062 removed the
+	self-sign-off leg: ``install_agent`` stamps ``reviewer = me``, so "the named
+	reviewer may promote" meant every installer could promote their OWN install to
+	live, unreviewed — the exact rubber stamp the PP-4 shadow period exists to
+	prevent. Promotion is now an act by someone with a reviewing role, and the
+	SPA hides the control (and the whole shadow/attestation vocabulary) from
+	everyone else.
+
+	``promoted_by``/``promoted_at`` still record WHO signed off, and the
+	installation's ``reviewer`` field still names who is accountable for it; only
+	the authority to flip the switch changed.
+
+	This is the ONLY gate on promote/demote, deliberately: it is the same set
+	``apply_agents`` requires, and like that endpoint it is NOT additionally
+	stacked under a Jarvis User check. A reviewer may hold Jarvis Skill Reviewer
+	and nothing else - reviewing is a job, not a seat on the chat surface - and
+	requiring Jarvis User as well would lock exactly that person out of the one
+	action the role exists for. The earlier worry it would have addressed (a user
+	whose Jarvis access was revoked keeping authority through the ``reviewer``
+	field) is moot now that authority comes from a reviewing ROLE, which is
+	revoked the same way any other role is."""
+	if not (is_skill_reviewer(user) or has_jarvis_admin_access(user)):
+		frappe.throw(
+			_("Only a reviewer or a Jarvis Admin may change an installation's activation state."),
+			frappe.PermissionError,
+		)
+
+
 @frappe.whitelist()
 def promote_installation(installation: str, justification: str | None = None) -> dict:
-	"""PP-4 — promote a shadow installation to LIVE by the named reviewer's explicit
+	"""PP-4 — promote a shadow installation to LIVE on a reviewer's explicit
 	sign-off. This is the SINGLE choke point PP-4 (calibration) and PP-6 (budget)
 	both enforce:
 
-	  * Authority: the named ``reviewer`` (their sign-off), or an authorised approver
-	    (Jarvis Admin / System Manager). NOT the owner surface — ``check_permission``
-	    gates on ``if_owner`` and the reviewer may not be the owner, so authority is
-	    checked explicitly here.
+	  * Authority: the reviewer set (Jarvis Skill Reviewer / Jarvis Admin / System
+	    Manager) — see ``_require_activation_authority``. NOT the owner surface
+	    (``check_permission`` gates on ``if_owner``, and the owner is precisely who
+	    must not sign off on their own install), and no longer the named
+	    ``reviewer`` field on its own.
 	  * PP-6 budget: refuse when this customer already has ``activation_module_ceiling``
 	    live modules (global across all packs, per customer; default 1).
 	  * Records who/when (``promoted_by``/``promoted_at``, track_changes audited) and
@@ -1423,11 +1795,7 @@ def promote_installation(installation: str, justification: str | None = None) ->
 
 	doc = frappe.get_doc(INSTALLATION, installation)
 	me = frappe.session.user
-	if me != doc.reviewer and not has_jarvis_admin_access(me):
-		frappe.throw(
-			_("Only the named reviewer or a Jarvis Admin may promote this installation to live."),
-			frappe.PermissionError,
-		)
+	_require_activation_authority(me)
 	if doc.activation_state == "live":
 		frappe.throw(_("This installation is already live."))
 
@@ -1443,7 +1811,7 @@ def promote_installation(installation: str, justification: str | None = None) ->
 	with redis_lock(f"jarvis_agent_activation:{owner}", timeout_s=30, blocking_timeout_s=10.0) as acquired:
 		if not acquired:
 			frappe.throw(
-				_("Another activation change for this customer is in progress — please retry in a moment.")
+				_("Another activation change for this customer is in progress. Please retry in a moment.")
 			)
 		frappe.db.commit()  # fresh snapshot under the lock (defeats stale REPEATABLE-READ count)
 		doc = frappe.get_doc(INSTALLATION, installation)  # re-read the row under the lock
@@ -1453,12 +1821,13 @@ def promote_installation(installation: str, justification: str | None = None) ->
 		ceiling = _activation_ceiling(owner)
 		live_count = frappe.db.count(INSTALLATION, {"owner": owner, "activation_state": "live"})
 		if live_count >= ceiling:
+			# #1062 polish: one sentence, one action - no UI exists to raise the
+			# ceiling, so don't point at one; demoting a live module is the actual
+			# available action.
 			frappe.throw(
 				_(
-					"Activation budget reached: this customer already has {0} live module(s) and the "
-					"activation ceiling is {1}. The initial budget is a single live module; a Jarvis Admin "
-					"can raise the ceiling to {2} once the reviewer covers a second pack."
-				).format(live_count, ceiling, _ACTIVATION_CEILING_MAX)
+					"Activation budget reached ({0} of {1} live); demote a module before promoting another."
+				).format(live_count, ceiling)
 			)
 
 		doc.activation_state = "live"
@@ -1501,16 +1870,12 @@ def promote_installation(installation: str, justification: str | None = None) ->
 def demote_installation(installation: str, reason: str | None = None) -> dict:
 	"""PP-4 — the demotion / kill path: send a live installation back to SHADOW
 	(re-closing the owner surface, freeing a global activation-budget slot). Same
-	authority as promotion (named reviewer or a Jarvis Admin). Clears the promotion
+	authority as promotion (the reviewer set). Clears the promotion
 	stamp and re-homes outputs back to the reviewer-only surface; audited via
 	track_changes + the activity feed."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	me = frappe.session.user
-	if me != doc.reviewer and not has_jarvis_admin_access(me):
-		frappe.throw(
-			_("Only the named reviewer or a Jarvis Admin may demote this installation."),
-			frappe.PermissionError,
-		)
+	_require_activation_authority(me)
 	if doc.activation_state != "live":
 		frappe.throw(_("This installation is not live."))
 	doc.activation_state = "shadow"
@@ -1614,6 +1979,10 @@ _RUN_LIST_FIELDS = [
 	# findings count; empty/0 for auditor/operator runs.
 	"pages_written",
 	"pages_json",
+	# PP-4 shadow/preview pill + attestation banner (AgentRunsBoard.vue) and the
+	# "Open dashboard" action (FindingsPanel.vue) both key off these.
+	"preparation_mode",
+	"dashboard",
 ]
 
 
@@ -1848,6 +2217,67 @@ def list_findings(
 	}
 
 
+#: Hard ceiling on one run's timeline. A run makes tens of tool calls, not
+#: hundreds; the cap exists so a pathological (or looping) run can never make the
+#: SPA's 5s poll expensive. The UI polls the whole list, so there is no cursor.
+RUN_STEPS_CAP = 200
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def list_run_steps(run: str) -> dict:
+	"""One run's STEP TIMELINE, oldest first: ``{steps, count}``.
+
+	Steps are what the bench OBSERVED the run do - the launch dispatch, each
+	``jarvis__*`` tool call the delegate made over its own session bearer, and the
+	findings writeback. They carry shapes, never row contents (see
+	``jarvis.chat.agent_run_steps``), so they are safe to render wherever the run
+	itself is.
+
+	Gated exactly like :func:`list_findings`: the raw ``get_value`` below bypasses
+	permissions, so a run the caller neither owns nor administers returns an EMPTY
+	timeline - identical to an unknown run, never an existence oracle.
+
+	Ordered by ``occurred_at`` (``creation`` breaks the tie), and the ``seq`` in
+	the RESPONSE is renumbered 1..n over that order. The stored ``seq`` is written
+	unlocked by ``record_step`` - a delegate firing tool calls in parallel reads
+	the same MAX(seq) twice and both rows land on the same number (observed live:
+	2,2,2 then 3,3). Putting a write barrier on the hot path of every plugin tool
+	call to order a decoration is the wrong trade, so the ordering contract lives
+	HERE instead, where it costs nothing and duplicates can never reach the UI."""
+	empty: dict = {"steps": [], "count": 0}
+	if not run:
+		return empty
+	me = frappe.session.user
+	run_row = frappe.db.get_value(RUN, run, ["name", "owner"], as_dict=True)
+	if not run_row:
+		return empty
+	if run_row.owner != me and not has_jarvis_admin_access(me):
+		return empty
+	steps = frappe.get_all(
+		RUN_STEP,
+		filters={"run": run_row.name},
+		fields=[
+			"name",
+			"seq",
+			"kind",
+			"tool",
+			"label",
+			"detail",
+			"status",
+			"duration_ms",
+			"occurred_at",
+			"creation",
+		],
+		order_by="occurred_at asc, creation asc",
+		limit_page_length=RUN_STEPS_CAP,
+		ignore_permissions=True,
+	)
+	for position, step in enumerate(steps, start=1):
+		step["seq"] = position
+	return {"steps": steps, "count": len(steps)}
+
+
 @frappe.whitelist()
 def set_finding_state(finding: str, state: str) -> dict:
 	"""Move a finding to open/acknowledged/resolved. Owner-gated (S3)."""
@@ -1874,7 +2304,10 @@ def list_agent_activity_page(
 	``{rows, total, has_more, start, page_length}``). Activity rows are
 	Link-free Data snapshots, so the feed survives the uninstall cascade —
 	``agent`` filters on the slug snapshot, ``action`` on the lifecycle verb.
-	Search matches agent_title/detail (LIKE-escaped)."""
+	Search matches agent_title/detail (LIKE-escaped). Each row also carries a
+	live-joined ``run_status`` (the named run's CURRENT status, not the
+	action verb's point-in-time label; ``None`` when the row names no run or
+	that run no longer exists)."""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
 	filters: dict = {"owner": me}
@@ -1906,6 +2339,23 @@ def list_agent_activity_page(
 		limit_start=start,
 		limit_page_length=pl,
 	)
+	# jarvis#1062: the action verb ("Run started") is a point-in-time label
+	# stamped when the row was written; the row's CURRENT run status (a
+	# "Run started" row whose run later failed) is a live join, not baked
+	# into the snapshot - one batched query for the whole page, never per
+	# row. A row whose run has since been deleted (or that names no run at
+	# all - every non-run action) gets run_status: None, so the SPA renders
+	# no badge rather than a stale or invented one.
+	run_names = {r["run"] for r in rows if r.get("run")}
+	status_by_run = {}
+	if run_names:
+		status_by_run = {
+			d.name: d.status
+			for d in frappe.get_all(RUN, filters={"name": ["in", list(run_names)]}, fields=["name", "status"])
+		}
+	for r in rows:
+		r["run_status"] = status_by_run.get(r["run"]) if r.get("run") else None
+
 	return {
 		"rows": rows,
 		"total": total,
@@ -1928,12 +2378,12 @@ def take_finding_to_chat(finding: str) -> dict:
 	doc = frappe.get_doc(FINDING, finding)
 	doc.check_permission("read")  # S3 owner-gate (owner via if_owner, or SM)
 
-	from jarvis.chat.api import send_message
+	from jarvis.chat.api import CONV, MSG, send_message
 
 	title = (doc.title or doc.rule_id or "finding").strip()
 	conv = frappe.get_doc(
 		{
-			"doctype": "Jarvis Conversation",
+			"doctype": CONV,
 			"title": f"Finding: {title}"[:140],
 			"status": "Active",
 		}
@@ -1960,8 +2410,25 @@ def take_finding_to_chat(finding: str) -> dict:
 		"documents or remediation steps the data does not support."
 	)
 	res = send_message(conversation=conv.name, message="\n".join(parts))
+	if not res.get("ok"):
+		# jarvis#1062 polish: the conversation above is committed BEFORE the seed
+		# is attempted, so a validate_can_send failure (no model configured, over
+		# quota, ...) left an orphaned, empty "Finding: ..." conversation behind on
+		# every failed click. Clean it up - and any partial seed message, belt-
+		# and-suspenders: send_message's own overload-race path already deletes
+		# its own Message row before returning ok:False - so a failed seed leaves
+		# no trace, mirroring filebox._cascade's cleanup shape.
+		frappe.db.delete(MSG, {"conversation": conv.name})
+		frappe.delete_doc(CONV, conv.name, ignore_permissions=True, force=True)
+		frappe.db.commit()
+		return {
+			"ok": False,
+			"conversation": None,
+			"run_id": res.get("run_id"),
+			"reason": res.get("reason"),
+		}
 	return {
-		"ok": bool(res.get("ok")),
+		"ok": True,
 		"conversation": conv.name,
 		"run_id": res.get("run_id"),
 		"reason": res.get("reason"),
@@ -2026,6 +2493,23 @@ def apply_agents() -> dict:
 	from jarvis.permissions import require_skill_reviewer
 
 	require_skill_reviewer()
+	return _enqueue_apply()
+
+
+def _enqueue_apply() -> dict:
+	"""The apply pipeline itself, WITHOUT the authority check.
+
+	Split out of ``apply_agents`` so ``set_agent_access`` can offer "save the
+	access change and make it runnable" as ONE action, without re-implementing the
+	enqueue. Re-implementing it would drift: the deduped ``job_id``, the
+	inline-in-test flag, the pending stamp and the synchronous payload build (which
+	is what surfaces a size/cap error to the caller instead of burying it in a job)
+	all have to match exactly, and a second copy is where that stops being true.
+
+	Every caller MUST establish authority first — ``apply_agents`` via
+	``require_skill_reviewer``, ``set_agent_access`` via ``require_jarvis_admin``,
+	which is a strict SUBSET of the reviewer set (JARVIS_REVIEWER_ROLES contains
+	Jarvis Admin and System Manager), so the admin path grants nothing new."""
 	_rate_limit_apply()
 	payload = build_agent_push_payload()
 	frappe.db.set_single_value(_SETTINGS, "agent_skills_sync_status", "pending: applying agents")
@@ -2056,7 +2540,7 @@ def _rate_limit_apply() -> None:
 	me = frappe.session.user
 	key = f"jarvis_apply_agents_rl:{me}"
 	if frappe.cache().get_value(key, expires=True):
-		frappe.throw(_("An apply is already in progress — please wait a moment."))
+		frappe.throw(_("An apply is already in progress. Please wait a moment."))
 	frappe.cache().set_value(key, "1", expires_in_sec=5)
 
 

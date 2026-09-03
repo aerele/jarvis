@@ -31,13 +31,32 @@
 			>
 				<FeatherIcon name="activity" class="size-7.5 text-ink-gray-5" />
 				<span class="mt-2 text-lg font-medium text-ink-gray-8">No activity yet</span>
-				<span class="text-p-base text-ink-gray-6">
+				<!-- jarvis#1062 P2-9 (production-readiness audit): "Installs...
+				     will show up here" reads as an instruction to go install
+				     something, which the Administrator session can never do
+				     (Install is refused server-side, S3 owner-gate) - told
+				     straight instead. -->
+				<span v-if="isAdministrator" class="text-p-base text-ink-gray-6">
+					Administrator cannot install agents. Sign in as a named user.
+				</span>
+				<span v-else class="text-p-base text-ink-gray-6">
 					Installs, schedule changes and runs will show up here.
 				</span>
 			</div>
 
 			<div v-else class="divide-y">
-				<div v-for="r in rows" :key="r.name" class="flex items-start gap-3 py-3">
+				<!-- jarvis#1062 P1-5 (production-readiness audit): keyboard focus
+				     was invisible here, same as every other role="button" row in
+				     this app - added the same focus-visible ring. -->
+				<div
+					v-for="r in rows"
+					:key="r.name"
+					role="button"
+					tabindex="0"
+					class="flex cursor-pointer items-start gap-3 py-3 hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
+					@click="openRow(r)"
+					@keydown.enter.prevent="openRow(r)"
+				>
 					<div
 						class="grid size-8 shrink-0 place-items-center rounded-full bg-surface-gray-2"
 					>
@@ -55,8 +74,21 @@
 							<span class="text-sm text-ink-gray-5">{{
 								actionLabel(r.action)
 							}}</span>
+							<!-- jarvis#1062: the action verb is a point-in-time label ("Run
+							     started"); this badge is the run's LIVE status, so a started
+							     run that later failed reads as failed here, not started. -->
+							<Badge
+								v-if="r.run_status"
+								variant="subtle"
+								:theme="STATUS_THEME[r.run_status] || 'gray'"
+								:label="r.run_status"
+							/>
 						</div>
-						<div v-if="r.detail" class="mt-0.5 truncate text-sm text-ink-gray-6">
+						<div
+							v-if="r.detail"
+							class="mt-0.5 truncate text-sm text-ink-gray-6"
+							:title="r.detail"
+						>
 							{{ r.detail }}
 						</div>
 					</div>
@@ -85,11 +117,48 @@
 // useListPage bound to list_agent_activity_page (owner-scoped, newest first),
 // its own debounced search and its own ListFooter, so AgentsList only mounts
 // it when #activity is active (lazy first fetch via useListPage's onMounted).
-// Rows are Link-free snapshots: {agent_title, action, detail, creation, run}.
-import { FeatherIcon, FormControl, ListFooter, Tooltip } from "frappe-ui";
+// Rows are Link-free snapshots: {agent, agent_title, action, detail, creation,
+// run, run_status}. run_status is a live join (agents_api.py), not part of
+// the snapshot itself.
+import { computed } from "vue";
+import { Badge, FeatherIcon, FormControl, ListFooter, Tooltip } from "frappe-ui";
+import { useRouter } from "vue-router";
 import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { listAgentActivityPage } from "@/api/agents";
+import { STATUS_THEME } from "@/lib/agentRunStatus";
+import { session } from "@/data/session";
+
+const router = useRouter();
+// jarvis#1062 P2-9: the empty state names the Administrator case specifically
+// - it cannot install, so "will show up here" is never true for that session.
+const isAdministrator = computed(() => session.user === "Administrator");
+
+// jarvis#1062: a run row (its live status now shown as the badge above)
+// opens straight to that run in the Runs tab; every other lifecycle event
+// (installed, enabled, config_changed, promoted...) has no single run to
+// point at, so it opens the agent's Overview instead. router-driven, never
+// window.location - this stays an in-SPA navigation.
+const RUN_ACTIONS = new Set([
+	"run_started",
+	"run_completed",
+	"run_partial",
+	"run_failed",
+	"run_stopped",
+]);
+function openRow(r) {
+	if (!r || !r.agent) return;
+	if (RUN_ACTIONS.has(r.action) && r.run) {
+		router.push({
+			name: "AgentDetail",
+			params: { slug: r.agent },
+			hash: "#runs",
+			query: { run: r.run },
+		});
+	} else {
+		router.push({ name: "AgentDetail", params: { slug: r.agent }, hash: "#overview" });
+	}
+}
 
 // per-action Feather icon + label + ink color (lifecycle verbs from
 // agents_api.list_agent_activity_page)
@@ -108,6 +177,13 @@ const ACTIONS = {
 		color: "text-ink-amber-3",
 	},
 	run_failed: { icon: "x-circle", label: "Run failed", color: "text-ink-red-4" },
+	run_stopped: { icon: "square", label: "Run stopped" },
+	promoted_to_live: {
+		icon: "arrow-up-circle",
+		label: "Promoted to live",
+		color: "text-ink-green-3",
+	},
+	demoted_to_shadow: { icon: "eye", label: "Returned to preview", color: "text-ink-violet-1" },
 };
 function actionIcon(a) {
 	return (ACTIONS[a] || {}).icon || "activity";

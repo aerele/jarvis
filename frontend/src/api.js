@@ -702,10 +702,11 @@ export const listAgentRuns = (agent, limit) =>
 export const listAgentFindings = (p) => call(AG + "list_findings", p || {});
 export const setFindingState = (finding, state) =>
 	call(AG + "set_finding_state", { finding, state });
-// Role gating + listing admin (System Manager only - the server enforces it;
-// the SPA merely probes getAgentAdminOverview and hides the Admin tab on 403).
-export const setAgentRoles = (agent_slug, roles) =>
-	call(AG + "set_agent_roles", { agent_slug, roles: JSON.stringify(roles || []) });
+// Listing admin (System Manager only - the server enforces it; the SPA merely
+// probes getAgentAdminOverview and hides the Admin tab on 403). Access gating
+// moved to api/agents.setAgentAccess (jarvis#1062), which sets roles and named
+// users together; the set_agent_roles ENDPOINT survives as a compat shim for
+// cached older SPA builds, but nothing in this build calls it.
 export const setListingStatus = (agent_slug, status) =>
 	call(AG + "set_listing_status", { agent_slug, status });
 export const getAgentAdminOverview = () => call(AG + "get_agent_admin_overview");

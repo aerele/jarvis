@@ -2,12 +2,34 @@
 	<div class="flex h-full flex-col overflow-hidden">
 		<LayoutHeader>
 			<template #left-header>
+				<!-- jarvis#1062 P1-6 (production-readiness audit): the raw slug
+				     ("negative-stock-valuation-auditor") used to flash here before
+				     the agent loaded, then get replaced by its real title - a
+				     visible, jarring swap. An empty crumb + a skeleton bar
+				     (item.loading, via Breadcrumbs' own #suffix slot) now render
+				     until the title is actually known; nothing ever flashes.
+				     Review fix: a failed load() left `agent` null forever, so a
+				     bare load failure showed a blank crumb AND a permanently
+				     spinning skeleton next to the error panel below. `error` set
+				     falls back to the slug (the old, pre-P1-6 behaviour) and
+				     stops the skeleton - there is nothing left to wait for. -->
 				<Breadcrumbs
 					:items="[
 						{ label: 'Agents', route: { name: 'AgentsList' } },
-						{ label: (agent && agent.title) || slug },
+						{
+							label: agent ? agent.title || props.slug : error ? props.slug : '',
+							loading: !agent && !error,
+						},
 					]"
-				/>
+				>
+					<template #suffix="{ item }">
+						<span
+							v-if="item.loading"
+							class="ml-1 inline-block h-4 w-32 animate-pulse rounded bg-surface-gray-3"
+							aria-hidden="true"
+						/>
+					</template>
+				</Breadcrumbs>
 			</template>
 			<template #right-header>
 				<template v-if="agent && !installation">
@@ -125,12 +147,14 @@
 						     is discussed - not only in the passive Runs-tab "Preview" pill
 						     (jarvis#456). The action itself lives in Configure. -->
 						<Badge
-							v-if="activation && activation.activation_state === 'live'"
+							v-if="
+								canReview && activation && activation.activation_state === 'live'
+							"
 							variant="subtle"
 							theme="green"
 							label="Live"
 						/>
-						<ShadowChip v-else-if="activation" label="Shadow (preview)" />
+						<ShadowChip v-else-if="canReview && activation" label="Shadow (preview)" />
 						<Switch
 							v-if="installation"
 							label="Enabled"
@@ -140,9 +164,39 @@
 						/>
 					</div>
 				</div>
-				<div v-if="!agent.allowed" class="mt-3 text-sm text-ink-gray-5">
-					Available to: {{ (agent.allowed_roles || []).join(", ") || "-" }} - ask your
-					administrator.
+				<!-- #1062 review fix: an installed-but-not-allowed row (role revoked
+				     after install) must say so visibly, not only via the disabled Run
+				     button's tooltip - a tooltip is easy to miss entirely. -->
+				<div v-if="installation && !agent.allowed" class="mt-3 text-sm text-ink-gray-5">
+					You do not have access to run this agent. Ask your administrator.
+				</div>
+				<!-- jarvis#1062 polish: the same visible-hint treatment for the other
+				     two reasons Run Now can be disabled - a tooltip alone is easy to
+				     miss. -->
+				<div
+					v-else-if="installation && !installation.enabled"
+					class="mt-3 text-sm text-ink-gray-5"
+				>
+					Enable this agent to run it.
+				</div>
+				<div v-else-if="shadowScribeBlocked" class="mt-3 text-sm text-ink-gray-5">
+					Still in shadow preview - promote it to live under Configure first
+				</div>
+				<!-- jarvis#1062 polish: install_agent refuses an Administrator run-as
+				     identity server-side ("agents cannot run as Administrator") - fail
+				     this visibly instead of letting the click round-trip into a
+				     toast-only refusal. -->
+				<div
+					v-if="!installation && isAdministratorSession"
+					class="mt-3 text-sm text-ink-gray-5"
+				>
+					Log in as a named user to install this agent.
+				</div>
+				<!-- jarvis#1062 polish: the install-failure toast auto-dismisses in
+				     ~2s - keep the reason visible under the Install button until the
+				     next attempt. -->
+				<div v-if="!installation && installError" class="mt-3 text-sm text-ink-red-4">
+					{{ installError }}
 				</div>
 			</div>
 
@@ -163,6 +217,23 @@
 						<div class="mt-2 flex flex-wrap gap-1.5">
 							<code
 								v-for="t in needs"
+								:key="t"
+								class="rounded bg-surface-gray-2 px-1.5 py-0.5 font-mono text-xs text-ink-gray-7"
+							>
+								{{ t }}
+							</code>
+						</div>
+					</div>
+					<!-- jarvis#1062 polish: doctypes_required (A12) rides in get_agent's
+					     payload but was never shown - a customer had no way to see which
+					     records the run-as user must be able to read. -->
+					<div v-if="readsRecords.length" class="mt-8">
+						<div class="text-base font-medium text-ink-gray-9">
+							Reads these records
+						</div>
+						<div class="mt-2 flex flex-wrap gap-1.5">
+							<code
+								v-for="t in readsRecords"
 								:key="t"
 								class="rounded bg-surface-gray-2 px-1.5 py-0.5 font-mono text-xs text-ink-gray-7"
 							>
@@ -226,18 +297,27 @@
 						</div>
 					</div>
 					<div>
-						<div class="text-sm font-medium text-ink-gray-5">Allowed roles</div>
-						<div class="mt-1 flex flex-wrap gap-1.5">
-							<template v-if="(agent.allowed_roles || []).length">
+						<div class="text-sm font-medium text-ink-gray-5">Access</div>
+						<!-- Admins see the roster; everyone else sees only whether THEY
+						     are allowed - who else has access is admin information. -->
+						<div v-if="isSM" class="mt-1 flex flex-wrap gap-1.5">
+							<template v-if="accessGrants.length">
 								<Badge
-									v-for="r in agent.allowed_roles"
-									:key="r"
+									v-for="g in accessGrants"
+									:key="g"
 									variant="subtle"
 									theme="gray"
-									:label="r"
+									:label="g"
 								/>
 							</template>
-							<span v-else class="text-base text-ink-gray-8">Everyone</span>
+							<span v-else class="text-base text-ink-gray-8">Admins only</span>
+						</div>
+						<div v-else class="mt-1 text-base text-ink-gray-8">
+							{{
+								agent.allowed
+									? "You have access"
+									: "No access - ask your administrator"
+							}}
 						</div>
 					</div>
 					<div>
@@ -248,11 +328,8 @@
 			</div>
 
 			<!-- ── Configure (installed; §14 F3 + D28 comments) ── -->
-			<div
-				v-else-if="tab === 'configure' && installation"
-				class="max-w-2xl shrink-0 space-y-10 px-5 py-6"
-			>
-				<section>
+			<div v-else-if="tab === 'configure' && installation" class="shrink-0 px-5 py-6">
+				<section v-if="canReview" class="mb-10 max-w-2xl">
 					<ActivationPanel
 						:installation-name="installation.name"
 						:agent-title="agent.title"
@@ -267,55 +344,84 @@
 					/>
 				</section>
 
-				<section>
-					<div class="text-base font-medium text-ink-gray-9">Schedule</div>
-					<div class="mt-3 space-y-4">
-						<Switch
-							label="Run automatically"
-							:modelValue="sched.enabled"
-							@update:modelValue="(v) => (sched.enabled = v)"
-						/>
-						<div v-if="sched.enabled" class="grid grid-cols-2 gap-4">
-							<FormControl
-								type="select"
-								label="Frequency"
-								:options="FREQUENCY_OPTIONS"
-								:modelValue="sched.frequency"
-								@update:modelValue="(v) => (sched.frequency = v)"
+				<!-- Configuration on the left/primary column, Schedule on the right -
+				     the same 2-col-on-lg+ pattern as the Admin tab (Access left,
+				     Installs right), same section-heading style
+				     (text-base font-medium text-ink-gray-9, matching AgentAccessEditor's
+				     own "Access" heading) and the same lg:items-start so neither column
+				     stretches to the taller one's height - both start at the identical
+				     top edge. Comments moved OFF this tab onto the Run itself (owner
+				     decision, jarvis#1062) - a Note now belongs to what it is actually
+				     about; no divider/empty space is left behind for it. -->
+				<div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-start">
+					<div class="min-w-0">
+						<section>
+							<div class="text-base font-medium text-ink-gray-9">Configuration</div>
+							<!-- mt-2, matching AgentAccessEditor's own heading->content gap
+							     (its "Access" heading is immediately followed by an
+							     mt-2 description) - the Admin tab is the reference. -->
+							<ConfigForm
+								class="mt-2"
+								:config="parsedConfig"
+								:config-keys="configKeys"
+								:saving="savingConfig"
+								@save="saveConfig"
 							/>
-							<div>
-								<FormLabel label="Time" class="mb-1.5" />
-								<TimePicker
-									:modelValue="sched.time"
-									placeholder="09:00"
-									@update:modelValue="(v) => (sched.time = v)"
+						</section>
+					</div>
+
+					<div class="min-w-0">
+						<section>
+							<div class="text-base font-medium text-ink-gray-9">Schedule</div>
+							<!-- mt-2 for the same reason as Configuration above;
+							     space-y-5 (not -4) to match ConfigForm's own
+							     field-to-field rhythm - one consistent gap across
+							     both columns, not two different densities. -->
+							<div class="mt-2 space-y-5">
+								<Switch
+									label="Run automatically"
+									:modelValue="sched.enabled"
+									@update:modelValue="(v) => (sched.enabled = v)"
+								/>
+								<div v-if="sched.enabled" class="grid grid-cols-2 gap-4">
+									<FormControl
+										type="select"
+										label="Frequency"
+										:options="FREQUENCY_OPTIONS"
+										:modelValue="sched.frequency"
+										@update:modelValue="(v) => (sched.frequency = v)"
+									/>
+									<div>
+										<FormLabel label="Time" class="mb-1.5" />
+										<TimePicker
+											:modelValue="sched.time"
+											placeholder="09:00"
+											@update:modelValue="(v) => (sched.time = v)"
+										/>
+									</div>
+								</div>
+								<!-- owner feedback: the committed schedule + its next run, ONE
+								     line, shown only while the form matches what is actually
+								     saved (scheduleDirty false) - editing any control hides
+								     this and reveals Save instead (below). -->
+								<div v-if="scheduleSummary" class="text-sm text-ink-gray-5">
+									{{ scheduleSummary }}
+								</div>
+								<!-- owner feedback: Save is not always-on chrome - it appears
+								     only once the form actually differs from the saved
+								     installation (toggle/frequency/time), and disappears again
+								     once a save lands (scheduleDirty recomputes off
+								     `installation`, which `load()` refreshes post-save). -->
+								<Button
+									v-if="scheduleDirty"
+									label="Save schedule"
+									:loading="savingSchedule"
+									@click="saveSchedule"
 								/>
 							</div>
-						</div>
-						<div v-if="installation.next_run_at" class="text-sm text-ink-gray-5">
-							Next run: {{ fmtDt(installation.next_run_at) }}
-						</div>
-						<Button
-							label="Save schedule"
-							:loading="savingSchedule"
-							@click="saveSchedule"
-						/>
+						</section>
 					</div>
-				</section>
-
-				<section>
-					<div class="text-base font-medium text-ink-gray-9">Configuration</div>
-					<ConfigForm
-						class="mt-3"
-						:config="parsedConfig"
-						:saving="savingConfig"
-						@save="saveConfig"
-					/>
-				</section>
-
-				<section class="border-t pt-6">
-					<CommentsSection :docmeta="docmeta" :can-comment="true" />
-				</section>
+				</div>
 			</div>
 
 			<!-- ── Runs (installed): two-pane master-detail board ── -->
@@ -323,147 +429,136 @@
 				v-else-if="tab === 'runs' && installation"
 				ref="runsBoard"
 				:agent-name="agent.name"
+				:can-review="canReview"
 			/>
 
 			<!-- ── Admin (SM only; server enforces every call). Listing status is
 			     publisher/catalog state curated in registry.json (it reverts on the
 			     next deploy) - deliberately NOT editable here. ── -->
-			<div
-				v-else-if="tab === 'admin' && isSM"
-				class="max-w-2xl shrink-0 space-y-10 px-5 py-6"
-			>
-				<section>
-					<div class="text-base font-medium text-ink-gray-9">Allowed roles</div>
-					<div class="mt-2 text-sm text-ink-gray-5">
-						Role gating is enforced server-side on every path. An empty list means
-						everyone.
-					</div>
-					<div class="mt-3 flex flex-wrap gap-1.5">
-						<div
-							v-for="r in roleDraft"
-							:key="r"
-							class="flex h-6 items-center gap-1 rounded bg-surface-gray-2 px-2 text-sm text-ink-gray-8"
-						>
-							<span class="truncate">{{ r }}</span>
-							<Button
-								variant="ghost"
-								icon="x"
-								class="!h-4 !w-4"
-								:label="'Remove role ' + r"
-								@click="removeRole(r)"
-							/>
-						</div>
-						<span v-if="!roleDraft.length" class="text-sm text-ink-gray-4">
-							Everyone - no restriction
-						</span>
-					</div>
-					<div class="mt-3 w-72">
-						<Autocomplete
-							:options="roleOptions"
-							:modelValue="null"
-							placeholder="Add a role…"
-							@update:modelValue="(opt) => opt && addRole(opt.value)"
-						/>
-					</div>
-					<div v-if="rolesDirty" class="mt-3 flex items-center gap-2">
-						<Button label="Save roles" :loading="savingRoles" @click="saveRoles" />
-						<Button label="Reset" variant="ghost" @click="resetRoles" />
-						<span v-if="!roleDraft.length" class="text-sm text-ink-gray-5">
-							Saving with none selected clears the restriction.
-						</span>
-					</div>
-				</section>
+			<!-- v-show, NOT v-else-if like the tabs above it: the Access editor holds
+			     an unsaved draft, and the v-if chain unmounted it on every tab switch,
+			     so a half-finished grant was silently thrown away by a trip to
+			     Overview and back. v-if="isSM" still gates it, so a non-admin renders
+			     no admin markup at all - only an admin pays the cost of keeping it
+			     mounted, and only for the life of this page. -->
+			<div v-if="isSM" v-show="tab === 'admin'" class="shrink-0 px-5 py-6">
+				<!-- Access and Installs are read together - you grant, then look at who
+				     actually has it - and the page had them stacked in a 2xl column that
+				     left most of the width empty. Side by side on lg+, stacked below,
+				     with the gap doing the separating that space-y-10 used to. -->
+				<div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-start">
+					<AgentAccessEditor
+						ref="accessEditor"
+						:slug="props.slug"
+						:roles="agent.allowed_roles || []"
+						:users="agent.allowed_users || []"
+						:all-roles="agent.all_roles || []"
+						@saved="onAccessSaved"
+					/>
 
-				<section>
-					<div class="text-base font-medium text-ink-gray-9">
-						Installs ({{ installRows.length }})
-					</div>
-					<div v-if="adminLoading && !adminData" class="mt-3 text-sm text-ink-gray-5">
-						Loading installs…
-					</div>
-					<div v-else-if="!installRows.length" class="mt-3 text-sm text-ink-gray-5">
-						No installs yet.
-					</div>
-					<ListView
-						v-else
-						class="mt-3"
-						:columns="INSTALL_COLUMNS"
-						:rows="installRows"
-						row-key="installation"
-						:options="{
-							selectable: false,
-							rowHeight: 40,
-							resizeColumn: false,
-							showTooltip: true,
-						}"
-					>
-						<template #default>
-							<ListHeader>
-								<ListHeaderItem
-									v-for="column in INSTALL_COLUMNS"
-									:key="column.key"
-									:item="column"
-								/>
-							</ListHeader>
-							<ListRows />
-						</template>
-						<template #cell="{ column, row, item, align }">
-							<template v-if="column.key === 'state'">
-								<!-- State precedence, most-actionable first: Blocked > Disabled >
-								     Live > Shadow. `installable` is a last-reconciled STORED flag
-								     (see get_agent_admin_overview), so Blocked reads "as last
-								     reconciled" rather than claiming a live guarantee. -->
-								<Tooltip v-if="!row.installable" :text="blockedReason(row)">
-									<Badge variant="subtle" theme="orange" label="Blocked" />
-								</Tooltip>
-								<Badge
-									v-else-if="!row.enabled"
-									variant="subtle"
-									theme="gray"
-									label="Disabled"
-								/>
-								<Badge
-									v-else-if="row.activation_state === 'live'"
-									variant="subtle"
-									theme="green"
-									label="Live"
-								/>
-								<ShadowChip v-else label="Shadow" />
+					<section class="min-w-0">
+						<div class="text-base font-medium text-ink-gray-9">
+							Installs ({{ installRows.length }})
+						</div>
+						<div
+							v-if="adminLoading && !adminData"
+							class="mt-3 text-sm text-ink-gray-5"
+						>
+							Loading installs…
+						</div>
+						<div v-else-if="!installRows.length" class="mt-3 text-sm text-ink-gray-5">
+							No installs yet.
+						</div>
+						<ListView
+							v-else
+							class="mt-3"
+							:columns="INSTALL_COLUMNS"
+							:rows="installRows"
+							row-key="installation"
+							:options="{
+								selectable: false,
+								rowHeight: 40,
+								resizeColumn: false,
+								showTooltip: true,
+							}"
+						>
+							<template #default>
+								<ListHeader>
+									<ListHeaderItem
+										v-for="column in INSTALL_COLUMNS"
+										:key="column.key"
+										:item="column"
+									/>
+								</ListHeader>
+								<ListRows />
 							</template>
-							<div
-								v-else-if="column.key === 'run_as_user'"
-								class="truncate text-base"
-							>
-								<span v-if="row.run_as_user">{{ row.run_as_user }}</span>
-								<Badge
+							<template #cell="{ column, row, item, align }">
+								<template v-if="column.key === 'state'">
+									<!-- State precedence, most-actionable first: Blocked > Disabled >
+									     Live > Shadow. `installable` is a last-reconciled STORED flag
+									     (see get_agent_admin_overview), so Blocked reads "as last
+									     reconciled" rather than claiming a live guarantee. -->
+									<Tooltip v-if="!row.installable" :text="blockedReason(row)">
+										<Badge variant="subtle" theme="orange" label="Blocked" />
+									</Tooltip>
+									<Badge
+										v-else-if="!row.enabled"
+										variant="subtle"
+										theme="gray"
+										label="Disabled"
+									/>
+									<Badge
+										v-else-if="row.activation_state === 'live'"
+										variant="subtle"
+										theme="green"
+										label="Live"
+									/>
+									<!-- jarvis#1062 P2-11 (production-readiness audit): the Blocked
+									     badge just above already explains itself on hover - Shadow
+									     is the only other State value that names a mode without
+									     saying what it means. -->
+									<Tooltip
+										v-else
+										text="Preview mode: runs are visible only to the reviewer until promoted to live."
+									>
+										<ShadowChip label="Shadow" />
+									</Tooltip>
+								</template>
+								<div
+									v-else-if="column.key === 'run_as_user'"
+									class="truncate text-base"
+								>
+									<span v-if="row.run_as_user">{{ row.run_as_user }}</span>
+									<Badge
+										v-else
+										variant="subtle"
+										theme="orange"
+										label="No run-as user"
+									/>
+								</div>
+								<div
+									v-else-if="column.key === 'last_run_at'"
+									class="truncate text-base"
+								>
+									{{ row.last_run_at ? timeAgo(row.last_run_at) : "-" }}
+								</div>
+								<div
+									v-else-if="column.key === 'sync_status'"
+									class="truncate text-base"
+								>
+									{{ row.sync_status || "-" }}
+								</div>
+								<ListRowItem
 									v-else
-									variant="subtle"
-									theme="orange"
-									label="No run-as user"
+									:column="column"
+									:row="row"
+									:item="item"
+									:align="align"
 								/>
-							</div>
-							<div
-								v-else-if="column.key === 'last_run_at'"
-								class="truncate text-base"
-							>
-								{{ row.last_run_at ? timeAgo(row.last_run_at) : "-" }}
-							</div>
-							<div
-								v-else-if="column.key === 'sync_status'"
-								class="truncate text-base"
-							>
-								{{ row.sync_status || "-" }}
-							</div>
-							<ListRowItem
-								v-else
-								:column="column"
-								:row="row"
-								:item="item"
-								:align="align"
-							/>
-						</template>
-					</ListView>
-				</section>
+							</template>
+						</ListView>
+					</section>
+				</div>
 			</div>
 		</div>
 
@@ -484,14 +579,14 @@
 // Marketplace template: de-texted hero (logo · name · one meta line ·
 // one-line tagline · category chips; install count + Enabled switch right) →
 // hash-synced tabs. Overview (markdown description + static facts panel) ·
-// Configure (schedule / ConfigForm / CommentsSection on the installation, D28)
-// · Runs (AgentRunsBoard: two-pane runs rail → findings pane) · Admin
-// (SM-only: roles editor + installs overview; listing status is registry.json
-// publisher state and intentionally has no tenant control here).
+// Configure (schedule / ConfigForm on the installation, D28) · Runs
+// (AgentRunsBoard: two-pane runs rail → findings pane, which now also carries
+// Notes-on-the-run, jarvis#1062 - Comments moved off this tab entirely) ·
+// Admin (admin-only: the Access editor + installs overview; listing status is
+// registry.json publisher state and intentionally has no tenant control here).
 import { ref, computed, watch, nextTick } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import {
-	Autocomplete,
 	Badge,
 	Breadcrumbs,
 	Button,
@@ -512,20 +607,21 @@ import {
 } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
-import CommentsSection from "@/components/doc/CommentsSection.vue";
 import AgentRunsBoard from "@/pages/agents/AgentRunsBoard.vue";
 import ActivationPanel from "@/pages/agents/ActivationPanel.vue";
+import AgentAccessEditor from "@/pages/agents/AgentAccessEditor.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import ShadowChip from "@/components/ShadowChip.vue";
-import { useDocmeta } from "@/composables/useDocmeta";
-import { session } from "@/data/session";
 import { timeAgo, exactDate as fmtDt } from "@/utils/datetime";
 import * as api from "@/api";
 import * as apiAgents from "@/api/agents";
 import { renderMarkdown } from "@/markdown";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { session } from "@/data/session";
+import { parseListField } from "@/lib/parseListField";
+import { categoryTitle } from "@/lib/agentCategory";
 
 const props = defineProps({
 	slug: { type: String, required: true },
@@ -534,11 +630,6 @@ const props = defineProps({
 const route = useRoute();
 const router = useRouter();
 
-// display metadata (mirrors AgentsList / registry.json domains)
-const DOMAINS = [
-	{ slug: "close", title: "Close & Reporting" },
-	{ slug: "bank-recon", title: "Bank & Reconciliation" },
-];
 const FREQUENCY_OPTIONS = [
 	{ label: "Daily", value: "daily" },
 	{ label: "Weekly", value: "weekly" },
@@ -579,6 +670,12 @@ function blockedReason(row) {
 // ── data ──────────────────────────────────────────────────────────────────────
 const agent = ref(null); // get_agent payload (§8.3)
 const error = ref("");
+// jarvis#1062 fix: Configure/Runs only exist once `installation` resolves
+// (tabs computed, below) - true only after this first settles (success or
+// error). applyHash() reads this to tell "the hash names a tab that does
+// not exist YET" (still loading - wait) apart from "...that never will"
+// (settled - give up to Overview for real).
+const initialLoadSettled = ref(false);
 
 async function load() {
 	try {
@@ -588,7 +685,10 @@ async function load() {
 		error.value = errMsg(e);
 	}
 }
-load().then(applyHash);
+load().then(() => {
+	initialLoadSettled.value = true;
+	applyHash();
+});
 watch(
 	() => props.slug,
 	() => {
@@ -596,7 +696,11 @@ watch(
 		error.value = "";
 		adminData.value = null;
 		activation.value = null;
-		load().then(applyHash);
+		initialLoadSettled.value = false;
+		load().then(() => {
+			initialLoadSettled.value = true;
+			applyHash();
+		});
 	}
 );
 
@@ -648,12 +752,23 @@ watch(
 	{ immediate: true }
 );
 
-// The named reviewer's sign-off, or a Jarvis Admin (agents_api mirrors this
-// server-side - this only decides whether to show the button, never grants
-// the action itself).
-const canActOnActivation = computed(
-	() => !!activation.value && (session.user === activation.value.reviewer || isSM.value)
-);
+// ── reviewer capability (jarvis#1062) ────────────────────────────────────────
+// The reviewer set (Jarvis Skill Reviewer / Jarvis Admin / System Manager), read
+// from get_agents_caps().review - the SAME capability apply_agents and
+// promote_installation gate on, so the button appears exactly when the call
+// would succeed. It replaced `session.user === activation.reviewer`: install_agent
+// stamps reviewer = the installer, so that test made every installer their own
+// approver and put the whole shadow/attestation vocabulary in front of people who
+// have no say over it. A plain user now sees nothing about shadow at all.
+const canReview = ref(false);
+(async () => {
+	try {
+		canReview.value = !!((await apiAgents.getAgentsCaps()) || {}).review;
+	} catch {
+		canReview.value = false; // fail closed: no control, no shadow copy
+	}
+})();
+const canActOnActivation = computed(() => !!activation.value && canReview.value);
 function onActivationChanged(next) {
 	activation.value = next;
 }
@@ -674,7 +789,21 @@ const tabs = computed(() => {
 
 function applyHash() {
 	const h = (route.hash || "").replace(/^#/, "");
-	tab.value = tabs.value.some((t) => t.value === h) ? h : "overview";
+	if (!h) {
+		tab.value = "overview";
+		return;
+	}
+	if (tabs.value.some((t) => t.value === h)) {
+		tab.value = h;
+		return;
+	}
+	// h names a tab that is not in the set RIGHT NOW - Configure/Runs need
+	// `installation`, which is only known once the async get_agent fetch
+	// resolves. Only a settled load makes "not in tabs.value" a real verdict;
+	// until then, leave tab.value alone (the page shows "Loading agent…"
+	// regardless) rather than lock in Overview and drop the requested tab -
+	// load()/the slug watcher re-run applyHash() once settled.
+	if (initialLoadSettled.value) tab.value = "overview";
 }
 function setTab(v) {
 	if (tab.value === v && route.hash === "#" + v) return;
@@ -695,19 +824,38 @@ watch(tabs, (list) => {
 
 // ── header actions ────────────────────────────────────────────────────────────
 const installing = ref(false);
+// jarvis#1062 polish: the toast auto-dismisses after ~2s, easy to miss - keep
+// a persistent inline echo under the Install button until the next attempt.
+const installError = ref("");
+// jarvis#1062 polish: install_agent refuses a run-as identity of
+// Administrator ("agents cannot run as Administrator") - read the session
+// user the same way @/data/session already exposes it elsewhere, and
+// disable Install client-side instead of letting the click round-trip into
+// a toast-only refusal.
+const isAdministratorSession = computed(() => session.user === "Administrator");
 const canInstall = computed(
-	() => !!(agent.value && agent.value.allowed && agent.value.status === "Published")
+	() =>
+		!!(
+			agent.value &&
+			agent.value.allowed &&
+			agent.value.status === "Published" &&
+			!isAdministratorSession.value
+		)
 );
 const installTooltip = computed(() => {
 	if (!agent.value || canInstall.value) return "";
+	if (isAdministratorSession.value) return "Log in as a named user to install this agent.";
+	// Never the roster: get_agent strips allowed_roles/allowed_users for non-admins,
+	// and naming who DOES have access is admin information anyway.
 	if (!agent.value.allowed)
-		return "Restricted to: " + ((agent.value.allowed_roles || []).join(", ") || "-");
+		return "You do not have access to this agent. Ask your administrator.";
 	return agent.value.status === "Coming Soon" ? "Coming soon" : "Not available to install";
 });
 
 async function install() {
 	if (installing.value || !canInstall.value) return;
 	installing.value = true;
+	installError.value = "";
 	const p = api.installAgent(props.slug);
 	toast.promise(p, {
 		loading: "Installing…",
@@ -717,6 +865,7 @@ async function install() {
 	try {
 		await p;
 	} catch (e) {
+		installError.value = errMsg(e);
 		installing.value = false;
 		return;
 	}
@@ -757,9 +906,14 @@ const runTooltip = computed(() => {
 	if (nature !== "Auditor" && nature !== "Scribe")
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
-	if (!agent.value.allowed) return "Your roles do not permit this agent";
+	if (!agent.value.allowed) return "You do not have access to this agent";
+	// The shadow vocabulary is reviewer language (jarvis#1062): a plain user has
+	// no promote control and no say in the sign-off, so telling them to go and
+	// promote it names an action they cannot take.
 	if (shadowScribeBlocked.value)
-		return "Still in shadow preview - promote it to live under Configure first";
+		return canReview.value
+			? "Still in shadow preview - promote it to live under Configure first"
+			: "Not yet enabled for live runs - ask your administrator";
 	return nature === "Scribe" ? "Run this agent now" : "Run this audit now";
 });
 
@@ -808,9 +962,11 @@ function confirmUninstall() {
 	const name = installation.value.name;
 	confirmDialog({
 		title: `Uninstall ${agent.value.title}?`,
-		// the backend cascade-deletes findings → runs → installation
+		// the backend cascade-deletes findings → runs → installation, but never
+		// touches a run's linked Jarvis Dashboard (#1062 polish - the warning was
+		// overclaiming what actually gets deleted).
 		message:
-			"This removes the agent and ALL of its run history and findings. This can't be undone.",
+			"This removes the agent and its run history and findings; saved dashboards are kept. This can't be undone.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				await api.uninstallAgent(name);
@@ -865,20 +1021,18 @@ const descriptionHtml = computed(() =>
 );
 const needs = computed(() => {
 	if (!agent.value) return [];
-	const out = [];
-	for (const key of ["tools_required", "min_apps"]) {
-		let v = agent.value[key];
-		if (typeof v === "string" && v.trim()) {
-			try {
-				v = JSON.parse(v);
-			} catch (e) {
-				v = null;
-			}
-		}
-		if (Array.isArray(v)) out.push(...v.map(String));
-	}
-	return out;
+	return ["tools_required", "min_apps"].flatMap((key) => parseListField(agent.value[key]));
 });
+// jarvis#1062 polish: shares parseListField with `needs`, its own field/
+// heading - doctypes_required (A12) is a distinct concept (records read,
+// not tools/apps).
+const readsRecords = computed(() =>
+	agent.value ? parseListField(agent.value.doctypes_required) : []
+);
+// jarvis#1063 (jarvis-only half): which agent-specific config keys this
+// agent's bundle actually reads (get_agent) - gates ConfigForm's
+// agent-specific fields; [] shows its "no additional settings" note.
+const configKeys = computed(() => (agent.value ? parseListField(agent.value.config_keys) : []));
 const defaultScheduleText = computed(() => {
 	let s = {};
 	try {
@@ -890,15 +1044,6 @@ const defaultScheduleText = computed(() => {
 	if (!freq) return "None - runs on demand.";
 	return s.schedule_enabled ? `On by default · ${freq}` : `Off by default · suggested ${freq}`;
 });
-function categoryTitle(slug) {
-	const d = DOMAINS.find((x) => x.slug === slug);
-	if (d) return d.title;
-	return String(slug || "other")
-		.split("-")
-		.map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-		.join(" ");
-}
-
 // ── Configure: schedule ───────────────────────────────────────────────────────
 const sched = ref({ enabled: false, frequency: "daily", time: "09:00" });
 const savingSchedule = ref(false);
@@ -916,6 +1061,43 @@ watch(
 	},
 	{ immediate: true }
 );
+// owner feedback: the ACTUAL saved shape, in `sched`'s own shape, derived
+// live off `installation` (not a second seeded ref) - so it tracks a
+// successful save's post-`load()` refresh for free, with no manual
+// dirty-reset bookkeeping to get wrong.
+const savedSched = computed(() => {
+	const inst = installation.value;
+	return {
+		enabled: !!(inst && inst.schedule_enabled),
+		frequency: (inst && inst.schedule_frequency) || "daily",
+		time: timeHHMM(inst && inst.schedule_time) || "09:00",
+	};
+});
+const scheduleDirty = computed(
+	() =>
+		sched.value.enabled !== savedSched.value.enabled ||
+		sched.value.frequency !== savedSched.value.frequency ||
+		// timeHHMM()-normalize both sides - TimePicker's own modelValue may
+		// carry seconds ("10:30:00"), while savedSched.time is already
+		// normalized to "HH:MM"; comparing raw would leave Save stuck visible
+		// after a successful time-only save (the two would never look equal).
+		timeHHMM(sched.value.time) !== savedSched.value.time
+);
+// "Scheduled monthly at 9:00 am. Next run: Sat, Oct 3, 2026 9:00 AM" - the
+// SAVED frequency/time (never the unsaved draft) plus the existing
+// next_run_at rendering (fmtDt); empty while dirty (would describe a state
+// that no longer matches the form), when nothing is actually scheduled, or
+// when the SAVED schedule is off (a legacy/stale next_run_at must not be
+// narrated as a live schedule - "saved AND enabled").
+const scheduleSummary = computed(() => {
+	if (scheduleDirty.value || !savedSched.value.enabled) return "";
+	const nextRunAt = installation.value && installation.value.next_run_at;
+	if (!nextRunAt) return "";
+	return (
+		`Scheduled ${savedSched.value.frequency} at ${formatTime12h(savedSched.value.time)}. ` +
+		`Next run: ${fmtDt(nextRunAt)}`
+	);
+});
 
 async function saveSchedule() {
 	if (!installation.value || savingSchedule.value) return;
@@ -965,9 +1147,9 @@ async function saveConfig(merged) {
 	}
 }
 
-// ── Configure: comments on the installation (D28, B3 contract) ───────────────
-const instName = computed(() => (installation.value && installation.value.name) || null);
-const docmeta = useDocmeta("Jarvis Agent Installation", instName);
+// jarvis#1062: Comments moved off Configure onto the Run itself
+// (FindingsPanel.vue's new Notes section) - existing installation comments
+// are deliberately left in the DB, unmigrated, just no longer surfaced here.
 
 // ── Admin (SM) ────────────────────────────────────────────────────────────────
 const adminData = ref(null); // {roles, listings} from get_agent_admin_overview
@@ -998,59 +1180,64 @@ const adminListing = computed(() => {
 });
 const installRows = computed(() => (adminListing.value && adminListing.value.installs) || []);
 
-// roles editor (Autocomplete over all_roles → chips → Save)
-const roleDraft = ref([]);
-const savingRoles = ref(false);
-watch(
-	() => agent.value && agent.value.allowed_roles,
-	(v) => {
-		roleDraft.value = [...(v || [])];
-	},
-	{ immediate: true }
-);
-const roleOptions = computed(() => {
-	const all = (agent.value && agent.value.all_roles) || [];
-	const taken = new Set(roleDraft.value);
-	return all.filter((r) => !taken.has(r)).map((r) => ({ label: r, value: r }));
+// ── access (jarvis#1062) ──────────────────────────────────────────────────────
+// The editor itself is AgentAccessEditor.vue; the detail page only owns the
+// saved value, so the Overview summary and the Admin tab cannot disagree.
+const accessGrants = computed(() => [
+	...((agent.value && agent.value.allowed_roles) || []),
+	...((agent.value && agent.value.allowed_users) || []),
+]);
+function onAccessSaved(next) {
+	if (!agent.value) return;
+	agent.value.allowed_roles = next.allowed_roles || [];
+	agent.value.allowed_users = next.allowed_users || [];
+	load(); // re-read `allowed` - an admin can lock themselves out of the user surface
+}
+
+// ── leaving the page with an unsaved access draft ────────────────────────────
+// Keeping the editor mounted saves the draft from a TAB switch; this saves it
+// from a ROUTE change. frappe-ui's confirmDialog, not useConfirm(): its own docs
+// say the frappe-ui-styled list/detail pages (agents among them) use frappe-ui's
+// dialog and the jv- surfaces use the other one - "don't cross the streams".
+const accessEditor = ref(null);
+// Set only for the navigation we have already asked about, so confirming does
+// not re-open the dialog on the re-push below.
+let leaveConfirmed = false;
+
+onBeforeRouteLeave((to) => {
+	if (leaveConfirmed || !accessEditor.value?.dirty) return true;
+	confirmDialog({
+		title: "Discard unsaved access changes?",
+		message:
+			"Your changes to who can use this agent have not been saved. Leaving now discards them.",
+		onConfirm: ({ hideDialog }) => {
+			hideDialog();
+			leaveConfirmed = true;
+			router.push(to.fullPath);
+		},
+	});
+	// Refuse the navigation rather than holding a `next` callback open: a
+	// dismissed dialog (Escape, backdrop) never calls onConfirm, and a guard that
+	// was waiting on that callback would wedge routing for the rest of the
+	// session. Cancelling costs nothing - the user is already where they were.
+	return false;
 });
-const rolesDirty = computed(() => {
-	const a = [...roleDraft.value].sort().join("|");
-	const b = [...((agent.value && agent.value.allowed_roles) || [])].sort().join("|");
-	return a !== b;
-});
-function addRole(r) {
-	if (!roleDraft.value.includes(r)) roleDraft.value = [...roleDraft.value, r];
-}
-function removeRole(r) {
-	roleDraft.value = roleDraft.value.filter((x) => x !== r);
-}
-function resetRoles() {
-	roleDraft.value = [...((agent.value && agent.value.allowed_roles) || [])];
-}
-async function saveRoles() {
-	if (savingRoles.value) return;
-	savingRoles.value = true;
-	try {
-		const r = await api.setAgentRoles(props.slug, roleDraft.value);
-		agent.value.allowed_roles = (r && r.allowed_roles) || [];
-		roleDraft.value = [...agent.value.allowed_roles];
-		toast.success(
-			agent.value.allowed_roles.length
-				? "Roles saved"
-				: "Restriction cleared - available to everyone"
-		);
-		load(); // refresh allowed/lock state
-	} catch (e) {
-		toast.error(errHtml(e));
-	} finally {
-		savingRoles.value = false;
-	}
-}
 
 // ── formatting helpers ────────────────────────────────────────────────────────
 // "9:00:00" (python str(timedelta)) → "09:00" for the TimePicker
 function timeHHMM(s) {
 	const m = /^(\d{1,2}):(\d{2})/.exec(String(s || ""));
 	return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
+}
+// "09:00" → "9:00 am" - mirrors TimePicker's OWN formatDisplay (frappe-ui,
+// use12Hour default) exactly, so the schedule summary line reads the same
+// way the picker itself would show that time.
+function formatTime12h(hhmm) {
+	const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ""));
+	if (!m) return "";
+	const h = parseInt(m[1], 10);
+	const am = h < 12;
+	const h12 = h % 12 === 0 ? 12 : h % 12;
+	return `${h12}:${m[2]} ${am ? "am" : "pm"}`;
 }
 </script>

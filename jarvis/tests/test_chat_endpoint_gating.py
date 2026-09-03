@@ -49,13 +49,19 @@ _GUARD_CALL_SUBSTRS = (
 	# fact gated harder than the sweep's own baseline.
 	"require_jarvis_admin",
 	"require_skill_reviewer",  # PART 2 TASK 12: skill-reviewer/admin gate (org-wide apply)
-	# Admin-level access CHECK (bool), the analogue of has_jarvis_access below. The
-	# reviewer-or-admin endpoints (agents_api.promote_installation /
-	# demote_installation) gate in-body on `me != doc.reviewer and not
-	# has_jarvis_admin_access(me)` -> frappe.throw(PermissionError) — a gate STRICTER
-	# than require_jarvis_user (the caller must be the named reviewer or a Jarvis
-	# Admin), so without this entry the sweep false-positived them as ungated.
+	# Admin-level access CHECK (bool), the analogue of has_jarvis_access below. Some
+	# endpoints gate in-body on `has_jarvis_admin_access(me)` -> frappe.throw(
+	# PermissionError) rather than through a require_* helper — a gate STRICTER than
+	# require_jarvis_user, so without this entry the sweep false-positives them as
+	# ungated. (agents_api.promote_installation / demote_installation used to be the
+	# example; jarvis#1062 moved their check into _require_activation_authority and
+	# they now also carry require_jarvis_access at the top.)
 	"has_jarvis_admin_access",
+	# jarvis#1062: the reviewer-or-admin activation gate promote/demote delegate to.
+	"_require_activation_authority",
+	# jarvis#1062: the installation write gate (owner via check_permission, or a
+	# tenant admin) that set_enabled / uninstall_agent / the run-control guard use.
+	"_check_installation_write",
 	"_require_system_user",
 	"only_for",  # frappe.only_for(...) — an SM/role gate, stricter than Jarvis User
 	"_guard",  # learned_api._guard / _admin_guard (reviewer/admin role gate)

@@ -29,6 +29,10 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_permissions, agent_runs, agents_api
 
+# The reviewing role promote/demote now demands (JARVIS_REVIEWER_ROLES). Created by
+# DocType sync - one DocType names it - so it exists on a fresh CI site.
+_REVIEWER_ROLE = "Jarvis Skill Reviewer"
+
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
 RUN = "Jarvis Agent Run"
@@ -237,7 +241,7 @@ class TestPP4ShadowVisibility(FrappeTestCase):
 			"T", [], {"blocker": 0, "warning": 0, "note": 0}, "", result_state="evaluated_clean", shadow=True
 		)
 		self.assertNotIn("No exceptions were found", html)
-		self.assertNotIn("Evaluated — clean coverage", html)
+		self.assertNotIn("Evaluated: clean coverage", html)
 		self.assertIn("Preview (shadow)", html)
 		self.assertIn('data-result-state="shadow"', html)
 
@@ -266,6 +270,14 @@ class TestPP4PromotionAndPP6Budget(FrappeTestCase):
 		cls.owner = _mk_user("pa-owner2@example.com")
 		cls.reviewer = _mk_user("pa-reviewer2@example.com")
 		cls.stranger = _mk_user("pa-stranger@example.com")
+		# jarvis#1062: promote/demote authority is the REVIEWER SET, no longer the
+		# installation's own `reviewer` field - install_agent stamps that field with
+		# the installer, so self-sign-off let anyone promote their own install. This
+		# fixture is the named reviewer AND must now hold a reviewing role. Applied
+		# unconditionally (outside _mk_user's exists-guard) because on a shared site
+		# the user may already exist without it.
+		frappe.get_doc("User", cls.reviewer).add_roles(_REVIEWER_ROLE)
+		frappe.clear_cache(user=cls.reviewer)
 		_mk_listing()
 		frappe.db.commit()
 
