@@ -1,4 +1,4 @@
-// Shared weekly/monthly schedule-anchor helpers (jarvis#653) — the "which day"
+// Shared weekly/monthly schedule-anchor helpers (jarvis#653) - the "which day"
 // half of the Schedule section's Frequency/Time/Day trio, used by AgentDetail.vue,
 // MacroDetail.vue and MacrosList.vue so the three surfaces cannot drift on the
 // option lists, the ordinal spelling, or the summary wording.
@@ -7,7 +7,7 @@
 // modelValue, matching FormControl's own Frequency control): the weekday name
 // itself for weekly ("Monday"), or the day number as a string for monthly
 // ("15"). Comparing/deriving this as one shape (instead of two separately-typed
-// fields) is what keeps the dirty-check symmetric — see AGENT-653 notes in
+// fields) is what keeps the dirty-check symmetric - see AGENT-653 notes in
 // AgentDetail.vue / MacroDetail.vue.
 
 export const WEEKDAY_OPTIONS = [
@@ -45,7 +45,7 @@ export function ordinal(n) {
 }
 
 // The Day control's model value for a (frequency, weekday, day_of_month) triple
-// read off a saved row — "" when the frequency doesn't use a day anchor, or when
+// read off a saved row - "" when the frequency doesn't use a day anchor, or when
 // no anchor was ever saved for it (a legacy row, or the anchor cleared).
 export function deriveScheduleDay(frequency, weekday, dayOfMonth) {
 	if (frequency === "weekly") return weekday || "";
@@ -53,7 +53,7 @@ export function deriveScheduleDay(frequency, weekday, dayOfMonth) {
 	return "";
 }
 
-// "on Monday" / "on the 15th" / "" — the anchor clause the summary line
+// "on Monday" / "on the 15th" / "" - the anchor clause the summary line
 // appends after the frequency word. Empty when there is no day to name (daily,
 // or a weekly/monthly row with no anchor saved) so the legacy summary wording
 // ("Scheduled monthly at 9:00 am...") is preserved verbatim for those rows.

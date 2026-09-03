@@ -714,3 +714,85 @@ class TestComputeNextRunAnchors(FrappeTestCase):
 			"weekly", "not-a-time", from_dt="2026-09-07 10:00:00", weekday="Monday"
 		)
 		self.assertEqual((nxt.hour, nxt.minute), (9, 0))
+
+
+class TestDefaultScheduleAnchors(FrappeTestCase):
+	"""``agents_api.install_agent`` resolves a listing's ``default_schedule`` JSON
+	into the two anchors a fresh installation is born with. A first version of
+	this reimplemented weekday normalization as a bespoke string-only check
+	instead of reusing ``macro_scheduler._normalize_weekday`` (the reader every
+	OTHER weekday input - the SPA, ``set_schedule``, both DocType controllers -
+	goes through), so a listing authored with the ISO-int form (e.g. 3 for
+	Wednesday) silently landed with no weekday at all. These call the exact
+	functions ``install_agent`` calls, no DB fixture needed."""
+
+	def test_int_weekday_in_default_schedule_resolves_to_its_name(self):
+		from jarvis.chat.agents_api import _default_schedule_weekday
+
+		# ISO weekday: 1=Monday .. 7=Sunday.
+		cases = {1: "Monday", 3: "Wednesday", 7: "Sunday"}
+		for iso, name in cases.items():
+			with self.subTest(iso=iso):
+				self.assertEqual(_default_schedule_weekday({"schedule_weekday": iso}), name)
+
+	def test_weekday_name_in_default_schedule_still_works(self):
+		from jarvis.chat.agents_api import _default_schedule_weekday
+
+		self.assertEqual(_default_schedule_weekday({"schedule_weekday": "Friday"}), "Friday")
+		self.assertEqual(_default_schedule_weekday({"schedule_weekday": "friday"}), "Friday")
+
+	def test_garbage_weekday_in_default_schedule_resolves_to_none(self):
+		from jarvis.chat.agents_api import _default_schedule_weekday
+
+		for bad in ("Blursday", 0, 8, "", None, [], {}):
+			with self.subTest(bad=bad):
+				self.assertIsNone(_default_schedule_weekday({"schedule_weekday": bad}))
+
+	def test_day_of_month_in_default_schedule(self):
+		from jarvis.chat.agents_api import _default_schedule_day_of_month
+
+		self.assertEqual(_default_schedule_day_of_month({"schedule_day_of_month": 15}), 15)
+		for bad in (0, 32, -1, "abc", None):
+			with self.subTest(bad=bad):
+				self.assertIsNone(_default_schedule_day_of_month({"schedule_day_of_month": bad}))
+
+	def test_install_agent_applies_an_int_weekday_default_schedule(self):
+		# End-to-end through install_agent itself: a listing whose default_schedule
+		# carries an ISO-int weekday must land on the installation AS ITS NAME, not
+		# be silently dropped.
+		from jarvis.chat import agents_api
+
+		listing_name = frappe.db.get_value("Jarvis Agent Listing", {"agent_slug": "close-auditor"}, "name")
+		if not listing_name:
+			self.skipTest("close-auditor listing not present on this site")
+		owner = _ensure_user("msched-int-weekday@example.com", enabled=1)
+		original_schedule = frappe.db.get_value("Jarvis Agent Listing", listing_name, "default_schedule")
+		frappe.db.set_value(
+			"Jarvis Agent Listing",
+			listing_name,
+			"default_schedule",
+			frappe.as_json({"schedule_enabled": 0, "schedule_frequency": "weekly", "schedule_weekday": 3}),
+			update_modified=False,
+		)
+		frappe.db.commit()
+		original_user = frappe.session.user
+		try:
+			frappe.set_user(owner)
+			frappe.db.delete("Jarvis Agent Installation", {"owner": owner, "agent": listing_name})
+			frappe.db.commit()
+			agents_api.install_agent("close-auditor")
+			weekday = frappe.db.get_value(
+				"Jarvis Agent Installation", {"owner": owner, "agent": listing_name}, "schedule_weekday"
+			)
+			self.assertEqual(weekday, "Wednesday")
+		finally:
+			frappe.set_user(original_user)
+			frappe.db.delete("Jarvis Agent Installation", {"owner": owner, "agent": listing_name})
+			frappe.db.set_value(
+				"Jarvis Agent Listing",
+				listing_name,
+				"default_schedule",
+				original_schedule,
+				update_modified=False,
+			)
+			frappe.db.commit()

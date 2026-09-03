@@ -309,13 +309,13 @@ def compute_next_run(
 	(#653): when given, the next occurrence lands ON that weekday / day of month
 	rather than simply +7 days / +1 month from ``from_dt``. Omitted or invalid
 	entirely (either argument), the function falls back to the original plain
-	advance — every existing caller that does not pass them keeps its old
+	advance - every existing caller that does not pass them keeps its old
 	behaviour verbatim.
 
 	TOTAL by construction (#472, extended by #653 to the two new anchors):
 	``_time_to_seconds`` can only return a real time of day, and
 	``_normalize_weekday``/``_normalize_day_of_month`` can only return a valid
-	index or ``None`` — never raise — so a garbage anchor is treated the same as
+	index or ``None`` - never raise - so a garbage anchor is treated the same as
 	an absent one. That matters because the function is called from the cron's
 	bookkeeping, where a raise skipped every macro/install after the offending
 	one."""
@@ -357,7 +357,7 @@ def _weekly_candidate(
 	base_date: datetime.datetime, hour: int, minute: int, weekday_idx: int
 ) -> datetime.datetime:
 	"""The occurrence of ``weekday_idx`` (0=Monday..6=Sunday, ``datetime.weekday()``
-	convention) at ``hour``:``minute`` in the week containing ``base_date`` — which
+	convention) at ``hour``:``minute`` in the week containing ``base_date`` - which
 	may fall BEFORE ``base_date`` itself; the caller's ``while cand <= base`` loop
 	is what pushes it into the following week when that happens."""
 	delta = (weekday_idx - base_date.weekday()) % 7
@@ -376,7 +376,7 @@ def _monthly_candidate(base_date: datetime.datetime, hour: int, minute: int, day
 def _normalize_weekday(value) -> int | None:
 	"""Weekday index (0=Monday..6=Sunday) from a weekday name (case-insensitive,
 	matching the Select field's options) or an ISO weekday int (1=Monday..7=Sunday).
-	``None`` for anything else — a missing, blank, or garbage value included — so
+	``None`` for anything else - a missing, blank, or garbage value included - so
 	the caller falls back to the plain +7-days advance (#653, extending #472's
 	TOTAL guarantee to this anchor)."""
 	if value is None or value == "":
@@ -397,7 +397,7 @@ def _normalize_weekday(value) -> int | None:
 
 
 def _normalize_day_of_month(value) -> int | None:
-	"""1-31, or ``None`` for anything else — including the ``0`` an unset Int
+	"""1-31, or ``None`` for anything else - including the ``0`` an unset Int
 	field reads as (Frappe coerces a blank Int to 0, not ``None``) and any
 	garbage that reached the row before validation existed (#653, same TOTAL
 	shape as ``_normalize_weekday``)."""
@@ -495,12 +495,12 @@ def validate_schedule_time_or_throw(value) -> None:
 
 def validate_schedule_day_of_month_or_throw(value) -> None:
 	"""Refuse a ``schedule_day_of_month`` that is not 1-31, with the field error the
-	SPA renders. Companion to ``validate_schedule_time_or_throw`` — same ONE-definition
+	SPA renders. Companion to ``validate_schedule_time_or_throw`` - same ONE-definition
 	reasoning, called by both ``JarvisMacro`` and ``JarvisAgentInstallation`` (#653).
 
 	``0`` is exempt alongside ``None``/``""``: Frappe coerces a blank Int field to
 	``0`` rather than ``None``, so an unset value reaches here as ``0`` on every
-	normal save path — that is "not set", not "the 0th day"."""
+	normal save path - that is "not set", not "the 0th day"."""
 	if value in (None, "", 0):
 		return
 	if _normalize_day_of_month(value) is None:

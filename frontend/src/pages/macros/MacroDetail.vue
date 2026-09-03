@@ -117,13 +117,8 @@
 							@update:modelValue="(v) => (form.schedule_day = v)"
 						/>
 					</div>
-					<div
-						v-if="!isNew && form.schedule_enabled && nextRunAt"
-						class="text-sm text-ink-gray-5"
-					>
-						Scheduled {{ form.schedule_frequency
-						}}{{ scheduleAnchorText ? ` ${scheduleAnchorText}` : "" }} at
-						{{ formatTime12h(form.schedule_time) }}. Next run: {{ nextRunAt }}
+					<div v-if="scheduleSummary" class="text-sm text-ink-gray-5">
+						{{ scheduleSummary }}
 					</div>
 				</div>
 			</DocSection>
@@ -196,6 +191,7 @@ import {
 	reactive,
 	computed,
 	watch,
+	nextTick,
 	shallowRef,
 	inject,
 	onMounted,
@@ -273,20 +269,25 @@ const form = reactive({
 const dayOptions = computed(() =>
 	form.schedule_frequency === "weekly" ? WEEKDAY_OPTIONS : DAY_OF_MONTH_OPTIONS
 );
-// "on Monday" / "on the 15th" / "" for the Next-run line below.
-const scheduleAnchorText = computed(() =>
-	scheduleAnchorPhrase(form.schedule_frequency, form.schedule_day)
-);
-// jarvis#653: an interactive Frequency change needs its OWN default day -
-// "Monday" for weekly, the 1st for monthly - so the Day select never shows a
-// visible option ("Monday") while the model is empty (a phantom selection that
-// would silently save nothing). Only fills in when the current day does not
-// already belong to the new frequency's own option set, so switching away and
-// back keeps whatever was picked (and `seed()` above, which sets frequency+day
-// together, never trips this into overwriting a loaded value).
+// jarvis#653: guards the interactive-frequency-change watcher below from firing
+// off `seed()`'s own frequency+day assignment (which legitimately sets day to
+// "" for a legacy row with no anchor saved - the defaulting watcher must not
+// treat that as "needs a default"). True for exactly the synchronous pre-flush
+// window seed()'s own assignment runs in; nextTick clears it once the DOM
+// update (and any watcher chained off THIS assignment) has settled. Mirrors
+// AgentDetail.vue's `seedingSchedule` guard exactly.
+let seedingSchedule = false;
+// jarvis#653: an interactive Frequency change (NOT `seed()`, guarded off by
+// `seedingSchedule`) needs its OWN default day - "Monday" for weekly, the 1st
+// for monthly - so the Day select never shows a visible option ("Monday")
+// while the model is empty (a phantom selection that would silently save
+// nothing). Only fills in when the current day does not already belong to the
+// new frequency's own option set, so switching away and back keeps whatever
+// was picked.
 watch(
 	() => form.schedule_frequency,
 	(freq) => {
+		if (seedingSchedule) return;
 		if (freq === "weekly" && !WEEKDAY_OPTIONS.some((o) => o.value === form.schedule_day)) {
 			form.schedule_day = "Monday";
 		} else if (
@@ -343,6 +344,22 @@ const breadcrumbs = computed(() => [
 ]);
 
 const nextRunAt = computed(() => exactDate(nextRunRaw.value));
+// "Scheduled monthly on the 15th at 9:00 am. Next run: ..." - built from the
+// SAVED snapshot only (never the live draft), mirroring AgentDetail.vue's own
+// scheduleSummary exactly: blank while `dirty` (would narrate a schedule that
+// no longer matches the form - nextRunAt never recomputes off an unsaved
+// edit, it only ever changes on the next load()/seed()), when there is no
+// next_run_at, or when the SAVED schedule is off.
+const scheduleSummary = computed(() => {
+	const snap = snapshot.value;
+	if (!snap || props.isNew || dirty.value || !snap.schedule_enabled) return "";
+	if (!nextRunAt.value) return "";
+	const anchor = scheduleAnchorPhrase(snap.schedule_frequency, snap.schedule_day);
+	return (
+		`Scheduled ${snap.schedule_frequency}${anchor ? ` ${anchor}` : ""} ` +
+		`at ${formatTime12h(snap.schedule_time)}. Next run: ${nextRunAt.value}`
+	);
+});
 
 const overflowOptions = computed(() => {
 	const opts = [];
@@ -394,6 +411,12 @@ function formatTime12h(hhmm) {
 
 // ── load / init (re-runs when /macros/new saves and replaces to /macros/:id) ─
 function seed(data) {
+	// jarvis#653: guard the frequency-change watcher above from the assignment
+	// two lines down - a legacy row with schedule_frequency weekly/monthly and
+	// NO anchor saved must seed schedule_day as "" (matching the snapshot below
+	// verbatim), not have the watcher fabricate "Monday"/"1" and leave the page
+	// dirty before the owner has touched anything.
+	seedingSchedule = true;
 	form.macro_name = data.macro_name || "";
 	form.description = data.description || "";
 	form.enabled = data.enabled == null ? true : !!data.enabled;
@@ -407,6 +430,9 @@ function seed(data) {
 		data.schedule_weekday,
 		data.schedule_day_of_month
 	);
+	nextTick(() => {
+		seedingSchedule = false;
+	});
 	form.steps = mapSteps(data.steps);
 	if (!form.steps.length) form.steps = [{ label: "", prompt: "", skills: [] }];
 	form.merged_prompt = data.merged_prompt || "";

@@ -172,7 +172,7 @@ class JarvisAgentInstallation(Document):
 		validate_schedule_time_or_throw(self.schedule_time)
 
 	def _validate_schedule_day_of_month(self):
-		"""#653: the agent twin of ``JarvisMacro._validate_schedule_day_of_month`` —
+		"""#653: the agent twin of ``JarvisMacro._validate_schedule_day_of_month`` -
 		refuse a ``schedule_day_of_month`` outside 1-31 on every save surface, for the
 		same reason ``_validate_schedule_time`` above gives (a Desk edit / data import /
 		direct ``doc.save()`` all bypass ``agents_api.set_schedule``). The weekday Select

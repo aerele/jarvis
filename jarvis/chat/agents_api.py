@@ -905,6 +905,35 @@ def _bump_catalog_version() -> None:
 	frappe.clear_document_cache(_SETTINGS, _SETTINGS)
 
 
+def _default_schedule_weekday(sched: dict) -> str | None:
+	"""#653: resolve a listing's ``default_schedule`` weekday anchor, tolerantly
+	- an admin-authored default must never break an install (the controller's
+	own ``validate()`` is the throwing gate for a user-entered value; a bad
+	default here just falls back to "no anchor set" instead).
+
+	Reuses ``macro_scheduler._normalize_weekday``, the SAME reader every other
+	weekday input (the SPA, ``set_schedule``, the DocType controllers) goes
+	through - a listing default is not exempt from accepting the ISO-int form
+	(1-7) those callers all accept; a bespoke string-only check here silently
+	dropped a valid int weekday instead of resolving it. That reader returns a
+	0-6 index (Monday=0); convert it back to the Select field's own weekday
+	name for storage. Extracted as its own function (rather than inlined in
+	``install_agent``) so it is unit-testable without a DB fixture."""
+	from jarvis.chat.macro_scheduler import _WEEKDAY_NAMES, _normalize_weekday
+
+	idx = _normalize_weekday(sched.get("schedule_weekday"))
+	return _WEEKDAY_NAMES[idx] if idx is not None else None
+
+
+def _default_schedule_day_of_month(sched: dict) -> int | None:
+	"""#653 twin of ``_default_schedule_weekday``, for the monthly anchor."""
+	try:
+		day = int(sched.get("schedule_day_of_month"))
+	except (TypeError, ValueError):
+		return None
+	return day if 1 <= day <= 31 else None
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def install_agent(agent_slug: str) -> dict:
@@ -946,21 +975,11 @@ def install_agent(agent_slug: str) -> dict:
 	if freq not in _FREQUENCIES:
 		freq = "daily"
 	# #653: the two weekly/monthly anchors ride the same default_schedule JSON,
-	# tolerantly — an admin-authored listing default must never BREAK an install
+	# tolerantly - an admin-authored listing default must never BREAK an install
 	# (the controller's own validate() is the throwing gate for a user-entered
 	# value; a bad default here just falls back to "no anchor set" instead).
-	from jarvis.chat.macro_scheduler import _WEEKDAY_NAMES
-
-	weekday = str(sched.get("schedule_weekday") or "").strip().capitalize()
-	if weekday not in _WEEKDAY_NAMES:
-		weekday = None
-	try:
-		day_of_month = int(sched.get("schedule_day_of_month"))
-	except (TypeError, ValueError):
-		day_of_month = None
-	else:
-		if not (1 <= day_of_month <= 31):
-			day_of_month = None
+	weekday = _default_schedule_weekday(sched)
+	day_of_month = _default_schedule_day_of_month(sched)
 
 	doc = frappe.get_doc(
 		{
@@ -1090,7 +1109,7 @@ def set_schedule(
 	after disabling the schedule).
 
 	``schedule_weekday``/``schedule_day_of_month`` (#653) are the weekly/monthly
-	anchors — optional, and only meaningful for their own frequency; the doctype's
+	anchors - optional, and only meaningful for their own frequency; the doctype's
 	own ``validate()`` re-checks both ranges (a Desk edit or data import bypasses
 	this endpoint entirely, so the range check cannot live here alone)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
