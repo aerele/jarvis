@@ -112,10 +112,8 @@ import { Autocomplete, Button, ErrorMessage, FormControl } from "frappe-ui";
 import DocSection from "@/components/doc/DocSection.vue";
 import { searchLink } from "@/api";
 import {
-	CONFIG_FIELD_SET,
 	SCOPE_CONFIG_FIELDS,
 	AGENT_SPECIFIC_CONFIG_FIELDS,
-	KNOWN_CONFIG_KEYS,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
 } from "@/lib/agentConfigFields";
@@ -140,6 +138,12 @@ const agentSpecificFields = computed(() =>
 // Scope fields first (always), then whichever agent-specific fields apply -
 // the single list the template's v-for renders.
 const visibleFields = computed(() => [...SCOPE_CONFIG_FIELDS, ...agentSpecificFields.value]);
+// jarvis#1063: the key set for THIS agent's rendered fields - not the global
+// CONFIG_FIELD_SET. A key this agent's config_keys does not name (e.g. a
+// stale benchmark_value on a non-close-auditor installation, saved back when
+// every field always rendered) has no control here and must fall through to
+// Advanced (JSON) - seed()/save() key off this, not the old KNOWN_CONFIG_KEYS.
+const visibleKeys = computed(() => new Set(visibleFields.value.flatMap((f) => f.keys || [f.key])));
 
 const emit = defineEmits(["save"]);
 
@@ -161,18 +165,23 @@ const advancedError = ref("");
 function seed(cfg) {
 	const c = cfg || {};
 	for (const key of Object.keys(form)) {
-		const v = c[key];
+		// only a key with a rendered control here gets seeded from the saved
+		// config - a key this agent's config_keys does not name is left blank
+		// in `form` (so save() - which only reads visibleKeys - never touches
+		// it) and instead flows into Advanced (JSON) below, where it stays
+		// visible and editable rather than silently vanishing.
+		const v = visibleKeys.value.has(key) ? c[key] : undefined;
 		form[key] = v == null ? "" : String(v);
 	}
 	const rest = {};
 	for (const [key, value] of Object.entries(c)) {
-		if (!KNOWN_CONFIG_KEYS.has(key)) rest[key] = value;
+		if (!visibleKeys.value.has(key)) rest[key] = value;
 	}
 	advanced.value = JSON.stringify(rest, null, 2);
 	advancedError.value = "";
 }
 
-watch(() => props.config, seed, { immediate: true });
+watch([() => props.config, visibleKeys], () => seed(props.config), { immediate: true });
 
 function onAdvancedInput(v) {
 	advanced.value = v;
@@ -244,7 +253,7 @@ function save() {
 	// rather than saving "" (§14 F3 / round-2 parity, now covering every known
 	// field, not only numeric ones).
 	const merged = { ...base };
-	for (const key of Object.keys(form)) {
+	for (const key of visibleKeys.value) {
 		const v = String(form[key] ?? "").trim();
 		if (v === "") {
 			delete merged[key];

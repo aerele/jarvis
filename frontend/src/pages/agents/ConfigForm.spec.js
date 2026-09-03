@@ -266,16 +266,22 @@ describe("per-agent gating via the configKeys prop", () => {
 		expect(w.text()).not.toContain("This agent has no additional settings.");
 	});
 
-	it("saving with configKeys=[] omits the hidden agent-specific keys even if seeded in config", async () => {
-		// a stale/advanced-JSON value for a field this agent doesn't declare
-		// stays out of the rendered form but must not be silently dropped -
-		// it still round-trips through Advanced (JSON), since it is simply
-		// an "unknown" key from this render's point of view... except these
-		// ARE known keys (KNOWN_CONFIG_KEYS is global, not per-agent), so
-		// seed() puts them into `form`, not `advanced`. With no control
-		// rendered to clear them, save() still emits whatever `form` holds -
-		// gating is a display-only concern per the coordinator's spec, not a
-		// hard the-key-cannot-be-saved constraint.
+	it("a stale agent-specific value this agent doesn't declare stays visible in Advanced (JSON), not lost", async () => {
+		// e.g. a benchmark_value saved on a non-close-auditor installation back
+		// when every field always rendered. With configKeys=[] the field has no
+		// control here - it must NOT silently vanish (unreadable, unclearable);
+		// it surfaces in Advanced (JSON) instead, same as any other unrecognised
+		// key, and round-trips unchanged on save.
+		const w = mountForm({ percentage: 5 }, { configKeys: [] });
+		const textarea = w.find("textarea");
+		expect(JSON.parse(textarea.element.value)).toEqual({ percentage: 5 });
+		expect(w.text()).not.toContain("Materiality percentage");
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({ percentage: 5 });
+	});
+
+	it("saving with configKeys=[] and nothing seeded emits an empty object", async () => {
 		const w = mountForm({}, { configKeys: [] });
 		await w.find('[data-label="Save configuration"]').trigger("click");
 		expect(w.emitted("save")[0][0]).toEqual({});
