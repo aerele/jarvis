@@ -85,6 +85,22 @@ def grandfather_existing_installs() -> dict:
 	):
 		users_by_listing.setdefault(row.parent, set()).add(row.user)
 
+	# Existence for every candidate identity in ONE query. This used to be a
+	# frappe.db.exists per identity inside the loop, which the docstring's batching
+	# claim did not cover: on a tenant with many installs that is exactly the N+1
+	# the two queries above exist to avoid, and it runs during migrate.
+	candidates = {
+		(v or "").strip()
+		for inst in installs
+		for v in (inst.owner, inst.run_as_user)
+		if (v or "").strip() and (v or "").strip() not in _NEVER_GRANT
+	}
+	live_users = (
+		set(frappe.get_all("User", filters={"name": ("in", list(candidates))}, pluck="name"))
+		if candidates
+		else set()
+	)
+
 	roles_by_user: dict[str, set[str]] = {}
 	added = 0
 	for inst in installs:
@@ -99,7 +115,7 @@ def grandfather_existing_installs() -> dict:
 				continue
 			if identity in users_by_listing.get(listing, set()):
 				continue
-			if not frappe.db.exists("User", identity):
+			if identity not in live_users:
 				# A deleted user would fail the child row's Link validation and break
 				# the whole migrate for a row nothing can dispatch anyway.
 				continue
