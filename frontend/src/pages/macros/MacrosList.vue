@@ -53,7 +53,9 @@
 
 			<template #cell-macro_name="{ row }">
 				<div class="flex items-center gap-2">
-					<span class="truncate">{{ row.macro_name }}</span>
+					<span class="truncate text-base font-medium text-ink-gray-9">{{
+						row.macro_name
+					}}</span>
 					<Tooltip
 						v-if="row.skip_confirmation"
 						text="Armed: this macro's runs execute writes without a confirmation card (admin-set)."
