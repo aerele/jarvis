@@ -41,24 +41,30 @@ jobs:
         run: |
           set -euo pipefail
           v="$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' jarvis/__init__.py)"
+          if [[ ! "$GITHUB_REF_NAME" =~ ^version-[0-9]+$ ]]; then
+            echo "::error::Release runs only on a version-N branch (got $GITHUB_REF_NAME)"; exit 1
+          fi
           line="${GITHUB_REF_NAME#version-}"
-          case "$GITHUB_REF_NAME" in
-            version-[0-9]*) ;;
-            *) echo "::error::Release runs only on a version-N branch (got $GITHUB_REF_NAME)"; exit 1 ;;
-          esac
           if [ -z "$v" ] || [ "${v%%.*}" != "$line" ]; then
             echo "::error::__version__ '$v' is not on the $line.x line of $GITHUB_REF_NAME"; exit 1
           fi
+          # Tag and Release are checked separately so a re-run finishes whatever step failed:
+          # a pushed tag with no Release (API hiccup) must still get its Release.
           if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
-            echo "v$v already tagged, nothing to do"; exit 0
+            echo "tag v$v exists"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "v$v" -m "v$v" "$GITHUB_SHA"
+            git push origin "v$v"
+            echo "tagged v$v at $GITHUB_SHA"
           fi
-          prev="$(git tag -l "v$line.*" --sort=-v:refname | head -1)"
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "release v$v exists, nothing to do"; exit 0
+          fi
+          prev="$(git tag -l "v$line.*" --sort=-v:refname | grep -vx "v$v" | head -1 || true)"
           highest="$(git ls-remote --heads origin 'version-*' | sed -n 's|.*/version-\([0-9]*\)$|\1|p' | sort -n | tail -1)"
           latest=false; [ "$line" = "$highest" ] && latest=true
-          echo "release v$v on $GITHUB_REF_NAME (previous: ${prev:-none}, latest=$latest)"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v$v" -m "v$v" "$GITHUB_SHA"
-          git push origin "v$v"
+          echo "publishing v$v on $GITHUB_REF_NAME (previous: ${prev:-none}, latest=$latest)"
           gh release create "v$v" --verify-tag --title "v$v" --generate-notes \
             ${prev:+--notes-start-tag "$prev"} --latest="$latest"
