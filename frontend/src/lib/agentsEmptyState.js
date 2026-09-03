@@ -27,16 +27,39 @@ export const NO_ACCESS_EMPTY_STATE = Object.freeze({
 });
 
 /**
+ * jarvis#1062 P2-9 (production-readiness audit): the session user
+ * "Administrator" (the Frappe superuser account, not a named person) is
+ * refused Install server-side (S3 owner-gate needs a real user) and the
+ * Install button is already disabled for it elsewhere (AgentDetail.vue) -
+ * but the empty Installed tab still said "install one to get started" with
+ * a working-looking CTA. Told straight instead: sign in as a named user.
+ */
+export const ADMINISTRATOR_CANNOT_INSTALL = Object.freeze({
+	title: "You haven't installed any agents yet",
+	description: "Administrator cannot install agents. Sign in as a named user.",
+	cta: false,
+});
+
+/**
  * @param {object} state
  * @param {string} state.tab              featured | available | installed
  * @param {boolean} state.filtersActive   a search term or category is set
  * @param {boolean} state.canAdminister   caps.admin - a tenant admin
+ * @param {boolean} [state.isAdministrator]
+ *        session.user === "Administrator" - the superuser account, refused
+ *        Install server-side regardless of caps.admin.
  * @param {boolean|null} state.wholeCatalogEmpty
  *        true/false once probed; null while unknown. Only meaningful for a
  *        non-admin, and only probed when it is about to be needed.
  * @returns {{title: string, description: string, cta: boolean}}
  */
-export function agentsEmptyState({ tab, filtersActive, canAdminister, wholeCatalogEmpty }) {
+export function agentsEmptyState({
+	tab,
+	filtersActive,
+	canAdminister,
+	isAdministrator,
+	wholeCatalogEmpty,
+}) {
 	// A filtered view that came back empty is about the FILTER, whoever is
 	// looking - checked first so it never gets misread as an access problem.
 	if (filtersActive) {
@@ -58,6 +81,7 @@ export function agentsEmptyState({ tab, filtersActive, canAdminister, wholeCatal
 		};
 	}
 	if (tab === "installed") {
+		if (isAdministrator) return { ...ADMINISTRATOR_CANNOT_INSTALL };
 		return {
 			title: "You haven't installed any agents yet",
 			description: "Browse the catalog and install one to get started.",

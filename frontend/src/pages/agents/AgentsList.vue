@@ -126,12 +126,17 @@
 				</div>
 
 				<div v-else class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+					<!-- jarvis#1062 P1-5 (production-readiness audit): keyboard focus
+					     on a card was invisible - a plain role="button" div carries no
+					     default browser outline the way a real <button> would, and had
+					     no explicit ring either. focus-visible:outline-none first, or
+					     the ring stacks on top of a still-visible default outline. -->
 					<div
 						v-for="a in rows"
 						:key="a.agent_slug"
 						role="button"
 						tabindex="0"
-						class="flex cursor-pointer flex-col rounded-lg border bg-surface-white p-5 transition hover:bg-surface-gray-1 hover:shadow-sm"
+						class="flex cursor-pointer flex-col rounded-lg border bg-surface-white p-5 transition hover:bg-surface-gray-1 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3"
 						@click="openAgent(a)"
 						@keydown.enter.prevent="openAgent(a)"
 						@keydown.space.prevent="openAgent(a)"
@@ -144,8 +149,18 @@
 								{{ logoText(a) }}
 							</div>
 							<div class="min-w-0 flex-1">
-								<div class="flex items-center gap-2">
-									<span class="truncate text-base font-semibold text-ink-gray-9">
+								<!-- jarvis#1062 P1-4 (production-readiness audit): a single-line
+								     truncate cut long agent names off mid-word with no way to
+								     read the rest. Two lines now (line-clamp-2), :title carries
+								     the full name for anything a second line still can't fit;
+								     items-start (not -center) keeps a status badge pinned to the
+								     title's first line rather than drifting to the middle of a
+								     wrapped block. -->
+								<div class="flex items-start gap-2">
+									<span
+										class="line-clamp-2 text-base font-semibold text-ink-gray-9"
+										:title="a.title"
+									>
 										{{ a.title }}
 									</span>
 									<Badge
@@ -254,6 +269,7 @@ import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { agentsEmptyState, shouldProbeWholeCatalog } from "@/lib/agentsEmptyState";
 import { errHtml } from "@/lib/errors";
 import { categoryTitle } from "@/lib/agentCategory";
+import { session } from "@/data/session";
 
 const route = useRoute();
 const router = useRouter();
@@ -425,11 +441,15 @@ async function probeCaps() {
 // there). Here we only supply what it needs, including the lazily-probed
 // "does this caller have ANY agents at all" signal below.
 const filtersActive = computed(() => !!(search.value || category.value));
+// jarvis#1062 P2-9: the Installed tab's empty state names the Administrator
+// case specifically - it cannot install, no matter caps.admin.
+const isAdministrator = computed(() => session.user === "Administrator");
 const emptyState = computed(() =>
 	agentsEmptyState({
 		tab: tab.value,
 		filtersActive: filtersActive.value,
 		canAdminister: canAdminister.value,
+		isAdministrator: isAdministrator.value,
 		wholeCatalogEmpty: wholeCatalogEmpty.value,
 	})
 );

@@ -25,6 +25,37 @@ const state = (over = {}) => ({
 	...over,
 });
 
+// jarvis#1062 P2-9 (production-readiness audit): the Administrator session
+// (the Frappe superuser, not a named person) is refused Install
+// server-side (S3 owner-gate) - "Browse the catalog and install one to get
+// started" is a dead end for it specifically.
+describe("the Administrator session on the Installed tab", () => {
+	it("names Administrator specifically, no install CTA", () => {
+		const s = agentsEmptyState(
+			state({ tab: "installed", canAdminister: true, isAdministrator: true })
+		);
+		expect(s.title).toBe("You haven't installed any agents yet");
+		expect(s.description).toBe(
+			"Administrator cannot install agents. Sign in as a named user."
+		);
+		expect(s.cta).toBe(false);
+	});
+
+	it("does not apply to any other tab", () => {
+		for (const tab of ["featured", "available"]) {
+			const s = agentsEmptyState(state({ tab, canAdminister: true, isAdministrator: true }));
+			expect(s.description).not.toContain("Administrator cannot install");
+		}
+	});
+
+	it("does not apply to a named user, even with the same caps", () => {
+		const s = agentsEmptyState(
+			state({ tab: "installed", canAdminister: true, isAdministrator: false })
+		);
+		expect(s.description).toBe("Browse the catalog and install one to get started.");
+	});
+});
+
 describe("a non-admin with nothing granted", () => {
 	it.each(["featured", "available", "installed"])(
 		"shows the not-allowed copy on the %s tab",

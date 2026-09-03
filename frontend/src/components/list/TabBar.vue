@@ -1,11 +1,15 @@
 <template>
 	<div role="tablist" class="flex min-h-[45px] items-center gap-7.5 border-b px-5">
+		<!-- jarvis#1062 P1-5 (production-readiness audit): a raw <button>, so it
+		     needs its own focus-visible ring (frappe-ui's shared <Button>
+		     already carries one; this doesn't use that component) - keyboard
+		     tabbing through these tabs was otherwise invisible. -->
 		<button
 			v-for="tab in tabs"
 			:key="tab.value"
 			role="tab"
 			:aria-selected="modelValue === tab.value"
-			class="relative flex h-full min-h-[45px] items-center gap-1.5 text-base"
+			class="relative flex h-full min-h-[45px] items-center gap-1.5 rounded text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3"
 			:class="
 				modelValue === tab.value
 					? 'text-ink-gray-9'
