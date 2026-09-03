@@ -106,6 +106,15 @@ export async function transcribeAudio(blob, durationS) {
 export const stopRun = (conversation, runId) =>
   call(CHAT + "stop_run", { conversation, run_id: runId || "" });
 
+// Post-reply feedback: a thumbs up/down (+ optional note on a down) on one
+// assistant reply. Best-effort - the bench forwards it to the admin dashboard.
+export const submitFeedback = (messageId, rating, note) =>
+  call("jarvis.chat.feedback.submit_feedback", {
+    message_id: messageId,
+    rating,
+    note: note || "",
+  });
+
 // Resolves a write-confirmation gate raised by an `action:pending` frame.
 export const confirmTool = (token, conversation) =>
   call(ACTIONS + "confirm_tool", { token, conversation: conversation || "" });
