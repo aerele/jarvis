@@ -251,10 +251,14 @@
 //   Activity - the owner's lifecycle feed (AgentActivityTab, self-contained).
 // Reviewer/SM header action: prominent "Apply catalog changes" driven by
 // get_agents_sync_status().dirty (install/uninstall/enable since the last
-// successful Apply), with SyncPill-style pending/failed polling, plus a
-// route-leave + beforeunload guard while dirty. Gated on the skill-reviewer
-// capability (get_agents_caps().review) since apply_agents needs the reviewer
-// set, not System Manager.
+// successful Apply), with SyncPill-style pending/failed polling, plus an
+// in-SPA route-leave guard while dirty (a custom confirm dialog, not the
+// native browser prompt - jarvis#1062 E2E defect: a beforeunload listener
+// used to also fire that native "leave site?" prompt on ordinary SPA
+// navigation; removed, since the dirty state lives server-side and nothing
+// is lost by navigating away - see onBeforeRouteLeave below). Gated on the
+// skill-reviewer capability (get_agents_caps().review) since apply_agents
+// needs the reviewer set, not System Manager.
 import { reactive, ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import {
@@ -584,21 +588,19 @@ async function applyAndLeave() {
 	resolveLeave(ok);
 }
 
-// hard reloads / tab close while dirty → native browser prompt
-function onBeforeUnload(e) {
-	if (canApply.value && sync.dirty) {
-		e.preventDefault();
-		e.returnValue = ""; // Chrome requires returnValue to show the prompt
-	}
-}
+// jarvis#1062 E2E defect: a beforeunload listener here used to fire the
+// native "leave site?" prompt on ordinary SPA navigation, not only a real
+// tab close/hard reload. The dirty state it guarded lives server-side
+// (get_agents_sync_status) and nothing is lost by navigating away - the
+// "Changes pending" badge above already communicates it, and the in-SPA
+// onBeforeRouteLeave guard above still catches navigation OUT of /agents.
+// So this native-prompt guard is removed outright, not just narrowed.
 
 onMounted(() => {
 	probeCaps();
 	loadCategories();
-	window.addEventListener("beforeunload", onBeforeUnload);
 });
 onBeforeUnmount(() => {
-	window.removeEventListener("beforeunload", onBeforeUnload);
 	stopSyncPoll();
 });
 </script>

@@ -344,6 +344,79 @@ describe("Configure tab: two-column layout on lg+ (jarvis#1062 polish, matches t
 	});
 });
 
+describe("Configure tab: Next run line follows next_run_at, including after disabling the schedule", () => {
+	it("shows the Next run line when next_run_at is set", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "daily",
+					next_run_at: "2026-09-10 09:00:00",
+				}),
+			})
+		);
+		expect(w.text()).toContain("Next run:");
+	});
+
+	it("hides the Next run line when next_run_at is null (schedule off)", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({ enabled: 1, next_run_at: null }),
+			})
+		);
+		expect(w.text()).not.toContain("Next run:");
+	});
+
+	it("re-fetching after a disable clears the line (agents#1062 next_run_at fix)", async () => {
+		// jarvis chat/agents_api.py's set_schedule now nulls next_run_at when the
+		// schedule is turned off; AgentDetail's saveSchedule() reloads via load(),
+		// so the next getAgent() response deciding this is the contract that matters
+		// here, not a client-side mutation of the previous response.
+		routeMock.hash = "#configure";
+		apiAgents.getAgent
+			.mockResolvedValueOnce(
+				baseAgent({
+					installation: installedInstallation({
+						enabled: 1,
+						schedule_enabled: 1,
+						schedule_frequency: "daily",
+						next_run_at: "2026-09-10 09:00:00",
+					}),
+				})
+			)
+			.mockResolvedValueOnce(
+				baseAgent({
+					installation: installedInstallation({
+						enabled: 1,
+						schedule_enabled: 0,
+						next_run_at: null,
+					}),
+				})
+			);
+		apiAgents.getInstallationActivation.mockResolvedValue(null);
+		const w = mount(AgentDetail, { props: { slug: "close-auditor" } });
+		await flushPromises();
+		await flushPromises();
+		expect(w.text()).toContain("Next run:");
+
+		api.setAgentSchedule.mockResolvedValue({
+			ok: true,
+			data: { name: "INST-1", next_run_at: null },
+		});
+		const saveScheduleBtn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Save schedule");
+		await saveScheduleBtn.trigger("click");
+		await flushPromises();
+		await flushPromises();
+
+		expect(w.text()).not.toContain("Next run:");
+	});
+});
+
 describe("jarvis#1062 fix: a #runs deep link survives the pending agent/installation fetch", () => {
 	it("lands on Runs (not Overview) once installation resolves, from a hash requested before load", async () => {
 		routeMock.hash = "#runs";

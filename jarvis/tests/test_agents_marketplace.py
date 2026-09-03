@@ -519,6 +519,27 @@ class TestAgentsMarketplace(unittest.TestCase):
 		)
 
 	# ------------------------------------------------------------------ #
+	# jarvis#1062 E2E defect: turning a schedule off left the last computed
+	# next_run_at in place, so the Configure tab kept showing a stale
+	# "Next run: ..." line after disabling the schedule.
+	# ------------------------------------------------------------------ #
+	def test_set_schedule_clears_next_run_at_when_disabled(self):
+		inst = _install_as(self.owner, "close-auditor")
+		frappe.set_user(self.owner)
+		try:
+			on = agents_api.set_schedule(
+				inst, schedule_enabled=1, schedule_frequency="daily", schedule_time="09:00"
+			)
+			self.assertTrue(on["data"]["next_run_at"])
+			self.assertTrue(frappe.db.get_value(INSTALLATION, inst, "next_run_at"))
+
+			off = agents_api.set_schedule(inst, schedule_enabled=0)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIsNone(off["data"]["next_run_at"])
+		self.assertIsNone(frappe.db.get_value(INSTALLATION, inst, "next_run_at"))
+
+	# ------------------------------------------------------------------ #
 	# (d4) jarvis#1062 polish: Published operator listings with no dispatch
 	# path were flipped to Coming Soon in the registry; a re-sync must carry
 	# an already-deployed Published row down with it.

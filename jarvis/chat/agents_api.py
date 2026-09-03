@@ -1017,7 +1017,10 @@ def set_schedule(
 	schedule_time: str | None = None,
 ) -> dict:
 	"""Set an installed agent's audit schedule — pure DB write (O6: no restart).
-	Recomputes ``next_run_at`` when the schedule is enabled."""
+	Recomputes ``next_run_at`` when the schedule is enabled; CLEARS it when the
+	schedule is turned off (jarvis#1062 E2E defect: it previously kept the last
+	computed value, so the Configure tab kept showing a stale "Next run: ..."
+	after disabling the schedule)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
@@ -1038,6 +1041,8 @@ def set_schedule(
 
 	if doc.schedule_enabled:
 		doc.next_run_at = compute_next_run(doc.schedule_frequency, doc.schedule_time)
+	else:
+		doc.next_run_at = None
 	doc.save()
 	log_activity(
 		agent=doc.agent,
@@ -1053,7 +1058,10 @@ def set_schedule(
 	frappe.db.commit()
 	return {
 		"ok": True,
-		"data": {"name": doc.name, "next_run_at": str(doc.next_run_at or "")},
+		"data": {
+			"name": doc.name,
+			"next_run_at": str(doc.next_run_at) if doc.next_run_at else None,
+		},
 	}
 
 
