@@ -45,6 +45,15 @@ jobs:
       THIS_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: A retargeted PR must be pushed to or reopened before it can merge
+        # ci.yml does not run on `edited` (see the note there), so after a base change its
+        # green checks describe the OLD base. Fail here until a push or a close/reopen
+        # makes CI run against the new one; both events re-run this job too.
+        if: github.event.action == 'edited' && github.event.changes.base != null
+        run: |
+          echo "::error::Base changed from ${{ github.event.changes.base.ref.from }} to $BASE. CI has not run against the new base: push a commit or close and reopen this PR."
+          exit 1
+
       - name: Only version-N-hotfix (same repo) may open a PR into version-N
         run: |
           case "$BASE" in
