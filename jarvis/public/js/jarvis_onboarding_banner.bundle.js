@@ -3,8 +3,13 @@
 // user to finish setup and start easing their ERP workflows. Replaces the old
 // top banner with a friendlier, on-brand "Jarvis is chatting" bubble thread.
 //
-// Reads `frappe.boot.jarvis_onboarded` (set in jarvis.boot.set_jarvis_boot)
-// and `frappe.boot.sysdefaults.setup_complete` (frappe.is_setup_complete()).
+// Reads `frappe.boot.jarvis_onboarded` and `frappe.boot.jarvis_ready_reason`
+// (both set in jarvis.boot.set_jarvis_boot from is_ready_for_chat's verdict),
+// `frappe.boot.jarvis_has_been_ready` (same file, from account.
+// has_been_chat_ready - disambiguates a never-established workspace from an
+// established one for the two reasons that alone cannot tell the two apart,
+// see nudgeVariant()'s llm_pool_provisioning/llm_provisioning case), and
+// `frappe.boot.sysdefaults.setup_complete` (frappe.is_setup_complete()).
 // Shows only for a not-onboarded System Manager AFTER ERPNext's own setup
 // wizard is finished, so it never pops over the wizard. Dismissal is
 // per-tab-session (sessionStorage) so it returns next fresh session until
@@ -69,12 +74,17 @@
 	// NOT_ONBOARDED_REASONS) never force-redirects any of these either.
 	//
 	// Deliberately NOT here: llm_pool_provisioning / llm_provisioning. Those
-	// two ALSO cover the exact "disconnected all models, apply-confirmed
-	// marker cleared with no fresh apply timestamp to soften it into
-	// llm_applying" shape for an established workspace (account.py's
-	// _provisioning_verdict), and nothing else on the Desk offers that
-	// workspace a CTA - suppressing them here would leave it with no way
-	// back in. See nudgeVariant()'s own case for the two.
+	// two reasons are AMBIGUOUS by themselves (account.py's
+	// _provisioning_verdict returns the same hard reason whenever
+	// _has_been_chat_ready(raw) is false, which covers both a brand-new
+	// tenant whose first sync is still pending AND an established workspace
+	// whose apply-confirmed marker was cleared - e.g. disconnecting all
+	// models - with no fresh apply timestamp to soften it into
+	// llm_applying). nudgeVariant() resolves the ambiguity with
+	// frappe.boot.jarvis_has_been_ready instead of suppressing outright:
+	// established gets its own CTA (nothing else on the Desk offers one -
+	// the floating widget still gates these to setup too), never-established
+	// falls through to the same wizard pitch it would have gotten anyway.
 	var SUPPRESSED_REASONS = [
 		// Pre-existing (jarvis C2): an established workspace's first pool/direct
 		// leg is mid-apply.
@@ -329,15 +339,25 @@
 				href: RECONNECT_INTENT_URL,
 			};
 		}
-		// account.py's _provisioning_verdict: an established workspace (one
-		// _has_been_chat_ready has already confirmed) whose apply-confirmed
-		// marker was cleared - e.g. "disconnect AI model connections" in pool or
-		// subscription mode - and whose last_sync_requested_at is either unset or
-		// too stale to soften this into llm_applying/llm_apply_stuck. Unlike
-		// those two soft reasons this is not necessarily still converging, so
-		// point at Settings to check/redo the connection rather than promising a
-		// Retry that may have nothing in flight to retry.
-		if (reason === "llm_pool_provisioning" || reason === "llm_provisioning") {
+		// account.py's _provisioning_verdict returns these two whenever
+		// _has_been_chat_ready(raw) is false - which is ALSO true for a
+		// brand-new tenant whose very first sync is still pending, not only
+		// for an established workspace whose apply-confirmed marker was
+		// cleared (e.g. "disconnect AI model connections" in pool or
+		// subscription mode). The reason string alone cannot tell the two
+		// apart, so this branches on frappe.boot.jarvis_has_been_ready (set in
+		// jarvis.boot.set_jarvis_boot from account.has_been_chat_ready, the
+		// SAME check _has_been_chat_ready itself makes): only an established
+		// workspace gets the Settings CTA below - Retry would have nothing in
+		// flight to retry, unlike llm_applying/llm_apply_stuck's soft window.
+		// A brand-new tenant (flag false, or absent on an older boot payload)
+		// falls through to the unchanged wizard pitch, which is exactly what
+		// a customer mid-first-sync should see.
+		if (
+			(reason === "llm_pool_provisioning" || reason === "llm_provisioning") &&
+			frappe.boot &&
+			frappe.boot.jarvis_has_been_ready === true
+		) {
 			return {
 				name: agentName,
 				aria: "Check " + agentName + " AI models",
@@ -368,6 +388,11 @@
 		//     workspace nothing has ever confirmed ready (an established one
 		//     fails OPEN through the same outage instead - _admin_unreachable_
 		//     verdict) - so it never fires on a workspace with history either.
+		//   - "llm_pool_provisioning" / "llm_provisioning" WITHOUT
+		//     jarvis_has_been_ready === true: the ambiguous case above resolved
+		//     to "never established" (or the flag is missing/false on an older
+		//     boot payload), so this is exactly the first-sync-still-pending
+		//     tenant the wizard pitch is for.
 		return {
 			name: "Jarvis",
 			aria: "Set up Jarvis",

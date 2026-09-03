@@ -29,9 +29,18 @@ const {
   isSuppressedReason,
 } = require("./jarvis_onboarding_banner.bundle.js");
 
-function setReason(reason, agentName) {
+// `hasBeenReady` defaults to `undefined` - an absent jarvis_has_been_ready key
+// on the boot object, exactly like an older boot payload that predates the
+// flag - rather than to `false`, so a caller that does not pass it exercises
+// the "missing" case, not the "explicitly false" one. Pass it explicitly
+// wherever the distinction matters.
+function setReason(reason, agentName, hasBeenReady) {
   globalThis.frappe = {
-    boot: { jarvis_ready_reason: reason, jarvis_agent_name: agentName },
+    boot: {
+      jarvis_ready_reason: reason,
+      jarvis_agent_name: agentName,
+      jarvis_has_been_ready: hasBeenReady,
+    },
   };
 }
 
@@ -54,14 +63,36 @@ test("nudgeVariant: reconnect_required carries the reconnect intent flag, not a 
   assert.doesNotMatch(v.text, /Hey/);
 });
 
-test("nudgeVariant: llm_pool_provisioning and llm_provisioning point at AI models settings, not the wizard", () => {
+test("nudgeVariant: llm_pool_provisioning/llm_provisioning + jarvis_has_been_ready true points at AI models settings", () => {
   for (const reason of ["llm_pool_provisioning", "llm_provisioning"]) {
-    setReason(reason, "Nova");
+    setReason(reason, "Nova", true);
     const v = nudgeVariant();
     assert.equal(v.ctaLabel, "Check AI models →", `reason=${reason}`);
     assert.equal(v.href, "/jarvis/?settings=aimodels", `reason=${reason}`);
     assert.match(v.text, /Nova/, `reason=${reason}`);
     assert.doesNotMatch(v.href, /onboarding/, `reason=${reason}`);
+  }
+});
+
+test("nudgeVariant: llm_pool_provisioning/llm_provisioning + jarvis_has_been_ready false keeps the wizard pitch", () => {
+  for (const reason of ["llm_pool_provisioning", "llm_provisioning"]) {
+    setReason(reason, "Nova", false);
+    const v = nudgeVariant();
+    assert.equal(v.ctaLabel, "Set up Jarvis →", `reason=${reason}`);
+    assert.equal(v.href, "/jarvis/onboarding", `reason=${reason}`);
+  }
+});
+
+test("nudgeVariant: llm_pool_provisioning/llm_provisioning + jarvis_has_been_ready absent keeps the wizard pitch", () => {
+  // Absent (older boot payload, or the boot-time try/except's fail-safe False
+  // never having reached this session's cached boot object) must behave like
+  // "not established", never like "established" - the safer failure mode when
+  // the disambiguator itself is missing.
+  for (const reason of ["llm_pool_provisioning", "llm_provisioning"]) {
+    setReason(reason, "Nova"); // hasBeenReady omitted -> undefined
+    const v = nudgeVariant();
+    assert.equal(v.ctaLabel, "Set up Jarvis →", `reason=${reason}`);
+    assert.equal(v.href, "/jarvis/onboarding", `reason=${reason}`);
   }
 });
 
@@ -100,7 +131,7 @@ test("nudgeVariant: white-label - only the never-set-up pitch says literal Jarvi
   setReason("reconnect_required", "Nova");
   assert.equal(nudgeVariant().name, "Nova");
 
-  setReason("llm_pool_provisioning", "Nova");
+  setReason("llm_pool_provisioning", "Nova", true);
   assert.equal(nudgeVariant().name, "Nova");
 
   setReason("signup", "Nova");
