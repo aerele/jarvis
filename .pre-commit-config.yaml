@@ -27,7 +27,7 @@ repos:
       # protection is a paid feature on private repos, so this is the local
       # equivalent - it holds on every machine that runs `pre-commit install`.
       - id: no-commit-to-branch
-        args: ["--branch", "develop", "--branch", "beta"]
+        args: ["--branch", "develop", "--pattern", "^version-[0-9]+(-hotfix)?$"]
       - id: check-merge-conflict
       - id: check-ast
       - id: check-json

@@ -28,18 +28,48 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [develop]
+    # develop is where work lands; version-16 is the stable line customers install from and
+    # version-16-hotfix is where its backports collect until a release merges them into it.
+    # version-15 has its own copy of this file on its branch. See CONTRIBUTING.md.
+    branches: [develop, version-16, version-16-hotfix]
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Never auto-cancel a develop run (cancelled reads as neutral, not failed → hides regressions).
-  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
+  # Only auto-cancel PR runs. A cancelled run on a long-lived branch reads as neutral, not
+  # failed, which hides regressions.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
   packages: read   # to pull the base image from GHCR
 
 jobs:
+  # Stable branches (version-N) accept exactly one kind of PR: the release PR from their own
+  # hotfix branch (version-N-hotfix). Backports target the hotfix branch; a release is the
+  # merge of hotfix into stable. This job fails any other PR into a stable branch. It is a
+  # required check on the version-* rulesets. On non-PR events it is skipped, and a skipped
+  # job satisfies a required check.
+  release-source:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Only version-N-hotfix may open a PR into version-N
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+        run: |
+          case "$BASE" in
+            version-*-hotfix) echo "hotfix base: any head is allowed"; exit 0 ;;
+            version-*) ;;
+            *) echo "not a stable base: nothing to check"; exit 0 ;;
+          esac
+          if [ "$HEAD" != "${BASE}-hotfix" ]; then
+            echo "::error::PRs into $BASE must come from ${BASE}-hotfix (got $HEAD). Retarget this PR to ${BASE}-hotfix; a release is cut by merging ${BASE}-hotfix into $BASE."
+            exit 1
+          fi
+          echo "release PR: $HEAD -> $BASE"
+
   # Runs the same .pre-commit-config.yaml the local hook runs, so the checks hold
   # even for a clone where nobody ran `pre-commit install`. Deliberately NOT in
   # the tests container: this needs only python + node, and it should report in
@@ -58,7 +88,7 @@ jobs:
       - uses: pre-commit/action@v3.0.1
         env:
           # no-commit-to-branch is a LOCAL guard: it inspects the checked-out
-          # branch name. On `push: branches: [develop]` the checkout IS develop,
+          # branch name. On a `push` event the checkout IS the guarded branch,
           # so leaving it on would fail this job on every merge. It has no
           # meaning server-side anyway - the PR requirement is what enforces it.
           SKIP: no-commit-to-branch
