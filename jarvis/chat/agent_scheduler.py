@@ -1254,6 +1254,22 @@ def _launch_audit(
 			# swaps which exception the caller re-raises.
 			frappe.throw(error_msg, title=_("Agent not applied"))
 		raise
+
+	# STEP TIMELINE (#1062): the run's first step, and the only one the bench
+	# writes before the delegate says anything. It is recorded only after the 202
+	# above - both failure branches raise before reaching here - so "Dispatched to
+	# the agent" on screen means the fleet really accepted the turn. Owner-pinned
+	# like every other row of this launch (the session is the run-as user by now).
+	from jarvis.chat.agent_run_steps import record_step
+
+	record_step(
+		run.name,
+		kind="dispatched",
+		label="Dispatched to the agent",
+		detail=f"trigger: {trigger}",
+		owner=owner,
+	)
+	frappe.db.commit()
 	return {"run": run.name, "conversation": conv.name, "session_key": session_key}
 
 

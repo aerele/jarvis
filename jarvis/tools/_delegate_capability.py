@@ -196,7 +196,11 @@ def resolve(session_key: str | None = None) -> dict | None:
 	id, so a delegate can only ever act as its own run); ``session_key=None`` reads
 	it from the request-scoped ``_agent_run_ctx``.
 
-	Returns ``{run, agent, legacy, tools_allow, nature, writes, run_as}``. ``legacy``
+	Returns ``{run, owner, status, agent, legacy, tools_allow, nature, writes,
+	run_as}``. ``owner`` and ``status`` are along for the ride so a caller that
+	needs the run ROW (the #1062 step timeline pins each step to the run owner and
+	only narrates a ``running`` run) does not have to fetch the same row a second
+	time on the hot path of every plugin tool call. ``legacy``
 	True means no snapshot governs this run — the caller falls back to pre-JF-017
 	behaviour. A run that is neither snapshotted nor legacy yields an EMPTY contract
 	with ``legacy`` False, i.e. everything is refused."""
@@ -210,6 +214,8 @@ def resolve(session_key: str | None = None) -> dict | None:
 		{"session_key": key},
 		[
 			"name",
+			"owner",
+			"status",
 			"agent",
 			"creation",
 			"capability_contract",
@@ -219,16 +225,31 @@ def resolve(session_key: str | None = None) -> dict | None:
 		],
 		as_dict=True,
 	)
-	if not run or not run.agent:
+	# Shape-checked, not just truthiness-checked. ``as_dict=True`` yields a
+	# frappe._dict or None in production, so the isinstance arm is unreachable
+	# there - but ``frappe.db.get_value`` is a seam tests stub WHOLESALE (test_api's
+	# budget cases patch it to return one fixed string for every lookup on the
+	# dispatch path), and this function now runs on that path directly rather than
+	# only behind ``tool_denial``. A stub must make the caller a non-delegate, never
+	# an AttributeError out of the dispatcher. ``.get`` below for the same reason: a
+	# plain dict stub has no attribute access.
+	if not isinstance(run, dict) or not run.get("agent"):
 		return None  # no delegate run bound -> not a delegate; leave the caller untouched
 
-	base = {"run": run.name, "agent": run.agent, "run_as": frappe.session.user}
-	contract = (run.capability_contract or "").strip().lower()
+	base = {
+		"run": run.get("name"),
+		"owner": run.get("owner"),
+		"status": run.get("status"),
+		"agent": run.get("agent"),
+		"run_as": frappe.session.user,
+	}
+	contract = (run.get("capability_contract") or "").strip().lower()
 
-	if contract == CONTRACT_LEGACY or (not contract and _is_pre_patch(run.creation)):
+	if contract == CONTRACT_LEGACY or (not contract and _is_pre_patch(run.get("creation"))):
 		# Pre-JF-017 run: nature/writes come from the live listing, as they did
 		# before the snapshot existed, and no tools_allow gate applies.
-		listing = frappe.db.get_value(LISTING, run.agent, ["nature", "writes"], as_dict=True) or {}
+		listing = frappe.db.get_value(LISTING, run.get("agent"), ["nature", "writes"], as_dict=True) or {}
+		listing = listing if isinstance(listing, dict) else {}
 		return {
 			**base,
 			"legacy": True,
@@ -247,9 +268,9 @@ def resolve(session_key: str | None = None) -> dict | None:
 	return {
 		**base,
 		"legacy": False,
-		"tools_allow": _parse_list(run.tools_allow_json),
-		"nature": (run.capability_nature or "").strip().lower(),
-		"writes": parse_writes(run.capability_writes_json),
+		"tools_allow": _parse_list(run.get("tools_allow_json")),
+		"nature": (run.get("capability_nature") or "").strip().lower(),
+		"writes": parse_writes(run.get("capability_writes_json")),
 	}
 
 
@@ -270,7 +291,13 @@ _CHAT_NO_SURFACE = (
 _RUN_ERROR_NO_SURFACE = "the agent's capability contract authorises no tools; refused at the first call"
 
 
-def tool_denial(session_key: str | None, tool: str) -> dict | None:
+#: Distinguishes "caller passed no contract" from "caller resolved and got None"
+#: (a non-delegate). Without it, a caller that correctly resolved None would make
+#: this function resolve all over again - the exact double read it exists to avoid.
+_UNRESOLVED = object()
+
+
+def tool_denial(session_key: str | None, tool: str, cap=_UNRESOLVED) -> dict | None:
 	"""The refusal for this delegate's ``tool`` call, or None when it may proceed.
 
 	None is also returned for a NON-delegate caller (nothing to enforce) and for a
@@ -289,9 +316,18 @@ def tool_denial(session_key: str | None, tool: str) -> dict | None:
 	    than leave it ``running`` for the 3h reaper to mislabel as a timeout.
 	  * ``chat_message`` vs ``message`` — plain language for the customer-visible
 	    transcript, contract vocabulary for the delegate and the audit trail.
+
+	``cap`` lets a caller that has ALREADY resolved this session's contract hand it
+	in instead of paying for a second identical run-row read. Omit it and the
+	contract is resolved here, exactly as before.
 	"""
-	cap = resolve(session_key)
-	if cap is None or cap["legacy"]:
+	cap = resolve(session_key) if cap is _UNRESOLVED else cap
+	# Shape-checked like resolve's own row guard: a non-delegate (None) and a
+	# stubbed/mocked cap both mean "nothing to enforce here", which is what a
+	# patched resolve already produced before the contract was passed in. ``.get``
+	# so a cap missing the key is treated as NOT legacy, i.e. enforced - the
+	# fail-closed direction.
+	if not isinstance(cap, dict) or cap.get("legacy"):
 		return None
 	allowed = bench_tools(cap["tools_allow"])
 	name = normalize_tool(tool)
