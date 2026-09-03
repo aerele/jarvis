@@ -1,0 +1,42 @@
+name: Release guard
+
+# Stable branches (version-N) accept exactly one kind of PR: the release PR from their own
+# hotfix branch (version-N-hotfix). Backports target the hotfix branch; a release is the
+# merge of hotfix into stable. This job fails any other PR into a stable branch and is a
+# required check on the version-* rulesets. See CONTRIBUTING.md.
+#
+# Its own workflow, not a job in ci.yml, for one reason: `edited` is the event GitHub
+# sends when a PR's BASE is changed in the UI. Retargeting a green PR from develop to
+# version-16 must re-run this check, but re-running the whole test matrix on every title
+# or body edit would be waste. Only a same-repo head counts: on a public repo a fork could
+# otherwise name its branch version-16-hotfix.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  release-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Only version-N-hotfix (same repo) may open a PR into version-N
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          case "$BASE" in
+            version-*-hotfix) echo "hotfix base: any head is allowed"; exit 0 ;;
+            version-*) ;;
+            *) echo "not a stable base: nothing to check"; exit 0 ;;
+          esac
+          if [ "$HEAD" != "${BASE}-hotfix" ] || [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            echo "::error::PRs into $BASE must come from ${BASE}-hotfix in $THIS_REPO (got $HEAD_REPO:$HEAD). Retarget this PR to ${BASE}-hotfix; a release is cut by merging ${BASE}-hotfix into $BASE."
+            exit 1
+          fi
+          echo "release PR: $HEAD -> $BASE"
