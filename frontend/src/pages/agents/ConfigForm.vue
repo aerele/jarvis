@@ -84,8 +84,10 @@
 				@update:modelValue="onAdvancedInput"
 			/>
 			<div class="mt-1 text-xs text-ink-gray-5">
-				Enter values as JSON, for example {"company": "Acme Ltd", "benchmark_value":
-				1000000, "percentage": 5}. Form fields above win on matching keys.
+				Enter values as JSON, for example {"company": "Acme Ltd", "materiality":
+				{"pl_balance": 50000}}. Form fields above win on matching keys - a value this page
+				renders a field for (e.g. "materiality": {"benchmark_value": ...}) belongs in that
+				field, not here.
 			</div>
 			<ErrorMessage class="mt-2" :message="advancedError" />
 		</DocSection>

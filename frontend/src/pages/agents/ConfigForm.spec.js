@@ -233,6 +233,21 @@ describe("clearing a field drops its key", () => {
 	});
 });
 
+describe("Advanced (JSON) hint text", () => {
+	it("its example uses the NESTED materiality shape, not a flat key the form already renders a field for", () => {
+		// jarvis#1063 CRITICAL follow-up: the old example -
+		// {"benchmark_value": 1000000} - was exactly the flat legacy shape
+		// save() deletes (migration is one-directional, flat -> nested). A
+		// user following the hint verbatim would type a value that vanishes
+		// on save. The example must never again name a key the form itself
+		// covers.
+		const w = mountForm({});
+		const hint = w.text();
+		expect(hint).toContain('"materiality"');
+		expect(hint).not.toContain('"benchmark_value": 1000000');
+	});
+});
+
 describe("an unknown config key survives untouched in Advanced (JSON)", () => {
 	it("seeds an unrecognised key into Advanced, not a form field", () => {
 		const w = mountForm({ company: "Acme Ltd", custom_flag: true, nested: { a: 1 } });
