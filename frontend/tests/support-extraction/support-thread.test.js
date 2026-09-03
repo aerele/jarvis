@@ -81,6 +81,7 @@ const storeDouble = {
 	loadTickets: vi.fn(),
 	loadThread: vi.fn(),
 	closeTicket: vi.fn(),
+	refreshAwaiting: vi.fn(),
 	reply: vi.fn(async () => true),
 	// Fix 2: uploadTo returns the succeeded FILE REFERENCES, not a count — a
 	// realistic default double is "everything I was given succeeded".

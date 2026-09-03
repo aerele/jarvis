@@ -96,7 +96,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
 import { Badge, Button, Tooltip } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
@@ -104,6 +104,7 @@ import SupportShell from "@/components/support/SupportShell.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { useSupportStore, badgeFor, priorityBadge } from "@/stores/support";
 
+const route = useRoute();
 const router = useRouter();
 const store = useSupportStore();
 
@@ -118,6 +119,14 @@ const STATUS_OPTIONS = [
 	{ label: "Open", value: "open" },
 	{ label: "Closed", value: "closed" },
 ];
+const KNOWN_STATUS_VALUES = STATUS_OPTIONS.map((o) => o.value).filter(Boolean);
+
+// Deep-link seed (?status=) - same recipe as ApprovalsBoard's initialStatus
+// (route.query validated against the known quick-filter values, read once at
+// setup rather than watched). The chat header's ticket-count pill routes here
+// with ?status=awaiting so the list opens pre-filtered instead of showing
+// everything and making the user re-pick the filter they just clicked for.
+const initialStatus = KNOWN_STATUS_VALUES.includes(route.query.status) ? route.query.status : "";
 
 const ALL_COLUMNS = [
 	{ label: "Subject", key: "subject", width: 3 },
@@ -196,7 +205,7 @@ const sortOptions = [
 ];
 const DEFAULT_SORT = { field: "modified", dir: "desc" };
 
-const filters = reactive({});
+const filters = reactive(initialStatus ? { status: initialStatus } : {});
 const sort = ref({ ...DEFAULT_SORT });
 const pageLength = ref(20);
 const shown = ref(20);

@@ -7,7 +7,14 @@ vi.mock("frappe-ui", () => ({
 	Button: { template: "<button/>" },
 	Tooltip: { template: "<div><slot/></div>" },
 }));
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+// query is mutated per-test (see the route-query preselect describe block
+// below); useRoute() must keep returning the SAME object so a mount picks
+// up whatever the test set on it just before mounting.
+const routeDouble = { query: {} };
+vi.mock("vue-router", () => ({
+	useRouter: () => ({ push: vi.fn() }),
+	useRoute: () => routeDouble,
+}));
 
 // reactive(), not a plain object: the real store (stores/support.js) wraps its
 // state the same way, and the refresh/paging tests below reassign
@@ -89,7 +96,10 @@ async function applyFilters(w, next) {
 }
 
 describe("SupportListPage", () => {
-	beforeEach(() => vi.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		routeDouble.query = {};
+	});
 
 	it("defaults to most-recently-updated first, the house default sort", async () => {
 		const w = mountList();
@@ -245,5 +255,44 @@ describe("mobile column drop does not empty the grid (fix 4)", () => {
 			.props("columns")
 			.map((c) => c.key);
 		expect(keys).toContain("name");
+	});
+});
+
+// The chat header's ticket-count pill (ChatView.vue) routes here with
+// ?status=awaiting when the viewer clicks "Tickets awaiting reply", so the
+// list must open pre-filtered rather than making them re-pick the filter they just
+// clicked for.
+describe("deep-link seed from ?status= (header pill preselect)", () => {
+	afterEach(() => {
+		routeDouble.query = {};
+	});
+
+	it("seeds filters.status from a known ?status= value", async () => {
+		routeDouble.query = { status: "awaiting" };
+		expect(
+			mountList()
+				.findComponent(ListPageStub)
+				.props("rows")
+				.map((r) => r.name)
+		).toEqual(["T-2", "T-3"]);
+	});
+
+	it("ignores an unknown ?status= value and falls back to All", async () => {
+		routeDouble.query = { status: "not-a-real-status" };
+		expect(
+			mountList()
+				.findComponent(ListPageStub)
+				.props("rows")
+				.map((r) => r.name)
+		).toHaveLength(5);
+	});
+
+	it("falls back to All with no ?status= at all", async () => {
+		expect(
+			mountList()
+				.findComponent(ListPageStub)
+				.props("rows")
+				.map((r) => r.name)
+		).toHaveLength(5);
 	});
 });
