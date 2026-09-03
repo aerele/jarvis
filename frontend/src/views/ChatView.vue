@@ -289,9 +289,78 @@
 					     button replaces that entry rather than duplicating it. Unconfigured
 					     gets the same jv-unavailable + aria-disabled treatment the STT/wiki
 					     buttons use for their own "visible but not usable yet" state, so a
-					     screen-reader user hears it's inert before clicking, not after. -->
+					     screen-reader user hears it's inert before clicking, not after.
+
+					     A waiting reply now surfaces HERE too (a red count pill, see
+					     jv-support-pill below) rather than only on the sidebar avatar dot -
+					     that dot is gone (UserMenu.vue). Two branches render the SAME
+					     button markup: with a waiting reply the button becomes a
+					     frappe-ui Dropdown trigger (two rows: go to the awaiting list, or
+					     start a new ticket); with nothing waiting it stays the plain
+					     new-ticket button it always was, so a zero-count click is byte-for-
+					     byte the old behaviour. No jv- palette rebind needed on the portal:
+					     the menu is pure frappe-ui (label/icon/text-ink-red-4 suffix), and
+					     frappe-ui's own theming already flips off the `data-theme` attribute
+					     theme.js sets on <html> - jv-* vars are only for THIS view's own
+					     hand-styled surface, which the portal content never touches. -->
+					<Dropdown
+						v-if="supportEntryVisible && supportHasAwaiting"
+						:options="supportMenuOptions"
+						placement="right"
+					>
+						<template #trigger>
+							<button
+								class="jv-iconbtn jv-support-btn"
+								:title="supportAwaitingPhraseText"
+								:aria-label="`Support, ${supportAwaitingPhraseText}`"
+								style="
+									position: relative;
+									width: 32px;
+									height: 32px;
+									display: flex;
+									align-items: center;
+									justify-content: center;
+									background: transparent;
+									border: 1px solid var(--border);
+									border-radius: 7px;
+									cursor: pointer;
+								"
+							>
+								<svg
+									width="16"
+									height="16"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="var(--text-2)"
+									stroke-width="1.7"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path d="M3 18v-6a9 9 0 0 1 18 0v6" />
+									<path
+										d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"
+									/>
+								</svg>
+								<span
+									class="jv-support-pill bg-surface-red-5"
+									role="status"
+									aria-live="polite"
+								>
+									<span aria-hidden="true">{{ supportPillLabel }}</span>
+									<!-- sr-only: the button's own aria-label already carries this
+									     phrase for a focused/click read, but role="status" here is
+									     what makes it ANNOUNCE on its own while the user is heads-
+									     down typing elsewhere in chat - the same job the removed
+									     avatar dot's role="status" did. jv-sr is the same visually-
+									     hidden utility the turn-completion live region (srMessage,
+									     below in this template) uses. -->
+									<span class="jv-sr">{{ supportAwaitingPhraseText }}</span>
+								</span>
+							</button>
+						</template>
+					</Dropdown>
 					<button
-						v-if="supportEntryVisible"
+						v-else-if="supportEntryVisible"
 						class="jv-iconbtn jv-support-btn"
 						:class="{ 'jv-unavailable': supportUnconfigured }"
 						:aria-disabled="supportUnconfigured ? 'true' : undefined"
@@ -4144,6 +4213,7 @@
 import {
 	ref,
 	computed,
+	h,
 	inject,
 	onMounted,
 	onBeforeUnmount,
@@ -4153,6 +4223,7 @@ import {
 	watchEffect,
 } from "vue";
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
+import { Dropdown } from "frappe-ui";
 import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
 import { shouldOfferFeedback, markRated, markIgnored } from "@/lib/feedbackGate";
@@ -4181,6 +4252,11 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
+import {
+	supportPillLabel as supportPillLabelFor,
+	supportAwaitingPhrase,
+	supportAwaitingRoute,
+} from "@/lib/supportHeaderPill";
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
@@ -4602,9 +4678,11 @@ async function openSupport() {
 		explainUnavailable("Support");
 		return;
 	}
-	// This header control is the NEW-TICKET entry point only. The "you have a
-	// waiting reply" signal + its route to the inbox now live solely on the
-	// avatar's resting badge (UserMenu), so the two concerns don't share a button.
+	// This function is the NEW-TICKET action specifically: with a waiting reply
+	// the header button opens a menu instead of calling this directly (see
+	// supportMenuOptions below), and its "New ticket from this chat" row calls
+	// straight into this same function - so openSupport() itself never needs to
+	// know which of the two paths got it here.
 	if (openSupportInFlight) return;
 	openSupportInFlight = true;
 	try {
@@ -4637,6 +4715,69 @@ async function openSupport() {
 		openSupportInFlight = false;
 	}
 }
+// Waiting-reply count pill (header headphones button). awaiting_count is a
+// cheap poll-driven number (stores/support.js's refreshAwaiting, already run
+// by UserMenu's 60s poll timer - no second poller started here); reading
+// zero for a not-yet-primed store is the correct "nothing waiting" default.
+// The label/phrase/routing math itself lives in lib/supportHeaderPill.js,
+// pure and unit-tested there (the same split lib/supportCopyFormat.js already
+// uses for this button's copy-to-ticket formatting) - this view just wires
+// the store's numbers through it.
+const supportAwaitingCount = computed(() => (supportStore ? supportStore.awaitingCount : 0));
+const supportHasAwaiting = computed(() => supportAwaitingCount.value > 0);
+const supportPillLabel = computed(() => supportPillLabelFor(supportAwaitingCount.value));
+const supportAwaitingPhraseText = computed(() =>
+	supportAwaitingPhrase(supportAwaitingCount.value)
+);
+function goToAwaitingTickets() {
+	router.push(supportAwaitingRoute());
+}
+const supportMenuOptions = computed(() => [
+	{
+		group: "Support",
+		hideLabel: true,
+		items: [
+			{
+				label: "Tickets awaiting reply",
+				icon: "life-buoy",
+				onClick: goToAwaitingTickets,
+				slots: {
+					// The raw count, not the "9+"-capped supportPillLabel: this row has
+					// room for it, and UserMenu's sibling "Support tickets · N" row
+					// already shows the uncapped number, so the two should never disagree.
+					suffix: () =>
+						h(
+							"span",
+							{ class: "text-ink-red-4 font-medium tabular-nums" },
+							String(supportAwaitingCount.value)
+						),
+				},
+			},
+			{
+				label: "New ticket from this chat",
+				icon: "plus",
+				onClick: openSupport,
+			},
+		],
+	},
+]);
+// This view only READS supportStore.awaitingCount - the 60s poll that keeps
+// it fresh belongs to UserMenu.vue (always mounted alongside chat), so no
+// second poller starts here. But that poller is on a timer, not a mount
+// hook, so the pill's FIRST paint here could be showing a stale/empty count
+// for up to 60s. It could also simply be wrong on any load where UserMenu
+// isn't mounted at all (collapsed/off-canvas sidebar on phone), not only
+// that one case. One extra one-shot refresh on this view's own mount closes
+// that gap without adding a second timer. It DOES fire on every normal load
+// alongside UserMenu's own immediate call - refreshAwaiting() in
+// stores/support.js de-dupes concurrent callers into one request, so this
+// never becomes two round trips for the same number. .catch() for the same
+// reason as SupportThreadPage's calls: an un-awaited rejection here would
+// otherwise be unhandled (the real store already catches its own errors, so
+// this is belt-and-braces).
+onMounted(() => {
+	if (supportOn) supportStore.refreshAwaiting().catch(() => {});
+});
 // One-shot "ground on wiki": when armed, the NEXT message carries a
 // context.ground_wiki flag so the backend injects relevant wiki page bodies
 // into that turn. Cleared after each send (see send()).
@@ -11452,6 +11593,36 @@ onUnmounted(() => {
 	background: transparent !important;
 	color: var(--text-3) !important;
 	stroke: currentColor !important;
+}
+/* Waiting-reply count pill on the header's support button (jv-support-btn).
+   The bg-surface-red-5 Tailwind class (not var(--red), THIS view's own
+   red for inline error states - a different, unrelated token) is the same
+   class Sidebar.vue's approvals badge/dot paint with, kept as a literal
+   utility class rather than a hand-copied hex so it keeps tracking that
+   token if it's ever retuned. It already flips with data-theme (theme.js's
+   applyTheme sets that on <html> for every frappe-ui consumer), independent
+   of this view's own jv-dark/paletteVars system. The 2px ring is
+   var(--surface): this header paints no background of its own, so
+   var(--surface) IS what actually shows behind the button, and using it
+   (rather than a literal white) keeps the ring correct if the header ever
+   grows a background. */
+.jv-support-pill {
+	position: absolute;
+	top: -5px;
+	right: -5px;
+	min-width: 17px;
+	height: 17px;
+	padding: 0 4px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	color: #fff;
+	font-size: 11px;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	box-shadow: 0 0 0 2px var(--surface);
+	pointer-events: none;
 }
 .jv-nudge-actions {
 	display: flex;
