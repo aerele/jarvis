@@ -436,13 +436,21 @@ class TestHumanizeToolCall(unittest.TestCase):
 		"""get_doc short-circuits a Single AHEAD of name/names (#1062), because its
 		one document's name IS the doctype. A delegate with nothing sensible to put
 		there sends "" or [] - and the step must still read as the one document it
-		actually got, never "Read System Settings, 0 documents"."""
-		for args in (
-			{"doctype": "System Settings", "names": []},
-			{"doctype": "System Settings", "names": ["bogus", "also-bogus"]},
-			{"doctype": "System Settings", "name": "x"},
+		actually got, never "Read System Settings, 0 documents".
+
+		Each case carries the shape get_doc ACTUALLY returns for it: flat for
+		name/empty-names, and the batch envelope for a non-empty names list (a
+		caller that asked for the batch shape gets it back, holding the one
+		document). Feeding one flat dict to all three would pass either way and
+		prove nothing about the real contract."""
+		flat = {"name": "System Settings"}
+		batch = {"doctype": "System Settings", "docs": [flat], "count": 1}
+		for args, result in (
+			({"doctype": "System Settings", "names": []}, flat),
+			({"doctype": "System Settings", "names": ["bogus", "also-bogus"]}, batch),
+			({"doctype": "System Settings", "name": "x"}, flat),
 		):
-			label, _ = agent_run_steps.humanize_tool_call("get_doc", args, {"name": "System Settings"})
+			label, _ = agent_run_steps.humanize_tool_call("get_doc", args, result)
 			self.assertEqual(label, "Read System Settings", args)
 
 	def test_a_single_that_did_not_resolve_claims_no_read(self):
