@@ -1,0 +1,64 @@
+name: Release
+
+# Tags and publishes a release whenever a stable branch (version-N) moves. Under the hotfix
+# model the only thing that lands on a stable branch is the release PR from version-N-hotfix,
+# and that PR carries the __version__ bump (release-guard.yml refuses it otherwise), so every
+# push here IS a release: read __version__, tag the merge commit vN.x.y, publish a GitHub
+# Release with notes generated from the previous tag on the same line.
+#
+# Idempotent: if the tag already exists nothing happens, so a failed run can be re-run from
+# the Actions tab (workflow_dispatch) without side effects. "Latest" goes only to the highest
+# version-N line, so a v15 release never displaces the v16 one.
+#
+# The token is github-actions[bot]; the "Release tags" ruleset must list the GitHub Actions
+# app (Integration 15368) as a bypass actor or the tag push is refused.
+
+on:
+  push:
+    branches: [version-15, version-16]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Tag and publish if __version__ is new
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' jarvis/__init__.py)"
+          line="${GITHUB_REF_NAME#version-}"
+          case "$GITHUB_REF_NAME" in
+            version-[0-9]*) ;;
+            *) echo "::error::Release runs only on a version-N branch (got $GITHUB_REF_NAME)"; exit 1 ;;
+          esac
+          if [ -z "$v" ] || [ "${v%%.*}" != "$line" ]; then
+            echo "::error::__version__ '$v' is not on the $line.x line of $GITHUB_REF_NAME"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+            echo "v$v already tagged, nothing to do"; exit 0
+          fi
+          prev="$(git tag -l "v$line.*" --sort=-v:refname | head -1)"
+          highest="$(git ls-remote --heads origin 'version-*' | sed -n 's|.*/version-\([0-9]*\)$|\1|p' | sort -n | tail -1)"
+          latest=false; [ "$line" = "$highest" ] && latest=true
+          echo "release v$v on $GITHUB_REF_NAME (previous: ${prev:-none}, latest=$latest)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$v" -m "v$v" "$GITHUB_SHA"
+          git push origin "v$v"
+          gh release create "v$v" --verify-tag --title "v$v" --generate-notes \
+            ${prev:+--notes-start-tag "$prev"} --latest="$latest"
