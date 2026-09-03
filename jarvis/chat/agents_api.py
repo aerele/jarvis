@@ -1069,8 +1069,18 @@ def set_schedule(
 def set_config(installation: str, config: str) -> dict:
 	"""Persist an installed agent's engagement config JSON — a pure DB write
 	(O6: no restart; the delegate reads it on its installation on the next run).
-	Owner-gated (S3). Validates the payload is a JSON object (keys: benchmark_value,
-	percentage, engagement_risk_level, rounding_step, company, …)."""
+	Owner-gated (S3). Validates the payload is a JSON object.
+
+	Generic and agent-agnostic here on purpose — the SHAPE of "keys" is a
+	per-agent bundle contract, not a bench one (jarvis#1063: the shape lives
+	in each listing's ``config_keys``, dot-paths for a nested key). The
+	universal scope keys are flat top-level (company, fiscal_year, from_date,
+	to_date — agent_scope.py's ``_resolve``); close-auditor's materiality
+	inputs are nested under a top-level ``materiality`` object
+	(``materiality.benchmark_value`` / ``.percentage`` /
+	``.engagement_risk_level`` / ``.rounding_step`` — verified against
+	jarvis-agents/agents/close-auditor/evaluate.py's ``_materiality_pl_balance``,
+	the only bundle that reads any agent-specific config today)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	try:

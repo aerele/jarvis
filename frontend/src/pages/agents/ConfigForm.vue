@@ -116,6 +116,10 @@ import {
 	AGENT_SPECIFIC_CONFIG_FIELDS,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
+	KEY_TO_PATH,
+	getPath,
+	setPath,
+	deletePath,
 } from "@/lib/agentConfigFields";
 
 const props = defineProps({
@@ -132,7 +136,7 @@ const props = defineProps({
 // CONFIG_FIELD_SET's display order.
 const agentSpecificFields = computed(() =>
 	AGENT_SPECIFIC_CONFIG_FIELDS.filter((f) =>
-		(f.keys || [f.key]).some((k) => props.configKeys.includes(k))
+		(f.paths || [f.path]).some((p) => props.configKeys.includes(p))
 	)
 );
 // Scope fields first (always), then whichever agent-specific fields apply -
@@ -142,7 +146,7 @@ const visibleFields = computed(() => [...SCOPE_CONFIG_FIELDS, ...agentSpecificFi
 // CONFIG_FIELD_SET. A key this agent's config_keys does not name (e.g. a
 // stale benchmark_value on a non-close-auditor installation, saved back when
 // every field always rendered) has no control here and must fall through to
-// Advanced (JSON) - seed()/save() key off this, not the old KNOWN_CONFIG_KEYS.
+// Advanced (JSON) - seed()/save() key off this.
 const visibleKeys = computed(() => new Set(visibleFields.value.flatMap((f) => f.keys || [f.key])));
 
 const emit = defineEmits(["save"]);
@@ -165,17 +169,35 @@ const advancedError = ref("");
 function seed(cfg) {
 	const c = cfg || {};
 	for (const key of Object.keys(form)) {
-		// only a key with a rendered control here gets seeded from the saved
-		// config - a key this agent's config_keys does not name is left blank
-		// in `form` (so save() - which only reads visibleKeys - never touches
-		// it) and instead flows into Advanced (JSON) below, where it stays
-		// visible and editable rather than silently vanishing.
-		const v = visibleKeys.value.has(key) ? c[key] : undefined;
+		if (!visibleKeys.value.has(key)) {
+			// no rendered control here - leave it out of `form` entirely so
+			// save() (which only reads visibleKeys) never touches it; it stays
+			// visible and editable in Advanced (JSON) below instead of silently
+			// vanishing.
+			form[key] = "";
+			continue;
+		}
+		const path = KEY_TO_PATH[key] || key;
+		// jarvis#1063 CRITICAL fix: the nested path (e.g.
+		// "materiality.benchmark_value") is the source of truth. A flat
+		// top-level key of the same name (pre-nesting saves) is a MIGRATION
+		// fallback, read only when the nested value is absent - never the
+		// other way round.
+		let v = getPath(c, path);
+		if (v == null && path !== key) v = c[key];
 		form[key] = v == null ? "" : String(v);
 	}
-	const rest = {};
-	for (const [key, value] of Object.entries(c)) {
-		if (!visibleKeys.value.has(key)) rest[key] = value;
+	// Advanced (JSON) holds everything NOT covered by a visible field's path -
+	// a deep clone with each visible path (and its flat legacy counterpart,
+	// now migrated into `form` above) removed. deletePath also drops a
+	// now-empty intermediate object (e.g. `materiality`), so an installation
+	// whose only materiality keys are all rendered here does not leave a
+	// stray `{"materiality": {}}` in Advanced.
+	const rest = JSON.parse(JSON.stringify(c));
+	for (const key of visibleKeys.value) {
+		const path = KEY_TO_PATH[key] || key;
+		deletePath(rest, path);
+		if (path !== key) delete rest[key];
 	}
 	advanced.value = JSON.stringify(rest, null, 2);
 	advancedError.value = "";
@@ -249,14 +271,23 @@ function save() {
 			return;
 		}
 	}
-	// 2) the known fields merge OVER the JSON; an empty field drops its key
-	// rather than saving "" (§14 F3 / round-2 parity, now covering every known
-	// field, not only numeric ones).
-	const merged = { ...base };
+	// 2) the known fields merge OVER the JSON, WRITTEN THROUGH EACH FIELD'S
+	// PATH (jarvis#1063 CRITICAL fix - a flat save of a key the bundle reads
+	// nested, e.g. close-auditor's materiality.*, never reaches the
+	// evaluator). setPath merges into an existing object at that path rather
+	// than replacing it (an existing `materiality.pl_balance` from Advanced
+	// survives a benchmark_value edit); an empty field deletes its path
+	// rather than saving "" (§14 F3 / round-2 parity), pruning `materiality`
+	// entirely once every field under it is cleared. Either way, the
+	// migration is one-directional: a flat legacy key of the same name is
+	// always removed, since the nested path is now the source of truth.
+	const merged = JSON.parse(JSON.stringify(base));
 	for (const key of visibleKeys.value) {
+		const path = KEY_TO_PATH[key] || key;
 		const v = String(form[key] ?? "").trim();
+		if (path !== key) delete merged[key];
 		if (v === "") {
-			delete merged[key];
+			deletePath(merged, path);
 			continue;
 		}
 		if (NUMBER_CONFIG_KEYS.includes(key)) {
@@ -265,9 +296,9 @@ function save() {
 				advancedError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
 				return;
 			}
-			merged[key] = n;
+			setPath(merged, path, n);
 		} else {
-			merged[key] = v;
+			setPath(merged, path, v);
 		}
 	}
 	advancedError.value = "";

@@ -493,10 +493,17 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# reads any today).
 	# ------------------------------------------------------------------ #
 	def test_sync_agent_listings_writes_config_keys_from_the_registry(self):
+		# dot paths - close-auditor/evaluate.py reads these NESTED under a
+		# top-level "materiality" object, not as flat top-level keys.
 		agent_catalog.sync_agent_listings()
 		self.assertEqual(
 			json.loads(frappe.db.get_value(LISTING, "close-auditor", "config_keys")),
-			["benchmark_value", "percentage", "engagement_risk_level", "rounding_step"],
+			[
+				"materiality.benchmark_value",
+				"materiality.percentage",
+				"materiality.engagement_risk_level",
+				"materiality.rounding_step",
+			],
 		)
 
 	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
@@ -515,7 +522,12 @@ class TestAgentsMarketplace(unittest.TestCase):
 			frappe.set_user("Administrator")
 		self.assertEqual(
 			json.loads(out["config_keys"]),
-			["benchmark_value", "percentage", "engagement_risk_level", "rounding_step"],
+			[
+				"materiality.benchmark_value",
+				"materiality.percentage",
+				"materiality.engagement_risk_level",
+				"materiality.rounding_step",
+			],
 		)
 
 	# ------------------------------------------------------------------ #
@@ -538,6 +550,33 @@ class TestAgentsMarketplace(unittest.TestCase):
 			frappe.set_user("Administrator")
 		self.assertIsNone(off["data"]["next_run_at"])
 		self.assertIsNone(frappe.db.get_value(INSTALLATION, inst, "next_run_at"))
+
+	# ------------------------------------------------------------------ #
+	# jarvis#1063 CRITICAL fix: close-auditor/evaluate.py reads its
+	# materiality inputs NESTED under a top-level "materiality" object
+	# (config["materiality"]["benchmark_value"], etc.), not as flat
+	# top-level keys. set_config is a generic passthrough - this just
+	# guards that the bench does not flatten/mangle a nested payload on
+	# the way to storage, which the delegate reads verbatim.
+	# ------------------------------------------------------------------ #
+	def test_set_config_persists_a_nested_materiality_object_unchanged(self):
+		inst = _install_as(self.owner, "close-auditor")
+		payload = {
+			"company": "Acme Ltd",
+			"materiality": {
+				"benchmark_value": 1000000,
+				"percentage": 5,
+				"engagement_risk_level": "medium",
+				"rounding_step": 100,
+			},
+		}
+		frappe.set_user(self.owner)
+		try:
+			agents_api.set_config(inst, json.dumps(payload))
+		finally:
+			frappe.set_user("Administrator")
+		stored = json.loads(frappe.db.get_value(INSTALLATION, inst, "config"))
+		self.assertEqual(stored, payload)
 
 	# ------------------------------------------------------------------ #
 	# (d4) jarvis#1062 polish: Published operator listings with no dispatch

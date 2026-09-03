@@ -108,7 +108,7 @@
    "fieldname": "config_keys",
    "fieldtype": "Small Text",
    "label": "Config Keys (JSON)",
-   "description": "JSON array of the agent-specific installation config keys this agent's bundle actually reads (jarvis#1063) - e.g. benchmark_value/percentage/engagement_risk_level/rounding_step for close-auditor. Excludes the universal scope keys (company/fiscal_year/from_date/to_date) every run receives regardless. Drives which agent-specific fields ConfigForm.vue renders; [] for an agent with none."
+   "description": "JSON array of the agent-specific installation config keys this agent's bundle actually reads (jarvis#1063), as dot paths for a nested key - e.g. materiality.benchmark_value/materiality.percentage/materiality.engagement_risk_level/materiality.rounding_step for close-auditor (its evaluate.py reads them nested under a top-level materiality object). Excludes the universal scope keys (company/fiscal_year/from_date/to_date) every run receives regardless, which stay flat. Drives which agent-specific fields ConfigForm.vue renders; [] for an agent with none."
   },
   {
    "fieldname": "rule_tokens",
@@ -170,7 +170,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-03 12:00:00.000000",
+ "modified": "2026-09-03 13:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Agent Listing",

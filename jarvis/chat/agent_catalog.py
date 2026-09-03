@@ -133,9 +133,12 @@ def sync_agent_listings() -> dict:
 			# delegate agents this comes from the bundle-store manifest.
 			"doctypes_required": frappe.as_json(a.get("doctypes_required") or []),
 			# jarvis#1062/#1063: agent-specific installation config keys this
-			# agent's bundle actually reads (e.g. close-auditor's materiality/
-			# risk/rounding set) - excludes the universal scope keys every run
-			# gets regardless (company/fiscal_year/from_date/to_date). Drives
+			# agent's bundle actually reads, as dot paths for a nested key (e.g.
+			# close-auditor's materiality.benchmark_value/.percentage/
+			# .engagement_risk_level/.rounding_step - its evaluate.py reads them
+			# nested under a top-level "materiality" object, not flat) - excludes
+			# the universal scope keys every run gets regardless
+			# (company/fiscal_year/from_date/to_date, which stay flat). Drives
 			# ConfigForm.vue's per-agent field set; [] for an agent with none.
 			"config_keys": frappe.as_json(a.get("config_keys") or []),
 			# A2/A16: the delegate auditor's OPAQUE rule-token set, id-only. The

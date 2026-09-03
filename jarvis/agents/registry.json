@@ -566,10 +566,10 @@
         "Company"
       ],
       "config_keys": [
-        "benchmark_value",
-        "percentage",
-        "engagement_risk_level",
-        "rounding_step"
+        "materiality.benchmark_value",
+        "materiality.percentage",
+        "materiality.engagement_risk_level",
+        "materiality.rounding_step"
       ],
       "rule_tokens": [
         "ca-cl-2b9d",
