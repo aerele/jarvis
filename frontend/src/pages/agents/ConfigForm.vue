@@ -113,6 +113,7 @@ import { computed, reactive, ref, watch } from "vue";
 import { Autocomplete, Button, ErrorMessage, FormControl } from "frappe-ui";
 import DocSection from "@/components/doc/DocSection.vue";
 import { searchLink } from "@/api";
+import { useLinkSearch } from "@/composables/useLinkSearch";
 import {
 	SCOPE_CONFIG_FIELDS,
 	AGENT_SPECIFIC_CONFIG_FIELDS,
@@ -214,36 +215,11 @@ function onAdvancedInput(v) {
 
 // ── Company / Fiscal year: debounced + fenced Link search, primed on open ───
 // (mirrors AgentAccessEditor.vue's people picker and FilterValueControl.vue's
-// generic Link control - 300ms debounce, a monotonic sequence so a slow early
-// response can never overwrite a newer one, and the first page loads on
-// focus/click so the menu is never empty before a keystroke.)
+// generic Link control - all three now share useLinkSearch, jarvis#1062.)
 function makeLinkField(doctype) {
-	const options = ref([]);
-	const primed = ref(false);
-	let timer = null;
-	let seq = 0;
-
-	async function runSearch(q) {
-		const mySeq = ++seq;
-		try {
-			const rows = (await searchLink(doctype, q || "")) || [];
-			if (mySeq === seq)
-				options.value = rows.map((r) => ({ label: r.value, value: r.value }));
-		} catch (e) {
-			if (mySeq === seq) options.value = [];
-		}
-	}
-	function prime() {
-		if (primed.value) return;
-		primed.value = true;
-		runSearch("");
-	}
-	function onQuery(q) {
-		primed.value = true;
-		clearTimeout(timer);
-		timer = setTimeout(() => runSearch(q), 300);
-	}
-	return { options, prime, onQuery };
+	return useLinkSearch((q) => searchLink(doctype, q), {
+		mapper: (rows) => rows.map((r) => ({ label: r.value, value: r.value })),
+	});
 }
 
 const linkFields = {
