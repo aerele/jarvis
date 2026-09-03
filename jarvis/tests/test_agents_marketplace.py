@@ -8,6 +8,7 @@ cover mutation authZ (S3), the deterministic Run+Findings persistence with
 dedupe (O2), and catalog-sync idempotency.
 """
 
+import json
 import unittest
 
 import frappe
@@ -483,6 +484,38 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(frappe.db.get_value(LISTING, "close-auditor", "category"), "Close and Reporting")
 		self.assertEqual(
 			frappe.db.get_value(LISTING, "bank-recon-operator", "category"), "Bank and Reconciliation"
+		)
+
+	# ------------------------------------------------------------------ #
+	# jarvis#1063 (jarvis-only half) - config_keys: which agent-specific
+	# installation config keys an agent's bundle actually reads (verified
+	# against jarvis-agents/agents/<slug>/evaluate.py; only close-auditor
+	# reads any today).
+	# ------------------------------------------------------------------ #
+	def test_sync_agent_listings_writes_config_keys_from_the_registry(self):
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "close-auditor", "config_keys")),
+			["benchmark_value", "percentage", "engagement_risk_level", "rounding_step"],
+		)
+
+	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
+		"""An agent the registry declares no config_keys for (everyone but
+		close-auditor today) gets [], not null/absent - ConfigForm.vue can
+		always safely parse it."""
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(json.loads(frappe.db.get_value(LISTING, "bank-recon-operator", "config_keys")), [])
+
+	def test_get_agent_returns_config_keys(self):
+		agent_catalog.sync_agent_listings()
+		frappe.set_user(self.owner)
+		try:
+			out = agents_api.get_agent("close-auditor")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(
+			json.loads(out["config_keys"]),
+			["benchmark_value", "percentage", "engagement_risk_level", "rounding_step"],
 		)
 
 	# ------------------------------------------------------------------ #

@@ -427,6 +427,10 @@ def get_agent(agent_slug: str) -> dict:
 		# which governance gates on is_sm further down (never added for a
 		# non-admin, not added-then-popped).
 		"doctypes_required": listing.doctypes_required,
+		# jarvis#1063 (jarvis-only half): which agent-specific config keys this
+		# agent's bundle actually reads - ConfigForm.vue only renders the
+		# corresponding fields when their key is in this list.
+		"config_keys": listing.config_keys,
 		"allowed": 1 if allowed else 0,
 		"install_count": frappe.db.count(INSTALLATION, {"agent": listing.name}),
 		"installation": None,

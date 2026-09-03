@@ -17,6 +17,7 @@
   "status",
   "tools_required",
   "doctypes_required",
+  "config_keys",
   "rule_tokens",
   "min_apps",
   "rule_pack",
@@ -104,6 +105,12 @@
    "description": "JSON array of DocTypes the run-as user MUST hold read on for this agent's aggregates to be numerically correct (A12). Checked at install/validate against the mapped run_as_user (fail-closed on a missing read). Declared here so it is checkable without leaking rule shape."
   },
   {
+   "fieldname": "config_keys",
+   "fieldtype": "Small Text",
+   "label": "Config Keys (JSON)",
+   "description": "JSON array of the agent-specific installation config keys this agent's bundle actually reads (jarvis#1063) - e.g. benchmark_value/percentage/engagement_risk_level/rounding_step for close-auditor. Excludes the universal scope keys (company/fiscal_year/from_date/to_date) every run receives regardless. Drives which agent-specific fields ConfigForm.vue renders; [] for an agent with none."
+  },
+  {
    "fieldname": "rule_tokens",
    "fieldtype": "Small Text",
    "label": "Rule Tokens (JSON)",
@@ -163,7 +170,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-02 12:00:00.000000",
+ "modified": "2026-09-03 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Agent Listing",

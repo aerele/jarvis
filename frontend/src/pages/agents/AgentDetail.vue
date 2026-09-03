@@ -379,6 +379,7 @@
 							<ConfigForm
 								class="mt-3"
 								:config="parsedConfig"
+								:config-keys="configKeys"
 								:saving="savingConfig"
 								@save="saveConfig"
 							/>
@@ -977,6 +978,10 @@ const needs = computed(() => {
 const readsRecords = computed(() =>
 	agent.value ? parseListField(agent.value.doctypes_required) : []
 );
+// jarvis#1063 (jarvis-only half): which agent-specific config keys this
+// agent's bundle actually reads (get_agent) - gates ConfigForm's
+// agent-specific fields; [] shows its "no additional settings" note.
+const configKeys = computed(() => (agent.value ? parseListField(agent.value.config_keys) : []));
 const defaultScheduleText = computed(() => {
 	let s = {};
 	try {

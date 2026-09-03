@@ -5,7 +5,7 @@
 		</p>
 
 		<div class="mt-4 space-y-5">
-			<template v-for="f in CONFIG_FIELD_SET" :key="f.key || f.keys.join('-')">
+			<template v-for="f in visibleFields" :key="f.key || f.keys.join('-')">
 				<!-- Company / Fiscal year: frappe-ui Autocomplete fed by
 				     frappe.desk.search.search_link - the same whitelisted, generic
 				     Link-picker call every other Link field in this app uses
@@ -67,6 +67,10 @@
 					</template>
 				</FormControl>
 			</template>
+
+			<p v-if="!agentSpecificFields.length" class="text-p-xs text-ink-gray-5">
+				This agent has no additional settings.
+			</p>
 		</div>
 
 		<!-- §14 F3: any key outside CONFIG_FIELD_SET (unknown, or an array/object
@@ -103,12 +107,14 @@
 // persists via setAgentConfig. An empty field means the key is ABSENT from
 // the saved config, not saved as "" - that is what "leave it to use the
 // default" means server-side.
-import { reactive, ref, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { Autocomplete, Button, ErrorMessage, FormControl } from "frappe-ui";
 import DocSection from "@/components/doc/DocSection.vue";
 import { searchLink } from "@/api";
 import {
 	CONFIG_FIELD_SET,
+	SCOPE_CONFIG_FIELDS,
+	AGENT_SPECIFIC_CONFIG_FIELDS,
 	KNOWN_CONFIG_KEYS,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
@@ -116,8 +122,24 @@ import {
 
 const props = defineProps({
 	config: { type: Object, default: () => ({}) }, // parsed installation config
+	// jarvis#1063 (jarvis-only half): the current agent's Jarvis Agent Listing
+	// config_keys (get_agent), already parsed to a plain array by the parent.
+	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - the scope fields
+	// (SCOPE_CONFIG_FIELDS) always render regardless.
+	configKeys: { type: Array, default: () => [] },
 	saving: { type: Boolean, default: false },
 });
+
+// The agent-specific fields this agent's config_keys actually names, in
+// CONFIG_FIELD_SET's display order.
+const agentSpecificFields = computed(() =>
+	AGENT_SPECIFIC_CONFIG_FIELDS.filter((f) =>
+		(f.keys || [f.key]).some((k) => props.configKeys.includes(k))
+	)
+);
+// Scope fields first (always), then whichever agent-specific fields apply -
+// the single list the template's v-for renders.
+const visibleFields = computed(() => [...SCOPE_CONFIG_FIELDS, ...agentSpecificFields.value]);
 
 const emit = defineEmits(["save"]);
 

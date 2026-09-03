@@ -6,10 +6,26 @@ import { mount, flushPromises } from "@vue/test-utils";
  * user friendly. ConfigForm.vue now renders a REAL form for the known
  * engagement settings (CONFIG_FIELD_SET, @/lib/agentConfigFields) - link
  * pickers for Company/Fiscal year, a date pair, number inputs, a select -
- * always rendered, with the merge semantics unchanged: known fields win on
- * matching keys, an unrecognised key survives untouched in Advanced (JSON),
- * and an empty field means the key is absent from the saved config.
+ * with the merge semantics unchanged: known fields win on matching keys, an
+ * unrecognised key survives untouched in Advanced (JSON), and an empty field
+ * means the key is absent from the saved config.
+ *
+ * jarvis#1063 (jarvis-only half): the scope fields (Company/Fiscal
+ * year/Period) always render; the agent-specific fields (materiality
+ * amount/percentage, risk level, rounding step) render only when their key
+ * is in the `configKeys` prop (the listing's config_keys, get_agent).
+ * mountForm()'s default configKeys covers all four so the pre-existing
+ * "always renders" tests below still describe a close-auditor-shaped agent;
+ * the dedicated "per-agent gating" describe block below covers the subset
+ * and empty cases.
  */
+
+const ALL_AGENT_SPECIFIC_KEYS = [
+	"benchmark_value",
+	"percentage",
+	"engagement_risk_level",
+	"rounding_step",
+];
 
 const api = vi.hoisted(() => ({ searchLink: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/api", () => api);
@@ -77,7 +93,9 @@ vi.mock("frappe-ui", () => ({
 import ConfigForm from "./ConfigForm.vue";
 
 function mountForm(config = {}, extraProps = {}) {
-	return mount(ConfigForm, { props: { config, saving: false, ...extraProps } });
+	return mount(ConfigForm, {
+		props: { config, configKeys: ALL_AGENT_SPECIFIC_KEYS, saving: false, ...extraProps },
+	});
 }
 
 function field(w, label) {
@@ -215,5 +233,51 @@ describe("an unknown config key survives untouched in Advanced (JSON)", () => {
 		await field(w, "Rounding step").setValue("50");
 		await w.find('[data-label="Save configuration"]').trigger("click");
 		expect(w.emitted("save")[0][0]).toEqual({ custom_flag: true, rounding_step: 50 });
+	});
+});
+
+// jarvis#1063 (jarvis-only half): agent-specific fields are gated by the
+// listing's config_keys - the scope fields never are.
+describe("per-agent gating via the configKeys prop", () => {
+	it("configKeys=[] (e.g. bank-recon-operator) renders only the scope fields, plus the note", () => {
+		const w = mountForm({}, { configKeys: [] });
+		expect(w.text()).toContain("Company");
+		expect(w.text()).toContain("Fiscal year");
+		expect(w.text()).toContain("Period from");
+		expect(w.text()).toContain("Period to");
+		expect(w.text()).not.toContain("Materiality benchmark amount");
+		expect(w.text()).not.toContain("Materiality percentage");
+		expect(w.text()).not.toContain("Engagement risk level");
+		expect(w.text()).not.toContain("Rounding step");
+		expect(w.text()).toContain("This agent has no additional settings.");
+	});
+
+	it("a partial configKeys renders only the matching agent-specific fields, no note", () => {
+		const w = mountForm({}, { configKeys: ["percentage", "rounding_step"] });
+		expect(w.text()).toContain("Materiality percentage");
+		expect(w.text()).toContain("Rounding step");
+		expect(w.text()).not.toContain("Materiality benchmark amount");
+		expect(w.text()).not.toContain("Engagement risk level");
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+	});
+
+	it("the full configKeys set (close-auditor) renders every agent-specific field, no note", () => {
+		const w = mountForm({});
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+	});
+
+	it("saving with configKeys=[] omits the hidden agent-specific keys even if seeded in config", async () => {
+		// a stale/advanced-JSON value for a field this agent doesn't declare
+		// stays out of the rendered form but must not be silently dropped -
+		// it still round-trips through Advanced (JSON), since it is simply
+		// an "unknown" key from this render's point of view... except these
+		// ARE known keys (KNOWN_CONFIG_KEYS is global, not per-agent), so
+		// seed() puts them into `form`, not `advanced`. With no control
+		// rendered to clear them, save() still emits whatever `form` holds -
+		// gating is a display-only concern per the coordinator's spec, not a
+		// hard the-key-cannot-be-saved constraint.
+		const w = mountForm({}, { configKeys: [] });
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({});
 	});
 });
