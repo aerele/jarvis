@@ -773,6 +773,15 @@ class TestDefaultScheduleAnchors(FrappeTestCase):
 		if not listing_name:
 			self.skipTest("close-auditor listing not present on this site")
 		owner = _ensure_user("msched-int-weekday@example.com", enabled=1)
+		# close-auditor declares doctypes_required (GL Entry / Account / Company);
+		# JarvisAgentInstallation._validate_run_as_user refuses to install unless
+		# the run-as user already holds read on those - the same A12 gate
+		# test_agents_marketplace.py and test_platform_agents_api_hardening.py
+		# satisfy for their own fixtures. Accounts User grants them. This is a
+		# real-access grant, not a bypass of the check itself.
+		if frappe.db.exists("Role", "Accounts User"):
+			if "Accounts User" not in set(frappe.get_roles(owner)):
+				frappe.get_doc("User", owner).add_roles("Accounts User")
 		original_schedule = frappe.db.get_value("Jarvis Agent Listing", listing_name, "default_schedule")
 		frappe.db.set_value(
 			"Jarvis Agent Listing",

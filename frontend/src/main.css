@@ -200,3 +200,28 @@ body {
 .PopoverContent {
 	z-index: 120;
 }
+
+/* jarvis#653: frappe-ui's FormControl type="select" (reka-ui's SelectContent
+   under the hood) sets NO height cap on its popover - unlike Combobox/
+   Autocomplete/MultiSelect, whose own inner viewport already carries a
+   max-height + overflow-auto class. With few options that is invisible; the
+   Schedule section's monthly Day control (1st..31st, 31 rows) grew the
+   popover past the bottom of the viewport with no way to reach the later
+   rows - page scroll does not move a portaled popover, and there was no
+   internal scrollbar to scroll instead.
+
+   [data-slot="content-body"] is the wrapper Select/Combobox/MultiSelect all
+   render (see their own scoped <style> blocks for the exact selector); a
+   redundant cap on Combobox/MultiSelect's OUTER wrapper is harmless since
+   their own inner viewport is already smaller. overflow-y is !important
+   because Select's own class list already carries `overflow-hidden`
+   (Tailwind, same specificity as this attribute selector) and load order
+   between the two stylesheets is not something to rely on.
+
+   App-wide for the same reason as the two rules above: every Select in the
+   app (not just this one page) portals identically and none of them wants an
+   unreachable tail once its option list is long enough. */
+[data-slot="content-body"] {
+	max-height: 40vh;
+	overflow-y: auto !important;
+}
