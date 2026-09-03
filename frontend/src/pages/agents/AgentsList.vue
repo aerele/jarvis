@@ -211,32 +211,6 @@
 				@loadMore="loadMore"
 			/>
 		</template>
-
-		<!-- leave-guard: SM with unapplied catalog changes (dirty) -->
-		<Dialog
-			v-model="leaveDialog.show"
-			:options="{ title: 'Unapplied catalog changes' }"
-			@close="resolveLeave(false)"
-		>
-			<template #body-content>
-				<p class="text-p-base text-ink-gray-6">
-					You have unapplied catalog changes. Apply them now, or leave anyway? Your
-					changes stay saved either way - they only reach the assistant after an Apply.
-				</p>
-			</template>
-			<template #actions>
-				<div class="flex items-center gap-2">
-					<Button
-						variant="solid"
-						label="Apply & leave"
-						:loading="applying"
-						@click="applyAndLeave"
-					/>
-					<Button label="Leave anyway" @click="resolveLeave(true)" />
-					<Button variant="ghost" label="Stay" @click="resolveLeave(false)" />
-				</div>
-			</template>
-		</Dialog>
 	</div>
 </template>
 
@@ -251,17 +225,19 @@
 //   Activity - the owner's lifecycle feed (AgentActivityTab, self-contained).
 // Reviewer/SM header action: prominent "Apply catalog changes" driven by
 // get_agents_sync_status().dirty (install/uninstall/enable since the last
-// successful Apply), with SyncPill-style pending/failed polling, plus a
-// route-leave + beforeunload guard while dirty. Gated on the skill-reviewer
-// capability (get_agents_caps().review) since apply_agents needs the reviewer
-// set, not System Manager.
+// successful Apply), with SyncPill-style pending/failed polling. jarvis#1062
+// E2E defect (both a beforeunload listener AND an in-SPA route-leave confirm
+// dialog used to nag while dirty): the dirty state lives server-side and
+// nothing is lost by navigating away, so BOTH leave-guards are removed - the
+// "Changes pending" badge above is the only signal now. Gated on the
+// skill-reviewer capability (get_agents_caps().review) since apply_agents
+// needs the reviewer set, not System Manager.
 import { reactive, ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
-import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
 	Badge,
 	Breadcrumbs,
 	Button,
-	Dialog,
 	FeatherIcon,
 	FormControl,
 	ListFooter,
@@ -560,45 +536,19 @@ async function applyCatalog() {
 	}
 }
 
-// ── leave-guard: can-apply + dirty (unapplied catalog changes) ───────────────
-const leaveDialog = reactive({ show: false, next: null });
-
-onBeforeRouteLeave((to, from, next) => {
-	// drilling into /agents/:slug stays inside the agents area - don't nag
-	if (!canApply.value || !sync.dirty || String(to.path || "").startsWith("/agents"))
-		return next();
-	leaveDialog.next = next;
-	leaveDialog.show = true;
-});
-
-function resolveLeave(go) {
-	const n = leaveDialog.next;
-	leaveDialog.next = null; // idempotent: Dialog @close re-fires after buttons
-	leaveDialog.show = false;
-	if (n) n(go);
-}
-
-async function applyAndLeave() {
-	const ok = await applyCatalog();
-	// apply request failed → stay so the SM can retry (error already toasted)
-	resolveLeave(ok);
-}
-
-// hard reloads / tab close while dirty → native browser prompt
-function onBeforeUnload(e) {
-	if (canApply.value && sync.dirty) {
-		e.preventDefault();
-		e.returnValue = ""; // Chrome requires returnValue to show the prompt
-	}
-}
+// jarvis#1062 E2E defect: this file used to carry TWO leave-guards while the
+// catalog was dirty (canApply && sync.dirty) - a beforeunload listener
+// firing the native "leave site?" prompt on ordinary SPA navigation, and an
+// in-SPA onBeforeRouteLeave confirm dialog nagging on route changes. Both
+// removed outright: the dirty state lives server-side (get_agents_sync_status)
+// and nothing is lost by navigating away - the "Changes pending" badge above
+// is the honest, non-blocking signal instead.
 
 onMounted(() => {
 	probeCaps();
 	loadCategories();
-	window.addEventListener("beforeunload", onBeforeUnload);
 });
 onBeforeUnmount(() => {
-	window.removeEventListener("beforeunload", onBeforeUnload);
 	stopSyncPoll();
 });
 </script>

@@ -8,6 +8,7 @@ cover mutation authZ (S3), the deterministic Run+Findings persistence with
 dedupe (O2), and catalog-sync idempotency.
 """
 
+import json
 import unittest
 
 import frappe
@@ -484,6 +485,98 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(
 			frappe.db.get_value(LISTING, "bank-recon-operator", "category"), "Bank and Reconciliation"
 		)
+
+	# ------------------------------------------------------------------ #
+	# jarvis#1063 (jarvis-only half) - config_keys: which agent-specific
+	# installation config keys an agent's bundle actually reads (verified
+	# against jarvis-agents/agents/<slug>/evaluate.py; only close-auditor
+	# reads any today).
+	# ------------------------------------------------------------------ #
+	def test_sync_agent_listings_writes_config_keys_from_the_registry(self):
+		# dot paths - close-auditor/evaluate.py reads these NESTED under a
+		# top-level "materiality" object, not as flat top-level keys.
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "close-auditor", "config_keys")),
+			[
+				"materiality.benchmark_value",
+				"materiality.percentage",
+				"materiality.engagement_risk_level",
+				"materiality.rounding_step",
+			],
+		)
+
+	def test_sync_agent_listings_defaults_config_keys_to_empty(self):
+		"""An agent the registry declares no config_keys for (everyone but
+		close-auditor today) gets [], not null/absent - ConfigForm.vue can
+		always safely parse it."""
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(json.loads(frappe.db.get_value(LISTING, "bank-recon-operator", "config_keys")), [])
+
+	def test_get_agent_returns_config_keys(self):
+		agent_catalog.sync_agent_listings()
+		frappe.set_user(self.owner)
+		try:
+			out = agents_api.get_agent("close-auditor")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(
+			json.loads(out["config_keys"]),
+			[
+				"materiality.benchmark_value",
+				"materiality.percentage",
+				"materiality.engagement_risk_level",
+				"materiality.rounding_step",
+			],
+		)
+
+	# ------------------------------------------------------------------ #
+	# jarvis#1062 E2E defect: turning a schedule off left the last computed
+	# next_run_at in place, so the Configure tab kept showing a stale
+	# "Next run: ..." line after disabling the schedule.
+	# ------------------------------------------------------------------ #
+	def test_set_schedule_clears_next_run_at_when_disabled(self):
+		inst = _install_as(self.owner, "close-auditor")
+		frappe.set_user(self.owner)
+		try:
+			on = agents_api.set_schedule(
+				inst, schedule_enabled=1, schedule_frequency="daily", schedule_time="09:00"
+			)
+			self.assertTrue(on["data"]["next_run_at"])
+			self.assertTrue(frappe.db.get_value(INSTALLATION, inst, "next_run_at"))
+
+			off = agents_api.set_schedule(inst, schedule_enabled=0)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIsNone(off["data"]["next_run_at"])
+		self.assertIsNone(frappe.db.get_value(INSTALLATION, inst, "next_run_at"))
+
+	# ------------------------------------------------------------------ #
+	# jarvis#1063 CRITICAL fix: close-auditor/evaluate.py reads its
+	# materiality inputs NESTED under a top-level "materiality" object
+	# (config["materiality"]["benchmark_value"], etc.), not as flat
+	# top-level keys. set_config is a generic passthrough - this just
+	# guards that the bench does not flatten/mangle a nested payload on
+	# the way to storage, which the delegate reads verbatim.
+	# ------------------------------------------------------------------ #
+	def test_set_config_persists_a_nested_materiality_object_unchanged(self):
+		inst = _install_as(self.owner, "close-auditor")
+		payload = {
+			"company": "Acme Ltd",
+			"materiality": {
+				"benchmark_value": 1000000,
+				"percentage": 5,
+				"engagement_risk_level": "medium",
+				"rounding_step": 100,
+			},
+		}
+		frappe.set_user(self.owner)
+		try:
+			agents_api.set_config(inst, json.dumps(payload))
+		finally:
+			frappe.set_user("Administrator")
+		stored = json.loads(frappe.db.get_value(INSTALLATION, inst, "config"))
+		self.assertEqual(stored, payload)
 
 	# ------------------------------------------------------------------ #
 	# (d4) jarvis#1062 polish: Published operator listings with no dispatch

@@ -25,10 +25,12 @@ vi.mock("@/api/agents", () => agentsApi);
 
 const router = vi.hoisted(() => ({ push: vi.fn() }));
 const route = vi.hoisted(() => ({ hash: "", name: "AgentsList", query: {}, params: {} }));
+// jarvis#1062 E2E defect: AgentsList.vue no longer imports onBeforeRouteLeave
+// (the in-SPA leave-confirm dialog was removed, along with the beforeunload
+// listener - see the no-leave-guard describe block below).
 vi.mock("vue-router", () => ({
 	useRouter: () => router,
 	useRoute: () => route,
-	onBeforeRouteLeave: vi.fn(),
 }));
 
 // jsdom here has no usable localStorage, and useListPage's persisted view
@@ -93,12 +95,14 @@ function selectedTabLabel(w) {
 	return sel.length ? sel[0].text() : null;
 }
 
-async function mountList({ caps = {}, hash = "" } = {}) {
+async function mountList({ caps = {}, hash = "", syncStatus = null } = {}) {
 	route.hash = hash;
 	agentsApi.getAgentsCaps.mockResolvedValue(caps);
 	agentsApi.listAgentsPage.mockResolvedValue({ rows: [], total: 0, has_more: false });
 	api.listAgents.mockResolvedValue([]);
-	api.getAgentsSyncStatus.mockResolvedValue({ pending: false, dirty: false, status: "" });
+	api.getAgentsSyncStatus.mockResolvedValue(
+		syncStatus || { pending: false, dirty: false, status: "" }
+	);
 	const w = mount(AgentsList);
 	await flushPromises();
 	await flushPromises();
@@ -151,5 +155,52 @@ describe("an admin keeps the full four-tab catalog", () => {
 	it("a reviewer (not admin) also keeps the full four-tab set", async () => {
 		const w = await mountList({ caps: { review: true, admin: false } });
 		expect(tabLabels(w)).toEqual(["Featured", "Available", "Installed", "Activity"]);
+	});
+});
+
+// jarvis#1062 E2E defect: a beforeunload listener used to fire the native
+// "leave site?" prompt on ordinary SPA navigation whenever the catalog was
+// dirty (canApply && sync.dirty). Removed outright - nothing is lost by
+// navigating, since the dirty state lives server-side - while the "Changes
+// pending" badge (the honest signal) stays.
+describe("no leave-guard of any kind, even when the catalog is dirty (only the badge)", () => {
+	it("never registers a beforeunload listener for a reviewer with unapplied changes", async () => {
+		const addSpy = vi.spyOn(window, "addEventListener");
+		const w = await mountList({
+			caps: { review: true, admin: false },
+			syncStatus: { pending: false, dirty: true, status: "" },
+		});
+		await flushPromises();
+
+		expect(w.text()).toContain("Changes pending");
+		expect(addSpy.mock.calls.some(([event]) => event === "beforeunload")).toBe(false);
+
+		addSpy.mockRestore();
+	});
+
+	it("never registers one for a non-reviewer either (canApply false)", async () => {
+		const addSpy = vi.spyOn(window, "addEventListener");
+		await mountList({
+			caps: { review: false, admin: false },
+			syncStatus: { pending: false, dirty: true, status: "" },
+		});
+		await flushPromises();
+
+		expect(addSpy.mock.calls.some(([event]) => event === "beforeunload")).toBe(false);
+
+		addSpy.mockRestore();
+	});
+
+	it("renders no leave-confirm Dialog while dirty - the badge is the only signal", async () => {
+		const w = await mountList({
+			caps: { review: true, admin: false },
+			syncStatus: { pending: false, dirty: true, status: "" },
+		});
+		await flushPromises();
+
+		expect(w.text()).toContain("Changes pending");
+		expect(w.text()).not.toContain("Unapplied catalog changes");
+		expect(w.text()).not.toContain("Leave anyway");
+		expect(w.find('[data-label="Leave anyway"]').exists()).toBe(false);
 	});
 });

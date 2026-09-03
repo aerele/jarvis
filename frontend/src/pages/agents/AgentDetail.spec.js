@@ -42,6 +42,10 @@ const routeMock = vi.hoisted(() => ({ hash: "", name: "AgentDetail", query: {}, 
 vi.mock("vue-router", () => ({
 	useRouter: () => router,
 	useRoute: () => routeMock,
+	// jarvis#1062 access-governance merge: AgentDetail.vue now also guards
+	// leaving with an unsaved Access draft (onBeforeRouteLeave) - a no-op
+	// here, since none of this file's tests dirty the Access editor.
+	onBeforeRouteLeave: vi.fn(),
 }));
 
 const sessionMock = vi.hoisted(() => ({ session: { user: "owner@example.com" } }));
@@ -341,5 +345,145 @@ describe("Configure tab: two-column layout on lg+ (jarvis#1062 polish, matches t
 		// Schedule (left) and Configuration (right) both land inside it.
 		expect(grid.text()).toContain("Schedule");
 		expect(grid.text()).toContain("Configuration");
+	});
+});
+
+describe("Configure tab: Next run line follows next_run_at, including after disabling the schedule", () => {
+	it("shows the Next run line when next_run_at is set", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({
+					enabled: 1,
+					schedule_enabled: 1,
+					schedule_frequency: "daily",
+					next_run_at: "2026-09-10 09:00:00",
+				}),
+			})
+		);
+		expect(w.text()).toContain("Next run:");
+	});
+
+	it("hides the Next run line when next_run_at is null (schedule off)", async () => {
+		routeMock.hash = "#configure";
+		const w = await mountDetail(
+			baseAgent({
+				installation: installedInstallation({ enabled: 1, next_run_at: null }),
+			})
+		);
+		expect(w.text()).not.toContain("Next run:");
+	});
+
+	it("re-fetching after a disable clears the line (agents#1062 next_run_at fix)", async () => {
+		// jarvis chat/agents_api.py's set_schedule now nulls next_run_at when the
+		// schedule is turned off; AgentDetail's saveSchedule() reloads via load(),
+		// so the next getAgent() response deciding this is the contract that matters
+		// here, not a client-side mutation of the previous response.
+		routeMock.hash = "#configure";
+		apiAgents.getAgent
+			.mockResolvedValueOnce(
+				baseAgent({
+					installation: installedInstallation({
+						enabled: 1,
+						schedule_enabled: 1,
+						schedule_frequency: "daily",
+						next_run_at: "2026-09-10 09:00:00",
+					}),
+				})
+			)
+			.mockResolvedValueOnce(
+				baseAgent({
+					installation: installedInstallation({
+						enabled: 1,
+						schedule_enabled: 0,
+						next_run_at: null,
+					}),
+				})
+			);
+		apiAgents.getInstallationActivation.mockResolvedValue(null);
+		const w = mount(AgentDetail, { props: { slug: "close-auditor" } });
+		await flushPromises();
+		await flushPromises();
+		expect(w.text()).toContain("Next run:");
+
+		api.setAgentSchedule.mockResolvedValue({
+			ok: true,
+			data: { name: "INST-1", next_run_at: null },
+		});
+		const saveScheduleBtn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Save schedule");
+		await saveScheduleBtn.trigger("click");
+		await flushPromises();
+		await flushPromises();
+
+		expect(w.text()).not.toContain("Next run:");
+	});
+});
+
+describe("jarvis#1062 fix: a #runs deep link survives the pending agent/installation fetch", () => {
+	it("lands on Runs (not Overview) once installation resolves, from a hash requested before load", async () => {
+		routeMock.hash = "#runs";
+		routeMock.query = { run: "RUN-9" };
+		let resolveFetch;
+		apiAgents.getAgent.mockReturnValue(
+			new Promise((res) => {
+				resolveFetch = res;
+			})
+		);
+		apiAgents.getInstallationActivation.mockResolvedValue(null);
+
+		const w = mount(AgentDetail, { props: { slug: "close-auditor" } });
+		await flushPromises();
+		// Still loading - AgentRunsBoard cannot exist yet (no installation to
+		// gate it on), but the hash must not have been thrown away either.
+		expect(w.text()).toContain("Loading agent");
+		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(false);
+		expect(routeMock.query.run).toBe("RUN-9");
+
+		resolveFetch(baseAgent({ installation: installedInstallation({ enabled: 1 }) }));
+		await flushPromises();
+		await flushPromises();
+
+		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(true);
+		// AgentDetail's own job stops at landing on the right tab - it must not
+		// have consumed/cleared the run query itself; that is AgentRunsBoard's
+		// job (see AgentRunsBoard.spec.js), and it needs the query intact when
+		// it mounts.
+		expect(routeMock.query.run).toBe("RUN-9");
+	});
+
+	it("a non-run hash (#overview) is unaffected - resolves immediately, no wait needed", async () => {
+		routeMock.hash = "#overview";
+		routeMock.query = {};
+		let resolveFetch;
+		apiAgents.getAgent.mockReturnValue(
+			new Promise((res) => {
+				resolveFetch = res;
+			})
+		);
+		apiAgents.getInstallationActivation.mockResolvedValue(null);
+
+		const w = mount(AgentDetail, { props: { slug: "close-auditor" } });
+		await flushPromises();
+		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(false);
+
+		resolveFetch(baseAgent({ installation: installedInstallation({ enabled: 1 }) }));
+		await flushPromises();
+		await flushPromises();
+
+		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(false);
+		expect(w.findComponent({ name: "ConfigForm" }).exists()).toBe(false);
+	});
+
+	it("an eventually-invalid hash still falls back to Overview once the load truly settles", async () => {
+		routeMock.hash = "#nonexistent-tab";
+		routeMock.query = {};
+		const w = await mountDetail(
+			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
+		);
+		// "nonexistent-tab" was never going to exist - overview wins once the
+		// load has settled, same as before this fix.
+		expect(w.findComponent({ name: "AgentRunsBoard" }).exists()).toBe(false);
 	});
 });

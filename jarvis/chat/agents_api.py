@@ -428,6 +428,10 @@ def get_agent(agent_slug: str) -> dict:
 		# which governance gates on is_sm further down (never added for a
 		# non-admin, not added-then-popped).
 		"doctypes_required": listing.doctypes_required,
+		# jarvis#1063 (jarvis-only half): which agent-specific config keys this
+		# agent's bundle actually reads - ConfigForm.vue only renders the
+		# corresponding fields when their key is in this list.
+		"config_keys": listing.config_keys,
 		"allowed": 1 if allowed else 0,
 		"install_count": frappe.db.count(INSTALLATION, {"agent": listing.name}),
 		"installation": None,
@@ -1014,7 +1018,10 @@ def set_schedule(
 	schedule_time: str | None = None,
 ) -> dict:
 	"""Set an installed agent's audit schedule — pure DB write (O6: no restart).
-	Recomputes ``next_run_at`` when the schedule is enabled."""
+	Recomputes ``next_run_at`` when the schedule is enabled; CLEARS it when the
+	schedule is turned off (jarvis#1062 E2E defect: it previously kept the last
+	computed value, so the Configure tab kept showing a stale "Next run: ..."
+	after disabling the schedule)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
@@ -1035,6 +1042,8 @@ def set_schedule(
 
 	if doc.schedule_enabled:
 		doc.next_run_at = compute_next_run(doc.schedule_frequency, doc.schedule_time)
+	else:
+		doc.next_run_at = None
 	doc.save()
 	log_activity(
 		agent=doc.agent,
@@ -1050,7 +1059,10 @@ def set_schedule(
 	frappe.db.commit()
 	return {
 		"ok": True,
-		"data": {"name": doc.name, "next_run_at": str(doc.next_run_at or "")},
+		"data": {
+			"name": doc.name,
+			"next_run_at": str(doc.next_run_at) if doc.next_run_at else None,
+		},
 	}
 
 
@@ -1058,8 +1070,18 @@ def set_schedule(
 def set_config(installation: str, config: str) -> dict:
 	"""Persist an installed agent's engagement config JSON — a pure DB write
 	(O6: no restart; the delegate reads it on its installation on the next run).
-	Owner-gated (S3). Validates the payload is a JSON object (keys: benchmark_value,
-	percentage, engagement_risk_level, rounding_step, company, …)."""
+	Owner-gated (S3). Validates the payload is a JSON object.
+
+	Generic and agent-agnostic here on purpose — the SHAPE of "keys" is a
+	per-agent bundle contract, not a bench one (jarvis#1063: the shape lives
+	in each listing's ``config_keys``, dot-paths for a nested key). The
+	universal scope keys are flat top-level (company, fiscal_year, from_date,
+	to_date — agent_scope.py's ``_resolve``); close-auditor's materiality
+	inputs are nested under a top-level ``materiality`` object
+	(``materiality.benchmark_value`` / ``.percentage`` /
+	``.engagement_risk_level`` / ``.rounding_step`` — verified against
+	jarvis-agents/agents/close-auditor/evaluate.py's ``_materiality_pl_balance``,
+	the only bundle that reads any agent-specific config today)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	try:

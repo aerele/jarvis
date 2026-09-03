@@ -379,6 +379,7 @@
 							<ConfigForm
 								class="mt-3"
 								:config="parsedConfig"
+								:config-keys="configKeys"
 								:saving="savingConfig"
 								@save="saveConfig"
 							/>
@@ -398,13 +399,20 @@
 			<!-- ── Admin (SM only; server enforces every call). Listing status is
 			     publisher/catalog state curated in registry.json (it reverts on the
 			     next deploy) - deliberately NOT editable here. ── -->
-			<div v-else-if="tab === 'admin' && isSM" class="shrink-0 px-5 py-6">
+			<!-- v-show, NOT v-else-if like the tabs above it: the Access editor holds
+			     an unsaved draft, and the v-if chain unmounted it on every tab switch,
+			     so a half-finished grant was silently thrown away by a trip to
+			     Overview and back. v-if="isSM" still gates it, so a non-admin renders
+			     no admin markup at all - only an admin pays the cost of keeping it
+			     mounted, and only for the life of this page. -->
+			<div v-if="isSM" v-show="tab === 'admin'" class="shrink-0 px-5 py-6">
 				<!-- Access and Installs are read together - you grant, then look at who
 				     actually has it - and the page had them stacked in a 2xl column that
 				     left most of the width empty. Side by side on lg+, stacked below,
 				     with the gap doing the separating that space-y-10 used to. -->
 				<div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-start">
 					<AgentAccessEditor
+						ref="accessEditor"
 						:slug="props.slug"
 						:roles="agent.allowed_roles || []"
 						:users="agent.allowed_users || []"
@@ -531,7 +539,7 @@
 // (admin-only: the Access editor + installs overview; listing status is
 // registry.json publisher state and intentionally has no tenant control here).
 import { ref, computed, watch, nextTick } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import {
 	Badge,
 	Breadcrumbs,
@@ -618,6 +626,12 @@ function blockedReason(row) {
 // ── data ──────────────────────────────────────────────────────────────────────
 const agent = ref(null); // get_agent payload (§8.3)
 const error = ref("");
+// jarvis#1062 fix: Configure/Runs only exist once `installation` resolves
+// (tabs computed, below) - true only after this first settles (success or
+// error). applyHash() reads this to tell "the hash names a tab that does
+// not exist YET" (still loading - wait) apart from "...that never will"
+// (settled - give up to Overview for real).
+const initialLoadSettled = ref(false);
 
 async function load() {
 	try {
@@ -627,7 +641,10 @@ async function load() {
 		error.value = errMsg(e);
 	}
 }
-load().then(applyHash);
+load().then(() => {
+	initialLoadSettled.value = true;
+	applyHash();
+});
 watch(
 	() => props.slug,
 	() => {
@@ -635,7 +652,11 @@ watch(
 		error.value = "";
 		adminData.value = null;
 		activation.value = null;
-		load().then(applyHash);
+		initialLoadSettled.value = false;
+		load().then(() => {
+			initialLoadSettled.value = true;
+			applyHash();
+		});
 	}
 );
 
@@ -724,7 +745,21 @@ const tabs = computed(() => {
 
 function applyHash() {
 	const h = (route.hash || "").replace(/^#/, "");
-	tab.value = tabs.value.some((t) => t.value === h) ? h : "overview";
+	if (!h) {
+		tab.value = "overview";
+		return;
+	}
+	if (tabs.value.some((t) => t.value === h)) {
+		tab.value = h;
+		return;
+	}
+	// h names a tab that is not in the set RIGHT NOW - Configure/Runs need
+	// `installation`, which is only known once the async get_agent fetch
+	// resolves. Only a settled load makes "not in tabs.value" a real verdict;
+	// until then, leave tab.value alone (the page shows "Loading agent…"
+	// regardless) rather than lock in Overview and drop the requested tab -
+	// load()/the slug watcher re-run applyHash() once settled.
+	if (initialLoadSettled.value) tab.value = "overview";
 }
 function setTab(v) {
 	if (tab.value === v && route.hash === "#" + v) return;
@@ -950,6 +985,10 @@ const needs = computed(() => {
 const readsRecords = computed(() =>
 	agent.value ? parseListField(agent.value.doctypes_required) : []
 );
+// jarvis#1063 (jarvis-only half): which agent-specific config keys this
+// agent's bundle actually reads (get_agent) - gates ConfigForm's
+// agent-specific fields; [] shows its "no additional settings" note.
+const configKeys = computed(() => (agent.value ? parseListField(agent.value.config_keys) : []));
 const defaultScheduleText = computed(() => {
 	let s = {};
 	try {
@@ -1073,6 +1112,35 @@ function onAccessSaved(next) {
 	agent.value.allowed_users = next.allowed_users || [];
 	load(); // re-read `allowed` - an admin can lock themselves out of the user surface
 }
+
+// ── leaving the page with an unsaved access draft ────────────────────────────
+// Keeping the editor mounted saves the draft from a TAB switch; this saves it
+// from a ROUTE change. frappe-ui's confirmDialog, not useConfirm(): its own docs
+// say the frappe-ui-styled list/detail pages (agents among them) use frappe-ui's
+// dialog and the jv- surfaces use the other one - "don't cross the streams".
+const accessEditor = ref(null);
+// Set only for the navigation we have already asked about, so confirming does
+// not re-open the dialog on the re-push below.
+let leaveConfirmed = false;
+
+onBeforeRouteLeave((to) => {
+	if (leaveConfirmed || !accessEditor.value?.dirty) return true;
+	confirmDialog({
+		title: "Discard unsaved access changes?",
+		message:
+			"Your changes to who can use this agent have not been saved. Leaving now discards them.",
+		onConfirm: ({ hideDialog }) => {
+			hideDialog();
+			leaveConfirmed = true;
+			router.push(to.fullPath);
+		},
+	});
+	// Refuse the navigation rather than holding a `next` callback open: a
+	// dismissed dialog (Escape, backdrop) never calls onConfirm, and a guard that
+	// was waiting on that callback would wedge routing for the rest of the
+	// session. Cancelling costs nothing - the user is already where they were.
+	return false;
+});
 
 // ── formatting helpers ────────────────────────────────────────────────────────
 // "9:00:00" (python str(timedelta)) → "09:00" for the TimePicker

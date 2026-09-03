@@ -565,6 +565,12 @@
         "Account",
         "Company"
       ],
+      "config_keys": [
+        "materiality.benchmark_value",
+        "materiality.percentage",
+        "materiality.engagement_risk_level",
+        "materiality.rounding_step"
+      ],
       "rule_tokens": [
         "ca-cl-2b9d",
         "ca-cl-7f31",

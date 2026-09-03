@@ -13,7 +13,7 @@ const apiAgents = vi.hoisted(() => ({ listRunsPage: vi.fn() }));
 vi.mock("@/api/agents", () => apiAgents);
 
 const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
-const routeMock = vi.hoisted(() => ({ query: {} }));
+const routeMock = vi.hoisted(() => ({ hash: "#runs", query: {} }));
 vi.mock("vue-router", () => ({
 	useRouter: () => router,
 	useRoute: () => routeMock,
@@ -95,6 +95,7 @@ function setVisibility(state) {
 beforeEach(() => {
 	vi.clearAllMocks();
 	setVisibility("visible");
+	routeMock.hash = "#runs";
 	routeMock.query = {};
 });
 
@@ -209,23 +210,31 @@ describe("jarvis#1062: ?run=<id> query-param preselection (deep-linked from the 
 		expect(w.findComponent({ name: "FindingsPanel" }).props("run").name).toBe("RUN-0002");
 	});
 
-	it("clears the run param from the URL once applied", async () => {
+	it("clears the run param from the URL once applied, WITHOUT dropping the hash", async () => {
+		// jarvis#1062 fix: router.replace({query}) alone is a partial location
+		// that drops the current hash entirely (verified against real
+		// vue-router - {query} alone resolves to the bare path, no "#runs").
+		// That silently knocked AgentDetail back onto Overview a moment after
+		// landing on Runs, since route.hash changing to "" is exactly what its
+		// hash watcher reads as "go to the default tab".
+		routeMock.hash = "#runs";
 		routeMock.query = { run: "RUN-0002", other: "kept" };
 		apiAgents.listRunsPage.mockResolvedValue(
 			envelope([runRow({ name: "RUN-0001" }), runRow({ name: "RUN-0002" })])
 		);
 		mountBoard();
 		await flushPromises();
-		expect(router.replace).toHaveBeenCalledWith({ query: { other: "kept" } });
+		expect(router.replace).toHaveBeenCalledWith({ hash: "#runs", query: { other: "kept" } });
 	});
 
-	it("falls back to the first row (and still clears the query) when the id isn't in this page", async () => {
+	it("falls back to the first row (and still clears the query, keeping the hash) when the id isn't in this page", async () => {
+		routeMock.hash = "#runs";
 		routeMock.query = { run: "RUN-NOT-LOADED" };
 		apiAgents.listRunsPage.mockResolvedValue(envelope([runRow({ name: "RUN-0001" })]));
 		const w = mountBoard();
 		await flushPromises();
 		expect(w.findComponent({ name: "FindingsPanel" }).props("run").name).toBe("RUN-0001");
-		expect(router.replace).toHaveBeenCalledWith({ query: {} });
+		expect(router.replace).toHaveBeenCalledWith({ hash: "#runs", query: {} });
 	});
 
 	it("is ignored on a later refresh once an explicit selection exists", async () => {

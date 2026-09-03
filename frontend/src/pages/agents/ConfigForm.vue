@@ -5,7 +5,7 @@
 		</p>
 
 		<div class="mt-4 space-y-5">
-			<template v-for="f in CONFIG_FIELD_SET" :key="f.key || f.keys.join('-')">
+			<template v-for="f in visibleFields" :key="f.key || f.keys.join('-')">
 				<!-- Company / Fiscal year: frappe-ui Autocomplete fed by
 				     frappe.desk.search.search_link - the same whitelisted, generic
 				     Link-picker call every other Link field in this app uses
@@ -67,6 +67,10 @@
 					</template>
 				</FormControl>
 			</template>
+
+			<p v-if="!agentSpecificFields.length" class="text-p-xs text-ink-gray-5">
+				This agent has no additional settings.
+			</p>
 		</div>
 
 		<!-- §14 F3: any key outside CONFIG_FIELD_SET (unknown, or an array/object
@@ -80,8 +84,10 @@
 				@update:modelValue="onAdvancedInput"
 			/>
 			<div class="mt-1 text-xs text-ink-gray-5">
-				Enter values as JSON, for example {"company": "Acme Ltd", "benchmark_value":
-				1000000, "percentage": 5}. Form fields above win on matching keys.
+				Enter values as JSON, for example {"company": "Acme Ltd", "materiality":
+				{"pl_balance": 50000}}. Form fields above win on matching keys - a value this page
+				renders a field for (e.g. "materiality": {"benchmark_value": ...}) belongs in that
+				field, not here.
 			</div>
 			<ErrorMessage class="mt-2" :message="advancedError" />
 		</DocSection>
@@ -103,21 +109,47 @@
 // persists via setAgentConfig. An empty field means the key is ABSENT from
 // the saved config, not saved as "" - that is what "leave it to use the
 // default" means server-side.
-import { reactive, ref, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { Autocomplete, Button, ErrorMessage, FormControl } from "frappe-ui";
 import DocSection from "@/components/doc/DocSection.vue";
 import { searchLink } from "@/api";
 import {
-	CONFIG_FIELD_SET,
-	KNOWN_CONFIG_KEYS,
+	SCOPE_CONFIG_FIELDS,
+	AGENT_SPECIFIC_CONFIG_FIELDS,
 	CONFIG_FIELD_LABELS,
 	NUMBER_CONFIG_KEYS,
+	KEY_TO_PATH,
+	getPath,
+	setPath,
+	deletePath,
 } from "@/lib/agentConfigFields";
 
 const props = defineProps({
 	config: { type: Object, default: () => ({}) }, // parsed installation config
+	// jarvis#1063 (jarvis-only half): the current agent's Jarvis Agent Listing
+	// config_keys (get_agent), already parsed to a plain array by the parent.
+	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - the scope fields
+	// (SCOPE_CONFIG_FIELDS) always render regardless.
+	configKeys: { type: Array, default: () => [] },
 	saving: { type: Boolean, default: false },
 });
+
+// The agent-specific fields this agent's config_keys actually names, in
+// CONFIG_FIELD_SET's display order.
+const agentSpecificFields = computed(() =>
+	AGENT_SPECIFIC_CONFIG_FIELDS.filter((f) =>
+		(f.paths || [f.path]).some((p) => props.configKeys.includes(p))
+	)
+);
+// Scope fields first (always), then whichever agent-specific fields apply -
+// the single list the template's v-for renders.
+const visibleFields = computed(() => [...SCOPE_CONFIG_FIELDS, ...agentSpecificFields.value]);
+// jarvis#1063: the key set for THIS agent's rendered fields - not the global
+// CONFIG_FIELD_SET. A key this agent's config_keys does not name (e.g. a
+// stale benchmark_value on a non-close-auditor installation, saved back when
+// every field always rendered) has no control here and must fall through to
+// Advanced (JSON) - seed()/save() key off this.
+const visibleKeys = computed(() => new Set(visibleFields.value.flatMap((f) => f.keys || [f.key])));
 
 const emit = defineEmits(["save"]);
 
@@ -139,18 +171,41 @@ const advancedError = ref("");
 function seed(cfg) {
 	const c = cfg || {};
 	for (const key of Object.keys(form)) {
-		const v = c[key];
+		if (!visibleKeys.value.has(key)) {
+			// no rendered control here - leave it out of `form` entirely so
+			// save() (which only reads visibleKeys) never touches it; it stays
+			// visible and editable in Advanced (JSON) below instead of silently
+			// vanishing.
+			form[key] = "";
+			continue;
+		}
+		const path = KEY_TO_PATH[key] || key;
+		// jarvis#1063 CRITICAL fix: the nested path (e.g.
+		// "materiality.benchmark_value") is the source of truth. A flat
+		// top-level key of the same name (pre-nesting saves) is a MIGRATION
+		// fallback, read only when the nested value is absent - never the
+		// other way round.
+		let v = getPath(c, path);
+		if (v == null && path !== key) v = c[key];
 		form[key] = v == null ? "" : String(v);
 	}
-	const rest = {};
-	for (const [key, value] of Object.entries(c)) {
-		if (!KNOWN_CONFIG_KEYS.has(key)) rest[key] = value;
+	// Advanced (JSON) holds everything NOT covered by a visible field's path -
+	// a deep clone with each visible path (and its flat legacy counterpart,
+	// now migrated into `form` above) removed. deletePath also drops a
+	// now-empty intermediate object (e.g. `materiality`), so an installation
+	// whose only materiality keys are all rendered here does not leave a
+	// stray `{"materiality": {}}` in Advanced.
+	const rest = JSON.parse(JSON.stringify(c));
+	for (const key of visibleKeys.value) {
+		const path = KEY_TO_PATH[key] || key;
+		deletePath(rest, path);
+		if (path !== key) delete rest[key];
 	}
 	advanced.value = JSON.stringify(rest, null, 2);
 	advancedError.value = "";
 }
 
-watch(() => props.config, seed, { immediate: true });
+watch([() => props.config, visibleKeys], () => seed(props.config), { immediate: true });
 
 function onAdvancedInput(v) {
 	advanced.value = v;
@@ -218,14 +273,23 @@ function save() {
 			return;
 		}
 	}
-	// 2) the known fields merge OVER the JSON; an empty field drops its key
-	// rather than saving "" (§14 F3 / round-2 parity, now covering every known
-	// field, not only numeric ones).
-	const merged = { ...base };
-	for (const key of Object.keys(form)) {
+	// 2) the known fields merge OVER the JSON, WRITTEN THROUGH EACH FIELD'S
+	// PATH (jarvis#1063 CRITICAL fix - a flat save of a key the bundle reads
+	// nested, e.g. close-auditor's materiality.*, never reaches the
+	// evaluator). setPath merges into an existing object at that path rather
+	// than replacing it (an existing `materiality.pl_balance` from Advanced
+	// survives a benchmark_value edit); an empty field deletes its path
+	// rather than saving "" (§14 F3 / round-2 parity), pruning `materiality`
+	// entirely once every field under it is cleared. Either way, the
+	// migration is one-directional: a flat legacy key of the same name is
+	// always removed, since the nested path is now the source of truth.
+	const merged = JSON.parse(JSON.stringify(base));
+	for (const key of visibleKeys.value) {
+		const path = KEY_TO_PATH[key] || key;
 		const v = String(form[key] ?? "").trim();
+		if (path !== key) delete merged[key];
 		if (v === "") {
-			delete merged[key];
+			deletePath(merged, path);
 			continue;
 		}
 		if (NUMBER_CONFIG_KEYS.includes(key)) {
@@ -234,9 +298,9 @@ function save() {
 				advancedError.value = `"${CONFIG_FIELD_LABELS[key]}" must be a number.`;
 				return;
 			}
-			merged[key] = n;
+			setPath(merged, path, n);
 		} else {
-			merged[key] = v;
+			setPath(merged, path, v);
 		}
 	}
 	advancedError.value = "";

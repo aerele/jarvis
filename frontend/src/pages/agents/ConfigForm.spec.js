@@ -6,10 +6,28 @@ import { mount, flushPromises } from "@vue/test-utils";
  * user friendly. ConfigForm.vue now renders a REAL form for the known
  * engagement settings (CONFIG_FIELD_SET, @/lib/agentConfigFields) - link
  * pickers for Company/Fiscal year, a date pair, number inputs, a select -
- * always rendered, with the merge semantics unchanged: known fields win on
- * matching keys, an unrecognised key survives untouched in Advanced (JSON),
- * and an empty field means the key is absent from the saved config.
+ * with the merge semantics unchanged: known fields win on matching keys, an
+ * unrecognised key survives untouched in Advanced (JSON), and an empty field
+ * means the key is absent from the saved config.
+ *
+ * jarvis#1063 (jarvis-only half): the scope fields (Company/Fiscal
+ * year/Period) always render; the agent-specific fields (materiality
+ * amount/percentage, risk level, rounding step) render only when their
+ * storage PATH (a dot path for a nested key - close-auditor's evaluate.py
+ * reads them under a top-level `materiality` object) is in the `configKeys`
+ * prop (the listing's config_keys, get_agent, itself dot paths).
+ * mountForm()'s default configKeys covers all four so the pre-existing
+ * "always renders" tests below still describe a close-auditor-shaped agent;
+ * the dedicated "per-agent gating" describe block below covers the subset,
+ * empty and flat-legacy-migration cases.
  */
+
+const ALL_AGENT_SPECIFIC_PATHS = [
+	"materiality.benchmark_value",
+	"materiality.percentage",
+	"materiality.engagement_risk_level",
+	"materiality.rounding_step",
+];
 
 const api = vi.hoisted(() => ({ searchLink: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/api", () => api);
@@ -77,7 +95,9 @@ vi.mock("frappe-ui", () => ({
 import ConfigForm from "./ConfigForm.vue";
 
 function mountForm(config = {}, extraProps = {}) {
-	return mount(ConfigForm, { props: { config, saving: false, ...extraProps } });
+	return mount(ConfigForm, {
+		props: { config, configKeys: ALL_AGENT_SPECIFIC_PATHS, saving: false, ...extraProps },
+	});
 }
 
 function field(w, label) {
@@ -121,16 +141,18 @@ describe("the known-settings form always renders, config empty or not", () => {
 });
 
 describe("existing values pre-fill every field", () => {
-	it("seeds the form from the installation's current config", () => {
+	it("seeds the form from the installation's current config (materiality nested)", () => {
 		const w = mountForm({
 			company: "Acme Ltd",
 			fiscal_year: "2026",
 			from_date: "2026-04-01",
 			to_date: "2027-03-31",
-			benchmark_value: 1000000,
-			percentage: 5,
-			engagement_risk_level: "medium",
-			rounding_step: 100,
+			materiality: {
+				benchmark_value: 1000000,
+				percentage: 5,
+				engagement_risk_level: "medium",
+				rounding_step: 100,
+			},
 		});
 		expect(field(w, "Period from").element.value).toBe("2026-04-01");
 		expect(field(w, "Period to").element.value).toBe("2027-03-31");
@@ -144,7 +166,7 @@ describe("existing values pre-fill every field", () => {
 });
 
 describe("saving produces the right JSON", () => {
-	it("typing values into every field and saving merges them", async () => {
+	it("typing values into every field and saving merges them - materiality NESTED (jarvis#1063 CRITICAL)", async () => {
 		const w = mountForm({});
 		await field(w, "Period from").setValue("2026-04-01");
 		await field(w, "Period to").setValue("2027-03-31");
@@ -157,10 +179,12 @@ describe("saving produces the right JSON", () => {
 		expect(w.emitted("save")[0][0]).toEqual({
 			from_date: "2026-04-01",
 			to_date: "2027-03-31",
-			benchmark_value: 1000000,
-			percentage: 5,
-			engagement_risk_level: "high",
-			rounding_step: 100,
+			materiality: {
+				benchmark_value: 1000000,
+				percentage: 5,
+				engagement_risk_level: "high",
+				rounding_step: 100,
+			},
 		});
 	});
 
@@ -180,13 +204,20 @@ describe("saving produces the right JSON", () => {
 });
 
 describe("clearing a field drops its key", () => {
-	it("clearing a populated field omits it from the saved config", async () => {
-		const w = mountForm({ rounding_step: 100, percentage: 5 });
+	it("clearing a populated field deletes its nested path, siblings under materiality survive", async () => {
+		const w = mountForm({ materiality: { rounding_step: 100, percentage: 5 } });
 		await field(w, "Rounding step").setValue("");
 		await w.find('[data-label="Save configuration"]').trigger("click");
 		const saved = w.emitted("save")[0][0];
-		expect(saved).not.toHaveProperty("rounding_step");
-		expect(saved.percentage).toBe(5);
+		expect(saved.materiality).not.toHaveProperty("rounding_step");
+		expect(saved.materiality.percentage).toBe(5);
+	});
+
+	it("clearing every materiality field drops the now-empty materiality object entirely", async () => {
+		const w = mountForm({ materiality: { rounding_step: 100 } });
+		await field(w, "Rounding step").setValue("");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({});
 	});
 
 	it("re-picking Company to a different value saves the new one, not a stale key", async () => {
@@ -202,6 +233,21 @@ describe("clearing a field drops its key", () => {
 	});
 });
 
+describe("Advanced (JSON) hint text", () => {
+	it("its example uses the NESTED materiality shape, not a flat key the form already renders a field for", () => {
+		// jarvis#1063 CRITICAL follow-up: the old example -
+		// {"benchmark_value": 1000000} - was exactly the flat legacy shape
+		// save() deletes (migration is one-directional, flat -> nested). A
+		// user following the hint verbatim would type a value that vanishes
+		// on save. The example must never again name a key the form itself
+		// covers.
+		const w = mountForm({});
+		const hint = w.text();
+		expect(hint).toContain('"materiality"');
+		expect(hint).not.toContain('"benchmark_value": 1000000');
+	});
+});
+
 describe("an unknown config key survives untouched in Advanced (JSON)", () => {
 	it("seeds an unrecognised key into Advanced, not a form field", () => {
 		const w = mountForm({ company: "Acme Ltd", custom_flag: true, nested: { a: 1 } });
@@ -214,6 +260,120 @@ describe("an unknown config key survives untouched in Advanced (JSON)", () => {
 		const w = mountForm({ custom_flag: true });
 		await field(w, "Rounding step").setValue("50");
 		await w.find('[data-label="Save configuration"]').trigger("click");
-		expect(w.emitted("save")[0][0]).toEqual({ custom_flag: true, rounding_step: 50 });
+		expect(w.emitted("save")[0][0]).toEqual({
+			custom_flag: true,
+			materiality: { rounding_step: 50 },
+		});
+	});
+
+	it("an UNKNOWN sibling under materiality (e.g. pl_balance) survives a rounding_step edit, not replaced", async () => {
+		const w = mountForm({ materiality: { pl_balance: 50000, rounding_step: 100 } });
+		const textarea = w.find("textarea");
+		expect(JSON.parse(textarea.element.value)).toEqual({ materiality: { pl_balance: 50000 } });
+
+		await field(w, "Rounding step").setValue("200");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({
+			materiality: { pl_balance: 50000, rounding_step: 200 },
+		});
+	});
+});
+
+// jarvis#1063 (jarvis-only half): agent-specific fields are gated by the
+// listing's config_keys, matched against each field's storage PATH (a dot
+// path for a nested key) - the scope fields never are.
+describe("per-agent gating via the configKeys prop", () => {
+	it("configKeys=[] (e.g. bank-recon-operator) renders only the scope fields, plus the note", () => {
+		const w = mountForm({}, { configKeys: [] });
+		expect(w.text()).toContain("Company");
+		expect(w.text()).toContain("Fiscal year");
+		expect(w.text()).toContain("Period from");
+		expect(w.text()).toContain("Period to");
+		expect(w.text()).not.toContain("Materiality benchmark amount");
+		expect(w.text()).not.toContain("Materiality percentage");
+		expect(w.text()).not.toContain("Engagement risk level");
+		expect(w.text()).not.toContain("Rounding step");
+		expect(w.text()).toContain("This agent has no additional settings.");
+	});
+
+	it("a partial configKeys (dot paths) renders only the matching agent-specific fields, no note", () => {
+		const w = mountForm(
+			{},
+			{ configKeys: ["materiality.percentage", "materiality.rounding_step"] }
+		);
+		expect(w.text()).toContain("Materiality percentage");
+		expect(w.text()).toContain("Rounding step");
+		expect(w.text()).not.toContain("Materiality benchmark amount");
+		expect(w.text()).not.toContain("Engagement risk level");
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+	});
+
+	it("a bare flat key (no materiality. prefix) in configKeys matches nothing - paths are dot paths, not local keys", () => {
+		const w = mountForm({}, { configKeys: ["percentage"] });
+		expect(w.text()).not.toContain("Materiality percentage");
+		expect(w.text()).toContain("This agent has no additional settings.");
+	});
+
+	it("the full configKeys set (close-auditor) renders every agent-specific field, no note", () => {
+		const w = mountForm({});
+		expect(w.text()).not.toContain("This agent has no additional settings.");
+	});
+
+	it("a stale agent-specific value this agent doesn't declare stays visible in Advanced (JSON), not lost", async () => {
+		// e.g. a materiality.percentage saved on a non-close-auditor installation.
+		// With configKeys=[] the field has no control here - it must NOT
+		// silently vanish (unreadable, unclearable); it surfaces in Advanced
+		// (JSON) instead, same as any other unrecognised key, and round-trips
+		// unchanged on save.
+		const w = mountForm({ materiality: { percentage: 5 } }, { configKeys: [] });
+		const textarea = w.find("textarea");
+		expect(JSON.parse(textarea.element.value)).toEqual({ materiality: { percentage: 5 } });
+		expect(w.text()).not.toContain("Materiality percentage");
+
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({ materiality: { percentage: 5 } });
+	});
+
+	it("saving with configKeys=[] and nothing seeded emits an empty object", async () => {
+		const w = mountForm({}, { configKeys: [] });
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({});
+	});
+});
+
+// jarvis#1063 CRITICAL fix: close-auditor/evaluate.py reads materiality
+// config NESTED, not flat. Installations saved before this fix have it flat
+// at the top level - migrate transparently, one-directional (flat -> nested,
+// never back).
+describe("legacy flat-key migration (materiality.* used to be saved flat)", () => {
+	it("seed: pre-fills the field from a flat legacy key when the nested one is absent", () => {
+		const w = mountForm({ benchmark_value: 750000 });
+		expect(field(w, "Materiality benchmark amount").element.value).toBe("750000");
+	});
+
+	it("seed: the nested value wins over a flat legacy value when both are present", () => {
+		const w = mountForm({ benchmark_value: 1, materiality: { benchmark_value: 2 } });
+		expect(field(w, "Materiality benchmark amount").element.value).toBe("2");
+	});
+
+	it("seed: a flat legacy value does not leak into Advanced (JSON) once migrated into the form", () => {
+		const w = mountForm({ benchmark_value: 750000, custom_flag: true });
+		const textarea = w.find("textarea");
+		expect(JSON.parse(textarea.element.value)).toEqual({ custom_flag: true });
+	});
+
+	it("save: a migrated flat value is written nested, and the flat key is dropped", async () => {
+		const w = mountForm({ benchmark_value: 750000 });
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		const saved = w.emitted("save")[0][0];
+		expect(saved).toEqual({ materiality: { benchmark_value: 750000 } });
+		expect(saved).not.toHaveProperty("benchmark_value");
+	});
+
+	it("save: editing a migrated field and saving writes only the nested path", async () => {
+		const w = mountForm({ percentage: 5 });
+		await field(w, "Materiality percentage").setValue("7");
+		await w.find('[data-label="Save configuration"]').trigger("click");
+		expect(w.emitted("save")[0][0]).toEqual({ materiality: { percentage: 7 } });
 	});
 });
