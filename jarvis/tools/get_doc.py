@@ -1,8 +1,12 @@
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
-from jarvis.tools import require_doctype_and_name
 from jarvis.tools._bulk import _MAX_BATCH
+
+_NO_NAME_MESSAGE = (
+	"Pass name (one document) or names (a non-empty list). For a single "
+	"record like Stock Settings call get_doc with only the doctype."
+)
 
 
 def get_doc(doctype: str, name: str | None = None, names: list | None = None) -> dict:
@@ -13,18 +17,36 @@ def get_doc(doctype: str, name: str | None = None, names: list | None = None) ->
 	Single: returns the document dict.
 	Batch: returns ``{"doctype","docs":[<doc>,...],"count":N}`` (fail-fast: a
 	missing or unreadable name raises, naming the offending record).
+
+	A Single DocType (e.g. Stock Settings) has exactly one document, whose
+	name IS the doctype - there is nothing else to pass. ``name``/``names``
+	are ignored for one: a delegate with nothing sensible to put there
+	commonly sends "" or [], which used to bounce back "names must be a
+	non-empty list of document names" or "unknown Stock Settings: x" instead
+	of just reading the one document that exists.
 	"""
+	if not doctype:
+		raise InvalidArgumentError("doctype is required")
+	if not frappe.db.exists("DocType", doctype):
+		raise InvalidArgumentError(f"unknown doctype: {doctype}")
+
+	if frappe.get_meta(doctype).issingle:
+		return _get_doc_one(doctype, doctype)
+
 	if names is not None:
+		if not isinstance(names, list) or not names:
+			raise InvalidArgumentError(_NO_NAME_MESSAGE)
 		return _get_doc_batch(doctype, names)
 
-	require_doctype_and_name(doctype, name)
+	if not name:
+		raise InvalidArgumentError(_NO_NAME_MESSAGE)
 	return _get_doc_one(doctype, name)
 
 
 def _get_doc_one(doctype: str, name: str) -> dict:
 	"""Existence + per-record read-permission check, then the doc dict."""
 	if not frappe.db.exists(doctype, name):
-		raise InvalidArgumentError(f"unknown {doctype}: {name}")
+		raise InvalidArgumentError(f"No {doctype} named '{name}'. Use get_list to find valid names first.")
 
 	if not frappe.has_permission(doctype, ptype="read", doc=name):
 		raise PermissionDeniedError(f"no read permission on {doctype} {name}")
@@ -35,10 +57,6 @@ def _get_doc_one(doctype: str, name: str) -> dict:
 
 
 def _get_doc_batch(doctype: str, names: list) -> dict:
-	if not doctype:
-		raise InvalidArgumentError("doctype is required")
-	if not isinstance(names, list) or not names:
-		raise InvalidArgumentError("names must be a non-empty list of document names")
 	if len(names) > _MAX_BATCH:
 		raise InvalidArgumentError(f"too many names in one batch (max {_MAX_BATCH})")
 
