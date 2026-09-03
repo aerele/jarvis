@@ -42,6 +42,10 @@ const routeMock = vi.hoisted(() => ({ hash: "", name: "AgentDetail", query: {}, 
 vi.mock("vue-router", () => ({
 	useRouter: () => router,
 	useRoute: () => routeMock,
+	// jarvis#1062 access-governance merge: AgentDetail.vue now also guards
+	// leaving with an unsaved Access draft (onBeforeRouteLeave) - a no-op
+	// here, since none of this file's tests dirty the Access editor.
+	onBeforeRouteLeave: vi.fn(),
 }));
 
 const sessionMock = vi.hoisted(() => ({ session: { user: "owner@example.com" } }));
