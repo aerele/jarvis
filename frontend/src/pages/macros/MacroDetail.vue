@@ -107,10 +107,11 @@
 						<!-- weekly -> weekday name, monthly -> day of month; hidden for
 						     daily. Copies the Frequency control above exactly - jarvis#653.
 						     Monthly's 31 rows overflow this Select's popover with no cap of
-						     its own (frappe-ui's Select, unlike Combobox/Autocomplete/
-						     MultiSelect, sets no max-height on its content) - the fix lives
-						     in src/main.css's [data-slot="content-body"] rule, app-wide,
-						     not here (nothing to add on this control itself). -->
+						     its own (frappe-ui's Select sets no max-height on its content,
+						     unlike Combobox/Autocomplete/MultiSelect) - the fix lives in
+						     src/main.css's [role="listbox"] [data-slot="content-body"]
+						     rule, app-wide for every plain Select, not here (nothing to add
+						     on this control itself). -->
 						<FormControl
 							v-if="form.schedule_frequency !== 'daily'"
 							class="flex-1"
