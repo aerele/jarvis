@@ -19,6 +19,7 @@ LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
 RUN = "Jarvis Agent Run"
 FINDING = "Jarvis Agent Finding"
+ACTIVITY = "Jarvis Agent Activity"
 ALLOWED_ROLE = "Jarvis Agent Allowed Role"
 
 ROLE_X = "Jarvis Agent Test Role X"
@@ -140,8 +141,10 @@ class TestAgentsMarketplace(unittest.TestCase):
 
 	def setUp(self):
 		frappe.set_user("Administrator")
-		# Clean this test's installs/runs/findings so reruns are deterministic.
-		for dt in (FINDING, RUN, INSTALLATION):
+		# Clean this test's installs/runs/findings/activity so reruns are
+		# deterministic (install_agent/log_activity commit; FrappeTestCase's
+		# rollback cannot reclaim them).
+		for dt in (FINDING, RUN, ACTIVITY, INSTALLATION):
 			for owner in (self.owner, self.other, self.admin):
 				for n in frappe.get_all(dt, filters={"owner": owner}, pluck="name"):
 					frappe.delete_doc(dt, n, force=True, ignore_permissions=True)
@@ -1468,3 +1471,85 @@ class TestAgentsMarketplace(unittest.TestCase):
 		for o in (self.owner, self.other):
 			payload = agent_catalog.build_agent_push_payload(owner=o)
 			self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 0)
+
+	# ------------------------------------------------------------------ #
+	# jarvis#1062 - list_agent_activity_page's live run_status join: the
+	# action verb ("Run started") is a point-in-time label; run_status is
+	# the run's CURRENT status, joined in one batched query for the page.
+	# ------------------------------------------------------------------ #
+	def _mk_run(self, owner: str, slug: str, inst: str, *, status: str) -> str:
+		doc = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"agent": slug,
+				"installation": inst,
+				"trigger": "manual",
+				"status": status,
+			}
+		)
+		doc.flags.ignore_permissions = True
+		doc.insert(ignore_permissions=True)
+		frappe.db.set_value(RUN, doc.name, "owner", owner, update_modified=False)
+		frappe.db.commit()
+		return doc.name
+
+	def _mk_activity(self, owner: str, slug: str, inst: str, *, action: str, run: str | None = None) -> str:
+		doc = frappe.get_doc(
+			{
+				"doctype": ACTIVITY,
+				"agent": slug,
+				"agent_title": slug,
+				"installation": inst,
+				"action": action,
+				"run": run or "",
+			}
+		)
+		doc.flags.ignore_permissions = True
+		doc.insert(ignore_permissions=True)
+		frappe.db.set_value(ACTIVITY, doc.name, "owner", owner, update_modified=False)
+		frappe.db.commit()
+		return doc.name
+
+	def test_activity_page_joins_current_run_status(self):
+		inst = self._enable_for(self.owner, "close-auditor")
+		run_still_running = self._mk_run(self.owner, "close-auditor", inst, status="running")
+		run_now_failed = self._mk_run(self.owner, "close-auditor", inst, status="failed")
+
+		act_running = self._mk_activity(
+			self.owner, "close-auditor", inst, action="run_started", run=run_still_running
+		)
+		# The action verb here still reads "Run started" - written at dispatch
+		# time - but the run has SINCE failed. run_status must reflect that,
+		# not the stale action label.
+		act_stale_label = self._mk_activity(
+			self.owner, "close-auditor", inst, action="run_started", run=run_now_failed
+		)
+		act_no_run = self._mk_activity(self.owner, "close-auditor", inst, action="enabled")
+
+		frappe.set_user(self.owner)
+		try:
+			page = agents_api.list_agent_activity_page(agent="close-auditor")
+		finally:
+			frappe.set_user("Administrator")
+
+		by_name = {r["name"]: r for r in page["rows"]}
+		self.assertEqual(by_name[act_running]["run_status"], "running")
+		self.assertEqual(by_name[act_stale_label]["run_status"], "failed")
+		self.assertIsNone(by_name[act_no_run]["run_status"])
+
+	def test_activity_page_run_status_null_when_run_deleted(self):
+		inst = self._enable_for(self.owner, "close-auditor")
+		run = self._mk_run(self.owner, "close-auditor", inst, status="completed")
+		act = self._mk_activity(self.owner, "close-auditor", inst, action="run_completed", run=run)
+
+		frappe.delete_doc(RUN, run, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+		frappe.set_user(self.owner)
+		try:
+			page = agents_api.list_agent_activity_page(agent="close-auditor")
+		finally:
+			frappe.set_user("Administrator")
+
+		row = next(r for r in page["rows"] if r["name"] == act)
+		self.assertIsNone(row["run_status"])
