@@ -195,7 +195,7 @@ class TestRecordStep(FrappeTestCase):
 		_wipe(SLUG)
 		_mk_listing(SLUG)
 		self.key = f"agent:agent-{SLUG}:rs-run"
-		self.run = _mk_run(SLUG, self.owner, self.key)
+		self.run_name = _mk_run(SLUG, self.owner, self.key)
 
 	def tearDown(self):
 		_agent_run_ctx.clear_session_key()
@@ -205,35 +205,37 @@ class TestRecordStep(FrappeTestCase):
 
 	def test_steps_are_numbered_from_one_and_monotonic(self):
 		for label in ("first", "second", "third"):
-			agent_run_steps.record_step(self.run, kind="note", label=label)
-		self.assertEqual([s.seq for s in _steps(self.run)], [1, 2, 3])
-		self.assertEqual([s.label for s in _steps(self.run)], ["first", "second", "third"])
+			agent_run_steps.record_step(self.run_name, kind="note", label=label)
+		self.assertEqual([s.seq for s in _steps(self.run_name)], [1, 2, 3])
+		self.assertEqual([s.label for s in _steps(self.run_name)], ["first", "second", "third"])
 
 	def test_owner_is_pinned_to_the_run_owner_not_the_session_user(self):
 		"""The hook runs impersonated (the run-as user) or as the scheduler's
 		Administrator, so an unpinned row would be invisible on the owner-scoped
 		(if_owner) timeline it exists for."""
 		frappe.set_user("Administrator")
-		agent_run_steps.record_step(self.run, kind="note", label="pinned", owner=self.owner)
-		self.assertEqual(_steps(self.run)[0].owner, self.owner)
+		agent_run_steps.record_step(self.run_name, kind="note", label="pinned", owner=self.owner)
+		self.assertEqual(_steps(self.run_name)[0].owner, self.owner)
 
 	def test_owner_falls_back_to_the_run_owner_when_not_passed(self):
 		"""A caller that forgets ``owner`` must not leak the step to whoever is
 		executing. A step belongs to whoever owns the RUN, always."""
 		frappe.set_user("Administrator")
-		agent_run_steps.record_step(self.run, kind="note", label="no explicit owner")
-		self.assertEqual(_steps(self.run)[0].owner, self.owner)
+		agent_run_steps.record_step(self.run_name, kind="note", label="no explicit owner")
+		self.assertEqual(_steps(self.run_name)[0].owner, self.owner)
 
 	def test_label_and_detail_are_clipped(self):
-		agent_run_steps.record_step(self.run, kind="note", label="L" * 400, detail="D" * 900, status="error")
-		row = _steps(self.run)[0]
+		agent_run_steps.record_step(
+			self.run_name, kind="note", label="L" * 400, detail="D" * 900, status="error"
+		)
+		row = _steps(self.run_name)[0]
 		self.assertEqual(len(row.label), agent_run_steps.LABEL_MAX)
 		self.assertEqual(len(row.detail), agent_run_steps.DETAIL_MAX)
 		self.assertEqual(row.status, "error")
 
 	def test_an_unknown_status_falls_back_to_ok(self):
-		agent_run_steps.record_step(self.run, kind="note", label="x", status="weird")
-		self.assertEqual(_steps(self.run)[0].status, "ok")
+		agent_run_steps.record_step(self.run_name, kind="note", label="x", status="weird")
+		self.assertEqual(_steps(self.run_name)[0].status, "ok")
 
 	def test_a_missing_run_records_nothing_and_does_not_raise(self):
 		self.assertIsNone(agent_run_steps.record_step("", kind="note", label="orphan"))
@@ -241,19 +243,19 @@ class TestRecordStep(FrappeTestCase):
 	def test_a_failing_insert_is_swallowed(self):
 		"""Narration must never be able to fail the run it narrates."""
 		with mock.patch.object(frappe, "get_doc", side_effect=RuntimeError("db down")):
-			self.assertIsNone(agent_run_steps.record_step(self.run, kind="note", label="x"))
+			self.assertIsNone(agent_run_steps.record_step(self.run_name, kind="note", label="x"))
 
 	def test_step_target_reads_the_run_off_the_capability_contract(self):
 		"""The step's run comes from the contract the dispatcher already resolved -
 		that reuse is what keeps a tool call at one run-row read."""
 		cap = _delegate_capability.resolve(self.key)
 		got = agent_run_steps.step_target(cap)
-		self.assertEqual(got["name"], self.run)
+		self.assertEqual(got["name"], self.run_name)
 		self.assertEqual(got["owner"], self.owner)
 
 	def test_step_target_ignores_a_run_that_is_no_longer_running(self):
 		"""A bearer replayed after the run finished must not extend its history."""
-		frappe.db.set_value(RUN, self.run, "status", "completed", update_modified=False)
+		frappe.db.set_value(RUN, self.run_name, "status", "completed", update_modified=False)
 		self.assertIsNone(agent_run_steps.step_target(_delegate_capability.resolve(self.key)))
 
 	def test_step_target_of_a_non_delegate_is_none(self):
@@ -512,7 +514,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 		_wipe(SLUG)
 		_mk_listing(SLUG)
 		self.key = f"agent:agent-{SLUG}:rs-dispatch"
-		self.run = _mk_run(SLUG, self.run_as, self.key)
+		self.run_name = _mk_run(SLUG, self.run_as, self.key)
 
 	def tearDown(self):
 		_agent_run_ctx.clear_session_key()
@@ -528,7 +530,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 	def test_a_delegate_tool_call_lands_one_step(self):
 		res = self._dispatch(self.key, "get_schema", {"doctype": "ToDo"})
 		self.assertTrue(res["ok"], res)
-		rows = _steps(self.run)
+		rows = _steps(self.run_name)
 		self.assertEqual(len(rows), 1, rows)
 		self.assertEqual(rows[0].kind, "tool")
 		self.assertEqual(rows[0].tool, "get_schema")
@@ -541,14 +543,14 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 		almost all of the traffic on this endpoint."""
 		res = self._dispatch("chat-session-with-no-agent-run", "get_schema", {"doctype": "ToDo"})
 		self.assertTrue(res["ok"], res)
-		self.assertEqual(_steps(self.run), [])
+		self.assertEqual(_steps(self.run_name), [])
 
 	def test_a_terminal_run_records_nothing(self):
 		"""Only a RUNNING run has a timeline to extend; a bearer replayed after the
 		run finished must not append to its history."""
-		frappe.db.set_value(RUN, self.run, "status", "completed", update_modified=False)
+		frappe.db.set_value(RUN, self.run_name, "status", "completed", update_modified=False)
 		self._dispatch(self.key, "get_schema", {"doctype": "ToDo"})
-		self.assertEqual(_steps(self.run), [])
+		self.assertEqual(_steps(self.run_name), [])
 
 	def test_a_tool_error_envelope_leaves_an_error_step(self):
 		with mock.patch.object(
@@ -556,7 +558,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 		):
 			res = self._dispatch(self.key, "get_list", {"doctype": "ToDo"})
 		self.assertFalse(res["ok"], res)
-		rows = _steps(self.run)
+		rows = _steps(self.run_name)
 		self.assertEqual(len(rows), 1, rows)
 		self.assertEqual(rows[0].status, "error")
 		self.assertEqual(rows[0].label, "Read ToDo")
@@ -573,7 +575,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 			},
 		):
 			self._dispatch(self.key, "get_list", {"doctype": "ToDo"})
-		row = _steps(self.run)[0]
+		row = _steps(self.run_name)[0]
 		self.assertEqual(row.label, "Read ToDo")
 		self.assertEqual(row.detail, "unknown Report: Foo")
 
@@ -584,7 +586,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 			return_value={"ok": False, "error": {"message": "boom\nTraceback: secret"}},
 		):
 			self._dispatch(self.key, "get_list", {"doctype": "ToDo"})
-		self.assertEqual(_steps(self.run)[0].detail, "boom")
+		self.assertEqual(_steps(self.run_name)[0].detail, "boom")
 
 	def test_a_raising_tool_still_raises_and_still_leaves_an_error_step(self):
 		"""A fault past _run_tool's envelope translation is a real bug: it must
@@ -597,7 +599,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 		with mock.patch.object(api, "_run_tool", side_effect=RuntimeError("boom")):
 			with self.assertRaises(RuntimeError):
 				self._dispatch(self.key, "get_list", {"doctype": "ToDo"})
-		rows = _steps(self.run)
+		rows = _steps(self.run_name)
 		self.assertEqual(len(rows), 1, rows)
 		self.assertEqual(rows[0].status, "error")
 		self.assertEqual(rows[0].tool, "get_list")
@@ -608,7 +610,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 		skip it rather than adding a second row for the same act."""
 		with mock.patch.object(api, "_run_tool", return_value={"ok": True, "data": {}}):
 			self._dispatch(self.key, "record_agent_run", {"findings": []})
-		self.assertEqual(_steps(self.run), [])
+		self.assertEqual(_steps(self.run_name), [])
 
 	def test_a_refused_tool_records_no_step(self):
 		"""A capability refusal never reaches dispatch, so there is no step to
@@ -616,7 +618,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 		res = self._dispatch(self.key, "get_doc", {"doctype": "ToDo", "name": "nope"})
 		self.assertFalse(res["ok"], res)
 		self.assertEqual(res["error"]["code"], "CapabilityDeniedError")
-		self.assertEqual(_steps(self.run), [])
+		self.assertEqual(_steps(self.run_name), [])
 
 	def test_a_delegate_tool_call_reads_the_run_row_exactly_once(self):
 		"""The capability gate and the timeline both need the run row. They share
@@ -634,7 +636,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 			res = self._dispatch(self.key, "get_schema", {"doctype": "ToDo"})
 		self.assertTrue(res["ok"], res)
 		self.assertEqual(len(run_reads), 1, run_reads)
-		self.assertEqual(len(_steps(self.run)), 1)
+		self.assertEqual(len(_steps(self.run_name)), 1)
 
 	def test_an_ordinary_chat_session_costs_one_lookup_and_no_more(self):
 		"""The control: non-agent chat is almost all of this endpoint's traffic. It
@@ -664,7 +666,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 		):
 			res = self._dispatch(self.key, "update_wiki", {"slug": "cash-flow"})
 		self.assertTrue(res["ok"], res)
-		row = _steps(self.run)[0]
+		row = _steps(self.run_name)[0]
 		self.assertEqual(row.kind, "tool")
 		self.assertEqual(row.status, "ok")
 		self.assertEqual(row.label, "Proposed Update Wiki, awaiting confirmation")
@@ -675,7 +677,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 		record_agent_run writes its own step, phrased with the shared `plural`."""
 		from jarvis.tools import record_agent_run as rar
 
-		run_doc = frappe.get_doc(RUN, self.run)
+		run_doc = frappe.get_doc(RUN, self.run_name)
 		run_doc.findings_count = 3
 		run_doc.blocker_count = 0
 		with mock.patch("jarvis.chat.agent_runs.record_delegate_run", return_value=run_doc):
@@ -684,7 +686,7 @@ class TestDispatchHookRecordsSteps(FrappeTestCase):
 				rar.record_agent_run(findings=[], coverage={})
 			finally:
 				_agent_run_ctx.clear_session_key()
-		rows = _steps(self.run)
+		rows = _steps(self.run_name)
 		self.assertEqual(len(rows), 1, rows)
 		self.assertEqual(rows[0].kind, "writeback")
 		self.assertEqual(rows[0].label, "Recorded 3 findings")
@@ -719,12 +721,12 @@ class TestListRunSteps(FrappeTestCase):
 		_wipe(SLUG)
 		_mk_listing(SLUG)
 		self.key = f"agent:agent-{SLUG}:rs-list"
-		self.run = _mk_run(SLUG, self.owner, self.key)
+		self.run_name = _mk_run(SLUG, self.owner, self.key)
 		agent_run_steps.record_step(
-			self.run, kind="dispatched", label="Dispatched to the agent", owner=self.owner
+			self.run_name, kind="dispatched", label="Dispatched to the agent", owner=self.owner
 		)
 		agent_run_steps.record_step(
-			self.run, kind="tool", tool="get_list", label="Read ToDo, 2 rows", owner=self.owner
+			self.run_name, kind="tool", tool="get_list", label="Read ToDo, 2 rows", owner=self.owner
 		)
 
 	def tearDown(self):
@@ -734,7 +736,7 @@ class TestListRunSteps(FrappeTestCase):
 
 	def test_the_owner_reads_their_timeline_in_sequence_order(self):
 		frappe.set_user(self.owner)
-		res = agents_api.list_run_steps(self.run)
+		res = agents_api.list_run_steps(self.run_name)
 		self.assertEqual(res["count"], 2)
 		self.assertEqual([s["kind"] for s in res["steps"]], ["dispatched", "tool"])
 		self.assertEqual([s["seq"] for s in res["steps"]], [1, 2])
@@ -743,33 +745,33 @@ class TestListRunSteps(FrappeTestCase):
 		"""Identical to an unknown run: a stranger must not be able to tell that
 		this run exists, let alone how busy it was."""
 		frappe.set_user(self.stranger)
-		self.assertEqual(agents_api.list_run_steps(self.run), {"steps": [], "count": 0})
+		self.assertEqual(agents_api.list_run_steps(self.run_name), {"steps": [], "count": 0})
 		self.assertEqual(agents_api.list_run_steps("RUN-does-not-exist"), {"steps": [], "count": 0})
 
 	def test_a_jarvis_admin_may_read_someone_elses_run(self):
 		admin = _mk_user("rs-admin@example.com", roles=("Jarvis User", "System Manager"))
 		frappe.set_user(admin)
-		self.assertEqual(agents_api.list_run_steps(self.run)["count"], 2)
+		self.assertEqual(agents_api.list_run_steps(self.run_name)["count"], 2)
 
 	def test_duplicate_stored_seq_is_renumbered_in_the_response(self):
 		"""THE live defect: record_step's MAX(seq)+1 is unlocked, so parallel tool
 		calls land on the same number (2,2,2 then 3,3 on the bench). The stored
 		column may collide; what the UI reads must not."""
 		third = agent_run_steps.record_step(
-			self.run, kind="tool", tool="get_doc", label="Read ToDo T-1", owner=self.owner
+			self.run_name, kind="tool", tool="get_doc", label="Read ToDo T-1", owner=self.owner
 		)
 		# force the collision the race produces, and pin the true order via
 		# occurred_at (the column the response now sorts on)
 		frappe.db.set_value(STEP, third, "seq", 2, update_modified=False)
 		for name, occurred in zip(
-			[s.name for s in _steps_by_seq(self.run)],
+			[s.name for s in _steps_by_seq(self.run_name)],
 			["2026-09-02 10:00:00.000000", "2026-09-02 10:00:01.000000", "2026-09-02 10:00:02.000000"],
 			strict=False,
 		):
 			frappe.db.set_value(STEP, name, "occurred_at", occurred, update_modified=False)
 
 		frappe.set_user(self.owner)
-		res = agents_api.list_run_steps(self.run)
+		res = agents_api.list_run_steps(self.run_name)
 		self.assertEqual([s["seq"] for s in res["steps"]], [1, 2, 3])
 		self.assertEqual(
 			[s["label"] for s in res["steps"]],
@@ -780,7 +782,7 @@ class TestListRunSteps(FrappeTestCase):
 		"""Ordering is occurred_at, not the racy stored seq: a step stamped later
 		reads later even when its seq says otherwise."""
 		frappe.set_user("Administrator")
-		rows = _steps_by_seq(self.run)
+		rows = _steps_by_seq(self.run_name)
 		frappe.db.set_value(
 			STEP, rows[0].name, "occurred_at", "2026-09-02 11:00:00.000000", update_modified=False
 		)
@@ -788,7 +790,7 @@ class TestListRunSteps(FrappeTestCase):
 			STEP, rows[1].name, "occurred_at", "2026-09-02 10:00:00.000000", update_modified=False
 		)
 		frappe.set_user(self.owner)
-		res = agents_api.list_run_steps(self.run)
+		res = agents_api.list_run_steps(self.run_name)
 		self.assertEqual([s["kind"] for s in res["steps"]], ["tool", "dispatched"])
 		self.assertEqual([s["seq"] for s in res["steps"]], [1, 2])
 
