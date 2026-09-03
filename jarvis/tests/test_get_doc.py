@@ -131,6 +131,32 @@ class TestGetDoc(FrappeTestCase):
 		result = get_doc(doctype="Stock Settings", names=[])
 		self.assertEqual(result["name"], "Stock Settings")
 
+	def test_single_doctype_with_names_returns_the_batch_envelope(self):
+		"""Review fix: the Single short-circuit used to return the plain
+		document dict even when `names` was passed, silently ignoring that
+		the caller asked for the batch shape. A non-empty `names` on a
+		Single now gets the same {doctype, docs, count} envelope any other
+		doctype's batch call gets, wrapping that one document - names'
+		CONTENT is still meaningless (a Single has exactly one document,
+		whose name IS the doctype), only its presence switches the shape."""
+		result = get_doc(doctype="Stock Settings", names=["this-name-does-not-exist"])
+		self.assertEqual(result["doctype"], "Stock Settings")
+		self.assertEqual(result["count"], 1)
+		self.assertEqual(len(result["docs"]), 1)
+		self.assertEqual(result["docs"][0]["name"], "Stock Settings")
+
+	def test_single_doctype_without_names_still_returns_the_flat_dict(self):
+		"""The other half of the same fix: `name`/no-args at all must keep
+		the pre-existing flat-dict shape - only an explicit non-empty
+		`names` switches to the batch envelope."""
+		result = get_doc(doctype="Stock Settings")
+		self.assertNotIn("docs", result)
+		self.assertEqual(result["name"], "Stock Settings")
+
+		result = get_doc(doctype="Stock Settings", name="whatever")
+		self.assertNotIn("docs", result)
+		self.assertEqual(result["name"], "Stock Settings")
+
 	def test_permission_check_blocks_unauthorized_user(self):
 		user_email = "docless@example.com"
 		if not frappe.db.exists("User", user_email):

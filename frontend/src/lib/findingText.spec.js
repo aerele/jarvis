@@ -80,6 +80,39 @@ describe("extractTechnicalDetails", () => {
 		expect(details).toEqual([]);
 	});
 
+	it("never mangles a markdown link whose host happens to be capitalised", () => {
+		const { text, details } = extractTechnicalDetails(
+			"See [the policy](https://Example.com/policy) for details."
+		);
+		expect(text).toBe("See [the policy](https://Example.com/policy) for details.");
+		expect(details).toEqual([]);
+	});
+
+	it("never mangles a capitalised host in a protocol-less markdown link target either", () => {
+		const { text, details } = extractTechnicalDetails("See [the policy](Example.com/policy).");
+		expect(text).toBe("See [the policy](Example.com/policy).");
+		expect(details).toEqual([]);
+	});
+
+	it("still extracts a real DocType.field reference sitting next to a markdown link", () => {
+		const { text, details } = extractTechnicalDetails(
+			"See [the policy](https://example.com/policy) - Warehouse.account is empty."
+		);
+		expect(text).not.toContain("Warehouse.account");
+		expect(details).toContainEqual({ label: "Field reference", value: "Warehouse.account" });
+	});
+
+	it("extracts a multi-word DocType.field reference", () => {
+		const { text, details } = extractTechnicalDetails(
+			"Stock Ledger Entry.voucher_no does not match."
+		);
+		expect(text).not.toContain("Stock Ledger Entry.voucher_no");
+		expect(details).toContainEqual({
+			label: "Field reference",
+			value: "Stock Ledger Entry.voucher_no",
+		});
+	});
+
 	it("handles the exact audit-screenshot coverage-note text without throwing, and pulls out both the rule code and the field reference", () => {
 		const raw =
 			"not evaluable: nsv-tieout-7d92: Configure no account<->warehouse mapping is populated for any scoped warehouse (Warehouse.account empty)";

@@ -799,4 +799,20 @@ describe("Breadcrumb: no slug flash while the agent is loading (jarvis#1062 P1-6
 		expect(lastCrumb.text()).toContain("Negative-Stock & Valuation Auditor");
 		expect(lastCrumb.attributes("data-loading")).toBe("false");
 	});
+
+	// Review fix: get_agent failing left `agent` null forever, so the crumb
+	// showed a blank label AND a skeleton that never stopped spinning next to
+	// the error panel below it.
+	it("falls back to the slug and stops the skeleton when the agent fails to load", async () => {
+		apiAgents.getAgent.mockRejectedValue(new Error("Agent not found"));
+		apiAgents.getInstallationActivation.mockResolvedValue(null);
+		const w = mount(AgentDetail, { props: { slug: "negative-stock-valuation-auditor" } });
+		await flushPromises();
+		await flushPromises();
+
+		const crumbs = w.findAll(".crumb");
+		const lastCrumb = crumbs[crumbs.length - 1];
+		expect(lastCrumb.text()).toContain("negative-stock-valuation-auditor");
+		expect(lastCrumb.attributes("data-loading")).toBe("false");
+	});
 });

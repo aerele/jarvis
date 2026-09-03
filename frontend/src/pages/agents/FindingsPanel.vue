@@ -266,11 +266,13 @@
 							     jarvis#1062 P0-2: the machine tokens findingDisplay() lifted
 							     out (rule codes, boolean eval flags, not_evaluable class
 							     counts, DocType.field refs) render ONLY in Technical details
-							     below - never in this primary sentence. -->
+							     below - never in this primary sentence. displayFor(f.name)
+							     reads the precomputed findingDisplayMap entry - one
+							     extraction pass per finding, not one per template read. -->
 							<div
-								v-if="findingDisplay(f).text"
+								v-if="displayFor(f.name).text"
 								class="prose prose-sm max-w-none"
-								v-html="renderMarkdown(findingDisplay(f).text)"
+								v-html="renderMarkdown(displayFor(f.name).text)"
 							/>
 							<div v-else class="text-sm text-ink-gray-5">
 								No further detail recorded.
@@ -308,7 +310,7 @@
 							<!-- jarvis#1062 P0-2/P1-3: rule code, evaluation flags,
 							     not_evaluable class counts and DocType.field references -
 							     collapsed, labelled, monospace. Never inline above. -->
-							<TechnicalDetails class="mt-1" :details="findingDisplay(f).details" />
+							<TechnicalDetails class="mt-1" :details="displayFor(f.name).details" />
 
 							<div class="mt-3 flex items-center gap-2">
 								<Button
@@ -777,6 +779,21 @@ function findingDisplay(f) {
 		all.unshift({ label: "Rule", value: f.rule_id });
 	}
 	return { text, details: all };
+}
+// Review fix: an expanded row's template read findingDisplay(f) 2-3 times
+// (the v-if, the v-html source, and TechnicalDetails' :details prop), each
+// call re-running the regex extraction pass over the same detail_md. Computed
+// once per finding here, keyed by the same f.name the row already keys on;
+// EMPTY_DISPLAY is a static fallback so a template read for a name not (yet)
+// in the map never throws.
+const EMPTY_DISPLAY = Object.freeze({ text: "", details: [] });
+const findingDisplayMap = computed(() => {
+	const map = new Map();
+	for (const f of rows.value) map.set(f.name, findingDisplay(f));
+	return map;
+});
+function displayFor(name) {
+	return findingDisplayMap.value.get(name) || EMPTY_DISPLAY;
 }
 // "Statutory basis: {section} (effective {date}). {disclaimer}" - only the
 // pieces the run recorded

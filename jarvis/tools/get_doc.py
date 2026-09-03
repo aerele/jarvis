@@ -14,16 +14,20 @@ def get_doc(doctype: str, name: str | None = None, names: list | None = None) ->
 
 	Enforces read permission on EACH specific document for the current user.
 
-	Single: returns the document dict.
-	Batch: returns ``{"doctype","docs":[<doc>,...],"count":N}`` (fail-fast: a
-	missing or unreadable name raises, naming the offending record).
-
-	A Single DocType (e.g. Stock Settings) has exactly one document, whose
-	name IS the doctype - there is nothing else to pass. ``name``/``names``
-	are ignored for one: a delegate with nothing sensible to put there
-	commonly sends "" or [], which used to bounce back "names must be a
-	non-empty list of document names" or "unknown Stock Settings: x" instead
-	of just reading the one document that exists.
+	Single: returns the document dict - or, if the caller passed a non-empty
+	``names`` list, the SAME batch envelope as any other doctype
+	(``{"doctype","docs":[<the one doc>],"count":1}``), because a caller that
+	asked for the batch shape must get the batch shape back, not silently a
+	different one it has to special-case. ``name``/an empty or absent
+	``names`` are ignored: a Single DocType (e.g. Stock Settings) has exactly
+	one document, whose name IS the doctype - there is nothing else to pass,
+	and a delegate with nothing sensible to put there commonly sends "" or
+	[], which used to bounce back "names must be a non-empty list of document
+	names" or "unknown Stock Settings: x" instead of just reading the one
+	document that exists.
+	Batch (non-single): returns ``{"doctype","docs":[<doc>,...],"count":N}``
+	(fail-fast: a missing or unreadable name raises, naming the offending
+	record).
 	"""
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
@@ -31,7 +35,15 @@ def get_doc(doctype: str, name: str | None = None, names: list | None = None) ->
 		raise InvalidArgumentError(f"unknown doctype: {doctype}")
 
 	if frappe.get_meta(doctype).issingle:
-		return _get_single(doctype)
+		doc = _get_single(doctype)
+		# names=[...] on a Single is meaningless as a name list (its one
+		# document's name IS the doctype - see docstring), but a caller who
+		# passed it explicitly asked for the BATCH shape and must get it back,
+		# not the flat dict every other Single call returns. names=None/[]
+		# (the common "nothing sensible to pass" case) stays flat.
+		if isinstance(names, list) and names:
+			return {"doctype": doctype, "docs": [doc], "count": 1}
+		return doc
 
 	if names is not None:
 		if not isinstance(names, list) or not names:
