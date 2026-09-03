@@ -322,16 +322,40 @@
 					/>
 				</section>
 
-				<!-- Schedule on the left, Configuration on the right - the same
-				     2-col-on-lg+ pattern as the Admin tab, so the width it claims back
-				     from a stacked max-w-2xl column isn't left empty here either.
-				     Comments moved OFF this tab onto the Run itself (owner decision,
-				     jarvis#1062) - a Note now belongs to what it is actually about. -->
+				<!-- Configuration on the left/primary column, Schedule on the right -
+				     the same 2-col-on-lg+ pattern as the Admin tab (Access left,
+				     Installs right), same section-heading style
+				     (text-base font-medium text-ink-gray-9, matching AgentAccessEditor's
+				     own "Access" heading) and the same lg:items-start so neither column
+				     stretches to the taller one's height - both start at the identical
+				     top edge. Comments moved OFF this tab onto the Run itself (owner
+				     decision, jarvis#1062) - a Note now belongs to what it is actually
+				     about; no divider/empty space is left behind for it. -->
 				<div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-start">
 					<div class="min-w-0">
 						<section>
+							<div class="text-base font-medium text-ink-gray-9">Configuration</div>
+							<!-- mt-2, matching AgentAccessEditor's own heading->content gap
+							     (its "Access" heading is immediately followed by an
+							     mt-2 description) - the Admin tab is the reference. -->
+							<ConfigForm
+								class="mt-2"
+								:config="parsedConfig"
+								:config-keys="configKeys"
+								:saving="savingConfig"
+								@save="saveConfig"
+							/>
+						</section>
+					</div>
+
+					<div class="min-w-0">
+						<section>
 							<div class="text-base font-medium text-ink-gray-9">Schedule</div>
-							<div class="mt-3 space-y-4">
+							<!-- mt-2 for the same reason as Configuration above;
+							     space-y-5 (not -4) to match ConfigForm's own
+							     field-to-field rhythm - one consistent gap across
+							     both columns, not two different densities. -->
+							<div class="mt-2 space-y-5">
 								<Switch
 									label="Run automatically"
 									:modelValue="sched.enabled"
@@ -373,19 +397,6 @@
 									@click="saveSchedule"
 								/>
 							</div>
-						</section>
-					</div>
-
-					<div class="min-w-0">
-						<section>
-							<div class="text-base font-medium text-ink-gray-9">Configuration</div>
-							<ConfigForm
-								class="mt-3"
-								:config="parsedConfig"
-								:config-keys="configKeys"
-								:saving="savingConfig"
-								@save="saveConfig"
-							/>
 						</section>
 					</div>
 				</div>
