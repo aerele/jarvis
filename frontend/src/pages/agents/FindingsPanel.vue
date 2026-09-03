@@ -327,6 +327,10 @@ import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-
 import JvSpinner from "@/components/JvSpinner.vue";
 import Banner from "@/components/Banner.vue";
 import RunStepTimeline from "./RunStepTimeline.vue";
+// Shared, not a local copy: this panel's header pill is one of the surfaces
+// @/lib/agentRunStatus exists to keep in step with the rail and the Activity
+// feed (jarvis#1062). A second table here is exactly the drift it prevents.
+import { STATUS_THEME } from "@/lib/agentRunStatus";
 import { timeAgo, exactDate, formatDate, toLocalMs, fmtElapsed } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
 import * as api from "@/api";
@@ -350,13 +354,6 @@ const emit = defineEmits(["stopped"]);
 
 const router = useRouter();
 
-const STATUS_THEME = {
-	running: "blue",
-	completed: "green",
-	partial: "orange",
-	failed: "red",
-	stopped: "gray",
-};
 const SEVERITY_THEME = { blocker: "red", warning: "orange", note: "gray" };
 const SEVERITY_ORDER = ["blocker", "warning", "note"];
 const SEVERITY_LABEL = { blocker: "Blockers", warning: "Warnings", note: "Notes" };
