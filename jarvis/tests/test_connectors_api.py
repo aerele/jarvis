@@ -209,6 +209,31 @@ class TestAddConnector(_ConnectorApiTestCase):
 		self._connectors.append(out["name"])
 		self.assertEqual(out["last_test_status"], "")
 
+	def test_label_derived_from_preset_when_omitted(self):
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.add_connector(
+			preset="GitHub",
+			base_url="",
+			scope="Personal",
+			credential="tok",
+		)
+		self._connectors.append(out["name"])
+		self.assertEqual(out["label"], "GitHub")
+		self.assertEqual(out["key"], "github")
+
+	def test_label_and_key_derived_from_host_for_custom_url(self):
+		self._set_single("allow_custom_urls", 1)
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.add_connector(
+			preset="Custom URL",
+			base_url="https://mcp.example.com/mcp",
+			scope="Personal",
+			credential="tok",
+		)
+		self._connectors.append(out["name"])
+		self.assertEqual(out["label"], "mcp.example.com")
+		self.assertEqual(out["key"], "mcp_example_com")
+
 
 class TestListConnectors(_ConnectorApiTestCase):
 	def test_never_returns_credential_and_splits_shared_vs_mine(self):

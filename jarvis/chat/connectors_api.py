@@ -52,7 +52,9 @@ two flags for callers that only have the API (e.g. a stale boot cache).
 from __future__ import annotations
 
 import json
+import re
 import time
+from urllib.parse import urlparse
 
 import frappe
 from frappe import _
@@ -150,6 +152,15 @@ def _over_test_rate_limit(user: str) -> bool:
 def _clip(text: str, length: int) -> str:
 	text = text or ""
 	return text if len(text) <= length else text[:length]
+
+
+def _slug(text: str) -> str:
+	"""Lowercase [a-z0-9_] slug used as a Custom URL connector's uniqueness key
+	when the SPA does not send one (it derives from the host, e.g.
+	``mcp.example.com`` -> ``mcp_example_com``). The controller's own
+	``_normalize_key`` re-validates this, so an empty result fails cleanly there
+	with "Connector Key is required" rather than saving a keyless row."""
+	return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
 
 
 def _parse_json(raw, default):
@@ -374,11 +385,11 @@ def list_connectors() -> dict:
 @frappe.whitelist()
 @require_jarvis_user
 def add_connector(
-	label: str,
 	preset: str,
 	base_url: str,
 	scope: str,
 	credential: str,
+	label: str | None = None,
 	key: str | None = None,
 ) -> dict:
 	"""Create a connector. Never marks it Passed — a fresh row's
@@ -388,7 +399,15 @@ def add_connector(
 	controller's ``_guard_shared_scope`` (only the admin tier may create a
 	Shared row) apply exactly as they do from the Desk — a plain user asking
 	for ``scope="Shared"`` fails cleanly with the controller's own
-	``frappe.PermissionError``, not a custom message here."""
+	``frappe.PermissionError``, not a custom message here.
+
+	``label`` is OPTIONAL: the SPA no longer asks for a name, so when it is
+	omitted the display label is derived here — the preset's own name for a
+	built-in preset, or the base URL's hostname for a Custom URL. ``key`` (the
+	uniqueness slug the agent passes) is likewise derived: the preset's fixed
+	key, or a slug of the Custom URL host. Uniqueness is then enforced on that
+	key by the controller (one per app for Shared, one per app per user for
+	Personal), so a user cannot connect the same app twice."""
 	label = (label or "").strip()
 	preset = (preset or "").strip()
 	scope = (scope or "").strip()
@@ -408,18 +427,21 @@ def add_connector(
 				)
 			)
 		resolved_base_url = (base_url or "").strip()
+		host = (urlparse(resolved_base_url).hostname or "").strip()
+		resolved_key = (key or _slug(host)).strip()
+		resolved_label = label or host or _("Custom connector")
 	else:
 		# Presets are pinned to the vendor's own endpoint — a caller's base_url
 		# is ignored entirely for anything but Custom URL.
 		resolved_base_url = _PRESET_BASE_URLS[preset]
-
-	resolved_key = (key or _PRESET_KEYS.get(preset) or "").strip()
+		resolved_key = (key or _PRESET_KEYS.get(preset) or "").strip()
+		resolved_label = label or preset
 
 	doc = frappe.get_doc(
 		{
 			"doctype": CONNECTOR,
 			"key": resolved_key,
-			"label": label,
+			"label": resolved_label,
 			"preset": preset,
 			"base_url": resolved_base_url,
 			"scope": scope,
