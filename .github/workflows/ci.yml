@@ -132,10 +132,25 @@ jobs:
       - name: node:test (Desk widget + PWA lib)
         env:
           NODE_OPTIONS: --unhandled-rejections=strict
-        # These two suites are plain node:test with only sibling-module imports (no npm deps),
-        # so they run from the repo root with bare node - no `npm ci` needed.
+        # These suites are plain node:test with only sibling-module imports (no npm deps),
+        # so they run from the repo root with bare node - no `npm ci` needed. They were run by
+        # NOTHING in CI before, which is exactly how a Desk-widget confirmation-card ordering
+        # bug (a dropped field that renumbered a typed "confirm N" onto the wrong ERP write)
+        # shipped under a green build. Gate them here.
+        #
+        # Each glob is `dir/*.test.mjs` - NOT recursive - so it covers only *.test.mjs files
+        # sitting directly in that one directory, never a subdirectory's. jarvis/public/js/
+        # has two: jarvis_onboarding_banner.test.mjs directly in it (the same gap as the
+        # widget's, for the Desk nudge bundle - it `require()`s the bundle's CommonJS export
+        # guard rather than a plain sibling import, see that file's own comment) and
+        # pump_fence.test.mjs under shared/, which needs its own explicit pattern for exactly
+        # this reason - it went ungated for a while after jarvis/public/js/*.test.mjs was
+        # added, on the same silent-mismatch shape this whole job exists to close. A NEW
+        # subdirectory under jarvis/public/js/ with its own *.test.mjs needs the same: add its
+        # own line/pattern here, do not assume an existing glob already reaches it.
         run: |
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
+          node --test jarvis/public/js/*.test.mjs jarvis/public/js/shared/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
   # Builds BOTH deploy artifacts (the /jarvis SPA and the /jarvis-mobile PWA) on Node
