@@ -23,8 +23,19 @@
 
 import { reactive, ref, computed } from "vue";
 
-// The four Details-step inputs.
-export const BILLING_FIELDS = ["contact", "address", "city", "gstin"];
+// The Details-step billing inputs. State + Country drive India Compliance's place
+// of supply (State is a Select of Indian states when Country is India); the books
+// side maps them to a GST state code / Overseas.
+export const BILLING_FIELDS = [
+	"contact",
+	"address",
+	"address2",
+	"city",
+	"state",
+	"pincode",
+	"country",
+	"gstin",
+];
 
 // The two IDENTITY inputs (work email, company). They are not billing fields and
 // they carry no provenance, but they belong in the same snapshot for one blunt
@@ -43,7 +54,11 @@ export const IDENTITY_FIELDS = ["email", "company"];
 export const REQUEST_KEY = {
 	contact: "contact_number",
 	address: "address_line1",
+	address2: "address_line2",
 	city: "city",
+	state: "state",
+	pincode: "pincode",
+	country: "country",
 	gstin: "gstin",
 };
 
@@ -91,6 +106,8 @@ function fieldValuesFromDefaults(data) {
 		contact: (contact.phone || "").trim(),
 		address: (addr.address_line1 || "").trim(),
 		city: (addr.city || "").trim(),
+		state: (addr.state || "").trim(),
+		country: (addr.country || "").trim(),
 		gstin: (addr.gstin || "").trim(),
 	};
 }
@@ -103,6 +120,8 @@ function fieldValuesFromSummary(s) {
 		contact: (s.contact_number || "").trim(),
 		address: (s.address_line1 || "").trim(),
 		city: (s.city || "").trim(),
+		state: (s.state || "").trim(),
+		country: (s.country || "").trim(),
 		gstin: (s.gstin || "").trim(),
 	};
 }
@@ -125,7 +144,14 @@ export function useBillingDetails(opts = {}) {
 	const fields = reactive({
 		contact: { value: "", source: "empty", source_company: "", last_auto_value: "" },
 		address: { value: "", source: "empty", source_company: "", last_auto_value: "" },
+		address2: { value: "", source: "empty", source_company: "", last_auto_value: "" },
 		city: { value: "", source: "empty", source_company: "", last_auto_value: "" },
+		state: { value: "", source: "empty", source_company: "", last_auto_value: "" },
+		pincode: { value: "", source: "empty", source_company: "", last_auto_value: "" },
+		// Country defaults to India (this is an India-first GST product) so the value
+		// is actually captured, not just displayed — the field is required. Kept at
+		// source "empty" so an ERP company default or a resumed snapshot still wins.
+		country: { value: "India", source: "empty", source_company: "", last_auto_value: "" },
 		gstin: { value: "", source: "empty", source_company: "", last_auto_value: "" },
 	});
 
@@ -136,6 +162,34 @@ export function useBillingDetails(opts = {}) {
 	// deliberately dumb: last write wins, no provenance, because unlike the billing
 	// fields nothing auto-fills these behind the customer's back.
 	const identity = reactive({ email: "", company: "" });
+
+	// Invoicing Details: the party the GST invoice is raised to. Optional overrides — blank means
+	// the invoice falls back to the customer's own company (identity.company) + account email. Simple
+	// values (no ERP-default provenance), persisted + restored like identity so a checkout round
+	// trip keeps them.
+	const invoicing = reactive({ company_name: "", email: "" });
+	// The invoicing company name + email DEFAULT to the chosen company + work email and follow them,
+	// until the customer edits that invoicing field — then it is user-owned and stops auto-tracking.
+	let invoicingCompanyUserSet = false;
+	let invoicingEmailUserSet = false;
+	function setInvoicing(company_name, email) {
+		if (company_name !== undefined) {
+			invoicing.company_name = company_name == null ? "" : String(company_name);
+			invoicingCompanyUserSet = true;
+		}
+		if (email !== undefined) {
+			invoicing.email = email == null ? "" : String(email);
+			invoicingEmailUserSet = true;
+		}
+		persist();
+	}
+	// Mirror the company + work email into the invoicing party, unless the customer overrode them.
+	// The view calls this whenever the company / work email changes — INCLUDING the prefilled
+	// defaults on mount, which is why the default must live here and not in setIdentity.
+	function syncInvoicingDefaults(company, email) {
+		if (!invoicingCompanyUserSet) invoicing.company_name = (company || "").trim();
+		if (!invoicingEmailUserSet) invoicing.email = (email || "").trim();
+	}
 	// No contact-consent state here any more: the Details-step "okay to contact
 	// me" checkbox was folded into the required T&C acceptance on Review & Pay
 	// (owner decision 2026-08-14), so consent rides start_signup as a literal
@@ -243,10 +297,16 @@ export function useBillingDetails(opts = {}) {
 				JSON.stringify({
 					contact: fields.contact.value,
 					address: fields.address.value,
+					address2: fields.address2.value,
 					city: fields.city.value,
+					state: fields.state.value,
+					pincode: fields.pincode.value,
+					country: fields.country.value,
 					gstin: fields.gstin.value,
 					email: identity.email,
 					company: identity.company,
+					invoice_company_name: invoicing.company_name,
+					invoice_email: invoicing.email,
 					// Stamped on every write so restore() can bound how long this PII
 					// lives, whatever happens to the session that wrote it.
 					saved_at: now(),
@@ -304,6 +364,17 @@ export function useBillingDetails(opts = {}) {
 				identity[name] = v;
 				any = true;
 			}
+		}
+		// Invoicing overrides restore into whatever is still blank (like identity, no provenance).
+		if (d && d.invoice_company_name && !invoicing.company_name) {
+			invoicing.company_name = d.invoice_company_name;
+			invoicingCompanyUserSet = true; // a resumed value must not be clobbered by a company change
+			any = true;
+		}
+		if (d && d.invoice_email && !invoicing.email) {
+			invoicing.email = d.invoice_email;
+			invoicingEmailUserSet = true;
+			any = true;
 		}
 		// A `contact_consent` key from a snapshot written by an older build is
 		// simply ignored: the consent checkbox no longer exists (it lives inside
@@ -369,6 +440,16 @@ export function useBillingDetails(opts = {}) {
 				any = true;
 			}
 		}
+		if (summary.company_name) {
+			invoicing.company_name = String(summary.company_name);
+			invoicingCompanyUserSet = true; // server truth is authoritative; do not auto-track after
+			any = true;
+		}
+		if (summary.email) {
+			invoicing.email = String(summary.email);
+			invoicingEmailUserSet = true;
+			any = true;
+		}
 		if (summary.source_company) sourceCompany.value = String(summary.source_company);
 		if (summary.source_address) sourceAddress.value = String(summary.source_address);
 		if (any) {
@@ -392,6 +473,12 @@ export function useBillingDetails(opts = {}) {
 			if (name === "gstin") v = v.toUpperCase();
 			if (v) out[REQUEST_KEY[name]] = v;
 		}
+		// Invoicing Details party (admin's _normalize_billing maps company_name -> billing_company_name,
+		// email -> billing_email). Blank => omitted, so admin falls back to the customer's own company.
+		const invCompany = (invoicing.company_name || "").trim();
+		if (invCompany) out.company_name = invCompany;
+		const invEmail = (invoicing.email || "").trim();
+		if (invEmail) out.email = invEmail;
 		if (Object.keys(out).length) {
 			if (sourceCompany.value) out.source_company = sourceCompany.value;
 			if (sourceAddress.value) out.source_address = sourceAddress.value;
@@ -404,9 +491,15 @@ export function useBillingDetails(opts = {}) {
 	const reviewRows = computed(() => {
 		const b = buildBilling();
 		const labels = {
+			company_name: "Invoicing company",
+			email: "Invoicing email",
 			contact_number: "Contact",
 			address_line1: "Billing address",
+			address_line2: "Address line 2",
 			city: "City",
+			state: "State",
+			pincode: "Pincode",
+			country: "Country",
 			gstin: "GSTIN",
 		};
 		return Object.keys(labels)
@@ -422,6 +515,9 @@ export function useBillingDetails(opts = {}) {
 		fields,
 		identity,
 		setIdentity,
+		invoicing,
+		setInvoicing,
+		syncInvoicingDefaults,
 		finish,
 		billingSaved,
 		sourceCompany,

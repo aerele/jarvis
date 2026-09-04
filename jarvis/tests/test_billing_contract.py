@@ -16,7 +16,7 @@ from jarvis import admin_client
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "billing_contract" / "billing_snapshot.json"
 # sha256 of the shared billing_snapshot.json; the admin twin pins the same value.
-_FIXTURE_SHA = "c370ecf920f61212f2f3f2359f28fca375a8e417573daabb6f735d6d222e03a2"
+_FIXTURE_SHA = "95b5460b850e45bc1c8c3de198f7ddd74d747daa541a0d3b6f16984d46c2ddc1"
 
 
 class TestBillingContract(FrappeTestCase):
