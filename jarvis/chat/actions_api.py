@@ -652,7 +652,10 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 				record["tool"],
 				record["args"],
 				result,
-				action_outcome="confirmed" if ok else "failed",
+				# envelope_ok unwraps a connector tool's inner {ok:false} so a blocked/
+				# denied connector call reads "failed", consistent with its receipt
+				# status; non-connector tools keep the outer ok.
+				action_outcome="confirmed" if api.envelope_ok(record["tool"], result) else "failed",
 			)
 		except Exception:
 			frappe.log_error(
@@ -800,7 +803,10 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 				record["tool"],
 				record["args"],
 				result,
-				action_outcome="confirmed" if ok else "failed",
+				# envelope_ok unwraps a connector tool's inner {ok:false} so a blocked/
+				# denied connector call reads "failed", consistent with its receipt
+				# status; non-connector tools keep the outer ok.
+				action_outcome="confirmed" if api.envelope_ok(record["tool"], result) else "failed",
 			)
 		except Exception:
 			frappe.log_error(

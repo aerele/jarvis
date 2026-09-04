@@ -562,7 +562,10 @@ def persist_tool_receipt(
 		# stays empty (a valid Select option) rather than a misleading completed/error.
 		status = ""
 	else:
-		status = "completed" if result.get("ok") else "error"
+		# envelope_ok unwraps a connector tool's inner {ok:false} (a blocked/denied/
+		# failed connector call), so its chip reads "error" not a false "completed";
+		# every other tool keeps the outer envelope's ok verbatim.
+		status = "completed" if envelope_ok(tool, result) else "error"
 
 	# Entity stamping (org wiki): which doc this call touched, so wiki nudges
 	# can read a turn's entities off the receipt rows. Lazy + guarded: a
@@ -1474,6 +1477,48 @@ def _translate_write_error(e: Exception, mark: int) -> dict | None:
 	return _error(code, message, detail=detail, hint=_hint_for(code, detail))
 
 
+# Tools that never raise and return their OWN {ok: false} envelope as the tool's
+# data - so the outer {ok: true, data} envelope (the tool DISPATCHED) hides the
+# real outcome. The audit trail and the receipt chip must reflect the INNER
+# outcome for these, or an ssrf_blocked / action_denied / transport_error attempt
+# is filed as a success. Kept deliberately narrow so every other tool is untouched.
+_ENVELOPE_TOOLS = frozenset({"call_connector"})
+
+
+def envelope_ok(tool: str, result) -> bool:
+	"""Effective success of a completed tool call, for the audit line and the
+	receipt chip. Normally the OUTER envelope's ``ok`` (did the tool dispatch); for
+	an :data:`_ENVELOPE_TOOLS` tool it is the INNER ``data.ok`` (did the connector
+	call itself succeed), so a blocked/denied/failed attempt is not shown as a
+	success. Non-envelope tools are unchanged. ``result`` is the outer
+	``{ok, data}`` envelope."""
+	outer = bool(isinstance(result, dict) and result.get("ok"))
+	if not outer or tool not in _ENVELOPE_TOOLS:
+		return outer
+	data = result.get("data")
+	if isinstance(data, dict) and "ok" in data:
+		return bool(data.get("ok"))
+	return outer
+
+
+def _record_tool_audit(tool: str, args: dict, data) -> None:
+	"""Audit a completed (non-raising) tool. ``data`` is the tool's OWN return. For
+	an :data:`_ENVELOPE_TOOLS` tool whose data is itself an ``{ok: false}`` envelope,
+	record the connector's own failure (code + message) instead of a false success;
+	every other tool records ok=True with its result exactly as before."""
+	if tool in _ENVELOPE_TOOLS and isinstance(data, dict) and data.get("ok") is False:
+		err = data.get("error") if isinstance(data.get("error"), dict) else {}
+		audit.record(
+			tool=tool,
+			args=args,
+			ok=False,
+			error_code=err.get("code") or "connector_error",
+			error_message=err.get("message") or "",
+		)
+		return
+	audit.record(tool=tool, args=args, ok=True, result=data)
+
+
 def _dispatch_and_wrap(tool: str, args: dict, is_write: bool) -> dict:
 	"""Dispatch + translate exceptions into the ``{ok, data}`` / ``{ok, error}``
 	envelope + audit write tools. This is the shared core of ``_run_tool``'s
@@ -1524,7 +1569,7 @@ def _dispatch_and_wrap(tool: str, args: dict, is_write: bool) -> dict:
 		except Exception:
 			pass
 	if is_write:
-		audit.record(tool=tool, args=args, ok=True, result=data)
+		_record_tool_audit(tool, args, data)
 	return {"ok": True, "data": data}
 
 
