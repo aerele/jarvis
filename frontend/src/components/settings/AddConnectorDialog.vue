@@ -55,7 +55,7 @@
 						@click="runTest"
 					/>
 					<span v-if="testState.status === 'passed'" class="text-sm text-ink-green-3">
-						Reachable, {{ testState.tools.length }}
+						Connected, {{ testState.tools.length }}
 						{{ testState.tools.length === 1 ? "tool" : "tools" }} found
 					</span>
 					<span v-else-if="testState.status === 'failed'" class="text-sm text-ink-red-4">
@@ -96,7 +96,7 @@
 							<label
 								v-for="a in filteredReadOnly"
 								:key="a.action"
-								class="flex items-start justify-between gap-3 rounded px-2 py-1.5 hover:bg-surface-gray-2"
+								class="flex cursor-pointer items-start justify-between gap-3 rounded px-2 py-1.5 hover:bg-surface-gray-2"
 							>
 								<span class="min-w-0">
 									<span class="block truncate text-sm text-ink-gray-8">{{
@@ -124,7 +124,7 @@
 							<label
 								v-for="a in filteredWrites"
 								:key="a.action"
-								class="flex items-start justify-between gap-3 rounded px-2 py-1.5 hover:bg-surface-gray-2"
+								class="flex cursor-pointer items-start justify-between gap-3 rounded px-2 py-1.5 hover:bg-surface-gray-2"
 							>
 								<span class="min-w-0">
 									<span class="flex items-center gap-1.5">

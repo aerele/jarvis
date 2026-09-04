@@ -2,9 +2,24 @@
 	<SettingsPane
 		title="Connectors"
 		:description="`Give ${agentName} access to other tools like GitHub, Linear or Stripe.`"
-		:error="loadError"
 	>
-		<div v-if="loading && !loaded" class="grid place-items-center py-10">
+		<!-- Load failure keeps its own inline recovery rather than the pane-level
+		     error slot, which is reserved for action errors (UsageAdminPane's
+		     pattern) — showing the empty-state cards on a failed load would read
+		     as "you have no connectors" instead of "we couldn't load them". -->
+		<div v-if="loadError" class="flex flex-col items-center gap-3 py-12 text-center">
+			<FeatherIcon name="alert-triangle" class="size-8 text-ink-gray-4" />
+			<span class="text-base text-ink-gray-6">Could not load connectors.</span>
+			<Button
+				variant="subtle"
+				label="Retry"
+				iconLeft="refresh-cw"
+				:loading="loading"
+				@click="load"
+			/>
+		</div>
+
+		<div v-else-if="loading && !loaded" class="grid place-items-center py-10">
 			<JvSpinner />
 		</div>
 
@@ -38,7 +53,8 @@
 						:key="row.name"
 						:row="row"
 						:can-manage="isAdmin"
-						:acting="acting === row.name"
+						:testing="testingRow === row.name"
+						:toggling="togglingRow === row.name"
 						@test="test(row)"
 						@edit="openEdit(row)"
 						@delete="confirmDelete(row)"
@@ -67,9 +83,7 @@
 					class="flex flex-col items-center gap-1 rounded-lg border border-dashed py-8 text-center"
 				>
 					<FeatherIcon name="link-2" class="size-6 text-ink-gray-4" />
-					<div class="text-sm text-ink-gray-6">
-						No personal connectors yet. Add one to let {{ agentName }} use it in chat.
-					</div>
+					<div class="text-sm text-ink-gray-6">No personal connectors yet.</div>
 				</div>
 				<div v-else class="flex flex-col gap-2">
 					<ConnectorRow
@@ -77,7 +91,8 @@
 						:key="row.name"
 						:row="row"
 						:can-manage="true"
-						:acting="acting === row.name"
+						:testing="testingRow === row.name"
+						:toggling="togglingRow === row.name"
 						@test="test(row)"
 						@edit="openEdit(row)"
 						@delete="confirmDelete(row)"
@@ -119,21 +134,25 @@ import AddConnectorDialog from "@/components/settings/AddConnectorDialog.vue";
 import ConnectorRow from "@/components/settings/ConnectorRow.vue";
 import { deleteConnector, listConnectors, testConnector, updateConnector } from "@/api";
 import { agentName } from "@/branding";
-import { errMessage, errHtml } from "@/lib/errors";
+import { errHtml } from "@/lib/errors";
 
 const isAdmin = !!window.is_system_manager || !!window.is_jarvis_admin;
 
 const loading = ref(false);
 const loaded = ref(false);
-const loadError = ref("");
+const loadError = ref(false);
 const shared = ref([]);
 const mine = ref([]);
 const allowCustomUrls = ref(true);
-const acting = ref(""); // row name mid Test/toggle, for the per-row spinner state
+// Two independent per-row flags — a Test press only ever sets testingRow, a
+// Switch flip only ever sets togglingRow, so neither control's spinner reads
+// the other action's state.
+const testingRow = ref("");
+const togglingRow = ref("");
 
 async function load() {
 	loading.value = true;
-	loadError.value = "";
+	loadError.value = false;
 	try {
 		const res = await listConnectors();
 		shared.value = res.shared || [];
@@ -141,7 +160,7 @@ async function load() {
 		allowCustomUrls.value = !!res.allow_custom_urls;
 		loaded.value = true;
 	} catch (e) {
-		loadError.value = errMessage(e, "Could not load connectors.");
+		loadError.value = true;
 	} finally {
 		loading.value = false;
 	}
@@ -167,7 +186,7 @@ function onSaved() {
 
 // ── row actions ──────────────────────────────────────────────────────────
 async function test(row) {
-	acting.value = row.name;
+	testingRow.value = row.name;
 	try {
 		const res = await testConnector(row.name);
 		row.last_test_status = res && res.ok ? "Passed" : "Failed";
@@ -181,14 +200,14 @@ async function test(row) {
 	} catch (e) {
 		toast.error(errHtml(e));
 	} finally {
-		acting.value = "";
+		testingRow.value = "";
 	}
 }
 
 async function toggleEnabled(row, value) {
 	const prev = row.enabled;
 	row.enabled = value;
-	acting.value = row.name;
+	togglingRow.value = row.name;
 	try {
 		await updateConnector(row.name, { enabled: value ? 1 : 0 });
 		toast.success(value ? "Connector enabled" : "Connector disabled");
@@ -196,7 +215,7 @@ async function toggleEnabled(row, value) {
 		row.enabled = prev;
 		toast.error(errHtml(e));
 	} finally {
-		acting.value = "";
+		togglingRow.value = "";
 	}
 }
 

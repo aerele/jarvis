@@ -4,7 +4,6 @@
 		<div class="min-w-0 flex-1">
 			<div class="flex flex-wrap items-center gap-1.5">
 				<span class="truncate text-sm font-medium text-ink-gray-9">{{ row.label }}</span>
-				<Badge variant="subtle" size="sm" theme="gray" label="mcp" />
 				<Tooltip :text="statusTip">
 					<Badge variant="subtle" size="sm" :theme="statusTheme" :label="statusLabel" />
 				</Tooltip>
@@ -14,13 +13,13 @@
 
 		<Switch
 			:modelValue="!!row.enabled"
-			:disabled="!canManage || acting"
+			:disabled="!canManage || toggling"
 			@update:modelValue="(v) => emit('toggle', v)"
 		/>
 		<Button
 			variant="ghost"
 			icon="refresh-cw"
-			:loading="acting"
+			:loading="testing"
 			:tooltip="'Test connection'"
 			@click="emit('test')"
 		/>
@@ -53,7 +52,12 @@ const props = defineProps({
 	// backend gates it on read, not write) but the toggle/edit/delete actions
 	// are hidden entirely rather than shown disabled.
 	canManage: { type: Boolean, default: true },
-	acting: { type: Boolean, default: false },
+	// Split so flipping the Switch never spins the Test button and vice versa
+	// (each control's :loading/:disabled reads only its own action's flag) —
+	// mirrors PersonalisationSettings' rowActing, which likewise only ever
+	// disables its own Switch and never leaks into another control.
+	testing: { type: Boolean, default: false },
+	toggling: { type: Boolean, default: false },
 });
 const emit = defineEmits(["test", "edit", "delete", "toggle"]);
 
