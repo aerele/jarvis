@@ -289,9 +289,78 @@
 					     button replaces that entry rather than duplicating it. Unconfigured
 					     gets the same jv-unavailable + aria-disabled treatment the STT/wiki
 					     buttons use for their own "visible but not usable yet" state, so a
-					     screen-reader user hears it's inert before clicking, not after. -->
+					     screen-reader user hears it's inert before clicking, not after.
+
+					     A waiting reply now surfaces HERE too (a red count pill, see
+					     jv-support-pill below) rather than only on the sidebar avatar dot -
+					     that dot is gone (UserMenu.vue). Two branches render the SAME
+					     button markup: with a waiting reply the button becomes a
+					     frappe-ui Dropdown trigger (two rows: go to the awaiting list, or
+					     start a new ticket); with nothing waiting it stays the plain
+					     new-ticket button it always was, so a zero-count click is byte-for-
+					     byte the old behaviour. No jv- palette rebind needed on the portal:
+					     the menu is pure frappe-ui (label/icon/text-ink-red-4 suffix), and
+					     frappe-ui's own theming already flips off the `data-theme` attribute
+					     theme.js sets on <html> - jv-* vars are only for THIS view's own
+					     hand-styled surface, which the portal content never touches. -->
+					<Dropdown
+						v-if="supportEntryVisible && supportHasAwaiting"
+						:options="supportMenuOptions"
+						placement="right"
+					>
+						<template #trigger>
+							<button
+								class="jv-iconbtn jv-support-btn"
+								:title="supportAwaitingPhraseText"
+								:aria-label="`Support, ${supportAwaitingPhraseText}`"
+								style="
+									position: relative;
+									width: 32px;
+									height: 32px;
+									display: flex;
+									align-items: center;
+									justify-content: center;
+									background: transparent;
+									border: 1px solid var(--border);
+									border-radius: 7px;
+									cursor: pointer;
+								"
+							>
+								<svg
+									width="16"
+									height="16"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="var(--text-2)"
+									stroke-width="1.7"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path d="M3 18v-6a9 9 0 0 1 18 0v6" />
+									<path
+										d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"
+									/>
+								</svg>
+								<span
+									class="jv-support-pill bg-surface-red-5"
+									role="status"
+									aria-live="polite"
+								>
+									<span aria-hidden="true">{{ supportPillLabel }}</span>
+									<!-- sr-only: the button's own aria-label already carries this
+									     phrase for a focused/click read, but role="status" here is
+									     what makes it ANNOUNCE on its own while the user is heads-
+									     down typing elsewhere in chat - the same job the removed
+									     avatar dot's role="status" did. jv-sr is the same visually-
+									     hidden utility the turn-completion live region (srMessage,
+									     below in this template) uses. -->
+									<span class="jv-sr">{{ supportAwaitingPhraseText }}</span>
+								</span>
+							</button>
+						</template>
+					</Dropdown>
 					<button
-						v-if="supportEntryVisible"
+						v-else-if="supportEntryVisible"
 						class="jv-iconbtn jv-support-btn"
 						:class="{ 'jv-unavailable': supportUnconfigured }"
 						:aria-disabled="supportUnconfigured ? 'true' : undefined"
@@ -593,6 +662,22 @@
 						gap: 26px;
 					"
 				>
+					<!-- An existing titled conversation (e.g. opened via an agent run's
+					     "Open chat") whose first message hasn't landed yet - render a
+					     quiet placeholder instead of an empty scroll area, since
+					     showWelcome no longer treats this case as a fresh chat. -->
+					<p
+						v-if="!visibleMessages.length"
+						style="
+							margin: 0;
+							padding: 8px 0;
+							font-size: 13px;
+							color: var(--text-3);
+							text-align: center;
+						"
+					>
+						No messages yet.
+					</p>
 					<!-- macro run progress banner -->
 					<div
 						v-if="macroRun && macroRun.conversation === currentId"
@@ -606,7 +691,7 @@
 						<template v-if="macroRun.status === 'running'">
 							<span class="jv-macrobar-dot spin"></span>
 							<span class="jv-macrobar-txt"
-								>Running macro — step {{ macroRun.step }}/{{ macroRun.total
+								>Running macro, step {{ macroRun.step }}/{{ macroRun.total
 								}}<template v-if="macroRun.label"
 									>: {{ macroRun.label }}</template
 								></span
@@ -1375,7 +1460,7 @@
 											‹
 										</button>
 										<span class="jv-cards-pginfo"
-											>{{ cardPageOf(m) * CARD_PAGE_SIZE + 1 }}–{{
+											>{{ cardPageOf(m) * CARD_PAGE_SIZE + 1 }}-{{
 												Math.min(
 													(cardPageOf(m) + 1) * CARD_PAGE_SIZE,
 													cardsOf(m).cards.length
@@ -1732,7 +1817,7 @@
 										v-if="!m.streaming && enrichmentPending.has(m.name)"
 										class="jv-meta"
 										style="opacity: 0.6"
-										title="Finishing up — attachments and extras are still being added"
+										title="Finishing up. Attachments and extras are still being added"
 									>
 										<span>Finishing…</span>
 									</div>
@@ -1780,6 +1865,11 @@
 										</button>
 									</div>
 								</div>
+								<FeedbackBar
+									v-if="feedbackFor === m.name"
+									@rate="onFeedbackRate"
+									@close="onFeedbackClose"
+								/>
 							</template>
 						</Message>
 					</template>
@@ -2021,7 +2111,8 @@
 								v-if="
 									!showActivityDetail ||
 									(waiting && !currentTool) ||
-									(!currentTool && statusPhase)
+									(!currentTool && statusPhase) ||
+									(!currentTool && !doneCount)
 								"
 								role="status"
 								aria-live="polite"
@@ -2727,7 +2818,7 @@
 											ui.stt_enabled
 												? startNudgeMic()
 												: notify(
-														`Voice notes aren't set up on this workspace — ask your administrator.`,
+														`Voice notes aren't set up on this workspace. Ask your administrator.`,
 														{ type: 'info' }
 												  )
 										"
@@ -2888,7 +2979,7 @@
 									}}
 									<button
 										class="jv-voicechip-quiet"
-										title="Stop waiting for this transcription — the recording is kept, with Retry and Download"
+										title="Stop waiting for this transcription. The recording is kept, with Retry and Download"
 										aria-label="Cancel this transcription"
 										@click="cancelTranscribing(t.id)"
 									>
@@ -3180,7 +3271,7 @@
 								"
 								@click="
 									notify(
-										`No wiki pages yet — I'll ask when something's worth remembering, or add one in Wiki.`,
+										`No wiki pages yet. I'll ask when something's worth remembering, or add one in Wiki.`,
 										{ type: 'info' }
 									)
 								"
@@ -3206,7 +3297,7 @@
 								class="jv-iconbtn"
 								:title="
 									groundNextTurn
-										? 'Wiki grounding armed — your next message will be answered from the wiki (click to turn off)'
+										? 'Wiki grounding armed. Your next message will be answered from the wiki (click to turn off)'
 										: 'Ground your next message on the org wiki'
 								"
 								@click="groundNextTurn = !groundNextTurn"
@@ -3341,7 +3432,7 @@
 									>
 									<button
 										class="jv-mic-cancel"
-										title="Cancel recording (Esc) — throws this whole recording away; text already in the box is kept"
+										title="Cancel recording (Esc). Throws this whole recording away; text already in the box is kept"
 										aria-label="Cancel recording"
 										@click="cancelMic"
 									>
@@ -3808,7 +3899,7 @@
 												"
 											>
 												<b>{{ it.value }}</b
-												><span v-if="it.label"> — {{ it.label }}</span>
+												><span v-if="it.label">: {{ it.label }}</span>
 											</button>
 										</div>
 									</template>
@@ -3948,7 +4039,7 @@
 														>
 															<b>{{ it.value }}</b
 															><span v-if="it.label">
-																— {{ it.label }}</span
+																: {{ it.label }}</span
 															>
 														</button>
 													</div>
@@ -4122,6 +4213,7 @@
 import {
 	ref,
 	computed,
+	h,
 	inject,
 	onMounted,
 	onBeforeUnmount,
@@ -4131,7 +4223,10 @@ import {
 	watchEffect,
 } from "vue";
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
+import { Dropdown } from "frappe-ui";
 import * as api from "@/api";
+import FeedbackBar from "@/components/chat/FeedbackBar.vue";
+import { shouldOfferFeedback, markRated, markIgnored } from "@/lib/feedbackGate";
 import * as voice from "@/api/voice";
 import { agentName, isWhitelabeled } from "@/branding";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
@@ -4157,6 +4252,11 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
+import {
+	supportPillLabel as supportPillLabelFor,
+	supportAwaitingPhrase,
+	supportAwaitingRoute,
+} from "@/lib/supportHeaderPill";
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
@@ -4177,6 +4277,7 @@ import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import { parseAsk } from "@/lib/chatAsk";
+import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import {
@@ -4277,6 +4378,36 @@ const promptHistory = ref([]);
 const histIdx = ref(null);
 const histDraft = ref("");
 const sending = ref(false);
+
+// ---- post-reply feedback line (lib/feedbackGate decides IF/when it appears) ----
+const feedbackFor = ref(null); // message name currently showing the feedback bar
+const feedbackRated = ref(false); // did the user rate the current bar?
+const feedbackEvaluated = new Set(); // message names already run through the gate
+function maybeOfferFeedback(m) {
+	if (!m || m.role !== "assistant" || m.error || m.stopped) return;
+	if (feedbackEvaluated.has(m.name)) return;
+	feedbackEvaluated.add(m.name); // gate each reply exactly once
+	const secs = parseFloat(elapsedOf(m)) || 0;
+	if (shouldOfferFeedback(secs * 1000)) {
+		feedbackFor.value = m.name;
+		feedbackRated.value = false;
+	}
+}
+function onFeedbackRate({ rating, note }) {
+	feedbackRated.value = true;
+	markRated(); // any rating stops further asks this session
+	const target = feedbackFor.value;
+	if (target) api.submitFeedback(target, rating, note || "").catch(() => {}); // best-effort
+}
+function onFeedbackClose() {
+	feedbackFor.value = null;
+}
+function dismissFeedback() {
+	// Starting the next query clears a still-unanswered bar (counts as an ignore).
+	if (!feedbackFor.value) return;
+	if (!feedbackRated.value) markIgnored();
+	feedbackFor.value = null;
+}
 const waiting = ref(false);
 // Phase-0 admission (chat concurrency): when a send is accepted but QUEUED
 // (all in-flight slots taken), the reply hasn't started - we show a "~N ahead"
@@ -4547,9 +4678,11 @@ async function openSupport() {
 		explainUnavailable("Support");
 		return;
 	}
-	// This header control is the NEW-TICKET entry point only. The "you have a
-	// waiting reply" signal + its route to the inbox now live solely on the
-	// avatar's resting badge (UserMenu), so the two concerns don't share a button.
+	// This function is the NEW-TICKET action specifically: with a waiting reply
+	// the header button opens a menu instead of calling this directly (see
+	// supportMenuOptions below), and its "New ticket from this chat" row calls
+	// straight into this same function - so openSupport() itself never needs to
+	// know which of the two paths got it here.
 	if (openSupportInFlight) return;
 	openSupportInFlight = true;
 	try {
@@ -4582,6 +4715,69 @@ async function openSupport() {
 		openSupportInFlight = false;
 	}
 }
+// Waiting-reply count pill (header headphones button). awaiting_count is a
+// cheap poll-driven number (stores/support.js's refreshAwaiting, already run
+// by UserMenu's 60s poll timer - no second poller started here); reading
+// zero for a not-yet-primed store is the correct "nothing waiting" default.
+// The label/phrase/routing math itself lives in lib/supportHeaderPill.js,
+// pure and unit-tested there (the same split lib/supportCopyFormat.js already
+// uses for this button's copy-to-ticket formatting) - this view just wires
+// the store's numbers through it.
+const supportAwaitingCount = computed(() => (supportStore ? supportStore.awaitingCount : 0));
+const supportHasAwaiting = computed(() => supportAwaitingCount.value > 0);
+const supportPillLabel = computed(() => supportPillLabelFor(supportAwaitingCount.value));
+const supportAwaitingPhraseText = computed(() =>
+	supportAwaitingPhrase(supportAwaitingCount.value)
+);
+function goToAwaitingTickets() {
+	router.push(supportAwaitingRoute());
+}
+const supportMenuOptions = computed(() => [
+	{
+		group: "Support",
+		hideLabel: true,
+		items: [
+			{
+				label: "Tickets awaiting reply",
+				icon: "life-buoy",
+				onClick: goToAwaitingTickets,
+				slots: {
+					// The raw count, not the "9+"-capped supportPillLabel: this row has
+					// room for it, and UserMenu's sibling "Support tickets · N" row
+					// already shows the uncapped number, so the two should never disagree.
+					suffix: () =>
+						h(
+							"span",
+							{ class: "text-ink-red-4 font-medium tabular-nums" },
+							String(supportAwaitingCount.value)
+						),
+				},
+			},
+			{
+				label: "New ticket from this chat",
+				icon: "plus",
+				onClick: openSupport,
+			},
+		],
+	},
+]);
+// This view only READS supportStore.awaitingCount - the 60s poll that keeps
+// it fresh belongs to UserMenu.vue (always mounted alongside chat), so no
+// second poller starts here. But that poller is on a timer, not a mount
+// hook, so the pill's FIRST paint here could be showing a stale/empty count
+// for up to 60s. It could also simply be wrong on any load where UserMenu
+// isn't mounted at all (collapsed/off-canvas sidebar on phone), not only
+// that one case. One extra one-shot refresh on this view's own mount closes
+// that gap without adding a second timer. It DOES fire on every normal load
+// alongside UserMenu's own immediate call - refreshAwaiting() in
+// stores/support.js de-dupes concurrent callers into one request, so this
+// never becomes two round trips for the same number. .catch() for the same
+// reason as SupportThreadPage's calls: an un-awaited rejection here would
+// otherwise be unhandled (the real store already catches its own errors, so
+// this is belt-and-braces).
+onMounted(() => {
+	if (supportOn) supportStore.refreshAwaiting().catch(() => {});
+});
 // One-shot "ground on wiki": when armed, the NEXT message carries a
 // context.ground_wiki flag so the backend injects relevant wiki page bodies
 // into that turn. Cleared after each send (see send()).
@@ -5116,13 +5312,22 @@ function onVisibilityChange() {
 	if (document.hidden) flushReveal();
 }
 const activeTools = ref([]); // [{ id, name, status }] for the in-flight run
+// Live COUNT + current-tool name exclude the agent's built-ins so the tally matches the
+// settled accordion (no 3→2 jump); raw activeTools still drives the "is working" gating.
+const visibleActiveTools = computed(() =>
+	activeTools.value.filter((t) => isCustomerFacingTool(t.name))
+);
 // Live activity shows ONE tool at a time: the most-recently-started tool that's
 // still running, plus a compact count of the ones already finished this turn.
 const currentTool = computed(
-	() => [...activeTools.value].reverse().find((t) => t.status === "running") || null
+	() => [...visibleActiveTools.value].reverse().find((t) => t.status === "running") || null
 );
-const doneCount = computed(() => activeTools.value.filter((t) => t.status !== "running").length);
-const failedCount = computed(() => activeTools.value.filter((t) => t.status === "error").length);
+const doneCount = computed(
+	() => visibleActiveTools.value.filter((t) => t.status !== "running").length
+);
+const failedCount = computed(
+	() => visibleActiveTools.value.filter((t) => t.status === "error").length
+);
 // ── Live status line ────────────────────────────────────────────────────────
 // Real progress instead of a blanket "Thinking…": phase transitions come from
 // the run's realtime events (run:start → tool:start/end → assistant:delta).
@@ -5214,8 +5419,8 @@ function goRenew() {
 }
 const recoveringLabel = computed(() =>
 	recovering.value && recovering.value.reason === "compacting"
-		? "That was a big one — reorganizing the conversation and retrying…"
-		: "Reconnecting — your answer will appear here when it's ready."
+		? "That was a big one, reorganizing the conversation and retrying…"
+		: "Reconnecting. Your answer will appear here when it's ready."
 );
 // Failure taxonomy → a plain-language headline + "what you can do" hint. The
 // raw string still shows behind "Show details". `code` comes from the live
@@ -5233,7 +5438,7 @@ const recoveringLabel = computed(() =>
 // (lib/errors.js); a done reply renders normally), kept so the mapping is
 // complete for WP-1 (SUXI-7).
 const TURN_STATE_COPY = {
-	queued: (pos) => (pos && pos > 0 ? `Queued — ~${pos} ahead` : "Queued"),
+	queued: (pos) => (pos && pos > 0 ? `Queued, ~${pos} ahead` : "Queued"),
 	// SUXF-3: the pump introduces a queued->preparing->ready window (prompt assembly
 	// + session bootstrap) between "queued" and the stream. Give it copy so the chip
 	// reads "Starting…" instead of freezing on a stale "~N ahead" / going silent.
@@ -5464,8 +5669,29 @@ const modelsByProvider = computed(() => {
 	return [...groups.entries()].map(([provider, models]) => ({ provider, models }));
 });
 
+// Title of the conversation loadConversation() last fetched, straight from
+// get_conversation's payload. The recent-list (store.conversations) omits
+// zero-message conversations, so a titled-but-empty chat opened via an agent
+// run's "Open chat" is NOT in that list - its title is only knowable from the
+// fetch. Cleared on the new-chat (no id) path so the welcome still shows there.
+const loadedConvTitle = ref("");
 const currentTitle = computed(
-	() => store.conversations.find((c) => c.name === currentId.value)?.title || "New chat"
+	() =>
+		store.conversations.find((c) => c.name === currentId.value)?.title ||
+		loadedConvTitle.value ||
+		"New chat"
+);
+// An EXISTING conversation (e.g. routed to from an agent run's "Open chat")
+// that has a real persisted title - as opposed to a brand-new chat, which is
+// either id-less or still titled the backend's literal "New chat" default
+// (jarvis/chat/api.py's create_conversation). Zero messages on one of these
+// means "not loaded yet" or "titled but empty", never "blank", so showWelcome
+// below must not treat it the same as a fresh chat. currentTitle already
+// resolves the title from the recent list OR, for a zero-message conversation
+// the list omits, from the last loadConversation fetch (loadedConvTitle), so
+// reuse it as the single source rather than re-deriving the lookup here.
+const isExistingTitledConv = computed(
+	() => !!currentId.value && currentTitle.value !== "New chat"
 );
 
 // supportOn/supportUnconfigured (the same dual kill-switch router/index.js's
@@ -5488,7 +5714,7 @@ const wikiEmpty = computed(() => ui.value?.wiki_state === "empty");
 // One message shape for every not-set-up feature, so the wording cannot drift between
 // the surfaces (a user with STT off sees the nudge mic and the composer mic at once).
 function explainUnavailable(feature) {
-	notify(`${feature} isn't set up on this workspace yet — ask your administrator.`, {
+	notify(`${feature} isn't set up on this workspace yet. Ask your administrator.`, {
 		type: "info",
 	});
 }
@@ -5569,8 +5795,8 @@ const activityByAssistant = computed(() => {
 			cur = m.name;
 			if (!map[cur]) map[cur] = [];
 		}
-		// action_outcome rows are receipt chips shown inline, not accordion tool calls.
-		else if (m.role === "tool" && cur && !m.action_outcome)
+		// action_outcome rows show inline as chips; no-I/O agent built-ins expand to nothing — skip both.
+		else if (m.role === "tool" && cur && !m.action_outcome && !shouldHideActivityTool(m))
 			(map[cur] || (map[cur] = [])).push(m);
 	}
 	return map;
@@ -5718,7 +5944,9 @@ function prettyJson(s) {
 // screen from flashing on refresh before the open chat appears.
 const booting = ref(true);
 const showWelcome = computed(
-	() => !booting.value && (!currentId.value || visibleMessages.value.length === 0)
+	() =>
+		!booting.value &&
+		(!currentId.value || (visibleMessages.value.length === 0 && !isExistingTitledConv.value))
 );
 
 // settings/overview derived metrics (all from data we already hold)
@@ -5731,7 +5959,7 @@ const assistantMsgCount = computed(
 );
 const avgTokensPerMsg = computed(() => {
 	const n = msgCount.value;
-	if (!usage.value || !n) return "—";
+	if (!usage.value || !n) return "-";
 	return fmtTokens(Math.round((usage.value.chat_tokens || 0) / n));
 });
 const starredCount = computed(() => store.conversations.filter((c) => c.starred).length);
@@ -6263,7 +6491,7 @@ function answerConfirm(ok, label) {
 	// Echo the card's own wording so the transcript reads like what the user
 	// clicked ("Yes — Confirm and save") instead of a canned "go ahead".
 	const l = (label || "").trim();
-	send(ok ? (l ? `Yes — ${l}` : "Yes, go ahead.") : "No, cancel that.");
+	send(ok ? (l ? `Yes: ${l}` : "Yes, go ahead.") : "No, cancel that.");
 }
 
 // --- Field-control helpers shared by the confirm card and the record draft
@@ -6855,7 +7083,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			// (rich detail + hint, and nothing was saved) instead of throwing a
 			// raw Frappe 403/417. Keep the panel open so the values are editable.
 			p.applying = false;
-			p.error = r.error || { message: "Could not save — check the values." };
+			p.error = r.error || { message: "Could not save. Check the values." };
 			return;
 		}
 		closeDraftPanel();
@@ -7044,8 +7272,8 @@ async function confirmPending(pa) {
 				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
 				notify(
 					expired
-						? "This confirmation expired — tell me the action again to retry it."
-						: "Couldn't confirm — it may have been handled in another tab. Refresh, or ask me to try again.",
+						? "This confirmation expired. Tell me the action again to retry it."
+						: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again.",
 					{ type: "error" }
 				);
 				return;
@@ -7944,6 +8172,7 @@ async function loadConversation(id) {
 		promptHistory.value = [];
 		histIdx.value = null;
 		histDraft.value = "";
+		loadedConvTitle.value = "";
 		return;
 	}
 	const d = await api.getConversation(id);
@@ -7973,6 +8202,9 @@ async function loadConversation(id) {
 	// saved pin always rendered as "Auto" after a reload.
 	modelOverride.value = d?.conversation?.model_override || "";
 	thinkingOverride.value = d?.conversation?.thinking_override || "";
+	// Remember the fetched title so a titled-but-empty conversation (which the
+	// recent list omits) is recognised as existing, not rendered as a new chat.
+	loadedConvTitle.value = d?.conversation?.title || "";
 	// The origin and the conversation it was read for, written as a pair — the
 	// gate compares the second against currentId, so neither is ever trusted
 	// alone. Nothing above blanks them: a refresh of the conversation already on
@@ -8303,7 +8535,7 @@ async function selectConversation(id) {
 // the extracted reason so a non-string Frappe error payload can't throw inside the
 // caller's catch and re-swallow the very failure we're trying to report.
 function notifyActionError(prefix, e) {
-	notify(`${prefix} — ${String(errMessage(e)).replace(/\.$/, "")}. Try again.`, {
+	notify(`${prefix}: ${String(errMessage(e)).replace(/\.$/, "")}. Try again.`, {
 		type: "error",
 	});
 }
@@ -8348,6 +8580,11 @@ async function newChat() {
 	// and a later send can release the records by the real scope instead of stranding them (R2-2/R3-2).
 	if (currentId.value) _promoteNewChatScope(currentId.value);
 	messages.value = [];
+	// A brand-new chat is not in the recent list and loadConversation does not
+	// run here (the route watcher no-ops), so clear the last-loaded title;
+	// otherwise isExistingTitledConv keeps the previous conversation's title and
+	// suppresses the welcome screen on the fresh chat.
+	loadedConvTitle.value = "";
 	// loadConversation is the only other writer and the route watcher no-ops here
 	// (currentId already equals this id), so without this the previous chat's
 	// origin survives onto a brand-new one — and the first html the agent draws
@@ -8478,6 +8715,7 @@ function resendFailed(m) {
 // optional `context`, e.g. a dashboard): consumed by the first send below.
 let _prefillSendContext = null;
 async function send(textArg, resendAck) {
+	dismissFeedback(); // sending the next turn clears any pending feedback line
 	// Don't race a dictation that hasn't landed: sending now would drop the spoken words (the
 	// transcript would arrive AFTER the message left the composer). Block on the real busy
 	// signal — recording, or a recording still being transcribed — NOT hasUnfinished(), which
@@ -9132,6 +9370,9 @@ function onEvent(p) {
 					},
 				};
 			}
+			// Post-reply feedback line: offer it (throttled) now the reply is
+			// finalized and its duration is stamped. Only here - never on history load.
+			if (m) maybeOfferFeedback(m);
 			waiting.value = false;
 			sending.value = false;
 			statusPhase.value = null;
@@ -9482,7 +9723,7 @@ const voiceBusyCount = computed(
 // careful about everywhere else.
 const voiceSendBlockReason = computed(() => {
 	if (micState.value === "recording")
-		return "Stop the dictation first — its words are still coming.";
+		return "Stop the dictation first. Its words are still coming.";
 	if (voiceBusyCount.value > 0)
 		return "Waiting for the dictation to land in the box (or cancel it below).";
 	return "";
@@ -9646,7 +9887,7 @@ function _onVoicePersistFail() {
 	if (micState.value !== "recording") return;
 	void stopMic();
 	notify(
-		"Couldn't safely save your voice audio on this device (storage may be full or private mode). Recording stopped — download the recording to keep it, or retry once you've freed space.",
+		"Couldn't safely save your voice audio on this device (storage may be full or private mode). Recording stopped. Download the recording to keep it, or retry once you've freed space.",
 		{ type: "error" }
 	);
 }
@@ -9675,7 +9916,7 @@ const micRec = useDictationRecorder({
 		// transcribed, and one audible word anywhere in the take clears the gate.
 		if (isNearSilent(take.peakRms)) {
 			voiceStore.finishSilent(id, take);
-			notify("Nothing was heard — try closer to the microphone.", { type: "info" });
+			notify("Nothing was heard. Try closer to the microphone.", { type: "info" });
 			return;
 		}
 		voiceStore.finish(id, take);
@@ -9690,7 +9931,7 @@ const micRec = useDictationRecorder({
 	// transcribed rather than refused after the fact.
 	onAutoStop: () => {
 		micState.value = "idle";
-		notify("Recording stopped at the 5-minute limit — transcribing what you said.", {
+		notify("Recording stopped at the 5-minute limit. Transcribing what you said.", {
 			type: "info",
 		});
 	},
@@ -9698,7 +9939,7 @@ const micRec = useDictationRecorder({
 	// mid-sentence surprise explained only afterwards.
 	onNearCap: (secondsLeft) => {
 		notify(
-			`${secondsLeft} seconds left before the 5-minute limit — finish your sentence and stop when you're ready.`,
+			`${secondsLeft} seconds left before the 5-minute limit. Finish your sentence and stop when you're ready.`,
 			{ type: "info" }
 		);
 	},
@@ -9772,22 +10013,22 @@ async function cancelMic() {
 // would be a riddle and the honest verb is "transcribe it anyway".
 const failedChipLabel = (f) => {
 	const len = _fmtClock(f.durationS);
-	if (f.noSpeech) return `Recording ${len} — nothing was heard`;
+	if (f.noSpeech) return `Recording ${len}, nothing was heard`;
 	// WHY it failed, from the server's own (secret-scrubbed) message: a permanent fault
 	// ("Speech-to-text is not enabled on this site.") and a transient blip are otherwise
 	// indistinguishable, so users Retry-loop the same upload forever and report nothing useful.
 	const why = f.error ? ` · ${f.error}` : "";
 	return f.sentWithout
-		? `Recording ${len} didn't transcribe — your last message went without it${why}`
+		? `Recording ${len} didn't transcribe, your last message went without it${why}`
 		: `Recording ${len} didn't transcribe${why}`;
 };
 const failedChipTitle = (f) => (f.error ? `Reason: ${f.error}` : "");
 const failedChipRetryLabel = (f) => (f.noSpeech ? "Transcribe anyway" : "Retry");
 const failedChipRetryTitle = (f) =>
 	f.sentWithout
-		? "Transcribe again — the words go into your current draft, not the message that already went"
+		? "Transcribe again. The words go into your current draft, not the message that already went"
 		: f.noSpeech
-		? "Send it for transcription anyway — nothing audible was measured, but the measurement can be wrong"
+		? "Send it for transcription anyway. Nothing audible was measured, but the measurement can be wrong"
 		: "Transcribe this recording again";
 function retryRecording(id) {
 	if (voiceStore) voiceStore.retry(id);
@@ -9812,7 +10053,7 @@ async function discardUnpersistedRecording(id) {
 	const ok = await confirm({
 		title: "Discard this recording?",
 		message:
-			"This audio could not be saved to disk — discarding loses it. It exists only in this tab, so a reload would lose it too. Download it first if you want to keep it.",
+			"This audio could not be saved to disk, discarding loses it. It exists only in this tab, so a reload would lose it too. Download it first if you want to keep it.",
 		danger: true,
 		confirmLabel: "Discard",
 		cancelLabel: "Keep",
@@ -9932,7 +10173,7 @@ const recoveryLabel = (t) => {
 	const len = _fmtClock(t.durationS || 0);
 	return t.complete
 		? `A recording from your last session wasn't transcribed (${len})`
-		: `A recording from your last session can't be rebuilt (${len}) — its first fragment is missing`;
+		: `A recording from your last session can't be rebuilt (${len}), its first fragment is missing`;
 };
 function recoverTake(t) {
 	// Never recover while recording: the composer is already filling from a live take, and the
@@ -10051,7 +10292,7 @@ const nudgeLabels = computed(() =>
 );
 const nudgeRec = useAudioRecorder({
 	onAutoStop: (r) => {
-		notify("Recording stopped at the 5-minute limit — transcribing.", { type: "info" });
+		notify("Recording stopped at the 5-minute limit. Transcribing.", { type: "info" });
 		_nudgeTranscribe(r);
 	},
 });
@@ -10084,7 +10325,7 @@ async function _nudgeTranscribe(r) {
 		const res = await voice.transcribeAudio(r.blob, { durationS: r.durationS });
 		const text = ((res && res.text) || "").trim();
 		if (!text) {
-			notify("Nothing was transcribed — try again closer to the microphone.", {
+			notify("Nothing was transcribed. Try again closer to the microphone.", {
 				type: "info",
 			});
 			if (nudge.value) nudge.value.mode = "idle";
@@ -10139,7 +10380,7 @@ async function saveNudgeNote() {
 			entities: JSON.stringify(n.entities || []),
 			source: "Chat Nudge",
 		});
-		notify(`Noted — ${agentName} will remember this`, { type: "success" });
+		notify(`Noted, ${agentName} will remember this`, { type: "success" });
 		nudge.value = null;
 	} catch (e) {
 		n.saving = false;
@@ -10154,7 +10395,7 @@ function dismissNudge() {
 	if (n) voice.dismissWikiNudge(n.conversationId).catch(() => {});
 	// the dismissal mutes a week of nudges here — say so, once, or users
 	// won't know they opted out
-	notify("Okay — won't ask again in this chat for a week.");
+	notify("Okay, won't ask again in this chat for a week.");
 }
 
 // ---- attachments ----
@@ -10352,6 +10593,7 @@ function openUserFile(a) {
 // ---- mentions (@ user, / doctype·tool) ----
 let _mentionSeq = 0;
 function onInput() {
+	dismissFeedback(); // starting the next query clears any pending feedback line
 	histIdx.value = null; // typing exits prompt-history navigation
 	const el = composerRef.value?.el;
 	if (!el) return;
@@ -11351,6 +11593,36 @@ onUnmounted(() => {
 	background: transparent !important;
 	color: var(--text-3) !important;
 	stroke: currentColor !important;
+}
+/* Waiting-reply count pill on the header's support button (jv-support-btn).
+   The bg-surface-red-5 Tailwind class (not var(--red), THIS view's own
+   red for inline error states - a different, unrelated token) is the same
+   class Sidebar.vue's approvals badge/dot paint with, kept as a literal
+   utility class rather than a hand-copied hex so it keeps tracking that
+   token if it's ever retuned. It already flips with data-theme (theme.js's
+   applyTheme sets that on <html> for every frappe-ui consumer), independent
+   of this view's own jv-dark/paletteVars system. The 2px ring is
+   var(--surface): this header paints no background of its own, so
+   var(--surface) IS what actually shows behind the button, and using it
+   (rather than a literal white) keeps the ring correct if the header ever
+   grows a background. */
+.jv-support-pill {
+	position: absolute;
+	top: -5px;
+	right: -5px;
+	min-width: 17px;
+	height: 17px;
+	padding: 0 4px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	color: #fff;
+	font-size: 11px;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	box-shadow: 0 0 0 2px var(--surface);
+	pointer-events: none;
 }
 .jv-nudge-actions {
 	display: flex;

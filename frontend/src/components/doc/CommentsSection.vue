@@ -1,7 +1,7 @@
 <template>
 	<div>
 		<div class="mb-4 flex items-center gap-2">
-			<span class="text-base font-semibold text-ink-gray-9">Comments</span>
+			<span class="text-base font-semibold text-ink-gray-9">{{ heading }}</span>
 			<Badge
 				v-if="comments.length"
 				variant="subtle"
@@ -57,7 +57,7 @@
 			</div>
 		</div>
 		<div v-else class="text-sm text-ink-gray-5">
-			No comments yet - be the first to add one.
+			{{ emptyText }}
 		</div>
 
 		<template v-if="canComment">
@@ -102,6 +102,10 @@ const CommentComposer = defineAsyncComponent(() => import("@/components/doc/Comm
 const props = defineProps({
 	docmeta: { type: Object, required: true }, // useDocmeta() object
 	canComment: { type: Boolean, default: false },
+	// jarvis#1062: Notes-on-a-Run (FindingsPanel.vue) reuses this same
+	// component/API against a different doctype - only the copy differs.
+	heading: { type: String, default: "Comments" },
+	emptyText: { type: String, default: "No comments yet - be the first to add one." },
 });
 
 const comments = computed(() => (props.docmeta.meta && props.docmeta.meta.comments) || []);

@@ -24,6 +24,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, get_datetime, now_datetime
 
 from jarvis.chat import agents_api, approvals_api, docmeta_api, macro_scheduler
+from jarvis.tests._agent_access import allow_listing_for
 
 CONVERSATION = "Jarvis Conversation"
 MACRO = "Jarvis Macro"
@@ -210,6 +211,10 @@ class Part3Base(FrappeTestCase):
 					"skill_bundle": '[{"path":"SKILL.md","body":"PROPRIETARY VENDOR IP"}]',
 				}
 			).insert(ignore_permissions=True)
+		# jarvis#1062: deny-by-default access. USER_A reads this listing through
+		# get_agent (the skill_bundle-hiding test), which now 403s an ungranted
+		# non-admin before it can assert anything about the payload.
+		allow_listing_for(AGENT_SLUG, roles=["Jarvis User"])
 		frappe.db.commit()
 
 	@classmethod
@@ -229,6 +234,8 @@ class Part3Base(FrappeTestCase):
 		for dt, filt in (
 			(APPROVAL, {"title": ["like", f"{PFX}%"]}),
 			(MACRO, {"macro_name": ["like", f"{PFX}%"]}),
+			# take_finding_to_chat commits its seed conversation too.
+			(CONVERSATION, {"title": ["like", f"Finding: {PFX}%"]}),
 		):
 			for n in frappe.get_all(dt, filters=filt, pluck="name"):
 				if dt == MACRO:
@@ -553,3 +560,41 @@ class TestAgentScoping(Part3Base):
 				LISTING, filters={"agent_slug": AGENT_SLUG}, fields=["name", "skill_bundle"]
 			)
 		self.assertIn("skill_bundle", rows2[0])
+
+	# ------------------------------------------------------------------ #
+	# jarvis#1062 polish: take_finding_to_chat commits its seed conversation
+	# BEFORE attempting to seed it; a failed seed must not leave an orphaned,
+	# empty "Finding: ..." conversation behind (FindingsPanel no longer
+	# navigates on ok:False, so nothing cleans it up client-side either).
+	# ------------------------------------------------------------------ #
+	def test_take_finding_to_chat_seed_failure_leaves_no_conversation_row(self):
+		f = _mk_finding(USER_A, title=f"{PFX}-cleanup-fail")
+		conv_filters = {"title": f"Finding: {f.title}"[:140]}
+		self.assertFalse(frappe.db.exists(CONVERSATION, conv_filters))
+		with _as(USER_A):
+			with patch(
+				"jarvis.chat.api.send_message",
+				return_value={"ok": False, "reason": "llm_not_configured"},
+			):
+				res = agents_api.take_finding_to_chat(f.name)
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["reason"], "llm_not_configured")
+		self.assertIsNone(res.get("conversation"))
+		self.assertFalse(
+			frappe.db.exists(CONVERSATION, conv_filters),
+			"a failed seed must not leave an orphaned conversation behind",
+		)
+
+	def test_take_finding_to_chat_seed_success_keeps_the_conversation(self):
+		"""Control: the cleanup path must not have swallowed the real case."""
+		f = _mk_finding(USER_A, title=f"{PFX}-cleanup-ok")
+		conv_filters = {"title": f"Finding: {f.title}"[:140]}
+		with _as(USER_A):
+			with patch(
+				"jarvis.chat.api.send_message",
+				return_value={"ok": True, "run_id": "r1", "message_id": "m1"},
+			):
+				res = agents_api.take_finding_to_chat(f.name)
+		self.assertTrue(res["ok"])
+		self.assertIsNotNone(res["conversation"])
+		self.assertTrue(frappe.db.exists(CONVERSATION, conv_filters))

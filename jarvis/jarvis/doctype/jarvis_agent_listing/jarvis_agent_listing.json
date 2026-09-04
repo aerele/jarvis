@@ -17,6 +17,7 @@
   "status",
   "tools_required",
   "doctypes_required",
+  "config_keys",
   "rule_tokens",
   "min_apps",
   "rule_pack",
@@ -24,7 +25,8 @@
   "skill_bundle",
   "default_schedule",
   "validated_for_fy",
-  "allowed_roles"
+  "allowed_roles",
+  "allowed_users"
  ],
  "fields": [
   {
@@ -103,6 +105,12 @@
    "description": "JSON array of DocTypes the run-as user MUST hold read on for this agent's aggregates to be numerically correct (A12). Checked at install/validate against the mapped run_as_user (fail-closed on a missing read). Declared here so it is checkable without leaking rule shape."
   },
   {
+   "fieldname": "config_keys",
+   "fieldtype": "Small Text",
+   "label": "Config Keys (JSON)",
+   "description": "JSON array of the agent-specific installation config keys this agent's bundle actually reads (jarvis#1063), as dot paths for a nested key - e.g. materiality.benchmark_value/materiality.percentage/materiality.engagement_risk_level/materiality.rounding_step for close-auditor (its evaluate.py reads them nested under a top-level materiality object). Excludes the universal scope keys (company/fiscal_year/from_date/to_date) every run receives regardless, which stay flat. Drives which agent-specific fields ConfigForm.vue renders; [] for an agent with none."
+  },
+  {
    "fieldname": "rule_tokens",
    "fieldtype": "Small Text",
    "label": "Rule Tokens (JSON)",
@@ -150,12 +158,19 @@
    "fieldtype": "Table MultiSelect",
    "label": "Allowed Roles",
    "options": "Jarvis Agent Allowed Role",
-   "description": "Roles allowed to install/run this agent. Empty = unrestricted (any user). System Manager is always allowed. Bench-admin state — NEVER written by the catalog sync."
+   "description": "Roles allowed to install/run this agent. Access is DENY BY DEFAULT: a listing with no allowed roles AND no allowed users is reachable by Jarvis Admins only. Bench-admin state, NEVER written by the catalog sync."
+  },
+  {
+   "fieldname": "allowed_users",
+   "fieldtype": "Table MultiSelect",
+   "label": "Allowed Users",
+   "options": "Jarvis Agent Allowed User",
+   "description": "Named users allowed to install/run this agent, on top of any allowed roles. Access is DENY BY DEFAULT: a listing with no allowed roles AND no allowed users is reachable by Jarvis Admins only. Bench-admin state, NEVER written by the catalog sync."
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-07-05 10:00:00.000000",
+ "modified": "2026-09-03 13:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Agent Listing",

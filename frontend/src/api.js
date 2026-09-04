@@ -17,6 +17,15 @@ export const getCanvas = (message, name, dark) =>
 export const previewFile = (fileUrl) =>
 	call("jarvis.chat.api.preview_file", { file_url: fileUrl });
 export const createOrFocusEmpty = () => call("jarvis.chat.api.create_or_focus_empty");
+// Post-reply feedback: a thumbs up/down (+ optional note on a down) on one
+// assistant reply. Best-effort - the bench derives the metadata server-side and
+// forwards it to the admin fleet dashboard; the tap never blocks on that.
+export const submitFeedback = (message, rating, note) =>
+	call("jarvis.chat.feedback.submit_feedback", {
+		message_id: message,
+		rating,
+		note: note || "",
+	});
 export const archiveConversation = (conversation) =>
 	call("jarvis.chat.api.archive_conversation", { conversation });
 // Danger zone: permanently delete ALL of the user's conversations + messages.
@@ -704,10 +713,11 @@ export const listAgentRuns = (agent, limit) =>
 export const listAgentFindings = (p) => call(AG + "list_findings", p || {});
 export const setFindingState = (finding, state) =>
 	call(AG + "set_finding_state", { finding, state });
-// Role gating + listing admin (System Manager only - the server enforces it;
-// the SPA merely probes getAgentAdminOverview and hides the Admin tab on 403).
-export const setAgentRoles = (agent_slug, roles) =>
-	call(AG + "set_agent_roles", { agent_slug, roles: JSON.stringify(roles || []) });
+// Listing admin (System Manager only - the server enforces it; the SPA merely
+// probes getAgentAdminOverview and hides the Admin tab on 403). Access gating
+// moved to api/agents.setAgentAccess (jarvis#1062), which sets roles and named
+// users together; the set_agent_roles ENDPOINT survives as a compat shim for
+// cached older SPA builds, but nothing in this build calls it.
 export const setListingStatus = (agent_slug, status) =>
 	call(AG + "set_listing_status", { agent_slug, status });
 export const getAgentAdminOverview = () => call(AG + "get_agent_admin_overview");

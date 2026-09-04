@@ -157,7 +157,7 @@ function pick(r) {
 	}
 }
 
-const dialogTitle = computed(() => `Request promotion — ${props.noun}`);
+const dialogTitle = computed(() => `Request promotion: ${props.noun}`);
 const roleOptions = computed(() => roles.value.map((r) => ({ label: r, value: r })));
 const roleQuery = ref("");
 // Client-side filter for the inline role list (see the template note on why this

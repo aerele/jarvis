@@ -12,7 +12,7 @@
 			<KvRow v-if="isPool" label="Models" :value="poolSummary" />
 			<template v-else>
 				<KvRow label="Model" :value="modelLabel" />
-				<KvRow label="Provider" :value="ui.llm_provider || '—'" />
+				<KvRow label="Provider" :value="ui.llm_provider || '-'" />
 			</template>
 			<KvRow label="Status">
 				<Badge :label="statusLabel" :theme="statusTheme" variant="subtle" />
@@ -134,12 +134,12 @@
 			<Badge label="est." theme="gray" variant="subtle" size="sm" />
 		</h3>
 		<div class="mt-2">
-			<KvRow label="This chat" :value="usage ? fmtTokens(usage.chat_tokens) : '—'" />
+			<KvRow label="This chat" :value="usage ? fmtTokens(usage.chat_tokens) : '-'" />
 			<KvRow
 				:label="usage ? usage.month_label : 'This month'"
-				:value="usage ? fmtTokens(usage.month_tokens) : '—'"
+				:value="usage ? fmtTokens(usage.month_tokens) : '-'"
 			/>
-			<KvRow label="All time" :value="usage ? fmtTokens(usage.total_tokens) : '—'" />
+			<KvRow label="All time" :value="usage ? fmtTokens(usage.total_tokens) : '-'" />
 		</div>
 		<template v-if="usage && usage.budget_monthly">
 			<div class="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-gray-3">
@@ -321,7 +321,7 @@ const hasConversation = computed(() => !!(ctx.value && ctx.value.conversationId)
 // which is a different thing from "there is no model".
 const modelLabel = computed(() =>
 	disconnected.value
-		? "—"
+		? "-"
 		: (connStatus.value && connStatus.value.default_model) ||
 		  (ctx.value && ctx.value.modelLabel) ||
 		  "Auto"
@@ -391,7 +391,7 @@ const isPool = computed(() => !!(connStatus.value && connStatus.value.pool_mode)
 // oauth_expires_at is an epoch-ms value, rendered in the viewer's locale.
 const expiresLabel = computed(() => {
 	const ms = connStatus.value && connStatus.value.oauth_expires_at;
-	return ms ? new Date(Number(ms)).toLocaleString() : "—";
+	return ms ? new Date(Number(ms)).toLocaleString() : "-";
 });
 // The one line that replaces the pair for a pool: how many models, how they
 // are routed, and whether the container has the current set. humaniseSyncStatus
@@ -451,12 +451,12 @@ const statusLabel = computed(
 	() =>
 		({
 			ok: "Connected",
-			unknown: "—",
+			unknown: "-",
 			disconnected: "Disconnected",
 			down: "Not connected",
 			applying: "Applying changes",
 			attention: "Needs attention",
-		}[statusState.value] || "—")
+		}[statusState.value] || "-")
 );
 // The server's reason for "attention" (jarvis#714) - see account._llm_health.
 // One of sync_failed / turn_error / subscription_unverified, or "" for every
@@ -614,7 +614,7 @@ const resetStatusLabel = computed(() =>
 );
 const resetNote = computed(() => {
 	if (resetState.value.message) return resetState.value.message;
-	return "This usually takes a few minutes. You can leave this page open — chat reloads when the workspace is back.";
+	return "This usually takes a few minutes. You can leave this page open. Chat reloads when the workspace is back.";
 });
 
 const resetFormEl = ref(null);
@@ -644,7 +644,7 @@ async function doReset() {
 	}
 	if (revokeLlm.value) {
 		parts.push(
-			"Your AI model connections will be disconnected — you'll set them up again after the reset."
+			"Your AI model connections will be disconnected. You'll set them up again after the reset."
 		);
 	}
 	const ok = await confirm({
@@ -723,7 +723,7 @@ async function pollReset() {
 	resetState.value = s;
 	if (s.ready) {
 		stopPoll();
-		toast.success("Workspace is back — reloading.");
+		toast.success("Workspace is back. Reloading.");
 		// Full reload drops the memoized readiness verdict (same ending as the
 		// onboarding wizard).
 		setTimeout(() => window.location.assign("/jarvis/"), 800);

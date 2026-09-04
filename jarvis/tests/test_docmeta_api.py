@@ -629,5 +629,125 @@ class TestDocmetaApi(unittest.TestCase):
 		self.assertEqual(liked, [USER_A])  # no duplicate entry
 
 
+# --------------------------------------------------------------------------- #
+# jarvis#1062 owner decision: Notes moved off the Configure tab (the
+# installation) onto the Run itself (FindingsPanel.vue). "Jarvis Agent Run"
+# joined ALLOWED_DOCTYPES with NO extra gating code - `_get_gated`'s existing
+# doc.owner/System Manager check already resolves correctly because
+# agent_scheduler.py's `_launch_audit` reassigns a Run's `owner` to the
+# INSTALLATION owner at launch (never Administrator, never the run-as user),
+# for both a manual and a scheduled run. This is a focused, standalone
+# fixture (a bare Run insert, not a full `_launch_audit` launch) rather than
+# folding into TestDocmetaApi's shared `all_docs` - Runs are comment-only
+# (not assignable/shareable), so they do not belong in that generic loop.
+# --------------------------------------------------------------------------- #
+RUN = "Jarvis Agent Run"
+
+
+class TestDocmetaApiAgentRun(unittest.TestCase):
+	@classmethod
+	def setUpClass(cls):
+		frappe.set_user("Administrator")
+		cls.owner = _ensure_user("dm-run-owner@example.com")
+		cls.other = _ensure_user("dm-run-other@example.com")
+
+		agent_catalog.sync_agent_listings()
+		slug = "close-auditor"
+		if not frappe.db.exists(LISTING, slug):
+			slug = frappe.get_all(LISTING, filters={"status": "Published"}, pluck="name", limit=1)[0]
+		for n in frappe.get_all(INSTALLATION, filters={"owner": cls.owner}, pluck="name"):
+			frappe.delete_doc(INSTALLATION, n, force=True, ignore_permissions=True)
+		# close-auditor requires GL Entry / Account / Company read (install
+		# A12-gate) - grant it so the self-mapped install validates (mirrors
+		# TestDocmetaApi.setUpClass; ignore_permissions on the insert below
+		# skips permission checks, NOT validate()).
+		if frappe.db.exists("Role", "Accounts User"):
+			frappe.get_doc("User", cls.owner).add_roles("Accounts User")
+			frappe.clear_cache(user=cls.owner)
+		with _as(cls.owner):
+			inst = frappe.get_doc(
+				{
+					"doctype": INSTALLATION,
+					"agent": slug,
+					"enabled": 0,
+					"run_as_user": frappe.session.user,
+					"installed_version": frappe.db.get_value(LISTING, slug, "version"),
+					"installed_at": frappe.utils.now(),
+				}
+			)
+			inst.insert(ignore_permissions=True)
+		cls.installation = inst.name
+
+		# Bare Run insert (not a full _launch_audit launch) - this test is
+		# about the docmeta gate, not the launch pipeline. Owner reassigned
+		# server-side afterward, exactly as _launch_audit itself does (never
+		# left as Administrator / the inserting session's identity).
+		run = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"agent": slug,
+				"installation": cls.installation,
+				"trigger": "manual",
+				"status": "completed",
+				"started_at": frappe.utils.now(),
+			}
+		)
+		run.flags.ignore_permissions = True
+		run.insert()
+		frappe.db.set_value(RUN, run.name, "owner", cls.owner, update_modified=False)
+		frappe.db.commit()
+		cls.run_name = run.name
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		_clear_meta(RUN, cls.run_name)
+		frappe.delete_doc(RUN, cls.run_name, force=True, ignore_permissions=True)
+		frappe.delete_doc(INSTALLATION, cls.installation, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_clear_meta(RUN, self.run_name)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_run_owner_can_read_and_comment(self):
+		with _as(self.owner):
+			meta = docmeta_api.get_docmeta(RUN, self.run_name)
+			self.assertEqual(meta["created"]["owner"], self.owner)
+			row = docmeta_api.add_comment(RUN, self.run_name, "note on this run")
+			self.assertEqual(row["owner"], self.owner)
+			meta = docmeta_api.get_docmeta(RUN, self.run_name)
+			self.assertEqual([c["name"] for c in meta["comments"]], [row["name"]])
+
+	def test_non_owner_denied_on_a_run(self):
+		with _as(self.other):
+			with self.assertRaises(frappe.PermissionError):
+				docmeta_api.get_docmeta(RUN, self.run_name)
+			with self.assertRaises(frappe.PermissionError):
+				docmeta_api.add_comment(RUN, self.run_name, "nope")
+
+	def test_system_manager_allowed_on_a_run(self):
+		# Administrator is a System Manager and owns none of this fixture.
+		meta = docmeta_api.get_docmeta(RUN, self.run_name)
+		self.assertEqual(meta["created"]["owner"], self.owner)
+		row = docmeta_api.add_comment(RUN, self.run_name, "sm note")
+		self.assertEqual(row["owner"], "Administrator")
+
+	def test_run_is_not_assignable_or_shareable(self):
+		"""Comments only (jarvis#1062) - Runs deliberately never joined
+		ASSIGNABLE_DOCTYPES/SHAREABLE_DOCTYPES. Mirrors
+		test_toggle_assignment_excludes_custom_skill: this is the doctype
+		allowlist check (frappe.throw's default ValidationError), which runs
+		BEFORE any owner/write gate - not a PermissionError."""
+		with _as(self.owner):
+			with self.assertRaises(frappe.ValidationError):
+				docmeta_api.toggle_assignment(RUN, self.run_name, self.other, "add")
+			with self.assertRaises(frappe.ValidationError):
+				docmeta_api.toggle_share(RUN, self.run_name, self.other, "add")
+
+
 if __name__ == "__main__":
 	unittest.main()

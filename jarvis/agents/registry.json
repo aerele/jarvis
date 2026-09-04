@@ -87,7 +87,7 @@
       "nature": "operator",
       "delivery": "delegate",
       "version": "0.1.0",
-      "status": "Published",
+      "status": "Coming Soon",
       "description": "Assembles the PO, Goods Receipt and captured vendor invoice for each payable and works the exception tail: raises one evidence-carrying Approval Request per line that does not tie out (short-receipt, price variance, missing GRN, duplicate bill), and stages a draft Purchase Invoice only for invoices whose lines are all clean. Proposes only; a human confirms and submits every posting.",
       "tools_required": [
         "jarvis__get_list",
@@ -150,7 +150,7 @@
       "nature": "operator",
       "delivery": "delegate",
       "version": "0.1.0",
-      "status": "Published",
+      "status": "Coming Soon",
       "description": "Sweeps the overdue receivables book each day, nets the true residual per invoice, and risk-ranks who to chase. Stages a docstatus-0 draft Dunning per overdue customer with an escalating-by-bucket letter, and raises one Jarvis Approval Request carrying the prioritised follow-up worklist with per-account evidence. It proposes only; a human reviews the tone, sends, calls, and submits or discards every artifact. It never sends, reconciles, posts, or writes off.",
       "tools_required": [
         "jarvis__get_list",
@@ -272,7 +272,7 @@
       "nature": "operator",
       "delivery": "delegate",
       "version": "2.0.0",
-      "status": "Published",
+      "status": "Coming Soon",
       "description": "The reconciliation workbench as drafts and approvals: lists unreconciled Bank Transactions, proposes matches against submitted Payment Entries / invoices by reference, amount, date and party, and queues each proposal as a Jarvis Approval Request carrying both sides of the evidence. Unmatched lines become draft Payment Entry proposals. It proposes; a human confirms and reconciles every one — it never reconciles, allocates, or submits.",
       "tools_required": [
         "jarvis__get_list",
@@ -565,6 +565,12 @@
         "Account",
         "Company"
       ],
+      "config_keys": [
+        "materiality.benchmark_value",
+        "materiality.percentage",
+        "materiality.engagement_risk_level",
+        "materiality.rounding_step"
+      ],
       "rule_tokens": [
         "ca-cl-2b9d",
         "ca-cl-7f31",
@@ -634,7 +640,7 @@
       "nature": "operator",
       "delivery": "delegate",
       "version": "0.1.0",
-      "status": "Published",
+      "status": "Coming Soon",
       "description": "Runs a rolling cycle-count programme ERPNext has no native planner for: ranks the SKU book by value (ABC) and movement (velocity), reads how long since each item/warehouse was last counted, and for the lines due this cycle stages a docstatus-0 draft Stock Reconciliation per warehouse with item rows pre-filled and the counted quantity left blank for the human counter, plus one evidence-carrying Approval Request so a store lead approves the count list first. Proposes only; it never counts, never fills a quantity, and never submits a reconciliation.",
       "tools_required": [
         "jarvis__get_list",
@@ -1416,7 +1422,7 @@
       "nature": "operator",
       "delivery": "delegate",
       "version": "0.1.0",
-      "status": "Published",
+      "status": "Coming Soon",
       "description": "Watches stock position daily and works the replenishment tail: for each item whose velocity- and lead-time-aware reorder point is breached and is not already covered by open supply, it stages a docstatus-0 draft Material Request with a computed reorder qty, target warehouse and required-by date; where demand is ambiguous (no history, erratic, or slow/dead) it raises one evidence-carrying Approval Request instead of guessing. Proposes only; a human confirms and submits every request.",
       "tools_required": [
         "jarvis__get_list",

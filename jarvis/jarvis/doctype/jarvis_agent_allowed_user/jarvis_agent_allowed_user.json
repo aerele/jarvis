@@ -1,0 +1,22 @@
+{
+  "doctype": "DocType",
+  "name": "Jarvis Agent Allowed User",
+  "module": "Jarvis",
+  "istable": 1,
+  "custom": 0,
+  "engine": "InnoDB",
+  "field_order": [
+    "user"
+  ],
+  "fields": [
+    {
+      "fieldname": "user",
+      "fieldtype": "Link",
+      "label": "User",
+      "options": "User",
+      "reqd": 1,
+      "in_list_view": 1
+    }
+  ],
+  "permissions": []
+}

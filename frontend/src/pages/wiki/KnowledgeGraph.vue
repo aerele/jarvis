@@ -26,7 +26,7 @@
 		</div>
 		<div v-else-if="!rawPageCount" class="kg-empty text-muted">
 			<i
-				>No wiki pages yet — create some under the Wiki tab, then come back to connect and
+				>No wiki pages yet. Create some under the Wiki tab, then come back to connect and
 				explore them here.</i
 			>
 		</div>

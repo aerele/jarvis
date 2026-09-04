@@ -2,22 +2,18 @@
 	<section class="rounded-lg border p-4">
 		<div class="text-base font-semibold text-ink-gray-9">Learn from custom apps</div>
 		<div class="mt-0.5 text-sm text-ink-gray-6">
-			Teach Jarvis the workflows your custom apps implement. This now runs as the
-			<span class="font-medium text-ink-gray-8">Custom App Learning</span> agent: it reads
-			the apps <span class="font-medium text-ink-gray-8">you select</span> and writes
-			business-first pages straight to the Org wiki, on demand, inside the Jarvis container —
-			so your chat is never filled with source. Re-running updates the same pages in place.
-			Restricted to admins.
+			Runs as the
+			<span class="font-medium text-ink-gray-8">Custom App Learning</span> agent. It reads
+			the apps <span class="font-medium text-ink-gray-8">you select</span> and writes pages
+			to the Org wiki, updating them each time you rerun. Admins only.
 		</div>
 		<div
 			class="mt-3 flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
 		>
 			<FeatherIcon name="alert-triangle" class="size-4 shrink-0" />
 			<span>
-				A run reads only the apps you pick, and their source code is sent to the AI model
-				provider configured for this site. Source text — including comments and docstrings
-				— is treated as data, not instructions, but a hostile app could still attempt to
-				steer the agent, so only select apps whose code you trust.
+				A run sends the selected apps' source code to your AI provider. Only pick apps you
+				trust.
 			</span>
 		</div>
 		<div class="mt-4 flex flex-wrap items-center gap-3">
@@ -113,7 +109,7 @@ async function run(apps) {
 	try {
 		await api.runAgentNow(installation.value.name, { source_apps: apps });
 		pickerOpen.value = false;
-		toast.success(`Learning ${apps.length} app(s) — follow it on the agent's Runs tab`);
+		toast.success(`Learning ${apps.length} app(s). Follow progress on the agent's Runs tab.`);
 	} catch (e) {
 		toast.error(errHtml(e));
 	} finally {

@@ -168,11 +168,30 @@
 			</template>
 			<!-- DA-08: cell renderers dispatch through ListView's named `cell` slot
 			     ({column, row, item, align}) and forward to #cell-<key> ({row, column, item});
-			     no page slot for a column ⇒ stock ListRowItem. -->
+			     no page slot for a column ⇒ stock ListRowItem.
+
+			     text-base here is the ONE font-size convention for every list cell
+			     in the app (jarvis#653 audit: several pages' custom #cell-<key>
+			     slots omitted it and rendered larger than their siblings, since
+			     nothing else in the ancestor chain sets a font-size - frappe-ui's
+			     own per-column wrapper in ListRow.vue only defaults the TEXT
+			     COLOR, not the size, and ListRowItem's stock fallback below
+			     already carries text-base itself, which is why a column with no
+			     custom slot never showed the bug). A plain <div> is safe to
+			     insert here: it is a block element with no width/flex opinion of
+			     its own, so it changes neither the grid-cell sizing that makes
+			     `truncate` work nor a page's own flex/gap layout inside the slot -
+			     only inherited typography (font-size, line-height) passes through
+			     it. A page's own explicit classes (font-medium, text-ink-gray-9
+			     for a name cell, text-ink-gray-4 for a muted dash) still win, and
+			     a Badge inside a cell carries its own font-size regardless of what
+			     an ancestor sets, so this is a strict default, not an override. -->
 			<template #cell="{ column, row, item, align }">
-				<slot :name="`cell-${column.key}`" v-bind="{ row, column, item }">
-					<ListRowItem :column="column" :row="row" :item="item" :align="align" />
-				</slot>
+				<div class="text-base">
+					<slot :name="`cell-${column.key}`" v-bind="{ row, column, item }">
+						<ListRowItem :column="column" :row="row" :item="item" :align="align" />
+					</slot>
+				</div>
 			</template>
 		</ListView>
 

@@ -78,7 +78,7 @@ def _default_dashboard_title(run_doc, listing_title: str) -> str:
 	if not period:
 		period = frappe.utils.today()
 	base = (listing_title or "Agent").strip()
-	return f"{base} — {period}"[:140]
+	return f"{base} - {period}"[:140]
 
 
 def _esc(value) -> str:
@@ -91,10 +91,10 @@ def _esc(value) -> str:
 # per state; rendered as a first-class block inside the document body, NEVER as a
 # detachable banner, so a crop/PDF keeps it.
 _STATE_HEADING = {
-	"evaluated_clean": ("Evaluated — clean coverage", "#065f46", "#d1fae5"),
-	"partial": ("Partial coverage — not a clean result", "#92400e", "#fef3c7"),
-	"not_evaluable": ("Not evaluable — required checks could not run", "#991b1b", "#fee2e2"),
-	"failed": ("Run failed — no result produced", "#991b1b", "#fee2e2"),
+	"evaluated_clean": ("Evaluated: clean coverage", "#065f46", "#d1fae5"),
+	"partial": ("Partial coverage: not a clean result", "#92400e", "#fef3c7"),
+	"not_evaluable": ("Not evaluable: required checks could not run", "#991b1b", "#fee2e2"),
+	"failed": ("Run failed: no result produced", "#991b1b", "#fee2e2"),
 }
 
 # PP-2: the empty-findings sentence is state-conditional. "No exceptions were
@@ -102,7 +102,7 @@ _STATE_HEADING = {
 _EMPTY_SENTENCE = {
 	"evaluated_clean": "No exceptions were found for this run.",
 	"partial": (
-		"Partial coverage — this run did not evaluate every required check; "
+		"Partial coverage: this run did not evaluate every required check; "
 		"absence of findings is not a clean result."
 	),
 	"not_evaluable": "This run could not evaluate the required checks (see reasons below).",
@@ -207,7 +207,7 @@ def _fallback_dashboard_html(
 		# clean sentence because condition 2 fails.
 		if shadow:
 			sentence = (
-				"Preview (shadow) run — findings are visible to the reviewer only; "
+				"Preview (shadow) run - findings are visible to the reviewer only; "
 				"no clean or compliant attestation is issued while this capability is in preview."
 			)
 		elif _clean_attestation_allowed(result_state, total, shadow=shadow):
@@ -227,7 +227,7 @@ def _fallback_dashboard_html(
 	# PP-4: in shadow the outward clean/compliant heading is REPLACED by a preview
 	# banner, so a computed evaluated_clean never surfaces as an outward attestation.
 	if shadow:
-		label, fg, bg = ("Preview (shadow) — not a compliant attestation", "#3730a3", "#e0e7ff")
+		label, fg, bg = ("Preview (shadow) - not a compliant attestation", "#3730a3", "#e0e7ff")
 		state_attr = "shadow"
 	else:
 		label, fg, bg = _STATE_HEADING.get(result_state, _STATE_HEADING["partial"])
@@ -260,7 +260,7 @@ def _fallback_dashboard_html(
 	gaps = ""
 	if coverage_notes:
 		items = "".join(
-			f'<li style="margin:0 0 6px"><strong>{_esc(n.get("reason_code"))}</strong> — '
+			f'<li style="margin:0 0 6px"><strong>{_esc(n.get("reason_code"))}</strong>: '
 			f"{_esc(n.get('remediation'))}"
 			f"{(' (' + _esc(n.get('detail')) + ')') if n.get('detail') else ''}</li>"
 			for n in coverage_notes
@@ -276,7 +276,7 @@ def _fallback_dashboard_html(
 		banner = (
 			f'<div style="margin:0 0 16px;padding:10px 14px;border-radius:8px;'
 			f"background:var(--jarvis-warn-bg,#fef3c7);color:var(--jarvis-warn-text,#92400e);"
-			f'font-size:13px">Partial run — {_esc(coverage_note)}</div>'
+			f'font-size:13px">Partial run - {_esc(coverage_note)}</div>'
 		)
 	return (
 		f'<!doctype html><html><head><meta charset="utf-8">'
@@ -850,11 +850,11 @@ def record_delegate_run(
 	if truncated:
 		note_parts.append("scan truncated; findings incomplete")
 	if wm_drift:
-		note_parts.append("GL changed during scan — re-run advised")
+		note_parts.append("GL changed during scan - re-run advised")
 	if scoped:
-		note_parts.append("scoped visibility — findings not auto-resolved")
+		note_parts.append("scoped visibility - findings not auto-resolved")
 	if row_shortfall:
-		note_parts.append("ledger under-read vs watermark — re-run advised")
+		note_parts.append("ledger under-read vs watermark - re-run advised")
 	if coverage_notes:
 		# PP-3: surface the CUSTOMER remediation sentence (placeholder-filled) that the
 		# amber "Partial scan — {coverageNote}" banner reads day to day, NOT the raw
@@ -988,7 +988,12 @@ def record_delegate_run(
 	# next_run_at only for a scheduled install.
 	inst_values = {"last_run_at": frappe.utils.now()}
 	if inst.schedule_enabled:
-		inst_values["next_run_at"] = compute_next_run(inst.schedule_frequency, inst.schedule_time)
+		inst_values["next_run_at"] = compute_next_run(
+			inst.schedule_frequency,
+			inst.schedule_time,
+			weekday=inst.schedule_weekday,
+			day_of_month=inst.schedule_day_of_month,
+		)
 	frappe.db.set_value(INSTALLATION, inst.name, inst_values, update_modified=False)
 	# Under FrappeTestCase the enclosing transaction is rolled back at teardown; a
 	# mid-test commit would defeat that and leak Run/Finding/Provenance/Dashboard

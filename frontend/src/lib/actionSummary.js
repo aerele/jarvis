@@ -260,24 +260,24 @@ export function receiptView(tool, args, result, outcome) {
 	if (outcome === "discarded") {
 		icon = "discarded";
 		tone = "muted";
-		title = `Discarded — did not ${verb.present} ${wfPrefix}${subject}`;
+		title = `Discarded, did not ${verb.present} ${wfPrefix}${subject}`;
 	} else if (outcome === "failed") {
 		icon = "failed";
 		tone = "danger";
 		error = (result && result.error && result.error.message) || "";
 		title =
 			count > 1
-				? `Failed — none of the ${count} ${pluralize(
+				? `Failed, none of the ${count} ${pluralize(
 						doctype,
 						count
 				  )} were ${verb.past.toLowerCase()}`
-				: `Failed — ${subject} was not ${verb.past.toLowerCase()}`;
+				: `Failed, ${subject} was not ${verb.past.toLowerCase()}`;
 	} else if (outcome === "auto_applied") {
 		// An armed macro ran this write WITHOUT a confirmation card. Render a distinct
 		// receipt (not an identical "confirmed" chip) so it never reads as a silent run.
 		icon = "auto_applied";
 		tone = "success";
-		title = `${verb.past} ${wfPrefix}${subject} — automatically, no confirmation`;
+		title = `${verb.past} ${wfPrefix}${subject}, automatically, no confirmation`;
 	} else {
 		icon = "confirmed";
 		tone = "success";

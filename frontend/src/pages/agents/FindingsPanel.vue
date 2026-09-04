@@ -1,7 +1,11 @@
 <template>
 	<div class="mx-auto w-full max-w-3xl px-6 py-6">
-		<!-- run header -->
-		<div class="flex items-center gap-3">
+		<!-- run header. jarvis#1062 P2-12 (production-readiness audit):
+		     flex-wrap - the status badge + up to 3 action buttons had nowhere
+		     to go on a narrow screen except squeeze the title down to
+		     nothing; they now wrap to their own line instead, title kept
+		     full-width and truncating on its own line above them. -->
+		<div class="flex flex-wrap items-center gap-3">
 			<h2 class="min-w-0 flex-1 truncate text-lg font-semibold text-ink-gray-9">
 				Run {{ runLabel }}
 			</h2>
@@ -18,11 +22,23 @@
 				@click="router.push('/dashboards/' + run.dashboard)"
 			/>
 			<Button
-				v-if="run.conversation"
+				v-if="run.conversation && run.status !== 'running'"
 				variant="subtle"
 				label="Open Chat"
 				iconLeft="message-circle"
 				@click="router.push('/c/' + run.conversation)"
+			/>
+			<!-- #1062 C2: no confirm dialog - stop is safe (soft) and idempotent
+			     server-side (a concurrent finish/second click just reports the
+			     terminal state it actually reached). -->
+			<Button
+				v-if="run.status === 'running'"
+				variant="subtle"
+				theme="red"
+				label="Stop"
+				iconLeft="square"
+				:loading="stopping"
+				@click="stopRun"
 			/>
 		</div>
 		<div class="mt-1 flex flex-wrap items-center gap-1.5 text-sm text-ink-gray-5">
@@ -40,6 +56,13 @@
 				</Tooltip>
 			</template>
 		</div>
+
+		<!-- Step timeline (jarvis#1062): the run's own narration, full width and
+		     directly under the header so it reads as part of the run, not as a
+		     placeholder inside an empty findings list. Deliberately OUTSIDE the
+		     scribe/auditor branches - both natures take the same steps - and kept
+		     after the run finishes (collapsed) so a completed run is inspectable. -->
+		<RunStepTimeline :steps="steps" :status="run.status" :elapsed="elapsedLabel" />
 
 		<!-- Scribe run: a Custom App Learning agent writes wiki pages, not findings.
 		     Show the pages it wrote (with links) instead of a findings list, so a
@@ -60,7 +83,9 @@
 				class="mt-4"
 				type="warning"
 				:message="`${coverageNote}.`"
-			/>
+			>
+				<TechnicalDetails :details="coverageDetails" />
+			</Banner>
 
 			<div class="mt-5 text-base font-medium text-ink-gray-9">
 				{{ scribePages.length || run.pages_written || 0 }} wiki page{{
@@ -84,8 +109,10 @@
 					<FeatherIcon name="external-link" class="size-3.5 shrink-0 text-ink-gray-5" />
 				</a>
 			</div>
+			<!-- the running state is the timeline above; this line only says where
+			     the pages will land -->
 			<div v-else-if="run.status === 'running'" class="mt-2 py-6 text-sm text-ink-gray-5">
-				Run in progress - pages appear here as they are written.
+				Wiki pages appear here as they are written.
 			</div>
 			<div v-else class="mt-2 py-6 text-sm text-ink-gray-5">
 				No wiki pages were written this run.
@@ -99,12 +126,15 @@
 				class="mt-4"
 				type="warning"
 				:message="`Partial scan - ${coverageNote}. Treat gaps as unreviewed, not clean.`"
-			/>
+			>
+				<TechnicalDetails :details="coverageDetails" />
+			</Banner>
 
-			<!-- failed run: surface the error; no findings snapshot was recorded.
-				 x-circle, not Banner's fixed error icon: see the scribe branch above. -->
+			<!-- failed/stopped run: surface the error; no findings snapshot was
+				 recorded. x-circle, not Banner's fixed error icon: see the scribe
+				 branch above. -->
 			<div
-				v-if="run.status === 'failed'"
+				v-if="run.status === 'failed' || (run.status === 'stopped' && run.error)"
 				class="mt-4 flex items-start gap-2 rounded-lg border border-outline-red-1 bg-surface-red-1 px-3 py-2 text-sm text-ink-red-4"
 			>
 				<FeatherIcon name="x-circle" class="size-4 shrink-0" />
@@ -129,6 +159,14 @@
 			<div v-else-if="loadError && !rows.length" class="py-8 text-sm text-ink-red-4">
 				{{ loadError }}
 			</div>
+			<!-- a running run with no snapshot yet: the timeline above carries the
+			     progress, so this only says where the findings will land -->
+			<div
+				v-else-if="!rows.length && run.status === 'running'"
+				class="py-8 text-sm text-ink-gray-5"
+			>
+				Findings appear here when the run completes.
+			</div>
 			<div v-else-if="!rows.length" class="py-8 text-sm text-ink-gray-5">
 				{{ emptyText }}
 			</div>
@@ -145,12 +183,14 @@
 				<div class="mt-2 divide-y overflow-hidden rounded-lg border">
 					<div v-for="f in group.rows" :key="f.name">
 						<!-- collapsed row (div, not button - it hosts the state select);
-					     role/tabindex + enter/space keep it keyboard-operable -->
+					     role/tabindex + enter/space keep it keyboard-operable.
+					     jarvis#1062 P1-5: focus-visible ring added - none of this was
+					     there before, so tabbing to a finding row was invisible. -->
 						<div
 							role="button"
 							tabindex="0"
 							:aria-expanded="isExpanded(f.name)"
-							class="flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-gray-1"
+							class="flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
 							@click="toggleExpand(f.name)"
 							@keydown.enter.prevent="toggleExpand(f.name)"
 							@keydown.space.prevent="toggleExpand(f.name)"
@@ -166,9 +206,10 @@
 								:theme="SEVERITY_THEME[f.severity] || 'gray'"
 								:label="severityBadgeLabel(f.severity)"
 							/>
-							<span class="w-20 shrink-0 truncate font-mono text-sm text-ink-gray-5">
-								{{ f.rule_id || "-" }}
-							</span>
+							<!-- jarvis#1062 P0-2/P1-3: the rule code used to sit here as an
+							     unlabeled, truncated monospace column - engineering output
+							     ahead of the human summary. It now lives ONLY in the
+							     expanded finding's "Technical details" block, labelled. -->
 							<span class="min-w-0 flex-1 truncate text-base text-ink-gray-8">
 								{{ f.title }}
 							</span>
@@ -202,11 +243,17 @@
 							v-if="isExpanded(f.name)"
 							class="border-t bg-surface-gray-1 px-4 py-3"
 						>
-							<!-- O1: renderMarkdown from @/markdown (escapes HTML first - safe) -->
+							<!-- O1: renderMarkdown from @/markdown (escapes HTML first - safe).
+							     jarvis#1062 P0-2: the machine tokens findingDisplay() lifted
+							     out (rule codes, boolean eval flags, not_evaluable class
+							     counts, DocType.field refs) render ONLY in Technical details
+							     below - never in this primary sentence. displayFor(f.name)
+							     reads the precomputed findingDisplayMap entry - one
+							     extraction pass per finding, not one per template read. -->
 							<div
-								v-if="f.detail_md"
+								v-if="displayFor(f.name).text"
 								class="prose prose-sm max-w-none"
-								v-html="renderMarkdown(f.detail_md)"
+								v-html="renderMarkdown(displayFor(f.name).text)"
 							/>
 							<div v-else class="text-sm text-ink-gray-5">
 								No further detail recorded.
@@ -240,6 +287,11 @@
 							>
 								{{ caveatText(f) }}
 							</div>
+
+							<!-- jarvis#1062 P0-2/P1-3: rule code, evaluation flags,
+							     not_evaluable class counts and DocType.field references -
+							     collapsed, labelled, monospace. Never inline above. -->
+							<TechnicalDetails class="mt-1" :details="displayFor(f.name).details" />
 
 							<div class="mt-3 flex items-center gap-2">
 								<Button
@@ -279,6 +331,27 @@
 				>
 			</div>
 		</template>
+
+		<!-- Notes on THIS run (owner decision, jarvis#1062: moved off the
+		     Configure tab, which was per-installation - a note belongs to what
+		     it is actually about). Every run status, running included; same
+		     CommentsSection/useDocmeta pair the Configure tab used, re-targeted
+		     at "Jarvis Agent Run" + this run's name instead of the
+		     installation.
+
+		     "Run notes", not "Notes": this panel ALREADY renders a "Notes"
+		     heading a few hundred pixels up - SEVERITY_LABEL.note, the group of
+		     note-severity findings. Two identical headings on one screen meaning
+		     two unrelated things is a collision the merge created, not a naming
+		     preference. -->
+		<section class="mt-6 border-t pt-6">
+			<CommentsSection
+				:docmeta="runDocmeta"
+				:can-comment="true"
+				heading="Run notes"
+				empty-text="No notes on this run yet."
+			/>
+		</section>
 	</div>
 </template>
 
@@ -291,15 +364,24 @@
 // Discuss in chat (take_finding_to_chat → /c/:id), Open document, and the
 // open/acknowledged/resolved state select → setFindingState (optimistic).
 // No remediation text is ever fabricated - only what the run persisted.
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import Banner from "@/components/Banner.vue";
-import { timeAgo, exactDate, formatDate } from "@/utils/datetime";
+import RunStepTimeline from "./RunStepTimeline.vue";
+// Shared, not a local copy: this panel's header pill is one of the surfaces
+// @/lib/agentRunStatus exists to keep in step with the rail and the Activity
+// feed (jarvis#1062). A second table here is exactly the drift it prevents.
+import { STATUS_THEME } from "@/lib/agentRunStatus";
+import CommentsSection from "@/components/doc/CommentsSection.vue";
+import TechnicalDetails from "@/components/doc/TechnicalDetails.vue";
+import { useDocmeta } from "@/composables/useDocmeta";
+import { timeAgo, exactDate, formatDate, toLocalMs, fmtElapsed } from "@/utils/datetime";
 import { renderMarkdown } from "@/markdown";
+import { extractTechnicalDetails } from "@/lib/findingText";
 import * as api from "@/api";
-import { takeFindingToChat } from "@/api/agents";
+import { takeFindingToChat, stopAgentRun, listRunSteps } from "@/api/agents";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
@@ -313,10 +395,25 @@ const props = defineProps({
 	// appear (cross-file — see report notes).
 	run: { type: Object, required: true },
 });
+// stopped: the parent (AgentRunsBoard) owns the run list - refresh it after a
+// successful stop so the rail's status/badge picks up the terminal state.
+const emit = defineEmits(["stopped"]);
+
+// jarvis#1062: Notes-on-a-run - the SAME useDocmeta/CommentsSection pair the
+// Configure tab used for the installation, re-targeted at the run. A ref
+// (not a plain string) so switching the selected run (this panel is REUSED
+// across rail clicks, not remounted - see the findings watch below) reloads
+// the right run's comments; docmeta_api gates on doc.owner/System Manager,
+// which already resolves correctly for a run (its `owner` is reassigned to
+// the installation owner at launch, never Administrator - agent_scheduler.py
+// _launch_audit).
+const runDocmeta = useDocmeta(
+	"Jarvis Agent Run",
+	computed(() => props.run && props.run.name)
+);
 
 const router = useRouter();
 
-const STATUS_THEME = { running: "blue", completed: "green", partial: "orange", failed: "red" };
 const SEVERITY_THEME = { blocker: "red", warning: "orange", note: "gray" };
 const SEVERITY_ORDER = ["blocker", "warning", "note"];
 const SEVERITY_LABEL = { blocker: "Blockers", warning: "Warnings", note: "Notes" };
@@ -347,7 +444,65 @@ const loadError = ref("");
 const stateFilter = ref("");
 const busy = ref("");
 const chatBusy = ref("");
+const stopping = ref(false);
 const expanded = ref(new Set());
+
+// ── #1062: the per-run STEP TIMELINE. A ticking elapsed-time label plus the
+// steps the bench observed THIS run take (list_run_steps), so a running run
+// reads as alive and step-by-step instead of a static "in progress" line. The
+// steps outlive the run: a finished one keeps them behind a collapsed
+// disclosure, which is why they are fetched for a terminal run too. ──────────
+const nowTick = ref(Date.now());
+const steps = ref([]);
+let elapsedTimer = null;
+let stepsTimer = null;
+
+const STEPS_POLL_MS = 5000;
+
+const elapsedLabel = computed(() => {
+	const startMs = props.run && toLocalMs(props.run.started_at);
+	if (startMs == null) return fmtElapsed(0);
+	return fmtElapsed((nowTick.value - startMs) / 1000);
+});
+
+// Monotonic request id, like the findings load: rapid rail clicks must not land
+// another run's steps on the pinned run.
+let stepsReqId = 0;
+async function loadSteps() {
+	if (!props.run || !props.run.name) return;
+	const id = ++stepsReqId;
+	try {
+		const res = await listRunSteps(props.run.name);
+		if (id !== stepsReqId) return;
+		steps.value = (res && res.steps) || [];
+	} catch {
+		// Best-effort narration: a failed fetch leaves the last steps on screen and
+		// the elapsed timer ticking. It must never turn a healthy run into an error
+		// state - the findings load owns that.
+	}
+}
+function startStepsPoll() {
+	if (elapsedTimer) return; // already running
+	nowTick.value = Date.now();
+	elapsedTimer = setInterval(() => (nowTick.value = Date.now()), 1000);
+	loadSteps();
+	// Visibility-guarded, mirroring the rows poll in AgentRunsBoard.vue: a
+	// backgrounded tab must not burn a request every 5s.
+	stepsTimer = setInterval(() => {
+		if (document.visibilityState === "visible") loadSteps();
+	}, STEPS_POLL_MS);
+}
+function stopStepsPoll() {
+	if (elapsedTimer) {
+		clearInterval(elapsedTimer);
+		elapsedTimer = null;
+	}
+	if (stepsTimer) {
+		clearInterval(stepsTimer);
+		stepsTimer = null;
+	}
+}
+onBeforeUnmount(stopStepsPoll);
 
 const runLabel = computed(() =>
 	props.run && props.run.started_at ? timeAgo(props.run.started_at) : props.run.name
@@ -358,11 +513,16 @@ const coverageWarning = computed(
 		props.run.status === "partial" ||
 		(!!props.run.coverage_note && props.run.status !== "failed")
 );
+// jarvis#1062 P0-2: coverage_note is bundle-generated too - the same
+// extraction as findings' detail_md, so a rule code / DocType.field
+// reference in the coverage sentence lands in coverageDetails, never inline.
+const coverageExtract = computed(() => extractTechnicalDetails(props.run.coverage_note));
 const coverageNote = computed(() => {
-	const note = String(props.run.coverage_note || "").trim();
+	const note = coverageExtract.value.text.trim();
 	// the sentence supplies its own terminal punctuation
 	return note.replace(/[.\s]+$/, "") || "some records were not reviewed";
 });
+const coverageDetails = computed(() => coverageExtract.value.details);
 
 // Scribe runs (Custom App Learning) write wiki pages, not findings: render the
 // pages tally + links instead of the findings machinery.
@@ -380,10 +540,11 @@ const scribePages = computed(() => {
 function wikiUrl(slug) {
 	return `/app/jarvis-wiki-page/${encodeURIComponent(slug)}`;
 }
+// "running" is handled by its own branch above (#1062 C3 progress display) -
+// this only ever renders for a run that has already finished (or stopped).
 const emptyText = computed(() => {
-	if (props.run.status === "running")
-		return "Run in progress - findings appear when it completes.";
 	if (props.run.status === "failed") return "This run recorded no findings.";
+	if (props.run.status === "stopped") return "This run was stopped before it reported findings.";
 	return `No ${stateFilter.value ? stateFilter.value + " " : ""}findings for this run.`;
 });
 
@@ -470,7 +631,24 @@ function loadMore() {
 // refresh and object identity alone must not re-fetch findings.
 watch(
 	[() => props.run && props.run.name, () => props.run && props.run.status],
-	([name], [prevName] = []) => {
+	([name, status], [prevName, prevStatus] = []) => {
+		// Step timeline: independent of the findings reload below, and evaluated
+		// first so the state-filter early-return further down never skips it.
+		if (name !== prevName) steps.value = [];
+		if (status === "running") {
+			// switching from one running run to another must re-arm the poll, not
+			// leave it pointed at the previous run's elapsed clock
+			if (name !== prevName) stopStepsPoll();
+			startStepsPoll();
+		} else {
+			stopStepsPoll();
+			// One last fetch on the flip to terminal: the closing writeback step
+			// lands in the same instant the status changes, so stopping the interval
+			// alone would leave the timeline permanently one step short. A run
+			// selected while already finished takes this branch too, which is what
+			// fills its collapsed "Steps (N)" disclosure.
+			if (name && (name !== prevName || prevStatus === "running")) loadSteps();
+		}
 		if (name !== prevName) {
 			rows.value = [];
 			total.value = 0;
@@ -535,14 +713,33 @@ async function moveFinding(f, state) {
 	}
 }
 
+// ── #1062 C2: operator stop (soft, idempotent server-side - no confirm) ─────
+async function stopRun() {
+	if (stopping.value || props.run.status !== "running") return;
+	stopping.value = true;
+	try {
+		await stopAgentRun(props.run.name);
+		toast.success("Run stopped");
+		emit("stopped");
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		stopping.value = false;
+	}
+}
+
 // ── actions: take-to-chat + open-doc (decision: NO fabricated remediation) ──
 async function discussInChat(f) {
 	if (chatBusy.value) return;
 	chatBusy.value = f.name;
 	try {
 		const res = (await takeFindingToChat(f.name)) || {};
-		if (!res.conversation) {
-			throw new Error(res.reason || "Could not open a conversation for this finding.");
+		// take_finding_to_chat always creates the conversation, even when
+		// seeding it (send_message) fails - so `ok`, not `conversation`, is the
+		// real success signal (#1062 polish: this used to navigate regardless).
+		if (!res.ok) {
+			toast.error(errHtml(res.reason || "Could not open this finding in chat."));
+			return;
 		}
 		router.push("/c/" + res.conversation);
 	} catch (e) {
@@ -560,6 +757,35 @@ function refUrl(row) {
 		.toLowerCase()
 		.replace(/ /g, "-");
 	return `/app/${dt}/${encodeURIComponent(row.ref_name)}`;
+}
+// jarvis#1062 P0-2/P1-3: the primary sentence a reviewer reads, plus every
+// machine token pulled out of it (rule code, eval flags, not_evaluable class
+// counts, DocType.field refs) as a flat labelled list for the collapsed
+// "Technical details" block. f.rule_id is a SEPARATE structured field (not
+// necessarily repeated inside detail_md's prose) - folded in here too,
+// de-duplicated against whatever extraction already found.
+function findingDisplay(f) {
+	const { text, details } = extractTechnicalDetails(f && f.detail_md);
+	const all = [...details];
+	if (f && f.rule_id && !all.some((d) => d.value === f.rule_id)) {
+		all.unshift({ label: "Rule", value: f.rule_id });
+	}
+	return { text, details: all };
+}
+// Review fix: an expanded row's template read findingDisplay(f) 2-3 times
+// (the v-if, the v-html source, and TechnicalDetails' :details prop), each
+// call re-running the regex extraction pass over the same detail_md. Computed
+// once per finding here, keyed by the same f.name the row already keys on;
+// EMPTY_DISPLAY is a static fallback so a template read for a name not (yet)
+// in the map never throws.
+const EMPTY_DISPLAY = Object.freeze({ text: "", details: [] });
+const findingDisplayMap = computed(() => {
+	const map = new Map();
+	for (const f of rows.value) map.set(f.name, findingDisplay(f));
+	return map;
+});
+function displayFor(name) {
+	return findingDisplayMap.value.get(name) || EMPTY_DISPLAY;
 }
 // "Statutory basis: {section} (effective {date}). {disclaimer}" - only the
 // pieces the run recorded

@@ -35,6 +35,7 @@ from frappe.utils import add_days, add_to_date, now_datetime
 
 from jarvis import admin_client
 from jarvis.chat import agent_catalog, agent_scheduler, agents_api
+from jarvis.tests._agent_access import allow_listing_for
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -115,6 +116,12 @@ class DispatchIdempotencyTestCase(FrappeTestCase):
 		frappe.set_user("Administrator")
 		cls.owner = _mk_user(OWNER)
 		_mk_listing()
+		# jarvis#1062: agent access is DENY BY DEFAULT, and this module's owner is a
+		# plain Jarvis User. Every dispatch path here (run_agent_now, the sweep,
+		# _launch_audit) gates on it, so without an explicit grant the whole module
+		# tests nothing but the refusal. Persists module-wide - neither _wipe() nor
+		# _mk_listing() touches the allow rows.
+		allow_listing_for(SLUG, user=cls.owner)
 		# The A14 ceiling counts every non-failed run on the SITE, including rows other
 		# platform-test modules commit and never clean, so it can refuse a legitimate
 		# dispatch here for reasons that have nothing to do with this module.

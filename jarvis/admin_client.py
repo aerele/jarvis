@@ -1348,13 +1348,6 @@ def post_push_agent_skills(agent_skills: list[dict]) -> dict:
 	restarts the container so agent re-scans ``workspace/skills``. An empty
 	list is a valid "remove all agent skills" reconcile.
 
-	NOTE: the admin endpoint ``jarvis_admin.api.tenant.push_agent_skills`` and the
-	fleet ``PUT /v1/containers/{name}/agent-skills`` are the B5 half of this work
-	(a sibling of the custom-skills chain). Until they ship this raises
-	``AdminValidationError`` (unknown method), which ``apply_agents`` records as a
-	terminal ``failed:`` status — the bench-side path is complete and structured
-	identically to ``post_push_custom_skills``.
-
 	Raises:
 		AdminAuthError, AdminUnreachableError, AdminValidationError
 		(rate-limit shares the rotate-secret bucket).
@@ -1798,6 +1791,15 @@ def push_bench_heartbeat(heartbeat: dict) -> dict:
 	dead-man's-switch. Called best-effort from the heartbeat */5 cron.
 	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
 	return _post(path=_m("api.tenant.ingest_bench_heartbeat"), body={"heartbeat": heartbeat})
+
+
+def push_chat_feedback(item: dict) -> dict:
+	"""Push one chat-reply rating (thumbs up/down + optional note) to admin for the
+	tenant-wise Feedback dashboard. Admin upserts on (tenant, message). Called
+	best-effort from jarvis.chat.feedback.submit_feedback, which swallows failures
+	so a lost rating never blocks the tap.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
+	return _post(path=_m("api.tenant.ingest_chat_feedback"), body={"item": item})
 
 
 def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int = 30) -> dict:

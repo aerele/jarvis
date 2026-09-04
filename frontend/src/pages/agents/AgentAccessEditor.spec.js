@@ -1,0 +1,390 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mount, flushPromises } from "@vue/test-utils";
+
+/**
+ * AgentAccessEditor: the four behaviours that decide whether "Save access"
+ * means what an admin thinks it means.
+ *
+ *   1. The button is inert until something actually changed, and the unsaved
+ *      marker appears exactly when it is. The old two-step flow had a live Save
+ *      button and no marker, so an admin could not tell a saved list from a
+ *      half-edited one.
+ *   2. ONE save carries BOTH lists. Roles and users are two halves of one
+ *      access statement; saving them separately means passing through an access
+ *      state nobody chose.
+ *   3. The apply checkbox is what decides whether the workspace restarts, and
+ *      it is the ADMIN's choice - the toast differs so they know which of the
+ *      two things just happened.
+ *   4. A pending apply is polled to a terminal state, and a FAILED one says why
+ *      rather than reporting success.
+ */
+
+const agentsApi = vi.hoisted(() => ({
+	setAgentAccess: vi.fn(),
+	searchUsers: vi.fn(),
+}));
+vi.mock("@/api/agents", () => agentsApi);
+
+const api = vi.hoisted(() => ({ getAgentsSyncStatus: vi.fn() }));
+vi.mock("@/api", () => api);
+
+// frappe-ui's ESM entry does not resolve under vitest (see LlmPoolEditor.spec.js).
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+vi.mock("frappe-ui", () => ({
+	toast,
+	call: vi.fn(),
+	Button: {
+		name: "Button",
+		props: ["label", "loading", "disabled", "variant", "icon"],
+		emits: ["click"],
+		template: '<button :disabled="disabled" @click="$emit(\'click\')">{{ label }}</button>',
+	},
+	Autocomplete: {
+		name: "Autocomplete",
+		props: ["options", "modelValue", "placeholder"],
+		emits: ["update:modelValue", "update:query"],
+		template: "<div class='autocomplete'></div>",
+	},
+}));
+vi.mock("@/lib/errors", () => ({ errHtml: (e) => String((e && e.message) || e) }));
+
+import AgentAccessEditor from "./AgentAccessEditor.vue";
+
+const SAVED_ROLES = ["Accounts User"];
+const SAVED_USERS = ["ann@example.com"];
+
+function editor(props = {}) {
+	return mount(AgentAccessEditor, {
+		props: {
+			slug: "close-auditor",
+			roles: [...SAVED_ROLES],
+			users: [...SAVED_USERS],
+			allRoles: ["Accounts User", "Accounts Manager", "Stock User"],
+			...props,
+		},
+	});
+}
+
+const saveBtn = (w) => w.find('[data-test="save-access"]');
+// Roles first, People second - the same frappe-ui Autocomplete in both slots, which
+// is the point of the change: one control, one behaviour.
+const pickers = (w) => w.findAllComponents({ name: "Autocomplete" });
+const peoplePicker = (w) => pickers(w)[1];
+
+beforeEach(() => {
+	vi.useFakeTimers();
+	agentsApi.setAgentAccess.mockReset();
+	agentsApi.searchUsers.mockReset().mockResolvedValue([]);
+	api.getAgentsSyncStatus.mockReset();
+	toast.success.mockReset();
+	toast.error.mockReset();
+	// Default: the save lands and reports back exactly what the draft asked for.
+	agentsApi.setAgentAccess.mockImplementation(async (slug, roles, users, apply) => ({
+		ok: true,
+		allowed_roles: roles,
+		allowed_users: users,
+		applied: !!apply,
+	}));
+});
+afterEach(() => {
+	vi.useRealTimers();
+});
+
+describe("dirty state", () => {
+	it("starts clean: no marker, save disabled", () => {
+		const w = editor();
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(false);
+		expect(saveBtn(w).attributes("disabled")).toBeDefined();
+	});
+
+	it("marks dirty and enables save once a role is removed", async () => {
+		const w = editor();
+		w.vm.roleDraft = [];
+		await flushPromises();
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(true);
+		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
+	});
+
+	it("a change that nets out to the saved value is NOT dirty", async () => {
+		// Order must not count as a change: the server returns its own order and an
+		// admin who removes and re-adds the same role has changed nothing.
+		const w = editor({ roles: ["A", "B"], users: [] });
+		w.vm.roleDraft = ["B", "A"];
+		await flushPromises();
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(false);
+	});
+
+	it("goes clean again after a successful save", async () => {
+		api.getAgentsSyncStatus.mockResolvedValue({ pending: false, last_sync_status: "ok" });
+		const w = editor();
+		w.vm.roleDraft = ["Stock User"];
+		await flushPromises();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(false);
+	});
+});
+
+describe("one save carries both lists", () => {
+	it("sends roles AND users in a single call", async () => {
+		api.getAgentsSyncStatus.mockResolvedValue({ pending: false, last_sync_status: "ok" });
+		const w = editor();
+		w.vm.roleDraft = ["Stock User"];
+		w.vm.userDraft = ["bo@example.com"];
+		await flushPromises();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+
+		expect(agentsApi.setAgentAccess).toHaveBeenCalledTimes(1);
+		const [slug, roles, users] = agentsApi.setAgentAccess.mock.calls[0];
+		expect(slug).toBe("close-auditor");
+		expect(roles).toEqual(["Stock User"]);
+		expect(users).toEqual(["bo@example.com"]);
+	});
+
+	it("emits the saved value so the page can update without a refetch", async () => {
+		api.getAgentsSyncStatus.mockResolvedValue({ pending: false, last_sync_status: "ok" });
+		const w = editor();
+		w.vm.userDraft = [];
+		await flushPromises();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(w.emitted("saved")[0][0]).toEqual({
+			allowed_roles: SAVED_ROLES,
+			allowed_users: [],
+		});
+	});
+
+	it("saving an empty pair is allowed - it CLOSES the agent, it does not open it", async () => {
+		api.getAgentsSyncStatus.mockResolvedValue({ pending: false, last_sync_status: "ok" });
+		const w = editor();
+		w.vm.roleDraft = [];
+		w.vm.userDraft = [];
+		await flushPromises();
+		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		const [, roles, users] = agentsApi.setAgentAccess.mock.calls[0];
+		expect(roles).toEqual([]);
+		expect(users).toEqual([]);
+	});
+});
+
+describe("saving always applies", () => {
+	it("offers no opt-out and always asks the server to apply", async () => {
+		// The checkbox is gone on purpose: access that is saved but not loaded is a
+		// half-done action, and the roster silently disagreeing with the database is
+		// the bug class this feature keeps designing around.
+		api.getAgentsSyncStatus.mockResolvedValue({ pending: false, last_sync_status: "ok" });
+		const w = editor();
+		expect(w.find('[data-test="apply-now"]').exists()).toBe(false);
+
+		w.vm.roleDraft = [];
+		await flushPromises();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+
+		expect(agentsApi.setAgentAccess.mock.calls[0][3]).toBe(true);
+	});
+
+	it("states the restart cost as a fact rather than a choice", async () => {
+		const w = editor();
+		const note = w.find('[data-test="apply-note"]').text();
+		expect(note).toContain("Saving loads this agent on your workspace");
+		expect(note).toContain("restarts for about 30 seconds");
+		expect(note).toContain("active chats are interrupted");
+	});
+});
+
+describe("apply progress", () => {
+	it("shows the pending badge, polls, then reports success", async () => {
+		api.getAgentsSyncStatus
+			.mockResolvedValueOnce({ pending: true })
+			.mockResolvedValueOnce({ pending: false, last_sync_status: "ok" });
+		const w = editor();
+		w.vm.roleDraft = [];
+		await flushPromises();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+
+		expect(w.find('[data-test="apply-pending"]').exists()).toBe(true);
+		expect(toast.success).not.toHaveBeenCalled();
+
+		await vi.advanceTimersByTimeAsync(3000);
+		await flushPromises();
+
+		expect(w.find('[data-test="apply-pending"]').exists()).toBe(false);
+		expect(toast.success).toHaveBeenCalledWith("Access saved and applied.");
+	});
+
+	it("a failed apply surfaces the reason, never a success toast", async () => {
+		api.getAgentsSyncStatus.mockResolvedValue({
+			pending: false,
+			last_sync_status: "failed: workspace refused the roster",
+		});
+		const w = editor();
+		w.vm.roleDraft = [];
+		await flushPromises();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+
+		// Classified by the real humaniseSyncStatus (not mocked here on purpose:
+		// the point is that this toast and the catalog's apply pill read the same
+		// status the same way).
+		expect(toast.error).toHaveBeenCalledWith(
+			expect.stringContaining("workspace refused the roster")
+		);
+		expect(toast.success).not.toHaveBeenCalled();
+		expect(w.find('[data-test="apply-pending"]').exists()).toBe(false);
+	});
+
+	it("a rejected save leaves the draft intact so the edit is not lost", async () => {
+		agentsApi.setAgentAccess.mockRejectedValue(new Error("You need the Jarvis Admin role"));
+		const w = editor();
+		w.vm.roleDraft = ["Stock User"];
+		await flushPromises();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+
+		expect(toast.error).toHaveBeenCalledWith("You need the Jarvis Admin role");
+		expect(w.vm.roleDraft).toEqual(["Stock User"]);
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(true);
+	});
+});
+
+describe("a props refresh mid-edit", () => {
+	it("keeps unsaved draft edits and stays dirty", async () => {
+		// The parent reloads the agent for unrelated reasons - toggling Enabled
+		// calls load() and reassigns `agent` - and that used to silently discard a
+		// half-finished access edit.
+		const w = editor();
+		w.vm.roleDraft = ["Stock User"];
+		await flushPromises();
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(true);
+
+		await w.setProps({ roles: ["Accounts Manager"], users: [...SAVED_USERS] });
+		await flushPromises();
+
+		expect(w.vm.roleDraft).toEqual(["Stock User"]);
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(true);
+	});
+
+	it("reseeds the drafts when there is nothing to lose", async () => {
+		const w = editor();
+		await w.setProps({ roles: ["Accounts Manager"], users: [] });
+		await flushPromises();
+
+		expect(w.vm.roleDraft).toEqual(["Accounts Manager"]);
+		expect(w.vm.userDraft).toEqual([]);
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(false);
+	});
+
+	it("a kept draft that now matches the new baseline reads as clean", async () => {
+		// dirty is recomputed against the NEW baseline, so the indicator never
+		// claims an unsaved change that the server already holds.
+		const w = editor();
+		w.vm.roleDraft = ["Stock User"];
+		await flushPromises();
+		await w.setProps({ roles: ["Stock User"], users: [...SAVED_USERS] });
+		await flushPromises();
+
+		expect(w.find('[data-test="access-dirty"]').exists()).toBe(false);
+	});
+});
+
+describe("out-of-order user searches", () => {
+	it("ignores a slow earlier response that lands after a newer one", async () => {
+		// Typing "ne" then "newe" and having "ne" resolve second used to repopulate
+		// the menu with results for a prefix the admin had already moved past.
+		let resolveFirst;
+		agentsApi.searchUsers
+			.mockImplementationOnce(() => new Promise((r) => (resolveFirst = r)))
+			.mockImplementationOnce(async () => [
+				{ name: "newer@example.com", full_name: "Newer" },
+			]);
+
+		const w = editor();
+		peoplePicker(w).vm.$emit("update:query", "ne");
+		await vi.advanceTimersByTimeAsync(200);
+		peoplePicker(w).vm.$emit("update:query", "newe");
+		await vi.advanceTimersByTimeAsync(200);
+		await flushPromises();
+
+		// The newer request has already landed; now the stale one answers.
+		resolveFirst([{ name: "stale@example.com", full_name: "Stale" }]);
+		await flushPromises();
+
+		expect(w.vm.userOptions.map((o) => o.value)).toEqual(["newer@example.com"]);
+	});
+});
+
+describe("opening the people picker", () => {
+	it("uses the same Autocomplete as the roles picker, not a bespoke widget", () => {
+		// Standing directive: SPA UI is frappe-ui, and a control must match the one
+		// beside it. This also fixed a transparent hand-rolled popup that read
+		// through onto the helper text and the Save button.
+		const w = editor();
+		expect(pickers(w)).toHaveLength(2);
+		expect(peoplePicker(w).props("placeholder")).toBe("Add a person…");
+	});
+
+	it("fetches with the current (empty) query and renders the results", async () => {
+		// The picker used to sit empty until the admin guessed a letter; search_users
+		// answers an empty term with the first 20 enabled users, which is the "who is
+		// there?" that opening it is actually asking.
+		agentsApi.searchUsers.mockResolvedValue([
+			{ name: "bo@example.com", full_name: "Bo" },
+			{ name: "cy@example.com", full_name: "Cy" },
+		]);
+		const w = editor();
+		w.vm.primeUserMenu();
+		await flushPromises();
+
+		expect(agentsApi.searchUsers).toHaveBeenCalledWith("");
+		// Fed to the picker as its options, in frappe-ui's {label, value} shape.
+		expect(
+			peoplePicker(w)
+				.props("options")
+				.map((o) => o.value)
+		).toEqual(["bo@example.com", "cy@example.com"]);
+	});
+
+	it("debounces typing into a remote search and adds the pick as a chip", async () => {
+		agentsApi.searchUsers.mockResolvedValue([{ name: "dee@example.com", full_name: "Dee" }]);
+		const w = editor();
+
+		peoplePicker(w).vm.$emit("update:query", "de");
+		expect(agentsApi.searchUsers).not.toHaveBeenCalled(); // debounced, not per keystroke
+		await vi.advanceTimersByTimeAsync(200);
+		await flushPromises();
+		expect(agentsApi.searchUsers).toHaveBeenCalledWith("de");
+
+		peoplePicker(w).vm.$emit("update:modelValue", { label: "Dee", value: "dee@example.com" });
+		await flushPromises();
+		expect(w.vm.userDraft).toContain("dee@example.com");
+		expect(w.findAll('[data-test="user-chip"]').length).toBe(2);
+	});
+
+	it("does not refetch while the menu is already primed", async () => {
+		agentsApi.searchUsers.mockResolvedValue([{ name: "bo@example.com", full_name: "Bo" }]);
+		const w = editor();
+		w.vm.primeUserMenu();
+		w.vm.primeUserMenu();
+		await flushPromises();
+		expect(agentsApi.searchUsers).toHaveBeenCalledTimes(1);
+	});
+
+	it("primes again after a pick, so reopening still offers people", async () => {
+		agentsApi.searchUsers.mockResolvedValue([{ name: "bo@example.com", full_name: "Bo" }]);
+		const w = editor();
+		w.vm.primeUserMenu();
+		await flushPromises();
+
+		w.vm.addUser("bo@example.com"); // selects, and clears the menu
+		expect(w.vm.userDraft).toContain("bo@example.com");
+
+		w.vm.primeUserMenu();
+		await flushPromises();
+		expect(agentsApi.searchUsers).toHaveBeenCalledTimes(2);
+	});
+});

@@ -1,8 +1,12 @@
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
-from jarvis.tools import require_doctype_and_name
 from jarvis.tools._bulk import _MAX_BATCH
+
+_NO_NAME_MESSAGE = (
+	"Pass name (one document) or names (a non-empty list). For a single "
+	"record like Stock Settings call get_doc with only the doctype."
+)
 
 
 def get_doc(doctype: str, name: str | None = None, names: list | None = None) -> dict:
@@ -10,21 +14,51 @@ def get_doc(doctype: str, name: str | None = None, names: list | None = None) ->
 
 	Enforces read permission on EACH specific document for the current user.
 
-	Single: returns the document dict.
-	Batch: returns ``{"doctype","docs":[<doc>,...],"count":N}`` (fail-fast: a
-	missing or unreadable name raises, naming the offending record).
+	Single: returns the document dict - or, if the caller passed a non-empty
+	``names`` list, the SAME batch envelope as any other doctype
+	(``{"doctype","docs":[<the one doc>],"count":1}``), because a caller that
+	asked for the batch shape must get the batch shape back, not silently a
+	different one it has to special-case. ``name``/an empty or absent
+	``names`` are ignored: a Single DocType (e.g. Stock Settings) has exactly
+	one document, whose name IS the doctype - there is nothing else to pass,
+	and a delegate with nothing sensible to put there commonly sends "" or
+	[], which used to bounce back "names must be a non-empty list of document
+	names" or "unknown Stock Settings: x" instead of just reading the one
+	document that exists.
+	Batch (non-single): returns ``{"doctype","docs":[<doc>,...],"count":N}``
+	(fail-fast: a missing or unreadable name raises, naming the offending
+	record).
 	"""
+	if not doctype:
+		raise InvalidArgumentError("doctype is required")
+	if not frappe.db.exists("DocType", doctype):
+		raise InvalidArgumentError(f"unknown doctype: {doctype}")
+
+	if frappe.get_meta(doctype).issingle:
+		doc = _get_single(doctype)
+		# names=[...] on a Single is meaningless as a name list (its one
+		# document's name IS the doctype - see docstring), but a caller who
+		# passed it explicitly asked for the BATCH shape and must get it back,
+		# not the flat dict every other Single call returns. names=None/[]
+		# (the common "nothing sensible to pass" case) stays flat.
+		if isinstance(names, list) and names:
+			return {"doctype": doctype, "docs": [doc], "count": 1}
+		return doc
+
 	if names is not None:
+		if not isinstance(names, list) or not names:
+			raise InvalidArgumentError(_NO_NAME_MESSAGE)
 		return _get_doc_batch(doctype, names)
 
-	require_doctype_and_name(doctype, name)
+	if not name:
+		raise InvalidArgumentError(_NO_NAME_MESSAGE)
 	return _get_doc_one(doctype, name)
 
 
 def _get_doc_one(doctype: str, name: str) -> dict:
 	"""Existence + per-record read-permission check, then the doc dict."""
 	if not frappe.db.exists(doctype, name):
-		raise InvalidArgumentError(f"unknown {doctype}: {name}")
+		raise InvalidArgumentError(f"No {doctype} named '{name}'. Use get_list to find valid names first.")
 
 	if not frappe.has_permission(doctype, ptype="read", doc=name):
 		raise PermissionDeniedError(f"no read permission on {doctype} {name}")
@@ -34,11 +68,21 @@ def _get_doc_one(doctype: str, name: str) -> dict:
 	return doc.as_dict(no_default_fields=False)
 
 
+def _get_single(doctype: str) -> dict:
+	"""Frappe's documented idiom for reading a Single - ``get_single``, not
+	``get_doc(doctype, doctype)`` - plus the same read-permission check and
+	output shaping ``_get_doc_one`` gives every other document. No existence
+	check: a Single always exists (frappe.db.exists special-cases it), and
+	singles carry their own DocPerms, so the permission check still matters."""
+	if not frappe.has_permission(doctype, ptype="read", doc=doctype):
+		raise PermissionDeniedError(f"no read permission on {doctype}")
+
+	doc = frappe.get_single(doctype)
+	doc.apply_fieldlevel_read_permissions()
+	return doc.as_dict(no_default_fields=False)
+
+
 def _get_doc_batch(doctype: str, names: list) -> dict:
-	if not doctype:
-		raise InvalidArgumentError("doctype is required")
-	if not isinstance(names, list) or not names:
-		raise InvalidArgumentError("names must be a non-empty list of document names")
 	if len(names) > _MAX_BATCH:
 		raise InvalidArgumentError(f"too many names in one batch (max {_MAX_BATCH})")
 
