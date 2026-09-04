@@ -22,6 +22,7 @@
 // useBillingDetails.spec.js.
 
 import { reactive, ref, computed } from "vue";
+import { canonicalCountry } from "./indianStates.js";
 
 // The Details-step billing inputs. State + Country drive India Compliance's place
 // of supply (State is a Select of Indian states when Country is India); the books
@@ -109,7 +110,7 @@ function fieldValuesFromDefaults(data) {
 		city: (addr.city || "").trim(),
 		state: (addr.state || "").trim(),
 		pincode: (addr.pincode || "").trim(),
-		country: (addr.country || "").trim(),
+		country: canonicalCountry(addr.country),
 		gstin: (addr.gstin || "").trim(),
 	};
 }
@@ -125,7 +126,7 @@ function fieldValuesFromSummary(s) {
 		city: (s.city || "").trim(),
 		state: (s.state || "").trim(),
 		pincode: (s.pincode || "").trim(),
-		country: (s.country || "").trim(),
+		country: canonicalCountry(s.country),
 		gstin: (s.gstin || "").trim(),
 	};
 }
@@ -328,6 +329,11 @@ export function useBillingDetails(opts = {}) {
 					company: identity.company,
 					invoice_company_name: invoicing.company_name,
 					invoice_email: invoicing.email,
+					// Provenance: whether each invoicing value was USER-set (an override that must
+					// survive a company/email change) or auto-mirrored (must keep tracking). Without
+					// this, restore() marks every mirrored default as an override and stops mirroring.
+					invoice_company_user_set: invoicingCompanyUserSet,
+					invoice_email_user_set: invoicingEmailUserSet,
 					// Stamped on every write so restore() can bound how long this PII
 					// lives, whatever happens to the session that wrote it.
 					saved_at: now(),
@@ -370,7 +376,9 @@ export function useBillingDetails(opts = {}) {
 		for (const name of BILLING_FIELDS) {
 			const v = (d && d[name]) || "";
 			if (v && fields[name].source === "empty") {
-				fields[name].value = v;
+				// A resumed country never passed through the select; canonicalise a legacy/alias
+				// name (an unknown stays as-is for countryError to reject) so it matches the Link.
+				fields[name].value = name === "country" ? canonicalCountry(v) : v;
 				fields[name].source = "local_restore";
 				any = true;
 			}
@@ -389,12 +397,17 @@ export function useBillingDetails(opts = {}) {
 		// Invoicing overrides restore into whatever is still blank (like identity, no provenance).
 		if (d && d.invoice_company_name && !invoicing.company_name) {
 			invoicing.company_name = d.invoice_company_name;
-			invoicingCompanyUserSet = true; // a resumed value must not be clobbered by a company change
+			// Respect the stored provenance: an auto-mirrored value keeps tracking a later company
+			// change; a user override does not. Legacy snapshots (no flag) predate mirror-persistence,
+			// so their value was necessarily user-set — default to true.
+			invoicingCompanyUserSet =
+				d.invoice_company_user_set === undefined ? true : !!d.invoice_company_user_set;
 			any = true;
 		}
 		if (d && d.invoice_email && !invoicing.email) {
 			invoicing.email = d.invoice_email;
-			invoicingEmailUserSet = true;
+			invoicingEmailUserSet =
+				d.invoice_email_user_set === undefined ? true : !!d.invoice_email_user_set;
 			any = true;
 		}
 		// A `contact_consent` key from a snapshot written by an older build is
@@ -492,6 +505,7 @@ export function useBillingDetails(opts = {}) {
 		for (const name of BILLING_FIELDS) {
 			let v = (fields[name].value || "").trim();
 			if (name === "gstin") v = v.toUpperCase();
+			if (name === "country") v = canonicalCountry(v); // never submit a legacy/alias country name
 			if (v) out[REQUEST_KEY[name]] = v;
 		}
 		// Invoicing Details party (admin's _normalize_billing maps company_name -> billing_company_name,

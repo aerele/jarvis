@@ -2142,7 +2142,13 @@ import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
 import { readCookie } from "@/lib/user";
 import { useBillingDetails, billingEditAction } from "@/onboarding/useBillingDetails";
 import { gstinError, GSTIN_PLACEHOLDER } from "@/onboarding/gstin";
-import { INDIAN_STATES, COUNTRIES, isIndia, isValidIndianState } from "@/onboarding/indianStates";
+import {
+	INDIAN_STATES,
+	COUNTRIES,
+	isIndia,
+	isValidIndianState,
+	isValidCountry,
+} from "@/onboarding/indianStates";
 import { isExpectedCompanyDefaultsMiss } from "@/onboarding/companyDefaultsMiss";
 
 const router = useRouter();
@@ -2830,7 +2836,13 @@ function pincodeError(value) {
 // Country is always populated (defaults to India, no blank option), so this is
 // practically unreachable; kept for the required marker + a defensive gate.
 function countryError(value) {
-	return (value || "").trim() ? "" : "Select your country.";
+	const s = (value || "").trim();
+	if (!s) return "Select your country.";
+	// A resumed snapshot / ERP default never passed through the select, so its country must be
+	// checked against the canonical list (a legacy "Turkey"/"Other" would otherwise fail the
+	// Address.country Link after payment). Aliases normalise; a genuine unknown is rejected.
+	if (!isValidCountry(s)) return "Choose your country from the list.";
+	return "";
 }
 // gstinError (gstin.js) already treats a blank value as "" (GSTIN is optional).
 // Required T&C checkbox (moved here from Review & Pay 2026-08-16): unlike the

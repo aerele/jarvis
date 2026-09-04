@@ -308,6 +308,30 @@ export const COUNTRIES = [
 	"Åland Islands",
 ];
 
+// Legacy Frappe Country names that differ from the current country_info.json (this list), so a
+// resumed snapshot or an ERP default copied from an older Frappe still resolves to a name the
+// Address.country Link accepts. Keys lowercased. Extend as Frappe renames more. (This list holds
+// "Türkiye"; an older site holds "Turkey" — most other renames still use their old name here.)
+const COUNTRY_ALIASES = {
+	turkey: "Türkiye",
+};
+const _COUNTRY_LC = new Map(COUNTRIES.map((c) => [c.toLowerCase(), c]));
+
+// Resolve a value to its canonical Country name: a known alias, else the case-insensitive match
+// from COUNTRIES, else the trimmed value as-is (so isValidCountry rejects a genuine unknown).
+export function canonicalCountry(value) {
+	const s = (value || "").trim();
+	if (!s) return "";
+	return COUNTRY_ALIASES[s.toLowerCase()] || _COUNTRY_LC.get(s.toLowerCase()) || s;
+}
+
+// Whether a value maps to a real Country (Address.country is a Link, so a value from a resumed
+// snapshot / ERP default — which never passed through the select — must be checked, not assumed).
+export function isValidCountry(value) {
+	const c = canonicalCountry(value);
+	return !!c && _COUNTRY_LC.has(c.toLowerCase());
+}
+
 export function isIndia(country) {
 	return (country || "").trim().toLowerCase() === INDIA.toLowerCase();
 }
