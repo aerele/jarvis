@@ -102,6 +102,17 @@ def get_context(context):
 		"time_zone": frappe.utils.get_system_timezone(),
 	}
 
+	# MCP connectors (MCP_CONNECTORS_PLAN.md P3): the site-wide kill switch plus
+	# the Custom URL policy, shipped up front so the nav can gate the
+	# Connectors tab with no round trip. `connectors_api.list_connectors`
+	# returns the same two flags for any caller that only has the API (a stale
+	# boot cache, e.g.).
+	from jarvis.chat.connectors_api import connector_flags
+
+	_connectors = connector_flags()
+	context.boot["connectors_enabled"] = _connectors["enabled"]
+	context.boot["connectors_allow_custom_urls"] = _connectors["allow_custom_urls"]
+
 	# Whitelabel branding (Phase 2): tenant-admin-set identity, shipped to every
 	# user in boot so the SPA renders the custom name/logo/favicon with no round
 	# trip. Blank => the frontend falls back to the Jarvis defaults.
