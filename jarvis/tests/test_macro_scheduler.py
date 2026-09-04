@@ -314,18 +314,10 @@ class TestScheduledMacroCaps(MacroSchedulerBase):
 		after = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
 		self.assertEqual(after, before, "a rollout that clears in minutes cost the macro its slot")
 
-	def test_insufficient_workers_block_leaves_the_slot_due_for_a_retry(self):
-		# #468's TRANSIENT shape now also covers a confidently-zero-workers snapshot:
-		# it self-heals within the worker lane's debounce, so the slot must stay due
-		# for the next hourly tick rather than being consumed like an entitlement
-		# refusal.
-		m = _mk_macro(OWNER_OK, "workers-low")
-		before = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
-		with patch("jarvis.chat.policy.validate_can_send", return_value=(False, "insufficient_workers")):
-			self._run_due_gated()
-		self.assertEqual([r.status for r in _runs_for(m.name)], ["failed"])
-		after = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
-		self.assertEqual(after, before, "a worker shortage that clears in seconds cost the macro its slot")
+	def test_a_zero_worker_reading_is_not_a_block_reason_any_more(self):
+		# The RQ registry can misreport zero workers while they are alive, so chat
+		# no longer refuses sends for it; the scheduler must not expect that reason.
+		self.assertNotIn("insufficient_workers", macro_scheduler._TRANSIENT_BLOCKS)
 
 	def test_the_gate_creates_nothing_before_refusing(self):
 		# A refused run must leave no conversation and no intro message behind —
