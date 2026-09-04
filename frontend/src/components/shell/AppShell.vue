@@ -187,6 +187,7 @@ const SETTINGS_DEEP_LINK_KEYS = new Set([
 	"usage",
 	"activity",
 	"shortcuts",
+	"connectors",
 	"plan",
 	"aimodels",
 	"billing", // legacy alias, not a PANES key - SettingsDialog maps it to "usage"

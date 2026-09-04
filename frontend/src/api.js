@@ -751,6 +751,32 @@ export const fileboxDeleteBulk = (conversations) =>
 		conversations: JSON.stringify(conversations || []),
 	});
 
+// --- MCP Connectors (MCP_CONNECTORS_PLAN.md P4; broker + SSRF guard live
+// entirely server-side in jarvis.connectors, this is just the SPA's thin CRUD
+// + test-probe surface). All six calls run @require_jarvis_user and re-check
+// row permissions server-side (jarvis.chat.connector_permissions) regardless
+// of what the client believes about scope/role. ---
+const CN = "jarvis.chat.connectors_api.";
+// {enabled, allow_custom_urls, shared:[row], mine:[row]}.
+export const listConnectors = () => call(CN + "list_connectors");
+// p = {label, preset, base_url, scope, credential, key?}. Presets other than
+// "Custom URL" ignore base_url server-side (pinned to the vendor endpoint).
+export const addConnector = (p) => call(CN + "add_connector", p);
+// Runs a live initialize + tools/list through the broker; on success writes
+// tools_cache + merges allowed_actions. {ok, tools:[...]} | {ok:false, error}.
+export const testConnector = (name) => call(CN + "test_connector", { name });
+// actions: [{action, allowed}] - JSON-stringified like every other list/dict
+// param this codebase posts through call() (see personalise_api's payload
+// convention); read_only/destructive are always server-recomputed, never
+// trusted from here.
+export const setConnectorAllowedActions = (name, actions) =>
+	call(CN + "set_allowed_actions", { name, actions: JSON.stringify(actions || []) });
+// p = {label?, base_url?, credential?, enabled?}. base_url only takes effect
+// on a Custom URL connector; a blank/omitted credential means "keep the saved
+// one" - the SPA never round-trips the real secret back to resubmit it.
+export const updateConnector = (name, p) => call(CN + "update_connector", { name, ...(p || {}) });
+export const deleteConnector = (name) => call(CN + "delete_connector", { name });
+
 // --- Support panel (Plan 3) -------------------------------------------------
 export const supportListTickets = () => call("jarvis.support.api.list_tickets");
 export const supportCreateTicket = (subject, body) =>

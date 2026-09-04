@@ -148,18 +148,26 @@ const UsageAdminPane = defineAsyncComponent(() =>
 	import("@/components/settings/UsageAdminPane.vue")
 );
 const BrandingPane = defineAsyncComponent(() => import("@/components/settings/BrandingPane.vue"));
+const ConnectorsPane = defineAsyncComponent(() =>
+	import("@/components/settings/ConnectorsPane.vue")
+);
 
 // ACCOUNT AND BILLING is the tenant-admin tier (System Manager OR Jarvis Admin,
 // matching the widened require_jarvis_admin endpoints). ADMINISTRATION is
 // is_jarvis_admin, which is true for System Managers too.
 const isSM = !!window.is_system_manager;
 const isAdmin = !!window.is_jarvis_admin;
+// MCP Connectors kill switch (MCP_CONNECTORS_PLAN.md P4/design §2): boot flag
+// off site.jarvis.py's connector_flags(), same shape AddConnectorDialog reads
+// via list_connectors for allow_custom_urls.
+const connectorsEnabled = !!window.connectors_enabled;
 
 const PANES = {
 	general: GeneralPane,
 	usage: UsagePane,
 	activity: ActivityPane,
 	shortcuts: ShortcutsPane,
+	connectors: ConnectorsPane,
 	plan: PlanBillingPane,
 	aimodels: AiModelsPane,
 	branding: BrandingPane,
@@ -178,6 +186,10 @@ const NAV = [
 			{ key: "usage", label: "Usage", icon: "bar-chart-2" },
 			{ key: "activity", label: "Activity", icon: "activity" },
 			{ key: "shortcuts", label: "Shortcuts", icon: "command" },
+			// Item-level gate (on top of the group's, which is always true here):
+			// the tab is hidden entirely, not shown-and-refused, when the tenant
+			// hasn't turned connectors on.
+			{ key: "connectors", label: "Connectors", icon: "link-2", gate: () => connectorsEnabled },
 		],
 	},
 	{
@@ -196,7 +208,14 @@ const NAV = [
 	},
 ];
 
-const visibleGroups = computed(() => NAV.filter((g) => g.gate()));
+// Items may carry their own gate (currently only "connectors") on top of the
+// group's — a group stays visible for its ungated siblings even when one item
+// in it is hidden.
+const visibleGroups = computed(() =>
+	NAV.filter((g) => g.gate())
+		.map((g) => ({ ...g, items: g.items.filter((i) => !i.gate || i.gate()) }))
+		.filter((g) => g.items.length)
+);
 
 const open = computed({
 	get: () => store.settingsOpen,
@@ -216,13 +235,18 @@ const confirmOpen = computed(() => confirmState.value !== null);
 // together.
 const LEGACY_SECTION_ALIASES = { billing: "usage" };
 
-// A gated section requested by a user without the role falls back to General.
+// A gated section requested by a user without the role (group gate) or the
+// item's own gate (connectors' kill switch) falls back to General.
 const section = computed(() => {
 	let s = store.settingsSection;
 	if (LEGACY_SECTION_ALIASES[s]) s = LEGACY_SECTION_ALIASES[s];
 	if (!PANES[s]) return "general";
 	const group = NAV.find((g) => g.items.some((i) => i.key === s));
-	if (group && !group.gate()) return "general";
+	if (group) {
+		if (!group.gate()) return "general";
+		const item = group.items.find((i) => i.key === s);
+		if (item && item.gate && !item.gate()) return "general";
+	}
 	return s;
 });
 const pane = computed(() => PANES[section.value]);
