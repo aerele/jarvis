@@ -2150,6 +2150,19 @@ class TestWorkerStatus(FrappeTestCase):  # reuse module base
 		with patch("frappe.utils.background_jobs.get_workers", return_value=[bare]):
 			self.assertIsNone(pump._probe_worker_count("long"))
 
+	def test_probe_keeps_a_confident_count_when_an_unrelated_worker_is_bare(self):
+		# One worker lost its queues, but another provably serves this queue: the
+		# positive evidence stands, so routing must not collapse to "unknown".
+		serving = MagicMock()
+		serving.queue_names.return_value = ["bench:long"]
+		bare = MagicMock()
+		bare.queue_names.return_value = []
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[serving, bare]),
+			patch("frappe.utils.background_jobs.generate_qname", return_value="bench:long"),
+		):
+			self.assertEqual(pump._probe_worker_count("long"), 1)
+
 	def test_total_live_workers_counts_all_queues(self):
 		fake_workers = [MagicMock(), MagicMock(), MagicMock()]
 		with patch("frappe.utils.background_jobs.get_workers", return_value=fake_workers):
@@ -2199,6 +2212,25 @@ class TestWorkerStatus(FrappeTestCase):  # reuse module base
 			patch.object(pump, "_fresh_heartbeat_count", return_value=1),
 		):
 			self.assertTrue(pump._registry_is_stale())
+
+	def test_registry_is_stale_when_the_heartbeat_probe_fails(self):
+		# An empty registry plus an unreadable heartbeat scan is "unknown", never a
+		# confirmed zero: the orphan sweep must not cancel on it.
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=None),
+		):
+			self.assertTrue(pump._registry_is_stale())
+
+	def test_registry_is_stale_takes_a_registry_snapshot(self):
+		# Callers that already hold the registry pass it in; no second read.
+		bare = MagicMock()
+		bare.queue_names.return_value = []
+		with (
+			patch("frappe.utils.background_jobs.get_workers", side_effect=AssertionError("no re-read")),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=1),
+		):
+			self.assertTrue(pump._registry_is_stale([bare]))
 
 	def test_registry_is_not_stale_without_heartbeats(self):
 		# Nobody heartbeats: the workers really are gone, the registry is right.

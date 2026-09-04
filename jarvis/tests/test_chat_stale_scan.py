@@ -200,11 +200,14 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 		with (
 			patch("frappe.utils.background_jobs.get_job_status", return_value="queued"),
 			patch("frappe.utils.background_jobs.get_job", return_value=job),
-			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]) as registry,
 			patch.object(pump, "_fresh_heartbeat_count", return_value=0),
 			patch.object(api, "_dispatch_turn", side_effect=lambda *a, **k: None),
 		):
 			stale_scan._sweep_orphan_turns(now_datetime())
+		# One registry snapshot per sweep: the staleness check and the queue map
+		# must not read Redis twice and disagree with each other.
+		self.assertEqual(registry.call_count, 1)
 		job.cancel.assert_called_once()
 		self.assertEqual(
 			int(frappe.db.get_value(MSG, uid, "was_recovered") or 0), 1, "heal consumed the strike"

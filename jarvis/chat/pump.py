@@ -889,34 +889,41 @@ def _probe_worker_count(queue_name: str) -> "int | None":
 	returns ``None`` (not 0) on any probe trouble, so a caller can tell a
 	CONFIDENT zero apart from a broken probe and fail OPEN on the latter.
 
-	A live worker with no queue names is such trouble: its registry hash was
-	recreated by a heartbeat after expiring, so which queues it serves is
-	unknown."""
+	A zero with a live worker that carries no queue names is such trouble: that
+	worker's registry hash was recreated by a heartbeat after expiring, so it
+	may well be the one serving this queue. A positive count stands regardless:
+	a bare worker elsewhere on the bench must not blank out real evidence."""
 	try:
 		from frappe.utils.background_jobs import generate_qname, get_workers
 
 		workers = get_workers()
-		if any(not w.queue_names() for w in workers):
-			return None
 		qname = generate_qname(queue_name)
-		return sum(1 for w in workers if qname in w.queue_names())
+		n = sum(1 for w in workers if qname in (w.queue_names() or []))
+		if n == 0 and any(not w.queue_names() for w in workers):
+			return None
+		return n
 	except Exception:
 		return None
 
 
-def _registry_is_stale() -> bool:
+def _registry_is_stale(workers=None) -> bool:
 	"""True when the RQ registry cannot be trusted: it lists no worker, or a
-	worker with no queues, while some worker still heartbeats. False on probe
-	trouble (the registry is then taken at face value)."""
+	worker with no queues, and the heartbeat scan either finds a live worker or
+	cannot say. Only a readable scan that finds nobody confirms the registry.
+	``workers`` lets a caller that already holds a registry snapshot reuse it,
+	so one sweep never reads Redis twice and disagrees with itself. Probe
+	trouble reads as stale: "unknown" must never become "nobody listens"."""
 	try:
-		from frappe.utils.background_jobs import get_workers
+		if workers is None:
+			from frappe.utils.background_jobs import get_workers
 
-		workers = get_workers()
+			workers = get_workers()
 		if workers and all(w.queue_names() for w in workers):
 			return False
-		return bool(_fresh_heartbeat_count())
+		fresh = _fresh_heartbeat_count()
+		return fresh is None or fresh > 0
 	except Exception:
-		return False
+		return True
 
 
 def _total_live_workers() -> "int | None":
