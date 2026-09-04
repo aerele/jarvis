@@ -568,6 +568,10 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 	"jarvis.chat.personalise_api.list_question_rules": (
 		"the question-bank rule configuration rendered as a settings form, not a list view"
 	),
+	"jarvis.chat.connectors_api.list_connectors": (
+		"Settings pane payload: returns the user's connectors in two scoped sections "
+		"with policy flags, not a DocType list view"
+	),
 	# Transient per-session state, keyed by token and scoped to the caller's own
 	# live turns. It has no identity that survives the turn, no page and no sort.
 	"jarvis.chat.actions_api.list_pending_confirmations": (
