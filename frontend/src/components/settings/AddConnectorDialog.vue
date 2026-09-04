@@ -39,6 +39,18 @@
 					:modelValue="form.credential"
 					@update:modelValue="(v) => onCredentialChange(v)"
 				/>
+				<p class="text-xs text-ink-gray-5">
+					{{ tokenHint }}
+					<a
+						v-if="tokenDocsUrl"
+						:href="tokenDocsUrl"
+						target="_blank"
+						rel="noopener"
+						class="text-ink-blue-link hover:underline"
+					>
+						How to create this token
+					</a>
+				</p>
 
 				<div class="flex items-center gap-3 rounded-lg border p-3">
 					<Button
@@ -201,6 +213,7 @@
 import { computed, reactive, ref, watch } from "vue";
 import { Badge, Button, Dialog, FormControl, Switch, toast } from "frappe-ui";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
+import { CONNECTOR_HELP, CUSTOM_URL_TOKEN_HINT } from "@/components/settings/connectorHelp.js";
 import {
 	addConnector,
 	deleteConnector,
@@ -252,6 +265,11 @@ const connectorDisplayName = computed(() => {
 	if (form.preset && form.preset !== "Custom URL") return form.preset;
 	return "this connector";
 });
+// Per-preset token guidance shown under the Access token field (connectorHelp.js):
+// which token/scopes are needed, plus a link to the vendor's own token page.
+// Custom URL has no vendor to link to, so it gets a generic hint and no link.
+const tokenHint = computed(() => CONNECTOR_HELP[form.preset]?.tokenHint || CUSTOM_URL_TOKEN_HINT);
+const tokenDocsUrl = computed(() => CONNECTOR_HELP[form.preset]?.tokenDocsUrl || "");
 // The saved row this dialog is working against: the edited row's name, or the
 // name add_connector returned the first time "Test connection" ran this session.
 const rowName = ref("");
