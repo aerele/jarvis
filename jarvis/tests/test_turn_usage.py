@@ -222,27 +222,42 @@ class TestTurnUsage(FrappeTestCase):
 	# -- review fix 3: last_usage_at/modified reliably order "newest" even -- #
 	# -- when the gateway row carries no updatedAt --------------------------- #
 	def test_refresh_session_snapshots_stamps_last_usage_at_without_updated_at(self):
+		# last_usage_at means "last REAL usage" (test_user_settings.
+		# TestAdminSync.test_refreshes_snapshots_without_accumulating pins
+		# this: a session with no updatedAt keeps last_usage_at exactly as it
+		# was - a sweep must never fabricate a usage time from sync time).
+		# `modified`, unrelated to that meaning, must still advance on every
+		# sweep so "just synced" stays orderable.
 		_make_session("agent:tu-ctx-stamp", USER_A)
-		before = frappe.db.get_value(SESSION, {"session_key": "agent:tu-ctx-stamp"}, "last_usage_at")
-		self.assertIsNone(before, "a fresh session has never had a usage stamp")
-		# No "updatedAt" key at all - the branch that previously never touched
-		# last_usage_at / modified.
+		before = frappe.db.get_value(
+			SESSION, {"session_key": "agent:tu-ctx-stamp"}, ["last_usage_at", "modified"], as_dict=True
+		)
+		self.assertIsNone(before.last_usage_at, "a fresh session has never had a usage stamp")
+		# No "updatedAt" key at all - last_usage_at must stay None, not get
+		# fabricated from sync time.
 		usage.refresh_session_snapshots([{"key": "agent:tu-ctx-stamp", "totalTokens": 1000}])
 		after = frappe.db.get_value(
 			SESSION, {"session_key": "agent:tu-ctx-stamp"}, ["last_usage_at", "modified"], as_dict=True
 		)
-		self.assertIsNotNone(after.last_usage_at, "COALESCE(..., NOW()) must stamp a first usage time")
-		first_stamp = after.last_usage_at
-		first_modified = after.modified
-		# A second no-updatedAt sweep must PRESERVE the prior last_usage_at
-		# (COALESCE keeps the real stored value over a missing one) while
-		# still advancing `modified`, so "just synced" is still orderable.
+		self.assertIsNone(after.last_usage_at, "no updatedAt must not stamp last_usage_at")
+		self.assertNotEqual(after.modified, before.modified, "modified must still advance on every sweep")
+		# Once a real usage stamp exists (a row that DOES carry updatedAt), a
+		# later no-updatedAt sweep must PRESERVE it, not clobber it - COALESCE
+		# keeps the real stored value over a missing one, and `modified` keeps
+		# advancing regardless.
+		usage.refresh_session_snapshots(
+			[{"key": "agent:tu-ctx-stamp", "totalTokens": 1500, "updatedAt": 1700000000000}]
+		)
+		stamped = frappe.db.get_value(
+			SESSION, {"session_key": "agent:tu-ctx-stamp"}, ["last_usage_at", "modified"], as_dict=True
+		)
+		self.assertIsNotNone(stamped.last_usage_at)
 		usage.refresh_session_snapshots([{"key": "agent:tu-ctx-stamp", "totalTokens": 2000}])
 		again = frappe.db.get_value(
 			SESSION, {"session_key": "agent:tu-ctx-stamp"}, ["last_usage_at", "modified"], as_dict=True
 		)
-		self.assertEqual(again.last_usage_at, first_stamp, "last_usage_at must not be clobbered by NOW()")
-		self.assertNotEqual(again.modified, first_modified, "modified must still advance on every sweep")
+		self.assertEqual(again.last_usage_at, stamped.last_usage_at, "last_usage_at unchanged, not clobbered")
+		self.assertNotEqual(again.modified, stamped.modified, "modified must still advance on every sweep")
 
 	# -- (b) VALID_ZERO path still writes a row (attribution, zero tokens) -- #
 	def test_valid_zero_row_writes_attribution(self):
