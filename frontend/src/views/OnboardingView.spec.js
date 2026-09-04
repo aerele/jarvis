@@ -1647,3 +1647,17 @@ describe("resumed Pay enforces billing completeness", () => {
 		expect(wrapper.vm.detailsFieldErrors.pincode).toBeTruthy();
 	});
 });
+
+// Review P1: countryError must reject a restored/defaulted value that isn't a real Country
+// (it never passed through the select), while normalising a known alias.
+describe("country validation rejects a non-canonical value", () => {
+	it("flags the old literal 'Other' and an unknown country; accepts a real name + alias", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.countryError("Other")).toBeTruthy();
+		expect(wrapper.vm.countryError("Nowhereland")).toBeTruthy();
+		expect(wrapper.vm.countryError("")).toBeTruthy();
+		expect(wrapper.vm.countryError("India")).toBe("");
+		expect(wrapper.vm.countryError("Turkey")).toBe(""); // alias normalises to Türkiye
+	});
+});
