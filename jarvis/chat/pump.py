@@ -71,6 +71,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import frappe
 
@@ -858,7 +859,7 @@ def _warn_provisioning_if_starved() -> None:
 		pass
 
 
-# --- Chat worker health (drives onboarding warning + chat send block) ---------
+# --- Chat worker health (drives the onboarding warning) ----------------------
 #
 # Two conditions, deliberately split so the fail-CLOSED chat block is flap-proof
 # on the managed fleet (a rolling worker restart must never block a paying
@@ -866,103 +867,105 @@ def _warn_provisioning_if_starved() -> None:
 #   * DEGRADED  -> warn only. The F1 self-starvation shape (_pump_shape_starves):
 #     turns run but strand for minutes. Surfaced as a non-blocking onboarding
 #     banner; chat still works.
-#   * BLOCKED   -> block sends. CONFIDENT zero live workers on the turn queue,
-#     sustained past a short grace window. This is the only guaranteed-hang shape
-#     (no worker can pick a turn up at all). Never fires on a probe error.
+#   * No hard block. RQ's registry can read zero workers while every worker is
+#     alive: a worker hash that expired during a heartbeat gap comes back with
+#     only `last_heartbeat` (no `queues`), and a queue-Redis restart empties
+#     `rq:workers` for good while the workers keep running. So a zero reading is
+#     never a send block; `_registry_is_stale` names that shape and the readers
+#     treat it as "unknown". A turn nobody picks up is the orphan sweep's job
+#     (stale_scan), not this probe's.
 
-_ZERO_GRACE_S = 20  # a 0 reading must persist this long before it blocks sends
-_ZERO_KEY = "jarvis:workers:zero_since"
+_HEARTBEAT_FRESH_S = 480  # RQ's default worker_ttl (420s) plus its heartbeat slack
 
 
 def _probe_worker_count(queue_name: str) -> "int | None":
 	"""Live RQ worker count on ``queue_name`` - like ``_live_worker_count`` but
 	returns ``None`` (not 0) on any probe trouble, so a caller can tell a
-	CONFIDENT zero apart from a broken probe and fail OPEN on the latter."""
+	CONFIDENT zero apart from a broken probe and fail OPEN on the latter.
+
+	A zero with a live worker that carries no queue names is such trouble: that
+	worker's registry hash was recreated by a heartbeat after expiring, so it
+	may well be the one serving this queue. A positive count stands regardless:
+	a bare worker elsewhere on the bench must not blank out real evidence."""
 	try:
 		from frappe.utils.background_jobs import generate_qname, get_workers
 
+		workers = get_workers()
 		qname = generate_qname(queue_name)
-		return sum(1 for w in get_workers() if qname in (w.queue_names() or []))
+		n = sum(1 for w in workers if qname in (w.queue_names() or []))
+		if n == 0 and any(not w.queue_names() for w in workers):
+			return None
+		return n
 	except Exception:
 		return None
 
 
-def _zero_marker_cache_key() -> str:
+def _registry_is_stale(workers=None) -> bool:
+	"""True when the RQ registry cannot be trusted: it lists no worker, or a
+	worker with no queues, and the heartbeat scan either finds a live worker or
+	cannot say. Only a readable scan that finds nobody confirms the registry.
+	``workers`` lets a caller that already holds a registry snapshot reuse it,
+	so one sweep never reads Redis twice and disagrees with itself. Probe
+	trouble reads as stale: "unknown" must never become "nobody listens"."""
 	try:
-		return f"{_ZERO_KEY}:{frappe.local.site}"
-	except Exception:
-		return _ZERO_KEY
+		if workers is None:
+			from frappe.utils.background_jobs import get_workers
 
-
-def _clear_zero_marker() -> None:
-	try:
-		frappe.cache().delete_value(_zero_marker_cache_key())
-	except Exception:
-		pass
-
-
-def _force_zero_marker_age(age_s: int) -> None:
-	"""Test helper: rewind the zero-marker so it reads as ``age_s`` seconds old."""
-	from frappe.utils import add_to_date, now_datetime
-
-	frappe.cache().set_value(
-		_zero_marker_cache_key(),
-		add_to_date(now_datetime(), seconds=-age_s).isoformat(),
-		expires_in_sec=300,
-	)
-
-
-def _zero_persisted(grace_s: int) -> bool:
-	"""True once a 0-worker reading has persisted at least ``grace_s`` seconds.
-	First 0 sets the marker and returns False (debounce)."""
-	from frappe.utils import get_datetime, now_datetime, time_diff_in_seconds
-
-	key = _zero_marker_cache_key()
-	now = now_datetime()
-	try:
-		since = frappe.cache().get_value(key, expires=True)
-		if not since:
-			frappe.cache().set_value(key, now.isoformat(), expires_in_sec=300)
+			workers = get_workers()
+		if workers and all(w.queue_names() for w in workers):
 			return False
-		# Refresh the TTL while zero persists so a lane dead longer than the TTL
-		# never evicts the marker (which would briefly flip the block OFF and
-		# re-arm the grace every ~5 min). `since` is kept anchored to the first
-		# zero reading, so the grace calculation is unchanged.
-		frappe.cache().set_value(key, since, expires_in_sec=300)
-		return time_diff_in_seconds(now, get_datetime(since)) >= grace_s
+		fresh = _fresh_heartbeat_count()
+		return fresh is None or fresh > 0
 	except Exception:
-		return False  # cache trouble => fail OPEN (do not block)
+		return True
 
 
-def _turn_workers_confidently_zero() -> bool:
+def _fresh_heartbeat_count() -> "int | None":
+	"""Workers whose registry hash carries a recent ``last_heartbeat``, found by
+	scanning ``rq:worker:*`` directly. Survives both registry failures: a hash
+	recreated without its queues still heartbeats, and a worker pruned from
+	``rq:workers`` still owns its hash. ``None`` on probe trouble."""
 	try:
-		from jarvis.chat.api import _turn_queue
+		from frappe.utils.background_jobs import get_redis_conn
 
-		q = _turn_queue()
+		conn = get_redis_conn()
+		now = datetime.now(timezone.utc)
+		fresh = 0
+		for key in conn.scan_iter(match="rq:worker:*"):
+			seen = _heartbeat_time(conn.hget(key, "last_heartbeat"))
+			if seen and (now - seen).total_seconds() <= _HEARTBEAT_FRESH_S:
+				fresh += 1
+		return fresh
 	except Exception:
-		_clear_zero_marker()
-		return False
-	n = _probe_worker_count(q)
-	if n is None:
-		return False  # probe failed => fail OPEN, leave marker untouched
-	if n > 0:
-		_clear_zero_marker()
-		return False
-	return _zero_persisted(_ZERO_GRACE_S)
+		return None
+
+
+def _heartbeat_time(raw) -> "datetime | None":
+	"""Parse RQ's ``last_heartbeat`` (``%Y-%m-%dT%H:%M:%S.%fZ``, older releases
+	without the fraction) as an aware UTC datetime; None when absent or odd."""
+	if not raw:
+		return None
+	text = (raw.decode() if isinstance(raw, bytes) else str(raw)).rstrip("Z")
+	for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+		try:
+			return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+		except ValueError:
+			continue
+	return None
 
 
 def chat_worker_status() -> dict:
-	"""Worker health for the onboarding warning + chat send block. Fails SAFE:
-	on any trouble reports neither blocked nor degraded."""
-	try:
-		blocked = _turn_workers_confidently_zero()
-	except Exception:
-		blocked = False
+	"""Worker health for the onboarding warning. Fails SAFE: on any trouble
+	reports not degraded.
+
+	``degraded`` is the F1 self-starvation shape (``_pump_shape_starves``). It is
+	a banner, never a send block: the registry it reads can misreport zero
+	(``_registry_is_stale``)."""
 	try:
 		degraded = _pump_shape_starves()
 	except Exception:
 		degraded = False
-	return {"blocked": bool(blocked), "degraded": bool(blocked or degraded)}
+	return {"degraded": bool(degraded)}
 
 
 # --------------------------------------------------------------------------- #

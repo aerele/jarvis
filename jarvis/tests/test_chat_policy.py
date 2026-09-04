@@ -2,7 +2,6 @@
 
 from unittest.mock import patch
 
-import frappe
 from frappe.tests.utils import FrappeTestCase
 
 import jarvis.account as account
@@ -255,41 +254,19 @@ class TestLlmConfiguredGate(FrappeTestCase):
 		self.assertIsNone(reason)
 
 
-class TestInsufficientWorkers(FrappeTestCase):  # reuse module base
-	def setUp(self):
-		frappe.flags.test_worker_gate = True  # opt into the real gate under test
-
-	def tearDown(self):
-		frappe.flags.test_worker_gate = False
-
-	def test_blocked_returns_reason(self):
-		with patch(
-			"jarvis.chat.pump.chat_worker_status",
-			return_value={"blocked": True, "degraded": True, "workers": 0},
-		):
-			self.assertTrue(policy._insufficient_workers())
-
-	def test_healthy_returns_false(self):
-		with patch(
-			"jarvis.chat.pump.chat_worker_status",
-			return_value={"blocked": False, "degraded": False, "workers": 4},
-		):
-			self.assertFalse(policy._insufficient_workers())
-
-	def test_fails_open_on_error(self):
-		with patch("jarvis.chat.pump.chat_worker_status", side_effect=RuntimeError):
-			self.assertFalse(policy._insufficient_workers())
-
-	def test_validate_can_send_surfaces_reason(self):
-		# A user that clears every OTHER gate, but has 0 workers, is blocked here.
+class TestWorkerRegistryNeverBlocks(FrappeTestCase):  # reuse module base
+	def test_validate_can_send_ignores_a_zero_worker_reading(self):
+		# The RQ registry can read "zero workers" while workers are alive (a worker
+		# hash that expired and came back without its queues), so a worker reading
+		# must never refuse a send. A user that clears every other gate goes through.
 		with (
 			patch.object(policy, "_over_total_limit", return_value=False),
 			patch.object(policy, "_subscription_suspended", return_value=False),
 			patch.object(policy, "_release_update_required", return_value=False),
 			patch.object(policy, "_workspace_resetting", return_value=False),
 			patch.object(policy, "_llm_not_configured", return_value=False),
-			patch.object(policy, "_insufficient_workers", return_value=True),
+			patch("jarvis.chat.pump._pump_shape_starves", return_value=True),
 		):
 			ok, reason = policy.validate_can_send("someone@acme.com")
-			self.assertFalse(ok)
-			self.assertEqual(reason, "insufficient_workers")
+		self.assertTrue(ok)
+		self.assertIsNone(reason)
