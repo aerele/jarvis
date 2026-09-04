@@ -13,7 +13,7 @@
 			<div class="flex flex-col gap-3">
 				<div class="flex items-start justify-between gap-3">
 					<div>
-						<h3 class="text-base font-medium text-ink-gray-9">Shared</h3>
+						<h3 class="text-base font-semibold text-ink-gray-9">Shared</h3>
 						<p class="text-p-sm text-ink-gray-6">Set by your admin.</p>
 					</div>
 					<Button
@@ -51,7 +51,7 @@
 			<div class="flex flex-col gap-3">
 				<div class="flex items-start justify-between gap-3">
 					<div>
-						<h3 class="text-base font-medium text-ink-gray-9">Mine</h3>
+						<h3 class="text-base font-semibold text-ink-gray-9">Mine</h3>
 						<p class="text-p-sm text-ink-gray-6">Only you can use these.</p>
 					</div>
 					<Button
@@ -173,7 +173,8 @@ async function test(row) {
 		row.last_test_status = res && res.ok ? "Passed" : "Failed";
 		row.last_test_at = new Date().toISOString();
 		if (res && res.ok) {
-			toast.success(`Connected, ${(res.tools || []).length} tools found`);
+			const n = (res.tools || []).length;
+			toast.success(`Connected, ${n} ${n === 1 ? "tool" : "tools"} found`);
 		} else {
 			toast.error(errHtml({ message: (res && res.error && res.error.message) || "" }, "Test failed."));
 		}
