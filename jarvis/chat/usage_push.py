@@ -43,6 +43,12 @@ _USERS_DAILY_ROW_CAP = 5000
 _USERS_DAILY_PER_MODEL_CAP = 20
 _CONTEXT_OVER_PCT = 80
 
+# Built once (review: was re-constructed on every _iso_utc_z call). UTC is a
+# fixed offset, unlike the site's system timezone (frappe.utils.
+# get_system_timezone()), which genuinely varies per request in a multi-site
+# process and so cannot be hoisted the same way.
+_UTC = ZoneInfo("UTC")
+
 # Mirrors the admin ingest validator exactly (contract settled 2026-08-17): a
 # bare name, or a "jarvis__" prefixed tool with an UNBOUNDED suffix. A name
 # that matches neither would 400 the whole push (payload-atomic), so it is
@@ -110,7 +116,10 @@ def _build_rollup(cap: int = _MAX_USERS) -> tuple[dict, bool]:
 		agg = turn_aggregates_by_user.get(s.user, {})
 		users.append(
 			{
-				"email": s.user,
+				# Lowercased (review): users_daily already lowercases its
+				# email and admin lowercases on ingest anyway - matching
+				# here just keeps the payload self-consistent.
+				"email": (s.user or "").strip().lower(),
 				"tokens_in": int(s.month_input_tokens or 0),
 				"tokens_out": int(s.month_output_tokens or 0),
 				"total_tokens": int(s.month_tokens or 0),
@@ -408,7 +417,7 @@ def _iso_utc_z(value) -> str | None:
 		return None
 	dt = frappe.utils.get_datetime(value)
 	aware = dt.replace(tzinfo=ZoneInfo(frappe.utils.get_system_timezone()))
-	return aware.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+	return aware.astimezone(_UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _context_by_user(users: list[str]) -> dict[str, dict]:
@@ -417,69 +426,63 @@ def _context_by_user(users: list[str]) -> dict[str, dict]:
 	``last_total_tokens`` are ``usage.record_turn_usage`` and
 	``usage.refresh_session_snapshots``).
 
-	``used_max`` is the largest ``last_total_tokens`` across the user's
-	sessions; ``capacity`` comes from whichever of the user's sessions most
-	recently reported a non-zero ``context_capacity`` (a user's sessions can,
-	in principle, run different models with different context windows, so
-	"the newest row with one" per the spec, not an arbitrary/first row);
-	``pct_max`` is recomputed from ``used_max`` / that ``capacity`` rather than
-	trusting any single session's stored ``context_pct``, since the session
-	that had the highest usage need not be the same one capacity was read
-	from. Returns ``{}`` for an empty ``users`` list; callers fall back to
-	``_EMPTY_CONTEXT`` per user."""
+	Review fix: a user's sessions can run different models with different
+	context windows, so pairing the session with the highest ``used`` against
+	a DIFFERENT session's ``capacity`` (e.g. "the newest row with one") can
+	report a nonsensical pct (or the wrong one). Instead, ``pct`` is computed
+	PER SESSION (``last_total_tokens / context_capacity`` of that SAME
+	session, only over sessions that have actually reported a capacity), and
+	the session with the HIGHEST own pct wins: its own ``used``/``capacity``/
+	``pct`` become ``used_max``/``capacity``/``pct_max``. ``sessions_over_80``
+	counts sessions whose OWN pct is >= ``_CONTEXT_OVER_PCT``. ``last_seen_at``
+	is unrelated to capacity - it stays the newest ``last_usage_at`` across
+	ALL of the user's sessions, capacity-reporting or not. Returns ``{}`` for
+	an empty ``users`` list; callers fall back to ``_EMPTY_CONTEXT`` per user
+	(also what a user with sessions but none reporting a capacity gets, since
+	pct/used_max/capacity are then undefined)."""
 	if not users:
 		return {}
-	summary = {
-		r.user: r
+	last_seen_by_user = {
+		r.user: r.last_seen_at
 		for r in frappe.db.sql(
 			"""
-			SELECT user,
-				   MAX(last_total_tokens) AS used_max,
-				   SUM(CASE WHEN context_pct >= %(over_pct)s THEN 1 ELSE 0 END) AS sessions_over_80,
-				   MAX(last_usage_at) AS last_seen_at
+			SELECT user, MAX(last_usage_at) AS last_seen_at
 			FROM `tabJarvis Chat Session`
 			WHERE user IN %(users)s
 			GROUP BY user
 			""",
-			{"users": tuple(users), "over_pct": _CONTEXT_OVER_PCT},
+			{"users": tuple(users)},
 			as_dict=True,
 		)
 	}
-	# COALESCE(last_usage_at, modified): refresh_session_snapshots only stamps
-	# last_usage_at when the gateway row carried updatedAt (see its docstring);
-	# a session refreshed without one still has a real context_capacity, and
-	# without the fallback it would silently lose the newest-row-wins ordering
-	# (NULL never wins a MAX/join match against a real timestamp).
-	capacity_by_user: dict[str, int] = {}
+	best_by_user: dict[str, dict] = {}
+	over_80_by_user: dict[str, int] = {}
 	for r in frappe.db.sql(
 		"""
-		SELECT t1.user AS user, t1.context_capacity AS context_capacity
-		FROM `tabJarvis Chat Session` t1
-		INNER JOIN (
-			SELECT user, MAX(COALESCE(last_usage_at, modified)) AS max_at
-			FROM `tabJarvis Chat Session`
-			WHERE user IN %(users)s AND context_capacity > 0
-			GROUP BY user
-		) newest ON newest.user = t1.user AND newest.max_at = COALESCE(t1.last_usage_at, t1.modified)
-		WHERE t1.context_capacity > 0
+		SELECT user, last_total_tokens, context_capacity
+		FROM `tabJarvis Chat Session`
+		WHERE user IN %(users)s AND context_capacity > 0
 		""",
 		{"users": tuple(users)},
 		as_dict=True,
 	):
-		# A tie on last_usage_at (rare) just keeps whichever row SQL returns
-		# last; both would carry the same model's capacity in practice.
-		capacity_by_user[r.user] = int(r.context_capacity or 0)
+		used = int(r.last_total_tokens or 0)
+		capacity = int(r.context_capacity or 0)
+		pct = round(100 * used / capacity, 1)
+		if pct >= _CONTEXT_OVER_PCT:
+			over_80_by_user[r.user] = over_80_by_user.get(r.user, 0) + 1
+		best = best_by_user.get(r.user)
+		if best is None or pct > best["pct_max"]:
+			best_by_user[r.user] = {"used_max": used, "capacity": capacity, "pct_max": pct}
 	out: dict[str, dict] = {}
 	for user in users:
-		row = summary.get(user)
-		used_max = int(row.used_max or 0) if row else 0
-		capacity = capacity_by_user.get(user)
+		best = best_by_user.get(user)
 		out[user] = {
-			"used_max": used_max,
-			"capacity": capacity,
-			"pct_max": round(100 * used_max / capacity, 1) if capacity else None,
-			"sessions_over_80": int(row.sessions_over_80 or 0) if row else 0,
-			"last_seen_at": _iso_utc_z(row.last_seen_at) if row else None,
+			"used_max": best["used_max"] if best else 0,
+			"capacity": best["capacity"] if best else None,
+			"pct_max": best["pct_max"] if best else None,
+			"sessions_over_80": over_80_by_user.get(user, 0),
+			"last_seen_at": _iso_utc_z(last_seen_by_user.get(user)),
 		}
 	return out
 
