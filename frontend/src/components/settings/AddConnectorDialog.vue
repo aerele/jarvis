@@ -8,22 +8,18 @@
 					allow on the next step.
 				</p>
 
-				<FormControl
-					type="select"
-					label="App"
-					:options="presetOptions"
-					:disabled="isEdit"
-					:modelValue="form.preset"
-					@update:modelValue="onPresetChange"
-				/>
-
-				<FormControl
-					type="text"
-					label="Name"
-					placeholder="e.g. GitHub"
-					:modelValue="form.label"
-					@update:modelValue="(v) => (form.label = v)"
-				/>
+				<div class="flex items-end gap-2">
+					<FormControl
+						class="flex-1"
+						type="select"
+						label="App"
+						:options="presetOptions"
+						:disabled="isEdit"
+						:modelValue="form.preset"
+						@update:modelValue="onPresetChange"
+					/>
+					<ConnectorLogo :preset="form.preset" :size="20" class="mb-2 text-ink-gray-5" />
+				</div>
 
 				<FormControl
 					v-if="form.preset === 'Custom URL' && allowCustomUrls"
@@ -67,9 +63,8 @@
 			<div v-else class="flex flex-col gap-3">
 				<div class="flex items-center justify-between gap-3">
 					<p class="text-sm text-ink-gray-6">
-						Choose what {{ agentName }} may do with
-						{{ form.label || "this connector" }}. Read-only actions are pre-checked;
-						writes are off by default.
+						Choose what {{ agentName }} may do with {{ connectorDisplayName }}.
+						Read-only actions are pre-checked; writes are off by default.
 					</p>
 					<Button
 						variant="ghost"
@@ -165,23 +160,8 @@
 			<div class="flex items-center justify-end gap-2">
 				<Button v-if="step === 2" label="Back" :disabled="saving" @click="step = 1" />
 				<Button label="Cancel" :disabled="saving" @click="cancel" />
-				<!-- Rename-only path: editing a connector whose endpoint/credential
-				     are untouched and NOT yet re-tested this session shouldn't force
-				     a live re-test just to save a new label (the plan only requires
-				     re-testing WHEN base_url/credential change). Once a test HAS
-				     passed this session - unchanged or not - Continue takes over so
-				     Edit still reaches the allowed-actions picker; the two buttons
-				     never both show. -->
 				<Button
-					v-if="step === 1 && renameOnly"
-					variant="solid"
-					label="Save"
-					:loading="saving"
-					:disabled="!form.label.trim()"
-					@click="saveLabelOnly"
-				/>
-				<Button
-					v-if="step === 1 && !renameOnly"
+					v-if="step === 1"
 					variant="solid"
 					label="Continue"
 					:disabled="testState.status !== 'passed'"
@@ -220,6 +200,7 @@
 // means "keep the saved one" (connectors_api.update_connector's contract).
 import { computed, reactive, ref, watch } from "vue";
 import { Badge, Button, Dialog, FormControl, Switch, toast } from "frappe-ui";
+import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 import {
 	addConnector,
 	deleteConnector,
@@ -256,28 +237,33 @@ const presetOptions = computed(() =>
 		value: p,
 	}))
 );
-
 const step = ref(1);
 const saving = ref(false);
 const testing = ref(false);
 
-const form = reactive({ label: "", preset: "GitHub", base_url: "", credential: "" });
+const form = reactive({ preset: "GitHub", base_url: "", credential: "" });
+// Step 2's "Choose what {agent} may do with X" line. There's no user-typed
+// Name field any more (the backend derives the saved label - preset display
+// name, or the Custom URL's hostname), so this falls back to the preset's
+// own name for a fresh Add and to the edited row's already-saved label
+// otherwise.
+const connectorDisplayName = computed(() => {
+	if (isEdit.value && props.connector?.label) return props.connector.label;
+	if (form.preset && form.preset !== "Custom URL") return form.preset;
+	return "this connector";
+});
 // The saved row this dialog is working against: the edited row's name, or the
 // name add_connector returned the first time "Test connection" ran this session.
 const rowName = ref("");
 // Only true for a row THIS dialog session created (never for an edited row) —
 // gates the delete-on-close cleanup below.
 const createdThisSession = ref(false);
-// Flips true once Save (either path) has actually committed, so a created-
-// this-session row that WAS saved is never mistaken for an orphan.
+// Flips true once Save has actually committed, so a created-this-session row
+// that WAS saved is never mistaken for an orphan.
 const savedThisSession = ref(false);
 const testState = reactive({ status: "idle", tools: [], message: "" }); // idle | passed | failed
-// The connect fields as they stood when an edit opened — lets connectionUnchanged
-// (below) tell a pure rename apart from a real endpoint/credential edit.
-const initialConn = reactive({ preset: "", base_url: "" });
 
 function resetForCreate() {
-	form.label = "";
 	form.preset = "GitHub";
 	form.base_url = "";
 	form.credential = "";
@@ -293,21 +279,16 @@ function resetForCreate() {
 	actionQuery.value = "";
 }
 function resetForEdit(row) {
-	form.label = row.label || "";
 	form.preset = row.preset || "GitHub";
 	form.base_url = row.base_url || "";
 	form.credential = "";
 	rowName.value = row.name;
 	createdThisSession.value = false;
 	savedThisSession.value = false;
-	initialConn.preset = form.preset;
-	initialConn.base_url = form.base_url;
 	// An edited row may already have a passing test on record; that state is
 	// server truth (last_test_status), not something to re-derive here — but
 	// this dialog only knows the LIVE tools/list shape after a fresh test, so
 	// it still starts at "idle" and asks for a re-test before Continue unlocks.
-	// A pure rename (connectionUnchanged) can still save without one — see the
-	// "Save" footer button and saveLabelOnly() below.
 	testState.status = "idle";
 	testState.tools = [];
 	testState.message = "";
@@ -326,28 +307,9 @@ watch(
 	}
 );
 
-// True once the endpoint identity (preset/base_url) has NOT moved since this
-// edit opened and no fresh credential was typed — the plan only requires a
-// re-test when base_url/credential actually change (connectors_api.
-// update_connector's own last_test_status-reset condition), so this is the
-// SPA-side mirror of that same condition.
-const connectionUnchanged = computed(
-	() =>
-		isEdit.value &&
-		form.preset === initialConn.preset &&
-		form.base_url === initialConn.base_url &&
-		!form.credential.trim()
-);
-// The footer's rename-only branch: only while nothing has been tested THIS
-// session. Once a test passes - whether the connection changed or not -
-// Continue takes over, which is what makes the allowed-actions picker
-// reachable from Edit at all (a connector's own permissions are set once at
-// creation and otherwise only revisited by testing again).
-const renameOnly = computed(() => connectionUnchanged.value && testState.status !== "passed");
-
-// Any change to what's actually tested (preset/base_url/credential — not the
-// display label) invalidates a prior pass, same as the backend's own
-// last_test_status reset on a real base_url/credential change.
+// Any change to what's actually tested (preset/base_url/credential) invalidates
+// a prior pass, same as the backend's own last_test_status reset on a real
+// base_url/credential change.
 watch([() => form.preset, () => form.base_url], () => {
 	if (testState.status !== "idle") {
 		testState.status = "idle";
@@ -372,7 +334,6 @@ function onCredentialChange(v) {
 }
 
 const canTest = computed(() => {
-	if (!form.label.trim()) return false;
 	if (form.preset === "Custom URL" && !form.base_url.trim()) return false;
 	if (!isEdit.value && !form.credential.trim()) return false;
 	return true;
@@ -403,9 +364,10 @@ async function runTest() {
 	testing.value = true;
 	try {
 		if (!rowName.value) {
-			// First test this session, create mode: mint the row.
+			// First test this session, create mode: mint the row. No `label` is
+			// sent - add_connector derives one server-side (the preset's display
+			// name, or the Custom URL's hostname).
 			const row = await addConnector({
-				label: form.label.trim(),
 				preset: form.preset,
 				base_url: form.base_url.trim(),
 				scope: props.scope,
@@ -420,7 +382,6 @@ async function runTest() {
 			// Re-test (edit mode, or a second Test press this session): persist
 			// whatever changed first. Blank credential means "keep the saved one".
 			await updateConnector(rowName.value, {
-				label: form.label.trim(),
 				...(form.preset === "Custom URL" ? { base_url: form.base_url.trim() } : {}),
 				...(form.credential.trim() ? { credential: form.credential.trim() } : {}),
 			});
@@ -502,24 +463,6 @@ async function save() {
 		const row = await updateConnector(rowName.value, { enabled: 1 });
 		savedThisSession.value = true;
 		toast.success(isEdit.value ? "Connector updated" : "Connector added");
-		emit("saved", row);
-		show.value = false;
-	} catch (e) {
-		toast.error(errHtml(e));
-	} finally {
-		saving.value = false;
-	}
-}
-
-// Rename-only path (see connectionUnchanged above): commits just the label,
-// without requiring a live re-test of an endpoint that hasn't moved.
-async function saveLabelOnly() {
-	if (!rowName.value || !form.label.trim()) return;
-	saving.value = true;
-	try {
-		const row = await updateConnector(rowName.value, { label: form.label.trim() });
-		savedThisSession.value = true;
-		toast.success("Connector updated");
 		emit("saved", row);
 		show.value = false;
 	} catch (e) {

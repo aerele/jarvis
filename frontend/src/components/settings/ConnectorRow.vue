@@ -1,6 +1,6 @@
 <template>
 	<div class="flex items-center gap-3 rounded-lg border p-3">
-		<FeatherIcon :name="presetIcon" class="size-5 shrink-0 text-ink-gray-5" />
+		<ConnectorLogo :preset="row.preset" :size="20" class="shrink-0 text-ink-gray-5" />
 		<div class="min-w-0 flex-1">
 			<div class="flex flex-wrap items-center gap-1.5">
 				<span class="truncate text-sm font-medium text-ink-gray-9">{{ row.label }}</span>
@@ -43,7 +43,8 @@
 // this row's own three-state status (MCP_CONNECTORS_PLAN.md UI/UX decision
 // #3: Connected / Failed / Disabled only — no "Needs auth" tier in v1).
 import { computed } from "vue";
-import { Badge, Button, FeatherIcon, Switch, Tooltip } from "frappe-ui";
+import { Badge, Button, Switch, Tooltip } from "frappe-ui";
+import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 import { timeAgo } from "@/utils/datetime";
 
 const props = defineProps({
@@ -60,17 +61,6 @@ const props = defineProps({
 	toggling: { type: Boolean, default: false },
 });
 const emit = defineEmits(["test", "edit", "delete", "toggle"]);
-
-// Feather ships no vendor logos for Atlassian/Linear/Stripe, so these are
-// generic stand-ins, not brand marks.
-const PRESET_ICON = {
-	GitHub: "github",
-	Atlassian: "trello",
-	Linear: "zap",
-	Stripe: "credit-card",
-	"Custom URL": "link-2",
-};
-const presetIcon = computed(() => PRESET_ICON[props.row.preset] || "server");
 
 const statusTheme = computed(() => {
 	if (!props.row.enabled) return "gray";
