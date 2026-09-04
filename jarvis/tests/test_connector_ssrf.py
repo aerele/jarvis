@@ -11,6 +11,8 @@ every test that would otherwise touch the wire.
 
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -147,6 +149,31 @@ class TestOpenPinnedRequest(unittest.TestCase):
 		# Re-validated on the second hop too (host resolved again).
 		self.assertGreaterEqual(gai.call_count, 2)
 
+	def test_307_https_to_http_downgrade_refused(self):
+		# A same-host redirect that downgrades https -> http would re-POST the
+		# Authorization: Bearer header in cleartext. It must be refused.
+		with mock.patch.object(ssrf.socket, "getaddrinfo", return_value=_addrinfo(PUBLIC_IP)):
+			with mock.patch.object(
+				ssrf,
+				"_open_pinned",
+				return_value=_open(_FakeResp(307, {"Location": "http://example.com/x"})),
+			):
+				with self.assertRaises(ssrf.SsrfError) as cm:
+					ssrf.open_pinned_request("https://example.com/mcp", body=b"{}")
+		self.assertEqual(cm.exception.kind, ssrf.ERR_INSECURE_REDIRECT)
+
+	def test_307_http_to_https_upgrade_is_followed(self):
+		# The opposite direction (an UPGRADE) is safe and must still be followed.
+		responses = [
+			_open(_FakeResp(307, {"Location": "https://example.com/secure"})),
+			_open(_FakeResp(200)),
+		]
+		with mock.patch.object(ssrf.socket, "getaddrinfo", return_value=_addrinfo(PUBLIC_IP)):
+			with mock.patch.object(ssrf, "_open_pinned", side_effect=responses):
+				resp, pool, final = ssrf.open_pinned_request("http://example.com/mcp", body=b"{}")
+		self.assertEqual(resp.status, 200)
+		self.assertEqual(final, "https://example.com/secure")
+
 	def test_307_cross_host_is_refused(self):
 		with mock.patch.object(ssrf.socket, "getaddrinfo", return_value=_addrinfo(PUBLIC_IP)):
 			with mock.patch.object(
@@ -225,6 +252,65 @@ class TestConnectionPinning(unittest.TestCase):
 		self.assertEqual(kwargs["headers"]["Host"], "example.com")
 		self.assertFalse(kwargs["redirect"])
 		self.assertFalse(kwargs["preload_content"])
+
+
+class TestDnsTimeout(unittest.TestCase):
+	"""``socket.getaddrinfo`` has no timeout; a black-holed nameserver would
+	otherwise pin a worker for the OS resolver's full retry budget. Resolution
+	must be hard-bounded and fail closed."""
+
+	def test_resolve_timeout_fails_closed_promptly(self):
+		release = threading.Event()
+
+		def _slow(*a, **k):
+			# Block until released (with a safety cap) to model a hung resolver.
+			release.wait(5)
+			return _addrinfo(PUBLIC_IP)
+
+		try:
+			with mock.patch.object(ssrf.socket, "getaddrinfo", _slow):
+				start = time.monotonic()
+				with self.assertRaises(ssrf.SsrfError) as cm:
+					ssrf._validate_host("slow.example.com", resolve_timeout=0.1)
+				elapsed = time.monotonic() - start
+			# A hung resolver is an endpoint-health signal -> ERR_CONNECT_FAILED so
+			# the broker's circuit breaker opens on it (never ERR_UNRESOLVED).
+			self.assertEqual(cm.exception.kind, ssrf.ERR_CONNECT_FAILED)
+			# We returned on the timeout, not after waiting out getaddrinfo.
+			self.assertLess(elapsed, 2.0)
+		finally:
+			release.set()
+
+	def test_resolve_exception_is_unresolved(self):
+		def _boom(*a, **k):
+			raise OSError("nxdomain")
+
+		with mock.patch.object(ssrf.socket, "getaddrinfo", _boom):
+			with self.assertRaises(ssrf.SsrfError) as cm:
+				ssrf._validate_host("bad.example.com", resolve_timeout=1.0)
+		self.assertEqual(cm.exception.kind, ssrf.ERR_UNRESOLVED)
+
+	def test_open_pinned_bounds_resolve_by_budget(self):
+		# The DNS bound is min(connect_timeout, read_timeout) so it can never
+		# outlast the request the caller asked for.
+		release = threading.Event()
+
+		def _slow(*a, **k):
+			release.wait(5)
+			return _addrinfo(PUBLIC_IP)
+
+		try:
+			with mock.patch.object(ssrf.socket, "getaddrinfo", _slow):
+				start = time.monotonic()
+				with self.assertRaises(ssrf.SsrfError) as cm:
+					ssrf.open_pinned_request(
+						"https://slow.example.com/mcp", body=b"{}", connect_timeout=0.1, read_timeout=0.1
+					)
+				elapsed = time.monotonic() - start
+			self.assertEqual(cm.exception.kind, ssrf.ERR_CONNECT_FAILED)
+			self.assertLess(elapsed, 2.0)
+		finally:
+			release.set()
 
 
 if __name__ == "__main__":

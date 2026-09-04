@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import threading
 from collections.abc import Callable
 from urllib.parse import urljoin, urlparse
 
@@ -61,6 +62,12 @@ _METADATA_IPS = {"169.254.169.254", "fd00:ec2::254"}
 
 _USER_AGENT = "JarvisConnector/1.0"
 
+# Hard wall-clock bound for a single DNS resolution. getaddrinfo has no timeout of
+# its own and can block a worker for the OS resolver's full retry budget
+# (typically 20-30s) on a black-holed nameserver; the caller lowers this to fit
+# whatever remains of the overall request budget.
+DEFAULT_RESOLVE_TIMEOUT = 5.0
+
 
 # Failure kinds carried on SsrfError.kind - mirrors link_fetch's split so a
 # caller can tell "this bench could not reach the endpoint" (unreachable) from
@@ -72,6 +79,7 @@ ERR_EGRESS_DENIED = "egress_denied"
 ERR_CONNECT_FAILED = "connect_failed"
 ERR_TOO_MANY_REDIRECTS = "too_many_redirects"
 ERR_CROSS_HOST_REDIRECT = "cross_host_redirect"
+ERR_INSECURE_REDIRECT = "insecure_redirect"
 
 UNREACHABLE_KINDS = frozenset({ERR_UNRESOLVED, ERR_BLOCKED_ADDRESS, ERR_CONNECT_FAILED})
 
@@ -107,18 +115,48 @@ def _is_blocked_ip(ip_str: str) -> bool:
 	)
 
 
-def _validate_host(hostname: str) -> list[str]:
+def _resolve(hostname: str, resolve_timeout: float) -> list:
+	"""``socket.getaddrinfo`` with a HARD wall-clock bound.
+
+	getaddrinfo cannot be given a timeout, so run it in a daemon thread and abandon
+	it if it overruns ``resolve_timeout`` - a black-holed nameserver otherwise pins
+	a gunicorn worker for the OS resolver's full retry budget, well past the
+	request deadline. A timeout is reported as ``ERR_CONNECT_FAILED`` (not
+	``ERR_UNRESOLVED``): a resolver that keeps hanging IS an endpoint-health signal,
+	so the broker's circuit breaker should open on it and fast-fail the next call
+	rather than burn another worker. A normal resolution failure stays
+	``ERR_UNRESOLVED``. The abandoned thread is a daemon and cannot block shutdown."""
+	result: dict = {}
+
+	def _run():
+		try:
+			result["infos"] = socket.getaddrinfo(hostname, None)
+		except Exception as exc:
+			# Any resolver failure is handed back to the calling thread below.
+			result["error"] = exc
+
+	thread = threading.Thread(target=_run, name="ssrf-getaddrinfo", daemon=True)
+	thread.start()
+	# A small floor so a near-exhausted budget still gives the resolver a real
+	# (if tiny) window rather than an instant, guaranteed timeout.
+	thread.join(max(0.1, resolve_timeout))
+	if thread.is_alive():
+		raise SsrfError(f"DNS resolution for {hostname} timed out.", kind=ERR_CONNECT_FAILED)
+	if "error" in result:
+		raise SsrfError(f"Could not resolve host: {hostname}", kind=ERR_UNRESOLVED) from result["error"]
+	return result.get("infos") or []
+
+
+def _validate_host(hostname: str, resolve_timeout: float = DEFAULT_RESOLVE_TIMEOUT) -> list[str]:
 	"""Resolve ``hostname`` and reject if ANY returned address is blocked; return
 	the vetted addresses so the connection can be PINNED to one of them. A string
 	check on the host alone proves nothing about where the socket will land (DNS
 	rebinding, split-horizon records), so every ``getaddrinfo`` result must be
-	individually safe before the request proceeds."""
+	individually safe before the request proceeds. Resolution is time-bounded (see
+	:func:`_resolve`) so it cannot outlast the request budget."""
 	if not hostname:
 		raise SsrfError("URL has no host to validate.", kind=ERR_INVALID_URL)
-	try:
-		infos = socket.getaddrinfo(hostname, None)
-	except Exception as exc:
-		raise SsrfError(f"Could not resolve host: {hostname}", kind=ERR_UNRESOLVED) from exc
+	infos = _resolve(hostname, resolve_timeout)
 	if not infos:
 		raise SsrfError(f"Could not resolve host: {hostname}", kind=ERR_UNRESOLVED)
 	addrs: list[str] = []
@@ -133,12 +171,17 @@ def _validate_host(hostname: str) -> list[str]:
 	return addrs
 
 
-def _validate_url(url: str, egress_allowed: Callable[[str], bool] | None):
+def _validate_url(
+	url: str,
+	egress_allowed: Callable[[str], bool] | None,
+	resolve_timeout: float = DEFAULT_RESOLVE_TIMEOUT,
+):
 	"""Validate scheme, reject embedded credentials, run the optional egress
 	hook, resolve + vet the host, and return ``(parsed, pinned_ip)``.
 
 	``egress_allowed`` (if given) is consulted with the bare hostname BEFORE any
-	DNS lookup, so an operator deny-list short-circuits the resolution too."""
+	DNS lookup, so an operator deny-list short-circuits the resolution too.
+	``resolve_timeout`` bounds the DNS lookup (see :func:`_validate_host`)."""
 	parsed = urlparse(url)
 	if parsed.scheme not in _ALLOWED_SCHEMES:
 		raise SsrfError(f"URL scheme must be http or https (got {parsed.scheme!r}).", kind=ERR_INVALID_URL)
@@ -153,7 +196,7 @@ def _validate_url(url: str, egress_allowed: Callable[[str], bool] | None):
 			f"Egress to host {parsed.hostname} is not permitted by policy.",
 			kind=ERR_EGRESS_DENIED,
 		)
-	vetted = _validate_host(parsed.hostname)
+	vetted = _validate_host(parsed.hostname, resolve_timeout)
 	return parsed, vetted[0]
 
 
@@ -247,10 +290,14 @@ def open_pinned_request(
 	if not current:
 		raise SsrfError("No URL given.", kind=ERR_INVALID_URL)
 
+	# Bound DNS resolution by what remains of the connect/read budget so a hung
+	# resolver cannot outlast the request the caller asked for.
+	resolve_timeout = min(connect_timeout, read_timeout)
+
 	origin_host = None
 	redirects = 0
 	while True:
-		parsed, ip = _validate_url(current, egress_allowed)
+		parsed, ip = _validate_url(current, egress_allowed, resolve_timeout)
 		if origin_host is None:
 			origin_host = parsed.hostname
 		try:
@@ -276,12 +323,20 @@ def open_pinned_request(
 				raise SsrfError("Too many redirects.", kind=ERR_TOO_MANY_REDIRECTS)
 			redirects += 1
 			nxt = urljoin(current, location)
-			if (urlparse(nxt).hostname or "").lower() != (origin_host or "").lower():
+			nxt_parsed = urlparse(nxt)
+			if (nxt_parsed.hostname or "").lower() != (origin_host or "").lower():
 				# Following would forward the Bearer token to a host the user
 				# never approved. Refuse rather than strip-and-follow.
 				raise SsrfError(
 					"Refusing cross-host redirect (would leak credential).",
 					kind=ERR_CROSS_HOST_REDIRECT,
+				)
+			if parsed.scheme == "https" and nxt_parsed.scheme == "http":
+				# A same-host downgrade to http would re-POST the Authorization:
+				# Bearer header in cleartext. Refuse rather than leak the credential.
+				raise SsrfError(
+					"Refusing https to http downgrade on redirect (would expose credential).",
+					kind=ERR_INSECURE_REDIRECT,
 				)
 			current = nxt
 			continue
