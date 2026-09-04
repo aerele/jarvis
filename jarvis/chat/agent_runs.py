@@ -988,7 +988,12 @@ def record_delegate_run(
 	# next_run_at only for a scheduled install.
 	inst_values = {"last_run_at": frappe.utils.now()}
 	if inst.schedule_enabled:
-		inst_values["next_run_at"] = compute_next_run(inst.schedule_frequency, inst.schedule_time)
+		inst_values["next_run_at"] = compute_next_run(
+			inst.schedule_frequency,
+			inst.schedule_time,
+			weekday=inst.schedule_weekday,
+			day_of_month=inst.schedule_day_of_month,
+		)
 	frappe.db.set_value(INSTALLATION, inst.name, inst_values, update_modified=False)
 	# Under FrappeTestCase the enclosing transaction is rolled back at teardown; a
 	# mid-test commit would defeat that and leak Run/Finding/Provenance/Dashboard

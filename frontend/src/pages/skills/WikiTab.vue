@@ -105,7 +105,9 @@
 
 			<template #cell-title="{ row }">
 				<div class="flex items-center gap-2 overflow-hidden">
-					<div class="truncate text-base">{{ row.title || row.slug }}</div>
+					<div class="truncate text-base font-medium text-ink-gray-9">
+						{{ row.title || row.slug }}
+					</div>
 					<Badge
 						v-if="row.contradiction_flag"
 						variant="subtle"

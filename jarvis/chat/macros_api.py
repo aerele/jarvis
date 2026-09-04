@@ -98,6 +98,8 @@ def list_macros() -> list[dict]:
 			"stop_on_error",
 			"schedule_enabled",
 			"schedule_frequency",
+			"schedule_weekday",
+			"schedule_day_of_month",
 			"schedule_time",
 			"next_run_at",
 			"last_run_at",
@@ -190,7 +192,8 @@ def list_macros_page(
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` WHERE {where}", params)[0][0]
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, macro_name, description, enabled, stop_on_error, skip_confirmation,
-		schedule_enabled, schedule_frequency, schedule_time, next_run_at,
+		schedule_enabled, schedule_frequency, schedule_weekday, schedule_day_of_month,
+		schedule_time, next_run_at,
 		last_run_at, modified, merge_status,
 		CASE WHEN TRIM(COALESCE(merged_prompt, '')) != '' THEN 1 ELSE 0 END AS has_summary
 		FROM `tabJarvis Macro`
@@ -241,6 +244,8 @@ def get_macro(name: str) -> dict:
 		"skip_confirmation": int(doc.skip_confirmation or 0),
 		"schedule_enabled": int(doc.schedule_enabled or 0),
 		"schedule_frequency": doc.schedule_frequency or "daily",
+		"schedule_weekday": doc.schedule_weekday or None,
+		"schedule_day_of_month": doc.schedule_day_of_month or None,
 		"schedule_time": str(doc.schedule_time or ""),
 		"next_run_at": str(doc.next_run_at or ""),
 		"merged_prompt": doc.merged_prompt or "",
@@ -279,10 +284,13 @@ def create_macro(
 	schedule_enabled: int = 0,
 	schedule_frequency: str = "daily",
 	schedule_time: str | None = None,
+	schedule_weekday: str | None = None,
+	schedule_day_of_month: int | None = None,
 ) -> dict:
-	"""Create a macro. Validation (name/steps/caps) runs in the doctype validate().
-	Per-step tagged skills arrive INSIDE each step dict (``steps[].skills``). Arming
-	(``skip_confirmation`` 0 -> 1) is admin-gated in the doctype validate()."""
+	"""Create a macro. Validation (name/steps/caps, and the two schedule anchors'
+	ranges) runs in the doctype validate(). Per-step tagged skills arrive INSIDE
+	each step dict (``steps[].skills``). Arming (``skip_confirmation`` 0 -> 1) is
+	admin-gated in the doctype validate()."""
 	doc = frappe.get_doc(
 		{
 			"doctype": MACRO,
@@ -294,6 +302,8 @@ def create_macro(
 			"schedule_enabled": int(schedule_enabled or 0),
 			"schedule_frequency": schedule_frequency or "daily",
 			"schedule_time": schedule_time or None,
+			"schedule_weekday": schedule_weekday or None,
+			"schedule_day_of_month": frappe.utils.cint(schedule_day_of_month) or None,
 			"steps": _parse_steps(steps),
 		}
 	)
@@ -315,6 +325,8 @@ def update_macro(
 	schedule_enabled: int | None = None,
 	schedule_frequency: str | None = None,
 	schedule_time: str | None = None,
+	schedule_weekday: str | None = None,
+	schedule_day_of_month: int | None = None,
 	merged_prompt: str | None = None,
 ) -> dict:
 	"""Update provided fields of a macro (owner-gated). When ``steps`` is given it
@@ -340,6 +352,12 @@ def update_macro(
 		doc.schedule_frequency = schedule_frequency
 	if schedule_time is not None:
 		doc.schedule_time = schedule_time or None
+	if schedule_weekday is not None:
+		doc.schedule_weekday = schedule_weekday or None
+	if schedule_day_of_month is not None:
+		# cint (not the raw arg) so a stray "" or a non-numeric SPA payload lands
+		# on the doctype's own 1-31 validate() rather than a TypeError here.
+		doc.schedule_day_of_month = frappe.utils.cint(schedule_day_of_month) or None
 	if steps is not None:
 		doc.set("steps", _parse_steps(steps))
 		if merged_prompt is None:

@@ -95,6 +95,8 @@ def run_due_agent_audits() -> None:
 			"agent",
 			"schedule_frequency",
 			"schedule_time",
+			"schedule_weekday",
+			"schedule_day_of_month",
 			"installable",
 			"source_apps_json",
 			"activation_state",
@@ -1217,7 +1219,13 @@ def _advance(row, now) -> None:
 		row.name,
 		{
 			"last_run_at": now,
-			"next_run_at": compute_next_run(row.schedule_frequency, row.schedule_time, from_dt=now),
+			"next_run_at": compute_next_run(
+				row.schedule_frequency,
+				row.schedule_time,
+				from_dt=now,
+				weekday=row.schedule_weekday,
+				day_of_month=row.schedule_day_of_month,
+			),
 		},
 		update_modified=False,
 	)
