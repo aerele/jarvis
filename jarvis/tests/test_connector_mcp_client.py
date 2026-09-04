@@ -230,15 +230,86 @@ class TestSessionFlow(unittest.TestCase):
 		self.assertEqual(cm.exception.code, 503)
 
 	def test_total_timeout_budget_trips(self):
-		# A clock that jumps past the budget between the first and second read.
-		ticks = iter([0.0, 0.0, 100.0, 100.0, 100.0, 100.0])
+		# A clock that jumps past the budget once the session is under way. An
+		# infinite generator (0 for the first few calls, then 100) is robust to the
+		# exact number of clock reads (_run_session now reads it too, to span the
+		# retry deadline).
+		def _ticks():
+			for _ in range(4):
+				yield 0.0
+			while True:
+				yield 100.0
+
+		gen = _ticks()
 		seam = _Seam([_init_ok(), _initialized_202()])
 		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
 			with self.assertRaises(mcp_client.McpError) as cm:
 				mcp_client.fetch_tools(
-					"https://api.example.com/mcp", None, total_timeout=5.0, clock=lambda: next(ticks)
+					"https://api.example.com/mcp", None, total_timeout=5.0, clock=lambda: next(gen)
 				)
 		self.assertEqual(cm.exception.kind, mcp_client.ERR_TRANSPORT)
+
+	def test_session_expired_retry_carries_remaining_budget(self):
+		# A naive retry gave the second session a fresh full total_timeout, so a
+		# slow first session + retry could reach ~2x the budget (past the plugin's
+		# 30s AbortController). A single deadline must span both attempts: the retry
+		# gets only what remained, never a second full budget.
+		constructed_budgets: list[float] = []
+		t = {"now": 1000.0}
+
+		class _FakeClient:
+			def __init__(self, base_url, token, **kw):
+				constructed_budgets.append(kw.get("total_timeout"))
+				self._first = len(constructed_budgets) == 1
+
+			def initialize(self):
+				# Each session burns 5s of wall-clock before its op runs.
+				t["now"] += 5.0
+
+			def list_tools(self, **kw):
+				if self._first:
+					raise mcp_client.McpError("expired", kind=mcp_client.ERR_SESSION_EXPIRED)
+				return [{"name": "x"}]
+
+			def close(self):
+				pass
+
+		with mock.patch.object(mcp_client, "McpClient", _FakeClient):
+			tools = mcp_client.fetch_tools(
+				"https://api.example.com/mcp", None, total_timeout=20.0, clock=lambda: t["now"]
+			)
+		self.assertEqual(tools, [{"name": "x"}])
+		self.assertEqual(len(constructed_budgets), 2)
+		self.assertAlmostEqual(constructed_budgets[0], 20.0)
+		# First session burned 5s, so the retry gets ~15s, not another full 20s.
+		self.assertAlmostEqual(constructed_budgets[1], 15.0)
+		self.assertLess(constructed_budgets[1], constructed_budgets[0])
+
+	def test_session_expired_not_retried_when_budget_exhausted(self):
+		# If the first session used up the whole budget, the expired-session retry
+		# must NOT fire (it would add a fresh call past the deadline); the original
+		# session_expired error surfaces instead.
+		t = {"now": 1000.0}
+
+		class _FakeClient:
+			def __init__(self, base_url, token, **kw):
+				pass
+
+			def initialize(self):
+				t["now"] += 25.0  # blow the whole 20s budget
+
+			def list_tools(self, **kw):
+				raise mcp_client.McpError("expired", kind=mcp_client.ERR_SESSION_EXPIRED)
+
+			def close(self):
+				pass
+
+		with mock.patch.object(mcp_client, "McpClient", _FakeClient):
+			with self.assertRaises(mcp_client.McpError) as cm:
+				mcp_client.fetch_tools(
+					"https://api.example.com/mcp", None, total_timeout=20.0, clock=lambda: t["now"]
+				)
+		self.assertEqual(cm.exception.kind, mcp_client.ERR_SESSION_EXPIRED)
 
 
 if __name__ == "__main__":

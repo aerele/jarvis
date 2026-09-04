@@ -412,15 +412,31 @@ class McpClient:
 # --------------------------------------------------------------------------- #
 # convenience: one full session, with a single retry on an expired session
 # --------------------------------------------------------------------------- #
-def _run_session(base_url, token, op, *, _retried=False, **client_kw):
-	client = McpClient(base_url, token, **client_kw)
+def _run_session(base_url, token, op, *, _retried=False, _deadline=None, **client_kw):
+	"""Run one MCP session, with a single retry on an expired session (404).
+
+	A naive retry built a fresh client with a fresh full ``total_timeout``, so a
+	slow first session plus a retry could reach ~2x the budget - past the plugin's
+	30s AbortController. Instead a single absolute deadline spans BOTH attempts:
+	each client is handed only the budget that remains, so the retry can never add
+	a second full timeout on top of the first."""
+	clock = client_kw.get("clock", time.monotonic)
+	now = clock()
+	if _deadline is None:
+		_deadline = now + client_kw.get("total_timeout", DEFAULT_TOTAL_TIMEOUT)
+	remaining = _deadline - now
+	if remaining <= 0:
+		raise McpError("Connector call exceeded its time budget.", kind=ERR_TRANSPORT)
+
+	client = McpClient(base_url, token, **{**client_kw, "total_timeout": remaining})
 	try:
 		client.initialize()
 		return op(client)
 	except McpError as exc:
-		if exc.kind == ERR_SESSION_EXPIRED and not _retried:
-			# Fresh session, one retry (spec: 404 => start a new session).
-			return _run_session(base_url, token, op, _retried=True, **client_kw)
+		if exc.kind == ERR_SESSION_EXPIRED and not _retried and (_deadline - clock()) > 0:
+			# Fresh session, one retry (spec: 404 => start a new session), carrying
+			# the SAME deadline so the retry draws from what is left of the budget.
+			return _run_session(base_url, token, op, _retried=True, _deadline=_deadline, **client_kw)
 		raise
 	finally:
 		client.close()
