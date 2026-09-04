@@ -21,6 +21,8 @@
     "output_tokens",
     "run_count",
     "last_total_tokens",
+    "context_capacity",
+    "context_pct",
     "last_usage_at"
   ],
   "fields": [
@@ -130,6 +132,22 @@
       "read_only": 1,
       "no_copy": 1,
       "description": "Snapshot of the gateway's totalTokens (context size) at the last recorded turn / sync."
+    },
+    {
+      "fieldname": "context_capacity",
+      "fieldtype": "Int",
+      "label": "Context Capacity",
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Snapshot of the gateway's contextTokens (the model's context-window capacity) at the last recorded turn / sync. 0 when the row never reported one."
+    },
+    {
+      "fieldname": "context_pct",
+      "fieldtype": "Percent",
+      "label": "Context Percent",
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "100 * last_total_tokens / context_capacity, rounded to 1 decimal. 0 when context_capacity is not yet known."
     },
     {
       "fieldname": "last_usage_at",
