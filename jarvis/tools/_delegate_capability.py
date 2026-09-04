@@ -303,8 +303,7 @@ _RUN_ERROR_NO_SURFACE = "the agent's capability contract authorises no tools; re
 # every other tool's own gate) entirely for such a run.
 _ALWAYS_GATED = frozenset({"call_connector"})
 _CHAT_CONNECTOR_NOT_DECLARED = (
-	"This agent tried to use a connector, which isn't allowed for this kind of run, "
-	"so the step was skipped."
+	"This agent tried to use a connector, which isn't allowed for this kind of run, so the step was skipped."
 )
 
 

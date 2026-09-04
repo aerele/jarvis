@@ -97,6 +97,4 @@ def log_call(
 			}
 		).insert(ignore_permissions=True)
 	except Exception:
-		frappe.logger("jarvis.connectors").warning(
-			"jarvis connector log insert failed", exc_info=True
-		)
+		frappe.logger("jarvis.connectors").warning("jarvis connector log insert failed", exc_info=True)

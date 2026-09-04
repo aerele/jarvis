@@ -189,7 +189,12 @@ const NAV = [
 			// Item-level gate (on top of the group's, which is always true here):
 			// the tab is hidden entirely, not shown-and-refused, when the tenant
 			// hasn't turned connectors on.
-			{ key: "connectors", label: "Connectors", icon: "link-2", gate: () => connectorsEnabled },
+			{
+				key: "connectors",
+				label: "Connectors",
+				icon: "link-2",
+				gate: () => connectorsEnabled,
+			},
 		],
 	},
 	{

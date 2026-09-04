@@ -1,15 +1,11 @@
 <template>
-	<Dialog
-		v-model="show"
-		:options="{ title: dialogTitle, size: 'lg' }"
-		@after-leave="onClosed"
-	>
+	<Dialog v-model="show" :options="{ title: dialogTitle, size: 'lg' }" @after-leave="onClosed">
 		<template #body-content>
 			<!-- ── Step 1: connect ─────────────────────────────────────────── -->
 			<div v-if="step === 1" class="flex flex-col gap-3">
 				<p class="text-sm text-ink-gray-6">
-					{{ agentName }} can use this connector's actions in chat, gated by what
-					you allow on the next step.
+					{{ agentName }} can use this connector's actions in chat, gated by what you
+					allow on the next step.
 				</p>
 
 				<FormControl
@@ -41,7 +37,9 @@
 				<FormControl
 					type="password"
 					label="Access token"
-					:placeholder="isEdit ? 'Leave blank to keep the saved token' : 'Paste your token'"
+					:placeholder="
+						isEdit ? 'Leave blank to keep the saved token' : 'Paste your token'
+					"
 					:modelValue="form.credential"
 					@update:modelValue="(v) => onCredentialChange(v)"
 				/>
@@ -69,8 +67,9 @@
 			<div v-else class="flex flex-col gap-3">
 				<div class="flex items-center justify-between gap-3">
 					<p class="text-sm text-ink-gray-6">
-						Choose what {{ agentName }} may do with {{ form.label || "this connector" }}.
-						Read-only actions are pre-checked; writes are off by default.
+						Choose what {{ agentName }} may do with
+						{{ form.label || "this connector" }}. Read-only actions are pre-checked;
+						writes are off by default.
 					</p>
 					<Button
 						variant="ghost"
@@ -188,7 +187,13 @@
 					:disabled="testState.status !== 'passed'"
 					@click="step = 2"
 				/>
-				<Button v-if="step === 2" variant="solid" label="Save" :loading="saving" @click="save" />
+				<Button
+					v-if="step === 2"
+					variant="solid"
+					label="Save"
+					:loading="saving"
+					@click="save"
+				/>
 			</div>
 		</template>
 	</Dialog>
@@ -405,7 +410,9 @@ async function runTest() {
 				base_url: form.base_url.trim(),
 				scope: props.scope,
 				credential: form.credential,
-				...(form.preset === "Custom URL" ? { key: customUrlKey(form.base_url.trim()) } : {}),
+				...(form.preset === "Custom URL"
+					? { key: customUrlKey(form.base_url.trim()) }
+					: {}),
 			});
 			rowName.value = row.name;
 			createdThisSession.value = true;
@@ -456,7 +463,8 @@ watch(
 	(tools) => {
 		const next = {};
 		// Fall back to read_only if `allowed` is absent (older backend response).
-		for (const t of tools) next[t.action] = t.allowed !== undefined ? !!t.allowed : !!t.read_only;
+		for (const t of tools)
+			next[t.action] = t.allowed !== undefined ? !!t.allowed : !!t.read_only;
 		selected.value = next;
 		touchedActions.value = new Set();
 	}
@@ -472,9 +480,7 @@ const writeTools = computed(() => testState.tools.filter((t) => !t.read_only));
 function matchesQuery(t) {
 	const q = actionQuery.value.trim().toLowerCase();
 	if (!q) return true;
-	return (
-		t.action.toLowerCase().includes(q) || (t.description || "").toLowerCase().includes(q)
-	);
+	return t.action.toLowerCase().includes(q) || (t.description || "").toLowerCase().includes(q);
 }
 const filteredReadOnly = computed(() => readOnlyTools.value.filter(matchesQuery));
 const filteredWrites = computed(() => writeTools.value.filter(matchesQuery));

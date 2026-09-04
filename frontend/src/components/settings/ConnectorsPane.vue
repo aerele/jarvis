@@ -195,7 +195,9 @@ async function test(row) {
 			const n = (res.tools || []).length;
 			toast.success(`Connected, ${n} ${n === 1 ? "tool" : "tools"} found`);
 		} else {
-			toast.error(errHtml({ message: (res && res.error && res.error.message) || "" }, "Test failed."));
+			toast.error(
+				errHtml({ message: (res && res.error && res.error.message) || "" }, "Test failed.")
+			);
 		}
 	} catch (e) {
 		toast.error(errHtml(e));

@@ -56,7 +56,7 @@ class JarvisConnector(Document):
 			frappe.throw(
 				_(
 					"Connector Key must be lowercase letters, digits, hyphens or "
-					"underscores, starting with a letter or digit (e.g. \"github\")."
+					'underscores, starting with a letter or digit (e.g. "github").'
 				)
 			)
 		self.key = key
@@ -107,7 +107,5 @@ class JarvisConnector(Document):
 			filters["owner"] = self.owner or frappe.session.user
 		if frappe.db.exists("Jarvis Connector", filters):
 			if self.scope == "Personal":
-				frappe.throw(
-					_("You already have a Personal connector with key \"{0}\".").format(self.key)
-				)
-			frappe.throw(_("A Shared connector with key \"{0}\" already exists.").format(self.key))
+				frappe.throw(_('You already have a Personal connector with key "{0}".').format(self.key))
+			frappe.throw(_('A Shared connector with key "{0}" already exists.').format(self.key))
