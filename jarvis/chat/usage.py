@@ -808,20 +808,19 @@ def refresh_session_snapshots(rows: list[dict]) -> dict:
 			# Naive system-tz datetime, matching how Frappe stores Datetime.
 			last_at = datetime.fromtimestamp(int(updated_ms) / 1000) if updated_ms else None
 			# ONE update (review: two near-duplicate UPDATEs made "newest row"
-			# ordering unreliable elsewhere - a row with no updatedAt never
-			# stamped last_usage_at, and a raw SQL UPDATE never bumps modified
-			# on its own). COALESCE keeps a real prior last_usage_at over a
-			# missing updatedAt stamp, falling back to the sweep's own `now`
-			# (the Python-side stamp computed once above, NOT SQL's NOW() -
-			# NOW() is the DB session's timezone, which need not match the
-			# site's system tz that every other write to these columns uses,
-			# and MariaDB's NOW() is second-precision, too coarse to always
-			# order two sweeps run back-to-back) only when this session has
-			# never had one; modified = %(now)s always advances, so ordering
-			# by either column is reliable that this row was just synced.
-			# context_capacity / context_pct are set ONLY when THIS row
-			# actually reported a capacity (review: a sweep row that carries
-			# none must never clobber a previously known capacity with 0).
+			# ordering unreliable elsewhere - a raw SQL UPDATE never bumps
+			# modified on its own). last_usage_at means "last REAL usage", not
+			# sync time (test_user_settings.TestAdminSync.
+			# test_refreshes_snapshots_without_accumulating pins this: a row
+			# with no updatedAt must leave last_usage_at exactly as it was -
+			# untouched if never set, unchanged if it was), so COALESCE has NO
+			# now()/`now` fallback here - only the row's own updatedAt stamp,
+			# else whatever is already stored. modified = %(now)s always
+			# advances regardless, so "just synced" stays orderable even when
+			# last_usage_at itself doesn't move. context_capacity /
+			# context_pct are set ONLY when THIS row actually reported a
+			# capacity (review: a sweep row that carries none must never
+			# clobber a previously known capacity with 0).
 			params = {
 				"ctx": context_tokens,
 				"usage_at": last_at,
@@ -838,7 +837,7 @@ def refresh_session_snapshots(rows: list[dict]) -> dict:
 				UPDATE `tabJarvis Chat Session`
 				SET last_total_tokens = %(ctx)s,
 					{capacity_set_sql}
-					last_usage_at = COALESCE(%(usage_at)s, last_usage_at, %(now)s),
+					last_usage_at = COALESCE(%(usage_at)s, last_usage_at),
 					modified = %(now)s
 				WHERE session_key = %(session_key)s
 				""",
