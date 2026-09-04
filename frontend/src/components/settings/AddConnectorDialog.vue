@@ -442,14 +442,12 @@ async function runTest() {
 // ── step 2: allowed actions ─────────────────────────────────────────────────
 const selected = ref({}); // action -> bool (display / working value)
 // Actions the user actually touched this session (a Switch flip, or "Allow
-// all read-only"). test_connector's response carries no `allowed` field (only
-// action/read_only/destructive/description - see connectors_api.test_connector),
-// so this dialog cannot know an edited connector's PRIOR grants for actions the
-// user never touches. Save sends ONLY the touched subset; set_allowed_actions
-// keeps every unmentioned action's existing stored value (its own documented
-// contract), which is exactly right the first time too - test_connector's own
-// merge already wrote sensible defaults (read-only checked, writes off) into
-// the row before this dialog ever reads them.
+// all read-only"). test_connector's response carries each action's stored
+// `allowed` grant (its server-merged value: read-only pre-checked, writes off
+// the first time; an admin's PRIOR choice preserved on an edit re-test), so the
+// picker shows the connector's true current grants. Save still sends ONLY the
+// touched subset; set_allowed_actions keeps every unmentioned action's existing
+// stored value (its own documented contract).
 const touchedActions = ref(new Set());
 const actionQuery = ref("");
 
@@ -457,7 +455,8 @@ watch(
 	() => testState.tools,
 	(tools) => {
 		const next = {};
-		for (const t of tools) next[t.action] = !!t.read_only;
+		// Fall back to read_only if `allowed` is absent (older backend response).
+		for (const t of tools) next[t.action] = t.allowed !== undefined ? !!t.allowed : !!t.read_only;
 		selected.value = next;
 		touchedActions.value = new Set();
 	}

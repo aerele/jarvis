@@ -453,6 +453,7 @@ def test_connector(name: str) -> dict:
 		"tools": [
 			{
 				"action": m["action"],
+				"allowed": bool(m["allowed"]),
 				"read_only": bool(m["read_only"]),
 				"destructive": bool(m["destructive"]),
 				"description": m["description"],
