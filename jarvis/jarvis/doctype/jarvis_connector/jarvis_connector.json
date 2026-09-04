@@ -1,0 +1,189 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-09-04 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "details_section",
+  "key",
+  "label",
+  "preset",
+  "column_break_details",
+  "scope",
+  "enabled",
+  "connection_section",
+  "base_url",
+  "credential",
+  "actions_section",
+  "allowed_actions",
+  "status_section",
+  "last_test_status",
+  "last_test_at",
+  "column_break_status",
+  "tools_cached_at",
+  "tools_cache"
+ ],
+ "fields": [
+  {
+   "fieldname": "details_section",
+   "fieldtype": "Section Break",
+   "label": "Connector"
+  },
+  {
+   "fieldname": "key",
+   "fieldtype": "Data",
+   "label": "Key",
+   "length": 64,
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Lowercase slug the agent uses to address this connector (e.g. \"github\"). Normalized to lowercase on save."
+  },
+  {
+   "fieldname": "label",
+   "fieldtype": "Data",
+   "label": "Label",
+   "length": 140,
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "Display name shown to users in Settings and confirmation cards."
+  },
+  {
+   "fieldname": "preset",
+   "fieldtype": "Select",
+   "label": "Preset",
+   "options": "GitHub\nAtlassian\nLinear\nStripe\nCustom URL",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Which known gateway this connector points at. \"Custom URL\" allows any admin-approved endpoint."
+  },
+  {
+   "fieldname": "column_break_details",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "scope",
+   "fieldtype": "Select",
+   "label": "Scope",
+   "options": "Shared\nPersonal",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Shared: one connector for the whole tenant, credential set by an admin, visible (read-only) to every user. Personal: owned by one user, invisible to everyone else. A Personal connector wins over a Shared one with the same key for that user."
+  },
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled",
+   "default": "1",
+   "in_list_view": 1,
+   "description": "Disabled connectors are never dispatched to, regardless of the site-wide kill switch."
+  },
+  {
+   "fieldname": "connection_section",
+   "fieldtype": "Section Break",
+   "label": "Connection"
+  },
+  {
+   "fieldname": "base_url",
+   "fieldtype": "Data",
+   "label": "Base URL",
+   "length": 500,
+   "reqd": 1,
+   "description": "The gateway's HTTP(S) endpoint, e.g. https://api.githubcopilot.com/mcp. Must be http:// or https://."
+  },
+  {
+   "fieldname": "credential",
+   "fieldtype": "Password",
+   "label": "Credential",
+   "description": "Bearer token/PAT for this connector, stored encrypted. Never returned by any API; read only via get_password server-side."
+  },
+  {
+   "fieldname": "actions_section",
+   "fieldtype": "Section Break",
+   "label": "Allowed Actions"
+  },
+  {
+   "fieldname": "allowed_actions",
+   "fieldtype": "Table",
+   "label": "Allowed Actions",
+   "options": "Jarvis Connector Action",
+   "description": "Per-action allow list, deny by default. Populated from the connector's tools/list result; only actions marked Allowed here may be called."
+  },
+  {
+   "fieldname": "status_section",
+   "fieldtype": "Section Break",
+   "label": "Status",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "last_test_status",
+   "fieldtype": "Select",
+   "label": "Last Test Status",
+   "options": "\nPassed\nFailed",
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "Outcome of the last connection test (initialize + tools/list). Server-set only."
+  },
+  {
+   "fieldname": "last_test_at",
+   "fieldtype": "Datetime",
+   "label": "Last Test At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_status",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "tools_cached_at",
+   "fieldtype": "Datetime",
+   "label": "Tools Cached At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "tools_cache",
+   "fieldtype": "JSON",
+   "label": "Tools Cache",
+   "read_only": 1,
+   "description": "Last tools/list result from this connector, server-set only. Used to validate call arguments and to render the allowed-actions picker."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-04 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Connector",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "Jarvis User",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  },
+  {
+   "role": "Jarvis Admin",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  },
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

@@ -93,6 +93,11 @@
   "core_apps_override",
   "enable_customizations_clause",
   "enable_role_profiles",
+  "connectors_section",
+  "connectors_enabled",
+  "allow_custom_urls",
+  "connectors_col",
+  "connector_egress_rules",
   "sync_tab",
   "last_sync_section",
   "last_sync_at",
@@ -697,6 +702,36 @@
    "read_only": 1,
    "hidden": 1,
    "description": "When on, a new chat session may be pinned to a role-based agent profile (a reduced tool set plus the matching skill set derived from the user's ERPNext roles) instead of the main agent - but only once that profile has actually been rendered on the agent side (see Role Profiles Pushed below). Off (default): every session uses the main agent, matching pre-role-profiles behavior exactly. Admin-owned mirror of the pulled role_profiles_config's `enabled` flag (spec B4) - never tenant-controllable; only jarvis.chat.role_profiles.sync_role_profile_config writes it. Reset to 0 between tenancies."
+  },
+  {
+   "fieldname": "connectors_section",
+   "fieldtype": "Section Break",
+   "label": "Connectors",
+   "description": "MCP connectors let the agent call external services (GitHub, Atlassian, Linear, Stripe and custom gateways) on a user's behalf."
+  },
+  {
+   "fieldname": "connectors_enabled",
+   "fieldtype": "Check",
+   "label": "Enable MCP Connectors",
+   "default": "0",
+   "description": "Site-wide kill switch. Off by default: call_connector fast-fails and list_connector_actions returns empty until this is turned on."
+  },
+  {
+   "fieldname": "allow_custom_urls",
+   "fieldtype": "Check",
+   "label": "Allow Custom URL Connectors",
+   "default": "1",
+   "description": "When on, users may add a connector pointing at any admin-approved Custom URL, not just the built-in presets. Turn off to restrict everyone to the built-in presets only."
+  },
+  {
+   "fieldname": "connectors_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "connector_egress_rules",
+   "fieldtype": "Small Text",
+   "label": "Connector Egress Rules",
+   "description": "Optional allow/deny list of hosts or patterns connector calls may reach, one per line. Empty allows any host (subject to the built-in SSRF guard)."
   },
   {
    "fieldname": "sync_tab",

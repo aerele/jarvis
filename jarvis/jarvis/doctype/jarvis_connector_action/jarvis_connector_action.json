@@ -1,0 +1,68 @@
+{
+ "actions": [],
+ "creation": "2026-09-04 10:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "action",
+  "allowed",
+  "read_only",
+  "destructive",
+  "description"
+ ],
+ "fields": [
+  {
+   "fieldname": "action",
+   "fieldtype": "Data",
+   "label": "Action",
+   "length": 140,
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "Tool/action name exactly as reported by the connector's tools/list (e.g. \"create_issue\")."
+  },
+  {
+   "fieldname": "allowed",
+   "fieldtype": "Check",
+   "label": "Allowed",
+   "default": "0",
+   "in_list_view": 1,
+   "description": "Deny-by-default: the broker refuses any action not explicitly allowed here."
+  },
+  {
+   "fieldname": "read_only",
+   "fieldtype": "Check",
+   "label": "Read Only",
+   "default": "0",
+   "in_list_view": 1,
+   "description": "Informational: this action does not mutate anything at the connector's remote end."
+  },
+  {
+   "fieldname": "destructive",
+   "fieldtype": "Check",
+   "label": "Destructive",
+   "default": "0",
+   "in_list_view": 1,
+   "description": "Informational: this action can delete or irreversibly change remote data. Surfaced to the confirmation card."
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description",
+   "description": "Short description of the action, taken from the connector's tools/list result."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-09-04 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Connector Action",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
