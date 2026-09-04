@@ -737,7 +737,7 @@
 							</svg>
 							<div class="jv-toolfail-main">
 								<div class="jv-toolfail-title">
-									{{ toolLabel(m.tool_name) }} didn't run
+									{{ toolCallLabel(m) }} didn't run
 								</div>
 								<div class="jv-toolfail-msg">
 									{{ orphanToolFailures[m.name].message }}
@@ -876,8 +876,13 @@
 															: 'err'
 													"
 												></span>
+												<ConnectorLogo
+													v-if="toolCallPreset(t)"
+													:preset="toolCallPreset(t)"
+													:size="13"
+												/>
 												<span class="jv-tool-name">{{
-													toolLabel(t.tool_name)
+													toolCallLabel(t)
 												}}</span>
 												<span class="jv-tool-status">{{
 													t.tool_status
@@ -6116,9 +6121,59 @@ function toggleTool(name) {
 function toolLabel(n) {
 	return (n || "tool").replace(/^jarvis__/, "");
 }
+// Connector tool calls (list_connector_actions, call_connector) otherwise show
+// their bare Python name, unlike every other tool's already-readable label.
+// list_connector_actions takes no arg worth surfacing, so it gets one fixed
+// phrase; call_connector's label is DERIVED from its own tool_args (the
+// connector key + action it invoked), resolved against the connectors this
+// device already loaded for the @-connector picker (connectorFocusOptions) so
+// it reads as "GitHub - search_repositories" rather than the bare key. Never
+// throws and never blanks: a parse failure, a stale/unresolved key, or a
+// missing arg all fall back to toolLabel's plain name, same as any other tool.
+function _connectorRowArgs(t) {
+	if (!t || !t.tool_args) return null;
+	try {
+		// tool_args is a JSON string once persisted, but a still-streaming row
+		// (before its first reload) can carry the already-parsed object — same
+		// dual shape prettyJson() above guards against.
+		const v = typeof t.tool_args === "string" ? JSON.parse(t.tool_args) : t.tool_args;
+		return v && typeof v === "object" ? v : null;
+	} catch (e) {
+		return null;
+	}
+}
+// {key, label, preset, ...} for a connector this device already knows about
+// (loaded once onMounted — see loadConnectorFocusOptions), or null when it
+// hasn't loaded yet or the key is unrecognised/disabled.
+function connectorOptionFor(key) {
+	if (!key) return null;
+	return connectorFocusOptions.value.find((r) => r.key === key) || null;
+}
+function toolCallLabel(t) {
+	const bare = toolLabel(t && t.tool_name);
+	if (bare === "list_connector_actions") return "Checked connected apps";
+	if (bare === "call_connector") {
+		const args = _connectorRowArgs(t);
+		const key = args && args.connector;
+		const action = args && args.action;
+		if (!key && !action) return bare;
+		const known = connectorOptionFor(key);
+		const label = (args && args.label) || (known && known.label) || key || "connector";
+		return action ? `${label} - ${action}` : label;
+	}
+	return bare;
+}
+// The connector preset (for ConnectorLogo) behind a call_connector row, or ""
+// for every other tool, or one whose connector this device can't resolve.
+function toolCallPreset(t) {
+	if (toolLabel(t && t.tool_name) !== "call_connector") return "";
+	const args = _connectorRowArgs(t);
+	const known = connectorOptionFor(args && args.connector);
+	return (known && known.preset) || "";
+}
 function activityNames(assistantName) {
 	return (activityByAssistant.value[assistantName] || [])
-		.map((t) => toolLabel(t.tool_name))
+		.map((t) => toolCallLabel(t))
 		.join(", ");
 }
 // args/result are stored as JSON strings — pretty-print, and trim very large
