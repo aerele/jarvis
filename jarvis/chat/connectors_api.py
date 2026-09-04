@@ -52,6 +52,7 @@ two flags for callers that only have the API (e.g. a stale boot cache).
 from __future__ import annotations
 
 import json
+import time
 
 import frappe
 from frappe import _
@@ -63,6 +64,12 @@ from jarvis.permissions import require_jarvis_user
 CONNECTOR = "Jarvis Connector"
 ACTION_DT = "Jarvis Connector Action"
 SETTINGS = "Jarvis Settings"
+
+# Per-user rate limit on the outbound Test-connection probe (calendar-minute
+# bucket). The probe fires a real network call to a user-chosen host, so it must
+# not be spammable; the broker's circuit breaker + concurrency cap protect the
+# WORKER, this protects against a single user hammering the button.
+_TEST_RATE_PER_MIN = 20
 
 # Vendor MCP endpoints for the four built-in presets (validated against each
 # vendor's current docs 2026-09-04 — see the P3 report). Pinned SERVER-SIDE:
@@ -117,6 +124,24 @@ def _single_bool(field: str, default: bool) -> bool:
 	if not row:
 		return default
 	return bool(cint(row[0][0]))
+
+
+def _over_test_rate_limit(user: str) -> bool:
+	"""Per-user calendar-minute bucket for the Test-connection probe. Atomic
+	``incrby`` (race-free under concurrent requests, and not fooled by frappe's
+	request-local cache), self-expiring so old buckets never accumulate. Mirrors
+	``api_errors._over_report_rate_limit``. No-op under tests."""
+	if frappe.flags.in_test:
+		return False
+	bucket = int(time.time()) // 60
+	# incrby is a raw redis-py call that bypasses RedisWrapper's site prefix, so
+	# prefix the site ourselves - otherwise a multi-site bench sharing one Redis
+	# would let two sites' same-named users share a bucket.
+	key = f"{frappe.local.site}:jarvis.connector_test.{user}.{bucket}"
+	count = frappe.cache.incrby(key, 1)
+	if count == 1:
+		frappe.cache.expire(key, 120)
+	return count > _TEST_RATE_PER_MIN
 
 
 # --------------------------------------------------------------------------- #
@@ -221,13 +246,24 @@ def _tool_flags(tool: dict) -> tuple[bool, bool]:
 
 
 def _merge_allowed_actions(existing_children, tools: list[dict]) -> list[dict]:
-	"""Build the new ``allowed_actions`` row set from a fresh ``tools/list``,
-	preserving every existing ``allowed`` choice for an action that is still
-	present (re-testing must never silently revoke an admin's earlier grant),
-	and defaulting a newly-seen action to ``allowed = read_only`` (read-only
-	pre-checked, writes off — MCP_CONNECTORS_PLAN.md UI/UX decision #3). An
-	action that vanished from the server's tool list is simply not re-added."""
-	existing_allowed = {c.get("action"): bool(c.get("allowed")) for c in existing_children if c.get("action")}
+	"""Build the new ``allowed_actions`` row set from a fresh ``tools/list``.
+
+	For an action that ALREADY has a stored child row, the stored
+	``allowed``/``read_only``/``destructive`` flags are PRESERVED as-is; they are
+	NOT recomputed from the server's ``annotations``. This closes a relabel attack:
+	a compromised server could otherwise mark a known destructive action
+	``readOnlyHint: true`` on the next re-test and have ``policy.action_decision``
+	auto-allow it (it auto-allows read-only, non-destructive actions). Re-testing
+	must never silently revoke an admin's earlier grant either, and preserving the
+	stored row does both.
+
+	A NEWLY-seen action derives its flags from the server annotations and defaults
+	to ``allowed = read_only`` (read-only pre-checked, writes off -
+	MCP_CONNECTORS_PLAN.md UI/UX decision #3); this initial trust is unavoidable
+	(the action has never been seen) and a non-read-only default still needs an
+	explicit admin grant to run. An action that vanished from the server's tool
+	list is simply not re-added."""
+	existing_by_action = {c.get("action"): c for c in existing_children if c.get("action")}
 	merged: list[dict] = []
 	seen: set[str] = set()
 	for tool in tools:
@@ -235,8 +271,15 @@ def _merge_allowed_actions(existing_children, tools: list[dict]) -> list[dict]:
 		if not action or action in seen:
 			continue
 		seen.add(action)
-		read_only, destructive = _tool_flags(tool)
-		allowed = existing_allowed.get(action, read_only)
+		prior = existing_by_action.get(action)
+		if prior is not None:
+			# Trust the STORED flags, never the server's fresh annotations.
+			read_only = bool(prior.get("read_only"))
+			destructive = bool(prior.get("destructive"))
+			allowed = bool(prior.get("allowed"))
+		else:
+			read_only, destructive = _tool_flags(tool)
+			allowed = read_only
 		merged.append(
 			{
 				"action": action,
@@ -395,38 +438,69 @@ def add_connector(
 @frappe.whitelist()
 @require_jarvis_user
 def test_connector(name: str) -> dict:
-	"""Run initialize + tools/list through ``broker.test_connector`` and, on
-	success, write ``tools_cache`` + ``last_test_status="Passed"`` and MERGE the
-	``allowed_actions`` table from the result (see ``_merge_allowed_actions``).
-	On failure, only ``last_test_status="Failed"`` moves — an existing good
-	``tools_cache``/``allowed_actions`` from a PRIOR passing test is left alone,
-	so a transient failure never wipes an already-working connector's config.
+	"""Run initialize + tools/list through ``broker.test_connector`` and, when the
+	caller has WRITE permission, persist the outcome: on success write
+	``tools_cache`` + ``last_test_status="Passed"`` and MERGE the ``allowed_actions``
+	table (see ``_merge_allowed_actions``); on failure move only
+	``last_test_status="Failed"`` (an existing good cache from a PRIOR passing test
+	is left alone, so a transient failure never wipes a working connector's config).
 
-	Gated on READ, not write: any user who can see a Shared connector (every
-	tenant user) may run a live health/discovery probe against it, but must
-	not be able to edit its base_url/credential — so the parent-field write
-	goes through ``frappe.db.set_value`` (bypasses the write-only DocType
-	permission a plain reader would fail), never ``doc.save()``. The
-	``allowed_actions`` MERGE is a server-derived rewrite (see
-	``_replace_allowed_actions``) that can only ever grant a read-only,
-	non-destructive default or preserve an admin's existing choice — it can
-	never turn ON a write/destructive action a plain user just discovered.
+	Two guards run BEFORE the outbound probe:
+	  * the site-wide kill switch (``connectors_enabled``) - an operator's incident
+	    override must stop the outbound probe too, not only ``call_connector``;
+	  * a per-user rate limit - the probe is a real network call to a user-chosen
+	    host, so it must not be spammable.
+
+	Read runs the probe, WRITE persists. Any user who can SEE a connector (a Shared
+	one is visible to every tenant user) may run the live health/discovery probe and
+	gets the tool list back for display, but a read-only caller causes NO DB write:
+	without this a plain reader could flip a Shared connector to
+	``last_test_status="Failed"`` and disable it tenant-wide (``call_connector``'s
+	readiness guard refuses a non-Passed connector). The parent-field write goes
+	through ``frappe.db.set_value`` (the write-only DocType permission a reader lacks
+	would block ``doc.save()``), and the ``allowed_actions`` MERGE is a server-derived
+	rewrite that can only grant a read-only, non-destructive default or preserve an
+	admin's existing choice - never turn ON a write/destructive action.
 	"""
+	from jarvis.tools._connector_gate import connectors_enabled
+
+	if not connectors_enabled():
+		return {
+			"ok": False,
+			"error": {
+				"code": "connectors_disabled",
+				"message": "Connectors are not enabled for this workspace.",
+			},
+		}
+
 	doc = frappe.get_doc(CONNECTOR, name)
 	if not doc.has_permission("read"):
 		frappe.throw(_("Not permitted."), frappe.PermissionError)
 
+	if _over_test_rate_limit(frappe.session.user):
+		return {
+			"ok": False,
+			"error": {
+				"code": "rate_limited",
+				"message": "Too many connection tests. Please wait a moment and try again.",
+			},
+		}
+
+	can_write = doc.has_permission("write")
 	result = broker.test_connector(doc)
 	now = now_datetime()
 
 	if not result.get("ok"):
-		frappe.db.set_value(
-			CONNECTOR,
-			doc.name,
-			{"last_test_status": "Failed", "last_test_at": now},
-			update_modified=False,
-		)
-		frappe.db.commit()
+		# Only a writer may flip the stored status; a reader's probe is display-only
+		# so it can never disable a Shared connector tenant-wide.
+		if can_write:
+			frappe.db.set_value(
+				CONNECTOR,
+				doc.name,
+				{"last_test_status": "Failed", "last_test_at": now},
+				update_modified=False,
+			)
+			frappe.db.commit()
 		return {
 			"ok": False,
 			"error": result.get("error")
@@ -435,19 +509,20 @@ def test_connector(name: str) -> dict:
 
 	tools = [t for t in (result.get("tools") or []) if isinstance(t, dict)]
 	merged = _merge_allowed_actions(doc.get("allowed_actions") or [], tools)
-	frappe.db.set_value(
-		CONNECTOR,
-		doc.name,
-		{
-			"tools_cache": frappe.as_json({"tools": tools}),
-			"tools_cached_at": now,
-			"last_test_status": "Passed",
-			"last_test_at": now,
-		},
-		update_modified=False,
-	)
-	_replace_allowed_actions(doc.name, merged)
-	frappe.db.commit()
+	if can_write:
+		frappe.db.set_value(
+			CONNECTOR,
+			doc.name,
+			{
+				"tools_cache": frappe.as_json({"tools": tools}),
+				"tools_cached_at": now,
+				"last_test_status": "Passed",
+				"last_test_at": now,
+			},
+			update_modified=False,
+		)
+		_replace_allowed_actions(doc.name, merged)
+		frappe.db.commit()
 	return {
 		"ok": True,
 		"tools": [
@@ -585,6 +660,16 @@ def update_connector(
 		if base_url != doc.base_url:
 			if doc.preset != "Custom URL":
 				frappe.throw(_("Only Custom URL connectors may change their Base URL."))
+			# Re-point is a fresh custom URL, so re-apply the same allow_custom_urls
+			# gate add_connector uses. Without this, an admin turning the toggle OFF
+			# would still leave existing Custom URL rows freely re-pointable on edit.
+			if not connector_flags()["allow_custom_urls"]:
+				frappe.throw(
+					_(
+						"Custom URL connectors are turned off. Ask an administrator to "
+						"enable them before changing this Base URL."
+					)
+				)
 			doc.base_url = base_url
 			base_url_changed = True
 
