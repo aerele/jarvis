@@ -91,8 +91,14 @@ egress_hook: Callable[[str], bool] | None = None
 
 def _egress_allowed(host: str) -> bool:
 	"""Consult the operator's egress policy for ``host`` before any outbound
-	connection. Fail-OPEN: an empty/unset policy or any read error allows the host
-	(the SSRF guard still blocks private/metadata addresses regardless).
+	connection. An empty/unset policy allows the host (allow-all is the design
+	default; the SSRF guard still blocks private/metadata addresses regardless),
+	but a READ ERROR now fails CLOSED rather than open: we cannot tell an
+	unconfigured (allow-all) field from a configured allow/deny list when the read
+	itself fails, and a configured egress policy must never be silently bypassed by
+	a transient error. A hard read error here also means the DB is unreachable, so
+	the surrounding broker call (row resolution, credential decrypt) is failing
+	anyway - denying egress is the safe outcome, not a regression.
 
 	POLICY GRAMMAR (``Jarvis Settings.connector_egress_rules``, one rule per line;
 	blank lines and ``#`` comments ignored). A rule is a host glob (``fnmatch``);
@@ -110,12 +116,15 @@ def _egress_allowed(host: str) -> bool:
 		try:
 			return bool(egress_hook(host))
 		except Exception:
+			# Fail CLOSED for consistency with the settings-read path below: an egress
+			# hook that errors must not be read as "allow".
 			frappe.logger("jarvis.connectors").warning("connector egress hook failed", exc_info=True)
-			return True
+			return False
 	try:
 		raw = frappe.db.get_single_value(SETTINGS_DOCTYPE, "connector_egress_rules")
 	except Exception:
-		return True
+		frappe.logger("jarvis.connectors").warning("connector egress rules read failed", exc_info=True)
+		return False
 	return policy.egress_match(host, raw)
 
 
@@ -330,11 +339,23 @@ def call(connector_key: str, action: str, args: dict | None = None, *, run_id: s
 # --------------------------------------------------------------------------- #
 # test path (SPA test button + tools_cache fill)
 # --------------------------------------------------------------------------- #
-def test_endpoint(base_url: str, credential: str | None) -> dict:
+class _NullBreaker:
+	"""No-op breaker for the bare :func:`test_endpoint` seam, which has no connector
+	row to key a real breaker/cap on. Satisfies the record_* contract only."""
+
+	def record_failure(self) -> None:
+		pass
+
+	def record_success(self) -> None:
+		pass
+
+
+def _test_probe(base_url: str, credential: str | None, breaker) -> dict:
 	"""Run initialize + tools/list against ``base_url`` and return
-	``{ok: True, tools: [...]}`` or ``{ok: False, error: {code, message}}``. The
-	SPA saves nothing until this passes and writes the tool list to
-	``tools_cache``."""
+	``{ok: True, tools: [...]}`` or ``{ok: False, error: {code, message}}``,
+	feeding transport-class failures to ``breaker`` exactly as :func:`_do_call`
+	does for a real call. The SPA saves nothing until this passes and writes the
+	tool list to ``tools_cache``."""
 	if not base_url:
 		return {
 			"ok": False,
@@ -350,6 +371,7 @@ def test_endpoint(base_url: str, credential: str | None) -> dict:
 		)
 	except ssrf.SsrfError as exc:
 		if exc.kind == ssrf.ERR_CONNECT_FAILED:
+			breaker.record_failure()
 			return {
 				"ok": False,
 				"error": {"code": "transport_error", "message": "The connector could not be reached."},
@@ -357,14 +379,53 @@ def test_endpoint(base_url: str, credential: str | None) -> dict:
 		code = "egress_denied" if exc.kind == ssrf.ERR_EGRESS_DENIED else "ssrf_blocked"
 		return {"ok": False, "error": {"code": code, "message": _ssrf_message(exc.kind)}}
 	except mcp_client.McpError as exc:
+		if _is_transport_failure(exc):
+			breaker.record_failure()
 		return {"ok": False, "error": {"code": _mcp_code(exc), "message": _clean(str(exc))}}
+	breaker.record_success()
 	return {"ok": True, "tools": tools}
 
 
+def test_endpoint(base_url: str, credential: str | None) -> dict:
+	"""Bare, UNGUARDED initialize + tools/list probe by URL. :func:`test_connector`
+	is the guarded entry point the SPA uses; this form has no connector row to key a
+	breaker/cap on and so runs without them (kept for callers that only have a URL)."""
+	return _test_probe(base_url, credential or None, _NullBreaker())
+
+
 def test_connector(row) -> dict:
-	"""Row wrapper around :func:`test_endpoint`. Handles the unsaved-row credential
-	read (P3 tests before the first save)."""
-	return test_endpoint(row.get("base_url"), _credential(row))
+	"""Guarded row wrapper: runs the initialize + tools/list probe through the SAME
+	per-connector circuit breaker and per-(tenant, connector) concurrency cap as a
+	real :func:`call`, so the Test button cannot bypass the worker protection or
+	hammer a flapping endpoint. Handles the unsaved-row credential read (P3 tests
+	before the first save).
+
+	The breaker/cap key is the connector row, shared with :func:`call`: 5 test-probe
+	transport failures in the window open the circuit for chat calls too, which is
+	the intent (the endpoint is unhealthy for either path)."""
+	store = _store()
+	guard_key = _guard_key(row) or (row.get("base_url") or "test")
+	breaker = CircuitBreaker(store, guard_key, threshold=CB_THRESHOLD, window_s=CB_WINDOW_S, open_s=CB_OPEN_S)
+	if not breaker.allow():
+		return {
+			"ok": False,
+			"error": {
+				"code": "circuit_open",
+				"message": "This connector is temporarily paused after repeated failures. Please try again shortly.",
+			},
+		}
+	cap = ConcurrencyCap(store, guard_key, limit=CC_LIMIT, ttl_s=CC_TTL_S)
+	try:
+		with cap.slot():
+			return _test_probe(row.get("base_url"), _credential(row), breaker)
+	except AtCapacityError:
+		return {
+			"ok": False,
+			"error": {
+				"code": "at_capacity",
+				"message": "This connector is handling too many requests right now. Please try again shortly.",
+			},
+		}
 
 
 # --------------------------------------------------------------------------- #
@@ -404,21 +465,33 @@ def _status_for(error_code: str) -> str:
 	return "Failed"
 
 
+def _redact_value(value):
+	"""Recursively redact secret-shaped keys and clip long strings anywhere in a
+	nested structure. A top-level-only scrub let a nested token (e.g.
+	``{"config": {"token": ...}}``) reach the audit table verbatim; this walks
+	dicts and lists so no secret-shaped key survives at any depth."""
+	if isinstance(value, dict):
+		out = {}
+		for key, val in value.items():
+			if _REDACT_KEY_RE.search(str(key)):
+				out[key] = "***"
+			else:
+				out[key] = _redact_value(val)
+		return out
+	if isinstance(value, (list, tuple)):
+		return [_redact_value(v) for v in value]
+	if isinstance(value, str) and len(value) > 80:
+		return value[:80] + "..."
+	return value
+
+
 def _redact_args(args) -> str:
-	"""Redact secret-shaped keys, clip long string values, then truncate the whole
-	summary. Never let a per-call token land in the audit table."""
+	"""Redact secret-shaped keys (recursively), clip long string values, then
+	truncate the whole summary. Never let a per-call token land in the audit table."""
 	try:
 		if not isinstance(args, dict):
 			return _clip(frappe.as_json(args) if args is not None else "", _ARGS_SUMMARY_MAX)
-		out = {}
-		for key, value in args.items():
-			if _REDACT_KEY_RE.search(str(key)):
-				out[key] = "***"
-			elif isinstance(value, str) and len(value) > 80:
-				out[key] = value[:80] + "..."
-			else:
-				out[key] = value
-		return _clip(frappe.as_json(out), _ARGS_SUMMARY_MAX)
+		return _clip(frappe.as_json(_redact_value(args)), _ARGS_SUMMARY_MAX)
 	except Exception:
 		return ""
 
