@@ -170,14 +170,29 @@ function setCopyPref(v) {
 	updateMySettings({ support_context_copy_pref: v }).catch(() => {});
 }
 
+// De-dupes concurrent callers into ONE request, same idea as getCopyPref's
+// loadingCopyPref above. Two callers can land in the same tick on a normal
+// page load - UserMenu's own immediate poll call and ChatView's one-shot
+// mount refresh both fire on mount, and either can also overlap a
+// SupportThreadPage close/reply refresh - so without this every one of them
+// would round-trip supportAwaitingCount() separately for the exact same
+// number.
+let refreshingAwaiting = null;
 async function refreshAwaiting() {
-	try {
-		const r = await supportAwaitingCount();
-		awaitingCount.value = (r && r.data && r.data.count) || 0;
-	} catch (e) {
-		// Best-effort: this drives an ambient badge, so a failure must never
-		// interrupt whatever the user is actually doing. Intentionally silent.
+	if (!refreshingAwaiting) {
+		refreshingAwaiting = (async () => {
+			try {
+				const r = await supportAwaitingCount();
+				awaitingCount.value = (r && r.data && r.data.count) || 0;
+			} catch (e) {
+				// Best-effort: this drives an ambient badge, so a failure must never
+				// interrupt whatever the user is actually doing. Intentionally silent.
+			} finally {
+				refreshingAwaiting = null;
+			}
+		})();
 	}
+	return refreshingAwaiting;
 }
 
 async function createTicket(subject, body) {
