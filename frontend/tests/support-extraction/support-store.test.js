@@ -95,6 +95,34 @@ describe("support store", () => {
 		expect(s.awaitingCount).toBe(0);
 	});
 
+	it("concurrent callers before a fetch resolves share ONE request, not one each", async () => {
+		// UserMenu's own immediate poll call and ChatView's one-shot mount
+		// refresh land in the same tick on a normal page load (and a
+		// SupportThreadPage close/reply refresh can overlap either) - without
+		// de-duping, each caller would fire its own round trip for the exact
+		// same number.
+		const s = useSupportStore();
+		let resolve;
+		api.supportAwaitingCount.mockReturnValue(new Promise((r) => (resolve = r)));
+		const a = s.refreshAwaiting();
+		const b = s.refreshAwaiting();
+		resolve({ data: { count: 3 } });
+		await a;
+		await b;
+		expect(s.awaitingCount).toBe(3);
+		expect(api.supportAwaitingCount).toHaveBeenCalledTimes(1);
+	});
+
+	it("a later call after the first settles starts a genuinely NEW request", async () => {
+		const s = useSupportStore();
+		api.supportAwaitingCount.mockResolvedValueOnce({ data: { count: 1 } });
+		await s.refreshAwaiting();
+		api.supportAwaitingCount.mockResolvedValueOnce({ data: { count: 2 } });
+		await s.refreshAwaiting();
+		expect(s.awaitingCount).toBe(2);
+		expect(api.supportAwaitingCount).toHaveBeenCalledTimes(2);
+	});
+
 	it("uploads every file even when one fails, and returns the succeeded FILE REFERENCES (not a count)", async () => {
 		// Fix 2: the caller (useStagedFiles's settleUpload) needs to know exactly
 		// which files landed so a retry only re-sends the failures — Helpdesk's

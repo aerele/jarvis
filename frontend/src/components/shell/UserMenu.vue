@@ -20,20 +20,6 @@
 				     (design.md §2.2). idlePeek: this is the one mark that sits resting on
 				     every route, so it's the chosen surface for the designed idle blink. -->
 				<JarvisMark :size="28" :radius="7" :peek="brandPeek" idlePeek />
-				<!-- Resting badge: a waiting reply has to register on every route, so it
-				     lives here on the avatar - the SOLE unread indicator now (the
-				     chat-header jv-support-dot was removed; that control is new-ticket
-				     only). Red + pulse to actually pull the eye: an unheard reply is a
-				     pending action ON the user, the same semantic (bg-surface-red-5) as
-				     Sidebar.vue's approvals dot. motion-safe so reduced-motion stays calm. -->
-				<div
-					v-if="supportOn && store.awaitingCount"
-					class="absolute left-7 top-1 size-2 rounded-full bg-surface-red-5 motion-safe:animate-pulse"
-					:aria-label="`${store.awaitingCount} ${
-						store.awaitingCount === 1 ? 'ticket' : 'tickets'
-					} awaiting your reply`"
-					role="status"
-				/>
 				<div
 					class="flex flex-1 flex-col overflow-hidden text-left duration-300 ease-in-out"
 					:class="isCollapsed ? 'ml-0 w-0 opacity-0' : 'ml-2 w-auto opacity-100'"
@@ -87,8 +73,12 @@ const session = inject("$session");
 const { effectiveDark, toggleTheme } = useJarvisTheme();
 
 // Support panel: `store` is the shared support-store singleton, kept fresh here
-// by this poll timer so the avatar's resting badge and the ticket list always
-// read the same awaiting-count value without each needing to run its own poller.
+// by this poll timer so the chat header's count pill (ChatView.vue's
+// jv-support-btn), this menu's "Support tickets · N" row, and the ticket
+// list always read the same awaiting-count value without each needing to
+// run its own poller. The avatar used to carry its own resting dot fed by
+// this same poll - removed once the header pill became the primary signal,
+// so a waiting reply now shows in exactly one place instead of two.
 const router = useRouter();
 const supportOn = window.support_available && window.has_support_access;
 const store = useSupportStore();
@@ -155,8 +145,9 @@ const menuOptions = computed(() => [
 				? []
 				: [
 						{
-							// Count flag mirrors the avatar's resting dot, so opening the
-							// menu confirms where the waiting reply is.
+							// Count flag mirrors the chat header's pill (ChatView.vue's
+							// jv-support-btn), so opening this menu confirms where the
+							// waiting reply is.
 							label: store.awaitingCount
 								? `Support tickets · ${store.awaitingCount}`
 								: "Support tickets",
