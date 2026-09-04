@@ -186,6 +186,20 @@ def resolved_model_identity(row: dict | None) -> tuple[str, str]:
 	return (row.get("model") or "").strip(), (row.get("modelProvider") or "").strip()
 
 
+def _context_capacity_and_pct(row: dict | None, used_tokens: int) -> tuple[int, float]:
+	"""``(context_capacity, context_pct)`` from a ``sessions.list`` row.
+
+	``contextTokens`` is the model's context-WINDOW CAPACITY (verified live,
+	2026-09-04: 200000), distinct from ``totalTokens`` (context tokens actually
+	USED, already read as ``context_tokens`` by every caller here). ``pct`` is
+	``100 * used_tokens / capacity`` rounded to 1 decimal, or ``0`` when the row
+	never reported a capacity (``contextTokens`` missing/zero)."""
+	capacity = int((row or {}).get("contextTokens") or 0)
+	if capacity <= 0:
+		return 0, 0.0
+	return capacity, round(100 * used_tokens / capacity, 1)
+
+
 def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = None) -> str:
 	"""Record one completed turn's token delta from a ``sessions.list`` row.
 
@@ -249,6 +263,7 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 			_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
 			return USAGE_VALID_ZERO
 		context_tokens = int(row.get("totalTokens") or 0)
+		context_capacity, context_pct = _context_capacity_and_pct(row, context_tokens)
 
 		if not user:
 			# CDX-6: a FRESH POSITIVE token delta with no `Jarvis Chat Session` user
@@ -269,6 +284,8 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 			"out": output_tokens,
 			"delta": delta,
 			"ctx": context_tokens,
+			"ctx_cap": context_capacity,
+			"ctx_pct": context_pct,
 			"month": month,
 			"now": now,
 			"user": user,
@@ -303,6 +320,8 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 				output_tokens = output_tokens + %(out)s,
 				run_count = run_count + 1,
 				last_total_tokens = %(ctx)s,
+				context_capacity = %(ctx_cap)s,
+				context_pct = %(ctx_pct)s,
 				last_usage_at = %(now)s
 			WHERE session_key = %(session_key)s
 			""",
@@ -742,6 +761,7 @@ def refresh_session_snapshots(rows: list[dict]) -> dict:
 			if not user:
 				continue
 			context_tokens = int(row.get("totalTokens") or 0)
+			context_capacity, context_pct = _context_capacity_and_pct(row, context_tokens)
 			updated_ms = row.get("updatedAt")
 			if updated_ms:
 				# Naive system-tz datetime, matching how Frappe stores Datetime.
@@ -749,19 +769,32 @@ def refresh_session_snapshots(rows: list[dict]) -> dict:
 				frappe.db.sql(
 					"""
 					UPDATE `tabJarvis Chat Session`
-					SET last_total_tokens = %(ctx)s, last_usage_at = %(at)s
+					SET last_total_tokens = %(ctx)s, context_capacity = %(ctx_cap)s,
+						context_pct = %(ctx_pct)s, last_usage_at = %(at)s
 					WHERE session_key = %(session_key)s
 					""",
-					{"ctx": context_tokens, "at": last_at, "session_key": session_key},
+					{
+						"ctx": context_tokens,
+						"ctx_cap": context_capacity,
+						"ctx_pct": context_pct,
+						"at": last_at,
+						"session_key": session_key,
+					},
 				)
 			else:
 				frappe.db.sql(
 					"""
 					UPDATE `tabJarvis Chat Session`
-					SET last_total_tokens = %(ctx)s
+					SET last_total_tokens = %(ctx)s, context_capacity = %(ctx_cap)s,
+						context_pct = %(ctx_pct)s
 					WHERE session_key = %(session_key)s
 					""",
-					{"ctx": context_tokens, "session_key": session_key},
+					{
+						"ctx": context_tokens,
+						"ctx_cap": context_capacity,
+						"ctx_pct": context_pct,
+						"session_key": session_key,
+					},
 				)
 			touched_users.add(user)
 			bucket = summary.setdefault(user, {"sessions": 0, "last_total_tokens": 0})
