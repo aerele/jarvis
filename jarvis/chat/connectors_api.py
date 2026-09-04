@@ -90,16 +90,21 @@ def connector_flags() -> dict:
 	— called directly by ``list_connectors`` below and by ``www/jarvis.py`` for
 	the boot payload (design section 2's kill switch + custom-URL policy).
 
-	``connectors_enabled`` defaults to 0, so a plain ``get_single_value`` read
-	is safe (an unset row already reads back as the intended-safe "off").
+	``enabled`` reuses ``_connector_gate.connectors_enabled()`` — the SAME source
+	of truth the chat tools gate on — so the ``jarvis_connectors_enabled``
+	site_config override (an operator's fleet-wide kill switch) is honored here
+	too; otherwise the SPA boot payload could say "on" while chat returns
+	``connectors_disabled``.
 	``allow_custom_urls`` defaults to 1 but — per its own field description —
 	Single defaults are NOT backfilled onto an existing site's ``tabSingles``
 	row on migrate, and ``get_single_value`` coerces a genuinely missing row to
 	0/off via ``cint`` — indistinguishable from an admin explicitly turning it
 	off. So it needs the same tabSingles row-existence probe
 	``personalise_api._single_bool`` uses, treating "no row at all" as ON."""
+	from jarvis.tools._connector_gate import connectors_enabled
+
 	return {
-		"enabled": bool(frappe.db.get_single_value(SETTINGS, "connectors_enabled")),
+		"enabled": connectors_enabled(),
 		"allow_custom_urls": _single_bool("allow_custom_urls", True),
 	}
 
