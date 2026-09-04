@@ -81,13 +81,10 @@ _BLOCK_SENTENCE = {
 # #468: a refusal that CLEARS ON ITS OWN within minutes leaves the slot due, so the
 # next hourly tick retries it (the sibling's O4 shape). Everything else is an
 # entitlement decision that cannot clear inside the hour — consume the slot, or the
-# cadence relogs the same dead end 24 times a day. ``insufficient_workers`` belongs
-# here too: it is a confidently-zero-workers snapshot that self-heals within the
-# worker lane's 20s debounce, not an entitlement decision.
+# cadence relogs the same dead end 24 times a day.
 _TRANSIENT_BLOCKS = {
 	"release_update_required",
 	"workspace_resetting",
-	"insufficient_workers",
 	BLOCK_DISPATCH_FAILED,
 }
 

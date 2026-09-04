@@ -2471,23 +2471,10 @@
 						<button class="jv-btn jv-btn--sm" @click="goRenew">Renew</button>
 					</template>
 				</Banner>
-				<!-- No live background worker to run a turn. AFTER suspendedNotice (billing
-					 takes precedence) - ORDER MATTERS, pinned by readiness.spec.js. The
-					 composer stays enabled (see canSend): a send re-raises this if the lane
-					 is still dead, or clears it if the worker came back (self-heal). -->
-				<Banner
-					v-else-if="workersNotice"
-					type="warning"
-					title="Chat is paused"
-					:message="workersNotice"
-					style="margin-bottom: 10px"
-				/>
-				<!-- Soft counterpart to workersNotice above: worker_warning (degraded /
-					 under-provisioned workers) rather than the hard zero-workers block.
-					 AFTER workersNotice - ORDER MATTERS, pinned by readiness.spec.js: the
-					 block wins the v-else-if race whenever both are true (worker_blocked
-					 implies degraded), so this only ever shows on its own. Non-blocking -
-					 the composer stays enabled (see canSend), this is a heads-up only. -->
+				<!-- Soft worker warning: worker_warning (degraded / under-provisioned
+					 workers). AFTER suspendedNotice (billing takes precedence) - ORDER
+					 MATTERS, pinned by readiness.spec.js. Non-blocking - the composer stays
+					 enabled (see canSend), this is a heads-up only. -->
 				<Banner
 					v-else-if="workersWarnNotice"
 					type="warning"
@@ -4439,22 +4426,11 @@ watch(
 // Renew-banner copy when the subscription has lapsed; null while entitled.
 // The composer is disabled alongside it (no send can succeed while stopped).
 const suspendedNotice = ref(null);
-// Chat is blocked because the site has no live background worker to run a turn.
-// Persistent (not a toast), but UNLIKE suspendedNotice the composer stays enabled:
-// checkReady() is memoized and never re-polls, so a disabled composer could never
-// recover without a full reload. Instead this self-heals - a still-dead lane
-// re-raises it on the next rejected send, a recovered lane clears it on the next
-// successful one (see send()). Null while healthy.
-const workersNotice = ref(null);
-const WORKERS_BLOCKED_MSG =
-	"Chat is paused: no background workers are running to handle messages. Please try again shortly.";
-// Soft, non-blocking counterpart to workersNotice above: worker_warning fires
-// when workers are merely under-provisioned/degraded, distinct from the hard
-// worker_blocked zero-workers state. The composer stays enabled - canSend
-// must never gate on this (see the "never gates canSend" test) - this is a
-// heads-up only, not a stop sign. Self-heals the same way workersNotice does:
-// cleared on the next successful retry/send, never re-derived from a re-poll
-// (checkReady() is memoized).
+// Soft, non-blocking worker warning: worker_warning fires when workers are
+// under-provisioned/degraded. The composer stays enabled - canSend must never
+// gate on this (see the "never gates canSend" test) - this is a heads-up only,
+// not a stop sign. Self-heals: cleared on the next successful retry/send, never
+// re-derived from a re-poll (checkReady() is memoized). Null while healthy.
 const workersWarnNotice = ref(null);
 const WORKERS_WARN_MSG = `${agentName} is low on background workers, so answers may take longer. Add more workers to your bench to speed this up.`;
 // A DIFFERENT not-ready reason (container_provisioning - e.g. the connected LLM
@@ -8668,18 +8644,13 @@ async function retry(messageId) {
 			// not a toast that vanishes before they can renew.
 			if (r.reason === "subscription_suspended") {
 				if (!suspendedNotice.value) suspendedNotice.value = SUSPENDED_FALLBACK;
-			} else if (r.reason === "insufficient_workers") {
-				// No live worker to run the retried turn - same persistent, self-healing
-				// banner a blocked send raises (see send()).
-				if (!workersNotice.value) workersNotice.value = WORKERS_BLOCKED_MSG;
 			} else {
 				// e.g. the single-flight guard ("a reply is already in progress").
 				notify(r.reason || "Couldn't retry that.", { type: "error" });
 			}
 		}
 		if (r && r.ok !== false) {
-			workersNotice.value = null; // a retry got through: workers are back
-			workersWarnNotice.value = null; // same self-heal for the soft warning
+			workersWarnNotice.value = null; // a retry got through: workers are back
 		}
 	} catch (e) {
 		sending.value = false;
@@ -8931,13 +8902,6 @@ async function send(textArg, resendAck) {
 				});
 				return;
 			}
-			// No live worker to run this turn: raise the persistent, self-healing
-			// banner (composer stays enabled - see canSend/workersNotice) rather than
-			// a toast that vanishes before the lane recovers.
-			if (r.reason === "insufficient_workers") {
-				if (!workersNotice.value) workersNotice.value = WORKERS_BLOCKED_MSG;
-				return;
-			}
 			notify(
 				// Period-neutral copy: "usage_limit" fires from BOTH the all-time
 				// aggregate cap (jarvis.chat.policy._over_total_limit) and the
@@ -8951,8 +8915,7 @@ async function send(textArg, resendAck) {
 			return;
 		}
 		if (r && r.ok !== false) {
-			workersNotice.value = null; // a send got through: workers are back
-			workersWarnNotice.value = null; // same self-heal for the soft warning
+			workersWarnNotice.value = null; // a send got through: workers are back
 		}
 		// Send accepted — the one-shot grounding/prefill context is now consumed.
 		// Cleared HERE, not before the await: a rejected send (r.ok === false, above)
@@ -10773,14 +10736,9 @@ onMounted(async () => {
 			// reason gets its own honest, CTA-less banner below.
 			suspendedNotice.value =
 				r && r.reason === "subscription_suspended" ? suspensionNotice(r) : null;
-			// Seed the workers banner from the same boot verdict. checkReady() is
-			// memoized and never re-polls, so this is a ONE-TIME seed only - the
-			// banner then self-heals through send()'s rejection/success branches,
-			// never through a re-check here.
-			workersNotice.value = r && r.worker_blocked ? WORKERS_BLOCKED_MSG : null;
-			// Same one-time seed for the soft counterpart: worker_warning is a
-			// distinct, non-blocking degraded-workers signal (see workersWarnNotice
-			// above). It also self-heals through send()/retry() only, never here.
+			// Seed the soft workers banner from the same boot verdict. checkReady() is
+			// memoized and never re-polls, so this is a ONE-TIME seed only - the banner
+			// then self-heals through send()/retry() success, never through a re-check.
 			workersWarnNotice.value = r && r.worker_warning ? WORKERS_WARN_MSG : null;
 		})
 		.catch(() => {});

@@ -2138,14 +2138,16 @@ class TestConservativeAdmission(_PumpTestCase):
 
 
 class TestWorkerStatus(FrappeTestCase):  # reuse module base
-	def setUp(self):
-		pump._clear_zero_marker()
-
-	def tearDown(self):
-		pump._clear_zero_marker()
-
 	def test_probe_returns_none_on_error(self):
 		with patch("frappe.utils.background_jobs.get_workers", side_effect=RuntimeError):
+			self.assertIsNone(pump._probe_worker_count("long"))
+
+	def test_probe_returns_none_when_a_worker_lost_its_queues(self):
+		# An RQ worker hash that expired and was recreated by a heartbeat carries no
+		# `queues`. That is "unknown", never "not listening on this queue".
+		bare = MagicMock()
+		bare.queue_names.return_value = []
+		with patch("frappe.utils.background_jobs.get_workers", return_value=[bare]):
 			self.assertIsNone(pump._probe_worker_count("long"))
 
 	def test_total_live_workers_counts_all_queues(self):
@@ -2157,119 +2159,83 @@ class TestWorkerStatus(FrappeTestCase):  # reuse module base
 		with patch("frappe.utils.background_jobs.get_workers", side_effect=RuntimeError):
 			self.assertIsNone(pump._total_live_workers())
 
-	def test_healthy_is_not_blocked_not_degraded(self):
+	def test_total_live_workers_falls_back_to_heartbeats_when_the_registry_is_empty(self):
+		# A queue-Redis restart empties `rq:workers` while the workers keep running
+		# and heartbeating; their hashes are still there to count.
 		with (
-			patch.object(pump, "_probe_worker_count", return_value=4),
-			patch.object(pump, "_total_live_workers", return_value=4),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=2),
 		):
-			s = pump.chat_worker_status()
-			self.assertFalse(s["blocked"])
-			self.assertFalse(s["degraded"])
+			self.assertEqual(pump._total_live_workers(), 2)
 
-	def test_one_total_worker_degraded_not_blocked(self):
-		# 1 TOTAL live worker (any queue) -> degraded, even though the turn queue
-		# itself still shows a live worker (not blocked).
+	def test_fresh_heartbeat_count_reads_recent_worker_hashes(self):
+		from datetime import datetime, timedelta, timezone
+
+		now = datetime.now(timezone.utc)
+		recent = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+		old = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+		conn = MagicMock()
+		conn.scan_iter.return_value = [b"rq:worker:a", b"rq:worker:b", b"rq:worker:c"]
+		conn.hget.side_effect = [recent.encode(), old.encode(), None]
+		with patch("frappe.utils.background_jobs.get_redis_conn", return_value=conn):
+			self.assertEqual(pump._fresh_heartbeat_count(), 1)
+
+	def test_fresh_heartbeat_count_none_on_error(self):
+		with patch("frappe.utils.background_jobs.get_redis_conn", side_effect=RuntimeError):
+			self.assertIsNone(pump._fresh_heartbeat_count())
+
+	def test_registry_is_stale_when_bare_but_a_worker_still_heartbeats(self):
+		bare = MagicMock()
+		bare.queue_names.return_value = []
 		with (
-			patch.object(pump, "_probe_worker_count", return_value=1),
-			patch.object(pump, "_total_live_workers", return_value=1),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
+			patch("frappe.utils.background_jobs.get_workers", return_value=[bare]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=1),
 		):
+			self.assertTrue(pump._registry_is_stale())
+
+	def test_registry_is_stale_when_empty_but_a_worker_still_heartbeats(self):
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=1),
+		):
+			self.assertTrue(pump._registry_is_stale())
+
+	def test_registry_is_not_stale_without_heartbeats(self):
+		# Nobody heartbeats: the workers really are gone, the registry is right.
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=0),
+		):
+			self.assertFalse(pump._registry_is_stale())
+
+	def test_registry_is_not_stale_when_workers_carry_queues(self):
+		w = MagicMock()
+		w.queue_names.return_value = ["bench:long"]
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[w]),
+			patch.object(pump, "_fresh_heartbeat_count", side_effect=AssertionError("no scan needed")),
+		):
+			self.assertFalse(pump._registry_is_stale())
+
+	def test_healthy_is_not_degraded(self):
+		with patch.object(pump, "_total_live_workers", return_value=4):
 			s = pump.chat_worker_status()
-			self.assertFalse(s["blocked"])
-			self.assertTrue(s["degraded"])
+			self.assertFalse(s["degraded"])
+			self.assertNotIn("blocked", s)
+
+	def test_one_total_worker_is_degraded(self):
+		with patch.object(pump, "_total_live_workers", return_value=1):
+			self.assertTrue(pump.chat_worker_status()["degraded"])
 
 	def test_two_total_workers_not_degraded(self):
 		# The discriminating case: exactly 2 total workers must NOT warn (this is
 		# the F1 "1 long + 1 to run rerouted control jobs" shape that no longer
 		# strands, per `_control_queue`). Fails if the threshold were `<= 2`.
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=2),
-			patch.object(pump, "_total_live_workers", return_value=2),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			s = pump.chat_worker_status()
-			self.assertFalse(s["blocked"])
-			self.assertFalse(s["degraded"])
+		with patch.object(pump, "_total_live_workers", return_value=2):
+			self.assertFalse(pump.chat_worker_status()["degraded"])
 
 	def test_total_worker_probe_error_not_degraded(self):
 		# Fail-safe: a probe error (_total_live_workers -> None) must never be
 		# read as a real shortage.
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=4),
-			patch.object(pump, "_total_live_workers", return_value=None),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			s = pump.chat_worker_status()
-			self.assertFalse(s["blocked"])
-			self.assertFalse(s["degraded"])
-
-	def test_probe_error_never_blocks(self):
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=None),
-			patch.object(pump, "_total_live_workers", return_value=4),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			self.assertFalse(pump.chat_worker_status()["blocked"])
-
-	def test_zero_workers_blocks_only_after_grace_and_is_degraded(self):
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=0),
-			patch.object(pump, "_total_live_workers", return_value=0),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			# first observation: marker set, NOT yet blocked (debounce); 0 total
-			# workers is already degraded regardless of the blocked debounce.
-			s = pump.chat_worker_status()
-			self.assertFalse(s["blocked"])
-			self.assertTrue(s["degraded"])
-			# simulate the marker aging past the grace window
-			pump._force_zero_marker_age(pump._ZERO_GRACE_S + 5)
-			s = pump.chat_worker_status()
-			self.assertTrue(s["blocked"])
-			self.assertTrue(s["degraded"])  # a blocked state is always at least degraded
-
-	def test_recovery_clears_marker(self):
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=0),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			pump.chat_worker_status()  # sets marker
-		# Age the ORIGINAL marker past grace before the recovery step. If the
-		# recovery reading below fails to clear it, this aged, still-live marker
-		# would make the later fresh 0-reading block IMMEDIATELY (no debounce),
-		# so the final assertion below only holds if recovery actually cleared it.
-		pump._force_zero_marker_age(pump._ZERO_GRACE_S + 5)
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=3),
-			patch.object(pump, "_total_live_workers", return_value=3),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			self.assertFalse(pump.chat_worker_status()["blocked"])
-			# marker cleared: a later single 0 must re-arm the grace, not block instantly
-			with (
-				patch.object(pump, "_probe_worker_count", return_value=0),
-				patch.object(pump, "_total_live_workers", return_value=0),
-			):
-				self.assertFalse(pump.chat_worker_status()["blocked"])
-
-	def test_zero_still_present_refreshes_ttl(self):
-		"""When the marker is PRESENT and the reading is still zero, `_zero_persisted`
-		must RE-WRITE it (same `since`, fresh TTL) rather than leaving it untouched.
-		Without the refresh, a lane dead longer than the 300s TTL loses the marker in
-		Redis; the next zero reading re-seeds it from scratch and returns False, briefly
-		flipping the fail-closed chat block OFF for a fresh 20s grace window on a lane
-		that has been dead the whole time. This test fails if the refresh line is
-		removed (set_value would then never be called for a still-present marker)."""
-		fixed_since = "2020-01-01 00:00:00.000000"
-		mock_cache = MagicMock()
-		mock_cache.get_value.return_value = fixed_since
-		with patch.object(pump.frappe, "cache", return_value=mock_cache):
-			result = pump._zero_persisted(pump._ZERO_GRACE_S)
-		# `since` is ancient, so with grace elapsed this must report persisted.
-		self.assertTrue(result)
-		# The marker must be RE-WRITTEN with the SAME `since` and a fresh TTL -
-		# never left untouched while zero readings keep coming in.
-		mock_cache.set_value.assert_called_once_with(
-			pump._zero_marker_cache_key(), fixed_since, expires_in_sec=300
-		)
+		with patch.object(pump, "_total_live_workers", return_value=None):
+			self.assertFalse(pump.chat_worker_status()["degraded"])

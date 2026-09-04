@@ -5,7 +5,7 @@ chat history on a dev site.
 """
 
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -165,6 +165,50 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 		frappe.db.sql("UPDATE `tabJarvis Chat Message` SET creation=%s WHERE name=%s", (old, doc.name))
 		frappe.db.commit()
 		return doc.name
+
+	def _queued_job(self):
+		job = MagicMock()
+		job.origin = "bench:long"
+		job.kwargs = {}
+		return job
+
+	def test_a_stale_registry_leaves_a_queued_orphan_alone(self):
+		# Workers alive but invisible in the RQ registry (bare or empty after a
+		# heartbeat gap or a queue-Redis restart): the queued job is draining toward
+		# them, so the sweep must not cancel and re-dispatch it.
+		from jarvis.chat import pump, stale_scan
+
+		uid = self._mk_orphan()
+		job = self._queued_job()
+		with (
+			patch("frappe.utils.background_jobs.get_job_status", return_value="queued"),
+			patch("frappe.utils.background_jobs.get_job", return_value=job),
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=2),
+		):
+			stale_scan._sweep_orphan_turns(now_datetime())
+		job.cancel.assert_not_called()
+		self.assertEqual(int(frappe.db.get_value(MSG, uid, "was_recovered") or 0), 0, "no heal")
+		self.assertEqual(frappe.db.count(self.TURN, {"conversation": self.conv}), 0, "no replacement Turn")
+
+	def test_a_truly_empty_registry_still_heals_a_queued_orphan(self):
+		# Nobody heartbeats: the queue really is dead, the existing heal path stands.
+		from jarvis.chat import api, pump, stale_scan
+
+		uid = self._mk_orphan()
+		job = self._queued_job()
+		with (
+			patch("frappe.utils.background_jobs.get_job_status", return_value="queued"),
+			patch("frappe.utils.background_jobs.get_job", return_value=job),
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=0),
+			patch.object(api, "_dispatch_turn", side_effect=lambda *a, **k: None),
+		):
+			stale_scan._sweep_orphan_turns(now_datetime())
+		job.cancel.assert_called_once()
+		self.assertEqual(
+			int(frappe.db.get_value(MSG, uid, "was_recovered") or 0), 1, "heal consumed the strike"
+		)
 
 	def test_overload_does_not_consume_healing_strike(self):
 		from jarvis.chat import admission, api, stale_scan
