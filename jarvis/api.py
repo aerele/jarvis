@@ -834,10 +834,13 @@ _WRITE_TOOLS = frozenset(
 		"finish_app_learning_run",
 		"save_agent_dashboard",
 		# call_connector fires a real outbound call to an external service under
-		# the caller's connector credential - audited like every other write here,
-		# and (below) gated like run_method: it is never previewable, so it falls
-		# through to _pending_preview's described-intent default with no carve-out
-		# needed (run_method needs one only because it IS in _PREVIEWABLE).
+		# the caller's connector credential - AUDITED like every other write here
+		# (this set is what drives is_write -> the audit + savepoint), and never
+		# previewable, so a parked call falls through to _pending_preview's
+		# described-intent default. It stays in _GATED_WRITES too, but its confirm
+		# gate is ACTION-AWARE (see _connector_call_is_safe_read): a user-allowed
+		# read-only, non-destructive action skips the card and runs as an ordinary
+		# read - still audited through THIS set. Writes/destructive/unknown park.
 		"call_connector",
 	}
 )
@@ -913,11 +916,15 @@ _AUTO_APPLYABLE = frozenset({"create_doc", "update_doc"})
 # the F16 over-size cap still bounces them. A gated tool NOT in COVERED (e.g.
 # a bulk light write) parks in an armed run like any other excluded write.
 # call_connector joins the never-skip set (not merely omitted from covered,
-# per the invariant below): its per-action reversibility is opaque to the
-# bench - a connector action can be anything the third-party service defines,
-# unlike the well-understood ERPNext writes covered above - so an armed macro
-# must still stop at it rather than fire it uncarded (this is v1, flag-off by
-# default; widen deliberately later if the soak justifies it).
+# per the invariant below): a connector WRITE's per-action reversibility is
+# opaque to the bench - a connector action can be anything the third-party
+# service defines, unlike the well-understood ERPNext writes covered above - so
+# an armed macro must still stop at a connector WRITE rather than fire it uncarded.
+# A connector SAFE READ (user-allowed, read-only, non-destructive) is the one
+# exception, and it is NOT handled here: the action-aware carve-out in _run_tool
+# (_connector_call_is_safe_read) runs a safe read BEFORE this gate block, so a
+# read never force-stops an armed run. This set therefore governs only connector
+# WRITES, which stay never-skip.
 _ARMED_SKIP_COVERED = frozenset(
 	{
 		"create_doc",
@@ -947,9 +954,14 @@ _ARMED_SKIP_NEVER = frozenset({"cancel_doc", "delete_doc", "amend_doc", "call_co
 # The irreversible trio (delete/cancel/amend) + create_custom_skill + call_connector
 # make up _SKILL_AUTORUN_NEVER and always park (a park mid-run is a legit PAUSE that
 # resumes on confirm) - call_connector for the same opaque-reversibility reason as
-# _ARMED_SKIP_NEVER above. The partition invariant (test_covered_and_never_partition_
-# gated_writes) asserts COVERED and NEVER are disjoint and together == _GATED_WRITES,
-# so a gated tool filed in neither turns that test RED until a human classifies it.
+# _ARMED_SKIP_NEVER above, i.e. a connector WRITE never auto-runs. As there, a
+# connector SAFE READ (user-allowed, read-only, non-destructive) is the exception
+# and is NOT decided here: _run_tool's action-aware carve-out
+# (_connector_call_is_safe_read) runs a safe read BEFORE this gate block, so a read
+# never pauses an approved skill run; this set governs only connector WRITES. The
+# partition invariant (test_covered_and_never_partition_gated_writes) asserts COVERED
+# and NEVER are disjoint and together == _GATED_WRITES, so a gated tool filed in
+# neither turns that test RED until a human classifies it.
 _SKILL_AUTORUN_COVERED = frozenset(
 	{
 		"create_doc",
@@ -1657,6 +1669,84 @@ def _run_covered_write(
 	return result
 
 
+def _connector_call_is_safe_read(args) -> bool:
+	"""Action-aware carve-out for ``call_connector``'s confirm-first gate: return
+	True ONLY for a connector action the CURRENT user has explicitly ALLOWED and
+	that is marked read-only and non-destructive - such a call skips the
+	confirmation card and runs like an ordinary read. Everything else returns
+	False and PARKS exactly as before. FAIL SAFE: any uncertainty -> False.
+
+	SAFE_READ (all four required, read off the resolved ``Jarvis Connector Action``
+	child row): the child row for ``action`` EXISTS, ``allowed`` == 1,
+	``read_only`` == 1, and ``destructive`` == 0. This is intentionally STRICTER
+	than ``policy.action_decision``'s allow rule (which also auto-allows an
+	unmarked read-only action): skipping the human card requires the user to have
+	positively enabled the action in the picker, not merely that the broker would
+	permit it.
+
+	SECURITY (owner-approved tradeoff). SAFE_READ trusts the STORED
+	``read_only``/``destructive`` flags. Those are NOT client-settable: the SPA's
+	test path (``jarvis.chat.connectors_api``) stamps them server-side from the
+	remote server's ``readOnlyHint``/``destructiveHint`` MCP annotations captured
+	at Test time, PRESERVES the stored values on every re-test (a relabel by a
+	compromised server cannot flip a known write to read-only), and lets the
+	client set only the ``allowed`` bit - which the user reviews in the
+	allowed-actions picker (a newly-seen read-only action is pre-checked there and
+	the user can uncheck it; writes default off). Hard invariants preserved:
+	  * a ``destructive`` action ALWAYS confirms (destructive != 0 -> False);
+	  * an action the user did NOT allow ALWAYS confirms (allowed != 1 -> False)
+	    AND is still denied at execution by ``broker``/``policy.action_decision``
+	    - skipping the card is defense-in-depth, never a bypass of the broker's own
+	    allow gate;
+	  * the site kill-switch + not-ready guards in ``call_connector.py`` are
+	    unchanged and still run at execution.
+
+	Runs at the gate point inside ``_run_tool``, which is itself inside
+	``impersonate(end_user)`` (see ``_dispatch_from_session``), so
+	``frappe.session.user`` IS that user and ``broker.resolve_for_status`` below
+	resolves the SAME row the call will use (Personal wins over Shared)."""
+	try:
+		if not isinstance(args, dict):
+			return False
+		# preview=True on a gated write is a category error the park block below
+		# answers with a legible "preview is not needed" error; keep that behaviour
+		# by declining the carve-out so the call falls into the block, not silently
+		# running with the flag stripped.
+		if _as_bool(args.get("preview")):
+			return False
+		connector = args.get("connector")
+		action = args.get("action")
+		if not connector or not action or not isinstance(connector, str) or not isinstance(action, str):
+			return False
+		from jarvis.connectors import broker
+
+		# resolve_for_status never raises: it returns the resolved row (Personal
+		# wins over Shared) or None for an unknown/invisible key. It does NOT check
+		# ``enabled``, so we do (a disabled connector must still confirm/deny).
+		row = broker.resolve_for_status(connector)
+		if row is None or not row.get("enabled"):
+			return False
+		for child in row.get("allowed_actions") or []:
+			if child.get("action") != action:
+				continue
+			return (
+				bool(child.get("allowed")) and bool(child.get("read_only")) and not child.get("destructive")
+			)
+		# No child row for this action -> unknown -> confirm (and the broker denies it).
+		return False
+	except Exception:
+		# Any error resolving the row / reading the flags fails SAFE: park the call.
+		# The log itself is best-effort - a logging failure must never turn the
+		# fail-safe into a raise (that would escape the gate entirely).
+		try:
+			frappe.logger("jarvis.connectors").warning(
+				"call_connector safe-read gate lookup failed", exc_info=True
+			)
+		except Exception:
+			pass
+		return False
+
+
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
 	"""Parse args + dispatch + wrap in the bench's standard envelope.
 
@@ -1740,7 +1830,24 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# batch the human should confirm, and the plugin/persona promise exactly one
 	# card for it. Non-_PREVIEWABLE bulk writes get a described-intent card via
 	# _pending_preview (no sandbox); single calls to these tools are unchanged.
-	if tool in _GATED_WRITES or (is_write and _is_bulk_call(args)):
+	#
+	# ACTION-AWARE call_connector carve-out (owner-approved UX): a connector action
+	# the user has explicitly allowed AND that is marked read-only + non-destructive
+	# does NOT park - it falls through to the normal dispatch at the bottom of
+	# _run_tool and runs like any ordinary read (still AUDITED: call_connector is a
+	# _WRITE_TOOL, so _dispatch_and_wrap audits it via _record_tool_audit with the
+	# _ENVELOPE_TOOLS unwrap, and telemetry records it). This sits ABOVE the whole
+	# gate block, so a safe read ALSO bypasses the armed-macro (_ARMED_SKIP_NEVER)
+	# force-stop and the skill-autorun (_SKILL_AUTORUN_NEVER) pause - a read should
+	# never halt an automation. A write/destructive/not-allowed/unknown/unresolved
+	# connector action is NOT a safe read, so it stays in call_connector's static
+	# never-skip/never-autorun classification and parks exactly as before. The
+	# ``tool == "call_connector"`` guard short-circuits so no other tool pays the
+	# row lookup. call_connector stays in _GATED_WRITES / _ARMED_SKIP_NEVER /
+	# _SKILL_AUTORUN_NEVER unchanged (writes still park; the partition invariants
+	# hold); only a proven safe read is exempted here.
+	_connector_safe_read = tool == "call_connector" and _connector_call_is_safe_read(args)
+	if (tool in _GATED_WRITES or (is_write and _is_bulk_call(args))) and not _connector_safe_read:
 		from jarvis.chat import events, pending_confirm
 		from jarvis.tools._bulk import _MAX_BATCH
 

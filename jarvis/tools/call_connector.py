@@ -2,11 +2,15 @@
 Atlassian, Linear, Stripe, or a custom gateway) on the calling user's behalf.
 
 Consequential by default: it can create, change or delete data in the external
-service, so ``jarvis.api`` treats it exactly like ``run_method`` - one of
-``_GATED_WRITES`` (ALWAYS parks for a human confirmation, never auto-applies)
-and never sandbox-previewed (the outbound call is real and cannot be rolled
+service, so ``jarvis.api`` keeps it in ``_WRITE_TOOLS`` (audited) and
+``_GATED_WRITES`` (a write parks for a human confirmation, never auto-applies)
+and never sandbox-previews it (the outbound call is real and cannot be rolled
 back like a DB write, so a parked card gets a described-intent summary, not a
-dry run - see ``run_method``'s own docstring for the same reasoning).
+dry run - see ``run_method``'s own docstring for the same reasoning). The confirm
+gate is ACTION-AWARE, though (``jarvis.api._connector_call_is_safe_read``): a
+connector action the user has explicitly enabled that is marked read-only and
+non-destructive runs WITHOUT a card, like an ordinary read - still audited.
+Writes, destructive, not-yet-enabled and unknown actions still park.
 
 Runs under the calling user's identity: by the time this fires,
 ``jarvis.api._dispatch_from_session`` has already impersonated the real end
@@ -50,10 +54,13 @@ def call_connector(connector: str, action: str, args: dict | None = None) -> dic
 	"""Call ``action`` on the connector named ``connector`` (its key, e.g.
 	``"github"``) with keyword ``args``.
 
-	ALWAYS CONFIRM before calling this: it can create, modify or delete data
-	in an external service under the caller's own connector credential, and
-	the bench will park it for a human click regardless. ``preview`` is not
-	supported - there is nothing to dry-run against a live third-party API.
+	Confirm-first for anything that changes state: a connector action that can
+	create, modify or delete data in an external service under the caller's own
+	credential is parked for a human click. A read-only, non-destructive action
+	the user has explicitly enabled runs directly with no card (the bench decides
+	this per call from the connector's allowed-actions configuration; unknown or
+	not-yet-enabled actions confirm too). ``preview`` is not supported - there is
+	nothing to dry-run against a live third-party API.
 
 	Returns the broker's structured result verbatim: ``{"ok": True, "result":
 	<the MCP tools/call result>}`` on success, or ``{"ok": False, "error":
