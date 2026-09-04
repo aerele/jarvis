@@ -958,7 +958,7 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 			patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}),
 			patch(
 				"jarvis.chat.pump.chat_worker_status",
-				return_value={"blocked": False, "degraded": False, "workers": 3},
+				return_value={"degraded": False},
 			),
 		):
 			out = account.is_ready_for_chat()
@@ -969,7 +969,6 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 				"reason": None,
 				"billing_notice": {},
 				"worker_warning": False,
-				"worker_blocked": False,
 			},
 		)
 
@@ -1879,12 +1878,14 @@ class TestReadinessWorkerFields(FrappeTestCase):
 	def test_ready_dict_carries_worker_warning_without_flipping_ready(self):
 		with patch(
 			"jarvis.chat.pump.chat_worker_status",
-			return_value={"blocked": False, "degraded": True, "workers": 1},
+			return_value={"degraded": True},
 		):
 			r = account.is_ready_for_chat()
 			self.assertIn("worker_warning", r)
 			self.assertTrue(r["worker_warning"])
-			self.assertFalse(r.get("worker_blocked"))
+			# The hard zero-workers verdict is gone: the registry cannot be trusted
+			# for it (see pump._registry_is_stale), so readiness never carries it.
+			self.assertNotIn("worker_blocked", r)
 			# worker health must NOT change the ready/reason verdict
 			self.assertIn("ready", r)
 
@@ -1892,4 +1893,4 @@ class TestReadinessWorkerFields(FrappeTestCase):
 		with patch("jarvis.chat.pump.chat_worker_status", side_effect=RuntimeError):
 			r = account.is_ready_for_chat()
 			self.assertFalse(r.get("worker_warning"))
-			self.assertFalse(r.get("worker_blocked"))
+			self.assertNotIn("worker_blocked", r)
