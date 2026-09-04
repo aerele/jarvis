@@ -307,14 +307,88 @@ describe("Review & Pay card equals the normalized payload (P1-03)", () => {
 		expect(b.reviewRows.value.some((r) => r.key === "source_company")).toBe(false);
 	});
 
-	it("omits blank optional fields from both payload and card", () => {
+	it("omits blank optional fields from both payload and card (country defaults to India)", () => {
 		const b = useBillingDetails({ site: "s1", user: "u1" });
 		b.setUserValue("contact", "+91 90000 00000");
 		const payload = b.buildBilling();
-		expect(payload).toEqual({ contact_number: "+91 90000 00000" });
+		// Country is a required field defaulting to India, so it is always captured;
+		// every other untouched field is still omitted.
+		expect(payload).toEqual({ contact_number: "+91 90000 00000", country: "India" });
 		expect(b.reviewRows.value).toEqual([
 			{ key: "contact_number", label: "Contact", value: "+91 90000 00000" },
+			{ key: "country", label: "Country", value: "India" },
 		]);
+	});
+
+	it("defaults country to India so it is captured, not just displayed", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.fields.country.value).toBe("India");
+		// still source 'empty' so an ERP company default / resumed snapshot can win
+		expect(b.fields.country.source).toBe("empty");
+	});
+});
+
+describe("Invoicing Details party (billing_company_name / billing_email)", () => {
+	it("setInvoicing adds company_name + email to the payload; blanks are omitted", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setUserValue("contact", "+91 90000 00000");
+		b.setInvoicing("Acme Invoicing Pvt Ltd", "invoices@acme.test");
+		const payload = b.buildBilling();
+		expect(payload.company_name).toBe("Acme Invoicing Pvt Ltd");
+		expect(payload.email).toBe("invoices@acme.test");
+		// no invoicing entered -> omitted (admin falls back to the customer's own company)
+		const b2 = useBillingDetails({ site: "s2", user: "u2" });
+		b2.setUserValue("contact", "+91 90000 00000");
+		expect(b2.buildBilling().company_name).toBeUndefined();
+		expect(b2.buildBilling().email).toBeUndefined();
+	});
+
+	it("persists + restores the invoicing party across a reload", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setInvoicing("Acme Invoicing Pvt Ltd", "invoices@acme.test");
+		const fresh = useBillingDetails({ site: "s1", user: "u1" });
+		fresh.restore();
+		expect(fresh.invoicing.company_name).toBe("Acme Invoicing Pvt Ltd");
+		expect(fresh.invoicing.email).toBe("invoices@acme.test");
+	});
+
+	it("hydrates the invoicing party from the server summary", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.hydrateServerSnapshot({ company_name: "Server Co", email: "server@acme.test" });
+		expect(b.invoicing.company_name).toBe("Server Co");
+		expect(b.invoicing.email).toBe("server@acme.test");
+	});
+
+	it("shows the invoicing party on the Review card", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setInvoicing("Acme Invoicing Pvt Ltd", "invoices@acme.test");
+		const rows = Object.fromEntries(b.reviewRows.value.map((r) => [r.key, r.value]));
+		expect(rows.company_name).toBe("Acme Invoicing Pvt Ltd");
+		expect(rows.email).toBe("invoices@acme.test");
+	});
+
+	it("defaults the invoicing party from the company + work email, follows them, until edited", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.syncInvoicingDefaults("Acme Pvt Ltd", "acct@acme.test");
+		expect(b.invoicing.company_name).toBe("Acme Pvt Ltd");
+		expect(b.invoicing.email).toBe("acct@acme.test");
+		b.syncInvoicingDefaults("Acme Holdings", "acct2@acme.test"); // follows changes
+		expect(b.invoicing.company_name).toBe("Acme Holdings");
+		expect(b.invoicing.email).toBe("acct2@acme.test");
+		// editing the invoicing company stops ITS tracking; the email keeps following
+		b.setInvoicing("Custom Co", undefined);
+		b.syncInvoicingDefaults("Acme Reborn", "acct3@acme.test");
+		expect(b.invoicing.company_name).toBe("Custom Co");
+		expect(b.invoicing.email).toBe("acct3@acme.test");
+	});
+
+	it("carries address line 2 + pincode in the payload", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setUserValue("address2", "Level 4");
+		b.setUserValue("pincode", "600001");
+		const p = b.buildBilling();
+		expect(p.address_line2).toBe("Level 4");
+		expect(p.pincode).toBe("600001");
 	});
 });
 
@@ -395,5 +469,28 @@ describe("the snapshot has a bounded lifetime (retention)", () => {
 		window.localStorage.setItem(b.storageKey, JSON.stringify({ city: "Chennai" }));
 		expect(b.restore()).toBe(false);
 		expect(window.localStorage.getItem(b.storageKey)).toBeNull();
+	});
+});
+
+describe("state + country (India Compliance place of supply)", () => {
+	it("round-trips state and country through buildBilling under the contract keys", () => {
+		const b = useBillingDetails({ site: "sc1", user: "uc1" });
+		b.setUserValue("city", "Bengaluru");
+		b.setUserValue("state", "Karnataka");
+		b.setUserValue("country", "India");
+		const out = b.buildBilling();
+		expect(out.city).toBe("Bengaluru");
+		expect(out.state).toBe("Karnataka");
+		expect(out.country).toBe("India");
+	});
+
+	it("persists and restores state + country for the same site/user", () => {
+		const b1 = useBillingDetails({ site: "sc2", user: "uc2" });
+		b1.setUserValue("state", "Tamil Nadu");
+		b1.setUserValue("country", "India");
+		const b2 = useBillingDetails({ site: "sc2", user: "uc2" });
+		expect(b2.restore()).toBe(true);
+		expect(b2.fields.state.value).toBe("Tamil Nadu");
+		expect(b2.fields.country.value).toBe("India");
 	});
 });
