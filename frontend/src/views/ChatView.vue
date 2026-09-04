@@ -10879,8 +10879,12 @@ function toggleConnectorFocusPicker() {
 }
 function openConnectorSettings() {
 	connectorFocusOpen.value = false;
-	settingsTab.value = "connectors";
-	settingsOpen.value = true;
+	// store.openSettings, not the local settingsTab ref: settingsTab only
+	// drives ChatView's own macroruns-poll gate, it is not wired to the
+	// hoisted SettingsDialog (which reads store.settingsSection, written by
+	// this same call other ChatView buttons already use - see the AI models
+	// button above).
+	store.openSettings("connectors");
 }
 
 // ---- mentions (@ user, / doctype·tool) ----
