@@ -1914,7 +1914,7 @@ def get_billing_profile() -> dict:
 
 
 @frappe.whitelist()
-def update_billing_details(billing=None) -> dict:
+def update_billing_details(billing: dict | None = None) -> dict:
 	"""Save the customer's own billing party (validated admin-side; a partner-billed customer is
 	refused there)."""
 	require_jarvis_admin()
