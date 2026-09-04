@@ -81,36 +81,96 @@ def ping_agent() -> dict:
 
 @frappe.whitelist()
 def force_resync(action: str = "reload") -> dict:
-	"""Bypass on_update change-detection. Run the same sync path on
-	current Settings values. action in {'reload', 'restart'}.
+	"""Bypass on_update change-detection. Re-drive the CURRENT Settings through
+	admin, branching pool vs direct like every other dispatch path.
+
+	A pool/subscription tenant goes through the /llm-pool leg so the Bifrost +
+	CLIProxyAPI sidecars are reconciled; a direct/api-key tenant keeps the
+	/llm-creds leg. Before this branch existed the button used /llm-creds
+	unconditionally and never touched a pool tenant's sidecars.
+
+	action in {'reload', 'restart'}:
+	- direct leg: 'reload' hot-rotates the key, 'restart' re-renders + bounces
+	  the container (and re-pushes skills), as before.
+	- pool leg: the fleet's /llm-pool apply is health-aware - it bounces the
+	  container when the config drifted or the container is unhealthy, and
+	  no-ops an already-correct healthy one. 'restart' additionally re-pushes
+	  custom + learned skills (no-op when the tenant has none). A wedged but
+	  healthy pool container is a reprovision, not a resync - out of scope here.
+
+	Returns ``{action, state, last_sync_at, last_sync_status}`` where ``state``
+	is one of applied / applying / failed / skipped (the pool leg hands its
+	converge tail to an async worker, so ``applying`` is a normal outcome).
 
 	Gated on ``require_jarvis_admin`` (PART 4 REVISED, TASK 45): a restart
-	reconciles + recreates the tenant container (DoS-class)."""
+	reconciles + bounces the tenant container (DoS-class)."""
 	require_jarvis_admin()
 	if action not in ("reload", "restart"):
 		raise frappe.ValidationError(f"invalid action {action!r}; expected reload or restart")
 	from jarvis import admin_client
+	from jarvis.jarvis.pool_serialize import compute_pool_mode
 
 	settings = frappe.get_single("Jarvis Settings")
-	# Always the admin path: the legacy local-agent sync was retired with
-	# the managed fleet (its method no longer exists), and _sync_via_admin
-	# surfaces its own clear error on an unconfigured bench.
-	try:
-		settings._sync_via_admin(action)
-	except admin_client.AdminAuthError:
-		# #388: _sync_via_admin now re-raises a genuine (non-"not paid") auth
-		# failure instead of swallowing it, so the RQ-enqueued caller sees it.
-		# This is the one SYNCHRONOUS, whitelisted caller with a JSON {ok, ...}
-		# contract of its own to preserve - _sync_via_admin already wrote the
-		# terminal "failed: auth: ..." status onto Settings before raising, so
-		# swallow here and let the reload below report it the same way every
-		# other outcome of this endpoint is reported.
-		pass
+	# Branch on pool vs direct the way every other dispatch path does (on_update,
+	# request_resync). A pool/subscription tenant's proxy sidecars (Bifrost +
+	# CLIProxyAPI) live ONLY on the /llm-pool leg: _sync_via_admin's /llm-creds path
+	# rotates the key or re-pushes a single model and never rebuilds the sidecars
+	# (see jarvis_settings.py's _sync_via_admin docstring). Without this branch a
+	# "Force Resync" on a pool tenant silently used the wrong wire contract and left
+	# the sidecars untouched.
+	skipped = False
+	if compute_pool_mode(settings):
+		# sync_pool_now does the bounded /llm-pool push - the fleet re-materializes
+		# Bifrost + CLIProxyAPI and bounces the container when the config drifted or
+		# it is unhealthy, and force_probe=True fires a live chat-completion probe so a
+		# byte-identical healthy no-op still returns an honest verdict instead of doing
+		# nothing. It handles its own admin errors (writing a terminal status) and hands
+		# the converge tail to the async worker - this mirrors save_llm_pool's
+		# settings-save flow (bounded push + async converge), NOT the SPA "Resync"
+		# button, which enqueues fully async via request_resync/_enqueue_pool_sync.
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import sync_pool_now
+
+		outcome = sync_pool_now(force_probe=True) or {}
+		skipped = bool(outcome.get("skipped"))
+		if action == "restart":
+			# Match the direct leg's restart: restore custom + learned skills a
+			# container (re)provision would have wiped. Both no-op when the tenant has
+			# no such skills, so a plain subscription tenant pays no extra restart.
+			settings._resync_custom_skills_after_restart()
+			settings._resync_learned_skills_after_restart()
+	else:
+		# Direct (api-key / lone-subscription) tenant: no sidecars to reconcile, so the
+		# legacy /llm-creds leg is correct and ``action`` still selects reload vs
+		# restart. The local-agent sync was retired with the managed fleet.
+		try:
+			settings._sync_via_admin(action)
+		except admin_client.AdminAuthError:
+			# #388: _sync_via_admin now re-raises a genuine (non-"not paid") auth
+			# failure instead of swallowing it, so the RQ-enqueued caller sees it.
+			# This is the one SYNCHRONOUS, whitelisted caller with a JSON {ok, ...}
+			# contract of its own to preserve - _sync_via_admin already wrote the
+			# terminal "failed: auth: ..." status onto Settings before raising, so
+			# swallow here and let the reload below report it the same way every
+			# other outcome of this endpoint is reported.
+			pass
 	settings.reload()
+	# Report an explicit state instead of making the caller parse the status string.
+	# The pool leg stamps "pending: ..." synchronously and converges async, so
+	# ``applying`` is a normal, non-error outcome (the Desk toast keys off this).
+	status = settings.get("last_sync_status") or ""
+	if skipped:
+		state = "skipped"
+	elif status.startswith("ok"):
+		state = "applied"
+	elif status.startswith("failed"):
+		state = "failed"
+	else:
+		state = "applying"
 	return {
 		"action": action,
+		"state": state,
 		"last_sync_at": str(settings.get("last_sync_at") or ""),
-		"last_sync_status": settings.get("last_sync_status") or "",
+		"last_sync_status": status,
 	}
 
 
