@@ -274,6 +274,7 @@ import { sendDashboardChat, getDashboardConversation } from "@/api/dashboards";
 import { listPendingConfirmations, confirmTool, dismissTool } from "@/api";
 import { agentName } from "@/branding";
 import { errHtml } from "@/lib/errors";
+import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 
 // get_dashboards_caps payload (creatable_scopes/manageable_roles feed the save
 // dialog; stt_enabled - when the backend sends it - gates the mic)
@@ -662,7 +663,8 @@ async function send(gotoMessageId = "") {
 			messages.value = messages.value.filter((m) => m.name !== tmpName);
 			if (!draft.value) draft.value = text;
 			forgetGotoClaim(gotoMessageId);
-			toast.error(r.reason || "Couldn't send your message.");
+			const { message, type } = sendRejectionCopy(r.reason, agentName);
+			(toast[type] || toast.error)(message);
 			return;
 		}
 		if (r.conversation_id && r.conversation_id !== conversation.value) {

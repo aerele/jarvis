@@ -931,7 +931,7 @@ test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the acc
 	// be textually after a bare "if (r && r.ok === false)" search, but sits BEFORE this closing
 	// sequence, so it fails here. The rejection block's final `return;` and closing brace are
 	// immediately followed by the workers-notice self-heal block's `if`, not directly by the
-	// "// Send accepted" comment (a workersNotice/workersWarnNotice self-heal block now sits
+	// "// Send accepted" comment (a workersWarnNotice self-heal block now sits
 	// between the two), so anchor on that sibling `if` instead of the comment.
 	const rejectBlockCloseIdx = sendSrc.indexOf("return;\n\t\t}\n\t\tif (r && r.ok !== false) {");
 	const clearIdx = sendSrc.indexOf("_prefillSendContext = null;");
