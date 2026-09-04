@@ -105,8 +105,10 @@ function fieldValuesFromDefaults(data) {
 	return {
 		contact: (contact.phone || "").trim(),
 		address: (addr.address_line1 || "").trim(),
+		address2: (addr.address_line2 || "").trim(),
 		city: (addr.city || "").trim(),
 		state: (addr.state || "").trim(),
+		pincode: (addr.pincode || "").trim(),
 		country: (addr.country || "").trim(),
 		gstin: (addr.gstin || "").trim(),
 	};
@@ -119,8 +121,10 @@ function fieldValuesFromSummary(s) {
 	return {
 		contact: (s.contact_number || "").trim(),
 		address: (s.address_line1 || "").trim(),
+		address2: (s.address_line2 || "").trim(),
 		city: (s.city || "").trim(),
 		state: (s.state || "").trim(),
+		pincode: (s.pincode || "").trim(),
 		country: (s.country || "").trim(),
 		gstin: (s.gstin || "").trim(),
 	};
@@ -187,8 +191,25 @@ export function useBillingDetails(opts = {}) {
 	// The view calls this whenever the company / work email changes — INCLUDING the prefilled
 	// defaults on mount, which is why the default must live here and not in setIdentity.
 	function syncInvoicingDefaults(company, email) {
-		if (!invoicingCompanyUserSet) invoicing.company_name = (company || "").trim();
-		if (!invoicingEmailUserSet) invoicing.email = (email || "").trim();
+		let changed = false;
+		if (!invoicingCompanyUserSet) {
+			const v = (company || "").trim();
+			if (invoicing.company_name !== v) {
+				invoicing.company_name = v;
+				changed = true;
+			}
+		}
+		if (!invoicingEmailUserSet) {
+			const v = (email || "").trim();
+			if (invoicing.email !== v) {
+				invoicing.email = v;
+				changed = true;
+			}
+		}
+		// setIdentity() persists BEFORE the view's watcher calls this, so without a write
+		// here the snapshot keeps the NEW identity beside a STALE invoicing default (one
+		// keystroke behind) across a reload. Persist the mirrored value too.
+		if (changed) persist();
 	}
 	// No contact-consent state here any more: the Details-step "okay to contact
 	// me" checkbox was folded into the required T&C acceptance on Review & Pay

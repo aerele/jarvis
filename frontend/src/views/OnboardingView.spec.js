@@ -118,6 +118,10 @@ beforeEach(() => {
 	);
 	try {
 		window.sessionStorage.clear();
+		// Also clear localStorage: the billing snapshot key is constant across the file
+		// (one host+user namespace), so without this a test's persisted billing/identity
+		// leaks into later tests and can mask a missing-field guard.
+		window.localStorage.clear();
 	} catch (e) {
 		/* jsdom */
 	}
@@ -1050,7 +1054,7 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		wrapper.vm.state.planName = "pro";
 		wrapper.vm.state.paymentProvider = "razorpay";
 		wrapper.vm.state.termsAccepted = false;
-		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		fillRequiredBilling(wrapper); // complete billing so this test exercises the T&C gate, not the completeness guard
 
 		await wrapper.vm.onPayClick();
 		expect(api.onboardingPaymentApi.startSignup).not.toHaveBeenCalled();
@@ -1335,3 +1339,314 @@ describe("pending-payment auto-poll", () => {
 		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
 	});
 });
+<<<<<<< HEAD
+=======
+
+// The panic-page fix: a customer who COMPLETED checkout (?pay=done) and lands on
+// the coded PAYMENT_CONFIRMATION_PENDING wait (UNKNOWN) - because Razorpay's
+// confirmation webhook lags the browser redirect by seconds - must see the calm
+// "Confirming your payment / we're checking automatically" settling hold, NOT the
+// alarming "We have not confirmed this payment / Check the status before doing
+// anything else" recovery card, while the auto-poll works. The recovery card is
+// reached only once the poll gives up (pendingPollStuck). The gate is the completed
+// return, never UNKNOWN alone, so a failed/abandoned return still gets recovery.
+const SETTLING_TEXT = "You've completed checkout";
+const RECOVERY_PENDING_TEXT = "We have not confirmed this payment";
+describe("post-checkout settling hold (calm wait, not the panic card)", () => {
+	function atSearch(search) {
+		window.history.pushState(null, "", "/onboarding" + search);
+	}
+	afterEach(() => {
+		window.history.pushState(null, "", "/onboarding");
+		vi.useRealTimers();
+	});
+
+	// A completed checkout whose webhook has not landed yet: both the passive
+	// hydrate and the mount-time return-heal answer PENDING, so the machine settles
+	// on UNKNOWN with proof-of-completion in hand.
+	function pendingAfterDoneReturn() {
+		atSearch("?pay=done");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+	}
+
+	it("shows the calm settling screen (not the panic card) after a completed checkout", async () => {
+		pendingAfterDoneReturn();
+		const wrapper = mountView();
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.UNKNOWN);
+		expect(wrapper.vm.returnedFromCompletedCheckout).toBe(true);
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+		expect(wrapper.vm.showRecovery).toBe(false);
+		expect(wrapper.text()).toContain(SETTLING_TEXT);
+		expect(wrapper.text()).not.toContain(RECOVERY_PENDING_TEXT);
+	});
+
+	it("gates on the completed return: a ?pay=failed return still gets the recovery card", async () => {
+		atSearch("?pay=failed");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		const wrapper = mountView();
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.UNKNOWN);
+		expect(wrapper.vm.returnedFromCompletedCheckout).toBe(false);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+		expect(wrapper.vm.showRecovery).toBe(true);
+		expect(wrapper.text()).toContain(RECOVERY_PENDING_TEXT);
+		expect(wrapper.text()).not.toContain(SETTLING_TEXT);
+	});
+
+	it("escalates to the recovery card once the auto-poll gives up (~2 min)", async () => {
+		pendingAfterDoneReturn();
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+
+		// Run the auto-poll to its ceiling: early 4s check + 15s x 7 ≈ 2 min.
+		await vi.advanceTimersByTimeAsync(4_000 + 8 * 15_000);
+		expect(wrapper.vm.pendingPollStuck).toBe(true);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+		expect(wrapper.vm.showRecovery).toBe(true);
+	});
+
+	it("leaves the settling hold the moment the payment confirms (poll answers PAID)", async () => {
+		atSearch("?pay=done");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		// Mount-time return-heal still pending; the first auto-poll tick finds it PAID.
+		api.onboardingPaymentApi.checkSignupPaymentStatus
+			.mockResolvedValueOnce(
+				ENVELOPE({
+					code: "PAYMENT_CONFIRMATION_PENDING",
+					attempt_id: "att_s",
+					generation: 1,
+				})
+			)
+			.mockResolvedValue(
+				ENVELOPE({ code: "PAYMENT_ALREADY_ACTIVE", attempt_id: "att_s", generation: 2 })
+			);
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+
+		await vi.advanceTimersByTimeAsync(4_000); // the early first re-check
+		await flushPromises();
+		expect(wrapper.vm.pay.value).not.toBe(STATES.UNKNOWN);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+	});
+
+	// Finding 3: the early 4s first re-check is scoped to the completed-checkout
+	// case (a webhook expected within seconds). An in-app pending wait that never
+	// left the page keeps the ordinary 15s first interval and does not hit the
+	// rate-limited endpoint any sooner than before.
+	it("re-checks early (~4s) on the first auto-poll tick after a completed checkout", async () => {
+		pendingAfterDoneReturn();
+		vi.useFakeTimers();
+		mountView();
+		await flushPromises();
+		// The mount-time return-heal already fired one check; clear it so we are
+		// measuring the auto-poll's own first tick.
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockClear();
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the ordinary 15s first interval for an in-app pending wait (no completed checkout)", async () => {
+		// No ?pay= return, so returnedFromCompletedCheckout stays false.
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({ code: "PAYMENT_CONFIRMATION_PENDING", attempt_id: "att_s", generation: 1 })
+		);
+		vi.useFakeTimers();
+		mountView();
+		await flushPromises();
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+		// 4s must NOT be enough for the first tick here (unlike the checkout-return case).
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).not.toHaveBeenCalled();
+		// The ordinary 15s interval fires it.
+		await vi.advanceTimersByTimeAsync(11_000);
+		expect(api.onboardingPaymentApi.checkSignupPaymentStatus).toHaveBeenCalledTimes(1);
+	});
+
+	// The primary production path: the ₹0 auto-pay authorization lands on
+	// PAYMENT_AUTHORIZED_PENDING_CONFIRM (S.CONFIRM_REQUIRED) while the bank confirms the
+	// e-NACH mandate. The calm hold + auto-poll must cover this state too, not just the
+	// webhook-lag one - otherwise a customer who just authorized sees the recovery card's
+	// "Check payment status / Contact support / nothing has changed yet" chrome.
+	const AUTHORIZED_CALM = "we've got it from here";
+	const AUTHORIZED_RECOVERY = "We are watching for it";
+	// The auto-pay mandate authorization returns ?pay=PENDING, not ?pay=done - the admin
+	// pay page (billing/checkout/shell.py outcomeFor) emits `pending` for the "authorized,
+	// awaiting confirmation" (next_step poll/contact_support) case. Gating the calm hold on
+	// `done` alone silently missed this whole path; these tests pin the pending return.
+	function mandatePendingReturn() {
+		atSearch("?pay=pending");
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: "att_m",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: "att_m",
+				generation: 1,
+			})
+		);
+	}
+
+	it("shows the calm 'authorized' screen (not the recovery card) for a pending auto-pay mandate", async () => {
+		mandatePendingReturn();
+		const wrapper = mountView();
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.CONFIRM_REQUIRED);
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+		expect(wrapper.vm.showRecovery).toBe(false);
+		expect(wrapper.text()).toContain("Your payment is authorized");
+		expect(wrapper.text()).toContain(AUTHORIZED_CALM);
+		// The recovery card's own body / Contact-support chrome must NOT be showing.
+		expect(wrapper.text()).not.toContain(AUTHORIZED_RECOVERY);
+	});
+
+	it("a pending mandate WITHOUT a completed return still gets the recovery card", async () => {
+		api.onboardingPaymentApi.getOnboardingState.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: "att_m",
+				generation: 1,
+			})
+		);
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue(
+			ENVELOPE({
+				code: "PAYMENT_AUTHORIZED_PENDING_CONFIRM",
+				attempt_id: "att_m",
+				generation: 1,
+			})
+		);
+		const wrapper = mountView();
+		await flushPromises();
+
+		expect(wrapper.vm.pay.value).toBe(STATES.CONFIRM_REQUIRED);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+		expect(wrapper.vm.showRecovery).toBe(true);
+		expect(wrapper.text()).toContain(AUTHORIZED_RECOVERY);
+		expect(wrapper.text()).not.toContain(AUTHORIZED_CALM);
+	});
+
+	it("escalates the mandate wait to the recovery card once the auto-poll gives up", async () => {
+		mandatePendingReturn();
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+
+		await vi.advanceTimersByTimeAsync(4_000 + 8 * 15_000);
+		expect(wrapper.vm.pendingPollStuck).toBe(true);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+		expect(wrapper.vm.showRecovery).toBe(true);
+		expect(wrapper.text()).toContain(AUTHORIZED_RECOVERY);
+	});
+
+	// The regression that stranded a customer on the calm spinner for ~15 min: the
+	// server rate-limits the status check, so the auto-poll's 8-check ceiling
+	// (pendingPollStuck) may never fire in a reasonable time. The calm hold MUST still
+	// escalate on a hard ~2 min wall-clock so the customer always gets the manual
+	// "Check payment status" button. Here every check is rate-limited with a long
+	// cooldown, so the poll makes no progress - pendingPollStuck can NOT be the escape.
+	it("escalates on the ~2 min wall-clock even when the auto-poll is stalled by rate-limit cooldowns", async () => {
+		mandatePendingReturn();
+		api.onboardingPaymentApi.checkSignupPaymentStatus.mockResolvedValue({
+			status: 429,
+			body: {
+				message: {
+					ok: false,
+					error: { code: "PAYMENT_CHECK_RATE_LIMITED", retry_after_seconds: 300 },
+					context: {},
+				},
+			},
+		});
+		vi.useFakeTimers();
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+		expect(wrapper.vm.pendingPollStuck).toBe(false);
+
+		// Just before the ceiling: still the calm hold.
+		await vi.advanceTimersByTimeAsync(118_000);
+		expect(wrapper.vm.showPaymentSettling).toBe(true);
+
+		// Past the ceiling: escalated to the recovery card WITHOUT pendingPollStuck ever
+		// firing - the wall-clock deadline is the escape, exactly as the fix intends.
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(wrapper.vm.pendingPollStuck).toBe(false);
+		expect(wrapper.vm.showPaymentSettling).toBe(false);
+		expect(wrapper.vm.showRecovery).toBe(true);
+	});
+});
+
+// Review P2: changing Country must clear a state/region entered for the old country.
+// stateError accepts any non-empty region for a non-India country, so a leftover Indian
+// state (e.g. "United States / Tamil Nadu") would otherwise pass and be invoiced.
+describe("changing country clears a stale state/region", () => {
+	it("India -> foreign clears the Indian state and its error", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.billing.setUserValue("state", "Tamil Nadu");
+		wrapper.vm.detailsFieldErrors.state = "stale error";
+		wrapper.vm.onCountryChange("United States");
+		expect(wrapper.vm.billing.fields.country.value).toBe("United States");
+		expect(wrapper.vm.billing.fields.state.value).toBe("");
+		expect(wrapper.vm.detailsFieldErrors.state).toBe("");
+	});
+
+	it("re-selecting the same country leaves the state untouched", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.billing.setUserValue("state", "Tamil Nadu");
+		wrapper.vm.onCountryChange("India"); // country already defaults to India
+		expect(wrapper.vm.billing.fields.state.value).toBe("Tamil Nadu");
+	});
+});
+
+// Review P2: a resumed session can land directly on Review & Pay with a pre-change saved
+// state that never collected address/city/state/pincode. onPayClick must run the same
+// completeness guard as onDetailsSubmit and bounce back to Details, not submit.
+describe("resumed Pay enforces billing completeness", () => {
+	it("onPayClick with incomplete billing bounces to Details with per-field errors", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.planName = "standard";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.email = "acme@example.com";
+		wrapper.vm.state.termsAccepted = true;
+		// Only contact present; address / city / state / pincode missing (the pre-change shape).
+		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		wrapper.vm.state.step = "pay";
+		await wrapper.vm.onPayClick();
+		expect(wrapper.vm.state.step).toBe("details");
+		expect(wrapper.vm.detailsFieldErrors.address).toBeTruthy();
+		expect(wrapper.vm.detailsFieldErrors.city).toBeTruthy();
+		expect(wrapper.vm.detailsFieldErrors.state).toBeTruthy();
+		expect(wrapper.vm.detailsFieldErrors.pincode).toBeTruthy();
+	});
+});
+>>>>>>> be2eecf (fix(onboarding): capture a valid billing country + close address completeness gaps)
