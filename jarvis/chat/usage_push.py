@@ -11,6 +11,7 @@ push; admin then shows "no usage".
 from __future__ import annotations
 
 import re
+from zoneinfo import ZoneInfo
 
 import frappe
 
@@ -20,6 +21,7 @@ from jarvis.exceptions import AdminAuthError
 USER_SETTINGS = usage.USER_SETTINGS
 MODEL_USAGE = usage.MODEL_USAGE
 MODEL_USAGE_FIELD = usage.MODEL_USAGE_FIELD
+TURN_USAGE = usage.TURN_USAGE
 
 # Hard cap on users per push (spec §7). Bounds payload size; extra users are
 # dropped (highest-usage first kept) and the truncation is logged.
@@ -28,6 +30,24 @@ _MAX_USERS = 500
 # Caps on the rollup's task-U2 aggregate lists (contract settled 2026-08-17).
 _TOP_TOOLS_USER_CAP = 10
 _TOP_TOOLS_TENANT_CAP = 15
+
+# Sub-project C1, pinned wire contract (schema_version 2): the "who's using
+# Jarvis most" admin dashboard adds a per-user context snapshot and a daily
+# per-(user, day, model) breakdown on top of the month-to-date rollup above.
+# ``users_daily`` window/caps and ``context`` null-handling are all spelled
+# out in the pinned contract - do not add/rename/reshape keys without
+# re-checking it, the admin ingest side is built from the same text.
+SCHEMA_VERSION = 2
+_USERS_DAILY_WINDOW_DAYS = 35
+_USERS_DAILY_ROW_CAP = 5000
+_USERS_DAILY_PER_MODEL_CAP = 20
+_CONTEXT_OVER_PCT = 80
+
+# Built once (review: was re-constructed on every _iso_utc_z call). UTC is a
+# fixed offset, unlike the site's system timezone (frappe.utils.
+# get_system_timezone()), which genuinely varies per request in a multi-site
+# process and so cannot be hoisted the same way.
+_UTC = ZoneInfo("UTC")
 
 # Mirrors the admin ingest validator exactly (contract settled 2026-08-17): a
 # bare name, or a "jarvis__" prefixed tool with an UNBOUNDED suffix. A name
@@ -67,7 +87,16 @@ def _build_rollup(cap: int = _MAX_USERS) -> tuple[dict, bool]:
 	user's profile attribution, cache/tool-call aggregates and top_tools, plus
 	the tenant-wide ``by_profile`` and ``top_tools`` blocks. ``users[]`` stays
 	settings-sourced - a settings row with no Turn Usage rows this month just
-	gets the empty/zero defaults, never an entry invented from Turn Usage."""
+	gets the empty/zero defaults, never an entry invented from Turn Usage.
+
+	Schema version 2 (sub-project C1) adds, on top of the unchanged shape
+	above: ``schema_version``, a per-user ``context`` block (from ``Jarvis Chat
+	Session`` snapshots - see ``usage._context_capacity_and_pct``) and a
+	top-level ``users_daily`` list (from ``Jarvis Turn Usage``, grouped by
+	user/day/model, last 35 days including today). Both are additive and
+	optional per the pinned contract: an old-shape rollup (no Turn Usage /
+	Chat Session data at all) still round-trips, ``context`` fields going null
+	and ``users_daily`` going empty rather than either key being fabricated."""
 	month = usage.current_month_key()
 	start, next_month = _month_range(month)
 	rows = frappe.get_all(
@@ -81,12 +110,16 @@ def _build_rollup(cap: int = _MAX_USERS) -> tuple[dict, bool]:
 	per_model_by_user = _per_model_totals([s.user for s in rows], month)
 	turn_aggregates_by_user = _turn_usage_user_aggregates(start, next_month)
 	top_tools_by_user, tool_calls_by_user, top_tools_tenant = _tool_message_aggregates(start, next_month)
+	context_by_user = _context_by_user([s.user for s in rows])
 	users = []
 	for s in rows:
 		agg = turn_aggregates_by_user.get(s.user, {})
 		users.append(
 			{
-				"email": s.user,
+				# Lowercased (review): users_daily already lowercases its
+				# email and admin lowercases on ingest anyway - matching
+				# here just keeps the payload self-consistent.
+				"email": (s.user or "").strip().lower(),
 				"tokens_in": int(s.month_input_tokens or 0),
 				"tokens_out": int(s.month_output_tokens or 0),
 				"total_tokens": int(s.month_tokens or 0),
@@ -101,13 +134,16 @@ def _build_rollup(cap: int = _MAX_USERS) -> tuple[dict, bool]:
 				# Turn Usage - see that function's docstring (finding #2).
 				"tool_calls": tool_calls_by_user.get(s.user, 0),
 				"top_tools": top_tools_by_user.get(s.user, []),
+				"context": context_by_user.get(s.user, _EMPTY_CONTEXT),
 			}
 		)
 	rollup = {
 		"month_key": month,
+		"schema_version": SCHEMA_VERSION,
 		"users": users,
 		"by_profile": _by_profile(start, next_month),
 		"top_tools": top_tools_tenant,
+		"users_daily": _users_daily_rollup(),
 	}
 	return rollup, truncated
 
@@ -357,6 +393,168 @@ def _per_model_totals(users: list[str], month: str) -> dict[str, dict[str, dict]
 			"out": int(r.out_ or 0),
 		}
 	return out
+
+
+# Contract default for a user with no Jarvis Chat Session data at all: the
+# object is always present (never omitted), with every field null/zero per
+# the pinned contract ("capacity null when no session has reported one").
+_EMPTY_CONTEXT = {
+	"used_max": 0,
+	"capacity": None,
+	"pct_max": None,
+	"sessions_over_80": 0,
+	"last_seen_at": None,
+}
+
+
+def _iso_utc_z(value) -> str | None:
+	"""A stored ``Datetime`` value (naive, SYSTEM timezone - see
+	``frappe.utils.now_datetime``, the writer of ``Jarvis Chat
+	Session.last_usage_at``) as an ISO-8601 UTC string with a trailing ``Z``,
+	per the pinned contract's ``context.last_seen_at``. ``None``/falsy passes
+	through as ``None``."""
+	if not value:
+		return None
+	dt = frappe.utils.get_datetime(value)
+	aware = dt.replace(tzinfo=ZoneInfo(frappe.utils.get_system_timezone()))
+	return aware.astimezone(_UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _context_by_user(users: list[str]) -> dict[str, dict]:
+	"""Per-user context-usage summary from ``Jarvis Chat Session`` snapshots
+	(the only writers of ``context_capacity`` / ``context_pct`` /
+	``last_total_tokens`` are ``usage.record_turn_usage`` and
+	``usage.refresh_session_snapshots``).
+
+	Review fix: a user's sessions can run different models with different
+	context windows, so pairing the session with the highest ``used`` against
+	a DIFFERENT session's ``capacity`` (e.g. "the newest row with one") can
+	report a nonsensical pct (or the wrong one). Instead, ``pct`` is computed
+	PER SESSION (``last_total_tokens / context_capacity`` of that SAME
+	session, only over sessions that have actually reported a capacity), and
+	the session with the HIGHEST own pct wins: its own ``used``/``capacity``/
+	``pct`` become ``used_max``/``capacity``/``pct_max``. ``sessions_over_80``
+	counts sessions whose OWN pct is >= ``_CONTEXT_OVER_PCT``. ``last_seen_at``
+	is unrelated to capacity - it stays the newest ``last_usage_at`` across
+	ALL of the user's sessions, capacity-reporting or not. Returns ``{}`` for
+	an empty ``users`` list; callers fall back to ``_EMPTY_CONTEXT`` per user
+	(also what a user with sessions but none reporting a capacity gets, since
+	pct/used_max/capacity are then undefined)."""
+	if not users:
+		return {}
+	last_seen_by_user = {
+		r.user: r.last_seen_at
+		for r in frappe.db.sql(
+			"""
+			SELECT user, MAX(last_usage_at) AS last_seen_at
+			FROM `tabJarvis Chat Session`
+			WHERE user IN %(users)s
+			GROUP BY user
+			""",
+			{"users": tuple(users)},
+			as_dict=True,
+		)
+	}
+	best_by_user: dict[str, dict] = {}
+	over_80_by_user: dict[str, int] = {}
+	for r in frappe.db.sql(
+		"""
+		SELECT user, last_total_tokens, context_capacity
+		FROM `tabJarvis Chat Session`
+		WHERE user IN %(users)s AND context_capacity > 0
+		""",
+		{"users": tuple(users)},
+		as_dict=True,
+	):
+		used = int(r.last_total_tokens or 0)
+		capacity = int(r.context_capacity or 0)
+		pct = round(100 * used / capacity, 1)
+		if pct >= _CONTEXT_OVER_PCT:
+			over_80_by_user[r.user] = over_80_by_user.get(r.user, 0) + 1
+		best = best_by_user.get(r.user)
+		if best is None or pct > best["pct_max"]:
+			best_by_user[r.user] = {"used_max": used, "capacity": capacity, "pct_max": pct}
+	out: dict[str, dict] = {}
+	for user in users:
+		best = best_by_user.get(user)
+		out[user] = {
+			"used_max": best["used_max"] if best else 0,
+			"capacity": best["capacity"] if best else None,
+			"pct_max": best["pct_max"] if best else None,
+			"sessions_over_80": over_80_by_user.get(user, 0),
+			"last_seen_at": _iso_utc_z(last_seen_by_user.get(user)),
+		}
+	return out
+
+
+def _users_daily_rollup() -> list[dict]:
+	"""Per-(user, day, model) breakdown from ``Jarvis Turn Usage`` for the last
+	``_USERS_DAILY_WINDOW_DAYS`` days INCLUDING today (site-local day, matching
+	the ``day`` column - the pinned contract labels this "the bench day").
+
+	Only days with at least one turn are emitted (a plain GROUP BY over an
+	append-only table naturally skips empty days). One row per (email, day);
+	``per_model`` capped at ``_USERS_DAILY_PER_MODEL_CAP`` entries, highest
+	token volume first (the SQL ORDER BY ensures the first models folded into
+	each bucket below are the biggest ones) - a day's ``turns`` /
+	``tokens_in`` / ``tokens_out`` totals still cover EVERY model that day,
+	even one that overflowed the per_model cap; only the per-model breakdown
+	is trimmed. Total row count is capped at ``_USERS_DAILY_ROW_CAP``,
+	trimming the LOWEST-token rows first and logging once (spec: bench trims,
+	admin 400s if it ever still sees more)."""
+	today = frappe.utils.today()
+	start = frappe.utils.add_days(today, -(_USERS_DAILY_WINDOW_DAYS - 1))
+	grouped: dict[tuple[str, str], dict] = {}
+	for r in frappe.db.sql(
+		f"""
+		SELECT user, day, model,
+			   COUNT(*) AS turns,
+			   SUM(tokens_in) AS tokens_in,
+			   SUM(tokens_out) AS tokens_out
+		FROM `tab{TURN_USAGE}`
+		WHERE user != '' AND day >= %(start)s AND day <= %(today)s
+		GROUP BY user, day, model
+		ORDER BY user, day, (SUM(tokens_in) + SUM(tokens_out)) DESC
+		""",
+		{"start": start, "today": today},
+		as_dict=True,
+	):
+		email = (r.user or "").strip().lower()
+		if not email:
+			continue
+		key = (email, str(r.day))
+		bucket = grouped.setdefault(
+			key,
+			{"email": email, "day": str(r.day), "turns": 0, "tokens_in": 0, "tokens_out": 0, "per_model": {}},
+		)
+		tokens_in = int(r.tokens_in or 0)
+		tokens_out = int(r.tokens_out or 0)
+		bucket["turns"] += int(r.turns or 0)
+		bucket["tokens_in"] += tokens_in
+		bucket["tokens_out"] += tokens_out
+		model = (r.model or "").strip()
+		if model and len(bucket["per_model"]) < _USERS_DAILY_PER_MODEL_CAP:
+			bucket["per_model"][model] = {"in": tokens_in, "out": tokens_out}
+	return _trim_users_daily_rows(list(grouped.values()))
+
+
+def _trim_users_daily_rows(rows: list[dict], cap: int = _USERS_DAILY_ROW_CAP) -> list[dict]:
+	"""Enforce the pinned contract's ``users_daily`` row cap: at most ``cap``
+	rows, dropping the LOWEST-token rows first and logging once when trimming
+	actually occurs (spec: bench trims and warns; admin 400s if it ever still
+	sees more than the cap). Split out as its own pure function - unlike the
+	grouping above, this is a plain list transform, so cap behaviour is
+	unit-testable directly without seeding thousands of Turn Usage rows
+	against a live bench."""
+	if len(rows) <= cap:
+		return rows
+	rows = sorted(rows, key=lambda row: row["tokens_in"] + row["tokens_out"])
+	dropped = len(rows) - cap
+	kept = rows[dropped:]
+	frappe.logger("jarvis.usage_push").warning(
+		"users_daily rollup trimmed %s lowest-token rows (cap %s)", dropped, cap
+	)
+	return kept
 
 
 def push_usage_rollup() -> None:
