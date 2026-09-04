@@ -171,7 +171,7 @@ frappe.ui.form.on("Jarvis Settings", {
 							default: "reload",
 							reqd: 1,
 							description: __(
-								"reload = hot-swap LLM key only. restart = re-render config and bounce the container."
+								"reload = re-push the current config (hot-swap the key where possible). restart = also restore skills and bounce the container when the config drifted or it is unhealthy."
 							),
 						},
 					],
@@ -184,15 +184,37 @@ frappe.ui.form.on("Jarvis Settings", {
 							})
 							.then((r) => {
 								const m = r.message || {};
-								const ok = (m.last_sync_status || "").startsWith("ok");
+								// state (applied/applying/failed/skipped) is authoritative;
+								// fall back to the status string for an older backend. A pool
+								// resync converges async, so "applying" is normal, not a failure.
+								const state =
+									m.state ||
+									((m.last_sync_status || "").startsWith("ok")
+										? "applied"
+										: "failed");
+								const meta = {
+									applied: { title: __("Resync OK"), indicator: "green" },
+									applying: { title: __("Resync Queued"), indicator: "blue" },
+									skipped: {
+										title: __("Nothing to Resync"),
+										indicator: "orange",
+									},
+									failed: {
+										title: __("Resync Reported a Problem"),
+										indicator: "red",
+									},
+								}[state] || {
+									title: __("Resync Reported a Problem"),
+									indicator: "red",
+								};
 								frappe.msgprint({
-									title: ok ? __("Resync OK") : __("Resync Reported a Problem"),
+									title: meta.title,
 									message: __("Action: {0}<br>At: {1}<br>Status: {2}", [
 										m.action || "?",
 										m.last_sync_at || "(no timestamp)",
 										m.last_sync_status || "(no status)",
 									]),
-									indicator: ok ? "green" : "red",
+									indicator: meta.indicator,
 								});
 								frm.reload_doc();
 							});
