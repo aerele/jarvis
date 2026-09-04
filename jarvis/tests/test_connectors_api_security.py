@@ -143,6 +143,18 @@ class TestTestConnectorWriteGate(unittest.TestCase):
 		args, kwargs = fake.db.set_value.call_args
 		self.assertEqual(args[2]["last_test_status"], "Failed")
 
+	def test_transient_guard_signal_does_not_flip_status(self):
+		# circuit_open / at_capacity are guard signals, not a health result (the probe
+		# never ran). Even a writer must not have them flip last_test_status to Failed,
+		# which would disable the connector tenant-wide.
+		for code in ("circuit_open", "at_capacity"):
+			doc = _Doc("conn-1", can_read=True, can_write=True)
+			out, fake, _, _ = self._run(doc, {"ok": False, "error": {"code": code, "message": "busy"}})
+			self.assertFalse(out["ok"])
+			self.assertEqual(out["error"]["code"], code)
+			fake.db.set_value.assert_not_called()
+			fake.db.commit.assert_not_called()
+
 
 class TestMergeNoRecomputeOnExistingRow(unittest.TestCase):
 	def test_stored_flags_survive_a_relabel_attack(self):

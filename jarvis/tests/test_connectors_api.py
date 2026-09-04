@@ -79,6 +79,10 @@ class _ConnectorApiTestCase(FrappeTestCase):
 		self._orig_user = frappe.session.user
 		self._connectors: list[str] = []
 		self._saved_singles: dict[str, object] = {}
+		# The feature flag defaults OFF on a fresh DB, and test_connector now refuses
+		# to probe when it is off. Every test here exercises an ENABLED workspace, so
+		# turn it on (tearDown restores the original via _saved_singles).
+		self._set_single("connectors_enabled", 1)
 
 	def tearDown(self):
 		frappe.set_user(self._orig_user)

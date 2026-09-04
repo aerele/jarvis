@@ -491,9 +491,14 @@ def test_connector(name: str) -> dict:
 	now = now_datetime()
 
 	if not result.get("ok"):
+		error = result.get("error") or {"code": "unknown_error", "message": "The connection test failed."}
+		# circuit_open / at_capacity are guard / transient-load signals, not a health
+		# measurement (the probe never ran), so they must NOT flip last_test_status to
+		# Failed and disable the connector tenant-wide via call_connector's guard.
+		transient = error.get("code") in {"circuit_open", "at_capacity"}
 		# Only a writer may flip the stored status; a reader's probe is display-only
 		# so it can never disable a Shared connector tenant-wide.
-		if can_write:
+		if can_write and not transient:
 			frappe.db.set_value(
 				CONNECTOR,
 				doc.name,
@@ -501,11 +506,7 @@ def test_connector(name: str) -> dict:
 				update_modified=False,
 			)
 			frappe.db.commit()
-		return {
-			"ok": False,
-			"error": result.get("error")
-			or {"code": "unknown_error", "message": "The connection test failed."},
-		}
+		return {"ok": False, "error": error}
 
 	tools = [t for t in (result.get("tools") or []) if isinstance(t, dict)]
 	merged = _merge_allowed_actions(doc.get("allowed_actions") or [], tools)
