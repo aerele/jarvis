@@ -87,6 +87,17 @@ function mountView() {
 	return mount(OnboardingView, { global: { stubs: STUBS } });
 }
 
+// Fill every billing field the Details step now REQUIRES (contact + address + city +
+// state + pincode) so onDetailsSubmit's validation gate passes and a test can reach
+// the behaviour it targets. Country auto-defaults to India, so it is left alone.
+function fillRequiredBilling(wrapper) {
+	wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+	wrapper.vm.billing.setUserValue("address", "12 MG Road");
+	wrapper.vm.billing.setUserValue("city", "Chennai");
+	wrapper.vm.billing.setUserValue("state", "Tamil Nadu");
+	wrapper.vm.billing.setUserValue("pincode", "600001");
+}
+
 beforeEach(() => {
 	window.matchMedia = (q) => ({
 		matches: false,
@@ -733,9 +744,9 @@ describe("Returning-customer forced reconnect gate", () => {
 		wrapper.vm.state.email = "back@corp.test";
 		wrapper.vm.state.company = company;
 		wrapper.vm.state.identityFromUser = typed; // typed => reconnectIdentity present
-		// Contact number is mandatory on Details now; fill it so onDetailsSubmit's
-		// gate doesn't block these reconnect-flow tests on an unrelated field.
-		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		// Fill every field Details now requires so onDetailsSubmit's gate doesn't
+		// block these reconnect-flow tests on an unrelated field.
+		fillRequiredBilling(wrapper);
 		// The required T&C checkbox now lives on Details too, but these tests are
 		// about the reconnect gate specifically, so tick it by default (a
 		// dedicated test below asserts the reconnect branch does NOT need it).
@@ -872,7 +883,7 @@ describe("Returning-customer forced reconnect gate", () => {
 		wrapper.vm.state.email = "back@corp.test";
 		wrapper.vm.state.company = "Corp";
 		wrapper.vm.state.identityFromUser = true;
-		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		fillRequiredBilling(wrapper);
 		wrapper.vm.state.termsAccepted = true;
 		await wrapper.vm.onDetailsSubmit();
 		await flushPromises();
@@ -988,7 +999,7 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		wrapper.vm.state.email = "a@b.com";
 		wrapper.vm.state.company = "Acme";
 		wrapper.vm.state.identityFromUser = true;
-		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		fillRequiredBilling(wrapper);
 		wrapper.vm.state.termsAccepted = false;
 		await flushPromises();
 
