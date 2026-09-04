@@ -15,7 +15,7 @@ it, so the two repos cannot drift silently:
 | twin repo | `git@github.com:Aerele-RnD/jarvis-admin-v2.git` |
 | twin branch | `feat/plan01-billing-persistence` |
 | twin path | `jarvis_admin_v2/tests/billing/fixtures/billing_contract/billing_snapshot.json` |
-| sha256 | `c370ecf920f61212f2f3f2359f28fca375a8e417573daabb6f735d6d222e03a2` |
+| sha256 | `95b5460b850e45bc1c8c3de198f7ddd74d747daa541a0d3b6f16984d46c2ddc1` |
 
 The sha pin is what enforces byte-identity: `test_billing_contract.py`
 recomputes the sha of this file and fails on a mismatch, and the admin twin pins
