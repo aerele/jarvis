@@ -357,6 +357,53 @@ class TestErrorLogReader(ApiErrorsBase):
 		self.assertEqual(vrow["kind"], "exception")
 		self.assertIsNotNone(result["watermark"])
 
+	# -- C1: user_ref from Error Log.owner (code-level exceptions) ---------- #
+	def test_user_ref_unit(self):
+		self.assertEqual(api_errors._error_log_user_ref(USER), USER)
+		self.assertEqual(api_errors._error_log_user_ref("Administrator"), "")
+		self.assertEqual(api_errors._error_log_user_ref("Guest"), "")
+		self.assertEqual(api_errors._error_log_user_ref(None), "")
+		self.assertEqual(api_errors._error_log_user_ref(""), "")
+
+	def test_collect_error_log_sets_user_ref_from_real_owner(self):
+		# `since` pinned to just before the insert (not None): on a live-used
+		# site collect_error_log(since=None) scans oldest-first and a fresh row
+		# can fall outside the `limit` window, same trap the neighbouring
+		# jarvis-origin test above doesn't yet guard against.
+		since = str(frappe.utils.now_datetime())
+		tb = (
+			"Traceback (most recent call last):\n"
+			'  File "/home/x/apps/jarvis/jarvis/chat/api.py", line 1, in f\n'
+			"    boom()\n"
+			"ValueError: real owner boom"
+		)
+		with _as(USER):
+			doc = frappe.get_doc({"doctype": "Error Log", "method": "jarvis.chat.api.f", "error": tb})
+			doc.insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "Error Log", doc.name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		result = api_errors.collect_error_log(since=since, limit=500)
+		row = next(r for r in result["rows"] if "real owner boom" in r["stack"])
+		self.assertEqual(row["user_ref"], USER)
+
+	def test_collect_error_log_blanks_user_ref_for_administrator_owner(self):
+		since = str(frappe.utils.now_datetime())
+		tb = (
+			"Traceback (most recent call last):\n"
+			'  File "/home/x/apps/jarvis/jarvis/chat/api.py", line 2, in g\n'
+			"    boom()\n"
+			"TypeError: admin owner boom"
+		)
+		# No _as() wrapper: the test runner's session user (Administrator) is
+		# stamped as owner, which must NOT be forwarded as a per-user attribution.
+		doc = frappe.get_doc({"doctype": "Error Log", "method": "jarvis.chat.api.g", "error": tb})
+		doc.insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "Error Log", doc.name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		result = api_errors.collect_error_log(since=since, limit=500)
+		row = next(r for r in result["rows"] if "admin owner boom" in r["stack"])
+		self.assertEqual(row["user_ref"], "")
+
 
 # --------------------------------------------------------------------------- #
 # Push job — self-gating + never-raise
