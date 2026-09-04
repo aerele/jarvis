@@ -560,3 +560,69 @@ describe("mirrored invoicing default is persisted, not just held in memory", () 
 		expect(window.localStorage.getItem(b.storageKey)).toBe(null);
 	});
 });
+
+// Review P1: a country from a resumed snapshot / ERP default bypasses the select, so it is
+// canonicalised on the way in and on the way out — never submitting a legacy/alias name.
+describe("country is canonicalised from restore and from ERP defaults", () => {
+	it("restore canonicalises a legacy country and buildBilling submits the canonical name", () => {
+		const key = billingStorageKey("s1", "u1");
+		window.localStorage.setItem(
+			key,
+			JSON.stringify({ country: "Turkey", saved_at: Date.now() })
+		);
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.restore()).toBe(true);
+		expect(b.fields.country.value).toBe("Türkiye");
+		expect(b.buildBilling().country).toBe("Türkiye");
+	});
+
+	it("applyDefaults canonicalises a legacy ERP country", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		const resp = {
+			ok: true,
+			data: { company: "Acme", billing_address: { address_line1: "x", country: "Turkey" } },
+		};
+		expect(fetchAndApply(b, "Acme", resp)).toBe("applied");
+		expect(b.fields.country.value).toBe("Türkiye");
+	});
+});
+
+// Review P2: persisting the mirrored invoicing default (the earlier fix) must also persist its
+// PROVENANCE, or restore() treats the auto-mirrored value as a user override and stops tracking.
+describe("invoicing-default provenance survives a reload", () => {
+	it("an auto-mirrored invoicing default keeps tracking a later company change after restore", () => {
+		const seed = useBillingDetails({ site: "s1", user: "u1" });
+		seed.setIdentity("team@example.com", "Acme"); // persist identity
+		seed.syncInvoicingDefaults("Acme", "team@example.com"); // auto-mirror (not user-set) + persist
+		expect(seed.invoicing.company_name).toBe("Acme");
+
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.restore()).toBe(true);
+		expect(b.invoicing.company_name).toBe("Acme");
+		b.syncInvoicingDefaults("Globex", "team@example.com"); // provenance = auto → must re-mirror
+		expect(b.invoicing.company_name).toBe("Globex");
+	});
+
+	it("a user-overridden invoicing value stays fixed after restore", () => {
+		const seed = useBillingDetails({ site: "s1", user: "u1" });
+		seed.setInvoicing("Custom Billing Co", undefined); // user override (user-set) + persist
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.restore()).toBe(true);
+		expect(b.invoicing.company_name).toBe("Custom Billing Co");
+		b.syncInvoicingDefaults("Globex", "team@example.com"); // must NOT clobber the override
+		expect(b.invoicing.company_name).toBe("Custom Billing Co");
+	});
+
+	it("a legacy snapshot with no provenance flag is treated as user-set (back-compat)", () => {
+		const key = billingStorageKey("s1", "u1");
+		window.localStorage.setItem(
+			key,
+			JSON.stringify({ invoice_company_name: "Legacy Co", saved_at: Date.now() })
+		);
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.restore()).toBe(true);
+		expect(b.invoicing.company_name).toBe("Legacy Co");
+		b.syncInvoicingDefaults("Globex", "team@example.com"); // legacy default = user-set → not clobbered
+		expect(b.invoicing.company_name).toBe("Legacy Co");
+	});
+});
