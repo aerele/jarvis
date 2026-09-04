@@ -494,3 +494,69 @@ describe("state + country (India Compliance place of supply)", () => {
 		expect(b2.fields.country.value).toBe("India");
 	});
 });
+
+// Review P2: both conversion helpers must hydrate the now-required postal code (and the
+// optional second address line), or ERP defaults never prefill pincode and server recovery
+// leaves it blank / stale.
+describe("address2 + pincode hydrate from ERP defaults and from the server snapshot", () => {
+	it("applyDefaults fills address_line2 and pincode", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		const resp = {
+			ok: true,
+			data: {
+				company: "Aerele",
+				billing_address: {
+					address_line1: "12 MG Road",
+					address_line2: "Floor 3",
+					city: "Chennai",
+					pincode: "600001",
+				},
+			},
+		};
+		expect(fetchAndApply(b, "Aerele", resp)).toBe("applied");
+		expect(b.fields.address2.value).toBe("Floor 3");
+		expect(b.fields.pincode.value).toBe("600001");
+	});
+
+	it("hydrateServerSnapshot fills address_line2 and pincode", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.hydrateServerSnapshot({
+			address_line1: "9 Ring Road",
+			address_line2: "Unit 2",
+			city: "Delhi",
+			pincode: "110001",
+		});
+		expect(b.fields.address2.value).toBe("Unit 2");
+		expect(b.fields.pincode.value).toBe("110001");
+	});
+});
+
+// Review P2: syncInvoicingDefaults mutated memory only. setIdentity persists the snapshot
+// BEFORE the view's watcher calls it, so a reload kept the new identity beside a stale
+// invoicing default. It must persist the mirror too.
+describe("mirrored invoicing default is persisted, not just held in memory", () => {
+	it("persists the synced invoicing company + email so a reload keeps them", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setIdentity("team@example.com", "Aerele"); // persists identity (stale invoicing)
+		b.syncInvoicingDefaults("Aerele", "team@example.com");
+		const snap = JSON.parse(window.localStorage.getItem(b.storageKey));
+		expect(snap.invoice_company_name).toBe("Aerele");
+		expect(snap.invoice_email).toBe("team@example.com");
+	});
+
+	it("does not clobber a user-overridden invoicing value", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setInvoicing("Custom Billing Co", undefined); // user owns the company field
+		b.syncInvoicingDefaults("Aerele", "team@example.com");
+		expect(b.invoicing.company_name).toBe("Custom Billing Co"); // untouched
+		expect(b.invoicing.email).toBe("team@example.com"); // email still auto-tracks
+	});
+
+	it("does not write when nothing changed (idempotent)", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.syncInvoicingDefaults("Aerele", "team@example.com"); // first sync writes
+		window.localStorage.removeItem(b.storageKey); // prove a redundant call does not rewrite
+		b.syncInvoicingDefaults("Aerele", "team@example.com"); // same values -> no change
+		expect(window.localStorage.getItem(b.storageKey)).toBe(null);
+	});
+});
