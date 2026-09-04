@@ -2917,6 +2917,88 @@
 									>
 								</button>
 							</div>
+							<!-- connector-focus picker: same absolutely-positioned dropdown idiom
+							     as the mention list above, opened from the toolbar pill below. -->
+							<div
+								v-if="connectorFocusOpen"
+								style="
+									position: absolute;
+									bottom: calc(100% + 6px);
+									left: 0;
+									min-width: 220px;
+									max-height: 280px;
+									overflow-y: auto;
+									background: var(--surface);
+									border: 1px solid var(--border-2);
+									border-radius: 10px;
+									box-shadow: 0 10px 28px rgba(20, 20, 30, 0.16);
+									padding: 5px;
+									z-index: 30;
+								"
+							>
+								<div
+									v-if="!connectorFocusLoaded"
+									style="padding: 12px; display: flex; justify-content: center"
+								>
+									<JvSpinner :size="16" />
+								</div>
+								<template v-else-if="connectorFocusOptions.length">
+									<button
+										v-if="connectorFocus"
+										class="jv-menuitem"
+										style="color: var(--text-3)"
+										@click="setConnectorFocus(null)"
+									>
+										<span>Clear focus</span>
+									</button>
+									<button
+										v-for="row in connectorFocusOptions"
+										:key="row.name"
+										class="jv-menuitem"
+										:class="{
+											on: connectorFocus && connectorFocus.key === row.key,
+										}"
+										@click="setConnectorFocus(row)"
+									>
+										<ConnectorLogo :preset="row.preset" :size="16" />
+										<span
+											style="
+												flex: 1;
+												overflow: hidden;
+												text-overflow: ellipsis;
+												white-space: nowrap;
+											"
+											>{{ row.label }}</span
+										>
+									</button>
+								</template>
+								<div
+									v-else
+									style="
+										padding: 10px 8px;
+										font-size: 12px;
+										color: var(--text-3);
+										max-width: 220px;
+									"
+								>
+									No connected apps yet.
+									<button
+										type="button"
+										style="
+											border: none;
+											background: transparent;
+											padding: 0;
+											color: var(--cta);
+											cursor: pointer;
+											font-size: 12px;
+											text-decoration: underline;
+										"
+										@click="openConnectorSettings"
+									>
+										Add one in Settings
+									</button>
+								</div>
+							</div>
 							<!-- clipboard held only a file PATH, not the image bytes -->
 							<div
 								v-if="pasteHint"
@@ -3335,6 +3417,94 @@
 									/>
 								</svg>
 								<span v-if="groundNextTurn">Wiki</span>
+							</button>
+							<!-- Connector-focus pill: scope this conversation to one connected +
+							     enabled app (soft prompt-level nudge — see sendCtx.focus_connector
+							     in send()). Hidden with nothing to offer, exactly like the wiki
+							     button above, EXCEPT a focus already armed still shows so it stays
+							     clearable even if that connector was since disabled. -->
+							<button
+								v-if="connectorFocusOptions.length || connectorFocus"
+								class="jv-iconbtn"
+								:title="
+									connectorFocus
+										? `Focused on ${connectorFocus.label}. Click to change.`
+										: 'Focus this chat on one connected app'
+								"
+								@click="toggleConnectorFocusPicker"
+								:aria-pressed="String(!!connectorFocus)"
+								:style="{
+									height: '30px',
+									display: 'flex',
+									alignItems: 'center',
+									gap: '4px',
+									padding: connectorFocus ? '0 4px 0 8px' : '0',
+									width: connectorFocus ? 'auto' : '30px',
+									justifyContent: 'center',
+									background: 'transparent',
+									border: connectorFocus ? '1px solid var(--cta)' : 'none',
+									borderRadius: '7px',
+									cursor: 'pointer',
+									color: connectorFocus ? 'var(--cta)' : 'var(--text-3)',
+									fontSize: '12px',
+									fontWeight: '500',
+								}"
+							>
+								<ConnectorLogo
+									v-if="connectorFocus"
+									:preset="connectorFocus.preset"
+									:size="14"
+								/>
+								<svg
+									v-else
+									width="16"
+									height="16"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.7"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path
+										d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"
+									/>
+									<path
+										d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+									/>
+								</svg>
+								<span
+									v-if="connectorFocus"
+									style="
+										max-width: 110px;
+										overflow: hidden;
+										text-overflow: ellipsis;
+										white-space: nowrap;
+									"
+									>{{ connectorFocus.label }}</span
+								>
+								<span
+									v-if="connectorFocus"
+									role="button"
+									tabindex="0"
+									title="Clear focus"
+									aria-label="Clear connector focus"
+									style="
+										display: inline-flex;
+										align-items: center;
+										justify-content: center;
+										width: 16px;
+										height: 16px;
+										margin-left: 2px;
+										border-radius: 50%;
+										cursor: pointer;
+										color: var(--text-3);
+									"
+									@click.stop="setConnectorFocus(null)"
+									@keydown.enter.stop="setConnectorFocus(null)"
+									@keydown.space.stop.prevent="setConnectorFocus(null)"
+									>×</span
+								>
 							</button>
 							<!-- The composer's own "Get help from a human" button used to live
 							     here (Task 6) - it's gone now that Support has one entry point,
@@ -4273,6 +4443,8 @@ import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
 import Composer from "@/components/chat/Composer.vue";
+import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
+import JvSpinner from "@/components/JvSpinner.vue";
 import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
@@ -4782,6 +4954,16 @@ onMounted(() => {
 // context.ground_wiki flag so the backend injects relevant wiki page bodies
 // into that turn. Cleared after each send (see send()).
 const groundNextTurn = ref(false);
+// Connector-focus pill (composer control, MCP_CONNECTORS_PLAN.md): a soft
+// prompt-level nudge scoping this conversation to ONE connected+enabled
+// connector — NOT tool gating, the agent can still reach for anything, this
+// only tells it what to prefer. { key, label, preset } | null. Persisted per
+// conversation (see connectorFocusStore below) so it survives across turns
+// until the user clears it, unlike the one-shot groundNextTurn above.
+const connectorFocus = ref(null);
+const connectorFocusOpen = ref(false);
+const connectorFocusOptions = ref([]);
+const connectorFocusLoaded = ref(false);
 // (sidebar collapse machinery, per-conversation ⋯ menu and inline rename
 // moved to the app shell — stores/shell.js + components/shell/*, §3.7)
 const modelOverride = ref("");
@@ -8163,6 +8345,11 @@ async function loadConversation(id) {
 	// Trigger-build mode is per-conversation too: switching chats clears it.
 	triggerMode.value = false;
 	createMenuOpen.value = false;
+	// Default to no focus; the id branch below reloads THIS conversation's own
+	// pick (unlike groundNextTurn/triggerMode, the pill persists — see
+	// _loadConnectorFocusFor).
+	connectorFocus.value = null;
+	connectorFocusOpen.value = false;
 	if (!id) {
 		messages.value = [];
 		originPage.value = "";
@@ -8183,6 +8370,9 @@ async function loadConversation(id) {
 	// does a single clean load, would put it right. (Root cause of "open a
 	// chat, switch away and back, it shows empty until I refresh".)
 	if (currentId.value !== id) return;
+	// Reload THIS conversation's own connector-focus pick, if any (localStorage
+	// is the source of truth — see _loadConnectorFocusFor).
+	connectorFocus.value = _loadConnectorFocusFor(id);
 	// Flush any in-flight reveal BEFORE swapping in the freshly-loaded rows. On a
 	// reconnect resync the socket may have missed a run's terminal (fire-and-forget
 	// pub/sub, no replay), so flushReveal(message_id) never ran for it; a leftover
@@ -8649,7 +8839,10 @@ async function selectThinking(level) {
 	}
 }
 function onDocClick(e) {
-	if (!e.target.closest(".jv-composer")) mention.value = { ...mention.value, open: false };
+	if (!e.target.closest(".jv-composer")) {
+		mention.value = { ...mention.value, open: false };
+		connectorFocusOpen.value = false;
+	}
 }
 async function retry(messageId) {
 	if (retrying.value) return;
@@ -8848,6 +9041,17 @@ async function send(textArg, resendAck) {
 		// one-shot _prefillSendContext is cleared after the send is accepted, below,
 		// so a rejected send keeps it armed for retry.)
 		if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
+		// Connector-focus pill: carries every turn while armed (not one-shot like
+		// groundWiki/triggerMode above), so a rejection/resend needs no special
+		// handling — connectorFocus.value itself is untouched by a failed send.
+		// Captured now (not read again after the POST) so a clear mid-flight can't
+		// change what this SPECIFIC turn asked for.
+		const _sentFocus = connectorFocus.value;
+		if (_sentFocus)
+			sendCtx = {
+				...(sendCtx || {}),
+				focus_connector: { key: _sentFocus.key, label: _sentFocus.label },
+			};
 		// The confirmation cards currently on screen, in the order the numbers are
 		// shown, so a typed "confirm 2" binds to the card the user actually sees.
 		// Deliberately confirm-only (step-by-step): send_message forwards these
@@ -9009,6 +9213,10 @@ async function send(textArg, resendAck) {
 			// Same helper newChat() uses. Only currentId + the URL below stay gated on visibility.
 			if (_sentScope === _NEW_CHAT_SCOPE && r.conversation_id !== _NEW_CHAT_SCOPE)
 				_promoteNewChatScope(r.conversation_id);
+			// Same visibility-independent reasoning as the promotion above: the pick
+			// this turn actually carried belongs to the conversation the server just
+			// created/used for it, whether or not that's still on screen.
+			if (_sentFocus) _saveConnectorFocusFor(r.conversation_id, _sentFocus);
 			if (_stillOnSentChat) {
 				// Still on the chat we sent from — safe to reconcile it. Adopt the server's id when it
 				// differs (a brand-new chat that just got its id, or a stale/reaped conversation
@@ -10590,6 +10798,68 @@ function openUserFile(a) {
 	userFilePreviewOpen.value = true;
 }
 
+// ---- connector focus pill (composer control) ----
+// Persistence is a lightweight per-conversation localStorage entry (soft
+// version — MCP_CONNECTORS_PLAN.md's hard-scoping follow-up can move this
+// server-side later). Storage is the source of truth; `connectorFocus` is
+// just today's on-screen reflection of it, reloaded by loadConversation()
+// exactly like modelOverride/thinkingOverride reload from the server.
+function _connectorFocusStorageKey(id) {
+	return `jarvis-connector-focus:${id}`;
+}
+function _loadConnectorFocusFor(id) {
+	if (!id) return null;
+	try {
+		const raw = localStorage.getItem(_connectorFocusStorageKey(id));
+		return raw ? JSON.parse(raw) : null;
+	} catch (e) {
+		return null;
+	}
+}
+function _saveConnectorFocusFor(id, row) {
+	if (!id) return;
+	try {
+		if (row) localStorage.setItem(_connectorFocusStorageKey(id), JSON.stringify(row));
+		else localStorage.removeItem(_connectorFocusStorageKey(id));
+	} catch (e) {}
+}
+// Called from the picker (a row click) and from the pill's own × (row = null).
+function setConnectorFocus(row) {
+	connectorFocus.value = row
+		? { key: row.key, label: row.label, preset: row.preset || "" }
+		: null;
+	connectorFocusOpen.value = false;
+	_saveConnectorFocusFor(currentId.value, connectorFocus.value);
+}
+// Enabled connectors (shared + mine) — fetched once per component lifetime
+// (onMounted below, so the toolbar button's own visibility is known before
+// the composer first paints); the picker re-invokes this too but the
+// `connectorFocusLoaded` guard makes every call after the first a no-op.
+async function loadConnectorFocusOptions() {
+	if (connectorFocusLoaded.value) return;
+	try {
+		const res = await api.listConnectors();
+		connectorFocusLoaded.value = true;
+		connectorFocusOptions.value =
+			res && res.enabled
+				? [...(res.shared || []), ...(res.mine || [])].filter((r) => r.enabled)
+				: [];
+	} catch (e) {
+		// Best-effort: the picker just shows its empty state.
+		connectorFocusOptions.value = [];
+	}
+}
+function toggleConnectorFocusPicker() {
+	mention.value = { ...mention.value, open: false };
+	connectorFocusOpen.value = !connectorFocusOpen.value;
+	if (connectorFocusOpen.value) loadConnectorFocusOptions();
+}
+function openConnectorSettings() {
+	connectorFocusOpen.value = false;
+	settingsTab.value = "connectors";
+	settingsOpen.value = true;
+}
+
 // ---- mentions (@ user, / doctype·tool) ----
 let _mentionSeq = 0;
 function onInput() {
@@ -10613,6 +10883,7 @@ function onInput() {
 		items: mention.value.items,
 		index: 0,
 	};
+	connectorFocusOpen.value = false; // typing @/ takes over the same overlay slot
 	queryMentions(type, query);
 }
 async function queryMentions(type, query) {
@@ -10761,6 +11032,12 @@ onMounted(async () => {
 			if (Array.isArray(t) && t.length) jarvisTools.value = t;
 		})
 		.catch(() => {});
+	// Connector-focus pill's own options, fetched eagerly (not on first picker
+	// open) so the toolbar button's OWN visibility — hidden with no enabled
+	// connector to offer — is known by the time the composer first paints,
+	// same fail-open posture as the flags above: an unreachable backend just
+	// leaves the button hidden.
+	loadConnectorFocusOptions();
 	// Billing banner off the boot readiness promise (memoized, already awaited by
 	// AppShell). Not awaited here: it must never delay painting the chat.
 	checkReady()

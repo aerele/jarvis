@@ -245,15 +245,21 @@ export async function sendMessage(
 	if (approvalTokens && approvalTokens.length)
 		args.approval_tokens = JSON.stringify(approvalTokens);
 	// Forward context for a viewing-context doc/report, the one-shot "ground on
-	// wiki" flag (which can arrive without a doc), OR a page marker ("triggers" /
+	// wiki" flag (which can arrive without a doc), a page marker ("triggers" /
 	// "dashboards") that primes the agent for that surface's flow from the main
-	// chat. The backend re-applies the same allow-list (chat.api.send_message).
+	// chat, OR the composer's connector-focus pill ({key, label} of the one
+	// connector the user scoped this turn to — a soft prompt-level nudge, never
+	// tool gating). The backend re-applies the same allow-list
+	// (chat.api.send_message).
 	if (
 		context &&
 		(context.doctype ||
 			context.ground_wiki ||
 			context.page === "triggers" ||
-			context.page === "dashboards")
+			context.page === "dashboards" ||
+			(context.focus_connector &&
+				context.focus_connector.key &&
+				context.focus_connector.label))
 	)
 		args.context = JSON.stringify(context);
 	return call("jarvis.chat.api.send_message", args);

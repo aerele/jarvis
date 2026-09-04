@@ -898,6 +898,11 @@ def assemble_prompt(
 	# already date/user-augmented user_message built above. Prompt-only;
 	# the persisted/visible user message is unchanged.
 	user_message = _prepend_doc_context(user_message, context, conversation_id)
+	# Composer connector-focus pill: a SEPARATE, additive prepend (not folded
+	# into _prepend_doc_context's branches above) so it can co-exist with a
+	# doc/report/page context and never has to touch that function's existing,
+	# individually-pinned branches.
+	user_message = _prepend_connector_focus(user_message, context)
 	# Vision is gated by the operator toggle and the model's provider being
 	# multimodal. When off, image/PDF attachments degrade to a short note (no
 	# OCR fallback any more).
@@ -1729,6 +1734,38 @@ def _dashboard_has_asked(conversation_id: str) -> bool:
 			message=f"conversation={conversation_id!r}\n\n{frappe.get_traceback()}",
 		)
 		return True
+
+
+def _prepend_connector_focus(user_message: str, context) -> str:
+	"""Prepend the composer's connector-focus pill directive, when armed.
+
+	``context.focus_connector`` is ``{key, label}`` (jarvis/chat/api.py's
+	allow-list — both required, length-capped). Purely a prompt-level nudge:
+	it tells the agent which connector to prefer, it does NOT restrict which
+	tools the agent may actually call (that hard-scoping is explicitly out of
+	scope — MCP_CONNECTORS_PLAN.md). Defensive: a malformed/absent context is
+	a no-op, matching ``_prepend_doc_context``'s contract.
+	"""
+	if not isinstance(context, dict):
+		return user_message
+	focus = context.get("focus_connector")
+	if not isinstance(focus, dict):
+		return user_message
+	# Client-supplied text, sanitized the same way an attachment file name is
+	# before it rides in a bench-authored bracket line (see _safe_label_name):
+	# collapse whitespace/newlines and strip backticks so it cannot break out
+	# of this single trusted line.
+	label = _safe_label_name(focus.get("label") or "").replace("[", "(").replace("]", ")")
+	key = _safe_label_name(focus.get("key") or "").replace("[", "(").replace("]", ")")
+	if not label or not key:
+		return user_message
+	return (
+		f"[Context: The user turned on connector focus for this turn, the '{label}' "
+		f"connector (key: {key}). Use only that connector via list_connector_actions "
+		"and call_connector to answer this request. Do not use ERPNext or other tools "
+		"unless the user explicitly asks for them.]"
+		f"\n\n{user_message}"
+	)
 
 
 def _prepend_doc_context(user_message: str, context, conversation_id: str = "") -> str:

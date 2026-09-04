@@ -1488,11 +1488,14 @@ def send_message(
 	# Floating-widget auto-context: {doctype, name, label} of the doc the user
 	# is viewing, OR {report_name, filters} when the user is on a
 	# query-report route, OR {page: "triggers"|"dashboards"} when the user is
-	# on the Triggers / Dashboards page. Only forwarded when present, for the
-	# same not-yet-reloaded worker safety as attachments above. The narrowing
-	# here is deliberate (allow-list, not passthrough) so a compromised /
-	# stale frontend can't smuggle arbitrary keys into the worker payload;
-	# every key the prompt-side actually consumes must be listed here.
+	# on the Triggers / Dashboards page, OR {focus_connector: {key, label}}
+	# when the composer's connector-focus pill is armed (a soft prompt-level
+	# nudge, not tool gating — MCP_CONNECTORS_PLAN.md). Only forwarded when
+	# present, for the same not-yet-reloaded worker safety as attachments
+	# above. The narrowing here is deliberate (allow-list, not passthrough) so
+	# a compromised / stale frontend can't smuggle arbitrary keys into the
+	# worker payload; every key the prompt-side actually consumes must be
+	# listed here.
 	if context:
 		try:
 			ctx = frappe.parse_json(context)
@@ -1501,11 +1504,26 @@ def send_message(
 			# context payload when EITHER a doc/report ref OR ground_wiki OR a
 			# page marker is set.
 			ground_wiki = 1 if (isinstance(ctx, dict) and frappe.utils.cint(ctx.get("ground_wiki"))) else 0
+			# Connector-focus pill: {key, label} of the one connector the user
+			# scoped this turn to. Both are client-supplied text (the label is a
+			# display string, the key names a connector the caller may or may not
+			# still have) — length-capped here; the prompt-side sanitizes before
+			# interpolating it into the trusted bracket line.
+			_focus_raw = ctx.get("focus_connector") if isinstance(ctx, dict) else None
+			focus_connector = (
+				{
+					"key": str(_focus_raw.get("key") or "")[:80],
+					"label": str(_focus_raw.get("label") or "")[:80],
+				}
+				if isinstance(_focus_raw, dict) and _focus_raw.get("key") and _focus_raw.get("label")
+				else None
+			)
 			if isinstance(ctx, dict) and (
 				ctx.get("doctype")
 				or ctx.get("report_name")
 				or ground_wiki
 				or ctx.get("page") in ("triggers", "dashboards")
+				or focus_connector
 			):
 				enqueue_kwargs["context"] = {
 					"doctype": ctx.get("doctype") or "",
@@ -1519,6 +1537,11 @@ def send_message(
 					# One-shot wiki grounding (allow-listed, boolean only).
 					"ground_wiki": ground_wiki,
 				}
+				# Only set when present — an absent key, not a null/empty one,
+				# so a plain send's context dict looks exactly as it did before
+				# this pill existed (mirrors how `page` below is handled).
+				if focus_connector:
+					enqueue_kwargs["context"]["focus_connector"] = focus_connector
 				# `page` is a literal allow-list of two values (not a
 				# passthrough) — the prompt-side only consumes "triggers"
 				# and "dashboards".
