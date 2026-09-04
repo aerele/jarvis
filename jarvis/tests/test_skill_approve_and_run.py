@@ -1150,10 +1150,12 @@ class TestSkillAutorunPartition(FrappeTestCase):
 			),
 		)
 
-	def test_never_set_is_the_trio_plus_create_custom_skill(self):
+	def test_never_set_is_the_trio_plus_create_custom_skill_and_call_connector(self):
 		self.assertEqual(
 			api._SKILL_AUTORUN_NEVER,
-			frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill"}),
+			frozenset(
+				{"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill", "call_connector"}
+			),
 		)
 
 	def test_create_custom_skill_is_not_covered_here_though_the_macro_covers_it(self):

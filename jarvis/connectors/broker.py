@@ -148,6 +148,27 @@ def _resolve_row(connector_key: str):
 	raise _BrokerError("connector_not_found", f"No connector named {connector_key!r} is available to you.")
 
 
+def resolve_for_status(connector_key: str):
+	"""The same row :func:`_resolve_row` would use (Personal wins over Shared),
+	for a caller that needs to inspect a connector's readiness BEFORE deciding
+	whether to call :func:`call` at all - ``call_connector`` uses this to
+	fast-fail with a ``connector_not_ready`` error when a connector has never
+	passed a connection test (or lost that pass on a credential/URL edit -
+	the SPA's ``update_connector`` clears ``last_test_status``/``tools_cache``
+	on either), instead of a less legible failure surfacing deeper in the
+	broker or the MCP client.
+
+	Returns the resolved row, or ``None`` when it cannot be resolved (unknown
+	key, or none visible to the caller) - the caller should fall through to
+	:func:`call` in that case so the ORDINARY ``connector_not_found`` error
+	(with its own wording) is what the model sees, not a second one invented
+	here. Never raises."""
+	try:
+		return _resolve_row(connector_key)
+	except _BrokerError:
+		return None
+
+
 def _credential(row) -> str:
 	"""Decrypt the connector credential. On an UNSAVED row (the P3 test button
 	tests before first save) ``get_password`` cannot read ``__Auth`` by name, so

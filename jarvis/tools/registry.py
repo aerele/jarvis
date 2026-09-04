@@ -167,6 +167,9 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"read_app_source",
 	"record_app_wiki",
 	"finish_app_learning_run",
+	# MCP connectors (GitHub / Atlassian / Linear / Stripe / custom gateways):
+	"call_connector",
+	"list_connector_actions",
 )
 
 

@@ -830,6 +830,12 @@ _WRITE_TOOLS = frozenset(
 		"record_app_wiki",
 		"finish_app_learning_run",
 		"save_agent_dashboard",
+		# call_connector fires a real outbound call to an external service under
+		# the caller's connector credential - audited like every other write here,
+		# and (below) gated like run_method: it is never previewable, so it falls
+		# through to _pending_preview's described-intent default with no carve-out
+		# needed (run_method needs one only because it IS in _PREVIEWABLE).
+		"call_connector",
 	}
 )
 _PREVIEWABLE = frozenset(
@@ -871,6 +877,7 @@ _GATED_WRITES = frozenset(
 		"update_wiki",
 		"share_doc",
 		"assign_to",
+		"call_connector",
 	}
 )
 # #493: the agent-facing wiki surface, refused wholesale when the operator has
@@ -898,10 +905,16 @@ _AUTO_APPLYABLE = frozenset({"create_doc", "update_doc"})
 # armed-skippable by default. The partition invariant (test_armed_skip_partition)
 # asserts COVERED and NEVER are disjoint and together == _GATED_WRITES, so adding a
 # gated tool to neither set turns that test RED until a human consciously files it.
-# The irreversible trio (_ARMED_SKIP_NEVER) always parks; an armed macro that hits
-# one stops the run (D5). Bulk covered writes DO skip; the F16 over-size cap still
-# bounces them. A gated tool NOT in COVERED (e.g. a bulk light write) parks in an
-# armed run like any other excluded write.
+# The irreversible trio + call_connector (_ARMED_SKIP_NEVER) always park; an
+# armed macro that hits one stops the run (D5). Bulk covered writes DO skip;
+# the F16 over-size cap still bounces them. A gated tool NOT in COVERED (e.g.
+# a bulk light write) parks in an armed run like any other excluded write.
+# call_connector joins the never-skip set (not merely omitted from covered,
+# per the invariant below): its per-action reversibility is opaque to the
+# bench - a connector action can be anything the third-party service defines,
+# unlike the well-understood ERPNext writes covered above - so an armed macro
+# must still stop at it rather than fire it uncarded (this is v1, flag-off by
+# default; widen deliberately later if the soak justifies it).
 _ARMED_SKIP_COVERED = frozenset(
 	{
 		"create_doc",
@@ -918,7 +931,7 @@ _ARMED_SKIP_COVERED = frozenset(
 		"update_wiki",
 	}
 )
-_ARMED_SKIP_NEVER = frozenset({"cancel_doc", "delete_doc", "amend_doc"})
+_ARMED_SKIP_NEVER = frozenset({"cancel_doc", "delete_doc", "amend_doc", "call_connector"})
 # Skill "Approve & run the plan" (design §3.4, D-COVERED): a conversation in an
 # APPROVED skill run (Jarvis Conversation.skill_autorun=1, stamped by the
 # approve_and_run endpoint on step-1 success) runs THESE covered writes without a
@@ -928,9 +941,10 @@ _ARMED_SKIP_NEVER = frozenset({"cancel_doc", "delete_doc", "amend_doc"})
 # unclassified tool defaults to carding). It DIVERGES from the macro set in ONE
 # tool: create_custom_skill is COVERED for a macro but NEVER here - a skill that
 # writes another skill is a consequential meta-write the user should still confirm.
-# The irreversible trio (delete/cancel/amend) + create_custom_skill make up
-# _SKILL_AUTORUN_NEVER and always park (a park mid-run is a legit PAUSE that
-# resumes on confirm). The partition invariant (test_covered_and_never_partition_
+# The irreversible trio (delete/cancel/amend) + create_custom_skill + call_connector
+# make up _SKILL_AUTORUN_NEVER and always park (a park mid-run is a legit PAUSE that
+# resumes on confirm) - call_connector for the same opaque-reversibility reason as
+# _ARMED_SKIP_NEVER above. The partition invariant (test_covered_and_never_partition_
 # gated_writes) asserts COVERED and NEVER are disjoint and together == _GATED_WRITES,
 # so a gated tool filed in neither turns that test RED until a human classifies it.
 _SKILL_AUTORUN_COVERED = frozenset(
@@ -948,7 +962,9 @@ _SKILL_AUTORUN_COVERED = frozenset(
 		"run_method",
 	}
 )
-_SKILL_AUTORUN_NEVER = frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill"})
+_SKILL_AUTORUN_NEVER = frozenset(
+	{"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill", "call_connector"}
+)
 # Sliding-TTL horizon for an approved run: the auto-run branch runs a covered write
 # uncarded only while the LAST covered write (skill_autorun_at, which slides forward
 # on each success) is within this window. It must comfortably EXCEED the longest idle
@@ -1184,6 +1200,7 @@ def _describe_call(tool: str, args: dict) -> str:
 		"target_doctype",
 		"target_name",
 		"method",
+		"connector",
 		"action",
 		"recipients",
 		"to",

@@ -576,6 +576,68 @@ class TestLegacyRunFallback(_DelegateCase):
 
 
 # --------------------------------------------------------------------------- #
+# call_connector: never reachable via the legacy no-snapshot bypass
+# --------------------------------------------------------------------------- #
+class TestConnectorAlwaysGated(_DelegateCase):
+	"""MCP connectors, P2: call_connector reaches a connector credential (a
+	Personal-scope row can be the run-as user's OWN PAT) under the delegate's
+	identity, so a marketplace-agent run must never get it for free. The
+	ordinary snapshot check already default-denies every undeclared tool for a
+	NON-legacy run; the one gap it does not close is ``legacy``, a run with no
+	snapshot at all, which ``tool_denial`` otherwise waves through untouched
+	(see ``TestLegacyRunFallback`` above). This proves the gap is closed
+	specifically for call_connector, and that closing it does not touch any
+	other tool's legacy behaviour."""
+
+	def test_legacy_run_never_reaches_call_connector(self):
+		frappe.db.set_value(
+			RUN,
+			self.aud_run,
+			{"capability_contract": "legacy", "tools_allow_json": None},
+			update_modified=False,
+		)
+		res = self._dispatch(self.aud_key, "call_connector", {"connector": "github", "action": "x"})
+		self.assertFalse(res["ok"], res)
+		self.assertEqual(res["error"]["code"], "CapabilityDeniedError")
+
+	def test_legacy_run_still_executes_every_other_undeclared_tool(self):
+		"""The fix is scoped to call_connector alone - a legacy run's ordinary
+		fallback (no tools_allow gate at all) is untouched for everything else."""
+		frappe.db.set_value(
+			RUN,
+			self.aud_run,
+			{"capability_contract": "legacy", "tools_allow_json": None},
+			update_modified=False,
+		)
+		frappe.set_user("Administrator")
+		todo = _mk_todo(self.run_as)
+		res = self._dispatch(self.aud_key, "get_doc", {"doctype": "ToDo", "name": todo})
+		self.assertTrue(res["ok"], res)
+
+	def test_snapshot_run_that_declared_it_passes_the_gate(self):
+		"""The escape hatch is explicit declaration, not "run predates the
+		guard": a snapshot contract that names ``jarvis__call_connector`` is let
+		through the CAPABILITY gate. call_connector is also a _GATED_WRITES
+		tool (api.py), so - exactly like any other gated write reached from a
+		conversation-less context - it PARKS for a human confirmation rather
+		than executing inline (the park mints its token bound to the run-as
+		user via the documented owner-fallback, so it is not a dead end, just
+		not synchronous); it never reaches the broker on this path. Never
+		refused by the capability gate is the thing proven here - the tool's
+		OWN kill switch and the broker's gates are covered separately, see
+		test_connector_tools.py."""
+		frappe.db.set_value(
+			RUN,
+			self.aud_run,
+			{"tools_allow_json": json.dumps([*AUD_TOOLS_ALLOW, "jarvis__call_connector"])},
+			update_modified=False,
+		)
+		res = self._dispatch(self.aud_key, "call_connector", {"connector": "github", "action": "x"})
+		self.assertTrue(res["ok"], res)
+		self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation")
+
+
+# --------------------------------------------------------------------------- #
 # write caps are driven by the snapshot, not the live listing
 # --------------------------------------------------------------------------- #
 class TestWriteCapsFromSnapshot(_DelegateCase):

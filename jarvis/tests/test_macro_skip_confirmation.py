@@ -210,8 +210,13 @@ class TestArmedSkipPartition(FrappeTestCase):
 			"never (always parks) - a tool in neither is an unclassified fail-open gap",
 		)
 
-	def test_irreversible_trio_never_skips(self):
-		self.assertEqual(_ARMED_SKIP_NEVER, frozenset({"cancel_doc", "delete_doc", "amend_doc"}))
+	def test_irreversible_trio_plus_call_connector_never_skips(self):
+		# call_connector joins the trio: its per-action reversibility is opaque to
+		# the bench (unlike the well-understood ERPNext writes covered above), so
+		# an armed macro must still stop at it rather than fire it uncarded.
+		self.assertEqual(
+			_ARMED_SKIP_NEVER, frozenset({"cancel_doc", "delete_doc", "amend_doc", "call_connector"})
+		)
 
 	def test_run_method_is_covered(self):
 		# run_method gates in ordinary chat but skips inside an armed macro (D5).

@@ -4,11 +4,13 @@ Spec: ``docs/superpowers/specs/2026-08-16-role-profile-agents-design.md``.
 
 Two independent axes, both curated data (spec §5), never runtime discovery:
 
-* **Tool tier**: the jarvis-plane role decides ``full`` (today's 94 tools)
-  vs ``standard`` (67 tools; ``STANDARD_DROP_TOOLS`` is the 27-tool drop
+* **Tool tier**: the jarvis-plane role decides ``full`` (today's 96 tools)
+  vs ``standard`` (69 tools; ``STANDARD_DROP_TOOLS`` is the 27-tool drop
   list). Spec §3 sized these 68/26; ``session_status`` was later pulled to the
-  drop list (denied fleet-wide for the white-label leak, not a tier call), so
-  the split is 67/27 with the 94-tool universe unchanged.
+  drop list (denied fleet-wide for the white-label leak, not a tier call), and
+  the MCP connector tools (``call_connector`` / ``list_connector_actions``)
+  were added to the allow list after, so the split is 69/27 with a 96-tool
+  universe.
 * **Skill set**: ERPNext roles decide which of the 6 named skill sets
   (``SKILL_SETS``), plus the always-on ``SHARED_CORE_SKILLS``, a user's
   profile includes.
@@ -76,10 +78,13 @@ STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 	}
 )
 
-# The full 94-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
-# sorted (spec §2 evidence capture: ~/.claude/jobs/bce488ac/tmp/postfix-cap.jsonl).
-# An allow list must be explicit here: deriving it at runtime from a live
-# agent container is not possible bench-side.
+# The full 96-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
+# sorted (spec §2 evidence capture: ~/.claude/jobs/bce488ac/tmp/postfix-cap.jsonl,
+# plus jarvis__call_connector / jarvis__list_connector_actions added after the
+# MCP connectors feature landed - a standard-tier user gets both like any other
+# jarvis tool; the connectors kill switch and delegate gate are the actual
+# authority, not tier membership). An allow list must be explicit here:
+# deriving it at runtime from a live agent container is not possible bench-side.
 _STANDARD_TOOLS_ALLOW = [
 	"agents_list",
 	"canvas",
@@ -93,6 +98,7 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__apply_workflow_action",
 	"jarvis__assign_to",
 	"jarvis__attach_to_doc",
+	"jarvis__call_connector",
 	"jarvis__cancel_doc",
 	"jarvis__create_custom_skill",
 	"jarvis__create_dashboard",
@@ -119,6 +125,7 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__get_submitted_linked_docs",
 	"jarvis__get_workflow_transitions",
 	"jarvis__list_app_modules",
+	"jarvis__list_connector_actions",
 	"jarvis__preview_doc",
 	"jarvis__preview_import",
 	"jarvis__query",
@@ -152,8 +159,9 @@ _STANDARD_TOOLS_ALLOW = [
 
 
 def standard_tools_allow() -> list[str]:
-	"""The 67-tool allow list for the ``standard`` tier (spec §3 sized 68;
-	session_status pulled to the drop list for the fleet-wide white-label deny)."""
+	"""The 69-tool allow list for the ``standard`` tier (spec §3 sized 68;
+	session_status pulled to the drop list for the fleet-wide white-label deny;
+	the two MCP connector tools added after)."""
 	return list(_STANDARD_TOOLS_ALLOW)
 
 
