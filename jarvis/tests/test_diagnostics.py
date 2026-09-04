@@ -122,28 +122,96 @@ class TestPingAgent(FrappeTestCase):
 
 
 class TestForceResync(FrappeTestCase):
+	# force_resync branches on compute_pool_mode: a pool/subscription tenant must go
+	# through the /llm-pool leg (which reconciles the Bifrost + CLIProxyAPI sidecars),
+	# a direct/api-key tenant keeps the legacy /llm-creds leg (no sidecars to touch).
+	SYNC_POOL_NOW = "jarvis.jarvis.doctype.jarvis_settings.jarvis_settings.sync_pool_now"
+	POOL_MODE = "jarvis.jarvis.pool_serialize.compute_pool_mode"
+
 	def test_rejects_invalid_action(self):
 		with self.assertRaises(frappe.ValidationError):
 			diagnostics.force_resync(action="blowup")
 
-	def test_force_resync_always_uses_admin_path(self):
-		"""Post-unification (2026-05-29): on_update always routes via admin.
-		force_resync inherits the same path."""
+	def test_direct_tenant_uses_creds_leg(self):
+		"""A non-pool (direct / api-key) tenant reconciles through
+		_sync_via_admin's /llm-creds leg - there are no sidecars to rebuild, and
+		the pool leg must NOT be invoked."""
 		cls = frappe.get_single("Jarvis Settings").__class__
-		with patch.object(cls, "_sync_via_admin") as sa:
-			diagnostics.force_resync(action="reload")
+		with (
+			patch(self.POOL_MODE, return_value=False),
+			patch(self.SYNC_POOL_NOW) as pool,
+			patch.object(cls, "_sync_via_admin") as sa,
+		):
+			out = diagnostics.force_resync(action="reload")
 		sa.assert_called_once_with("reload")
+		pool.assert_not_called()
+		self.assertIn("state", out)
+
+	def test_pool_reload_reconciles_sidecars_only(self):
+		"""THE FIX (sidecar reconcile): a pool/subscription tenant pushes through
+		sync_pool_now (/llm-pool - rebuilds Bifrost + CLIProxyAPI) with a live probe,
+		NOT the legacy /llm-creds leg. 'reload' does NOT re-push skills."""
+		cls = frappe.get_single("Jarvis Settings").__class__
+		with (
+			patch(self.POOL_MODE, return_value=True),
+			patch(self.SYNC_POOL_NOW, return_value={}) as pool,
+			patch.object(cls, "_sync_via_admin") as sa,
+			patch.object(cls, "_resync_custom_skills_after_restart") as cs,
+			patch.object(cls, "_resync_learned_skills_after_restart") as ls,
+		):
+			out = diagnostics.force_resync(action="reload")
+		pool.assert_called_once_with(force_probe=True)
+		sa.assert_not_called()
+		cs.assert_not_called()
+		ls.assert_not_called()
+		self.assertIn("state", out)
+
+	def test_pool_restart_also_repushes_skills(self):
+		"""'restart' on a pool tenant reconciles the sidecars AND re-pushes custom +
+		learned skills (which restore skills and bounce the container), matching the
+		reload/restart + skills-re-push semantics the direct leg has."""
+		cls = frappe.get_single("Jarvis Settings").__class__
+		with (
+			patch(self.POOL_MODE, return_value=True),
+			patch(self.SYNC_POOL_NOW, return_value={}) as pool,
+			patch.object(cls, "_sync_via_admin") as sa,
+			patch.object(cls, "_resync_custom_skills_after_restart") as cs,
+			patch.object(cls, "_resync_learned_skills_after_restart") as ls,
+		):
+			out = diagnostics.force_resync(action="restart")
+		pool.assert_called_once_with(force_probe=True)
+		sa.assert_not_called()
+		cs.assert_called_once_with()
+		ls.assert_called_once_with()
+		self.assertEqual(out["action"], "restart")
+
+	def test_pool_skipped_outcome_reports_skipped_state(self):
+		"""When sync_pool_now reports the spec was not pushable (skipped), the
+		endpoint surfaces state='skipped' instead of echoing a stale status."""
+		cls = frappe.get_single("Jarvis Settings").__class__
+		with (
+			patch(self.POOL_MODE, return_value=True),
+			patch(self.SYNC_POOL_NOW, return_value={"skipped": True}),
+			patch.object(cls, "_resync_custom_skills_after_restart"),
+			patch.object(cls, "_resync_learned_skills_after_restart"),
+		):
+			out = diagnostics.force_resync(action="reload")
+		self.assertEqual(out["state"], "skipped")
 
 	def test_force_resync_survives_genuine_auth_error(self):
 		"""#388: _sync_via_admin now re-raises a genuine admin auth failure.
 		force_resync is the one SYNCHRONOUS, whitelisted caller with its own
 		{ok/status} JSON contract - it must swallow the raise and still return
 		its status dict (reflecting the terminal status _sync_via_admin wrote)
-		rather than letting the exception blow through the endpoint."""
+		rather than letting the exception blow through the endpoint. Applies to
+		the direct leg (the pool leg's sync_pool_now handles its own errors)."""
 		from jarvis.exceptions import AdminAuthError
 
 		cls = frappe.get_single("Jarvis Settings").__class__
-		with patch.object(cls, "_sync_via_admin", side_effect=AdminAuthError("nope")):
+		with (
+			patch(self.POOL_MODE, return_value=False),
+			patch.object(cls, "_sync_via_admin", side_effect=AdminAuthError("nope")),
+		):
 			out = diagnostics.force_resync(action="reload")
 		self.assertEqual(out["action"], "reload")
 		self.assertIn("last_sync_status", out)
