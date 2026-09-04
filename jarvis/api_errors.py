@@ -381,6 +381,21 @@ def _parse_traceback(traceback: str) -> tuple[str, str, list[str]]:
 	return exc_class, exc_message, frames
 
 
+#: Error Log.owner values that are not a real reporting user - mirrors the
+#: convention used elsewhere in this app (e.g. jarvis.chat.agent_runs).
+_NON_USER_OWNERS = ("Administrator", "Guest")
+
+
+def _error_log_user_ref(owner: str | None) -> str:
+	"""``owner`` when it names a real user, else "" - the same per-user
+	attribution ``_collect_ui_errors`` already sends for UI errors
+	(``jarvis.error_push``), extended to code-level exceptions so admin's
+	per-user error rollup covers both lanes."""
+	if not owner or owner in _NON_USER_OWNERS:
+		return ""
+	return owner
+
+
 def collect_error_log(since: str | None, limit: int = ERROR_LOG_SCAN_LIMIT) -> dict:
 	"""Read new ``Error Log`` rows after ``since``, keep only jarvis-origin ones,
 	and normalize them into the push shape.
@@ -392,7 +407,7 @@ def collect_error_log(since: str | None, limit: int = ERROR_LOG_SCAN_LIMIT) -> d
 	logs = frappe.get_all(
 		"Error Log",
 		filters=filters,
-		fields=["name", "method", "error", "creation"],
+		fields=["name", "method", "error", "creation", "owner"],
 		order_by="creation asc",
 		limit=limit,
 	)
@@ -416,6 +431,7 @@ def collect_error_log(since: str | None, limit: int = ERROR_LOG_SCAN_LIMIT) -> d
 				"fingerprint": _traceback_fingerprint(exc_class, frames),
 				"occurred_at": str(log.creation),
 				"severity": "error",
+				"user_ref": _error_log_user_ref(log.owner),
 			}
 		)
 	return {"rows": rows, "watermark": watermark}
