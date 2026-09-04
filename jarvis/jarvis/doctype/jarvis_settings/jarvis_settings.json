@@ -129,6 +129,7 @@
   "release_notice_active",
   "latest_jarvis_version",
   "release_notice_message",
+  "release_notice_tier",
   "system_tab",
   "deployment_section",
   "deployment_mode",
@@ -937,6 +938,12 @@
    "fieldname": "release_notice_message",
    "fieldtype": "Small Text",
    "label": "Release Notice Message",
+   "read_only": 1
+  },
+  {
+   "fieldname": "release_notice_tier",
+   "fieldtype": "Data",
+   "label": "Release Notice Tier",
    "read_only": 1
   },
   {

@@ -17,6 +17,7 @@ _FIELDS = (
 	"release_notice_active",
 	"latest_jarvis_version",
 	"release_notice_message",
+	"release_notice_tier",
 )
 
 
@@ -116,6 +117,37 @@ class TestBootPayload(FrappeTestCase):
 		self.assertFalse(p["active"])
 		self.assertEqual(p["version"], "")
 		self.assertEqual(p["message"], "")
+
+	# -- tier (Slice 2) -------------------------------------------------------
+
+	def test_persist_and_boot_carry_tier(self):
+		release_notice.persist({"active": 0, "tier": "soft", "version": NEWER, "message": "m"})
+		p = release_notice.boot_payload()
+		self.assertEqual(p["tier"], "soft")
+		self.assertFalse(p["active"])
+
+	def test_hard_tier_sets_active(self):
+		release_notice.persist({"active": 1, "tier": "hard", "version": NEWER, "message": "m"})
+		p = release_notice.boot_payload()
+		self.assertEqual(p["tier"], "hard")
+		self.assertTrue(p["active"])
+
+	def test_missing_tier_derives_from_active(self):
+		# Old CP omits the tier key -> derive it from active (a hard gate reads hard).
+		release_notice.persist({"active": 1, "version": NEWER, "message": "m"})
+		self.assertEqual(release_notice.boot_payload()["tier"], "hard")
+
+	def test_self_clear_zeroes_both_tiers(self):
+		# Bench already at target -> both active and tier clear, even a stored hard.
+		release_notice.persist({"active": 1, "tier": "hard", "version": __version__, "message": "m"})
+		p = release_notice.boot_payload()
+		self.assertFalse(p["active"])
+		self.assertEqual(p["tier"], "none")
+
+	def test_empty_notice_clears_tier(self):
+		release_notice.persist({"active": 1, "tier": "hard", "version": NEWER, "message": "m"})
+		release_notice.persist({})
+		self.assertEqual(release_notice.boot_payload()["tier"], "none")
 
 
 class TestVersionParse(FrappeTestCase):

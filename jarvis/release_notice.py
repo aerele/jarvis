@@ -14,6 +14,7 @@ _FIELDS = (
 	"release_notice_active",
 	"latest_jarvis_version",
 	"release_notice_message",
+	"release_notice_tier",
 )
 _CHECK_CACHE_KEY = "jarvis:release_notice_checked"
 _CHECK_CACHE_TTL_S = 30
@@ -49,6 +50,9 @@ def persist(notice: dict) -> None:
 			"release_notice_active": 1 if n.get("active") else 0,
 			"latest_jarvis_version": n.get("version") or "",
 			"release_notice_message": n.get("message") or "",
+			# Back-compat: an old CP omits `tier`, so derive it from `active` -- a hard
+			# gate still reads "hard", everything else "none".
+			"release_notice_tier": n.get("tier") or ("hard" if n.get("active") else "none"),
 		}
 		current = frappe.db.get_value(SETTINGS, SETTINGS, list(_FIELDS), as_dict=True) or {}
 		if all(current.get(k) == v for k, v in fresh.items()):
@@ -64,12 +68,15 @@ def boot_payload() -> dict:
 	target = (row.get("latest_jarvis_version") or "").strip()
 	# Self-clear: this bench is already at the target, so don't wait on the control
 	# plane to say so - otherwise an unreachable or mis-credentialed admin would
-	# keep an updated tenant blocked with no way out.
-	active = bool(row.get("release_notice_active")) and not _already_current(target)
+	# keep an updated tenant blocked with no way out. Clears BOTH tiers.
+	current = _already_current(target)
+	active = bool(row.get("release_notice_active")) and not current
+	tier = "none" if current else (row.get("release_notice_tier") or ("hard" if active else "none"))
 	return {
 		"active": active,
 		"version": target,
 		"message": row.get("release_notice_message") or "",
+		"tier": tier,
 	}
 
 
