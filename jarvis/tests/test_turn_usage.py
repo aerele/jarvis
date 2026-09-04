@@ -197,6 +197,53 @@ class TestTurnUsage(FrappeTestCase):
 		self.assertEqual(row.context_capacity, 200000)
 		self.assertEqual(row.context_pct, 25.0)
 
+	# -- review fix 1: a sweep row with no capacity must not clobber a ------ #
+	# -- previously known one with 0 ----------------------------------------- #
+	def test_refresh_session_snapshots_keeps_stored_capacity_when_row_has_none(self):
+		_make_session("agent:tu-ctx-keep", USER_A)
+		usage.refresh_session_snapshots(
+			[{"key": "agent:tu-ctx-keep", "totalTokens": 50000, "contextTokens": 200000}]
+		)
+		# A later sweep row for the same session that reports no contextTokens
+		# (e.g. the gateway omitted it this cycle) - last_total_tokens still
+		# moves (it is the row's own honest snapshot), but capacity/pct must
+		# NOT be zeroed out just because this particular row didn't carry one.
+		usage.refresh_session_snapshots([{"key": "agent:tu-ctx-keep", "totalTokens": 60000}])
+		row = frappe.db.get_value(
+			SESSION,
+			{"session_key": "agent:tu-ctx-keep"},
+			["last_total_tokens", "context_capacity", "context_pct"],
+			as_dict=True,
+		)
+		self.assertEqual(row.last_total_tokens, 60000, "the fresh snapshot always moves")
+		self.assertEqual(row.context_capacity, 200000, "stored capacity must survive a capacity-less row")
+		self.assertEqual(row.context_pct, 25.0, "stored pct must survive a capacity-less row")
+
+	# -- review fix 3: last_usage_at/modified reliably order "newest" even -- #
+	# -- when the gateway row carries no updatedAt --------------------------- #
+	def test_refresh_session_snapshots_stamps_last_usage_at_without_updated_at(self):
+		_make_session("agent:tu-ctx-stamp", USER_A)
+		before = frappe.db.get_value(SESSION, {"session_key": "agent:tu-ctx-stamp"}, "last_usage_at")
+		self.assertIsNone(before, "a fresh session has never had a usage stamp")
+		# No "updatedAt" key at all - the branch that previously never touched
+		# last_usage_at / modified.
+		usage.refresh_session_snapshots([{"key": "agent:tu-ctx-stamp", "totalTokens": 1000}])
+		after = frappe.db.get_value(
+			SESSION, {"session_key": "agent:tu-ctx-stamp"}, ["last_usage_at", "modified"], as_dict=True
+		)
+		self.assertIsNotNone(after.last_usage_at, "COALESCE(..., NOW()) must stamp a first usage time")
+		first_stamp = after.last_usage_at
+		first_modified = after.modified
+		# A second no-updatedAt sweep must PRESERVE the prior last_usage_at
+		# (COALESCE keeps the real stored value over a missing one) while
+		# still advancing `modified`, so "just synced" is still orderable.
+		usage.refresh_session_snapshots([{"key": "agent:tu-ctx-stamp", "totalTokens": 2000}])
+		again = frappe.db.get_value(
+			SESSION, {"session_key": "agent:tu-ctx-stamp"}, ["last_usage_at", "modified"], as_dict=True
+		)
+		self.assertEqual(again.last_usage_at, first_stamp, "last_usage_at must not be clobbered by NOW()")
+		self.assertNotEqual(again.modified, first_modified, "modified must still advance on every sweep")
+
 	# -- (b) VALID_ZERO path still writes a row (attribution, zero tokens) -- #
 	def test_valid_zero_row_writes_attribution(self):
 		_make_session("agent:tu-zero", USER_A, profile_agent_id="", profile_tier="full")
@@ -211,6 +258,46 @@ class TestTurnUsage(FrappeTestCase):
 		self.assertEqual(rows[0].user, USER_A)
 		self.assertEqual(rows[0].tokens_in, 0)
 		self.assertEqual(rows[0].tokens_out, 0)
+
+	# -- review fix 4: VALID_ZERO must still refresh the context snapshot --- #
+	def test_valid_zero_row_refreshes_context_snapshot(self):
+		_make_session("agent:tu-zero-ctx", USER_A)
+		outcome = usage.record_turn_usage(
+			"agent:tu-zero-ctx",
+			self._row(inputTokens=0, outputTokens=0, totalTokens=42000, contextTokens=200000),
+		)
+		self.assertEqual(outcome, usage.USAGE_VALID_ZERO)
+		row = frappe.db.get_value(
+			SESSION,
+			{"session_key": "agent:tu-zero-ctx"},
+			["last_total_tokens", "context_capacity", "context_pct", "last_usage_at"],
+			as_dict=True,
+		)
+		self.assertEqual(row.last_total_tokens, 42000)
+		self.assertEqual(row.context_capacity, 200000)
+		self.assertEqual(row.context_pct, 21.0)
+		self.assertIsNotNone(row.last_usage_at)
+
+	def test_valid_zero_row_no_capacity_does_not_clobber_stored_one(self):
+		# Same no-clobber guard as refresh_session_snapshots (fix 1), on the
+		# record_turn_usage VALID_ZERO path.
+		_make_session("agent:tu-zero-keep", USER_A)
+		usage.record_turn_usage(
+			"agent:tu-zero-keep",
+			self._row(inputTokens=1, outputTokens=1, totalTokens=50000, contextTokens=200000),
+		)
+		usage.record_turn_usage(
+			"agent:tu-zero-keep", self._row(inputTokens=0, outputTokens=0, totalTokens=51000)
+		)
+		row = frappe.db.get_value(
+			SESSION,
+			{"session_key": "agent:tu-zero-keep"},
+			["last_total_tokens", "context_capacity", "context_pct"],
+			as_dict=True,
+		)
+		self.assertEqual(row.last_total_tokens, 51000)
+		self.assertEqual(row.context_capacity, 200000)
+		self.assertEqual(row.context_pct, 25.0)
 
 	# -- (c) RETRY path writes nothing ---------------------------------------- #
 	def test_retry_path_writes_nothing(self):
@@ -733,6 +820,112 @@ class TestUsageRollupContextAndUsersDaily(FrappeTestCase):
 		rollup, _ = usage_push._build_rollup()
 		ctx = {u["email"]: u for u in rollup["users"]}[USER_A]["context"]
 		self.assertEqual(ctx, usage_push._EMPTY_CONTEXT)
+
+	# -- review fix 2: pct is computed PER SESSION, not used_max paired with -#
+	# -- a DIFFERENT session's capacity --------------------------------------#
+	def test_context_block_picks_highest_pct_session_not_highest_used_session(self):
+		self._seed_settings(USER_A, 10)
+		# Session 1: a huge-context model, LOW pct despite the highest raw
+		# used_max (190000 tokens).
+		_make_session("agent:tu-roll-pct1", USER_A)
+		frappe.db.set_value(
+			SESSION,
+			{"session_key": "agent:tu-roll-pct1"},
+			{
+				"last_total_tokens": 190000,
+				"context_capacity": 1000000,
+				"last_usage_at": frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-10),
+			},
+			update_modified=False,
+		)
+		# Session 2: a small-context model, HIGH pct despite fewer raw tokens.
+		# The buggy pairing (highest used_max + "newest" capacity) would have
+		# reported used_max=190000 against capacity=100000 -> a nonsensical
+		# 190% - or, if session 1 happened to be "newest", the right capacity
+		# by luck; this fixture makes session 2 the newest too, so the OLD
+		# code's "capacity from the newest row" would have picked session 2's
+		# capacity (100000) but still used_max from session 1 (190000).
+		_make_session("agent:tu-roll-pct2", USER_A)
+		frappe.db.set_value(
+			SESSION,
+			{"session_key": "agent:tu-roll-pct2"},
+			{
+				"last_total_tokens": 90000,
+				"context_capacity": 100000,
+				"last_usage_at": frappe.utils.now_datetime(),
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		rollup, _ = usage_push._build_rollup()
+		ctx = {u["email"]: u for u in rollup["users"]}[USER_A]["context"]
+		# Session 2 has the higher OWN pct (90% vs 19%), so it must win -
+		# never a used_max/capacity pair that spans two different sessions.
+		self.assertEqual(ctx["used_max"], 90000)
+		self.assertEqual(ctx["capacity"], 100000)
+		self.assertEqual(ctx["pct_max"], 90.0)
+		self.assertEqual(ctx["sessions_over_80"], 1)
+
+	# -- review fix 5: users[].email lowercased, matching users_daily -------- #
+	def test_users_email_lowercased_in_rollup(self):
+		mixed_email = "MixedCase@Example.Test"
+		lower_email = mixed_email.lower()
+		_ensure_user(lower_email)
+		doc = frappe.get_doc({"doctype": USETT, "user": mixed_email, "owner": lower_email})
+		doc.insert(ignore_permissions=True)
+		# Frappe's own Link-field validation canonicalizes `user` to the DB's
+		# stored (lowercase) docname BEFORE autoname runs (base_document.py:
+		# "MySQL is case insensitive. Preserve case of the original docname"),
+		# so doc.name is already lowercase here - a normal insert can never
+		# seed a mixed-case row. Force the STORED row to mixed case directly
+		# (a legacy row / data anomaly is exactly what this fix defends
+		# against) so the test exercises _build_rollup's own lowering, not
+		# Frappe's.
+		self.assertEqual(doc.name, lower_email, "sanity: Frappe already lowercased this on insert")
+		frappe.db.sql(
+			"UPDATE `tabJarvis User Settings` SET name=%(mixed)s, user=%(mixed)s WHERE name=%(lower)s",
+			{"mixed": mixed_email, "lower": lower_email},
+		)
+
+		def _cleanup_mixed_case_row():
+			frappe.db.sql(
+				"DELETE FROM `tabJarvis User Settings` WHERE name=%(mixed)s", {"mixed": mixed_email}
+			)
+			frappe.db.commit()
+
+		self.addCleanup(_cleanup_mixed_case_row)
+		frappe.db.set_value(
+			USETT,
+			mixed_email,
+			{
+				"usage_month": usage.current_month_key(),
+				"month_input_tokens": 1,
+				"month_output_tokens": 1,
+				"month_tokens": 2,
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		rollup, _ = usage_push._build_rollup()
+		emails = [u["email"] for u in rollup["users"]]
+		self.assertIn(lower_email, emails)
+		self.assertNotIn(mixed_email, emails)
+
+	# -- review fix 6: the UTC ZoneInfo is built once at module level -------- #
+	def test_iso_utc_z_reuses_module_level_utc_zoneinfo(self):
+		from zoneinfo import ZoneInfo as RealZoneInfo
+
+		calls = []
+
+		def spy(key):
+			calls.append(key)
+			return RealZoneInfo(key)
+
+		with patch("jarvis.chat.usage_push.ZoneInfo", side_effect=spy):
+			usage_push._iso_utc_z(frappe.utils.now_datetime())
+			usage_push._iso_utc_z(frappe.utils.now_datetime())
+		self.assertNotIn("UTC", calls, "UTC must come from the module-level _UTC, not a fresh ZoneInfo call")
+		self.assertIsInstance(usage_push._UTC, RealZoneInfo)
 
 	# -- users_daily: grouping, window, per_model cap, email case ----------- #
 	def test_users_daily_rollup_groups_by_user_day_model(self):
