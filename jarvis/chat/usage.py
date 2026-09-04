@@ -200,6 +200,43 @@ def _context_capacity_and_pct(row: dict | None, used_tokens: int) -> tuple[int, 
 	return capacity, round(100 * used_tokens / capacity, 1)
 
 
+def _refresh_session_context_snapshot(
+	session_key: str, context_tokens: int, context_capacity: int, context_pct: float
+) -> None:
+	"""Snapshot-only UPDATE (no token/run-count accrual) of a Chat Session's
+	context fields - used on ``record_turn_usage``'s VALID_ZERO path, where
+	there is no token delta to accrue but the row's context snapshot can
+	still have moved.
+
+	Mirrors ``refresh_session_snapshots``'s capacity guard: ``context_capacity``
+	/ ``context_pct`` are only written when THIS row actually reported a
+	capacity (``context_capacity > 0``) - a row that carries none must never
+	clobber a previously known capacity with 0. Uncommitted, matching the
+	VALID_ZERO/RETRY paths' no-commit contract (see ``record_turn_usage``'s
+	docstring) - the caller's outer commit (RECORDED) or the finalize effect's
+	own commit covers it."""
+	params = {
+		"ctx": context_tokens,
+		"now": frappe.utils.now_datetime(),
+		"session_key": session_key,
+	}
+	capacity_set_sql = ""
+	if context_capacity > 0:
+		capacity_set_sql = "context_capacity = %(ctx_cap)s, context_pct = %(ctx_pct)s,"
+		params["ctx_cap"] = context_capacity
+		params["ctx_pct"] = context_pct
+	frappe.db.sql(
+		f"""
+		UPDATE `tabJarvis Chat Session`
+		SET last_total_tokens = %(ctx)s,
+			{capacity_set_sql}
+			last_usage_at = %(now)s
+		WHERE session_key = %(session_key)s
+		""",
+		params,
+	)
+
+
 def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = None) -> str:
 	"""Record one completed turn's token delta from a ``sessions.list`` row.
 
@@ -256,14 +293,19 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 			or {}
 		)
 		user = session.get("user") or ""
+		context_tokens = int(row.get("totalTokens") or 0)
+		context_capacity, context_pct = _context_capacity_and_pct(row, context_tokens)
 		if delta <= 0:
 			# Task U1: attribution is still worth recording even though there is
 			# no token delta - the turn happened and this is the only record of
 			# WHO it happened for. Isolated + never raises (see the docstring).
 			_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
+			# C1 review: a zero-delta turn is still a real turn - the session's
+			# context snapshot (and, when this row reports one, its capacity)
+			# can have moved even though no tokens were spent this turn. Same
+			# no-commit contract as the rest of this branch (see docstring).
+			_refresh_session_context_snapshot(session_key, context_tokens, context_capacity, context_pct)
 			return USAGE_VALID_ZERO
-		context_tokens = int(row.get("totalTokens") or 0)
-		context_capacity, context_pct = _context_capacity_and_pct(row, context_tokens)
 
 		if not user:
 			# CDX-6: a FRESH POSITIVE token delta with no `Jarvis Chat Session` user
@@ -763,39 +805,45 @@ def refresh_session_snapshots(rows: list[dict]) -> dict:
 			context_tokens = int(row.get("totalTokens") or 0)
 			context_capacity, context_pct = _context_capacity_and_pct(row, context_tokens)
 			updated_ms = row.get("updatedAt")
-			if updated_ms:
-				# Naive system-tz datetime, matching how Frappe stores Datetime.
-				last_at = datetime.fromtimestamp(int(updated_ms) / 1000)
-				frappe.db.sql(
-					"""
-					UPDATE `tabJarvis Chat Session`
-					SET last_total_tokens = %(ctx)s, context_capacity = %(ctx_cap)s,
-						context_pct = %(ctx_pct)s, last_usage_at = %(at)s
-					WHERE session_key = %(session_key)s
-					""",
-					{
-						"ctx": context_tokens,
-						"ctx_cap": context_capacity,
-						"ctx_pct": context_pct,
-						"at": last_at,
-						"session_key": session_key,
-					},
-				)
-			else:
-				frappe.db.sql(
-					"""
-					UPDATE `tabJarvis Chat Session`
-					SET last_total_tokens = %(ctx)s, context_capacity = %(ctx_cap)s,
-						context_pct = %(ctx_pct)s
-					WHERE session_key = %(session_key)s
-					""",
-					{
-						"ctx": context_tokens,
-						"ctx_cap": context_capacity,
-						"ctx_pct": context_pct,
-						"session_key": session_key,
-					},
-				)
+			# Naive system-tz datetime, matching how Frappe stores Datetime.
+			last_at = datetime.fromtimestamp(int(updated_ms) / 1000) if updated_ms else None
+			# ONE update (review: two near-duplicate UPDATEs made "newest row"
+			# ordering unreliable elsewhere - a row with no updatedAt never
+			# stamped last_usage_at, and a raw SQL UPDATE never bumps modified
+			# on its own). COALESCE keeps a real prior last_usage_at over a
+			# missing updatedAt stamp, falling back to the sweep's own `now`
+			# (the Python-side stamp computed once above, NOT SQL's NOW() -
+			# NOW() is the DB session's timezone, which need not match the
+			# site's system tz that every other write to these columns uses,
+			# and MariaDB's NOW() is second-precision, too coarse to always
+			# order two sweeps run back-to-back) only when this session has
+			# never had one; modified = %(now)s always advances, so ordering
+			# by either column is reliable that this row was just synced.
+			# context_capacity / context_pct are set ONLY when THIS row
+			# actually reported a capacity (review: a sweep row that carries
+			# none must never clobber a previously known capacity with 0).
+			params = {
+				"ctx": context_tokens,
+				"usage_at": last_at,
+				"now": now,
+				"session_key": session_key,
+			}
+			capacity_set_sql = ""
+			if context_capacity > 0:
+				capacity_set_sql = "context_capacity = %(ctx_cap)s, context_pct = %(ctx_pct)s,"
+				params["ctx_cap"] = context_capacity
+				params["ctx_pct"] = context_pct
+			frappe.db.sql(
+				f"""
+				UPDATE `tabJarvis Chat Session`
+				SET last_total_tokens = %(ctx)s,
+					{capacity_set_sql}
+					last_usage_at = COALESCE(%(usage_at)s, last_usage_at, %(now)s),
+					modified = %(now)s
+				WHERE session_key = %(session_key)s
+				""",
+				params,
+			)
 			touched_users.add(user)
 			bucket = summary.setdefault(user, {"sessions": 0, "last_total_tokens": 0})
 			bucket["sessions"] += 1
