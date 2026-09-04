@@ -3422,90 +3422,107 @@
 							     enabled app (soft prompt-level nudge — see sendCtx.focus_connector
 							     in send()). Hidden with nothing to offer, exactly like the wiki
 							     button above, EXCEPT a focus already armed still shows so it stays
-							     clearable even if that connector was since disabled. -->
-							<button
+							     clearable even if that connector was since disabled. The pill's
+							     border/background live on this wrapping span (not on either
+							     button), because Composer.vue's own convention is that a remove
+							     control is a SIBLING button, never nested inside the one it sits
+							     on - the ×, below, is exactly that sibling, not a nested control. -->
+							<span
 								v-if="connectorFocusOptions.length || connectorFocus"
-								class="jv-iconbtn"
-								:title="
-									connectorFocus
-										? `Focused on ${connectorFocus.label}. Click to change.`
-										: 'Focus this chat on one connected app'
-								"
-								@click="toggleConnectorFocusPicker"
-								:aria-pressed="String(!!connectorFocus)"
 								:style="{
-									height: '30px',
 									display: 'flex',
 									alignItems: 'center',
-									gap: '4px',
-									padding: connectorFocus ? '0 4px 0 8px' : '0',
-									width: connectorFocus ? 'auto' : '30px',
-									justifyContent: 'center',
-									background: 'transparent',
-									border: connectorFocus ? '1px solid var(--cta)' : 'none',
+									height: '30px',
+									padding: connectorFocus ? '0 2px 0 8px' : '0',
 									borderRadius: '7px',
-									cursor: 'pointer',
+									border: connectorFocus ? '1px solid var(--cta)' : 'none',
 									color: connectorFocus ? 'var(--cta)' : 'var(--text-3)',
-									fontSize: '12px',
-									fontWeight: '500',
 								}"
 							>
-								<ConnectorLogo
-									v-if="connectorFocus"
-									:preset="connectorFocus.preset"
-									:size="14"
-								/>
-								<svg
-									v-else
-									width="16"
-									height="16"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.7"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path
-										d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"
-									/>
-									<path
-										d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
-									/>
-								</svg>
-								<span
-									v-if="connectorFocus"
-									style="
-										max-width: 110px;
-										overflow: hidden;
-										text-overflow: ellipsis;
-										white-space: nowrap;
+								<button
+									class="jv-iconbtn"
+									:title="
+										connectorFocus
+											? `Focused on ${connectorFocus.label}. Click to change.`
+											: 'Focus this chat on one connected app'
 									"
-									>{{ connectorFocus.label }}</span
+									@click="toggleConnectorFocusPicker"
+									:aria-pressed="String(!!connectorFocus)"
+									:style="{
+										height: '26px',
+										display: 'flex',
+										alignItems: 'center',
+										gap: '4px',
+										padding: 0,
+										width: connectorFocus ? 'auto' : '30px',
+										justifyContent: 'center',
+										background: 'transparent',
+										border: 'none',
+										borderRadius: '6px',
+										cursor: 'pointer',
+										color: 'inherit',
+										fontSize: '12px',
+										fontWeight: '500',
+									}"
 								>
-								<span
+									<ConnectorLogo
+										v-if="connectorFocus"
+										:preset="connectorFocus.preset"
+										:size="14"
+									/>
+									<svg
+										v-else
+										width="16"
+										height="16"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="1.7"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<path
+											d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"
+										/>
+										<path
+											d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+										/>
+									</svg>
+									<span
+										v-if="connectorFocus"
+										style="
+											max-width: 100px;
+											overflow: hidden;
+											text-overflow: ellipsis;
+											white-space: nowrap;
+										"
+										>{{ connectorFocus.label }}</span
+									>
+								</button>
+								<button
 									v-if="connectorFocus"
-									role="button"
-									tabindex="0"
+									class="jv-iconbtn"
 									title="Clear focus"
 									aria-label="Clear connector focus"
 									style="
-										display: inline-flex;
+										width: 20px;
+										height: 20px;
+										display: flex;
 										align-items: center;
 										justify-content: center;
-										width: 16px;
-										height: 16px;
-										margin-left: 2px;
+										background: transparent;
+										border: none;
 										border-radius: 50%;
 										cursor: pointer;
-										color: var(--text-3);
+										color: inherit;
+										font-size: 13px;
+										line-height: 1;
 									"
-									@click.stop="setConnectorFocus(null)"
-									@keydown.enter.stop="setConnectorFocus(null)"
-									@keydown.space.stop.prevent="setConnectorFocus(null)"
-									>×</span
+									@click="setConnectorFocus(null)"
 								>
-							</button>
+									×
+								</button>
+							</span>
 							<!-- The composer's own "Get help from a human" button used to live
 							     here (Task 6) - it's gone now that Support has one entry point,
 							     the headphones icon in the header (see supportEntryVisible near
@@ -8763,6 +8780,12 @@ async function newChat() {
 	swapDraft(null);
 	resetRunState();
 	currentId.value = conv?.name || conv;
+	// loadConversation does not run on this path (see below), so reload THIS
+	// conversation's own connector-focus pick here instead of leaving the ref
+	// on whatever the PREVIOUS chat had armed - createOrFocusEmpty can return
+	// an already-existing empty conversation, so this is a real reload (its
+	// own stored pick, if any), not just a reset to null.
+	connectorFocus.value = _loadConnectorFocusFor(currentId.value);
 	// This conversation IS the unsaved new-chat composer getting its id. The recovered/typed
 	// new-chat draft (already restored into `input` by swapDraft above) and its still-retained
 	// voice records lived under the _NEW_CHAT_SCOPE sentinel — migrate draft + records + mirror +
