@@ -11,9 +11,18 @@ Visibility matrix:
   * Personal connectors - readable only by their owner. Deliberately NOT
     expanded to the admin tier (mirrors ``Jarvis Conversation`` in
     ``chat_permissions.py``, which keeps System Manager scoped to its own
-    private chats too): a Personal connector's whole point is that nobody else,
-    including a tenant admin, can read or ride the owner's credential.
+    private chats too): a Jarvis Admin gets no read/write access to another
+    user's Personal connector row or its credential through this hook.
     ``Administrator`` bypasses Frappe perms entirely regardless.
+
+    CAVEAT this hook cannot close: a System Manager who already knows a
+    Personal row's docname (e.g. from ``Jarvis Connector Log.connector``, a
+    Data field System Managers can read) can still decrypt its credential via
+    ``frappe.client.get_password`` - that whitelisted method is gated by
+    ``frappe.only_for("System Manager")``, not by doc-level read permission,
+    so no ``has_permission`` hook can restrict it. This is a framework
+    property shared by every Password field in the app (``llm_api_key``
+    included), not a gap specific to this DocType.
 
 Write matrix:
 

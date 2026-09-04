@@ -121,6 +121,12 @@ class TestReadMatrix(_ConnectorPermTestCase):
 		self.assertIn(name, self._visible_names(PLAIN_A, [name]))
 		self.assertNotIn(name, self._visible_names(PLAIN_B, [name]))
 		self.assertNotIn(name, self._visible_names(ADMIN_USER, [name]))
+		# Exercise the real dispatcher (frappe.has_permission), not just the pure
+		# function above - this is what actually proves the hooks.py wiring
+		# (has_permission["Jarvis Connector"]) resolves to the right callable.
+		self.assertTrue(frappe.has_permission(CONNECTOR, "read", doc=name, user=PLAIN_A))
+		self.assertFalse(frappe.has_permission(CONNECTOR, "read", doc=name, user=PLAIN_B))
+		self.assertFalse(frappe.has_permission(CONNECTOR, "read", doc=name, user=ADMIN_USER))
 
 	def test_administrator_reads_everything(self):
 		shared = self._mk("Shared", "linear")

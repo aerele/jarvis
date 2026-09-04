@@ -721,7 +721,7 @@
    "fieldtype": "Check",
    "label": "Allow Custom URL Connectors",
    "default": "1",
-   "description": "When on, users may add a connector pointing at any admin-approved Custom URL, not just the built-in presets. Turn off to restrict everyone to the built-in presets only."
+   "description": "When on, users may add a connector pointing at any admin-approved Custom URL, not just the built-in presets. Turn off to restrict everyone to the built-in presets only. Readers treat an unset value as ON (Single defaults are not backfilled on migrate)."
   },
   {
    "fieldname": "connectors_col",
