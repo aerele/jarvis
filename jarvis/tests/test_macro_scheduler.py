@@ -767,7 +767,6 @@ class TestDefaultScheduleAnchors(FrappeTestCase):
 		# carries an ISO-int weekday must land on the installation AS ITS NAME, not
 		# be silently dropped.
 		from jarvis.chat import agents_api
-		from jarvis.tests._agent_access import allow_listing_for, clear_listing_access
 
 		listing_name = frappe.db.get_value("Jarvis Agent Listing", {"agent_slug": "close-auditor"}, "name")
 		if not listing_name:
@@ -791,12 +790,24 @@ class TestDefaultScheduleAnchors(FrappeTestCase):
 			update_modified=False,
 		)
 		frappe.db.commit()
-		# Agent access is deny-by-default (jarvis#1062 / PR #1095) - grant this
-		# test's user access to the listing the same way test_agents_marketplace
-		# and test_platform_agents_api_hardening do, or install_agent refuses
-		# with a PermissionError before ever reaching the schedule handling this
-		# test is about. _ensure_user already grants the Jarvis User role.
-		allow_listing_for(listing_name, roles=["Jarvis User"])
+		# On this line a listing with allowed_roles rows refuses installs from
+		# users outside those roles (empty = open). close-auditor may ship seeded
+		# roles, so grant Jarvis User for the duration of the test, or
+		# install_agent refuses with a PermissionError before ever reaching the
+		# schedule handling this test is about. _ensure_user already grants the
+		# Jarvis User role. Only the row added here is removed afterwards.
+		allowed_role_filters = {
+			"parenttype": "Jarvis Agent Listing",
+			"parentfield": "allowed_roles",
+			"parent": listing_name,
+			"role": "Jarvis User",
+		}
+		added_allowed_role = None
+		if not frappe.db.exists("Jarvis Agent Allowed Role", allowed_role_filters):
+			added_allowed_role = frappe.get_doc(
+				{"doctype": "Jarvis Agent Allowed Role", **allowed_role_filters}
+			).insert(ignore_permissions=True)
+			frappe.db.commit()
 		original_user = frappe.session.user
 		try:
 			frappe.set_user(owner)
@@ -809,7 +820,8 @@ class TestDefaultScheduleAnchors(FrappeTestCase):
 			self.assertEqual(weekday, "Wednesday")
 		finally:
 			frappe.set_user(original_user)
-			clear_listing_access(listing_name)
+			if added_allowed_role is not None:
+				frappe.db.delete("Jarvis Agent Allowed Role", {"name": added_allowed_role.name})
 			frappe.db.delete("Jarvis Agent Installation", {"owner": owner, "agent": listing_name})
 			frappe.db.set_value(
 				"Jarvis Agent Listing",
