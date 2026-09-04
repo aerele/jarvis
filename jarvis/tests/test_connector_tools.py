@@ -81,6 +81,33 @@ class TestConnectorGate(unittest.TestCase):
 		with mock.patch.object(_connector_gate, "frappe", fake_frappe):
 			self.assertFalse(_connector_gate.connectors_enabled())
 
+	def test_string_override_is_not_inverted(self):
+		# ``bench set-config`` writes JSON strings, so the override commonly arrives
+		# as "true"/"false"/"1"/"0" (or ""), not a native bool. A plain bool() would
+		# make "false"/"0" truthy and INVERT the kill switch - sbool must not.
+		# sbool recognizes true/false/1/0 (case-insensitive); any OTHER string is
+		# unrecognized and must fail closed (OFF) for a kill switch.
+		off_values = ["false", "False", "0", "", "yes", "no", "off", "on", "enabled"]
+		on_values = ["true", "True", "1"]
+		for val in off_values:
+			fake_frappe = mock.MagicMock()
+			fake_frappe.conf.get.return_value = val
+			with mock.patch.object(_connector_gate, "frappe", fake_frappe):
+				self.assertFalse(_connector_gate.connectors_enabled(), f"{val!r} should read OFF")
+			fake_frappe.db.get_single_value.assert_not_called()
+		for val in on_values:
+			fake_frappe = mock.MagicMock()
+			fake_frappe.conf.get.return_value = val
+			with mock.patch.object(_connector_gate, "frappe", fake_frappe):
+				self.assertTrue(_connector_gate.connectors_enabled(), f"{val!r} should read ON")
+
+	def test_int_override_coerces(self):
+		for val, expected in ((1, True), (0, False)):
+			fake_frappe = mock.MagicMock()
+			fake_frappe.conf.get.return_value = val
+			with mock.patch.object(_connector_gate, "frappe", fake_frappe):
+				self.assertEqual(_connector_gate.connectors_enabled(), expected)
+
 
 class _ConnectorRow(dict):
 	"""Minimal Document-like stand-in exposing ``.get`` like the real
@@ -247,7 +274,13 @@ class TestListConnectorActionsShape(unittest.TestCase):
 	(frappe-free), with ``frappe.get_list``/``get_doc`` mocked."""
 
 	def _action(self, action, allowed=0, read_only=0, destructive=0, description="d"):
-		return _Row(action=action, allowed=allowed, read_only=read_only, destructive=destructive, description=description)
+		return _Row(
+			action=action,
+			allowed=allowed,
+			read_only=read_only,
+			destructive=destructive,
+			description=description,
+		)
 
 	def _connector_doc(self, name, key, label, scope, actions):
 		return _Row(name=name, key=key, label=label, scope=scope, allowed_actions=actions)

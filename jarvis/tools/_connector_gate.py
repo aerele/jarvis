@@ -16,6 +16,7 @@ only once the flag is already on.
 from __future__ import annotations
 
 import frappe
+from frappe.utils import sbool
 
 SETTINGS_DOCTYPE = "Jarvis Settings"
 
@@ -31,10 +32,19 @@ def connectors_enabled() -> bool:
 	Fail-CLOSED: an unset/unreadable ``Jarvis Settings.connectors_enabled``
 	(default ``0``) or any error reading it means OFF, never a silent
 	fall-open. A site_config override, when present, wins outright in either
-	direction."""
+	direction.
+
+	The override is coerced with ``sbool``, NOT ``bool``: ``bench set-config``
+	writes JSON strings, so a plain ``bool("false")``/``bool("0")`` would read as
+	TRUE and INVERT the kill switch. ``sbool`` maps ``"true"/"1"`` -> on and
+	``"false"/"0"/""`` -> off; any other unrecognized string (``sbool`` passes it
+	through unchanged) is treated as OFF, the safe default for a kill switch."""
 	override = frappe.conf.get(_SITE_CONFIG_KEY)
 	if override is not None:
-		return bool(override)
+		coerced = sbool(override)
+		# sbool returns the original value for anything it does not recognize; an
+		# unrecognized string must fail closed rather than read truthy.
+		return False if isinstance(coerced, str) else bool(coerced)
 	try:
 		return bool(frappe.db.get_single_value(SETTINGS_DOCTYPE, "connectors_enabled"))
 	except Exception:
