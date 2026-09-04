@@ -104,12 +104,27 @@
 								:disabled="saving"
 							/>
 						</div>
+						<!-- weekly -> weekday name, monthly -> day of month; hidden for
+						     daily. Copies the Frequency control above exactly - jarvis#653.
+						     Monthly's 31 rows overflow this Select's popover with no cap of
+						     its own (frappe-ui's Select sets no max-height on its content,
+						     unlike Combobox/Autocomplete/MultiSelect) - the fix lives in
+						     src/main.css's [role="listbox"] [data-slot="content-body"]
+						     rule, app-wide for every plain Select, not here (nothing to add
+						     on this control itself). -->
+						<FormControl
+							v-if="form.schedule_frequency !== 'daily'"
+							class="flex-1"
+							type="select"
+							label="Day"
+							:options="dayOptions"
+							:modelValue="form.schedule_day"
+							:disabled="saving"
+							@update:modelValue="(v) => (form.schedule_day = v)"
+						/>
 					</div>
-					<div
-						v-if="!isNew && form.schedule_enabled && nextRunAt"
-						class="text-sm text-ink-gray-5"
-					>
-						Next run: {{ nextRunAt }}
+					<div v-if="scheduleSummary" class="text-sm text-ink-gray-5">
+						{{ scheduleSummary }}
 					</div>
 				</div>
 			</DocSection>
@@ -182,6 +197,7 @@ import {
 	reactive,
 	computed,
 	watch,
+	nextTick,
 	shallowRef,
 	inject,
 	onMounted,
@@ -206,6 +222,12 @@ import { useDocmeta } from "@/composables/useDocmeta";
 import StepsBuilder from "./StepsBuilder.vue";
 import { takeMacroPrefill } from "@/composables/macroPrefill";
 import { exactDate } from "@/utils/datetime";
+import {
+	WEEKDAY_OPTIONS,
+	DAY_OF_MONTH_OPTIONS,
+	deriveScheduleDay,
+	scheduleAnchorPhrase,
+} from "@/lib/scheduleAnchor";
 import * as api from "@/api";
 import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
@@ -243,9 +265,45 @@ const form = reactive({
 	schedule_enabled: false,
 	schedule_frequency: "daily",
 	schedule_time: "09:00",
+	schedule_day: "",
 	steps: [],
 	merged_prompt: "",
 });
+// jarvis#653: weekly -> weekday names, monthly -> 1..31 (ordinal labels) - the
+// Day control's own option list, keyed off the DRAFT frequency so it flips the
+// instant Frequency changes, before any save.
+const dayOptions = computed(() =>
+	form.schedule_frequency === "weekly" ? WEEKDAY_OPTIONS : DAY_OF_MONTH_OPTIONS
+);
+// jarvis#653: guards the interactive-frequency-change watcher below from firing
+// off `seed()`'s own frequency+day assignment (which legitimately sets day to
+// "" for a legacy row with no anchor saved - the defaulting watcher must not
+// treat that as "needs a default"). True for exactly the synchronous pre-flush
+// window seed()'s own assignment runs in; nextTick clears it once the DOM
+// update (and any watcher chained off THIS assignment) has settled. Mirrors
+// AgentDetail.vue's `seedingSchedule` guard exactly.
+let seedingSchedule = false;
+// jarvis#653: an interactive Frequency change (NOT `seed()`, guarded off by
+// `seedingSchedule`) needs its OWN default day - "Monday" for weekly, the 1st
+// for monthly - so the Day select never shows a visible option ("Monday")
+// while the model is empty (a phantom selection that would silently save
+// nothing). Only fills in when the current day does not already belong to the
+// new frequency's own option set, so switching away and back keeps whatever
+// was picked.
+watch(
+	() => form.schedule_frequency,
+	(freq) => {
+		if (seedingSchedule) return;
+		if (freq === "weekly" && !WEEKDAY_OPTIONS.some((o) => o.value === form.schedule_day)) {
+			form.schedule_day = "Monday";
+		} else if (
+			freq === "monthly" &&
+			!DAY_OF_MONTH_OPTIONS.some((o) => o.value === form.schedule_day)
+		) {
+			form.schedule_day = "1";
+		}
+	}
+);
 // Saved-state copy for the dirty compare (set by seed). MUST be a ref: on
 // /macros/:id the dirty computed first evaluates while the load is in flight,
 // and with a plain variable the `!snapshot` short-circuit would track zero
@@ -275,6 +333,7 @@ const dirty = computed(() => {
 		(form.schedule_enabled ? 1 : 0) !== snap.schedule_enabled ||
 		(form.schedule_frequency || "daily") !== snap.schedule_frequency ||
 		(form.schedule_time || "") !== snap.schedule_time ||
+		(form.schedule_day || "") !== (snap.schedule_day || "") ||
 		JSON.stringify(cleanSteps(form.steps)) !== snap.stepsJson ||
 		(form.merged_prompt || "") !== snap.merged_prompt
 	);
@@ -291,6 +350,22 @@ const breadcrumbs = computed(() => [
 ]);
 
 const nextRunAt = computed(() => exactDate(nextRunRaw.value));
+// "Scheduled monthly on the 15th at 9:00 am. Next run: ..." - built from the
+// SAVED snapshot only (never the live draft), mirroring AgentDetail.vue's own
+// scheduleSummary exactly: blank while `dirty` (would narrate a schedule that
+// no longer matches the form - nextRunAt never recomputes off an unsaved
+// edit, it only ever changes on the next load()/seed()), when there is no
+// next_run_at, or when the SAVED schedule is off.
+const scheduleSummary = computed(() => {
+	const snap = snapshot.value;
+	if (!snap || props.isNew || dirty.value || !snap.schedule_enabled) return "";
+	if (!nextRunAt.value) return "";
+	const anchor = scheduleAnchorPhrase(snap.schedule_frequency, snap.schedule_day);
+	return (
+		`Scheduled ${snap.schedule_frequency}${anchor ? ` ${anchor}` : ""} ` +
+		`at ${formatTime12h(snap.schedule_time)}. Next run: ${nextRunAt.value}`
+	);
+});
 
 const overflowOptions = computed(() => {
 	const opts = [];
@@ -329,9 +404,25 @@ function toHHMM(t) {
 	const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ""));
 	return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
 }
+// "09:00" -> "9:00 am" - mirrors TimePicker's OWN formatDisplay (frappe-ui,
+// use12Hour default), matching AgentDetail.vue's own copy of this helper.
+function formatTime12h(hhmm) {
+	const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ""));
+	if (!m) return "";
+	const h = parseInt(m[1], 10);
+	const am = h < 12;
+	const h12 = h % 12 === 0 ? 12 : h % 12;
+	return `${h12}:${m[2]} ${am ? "am" : "pm"}`;
+}
 
 // ── load / init (re-runs when /macros/new saves and replaces to /macros/:id) ─
 function seed(data) {
+	// jarvis#653: guard the frequency-change watcher above from the assignment
+	// two lines down - a legacy row with schedule_frequency weekly/monthly and
+	// NO anchor saved must seed schedule_day as "" (matching the snapshot below
+	// verbatim), not have the watcher fabricate "Monday"/"1" and leave the page
+	// dirty before the owner has touched anything.
+	seedingSchedule = true;
 	form.macro_name = data.macro_name || "";
 	form.description = data.description || "";
 	form.enabled = data.enabled == null ? true : !!data.enabled;
@@ -340,6 +431,14 @@ function seed(data) {
 	form.schedule_enabled = !!data.schedule_enabled;
 	form.schedule_frequency = data.schedule_frequency || "daily";
 	form.schedule_time = toHHMM(data.schedule_time) || "09:00";
+	form.schedule_day = deriveScheduleDay(
+		form.schedule_frequency,
+		data.schedule_weekday,
+		data.schedule_day_of_month
+	);
+	nextTick(() => {
+		seedingSchedule = false;
+	});
 	form.steps = mapSteps(data.steps);
 	if (!form.steps.length) form.steps = [{ label: "", prompt: "", skills: [] }];
 	form.merged_prompt = data.merged_prompt || "";
@@ -354,6 +453,7 @@ function seed(data) {
 		schedule_enabled: form.schedule_enabled ? 1 : 0,
 		schedule_frequency: form.schedule_frequency,
 		schedule_time: form.schedule_time,
+		schedule_day: form.schedule_day,
 		stepsJson: JSON.stringify(cleanSteps(form.steps)),
 		merged_prompt: form.merged_prompt,
 	};
@@ -429,6 +529,9 @@ async function save() {
 			schedule_enabled: form.schedule_enabled ? 1 : 0,
 			schedule_frequency: form.schedule_frequency || "daily",
 			schedule_time: form.schedule_time || "09:00",
+			schedule_weekday: form.schedule_frequency === "weekly" ? form.schedule_day || "" : "",
+			schedule_day_of_month:
+				form.schedule_frequency === "monthly" ? Number(form.schedule_day) || 0 : 0,
 		};
 		// Summary handling (update only): an edited summary is explicit intent →
 		// send it; a rename-only save keeps the stored one; changed steps with an

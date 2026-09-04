@@ -29,7 +29,7 @@
 		@refresh="resetLoad"
 	>
 		<template #cell-dashboard_title="{ row }">
-			<div class="truncate text-base font-medium text-ink-gray-8">
+			<div class="truncate text-base font-medium text-ink-gray-9">
 				{{ row.dashboard_title || row.name }}
 			</div>
 		</template>
