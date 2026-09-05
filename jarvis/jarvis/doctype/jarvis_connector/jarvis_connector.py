@@ -110,11 +110,25 @@ class JarvisConnector(Document):
 		only in ``connectors_api``). Server writes under ``ignore_permissions`` (the
 		API already resolved the app itself) skip the check.
 
+		The pin is enforced ONLY when the link (or ``auth_method``) is being set or
+		changed - never on an unchanged resave. Re-deriving every save would 403 a
+		legitimately created row the moment the preset resolves elsewhere (e.g. a
+		second Connected App with the same ``provider_name`` later wins the
+		``get_all(limit=1)`` lookup), locking the row against even a disable or
+		relabel. Steering still cannot slip through: aiming a row at another app
+		requires setting or changing the field, which this catches.
+
 		The resolver is imported lazily to avoid a load-time cycle between this
 		controller and ``connectors_api``."""
 		if self.flags.ignore_permissions:
 			return
 		if (self.auth_method or "") == "OAuth":
+			if not (
+				self.is_new()
+				or self.has_value_changed("connected_app")
+				or self.has_value_changed("auth_method")
+			):
+				return
 			from jarvis.chat.connectors_api import _resolve_connected_app_for_preset
 
 			expected = _resolve_connected_app_for_preset(self.preset)

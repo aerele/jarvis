@@ -150,6 +150,29 @@ class _ConnectorApiTestCase(FrappeTestCase):
 		finally:
 			frappe.set_user(prev)
 
+	def _mk_connected_app_named(self, name: str, provider_name: str) -> str:
+		"""A Connected App whose docname differs from its provider_name, so two apps
+		can share one provider_name (Frappe does not enforce uniqueness on it)."""
+		prev = frappe.session.user
+		frappe.set_user("Administrator")
+		try:
+			doc = frappe.get_doc(
+				{
+					"doctype": "Connected App",
+					"name": name,
+					"provider_name": provider_name,
+					"client_id": "test-client-id",
+					"client_secret": "test-client-secret",
+					"authorization_uri": "https://example.invalid/authorize",
+					"token_uri": "https://example.invalid/token",
+				}
+			).insert(ignore_permissions=True)
+			self._connected_apps.append(doc.name)
+			frappe.db.commit()
+			return doc.name
+		finally:
+			frappe.set_user(prev)
+
 	def _mk_token_cache(
 		self,
 		connected_app: str,
@@ -733,6 +756,23 @@ class TestConnectorOauthFieldGuard(_ConnectorApiTestCase):
 		app = self._mk_connected_app("GitHub")
 		doc = self._insert_as(PLAIN_A, key="gh-key", auth_method="API Key", connected_app=app)
 		self.assertFalse(doc.connected_app)
+
+	def test_legit_oauth_row_resaves_even_if_preset_now_resolves_elsewhere(self):
+		"""A row created against app A must not lock when a second same-provider app
+		later wins the resolver (provider_name is not unique). Resave with the link
+		unchanged must NOT re-derive-and-403, or the row can never be disabled."""
+		app_a = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-resave", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app_a
+		)
+		# A second Connected App with the same provider_name now exists; the resolver
+		# (get_all limit=1) may return it instead of app_a.
+		self._mk_connected_app_named("GitHub-2", provider_name="GitHub")
+		frappe.set_user(PLAIN_A)
+		doc = frappe.get_doc(CONNECTOR, name)
+		doc.label = "renamed by owner"
+		doc.save()  # no ignore_permissions - the guard runs; must not throw
+		self.assertEqual(frappe.get_doc(CONNECTOR, name).connected_app, app_a)
 
 
 class TestListConnectorsOauth(_ConnectorApiTestCase):
