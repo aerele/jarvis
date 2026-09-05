@@ -2290,6 +2290,31 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 			return
 		ctx.deps.apply_tool(ctx, rs, event)
 
+	def on_status(event_seq: int, status: str) -> None:
+		# LOSSY (like a delta): a raise here drops this one frame and continues
+		# the lane — a transient "compacting"/"compacted" marker is never worth
+		# quarantining a turn over. Flush any batched deltas first so the
+		# realtime order matches the frame order (same discipline as on_tool).
+		if ctx.lease_lost:
+			return
+		try:
+			_flush_deltas(ctx, rs)
+		except ts.LeaseLostExit:
+			ctx.lease_lost = rs.run_id
+			return
+		if rs.owner:
+			ts.publish_fenced(
+				rs.owner,
+				"run:status",
+				conversation_id=rs.conversation,
+				run_id=rs.run_id,
+				event_seq=event_seq,
+				message_id=rs.assistant_message,
+				status=status,
+				pump_epoch=ctx.epoch,
+				relay_target_id=ctx.relay_target_id,
+			)
+
 	def on_terminal(kind: str, payload: dict) -> None:
 		if ctx.lease_lost:
 			return
@@ -2343,6 +2368,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		on_terminal=on_terminal,
 		on_quarantine=on_quarantine,
 		on_closing=on_closing,
+		on_status=on_status,
 	)
 
 

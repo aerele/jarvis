@@ -468,3 +468,33 @@ class TestPrepareErrorCodeOverride(FrappeTestCase):
 	def test_no_explicit_code_falls_back_to_classify_error(self):
 		published = self._run(error="insufficient credit")
 		self.assertEqual(published.get("code"), "provider")
+
+
+class TestCompactionEventPublishesRunStatus(FrappeTestCase):
+	"""The runtime brackets an automatic compaction with a ``compaction``
+	stream event; the turn handler must surface it to the chat as a
+	``run:status`` so the UI can show a transient "reorganising" state
+	without treating the run as errored or finished."""
+
+	def test_compaction_event_publishes_run_status(self):
+		with patch.object(turn_handler, "_publish_to_user") as pub:
+			turn_handler._handle_event_inner(
+				{"kind": "compaction", "phase": "start", "completed": False},
+				conversation_id="c1",
+				assistant_msg_name="m1",
+				tool_msg_by_call_id={},
+				user="Administrator",
+				run_id="r1",
+				batcher=MagicMock(),
+			)
+			turn_handler._handle_event_inner(
+				{"kind": "compaction", "phase": "end", "completed": True},
+				conversation_id="c1",
+				assistant_msg_name="m1",
+				tool_msg_by_call_id={},
+				user="Administrator",
+				run_id="r1",
+				batcher=MagicMock(),
+			)
+		statuses = [c.args[1]["status"] for c in pub.call_args_list if c.args[1]["kind"] == "run:status"]
+		self.assertEqual(statuses, ["compacting", "compacted"])

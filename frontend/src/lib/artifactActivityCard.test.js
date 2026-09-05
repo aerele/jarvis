@@ -256,9 +256,12 @@ test("the common card is gated on artifactKind, mutually exclusive with the morp
 		chatSrc,
 		/v-if="artifactKind && \(activeTools\.length \|\| waiting\) && !queuedTurn"/
 	);
+	// Also excludes a live compaction (F7): the compacting banner owns the row
+	// while a compact is in flight, so the generic activity line must not
+	// render alongside it either.
 	assert.match(
 		chatSrc,
-		/v-if="\s*\(activeTools\.length \|\| waiting\) &&\s*!queuedTurn &&\s*!artifactKind &&\s*!gotoMorph\s*"/
+		/v-if="\s*\(activeTools\.length \|\| waiting\) &&\s*!queuedTurn &&\s*!artifactKind &&\s*!gotoMorph &&\s*!compacting\s*"/
 	);
 });
 
