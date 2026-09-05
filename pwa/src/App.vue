@@ -3,10 +3,13 @@ import { onMounted, onUnmounted, inject } from "vue";
 import { useRouter } from "vue-router";
 import AppDrawer from "./components/AppDrawer.vue";
 import InstallBanner from "./components/InstallBanner.vue";
+import UpdateBanner from "./components/UpdateBanner.vue";
 import UpdateNoticeGate from "./components/UpdateNoticeGate.vue";
+import WhatsNewSheet from "./components/WhatsNewSheet.vue";
 import { store } from "./store";
 import { sessionUser } from "./router";
-import { showNotice } from "./noticeGate";
+import { showBanner, showNotice } from "./noticeGate";
+import { installBannerVisible } from "./lib/installBanner";
 import { prefs } from "./lib/prefs";
 import { agentName } from "@/branding";
 import { flushBuffered } from "@shared/lib/errorReporter";
@@ -117,6 +120,12 @@ onUnmounted(() => {
 		<!-- First child, in the flow: the install strip pushes the app down rather
 		     than covering any part of it. -->
 		<InstallBanner />
+		<!-- Release-nudge soft banner (Slice 3b): top-of-app, next to the install
+		     strip. Yields to InstallBanner (installBannerVisible - only one top
+		     slot shows at a time) and to a signed-out visitor (nothing to nudge on
+		     the login screen). Dismiss minimises it into whichever VersionPill is
+		     currently mounted (ChatView's header; see noticeGate.js's pillHandle). -->
+		<UpdateBanner v-if="showBanner && !installBannerVisible && sessionUser()" />
 		<router-view v-slot="{ Component }">
 			<component :is="Component" />
 		</router-view>
@@ -124,5 +133,9 @@ onUnmounted(() => {
 		<!-- Release-notice overlay: a hard block above the app for a signed-in
 		     user, until the control plane stops serving the notice. -->
 		<UpdateNoticeGate v-if="showNotice && sessionUser()" />
+		<!-- What's-new sheet (Slice 3b): ONE global instance, opened from the
+		     pill, the soft banner above, and the hard gate's "See what's new"
+		     link, all via the shared whatsNewOpen ref. -->
+		<WhatsNewSheet />
 	</div>
 </template>

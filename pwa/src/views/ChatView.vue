@@ -41,6 +41,7 @@ import RecordCards from "../components/RecordCards.vue";
 import Sheet from "../components/Sheet.vue";
 import SkillChips from "../components/SkillChips.vue";
 import ThinkingIndicator from "../components/ThinkingIndicator.vue";
+import VersionPill from "../components/VersionPill.vue";
 // Lazy: the voice sheet pulls in the shared audio recorder, and a user who never
 // taps the mic should never pay for it.
 const VoiceSheet = defineAsyncComponent(() => import("../components/VoiceSheet.vue"));
@@ -678,6 +679,10 @@ onUnmounted(() => {
 			<div class="jv-head-title">{{ title }}</div>
 			<div class="jv-head-sub">{{ model ? `${agentName} · ${model}` : agentName }}</div>
 		</div>
+		<!-- Release-nudge version pill (Slice 3b): always-on "how current is my
+		     Jarvis" status; click opens What's-new. Hidden when the target
+		     version is unknown (VersionPill's own v-if). -->
+		<VersionPill />
 		<button
 			v-if="convId"
 			class="jv-icon-btn"
