@@ -239,6 +239,9 @@ class TestNotes(FrappeTestCase):
 			out = release_notice.notes()
 		gn.assert_called_once_with("16", "16.2.0", timeout_s=8)
 		self.assertEqual(out, {"notes": [{"version": "16.4.0"}]})
+		# A clean success never carries the error flag -> the panel shows notes /
+		# "all caught up", never its error state.
+		self.assertNotIn("error", out)
 
 	def test_notes_swallows_and_logs_admin_error(self):
 		with (
@@ -247,17 +250,37 @@ class TestNotes(FrappeTestCase):
 			patch("frappe.log_error") as log,
 		):
 			out = release_notice.notes()
-		self.assertEqual(out, {"notes": []})
+		# A genuine fetch failure flags the error so the panel shows its error state
+		# (+ Retry), NOT the misleading "all caught up" empty state.
+		self.assertEqual(out, {"notes": [], "error": True})
 		log.assert_called_once()
 
+	def test_notes_auth_error_returns_empty(self):
+		# A lapsed customer behind a stale pill: get_release_notes raises AdminAuthError.
+		# notes() must swallow it (never propagate raw CP prose) and flag the error state.
+		from jarvis.exceptions import AdminAuthError
+
+		with (
+			patch.object(release_notice, "__version__", "16.2.0"),
+			patch(
+				"jarvis.admin_client.get_release_notes",
+				side_effect=AdminAuthError("lapsed", status_code=403),
+			),
+			patch("frappe.log_error"),
+		):
+			out = release_notice.notes()
+		self.assertEqual(out, {"notes": [], "error": True})
+
 	def test_notes_unversioned_empty(self):
-		# major < 15 short-circuits before any admin round-trip.
+		# major < 15 short-circuits before any admin round-trip. "Nothing to show" is
+		# NOT an error, so no error flag travels -> the panel shows "all caught up".
 		with (
 			patch.object(release_notice, "__version__", "0.0.1"),
 			patch("jarvis.admin_client.get_release_notes") as gn,
 		):
 			out = release_notice.notes()
 		self.assertEqual(out, {"notes": []})
+		self.assertNotIn("error", out)
 		gn.assert_not_called()
 
 

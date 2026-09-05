@@ -29,6 +29,11 @@ test("pillFor: soft -> amber; behind>=1 shows the count, behind<1 falls back", (
 		tone: "amber",
 		label: "2 versions behind",
 	});
+	// behind==1 is singular: "1 version behind", never "1 versions behind".
+	assert.equal(
+		pillFor({ version: "16.4.0", tier: "soft", behind: 1 }).label,
+		"1 version behind"
+	);
 	assert.equal(
 		pillFor({ version: "16.4.0", tier: "soft", behind: 0 }).label,
 		"Update available"
@@ -43,6 +48,11 @@ test("pillFor: hard -> red; behind>=1 shows the count, behind<1 falls back", () 
 		tone: "red",
 		label: "5 versions behind",
 	});
+	// behind==1 is singular: "1 version behind", never "1 versions behind".
+	assert.equal(
+		pillFor({ version: "16.4.0", tier: "hard", behind: 1 }).label,
+		"1 version behind"
+	);
 	assert.equal(pillFor({ version: "16.4.0", tier: "hard", behind: 0 }).label, "Update required");
 });
 
@@ -89,8 +99,8 @@ function installLocalStorage() {
 test("writeSnooze/readSnooze: round-trip with a present localStorage", () => {
 	installLocalStorage();
 	try {
-		writeSnooze({ version: "16.4.0", banner_interval_days: 7 }, 1_000_000);
-		const snooze = readSnooze();
+		writeSnooze({ version: "16.4.0", banner_interval_days: 7 }, 1_000_000, "user@a");
+		const snooze = readSnooze("user@a");
 		assert.equal(snooze.version, "16.4.0");
 		assert.equal(snooze.until, 1_000_000 + 7 * DAY);
 	} finally {
@@ -101,8 +111,39 @@ test("writeSnooze/readSnooze: round-trip with a present localStorage", () => {
 test("writeSnooze: missing/zero interval defaults to 7 days", () => {
 	installLocalStorage();
 	try {
-		writeSnooze({ version: "16.4.0" }, 0);
-		assert.equal(readSnooze().until, 7 * DAY);
+		writeSnooze({ version: "16.4.0" }, 0, "user@a");
+		assert.equal(readSnooze("user@a").until, 7 * DAY);
+	} finally {
+		delete globalThis.localStorage;
+	}
+});
+
+test("snooze is per-user: user A's write doesn't suppress user B's banner", () => {
+	const store = installLocalStorage();
+	try {
+		writeSnooze({ version: "16.4.0", banner_interval_days: 7 }, 1_000_000, "user@a");
+		// A is snoozed...
+		assert.ok(readSnooze("user@a"));
+		// ...but B, who never dismissed, reads no snooze -> the banner still shows.
+		assert.equal(readSnooze("user@b"), null);
+		// The two keys are genuinely distinct in storage.
+		assert.notEqual(`${SNOOZE_KEY}:user@a`, `${SNOOZE_KEY}:user@b`);
+		assert.ok(store.has(`${SNOOZE_KEY}:user@a`));
+		assert.ok(!store.has(`${SNOOZE_KEY}:user@b`));
+	} finally {
+		delete globalThis.localStorage;
+	}
+});
+
+test("missing userId falls back to a stable 'anon' key (round-trips + matches undefined)", () => {
+	const store = installLocalStorage();
+	try {
+		writeSnooze({ version: "16.4.0", banner_interval_days: 7 }, 1_000_000, undefined);
+		// The write lands under the literal ":anon" bucket...
+		assert.ok(store.has(`${SNOOZE_KEY}:anon`));
+		// ...and a later read with no userId finds the very same snooze (stable key).
+		assert.equal(readSnooze().version, "16.4.0");
+		assert.equal(readSnooze(undefined).version, "16.4.0");
 	} finally {
 		delete globalThis.localStorage;
 	}
@@ -111,8 +152,8 @@ test("writeSnooze: missing/zero interval defaults to 7 days", () => {
 test("readSnooze: malformed JSON -> null, never throws", () => {
 	installLocalStorage();
 	try {
-		globalThis.localStorage.setItem(SNOOZE_KEY, "{not json");
-		assert.equal(readSnooze(), null);
+		globalThis.localStorage.setItem(`${SNOOZE_KEY}:user@a`, "{not json");
+		assert.equal(readSnooze("user@a"), null);
 	} finally {
 		delete globalThis.localStorage;
 	}
@@ -120,6 +161,6 @@ test("readSnooze: malformed JSON -> null, never throws", () => {
 
 test("readSnooze/writeSnooze: localStorage absent -> null / no-op, no throw", () => {
 	assert.equal(typeof globalThis.localStorage, "undefined");
-	assert.equal(readSnooze(), null);
-	assert.doesNotThrow(() => writeSnooze({ version: "16.4.0" }, 1000));
+	assert.equal(readSnooze("user@a"), null);
+	assert.doesNotThrow(() => writeSnooze({ version: "16.4.0" }, 1000, "user@a"));
 });

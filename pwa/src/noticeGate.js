@@ -7,8 +7,13 @@
 import { computed, ref } from "vue";
 import { call } from "frappe-ui";
 import { bannerShouldShow, writeSnooze, readSnooze } from "@shared/releaseNudge";
+import { sessionUser } from "./router";
 
 const n = window.release_notice || {};
+
+// Namespace the snooze by the signed-in user, so two people sharing a browser
+// profile keep independent snoozes; guest / signed-out -> "anon".
+const userId = sessionUser() || "anon";
 
 // The boot payload is stable for the page's lifetime, so this is a plain object
 // (not reactive): pillFor()/bannerShouldShow() read it, and it never changes.
@@ -32,7 +37,7 @@ export const showNotice = computed(() => notice.active && !cleared.value);
 // The snooze lives in localStorage; this ref mirrors it so the banner hides
 // reactively the moment it is snoozed. Seeded from storage at boot (a read-throw
 // reads as not-snoozed, so the banner shows - see readSnooze()).
-const snooze = ref(readSnooze());
+const snooze = ref(readSnooze(userId));
 
 // Reactive: soft tier AND not currently snoozed. `Date.now()` is read at
 // evaluation time; the only reactive dependency is `snooze`, so snoozing (which
@@ -46,7 +51,7 @@ export const showBanner = computed(() => bannerShouldShow(notice, Date.now(), sn
 // next boot - the accepted edge behaviour, spec §6).
 export function snoozeBanner() {
 	const now = Date.now();
-	writeSnooze(notice, now);
+	writeSnooze(notice, now, userId);
 	const days = notice.banner_interval_days || 7;
 	snooze.value = { until: now + days * 86400000, version: notice.version };
 }

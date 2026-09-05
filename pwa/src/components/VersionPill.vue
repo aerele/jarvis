@@ -16,6 +16,9 @@ const pulsing = ref(false);
 
 // Boot payload is stable for the page's lifetime, so derive once.
 const pill = pillFor(notice, agentName);
+// The screen-reader label names the action ("… — see what's new"); the visible
+// text stays the terse status label. Only meaningful when the pill renders.
+const pillAriaLabel = pill.show ? `${pill.label} — see what's new` : "";
 
 // The soft banner's minimise-into-pill animation calls this as the banner
 // "arrives", for a small catch-pulse. Restart-safe on repeat dismisses; the
@@ -49,7 +52,7 @@ defineExpose({ getEl: handle.getEl, pulse });
 		type="button"
 		class="jv-versionpill"
 		:class="['jv-tone-' + pill.tone, { 'jv-pill-pulse': pulsing }]"
-		:aria-label="pill.label"
+		:aria-label="pillAriaLabel"
 		:title="pill.label"
 		@click="openWhatsNew"
 		@animationend="pulsing = false"

@@ -36,6 +36,12 @@ async function load(force = false) {
 	error.value = false;
 	try {
 		const res = await call("jarvis.release_notice.notes");
+		// A flagged fetch failure degrades to the friendly error state, NOT the
+		// "all caught up" empty state - and is never cached, so Retry refetches.
+		if (res && res.error) {
+			error.value = true;
+			return;
+		}
 		const list = (res && res.notes) || [];
 		NOTES_CACHE.set(key, list);
 		notes.value = list;

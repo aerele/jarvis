@@ -24,14 +24,20 @@ export function pillFor(notice, agentName = "Jarvis") {
 		return {
 			show: true,
 			tone: "red",
-			label: behind >= 1 ? `${behind} versions behind` : "Update required",
+			label:
+				behind >= 1
+					? `${behind} version${behind === 1 ? "" : "s"} behind`
+					: "Update required",
 		};
 	}
 	if (notice.tier === "soft") {
 		return {
 			show: true,
 			tone: "amber",
-			label: behind >= 1 ? `${behind} versions behind` : "Update available",
+			label:
+				behind >= 1
+					? `${behind} version${behind === 1 ? "" : "s"} behind`
+					: "Update available",
 		};
 	}
 	return { show: true, tone: "green", label: `On the latest ${agentName}` };
@@ -45,25 +51,35 @@ export function bannerShouldShow(notice, now, snooze) {
 	return !snooze || snooze.version !== notice.version || now > snooze.until;
 }
 
-// Per-device snooze state. Reads/writes are wrapped so a private-mode / quota / absent
-// localStorage never throws: a read-throw reads as not-snoozed (banner shows), a
-// write-throw is swallowed (the dismiss animation still completes; snooze just doesn't
-// persist and the banner returns next boot - acceptable).
-export function readSnooze() {
+// Per-user, per-device snooze state. The key is namespaced by `userId` so two
+// people sharing a browser profile don't inherit each other's snooze (a missing
+// userId falls back to a stable "anon" bucket). `userId` is a PARAMETER, not an
+// import, so this module stays node-testable and single-sourced - the caller
+// passes the current user in.
+//
+// Reads/writes are wrapped so a private-mode / quota / absent localStorage never
+// throws: a read-throw reads as not-snoozed (banner shows), a write-throw is
+// swallowed (the dismiss animation still completes; snooze just doesn't persist
+// and the banner returns next boot - acceptable).
+function snoozeKey(userId) {
+	return `${SNOOZE_KEY}:${userId || "anon"}`;
+}
+
+export function readSnooze(userId) {
 	if (typeof localStorage === "undefined") return null;
 	try {
-		return JSON.parse(localStorage.getItem(SNOOZE_KEY)) || null;
+		return JSON.parse(localStorage.getItem(snoozeKey(userId))) || null;
 	} catch {
 		return null;
 	}
 }
 
-export function writeSnooze(notice, now) {
+export function writeSnooze(notice, now, userId) {
 	if (typeof localStorage === "undefined") return;
 	try {
 		const days = notice.banner_interval_days || 7;
 		localStorage.setItem(
-			SNOOZE_KEY,
+			snoozeKey(userId),
 			JSON.stringify({ until: now + days * 86400000, version: notice.version })
 		);
 	} catch {

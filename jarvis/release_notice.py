@@ -122,6 +122,7 @@ def notes() -> dict:
 
 	major = _version(__version__)[0]
 	if major < 15:
+		# Nothing to show for an unversioned line - NOT an error, so no error flag.
 		return {"notes": []}
 	try:
 		res = admin_client.get_release_notes(str(major), __version__, timeout_s=8) or {}
@@ -133,5 +134,8 @@ def notes() -> dict:
 			)
 		except Exception:
 			pass
-		return {"notes": []}
+		# A genuine fetch failure (unreachable admin, or an AdminAuthError from a
+		# lapsed customer): flag it so the panel shows its error state + Retry,
+		# never the misleading "all caught up".
+		return {"notes": [], "error": True}
 	return {"notes": res.get("notes") or []}
