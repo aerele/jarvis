@@ -6,7 +6,7 @@
 		class="jv-ctx"
 		:class="{ 'jv-ctx-warn': warn && !compacting && !compacted, 'jv-ctx-busy': compacting }"
 		:title="title"
-		:aria-label="title"
+		:aria-label="ariaLabel"
 		:disabled="compacting"
 		@click="$emit('compact')"
 	>
@@ -55,6 +55,7 @@ const title = computed(() =>
 		? "Context compacted. The meter updates after your next message."
 		: "Context in use. Compacts automatically near the tick. Click to compact now."
 );
+const ariaLabel = computed(() => `${label.value}. ${title.value}`);
 </script>
 
 <style scoped>
@@ -82,7 +83,7 @@ const title = computed(() =>
 	outline-offset: 1px;
 }
 .jv-ctx-warn {
-	color: #d97706;
+	color: var(--text-2);
 	border-color: #d97706;
 	background: rgba(217, 119, 6, 0.08);
 }

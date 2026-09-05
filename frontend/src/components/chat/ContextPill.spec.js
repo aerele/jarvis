@@ -42,4 +42,18 @@ describe("ContextPill", () => {
 		await w.find("[data-testid=context-pill]").trigger("click");
 		expect(w.emitted("compact")).toHaveLength(1);
 	});
+	it("keeps the visible value in the accessible name", () => {
+		const w = mount(ContextPill, { props: { context: ctx() } });
+		expect(w.find("[data-testid=context-pill]").attributes("aria-label")).toMatch(
+			/^42k \/ 200k/
+		);
+	});
+	it("disables the pill while compacting", () => {
+		const w = mount(ContextPill, { props: { context: ctx(), compacting: true } });
+		expect(w.find("[data-testid=context-pill]").attributes("disabled")).toBeDefined();
+	});
+	it("empties the bar once compacted", () => {
+		const w = mount(ContextPill, { props: { context: ctx(), compacted: true } });
+		expect(w.find(".jv-ctx-fill").attributes("style")).toContain("width: 0%");
+	});
 });
