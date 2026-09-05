@@ -247,6 +247,40 @@ class TestCompactEndpoints(FrappeTestCase):
 		conv = _mk_conversation(None)
 		self.assertEqual(chat_api.compact_conversation(conv), {"ok": False, "reason": "nothing_to_compact"})
 
+	def test_compact_refuses_when_nothing_new_since_last_compaction(self):
+		key = "agent:main:c-ep11"
+		conv = _mk_conversation(key)
+		now = frappe.utils.now_datetime()
+		frappe.db.set_value(
+			CHAT_SESSION,
+			{"session_key": key},
+			{
+				"last_compacted_at": now,
+				"last_usage_at": frappe.utils.add_to_date(now, seconds=-60),
+			},
+		)
+		with patch("jarvis.chat.compaction.frappe.enqueue") as enq:
+			out = chat_api.compact_conversation(conv, "keep invoices")
+		self.assertEqual(out, {"ok": False, "reason": "nothing_to_compact"})
+		enq.assert_not_called()
+
+	def test_compact_proceeds_after_a_turn_since_last_compaction(self):
+		key = "agent:main:c-ep12"
+		conv = _mk_conversation(key)
+		now = frappe.utils.now_datetime()
+		frappe.db.set_value(
+			CHAT_SESSION,
+			{"session_key": key},
+			{
+				"last_compacted_at": now,
+				"last_usage_at": frappe.utils.add_to_date(now, seconds=1),
+			},
+		)
+		with patch("jarvis.chat.compaction.frappe.enqueue") as enq:
+			out = chat_api.compact_conversation(conv, "keep invoices")
+		self.assertEqual(out, {"ok": True, "queued": True})
+		enq.assert_called_once()
+
 	def test_compact_refuses_when_already_compacting(self):
 		conv = _mk_conversation("agent:main:c-ep2")
 		frappe.db.set_value(

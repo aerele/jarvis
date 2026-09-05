@@ -2071,7 +2071,8 @@
 							(activeTools.length || waiting) &&
 							!queuedTurn &&
 							!artifactKind &&
-							!gotoMorph
+							!gotoMorph &&
+							!compacting
 						"
 						style="display: flex; gap: 12px"
 					>

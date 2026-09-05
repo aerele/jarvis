@@ -18,6 +18,7 @@ describe("parseCompactCommand", () => {
 describe("compactFailureCopy", () => {
 	it("maps reasons to copy", () => {
 		expect(compactFailureCopy("runtime_declined")).toBe("Nothing to compact yet");
+		expect(compactFailureCopy("nothing_to_compact")).toBe("Nothing new to compact yet");
 		expect(compactFailureCopy("conversation_busy")).toBe(
 			"A reply is in progress, try again in a moment"
 		);

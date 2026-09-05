@@ -8,7 +8,7 @@ export function parseCompactCommand(text) {
 
 const COPY = {
 	runtime_declined: "Nothing to compact yet",
-	nothing_to_compact: "Nothing to compact yet",
+	nothing_to_compact: "Nothing new to compact yet",
 	conversation_busy: "A reply is in progress, try again in a moment",
 	already_compacting: "Already compacting this chat",
 	macro_armed: "This chat is running a macro",

@@ -2323,6 +2323,25 @@ def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 		return {"ok": False, "reason": "macro_armed"}
 	if not (doc.get("session_key") or "").strip():
 		return {"ok": False, "reason": "nothing_to_compact"}
+	# A second Compact with no turn in between would just re-summarise the summary:
+	# refuse it the same way as "nothing to compact" rather than burn a gateway
+	# round trip. run_compact stamps last_compacted_at but never last_usage_at;
+	# record_turn_usage stamps last_usage_at on the NEXT completed turn, so
+	# last_compacted_at >= last_usage_at (or no usage at all yet) means no turn
+	# has run since the last compaction.
+	session_row = (
+		frappe.db.get_value(
+			"Jarvis Chat Session",
+			{"session_key": doc.session_key},
+			["last_compacted_at", "last_usage_at"],
+			as_dict=True,
+		)
+		or {}
+	)
+	last_compacted_at = session_row.get("last_compacted_at")
+	last_usage_at = session_row.get("last_usage_at")
+	if last_compacted_at and (not last_usage_at or last_compacted_at >= last_usage_at):
+		return {"ok": False, "reason": "nothing_to_compact"}
 	if compaction.is_compacting(conversation):
 		return {"ok": False, "reason": "already_compacting"}
 	if _conversation_busy(conversation) or admission._conv_has_other_active_turn(conversation, ""):
