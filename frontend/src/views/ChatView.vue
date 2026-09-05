@@ -2140,10 +2140,11 @@
 							</div>
 							<div
 								v-if="
-									!showActivityDetail ||
-									(waiting && !currentTool) ||
-									(!currentTool && statusPhase) ||
-									(!currentTool && !doneCount)
+									(!showActivityDetail ||
+										(waiting && !currentTool) ||
+										(!currentTool && statusPhase) ||
+										(!currentTool && !doneCount)) &&
+									!compacting
 								"
 								role="status"
 								aria-live="polite"
@@ -8891,6 +8892,10 @@ async function send(textArg, resendAck) {
 	const compactCmd = parseCompactCommand(text);
 	if (compactCmd) {
 		if (fromMain) input.value = "";
+		if (compacting.value) {
+			notify("Already compacting this chat", { type: "info" });
+			return;
+		}
 		if (compactCmd.hint) await runCompact(compactCmd.hint);
 		else openCompactDialog("");
 		return;
@@ -9355,14 +9360,12 @@ function onEvent(p) {
 			}
 			break;
 		case "context:compacted":
-			if (p.conversation_id !== currentId.value) break;
 			compacting.value = false;
 			compactedChip.value = true;
 			compactHintSeed.value = "";
 			loadContext();
 			break;
 		case "context:compact_failed":
-			if (p.conversation_id !== currentId.value) break;
 			compacting.value = false;
 			compactHintSeed.value = "";
 			notify(compactFailureCopy(p.reason), { type: "error" });

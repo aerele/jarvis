@@ -87,6 +87,7 @@ class TestCompactionHelpers(FrappeTestCase):
 			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
 		)
 		self.assertTrue(compaction.is_compacting(conv))
+		self.assertTrue(compaction.context_payload(conv)["compacting"])
 		frappe.db.set_value(
 			CONV,
 			conv,
@@ -97,6 +98,7 @@ class TestCompactionHelpers(FrappeTestCase):
 			update_modified=False,
 		)
 		self.assertFalse(compaction.is_compacting(conv))
+		self.assertFalse(compaction.context_payload(conv)["compacting"])
 
 	def test_context_payload_fresh_and_unmeasured(self):
 		conv = _mk_conversation("agent:main:c-pay")
@@ -159,7 +161,9 @@ class TestRunCompact(FrappeTestCase):
 			"run_id": "r",
 		}
 		pub = self._run(conv, sess)
-		sess.compact_session.assert_called_once_with(key, "keep invoices")
+		sess.compact_session.assert_called_once_with(
+			key, "keep invoices", timeout_s=compaction.COMPACT_RPC_TIMEOUT_S
+		)
 		kinds = [c.args[1]["kind"] for c in pub.call_args_list]
 		self.assertIn("context:compacted", kinds)
 		got = frappe.db.get_value(

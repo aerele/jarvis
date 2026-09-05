@@ -804,7 +804,8 @@ class RelayMux:
 				# fault NEVER parks the turn.
 				self._bump("deltas_dropped")
 				_logger.debug(
-					"relay_mux: poison delta on run=%s seq=%s dropped+continued",
+					"relay_mux: poison %s on run=%s seq=%s dropped+continued",
+					ev.kind,
 					lane.run_id,
 					ev.event_seq,
 					exc_info=True,

@@ -21,6 +21,7 @@ Facts verified live 2026-09-05 (image 2026.6.8, e2e.localhost):
 from __future__ import annotations
 
 import re
+import uuid
 
 import frappe
 from frappe import _
@@ -30,7 +31,7 @@ from jarvis.chat.events import publish_to_user
 CONV = "Jarvis Conversation"
 CHAT_SESSION = "Jarvis Chat Session"
 
-COMPACT_LOCK_SECONDS = 240
+COMPACT_LOCK_SECONDS = 300
 HINT_MAX_CHARS = 500
 WARN_PCT = 80
 DEFAULT_RESERVE_TOKENS = 20000
@@ -51,12 +52,20 @@ def sanitize_hint(hint: str | None) -> str:
 	return text[:HINT_MAX_CHARS]
 
 
-def is_compacting(conversation: str) -> bool:
-	since = frappe.db.get_value(CONV, conversation, "compacting_since")
+def _is_fresh_lock(since) -> bool:
+	"""True while ``since`` (a ``compacting_since`` value already read by the
+	caller) still falls inside the lock window. Shared by ``is_compacting``
+	and ``context_payload`` so a caller that already has the row need not
+	re-read ``compacting_since`` a second time."""
 	if not since:
 		return False
 	age = (frappe.utils.now_datetime() - frappe.utils.get_datetime(since)).total_seconds()
 	return 0 <= age < COMPACT_LOCK_SECONDS
+
+
+def is_compacting(conversation: str) -> bool:
+	since = frappe.db.get_value(CONV, conversation, "compacting_since")
+	return _is_fresh_lock(since)
 
 
 def classify_notice(text: str) -> str:
@@ -108,7 +117,7 @@ def context_payload(conversation: str) -> dict:
 		"route": row.get("budget_route") or "",
 		"compaction_count": int(row.get("compaction_count") or 0),
 		"last_compacted_at": row.get("last_compacted_at"),
-		"compacting": is_compacting(conversation),
+		"compacting": _is_fresh_lock(conv.get("compacting_since")),
 		"fresh": bool(row.get("last_usage_at")) and capacity > 0,
 	}
 
@@ -125,7 +134,7 @@ def start_compaction(conversation: str, user: str, hint: str) -> dict:
 		queue="long",
 		timeout=COMPACT_JOB_TIMEOUT_S,
 		at_front=True,
-		job_id=f"jarvis-compact::{conversation}",
+		job_id=f"jarvis-compact::{conversation}::{uuid.uuid4().hex[:8]}",
 		conversation=conversation,
 		user=user,
 		hint=hint,
@@ -173,7 +182,7 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 			row = rows[0] if rows else {}
 			before = int(row.get("totalTokens") or 0)
 			capacity = int(row.get("contextTokens") or 0)
-			res = sess.compact_session(session_key, hint or None)
+			res = sess.compact_session(session_key, hint or None, timeout_s=COMPACT_RPC_TIMEOUT_S)
 			outcome = classify_notice(res.get("text") or "") if res.get("state") == "final" else "declined"
 			if outcome != "compacted":
 				reason = "runtime_declined"

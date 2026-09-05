@@ -929,6 +929,15 @@ def _conversation_busy(conversation: str) -> bool:
 	return age < _INFLIGHT_FRESH_SECONDS
 
 
+def _compacting_reject(conversation: str) -> dict | None:
+	"""The send-path front door while a compaction holds the conversation."""
+	from jarvis.chat import compaction
+
+	if compaction.is_compacting(conversation):
+		return {"ok": False, "reason": _("Compacting this chat, try again in a moment")}
+	return None
+
+
 def _ordered_parked_cards(user: str, conversation: str) -> list[dict] | None:
 	"""This user's currently-live parked cards for this conversation.
 
@@ -1333,19 +1342,16 @@ def send_message(
 	# second turn becomes a durable QUEUED turn with a visible position. So skip
 	# the legacy reject and let accept_or_queue serialize + queue it. We still
 	# reject up front on OVERLOAD (queue too deep) before inserting the user row,
-	# so an overloaded site never accretes orphaned messages.
+	# so an overloaded site never accretes orphaned messages, and the compaction
+	# front door (_compacting_reject) still gates both branches below it.
 	if admission.turn_machine_enabled():
-		from jarvis.chat import compaction
-
 		if admission.shard_overloaded(conversation):
 			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
-		if compaction.is_compacting(conversation):
-			return {"ok": False, "reason": _("Compacting this chat, try again in a moment")}
+		if _rej := _compacting_reject(conversation):
+			return _rej
 	elif _conversation_busy(conversation):
-		from jarvis.chat import compaction
-
-		if compaction.is_compacting(conversation):
-			return {"ok": False, "reason": _("Compacting this chat, try again in a moment")}
+		if _rej := _compacting_reject(conversation):
+			return _rej
 		return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
 
 	# Apply model override BEFORE enqueueing so the worker sees the new value
@@ -2473,17 +2479,13 @@ def retry_message(message: str) -> dict:
 	# Flag ON: a retry racing a live turn QUEUES (accept_or_queue) rather than
 	# rejecting; flag OFF keeps the legacy single-flight reject.
 	if admission.turn_machine_enabled():
-		from jarvis.chat import compaction
-
 		if admission.shard_overloaded(doc.conversation):
 			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
-		if compaction.is_compacting(doc.conversation):
-			return {"ok": False, "reason": _("Compacting this chat, try again in a moment")}
+		if _rej := _compacting_reject(doc.conversation):
+			return _rej
 	elif _conversation_busy(doc.conversation):
-		from jarvis.chat import compaction
-
-		if compaction.is_compacting(doc.conversation):
-			return {"ok": False, "reason": _("Compacting this chat, try again in a moment")}
+		if _rej := _compacting_reject(doc.conversation):
+			return _rej
 		return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
 	if doc.role != "assistant":
 		return {"ok": False, "reason": _("only assistant messages can be retried")}
