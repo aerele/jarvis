@@ -1040,6 +1040,16 @@ class TestOnboardingClient(FrappeTestCase):
 			out = admin_client.get_plans()
 		self.assertEqual(out[0]["name"], "p1")
 
+	def test_get_release_notes_posts_track_and_since_with_short_budget(self):
+		with patch.object(admin_client, "_post", return_value={"notes": [{"version": "16.4.0"}]}) as mp:
+			out = admin_client.get_release_notes("16", "16.2.0")
+		mp.assert_called_once_with(
+			path=admin_client._m("api.tenant.get_release_notes"),
+			body={"track": "16", "since_version": "16.2.0"},
+			timeout_s=8,
+		)
+		self.assertEqual(out["notes"][0]["version"], "16.4.0")
+
 	def test_get_connection_unwraps_data(self):
 		_settings_for_admin()
 		with patch(

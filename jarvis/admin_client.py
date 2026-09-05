@@ -944,6 +944,24 @@ def get_role_profile_config(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	)
 
 
+def get_release_notes(track: str, since_version: str, *, timeout_s: int = 8) -> dict:
+	"""Fetch the cumulative changelog notes newer than ``since_version`` for a
+	release ``track`` (the tenant's major line, e.g. "16").
+
+	Fetched on demand when the customer opens the What's-new panel, so it carries a
+	short 8s budget by default - a slow control plane must not stall the click.
+	``_post`` (via ``_do_post``) unwraps the ``{"ok", "data"}`` envelope, so this
+	returns the bare ``{"notes": [...]}`` payload. Raises the usual
+	``AdminAuthError`` / ``AdminUnreachableError`` family, which the caller
+	(``jarvis.release_notice.notes``) degrades to an empty list.
+	"""
+	return _post(
+		path=_m("api.tenant.get_release_notes"),
+		body={"track": track, "since_version": since_version},
+		timeout_s=timeout_s,
+	)
+
+
 # --------------------------------------------------------------------------- #
 # Support panel proxies (Plan 3 B2). The customer bench forwards requesting_user +
 # scope to the control-plane support endpoints, which re-derive the customer from the
