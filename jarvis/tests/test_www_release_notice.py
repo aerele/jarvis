@@ -8,6 +8,8 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.www import jarvis as www_desktop
 from jarvis.www import jarvis_mobile as www_mobile
 
+NEWER = "99.0.0"  # above any installed version, so the notice reads as active
+
 _FIELDS = (
 	"release_notice_active",
 	"latest_jarvis_version",
@@ -20,7 +22,7 @@ class TestWwwReleaseNotice(FrappeTestCase):
 		s = frappe.get_single("Jarvis Settings")
 		self._snap = {f: s.get(f) for f in _FIELDS}
 		s.db_set("release_notice_active", 1)
-		s.db_set("latest_jarvis_version", "0.0.2")
+		s.db_set("latest_jarvis_version", NEWER)
 		s.db_set("release_notice_message", "New dashboards.")
 		frappe.db.commit()
 
@@ -43,7 +45,7 @@ class TestWwwReleaseNotice(FrappeTestCase):
 			www_desktop.get_context(ctx)
 		rn = ctx.boot["release_notice"]
 		self.assertTrue(rn["active"])
-		self.assertEqual(rn["version"], "0.0.2")
+		self.assertEqual(rn["version"], NEWER)
 		self.assertEqual(rn["message"], "New dashboards.")
 
 	def test_mobile_boot_exposes_release_notice(self):
@@ -52,4 +54,4 @@ class TestWwwReleaseNotice(FrappeTestCase):
 			www_mobile.get_context(ctx)
 		rn = ctx.boot["release_notice"]
 		self.assertTrue(rn["active"])
-		self.assertEqual(rn["version"], "0.0.2")
+		self.assertEqual(rn["version"], NEWER)

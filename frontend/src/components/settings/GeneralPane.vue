@@ -129,12 +129,18 @@
 
 		<hr class="my-8" />
 
+		<h3 class="text-base font-semibold text-ink-gray-9">Context</h3>
+		<div class="mt-2">
+			<KvRow label="This chat" :value="context.text" />
+		</div>
+
+		<hr class="my-8" />
+
 		<h3 class="flex items-center gap-2 text-base font-semibold text-ink-gray-9">
 			Token usage
 			<Badge label="est." theme="gray" variant="subtle" size="sm" />
 		</h3>
 		<div class="mt-2">
-			<KvRow label="This chat" :value="usage ? fmtTokens(usage.chat_tokens) : '-'" />
 			<KvRow
 				:label="usage ? usage.month_label : 'This month'"
 				:value="usage ? fmtTokens(usage.month_tokens) : '-'"
@@ -301,6 +307,7 @@ import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { agentName } from "@/branding";
 import * as api from "@/api";
 import { errHtml } from "@/lib/errors";
+import { fmtTokens, contextReading } from "@/lib/tokens.js";
 
 const store = useShellStore();
 
@@ -522,17 +529,14 @@ const statusTheme = computed(() => {
 
 // Estimated token usage — the dialog fetches its own data on open.
 const usage = ref(null);
+// This chat's context reading (usage.context, from get_usage()'s
+// per-conversation block).
+const context = computed(() => contextReading(usage.value));
 const usagePct = computed(() => {
 	const u = usage.value;
 	if (!u || !u.budget_monthly) return 0;
 	return Math.min(100, Math.round((u.month_tokens / u.budget_monthly) * 100));
 });
-function fmtTokens(n) {
-	n = Number(n || 0);
-	if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
-	if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
-	return String(n);
-}
 
 onMounted(async () => {
 	try {

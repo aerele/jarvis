@@ -899,6 +899,10 @@ def _conversation_busy(conversation: str) -> bool:
 	composer is intentionally unlocked while recovering), and a stale streaming
 	row from a crashed worker ages out of the freshness window (stale_scan
 	finalizes it) so it never blocks sends forever."""
+	from jarvis.chat import compaction
+
+	if compaction.is_compacting(conversation):
+		return True
 	rows = frappe.db.sql(
 		"""SELECT streaming, recovering, modified FROM `tabJarvis Chat Message`
 		WHERE conversation = %s AND role = 'assistant'
@@ -923,6 +927,15 @@ def _conversation_busy(conversation: str) -> bool:
 		return False
 	age = (frappe.utils.now_datetime() - frappe.utils.get_datetime(last)).total_seconds()
 	return age < _INFLIGHT_FRESH_SECONDS
+
+
+def _compacting_reject(conversation: str) -> dict | None:
+	"""The send-path front door while a compaction holds the conversation."""
+	from jarvis.chat import compaction
+
+	if compaction.is_compacting(conversation):
+		return {"ok": False, "reason": _("Compacting this chat, try again in a moment")}
+	return None
 
 
 def _ordered_parked_cards(user: str, conversation: str) -> list[dict] | None:
@@ -1329,12 +1342,21 @@ def send_message(
 	# second turn becomes a durable QUEUED turn with a visible position. So skip
 	# the legacy reject and let accept_or_queue serialize + queue it. We still
 	# reject up front on OVERLOAD (queue too deep) before inserting the user row,
-	# so an overloaded site never accretes orphaned messages.
+	# so an overloaded site never accretes orphaned messages, and the compaction
+	# front door (_compacting_reject) still gates both branches below it.
 	if admission.turn_machine_enabled():
 		if admission.shard_overloaded(conversation):
 			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
-	elif _conversation_busy(conversation):
-		return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
+		if _rej := _compacting_reject(conversation):
+			return _rej
+	else:
+		# Check the compaction front door first so a compacting conversation
+		# doesn't pay for is_compacting twice (once here, once inside the
+		# _conversation_busy() call below).
+		if _rej := _compacting_reject(conversation):
+			return _rej
+		if _conversation_busy(conversation):
+			return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
 
 	# Apply model override BEFORE enqueueing so the worker sees the new value
 	# when it loads the conversation. (If we set this after the enqueue, the
@@ -2262,6 +2284,9 @@ def get_usage(conversation: str | None = None) -> dict:
 	# is the ownership check: this endpoint never loads the conversation doc.
 	if conversation and conversation in convs:
 		out["chat_tool_calls"] = sum(r["tools"] for r in _tool_runs(conversation))
+		from jarvis.chat import compaction
+
+		out["context"] = compaction.context_payload(conversation)
 
 	rows = frappe.get_all(
 		MSG,
@@ -2276,6 +2301,63 @@ def get_usage(conversation: str | None = None) -> dict:
 		if conversation and m.conversation == conversation:
 			out["chat_tokens"] += t
 	return out
+
+
+@frappe.whitelist()
+def get_conversation_context(conversation: str) -> dict:
+	"""Context-window meter for one conversation (owner only). Bench snapshot
+	only; never calls the runtime."""
+	require_jarvis_access()
+	_get_owned_conversation(conversation)
+	from jarvis.chat import compaction
+
+	return compaction.context_payload(conversation)
+
+
+@frappe.whitelist()
+def compact_conversation(conversation: str, hint: str | None = None) -> dict:
+	"""Summarise older turns of one conversation (owner only). Refuses with a
+	typed reason while a turn or another compaction is in flight; otherwise
+	takes the lock and enqueues jarvis.chat.compaction.run_compact."""
+	require_jarvis_access()
+	doc = _get_owned_conversation(conversation)
+	from jarvis.chat import compaction
+
+	if doc.get("skip_confirmation"):
+		return {"ok": False, "reason": "macro_armed"}
+	if not (doc.get("session_key") or "").strip():
+		return {"ok": False, "reason": "nothing_to_compact"}
+	# A second Compact with no turn in between would just re-summarise the summary:
+	# refuse it the same way as "nothing to compact" rather than burn a gateway
+	# round trip. run_compact stamps last_compacted_at but never last_usage_at;
+	# record_turn_usage stamps last_usage_at on the NEXT completed turn, so
+	# last_compacted_at >= last_usage_at (or no usage at all yet) means no turn
+	# has run since the last compaction.
+	session_row = (
+		frappe.db.get_value(
+			"Jarvis Chat Session",
+			{"session_key": doc.session_key},
+			["last_compacted_at", "last_usage_at"],
+			as_dict=True,
+		)
+		or {}
+	)
+	last_compacted_at = session_row.get("last_compacted_at")
+	last_usage_at = session_row.get("last_usage_at")
+	if last_compacted_at and (not last_usage_at or last_compacted_at >= last_usage_at):
+		return {"ok": False, "reason": "nothing_to_compact"}
+	# This check races the same way is_compacting below does - the compare-and-set
+	# in compaction.start_compaction is the actual authority, this is just a
+	# cheap pre-check that saves a gateway round trip for the common case.
+	if compaction.is_compacting(conversation):
+		return {"ok": False, "reason": "already_compacting"}
+	if _conversation_busy(conversation) or admission._conv_has_other_active_turn(conversation, ""):
+		return {"ok": False, "reason": "conversation_busy"}
+	try:
+		clean = compaction.sanitize_hint(hint)
+	except frappe.ValidationError:
+		return {"ok": False, "reason": "bad_hint"}
+	return compaction.start_compaction(conversation, frappe.session.user, clean)
 
 
 @frappe.whitelist()
@@ -2425,8 +2507,16 @@ def retry_message(message: str) -> dict:
 	if admission.turn_machine_enabled():
 		if admission.shard_overloaded(doc.conversation):
 			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
-	elif _conversation_busy(doc.conversation):
-		return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
+		if _rej := _compacting_reject(doc.conversation):
+			return _rej
+	else:
+		# Check the compaction front door first so a compacting conversation
+		# doesn't pay for is_compacting twice (once here, once inside the
+		# _conversation_busy() call below).
+		if _rej := _compacting_reject(doc.conversation):
+			return _rej
+		if _conversation_busy(doc.conversation):
+			return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
 	if doc.role != "assistant":
 		return {"ok": False, "reason": _("only assistant messages can be retried")}
 	if not doc.error:

@@ -65,6 +65,17 @@ def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 			"delta": egress_rules.redact(data.get("delta", "")),
 		}
 
+	if stream == "compaction":
+		# The runtime brackets an automatic (threshold or overflow) compaction
+		# with this stream. Mapped so the chat can show "reorganising" while the
+		# run is still alive; nothing else changes on the terminal path.
+		phase = str(data.get("phase") or "")
+		return {
+			"kind": "compaction",
+			"phase": "start" if phase in ("start", "before") else "end",
+			"completed": bool(data.get("completed")),
+		}
+
 	return None
 
 

@@ -186,6 +186,116 @@ def resolved_model_identity(row: dict | None) -> tuple[str, str]:
 	return (row.get("model") or "").strip(), (row.get("modelProvider") or "").strip()
 
 
+def _context_capacity_and_pct(row: dict | None, used_tokens: int) -> tuple[int, float]:
+	"""``(context_capacity, context_pct)`` from a ``sessions.list`` row.
+
+	``contextTokens`` is the model's context-WINDOW CAPACITY (verified live,
+	2026-09-04: 200000), distinct from ``totalTokens`` (context tokens actually
+	USED, already read as ``context_tokens`` by every caller here). ``pct`` is
+	``100 * used_tokens / capacity`` rounded to 1 decimal, or ``0`` when the row
+	never reported a capacity (``contextTokens`` missing/zero)."""
+	capacity = int((row or {}).get("contextTokens") or 0)
+	if capacity <= 0:
+		return 0, 0.0
+	return capacity, round(100 * used_tokens / capacity, 1)
+
+
+def budget_fields_from_row(row: dict | None) -> tuple[str, int, int]:
+	"""``(budget_route, reserve_tokens, compaction_count)`` from a sessions row.
+
+	``contextBudgetStatus`` is an OBJECT on the runtime row (pre-prompt
+	estimate; ``route`` is one of fits / compact_only /
+	truncate_tool_results_only / compact_then_truncate). Absent or malformed
+	values read as empty/zero so a missing field never breaks a turn."""
+	row = row or {}
+	status = row.get("contextBudgetStatus")
+	if not isinstance(status, dict):
+		status = {}
+	route = str(status.get("route") or "")[:40]
+	try:
+		reserve = int(status.get("reserveTokens") or 0)
+	except (TypeError, ValueError):
+		reserve = 0
+	try:
+		count = int(row.get("compactionCheckpointCount") or 0)
+	except (TypeError, ValueError):
+		count = 0
+	return route, max(reserve, 0), max(count, 0)
+
+
+def _write_budget_fields(session_key: str, row: dict | None) -> None:
+	"""UPDATE the budget snapshot columns. Same no-commit contract as
+	``_refresh_session_context_snapshot``. ``compaction_count`` only moves
+	forward (the row is authoritative when it reports one).
+
+	Compaction amendment (context-meter task 4): the runtime CLEARS
+	``contextBudgetStatus`` on a compaction turn, so a row with no status is
+	not "route/reserve are now empty" - it is "this row didn't report a
+	budget this time". Blanking ``budget_route``/``reserve_tokens`` on such a
+	row would erase a good reserve right after a compaction, so when the
+	status is absent this only advances ``compaction_count`` and leaves the
+	other two columns untouched. A row that DOES carry a status still writes
+	all three, same as before."""
+	route, reserve, count = budget_fields_from_row(row)
+	if not isinstance((row or {}).get("contextBudgetStatus"), dict):
+		frappe.db.sql(
+			"""
+			UPDATE `tabJarvis Chat Session`
+			SET compaction_count = GREATEST(IFNULL(compaction_count, 0), %(count)s)
+			WHERE session_key = %(session_key)s
+			""",
+			{"count": count, "session_key": session_key},
+		)
+		return
+	frappe.db.sql(
+		"""
+		UPDATE `tabJarvis Chat Session`
+		SET budget_route = %(route)s,
+			reserve_tokens = %(reserve)s,
+			compaction_count = GREATEST(IFNULL(compaction_count, 0), %(count)s)
+		WHERE session_key = %(session_key)s
+		""",
+		{"route": route, "reserve": reserve, "count": count, "session_key": session_key},
+	)
+
+
+def _refresh_session_context_snapshot(
+	session_key: str, context_tokens: int, context_capacity: int, context_pct: float
+) -> None:
+	"""Snapshot-only UPDATE (no token/run-count accrual) of a Chat Session's
+	context fields - used on ``record_turn_usage``'s VALID_ZERO path, where
+	there is no token delta to accrue but the row's context snapshot can
+	still have moved.
+
+	Mirrors ``refresh_session_snapshots``'s capacity guard: ``context_capacity``
+	/ ``context_pct`` are only written when THIS row actually reported a
+	capacity (``context_capacity > 0``) - a row that carries none must never
+	clobber a previously known capacity with 0. Uncommitted, matching the
+	VALID_ZERO/RETRY paths' no-commit contract (see ``record_turn_usage``'s
+	docstring) - the caller's outer commit (RECORDED) or the finalize effect's
+	own commit covers it."""
+	params = {
+		"ctx": context_tokens,
+		"now": frappe.utils.now_datetime(),
+		"session_key": session_key,
+	}
+	capacity_set_sql = ""
+	if context_capacity > 0:
+		capacity_set_sql = "context_capacity = %(ctx_cap)s, context_pct = %(ctx_pct)s,"
+		params["ctx_cap"] = context_capacity
+		params["ctx_pct"] = context_pct
+	frappe.db.sql(
+		f"""
+		UPDATE `tabJarvis Chat Session`
+		SET last_total_tokens = %(ctx)s,
+			{capacity_set_sql}
+			last_usage_at = %(now)s
+		WHERE session_key = %(session_key)s
+		""",
+		params,
+	)
+
+
 def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = None) -> str:
 	"""Record one completed turn's token delta from a ``sessions.list`` row.
 
@@ -242,13 +352,20 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 			or {}
 		)
 		user = session.get("user") or ""
+		context_tokens = int(row.get("totalTokens") or 0)
+		context_capacity, context_pct = _context_capacity_and_pct(row, context_tokens)
 		if delta <= 0:
 			# Task U1: attribution is still worth recording even though there is
 			# no token delta - the turn happened and this is the only record of
 			# WHO it happened for. Isolated + never raises (see the docstring).
 			_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
+			# C1 review: a zero-delta turn is still a real turn - the session's
+			# context snapshot (and, when this row reports one, its capacity)
+			# can have moved even though no tokens were spent this turn. Same
+			# no-commit contract as the rest of this branch (see docstring).
+			_refresh_session_context_snapshot(session_key, context_tokens, context_capacity, context_pct)
+			_write_budget_fields(session_key, row)
 			return USAGE_VALID_ZERO
-		context_tokens = int(row.get("totalTokens") or 0)
 
 		if not user:
 			# CDX-6: a FRESH POSITIVE token delta with no `Jarvis Chat Session` user
@@ -269,6 +386,8 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 			"out": output_tokens,
 			"delta": delta,
 			"ctx": context_tokens,
+			"ctx_cap": context_capacity,
+			"ctx_pct": context_pct,
 			"month": month,
 			"now": now,
 			"user": user,
@@ -303,11 +422,14 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 				output_tokens = output_tokens + %(out)s,
 				run_count = run_count + 1,
 				last_total_tokens = %(ctx)s,
+				context_capacity = %(ctx_cap)s,
+				context_pct = %(ctx_pct)s,
 				last_usage_at = %(now)s
 			WHERE session_key = %(session_key)s
 			""",
 			params,
 		)
+		_write_budget_fields(session_key, row)
 		# Per-model attribution (fleet spec §7): the gateway sessions row
 		# carries whatever model the SESSION resolved to for this turn
 		# (turn_handler._session_model_for). For a pinned model that's the
@@ -742,27 +864,47 @@ def refresh_session_snapshots(rows: list[dict]) -> dict:
 			if not user:
 				continue
 			context_tokens = int(row.get("totalTokens") or 0)
+			context_capacity, context_pct = _context_capacity_and_pct(row, context_tokens)
 			updated_ms = row.get("updatedAt")
-			if updated_ms:
-				# Naive system-tz datetime, matching how Frappe stores Datetime.
-				last_at = datetime.fromtimestamp(int(updated_ms) / 1000)
-				frappe.db.sql(
-					"""
-					UPDATE `tabJarvis Chat Session`
-					SET last_total_tokens = %(ctx)s, last_usage_at = %(at)s
-					WHERE session_key = %(session_key)s
-					""",
-					{"ctx": context_tokens, "at": last_at, "session_key": session_key},
-				)
-			else:
-				frappe.db.sql(
-					"""
-					UPDATE `tabJarvis Chat Session`
-					SET last_total_tokens = %(ctx)s
-					WHERE session_key = %(session_key)s
-					""",
-					{"ctx": context_tokens, "session_key": session_key},
-				)
+			# Naive system-tz datetime, matching how Frappe stores Datetime.
+			last_at = datetime.fromtimestamp(int(updated_ms) / 1000) if updated_ms else None
+			# ONE update (review: two near-duplicate UPDATEs made "newest row"
+			# ordering unreliable elsewhere - a raw SQL UPDATE never bumps
+			# modified on its own). last_usage_at means "last REAL usage", not
+			# sync time (test_user_settings.TestAdminSync.
+			# test_refreshes_snapshots_without_accumulating pins this: a row
+			# with no updatedAt must leave last_usage_at exactly as it was -
+			# untouched if never set, unchanged if it was), so COALESCE has NO
+			# now()/`now` fallback here - only the row's own updatedAt stamp,
+			# else whatever is already stored. modified = %(now)s always
+			# advances regardless, so "just synced" stays orderable even when
+			# last_usage_at itself doesn't move. context_capacity /
+			# context_pct are set ONLY when THIS row actually reported a
+			# capacity (review: a sweep row that carries none must never
+			# clobber a previously known capacity with 0).
+			params = {
+				"ctx": context_tokens,
+				"usage_at": last_at,
+				"now": now,
+				"session_key": session_key,
+			}
+			capacity_set_sql = ""
+			if context_capacity > 0:
+				capacity_set_sql = "context_capacity = %(ctx_cap)s, context_pct = %(ctx_pct)s,"
+				params["ctx_cap"] = context_capacity
+				params["ctx_pct"] = context_pct
+			frappe.db.sql(
+				f"""
+				UPDATE `tabJarvis Chat Session`
+				SET last_total_tokens = %(ctx)s,
+					{capacity_set_sql}
+					last_usage_at = COALESCE(%(usage_at)s, last_usage_at),
+					modified = %(now)s
+				WHERE session_key = %(session_key)s
+				""",
+				params,
+			)
+			_write_budget_fields(session_key, row)
 			touched_users.add(user)
 			bucket = summary.setdefault(user, {"sessions": 0, "last_total_tokens": 0})
 			bucket["sessions"] += 1

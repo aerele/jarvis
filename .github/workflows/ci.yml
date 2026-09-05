@@ -26,14 +26,24 @@ name: CI
 
 on:
   workflow_dispatch:
+  # Default PR types only, deliberately without `edited` (the event a base retarget sends).
+  # Listening to it and skipping the jobs on title edits was tried and is a trap: a skipped
+  # job still posts a "skipped" check run, GitHub reads the LATEST check per name, and a
+  # skipped check satisfies a required check, so a title edit after a red run would mask
+  # the failure. release-guard.yml instead fails a PR whose base changed until it is pushed
+  # to or reopened, which is what makes this workflow run against the new base.
   pull_request:
   push:
-    branches: [develop]
+    # develop is where work lands; version-16 is the stable line customers install from and
+    # version-16-hotfix is where its backports collect until a release merges them into it.
+    # version-15 has its own copy of this file on its branch. See CONTRIBUTING.md.
+    branches: [develop, version-16, version-16-hotfix]
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Never auto-cancel a develop run (cancelled reads as neutral, not failed → hides regressions).
-  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
+  # Only auto-cancel PR runs. A cancelled run on a long-lived branch reads as neutral, not
+  # failed, which hides regressions.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -58,7 +68,7 @@ jobs:
       - uses: pre-commit/action@v3.0.1
         env:
           # no-commit-to-branch is a LOCAL guard: it inspects the checked-out
-          # branch name. On `push: branches: [develop]` the checkout IS develop,
+          # branch name. On a `push` event the checkout IS the guarded branch,
           # so leaving it on would fail this job on every merge. It has no
           # meaning server-side anyway - the PR requirement is what enforces it.
           SKIP: no-commit-to-branch
@@ -119,13 +129,25 @@ jobs:
       - name: node:test (Desk widget + PWA lib)
         env:
           NODE_OPTIONS: --unhandled-rejections=strict
-        # These two suites are plain node:test with only sibling-module imports (no npm deps),
+        # These suites are plain node:test with only sibling-module imports (no npm deps),
         # so they run from the repo root with bare node - no `npm ci` needed. They were run by
         # NOTHING in CI before, which is exactly how a Desk-widget confirmation-card ordering
         # bug (a dropped field that renumbered a typed "confirm N" onto the wrong ERP write)
         # shipped under a green build. Gate them here.
+        #
+        # Each glob is `dir/*.test.mjs` - NOT recursive - so it covers only *.test.mjs files
+        # sitting directly in that one directory, never a subdirectory's. jarvis/public/js/
+        # has two: jarvis_onboarding_banner.test.mjs directly in it (the same gap as the
+        # widget's, for the Desk nudge bundle - it `require()`s the bundle's CommonJS export
+        # guard rather than a plain sibling import, see that file's own comment) and
+        # pump_fence.test.mjs under shared/, which needs its own explicit pattern for exactly
+        # this reason - it went ungated for a while after jarvis/public/js/*.test.mjs was
+        # added, on the same silent-mismatch shape this whole job exists to close. A NEW
+        # subdirectory under jarvis/public/js/ with its own *.test.mjs needs the same: add its
+        # own line/pattern here, do not assume an existing glob already reaches it.
         run: |
           node --test jarvis/public/js/jarvis_chat/widget/*.test.mjs
+          node --test jarvis/public/js/*.test.mjs jarvis/public/js/shared/*.test.mjs
           node --test pwa/src/lib/*.test.js
 
   # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break

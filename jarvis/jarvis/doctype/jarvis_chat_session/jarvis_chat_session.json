@@ -21,7 +21,13 @@
     "output_tokens",
     "run_count",
     "last_total_tokens",
-    "last_usage_at"
+    "context_capacity",
+    "context_pct",
+    "last_usage_at",
+    "budget_route",
+    "reserve_tokens",
+    "compaction_count",
+    "last_compacted_at"
   ],
   "fields": [
     {
@@ -132,12 +138,54 @@
       "description": "Snapshot of the gateway's totalTokens (context size) at the last recorded turn / sync."
     },
     {
+      "fieldname": "context_capacity",
+      "fieldtype": "Int",
+      "label": "Context Capacity",
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "Snapshot of the gateway's contextTokens (the model's context-window capacity) at the last recorded turn / sync. 0 when the row never reported one."
+    },
+    {
+      "fieldname": "context_pct",
+      "fieldtype": "Percent",
+      "label": "Context Percent",
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "100 * last_total_tokens / context_capacity, rounded to 1 decimal. 0 when context_capacity is not yet known."
+    },
+    {
       "fieldname": "last_usage_at",
       "fieldtype": "Datetime",
       "label": "Last Usage At",
       "read_only": 1,
       "no_copy": 1,
       "description": "When usage was last recorded or synced for this session."
+    },
+    {
+      "fieldname": "budget_route",
+      "fieldtype": "Data",
+      "label": "Budget Route",
+      "length": 40,
+      "read_only": 1
+    },
+    {
+      "fieldname": "reserve_tokens",
+      "fieldtype": "Int",
+      "label": "Reserve Tokens",
+      "read_only": 1
+    },
+    {
+      "fieldname": "compaction_count",
+      "fieldtype": "Int",
+      "label": "Compaction Count",
+      "default": "0",
+      "read_only": 1
+    },
+    {
+      "fieldname": "last_compacted_at",
+      "fieldtype": "Datetime",
+      "label": "Last Compacted At",
+      "read_only": 1
     }
   ],
   "permissions": [

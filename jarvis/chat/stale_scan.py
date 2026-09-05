@@ -129,8 +129,17 @@ def _sweep_orphan_turns(now) -> int:
 
 	live_qnames = set()
 	try:
-		for w in get_workers():
-			live_qnames.update(w.queue_names() or [])
+		from jarvis.chat.pump import _registry_is_stale
+
+		workers = get_workers()
+		if _registry_is_stale(workers):
+			# Workers alive but unregistered (a heartbeat gap or a queue-Redis
+			# restart), or unverifiable: the queue is draining toward them, never
+			# "nobody listens".
+			live_qnames = None
+		else:
+			for w in workers:
+				live_qnames.update(w.queue_names() or [])
 	except Exception:
 		live_qnames = None  # probe trouble: treat queued jobs as draining
 

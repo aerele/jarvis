@@ -314,18 +314,10 @@ class TestScheduledMacroCaps(MacroSchedulerBase):
 		after = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
 		self.assertEqual(after, before, "a rollout that clears in minutes cost the macro its slot")
 
-	def test_insufficient_workers_block_leaves_the_slot_due_for_a_retry(self):
-		# #468's TRANSIENT shape now also covers a confidently-zero-workers snapshot:
-		# it self-heals within the worker lane's debounce, so the slot must stay due
-		# for the next hourly tick rather than being consumed like an entitlement
-		# refusal.
-		m = _mk_macro(OWNER_OK, "workers-low")
-		before = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
-		with patch("jarvis.chat.policy.validate_can_send", return_value=(False, "insufficient_workers")):
-			self._run_due_gated()
-		self.assertEqual([r.status for r in _runs_for(m.name)], ["failed"])
-		after = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
-		self.assertEqual(after, before, "a worker shortage that clears in seconds cost the macro its slot")
+	def test_a_zero_worker_reading_is_not_a_block_reason_any_more(self):
+		# The RQ registry can misreport zero workers while they are alive, so chat
+		# no longer refuses sends for it; the scheduler must not expect that reason.
+		self.assertNotIn("insufficient_workers", macro_scheduler._TRANSIENT_BLOCKS)
 
 	def test_the_gate_creates_nothing_before_refusing(self):
 		# A refused run must leave no conversation and no intro message behind —
@@ -581,3 +573,253 @@ class TestScheduleTimeValidation(MacroSchedulerBase):
 			with self.subTest(bad=bad):
 				nxt = macro_scheduler.compute_next_run("daily", bad)
 				self.assertEqual((nxt.hour, nxt.minute), (9, 0))
+
+
+class TestScheduleDayOfMonthValidation(MacroSchedulerBase):
+	"""The #653 twin of ``TestScheduleTimeValidation`` above: ``schedule_day_of_month``
+	is an Int field Frappe never range-checks on its own, so a bad value must be
+	refused the same way an out-of-range ``schedule_time`` is."""
+
+	def _save(self, tag: str, day_of_month, frequency: str = "monthly"):
+		doc = frappe.get_doc(
+			{
+				"doctype": MACRO,
+				"macro_name": f"{PFX}-{tag}",
+				"enabled": 1,
+				"schedule_enabled": 1,
+				"schedule_frequency": frequency,
+				"schedule_day_of_month": day_of_month,
+				"steps": [{"prompt": "p1"}],
+			}
+		)
+		doc.flags.ignore_permissions = True
+		doc.insert()
+		return doc
+
+	def test_out_of_range_day_of_month_is_refused_cleanly(self):
+		# 0 is deliberately NOT here: Frappe coerces a blank Int field to 0 (not
+		# None), so the validator exempts it as "unset", not "the 0th day" - see
+		# test_unset_day_of_month_is_exempt below.
+		for bad in (32, -1, 100):
+			with self.subTest(bad=bad):
+				with self.assertRaises(frappe.ValidationError):
+					self._save(f"bad-{bad}", bad)
+
+	def test_valid_days_of_month_are_accepted_and_scheduled(self):
+		for good in (1, 15, 31):
+			with self.subTest(good=good):
+				doc = self._save(f"ok-{good}", good)
+				self.assertTrue(doc.next_run_at, "a valid day must still produce a next_run_at")
+
+	def test_unset_day_of_month_is_exempt(self):
+		# An Int field left blank reaches validate() as 0, not None - "not set",
+		# never "the 0th day" (#653's exemption, mirroring the empty-string exemption
+		# schedule_time gets). Both the None a caller might pass and the literal 0
+		# Frappe coerces it to must be accepted, not refused.
+		for unset in (None, 0):
+			with self.subTest(unset=unset):
+				doc = self._save(f"unset-{unset}", unset)
+				self.assertTrue(doc.next_run_at)
+
+	def test_out_of_range_weekday_select_is_refused_by_the_framework(self):
+		# schedule_weekday is a Select field - Frappe's own _validate_selects()
+		# refuses a value outside its options list, so no bespoke throw is needed
+		# here (unlike the Int field above).
+		doc = frappe.get_doc(
+			{
+				"doctype": MACRO,
+				"macro_name": f"{PFX}-bad-weekday",
+				"enabled": 1,
+				"schedule_enabled": 1,
+				"schedule_frequency": "weekly",
+				"schedule_weekday": "Blursday",
+				"steps": [{"prompt": "p1"}],
+			}
+		)
+		doc.flags.ignore_permissions = True
+		with self.assertRaises(frappe.ValidationError):
+			doc.insert()
+
+
+class TestComputeNextRunAnchors(FrappeTestCase):
+	"""Pure arithmetic, no DB writes needed - the anchors compute_next_run gained
+	for #653 (weekly weekday, monthly day-of-month), and the TOTAL guarantee
+	(#472) extended to cover them: a missing, None, or garbage anchor value must
+	fall back to the plain +7-days / +1-month advance and never raise."""
+
+	def test_weekly_anchor_skips_to_next_occurrence_when_todays_has_passed(self):
+		# Monday 10:00, target Monday 09:00 -> already passed today, so next Monday.
+		nxt = macro_scheduler.compute_next_run(
+			"weekly", "09:00:00", from_dt="2026-09-07 10:00:00", weekday="Monday"
+		)
+		self.assertEqual(nxt.strftime("%A"), "Monday")
+		self.assertEqual(nxt.date().isoformat(), "2026-09-14")
+
+	def test_weekly_anchor_same_day_when_the_time_has_not_passed_yet(self):
+		nxt = macro_scheduler.compute_next_run(
+			"weekly", "09:00:00", from_dt="2026-09-07 08:00:00", weekday="Monday"
+		)
+		self.assertEqual(nxt.date().isoformat(), "2026-09-07")
+
+	def test_weekly_anchor_picks_a_different_weekday(self):
+		nxt = macro_scheduler.compute_next_run(
+			"weekly", "09:00:00", from_dt="2026-09-07 08:00:00", weekday="Friday"
+		)
+		self.assertEqual(nxt.strftime("%A"), "Friday")
+		self.assertEqual(nxt.date().isoformat(), "2026-09-11")
+
+	def test_monthly_anchor_clamps_day_31_in_february_then_returns_to_31_in_march(self):
+		# 2026 is not a leap year: Feb has 28 days.
+		feb = macro_scheduler.compute_next_run(
+			"monthly", "09:00:00", from_dt="2026-01-31 09:00:01", day_of_month=31
+		)
+		self.assertEqual(feb.date().isoformat(), "2026-02-28")
+
+		mar = macro_scheduler.compute_next_run("monthly", "09:00:00", from_dt=str(feb), day_of_month=31)
+		self.assertEqual(mar.date().isoformat(), "2026-03-31")
+
+	def test_monthly_anchor_clamps_to_29_in_a_leap_february(self):
+		nxt = macro_scheduler.compute_next_run(
+			"monthly", "09:00:00", from_dt="2028-01-31 09:00:01", day_of_month=31
+		)
+		self.assertEqual(nxt.date().isoformat(), "2028-02-29")
+
+	def test_no_anchor_falls_back_to_the_plain_advance(self):
+		# Same shape every pre-#653 caller still uses: weekday/day_of_month omitted.
+		weekly = macro_scheduler.compute_next_run("weekly", "09:00:00", from_dt="2026-09-07 10:00:00")
+		self.assertEqual(weekly.date().isoformat(), "2026-09-14")
+		monthly = macro_scheduler.compute_next_run("monthly", "09:00:00", from_dt="2026-01-31 10:00:00")
+		self.assertEqual(monthly.date().isoformat(), "2026-02-28")
+
+	def test_garbage_anchors_never_raise_and_fall_back_to_the_plain_advance(self):
+		for weekday in ("Blursday", 0, 8, "", [], {}):
+			with self.subTest(weekday=weekday):
+				nxt = macro_scheduler.compute_next_run(
+					"weekly", "09:00:00", from_dt="2026-09-07 10:00:00", weekday=weekday
+				)
+				self.assertEqual(nxt.date().isoformat(), "2026-09-14")
+		for day in (0, 32, -1, "abc", None, [], {}):
+			with self.subTest(day=day):
+				nxt = macro_scheduler.compute_next_run(
+					"monthly", "09:00:00", from_dt="2026-01-31 10:00:00", day_of_month=day
+				)
+				self.assertEqual(nxt.date().isoformat(), "2026-02-28")
+
+	def test_a_garbage_schedule_time_still_never_raises_alongside_a_valid_anchor(self):
+		# #472's TOTAL guarantee and #653's anchors compose: a bad time AND a good
+		# anchor together still fall back cleanly (09:00 default time).
+		nxt = macro_scheduler.compute_next_run(
+			"weekly", "not-a-time", from_dt="2026-09-07 10:00:00", weekday="Monday"
+		)
+		self.assertEqual((nxt.hour, nxt.minute), (9, 0))
+
+
+class TestDefaultScheduleAnchors(FrappeTestCase):
+	"""``agents_api.install_agent`` resolves a listing's ``default_schedule`` JSON
+	into the two anchors a fresh installation is born with. A first version of
+	this reimplemented weekday normalization as a bespoke string-only check
+	instead of reusing ``macro_scheduler._normalize_weekday`` (the reader every
+	OTHER weekday input - the SPA, ``set_schedule``, both DocType controllers -
+	goes through), so a listing authored with the ISO-int form (e.g. 3 for
+	Wednesday) silently landed with no weekday at all. These call the exact
+	functions ``install_agent`` calls, no DB fixture needed."""
+
+	def test_int_weekday_in_default_schedule_resolves_to_its_name(self):
+		from jarvis.chat.agents_api import _default_schedule_weekday
+
+		# ISO weekday: 1=Monday .. 7=Sunday.
+		cases = {1: "Monday", 3: "Wednesday", 7: "Sunday"}
+		for iso, name in cases.items():
+			with self.subTest(iso=iso):
+				self.assertEqual(_default_schedule_weekday({"schedule_weekday": iso}), name)
+
+	def test_weekday_name_in_default_schedule_still_works(self):
+		from jarvis.chat.agents_api import _default_schedule_weekday
+
+		self.assertEqual(_default_schedule_weekday({"schedule_weekday": "Friday"}), "Friday")
+		self.assertEqual(_default_schedule_weekday({"schedule_weekday": "friday"}), "Friday")
+
+	def test_garbage_weekday_in_default_schedule_resolves_to_none(self):
+		from jarvis.chat.agents_api import _default_schedule_weekday
+
+		for bad in ("Blursday", 0, 8, "", None, [], {}):
+			with self.subTest(bad=bad):
+				self.assertIsNone(_default_schedule_weekday({"schedule_weekday": bad}))
+
+	def test_day_of_month_in_default_schedule(self):
+		from jarvis.chat.agents_api import _default_schedule_day_of_month
+
+		self.assertEqual(_default_schedule_day_of_month({"schedule_day_of_month": 15}), 15)
+		for bad in (0, 32, -1, "abc", None):
+			with self.subTest(bad=bad):
+				self.assertIsNone(_default_schedule_day_of_month({"schedule_day_of_month": bad}))
+
+	def test_install_agent_applies_an_int_weekday_default_schedule(self):
+		# End-to-end through install_agent itself: a listing whose default_schedule
+		# carries an ISO-int weekday must land on the installation AS ITS NAME, not
+		# be silently dropped.
+		from jarvis.chat import agents_api
+
+		listing_name = frappe.db.get_value("Jarvis Agent Listing", {"agent_slug": "close-auditor"}, "name")
+		if not listing_name:
+			self.skipTest("close-auditor listing not present on this site")
+		owner = _ensure_user("msched-int-weekday@example.com", enabled=1)
+		# close-auditor declares doctypes_required (GL Entry / Account / Company);
+		# JarvisAgentInstallation._validate_run_as_user refuses to install unless
+		# the run-as user already holds read on those - the same A12 gate
+		# test_agents_marketplace.py and test_platform_agents_api_hardening.py
+		# satisfy for their own fixtures. Accounts User grants them. This is a
+		# real-access grant, not a bypass of the check itself.
+		if frappe.db.exists("Role", "Accounts User"):
+			if "Accounts User" not in set(frappe.get_roles(owner)):
+				frappe.get_doc("User", owner).add_roles("Accounts User")
+		original_schedule = frappe.db.get_value("Jarvis Agent Listing", listing_name, "default_schedule")
+		frappe.db.set_value(
+			"Jarvis Agent Listing",
+			listing_name,
+			"default_schedule",
+			frappe.as_json({"schedule_enabled": 0, "schedule_frequency": "weekly", "schedule_weekday": 3}),
+			update_modified=False,
+		)
+		frappe.db.commit()
+		# On this line a listing with allowed_roles rows refuses installs from
+		# users outside those roles (empty = open). close-auditor may ship seeded
+		# roles, so grant Jarvis User for the duration of the test, or
+		# install_agent refuses with a PermissionError before ever reaching the
+		# schedule handling this test is about. _ensure_user already grants the
+		# Jarvis User role. Only the row added here is removed afterwards.
+		allowed_role_filters = {
+			"parenttype": "Jarvis Agent Listing",
+			"parentfield": "allowed_roles",
+			"parent": listing_name,
+			"role": "Jarvis User",
+		}
+		added_allowed_role = None
+		if not frappe.db.exists("Jarvis Agent Allowed Role", allowed_role_filters):
+			added_allowed_role = frappe.get_doc(
+				{"doctype": "Jarvis Agent Allowed Role", **allowed_role_filters}
+			).insert(ignore_permissions=True)
+			frappe.db.commit()
+		original_user = frappe.session.user
+		try:
+			frappe.set_user(owner)
+			frappe.db.delete("Jarvis Agent Installation", {"owner": owner, "agent": listing_name})
+			frappe.db.commit()
+			agents_api.install_agent("close-auditor")
+			weekday = frappe.db.get_value(
+				"Jarvis Agent Installation", {"owner": owner, "agent": listing_name}, "schedule_weekday"
+			)
+			self.assertEqual(weekday, "Wednesday")
+		finally:
+			frappe.set_user(original_user)
+			if added_allowed_role is not None:
+				frappe.db.delete("Jarvis Agent Allowed Role", {"name": added_allowed_role.name})
+			frappe.db.delete("Jarvis Agent Installation", {"owner": owner, "agent": listing_name})
+			frappe.db.set_value(
+				"Jarvis Agent Listing",
+				listing_name,
+				"default_schedule",
+				original_schedule,
+				update_modified=False,
+			)
+			frappe.db.commit()
