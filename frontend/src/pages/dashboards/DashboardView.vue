@@ -25,11 +25,6 @@
 						/>
 					</Dropdown>
 					<Button
-						label="Discuss in chat"
-						iconLeft="message-circle"
-						@click="discussInChat"
-					/>
-					<Button
 						v-if="detail.can_edit"
 						label="Edit in builder"
 						iconLeft="edit-2"
@@ -176,7 +171,6 @@ import {
 } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
-import { setChatPrefill } from "@/composables/chatPrefill";
 import { getDashboard, getDashboardsCaps, deleteDashboard, saveDashboard } from "@/api/dashboards";
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
@@ -250,7 +244,11 @@ function goBack() {
 // ── header actions ───────────────────────────────────────────────────────────
 const canShare = computed(
 	() =>
-		!!(detail.value && detail.value.can_edit && (caps.value.creatable_scopes || []).length > 1)
+		!!(
+			detail.value &&
+			detail.value.can_edit &&
+			(caps.value.creatable_scopes || []).length > 1
+		),
 );
 
 const moreOptions = computed(() => {
@@ -312,19 +310,6 @@ const deleteDialogOptions = computed(() => {
 function onShared(fresh) {
 	if (fresh && fresh.name) detail.value = fresh;
 	toast.success("Sharing updated");
-}
-
-// Hand the dashboard to the main chat as viewing context (api.js#sendMessage
-// forwards `context` because it carries a doctype) and let ChatView's prefill
-// consumption start a fresh conversation + auto-send.
-function discussInChat() {
-	const title = (detail.value && detail.value.dashboard_title) || props.id;
-	setChatPrefill({
-		text: `Let's discuss the dashboard "${title}". What does it show and what stands out?`,
-		autoSend: true,
-		context: { doctype: "Jarvis Dashboard", name: props.id },
-	});
-	router.push("/");
 }
 
 onMounted(() => {
