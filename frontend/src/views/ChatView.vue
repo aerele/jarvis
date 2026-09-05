@@ -91,6 +91,10 @@
 					<span style="font-size: 11.5px; color: var(--text-3)">{{ headerSub }}</span>
 				</div>
 				<div style="margin-left: auto; display: flex; align-items: center; gap: 8px">
+					<!-- Release-nudge version pill (Slice 3b): always-on "how current is
+					     my Jarvis" status; click opens What's-new. Hidden when the target
+					     version is unknown (VersionPill's own v-if). -->
+					<VersionPill ref="versionPillRef" />
 					<!-- "Go to Desk" — at the rightmost end of the cluster (chat only, via CSS order)
 					     (uniform with LayoutHeader across every page) -->
 					<button
@@ -544,6 +548,12 @@
 					</div>
 				</div>
 			</div>
+
+			<!-- Release-nudge soft banner (Slice 3b): calm info/blue, top-of-chat.
+			     Yields to the greeting/welcome/booting states and to any urgent
+			     billing/readiness alert (updateBannerVisible); dismiss minimises it
+			     into the version pill. Never stacks, never hides chat. -->
+			<UpdateBanner v-if="updateBannerVisible" :pill="versionPillRef" />
 
 			<!-- initial load: a quiet spinner so the welcome screen doesn't flash
 			     before the open conversation finishes loading on refresh -->
@@ -4278,6 +4288,10 @@
 			@confirm="runCompact"
 		/>
 
+		<!-- What's-new panel (Slice 3b): opened by the version pill and the soft
+		     banner via the shared whatsNewOpen ref in noticeGate. -->
+		<WhatsNewDialog />
+
 		<!-- Preview a file the user attached in the composer (before send). Images
 		     enlarge, PDFs/others render in-app; loads over the session cookie so a
 		     private File just works. Sent-message attachments use the artifact
@@ -4366,6 +4380,10 @@ import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
+import VersionPill from "@/components/chat/VersionPill.vue";
+import UpdateBanner from "@/components/chat/UpdateBanner.vue";
+import WhatsNewDialog from "@/components/chat/WhatsNewDialog.vue";
+import { showBanner } from "@/noticeGate";
 import { parseAsk } from "@/lib/chatAsk";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
@@ -4664,6 +4682,39 @@ const billingAlert = computed(() => {
 function dismissBillingAlert() {
 	billingDismissedPhase.value = (billingAlert.value && billingAlert.value.phase) || "";
 }
+
+// ---- Release-nudge soft banner (Slice 3b) ----------------------------------
+// The version pill (header) exposes { getEl, pulse }; the soft banner reaches
+// for it to minimise-into-pill on dismiss.
+const versionPillRef = ref(null);
+// Any composer-region billing/readiness alert that is live. The soft update
+// banner yields to all of them (never stacks, never competes with something the
+// customer must act on) - it is the least urgent surface here.
+const hasUrgentAlert = computed(
+	() =>
+		!!(
+			replacedAlert.value ||
+			billingAlert.value ||
+			suspendedNotice.value ||
+			workersWarnNotice.value ||
+			noAiConnected.value ||
+			containerUnavailable.value ||
+			notReadyNotice.value ||
+			llmApplying.value ||
+			llmApplyStuck.value
+		)
+);
+// The soft banner shows only when: it's a not-snoozed soft notice AND the
+// top-of-chat region is otherwise clear (no greeting/welcome/booting) AND no
+// urgent alert is competing for attention. The pill stays regardless.
+const updateBannerVisible = computed(
+	() =>
+		showBanner.value &&
+		!bizGreeting.value.show &&
+		!showWelcome.value &&
+		!booting.value &&
+		!hasUrgentAlert.value
+);
 // Per-conversation "auto-apply changes" (issue #186): seeded from
 // get_conversation().conversation.auto_apply on each load; the toggle reflects
 // THIS chat. autoApplyNote surfaces the admin-only-enable message.
