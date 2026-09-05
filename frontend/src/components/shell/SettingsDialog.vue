@@ -192,7 +192,9 @@ const NAV = [
 			{
 				key: "connectors",
 				label: "Connectors",
-				icon: "link-2",
+				// "grid" (integrations/apps) not "link-2": a chain-link reads as the
+				// composer's attach-link control and confused users.
+				icon: "grid",
 				gate: () => connectorsEnabled,
 			},
 		],
