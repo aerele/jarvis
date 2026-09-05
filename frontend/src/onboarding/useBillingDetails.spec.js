@@ -307,14 +307,88 @@ describe("Review & Pay card equals the normalized payload (P1-03)", () => {
 		expect(b.reviewRows.value.some((r) => r.key === "source_company")).toBe(false);
 	});
 
-	it("omits blank optional fields from both payload and card", () => {
+	it("omits blank optional fields from both payload and card (country defaults to India)", () => {
 		const b = useBillingDetails({ site: "s1", user: "u1" });
 		b.setUserValue("contact", "+91 90000 00000");
 		const payload = b.buildBilling();
-		expect(payload).toEqual({ contact_number: "+91 90000 00000" });
+		// Country is a required field defaulting to India, so it is always captured;
+		// every other untouched field is still omitted.
+		expect(payload).toEqual({ contact_number: "+91 90000 00000", country: "India" });
 		expect(b.reviewRows.value).toEqual([
 			{ key: "contact_number", label: "Contact", value: "+91 90000 00000" },
+			{ key: "country", label: "Country", value: "India" },
 		]);
+	});
+
+	it("defaults country to India so it is captured, not just displayed", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.fields.country.value).toBe("India");
+		// still source 'empty' so an ERP company default / resumed snapshot can win
+		expect(b.fields.country.source).toBe("empty");
+	});
+});
+
+describe("Invoicing Details party (billing_company_name / billing_email)", () => {
+	it("setInvoicing adds company_name + email to the payload; blanks are omitted", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setUserValue("contact", "+91 90000 00000");
+		b.setInvoicing("Acme Invoicing Pvt Ltd", "invoices@acme.test");
+		const payload = b.buildBilling();
+		expect(payload.company_name).toBe("Acme Invoicing Pvt Ltd");
+		expect(payload.email).toBe("invoices@acme.test");
+		// no invoicing entered -> omitted (admin falls back to the customer's own company)
+		const b2 = useBillingDetails({ site: "s2", user: "u2" });
+		b2.setUserValue("contact", "+91 90000 00000");
+		expect(b2.buildBilling().company_name).toBeUndefined();
+		expect(b2.buildBilling().email).toBeUndefined();
+	});
+
+	it("persists + restores the invoicing party across a reload", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setInvoicing("Acme Invoicing Pvt Ltd", "invoices@acme.test");
+		const fresh = useBillingDetails({ site: "s1", user: "u1" });
+		fresh.restore();
+		expect(fresh.invoicing.company_name).toBe("Acme Invoicing Pvt Ltd");
+		expect(fresh.invoicing.email).toBe("invoices@acme.test");
+	});
+
+	it("hydrates the invoicing party from the server summary", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.hydrateServerSnapshot({ company_name: "Server Co", email: "server@acme.test" });
+		expect(b.invoicing.company_name).toBe("Server Co");
+		expect(b.invoicing.email).toBe("server@acme.test");
+	});
+
+	it("shows the invoicing party on the Review card", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setInvoicing("Acme Invoicing Pvt Ltd", "invoices@acme.test");
+		const rows = Object.fromEntries(b.reviewRows.value.map((r) => [r.key, r.value]));
+		expect(rows.company_name).toBe("Acme Invoicing Pvt Ltd");
+		expect(rows.email).toBe("invoices@acme.test");
+	});
+
+	it("defaults the invoicing party from the company + work email, follows them, until edited", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.syncInvoicingDefaults("Acme Pvt Ltd", "acct@acme.test");
+		expect(b.invoicing.company_name).toBe("Acme Pvt Ltd");
+		expect(b.invoicing.email).toBe("acct@acme.test");
+		b.syncInvoicingDefaults("Acme Holdings", "acct2@acme.test"); // follows changes
+		expect(b.invoicing.company_name).toBe("Acme Holdings");
+		expect(b.invoicing.email).toBe("acct2@acme.test");
+		// editing the invoicing company stops ITS tracking; the email keeps following
+		b.setInvoicing("Custom Co", undefined);
+		b.syncInvoicingDefaults("Acme Reborn", "acct3@acme.test");
+		expect(b.invoicing.company_name).toBe("Custom Co");
+		expect(b.invoicing.email).toBe("acct3@acme.test");
+	});
+
+	it("carries address line 2 + pincode in the payload", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setUserValue("address2", "Level 4");
+		b.setUserValue("pincode", "600001");
+		const p = b.buildBilling();
+		expect(p.address_line2).toBe("Level 4");
+		expect(p.pincode).toBe("600001");
 	});
 });
 
@@ -395,5 +469,160 @@ describe("the snapshot has a bounded lifetime (retention)", () => {
 		window.localStorage.setItem(b.storageKey, JSON.stringify({ city: "Chennai" }));
 		expect(b.restore()).toBe(false);
 		expect(window.localStorage.getItem(b.storageKey)).toBeNull();
+	});
+});
+
+describe("state + country (India Compliance place of supply)", () => {
+	it("round-trips state and country through buildBilling under the contract keys", () => {
+		const b = useBillingDetails({ site: "sc1", user: "uc1" });
+		b.setUserValue("city", "Bengaluru");
+		b.setUserValue("state", "Karnataka");
+		b.setUserValue("country", "India");
+		const out = b.buildBilling();
+		expect(out.city).toBe("Bengaluru");
+		expect(out.state).toBe("Karnataka");
+		expect(out.country).toBe("India");
+	});
+
+	it("persists and restores state + country for the same site/user", () => {
+		const b1 = useBillingDetails({ site: "sc2", user: "uc2" });
+		b1.setUserValue("state", "Tamil Nadu");
+		b1.setUserValue("country", "India");
+		const b2 = useBillingDetails({ site: "sc2", user: "uc2" });
+		expect(b2.restore()).toBe(true);
+		expect(b2.fields.state.value).toBe("Tamil Nadu");
+		expect(b2.fields.country.value).toBe("India");
+	});
+});
+
+// Review P2: both conversion helpers must hydrate the now-required postal code (and the
+// optional second address line), or ERP defaults never prefill pincode and server recovery
+// leaves it blank / stale.
+describe("address2 + pincode hydrate from ERP defaults and from the server snapshot", () => {
+	it("applyDefaults fills address_line2 and pincode", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		const resp = {
+			ok: true,
+			data: {
+				company: "Aerele",
+				billing_address: {
+					address_line1: "12 MG Road",
+					address_line2: "Floor 3",
+					city: "Chennai",
+					pincode: "600001",
+				},
+			},
+		};
+		expect(fetchAndApply(b, "Aerele", resp)).toBe("applied");
+		expect(b.fields.address2.value).toBe("Floor 3");
+		expect(b.fields.pincode.value).toBe("600001");
+	});
+
+	it("hydrateServerSnapshot fills address_line2 and pincode", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.hydrateServerSnapshot({
+			address_line1: "9 Ring Road",
+			address_line2: "Unit 2",
+			city: "Delhi",
+			pincode: "110001",
+		});
+		expect(b.fields.address2.value).toBe("Unit 2");
+		expect(b.fields.pincode.value).toBe("110001");
+	});
+});
+
+// Review P2: syncInvoicingDefaults mutated memory only. setIdentity persists the snapshot
+// BEFORE the view's watcher calls it, so a reload kept the new identity beside a stale
+// invoicing default. It must persist the mirror too.
+describe("mirrored invoicing default is persisted, not just held in memory", () => {
+	it("persists the synced invoicing company + email so a reload keeps them", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setIdentity("team@example.com", "Aerele"); // persists identity (stale invoicing)
+		b.syncInvoicingDefaults("Aerele", "team@example.com");
+		const snap = JSON.parse(window.localStorage.getItem(b.storageKey));
+		expect(snap.invoice_company_name).toBe("Aerele");
+		expect(snap.invoice_email).toBe("team@example.com");
+	});
+
+	it("does not clobber a user-overridden invoicing value", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setInvoicing("Custom Billing Co", undefined); // user owns the company field
+		b.syncInvoicingDefaults("Aerele", "team@example.com");
+		expect(b.invoicing.company_name).toBe("Custom Billing Co"); // untouched
+		expect(b.invoicing.email).toBe("team@example.com"); // email still auto-tracks
+	});
+
+	it("does not write when nothing changed (idempotent)", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.syncInvoicingDefaults("Aerele", "team@example.com"); // first sync writes
+		window.localStorage.removeItem(b.storageKey); // prove a redundant call does not rewrite
+		b.syncInvoicingDefaults("Aerele", "team@example.com"); // same values -> no change
+		expect(window.localStorage.getItem(b.storageKey)).toBe(null);
+	});
+});
+
+// Review P1: a country from a resumed snapshot / ERP default bypasses the select, so it is
+// canonicalised on the way in and on the way out — never submitting a legacy/alias name.
+describe("country is canonicalised from restore and from ERP defaults", () => {
+	it("restore canonicalises a legacy country and buildBilling submits the canonical name", () => {
+		const key = billingStorageKey("s1", "u1");
+		window.localStorage.setItem(
+			key,
+			JSON.stringify({ country: "Turkey", saved_at: Date.now() })
+		);
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.restore()).toBe(true);
+		expect(b.fields.country.value).toBe("Türkiye");
+		expect(b.buildBilling().country).toBe("Türkiye");
+	});
+
+	it("applyDefaults canonicalises a legacy ERP country", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		const resp = {
+			ok: true,
+			data: { company: "Acme", billing_address: { address_line1: "x", country: "Turkey" } },
+		};
+		expect(fetchAndApply(b, "Acme", resp)).toBe("applied");
+		expect(b.fields.country.value).toBe("Türkiye");
+	});
+});
+
+// Review P2: persisting the mirrored invoicing default (the earlier fix) must also persist its
+// PROVENANCE, or restore() treats the auto-mirrored value as a user override and stops tracking.
+describe("invoicing-default provenance survives a reload", () => {
+	it("an auto-mirrored invoicing default keeps tracking a later company change after restore", () => {
+		const seed = useBillingDetails({ site: "s1", user: "u1" });
+		seed.setIdentity("team@example.com", "Acme"); // persist identity
+		seed.syncInvoicingDefaults("Acme", "team@example.com"); // auto-mirror (not user-set) + persist
+		expect(seed.invoicing.company_name).toBe("Acme");
+
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.restore()).toBe(true);
+		expect(b.invoicing.company_name).toBe("Acme");
+		b.syncInvoicingDefaults("Globex", "team@example.com"); // provenance = auto → must re-mirror
+		expect(b.invoicing.company_name).toBe("Globex");
+	});
+
+	it("a user-overridden invoicing value stays fixed after restore", () => {
+		const seed = useBillingDetails({ site: "s1", user: "u1" });
+		seed.setInvoicing("Custom Billing Co", undefined); // user override (user-set) + persist
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.restore()).toBe(true);
+		expect(b.invoicing.company_name).toBe("Custom Billing Co");
+		b.syncInvoicingDefaults("Globex", "team@example.com"); // must NOT clobber the override
+		expect(b.invoicing.company_name).toBe("Custom Billing Co");
+	});
+
+	it("a legacy snapshot with no provenance flag is treated as user-set (back-compat)", () => {
+		const key = billingStorageKey("s1", "u1");
+		window.localStorage.setItem(
+			key,
+			JSON.stringify({ invoice_company_name: "Legacy Co", saved_at: Date.now() })
+		);
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.restore()).toBe(true);
+		expect(b.invoicing.company_name).toBe("Legacy Co");
+		b.syncInvoicingDefaults("Globex", "team@example.com"); // legacy default = user-set → not clobbered
+		expect(b.invoicing.company_name).toBe("Legacy Co");
 	});
 });

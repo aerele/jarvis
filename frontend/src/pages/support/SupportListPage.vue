@@ -96,7 +96,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
 import { Badge, Button, Tooltip } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
@@ -104,6 +104,7 @@ import SupportShell from "@/components/support/SupportShell.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { useSupportStore, badgeFor, priorityBadge } from "@/stores/support";
 
+const route = useRoute();
 const router = useRouter();
 const store = useSupportStore();
 
@@ -118,6 +119,7 @@ const STATUS_OPTIONS = [
 	{ label: "Open", value: "open" },
 	{ label: "Closed", value: "closed" },
 ];
+const KNOWN_STATUS_VALUES = STATUS_OPTIONS.map((o) => o.value).filter(Boolean);
 
 const ALL_COLUMNS = [
 	{ label: "Subject", key: "subject", width: 3 },
@@ -206,6 +208,48 @@ function setFilters(next) {
 	for (const k of Object.keys(filters)) delete filters[k];
 	Object.assign(filters, next || {});
 }
+
+// Deep-link seed (?status=). NOT a one-time setup read: AppShell's single
+// router-view reuses THIS component instance across a same-route navigation
+// (e.g. the chat header pill's "Tickets awaiting reply" row pushing
+// {name:"Support", query:{status:"awaiting"}} while the user is already on
+// /support with some other filter picked) - setup only runs once per mount,
+// so a plain "read route.query.status at setup" misses every later arrival
+// at the same route. `immediate: true` covers the first mount too, so this
+// replaces that old one-shot seed rather than sitting alongside it. Unknown
+// values are ignored (filters.status is left as the user set it) rather than
+// cleared, so a stray/foreign query param can never blank out a filter picked
+// by hand - same as ApprovalsBoard's initialStatus validation, just re-run on
+// every arrival instead of once.
+watch(
+	() => route.query.status,
+	(status) => {
+		if (KNOWN_STATUS_VALUES.includes(status)) setFilters({ ...filters, status });
+	},
+	{ immediate: true }
+);
+
+// The other direction: keep the URL's ?status= matching a filter change the
+// user makes by hand (quick filter / filter popover), not only the one above.
+// Without this, the sequence that shipped the bug is: the header pill routes
+// here once (?status=awaiting), the user hand-picks a DIFFERENT status (the
+// URL is now stale), they leave for chat, then click the pill again - that
+// pushes the exact same {status:"awaiting"} location, which is NOT a value
+// change from vue-router's point of view, so the watch above never fires and
+// the stale hand-picked filter is left showing. Syncing the URL on every
+// hand-picked change keeps a later pill click a real query change again.
+// router.replace (not push): this is bookkeeping, not a navigation the user
+// should be able to Back through.
+watch(
+	() => filters.status,
+	(status) => {
+		if ((route.query.status || "") === (status || "")) return; // already in sync
+		const nextQuery = { ...route.query };
+		if (status) nextQuery.status = status;
+		else delete nextQuery.status;
+		router.replace({ query: nextQuery });
+	}
+);
 
 function onPageLength(v) {
 	pageLength.value = v;

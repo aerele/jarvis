@@ -318,9 +318,9 @@
 									<div
 										class="col-span-2 -mb-1 mt-2 text-base font-semibold text-ink-gray-9 first:mt-0"
 									>
-										Account
+										Company details
 									</div>
-									<div class="flex flex-col gap-1">
+									<div class="col-span-2 flex flex-col gap-1">
 										<FormControl
 											type="email"
 											variant="outline"
@@ -352,42 +352,6 @@
 										<ErrorMessage
 											id="jv-ob-email-err"
 											:message="detailsFieldErrors.email"
-										/>
-									</div>
-									<div class="flex flex-col gap-1">
-										<FormControl
-											type="tel"
-											variant="outline"
-											label="Contact number"
-											:model-value="billing.fields.contact.value"
-											@update:model-value="
-												(v) => {
-													billing.setUserValue('contact', v);
-													clearFieldErrorIfValid(
-														'contact',
-														contactError,
-														v
-													);
-												}
-											"
-											placeholder="+91 98765 43210"
-											autocomplete="tel"
-											required
-											aria-required="true"
-											:aria-invalid="
-												detailsFieldErrors.contact ? 'true' : undefined
-											"
-											:aria-describedby="
-												detailsFieldErrors.contact
-													? 'jv-ob-contact-err'
-													: undefined
-											"
-											@blur="touchContactField"
-											@keydown.enter="onDetailsSubmit"
-										/>
-										<ErrorMessage
-											id="jv-ob-contact-err"
-											:message="detailsFieldErrors.contact"
 										/>
 									</div>
 									<!-- No separate contact-consent checkbox here (owner decision
@@ -498,34 +462,277 @@
 									<div
 										class="col-span-2 mt-2 text-base font-semibold text-ink-gray-9"
 									>
-										Billing
+										Invoicing details
 									</div>
 									<FormControl
 										class="col-span-2"
 										type="text"
 										variant="outline"
-										label="Billing address (optional)"
-										:model-value="billing.fields.address.value"
+										label="Invoicing company name (optional)"
+										:model-value="billing.invoicing.company_name"
 										@update:model-value="
-											(v) => billing.setUserValue('address', v)
+											(v) => billing.setInvoicing(v, undefined)
 										"
-										placeholder="Street, area"
-										autocomplete="street-address"
+										placeholder="Defaults to your company name"
 										@keydown.enter="onDetailsSubmit"
 									/>
 									<FormControl
-										type="text"
+										type="email"
 										variant="outline"
-										label="City (optional)"
-										:model-value="billing.fields.city.value"
+										label="Invoicing email (optional)"
+										:model-value="billing.invoicing.email"
 										@update:model-value="
-											(v) => billing.setUserValue('city', v)
+											(v) => billing.setInvoicing(undefined, v)
 										"
-										placeholder="Chennai"
-										autocomplete="address-level2"
+										:placeholder="state.email || 'billing@company.com'"
+										autocomplete="email"
 										@keydown.enter="onDetailsSubmit"
 									/>
 									<div class="flex flex-col gap-1">
+										<FormControl
+											type="tel"
+											variant="outline"
+											label="Contact number"
+											:model-value="billing.fields.contact.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('contact', v);
+													clearFieldErrorIfValid(
+														'contact',
+														contactError,
+														v
+													);
+												}
+											"
+											placeholder="+91 98765 43210"
+											autocomplete="tel"
+											required
+											aria-required="true"
+											:aria-invalid="
+												detailsFieldErrors.contact ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.contact
+													? 'jv-ob-contact-err'
+													: undefined
+											"
+											@blur="touchContactField"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage
+											id="jv-ob-contact-err"
+											:message="detailsFieldErrors.contact"
+										/>
+									</div>
+									<div class="col-span-2 flex flex-col gap-1">
+										<FormControl
+											type="text"
+											variant="outline"
+											label="Address line 1"
+											:model-value="billing.fields.address.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('address', v);
+													clearFieldErrorIfValid(
+														'address',
+														addressError,
+														v
+													);
+												}
+											"
+											placeholder="Street, area"
+											autocomplete="street-address"
+											required
+											aria-required="true"
+											:aria-invalid="
+												detailsFieldErrors.address ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.address
+													? 'jv-ob-address-err'
+													: undefined
+											"
+											@blur="touchAddressField"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage
+											id="jv-ob-address-err"
+											:message="detailsFieldErrors.address"
+										/>
+									</div>
+									<FormControl
+										class="col-span-2"
+										type="text"
+										variant="outline"
+										label="Address line 2 (optional)"
+										:model-value="billing.fields.address2.value"
+										@update:model-value="
+											(v) => billing.setUserValue('address2', v)
+										"
+										placeholder="Landmark, area"
+										autocomplete="address-line2"
+										@keydown.enter="onDetailsSubmit"
+									/>
+									<div class="flex flex-col gap-1">
+										<FormControl
+											type="text"
+											variant="outline"
+											label="City/Town"
+											:model-value="billing.fields.city.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('city', v);
+													clearFieldErrorIfValid('city', cityError, v);
+												}
+											"
+											placeholder="Chennai"
+											autocomplete="address-level2"
+											required
+											aria-required="true"
+											:aria-invalid="
+												detailsFieldErrors.city ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.city
+													? 'jv-ob-city-err'
+													: undefined
+											"
+											@blur="touchCityField"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage
+											id="jv-ob-city-err"
+											:message="detailsFieldErrors.city"
+										/>
+									</div>
+									<div class="flex flex-col gap-1">
+										<FormControl
+											type="text"
+											variant="outline"
+											label="Postal Code"
+											:model-value="billing.fields.pincode.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('pincode', v);
+													clearFieldErrorIfValid(
+														'pincode',
+														(val) =>
+															pincodeError(val) ||
+															pincodeStateError(_billingAddr()),
+														v
+													);
+												}
+											"
+											placeholder="600001"
+											autocomplete="postal-code"
+											required
+											aria-required="true"
+											:aria-invalid="
+												detailsFieldErrors.pincode ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.pincode
+													? 'jv-ob-pincode-err'
+													: undefined
+											"
+											@blur="touchPincodeField"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage
+											id="jv-ob-pincode-err"
+											:message="detailsFieldErrors.pincode"
+										/>
+									</div>
+									<div class="flex flex-col gap-1">
+										<FormControl
+											type="select"
+											variant="outline"
+											label="Country"
+											:options="countryOptions"
+											:model-value="billing.fields.country.value || 'India'"
+											@update:model-value="onCountryChange"
+											required
+											aria-required="true"
+											:aria-invalid="
+												detailsFieldErrors.country ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.country
+													? 'jv-ob-country-err'
+													: undefined
+											"
+											@blur="touchCountryField"
+										/>
+										<ErrorMessage
+											id="jv-ob-country-err"
+											:message="detailsFieldErrors.country"
+										/>
+									</div>
+									<!-- State: place of supply for India Compliance. A Select of Indian
+										 states when the Country is India (required — it's the GST invoice's
+										 place of supply); a free-text region otherwise. -->
+									<div v-if="billingIsIndia" class="flex flex-col gap-1">
+										<FormControl
+											type="select"
+											variant="outline"
+											label="State"
+											:options="stateOptions"
+											:model-value="billing.fields.state.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('state', v);
+													clearFieldErrorIfValid('state', stateError, v);
+												}
+											"
+											required
+											aria-required="true"
+											:aria-invalid="
+												detailsFieldErrors.state ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.state
+													? 'jv-ob-state-err'
+													: undefined
+											"
+											@blur="touchStateField"
+										/>
+										<ErrorMessage
+											id="jv-ob-state-err"
+											:message="detailsFieldErrors.state"
+										/>
+									</div>
+									<div v-else class="flex flex-col gap-1">
+										<FormControl
+											type="text"
+											variant="outline"
+											label="State / Region"
+											:model-value="billing.fields.state.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('state', v);
+													clearFieldErrorIfValid('state', stateError, v);
+												}
+											"
+											placeholder="Region"
+											required
+											aria-required="true"
+											:aria-invalid="
+												detailsFieldErrors.state ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.state
+													? 'jv-ob-state-err'
+													: undefined
+											"
+											@blur="touchStateField"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage
+											id="jv-ob-state-err"
+											:message="detailsFieldErrors.state"
+										/>
+									</div>
+									<div class="col-span-2 flex flex-col gap-1">
 										<FormControl
 											type="text"
 											variant="outline"
@@ -534,7 +741,13 @@
 											@update:model-value="
 												(v) => {
 													billing.setUserValue('gstin', v);
-													clearFieldErrorIfValid('gstin', gstinError, v);
+													clearFieldErrorIfValid(
+														'gstin',
+														(val) =>
+															gstinError(val) ||
+															gstinStateError(_billingAddr()),
+														v
+													);
 												}
 											"
 											:placeholder="GSTIN_PLACEHOLDER"
@@ -1968,6 +2181,14 @@ import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
 import { readCookie } from "@/lib/user";
 import { useBillingDetails, billingEditAction } from "@/onboarding/useBillingDetails";
 import { gstinError, GSTIN_PLACEHOLDER } from "@/onboarding/gstin";
+import { gstinStateError, pincodeStateError } from "@/onboarding/address";
+import {
+	INDIAN_STATES,
+	COUNTRIES,
+	isIndia,
+	isValidIndianState,
+	isValidCountry,
+} from "@/onboarding/indianStates";
 import { isExpectedCompanyDefaultsMiss } from "@/onboarding/companyDefaultsMiss";
 
 const router = useRouter();
@@ -2301,6 +2522,13 @@ watch(
 watch(
 	() => state.company,
 	() => scheduleCompanyDefaults()
+);
+// Default the Invoicing details party from the chosen company + work email — including the values
+// prefilled on mount. Fires on any state.company/state.email change; billing.restore() runs before
+// prefillAccount() in onMounted and marks a resumed invoicing value user-owned, so
+// syncInvoicingDefaults preserves a resume and stops mirroring once the customer edits the field.
+watch([() => state.company, () => state.email], ([company, email]) =>
+	billing.syncInvoicingDefaults(company, email)
 );
 const frameSub = computed(() => FRAME_SUBS[state.step] || "Set up your workspace");
 
@@ -2636,6 +2864,26 @@ function companyError(value) {
 function contactError(value) {
 	return (value || "").trim() ? "" : "Enter a contact number.";
 }
+function addressError(value) {
+	return (value || "").trim() ? "" : "Enter your billing address.";
+}
+function cityError(value) {
+	return (value || "").trim() ? "" : "Enter your city or town.";
+}
+function pincodeError(value) {
+	return (value || "").trim() ? "" : "Enter your postal code.";
+}
+// Country is always populated (defaults to India, no blank option), so this is
+// practically unreachable; kept for the required marker + a defensive gate.
+function countryError(value) {
+	const s = (value || "").trim();
+	if (!s) return "Select your country.";
+	// A resumed snapshot / ERP default never passed through the select, so its country must be
+	// checked against the canonical list (a legacy "Turkey"/"Other" would otherwise fail the
+	// Address.country Link after payment). Aliases normalise; a genuine unknown is rejected.
+	if (!isValidCountry(s)) return "Choose your country from the list.";
+	return "";
+}
 // gstinError (gstin.js) already treats a blank value as "" (GSTIN is optional).
 // Required T&C checkbox (moved here from Review & Pay 2026-08-16): unlike the
 // other Details fields this isn't touched on blur (a checkbox has none worth
@@ -2653,7 +2901,43 @@ function termsError(value) {
 // no tie to what's wrong. Set all at once by onDetailsSubmit (every failure
 // shown together, not one submit per error); state.detailsErr stays reserved
 // for genuinely form-wide messages (see onPayClick's missing-details guard).
-const detailsFieldErrors = reactive({ email: "", company: "", contact: "", gstin: "", terms: "" });
+const detailsFieldErrors = reactive({
+	email: "",
+	company: "",
+	contact: "",
+	address: "",
+	city: "",
+	pincode: "",
+	country: "",
+	gstin: "",
+	state: "",
+	terms: "",
+});
+
+// Place of supply for India Compliance: State is a Select of Indian states when the
+// Country is India (the common case, so a blank Country reads as India), and it is
+// REQUIRED then because the GST invoice's place of supply is the buyer's state. For
+// any other country State is a free-text region and the books side treats the buyer
+// as Overseas (export → operator review in this phase).
+const countryOptions = COUNTRIES.map((c) => ({ label: c, value: c }));
+const stateOptions = [
+	{ label: "Select state…", value: "" },
+	...INDIAN_STATES.map((s) => ({ label: s, value: s })),
+];
+const billingIsIndia = computed(() => isIndia(billing.fields.country.value || "India"));
+function stateError(v) {
+	const s = (v || "").trim();
+	if (!billingIsIndia.value) return s ? "" : "Enter your state or region."; // non-India: free-text, required
+	if (!s) return "Select your state — it's the place of supply on your GST invoice.";
+	if (!isValidIndianState(s)) return "Select a valid Indian state.";
+	return "";
+}
+function touchStateField() {
+	detailsFieldErrors.state = stateError(billing.fields.state.value);
+	// a state change re-decides the pincode<->state and GSTIN<->state consistency shown on those fields
+	touchPincodeField();
+	touchGstinField();
+}
 function touchEmailField() {
 	detailsFieldErrors.email = emailError(state.email);
 }
@@ -2663,14 +2947,85 @@ function touchCompanyField() {
 function touchContactField() {
 	detailsFieldErrors.contact = contactError(billing.fields.contact.value);
 }
+function touchAddressField() {
+	detailsFieldErrors.address = addressError(billing.fields.address.value);
+}
+function touchCityField() {
+	detailsFieldErrors.city = cityError(billing.fields.city.value);
+}
+// Pincode + GSTIN also carry a CROSS-FIELD consistency check (State <-> Pincode <-> GSTIN must agree,
+// mirroring the admin control plane / India Compliance) so an inconsistent India address is caught HERE, not
+// as a silent operator REVIEW when the books build the invoice. The required/format error wins first; the
+// consistency message only shows when the field is otherwise fine. Surfaced on the field the mismatch is
+// about — pincode-vs-state on pincode, GSTIN-vs-state on GSTIN.
+function _billingAddr() {
+	return {
+		country: billing.fields.country.value || "India",
+		state: billing.fields.state.value,
+		pincode: billing.fields.pincode.value,
+		gstin: billing.fields.gstin.value,
+	};
+}
+function touchPincodeField() {
+	detailsFieldErrors.pincode =
+		pincodeError(billing.fields.pincode.value) || pincodeStateError(_billingAddr());
+}
+function touchCountryField() {
+	detailsFieldErrors.country = countryError(billing.fields.country.value || "India");
+}
 function touchGstinField() {
-	detailsFieldErrors.gstin = gstinError(billing.fields.gstin.value);
+	detailsFieldErrors.gstin =
+		gstinError(billing.fields.gstin.value) || gstinStateError(_billingAddr());
 }
 // Called on every keystroke: only ever CLEARS an error that no longer applies
 // - it never shows a NEW one while the customer is still typing. Full
 // (re)validation happens on blur (touch*Field above) and on submit.
 function clearFieldErrorIfValid(name, errorFn, value) {
 	if (detailsFieldErrors[name] && !errorFn(value)) detailsFieldErrors[name] = "";
+}
+// Run the full Details-step validation (every field's touch*Field) and report whether
+// any error stands. Shared by onDetailsSubmit AND the resumed-Pay guard so both enforce
+// the SAME required set — a resumed session that lands straight on Review & Pay can't
+// bypass the address/city/state/pincode/country checks. terms is NOT here: it's gated
+// separately (after the reconnect branch) so reconnect is never blocked.
+function billingDetailsInvalid() {
+	touchEmailField();
+	touchCompanyField();
+	touchContactField();
+	touchAddressField();
+	touchCityField();
+	touchPincodeField();
+	touchCountryField();
+	touchGstinField();
+	touchStateField();
+	return !!(
+		detailsFieldErrors.email ||
+		detailsFieldErrors.company ||
+		detailsFieldErrors.contact ||
+		detailsFieldErrors.address ||
+		detailsFieldErrors.city ||
+		detailsFieldErrors.pincode ||
+		detailsFieldErrors.country ||
+		detailsFieldErrors.gstin ||
+		detailsFieldErrors.state
+	);
+}
+// A state/region is country-specific, so a value entered for one country must not carry
+// into another (review: an Indian state left selected after switching to a foreign
+// country made "United States / Tamil Nadu" pass validation). Clear it (and its error)
+// on a real country change; India-ness also flips the State widget Select↔free-text.
+function onCountryChange(v) {
+	const prev = billing.fields.country.value || "India";
+	billing.setUserValue("country", v);
+	if (v !== prev && billing.fields.state.value) {
+		billing.setUserValue("state", "");
+		detailsFieldErrors.state = "";
+	}
+	clearFieldErrorIfValid("country", countryError, v);
+	// The pincode/GSTIN consistency messages are country-dependent (India-only), so a country change must
+	// re-decide them too — else a stale "doesn't match your state" lingers after switching to overseas.
+	touchPincodeField();
+	touchGstinField();
 }
 
 // ERP-derived billing defaults for the selected Company. Debounced (the Company
@@ -2722,17 +3077,7 @@ async function onDetailsSubmit() {
 	// reconnect branch too (item 5), which it must not. A customer with both a
 	// bad GSTIN and an unticked box sees the GSTIN error first and the terms
 	// error only on a second submit; accepted as the cost of that exemption.
-	touchEmailField();
-	touchCompanyField();
-	touchContactField();
-	touchGstinField();
-	if (
-		detailsFieldErrors.email ||
-		detailsFieldErrors.company ||
-		detailsFieldErrors.contact ||
-		detailsFieldErrors.gstin
-	)
-		return;
+	if (billingDetailsInvalid()) return;
 	billing.persist();
 	// Editing billing after Review & Pay: return straight to Pay, and — once an
 	// intent exists — save the edit through the authenticated update_billing
@@ -3790,15 +4135,21 @@ async function onPayClick() {
 	// never an empty object) when nothing was entered, so a blank Details step sends
 	// no billing key at all.
 	const billingPayload = billing.buildBilling();
-	if (!state.planName || !state.email || !state.company || !billingPayload.contact_number) {
-		// A signup with empty args would create a broken record upstream. This is
-		// the fresh-start guard; a resumed session renders from server truth and
-		// uses Initiate, not this button. Contact number is checked here too
-		// (jarvis#888): a resumed session can land directly on Pay with a
-		// pre-change saved state that never collected it, and the server now
-		// requires it - catch that before the throw, same as the other fields.
+	if (!state.planName || !state.email || !state.company) {
+		// Nothing to sign up with. A resumed session renders from server truth and uses
+		// Initiate, not this button, so an empty plan/email/company here is a fresh-start
+		// bounce back to Details.
 		state.detailsErr =
 			"Your signup details are missing. Please go back and pick a plan and enter your details again.";
+		state.step = "details";
+		return;
+	}
+	// Full billing completeness (mirrors onDetailsSubmit): a resumed session can land
+	// directly on Review & Pay with a pre-change saved state that predates the required
+	// address/city/state/pincode/country (and the contact number, jarvis#888) — and a
+	// missing state also blocks signup once place-of-supply charging is on. Bounce to
+	// Details with the per-field errors shown rather than submit an incomplete profile.
+	if (billingDetailsInvalid()) {
 		state.step = "details";
 		return;
 	}
@@ -5769,5 +6120,13 @@ onUnmounted(() => {
 	}
 	/* StepProgress.vue owns its own reduced-motion fallback for the
 	   indeterminate fill/segment pulse. */
+}
+
+/* frappe-ui's Select trigger is inline-flex, so it sizes to its content — Country
+   ("India") renders narrower than the paired State ("Select state…") and than the
+   text inputs. Force the details-form select triggers to fill their grid cell so
+   every paired field lines up at equal width. */
+.ob-details-form :deep(button[role="combobox"]) {
+	width: 100%;
 }
 </style>

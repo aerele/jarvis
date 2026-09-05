@@ -1880,6 +1880,35 @@ class TestPublishFencing(_PumpTestCase):
 		self.assertIn("run:end", by_kind)
 		self.assertEqual(by_kind["run:end"]["pump_epoch"], ctx.epoch)
 
+	def test_on_status_publishes_run_status(self):
+		"""Task 6 fix: the lane handler's ``on_status`` (wired from
+		``relay_mux``'s new ``status`` lane-event kind) publishes a fenced
+		``run:status`` carrying the run's conversation/run_id/message_id, exactly
+		like ``on_tool``'s ``tool:start``/``tool:end`` publishes above."""
+		conv = self._mk_conv()
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rs = pump._RunState(
+			run_id="pmp_status1",
+			conversation=conv,
+			owner="u@x",
+			assistant_message="msg1",
+			session_key="sess-pmp_status1",
+			version=1,
+		)
+		handler = pump._make_handler(ctx, rs)
+		captured = []
+		with patch.object(ts, "publish_to_user", side_effect=lambda u, p: captured.append(p)):
+			handler.on_status(3, "compacting")
+		self.assertEqual(len(captured), 1)
+		payload = captured[0]
+		self.assertEqual(payload["kind"], "run:status")
+		self.assertEqual(payload["status"], "compacting")
+		self.assertEqual(payload["conversation_id"], conv)
+		self.assertEqual(payload["run_id"], "pmp_status1")
+		self.assertEqual(payload["message_id"], "msg1")
+		self.assertEqual(payload["pump_epoch"], ctx.epoch)
+
 
 # --------------------------------------------------------------------------- #
 # CDX-4 — watchdog EFFECT scan (recover a lost enqueue_finalize)
@@ -2138,97 +2167,110 @@ class TestConservativeAdmission(_PumpTestCase):
 
 
 class TestWorkerStatus(FrappeTestCase):  # reuse module base
-	def setUp(self):
-		pump._clear_zero_marker()
-
-	def tearDown(self):
-		pump._clear_zero_marker()
-
 	def test_probe_returns_none_on_error(self):
 		with patch("frappe.utils.background_jobs.get_workers", side_effect=RuntimeError):
 			self.assertIsNone(pump._probe_worker_count("long"))
 
-	def test_healthy_is_not_blocked_not_degraded(self):
+	def test_probe_returns_none_when_a_worker_lost_its_queues(self):
+		# An RQ worker hash that expired and was recreated by a heartbeat carries no
+		# `queues`. That is "unknown", never "not listening on this queue".
+		bare = MagicMock()
+		bare.queue_names.return_value = []
+		with patch("frappe.utils.background_jobs.get_workers", return_value=[bare]):
+			self.assertIsNone(pump._probe_worker_count("long"))
+
+	def test_probe_keeps_a_confident_count_when_an_unrelated_worker_is_bare(self):
+		# One worker lost its queues, but another provably serves this queue: the
+		# positive evidence stands, so routing must not collapse to "unknown".
+		serving = MagicMock()
+		serving.queue_names.return_value = ["bench:long"]
+		bare = MagicMock()
+		bare.queue_names.return_value = []
 		with (
-			patch.object(pump, "_probe_worker_count", return_value=4),
-			patch.object(pump, "_pump_shape_starves", return_value=False),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
+			patch("frappe.utils.background_jobs.get_workers", return_value=[serving, bare]),
+			patch("frappe.utils.background_jobs.generate_qname", return_value="bench:long"),
 		):
+			self.assertEqual(pump._probe_worker_count("long"), 1)
+
+	def test_fresh_heartbeat_count_reads_recent_worker_hashes(self):
+		from datetime import datetime, timedelta, timezone
+
+		now = datetime.now(timezone.utc)
+		recent = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+		old = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+		conn = MagicMock()
+		conn.scan_iter.return_value = [b"rq:worker:a", b"rq:worker:b", b"rq:worker:c"]
+		conn.hget.side_effect = [recent.encode(), old.encode(), None]
+		with patch("frappe.utils.background_jobs.get_redis_conn", return_value=conn):
+			self.assertEqual(pump._fresh_heartbeat_count(), 1)
+
+	def test_fresh_heartbeat_count_none_on_error(self):
+		with patch("frappe.utils.background_jobs.get_redis_conn", side_effect=RuntimeError):
+			self.assertIsNone(pump._fresh_heartbeat_count())
+
+	def test_registry_is_stale_when_bare_but_a_worker_still_heartbeats(self):
+		bare = MagicMock()
+		bare.queue_names.return_value = []
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[bare]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=1),
+		):
+			self.assertTrue(pump._registry_is_stale())
+
+	def test_registry_is_stale_when_empty_but_a_worker_still_heartbeats(self):
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=1),
+		):
+			self.assertTrue(pump._registry_is_stale())
+
+	def test_registry_is_stale_when_the_heartbeat_probe_fails(self):
+		# An empty registry plus an unreadable heartbeat scan is "unknown", never a
+		# confirmed zero: the orphan sweep must not cancel on it.
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=None),
+		):
+			self.assertTrue(pump._registry_is_stale())
+
+	def test_registry_is_stale_takes_a_registry_snapshot(self):
+		# Callers that already hold the registry pass it in; no second read.
+		bare = MagicMock()
+		bare.queue_names.return_value = []
+		with (
+			patch("frappe.utils.background_jobs.get_workers", side_effect=AssertionError("no re-read")),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=1),
+		):
+			self.assertTrue(pump._registry_is_stale([bare]))
+
+	def test_registry_is_not_stale_without_heartbeats(self):
+		# Nobody heartbeats: the workers really are gone, the registry is right.
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[]),
+			patch.object(pump, "_fresh_heartbeat_count", return_value=0),
+		):
+			self.assertFalse(pump._registry_is_stale())
+
+	def test_registry_is_not_stale_when_workers_carry_queues(self):
+		w = MagicMock()
+		w.queue_names.return_value = ["bench:long"]
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[w]),
+			patch.object(pump, "_fresh_heartbeat_count", side_effect=AssertionError("no scan needed")),
+		):
+			self.assertFalse(pump._registry_is_stale())
+
+	def test_healthy_is_not_degraded(self):
+		with patch.object(pump, "_pump_shape_starves", return_value=False):
 			s = pump.chat_worker_status()
-			self.assertFalse(s["blocked"])
 			self.assertFalse(s["degraded"])
+			self.assertNotIn("blocked", s)
 
-	def test_one_worker_degraded_not_blocked(self):
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=1),
-			patch.object(pump, "_pump_shape_starves", return_value=True),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			s = pump.chat_worker_status()
-			self.assertFalse(s["blocked"])
-			self.assertTrue(s["degraded"])
+	def test_starved_shape_is_degraded(self):
+		with patch.object(pump, "_pump_shape_starves", return_value=True):
+			self.assertTrue(pump.chat_worker_status()["degraded"])
 
-	def test_probe_error_never_blocks(self):
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=None),
-			patch.object(pump, "_pump_shape_starves", return_value=False),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			self.assertFalse(pump.chat_worker_status()["blocked"])
-
-	def test_zero_workers_blocks_only_after_grace(self):
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=0),
-			patch.object(pump, "_pump_shape_starves", return_value=True),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			# first observation: marker set, NOT yet blocked (debounce)
-			self.assertFalse(pump.chat_worker_status()["blocked"])
-			# simulate the marker aging past the grace window
-			pump._force_zero_marker_age(pump._ZERO_GRACE_S + 5)
-			self.assertTrue(pump.chat_worker_status()["blocked"])
-
-	def test_recovery_clears_marker(self):
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=0),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			pump.chat_worker_status()  # sets marker
-		# Age the ORIGINAL marker past grace before the recovery step. If the
-		# recovery reading below fails to clear it, this aged, still-live marker
-		# would make the later fresh 0-reading block IMMEDIATELY (no debounce),
-		# so the final assertion below only holds if recovery actually cleared it.
-		pump._force_zero_marker_age(pump._ZERO_GRACE_S + 5)
-		with (
-			patch.object(pump, "_probe_worker_count", return_value=3),
-			patch.object(pump, "_pump_shape_starves", return_value=False),
-			patch("jarvis.chat.api._turn_queue", return_value="long"),
-		):
-			self.assertFalse(pump.chat_worker_status()["blocked"])
-			# marker cleared: a later single 0 must re-arm the grace, not block instantly
-			with (
-				patch.object(pump, "_probe_worker_count", return_value=0),
-				patch.object(pump, "_pump_shape_starves", return_value=True),
-			):
-				self.assertFalse(pump.chat_worker_status()["blocked"])
-
-	def test_zero_still_present_refreshes_ttl(self):
-		"""When the marker is PRESENT and the reading is still zero, `_zero_persisted`
-		must RE-WRITE it (same `since`, fresh TTL) rather than leaving it untouched.
-		Without the refresh, a lane dead longer than the 300s TTL loses the marker in
-		Redis; the next zero reading re-seeds it from scratch and returns False, briefly
-		flipping the fail-closed chat block OFF for a fresh 20s grace window on a lane
-		that has been dead the whole time. This test fails if the refresh line is
-		removed (set_value would then never be called for a still-present marker)."""
-		fixed_since = "2020-01-01 00:00:00.000000"
-		mock_cache = MagicMock()
-		mock_cache.get_value.return_value = fixed_since
-		with patch.object(pump.frappe, "cache", return_value=mock_cache):
-			result = pump._zero_persisted(pump._ZERO_GRACE_S)
-		# `since` is ancient, so with grace elapsed this must report persisted.
-		self.assertTrue(result)
-		# The marker must be RE-WRITTEN with the SAME `since` and a fresh TTL -
-		# never left untouched while zero readings keep coming in.
-		mock_cache.set_value.assert_called_once_with(
-			pump._zero_marker_cache_key(), fixed_since, expires_in_sec=300
-		)
+	def test_shape_probe_error_not_degraded(self):
+		# Fail-safe: a probe error must never be read as a real shortage.
+		with patch.object(pump, "_pump_shape_starves", side_effect=RuntimeError):
+			self.assertFalse(pump.chat_worker_status()["degraded"])

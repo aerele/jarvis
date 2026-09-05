@@ -217,6 +217,57 @@ class TestAcceptOrQueueBasics(_AdmissionTestCase):
 		self.assertEqual(frappe.db.count(TURN, {"run_id": "dup"}), 1)
 
 
+class TestCompactionQueuesInsteadOfRejects(_AdmissionTestCase):
+	"""A compacting conversation is not a hard reject in admission - it is the
+	same "busy" signal a live turn or a recovering turn already is:
+	``_conv_legacy_busy`` -> ``api._conversation_busy`` returns True while
+	``compaction.is_compacting`` (see api.py), so accept queues instead of
+	dispatching and ``_pick_next``'s ``eligible()`` skips it on promotion until
+	the lock clears. The front door (send_message / retry_message) is what
+	actually refuses a compacting send to the user; this class covers the
+	machine's own queue-then-promote-later behavior."""
+
+	def test_accept_or_queue_queues_while_compacting(self):
+		conv = self._mk_conv()
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		seed = self._mk_msg(conv, 1)
+		calls = []
+		with patch.object(admission, "_max_inflight", return_value=4):
+			res = self._accept(conv, "compact-run", seed, calls=calls)
+		self.assertTrue(res["ok"])
+		self.assertFalse(res["dispatched"], "must not dispatch onto the transcript a compaction is rewriting")
+		self.assertIsNotNone(res["queued_position"])
+		self.assertEqual(self._state("compact-run"), "queued")
+		self.assertEqual(calls, [], "no dispatch fired for a queued (not rejected) turn")
+
+	def test_promote_next_skips_while_compacting_then_promotes_once_cleared(self):
+		conv = self._mk_conv()
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		seed = self._mk_msg(conv, 1)
+		self._insert_turn(conv, "queued1", seed, "queued")
+		dispatched = []
+		with (
+			patch.object(admission, "_max_inflight", return_value=4),
+			patch.object(
+				chat_api, "_dispatch_turn", side_effect=lambda *a, **k: dispatched.append(a[0]["run_id"])
+			),
+		):
+			# Blocked while the lock is fresh.
+			admission.promote_next(admission.DEFAULT_RELAY_TARGET)
+			self.assertEqual(self._state("queued1"), "queued", "not promoted while compacting")
+			self.assertEqual(dispatched, [])
+			# The lock clears (compaction finished) - the next sweep promotes it.
+			frappe.db.set_value(CONV, conv, "compacting_since", None, update_modified=False)
+			frappe.db.commit()
+			admission.promote_next(admission.DEFAULT_RELAY_TARGET)
+		self.assertEqual(self._state("queued1"), "dispatching", "promoted once the lock cleared")
+		self.assertEqual(dispatched, ["queued1"], "dispatched exactly once")
+
+
 class TestSimultaneousSendsCASRace(_AdmissionTestCase):
 	def test_two_simultaneous_sends_cap_one(self):
 		"""Barrier-synchronized threads, real separate DB connections, cap 1:

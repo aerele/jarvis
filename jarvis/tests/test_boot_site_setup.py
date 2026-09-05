@@ -57,3 +57,41 @@ class TestBootSiteSetupFlag(FrappeTestCase):
 			b = self._boot()
 		self.assertTrue(b.jarvis_site_setup_complete)
 		self.assertFalse(b.jarvis_onboarded)
+
+
+class TestBootHasBeenReadyFlag(FrappeTestCase):
+	"""jarvis_has_been_ready disambiguates the two reasons that alone cannot
+	tell a brand-new tenant (first sync still pending) from an established
+	workspace (apply-confirmed marker cleared) - see jarvis.account.
+	has_been_chat_ready and the desk banner's llm_pool_provisioning /
+	llm_provisioning variant."""
+
+	def _boot(self):
+		b = frappe._dict()
+		set_jarvis_boot(b)
+		return b
+
+	def test_established_workspace_reads_true(self):
+		with patch("jarvis.account.has_been_chat_ready", return_value=True):
+			self.assertTrue(self._boot().jarvis_has_been_ready)
+
+	def test_never_established_workspace_reads_false(self):
+		with patch("jarvis.account.has_been_chat_ready", return_value=False):
+			self.assertFalse(self._boot().jarvis_has_been_ready)
+
+	def test_a_boot_error_fails_safe_to_false(self):
+		"""Matches every other boot.py flag: a boot-time failure must not
+		claim a workspace is established when nothing confirmed that."""
+		with patch("jarvis.account.has_been_chat_ready", side_effect=Exception("boom")):
+			self.assertFalse(self._boot().jarvis_has_been_ready)
+
+	def test_independent_of_the_readiness_call_failing(self):
+		"""is_ready_for_chat() throwing must not also blank this flag - the
+		two try/except blocks in set_jarvis_boot are deliberately separate."""
+		with (
+			patch("jarvis.account.is_ready_for_chat", side_effect=Exception("boom")),
+			patch("jarvis.account.has_been_chat_ready", return_value=True),
+		):
+			b = self._boot()
+		self.assertTrue(b.jarvis_onboarded)  # the readiness fail-safe: never nag on a boot error
+		self.assertTrue(b.jarvis_has_been_ready)
