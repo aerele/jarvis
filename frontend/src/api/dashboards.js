@@ -102,7 +102,7 @@ export const sendDashboardChat = (
 	editingName = "",
 	theme = "",
 	modelOverride = "",
-	thinkingOverride = null,
+	thinkingOverride = null
 ) => {
 	const context = { page: "dashboards" };
 	if (dataMode === "static" || dataMode === "live") context.data_mode = dataMode;

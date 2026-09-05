@@ -93,10 +93,7 @@ def publish_to_user(user: str, payload: dict[str, Any]) -> None:
 	):
 		try:
 			origin = (
-				frappe.db.get_value(
-					"Jarvis Conversation", payload["conversation_id"], "origin_page"
-				)
-				or ""
+				frappe.db.get_value("Jarvis Conversation", payload["conversation_id"], "origin_page") or ""
 			)
 			if origin == "dashboards":
 				message = {**payload, "origin_page": origin}

@@ -391,9 +391,7 @@ watch(open, (isOpen) => {
 	font-family: inherit;
 	font-size: 12px;
 	font-weight: 500;
-	transition:
-		background-color 0.12s,
-		border-color 0.12s;
+	transition: background-color 0.12s, border-color 0.12s;
 }
 .mep-pill:hover {
 	background: var(--surface-2);

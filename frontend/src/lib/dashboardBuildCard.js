@@ -147,7 +147,7 @@ export function toolBaseName(name) {
  */
 export function dashboardBuildPhase(
 	{ activeTools, statusPhase, waiting },
-	{ dataTools = DATA_TOOLS, writeTools = WRITE_TOOLS } = {},
+	{ dataTools = DATA_TOOLS, writeTools = WRITE_TOOLS } = {}
 ) {
 	const tools = Array.isArray(activeTools) ? activeTools : [];
 	const running = [...tools].reverse().find((t) => t && t.status === "running");
@@ -204,7 +204,7 @@ function enabledFlag(value) {
  */
 export function restoreDashboardRunState(
 	messages,
-	{ now = Date.now(), maxAgeMs = STREAMING_FRESHNESS_MS } = {},
+	{ now = Date.now(), maxAgeMs = STREAMING_FRESHNESS_MS } = {}
 ) {
 	const rows = Array.isArray(messages) ? messages : [];
 	let assistantIndex = -1;
@@ -279,7 +279,7 @@ export const DASH_THUMB_SOURCE_HEIGHT = 400;
 export function dashboardThumbnailTransform(
 	containerWidthPx,
 	sourceWidthPx = DASH_THUMB_SOURCE_WIDTH,
-	sourceHeightPx = DASH_THUMB_SOURCE_HEIGHT,
+	sourceHeightPx = DASH_THUMB_SOURCE_HEIGHT
 ) {
 	const w = Number(containerWidthPx) > 0 ? Number(containerWidthPx) : sourceWidthPx;
 	const scale = w / sourceWidthPx;
