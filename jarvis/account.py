@@ -1886,6 +1886,36 @@ def get_billing_payment_state() -> dict:
 
 
 @frappe.whitelist()
+def get_invoices() -> list:
+	"""The customer's own GST invoices for the billing page. SM/Jarvis-Admin only, like its
+	billing siblings (the SPA route adds no client guard and leans on this one)."""
+	require_jarvis_admin()
+	return _surface(admin_client.get_invoices)
+
+
+@frappe.whitelist()
+def download_invoice(erp_name: str) -> dict:
+	"""Base64 PDF of ONE of the customer's invoices; admin re-verifies ownership."""
+	require_jarvis_admin()
+	return _surface(admin_client.download_invoice, erp_name)
+
+
+@frappe.whitelist()
+def get_billing_profile() -> dict:
+	"""The billing-details card: editable party (direct) or a 'billed through <partner>' notice."""
+	require_jarvis_admin()
+	return _surface(admin_client.get_billing_profile)
+
+
+@frappe.whitelist()
+def update_billing_details(billing: dict | None = None) -> dict:
+	"""Save the customer's own billing party (validated admin-side; a partner-billed customer is
+	refused there)."""
+	require_jarvis_admin()
+	return _surface(admin_client.update_billing_details, billing)
+
+
+@frappe.whitelist()
 def check_billing_payment_status() -> dict:
 	"""Ask the provider what happened to the current billing payment and converge.
 

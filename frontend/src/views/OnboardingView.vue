@@ -616,7 +616,9 @@
 													billing.setUserValue('pincode', v);
 													clearFieldErrorIfValid(
 														'pincode',
-														pincodeError,
+														(val) =>
+															pincodeError(val) ||
+															pincodeStateError(_billingAddr()),
 														v
 													);
 												}
@@ -648,21 +650,7 @@
 											label="Country"
 											:options="countryOptions"
 											:model-value="billing.fields.country.value || 'India'"
-											@update:model-value="
-												(v) => {
-													billing.setUserValue('country', v);
-													clearFieldErrorIfValid(
-														'country',
-														countryError,
-														v
-													);
-													clearFieldErrorIfValid(
-														'state',
-														stateError,
-														billing.fields.state.value
-													);
-												}
-											"
+											@update:model-value="onCountryChange"
 											required
 											aria-required="true"
 											:aria-invalid="
@@ -753,7 +741,13 @@
 											@update:model-value="
 												(v) => {
 													billing.setUserValue('gstin', v);
-													clearFieldErrorIfValid('gstin', gstinError, v);
+													clearFieldErrorIfValid(
+														'gstin',
+														(val) =>
+															gstinError(val) ||
+															gstinStateError(_billingAddr()),
+														v
+													);
 												}
 											"
 											:placeholder="GSTIN_PLACEHOLDER"
@@ -2187,7 +2181,14 @@ import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
 import { readCookie } from "@/lib/user";
 import { useBillingDetails, billingEditAction } from "@/onboarding/useBillingDetails";
 import { gstinError, GSTIN_PLACEHOLDER } from "@/onboarding/gstin";
-import { INDIAN_STATES, COUNTRIES, isIndia, isValidIndianState } from "@/onboarding/indianStates";
+import { gstinStateError, pincodeStateError } from "@/onboarding/address";
+import {
+	INDIAN_STATES,
+	COUNTRIES,
+	isIndia,
+	isValidIndianState,
+	isValidCountry,
+} from "@/onboarding/indianStates";
 import { isExpectedCompanyDefaultsMiss } from "@/onboarding/companyDefaultsMiss";
 
 const router = useRouter();
@@ -2875,7 +2876,13 @@ function pincodeError(value) {
 // Country is always populated (defaults to India, no blank option), so this is
 // practically unreachable; kept for the required marker + a defensive gate.
 function countryError(value) {
-	return (value || "").trim() ? "" : "Select your country.";
+	const s = (value || "").trim();
+	if (!s) return "Select your country.";
+	// A resumed snapshot / ERP default never passed through the select, so its country must be
+	// checked against the canonical list (a legacy "Turkey"/"Other" would otherwise fail the
+	// Address.country Link after payment). Aliases normalise; a genuine unknown is rejected.
+	if (!isValidCountry(s)) return "Choose your country from the list.";
+	return "";
 }
 // gstinError (gstin.js) already treats a blank value as "" (GSTIN is optional).
 // Required T&C checkbox (moved here from Review & Pay 2026-08-16): unlike the
@@ -2927,6 +2934,9 @@ function stateError(v) {
 }
 function touchStateField() {
 	detailsFieldErrors.state = stateError(billing.fields.state.value);
+	// a state change re-decides the pincode<->state and GSTIN<->state consistency shown on those fields
+	touchPincodeField();
+	touchGstinField();
 }
 function touchEmailField() {
 	detailsFieldErrors.email = emailError(state.email);
@@ -2943,20 +2953,79 @@ function touchAddressField() {
 function touchCityField() {
 	detailsFieldErrors.city = cityError(billing.fields.city.value);
 }
+// Pincode + GSTIN also carry a CROSS-FIELD consistency check (State <-> Pincode <-> GSTIN must agree,
+// mirroring the admin control plane / India Compliance) so an inconsistent India address is caught HERE, not
+// as a silent operator REVIEW when the books build the invoice. The required/format error wins first; the
+// consistency message only shows when the field is otherwise fine. Surfaced on the field the mismatch is
+// about — pincode-vs-state on pincode, GSTIN-vs-state on GSTIN.
+function _billingAddr() {
+	return {
+		country: billing.fields.country.value || "India",
+		state: billing.fields.state.value,
+		pincode: billing.fields.pincode.value,
+		gstin: billing.fields.gstin.value,
+	};
+}
 function touchPincodeField() {
-	detailsFieldErrors.pincode = pincodeError(billing.fields.pincode.value);
+	detailsFieldErrors.pincode =
+		pincodeError(billing.fields.pincode.value) || pincodeStateError(_billingAddr());
 }
 function touchCountryField() {
 	detailsFieldErrors.country = countryError(billing.fields.country.value || "India");
 }
 function touchGstinField() {
-	detailsFieldErrors.gstin = gstinError(billing.fields.gstin.value);
+	detailsFieldErrors.gstin =
+		gstinError(billing.fields.gstin.value) || gstinStateError(_billingAddr());
 }
 // Called on every keystroke: only ever CLEARS an error that no longer applies
 // - it never shows a NEW one while the customer is still typing. Full
 // (re)validation happens on blur (touch*Field above) and on submit.
 function clearFieldErrorIfValid(name, errorFn, value) {
 	if (detailsFieldErrors[name] && !errorFn(value)) detailsFieldErrors[name] = "";
+}
+// Run the full Details-step validation (every field's touch*Field) and report whether
+// any error stands. Shared by onDetailsSubmit AND the resumed-Pay guard so both enforce
+// the SAME required set — a resumed session that lands straight on Review & Pay can't
+// bypass the address/city/state/pincode/country checks. terms is NOT here: it's gated
+// separately (after the reconnect branch) so reconnect is never blocked.
+function billingDetailsInvalid() {
+	touchEmailField();
+	touchCompanyField();
+	touchContactField();
+	touchAddressField();
+	touchCityField();
+	touchPincodeField();
+	touchCountryField();
+	touchGstinField();
+	touchStateField();
+	return !!(
+		detailsFieldErrors.email ||
+		detailsFieldErrors.company ||
+		detailsFieldErrors.contact ||
+		detailsFieldErrors.address ||
+		detailsFieldErrors.city ||
+		detailsFieldErrors.pincode ||
+		detailsFieldErrors.country ||
+		detailsFieldErrors.gstin ||
+		detailsFieldErrors.state
+	);
+}
+// A state/region is country-specific, so a value entered for one country must not carry
+// into another (review: an Indian state left selected after switching to a foreign
+// country made "United States / Tamil Nadu" pass validation). Clear it (and its error)
+// on a real country change; India-ness also flips the State widget Select↔free-text.
+function onCountryChange(v) {
+	const prev = billing.fields.country.value || "India";
+	billing.setUserValue("country", v);
+	if (v !== prev && billing.fields.state.value) {
+		billing.setUserValue("state", "");
+		detailsFieldErrors.state = "";
+	}
+	clearFieldErrorIfValid("country", countryError, v);
+	// The pincode/GSTIN consistency messages are country-dependent (India-only), so a country change must
+	// re-decide them too — else a stale "doesn't match your state" lingers after switching to overseas.
+	touchPincodeField();
+	touchGstinField();
 }
 
 // ERP-derived billing defaults for the selected Company. Debounced (the Company
@@ -3008,27 +3077,7 @@ async function onDetailsSubmit() {
 	// reconnect branch too (item 5), which it must not. A customer with both a
 	// bad GSTIN and an unticked box sees the GSTIN error first and the terms
 	// error only on a second submit; accepted as the cost of that exemption.
-	touchEmailField();
-	touchCompanyField();
-	touchContactField();
-	touchAddressField();
-	touchCityField();
-	touchPincodeField();
-	touchCountryField();
-	touchGstinField();
-	touchStateField();
-	if (
-		detailsFieldErrors.email ||
-		detailsFieldErrors.company ||
-		detailsFieldErrors.contact ||
-		detailsFieldErrors.address ||
-		detailsFieldErrors.city ||
-		detailsFieldErrors.pincode ||
-		detailsFieldErrors.country ||
-		detailsFieldErrors.gstin ||
-		detailsFieldErrors.state
-	)
-		return;
+	if (billingDetailsInvalid()) return;
 	billing.persist();
 	// Editing billing after Review & Pay: return straight to Pay, and — once an
 	// intent exists — save the edit through the authenticated update_billing
@@ -4086,15 +4135,21 @@ async function onPayClick() {
 	// never an empty object) when nothing was entered, so a blank Details step sends
 	// no billing key at all.
 	const billingPayload = billing.buildBilling();
-	if (!state.planName || !state.email || !state.company || !billingPayload.contact_number) {
-		// A signup with empty args would create a broken record upstream. This is
-		// the fresh-start guard; a resumed session renders from server truth and
-		// uses Initiate, not this button. Contact number is checked here too
-		// (jarvis#888): a resumed session can land directly on Pay with a
-		// pre-change saved state that never collected it, and the server now
-		// requires it - catch that before the throw, same as the other fields.
+	if (!state.planName || !state.email || !state.company) {
+		// Nothing to sign up with. A resumed session renders from server truth and uses
+		// Initiate, not this button, so an empty plan/email/company here is a fresh-start
+		// bounce back to Details.
 		state.detailsErr =
 			"Your signup details are missing. Please go back and pick a plan and enter your details again.";
+		state.step = "details";
+		return;
+	}
+	// Full billing completeness (mirrors onDetailsSubmit): a resumed session can land
+	// directly on Review & Pay with a pre-change saved state that predates the required
+	// address/city/state/pincode/country (and the contact number, jarvis#888) — and a
+	// missing state also blocks signup once place-of-supply charging is on. Bounce to
+	// Details with the per-field errors shown rather than submit an incomplete profile.
+	if (billingDetailsInvalid()) {
 		state.step = "details";
 		return;
 	}
