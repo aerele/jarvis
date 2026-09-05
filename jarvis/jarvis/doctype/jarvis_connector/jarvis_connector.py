@@ -48,6 +48,7 @@ class JarvisConnector(Document):
 		self._normalize_label()
 		self._validate_base_url()
 		self._guard_shared_scope()
+		self._guard_oauth_fields()
 		self._enforce_uniqueness()
 
 	def _normalize_key(self) -> None:
@@ -100,6 +101,28 @@ class JarvisConnector(Document):
 				_("Only a System Manager or Jarvis Admin may share a connector tenant-wide."),
 				frappe.PermissionError,
 			)
+
+	def _guard_oauth_fields(self) -> None:
+		"""An OAuth row may point ONLY at the Connected App its preset resolves to,
+		server-side; a key row carries none. A Jarvis User has raw write/create on
+		this DocType, so without this guard they could aim ``connected_app`` at any
+		operator app (the API's ``_resolve_connected_app_for_preset`` pinning lives
+		only in ``connectors_api``). Server writes under ``ignore_permissions`` (the
+		API already resolved the app itself) skip the check.
+
+		The resolver is imported lazily to avoid a load-time cycle between this
+		controller and ``connectors_api``."""
+		if self.flags.ignore_permissions:
+			return
+		if (self.auth_method or "") == "OAuth":
+			from jarvis.chat.connectors_api import _resolve_connected_app_for_preset
+
+			expected = _resolve_connected_app_for_preset(self.preset)
+			if not self.connected_app or self.connected_app != expected:
+				frappe.throw(_("This app is not set up for sign-in."), frappe.PermissionError)
+		elif self.connected_app:
+			# A non-OAuth (key) connector must never carry a Connected App link.
+			self.connected_app = None
 
 	def _enforce_uniqueness(self) -> None:
 		filters: dict = {"key": self.key, "scope": self.scope, "name": ("!=", self.name or "")}

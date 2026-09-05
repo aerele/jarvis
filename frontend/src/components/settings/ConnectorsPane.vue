@@ -269,7 +269,11 @@ onMounted(async () => {
 	await load();
 	if (!oauthName) return;
 	const row = [...shared.value, ...mine.value].find((r) => r.name === oauthName);
-	if (row) openEdit(row);
+	// Only land on the Edit dialog when the user can actually manage this row (an
+	// own Personal row, or a Shared row and they're an admin). A non-admin who
+	// just connected a Shared row cannot Save its allowed actions, so a bare
+	// confirmation is the right ending for them.
+	if (row && (row.scope !== "Shared" || isAdmin)) openEdit(row);
 	else toast.success("Connected.");
 });
 </script>

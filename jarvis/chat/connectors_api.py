@@ -445,9 +445,9 @@ def list_connectors() -> dict:
 @require_jarvis_user
 def add_connector(
 	preset: str,
-	base_url: str,
-	scope: str,
-	credential: str,
+	base_url: str = "",
+	scope: str = "",
+	credential: str = "",
 	label: str | None = None,
 	key: str | None = None,
 	auth_method: str = "API Key",

@@ -193,9 +193,7 @@ def _credential(row) -> str:
 	if oauth.is_oauth(row):
 		token = oauth.resolve_access_token(row)
 		if not token:
-			raise _BrokerError(
-				"connector_not_ready", "Connect this app in Settings before Jarvis can use it."
-			)
+			raise _BrokerError("connector_not_ready", "Connect this app in Settings before it can be used.")
 		return token
 	is_new = getattr(row, "is_new", None)
 	if callable(is_new) and is_new():

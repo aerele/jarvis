@@ -150,23 +150,33 @@ class _ConnectorApiTestCase(FrappeTestCase):
 		finally:
 			frappe.set_user(prev)
 
-	def _mk_token_cache(self, connected_app: str, user: str, access_token: str = "live-token") -> str:
-		"""A live (non-expired) Token Cache for ``user`` - bypasses the real
-		authorize/exchange dance entirely, which is exactly what
-		``get_active_token``/``get_token_cache`` read."""
+	def _mk_token_cache(
+		self,
+		connected_app: str,
+		user: str,
+		access_token: str = "live-token",
+		expires_in: int = 3600,
+		refresh_token: str | None = None,
+	) -> str:
+		"""A Token Cache for ``user`` - bypasses the real authorize/exchange dance
+		entirely, which is exactly what ``get_active_token``/``get_token_cache``
+		read. ``expires_in=0`` + no ``refresh_token`` models a classic GitHub
+		OAuth-App token (long-lived, non-refreshable), which Frappe otherwise treats
+		as instantly expired."""
 		prev = frappe.session.user
 		frappe.set_user("Administrator")
 		try:
-			doc = frappe.get_doc(
-				{
-					"doctype": "Token Cache",
-					"connected_app": connected_app,
-					"user": user,
-					"access_token": access_token,
-					"token_type": "Bearer",
-					"expires_in": 3600,
-				}
-			).insert(ignore_permissions=True)
+			fields = {
+				"doctype": "Token Cache",
+				"connected_app": connected_app,
+				"user": user,
+				"access_token": access_token,
+				"token_type": "Bearer",
+				"expires_in": expires_in,
+			}
+			if refresh_token is not None:
+				fields["refresh_token"] = refresh_token
+			doc = frappe.get_doc(fields).insert(ignore_permissions=True)
 			self._token_caches.append(doc.name)
 			frappe.db.commit()
 			return doc.name
@@ -576,6 +586,34 @@ class TestOauthModule(_ConnectorApiTestCase):
 		doc = frappe.get_doc(CONNECTOR, name)
 		self.assertEqual(oauth.resolve_access_token(doc), "secret-token")
 
+	def test_nonrefreshable_token_is_used_as_is_never_refreshed(self):
+		"""A classic GitHub OAuth-App token has expires_in=0 and no refresh token,
+		so Frappe reports it expired one second in. resolve_access_token must return
+		the stored token directly, NOT route it through get_active_token (whose
+		doomed refresh returns None and leaks the client secret). We assert this by
+		making get_active_token blow up: it must never be reached."""
+		app_name = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal",
+			"gh-noref",
+			owner=PLAIN_A,
+			preset="GitHub",
+			auth_method="OAuth",
+			connected_app=app_name,
+		)
+		self._mk_token_cache(app_name, PLAIN_A, access_token="long-lived", expires_in=0, refresh_token=None)
+		frappe.set_user(PLAIN_A)
+		doc = frappe.get_doc(CONNECTOR, name)
+
+		def _boom(*a, **k):
+			raise AssertionError("get_active_token must not be called for a non-refreshable token")
+
+		with patch(
+			"frappe.integrations.doctype.connected_app.connected_app.ConnectedApp.get_active_token",
+			_boom,
+		):
+			self.assertEqual(oauth.resolve_access_token(doc), "long-lived")
+
 
 class TestBrokerCredentialOauth(_ConnectorApiTestCase):
 	def test_credential_raises_connector_not_ready_without_a_token(self):
@@ -624,6 +662,19 @@ class TestAddConnectorOauth(_ConnectorApiTestCase):
 		self.assertEqual(reloaded.connected_app, app)
 		self.assertFalse(reloaded.get_password("credential", raise_exception=False))
 
+	def test_oauth_create_succeeds_without_base_url_or_credential(self):
+		"""The SPA's Connect flow posts only preset + scope + auth_method (no
+		base_url, no credential). add_connector must accept that - base_url and
+		credential are defaulted - or the only OAuth create path 500s before the
+		body runs."""
+		app = self._mk_connected_app("GitHub")
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.add_connector(preset="GitHub", scope="Personal", auth_method="OAuth")
+		self._connectors.append(out["name"])
+		self.assertEqual(out["auth_method"], "OAuth")
+		reloaded = frappe.get_doc(CONNECTOR, out["name"])
+		self.assertEqual(reloaded.connected_app, app)
+
 	def test_oauth_without_a_configured_connected_app_is_rejected(self):
 		frappe.set_user(PLAIN_A)
 		with self.assertRaises(frappe.ValidationError):
@@ -645,6 +696,43 @@ class TestAddConnectorOauth(_ConnectorApiTestCase):
 				credential="tok",
 				auth_method="Bearer Token",
 			)
+
+
+class TestConnectorOauthFieldGuard(_ConnectorApiTestCase):
+	"""The controller must stop a raw DocType write (a Jarvis User has create/write)
+	from steering an OAuth row at an arbitrary Connected App, and must strip a
+	Connected App off a non-OAuth row - the API's server-side pinning is not the
+	only write path."""
+
+	def _insert_as(self, user, **fields):
+		prev = frappe.session.user
+		frappe.set_user(user)
+		try:
+			doc = frappe.get_doc(
+				{
+					"doctype": CONNECTOR,
+					"scope": "Personal",
+					"base_url": "https://api.githubcopilot.com/mcp/",
+					"label": "GH",
+					"preset": "GitHub",
+					**fields,
+				}
+			).insert()  # no ignore_permissions - runs the user-facing guard
+			self._connectors.append(doc.name)
+			return doc
+		finally:
+			frappe.set_user(prev)
+
+	def test_oauth_row_cannot_point_at_an_arbitrary_connected_app(self):
+		self._mk_connected_app("GitHub")  # the preset's real app
+		other = self._mk_connected_app("Other")  # a stranger app the user should not reach
+		with self.assertRaises(frappe.PermissionError):
+			self._insert_as(PLAIN_A, key="gh-evil", auth_method="OAuth", connected_app=other)
+
+	def test_key_row_never_keeps_a_connected_app_link(self):
+		app = self._mk_connected_app("GitHub")
+		doc = self._insert_as(PLAIN_A, key="gh-key", auth_method="API Key", connected_app=app)
+		self.assertFalse(doc.connected_app)
 
 
 class TestListConnectorsOauth(_ConnectorApiTestCase):
