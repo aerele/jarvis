@@ -1925,12 +1925,14 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# in pending_confirm either way, so a retry or a future resync can
 		# still surface it.
 		try:
+			origin_page = frappe.db.get_value("Jarvis Conversation", conv, "origin_page") or ""
 			events.publish_to_user(
 				owner_user,
 				# Same shared item shape the resync endpoint + run:end terminal use, so
 				# the live push can't drift from them (and gets the summary guard too).
 				{
 					"kind": "action:pending",
+					"origin_page": origin_page,
 					**pending_confirm._pending_item(
 						token=token,
 						tool=tool,

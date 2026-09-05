@@ -208,7 +208,7 @@ test("a remount restores WHAT WAS BEING EDITED, not just the pixels", () => {
 
 test("every path that drops an unsaved canvas confirms first", () => {
 	assert.match(pageSrc, /Discard this unsaved dashboard\?/);
-	assert.match(pageSrc, /Its chat stays in your conversations\./);
+	assert.match(pageSrc, /Its dashboard chat stays available in this builder\./);
 	// unsaved == on the canvas and not (still) the saved document's html
 	assert.match(
 		pageSrc,
@@ -238,18 +238,15 @@ test("the discard confirm is REACHABLE from loadEdit, not dead code", () => {
 	assert.match(load, /confirmDiscard\(\(\) => \{[\s\S]*?settle\(\);\n\t\t\}, settle\);/);
 });
 
-test("the discard confirm offers the surviving chat instead of just naming it", () => {
+test("the discard confirm keeps dashboard work inside the builder", () => {
 	assert.match(
 		pageSrc,
 		/label: "Discard", variant: "solid", onClick: \(\) => settleDiscard\(true\)/
 	);
 	const actions = pageSrc.slice(pageSrc.indexOf("const discardActions = computed("));
-	assert.match(actions, /label: "Open its chat"/);
-	assert.match(actions, /router\.push\("\/c\/" \+ id\)/);
-	// ...only when there IS one, and only when going there is actually an escape
-	// (a caller already acting on that same conversation drops it — see
-	// dashboardOpen.test.js for the promotion that would otherwise loop)
-	assert.match(actions, /if \(chatConv\.value && discardOfferChat\.value\) \{/);
+	assert.doesNotMatch(actions, /Open its chat/);
+	assert.doesNotMatch(actions, /router\.push\("\/c\//);
+	assert.match(pageSrc, /Its dashboard chat stays available in this builder\./);
 });
 
 test("New chat asks the page instead of clearing itself behind a confirm", () => {

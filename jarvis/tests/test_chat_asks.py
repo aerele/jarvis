@@ -126,9 +126,16 @@ def _wipe_all() -> None:
 	frappe.db.commit()
 
 
-def _mk_conv(owner, title, status="Active") -> str:
+def _mk_conv(owner, title, status="Active", origin_page="") -> str:
 	with _as(owner):
-		doc = frappe.get_doc({"doctype": CONV, "title": title, "status": status})
+		doc = frappe.get_doc(
+			{
+				"doctype": CONV,
+				"title": title,
+				"status": status,
+				"origin_page": origin_page,
+			}
+		)
 		doc.insert(ignore_permissions=True)
 	frappe.db.commit()
 	return doc.name
@@ -320,6 +327,14 @@ class TestMaterialize(unittest.TestCase):
 		self.assertEqual(payload["conversation_id"], self.conv)
 		self.assertEqual(payload["name"], name)
 		self.assertEqual(payload["question"], "Which supplier is this from?")
+		self.assertEqual(payload["origin_page"], "")
+
+	def test_publish_identifies_dashboard_questions_for_native_routing(self):
+		frappe.db.set_value(CONV, self.conv, "origin_page", "dashboards")
+		frappe.db.commit()
+		with patch("jarvis.chat.chat_asks.publish_to_user") as pub:
+			materialize_from_turn(self.conv, _fence([_ask()]))
+		self.assertEqual(pub.call_args[0][1]["origin_page"], "dashboards")
 
 	def test_no_fence_and_malformed_fence_skip(self):
 		with patch("jarvis.chat.chat_asks.publish_to_user") as pub:
@@ -562,6 +577,14 @@ class TestApprovalsPageExtensions(unittest.TestCase):
 			self.assertEqual(get_approval(self.pending_fb)["source"], "File Box")
 			self.assertEqual(get_approval(self.pending_chat)["source"], "Chat")
 
+	def test_rows_and_detail_carry_the_conversation_origin(self):
+		frappe.db.set_value(CONV, self.conv, "origin_page", "dashboards")
+		frappe.db.commit()
+		row = next(r for r in self._page(filters={"status": "All"})["rows"] if r["name"] == self.pending_chat)
+		self.assertEqual(row["origin_page"], "dashboards")
+		with _as(USER_A):
+			self.assertEqual(get_approval(self.pending_chat)["origin_page"], "dashboards")
+
 
 class TestAwaitingReply(unittest.TestCase):
 	def setUp(self):
@@ -575,7 +598,7 @@ class TestAwaitingReply(unittest.TestCase):
 		_add_msg(self.conv_q, 3, "assistant", "I drafted it. Should I submit the invoice now?")
 		# included: jarvis-ask fence always qualifies (no depth needed), even
 		# with NO Pending chat row (e.g. a malformed/recovery-finalized fence)
-		self.conv_fence = _mk_conv(USER_A, "ca-conv-await-fence")
+		self.conv_fence = _mk_conv(USER_A, "ca-conv-await-fence", origin_page="dashboards")
 		_add_msg(self.conv_fence, 1, "user", "hi")
 		_add_msg(self.conv_fence, 2, "assistant", "Pick one.\n" + _fence("{broken json"))
 		# excluded: a shallow prose "?" with one user turn and no tools is an
@@ -623,13 +646,18 @@ class TestAwaitingReply(unittest.TestCase):
 		convs = {r["conversation"] for r in lane}
 		self.assertEqual(convs, {self.conv_q, self.conv_fence})
 		for r in lane:
-			self.assertEqual(set(r.keys()), {"conversation", "title", "question_excerpt", "last_at"})
+			self.assertEqual(
+				set(r.keys()),
+				{"conversation", "title", "origin_page", "question_excerpt", "last_at"},
+			)
 			self.assertTrue(r["title"].startswith("ca-conv-await"))
 			self.assertLessEqual(len(r["question_excerpt"]), 140)
 			self.assertTrue(r["last_at"])
 		# the shallow opener greeting is NOT surfaced (the flood we prevent)
 		self.assertNotIn(self.conv_greet, convs)
 		by_conv = {r["conversation"]: r for r in lane}
+		self.assertEqual(by_conv[self.conv_q]["origin_page"], "")
+		self.assertEqual(by_conv[self.conv_fence]["origin_page"], "dashboards")
 		self.assertTrue(by_conv[self.conv_q]["question_excerpt"].endswith("Should I submit the invoice now?"))
 		# newest first: conv_greet was seeded last but excluded, so conv_fence
 		# (seeded after conv_q) leads

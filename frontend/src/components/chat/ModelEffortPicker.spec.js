@@ -102,3 +102,40 @@ describe("ModelEffortPicker add-a-provider row", () => {
 		expect(w.find(".mep-menu").exists()).toBe(false);
 	});
 });
+
+/**
+ * The dashboard builder embeds this same picker in a narrow, overflow-hidden
+ * pane whose left edge sits a few px left of the pill. The default geometry
+ * (menu hangs off the pill's RIGHT edge and grows leftward, effort flyout
+ * opens further left) put the menu 88px outside that pane and the flyout
+ * entirely outside it. These pin the two host-selectable modes that keep both
+ * inside a narrow host.
+ */
+describe("ModelEffortPicker narrow-host geometry", () => {
+	it("defaults to main chat's end-aligned menu with side flyouts", async () => {
+		const w = openPicker();
+		await w.vm.$nextTick();
+		expect(w.classes()).not.toContain("mep-start");
+		expect(w.classes()).not.toContain("mep-compact");
+	});
+
+	it("align=start + compact mark the root so the menu and flyout stay inside the host", async () => {
+		const w = openPicker({ align: "start", compact: true });
+		await w.vm.$nextTick();
+		expect(w.classes()).toContain("mep-start");
+		expect(w.classes()).toContain("mep-compact");
+		// the effort flyout still opens (inline, below its row) and still picks
+		await w.find(".mep-sub > .mep-item").trigger("click");
+		const fly = w.find(".mep-sub .mep-flyout");
+		expect(fly.exists()).toBe(true);
+		await fly.findAll(".mep-item").at(-1).trigger("click");
+		expect(w.emitted("select-thinking")).toEqual([["high"]]);
+	});
+
+	it("rejects an alignment it has no geometry for", () => {
+		const validator = ModelEffortPicker.props.align.validator;
+		expect(validator("start")).toBe(true);
+		expect(validator("end")).toBe(true);
+		expect(validator("left")).toBe(false);
+	});
+});
