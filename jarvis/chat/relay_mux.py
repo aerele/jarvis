@@ -229,6 +229,9 @@ class LaneHandler:
 	    fault, precious overflow). The pump parks the turn toward ``recovering``.
 	  * ``on_closing(sentinel: str)`` — the socket died: this lane lost its
 	    transport. The pump re-attaches from durable state on the next hop.
+	  * ``on_status(event_seq: int, status: str)`` — a transient run-status
+	    marker (e.g. an in-flight compaction) (LOSSY, like a delta): a raise
+	    drops the frame, counts it, and continues the same lane.
 	"""
 
 	on_delta: Callable[[int, str, str], None] | None = None
@@ -236,6 +239,7 @@ class LaneHandler:
 	on_terminal: Callable[[str, dict], None] | None = None
 	on_quarantine: Callable[[str], None] | None = None
 	on_closing: Callable[[str], None] | None = None
+	on_status: Callable[[int, str], None] | None = None
 
 
 class _Lane:
@@ -536,7 +540,15 @@ class RelayMux:
 					"title": parsed.get("tool_title"),
 				},
 			)
-		else:  # pragma: no cover - parse_event only yields the three kinds
+		elif kind == "compaction":
+			seq = lane.next_seq()
+			ev = _LaneEvent(
+				cls=LOSSY,
+				kind="status",
+				event_seq=seq,
+				data={"status": "compacting" if parsed.get("phase") == "start" else "compacted"},
+			)
+		else:  # pragma: no cover - parse_event only yields the four kinds above
 			return
 		self._offer(lane, ev)
 
@@ -775,6 +787,9 @@ class RelayMux:
 			elif ev.kind == "tool":
 				if h.on_tool is not None:
 					h.on_tool({"event_seq": ev.event_seq, **ev.data})
+			elif ev.kind == "status":
+				if h.on_status is not None:
+					h.on_status(ev.event_seq, ev.data["status"])
 			elif ev.kind == "terminal":
 				if h.on_terminal is not None:
 					h.on_terminal(ev.data["terminal_kind"], ev.data["payload"])
