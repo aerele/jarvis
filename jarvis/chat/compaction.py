@@ -150,9 +150,11 @@ def start_compaction(conversation: str, user: str, hint: str) -> dict:
 	actually serializes two near-simultaneous callers."""
 	if not _try_take_lock(conversation):
 		return {"ok": False, "reason": "already_compacting"}
+	# ``jarvis_compact_queue`` (site config) lets a sidecar deployment route the
+	# job to a dedicated worker; production stays on the shared long queue.
 	frappe.enqueue(
 		method="jarvis.chat.compaction.run_compact",
-		queue="long",
+		queue=frappe.conf.get("jarvis_compact_queue") or "long",
 		timeout=COMPACT_JOB_TIMEOUT_S,
 		at_front=True,
 		job_id=f"jarvis-compact::{conversation}::{uuid.uuid4().hex[:8]}",

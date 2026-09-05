@@ -353,6 +353,19 @@ class TestCompactEndpoints(FrappeTestCase):
 		self.assertEqual(enq.call_args.kwargs["method"], "jarvis.chat.compaction.run_compact")
 		self.assertTrue(compaction.is_compacting(conv))
 
+	def test_compact_queue_name_from_site_config(self):
+		conv = _mk_conversation("agent:main:c-ep-queue")
+		with patch("jarvis.chat.compaction.frappe.enqueue") as enq:
+			chat_api.compact_conversation(conv, "keep totals")
+		self.assertEqual(enq.call_args.kwargs["queue"], "long")
+		conv2 = _mk_conversation("agent:main:c-ep-queue2")
+		with (
+			patch("jarvis.chat.compaction.frappe.enqueue") as enq,
+			patch.dict(frappe.conf, {"jarvis_compact_queue": "compact"}),
+		):
+			chat_api.compact_conversation(conv2, "keep totals")
+		self.assertEqual(enq.call_args.kwargs["queue"], "compact")
+
 	def test_conversation_busy_while_compacting(self):
 		conv = _mk_conversation("agent:main:c-ep6")
 		frappe.db.set_value(
