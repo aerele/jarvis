@@ -1335,8 +1335,12 @@ def send_message(
 	# reject up front on OVERLOAD (queue too deep) before inserting the user row,
 	# so an overloaded site never accretes orphaned messages.
 	if admission.turn_machine_enabled():
+		from jarvis.chat import compaction
+
 		if admission.shard_overloaded(conversation):
 			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
+		if compaction.is_compacting(conversation):
+			return {"ok": False, "reason": _("Compacting this chat, try again in a moment")}
 	elif _conversation_busy(conversation):
 		from jarvis.chat import compaction
 
@@ -2469,9 +2473,17 @@ def retry_message(message: str) -> dict:
 	# Flag ON: a retry racing a live turn QUEUES (accept_or_queue) rather than
 	# rejecting; flag OFF keeps the legacy single-flight reject.
 	if admission.turn_machine_enabled():
+		from jarvis.chat import compaction
+
 		if admission.shard_overloaded(doc.conversation):
 			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
+		if compaction.is_compacting(doc.conversation):
+			return {"ok": False, "reason": _("Compacting this chat, try again in a moment")}
 	elif _conversation_busy(doc.conversation):
+		from jarvis.chat import compaction
+
+		if compaction.is_compacting(doc.conversation):
+			return {"ok": False, "reason": _("Compacting this chat, try again in a moment")}
 		return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
 	if doc.role != "assistant":
 		return {"ok": False, "reason": _("only assistant messages can be retried")}

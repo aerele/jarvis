@@ -12,6 +12,7 @@ from jarvis.chat import compaction
 
 CHAT_SESSION = "Jarvis Chat Session"
 CONV = "Jarvis Conversation"
+MSG = "Jarvis Chat Message"
 
 
 def _mk_conversation(session_key: str | None) -> str:
@@ -274,3 +275,29 @@ class TestCompactEndpoints(FrappeTestCase):
 		out = chat_api.get_usage(conv)
 		self.assertIn("context", out)
 		self.assertIn("capacity", out["context"])
+
+	def test_send_message_refuses_while_compacting_machine_enabled(self):
+		conv = _mk_conversation("agent:main:c-ep8")
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		with (
+			patch.object(chat_api.admission, "turn_machine_enabled", return_value=True),
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, None)),
+		):
+			out = chat_api.send_message(conv, "hello")
+		self.assertEqual(out, {"ok": False, "reason": "Compacting this chat, try again in a moment"})
+		self.assertFalse(frappe.db.exists(MSG, {"conversation": conv}))
+
+	def test_send_message_refuses_while_compacting_legacy(self):
+		conv = _mk_conversation("agent:main:c-ep9")
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		with (
+			patch.object(chat_api.admission, "turn_machine_enabled", return_value=False),
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, None)),
+		):
+			out = chat_api.send_message(conv, "hello")
+		self.assertEqual(out, {"ok": False, "reason": "Compacting this chat, try again in a moment"})
+		self.assertFalse(frappe.db.exists(MSG, {"conversation": conv}))
