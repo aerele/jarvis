@@ -84,7 +84,6 @@
 						label="Last reply"
 						:value="`${fmtTokens(lastIn)} in · ${fmtTokens(lastOut)} out`"
 					/>
-					<KvRow v-if="model" label="Model" :value="model" />
 					<KvRow label="Compacted" :value="compactedLabel" />
 				</div>
 
@@ -142,7 +141,6 @@ const pct = computed(() =>
 const warn = computed(() => !!props.context && pct.value >= warnPct.value);
 const lastIn = computed(() => Number(props.context?.last_in || 0));
 const lastOut = computed(() => Number(props.context?.last_out || 0));
-const model = computed(() => props.context?.model || "");
 const compactionCount = computed(() => Number(props.context?.compaction_count || 0));
 const lastCompactedAt = computed(() => props.context?.last_compacted_at || null);
 
