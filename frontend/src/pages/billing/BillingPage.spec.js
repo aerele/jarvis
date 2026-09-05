@@ -1352,3 +1352,32 @@ describe("upgrade confirmation dialog: trial vs paid", () => {
 		expect(wrapper.vm.pending.amount).toBe(inrLabel(590));
 	});
 });
+
+describe("upgrade near-renewal lock freshness (R2)", () => {
+	it("re-reads the account when the tab becomes visible, clearing a stale lock", async () => {
+		const locked = baseAccount({
+			subscription_status: "Active",
+			is_trial: 0,
+			days_remaining: 1,
+			upgrade_locked_near_renewal: true,
+			upgrade_plans: [
+				{ name: "max", plan_name: "Max", price_inr: 200, billing_cycle: "Monthly" },
+			],
+		});
+		const wrapper = await mountPage(locked);
+		expect(wrapper.vm.upgradeNearRenewal).toBe(true);
+
+		// After renewal the server returns an UNLOCKED account.
+		api.getAccount.mockResolvedValue({ ...locked, upgrade_locked_near_renewal: false });
+		const before = api.getAccount.mock.calls.length;
+		Object.defineProperty(document, "visibilityState", {
+			value: "visible",
+			configurable: true,
+		});
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushPromises();
+
+		expect(api.getAccount.mock.calls.length).toBeGreaterThan(before); // re-read, not stuck on the snapshot
+		expect(wrapper.vm.upgradeNearRenewal).toBe(false); // lock cleared client-side
+	});
+});

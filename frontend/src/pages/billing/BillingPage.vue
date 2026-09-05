@@ -865,6 +865,35 @@ onMounted(() => {
 	window.addEventListener("pageshow", onPageShow);
 });
 onBeforeUnmount(() => window.removeEventListener("pageshow", onPageShow));
+// R2 upgrade-lock freshness (review): upgrade_locked_near_renewal is a server-computed, TIME-BASED
+// flag baked into the account snapshot. current_period_end is not re-read as it passes, so a tab left
+// open across renewal would keep every upgrade card disabled even after the server lock expired -
+// "upgrade right after it renews" would need a manual reload. Re-read server truth when the tab becomes
+// visible again (the user returning), and while the lock is active poll for it to expire so a
+// continuously-open tab also clears on its own. Both stop once the lock is gone.
+let nearRenewalPoll = null;
+function stopNearRenewalPoll() {
+	if (nearRenewalPoll) {
+		clearInterval(nearRenewalPoll);
+		nearRenewalPoll = null;
+	}
+}
+function onVisible() {
+	if (document.visibilityState === "visible") loadAccount();
+}
+watch(
+	upgradeNearRenewal,
+	(locked) => {
+		stopNearRenewalPoll();
+		if (locked) nearRenewalPoll = setInterval(loadAccount, 5 * 60 * 1000);
+	},
+	{ immediate: true }
+);
+onMounted(() => document.addEventListener("visibilitychange", onVisible));
+onBeforeUnmount(() => {
+	document.removeEventListener("visibilitychange", onVisible);
+	stopNearRenewalPoll();
+});
 // Invoices + billing details load on mount, independent of the plan read above.
 onMounted(() => {
 	loadInvoices();
