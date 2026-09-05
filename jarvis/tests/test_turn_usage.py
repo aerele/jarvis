@@ -402,6 +402,65 @@ class TestTurnUsage(FrappeTestCase):
 		tool_calls = frappe.db.get_value(TURN_USAGE, {"session_key": "agent:tu-norun"}, "tool_calls")
 		self.assertEqual(tool_calls, 0)
 
+	# -- budget/compaction snapshot fields (context-meter task 2) ------------ #
+	def test_budget_fields_from_row(self):
+		row = {
+			"contextBudgetStatus": {"route": "compact_only", "reserveTokens": 20000},
+			"compactionCheckpointCount": 2,
+		}
+		self.assertEqual(usage.budget_fields_from_row(row), ("compact_only", 20000, 2))
+		self.assertEqual(usage.budget_fields_from_row({}), ("", 0, 0))
+		self.assertEqual(usage.budget_fields_from_row({"contextBudgetStatus": "junk"}), ("", 0, 0))
+
+	def test_write_budget_fields_keeps_route_when_status_absent(self):
+		# jarvis#chat-context-meter amendment: the runtime clears
+		# contextBudgetStatus on compaction, so a write with no status must not
+		# blank a previously-known route/reserve - only compaction_count may
+		# move (and only forward).
+		key = "agent:tu-budget-keep"
+		_make_session(key, USER_A)
+		usage._write_budget_fields(key, {"contextBudgetStatus": {"route": "fits", "reserveTokens": 16384}})
+		frappe.db.commit()
+		usage._write_budget_fields(key, {"compactionCheckpointCount": 2})
+		frappe.db.commit()
+		got = frappe.db.get_value(
+			SESSION,
+			{"session_key": key},
+			["budget_route", "reserve_tokens", "compaction_count"],
+			as_dict=True,
+		)
+		self.assertEqual((got.budget_route, got.reserve_tokens, got.compaction_count), ("fits", 16384, 2))
+
+	def test_record_turn_usage_writes_budget_fields(self):
+		# USER_A (not Administrator) so the RECORDED path's commit - the
+		# Chat Session row, its Turn Usage row, and the Jarvis User Settings
+		# row get_or_create_user_settings creates - is fully hermetic: the
+		# shared _cleanup() helper (setUp/tearDown) already removes all three
+		# for USER_A, including the settings row a raw Administrator fixture
+		# would otherwise leave behind permanently on a fresh (CI) DB.
+		key = "agent:tu-budget"
+		_make_session(key, USER_A)
+		row = {
+			"key": key,
+			"inputTokens": 100,
+			"outputTokens": 10,
+			"totalTokens": 5000,
+			"totalTokensFresh": True,
+			"contextTokens": 200000,
+			"contextBudgetStatus": {"route": "fits", "reserveTokens": 16384},
+			"compactionCheckpointCount": 1,
+			"model": "m",
+			"modelProvider": "p",
+		}
+		usage.record_turn_usage(key, row)
+		got = frappe.db.get_value(
+			SESSION,
+			{"session_key": key},
+			["budget_route", "reserve_tokens", "compaction_count"],
+			as_dict=True,
+		)
+		self.assertEqual((got.budget_route, got.reserve_tokens, got.compaction_count), ("fits", 16384, 1))
+
 
 def _seed_turn_row(
 	session_key: str,

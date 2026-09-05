@@ -18,7 +18,8 @@
   "pending_agent_notes",
   "auto_expired",
   "expired_at",
-  "origin_page"
+  "origin_page",
+  "compacting_since"
  ],
  "fields": [
   {
@@ -161,6 +162,13 @@
    "no_copy": 1,
    "read_only": 1,
    "description": "The builder page this conversation was started from (\"dashboards\" / \"triggers\"), stamped by jarvis.chat.api.send_message from the context allow-list. The builder chats are ordinary conversations that also show up in the main chat list, where nothing else distinguishes a dashboard artifact from any other html canvas - this is that marker. Server-set only."
+  },
+  {
+   "fieldname": "compacting_since",
+   "fieldtype": "Datetime",
+   "label": "Compacting Since",
+   "hidden": 1,
+   "read_only": 1
   }
  ],
  "permissions": [
