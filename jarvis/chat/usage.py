@@ -226,8 +226,27 @@ def budget_fields_from_row(row: dict | None) -> tuple[str, int, int]:
 def _write_budget_fields(session_key: str, row: dict | None) -> None:
 	"""UPDATE the budget snapshot columns. Same no-commit contract as
 	``_refresh_session_context_snapshot``. ``compaction_count`` only moves
-	forward (the row is authoritative when it reports one)."""
+	forward (the row is authoritative when it reports one).
+
+	Compaction amendment (context-meter task 4): the runtime CLEARS
+	``contextBudgetStatus`` on a compaction turn, so a row with no status is
+	not "route/reserve are now empty" - it is "this row didn't report a
+	budget this time". Blanking ``budget_route``/``reserve_tokens`` on such a
+	row would erase a good reserve right after a compaction, so when the
+	status is absent this only advances ``compaction_count`` and leaves the
+	other two columns untouched. A row that DOES carry a status still writes
+	all three, same as before."""
 	route, reserve, count = budget_fields_from_row(row)
+	if not isinstance((row or {}).get("contextBudgetStatus"), dict):
+		frappe.db.sql(
+			"""
+			UPDATE `tabJarvis Chat Session`
+			SET compaction_count = GREATEST(IFNULL(compaction_count, 0), %(count)s)
+			WHERE session_key = %(session_key)s
+			""",
+			{"count": count, "session_key": session_key},
+		)
+		return
 	frappe.db.sql(
 		"""
 		UPDATE `tabJarvis Chat Session`

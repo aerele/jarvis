@@ -2,11 +2,37 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import compaction
+
 CHAT_SESSION = "Jarvis Chat Session"
 CONV = "Jarvis Conversation"
+
+
+def _mk_conversation(session_key: str | None) -> str:
+	doc = frappe.get_doc({"doctype": CONV, "title": "compact test", "session_key": session_key or ""})
+	doc.insert(ignore_permissions=True)
+	if session_key and not frappe.db.exists(CHAT_SESSION, {"session_key": session_key}):
+		frappe.get_doc({"doctype": CHAT_SESSION, "session_key": session_key, "user": "Administrator"}).insert(
+			ignore_permissions=True
+		)
+	return doc.name
+
+
+def _cleanup() -> None:
+	"""These fixtures are inserted as Administrator (see ``_mk_conversation``) and
+	the compaction job commits, so a test-transaction rollback cannot undo them -
+	delete by name/session_key explicitly so a fresh CI DB stays clean."""
+	for name in frappe.get_all(CONV, filters={"title": "compact test"}, pluck="name"):
+		frappe.delete_doc(CONV, name, ignore_permissions=True, force=True)
+	for name in frappe.get_all(
+		CHAT_SESSION, filters={"session_key": ["like", "agent:main:c-%"]}, pluck="name"
+	):
+		frappe.delete_doc(CHAT_SESSION, name, ignore_permissions=True, force=True)
 
 
 class TestCompactionFields(FrappeTestCase):
@@ -22,3 +48,157 @@ class TestCompactionFields(FrappeTestCase):
 
 	def test_conversation_has_compacting_since(self):
 		self.assertEqual(frappe.get_meta(CONV).get_field("compacting_since").fieldtype, "Datetime")
+
+
+class TestCompactionHelpers(FrappeTestCase):
+	def tearDown(self):
+		_cleanup()
+		frappe.db.commit()
+
+	def test_sanitize_hint(self):
+		self.assertEqual(
+			compaction.sanitize_hint("  keep the invoice\x00 inputs  "), "keep the invoice inputs"
+		)
+		self.assertEqual(len(compaction.sanitize_hint("x" * 900)), compaction.HINT_MAX_CHARS)
+		self.assertEqual(compaction.sanitize_hint(None), "")
+		with self.assertRaises(frappe.ValidationError):
+			compaction.sanitize_hint("/reset")
+
+	def test_classify_notice(self):
+		self.assertEqual(
+			compaction.classify_notice("⚙️ Compacted (58k before) • Context 58k/200k"), "compacted"
+		)
+		self.assertEqual(compaction.classify_notice("⚙️ Compaction skipped: nothing compactable"), "declined")
+		self.assertEqual(compaction.classify_notice(""), "declined")
+
+	def test_is_compacting_window(self):
+		conv = _mk_conversation("agent:main:c-lock")
+		self.assertFalse(compaction.is_compacting(conv))
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		self.assertTrue(compaction.is_compacting(conv))
+		frappe.db.set_value(
+			CONV,
+			conv,
+			"compacting_since",
+			frappe.utils.add_to_date(
+				frappe.utils.now_datetime(), seconds=-(compaction.COMPACT_LOCK_SECONDS + 5)
+			),
+			update_modified=False,
+		)
+		self.assertFalse(compaction.is_compacting(conv))
+
+	def test_context_payload_fresh_and_unmeasured(self):
+		conv = _mk_conversation("agent:main:c-pay")
+		p = compaction.context_payload(conv)
+		self.assertFalse(p["fresh"])
+		self.assertEqual(p["warn_pct"], 80)
+		frappe.db.sql(
+			"""UPDATE `tabJarvis Chat Session` SET last_total_tokens=50000, context_capacity=200000,
+			context_pct=25, last_usage_at=NOW(), reserve_tokens=20000, budget_route='fits', compaction_count=1
+			WHERE session_key=%s""",
+			("agent:main:c-pay",),
+		)
+		p = compaction.context_payload(conv)
+		self.assertTrue(p["fresh"])
+		self.assertEqual((p["used"], p["capacity"], p["pct"]), (50000, 200000, 25.0))
+		self.assertEqual(p["auto_compact_pct"], 90.0)
+		self.assertEqual(p["route"], "fits")
+		self.assertEqual(p["compaction_count"], 1)
+
+	def test_context_payload_no_session(self):
+		conv = _mk_conversation(None)
+		p = compaction.context_payload(conv)
+		self.assertEqual((p["used"], p["capacity"], p["fresh"]), (0, 0, False))
+
+
+class TestRunCompact(FrappeTestCase):
+	def tearDown(self):
+		_cleanup()
+		frappe.db.commit()
+
+	def _run(self, conv, sess):
+		with (
+			patch("jarvis.chat.agent_session_pool.checkout") as co,
+			patch("jarvis.chat.compaction.publish_to_user") as pub,
+		):
+			co.return_value.__enter__.return_value = sess
+			compaction.run_compact(conv, "Administrator", "keep invoices")
+		return pub
+
+	def test_happy_path_writes_result_and_publishes(self):
+		key = "agent:main:c-run1"
+		conv = _mk_conversation(key)
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		sess = MagicMock()
+		sess.list_sessions.return_value = [
+			{
+				"key": key,
+				"totalTokens": 58000,
+				"totalTokensFresh": True,
+				"contextTokens": 200000,
+				"compactionCheckpointCount": 1,
+				"contextBudgetStatus": {"route": "fits", "reserveTokens": 20000},
+			}
+		]
+		sess.compact_session.return_value = {
+			"state": "final",
+			"text": "⚙️ Compacted (58k before)",
+			"run_id": "r",
+		}
+		pub = self._run(conv, sess)
+		sess.compact_session.assert_called_once_with(key, "keep invoices")
+		kinds = [c.args[1]["kind"] for c in pub.call_args_list]
+		self.assertIn("context:compacted", kinds)
+		got = frappe.db.get_value(
+			CHAT_SESSION, {"session_key": key}, ["compaction_count", "last_compacted_at"], as_dict=True
+		)
+		self.assertEqual(got.compaction_count, 1)
+		self.assertIsNotNone(got.last_compacted_at)
+		self.assertIsNone(frappe.db.get_value(CONV, conv, "compacting_since"))
+
+	def test_declined_publishes_failure_and_clears_lock(self):
+		key = "agent:main:c-run2"
+		conv = _mk_conversation(key)
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		sess = MagicMock()
+		sess.list_sessions.return_value = [{"key": key, "totalTokens": 1000, "totalTokensFresh": True}]
+		sess.compact_session.return_value = {
+			"state": "final",
+			"text": "⚙️ Compaction skipped: nothing",
+			"run_id": "r",
+		}
+		pub = self._run(conv, sess)
+		payload = [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"][0]
+		self.assertEqual(payload["reason"], "runtime_declined")
+		self.assertIsNone(frappe.db.get_value(CONV, conv, "compacting_since"))
+
+	def test_timeout_reason(self):
+		from jarvis.chat.agent_client import AgentUnreachableError
+
+		key = "agent:main:c-run3"
+		conv = _mk_conversation(key)
+		sess = MagicMock()
+		sess.list_sessions.return_value = []
+		sess.compact_session.side_effect = AgentUnreachableError("t", code="compact-timeout")
+		pub = self._run(conv, sess)
+		payload = [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"][0]
+		self.assertEqual(payload["reason"], "timeout")
+
+	def test_gateway_unreachable_reason(self):
+		from jarvis.chat.agent_client import AgentUnreachableError
+
+		key = "agent:main:c-run4"
+		conv = _mk_conversation(key)
+		with (
+			patch("jarvis.chat.agent_session_pool.checkout", side_effect=AgentUnreachableError("down")),
+			patch("jarvis.chat.compaction.publish_to_user") as pub,
+		):
+			compaction.run_compact(conv, "Administrator", "")
+		payload = [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"][0]
+		self.assertEqual(payload["reason"], "gateway_unreachable")

@@ -412,6 +412,25 @@ class TestTurnUsage(FrappeTestCase):
 		self.assertEqual(usage.budget_fields_from_row({}), ("", 0, 0))
 		self.assertEqual(usage.budget_fields_from_row({"contextBudgetStatus": "junk"}), ("", 0, 0))
 
+	def test_write_budget_fields_keeps_route_when_status_absent(self):
+		# jarvis#chat-context-meter amendment: the runtime clears
+		# contextBudgetStatus on compaction, so a write with no status must not
+		# blank a previously-known route/reserve - only compaction_count may
+		# move (and only forward).
+		key = "agent:tu-budget-keep"
+		_make_session(key, USER_A)
+		usage._write_budget_fields(key, {"contextBudgetStatus": {"route": "fits", "reserveTokens": 16384}})
+		frappe.db.commit()
+		usage._write_budget_fields(key, {"compactionCheckpointCount": 2})
+		frappe.db.commit()
+		got = frappe.db.get_value(
+			SESSION,
+			{"session_key": key},
+			["budget_route", "reserve_tokens", "compaction_count"],
+			as_dict=True,
+		)
+		self.assertEqual((got.budget_route, got.reserve_tokens, got.compaction_count), ("fits", 16384, 2))
+
 	def test_record_turn_usage_writes_budget_fields(self):
 		# USER_A (not Administrator) so the RECORDED path's commit - the
 		# Chat Session row, its Turn Usage row, and the Jarvis User Settings
