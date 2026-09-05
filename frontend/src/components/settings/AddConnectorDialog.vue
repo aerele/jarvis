@@ -46,16 +46,27 @@
 				     here. The pasted-token path stays one click away via "Use a token
 				     instead" - shown only before a row exists this session (rowName),
 				     so switching mid-flow never has to migrate an already-saved row's
-				     auth method. Custom URL only earns this branch once Check finds a
-				     sign-in requirement (customUrlOauth.active) - a plain token-only
-				     server never leaves the FormControl-only path below. -->
+				     auth method. "Sign-in option" means whatever the catalog marks
+				     connected_app/dcr/static (jarvis/connectors/catalog.py) - token and
+				     open presets never reach this branch. Custom URL only earns it once
+				     Check finds a sign-in requirement (customUrlOauth.active) - a plain
+				     token-only server never leaves the FormControl-only path below. -->
 				<template v-if="presetHasOauth && form.auth_method === 'OAuth'">
 					<div
 						v-if="!rowOauthConnected"
 						class="flex flex-col gap-2 rounded-lg border p-3"
 					>
-						<p v-if="form.preset !== 'Custom URL'" class="text-xs text-ink-gray-5">
+						<p
+							v-if="presetAuthClass === 'connected_app'"
+							class="text-xs text-ink-gray-5"
+						>
 							Sign in with your {{ form.preset }} account to connect.
+						</p>
+						<p
+							v-else-if="form.preset !== 'Custom URL'"
+							class="text-xs text-ink-gray-5"
+						>
+							Sign in to {{ form.preset }} to connect.
 						</p>
 						<p v-else-if="customUrlOauth.signinHost" class="text-xs text-ink-gray-5">
 							This app signs you in at {{ customUrlOauth.signinHost }}.
@@ -64,8 +75,11 @@
 						<!-- A static (admin-registered) server needs a client id/secret
 						     before anyone can sign in. The row already exists (the first
 						     Connect press creates it) but connecting was deliberately
-						     skipped until this is filled in - see startOauthConnect. -->
-						<template v-if="form.preset === 'Custom URL' && rowNeedsStaticClient">
+						     skipped until this is filled in - see startOauthConnect. Gated
+						     on rowNeedsStaticClient alone (server truth), not the preset, so
+						     a named static preset gets the same block Custom URL already
+						     had. -->
+						<template v-if="rowNeedsStaticClient">
 							<template v-if="isAdmin">
 								<FormControl
 									type="text"
@@ -131,6 +145,10 @@
 					/>
 				</template>
 
+				<template v-else-if="presetAuthClass === 'open'">
+					<p class="text-xs text-ink-gray-5">No sign-in needed.</p>
+				</template>
+
 				<template v-else>
 					<FormControl
 						type="password"
@@ -141,7 +159,7 @@
 						:modelValue="form.credential"
 						@update:modelValue="(v) => onCredentialChange(v)"
 					/>
-					<p class="text-xs text-ink-gray-5">
+					<p v-if="tokenHint || tokenDocsUrl" class="text-xs text-ink-gray-5">
 						{{ tokenHint }}
 						<a
 							v-if="tokenDocsUrl"
@@ -327,7 +345,7 @@
 import { computed, reactive, ref, watch } from "vue";
 import { Badge, Button, Dialog, FormControl, Switch, toast } from "frappe-ui";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
-import { CONNECTOR_HELP, CUSTOM_URL_TOKEN_HINT } from "@/components/settings/connectorHelp.js";
+import { CUSTOM_URL_TOKEN_HINT } from "@/components/settings/connectorHelp.js";
 import {
 	addConnector,
 	connectOauth,
@@ -349,13 +367,12 @@ const props = defineProps({
 	allowCustomUrls: { type: Boolean, default: true },
 	// The row being edited, or null for a fresh Add.
 	connector: { type: Object, default: null },
+	// listConnectors()'s catalog: [{ name, key, auth, category, logo, help_url,
+	// hint }], enabled providers in catalog order. Drives the preset picker and
+	// every auth-class branch below instead of a hardcoded list.
+	catalog: { type: Array, default: () => [] },
 });
 const emit = defineEmits(["update:modelValue", "saved"]);
-
-const PRESETS = ["GitHub", "Atlassian", "Linear", "Stripe", "Custom URL"];
-// v1 flagship only (OAUTH_CONNECTORS_DESIGN.md §3) - every other preset stays
-// pasted-token only until it gets its own OAuth wiring.
-const OAUTH_PRESETS = ["GitHub"];
 
 const show = computed({
 	get: () => props.modelValue,
@@ -366,32 +383,51 @@ const isAdmin = !!window.is_system_manager || !!window.is_jarvis_admin;
 
 const isEdit = computed(() => !!props.connector);
 const dialogTitle = computed(() => (isEdit.value ? "Edit connector" : "Add connector"));
-const presetOptions = computed(() =>
-	PRESETS.filter((p) => p !== "Custom URL" || props.allowCustomUrls).map((p) => ({
-		label: p,
-		value: p,
-	}))
-);
+const presetOptions = computed(() => {
+	const opts = props.catalog.map((c) => ({ label: c.name, value: c.name }));
+	if (props.allowCustomUrls) opts.push({ label: "Custom URL", value: "Custom URL" });
+	return opts;
+});
 const step = ref(1);
 const saving = ref(false);
 const testing = ref(false);
 
-const form = reactive({ preset: "GitHub", base_url: "", credential: "", auth_method: "OAuth" });
+const form = reactive({ preset: "", base_url: "", credential: "", auth_method: "API Key" });
+// resetForCreate/resetForEdit always set preset+auth_method before the dialog
+// is shown, so these are just safe empty defaults, not a real first preset.
+
+// name -> catalog auth class ("dcr"/"static"/"token"/"open"/"connected_app"),
+// or null for Custom URL (not a catalog entry) or an unknown/not-yet-loaded name.
+function catalogAuthOf(name) {
+	if (name === "Custom URL") return null;
+	const entry = props.catalog.find((c) => c.name === name);
+	return entry ? entry.auth : null;
+}
+// The picked preset's catalog auth class, or "custom" for Custom URL (its
+// class is decided live by the Check probe instead, see customUrlOauth).
+const presetAuthClass = computed(() =>
+	form.preset === "Custom URL" ? "custom" : catalogAuthOf(form.preset)
+);
+// connected_app/dcr/static all default to a sign-in flow (OAUTH_CONNECTORS_DESIGN.md
+// §3, extended to every catalog auth class that supports it); token/open never do.
+function presetDefaultsToOauth(auth) {
+	return auth === "connected_app" || auth === "dcr" || auth === "static";
+}
 // Whether the selected preset offers a sign-in option at all - gates every
 // OAuth-mode template branch below. Custom URL only joins this once Check
 // (runProbe) finds the pasted server needs a sign-in - it never defaults to
 // it the way a named preset does.
-const presetHasOauth = computed(
-	() =>
-		OAUTH_PRESETS.includes(form.preset) ||
-		(form.preset === "Custom URL" && customUrlOauth.active)
-);
-// The sign-in box's own button label: GitHub keeps its named "Sign in to X",
-// Custom URL gets the generic "Connect" (design §8 copy - the server has no
-// brand name to show).
+const presetHasOauth = computed(() => {
+	if (form.preset === "Custom URL") return customUrlOauth.active;
+	return presetDefaultsToOauth(presetAuthClass.value);
+});
+// The sign-in box's own button label: a Connected App keeps its named "Sign
+// in to X" (today's GitHub copy); every discovered flow (dcr/static/Custom
+// URL) gets the generic "Connect" (design §8 copy - nothing to brand it with
+// beyond the preset name already shown in the line above the button).
 const oauthConnectLabel = computed(() => {
 	if (connecting.value) return "Connecting…";
-	return form.preset === "Custom URL" ? "Connect" : `Sign in to ${form.preset}`;
+	return presetAuthClass.value === "connected_app" ? `Sign in to ${form.preset}` : "Connect";
 });
 // Step 2's "Choose what {agent} may do with X" line. There's no user-typed
 // Name field any more (the backend derives the saved label - preset display
@@ -403,11 +439,22 @@ const connectorDisplayName = computed(() => {
 	if (form.preset && form.preset !== "Custom URL") return form.preset;
 	return "this connector";
 });
-// Per-preset token guidance shown under the Access token field (connectorHelp.js):
-// which token/scopes are needed, plus a link to the vendor's own token page.
-// Custom URL has no vendor to link to, so it gets a generic hint and no link.
-const tokenHint = computed(() => CONNECTOR_HELP[form.preset]?.tokenHint || CUSTOM_URL_TOKEN_HINT);
-const tokenDocsUrl = computed(() => CONNECTOR_HELP[form.preset]?.tokenDocsUrl || "");
+// Per-preset token guidance shown under the Access token field now comes
+// straight from the catalog entry (jarvis/connectors/catalog.py): its own
+// hint text plus a link to help_url when the vendor has one. Custom URL has
+// no catalog entry, so it gets the one generic hint below instead - a named
+// preset with neither a hint nor a help_url renders no guidance line at all
+// (see the template's v-if on this).
+const tokenHint = computed(() => {
+	if (form.preset === "Custom URL") return CUSTOM_URL_TOKEN_HINT;
+	const entry = props.catalog.find((c) => c.name === form.preset);
+	return entry?.hint || "";
+});
+const tokenDocsUrl = computed(() => {
+	if (form.preset === "Custom URL") return "";
+	const entry = props.catalog.find((c) => c.name === form.preset);
+	return entry?.help_url || "";
+});
 // The saved row this dialog is working against: the edited row's name, or the
 // name add_connector returned the first time "Test connection" ran this session.
 const rowName = ref("");
@@ -458,11 +505,19 @@ function resetCustomUrlOauthState() {
 	copied.value = false;
 }
 
+// The picker's opening preset: the catalog's own first entry (its order is
+// the shipped-first/category order jarvis/connectors/catalog.py documents),
+// or Custom URL when a tenant has no catalog presets enabled for it.
+function defaultPreset() {
+	if (props.catalog.length) return props.catalog[0].name;
+	return props.allowCustomUrls ? "Custom URL" : "";
+}
+
 function resetForCreate() {
-	form.preset = "GitHub";
+	form.preset = defaultPreset();
 	form.base_url = "";
 	form.credential = "";
-	form.auth_method = OAUTH_PRESETS.includes(form.preset) ? "OAuth" : "API Key";
+	form.auth_method = presetDefaultsToOauth(catalogAuthOf(form.preset)) ? "OAuth" : "API Key";
 	rowName.value = "";
 	createdThisSession.value = false;
 	savedThisSession.value = false;
@@ -478,7 +533,7 @@ function resetForCreate() {
 	resetCustomUrlOauthState();
 }
 function resetForEdit(row) {
-	form.preset = row.preset || "GitHub";
+	form.preset = row.preset || defaultPreset();
 	form.base_url = row.base_url || "";
 	form.credential = "";
 	form.auth_method = row.auth_method || "API Key";
@@ -549,7 +604,7 @@ function onPresetChange(v) {
 	form.base_url = "";
 	// OAuth-first (design §1): switching to a preset with a sign-in option
 	// re-defaults to it, same as the dialog's own initial state.
-	form.auth_method = OAUTH_PRESETS.includes(v) ? "OAuth" : "API Key";
+	form.auth_method = presetDefaultsToOauth(catalogAuthOf(v)) ? "OAuth" : "API Key";
 	rowOauthConnected.value = false;
 	resetCustomUrlOauthState();
 }
@@ -716,6 +771,9 @@ const canTest = computed(() => {
 	// renders once rowOauthConnected is true (see template), so there's
 	// nothing further to gate here.
 	if (form.auth_method === "OAuth") return true;
+	// open has no credential field either - it creates+tests with an empty
+	// credential (runTest), same one-click shape as OAuth above.
+	if (presetAuthClass.value === "open") return true;
 	if (!isEdit.value && !form.credential.trim()) return false;
 	return true;
 });

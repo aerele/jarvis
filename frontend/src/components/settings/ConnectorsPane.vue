@@ -109,6 +109,7 @@
 			:scope="addScope"
 			:allow-custom-urls="allowCustomUrls"
 			:connector="editingRow"
+			:catalog="catalog"
 			@saved="onSaved"
 		/>
 	</SettingsPane>
@@ -146,6 +147,9 @@ const loadError = ref(false);
 const shared = ref([]);
 const mine = ref([]);
 const allowCustomUrls = ref(true);
+// The connector preset catalog (jarvis/connectors/catalog.py), passed straight
+// through to AddConnectorDialog's preset picker.
+const catalog = ref([]);
 // Two independent per-row flags — a Test press only ever sets testingRow, a
 // Switch flip only ever sets togglingRow, so neither control's spinner reads
 // the other action's state.
@@ -160,6 +164,7 @@ async function load() {
 		shared.value = res.shared || [];
 		mine.value = res.mine || [];
 		allowCustomUrls.value = !!res.allow_custom_urls;
+		catalog.value = res.catalog || [];
 		loaded.value = true;
 	} catch (e) {
 		loadError.value = true;

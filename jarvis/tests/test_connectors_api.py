@@ -22,8 +22,9 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from jarvis.chat import connectors_api
-from jarvis.connectors import broker, mcp_oauth_store, oauth
-from jarvis.connectors.mcp_oauth import pkce_challenge
+from jarvis.connectors import broker, catalog, mcp_oauth_store, oauth
+from jarvis.connectors.mcp_client import McpClient
+from jarvis.connectors.mcp_oauth import canonical_resource, pkce_challenge
 from jarvis.connectors.mcp_oauth.transport import HttpResult
 from jarvis.permissions import (
 	JARVIS_ADMIN_ROLE,
@@ -349,6 +350,41 @@ class TestListConnectors(_ConnectorApiTestCase):
 		for row in out["shared"] + out["mine"]:
 			self.assertNotIn("credential", row)
 			self.assertIn("allowed_actions", row)
+
+
+class TestListConnectorsCatalog(_ConnectorApiTestCase):
+	"""The SPA builds its whole preset picker from ``list_connectors()["catalog"]``,
+	so this is a contract, not an implementation detail."""
+
+	def test_ships_the_enabled_catalog_and_no_secrets(self):
+		frappe.set_user(PLAIN_A)
+		entries = connectors_api.list_connectors()["catalog"]
+
+		self.assertEqual(len(entries), sum(1 for p in catalog.PROVIDERS if p.enabled))
+		self.assertEqual(len(entries), 30, "the SPA is built against this count")
+
+		names = {e["name"] for e in entries}
+		self.assertIn("Razorpay", names)
+		self.assertNotIn("Plaid", names, "a disabled catalog entry is never offered")
+		self.assertNotIn("Custom URL", names, "Custom URL is a flow, not a provider")
+
+		allowed = {"name", "key", "auth", "category", "logo", "help_url", "hint"}
+		for entry in entries:
+			self.assertEqual(set(entry), allowed, entry.get("name"))
+			self.assertIn(entry["auth"], {"dcr", "static", "token", "open", "connected_app"})
+
+	def test_rows_carry_the_flow_the_spa_should_render(self):
+		github = self._mk("Personal", "gh-class", owner=PLAIN_A, preset="GitHub")
+		custom = self._mk("Personal", "custom-class", owner=PLAIN_A, preset="Custom URL")
+		razorpay = self._mk("Personal", "rzp-class", owner=PLAIN_A, preset="Razorpay")
+		open_row = self._mk("Personal", "ms-class", owner=PLAIN_A, preset="Microsoft Learn")
+
+		frappe.set_user(PLAIN_A)
+		rows = {r["name"]: r for r in connectors_api.list_connectors()["mine"]}
+		self.assertEqual(rows[github]["auth_class"], "connected_app")
+		self.assertEqual(rows[custom]["auth_class"], "custom")
+		self.assertEqual(rows[razorpay]["auth_class"], "dcr")
+		self.assertEqual(rows[open_row]["auth_class"], "open")
 
 
 class TestTestConnector(_ConnectorApiTestCase):
@@ -784,6 +820,23 @@ class TestConnectorOauthFieldGuard(_ConnectorApiTestCase):
 		doc.save()  # no ignore_permissions - the guard runs; must not throw
 		self.assertEqual(frappe.get_doc(CONNECTOR, name).connected_app, app_a)
 
+	def test_raw_write_cannot_repoint_a_catalog_preset(self):
+		"""The API ignores a caller's base_url for a preset; the controller must too,
+		or a raw DocType write could aim a preset row at any public host and have
+		the credential sent there. Custom URL is the only caller-chosen endpoint."""
+		from jarvis.connectors import catalog
+
+		doc = self._insert_as(
+			PLAIN_A,
+			key="rzp-evil",
+			preset="Razorpay",
+			auth_method="API Key",
+			credential="tok",
+			base_url="https://attacker.invalid/steal",
+		)
+		self.assertEqual(doc.base_url, catalog.base_urls()["Razorpay"])
+		self.assertEqual(frappe.get_doc(CONNECTOR, doc.name).base_url, catalog.base_urls()["Razorpay"])
+
 
 class TestListConnectorsOauth(_ConnectorApiTestCase):
 	def test_annotates_oauth_configured_and_connected(self):
@@ -1044,6 +1097,40 @@ def _discovery_script(registration: bool = True, rm_overrides: dict | None = Non
 	return {
 		MCP_BASE_URL: HttpResult(status=401, headers={"www-authenticate": challenge}, json=None, text=""),
 		MCP_RM_URL: _json_result(rm_doc),
+		MCP_AS_META_URL: _json_result(as_doc),
+	}
+
+
+# --- catalog presets, discovered against their PINNED endpoints -------------- #
+# Copied from ``jarvis.connectors.catalog``'s own entries on purpose: a test that
+# imported the pinned URL from the catalog could not prove the API pins it.
+RAZORPAY_BASE_URL = "https://mcp.razorpay.com/mcp"
+SLACK_BASE_URL = "https://mcp.slack.com/mcp"
+MS_LEARN_BASE_URL = "https://learn.microsoft.com/api/mcp"
+ATTACKER_BASE_URL = "https://attacker.invalid/steal"
+
+
+def _discovery_script_at(base_url: str, *, registration: bool = True) -> dict:
+	"""``_discovery_script`` for an arbitrary address, so a CATALOG preset's own
+	pinned endpoint can be scripted. The resource document must name that same
+	address in canonical form or the anti-phishing gate rejects it."""
+	resource = canonical_resource(base_url)
+	parsed = urlparse(resource)
+	rm_url = f"{parsed.scheme}://{parsed.netloc}/.well-known/oauth-protected-resource{parsed.path}"
+	challenge = f'Bearer error="invalid_request", resource_metadata="{rm_url}", scope="read"'
+	as_doc = {
+		"issuer": MCP_AS_URL,
+		"authorization_endpoint": MCP_AUTHORIZE,
+		"token_endpoint": MCP_TOKEN,
+		"authorization_response_iss_parameter_supported": True,
+	}
+	if registration:
+		as_doc["registration_endpoint"] = MCP_REGISTER
+	return {
+		base_url: HttpResult(status=401, headers={"www-authenticate": challenge}, json=None, text=""),
+		rm_url: _json_result(
+			{"resource": resource, "authorization_servers": [MCP_AS_URL], "scopes_supported": ["read"]}
+		),
 		MCP_AS_META_URL: _json_result(as_doc),
 	}
 
@@ -1314,6 +1401,135 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 				preset="Custom URL", base_url=MCP_BASE_URL, scope="Shared", auth_method="OAuth"
 			)
 		self.assertEqual(transport.calls, [], "no egress before the permission gate")
+
+
+class TestCatalogPresetFlows(_McpOauthTestCase):
+	"""Phase D2: the in-app catalog routes every preset to its connection flow.
+	``dcr``/``static`` presets run the SAME discovery engine a Custom URL row
+	runs, against the catalog's PINNED address; ``token``/``open`` presets have
+	no sign-in at all."""
+
+	def test_dcr_preset_discovers_the_pinned_url_not_the_callers(self):
+		script = _discovery_script_at(RAZORPAY_BASE_URL)
+		script[MCP_REGISTER] = _json_result({"client_id": "rzp-client"}, status=201)
+		transport = _ScriptedTransport(script)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.add_connector(
+				preset="Razorpay",
+				# A caller-supplied address that must be ignored end to end: an
+				# unscripted URL would raise inside the fake transport, so reaching
+				# it at all fails this test rather than silently passing.
+				base_url=ATTACKER_BASE_URL,
+				scope="Personal",
+				auth_method="OAuth",
+			)
+		self._connectors.append(out["name"])
+
+		self.assertEqual(out["base_url"], RAZORPAY_BASE_URL)
+		self.assertEqual(out["auth_class"], "dcr")
+		self.assertEqual(transport.urls()[0], RAZORPAY_BASE_URL, "discovery starts at the pinned address")
+		for url in transport.urls():
+			self.assertNotIn("attacker.invalid", url)
+
+		row = frappe.get_doc(CONNECTOR, out["name"])
+		self.assertEqual(row.base_url, RAZORPAY_BASE_URL)
+		self.assertEqual(row.mcp_oauth_client, out["name"])
+		self.assertFalse(row.connected_app, "a catalog dcr preset never takes the Connected App link")
+		self.assertEqual(row.key, "razorpay")
+
+		client = frappe.get_doc(CLIENT_DT, out["name"])
+		self.assertEqual(client.registration_mode, "dcr")
+		self.assertEqual(client.client_id, "rzp-client")
+		self.assertEqual(client.resource, RAZORPAY_BASE_URL)
+		self.assertTrue(out["oauth_configured"])
+		self.assertFalse(out["oauth_connected"])
+		self.assertEqual(out["signin_host"], "as.example.invalid")
+
+	def test_static_preset_asks_an_admin_for_credentials(self):
+		transport = _ScriptedTransport(_discovery_script_at(SLACK_BASE_URL, registration=False))
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.add_connector(preset="Slack", scope="Personal", auth_method="OAuth")
+		self._connectors.append(out["name"])
+
+		self.assertEqual(out["auth_class"], "static")
+		self.assertTrue(out["needs_static_client"])
+		self.assertFalse(out["oauth_configured"])
+		self.assertEqual(out["oauth_redirect_uri"], connectors_api.oauth_redirect_uri())
+		self.assertEqual(out["base_url"], SLACK_BASE_URL)
+		client = frappe.get_doc(CLIENT_DT, out["name"])
+		self.assertEqual(client.registration_mode, "static")
+		self.assertFalse(client.client_id)
+		self.assertNotIn(MCP_REGISTER, transport.urls(), "nothing to register with")
+
+	def test_token_preset_cannot_ask_for_a_signin(self):
+		transport = _ScriptedTransport({})
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport),
+			self.assertRaises(frappe.ValidationError),
+		):
+			connectors_api.add_connector(preset="Stripe", scope="Personal", auth_method="OAuth")
+		self.assertEqual(transport.calls, [], "refused before any request leaves")
+		self.assertFalse(frappe.db.exists(CONNECTOR, {"key": "stripe", "owner": PLAIN_A}))
+
+	def test_open_preset_cannot_ask_for_a_signin(self):
+		transport = _ScriptedTransport({})
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport),
+			self.assertRaises(frappe.ValidationError),
+		):
+			connectors_api.add_connector(preset="Microsoft Learn", scope="Personal", auth_method="OAuth")
+		self.assertEqual(transport.calls, [])
+		self.assertFalse(frappe.db.exists(CONNECTOR, {"key": "microsoft_learn", "owner": PLAIN_A}))
+
+	def test_refusal_message_names_no_protocol(self):
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			connectors_api.add_connector(preset="Stripe", scope="Personal", auth_method="OAuth")
+		message = str(caught.exception)
+		for word in ("OAuth", "MCP", "bearer", "PKCE", "token"):
+			self.assertNotIn(word, message)
+
+	def test_open_preset_needs_no_credential_and_sends_no_authorization(self):
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.add_connector(preset="Microsoft Learn", scope="Personal")
+		self._connectors.append(out["name"])
+
+		self.assertEqual(out["base_url"], MS_LEARN_BASE_URL)
+		self.assertEqual(out["auth_class"], "open")
+		self.assertEqual(out["auth_method"], "API Key")
+		row = frappe.get_doc(CONNECTOR, out["name"])
+		self.assertFalse(row.get_password("credential", raise_exception=False))
+
+		# One level below broker.test_connector, so the real _credential read runs:
+		# an empty Password resolves to "" and reaches the client as None.
+		with patch.object(broker.mcp_client, "fetch_tools", return_value=_TOOLS) as fetch:
+			result = connectors_api.test_connector(out["name"])
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(fetch.call_args.args[0], MS_LEARN_BASE_URL)
+		self.assertIsNone(fetch.call_args.args[1], "no credential is handed to the outbound call")
+
+	def test_client_sends_no_authorization_header_without_a_token(self):
+		headers = McpClient(MS_LEARN_BASE_URL, None)._headers(is_initialize=False)
+		self.assertNotIn("Authorization", headers)
+
+	def test_api_key_on_a_signin_preset_is_still_the_shipped_path(self):
+		# The new routing branches only when OAuth is ASKED for: a key on a dcr
+		# preset stays the plain stored-credential row it has always been, and
+		# nothing is discovered.
+		transport = _ScriptedTransport({})
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.add_connector(preset="Linear", scope="Personal", credential="tok")
+		self._connectors.append(out["name"])
+		self.assertEqual(transport.calls, [])
+		row = frappe.get_doc(CONNECTOR, out["name"])
+		self.assertFalse(row.mcp_oauth_client)
+		self.assertFalse(row.connected_app)
+		self.assertEqual(row.get_password("credential", raise_exception=False), "tok")
 
 
 class TestSetOauthClientCredentials(_McpOauthTestCase):
@@ -1761,6 +1977,64 @@ class TestConnectorTwoEngineGuard(_McpOauthTestCase):
 		doc.label = "renamed by owner"
 		doc.save()  # no ignore_permissions - the guard runs and must not throw
 		self.assertEqual(self._reload_doc(name).mcp_oauth_client, name)
+
+	def test_catalog_signin_preset_may_not_take_the_preset_link(self):
+		# Razorpay is a dcr preset: the discovery engine backs it, so the Connected
+		# App link is not its to claim even though it is not a Custom URL row.
+		app = self._mk_connected_app("GitHub")
+		with self.assertRaises(frappe.PermissionError):
+			self._insert_as(
+				PLAIN_A,
+				key="guard-rzp-app",
+				preset="Razorpay",
+				base_url=RAZORPAY_BASE_URL,
+				auth_method="OAuth",
+				connected_app=app,
+			)
+
+	def test_catalog_signin_preset_cannot_borrow_another_connectors_client(self):
+		victim = self._mk_mcp_connector("guard-rzp-victim")
+		with self.assertRaises(frappe.PermissionError):
+			self._insert_as(
+				PLAIN_A,
+				key="guard-rzp-thief",
+				preset="Razorpay",
+				base_url=RAZORPAY_BASE_URL,
+				auth_method="OAuth",
+				mcp_oauth_client=victim,
+			)
+
+	def test_connected_app_preset_may_not_take_the_discovery_link(self):
+		victim = self._mk_mcp_connector("guard-gh-victim")
+		with self.assertRaises(frappe.PermissionError):
+			self._insert_as(
+				PLAIN_A,
+				key="guard-gh-thief",
+				preset="GitHub",
+				base_url="https://api.githubcopilot.com/mcp/",
+				auth_method="OAuth",
+				mcp_oauth_client=victim,
+			)
+
+	def test_token_preset_cannot_claim_a_signin_by_raw_write(self):
+		with self.assertRaises(frappe.PermissionError):
+			self._insert_as(
+				PLAIN_A,
+				key="guard-stripe",
+				preset="Stripe",
+				base_url="https://mcp.stripe.com/",
+				auth_method="OAuth",
+			)
+
+	def test_open_preset_cannot_claim_a_signin_by_raw_write(self):
+		with self.assertRaises(frappe.PermissionError):
+			self._insert_as(
+				PLAIN_A,
+				key="guard-mslearn",
+				preset="Microsoft Learn",
+				base_url=MS_LEARN_BASE_URL,
+				auth_method="OAuth",
+			)
 
 	def test_deleting_a_connector_purges_its_client_and_tokens(self):
 		name = self._mk_mcp_connector("guard-cascade")

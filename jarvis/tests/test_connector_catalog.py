@@ -5,10 +5,22 @@ bench: ``python3 -m unittest jarvis.tests.test_connector_catalog``.
 
 from __future__ import annotations
 
+import json
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 from jarvis.connectors import catalog
+
+# The Jarvis Connector DocType's own JSON. Read as a file rather than through
+# frappe.get_meta so this stays bench-free.
+_CONNECTOR_JSON = (
+	Path(catalog.__file__).resolve().parents[1]
+	/ "jarvis"
+	/ "doctype"
+	/ "jarvis_connector"
+	/ "jarvis_connector.json"
+)
 
 # The four presets already shipping in ``jarvis.chat.connectors_api`` before
 # this catalog existed. These literals are copied from
@@ -154,6 +166,34 @@ class TestToPublic(unittest.TestCase):
 	def test_count_matches_enabled_providers(self):
 		enabled_count = sum(1 for p in catalog.PROVIDERS if p.enabled)
 		self.assertEqual(len(catalog.to_public()), enabled_count)
+
+
+class TestDocTypeSelectOptionsDrift(unittest.TestCase):
+	"""The ``preset`` Select on Jarvis Connector is a COPY of the catalog, and
+	Frappe validates a Select value against those options server-side. A catalog
+	entry added without regenerating the JSON would therefore be offered by the
+	SPA and then rejected on save, so the drift has to fail here instead."""
+
+	def _preset_field(self) -> dict:
+		fields = json.loads(_CONNECTOR_JSON.read_text())["fields"]
+		for field in fields:
+			if field.get("fieldname") == "preset":
+				return field
+		raise AssertionError("Jarvis Connector has no 'preset' field")
+
+	def test_options_match_the_catalog_exactly(self):
+		expected = "\n".join([*catalog.preset_names(), "Custom URL"])
+		self.assertEqual(
+			self._preset_field()["options"],
+			expected,
+			"regenerate jarvis_connector.json's preset options from the catalog",
+		)
+
+	def test_disabled_entries_are_absent_from_the_options(self):
+		options = self._preset_field()["options"].split("\n")
+		for provider in catalog.PROVIDERS:
+			if not provider.enabled:
+				self.assertNotIn(provider.name, options, provider.name)
 
 
 class TestValidate(unittest.TestCase):

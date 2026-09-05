@@ -133,12 +133,13 @@ const statusTip = computed(() => {
 	if (props.row.last_test_status === "Failed") return `Last test failed${when}.`;
 	return "Run a test to confirm it's reachable.";
 });
-// Custom URL OAuth rows show where they sign in alongside the address
-// (design §6's confused-deputy line, echoed here); GitHub keeps its plain
-// base_url subtext untouched - its sign-in host is obvious from the logo and
-// showing it would just be noise. One line either way, no new row.
+// Every discovered sign-in (dcr/static/Custom URL) shows where it signs in
+// alongside the address (design §6's confused-deputy line, echoed here) -
+// only a Connected App (GitHub) skips it, since its sign-in host is implied
+// by the brand and showing it would just be noise. One line either way, no
+// new row.
 const subtext = computed(() => {
-	if (props.row.preset === "Custom URL" && isOauth.value && props.row.signin_host) {
+	if (isOauth.value && props.row.auth_class !== "connected_app" && props.row.signin_host) {
 		return props.row.base_url
 			? `${props.row.base_url} · Signs in at ${props.row.signin_host}`
 			: `Signs in at ${props.row.signin_host}`;

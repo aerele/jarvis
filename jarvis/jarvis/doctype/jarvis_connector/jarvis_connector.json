@@ -57,10 +57,10 @@
    "fieldname": "preset",
    "fieldtype": "Select",
    "label": "Preset",
-   "options": "GitHub\nAtlassian\nLinear\nStripe\nCustom URL",
+   "options": "GitHub\nAtlassian\nLinear\nStripe\nRazorpay\nPayPal\nSquare\nAsana\nNotion\nMonday.com\nSlack\nDropbox\nBox\nCanva\nFigma\nIntercom\nZendesk\nSupabase\nNeon\nAirtable\nSentry\nCloudflare\nVercel\nNetlify\nWebflow\nWix\nZapier\nMicrosoft Learn\nCloudflare Docs\nHugging Face\nCustom URL",
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "description": "Which known gateway this connector points at. \"Custom URL\" allows any admin-approved endpoint."
+   "description": "Which known gateway this connector points at. These options are the enabled entries of jarvis.connectors.catalog plus \"Custom URL\"; a drift test fails if the two disagree. \"Custom URL\" allows any admin-approved endpoint."
   },
   {
    "fieldname": "column_break_details",
@@ -97,16 +97,15 @@
    "default": "API Key",
    "reqd": 1,
    "in_standard_filter": 1,
-   "description": "How this connector authenticates. \"API Key\": a bearer token/PAT stored in Credential (the shipped path). \"OAuth\": a browser Connect flow whose tokens live in a linked Connected App (a preset) or an MCP OAuth Client (a Custom URL); Credential is unused either way. Broker branches on this; unset rows are treated as API Key."
+   "description": "How this connector authenticates. \"API Key\": a bearer token/PAT stored in Credential (the shipped path), or no credential at all for an open preset. \"OAuth\": a browser Connect flow whose tokens live in a linked Connected App or an MCP OAuth Client, chosen by the preset's catalog class; Credential is unused either way. A token or open preset has no sign-in and the controller rejects \"OAuth\" on one. Broker branches on this; unset rows are treated as API Key."
   },
   {
    "fieldname": "connected_app",
    "fieldtype": "Link",
    "label": "Connected App",
    "options": "Connected App",
-   "depends_on": "eval:doc.auth_method==\"OAuth\" && doc.preset!=\"Custom URL\"",
-   "mandatory_depends_on": "eval:doc.auth_method==\"OAuth\" && doc.preset!=\"Custom URL\"",
-   "description": "The Frappe Connected App backing this connector's OAuth grant, on the PRESET path only. A Custom URL connector uses MCP OAuth Client instead and must leave this empty - the controller rejects a row carrying both."
+   "depends_on": "eval:doc.auth_method==\"OAuth\"",
+   "description": "The Frappe Connected App backing this connector's OAuth grant, on the connected_app-class presets only (see jarvis.connectors.catalog). Every other sign-in preset, and Custom URL, uses MCP OAuth Client instead and must leave this empty - the controller rejects a row carrying the wrong link, or both."
   },
   {
    "fieldname": "mcp_oauth_client",
@@ -114,8 +113,8 @@
    "label": "MCP OAuth Client",
    "options": "MCP OAuth Client",
    "read_only": 1,
-   "depends_on": "eval:doc.auth_method==\"OAuth\" && doc.preset==\"Custom URL\"",
-   "description": "The discovered OAuth configuration backing this connector's sign-in, on the CUSTOM URL path only. SERVER-SET: written by the connectors API after discovery, never accepted from a client, and the controller rejects any value naming a client that belongs to a different connector."
+   "depends_on": "eval:doc.auth_method==\"OAuth\"",
+   "description": "The discovered OAuth configuration backing this connector's sign-in, on Custom URL and on the dcr/static presets (see jarvis.connectors.catalog). SERVER-SET: written by the connectors API after discovery, never accepted from a client, and the controller rejects any value naming a client that belongs to a different connector."
   },
   {
    "fieldname": "base_url",
@@ -184,7 +183,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-04 10:00:00.000000",
+ "modified": "2026-09-05 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Connector",

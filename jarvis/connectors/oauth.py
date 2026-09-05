@@ -15,8 +15,9 @@ Password field::
 
 TWO ENGINES SIT BEHIND THAT ONE CALL (MCP_OAUTH_CLIENT_DESIGN.md §7). A row
 carrying ``connected_app`` is the shipped v1 preset path (Frappe's Connected
-App); a row carrying ``mcp_oauth_client`` is the discovery-driven engine for a
-Custom URL server. :func:`resolve_connector_token` is the ONLY place that
+App); a row carrying ``mcp_oauth_client`` is the discovery-driven engine, which
+backs a catalog ``dcr``/``static`` preset as well as a Custom URL server.
+:func:`resolve_connector_token` is the ONLY place that
 branch is made, so the broker and the SPA's Test button can never disagree
 about which engine a row uses.
 

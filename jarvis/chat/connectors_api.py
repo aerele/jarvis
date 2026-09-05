@@ -20,7 +20,9 @@ module resolves a row, checks a permission, and reads/writes plain Frappe
 fields around that one call.
 
 Endpoints:
-  * ``list_connectors``       — the pane's two-section list (Shared + Mine).
+  * ``list_connectors``       - the pane's two-section list (Shared + Mine),
+    plus ``catalog``: the in-app provider list the SPA builds its preset picker
+    from (``jarvis.connectors.catalog.to_public``, public fields only).
   * ``add_connector``         — create; presets are pinned to their vendor
     endpoint server-side (see ``_PRESET_BASE_URLS``) so "Custom URL" is the
     ONLY way a caller's own ``base_url`` ever reaches a saved row — otherwise
@@ -40,9 +42,10 @@ Endpoints:
     deny everything as ``action_unknown``, which is confusing, not safer).
   * ``delete_connector``.
   * ``connect_oauth``         - OAuth tier: returns the provider's authorize
-    URL for an OAuth-auth-method row. On the PRESET path Frappe's native
-    Connected App callback handles the return trip; on the CUSTOM URL path
-    ``mcp_oauth_callback`` below does.
+    URL for an OAuth-auth-method row. A ``connected_app``-class row returns
+    through Frappe's native Connected App callback; every discovery-engine row
+    (a catalog ``dcr``/``static`` preset, or a Custom URL) returns through
+    ``mcp_oauth_callback`` below.
   * ``disconnect_oauth``      - deletes the CURRENT user's stored sign-in for an
     OAuth row (per-user, idempotent), from whichever engine backs it.
   * ``probe_connector_auth``  - Custom URL sign-in discovery, WITHOUT creating
@@ -52,13 +55,23 @@ Endpoints:
   * ``mcp_oauth_callback``    - the ONE redirect URI the discovery engine
     registers and returns to. Login-required (never allow_guest).
 
-TWO OAUTH ENGINES (MCP_OAUTH_CLIENT_DESIGN.md). A ``preset`` row with
-``auth_method="OAuth"`` uses Frappe's Connected App, exactly as it shipped and
-untouched here. A ``Custom URL`` row with ``auth_method="OAuth"`` uses the
-spec-compliant discovery engine in ``jarvis.connectors.mcp_oauth`` (+
-``mcp_oauth_store``). The engines are told apart by WHICH link the row carries
-(``connected_app`` vs ``mcp_oauth_client``), never by ``auth_method``, and the
-connector controller guarantees a row never carries both.
+TWO OAUTH ENGINES (MCP_OAUTH_CLIENT_DESIGN.md), and the CATALOG picks between
+them. ``jarvis.connectors.catalog`` gives every preset an ``auth`` class, and
+that class is the whole routing rule for ``auth_method="OAuth"``:
+
+  * ``connected_app`` (GitHub) - Frappe's Connected App, exactly as it shipped
+    and untouched here.
+  * ``dcr`` / ``static`` - the spec-compliant discovery engine in
+    ``jarvis.connectors.mcp_oauth`` (+ ``mcp_oauth_store``), the SAME code path
+    a ``Custom URL`` row takes, except that the address discovery runs against
+    is the catalog's pinned one rather than the caller's.
+  * ``token`` / ``open`` - no sign-in exists, so asking for OAuth is refused
+    (here AND in the connector controller, so a raw DocType write cannot take
+    the shortcut the API refuses).
+
+The engines are told apart by WHICH link the row carries (``connected_app`` vs
+``mcp_oauth_client``), never by ``auth_method``, and the connector controller
+guarantees a row never carries both.
 
 ``set_custom_url_policy`` is deliberately NOT here — MCP_CONNECTORS_PLAN.md's
 UI/UX decision #2 puts that admin control on the Jarvis Settings Desk form.
@@ -82,7 +95,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, get_url, now_datetime
 
-from jarvis.connectors import broker, mcp_oauth, mcp_oauth_store, oauth
+from jarvis.connectors import broker, catalog, mcp_oauth, mcp_oauth_store, oauth
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 
 CONNECTOR = "Jarvis Connector"
@@ -111,26 +124,34 @@ _SPA_CONNECTORS_PATH = "/jarvis?settings=connectors"
 # WORKER, this protects against a single user hammering the button.
 _TEST_RATE_PER_MIN = 20
 
-# Vendor MCP endpoints for the four built-in presets (validated against each
-# vendor's current docs 2026-09-04 — see the P3 report). Pinned SERVER-SIDE:
-# add_connector/update_connector never let a caller point a "preset"
-# connector anywhere else, which is what makes the Custom URL policy
-# (Jarvis Settings.allow_custom_urls) mean anything at all.
-_PRESET_BASE_URLS = {
-	"GitHub": "https://api.githubcopilot.com/mcp/",
-	"Atlassian": "https://mcp.atlassian.com/v2/mcp",
-	"Linear": "https://mcp.linear.app/mcp",
-	"Stripe": "https://mcp.stripe.com/",
-}
-_PRESET_KEYS = {"GitHub": "github", "Atlassian": "atlassian", "Linear": "linear", "Stripe": "stripe"}
-_PRESETS = (*_PRESET_BASE_URLS, "Custom URL")
+# Vendor MCP endpoints come from ``jarvis.connectors.catalog``, the in-app
+# provider list that is the single source of truth for which apps may be
+# connected and where each one lives. Pinned SERVER-SIDE: add_connector /
+# update_connector never let a caller point a catalog preset anywhere else,
+# which is what makes the Custom URL policy (Jarvis Settings.allow_custom_urls)
+# mean anything at all.
+#
+# ``base_urls``/``keys`` deliberately INCLUDE entries the catalog has disabled,
+# so an already-saved row still resolves its endpoint; ``_PRESETS`` (the create
+# allowlist) does not, so a disabled entry can never back a NEW connector.
+_PRESET_BASE_URLS = catalog.base_urls()
+_PRESET_KEYS = catalog.keys()
+_PRESETS = (*catalog.preset_names(), catalog.CUSTOM_URL)
 _SCOPES = ("Shared", "Personal")
 _AUTH_METHODS = ("API Key", "OAuth")
 
 # Preset -> the Connected App's own ``provider_name`` (an operator-set System
-# Manager-only field, never client input). Extend this map, not the resolver,
-# when a second preset gets an OAuth path.
+# Manager-only field, never client input). Only a ``connected_app``-class preset
+# belongs here; every other sign-in preset goes through the discovery engine.
 _PRESET_PROVIDER = {"GitHub": "GitHub"}
+
+#: The catalog auth classes the discovery engine serves. A preset outside this
+#: set either uses a Connected App or has no sign-in at all.
+_DISCOVERY_AUTH = (catalog.AUTH_DCR, catalog.AUTH_STATIC)
+
+#: ``auth_class`` for a row whose preset the catalog does not carry: a Custom URL
+#: row, or a legacy row on a preset that has since been dropped.
+_AUTH_CLASS_CUSTOM = "custom"
 
 _DESC_MAX = 500
 
@@ -245,6 +266,22 @@ def _action_summaries(parent_names: list[str]) -> dict[str, dict]:
 		if row["allowed"]:
 			summary["allowed"] += 1
 	return out
+
+
+def _auth_class(preset: str) -> str:
+	"""The catalog's connection class for ``preset`` (``dcr``/``static``/``token``/
+	``open``/``connected_app``), or ``"custom"`` for a Custom URL row and for any
+	preset the catalog no longer carries. Shipped on every list row so the SPA
+	reads a row's flow off the row instead of re-deriving it from the catalog."""
+	return catalog.auth_of(preset) or _AUTH_CLASS_CUSTOM
+
+
+def _uses_discovery_engine(preset: str) -> bool:
+	"""True when an OAuth row for ``preset`` is backed by the discovery engine
+	rather than a Connected App: a Custom URL, or a catalog preset whose class is
+	``dcr``/``static``. The connector controller re-derives the same rule from the
+	same catalog, so the API and the last-line guard cannot drift."""
+	return preset == catalog.CUSTOM_URL or catalog.auth_of(preset) in _DISCOVERY_AUTH
 
 
 def _resolve_connected_app_for_preset(preset: str) -> str | None:
@@ -401,6 +438,7 @@ def _connector_summary(doc) -> dict:
 		"key": doc.key,
 		"label": doc.label,
 		"preset": doc.preset,
+		"auth_class": _auth_class(doc.preset),
 		"base_url": doc.base_url,
 		"scope": doc.scope,
 		"enabled": bool(doc.enabled),
@@ -527,10 +565,15 @@ def _replace_allowed_actions(parent_name: str, actions: list[dict]) -> None:
 @frappe.whitelist()
 @require_jarvis_user
 def list_connectors() -> dict:
-	"""``{enabled, allow_custom_urls, shared, mine}``. ``frappe.get_list``
+	"""``{enabled, allow_custom_urls, catalog, shared, mine}``. ``frappe.get_list``
 	(not ``get_all``) so ``connector_query_conditions`` scopes the query the
 	same way the Desk list view is scoped: every Shared row plus the caller's
-	own Personal rows — nothing more. Never selects ``credential``."""
+	own Personal rows, nothing more. Never selects ``credential``.
+
+	``catalog`` is the in-app provider list (public fields only, no ``base_url``,
+	no secrets, disabled entries absent) the SPA builds its preset picker, logos,
+	hints, help links and per-preset flow from, so the flow a preset takes is
+	decided once, here, rather than duplicated in the client."""
 	flags = connector_flags()
 	rows = frappe.get_list(
 		CONNECTOR,
@@ -562,6 +605,7 @@ def list_connectors() -> dict:
 		row["enabled"] = bool(row["enabled"])
 		row["last_test_status"] = row.get("last_test_status") or ""
 		row["auth_method"] = row.get("auth_method") or "API Key"
+		row["auth_class"] = _auth_class(row.get("preset") or "")
 		if row["auth_method"] == oauth.OAUTH_AUTH_METHOD:
 			row.update(_oauth_status(row))
 		# Both engine links are internals - never shipped to the SPA.
@@ -572,6 +616,7 @@ def list_connectors() -> dict:
 	return {
 		"enabled": flags["enabled"],
 		"allow_custom_urls": flags["allow_custom_urls"],
+		"catalog": catalog.to_public(),
 		"shared": shared,
 		"mine": mine,
 	}
@@ -612,12 +657,18 @@ def add_connector(
 	§6b): "OAuth" IGNORES the ``credential`` argument entirely (nothing is ever
 	stored in the Password field for an OAuth row) and resolves the backing link
 	SERVER-SIDE - a caller can ask for OAuth but can never name or steer what
-	backs it. "API Key" is the shipped, unchanged behaviour.
+	backs it. "API Key" is the shipped, unchanged behaviour, and an ``open``
+	preset needs no credential at all (the broker sends no Authorization header
+	when the credential is empty).
 
-	OAuth resolves to one of two engines. A PRESET row gets the Connected App its
-	preset maps to (shipped, unchanged). A CUSTOM URL row runs discovery against
-	the address itself and gets an ``MCP OAuth Client`` - see
-	:func:`_setup_mcp_oauth_client`."""
+	The CATALOG routes an OAuth request (see the module docstring). A
+	``connected_app``-class preset gets the Connected App it maps to (shipped,
+	unchanged). A ``dcr``/``static`` preset and a Custom URL row both run
+	discovery and get an ``MCP OAuth Client`` - see
+	:func:`_setup_mcp_oauth_client` - the difference being only WHICH address
+	discovery runs against: the catalog's pinned one for a preset, the caller's
+	for a Custom URL. A ``token``/``open`` preset has no sign-in and is refused
+	before anything is created."""
 	label = (label or "").strip()
 	preset = (preset or "").strip()
 	scope = (scope or "").strip()
@@ -630,8 +681,16 @@ def add_connector(
 		frappe.throw(_("Scope must be Shared or Personal."))
 	if auth_method not in _AUTH_METHODS:
 		frappe.throw(_("Auth Method must be API Key or OAuth."))
+	if auth_method == oauth.OAUTH_AUTH_METHOD and not (
+		_uses_discovery_engine(preset) or catalog.auth_of(preset) == catalog.AUTH_CONNECTED_APP
+	):
+		# A key-only or no-credential app has no sign-in to start, so there is
+		# nothing to route this to. Refused HERE, before anything is created or any
+		# request leaves, and refused again in the connector controller so a raw
+		# DocType write cannot take the shortcut this rejects.
+		frappe.throw(_("This app connects with a key, not a sign-in."))
 
-	if preset == "Custom URL":
+	if preset == catalog.CUSTOM_URL:
 		if not connector_flags()["allow_custom_urls"]:
 			frappe.throw(
 				_(
@@ -660,11 +719,12 @@ def add_connector(
 		"auth_method": auth_method,
 		"enabled": 1,
 	}
-	custom_url_oauth = auth_method == oauth.OAUTH_AUTH_METHOD and preset == "Custom URL"
-	if custom_url_oauth:
-		# Discovery below is real egress to a host the CALLER chose, so it is rate
-		# limited exactly like the Test button. Without this the endpoint is an
-		# unmetered outbound-request amplifier for any Jarvis User.
+	engine_oauth = auth_method == oauth.OAUTH_AUTH_METHOD and _uses_discovery_engine(preset)
+	if engine_oauth:
+		# Discovery below is real egress, to a host the CALLER chose on the Custom
+		# URL path and to a vendor on the preset path, so it is rate limited exactly
+		# like the Test button either way. Without this the endpoint is an unmetered
+		# outbound-request amplifier for any Jarvis User.
 		if _over_test_rate_limit(frappe.session.user):
 			frappe.throw(_("Too many attempts. Please wait a moment and try again."))
 		doc_fields["credential"] = ""
@@ -681,7 +741,7 @@ def add_connector(
 
 	doc = frappe.get_doc(doc_fields)
 	doc.insert()
-	if custom_url_oauth:
+	if engine_oauth:
 		_setup_mcp_oauth_client(doc)
 	frappe.db.commit()
 	return _connector_summary(doc)
@@ -690,6 +750,12 @@ def add_connector(
 def _setup_mcp_oauth_client(doc) -> None:
 	"""Discover ``doc``'s sign-in service, self-register with it when it supports
 	that, and store the result as the row's ``MCP OAuth Client``.
+
+	Discovery runs against ``doc.base_url``, which by this point is ALREADY the
+	resolved address: the catalog's pinned endpoint for a preset, the caller's own
+	only for a Custom URL. Nothing here re-reads a caller-supplied URL, so a
+	preset row can never be discovered - or later signed in - against an address
+	its caller named.
 
 	ORDER MATTERS. This runs AFTER the insert so every cheap gate has already run
 	- the Shared-scope permission check, key uniqueness, the custom-URL policy.
