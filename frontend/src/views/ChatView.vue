@@ -3433,7 +3433,7 @@
 							     control is a SIBLING button, never nested inside the one it sits
 							     on - the ×, below, is exactly that sibling, not a nested control. -->
 							<span
-								v-if="connectorFocusOptions.length || connectorFocus"
+								v-if="connectorFocusOptions.length || connectorFocus" class="jv-connfocus-pill"
 								:style="{
 									display: 'flex',
 									alignItems: 'center',
@@ -11423,6 +11423,18 @@ onUnmounted(() => {
 .jv-iconbtn:hover svg {
 	stroke: var(--surface) !important;
 }
+/* The connector-focus pill is a labeled chip, not a bare icon. The default
+   .jv-iconbtn:hover bold-inverts to a solid var(--text) fill, which painted the
+   whole pill black on the light theme. Give its inner buttons a subtle,
+   theme-aware surface hover instead, keeping the accent border and label
+   readable. (Dark already had a subtle hover; a matching override is below.) */
+.jv-connfocus-pill .jv-iconbtn:hover {
+	background: var(--surface-2) !important;
+	color: var(--cta) !important;
+}
+.jv-connfocus-pill .jv-iconbtn:hover svg {
+	stroke: var(--cta) !important;
+}
 .jv-ctxbtn:hover {
 	background: var(--surface-2);
 }
@@ -14643,6 +14655,15 @@ onUnmounted(() => {
 }
 .jv-dark .jv-modelpill:hover span {
 	color: var(--text) !important;
+}
+/* Connector-focus pill hover in dark: subtle surface, accent kept (matches the
+   light-theme override above rather than the bold neutral iconbtn hover). */
+.jv-dark .jv-connfocus-pill .jv-iconbtn:hover {
+	background: var(--surface-3) !important;
+	color: var(--cta) !important;
+}
+.jv-dark .jv-connfocus-pill .jv-iconbtn:hover svg {
+	stroke: var(--cta) !important;
 }
 .jv-dark .jv-confirm-yes:hover,
 .jv-dark .jv-action-primary:hover {
