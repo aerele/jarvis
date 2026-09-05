@@ -1306,3 +1306,49 @@ describe("upgrade card copy: trial vs paid", () => {
 		expect(card.classes()).toContain("is-disabled");
 	});
 });
+
+describe("upgrade confirmation dialog: trial vs paid", () => {
+	const growth = {
+		name: "growth",
+		plan_name: "Growth",
+		price_inr: 500,
+		billing_cycle: "Monthly",
+	};
+
+	it("a TRIAL switch confirms with NO charge and a 'Switch plan' CTA, not 'Pay ₹0'", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Active",
+				is_trial: 1,
+				days_remaining: 10,
+				upgrade_plans: [growth],
+			})
+		);
+		// preview for a trial-switch: 0 charge, mode marker + the target price for the copy.
+		api.previewUpgrade.mockResolvedValue({
+			mode: "trial_switch",
+			prorated_inr: 0,
+			target_total_inr: 2950,
+		});
+		await wrapper.vm.doUpgrade(growth);
+		expect(wrapper.vm.pending.confirmLabel).toBe("Switch plan");
+		expect(wrapper.vm.pending.amount).toBe("");
+		expect(wrapper.vm.pending.message).toContain("No charge now");
+		expect(wrapper.vm.pending.message).toContain(inrLabel(2950));
+	});
+
+	it("a PAID upgrade still confirms with the prorated 'Pay ₹…' charge", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Active",
+				is_trial: 0,
+				days_remaining: 10,
+				upgrade_plans: [growth],
+			})
+		);
+		api.previewUpgrade.mockResolvedValue({ mode: "delta", prorated_inr: 590 });
+		await wrapper.vm.doUpgrade(growth);
+		expect(wrapper.vm.pending.confirmLabel).toBe(`Pay ${inrLabel(590)}`);
+		expect(wrapper.vm.pending.amount).toBe(inrLabel(590));
+	});
+});

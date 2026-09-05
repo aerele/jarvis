@@ -914,12 +914,24 @@ async function doUpgrade(plan) {
 		// (days-left * GST-inclusive daily rate) and can land on paise, same as
 		// total_inr below - inr()'s bare toLocaleString would show a stray
 		// one-decimal amount instead of the exact figure charged.
-		describe: (d) => ({
-			amount: inrExact(d.prorated_inr),
-			message:
-				"Charged now for the days left in your current billing period. Your new plan starts immediately.",
-			confirmLabel: `Pay ${inrExact(d.prorated_inr)}`,
-		}),
+		// A TRIAL switch takes no money today (the trial just moves to the new plan, first
+		// charge at trial-end), so the confirm must match the card's "nothing charged now"
+		// promise - no "Pay ₹0". A paid upgrade leads with the prorated charge as before.
+		describe: (d) =>
+			d.mode === "trial_switch"
+				? {
+						amount: "",
+						message: `No charge now - your free trial moves to this plan. You'll be billed ${inrExact(
+							d.target_total_inr
+						)} when your trial ends.`,
+						confirmLabel: "Switch plan",
+				  }
+				: {
+						amount: inrExact(d.prorated_inr),
+						message:
+							"Charged now for the days left in your current billing period. Your new plan starts immediately.",
+						confirmLabel: `Pay ${inrExact(d.prorated_inr)}`,
+				  },
 		start: () => api.startUpgrade(plan.name),
 		retry: () => doUpgrade(plan),
 	});
