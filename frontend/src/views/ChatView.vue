@@ -3531,7 +3531,7 @@
 							     linger a session if an admin flips it, but the server clause
 							     (_persona_clause) re-reads it every turn, so behaviour is always
 							     correct - voice-only cosmetic lag that self-heals on next boot. -->
-							<ContextPill
+							<ContextRing
 								:context="contextInfo"
 								:compacting="compacting"
 								:compacted="compactedChip"
@@ -4311,7 +4311,7 @@ import {
 } from "vue";
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import { Dropdown } from "frappe-ui";
-import ContextPill from "@/components/chat/ContextPill.vue";
+import ContextRing from "@/components/chat/ContextRing.vue";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
 import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
 import * as api from "@/api";
@@ -5199,8 +5199,8 @@ const compactBusyReason = computed(() => {
 	return "";
 });
 
-// Best-effort context refresh for the open chat. The pill stays mounted through
-// a compacting/compacted transition (ContextPill only hides on !context.fresh):
+// Best-effort context refresh for the open chat. The ring stays mounted through
+// a compacting/compacted transition (ContextRing only hides on !context.fresh):
 // a payload that hasn't been measured yet (fresh:false, e.g. right after
 // context:compacted, before the runtime re-measures) must NOT overwrite the
 // last fresh snapshot, or the pill would vanish mid-transition instead of

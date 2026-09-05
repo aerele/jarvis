@@ -30,6 +30,7 @@ from jarvis.chat.events import publish_to_user
 
 CONV = "Jarvis Conversation"
 CHAT_SESSION = "Jarvis Chat Session"
+TURN_USAGE = "Jarvis Turn Usage"
 
 COMPACT_LOCK_SECONDS = 300
 HINT_MAX_CHARS = 500
@@ -103,16 +104,34 @@ def _session_row(session_key: str) -> dict:
 	)
 
 
+def _last_turn_usage(session_key: str) -> dict:
+	"""The newest ``Jarvis Turn Usage`` row for this session, for the ring
+	popover's "Last reply" / "Model" rows. Empty when the session has no
+	recorded turn yet."""
+	if not session_key:
+		return {}
+	rows = frappe.get_all(
+		TURN_USAGE,
+		filters={"session_key": session_key},
+		fields=["tokens_in", "tokens_out", "model"],
+		order_by="creation desc",
+		limit=1,
+	)
+	return rows[0] if rows else {}
+
+
 def context_payload(conversation: str) -> dict:
-	"""What the context pill renders. Reads only the bench snapshot; never
+	"""What the context ring renders. Reads only the bench snapshot; never
 	touches the gateway."""
 	conv = frappe.db.get_value(CONV, conversation, ["session_key", "compacting_since"], as_dict=True) or {}
-	row = _session_row(conv.get("session_key") or "")
+	session_key = conv.get("session_key") or ""
+	row = _session_row(session_key)
 	capacity = int(row.get("context_capacity") or 0)
 	used = int(row.get("last_total_tokens") or 0)
 	reserve = int(row.get("reserve_tokens") or 0) or DEFAULT_RESERVE_TOKENS
 	pct = round(100 * used / capacity, 1) if capacity > 0 else 0.0
 	auto_pct = round(100 * (capacity - reserve) / capacity, 1) if capacity > reserve > 0 else 0.0
+	last_turn = _last_turn_usage(session_key)
 	return {
 		"used": used,
 		"capacity": capacity,
@@ -124,6 +143,9 @@ def context_payload(conversation: str) -> dict:
 		"last_compacted_at": row.get("last_compacted_at"),
 		"compacting": _is_fresh_lock(conv.get("compacting_since")),
 		"fresh": bool(row.get("last_usage_at")) and capacity > 0,
+		"last_in": int(last_turn.get("tokens_in") or 0),
+		"last_out": int(last_turn.get("tokens_out") or 0),
+		"model": last_turn.get("model") or "",
 	}
 
 

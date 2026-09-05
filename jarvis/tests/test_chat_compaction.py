@@ -14,6 +14,7 @@ from jarvis.chat.events import parse_event
 CHAT_SESSION = "Jarvis Chat Session"
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
+TURN_USAGE = "Jarvis Turn Usage"
 
 
 def _mk_conversation(session_key: str | None) -> str:
@@ -42,6 +43,8 @@ def _cleanup() -> None:
 		CHAT_SESSION, filters={"session_key": ["like", "agent:main:c-%"]}, pluck="name"
 	):
 		frappe.delete_doc(CHAT_SESSION, name, ignore_permissions=True, force=True)
+	for name in frappe.get_all(TURN_USAGE, filters={"session_key": ["like", "agent:main:c-%"]}, pluck="name"):
+		frappe.delete_doc(TURN_USAGE, name, ignore_permissions=True, force=True)
 
 
 class TestCompactionFields(FrappeTestCase):
@@ -112,17 +115,38 @@ class TestCompactionHelpers(FrappeTestCase):
 			WHERE session_key=%s""",
 			("agent:main:c-pay",),
 		)
+		frappe.get_doc(
+			{
+				"doctype": TURN_USAGE,
+				"session_key": "agent:main:c-pay",
+				"user": "Administrator",
+				"profile_agent_id": "",
+				"profile_tier": "full",
+				"model": "gpt-5.5",
+				"tokens_in": 1200,
+				"tokens_out": 300,
+				"cache_read": 0,
+				"cache_write": 0,
+				"cache_reported": 0,
+				"tool_calls": 0,
+				"day": frappe.utils.today(),
+				"run_id": "",
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
 		p = compaction.context_payload(conv)
 		self.assertTrue(p["fresh"])
 		self.assertEqual((p["used"], p["capacity"], p["pct"]), (50000, 200000, 25.0))
 		self.assertEqual(p["auto_compact_pct"], 90.0)
 		self.assertEqual(p["route"], "fits")
 		self.assertEqual(p["compaction_count"], 1)
+		self.assertEqual((p["last_in"], p["last_out"], p["model"]), (1200, 300, "gpt-5.5"))
 
 	def test_context_payload_no_session(self):
 		conv = _mk_conversation(None)
 		p = compaction.context_payload(conv)
 		self.assertEqual((p["used"], p["capacity"], p["fresh"]), (0, 0, False))
+		self.assertEqual((p["last_in"], p["last_out"], p["model"]), (0, 0, ""))
 
 
 class TestCompactionLock(FrappeTestCase):
