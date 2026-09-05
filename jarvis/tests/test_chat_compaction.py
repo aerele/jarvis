@@ -77,8 +77,9 @@ class TestCompactionHelpers(FrappeTestCase):
 		self.assertEqual(
 			compaction.classify_notice("⚙️ Compacted (58k before) • Context 58k/200k"), "compacted"
 		)
-		self.assertEqual(compaction.classify_notice("⚙️ Compaction skipped: nothing compactable"), "declined")
-		self.assertEqual(compaction.classify_notice(""), "declined")
+		self.assertEqual(compaction.classify_notice("⚙️ Compaction skipped: nothing compactable"), "skipped")
+		self.assertEqual(compaction.classify_notice("⚙️ Compaction failed: rate limited"), "failed")
+		self.assertEqual(compaction.classify_notice(""), "failed")
 
 	def test_is_compacting_window(self):
 		conv = _mk_conversation("agent:main:c-lock")
@@ -235,6 +236,20 @@ class TestRunCompact(FrappeTestCase):
 		payload = [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"][0]
 		self.assertEqual(payload["reason"], "runtime_declined")
 		self.assertIsNone(frappe.db.get_value(CONV, conv, "compacting_since"))
+
+	def test_failed_notice_publishes_runtime_failed(self):
+		key = "agent:main:c-run2b"
+		conv = _mk_conversation(key)
+		sess = MagicMock()
+		sess.list_sessions.return_value = [{"key": key, "totalTokens": 1000, "totalTokensFresh": True}]
+		sess.compact_session.return_value = {
+			"state": "final",
+			"text": "⚙️ Compaction failed: rate limited",
+			"run_id": "r",
+		}
+		pub = self._run(conv, sess)
+		payload = [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"][0]
+		self.assertEqual(payload["reason"], "runtime_failed")
 
 	def test_timeout_reason(self):
 		from jarvis.chat.agent_client import AgentUnreachableError

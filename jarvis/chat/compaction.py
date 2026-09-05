@@ -69,10 +69,15 @@ def is_compacting(conversation: str) -> bool:
 
 
 def classify_notice(text: str) -> str:
-	"""``compacted`` when the runtime's notice says it compacted, else
-	``declined`` (skipped / failed / unavailable / anything unexpected)."""
+	"""``compacted`` when the runtime's notice says it compacted, ``skipped``
+	when it says there was nothing to compact, else ``failed`` (the runtime
+	reported a failure, or the notice is missing or unexpected)."""
 	t = (text or "").strip().lstrip("⚙️").strip().lower()
-	return "compacted" if t.startswith("compacted") else "declined"
+	if t.startswith("compacted"):
+		return "compacted"
+	if t.startswith("compaction skipped"):
+		return "skipped"
+	return "failed"
 
 
 def _session_row(session_key: str) -> dict:
@@ -212,10 +217,10 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 			before = int(row.get("totalTokens") or 0)
 			capacity = int(row.get("contextTokens") or 0)
 			res = sess.compact_session(session_key, hint or None, timeout_s=COMPACT_RPC_TIMEOUT_S)
-			outcome = classify_notice(res.get("text") or "") if res.get("state") == "final" else "declined"
+			outcome = classify_notice(res.get("text") or "") if res.get("state") == "final" else "failed"
 			if outcome != "compacted":
-				reason = "runtime_declined"
-				frappe.logger("jarvis.chat").info(
+				reason = "runtime_declined" if outcome == "skipped" else "runtime_failed"
+				frappe.logger("jarvis.chat").warning(
 					"compact declined conv=%s state=%s text=%s",
 					conversation,
 					res.get("state"),
