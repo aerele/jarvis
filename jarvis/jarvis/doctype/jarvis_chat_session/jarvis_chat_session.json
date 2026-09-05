@@ -23,7 +23,11 @@
     "last_total_tokens",
     "context_capacity",
     "context_pct",
-    "last_usage_at"
+    "last_usage_at",
+    "budget_route",
+    "reserve_tokens",
+    "compaction_count",
+    "last_compacted_at"
   ],
   "fields": [
     {
@@ -156,6 +160,32 @@
       "read_only": 1,
       "no_copy": 1,
       "description": "When usage was last recorded or synced for this session."
+    },
+    {
+      "fieldname": "budget_route",
+      "fieldtype": "Data",
+      "label": "Budget Route",
+      "length": 40,
+      "read_only": 1
+    },
+    {
+      "fieldname": "reserve_tokens",
+      "fieldtype": "Int",
+      "label": "Reserve Tokens",
+      "read_only": 1
+    },
+    {
+      "fieldname": "compaction_count",
+      "fieldtype": "Int",
+      "label": "Compaction Count",
+      "default": "0",
+      "read_only": 1
+    },
+    {
+      "fieldname": "last_compacted_at",
+      "fieldtype": "Datetime",
+      "label": "Last Compacted At",
+      "read_only": 1
     }
   ],
   "permissions": [
