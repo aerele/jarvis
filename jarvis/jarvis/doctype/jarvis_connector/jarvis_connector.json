@@ -14,6 +14,8 @@
   "scope",
   "enabled",
   "connection_section",
+  "auth_method",
+  "connected_app",
   "base_url",
   "credential",
   "actions_section",
@@ -85,6 +87,25 @@
    "fieldname": "connection_section",
    "fieldtype": "Section Break",
    "label": "Connection"
+  },
+  {
+   "fieldname": "auth_method",
+   "fieldtype": "Select",
+   "label": "Auth Method",
+   "options": "API Key\nOAuth",
+   "default": "API Key",
+   "reqd": 1,
+   "in_standard_filter": 1,
+   "description": "How this connector authenticates. \"API Key\": a bearer token/PAT stored in Credential (the shipped path). \"OAuth\": a browser Connect flow whose tokens live in a linked Connected App (Credential is unused). Broker branches on this; unset rows are treated as API Key."
+  },
+  {
+   "fieldname": "connected_app",
+   "fieldtype": "Link",
+   "label": "Connected App",
+   "options": "Connected App",
+   "depends_on": "eval:doc.auth_method==\"OAuth\"",
+   "mandatory_depends_on": "eval:doc.auth_method==\"OAuth\"",
+   "description": "The Frappe Connected App backing this connector's OAuth grant. Set only when Auth Method is OAuth; ignored otherwise."
   },
   {
    "fieldname": "base_url",
