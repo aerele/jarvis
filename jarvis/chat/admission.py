@@ -557,20 +557,6 @@ def accept_or_queue(
 				"reason": frappe._("The site is busy — please try again in a moment."),
 			}
 
-		# Context compaction lock (spec 2026-09-05): a compaction rewrites the
-		# transcript, so no turn may start until it settles. Reject, do not
-		# queue: the user re-sends in a few seconds.
-		from jarvis.chat import compaction
-
-		if compaction.is_compacting(conversation):
-			frappe.db.rollback()
-			_telemetry("compacting_reject", run_id=run_id, target=target)
-			return {
-				"ok": False,
-				"reason_code": "compacting",
-				"reason": frappe._("Compacting this chat, try again in a moment"),
-			}
-
 		# Seed the user Message if the caller delegated it (WP-1 branch; unused in
 		# Phase-0 wiring because every legacy caller inserts before dispatch).
 		if not seed_message:

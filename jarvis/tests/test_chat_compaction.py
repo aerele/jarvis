@@ -30,7 +30,13 @@ def _cleanup() -> None:
 	"""These fixtures are inserted as Administrator (see ``_mk_conversation``) and
 	the compaction job commits, so a test-transaction rollback cannot undo them -
 	delete by name/session_key explicitly so a fresh CI DB stays clean."""
-	for name in frappe.get_all(CONV, filters={"title": "compact test"}, pluck="name"):
+	convs = frappe.get_all(CONV, filters={"title": "compact test"}, pluck="name")
+	if convs:
+		# retry_message fixtures insert real Message rows under these conversations
+		# (force=True on the conversation delete below only ignores the link, it
+		# does not cascade), so drop them first to avoid leaving orphan rows.
+		frappe.db.delete(MSG, {"conversation": ["in", convs]})
+	for name in convs:
 		frappe.delete_doc(CONV, name, ignore_permissions=True, force=True)
 	for name in frappe.get_all(
 		CHAT_SESSION, filters={"session_key": ["like", "agent:main:c-%"]}, pluck="name"
@@ -302,6 +308,33 @@ class TestCompactEndpoints(FrappeTestCase):
 			out = chat_api.send_message(conv, "hello")
 		self.assertEqual(out, {"ok": False, "reason": "Compacting this chat, try again in a moment"})
 		self.assertFalse(frappe.db.exists(MSG, {"conversation": conv}))
+
+	def test_retry_message_refuses_while_compacting(self):
+		conv = _mk_conversation("agent:main:c-ep10")
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		user_doc = frappe.get_doc(
+			{"doctype": MSG, "conversation": conv, "seq": 1, "role": "user", "content": "hi"}
+		)
+		user_doc.insert(ignore_permissions=True)
+		asst_doc = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": conv,
+				"seq": 2,
+				"role": "assistant",
+				"content": "",
+				"error": "rate limit",
+			}
+		)
+		asst_doc.insert(ignore_permissions=True)
+		with (
+			patch.object(chat_api.admission, "turn_machine_enabled", return_value=True),
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, None)),
+		):
+			out = chat_api.retry_message(asst_doc.name)
+		self.assertEqual(out, {"ok": False, "reason": "Compacting this chat, try again in a moment"})
 
 
 class TestCompactionEvent(FrappeTestCase):
