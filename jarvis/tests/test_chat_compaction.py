@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import api as chat_api
 from jarvis.chat import compaction
 
 CHAT_SESSION = "Jarvis Chat Session"
@@ -202,3 +203,74 @@ class TestRunCompact(FrappeTestCase):
 			compaction.run_compact(conv, "Administrator", "")
 		payload = [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"][0]
 		self.assertEqual(payload["reason"], "gateway_unreachable")
+
+
+class TestCompactEndpoints(FrappeTestCase):
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+
+	def tearDown(self):
+		_cleanup()
+		frappe.db.commit()
+
+	def test_get_conversation_context_shape(self):
+		conv = _mk_conversation("agent:main:c-ep1")
+		out = chat_api.get_conversation_context(conv)
+		for k in (
+			"used",
+			"capacity",
+			"pct",
+			"warn_pct",
+			"auto_compact_pct",
+			"route",
+			"compaction_count",
+			"last_compacted_at",
+			"compacting",
+			"fresh",
+		):
+			self.assertIn(k, out)
+
+	def test_compact_refuses_without_session(self):
+		conv = _mk_conversation(None)
+		self.assertEqual(chat_api.compact_conversation(conv), {"ok": False, "reason": "nothing_to_compact"})
+
+	def test_compact_refuses_when_already_compacting(self):
+		conv = _mk_conversation("agent:main:c-ep2")
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		self.assertEqual(chat_api.compact_conversation(conv), {"ok": False, "reason": "already_compacting"})
+
+	def test_compact_refuses_when_busy(self):
+		conv = _mk_conversation("agent:main:c-ep3")
+		with patch("jarvis.chat.api._conversation_busy", return_value=True):
+			self.assertEqual(
+				chat_api.compact_conversation(conv), {"ok": False, "reason": "conversation_busy"}
+			)
+
+	def test_compact_bad_hint(self):
+		conv = _mk_conversation("agent:main:c-ep4")
+		self.assertEqual(chat_api.compact_conversation(conv, "/new"), {"ok": False, "reason": "bad_hint"})
+
+	def test_compact_enqueues(self):
+		conv = _mk_conversation("agent:main:c-ep5")
+		with patch("jarvis.chat.compaction.frappe.enqueue") as enq:
+			out = chat_api.compact_conversation(conv, "keep the invoice inputs")
+		self.assertEqual(out, {"ok": True, "queued": True})
+		self.assertEqual(enq.call_args.kwargs["hint"], "keep the invoice inputs")
+		self.assertEqual(enq.call_args.kwargs["method"], "jarvis.chat.compaction.run_compact")
+		self.assertTrue(compaction.is_compacting(conv))
+
+	def test_conversation_busy_while_compacting(self):
+		conv = _mk_conversation("agent:main:c-ep6")
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		self.assertTrue(chat_api._conversation_busy(conv))
+
+	def test_get_usage_carries_context(self):
+		conv = _mk_conversation("agent:main:c-ep7")
+		out = chat_api.get_usage(conv)
+		self.assertIn("context", out)
+		self.assertIn("capacity", out["context"])

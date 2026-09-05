@@ -216,6 +216,20 @@ class TestAcceptOrQueueBasics(_AdmissionTestCase):
 		self.assertTrue(res.get("duplicate"))
 		self.assertEqual(frappe.db.count(TURN, {"run_id": "dup"}), 1)
 
+	def test_accept_or_queue_rejects_while_compacting(self):
+		conv = self._mk_conv()
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		out = admission.accept_or_queue(
+			conversation=conv,
+			run_id=frappe.generate_hash(length=12),
+			seed_message=None,
+			dispatch=lambda: None,
+		)
+		self.assertFalse(out["ok"])
+		self.assertEqual(out.get("reason_code"), "compacting")
+
 
 class TestSimultaneousSendsCASRace(_AdmissionTestCase):
 	def test_two_simultaneous_sends_cap_one(self):

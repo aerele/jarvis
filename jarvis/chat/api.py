@@ -899,6 +899,10 @@ def _conversation_busy(conversation: str) -> bool:
 	composer is intentionally unlocked while recovering), and a stale streaming
 	row from a crashed worker ages out of the freshness window (stale_scan
 	finalizes it) so it never blocks sends forever."""
+	from jarvis.chat import compaction
+
+	if compaction.is_compacting(conversation):
+		return True
 	rows = frappe.db.sql(
 		"""SELECT streaming, recovering, modified FROM `tabJarvis Chat Message`
 		WHERE conversation = %s AND role = 'assistant'
@@ -1334,6 +1338,10 @@ def send_message(
 		if admission.shard_overloaded(conversation):
 			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
 	elif _conversation_busy(conversation):
+		from jarvis.chat import compaction
+
+		if compaction.is_compacting(conversation):
+			return {"ok": False, "reason": _("Compacting this chat, try again in a moment")}
 		return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
 
 	# Apply model override BEFORE enqueueing so the worker sees the new value
@@ -2262,6 +2270,9 @@ def get_usage(conversation: str | None = None) -> dict:
 	# is the ownership check: this endpoint never loads the conversation doc.
 	if conversation and conversation in convs:
 		out["chat_tool_calls"] = sum(r["tools"] for r in _tool_runs(conversation))
+		from jarvis.chat import compaction
+
+		out["context"] = compaction.context_payload(conversation)
 
 	rows = frappe.get_all(
 		MSG,
@@ -2276,6 +2287,41 @@ def get_usage(conversation: str | None = None) -> dict:
 		if conversation and m.conversation == conversation:
 			out["chat_tokens"] += t
 	return out
+
+
+@frappe.whitelist()
+def get_conversation_context(conversation: str) -> dict:
+	"""Context-window meter for one conversation (owner only). Bench snapshot
+	only; never calls the runtime."""
+	require_jarvis_access()
+	_get_owned_conversation(conversation)
+	from jarvis.chat import compaction
+
+	return compaction.context_payload(conversation)
+
+
+@frappe.whitelist()
+def compact_conversation(conversation: str, hint: str | None = None) -> dict:
+	"""Summarise older turns of one conversation (owner only). Refuses with a
+	typed reason while a turn or another compaction is in flight; otherwise
+	takes the lock and enqueues jarvis.chat.compaction.run_compact."""
+	require_jarvis_access()
+	doc = _get_owned_conversation(conversation)
+	from jarvis.chat import compaction
+
+	if doc.get("skip_confirmation"):
+		return {"ok": False, "reason": "macro_armed"}
+	if not (doc.get("session_key") or "").strip():
+		return {"ok": False, "reason": "nothing_to_compact"}
+	if compaction.is_compacting(conversation):
+		return {"ok": False, "reason": "already_compacting"}
+	if _conversation_busy(conversation) or admission._conv_has_other_active_turn(conversation, ""):
+		return {"ok": False, "reason": "conversation_busy"}
+	try:
+		clean = compaction.sanitize_hint(hint)
+	except frappe.ValidationError:
+		return {"ok": False, "reason": "bad_hint"}
+	return compaction.start_compaction(conversation, frappe.session.user, clean)
 
 
 @frappe.whitelist()
