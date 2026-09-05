@@ -118,6 +118,10 @@ beforeEach(() => {
 	);
 	try {
 		window.sessionStorage.clear();
+		// Also clear localStorage: the billing snapshot key is constant across the file
+		// (one host+user namespace), so without this a test's persisted billing/identity
+		// leaks into later tests and can mask a missing-field guard.
+		window.localStorage.clear();
 	} catch (e) {
 		/* jsdom */
 	}
@@ -1050,7 +1054,7 @@ describe("lead-capture + T&C (frozen contract)", () => {
 		wrapper.vm.state.planName = "pro";
 		wrapper.vm.state.paymentProvider = "razorpay";
 		wrapper.vm.state.termsAccepted = false;
-		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		fillRequiredBilling(wrapper); // complete billing so this test exercises the T&C gate, not the completeness guard
 
 		await wrapper.vm.onPayClick();
 		expect(api.onboardingPaymentApi.startSignup).not.toHaveBeenCalled();
@@ -1594,5 +1598,66 @@ describe("post-checkout settling hold (calm wait, not the panic card)", () => {
 		expect(wrapper.vm.pendingPollStuck).toBe(false);
 		expect(wrapper.vm.showPaymentSettling).toBe(false);
 		expect(wrapper.vm.showRecovery).toBe(true);
+	});
+});
+
+// Review P2: changing Country must clear a state/region entered for the old country.
+// stateError accepts any non-empty region for a non-India country, so a leftover Indian
+// state (e.g. "United States / Tamil Nadu") would otherwise pass and be invoiced.
+describe("changing country clears a stale state/region", () => {
+	it("India -> foreign clears the Indian state and its error", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.billing.setUserValue("state", "Tamil Nadu");
+		wrapper.vm.detailsFieldErrors.state = "stale error";
+		wrapper.vm.onCountryChange("United States");
+		expect(wrapper.vm.billing.fields.country.value).toBe("United States");
+		expect(wrapper.vm.billing.fields.state.value).toBe("");
+		expect(wrapper.vm.detailsFieldErrors.state).toBe("");
+	});
+
+	it("re-selecting the same country leaves the state untouched", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.billing.setUserValue("state", "Tamil Nadu");
+		wrapper.vm.onCountryChange("India"); // country already defaults to India
+		expect(wrapper.vm.billing.fields.state.value).toBe("Tamil Nadu");
+	});
+});
+
+// Review P2: a resumed session can land directly on Review & Pay with a pre-change saved
+// state that never collected address/city/state/pincode. onPayClick must run the same
+// completeness guard as onDetailsSubmit and bounce back to Details, not submit.
+describe("resumed Pay enforces billing completeness", () => {
+	it("onPayClick with incomplete billing bounces to Details with per-field errors", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		wrapper.vm.state.planName = "standard";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.state.email = "acme@example.com";
+		wrapper.vm.state.termsAccepted = true;
+		// Only contact present; address / city / state / pincode missing (the pre-change shape).
+		wrapper.vm.billing.setUserValue("contact", "+91 98765 43210");
+		wrapper.vm.state.step = "pay";
+		await wrapper.vm.onPayClick();
+		expect(wrapper.vm.state.step).toBe("details");
+		expect(wrapper.vm.detailsFieldErrors.address).toBeTruthy();
+		expect(wrapper.vm.detailsFieldErrors.city).toBeTruthy();
+		expect(wrapper.vm.detailsFieldErrors.state).toBeTruthy();
+		expect(wrapper.vm.detailsFieldErrors.pincode).toBeTruthy();
+	});
+});
+
+// Review P1: countryError must reject a restored/defaulted value that isn't a real Country
+// (it never passed through the select), while normalising a known alias.
+describe("country validation rejects a non-canonical value", () => {
+	it("flags the old literal 'Other' and an unknown country; accepts a real name + alias", async () => {
+		const wrapper = mountView();
+		await flushPromises();
+		expect(wrapper.vm.countryError("Other")).toBeTruthy();
+		expect(wrapper.vm.countryError("Nowhereland")).toBeTruthy();
+		expect(wrapper.vm.countryError("")).toBeTruthy();
+		expect(wrapper.vm.countryError("India")).toBe("");
+		expect(wrapper.vm.countryError("Turkey")).toBe(""); // alias normalises to Türkiye
 	});
 });
