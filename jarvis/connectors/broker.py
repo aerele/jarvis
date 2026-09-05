@@ -51,12 +51,18 @@ TOTAL_TIMEOUT_S = 20.0
 # An OAuth row may have to REFRESH its token before the call, and that refresh is
 # outbound time too. The arithmetic that keeps the plugin's 30s abort safe:
 #
-#   refresh (<= REFRESH_BUDGET_S, WALL-CLOCK: DNS + connect + header wait + body
-#   are clamped to one deadline in ssrf.open_pinned_request, never spent one after
-#   another)  +  call (TOTAL_TIMEOUT_S - refresh elapsed, floored at
-#   MIN_CALL_TIMEOUT_S)  =  at most 20s when the refresh stays inside its budget,
-#   and at most REFRESH_BUDGET_S + MIN_CALL_TIMEOUT_S = 15s of call-side slack
-#   beyond that in the degenerate case, i.e. never past 25s.
+#   refresh (<= REFRESH_BUDGET_S wall-clock: DNS, connect and header wait are
+#   clamped to one deadline in ssrf.open_pinned_request, and the body is read one
+#   syscall at a time with the socket re-armed to the remaining budget, see
+#   mcp_oauth.transport._read_capped)  +  call (TOTAL_TIMEOUT_S - refresh
+#   elapsed, floored at MIN_CALL_TIMEOUT_S)  =  20s while the refresh stays in
+#   budget, never past REFRESH_BUDGET_S + MIN_CALL_TIMEOUT_S + TOTAL_TIMEOUT_S
+#   - REFRESH_BUDGET_S = 25s.
+#
+# Caveat, honestly stated: the MCP call's OWN body loop (mcp_client) still reads
+# via urllib3 stream(), whose read(n) can loop recvs past the per-chunk deadline
+# check on a byte-dripping server; that is the pre-existing v1 surface and is
+# tracked as a follow-up, not something this arithmetic claims to bound.
 #
 # The floor is what keeps a refresh that spends its whole budget from leaving the
 # call a guaranteed instant timeout. An API-key row spends none of this and keeps

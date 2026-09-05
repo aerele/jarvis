@@ -85,13 +85,46 @@ def _check_deadline(deadline: float, clock: Callable[[], float]) -> None:
 		raise OAuthTransportError("timeout", "The sign-in service took too long to answer.")
 
 
+def _rearm_socket(resp, remaining: float) -> None:
+	"""Point the connection's socket timeout at what is LEFT of the budget before
+	each body read. urllib3 arms the socket once, before the headers, from
+	``min(total - connect, read)`` and never re-evaluates ``total`` for the body;
+	without this a recv could legitimately wait the whole original read timeout
+	after the deadline has already passed. Best effort: fakes and closed
+	connections have no socket."""
+	sock = getattr(getattr(resp, "connection", None), "sock", None)
+	if sock is not None:
+		try:
+			sock.settimeout(max(remaining, 0.05))
+		except Exception:
+			pass
+
+
 def _read_capped(resp, deadline: float, clock: Callable[[], float]) -> bytes:
+	"""Read the body under the wall-clock ``deadline``, ONE syscall per iteration.
+
+	``resp.stream(n)`` -> ``read(n)`` loops recvs until ``n`` bytes arrive, so a
+	server dripping one byte at a time would run far past any deadline before the
+	loop ever came back to us. ``read1(n)`` returns after a single underlying read,
+	so the deadline is re-checked after every recv, and the socket timeout is
+	re-armed to the remaining budget before each one so no single recv can outlive
+	the deadline either. A fake without ``read1`` (tests) falls back to ``stream``."""
 	chunks: list[bytes] = []
 	total = 0
-	for chunk in resp.stream(8192, decode_content=True):
-		# Re-check between recvs, like ``mcp_client._read_capped`` does: a server
-		# trickling bytes just inside the read timeout would otherwise stream past
-		# any budget, one chunk at a time.
+	read1 = getattr(resp, "read1", None)
+
+	def _iter():
+		if read1 is None:
+			yield from resp.stream(8192, decode_content=True)
+			return
+		while True:
+			_rearm_socket(resp, deadline - clock())
+			chunk = read1(65536, decode_content=True)
+			if not chunk:
+				return
+			yield chunk
+
+	for chunk in _iter():
 		_check_deadline(deadline, clock)
 		if not chunk:
 			continue
@@ -99,6 +132,7 @@ def _read_capped(resp, deadline: float, clock: Callable[[], float]) -> bytes:
 		if total > _MAX_BODY_BYTES:
 			raise OAuthTransportError("response_too_large", "OAuth endpoint response exceeded the size cap.")
 		chunks.append(chunk)
+	_check_deadline(deadline, clock)
 	return b"".join(chunks)
 
 
@@ -126,8 +160,10 @@ def open_pinned(
 	The deadline spans everything, as ONE clock: DNS, connect and the header wait
 	(each clamped to what is left when it starts, plus a urllib3 ``total`` so they
 	cannot be spent one after another), every redirect (capped at
-	:data:`MAX_REDIRECTS`) and each chunk of the body read. Overrunning it raises
-	``OAuthTransportError("timeout")`` with the response and pool already closed.
+	:data:`MAX_REDIRECTS`), and the body, read one syscall at a time with the socket
+	timeout re-armed to the remaining budget before each read (see
+	``_read_capped``). Overrunning it raises ``OAuthTransportError("timeout")`` with
+	the response and pool already closed.
 
 	``drain_event_stream=False`` says "this hop only needs the headers of an event
 	stream": a 2xx ``text/event-stream`` answer is returned with an empty body

@@ -1664,8 +1664,25 @@ class TestCatalogPresetFlows(_McpOauthTestCase):
 
 
 class TestSetOauthClientCredentials(_McpOauthTestCase):
-	def test_plain_user_is_refused(self):
+	def test_owner_configures_their_own_personal_connector(self):
+		# A Personal row is the owner's own app and own connector: the same trust as
+		# pasting their own key. Refusing them would leave the row a dead end, since
+		# no admin can even see (let alone write) another user's Personal row.
 		name = self._mk_mcp_connector("static-cred", mode="static", client_id="")
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.set_oauth_client_credentials(name, "my-client", "my-secret")
+		self.assertTrue(out["oauth_configured"])
+		self.assertEqual(frappe.db.get_value(CLIENT_DT, name, "client_id"), "my-client")
+
+	def test_plain_user_cannot_configure_someone_elses_personal_connector(self):
+		name = self._mk_mcp_connector("static-cred-b", mode="static", client_id="")  # owned by PLAIN_A
+		frappe.set_user(PLAIN_B)
+		with self.assertRaises(frappe.PermissionError):
+			connectors_api.set_oauth_client_credentials(name, "stolen-client", "stolen-secret")
+		self.assertFalse(frappe.db.get_value(CLIENT_DT, name, "client_id"))
+
+	def test_plain_user_cannot_configure_a_shared_connector(self):
+		name = self._mk_mcp_connector("static-shared", scope="Shared", owner=None, mode="static", client_id="")
 		frappe.set_user(PLAIN_A)
 		with self.assertRaises(frappe.PermissionError):
 			connectors_api.set_oauth_client_credentials(name, "stolen-client", "stolen-secret")

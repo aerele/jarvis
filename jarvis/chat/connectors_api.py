@@ -765,8 +765,9 @@ def _setup_mcp_oauth_client(doc) -> None:
 
 	TIME. This is the slowest thing the connectors API does, and every second of it
 	is a held worker. The ceiling is deliberate and arithmetic, and WALL-CLOCK
-	(``ssrf.open_pinned_request`` clamps DNS, connect, header wait and body to one
-	deadline per hop): ``mcp_oauth.discovery.RUN_TOTAL_TIMEOUT_S`` (45s) for the
+	(``ssrf.open_pinned_request`` clamps DNS, connect and header wait to one
+	deadline per hop; ``mcp_oauth.transport._read_capped`` reads the body one
+	syscall at a time under the same deadline): ``mcp_oauth.discovery.RUN_TOTAL_TIMEOUT_S`` (45s) for the
 	whole discovery run, up to six hops inside it, plus
 	``transport.TOKEN_TOTAL_TIMEOUT_S`` (10s) for the registration POST - 55s worst
 	case, with at most ``transport.MAX_REDIRECTS`` (2) redirects per hop, well under
@@ -1327,9 +1328,9 @@ def set_oauth_client_credentials(name: str, client_id: str, client_secret: str =
 	workspace at a provider by hand - the static path, taken when the provider
 	does not set itself up automatically.
 
-	Not something a tenant user may do: these credentials identify the whole
-	workspace to the provider, and the redirect URI they are registered against
-	is this site's. A blank ``client_secret`` means "leave the stored one alone",
+	For a Shared row this is admin work: the credentials identify the whole
+	workspace to the provider. For a Personal row the owner does it themselves,
+	for their own app. A blank ``client_secret`` means "leave the stored one alone",
 	the same convention ``update_connector`` uses for a credential, since the SPA
 	never round-trips a stored secret back.
 
