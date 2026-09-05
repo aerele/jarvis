@@ -287,7 +287,7 @@ watch(
 	() => route.hash,
 	() => {
 		if (route.name === "DashboardsPage") applyHash();
-	},
+	}
 );
 
 // ── builder state ────────────────────────────────────────────────────────────
@@ -331,7 +331,7 @@ const agentEditingName = computed(() =>
 	agentRevisionTarget({
 		editingName: (editingDetail.value || {}).name || "",
 		adoptionActive: !!adoptedRow.value,
-	}),
+	})
 );
 
 // A pending ?edit=<name> deep-link, or - on a plain remount - the dashboard the
@@ -539,7 +539,7 @@ function onSaved(detail) {
 // A canvas the user would lose: html on the builder that isn't (still) the
 // document of the dashboard we last saved or opened for editing.
 const unsavedCanvas = computed(
-	() => !!builderHtml.value && builderHtml.value !== ((editingDetail.value || {}).html || ""),
+	() => !!builderHtml.value && builderHtml.value !== ((editingDetail.value || {}).html || "")
 );
 
 // The canvas is never thrown away silently. Every path that would drop an
@@ -660,7 +660,7 @@ function selectDashboardConversation(row, { force = false } = {}) {
 			}
 		},
 		null,
-		{ force, copy: force ? PROMOTE_COPY : DISCARD_COPY },
+		{ force, copy: force ? PROMOTE_COPY : DISCARD_COPY }
 	);
 }
 
@@ -695,7 +695,7 @@ watch(
 		const id = typeof value === "string" ? value : "";
 		if (!id) return;
 		openDashboardConversationId(id);
-	},
+	}
 );
 
 // The state-setting guts of adopting a saved dashboard's detail as the
@@ -805,7 +805,7 @@ watch(
 		if (!name || name === (editingDetail.value || {}).name) return;
 		editSeed.value = name;
 		loadEdit(name);
-	},
+	}
 );
 
 // Permanent enough to forget a stored target over: the row was deleted, or this
@@ -1132,7 +1132,7 @@ watch(
 		// above, in the single route push main chat makes.
 		const dash = typeof route.query.dash === "string" ? route.query.dash : "";
 		promoteFromChat(conv, msg, { dash });
-	},
+	}
 );
 
 // v-show keeps the builder mounted while Saved is up, so its iframe loads and
@@ -1145,7 +1145,7 @@ watch(
 		if (v !== "builder" || !builderHtml.value) return;
 		if (canvasRef.value && canvasRef.value.rebuild) canvasRef.value.rebuild();
 	},
-	{ flush: "post" },
+	{ flush: "post" }
 );
 
 // ── the drag-split (Sidebar's resize machinery, horizontal right panel) ──

@@ -78,7 +78,7 @@ test("a recorded message that is gone (or drew no html) restores nothing", () =>
 	assert.equal(builderCanvasFrame([{ name: "m1", canvas: [] }], "m1"), null);
 	assert.equal(
 		builderCanvasFrame([{ name: "m1", canvas: [{ name: "a.png", type: "image" }] }], "m1"),
-		null,
+		null
 	);
 	// ...but an html item ALONGSIDE an image still restores.
 	const mixed = [{ name: "a.png", type: "image" }, html()];
@@ -112,7 +112,7 @@ test("the page records WHICH message is on the canvas, under the same key", () =
 	assert.ok(
 		onCanvas.indexOf("builderHtml.value = content;") <
 			onCanvas.indexOf("canvasMsg.value = message_id;"),
-		"the id is recorded for the html that was rendered",
+		"the id is recorded for the html that was rendered"
 	);
 	// and dropped whenever the canvas stops being a chat artifact. loadEdit's
 	// own state-setting (jarvis#884) moved into applyEditDetail, which it calls
@@ -122,7 +122,7 @@ test("the page records WHICH message is on the canvas, under the same key", () =
 	assert.match(fnBody(pageSrc, "function applyEditDetail("), /canvasMsg\.value = "";/);
 	assert.match(
 		fnBody(pageSrc, "async function loadEdit("),
-		/applyEditDetail\(d, \{ deepLink \}\);/,
+		/applyEditDetail\(d, \{ deepLink \}\);/
 	);
 });
 
@@ -189,11 +189,11 @@ test("a remount restores WHAT WAS BEING EDITED, not just the pixels", () => {
 	// (dashboardOpen.test.js owns that path) — the identity still comes back.
 	assert.match(
 		pageSrc,
-		/const editSeed = ref\(routeEdit \|\| \(adoptionResume \? "" : editingSticky\.value\)\);/,
+		/const editSeed = ref\(routeEdit \|\| \(adoptionResume \? "" : editingSticky\.value\)\);/
 	);
 	assert.match(
 		pageSrc,
-		/if \(editSeed\.value\) loadEdit\(editSeed\.value, \{ deepLink: !!routeEdit \}\);/,
+		/if \(editSeed\.value\) loadEdit\(editSeed\.value, \{ deepLink: !!routeEdit \}\);/
 	);
 	// written by both paths that make this page "the editor of X"... loadEdit's
 	// own copy moved into applyEditDetail (jarvis#884), which onDashboardSaved
@@ -212,7 +212,7 @@ test("every path that drops an unsaved canvas confirms first", () => {
 	// unsaved == on the canvas and not (still) the saved document's html
 	assert.match(
 		pageSrc,
-		/const unsavedCanvas = computed\(\s*\(\) =>\s*!!builderHtml\.value && builderHtml\.value !== /,
+		/const unsavedCanvas = computed\(\s*\(\) =>\s*!!builderHtml\.value && builderHtml\.value !== /
 	);
 	for (const fn of [
 		"function newDashboard(",
@@ -241,7 +241,7 @@ test("the discard confirm is REACHABLE from loadEdit, not dead code", () => {
 test("the discard confirm keeps dashboard work inside the builder", () => {
 	assert.match(
 		pageSrc,
-		/label: "Discard", variant: "solid", onClick: \(\) => settleDiscard\(true\)/,
+		/label: "Discard", variant: "solid", onClick: \(\) => settleDiscard\(true\)/
 	);
 	const actions = pageSrc.slice(pageSrc.indexOf("const discardActions = computed("));
 	assert.doesNotMatch(actions, /Open its chat/);
@@ -267,7 +267,7 @@ test("the pane follows the sticky conversation slot when the page repoints it", 
 	assert.match(paneSrc, /clearThread\(\{ keepRun: own \}\);/);
 	assert.match(
 		fnBody(paneSrc, "function clearThread("),
-		/if \(!keepRun\) runActive\.value = false;/,
+		/if \(!keepRun\) runActive\.value = false;/
 	);
 });
 
@@ -292,7 +292,7 @@ test("submitting the ask keeps the picks until the answer is actually posted", (
 	const submit = fnBody(askCardSrc, "function submit()");
 	assert.match(
 		submit,
-		/emit\("submit", askAnswerText\(props\.spec, sel\.value, other\.value\)\);/,
+		/emit\("submit", askAnswerText\(props\.spec, sel\.value, other\.value\)\);/
 	);
 	assert.doesNotMatch(submit, /sel\.value = \{\};/);
 	assert.doesNotMatch(submit, /other\.value = \{\};/);
@@ -324,12 +324,12 @@ for (const [label, src] of [["dashboards", paneSrc]]) {
 		assert.doesNotMatch(
 			textarea,
 			/sending/,
-			"disabling a focused, dirty textarea mid-send is exactly the bug",
+			"disabling a focused, dirty textarea mid-send is exactly the bug"
 		);
 		// but the SEND control still is gated, or a double-send is possible
 		assert.ok(
 			disabledBindings.some((b) => b.includes("sending")),
-			"the send button must still be gated on `sending`",
+			"the send button must still be gated on `sending`"
 		);
 	});
 
@@ -354,7 +354,7 @@ test("every Enter-to-send handler ignores an IME composition commit", () => {
 		assert.match(body, /if \(e\.isComposing \|\| e\.keyCode === 229\) return;/, label);
 		assert.ok(
 			body.indexOf("e.isComposing") < body.indexOf('e.key === "Enter"'),
-			`${label}: the guard must precede the Enter branch`,
+			`${label}: the guard must precede the Enter branch`
 		);
 	}
 });
@@ -365,7 +365,7 @@ test("send() clears the draft up front and restores it only on rejection", () =>
 	assert.ok(
 		send.indexOf("if (!text || sending.value || runActive.value) return;") <
 			send.indexOf('draft.value = "";'),
-		"the in-flight guard must precede the clear",
+		"the in-flight guard must precede the clear"
 	);
 	assert.match(send, /const text = draft\.value\.trim\(\);/);
 	assert.match(send, /draft\.value = "";/);
@@ -375,7 +375,7 @@ test("send() clears the draft up front and restores it only on rejection", () =>
 	assert.equal(restores.length, 2, "restore on BOTH the ok:false and the throw path");
 	assert.match(
 		send,
-		/messages\.value = messages\.value\.filter\(\(m\) => m\.name !== tmpName\)/,
+		/messages\.value = messages\.value\.filter\(\(m\) => m\.name !== tmpName\)/
 	);
 });
 
@@ -390,7 +390,7 @@ test("Send is disabled while a turn is running, not just while posting", () => {
 	const disabledBindings = composer.match(/:disabled="[^"]*"/g) || [];
 	assert.ok(
 		disabledBindings.some((b) => b.includes("sending") && b.includes("runActive")),
-		"the Send button must gate on runActive too, or a duplicate turn can be dispatched once the POST settles",
+		"the Send button must gate on runActive too, or a duplicate turn can be dispatched once the POST settles"
 	);
 });
 

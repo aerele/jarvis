@@ -1361,11 +1361,7 @@ def send_message(
 	# scheduler, recovery) are allowed because they act on an already-owned row
 	# rather than a browser-selected surface.
 	existing_origin = (conv_doc.get("origin_page") or "").strip().lower()
-	if (
-		not _delegated
-		and existing_origin in _ISOLATED_ORIGINS
-		and requested_origin != existing_origin
-	):
+	if not _delegated and existing_origin in _ISOLATED_ORIGINS and requested_origin != existing_origin:
 		return {
 			"ok": False,
 			"reason": _("Continue this conversation in Dashboard Builder."),

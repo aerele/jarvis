@@ -49,14 +49,14 @@ test("dashboard chat sends model and effort and wears main chat's context ring",
 	assert.match(pane, /import ContextRing from "@\/components\/chat\/ContextRing\.vue"/);
 	assert.match(
 		pane,
-		/<ContextRing[\s\S]*?:context="contextInfo"[\s\S]*?@compact="openCompactDialog\(\)"/,
+		/<ContextRing[\s\S]*?:context="contextInfo"[\s\S]*?@compact="openCompactDialog\(\)"/
 	);
 	assert.match(pane, /<CompactDialog[\s\S]*?@confirm="runCompact"/);
 	assert.match(pane, /getConversationContext\(id\)/);
 	assert.doesNotMatch(pane, /ContextUsagePill|contextUsage\b/);
 	assert.ok(
 		pane.indexOf("<ContextRing") < pane.indexOf("<ModelEffortPicker"),
-		"ring before model pill",
+		"ring before model pill"
 	);
 	assert.match(dashboardsApi, /model_override: modelOverride/);
 	assert.match(dashboardsApi, /thinking_override: thinkingOverride/);

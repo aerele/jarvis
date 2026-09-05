@@ -36,27 +36,27 @@ const fnBody = (src, decl) => {
 test("a turn only earns the card when the origin was read for THIS conversation", () => {
 	assert.equal(
 		isDashboardBuildTurn({ originPage: "dashboards", originOf: "c1", conversation: "c1" }),
-		true,
+		true
 	);
 	// wrong page
 	assert.equal(
 		isDashboardBuildTurn({ originPage: "triggers", originOf: "c1", conversation: "c1" }),
-		false,
+		false
 	);
 	assert.equal(
 		isDashboardBuildTurn({ originPage: "", originOf: "c1", conversation: "c1" }),
-		false,
+		false
 	);
 	// origin read for a DIFFERENT conversation than the one on screen (a stale
 	// pair mid-switch) must not light the card up on the wrong thread
 	assert.equal(
 		isDashboardBuildTurn({ originPage: "dashboards", originOf: "c1", conversation: "c2" }),
-		false,
+		false
 	);
 	// no conversation yet (e.g. boot)
 	assert.equal(
 		isDashboardBuildTurn({ originPage: "dashboards", originOf: "", conversation: "" }),
-		false,
+		false
 	);
 });
 
@@ -65,7 +65,7 @@ test("a turn only earns the card when the origin was read for THIS conversation"
 test("no activity yet, still waiting on the first event -> Understanding", () => {
 	assert.equal(
 		dashboardBuildPhase({ activeTools: [], statusPhase: null, waiting: true }),
-		"understanding",
+		"understanding"
 	);
 });
 
@@ -76,7 +76,7 @@ test("a data tool running -> Querying data", () => {
 			statusPhase: null,
 			waiting: false,
 		}),
-		"querying",
+		"querying"
 	);
 	assert.equal(
 		dashboardBuildPhase({
@@ -84,7 +84,7 @@ test("a data tool running -> Querying data", () => {
 			statusPhase: null,
 			waiting: false,
 		}),
-		"querying",
+		"querying"
 	);
 });
 
@@ -95,7 +95,7 @@ test("a data tool finished, nothing else running yet -> Composing", () => {
 			statusPhase: "analyzing",
 			waiting: false,
 		}),
-		"composing",
+		"composing"
 	);
 });
 
@@ -106,7 +106,7 @@ test("a write-ish tool running or already seen -> Publishing", () => {
 			statusPhase: null,
 			waiting: false,
 		}),
-		"publishing",
+		"publishing"
 	);
 	assert.equal(
 		dashboardBuildPhase({
@@ -117,7 +117,7 @@ test("a write-ish tool running or already seen -> Publishing", () => {
 			statusPhase: "analyzing",
 			waiting: false,
 		}),
-		"publishing",
+		"publishing"
 	);
 });
 
@@ -128,7 +128,7 @@ test("jarvis#884: save_dashboard also lights Publishing, with or without the jar
 			statusPhase: null,
 			waiting: false,
 		}),
-		"publishing",
+		"publishing"
 	);
 	assert.equal(
 		dashboardBuildPhase({
@@ -136,7 +136,7 @@ test("jarvis#884: save_dashboard also lights Publishing, with or without the jar
 			statusPhase: null,
 			waiting: false,
 		}),
-		"publishing",
+		"publishing"
 	);
 	assert.equal(
 		dashboardBuildPhase({
@@ -147,7 +147,7 @@ test("jarvis#884: save_dashboard also lights Publishing, with or without the jar
 			statusPhase: "analyzing",
 			waiting: false,
 		}),
-		"publishing",
+		"publishing"
 	);
 });
 
@@ -156,7 +156,7 @@ test("joining a turn already in flight reports null, not a guess", () => {
 	// hasn't seen the run:start / tool:start that already happened elsewhere)
 	assert.equal(
 		dashboardBuildPhase({ activeTools: [], statusPhase: null, waiting: false }),
-		null,
+		null
 	);
 });
 
@@ -167,7 +167,7 @@ test("an unmapped tool name while a build is confirmed stays Composing, not done
 			statusPhase: null,
 			waiting: false,
 		}),
-		"composing",
+		"composing"
 	);
 });
 
@@ -183,9 +183,9 @@ test("jarvis#884: dataTools/writeTools are overridable so artifactActivityCard.j
 				statusPhase: null,
 				waiting: false,
 			},
-			customSets,
+			customSets
 		),
-		"querying",
+		"querying"
 	);
 	assert.equal(
 		dashboardBuildPhase(
@@ -194,9 +194,9 @@ test("jarvis#884: dataTools/writeTools are overridable so artifactActivityCard.j
 				statusPhase: null,
 				waiting: false,
 			},
-			customSets,
+			customSets
 		),
-		"publishing",
+		"publishing"
 	);
 	// the DEFAULT sets are unchanged when no override is passed — dashboard
 	// callers (this file's own tests, DashboardChatPane.vue) keep behaving
@@ -207,7 +207,7 @@ test("jarvis#884: dataTools/writeTools are overridable so artifactActivityCard.j
 			statusPhase: null,
 			waiting: false,
 		}),
-		"querying",
+		"querying"
 	);
 });
 
@@ -251,7 +251,7 @@ test("a fresh tool receipt keeps a long-running build restorable", () => {
 				modified: "2026-09-04 11:59:30",
 			},
 		],
-		{ now: NOW },
+		{ now: NOW }
 	);
 	assert.equal(state.active, true);
 	assert.equal(state.tools[0].status, "running");
@@ -269,14 +269,14 @@ test("durable tool receipts restore the current dashboard build phase", () => {
 				streaming: 1,
 			},
 		],
-		{ now: NOW },
+		{ now: NOW }
 	);
 	assert.equal(querying.active, true);
 	assert.equal(querying.waiting, false);
 	assert.deepEqual(querying.tools, [{ id: "tool-1", name: "jarvis__query", status: "running" }]);
 	assert.equal(
 		dashboardBuildPhase({ activeTools: querying.tools, statusPhase: null, waiting: false }),
-		"querying",
+		"querying"
 	);
 
 	const publishing = restoreDashboardRunState(
@@ -289,7 +289,7 @@ test("durable tool receipts restore the current dashboard build phase", () => {
 				tool_status: "completed",
 			},
 		],
-		{ now: NOW },
+		{ now: NOW }
 	);
 	assert.equal(
 		dashboardBuildPhase({
@@ -297,7 +297,7 @@ test("durable tool receipts restore the current dashboard build phase", () => {
 			statusPhase: null,
 			waiting: publishing.waiting,
 		}),
-		"publishing",
+		"publishing"
 	);
 });
 
@@ -308,7 +308,7 @@ test("only tool receipts belonging to the newest assistant turn are restored", (
 			{ name: "old-tool", role: "tool", tool_name: "query", tool_status: "completed" },
 			freshAssistant(),
 		],
-		{ now: NOW },
+		{ now: NOW }
 	);
 	assert.deepEqual(restored.tools, []);
 	assert.equal(restored.waiting, true);
@@ -334,7 +334,7 @@ test("settled, stale, recovering, stopped and errored replies never lock the bui
 test("DashboardChatPane restores run state on transcript load and uses semantic checkpoint colors", () => {
 	const paneSrc = fs.readFileSync(
 		path.join(HERE, "..", "pages", "dashboards", "DashboardChatPane.vue"),
-		"utf8",
+		"utf8"
 	);
 	assert.match(paneSrc, /const restoredRun = restoreDashboardRunState\(messages\.value\)/);
 	assert.match(paneSrc, /runActive\.value = restoredRun\.active/);
@@ -395,7 +395,7 @@ test("a custom source viewport is honoured", () => {
 test("ChatView imports the thumbnail/origin helpers from dashboardBuildCard, not a private copy", () => {
 	assert.match(
 		chatSrc,
-		/import \{\s*dashboardThumbnailTransform,\s*isDashboardBuildTurn,\s*isDashboardCanvas,\s*phaseTickIndex,\s*\} from "@\/lib\/dashboardBuildCard";/,
+		/import \{\s*dashboardThumbnailTransform,\s*isDashboardBuildTurn,\s*isDashboardCanvas,\s*phaseTickIndex,\s*\} from "@\/lib\/dashboardBuildCard";/
 	);
 	const gate = fnBody(chatSrc, "const dashboardBuildTurn = computed(");
 	assert.match(gate, /originPage: originPage\.value,/);

@@ -244,11 +244,7 @@ function goBack() {
 // ── header actions ───────────────────────────────────────────────────────────
 const canShare = computed(
 	() =>
-		!!(
-			detail.value &&
-			detail.value.can_edit &&
-			(caps.value.creatable_scopes || []).length > 1
-		),
+		!!(detail.value && detail.value.can_edit && (caps.value.creatable_scopes || []).length > 1)
 );
 
 const moreOptions = computed(() => {

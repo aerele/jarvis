@@ -90,7 +90,7 @@ describe("ModelEffortPicker add-a-provider row", () => {
 		await withRow.vm.$nextTick();
 		await without.vm.$nextTick();
 		expect(withRow.findAll('[role="menuitemradio"]')).toHaveLength(
-			without.findAll('[role="menuitemradio"]').length,
+			without.findAll('[role="menuitemradio"]').length
 		);
 	});
 
