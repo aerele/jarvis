@@ -616,7 +616,9 @@
 													billing.setUserValue('pincode', v);
 													clearFieldErrorIfValid(
 														'pincode',
-														pincodeError,
+														(val) =>
+															pincodeError(val) ||
+															pincodeStateError(_billingAddr()),
 														v
 													);
 												}
@@ -739,7 +741,13 @@
 											@update:model-value="
 												(v) => {
 													billing.setUserValue('gstin', v);
-													clearFieldErrorIfValid('gstin', gstinError, v);
+													clearFieldErrorIfValid(
+														'gstin',
+														(val) =>
+															gstinError(val) ||
+															gstinStateError(_billingAddr()),
+														v
+													);
 												}
 											"
 											:placeholder="GSTIN_PLACEHOLDER"
@@ -2173,6 +2181,7 @@ import { makeTelemetryReporter } from "@/onboarding/paymentTelemetry";
 import { readCookie } from "@/lib/user";
 import { useBillingDetails, billingEditAction } from "@/onboarding/useBillingDetails";
 import { gstinError, GSTIN_PLACEHOLDER } from "@/onboarding/gstin";
+import { gstinStateError, pincodeStateError } from "@/onboarding/address";
 import {
 	INDIAN_STATES,
 	COUNTRIES,
@@ -2925,6 +2934,9 @@ function stateError(v) {
 }
 function touchStateField() {
 	detailsFieldErrors.state = stateError(billing.fields.state.value);
+	// a state change re-decides the pincode<->state and GSTIN<->state consistency shown on those fields
+	touchPincodeField();
+	touchGstinField();
 }
 function touchEmailField() {
 	detailsFieldErrors.email = emailError(state.email);
@@ -2941,14 +2953,29 @@ function touchAddressField() {
 function touchCityField() {
 	detailsFieldErrors.city = cityError(billing.fields.city.value);
 }
+// Pincode + GSTIN also carry a CROSS-FIELD consistency check (State <-> Pincode <-> GSTIN must agree,
+// mirroring the admin control plane / India Compliance) so an inconsistent India address is caught HERE, not
+// as a silent operator REVIEW when the books build the invoice. The required/format error wins first; the
+// consistency message only shows when the field is otherwise fine. Surfaced on the field the mismatch is
+// about — pincode-vs-state on pincode, GSTIN-vs-state on GSTIN.
+function _billingAddr() {
+	return {
+		country: billing.fields.country.value || "India",
+		state: billing.fields.state.value,
+		pincode: billing.fields.pincode.value,
+		gstin: billing.fields.gstin.value,
+	};
+}
 function touchPincodeField() {
-	detailsFieldErrors.pincode = pincodeError(billing.fields.pincode.value);
+	detailsFieldErrors.pincode =
+		pincodeError(billing.fields.pincode.value) || pincodeStateError(_billingAddr());
 }
 function touchCountryField() {
 	detailsFieldErrors.country = countryError(billing.fields.country.value || "India");
 }
 function touchGstinField() {
-	detailsFieldErrors.gstin = gstinError(billing.fields.gstin.value);
+	detailsFieldErrors.gstin =
+		gstinError(billing.fields.gstin.value) || gstinStateError(_billingAddr());
 }
 // Called on every keystroke: only ever CLEARS an error that no longer applies
 // - it never shows a NEW one while the customer is still typing. Full
@@ -2995,6 +3022,10 @@ function onCountryChange(v) {
 		detailsFieldErrors.state = "";
 	}
 	clearFieldErrorIfValid("country", countryError, v);
+	// The pincode/GSTIN consistency messages are country-dependent (India-only), so a country change must
+	// re-decide them too — else a stale "doesn't match your state" lingers after switching to overseas.
+	touchPincodeField();
+	touchGstinField();
 }
 
 // ERP-derived billing defaults for the selected Company. Debounced (the Company
