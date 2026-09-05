@@ -36,14 +36,28 @@ test("approval hand-offs route dashboard conversations back to the builder", () 
 	assert.match(approvals, /Answer in builder/);
 });
 
-test("dashboard chat sends model and effort and renders model/context pills", () => {
+test("dashboard chat sends model and effort and wears main chat's context ring", () => {
 	assert.match(pane, /<ModelEffortPicker/);
 	// The pane is narrow and overflow-hidden: the shared picker must use its
 	// start-aligned menu and inline (compact) effort flyout, or both clip.
 	assert.match(pane, /<ModelEffortPicker[\s\S]*?\balign="start"[\s\S]*?\bcompact\b[\s\S]*?\/>/);
 	// Send stays pinned at the row's end; the controls wrap on their own.
 	assert.match(pane, /class="flex min-w-0 flex-1 flex-wrap items-center gap-1\.5"/);
-	assert.match(pane, /<ContextUsagePill/);
+	// The SAME ContextRing + CompactDialog main chat uses (#1136), fed by the
+	// same get_conversation_context payload: no dashboard-only meter, and the
+	// ring sits LEFT of the model pill exactly as in main chat's composer.
+	assert.match(pane, /import ContextRing from "@\/components\/chat\/ContextRing\.vue"/);
+	assert.match(
+		pane,
+		/<ContextRing[\s\S]*?:context="contextInfo"[\s\S]*?@compact="openCompactDialog\(\)"/,
+	);
+	assert.match(pane, /<CompactDialog[\s\S]*?@confirm="runCompact"/);
+	assert.match(pane, /getConversationContext\(id\)/);
+	assert.doesNotMatch(pane, /ContextUsagePill|contextUsage\b/);
+	assert.ok(
+		pane.indexOf("<ContextRing") < pane.indexOf("<ModelEffortPicker"),
+		"ring before model pill",
+	);
 	assert.match(dashboardsApi, /model_override: modelOverride/);
 	assert.match(dashboardsApi, /thinking_override: thinkingOverride/);
 });
