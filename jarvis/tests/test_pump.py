@@ -1880,6 +1880,35 @@ class TestPublishFencing(_PumpTestCase):
 		self.assertIn("run:end", by_kind)
 		self.assertEqual(by_kind["run:end"]["pump_epoch"], ctx.epoch)
 
+	def test_on_status_publishes_run_status(self):
+		"""Task 6 fix: the lane handler's ``on_status`` (wired from
+		``relay_mux``'s new ``status`` lane-event kind) publishes a fenced
+		``run:status`` carrying the run's conversation/run_id/message_id, exactly
+		like ``on_tool``'s ``tool:start``/``tool:end`` publishes above."""
+		conv = self._mk_conv()
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rs = pump._RunState(
+			run_id="pmp_status1",
+			conversation=conv,
+			owner="u@x",
+			assistant_message="msg1",
+			session_key="sess-pmp_status1",
+			version=1,
+		)
+		handler = pump._make_handler(ctx, rs)
+		captured = []
+		with patch.object(ts, "publish_to_user", side_effect=lambda u, p: captured.append(p)):
+			handler.on_status(3, "compacting")
+		self.assertEqual(len(captured), 1)
+		payload = captured[0]
+		self.assertEqual(payload["kind"], "run:status")
+		self.assertEqual(payload["status"], "compacting")
+		self.assertEqual(payload["conversation_id"], conv)
+		self.assertEqual(payload["run_id"], "pmp_status1")
+		self.assertEqual(payload["message_id"], "msg1")
+		self.assertEqual(payload["pump_epoch"], ctx.epoch)
+
 
 # --------------------------------------------------------------------------- #
 # CDX-4 — watchdog EFFECT scan (recover a lost enqueue_finalize)

@@ -1032,3 +1032,95 @@ class TestSessionsListModelIdentity(FrappeTestCase):
 
 		self.assertEqual(resolved_model_identity(rows[0]), ("", ""))
 		self.assertEqual(resolved_model_identity(None), ("", ""))
+
+
+# --- TestCompactSession ----------------------------------------------------
+
+
+def _session_with_scripted_frames(frames: list) -> AgentSession:
+	"""Build a handshaken AgentSession (via _build_session) whose WS then
+	plays back `frames` in order. Each dict with type == "res" gets its "id"
+	substituted at recv time with the id of the request most recently sent on
+	this connection (mirrors _build_session._ok / TestCreateSession's _resp
+	pattern), so the caller doesn't need to predict request ids; every other
+	frame (an "event") is replayed verbatim."""
+	sess, ws = _build_session()
+
+	def _make(d: dict):
+		if d.get("type") == "res":
+
+			def _resp(d=d):
+				return _frame({**d, "id": ws.sent[-1]["id"]})
+
+			return _resp
+		return _frame(d)
+
+	ws._frames.extend(_make(f) for f in frames)
+	return sess
+
+
+class TestCompactSession(FrappeTestCase):
+	def test_compact_session_waits_for_chat_final(self):
+		key = "agent:main:k1"
+		frames = [
+			{"type": "res", "id": "<sub>", "ok": True, "payload": {"subscribed": True}},
+			{"type": "res", "id": "<send>", "ok": True, "payload": {"runId": "r1", "status": "started"}},
+			{"type": "event", "event": "session.message", "payload": {"sessionKey": key}},
+			{
+				"type": "event",
+				"event": "agent",
+				"payload": {"runId": "r1", "stream": "lifecycle", "data": {"phase": "start"}},
+			},
+			{
+				"type": "event",
+				"event": "chat",
+				"payload": {
+					"runId": "r1",
+					"sessionKey": key,
+					"state": "final",
+					"message": {
+						"role": "assistant",
+						"content": [
+							{"type": "text", "text": "⚙️ Compacted (58k before) • Context 58k/200k (29%)"}
+						],
+					},
+				},
+			},
+		]
+		sess = _session_with_scripted_frames(frames)
+		out = sess.compact_session(key, "keep the invoice inputs", timeout_s=5)
+		self.assertEqual(out["state"], "final")
+		self.assertIn("Compacted", out["text"])
+		sent = sess._ws.sent
+		self.assertEqual(sent[-1]["params"]["message"], "/compact keep the invoice inputs")
+
+	def test_compact_session_times_out(self):
+		key = "agent:main:k2"
+		frames = [
+			{"type": "res", "id": "<sub>", "ok": True, "payload": {}},
+			{"type": "res", "id": "<send>", "ok": True, "payload": {"runId": "r2"}},
+		]
+		sess = _session_with_scripted_frames(frames)
+		with self.assertRaises(AgentUnreachableError) as cm:
+			sess.compact_session(key, None, timeout_s=0.2)
+		self.assertEqual(cm.exception.code, "compact-timeout")
+
+	def test_compact_session_recodes_mid_wait_close_as_compact_timeout(self):
+		# A hard close AFTER the ack (command already accepted, may have
+		# landed) must route the same as a plain timeout, not surface the
+		# codeless AgentUnreachableError _recv_with_timeout raises on a
+		# real socket close.
+		key = "agent:main:k3"
+
+		def _raise_closed():
+			raise websocket.WebSocketConnectionClosedException("closed")
+
+		frames = [
+			{"type": "res", "id": "<sub>", "ok": True, "payload": {}},
+			{"type": "res", "id": "<send>", "ok": True, "payload": {"runId": "r3"}},
+		]
+		sess = _session_with_scripted_frames(frames)
+		sess._ws._frames.append(_raise_closed)
+		with self.assertRaises(AgentUnreachableError) as cm:
+			sess.compact_session(key, None, timeout_s=5)
+		self.assertEqual(cm.exception.code, "compact-timeout")

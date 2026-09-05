@@ -248,6 +248,37 @@
 										>
 									</span>
 								</button>
+								<button
+									v-if="currentId"
+									role="menuitem"
+									class="jv-create-item"
+									@click="
+										createMenuOpen = false;
+										openCompactDialog('');
+									"
+								>
+									<svg
+										width="17"
+										height="17"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="var(--text-2)"
+										stroke-width="1.7"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<path d="M8 3v4a1 1 0 0 1-1 1H3" />
+										<path d="M21 8h-4a1 1 0 0 1-1-1V3" />
+										<path d="M3 16h4a1 1 0 0 1 1 1v4" />
+										<path d="M16 21v-4a1 1 0 0 1 1-1h4" />
+									</svg>
+									<span class="jv-create-item-txt">
+										<span class="jv-create-item-t">Compact chat</span>
+										<span class="jv-create-item-s"
+											>Summarise older turns to free up space</span
+										>
+									</span>
+								</button>
 							</div>
 						</template>
 					</div>
@@ -2040,7 +2071,8 @@
 							(activeTools.length || waiting) &&
 							!queuedTurn &&
 							!artifactKind &&
-							!gotoMorph
+							!gotoMorph &&
+							!compacting
 						"
 						style="display: flex; gap: 12px"
 					>
@@ -2109,10 +2141,11 @@
 							</div>
 							<div
 								v-if="
-									!showActivityDetail ||
-									(waiting && !currentTool) ||
-									(!currentTool && statusPhase) ||
-									(!currentTool && !doneCount)
+									(!showActivityDetail ||
+										(waiting && !currentTool) ||
+										(!currentTool && statusPhase) ||
+										(!currentTool && !doneCount)) &&
+									!compacting
 								"
 								role="status"
 								aria-live="polite"
@@ -2176,6 +2209,59 @@
 								<span>{{ recoveringLabel }}</span>
 							</div>
 						</div>
+					</div>
+
+					<!-- Compacting: older turns are being summarised (auto mid-turn, or a
+					     manual Compact chat / /compact). The composer stays LOCKED (a
+					     compact and a turn must never race the same context write). -->
+					<div
+						v-if="compacting"
+						style="display: flex; gap: 12px"
+						data-testid="compacting-banner"
+					>
+						<JarvisMark
+							:size="28"
+							:radius="7"
+							mood="thinking"
+							style="margin-top: 2px"
+						/>
+						<div style="flex: 1; min-width: 0; padding-top: 3px">
+							<div
+								role="status"
+								aria-live="polite"
+								style="
+									display: flex;
+									align-items: center;
+									gap: 7px;
+									font-size: 12px;
+									color: var(--text-3);
+								"
+							>
+								<svg
+									class="jv-spin"
+									width="13"
+									height="13"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="var(--text-3)"
+									stroke-width="2"
+									stroke-linecap="round"
+								>
+									<path d="M12 3a9 9 0 1 0 9 9" />
+								</svg>
+								Compacting this chat{{
+									compactHintSeed ? " · “" + compactHintSeed + "”" : ""
+								}}
+							</div>
+							<div class="jv-fold" aria-hidden="true">
+								<i></i><i></i><i></i><i></i><i></i><i></i>
+							</div>
+						</div>
+					</div>
+					<div v-else-if="compactedChip" style="display: flex; justify-content: center">
+						<span class="jv-ctx-chip" role="status"
+							>Context compacted. The meter updates after your next message.</span
+						>
 					</div>
 
 					<!-- SUX-3: immediate "change saved" acknowledgment after a confirm
@@ -3445,6 +3531,12 @@
 							     linger a session if an admin flips it, but the server clause
 							     (_persona_clause) re-reads it every turn, so behaviour is always
 							     correct - voice-only cosmetic lag that self-heals on next boot. -->
+							<ContextRing
+								:context="contextInfo"
+								:compacting="compacting"
+								:compacted="compactedChip"
+								@compact="openCompactDialog('')"
+							/>
 							<ModelEffortPicker
 								:model-override="modelOverride"
 								:default-model="ui.llm_model || ''"
@@ -4178,6 +4270,14 @@
 
 		<ConnectPhoneDialog v-model="showConnect" />
 
+		<CompactDialog
+			v-model="compactDialogOpen"
+			:busy-reason="compactBusyReason"
+			:submitting="compactSubmitting"
+			:initial-hint="compactHintSeed"
+			@confirm="runCompact"
+		/>
+
 		<!-- Preview a file the user attached in the composer (before send). Images
 		     enlarge, PDFs/others render in-app; loads over the session cookie so a
 		     private File just works. Sent-message attachments use the artifact
@@ -4211,6 +4311,9 @@ import {
 } from "vue";
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import { Dropdown } from "frappe-ui";
+import ContextRing from "@/components/chat/ContextRing.vue";
+import CompactDialog from "@/components/chat/CompactDialog.vue";
+import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
 import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
 import { shouldOfferFeedback, markRated, markIgnored } from "@/lib/feedbackGate";
@@ -4347,6 +4450,16 @@ watch(currentId, (id) => {
 	// from; never carry it into a different chat.
 	queuedTurn.value = null;
 	confirmedAck.value = false;
+	// The context meter's transient state is per-conversation too: a chip, a
+	// compacting lock, or a stale token count from the chat we left must never
+	// bleed into the one we just opened. Not every currentId change routes
+	// through loadConversation() (newChat() does not), so null contextInfo
+	// here rather than relying on that reload to do it; whichever load path
+	// does run (loadConversation, or loadContext directly) repopulates it off
+	// server truth.
+	contextInfo.value = null;
+	compactedChip.value = false;
+	compacting.value = false;
 	try {
 		id
 			? localStorage.setItem("jarvis-last-conv", id)
@@ -5071,6 +5184,83 @@ watch(
 	}
 );
 const usage = ref(null); // { estimated, chat_tokens, month_tokens, total_tokens, budget_monthly, month_label }
+
+// ---- chat context meter + Compact (sub-project B) ----
+const contextInfo = ref(null); // get_conversation_context payload for the open chat
+const compacting = ref(false); // a compaction we started (or one the runtime is doing mid-turn)
+const compactedChip = ref(false); // after-chip + pill "Compacted" until the next run:end
+const compactDialogOpen = ref(false);
+const compactSubmitting = ref(false);
+const compactHintSeed = ref("");
+const compactBusyReason = computed(() => {
+	if (compacting.value) return "Already compacting this chat";
+	if (sending.value || waiting.value || currentRunId.value)
+		return "A reply is in progress, try again in a moment";
+	return "";
+});
+
+// Best-effort context refresh for the open chat. The ring stays mounted through
+// a compacting/compacted transition (ContextRing only hides on !context.fresh):
+// a payload that hasn't been measured yet (fresh:false, e.g. right after
+// context:compacted, before the runtime re-measures) must NOT overwrite the
+// last fresh snapshot, or the pill would vanish mid-transition instead of
+// showing the compacted state.
+// `applyCompacting` is true only from the conversation-open path
+// (loadConversation): there, a fetch may CLEAR the optimistic lock, since it
+// is the authoritative read for a chat that just came on screen. Anywhere
+// else a stale, slow GET racing a fresh compact click must not flip a live
+// lock back off - such a fetch may only turn compacting ON, never off; the
+// run:end / run:error / run:recovering / context:compacted /
+// context:compact_failed events (plus the dropped-frame progress guards in
+// assistant:delta / tool:start) are the only other clearers.
+async function loadContext({ applyCompacting = false } = {}) {
+	const id = currentId.value;
+	if (!id) {
+		contextInfo.value = null;
+		return;
+	}
+	try {
+		const c = await api.getConversationContext(id);
+		// Stale-response guard (mirrors loadConversation): a slow response for a
+		// chat the user has since left must not stamp ITS compacting/context state
+		// onto whichever chat is on screen now.
+		if (currentId.value !== id) return;
+		if (c && c.fresh) contextInfo.value = c;
+		if (applyCompacting) {
+			compacting.value = !!(c && c.compacting);
+		} else if (c && c.compacting) {
+			compacting.value = true;
+		}
+	} catch {
+		/* meter is best-effort */
+	}
+}
+
+function openCompactDialog(seed = "") {
+	compactHintSeed.value = seed;
+	compactDialogOpen.value = true;
+}
+
+async function runCompact(hint) {
+	if (!currentId.value) return;
+	compactSubmitting.value = true;
+	try {
+		const res = await api.compactConversation(currentId.value, hint);
+		if (!res || !res.ok) {
+			notify(compactFailureCopy(res && res.reason), { type: "error" });
+			return;
+		}
+		compacting.value = true;
+		compactedChip.value = false;
+		compactHintSeed.value = hint || "";
+		compactDialogOpen.value = false;
+	} catch (e) {
+		notify(errMessage(e) || compactFailureCopy(), { type: "error" });
+	} finally {
+		compactSubmitting.value = false;
+	}
+}
+
 // Compact token count: 1234 → "1.2k", 2_500_000 → "2.5M".
 function fmtTokens(n) {
 	n = Number(n || 0);
@@ -5953,6 +6143,11 @@ const canSend = computed(
 	() =>
 		(input.value.trim().length > 0 || pendingFiles.value.length > 0) &&
 		!sending.value &&
+		// A compaction (auto mid-turn, or one we started) must never race a turn
+		// writing the same context — Composer has no bare `disabled` prop, so this
+		// is the equivalent binding: fold `compacting` into the same gate `sending`
+		// already uses.
+		!compacting.value &&
 		// Suspended: the server rejects every send, so keep the button dead.
 		!suspendedNotice.value &&
 		// No model configured: nothing on the other end can answer, so prevent the
@@ -6178,7 +6373,9 @@ const triggerMode = ref(false);
 // "Ask Jarvis" style) instead of a chip list, and a small marker sits above it.
 const TRIGGER_PLACEHOLDER = "e.g. Warn me when a Sales Invoice over 1 lakh is submitted";
 const composerPlaceholder = computed(() =>
-	triggerMode.value
+	compacting.value
+		? "Compacting this chat, try again in a moment"
+		: triggerMode.value
 		? TRIGGER_PLACEHOLDER
 		: `Ask ${agentName}…   @ to mention a user, / for a doctype or tool`
 );
@@ -8149,6 +8346,7 @@ async function loadConversation(id) {
 		histIdx.value = null;
 		histDraft.value = "";
 		loadedConvTitle.value = "";
+		contextInfo.value = null;
 		return;
 	}
 	const d = await api.getConversation(id);
@@ -8159,6 +8357,11 @@ async function loadConversation(id) {
 	// does a single clean load, would put it right. (Root cause of "open a
 	// chat, switch away and back, it shows empty until I refresh".)
 	if (currentId.value !== id) return;
+	// Context meter: best-effort, off the critical path (never awaited) — a slow
+	// or failed get_conversation_context must not delay messages rendering.
+	// This is the conversation-open path, so this fetch is authoritative for
+	// the lock too (applyCompacting) - unlike the mid-turn refreshes elsewhere.
+	loadContext({ applyCompacting: true });
 	// Flush any in-flight reveal BEFORE swapping in the freshly-loaded rows. On a
 	// reconnect resync the socket may have missed a run's terminal (fire-and-forget
 	// pub/sub, no replay), so flushReveal(message_id) never ran for it; a leftover
@@ -8701,6 +8904,25 @@ async function send(textArg, resendAck) {
 	const _sentScope = _currentScope();
 	const fromMain = typeof textArg !== "string";
 	const text = (fromMain ? input.value : textArg).trim();
+	const compactCmd = parseCompactCommand(text);
+	if (compactCmd) {
+		if (fromMain) input.value = "";
+		if (compacting.value) {
+			notify("Already compacting this chat", { type: "info" });
+			return;
+		}
+		if (compactCmd.hint) await runCompact(compactCmd.hint);
+		else openCompactDialog("");
+		return;
+	}
+	// A compaction in flight must never race a turn writing the same context.
+	// canSend already darkens Send while compacting, but Enter routes here
+	// directly (same gap noAiConnected below closes for that reason) and a
+	// programmatic send never sees the button at all.
+	if (compacting.value) {
+		notify("Compacting this chat, try again in a moment", { type: "info" });
+		return;
+	}
 	// PAYLOAD-bound voice release: bind the release to the transcribed recordings whose text is
 	// ACTUALLY PRESENT in THIS outgoing payload — captured NOW, before the POST. A recording the
 	// user EDITED or DELETED out of the composer is absent from `text`, so captureSentInPayload
@@ -9129,6 +9351,11 @@ function onEvent(p) {
 			waiting.value = false;
 			sending.value = false;
 			statusPhase.value = null;
+			// run:status "compacting" is lossy on the transport and its "compacted"
+			// counterpart can be dropped — never leave the composer locked waiting
+			// for an event that may never arrive. A parked/recovering turn is, by
+			// definition, no longer mid-compaction from this tab's point of view.
+			compacting.value = false;
 			activeTools.value = [];
 			currentRunId.value = null;
 			store.streamingConvId = null;
@@ -9137,6 +9364,26 @@ function onEvent(p) {
 			// Lightweight progress signal (e.g. waking a cold container) between
 			// run:start and the first token — keeps the connect window honest.
 			if (p.status === "waking") statusPhase.value = "waking";
+			if (p.status === "compacting") {
+				statusPhase.value = "compacting";
+				compacting.value = true;
+			}
+			if (p.status === "compacted") {
+				statusPhase.value = null;
+				compacting.value = false;
+				compactedChip.value = true;
+			}
+			break;
+		case "context:compacted":
+			compacting.value = false;
+			compactedChip.value = true;
+			compactHintSeed.value = "";
+			loadContext();
+			break;
+		case "context:compact_failed":
+			compacting.value = false;
+			compactHintSeed.value = "";
+			notify(compactFailureCopy(p.reason), { type: "error" });
 			break;
 		case "run:start":
 			// CDX-3: a stale-epoch run:start (a pump that lost the lease, or one that
@@ -9199,6 +9446,15 @@ function onEvent(p) {
 			// bypass and are always applied, unchanged.
 			if (pumpFenceReject(p)) break;
 			pumpFenceAccept(p, false);
+			// The "compacted" run:status frame is lossy (see the run:status case
+			// below); if it never arrived, real progress after a "compacting"
+			// marker means the compaction already ended, so clear the stuck lock
+			// here rather than leave the activity row hidden for the rest of the
+			// turn.
+			if (compacting.value && statusPhase.value === "compacting") {
+				compacting.value = false;
+				statusPhase.value = null;
+			}
 			waiting.value = false;
 			statusPhase.value = null;
 			recovering.value = null;
@@ -9222,6 +9478,13 @@ function onEvent(p) {
 			if (pumpFenceReject(p)) break; // CDX-3 (epoch-less legacy tool events bypass)
 			if (toolEventIsStale(p)) break;
 			pumpFenceAccept(p, false);
+			// See the matching guard in assistant:delta: a dropped "compacted"
+			// run:status frame must not leave compacting stuck true once the turn
+			// has visibly moved on.
+			if (compacting.value && statusPhase.value === "compacting") {
+				compacting.value = false;
+				statusPhase.value = null;
+			}
 			const id = p.tool_call_id || `${p.tool_name}-${activeTools.value.length}`;
 			activeTools.value = [
 				...activeTools.value,
@@ -9336,6 +9599,12 @@ function onEvent(p) {
 			// Post-reply feedback line: offer it (throttled) now the reply is
 			// finalized and its duration is stamped. Only here - never on history load.
 			if (m) maybeOfferFeedback(m);
+			// The compacted after-chip and the compacting lock are both scoped to a
+			// single turn: the NEXT run:end always clears them and refetches the
+			// meter, whether or not this particular turn itself compacted.
+			compactedChip.value = false;
+			compacting.value = false;
+			loadContext();
 			waiting.value = false;
 			sending.value = false;
 			statusPhase.value = null;
@@ -9504,6 +9773,10 @@ function onEvent(p) {
 			waiting.value = false;
 			sending.value = false;
 			statusPhase.value = null;
+			// run:status "compacting" is lossy on the transport and its "compacted"
+			// counterpart can be dropped — an errored turn must not leave the
+			// composer locked waiting for an event that may never arrive.
+			compacting.value = false;
 			activeTools.value = [];
 			currentRunId.value = null;
 			store.streamingConvId = null;
@@ -11729,6 +12002,90 @@ onUnmounted(() => {
 @keyframes jv-spin {
 	to {
 		transform: rotate(360deg);
+	}
+}
+/* Compacting banner: folding lines settle into one summary line, on loop. */
+.jv-fold {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	width: 150px;
+	margin-top: 8px;
+}
+.jv-fold i {
+	display: block;
+	height: 6px;
+	border-radius: 99px;
+	background: var(--surface-3);
+	transform-origin: top;
+	animation: jv-foldline 3.2s ease-in-out infinite;
+}
+.jv-fold i:nth-child(2) {
+	width: 88%;
+	animation-delay: 0.12s;
+}
+.jv-fold i:nth-child(3) {
+	width: 70%;
+	animation-delay: 0.24s;
+}
+.jv-fold i:nth-child(4) {
+	width: 92%;
+	animation-delay: 0.36s;
+}
+.jv-fold i:nth-child(5) {
+	width: 60%;
+	animation-delay: 0.48s;
+}
+.jv-fold i:last-child {
+	width: 44%;
+	background: var(--brand-grad, linear-gradient(135deg, #6e8bff, #8b5cf6));
+	animation: jv-summary 3.2s ease-in-out infinite;
+}
+@keyframes jv-foldline {
+	0%,
+	25% {
+		opacity: 1;
+		transform: scaleY(1) translateY(0);
+	}
+	55%,
+	100% {
+		opacity: 0;
+		transform: scaleY(0.1) translateY(-26px);
+	}
+}
+@keyframes jv-summary {
+	0%,
+	50% {
+		opacity: 0;
+		transform: translateY(-14px);
+	}
+	70%,
+	100% {
+		opacity: 1;
+		transform: translateY(-32px);
+	}
+}
+.jv-ctx-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	font-size: 12px;
+	color: var(--text-2);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 99px;
+	padding: 4px 11px;
+}
+.jv-ctx-chip::before {
+	content: "";
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: #16a34a;
+}
+@media (prefers-reduced-motion: reduce) {
+	.jv-fold i {
+		animation: none;
 	}
 }
 /* Phase-0 admission: Cancel affordance on the queued chip. Text-button idiom

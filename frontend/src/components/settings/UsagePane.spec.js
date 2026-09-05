@@ -189,3 +189,40 @@ describe("UsagePane metering error/retry", () => {
 		expect(w.find(".stub-errormessage").exists()).toBe(true);
 	});
 });
+
+describe("UsagePane, this chat context", () => {
+	// This row lives in its own unbadged "Context" section, independent of the
+	// "Measured usage" block below it - it must show even when there are no
+	// account-wide measured totals yet (measured.total_tokens is 0, hasMeasured
+	// false), as long as this chat's own context reading is fresh.
+	it("shows context in use for this chat when measured", async () => {
+		api.getUsage.mockResolvedValue({
+			chat_tokens: 999,
+			measured: { total_tokens: 500000, month_tokens: 100000 },
+			context: { used: 42000, capacity: 200000, fresh: true },
+		});
+		const w = await mountAs({ isSM: false, isAdmin: false });
+		expect(w.text()).toContain("42k of 200k context in use");
+	});
+
+	it("shows the row even with no measured totals yet, when this chat's context is fresh", async () => {
+		api.getUsage.mockResolvedValue({
+			chat_tokens: 999,
+			measured: { total_tokens: 0, month_tokens: 0 },
+			context: { used: 42000, capacity: 200000, fresh: true },
+		});
+		const w = await mountAs({ isSM: false, isAdmin: false });
+		expect(w.text()).toContain("42k of 200k context in use");
+		expect(w.text()).not.toContain("Measured usage");
+	});
+
+	it("falls back to not measured", async () => {
+		api.getUsage.mockResolvedValue({
+			chat_tokens: 999,
+			measured: { total_tokens: 500000, month_tokens: 100000 },
+			context: { used: 0, capacity: 0, fresh: false },
+		});
+		const w = await mountAs({ isSM: false, isAdmin: false });
+		expect(w.text()).toContain("Not measured yet");
+	});
+});
