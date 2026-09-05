@@ -1223,3 +1223,161 @@ describe("the paid notice speaks for the BILLING surface, not the signup wizard"
 		expect(window.location.assign).toHaveBeenCalledWith("/jarvis/");
 	});
 });
+
+describe("upgrade card copy: trial vs paid", () => {
+	// A PlanCard stub that renders its note + a disabled marker, so we can assert the
+	// per-plan copy the page computes (the default STUBS stub PlanCard opaquely).
+	const PlanCardNote = {
+		name: "PlanCard",
+		props: ["plan", "actionLabel", "note", "disabled", "loading", "current", "badge"],
+		template: `<div class="plan-card" :class="{ 'is-disabled': disabled }">{{ note }}</div>`,
+	};
+	async function mountWith(account) {
+		api.getAccount.mockResolvedValue(account);
+		const wrapper = mount(BillingPage, {
+			global: { stubs: { ...STUBS, PlanCard: PlanCardNote } },
+		});
+		await flushPromises();
+		return wrapper;
+	}
+
+	it("tells a PAID customer they pay the prorated difference", async () => {
+		const wrapper = await mountWith(
+			baseAccount({
+				subscription_status: "Active",
+				days_remaining: 20,
+				is_trial: 0,
+				upgrade_plans: [
+					{ name: "max", plan_name: "Max", price_inr: 200, billing_cycle: "Monthly" },
+				],
+			})
+		);
+		const card = findByText(wrapper, ".plan-card", "prorated difference");
+		expect(card).toBeTruthy();
+		expect(card.classes()).not.toContain("is-disabled");
+	});
+
+	it("tells a TRIAL customer nothing is charged now and the trial moves", async () => {
+		const wrapper = await mountWith(
+			baseAccount({
+				subscription_status: "Active",
+				days_remaining: 10,
+				is_trial: 1,
+				upgrade_plans: [
+					{ name: "max", plan_name: "Max", price_inr: 200, billing_cycle: "Monthly" },
+				],
+			})
+		);
+		const card = findByText(wrapper, ".plan-card", "Nothing is charged now");
+		expect(card).toBeTruthy();
+		expect(card.classes()).not.toContain("is-disabled");
+	});
+
+	it("disables a cross-cycle (Annual) upgrade during a trial and says why", async () => {
+		const wrapper = await mountWith(
+			baseAccount({
+				subscription_status: "Active",
+				days_remaining: 10,
+				is_trial: 1,
+				upgrade_plans: [
+					{ name: "ann", plan_name: "Annual", price_inr: 900, billing_cycle: "Annual" },
+				],
+			})
+		);
+		const card = findByText(wrapper, ".plan-card", "converts to a paid plan");
+		expect(card).toBeTruthy();
+		expect(card.classes()).toContain("is-disabled");
+	});
+
+	it("disables upgrade cards near renewal (R2) with a why note", async () => {
+		const wrapper = await mountWith(
+			baseAccount({
+				subscription_status: "Active",
+				days_remaining: 1,
+				is_trial: 0,
+				upgrade_locked_near_renewal: true,
+				upgrade_plans: [
+					{ name: "max", plan_name: "Max", price_inr: 200, billing_cycle: "Monthly" },
+				],
+			})
+		);
+		const card = findByText(wrapper, ".plan-card", "renews within a day");
+		expect(card).toBeTruthy();
+		expect(card.classes()).toContain("is-disabled");
+	});
+});
+
+describe("upgrade confirmation dialog: trial vs paid", () => {
+	const growth = {
+		name: "growth",
+		plan_name: "Growth",
+		price_inr: 500,
+		billing_cycle: "Monthly",
+	};
+
+	it("a TRIAL switch confirms with NO charge and a 'Switch plan' CTA, not 'Pay ₹0'", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Active",
+				is_trial: 1,
+				days_remaining: 10,
+				upgrade_plans: [growth],
+			})
+		);
+		// preview for a trial-switch: 0 charge, mode marker + the target price for the copy.
+		api.previewUpgrade.mockResolvedValue({
+			mode: "trial_switch",
+			prorated_inr: 0,
+			target_total_inr: 2950,
+		});
+		await wrapper.vm.doUpgrade(growth);
+		expect(wrapper.vm.pending.confirmLabel).toBe("Switch plan");
+		expect(wrapper.vm.pending.amount).toBe("");
+		expect(wrapper.vm.pending.message).toContain("No charge now");
+		expect(wrapper.vm.pending.message).toContain(inrLabel(2950));
+	});
+
+	it("a PAID upgrade still confirms with the prorated 'Pay ₹…' charge", async () => {
+		const wrapper = await mountPage(
+			baseAccount({
+				subscription_status: "Active",
+				is_trial: 0,
+				days_remaining: 10,
+				upgrade_plans: [growth],
+			})
+		);
+		api.previewUpgrade.mockResolvedValue({ mode: "delta", prorated_inr: 590 });
+		await wrapper.vm.doUpgrade(growth);
+		expect(wrapper.vm.pending.confirmLabel).toBe(`Pay ${inrLabel(590)}`);
+		expect(wrapper.vm.pending.amount).toBe(inrLabel(590));
+	});
+});
+
+describe("upgrade near-renewal lock freshness (R2)", () => {
+	it("re-reads the account when the tab becomes visible, clearing a stale lock", async () => {
+		const locked = baseAccount({
+			subscription_status: "Active",
+			is_trial: 0,
+			days_remaining: 1,
+			upgrade_locked_near_renewal: true,
+			upgrade_plans: [
+				{ name: "max", plan_name: "Max", price_inr: 200, billing_cycle: "Monthly" },
+			],
+		});
+		const wrapper = await mountPage(locked);
+		expect(wrapper.vm.upgradeNearRenewal).toBe(true);
+
+		// After renewal the server returns an UNLOCKED account.
+		api.getAccount.mockResolvedValue({ ...locked, upgrade_locked_near_renewal: false });
+		const before = api.getAccount.mock.calls.length;
+		Object.defineProperty(document, "visibilityState", {
+			value: "visible",
+			configurable: true,
+		});
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushPromises();
+
+		expect(api.getAccount.mock.calls.length).toBeGreaterThan(before); // re-read, not stuck on the snapshot
+		expect(wrapper.vm.upgradeNearRenewal).toBe(false); // lock cleared client-side
+	});
+});

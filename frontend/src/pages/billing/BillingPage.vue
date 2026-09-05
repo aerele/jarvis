@@ -182,8 +182,8 @@
 								:key="'up-' + p.name"
 								:plan="p"
 								action-label="Upgrade"
-								note="You pay only the prorated difference for the days left in this period."
-								:disabled="changesBlocked"
+								:note="upgradeNote(p)"
+								:disabled="changesBlocked || upgradeDisabled(p)"
 								:loading="busy === 'up:' + p.name"
 								@action="doUpgrade"
 							/>
@@ -528,6 +528,37 @@ const currentPlan = computed(() => {
 });
 const upgradePlans = computed(() => account.value.upgrade_plans || []);
 const downgradePlans = computed(() => account.value.downgrade_plans || []);
+const isTrial = computed(() => !!account.value.is_trial);
+// The server refuses an upgrade within 24h of renewal (UpgradeTooCloseToRenewal), so mirror
+// that here: disable the upgrade cards with a reason instead of offering a button that errors.
+const upgradeNearRenewal = computed(() => !!account.value.upgrade_locked_near_renewal);
+// Upgrade copy differs on a TRIAL: nothing is charged now (the trial just moves to
+// the new plan, first charge at trial-end), vs a paid customer who pays the prorated
+// difference for the days left. A trial can only switch SAME-cycle (the server refuses
+// a cross-cycle/Annual target with TrialCrossCycleUnsupported), so those cards are
+// disabled during a trial with a note that says why, rather than erroring on click.
+function upgradeCrossCycle(p) {
+	return !!(
+		currentPlan.value &&
+		p.billing_cycle &&
+		p.billing_cycle !== currentPlan.value.billing_cycle
+	);
+}
+function upgradeDisabled(p) {
+	return upgradeNearRenewal.value || (isTrial.value && upgradeCrossCycle(p));
+}
+function upgradeNote(p) {
+	if (upgradeNearRenewal.value) {
+		return "Your plan renews within a day - you can upgrade right after it renews.";
+	}
+	if (isTrial.value) {
+		if (upgradeCrossCycle(p)) {
+			return "Available once your free trial converts to a paid plan.";
+		}
+		return "Your free trial moves to this plan. Nothing is charged now; you're billed at the new price when your trial ends.";
+	}
+	return "You pay only the prorated difference for the days left in this period.";
+}
 const cancelling = computed(() => !!account.value.cancel_at_period_end);
 const scheduledDowngrade = computed(() => !!account.value.scheduled_plan);
 // The lapsed cohort (Expired/Cancelled/Past-Due-with-no-days-left): a plan
@@ -834,6 +865,35 @@ onMounted(() => {
 	window.addEventListener("pageshow", onPageShow);
 });
 onBeforeUnmount(() => window.removeEventListener("pageshow", onPageShow));
+// R2 upgrade-lock freshness (review): upgrade_locked_near_renewal is a server-computed, TIME-BASED
+// flag baked into the account snapshot. current_period_end is not re-read as it passes, so a tab left
+// open across renewal would keep every upgrade card disabled even after the server lock expired -
+// "upgrade right after it renews" would need a manual reload. Re-read server truth when the tab becomes
+// visible again (the user returning), and while the lock is active poll for it to expire so a
+// continuously-open tab also clears on its own. Both stop once the lock is gone.
+let nearRenewalPoll = null;
+function stopNearRenewalPoll() {
+	if (nearRenewalPoll) {
+		clearInterval(nearRenewalPoll);
+		nearRenewalPoll = null;
+	}
+}
+function onVisible() {
+	if (document.visibilityState === "visible") loadAccount();
+}
+watch(
+	upgradeNearRenewal,
+	(locked) => {
+		stopNearRenewalPoll();
+		if (locked) nearRenewalPoll = setInterval(loadAccount, 5 * 60 * 1000);
+	},
+	{ immediate: true }
+);
+onMounted(() => document.addEventListener("visibilitychange", onVisible));
+onBeforeUnmount(() => {
+	document.removeEventListener("visibilitychange", onVisible);
+	stopNearRenewalPoll();
+});
 // Invoices + billing details load on mount, independent of the plan read above.
 onMounted(() => {
 	loadInvoices();
@@ -883,12 +943,24 @@ async function doUpgrade(plan) {
 		// (days-left * GST-inclusive daily rate) and can land on paise, same as
 		// total_inr below - inr()'s bare toLocaleString would show a stray
 		// one-decimal amount instead of the exact figure charged.
-		describe: (d) => ({
-			amount: inrExact(d.prorated_inr),
-			message:
-				"Charged now for the days left in your current billing period. Your new plan starts immediately.",
-			confirmLabel: `Pay ${inrExact(d.prorated_inr)}`,
-		}),
+		// A TRIAL switch takes no money today (the trial just moves to the new plan, first
+		// charge at trial-end), so the confirm must match the card's "nothing charged now"
+		// promise - no "Pay ₹0". A paid upgrade leads with the prorated charge as before.
+		describe: (d) =>
+			d.mode === "trial_switch"
+				? {
+						amount: "",
+						message: `No charge now - your free trial moves to this plan. You'll be billed ${inrExact(
+							d.target_total_inr
+						)} when your trial ends.`,
+						confirmLabel: "Switch plan",
+				  }
+				: {
+						amount: inrExact(d.prorated_inr),
+						message:
+							"Charged now for the days left in your current billing period. Your new plan starts immediately.",
+						confirmLabel: `Pay ${inrExact(d.prorated_inr)}`,
+				  },
 		start: () => api.startUpgrade(plan.name),
 		retry: () => doUpgrade(plan),
 	});
