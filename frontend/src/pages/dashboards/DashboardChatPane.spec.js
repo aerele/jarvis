@@ -58,8 +58,15 @@ vi.mock("@/components/VoiceRecorder.vue", () => ({
 vi.mock("@/components/chat/AskCard.vue", () => ({
 	default: { name: "AskCard", template: "<div />" },
 }));
-vi.mock("@/components/chat/ContextUsagePill.vue", () => ({
-	default: { name: "ContextUsagePill", template: "<div />" },
+vi.mock("@/components/chat/ContextRing.vue", () => ({
+	default: {
+		name: "ContextRing",
+		props: ["context", "compacting", "compacted"],
+		template: "<div />",
+	},
+}));
+vi.mock("@/components/chat/CompactDialog.vue", () => ({
+	default: { name: "CompactDialog", template: "<div />" },
 }));
 vi.mock("@/components/chat/ModelEffortPicker.vue", () => ({
 	default: { name: "ModelEffortPicker", template: "<div />" },
@@ -80,6 +87,8 @@ vi.mock("@/api", () => ({
 	getChatUiSettings: vi.fn(async () => ({})),
 	setConversationModel: vi.fn(async () => ({ ok: true })),
 	setConversationThinking: vi.fn(async () => ({ ok: true })),
+	getConversationContext: vi.fn(async () => null),
+	compactConversation: vi.fn(async () => ({ ok: true })),
 }));
 
 import DashboardChatPane from "./DashboardChatPane.vue";
