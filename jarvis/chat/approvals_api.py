@@ -92,6 +92,19 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 	)
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
+	conversation_names = [r.get("conversation") for r in rows if r.get("conversation")]
+	conversation_origins = {}
+	if conversation_names:
+		conversation_origins = {
+			r.name: r.origin_page or ""
+			for r in frappe.get_all(
+				"Jarvis Conversation",
+				filters={"name": ["in", conversation_names]},
+				fields=["name", "origin_page"],
+			)
+		}
+	for r in rows:
+		r["origin_page"] = conversation_origins.get(r.get("conversation"), "")
 	return rows
 
 
@@ -251,6 +264,8 @@ def list_approvals_page(
 		f"""SELECT a.name, a.title, a.status, a.source, a.document_type, a.question,
 		a.context_md, a.options, a.conversation, a.ref_doctype, a.ref_name,
 		a.decision, a.decided_by, a.decided_at, a.creation,
+		COALESCE((SELECT oc.origin_page FROM `tabJarvis Conversation` oc
+		          WHERE oc.name = a.conversation), '') AS origin_page,
 		{shared_expr}
 		FROM {from_sql}
 		WHERE {main_where}
@@ -305,7 +320,8 @@ def _awaiting_reply(me: str) -> list[dict]:
 	from jarvis.chat.chat_asks import question_excerpt
 
 	rows = frappe.db.sql(
-		"""SELECT c.name AS conversation, c.title, m.content, m.creation AS last_at
+		"""SELECT c.name AS conversation, c.title, c.origin_page,
+		m.content, m.creation AS last_at
 		FROM `tabJarvis Conversation` c
 		JOIN (SELECT mm.conversation, MAX(mm.seq) mseq
 		      FROM `tabJarvis Chat Message` mm
@@ -348,6 +364,7 @@ def _awaiting_reply(me: str) -> list[dict]:
 		{
 			"conversation": r.conversation,
 			"title": r.title or "",
+			"origin_page": r.origin_page or "",
 			"question_excerpt": question_excerpt(r.content),
 			"last_at": str(r.last_at or ""),
 		}
@@ -379,6 +396,11 @@ def get_approval(name: str) -> dict:
 		"source": doc.get("source") or "File Box",
 		"document_type": doc.document_type or "",
 		"conversation": doc.conversation,
+		"origin_page": (
+			frappe.db.get_value("Jarvis Conversation", doc.conversation, "origin_page") or ""
+			if doc.conversation
+			else ""
+		),
 		"question": doc.question,
 		"context_md": doc.context_md or "",
 		"options": _parse_options(doc.options),

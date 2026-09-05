@@ -286,10 +286,8 @@ test("frappe timestamps compare exactly, microseconds and all", () => {
 const SAME = { conv: "C", chatConv: "C", canvasMsg: "M1", unsavedCanvas: false, editing: false };
 
 test("re-opening the builder's OWN thread never confirms", () => {
-	// The feature's primary path: the user built here, went to main chat, and
-	// clicked the way back. Both messages live in one transcript, so repointing
-	// the canvas loses nothing — and a confirm here is worse than noise, since
-	// its "Open its chat" action lands back in the chat they clicked from.
+	// Both messages live in one transcript, so repointing the canvas loses
+	// nothing and a confirm here would be noise.
 	assert.equal(wouldDiscardOnPromotion(SAME), false);
 	// the restored canvas of that same thread reads as "unsaved" on a fresh
 	// mount (editingDetail is null) — still nothing to lose
@@ -1286,31 +1284,25 @@ test("a promotion that would cost the user something confirms first", () => {
 		promote,
 		/if \(!promotionWouldDiscard\(conversation, dash\)\) \{\n\t\tawait accept\(\);/
 	);
-	// the dialog's copy is per-call now, and the promotion's says the chat lives on
+	// the dialog's copy is per-call now, and the promotion says the builder keeps
+	// the dashboard thread available
 	assert.match(pageSrc, /const discardCopy = ref\(DISCARD_COPY\);/);
 	assert.match(pageSrc, /title: discardCopy\.title,/);
 	assert.match(pageSrc, /message: discardCopy\.message,/);
-	assert.match(pageSrc, /Its chat stays in your conversations\./);
+	assert.match(pageSrc, /Its dashboard chat stays available/);
 	// and the default is restored when the dialog settles, or the next plain
 	// discard inherits the promotion's wording
 	assert.match(fnBody(pageSrc, "function settleDiscard("), /discardCopy\.value = DISCARD_COPY;/);
 });
 
-test("that confirm never offers to open the chat it was clicked from", () => {
-	// "Open its chat" is the escape hatch to the thread the builder is holding —
-	// an escape only while that is somewhere else. In the case these rules
-	// deliberately still confirm (the builder's OWN thread, with an editing
-	// identity at stake), it is the conversation the user clicked "Open in
-	// Dashboards" in, so the action lands them straight back there.
+test("that confirm never offers an escape into general chat", () => {
 	const promote = fnBody(pageSrc, "async function promoteFromChat(");
-	assert.match(promote, /offerChat: chatConv\.value !== conversation,/);
-	assert.match(pageSrc, /const discardOfferChat = ref\(true\);/);
-	assert.match(pageSrc, /if \(chatConv\.value && discardOfferChat\.value\) \{/);
+	assert.doesNotMatch(promote, /offerChat/);
+	assert.doesNotMatch(pageSrc, /const discardOfferChat/);
+	assert.doesNotMatch(pageSrc, /label: "Open its chat"/);
+	assert.doesNotMatch(pageSrc, /router\.push\("\/c\//);
 	const confirm = fnBody(pageSrc, "function confirmDiscard(");
-	assert.match(confirm, /offerChat = true/);
-	assert.match(confirm, /discardOfferChat\.value = offerChat;/);
-	// per-call, exactly like the copy: the next plain discard gets it back
-	assert.match(fnBody(pageSrc, "function settleDiscard("), /discardOfferChat\.value = true;/);
+	assert.doesNotMatch(confirm, /offerChat/);
 });
 
 test("the query is stripped once the promotion settles, both ways", () => {

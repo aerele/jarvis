@@ -178,6 +178,73 @@ export function phaseTickIndex(phase, phases = DASHBOARD_BUILD_PHASES) {
 	return phases.findIndex((p) => p.key === phase);
 }
 
+const STREAMING_FRESHNESS_MS = 5 * 60 * 1000;
+
+function enabledFlag(value) {
+	return value === true || Number(value) === 1;
+}
+
+/**
+ * Rebuild the dashboard pane's in-flight state from the durable transcript.
+ *
+ * Realtime frames are deliberately ephemeral: refreshing the page midway
+ * through a build loses run:start and every tool:start already observed by
+ * that tab. The assistant placeholder and tool receipt rows are the durable
+ * equivalent, so a newly mounted pane can recover the same progress state
+ * until run:end arrives.
+ *
+ * Only the newest assistant turn may resume, and it must still be fresh. This
+ * mirrors ChatView's stale-stream guard so a crashed worker cannot leave the
+ * builder composer locked forever. Recovering, stopped and failed replies are
+ * explicitly non-blocking even if an old row still carries streaming=1.
+ *
+ * @param {Array<object>} messages ordered by ascending sequence
+ * @param {{now?: number, maxAgeMs?: number}} [options]
+ * @returns {{active: boolean, tools: Array<{id: string, name: string, status: string}>, waiting: boolean}}
+ */
+export function restoreDashboardRunState(
+	messages,
+	{ now = Date.now(), maxAgeMs = STREAMING_FRESHNESS_MS } = {}
+) {
+	const rows = Array.isArray(messages) ? messages : [];
+	let assistantIndex = -1;
+	for (let i = rows.length - 1; i >= 0; i--) {
+		if (rows[i] && rows[i].role === "assistant") {
+			assistantIndex = i;
+			break;
+		}
+	}
+	if (assistantIndex < 0) return { active: false, tools: [], waiting: false };
+
+	const assistant = rows[assistantIndex];
+	// Tool-heavy turns may leave the assistant placeholder's `modified` stamp at
+	// dispatch time while newer durable tool receipts prove the run is alive. Use
+	// the newest stamp in this turn, matching the backend's in-flight freshness
+	// check instead of dropping progress during a legitimately long build.
+	const newestStamp = rows.slice(assistantIndex).reduce((latest, row) => {
+		const stamp = Date.parse(String(row?.modified || row?.creation || "").replace(" ", "T"));
+		return Number.isFinite(stamp) ? Math.max(latest, stamp) : latest;
+	}, Number.NEGATIVE_INFINITY);
+	const fresh = Number.isFinite(newestStamp) && Number(now) - newestStamp < Number(maxAgeMs);
+	const active =
+		enabledFlag(assistant.streaming) &&
+		!enabledFlag(assistant.recovering) &&
+		!enabledFlag(assistant.stopped) &&
+		!enabledFlag(assistant.error) &&
+		fresh;
+	if (!active) return { active: false, tools: [], waiting: false };
+
+	const tools = rows
+		.slice(assistantIndex + 1)
+		.filter((row) => row && row.role === "tool" && row.tool_name)
+		.map((row, index) => ({
+			id: String(row.tool_call_id || row.name || `restored-tool-${index}`),
+			name: row.tool_name,
+			status: row.tool_status || (enabledFlag(row.streaming) ? "running" : "completed"),
+		}));
+	return { active: true, tools, waiting: tools.length === 0 };
+}
+
 // ── the finished canvas -> a compact clickable thumbnail ────────────────────
 //
 // The builder's own canvas render component (DashboardCanvas.vue) is NOT

@@ -196,6 +196,50 @@ def get_dashboards_caps() -> dict:
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
 @require_jarvis_user
+def list_dashboard_conversations(conversation: str = "") -> dict:
+	"""Non-empty dashboard-builder threads owned by the caller, newest first.
+
+	This is intentionally a separate endpoint from chat.api.list_conversations:
+	the general chat sidebar excludes the dashboard namespace, while this builder
+	shows only its own. The latest owned dashboard and canvas-message references let the
+	SPA restore either a saved document or an unsaved build without trusting a
+	client-supplied cross-conversation identity.
+	"""
+	user = frappe.session.user
+	exact = str(conversation or "").strip()
+	rows = frappe.db.sql(
+		"""
+		SELECT c.name, c.title, c.last_active_at,
+		       (SELECT d.name FROM `tabJarvis Dashboard` d
+		        WHERE d.source_conversation = c.name AND d.owner = %(user)s
+		        ORDER BY d.modified DESC, d.name DESC LIMIT 1) AS dashboard_name,
+		       (SELECT d.dashboard_title FROM `tabJarvis Dashboard` d
+		        WHERE d.source_conversation = c.name AND d.owner = %(user)s
+		        ORDER BY d.modified DESC, d.name DESC LIMIT 1) AS dashboard_title,
+		       (SELECT m.name FROM `tabJarvis Chat Message` m
+		        WHERE m.conversation = c.name
+		          AND m.role = 'assistant'
+		          AND m.canvas IS NOT NULL AND m.canvas NOT IN ('', '[]')
+		        ORDER BY m.seq DESC LIMIT 1) AS last_canvas_message
+		FROM `tabJarvis Conversation` c
+		WHERE c.owner = %(user)s AND c.status = 'Active'
+		  AND c.origin_page = 'dashboards'
+		  AND (%(conversation)s = '' OR c.name = %(conversation)s)
+		  AND EXISTS (
+		    SELECT 1 FROM `tabJarvis Chat Message` present
+		    WHERE present.conversation = c.name
+		  )
+		ORDER BY c.last_active_at DESC, c.name DESC
+		LIMIT 100
+		""",
+		{"user": user, "conversation": exact},
+		as_dict=True,
+	)
+	return {"ok": True, "data": {"rows": rows}}
+
+
+@frappe.whitelist()
+@require_jarvis_user
 @list_filters.filter_errors_to_envelope
 def list_dashboards_page(
 	search: str = "",
