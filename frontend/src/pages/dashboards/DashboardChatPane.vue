@@ -117,8 +117,8 @@
 								i < buildTickIndex
 									? 'text-ink-green-3'
 									: i === buildTickIndex
-										? 'font-medium text-ink-blue-3'
-										: 'text-ink-gray-4'
+									? 'font-medium text-ink-blue-3'
+									: 'text-ink-gray-4'
 							"
 						>
 							<span
@@ -127,8 +127,8 @@
 									i < buildTickIndex
 										? 'bg-surface-green-2'
 										: i === buildTickIndex
-											? 'bg-surface-blue-2 motion-safe:animate-pulse'
-											: 'bg-surface-gray-3'
+										? 'bg-surface-blue-2 motion-safe:animate-pulse'
+										: 'bg-surface-gray-3'
 								"
 							/>
 							{{ ph.label }}
@@ -247,7 +247,7 @@
 						aria-label="Voice input is not set up on this workspace"
 						@click="
 							toast.info(
-								`Voice input isn't set up on this workspace yet. Ask your administrator.`,
+								`Voice input isn't set up on this workspace yet. Ask your administrator.`
 							)
 						"
 					>
@@ -605,8 +605,8 @@ const bubbles = computed(() =>
 	messages.value.filter(
 		(m) =>
 			(m.role === "user" || m.role === "assistant") &&
-			(String(m.content || "").trim() || (m.role === "assistant" && m.error)),
-	),
+			(String(m.content || "").trim() || (m.role === "assistant" && m.error))
+	)
 );
 function errorNote(m) {
 	const reason = typeof m.error === "string" ? m.error.trim() : "";
@@ -644,7 +644,7 @@ const lastAssistant = computed(() => {
 	return null;
 });
 const activeAsk = computed(() =>
-	lastAssistant.value ? parseAsk(lastAssistant.value.content) : null,
+	lastAssistant.value ? parseAsk(lastAssistant.value.content) : null
 );
 const askFor = computed(() => (activeAsk.value ? lastAssistant.value.name : null));
 
@@ -814,7 +814,7 @@ async function approve(pa) {
 			toast.error(
 				keepCard
 					? r.error.message
-					: "Couldn't confirm. It may have expired. Ask again in the chat.",
+					: "Couldn't confirm. It may have expired. Ask again in the chat."
 			);
 		}
 	} catch (e) {
@@ -869,7 +869,7 @@ const buildPhaseKey = computed(() =>
 		activeTools: activeTools.value,
 		statusPhase: null,
 		waiting: waitingFirstTool.value,
-	}),
+	})
 );
 const buildTickIndex = computed(() => phaseTickIndex(buildPhaseKey.value));
 
@@ -964,7 +964,7 @@ async function send(gotoMessageId = "") {
 				props.editingName,
 				props.theme,
 				modelOverride.value,
-				thinkingOverride.value,
+				thinkingOverride.value
 			)) || {};
 		if (r.ok === false) {
 			// rejected (single-flight guard / usage cap) - nothing persisted
@@ -1161,7 +1161,7 @@ function startNoSocketLadder() {
 				runActive.value = false;
 				emit("activity");
 			}
-		}, ms),
+		}, ms)
 	);
 }
 

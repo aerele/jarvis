@@ -284,7 +284,7 @@
 									:to="
 										conversationRoute(
 											selected.conversation,
-											selected.origin_page,
+											selected.origin_page
 										)
 									"
 									class="inline-flex h-6 min-w-0 items-center gap-1.5 rounded bg-surface-gray-2 px-2 text-sm text-ink-gray-8 hover:bg-surface-gray-3"
@@ -415,7 +415,7 @@
 																@click="
 																	docmeta.toggleShare(
 																		s.user,
-																		'remove',
+																		'remove'
 																	)
 																"
 															/>
@@ -753,7 +753,7 @@ const refUrl = computed(() => {
 	return `/app/${dt}/${encodeURIComponent(selected.value.ref_name)}`;
 });
 const contextHtml = computed(() =>
-	selected.value && selected.value.context_md ? renderMarkdown(selected.value.context_md) : "",
+	selected.value && selected.value.context_md ? renderMarkdown(selected.value.context_md) : ""
 );
 // options may arrive parsed (list) or as the raw JSON string - be defensive
 const options = computed(() => {
@@ -791,7 +791,7 @@ const showOptionChips = computed(() => {
 // options merely restate Approve/Reject keeps the plain Approve/Reject
 // buttons (decide() already resumes the conversation with the decision).
 const chatAnswerOnly = computed(
-	() => !!selected.value && sourceOf(selected.value) === "Chat" && !options.value.length,
+	() => !!selected.value && sourceOf(selected.value) === "Chat" && !options.value.length
 );
 const decidedLine = computed(() => {
 	const s = selected.value;
@@ -877,7 +877,7 @@ async function submitDecide(approve) {
 		selectedOption.value = "";
 		note.value = "";
 		toast.success(
-			(approve ? "Approved" : "Rejected") + (res.resumed ? " - conversation resumed" : ""),
+			(approve ? "Approved" : "Rejected") + (res.resumed ? " - conversation resumed" : "")
 		);
 		store.refreshApprovalsCount();
 		if ((filters.status || "Pending") === "Pending") {
@@ -988,7 +988,7 @@ watch(
 	(id) => {
 		if (typeof id === "string" && id) select(id);
 	},
-	{ immediate: true },
+	{ immediate: true }
 );
 // auto-select the first row only when the route carries no :id
 watch(rows, (r) => {

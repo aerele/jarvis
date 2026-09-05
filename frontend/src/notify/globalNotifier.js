@@ -48,7 +48,7 @@ export function pushToast({ title, body, onClick }) {
 	toasts.value = next;
 	_timers.set(
 		id,
-		setTimeout(() => dismissToast(id), TOAST_MS),
+		setTimeout(() => dismissToast(id), TOAST_MS)
 	);
 	return id;
 }
@@ -122,8 +122,8 @@ export function attachGlobalNotifier({ socket, router }) {
 		originPage === "dashboards" || (conv && conv === dashboardStoredConv())
 			? { name: "DashboardsPage", query: { conversation: conv } }
 			: conv
-				? "/c/" + conv
-				: "/";
+			? "/c/" + conv
+			: "/";
 	const convTitle = (id) => (id && store.conversations.find((c) => c.name === id)?.title) || "";
 	const go = (path) => {
 		try {
@@ -257,13 +257,11 @@ export function attachGlobalNotifier({ socket, router }) {
 					body: dashboardApproval
 						? _excerpt(p.question) || "A dashboard question needs your answer."
 						: _excerpt(p.question) ||
-							"A question needs your answer on the Approval Board.",
+						  "A question needs your answer on the Approval Board.",
 					tag: "jarvis-" + (conv || "approvals"),
 					open: () =>
 						go(
-							dashboardApproval
-								? conversationPath(conv, "dashboards")
-								: "/approvals",
+							dashboardApproval ? conversationPath(conv, "dashboards") : "/approvals"
 						),
 				});
 				return;
@@ -290,14 +288,14 @@ export function attachGlobalNotifier({ socket, router }) {
 					status === "Failed"
 						? "Trigger failed"
 						: status === "Blocked"
-							? "Trigger blocked a save"
-							: "Trigger fired";
+						? "Trigger blocked a save"
+						: "Trigger fired";
 				const body =
 					status === "Failed"
 						? `${what} hit an error. Open the activity log for details.`
 						: status === "Blocked"
-							? `${what} blocked a document from saving.`
-							: `${what} ran. See the activity log for what it found.`;
+						? `${what} blocked a document from saving.`
+						: `${what} ran. See the activity log for what it found.`;
 				const open = () => go("/triggers#activity");
 				// like conversation:new, hand-rolled: signal() would swallow a
 				// conv-less toast on non-chat routes (null === onScreenConv()).

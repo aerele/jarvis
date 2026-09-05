@@ -107,7 +107,7 @@ function setActivityDetail(v, { persist = true } = {}) {
 		// toast (same as renameConversation/toggleStar below) but the local
 		// (localStorage-cached) value already stuck, so the UI stays correct.
 		api.updateMySettings({ activity_detail: activityDetail.value ? 1 : 0 }).catch((e) =>
-			toast.error(errHtml(e)),
+			toast.error(errHtml(e))
 		);
 	}
 }
@@ -199,7 +199,7 @@ function setPreferredPersona(v, { persist = true } = {}) {
 				// see above: localStorage write failures are non-fatal
 			}
 			toast.error(
-				"Couldn't switch to " + persona + " - still using " + _personaConfirmed + ".",
+				"Couldn't switch to " + persona + " - still using " + _personaConfirmed + "."
 			);
 		})
 		.finally(release);
@@ -210,7 +210,7 @@ function setPreferredPersona(v, { persist = true } = {}) {
 const notifyEnabled = ref(
 	typeof Notification !== "undefined" &&
 		_lsGet("jarvis-notify") === "1" &&
-		Notification.permission === "granted",
+		Notification.permission === "granted"
 );
 async function toggleNotify() {
 	if (typeof Notification === "undefined") return;

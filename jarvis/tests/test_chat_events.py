@@ -114,9 +114,7 @@ class TestPublishToUser(FrappeTestCase):
 		):
 			publish_to_user("alice@example.com", payload)
 
-		get_origin.assert_called_once_with(
-			"Jarvis Conversation", "conv-dashboard", "origin_page"
-		)
+		get_origin.assert_called_once_with("Jarvis Conversation", "conv-dashboard", "origin_page")
 		mock_pub.assert_called_once_with(
 			"jarvis:event",
 			{

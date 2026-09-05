@@ -130,9 +130,7 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	# flips the old row the moment the user replies.
 	if frappe.db.exists(APPROVAL, {"conversation": conversation, "status": "Pending", "source": "Chat"}):
 		return None
-	conversation_meta = frappe.db.get_value(
-		CONV, conversation, ["owner", "origin_page"], as_dict=True
-	)
+	conversation_meta = frappe.db.get_value(CONV, conversation, ["owner", "origin_page"], as_dict=True)
 	if not conversation_meta:
 		return None
 	owner = conversation_meta.owner

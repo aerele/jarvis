@@ -598,9 +598,7 @@ class TestAwaitingReply(unittest.TestCase):
 		_add_msg(self.conv_q, 3, "assistant", "I drafted it. Should I submit the invoice now?")
 		# included: jarvis-ask fence always qualifies (no depth needed), even
 		# with NO Pending chat row (e.g. a malformed/recovery-finalized fence)
-		self.conv_fence = _mk_conv(
-			USER_A, "ca-conv-await-fence", origin_page="dashboards"
-		)
+		self.conv_fence = _mk_conv(USER_A, "ca-conv-await-fence", origin_page="dashboards")
 		_add_msg(self.conv_fence, 1, "user", "hi")
 		_add_msg(self.conv_fence, 2, "assistant", "Pick one.\n" + _fence("{broken json"))
 		# excluded: a shallow prose "?" with one user turn and no tools is an

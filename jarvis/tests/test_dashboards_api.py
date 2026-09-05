@@ -1069,9 +1069,7 @@ class TestDashboardConversationList(_DashboardsApiTestCase):
 					"role": "assistant",
 					"content": "built",
 					"canvas": (
-						frappe.as_json(
-							[{"type": "html", "name": "documents/history/index.html"}]
-						)
+						frappe.as_json([{"type": "html", "name": "documents/history/index.html"}])
 						if canvas
 						else None
 					),
@@ -1102,9 +1100,7 @@ class TestDashboardConversationList(_DashboardsApiTestCase):
 
 		# Exact lookup is what notification/Approval Board deep-links use. It is
 		# still namespace- and owner-scoped, independent of the bounded menu page.
-		self.assertEqual(
-			list_dashboard_conversations(wanted)["data"]["rows"][0]["name"], wanted
-		)
+		self.assertEqual(list_dashboard_conversations(wanted)["data"]["rows"][0]["name"], wanted)
 		self.assertEqual(list_dashboard_conversations(ordinary)["data"]["rows"], [])
 		self.assertEqual(list_dashboard_conversations(foreign)["data"]["rows"], [])
 
