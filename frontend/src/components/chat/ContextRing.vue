@@ -26,7 +26,8 @@
 						cy="10"
 						r="7.5"
 						fill="none"
-						stroke="var(--surface-3)"
+						stroke="var(--text-3)"
+						stroke-opacity="0.45"
 						stroke-width="2.6"
 					/>
 					<circle
