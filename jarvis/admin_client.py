@@ -573,6 +573,27 @@ def get_billing_payment_state() -> dict:
 	return _post(path=_m("api.account.get_billing_payment_state"), body={})
 
 
+def get_invoices() -> list:
+	"""The customer's own submitted GST invoices for the billing page (Phase 3b)."""
+	return _post(path=_m("api.invoices.get_invoices"), body={})
+
+
+def download_invoice(erp_name: str) -> dict:
+	"""Base64 PDF of one of the customer's invoices; admin re-verifies ownership."""
+	return _post(path=_m("api.invoices.get_invoice_pdf"), body={"erp_name": erp_name})
+
+
+def get_billing_profile() -> dict:
+	"""The billing-details card: an editable party for a direct customer, or a
+	read-only 'billed through <partner>' notice for a reseller-billed customer."""
+	return _post(path=_m("api.invoices.get_billing_profile"), body={})
+
+
+def update_billing_details(billing) -> dict:
+	"""Save a direct customer's billing party (validated admin-side)."""
+	return _post(path=_m("api.invoices.update_billing_details"), body={"billing": billing})
+
+
 def check_billing_payment_status() -> dict:
 	"""Provider-truth check on the current BILLING checkout, converged through the
 	same apply seam as the browser confirm and the webhook. Never creates or
@@ -919,6 +940,24 @@ def get_role_profile_config(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	return _post(
 		path=_m("api.tenant.get_role_profile_config"),
 		body={},
+		timeout_s=timeout_s,
+	)
+
+
+def get_release_notes(track: str, since_version: str, *, timeout_s: int = 8) -> dict:
+	"""Fetch the cumulative changelog notes newer than ``since_version`` for a
+	release ``track`` (the tenant's major line, e.g. "16").
+
+	Fetched on demand when the customer opens the What's-new panel, so it carries a
+	short 8s budget by default - a slow control plane must not stall the click.
+	``_post`` (via ``_do_post``) unwraps the ``{"ok", "data"}`` envelope, so this
+	returns the bare ``{"notes": [...]}`` payload. Raises the usual
+	``AdminAuthError`` / ``AdminUnreachableError`` family, which the caller
+	(``jarvis.release_notice.notes``) degrades to an empty list.
+	"""
+	return _post(
+		path=_m("api.tenant.get_release_notes"),
+		body={"track": track, "since_version": since_version},
 		timeout_s=timeout_s,
 	)
 

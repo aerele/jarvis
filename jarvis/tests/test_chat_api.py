@@ -160,6 +160,17 @@ class TestListConversations(_ChatTestCase):
 		self.assertEqual(result[a]["message_count"], 1)
 		self.assertNotIn(b, result)
 
+	def test_excludes_dashboard_namespace_from_general_chat(self):
+		ordinary = create_conversation()
+		dashboard = create_conversation(origin_page="dashboards")
+		trigger = create_conversation(origin_page="triggers")
+		for name in (ordinary, dashboard, trigger):
+			self._add_message(name)
+		names = {c["name"] for c in list_conversations()}
+		self.assertIn(ordinary, names)
+		self.assertNotIn(dashboard, names)
+		self.assertIn(trigger, names)
+
 
 class TestCreateOrFocusEmpty(_ChatTestCase):
 	def test_creates_when_no_conversations_exist(self):
@@ -205,6 +216,21 @@ class TestCreateOrFocusEmpty(_ChatTestCase):
 		newer = create_conversation()
 		returned = create_or_focus_empty()
 		self.assertEqual(returned, newer)
+
+	def test_empty_reuse_is_isolated_by_builder_namespace(self):
+		ordinary = create_conversation()
+		dashboard = create_conversation(origin_page="dashboards")
+		self.assertEqual(create_or_focus_empty(), ordinary)
+		self.assertEqual(create_or_focus_empty(origin_page="dashboards"), dashboard)
+		trigger = create_or_focus_empty(origin_page="triggers")
+		self.assertNotIn(trigger, (ordinary, dashboard))
+		self.assertEqual(frappe.db.get_value(CONV, trigger, "origin_page"), "triggers")
+
+	def test_new_dashboard_chat_does_not_advance_main_chat_greeting(self):
+		with patch("jarvis.chat.greeting.increment_new_chat_count") as increment:
+			name = create_or_focus_empty(origin_page="dashboards")
+		self.assertEqual(frappe.db.get_value(CONV, name, "origin_page"), "dashboards")
+		increment.assert_not_called()
 
 	def test_reuse_bumps_last_active_at(self):
 		# Focusing an old empty resets its idle clock so the empty-reaper

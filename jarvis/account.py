@@ -768,28 +768,22 @@ def is_ready_for_chat() -> dict:
 	  reassurance (see ``_admin_chat_gate``, review plan 04 P0-6).
 	- ``None`` when ``ready`` is True.
 
-	Also carries two non-blocking worker-health fields, merged in AFTER the
+	Also carries one non-blocking worker-health field, merged in AFTER the
 	verdict above and never able to change ``ready``/``reason``:
 
 	- ``worker_warning`` (bool) - the background worker lane looks degraded
 	  (``jarvis.chat.pump.chat_worker_status()['degraded']``). Soft: banner only.
-	- ``worker_blocked`` (bool) - workers confidently read as zero
-	  (``...['blocked']``). Still non-blocking here - the hard block on actually
-	  SENDING a chat message lives in chat/policy.py, not in this readiness read.
 
-	Fails safe: any exception probing worker health leaves both fields False
+	Fails safe: any exception probing worker health leaves the field False
 	rather than raising or affecting the verdict above.
 	"""
 	verdict = _ready_verdict()
 	try:
 		from jarvis.chat.pump import chat_worker_status
 
-		w = chat_worker_status()
-		verdict["worker_warning"] = bool(w.get("degraded"))
-		verdict["worker_blocked"] = bool(w.get("blocked"))
+		verdict["worker_warning"] = bool(chat_worker_status().get("degraded"))
 	except Exception:
 		verdict.setdefault("worker_warning", False)
-		verdict.setdefault("worker_blocked", False)
 	return verdict
 
 
@@ -1889,6 +1883,36 @@ def get_billing_payment_state() -> dict:
 	"""
 	require_jarvis_admin()
 	return onboarding_contract.augment_pay_page(_surface(admin_client.get_billing_payment_state))
+
+
+@frappe.whitelist()
+def get_invoices() -> list:
+	"""The customer's own GST invoices for the billing page. SM/Jarvis-Admin only, like its
+	billing siblings (the SPA route adds no client guard and leans on this one)."""
+	require_jarvis_admin()
+	return _surface(admin_client.get_invoices)
+
+
+@frappe.whitelist()
+def download_invoice(erp_name: str) -> dict:
+	"""Base64 PDF of ONE of the customer's invoices; admin re-verifies ownership."""
+	require_jarvis_admin()
+	return _surface(admin_client.download_invoice, erp_name)
+
+
+@frappe.whitelist()
+def get_billing_profile() -> dict:
+	"""The billing-details card: editable party (direct) or a 'billed through <partner>' notice."""
+	require_jarvis_admin()
+	return _surface(admin_client.get_billing_profile)
+
+
+@frappe.whitelist()
+def update_billing_details(billing: dict | None = None) -> dict:
+	"""Save the customer's own billing party (validated admin-side; a partner-billed customer is
+	refused there)."""
+	require_jarvis_admin()
+	return _surface(admin_client.update_billing_details, billing)
 
 
 @frappe.whitelist()

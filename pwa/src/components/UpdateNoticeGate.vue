@@ -2,7 +2,7 @@
 import { onMounted, onBeforeUnmount } from "vue";
 import BrandMark from "./BrandMark.vue";
 import { agentName } from "@/branding";
-import { checking, notice, recheck } from "../noticeGate";
+import { checking, notice, openWhatsNew, recheck } from "../noticeGate";
 
 // The PWA never calls the chat-readiness gate, so this is its only way to learn
 // the notice was lifted short of the daily sync.
@@ -34,6 +34,8 @@ onBeforeUnmount(() => clearInterval(timer));
 			<button class="jv-nu-btn" :disabled="checking" @click="recheck">
 				{{ checking ? "Checking…" : "I've updated, check again" }}
 			</button>
+
+			<button type="button" class="jv-nu-link" @click="openWhatsNew">See what's new</button>
 		</div>
 	</div>
 </template>
@@ -106,5 +108,21 @@ onBeforeUnmount(() => clearInterval(timer));
 .jv-nu-btn:disabled {
 	opacity: 0.6;
 	cursor: default;
+}
+.jv-nu-link {
+	margin-top: 2px;
+	border: none;
+	background: transparent;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--accent, #6e5cf6);
+	cursor: pointer;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+.jv-nu-link:focus-visible {
+	outline: 2px solid var(--accent, #6e5cf6);
+	outline-offset: 2px;
+	border-radius: 4px;
 }
 </style>

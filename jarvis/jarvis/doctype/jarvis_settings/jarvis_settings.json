@@ -134,6 +134,9 @@
   "release_notice_active",
   "latest_jarvis_version",
   "release_notice_message",
+  "release_notice_tier",
+  "release_notice_behind",
+  "release_banner_interval_days",
   "system_tab",
   "deployment_section",
   "deployment_mode",
@@ -972,6 +975,24 @@
    "fieldname": "release_notice_message",
    "fieldtype": "Small Text",
    "label": "Release Notice Message",
+   "read_only": 1
+  },
+  {
+   "fieldname": "release_notice_tier",
+   "fieldtype": "Data",
+   "label": "Release Notice Tier",
+   "read_only": 1
+  },
+  {
+   "fieldname": "release_notice_behind",
+   "fieldtype": "Int",
+   "label": "Release Notice Behind",
+   "read_only": 1
+  },
+  {
+   "fieldname": "release_banner_interval_days",
+   "fieldtype": "Int",
+   "label": "Release Banner Interval Days",
    "read_only": 1
   },
   {

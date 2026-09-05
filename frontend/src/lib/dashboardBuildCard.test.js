@@ -17,6 +17,7 @@ import {
 	isDashboardBuildTurn,
 	isDashboardCanvas,
 	phaseTickIndex,
+	restoreDashboardRunState,
 } from "./dashboardBuildCard.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -217,6 +218,128 @@ test("phaseTickIndex orders the four phases and reports -1 for indeterminate", (
 	assert.equal(phaseTickIndex("publishing"), 3);
 	assert.equal(phaseTickIndex(null), -1);
 	assert.equal(DASHBOARD_BUILD_PHASES.length, 4);
+});
+
+// ---- reload recovery: durable transcript reconstructs ephemeral run frames ----
+
+const NOW = Date.parse("2026-09-04T12:00:00");
+const freshAssistant = (extra = {}) => ({
+	name: "assistant-2",
+	role: "assistant",
+	streaming: 1,
+	modified: "2026-09-04 11:59:00",
+	...extra,
+});
+
+test("a fresh streaming assistant restores Understanding after a refresh", () => {
+	assert.deepEqual(restoreDashboardRunState([freshAssistant()], { now: NOW }), {
+		active: true,
+		tools: [],
+		waiting: true,
+	});
+});
+
+test("a fresh tool receipt keeps a long-running build restorable", () => {
+	const state = restoreDashboardRunState(
+		[
+			freshAssistant({ modified: "2026-09-04 11:50:00" }),
+			{
+				name: "tool-fresh",
+				role: "tool",
+				tool_name: "query",
+				tool_status: "running",
+				modified: "2026-09-04 11:59:30",
+			},
+		],
+		{ now: NOW }
+	);
+	assert.equal(state.active, true);
+	assert.equal(state.tools[0].status, "running");
+});
+
+test("durable tool receipts restore the current dashboard build phase", () => {
+	const querying = restoreDashboardRunState(
+		[
+			freshAssistant(),
+			{
+				name: "tool-1",
+				role: "tool",
+				tool_name: "jarvis__query",
+				tool_status: "running",
+				streaming: 1,
+			},
+		],
+		{ now: NOW }
+	);
+	assert.equal(querying.active, true);
+	assert.equal(querying.waiting, false);
+	assert.deepEqual(querying.tools, [{ id: "tool-1", name: "jarvis__query", status: "running" }]);
+	assert.equal(
+		dashboardBuildPhase({ activeTools: querying.tools, statusPhase: null, waiting: false }),
+		"querying"
+	);
+
+	const publishing = restoreDashboardRunState(
+		[
+			freshAssistant(),
+			{
+				name: "tool-2",
+				role: "tool",
+				tool_name: "save_dashboard",
+				tool_status: "completed",
+			},
+		],
+		{ now: NOW }
+	);
+	assert.equal(
+		dashboardBuildPhase({
+			activeTools: publishing.tools,
+			statusPhase: null,
+			waiting: publishing.waiting,
+		}),
+		"publishing"
+	);
+});
+
+test("only tool receipts belonging to the newest assistant turn are restored", () => {
+	const restored = restoreDashboardRunState(
+		[
+			{ role: "assistant", streaming: 0, modified: "2026-09-04 11:55:00" },
+			{ name: "old-tool", role: "tool", tool_name: "query", tool_status: "completed" },
+			freshAssistant(),
+		],
+		{ now: NOW }
+	);
+	assert.deepEqual(restored.tools, []);
+	assert.equal(restored.waiting, true);
+});
+
+test("settled, stale, recovering, stopped and errored replies never lock the builder", () => {
+	const inactive = [
+		freshAssistant({ streaming: 0 }),
+		freshAssistant({ modified: "2026-09-04 11:40:00" }),
+		freshAssistant({ recovering: 1 }),
+		freshAssistant({ stopped: 1 }),
+		freshAssistant({ error: 1 }),
+	];
+	for (const row of inactive) {
+		assert.deepEqual(restoreDashboardRunState([row], { now: NOW }), {
+			active: false,
+			tools: [],
+			waiting: false,
+		});
+	}
+});
+
+test("DashboardChatPane restores run state on transcript load and uses semantic checkpoint colors", () => {
+	const paneSrc = fs.readFileSync(
+		path.join(HERE, "..", "pages", "dashboards", "DashboardChatPane.vue"),
+		"utf8"
+	);
+	assert.match(paneSrc, /const restoredRun = restoreDashboardRunState\(messages\.value\)/);
+	assert.match(paneSrc, /runActive\.value = restoredRun\.active/);
+	assert.match(paneSrc, /text-ink-green-3/);
+	assert.match(paneSrc, /text-ink-blue-3/);
 });
 
 // ---- the finished canvas: dashboard identity by content, not conversation ----

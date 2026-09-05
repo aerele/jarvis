@@ -7,12 +7,12 @@
 // the conversation. So "restore the canvas" is just: pull that message's
 // artifact again. No new server state, no draft row, no extra endpoint.
 //
-// WHICH message, though, is not "the newest html in the conversation": the
-// builder's thread is an ordinary Jarvis Conversation that the user can also
-// open in main chat ("Open in chat"), where an html artifact means something
-// else entirely. Restoring that would put a chat answer on the builder canvas
-// and arm "Save dashboard" over it. So the builder remembers the message id of
-// the canvas IT last rendered (sticky, per user) and restores exactly that one.
+// WHICH message, though, is not "the newest html in the conversation": legacy
+// threads and main-chat promotions can contain more than one html artifact,
+// and only one was actually accepted by the builder. Restoring another would
+// arm "Save dashboard" over the wrong document. So the builder remembers the
+// message id of the canvas IT last rendered (sticky, per user) and restores
+// exactly that one.
 
 /**
  * The canvas frame for a specific message of a transcript, in the shape the

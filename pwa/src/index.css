@@ -36,6 +36,10 @@
 	--amber: #b35309;
 	--amber-bg: #fff7d3;
 	--amber-dot: #db7706;
+	/* Calm "info" tone for the release-nudge soft banner (Slice 3b) - distinct
+	   from the amber/red alert tones above, which read as warnings. */
+	--blue: #1c6dc4;
+	--blue-bg: #e8f2fc;
 	--inv-bg: #171717;
 	--inv-ink: #ffffff;
 	--scrim: rgba(20, 20, 22, 0.34);
@@ -82,6 +86,8 @@
 		--amber: #e8a845;
 		--amber-bg: #3a2c1c;
 		--amber-dot: #e37d00;
+		--blue: #6fb3f5;
+		--blue-bg: #1c2c3d;
 		--inv-bg: #f5f4ee;
 		--inv-ink: #262624;
 		--scrim: rgba(0,0,0,0.6);
@@ -113,6 +119,8 @@
 	--amber: #e8a845;
 	--amber-bg: #3a2c1c;
 	--amber-dot: #e37d00;
+	--blue: #6fb3f5;
+	--blue-bg: #1c2c3d;
 	--inv-bg: #f5f4ee;
 	--inv-ink: #262624;
 	--scrim: rgba(0,0,0,0.6);

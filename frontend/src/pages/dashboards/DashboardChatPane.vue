@@ -1,6 +1,7 @@
 <template>
 	<div class="flex h-full flex-col overflow-hidden bg-surface-white">
-		<!-- header: title + New chat / Open in chat -->
+		<!-- header: this pane stays dashboard-native; it never hands the thread to
+		     the general chat surface. -->
 		<div class="flex min-h-[56px] shrink-0 items-center justify-between gap-2 border-b px-4">
 			<div class="flex min-w-0 flex-col gap-0.5">
 				<span class="text-base font-semibold text-ink-gray-9">Describe a dashboard</span>
@@ -9,14 +10,28 @@
 				>
 			</div>
 			<div class="flex shrink-0 items-center gap-1">
+				<Dropdown :options="historyOptions" placement="left">
+					<Button
+						variant="ghost"
+						label="Dashboard chats"
+						tooltip="Dashboard chats"
+						icon="clock"
+					/>
+				</Dropdown>
 				<Button
-					v-if="conversation"
 					variant="ghost"
-					label="Open in chat"
-					iconLeft="message-circle"
-					@click="router.push('/c/' + conversation)"
+					label="Hide chat"
+					tooltip="Hide chat"
+					icon="x"
+					@click="emit('close')"
 				/>
-				<Button variant="ghost" label="New chat" iconLeft="plus" @click="newChat" />
+				<Button
+					variant="ghost"
+					label="New chat"
+					tooltip="New dashboard chat"
+					icon="plus"
+					@click="newChat"
+				/>
 			</div>
 		</div>
 
@@ -50,10 +65,13 @@
 							{{ m.content }}
 						</div>
 					</div>
-					<!-- assistant error: inline red note (ChatView semantics, compact) -->
+					<!-- assistant error: inline red note (ChatView semantics, compact).
+					     A run that failed before any reply leaves an EMPTY content and
+					     the reason in `error` (a rate limit, a provider outage), which
+					     is what the user needs to read here. -->
 					<div v-else-if="m.error" class="flex">
 						<div class="max-w-[95%] text-sm text-ink-red-4">
-							{{ m.content || "That didn't go through. Try again." }}
+							{{ errorNote(m) }}
 						</div>
 					</div>
 					<!-- assistant: markdown, same renderer + prose classes as the
@@ -95,12 +113,22 @@
 							v-for="(ph, i) in DASHBOARD_BUILD_PHASES"
 							:key="ph.key"
 							class="flex items-center gap-1.5 text-xs"
-							:class="i <= buildTickIndex ? 'text-ink-gray-7' : 'text-ink-gray-4'"
+							:class="
+								i < buildTickIndex
+									? 'text-ink-green-3'
+									: i === buildTickIndex
+									? 'font-medium text-ink-blue-3'
+									: 'text-ink-gray-4'
+							"
 						>
 							<span
 								class="size-1.5 rounded-full"
 								:class="
-									i <= buildTickIndex ? 'bg-surface-gray-7' : 'bg-surface-gray-3'
+									i < buildTickIndex
+										? 'bg-surface-green-2'
+										: i === buildTickIndex
+										? 'bg-surface-blue-2 motion-safe:animate-pulse'
+										: 'bg-surface-gray-3'
 								"
 							/>
 							{{ ph.label }}
@@ -177,8 +205,35 @@
 				@keydown="onKeydown"
 				@input="autoGrow"
 			/>
-			<div class="mt-2 flex items-center justify-between gap-2">
-				<div class="flex items-center gap-1.5">
+			<!-- Send stays pinned bottom-right; the controls wrap on the left in
+			     this narrow, user-resizable pane. The picker is the shared main-chat
+			     component: align="start" + compact keep its menu and effort flyout
+			     inside the pane's overflow-hidden edge instead of clipping. -->
+			<div class="mt-2 flex items-end justify-between gap-2" :style="paletteVars">
+				<div class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+					<!-- the same context ring main chat wears (ContextRing, #1136),
+					     left of the model pill exactly as there, fed by the same
+					     get_conversation_context payload. -->
+					<ContextRing
+						:context="contextInfo"
+						:compacting="compacting"
+						:compacted="compactedChip"
+						@compact="openCompactDialog()"
+					/>
+					<ModelEffortPicker
+						:model-override="modelOverride"
+						:default-model="chatUi.llm_model || ''"
+						:thinking-override="thinkingOverride"
+						:thinking-levels="thinkingLevels"
+						:models-by-provider="modelsByProvider"
+						:show-providers="showProviders"
+						:can-add-provider="canConnectModel"
+						align="start"
+						compact
+						@select-model="selectModel"
+						@select-thinking="selectThinking"
+						@add-provider="goConnectModel"
+					/>
 					<VoiceRecorder v-if="caps.stt_enabled" compact @transcript="onTranscript" />
 					<!-- Voice not set up is an ACTIONABLE gap, so show it faded and say so
 					     rather than vanishing; deliberately off / a transient error stay
@@ -203,19 +258,23 @@
 					     numbers in (one-time report); Live declares view-time sources.
 					     TabButtons = real radio-group semantics + the raised-chip look,
 					     so the active option isn't a second solid next to Send. -->
-					<span
-						class="ml-1 text-xs text-ink-gray-5"
-						title="How this dashboard gets its data. Auto: I'll ask you before the first build."
-					>
-						Data
+					<!-- one wrap unit, so the label never strands on the row above its chips -->
+					<span class="inline-flex items-center gap-1.5">
+						<span
+							class="ml-1 text-xs text-ink-gray-5"
+							title="How this dashboard gets its data. Auto: I'll ask you before the first build."
+						>
+							Data
+						</span>
+						<TabButtons
+							:buttons="DATA_MODES"
+							:model-value="dataMode"
+							@update:model-value="(v) => (dataMode = v || 'auto')"
+						/>
 					</span>
-					<TabButtons
-						:buttons="DATA_MODES"
-						:model-value="dataMode"
-						@update:model-value="(v) => (dataMode = v || 'auto')"
-					/>
 				</div>
 				<Button
+					class="shrink-0"
 					variant="solid"
 					label="Send"
 					:disabled="!draft.trim() || sending || runActive"
@@ -224,6 +283,13 @@
 				/>
 			</div>
 		</div>
+		<CompactDialog
+			v-model="compactDialogOpen"
+			:busy-reason="compactBusyReason"
+			:submitting="compactSubmitting"
+			:initial-hint="compactHintSeed"
+			@confirm="runCompact"
+		/>
 	</div>
 </template>
 
@@ -253,12 +319,14 @@
 //   no socket        → (?nosocket / headless QA) a bounded refetch ladder after
 //                      each send stands in for the realtime frames.
 import { ref, computed, watch, nextTick, inject, onMounted, onBeforeUnmount } from "vue";
-import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
-import { Button, FeatherIcon, TabButtons, toast } from "frappe-ui";
+import { Button, Dropdown, FeatherIcon, TabButtons, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import VoiceRecorder from "@/components/VoiceRecorder.vue";
 import AskCard from "@/components/chat/AskCard.vue";
+import CompactDialog from "@/components/chat/CompactDialog.vue";
+import ContextRing from "@/components/chat/ContextRing.vue";
+import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import { renderMarkdown } from "@/markdown";
 import { parseAsk } from "@/lib/chatAsk";
 import { builderCanvasFrame } from "@/lib/dashboardRestore";
@@ -267,13 +335,30 @@ import {
 	DASHBOARD_BUILD_PHASES,
 	dashboardBuildPhase,
 	phaseTickIndex,
+	restoreDashboardRunState,
 } from "@/lib/dashboardBuildCard";
 import { useJarvisTheme } from "@/theme";
+import { useShellStore } from "@/stores/shell";
 import { session } from "@/data/session";
-import { sendDashboardChat, getDashboardConversation } from "@/api/dashboards";
-import { listPendingConfirmations, confirmTool, dismissTool } from "@/api";
+import {
+	sendDashboardChat,
+	getDashboardConversation,
+	listDashboardConversations,
+} from "@/api/dashboards";
+import {
+	listPendingConfirmations,
+	confirmTool,
+	dismissTool,
+	getChatUiSettings,
+	setConversationModel,
+	setConversationThinking,
+	getConversationContext,
+	compactConversation,
+} from "@/api";
 import { agentName } from "@/branding";
 import { errHtml } from "@/lib/errors";
+import { compactFailureCopy } from "@/lib/compact";
+import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 
 // get_dashboards_caps payload (creatable_scopes/manageable_roles feed the save
 // dialog; stt_enabled - when the backend sends it - gates the mic)
@@ -292,10 +377,17 @@ const props = defineProps({
 // activity: a run ended (the page may refresh lists); reset: New chat clicked;
 // dashboard: {name} - the agent's save_dashboard tool saved a row this turn
 // (jarvis#884), so the page can load it as the current document.
-const emit = defineEmits(["canvas", "activity", "reset", "dashboard"]);
+const emit = defineEmits([
+	"canvas",
+	"activity",
+	"reset",
+	"dashboard",
+	"close",
+	"select-conversation",
+]);
 
-const router = useRouter();
 const socket = inject("$socket", null);
+const shell = useShellStore();
 // AskCard styles with the jv-* tokens, which this frappe-ui page does not bind.
 const { paletteVars } = useJarvisTheme();
 
@@ -303,9 +395,201 @@ const { paletteVars } = useJarvisTheme();
 const conversation = useStorage(`jarvis-dash-conv-${session.user || "anon"}`, "");
 // The message whose canvas the BUILDER last rendered - the page stamps it, this
 // pane replays exactly that one. Scanning the transcript for "the newest html"
-// instead would hand the builder an artifact main chat produced in the same
-// thread ("Open in chat" shares it) and arm Save over it.
+// could hand the builder an unrelated legacy/promoted artifact and arm Save
+// over it.
 const canvasMsg = useStorage(`jarvis-dash-canvasmsg-${session.user || "anon"}`, "");
+
+// Dashboard conversations are a separate product namespace: they appear only
+// in this menu, never in the general chat sidebar or command palette.
+const dashboardChats = ref([]);
+const historyLoading = ref(false);
+const historyOptions = computed(() => {
+	if (historyLoading.value && !dashboardChats.value.length)
+		return [{ label: "Loading dashboard chats…", disabled: true }];
+	if (!dashboardChats.value.length)
+		return [{ label: "No previous dashboard chats", disabled: true }];
+	return dashboardChats.value.map((row) => ({
+		label: historyLabel(row),
+		icon: row.name === conversation.value ? "check" : "message-square",
+		onClick: () => {
+			if (row.name !== conversation.value) emit("select-conversation", row);
+		},
+	}));
+});
+
+// A thread the agent never got to title still carries the server's "New
+// chat" placeholder, which in a history MENU reads as the action next to it.
+function historyLabel(row) {
+	const title = String(row.title || "").trim();
+	return (
+		row.dashboard_title || (title && title !== "New chat" ? title : "Untitled dashboard chat")
+	);
+}
+
+async function loadDashboardChats() {
+	historyLoading.value = true;
+	try {
+		const data = (await listDashboardConversations()) || {};
+		dashboardChats.value = Array.isArray(data.rows) ? data.rows : [];
+	} catch {
+		// History is a convenience; transcript/send remain available on a blip.
+	} finally {
+		historyLoading.value = false;
+	}
+}
+
+// Same model catalogue and per-conversation overrides as main chat. Keeping
+// the picker component shared makes its interaction/design identical; the
+// builder owns only the compact catalogue projection and persistence calls.
+const chatUi = ref({});
+const modelOverride = ref("");
+const thinkingOverride = ref("");
+// Context meter + compaction: the same state machine main chat runs for its
+// ContextRing (ChatView loadContext / runCompact), scoped to this pane's
+// conversation. Dashboard threads are ordinary sessions to
+// get_conversation_context / compact_conversation, so nothing is dashboard-only.
+const contextInfo = ref(null); // get_conversation_context payload for the open thread
+const compacting = ref(false); // a compaction we started (or one the runtime is doing mid-turn)
+const compactedChip = ref(false); // ring "done" state until the next run:end
+const compactDialogOpen = ref(false);
+const compactSubmitting = ref(false);
+const compactHintSeed = ref("");
+const compactBusyReason = computed(() => {
+	if (compacting.value) return "Already compacting this chat";
+	if (sending.value || runActive.value) return "A reply is in progress, try again in a moment";
+	return "";
+});
+
+// Best-effort meter refresh. A not-yet-measured payload (fresh:false, e.g.
+// right after context:compacted) must not blank the last fresh snapshot, and a
+// slow response for a thread the user has since left must not stamp its state
+// onto the one now on screen. `applyCompacting` is the authoritative
+// conversation-open read that may CLEAR the lock; elsewhere a fetch may only
+// turn it on (run:end / run:error / context:* are the other clearers).
+async function loadContext({ applyCompacting = false } = {}) {
+	const id = conversation.value;
+	if (!id) {
+		contextInfo.value = null;
+		return;
+	}
+	try {
+		const c = await getConversationContext(id);
+		if (conversation.value !== id) return;
+		if (c && c.fresh) contextInfo.value = c;
+		if (applyCompacting) compacting.value = !!(c && c.compacting);
+		else if (c && c.compacting) compacting.value = true;
+	} catch {
+		/* meter is best-effort */
+	}
+}
+
+function openCompactDialog(seed = "") {
+	compactHintSeed.value = seed;
+	compactDialogOpen.value = true;
+}
+
+async function runCompact(hint) {
+	if (!conversation.value) return;
+	compactSubmitting.value = true;
+	try {
+		const res = await compactConversation(conversation.value, hint);
+		if (!res || !res.ok) {
+			toast.error(compactFailureCopy(res && res.reason));
+			return;
+		}
+		compacting.value = true;
+		compactedChip.value = false;
+		compactHintSeed.value = hint || "";
+		compactDialogOpen.value = false;
+	} catch (e) {
+		// frappe-ui toast renders `message` via v-html: feed it the escaped
+		// errHtml, never the plain-text errMessage (lib/noInlineErrorFormatter guard).
+		toast.error(errHtml(e));
+	} finally {
+		compactSubmitting.value = false;
+	}
+}
+const thinkingLevels = computed(() => chatUi.value.thinking_levels || ["low", "medium", "high"]);
+const showProviders = computed(() => !!chatUi.value.multi_provider);
+const pickableModels = computed(() => {
+	const pool = chatUi.value.pool_models || [];
+	if (pool.length) {
+		const seen = new Set();
+		const rows = [];
+		for (const row of pool) {
+			const key = `${row.provider}/${row.model}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			rows.push(row);
+		}
+		for (const row of pool) {
+			for (const extra of (chatUi.value.catalog_models || {})[row.provider] || []) {
+				const key = `${row.provider}/${extra.model}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				rows.push({ ...extra, provider: row.provider, tier: "", extra: true });
+			}
+		}
+		return rows;
+	}
+	return (chatUi.value.subscription_models?.[chatUi.value.llm_provider] || []).map((model) => ({
+		provider: chatUi.value.llm_provider || "",
+		model,
+		tier: "",
+	}));
+});
+const modelsByProvider = computed(() => {
+	const groups = new Map();
+	for (const row of pickableModels.value) {
+		const provider = row.provider || chatUi.value.llm_provider || "default";
+		if (!groups.has(provider)) groups.set(provider, []);
+		groups.get(provider).push(row);
+	}
+	return [...groups.entries()].map(([provider, models]) => ({ provider, models }));
+});
+const canConnectModel =
+	typeof window !== "undefined" && !!(window.is_jarvis_admin || window.is_system_manager);
+
+async function selectModel(model) {
+	const previous = modelOverride.value;
+	modelOverride.value = model;
+	if (!conversation.value) return;
+	try {
+		const result = await setConversationModel(conversation.value, model);
+		if (result && result.ok === false)
+			throw new Error(result.reason || "Model change rejected");
+	} catch {
+		modelOverride.value = previous;
+		toast.error("Couldn't change the model for this dashboard chat.");
+	}
+}
+
+async function selectThinking(level) {
+	const previous = thinkingOverride.value;
+	thinkingOverride.value = level;
+	if (!conversation.value) return;
+	try {
+		const result = await setConversationThinking(conversation.value, level);
+		if (result && result.ok === false)
+			throw new Error(result.reason || "Effort change rejected");
+	} catch {
+		thinkingOverride.value = previous;
+		toast.error("Couldn't change the effort for this dashboard chat.");
+	}
+}
+
+function goConnectModel() {
+	shell.openSettings("aimodels");
+}
+
+function resetRuntimeControls() {
+	modelOverride.value = "";
+	thinkingOverride.value = "";
+	contextInfo.value = null;
+	compacting.value = false;
+	compactedChip.value = false;
+	compactHintSeed.value = "";
+}
 
 // ── transcript ────────────────────────────────────────────────────────────────
 const messages = ref([]);
@@ -314,11 +598,20 @@ const scroller = ref(null);
 
 // user/assistant rows with visible content only (tool rows and internal
 // chatter stay out of this compact pane)
+// An errored assistant row usually has NO content (the run died before its
+// first token), so it must pass on `error` alone or the failure is invisible
+// and the composer just silently unlocks.
 const bubbles = computed(() =>
 	messages.value.filter(
-		(m) => (m.role === "user" || m.role === "assistant") && String(m.content || "").trim()
+		(m) =>
+			(m.role === "user" || m.role === "assistant") &&
+			(String(m.content || "").trim() || (m.role === "assistant" && m.error))
 	)
 );
+function errorNote(m) {
+	const reason = typeof m.error === "string" ? m.error.trim() : "";
+	return reason || String(m.content || "").trim() || "That didn't go through. Try again.";
+}
 
 // ChatView's stripBlocks, minimal subset: internal fenced blocks (actions,
 // confirms, cards…) never render as raw fences in the pane. `jarvis-ask` is
@@ -380,6 +673,20 @@ async function loadTranscript({ initial = false } = {}) {
 		const d = (await getDashboardConversation(conversation.value)) || {};
 		if (id !== loadReq) return;
 		messages.value = d.messages || [];
+		modelOverride.value = d.conversation?.model_override || "";
+		thinkingOverride.value = d.conversation?.thinking_override || "";
+		loadContext({ applyCompacting: initial });
+		// Reconstruct progress after a reload (and during the no-socket polling
+		// fallback). A normal realtime-driven transcript refresh must not overwrite
+		// the more precise live tool:start/tool:end state with durable receipts that
+		// naturally lag those events.
+		if (initial || !socket) {
+			const restoredRun = restoreDashboardRunState(messages.value);
+			runActive.value = restoredRun.active;
+			activeTools.value = restoredRun.tools;
+			waitingFirstTool.value = restoredRun.waiting;
+			if (initial && restoredRun.active && !socket) startNoSocketLadder();
+		}
 		// Navigating away unmounts the builder and drops its canvas html, but the
 		// transcript we just reloaded still carries every artifact the agent drew
 		// (get_conversation returns each message's parsed `canvas` list). Replay
@@ -655,20 +962,24 @@ async function send(gotoMessageId = "") {
 				text,
 				dataMode.value,
 				props.editingName,
-				props.theme
+				props.theme,
+				modelOverride.value,
+				thinkingOverride.value
 			)) || {};
 		if (r.ok === false) {
 			// rejected (single-flight guard / usage cap) - nothing persisted
 			messages.value = messages.value.filter((m) => m.name !== tmpName);
 			if (!draft.value) draft.value = text;
 			forgetGotoClaim(gotoMessageId);
-			toast.error(r.reason || "Couldn't send your message.");
+			const { message, type } = sendRejectionCopy(r.reason, agentName);
+			(toast[type] || toast.error)(message);
 			return;
 		}
 		if (r.conversation_id && r.conversation_id !== conversation.value) {
 			ownRepoint = true;
 			conversation.value = r.conversation_id;
 		}
+		loadDashboardChats();
 		recordGotoConversation(gotoMessageId, r.conversation_id || conversation.value);
 		runActive.value = true;
 		// This send's own optimistic start - a run:start frame for the same run
@@ -710,6 +1021,7 @@ function clearThread({ keepRun = false } = {}) {
 
 function resetChat() {
 	clearThread();
+	resetRuntimeControls();
 	conversation.value = "";
 }
 
@@ -722,6 +1034,7 @@ watch(conversation, (id, prev) => {
 	const own = ownRepoint;
 	ownRepoint = false;
 	clearThread({ keepRun: own });
+	if (!own) resetRuntimeControls();
 	if (id) {
 		loadTranscript({ initial: true });
 		refreshPending();
@@ -767,6 +1080,7 @@ function onEvent(p) {
 	// it is this same chat's own build
 	if (p.kind === "dashboard") {
 		emit("dashboard", { name: p.name });
+		loadDashboardChats();
 		return;
 	}
 	// any frame for OUR conversation refreshes the transcript (debounced)
@@ -803,12 +1117,31 @@ function onEvent(p) {
 			runActive.value = false;
 			activeTools.value = [];
 			waitingFirstTool.value = false;
+			// the compacted chip and the compacting lock are both scoped to one
+			// turn: the next terminal clears them and refetches the meter
+			compactedChip.value = false;
+			compacting.value = false;
+			loadContext();
 			emit("activity");
+			loadDashboardChats();
 			break;
 		case "run:error":
 			runActive.value = false;
 			activeTools.value = [];
 			waitingFirstTool.value = false;
+			compacting.value = false;
+			loadContext();
+			break;
+		case "context:compacted":
+			compacting.value = false;
+			compactedChip.value = true;
+			compactHintSeed.value = "";
+			loadContext();
+			break;
+		case "context:compact_failed":
+			compacting.value = false;
+			compactHintSeed.value = "";
+			toast.error(compactFailureCopy(p.reason));
 			break;
 	}
 }
@@ -833,6 +1166,12 @@ function startNoSocketLadder() {
 }
 
 onMounted(() => {
+	loadDashboardChats();
+	getChatUiSettings()
+		.then((data) => {
+			if (data) chatUi.value = data;
+		})
+		.catch(() => {});
 	if (conversation.value) {
 		loadTranscript({ initial: true });
 		refreshPending();

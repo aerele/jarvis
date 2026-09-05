@@ -48,6 +48,16 @@ export const setAutoApply = (conversation, value) =>
 // null/zeros until then (design doc §6, UsagePane's "Measured usage" block).
 export const getUsage = (conversation) =>
 	call("jarvis.chat.api.get_usage", { conversation: conversation || "" });
+// Context-window meter for one chat: {used, capacity, pct, warn_pct,
+// auto_compact_pct, route, compaction_count, last_compacted_at, compacting,
+// fresh}. Bench snapshot, refreshed after every completed turn.
+export const getConversationContext = (conversation) =>
+	call("jarvis.chat.api.get_conversation_context", { conversation });
+// Summarise older turns. Optional hint = what to keep. Resolves to
+// {ok, queued} or {ok:false, reason}; the result arrives later as a
+// context:compacted / context:compact_failed event.
+export const compactConversation = (conversation, hint = "") =>
+	call("jarvis.chat.api.compact_conversation", { conversation, hint: hint || null });
 // Tool runs recorded in one chat, newest turn first, from the PERSISTED tool
 // rows: the same rows the thread's Activity accordion renders. The Settings
 // Activity pane used to derive this from the browser's live run stream, which
@@ -623,6 +633,17 @@ export const billingPaymentState = () => call("jarvis.account.get_billing_paymen
 // payment, not transport errors, and call() would throw the code away.
 export const checkBillingPayment = (opts) =>
 	rawOnboardingCall("jarvis.account.check_billing_payment_status", {}, opts);
+
+// GST invoices + billing details for the billing page (Phase 3b). getInvoices lists the
+// customer's own invoices; downloadInvoice returns a base64 PDF (admin re-verifies ownership).
+// getBillingProfile/updateBillingDetails drive the editable billing-details card (a partner-
+// billed customer gets a read-only "billed through <partner>" and cannot edit).
+export const getInvoices = () => call("jarvis.account.get_invoices");
+export const downloadInvoice = (erpName) =>
+	call("jarvis.account.download_invoice", { erp_name: erpName });
+export const getBillingProfile = () => call("jarvis.account.get_billing_profile");
+export const updateBillingDetails = (billing) =>
+	call("jarvis.account.update_billing_details", { billing });
 
 // File input: upload to Frappe's File doctype, return {file_url, file_name}.
 export async function uploadFile(file) {

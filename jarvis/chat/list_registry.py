@@ -486,6 +486,14 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 	# document-list view; these are its accelerators and migrate with it.
 	"jarvis.chat.agents_api.list_agents": "unpaginated companion of agents_catalog (list_agents_page)",
 	"jarvis.chat.agents_api.list_runs": "unpaginated companion of agent_runs (list_runs_page)",
+	# The Dashboard Builder's own history MENU: owner-scoped origin_page="dashboards"
+	# threads, newest first, capped at 100, no filter/sort/page contract. It is the
+	# in-pane counterpart of the general chat sidebar (which deliberately excludes
+	# this namespace), not a browsable document list, so there is no view to register.
+	"jarvis.chat.dashboards_api.list_dashboard_conversations": (
+		"Dashboard Builder history menu: a capped, owner-scoped slice of dashboard-origin "
+		"threads for the pane's own dropdown, not a browsable document list"
+	),
 	# jarvis#1062: a type-ahead SOURCE for the admin Access editor's people picker,
 	# not a document list. It returns at most 20 {name, full_name} pairs for a
 	# substring, has no filter/sort/page contract, and is gated require_jarvis_admin

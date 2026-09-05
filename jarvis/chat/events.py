@@ -65,9 +65,40 @@ def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 			"delta": egress_rules.redact(data.get("delta", "")),
 		}
 
+	if stream == "compaction":
+		# The runtime brackets an automatic (threshold or overflow) compaction
+		# with this stream. Mapped so the chat can show "reorganising" while the
+		# run is still alive; nothing else changes on the terminal path.
+		phase = str(data.get("phase") or "")
+		return {
+			"kind": "compaction",
+			"phase": "start" if phase in ("start", "before") else "end",
+			"completed": bool(data.get("completed")),
+		}
+
 	return None
 
 
 def publish_to_user(user: str, payload: dict[str, Any]) -> None:
 	"""Broadcast a payload to a single user's socketio channel."""
-	frappe.publish_realtime(CHANNEL, payload, user=user)
+	message = payload
+	# Terminal events drive global unread/toast routing after the originating
+	# builder may have been hidden or switched to another thread. Attach the
+	# durable dashboard namespace once per terminal (not per streaming token), so
+	# those background completions can never fall back to a main-chat /c/:id URL.
+	if (
+		payload.get("kind") in {"run:end", "run:error"}
+		and payload.get("conversation_id")
+		and "origin_page" not in payload
+	):
+		try:
+			origin = (
+				frappe.db.get_value("Jarvis Conversation", payload["conversation_id"], "origin_page") or ""
+			)
+			if origin == "dashboards":
+				message = {**payload, "origin_page": origin}
+		except Exception:
+			# Realtime publication is best-effort and must not become a second
+			# failure path if the conversation was concurrently removed.
+			pass
+	frappe.publish_realtime(CHANNEL, message, user=user)

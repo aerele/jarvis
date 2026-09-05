@@ -2404,6 +2404,20 @@ def _handle_event_inner(
 		# lifecycle start is a no-op (we already published run:start)
 		return
 
+	if kind == "compaction":
+		batcher.flush()
+		_publish_to_user(
+			user,
+			{
+				"kind": "run:status",
+				"conversation_id": conversation_id,
+				"message_id": assistant_msg_name,
+				"run_id": run_id,
+				"status": "compacting" if event.get("phase") == "start" else "compacted",
+			},
+		)
+		return
+
 	if kind == "assistant":
 		text = event.get("text", "")
 		# Hot path: buffer the cumulative text + maybe-flush. The
