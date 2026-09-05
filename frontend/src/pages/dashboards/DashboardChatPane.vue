@@ -211,6 +211,15 @@
 			     inside the pane's overflow-hidden edge instead of clipping. -->
 			<div class="mt-2 flex items-end justify-between gap-2" :style="paletteVars">
 				<div class="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+					<!-- the same context ring main chat wears (ContextRing, #1136),
+					     left of the model pill exactly as there, fed by the same
+					     get_conversation_context payload. -->
+					<ContextRing
+						:context="contextInfo"
+						:compacting="compacting"
+						:compacted="compactedChip"
+						@compact="openCompactDialog()"
+					/>
 					<ModelEffortPicker
 						:model-override="modelOverride"
 						:default-model="chatUi.llm_model || ''"
@@ -225,7 +234,6 @@
 						@select-thinking="selectThinking"
 						@add-provider="goConnectModel"
 					/>
-					<ContextUsagePill :usage="contextUsage" />
 					<VoiceRecorder v-if="caps.stt_enabled" compact @transcript="onTranscript" />
 					<!-- Voice not set up is an ACTIONABLE gap, so show it faded and say so
 					     rather than vanishing; deliberately off / a transient error stay
@@ -275,6 +283,13 @@
 				/>
 			</div>
 		</div>
+		<CompactDialog
+			v-model="compactDialogOpen"
+			:busy-reason="compactBusyReason"
+			:submitting="compactSubmitting"
+			:initial-hint="compactHintSeed"
+			@confirm="runCompact"
+		/>
 	</div>
 </template>
 
@@ -309,7 +324,8 @@ import { Button, Dropdown, FeatherIcon, TabButtons, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import VoiceRecorder from "@/components/VoiceRecorder.vue";
 import AskCard from "@/components/chat/AskCard.vue";
-import ContextUsagePill from "@/components/chat/ContextUsagePill.vue";
+import CompactDialog from "@/components/chat/CompactDialog.vue";
+import ContextRing from "@/components/chat/ContextRing.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import { renderMarkdown } from "@/markdown";
 import { parseAsk } from "@/lib/chatAsk";
@@ -336,9 +352,12 @@ import {
 	getChatUiSettings,
 	setConversationModel,
 	setConversationThinking,
+	getConversationContext,
+	compactConversation,
 } from "@/api";
 import { agentName } from "@/branding";
 import { errHtml } from "@/lib/errors";
+import { compactFailureCopy } from "@/lib/compact";
 import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 
 // get_dashboards_caps payload (creatable_scopes/manageable_roles feed the save
@@ -425,7 +444,71 @@ async function loadDashboardChats() {
 const chatUi = ref({});
 const modelOverride = ref("");
 const thinkingOverride = ref("");
-const contextUsage = ref({ used: 0, capacity: 0, pct: 0, updated_at: "" });
+// Context meter + compaction: the same state machine main chat runs for its
+// ContextRing (ChatView loadContext / runCompact), scoped to this pane's
+// conversation. Dashboard threads are ordinary sessions to
+// get_conversation_context / compact_conversation, so nothing is dashboard-only.
+const contextInfo = ref(null); // get_conversation_context payload for the open thread
+const compacting = ref(false); // a compaction we started (or one the runtime is doing mid-turn)
+const compactedChip = ref(false); // ring "done" state until the next run:end
+const compactDialogOpen = ref(false);
+const compactSubmitting = ref(false);
+const compactHintSeed = ref("");
+const compactBusyReason = computed(() => {
+	if (compacting.value) return "Already compacting this chat";
+	if (sending.value || runActive.value) return "A reply is in progress, try again in a moment";
+	return "";
+});
+
+// Best-effort meter refresh. A not-yet-measured payload (fresh:false, e.g.
+// right after context:compacted) must not blank the last fresh snapshot, and a
+// slow response for a thread the user has since left must not stamp its state
+// onto the one now on screen. `applyCompacting` is the authoritative
+// conversation-open read that may CLEAR the lock; elsewhere a fetch may only
+// turn it on (run:end / run:error / context:* are the other clearers).
+async function loadContext({ applyCompacting = false } = {}) {
+	const id = conversation.value;
+	if (!id) {
+		contextInfo.value = null;
+		return;
+	}
+	try {
+		const c = await getConversationContext(id);
+		if (conversation.value !== id) return;
+		if (c && c.fresh) contextInfo.value = c;
+		if (applyCompacting) compacting.value = !!(c && c.compacting);
+		else if (c && c.compacting) compacting.value = true;
+	} catch {
+		/* meter is best-effort */
+	}
+}
+
+function openCompactDialog(seed = "") {
+	compactHintSeed.value = seed;
+	compactDialogOpen.value = true;
+}
+
+async function runCompact(hint) {
+	if (!conversation.value) return;
+	compactSubmitting.value = true;
+	try {
+		const res = await compactConversation(conversation.value, hint);
+		if (!res || !res.ok) {
+			toast.error(compactFailureCopy(res && res.reason));
+			return;
+		}
+		compacting.value = true;
+		compactedChip.value = false;
+		compactHintSeed.value = hint || "";
+		compactDialogOpen.value = false;
+	} catch (e) {
+		// frappe-ui toast renders `message` via v-html: feed it the escaped
+		// errHtml, never the plain-text errMessage (lib/noInlineErrorFormatter guard).
+		toast.error(errHtml(e));
+	} finally {
+		compactSubmitting.value = false;
+	}
+}
 const thinkingLevels = computed(() => chatUi.value.thinking_levels || ["low", "medium", "high"]);
 const showProviders = computed(() => !!chatUi.value.multi_provider);
 const pickableModels = computed(() => {
@@ -502,7 +585,10 @@ function goConnectModel() {
 function resetRuntimeControls() {
 	modelOverride.value = "";
 	thinkingOverride.value = "";
-	contextUsage.value = { used: 0, capacity: 0, pct: 0, updated_at: "" };
+	contextInfo.value = null;
+	compacting.value = false;
+	compactedChip.value = false;
+	compactHintSeed.value = "";
 }
 
 // ── transcript ────────────────────────────────────────────────────────────────
@@ -589,12 +675,7 @@ async function loadTranscript({ initial = false } = {}) {
 		messages.value = d.messages || [];
 		modelOverride.value = d.conversation?.model_override || "";
 		thinkingOverride.value = d.conversation?.thinking_override || "";
-		contextUsage.value = d.conversation?.context_usage || {
-			used: 0,
-			capacity: 0,
-			pct: 0,
-			updated_at: "",
-		};
+		loadContext({ applyCompacting: initial });
 		// Reconstruct progress after a reload (and during the no-socket polling
 		// fallback). A normal realtime-driven transcript refresh must not overwrite
 		// the more precise live tool:start/tool:end state with durable receipts that
@@ -1036,6 +1117,11 @@ function onEvent(p) {
 			runActive.value = false;
 			activeTools.value = [];
 			waitingFirstTool.value = false;
+			// the compacted chip and the compacting lock are both scoped to one
+			// turn: the next terminal clears them and refetches the meter
+			compactedChip.value = false;
+			compacting.value = false;
+			loadContext();
 			emit("activity");
 			loadDashboardChats();
 			break;
@@ -1043,6 +1129,19 @@ function onEvent(p) {
 			runActive.value = false;
 			activeTools.value = [];
 			waitingFirstTool.value = false;
+			compacting.value = false;
+			loadContext();
+			break;
+		case "context:compacted":
+			compacting.value = false;
+			compactedChip.value = true;
+			compactHintSeed.value = "";
+			loadContext();
+			break;
+		case "context:compact_failed":
+			compacting.value = false;
+			compactHintSeed.value = "";
+			toast.error(compactFailureCopy(p.reason));
 			break;
 	}
 }
