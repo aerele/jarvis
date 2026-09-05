@@ -298,60 +298,6 @@ class TestGetConversation(_ChatTestCase):
 		result = get_conversation(name)
 		self.assertEqual([m["seq"] for m in result["messages"]], [1, 2])
 
-	def test_returns_owner_bound_context_usage_snapshot(self):
-		name = create_conversation()
-		key = f"agent:test-{frappe.generate_hash(length=8)}"
-		session_doc = frappe.get_doc(
-			{
-				"doctype": "Jarvis Chat Session",
-				"session_key": key,
-				"user": TEST_USER,
-				"last_total_tokens": 125000,
-				"context_capacity": 200000,
-				"context_pct": 62.5,
-				"last_usage_at": "2026-09-04 12:00:00",
-			}
-		).insert(ignore_permissions=True)
-		self.addCleanup(
-			lambda: frappe.delete_doc(
-				"Jarvis Chat Session", session_doc.name, force=True, ignore_permissions=True
-			)
-		)
-		frappe.db.set_value(CONV, name, "session_key", key)
-		frappe.db.commit()
-
-		usage = get_conversation(name)["conversation"]["context_usage"]
-		self.assertEqual(usage["used"], 125000)
-		self.assertEqual(usage["capacity"], 200000)
-		self.assertEqual(usage["pct"], 62.5)
-		self.assertEqual(usage["updated_at"], "2026-09-04 12:00:00")
-
-	def test_cross_linked_foreign_session_usage_is_never_returned(self):
-		name = create_conversation()
-		key = f"agent:foreign-{frappe.generate_hash(length=8)}"
-		session_doc = frappe.get_doc(
-			{
-				"doctype": "Jarvis Chat Session",
-				"session_key": key,
-				"user": "Administrator",
-				"last_total_tokens": 99999,
-				"context_capacity": 100000,
-				"context_pct": 99.9,
-			}
-		).insert(ignore_permissions=True)
-		self.addCleanup(
-			lambda: frappe.delete_doc(
-				"Jarvis Chat Session", session_doc.name, force=True, ignore_permissions=True
-			)
-		)
-		frappe.db.set_value(CONV, name, "session_key", key)
-		frappe.db.commit()
-
-		self.assertEqual(
-			get_conversation(name)["conversation"]["context_usage"],
-			{"used": 0, "capacity": 0, "pct": 0, "updated_at": ""},
-		)
-
 	def test_raises_for_unknown_conversation(self):
 		with self.assertRaises(frappe.DoesNotExistError):
 			get_conversation("JCONV-99999")

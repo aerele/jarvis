@@ -698,24 +698,6 @@ def get_conversation(conversation: str) -> dict:
 				m["canvas"] = frappe.parse_json(m["canvas"])
 			except Exception:
 				m["canvas"] = None
-	context_usage = {"used": 0, "capacity": 0, "pct": 0, "updated_at": ""}
-	if doc.session_key:
-		# Session usage is private even though the conversation owner check above
-		# already passed. Bind both keys so a corrupted/cross-linked session_key can
-		# never reveal another user's context consumption.
-		snapshot = frappe.db.get_value(
-			"Jarvis Chat Session",
-			{"session_key": doc.session_key, "user": frappe.session.user},
-			["last_total_tokens", "context_capacity", "context_pct", "last_usage_at"],
-			as_dict=True,
-		)
-		if snapshot:
-			context_usage = {
-				"used": int(snapshot.last_total_tokens or 0),
-				"capacity": int(snapshot.context_capacity or 0),
-				"pct": float(snapshot.context_pct or 0),
-				"updated_at": str(snapshot.last_usage_at or ""),
-			}
 	return {
 		"conversation": {
 			"name": doc.name,
@@ -731,7 +713,6 @@ def get_conversation(conversation: str) -> dict:
 			# "Open in Dashboards" on a builder conversation's html artifacts.
 			"origin_page": doc.get("origin_page") or "",
 			"last_active_at": doc.last_active_at,
-			"context_usage": context_usage,
 		},
 		"messages": messages,
 	}
