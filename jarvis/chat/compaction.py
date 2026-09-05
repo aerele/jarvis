@@ -122,13 +122,34 @@ def context_payload(conversation: str) -> dict:
 	}
 
 
-def start_compaction(conversation: str, user: str, hint: str) -> dict:
-	"""Take the lock and enqueue the job. Callers have already checked the
-	conversation is idle (api.compact_conversation)."""
-	frappe.db.set_value(
-		CONV, conversation, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+def _try_take_lock(conversation: str) -> bool:
+	"""Atomic compare-and-set on compacting_since: wins only when the lock is
+	empty or expired. This, not any caller's earlier read, is the sole
+	authority on which of two near-simultaneous callers may proceed."""
+	now = frappe.utils.now_datetime()
+	frappe.db.sql(
+		"""UPDATE `tabJarvis Conversation`
+		SET compacting_since = %(now)s
+		WHERE name = %(name)s
+		  AND (compacting_since IS NULL OR compacting_since < %(expired)s)""",
+		{
+			"now": now,
+			"name": conversation,
+			"expired": frappe.utils.add_to_date(now, seconds=-COMPACT_LOCK_SECONDS),
+		},
 	)
+	won = frappe.db.sql("SELECT ROW_COUNT()")[0][0] > 0
 	frappe.db.commit()
+	return won
+
+
+def start_compaction(conversation: str, user: str, hint: str) -> dict:
+	"""Take the lock via compare-and-set and enqueue the job. Callers have
+	already checked the conversation looks idle (api.compact_conversation),
+	but that earlier check is only an optimization - the CAS here is what
+	actually serializes two near-simultaneous callers."""
+	if not _try_take_lock(conversation):
+		return {"ok": False, "reason": "already_compacting"}
 	frappe.enqueue(
 		method="jarvis.chat.compaction.run_compact",
 		queue="long",
@@ -163,6 +184,13 @@ def _clear_lock(conversation: str) -> None:
 	frappe.db.commit()
 
 
+def _gateway_session_row(sess, session_key: str) -> dict:
+	"""The gateway's own row for this session, or {} if it has none. Shared by
+	the before and after reads in run_compact - both want the same lookup."""
+	rows = [r for r in (sess.list_sessions() or []) if r.get("key") == session_key]
+	return rows[0] if rows else {}
+
+
 def run_compact(conversation: str, user: str, hint: str = "") -> None:
 	"""RQ entry point. One pooled gateway session for the whole operation."""
 	from jarvis.chat import agent_session_pool, usage
@@ -178,8 +206,7 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 	count = 0
 	try:
 		with agent_session_pool.checkout(gateway_url) as sess:
-			rows = [r for r in (sess.list_sessions() or []) if r.get("key") == session_key]
-			row = rows[0] if rows else {}
+			row = _gateway_session_row(sess, session_key)
 			before = int(row.get("totalTokens") or 0)
 			capacity = int(row.get("contextTokens") or 0)
 			res = sess.compact_session(session_key, hint or None, timeout_s=COMPACT_RPC_TIMEOUT_S)
@@ -193,8 +220,7 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 					res.get("text"),
 				)
 			else:
-				rows = [r for r in (sess.list_sessions() or []) if r.get("key") == session_key]
-				after_row = rows[0] if rows else None
+				after_row = _gateway_session_row(sess, session_key) or None
 				write_compaction_result(session_key, after_row)
 				frappe.db.commit()
 				count = int(

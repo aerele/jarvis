@@ -1,5 +1,14 @@
 <template>
 	<SettingsPane title="Usage" :description="paneDescription" :error="meteringErrorMessage">
+		<template v-if="usage">
+			<h3 class="text-base font-semibold text-ink-gray-9">Context</h3>
+			<div class="mt-2">
+				<KvRow label="This chat" :value="context.text" />
+			</div>
+
+			<hr class="my-8" />
+		</template>
+
 		<template v-if="hasMeasured">
 			<h3 class="text-base font-semibold text-ink-gray-9">Measured usage</h3>
 			<div class="mt-2">
@@ -12,16 +21,6 @@
 					v-if="measured.last_usage_at"
 					label="Last activity"
 					:value="timeAgo(measured.last_usage_at)"
-				/>
-				<KvRow
-					label="This chat"
-					:value="
-						contextFresh
-							? `${fmtTokens(usage.context.used)} of ${fmtTokens(
-									usage.context.capacity
-							  )} context in use`
-							: 'Not measured yet'
-					"
 				/>
 			</div>
 			<template v-if="measured.monthly_token_limit > 0">
@@ -119,10 +118,10 @@
 			     exists: the block above already carries both labels from the
 			     gateway's own counters, and showing an estimate of the stored
 			     transcript beside a measurement of what was actually sent put two
-			     very different numbers under one heading (#551). "This chat" now
-			     has a per-chat measurement too (usage.context), so it lives with
-			     the other measured figures in the "Measured usage" block above,
-			     not down here beside the est.-badged estimates. -->
+			     very different numbers under one heading (#551). "This chat"
+			     (usage.context) has its own unbadged "Context" section above,
+			     independent of hasMeasured, since a fresh per-chat reading can
+			     exist with no account-wide measured totals yet. -->
 			<template v-if="!hasMeasured">
 				<div class="rounded-md border p-4">
 					<div class="text-2xl font-medium text-ink-gray-8">
@@ -308,6 +307,7 @@ import JvChart from "@/charts/JvChart.vue";
 import EChart from "@/charts/EChart.vue";
 import { budgetGaugeOption, perModelBarSpec, formatUsd } from "@/charts/usageCharts.js";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
+import { fmtTokens, contextReading } from "@/lib/tokens.js";
 import { connectionModeLabel } from "@/llm/pool";
 import { useJarvisTheme } from "@/theme";
 import * as api from "@/api";
@@ -342,11 +342,10 @@ const measured = computed(() => (usage.value && usage.value.measured) || null);
 // showing both once real counters exist. So the block appears only once there is
 // something measured to show.
 const hasMeasured = computed(() => !!(measured.value && Number(measured.value.total_tokens || 0)));
-// Whether this chat's context usage (usage.context, from get_usage()'s
-// per-conversation block) is a live reading rather than a placeholder.
-const contextFresh = computed(
-	() => !!(usage.value && usage.value.context && usage.value.context.fresh)
-);
+// This chat's context reading (usage.context, from get_usage()'s
+// per-conversation block), independent of hasMeasured - see the "Context"
+// section above, which renders whenever usage itself has loaded.
+const context = computed(() => contextReading(usage.value));
 // All-time: compares against total_tokens (the cumulative, never-reset
 // counter), not month_tokens. See jarvis.chat.policy._over_total_limit.
 const measuredPct = computed(() => {
@@ -374,13 +373,6 @@ async function loadUsage() {
 	} catch {
 		usage.value = null;
 	}
-}
-
-function fmtTokens(n) {
-	n = Number(n || 0);
-	if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
-	if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
-	return String(n);
 }
 
 const usagePct = computed(() => {

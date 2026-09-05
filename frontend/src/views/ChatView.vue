@@ -5205,7 +5205,15 @@ const compactBusyReason = computed(() => {
 // context:compacted, before the runtime re-measures) must NOT overwrite the
 // last fresh snapshot, or the pill would vanish mid-transition instead of
 // showing the compacted state.
-async function loadContext() {
+// `applyCompacting` is true only from the conversation-open path
+// (loadConversation): there, a fetch may CLEAR the optimistic lock, since it
+// is the authoritative read for a chat that just came on screen. Anywhere
+// else a stale, slow GET racing a fresh compact click must not flip a live
+// lock back off - such a fetch may only turn compacting ON, never off; the
+// run:end / run:error / run:recovering / context:compacted /
+// context:compact_failed events (plus the dropped-frame progress guards in
+// assistant:delta / tool:start) are the only other clearers.
+async function loadContext({ applyCompacting = false } = {}) {
 	const id = currentId.value;
 	if (!id) {
 		contextInfo.value = null;
@@ -5218,7 +5226,11 @@ async function loadContext() {
 		// onto whichever chat is on screen now.
 		if (currentId.value !== id) return;
 		if (c && c.fresh) contextInfo.value = c;
-		compacting.value = !!(c && c.compacting);
+		if (applyCompacting) {
+			compacting.value = !!(c && c.compacting);
+		} else if (c && c.compacting) {
+			compacting.value = true;
+		}
 	} catch {
 		/* meter is best-effort */
 	}
@@ -8347,7 +8359,9 @@ async function loadConversation(id) {
 	if (currentId.value !== id) return;
 	// Context meter: best-effort, off the critical path (never awaited) — a slow
 	// or failed get_conversation_context must not delay messages rendering.
-	loadContext();
+	// This is the conversation-open path, so this fetch is authoritative for
+	// the lock too (applyCompacting) - unlike the mid-turn refreshes elsewhere.
+	loadContext({ applyCompacting: true });
 	// Flush any in-flight reveal BEFORE swapping in the freshly-loaded rows. On a
 	// reconnect resync the socket may have missed a run's terminal (fire-and-forget
 	// pub/sub, no replay), so flushReveal(message_id) never ran for it; a leftover
@@ -9432,6 +9446,15 @@ function onEvent(p) {
 			// bypass and are always applied, unchanged.
 			if (pumpFenceReject(p)) break;
 			pumpFenceAccept(p, false);
+			// The "compacted" run:status frame is lossy (see the run:status case
+			// below); if it never arrived, real progress after a "compacting"
+			// marker means the compaction already ended, so clear the stuck lock
+			// here rather than leave the activity row hidden for the rest of the
+			// turn.
+			if (compacting.value && statusPhase.value === "compacting") {
+				compacting.value = false;
+				statusPhase.value = null;
+			}
 			waiting.value = false;
 			statusPhase.value = null;
 			recovering.value = null;
@@ -9455,6 +9478,13 @@ function onEvent(p) {
 			if (pumpFenceReject(p)) break; // CDX-3 (epoch-less legacy tool events bypass)
 			if (toolEventIsStale(p)) break;
 			pumpFenceAccept(p, false);
+			// See the matching guard in assistant:delta: a dropped "compacted"
+			// run:status frame must not leave compacting stuck true once the turn
+			// has visibly moved on.
+			if (compacting.value && statusPhase.value === "compacting") {
+				compacting.value = false;
+				statusPhase.value = null;
+			}
 			const id = p.tool_call_id || `${p.tool_name}-${activeTools.value.length}`;
 			activeTools.value = [
 				...activeTools.value,

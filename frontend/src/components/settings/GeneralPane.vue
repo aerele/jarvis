@@ -131,16 +131,7 @@
 
 		<h3 class="text-base font-semibold text-ink-gray-9">Context</h3>
 		<div class="mt-2">
-			<KvRow
-				label="This chat"
-				:value="
-					contextFresh
-						? `${fmtTokens(usage.context.used)} of ${fmtTokens(
-								usage.context.capacity
-						  )} context`
-						: 'Not measured yet'
-				"
-			/>
+			<KvRow label="This chat" :value="context.text" />
 		</div>
 
 		<hr class="my-8" />
@@ -316,6 +307,7 @@ import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { agentName } from "@/branding";
 import * as api from "@/api";
 import { errHtml } from "@/lib/errors";
+import { fmtTokens, contextReading } from "@/lib/tokens.js";
 
 const store = useShellStore();
 
@@ -537,22 +529,14 @@ const statusTheme = computed(() => {
 
 // Estimated token usage — the dialog fetches its own data on open.
 const usage = ref(null);
-// Whether this chat's context usage (usage.context, from get_usage()'s
-// per-conversation block) is a live reading rather than a placeholder.
-const contextFresh = computed(
-	() => !!(usage.value && usage.value.context && usage.value.context.fresh)
-);
+// This chat's context reading (usage.context, from get_usage()'s
+// per-conversation block).
+const context = computed(() => contextReading(usage.value));
 const usagePct = computed(() => {
 	const u = usage.value;
 	if (!u || !u.budget_monthly) return 0;
 	return Math.min(100, Math.round((u.month_tokens / u.budget_monthly) * 100));
 });
-function fmtTokens(n) {
-	n = Number(n || 0);
-	if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
-	if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
-	return String(n);
-}
 
 onMounted(async () => {
 	try {

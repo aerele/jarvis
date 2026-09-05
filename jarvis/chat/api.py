@@ -1349,10 +1349,14 @@ def send_message(
 			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
 		if _rej := _compacting_reject(conversation):
 			return _rej
-	elif _conversation_busy(conversation):
+	else:
+		# Check the compaction front door first so a compacting conversation
+		# doesn't pay for is_compacting twice (once here, once inside the
+		# _conversation_busy() call below).
 		if _rej := _compacting_reject(conversation):
 			return _rej
-		return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
+		if _conversation_busy(conversation):
+			return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
 
 	# Apply model override BEFORE enqueueing so the worker sees the new value
 	# when it loads the conversation. (If we set this after the enqueue, the
@@ -2342,6 +2346,9 @@ def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 	last_usage_at = session_row.get("last_usage_at")
 	if last_compacted_at and (not last_usage_at or last_compacted_at >= last_usage_at):
 		return {"ok": False, "reason": "nothing_to_compact"}
+	# This check races the same way is_compacting below does - the compare-and-set
+	# in compaction.start_compaction is the actual authority, this is just a
+	# cheap pre-check that saves a gateway round trip for the common case.
 	if compaction.is_compacting(conversation):
 		return {"ok": False, "reason": "already_compacting"}
 	if _conversation_busy(conversation) or admission._conv_has_other_active_turn(conversation, ""):
@@ -2502,10 +2509,14 @@ def retry_message(message: str) -> dict:
 			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
 		if _rej := _compacting_reject(doc.conversation):
 			return _rej
-	elif _conversation_busy(doc.conversation):
+	else:
+		# Check the compaction front door first so a compacting conversation
+		# doesn't pay for is_compacting twice (once here, once inside the
+		# _conversation_busy() call below).
 		if _rej := _compacting_reject(doc.conversation):
 			return _rej
-		return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
+		if _conversation_busy(doc.conversation):
+			return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
 	if doc.role != "assistant":
 		return {"ok": False, "reason": _("only assistant messages can be retried")}
 	if not doc.error:

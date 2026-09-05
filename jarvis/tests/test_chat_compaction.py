@@ -124,6 +124,51 @@ class TestCompactionHelpers(FrappeTestCase):
 		self.assertEqual((p["used"], p["capacity"], p["fresh"]), (0, 0, False))
 
 
+class TestCompactionLock(FrappeTestCase):
+	"""R1: start_compaction's lock is a compare-and-set, not a plain read-then-write,
+	so two near-simultaneous callers can't both win it."""
+
+	def tearDown(self):
+		_cleanup()
+		frappe.db.commit()
+
+	def test_fresh_lock_refuses_and_does_not_enqueue(self):
+		conv = _mk_conversation("agent:main:c-lock1")
+		frappe.db.set_value(
+			CONV, conv, "compacting_since", frappe.utils.now_datetime(), update_modified=False
+		)
+		with patch("jarvis.chat.compaction.frappe.enqueue") as enq:
+			out = compaction.start_compaction(conv, "Administrator", "")
+		self.assertEqual(out, {"ok": False, "reason": "already_compacting"})
+		enq.assert_not_called()
+
+	def test_expired_lock_is_taken_and_enqueues(self):
+		conv = _mk_conversation("agent:main:c-lock2")
+		frappe.db.set_value(
+			CONV,
+			conv,
+			"compacting_since",
+			frappe.utils.add_to_date(
+				frappe.utils.now_datetime(), seconds=-(compaction.COMPACT_LOCK_SECONDS + 5)
+			),
+			update_modified=False,
+		)
+		with patch("jarvis.chat.compaction.frappe.enqueue") as enq:
+			out = compaction.start_compaction(conv, "Administrator", "")
+		self.assertEqual(out, {"ok": True, "queued": True})
+		enq.assert_called_once()
+		self.assertTrue(compaction.is_compacting(conv))
+
+	def test_back_to_back_calls_only_the_first_wins(self):
+		conv = _mk_conversation("agent:main:c-lock3")
+		with patch("jarvis.chat.compaction.frappe.enqueue") as enq:
+			first = compaction.start_compaction(conv, "Administrator", "")
+			second = compaction.start_compaction(conv, "Administrator", "")
+		self.assertEqual(first, {"ok": True, "queued": True})
+		self.assertEqual(second, {"ok": False, "reason": "already_compacting"})
+		enq.assert_called_once()
+
+
 class TestRunCompact(FrappeTestCase):
 	def tearDown(self):
 		_cleanup()

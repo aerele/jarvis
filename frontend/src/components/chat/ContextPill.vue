@@ -25,6 +25,7 @@
 
 <script setup>
 import { computed } from "vue";
+import { fmtTokens } from "@/lib/tokens.js";
 
 const props = defineProps({
 	context: { type: Object, default: null },
@@ -33,10 +34,6 @@ const props = defineProps({
 });
 defineEmits(["compact"]);
 
-function k(n) {
-	n = Number(n) || 0;
-	return n >= 1000 ? Math.round(n / 1000) + "k" : String(n);
-}
 const warn = computed(() => props.context && props.context.pct >= props.context.warn_pct);
 const fillPct = computed(() => {
 	if (props.compacted) return 0;
@@ -46,7 +43,7 @@ const fillPct = computed(() => {
 const label = computed(() => {
 	if (props.compacting) return "Compacting…";
 	if (props.compacted) return "Compacted";
-	return `${k(props.context.used)} / ${k(props.context.capacity)}`;
+	return `${fmtTokens(props.context.used)} / ${fmtTokens(props.context.capacity)}`;
 });
 const title = computed(() =>
 	props.compacting
