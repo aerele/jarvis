@@ -1661,3 +1661,50 @@ describe("country validation rejects a non-canonical value", () => {
 		expect(wrapper.vm.countryError("Turkey")).toBe(""); // alias normalises to Türkiye
 	});
 });
+
+describe("Address consistency: State <-> Pincode <-> GSTIN (India)", () => {
+	it("blocks Continue and flags the pincode when it doesn't match the state", () => {
+		const wrapper = mountView();
+		fillRequiredBilling(wrapper);
+		wrapper.vm.billing.setUserValue("state", "Maharashtra");
+		wrapper.vm.billing.setUserValue("pincode", "638108"); // a Tamil Nadu PIN
+		expect(wrapper.vm.billingDetailsInvalid()).toBe(true);
+		expect(wrapper.vm.detailsFieldErrors.pincode).toMatch(/postal code/i);
+	});
+
+	it("clears once the pincode matches the state", () => {
+		const wrapper = mountView();
+		fillRequiredBilling(wrapper);
+		// the address inconsistency must be the ONLY thing blocking, so satisfy email + company too
+		wrapper.vm.state.email = "test@acme.com";
+		wrapper.vm.state.company = "Acme";
+		wrapper.vm.billing.setUserValue("state", "Maharashtra");
+		wrapper.vm.billing.setUserValue("pincode", "638108");
+		expect(wrapper.vm.billingDetailsInvalid()).toBe(true);
+		expect(wrapper.vm.detailsFieldErrors.pincode).toMatch(/postal code/i);
+		wrapper.vm.billing.setUserValue("pincode", "400001"); // a Maharashtra PIN
+		expect(wrapper.vm.billingDetailsInvalid()).toBe(false);
+		expect(wrapper.vm.detailsFieldErrors.pincode).toBe("");
+	});
+
+	it("clears the India-only pincode message when the country switches overseas", () => {
+		const wrapper = mountView();
+		fillRequiredBilling(wrapper);
+		wrapper.vm.billing.setUserValue("state", "Maharashtra");
+		wrapper.vm.billing.setUserValue("pincode", "638108");
+		wrapper.vm.touchPincodeField();
+		expect(wrapper.vm.detailsFieldErrors.pincode).toMatch(/postal code/i);
+		wrapper.vm.onCountryChange("United States"); // overseas -> the India-specific check no longer applies
+		expect(wrapper.vm.detailsFieldErrors.pincode).toBe("");
+	});
+
+	it("flags the GSTIN when its state code disagrees with the selected state", () => {
+		const wrapper = mountView();
+		fillRequiredBilling(wrapper);
+		wrapper.vm.billing.setUserValue("state", "Karnataka");
+		wrapper.vm.billing.setUserValue("pincode", "560001"); // Karnataka PIN (consistent with the state)
+		wrapper.vm.billing.setUserValue("gstin", "33ABCDE1234F1Z7"); // Tamil Nadu GSTIN -> mismatch
+		expect(wrapper.vm.billingDetailsInvalid()).toBe(true);
+		expect(wrapper.vm.detailsFieldErrors.gstin).toMatch(/GSTIN/i);
+	});
+});
