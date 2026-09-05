@@ -107,10 +107,22 @@
 			</div>
 			<div class="rounded-md border p-4">
 				<div class="text-2xl font-medium text-ink-gray-8">
-					{{ usage ? fmtTokens(usage.chat_tokens) : "-" }}
+					{{
+						usage && usage.context && usage.context.fresh
+							? `${fmtTokens(usage.context.used)} of ${fmtTokens(
+									usage.context.capacity
+							  )}`
+							: "-"
+					}}
 				</div>
 				<div class="mt-1 text-sm text-ink-gray-6">This chat</div>
-				<div class="mt-1 text-xs text-ink-gray-5">tokens</div>
+				<div class="mt-1 text-xs text-ink-gray-5">
+					{{
+						usage && usage.context && usage.context.fresh
+							? "Context in use"
+							: "Not measured yet"
+					}}
+				</div>
 			</div>
 			<!-- The month / all-time estimates are dropped once measured usage
 			     exists: the block above already carries both labels from the

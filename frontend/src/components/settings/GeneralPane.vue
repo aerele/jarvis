@@ -134,7 +134,16 @@
 			<Badge label="est." theme="gray" variant="subtle" size="sm" />
 		</h3>
 		<div class="mt-2">
-			<KvRow label="This chat" :value="usage ? fmtTokens(usage.chat_tokens) : '-'" />
+			<KvRow
+				label="This chat"
+				:value="
+					usage && usage.context && usage.context.fresh
+						? `${fmtTokens(usage.context.used)} of ${fmtTokens(
+								usage.context.capacity
+						  )} context`
+						: 'Not measured yet'
+				"
+			/>
 			<KvRow
 				:label="usage ? usage.month_label : 'This month'"
 				:value="usage ? fmtTokens(usage.month_tokens) : '-'"

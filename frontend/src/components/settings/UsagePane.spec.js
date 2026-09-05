@@ -189,3 +189,24 @@ describe("UsagePane metering error/retry", () => {
 		expect(w.find(".stub-errormessage").exists()).toBe(true);
 	});
 });
+
+describe("UsagePane, this chat context", () => {
+	it("shows context in use for this chat when measured", async () => {
+		api.getUsage.mockResolvedValue({
+			chat_tokens: 999,
+			context: { used: 42000, capacity: 200000, fresh: true },
+		});
+		const w = await mountAs({ isSM: false, isAdmin: false });
+		expect(w.text()).toContain("42k of 200k");
+		expect(w.text()).toContain("Context in use");
+	});
+
+	it("falls back to not measured", async () => {
+		api.getUsage.mockResolvedValue({
+			chat_tokens: 999,
+			context: { used: 0, capacity: 0, fresh: false },
+		});
+		const w = await mountAs({ isSM: false, isAdmin: false });
+		expect(w.text()).toContain("Not measured yet");
+	});
+});
