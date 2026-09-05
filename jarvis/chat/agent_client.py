@@ -774,7 +774,16 @@ class AgentSession:
 		rid = ack.get("runId") or run_id
 		deadline = time.monotonic() + timeout_s
 		while time.monotonic() < deadline:
-			frame = self._recv(min(5.0, max(deadline - time.monotonic(), 0.01)))
+			try:
+				frame = self._recv(min(5.0, max(deadline - time.monotonic(), 0.01)))
+			except AgentUnreachableError as e:
+				# A hard close after the ack is the same "sent it, never heard
+				# back" outcome as a plain timeout (the command may have
+				# landed) - recode a codeless close so the caller's
+				# code == "compact-timeout" check still routes it that way.
+				if getattr(e, "code", None):
+					raise
+				raise AgentUnreachableError(str(e), code="compact-timeout") from e
 			if not frame or frame.get("type") != "event" or frame.get("event") != "chat":
 				continue
 			payload = frame.get("payload") or {}

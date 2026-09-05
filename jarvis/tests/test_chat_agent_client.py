@@ -1104,3 +1104,23 @@ class TestCompactSession(FrappeTestCase):
 		with self.assertRaises(AgentUnreachableError) as cm:
 			sess.compact_session(key, None, timeout_s=0.2)
 		self.assertEqual(cm.exception.code, "compact-timeout")
+
+	def test_compact_session_recodes_mid_wait_close_as_compact_timeout(self):
+		# A hard close AFTER the ack (command already accepted, may have
+		# landed) must route the same as a plain timeout, not surface the
+		# codeless AgentUnreachableError _recv_with_timeout raises on a
+		# real socket close.
+		key = "agent:main:k3"
+
+		def _raise_closed():
+			raise websocket.WebSocketConnectionClosedException("closed")
+
+		frames = [
+			{"type": "res", "id": "<sub>", "ok": True, "payload": {}},
+			{"type": "res", "id": "<send>", "ok": True, "payload": {"runId": "r3"}},
+		]
+		sess = _session_with_scripted_frames(frames)
+		sess._ws._frames.append(_raise_closed)
+		with self.assertRaises(AgentUnreachableError) as cm:
+			sess.compact_session(key, None, timeout_s=5)
+		self.assertEqual(cm.exception.code, "compact-timeout")
