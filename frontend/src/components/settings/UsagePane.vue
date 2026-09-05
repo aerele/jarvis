@@ -13,6 +13,16 @@
 					label="Last activity"
 					:value="timeAgo(measured.last_usage_at)"
 				/>
+				<KvRow
+					label="This chat"
+					:value="
+						contextFresh
+							? `${fmtTokens(usage.context.used)} of ${fmtTokens(
+									usage.context.capacity
+							  )} context in use`
+							: 'Not measured yet'
+					"
+				/>
 			</div>
 			<template v-if="measured.monthly_token_limit > 0">
 				<div class="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-gray-3">
@@ -105,31 +115,14 @@
 					{{ s ? `${s.starredCount} starred` : "no chat" }}
 				</div>
 			</div>
-			<div class="rounded-md border p-4">
-				<div class="text-2xl font-medium text-ink-gray-8">
-					{{
-						usage && usage.context && usage.context.fresh
-							? `${fmtTokens(usage.context.used)} of ${fmtTokens(
-									usage.context.capacity
-							  )}`
-							: "-"
-					}}
-				</div>
-				<div class="mt-1 text-sm text-ink-gray-6">This chat</div>
-				<div class="mt-1 text-xs text-ink-gray-5">
-					{{
-						usage && usage.context && usage.context.fresh
-							? "Context in use"
-							: "Not measured yet"
-					}}
-				</div>
-			</div>
 			<!-- The month / all-time estimates are dropped once measured usage
 			     exists: the block above already carries both labels from the
 			     gateway's own counters, and showing an estimate of the stored
 			     transcript beside a measurement of what was actually sent put two
-			     very different numbers under one heading (#551). "This chat" stays
-			     because the measured counters have no per-chat breakdown. -->
+			     very different numbers under one heading (#551). "This chat" now
+			     has a per-chat measurement too (usage.context), so it lives with
+			     the other measured figures in the "Measured usage" block above,
+			     not down here beside the est.-badged estimates. -->
 			<template v-if="!hasMeasured">
 				<div class="rounded-md border p-4">
 					<div class="text-2xl font-medium text-ink-gray-8">
@@ -349,6 +342,11 @@ const measured = computed(() => (usage.value && usage.value.measured) || null);
 // showing both once real counters exist. So the block appears only once there is
 // something measured to show.
 const hasMeasured = computed(() => !!(measured.value && Number(measured.value.total_tokens || 0)));
+// Whether this chat's context usage (usage.context, from get_usage()'s
+// per-conversation block) is a live reading rather than a placeholder.
+const contextFresh = computed(
+	() => !!(usage.value && usage.value.context && usage.value.context.fresh)
+);
 // All-time: compares against total_tokens (the cumulative, never-reset
 // counter), not month_tokens. See jarvis.chat.policy._over_total_limit.
 const measuredPct = computed(() => {

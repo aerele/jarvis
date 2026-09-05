@@ -191,19 +191,23 @@ describe("UsagePane metering error/retry", () => {
 });
 
 describe("UsagePane, this chat context", () => {
-	it("shows context in use for this chat when measured", async () => {
+	// This row only exists inside the unbadged "Measured usage" block, so
+	// both cases here need a non-zero `measured` block to make hasMeasured
+	// true and put that block on screen at all.
+	it("shows context in use for this chat when measured, in the measured block", async () => {
 		api.getUsage.mockResolvedValue({
 			chat_tokens: 999,
+			measured: { total_tokens: 500000, month_tokens: 100000 },
 			context: { used: 42000, capacity: 200000, fresh: true },
 		});
 		const w = await mountAs({ isSM: false, isAdmin: false });
-		expect(w.text()).toContain("42k of 200k");
-		expect(w.text()).toContain("Context in use");
+		expect(w.text()).toContain("42k of 200k context in use");
 	});
 
 	it("falls back to not measured", async () => {
 		api.getUsage.mockResolvedValue({
 			chat_tokens: 999,
+			measured: { total_tokens: 500000, month_tokens: 100000 },
 			context: { used: 0, capacity: 0, fresh: false },
 		});
 		const w = await mountAs({ isSM: false, isAdmin: false });

@@ -129,21 +129,27 @@
 
 		<hr class="my-8" />
 
-		<h3 class="flex items-center gap-2 text-base font-semibold text-ink-gray-9">
-			Token usage
-			<Badge label="est." theme="gray" variant="subtle" size="sm" />
-		</h3>
+		<h3 class="text-base font-semibold text-ink-gray-9">Context</h3>
 		<div class="mt-2">
 			<KvRow
 				label="This chat"
 				:value="
-					usage && usage.context && usage.context.fresh
+					contextFresh
 						? `${fmtTokens(usage.context.used)} of ${fmtTokens(
 								usage.context.capacity
 						  )} context`
 						: 'Not measured yet'
 				"
 			/>
+		</div>
+
+		<hr class="my-8" />
+
+		<h3 class="flex items-center gap-2 text-base font-semibold text-ink-gray-9">
+			Token usage
+			<Badge label="est." theme="gray" variant="subtle" size="sm" />
+		</h3>
+		<div class="mt-2">
 			<KvRow
 				:label="usage ? usage.month_label : 'This month'"
 				:value="usage ? fmtTokens(usage.month_tokens) : '-'"
@@ -531,6 +537,11 @@ const statusTheme = computed(() => {
 
 // Estimated token usage — the dialog fetches its own data on open.
 const usage = ref(null);
+// Whether this chat's context usage (usage.context, from get_usage()'s
+// per-conversation block) is a live reading rather than a placeholder.
+const contextFresh = computed(
+	() => !!(usage.value && usage.value.context && usage.value.context.fresh)
+);
 const usagePct = computed(() => {
 	const u = usage.value;
 	if (!u || !u.budget_monthly) return 0;
