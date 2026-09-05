@@ -25,6 +25,19 @@ vi.mock("@/data/session", () => ({ session: { user: "u@example.com" } }));
 vi.mock("@/lib/errorReporter", () => ({ report: vi.fn() }));
 vi.mock("@/branding", () => ({ agentName: "Jarvis" }));
 
+// Recent Node versions expose an experimental localStorage getter that is
+// undefined without --localstorage-file, which can shadow jsdom's storage.
+// Use an explicit browser-shaped in-memory store for these routing tests.
+const storage = new Map();
+const localStorageStub = {
+	getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+	setItem: (key, value) => storage.set(key, String(value)),
+	removeItem: (key) => storage.delete(key),
+	clear: () => storage.clear(),
+};
+vi.stubGlobal("localStorage", localStorageStub);
+window.focus = vi.fn();
+
 const { attachGlobalNotifier, useToasts, dismissToast } = await import("./globalNotifier");
 
 /** A socket that hands every emitted payload to the attached listener. */
@@ -72,6 +85,9 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	setHidden(false);
 	store.currentConvId = null;
+	store.approvalsCount = 0;
+	localStorage.clear();
+	router.currentRoute.value = { name: "Approvals", params: {}, meta: {} };
 	socket = fakeSocket();
 	detach = attachGlobalNotifier({ socket, router });
 });
@@ -137,6 +153,77 @@ describe("the fence does not touch the other signals", () => {
 		detach();
 		socket.emit(terminal({ run_id: "run-9" }));
 		expect(useToasts().value).toHaveLength(0);
+	});
+});
+
+describe("dashboard-origin attention stays in Dashboard Builder", () => {
+	it("does not toast a parked action already visible in the builder pane", () => {
+		localStorage.setItem("jarvis-dash-conv-u@example.com", "conv-a");
+		router.currentRoute.value = { name: "DashboardsPage", hash: "", params: {}, meta: {} };
+		socket.emit({
+			kind: "action:pending",
+			conversation: "conv-a",
+			origin_page: "dashboards",
+			tool: "jarvis__save_dashboard",
+		});
+		expect(useToasts().value).toHaveLength(0);
+	});
+
+	it("routes an off-screen dashboard confirmation back to its builder conversation", () => {
+		socket.emit({
+			kind: "action:pending",
+			conversation: "dash-conv",
+			origin_page: "dashboards",
+			tool: "jarvis__save_dashboard",
+		});
+		expect(useToasts().value).toHaveLength(1);
+		useToasts().value[0].onClick();
+		expect(router.push).toHaveBeenCalledWith({
+			name: "DashboardsPage",
+			query: { conversation: "dash-conv" },
+		});
+	});
+
+	it("suppresses dashboard approval redirects while its AskCard is visible", () => {
+		localStorage.setItem("jarvis-dash-conv-u@example.com", "conv-a");
+		router.currentRoute.value = { name: "DashboardsPage", hash: "", params: {}, meta: {} };
+		socket.emit({
+			kind: "approval:new",
+			conversation_id: "conv-a",
+			origin_page: "dashboards",
+			question: "Which metric?",
+		});
+		expect(useToasts().value).toHaveLength(0);
+		expect(store.approvalsCount).toBe(1);
+	});
+
+	it("opens an off-screen dashboard question in the builder, not Approval Board", () => {
+		socket.emit({
+			kind: "approval:new",
+			conversation_id: "dash-conv",
+			origin_page: "dashboards",
+			question: "Which metric?",
+		});
+		expect(useToasts().value).toHaveLength(1);
+		useToasts().value[0].onClick();
+		expect(router.push).toHaveBeenCalledWith({
+			name: "DashboardsPage",
+			query: { conversation: "dash-conv" },
+		});
+	});
+
+	it("does not create a main-chat unread dot for a dashboard terminal", () => {
+		// The user has already switched the pane to another dashboard thread, so
+		// only the terminal's durable origin can classify this background result.
+		localStorage.setItem("jarvis-dash-conv-u@example.com", "another-dashboard");
+		socket.emit(terminal({ origin_page: "dashboards" }));
+		expect(store.markUnread).not.toHaveBeenCalled();
+		expect(useToasts().value).toHaveLength(1);
+		useToasts().value[0].onClick();
+		expect(router.push).toHaveBeenCalledWith({
+			name: "DashboardsPage",
+			query: { conversation: "conv-a" },
+		});
 	});
 });
 

@@ -66,7 +66,7 @@
 							v-for="w in awaitingReply"
 							:key="w.conversation"
 							class="flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-surface-gray-2"
-							@click="openConversation(w.conversation)"
+							@click="openConversation(w)"
 						>
 							<FeatherIcon
 								name="message-circle"
@@ -215,7 +215,11 @@
 						<Button
 							v-if="selected.conversation"
 							variant="subtle"
-							label="Open Chat"
+							:label="
+								selected.origin_page === 'dashboards'
+									? 'Open Builder'
+									: 'Open Chat'
+							"
 							iconLeft="message-circle"
 							@click="openChat"
 						/>
@@ -277,7 +281,12 @@
 							</div>
 							<div class="flex w-[65%] items-center text-base">
 								<router-link
-									:to="'/c/' + selected.conversation"
+									:to="
+										conversationRoute(
+											selected.conversation,
+											selected.origin_page
+										)
+									"
 									class="inline-flex h-6 min-w-0 items-center gap-1.5 rounded bg-surface-gray-2 px-2 text-sm text-ink-gray-8 hover:bg-surface-gray-3"
 								>
 									<FeatherIcon
@@ -331,7 +340,11 @@
 										<Button
 											v-if="chatAnswerOnly"
 											variant="solid"
-											label="Answer in chat"
+											:label="
+												selected.origin_page === 'dashboards'
+													? 'Answer in builder'
+													: 'Answer in chat'
+											"
 											iconLeft="message-circle"
 											@click="openChat"
 										/>
@@ -715,13 +728,18 @@ function onRowClick(row) {
 
 function openChat() {
 	if (selected.value && selected.value.conversation) {
-		router.push("/c/" + selected.value.conversation);
+		router.push(conversationRoute(selected.value.conversation, selected.value.origin_page));
 	}
 }
 
 // awaiting-reply strip rows answer in the conversation itself
-function openConversation(conversation) {
-	if (conversation) router.push("/c/" + conversation);
+function conversationRoute(conversation, originPage = "") {
+	return originPage === "dashboards"
+		? { name: "DashboardsPage", query: { conversation } }
+		: "/c/" + conversation;
+}
+function openConversation(row) {
+	if (row && row.conversation) router.push(conversationRoute(row.conversation, row.origin_page));
 }
 
 // ── right-pane helpers ────────────────────────────────────────────────────────

@@ -46,6 +46,26 @@ class TestActionPendingEvent(FrappeTestCase):
 		self.assertEqual(record["tool"], "create_doc")
 		self.assertEqual(record["conversation"], payload["conversation"])
 
+	def test_dashboard_park_publishes_its_native_origin(self):
+		conversation = frappe.get_doc(
+			{
+				"doctype": "Jarvis Conversation",
+				"title": "dashboard pending action",
+				"origin_page": "dashboards",
+			}
+		).insert(ignore_permissions=True)
+		with patch("jarvis.chat.events.publish_to_user") as pub:
+			r = api._run_tool(
+				"create_doc",
+				{
+					"doctype": "ToDo",
+					"values": {"description": "jarvis-test-dashboard-action-pending"},
+				},
+				conversation=conversation.name,
+			)
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertEqual(pub.call_args[0][1]["origin_page"], "dashboards")
+
 	def test_model_facing_return_still_has_no_token(self):
 		desc = "jarvis-test-action-pending-no-token-031"
 		with patch("jarvis.chat.events.publish_to_user") as pub:

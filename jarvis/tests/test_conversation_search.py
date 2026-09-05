@@ -73,7 +73,12 @@ def _wipe() -> None:
 
 
 def _mk_conv(
-	owner: str, title: str, status: str = "Active", starred: int = 0, active_days_ago: int = 0
+	owner: str,
+	title: str,
+	status: str = "Active",
+	starred: int = 0,
+	active_days_ago: int = 0,
+	origin_page: str = "",
 ) -> str:
 	with _as(owner):
 		doc = frappe.get_doc(
@@ -82,6 +87,7 @@ def _mk_conv(
 				"title": title,
 				"status": status,
 				"starred": starred,
+				"origin_page": origin_page,
 			}
 		)
 		doc.insert(ignore_permissions=True)
@@ -127,6 +133,7 @@ class TestConversationSearch(unittest.TestCase):
 		cls.underscore_bait = _mk_conv(USER_A, "cs-axb tokens", active_days_ago=4)
 		# excluded: archived + another owner's row
 		cls.archived = _mk_conv(USER_A, "cs-archived thing", status="Archived")
+		cls.dashboard = _mk_conv(USER_A, "cs-dashboard private", origin_page="dashboards")
 		cls.b_conv = _mk_conv(USER_B, "cs-b private", active_days_ago=0)
 
 	@classmethod
@@ -154,6 +161,7 @@ class TestConversationSearch(unittest.TestCase):
 		res = self._search()
 		self.assertEqual(res["total"], 6)  # all of A's actives, not the archived one
 		self.assertNotIn(self.archived, _names(res["rows"]))
+		self.assertNotIn(self.dashboard, _names(res["rows"]))
 
 	def test_like_escaping_percent(self):
 		res = self._search(search="100%")

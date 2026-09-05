@@ -53,8 +53,12 @@
 				ref="builderEl"
 				class="flex min-h-0 flex-1 flex-row"
 			>
-				<!-- canvas pane (the surface's one solid action lives here) -->
+				<!-- canvas pane (the surface's one solid action lives here). On a
+				     phone the split can't hold two usable columns, so the canvas
+				     and chat swap full-width instead: hide the canvas while chat is
+				     open (Hide chat brings it back). -->
 				<div
+					v-show="!isMobile || !chatOpen"
 					class="flex min-h-0 flex-1 flex-col"
 					:class="resizing ? 'pointer-events-none select-none' : ''"
 				>
@@ -76,10 +80,11 @@
 						</div>
 						<div class="flex shrink-0 items-center gap-3">
 							<Button
+								v-if="!chatOpen"
 								variant="ghost"
-								:label="chatOpen ? 'Hide chat' : 'Show chat'"
+								label="Show chat"
 								iconLeft="message-square"
-								@click="chatOpen = !chatOpen"
+								@click="chatOpen = true"
 							/>
 							<router-link
 								v-if="savedName"
@@ -122,7 +127,7 @@
 				     can't swallow the mousemoves. -->
 				<div
 					class="group relative z-10 flex w-2.5 shrink-0 cursor-col-resize items-center justify-center"
-					v-show="chatOpen"
+					v-show="chatOpen && !isMobile"
 					role="separator"
 					aria-orientation="vertical"
 					title="Drag to resize · double-click to reset"
@@ -146,14 +151,16 @@
 				<DashboardChatPane
 					v-show="chatOpen"
 					ref="chatPane"
-					class="shrink-0 border-l"
-					:style="{ width: chatPct + '%' }"
+					:class="isMobile ? 'w-full' : 'shrink-0 border-l'"
+					:style="isMobile ? {} : { width: chatPct + '%' }"
 					:caps="caps"
 					:theme="builderTheme"
 					:editing-name="agentEditingName"
 					@canvas="onCanvas"
 					@reset="resetBuilder"
 					@dashboard="onDashboardSaved"
+					@close="chatOpen = false"
+					@select-conversation="selectDashboardConversation"
 				/>
 			</div>
 
@@ -172,10 +179,8 @@
 				@fix-in-chat="fixInChat"
 			/>
 
-			<!-- Discard confirm. NOT frappe-ui's confirmDialog: that has room for
-			     exactly one action, and telling someone who is about to lose a
-			     canvas that "its chat stays in your conversations" is only useful
-			     with a way to go there. -->
+			<!-- Discard confirm. The thread remains available from this builder's
+			     dashboard-only history; no action escapes into general chat. -->
 			<Dialog
 				v-model="discardOpen"
 				:options="{
@@ -209,9 +214,15 @@ import { Badge, Breadcrumbs, Button, Dialog, Dropdown, FeatherIcon, toast } from
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
 import { session } from "@/data/session";
+import { useShellStore } from "@/stores/shell";
 import { getCanvas } from "@/api";
 import { agentName } from "@/branding";
-import { getDashboardsCaps, getDashboard, getDashboardConversation } from "@/api/dashboards";
+import {
+	getDashboardsCaps,
+	getDashboard,
+	getDashboardConversation,
+	listDashboardConversations,
+} from "@/api/dashboards";
 import { takeDashboardPrefill } from "@/composables/dashboardPrefill";
 import { gotoFiredKey } from "@/lib/chatGoto";
 import { builderCanvasFrame } from "@/lib/dashboardRestore";
@@ -230,6 +241,13 @@ import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const route = useRoute();
 const router = useRouter();
+
+// The builder wants the whole window: it asks the shell to auto-collapse the
+// left rail while it is open (restored on leave, the user's saved preference is
+// never overwritten, see stores/shell.setSpaciousView). `isMobile` drops the
+// side-by-side split for a single-pane swap below the phone breakpoint.
+const shell = useShellStore();
+const isMobile = computed(() => shell.mobile);
 
 const TABS = [
 	{ label: "Builder", value: "builder" },
@@ -343,6 +361,10 @@ const editSeed = ref(routeEdit || (adoptionResume ? "" : editingSticky.value));
 // honours the deep-link too.
 const routeChat = typeof route.query.chat === "string" ? route.query.chat : "";
 const routeCanvas = typeof route.query.canvas === "string" ? route.query.canvas : "";
+// Approval notifications and Approval Board links return a dashboard-origin
+// conversation to its native builder instead of opening it under /c/:id.
+const routeConversation =
+	typeof route.query.conversation === "string" ? route.query.conversation : "";
 // ...and `dash=<name>`: the saved dashboard this conversation already has, sent
 // only when main chat promotes a build made AFTER it. The promotion ADOPTS that
 // row - badge and "Save changes" keep pointing at it - instead of dropping the
@@ -523,40 +545,31 @@ const unsavedCanvas = computed(
 // The canvas is never thrown away silently. Every path that would drop an
 // unsaved dashboard (New dashboard, the chat pane's New chat, opening another
 // dashboard for editing) asks first. The chat itself is NOT lost either way -
-// it stays in the user's conversations - so say so, and offer to go there.
+// it stays in this builder's dashboard-only history.
 const discardOpen = ref(false);
 let discardYes = null;
 let discardNo = null;
 
 const DISCARD_COPY = {
 	title: "Discard this unsaved dashboard?",
-	message: "Its chat stays in your conversations.",
+	message: "Its dashboard chat stays available in this builder.",
 };
 // The ?chat= promotion replaces the whole builder (canvas AND thread), which is
 // worth confirming even when the canvas on screen is a saved document.
 const PROMOTE_COPY = {
 	title: "Discard what's in the builder?",
-	message: "Opening this chat's dashboard replaces it. Its chat stays in your conversations.",
+	message: "Opening this dashboard replaces it. Its dashboard chat stays available here.",
 };
 const discardCopy = ref(DISCARD_COPY);
-// "Open its chat" is an escape hatch to the thread the builder is holding — it
-// is only an escape when that is somewhere ELSE. A caller that is already
-// acting on that same conversation turns it into a loop, so it can drop it.
-const discardOfferChat = ref(true);
 
 // `force` is for callers whose own state (an editing target, another chat's
 // restored canvas) is worth confirming even when `unsavedCanvas` is false.
-function confirmDiscard(
-	onYes,
-	onNo,
-	{ force = false, copy = DISCARD_COPY, offerChat = true } = {}
-) {
+function confirmDiscard(onYes, onNo, { force = false, copy = DISCARD_COPY } = {}) {
 	if (!force && !unsavedCanvas.value) {
 		onYes();
 		return;
 	}
 	discardCopy.value = copy;
-	discardOfferChat.value = offerChat;
 	discardYes = onYes;
 	discardNo = onNo || null;
 	discardOpen.value = true;
@@ -571,26 +584,13 @@ function settleDiscard(yes) {
 	discardNo = null;
 	discardOpen.value = false;
 	discardCopy.value = DISCARD_COPY;
-	discardOfferChat.value = true;
 	if (yes) {
 		if (y) y();
 	} else if (n) n();
 }
 
 const discardActions = computed(() => {
-	const actions = [{ label: "Discard", variant: "solid", onClick: () => settleDiscard(true) }];
-	if (chatConv.value && discardOfferChat.value) {
-		actions.push({
-			label: "Open its chat",
-			variant: "subtle",
-			onClick: () => {
-				const id = chatConv.value;
-				settleDiscard(false);
-				router.push("/c/" + id);
-			},
-		});
-	}
-	return actions;
+	return [{ label: "Discard", variant: "solid", onClick: () => settleDiscard(true) }];
 });
 
 function clearBuilder() {
@@ -630,6 +630,73 @@ function resetBuilder() {
 		if (route.query.edit) router.replace({ query: _withoutEditSeed(), hash: route.hash });
 	});
 }
+
+// Switch within the builder's own chat history. The page owns this operation
+// because changing a thread also changes the canvas/editing identity and must
+// pass through the same unsaved-work guard as every other destructive switch.
+function selectDashboardConversation(row, { force = false } = {}) {
+	if (!row || !row.name || row.name === chatConv.value) return;
+	confirmDiscard(
+		async () => {
+			clearBuilder();
+			activeTab.value = "builder";
+			chatOpen.value = true;
+			if (route.query.edit || route.query.conversation)
+				router.replace({ query: _withoutBuilderSeed(), hash: "" });
+
+			// Seed the durable artifact reference before repointing the pane: its
+			// conversation watcher immediately reloads and can then restore an unsaved
+			// dashboard canvas. A saved dashboard wins once its permission-gated fetch
+			// succeeds and applyEditDetail clears this artifact identity.
+			canvasMsg.value = row.last_canvas_message || "";
+			chatConv.value = row.name;
+			if (row.dashboard_name) {
+				editSeed.value = row.dashboard_name;
+				await loadEdit(row.dashboard_name);
+				// If the saved row disappeared between listing and selection, replay the
+				// thread's last durable canvas frame instead of leaving a blank builder.
+				if (!editingDetail.value && chatPane.value && chatPane.value.restoreCanvas)
+					chatPane.value.restoreCanvas();
+			}
+		},
+		null,
+		{ force, copy: force ? PROMOTE_COPY : DISCARD_COPY }
+	);
+}
+
+async function openDashboardConversationId(id, { force = false } = {}) {
+	if (!id) return;
+	if (id === chatConv.value) {
+		// A notification/Approval Board return to the thread already selected is
+		// still a navigation intent: reveal its AskCard or confirmation rather than
+		// landing on a hidden chat pane and making the user find Show chat.
+		activeTab.value = "builder";
+		chatOpen.value = true;
+		if (route.query.conversation) router.replace({ query: _withoutBuilderSeed(), hash: "" });
+		return;
+	}
+	try {
+		const data = (await listDashboardConversations(id)) || {};
+		const row = (data.rows || []).find((item) => item && item.name === id);
+		if (!row) {
+			toast.error("That dashboard chat is unavailable.");
+			return;
+		}
+		selectDashboardConversation(row, { force });
+	} catch (e) {
+		toast.error(errHtml(e));
+	}
+}
+
+watch(
+	() => route.query.conversation,
+	(value) => {
+		if (route.name !== "DashboardsPage" || route.query.edit || route.query.canvas) return;
+		const id = typeof value === "string" ? value : "";
+		if (!id) return;
+		openDashboardConversationId(id);
+	}
+);
 
 // The state-setting guts of adopting a saved dashboard's detail as the
 // current document - factored out of loadEdit so a caller that already knows
@@ -872,6 +939,14 @@ function _withoutEditSeed() {
 	return q;
 }
 
+// One-shot native-builder return targets must not survive a later history
+// switch and unexpectedly reopen the old thread on refresh.
+function _withoutBuilderSeed() {
+	const q = _withoutEditSeed();
+	delete q.conversation;
+	return q;
+}
+
 function stripPromotionQuery(hash = route.hash) {
 	if (route.name !== "DashboardsPage") return;
 	if (route.query.chat === undefined && route.query.canvas === undefined) return;
@@ -1036,10 +1111,6 @@ async function promoteFromChat(conversation, messageId, { fallback = null, dash 
 	confirmDiscard(accept, () => giveUp(""), {
 		force: true,
 		copy: PROMOTE_COPY,
-		// The builder is already holding the very conversation being promoted
-		// (the same-thread-with-an-editing-identity case), so "Open its chat"
-		// would land the user back in the chat they clicked the button in.
-		offerChat: chatConv.value !== conversation,
 	});
 }
 
@@ -1118,6 +1189,7 @@ function resetSplit() {
 	chatPct.value = 34;
 }
 onBeforeUnmount(stopResize);
+onBeforeUnmount(() => shell.setSpaciousView(false));
 
 // ── caps probe (403 vs transient, TriggersPage pattern) ──────────────────────
 function isPermissionError(e) {
@@ -1125,6 +1197,7 @@ function isPermissionError(e) {
 }
 
 onMounted(async () => {
+	shell.setSpaciousView(true);
 	let fresh = null;
 	try {
 		fresh = await getDashboardsCaps();
@@ -1169,7 +1242,8 @@ onMounted(async () => {
 	// canvas - an ?edit= target or a ?chat=&canvas= promotion IS what the user
 	// asked to land on, and a queued prompt must not race a message into
 	// whatever thread that resolves to instead.
-	const gotoClaimsCanvas = !routeEdit && !(routeChat && routeCanvas) && !!dashboardPrefill;
+	const gotoClaimsCanvas =
+		!routeEdit && !routeConversation && !(routeChat && routeCanvas) && !!dashboardPrefill;
 	// jarvis#912: a REPEAT hand-off for a message that already built a builder
 	// conversation resumes it instead - see resumeGotoHandoff above. `text`
 	// rides along on this shape too, as the fallback build if that conversation
@@ -1183,7 +1257,14 @@ onMounted(async () => {
 			? String(dashboardPrefill.text || "").trim()
 			: "";
 	const gotoMessageId = gotoClaimsCanvas ? dashboardPrefill.messageId || "" : "";
-	if (!routeEdit && routeChat && routeCanvas) {
+	if (!routeEdit && routeConversation && !(routeChat && routeCanvas)) {
+		promotionPending.value = false;
+		// On a fresh mount the previous sticky canvas may not have rehydrated yet;
+		// force the guard when durable state says another builder document exists.
+		await openDashboardConversationId(routeConversation, {
+			force: !!(canvasMsg.value || editingSticky.value),
+		});
+	} else if (!routeEdit && routeChat && routeCanvas) {
 		promoteFromChat(routeChat, routeCanvas, { fallback: normalMount, dash: routeDash });
 	} else {
 		// No promotion will run on this mount (?edit= won, or the pair is half
