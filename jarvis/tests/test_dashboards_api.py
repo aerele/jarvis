@@ -17,6 +17,7 @@ from jarvis.chat.dashboards_api import (
 	delete_dashboard,
 	get_dashboard,
 	get_dashboards_caps,
+	list_dashboard_conversations,
 	list_dashboards_page,
 	run_dashboard_source,
 	save_dashboard,
@@ -33,6 +34,7 @@ DASHBOARD = "Jarvis Dashboard"
 ADMIN_USER = "jarvis-dashapi-admin@example.com"
 PLAIN_A = "jarvis-dashapi-user-a@example.com"
 PLAIN_B = "jarvis-dashapi-user-b@example.com"
+ROLE_VIEWER = "jarvis-dashapi-role-viewer@example.com"
 CUSTOM_ROLE = "Jarvis Dash Test Role"
 
 REPORT_NAME = "Jarvis Dash Test Report"
@@ -107,6 +109,7 @@ class _DashboardsApiTestCase(FrappeTestCase):
 		_ensure_user(ADMIN_USER, [JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE, CUSTOM_ROLE])
 		_ensure_user(PLAIN_A, [JARVIS_USER_ROLE])
 		_ensure_user(PLAIN_B, [JARVIS_USER_ROLE])
+		_ensure_user(ROLE_VIEWER, [JARVIS_USER_ROLE, CUSTOM_ROLE])
 		_ensure_report(REPORT_NAME, prepared=0)
 		_ensure_report(PREPARED_REPORT_NAME, prepared=1)
 		frappe.db.commit()
@@ -561,6 +564,24 @@ class TestSaveDashboard(_DashboardsApiTestCase):
 
 
 class TestRunDashboardSource(_DashboardsApiTestCase):
+	def _shared_restricted_source(self, scope: str, target_role: str = "") -> dict:
+		frappe.set_user(ADMIN_USER)
+		return self._save(
+			{
+				"dashboard_title": f"restricted-{frappe.generate_hash(length=8)}",
+				"html": "<h1>Shared live dashboard</h1>",
+				"scope": scope,
+				"target_role": target_role,
+				"sources": [
+					{
+						"source_name": "restricted_scripts",
+						"tool": "get_list",
+						"spec": {"doctype": "Server Script", "fields": ["name"], "limit": 5},
+					}
+				],
+			}
+		)
+
 	def test_get_list_happy_path_envelope(self):
 		self._mk_todo(PLAIN_A)
 		created = self._mk_connected(
@@ -615,6 +636,48 @@ class TestRunDashboardSource(_DashboardsApiTestCase):
 		r = run_dashboard_source(created["name"], "scripts")
 		self.assertFalse(r["ok"])
 		self.assertEqual(r["error"]["code"], "PermissionError")
+		self.assertFalse(getattr(frappe.local, "message_log", None))
+
+	def test_org_shared_live_dashboard_does_not_grant_source_permissions(self):
+		"""Sharing the shell widens dashboard visibility, never ERP data access."""
+		created = self._shared_restricted_source("Org")
+		frappe.set_user(PLAIN_B)
+		# The share itself is real: the viewer may read/render the saved document.
+		detail = get_dashboard(created["name"])["data"]
+		self.assertEqual(detail["scope"], "Org")
+		self.assertEqual(detail["dashboard_type"], "Connected")
+		self.assertFalse(detail["can_edit"])
+
+		frappe.clear_messages()
+		result = run_dashboard_source(created["name"], "restricted_scripts")
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "PermissionError")
+		self.assertNotIn("traceback", frappe.as_json(result).lower())
+		self.assertFalse(getattr(frappe.local, "message_log", None))
+
+	def test_role_scope_is_checked_before_source_name_or_spec(self):
+		created = self._shared_restricted_source("Role", CUSTOM_ROLE)
+		frappe.set_user(PLAIN_B)
+		with self.assertRaises(frappe.PermissionError):
+			get_dashboard(created["name"])
+		frappe.clear_messages()
+		# Even probing an invented source returns only the dashboard permission
+		# boundary, not whether that source exists on a hidden dashboard.
+		result = run_dashboard_source(created["name"], "invented")
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "PermissionError")
+		self.assertNotIn("invented", result["error"]["message"])
+
+	def test_role_viewer_still_executes_under_their_own_erp_permissions(self):
+		created = self._shared_restricted_source("Role", CUSTOM_ROLE)
+		frappe.set_user(ROLE_VIEWER)
+		detail = get_dashboard(created["name"])["data"]
+		self.assertEqual(detail["target_role"], CUSTOM_ROLE)
+		self.assertFalse(detail["can_edit"])
+		frappe.clear_messages()
+		result = run_dashboard_source(created["name"], "restricted_scripts")
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["error"]["code"], "PermissionError")
 		self.assertFalse(getattr(frappe.local, "message_log", None))
 
 	def test_run_report_happy_path_normalized(self):
@@ -741,6 +804,13 @@ class TestWorkspaceSearchAndContext(_DashboardsApiTestCase):
 			}
 		).insert(ignore_permissions=True)
 		self._convs.append(conv.name)
+		ordinary = frappe.get_doc(
+			{
+				"doctype": "Jarvis Conversation",
+				"title": "ordinary ctx test",
+			}
+		).insert(ignore_permissions=True)
+		self._convs.append(ordinary.name)
 		with (
 			patch("jarvis.chat.api.validate_can_send", return_value=(True, "")),
 			patch("jarvis.chat.api._dispatch_turn") as disp,
@@ -762,9 +832,11 @@ class TestWorkspaceSearchAndContext(_DashboardsApiTestCase):
 			self.assertTrue(r["ok"])
 			kwargs = disp.call_args[0][0]
 			self.assertEqual(kwargs["context"]["page"], "dashboards")
-			# A page value outside the allow-list forwards NO context at all.
+			# A page value outside the allow-list forwards NO context at all on
+			# an ordinary thread.  Dashboard threads themselves are intentionally
+			# fenced from cross-surface human sends.
 			r2 = send_message(
-				conv.name,
+				ordinary.name,
 				"hello again",
 				context=frappe.as_json({"page": "evil"}),
 			)
@@ -840,9 +912,7 @@ class TestWorkspaceSearchAndContext(_DashboardsApiTestCase):
 
 class TestOriginPageStamp(_DashboardsApiTestCase):
 	"""``Jarvis Conversation.origin_page`` — the durable marker that says a chat
-	came from a builder page. The builder's thread is an ordinary conversation
-	that also shows up in the main chat list, where nothing else tells a
-	dashboard artifact apart from any other html canvas."""
+	came from a builder page. Dashboard threads use that marker for isolation."""
 
 	def _conv(self, user: str, title: str = "origin stamp test") -> str:
 		frappe.set_user(user)
@@ -903,11 +973,22 @@ class TestOriginPageStamp(_DashboardsApiTestCase):
 		self.assertTrue(self._send(conv, "now from the builder", {"page": "dashboards"})["ok"])
 		self.assertEqual(self._origin(conv), "dashboards")
 
-	def test_the_stamp_is_written_once_and_never_flips(self):
+	def test_a_builder_thread_cannot_be_taken_over_by_another_surface(self):
 		conv = self._conv(PLAIN_A)
-		self._send(conv, "build me a dashboard", {"page": "dashboards"})
-		self._send(conv, "and again", {"page": "triggers"})
+		self.assertTrue(self._send(conv, "build me a dashboard", {"page": "dashboards"})["ok"])
+		before = frappe.db.count("Jarvis Chat Message", {"conversation": conv})
+		out = self._send(conv, "and again", {"page": "triggers"})
+		self.assertFalse(out["ok"])
+		self.assertIn("Dashboard Builder", out["reason"])
+		self.assertEqual(frappe.db.count("Jarvis Chat Message", {"conversation": conv}), before)
 		self.assertEqual(self._origin(conv), "dashboards")
+
+	def test_main_chat_cannot_post_into_a_dashboard_thread(self):
+		conv = self._conv(PLAIN_A)
+		self.assertTrue(self._send(conv, "build me a dashboard", {"page": "dashboards"})["ok"])
+		out = self._send(conv, "continue from /c")
+		self.assertFalse(out["ok"])
+		self.assertIn("Dashboard Builder", out["reason"])
 
 	def test_get_conversation_returns_origin_page(self):
 		from jarvis.chat.api import get_conversation
@@ -956,6 +1037,76 @@ class TestOriginPageStamp(_DashboardsApiTestCase):
 				)
 			self.assertEqual(out["ok"], expect_ok)
 			self.assertEqual(self._origin(conv), "dashboards")
+
+
+class TestDashboardConversationList(_DashboardsApiTestCase):
+	def _conv(
+		self,
+		user: str,
+		*,
+		origin: str = "dashboards",
+		with_message: bool = True,
+		status: str = "Active",
+		canvas: bool = False,
+	) -> tuple[str, str]:
+		frappe.set_user(user)
+		conv = frappe.get_doc(
+			{
+				"doctype": "Jarvis Conversation",
+				"title": f"history-{frappe.generate_hash(length=6)}",
+				"status": status,
+				"origin_page": origin,
+			}
+		).insert(ignore_permissions=True)
+		self._convs.append(conv.name)
+		message = ""
+		if with_message:
+			msg = frappe.get_doc(
+				{
+					"doctype": "Jarvis Chat Message",
+					"conversation": conv.name,
+					"seq": 1,
+					"role": "assistant",
+					"content": "built",
+					"canvas": (
+						frappe.as_json(
+							[{"type": "html", "name": "documents/history/index.html"}]
+						)
+						if canvas
+						else None
+					),
+				}
+			).insert(ignore_permissions=True)
+			message = msg.name
+		frappe.db.commit()
+		return conv.name, message
+
+	def test_returns_only_owned_nonempty_active_dashboard_threads(self):
+		wanted, canvas_message = self._conv(PLAIN_A, canvas=True)
+		ordinary, _ = self._conv(PLAIN_A, origin="")
+		trigger, _ = self._conv(PLAIN_A, origin="triggers")
+		empty, _ = self._conv(PLAIN_A, with_message=False)
+		archived, _ = self._conv(PLAIN_A, status="Archived")
+		foreign, _ = self._conv(PLAIN_B)
+		dashboard = self._mk_static(PLAIN_A, title="History dashboard", source_conversation=wanted)
+
+		frappe.set_user(PLAIN_A)
+		rows = list_dashboard_conversations()["data"]["rows"]
+		by_name = {row["name"]: row for row in rows}
+		self.assertIn(wanted, by_name)
+		for hidden in (ordinary, trigger, empty, archived, foreign):
+			self.assertNotIn(hidden, by_name)
+		self.assertEqual(by_name[wanted]["dashboard_name"], dashboard["name"])
+		self.assertEqual(by_name[wanted]["dashboard_title"], "History dashboard")
+		self.assertEqual(by_name[wanted]["last_canvas_message"], canvas_message)
+
+		# Exact lookup is what notification/Approval Board deep-links use. It is
+		# still namespace- and owner-scoped, independent of the bounded menu page.
+		self.assertEqual(
+			list_dashboard_conversations(wanted)["data"]["rows"][0]["name"], wanted
+		)
+		self.assertEqual(list_dashboard_conversations(ordinary)["data"]["rows"], [])
+		self.assertEqual(list_dashboard_conversations(foreign)["data"]["rows"], [])
 
 
 class TestDashboardForConversation(_DashboardsApiTestCase):

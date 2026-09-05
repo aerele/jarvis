@@ -105,3 +105,38 @@ class TestPublishToUser(FrappeTestCase):
 			{"kind": "run:start"},
 			user="alice@example.com",
 		)
+
+	def test_dashboard_terminal_carries_durable_origin(self):
+		payload = {"kind": "run:end", "conversation_id": "conv-dashboard"}
+		with (
+			patch("frappe.db.get_value", return_value="dashboards") as get_origin,
+			patch("frappe.publish_realtime") as mock_pub,
+		):
+			publish_to_user("alice@example.com", payload)
+
+		get_origin.assert_called_once_with(
+			"Jarvis Conversation", "conv-dashboard", "origin_page"
+		)
+		mock_pub.assert_called_once_with(
+			"jarvis:event",
+			{
+				"kind": "run:end",
+				"conversation_id": "conv-dashboard",
+				"origin_page": "dashboards",
+			},
+			user="alice@example.com",
+		)
+		# The wrapper must not mutate a caller-owned dict that may be reused.
+		self.assertNotIn("origin_page", payload)
+
+	def test_streaming_events_do_not_pay_an_origin_lookup(self):
+		with (
+			patch("frappe.db.get_value") as get_origin,
+			patch("frappe.publish_realtime") as mock_pub,
+		):
+			publish_to_user(
+				"alice@example.com",
+				{"kind": "assistant:delta", "conversation_id": "conv-dashboard"},
+			)
+		get_origin.assert_not_called()
+		mock_pub.assert_called_once()

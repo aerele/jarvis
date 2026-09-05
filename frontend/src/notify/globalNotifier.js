@@ -48,7 +48,7 @@ export function pushToast({ title, body, onClick }) {
 	toasts.value = next;
 	_timers.set(
 		id,
-		setTimeout(() => dismissToast(id), TOAST_MS)
+		setTimeout(() => dismissToast(id), TOAST_MS),
 	);
 	return id;
 }
@@ -106,6 +106,24 @@ export function attachGlobalNotifier({ socket, router }) {
 			return null;
 		}
 	};
+	const dashboardStoredConv = () => {
+		try {
+			return localStorage.getItem(`jarvis-dash-conv-${session.user || "anon"}`) || null;
+		} catch (e) {
+			return null;
+		}
+	};
+	const dashboardsPaneConv = () => {
+		const r = router.currentRoute.value;
+		if (r.name !== "DashboardsPage" || String(r.hash || "").startsWith("#saved")) return null;
+		return dashboardStoredConv();
+	};
+	const conversationPath = (conv, originPage = "") =>
+		originPage === "dashboards" || (conv && conv === dashboardStoredConv())
+			? { name: "DashboardsPage", query: { conversation: conv } }
+			: conv
+				? "/c/" + conv
+				: "/";
 	const convTitle = (id) => (id && store.conversations.find((c) => c.name === id)?.title) || "";
 	const go = (path) => {
 		try {
@@ -183,8 +201,11 @@ export function attachGlobalNotifier({ socket, router }) {
 				// it like the on-screen chat: no unread dot, no "Reply ready" toast.
 				// A hidden tab still browser-notifies below, same as a hidden chat.
 				const onTriggersPane = conv === triggersPaneConv();
-				if (onTriggersPane && !document.hidden) return;
-				if (!onTriggersPane && conv !== onScreenConv()) {
+				const onDashboardsPane = conv === dashboardsPaneConv();
+				const dashboardConversation =
+					p.origin_page === "dashboards" || conv === dashboardStoredConv();
+				if ((onTriggersPane || onDashboardsPane) && !document.hidden) return;
+				if (!onTriggersPane && !dashboardConversation && conv !== onScreenConv()) {
 					// the sidebar unread dot — the in-app "multiple chats" signal
 					store.markUnread(conv);
 					// keep the row's title/order honest (debounced reload)
@@ -198,7 +219,14 @@ export function attachGlobalNotifier({ socket, router }) {
 					p.kind === "run:error"
 						? `${agentName} hit an error in ${convTitle(conv) || "your chat"}`
 						: _excerpt(p.preview) || "Reply ready";
-				signal({ conv, title, body, tag: "jarvis-" + conv, open: () => go("/c/" + conv) });
+				signal({
+					conv,
+					title,
+					body,
+					tag: "jarvis-" + conv,
+					open: () =>
+						go(conversationPath(conv, dashboardConversation ? "dashboards" : "")),
+				});
 				return;
 			}
 			case "action:pending": {
@@ -206,27 +234,37 @@ export function attachGlobalNotifier({ socket, router }) {
 				// it still reached THIS user's socket, so fall back to the active chat)
 				const conv = p.conversation || store.currentConvId || null;
 				const tool = p.tool ? String(p.tool).replace(/^jarvis__/, "") : "";
+				if (conv === dashboardsPaneConv() && !document.hidden) return;
 				signal({
 					conv,
 					title: convTitle(conv) || agentName,
 					body: `${agentName} needs your confirmation` + (tool ? ": " + tool : ""),
 					tag: "jarvis-" + (conv || "confirm"),
-					open: () => go(conv ? "/c/" + conv : "/"),
+					open: () => go(conversationPath(conv, p.origin_page || "")),
 				});
 				return;
 			}
 			case "approval:new": {
 				// bump the badge NOW — the 60s poll reconciles later
 				store.approvalsCount = (store.approvalsCount || 0) + 1;
+				const conv = p.conversation_id || null;
+				const dashboardApproval = p.origin_page === "dashboards";
+				if (dashboardApproval && conv === dashboardsPaneConv() && !document.hidden) return;
 				signal({
 					conv: null,
 					toastAnywhere: true, // waiting-on-you is worth a toast even on-conversation
 					title: `${agentName} is waiting on you`,
-					body:
-						_excerpt(p.question) ||
-						"A question needs your answer on the Approval Board.",
-					tag: "jarvis-" + (p.conversation_id || "approvals"),
-					open: () => go("/approvals"),
+					body: dashboardApproval
+						? _excerpt(p.question) || "A dashboard question needs your answer."
+						: _excerpt(p.question) ||
+							"A question needs your answer on the Approval Board.",
+					tag: "jarvis-" + (conv || "approvals"),
+					open: () =>
+						go(
+							dashboardApproval
+								? conversationPath(conv, "dashboards")
+								: "/approvals",
+						),
 				});
 				return;
 			}
@@ -252,14 +290,14 @@ export function attachGlobalNotifier({ socket, router }) {
 					status === "Failed"
 						? "Trigger failed"
 						: status === "Blocked"
-						? "Trigger blocked a save"
-						: "Trigger fired";
+							? "Trigger blocked a save"
+							: "Trigger fired";
 				const body =
 					status === "Failed"
 						? `${what} hit an error. Open the activity log for details.`
 						: status === "Blocked"
-						? `${what} blocked a document from saving.`
-						: `${what} ran. See the activity log for what it found.`;
+							? `${what} blocked a document from saving.`
+							: `${what} ran. See the activity log for what it found.`;
 				const open = () => go("/triggers#activity");
 				// like conversation:new, hand-rolled: signal() would swallow a
 				// conv-less toast on non-chat routes (null === onScreenConv()).

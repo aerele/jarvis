@@ -159,6 +159,30 @@ def _allowed_pin_models(settings) -> set[str]:
 # send context — a literal allow-list (not passthrough), mirrors the DocType
 # `theme` Select + frontend/src/lib/dashboardThemes.js.
 _DASHBOARD_THEME_KEYS = {"jarvis", "insight", "claude", "graphite", "custom"}
+_BUILDER_ORIGINS = {"dashboards", "triggers"}
+_ISOLATED_ORIGINS = {"dashboards"}
+
+
+def _normalise_origin_page(origin_page: str | None) -> str:
+	"""Validate an explicit conversation namespace used by first-party builders."""
+	origin = str(origin_page or "").strip().lower()
+	if origin and origin not in _BUILDER_ORIGINS:
+		frappe.throw(_("Invalid conversation origin."))
+	return origin
+
+
+def _origin_page_from_context(context: str | dict | None) -> str:
+	"""Read only the literal builder namespace from an otherwise wider context."""
+	if not context:
+		return ""
+	try:
+		parsed = frappe.parse_json(context)
+	except Exception:
+		return ""
+	if not isinstance(parsed, dict):
+		return ""
+	origin = str(parsed.get("page") or "").strip().lower()
+	return origin if origin in _BUILDER_ORIGINS else ""
 
 
 @frappe.whitelist()
@@ -204,6 +228,7 @@ def list_conversations() -> list[dict]:
 		        WHERE m.conversation = c.name) AS message_count
 		FROM `tabJarvis Conversation` c
 		WHERE c.owner = %s AND c.status = 'Active'
+		  AND COALESCE(c.origin_page, '') != 'dashboards'
 		  AND EXISTS (
 		    SELECT 1 FROM `tabJarvis Chat Message` m2
 		    WHERE m2.conversation = c.name
@@ -237,6 +262,10 @@ def search_conversations(search: str = "", start: int = 0, page_length: int = 20
 	conds = [
 		"c.owner = %(me)s",
 		"c.status = 'Active'",
+		# Dashboard Builder threads have their own in-context history and must not
+		# leak into the general chat palette. Other origin markers retain their
+		# established behavior.
+		"COALESCE(c.origin_page, '') != 'dashboards'",
 		# Hide empty (message-less) drafts, mirroring list_conversations.
 		"EXISTS (SELECT 1 FROM `tabJarvis Chat Message` m WHERE m.conversation = c.name)",
 	]
@@ -561,7 +590,7 @@ def search_workspace(search: str = "", limit: int = 6) -> dict:
 
 
 @frappe.whitelist()
-def create_or_focus_empty() -> str:
+def create_or_focus_empty(origin_page: str = "") -> str:
 	"""Return an empty active conversation for the current user, creating
 	one only if no empty conversation already exists.
 
@@ -570,6 +599,7 @@ def create_or_focus_empty() -> str:
 	"""
 	require_jarvis_access()
 	user = frappe.session.user
+	origin = _normalise_origin_page(origin_page)
 	# Reuse only a genuine blank chat. A File-Box drop that failed to send
 	# (filebox.drop_file) leaves a 0-message file_box conversation with the
 	# uploaded File attached - reusing THAT as a "New Chat" would silently inherit
@@ -581,6 +611,7 @@ def create_or_focus_empty() -> str:
 		SELECT c.name
 		FROM `tabJarvis Conversation` c
 		WHERE c.owner = %s AND c.status = 'Active'
+		  AND COALESCE(c.origin_page, '') = %s
 		  AND c.file_box = 0
 		  AND NOT EXISTS (
 		    SELECT 1 FROM `tabJarvis Chat Message` m
@@ -594,7 +625,7 @@ def create_or_focus_empty() -> str:
 		ORDER BY c.last_active_at DESC
 		LIMIT 1
 		""",
-		(user,),
+		(user, origin),
 	)
 	if empty:
 		# Focusing an existing empty as the target of a New Chat is activity: bump
@@ -602,17 +633,19 @@ def create_or_focus_empty() -> str:
 		# delete it out from under a tab the user just opened onto it.
 		frappe.db.set_value(CONV, empty[0][0], "last_active_at", frappe.utils.now())
 		return empty[0][0]
-	# Count only genuinely-new interactive chats toward the business-greeting
-	# cadence (every third new chat surfaces the card). Hooked here rather than
-	# in create_conversation() so unattended File Box drops don't count. A
-	# counter failure must never break chat creation.
-	try:
-		from jarvis.chat.greeting import increment_new_chat_count
+	# Count only genuinely-new MAIN chats toward the business-greeting cadence
+	# (every third new chat surfaces the card). Dashboard history is a separate
+	# workspace namespace and must not silently advance the main-chat greeting.
+	# Hooked here rather than in create_conversation() so unattended File Box
+	# drops do not count. A counter failure must never break chat creation.
+	if origin != "dashboards":
+		try:
+			from jarvis.chat.greeting import increment_new_chat_count
 
-		increment_new_chat_count(user)
-	except Exception as e:
-		frappe.log_error(title="jarvis greeting count", message=str(e))
-	return create_conversation()
+			increment_new_chat_count(user)
+		except Exception as e:
+			frappe.log_error(title="jarvis greeting count", message=str(e))
+	return create_conversation(origin_page=origin)
 
 
 @frappe.whitelist()
@@ -665,6 +698,24 @@ def get_conversation(conversation: str) -> dict:
 				m["canvas"] = frappe.parse_json(m["canvas"])
 			except Exception:
 				m["canvas"] = None
+	context_usage = {"used": 0, "capacity": 0, "pct": 0, "updated_at": ""}
+	if doc.session_key:
+		# Session usage is private even though the conversation owner check above
+		# already passed. Bind both keys so a corrupted/cross-linked session_key can
+		# never reveal another user's context consumption.
+		snapshot = frappe.db.get_value(
+			"Jarvis Chat Session",
+			{"session_key": doc.session_key, "user": frappe.session.user},
+			["last_total_tokens", "context_capacity", "context_pct", "last_usage_at"],
+			as_dict=True,
+		)
+		if snapshot:
+			context_usage = {
+				"used": int(snapshot.last_total_tokens or 0),
+				"capacity": int(snapshot.context_capacity or 0),
+				"pct": float(snapshot.context_pct or 0),
+				"updated_at": str(snapshot.last_usage_at or ""),
+			}
 	return {
 		"conversation": {
 			"name": doc.name,
@@ -680,6 +731,7 @@ def get_conversation(conversation: str) -> dict:
 			# "Open in Dashboards" on a builder conversation's html artifacts.
 			"origin_page": doc.get("origin_page") or "",
 			"last_active_at": doc.last_active_at,
+			"context_usage": context_usage,
 		},
 		"messages": messages,
 	}
@@ -800,14 +852,16 @@ def preview_file(file_url: str) -> dict:
 
 
 @frappe.whitelist()
-def create_conversation() -> str:
+def create_conversation(origin_page: str = "") -> str:
 	"""Create an empty conversation owned by the current user; return its name."""
 	require_jarvis_access()
+	origin = _normalise_origin_page(origin_page)
 	doc = frappe.get_doc(
 		{
 			"doctype": CONV,
 			"title": "New chat",
 			"status": "Active",
+			"origin_page": origin,
 		}
 	)
 	doc.insert()
@@ -1278,12 +1332,13 @@ def send_message(
 	ok, reason = validate_can_send(user)
 	if not ok:
 		return {"ok": False, "reason": reason}
+	requested_origin = _origin_page_from_context(context)
 
 	# No conversation yet (first send from a fresh chat surface): create or
 	# focus the user's empty conversation here instead of a separate
 	# round-trip from the SPA.
 	if not conversation:
-		conversation = create_or_focus_empty()
+		conversation = create_or_focus_empty(origin_page=requested_origin)
 
 	# Attachments arrive as a JSON string of [{file_url, file_name}, ...] from
 	# the composer's file picker (already uploaded to the Frappe File doctype).
@@ -1315,8 +1370,25 @@ def send_message(
 	except frappe.DoesNotExistError:
 		if _delegated:
 			raise
-		conversation = create_or_focus_empty()
+		conversation = create_or_focus_empty(origin_page=requested_origin)
 		conv_doc = _get_owned_conversation(conversation)
+
+	# Builder threads are application-scoped workspaces, not aliases for main
+	# chat. A direct /c/<id> visit therefore cannot post into one without the
+	# matching first-party page context, and one builder cannot take over another
+	# builder's thread. Trusted delegated continuations (approval resume,
+	# scheduler, recovery) are allowed because they act on an already-owned row
+	# rather than a browser-selected surface.
+	existing_origin = (conv_doc.get("origin_page") or "").strip().lower()
+	if (
+		not _delegated
+		and existing_origin in _ISOLATED_ORIGINS
+		and requested_origin != existing_origin
+	):
+		return {
+			"ok": False,
+			"reason": _("Continue this conversation in Dashboard Builder."),
+		}
 
 	_reject_send_into_armed_conversation(conv_doc)
 
@@ -1466,25 +1538,19 @@ def send_message(
 	# Session row BEFORE streaming starts (2026-07 latency plan, Phase 1.1).
 	first_turn = 1 if not conv_doc.session_key else 0
 
-	# Remember which builder page this thread came from. A builder conversation is
-	# an ordinary Jarvis Conversation that also shows up in the main chat list,
-	# where nothing else tells a dashboard artifact apart from any other html
-	# canvas - so the origin has to be data, not client state. Stamped on EVERY
-	# qualifying send rather than at creation, so a thread that predates the field
-	# self-heals the next time the user chats from the builder.
+	# Remember which builder page owns this thread. Dashboard conversations have
+	# native, origin-scoped history and are excluded from main chat, so the marker
+	# must be durable data rather than a client-only routing hint. Stamp every
+	# qualifying builder send rather than only at creation so a pre-field legacy
+	# thread self-heals the next time the user continues it from its builder.
 	#
 	# It rides the save+commit below deliberately: admission.accept_or_queue rolls
 	# back on its overload-reject and duplicate-replay paths, so a stamp written
 	# after that commit would be silently discarded on a busy site. The parse is
 	# side-effect-free and reads the same two-value literal allow-list the enqueue
 	# payload applies further down.
-	if context and not (conv_doc.get("origin_page") or ""):
-		try:
-			_octx = frappe.parse_json(context)
-			if isinstance(_octx, dict) and _octx.get("page") in ("triggers", "dashboards"):
-				conv_doc.origin_page = _octx["page"]
-		except Exception:
-			pass
+	if requested_origin and not existing_origin:
+		conv_doc.origin_page = requested_origin
 
 	if _delegated:
 		conv_doc.flags.ignore_permissions = True

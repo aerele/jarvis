@@ -130,9 +130,12 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	# flips the old row the moment the user replies.
 	if frappe.db.exists(APPROVAL, {"conversation": conversation, "status": "Pending", "source": "Chat"}):
 		return None
-	owner = frappe.db.get_value(CONV, conversation, "owner")
-	if not owner:
+	conversation_meta = frappe.db.get_value(
+		CONV, conversation, ["owner", "origin_page"], as_dict=True
+	)
+	if not conversation_meta:
 		return None
+	owner = conversation_meta.owner
 	# One decision field per row: a single question carries its options as
 	# board chips; a multi-question block becomes a free-form row (the board
 	# routes those to "Answer in chat").
@@ -163,6 +166,7 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 		{
 			"kind": "approval:new",
 			"conversation_id": conversation,
+			"origin_page": conversation_meta.origin_page or "",
 			"name": doc.name,
 			"question": question_text,
 		},
