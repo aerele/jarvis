@@ -1,8 +1,9 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watchEffect } from "vue";
 import { installPrompt, isStandalone } from "../install";
 import { agentName } from "@/branding";
 import BrandMark from "./BrandMark.vue";
+import { installBannerVisible } from "../lib/installBanner";
 
 // "Add Jarvis to your home screen." Two different worlds:
 //  - Chrome/Android fires beforeinstallprompt. That event is captured in
@@ -38,6 +39,13 @@ const show = computed(
 		!isStandalone() &&
 		(!!installPrompt.value || isIos.value || insecure.value)
 );
+
+// Slice 3b: expose this banner's visibility so App.vue can keep the
+// release-nudge banner out of the same top-of-app slot (see
+// lib/installBanner.js and App.vue's UpdateBanner v-if).
+watchEffect(() => {
+	installBannerVisible.value = show.value;
+});
 
 async function install() {
 	const e = installPrompt.value;

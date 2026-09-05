@@ -23,15 +23,22 @@
 			<button class="jv-gate-btn" :disabled="checking" @click="recheck">
 				{{ checking ? "Checking…" : "I've updated, check again" }}
 			</button>
+
+			<button type="button" class="jv-gate-link" @click="openWhatsNew">
+				See what's new
+			</button>
 		</div>
+
+		<WhatsNewDialog />
 	</div>
 </template>
 
 <script setup>
 import { onMounted, onBeforeUnmount } from "vue";
 import JarvisMark from "@/components/JarvisMark.vue";
+import WhatsNewDialog from "@/components/chat/WhatsNewDialog.vue";
 import { agentName } from "@/branding";
-import { checking, notice, recheck } from "@/noticeGate";
+import { checking, notice, openWhatsNew, recheck } from "@/noticeGate";
 
 // Boot read a mirror that may predate the update, so re-pull once on mount and
 // then poll: an open tab has no other way to learn the notice was lifted.
@@ -155,5 +162,25 @@ onBeforeUnmount(() => clearInterval(timer));
 .jv-gate-btn:disabled {
 	opacity: 0.6;
 	cursor: default;
+}
+
+.jv-gate-link {
+	margin-top: 14px;
+	border: none;
+	background: transparent;
+	font-size: 13.5px;
+	font-weight: 500;
+	color: var(--link, #1579d0);
+	cursor: pointer;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+.jv-gate-link:hover {
+	opacity: 0.82;
+}
+.jv-gate-link:focus-visible {
+	outline: 2px solid var(--link, #1579d0);
+	outline-offset: 2px;
+	border-radius: 4px;
 }
 </style>

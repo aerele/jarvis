@@ -18,6 +18,8 @@ _FIELDS = (
 	"latest_jarvis_version",
 	"release_notice_message",
 	"release_notice_tier",
+	"release_notice_behind",
+	"release_banner_interval_days",
 )
 
 
@@ -148,6 +150,138 @@ class TestBootPayload(FrappeTestCase):
 		release_notice.persist({"active": 1, "tier": "hard", "version": NEWER, "message": "m"})
 		release_notice.persist({})
 		self.assertEqual(release_notice.boot_payload()["tier"], "none")
+
+	# -- behind / banner interval (Slice 3b) ----------------------------------
+
+	def test_boot_soft(self):
+		self._set(
+			release_notice_active=0,
+			latest_jarvis_version=NEWER,
+			release_notice_tier="soft",
+			release_notice_behind=2,
+			release_banner_interval_days=14,
+		)
+		p = release_notice.boot_payload()
+		self.assertEqual(p["tier"], "soft")
+		self.assertEqual(p["behind"], 2)
+		self.assertFalse(p["active"])
+		self.assertEqual(p["banner_interval_days"], 14)
+
+	def test_boot_hard_active_true(self):
+		self._set(
+			release_notice_active=1,
+			latest_jarvis_version=NEWER,
+			release_notice_tier="hard",
+			release_notice_behind=4,
+		)
+		p = release_notice.boot_payload()
+		self.assertEqual(p["tier"], "hard")
+		self.assertTrue(p["active"])
+		self.assertEqual(p["behind"], 4)
+
+	def test_boot_current_zeroes_behind(self):
+		# Bench already at/past target: `behind` reads 0 regardless of a stale stored value.
+		self._set(
+			release_notice_active=1,
+			latest_jarvis_version=__version__,
+			release_notice_tier="hard",
+			release_notice_behind=9,
+		)
+		p = release_notice.boot_payload()
+		self.assertEqual(p["behind"], 0)
+		self.assertEqual(p["tier"], "none")
+		self.assertFalse(p["active"])
+
+	def test_self_clear_forces_current(self):
+		# The bench holds the target version -> everything reads current even with a
+		# stored hard tier and a non-zero behind (control plane need not be reachable).
+		release_notice.persist(
+			{"active": 1, "tier": "hard", "version": __version__, "message": "m", "behind": 5}
+		)
+		p = release_notice.boot_payload()
+		self.assertFalse(p["active"])
+		self.assertEqual(p["tier"], "none")
+		self.assertEqual(p["behind"], 0)
+
+	def test_active_equals_tier_hard(self):
+		# The load-bearing invariant: active is true exactly when the tier is hard,
+		# across every producible tier.
+		for tier, act in (("hard", 1), ("soft", 0), ("none", 0)):
+			release_notice.persist(
+				{"active": act, "tier": tier, "version": NEWER, "message": "m", "behind": 1}
+			)
+			p = release_notice.boot_payload()
+			self.assertEqual(p["active"], p["tier"] == "hard", tier)
+
+	def test_oldcp_no_behind_defaults_zero(self):
+		# An old CP omits `behind`; persist stores 0 and boot reports 0 (no crash, no stale).
+		release_notice.persist({"active": 0, "tier": "soft", "version": NEWER, "message": "m"})
+		self.assertEqual(release_notice.boot_payload()["behind"], 0)
+
+	def test_oldcp_no_interval_defaults_seven(self):
+		# An old CP omits `banner_interval_days`; persist/boot default it to 7.
+		release_notice.persist({"active": 0, "tier": "soft", "version": NEWER, "message": "m"})
+		self.assertEqual(release_notice.boot_payload()["banner_interval_days"], 7)
+
+
+class TestNotes(FrappeTestCase):
+	"""jarvis.release_notice.notes() derives the track + since-version from the bench's
+	own version and degrades every admin failure to an empty list."""
+
+	def test_notes_derives_track_and_since(self):
+		with (
+			patch.object(release_notice, "__version__", "16.2.0"),
+			patch(
+				"jarvis.admin_client.get_release_notes",
+				return_value={"notes": [{"version": "16.4.0"}]},
+			) as gn,
+		):
+			out = release_notice.notes()
+		gn.assert_called_once_with("16", "16.2.0", timeout_s=8)
+		self.assertEqual(out, {"notes": [{"version": "16.4.0"}]})
+		# A clean success never carries the error flag -> the panel shows notes /
+		# "all caught up", never its error state.
+		self.assertNotIn("error", out)
+
+	def test_notes_swallows_and_logs_admin_error(self):
+		with (
+			patch.object(release_notice, "__version__", "16.2.0"),
+			patch("jarvis.admin_client.get_release_notes", side_effect=RuntimeError("boom")),
+			patch("frappe.log_error") as log,
+		):
+			out = release_notice.notes()
+		# A genuine fetch failure flags the error so the panel shows its error state
+		# (+ Retry), NOT the misleading "all caught up" empty state.
+		self.assertEqual(out, {"notes": [], "error": True})
+		log.assert_called_once()
+
+	def test_notes_auth_error_returns_empty(self):
+		# A lapsed customer behind a stale pill: get_release_notes raises AdminAuthError.
+		# notes() must swallow it (never propagate raw CP prose) and flag the error state.
+		from jarvis.exceptions import AdminAuthError
+
+		with (
+			patch.object(release_notice, "__version__", "16.2.0"),
+			patch(
+				"jarvis.admin_client.get_release_notes",
+				side_effect=AdminAuthError("lapsed", status_code=403),
+			),
+			patch("frappe.log_error"),
+		):
+			out = release_notice.notes()
+		self.assertEqual(out, {"notes": [], "error": True})
+
+	def test_notes_unversioned_empty(self):
+		# major < 15 short-circuits before any admin round-trip. "Nothing to show" is
+		# NOT an error, so no error flag travels -> the panel shows "all caught up".
+		with (
+			patch.object(release_notice, "__version__", "0.0.1"),
+			patch("jarvis.admin_client.get_release_notes") as gn,
+		):
+			out = release_notice.notes()
+		self.assertEqual(out, {"notes": []})
+		self.assertNotIn("error", out)
+		gn.assert_not_called()
 
 
 class TestVersionParse(FrappeTestCase):

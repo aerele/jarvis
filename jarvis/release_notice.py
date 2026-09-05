@@ -6,6 +6,7 @@ tenant that has updated is never stranded by an unreachable control plane.
 """
 
 import frappe
+from frappe.utils import cint
 
 from jarvis import __version__
 
@@ -15,6 +16,8 @@ _FIELDS = (
 	"latest_jarvis_version",
 	"release_notice_message",
 	"release_notice_tier",
+	"release_notice_behind",
+	"release_banner_interval_days",
 )
 _CHECK_CACHE_KEY = "jarvis:release_notice_checked"
 _CHECK_CACHE_TTL_S = 30
@@ -53,6 +56,10 @@ def persist(notice: dict) -> None:
 			# Back-compat: an old CP omits `tier`, so derive it from `active` -- a hard
 			# gate still reads "hard", everything else "none".
 			"release_notice_tier": n.get("tier") or ("hard" if n.get("active") else "none"),
+			# `behind` powers the pill/banner copy; an old CP omits it -> 0. The banner
+			# reappear interval is operator-tunable, defaulting to 7 when absent/0.
+			"release_notice_behind": cint(n.get("behind")),
+			"release_banner_interval_days": cint(n.get("banner_interval_days")) or 7,
 		}
 		current = frappe.db.get_value(SETTINGS, SETTINGS, list(_FIELDS), as_dict=True) or {}
 		if all(current.get(k) == v for k, v in fresh.items()):
@@ -63,12 +70,14 @@ def persist(notice: dict) -> None:
 
 
 def boot_payload() -> dict:
-	"""``release_notice`` for context.boot. The SPA gates on `active`."""
+	"""``release_notice`` for context.boot. The SPA gates the hard lockout on
+	`active`; the always-on pill and the soft banner derive their display state
+	from `version`/`tier`/`behind` (no `state` travels on the wire)."""
 	row = frappe.get_cached_value(SETTINGS, SETTINGS, list(_FIELDS), as_dict=True) or {}
 	target = (row.get("latest_jarvis_version") or "").strip()
 	# Self-clear: this bench is already at the target, so don't wait on the control
 	# plane to say so - otherwise an unreachable or mis-credentialed admin would
-	# keep an updated tenant blocked with no way out. Clears BOTH tiers.
+	# keep an updated tenant blocked with no way out. Clears BOTH tiers and behind.
 	current = _already_current(target)
 	active = bool(row.get("release_notice_active")) and not current
 	tier = "none" if current else (row.get("release_notice_tier") or ("hard" if active else "none"))
@@ -77,6 +86,8 @@ def boot_payload() -> dict:
 		"version": target,
 		"message": row.get("release_notice_message") or "",
 		"tier": tier,
+		"behind": 0 if current else cint(row.get("release_notice_behind")),
+		"banner_interval_days": cint(row.get("release_banner_interval_days")) or 7,
 	}
 
 
@@ -98,3 +109,33 @@ def check() -> dict:
 		except Exception:
 			pass
 	return boot_payload()
+
+
+@frappe.whitelist(methods=["POST"])
+def notes() -> dict:
+	"""Cumulative "what's new" notes for this bench's major line, fetched on demand
+	when the customer opens the panel. The bench owns the version, so the client
+	passes nothing. Any admin failure (unreachable, or an ``AdminAuthError`` from a
+	lapsed customer behind a stale pill) degrades to an empty list - the panel shows
+	a friendly error, never raw control-plane prose - and is logged."""
+	from jarvis import admin_client
+
+	major = _version(__version__)[0]
+	if major < 15:
+		# Nothing to show for an unversioned line - NOT an error, so no error flag.
+		return {"notes": []}
+	try:
+		res = admin_client.get_release_notes(str(major), __version__, timeout_s=8) or {}
+	except Exception:
+		try:
+			frappe.log_error(
+				title="release_notice.notes: admin unreachable",
+				message=frappe.get_traceback(),
+			)
+		except Exception:
+			pass
+		# A genuine fetch failure (unreachable admin, or an AdminAuthError from a
+		# lapsed customer): flag it so the panel shows its error state + Retry,
+		# never the misleading "all caught up".
+		return {"notes": [], "error": True}
+	return {"notes": res.get("notes") or []}
