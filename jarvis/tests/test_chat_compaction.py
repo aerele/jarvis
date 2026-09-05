@@ -9,6 +9,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import api as chat_api
 from jarvis.chat import compaction
+from jarvis.chat.events import parse_event
 
 CHAT_SESSION = "Jarvis Chat Session"
 CONV = "Jarvis Conversation"
@@ -301,3 +302,17 @@ class TestCompactEndpoints(FrappeTestCase):
 			out = chat_api.send_message(conv, "hello")
 		self.assertEqual(out, {"ok": False, "reason": "Compacting this chat, try again in a moment"})
 		self.assertFalse(frappe.db.exists(MSG, {"conversation": conv}))
+
+
+class TestCompactionEvent(FrappeTestCase):
+	def test_parse_event_maps_compaction(self):
+		self.assertEqual(
+			parse_event({"stream": "compaction", "data": {"phase": "start"}}),
+			{"kind": "compaction", "phase": "start", "completed": False},
+		)
+		self.assertEqual(
+			parse_event({"stream": "compaction", "data": {"phase": "end", "completed": True}}),
+			{"kind": "compaction", "phase": "end", "completed": True},
+		)
+		self.assertEqual(parse_event({"stream": "compaction", "data": {"phase": "before"}})["phase"], "start")
+		self.assertEqual(parse_event({"stream": "compaction", "data": {"phase": "after"}})["phase"], "end")
