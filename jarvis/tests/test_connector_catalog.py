@@ -49,6 +49,22 @@ _LEGACY_HELP_URLS = {
 _STRIPE_HINT = (
 	"Needs a restricted API key with only the permissions this connector should use, not a full secret key."
 )
+# The token guidance the SPA shipped before this catalog existed, copied from the
+# same CONNECTOR_HELP map. A sign-in preset still shows it: the "Use a token
+# instead" fallback is exactly the case where a user needs to be told WHICH
+# token, so losing these strings would leave that path unexplained.
+_LEGACY_HINTS = {
+	"GitHub": (
+		"Needs a fine-grained token scoped to the repos you want connected, with "
+		"Contents (read) and Pull requests (read and write) permissions."
+	),
+	"Atlassian": (
+		"Needs an Atlassian API token for your account. Your organization admin may "
+		"need to enable API tokens for Jira and Confluence first."
+	),
+	"Linear": "Needs a personal API key from your Linear workspace's Security & access settings.",
+	"Stripe": _STRIPE_HINT,
+}
 
 
 class TestCatalogShape(unittest.TestCase):
@@ -121,9 +137,9 @@ class TestLegacyPresetsUnchanged(unittest.TestCase):
 		self.assertEqual(stripe.auth, catalog.AUTH_TOKEN)
 		self.assertEqual(stripe.hint, _STRIPE_HINT)
 
-	def test_non_token_legacy_presets_have_no_hint(self):
-		for name in ("GitHub", "Atlassian", "Linear"):
-			self.assertIsNone(catalog.by_name(name).hint, name)
+	def test_legacy_token_hints_are_carried_over_verbatim(self):
+		for name, hint in _LEGACY_HINTS.items():
+			self.assertEqual(catalog.by_name(name).hint, hint, name)
 
 
 class TestAccessors(unittest.TestCase):
@@ -144,6 +160,10 @@ class TestAccessors(unittest.TestCase):
 		# endpoint even for a preset no longer offered to new connectors.
 		self.assertIn("Plaid", catalog.base_urls())
 		self.assertIn("Plaid", catalog.keys())
+
+	def test_all_names_is_catalog_order_including_disabled(self):
+		self.assertEqual(list(catalog.all_names()), [p.name for p in catalog.PROVIDERS])
+		self.assertIn("Plaid", catalog.all_names())
 
 	def test_auth_of_known_and_unknown(self):
 		self.assertEqual(catalog.auth_of("Stripe"), catalog.AUTH_TOKEN)
@@ -182,18 +202,25 @@ class TestDocTypeSelectOptionsDrift(unittest.TestCase):
 		raise AssertionError("Jarvis Connector has no 'preset' field")
 
 	def test_options_match_the_catalog_exactly(self):
-		expected = "\n".join([*catalog.preset_names(), "Custom URL"])
+		expected = "\n".join([*catalog.all_names(), "Custom URL"])
 		self.assertEqual(
 			self._preset_field()["options"],
 			expected,
 			"regenerate jarvis_connector.json's preset options from the catalog",
 		)
 
-	def test_disabled_entries_are_absent_from_the_options(self):
+	def test_disabled_entries_stay_in_the_options(self):
+		# Frappe validates this Select on EVERY save, so a name dropped from the
+		# options freezes every row already on it - no relabel, no disable, not
+		# even a credential change. Disabling belongs in the picker
+		# (``to_public``) and the create allowlist (``preset_names``), not here.
 		options = self._preset_field()["options"].split("\n")
-		for provider in catalog.PROVIDERS:
-			if not provider.enabled:
-				self.assertNotIn(provider.name, options, provider.name)
+		disabled = [p.name for p in catalog.PROVIDERS if not p.enabled]
+		self.assertTrue(disabled, "this test needs at least one disabled entry to mean anything")
+		for name in disabled:
+			self.assertIn(name, options, name)
+			self.assertNotIn(name, catalog.preset_names(), name)
+			self.assertNotIn(name, {row["name"] for row in catalog.to_public()}, name)
 
 
 class TestValidate(unittest.TestCase):

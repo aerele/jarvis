@@ -122,7 +122,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		category="dev",
 		logo="github",
 		help_url="https://github.com/settings/personal-access-tokens/new",
-		hint=None,
+		hint="Needs a fine-grained token scoped to the repos you want connected, with Contents (read) and Pull requests (read and write) permissions.",
 	),
 	Provider(
 		name="Atlassian",
@@ -132,7 +132,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		category="work",
 		logo="atlassian",
 		help_url="https://id.atlassian.com/manage-profile/security/api-tokens",
-		hint=None,
+		hint="Needs an Atlassian API token for your account. Your organization admin may need to enable API tokens for Jira and Confluence first.",
 	),
 	Provider(
 		name="Linear",
@@ -142,7 +142,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		category="work",
 		logo="linear",
 		help_url="https://linear.app/settings/account/security",
-		hint=None,
+		hint="Needs a personal API key from your Linear workspace's Security & access settings.",
 	),
 	Provider(
 		name="Stripe",
@@ -459,6 +459,19 @@ def preset_names(*, providers: tuple[Provider, ...] = PROVIDERS) -> tuple[str, .
 	enabled entries only. A disabled entry never appears here, that is the
 	point of disabling it."""
 	return tuple(provider.name for provider in providers if provider.enabled)
+
+
+def all_names(*, providers: tuple[Provider, ...] = PROVIDERS) -> tuple[str, ...]:
+	"""Every preset name, catalog order, DISABLED ENTRIES INCLUDED.
+
+	This is what the `Jarvis Connector.preset` Select options are generated from,
+	and the reason they are not `preset_names()`: Frappe validates a Select value
+	on every save, so dropping a name from the options makes every existing row
+	on it unsaveable, and disabling an entry would silently freeze rows that are
+	already saved (no relabel, no disable, not even a credential change). What
+	disabling does is keep the name out of the picker (`to_public`) and out of
+	the create allowlist (`preset_names`), which is where it belongs."""
+	return tuple(provider.name for provider in providers)
 
 
 def base_urls(*, providers: tuple[Provider, ...] = PROVIDERS) -> dict[str, str]:

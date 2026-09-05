@@ -57,10 +57,10 @@
    "fieldname": "preset",
    "fieldtype": "Select",
    "label": "Preset",
-   "options": "GitHub\nAtlassian\nLinear\nStripe\nRazorpay\nPayPal\nSquare\nAsana\nNotion\nMonday.com\nSlack\nDropbox\nBox\nCanva\nFigma\nIntercom\nZendesk\nSupabase\nNeon\nAirtable\nSentry\nCloudflare\nVercel\nNetlify\nWebflow\nWix\nZapier\nMicrosoft Learn\nCloudflare Docs\nHugging Face\nCustom URL",
+   "options": "GitHub\nAtlassian\nLinear\nStripe\nRazorpay\nPayPal\nSquare\nAsana\nNotion\nMonday.com\nSlack\nDropbox\nBox\nCanva\nFigma\nIntercom\nZendesk\nSupabase\nNeon\nAirtable\nSentry\nCloudflare\nVercel\nNetlify\nPlaid\nWebflow\nWix\nZapier\nMicrosoft Learn\nCloudflare Docs\nHugging Face\nCustom URL",
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "description": "Which known gateway this connector points at. These options are the enabled entries of jarvis.connectors.catalog plus \"Custom URL\"; a drift test fails if the two disagree. \"Custom URL\" allows any admin-approved endpoint."
+   "description": "Which known gateway this connector points at. These options are EVERY entry of jarvis.connectors.catalog, disabled ones included, plus \"Custom URL\"; a drift test fails if the two disagree. Disabled entries stay listed because Frappe validates this Select on every save, so dropping a name would make existing rows on it unsaveable; what disabling does is keep the name out of the picker and out of the create allowlist. \"Custom URL\" allows any admin-approved endpoint."
   },
   {
    "fieldname": "column_break_details",

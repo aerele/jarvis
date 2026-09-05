@@ -759,7 +759,7 @@ export const fileboxDeleteBulk = (conversations) =>
 
 // --- MCP Connectors (MCP_CONNECTORS_PLAN.md P4; broker + SSRF guard live
 // entirely server-side in jarvis.connectors, this is just the SPA's thin CRUD
-// + test-probe surface). All six calls run @require_jarvis_user and re-check
+// + test-probe surface). All ten calls run @require_jarvis_user and re-check
 // row permissions server-side (jarvis.chat.connector_permissions) regardless
 // of what the client believes about scope/role. ---
 const CN = "jarvis.chat.connectors_api.";

@@ -325,6 +325,9 @@ def _host(url: str | None) -> str:
 # not. Codes come from the core's typed errors and from the SSRF guard's own
 # ``kind``, which OAuthTransportError mirrors.
 _OAUTH_ERROR_MESSAGES = {
+	# Kept although the engine no longer raises it: a 401 that names nothing now
+	# falls back to the two default document locations, and only a miss on BOTH
+	# is reported (as no_resource_metadata).
 	"no_www_authenticate": "This app did not say how to sign in to it.",
 	"no_resource_metadata": "This app did not say where to sign in.",
 	"resource_metadata_unavailable": "We could not read this app's sign-in details.",
@@ -334,6 +337,9 @@ _OAUTH_ERROR_MESSAGES = {
 	"issuer_mismatch": "The sign-in service's details do not match its address.",
 	"missing_endpoint": "The sign-in service's details are incomplete.",
 	"insecure_endpoint": "The sign-in service is not using a secure address.",
+	"insecure_metadata": "This app's sign-in details are not on a secure address.",
+	"malformed_metadata": "We could not make sense of this app's sign-in details.",
+	"timeout": "This app took too long to answer.",
 	"registration_failed": "The sign-in service would not set this workspace up.",
 	"no_client_id": "The sign-in service did not return the details we need.",
 	"token_request_failed": "The sign-in service rejected the sign-in.",
@@ -680,7 +686,7 @@ def add_connector(
 	if scope not in _SCOPES:
 		frappe.throw(_("Scope must be Shared or Personal."))
 	if auth_method not in _AUTH_METHODS:
-		frappe.throw(_("Auth Method must be API Key or OAuth."))
+		frappe.throw(_("Choose a key or a sign-in for this connector."))
 	if auth_method == oauth.OAUTH_AUTH_METHOD and not (
 		_uses_discovery_engine(preset) or catalog.auth_of(preset) == catalog.AUTH_CONNECTED_APP
 	):
@@ -756,6 +762,14 @@ def _setup_mcp_oauth_client(doc) -> None:
 	only for a Custom URL. Nothing here re-reads a caller-supplied URL, so a
 	preset row can never be discovered - or later signed in - against an address
 	its caller named.
+
+	TIME. This is the slowest thing the connectors API does, and every second of it
+	is a held worker. The ceiling is deliberate and arithmetic:
+	``mcp_oauth.discovery.RUN_TOTAL_TIMEOUT_S`` (45s) for the whole discovery run,
+	up to six hops inside it, plus ``transport.TOKEN_TOTAL_TIMEOUT_S`` (10s) for
+	the registration POST - about 55s worst case, with at most
+	``transport.MAX_REDIRECTS`` (2) redirects per hop. The rate limit above is what
+	stops a caller from queueing several of those at once.
 
 	ORDER MATTERS. This runs AFTER the insert so every cheap gate has already run
 	- the Shared-scope permission check, key uniqueness, the custom-URL policy.
@@ -1124,13 +1138,21 @@ def connect_oauth(name: str) -> dict:
 	``success_uri`` sends the browser back to the SPA's connectors settings
 	pane, carrying ``name`` so it can refresh that one row's status once the
 	user returns. Connect is PER USER (OAUTH_CONNECTORS_DESIGN.md §6a): each
-	user who wants to use a Shared OAuth connector runs their own sign-in."""
+	user who wants to use a Shared OAuth connector runs their own sign-in.
+
+	Rate limited exactly like the probe and the Test button. Starting a sign-in
+	mints server-side state and, on the shipped Connected App path, hits the
+	provider - so an unmetered version is both a state-minting loop and an
+	outbound-request amplifier for any user who can see a Shared connector."""
 	doc = frappe.get_doc(CONNECTOR, name)
 	if not doc.has_permission("read"):
 		frappe.throw(_("Not permitted."), frappe.PermissionError)
 
 	if not oauth.is_oauth(doc):
 		return {"ok": False, "error": {"code": "not_oauth", "message": "This connector doesn't use sign-in."}}
+
+	if _over_test_rate_limit(frappe.session.user):
+		return _error("rate_limited", "Too many attempts. Please wait a moment and try again.")
 
 	if doc.get("mcp_oauth_client"):
 		return _connect_mcp_oauth(doc)
@@ -1174,6 +1196,12 @@ def _connect_mcp_oauth(doc) -> dict:
 	state = secrets.token_urlsafe(32)
 	code_verifier = mcp_oauth.pkce_new_verifier()
 	redirect_uri = oauth_redirect_uri()
+	# Two forms of one address, and they are not interchangeable. ``resource`` is
+	# the canonical one the token gets PINNED to; ``resource_indicator`` is the
+	# app's own wording, which is what goes on the wire (see
+	# ``mcp_oauth_store.resource_indicator``).
+	resource = client.get("resource") or ""
+	indicator = mcp_oauth_store.resource_indicator(client)
 	mcp_oauth_store.put_state(
 		state,
 		{
@@ -1183,7 +1211,8 @@ def _connect_mcp_oauth(doc) -> dict:
 			"issuer": client.get("issuer") or "",
 			"iss_param_supported": bool(cint(client.get("iss_param_supported"))),
 			"redirect_uri": redirect_uri,
-			"resource": client.get("resource") or "",
+			"resource": resource,
+			"resource_indicator": indicator,
 			"scope": client.get("scope") or "",
 		},
 	)
@@ -1192,7 +1221,7 @@ def _connect_mcp_oauth(doc) -> dict:
 		client_id,
 		redirect_uri,
 		scope=client.get("scope") or "",
-		resource=client.get("resource") or "",
+		resource=indicator,
 		state=state,
 		code_challenge=mcp_oauth.pkce_challenge(code_verifier),
 	)
@@ -1300,7 +1329,15 @@ def set_oauth_client_credentials(name: str, client_id: str, client_secret: str =
 	workspace to the provider, and the redirect URI they are registered against
 	is this site's. A blank ``client_secret`` means "leave the stored one alone",
 	the same convention ``update_connector`` uses for a credential, since the SPA
-	never round-trips a stored secret back."""
+	never round-trips a stored secret back.
+
+	TWO gates, not one. The admin-tier check says WHO may configure a sign-in at
+	all; the row's own write permission says WHICH connectors this admin may
+	configure. They are not the same set: ``connector_permissions`` deliberately
+	keeps a Personal row private to its owner, admin tier included (mirroring
+	``Jarvis Conversation``), so without the second check an admin could plant
+	their own client credentials on another user's private connector and receive
+	that user's sign-in."""
 	if not has_jarvis_admin_access(frappe.session.user):
 		frappe.throw(
 			_("Only a System Manager or Jarvis Admin may set up sign-in for an app."),
@@ -1312,6 +1349,8 @@ def set_oauth_client_credentials(name: str, client_id: str, client_secret: str =
 		frappe.throw(_("Enter the ID the provider gave you."))
 
 	doc = frappe.get_doc(CONNECTOR, name)
+	if not doc.has_permission("write"):
+		frappe.throw(_("Not permitted."), frappe.PermissionError)
 	client = mcp_oauth_store.client_for(doc.name) if doc.get("mcp_oauth_client") else None
 	if client is None:
 		frappe.throw(_("This connector does not use this kind of sign-in."))
@@ -1402,7 +1441,9 @@ def _exchange_and_store(record: dict, code: str) -> None:
 		# the provider compares it to what it was given, so they must match even
 		# if the site's URL changed in between.
 		redirect_uri=record.get("redirect_uri") or oauth_redirect_uri(),
-		resource=resource,
+		# On the wire: the app's own wording of its address, the same string the
+		# authorize request carried. Pinned on the row below: the canonical form.
+		resource=record.get("resource_indicator") or mcp_oauth_store.resource_indicator(client),
 		transport=MCP_OAUTH_TRANSPORT,
 		egress_allowed=broker._egress_allowed,
 	)

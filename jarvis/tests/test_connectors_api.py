@@ -334,6 +334,48 @@ class TestAddConnector(_ConnectorApiTestCase):
 		self.assertEqual(out["key"], "mcp_example_com")
 
 
+class TestDisabledCatalogPreset(_ConnectorApiTestCase):
+	"""Plaid ships disabled (its endpoint speaks the older transport). Disabled
+	means "not offered for new connectors", NOT "existing rows are frozen": Frappe
+	validates the ``preset`` Select on every save, so the name has to stay in the
+	options or a row already on it can never be relabelled, disabled, or given a
+	new credential again."""
+
+	DISABLED_PRESET = "Plaid"
+
+	def test_the_preset_is_a_real_disabled_catalog_entry(self):
+		provider = catalog.by_name(self.DISABLED_PRESET)
+		self.assertIsNotNone(provider)
+		self.assertFalse(provider.enabled)
+
+	def test_a_row_on_a_disabled_preset_still_saves(self):
+		# Created directly: add_connector refuses a disabled preset, which is the
+		# point of disabling it. This models the row that predates the change.
+		name = self._mk(
+			"Personal",
+			"plaid-legacy",
+			owner=PLAIN_A,
+			preset=self.DISABLED_PRESET,
+			base_url=catalog.base_urls()[self.DISABLED_PRESET],
+		)
+		frappe.set_user(PLAIN_A)
+
+		out = connectors_api.update_connector(name, label="Renamed by owner")
+
+		self.assertEqual(out["label"], "Renamed by owner")
+		self.assertEqual(frappe.db.get_value(CONNECTOR, name, "preset"), self.DISABLED_PRESET)
+
+	def test_a_disabled_preset_cannot_back_a_new_connector(self):
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.add_connector(preset=self.DISABLED_PRESET, base_url="", scope="Personal")
+
+	def test_the_picker_never_offers_it(self):
+		frappe.set_user(PLAIN_A)
+		names = {row["name"] for row in connectors_api.list_connectors()["catalog"]}
+		self.assertNotIn(self.DISABLED_PRESET, names)
+
+
 class TestListConnectors(_ConnectorApiTestCase):
 	def test_never_returns_credential_and_splits_shared_vs_mine(self):
 		shared = self._mk("Shared", "shared-key", credential="shared-secret")
@@ -1026,6 +1068,18 @@ MCP_TOKEN = "https://as.example.invalid/token"
 MCP_REGISTER = "https://as.example.invalid/register"
 
 
+class _StepClock:
+	"""Stands in for the ``time`` module a caller reads ``monotonic`` off, handing
+	out a scripted sequence (the last value repeating). Lets a test say "the
+	credential took seven seconds" without spending seven seconds."""
+
+	def __init__(self, ticks: list[float]):
+		self._ticks = list(ticks)
+
+	def monotonic(self) -> float:
+		return self._ticks.pop(0) if len(self._ticks) > 1 else self._ticks[0]
+
+
 class _ScriptedTransport:
 	"""Stands in for the pinned transport's call shape. Returns canned results per
 	URL (a list is consumed in order, the last entry repeating) and records every
@@ -1044,9 +1098,20 @@ class _ScriptedTransport:
 		body=None,
 		connect_timeout=5.0,
 		read_timeout=20.0,
+		total_timeout=None,
 		egress_allowed=None,
+		**kwargs,
 	):
-		self.calls.append({"url": url, "method": method, "body": body, "egress_allowed": egress_allowed})
+		self.calls.append(
+			{
+				"url": url,
+				"method": method,
+				"headers": headers,
+				"body": body,
+				"total_timeout": total_timeout,
+				"egress_allowed": egress_allowed,
+			}
+		)
 		queue = self._script.get(url)
 		if not queue:
 			raise AssertionError(f"unscripted transport call to {url}")
@@ -1135,10 +1200,21 @@ def _discovery_script_at(base_url: str, *, registration: bool = True) -> dict:
 	}
 
 
-def _token_response(access="fresh-access", refresh="fresh-refresh", expires_in=3600) -> HttpResult:
-	payload = {"access_token": access, "expires_in": expires_in, "scope": "repo", "token_type": "Bearer"}
-	if refresh is not None:
-		payload["refresh_token"] = refresh
+def _token_response(
+	access="fresh-access", refresh="fresh-refresh", expires_in=3600, scope="repo", token_type="Bearer"
+) -> HttpResult:
+	"""A token response. A ``None`` field is OMITTED, not sent as null - that is
+	the shape a real server produces when it has nothing to say about a field, and
+	the shape the store's "keep what we had" rule is written for."""
+	payload = {"access_token": access}
+	for key, value in (
+		("refresh_token", refresh),
+		("expires_in", expires_in),
+		("scope", scope),
+		("token_type", token_type),
+	):
+		if value is not None:
+			payload[key] = value
 	return _json_result(payload)
 
 
@@ -1337,6 +1413,61 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 			next(c["body"] for c in transport.calls if c["url"] == MCP_REGISTER).decode("utf-8")
 		)
 		self.assertEqual(posted["redirect_uris"], [connectors_api.oauth_redirect_uri()])
+
+	def test_the_registered_client_auth_method_is_stored(self):
+		# We ASK for the secret in the body; a service that registers us for the
+		# header instead has its choice recorded and honoured from then on.
+		script = _discovery_script()
+		script[MCP_REGISTER] = _json_result(
+			{
+				"client_id": "dcr-client",
+				"client_secret": "dcr-secret",
+				"token_endpoint_auth_method": "client_secret_basic",
+			},
+			status=201,
+		)
+		transport = _ScriptedTransport(script)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self._connectors.append(out["name"])
+
+		posted = json.loads(
+			next(c["body"] for c in transport.calls if c["url"] == MCP_REGISTER).decode("utf-8")
+		)
+		self.assertEqual(posted["application_type"], "web")
+		self.assertEqual(posted["token_endpoint_auth_method"], "client_secret_post")
+		self.assertEqual(frappe.db.get_value(CLIENT_DT, out["name"], "auth_method"), "client_secret_basic")
+
+	def test_the_apps_own_wording_of_its_address_is_what_goes_on_the_wire(self):
+		# The app declares itself with a trailing slash. The canonical form is the
+		# pin; the declared form is the resource indicator every request carries.
+		script = _discovery_script(rm_overrides={"resource": MCP_BASE_URL})
+		script[MCP_REGISTER] = _json_result({"client_id": "dcr-client"}, status=201)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", _ScriptedTransport(script)):
+			out = connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		name = out["name"]
+		self._connectors.append(name)
+
+		client = frappe.get_doc(CLIENT_DT, name)
+		self.assertEqual(client.resource, MCP_RESOURCE, "the pin stays canonical")
+		self.assertEqual(client.resource_indicator, MCP_BASE_URL, "the wire value is verbatim")
+
+		url, state = self._connect(name)
+		self.assertEqual(parse_qs(urlparse(url).query)["resource"], [MCP_BASE_URL])
+
+		transport = _ScriptedTransport({MCP_TOKEN: _token_response()})
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			self._callback(code="the-code", state=state, iss=MCP_AS_URL)
+
+		self.assertEqual(transport.form_for(MCP_TOKEN)["resource"], MCP_BASE_URL)
+		token = frappe.get_doc(TOKEN_DT, f"{name}-{PLAIN_A}")
+		self.assertEqual(token.resource, MCP_RESOURCE, "the token is pinned to the canonical form")
 
 	def test_static_path_asks_an_admin_for_credentials(self):
 		transport = _ScriptedTransport(_discovery_script(registration=False))
@@ -1540,8 +1671,18 @@ class TestSetOauthClientCredentials(_McpOauthTestCase):
 			connectors_api.set_oauth_client_credentials(name, "stolen-client", "stolen-secret")
 		self.assertFalse(frappe.db.get_value(CLIENT_DT, name, "client_id"))
 
+	def test_admin_cannot_configure_someone_elses_personal_connector(self):
+		# The admin tier says WHO may configure a sign-in; the row's own write
+		# permission says WHICH rows. A Personal row stays private to its owner,
+		# admin tier included, so planting client credentials on one is refused.
+		name = self._mk_mcp_connector("static-private", mode="static", client_id="")
+		frappe.set_user(ADMIN_USER)
+		with self.assertRaises(frappe.PermissionError):
+			connectors_api.set_oauth_client_credentials(name, "admin-client", "admin-secret")
+		self.assertFalse(frappe.db.get_value(CLIENT_DT, name, "client_id"))
+
 	def test_admin_supplies_the_static_client(self):
-		name = self._mk_mcp_connector("static-ok", mode="static", client_id="")
+		name = self._mk_mcp_connector("static-ok", scope="Shared", owner=None, mode="static", client_id="")
 		frappe.set_user(ADMIN_USER)
 		out = connectors_api.set_oauth_client_credentials(name, "admin-client", "admin-secret")
 
@@ -1552,7 +1693,7 @@ class TestSetOauthClientCredentials(_McpOauthTestCase):
 		self.assertEqual(client.get_password("client_secret", raise_exception=False), "admin-secret")
 
 	def test_blank_secret_keeps_the_stored_one(self):
-		name = self._mk_mcp_connector("static-keep", mode="static", client_id="")
+		name = self._mk_mcp_connector("static-keep", scope="Shared", owner=None, mode="static", client_id="")
 		frappe.set_user(ADMIN_USER)
 		connectors_api.set_oauth_client_credentials(name, "admin-client", "admin-secret")
 		connectors_api.set_oauth_client_credentials(name, "admin-client-2", "")
@@ -1561,16 +1702,16 @@ class TestSetOauthClientCredentials(_McpOauthTestCase):
 		self.assertEqual(client.get_password("client_secret", raise_exception=False), "admin-secret")
 
 	def test_rejected_for_a_self_registered_client(self):
-		name = self._mk_mcp_connector("dcr-cred", mode="dcr", client_id="dcr-client")
+		name = self._mk_mcp_connector(
+			"dcr-cred", scope="Shared", owner=None, mode="dcr", client_id="dcr-client"
+		)
 		frappe.set_user(ADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):
 			connectors_api.set_oauth_client_credentials(name, "override", "")
 
 	def test_rejected_for_a_preset_row(self):
 		app = self._mk_connected_app("GitHub")
-		name = self._mk(
-			"Personal", "gh-static", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
-		)
+		name = self._mk("Shared", "gh-static", preset="GitHub", auth_method="OAuth", connected_app=app)
 		frappe.set_user(ADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):
 			connectors_api.set_oauth_client_credentials(name, "override", "")
@@ -1599,6 +1740,14 @@ class TestConnectOauthMcp(_McpOauthTestCase):
 		# The verifier stays server-side; only its challenge is ever in the URL.
 		self.assertEqual(query["code_challenge"], [pkce_challenge(record["code_verifier"])])
 		self.assertNotIn(record["code_verifier"], url)
+
+	def test_starting_a_signin_is_rate_limited(self):
+		name = self._mk_mcp_connector("connect-flood")
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "_over_test_rate_limit", return_value=True):
+			out = connectors_api.connect_oauth(name)
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "rate_limited")
 
 	def test_unconfigured_static_client_cannot_start_a_signin(self):
 		name = self._mk_mcp_connector("connect-unconf", mode="static", client_id="")
@@ -1794,6 +1943,91 @@ class TestBrokerMcpOauthToken(_McpOauthTestCase):
 		token = frappe.get_doc(TOKEN_DT, f"{name}-{PLAIN_A}")
 		self.assertEqual(token.get_password("refresh_token", raise_exception=False), "old-refresh")
 
+	def test_a_refresh_that_reports_no_expiry_keeps_the_row_refreshable(self):
+		# A response that omits expires_in says nothing new, it does not say "never
+		# expires". Blanking the stored expiry would make the row read as immortal
+		# and it would never be refreshed again - it would just start failing.
+		name = self._mk_mcp_connector("broker-keepexp")
+		expires_at = add_to_date(now_datetime(), seconds=30)
+		self._mk_mcp_token(
+			name,
+			PLAIN_A,
+			access_token="stale-token",
+			refresh_token="old-refresh",
+			expires_at=expires_at,
+		)
+		bare = _ScriptedTransport(
+			{
+				MCP_TOKEN: _token_response(
+					access="first", refresh=None, expires_in=None, scope=None, token_type=None
+				)
+			}
+		)
+		frappe.set_user(PLAIN_A)
+		with patch.object(oauth, "MCP_OAUTH_TRANSPORT", bare):
+			self.assertEqual(broker._credential(self._reload_doc(name)), "first")
+
+		token = frappe.get_doc(TOKEN_DT, f"{name}-{PLAIN_A}")
+		self.assertEqual(str(token.expires_at)[:19], str(expires_at)[:19], "the known expiry survives")
+		self.assertEqual(token.token_type, "Bearer", "an omitted token_type keeps the stored one")
+
+		# ...and because it survived, the NEXT call refreshes again rather than
+		# handing over a token nothing will ever renew.
+		again = _ScriptedTransport({MCP_TOKEN: _token_response(access="second", refresh=None)})
+		with patch.object(oauth, "MCP_OAUTH_TRANSPORT", again):
+			self.assertEqual(broker._credential(self._reload_doc(name)), "second")
+		self.assertEqual(again.hits(MCP_TOKEN), 1)
+
+	def test_a_refresh_spends_the_calls_budget_not_extra_time(self):
+		# refresh + call must stay under the plugin's 30s abort, so whatever the
+		# refresh took comes OUT of the call's 20s rather than being added to it.
+		name = self._mk_mcp_connector("broker-budget")
+		self._mk_mcp_token(
+			name,
+			PLAIN_A,
+			access_token="stale-token",
+			refresh_token="old-refresh",
+			expires_at=add_to_date(now_datetime(), seconds=30),
+		)
+		transport = _ScriptedTransport({MCP_TOKEN: _token_response(access="fresh-access")})
+		captured: dict = {}
+
+		def _capture(base_url, token, action, args, **kwargs):
+			captured.update(kwargs)
+			captured["token"] = token
+			return {"content": []}
+
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(oauth, "MCP_OAUTH_TRANSPORT", transport),
+			patch.object(broker.mcp_client, "run_tool", side_effect=_capture),
+			patch.object(broker, "time", _StepClock([0.0, 7.0])),
+		):
+			broker._execute(self._reload_doc(name), "list_issues", {})
+
+		self.assertEqual(captured["token"], "fresh-access")
+		self.assertEqual(captured["total_timeout"], broker.TOTAL_TIMEOUT_S - 7.0)
+		self.assertLess(captured["total_timeout"], broker.TOTAL_TIMEOUT_S)
+		self.assertEqual(transport.calls[0]["total_timeout"], broker.REFRESH_BUDGET_S)
+
+	def test_a_slow_refresh_still_leaves_the_call_a_floor(self):
+		name = self._mk_mcp_connector("broker-floor")
+		self._mk_mcp_token(name, PLAIN_A, access_token="live-token")
+		captured: dict = {}
+
+		def _capture(base_url, token, action, args, **kwargs):
+			captured.update(kwargs)
+			return {"content": []}
+
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(broker.mcp_client, "run_tool", side_effect=_capture),
+			patch.object(broker, "time", _StepClock([0.0, 60.0])),
+		):
+			broker._execute(self._reload_doc(name), "list_issues", {})
+
+		self.assertEqual(captured["total_timeout"], broker.MIN_CALL_TIMEOUT_S)
+
 	def test_a_token_without_an_expiry_is_never_refreshed(self):
 		name = self._mk_mcp_connector("broker-noexp")
 		self._mk_mcp_token(name, PLAIN_A, access_token="long-lived", refresh_token="unused-refresh")
@@ -1977,6 +2211,18 @@ class TestConnectorTwoEngineGuard(_McpOauthTestCase):
 		doc.label = "renamed by owner"
 		doc.save()  # no ignore_permissions - the guard runs and must not throw
 		self.assertEqual(self._reload_doc(name).mcp_oauth_client, name)
+
+	def test_preset_cannot_be_flipped_under_an_existing_client(self):
+		# Both links sit still, so only watching ``preset`` catches this: the row
+		# would end up pinned at Razorpay's endpoint while still presenting the
+		# client (and credentials) registered with the Custom URL app.
+		name = self._mk_mcp_connector("guard-flip")
+		frappe.set_user(PLAIN_A)
+		doc = self._reload_doc(name)
+		doc.preset = "Razorpay"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+		self.assertEqual(self._reload_doc(name).preset, "Custom URL")
 
 	def test_catalog_signin_preset_may_not_take_the_preset_link(self):
 		# Razorpay is a dcr preset: the discovery engine backs it, so the Connected

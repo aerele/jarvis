@@ -40,6 +40,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import threading
+import time
 from collections.abc import Callable
 from urllib.parse import urljoin, urlparse
 
@@ -276,6 +277,9 @@ def open_pinned_request(
 	connect_timeout: float = 5.0,
 	read_timeout: float = 20.0,
 	egress_allowed: Callable[[str], bool] | None = None,
+	max_redirects: int = MAX_REDIRECTS,
+	deadline: float | None = None,
+	clock: Callable[[], float] = time.monotonic,
 ):
 	"""Open ``method url`` SSRF-guarded and pinned to a vetted IP, following only
 	same-body 307/308 redirects (each re-validated, re-pinned, re-egress-checked;
@@ -285,18 +289,33 @@ def open_pinned_request(
 	False``); the caller reads/parses and MUST close both the response and the
 	pool. Raises :class:`SsrfError` for any guard rejection or transport error.
 	The original ``url``'s host is the only host an ``Authorization`` header will
-	ever be sent to."""
+	ever be sent to.
+
+	``deadline`` (a ``clock()`` timestamp, ``clock`` defaulting to
+	``time.monotonic``) is an OPTIONAL wall-clock bound spanning the WHOLE
+	redirect chain. Without it each hop gets its own full ``read_timeout``, so a
+	chain of stalling hops costs ``(1 + max_redirects) x read_timeout`` - which is
+	how a "20s" request becomes a 60s one. With it, every hop is handed only what
+	is left, and an exhausted budget fails as ``ERR_CONNECT_FAILED`` (the caller
+	classifies it further; ``mcp_oauth.transport`` reports it as a timeout).
+	``max_redirects`` lets a caller on a tight budget cap the chain below the
+	module default."""
 	current = (url or "").strip()
 	if not current:
 		raise SsrfError("No URL given.", kind=ERR_INVALID_URL)
 
-	# Bound DNS resolution by what remains of the connect/read budget so a hung
-	# resolver cannot outlast the request the caller asked for.
-	resolve_timeout = min(connect_timeout, read_timeout)
-
 	origin_host = None
 	redirects = 0
 	while True:
+		if deadline is not None:
+			left = deadline - clock()
+			if left <= 0:
+				raise SsrfError("Request exceeded its time budget.", kind=ERR_CONNECT_FAILED)
+			connect_timeout = min(connect_timeout, left)
+			read_timeout = min(read_timeout, left)
+		# Bound DNS resolution by what remains of the connect/read budget so a hung
+		# resolver cannot outlast the request the caller asked for.
+		resolve_timeout = min(connect_timeout, read_timeout)
 		parsed, ip = _validate_url(current, egress_allowed, resolve_timeout)
 		if origin_host is None:
 			origin_host = parsed.hostname
@@ -319,7 +338,7 @@ def open_pinned_request(
 			pool.close()
 			if not location:
 				raise SsrfError("Redirect response had no Location header.", kind=ERR_CONNECT_FAILED)
-			if redirects >= MAX_REDIRECTS:
+			if redirects >= max_redirects:
 				raise SsrfError("Too many redirects.", kind=ERR_TOO_MANY_REDIRECTS)
 			redirects += 1
 			nxt = urljoin(current, location)

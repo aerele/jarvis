@@ -117,11 +117,13 @@ def save_client(connector: str, discovery: Discovery, creds: ClientCreds, scope:
 	fields = {
 		"registration_mode": creds.mode,
 		"client_id": creds.client_id or "",
+		"auth_method": creds.auth_method or "",
 		"issuer": discovery.issuer,
 		"authorization_endpoint": discovery.authorization_endpoint,
 		"token_endpoint": discovery.token_endpoint,
 		"registration_endpoint": discovery.registration_endpoint or "",
 		"resource": discovery.resource,
+		"resource_indicator": discovery.resource_declared or discovery.resource,
 		"scope": scope,
 		"iss_param_supported": 1 if _iss_supported(discovery) else 0,
 		"as_metadata": frappe.as_json(discovery.raw_as_metadata or {}),
@@ -154,6 +156,7 @@ def discovery_from_client(client) -> Discovery:
 	scope actually being requested is stored on its own field."""
 	return Discovery(
 		resource=client.get("resource") or "",
+		resource_declared=resource_indicator(client),
 		authorization_servers=[client.get("issuer")] if client.get("issuer") else [],
 		scopes_supported=[],
 		issuer=client.get("issuer") or "",
@@ -165,15 +168,34 @@ def discovery_from_client(client) -> Discovery:
 	)
 
 
+def resource_indicator(client) -> str:
+	"""The ``resource`` value to put ON THE WIRE for this connector: the string
+	the server declared for itself, verbatim.
+
+	It is deliberately NOT the canonical ``resource``. The two differ by exactly
+	the pedantry RFC 8707 canonicalization removes (a trailing slash, host case),
+	and a server that names itself ``https://host/mcp/`` is entitled to compare
+	the indicator it receives against its own declared string. The canonical form
+	stays the value the anti-phishing gate and the per-token pin compare, so
+	interop here never widens what a token may be used for. Falls back to the
+	canonical form for a client stored before this field existed."""
+	return (client.get("resource_indicator") or "").strip() or (client.get("resource") or "")
+
+
 def creds_from_client(client) -> ClientCreds:
-	"""The credentials presented to the token endpoint. The registration access
-	token is deliberately NOT carried here: it authenticates management of the
-	registration itself and must never ride along on a token request."""
+	"""The credentials presented to the token endpoint, INCLUDING how to present
+	them (the sign-in service registered us for one of body / header / neither).
+	The registration access token is deliberately NOT carried here: it
+	authenticates management of the registration itself and must never ride along
+	on a token request."""
+	from jarvis.connectors.mcp_oauth import registration
+
 	return ClientCreds(
 		client_id=client.get("client_id") or "",
 		client_secret=client.get_password("client_secret", raise_exception=False) or None,
 		registration_access_token=None,
 		mode=client.get("registration_mode") or "static",
+		auth_method=registration.normalize_auth_method(client.get("auth_method")),
 	)
 
 
@@ -206,13 +228,17 @@ def save_token(connector: str, user: str, token_set, resource: str, requested_sc
 	"""Upsert ``(connector, user)``'s tokens from a token response. ``resource``
 	pins the row to the connector address the grant was issued for -
 	``oauth.resolve_mcp_oauth_token`` refuses to use a token whose pin no longer
-	matches the connector's address."""
+	matches the connector's address.
+
+	A field the response OMITS keeps the value the row already had. That is the
+	OAuth 2.1 reading (an absent ``expires_in``/``scope``/``token_type`` says
+	nothing new, it does not say "none"), and treating absence as a clear-out
+	breaks the next call rather than this one: a refresh response with no
+	``expires_in`` would blank ``expires_at``, ``_expiring_soon`` would then read
+	the row as never expiring, and the grant would be used until it died in the
+	user's face instead of being refreshed again."""
 	import frappe
 	from frappe.utils import add_to_date, now_datetime
-
-	expires_at = None
-	if token_set.expires_in:
-		expires_at = add_to_date(now_datetime(), seconds=int(token_set.expires_in))
 
 	doc = load_token(connector, user)
 	is_new = doc is None
@@ -224,10 +250,19 @@ def save_token(connector: str, user: str, token_set, resource: str, requested_sc
 		# already carries the old one forward, so an empty value here really is
 		# "there is none" and must not clobber a stored one.
 		doc.refresh_token = token_set.refresh_token
-	doc.expires_at = expires_at
-	doc.granted_scopes = token_set.scope or requested_scope or ""
+	if token_set.expires_in:
+		doc.expires_at = add_to_date(now_datetime(), seconds=int(token_set.expires_in))
+	elif is_new:
+		doc.expires_at = None
+	if token_set.scope:
+		doc.granted_scopes = token_set.scope
+	elif is_new:
+		doc.granted_scopes = requested_scope or ""
+	if token_set.token_type:
+		doc.token_type = token_set.token_type
+	elif is_new:
+		doc.token_type = ""
 	doc.resource = resource
-	doc.token_type = token_set.token_type or ""
 	if is_new:
 		doc.insert(ignore_permissions=True)
 	else:

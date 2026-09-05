@@ -167,6 +167,11 @@ class JarvisConnector(Document):
 			or self.has_value_changed("connected_app")
 			or self.has_value_changed("mcp_oauth_client")
 			or self.has_value_changed("auth_method")
+			# A preset change re-decides WHICH engine and WHICH app this row is for,
+			# so it has to be re-checked even when both links sit still: without it a
+			# raw write could move a row onto another preset while keeping the first
+			# one's client (and its registered credentials).
+			or self.has_value_changed("preset")
 		):
 			return
 		if self.connected_app and self.mcp_oauth_client:
@@ -187,11 +192,20 @@ class JarvisConnector(Document):
 		preset): never the Connected App link. The client must be the one created
 		FOR this connector - checked by reading the client's own ``connector`` field
 		rather than trusting the link's direction, so a user cannot borrow another
-		connector's client (and with it another tenant's discovered endpoints)."""
+		connector's client (and with it another tenant's discovered endpoints).
+
+		Changing the PRESET of a row that already has a client is refused outright.
+		The ownership check below would pass (the client does name this connector),
+		but the client holds endpoints and credentials registered with ONE app,
+		and the preset change has already re-pinned this row at a different one -
+		so the row would present another provider's registration, exactly the
+		re-point ``update_connector`` refuses for a Custom URL address."""
 		if self.connected_app:
 			frappe.throw(_("This app is not set up for sign-in."), frappe.PermissionError)
 		if not self.mcp_oauth_client:
 			return
+		if not self.is_new() and self.has_value_changed("preset"):
+			frappe.throw(_("Add a new connector to use a different app."), frappe.PermissionError)
 		owner_connector = frappe.db.get_value("MCP OAuth Client", self.mcp_oauth_client, "connector")
 		if owner_connector != self.name:
 			frappe.throw(_("This app is not set up for sign-in."), frappe.PermissionError)

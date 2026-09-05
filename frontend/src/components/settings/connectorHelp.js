@@ -3,4 +3,5 @@
 // (jarvis/connectors/catalog.py's `hint` and `help_url`), not a per-preset map
 // kept here. Custom URL is the one path with no catalog entry to read - it
 // has no vendor page either, so this is the only guidance left in this file.
-export const CUSTOM_URL_TOKEN_HINT = "Paste the bearer token or API key your MCP server expects.";
+export const CUSTOM_URL_TOKEN_HINT =
+	"Paste an access token or API key from the app you are connecting.";

@@ -9,6 +9,7 @@
  "field_order": [
   "connector",
   "registration_mode",
+  "auth_method",
   "column_break_registration",
   "client_id",
   "client_secret",
@@ -20,6 +21,7 @@
   "registration_endpoint",
   "column_break_endpoints",
   "resource",
+  "resource_indicator",
   "scope",
   "iss_param_supported",
   "discovered_at",
@@ -48,6 +50,14 @@
    "read_only": 1,
    "in_list_view": 1,
    "description": "How this client obtained its client_id. \"dcr\": the sign-in service supported self-registration and issued one at setup. \"static\": an administrator registered Jarvis at the provider by hand and pasted the credentials in (client_id is empty until they do)."
+  },
+  {
+   "fieldname": "auth_method",
+   "fieldtype": "Data",
+   "label": "Client Auth Method",
+   "length": 60,
+   "read_only": 1,
+   "description": "How this bench proves who it is when it asks the sign-in service for a token: client_secret_post (the credentials travel in the request body, the default we ask for), client_secret_basic (they travel in an Authorization header instead) or none (no secret at all). Set from what the sign-in service registered us as; anything else it might name falls back to client_secret_post."
   },
   {
    "fieldname": "column_break_registration",
@@ -120,7 +130,15 @@
    "label": "Resource",
    "length": 500,
    "read_only": 1,
-   "description": "The connector's canonical address (no trailing slash), sent as the resource indicator on every authorize, token and refresh request so the issued token is bound to THIS connector and cannot be replayed at another. Tokens are checked against it before use."
+   "description": "The connector's canonical address (no trailing slash). Every token is pinned to it and checked against it before use, so a token issued for this connector can never be replayed at another."
+  },
+  {
+   "fieldname": "resource_indicator",
+   "fieldtype": "Data",
+   "label": "Resource Indicator",
+   "length": 500,
+   "read_only": 1,
+   "description": "The address the app declared for itself, kept exactly as it was written (it may carry a trailing slash the canonical form above drops). This is what is sent on every authorize, token and refresh request, because an app is entitled to compare what it receives against its own wording. The canonical form is still what the pin above compares."
   },
   {
    "fieldname": "scope",

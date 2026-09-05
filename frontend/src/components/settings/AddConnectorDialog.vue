@@ -403,11 +403,18 @@ function catalogAuthOf(name) {
 	const entry = props.catalog.find((c) => c.name === name);
 	return entry ? entry.auth : null;
 }
-// The picked preset's catalog auth class, or "custom" for Custom URL (its
-// class is decided live by the Check probe instead, see customUrlOauth).
-const presetAuthClass = computed(() =>
-	form.preset === "Custom URL" ? "custom" : catalogAuthOf(form.preset)
-);
+// The picked preset's auth class, or "custom" for Custom URL (its class is
+// decided live by the Check probe instead, see customUrlOauth). Edit mode
+// reads this off the row itself (auth_class, sent on every list row - see
+// jarvis/chat/connectors_api.py's _auth_class) rather than the catalog: a
+// row whose preset was later disabled in the catalog has no catalog entry
+// to look up any more, and falling through to null would render the token
+// field for what is still an OAuth row. Create mode has no saved row yet,
+// so the catalog lookup is the only source of truth there.
+const presetAuthClass = computed(() => {
+	if (isEdit.value) return props.connector.auth_class;
+	return form.preset === "Custom URL" ? "custom" : catalogAuthOf(form.preset);
+});
 // connected_app/dcr/static all default to a sign-in flow (OAUTH_CONNECTORS_DESIGN.md
 // §3, extended to every catalog auth class that supports it); token/open never do.
 function presetDefaultsToOauth(auth) {

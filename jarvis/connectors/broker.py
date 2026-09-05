@@ -48,6 +48,19 @@ SETTINGS_DOCTYPE = "Jarvis Settings"
 CONNECT_TIMEOUT_S = 5.0
 TOTAL_TIMEOUT_S = 20.0
 
+# An OAuth row may have to REFRESH its token before the call, and that refresh is
+# outbound time too. The arithmetic that keeps the plugin's 30s abort safe:
+#
+#   refresh (<= REFRESH_BUDGET_S)  +  call (TOTAL_TIMEOUT_S - refresh elapsed,
+#   floored at MIN_CALL_TIMEOUT_S)  =  at most ~25s
+#
+# The floor is what makes the worst case 25 rather than 20: a refresh that spends
+# its whole budget still leaves the call MIN_CALL_TIMEOUT_S to be useful in,
+# instead of a guaranteed instant timeout. An API-key row spends none of this and
+# keeps the full 20s.
+REFRESH_BUDGET_S = 10.0
+MIN_CALL_TIMEOUT_S = 5.0
+
 # Circuit breaker + concurrency tunables.
 CB_THRESHOLD = 5
 CB_WINDOW_S = 60
@@ -196,7 +209,7 @@ def _credential(row) -> str:
 	``get_password`` cannot read ``__Auth`` by name, so fall back to the
 	in-memory field value."""
 	if oauth.is_oauth(row):
-		token = oauth.resolve_connector_token(row)
+		token = oauth.resolve_connector_token(row, total_timeout=REFRESH_BUDGET_S)
 		if not token:
 			raise _BrokerError("connector_not_ready", "Connect this app in Settings before it can be used.")
 		return token
@@ -248,10 +261,14 @@ def _execute(row, action: str, args: dict) -> dict:
 			"This connector is temporarily paused after repeated failures. Please try again shortly.",
 		)
 	cap = ConcurrencyCap(store, _guard_key(row), limit=CC_LIMIT, ttl_s=CC_TTL_S)
+	started = time.monotonic()
 	credential = _credential(row)
+	# Whatever the credential cost (an OAuth refresh is a real outbound hop) comes
+	# out of the CALL's budget, not on top of it - see REFRESH_BUDGET_S.
+	total_timeout = max(MIN_CALL_TIMEOUT_S, TOTAL_TIMEOUT_S - (time.monotonic() - started))
 	try:
 		with cap.slot():
-			return _do_call(row, action, args, credential, breaker)
+			return _do_call(row, action, args, credential, breaker, total_timeout)
 	except AtCapacityError as exc:
 		raise _BrokerError(
 			"at_capacity",
@@ -259,7 +276,14 @@ def _execute(row, action: str, args: dict) -> dict:
 		) from exc
 
 
-def _do_call(row, action: str, args: dict, credential: str, breaker: CircuitBreaker) -> dict:
+def _do_call(
+	row,
+	action: str,
+	args: dict,
+	credential: str,
+	breaker: CircuitBreaker,
+	total_timeout: float = TOTAL_TIMEOUT_S,
+) -> dict:
 	try:
 		result = mcp_client.run_tool(
 			row.base_url,
@@ -267,7 +291,7 @@ def _do_call(row, action: str, args: dict, credential: str, breaker: CircuitBrea
 			action,
 			args,
 			connect_timeout=CONNECT_TIMEOUT_S,
-			total_timeout=TOTAL_TIMEOUT_S,
+			total_timeout=total_timeout,
 			egress_allowed=_egress_allowed,
 		)
 	except ssrf.SsrfError as exc:
@@ -368,7 +392,9 @@ class _NullBreaker:
 		pass
 
 
-def _test_probe(base_url: str, credential: str | None, breaker) -> dict:
+def _test_probe(
+	base_url: str, credential: str | None, breaker, total_timeout: float = TOTAL_TIMEOUT_S
+) -> dict:
 	"""Run initialize + tools/list against ``base_url`` and return
 	``{ok: True, tools: [...]}`` or ``{ok: False, error: {code, message}}``,
 	feeding transport-class failures to ``breaker`` exactly as :func:`_do_call`
@@ -384,7 +410,7 @@ def _test_probe(base_url: str, credential: str | None, breaker) -> dict:
 			base_url,
 			credential or None,
 			connect_timeout=CONNECT_TIMEOUT_S,
-			total_timeout=TOTAL_TIMEOUT_S,
+			total_timeout=total_timeout,
 			egress_allowed=_egress_allowed,
 		)
 	except ssrf.SsrfError as exc:
@@ -420,7 +446,13 @@ def test_connector(row) -> dict:
 
 	The breaker/cap key is the connector row, shared with :func:`call`: 5 test-probe
 	transport failures in the window open the circuit for chat calls too, which is
-	the intent (the endpoint is unhealthy for either path)."""
+	the intent (the endpoint is unhealthy for either path).
+
+	The credential is resolved BEFORE the slot is taken, exactly as :func:`_execute`
+	does it. Resolving inside would hold one of the four slots for the whole of a
+	token refresh - an outbound hop to a different host that has nothing to do with
+	this connector's capacity - and would count a slow sign-in service against the
+	cap that exists to protect the worker from this endpoint."""
 	store = _store()
 	guard_key = _guard_key(row) or (row.get("base_url") or "test")
 	breaker = CircuitBreaker(store, guard_key, threshold=CB_THRESHOLD, window_s=CB_WINDOW_S, open_s=CB_OPEN_S)
@@ -433,16 +465,18 @@ def test_connector(row) -> dict:
 			},
 		}
 	cap = ConcurrencyCap(store, guard_key, limit=CC_LIMIT, ttl_s=CC_TTL_S)
+	started = time.monotonic()
+	try:
+		credential = _credential(row)
+	except _BrokerError as exc:
+		# An OAuth row with no live token - never a health/transport signal, so it
+		# does not touch the breaker (mirrors _do_call's own split between auth
+		# problems and endpoint-health signals).
+		return exc.as_dict()
+	total_timeout = max(MIN_CALL_TIMEOUT_S, TOTAL_TIMEOUT_S - (time.monotonic() - started))
 	try:
 		with cap.slot():
-			try:
-				credential = _credential(row)
-			except _BrokerError as exc:
-				# An OAuth row with no live token - never a health/transport signal,
-				# so it does not touch the breaker (mirrors _do_call's own split
-				# between auth problems and endpoint-health signals).
-				return exc.as_dict()
-			return _test_probe(row.get("base_url"), credential, breaker)
+			return _test_probe(row.get("base_url"), credential, breaker, total_timeout)
 	except AtCapacityError:
 		return {
 			"ok": False,

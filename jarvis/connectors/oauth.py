@@ -69,6 +69,11 @@ REFRESH_SKEW_S = 120
 REFRESH_READ_TIMEOUT_S = 8.0
 REFRESH_CONNECT_TIMEOUT_S = 5.0
 
+#: WALL-CLOCK ceiling for the whole refresh hop (connect + redirects + body), not
+#: just one recv. This is the number the broker subtracts from its own call
+#: budget, so a refresh can never quietly spend more of a chat turn than this.
+REFRESH_TOTAL_TIMEOUT_S = 10.0
+
 
 def is_oauth(row) -> bool:
 	"""True when this connector authenticates via the OAuth Connect flow rather
@@ -93,12 +98,16 @@ def is_mcp_oauth(row) -> bool:
 		return False
 
 
-def resolve_connector_token(row) -> str | None:
+def resolve_connector_token(row, *, total_timeout: float = REFRESH_TOTAL_TIMEOUT_S) -> str | None:
 	"""The one dispatcher between the two OAuth engines. Returns a live access
 	token for the CURRENT impersonated user, or ``None`` when they have not
-	finished connecting - callers map ``None`` to ``connector_not_ready``."""
+	finished connecting - callers map ``None`` to ``connector_not_ready``.
+
+	``total_timeout`` is the wall clock a refresh (if one happens) may spend. The
+	broker passes what its own call budget can afford to lose; the default suits
+	a caller with no budget of its own, like the SPA's readiness check."""
 	if is_mcp_oauth(row):
-		return resolve_mcp_oauth_token(row)
+		return resolve_mcp_oauth_token(row, total_timeout=total_timeout)
 	return resolve_access_token(row)
 
 
@@ -146,7 +155,7 @@ def resolve_access_token(row) -> str | None:
 		return None
 
 
-def resolve_mcp_oauth_token(row) -> str | None:
+def resolve_mcp_oauth_token(row, *, total_timeout: float = REFRESH_TOTAL_TIMEOUT_S) -> str | None:
 	"""Return a live access token for ``row``'s discovery-engine sign-in, for the
 	CURRENT impersonated user, refreshing it first when it is about to expire and
 	a refresh token exists.
@@ -186,7 +195,7 @@ def resolve_mcp_oauth_token(row) -> str | None:
 			# be the judge: some providers report an expiry but keep honouring the
 			# token, and a needless "connect again" prompt is worse than one 401.
 			return access_token
-		return _refresh_mcp_oauth_token(connector, refresh_token, resource)
+		return _refresh_mcp_oauth_token(connector, refresh_token, resource, total_timeout)
 	except Exception:
 		frappe.logger("jarvis.connectors").warning("connector sign-in token resolution failed", exc_info=True)
 		return None
@@ -204,10 +213,18 @@ def _expiring_soon(expires_at) -> bool:
 	return (get_datetime(expires_at) - now_datetime()).total_seconds() <= REFRESH_SKEW_S
 
 
-def _refresh_mcp_oauth_token(connector: str, refresh_token: str, resource: str) -> str | None:
+def _refresh_mcp_oauth_token(
+	connector: str, refresh_token: str, resource: str, total_timeout: float = REFRESH_TOTAL_TIMEOUT_S
+) -> str | None:
 	"""Refresh through the pinned transport and persist the rotation. Returns the
 	new access token, or ``None`` on any failure - a sign-in problem, surfaced as
 	re-consent, and never a breaker signal (it says nothing about endpoint health).
+
+	``resource`` is the CANONICAL address, and it is what the refreshed token is
+	pinned to. What goes on the wire is the sign-in service's own declared form of
+	it (``mcp_oauth_store.resource_indicator``) - the two differ only by the
+	pedantry canonicalization removes, and a server may compare the indicator
+	against its own string.
 
 	Deliberately NOT committed here: this runs inside ``broker._credential``,
 	before the concurrency slot and inside a caller's transaction, and committing
@@ -225,11 +242,12 @@ def _refresh_mcp_oauth_token(connector: str, refresh_token: str, resource: str) 
 			mcp_oauth_store.discovery_from_client(client),
 			mcp_oauth_store.creds_from_client(client),
 			refresh_token=refresh_token,
-			resource=resource,
+			resource=mcp_oauth_store.resource_indicator(client),
 			transport=MCP_OAUTH_TRANSPORT,
 			egress_allowed=broker._egress_allowed,
 			connect_timeout=REFRESH_CONNECT_TIMEOUT_S,
 			read_timeout=REFRESH_READ_TIMEOUT_S,
+			total_timeout=total_timeout,
 		)
 	except Exception:
 		# The core's errors carry a stable code and a message that never embeds a
