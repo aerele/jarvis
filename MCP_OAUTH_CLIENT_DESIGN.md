@@ -126,8 +126,11 @@ is**. Every hop is egress to an attacker-influenced host, so:
   - every AS endpoint **MUST be HTTPS**; redirect URIs HTTPS or localhost, exact-match;
   - `state` single-use, short TTL, bound server-side to `(tenant, user, connector,
     code_verifier, issuer)`;
-  - **canonical `resource`**: our `base_url` is stored `.../mcp/` (trailing slash) — send
-    the form **without** it.
+  - **`resource` on the wire vs. the pin**: the gate and the token pin compare **canonical**
+    forms (lowercase scheme/host, no trailing slash), but the value **sent** in authorize /
+    token / refresh is the server's **own declared** `resource` string from its metadata
+    (RFC 9728 §3.3 is what the resource server validates against) — so a server that
+    declares `.../mcp/` gets `.../mcp/`.
 - **Show the user the AS host before redirecting** — "This app signs you in at
   *github.com*" — because the server they pasted chose it. Confused-deputy defense.
 - **No passthrough**, **redacted logging** (Fable's v1 finding — a client_secret must never

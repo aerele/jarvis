@@ -123,7 +123,9 @@ def open_pinned(
 	``total_timeout``. Reads the whole body and closes both the response and the
 	pool before returning.
 
-	The deadline spans everything: the connect, every redirect (capped at
+	The deadline spans everything, as ONE clock: DNS, connect and the header wait
+	(each clamped to what is left when it starts, plus a urllib3 ``total`` so they
+	cannot be spent one after another), every redirect (capped at
 	:data:`MAX_REDIRECTS`) and each chunk of the body read. Overrunning it raises
 	``OAuthTransportError("timeout")`` with the response and pool already closed.
 

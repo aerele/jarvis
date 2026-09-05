@@ -261,6 +261,9 @@ class McpClient:
 
 		read_timeout = min(self._remaining(), self._total_timeout)
 		try:
+			# ``deadline`` makes the pinned client clamp DNS + connect + header wait
+			# to what is left of THIS session's budget too - otherwise a stalling
+			# resolver or connect could spend their own full caps on top of it.
 			resp, pool, _final = ssrf.open_pinned_request(
 				self.base_url,
 				method="POST",
@@ -269,6 +272,8 @@ class McpClient:
 				connect_timeout=self._connect_timeout,
 				read_timeout=read_timeout,
 				egress_allowed=self._egress_allowed,
+				deadline=self._deadline,
+				clock=self._clock,
 			)
 		except ssrf.SsrfError:
 			# A guard rejection is not a transport flake - let the broker classify
@@ -390,6 +395,8 @@ class McpClient:
 				connect_timeout=self._connect_timeout,
 				read_timeout=read_timeout,
 				egress_allowed=self._egress_allowed,
+				deadline=self._deadline,
+				clock=self._clock,
 			)
 			try:
 				resp.close()

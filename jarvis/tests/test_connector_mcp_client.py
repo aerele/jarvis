@@ -49,8 +49,22 @@ class _Seam:
 		self._responses = list(responses)
 		self.calls = []
 
-	def __call__(self, url, *, method, headers, body, connect_timeout, read_timeout, egress_allowed):
-		self.calls.append({"url": url, "method": method, "headers": dict(headers), "body": body})
+	def __call__(
+		self,
+		url,
+		*,
+		method,
+		headers,
+		body,
+		connect_timeout,
+		read_timeout,
+		egress_allowed,
+		deadline=None,
+		clock=None,
+	):
+		self.calls.append(
+			{"url": url, "method": method, "headers": dict(headers), "body": body, "deadline": deadline}
+		)
 		resp = self._responses.pop(0) if self._responses else _FakeResp(405)
 		return resp, mock.MagicMock(), url
 

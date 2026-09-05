@@ -212,8 +212,18 @@ def _host_header(hostname: str, port: int, scheme: str) -> str:
 	return hostname if port == default else f"{hostname}:{port}"
 
 
-def _build_pool(scheme: str, ip: str, port: int, hostname: str, connect_timeout: float, read_timeout: float):
-	pool_timeout = urllib3.Timeout(connect=connect_timeout, read=read_timeout)
+def _build_pool(
+	scheme: str,
+	ip: str,
+	port: int,
+	hostname: str,
+	connect_timeout: float,
+	read_timeout: float,
+	total_timeout: float | None = None,
+):
+	# ``total`` caps connect + header wait + body reads TOGETHER; connect/read
+	# alone are per-phase and would otherwise be spent one after another.
+	pool_timeout = urllib3.Timeout(connect=connect_timeout, read=read_timeout, total=total_timeout)
 	if scheme != "https":
 		return urllib3.HTTPConnectionPool(host=ip, port=port, timeout=pool_timeout, retries=False)
 	return urllib3.HTTPSConnectionPool(
@@ -237,12 +247,14 @@ def _open_pinned(
 	method: str,
 	body: bytes | None,
 	extra_headers: dict,
+	total_timeout: float | None = None,
 ):
 	"""Open one request pinned to the already-vetted ``ip``. Returns
 	``(response, pool)`` with ``preload_content=False`` so the caller streams the
 	body itself; the caller owns closing both. ``extra_headers`` is applied
 	first, then User-Agent/Host are set last so a caller can never override the
-	Host bookkeeping the pin relies on."""
+	Host bookkeeping the pin relies on. ``total_timeout`` bounds connect + header
+	wait together (see ``_build_pool``)."""
 	hostname = parsed.hostname
 	scheme = parsed.scheme
 	port = parsed.port or (443 if scheme == "https" else 80)
@@ -252,7 +264,7 @@ def _open_pinned(
 	headers = dict(extra_headers or {})
 	headers["User-Agent"] = _USER_AGENT
 	headers["Host"] = _host_header(hostname, port, scheme)
-	pool = _build_pool(scheme, ip, port, hostname, connect_timeout, read_timeout)
+	pool = _build_pool(scheme, ip, port, hostname, connect_timeout, read_timeout, total_timeout)
 	resp = pool.urlopen(
 		method,
 		target,
@@ -307,27 +319,42 @@ def open_pinned_request(
 	origin_host = None
 	redirects = 0
 	while True:
+		# DNS, connect and the header wait happen ONE AFTER ANOTHER, so each phase
+		# must be clamped to what is left when IT starts, not to a single value
+		# computed once per hop (that let a hop spend resolve + connect + read
+		# against the same remaining budget, i.e. up to three times over).
+		hop_connect, hop_read = connect_timeout, read_timeout
+		total_left = None
 		if deadline is not None:
 			left = deadline - clock()
 			if left <= 0:
 				raise SsrfError("Request exceeded its time budget.", kind=ERR_CONNECT_FAILED)
-			connect_timeout = min(connect_timeout, left)
-			read_timeout = min(read_timeout, left)
+			hop_connect = min(hop_connect, left)
+			hop_read = min(hop_read, left)
 		# Bound DNS resolution by what remains of the connect/read budget so a hung
 		# resolver cannot outlast the request the caller asked for.
-		resolve_timeout = min(connect_timeout, read_timeout)
+		resolve_timeout = min(hop_connect, hop_read)
 		parsed, ip = _validate_url(current, egress_allowed, resolve_timeout)
 		if origin_host is None:
 			origin_host = parsed.hostname
+		if deadline is not None:
+			# DNS has been paid for; re-clamp connect + header wait to what is left,
+			# and hand urllib3 a ``total`` so the two cannot be spent sequentially.
+			total_left = deadline - clock()
+			if total_left <= 0:
+				raise SsrfError("Request exceeded its time budget.", kind=ERR_CONNECT_FAILED)
+			hop_connect = min(hop_connect, total_left)
+			hop_read = min(hop_read, total_left)
 		try:
 			resp, pool = _open_pinned(
 				parsed,
 				ip,
-				connect_timeout,
-				read_timeout,
+				hop_connect,
+				hop_read,
 				method=method,
 				body=body,
 				extra_headers=dict(headers or {}),
+				total_timeout=total_left,
 			)
 		except (urllib3.exceptions.HTTPError, OSError) as exc:
 			raise SsrfError(f"Request failed: {exc}", kind=ERR_CONNECT_FAILED) from exc

@@ -10,7 +10,7 @@ import base64
 import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass
-from urllib.parse import quote, urlencode
+from urllib.parse import quote_plus, urlencode
 
 from jarvis.connectors.mcp_oauth import registration as registration_module
 from jarvis.connectors.mcp_oauth import transport as transport_module
@@ -83,13 +83,14 @@ def _client_auth(creds: ClientCreds) -> tuple[dict, dict]:
 	  * ``client_secret_post`` - id and secret in the form body (the default, and
 	    what a static admin-entered client has always done).
 	  * ``client_secret_basic`` - RFC 6749 section 2.3.1 HTTP Basic: BOTH values
-	    are form-urlencoded before being joined and base64'd, and NEITHER is
+	    are application/x-www-form-urlencoded (Appendix B: a space becomes ``+``,
+	    hence ``quote_plus``) before being joined and base64'd, and NEITHER is
 	    repeated in the body. A secret sent twice is a secret in two logs.
 	  * ``none`` - a public client: client_id in the body, no secret anywhere.
 	"""
 	method = creds.auth_method or registration_module.AUTH_POST
 	if method == registration_module.AUTH_BASIC and creds.client_secret:
-		raw = f"{quote(creds.client_id, safe='')}:{quote(creds.client_secret, safe='')}"
+		raw = f"{quote_plus(creds.client_id, safe='')}:{quote_plus(creds.client_secret, safe='')}"
 		encoded = base64.b64encode(raw.encode("utf-8")).decode("ascii")
 		return {}, {"Authorization": f"Basic {encoded}"}
 	form = {"client_id": creds.client_id}

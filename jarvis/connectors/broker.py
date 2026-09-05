@@ -51,13 +51,16 @@ TOTAL_TIMEOUT_S = 20.0
 # An OAuth row may have to REFRESH its token before the call, and that refresh is
 # outbound time too. The arithmetic that keeps the plugin's 30s abort safe:
 #
-#   refresh (<= REFRESH_BUDGET_S)  +  call (TOTAL_TIMEOUT_S - refresh elapsed,
-#   floored at MIN_CALL_TIMEOUT_S)  =  at most ~25s
+#   refresh (<= REFRESH_BUDGET_S, WALL-CLOCK: DNS + connect + header wait + body
+#   are clamped to one deadline in ssrf.open_pinned_request, never spent one after
+#   another)  +  call (TOTAL_TIMEOUT_S - refresh elapsed, floored at
+#   MIN_CALL_TIMEOUT_S)  =  at most 20s when the refresh stays inside its budget,
+#   and at most REFRESH_BUDGET_S + MIN_CALL_TIMEOUT_S = 15s of call-side slack
+#   beyond that in the degenerate case, i.e. never past 25s.
 #
-# The floor is what makes the worst case 25 rather than 20: a refresh that spends
-# its whole budget still leaves the call MIN_CALL_TIMEOUT_S to be useful in,
-# instead of a guaranteed instant timeout. An API-key row spends none of this and
-# keeps the full 20s.
+# The floor is what keeps a refresh that spends its whole budget from leaving the
+# call a guaranteed instant timeout. An API-key row spends none of this and keeps
+# the full 20s.
 REFRESH_BUDGET_S = 10.0
 MIN_CALL_TIMEOUT_S = 5.0
 

@@ -2011,21 +2011,35 @@ class TestBrokerMcpOauthToken(_McpOauthTestCase):
 		self.assertEqual(transport.calls[0]["total_timeout"], broker.REFRESH_BUDGET_S)
 
 	def test_a_slow_refresh_still_leaves_the_call_a_floor(self):
+		# A REAL refresh runs here (expiring token + refresh token + a scripted token
+		# endpoint); the clock says it took far longer than its budget. The call
+		# must still get MIN_CALL_TIMEOUT_S, never zero or negative.
 		name = self._mk_mcp_connector("broker-floor")
-		self._mk_mcp_token(name, PLAIN_A, access_token="live-token")
+		self._mk_mcp_token(
+			name,
+			PLAIN_A,
+			access_token="stale-token",
+			refresh_token="old-refresh",
+			expires_at=add_to_date(now_datetime(), seconds=30),
+		)
+		transport = _ScriptedTransport({MCP_TOKEN: _token_response(access="fresh-access")})
 		captured: dict = {}
 
 		def _capture(base_url, token, action, args, **kwargs):
 			captured.update(kwargs)
+			captured["token"] = token
 			return {"content": []}
 
 		frappe.set_user(PLAIN_A)
 		with (
+			patch.object(oauth, "MCP_OAUTH_TRANSPORT", transport),
 			patch.object(broker.mcp_client, "run_tool", side_effect=_capture),
 			patch.object(broker, "time", _StepClock([0.0, 60.0])),
 		):
 			broker._execute(self._reload_doc(name), "list_issues", {})
 
+		self.assertEqual(len(transport.calls), 1, "the refresh actually ran")
+		self.assertEqual(captured["token"], "fresh-access")
 		self.assertEqual(captured["total_timeout"], broker.MIN_CALL_TIMEOUT_S)
 
 	def test_a_token_without_an_expiry_is_never_refreshed(self):

@@ -845,7 +845,8 @@ class ExchangeCodeTests(unittest.TestCase):
 		)
 
 		call = transport.calls[0]
-		expected = base64.b64encode(b"cid%201:s3cr%21t").decode("ascii")
+		# form-encoding: a space is "+", per RFC 6749 Appendix B
+		expected = base64.b64encode(b"cid+1:s3cr%21t").decode("ascii")
 		self.assertEqual(call["headers"]["Authorization"], f"Basic {expected}")
 		sent = dict(parse_qsl(call["body"].decode("utf-8")))
 		# A secret sent twice is a secret in two logs: neither value is repeated

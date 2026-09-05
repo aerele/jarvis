@@ -206,8 +206,24 @@ class JarvisConnector(Document):
 			return
 		if not self.is_new() and self.has_value_changed("preset"):
 			frappe.throw(_("Add a new connector to use a different app."), frappe.PermissionError)
-		owner_connector = frappe.db.get_value("MCP OAuth Client", self.mcp_oauth_client, "connector")
+		owner_connector, client_resource = frappe.db.get_value(
+			"MCP OAuth Client", self.mcp_oauth_client, ["connector", "resource"]
+		) or (None, None)
 		if owner_connector != self.name:
+			frappe.throw(_("This app is not set up for sign-in."), frappe.PermissionError)
+		# The client was discovered FOR one address. It must still be this row's
+		# address, whatever route the row took to get here (a preset flip split across
+		# two saves re-pins base_url on the first and re-attaches the client on the
+		# second, with "preset" unchanged in that second save).
+		from jarvis.connectors.mcp_oauth import canonical_resource
+
+		try:
+			same_address = canonical_resource(client_resource or "") == canonical_resource(
+				self.base_url or ""
+			)
+		except ValueError:
+			same_address = False
+		if not same_address:
 			frappe.throw(_("This app is not set up for sign-in."), frappe.PermissionError)
 
 	def _guard_preset_oauth(self) -> None:

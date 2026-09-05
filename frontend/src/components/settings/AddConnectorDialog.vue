@@ -80,7 +80,7 @@
 						     a named static preset gets the same block Custom URL already
 						     had. -->
 						<template v-if="rowNeedsStaticClient">
-							<template v-if="isAdmin">
+							<template v-if="canSetStaticClient">
 								<FormControl
 									type="text"
 									label="Client ID"
@@ -380,6 +380,13 @@ const show = computed({
 });
 
 const isAdmin = !!window.is_system_manager || !!window.is_jarvis_admin;
+// Who may enter an app's client id/secret: an admin for a Shared row, or the
+// owner of their own Personal row (their app, their connector). Mirrors the
+// server gate in set_oauth_client_credentials, so a Personal row is never a
+// dead end waiting on an admin who cannot even see it.
+const canSetStaticClient = computed(
+	() => isAdmin || (props.connector?.scope || props.scope) === "Personal"
+);
 
 const isEdit = computed(() => !!props.connector);
 const dialogTitle = computed(() => (isEdit.value ? "Edit connector" : "Add connector"));

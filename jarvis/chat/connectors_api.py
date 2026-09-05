@@ -764,12 +764,14 @@ def _setup_mcp_oauth_client(doc) -> None:
 	its caller named.
 
 	TIME. This is the slowest thing the connectors API does, and every second of it
-	is a held worker. The ceiling is deliberate and arithmetic:
-	``mcp_oauth.discovery.RUN_TOTAL_TIMEOUT_S`` (45s) for the whole discovery run,
-	up to six hops inside it, plus ``transport.TOKEN_TOTAL_TIMEOUT_S`` (10s) for
-	the registration POST - about 55s worst case, with at most
-	``transport.MAX_REDIRECTS`` (2) redirects per hop. The rate limit above is what
-	stops a caller from queueing several of those at once.
+	is a held worker. The ceiling is deliberate and arithmetic, and WALL-CLOCK
+	(``ssrf.open_pinned_request`` clamps DNS, connect, header wait and body to one
+	deadline per hop): ``mcp_oauth.discovery.RUN_TOTAL_TIMEOUT_S`` (45s) for the
+	whole discovery run, up to six hops inside it, plus
+	``transport.TOKEN_TOTAL_TIMEOUT_S`` (10s) for the registration POST - 55s worst
+	case, with at most ``transport.MAX_REDIRECTS`` (2) redirects per hop, well under
+	gunicorn's 120s. The rate limit above is what stops a caller from queueing
+	several of those at once.
 
 	ORDER MATTERS. This runs AFTER the insert so every cheap gate has already run
 	- the Shared-scope permission check, key uniqueness, the custom-URL policy.
@@ -1331,24 +1333,25 @@ def set_oauth_client_credentials(name: str, client_id: str, client_secret: str =
 	the same convention ``update_connector`` uses for a credential, since the SPA
 	never round-trips a stored secret back.
 
-	TWO gates, not one. The admin-tier check says WHO may configure a sign-in at
-	all; the row's own write permission says WHICH connectors this admin may
-	configure. They are not the same set: ``connector_permissions`` deliberately
-	keeps a Personal row private to its owner, admin tier included (mirroring
-	``Jarvis Conversation``), so without the second check an admin could plant
-	their own client credentials on another user's private connector and receive
-	that user's sign-in."""
-	if not has_jarvis_admin_access(frappe.session.user):
-		frappe.throw(
-			_("Only a System Manager or Jarvis Admin may set up sign-in for an app."),
-			frappe.PermissionError,
-		)
-
+	TWO gates, not one. WHO may configure a sign-in: the admin tier for a Shared
+	row (these credentials identify the whole workspace), or the OWNER of a
+	Personal row (their own app, their own connector - the same trust as pasting
+	their own key). WHICH row: the row's own write permission, which
+	``connector_permissions`` deliberately keeps owner-only for a Personal row,
+	admin tier included (mirroring ``Jarvis Conversation``) - so an admin can
+	never plant their own client credentials on another user's private connector
+	and receive that user's sign-in, and a Personal row is never a dead end."""
 	client_id = (client_id or "").strip()
 	if not client_id:
 		frappe.throw(_("Enter the ID the provider gave you."))
 
 	doc = frappe.get_doc(CONNECTOR, name)
+	owns_personal = doc.scope == "Personal" and doc.owner == frappe.session.user
+	if not (owns_personal or has_jarvis_admin_access(frappe.session.user)):
+		frappe.throw(
+			_("Only a System Manager or Jarvis Admin may set up sign-in for a shared app."),
+			frappe.PermissionError,
+		)
 	if not doc.has_permission("write"):
 		frappe.throw(_("Not permitted."), frappe.PermissionError)
 	client = mcp_oauth_store.client_for(doc.name) if doc.get("mcp_oauth_client") else None
