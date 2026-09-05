@@ -62,6 +62,12 @@ class Discovery:
 	token_endpoint: str
 	registration_endpoint: str | None
 	raw_as_metadata: dict
+	#: The ``scope`` the 401 challenge itself asked for, when it named one. The
+	#: spec prefers it over ``scopes_supported`` (least privilege: the server is
+	#: naming what THIS resource needs, not everything its AS can issue).
+	#: Keyword-defaulted so every existing positional/keyword construction of
+	#: this dataclass keeps working.
+	challenge_scope: str | None = None
 
 
 def _parse_www_authenticate(value: str) -> dict:
@@ -250,4 +256,5 @@ def discover(
 		token_endpoint=token_endpoint,
 		registration_endpoint=registration_endpoint,
 		raw_as_metadata=as_metadata,
+		challenge_scope=(challenge_params.get("scope") or "").strip() or None,
 	)

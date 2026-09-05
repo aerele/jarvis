@@ -40,10 +40,25 @@ Endpoints:
     deny everything as ``action_unknown``, which is confusing, not safer).
   * ``delete_connector``.
   * ``connect_oauth``         - OAuth tier: returns the provider's authorize
-    URL for an OAuth-auth-method row; Frappe's native Connected App callback
-    handles the return trip, no custom callback lives here.
-  * ``disconnect_oauth``      - deletes the CURRENT user's Token Cache for an
-    OAuth row (per-user, idempotent).
+    URL for an OAuth-auth-method row. On the PRESET path Frappe's native
+    Connected App callback handles the return trip; on the CUSTOM URL path
+    ``mcp_oauth_callback`` below does.
+  * ``disconnect_oauth``      - deletes the CURRENT user's stored sign-in for an
+    OAuth row (per-user, idempotent), from whichever engine backs it.
+  * ``probe_connector_auth``  - Custom URL sign-in discovery, WITHOUT creating
+    anything: "does this address need a sign-in, and where?".
+  * ``set_oauth_client_credentials`` - admin-only, static-mode only: the
+    client_id/secret an administrator registered at the provider by hand.
+  * ``mcp_oauth_callback``    - the ONE redirect URI the discovery engine
+    registers and returns to. Login-required (never allow_guest).
+
+TWO OAUTH ENGINES (MCP_OAUTH_CLIENT_DESIGN.md). A ``preset`` row with
+``auth_method="OAuth"`` uses Frappe's Connected App, exactly as it shipped and
+untouched here. A ``Custom URL`` row with ``auth_method="OAuth"`` uses the
+spec-compliant discovery engine in ``jarvis.connectors.mcp_oauth`` (+
+``mcp_oauth_store``). The engines are told apart by WHICH link the row carries
+(``connected_app`` vs ``mcp_oauth_client``), never by ``auth_method``, and the
+connector controller guarantees a row never carries both.
 
 ``set_custom_url_policy`` is deliberately NOT here — MCP_CONNECTORS_PLAN.md's
 UI/UX decision #2 puts that admin control on the Jarvis Settings Desk form.
@@ -59,19 +74,36 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import time
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import frappe
 from frappe import _
-from frappe.utils import cint, now_datetime
+from frappe.utils import cint, get_url, now_datetime
 
-from jarvis.connectors import broker, oauth
-from jarvis.permissions import require_jarvis_user
+from jarvis.connectors import broker, mcp_oauth, mcp_oauth_store, oauth
+from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 
 CONNECTOR = "Jarvis Connector"
 ACTION_DT = "Jarvis Connector Action"
 SETTINGS = "Jarvis Settings"
+
+#: The transport the discovery engine's outbound hops go through here (the
+#: SSRF-guarded, IP-pinned client). Tests swap in a scripted fake; the broker's
+#: own refresh path has the twin hook on ``oauth.MCP_OAUTH_TRANSPORT``.
+MCP_OAUTH_TRANSPORT = mcp_oauth.open_pinned
+
+#: The ONE redirect URI this app registers and returns to. It must be
+#: byte-identical at registration time, at authorize time and at callback time -
+#: providers exact-match it - so every producer goes through
+#: :func:`oauth_redirect_uri` rather than building it again.
+_CALLBACK_METHOD = "jarvis.chat.connectors_api.mcp_oauth_callback"
+
+#: Where the browser lands after a sign-in attempt, success or failure. Same
+#: return the shipped Connected App path already uses, so the SPA has one
+#: place to handle both.
+_SPA_CONNECTORS_PATH = "/jarvis?settings=connectors"
 
 # Per-user rate limit on the outbound Test-connection probe (calendar-minute
 # bucket). The probe fires a real network call to a user-chosen host, so it must
@@ -228,10 +260,108 @@ def _resolve_connected_app_for_preset(preset: str) -> str | None:
 	return found[0] if found else None
 
 
+def oauth_redirect_uri() -> str:
+	"""The single redirect URI the discovery engine uses everywhere: dynamic
+	registration, the authorize URL, and the callback's own token exchange. A
+	provider exact-matches this string, so all three MUST agree.
+
+	TRAP: ``get_url()`` reads site_config, which can legitimately differ from the
+	host the browser actually used (an aliased or e2e host). That is tolerable
+	here in a way it was not for the shipped path's ``success_uri`` - this value
+	is registered WITH the provider and compared by it, so it has to be the
+	site's own canonical URL rather than whatever host this particular request
+	arrived on."""
+	return f"{get_url()}/api/method/{_CALLBACK_METHOD}"
+
+
+def _error(code: str, message: str) -> dict:
+	return {"ok": False, "error": {"code": code, "message": message}}
+
+
+def _host(url: str | None) -> str:
+	return (urlparse(url or "").hostname or "").strip()
+
+
+# Stable engine error code -> friendly copy. NO protocol words: the person
+# reading this pasted a URL and pressed a button, and "the sign-in service"
+# is a thing they can act on in a way "the authorization server metadata" is
+# not. Codes come from the core's typed errors and from the SSRF guard's own
+# ``kind``, which OAuthTransportError mirrors.
+_OAUTH_ERROR_MESSAGES = {
+	"no_www_authenticate": "This app did not say how to sign in to it.",
+	"no_resource_metadata": "This app did not say where to sign in.",
+	"resource_metadata_unavailable": "We could not read this app's sign-in details.",
+	"resource_mismatch": "This app's sign-in details do not match the address you entered.",
+	"no_authorization_servers": "This app did not name a sign-in service.",
+	"as_metadata_unavailable": "We could not read the sign-in service's details.",
+	"issuer_mismatch": "The sign-in service's details do not match its address.",
+	"missing_endpoint": "The sign-in service's details are incomplete.",
+	"insecure_endpoint": "The sign-in service is not using a secure address.",
+	"registration_failed": "The sign-in service would not set this workspace up.",
+	"no_client_id": "The sign-in service did not return the details we need.",
+	"token_request_failed": "The sign-in service rejected the sign-in.",
+	"no_access_token": "The sign-in service did not complete the sign-in.",
+	"response_too_large": "The sign-in service sent more data than we accept.",
+	"invalid_url": "That address is not valid.",
+	"unresolved": "That address could not be found.",
+	"blocked_address": "This connector address is not permitted.",
+	"egress_denied": "This connector address is not permitted by your administrator's policy.",
+	"connect_failed": "The connector could not be reached.",
+	"too_many_redirects": "That address redirects too many times.",
+	"cross_host_redirect": "That address redirects somewhere we cannot follow.",
+	"insecure_redirect": "That address redirects to an insecure address.",
+}
+
+
+def _oauth_error_message(code: str) -> str:
+	return _OAUTH_ERROR_MESSAGES.get(code, "We could not set up sign-in for this address.")
+
+
+def _mcp_oauth_status(doc) -> dict:
+	"""The discovery engine's twin of :func:`_oauth_status`'s Connected App
+	branch. ``oauth_configured`` means we hold a client_id to sign in WITH;
+	``needs_static_client`` means the sign-in service does not self-register, so
+	an administrator has to register Jarvis there and paste the result in.
+
+	Presence-only, exactly like the shipped branch: a stale or expired token
+	still reads as connected for display, and nothing here ever triggers a
+	refresh. The broker is what enforces liveness on an actual call."""
+	connector = doc.get("name")
+	client = mcp_oauth_store.client_for(connector)
+	if client is None:
+		return {
+			"oauth_configured": False,
+			"oauth_connected": False,
+			"signin_host": "",
+			"needs_static_client": False,
+		}
+	client_id = (client.get("client_id") or "").strip()
+	is_static = (client.get("registration_mode") or "static") == "static"
+	token = mcp_oauth_store.load_token(connector, frappe.session.user)
+	status = {
+		"oauth_configured": bool(client_id),
+		"oauth_connected": bool(token and token.get_password("access_token", raise_exception=False)),
+		"signin_host": _host(client.get("issuer")),
+		"needs_static_client": is_static and not client_id,
+	}
+	if is_static:
+		# An admin registering by hand needs the exact callback to paste at the
+		# provider, so ship it with the row rather than making them find it.
+		status["oauth_redirect_uri"] = oauth_redirect_uri()
+	return status
+
+
 def _oauth_status(doc) -> dict:
-	"""``{oauth_configured, oauth_connected}`` for an OAuth-auth-method row.
-	``oauth_configured`` is true when a Connected App still resolves for the
-	preset (an admin could remove it after the row was created).
+	"""``{oauth_configured, oauth_connected, signin_host}`` for an
+	OAuth-auth-method row, from whichever engine backs it.
+
+	``signin_host`` is on both branches on purpose: the confused-deputy defense
+	(design section 6) is showing the user WHERE they are about to sign in, and
+	that line should read the same whether the row is a preset or a Custom URL.
+
+	Below is the shipped Connected App branch. ``oauth_configured`` is true when a
+	Connected App still resolves for the preset (an admin could remove it after
+	the row was created).
 
 	``oauth_connected`` is PRESENCE of a real access token on the current
 	user's Token Cache - NOT mere presence of the Token Cache doc. Frappe's own
@@ -242,13 +372,19 @@ def _oauth_status(doc) -> dict:
 	Frappe's own ``connected_app.has_token``; this must never trigger a refresh
 	(a stale/expired token still counts as "connected" for display - the broker
 	is what enforces liveness on an actual call)."""
+	if doc.get("mcp_oauth_client"):
+		return _mcp_oauth_status(doc)
 	connected_app = doc.get("connected_app")
 	if not connected_app or not frappe.db.exists("Connected App", connected_app):
-		return {"oauth_configured": False, "oauth_connected": False}
+		return {"oauth_configured": False, "oauth_connected": False, "signin_host": ""}
 	app = frappe.get_doc("Connected App", connected_app)
 	token_cache = app.get_token_cache(frappe.session.user)
 	connected = bool(token_cache and token_cache.get_password("access_token", False))
-	return {"oauth_configured": True, "oauth_connected": connected}
+	return {
+		"oauth_configured": True,
+		"oauth_connected": connected,
+		"signin_host": _host(app.get("authorization_uri")),
+	}
 
 
 def _connector_summary(doc) -> dict:
@@ -408,6 +544,7 @@ def list_connectors() -> dict:
 			"enabled",
 			"auth_method",
 			"connected_app",
+			"mcp_oauth_client",
 			"last_test_status",
 			"last_test_at",
 		],
@@ -427,7 +564,9 @@ def list_connectors() -> dict:
 		row["auth_method"] = row.get("auth_method") or "API Key"
 		if row["auth_method"] == oauth.OAUTH_AUTH_METHOD:
 			row.update(_oauth_status(row))
-		row.pop("connected_app", None)  # internal - never shipped to the SPA
+		# Both engine links are internals - never shipped to the SPA.
+		row.pop("connected_app", None)
+		row.pop("mcp_oauth_client", None)
 		(shared if row["scope"] == "Shared" else mine).append(row)
 
 	return {
@@ -471,10 +610,14 @@ def add_connector(
 
 	``auth_method`` picks the connection method (OAUTH_CONNECTORS_DESIGN.md §4,
 	§6b): "OAuth" IGNORES the ``credential`` argument entirely (nothing is ever
-	stored in the Password field for an OAuth row) and resolves
-	``connected_app`` SERVER-SIDE from the preset - a caller can ask for OAuth
-	but can never name or steer which Connected App backs it. "API Key" is the
-	shipped, unchanged behaviour."""
+	stored in the Password field for an OAuth row) and resolves the backing link
+	SERVER-SIDE - a caller can ask for OAuth but can never name or steer what
+	backs it. "API Key" is the shipped, unchanged behaviour.
+
+	OAuth resolves to one of two engines. A PRESET row gets the Connected App its
+	preset maps to (shipped, unchanged). A CUSTOM URL row runs discovery against
+	the address itself and gets an ``MCP OAuth Client`` - see
+	:func:`_setup_mcp_oauth_client`."""
 	label = (label or "").strip()
 	preset = (preset or "").strip()
 	scope = (scope or "").strip()
@@ -517,7 +660,15 @@ def add_connector(
 		"auth_method": auth_method,
 		"enabled": 1,
 	}
-	if auth_method == oauth.OAUTH_AUTH_METHOD:
+	custom_url_oauth = auth_method == oauth.OAUTH_AUTH_METHOD and preset == "Custom URL"
+	if custom_url_oauth:
+		# Discovery below is real egress to a host the CALLER chose, so it is rate
+		# limited exactly like the Test button. Without this the endpoint is an
+		# unmetered outbound-request amplifier for any Jarvis User.
+		if _over_test_rate_limit(frappe.session.user):
+			frappe.throw(_("Too many attempts. Please wait a moment and try again."))
+		doc_fields["credential"] = ""
+	elif auth_method == oauth.OAUTH_AUTH_METHOD:
 		# Never store a pasted secret for an OAuth row, and never trust a
 		# client-supplied Connected App - resolve it from the preset ourselves.
 		connected_app = _resolve_connected_app_for_preset(preset)
@@ -530,8 +681,62 @@ def add_connector(
 
 	doc = frappe.get_doc(doc_fields)
 	doc.insert()
+	if custom_url_oauth:
+		_setup_mcp_oauth_client(doc)
 	frappe.db.commit()
 	return _connector_summary(doc)
+
+
+def _setup_mcp_oauth_client(doc) -> None:
+	"""Discover ``doc``'s sign-in service, self-register with it when it supports
+	that, and store the result as the row's ``MCP OAuth Client``.
+
+	ORDER MATTERS. This runs AFTER the insert so every cheap gate has already run
+	- the Shared-scope permission check, key uniqueness, the custom-URL policy.
+	Those are the likely failures and none of them should cost an outbound
+	request first; in particular, registering before the permission check would
+	let any Jarvis User drive registration POSTs at an arbitrary host by asking
+	for a Shared row they cannot create. If discovery then fails, the row just
+	created is removed rather than left behind as an unusable connector.
+
+	The link is written with ``frappe.db.set_value`` because the client cannot
+	exist before the connector it points at: this is the second half of ONE
+	create, not a user-initiated edit, and must not re-run the row's validation."""
+	try:
+		found = mcp_oauth.discover(
+			doc.base_url, transport=MCP_OAUTH_TRANSPORT, egress_allowed=broker._egress_allowed
+		)
+		scope = _requested_scope(found)
+		if found.registration_endpoint:
+			creds = mcp_oauth.register_dynamic(
+				found.registration_endpoint,
+				redirect_uri=oauth_redirect_uri(),
+				scope=scope,
+				transport=MCP_OAUTH_TRANSPORT,
+				egress_allowed=broker._egress_allowed,
+			)
+		else:
+			# No self-registration on offer: park a static client with no client_id
+			# until an administrator registers this workspace at the provider and
+			# fills it in via set_oauth_client_credentials.
+			creds = mcp_oauth.static_client("")
+		client = mcp_oauth_store.save_client(doc.name, found, creds, scope)
+	except mcp_oauth.OAuthError as exc:
+		frappe.delete_doc(CONNECTOR, doc.name, ignore_permissions=True, force=True)
+		frappe.db.commit()
+		frappe.throw(_oauth_error_message(exc.code))
+		return
+	frappe.db.set_value(CONNECTOR, doc.name, "mcp_oauth_client", client.name, update_modified=False)
+	doc.mcp_oauth_client = client.name
+
+
+def _requested_scope(found) -> str:
+	"""The permissions to ask for: what the connector's own challenge named when
+	it named any (least privilege - the server is stating what THIS resource
+	needs), else everything its sign-in service advertises."""
+	if found.challenge_scope:
+		return found.challenge_scope
+	return " ".join(found.scopes_supported or [])
 
 
 # --------------------------------------------------------------------------- #
@@ -588,10 +793,11 @@ def test_connector(name: str) -> dict:
 			},
 		}
 
-	if oauth.is_oauth(doc) and not oauth.resolve_access_token(doc):
+	if oauth.is_oauth(doc) and not oauth.resolve_connector_token(doc):
 		# Fail BEFORE the outbound probe (and before touching the rate limit's
 		# sibling breaker/cap): an unconnected OAuth row has no bearer to test
-		# with, and that is a sign-in problem, not a transport/health one.
+		# with, and that is a sign-in problem, not a transport/health one. The
+		# resolver picks the engine, so this covers both.
 		return {
 			"ok": False,
 			"error": {
@@ -775,6 +981,15 @@ def update_connector(
 		if base_url != doc.base_url:
 			if doc.preset != "Custom URL":
 				frappe.throw(_("Only Custom URL connectors may change their Base URL."))
+			if doc.get("mcp_oauth_client"):
+				# The stored sign-in was granted FOR this address, by a service this
+				# address named. Re-pointing would mean either forwarding that
+				# sign-in to a different app (which the resource pin in
+				# ``oauth.resolve_mcp_oauth_token`` refuses anyway, leaving the row
+				# permanently unusable) or silently re-running discovery against a
+				# new host under an existing grant. Neither is safe, so a different
+				# address is a different connector.
+				frappe.throw(_("Add a new connector to use a different address."))
 			# Re-point is a fresh custom URL, so re-apply the same allow_custom_urls
 			# gate add_connector uses. Without this, an admin turning the toggle OFF
 			# would still leave existing Custom URL rows freely re-pointable on edit.
@@ -851,6 +1066,9 @@ def connect_oauth(name: str) -> dict:
 	if not oauth.is_oauth(doc):
 		return {"ok": False, "error": {"code": "not_oauth", "message": "This connector doesn't use sign-in."}}
 
+	if doc.get("mcp_oauth_client"):
+		return _connect_mcp_oauth(doc)
+
 	connected_app = doc.get("connected_app")
 	if not connected_app or not frappe.db.exists("Connected App", connected_app):
 		return {
@@ -873,15 +1091,63 @@ def connect_oauth(name: str) -> dict:
 	return {"ok": True, "url": url}
 
 
+def _connect_mcp_oauth(doc) -> dict:
+	"""Start a discovery-engine sign-in: mint the one-time state, bind everything
+	the callback will need to it SERVER-SIDE, and hand back the authorize URL.
+
+	Nothing the callback needs travels in the URL except the opaque ``state``.
+	The code verifier, the issuer to validate the response against, the redirect
+	URI and the user who started the flow all live in the state record, because
+	the callback's own query string is attacker-influenced and may not be trusted
+	for any of them."""
+	client = mcp_oauth_store.client_for(doc.name)
+	client_id = (client.get("client_id") or "").strip() if client else ""
+	if not client_id:
+		return _error("oauth_not_configured", "This app isn't set up for sign-in yet. Ask your admin.")
+
+	state = secrets.token_urlsafe(32)
+	code_verifier = mcp_oauth.pkce_new_verifier()
+	redirect_uri = oauth_redirect_uri()
+	mcp_oauth_store.put_state(
+		state,
+		{
+			"connector": doc.name,
+			"user": frappe.session.user,
+			"code_verifier": code_verifier,
+			"issuer": client.get("issuer") or "",
+			"iss_param_supported": bool(cint(client.get("iss_param_supported"))),
+			"redirect_uri": redirect_uri,
+			"resource": client.get("resource") or "",
+			"scope": client.get("scope") or "",
+		},
+	)
+	url = mcp_oauth.build_authorize_url(
+		mcp_oauth_store.discovery_from_client(client),
+		client_id,
+		redirect_uri,
+		scope=client.get("scope") or "",
+		resource=client.get("resource") or "",
+		state=state,
+		code_challenge=mcp_oauth.pkce_challenge(code_verifier),
+	)
+	return {"ok": True, "url": url}
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def disconnect_oauth(name: str) -> dict:
 	"""End the CURRENT user's sign-in for an OAuth connector by deleting their
-	Token Cache. Idempotent - never errors when there was nothing to remove
-	(no Connected App configured, or the user never connected)."""
+	stored tokens, from whichever engine backs the row. Idempotent - never errors
+	when there was nothing to remove (nothing configured, or the user never
+	connected)."""
 	doc = frappe.get_doc(CONNECTOR, name)
 	if not doc.has_permission("read"):
 		frappe.throw(_("Not permitted."), frappe.PermissionError)
+
+	if doc.get("mcp_oauth_client"):
+		if mcp_oauth_store.delete_token(doc.name, frappe.session.user):
+			frappe.db.commit()
+		return {"ok": True}
 
 	connected_app = doc.get("connected_app")
 	if not connected_app or not frappe.db.exists("Connected App", connected_app):
@@ -893,3 +1159,199 @@ def disconnect_oauth(name: str) -> dict:
 		frappe.delete_doc("Token Cache", token_cache.name, ignore_permissions=True, force=True)
 		frappe.db.commit()
 	return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# 8. discovery engine: probe, static credentials, callback
+#    (MCP_OAUTH_CLIENT_DESIGN.md §2, §5, §6)
+# --------------------------------------------------------------------------- #
+@frappe.whitelist()
+@require_jarvis_user
+def probe_connector_auth(base_url: str) -> dict:
+	"""Ask an address whether it needs a sign-in, and where. Creates NOTHING -
+	this is what the SPA calls while the user is still typing a URL, so it can
+	say "this app signs you in at github.com" BEFORE anything is saved and before
+	the user is sent anywhere. That preview is the confused-deputy defense
+	(design section 6): the server the user pasted is what chose that host, so
+	the user has to see it.
+
+	``{ok: True, needs_signin: True, signin_host, registration, scopes}`` when the
+	address asks for a sign-in; ``{ok: True, needs_signin: False}`` when it does
+	not (an address that answers unauthenticated takes a key, or nothing);
+	``{ok: False, error}`` when it asks for one but its details cannot be read or
+	do not survive the validation gates.
+
+	Gated like the Test button, and for the same reason: it is a real outbound
+	call to a host the caller named."""
+	from jarvis.tools._connector_gate import connectors_enabled
+
+	if not connectors_enabled():
+		return _error("connectors_disabled", "Connectors are not enabled for this workspace.")
+	if not connector_flags()["allow_custom_urls"]:
+		return _error(
+			"custom_urls_disabled",
+			"Custom addresses are turned off. Ask an administrator to enable them.",
+		)
+
+	base_url = (base_url or "").strip()
+	parsed = urlparse(base_url)
+	if parsed.scheme not in ("http", "https") or not parsed.netloc:
+		return _error("invalid_arguments", "Enter a valid http:// or https:// address.")
+
+	if _over_test_rate_limit(frappe.session.user):
+		return _error("rate_limited", "Too many checks. Please wait a moment and try again.")
+
+	try:
+		found = mcp_oauth.discover(
+			base_url, transport=MCP_OAUTH_TRANSPORT, egress_allowed=broker._egress_allowed
+		)
+	except mcp_oauth.OAuthDiscoveryError as exc:
+		if exc.code == "no_401_challenge":
+			# The address served the call without asking for anything, so there is
+			# no sign-in to set up. Not a failure - the other kind of connector.
+			return {"ok": True, "needs_signin": False}
+		return _error(exc.code, _oauth_error_message(exc.code))
+	except mcp_oauth.OAuthError as exc:
+		return _error(exc.code, _oauth_error_message(exc.code))
+
+	return {
+		"ok": True,
+		"needs_signin": True,
+		"signin_host": _host(found.issuer),
+		"registration": "dcr" if found.registration_endpoint else "static",
+		"scopes": list(found.scopes_supported or []),
+	}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def set_oauth_client_credentials(name: str, client_id: str, client_secret: str = "") -> dict:
+	"""ADMIN ONLY. Supply the credentials an administrator got by registering this
+	workspace at a provider by hand - the static path, taken when the provider
+	does not set itself up automatically.
+
+	Not something a tenant user may do: these credentials identify the whole
+	workspace to the provider, and the redirect URI they are registered against
+	is this site's. A blank ``client_secret`` means "leave the stored one alone",
+	the same convention ``update_connector`` uses for a credential, since the SPA
+	never round-trips a stored secret back."""
+	if not has_jarvis_admin_access(frappe.session.user):
+		frappe.throw(
+			_("Only a System Manager or Jarvis Admin may set up sign-in for an app."),
+			frappe.PermissionError,
+		)
+
+	client_id = (client_id or "").strip()
+	if not client_id:
+		frappe.throw(_("Enter the ID the provider gave you."))
+
+	doc = frappe.get_doc(CONNECTOR, name)
+	client = mcp_oauth_store.client_for(doc.name) if doc.get("mcp_oauth_client") else None
+	if client is None:
+		frappe.throw(_("This connector does not use this kind of sign-in."))
+	if (client.get("registration_mode") or "static") != "static":
+		frappe.throw(_("This app set itself up, so it needs no details from you."))
+
+	client.client_id = client_id
+	if client_secret:
+		client.client_secret = client_secret
+	client.save(ignore_permissions=True)
+	frappe.db.commit()
+	return _connector_summary(doc)
+
+
+@frappe.whitelist(methods=["GET"])
+@require_jarvis_user
+def mcp_oauth_callback(
+	code: str | None = None,
+	state: str | None = None,
+	iss: str | None = None,
+	error: str | None = None,
+	error_description: str | None = None,
+) -> None:
+	"""The one redirect URI the discovery engine registers. A browser lands here
+	from the provider; this trades the authorization code for tokens and sends
+	the browser back to the connectors pane.
+
+	LOGIN REQUIRED - deliberately NOT ``allow_guest``. The whole flow is bound to
+	the user who started it, so an anonymous hit has nothing to bind to and is
+	refused by the framework before this body runs.
+
+	The order of the checks is the security design, not a style choice:
+
+	  1. Consume the state FIRST and destroy it - one callback per Connect,
+	     always, including for every failure path below. A replay finds nothing.
+	  2. The session user must be the user who started the flow, or a stolen
+	     state cannot be redeemed into someone else's account.
+	  3. RFC 9207 ``iss`` validation BEFORE any token request (mix-up defense).
+	     On mismatch nothing is acted on and nothing from the response is shown.
+	  4. Only then a provider-reported ``error`` is turned into a generic result.
+	     ``error_description`` is accepted so the URL parses and is then dropped
+	     unread - it is attacker-influenced text and is never echoed.
+
+	Nothing secret is ever put in the redirect or a log line: the browser is sent
+	back with a connector name or a one-word reason, never a token, code or state.
+	And the whole body is wrapped, because an exception escaping into Frappe's
+	error page would render a stack trace for a URL that carries a live
+	authorization code."""
+	try:
+		record = mcp_oauth_store.consume_state(state)
+		if record is None:
+			return _callback_redirect(reason="expired")
+		if record.get("user") != frappe.session.user:
+			return _callback_redirect(reason="denied")
+		mcp_oauth.validate_iss(iss, record.get("issuer") or "", bool(record.get("iss_param_supported")))
+		if error or not code:
+			return _callback_redirect(reason="denied")
+		_exchange_and_store(record, code)
+		return _callback_redirect(connector=record.get("connector"))
+	except mcp_oauth.OAuthError:
+		return _callback_redirect(reason="denied")
+	except Exception:
+		frappe.logger("jarvis.connectors").warning("connector sign-in callback failed", exc_info=True)
+		return _callback_redirect(reason="denied")
+
+
+def _exchange_and_store(record: dict, code: str) -> None:
+	"""Trade the code for tokens and store them for the user who STARTED the flow
+	(the record's user, already checked to be the session user), then commit.
+
+	The commit is load-bearing: this is a GET, and Frappe rolls back anything a
+	non-state-changing method wrote. Without it the sign-in would appear to work
+	and store nothing."""
+	connector = record.get("connector") or ""
+	client = mcp_oauth_store.client_for(connector)
+	if client is None or not (client.get("client_id") or "").strip():
+		raise mcp_oauth.OAuthTokenError(
+			"oauth_not_configured", "No sign-in is configured for this connector."
+		)
+
+	resource = record.get("resource") or client.get("resource") or ""
+	token_set = mcp_oauth.exchange_code(
+		mcp_oauth_store.discovery_from_client(client),
+		mcp_oauth_store.creds_from_client(client),
+		code=code,
+		code_verifier=record.get("code_verifier") or "",
+		# The redirect URI recorded when the flow STARTED, not one rebuilt now:
+		# the provider compares it to what it was given, so they must match even
+		# if the site's URL changed in between.
+		redirect_uri=record.get("redirect_uri") or oauth_redirect_uri(),
+		resource=resource,
+		transport=MCP_OAUTH_TRANSPORT,
+		egress_allowed=broker._egress_allowed,
+	)
+	mcp_oauth_store.save_token(connector, record["user"], token_set, resource, record.get("scope") or "")
+	frappe.db.commit()
+
+
+def _callback_redirect(connector: str | None = None, reason: str | None = None) -> None:
+	"""Send the browser back to the connectors pane. A bare path, never an
+	absolute URL: Frappe's own redirect sanitizer only trusts a redirect whose
+	host matches the CURRENT request's, and a path has no host to disagree."""
+	location = _SPA_CONNECTORS_PATH
+	if connector:
+		location += "&oauth=" + quote(connector, safe="")
+	elif reason:
+		location += "&oauth_error=" + quote(reason, safe="")
+	frappe.local.response["type"] = "redirect"
+	frappe.local.response["location"] = location

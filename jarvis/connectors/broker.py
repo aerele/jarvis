@@ -181,17 +181,22 @@ def resolve_for_status(connector_key: str):
 def _credential(row) -> str:
 	"""Resolve the connector's bearer credential. An OAuth row (see
 	``oauth.is_oauth``) resolves a live access token for the CURRENT
-	impersonated user from its linked Connected App - no ``credential`` field
+	impersonated user - from its linked Connected App, or from the discovery
+	engine's own token store, whichever backs the row; no ``credential`` field
 	is ever read for it - and raises ``connector_not_ready`` when the user has
 	not connected (or the token could not be refreshed), rather than handing
-	the MCP call a blank/broken bearer.
+	the MCP call a blank/broken bearer. ``oauth.resolve_connector_token`` owns
+	that branch so this module never has to know which engine a row uses.
+
+	A refresh, when one happens, happens HERE: before the concurrency slot below,
+	inside the time budget, and never feeding the circuit breaker.
 
 	Otherwise: decrypt the stored ``credential`` (the shipped API-key path,
 	unchanged). On an UNSAVED row (the P3 test button tests before first save)
 	``get_password`` cannot read ``__Auth`` by name, so fall back to the
 	in-memory field value."""
 	if oauth.is_oauth(row):
-		token = oauth.resolve_access_token(row)
+		token = oauth.resolve_connector_token(row)
 		if not token:
 			raise _BrokerError("connector_not_ready", "Connect this app in Settings before it can be used.")
 		return token

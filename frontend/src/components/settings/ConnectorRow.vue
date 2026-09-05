@@ -8,7 +8,7 @@
 					<Badge variant="subtle" size="sm" :theme="statusTheme" :label="statusLabel" />
 				</Tooltip>
 			</div>
-			<div class="truncate text-xs text-ink-gray-5">{{ row.base_url }}</div>
+			<div class="truncate text-xs text-ink-gray-5">{{ subtext }}</div>
 		</div>
 
 		<Switch
@@ -103,10 +103,15 @@ const statusTheme = computed(() => {
 	if (props.row.last_test_status === "Failed") return "red";
 	return "gray";
 });
+// needs_static_client (spec-compliant client, MCP_OAUTH_CLIENT_DESIGN.md §8)
+// is the authoritative "an admin must act" signal - checked ahead of
+// oauth_configured so a row that needs a client id/secret always reads
+// "Setup needed" even if oauth_configured happens to lag behind it.
 const statusLabel = computed(() => {
 	if (!props.row.enabled) return "Disabled";
 	if (isOauth.value) {
 		if (props.row.oauth_connected) return "Connected";
+		if (props.row.needs_static_client) return "Setup needed";
 		if (props.row.oauth_configured) return "Not connected";
 		return "Setup needed";
 	}
@@ -119,6 +124,7 @@ const statusTip = computed(() => {
 	if (isOauth.value) {
 		if (props.row.oauth_connected)
 			return "You're connected. Only you can use this connection.";
+		if (props.row.needs_static_client) return "Ask your admin to finish setup.";
 		if (props.row.oauth_configured) return "Sign in to start using this connector.";
 		return "Ask your admin to finish setup.";
 	}
@@ -126,6 +132,18 @@ const statusTip = computed(() => {
 	if (props.row.last_test_status === "Passed") return `Last test passed${when}.`;
 	if (props.row.last_test_status === "Failed") return `Last test failed${when}.`;
 	return "Run a test to confirm it's reachable.";
+});
+// Custom URL OAuth rows show where they sign in alongside the address
+// (design §6's confused-deputy line, echoed here); GitHub keeps its plain
+// base_url subtext untouched - its sign-in host is obvious from the logo and
+// showing it would just be noise. One line either way, no new row.
+const subtext = computed(() => {
+	if (props.row.preset === "Custom URL" && isOauth.value && props.row.signin_host) {
+		return props.row.base_url
+			? `${props.row.base_url} · Signs in at ${props.row.signin_host}`
+			: `Signs in at ${props.row.signin_host}`;
+	}
+	return props.row.base_url || "";
 });
 
 // ── connect / disconnect ─────────────────────────────────────────────────

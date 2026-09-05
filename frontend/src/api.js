@@ -783,11 +783,24 @@ export const setConnectorAllowedActions = (name, actions) =>
 export const updateConnector = (name, p) => call(CN + "update_connector", { name, ...(p || {}) });
 export const deleteConnector = (name) => call(CN + "delete_connector", { name });
 // OAuth tier: {ok, url} to redirect the browser to, or {ok:false, error}.
-// Frappe's native Connected App callback handles the return trip - no custom
-// callback lives in this app.
+// The return trip is handled by Frappe's Connected App callback on the preset
+// path, and by connectors_api.mcp_oauth_callback on the Custom URL path.
 export const connectOauth = (name) => call(CN + "connect_oauth", { name });
 // Deletes the CURRENT user's sign-in for this connector. Idempotent.
 export const disconnectOauth = (name) => call(CN + "disconnect_oauth", { name });
+// Checks whether an address needs a sign-in, WITHOUT creating anything - call it
+// before addConnector so the user can be shown where they would sign in.
+// {ok, needs_signin, signin_host, registration, scopes} | {ok:false, error}.
+export const probeConnectorAuth = (base_url) => call(CN + "probe_connector_auth", { base_url });
+// Admin only, and only for a connector whose row reports needs_static_client:
+// the id/secret an admin got by registering this workspace at the provider
+// (against the row's oauth_redirect_uri). A blank secret keeps the stored one.
+export const setOauthClientCredentials = (name, client_id, client_secret) =>
+	call(CN + "set_oauth_client_credentials", {
+		name,
+		client_id,
+		client_secret: client_secret || "",
+	});
 
 // --- Support panel (Plan 3) -------------------------------------------------
 export const supportListTickets = () => call("jarvis.support.api.list_tickets");

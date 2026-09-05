@@ -242,12 +242,14 @@ function confirmDelete(row) {
 
 // ── OAuth return (design §7) ─────────────────────────────────────────────
 // The provider round-trips the browser back to "...?settings=connectors&oauth=
-// <name>" (AppShell's own ?settings= deep link opens this pane; that read
+// <name>" on success, or "...&oauth_error=expired|denied" on a failed/denied
+// sign-in (AppShell's own ?settings= deep link opens this pane; that read
 // already strips "settings" from the URL by the time this pane mounts, but
-// leaves "oauth" alone). Read with URLSearchParams + history.replaceState,
-// the same low-level idiom AppShell uses for that same one-time external-
-// redirect deep link - NOT useRoute()/vue-router, whose reactive query would
-// not reliably reflect a plain history.replaceState the router never drove.
+// leaves "oauth"/"oauth_error" alone). Read with URLSearchParams +
+// history.replaceState, the same low-level idiom AppShell uses for that same
+// one-time external-redirect deep link - NOT useRoute()/vue-router, whose
+// reactive query would not reliably reflect a plain history.replaceState the
+// router never drove.
 //
 // Reopening the row's own dialog (rather than a bare toast) matters: the row
 // startOauthConnect created has no allowed actions yet and is not enabled -
@@ -256,19 +258,25 @@ function confirmDelete(row) {
 function consumeOauthReturn() {
 	const params = new URLSearchParams(window.location.search);
 	const name = params.get("oauth");
-	if (!name) return null;
+	const error = params.get("oauth_error");
+	if (!name && !error) return null;
 	params.delete("oauth");
+	params.delete("oauth_error");
 	const query = params.toString();
 	const url = window.location.pathname + (query ? `?${query}` : "") + window.location.hash;
 	history.replaceState(history.state, "", url);
-	return name;
+	return { name, error };
 }
 
 onMounted(async () => {
-	const oauthName = consumeOauthReturn();
+	const oauthReturn = consumeOauthReturn();
 	await load();
-	if (!oauthName) return;
-	const row = [...shared.value, ...mine.value].find((r) => r.name === oauthName);
+	if (!oauthReturn) return;
+	if (oauthReturn.error) {
+		toast.error("Sign-in didn't complete. Try again.");
+		return;
+	}
+	const row = [...shared.value, ...mine.value].find((r) => r.name === oauthReturn.name);
 	// Only land on the Edit dialog when the user can actually manage this row (an
 	// own Personal row, or a Shared row and they're an admin). A non-admin who
 	// just connected a Shared row cannot Save its allowed actions, so a bare

@@ -16,6 +16,7 @@
   "connection_section",
   "auth_method",
   "connected_app",
+  "mcp_oauth_client",
   "base_url",
   "credential",
   "actions_section",
@@ -96,16 +97,25 @@
    "default": "API Key",
    "reqd": 1,
    "in_standard_filter": 1,
-   "description": "How this connector authenticates. \"API Key\": a bearer token/PAT stored in Credential (the shipped path). \"OAuth\": a browser Connect flow whose tokens live in a linked Connected App (Credential is unused). Broker branches on this; unset rows are treated as API Key."
+   "description": "How this connector authenticates. \"API Key\": a bearer token/PAT stored in Credential (the shipped path). \"OAuth\": a browser Connect flow whose tokens live in a linked Connected App (a preset) or an MCP OAuth Client (a Custom URL); Credential is unused either way. Broker branches on this; unset rows are treated as API Key."
   },
   {
    "fieldname": "connected_app",
    "fieldtype": "Link",
    "label": "Connected App",
    "options": "Connected App",
-   "depends_on": "eval:doc.auth_method==\"OAuth\"",
-   "mandatory_depends_on": "eval:doc.auth_method==\"OAuth\"",
-   "description": "The Frappe Connected App backing this connector's OAuth grant. Set only when Auth Method is OAuth; ignored otherwise."
+   "depends_on": "eval:doc.auth_method==\"OAuth\" && doc.preset!=\"Custom URL\"",
+   "mandatory_depends_on": "eval:doc.auth_method==\"OAuth\" && doc.preset!=\"Custom URL\"",
+   "description": "The Frappe Connected App backing this connector's OAuth grant, on the PRESET path only. A Custom URL connector uses MCP OAuth Client instead and must leave this empty - the controller rejects a row carrying both."
+  },
+  {
+   "fieldname": "mcp_oauth_client",
+   "fieldtype": "Link",
+   "label": "MCP OAuth Client",
+   "options": "MCP OAuth Client",
+   "read_only": 1,
+   "depends_on": "eval:doc.auth_method==\"OAuth\" && doc.preset==\"Custom URL\"",
+   "description": "The discovered OAuth configuration backing this connector's sign-in, on the CUSTOM URL path only. SERVER-SET: written by the connectors API after discovery, never accepted from a client, and the controller rejects any value naming a client that belongs to a different connector."
   },
   {
    "fieldname": "base_url",

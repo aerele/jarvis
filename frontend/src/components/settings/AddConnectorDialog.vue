@@ -21,31 +21,101 @@
 					<ConnectorLogo :preset="form.preset" :size="20" class="mb-2 text-ink-gray-5" />
 				</div>
 
-				<FormControl
-					v-if="form.preset === 'Custom URL' && allowCustomUrls"
-					type="text"
-					label="Base URL"
-					placeholder="https://example.com/mcp"
-					:modelValue="form.base_url"
-					@update:modelValue="(v) => onBaseUrlChange(v)"
-				/>
+				<template v-if="form.preset === 'Custom URL' && allowCustomUrls">
+					<div class="flex items-end gap-2">
+						<FormControl
+							class="flex-1"
+							type="text"
+							label="Base URL"
+							placeholder="https://example.com/mcp"
+							:modelValue="form.base_url"
+							@update:modelValue="(v) => onBaseUrlChange(v)"
+						/>
+						<Button
+							variant="subtle"
+							:label="probing ? 'Checking…' : 'Check'"
+							:loading="probing"
+							:disabled="!form.base_url.trim()"
+							@click="runProbe"
+						/>
+					</div>
+					<p v-if="probeError" class="text-xs text-ink-red-4">{{ probeError }}</p>
+				</template>
 
 				<!-- OAuth-first (design §1): a preset with a sign-in option defaults
 				     here. The pasted-token path stays one click away via "Use a token
 				     instead" - shown only before a row exists this session (rowName),
 				     so switching mid-flow never has to migrate an already-saved row's
-				     auth method. -->
+				     auth method. Custom URL only earns this branch once Check finds a
+				     sign-in requirement (customUrlOauth.active) - a plain token-only
+				     server never leaves the FormControl-only path below. -->
 				<template v-if="presetHasOauth && form.auth_method === 'OAuth'">
 					<div
 						v-if="!rowOauthConnected"
 						class="flex flex-col gap-2 rounded-lg border p-3"
 					>
-						<p class="text-xs text-ink-gray-5">
+						<p v-if="form.preset !== 'Custom URL'" class="text-xs text-ink-gray-5">
 							Sign in with your {{ form.preset }} account to connect.
 						</p>
+						<p v-else-if="customUrlOauth.signinHost" class="text-xs text-ink-gray-5">
+							This app signs you in at {{ customUrlOauth.signinHost }}.
+						</p>
+
+						<!-- A static (admin-registered) server needs a client id/secret
+						     before anyone can sign in. The row already exists (the first
+						     Connect press creates it) but connecting was deliberately
+						     skipped until this is filled in - see startOauthConnect. -->
+						<template v-if="form.preset === 'Custom URL' && rowNeedsStaticClient">
+							<template v-if="isAdmin">
+								<FormControl
+									type="text"
+									label="Client ID"
+									:modelValue="staticClient.id"
+									@update:modelValue="(v) => (staticClient.id = v)"
+								/>
+								<FormControl
+									type="password"
+									label="Client secret"
+									:modelValue="staticClient.secret"
+									@update:modelValue="(v) => (staticClient.secret = v)"
+								/>
+								<div v-if="rowRedirectUri" class="flex flex-col gap-1">
+									<span class="text-xs text-ink-gray-5"
+										>Callback URL to register with the app</span
+									>
+									<div class="flex items-center gap-2">
+										<code
+											class="min-w-0 flex-1 truncate rounded border px-2 py-1 text-xs text-ink-gray-7"
+											>{{ rowRedirectUri }}</code
+										>
+										<Button
+											variant="ghost"
+											icon="copy"
+											:tooltip="copied ? 'Copied' : 'Copy'"
+											@click="copyRedirectUri"
+										/>
+									</div>
+								</div>
+								<Button
+									variant="solid"
+									label="Save"
+									:loading="savingClient"
+									:disabled="
+										!staticClient.id.trim() || !staticClient.secret.trim()
+									"
+									class="self-start"
+									@click="saveStaticClient"
+								/>
+							</template>
+							<p v-else class="text-xs text-ink-gray-5">
+								Ask your admin to finish setup.
+							</p>
+						</template>
+
 						<Button
+							v-else
 							variant="solid"
-							:label="connecting ? 'Connecting…' : `Sign in to ${form.preset}`"
+							:label="oauthConnectLabel"
 							:loading="connecting"
 							class="self-start"
 							@click="startOauthConnect"
@@ -262,7 +332,9 @@ import {
 	addConnector,
 	connectOauth,
 	deleteConnector,
+	probeConnectorAuth,
 	setConnectorAllowedActions,
+	setOauthClientCredentials,
 	testConnector,
 	updateConnector,
 } from "@/api";
@@ -290,6 +362,8 @@ const show = computed({
 	set: (v) => emit("update:modelValue", v),
 });
 
+const isAdmin = !!window.is_system_manager || !!window.is_jarvis_admin;
+
 const isEdit = computed(() => !!props.connector);
 const dialogTitle = computed(() => (isEdit.value ? "Edit connector" : "Add connector"));
 const presetOptions = computed(() =>
@@ -304,8 +378,21 @@ const testing = ref(false);
 
 const form = reactive({ preset: "GitHub", base_url: "", credential: "", auth_method: "OAuth" });
 // Whether the selected preset offers a sign-in option at all - gates every
-// OAuth-mode template branch below.
-const presetHasOauth = computed(() => OAUTH_PRESETS.includes(form.preset));
+// OAuth-mode template branch below. Custom URL only joins this once Check
+// (runProbe) finds the pasted server needs a sign-in - it never defaults to
+// it the way a named preset does.
+const presetHasOauth = computed(
+	() =>
+		OAUTH_PRESETS.includes(form.preset) ||
+		(form.preset === "Custom URL" && customUrlOauth.active)
+);
+// The sign-in box's own button label: GitHub keeps its named "Sign in to X",
+// Custom URL gets the generic "Connect" (design §8 copy - the server has no
+// brand name to show).
+const oauthConnectLabel = computed(() => {
+	if (connecting.value) return "Connecting…";
+	return form.preset === "Custom URL" ? "Connect" : `Sign in to ${form.preset}`;
+});
 // Step 2's "Choose what {agent} may do with X" line. There's no user-typed
 // Name field any more (the backend derives the saved label - preset display
 // name, or the Custom URL's hostname), so this falls back to the preset's
@@ -337,6 +424,39 @@ const testState = reactive({ status: "idle", tools: [], message: "" }); // idle 
 // shows the "Sign in" prompt or the Test connection box.
 const rowOauthConnected = ref(false);
 const connecting = ref(false);
+// Custom URL sign-in probe (design §8: paste a URL -> Check -> maybe sign-in).
+// `active` is what lets Custom URL join presetHasOauth above; a plain
+// token-only server never sets it.
+const customUrlOauth = reactive({ active: false, signinHost: "", registration: "" });
+const probing = ref(false);
+const probeError = ref("");
+// Static-registration rows (design §9's "static" mode) need an admin to enter
+// a client id/secret before anyone can sign in - set from whatever
+// add_connector / set_oauth_client_credentials last returned, alongside the
+// callback URL the admin must register at the provider.
+const rowNeedsStaticClient = ref(false);
+const rowRedirectUri = ref("");
+const staticClient = reactive({ id: "", secret: "" });
+const savingClient = ref(false);
+// "Copied" flash on the callback-URL copy button, same idiom as
+// DirectSubscriptionCard's own copy button.
+const copied = ref(false);
+
+// Shared by resetForCreate/resetForEdit/onPresetChange so the Check state
+// never survives a swap to a different preset or a fresh Add.
+function resetCustomUrlOauthState() {
+	customUrlOauth.active = false;
+	customUrlOauth.signinHost = "";
+	customUrlOauth.registration = "";
+	probing.value = false;
+	probeError.value = "";
+	rowNeedsStaticClient.value = false;
+	rowRedirectUri.value = "";
+	staticClient.id = "";
+	staticClient.secret = "";
+	savingClient.value = false;
+	copied.value = false;
+}
 
 function resetForCreate() {
 	form.preset = "GitHub";
@@ -355,6 +475,7 @@ function resetForCreate() {
 	selected.value = {};
 	touchedActions.value = new Set();
 	actionQuery.value = "";
+	resetCustomUrlOauthState();
 }
 function resetForEdit(row) {
 	form.preset = row.preset || "GitHub";
@@ -377,6 +498,16 @@ function resetForEdit(row) {
 	selected.value = {};
 	touchedActions.value = new Set();
 	actionQuery.value = "";
+	resetCustomUrlOauthState();
+	// A Custom URL row already on the sign-in path (opened fresh, or reopened
+	// after the provider redirects back) - re-derive the same state a live
+	// Check/Connect would have set, so reopening never needs a re-Check.
+	if (row.preset === "Custom URL" && row.auth_method === "OAuth") {
+		customUrlOauth.active = true;
+		customUrlOauth.signinHost = row.signin_host || "";
+	}
+	rowNeedsStaticClient.value = !!row.needs_static_client;
+	rowRedirectUri.value = row.oauth_redirect_uri || "";
 }
 
 watch(
@@ -398,6 +529,21 @@ watch([() => form.preset, () => form.base_url], () => {
 		testState.message = "";
 	}
 });
+// Editing the URL invalidates a prior Check the same way it invalidates a
+// prior Test above - the previous probe result no longer describes what's
+// typed, so a re-Check is required before Connect can show up again. Guarded
+// on !rowName for the same reason switchAuthMethod's own toggle links are
+// (see the template): once a row exists this session, nothing here may
+// migrate its already-saved auth method out from under it.
+watch(
+	() => form.base_url,
+	() => {
+		if (rowName.value) return;
+		if (!customUrlOauth.active && !probeError.value) return;
+		resetCustomUrlOauthState();
+		if (form.preset === "Custom URL") form.auth_method = "API Key";
+	}
+);
 function onPresetChange(v) {
 	form.preset = v;
 	form.base_url = "";
@@ -405,6 +551,7 @@ function onPresetChange(v) {
 	// re-defaults to it, same as the dialog's own initial state.
 	form.auth_method = OAUTH_PRESETS.includes(v) ? "OAuth" : "API Key";
 	rowOauthConnected.value = false;
+	resetCustomUrlOauthState();
 }
 
 // The toggle link only shows before this session has created a row (see the
@@ -419,6 +566,18 @@ function switchAuthMethod(method) {
 	testState.message = "";
 }
 
+// Applies an add_connector / connect_oauth / set_oauth_client_credentials row
+// summary's OAuth-setup fields onto local state, so every call site that gets
+// a fresh row back (creating it, saving static creds) stays in sync the same
+// way.
+function applyOauthRowMeta(row) {
+	if (!row) return;
+	rowOauthConnected.value = !!row.oauth_connected;
+	rowNeedsStaticClient.value = !!row.needs_static_client;
+	rowRedirectUri.value = row.oauth_redirect_uri || "";
+	if (row.signin_host) customUrlOauth.signinHost = row.signin_host;
+}
+
 async function startOauthConnect() {
 	if (connecting.value) return;
 	connecting.value = true;
@@ -428,9 +587,18 @@ async function startOauthConnect() {
 				preset: form.preset,
 				scope: props.scope,
 				auth_method: "OAuth",
+				...(form.preset === "Custom URL"
+					? { base_url: form.base_url.trim(), key: customUrlKey(form.base_url.trim()) }
+					: {}),
 			});
 			rowName.value = row.name;
 			createdThisSession.value = true;
+			applyOauthRowMeta(row);
+			// A static-client row needs an admin to enter credentials before
+			// anyone can sign in - stop here rather than redirect into a
+			// sign-in that cannot succeed yet (the credentials block renders
+			// instead; see the template).
+			if (rowNeedsStaticClient.value) return;
 		}
 		const res = await connectOauth(rowName.value);
 		if (res && res.ok && res.url) {
@@ -449,8 +617,89 @@ async function startOauthConnect() {
 		connecting.value = false;
 	}
 }
+
+async function saveStaticClient() {
+	if (!rowName.value || savingClient.value) return;
+	const id = staticClient.id.trim();
+	const secret = staticClient.secret.trim();
+	if (!id || !secret) return;
+	savingClient.value = true;
+	try {
+		const row = await setOauthClientCredentials(rowName.value, id, secret);
+		applyOauthRowMeta(row);
+		staticClient.id = "";
+		staticClient.secret = "";
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		savingClient.value = false;
+	}
+}
+
+// Mirrors DirectSubscriptionCard's own copy button: the Clipboard API needs a
+// secure context, so a plain LAN http:// deployment falls back to a
+// detached-textarea execCommand copy. The URL is plain selectable text either
+// way, so a failed copy still leaves the user able to select and copy by hand.
+function copyRedirectUri() {
+	const text = rowRedirectUri.value;
+	if (!text) return;
+	const done = () => {
+		copied.value = true;
+		setTimeout(() => {
+			copied.value = false;
+		}, 1400);
+	};
+	if (navigator.clipboard && window.isSecureContext) {
+		navigator.clipboard
+			.writeText(text)
+			.then(done)
+			.catch(() => {});
+		return;
+	}
+	const ta = document.createElement("textarea");
+	ta.value = text;
+	ta.style.position = "fixed";
+	ta.style.left = "-9999px";
+	document.body.appendChild(ta);
+	ta.focus();
+	ta.select();
+	try {
+		if (document.execCommand("copy")) done();
+	} catch (e) {
+		/* best-effort - see the comment above */
+	}
+	document.body.removeChild(ta);
+}
+
 function onBaseUrlChange(v) {
 	form.base_url = v;
+}
+
+// Custom URL's "Check" step (design §8): probes the pasted server and decides
+// whether it needs a sign-in at all. needs_signin:false leaves today's token
+// mode untouched; needs_signin:true switches this row into OAuth mode (the
+// template's presetHasOauth branch) the same way picking GitHub does.
+async function runProbe() {
+	const url = form.base_url.trim();
+	if (!url || probing.value) return;
+	probing.value = true;
+	probeError.value = "";
+	try {
+		const res = await probeConnectorAuth(url);
+		if (res && res.ok) {
+			customUrlOauth.active = !!res.needs_signin;
+			customUrlOauth.signinHost = res.needs_signin ? res.signin_host || "" : "";
+			customUrlOauth.registration = res.needs_signin ? res.registration || "" : "";
+			form.auth_method = res.needs_signin ? "OAuth" : "API Key";
+		} else {
+			probeError.value =
+				(res && res.error && res.error.message) || "Could not check this address.";
+		}
+	} catch (e) {
+		probeError.value = errMessage(e, "Could not check this address.");
+	} finally {
+		probing.value = false;
+	}
 }
 function onCredentialChange(v) {
 	form.credential = v;

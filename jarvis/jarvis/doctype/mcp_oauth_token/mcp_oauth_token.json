@@ -1,0 +1,131 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "format:{connector}-{user}",
+ "creation": "2026-09-05 10:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "connector",
+  "user",
+  "column_break_identity",
+  "expires_at",
+  "token_type",
+  "tokens_section",
+  "access_token",
+  "refresh_token",
+  "grant_section",
+  "granted_scopes",
+  "resource"
+ ],
+ "fields": [
+  {
+   "fieldname": "connector",
+   "fieldtype": "Link",
+   "label": "Connector",
+   "options": "Jarvis Connector",
+   "reqd": 1,
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "The Jarvis Connector this sign-in is for. Deleting the connector deletes every token held against it."
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "label": "User",
+   "options": "User",
+   "reqd": 1,
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "The user who signed in. Sign-in is PER USER even for a Shared connector: each user runs their own, and the broker only ever resolves the row for the impersonated user it is running as."
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "expires_at",
+   "fieldtype": "Datetime",
+   "label": "Expires At",
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "When the access token stops working. EMPTY means the provider issued no expiry (a long-lived token), and the stored token is then used as-is and never refreshed."
+  },
+  {
+   "fieldname": "token_type",
+   "fieldtype": "Data",
+   "label": "Token Type",
+   "length": 40,
+   "read_only": 1,
+   "description": "The token type the provider returned, recorded for diagnostics."
+  },
+  {
+   "fieldname": "tokens_section",
+   "fieldtype": "Section Break",
+   "label": "Tokens"
+  },
+  {
+   "fieldname": "access_token",
+   "fieldtype": "Password",
+   "label": "Access Token",
+   "description": "The access token, stored encrypted. Never returned by any API and never written to a log; read only via get_password server-side, and sent only to the connector's own address."
+  },
+  {
+   "fieldname": "refresh_token",
+   "fieldtype": "Password",
+   "label": "Refresh Token",
+   "description": "The refresh token, stored encrypted, when the provider issued one. Sent only to the sign-in service's token endpoint recorded on the MCP OAuth Client. A provider that rotates refresh tokens has the replacement stored here."
+  },
+  {
+   "fieldname": "grant_section",
+   "fieldtype": "Section Break",
+   "label": "Grant"
+  },
+  {
+   "fieldname": "granted_scopes",
+   "fieldtype": "Data",
+   "label": "Granted Scopes",
+   "length": 1000,
+   "read_only": 1,
+   "description": "The permissions the provider actually granted, which may be narrower than the ones Jarvis asked for."
+  },
+  {
+   "fieldname": "resource",
+   "fieldtype": "Data",
+   "label": "Resource",
+   "length": 500,
+   "read_only": 1,
+   "description": "The canonical connector address this token was issued for. Checked against the connector's current address before the token is used, so re-pointing a connector at a different address can never send this token to the new one."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-05 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "MCP OAuth Token",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "Jarvis Admin",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  },
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "delete": 1
+  }
+ ],
+ "quick_entry": 0,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

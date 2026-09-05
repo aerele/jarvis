@@ -13,13 +13,18 @@ network path (that is jarvis.connectors' own test suite's job).
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
+from frappe.utils import add_to_date, now_datetime
 
 from jarvis.chat import connectors_api
-from jarvis.connectors import broker, oauth
+from jarvis.connectors import broker, mcp_oauth_store, oauth
+from jarvis.connectors.mcp_oauth import pkce_challenge
+from jarvis.connectors.mcp_oauth.transport import HttpResult
 from jarvis.permissions import (
 	JARVIS_ADMIN_ROLE,
 	JARVIS_USER_ROLE,
@@ -30,6 +35,8 @@ from jarvis.permissions import (
 CONNECTOR = "Jarvis Connector"
 ACTION_DT = "Jarvis Connector Action"
 SETTINGS = "Jarvis Settings"
+CLIENT_DT = "MCP OAuth Client"
+TOKEN_DT = "MCP OAuth Token"
 
 ADMIN_USER = "jarvis-connapi-admin@example.com"
 PLAIN_A = "jarvis-connapi-user-a@example.com"
@@ -89,6 +96,9 @@ class _ConnectorApiTestCase(FrappeTestCase):
 	def tearDown(self):
 		frappe.set_user(self._orig_user)
 		for name in self._connectors:
+			# Defensive: the connector's own on_trash purges these, but a test that
+			# asserts on the cascade should not depend on the cascade for cleanup.
+			mcp_oauth_store.purge_connector(name)
 			if frappe.db.exists(CONNECTOR, name):
 				frappe.delete_doc(CONNECTOR, name, ignore_permissions=True, force=True)
 		for name in self._token_caches:
@@ -941,3 +951,823 @@ class TestDisconnectOauth(_ConnectorApiTestCase):
 		frappe.set_user(PLAIN_A)
 		out = connectors_api.disconnect_oauth(name)
 		self.assertEqual(out, {"ok": True})
+
+
+# --------------------------------------------------------------------------- #
+# Spec-compliant sign-in engine (MCP_OAUTH_CLIENT_DESIGN.md) - Custom URL rows.
+#
+# NO NETWORK. Every outbound hop goes through the module-level transport hooks
+# (``connectors_api.MCP_OAUTH_TRANSPORT`` for the API's own hops,
+# ``oauth.MCP_OAUTH_TRANSPORT`` for the broker's refresh), and every test here
+# patches one of them with a scripted fake. An unscripted URL raises, so a test
+# can prove a path did NOT reach the network as easily as that it did.
+# --------------------------------------------------------------------------- #
+MCP_BASE_URL = "https://mcp.example.invalid/mcp/"
+MCP_RESOURCE = "https://mcp.example.invalid/mcp"
+MCP_RM_URL = "https://mcp.example.invalid/.well-known/oauth-protected-resource/mcp"
+MCP_AS_URL = "https://as.example.invalid"
+MCP_AS_META_URL = "https://as.example.invalid/.well-known/oauth-authorization-server"
+MCP_OIDC_META_URL = "https://as.example.invalid/.well-known/openid-configuration"
+MCP_AUTHORIZE = "https://as.example.invalid/authorize"
+MCP_TOKEN = "https://as.example.invalid/token"
+MCP_REGISTER = "https://as.example.invalid/register"
+
+
+class _ScriptedTransport:
+	"""Stands in for the pinned transport's call shape. Returns canned results per
+	URL (a list is consumed in order, the last entry repeating) and records every
+	call. An unscripted URL is an AssertionError, never a real request."""
+
+	def __init__(self, script: dict):
+		self._script = {u: (list(r) if isinstance(r, list) else [r]) for u, r in script.items()}
+		self.calls: list[dict] = []
+
+	def __call__(
+		self,
+		url,
+		*,
+		method="GET",
+		headers=None,
+		body=None,
+		connect_timeout=5.0,
+		read_timeout=20.0,
+		egress_allowed=None,
+	):
+		self.calls.append({"url": url, "method": method, "body": body, "egress_allowed": egress_allowed})
+		queue = self._script.get(url)
+		if not queue:
+			raise AssertionError(f"unscripted transport call to {url}")
+		return queue.pop(0) if len(queue) > 1 else queue[0]
+
+	def urls(self) -> list[str]:
+		return [c["url"] for c in self.calls]
+
+	def hits(self, url: str) -> int:
+		return sum(1 for c in self.calls if c["url"] == url)
+
+	def form_for(self, url: str) -> dict:
+		for call in self.calls:
+			if call["url"] == url and call["body"]:
+				return {k: v[0] for k, v in parse_qs(call["body"].decode("utf-8")).items()}
+		raise AssertionError(f"no form was posted to {url}")
+
+
+def _json_result(payload, status: int = 200) -> HttpResult:
+	return HttpResult(
+		status=status,
+		headers={"content-type": "application/json"},
+		json=payload,
+		text=json.dumps(payload),
+	)
+
+
+def _discovery_script(registration: bool = True, rm_overrides: dict | None = None) -> dict:
+	"""The three hops a discovery run makes: the unauthenticated probe (401 with a
+	challenge), the protected-resource document, and the sign-in service's
+	metadata. The challenge names a NARROWER scope than the resource document
+	advertises, so tests can prove the challenge wins."""
+	challenge = f'Bearer error="invalid_request", resource_metadata="{MCP_RM_URL}", scope="repo read:org"'
+	rm_doc = {
+		"resource": MCP_RESOURCE,
+		"authorization_servers": [MCP_AS_URL],
+		"scopes_supported": ["repo", "read:org", "admin:everything"],
+	}
+	rm_doc.update(rm_overrides or {})
+	as_doc = {
+		"issuer": MCP_AS_URL,
+		"authorization_endpoint": MCP_AUTHORIZE,
+		"token_endpoint": MCP_TOKEN,
+		"authorization_response_iss_parameter_supported": True,
+	}
+	if registration:
+		as_doc["registration_endpoint"] = MCP_REGISTER
+	return {
+		MCP_BASE_URL: HttpResult(status=401, headers={"www-authenticate": challenge}, json=None, text=""),
+		MCP_RM_URL: _json_result(rm_doc),
+		MCP_AS_META_URL: _json_result(as_doc),
+	}
+
+
+def _token_response(access="fresh-access", refresh="fresh-refresh", expires_in=3600) -> HttpResult:
+	payload = {"access_token": access, "expires_in": expires_in, "scope": "repo", "token_type": "Bearer"}
+	if refresh is not None:
+		payload["refresh_token"] = refresh
+	return _json_result(payload)
+
+
+class _McpOauthTestCase(_ConnectorApiTestCase):
+	"""Fixtures for a Custom URL connector backed by the discovery engine."""
+
+	def _mk_client(self, connector: str, *, mode: str = "dcr", client_id: str = "cid-1"):
+		doc = frappe.get_doc(
+			{
+				"doctype": CLIENT_DT,
+				"connector": connector,
+				"registration_mode": mode,
+				"client_id": client_id,
+				"issuer": MCP_AS_URL,
+				"authorization_endpoint": MCP_AUTHORIZE,
+				"token_endpoint": MCP_TOKEN,
+				"registration_endpoint": MCP_REGISTER if mode == "dcr" else "",
+				"resource": MCP_RESOURCE,
+				"scope": "repo read:org",
+				"iss_param_supported": 1,
+				"as_metadata": frappe.as_json(
+					{"issuer": MCP_AS_URL, "authorization_response_iss_parameter_supported": True}
+				),
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.set_value(CONNECTOR, connector, "mcp_oauth_client", doc.name, update_modified=False)
+		frappe.db.commit()
+		return doc
+
+	def _mk_mcp_connector(
+		self,
+		key: str,
+		*,
+		owner: str = PLAIN_A,
+		scope: str = "Personal",
+		mode: str = "dcr",
+		client_id: str = "cid-1",
+		base_url: str = MCP_BASE_URL,
+	) -> str:
+		name = self._mk(scope, key, owner=owner, preset="Custom URL", base_url=base_url, auth_method="OAuth")
+		self._mk_client(name, mode=mode, client_id=client_id)
+		return name
+
+	def _mk_mcp_token(
+		self,
+		connector: str,
+		user: str,
+		*,
+		access_token: str = "live-token",
+		refresh_token: str | None = None,
+		expires_at=None,
+		resource: str = MCP_RESOURCE,
+	):
+		fields = {
+			"doctype": TOKEN_DT,
+			"connector": connector,
+			"user": user,
+			"access_token": access_token,
+			"resource": resource,
+			"token_type": "Bearer",
+		}
+		if refresh_token is not None:
+			fields["refresh_token"] = refresh_token
+		if expires_at is not None:
+			fields["expires_at"] = expires_at
+		doc = frappe.get_doc(fields).insert(ignore_permissions=True)
+		frappe.db.commit()
+		return doc
+
+	def _connect(self, name: str) -> tuple[str, str]:
+		"""Run connect_oauth and return (authorize_url, state)."""
+		out = connectors_api.connect_oauth(name)
+		self.assertTrue(out.get("ok"), out)
+		return out["url"], parse_qs(urlparse(out["url"]).query)["state"][0]
+
+	def _callback(self, **params):
+		"""Call the callback with a fresh response object and return it."""
+		frappe.local.response = frappe._dict()
+		connectors_api.mcp_oauth_callback(**params)
+		return frappe.local.response
+
+	def _reload_doc(self, name: str):
+		frappe.clear_document_cache(CONNECTOR, name)
+		return frappe.get_doc(CONNECTOR, name)
+
+
+class TestProbeConnectorAuth(_McpOauthTestCase):
+	def test_reports_where_the_user_would_sign_in(self):
+		transport = _ScriptedTransport(_discovery_script())
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.probe_connector_auth(MCP_BASE_URL)
+
+		self.assertTrue(out["ok"])
+		self.assertTrue(out["needs_signin"])
+		self.assertEqual(out["signin_host"], "as.example.invalid")
+		self.assertEqual(out["registration"], "dcr")
+		self.assertIn("repo", out["scopes"])
+		# Every hop carried the operator egress policy, not None.
+		for call in transport.calls:
+			self.assertIs(call["egress_allowed"], broker._egress_allowed)
+
+	def test_static_registration_when_no_self_registration_offered(self):
+		transport = _ScriptedTransport(_discovery_script(registration=False))
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.probe_connector_auth(MCP_BASE_URL)
+		self.assertEqual(out["registration"], "static")
+
+	def test_address_that_answers_needs_no_signin(self):
+		transport = _ScriptedTransport({MCP_BASE_URL: _json_result({"result": "ok"})})
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.probe_connector_auth(MCP_BASE_URL)
+		self.assertEqual(out, {"ok": True, "needs_signin": False})
+
+	def test_gate_failure_returns_a_stable_code_and_friendly_message(self):
+		# The protected-resource document describes a DIFFERENT resource: the
+		# anti-phishing gate must reject it rather than follow it anywhere.
+		script = _discovery_script(rm_overrides={"resource": "https://elsewhere.invalid/mcp"})
+		transport = _ScriptedTransport(script)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.probe_connector_auth(MCP_BASE_URL)
+
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "resource_mismatch")
+		for word in ("OAuth", "MCP", "bearer", "PKCE", "JSON-RPC"):
+			self.assertNotIn(word, out["error"]["message"])
+		# It never reached the sign-in service's metadata.
+		self.assertNotIn(MCP_AS_META_URL, transport.urls())
+
+	def test_rejects_a_non_http_address_without_probing(self):
+		transport = _ScriptedTransport({})
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.probe_connector_auth("file:///etc/passwd")
+		self.assertEqual(out["error"]["code"], "invalid_arguments")
+		self.assertEqual(transport.calls, [])
+
+	def test_custom_urls_off_blocks_the_probe(self):
+		self._set_single("allow_custom_urls", 0)
+		transport = _ScriptedTransport({})
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.probe_connector_auth(MCP_BASE_URL)
+		self.assertEqual(out["error"]["code"], "custom_urls_disabled")
+		self.assertEqual(transport.calls, [])
+
+	def test_kill_switch_off_blocks_the_probe(self):
+		self._set_single("connectors_enabled", 0)
+		transport = _ScriptedTransport({})
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.probe_connector_auth(MCP_BASE_URL)
+		self.assertEqual(out["error"]["code"], "connectors_disabled")
+		self.assertEqual(transport.calls, [])
+
+
+class TestAddConnectorMcpOauth(_McpOauthTestCase):
+	def test_dcr_registers_and_links_the_client(self):
+		script = _discovery_script()
+		script[MCP_REGISTER] = _json_result(
+			{"client_id": "dcr-client", "client_secret": "dcr-secret"}, status=201
+		)
+		transport = _ScriptedTransport(script)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self._connectors.append(out["name"])
+
+		self.assertTrue(out["oauth_configured"])
+		self.assertFalse(out["oauth_connected"])
+		self.assertFalse(out["needs_static_client"])
+		self.assertEqual(out["signin_host"], "as.example.invalid")
+
+		row = frappe.get_doc(CONNECTOR, out["name"])
+		self.assertEqual(row.mcp_oauth_client, out["name"], "the client is named after its connector")
+		self.assertFalse(row.connected_app, "the Custom URL path must never take the preset link")
+
+		client = frappe.get_doc(CLIENT_DT, out["name"])
+		self.assertEqual(client.registration_mode, "dcr")
+		self.assertEqual(client.client_id, "dcr-client")
+		self.assertEqual(client.resource, MCP_RESOURCE, "the resource is canonical, no trailing slash")
+		self.assertTrue(client.iss_param_supported)
+		# The challenge named a narrower scope than the resource document listed,
+		# and least privilege means the challenge wins.
+		self.assertEqual(client.scope, "repo read:org")
+		self.assertNotIn("admin:everything", client.scope)
+
+		# The registration named the ONE callback this app answers on, and the same
+		# string the authorize URL and the token exchange will later send.
+		posted = json.loads(
+			next(c["body"] for c in transport.calls if c["url"] == MCP_REGISTER).decode("utf-8")
+		)
+		self.assertEqual(posted["redirect_uris"], [connectors_api.oauth_redirect_uri()])
+
+	def test_static_path_asks_an_admin_for_credentials(self):
+		transport = _ScriptedTransport(_discovery_script(registration=False))
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self._connectors.append(out["name"])
+
+		self.assertFalse(out["oauth_configured"])
+		self.assertTrue(out["needs_static_client"])
+		self.assertEqual(out["oauth_redirect_uri"], connectors_api.oauth_redirect_uri())
+		client = frappe.get_doc(CLIENT_DT, out["name"])
+		self.assertEqual(client.registration_mode, "static")
+		self.assertFalse(client.client_id)
+		self.assertNotIn(MCP_REGISTER, transport.urls(), "nothing to register with")
+
+	def test_pasted_credential_is_ignored(self):
+		script = _discovery_script()
+		script[MCP_REGISTER] = _json_result({"client_id": "dcr-client"}, status=201)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", _ScriptedTransport(script)):
+			out = connectors_api.add_connector(
+				preset="Custom URL",
+				base_url=MCP_BASE_URL,
+				scope="Personal",
+				auth_method="OAuth",
+				credential="a-pasted-secret",
+			)
+		self._connectors.append(out["name"])
+		row = frappe.get_doc(CONNECTOR, out["name"])
+		self.assertFalse(row.get_password("credential", raise_exception=False))
+		self.assertNotIn("credential", out)
+
+	def test_discovery_failure_leaves_no_connector_behind(self):
+		transport = _ScriptedTransport({MCP_BASE_URL: HttpResult(status=500, headers={}, json=None, text="")})
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport),
+			self.assertRaises(frappe.ValidationError),
+		):
+			connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self.assertFalse(
+			frappe.db.exists(CONNECTOR, {"key": "mcp_example_invalid", "owner": PLAIN_A}),
+			"a failed setup must not leave an unusable row behind",
+		)
+
+	def test_permission_is_checked_before_any_outbound_request(self):
+		# A plain user asking for a Shared row is refused by the controller. That
+		# must happen BEFORE discovery, or the endpoint is an unmetered outbound
+		# request amplifier pointed at any host the caller names.
+		transport = _ScriptedTransport(_discovery_script())
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport),
+			self.assertRaises(frappe.PermissionError),
+		):
+			connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Shared", auth_method="OAuth"
+			)
+		self.assertEqual(transport.calls, [], "no egress before the permission gate")
+
+
+class TestSetOauthClientCredentials(_McpOauthTestCase):
+	def test_plain_user_is_refused(self):
+		name = self._mk_mcp_connector("static-cred", mode="static", client_id="")
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.PermissionError):
+			connectors_api.set_oauth_client_credentials(name, "stolen-client", "stolen-secret")
+		self.assertFalse(frappe.db.get_value(CLIENT_DT, name, "client_id"))
+
+	def test_admin_supplies_the_static_client(self):
+		name = self._mk_mcp_connector("static-ok", mode="static", client_id="")
+		frappe.set_user(ADMIN_USER)
+		out = connectors_api.set_oauth_client_credentials(name, "admin-client", "admin-secret")
+
+		self.assertTrue(out["oauth_configured"])
+		self.assertFalse(out["needs_static_client"])
+		client = frappe.get_doc(CLIENT_DT, name)
+		self.assertEqual(client.client_id, "admin-client")
+		self.assertEqual(client.get_password("client_secret", raise_exception=False), "admin-secret")
+
+	def test_blank_secret_keeps_the_stored_one(self):
+		name = self._mk_mcp_connector("static-keep", mode="static", client_id="")
+		frappe.set_user(ADMIN_USER)
+		connectors_api.set_oauth_client_credentials(name, "admin-client", "admin-secret")
+		connectors_api.set_oauth_client_credentials(name, "admin-client-2", "")
+		client = frappe.get_doc(CLIENT_DT, name)
+		self.assertEqual(client.client_id, "admin-client-2")
+		self.assertEqual(client.get_password("client_secret", raise_exception=False), "admin-secret")
+
+	def test_rejected_for_a_self_registered_client(self):
+		name = self._mk_mcp_connector("dcr-cred", mode="dcr", client_id="dcr-client")
+		frappe.set_user(ADMIN_USER)
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.set_oauth_client_credentials(name, "override", "")
+
+	def test_rejected_for_a_preset_row(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-static", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		frappe.set_user(ADMIN_USER)
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.set_oauth_client_credentials(name, "override", "")
+
+
+class TestConnectOauthMcp(_McpOauthTestCase):
+	def test_mints_single_use_state_and_a_bound_authorize_url(self):
+		name = self._mk_mcp_connector("connect-me")
+		frappe.set_user(PLAIN_A)
+		url, state = self._connect(name)
+
+		self.assertTrue(url.startswith(MCP_AUTHORIZE))
+		query = parse_qs(urlparse(url).query)
+		self.assertEqual(query["code_challenge_method"], ["S256"])
+		self.assertEqual(query["resource"], [MCP_RESOURCE])
+		self.assertEqual(query["client_id"], ["cid-1"])
+		self.assertEqual(query["redirect_uri"], [connectors_api.oauth_redirect_uri()])
+		self.assertEqual(query["scope"], ["repo read:org"])
+		self.assertEqual(query["state"], [state])
+
+		record = frappe.cache().get_value(f"jarvis:mcp_oauth_state:{state}", expires=True)
+		self.assertEqual(record["user"], PLAIN_A)
+		self.assertEqual(record["connector"], name)
+		self.assertEqual(record["issuer"], MCP_AS_URL)
+		self.assertEqual(record["redirect_uri"], connectors_api.oauth_redirect_uri())
+		# The verifier stays server-side; only its challenge is ever in the URL.
+		self.assertEqual(query["code_challenge"], [pkce_challenge(record["code_verifier"])])
+		self.assertNotIn(record["code_verifier"], url)
+
+	def test_unconfigured_static_client_cannot_start_a_signin(self):
+		name = self._mk_mcp_connector("connect-unconf", mode="static", client_id="")
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.connect_oauth(name)
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "oauth_not_configured")
+
+	def test_stranger_cannot_start_a_signin_for_someone_elses_connector(self):
+		name = self._mk_mcp_connector("connect-private")
+		frappe.set_user(PLAIN_B)
+		with self.assertRaises(frappe.PermissionError):
+			connectors_api.connect_oauth(name)
+
+
+class TestMcpOauthCallback(_McpOauthTestCase):
+	def _script(self, **kw):
+		return _ScriptedTransport({MCP_TOKEN: _token_response(**kw)})
+
+	def test_happy_path_stores_the_token_for_the_right_user(self):
+		name = self._mk_mcp_connector("cb-happy")
+		frappe.set_user(PLAIN_A)
+		_url, state = self._connect(name)
+		transport = self._script()
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			response = self._callback(code="the-code", state=state, iss=MCP_AS_URL)
+
+		self.assertEqual(response["type"], "redirect")
+		self.assertEqual(response["location"], f"/jarvis?settings=connectors&oauth={name}")
+
+		token = frappe.get_doc(TOKEN_DT, f"{name}-{PLAIN_A}")
+		self.assertEqual(token.user, PLAIN_A)
+		self.assertEqual(token.get_password("access_token", raise_exception=False), "fresh-access")
+		self.assertEqual(token.get_password("refresh_token", raise_exception=False), "fresh-refresh")
+		self.assertEqual(token.resource, MCP_RESOURCE)
+		self.assertTrue(token.expires_at)
+
+		form = transport.form_for(MCP_TOKEN)
+		self.assertEqual(form["grant_type"], "authorization_code")
+		self.assertEqual(form["resource"], MCP_RESOURCE)
+		self.assertEqual(form["redirect_uri"], connectors_api.oauth_redirect_uri())
+		self.assertIn("code_verifier", form)
+		# Nothing secret rode back in the redirect.
+		for secret in ("fresh-access", "fresh-refresh", "the-code", state):
+			self.assertNotIn(secret, response["location"])
+
+	def test_replayed_callback_cannot_mint_a_second_token(self):
+		name = self._mk_mcp_connector("cb-replay")
+		frappe.set_user(PLAIN_A)
+		_url, state = self._connect(name)
+		transport = self._script()
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			self._callback(code="the-code", state=state, iss=MCP_AS_URL)
+			replay = self._callback(code="the-code", state=state, iss=MCP_AS_URL)
+
+		self.assertEqual(replay["location"], "/jarvis?settings=connectors&oauth_error=expired")
+		self.assertEqual(transport.hits(MCP_TOKEN), 1, "the replay must not reach the token endpoint")
+
+	def test_rejects_a_state_minted_by_a_different_user(self):
+		name = self._mk_mcp_connector("cb-other-user", scope="Shared", owner=None)
+		frappe.set_user(PLAIN_A)
+		_url, state = self._connect(name)
+
+		frappe.set_user(PLAIN_B)
+		transport = self._script()
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			response = self._callback(code="the-code", state=state, iss=MCP_AS_URL)
+
+		self.assertEqual(response["location"], "/jarvis?settings=connectors&oauth_error=denied")
+		self.assertEqual(transport.calls, [], "no token is ever requested for a stolen state")
+		self.assertFalse(frappe.db.exists(TOKEN_DT, f"{name}-{PLAIN_B}"))
+		self.assertFalse(frappe.db.exists(TOKEN_DT, f"{name}-{PLAIN_A}"))
+
+	def test_rejects_a_mismatched_issuer_before_any_token_request(self):
+		name = self._mk_mcp_connector("cb-iss")
+		frappe.set_user(PLAIN_A)
+		_url, state = self._connect(name)
+		transport = self._script()
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			response = self._callback(code="the-code", state=state, iss="https://evil.invalid")
+
+		self.assertEqual(response["location"], "/jarvis?settings=connectors&oauth_error=denied")
+		self.assertEqual(transport.calls, [])
+		self.assertFalse(frappe.db.exists(TOKEN_DT, f"{name}-{PLAIN_A}"))
+
+	def test_rejects_a_missing_issuer_when_the_service_declared_one(self):
+		name = self._mk_mcp_connector("cb-noiss")
+		frappe.set_user(PLAIN_A)
+		_url, state = self._connect(name)
+		transport = self._script()
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			response = self._callback(code="the-code", state=state)
+		self.assertEqual(response["location"], "/jarvis?settings=connectors&oauth_error=denied")
+		self.assertEqual(transport.calls, [])
+
+	def test_provider_error_is_never_echoed_back(self):
+		name = self._mk_mcp_connector("cb-error")
+		frappe.set_user(PLAIN_A)
+		_url, state = self._connect(name)
+		transport = self._script()
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			response = self._callback(
+				state=state,
+				iss=MCP_AS_URL,
+				error="access_denied",
+				error_description="<script>alert(1)</script>",
+			)
+		self.assertEqual(response["location"], "/jarvis?settings=connectors&oauth_error=denied")
+		self.assertNotIn("script", response["location"])
+		self.assertEqual(transport.calls, [])
+
+	def test_unknown_state_redirects_without_touching_anything(self):
+		transport = self._script()
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			response = self._callback(code="the-code", state="never-minted", iss=MCP_AS_URL)
+		self.assertEqual(response["location"], "/jarvis?settings=connectors&oauth_error=expired")
+		self.assertEqual(transport.calls, [])
+
+	def test_a_failed_exchange_redirects_instead_of_raising(self):
+		name = self._mk_mcp_connector("cb-fail")
+		frappe.set_user(PLAIN_A)
+		_url, state = self._connect(name)
+		transport = _ScriptedTransport(
+			{MCP_TOKEN: HttpResult(status=400, headers={}, json={"error": "invalid_grant"}, text="")}
+		)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			response = self._callback(code="the-code", state=state, iss=MCP_AS_URL)
+		self.assertEqual(response["location"], "/jarvis?settings=connectors&oauth_error=denied")
+		self.assertFalse(frappe.db.exists(TOKEN_DT, f"{name}-{PLAIN_A}"))
+
+
+class TestBrokerMcpOauthToken(_McpOauthTestCase):
+	def test_credential_returns_the_stored_token(self):
+		name = self._mk_mcp_connector("broker-ok")
+		self._mk_mcp_token(name, PLAIN_A, access_token="secret-token")
+		frappe.set_user(PLAIN_A)
+		self.assertEqual(broker._credential(self._reload_doc(name)), "secret-token")
+
+	def test_credential_not_ready_without_a_signin(self):
+		name = self._mk_mcp_connector("broker-none")
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(broker._BrokerError) as ctx:
+			broker._credential(self._reload_doc(name))
+		self.assertEqual(ctx.exception.code, "connector_not_ready")
+
+	def test_one_users_token_is_never_handed_to_another(self):
+		name = self._mk_mcp_connector("broker-peruser", scope="Shared", owner=None)
+		self._mk_mcp_token(name, PLAIN_A, access_token="a-token")
+		frappe.set_user(PLAIN_B)
+		with self.assertRaises(broker._BrokerError) as ctx:
+			broker._credential(self._reload_doc(name))
+		self.assertEqual(ctx.exception.code, "connector_not_ready")
+
+	def test_expiring_token_is_refreshed_and_the_rotation_persisted(self):
+		name = self._mk_mcp_connector("broker-refresh")
+		self._mk_mcp_token(
+			name,
+			PLAIN_A,
+			access_token="stale-token",
+			refresh_token="old-refresh",
+			expires_at=add_to_date(now_datetime(), seconds=30),
+		)
+		transport = _ScriptedTransport(
+			{MCP_TOKEN: _token_response(access="rotated-access", refresh="rotated-refresh")}
+		)
+		frappe.set_user(PLAIN_A)
+		with patch.object(oauth, "MCP_OAUTH_TRANSPORT", transport):
+			self.assertEqual(broker._credential(self._reload_doc(name)), "rotated-access")
+
+		form = transport.form_for(MCP_TOKEN)
+		self.assertEqual(form["grant_type"], "refresh_token")
+		self.assertEqual(form["refresh_token"], "old-refresh")
+		self.assertEqual(form["resource"], MCP_RESOURCE)
+
+		token = frappe.get_doc(TOKEN_DT, f"{name}-{PLAIN_A}")
+		self.assertEqual(token.get_password("access_token", raise_exception=False), "rotated-access")
+		self.assertEqual(token.get_password("refresh_token", raise_exception=False), "rotated-refresh")
+
+	def test_a_rotating_service_that_omits_the_refresh_token_keeps_the_old_one(self):
+		name = self._mk_mcp_connector("broker-keepref")
+		self._mk_mcp_token(
+			name,
+			PLAIN_A,
+			access_token="stale-token",
+			refresh_token="old-refresh",
+			expires_at=add_to_date(now_datetime(), seconds=30),
+		)
+		transport = _ScriptedTransport({MCP_TOKEN: _token_response(access="new-access", refresh=None)})
+		frappe.set_user(PLAIN_A)
+		with patch.object(oauth, "MCP_OAUTH_TRANSPORT", transport):
+			self.assertEqual(broker._credential(self._reload_doc(name)), "new-access")
+		token = frappe.get_doc(TOKEN_DT, f"{name}-{PLAIN_A}")
+		self.assertEqual(token.get_password("refresh_token", raise_exception=False), "old-refresh")
+
+	def test_a_token_without_an_expiry_is_never_refreshed(self):
+		name = self._mk_mcp_connector("broker-noexp")
+		self._mk_mcp_token(name, PLAIN_A, access_token="long-lived", refresh_token="unused-refresh")
+		transport = _ScriptedTransport({})
+		frappe.set_user(PLAIN_A)
+		with patch.object(oauth, "MCP_OAUTH_TRANSPORT", transport):
+			self.assertEqual(broker._credential(self._reload_doc(name)), "long-lived")
+		self.assertEqual(transport.calls, [], "an empty expiry must never read as expired")
+
+	def test_a_failed_refresh_surfaces_as_reconsent(self):
+		name = self._mk_mcp_connector("broker-badref")
+		self._mk_mcp_token(
+			name,
+			PLAIN_A,
+			access_token="stale-token",
+			refresh_token="old-refresh",
+			expires_at=add_to_date(now_datetime(), seconds=30),
+		)
+		transport = _ScriptedTransport(
+			{MCP_TOKEN: HttpResult(status=400, headers={}, json={"error": "invalid_grant"}, text="")}
+		)
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(oauth, "MCP_OAUTH_TRANSPORT", transport),
+			self.assertRaises(broker._BrokerError) as ctx,
+		):
+			broker._credential(self._reload_doc(name))
+		self.assertEqual(ctx.exception.code, "connector_not_ready")
+
+	def test_a_token_is_never_sent_to_a_re_pointed_address(self):
+		# The resource pin is the no-passthrough rule: a token issued FOR one
+		# address must not follow the connector to another, however the row got
+		# re-pointed (this simulates a raw DocType write, since the API refuses).
+		name = self._mk_mcp_connector("broker-repoint")
+		self._mk_mcp_token(name, PLAIN_A, access_token="good-host-token")
+		frappe.db.set_value(CONNECTOR, name, "base_url", "https://evil.invalid/mcp", update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(broker._BrokerError) as ctx:
+			broker._credential(self._reload_doc(name))
+		self.assertEqual(ctx.exception.code, "connector_not_ready")
+
+	def test_test_connector_fails_before_probing_without_a_signin(self):
+		name = self._mk_mcp_connector("broker-test")
+		frappe.set_user(PLAIN_A)
+		with patch.object(broker, "test_connector") as probe:
+			out = connectors_api.test_connector(name)
+		self.assertEqual(out["error"]["code"], "connector_not_ready")
+		probe.assert_not_called()
+
+	def test_test_connector_probes_once_signed_in(self):
+		name = self._mk_mcp_connector("broker-test-ok")
+		self._mk_mcp_token(name, PLAIN_A, access_token="secret-token")
+		frappe.set_user(PLAIN_A)
+		with patch.object(broker, "test_connector", return_value={"ok": True, "tools": _TOOLS}) as probe:
+			out = connectors_api.test_connector(name)
+		self.assertTrue(out["ok"])
+		probe.assert_called_once()
+
+
+class TestDisconnectMcpOauth(_McpOauthTestCase):
+	def test_deletes_only_the_current_users_signin(self):
+		name = self._mk_mcp_connector("dis-mine", scope="Shared", owner=None)
+		self._mk_mcp_token(name, PLAIN_A)
+		self._mk_mcp_token(name, PLAIN_B)
+		frappe.set_user(PLAIN_A)
+		self.assertEqual(connectors_api.disconnect_oauth(name), {"ok": True})
+		self.assertFalse(frappe.db.exists(TOKEN_DT, f"{name}-{PLAIN_A}"))
+		self.assertTrue(frappe.db.exists(TOKEN_DT, f"{name}-{PLAIN_B}"))
+
+	def test_idempotent_when_never_connected(self):
+		name = self._mk_mcp_connector("dis-never")
+		frappe.set_user(PLAIN_A)
+		self.assertEqual(connectors_api.disconnect_oauth(name), {"ok": True})
+
+
+class TestListConnectorsMcpOauth(_McpOauthTestCase):
+	def test_annotates_rows_and_never_ships_the_internal_link(self):
+		connected = self._mk_mcp_connector("list-connected")
+		self._mk_mcp_token(connected, PLAIN_A)
+		pending = self._mk_mcp_connector("list-static", mode="static", client_id="")
+
+		frappe.set_user(PLAIN_A)
+		rows = {r["name"]: r for r in connectors_api.list_connectors()["mine"]}
+
+		self.assertTrue(rows[connected]["oauth_configured"])
+		self.assertTrue(rows[connected]["oauth_connected"])
+		self.assertFalse(rows[connected]["needs_static_client"])
+		self.assertEqual(rows[connected]["signin_host"], "as.example.invalid")
+		self.assertNotIn("mcp_oauth_client", rows[connected])
+		self.assertNotIn("connected_app", rows[connected])
+
+		self.assertFalse(rows[pending]["oauth_configured"])
+		self.assertTrue(rows[pending]["needs_static_client"])
+		self.assertEqual(rows[pending]["oauth_redirect_uri"], connectors_api.oauth_redirect_uri())
+
+	def test_preset_rows_report_a_signin_host_too(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "list-gh", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		frappe.set_user(PLAIN_A)
+		row = next(r for r in connectors_api.list_connectors()["mine"] if r["name"] == name)
+		self.assertEqual(row["signin_host"], "example.invalid")
+
+
+class TestUpdateConnectorMcpOauth(_McpOauthTestCase):
+	def test_a_signed_in_row_cannot_be_re_pointed(self):
+		name = self._mk_mcp_connector("upd-repoint")
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.update_connector(name, base_url="https://elsewhere.invalid/mcp")
+		self.assertEqual(frappe.db.get_value(CONNECTOR, name, "base_url"), MCP_BASE_URL)
+
+	def test_relabel_still_works(self):
+		name = self._mk_mcp_connector("upd-label")
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.update_connector(name, label="Renamed")
+		self.assertEqual(out["label"], "Renamed")
+
+
+class TestConnectorTwoEngineGuard(_McpOauthTestCase):
+	"""The controller is the last line: a Jarvis User has raw create/write on
+	Jarvis Connector, so neither engine's link may be steerable from a direct
+	DocType write."""
+
+	def _insert_as(self, user, **fields):
+		prev = frappe.session.user
+		frappe.set_user(user)
+		try:
+			doc = frappe.get_doc(
+				{
+					"doctype": CONNECTOR,
+					"scope": "Personal",
+					"base_url": MCP_BASE_URL,
+					"label": "Custom",
+					"preset": "Custom URL",
+					**fields,
+				}
+			).insert()
+			self._connectors.append(doc.name)
+			return doc
+		finally:
+			frappe.set_user(prev)
+
+	def test_row_cannot_borrow_another_connectors_client(self):
+		victim = self._mk_mcp_connector("guard-victim")
+		with self.assertRaises(frappe.PermissionError):
+			self._insert_as(PLAIN_A, key="guard-thief", auth_method="OAuth", mcp_oauth_client=victim)
+
+	def test_row_cannot_carry_both_engines(self):
+		app = self._mk_connected_app("GitHub")
+		victim = self._mk_mcp_connector("guard-both-src")
+		with self.assertRaises(frappe.PermissionError):
+			self._insert_as(
+				PLAIN_A,
+				key="guard-both",
+				auth_method="OAuth",
+				connected_app=app,
+				mcp_oauth_client=victim,
+			)
+
+	def test_custom_url_oauth_row_may_not_take_the_preset_link(self):
+		app = self._mk_connected_app("GitHub")
+		with self.assertRaises(frappe.PermissionError):
+			self._insert_as(PLAIN_A, key="guard-preset", auth_method="OAuth", connected_app=app)
+
+	def test_key_row_keeps_neither_link(self):
+		app = self._mk_connected_app("GitHub")
+		victim = self._mk_mcp_connector("guard-key-src")
+		doc = self._insert_as(
+			PLAIN_A, key="guard-key", auth_method="API Key", connected_app=app, mcp_oauth_client=victim
+		)
+		self.assertFalse(doc.connected_app)
+		self.assertFalse(doc.mcp_oauth_client)
+
+	def test_unchanged_resave_does_not_lock_the_row(self):
+		name = self._mk_mcp_connector("guard-resave")
+		frappe.set_user(PLAIN_A)
+		doc = self._reload_doc(name)
+		doc.label = "renamed by owner"
+		doc.save()  # no ignore_permissions - the guard runs and must not throw
+		self.assertEqual(self._reload_doc(name).mcp_oauth_client, name)
+
+	def test_deleting_a_connector_purges_its_client_and_tokens(self):
+		name = self._mk_mcp_connector("guard-cascade")
+		self._mk_mcp_token(name, PLAIN_A)
+		frappe.set_user(PLAIN_A)
+		connectors_api.delete_connector(name)
+		self._connectors.remove(name)
+		self.assertFalse(frappe.db.exists(CONNECTOR, name))
+		self.assertFalse(frappe.db.exists(CLIENT_DT, name), "the client must not outlive its connector")
+		self.assertFalse(frappe.db.exists(TOKEN_DT, f"{name}-{PLAIN_A}"), "tokens must not be orphaned")
