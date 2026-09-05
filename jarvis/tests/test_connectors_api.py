@@ -882,29 +882,36 @@ class TestConnectorOauthFieldGuard(_ConnectorApiTestCase):
 
 class TestListConnectorsOauth(_ConnectorApiTestCase):
 	def test_annotates_oauth_configured_and_connected(self):
+		"""Sign-in state is per (app, USER), not per row (design 6a): a Shared row
+		reads Connected for the user who signed in and Not connected for a
+		coworker who has not. Two rows for the same user on the same app would
+		necessarily agree, so the negative case has to be a different user."""
 		app = self._mk_connected_app("GitHub")
-		connected = self._mk(
+		personal = self._mk(
 			"Personal", "gh-connected", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
 		)
-		self._mk_token_cache(app, PLAIN_A)
-		not_connected = self._mk(
-			"Personal",
-			"gh-not-connected",
-			owner=PLAIN_A,
-			preset="GitHub",
-			auth_method="OAuth",
-			connected_app=app,
-		)
+		shared = self._mk("Shared", "gh-shared", preset="GitHub", auth_method="OAuth", connected_app=app)
+		self._mk_token_cache(app, PLAIN_A)  # only A has signed in
 
 		frappe.set_user(PLAIN_A)
 		out = connectors_api.list_connectors()
-		by_name = {r["name"]: r for r in out["mine"]}
+		mine = {r["name"]: r for r in out["mine"]}
+		shared_rows = {r["name"]: r for r in out["shared"]}
+		self.assertTrue(mine[personal]["oauth_configured"])
+		self.assertTrue(mine[personal]["oauth_connected"])
+		self.assertTrue(shared_rows[shared]["oauth_configured"])
+		self.assertTrue(
+			shared_rows[shared]["oauth_connected"], "A signed in, so the shared row is connected for A"
+		)
+		self.assertNotIn("connected_app", mine[personal])
 
-		self.assertTrue(by_name[connected]["oauth_configured"])
-		self.assertTrue(by_name[connected]["oauth_connected"])
-		self.assertTrue(by_name[not_connected]["oauth_configured"])
-		self.assertFalse(by_name[not_connected]["oauth_connected"])
-		self.assertNotIn("connected_app", by_name[connected])
+		frappe.set_user(PLAIN_B)
+		out = connectors_api.list_connectors()
+		shared_rows = {r["name"]: r for r in out["shared"]}
+		self.assertTrue(shared_rows[shared]["oauth_configured"])
+		self.assertFalse(
+			shared_rows[shared]["oauth_connected"], "B never signed in: same row, not connected for B"
+		)
 
 	def test_api_key_rows_are_not_annotated_with_oauth_fields(self):
 		name = self._mk("Personal", "gh-plain", owner=PLAIN_A, preset="GitHub")
@@ -1682,7 +1689,9 @@ class TestSetOauthClientCredentials(_McpOauthTestCase):
 		self.assertFalse(frappe.db.get_value(CLIENT_DT, name, "client_id"))
 
 	def test_plain_user_cannot_configure_a_shared_connector(self):
-		name = self._mk_mcp_connector("static-shared", scope="Shared", owner=None, mode="static", client_id="")
+		name = self._mk_mcp_connector(
+			"static-shared", scope="Shared", owner=None, mode="static", client_id=""
+		)
 		frappe.set_user(PLAIN_A)
 		with self.assertRaises(frappe.PermissionError):
 			connectors_api.set_oauth_client_credentials(name, "stolen-client", "stolen-secret")
