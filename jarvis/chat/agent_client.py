@@ -753,6 +753,49 @@ class AgentSession:
 			params["runId"] = run_id
 		return self._request("chat.abort", params, timeout_s=timeout_s)
 
+	def compact_session(
+		self,
+		session_key: str,
+		hint: str | None = None,
+		*,
+		timeout_s: float = 200.0,
+	) -> dict:
+		"""Compact one session by sending the runtime's text command
+		``/compact <hint>`` through chat.send (the ONLY surface that accepts a
+		hint; the sessions.compact RPC has none). The command path emits no
+		agent lifecycle frames, only session.message frames and one ``chat``
+		event with a terminal state, so this waits for THAT and nothing else.
+		Verified live 2026-09-05: about 6 s, notice text
+		"⚙️ Compacted (58k before) • Context 58k/200k (29%)"."""
+		message = "/compact" + (f" {hint.strip()}" if hint and hint.strip() else "")
+		run_id = uuid.uuid4().hex
+		self.subscribe_session(session_key)
+		ack = self.chat_send(session_key, message, run_id, timeout_s=CONNECT_TIMEOUT_SECONDS)
+		rid = ack.get("runId") or run_id
+		deadline = time.monotonic() + timeout_s
+		while time.monotonic() < deadline:
+			try:
+				frame = self._recv(min(5.0, max(deadline - time.monotonic(), 0.01)))
+			except AgentUnreachableError as e:
+				# A hard close after the ack is the same "sent it, never heard
+				# back" outcome as a plain timeout (the command may have
+				# landed) - recode a codeless close so the caller's
+				# code == "compact-timeout" check still routes it that way.
+				if getattr(e, "code", None):
+					raise
+				raise AgentUnreachableError(str(e), code="compact-timeout") from e
+			if not frame or frame.get("type") != "event" or frame.get("event") != "chat":
+				continue
+			payload = frame.get("payload") or {}
+			if payload.get("runId") != rid or payload.get("sessionKey") != session_key:
+				continue
+			state = payload.get("state")
+			if state == "final":
+				return {"state": "final", "text": _chat_final_text(payload), "run_id": rid}
+			if state in ("error", "aborted"):
+				return {"state": state, "text": str(payload.get("errorMessage") or state), "run_id": rid}
+		raise AgentUnreachableError("compact timed out", code="compact-timeout")
+
 	def subscribe_session(
 		self,
 		session_key: str,

@@ -200,6 +200,65 @@ def _context_capacity_and_pct(row: dict | None, used_tokens: int) -> tuple[int, 
 	return capacity, round(100 * used_tokens / capacity, 1)
 
 
+def budget_fields_from_row(row: dict | None) -> tuple[str, int, int]:
+	"""``(budget_route, reserve_tokens, compaction_count)`` from a sessions row.
+
+	``contextBudgetStatus`` is an OBJECT on the runtime row (pre-prompt
+	estimate; ``route`` is one of fits / compact_only /
+	truncate_tool_results_only / compact_then_truncate). Absent or malformed
+	values read as empty/zero so a missing field never breaks a turn."""
+	row = row or {}
+	status = row.get("contextBudgetStatus")
+	if not isinstance(status, dict):
+		status = {}
+	route = str(status.get("route") or "")[:40]
+	try:
+		reserve = int(status.get("reserveTokens") or 0)
+	except (TypeError, ValueError):
+		reserve = 0
+	try:
+		count = int(row.get("compactionCheckpointCount") or 0)
+	except (TypeError, ValueError):
+		count = 0
+	return route, max(reserve, 0), max(count, 0)
+
+
+def _write_budget_fields(session_key: str, row: dict | None) -> None:
+	"""UPDATE the budget snapshot columns. Same no-commit contract as
+	``_refresh_session_context_snapshot``. ``compaction_count`` only moves
+	forward (the row is authoritative when it reports one).
+
+	Compaction amendment (context-meter task 4): the runtime CLEARS
+	``contextBudgetStatus`` on a compaction turn, so a row with no status is
+	not "route/reserve are now empty" - it is "this row didn't report a
+	budget this time". Blanking ``budget_route``/``reserve_tokens`` on such a
+	row would erase a good reserve right after a compaction, so when the
+	status is absent this only advances ``compaction_count`` and leaves the
+	other two columns untouched. A row that DOES carry a status still writes
+	all three, same as before."""
+	route, reserve, count = budget_fields_from_row(row)
+	if not isinstance((row or {}).get("contextBudgetStatus"), dict):
+		frappe.db.sql(
+			"""
+			UPDATE `tabJarvis Chat Session`
+			SET compaction_count = GREATEST(IFNULL(compaction_count, 0), %(count)s)
+			WHERE session_key = %(session_key)s
+			""",
+			{"count": count, "session_key": session_key},
+		)
+		return
+	frappe.db.sql(
+		"""
+		UPDATE `tabJarvis Chat Session`
+		SET budget_route = %(route)s,
+			reserve_tokens = %(reserve)s,
+			compaction_count = GREATEST(IFNULL(compaction_count, 0), %(count)s)
+		WHERE session_key = %(session_key)s
+		""",
+		{"route": route, "reserve": reserve, "count": count, "session_key": session_key},
+	)
+
+
 def _refresh_session_context_snapshot(
 	session_key: str, context_tokens: int, context_capacity: int, context_pct: float
 ) -> None:
@@ -305,6 +364,7 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 			# can have moved even though no tokens were spent this turn. Same
 			# no-commit contract as the rest of this branch (see docstring).
 			_refresh_session_context_snapshot(session_key, context_tokens, context_capacity, context_pct)
+			_write_budget_fields(session_key, row)
 			return USAGE_VALID_ZERO
 
 		if not user:
@@ -369,6 +429,7 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 			""",
 			params,
 		)
+		_write_budget_fields(session_key, row)
 		# Per-model attribution (fleet spec §7): the gateway sessions row
 		# carries whatever model the SESSION resolved to for this turn
 		# (turn_handler._session_model_for). For a pinned model that's the
@@ -843,6 +904,7 @@ def refresh_session_snapshots(rows: list[dict]) -> dict:
 				""",
 				params,
 			)
+			_write_budget_fields(session_key, row)
 			touched_users.add(user)
 			bucket = summary.setdefault(user, {"sessions": 0, "last_total_tokens": 0})
 			bucket["sessions"] += 1
