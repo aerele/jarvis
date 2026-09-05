@@ -782,6 +782,12 @@ export const setConnectorAllowedActions = (name, actions) =>
 // one" - the SPA never round-trips the real secret back to resubmit it.
 export const updateConnector = (name, p) => call(CN + "update_connector", { name, ...(p || {}) });
 export const deleteConnector = (name) => call(CN + "delete_connector", { name });
+// OAuth tier: {ok, url} to redirect the browser to, or {ok:false, error}.
+// Frappe's native Connected App callback handles the return trip - no custom
+// callback lives in this app.
+export const connectOauth = (name) => call(CN + "connect_oauth", { name });
+// Deletes the CURRENT user's sign-in for this connector. Idempotent.
+export const disconnectOauth = (name) => call(CN + "disconnect_oauth", { name });
 
 // --- Support panel (Plan 3) -------------------------------------------------
 export const supportListTickets = () => call("jarvis.support.api.list_tickets");

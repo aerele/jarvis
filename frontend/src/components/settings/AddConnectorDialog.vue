@@ -30,29 +30,73 @@
 					@update:modelValue="(v) => onBaseUrlChange(v)"
 				/>
 
-				<FormControl
-					type="password"
-					label="Access token"
-					:placeholder="
-						isEdit ? 'Leave blank to keep the saved token' : 'Paste your token'
-					"
-					:modelValue="form.credential"
-					@update:modelValue="(v) => onCredentialChange(v)"
-				/>
-				<p class="text-xs text-ink-gray-5">
-					{{ tokenHint }}
-					<a
-						v-if="tokenDocsUrl"
-						:href="tokenDocsUrl"
-						target="_blank"
-						rel="noopener"
-						class="text-ink-blue-link hover:underline"
+				<!-- OAuth-first (design §1): a preset with a sign-in option defaults
+				     here. The pasted-token path stays one click away via "Use a token
+				     instead" - shown only before a row exists this session (rowName),
+				     so switching mid-flow never has to migrate an already-saved row's
+				     auth method. -->
+				<template v-if="presetHasOauth && form.auth_method === 'OAuth'">
+					<div
+						v-if="!rowOauthConnected"
+						class="flex flex-col gap-2 rounded-lg border p-3"
 					>
-						How to create this token
-					</a>
-				</p>
+						<p class="text-xs text-ink-gray-5">
+							Sign in with your {{ form.preset }} account to connect.
+						</p>
+						<Button
+							variant="solid"
+							:label="connecting ? 'Connecting…' : `Sign in to ${form.preset}`"
+							:loading="connecting"
+							class="self-start"
+							@click="startOauthConnect"
+						/>
+					</div>
+					<Button
+						v-if="!rowName"
+						variant="ghost"
+						size="sm"
+						label="Use a token instead"
+						class="self-start"
+						@click="switchAuthMethod('API Key')"
+					/>
+				</template>
 
-				<div class="flex items-center gap-3 rounded-lg border p-3">
+				<template v-else>
+					<FormControl
+						type="password"
+						label="Access token"
+						:placeholder="
+							isEdit ? 'Leave blank to keep the saved token' : 'Paste your token'
+						"
+						:modelValue="form.credential"
+						@update:modelValue="(v) => onCredentialChange(v)"
+					/>
+					<p class="text-xs text-ink-gray-5">
+						{{ tokenHint }}
+						<a
+							v-if="tokenDocsUrl"
+							:href="tokenDocsUrl"
+							target="_blank"
+							rel="noopener"
+							class="text-ink-blue-link hover:underline"
+						>
+							How to create this token
+						</a>
+					</p>
+					<Button
+						v-if="presetHasOauth && !rowName"
+						variant="ghost"
+						size="sm"
+						:label="`Sign in to ${form.preset} instead`"
+						class="self-start"
+						@click="switchAuthMethod('OAuth')"
+					/>
+				</template>
+
+				<div
+					v-if="form.auth_method !== 'OAuth' || rowOauthConnected"
+					class="flex items-center gap-3 rounded-lg border p-3"
+				>
 					<Button
 						variant="subtle"
 						:label="testing ? 'Testing…' : 'Test connection'"
@@ -216,6 +260,7 @@ import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 import { CONNECTOR_HELP, CUSTOM_URL_TOKEN_HINT } from "@/components/settings/connectorHelp.js";
 import {
 	addConnector,
+	connectOauth,
 	deleteConnector,
 	setConnectorAllowedActions,
 	testConnector,
@@ -236,6 +281,9 @@ const props = defineProps({
 const emit = defineEmits(["update:modelValue", "saved"]);
 
 const PRESETS = ["GitHub", "Atlassian", "Linear", "Stripe", "Custom URL"];
+// v1 flagship only (OAUTH_CONNECTORS_DESIGN.md §3) - every other preset stays
+// pasted-token only until it gets its own OAuth wiring.
+const OAUTH_PRESETS = ["GitHub"];
 
 const show = computed({
 	get: () => props.modelValue,
@@ -254,7 +302,10 @@ const step = ref(1);
 const saving = ref(false);
 const testing = ref(false);
 
-const form = reactive({ preset: "GitHub", base_url: "", credential: "" });
+const form = reactive({ preset: "GitHub", base_url: "", credential: "", auth_method: "OAuth" });
+// Whether the selected preset offers a sign-in option at all - gates every
+// OAuth-mode template branch below.
+const presetHasOauth = computed(() => OAUTH_PRESETS.includes(form.preset));
 // Step 2's "Choose what {agent} may do with X" line. There's no user-typed
 // Name field any more (the backend derives the saved label - preset display
 // name, or the Custom URL's hostname), so this falls back to the preset's
@@ -280,14 +331,23 @@ const createdThisSession = ref(false);
 // that WAS saved is never mistaken for an orphan.
 const savedThisSession = ref(false);
 const testState = reactive({ status: "idle", tools: [], message: "" }); // idle | passed | failed
+// Whether THIS row currently has a live per-user connection (design §6a) -
+// true for an edited row that's already connected, or right after this
+// session's own sign-in round-trip reopens the dialog. Gates whether step 1
+// shows the "Sign in" prompt or the Test connection box.
+const rowOauthConnected = ref(false);
+const connecting = ref(false);
 
 function resetForCreate() {
 	form.preset = "GitHub";
 	form.base_url = "";
 	form.credential = "";
+	form.auth_method = OAUTH_PRESETS.includes(form.preset) ? "OAuth" : "API Key";
 	rowName.value = "";
 	createdThisSession.value = false;
 	savedThisSession.value = false;
+	rowOauthConnected.value = false;
+	connecting.value = false;
 	testState.status = "idle";
 	testState.tools = [];
 	testState.message = "";
@@ -300,9 +360,12 @@ function resetForEdit(row) {
 	form.preset = row.preset || "GitHub";
 	form.base_url = row.base_url || "";
 	form.credential = "";
+	form.auth_method = row.auth_method || "API Key";
 	rowName.value = row.name;
 	createdThisSession.value = false;
 	savedThisSession.value = false;
+	rowOauthConnected.value = !!row.oauth_connected;
+	connecting.value = false;
 	// An edited row may already have a passing test on record; that state is
 	// server truth (last_test_status), not something to re-derive here — but
 	// this dialog only knows the LIVE tools/list shape after a fresh test, so
@@ -338,6 +401,53 @@ watch([() => form.preset, () => form.base_url], () => {
 function onPresetChange(v) {
 	form.preset = v;
 	form.base_url = "";
+	// OAuth-first (design §1): switching to a preset with a sign-in option
+	// re-defaults to it, same as the dialog's own initial state.
+	form.auth_method = OAUTH_PRESETS.includes(v) ? "OAuth" : "API Key";
+	rowOauthConnected.value = false;
+}
+
+// The toggle link only shows before this session has created a row (see the
+// template), so this never has to migrate an already-saved row's auth
+// method - it just flips which half of step 1 renders next.
+function switchAuthMethod(method) {
+	form.auth_method = method;
+	form.credential = "";
+	rowOauthConnected.value = false;
+	testState.status = "idle";
+	testState.tools = [];
+	testState.message = "";
+}
+
+async function startOauthConnect() {
+	if (connecting.value) return;
+	connecting.value = true;
+	try {
+		if (!rowName.value) {
+			const row = await addConnector({
+				preset: form.preset,
+				scope: props.scope,
+				auth_method: "OAuth",
+			});
+			rowName.value = row.name;
+			createdThisSession.value = true;
+		}
+		const res = await connectOauth(rowName.value);
+		if (res && res.ok && res.url) {
+			window.location.href = res.url;
+			return;
+		}
+		toast.error(
+			errHtml(
+				{ message: (res && res.error && res.error.message) || "" },
+				"Could not sign in."
+			)
+		);
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		connecting.value = false;
+	}
 }
 function onBaseUrlChange(v) {
 	form.base_url = v;
@@ -353,6 +463,10 @@ function onCredentialChange(v) {
 
 const canTest = computed(() => {
 	if (form.preset === "Custom URL" && !form.base_url.trim()) return false;
+	// OAuth mode has no credential field - the Test connection box only ever
+	// renders once rowOauthConnected is true (see template), so there's
+	// nothing further to gate here.
+	if (form.auth_method === "OAuth") return true;
 	if (!isEdit.value && !form.credential.trim()) return false;
 	return true;
 });
@@ -390,15 +504,18 @@ async function runTest() {
 				base_url: form.base_url.trim(),
 				scope: props.scope,
 				credential: form.credential,
+				auth_method: form.auth_method,
 				...(form.preset === "Custom URL"
 					? { key: customUrlKey(form.base_url.trim()) }
 					: {}),
 			});
 			rowName.value = row.name;
 			createdThisSession.value = true;
-		} else {
+		} else if (form.auth_method !== "OAuth") {
 			// Re-test (edit mode, or a second Test press this session): persist
 			// whatever changed first. Blank credential means "keep the saved one".
+			// An OAuth row has no credential to resend - its row was already
+			// created by startOauthConnect, so this branch never runs for it.
 			await updateConnector(rowName.value, {
 				...(form.preset === "Custom URL" ? { base_url: form.base_url.trim() } : {}),
 				...(form.credential.trim() ? { credential: form.credential.trim() } : {}),

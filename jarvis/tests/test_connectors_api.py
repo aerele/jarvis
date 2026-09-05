@@ -19,7 +19,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import connectors_api
-from jarvis.connectors import broker
+from jarvis.connectors import broker, oauth
 from jarvis.permissions import (
 	JARVIS_ADMIN_ROLE,
 	JARVIS_USER_ROLE,
@@ -78,6 +78,8 @@ class _ConnectorApiTestCase(FrappeTestCase):
 		_ensure_user(PLAIN_B, [JARVIS_USER_ROLE])
 		self._orig_user = frappe.session.user
 		self._connectors: list[str] = []
+		self._connected_apps: list[str] = []
+		self._token_caches: list[str] = []
 		self._saved_singles: dict[str, object] = {}
 		# The feature flag defaults OFF on a fresh DB, and test_connector now refuses
 		# to probe when it is off. Every test here exercises an ENABLED workspace, so
@@ -89,6 +91,12 @@ class _ConnectorApiTestCase(FrappeTestCase):
 		for name in self._connectors:
 			if frappe.db.exists(CONNECTOR, name):
 				frappe.delete_doc(CONNECTOR, name, ignore_permissions=True, force=True)
+		for name in self._token_caches:
+			if frappe.db.exists("Token Cache", name):
+				frappe.delete_doc("Token Cache", name, ignore_permissions=True, force=True)
+		for name in self._connected_apps:
+			if frappe.db.exists("Connected App", name):
+				frappe.delete_doc("Connected App", name, ignore_permissions=True, force=True)
 		for field, value in self._saved_singles.items():
 			frappe.db.sql("delete from tabSingles where doctype=%s and field=%s", (SETTINGS, field))
 			if value is not None:
@@ -113,6 +121,53 @@ class _ConnectorApiTestCase(FrappeTestCase):
 			self._connectors.append(doc.name)
 			if owner:
 				frappe.db.set_value(CONNECTOR, doc.name, "owner", owner, update_modified=False)
+			frappe.db.commit()
+			return doc.name
+		finally:
+			frappe.set_user(prev)
+
+	def _mk_connected_app(self, provider_name: str = "GitHub") -> str:
+		"""A minimal Connected App fixture - never touches a real provider (no
+		network happens on insert; ``authorization_uri``/``token_uri`` are just
+		strings until a flow actually runs)."""
+		prev = frappe.session.user
+		frappe.set_user("Administrator")
+		try:
+			doc = frappe.get_doc(
+				{
+					"doctype": "Connected App",
+					"name": provider_name,
+					"provider_name": provider_name,
+					"client_id": "test-client-id",
+					"client_secret": "test-client-secret",
+					"authorization_uri": "https://example.invalid/authorize",
+					"token_uri": "https://example.invalid/token",
+				}
+			).insert(ignore_permissions=True)
+			self._connected_apps.append(doc.name)
+			frappe.db.commit()
+			return doc.name
+		finally:
+			frappe.set_user(prev)
+
+	def _mk_token_cache(self, connected_app: str, user: str, access_token: str = "live-token") -> str:
+		"""A live (non-expired) Token Cache for ``user`` - bypasses the real
+		authorize/exchange dance entirely, which is exactly what
+		``get_active_token``/``get_token_cache`` read."""
+		prev = frappe.session.user
+		frappe.set_user("Administrator")
+		try:
+			doc = frappe.get_doc(
+				{
+					"doctype": "Token Cache",
+					"connected_app": connected_app,
+					"user": user,
+					"access_token": access_token,
+					"token_type": "Bearer",
+					"expires_in": 3600,
+				}
+			).insert(ignore_permissions=True)
+			self._token_caches.append(doc.name)
 			frappe.db.commit()
 			return doc.name
 		finally:
@@ -469,3 +524,292 @@ class TestDeleteConnector(_ConnectorApiTestCase):
 		frappe.set_user(PLAIN_A)
 		with self.assertRaises(frappe.PermissionError):
 			connectors_api.delete_connector(name)
+
+
+# --------------------------------------------------------------------------- #
+# OAuth tier v1 (OAUTH_CONNECTORS_DESIGN.md) - GitHub flagship.
+#
+# The real authorize/token-exchange dance is never exercised here - only
+# ``jarvis.connectors.oauth`` (this module's seam into Connected App) and the
+# API surface built around it. A Connected App/Token Cache fixture is real
+# (both are plain Frappe doctypes, no provider is ever contacted for it), so
+# ``get_active_token``/``get_token_cache`` run for real against them.
+# --------------------------------------------------------------------------- #
+class TestOauthModule(_ConnectorApiTestCase):
+	def test_is_oauth_true_for_oauth_auth_method(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-oauth", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		doc = frappe.get_doc(CONNECTOR, name)
+		self.assertTrue(oauth.is_oauth(doc))
+
+	def test_is_oauth_false_for_api_key_and_unset(self):
+		name = self._mk("Personal", "gh-key", owner=PLAIN_A, preset="GitHub")
+		doc = frappe.get_doc(CONNECTOR, name)
+		self.assertFalse(oauth.is_oauth(doc))
+		self.assertFalse(oauth.is_oauth({}))
+
+	def test_resolve_access_token_returns_none_without_connected_app(self):
+		# A bare dict-like row is enough here - Jarvis Connector's own
+		# mandatory_depends_on already forbids saving auth_method=OAuth with no
+		# connected_app, so this exercises resolve_access_token's OWN "unset"
+		# guard rather than a state the DocType itself would ever persist.
+		self.assertIsNone(oauth.resolve_access_token({"auth_method": "OAuth"}))
+
+	def test_resolve_access_token_returns_none_without_a_token_cache(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-no-cache", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		frappe.set_user(PLAIN_A)
+		doc = frappe.get_doc(CONNECTOR, name)
+		self.assertIsNone(oauth.resolve_access_token(doc))
+
+	def test_resolve_access_token_returns_the_live_token(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-live", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		self._mk_token_cache(app, PLAIN_A, access_token="secret-token")
+		frappe.set_user(PLAIN_A)
+		doc = frappe.get_doc(CONNECTOR, name)
+		self.assertEqual(oauth.resolve_access_token(doc), "secret-token")
+
+
+class TestBrokerCredentialOauth(_ConnectorApiTestCase):
+	def test_credential_raises_connector_not_ready_without_a_token(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-broker", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		frappe.set_user(PLAIN_A)
+		doc = frappe.get_doc(CONNECTOR, name)
+		with self.assertRaises(broker._BrokerError) as ctx:
+			broker._credential(doc)
+		self.assertEqual(ctx.exception.code, "connector_not_ready")
+
+	def test_credential_returns_the_live_token(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-broker-ok", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		self._mk_token_cache(app, PLAIN_A, access_token="secret-token")
+		frappe.set_user(PLAIN_A)
+		doc = frappe.get_doc(CONNECTOR, name)
+		self.assertEqual(broker._credential(doc), "secret-token")
+
+	def test_credential_unchanged_for_api_key_row(self):
+		name = self._mk("Personal", "gh-apikey", owner=PLAIN_A, preset="GitHub", credential="my-pat")
+		frappe.set_user(PLAIN_A)
+		doc = frappe.get_doc(CONNECTOR, name)
+		self.assertEqual(broker._credential(doc), "my-pat")
+
+
+class TestAddConnectorOauth(_ConnectorApiTestCase):
+	def test_oauth_ignores_credential_and_sets_connected_app_server_side(self):
+		app = self._mk_connected_app("GitHub")
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.add_connector(
+			preset="GitHub",
+			base_url="https://attacker.invalid/steal",
+			scope="Personal",
+			credential="a-pasted-secret",
+			auth_method="OAuth",
+		)
+		self._connectors.append(out["name"])
+		self.assertEqual(out["auth_method"], "OAuth")
+		self.assertNotIn("credential", out)
+		reloaded = frappe.get_doc(CONNECTOR, out["name"])
+		self.assertEqual(reloaded.connected_app, app)
+		self.assertFalse(reloaded.get_password("credential", raise_exception=False))
+
+	def test_oauth_without_a_configured_connected_app_is_rejected(self):
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.add_connector(
+				preset="GitHub",
+				base_url="",
+				scope="Personal",
+				credential="",
+				auth_method="OAuth",
+			)
+
+	def test_invalid_auth_method_rejected(self):
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.add_connector(
+				preset="GitHub",
+				base_url="",
+				scope="Personal",
+				credential="tok",
+				auth_method="Bearer Token",
+			)
+
+
+class TestListConnectorsOauth(_ConnectorApiTestCase):
+	def test_annotates_oauth_configured_and_connected(self):
+		app = self._mk_connected_app("GitHub")
+		connected = self._mk(
+			"Personal", "gh-connected", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		self._mk_token_cache(app, PLAIN_A)
+		not_connected = self._mk(
+			"Personal",
+			"gh-not-connected",
+			owner=PLAIN_A,
+			preset="GitHub",
+			auth_method="OAuth",
+			connected_app=app,
+		)
+
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.list_connectors()
+		by_name = {r["name"]: r for r in out["mine"]}
+
+		self.assertTrue(by_name[connected]["oauth_configured"])
+		self.assertTrue(by_name[connected]["oauth_connected"])
+		self.assertTrue(by_name[not_connected]["oauth_configured"])
+		self.assertFalse(by_name[not_connected]["oauth_connected"])
+		self.assertNotIn("connected_app", by_name[connected])
+
+	def test_api_key_rows_are_not_annotated_with_oauth_fields(self):
+		name = self._mk("Personal", "gh-plain", owner=PLAIN_A, preset="GitHub")
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.list_connectors()
+		row = next(r for r in out["mine"] if r["name"] == name)
+		self.assertEqual(row["auth_method"], "API Key")
+		self.assertNotIn("oauth_connected", row)
+
+
+class TestTestConnectorOauth(_ConnectorApiTestCase):
+	def test_no_token_returns_connector_not_ready_without_probing(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-test", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		frappe.set_user(PLAIN_A)
+		with patch.object(broker, "test_connector") as probe:
+			out = connectors_api.test_connector(name)
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "connector_not_ready")
+		probe.assert_not_called()
+
+	def test_live_token_reaches_the_broker_probe(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-test-ok", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		self._mk_token_cache(app, PLAIN_A, access_token="secret-token")
+		frappe.set_user(PLAIN_A)
+		with patch.object(broker, "test_connector", return_value={"ok": True, "tools": _TOOLS}) as probe:
+			out = connectors_api.test_connector(name)
+		self.assertTrue(out["ok"])
+		probe.assert_called_once()
+
+
+class TestConnectOauth(_ConnectorApiTestCase):
+	def test_returns_authorize_url_for_oauth_row(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-connect", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.connect_oauth(name)
+		self.assertTrue(out["ok"])
+		self.assertIn("https://example.invalid/authorize", out["url"])
+		# initiate_web_application_flow creates the user's Token Cache to hold state.
+		self._token_caches.append(f"{app}-{PLAIN_A}")
+
+	def test_started_but_unfinished_flow_is_not_reported_as_connected(self):
+		# initiate_web_application_flow creates the Token Cache up front to hold
+		# `state`, before the user ever reaches the provider's consent screen - it
+		# must NOT read as "connected" (a bare get_token_cache truthy check would
+		# say the opposite; see _oauth_status).
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal",
+			"gh-unfinished",
+			owner=PLAIN_A,
+			preset="GitHub",
+			auth_method="OAuth",
+			connected_app=app,
+		)
+		frappe.set_user(PLAIN_A)
+		connectors_api.connect_oauth(name)
+		self._token_caches.append(f"{app}-{PLAIN_A}")
+
+		out = connectors_api.list_connectors()
+		row = next(r for r in out["mine"] if r["name"] == name)
+		self.assertTrue(row["oauth_configured"])
+		self.assertFalse(row["oauth_connected"], "a state-only Token Cache is not a completed sign-in")
+
+	def test_not_oauth_row_returns_not_oauth_error(self):
+		name = self._mk("Personal", "gh-notoauth", owner=PLAIN_A, preset="GitHub")
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.connect_oauth(name)
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "not_oauth")
+
+	def test_unconfigured_connected_app_returns_friendly_error(self):
+		# auth_method OAuth with no connected_app can only happen on a row whose
+		# Connected App was removed (or edited out-of-band) after creation - the
+		# endpoint must still fail cleanly, not raise. Create with a real Connected
+		# App (the DocType's own mandatory_depends_on forbids saving without one),
+		# then blank it via a raw write to simulate that later state.
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-unconf", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		frappe.db.set_value(CONNECTOR, name, "connected_app", None, update_modified=False)
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.connect_oauth(name)
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "oauth_not_configured")
+
+	def test_stranger_cannot_connect_someone_elses_personal_connector(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-private", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		frappe.set_user(PLAIN_B)
+		with self.assertRaises(frappe.PermissionError):
+			connectors_api.connect_oauth(name)
+
+
+class TestDisconnectOauth(_ConnectorApiTestCase):
+	def test_deletes_the_current_users_token_cache(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal",
+			"gh-disconnect",
+			owner=PLAIN_A,
+			preset="GitHub",
+			auth_method="OAuth",
+			connected_app=app,
+		)
+		tc_name = self._mk_token_cache(app, PLAIN_A)
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.disconnect_oauth(name)
+		self.assertEqual(out, {"ok": True})
+		self.assertFalse(frappe.db.exists("Token Cache", tc_name))
+		self._token_caches.remove(tc_name)
+
+	def test_idempotent_when_never_connected(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-never", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.disconnect_oauth(name)
+		self.assertEqual(out, {"ok": True})
+
+	def test_idempotent_when_connected_app_missing(self):
+		app = self._mk_connected_app("GitHub")
+		name = self._mk(
+			"Personal", "gh-noapp", owner=PLAIN_A, preset="GitHub", auth_method="OAuth", connected_app=app
+		)
+		frappe.db.set_value(CONNECTOR, name, "connected_app", None, update_modified=False)
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.disconnect_oauth(name)
+		self.assertEqual(out, {"ok": True})

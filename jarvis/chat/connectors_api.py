@@ -1,6 +1,7 @@
-"""MCP Connectors — SPA API (MCP_CONNECTORS_PLAN.md P3).
+"""MCP Connectors - SPA API (MCP_CONNECTORS_PLAN.md P3; OAuth tier v1 per
+OAUTH_CONNECTORS_DESIGN.md).
 
-The SPA's Connectors settings pane talks to the six endpoints below. Every
+The SPA's Connectors settings pane talks to the endpoints below. Every
 call runs as the logged-in user (``@require_jarvis_user``, no impersonation
 here — that already happened, if at all, one layer up in the chat dispatcher)
 so ``Jarvis Connector`` row permissions
@@ -38,6 +39,11 @@ Endpoints:
     table — a stale cache from a different server would just make the broker
     deny everything as ``action_unknown``, which is confusing, not safer).
   * ``delete_connector``.
+  * ``connect_oauth``         - OAuth tier: returns the provider's authorize
+    URL for an OAuth-auth-method row; Frappe's native Connected App callback
+    handles the return trip, no custom callback lives here.
+  * ``disconnect_oauth``      - deletes the CURRENT user's Token Cache for an
+    OAuth row (per-user, idempotent).
 
 ``set_custom_url_policy`` is deliberately NOT here — MCP_CONNECTORS_PLAN.md's
 UI/UX decision #2 puts that admin control on the Jarvis Settings Desk form.
@@ -60,7 +66,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, now_datetime
 
-from jarvis.connectors import broker
+from jarvis.connectors import broker, oauth
 from jarvis.permissions import require_jarvis_user
 
 CONNECTOR = "Jarvis Connector"
@@ -87,6 +93,12 @@ _PRESET_BASE_URLS = {
 _PRESET_KEYS = {"GitHub": "github", "Atlassian": "atlassian", "Linear": "linear", "Stripe": "stripe"}
 _PRESETS = (*_PRESET_BASE_URLS, "Custom URL")
 _SCOPES = ("Shared", "Personal")
+_AUTH_METHODS = ("API Key", "OAuth")
+
+# Preset -> the Connected App's own ``provider_name`` (an operator-set System
+# Manager-only field, never client input). Extend this map, not the resolver,
+# when a second preset gets an OAuth path.
+_PRESET_PROVIDER = {"GitHub": "GitHub"}
 
 _DESC_MAX = 500
 
@@ -203,6 +215,42 @@ def _action_summaries(parent_names: list[str]) -> dict[str, dict]:
 	return out
 
 
+def _resolve_connected_app_for_preset(preset: str) -> str | None:
+	"""The site's Connected App for ``preset``'s OAuth provider, or ``None`` when
+	none is configured yet. Matched on ``provider_name`` - an operator-set,
+	System-Manager-only field on Connected App - NEVER on anything the caller
+	supplies, so a client can ask for OAuth but can never name or steer which
+	Connected App backs it (OAUTH_CONNECTORS_DESIGN.md §6b)."""
+	provider = _PRESET_PROVIDER.get(preset)
+	if not provider:
+		return None
+	found = frappe.get_all("Connected App", filters={"provider_name": provider}, pluck="name", limit=1)
+	return found[0] if found else None
+
+
+def _oauth_status(doc) -> dict:
+	"""``{oauth_configured, oauth_connected}`` for an OAuth-auth-method row.
+	``oauth_configured`` is true when a Connected App still resolves for the
+	preset (an admin could remove it after the row was created).
+
+	``oauth_connected`` is PRESENCE of a real access token on the current
+	user's Token Cache - NOT mere presence of the Token Cache doc. Frappe's own
+	``initiate_web_application_flow`` creates that doc up front to hold ``state``
+	before the user ever reaches the provider's consent screen, so a bare
+	``get_token_cache`` truthy check would read "connected" for a user who
+	clicked Connect and never finished (or bounced off consent). Mirrors
+	Frappe's own ``connected_app.has_token``; this must never trigger a refresh
+	(a stale/expired token still counts as "connected" for display - the broker
+	is what enforces liveness on an actual call)."""
+	connected_app = doc.get("connected_app")
+	if not connected_app or not frappe.db.exists("Connected App", connected_app):
+		return {"oauth_configured": False, "oauth_connected": False}
+	app = frappe.get_doc("Connected App", connected_app)
+	token_cache = app.get_token_cache(frappe.session.user)
+	connected = bool(token_cache and token_cache.get_password("access_token", False))
+	return {"oauth_configured": True, "oauth_connected": connected}
+
+
 def _connector_summary(doc) -> dict:
 	"""Same item shape as a ``list_connectors`` row, built from a loaded
 	Document (add_connector/update_connector's return value). NEVER includes
@@ -211,7 +259,8 @@ def _connector_summary(doc) -> dict:
 	total = len(children)
 	allowed = sum(1 for c in children if c.get("allowed"))
 	last_test_at = doc.get("last_test_at")
-	return {
+	auth_method = doc.get("auth_method") or "API Key"
+	summary = {
 		"name": doc.name,
 		"key": doc.key,
 		"label": doc.label,
@@ -219,10 +268,14 @@ def _connector_summary(doc) -> dict:
 		"base_url": doc.base_url,
 		"scope": doc.scope,
 		"enabled": bool(doc.enabled),
+		"auth_method": auth_method,
 		"last_test_status": doc.get("last_test_status") or "",
 		"last_test_at": str(last_test_at) if last_test_at else None,
 		"allowed_actions": _action_summary(allowed, total),
 	}
+	if auth_method == oauth.OAUTH_AUTH_METHOD:
+		summary.update(_oauth_status(doc))
+	return summary
 
 
 def _cached_tools(doc) -> list[dict]:
@@ -353,6 +406,8 @@ def list_connectors() -> dict:
 			"base_url",
 			"scope",
 			"enabled",
+			"auth_method",
+			"connected_app",
 			"last_test_status",
 			"last_test_at",
 		],
@@ -369,6 +424,10 @@ def list_connectors() -> dict:
 		# frappe.get_list's raw int/None - one shape for both response paths.
 		row["enabled"] = bool(row["enabled"])
 		row["last_test_status"] = row.get("last_test_status") or ""
+		row["auth_method"] = row.get("auth_method") or "API Key"
+		if row["auth_method"] == oauth.OAUTH_AUTH_METHOD:
+			row.update(_oauth_status(row))
+		row.pop("connected_app", None)  # internal - never shipped to the SPA
 		(shared if row["scope"] == "Shared" else mine).append(row)
 
 	return {
@@ -391,6 +450,7 @@ def add_connector(
 	credential: str,
 	label: str | None = None,
 	key: str | None = None,
+	auth_method: str = "API Key",
 ) -> dict:
 	"""Create a connector. Never marks it Passed — a fresh row's
 	``last_test_status`` is blank by field default, and only ``test_connector``
@@ -407,16 +467,26 @@ def add_connector(
 	uniqueness slug the agent passes) is likewise derived: the preset's fixed
 	key, or a slug of the Custom URL host. Uniqueness is then enforced on that
 	key by the controller (one per app for Shared, one per app per user for
-	Personal), so a user cannot connect the same app twice."""
+	Personal), so a user cannot connect the same app twice.
+
+	``auth_method`` picks the connection method (OAUTH_CONNECTORS_DESIGN.md §4,
+	§6b): "OAuth" IGNORES the ``credential`` argument entirely (nothing is ever
+	stored in the Password field for an OAuth row) and resolves
+	``connected_app`` SERVER-SIDE from the preset - a caller can ask for OAuth
+	but can never name or steer which Connected App backs it. "API Key" is the
+	shipped, unchanged behaviour."""
 	label = (label or "").strip()
 	preset = (preset or "").strip()
 	scope = (scope or "").strip()
+	auth_method = (auth_method or "API Key").strip()
 	credential = credential or ""
 
 	if preset not in _PRESETS:
 		frappe.throw(_("Unknown connector preset."))
 	if scope not in _SCOPES:
 		frappe.throw(_("Scope must be Shared or Personal."))
+	if auth_method not in _AUTH_METHODS:
+		frappe.throw(_("Auth Method must be API Key or OAuth."))
 
 	if preset == "Custom URL":
 		if not connector_flags()["allow_custom_urls"]:
@@ -437,18 +507,28 @@ def add_connector(
 		resolved_key = (key or _PRESET_KEYS.get(preset) or "").strip()
 		resolved_label = label or preset
 
-	doc = frappe.get_doc(
-		{
-			"doctype": CONNECTOR,
-			"key": resolved_key,
-			"label": resolved_label,
-			"preset": preset,
-			"base_url": resolved_base_url,
-			"scope": scope,
-			"credential": credential,
-			"enabled": 1,
-		}
-	)
+	doc_fields = {
+		"doctype": CONNECTOR,
+		"key": resolved_key,
+		"label": resolved_label,
+		"preset": preset,
+		"base_url": resolved_base_url,
+		"scope": scope,
+		"auth_method": auth_method,
+		"enabled": 1,
+	}
+	if auth_method == oauth.OAUTH_AUTH_METHOD:
+		# Never store a pasted secret for an OAuth row, and never trust a
+		# client-supplied Connected App - resolve it from the preset ourselves.
+		connected_app = _resolve_connected_app_for_preset(preset)
+		if not connected_app:
+			frappe.throw(_("This app isn't set up for sign-in yet. Ask your admin."))
+		doc_fields["credential"] = ""
+		doc_fields["connected_app"] = connected_app
+	else:
+		doc_fields["credential"] = credential
+
+	doc = frappe.get_doc(doc_fields)
 	doc.insert()
 	frappe.db.commit()
 	return _connector_summary(doc)
@@ -505,6 +585,18 @@ def test_connector(name: str) -> dict:
 			"error": {
 				"code": "rate_limited",
 				"message": "Too many connection tests. Please wait a moment and try again.",
+			},
+		}
+
+	if oauth.is_oauth(doc) and not oauth.resolve_access_token(doc):
+		# Fail BEFORE the outbound probe (and before touching the rate limit's
+		# sibling breaker/cap): an unconnected OAuth row has no bearer to test
+		# with, and that is a sign-in problem, not a transport/health one.
+		return {
+			"ok": False,
+			"error": {
+				"code": "connector_not_ready",
+				"message": "Connect this app first, then test it.",
 			},
 		}
 
@@ -733,4 +825,71 @@ def delete_connector(name: str) -> dict:
 		frappe.throw(_("Connector not found."), frappe.DoesNotExistError)
 	frappe.delete_doc(CONNECTOR, name)
 	frappe.db.commit()
+	return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# 7. OAuth connect / disconnect (OAUTH_CONNECTORS_DESIGN.md §4, §6a, §7)
+# --------------------------------------------------------------------------- #
+@frappe.whitelist()
+@require_jarvis_user
+def connect_oauth(name: str) -> dict:
+	"""Start the sign-in flow for an OAuth connector: return the provider's own
+	authorize URL for the SPA to redirect the browser to. Frappe's native
+	Connected App callback (``connected_app.callback/{app}``) handles the
+	provider's redirect back and writes the Token Cache itself - there is no
+	custom callback here.
+
+	``success_uri`` sends the browser back to the SPA's connectors settings
+	pane, carrying ``name`` so it can refresh that one row's status once the
+	user returns. Connect is PER USER (OAUTH_CONNECTORS_DESIGN.md §6a): each
+	user who wants to use a Shared OAuth connector runs their own sign-in."""
+	doc = frappe.get_doc(CONNECTOR, name)
+	if not doc.has_permission("read"):
+		frappe.throw(_("Not permitted."), frappe.PermissionError)
+
+	if not oauth.is_oauth(doc):
+		return {"ok": False, "error": {"code": "not_oauth", "message": "This connector doesn't use sign-in."}}
+
+	connected_app = doc.get("connected_app")
+	if not connected_app or not frappe.db.exists("Connected App", connected_app):
+		return {
+			"ok": False,
+			"error": {
+				"code": "oauth_not_configured",
+				"message": "This app isn't set up for sign-in yet. Ask your admin.",
+			},
+		}
+
+	app = frappe.get_doc("Connected App", connected_app)
+	# A bare path, not an absolute URL built off frappe.utils.get_url(): Frappe's
+	# own sanitize_redirect (frappe.www.login) only trusts a redirect whose netloc
+	# matches the CURRENT request's host, and rewrites anything else to "/desk".
+	# get_url() reads site_config, which can legitimately differ from the host the
+	# browser actually used (e.g. an aliased/e2e host) - a bare path has no netloc,
+	# so sanitize_redirect always resolves it against the real request host instead.
+	success_uri = "/jarvis?settings=connectors&oauth=" + name
+	url = app.initiate_web_application_flow(user=frappe.session.user, success_uri=success_uri)
+	return {"ok": True, "url": url}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def disconnect_oauth(name: str) -> dict:
+	"""End the CURRENT user's sign-in for an OAuth connector by deleting their
+	Token Cache. Idempotent - never errors when there was nothing to remove
+	(no Connected App configured, or the user never connected)."""
+	doc = frappe.get_doc(CONNECTOR, name)
+	if not doc.has_permission("read"):
+		frappe.throw(_("Not permitted."), frappe.PermissionError)
+
+	connected_app = doc.get("connected_app")
+	if not connected_app or not frappe.db.exists("Connected App", connected_app):
+		return {"ok": True}
+
+	app = frappe.get_doc("Connected App", connected_app)
+	token_cache = app.get_token_cache(frappe.session.user)
+	if token_cache:
+		frappe.delete_doc("Token Cache", token_cache.name, ignore_permissions=True, force=True)
+		frappe.db.commit()
 	return {"ok": True}

@@ -59,6 +59,7 @@
 						@edit="openEdit(row)"
 						@delete="confirmDelete(row)"
 						@toggle="toggleEnabled(row, $event)"
+						@reload="load"
 					/>
 				</div>
 			</div>
@@ -97,6 +98,7 @@
 						@edit="openEdit(row)"
 						@delete="confirmDelete(row)"
 						@toggle="toggleEnabled(row, $event)"
+						@reload="load"
 					/>
 				</div>
 			</div>
@@ -238,5 +240,36 @@ function confirmDelete(row) {
 	});
 }
 
-onMounted(load);
+// ── OAuth return (design §7) ─────────────────────────────────────────────
+// The provider round-trips the browser back to "...?settings=connectors&oauth=
+// <name>" (AppShell's own ?settings= deep link opens this pane; that read
+// already strips "settings" from the URL by the time this pane mounts, but
+// leaves "oauth" alone). Read with URLSearchParams + history.replaceState,
+// the same low-level idiom AppShell uses for that same one-time external-
+// redirect deep link - NOT useRoute()/vue-router, whose reactive query would
+// not reliably reflect a plain history.replaceState the router never drove.
+//
+// Reopening the row's own dialog (rather than a bare toast) matters: the row
+// startOauthConnect created has no allowed actions yet and is not enabled -
+// landing the user straight on the Test connection step (resetForEdit sees
+// oauth_connected=true) is what gets them to a saved, enabled connector.
+function consumeOauthReturn() {
+	const params = new URLSearchParams(window.location.search);
+	const name = params.get("oauth");
+	if (!name) return null;
+	params.delete("oauth");
+	const query = params.toString();
+	const url = window.location.pathname + (query ? `?${query}` : "") + window.location.hash;
+	history.replaceState(history.state, "", url);
+	return name;
+}
+
+onMounted(async () => {
+	const oauthName = consumeOauthReturn();
+	await load();
+	if (!oauthName) return;
+	const row = [...shared.value, ...mine.value].find((r) => r.name === oauthName);
+	if (row) openEdit(row);
+	else toast.success("Connected.");
+});
 </script>

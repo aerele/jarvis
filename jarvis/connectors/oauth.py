@@ -1,17 +1,16 @@
 """OAuth credential resolution for connectors — the *only* seam OAuth adds.
 
-DORMANT SCAFFOLDING. Nothing imports this yet. It exists so the OAuth build
-(task #6, gated on the owner handing over a GitHub OAuth App's client_id/secret —
-see OAUTH_CONNECTORS_DESIGN.md §8) has a home that keeps the OAuth token dance
-out of ``broker.py``'s hot path. The shipped API-key path in
-``broker._credential`` is untouched until this is wired in and tested live.
-
-Design contract (OAUTH_CONNECTORS_DESIGN.md §4, §6), so the eventual wiring is
-a one-line branch in ``broker._credential``::
+Wired into ``broker._credential`` (OAUTH_CONNECTORS_DESIGN.md §4, §6): a row
+whose ``auth_method`` is OAuth resolves its bearer through
+:func:`resolve_access_token` here rather than the shipped ``credential``
+Password field::
 
     def _credential(row):
-        if _is_oauth(row):
-            return oauth.resolve_access_token(row)  # <- this module
+        if oauth.is_oauth(row):
+            token = oauth.resolve_access_token(row)
+            if not token:
+                raise _BrokerError("connector_not_ready", ...)
+            return token
         return row.get_password("credential")  # shipped path, unchanged
 
 Two rules this module MUST honour (they are why OAuth lives here, not inline):
@@ -47,18 +46,29 @@ def is_oauth(row) -> bool:
 		return False
 
 
-def resolve_access_token(row) -> str:  # pragma: no cover - not yet wired
+def resolve_access_token(row) -> str | None:
 	"""Return a live access token for ``row``'s linked Connected App, for the
 	CURRENT impersonated user (``frappe.session.user`` — the identity the broker
 	already runs under and the key the per-user Token Cache is stored on),
-	refreshing proactively per the module docstring.
+	refreshing proactively via ``Connected App.get_active_token`` per the module
+	docstring.
 
-	NOT IMPLEMENTED until the OAuth build (needs the GitHub OAuth App handover,
-	OAUTH_CONNECTORS_DESIGN.md §8). Wiring this into ``broker._credential`` before
-	it is implemented and tested live would regress the shipped API-key path, so
-	it deliberately raises rather than returning a broken value.
-	"""
-	raise NotImplementedError(
-		"OAuth connector credential resolution is not implemented yet — "
-		"see OAUTH_CONNECTORS_DESIGN.md (task #6, blocked on GitHub OAuth App handover)."
-	)
+	Returns ``None`` (never raises) when the row has no ``connected_app``, the
+	Connected App is missing, the user has never connected, or anything else
+	goes wrong resolving/refreshing the token - the caller (``broker._credential``)
+	maps a ``None`` to a friendly ``connector_not_ready`` error rather than a
+	broken/blank bearer reaching the outbound call."""
+	import frappe
+
+	try:
+		name = row.get("connected_app")
+		if not name:
+			return None
+		app = frappe.get_doc("Connected App", name)
+		token_cache = app.get_active_token(frappe.session.user)
+		if not token_cache:
+			return None
+		return token_cache.get_password("access_token")
+	except Exception:
+		frappe.logger("jarvis.connectors").warning("oauth token resolution failed", exc_info=True)
+		return None

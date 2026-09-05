@@ -35,7 +35,7 @@ from collections.abc import Callable
 
 import frappe
 
-from jarvis.connectors import mcp_client, policy, ssrf
+from jarvis.connectors import mcp_client, oauth, policy, ssrf
 from jarvis.connectors.limits import AtCapacityError, CircuitBreaker, ConcurrencyCap
 from jarvis.jarvis.doctype.jarvis_connector_log.jarvis_connector_log import log_call
 
@@ -179,9 +179,24 @@ def resolve_for_status(connector_key: str):
 
 
 def _credential(row) -> str:
-	"""Decrypt the connector credential. On an UNSAVED row (the P3 test button
-	tests before first save) ``get_password`` cannot read ``__Auth`` by name, so
-	fall back to the in-memory field value."""
+	"""Resolve the connector's bearer credential. An OAuth row (see
+	``oauth.is_oauth``) resolves a live access token for the CURRENT
+	impersonated user from its linked Connected App - no ``credential`` field
+	is ever read for it - and raises ``connector_not_ready`` when the user has
+	not connected (or the token could not be refreshed), rather than handing
+	the MCP call a blank/broken bearer.
+
+	Otherwise: decrypt the stored ``credential`` (the shipped API-key path,
+	unchanged). On an UNSAVED row (the P3 test button tests before first save)
+	``get_password`` cannot read ``__Auth`` by name, so fall back to the
+	in-memory field value."""
+	if oauth.is_oauth(row):
+		token = oauth.resolve_access_token(row)
+		if not token:
+			raise _BrokerError(
+				"connector_not_ready", "Connect this app in Settings before Jarvis can use it."
+			)
+		return token
 	is_new = getattr(row, "is_new", None)
 	if callable(is_new) and is_new():
 		return row.get("credential") or ""
@@ -417,7 +432,14 @@ def test_connector(row) -> dict:
 	cap = ConcurrencyCap(store, guard_key, limit=CC_LIMIT, ttl_s=CC_TTL_S)
 	try:
 		with cap.slot():
-			return _test_probe(row.get("base_url"), _credential(row), breaker)
+			try:
+				credential = _credential(row)
+			except _BrokerError as exc:
+				# An OAuth row with no live token - never a health/transport signal,
+				# so it does not touch the breaker (mirrors _do_call's own split
+				# between auth problems and endpoint-health signals).
+				return exc.as_dict()
+			return _test_probe(row.get("base_url"), credential, breaker)
 	except AtCapacityError:
 		return {
 			"ok": False,
