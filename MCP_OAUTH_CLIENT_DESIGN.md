@@ -155,11 +155,15 @@ ConnectorsPane; one heading + one line per section.
   auth engine.
 - **v1 GitHub:** untouched here, except a small, safe **PKCE add-on** to its existing
   authorize/token calls (owner's "OAuth 2.1 + PKCE" ask, applied where it ships first).
-- **Decision for Kavin:** do we **host the CIMD client-metadata document** at a Jarvis
-  HTTPS URL now (needs a stable public host + a `/.well-known/mcp-client` JSON + the central
-  callback registered in it), or ship the client **static-first** (admin enters client_id/
-  secret per server) and add CIMD once the directory has a public home? CIMD is the
-  long-term unlock; static-first lets the engine land without waiting on hosting.
+- **Decision (settled 2026-09-05): Static + DCR now, CIMD later.** The engine leads with
+  **DCR** (RFC 7591 self-registration) for arbitrary servers whose AS supports it, and
+  **static** (admin-entered client_id/secret) for GitHub-like AS. **CIMD** is built as a
+  clean third registration mode **later**, once there is a public Jarvis host to serve the
+  `/.well-known/mcp-client` metadata document — no rework, the registration layer is
+  designed for three modes from the start. Rationale: CIMD is draft-00 with almost no AS
+  adoption today, while DCR (though "deprecated") is what real MCP servers actually support
+  now; static-first + DCR lands a working, spec-compliant engine without a hosting
+  dependency.
 
 ## 10. Estimate + sequence
 
