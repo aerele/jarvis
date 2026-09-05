@@ -45,6 +45,12 @@ export const saveDashboard = (payload = {}) =>
 
 export const deleteDashboard = (name) => call(DB + "delete_dashboard", { name }).then(unwrap);
 
+// Dashboard-builder chat history. General chat deliberately excludes these
+// rows; this endpoint returns only owner-scoped origin_page="dashboards"
+// threads, plus enough authoritative identity to restore their latest work.
+export const listDashboardConversations = (conversation = "") =>
+	call(DB + "list_dashboard_conversations", conversation ? { conversation } : {}).then(unwrap);
+
 // The saved dashboard a conversation built, for main chat's "Open in Dashboards"
 // affordance. -> {name, dashboard_title} | {} (an unsaved build is the normal
 // empty answer, not an error). Throws if the caller does not own the chat.
@@ -94,7 +100,9 @@ export const sendDashboardChat = (
 	message,
 	dataMode = "",
 	editingName = "",
-	theme = ""
+	theme = "",
+	modelOverride = "",
+	thinkingOverride = null,
 ) => {
 	const context = { page: "dashboards" };
 	if (dataMode === "static" || dataMode === "live") context.data_mode = dataMode;
@@ -108,6 +116,8 @@ export const sendDashboardChat = (
 		message,
 		context: JSON.stringify(context),
 		background: 0,
+		...(modelOverride ? { model_override: modelOverride } : {}),
+		...(thinkingOverride !== null ? { thinking_override: thinkingOverride } : {}),
 	});
 };
 

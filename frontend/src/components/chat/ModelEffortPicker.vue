@@ -1,5 +1,9 @@
 <template>
-	<div ref="rootRef" class="mep">
+	<div
+		ref="rootRef"
+		class="mep"
+		:class="{ 'mep-start': align === 'start', 'mep-compact': compact }"
+	>
 		<!-- trigger pill: sits in the composer's bottom-left toolbar -->
 		<button
 			ref="triggerRef"
@@ -245,6 +249,19 @@ const props = defineProps({
 	showProviders: { type: Boolean, default: false },
 	personaEnabled: { type: Boolean, default: false },
 	canAddProvider: { type: Boolean, default: false },
+	// Where the menu hangs off the pill. "end" (main chat: the pill sits at the
+	// composer's left, the menu grows leftward over the wide input) or "start"
+	// (a narrow host such as the dashboard builder pane, whose overflow-hidden
+	// edge is only a few px left of the pill and would clip a leftward menu).
+	align: {
+		type: String,
+		default: "end",
+		validator: (v) => ["start", "end"].includes(v),
+	},
+	// Narrow hosts have no room beside the menu for the Effort/Persona side
+	// flyouts, so they open inline below their row instead (the same drop the
+	// phone breakpoint makes for the whole app).
+	compact: { type: Boolean, default: false },
 });
 const emit = defineEmits(["select-model", "select-thinking", "add-provider"]);
 
@@ -374,7 +391,9 @@ watch(open, (isOpen) => {
 	font-family: inherit;
 	font-size: 12px;
 	font-weight: 500;
-	transition: background-color 0.12s, border-color 0.12s;
+	transition:
+		background-color 0.12s,
+		border-color 0.12s;
 }
 .mep-pill:hover {
 	background: var(--surface-2);
@@ -535,14 +554,31 @@ watch(open, (isOpen) => {
 	padding: 1px 5px;
 }
 
+/* a host whose own edge is just left of the pill (align="start") hangs the
+   menu off the pill's LEFT edge so it grows into the host, not out of it */
+.mep-start .mep-menu {
+	right: auto;
+	left: 0;
+}
+/* no room beside the menu for a side flyout (compact hosts, phones): it
+   opens in the flow below its row, so the menu just grows upward around it */
+.mep-compact .mep-flyout,
+.mep-compact .mep-flyout-persona {
+	position: static;
+	width: auto;
+	margin-top: 4px;
+	box-shadow: none;
+	border-radius: 9px;
+	background: var(--surface-1);
+}
 @media (max-width: 560px) {
-	/* no room for a side flyout on narrow screens — drop it below the row */
 	.mep-flyout {
-		left: 0;
-		right: 0;
-		bottom: auto;
-		top: calc(100% + 4px);
+		position: static;
 		width: auto;
+		margin-top: 4px;
+		box-shadow: none;
+		border-radius: 9px;
+		background: var(--surface-1);
 	}
 }
 </style>

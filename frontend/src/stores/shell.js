@@ -107,7 +107,7 @@ function setActivityDetail(v, { persist = true } = {}) {
 		// toast (same as renameConversation/toggleStar below) but the local
 		// (localStorage-cached) value already stuck, so the UI stays correct.
 		api.updateMySettings({ activity_detail: activityDetail.value ? 1 : 0 }).catch((e) =>
-			toast.error(errHtml(e))
+			toast.error(errHtml(e)),
 		);
 	}
 }
@@ -199,7 +199,7 @@ function setPreferredPersona(v, { persist = true } = {}) {
 				// see above: localStorage write failures are non-fatal
 			}
 			toast.error(
-				"Couldn't switch to " + persona + " - still using " + _personaConfirmed + "."
+				"Couldn't switch to " + persona + " - still using " + _personaConfirmed + ".",
 			);
 		})
 		.finally(release);
@@ -210,7 +210,7 @@ function setPreferredPersona(v, { persist = true } = {}) {
 const notifyEnabled = ref(
 	typeof Notification !== "undefined" &&
 		_lsGet("jarvis-notify") === "1" &&
-		Notification.permission === "granted"
+		Notification.permission === "granted",
 );
 async function toggleNotify() {
 	if (typeof Notification === "undefined") return;
@@ -274,7 +274,14 @@ function syncSettingsFromServer(data) {
 const sidebarPref = useStorage("jarvis-sidebar", "open"); // 'open' | 'collapsed'
 const _narrow = ref(false);
 const _narrowOverride = ref(null); // null | 'open' | 'collapsed' (narrow-only, not persisted)
-if (typeof window !== "undefined") {
+// A full-width view (the Dashboard Builder) can ask for the rail to auto-collapse
+// so the canvas gets the room, WITHOUT touching the user's saved preference: it
+// is restored verbatim on leave. Like the narrow override, a manual toggle while
+// the request is active is a transient peek (not persisted), and both are cleared
+// when the view releases the request.
+const _spacious = ref(false); // a route asked for the collapsed rail
+const _spaciousOverride = ref(null); // null | 'open' | 'collapsed' (peek, not persisted)
+if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
 	const mq = window.matchMedia("(max-width: 820px)");
 	_narrow.value = mq.matches;
 	mq.addEventListener("change", (e) => {
@@ -287,13 +294,25 @@ const sidebarCollapsed = computed({
 		if (_narrow.value) {
 			return _narrowOverride.value ? _narrowOverride.value === "collapsed" : true;
 		}
+		if (_spacious.value) {
+			return _spaciousOverride.value ? _spaciousOverride.value === "collapsed" : true;
+		}
 		return sidebarPref.value === "collapsed";
 	},
 	set(v) {
 		if (_narrow.value) _narrowOverride.value = v ? "collapsed" : "open";
+		else if (_spacious.value) _spaciousOverride.value = v ? "collapsed" : "open";
 		else sidebarPref.value = v ? "collapsed" : "open";
 	},
 });
+
+// A full-width view calls this on enter (on=true) and leave (on=false). Leaving
+// drops any peek so the next visit re-applies the auto-collapse, and the user's
+// persisted preference (never written here) takes over everywhere else.
+function setSpaciousView(on) {
+	_spacious.value = !!on;
+	if (!on) _spaciousOverride.value = null;
+}
 
 // Phone layout (< 768px): the sidebar leaves the flow and becomes an off-canvas
 // drawer (AppShell renders the scrim + slide-in; Sidebar drops its resize
@@ -303,7 +322,7 @@ const sidebarCollapsed = computed({
 // when we leave phone width so it can't leak across the breakpoint.
 const mobile = ref(false);
 const mobileDrawerOpen = ref(false);
-if (typeof window !== "undefined") {
+if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
 	const mmq = window.matchMedia("(max-width: 767px)");
 	mobile.value = mmq.matches;
 	mmq.addEventListener("change", (e) => {
@@ -494,6 +513,7 @@ const store = reactive({
 	paletteOpen,
 	sidebarPref,
 	sidebarCollapsed,
+	setSpaciousView,
 	sidebarWidth,
 	SIDEBAR_MIN_W,
 	SIDEBAR_MAX_W,
