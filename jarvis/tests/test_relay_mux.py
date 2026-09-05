@@ -56,14 +56,22 @@ class _Recorder:
 	is injected by making a specific callback raise — integrity-class behaviour
 	is driven by the mux, not by the raise itself (OAR-7)."""
 
-	def __init__(self, *, poison_delta_seq: int | None = None, poison_terminal: bool = False):
+	def __init__(
+		self,
+		*,
+		poison_delta_seq: int | None = None,
+		poison_terminal: bool = False,
+		poison_status_seq: int | None = None,
+	):
 		self.deltas: list[tuple[int, str, str]] = []
 		self.tools: list[dict] = []
+		self.statuses: list[tuple[int, str]] = []
 		self.terminal: tuple[str, dict] | None = None
 		self.quarantined: str | None = None
 		self.closing: str | None = None
 		self.poison_delta_seq = poison_delta_seq
 		self.poison_terminal = poison_terminal
+		self.poison_status_seq = poison_status_seq
 		self.done = threading.Event()  # set on terminal | quarantine | closing
 
 	def handler(self) -> LaneHandler:
@@ -73,6 +81,7 @@ class _Recorder:
 			on_terminal=self._on_terminal,
 			on_quarantine=self._on_quarantine,
 			on_closing=self._on_closing,
+			on_status=self._on_status,
 		)
 
 	def _on_delta(self, seq, text, delta):
@@ -82,6 +91,11 @@ class _Recorder:
 
 	def _on_tool(self, ev):
 		self.tools.append(ev)
+
+	def _on_status(self, seq, status):
+		if self.poison_status_seq is not None and seq == self.poison_status_seq:
+			raise RuntimeError(f"poison status seq={seq}")
+		self.statuses.append((seq, status))
 
 	def _on_terminal(self, kind, payload):
 		if self.poison_terminal:
@@ -478,6 +492,33 @@ class TestRelayMuxWhiteBox(FrappeTestCase):
 			mux._classify(_agent_frame("r", "s", "assistant", {"text": f"t{i}", "delta": f"d{i}"}))
 		self.assertEqual(lane.state, "active")  # never quarantines on lossy
 		self.assertGreaterEqual(mux.stats()["deltas_dropped"], 5)
+
+	def test_compaction_frame_routes_to_status_event(self):
+		"""Task 6 fix: a ``compaction`` agent frame is routed (via ``parse_event``)
+		to a LOSSY ``status`` lane event, and ``_apply`` calls
+		``on_status(event_seq, status)`` with the mapped compacting/compacted
+		status — the counterpart of the assistant/tool branches above."""
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r", rec.handler(), session_key="s")
+		mux._classify(_agent_frame("r", "s", "compaction", {"phase": "start"}))
+		mux._classify(_agent_frame("r", "s", "compaction", {"phase": "end", "completed": True}))
+		mux.dispatch()
+		self.assertEqual(rec.statuses, [(1, "compacting"), (2, "compacted")])
+
+	def test_poison_status_drops_and_continues_lossy(self):
+		"""A raising ``on_status`` behaves exactly like a poison delta (OAR-7):
+		drop+count the ONE frame and continue the same lane — never quarantine,
+		proving the new ``status`` lane event is classified LOSSY."""
+		mux = self._mux()
+		rec = _Recorder(poison_status_seq=1)
+		lane = mux.register_run("r", rec.handler(), session_key="s")
+		mux._classify(_agent_frame("r", "s", "compaction", {"phase": "start"}))
+		mux._classify(_agent_frame("r", "s", "compaction", {"phase": "end", "completed": True}))
+		mux.dispatch()
+		self.assertEqual(lane.state, "active", "a poison status never quarantines the lane")
+		self.assertEqual(rec.statuses, [(2, "compacted")], "only the poisoned frame was dropped")
+		self.assertGreaterEqual(mux.stats()["deltas_dropped"], 1)
 
 	def test_lane_fairness_hot_lane_does_not_starve_cold(self):
 		# CDX-13: a backed-up hot lane must not monopolise one dispatch — the per-lane

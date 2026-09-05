@@ -341,3 +341,28 @@ describe("GeneralPane Reset onboarding button", () => {
 		// flow review — jsdom makes window.location.assign non-stubbable.
 	});
 });
+
+describe("GeneralPane, Context section", () => {
+	it("shows the measured context in use for this chat, under its own unbadged heading", async () => {
+		api.getUsage.mockImplementation(() =>
+			Promise.resolve({
+				chat_tokens: 999,
+				context: { used: 42000, capacity: 200000, fresh: true },
+			})
+		);
+		const w = await mountAs({ admin: false });
+		expect(w.text()).toContain("42k of 200k context");
+		expect(w.text()).toContain("Context");
+	});
+
+	it("falls back to not measured yet", async () => {
+		api.getUsage.mockImplementation(() =>
+			Promise.resolve({
+				chat_tokens: 999,
+				context: { used: 0, capacity: 0, fresh: false },
+			})
+		);
+		const w = await mountAs({ admin: false });
+		expect(w.text()).toContain("Not measured yet");
+	});
+});
