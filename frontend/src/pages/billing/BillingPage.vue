@@ -182,8 +182,8 @@
 								:key="'up-' + p.name"
 								:plan="p"
 								action-label="Upgrade"
-								note="You pay only the prorated difference for the days left in this period."
-								:disabled="changesBlocked"
+								:note="upgradeNote(p)"
+								:disabled="changesBlocked || upgradeDisabled(p)"
 								:loading="busy === 'up:' + p.name"
 								@action="doUpgrade"
 							/>
@@ -528,6 +528,37 @@ const currentPlan = computed(() => {
 });
 const upgradePlans = computed(() => account.value.upgrade_plans || []);
 const downgradePlans = computed(() => account.value.downgrade_plans || []);
+const isTrial = computed(() => !!account.value.is_trial);
+// The server refuses an upgrade within 24h of renewal (UpgradeTooCloseToRenewal), so mirror
+// that here: disable the upgrade cards with a reason instead of offering a button that errors.
+const upgradeNearRenewal = computed(() => !!account.value.upgrade_locked_near_renewal);
+// Upgrade copy differs on a TRIAL: nothing is charged now (the trial just moves to
+// the new plan, first charge at trial-end), vs a paid customer who pays the prorated
+// difference for the days left. A trial can only switch SAME-cycle (the server refuses
+// a cross-cycle/Annual target with TrialCrossCycleUnsupported), so those cards are
+// disabled during a trial with a note that says why, rather than erroring on click.
+function upgradeCrossCycle(p) {
+	return !!(
+		currentPlan.value &&
+		p.billing_cycle &&
+		p.billing_cycle !== currentPlan.value.billing_cycle
+	);
+}
+function upgradeDisabled(p) {
+	return upgradeNearRenewal.value || (isTrial.value && upgradeCrossCycle(p));
+}
+function upgradeNote(p) {
+	if (upgradeNearRenewal.value) {
+		return "Your plan renews within a day - you can upgrade right after it renews.";
+	}
+	if (isTrial.value) {
+		if (upgradeCrossCycle(p)) {
+			return "Available once your free trial converts to a paid plan.";
+		}
+		return "Your free trial moves to this plan. Nothing is charged now; you're billed at the new price when your trial ends.";
+	}
+	return "You pay only the prorated difference for the days left in this period.";
+}
 const cancelling = computed(() => !!account.value.cancel_at_period_end);
 const scheduledDowngrade = computed(() => !!account.value.scheduled_plan);
 // The lapsed cohort (Expired/Cancelled/Past-Due-with-no-days-left): a plan
