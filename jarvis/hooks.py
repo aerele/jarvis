@@ -898,6 +898,9 @@ default_log_clearing_doctypes = {
 	"Jarvis Activity Event": 90,
 	# Its pre-aggregated per-person daily totals. clear_old_logs prunes on `day`.
 	"Jarvis Activity Daily": 90,
+	# MCP connector call audit log — high-churn, every call, never deduped. 90
+	# days matches Jarvis Trigger Activity's retention.
+	"Jarvis Connector Log": 90,
 }
 
 # Slice B fast-path: runs in the `finally` of EVERY background job on the bench (Frappe
@@ -1236,4 +1239,25 @@ permission_query_conditions["Jarvis Export Job"] = (
 )
 has_permission["Jarvis Export Job"] = (
 	"jarvis.jarvis.doctype.jarvis_export_job.jarvis_export_job.has_permission"
+)
+
+# ---------------------------------------------------------------------------
+# Jarvis Connector scoping (MCP connectors, P0 data model)
+# ---------------------------------------------------------------------------
+# The doctype rows grant Jarvis User / Jarvis Admin / System Manager r/w/c/d
+# broadly (no if_owner — Shared rows must be readable by non-owners); these
+# hooks scope reads to Shared-for-everyone + Personal-for-its-owner, and deny
+# writes to everyone but the admin tier (Shared) or the owner (Personal —
+# deliberately NOT widened to the admin tier, matching Jarvis Conversation).
+# The Shared-scope create/widen gate lives in the DocType controller —
+# "create" reaches has_permission without a doc.
+permission_query_conditions.update(
+	{
+		"Jarvis Connector": "jarvis.chat.connector_permissions.connector_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis Connector": "jarvis.chat.connector_permissions.has_connector_permission",
+	}
 )

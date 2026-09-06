@@ -1603,11 +1603,16 @@ def _dispatch_call(record: dict, token: str, guard_conv, crash_title: str) -> di
 	return result
 
 
-def _legacy_chip(result) -> str:
+def _legacy_chip(tool: str, result) -> str:
 	"""The receipt chip of a LEGACY confirm: confirmed, failed, or partial."""
+	from jarvis import api
+
 	if isinstance(result, dict) and result.get("outcome") == "partial":
 		return "partial"
-	return "confirmed" if isinstance(result, dict) and result.get("ok") else "failed"
+	# envelope_ok unwraps a connector tool's inner {ok:false} so a blocked/denied
+	# connector call reads "failed", consistent with its receipt status; non-connector
+	# tools keep the outer ok.
+	return "confirmed" if isinstance(result, dict) and api.envelope_ok(tool, result) else "failed"
 
 
 def _run_pending_action(
@@ -1779,7 +1784,7 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 				record["tool"],
 				record["args"],
 				result,
-				action_outcome=_legacy_chip(result),
+				action_outcome=_legacy_chip(record["tool"], result),
 				# PR-1: flip the parked PENDING action-row into this receipt in place
 				# (else insert, for a directly-minted / pre-deploy token).
 				flip_token=token,
@@ -1919,7 +1924,7 @@ def _confirm_core(
 				record["tool"],
 				record["args"],
 				result,
-				action_outcome=_legacy_chip(result),
+				action_outcome=_legacy_chip(record["tool"], result),
 				# PR-1: flip the parked PENDING action-row into this receipt in place
 				# (else insert, for a directly-minted / pre-deploy token).
 				flip_token=token,
