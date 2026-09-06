@@ -96,6 +96,12 @@ const settingsSection = ref("general"); // active pane key in the settings dialo
 // openSettings() below - so a section switch can never abandon an in-flight
 // apply regardless of which caller triggered it (jarvis#821 review).
 const settingsApplying = ref(false);
+// One-shot payload a caller can leave for the pane it just opened - e.g. the
+// composer's connector-focus picker sets { browse: true } so ConnectorsPane
+// can jump straight into the add-connector dialog on mount. Cleared by
+// takeSettingsIntent() below so a later mount (or a plain openSettings() call
+// with no intent) never replays a stale one.
+const settingsIntent = ref(null);
 // Bumped whenever the tenant's LLM config changes (a pool save, a subscription
 // connect/disconnect) so views that snapshot chat-ui settings at mount - the
 // chat model picker in particular - can re-fetch instead of showing a stale

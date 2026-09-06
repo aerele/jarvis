@@ -2965,7 +2965,10 @@ def send_message(
 	# Floating-widget auto-context: {doctype, name, label} of the doc the user
 	# is viewing, OR {report_name, filters} when the user is on a
 	# query-report route, OR {page: "triggers"|"dashboards"} when the user is
-	# on the Triggers / Dashboards page, OR {handoff_pages: ["payment-calendar"]}
+	# on the Triggers / Dashboards page, OR {focus_connector: {key, label}}
+	# when the composer's connector-focus pill is armed (a soft prompt-level
+	# nudge, not tool gating — MCP_CONNECTORS_PLAN.md), OR {handoff_pages:
+	# ["payment-calendar"]}
 	# when the web chat can open the Payment Calendar page (a capability, not a
 	# viewing context; see the allow-list below and
 	# turn_handler._payment_calendar_clause). Only forwarded when present, for the
@@ -2981,6 +2984,20 @@ def send_message(
 			# context payload when EITHER a doc/report ref OR ground_wiki OR a
 			# page marker is set.
 			ground_wiki = 1 if (isinstance(ctx, dict) and frappe.utils.cint(ctx.get("ground_wiki"))) else 0
+			# Connector-focus pill: {key, label} of the one connector the user
+			# scoped this turn to. Both are client-supplied text (the label is a
+			# display string, the key names a connector the caller may or may not
+			# still have) — length-capped here; the prompt-side sanitizes before
+			# interpolating it into the trusted bracket line.
+			_focus_raw = ctx.get("focus_connector") if isinstance(ctx, dict) else None
+			focus_connector = (
+				{
+					"key": str(_focus_raw.get("key") or "")[:80],
+					"label": str(_focus_raw.get("label") or "")[:80],
+				}
+				if isinstance(_focus_raw, dict) and _focus_raw.get("key") and _focus_raw.get("label")
+				else None
+			)
 			# Payment Calendar hand-off capability: the web chat names the pages it
 			# can open. A literal allow-list of ONE value (never a passthrough): the
 			# server hint (turn_handler._payment_calendar_clause) only checks that
@@ -2997,6 +3014,7 @@ def send_message(
 				or ctx.get("report_name")
 				or ground_wiki
 				or ctx.get("page") in ("triggers", "dashboards")
+				or focus_connector
 				or handoff_pages
 			):
 				enqueue_kwargs["context"] = {
@@ -3011,6 +3029,11 @@ def send_message(
 					# One-shot wiki grounding (allow-listed, boolean only).
 					"ground_wiki": ground_wiki,
 				}
+				# Only set when present — an absent key, not a null/empty one,
+				# so a plain send's context dict looks exactly as it did before
+				# this pill existed (mirrors how `page` below is handled).
+				if focus_connector:
+					enqueue_kwargs["context"]["focus_connector"] = focus_connector
 				# Only set when present — an absent key, not a null/empty one,
 				# so a plain send's context dict looks exactly as it did before
 				# (mirrors how `page` below is handled).

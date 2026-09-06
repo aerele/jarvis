@@ -117,6 +117,10 @@
   "run_query_doctype_allowlist",
   "run_method_blocklist",
   "core_apps_override",
+  "connectors_section",
+  "allow_custom_urls",
+  "connectors_col",
+  "connector_egress_rules",
   "sync_tab",
   "last_sync_section",
   "last_sync_at",
@@ -923,6 +927,29 @@
    "description": "Customization discovery treats every installed app outside the known core stack (frappe, erpnext, hrms, india_compliance, payments, webshop, insights, wiki, jarvis) as the customer's own. Comma- or newline-separated app names listed here EXTEND that core set, so their doctypes stop being reported as customizations. Leave empty (default) on most sites."
   },
   {
+   "fieldname": "connectors_section",
+   "fieldtype": "Section Break",
+   "label": "Connectors",
+   "description": "MCP connectors let the agent call external services (GitHub, Atlassian, Linear, Stripe and custom gateways) on a user's behalf."
+  },
+  {
+   "fieldname": "allow_custom_urls",
+   "fieldtype": "Check",
+   "label": "Allow Custom URL Connectors",
+   "default": "1",
+   "description": "When on, users may add a connector pointing at any admin-approved Custom URL, not just the built-in presets. Turn off to restrict everyone to the built-in presets only. Readers treat an unset value as ON (Single defaults are not backfilled on migrate)."
+  },
+  {
+   "fieldname": "connectors_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "connector_egress_rules",
+   "fieldtype": "Small Text",
+   "label": "Connector Egress Rules",
+   "description": "Optional allow/deny list of hosts or patterns connector calls may reach, one per line. Empty allows any host (subject to the built-in SSRF guard)."
+  },
+  {
    "fieldname": "sync_tab",
    "fieldtype": "Tab Break",
    "label": "Sync & Status"
@@ -1511,5 +1538,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-13 19:00:00.000000"
+ "modified": "2026-11-24 10:01:00.000000"
 }

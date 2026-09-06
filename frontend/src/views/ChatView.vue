@@ -800,7 +800,7 @@
 							</svg>
 							<div class="jv-toolfail-main">
 								<div class="jv-toolfail-title">
-									{{ toolLabel(m.tool_name) }} didn't run
+									{{ toolCallLabel(m) }} didn't run
 								</div>
 								<div class="jv-toolfail-msg">
 									{{ orphanToolFailures[m.name].message }}
@@ -937,8 +937,13 @@
 																: 'err'
 														"
 													></span>
+													<ConnectorLogo
+														v-if="toolCallPreset(item.row)"
+														:preset="toolCallPreset(item.row)"
+														:size="13"
+													/>
 													<span class="jv-tool-name">{{
-														toolLabel(item.row.tool_name)
+														toolCallLabel(item.row)
 													}}</span>
 													<span class="jv-tool-status">{{
 														item.row.tool_status
@@ -3501,7 +3506,134 @@
 								</svg>
 								<span v-if="groundNextTurn">Wiki</span>
 							</button>
-							<!-- Auto mode (#581): last in this group. Same shape and
+							<!-- Connector-focus pill: scope this conversation to one connected +
+							     enabled app (soft prompt-level nudge — see sendCtx.focus_connector
+							     in send()). Connectors are a default feature, so this is always
+							     shown, even before the first app is connected, so the picker's
+							     "Browse connectors" row is the way in; a focus already armed still
+							     shows the pill so it stays clearable even if that connector was
+							     since disabled. The pill's
+							     border/background live on this wrapping span (not on either
+							     button), because Composer.vue's own convention is that a remove
+							     control is a SIBLING button, never nested inside the one it sits
+							     on - the ×, below, is exactly that sibling, not a nested control.
+
+							     The picker itself is a frappe-ui Dropdown (same idiom as the
+							     header's support pill above) rather than a hand-rolled overlay:
+							     this span is its default-slot trigger, so open/close and
+							     outside-click/Escape are the component's, not ours - see
+							     connectorFocusMenuOptions and onConnectorFocusOpenChange below.
+							     side="top" because this toolbar sits at the BOTTOM of the
+							     composer, unlike the header pill which opens downward. The as-
+							     child trigger attaches its open-on-click behaviour to this span,
+							     so a click on either inner button bubbles up and opens the menu -
+							     the × must stop that bubbling (.stop) or clearing focus would
+							     reopen the picker in the same click. -->
+							<Dropdown
+								:options="connectorFocusMenuOptions"
+								side="top"
+								@update:open="onConnectorFocusOpenChange"
+							>
+								<span
+									class="jv-connfocus-pill"
+									:style="{
+										display: 'flex',
+										alignItems: 'center',
+										height: '30px',
+										padding: connectorFocus ? '0 2px 0 8px' : '0',
+										borderRadius: '7px',
+										border: connectorFocus
+											? '1px solid var(--border)'
+											: 'none',
+										background: connectorFocus
+											? 'var(--surface-1)'
+											: 'transparent',
+										color: connectorFocus ? 'var(--text)' : 'var(--text-3)',
+									}"
+								>
+									<button
+										class="jv-iconbtn"
+										:title="
+											connectorFocus
+												? `Focused on ${connectorFocus.label}. Click to change.`
+												: 'Focus this chat on one connected app'
+										"
+										:aria-pressed="String(!!connectorFocus)"
+										:style="{
+											height: '26px',
+											display: 'flex',
+											alignItems: 'center',
+											gap: '4px',
+											padding: 0,
+											width: connectorFocus ? 'auto' : '30px',
+											justifyContent: 'center',
+											background: 'transparent',
+											border: 'none',
+											borderRadius: '6px',
+											cursor: 'pointer',
+											color: 'inherit',
+											fontSize: '12px',
+											fontWeight: '500',
+										}"
+									>
+										<ConnectorLogo
+											v-if="connectorFocus"
+											:preset="connectorFocus.preset"
+											:size="14"
+										/>
+										<svg
+											v-else
+											width="16"
+											height="16"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.7"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M12 22v-5" />
+											<path d="M9 8V2" />
+											<path d="M15 8V2" />
+											<path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
+										</svg>
+										<span
+											v-if="connectorFocus"
+											style="
+												max-width: 100px;
+												overflow: hidden;
+												text-overflow: ellipsis;
+												white-space: nowrap;
+											"
+											>{{ connectorFocus.label }}</span
+										>
+									</button>
+									<button
+										v-if="connectorFocus"
+										class="jv-iconbtn"
+										title="Clear focus"
+										aria-label="Clear connector focus"
+										style="
+											width: 20px;
+											height: 20px;
+											display: flex;
+											align-items: center;
+											justify-content: center;
+											background: transparent;
+											border: none;
+											border-radius: 50%;
+											cursor: pointer;
+											color: inherit;
+											font-size: 13px;
+											line-height: 1;
+										"
+										@click.stop="setConnectorFocus(null)"
+									>
+										×
+									</button>
+								</span>
+							</Dropdown>
+							<!-- Auto mode (#581): last in this group, after connectors. Same shape and
 							     on-state colour as the Wiki toggle; the icon is the two filled
 							     triangles Claude Code shows for its auto mode. -->
 							<button
@@ -4455,6 +4587,7 @@ const SEND_DEADLINE_MS = 30000;
 const CHECK_DEADLINE_MS = 15000;
 import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
+import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 import FilePreview from "@/components/FilePreview.vue";
 import FileBoxUseAsSource from "@/components/chat/FileBoxUseAsSource.vue";
 import DocumentBlocks from "@/components/DocumentBlocks.vue";
@@ -5531,6 +5664,15 @@ watch(
 		if (!convAutoMode.value && autoView.value.visible) autoModeArmed.value = !!v;
 	}
 );
+// Connector-focus pill (composer control, MCP_CONNECTORS_PLAN.md): a soft
+// prompt-level nudge scoping this conversation to ONE connected+enabled
+// connector — NOT tool gating, the agent can still reach for anything, this
+// only tells it what to prefer. { key, label, preset } | null. Persisted per
+// conversation (see connectorFocusStore below) so it survives across turns
+// until the user clears it, unlike the one-shot groundNextTurn above.
+const connectorFocus = ref(null);
+const connectorFocusOptions = ref([]);
+const connectorFocusLoaded = ref(false);
 // (sidebar collapse machinery, per-conversation ⋯ menu and inline rename
 // moved to the app shell — stores/shell.js + components/shell/*, §3.7)
 const modelOverride = ref("");
@@ -6919,6 +7061,56 @@ function toolLoading(row) {
 }
 function toolLabel(n) {
 	return (n || "tool").replace(/^jarvis__/, "");
+}
+// Connector tool calls (list_connector_actions, call_connector) otherwise show
+// their bare Python name, unlike every other tool's already-readable label.
+// list_connector_actions takes no arg worth surfacing, so it gets one fixed
+// phrase; call_connector's label is DERIVED from its own tool_args (the
+// connector key + action it invoked), resolved against the connectors this
+// device already loaded for the @-connector picker (connectorFocusOptions) so
+// it reads as "GitHub - search_repositories" rather than the bare key. Never
+// throws and never blanks: a parse failure, a stale/unresolved key, or a
+// missing arg all fall back to toolLabel's plain name, same as any other tool.
+function _connectorRowArgs(t) {
+	if (!t || !t.tool_args) return null;
+	try {
+		// tool_args is a JSON string once persisted, but a still-streaming row
+		// (before its first reload) can carry the already-parsed object — same
+		// dual shape prettyJson() above guards against.
+		const v = typeof t.tool_args === "string" ? JSON.parse(t.tool_args) : t.tool_args;
+		return v && typeof v === "object" ? v : null;
+	} catch (e) {
+		return null;
+	}
+}
+// {key, label, preset, ...} for a connector this device already knows about
+// (loaded once onMounted — see loadConnectorFocusOptions), or null when it
+// hasn't loaded yet or the key is unrecognised/disabled.
+function connectorOptionFor(key) {
+	if (!key) return null;
+	return connectorFocusOptions.value.find((r) => r.key === key) || null;
+}
+function toolCallLabel(t) {
+	const bare = toolLabel(t && t.tool_name);
+	if (bare === "list_connector_actions") return "Checked connected apps";
+	if (bare === "call_connector") {
+		const args = _connectorRowArgs(t);
+		const key = args && args.connector;
+		const action = args && args.action;
+		if (!key && !action) return bare;
+		const known = connectorOptionFor(key);
+		const label = (args && args.label) || (known && known.label) || key || "connector";
+		return action ? `${label} - ${action}` : label;
+	}
+	return bare;
+}
+// The connector preset (for ConnectorLogo) behind a call_connector row, or ""
+// for every other tool, or one whose connector this device can't resolve.
+function toolCallPreset(t) {
+	if (toolLabel(t && t.tool_name) !== "call_connector") return "";
+	const args = _connectorRowArgs(t);
+	const known = connectorOptionFor(args && args.connector);
+	return (known && known.preset) || "";
 }
 // args/result are stored as JSON strings — pretty-print, and trim very large
 // payloads so a 10k-row result doesn't blow up the chat.
@@ -10802,6 +10994,10 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// Trigger-build mode is per-conversation too: switching chats clears it.
 	triggerMode.value = false;
 	createMenuOpen.value = false;
+	// Default to no focus; the id branch below reloads THIS conversation's own
+	// pick (unlike groundNextTurn/triggerMode, the pill persists — see
+	// _loadConnectorFocusFor).
+	connectorFocus.value = null;
 	if (!id) {
 		safetySettledTokens.value = new Set();
 		safetyUpdateNotice.value = null;
@@ -10877,6 +11073,9 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// chat, switch away and back, it shows empty until I refresh".)
 	if (!d || !chatViewIsCurrent(view) || loadId !== _conversationLoadId || !_recoveryViewActive)
 		return false;
+	// Reload THIS conversation's own connector-focus pick, if any (localStorage
+	// is the source of truth - see _loadConnectorFocusFor).
+	connectorFocus.value = _loadConnectorFocusFor(id);
 	// Context meter: best-effort, off the critical path (never awaited) — a slow
 	// or failed get_conversation_context must not delay messages rendering.
 	// This is the conversation-open path, so this fetch is authoritative for
@@ -11420,6 +11619,12 @@ async function newChat() {
 	// _checkPulseOnce (keyed on this id, not _shownConvId) keeps this from
 	// double-firing when the first reply's loadConversation reload runs next.
 	_checkPulseOnce(currentId.value);
+	// loadConversation does not run on this path (see below), so reload THIS
+	// conversation's own connector-focus pick here instead of leaving the ref
+	// on whatever the PREVIOUS chat had armed - createOrFocusEmpty can return
+	// an already-existing empty conversation, so this is a real reload (its
+	// own stored pick, if any), not just a reset to null.
+	connectorFocus.value = _loadConnectorFocusFor(currentId.value);
 	// The model and effort picks are per conversation, and the server hands a new chat
 	// out with none (a reused empty one is cleared), so the pill must not keep showing
 	// the previous chat's pick.
@@ -11505,7 +11710,9 @@ async function selectThinking(level) {
 	}
 }
 function onDocClick(e) {
-	if (!e.target.closest(".jv-composer")) mention.value = { ...mention.value, open: false };
+	if (!e.target.closest(".jv-composer")) {
+		mention.value = { ...mention.value, open: false };
+	}
 }
 async function retry(messageId) {
 	// Guard the WHOLE run, not just the enqueue: `retrying` clears in the finally
@@ -12053,6 +12260,19 @@ async function send(textArg, resendAck) {
 	// one-shot _prefillSendContext is cleared after the send is accepted, below,
 	// so a rejected send keeps it armed for retry.)
 	if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
+	// Connector-focus pill: carries every turn while armed (not one-shot like
+	// groundWiki/triggerMode above), so a rejection/resend needs no special
+	// handling — connectorFocus.value itself is untouched by a failed send.
+	// Captured now (not read again after the POST) so a clear mid-flight can't
+	// change what this SPECIFIC turn asked for.
+	const _sentFocus = retryBubble
+		? retryBubble.sendRequest.context?.focus_connector
+		: connectorFocus.value;
+	if (_sentFocus)
+		sendCtx = {
+			...(sendCtx || {}),
+			focus_connector: { key: _sentFocus.key, label: _sentFocus.label },
+		};
 	// Hand-off capability: tells the server this client can open the Payment Calendar
 	// (the existing boot flag - no new one). Only ever ADDS a key; a client without it
 	// sends none and gets today's behaviour.
@@ -12382,6 +12602,11 @@ async function send(textArg, resendAck) {
 			// Same helper newChat() uses. Only currentId + the URL below stay gated on visibility.
 			if (_sentScope === _NEW_CHAT_SCOPE && r.conversation_id !== _NEW_CHAT_SCOPE)
 				_promoteNewChatScope(r.conversation_id);
+			// Same visibility-independent reasoning as the promotion above: the pick
+			// this turn actually carried belongs to the conversation the server just
+			// created/used for it, whether or not that's still on screen.
+			if (sendRequest.context?.focus_connector)
+				_saveConnectorFocusFor(r.conversation_id, sendRequest.context.focus_connector);
 			// Mirror the server's flag from the send response itself (no reload needed).
 			// Only when the response carries it: a typed approval returns the confirmed
 			// form without the key, and that must not unlock an auto-mode chat.
@@ -14224,6 +14449,147 @@ function openUserFile(a) {
 	userFilePreviewOpen.value = true;
 }
 
+// ---- connector focus pill (composer control) ----
+// Persistence is a lightweight per-conversation localStorage entry (soft
+// version — MCP_CONNECTORS_PLAN.md's hard-scoping follow-up can move this
+// server-side later). Storage is the source of truth; `connectorFocus` is
+// just today's on-screen reflection of it, reloaded by loadConversation()
+// exactly like modelOverride/thinkingOverride reload from the server.
+function _connectorFocusStorageKey(id) {
+	return `jarvis-connector-focus:${id}`;
+}
+function _loadConnectorFocusFor(id) {
+	if (!id) return null;
+	try {
+		const raw = localStorage.getItem(_connectorFocusStorageKey(id));
+		return raw ? JSON.parse(raw) : null;
+	} catch (e) {
+		return null;
+	}
+}
+function _saveConnectorFocusFor(id, row) {
+	if (!id) return;
+	try {
+		if (row) localStorage.setItem(_connectorFocusStorageKey(id), JSON.stringify(row));
+		else localStorage.removeItem(_connectorFocusStorageKey(id));
+	} catch (e) {}
+}
+// Called from the picker (a row click) and from the pill's own × (row = null).
+// The Dropdown closes itself on either path (item select or the ×'s own
+// click), so there is no open flag to clear here.
+function setConnectorFocus(row) {
+	connectorFocus.value = row
+		? { key: row.key, label: row.label, preset: row.preset || "" }
+		: null;
+	_saveConnectorFocusFor(currentId.value, connectorFocus.value);
+}
+// Enabled connectors (shared + mine) usable by THIS user right now - an OAuth
+// row they haven't signed in to isn't usable yet even though it's `enabled`
+// for the workspace - fetched once per component lifetime (onMounted below,
+// so the toolbar button's own visibility is known before the composer first
+// paints); the picker re-invokes this too but the `connectorFocusLoaded`
+// guard makes every call after the first a no-op.
+async function loadConnectorFocusOptions() {
+	if (connectorFocusLoaded.value) return;
+	try {
+		const res = await api.listConnectors();
+		connectorFocusLoaded.value = true;
+		connectorFocusOptions.value = [...(res?.shared || []), ...(res?.mine || [])].filter(
+			(r) => r.enabled && (r.auth_method !== "OAuth" || r.oauth_connected)
+		);
+	} catch (e) {
+		// Best-effort: the picker just shows its empty state.
+		connectorFocusOptions.value = [];
+	}
+}
+// Same plug mark as the pill's own unfocused-state icon (see the template),
+// as a bare render function so it can go through an item's `slots.prefix`
+// below - Dropdown's `icon` field renders a component but passes it no
+// props, and a bare svg has none to pass, so this needs no wrapper.
+function _connectorFocusPlugIcon() {
+	return h(
+		"svg",
+		{
+			width: 16,
+			height: 16,
+			viewBox: "0 0 24 24",
+			fill: "none",
+			stroke: "currentColor",
+			"stroke-width": "1.7",
+			"stroke-linecap": "round",
+			"stroke-linejoin": "round",
+		},
+		[
+			h("path", { d: "M12 22v-5" }),
+			h("path", { d: "M9 8V2" }),
+			h("path", { d: "M15 8V2" }),
+			h("path", { d: "M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" }),
+		]
+	);
+}
+// Dropdown items for the picker: "Clear focus" first (only when a focus is
+// armed), one row per usable connected app, then an always-shown "Browse
+// connectors" row in its own group so the divide-y border lands in the same
+// place its old footer border did. A logo needs a per-row `preset` prop, and
+// the plain `icon` field has no way to carry one, so both icons render
+// through the item's own `slots.prefix` (same idiom supportMenuOptions above
+// uses for its `slots.suffix` count) instead of `icon`.
+const connectorFocusMenuOptions = computed(() => {
+	const rows = [];
+	if (connectorFocus.value) {
+		rows.push({ label: "Clear focus", onClick: () => setConnectorFocus(null) });
+	}
+	if (connectorFocusOptions.value.length) {
+		for (const row of connectorFocusOptions.value) {
+			rows.push({
+				label: row.label,
+				selected: connectorFocus.value?.key === row.key,
+				onClick: () => setConnectorFocus(row),
+				slots: { prefix: () => h(ConnectorLogo, { preset: row.preset, size: 16 }) },
+			});
+		}
+	} else {
+		rows.push({ label: "No connected apps yet.", disabled: true });
+	}
+	return [
+		{ group: "", hideLabel: true, items: rows },
+		{
+			group: "",
+			hideLabel: true,
+			items: [
+				{
+					label: "Browse connectors",
+					onClick: browseConnectors,
+					slots: { prefix: () => h(_connectorFocusPlugIcon) },
+				},
+			],
+		},
+	];
+});
+// Refetch on every open: an app connected in Settings a moment ago must show
+// up here without a page reload (the mount-time prefetch only decides the
+// pill's first paint). Hooked to the Dropdown's own update:open - fired by
+// reka-ui however the menu opened (click, keyboard) or closed (selection,
+// outside click, Escape) - rather than a manual toggle, so there is no open
+// flag here to keep in sync with the component's own state.
+function onConnectorFocusOpenChange(open) {
+	if (!open) return;
+	mention.value = { ...mention.value, open: false };
+	connectorFocusLoaded.value = false;
+	loadConnectorFocusOptions();
+}
+// Footer row of the picker (both the populated and empty states). Uses
+// store.openSettings, not the local settingsTab ref: settingsTab only
+// drives ChatView's own macroruns-poll gate, it is not wired to the
+// hoisted SettingsDialog (which reads store.settingsSection, written by
+// this same call other ChatView buttons already use - see the AI models
+// button above). The second openSettings arg is a one-shot intent
+// (stores/shell.js) that ConnectorsPane reads on mount to jump straight
+// into adding one.
+function browseConnectors() {
+	store.openSettings("connectors", { browse: true });
+}
+
 // ---- mentions (@ user, / doctype·tool) ----
 let _mentionSeq = 0;
 function onInput() {
@@ -14469,6 +14835,13 @@ onMounted(async () => {
 			if (Array.isArray(t) && t.length) jarvisTools.value = t;
 		})
 		.catch(() => {});
+	// Connector-focus pill's own options, fetched eagerly (not only on first
+	// picker open) so the picker already has a row list ready the first time
+	// it's opened rather than a flash of "No connected apps yet." while the
+	// request is in flight - the pill itself is always shown regardless of
+	// this fetch (see the template), same fail-open posture as the flags
+	// above: an unreachable backend just leaves the picker's empty state.
+	loadConnectorFocusOptions();
 	// Billing banner off the boot readiness promise (memoized, already awaited by
 	// AppShell). Not awaited here: it must never delay painting the chat.
 	checkReady()
@@ -14819,6 +15192,18 @@ onUnmounted(() => {
 }
 .jv-iconbtn:hover svg {
 	stroke: var(--surface) !important;
+}
+/* The connector-focus pill is a labeled chip, not a bare icon. The default
+   .jv-iconbtn:hover bold-inverts to a solid var(--text) fill, which painted the
+   whole pill black on the light theme. Give its inner buttons a subtle,
+   theme-aware surface hover instead, keeping the accent border and label
+   readable. (Dark already had a subtle hover; a matching override is below.) */
+.jv-connfocus-pill .jv-iconbtn:hover {
+	background: var(--surface-2) !important;
+	color: var(--cta) !important;
+}
+.jv-connfocus-pill .jv-iconbtn:hover svg {
+	stroke: var(--cta) !important;
 }
 .jv-ctxbtn:hover {
 	background: var(--surface-2);
@@ -17908,6 +18293,15 @@ onUnmounted(() => {
 }
 .jv-dark .jv-modelpill:hover span {
 	color: var(--text) !important;
+}
+/* Connector-focus pill hover in dark: subtle surface, accent kept (matches the
+   light-theme override above rather than the bold neutral iconbtn hover). */
+.jv-dark .jv-connfocus-pill .jv-iconbtn:hover {
+	background: var(--surface-3) !important;
+	color: var(--cta) !important;
+}
+.jv-dark .jv-connfocus-pill .jv-iconbtn:hover svg {
+	stroke: var(--cta) !important;
 }
 .jv-dark .jv-confirm-yes:hover,
 .jv-dark .jv-action-primary:hover {

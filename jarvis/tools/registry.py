@@ -211,6 +211,9 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# frappe.session.user (no user arg), so the model cannot reach another user's memory.
 	"recall",
 	"remember",
+	# MCP connectors (GitHub / Atlassian / Linear / Stripe / custom gateways):
+	"call_connector",
+	"list_connector_actions",
 )
 
 
