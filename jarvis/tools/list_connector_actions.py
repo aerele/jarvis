@@ -3,11 +3,21 @@ allowed actions) the calling user may reach through ``call_connector``.
 
 Per-user, like the SPA pane: a Shared connector is visible to every tenant
 user, a Personal connector only to its owner
-(``jarvis.chat.connector_permissions``). This tool relies ENTIRELY on Frappe
-row permissions under the caller's impersonated identity - it queries with
-``frappe.get_list`` (permission-checked, unlike ``get_all``) and never
-hand-filters by owner itself, so it cannot leak a row the permission hook
-would have denied.
+(``jarvis.chat.connector_permissions``). The permission boundary is the parent
+query ALONE: connectors come from ``frappe.get_list`` (permission-checked,
+unlike ``get_all``) under the caller's impersonated identity, never
+hand-filtered by owner, so it cannot leak a row the permission hook would have
+denied. The child rows then come from ONE ``frappe.get_all`` on ``Jarvis
+Connector Action`` (``jarvis.connectors.action_rows``, shared with the
+Settings list) bounded to exactly those surviving parent names. ``get_all``
+skips Frappe's permission check and a child DocType has no permission hook of
+its own, so that bounding is load-bearing: it is safe only because ``names``
+never holds a row the caller could not list.
+
+Why not ``frappe.get_doc`` per connector: nothing here mutates a document or
+needs a Document method, and a full load pulls every parent column (the whole
+``tools_cache`` blob and the encrypted credential included) plus a child SELECT
+each, per connector, per chat turn, just to read four flags per action.
 
 Each connector's actions are read from its ``allowed_actions`` child rows (the
 same stored flags ``jarvis.connectors.broker``/``policy`` gate a real call
@@ -22,9 +32,10 @@ from __future__ import annotations
 
 import frappe
 
-from jarvis.connectors import policy
+from jarvis.connectors import action_rows, policy
+from jarvis.connectors.action_rows import ACTIONS_FIELD, CONNECTOR_DOCTYPE
 
-CONNECTOR_DOCTYPE = "Jarvis Connector"
+_ACTION_FIELDS = ["action", "allowed", "read_only", "destructive", "description"]
 
 _MAX_CONNECTORS = 30
 _MAX_ACTIONS_PER_CONNECTOR = 50
@@ -62,31 +73,32 @@ def list_connector_actions(connector: str | None = None) -> dict:
 	for row in rows:
 		by_key.setdefault(row["key"], row)
 
-	connectors = []
-	for row in by_key.values():
-		doc = frappe.get_doc(CONNECTOR_DOCTYPE, row["name"])
-		connectors.append(
+	actions_by_parent = action_rows.by_parent([row["name"] for row in by_key.values()], _ACTION_FIELDS)
+	return {
+		"connectors": [
 			{
-				"connector": doc.key,
-				"label": doc.label,
-				"scope": doc.scope,
-				"actions": _allowed_actions(doc),
+				"connector": row["key"],
+				"label": row["label"],
+				"scope": row["scope"],
+				"actions": _allowed_actions(actions_by_parent.get(row["name"], [])),
 			}
-		)
-	return {"connectors": connectors}
+			for row in by_key.values()
+		]
+	}
 
 
-def _allowed_actions(doc) -> list[dict]:
-	"""The subset of ``doc``'s configured actions ``policy.action_decision``
-	currently permits, each trimmed to a compact ``{action, description}``."""
+def _allowed_actions(children: list[dict]) -> list[dict]:
+	"""The subset of ``children`` ``policy.action_decision`` currently permits,
+	each trimmed to a compact ``{action, description}``."""
+	row = {ACTIONS_FIELD: children}
 	actions = []
-	for child in doc.allowed_actions or []:
-		if policy.action_decision(doc, child.action) is not None:
+	for child in children:
+		if policy.action_decision(row, child["action"]) is not None:
 			continue
 		actions.append(
 			{
-				"action": child.action,
-				"description": (child.description or "")[:_DESCRIPTION_MAX],
+				"action": child["action"],
+				"description": (child.get("description") or "")[:_DESCRIPTION_MAX],
 			}
 		)
 		if len(actions) >= _MAX_ACTIONS_PER_CONNECTOR:

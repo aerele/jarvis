@@ -98,7 +98,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, get_datetime, get_system_timezone, get_url, now_datetime
 
-from jarvis.connectors import broker, catalog, mcp_oauth, mcp_oauth_store, oauth
+from jarvis.connectors import action_rows, broker, catalog, mcp_oauth, mcp_oauth_store, oauth
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 
 CONNECTOR = "Jarvis Connector"
@@ -239,21 +239,12 @@ def _action_summary(allowed: int, total: int) -> dict:
 
 
 def _action_summaries(parent_names: list[str]) -> dict[str, dict]:
-	"""One aggregate query mapping ``connector name -> {allowed, total}`` over
-	its ``allowed_actions`` children — avoids an N+1 when listing."""
-	if not parent_names:
-		return {}
-	rows = frappe.get_all(
-		ACTION_DT,
-		filters={"parent": ["in", parent_names], "parenttype": CONNECTOR},
-		fields=["parent", "allowed"],
-	)
+	"""One bounded query mapping ``connector name -> {allowed, total}`` over
+	its ``allowed_actions`` children (``jarvis.connectors.action_rows``, shared
+	with the agent's discovery tool) — avoids an N+1 when listing."""
 	out: dict[str, dict] = {}
-	for row in rows:
-		summary = out.setdefault(row["parent"], _action_summary(0, 0))
-		summary["total"] += 1
-		if row["allowed"]:
-			summary["allowed"] += 1
+	for parent, rows in action_rows.by_parent(parent_names, ["allowed"]).items():
+		out[parent] = _action_summary(sum(1 for row in rows if row["allowed"]), len(rows))
 	return out
 
 

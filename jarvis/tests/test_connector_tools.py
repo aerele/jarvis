@@ -13,7 +13,8 @@ these run with no site. What is proven here:
     the broker's own, more specific error instead;
   * when the connector is ready, ``call_connector`` delegates to
     ``jarvis.connectors.broker.call`` verbatim (result unmodified);
-  * ``list_connector_actions`` dedupes Personal-over-Shared by key and
+  * ``list_connector_actions`` dedupes Personal-over-Shared by key, fetches
+    child rows in one bounded ``get_all``, and
     surfaces only the actions ``policy.action_decision`` currently allows.
 
 Real broker dispatch (row resolution, credential decrypt, the allowed-actions
@@ -32,6 +33,7 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
+from jarvis.connectors import action_rows
 from jarvis.tools import call_connector, list_connector_actions
 
 
@@ -139,77 +141,103 @@ class TestCallConnectorReadiness(unittest.TestCase):
 		self.assertEqual(result, broker_result)
 
 
-class _Row(dict):
-	"""Minimal Document-like stand-in exposing attribute access + ``.get``,
-	matching what ``jarvis.connectors.policy`` and the tool expect."""
-
-	def __getattr__(self, name):
-		try:
-			return self[name]
-		except KeyError as exc:
-			raise AttributeError(name) from exc
-
-
 class TestListConnectorActionsShape(unittest.TestCase):
-	"""Enabled path: dedupe-by-key (Personal wins), and only policy-allowed
+	"""Enabled path: dedupe-by-key (Personal wins), child rows fetched in ONE
+	``get_all`` bounded to the surviving parent names, and only policy-allowed
 	actions are surfaced. Exercises the real ``jarvis.connectors.policy`` gate
-	(frappe-free), with ``frappe.get_list``/``get_doc`` mocked."""
+	(frappe-free), with ``frappe.get_list`` and the shared ``action_rows`` fetch mocked."""
 
-	def _action(self, action, allowed=0, read_only=0, destructive=0, description="d"):
-		return _Row(
-			action=action,
-			allowed=allowed,
-			read_only=read_only,
-			destructive=destructive,
-			description=description,
-		)
+	def _action(self, parent, action, allowed=0, read_only=0, destructive=0, description="d"):
+		return {
+			"parent": parent,
+			"action": action,
+			"allowed": allowed,
+			"read_only": read_only,
+			"destructive": destructive,
+			"description": description,
+		}
 
-	def _connector_doc(self, name, key, label, scope, actions):
-		return _Row(name=name, key=key, label=label, scope=scope, allowed_actions=actions)
+	def _fake_frappe(self, connectors, actions):
+		fake = mock.MagicMock()
+		fake.get_list.return_value = connectors
+		# Set explicitly in every test: a bare MagicMock iterates as empty, so a
+		# forgotten return value would pass vacuously with zero actions.
+		fake.get_all.return_value = actions
+		return fake
+
+	def _run(self, fake_frappe, connector=None):
+		with (
+			mock.patch.object(list_connector_actions, "frappe", fake_frappe),
+			mock.patch.object(action_rows, "frappe", fake_frappe),
+		):
+			return list_connector_actions.list_connector_actions(connector)
 
 	def test_personal_wins_over_shared_same_key(self):
-		fake_frappe = mock.MagicMock()
-		# order_by="scope asc, ..." puts Personal ("P") before Shared ("S").
-		fake_frappe.get_list.return_value = [
-			{"name": "conn-personal", "key": "github", "label": "My GitHub", "scope": "Personal"},
-			{"name": "conn-shared", "key": "github", "label": "Team GitHub", "scope": "Shared"},
-		]
-		personal_doc = self._connector_doc(
-			"conn-personal",
-			"github",
-			"My GitHub",
-			"Personal",
-			[self._action("read_issue", read_only=1)],
+		fake = self._fake_frappe(
+			[
+				# order_by="scope asc, ..." puts Personal ("P") before Shared ("S").
+				{"name": "conn-personal", "key": "github", "label": "My GitHub", "scope": "Personal"},
+				{"name": "conn-shared", "key": "github", "label": "Team GitHub", "scope": "Shared"},
+			],
+			[self._action("conn-personal", "read_issue", read_only=1)],
 		)
-		fake_frappe.get_doc.return_value = personal_doc
-		with mock.patch.object(list_connector_actions, "frappe", fake_frappe):
-			result = list_connector_actions.list_connector_actions()
+		result = self._run(fake)
 		self.assertEqual(len(result["connectors"]), 1)
 		self.assertEqual(result["connectors"][0]["scope"], "Personal")
-		fake_frappe.get_doc.assert_called_once_with("Jarvis Connector", "conn-personal")
+		self.assertEqual([a["action"] for a in result["connectors"][0]["actions"]], ["read_issue"])
+		# One child-table query, bounded to the surviving parent only: the
+		# shadowed Shared duplicate's rows are never fetched, and no full
+		# document is ever loaded.
+		fake.get_all.assert_called_once()
+		self.assertEqual(fake.get_all.call_args.args[0], "Jarvis Connector Action")
+		filters = fake.get_all.call_args.kwargs["filters"]
+		self.assertEqual(filters["parent"], ["in", ["conn-personal"]])
+		self.assertEqual(filters["parenttype"], "Jarvis Connector")
+		self.assertEqual(filters["parentfield"], "allowed_actions")
+		fake.get_doc.assert_not_called()
 
 	def test_only_policy_allowed_actions_are_surfaced(self):
-		fake_frappe = mock.MagicMock()
-		fake_frappe.get_list.return_value = [
-			{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}
-		]
-		doc = self._connector_doc(
-			"conn-1",
-			"github",
-			"GitHub",
-			"Shared",
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
 			[
-				self._action("read_issue", read_only=1, destructive=0),
-				self._action("delete_repo", read_only=0, destructive=1, allowed=0),
-				self._action("create_issue", allowed=1),
+				self._action("conn-1", "read_issue", read_only=1, destructive=0),
+				self._action("conn-1", "delete_repo", read_only=0, destructive=1, allowed=0),
+				self._action("conn-1", "create_issue", allowed=1),
 			],
 		)
-		fake_frappe.get_doc.return_value = doc
-		with mock.patch.object(list_connector_actions, "frappe", fake_frappe):
-			result = list_connector_actions.list_connector_actions()
+		result = self._run(fake)
 		actions = {a["action"] for a in result["connectors"][0]["actions"]}
 		self.assertEqual(actions, {"read_issue", "create_issue"})
 		self.assertNotIn("delete_repo", actions)
+
+	def test_child_rows_are_grouped_per_connector_in_query_order(self):
+		fake = self._fake_frappe(
+			[
+				{"name": "conn-gh", "key": "github", "label": "GitHub", "scope": "Shared"},
+				{"name": "conn-jira", "key": "jira", "label": "Jira", "scope": "Shared"},
+			],
+			[
+				self._action("conn-gh", "read_issue", read_only=1),
+				self._action("conn-jira", "create_issue", allowed=1),
+				self._action("conn-gh", "create_pr", allowed=1),
+			],
+		)
+		result = self._run(fake)
+		by_key = {c["connector"]: [a["action"] for a in c["actions"]] for c in result["connectors"]}
+		self.assertEqual(by_key, {"github": ["read_issue", "create_pr"], "jira": ["create_issue"]})
+
+	def test_connector_without_child_rows_has_empty_actions(self):
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}], []
+		)
+		result = self._run(fake)
+		self.assertEqual(result["connectors"][0]["actions"], [])
+
+	def test_no_visible_connectors_skips_child_query(self):
+		fake = self._fake_frappe([], [])
+		result = self._run(fake)
+		self.assertEqual(result, {"connectors": []})
+		fake.get_all.assert_not_called()
 
 
 if __name__ == "__main__":
