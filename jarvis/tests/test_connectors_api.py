@@ -326,7 +326,7 @@ class TestListConnectorsCatalog(_ConnectorApiTestCase):
 		entries = connectors_api.list_connectors()["catalog"]
 
 		self.assertEqual(len(entries), sum(1 for p in catalog.PROVIDERS if p.enabled))
-		self.assertEqual(len(entries), 25, "the SPA is built against this count")
+		self.assertEqual(len(entries), 40, "the SPA is built against this count")
 
 		names = {e["name"] for e in entries}
 		self.assertIn("Razorpay", names)
@@ -2277,6 +2277,46 @@ class TestStaticCatalogSeeding(_McpOauthTestCase):
 		self.assertEqual(query["scope"], ["repo read:org"])
 		self.assertEqual(query["code_challenge_method"], ["S256"])
 		self.assertIn("code_challenge", query)
+
+	def test_google_preset_seeds_from_the_catalog_and_asks_for_offline_access(self):
+		# Gmail answers an unauthenticated initialize with 200, so it can only be
+		# connected through the pinned-endpoint seed; and without Google's
+		# access_type=offline / prompt=consent no refresh token is ever issued.
+		frappe.set_user(PLAIN_A)
+		transport = _ScriptedTransport({})  # any hop is an AssertionError
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
+			out = connectors_api.add_connector(preset="Gmail", scope="Personal", auth_method="OAuth")
+		self._connectors.append(out["name"])
+		self.assertEqual(transport.calls, [], "pinned endpoints mean discovery never runs")
+		frappe.clear_document_cache(CONNECTOR, out["name"])
+		name = out["name"]
+
+		client = frappe.get_doc(CLIENT_DT, name)
+		self.assertEqual(client.registration_mode, "static")
+		self.assertEqual(client.issuer, "https://accounts.google.com")
+		self.assertEqual(client.token_endpoint, "https://oauth2.googleapis.com/token")
+		self.assertIn("gmail.readonly", client.scope)
+
+		connectors_api.set_oauth_client_credentials(name, "google-client", "google-secret")
+		url, _state = self._connect(name)
+		self.assertEqual(urlparse(url).hostname, "accounts.google.com")
+		query = parse_qs(urlparse(url).query)
+		self.assertEqual(query["access_type"], ["offline"])
+		self.assertEqual(query["prompt"], ["consent"])
+		self.assertEqual(query["client_id"], ["google-client"])
+		self.assertEqual(query["code_challenge_method"], ["S256"])
+		self.assertEqual(query["redirect_uri"], [connectors_api.oauth_redirect_uri()])
+
+	def test_github_authorize_url_carries_no_extra_params(self):
+		# Only presets that declare authorize_params add anything; GitHub sends
+		# exactly the request it always did.
+		frappe.set_user(PLAIN_A)
+		name = self._add_github_oauth()
+		connectors_api.set_oauth_client_credentials(name, "byoa-client", "byoa-secret")
+		url, _state = self._connect(name)
+		query = parse_qs(urlparse(url).query)
+		self.assertNotIn("access_type", query)
+		self.assertNotIn("prompt", query)
 
 	# --- self-heal: a GitHub OAuth row that never got a client is not a dead end - #
 	def _raw_github_oauth_no_client(self, key: str, *, owner: str = PLAIN_A, scope: str = "Personal"):

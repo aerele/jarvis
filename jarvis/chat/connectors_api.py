@@ -1372,6 +1372,11 @@ def _connect_mcp_oauth(doc) -> dict:
 		resource=indicator,
 		state=state,
 		code_challenge=mcp_oauth.pkce_challenge(code_verifier),
+		# A preset's fixed additions (Google: offline access + forced consent, or no
+		# refresh token is issued). Looked up from the reviewed catalog by preset at
+		# connect time, never stored; `{}` for a Custom URL row and for every preset
+		# that declares none, which sends exactly the request they always did.
+		extra_params=catalog.authorize_params_of((doc.get("preset") or "").strip()),
 	)
 	# ``started_at`` is the server clock at the moment this sign-in began, in the same
 	# UTC frame ``oauth_signin_status`` reports ``connected_at`` in. The SPA opens the

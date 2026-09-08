@@ -888,6 +888,54 @@ class BuildAuthorizeUrlTests(unittest.TestCase):
 		)
 		self.assertEqual(parse_qs(urlparse(url).query)["resource"], [BASE_URL])
 
+	def test_extra_params_are_appended_verbatim(self):
+		url = flow.build_authorize_url(
+			_discovery_fixture(),
+			"cid-1",
+			"https://jarvis.example/oauth/callback",
+			scope="repo",
+			resource=BASE_URL,
+			state="state-xyz",
+			code_challenge="chal-abc",
+			extra_params={"access_type": "offline", "prompt": "consent"},
+		)
+		params = parse_qs(urlparse(url).query)
+		self.assertEqual(params["access_type"], ["offline"])
+		self.assertEqual(params["prompt"], ["consent"])
+		# Nothing the flow sets itself moved.
+		self.assertEqual(params["code_challenge"], ["chal-abc"])
+		self.assertEqual(params["resource"], [BASE_URL])
+
+	def test_extra_params_may_not_override_a_reserved_parameter(self):
+		for reserved in sorted(flow.RESERVED_AUTHORIZE_PARAMS):
+			with self.assertRaises(ValueError, msg=reserved):
+				flow.build_authorize_url(
+					_discovery_fixture(),
+					"cid-1",
+					"https://jarvis.example/oauth/callback",
+					scope="repo",
+					resource=BASE_URL,
+					state="state-xyz",
+					code_challenge="chal-abc",
+					extra_params={reserved: "evil"},
+				)
+
+	def test_none_or_empty_extra_params_change_nothing(self):
+		common = dict(scope="repo", resource=BASE_URL, state="state-xyz", code_challenge="chal-abc")
+		base = flow.build_authorize_url(_discovery_fixture(), "cid-1", "https://jarvis.example/cb", **common)
+		self.assertEqual(
+			flow.build_authorize_url(
+				_discovery_fixture(), "cid-1", "https://jarvis.example/cb", extra_params=None, **common
+			),
+			base,
+		)
+		self.assertEqual(
+			flow.build_authorize_url(
+				_discovery_fixture(), "cid-1", "https://jarvis.example/cb", extra_params={}, **common
+			),
+			base,
+		)
+
 
 class ExchangeCodeTests(unittest.TestCase):
 	def test_exchange_code_posts_form_and_parses_tokens(self):
