@@ -67,8 +67,10 @@ _LEGACY_HINTS = {
 
 
 class TestCatalogShape(unittest.TestCase):
-	def test_thirty_one_providers(self):
-		self.assertEqual(len(catalog.PROVIDERS), 31)
+	def test_forty_seven_providers(self):
+		# 31 from the 2026-09-05 sweep + 16 from the 2026-09-07 gap analysis
+		# (CONNECTOR_PROVIDERS.md carries both).
+		self.assertEqual(len(catalog.PROVIDERS), 47)
 
 	def test_names_unique(self):
 		names = [p.name for p in catalog.PROVIDERS]
@@ -93,16 +95,21 @@ class TestCatalogShape(unittest.TestCase):
 		self.assertEqual(
 			counts,
 			{
-				catalog.AUTH_DCR: 18,
-				catalog.AUTH_STATIC: 5,
-				catalog.AUTH_TOKEN: 5,
+				catalog.AUTH_DCR: 23,
+				catalog.AUTH_STATIC: 15,
+				catalog.AUTH_TOKEN: 6,
 				catalog.AUTH_OPEN: 3,
 			},
 		)
 
-	def test_unreachable_providers_excluded(self):
+	def test_unlisted_vendors_stay_out(self):
+		# Twilio's only hosted server indexes public docs (no account data);
+		# QuickBooks' endpoint answered an Akamai 403 from every egress tried, so
+		# its auth class is unknown and guessing one into the allowlist is wrong;
+		# LinkedIn has no first-party server (Zapier covers it, Taplio is a
+		# third-party host). See CONNECTOR_PROVIDERS.md.
 		names = {p.name for p in catalog.PROVIDERS}
-		for excluded in ("DocuSign", "HubSpot", "Shopify", "Twilio"):
+		for excluded in ("Twilio", "QuickBooks", "LinkedIn", "Taplio"):
 			self.assertNotIn(excluded, names)
 
 	def test_custom_url_constant_is_not_a_provider(self):
@@ -364,11 +371,33 @@ class TestCatalogEndpointFields(unittest.TestCase):
 				self.assertTrue(provider.help_url, provider.name)
 				self.assertTrue(provider.hint, provider.name)
 
-	def test_only_github_seeds_from_pinned_endpoints(self):
-		# The other static providers (Slack, Box, ...) publish metadata and keep
-		# the discovery path, so they declare no endpoints.
+	# The static providers whose sign-in cannot go through discovery: GitHub's
+	# service publishes no metadata, and the others answer an unauthenticated
+	# initialize with something other than 401 (Google 200, Shopify and Docusign
+	# 403), which the discovery gate refuses. Every other static provider (Slack,
+	# Box, HubSpot, Xero, Zoom, ...) publishes metadata and keeps the discovery
+	# path, so it declares no endpoints.
+	PINNED = frozenset(
+		{
+			"GitHub",
+			"Shopify",
+			"Docusign",
+			"Gmail",
+			"Google Calendar",
+			"Google Drive",
+			"Google Sheets",
+			"Google Docs",
+		}
+	)
+
+	def test_only_gate_blocked_providers_seed_from_pinned_endpoints(self):
 		for provider in catalog.PROVIDERS:
-			if provider.name != "GitHub":
+			if provider.name in self.PINNED:
+				self.assertEqual(provider.auth, catalog.AUTH_STATIC, provider.name)
+				self.assertTrue(provider.issuer, provider.name)
+				self.assertTrue(provider.authorization_endpoint, provider.name)
+				self.assertTrue(provider.token_endpoint, provider.name)
+			else:
 				self.assertIsNone(provider.issuer, provider.name)
 				self.assertIsNone(provider.authorization_endpoint, provider.name)
 				self.assertIsNone(provider.token_endpoint, provider.name)
@@ -474,3 +503,136 @@ class TestTokenGuidanceFields(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestAuthorizeParams(unittest.TestCase):
+	"""`authorize_params` are a provider's fixed additions to the authorize
+	request. Google needs them (no refresh token otherwise); nothing else does."""
+
+	def test_google_presets_ask_for_offline_access_and_consent(self):
+		for name in ("Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs"):
+			self.assertEqual(
+				catalog.authorize_params_of(name),
+				{"access_type": "offline", "prompt": "consent"},
+				name,
+			)
+
+	def test_every_google_preset_is_a_pinned_static_provider(self):
+		# Google answers an unauthenticated initialize with 200, which the discovery
+		# gate refuses, so each Google preset must seed its client from pinned
+		# endpoints or it could never be connected.
+		for name in ("Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs"):
+			provider = catalog.by_name(name)
+			self.assertEqual(provider.auth, catalog.AUTH_STATIC, name)
+			self.assertEqual(provider.issuer, "https://accounts.google.com", name)
+			self.assertEqual(
+				provider.authorization_endpoint, "https://accounts.google.com/o/oauth2/v2/auth", name
+			)
+			self.assertEqual(provider.token_endpoint, "https://oauth2.googleapis.com/token", name)
+			self.assertTrue(provider.scopes, name)
+			self.assertEqual(provider.help_url, "https://console.cloud.google.com/apis/credentials", name)
+
+	def test_only_google_declares_authorize_params(self):
+		declaring = {p.name for p in catalog.PROVIDERS if p.authorize_params}
+		self.assertEqual(
+			declaring, {"Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs"}
+		)
+
+	def test_unknown_or_custom_preset_has_no_params(self):
+		self.assertEqual(catalog.authorize_params_of("GitHub"), {})
+		self.assertEqual(catalog.authorize_params_of(catalog.CUSTOM_URL), {})
+		self.assertEqual(catalog.authorize_params_of(""), {})
+
+	def test_params_are_rejected_on_a_token_or_open_provider(self):
+		for base in ("Stripe", "Microsoft Learn"):
+			bad = replace(catalog.by_name(base), name="Bad", key="bad", authorize_params=(("a", "b"),))
+			with self.assertRaises(ValueError):
+				catalog.validate((bad,))
+
+	def test_reserved_names_are_rejected(self):
+		github = catalog.by_name("GitHub")
+		for reserved in sorted(catalog._RESERVED_AUTHORIZE_PARAMS):
+			bad = replace(github, authorize_params=((reserved, "x"),))
+			with self.assertRaises(ValueError, msg=reserved):
+				catalog.validate((bad,))
+
+	def test_malformed_pairs_are_rejected(self):
+		github = catalog.by_name("GitHub")
+		for bad_params in ((("a",),), (("", "b"),), (("a", ""),), ((1, "b"),)):
+			with self.assertRaises(ValueError, msg=repr(bad_params)):
+				catalog.validate((replace(github, authorize_params=bad_params),))
+
+	def test_reserved_set_is_the_flow_module_s_own(self):
+		# The catalog validates at import, the flow guards at request time; the
+		# catalog imports the flow's set rather than copying it, so they are one
+		# object and cannot drift.
+		from jarvis.connectors.mcp_oauth import flow
+
+		self.assertIs(catalog._RESERVED_AUTHORIZE_PARAMS, flow.RESERVED_AUTHORIZE_PARAMS)
+
+	def test_not_shipped_by_to_public(self):
+		for row in catalog.to_public():
+			self.assertNotIn("authorize_params", row)
+
+	def test_overlay_may_not_change_params_but_may_repeat_them(self):
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay([{"name": "Gmail", "authorize_params": {"prompt": "none"}}])
+		# The same params, in either JSON shape, are not a change.
+		same = catalog.apply_overlay(
+			[{"name": "Gmail", "authorize_params": {"access_type": "offline", "prompt": "consent"}}]
+		)
+		self.assertEqual(
+			catalog.authorize_params_of("Gmail", providers=same), catalog.authorize_params_of("Gmail")
+		)
+		same = catalog.apply_overlay(
+			[{"name": "Gmail", "authorize_params": [["access_type", "offline"], ["prompt", "consent"]]}]
+		)
+		self.assertEqual(
+			catalog.authorize_params_of("Gmail", providers=same), catalog.authorize_params_of("Gmail")
+		)
+
+	def test_overlay_new_entry_carries_params(self):
+		added = catalog.apply_overlay(
+			[
+				{
+					"name": "Acme",
+					"key": "acme",
+					"base_url": "https://mcp.acme.example/mcp",
+					"auth": catalog.AUTH_DCR,
+					"category": "data",
+					"description": "Acme things",
+					"authorize_params": {"prompt": "consent"},
+				}
+			]
+		)
+		self.assertEqual(catalog.authorize_params_of("Acme", providers=added), {"prompt": "consent"})
+
+
+class TestGapAnalysisEntries(unittest.TestCase):
+	"""The 2026-09-07 additions: shapes that the probe sweep pinned down."""
+
+	def test_pinned_static_entries_pin_all_three_endpoints(self):
+		for name in ("Shopify", "Docusign"):
+			provider = catalog.by_name(name)
+			self.assertEqual(provider.auth, catalog.AUTH_STATIC, name)
+			self.assertTrue(
+				provider.issuer and provider.authorization_endpoint and provider.token_endpoint, name
+			)
+
+	def test_shopify_ships_switched_off(self):
+		self.assertFalse(catalog.by_name("Shopify").enabled)
+		self.assertNotIn("Shopify", catalog.preset_names())
+
+	def test_docusign_requests_only_the_esignature_floor(self):
+		self.assertEqual(catalog.by_name("Docusign").scopes, "signature")
+
+	def test_origin_level_servers_keep_their_bare_origin(self):
+		# HubSpot and Calendly serve MCP at the origin itself; a `/mcp` suffix is 404.
+		self.assertEqual(catalog.by_name("HubSpot").base_url, "https://mcp.hubspot.com")
+		self.assertEqual(catalog.by_name("Calendly").base_url, "https://mcp.calendly.com/")
+
+	def test_new_categories_are_allowed_and_used(self):
+		used = {p.category for p in catalog.PROVIDERS}
+		for category in ("accounting", "crm", "commerce", "communication"):
+			self.assertIn(category, catalog._ALLOWED_CATEGORIES)
+			self.assertIn(category, used)

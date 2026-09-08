@@ -25,14 +25,24 @@ Design:
 Catalog order: the four presets already shipping (GitHub, Atlassian, Linear,
 Stripe) come first in their existing order, so an already-familiar dropdown
 does not reshuffle under an existing user. The remaining entries are grouped
-by category in the order payments, work, files, design, support, data, web,
-automation, docs, matching how they were picked for ERPNext relevance.
+by category in the order payments, accounting, crm, commerce, work,
+communication, files, design, support, data, web, automation, docs, dev,
+matching how they were picked for ERPNext relevance. The SPA's category chips
+(``ConnectorDirectory.vue``) follow the same order.
+
+A provider whose sign-in service needs extra, fixed query parameters on the
+authorize request (Google: ``access_type=offline`` + ``prompt=consent``, or no
+refresh token is ever issued and the connector dies after an hour) declares
+them as ``authorize_params``. They are reviewed constants like the pinned
+endpoints, never client input, and never a reserved OAuth parameter.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
+
+from jarvis.connectors.mcp_oauth.flow import RESERVED_AUTHORIZE_PARAMS
 
 AUTH_DCR = "dcr"
 AUTH_STATIC = "static"
@@ -57,10 +67,23 @@ _ENDPOINT_AUTHS = frozenset({AUTH_STATIC})
 #: sign-in to scope, so a scope on one is a catalog mistake the allowlist rejects.
 _SCOPES_AUTHS = frozenset({AUTH_STATIC, AUTH_DCR})
 
+#: `authorize_params` are extra fixed query parameters for the authorize request.
+#: Like `scopes` they only mean anything on a provider that HAS a sign-in. The
+#: reserved set is the flow's own (``mcp_oauth.flow.RESERVED_AUTHORIZE_PARAMS``,
+#: every parameter it sets itself), imported rather than copied so the two can
+#: never drift: a catalog entry may add to the request, never override what
+#: PKCE / RFC 8707 / the redirect binding put there.
+_AUTHORIZE_PARAMS_AUTHS = frozenset({AUTH_STATIC, AUTH_DCR})
+_RESERVED_AUTHORIZE_PARAMS = RESERVED_AUTHORIZE_PARAMS
+
 _ALLOWED_CATEGORIES = frozenset(
 	{
 		"payments",
+		"accounting",
+		"crm",
+		"commerce",
 		"work",
+		"communication",
 		"files",
 		"design",
 		"support",
@@ -73,6 +96,21 @@ _ALLOWED_CATEGORIES = frozenset(
 )
 
 _KEY_RE = re.compile(r"^[a-z0-9_-]+$")
+
+# Google Workspace's MCP servers (Gmail, Calendar, Drive, Sheets, Docs) share one
+# sign-in service. Every one of them answers an unauthenticated initialize with
+# HTTP 200 (no 401 challenge), so discovery's first gate would refuse it; the
+# endpoints are pinned here instead and each preset's client is seeded from them,
+# exactly like GitHub. And Google issues NO refresh token unless the authorize
+# request carries access_type=offline and prompt=consent, so those ride on every
+# Google preset's `authorize_params`. Declared ONCE so the five entries cannot
+# drift from each other.
+_GOOGLE_ISSUER = "https://accounts.google.com"
+_GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+_GOOGLE_AUTHORIZE_PARAMS = (("access_type", "offline"), ("prompt", "consent"))
+_GOOGLE_HELP_URL = "https://console.cloud.google.com/apis/credentials"
+_GOOGLE_HINT = "Register your own Google Cloud OAuth client, then paste its details here."
 
 # The free-form path: a caller's own base_url, gated separately by the
 # `allow_custom_urls` site setting. Not a Provider, so it can never end up in
@@ -108,7 +146,15 @@ class Provider:
 	a protocol), shown under the name in the SPA's preset picker. `validate` requires
 	it non-empty, and `to_public` ships it. It has a `""` default only so `replace`
 	and an overlay's new-entry branch have a value to fall back to; a shipped entry
-	that left it blank would fail `validate` at import."""
+	that left it blank would fail `validate` at import.
+
+	`authorize_params` is a tuple of ``(name, value)`` pairs appended verbatim to
+	the authorize request (Google needs ``access_type=offline`` and
+	``prompt=consent`` to issue a refresh token at all). `validate` only allows it
+	on a sign-in class (`static` / `dcr`) and rejects any reserved OAuth parameter
+	name, so a catalog entry can add to the request but never override the PKCE,
+	resource or redirect binding the flow sets. It is server-side only: never
+	shipped by `to_public`."""
 
 	name: str
 	key: str
@@ -126,6 +172,18 @@ class Provider:
 	scopes: str | None = None
 	token_hint: str | None = None
 	token_help_url: str | None = None
+	authorize_params: tuple[tuple[str, str], ...] | None = None
+
+
+def _freeze_authorize_params(value) -> tuple[tuple[str, str], ...] | None:
+	"""Normalise an overlay's ``authorize_params`` (a JSON object or a list of
+	pairs) to the dataclass's tuple-of-pairs shape, so an overlay that repeats a
+	shipped entry's params compares equal to it. ``None`` / empty stays ``None``."""
+	if not value:
+		return None
+	if isinstance(value, dict):
+		return tuple((str(k), str(v)) for k, v in value.items())
+	return tuple((str(k), str(v)) for k, v in value)
 
 
 def validate(providers: tuple[Provider, ...]) -> None:
@@ -187,6 +245,24 @@ def validate(providers: tuple[Provider, ...]) -> None:
 			raise ValueError(
 				f"token_help_url must be https for {provider.name!r}: {provider.token_help_url!r}"
 			)
+
+		if provider.authorize_params:
+			if provider.auth not in _AUTHORIZE_PARAMS_AUTHS:
+				raise ValueError(
+					f"authorize_params are only allowed on a static or self-registering provider for "
+					f"{provider.name!r}: {provider.auth!r}"
+				)
+			for pair in provider.authorize_params:
+				if (
+					not isinstance(pair, tuple)
+					or len(pair) != 2
+					or not all(isinstance(part, str) and part.strip() for part in pair)
+				):
+					raise ValueError(f"malformed authorize_params entry for {provider.name!r}: {pair!r}")
+				if pair[0] in _RESERVED_AUTHORIZE_PARAMS:
+					raise ValueError(
+						f"authorize_params may not set the reserved parameter {pair[0]!r} for {provider.name!r}"
+					)
 
 
 PROVIDERS: tuple[Provider, ...] = (
@@ -287,6 +363,83 @@ PROVIDERS: tuple[Provider, ...] = (
 		# 2026-09-06). Off until Square opens registration.
 		enabled=False,
 	),
+	Provider(
+		name="Cashfree",
+		key="cashfree",
+		description="Payments, payouts and settlements",
+		base_url="https://mcp.cashfree.com/mcp",
+		auth=AUTH_DCR,
+		category="payments",
+		logo=None,
+		help_url=None,
+		hint=None,
+		# Answers 401 with an EMPTY WWW-Authenticate header; discovery falls back to
+		# the path-derived well-known document, which exists (probed 2026-09-07).
+	),
+	# --- accounting ------------------------------------------------------------
+	Provider(
+		name="Xero",
+		key="xero",
+		description="Invoices, contacts and reports",
+		base_url="https://mcp.xero.com/mcp",
+		auth=AUTH_STATIC,
+		category="accounting",
+		logo="xero",
+		help_url="https://developer.xero.com/app/manage",
+		hint="Register your own Xero app, then paste its details here.",
+		# identity.xero.com publishes metadata but no registration endpoint (probed
+		# 2026-09-07); the resource document names the accounting scopes, so
+		# discovery runs as normal and asks for exactly those.
+	),
+	# --- crm ------------------------------------------------------------
+	Provider(
+		name="HubSpot",
+		key="hubspot",
+		description="Contacts, companies and deals",
+		base_url="https://mcp.hubspot.com",
+		auth=AUTH_STATIC,
+		category="crm",
+		logo="hubspot",
+		help_url="https://developers.hubspot.com/docs/apps/developer-platform/build-apps/integrate-with-the-remote-hubspot-mcp-server",
+		hint="Register your own HubSpot app, then paste its details here.",
+		# The server lives at the ORIGIN (``/mcp`` is 404). Its sign-in service
+		# publishes metadata with no registration endpoint; HubSpot's own guide has
+		# each customer create an app and requires PKCE (probed 2026-09-07).
+	),
+	Provider(
+		name="Pipedrive",
+		key="pipedrive",
+		description="Leads, deals and contacts",
+		base_url="https://mcp.pipedrive.ai/mcp",
+		auth=AUTH_DCR,
+		category="crm",
+		logo=None,
+		help_url=None,
+		hint=None,
+	),
+	# --- commerce ------------------------------------------------------------
+	Provider(
+		name="Shopify",
+		key="shopify",
+		description="Products, orders and customers",
+		base_url="https://setup.shopify.com/mcp",
+		auth=AUTH_STATIC,
+		category="commerce",
+		logo="shopify",
+		help_url="https://dev.shopify.com/dashboard",
+		hint="Register your own Shopify app, then paste its details here.",
+		# The unauthenticated initialize answers 403 (no 401 challenge), so the
+		# endpoints its metadata publishes are pinned here.
+		issuer="https://setup.shopify.com/auth",
+		authorization_endpoint="https://setup.shopify.com/oauth/authorize",
+		token_endpoint="https://setup.shopify.com/oauth/token",
+		scopes="read_products write_products read_orders write_orders read_customers write_customers read_inventory write_inventory",
+		# Shopify documents no third-party client path for this server (its agent
+		# docs cover only the buyer-facing Cart / Checkout / Order servers), so
+		# whether a merchant's own Dev Dashboard app may sign in here is unproven.
+		# Off until a sign-in from a tenant host has been seen to work.
+		enabled=False,
+	),
 	# --- work ------------------------------------------------------------
 	Provider(
 		name="Asana",
@@ -337,6 +490,108 @@ PROVIDERS: tuple[Provider, ...] = (
 		help_url="https://api.slack.com/apps",
 		hint="Register your own Slack app, then paste its details here.",
 	),
+	Provider(
+		name="ClickUp",
+		key="clickup",
+		description="Tasks and spaces",
+		base_url="https://mcp.clickup.com/mcp",
+		auth=AUTH_DCR,
+		category="work",
+		logo="clickup",
+		help_url=None,
+		hint=None,
+	),
+	Provider(
+		name="Docusign",
+		key="docusign",
+		description="Agreements and envelopes",
+		base_url="https://mcp.docusign.com/mcp",
+		auth=AUTH_STATIC,
+		category="work",
+		logo=None,
+		help_url="https://apps.docusign.com/admin/apps-and-keys",
+		hint="Register your own Docusign app, then paste its details here.",
+		# The unauthenticated initialize answers 403 (no 401 challenge), so the
+		# production sign-in endpoints its metadata publishes are pinned here
+		# (developer accounts use account-d / mcp-d, not covered). The resource
+		# also advertises the Navigator and Maestro scopes; only the eSignature
+		# floor is requested so consent does not fail on accounts without them.
+		issuer="https://account.docusign.com",
+		authorization_endpoint="https://account.docusign.com/oauth/auth",
+		token_endpoint="https://account.docusign.com/oauth/token",
+		scopes="signature",
+	),
+	# --- communication ------------------------------------------------------------
+	Provider(
+		name="Gmail",
+		key="gmail",
+		description="Mail and drafts",
+		base_url="https://gmailmcp.googleapis.com/mcp/v1",
+		auth=AUTH_STATIC,
+		category="communication",
+		logo="gmail",
+		help_url=_GOOGLE_HELP_URL,
+		hint=_GOOGLE_HINT,
+		issuer=_GOOGLE_ISSUER,
+		authorization_endpoint=_GOOGLE_AUTHORIZATION_ENDPOINT,
+		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
+		scopes="https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
+		authorize_params=_GOOGLE_AUTHORIZE_PARAMS,
+	),
+	Provider(
+		name="Google Calendar",
+		key="google_calendar",
+		description="Calendars and events",
+		base_url="https://calendarmcp.googleapis.com/mcp/v1",
+		auth=AUTH_STATIC,
+		category="communication",
+		logo="google_calendar",
+		help_url=_GOOGLE_HELP_URL,
+		hint=_GOOGLE_HINT,
+		issuer=_GOOGLE_ISSUER,
+		authorization_endpoint=_GOOGLE_AUTHORIZATION_ENDPOINT,
+		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
+		scopes="https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.events.freebusy",
+		authorize_params=_GOOGLE_AUTHORIZE_PARAMS,
+	),
+	Provider(
+		name="Calendly",
+		key="calendly",
+		description="Event types and bookings",
+		base_url="https://mcp.calendly.com/",
+		auth=AUTH_DCR,
+		category="communication",
+		logo="calendly",
+		help_url=None,
+		hint=None,
+		# The server is the ORIGIN itself (``/mcp`` is 404), probed 2026-09-07.
+	),
+	Provider(
+		name="Zoom",
+		key="zoom",
+		description="Meetings and recordings",
+		base_url="https://mcp.zoom.us/mcp/zoom/streamable",
+		auth=AUTH_STATIC,
+		category="communication",
+		logo="zoom",
+		help_url="https://marketplace.zoom.us/develop/create",
+		hint="Register your own Zoom app, then paste its details here.",
+		# zoom.us publishes metadata and Zoom's docs say the MCP servers accept
+		# manual app registration only, no self-registration (probed 2026-09-07).
+	),
+	Provider(
+		name="Mailchimp Transactional",
+		key="mailchimp_transactional",
+		description="Transactional email",
+		base_url="https://mandrillapp.com/mcp",
+		auth=AUTH_TOKEN,
+		category="communication",
+		logo="mailchimp",
+		help_url="https://mandrillapp.com/settings",
+		hint="Paste an API key from your Mailchimp Transactional settings.",
+		# Mailchimp's only official server; the marketing API (audiences,
+		# campaigns) has none.
+	),
 	# --- files ------------------------------------------------------------
 	Provider(
 		name="Dropbox",
@@ -363,6 +618,54 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="box",
 		help_url="https://app.box.com/developers/console",
 		hint="Register your own Box app, then paste its details here.",
+	),
+	Provider(
+		name="Google Drive",
+		key="google_drive",
+		description="Files and folders",
+		base_url="https://drivemcp.googleapis.com/mcp/v1",
+		auth=AUTH_STATIC,
+		category="files",
+		logo="google_drive",
+		help_url=_GOOGLE_HELP_URL,
+		hint=_GOOGLE_HINT,
+		issuer=_GOOGLE_ISSUER,
+		authorization_endpoint=_GOOGLE_AUTHORIZATION_ENDPOINT,
+		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
+		scopes="https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
+		authorize_params=_GOOGLE_AUTHORIZE_PARAMS,
+	),
+	Provider(
+		name="Google Sheets",
+		key="google_sheets",
+		description="Spreadsheets",
+		base_url="https://sheetsmcp.googleapis.com/mcp/v1",
+		auth=AUTH_STATIC,
+		category="files",
+		logo="google_sheets",
+		help_url=_GOOGLE_HELP_URL,
+		hint=_GOOGLE_HINT,
+		issuer=_GOOGLE_ISSUER,
+		authorization_endpoint=_GOOGLE_AUTHORIZATION_ENDPOINT,
+		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
+		scopes="https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/spreadsheets",
+		authorize_params=_GOOGLE_AUTHORIZE_PARAMS,
+	),
+	Provider(
+		name="Google Docs",
+		key="google_docs",
+		description="Documents",
+		base_url="https://docsmcp.googleapis.com/mcp/v1",
+		auth=AUTH_STATIC,
+		category="files",
+		logo="google_docs",
+		help_url=_GOOGLE_HELP_URL,
+		hint=_GOOGLE_HINT,
+		issuer=_GOOGLE_ISSUER,
+		authorization_endpoint=_GOOGLE_AUTHORIZATION_ENDPOINT,
+		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
+		scopes="https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents.readonly https://www.googleapis.com/auth/documents",
+		authorize_params=_GOOGLE_AUTHORIZE_PARAMS,
 	),
 	# --- design ------------------------------------------------------------
 	Provider(
@@ -582,6 +885,20 @@ PROVIDERS: tuple[Provider, ...] = (
 		help_url=None,
 		hint=None,
 	),
+	# --- dev ------------------------------------------------------------
+	Provider(
+		name="GitLab",
+		key="gitlab",
+		description="Repositories, issues and merge requests",
+		base_url="https://gitlab.com/api/v4/mcp",
+		auth=AUTH_DCR,
+		category="dev",
+		logo="gitlab",
+		help_url=None,
+		hint=None,
+		# gitlab.com only; a self-hosted instance is the same path on its own host
+		# and connects as a Custom URL.
+	),
 )
 
 validate(PROVIDERS)
@@ -638,6 +955,15 @@ def auth_of(name: str, *, providers: tuple[Provider, ...] = PROVIDERS) -> str | 
 	return provider.auth if provider else None
 
 
+def authorize_params_of(name: str, *, providers: tuple[Provider, ...] = PROVIDERS) -> dict[str, str]:
+	"""The extra authorize-request parameters for `name` as a plain dict, `{}`
+	when the preset declares none or is unknown (a Custom URL row, for one).
+	Disabled entries still resolve, matching `by_name`: an already-saved row
+	keeps signing in the way its provider needs."""
+	provider = by_name(name, providers=providers)
+	return dict(provider.authorize_params) if provider and provider.authorize_params else {}
+
+
 def to_public(*, providers: tuple[Provider, ...] = PROVIDERS) -> list[dict]:
 	"""The fields the SPA may see, enabled entries only, catalog order: name,
 	key, auth, category, logo, help_url, hint, description, token_hint,
@@ -676,8 +1002,8 @@ def apply_overlay(
 	  * a `name` that already exists may only carry `enabled` (True or
 	    False); any other field present in the entry that differs from the
 	    shipped value (`key`, `base_url`, `auth`, `category`, `logo`,
-	    `help_url`, `hint`) raises `ValueError`, an overlay disables, it does
-	    not redefine.
+	    `help_url`, `hint`, the endpoints, `scopes`, `authorize_params`, ...)
+	    raises `ValueError`, an overlay disables, it does not redefine.
 	  * a `name` that does not yet exist is added as a brand-new `Provider`;
 	    the entry must then carry `key`, `base_url`, `auth` and `category`
 	    (`logo`/`help_url`/`hint`/`enabled` are optional, defaulting like the
@@ -702,6 +1028,7 @@ def apply_overlay(
 		"scopes",
 		"token_hint",
 		"token_help_url",
+		"authorize_params",
 	)
 
 	for entry in overlay:
@@ -712,7 +1039,12 @@ def apply_overlay(
 		existing = by_existing.get(name)
 		if existing is not None:
 			for field in fixed_fields:
-				if field in entry and entry[field] != getattr(existing, field):
+				if field not in entry:
+					continue
+				given = entry[field]
+				if field == "authorize_params":
+					given = _freeze_authorize_params(given)
+				if given != getattr(existing, field):
 					raise ValueError(f"overlay may not change {field!r} for {name!r}")
 			updated = replace(existing, enabled=entry.get("enabled", existing.enabled))
 			result[result.index(existing)] = updated
@@ -735,6 +1067,7 @@ def apply_overlay(
 				scopes=entry.get("scopes"),
 				token_hint=entry.get("token_hint"),
 				token_help_url=entry.get("token_help_url"),
+				authorize_params=_freeze_authorize_params(entry.get("authorize_params")),
 			)
 			result.append(provider)
 			by_existing[name] = provider

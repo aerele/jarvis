@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from urllib.parse import quote_plus, urlencode
 
@@ -29,6 +29,25 @@ class TokenSet:
 	token_type: str | None
 
 
+#: Every query parameter this module sets itself on the authorize request. A
+#: provider's ``extra_params`` may add to the request, never override one of
+#: these: the PKCE, resource and redirect bindings are what the rest of the flow
+#: validates against, so a catalog entry (or a future admin overlay) that could
+#: replace them would defeat those checks from data.
+RESERVED_AUTHORIZE_PARAMS = frozenset(
+	{
+		"response_type",
+		"client_id",
+		"redirect_uri",
+		"state",
+		"resource",
+		"code_challenge",
+		"code_challenge_method",
+		"scope",
+	}
+)
+
+
 def build_authorize_url(
 	discovery: Discovery,
 	client_id: str,
@@ -38,13 +57,20 @@ def build_authorize_url(
 	resource: str,
 	state: str,
 	code_challenge: str,
+	extra_params: Mapping[str, str] | None = None,
 ) -> str:
 	"""The browser-bound authorize URL: PKCE challenge and the RFC 8707
 	``resource`` indicator are always present, never optional.
 
 	``scope`` is OMITTED when empty rather than sent blank: a server that
 	advertised no scopes and issued no challenge scope has told us to ask for its
-	default, and ``scope=`` means "the empty set" to a strict AS."""
+	default, and ``scope=`` means "the empty set" to a strict AS.
+
+	``extra_params`` are a provider's fixed additions (Google's
+	``access_type=offline`` / ``prompt=consent``, without which it issues no
+	refresh token). They come from the reviewed catalog, never from a client,
+	and a name in :data:`RESERVED_AUTHORIZE_PARAMS` raises ``ValueError`` here
+	as well as in the catalog's own validation."""
 	params = {
 		"response_type": "code",
 		"client_id": client_id,
@@ -56,6 +82,12 @@ def build_authorize_url(
 	}
 	if (scope or "").strip():
 		params["scope"] = scope
+	for key, value in (extra_params or {}).items():
+		if key in RESERVED_AUTHORIZE_PARAMS:
+			raise ValueError(f"extra authorize parameter may not override {key!r}")
+		if not isinstance(key, str) or not isinstance(value, str) or not key.strip():
+			raise ValueError(f"malformed extra authorize parameter: {key!r}")
+		params[key] = value
 	separator = "&" if "?" in discovery.authorization_endpoint else "?"
 	return f"{discovery.authorization_endpoint}{separator}{urlencode(params)}"
 

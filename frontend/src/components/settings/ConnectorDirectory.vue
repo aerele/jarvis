@@ -117,7 +117,11 @@ const activeCategory = ref("all");
 // up as a chip - "Web" earns a chip only once something in it ships.
 const CATEGORY_LABELS = {
 	payments: "Payments",
+	accounting: "Accounting",
+	crm: "CRM",
+	commerce: "Commerce",
 	work: "Work",
+	communication: "Communication",
 	files: "Files",
 	design: "Design",
 	support: "Support",
