@@ -766,6 +766,37 @@
 											id="jv-ob-gstin-err"
 											:message="detailsFieldErrors.gstin"
 										/>
+										<!-- Tenant-local GSTIN autofill: shown ONLY where this site's own
+											 India Compliance can look the GSTIN up. Fail-open to manual. -->
+										<div
+											v-if="gstinAutofillCapable"
+											class="mt-1 flex flex-wrap items-center gap-3"
+										>
+											<Button
+												variant="subtle"
+												label="Fetch details"
+												:loading="gstinFetching"
+												:disabled="!canFetchGstin"
+												:aria-busy="gstinFetching ? 'true' : undefined"
+												@click="fetchGstinDetails"
+											/>
+											<button
+												v-if="billing.gstinUndoAvailable.value"
+												type="button"
+												class="text-p-sm text-ink-gray-6 underline underline-offset-2"
+												@click="onUndoGstinPrefill"
+											>
+												Undo autofill
+											</button>
+										</div>
+										<p
+											v-if="gstinFetchHint"
+											role="status"
+											aria-live="polite"
+											class="mt-1 text-p-sm text-ink-gray-6"
+										>
+											{{ gstinFetchHint }}
+										</p>
 									</div>
 								</div>
 								<!-- state.detailsErr stays for genuinely form-wide messages (e.g.
@@ -2137,6 +2168,8 @@ import {
 	onboardingPaymentApi,
 	supportCreateTicket,
 	captureOnboardingLead,
+	gstinAutofillAvailable,
+	gstinAutofill,
 	getTermsUrl,
 } from "@/api";
 import {
@@ -2414,6 +2447,87 @@ const billing = useBillingDetails({
 	site: (typeof window !== "undefined" && window.location && window.location.host) || "",
 	user: readCookie("user_id") || "",
 });
+
+// GSTIN party autofill (tenant-local): the "Fetch details" button is offered ONLY where this site's
+// own India Compliance can look a GSTIN up (capability fetched once on entering Details). Every miss
+// just shows a hint and leaves manual entry untouched — the button never blocks the form.
+const gstinAutofillCapable = ref(false);
+const gstinFetching = ref(false);
+const gstinFetchHint = ref("");
+const _GSTIN_FETCH_TIMEOUT_MS = 9000;
+let _gstinCapabilityChecked = false;
+
+const canFetchGstin = computed(
+	() =>
+		gstinAutofillCapable.value &&
+		!gstinFetching.value &&
+		!!(billing.fields.gstin.value || "").trim() &&
+		!gstinError(billing.fields.gstin.value)
+);
+
+async function fetchGstinDetails() {
+	if (!canFetchGstin.value) return;
+	const gstin = (billing.fields.gstin.value || "").trim();
+	gstinFetching.value = true;
+	gstinFetchHint.value = "";
+	try {
+		// Bound the wait: a slow GST-API round trip must not hang the form (IC has its own server
+		// timeout, but the button needs its own ceiling) — on timeout we fall back to manual entry.
+		const res = await Promise.race([
+			gstinAutofill(gstin),
+			new Promise((_, reject) =>
+				setTimeout(() => reject(new Error("timeout")), _GSTIN_FETCH_TIMEOUT_MS)
+			),
+		]);
+		if (res && res.found === true) {
+			billing.applyGstinPrefill(res);
+			// applyGstinPrefill wrote the fields directly (not via the inputs' handlers), so re-run the
+			// validators to clear any stale required/consistency errors under the now-filled fields.
+			// touchStateField cascades to state+pincode+GSTIN; address/city have their own buckets.
+			clearFieldErrorIfValid("country", countryError, billing.fields.country.value);
+			clearFieldErrorIfValid("address", addressError, billing.fields.address.value);
+			clearFieldErrorIfValid("city", cityError, billing.fields.city.value);
+			touchStateField();
+			gstinFetchHint.value =
+				res.status && res.status !== "Active"
+					? `Fetched — but this GSTIN is ${String(
+							res.status
+					  ).toLowerCase()} in the GST registry. Please verify before continuing.`
+					: "";
+		} else {
+			gstinFetchHint.value =
+				"Couldn't fetch details for that GSTIN — please enter them manually.";
+		}
+	} catch (e) {
+		gstinFetchHint.value = "Couldn't fetch details right now — please enter them manually.";
+	} finally {
+		gstinFetching.value = false;
+	}
+}
+
+// Undo the last GSTIN prefill AND drop the advisory hint (a lingering "…is cancelled" note after
+// the values are reverted would be stale).
+function onUndoGstinPrefill() {
+	billing.undoGstinPrefill();
+	gstinFetchHint.value = "";
+}
+
+// Probe the capability once when the customer reaches Details; best-effort, a failure hides the button.
+watch(
+	() => state.step,
+	(step) => {
+		if (step !== "details" || _gstinCapabilityChecked) return;
+		gstinAutofillAvailable()
+			.then((r) => {
+				_gstinCapabilityChecked = true; // only a real answer is final
+				gstinAutofillCapable.value = !!(r && r.available);
+			})
+			.catch(() => {
+				// transient probe failure: leave the guard unset so re-entering Details retries
+			});
+	},
+	{ immediate: true }
+);
 
 const steps = computed(() => STEPS_MANAGED);
 const selectedPlan = computed(() => state.plans.find((p) => p.name === state.planName) || {});
