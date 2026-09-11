@@ -464,6 +464,72 @@
 									>
 										Invoicing details
 									</div>
+									<div class="col-span-2 flex flex-col gap-1">
+										<FormControl
+											type="text"
+											variant="outline"
+											label="GSTIN (optional)"
+											:model-value="billing.fields.gstin.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('gstin', v);
+													clearFieldErrorIfValid(
+														'gstin',
+														(val) =>
+															gstinError(val) ||
+															gstinStateError(_billingAddr()),
+														v
+													);
+												}
+											"
+											:placeholder="GSTIN_PLACEHOLDER"
+											:aria-invalid="
+												detailsFieldErrors.gstin ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.gstin
+													? 'jv-ob-gstin-err'
+													: undefined
+											"
+											@blur="touchGstinField"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage
+											id="jv-ob-gstin-err"
+											:message="detailsFieldErrors.gstin"
+										/>
+										<!-- Tenant-local GSTIN autofill: shown ONLY where this site's own
+											 India Compliance can look the GSTIN up. Fail-open to manual. -->
+										<div
+											v-if="gstinAutofillCapable"
+											class="mt-1 flex flex-wrap items-center gap-3"
+										>
+											<Button
+												variant="subtle"
+												label="Fetch details"
+												:loading="gstinFetching"
+												:disabled="!canFetchGstin"
+												:aria-busy="gstinFetching ? 'true' : undefined"
+												@click="fetchGstinDetails"
+											/>
+											<button
+												v-if="billing.gstinUndoAvailable.value"
+												type="button"
+												class="text-p-sm text-ink-gray-6 underline underline-offset-2"
+												@click="onUndoGstinPrefill"
+											>
+												Undo autofill
+											</button>
+										</div>
+										<p
+											v-if="gstinFetchHint"
+											role="status"
+											aria-live="polite"
+											class="mt-1 text-p-sm text-ink-gray-6"
+										>
+											{{ gstinFetchHint }}
+										</p>
+									</div>
 									<FormControl
 										class="col-span-2"
 										type="text"
@@ -731,72 +797,6 @@
 											id="jv-ob-state-err"
 											:message="detailsFieldErrors.state"
 										/>
-									</div>
-									<div class="col-span-2 flex flex-col gap-1">
-										<FormControl
-											type="text"
-											variant="outline"
-											label="GSTIN (optional)"
-											:model-value="billing.fields.gstin.value"
-											@update:model-value="
-												(v) => {
-													billing.setUserValue('gstin', v);
-													clearFieldErrorIfValid(
-														'gstin',
-														(val) =>
-															gstinError(val) ||
-															gstinStateError(_billingAddr()),
-														v
-													);
-												}
-											"
-											:placeholder="GSTIN_PLACEHOLDER"
-											:aria-invalid="
-												detailsFieldErrors.gstin ? 'true' : undefined
-											"
-											:aria-describedby="
-												detailsFieldErrors.gstin
-													? 'jv-ob-gstin-err'
-													: undefined
-											"
-											@blur="touchGstinField"
-											@keydown.enter="onDetailsSubmit"
-										/>
-										<ErrorMessage
-											id="jv-ob-gstin-err"
-											:message="detailsFieldErrors.gstin"
-										/>
-										<!-- Tenant-local GSTIN autofill: shown ONLY where this site's own
-											 India Compliance can look the GSTIN up. Fail-open to manual. -->
-										<div
-											v-if="gstinAutofillCapable"
-											class="mt-1 flex flex-wrap items-center gap-3"
-										>
-											<Button
-												variant="subtle"
-												label="Fetch details"
-												:loading="gstinFetching"
-												:disabled="!canFetchGstin"
-												:aria-busy="gstinFetching ? 'true' : undefined"
-												@click="fetchGstinDetails"
-											/>
-											<button
-												v-if="billing.gstinUndoAvailable.value"
-												type="button"
-												class="text-p-sm text-ink-gray-6 underline underline-offset-2"
-												@click="onUndoGstinPrefill"
-											>
-												Undo autofill
-											</button>
-										</div>
-										<p
-											v-if="gstinFetchHint"
-											role="status"
-											aria-live="polite"
-											class="mt-1 text-p-sm text-ink-gray-6"
-										>
-											{{ gstinFetchHint }}
-										</p>
 									</div>
 								</div>
 								<!-- state.detailsErr stays for genuinely form-wide messages (e.g.
