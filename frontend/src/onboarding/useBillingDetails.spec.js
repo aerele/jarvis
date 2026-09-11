@@ -4,6 +4,7 @@ import {
 	billingEditAction,
 	billingStorageKey,
 	STORAGE_PROMISE_SAVED,
+	STORAGE_PROMISE_LOCAL,
 	BILLING_SNAPSHOT_TTL_MS,
 } from "./useBillingDetails.js";
 
@@ -624,5 +625,89 @@ describe("invoicing-default provenance survives a reload", () => {
 		expect(b.invoicing.company_name).toBe("Legacy Co");
 		b.syncInvoicingDefaults("Globex", "team@example.com"); // legacy default = user-set → not clobbered
 		expect(b.invoicing.company_name).toBe("Legacy Co");
+	});
+});
+
+// GSTIN autofill: overwrite-with-Undo, non-empty only, business_name -> invoicing, state resolve,
+// country coerce, and NO false "kept with your account" (nothing is persisted server-side yet).
+const GSTIN_CONTRACT = {
+	found: true,
+	gstin: "29AAACS0000A1ZC",
+	status: "Active",
+	business_name: "Acme Traders Pvt Ltd",
+	gst_category: "Registered Regular",
+	address: {
+		address_line1: "1 MG Road",
+		address_line2: "Near Park",
+		city: "Bengaluru",
+		state: "Karnataka",
+		pincode: "560001",
+		country: "India",
+	},
+};
+
+describe("GSTIN autofill prefill (applyGstinPrefill / undo)", () => {
+	it("overwrites as user-owned, maps business_name, coerces country, no false 'saved'", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.applyGstinPrefill(GSTIN_CONTRACT)).toBe(true);
+		expect(b.fields.address.value).toBe("1 MG Road");
+		expect(b.fields.city.value).toBe("Bengaluru");
+		expect(b.fields.state.value).toBe("Karnataka");
+		expect(b.fields.pincode.value).toBe("560001");
+		expect(b.fields.country.value).toBe("India");
+		for (const k of ["address", "city", "state", "pincode"])
+			expect(b.fields[k].source).toBe("user");
+		expect(b.invoicing.company_name).toBe("Acme Traders Pvt Ltd");
+		expect(b.billingSaved.value).toBe(false);
+		expect(b.promiseCopy.value).toBe(STORAGE_PROMISE_LOCAL);
+	});
+
+	it("resolves an aliased state to a valid option, blank on no match", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.applyGstinPrefill({
+			...GSTIN_CONTRACT,
+			address: { ...GSTIN_CONTRACT.address, state: "Lakshadweep Islands" },
+		});
+		expect(b.fields.state.value).toBe("Lakshadweep");
+		const b2 = useBillingDetails({ site: "s2", user: "u1" });
+		b2.applyGstinPrefill({
+			...GSTIN_CONTRACT,
+			address: { ...GSTIN_CONTRACT.address, state: "Freedonia" },
+		});
+		expect(b2.fields.state.value).toBe("");
+	});
+
+	it("non-empty only: a blank registry field never wipes what the customer typed", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setUserValue("address2", "Suite 5");
+		b.applyGstinPrefill({
+			...GSTIN_CONTRACT,
+			address: { ...GSTIN_CONTRACT.address, address_line2: "" },
+		});
+		expect(b.fields.address2.value).toBe("Suite 5");
+		expect(b.fields.address.value).toBe("1 MG Road");
+	});
+
+	it("one-shot Undo restores the prior field + invoicing state", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setUserValue("city", "Mumbai");
+		b.setInvoicing("My Co", undefined);
+		expect(b.gstinUndoAvailable.value).toBe(false);
+		b.applyGstinPrefill(GSTIN_CONTRACT);
+		expect(b.fields.city.value).toBe("Bengaluru");
+		expect(b.invoicing.company_name).toBe("Acme Traders Pvt Ltd");
+		expect(b.gstinUndoAvailable.value).toBe(true);
+		expect(b.undoGstinPrefill()).toBe(true);
+		expect(b.fields.city.value).toBe("Mumbai");
+		expect(b.invoicing.company_name).toBe("My Co");
+		expect(b.gstinUndoAvailable.value).toBe(false);
+	});
+
+	it("a not-found / missing contract is a no-op", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		expect(b.applyGstinPrefill({ found: false, reason: "invalid" })).toBe(false);
+		expect(b.applyGstinPrefill(null)).toBe(false);
+		expect(b.gstinUndoAvailable.value).toBe(false);
+		expect(b.fields.city.value).toBe("");
 	});
 });
