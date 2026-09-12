@@ -354,13 +354,34 @@ class JarvisAgentInstallation(Document):
 					_("This agent requires DocType {0}, which is not present on this site.").format(dt),
 					title=_("Agent not installable"),
 				)
-			if not frappe.has_permission(dt, "read", user=target):
+			if not self._run_as_can_read(dt, target):
 				frappe.throw(
 					_("Run-as user {0} lacks read access to {1}, which this agent requires.").format(
 						target, dt
 					)
 				)
 		self.scoped_visibility = 1 if self._detect_scoped_visibility(target) else 0
+
+	def _run_as_can_read(self, dt: str, target: str) -> bool:
+		"""Read check that understands child tables. A child DocType (``istable``)
+		carries NO DocPerm rows of its own — its readability rides the PARENT it is
+		embedded in — so a bare ``has_permission`` on it is False for every
+		non-Administrator user, wrongly refusing a run-as user who CAN read the parent
+		the agent scans it through. For a child, verify read via a parent that embeds it
+		(``has_permission(..., parent_doctype=p)`` — Frappe's own child-permission path):
+		readable when the user can read ANY embedding parent, refused when none is (so an
+		orphan child with no embedding parent refuses — fail-closed). Non-child unchanged."""
+		if not frappe.get_meta(dt).istable:
+			return bool(frappe.has_permission(dt, "read", user=target))
+		# Reuse the canonical parent finder (Table + Table MultiSelect, DocField + Custom
+		# Field) rather than a second copy that would drift. Drop a discovered parent that is
+		# no longer a real DocType (e.g. a Custom Field whose parent was later removed):
+		# has_permission would get_meta it and raise DoesNotExistError, turning a clean
+		# "lacks read access" refusal into a 500.
+		from jarvis.tools.get_list import _child_table_parents
+
+		parents = (p for p in _child_table_parents(dt) if frappe.db.exists("DocType", p))
+		return any(frappe.has_permission(dt, "read", user=target, parent_doctype=p) for p in parents)
 
 	def _required_doctypes(self) -> list[str]:
 		# R5-J8: return the FULL declared set (trimmed, non-empty strings) — no
