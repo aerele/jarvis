@@ -703,6 +703,27 @@ describe("GSTIN autofill prefill (applyGstinPrefill / undo)", () => {
 		expect(b.gstinUndoAvailable.value).toBe(false);
 	});
 
+	it("Undo leaves fields autofill never touched — contact + invoicing email typed after", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.applyGstinPrefill(GSTIN_CONTRACT); // fills address/city/state/pincode/country + invoicing company
+		b.setUserValue("contact", "+91 90000 00000"); // typed AFTER; autofill never touches contact
+		b.setInvoicing(undefined, "billing@acme.example"); // invoicing email typed AFTER
+		b.undoGstinPrefill();
+		expect(b.fields.contact.value).toBe("+91 90000 00000"); // preserved
+		expect(b.invoicing.email).toBe("billing@acme.example"); // preserved
+		expect(b.fields.city.value).toBe(""); // an autofilled field reverts
+		expect(b.invoicing.company_name).toBe(""); // the autofilled invoicing company reverts
+	});
+
+	it("Undo does not roll back a GSTIN the customer edited after autofill", () => {
+		const b = useBillingDetails({ site: "s1", user: "u1" });
+		b.setUserValue("gstin", "29AAACS0000A1ZC");
+		b.applyGstinPrefill(GSTIN_CONTRACT); // autofill never writes gstin
+		b.setUserValue("gstin", "27AAACS0000A1ZB"); // customer corrects the GSTIN after fetching
+		b.undoGstinPrefill();
+		expect(b.fields.gstin.value).toBe("27AAACS0000A1ZB"); // preserved
+	});
+
 	it("a not-found / missing contract is a no-op", () => {
 		const b = useBillingDetails({ site: "s1", user: "u1" });
 		expect(b.applyGstinPrefill({ found: false, reason: "invalid" })).toBe(false);
