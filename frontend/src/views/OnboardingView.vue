@@ -2465,6 +2465,16 @@ const canFetchGstin = computed(
 		!gstinError(billing.fields.gstin.value)
 );
 
+// Re-run the billing validators after a programmatic change (autofill apply / undo) that wrote the
+// fields directly instead of through the inputs' handlers, so stale required / India-only errors
+// clear. touchStateField cascades to state+pincode+GSTIN; country/address/city have their own buckets.
+function revalidateBillingFields() {
+	clearFieldErrorIfValid("country", countryError, billing.fields.country.value);
+	clearFieldErrorIfValid("address", addressError, billing.fields.address.value);
+	clearFieldErrorIfValid("city", cityError, billing.fields.city.value);
+	touchStateField();
+}
+
 async function fetchGstinDetails() {
 	if (!canFetchGstin.value) return;
 	const gstin = (billing.fields.gstin.value || "").trim();
@@ -2479,15 +2489,12 @@ async function fetchGstinDetails() {
 				setTimeout(() => reject(new Error("timeout")), _GSTIN_FETCH_TIMEOUT_MS)
 			),
 		]);
+		// Discard a late response if the customer changed or cleared the GSTIN while it was in flight:
+		// applying it would pair the old registry party (name/address) with a different or absent GSTIN.
+		if ((billing.fields.gstin.value || "").trim() !== gstin) return;
 		if (res && res.found === true) {
 			billing.applyGstinPrefill(res);
-			// applyGstinPrefill wrote the fields directly (not via the inputs' handlers), so re-run the
-			// validators to clear any stale required/consistency errors under the now-filled fields.
-			// touchStateField cascades to state+pincode+GSTIN; address/city have their own buckets.
-			clearFieldErrorIfValid("country", countryError, billing.fields.country.value);
-			clearFieldErrorIfValid("address", addressError, billing.fields.address.value);
-			clearFieldErrorIfValid("city", cityError, billing.fields.city.value);
-			touchStateField();
+			revalidateBillingFields();
 			gstinFetchHint.value =
 				res.status && res.status !== "Active"
 					? `Fetched — but this GSTIN is ${String(
@@ -2510,6 +2517,9 @@ async function fetchGstinDetails() {
 function onUndoGstinPrefill() {
 	billing.undoGstinPrefill();
 	gstinFetchHint.value = "";
+	// Restored values may flip India<->overseas (e.g. undoing the country coerce), so re-run the
+	// validators — else India-only state/PIN errors linger over now-valid overseas values.
+	revalidateBillingFields();
 }
 
 // Probe the capability once when the customer reaches Details; best-effort, a failure hides the button.
@@ -2517,14 +2527,18 @@ watch(
 	() => state.step,
 	(step) => {
 		if (step !== "details" || _gstinCapabilityChecked) return;
-		gstinAutofillAvailable()
-			.then((r) => {
-				_gstinCapabilityChecked = true; // only a real answer is final
-				gstinAutofillCapable.value = !!(r && r.available);
-			})
-			.catch(() => {
-				// transient probe failure: leave the guard unset so re-entering Details retries
-			});
+		try {
+			gstinAutofillAvailable()
+				.then((r) => {
+					_gstinCapabilityChecked = true; // only a real answer is final
+					gstinAutofillCapable.value = !!(r && r.available);
+				})
+				.catch(() => {
+					// transient probe failure: leave the guard unset so re-entering Details retries
+				});
+		} catch (e) {
+			/* never let the probe break the step transition (mirrors the lead-capture watch) */
+		}
 	},
 	{ immediate: true }
 );

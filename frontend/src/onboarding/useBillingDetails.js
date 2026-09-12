@@ -521,31 +521,32 @@ export function useBillingDetails(opts = {}) {
 			country: INDIA, // a GSTIN is India; the view coerces + re-validates the state/pincode fields
 		};
 		const businessName = (contract.business_name || "").trim();
-		// Snapshot BEFORE mutating, so Undo restores exactly (provenance included).
+		// Undo captures ONLY the fields this prefill actually changes, so it can never roll back a
+		// value autofill never touched (a contact number or invoicing email typed afterwards) or a
+		// later GSTIN edit. Snapshot each field's prior state (provenance included) as it is overwritten.
 		const priorFields = {};
-		for (const name of BILLING_FIELDS) priorFields[name] = { ...fields[name] };
-		const undo = {
-			fields: priorFields,
-			invoicing: { ...invoicing },
-			invoicingCompanyUserSet,
-			invoicingEmailUserSet,
-		};
 		let any = false;
 		for (const name of Object.keys(incoming)) {
 			const v = incoming[name];
 			if (!v) continue; // non-empty only — never blank out an existing value
+			priorFields[name] = { ...fields[name] };
 			const f = fields[name];
 			f.value = v;
 			f.source = "user"; // wins the stale-response fence; a late ERP default can't overwrite it
 			f.source_company = "";
 			any = true;
 		}
+		let priorInvoicing = null;
 		if (businessName) {
+			priorInvoicing = {
+				company_name: invoicing.company_name,
+				userSet: invoicingCompanyUserSet,
+			};
 			setInvoicing(businessName, undefined); // -> invoicing party (pins invoicingCompanyUserSet)
 			any = true;
 		}
 		if (any) {
-			_gstinUndo.value = undo;
+			_gstinUndo.value = { fields: priorFields, invoicing: priorInvoicing };
 			persist();
 		}
 		return any;
@@ -553,15 +554,17 @@ export function useBillingDetails(opts = {}) {
 
 	const gstinUndoAvailable = computed(() => _gstinUndo.value !== null);
 
-	// Restore the field + invoicing state captured by the most recent applyGstinPrefill (one-shot).
+	// Restore ONLY what the most recent applyGstinPrefill changed (one-shot). Fields the prefill did
+	// not touch — a contact number or invoicing email typed afterwards, a later GSTIN edit — are left
+	// exactly as the customer left them.
 	function undoGstinPrefill() {
 		const u = _gstinUndo.value;
 		if (!u) return false;
-		for (const name of BILLING_FIELDS) Object.assign(fields[name], u.fields[name]);
-		invoicing.company_name = u.invoicing.company_name;
-		invoicing.email = u.invoicing.email;
-		invoicingCompanyUserSet = u.invoicingCompanyUserSet;
-		invoicingEmailUserSet = u.invoicingEmailUserSet;
+		for (const name of Object.keys(u.fields)) Object.assign(fields[name], u.fields[name]);
+		if (u.invoicing) {
+			invoicing.company_name = u.invoicing.company_name;
+			invoicingCompanyUserSet = u.invoicing.userSet;
+		}
 		_gstinUndo.value = null;
 		persist();
 		return true;
