@@ -3,6 +3,7 @@ Settings, and thin server wrappers the onboarding page calls (so the browser
 never holds admin creds). admin_client returns already-unwrapped admin data."""
 
 import json
+import unicodedata
 
 import frappe
 from frappe.utils import cint, validate_email_address
@@ -1287,6 +1288,119 @@ def get_onboarding_state() -> dict:
 		return onboarding_contract.failure(error, status)
 	context = _absorb_signup_state(data)
 	return onboarding_contract.success(data, context=context)
+
+
+# --- GSTIN party autofill (onboarding Details step, tenant-LOCAL) ------------
+# Prefill billing party details from the customer's GSTIN using THIS site's own India Compliance
+# — entirely same-site + in-process: no admin/books/Fleet hop, the customer's own IC + API credits
+# (free on Frappe Cloud). Offered ONLY where IC's production autofill API is usable; everywhere
+# else the form is plain manual entry. Fail-open throughout: any failure → a soft miss → manual.
+_GSTIN_MAXLEN = {
+	"business_name": 140,
+	"address_line1": 200,
+	"address_line2": 200,
+	"city": 100,
+	"state": 100,
+	"pincode": 12,
+}
+# Unicode categories a Frappe party/IC save rejects (Cc/Cf/Cs/Co control-format + Zl/Zp separators);
+# strip them so a registry field can't fail a later save. (.strip() only catches TRAILING ones.)
+_STRIP_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
+
+
+def _ic_autofill_usable() -> bool:
+	"""IC's own 'production autofill API usable' verdict (enable_api + a credential — GST Settings
+	api_secret OR the Frappe-Cloud-injected frappe.conf.ic_api_secret — and NOT sandbox). Isolated
+	seam (lazy import) so a non-IC site never imports IC and tests can stub it without IC installed."""
+	from india_compliance.gst_india.utils import is_production_api_enabled
+
+	return bool(is_production_api_enabled())
+
+
+def _gstin_autofill_available() -> bool:
+	"""True iff this site can look up a GSTIN locally: India Compliance installed AND its autofill
+	API usable. Guards the IC import behind the installed-apps check. Fail-safe False on any error."""
+	try:
+		if "india_compliance" not in frappe.get_installed_apps():
+			return False
+		return _ic_autofill_usable()
+	except Exception:
+		return False
+
+
+def _raw_gstin_info(gstin: str):
+	"""Thin seam over IC's in-process GSTIN lookup (lazy import). Isolated so tests stub it without
+	IC installed. IC's _get_gstin_info validates BEFORE its throw_error guard, so a malformed GSTIN
+	raises here regardless — the caller wraps it."""
+	from india_compliance.gst_india.utils import gstin_info as _ic
+
+	return _ic._get_gstin_info(gstin, throw_error=False)
+
+
+@frappe.whitelist()
+def gstin_autofill_available() -> dict:
+	"""Whether to offer the onboarding GSTIN 'Fetch details' button on this site."""
+	require_jarvis_admin()
+	return {"available": _gstin_autofill_available()}
+
+
+@frappe.whitelist()
+def gstin_autofill(gstin: str) -> dict:
+	"""Prefill billing party details from a GSTIN via THIS site's own India Compliance.
+
+	Fail-open: `{found: True, ...party...}` on success, else a soft `{found: False, reason}`
+	(invalid | not_found | unavailable), or `{available: False}` where IC's autofill isn't usable —
+	the onboarding form always falls back to manual entry, never blocking signup."""
+	require_jarvis_admin()
+	if not _gstin_autofill_available():
+		return {"available": False}
+	# The whole lookup+mapping is wrapped so "fail-open" is total: a malformed GSTIN raises inside
+	# _raw_gstin_info (validate runs before IC's throw_error guard) -> invalid; a GSP/mapping fault
+	# -> unavailable. Never a 500 to the form.
+	try:
+		info = _raw_gstin_info(gstin)
+		if not info or not info.get("gstin"):
+			return {"found": False, "reason": "unavailable"}
+		if (info.get("status") or "") == "Invalid":
+			return {"found": False, "reason": "not_found"}
+		return _gstin_contract(info)
+	except frappe.ValidationError:
+		frappe.clear_last_message()
+		return {"found": False, "reason": "invalid"}
+	except Exception:
+		frappe.clear_last_message()
+		return {"found": False, "reason": "unavailable"}
+
+
+def _gstin_contract(info) -> dict:
+	addr = info.get("permanent_address") or None
+	out = {
+		"found": True,
+		"gstin": info.get("gstin"),
+		"status": info.get("status"),
+		"business_name": _clean_registry_value(info.get("business_name"), _GSTIN_MAXLEN["business_name"]),
+		"gst_category": info.get("gst_category"),
+		"address": None,
+	}
+	if addr:
+		out["address"] = {
+			"address_line1": _clean_registry_value(addr.get("address_line1"), _GSTIN_MAXLEN["address_line1"]),
+			"address_line2": _clean_registry_value(addr.get("address_line2"), _GSTIN_MAXLEN["address_line2"]),
+			"city": _clean_registry_value(addr.get("city"), _GSTIN_MAXLEN["city"]),
+			# raw IC state string; the onboarding client resolves it to a valid State option (GSTIN-first)
+			"state": _clean_registry_value(addr.get("state"), _GSTIN_MAXLEN["state"]),
+			"pincode": _clean_registry_value(addr.get("pincode"), _GSTIN_MAXLEN["pincode"]),
+			"country": "India",
+		}
+	return out
+
+
+def _clean_registry_value(value, maxlen):
+	"""Strip the Unicode categories a party save rejects and clamp to `maxlen` (after stripping)."""
+	if not value:
+		return value
+	cleaned = "".join(ch for ch in str(value) if unicodedata.category(ch) not in _STRIP_CATEGORIES)
+	return cleaned.strip()[:maxlen]
 
 
 @frappe.whitelist()

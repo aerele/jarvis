@@ -133,6 +133,12 @@ export const workspaceResetState = () => call("jarvis.onboarding.workspace_reset
 export const resetOnboarding = (wipeData = true) =>
 	call("jarvis.onboarding.reset_onboarding", { wipe_data: wipeData ? 1 : 0 });
 
+// GSTIN party autofill on the Details step, using THIS site's own India Compliance (offered only
+// where its lookup API is usable). `available` gates the button; `gstin_autofill` returns the party
+// details ({found, ...}) or a soft miss — the form always falls back to manual entry.
+export const gstinAutofillAvailable = () => call("jarvis.onboarding.gstin_autofill_available");
+export const gstinAutofill = (gstin) => call("jarvis.onboarding.gstin_autofill", { gstin });
+
 // --- Per-user chat settings + real (measured) usage tracking, incl. the
 // tenant-admin usage table (design doc §4/§6). All return the house
 // {ok, data} / {ok:false, reason} envelope — unlike getUsage above, which is

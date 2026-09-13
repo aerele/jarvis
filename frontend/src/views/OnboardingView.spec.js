@@ -34,6 +34,9 @@ const api = vi.hoisted(() => ({
 	getAccountDefaults: vi.fn(async () => ({})),
 	captureOnboardingLead: vi.fn(async () => ({ ok: true })),
 	getTermsUrl: vi.fn(async () => ({ url: "" })),
+	// Capability probe fires on entering Details; default "unavailable" keeps the Fetch button hidden.
+	gstinAutofillAvailable: vi.fn(async () => ({ available: false })),
+	gstinAutofill: vi.fn(async () => ({ found: false, reason: "unavailable" })),
 	onboardingPaymentApi: {
 		getOnboardingState: vi.fn(async () => ENVELOPE({ code: "BENCH_NO_SIGNUP_CONTEXT" })),
 		startSignup: vi.fn(),
