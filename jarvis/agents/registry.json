@@ -1834,6 +1834,12 @@
         "Purchase Receipt",
         "Company"
       ],
+      "config_keys": [
+        "ageing.stale_floor_days",
+        "ageing.advance_floor_days",
+        "ageing.grir_floor_days",
+        "ageing.band_edges"
+      ],
       "rule_tokens": [
         "grir_itc_s16_4_window",
         "vl-adv-ageing-3d92",
