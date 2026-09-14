@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
 	COUNTRIES,
+	INDIAN_STATES,
 	isIndia,
 	isValidIndianState,
 	canonicalCountry,
+	canonicalIndianState,
 	isValidCountry,
 } from "./indianStates.js";
 
@@ -73,5 +75,33 @@ describe("canonicalCountry / isValidCountry", () => {
 		expect(isValidCountry("Türkiye")).toBe(true);
 		expect(isValidCountry("India")).toBe(true);
 		expect(isValidCountry(COUNTRIES[COUNTRIES.length - 1])).toBe(true);
+	});
+});
+
+// canonicalIndianState: a GSTIN autofill must land a value the State <select> can show, or blank.
+// India Compliance's state (titlecase of the registry stcd) may differ in spelling from our list.
+describe("canonicalIndianState", () => {
+	it("returns the exact option for a case-insensitive match", () => {
+		expect(canonicalIndianState("KARNATAKA")).toBe("Karnataka");
+		expect(canonicalIndianState("tamil nadu")).toBe("Tamil Nadu");
+		// every canonical option resolves to itself
+		for (const s of INDIAN_STATES) expect(canonicalIndianState(s)).toBe(s);
+	});
+
+	it("resolves known IC/registry aliases to the list's spelling", () => {
+		expect(canonicalIndianState("Lakshadweep Islands")).toBe("Lakshadweep");
+		expect(canonicalIndianState("Daman and Diu")).toBe(
+			"Dadra and Nagar Haveli and Daman and Diu"
+		);
+		expect(canonicalIndianState("Pondicherry")).toBe("Puducherry");
+	});
+
+	it("returns '' on no confident match or empty (never an unshowable value)", () => {
+		expect(canonicalIndianState("Freedonia")).toBe("");
+		expect(canonicalIndianState("")).toBe("");
+		expect(canonicalIndianState(null)).toBe("");
+		// the resolved value, when non-empty, is always a real select option
+		const r = canonicalIndianState("karnataka");
+		expect(r === "" || isValidIndianState(r)).toBe(true);
 	});
 });
