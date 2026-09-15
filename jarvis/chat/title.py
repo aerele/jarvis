@@ -14,9 +14,10 @@ ChatGPT and agent do it. This mirrors agent's own ``generateThreadTitle``
 agent runs this through a cheap "simple completion" model. We don't have a
 separate completion surface in managed mode (device-paired WS only), so we run
 a throwaway agent turn on its own session_key — it never touches the visible
-conversation. Best-effort throughout: any failure falls back to a cleaned-up
-first message (agent's ``deriveSessionTitle`` fallback) and never breaks the
-chat turn that triggered it.
+conversation. Best-effort throughout: the model itself decides greeting-vs-topic
+(it answers ``SKIP`` for greetings / small talk in any language), and a greeting
+or any failure simply leaves the chat "New chat" to be retried on the next turn —
+we never guess a title, and it never breaks the chat turn that triggered it.
 """
 
 from __future__ import annotations
@@ -73,12 +74,35 @@ _GREETINGS = {
 # user-message agent turn (our managed gateway runs the persona agent, so we
 # spell out "no tools / only the title" explicitly).
 _TITLE_PROMPT = (
-	"Generate a concise title of 3 to 6 words that summarises what this "
-	"conversation is about, based on the user's opening message below.\n"
-	"Return ONLY the title text — no surrounding quotes, no markdown, no "
-	"trailing punctuation, no preamble, and do not call any tools.\n\n"
-	"Opening message:\n{msg}"
+	"Generate a concise title of 3 to 6 words naming the concrete topic or task of this "
+	"conversation, based on the user's opening messages below (which may be in any language).\n"
+	"If the messages are ONLY greetings or small talk with no real topic or task yet — in ANY "
+	"language — respond with exactly: SKIP\n"
+	"Otherwise return ONLY the title text — no surrounding quotes, no markdown, no trailing "
+	"punctuation, no preamble, do not describe it as a greeting/casual chat, and do not call "
+	"any tools.\n\n"
+	"Opening messages:\n{msg}"
 )
+
+# Sentinel the model returns when the opening message has no real topic yet (see _TITLE_PROMPT).
+_SKIP_SENTINEL = "SKIP"
+
+# A generated title that is itself a generic "this was a greeting / small talk" label is worse than
+# no title: a greeting conversation should stay "New chat" until it has a real topic. So reject these
+# on OUTPUT too — the belt to the prompt's SKIP braces, catching the variants that slip the input
+# guard ("hi how are you", "heyyy", an emoji) and come back as e.g. "Casual Greeting Conversation".
+_GENERIC_TITLE_RE = re.compile(
+	r"^\W*(casual\s+|friendly\s+|general\s+|quick\s+)?"
+	r"(greeting|hello|hi|hey|salutation|small[\s-]*talk|chit[\s-]*chat|casual)s?"
+	r"(\s+(conversation|chat|exchange|message|greeting|talk|session))?\W*$",
+	re.IGNORECASE,
+)
+
+
+def _is_generic_title(title: str) -> bool:
+	"""True for a meaningless meta-title ('Greetings', 'Casual Greeting Conversation', 'Small Talk',
+	'Hello') that a greeting turn tends to produce — better to stay 'New chat' than seed one."""
+	return bool(_GENERIC_TITLE_RE.match((title or "").strip()))
 
 
 # A credential/provider-auth fault on the PINNED title/suggestions lane (#531
@@ -134,9 +158,10 @@ def _log_pinned_lane_auth_fault(lane: str, detail: str, *, model: str | None, pr
 	``jarvis.error_push`` already forwards every jarvis-origin Error Log row
 	to, on its */5 cron) can key on this one instead of it drowning among
 	ordinary swallowed gateway blips. Still best-effort and additive only:
-	the lane's own fallback (derive_title / the previous suggestions strip)
-	runs exactly as it does for any other failure - this never changes what
-	the customer sees, it only adds the operator signal (#738).
+	the lane behaves on failure exactly as it does for any other failure
+	(title: stay "New chat", retry next turn; suggestions: the previous strip)
+	- this never changes what the customer sees, it only adds the operator
+	signal (#738).
 
 	The dotted ``jarvis.chat.<lane>:`` title is load-bearing on the
 	lifecycle-error path (no traceback to key off), where
@@ -201,35 +226,33 @@ def normalize_title(raw: str | None) -> str:
 	return current[:_TITLE_MAX_LEN]
 
 
-def derive_title(text: str) -> str:
-	"""Deterministic fallback (agent ``deriveSessionTitle``): the first line
-	of the opening message, unwrapped + capped. Used only when LLM generation
-	fails, so the chat never gets stuck on "New chat"."""
-	return normalize_title(_clean(text)) or _clean(text)[:_TITLE_MAX_LEN]
+def _opening_user_messages(conversation_id: str, *, limit: int = 6) -> str:
+	"""The first few user messages, cleaned + joined, for the titler to summarise or SKIP.
 
-
-def _first_substantive_user_message(conversation_id: str) -> str | None:
-	"""The earliest user message that isn't a bare greeting, or None if the
-	conversation so far is greetings only (title later, once a real prompt lands)."""
+	Feeds the whole opening exchange (not a single 'first substantive' message) so the model can
+	find the real topic even when it follows a greeting, and decide greeting-vs-topic ITSELF — in
+	any language — rather than us pre-filtering against a hardcoded English greeting list. Returns
+	"" when there is no user message yet."""
 	rows = frappe.get_all(
 		MSG,
 		filters={"conversation": conversation_id, "role": "user"},
 		fields=["content"],
 		order_by="seq asc",
-		limit_page_length=6,
+		limit_page_length=limit,
 	)
+	parts = []
 	for r in rows:
 		c = _clean(r.get("content"))
 		# Strip the trailing "📎 name" attachment marker send_message appends.
 		c = re.sub(r"\n*📎.*$", "", c).strip()
-		if c and not _is_greeting(c):
-			return c
-	return None
+		if c:
+			parts.append(c)
+	return "\n".join(parts)
 
 
 def _generate_via_gateway(gateway_url, source_text, *, model, provider) -> str:
 	"""Run a silent throwaway agent turn to summarise the opening message into a
-	title. Returns "" on any failure (caller falls back to derive_title)."""
+	title. Returns "" on any failure (caller leaves the chat "New chat")."""
 	from jarvis.chat import agent_session_pool
 	from jarvis.chat.agent_client import oneshot_run_id
 	from jarvis.chat.session_lifecycle import reclaim_throwaway_session
@@ -375,17 +398,21 @@ def maybe_autotitle(conversation_id: str, user: str, *, gateway_url, model, prov
 	if title and title != "New chat":
 		return  # user renamed it, or we already titled it
 
-	source = _first_substantive_user_message(conversation_id)
+	source = _opening_user_messages(conversation_id)
 	if not source:
-		return  # greetings only so far — title on the next real prompt
+		return  # no user message yet
 
-	new_title = _generate_via_gateway(
-		gateway_url,
-		source,
-		model=model,
-		provider=provider,
-	) or derive_title(source)
-	if not new_title or new_title == title:
+	new_title = _generate_via_gateway(gateway_url, source, model=model, provider=provider)
+	# ONLY a real title from the model names the chat. SKIP / a generic greeting label / an empty
+	# result (a title-model failure) all leave the chat "New chat", retried on the next turn — so a
+	# greeting is NEVER titled, even during a title-model outage, and no deterministic fallback
+	# guesses one; a real chat simply gets its title once the model answers.
+	if (
+		not new_title
+		or new_title.strip().upper() == _SKIP_SENTINEL
+		or _is_generic_title(new_title)
+		or new_title == title
+	):
 		return
 
 	frappe.db.set_value(CONV, conversation_id, "title", new_title)
