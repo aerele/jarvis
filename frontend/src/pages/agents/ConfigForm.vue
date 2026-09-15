@@ -59,6 +59,7 @@
 					type="number"
 					:label="f.label"
 					:description="f.help"
+					:placeholder="f.placeholder"
 					:modelValue="form[f.key]"
 					@update:modelValue="(v) => (form[f.key] = v)"
 				>

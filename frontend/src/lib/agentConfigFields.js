@@ -102,7 +102,8 @@ export const CONFIG_FIELD_SET = [
 		label: "Stale-invoice floor",
 		type: "number",
 		suffix: "days",
-		help: "An unpaid invoice open more than this many days past its due date is flagged stale. Default 30.",
+		placeholder: "30",
+		help: "An unpaid invoice open more than this many days past its due date is flagged stale.",
 	},
 	{
 		key: "advance_floor_days",
@@ -110,7 +111,8 @@ export const CONFIG_FIELD_SET = [
 		label: "Unlinked-advance floor",
 		type: "number",
 		suffix: "days",
-		help: "A supplier advance left unlinked to an invoice longer than this is surfaced. Default 30.",
+		placeholder: "30",
+		help: "A supplier advance left unlinked to an invoice longer than this is surfaced.",
 	},
 	{
 		key: "grir_floor_days",
@@ -118,7 +120,8 @@ export const CONFIG_FIELD_SET = [
 		label: "Received-not-billed floor",
 		type: "number",
 		suffix: "days",
-		help: "A goods-received-not-billed line older than this is surfaced. Default 30.",
+		placeholder: "30",
+		help: "A goods-received-not-billed line older than this is surfaced.",
 	},
 ];
 
