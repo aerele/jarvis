@@ -192,3 +192,47 @@ class TestGetMyAccess(FrappeTestCase):
 		self._as(ROLED_USER)
 		with self.assertRaises(InvalidArgumentError):
 			get_my_access(doctypes="User")
+
+	# --- per-record, User-Permission-aware projection ("can I do X to THIS record?") ---
+
+	def test_no_docs_arg_omits_can_doc(self):
+		self._as(ROLED_USER)
+		self.assertNotIn("can_doc", get_my_access())
+
+	def test_can_doc_reports_record_actions(self):
+		# Administrator can act on any record; "User" is not submittable -> no submit/cancel.
+		self._as("Administrator")
+		out = get_my_access(docs=[{"doctype": "User", "name": "Administrator"}])
+		self.assertIn("can_doc", out)
+		entry = out["can_doc"][0]
+		self.assertEqual(entry["doctype"], "User")
+		self.assertEqual(entry["name"], "Administrator")
+		self.assertEqual(set(entry["can"]), {"read", "write", "delete"})  # no create; not submittable
+		self.assertTrue(all(entry["can"].values()))
+
+	def test_can_doc_is_user_permission_aware(self):
+		# The record-level answer MUST go through has_permission WITH the doc — per
+		# frappe.permissions that is exactly what applies User Permissions / DocShare /
+		# owner rules (a doc-less check is role-only). Pin that the doc is passed.
+		self._as(ROLED_USER)
+		with patch.object(gma_mod.frappe, "has_permission", return_value=True) as hp:
+			get_my_access(docs=[{"doctype": "User", "name": "Administrator"}])
+		self.assertTrue(
+			any(c.kwargs.get("doc") == "Administrator" for c in hp.call_args_list),
+			"record capability check must pass doc= so User Permissions are applied",
+		)
+
+	def test_unknown_doc_record_raises(self):
+		self._as(ROLED_USER)
+		with self.assertRaises(InvalidArgumentError):
+			get_my_access(docs=[{"doctype": "User", "name": "no-such-user-zzz@example.com"}])
+
+	def test_docs_entry_must_be_an_object(self):
+		self._as(ROLED_USER)
+		with self.assertRaises(InvalidArgumentError):
+			get_my_access(docs=["User"])
+
+	def test_too_many_docs_raises(self):
+		self._as(ROLED_USER)
+		with self.assertRaises(InvalidArgumentError):
+			get_my_access(docs=[{"doctype": "User", "name": "Administrator"}] * (gma_mod._MAX_DOCTYPES + 1))
