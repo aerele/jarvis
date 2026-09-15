@@ -2,10 +2,13 @@
 bounded call. Self-scoped — it never reports another user's access (no privilege
 probing), and it drops the base All/Guest roles."""
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.permissions import ensure_jarvis_user_role
+from jarvis.tools import get_my_access as gma_mod
 from jarvis.tools.get_my_access import get_my_access
 
 ROLED_USER = "jarvis-access-roled@example.com"
@@ -107,3 +110,38 @@ class TestGetMyAccess(FrappeTestCase):
 		self._as(ROLED_USER)
 		out = get_my_access()
 		self.assertEqual(out["restrictions"], [], "another user's restriction leaked into my access")
+
+	def _only_restriction(self):
+		out = get_my_access()
+		self.assertEqual(len(out["restrictions"]), 1)
+		return out["restrictions"][0]
+
+	def test_tree_doctype_permission_reports_descendant_scope(self):
+		# On a tree DocType, a node permission covers the subtree by default — the
+		# response must say so, else "node only" and "node + subtree" look identical.
+		self._as(ROLED_USER)
+		name = _user_permission(ROLED_USER, "User", OTHER_USER)  # hide_descendants defaults to 0
+		self.addCleanup(
+			lambda: frappe.delete_doc("User Permission", name, force=True, ignore_permissions=True)
+		)
+		with patch.object(gma_mod, "_is_tree_doctype", return_value=True):
+			self.assertTrue(self._only_restriction()["includes_descendants"])
+
+	def test_hide_descendants_narrows_the_scope_to_the_node(self):
+		self._as(ROLED_USER)
+		name = _user_permission(ROLED_USER, "User", OTHER_USER)
+		frappe.db.set_value("User Permission", name, "hide_descendants", 1)
+		self.addCleanup(
+			lambda: frappe.delete_doc("User Permission", name, force=True, ignore_permissions=True)
+		)
+		with patch.object(gma_mod, "_is_tree_doctype", return_value=True):
+			self.assertFalse(self._only_restriction()["includes_descendants"])
+
+	def test_non_tree_permission_omits_descendant_scope(self):
+		# "User" is not a nested-set DocType, so the descendant flag is meaningless and absent.
+		self._as(ROLED_USER)
+		name = _user_permission(ROLED_USER, "User", OTHER_USER)
+		self.addCleanup(
+			lambda: frappe.delete_doc("User Permission", name, force=True, ignore_permissions=True)
+		)
+		self.assertNotIn("includes_descendants", self._only_restriction())
