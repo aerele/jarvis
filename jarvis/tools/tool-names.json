@@ -18,7 +18,11 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
+<<<<<<< HEAD
   "digest": "sha256:1fb1a5fd9068e9c81c140a50b27f730aad04e6c6c294424bf378fb5ecc3632ca",
+=======
+  "digest": "sha256:3181a94016964f5d0c05c5a4c52472655d4d6af806096201fd8874d7d0f87e22",
+>>>>>>> 4f60a48 (fix(chat): answer "what permissions do I have" from context + get_my_access tool)
   "tools": [
     "add_comment",
     "add_tag",
@@ -56,6 +60,7 @@
     "get_leaves_for_period",
     "get_linked_docs",
     "get_list",
+    "get_my_access",
     "get_naming_series_preview",
     "get_party_dashboard_info",
     "get_report_filters",

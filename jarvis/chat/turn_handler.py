@@ -629,6 +629,33 @@ def persona_feature_enabled() -> bool:
 	return _jarvis_settings_flag_null_on("persona_enabled")
 
 
+# Identity / permission turns: only THESE get the user's name + role list folded
+# into the bracket (below). Every other turn pays zero extra tokens and carries
+# just the bare id, exactly as before — the roles are needed only to answer "who
+# am I" / "what can I do", and a permission question phrased outside these triggers
+# still has the bounded get_my_access tool as its fallback (never an open lookup).
+_IDENTITY_TRIGGERS = ("permission", "role", "access", "who am i", "what can i", "am i allowed", "my rights")
+
+
+def _chat_user_identity(user: str, user_message: str) -> str:
+	"""The bracket's ``chat user:`` value. Normally just the Frappe id (the
+	dispatcher identity anchor). On an identity / permission turn ONLY, enrich it
+	with the full name + meaningful roles so the agent answers straight from context
+	— one line, no lookup (persona TOOLS.md) — instead of improvising an unbounded
+	permission lookup that runs into the turn wall-clock. Base All/Guest dropped."""
+	if not any(t in (user_message or "").lower() for t in _IDENTITY_TRIGGERS):
+		return user
+	try:
+		full = frappe.db.get_value("User", user, "full_name") or ""
+		roles = [r for r in sorted(frappe.get_roles(user)) if r not in ("All", "Guest")]
+	except Exception:
+		# Never let an identity lookup break the turn; fall back to the bare id.
+		return user
+	role_str = ", ".join(roles) if roles else "no special roles"
+	name_part = f"{full}; " if full and full != user else ""
+	return f"{user} ({name_part}roles: {role_str})"
+
+
 def _persona_clause(chat_user: str) -> str:
 	"""Per-user persona voice folded into the trusted [Context:] line so the agent
 	adopts the chosen voice (AGENTS.md "Personas"). ONLY the non-default persona is
@@ -891,7 +918,11 @@ def assemble_prompt(
 		# (skill_clause) stays intentional and is not demoted. The
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
+<<<<<<< HEAD
 		f"[Context: today is {today}{locale_clause}{assistant_name_clause}{persona_clause}; chat user: {chat_user}"
+=======
+		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
+>>>>>>> 4f60a48 (fix(chat): answer "what permissions do I have" from context + get_my_access tool)
 		f"; conv: {conversation_id}{auto_apply}{armed_run}{autorun_run}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
