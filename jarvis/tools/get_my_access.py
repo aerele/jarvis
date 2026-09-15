@@ -17,11 +17,19 @@ from __future__ import annotations
 
 import frappe
 
+from jarvis.exceptions import InvalidArgumentError
+
 # Base roles every user carries — noise, never part of "my permissions".
 _BASE_ROLES = ("All", "Guest")
 # Cap the restriction list like get_list's ROW_GUARD: a summary, not a dump. A
 # user with more than this many User Permission rows gets the first page + a flag.
 _MAX_RESTRICTIONS = 200
+# Cap the per-call capability probe so one call can't fan out into a huge
+# permission sweep (each doctype = a few has_permission checks + a meta read).
+_MAX_DOCTYPES = 20
+# The doctype-level actions worth reporting, mapped to the write tool each gates.
+# submit/cancel are added only for submittable DocTypes (see _capabilities).
+_BASE_PTYPES = ("create", "read", "write", "delete")
 
 
 def _is_tree_doctype(doctype: str) -> bool:
@@ -34,8 +42,20 @@ def _is_tree_doctype(doctype: str) -> bool:
 		return False
 
 
-def get_my_access() -> dict:
-	"""Return the calling user's roles + record-level restrictions.
+def _capabilities(doctype: str, user: str) -> dict:
+	"""The calling user's doctype-level (role-based) actions on ``doctype`` —
+	the "can I create / submit / ... this?" answer the write tools pre-flight on.
+	Ignores record-level User Permissions (those are the separate ``restrictions``
+	summary); submit/cancel only for a submittable DocType."""
+	ptypes = list(_BASE_PTYPES)
+	if frappe.get_meta(doctype).is_submittable:
+		ptypes += ["submit", "cancel"]
+	return {pt: bool(frappe.has_permission(doctype, ptype=pt, user=user)) for pt in ptypes}
+
+
+def get_my_access(doctypes: list[str] | None = None) -> dict:
+	"""Return the calling user's roles + record-level restrictions, and optionally
+	the doctype-level actions they can take on named DocTypes.
 
 	Shape::
 
@@ -45,6 +65,7 @@ def get_my_access() -> dict:
 	      "is_system_manager": bool,      # System Manager / Administrator
 	      "restrictions": [{"doctype", "value", "applies_to", "includes_descendants"?}...],
 	      "restriction_count": N, "restrictions_truncated": bool,
+	      "can": {"<DocType>": {"create", "read", "write", "delete", "submit"?, "cancel"?}},
 	    }
 
 	``restrictions`` are the user's User Permission rows — each limits the records
@@ -53,6 +74,11 @@ def get_my_access() -> dict:
 	``includes_descendants`` (the permission covers ``value``'s whole subtree, not
 	just that node, unless it is False). An empty list means no record-level
 	restriction: access is governed by roles alone.
+
+	Pass ``doctypes`` (max 20) to also get ``can`` — the role-based action map per
+	DocType (so "can I create a Sales Invoice?" is one deterministic call instead of
+	drafting a write that dies at save). Omitted entirely when ``doctypes`` is not
+	given, so the plain "my access" call stays lean.
 	"""
 	user = frappe.session.user
 	full_name = frappe.db.get_value("User", user, "full_name") or ""
@@ -82,7 +108,7 @@ def get_my_access() -> dict:
 			entry["includes_descendants"] = not r.hide_descendants
 		restrictions.append(entry)
 
-	return {
+	result = {
 		"user": user,
 		"full_name": full_name,
 		"roles": roles,
@@ -92,3 +118,17 @@ def get_my_access() -> dict:
 		"restriction_count": len(restrictions),
 		"restrictions_truncated": truncated,
 	}
+
+	if doctypes is not None:
+		if not isinstance(doctypes, (list, tuple)):
+			raise InvalidArgumentError("doctypes must be a list of DocType names")
+		if len(doctypes) > _MAX_DOCTYPES:
+			raise InvalidArgumentError(f"at most {_MAX_DOCTYPES} doctypes per call")
+		can = {}
+		for dt in doctypes:
+			if not isinstance(dt, str) or not frappe.db.exists("DocType", dt):
+				raise InvalidArgumentError(f"unknown DocType: {dt!r}")
+			can[dt] = _capabilities(dt, user)
+		result["can"] = can
+
+	return result
