@@ -6,7 +6,7 @@ seams (_ic_autofill_usable / _raw_gstin_info) so these run WITHOUT India Complia
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
+from frappe.tests.utils import FrappeTestCase
 
 from jarvis import onboarding
 
@@ -38,7 +38,7 @@ def _ic_info(**over):
 	return d
 
 
-class TestGstinAutofillCapability(IntegrationTestCase):
+class TestGstinAutofillCapability(FrappeTestCase):
 	def tearDown(self):
 		frappe.set_user("Administrator")
 
@@ -64,7 +64,7 @@ class TestGstinAutofillCapability(IntegrationTestCase):
 			self.assertEqual(onboarding.gstin_autofill_available(), {"available": True})
 
 
-class TestGstinAutofillGate(IntegrationTestCase):
+class TestGstinAutofillGate(FrappeTestCase):
 	def tearDown(self):
 		frappe.set_user("Administrator")
 
@@ -79,7 +79,7 @@ class TestGstinAutofillGate(IntegrationTestCase):
 			onboarding.gstin_autofill(GOOD)
 
 
-class TestGstinAutofillLookup(IntegrationTestCase):
+class TestGstinAutofillLookup(FrappeTestCase):
 	def tearDown(self):
 		frappe.set_user("Administrator")
 
