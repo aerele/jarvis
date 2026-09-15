@@ -28,6 +28,10 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"describe_customizations",
 	"get_doc",
 	"get_list",
+	# The calling user's own roles + record-level User Permission restrictions,
+	# in one bounded call — the deep-detail answer to "what can I do here" (the
+	# bracket already carries roles for the one-line answer). Read-only, self-scoped.
+	"get_my_access",
 	# Creation context assembler: field map (mandatory/auto/readonly) + the
 	# existing records most similar to the one being created, so the agent
 	# decides field values from real examples instead of interrogating the
