@@ -396,6 +396,40 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertEqual(frappe.db.get_value(RUN, run, "owner"), self.owner)
 
 	# ------------------------------------------------------------------ #
+	# (d2) jarvis#1063: declared config_keys are DELIVERED in the run message
+	# ------------------------------------------------------------------ #
+	def test_audit_prompt_hands_declared_config_in_message(self):
+		# Run.scope_json is a bench-side field that never reaches the container; the run MESSAGE
+		# is the only bench->delegate channel. So an agent's DECLARED config_keys values must ride
+		# the message as EXPLICIT CONFIG, filtered to declared namespaces (never the whole config),
+		# so the evaluator gets them without the delegate reading its own installation.
+		listing = frappe._dict(
+			{"name": "vl", "config_keys": ["ageing.stale_floor_days", "ageing.band_edges"]}
+		)
+		inst = frappe._dict(
+			{
+				"name": "INST-1",
+				"config": frappe.as_json(
+					{
+						"ageing": {"stale_floor_days": 45},
+						"materiality": {"percentage": 5},  # NOT in this agent's config_keys
+						"company": "X",  # a scope key, not a tunable
+					}
+				),
+			}
+		)
+		msg = agent_scheduler._audit_prompt(listing, inst, trigger="manual", scope={})
+		self.assertIn("EXPLICIT CONFIG", msg)
+		self.assertIn('"stale_floor_days": 45', msg)  # declared ageing tunable handed
+		self.assertNotIn("percentage", msg)  # non-declared namespace filtered out
+		self.assertNotIn('"company"', msg.split("EXPLICIT CONFIG", 1)[1])  # non-declared filtered
+		# an agent declaring NO config_keys gets no EXPLICIT CONFIG (points to its installation).
+		bare = frappe._dict({"name": "y", "config_keys": []})
+		self.assertNotIn(
+			"EXPLICIT CONFIG", agent_scheduler._audit_prompt(bare, inst, trigger="manual", scope={})
+		)
+
+	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner
 	# ------------------------------------------------------------------ #
 	def test_run_executes_as_run_as_user_not_owner(self):
