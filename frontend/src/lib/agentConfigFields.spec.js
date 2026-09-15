@@ -13,7 +13,7 @@ import {
 } from "./agentConfigFields";
 
 describe("CONFIG_FIELD_SET", () => {
-	it("covers exactly the 8 keys the run path reads (agent_scope.py + set_config docstring)", () => {
+	it("covers exactly the 11 keys the run path reads (scope + agent config_keys)", () => {
 		expect([...KNOWN_CONFIG_KEYS].sort()).toEqual(
 			[
 				"company",
@@ -24,11 +24,14 @@ describe("CONFIG_FIELD_SET", () => {
 				"percentage",
 				"engagement_risk_level",
 				"rounding_step",
+				"stale_floor_days",
+				"advance_floor_days",
+				"grir_floor_days",
 			].sort()
 		);
 	});
 
-	it("orders Company, Fiscal year, the date pair, benchmark, percentage, risk, rounding", () => {
+	it("orders scope, the materiality set, then the vendor-ledger ageing floors", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"company",
@@ -38,6 +41,9 @@ describe("CONFIG_FIELD_SET", () => {
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"stale_floor_days",
+			"advance_floor_days",
+			"grir_floor_days",
 		]);
 	});
 
@@ -54,9 +60,16 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(field.options.map((o) => o.value)).toEqual(["", "low", "medium", "high"]);
 	});
 
-	it("only benchmark_value/percentage/rounding_step are numeric", () => {
+	it("the materiality amounts and the ageing floors are numeric", () => {
 		expect(NUMBER_CONFIG_KEYS.sort()).toEqual(
-			["benchmark_value", "percentage", "rounding_step"].sort()
+			[
+				"benchmark_value",
+				"percentage",
+				"rounding_step",
+				"stale_floor_days",
+				"advance_floor_days",
+				"grir_floor_days",
+			].sort()
 		);
 	});
 
@@ -79,12 +92,15 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 		]);
 	});
 
-	it("agent-specific is exactly the close-auditor materiality/risk/rounding set", () => {
+	it("agent-specific is the close-auditor materiality set plus the vendor-ledger ageing floors", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"benchmark_value",
 			"percentage",
 			"engagement_risk_level",
 			"rounding_step",
+			"stale_floor_days",
+			"advance_floor_days",
+			"grir_floor_days",
 		]);
 	});
 
