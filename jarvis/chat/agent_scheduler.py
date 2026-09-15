@@ -33,6 +33,7 @@ review:
 trigger takes the EXACT same code path as the scheduler.
 """
 
+import json
 import time
 from datetime import timedelta
 
@@ -1387,6 +1388,29 @@ def _permission_profile(user: str) -> str:
 	return json.dumps({"hash": digest, **summary})
 
 
+def _explicit_config(listing, inst) -> dict:
+	"""The tenant's declared ``config_keys`` values, filtered to the TOP-LEVEL namespaces the
+	listing declares (e.g. config_keys ``['ageing.stale_floor_days', ...]`` -> the ``ageing``
+	object), so ONLY declared tunables are handed to the delegate - never the whole config, and
+	never a non-declared key a user typed into the advanced-JSON box. Empty when the agent
+	declares no config_keys or the installation has no config."""
+	keys = listing.get("config_keys")
+	try:
+		keys = frappe.parse_json(keys) if isinstance(keys, str) else (keys or [])
+	except Exception:
+		keys = []
+	namespaces = {str(k).split(".", 1)[0] for k in keys if k}
+	if not namespaces or not inst.get("config"):
+		return {}
+	try:
+		full = frappe.parse_json(inst.config) or {}
+	except Exception:
+		return {}
+	if not isinstance(full, dict):
+		return {}
+	return {k: full[k] for k in namespaces if k in full}
+
+
 def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str:
 	"""The GENERIC, non-leaky run message handed to the delegate (A2/A6).
 
@@ -1420,10 +1444,34 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			f'prior_fy_start="{scope.get("prior_fy_start")}", '
 			f'prior_fy_end="{scope.get("prior_fy_end")}".'
 		)
+	# EXPLICIT CONFIG (jarvis#1063 delivery): the tenant's declared config_keys values, HANDED
+	# to the delegate so its evaluator receives them DETERMINISTICALLY. Filtered to the declared
+	# namespaces (never the whole config); absent when the agent declares no config_keys. The
+	# delegate spills this JSON verbatim into config.json - it does NOT read its own installation
+	# for these tunables. Note ``Run.scope_json`` is a bench-side field that never reaches the
+	# container; the run MESSAGE is the only bench->delegate channel, so config must ride HERE.
+	explicit_config = _explicit_config(listing, inst)
+	if explicit_config:
+		# ADDITIVE, never a replacement: config.json legitimately carries fields the delegate
+		# fetches or derives at run time (e.g. balances, or a run-as permission set used to
+		# degrade a class to not_evaluable). So these declared tunables must be MERGED into the
+		# config.json the skill builds, not made its whole contents - "do not re-read your
+		# installation" is scoped to THESE values only, so a delegate can't drop the rest.
+		scope_block += (
+			"\n\nEXPLICIT CONFIG (your tenant's engagement tunables, authoritative): INCLUDE these "
+			"values in the config.json you build for your evaluator and USE them exactly - you need "
+			"not read your installation to obtain THESE values. Keep every other field your skill "
+			f"builds into config.json. {json.dumps(explicit_config, sort_keys=True)}"
+		)
+	config_pointer = (
+		"Your tenant's engagement tunables are handed below (authoritative) - use them exactly and "
+		"build the rest of your config.json as your skill directs."
+		if explicit_config
+		else f"Your engagement configuration is on your installation ({inst.name}); read it there."
+	)
 	return (
 		f"[Automated {trigger} run] Run your bundled playbook for this trigger now over "
-		f"the scope below. Your engagement configuration is on your installation "
-		f"({inst.name}); read it there. Follow your skill exactly and do only what it "
+		f"the scope below. {config_pointer} Follow your skill exactly and do only what it "
 		f"authorises."
 		f"{scope_block}"
 	)
