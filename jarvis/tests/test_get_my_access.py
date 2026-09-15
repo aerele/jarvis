@@ -7,6 +7,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.exceptions import InvalidArgumentError
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tools import get_my_access as gma_mod
 from jarvis.tools.get_my_access import get_my_access
@@ -145,3 +146,49 @@ class TestGetMyAccess(FrappeTestCase):
 			lambda: frappe.delete_doc("User Permission", name, force=True, ignore_permissions=True)
 		)
 		self.assertNotIn("includes_descendants", self._only_restriction())
+
+	# --- optional capability projection ("can I do X?") ---
+
+	def test_no_doctypes_arg_omits_can(self):
+		self._as(ROLED_USER)
+		self.assertNotIn("can", get_my_access())
+
+	def test_can_reports_doctype_actions(self):
+		# Administrator can do everything, so the projection is deterministic here.
+		self._as("Administrator")
+		out = get_my_access(doctypes=["User"])
+		self.assertIn("can", out)
+		user_caps = out["can"]["User"]
+		self.assertEqual(set(user_caps), {"create", "read", "write", "delete"})  # User is not submittable
+		self.assertTrue(all(user_caps.values()))  # admin -> all True
+
+	def test_submittable_doctype_reports_submit_and_cancel(self):
+		subm = frappe.get_all("DocType", filters={"is_submittable": 1}, pluck="name", limit=1)
+		if not subm:
+			self.skipTest("no submittable DocType on this site")
+		self._as("Administrator")
+		caps = get_my_access(doctypes=[subm[0]])["can"][subm[0]]
+		self.assertIn("submit", caps)
+		self.assertIn("cancel", caps)
+
+	def test_capabilities_reflect_the_users_roles(self):
+		# Not hardcoded True: a plain Jarvis user cannot create User records; the admin can.
+		self._as(OTHER_USER)  # only the Jarvis User role
+		self.assertFalse(get_my_access(doctypes=["User"])["can"]["User"]["create"])
+		frappe.set_user("Administrator")  # _as already queued the restore cleanup
+		self.assertTrue(get_my_access(doctypes=["User"])["can"]["User"]["create"])
+
+	def test_unknown_doctype_raises(self):
+		self._as(ROLED_USER)
+		with self.assertRaises(InvalidArgumentError):
+			get_my_access(doctypes=["No Such DocType ZZZ"])
+
+	def test_too_many_doctypes_raises(self):
+		self._as(ROLED_USER)
+		with self.assertRaises(InvalidArgumentError):
+			get_my_access(doctypes=["User"] * (gma_mod._MAX_DOCTYPES + 1))
+
+	def test_non_list_doctypes_raises(self):
+		self._as(ROLED_USER)
+		with self.assertRaises(InvalidArgumentError):
+			get_my_access(doctypes="User")
