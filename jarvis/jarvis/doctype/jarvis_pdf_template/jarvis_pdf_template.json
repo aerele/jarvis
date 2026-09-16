@@ -1,0 +1,219 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:template_key",
+ "creation": "2026-09-15 10:00:00",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "template_key",
+  "label",
+  "enabled",
+  "description",
+  "style_section",
+  "accent_color",
+  "dark_color",
+  "style_col",
+  "body_font",
+  "display_font",
+  "layout_section",
+  "masthead_align",
+  "cover",
+  "layout_col",
+  "show_logo",
+  "accent_bar",
+  "watermark",
+  "page_section",
+  "page_size",
+  "orientation",
+  "page_col",
+  "margins_mm",
+  "footer_section",
+  "use_letterhead_footer",
+  "company_letter_heads"
+ ],
+ "fields": [
+  {
+   "description": "Lowercase slug used as the template id (letters, digits, hyphen). Must not collide with a built-in template.",
+   "fieldname": "template_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Template Key",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "label",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Label",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "fieldname": "style_section",
+   "fieldtype": "Section Break",
+   "label": "Style"
+  },
+  {
+   "description": "Primary accent colour (masthead, accent bar). Hex, e.g. #2e7d6b.",
+   "fieldname": "accent_color",
+   "fieldtype": "Color",
+   "label": "Accent Color"
+  },
+  {
+   "description": "Dark shade for headings/rules. Hex.",
+   "fieldname": "dark_color",
+   "fieldtype": "Color",
+   "label": "Dark Color"
+  },
+  {
+   "fieldname": "style_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "sans",
+   "description": "Body text font (from the built-in font catalog).",
+   "fieldname": "body_font",
+   "fieldtype": "Select",
+   "label": "Body Font",
+   "options": "sans\nserif\ninter\nlato\nworksans\nlora\nmerriweather\nptserif"
+  },
+  {
+   "default": "sans",
+   "description": "Title/heading font (from the built-in font catalog).",
+   "fieldname": "display_font",
+   "fieldtype": "Select",
+   "label": "Display Font",
+   "options": "sans\nserif\ninter\nlato\nworksans\nlora\nmerriweather\nptserif"
+  },
+  {
+   "fieldname": "layout_section",
+   "fieldtype": "Section Break",
+   "label": "Layout"
+  },
+  {
+   "default": "left",
+   "fieldname": "masthead_align",
+   "fieldtype": "Select",
+   "label": "Masthead Align",
+   "options": "left\ncenter"
+  },
+  {
+   "default": "auto",
+   "fieldname": "cover",
+   "fieldtype": "Select",
+   "label": "Cover Page",
+   "options": "auto\non\noff"
+  },
+  {
+   "fieldname": "layout_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "show_logo",
+   "fieldtype": "Check",
+   "label": "Show Logo"
+  },
+  {
+   "default": "0",
+   "fieldname": "accent_bar",
+   "fieldtype": "Check",
+   "label": "Accent Bar"
+  },
+  {
+   "description": "Repeating diagonal watermark text (blank = none), e.g. CONFIDENTIAL.",
+   "fieldname": "watermark",
+   "fieldtype": "Data",
+   "label": "Watermark"
+  },
+  {
+   "fieldname": "page_section",
+   "fieldtype": "Section Break",
+   "label": "Page"
+  },
+  {
+   "default": "A4",
+   "fieldname": "page_size",
+   "fieldtype": "Select",
+   "label": "Page Size",
+   "options": "A4\nLetter\nLegal"
+  },
+  {
+   "default": "portrait",
+   "fieldname": "orientation",
+   "fieldtype": "Select",
+   "label": "Orientation",
+   "options": "portrait\nlandscape"
+  },
+  {
+   "fieldname": "page_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "15",
+   "description": "Page margin in millimetres (8-40).",
+   "fieldname": "margins_mm",
+   "fieldtype": "Int",
+   "label": "Margins (mm)"
+  },
+  {
+   "fieldname": "footer_section",
+   "fieldtype": "Section Break",
+   "label": "Letter Head Footer"
+  },
+  {
+   "default": "0",
+   "description": "Render a company Letter Head in the PDF footer, chosen per company below.",
+   "fieldname": "use_letterhead_footer",
+   "fieldtype": "Check",
+   "label": "Use Letter Head In Footer"
+  },
+  {
+   "depends_on": "use_letterhead_footer",
+   "fieldname": "company_letter_heads",
+   "fieldtype": "Table",
+   "label": "Company Letter Heads",
+   "options": "Jarvis PDF Template Company Letter Head"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-09-15 10:00:00",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis PDF Template",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

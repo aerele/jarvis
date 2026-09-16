@@ -70,11 +70,13 @@ class _Recorder:
 		self.stderr = b""
 		self.raise_timeout = False
 		self.raise_oserror = False
+		self.env: dict | None = None
 
-	def __call__(self, args, input=None, capture_output=False, timeout=None):
+	def __call__(self, args, input=None, capture_output=False, timeout=None, env=None):
 		self.args = list(args)
 		self.input = input
 		self.timeout = timeout
+		self.env = env
 		for flag in ("--header-html", "--footer-html"):
 			if flag in self.args:
 				path = self.args[self.args.index(flag) + 1]
@@ -171,6 +173,21 @@ class TestRequiredFlags(_FurnitureRenderBase):
 	def test_timeout_passed_through_to_subprocess(self) -> None:
 		render_pdf("<p>hi</p>", timeout=13, page_numbers=False)
 		self.assertEqual(self.fake_wk.timeout, 13)
+
+	def test_no_font_config_inherits_env(self) -> None:
+		# Default render passes env=None to subprocess.run (inherit the parent env),
+		# so nothing changes for a render without a brand font.
+		render_pdf("<p>hi</p>", page_numbers=False)
+		self.assertIsNone(self.fake_wk.env)
+
+	def test_font_config_injects_fontconfig_env(self) -> None:
+		# A staged brand font's FONTCONFIG_FILE is injected into the subprocess env
+		# (and the parent env is inherited, not replaced) so wkhtmltopdf resolves the
+		# font by family name via fontconfig.
+		render_pdf("<p>hi</p>", page_numbers=False, font_config_file="/tmp/jv-fc-x/fonts.conf")
+		self.assertIsNotNone(self.fake_wk.env)
+		self.assertEqual(self.fake_wk.env.get("FONTCONFIG_FILE"), "/tmp/jv-fc-x/fonts.conf")
+		self.assertIn("PATH", self.fake_wk.env)  # parent env inherited, not replaced
 
 	def test_oversized_furniture_rejected(self) -> None:
 		# Header/footer/watermark are agent-influenced; an unbounded one is refused
