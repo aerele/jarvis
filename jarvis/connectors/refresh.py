@@ -88,10 +88,14 @@ def request(row_name: str) -> bool:
 	stable ``job_id`` with ``deduplicate``). Returns True when a job was queued."""
 	if not _claim(row_name):
 		return False
+	# Queued NOW, not after commit: the debounce claim above is already taken, so a
+	# job deferred to commit time and then lost to a rollback of the calling
+	# request would leave the claim blocking every retry for DEBOUNCE_S. The job
+	# reads the row afresh on its own connection, so it needs nothing from the
+	# calling transaction.
 	frappe.enqueue(
 		JOB_METHOD,
 		queue="short",
-		enqueue_after_commit=True,
 		job_id=_job_id(row_name),
 		deduplicate=True,
 		name=row_name,

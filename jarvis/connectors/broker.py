@@ -256,8 +256,8 @@ def _gate(row, action: str) -> None:
 		raise _BrokerError(*denied)
 
 
-def _validate_args(row, action: str, args) -> None:
-	err = policy.argument_error(row, action, args)
+def _validate_args(row, action: str, args, schema_obj) -> None:
+	err = policy.argument_error(row, action, args, schema_obj)
 	if err:
 		raise _BrokerError(*err)
 
@@ -275,7 +275,7 @@ def _guard_key(row) -> str:
 	return row.name
 
 
-def _execute(row, action: str, args: dict) -> dict:
+def _execute(row, action: str, args: dict, schema_obj=None) -> dict:
 	store = _store()
 	breaker = CircuitBreaker(
 		store, _guard_key(row), threshold=CB_THRESHOLD, window_s=CB_WINDOW_S, open_s=CB_OPEN_S
@@ -293,7 +293,7 @@ def _execute(row, action: str, args: dict) -> dict:
 	total_timeout = max(MIN_CALL_TIMEOUT_S, TOTAL_TIMEOUT_S - (time.monotonic() - started))
 	try:
 		with cap.slot():
-			return _do_call(row, action, args, credential, breaker, total_timeout)
+			return _do_call(row, action, args, credential, breaker, total_timeout, schema_obj)
 	except AtCapacityError as exc:
 		raise _BrokerError(
 			"at_capacity",
@@ -308,7 +308,10 @@ def _do_call(
 	credential: str,
 	breaker: CircuitBreaker,
 	total_timeout: float = TOTAL_TIMEOUT_S,
+	schema_obj=None,
 ) -> dict:
+	if schema_obj is None:
+		schema_obj = policy.input_schema(row, action)
 	try:
 		result = mcp_client.run_tool(
 			row.base_url,
@@ -322,7 +325,7 @@ def _do_call(
 			protocol_version=row.get("mcp_protocol_version") or mcp_client.DEFAULT_PROTOCOL_VERSION,
 			# Mcp-Param-* mirrors for x-mcp-header parameters (spec MUST; the
 			# client only sends them to a modern server).
-			header_params=mcp_wire.header_params(policy.input_schema(row, action), args),
+			header_params=mcp_wire.header_params(schema_obj, args),
 			connect_timeout=CONNECT_TIMEOUT_S,
 			total_timeout=total_timeout,
 			egress_allowed=_egress_allowed,
@@ -392,8 +395,10 @@ def call(connector_key: str, action: str, args: dict | None = None, *, run_id: s
 		if not row.get("enabled"):
 			raise _BrokerError("connector_disabled", "This connector is turned off.")
 		_gate(row, action)
-		_validate_args(row, action, args)
-		result = _execute(row, action, args or {})
+		# Parsed once here: argument validation and the header mirrors both read it.
+		schema_obj = policy.input_schema(row, action)
+		_validate_args(row, action, args, schema_obj)
+		result = _execute(row, action, args or {}, schema_obj)
 
 		if isinstance(result, dict) and result.get("isError"):
 			# In-band tool-execution error (spec: isError:true) - a clean tool

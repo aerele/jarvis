@@ -1339,7 +1339,8 @@ class TestCatalogPresetFlows(_McpOauthTestCase):
 
 		# One level below broker.test_connector, so the real _credential read runs:
 		# an empty Password resolves to "" and reaches the client as None.
-		with patch.object(broker.mcp_client, "fetch_tools", return_value=_TOOLS) as fetch:
+		probed = {"tools": _TOOLS, "era": "legacy", "protocol_version": "2025-06-18", "tools_ttl_ms": None}
+		with patch.object(broker.mcp_client, "probe", return_value=probed) as fetch:
 			result = connectors_api.test_connector(out["name"])
 		self.assertTrue(result["ok"], result)
 		self.assertEqual(fetch.call_args.args[0], MS_LEARN_BASE_URL)

@@ -121,7 +121,7 @@ class TestAfterCallTriggers(unittest.TestCase):
 # request: debounce (NX) + dedupe (job_id)
 # --------------------------------------------------------------------------- #
 class TestRequestDebounce(unittest.TestCase):
-	def test_first_caller_enqueues_with_dedupe_and_after_commit(self):
+	def test_first_caller_enqueues_immediately_with_dedupe(self):
 		fake = _fake_frappe()
 		fake.cache.return_value.set.return_value = True  # NX claim won
 		fake.cache.return_value.make_key.side_effect = lambda k: f"site|{k}"
@@ -131,7 +131,9 @@ class TestRequestDebounce(unittest.TestCase):
 		_, kwargs = fake.enqueue.call_args
 		self.assertEqual(fake.enqueue.call_args[0][0], refresh.JOB_METHOD)
 		self.assertEqual(kwargs["queue"], "short")
-		self.assertTrue(kwargs["enqueue_after_commit"])
+		# Queued immediately: a claim already taken must never wait on a commit
+		# that a later rollback could cancel.
+		self.assertNotIn("enqueue_after_commit", kwargs)
 		self.assertTrue(kwargs["deduplicate"])
 		self.assertEqual(kwargs["job_id"], refresh._job_id("conn-1"))
 		self.assertEqual(kwargs["name"], "conn-1")

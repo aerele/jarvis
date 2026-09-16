@@ -42,12 +42,14 @@ def action_decision(row, action: str) -> tuple[str, str] | None:
 	return ("action_unknown", f"The action {action!r} is not configured on this connector.")
 
 
-def argument_error(row, action: str, args) -> tuple[str, str] | None:
+def argument_error(row, action: str, args, schema_obj=None) -> tuple[str, str] | None:
 	"""Return ``("invalid_arguments", msg)`` if ``args`` violates the cached
 	``inputSchema`` for ``action``, else ``None``. Missing/unparsable cache or an
 	unknown tool means "cannot validate locally" -> allow (the server validates
-	authoritatively). See the ``tools_cache`` contract in ``broker.py``."""
-	schema_obj = input_schema(row, action)
+	authoritatively). Pass ``schema_obj`` when the caller already parsed it so the
+	cache is not read twice. See the ``tools_cache`` contract in ``broker.py``."""
+	if schema_obj is None:
+		schema_obj = input_schema(row, action)
 	if schema_obj is None:
 		return None
 	err = schema.validate_arguments(schema_obj, args or {})
