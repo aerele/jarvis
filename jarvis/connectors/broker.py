@@ -27,7 +27,9 @@ step 4): a JSON object ``{"tools": [ {"name", "description", "inputSchema",
 "annotations"?}, ... ]}``. A bare JSON array of the same tool objects is also
 accepted defensively. ``inputSchema`` is the tool's MCP JSON Schema.
 
-This is the ONLY module under ``jarvis.connectors`` that imports frappe.
+This and ``jarvis.connectors.refresh`` (the background tool-cache refresher this
+module calls on every outcome) are the modules under ``jarvis.connectors`` that
+import frappe.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from collections.abc import Callable
 
 import frappe
 
-from jarvis.connectors import mcp_client, oauth, policy, ssrf
+from jarvis.connectors import mcp_client, mcp_wire, oauth, policy, refresh, ssrf
 from jarvis.connectors.limits import AtCapacityError, CircuitBreaker, ConcurrencyCap
 from jarvis.jarvis.doctype.jarvis_connector_log.jarvis_connector_log import log_call
 
@@ -313,6 +315,14 @@ def _do_call(
 			credential or None,
 			action,
 			args,
+			# The era/version stored at Test time: a chat turn never pays the
+			# server/discover probe. Empty (a row tested before this field existed)
+			# means the legacy initialize path, exactly as shipped; the field is
+			# filled by the next Test click or daily re-probe (which do detect).
+			protocol_version=row.get("mcp_protocol_version") or mcp_client.DEFAULT_PROTOCOL_VERSION,
+			# Mcp-Param-* mirrors for x-mcp-header parameters (spec MUST; the
+			# client only sends them to a modern server).
+			header_params=mcp_wire.header_params(policy.input_schema(row, action), args),
 			connect_timeout=CONNECT_TIMEOUT_S,
 			total_timeout=total_timeout,
 			egress_allowed=_egress_allowed,
@@ -346,6 +356,13 @@ def _is_transport_failure(exc: mcp_client.McpError) -> bool:
 
 
 def _mcp_code(exc: mcp_client.McpError) -> str:
+	# A modern server rejects a header/body mismatch with a 4xx carrying JSON-RPC
+	# -32020 (spec 2026-07-28: Streamable HTTP Request Metadata). Classify that as a
+	# protocol_error, not a generic http_error, so refresh.after_call re-lists the
+	# tools: the cached inputSchema's x-mcp-header annotations are the likely drift.
+	if exc.kind == mcp_client.ERR_HTTP and isinstance(exc.rpc, dict):
+		if exc.rpc.get("code") == mcp_wire.RPC_HEADER_MISMATCH:
+			return "protocol_error"
 	return {
 		mcp_client.ERR_TRANSPORT: "transport_error",
 		mcp_client.ERR_HTTP: "http_error",
@@ -383,13 +400,16 @@ def call(connector_key: str, action: str, args: dict | None = None, *, run_id: s
 			# error, not a broker/transport failure.
 			message = _first_text(result) or "The connector reported an error."
 			_log(row, action, "tool_error", message, started, run_id, args, result)
+			refresh.after_call(row, "tool_error")
 			return {"ok": False, "error": {"code": "tool_error", "message": _clean(message)}}
 
 		_log(row, action, "", "", started, run_id, args, result)
+		refresh.after_call(row, "")
 		return {"ok": True, "result": result}
 	except _BrokerError as exc:
 		if row is not None:
 			_log(row, action, exc.code, exc.message, started, run_id, args, None)
+			refresh.after_call(row, exc.code)
 		return exc.as_dict()
 	except Exception as exc:  # never let anything reach the turn as a 500
 		frappe.logger("jarvis.connectors").warning("connector broker unexpected error", exc_info=True)
@@ -418,8 +438,8 @@ class _NullBreaker:
 def _test_probe(
 	base_url: str, credential: str | None, breaker, total_timeout: float = TOTAL_TIMEOUT_S
 ) -> dict:
-	"""Run initialize + tools/list against ``base_url`` and return
-	``{ok: True, tools: [...]}`` or ``{ok: False, error: {code, message}}``,
+	"""Run connect (era detection) + tools/list against ``base_url`` and return
+	``{ok: True, tools, protocol_version, tools_ttl_ms}`` or ``{ok: False, error: {code, message}}``,
 	feeding transport-class failures to ``breaker`` exactly as :func:`_do_call`
 	does for a real call. The SPA saves nothing until this passes and writes the
 	tool list to ``tools_cache``."""
@@ -429,7 +449,7 @@ def _test_probe(
 			"error": {"code": "invalid_arguments", "message": "A connector URL is required."},
 		}
 	try:
-		tools = mcp_client.fetch_tools(
+		probed = mcp_client.probe(
 			base_url,
 			credential or None,
 			connect_timeout=CONNECT_TIMEOUT_S,
@@ -450,7 +470,14 @@ def _test_probe(
 			breaker.record_failure()
 		return {"ok": False, "error": {"code": _mcp_code(exc), "message": _clean(str(exc))}}
 	breaker.record_success()
-	return {"ok": True, "tools": tools}
+	return {
+		"ok": True,
+		"tools": probed["tools"],
+		# What the row stores so later calls skip era detection and know how
+		# long the tool list stays fresh (spec: caching utility ttlMs).
+		"protocol_version": probed["protocol_version"],
+		"tools_ttl_ms": probed["tools_ttl_ms"],
+	}
 
 
 def test_endpoint(base_url: str, credential: str | None) -> dict:

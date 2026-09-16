@@ -15,7 +15,12 @@ these run with no site. What is proven here:
     ``jarvis.connectors.broker.call`` verbatim (result unmodified);
   * ``list_connector_actions`` dedupes Personal-over-Shared by key, fetches
     child rows in one bounded ``get_all``, and
-    surfaces only the actions ``policy.action_decision`` currently allows.
+    surfaces only the actions ``policy.action_decision`` currently allows;
+  * with an ``action``, ``list_connector_actions`` returns that one action's
+    ``input_schema`` (read from ``tools_cache`` in one bounded ``get_values``)
+    only when the gate allows it and size-capped at 16 KiB - a denied or
+    unknown action reads no cache and yields empty actions, and the no-action
+    output is unchanged.
 
 Real broker dispatch (row resolution, credential decrypt, the allowed-actions
 gate, SSRF, the circuit breaker, the audit log) is exercised by
@@ -30,6 +35,7 @@ needed for that here, just confirmed by inspection at review time.
 
 from __future__ import annotations
 
+import json
 import unittest
 from unittest import mock
 
@@ -238,6 +244,240 @@ class TestListConnectorActionsShape(unittest.TestCase):
 		result = self._run(fake)
 		self.assertEqual(result, {"connectors": []})
 		fake.get_all.assert_not_called()
+
+
+class TestListConnectorActionsSchema(unittest.TestCase):
+	"""Named-action view: with ``action`` the tool returns the one action's
+	``input_schema`` (from ``tools_cache``) - but only when
+	``policy.action_decision`` allows it, only for the resolved row, and only
+	after the untrusted schema is size-capped. The gate and the ``tools_cache``
+	read are both driven off the frappe-free ``policy`` module, with
+	``frappe.get_list``, the shared ``action_rows`` fetch, and
+	``frappe.db.get_values`` mocked."""
+
+	def _action(self, parent, action, allowed=0, read_only=0, destructive=0, description="d"):
+		return {
+			"parent": parent,
+			"action": action,
+			"allowed": allowed,
+			"read_only": read_only,
+			"destructive": destructive,
+			"description": description,
+		}
+
+	def _cache(self, schemas_by_action):
+		"""A ``tools_cache`` JSON blob mapping each action to its ``inputSchema``,
+		shaped exactly as ``policy.input_schema`` parses it."""
+		return json.dumps(
+			{"tools": [{"name": name, "inputSchema": schema} for name, schema in schemas_by_action.items()]}
+		)
+
+	def _fake_frappe(self, connectors, actions, caches=None):
+		fake = mock.MagicMock()
+		fake.get_list.return_value = connectors
+		# Set explicitly in every test: a bare MagicMock iterates as empty, so a
+		# forgotten return value would pass vacuously with zero actions.
+		fake.get_all.return_value = actions
+		# {connector name: raw tools_cache}; get_values returns the as_dict rows
+		# the module maps by name. Extra names are harmless (the code picks by
+		# name), a missing one reads back as no cache.
+		fake.db.get_values.return_value = [
+			{"name": name, "tools_cache": cache} for name, cache in (caches or {}).items()
+		]
+		return fake
+
+	def _run(self, fake_frappe, connector=None, action=None):
+		with (
+			mock.patch.object(list_connector_actions, "frappe", fake_frappe),
+			mock.patch.object(action_rows, "frappe", fake_frappe),
+		):
+			return list_connector_actions.list_connector_actions(connector, action)
+
+	def test_named_action_returns_schema_only_when_allowed(self):
+		schema = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
+			[self._action("conn-1", "read_issue", read_only=1)],
+			caches={"conn-1": self._cache({"read_issue": schema})},
+		)
+		result = self._run(fake, connector="github", action="read_issue")
+		self.assertEqual(
+			result,
+			{
+				"connectors": [
+					{
+						"connector": "github",
+						"label": "GitHub",
+						"scope": "Shared",
+						"actions": [{"action": "read_issue", "description": "d", "input_schema": schema}],
+					}
+				]
+			},
+		)
+		# tools_cache is read once, bounded to the resolved row, via get_values
+		# (a read) - never get_doc, never get_all against the parent.
+		fake.db.get_values.assert_called_once()
+		self.assertEqual(fake.db.get_values.call_args.args[0], "Jarvis Connector")
+		self.assertEqual(fake.db.get_values.call_args.args[1], {"name": ["in", ["conn-1"]]})
+		self.assertEqual(fake.db.get_values.call_args.args[2], ["name", "tools_cache"])
+		self.assertIs(fake.db.get_values.call_args.kwargs["as_dict"], True)
+		fake.get_doc.assert_not_called()
+
+	def test_denied_action_returns_empty_actions_and_never_reads_cache(self):
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
+			[self._action("conn-1", "delete_repo", destructive=1, allowed=0)],
+			caches={"conn-1": self._cache({"delete_repo": {"type": "object"}})},
+		)
+		result = self._run(fake, connector="github", action="delete_repo")
+		self.assertEqual(result["connectors"][0]["actions"], [])
+		self.assertEqual(result["connectors"][0]["connector"], "github")
+		# Denied -> the untrusted schema blob is never pulled.
+		fake.db.get_values.assert_not_called()
+
+	def test_unknown_action_returns_empty_actions_and_never_reads_cache(self):
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
+			[self._action("conn-1", "read_issue", read_only=1)],
+		)
+		result = self._run(fake, connector="github", action="does_not_exist")
+		self.assertEqual(result["connectors"][0]["actions"], [])
+		fake.db.get_values.assert_not_called()
+
+	def test_unresolved_connector_returns_empty(self):
+		fake = self._fake_frappe([], [])
+		result = self._run(fake, connector="nope", action="read_issue")
+		self.assertEqual(result, {"connectors": []})
+		fake.db.get_values.assert_not_called()
+
+	def test_allowed_but_cache_lacks_the_tool_returns_null_schema(self):
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
+			[self._action("conn-1", "read_issue", read_only=1)],
+			# cache lists a DIFFERENT tool, so there is no schema for read_issue.
+			caches={"conn-1": self._cache({"other": {"type": "object"}})},
+		)
+		result = self._run(fake, connector="github", action="read_issue")
+		self.assertEqual(
+			result["connectors"][0]["actions"],
+			[{"action": "read_issue", "description": "d", "input_schema": None}],
+		)
+
+	def test_allowed_but_cache_missing_returns_null_schema(self):
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
+			[self._action("conn-1", "read_issue", read_only=1)],
+			caches={"conn-1": None},
+		)
+		result = self._run(fake, connector="github", action="read_issue")
+		self.assertEqual(result["connectors"][0]["actions"][0]["input_schema"], None)
+
+	def test_personal_wins_and_cache_read_targets_personal(self):
+		schema = {"type": "object", "properties": {"id": {"type": "string"}}}
+		fake = self._fake_frappe(
+			[
+				{"name": "conn-personal", "key": "github", "label": "My GitHub", "scope": "Personal"},
+				{"name": "conn-shared", "key": "github", "label": "Team GitHub", "scope": "Shared"},
+			],
+			[self._action("conn-personal", "read_issue", read_only=1)],
+			caches={"conn-personal": self._cache({"read_issue": schema})},
+		)
+		result = self._run(fake, connector="github", action="read_issue")
+		self.assertEqual(len(result["connectors"]), 1)
+		self.assertEqual(result["connectors"][0]["scope"], "Personal")
+		self.assertEqual(result["connectors"][0]["actions"][0]["input_schema"], schema)
+		# The resolved (Personal) row is the only one whose cache is read; the
+		# shadowed Shared duplicate is never touched.
+		self.assertEqual(fake.db.get_values.call_args.args[1], {"name": ["in", ["conn-personal"]]})
+
+	def test_no_connector_searches_all_and_returns_only_matches(self):
+		schema = {"type": "object", "properties": {"id": {"type": "string"}}}
+		fake = self._fake_frappe(
+			[
+				{"name": "conn-gh", "key": "github", "label": "GitHub", "scope": "Shared"},
+				{"name": "conn-jira", "key": "jira", "label": "Jira", "scope": "Shared"},
+			],
+			[
+				self._action("conn-gh", "read_issue", read_only=1),
+				# jira does not offer read_issue at all.
+				self._action("conn-jira", "create_ticket", allowed=1),
+			],
+			caches={"conn-gh": self._cache({"read_issue": schema})},
+		)
+		result = self._run(fake, action="read_issue")
+		self.assertEqual([c["connector"] for c in result["connectors"]], ["github"])
+		self.assertEqual(result["connectors"][0]["actions"][0]["input_schema"], schema)
+		# Only the matching connector's cache is read.
+		self.assertEqual(fake.db.get_values.call_args.args[1], {"name": ["in", ["conn-gh"]]})
+
+	def test_schema_under_cap_passes_through_unchanged(self):
+		schema = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
+			[self._action("conn-1", "read_issue", read_only=1)],
+			caches={"conn-1": self._cache({"read_issue": schema})},
+		)
+		result = self._run(fake, connector="github", action="read_issue")
+		self.assertEqual(result["connectors"][0]["actions"][0]["input_schema"], schema)
+
+	def test_oversize_schema_returns_top_level_summary(self):
+		# > 16 KiB serialised; required carries a non-string the summary must drop.
+		big = {
+			"type": "object",
+			"properties": {f"field_{i}": {"type": "string", "description": "x" * 300} for i in range(100)},
+			"required": ["field_0", 123, "field_1"],
+		}
+		self.assertGreater(len(json.dumps(big)), 16 * 1024)
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
+			[self._action("conn-1", "read_issue", read_only=1)],
+			caches={"conn-1": self._cache({"read_issue": big})},
+		)
+		result = self._run(fake, connector="github", action="read_issue")
+		schema_out = result["connectors"][0]["actions"][0]["input_schema"]
+		self.assertTrue(schema_out["truncated"])
+		self.assertEqual(schema_out["required"], ["field_0", "field_1"])
+		self.assertEqual(schema_out["properties"], [f"field_{i}" for i in range(100)])
+
+	def test_no_action_path_is_unchanged_and_reads_no_cache(self):
+		connectors = [{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}]
+		fake = self._fake_frappe(connectors, [self._action("conn-1", "read_issue", read_only=1)])
+		for action in (None, ""):
+			result = self._run(fake, action=action)
+			self.assertEqual(
+				result,
+				{
+					"connectors": [
+						{
+							"connector": "github",
+							"label": "GitHub",
+							"scope": "Shared",
+							"actions": [{"action": "read_issue", "description": "d"}],
+						}
+					]
+				},
+			)
+		# The listing view never reads tools_cache.
+		fake.db.get_values.assert_not_called()
+		# Pin the resolution query so the shared _resolve_connectors refactor
+		# cannot drift the fields / ordering / cap that make Personal win.
+		kwargs = fake.get_list.call_args.kwargs
+		self.assertEqual(kwargs["fields"], ["name", "key", "label", "scope"])
+		self.assertEqual(kwargs["order_by"], "scope asc, label asc")
+		self.assertEqual(kwargs["limit_page_length"], 30)
+		self.assertEqual(kwargs["filters"], {"enabled": 1})
+
+
+class TestSchemaSummaryBounds(unittest.TestCase):
+	def test_summary_caps_name_count_and_length(self):
+		from jarvis.tools import list_connector_actions as mod
+
+		props = {f"p{i}_" + "n" * 300: {"type": "string"} for i in range(500)}
+		summary = mod._schema_summary({"required": list(props.keys()), "properties": props})
+		self.assertTrue(summary["truncated"])
+		self.assertEqual(len(summary["properties"]), mod._SUMMARY_MAX_NAMES)
+		self.assertEqual(len(summary["required"]), mod._SUMMARY_MAX_NAMES)
+		self.assertTrue(all(len(n) <= mod._SUMMARY_NAME_MAX for n in summary["properties"]))
 
 
 if __name__ == "__main__":
