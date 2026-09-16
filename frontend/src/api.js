@@ -172,6 +172,27 @@ const BR = "jarvis.branding.";
 export const getBranding = () => call(BR + "get_branding");
 export const updateBranding = (p) => call(BR + "update_branding", p || {});
 
+// --- Predefined + custom PDF templates. list/get default: any Jarvis user. set
+// default, and the whole custom-template CRUD + preview + options set below:
+// tenant-admin only (server re-checks). rerender: any user, ownership-checked on
+// the source File - the per-document override on a PDF artifact card. ---
+const PT = "jarvis.pdf_templates.";
+export const listPdfTemplates = () => call(PT + "list_pdf_templates");
+export const getDefaultPdfTemplate = () => call(PT + "get_default_pdf_template");
+export const setDefaultPdfTemplate = (key) => call(PT + "set_default_pdf_template", { key });
+export const rerenderDocument = (source_name, template) =>
+	call(PT + "rerender_document", { source_name, template });
+// Custom template admin CRUD (tenant-admin only). `payload`/`config` are plain
+// objects here - callers JSON.stringify them, matching the backend's `payload:
+// str` / `config: str` signatures (same convention as saveLlmPool's `models`).
+export const getPdfTemplate = (key) => call(PT + "get_pdf_template", { key });
+export const savePdfTemplate = (payload) => call(PT + "save_pdf_template", { payload });
+export const deletePdfTemplate = (key) => call(PT + "delete_pdf_template", { key });
+// config: {key, company} for a saved template, or {draft:{...}, company} for
+// unsaved edits - see PdfTemplatesPane.vue's payloadFromForm().
+export const previewPdfTemplate = (config) => call(PT + "preview_pdf_template", { config });
+export const pdfTemplateOptions = () => call(PT + "pdf_template_options");
+
 // --- Mobile onboarding: QR of the mobile PWA URL (no secret — just the public
 // URL). Scanning opens /jarvis-mobile (Android offers to install it, iOS opens
 // it in Safari for Add-to-Home-Screen). ---
