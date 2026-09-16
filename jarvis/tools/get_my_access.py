@@ -27,6 +27,9 @@ _BASE_ROLES = ("All", "Guest")
 # the count; `detail` is where per-row includes_descendants/applies_to stay exact.
 _MAX_DETAIL = 200  # precise-rows cap (by_doctype counts stay complete past this)
 _RESTRICTION_SAMPLE = 20  # for_value names shown per DocType in by_doctype
+_MAX_RESTRICTION_DOCTYPES = 50  # cap DISTINCT DocTypes in by_doctype (top by count) so the
+# result stays within the model's tool-result budget even for a user restricted across many
+# DocTypes — by_doctype caps values-per-DocType, this caps the number of DocType keys.
 _MAX_RESTRICTION_SCAN = 5000  # internal safety fetch bound for the grouping scan (~never hit)
 # Cap the per-call capability probe so one call can't fan out into a huge
 # permission sweep (each doctype = a few has_permission checks + a meta read).
@@ -83,6 +86,7 @@ def get_my_access(doctypes: list[str] | None = None, docs: list[dict] | None = N
 	      "is_system_manager": bool,      # System Manager / Administrator
 	      "restrictions": {
 	        "by_doctype": {"<DocType>": {"count", "values": [...], "values_truncated"}},
+	        "doctype_count": N, "doctypes_truncated": bool,
 	        "detail": [{"doctype", "value", "applies_to", "includes_descendants"?}...],
 	        "detail_truncated": bool, "total": N, "scan_truncated": bool,
 	      },
@@ -141,6 +145,16 @@ def get_my_access(doctypes: list[str] | None = None, docs: list[dict] | None = N
 		else:
 			g["values_truncated"] = True
 
+	# Cap the NUMBER of DocType keys too (keep the top DocTypes by count), so a user
+	# restricted across very many DocTypes can't blow the model's tool-result budget —
+	# the dict is passed to the model uncapped (no rows/result key for the size guard to
+	# trim). doctype_count keeps the true total honest.
+	doctype_count = len(by_doctype)
+	doctypes_truncated = doctype_count > _MAX_RESTRICTION_DOCTYPES
+	if doctypes_truncated:
+		top = sorted(by_doctype.items(), key=lambda kv: kv[1]["count"], reverse=True)
+		by_doctype = dict(top[:_MAX_RESTRICTION_DOCTYPES])
+
 	# detail: the PRECISE per-row rows (the common small case), capped. Per-row
 	# includes_descendants (tree DocType) and applies_to stay exact here — the
 	# grouped summary above deliberately coarsens to counts, which need no per-row
@@ -161,6 +175,8 @@ def get_my_access(doctypes: list[str] | None = None, docs: list[dict] | None = N
 		"is_system_manager": is_system_manager,
 		"restrictions": {
 			"by_doctype": by_doctype,
+			"doctype_count": doctype_count,
+			"doctypes_truncated": doctypes_truncated,
 			"detail": detail,
 			"detail_truncated": len(rows) > _MAX_DETAIL,
 			"total": len(rows),
