@@ -163,6 +163,9 @@ const UsageAdminPane = defineAsyncComponent(() =>
 	import("@/components/settings/UsageAdminPane.vue")
 );
 const BrandingPane = defineAsyncComponent(() => import("@/components/settings/BrandingPane.vue"));
+const PdfTemplatesPane = defineAsyncComponent(() =>
+	import("@/components/settings/PdfTemplatesPane.vue")
+);
 const ConnectorsPane = defineAsyncComponent(() =>
 	import("@/components/settings/ConnectorsPane.vue")
 );
@@ -182,6 +185,7 @@ const PANES = {
 	plan: PlanBillingPane,
 	aimodels: AiModelsPane,
 	branding: BrandingPane,
+	pdftemplates: PdfTemplatesPane,
 	usageadmin: UsageAdminPane,
 };
 
@@ -213,6 +217,7 @@ const NAV = [
 			{ key: "plan", label: "Billing", icon: "credit-card" },
 			{ key: "aimodels", label: "AI models", icon: "cpu" },
 			{ key: "branding", label: "Branding", icon: "image" },
+			{ key: "pdftemplates", label: "PDF Templates", icon: "file-text" },
 		],
 	},
 	{
