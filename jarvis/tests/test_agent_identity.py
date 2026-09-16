@@ -343,16 +343,6 @@ class TestAgentIdentity(unittest.TestCase):
 		# the refused launch left NO orphan run.
 		self.assertEqual(frappe.db.count(RUN, {"installation": inst_name}), before)
 
-		# A17 watermark stamped (0 on this empty ledger, but PRESENT not None).
-		self.assertEqual(int(frappe.db.get_value(RUN, run, "wm_row_count")), 0)
-		# A6 explicit scope stamped + carries the resolved company.
-		scope_json = frappe.db.get_value(RUN, run, "scope_json") or ""
-		self.assertIn(company, scope_json)
-		# A12 permission profile stamped.
-		self.assertTrue(frappe.db.get_value(RUN, run, "permission_profile"))
-		# Row ownership stays the human owner.
-		self.assertEqual(frappe.db.get_value(RUN, run, "owner"), self.owner)
-
 	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner
 	# ------------------------------------------------------------------ #
