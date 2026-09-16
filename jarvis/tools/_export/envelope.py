@@ -1,3 +1,5 @@
+import contextlib
+import json
 import re
 
 # The shared builder that turns an export into a private File + download-card
@@ -66,3 +68,79 @@ def save_export_file(
 		"size_bytes": int(fdoc.file_size or len(content)),
 		"name": fdoc.name,
 	}
+
+
+# --- render-inputs sidecar (per-document template override) -------------------
+# A generated rich document can be re-rendered in another predefined template
+# (jarvis.pdf_templates.rerender_document). That needs the ORIGINAL render inputs,
+# which the PDF File does not carry. We persist them once, at generation, as a
+# private JSON File ATTACHED to the PDF File - so it shares the PDF's owner-only
+# ACL and is swept when the PDF is deleted - and reload them on re-render.
+
+_SIDECAR_SUFFIX = ".render.json"
+# Frappe appends a random hash to the STEM of a private File's name (so its
+# file_url is unguessable): ``x.render.json`` is stored as ``x.render<hash>.json``.
+# So match the ``.render`` marker and ``.json`` extension with the hash allowed to
+# fall between them - this glob matches both the hashed and un-hashed forms.
+_SIDECAR_GLOB = "%.render%.json"
+# Hard ceiling on the stored inputs. ``content`` is already bounded by
+# export_document's own char cap; this only guards a pathological payload from
+# persisting an unbounded second File. A payload over this simply gets no sidecar
+# (re-render is then unavailable for that document - acceptable, not an error).
+_MAX_SIDECAR_BYTES = 2_000_000
+
+
+def save_render_sidecar(source_name: str | None, payload: dict) -> str | None:
+	"""Persist ``payload`` (the render inputs) as a PRIVATE JSON File attached to
+	the generated File ``source_name``, returning the sidecar File name.
+
+	Best-effort: returns ``None`` (never raises) if the sidecar cannot be stored -
+	a sidecar failure must never fail the export it describes. The sidecar inherits
+	the source File's owner-only ACL by being attached to it."""
+	if not source_name:
+		return None
+	try:
+		from frappe.utils.file_manager import save_file
+
+		blob = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+		if len(blob) > _MAX_SIDECAR_BYTES:
+			return None
+		base = _safe_base(payload.get("title") or "document")
+		fdoc = save_file(f"{base}{_SIDECAR_SUFFIX}", blob, "File", source_name, is_private=1)
+		return fdoc.name
+	except Exception:
+		import frappe
+
+		with contextlib.suppress(Exception):
+			# Plain traceback only - NOT with_context, whose local-variable dump would
+			# leak the document content into the operator-readable Error Log.
+			frappe.log_error(
+				title="jarvis.export_document: render sidecar not stored",
+				message=frappe.get_traceback(),
+			)
+		return None
+
+
+def load_render_sidecar(source_name: str) -> dict | None:
+	"""Load and parse the render-inputs sidecar attached to File ``source_name``,
+	or ``None`` if there is none. Reads under the caller's permissions; the caller
+	is responsible for verifying it owns/may read ``source_name`` first."""
+	import frappe
+
+	names = frappe.get_all(
+		"File",
+		filters={
+			"attached_to_doctype": "File",
+			"attached_to_name": source_name,
+			"file_name": ["like", _SIDECAR_GLOB],
+		},
+		pluck="name",
+		order_by="creation desc",
+		limit=1,
+	)
+	if not names:
+		return None
+	content = frappe.get_doc("File", names[0]).get_content()
+	if isinstance(content, bytes):
+		content = content.decode("utf-8")
+	return json.loads(content)
