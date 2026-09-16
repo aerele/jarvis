@@ -87,65 +87,128 @@ class TestGetMyAccess(FrappeTestCase):
 		self._as("Administrator")
 		self.assertTrue(get_my_access()["is_system_manager"])
 
-	def test_restrictions_reflect_the_users_user_permissions(self):
-		self._as(ROLED_USER)
-		# Baseline: no restriction yet.
-		self.assertEqual(get_my_access()["restrictions"], [])
-		# Restrict this user to a single User record; it must surface.
-		name = _user_permission(ROLED_USER, "User", OTHER_USER)
+	def _add_up(self, user: str, allow: str, for_value: str) -> str:
+		name = _user_permission(user, allow, for_value)
 		self.addCleanup(
 			lambda: frappe.delete_doc("User Permission", name, force=True, ignore_permissions=True)
 		)
-		out = get_my_access()
-		self.assertEqual(out["restriction_count"], 1)
-		self.assertEqual(out["restrictions"][0]["doctype"], "User")
-		self.assertEqual(out["restrictions"][0]["value"], OTHER_USER)
-		self.assertFalse(out["restrictions_truncated"])
+		return name
+
+	def _restrictions(self) -> dict:
+		return get_my_access()["restrictions"]
+
+	def _detail(self) -> list:
+		return self._restrictions()["detail"]
+
+	def _bulk_doctype(self, n: int):
+		"""A (DocType, names) with >= n records that accepts a User Permission, else skipTest.
+		Lets the large-value-set test run without creating n throwaway records."""
+		for dt in ("Country", "Currency", "Language", "DocType", "Role"):
+			try:
+				names = frappe.get_all(dt, pluck="name", limit=n)
+			except Exception:
+				continue
+			if len(names) < n:
+				continue
+			try:  # confirm User Permission accepts this allow (probe, rolled back)
+				probe = _user_permission(ROLED_USER, dt, names[0])
+				frappe.delete_doc("User Permission", probe, force=True, ignore_permissions=True)
+				frappe.db.commit()
+				return dt, names
+			except Exception:
+				continue
+		self.skipTest("no DocType with enough records accepts a User Permission on this site")
+
+	def test_detail_carries_applies_to(self):
+		self._as(ROLED_USER)
+		name = self._add_up(ROLED_USER, "User", OTHER_USER)
+		frappe.db.set_value("User Permission", name, "applicable_for", "Contact")
+		self.assertEqual(self._detail()[0]["applies_to"], "Contact")
+
+	def test_no_restrictions_is_empty(self):
+		self._as(ROLED_USER)
+		r = self._restrictions()
+		self.assertEqual(r["by_doctype"], {})
+		self.assertEqual(r["detail"], [])
+		self.assertEqual(r["total"], 0)
+
+	def test_restriction_surfaces_in_by_doctype_and_detail(self):
+		self._as(ROLED_USER)
+		self._add_up(ROLED_USER, "User", OTHER_USER)
+		r = self._restrictions()
+		self.assertEqual(r["total"], 1)
+		self.assertEqual(r["by_doctype"]["User"]["count"], 1)
+		self.assertIn(OTHER_USER, r["by_doctype"]["User"]["values"])
+		self.assertFalse(r["by_doctype"]["User"]["values_truncated"])
+		self.assertEqual(r["detail"][0]["doctype"], "User")
+		self.assertEqual(r["detail"][0]["value"], OTHER_USER)
+		self.assertFalse(r["detail_truncated"])
+
+	def test_multiple_on_same_doctype_group_into_one_entry(self):
+		self._as(ROLED_USER)
+		self._add_up(ROLED_USER, "User", OTHER_USER)
+		self._add_up(ROLED_USER, "User", SM_USER)
+		g = self._restrictions()["by_doctype"]["User"]
+		self.assertEqual(g["count"], 2)
+		self.assertEqual(set(g["values"]), {OTHER_USER, SM_USER})
+		self.assertEqual(self._restrictions()["total"], 2)
+
+	def test_by_doctype_samples_and_flags_large_value_sets(self):
+		# The whole point of R3: > _RESTRICTION_SAMPLE values on one DocType report a
+		# count + a flagged sample, never a wall. (mutation target: sampling/flag.)
+		self._as(ROLED_USER)
+		n = gma_mod._RESTRICTION_SAMPLE + 1
+		dt, names = self._bulk_doctype(n)
+		for nm in names[:n]:
+			self._add_up(ROLED_USER, dt, nm)
+		g = self._restrictions()["by_doctype"][dt]
+		self.assertEqual(g["count"], n)
+		self.assertEqual(len(g["values"]), gma_mod._RESTRICTION_SAMPLE)
+		self.assertTrue(g["values_truncated"])
+
+	def test_detail_is_capped_but_by_doctype_counts_stay_complete(self):
+		self._as(ROLED_USER)
+		self._add_up(ROLED_USER, "User", OTHER_USER)
+		self._add_up(ROLED_USER, "User", SM_USER)
+		with patch.object(gma_mod, "_MAX_DETAIL", 1):
+			r = self._restrictions()
+		self.assertEqual(len(r["detail"]), 1)
+		self.assertTrue(r["detail_truncated"])
+		self.assertEqual(r["by_doctype"]["User"]["count"], 2)  # counts complete past the detail cap
+		self.assertEqual(r["total"], 2)
 
 	def test_self_scoped_never_reports_another_users_restriction(self):
 		# A User Permission on OTHER_USER must never appear when ROLED_USER asks.
-		name = _user_permission(OTHER_USER, "User", ROLED_USER)
-		self.addCleanup(
-			lambda: frappe.delete_doc("User Permission", name, force=True, ignore_permissions=True)
-		)
+		self._add_up(OTHER_USER, "User", ROLED_USER)
 		self._as(ROLED_USER)
-		out = get_my_access()
-		self.assertEqual(out["restrictions"], [], "another user's restriction leaked into my access")
+		r = self._restrictions()
+		self.assertEqual(r["by_doctype"], {}, "another user's restriction leaked (by_doctype)")
+		self.assertEqual(r["detail"], [], "another user's restriction leaked (detail)")
 
-	def _only_restriction(self):
-		out = get_my_access()
-		self.assertEqual(len(out["restrictions"]), 1)
-		return out["restrictions"][0]
-
-	def test_tree_doctype_permission_reports_descendant_scope(self):
-		# On a tree DocType, a node permission covers the subtree by default — the
-		# response must say so, else "node only" and "node + subtree" look identical.
+	def test_detail_keeps_per_row_tree_scope_precise(self):
+		# Option B's payoff: a single grouped form would collapse mixed tree-scope; the
+		# per-row detail must keep subtree vs node-only distinct.
 		self._as(ROLED_USER)
-		name = _user_permission(ROLED_USER, "User", OTHER_USER)  # hide_descendants defaults to 0
-		self.addCleanup(
-			lambda: frappe.delete_doc("User Permission", name, force=True, ignore_permissions=True)
-		)
+		self._add_up(ROLED_USER, "User", OTHER_USER)  # subtree (hide_descendants 0)
+		n2 = self._add_up(ROLED_USER, "User", SM_USER)
+		frappe.db.set_value("User Permission", n2, "hide_descendants", 1)  # node-only
 		with patch.object(gma_mod, "_is_tree_doctype", return_value=True):
-			self.assertTrue(self._only_restriction()["includes_descendants"])
+			by_val = {d["value"]: d["includes_descendants"] for d in self._detail()}
+		self.assertTrue(by_val[OTHER_USER])
+		self.assertFalse(by_val[SM_USER])
 
 	def test_hide_descendants_narrows_the_scope_to_the_node(self):
 		self._as(ROLED_USER)
-		name = _user_permission(ROLED_USER, "User", OTHER_USER)
+		name = self._add_up(ROLED_USER, "User", OTHER_USER)
 		frappe.db.set_value("User Permission", name, "hide_descendants", 1)
-		self.addCleanup(
-			lambda: frappe.delete_doc("User Permission", name, force=True, ignore_permissions=True)
-		)
 		with patch.object(gma_mod, "_is_tree_doctype", return_value=True):
-			self.assertFalse(self._only_restriction()["includes_descendants"])
+			self.assertFalse(self._detail()[0]["includes_descendants"])
 
-	def test_non_tree_permission_omits_descendant_scope(self):
+	def test_non_tree_detail_omits_descendant_scope(self):
 		# "User" is not a nested-set DocType, so the descendant flag is meaningless and absent.
 		self._as(ROLED_USER)
-		name = _user_permission(ROLED_USER, "User", OTHER_USER)
-		self.addCleanup(
-			lambda: frappe.delete_doc("User Permission", name, force=True, ignore_permissions=True)
-		)
-		self.assertNotIn("includes_descendants", self._only_restriction())
+		self._add_up(ROLED_USER, "User", OTHER_USER)
+		self.assertNotIn("includes_descendants", self._detail()[0])
 
 	# --- optional capability projection ("can I do X?") ---
 
@@ -182,6 +245,14 @@ class TestGetMyAccess(FrappeTestCase):
 		self._as(ROLED_USER)
 		with self.assertRaises(InvalidArgumentError):
 			get_my_access(doctypes=["No Such DocType ZZZ"])
+
+	def test_max_doctypes_at_the_cap_is_allowed(self):
+		# D2: the per-call cap (now 50) is a boundary, not a wall one-below it.
+		self._as("Administrator")
+		dts = frappe.get_all("DocType", pluck="name", limit=gma_mod._MAX_DOCTYPES)
+		self.assertEqual(len(dts), gma_mod._MAX_DOCTYPES)  # site has enough doctypes
+		out = get_my_access(doctypes=dts)
+		self.assertEqual(len(out["can"]), gma_mod._MAX_DOCTYPES)
 
 	def test_too_many_doctypes_raises(self):
 		self._as(ROLED_USER)
