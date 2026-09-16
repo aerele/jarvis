@@ -1310,6 +1310,47 @@ def _detach_last_seen_run(run_names: list) -> None:
 		frappe.db.set_value(FINDING, name, "last_seen_run", first_seen_run or None, update_modified=False)
 
 
+def _delete_installation_preserving_provenance(doc, via_admin: bool) -> None:
+	"""Delete the installation, forcing past its links to the append-only provenance
+	ledger (``Jarvis Agent Provenance Event``, PP-5): those rows can be neither modified
+	nor deleted, so the immutable audit trail intentionally outlives the install. Any
+	OTHER remaining linker is unexpected -- surface it as a clear message rather than let
+	``force`` silently orphan it (runs are already gone here, so provenance is the only
+	expected linker). A row lock from an in-flight run becomes a retryable message."""
+	from frappe.model.delete_doc import get_linked_docs
+
+	# get_linked_docs covers STATIC links only; force below also bypasses the dynamic-link
+	# check. No Dynamic Link to Jarvis Agent Installation exists today (only Run + this
+	# ledger statically link it) -- a future one would need get_dynamic_linked_docs here too.
+	unexpected = sorted(
+		{
+			link["reference_doctype"]
+			for link in get_linked_docs(doc, "Delete")
+			if link["reference_doctype"] != PROVENANCE
+		}
+	)
+	if unexpected:
+		# a new doctype started linking the installation without teaching this cascade --
+		# leave an operator breadcrumb, then fail loudly instead of force-orphaning it.
+		frappe.log_error(
+			title="uninstall_agent: unexpected installation linker",
+			message=f"{doc.name} still linked by {', '.join(unexpected)}",
+		)
+		frappe.throw(
+			_("Cannot remove this agent because it is still linked with {0}. Remove those first.").format(
+				", ".join(unexpected)
+			)
+		)
+	try:
+		# force skips ONLY the provenance-ledger link check (validated above); the
+		# owner/admin authorisation was already resolved by the caller.
+		frappe.delete_doc(INSTALLATION, doc.name, ignore_permissions=via_admin, force=True)
+	except frappe.QueryTimeoutError:
+		frappe.throw(
+			_("This agent is busy right now (a run may still be finishing). Please try again in a moment.")
+		)
+
+
 @frappe.whitelist()
 def uninstall_agent(installation: str) -> dict:
 	"""Delete an installation (owner-gated) plus its run + finding history —
@@ -1351,8 +1392,9 @@ def uninstall_agent(installation: str) -> dict:
 	_detach_last_seen_run(run_names)
 	for name in run_names:
 		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
-	# honors if_owner for an owner; the admin path was authorised above.
-	frappe.delete_doc(INSTALLATION, installation, ignore_permissions=via_admin)
+	# honors if_owner for an owner; the admin path was authorised above. The append-only
+	# provenance ledger is preserved (immutable audit trail); see the helper.
+	_delete_installation_preserving_provenance(doc, via_admin)
 	if doc.enabled:
 		_mark_catalog_dirty()
 	frappe.db.commit()
