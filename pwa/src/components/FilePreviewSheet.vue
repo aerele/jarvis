@@ -19,14 +19,62 @@ const loading = ref(false);
 const error = ref("");
 const sheetIdx = ref(0);
 
+// Per-document PDF template override: reformat this generated PDF into another
+// predefined template (jarvis.pdf_templates.rerender_document). Lazy-loaded set;
+// picking one swaps this preview's File in place.
+const templates = ref([]);
+const reformatting = ref(false);
+const reformatErr = ref("");
+
 const kind = () => (props.item ? previewKind(props.item) : "file");
+
+async function ensureTemplates() {
+	if (templates.value.length) return;
+	try {
+		const res = await api.listPdfTemplates();
+		templates.value = (res && res.data && res.data.templates) || [];
+	} catch (e) {
+		/* leave empty: download + open still work without the picker */
+	}
+}
+
+function onReformat(ev) {
+	const key = ev.target.value;
+	ev.target.value = ""; // reset the select back to the "Reformat…" placeholder
+	if (key) reformat(key);
+}
+
+async function reformat(key) {
+	const item = props.item;
+	// Needs the source File's docname; a user-sent attachment carries a file_url
+	// path as `name` instead, which cannot be re-rendered.
+	if (!key || reformatting.value || !item || !item.name || item.name.startsWith("/")) return;
+	reformatting.value = true;
+	reformatErr.value = "";
+	try {
+		const res = await api.rerenderDocument(item.name, key);
+		const env = (res && res.data) || {};
+		if (!env.file_url) throw new Error("No document returned");
+		// Mutate the shared canvas item so the iframe (and the chat card) re-point
+		// at the freshly rendered File.
+		item.name = env.name || item.name;
+		item.title = env.title || item.title;
+		item.file_url = env.file_url;
+	} catch (e) {
+		reformatErr.value = e?.message || "Couldn't reformat this document.";
+	} finally {
+		reformatting.value = false;
+	}
+}
 
 watch(
 	() => props.item?.file_url,
 	async (url) => {
 		preview.value = null;
 		error.value = "";
+		reformatErr.value = "";
 		sheetIdx.value = 0;
+		if (kind() === "pdf") ensureTemplates();
 		// Images, PDFs and canvases render straight from their URL; only the
 		// tabular/text kinds need the server to turn bytes into something a phone
 		// can show.
@@ -51,6 +99,18 @@ watch(
 				<div class="jv-preview-title">
 					{{ props.item.title || props.item.name || "Attachment" }}
 				</div>
+				<select
+					v-if="kind() === 'pdf' && templates.length"
+					class="jv-preview-tpl"
+					:disabled="reformatting"
+					aria-label="Reformat in another template"
+					@change="onReformat"
+				>
+					<option value="">{{ reformatting ? "Reformatting…" : "Reformat…" }}</option>
+					<option v-for="t in templates" :key="t.key" :value="t.key">
+						{{ t.label }}
+					</option>
+				</select>
 				<a
 					class="jv-preview-dl"
 					:href="props.item.file_url"
@@ -85,6 +145,8 @@ watch(
 					</svg>
 				</button>
 			</div>
+
+			<div v-if="reformatErr" class="jv-preview-reformat-err">{{ reformatErr }}</div>
 
 			<div class="jv-preview-body">
 				<img
@@ -191,6 +253,23 @@ watch(
 	flex: none;
 	border-radius: 10px;
 	color: var(--ink7);
+}
+.jv-preview-tpl {
+	flex: none;
+	max-width: 42%;
+	padding: 7px 8px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--card);
+	color: var(--ink7);
+	font: inherit;
+	font-size: 12.5px;
+}
+.jv-preview-reformat-err {
+	padding: 8px 16px;
+	color: var(--red);
+	font-size: 12.5px;
+	flex: none;
 }
 .jv-preview-body {
 	flex: 1;

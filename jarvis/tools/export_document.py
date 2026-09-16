@@ -66,13 +66,16 @@ from frappe.utils.html_utils import sanitize_html
 
 from jarvis import telemetry
 from jarvis.exceptions import InvalidArgumentError, NoDataError
-from jarvis.tools._export import save_export_file
+from jarvis.tools._export import save_export_file, save_render_sidecar
+from jarvis.tools._export.document import db_templates as pdf_templates
+from jarvis.tools._export.document.font_catalog import font_face_css, staged_fontconfig
 from jarvis.tools._export.document.furniture import (
 	build_brand_header,
 	build_title_block,
 	normalize_geometry,
 	render_pdf,
 	resolve_brand,
+	resolve_company_letterhead_footer,
 )
 from jarvis.tools._export.document.graphics import css_bar
 from jarvis.tools._export.document.sanitizer import sanitize_rich
@@ -140,6 +143,8 @@ def export_document(
 	subtitle: str | None = None,
 	meta: str | None = None,
 	cover: bool | None = None,
+	template: str | None = None,
+	company: str | None = None,
 ) -> dict:
 	"""Render ``content`` and return ``{file_url, filename, title, mime_type,
 	size_bytes, name}`` for a private downloadable File (the rich path also adds
@@ -166,6 +171,12 @@ def export_document(
 	    from these (the agent never hand-writes a title, so raw Markdown can't leak).
 	    ``cover`` forces (``True``) / suppresses (``False``) a full cover page; ``None``
 	    auto-picks (a full cover only for a long, structured document).
+	  * ``template`` — a predefined PDF template key: ``classic`` (default),
+	    ``editorial``, ``minimal``, ``branded``, ``formal``. It sets the look
+	    (palette / fonts / masthead alignment / logo / accent bar / default
+	    watermark / cover). An unknown key degrades to the workspace default (else
+	    ``classic``) with a note. Explicit style kwargs below OVERRIDE the template;
+	    passing a template also activates the rich path.
 	  * ``header`` / ``watermark`` — page furniture (PDF only). ``footer`` is a short
 	    TEXT line at the bottom-left; page numbers always render bottom-right, so a
 	    footer and page numbers coexist (branding rides the running header).
@@ -194,12 +205,15 @@ def export_document(
 	Do not promise any of these to the user.
 	"""
 	fmt = (format or "pdf").lower()
-	rich = _rich_requested(theme, letterhead, header, footer, watermark, charts, title, subtitle, meta, cover)
+	rich = _rich_requested(
+		theme, letterhead, header, footer, watermark, charts, title, subtitle, meta, cover, template
+	)
 	try:
 		_guard_content(content)
 		if fmt not in _FORMATS:
 			raise InvalidArgumentError(f"format must be one of {sorted(_FORMATS)}")
 		if rich:
+			tpl, tpl_note = _resolve_pdf_template(template)
 			env = _render_rich(
 				content,
 				fmt,
@@ -217,7 +231,41 @@ def export_document(
 				subtitle=subtitle,
 				meta=meta,
 				cover=cover,
+				tpl=tpl,
+				company=company,
 			)
+			if tpl_note:
+				env["notes"].insert(0, tpl_note)
+			if fmt == "pdf":
+				# Persist this render's inputs so the document can be re-rendered in a
+				# different predefined template later (per-document override). Best-
+				# effort; the stored ``template`` is the one requested here (may be
+				# None) and rerender_document swaps it. PDF only - the override picker
+				# is a PDF-card affordance.
+				save_render_sidecar(
+					env.get("name"),
+					{
+						"content": content,
+						"format": fmt,
+						"title": title,
+						"content_is_html": content_is_html,
+						"theme": theme,
+						"letterhead": letterhead,
+						"header": header,
+						"footer": footer,
+						"watermark": watermark,
+						"page_size": page_size,
+						"orientation": orientation,
+						"margins_mm": margins_mm,
+						"page_numbers": page_numbers,
+						"charts": charts,
+						"subtitle": subtitle,
+						"meta": meta,
+						"cover": cover,
+						"template": template,
+						"company": company,
+					},
+				)
 			outcome = "degraded" if env["notes"] else "ok"
 		else:
 			env = _render_plain(content, fmt, title, content_is_html)
@@ -289,7 +337,7 @@ def _guard_masthead(title, subtitle, meta) -> None:
 
 
 def _rich_requested(
-	theme, letterhead, header, footer, watermark, charts, title, subtitle, meta, cover
+	theme, letterhead, header, footer, watermark, charts, title, subtitle, meta, cover, template
 ) -> bool:
 	"""Branch on TRUTHY (non-empty) rich kwargs. Geometry kwargs (page_size /
 	orientation / margins_mm / page_numbers) have non-falsy defaults and are NOT
@@ -303,8 +351,37 @@ def _rich_requested(
 	would show no title at all). A bare content-only call (no title, no rich kwarg)
 	stays on the byte-preserved plain path."""
 	return bool(
-		theme or letterhead or header or footer or watermark or charts or title or subtitle or meta or cover
+		theme
+		or letterhead
+		or header
+		or footer
+		or watermark
+		or charts
+		or title
+		or subtitle
+		or meta
+		or cover
+		or template
 	)
+
+
+def _resolve_pdf_template(template: str | None) -> tuple[dict, str | None]:
+	"""Resolve the PDF template: explicit key -> workspace default -> classic.
+
+	An explicit UNKNOWN key degrades to the default and returns a note (so the
+	caller can surface it); a blank arg silently uses the workspace default
+	(``Jarvis Settings.default_pdf_template``, itself defaulting to classic). The
+	Settings read is best-effort so this never crashes a render - and it returns
+	classic even before that field exists."""
+	note = None
+	key = (template or "").strip()
+	if key and not pdf_templates.is_valid(key):
+		note = f"Unknown PDF template {key!r}; used the default instead."
+		key = ""
+	if not key:
+		with contextlib.suppress(Exception):
+			key = frappe.db.get_single_value("Jarvis Settings", "default_pdf_template") or ""
+	return pdf_templates.resolve(key), note
 
 
 def _render_rich(
@@ -325,6 +402,8 @@ def _render_rich(
 	subtitle,
 	meta,
 	cover,
+	tpl,
+	company=None,
 ) -> dict:
 	"""The branded rich pipeline: md→HTML → promote-alignment → sanitize →
 	post-sanitize chart splice → emptiness guard → resolve brand → tool-built
@@ -336,6 +415,17 @@ def _render_rich(
 		raise InvalidArgumentError(f"charts exceeds the {_MAX_CHARTS}-chart limit")
 	_guard_chart_rows(charts)
 	notes: list[str] = []
+	# A template can carry page geometry; apply it unless the caller passed a
+	# non-default explicit value (which then wins). Custom templates store it per
+	# row; of the predefined set only ``formal`` sets any (wider 20mm margins), the
+	# rest use the defaults so this is a no-op for them.
+	_tpl_page = tpl.get("page") or {}
+	if page_size == "A4" and _tpl_page.get("size"):
+		page_size = _tpl_page["size"]
+	if orientation == "portrait" and _tpl_page.get("orientation"):
+		orientation = _tpl_page["orientation"]
+	if margins_mm == 15 and _tpl_page.get("margins_mm"):
+		margins_mm = _tpl_page["margins_mm"]
 
 	# Validate page geometry up front so BOTH the PDF and HTML paths reject a bad
 	# page_size/orientation/margin identically (previously only render_pdf, on the
@@ -362,7 +452,10 @@ def _render_rich(
 		raise NoDataError("No content to export after sanitization.")
 	# 5. resolve the brand once (default Letter Head logo → else company name +
 	#    address), for the masthead and the running header. Fail-safe.
-	brand = resolve_brand(letterhead if isinstance(letterhead, str) else None)
+	# A template with logo=False suppresses the brand block (masthead + running
+	# header) entirely, for a clean, unbranded look.
+	show_logo = bool(tpl["placement"].get("logo", True))
+	brand = resolve_brand(letterhead if isinstance(letterhead, str) else None) if show_logo else {}
 	if brand.get("note"):
 		notes.append(brand["note"])
 	brand_header = build_brand_header(brand)
@@ -370,17 +463,55 @@ def _render_rich(
 	#    raw markdown can never leak into the title the way it did when the agent
 	#    hand-wrapped markdown in <div class="cover">). Full cover only for a
 	#    long/formal document; a scalable title block otherwise.
-	full_cover = _decide_cover(cover, body)
+	# cover: an explicit arg wins; otherwise the template's preference ("auto" ->
+	# the usual long/structured heuristic).
+	cover_pref = cover
+	if cover_pref is None:
+		cover_pref = {"on": True, "off": False}.get(tpl["placement"].get("cover"), None)
+	full_cover = _decide_cover(cover_pref, body)
 	title_block = build_title_block(title, subtitle, meta, brand, full_cover)
+	# template placement via TRUSTED tool HTML - it never touches the shared
+	# stylesheet, so the classic golden stays byte-identical: centered masthead
+	# (skipped when the cover already centers), and an accent bar across the top.
+	if title_block and not full_cover and tpl["placement"].get("masthead_align") == "center":
+		title_block = f'<div style="text-align:center">{title_block}</div>'
+	if title_block and tpl["placement"].get("accent_bar"):
+		_bar = tpl["css"].get("primary", "#1f4e79")
+		title_block = f'<div style="border-top:6pt solid {_bar};margin-bottom:12pt"></div>{title_block}'
 	# 7. theme CSS for the render's geometry. `header` reflects whether a running
 	#    header exists (brand / agent header / watermark) so the full cover's height
 	#    accounts for the reserved top margin and fills the page instead of spilling
 	#    onto page 2 (the branded-cover overflow the review caught). The reservation
 	#    is a wkhtmltopdf (PDF) margin concern; the HTML output paints no running
 	#    header, so its cover uses the unreserved height.
+	# template default watermark (an explicit watermark arg wins).
+	watermark = watermark or (tpl["placement"].get("watermark") or None)
 	has_header = bool(brand_header or header or watermark)
-	css = component_css(page_size, orientation, margins_mm, header=has_header and fmt != "html")
+	css = component_css(
+		page_size, orientation, margins_mm, header=has_header and fmt != "html", css_tokens=tpl["css"]
+	)
 
+	# Custom-template per-company Letter Head footer. Rendered as a position:fixed
+	# band, which wkhtmltopdf repeats on every page and the HTML preview shows once;
+	# page numbers stay in the wkhtmltopdf text-zone footer, so this never displaces
+	# them (why not --footer-html: it drops [page]/[topage] under --disable-javascript).
+	# The band self-sizes but is capped, and the body reserves bottom room so content
+	# never overlaps it. Resolution is per Company from the template's pinned map.
+	lh_footer_band = ""
+	lh_footer_css = ""
+	if tpl.get("use_letterhead_footer") and tpl.get("company_letter_heads"):
+		lh_html, lh_note = resolve_company_letterhead_footer(tpl.get("company_letter_heads"), company)
+		if lh_note:
+			notes.append(lh_note)
+		if lh_html:
+			lh_footer_band = f'<div class="jv-lh-footer">{lh_html}</div>'
+			lh_footer_css = _LH_FOOTER_CSS
+
+	# Catalog fonts the template pins (body/display). The two render engines need
+	# OPPOSITE mechanisms: Chrome (HTML/preview) loads a base64 @font-face, but
+	# wkhtmltopdf blanks its page on a real-sized @font-face, so the PDF resolves the
+	# same family via fontconfig instead.
+	font_keys = tpl.get("font_keys") or []
 	if fmt == "html":
 		# No wkhtmltopdf on the HTML path, so page furniture can't be applied —
 		# surface that rather than silently dropping it (the brand/title masthead
@@ -389,28 +520,37 @@ def _render_rich(
 		if header or footer or watermark:
 			notes.append("furniture (header/footer/watermark) applies only to PDF output")
 		doc_title = frappe.utils.escape_html(title) if title else "Document"
+		# @font-face (base64) so the brand font renders in the standalone HTML/Chrome.
+		font_css, font_notes = font_face_css(font_keys)
+		notes.extend(font_notes)
 		payload = (
 			f"<!doctype html><html><head><meta charset='utf-8'>"
-			f"<title>{doc_title}</title><style>{css}</style></head>"
-			f"<body>{title_block}{body}</body></html>"
+			f"<title>{doc_title}</title><style>{font_css}{css}{lh_footer_css}</style></head>"
+			f"<body>{lh_footer_band}{title_block}{body}</body></html>"
 		).encode()
 	else:
-		styled_body = f"<style>{css}</style>{title_block}{body}"
-		pdf_bytes = render_pdf(
-			styled_body,
-			page_size=page_size,
-			orientation=orientation,
-			margins_mm=margins_mm,
-			header_html=header,
-			footer_text=footer,
-			watermark=watermark,
-			brand_header=brand_header,
-			page_numbers=page_numbers,
-			# The 25s bound covers the whole render; subtract the pre-render work
-			# (md→HTML, sanitize, splice) already spent so the total stays under
-			# the plugin's 30s call_tool abort.
-			timeout=max(5, _RENDER_TIMEOUT_S - int(time.monotonic() - start)),
-		)
+		# PDF/PNG: the CSS carries the family STACK only (never an @font-face); the
+		# staged fontconfig makes the family resolvable to wkhtmltopdf. The staging
+		# temp tree lives only for the render call and is cleaned on exit.
+		styled_body = f"<style>{css}{lh_footer_css}</style>{lh_footer_band}{title_block}{body}"
+		with staged_fontconfig(font_keys) as (fc_file, font_notes):
+			notes.extend(font_notes)
+			pdf_bytes = render_pdf(
+				styled_body,
+				page_size=page_size,
+				orientation=orientation,
+				margins_mm=margins_mm,
+				header_html=header,
+				footer_text=footer,
+				watermark=watermark,
+				brand_header=brand_header,
+				page_numbers=page_numbers,
+				# The 25s bound covers the whole render; subtract the pre-render work
+				# (md→HTML, sanitize, splice) already spent so the total stays under
+				# the plugin's 30s call_tool abort.
+				timeout=max(5, _RENDER_TIMEOUT_S - int(time.monotonic() - start)),
+				font_config_file=fc_file,
+			)
 		payload = pdf_bytes if fmt == "pdf" else _pdf_to_png(pdf_bytes)
 
 	if not payload:
@@ -713,3 +853,64 @@ def _pdf_to_png(pdf_bytes: bytes) -> bytes:
 	out = io.BytesIO()
 	canvas.save(out, format="PNG")
 	return out.getvalue()
+
+
+_PREVIEW_SAMPLE = (
+	"<h2>Section heading</h2>"
+	"<p>This is sample body text showing the template's typography and accent colour. "
+	"Emphasis renders <strong>bold</strong> and <em>italic</em>, and figures like "
+	"<strong>1,234.56</strong> sit in the body font.</p>"
+	"<table><thead><tr><th>Item</th><th>Qty</th><th>Amount</th></tr></thead>"
+	"<tbody><tr><td>Widget A</td><td>3</td><td>120.00</td></tr>"
+	"<tr><td>Widget B</td><td>1</td><td>45.00</td></tr>"
+	"<tr><td>Total</td><td></td><td>165.00</td></tr></tbody></table>"
+)
+
+# Shared by the real export (_render_rich) and the settings-pane preview
+# (preview_template_html) so the two never drift — the fixed letterhead-footer band,
+# with body bottom padding reserved so content never overlaps it.
+_LH_FOOTER_CSS = (
+	".jv-lh-footer{position:fixed;bottom:0;left:0;right:0;max-height:28mm;overflow:hidden;"
+	"font-size:8pt;color:#555;border-top:0.5pt solid #ddd;padding-top:4pt;text-align:center}"
+	".jv-lh-footer img{max-height:16mm}body{padding-bottom:32mm}"
+)
+
+
+def preview_template_html(tpl: dict, company: str | None = None) -> str:
+	"""Render FIXED sample content through ``tpl`` to a self-contained HTML string for
+	the settings-pane preview (shown in a sandboxed iframe). No File is saved and no
+	wkhtmltopdf is used, so it works in dev; it reuses the same ``component_css`` +
+	masthead + letterhead-footer band the real HTML export uses, so the preview is
+	faithful. Accepts a resolved template dict (a saved key OR an unsaved draft), so
+	the pane can preview edits live. Never raises for a bad footer — it degrades the
+	same way the export does."""
+	css_tokens = tpl.get("css", {})
+	placement = tpl.get("placement", {})
+	css = component_css("A4", "portrait", 15, header=False, css_tokens=css_tokens)
+
+	brand = resolve_brand(None) if bool(placement.get("logo", True)) else {}
+	title_block = build_title_block("Sample Document", "Template preview", None, brand, False)
+	if title_block and placement.get("masthead_align") == "center":
+		title_block = f'<div style="text-align:center">{title_block}</div>'
+	if title_block and placement.get("accent_bar"):
+		bar = css_tokens.get("primary", "#1f4e79")
+		title_block = f'<div style="border-top:6pt solid {bar};margin-bottom:12pt"></div>{title_block}'
+
+	lh_band = ""
+	lh_css = ""
+	if tpl.get("use_letterhead_footer") and tpl.get("company_letter_heads"):
+		lh_html, _note = resolve_company_letterhead_footer(tpl.get("company_letter_heads"), company)
+		if lh_html:
+			lh_band = f'<div class="jv-lh-footer">{lh_html}</div>'
+			lh_css = _LH_FOOTER_CSS
+
+	# The preview renders in a sandboxed iframe (Chrome), so a brand font embeds via
+	# @font-face — the same family the PDF resolves through fontconfig, so preview and
+	# PDF agree. Font notes are dropped here (the pane shows a live preview, not a
+	# degrade channel); the real export surfaces them.
+	font_css, _font_notes = font_face_css(tpl.get("font_keys") or [])
+	body = sanitize_rich(_PREVIEW_SAMPLE)
+	return (
+		"<!doctype html><html><head><meta charset='utf-8'><title>Preview</title>"
+		f"<style>{font_css}{css}{lh_css}</style></head><body>{lh_band}{title_block}{body}</body></html>"
+	)

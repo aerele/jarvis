@@ -103,6 +103,83 @@ _SERIES = ("#1f4e79", "#2e7d6b", "#a9791c", "#6b4a7a")
 _INDENT_STEP_PT = 14
 _INDENT_LEVELS = range(1, 6)
 
+# The default ("classic") token set - the constants above in the exact shape
+# ``component_css`` substitutes. A PDF template (tools/_export/document/templates.py)
+# supplies a PARTIAL override of these; whatever it omits falls back to classic, so
+# ``component_css()`` with no ``css_tokens`` is byte-for-byte the pre-template
+# stylesheet (guarded by tests/test_pdf_templates.py against
+# fixtures/classic_component_css.txt).
+_CLASSIC_CSS_TOKENS: dict[str, str] = {
+	"font_text": _FONT_TEXT,
+	"font_display": _FONT_DISPLAY,
+	"font_mono": _FONT_MONO,
+	"ink": _INK,
+	"dark": _DARK,
+	"muted": _MUTED,
+	"primary": _PRIMARY,
+	"line": _LINE,
+	"tint": _TINT,
+	"zebra": _ZEBRA,
+	"callout_bg": _CALLOUT_BG,
+	"red": _RED,
+	"red_bg": _RED_BG,
+	"amber": _AMBER,
+	"amber_bg": _AMBER_BG,
+	"green": _GREEN,
+	"green_bg": _GREEN_BG,
+	"s1": _SERIES[0],
+	"s2": _SERIES[1],
+	"s3": _SERIES[2],
+	"s4": _SERIES[3],
+}
+
+# Public font-role -> server-safe stack, for templates.py to pick body/display by
+# role ("sans"/"serif"/"mono") without duplicating the stacks or importing privates.
+FONT_STACKS: dict[str, str] = {"sans": _FONT_TEXT, "serif": _FONT_DISPLAY, "mono": _FONT_MONO}
+
+# Opt-in type scale. The base sheet hardcodes absolute pt sizes (a deliberate
+# wkhtmltopdf choice), so a template cannot scale them through a token. Instead a
+# template may set ``css["font_scale"]`` (NOT a member of _CLASSIC_CSS_TOKENS) and
+# ``component_css`` APPENDS an override block restating only the READING sizes
+# (body, headings, masthead, KPI value) multiplied by the factor. Chrome sizes
+# (captions, chips, chart labels, code) stay put so the furniture keeps its
+# proportions. Classic never sets it, so its stylesheet is byte-identical; a value
+# outside the bounds, or exactly 1, appends nothing.
+_FONT_SCALE_KEY = "font_scale"
+_FONT_SCALE_MIN = 0.85
+_FONT_SCALE_MAX = 1.2
+# (selector, base pt) - these MUST mirror the sizes in _CSS_TEMPLATE below.
+_SCALED_SIZES_PT: tuple[tuple[str, float], ...] = (
+	("body", 10.5),
+	("h1", 22),
+	("h2", 16),
+	("h3", 13),
+	("h4", 11.5),
+	("h5", 11),
+	("h6", 9.5),
+	(".doc-title", 28),
+	(".cover .doc-title", 34),
+	(".doc-subtitle", 13),
+	(".kpi-tile .kpi-value", 20),
+)
+
+
+def _font_scale_css(scale) -> str:
+	"""The appended type-scale block for ``scale``, or ``""`` when there is nothing
+	to append (unset, non-numeric, out of bounds, or exactly 1). Every selector is
+	repeated at the same specificity as its base rule, so appearing later wins."""
+	try:
+		factor = float(scale)
+	except (TypeError, ValueError):
+		return ""
+	if factor == 1 or not (_FONT_SCALE_MIN <= factor <= _FONT_SCALE_MAX):
+		return ""
+	rules = "\n".join(
+		f"{selector} {{ font-size: {round(base * factor, 1):g}pt; }}" for selector, base in _SCALED_SIZES_PT
+	)
+	return f"\n/* --- template type scale x{factor:g}: reading sizes only, see theme.py --- */\n{rules}\n"
+
+
 # Page geometry for the full-cover height computation. Portrait (width_pt,
 # height_pt); 1pt = 1/72in, 1mm = 2.834645669pt.
 _MM_TO_PT = 2.834645669
@@ -491,7 +568,12 @@ $indent_rules
 
 
 def component_css(
-	page_size: str = "A4", orientation: str = "portrait", margins_mm: float = 15, header: bool = False
+	page_size: str = "A4",
+	orientation: str = "portrait",
+	margins_mm: float = 15,
+	header: bool = False,
+	*,
+	css_tokens: dict | None = None,
 ) -> str:
 	"""Return the branded component stylesheet (see module docstring for the full
 	class-name contract).
@@ -503,35 +585,30 @@ def component_css(
 	agent header / watermark), so the cover height accounts for the reserved top
 	margin. The default call ``component_css()`` (A4 / portrait / 15mm / no header)
 	is unchanged, so ``THEME_CSS`` and legacy no-arg callers keep working.
+
+	``css_tokens`` (keyword-only) is a PDF template's partial palette/font override,
+	merged over ``_CLASSIC_CSS_TOKENS``; omitted or ``None`` values fall back to
+	classic, so ``component_css()`` with no ``css_tokens`` is the classic stylesheet.
+	The one non-token key honoured is ``font_scale`` (see ``_font_scale_css``): it
+	is never substituted into the base sheet, only appended after it.
 	"""
 	indent_rules = "\n".join(
 		f".indent-{level} {{ padding-left: {level * _INDENT_STEP_PT}pt; }}" for level in _INDENT_LEVELS
 	)
-	return _CSS_TEMPLATE.substitute(
-		font_text=_FONT_TEXT,
-		font_display=_FONT_DISPLAY,
-		font_mono=_FONT_MONO,
-		ink=_INK,
-		dark=_DARK,
-		muted=_MUTED,
-		primary=_PRIMARY,
-		line=_LINE,
-		tint=_TINT,
-		zebra=_ZEBRA,
-		callout_bg=_CALLOUT_BG,
-		red=_RED,
-		red_bg=_RED_BG,
-		amber=_AMBER,
-		amber_bg=_AMBER_BG,
-		green=_GREEN,
-		green_bg=_GREEN_BG,
-		s1=_SERIES[0],
-		s2=_SERIES[1],
-		s3=_SERIES[2],
-		s4=_SERIES[3],
+	# Start from classic, then let a template override the subset it names. A None
+	# value in css_tokens is ignored (falls back to classic) so a partial template
+	# never blanks a placeholder.
+	tokens = dict(_CLASSIC_CSS_TOKENS)
+	scale_css = ""
+	if css_tokens:
+		tokens.update({k: v for k, v in css_tokens.items() if k in _CLASSIC_CSS_TOKENS and v is not None})
+		scale_css = _font_scale_css(css_tokens.get(_FONT_SCALE_KEY))
+	base = _CSS_TEMPLATE.substitute(
+		**tokens,
 		indent_rules=indent_rules,
 		cover_height=cover_height_pt(page_size, orientation, margins_mm, header=header),
 	)
+	return base + scale_css
 
 
 THEME_CSS: str = component_css()
