@@ -995,9 +995,10 @@ function confirmUninstall() {
 		title: `Uninstall ${agent.value.title}?`,
 		// the backend cascade-deletes findings → runs → installation, but never
 		// touches a run's linked Jarvis Dashboard (#1062 polish - the warning was
-		// overclaiming what actually gets deleted).
+		// overclaiming what actually gets deleted) nor the append-only provenance
+		// ledger (PP-5), which is immutable and outlives the install.
 		message:
-			"This removes the agent and its run history and findings; saved dashboards are kept. This can't be undone.",
+			"This removes the agent, its run history, and findings; saved dashboards and the compliance audit trail are kept. This can't be undone.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				await api.uninstallAgent(name);
