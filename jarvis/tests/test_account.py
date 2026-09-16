@@ -109,6 +109,41 @@ class TestAccountWrappers(FrappeTestCase):
 				account.get_account()
 		self.assertIn("plan disabled", str(cm.exception))
 
+	# --- get_subscription_status: the chat agent's fast LIVE read (no stale cache) ---
+	def test_get_subscription_status_reads_live_on_a_short_budget(self):
+		# The whole point of the fix: a live read on an 8s budget (not the 150s ladder), returning
+		# the fresh account summary — never the stale onboarding cache.
+		fake = {"subscription_status": "Active", "plan": {"name": "p1"}, "days_remaining": 20}
+		with patch.object(admin_client, "get_account_summary", return_value=fake) as m:
+			out = account.get_subscription_status()
+		m.assert_called_once_with(timeout_s=account._SUBSCRIPTION_STATUS_TIMEOUT_S)
+		self.assertEqual(account._SUBSCRIPTION_STATUS_TIMEOUT_S, 8)
+		self.assertEqual(out, fake)
+
+	def test_get_subscription_status_surfaces_admin_error(self):
+		# Fail-open error surfacing (a slow/unreachable admin -> a clean toast, not a 500).
+		with patch.object(admin_client, "get_account_summary", side_effect=AdminUnreachableError("timeout")):
+			with self.assertRaises(frappe.ValidationError):
+				account.get_subscription_status()
+
+	def test_get_subscription_status_requires_jarvis_admin(self):
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				account.get_subscription_status()
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_get_account_summary_forwards_timeout_to_post(self):
+		# admin_client.get_account_summary must thread the short budget through to _post, and default
+		# to DEFAULT_TIMEOUT_S so the existing SPA callers are unaffected.
+		with patch.object(admin_client, "_post", return_value={}) as mp:
+			admin_client.get_account_summary(timeout_s=8)
+		self.assertEqual(mp.call_args.kwargs.get("timeout_s"), 8)
+		with patch.object(admin_client, "_post", return_value={}) as mp:
+			admin_client.get_account_summary()
+		self.assertEqual(mp.call_args.kwargs.get("timeout_s"), admin_client.DEFAULT_TIMEOUT_S)
+
 	def test_preview_upgrade_surfaces_validation_error(self):
 		with patch.object(
 			admin_client, "preview_upgrade", side_effect=AdminValidationError("downgrade not supported")
