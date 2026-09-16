@@ -3825,6 +3825,40 @@
 								<path d="M18 20V10M12 20V4M6 20v-6" />
 							</svg>
 						</button>
+						<!-- Reformat this PDF into another predefined template (per-document
+						     override). User-driven; the picker is offered only for PDFs. -->
+						<Dropdown
+							v-if="artifact.kind === 'pdf' && pdfTemplateList.length"
+							:options="reformatOptions"
+							placement="bottom-end"
+						>
+							<template #trigger>
+								<button
+									class="jv-art-act"
+									:disabled="reformatting"
+									:title="
+										reformatting
+											? 'Reformatting…'
+											: 'Reformat in another template'
+									"
+									aria-label="Reformat in another template"
+								>
+									<svg
+										width="16"
+										height="16"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="1.8"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									>
+										<rect x="3" y="3" width="18" height="18" rx="2" />
+										<path d="M3 9h18M9 21V9" />
+									</svg>
+								</button>
+							</template>
+						</Dropdown>
 						<span class="jv-art-divider" aria-hidden="true"></span>
 						<button
 							class="jv-art-close"
@@ -8143,6 +8177,7 @@ async function openArtifact(m, cv) {
 	const conv = currentId.value;
 	if (t === "pdf" || t === "image") {
 		artifact.value = { m, cv, url, conv, kind: t };
+		if (t === "pdf") ensurePdfTemplates();
 		return;
 	}
 	if (t === "html" || t === "svg") {
@@ -8171,6 +8206,57 @@ async function openArtifact(m, cv) {
 		/* fall through to download-only */
 	}
 	artifact.value = { m, cv, url, conv, kind: "nopreview" };
+}
+
+// --- Per-document PDF template override (jarvis.pdf_templates.rerender_document).
+// The predefined set is fetched lazily the first time a PDF preview opens; picking
+// one re-renders the SAME content in that template and swaps the open document +
+// its canvas card in place with the freshly rendered File. User-driven; the source
+// File's ownership is re-checked server-side. ---
+const pdfTemplateList = ref([]);
+const reformatting = ref(false);
+// Grouped shape (matches supportMenuOptions, the proven Dropdown usage in this
+// view) so the menu never renders empty on a flat/grouped shape mismatch.
+const reformatOptions = computed(() => [
+	{
+		group: "Reformat as",
+		items: (pdfTemplateList.value || []).map((t) => ({
+			label: t.label,
+			onClick: () => reformatArtifact(t.key),
+		})),
+	},
+]);
+async function ensurePdfTemplates() {
+	if (pdfTemplateList.value.length) return;
+	try {
+		const res = await api.listPdfTemplates();
+		pdfTemplateList.value = (res && res.data && res.data.templates) || [];
+	} catch (e) {
+		/* leave empty: the download + open-in-tab actions still work without the picker */
+	}
+}
+async function reformatArtifact(key) {
+	const a = artifact.value;
+	if (!key || reformatting.value || !a || !a.cv || !a.cv.name) return;
+	reformatting.value = true;
+	try {
+		const res = await api.rerenderDocument(a.cv.name, key);
+		const env = (res && res.data) || {};
+		if (!env.file_url) throw new Error("No document returned");
+		// Mutate the shared canvas entry (the inline card renders the same object)
+		// and re-point the open viewer at the new File so the iframe reloads.
+		const cv = a.cv;
+		cv.name = env.name || cv.name;
+		cv.title = env.title || cv.title;
+		cv.file_url = env.file_url;
+		cv.notes = Array.isArray(env.notes) ? env.notes : [];
+		artifact.value = { ...a, cv, url: env.file_url, kind: "pdf" };
+		notify("Reformatted", { type: "success" });
+	} catch (e) {
+		notifyActionError("Couldn't reformat this document", e);
+	} finally {
+		reformatting.value = false;
+	}
 }
 // ---- "Open in Dashboards" (a Dashboards-builder conversation opened here) ----
 // The preview in this thread renders the document but never runs it: main chat's
