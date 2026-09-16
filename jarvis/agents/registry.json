@@ -1140,7 +1140,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Read-only hygiene sweep of your Frappe CRM: finds duplicate and near-duplicate leads (the same person entered twice across leads and deals), flags leads marked converted with no matching deal, and surfaces uncontactable, unassigned, or SLA-breached leads into a ranked worklist. Never merges, edits, assigns, or deletes a record — it hands sales-ops the exceptions and a human decides.",
       "tools_required": [
@@ -1195,7 +1195,7 @@
       "domain": "accounting",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Read-only pre-close ledger scrutiny: scans your general ledger for postings worth a human look — uncleared suspense/clearing balances, dormant accounts that moved, balances on the wrong side of an account, round-number plugs, and possible duplicate manual journal entries. Isolates human-authored journals from system-generated ones. Hands your accountant a ranked, evidence-linked worklist and a dashboard. Never edits the ledger, never books a correction, never decides whether a flag is truly an error.",
       "tools_required": [
