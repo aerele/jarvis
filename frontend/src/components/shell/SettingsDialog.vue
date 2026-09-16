@@ -148,15 +148,9 @@ const UsageAdminPane = defineAsyncComponent(() =>
 	import("@/components/settings/UsageAdminPane.vue")
 );
 const BrandingPane = defineAsyncComponent(() => import("@/components/settings/BrandingPane.vue"));
-<<<<<<< HEAD
-=======
 const PdfTemplatesPane = defineAsyncComponent(() =>
 	import("@/components/settings/PdfTemplatesPane.vue")
 );
-const ConnectorsPane = defineAsyncComponent(() =>
-	import("@/components/settings/ConnectorsPane.vue")
-);
->>>>>>> 51f00c6 (feat(pdf): settings pane + per-document reformat picker (SPA + PWA))
 
 // ACCOUNT AND BILLING is the tenant-admin tier (System Manager OR Jarvis Admin,
 // matching the widened require_jarvis_admin endpoints). ADMINISTRATION is
