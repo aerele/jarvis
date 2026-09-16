@@ -20,6 +20,8 @@
   "agent_name",
   "brand_logo",
   "brand_favicon",
+  "documents_section",
+  "default_pdf_template",
   "llm_tab",
   "llm_section",
   "models",
@@ -238,6 +240,18 @@
    "fieldtype": "Attach Image",
    "label": "Favicon",
    "description": "Browser-tab icon. Square PNG (or .ico) works best."
+  },
+  {
+   "fieldname": "documents_section",
+   "fieldtype": "Section Break",
+   "label": "Documents"
+  },
+  {
+   "fieldname": "default_pdf_template",
+   "fieldtype": "Data",
+   "label": "Default PDF Template",
+   "default": "classic",
+   "description": "Key of the look applied to PDFs the agent generates when no template is chosen (built-in or a custom Jarvis PDF Template). Managed from Settings > PDF Templates."
   },
   {
    "fieldname": "llm_tab",

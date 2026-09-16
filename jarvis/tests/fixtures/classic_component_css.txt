@@ -1,0 +1,342 @@
+
+/* === Branded component stylesheet - see theme.py docstring for the full
+   class-name contract and the wkhtmltopdf layout constraints. === */
+
+* {
+	-webkit-print-color-adjust:exact;
+	print-color-adjust:exact;
+}
+
+body {
+	font-family: "Helvetica Neue", Helvetica, "Liberation Sans", Arial, "Segoe UI", Roboto, "DejaVu Sans", sans-serif;
+	font-size: 10.5pt;
+	line-height: 1.5;
+	color: #1a1a1a;
+}
+
+/* --- headings: tighter, more refined scale WITH top margins for rhythm --- */
+
+h1, h2, h3, h4, h5, h6 {
+	font-weight: 700;
+	color: #132d47;
+}
+h1 { font-size: 22pt; line-height: 1.2;  margin: 0 0 8pt; }
+h2 { font-size: 16pt; line-height: 1.25; margin: 20pt 0 7pt; }
+h3 { font-size: 13pt; line-height: 1.3;  margin: 16pt 0 6pt; }
+h4 { font-size: 11.5pt; line-height: 1.35; margin: 14pt 0 5pt; }
+h5 { font-size: 11pt; line-height: 1.4; margin: 12pt 0 4pt; color: #132d47; }
+h6 {
+	font-size: 9.5pt;
+	line-height: 1.4;
+	margin: 12pt 0 4pt;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: #666666;
+}
+/* A doc/section opening on a heading gets no dead gap above it. */
+h1:first-child, h2:first-child, h3:first-child,
+h4:first-child, h5:first-child, h6:first-child { margin-top: 0; }
+
+/* --- body prose (was untuned WebKit defaults) ------------------------- */
+
+p { margin: 0 0 8pt; max-width: 34em; }
+/* Cap lists to the same measure as prose so the right edge doesn't go ragged
+   (a bullet list running full-width beside capped paragraphs reads unfinished). */
+ul, ol { margin: 0 0 8pt; padding-left: 20pt; max-width: 34em; }
+li { margin-bottom: 3pt; }
+ul ul, ol ol, ul ol, ol ul { margin: 4pt 0 0; }
+blockquote {
+	margin: 10pt 0;
+	padding: 2pt 0 2pt 14pt;
+	border-left: 3pt solid #1f4e79;
+	color: #444444;
+	max-width: 34em;
+	page-break-inside: avoid;
+}
+hr { border: 0; border-top: 0.75pt solid #d9d9d9; margin: 18pt 0; }
+a { color: #1f4e79; text-decoration: underline; }
+strong, b { font-weight: 700; }
+em, i { font-style: italic; }
+code {
+	font-family: "DejaVu Sans Mono", "Liberation Mono", Consolas, "Courier New", monospace;
+	font-size: 0.92em;
+	background: #eef2f7;
+	padding: 1pt 3pt;
+	border-radius: 2pt;
+}
+pre {
+	font-family: "DejaVu Sans Mono", "Liberation Mono", Consolas, "Courier New", monospace;
+	font-size: 9pt;
+	line-height: 1.4;
+	background: #eef2f7;
+	border: 0.75pt solid #d9d9d9;
+	border-radius: 3pt;
+	padding: 8pt 10pt;
+	margin: 10pt 0;
+	white-space: pre-wrap;
+	page-break-inside: avoid;
+}
+pre code { background: transparent; padding: 0; }
+caption { caption-side: top; text-align: left; font-size: 9pt; color: #666666; margin-bottom: 4pt; }
+
+/* --- tables --------------------------------------------------------- */
+
+table {
+	width: 100%;
+	border-collapse: collapse;
+	margin: 8pt 0 16pt;
+}
+/* Repeat the header row across page breaks on long tables. */
+thead { display: table-header-group; }
+th, td {
+	padding: 5pt 9pt;
+	border-bottom: 0.75pt solid #d9d9d9;
+	text-align: left;
+	vertical-align: top;
+}
+/* Lighter, universal header (a full navy fill on every 2-col table in a letter
+   is too heavy); the primary rule under it carries the emphasis. */
+thead th {
+	background: #eef2f7;
+	color: #132d47;
+	font-weight: 700;
+	border-bottom: 1.5pt solid #1f4e79;
+}
+
+/* Right-align a numeric column/cell - now on the <th> too, so a numeric header
+   lines up with its column instead of hanging left. */
+.num, th.num, td.num, thead th.num {
+	text-align: right;
+}
+/* Center a column/cell (md's |:---:| centered column promotes to this). */
+.text-center, th.text-center, td.text-center, thead th.text-center {
+	text-align: center;
+}
+
+/* Alternating body-row shading - opt a table in with class="zebra". Lighter
+   than #eef2f7 so it stays distinct from the callout/subtotal surface. */
+table.zebra tbody tr:nth-child(even) td,
+table.zebra tbody tr:nth-child(even) th {
+	background: #f5f7fa;
+}
+
+/* A subtotal/group-total row - put class="grouped" on the <tr>. */
+tr.grouped td,
+tr.grouped th {
+	font-weight: 700;
+	background: #eef2f7;
+	border-top: 1.5pt solid #1f4e79;
+	border-bottom: 0.75pt solid #1f4e79;
+}
+
+/* Tree-structured rows: indent the label cell by nesting depth. */
+.indent-1 { padding-left: 14pt; }
+.indent-2 { padding-left: 28pt; }
+.indent-3 { padding-left: 42pt; }
+.indent-4 { padding-left: 56pt; }
+.indent-5 { padding-left: 70pt; }
+
+/* A negative value - color only; the tool supplies "(1,234)"-style text. */
+.neg {
+	color: #b3261e;
+}
+
+/* RAG status - safe directly on a <td>/<th>, or on a nested <span> chip. */
+.rag-red, .rag-amber, .rag-green {
+	padding: 2pt 8pt;
+	border-radius: 3pt;
+	font-weight: 600;
+	font-size: 9.5pt;
+	white-space: nowrap;
+}
+.rag-red { background: #fbe9e7; color: #b3261e; }
+.rag-amber { background: #fff4e0; color: #8a5a00; }
+.rag-green { background: #e6f4ea; color: #1e7d32; }
+
+/* --- callout: a bordered card, distinct from a shaded table row ------- */
+
+.callout {
+	border: 0.75pt solid #d9d9d9;
+	border-left: 3pt solid #1f4e79;
+	background: #eef3f9;
+	padding: 10pt 14pt;
+	margin: 12pt 0;
+	page-break-inside: avoid;
+}
+.callout h1, .callout h2, .callout h3,
+.callout h4, .callout h5, .callout h6 {
+	margin-top: 0;
+}
+.callout p:last-child { margin-bottom: 0; }
+
+/* --- kpi tile ----------------------------------------------------------- */
+
+.kpi-tile {
+	display: inline-block;
+	min-width: 120pt;
+	padding: 12pt 16pt;
+	margin: 0 8pt 8pt 0;
+	border: 0.75pt solid #d9d9d9;
+	border-top: 2pt solid #1f4e79;
+	border-radius: 4pt;
+	background: #ffffff;
+	vertical-align: top;
+	page-break-inside: avoid;
+}
+.kpi-tile .kpi-value {
+	display: block;
+	font-size: 20pt;
+	font-weight: 700;
+	color: #132d47;
+}
+.kpi-tile .kpi-label {
+	display: block;
+	font-size: 8.5pt;
+	color: #666666;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	margin-top: 2pt;
+}
+.kpi-tile .kpi-delta {
+	display: inline-block;
+	font-size: 9.5pt;
+	font-weight: 600;
+	margin-top: 4pt;
+	color: #1e7d32;
+}
+.kpi-tile .kpi-delta.neg {
+	color: #b3261e;
+}
+
+/* --- title block (default masthead) + full cover (opt-in) --------------- */
+
+.doc-title-block {
+	margin: 0 0 24pt;
+	padding-bottom: 12pt;
+	border-bottom: 1.5pt solid #1f4e79;
+}
+.doc-brand { margin: 0 0 12pt; }
+.doc-brand .brand-logo img { height: 34pt; width: auto; max-width: 100%; }
+.doc-brand .brand-name { font-weight: 700; font-size: 12pt; color: #132d47; }
+.doc-brand .brand-addr { font-size: 9pt; color: #666666; line-height: 1.35; }
+.doc-title {
+	font-family: Georgia, "Liberation Serif", "Noto Serif", "Times New Roman", serif;
+	font-size: 28pt;
+	font-weight: 700;
+	line-height: 1.15;
+	color: #132d47;
+	margin: 0;
+}
+.doc-subtitle { font-size: 13pt; color: #666666; margin: 6pt 0 0; }
+.doc-meta { font-size: 9.5pt; color: #666666; margin: 8pt 0 0; }
+
+/* Full cover: a printable-page-height panel, centered via table-cell (no
+   flexbox). Height is computed for the render's page size/orientation/margins,
+   so it fills the page instead of collapsing (the old height:100% bug). True
+   bleed-to-paper-edge is impossible under uniform non-zero margins; L/R padding
+   fixes the old edge-bleed. */
+.cover {
+	display: table;
+	width: 100%;
+	height: 756.9pt;
+	page-break-after: always;
+	background: #132d47;
+	-webkit-print-color-adjust: exact;
+	print-color-adjust: exact;
+}
+.cover .cover-inner {
+	display: table-cell;
+	vertical-align: middle;
+	text-align: center;
+	padding: 0 40pt;
+	color: #ffffff;
+}
+.cover .doc-title-block { border: 0; margin: 0; padding: 0; }
+.cover .doc-title { font-family: Georgia, "Liberation Serif", "Noto Serif", "Times New Roman", serif; color: #ffffff; font-size: 34pt; }
+.cover .doc-subtitle, .cover .doc-meta { color: #f2f2f2; }
+.cover .doc-brand .brand-name { color: #ffffff; }
+.cover .doc-brand .brand-addr { color: #f2f2f2; }
+
+/* --- section rule + explicit page break -------------------------------- */
+
+/* A section header rule - NO forced page break (use .page-break for that). */
+.section-divider {
+	border-top: 2pt solid #1f4e79;
+	padding-top: 14pt;
+	margin: 22pt 0 12pt;
+	color: #132d47;
+}
+/* Force the next content onto a new page. */
+.page-break { page-break-before: always; }
+
+/* --- signature block -------------------------------------------------- */
+
+.signature-block {
+	margin-top: 40pt;
+	padding-top: 10pt;
+	border-top: 0.75pt solid #d9d9d9;
+	page-break-inside: avoid;
+}
+.signature-block .signature-line {
+	display: block;
+	width: 220pt;
+	margin-top: 28pt;
+	padding-top: 4pt;
+	border-top: 0.75pt solid #1a1a1a;
+	font-size: 9.5pt;
+	color: #666666;
+}
+
+/* --- CSS bar charts ------------------------------------------------------ */
+
+.bar-chart {
+	margin: 10pt 0 16pt;
+}
+.bar-chart-title { font-size: 10pt; font-weight: 700; color: #132d47; margin: 0 0 6pt; }
+.bar-chart-caption { font-size: 9pt; color: #666666; margin: 4pt 0 0; }
+/* One row = label | track (holds the bar) | value, kept on a single line so the
+   text never overlaps the bar (nowrap; the three inline-blocks sum to 100%). */
+.bar-chart .bar-row {
+	margin-bottom: 6pt;
+	white-space: nowrap;
+	page-break-inside: avoid;
+}
+.bar-chart .bar-label {
+	display: inline-block;
+	width: 28%;
+	font-size: 9.5pt;
+	color: #666666;
+	vertical-align: middle;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.bar-chart .bar-track {
+	display: inline-block;
+	width: 50%;
+	height: 14pt;
+	background: #eef2f7;
+	vertical-align: middle;
+	overflow: hidden;
+	border-bottom: 0.75pt solid #d9d9d9;
+	border-right: 0.75pt solid #d9d9d9;
+}
+.bar-chart .bar-value {
+	display: inline-block;
+	width: 22%;
+	font-size: 9.5pt;
+	text-align: right;
+	vertical-align: middle;
+	white-space: nowrap;
+}
+/* Color/height only - the tool sets `width` per bar via inline style. */
+.bar {
+	display: block;
+	height: 13pt;
+	background: #1f4e79;
+	border-bottom: 1pt solid #132d47;
+}
+.bar.series-1 { background: #1f4e79; }
+.bar.series-2 { background: #2e7d6b; }
+.bar.series-3 { background: #a9791c; }
+.bar.series-4 { background: #6b4a7a; }
