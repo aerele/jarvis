@@ -21,12 +21,16 @@ from jarvis.exceptions import InvalidArgumentError
 
 # Base roles every user carries — noise, never part of "my permissions".
 _BASE_ROLES = ("All", "Guest")
-# Cap the restriction list like get_list's ROW_GUARD: a summary, not a dump. A
-# user with more than this many User Permission rows gets the first page + a flag.
-_MAX_RESTRICTIONS = 200
+# Restrictions are reported two ways: a per-DocType `by_doctype` summary (counts +
+# a value sample — scale-proof, O(DocTypes)) plus a capped `detail` list of the
+# precise rows for the common small case. `by_doctype` removes any fixed "wall" on
+# the count; `detail` is where per-row includes_descendants/applies_to stay exact.
+_MAX_DETAIL = 200  # precise-rows cap (by_doctype counts stay complete past this)
+_RESTRICTION_SAMPLE = 20  # for_value names shown per DocType in by_doctype
+_MAX_RESTRICTION_SCAN = 5000  # internal safety fetch bound for the grouping scan (~never hit)
 # Cap the per-call capability probe so one call can't fan out into a huge
 # permission sweep (each doctype = a few has_permission checks + a meta read).
-_MAX_DOCTYPES = 20
+_MAX_DOCTYPES = 50
 # The doctype-level actions worth reporting, mapped to the write tool each gates.
 # submit/cancel are added only for submittable DocTypes (see _capabilities).
 _BASE_PTYPES = ("create", "read", "write", "delete")
@@ -77,25 +81,30 @@ def get_my_access(doctypes: list[str] | None = None, docs: list[dict] | None = N
 	      "user": "<id>", "full_name": "<name>",
 	      "roles": [...meaningful roles, sorted...], "role_count": N,
 	      "is_system_manager": bool,      # System Manager / Administrator
-	      "restrictions": [{"doctype", "value", "applies_to", "includes_descendants"?}...],
-	      "restriction_count": N, "restrictions_truncated": bool,
+	      "restrictions": {
+	        "by_doctype": {"<DocType>": {"count", "values": [...], "values_truncated"}},
+	        "detail": [{"doctype", "value", "applies_to", "includes_descendants"?}...],
+	        "detail_truncated": bool, "total": N, "scan_truncated": bool,
+	      },
 	      "can": {"<DocType>": {"create", "read", "write", "delete", "submit"?, "cancel"?}},
 	      "can_doc": [{"doctype", "name", "can": {"read", "write", "delete", "submit"?, "cancel"?}}],
 	    }
 
-	``restrictions`` are the user's User Permission rows — each limits the records
-	of ``doctype`` they can see to ``value`` (``applies_to`` narrows it to one
-	linked doctype when set). For a tree DocType the row also carries
-	``includes_descendants`` (the permission covers ``value``'s whole subtree, not
-	just that node, unless it is False). An empty list means no record-level
+	``restrictions`` are the user's User Permission rows — each limits the records of
+	``doctype`` they can see to ``value``. ``by_doctype`` is the scale-proof summary
+	(count + a value sample per restricted DocType, no fixed wall on the count);
+	``detail`` is the precise per-row list for the common small case (capped at
+	``_MAX_DETAIL``), where ``applies_to`` (the row narrowed to one linked doctype)
+	and, for a tree DocType, ``includes_descendants`` (covers ``value``'s whole
+	subtree unless False) stay exact. Empty ``by_doctype`` means no record-level
 	restriction: access is governed by roles alone.
 
-	Pass ``doctypes`` (max 20) to also get ``can`` — the role-based action map per
+	Pass ``doctypes`` (max 50) to also get ``can`` — the role-based action map per
 	DocType (so "can I create a Sales Invoice?" is one deterministic call instead of
 	drafting a write that dies at save). Omitted entirely when ``doctypes`` is not
 	given, so the plain "my access" call stays lean.
 
-	Pass ``docs`` (a list of ``{"doctype", "name"}``, max 20) for the User-Permission
+	Pass ``docs`` (a list of ``{"doctype", "name"}``, max 50) for the User-Permission
 	AWARE answer on specific records — ``can_doc`` reports read/write/delete
 	(+submit/cancel) per record, factoring in record-level User Permissions, DocShare
 	and owner rules (which ``can`` deliberately does not). Use it to pre-check "can I
@@ -115,19 +124,34 @@ def get_my_access(doctypes: list[str] | None = None, docs: list[dict] | None = N
 		filters={"user": user},
 		fields=["allow", "for_value", "applicable_for", "hide_descendants"],
 		order_by="allow asc, for_value asc",
-		limit_page_length=_MAX_RESTRICTIONS + 1,
+		limit_page_length=_MAX_RESTRICTION_SCAN + 1,
 	)
-	truncated = len(rows) > _MAX_RESTRICTIONS
-	restrictions = []
-	for r in rows[:_MAX_RESTRICTIONS]:
+	scan_truncated = len(rows) > _MAX_RESTRICTION_SCAN
+	rows = rows[:_MAX_RESTRICTION_SCAN]
+
+	# by_doctype: scale-proof summary — count + a value sample per restricted DocType.
+	# Counts are over ALL scanned rows, so there is no fixed wall on how many
+	# restrictions a DocType can report.
+	by_doctype: dict = {}
+	for r in rows:
+		g = by_doctype.setdefault(r.allow, {"count": 0, "values": [], "values_truncated": False})
+		g["count"] += 1
+		if len(g["values"]) < _RESTRICTION_SAMPLE:
+			g["values"].append(r.for_value)
+		else:
+			g["values_truncated"] = True
+
+	# detail: the PRECISE per-row rows (the common small case), capped. Per-row
+	# includes_descendants (tree DocType) and applies_to stay exact here — the
+	# grouped summary above deliberately coarsens to counts, which need no per-row
+	# precision. On a tree DocType a permission on a node also grants its subtree
+	# unless hide_descendants is set; that distinction lives per row.
+	detail = []
+	for r in rows[:_MAX_DETAIL]:
 		entry = {"doctype": r.allow, "value": r.for_value, "applies_to": r.applicable_for or None}
-		# On a tree DocType a permission on a node also grants its descendants unless
-		# hide_descendants is set — surface that, else "just this node" and "this node
-		# + its whole subtree" would read identically. Only meaningful (and only added)
-		# for tree DocTypes.
 		if _is_tree_doctype(r.allow):
 			entry["includes_descendants"] = not r.hide_descendants
-		restrictions.append(entry)
+		detail.append(entry)
 
 	result = {
 		"user": user,
@@ -135,9 +159,13 @@ def get_my_access(doctypes: list[str] | None = None, docs: list[dict] | None = N
 		"roles": roles,
 		"role_count": len(roles),
 		"is_system_manager": is_system_manager,
-		"restrictions": restrictions,
-		"restriction_count": len(restrictions),
-		"restrictions_truncated": truncated,
+		"restrictions": {
+			"by_doctype": by_doctype,
+			"detail": detail,
+			"detail_truncated": len(rows) > _MAX_DETAIL,
+			"total": len(rows),
+			"scan_truncated": scan_truncated,
+		},
 	}
 
 	if doctypes is not None:
