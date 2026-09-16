@@ -100,24 +100,25 @@ class TestGetMyAccess(FrappeTestCase):
 	def _detail(self) -> list:
 		return self._restrictions()["detail"]
 
-	def _bulk_doctype(self, n: int):
-		"""A (DocType, names) with >= n records that accepts a User Permission, else skipTest.
-		Lets the large-value-set test run without creating n throwaway records."""
+	def _other_up_doctype(self):
+		"""A (DocType, names) other than "User" that accepts a User Permission, else skipTest.
+		Only the DISTINCT-DocType cap test needs a second allow doctype; the sampling guard
+		is deterministic (below) and never depends on site data."""
 		for dt in ("Country", "Currency", "Language", "DocType", "Role"):
 			try:
-				names = frappe.get_all(dt, pluck="name", limit=n)
+				names = frappe.get_all(dt, pluck="name", limit=1)
 			except Exception:
 				continue
-			if len(names) < n:
+			if not names:
 				continue
 			try:  # confirm User Permission accepts this allow (probe, rolled back)
 				probe = _user_permission(ROLED_USER, dt, names[0])
 				frappe.delete_doc("User Permission", probe, force=True, ignore_permissions=True)
 				frappe.db.commit()
-				return dt, names
+				return dt, names[0]
 			except Exception:
 				continue
-		self.skipTest("no DocType with enough records accepts a User Permission on this site")
+		self.skipTest("no second DocType accepts a User Permission on this site")
 
 	def test_detail_carries_applies_to(self):
 		self._as(ROLED_USER)
@@ -154,17 +155,34 @@ class TestGetMyAccess(FrappeTestCase):
 		self.assertEqual(self._restrictions()["total"], 2)
 
 	def test_by_doctype_samples_and_flags_large_value_sets(self):
-		# The whole point of R3: > _RESTRICTION_SAMPLE values on one DocType report a
-		# count + a flagged sample, never a wall. (mutation target: sampling/flag.)
+		# The whole point of R3: more values than the sample on one DocType report a count +
+		# a flagged sample, never a wall. Deterministic (sample patched to 2, 3 real Users) so
+		# this load-bearing guard always runs — never a data-dependent skip. (mutation target.)
 		self._as(ROLED_USER)
-		n = gma_mod._RESTRICTION_SAMPLE + 1
-		dt, names = self._bulk_doctype(n)
-		for nm in names[:n]:
-			self._add_up(ROLED_USER, dt, nm)
-		g = self._restrictions()["by_doctype"][dt]
-		self.assertEqual(g["count"], n)
-		self.assertEqual(len(g["values"]), gma_mod._RESTRICTION_SAMPLE)
+		self._add_up(ROLED_USER, "User", OTHER_USER)
+		self._add_up(ROLED_USER, "User", SM_USER)
+		self._add_up(ROLED_USER, "User", "Administrator")
+		with patch.object(gma_mod, "_RESTRICTION_SAMPLE", 2):
+			g = self._restrictions()["by_doctype"]["User"]
+		self.assertEqual(g["count"], 3)
+		self.assertEqual(len(g["values"]), 2)
 		self.assertTrue(g["values_truncated"])
+
+	def test_by_doctype_caps_distinct_doctypes_but_reports_true_count(self):
+		# Cap the NUMBER of DocType keys too (top by count) so a user restricted across many
+		# DocTypes can't blow the model budget; doctype_count keeps the true total honest.
+		self._as(ROLED_USER)
+		dt2, val2 = self._other_up_doctype()
+		self._add_up(ROLED_USER, "User", OTHER_USER)
+		self._add_up(ROLED_USER, "User", SM_USER)  # "User" has the higher count -> survives the cap
+		self._add_up(ROLED_USER, dt2, val2)
+		with patch.object(gma_mod, "_MAX_RESTRICTION_DOCTYPES", 1):
+			r = self._restrictions()
+		self.assertEqual(len(r["by_doctype"]), 1)
+		self.assertIn("User", r["by_doctype"])  # kept the top DocType by count
+		self.assertTrue(r["doctypes_truncated"])
+		self.assertEqual(r["doctype_count"], 2)  # true distinct-DocType total still reported
+		self.assertEqual(r["total"], 3)  # and total rows honest
 
 	def test_detail_is_capped_but_by_doctype_counts_stay_complete(self):
 		self._as(ROLED_USER)
