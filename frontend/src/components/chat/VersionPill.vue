@@ -1,7 +1,8 @@
 <template>
-	<!-- Always-on version status in the chat top bar. A real focusable button
-	     whose aria-label matches its visible label; click opens What's-new. No
-	     pill at all when the target version is unknown (never a false "current"). -->
+	<!-- Version-status nudge in the chat top bar: a real focusable button whose
+	     aria-label matches its visible label; click opens What's-new. Shown ONLY
+	     when a newer version is available - no pill when on the latest, or when the
+	     target version is unknown (never a false "current"). -->
 	<button
 		v-if="pill.show"
 		ref="btnEl"
@@ -21,13 +22,12 @@
 <script setup>
 // VersionPill: the customer-facing "how current is my Jarvis" signal (Slice 3b).
 // Hand-styled to mirror the header's .jv-modelpill (a coloured dot + label),
-// tone driven by the app palette vars (--green/--amber/--red) rather than a
-// frappe-ui Badge (there is no "amber" Badge theme). The label text is derived
-// once from the stable boot payload (pillFor) - no per-render work.
+// tone driven by the app palette vars (--amber/--red) rather than a frappe-ui
+// Badge (there is no "amber" Badge theme). The label text is derived once from
+// the stable boot payload (pillFor) - no per-render work.
 import { ref } from "vue";
 import { pillFor } from "@/releaseNudge";
 import { notice, openWhatsNew } from "@/noticeGate";
-import { agentName } from "@/branding";
 
 defineProps({
 	// Hover tooltip; the visible label already lives in the pill + aria-label.
@@ -38,7 +38,7 @@ const btnEl = ref(null);
 const pulsing = ref(false);
 
 // Boot payload is stable for the page's lifetime, so derive once.
-const pill = pillFor(notice, agentName);
+const pill = pillFor(notice);
 // The screen-reader label names the action ("…, see what's new"); the visible
 // text stays the terse status label. Only meaningful when the pill renders.
 const pillAriaLabel = pill.show ? `${pill.label}, see what's new` : "";
@@ -97,16 +97,8 @@ defineExpose({ getEl: () => btnEl.value, pulse });
 }
 
 /* Tone drives the dot, the label colour, AND a subtle border in the same hue
-   (color-mix'd down so it reads as a tint, not a solid tone-coloured chip). */
-.jv-tone-green {
-	border-color: color-mix(in srgb, var(--green) 40%, transparent);
-}
-.jv-tone-green .jv-pill-dot {
-	background: var(--green);
-}
-.jv-tone-green .jv-pill-label {
-	color: var(--green);
-}
+   (color-mix'd down so it reads as a tint, not a solid tone-coloured chip). Only
+   amber/red are reachable - the pill is a nudge, never a green all-clear. */
 .jv-tone-amber {
 	border-color: color-mix(in srgb, var(--amber) 40%, transparent);
 }
