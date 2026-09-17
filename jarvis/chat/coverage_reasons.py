@@ -109,6 +109,12 @@ CLEAN_RUN_STATE = "evaluated_clean"
 #: The closed reason-code registry. Each entry carries:
 #:   meaning     — internal description
 #:   retryable   — whether re-running (after the stated remediation) can succeed
+#:   data_gap    — the gap is purely missing/unavailable INPUT DATA (not a permanent
+#:                 problem, permission slice, or execution truncation), so a run whose
+#:                 only gaps are data_gap still finished cleanly — its lifecycle status
+#:                 reads ``completed`` while the coverage verdict stays non-clean.
+#:                 Independent of ``retryable`` (permission_slice / run_truncated_watermark
+#:                 are retryable but NOT data gaps).
 #:   remediation — customer-facing text; may contain ``{}`` placeholders
 #:                 (e.g. ``{app}``, ``{setting}``) filled at render time
 #:   routing     — where a persistent occurrence is routed
@@ -116,54 +122,63 @@ REASON_CODES = {
 	"app_absent_or_ineligible": {
 		"meaning": "a min_apps dependency is not installed / edition ineligible",
 		"retryable": False,
+		"data_gap": False,
 		"remediation": "This capability needs {app}; it is not installed on your site.",
 		"routing": "install/onboarding",
 	},
 	"permission_slice": {
 		"meaning": "the run-as identity is record-sliced (A12 scoped_visibility)",
 		"retryable": True,
+		"data_gap": False,
 		"remediation": "The scheduled user only sees part of the ledger; findings are limited to that slice.",
 		"routing": "admin/permissions",
 	},
 	"configuration_missing": {
 		"meaning": "a required setting/master is unconfigured",
 		"retryable": True,
+		"data_gap": True,
 		"remediation": "Configure {setting} to evaluate this check.",
 		"routing": "config/support",
 	},
 	"record_coverage_insufficient": {
 		"meaning": "too few in-scope records to conclude",
 		"retryable": True,
+		"data_gap": True,
 		"remediation": "Not enough {records} in scope this period to evaluate.",
 		"routing": "none/informational",
 	},
 	"source_stale": {
 		"meaning": "an input source is behind its freshness watermark",
 		"retryable": True,
+		"data_gap": True,
 		"remediation": "The {source} data is stale; refresh and re-run.",
 		"routing": "data/support",
 	},
 	"rule_expired": {
 		"meaning": "a statutory rule set is past review/expiry (unknown applicability)",
 		"retryable": False,
+		"data_gap": False,
 		"remediation": "This statutory rule is pending review; the check is paused.",
 		"routing": "legal-rule owner",
 	},
 	"external_evidence_absent": {
 		"meaning": "required external evidence (import artifact) not supplied",
 		"retryable": True,
+		"data_gap": True,
 		"remediation": "Upload the {evidence} to evaluate this check.",
 		"routing": "reviewer/File-Box",
 	},
 	"run_truncated_watermark": {
 		"meaning": "fetch hit the turn budget / GL drifted mid-scan (A17)",
 		"retryable": True,
+		"data_gap": False,
 		"remediation": "The run was truncated; re-run to complete coverage.",
 		"routing": "none/auto-retry",
 	},
 	"unsupported_customisation": {
 		"meaning": "a customer customisation the evaluator cannot safely read",
 		"retryable": False,
+		"data_gap": False,
 		"remediation": "A customisation on {doctype} is not supported by this check.",
 		"routing": "product/support",
 	},
@@ -245,6 +260,14 @@ def remediation_for(reason_code, **fmt) -> str:
 def is_retryable(reason_code) -> bool:
 	entry = REASON_CODES.get(reason_code) or REASON_CODES[FALLBACK_REASON_CODE]
 	return bool(entry["retryable"])
+
+
+def is_data_gap(reason_code) -> bool:
+	"""True iff the gap is purely missing input DATA (see ``data_gap`` in the registry).
+	Unknown/None coerces through the fallback code (``data_gap`` False) → never silently
+	lets an unclassified gap read as ``completed``."""
+	entry = REASON_CODES.get(reason_code) or REASON_CODES[FALLBACK_REASON_CODE]
+	return bool(entry["data_gap"])
 
 
 def routing_for(reason_code) -> str:
