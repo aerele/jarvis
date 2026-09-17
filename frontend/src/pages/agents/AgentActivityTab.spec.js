@@ -113,6 +113,20 @@ describe("the badge reflects the run's live status, not the action label", () =>
 	});
 });
 
+describe("a data-gap run reads completed with the amber 'with issues' verb", () => {
+	it("shows the amber 'Run completed with issues' verb while the badge stays green 'completed'", async () => {
+		// the backend logs run_partial for a data-gap run whose status is completed, so the
+		// feed verb caveats coverage while the live status badge shows the finished lifecycle.
+		const w = await mountTab([
+			activityRow({ action: "run_partial", run_status: "completed" }),
+		]);
+		expect(w.text()).toContain("Run completed with issues");
+		const badge = w.find(".badge");
+		expect(badge.text()).toBe("completed");
+		expect(badge.attributes("data-theme")).toBe("green");
+	});
+});
+
 describe("clicking a row navigates", () => {
 	it("a run row opens the agent's Runs tab with the run preselected", async () => {
 		const w = await mountTab([activityRow({ action: "run_failed", run: "RUN-0007" })]);
@@ -159,7 +173,7 @@ describe("clicking a row navigates", () => {
 describe("the detail line clamps to one line with the full text in a title", () => {
 	it("truncates and carries the full text as a title attribute", async () => {
 		const longNote =
-			"Partial scan - coverage gaps: GL Entry, Account, Company were not fully evaluated this run, re-run advised";
+			"Coverage gaps: GL Entry, Account, Company were not fully evaluated this run, re-run advised";
 		const w = await mountTab([activityRow({ detail: longNote })]);
 		const detail = w.find(".truncate");
 		expect(detail.exists()).toBe(true);
