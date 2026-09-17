@@ -480,6 +480,58 @@ class TestUninstallCascadeScope(FrappeTestCase):
 		self.assertTrue(frappe.db.exists(FINDING, self.f_b))
 		self.assertEqual(frappe.db.get_value(FINDING, self.f_b, "last_seen_run"), self.run_b)
 
+	def test_uninstall_preserves_the_append_only_provenance_ledger(self):
+		"""The provenance ledger (PP-5) is append-only — its rows can be neither modified
+		nor deleted. Uninstall must remove the installation while leaving the ledger
+		intact: an immutable audit trail that outlives the install."""
+		ev = frappe.get_doc(
+			{
+				"doctype": PROVENANCE,
+				"event_type": "run_launched",
+				"agent": self.SLUG,
+				"installation": self.inst_a.name,
+				"run": self.run_a,
+			}
+		)
+		ev.insert(ignore_permissions=True)
+		frappe.db.commit()
+		self._uninstall_a()
+		# The install and its own run/finding history are cascaded away...
+		self.assertFalse(frappe.db.exists(INSTALLATION, self.inst_a.name))
+		self.assertFalse(frappe.db.exists(RUN, self.run_a))
+		self.assertFalse(frappe.db.exists(FINDING, self.f_a))
+		# ...but the immutable provenance event survives, UNMUTATED — its installation link
+		# is preserved as a historical fact, never nulled (the ledger is not rewritten).
+		self.assertTrue(frappe.db.exists(PROVENANCE, ev.name))
+		self.assertEqual(frappe.db.get_value(PROVENANCE, ev.name, "installation"), self.inst_a.name)
+
+	def test_uninstall_surfaces_an_unexpected_linker_clearly(self):
+		"""``force`` skips ONLY the provenance ledger: any OTHER linker must fail loudly
+		with a clear message, never be silently orphaned."""
+		fake = [{"reference_doctype": "Some Other Doctype", "reference_docname": "x1"}]
+		with patch("frappe.model.delete_doc.get_linked_docs", return_value=fake):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				self._uninstall_a()
+		self.assertIn("Some Other Doctype", str(ctx.exception))
+		# nothing was force-orphaned — the install still exists.
+		self.assertTrue(frappe.db.exists(INSTALLATION, self.inst_a.name))
+
+	def test_uninstall_row_lock_becomes_a_retryable_message(self):
+		"""A row lock (an in-flight run holding the installation) surfaces as a clear,
+		retryable message rather than a raw 500."""
+		real_delete = frappe.delete_doc
+
+		def _lock_install(doctype=None, name=None, *a, **kw):
+			if doctype == INSTALLATION:
+				raise frappe.QueryTimeoutError("row locked")
+			return real_delete(doctype, name, *a, **kw)
+
+		with patch("frappe.delete_doc", side_effect=_lock_install):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				self._uninstall_a()
+		self.assertIn("try again", str(ctx.exception).lower())
+		self.assertTrue(frappe.db.exists(INSTALLATION, self.inst_a.name))
+
 	def test_either_creation_stamp_alone_establishes_membership(self):
 		"""``run`` and ``first_seen_run`` are written to the same value today, but the
 		cascade ORs them so a row carrying only ONE of the two still resolves. Both
