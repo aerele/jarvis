@@ -12,15 +12,12 @@
 
 export const SNOOZE_KEY = "jarvis-release-banner-snooze";
 
-// The version pill's tone and (stable) label for a boot-payload notice.
-//
-// `agentName` is a PARAMETER (default "Jarvis"), not an import, so this module stays
-// node-testable and single-sourced - the caller passes the branded agent name in.
-//   - no notice / no target version -> hidden (never a false "on the latest").
-//   - tier "none" (a known version we're level with) -> green (current). This is
-//     the ONLY green: it is a positive all-clear, so it must never double as the
-//     catch-all fallback - an unrecognised future tier that carries a version is
-//     a real nudge, not proof we're up to date.
+// The version pill's tone and (stable) label for a boot-payload notice. The pill
+// is a NUDGE: it renders only when a newer version exists. There is no positive
+// "on the latest" all-clear badge - being up to date is the quiet default, not a
+// pill (an always-green "on the latest" badge was noise on every current chat).
+//   - no notice / no target version -> hidden.
+//   - tier "none" (a known version we're level with) -> hidden (up to date).
 //   - tier "hard" -> red   (N versions behind, or "Update required"). "hard" is
 //     block-only (critical release / below the floor version) and is normally
 //     hidden behind the full-page gate, so in practice the visible red pill is
@@ -29,14 +26,12 @@ export const SNOOZE_KEY = "jarvis-release-banner-snooze";
 //     behind >= release_lag_threshold, chat stays open).
 //   - tier "soft" OR any unknown-but-versioned future tier -> amber (N versions
 //     behind, or "Update available"). Amber is the safe default for "there's a
-//     newer version, urgency unknown": a nudge, never a false green all-clear.
-export function pillFor(notice, agentName = "Jarvis") {
-	if (!notice || !notice.version) return { show: false };
-	// The ONE green case: a known target version we are level with. Green is a
-	// positive claim, so it is gated to "none" alone and never the fallback.
-	if (notice.tier === "none") {
-		return { show: true, tone: "green", label: `On the latest ${agentName}` };
-	}
+//     newer version, urgency unknown": a nudge, never a false all-clear.
+export function pillFor(notice) {
+	// Hidden when there's nothing to nudge about: no notice, no target version, or
+	// we're level with a known version (tier "none"). Up to date is the quiet
+	// default - there is no positive "on the latest" badge.
+	if (!notice || !notice.version || notice.tier === "none") return { show: false };
 	const behind = Number(notice.behind) || 0;
 	if (notice.tier === "hard") {
 		return {
@@ -73,10 +68,11 @@ export function pillFor(notice, agentName = "Jarvis") {
 
 // The banner's tone, single-sourced from pillFor so the pill and the banner can
 // never disagree on colour - whatever pillFor would paint the pill, the banner
-// matches ("green"/"amber"/"red"). In practice only called once bannerShouldShow
-// has cleared the notice (soft/severe/unknown, all versioned), so it returns
-// "amber" or "red"; the SPA maps "red" -> Banner type="error", else "warning",
-// and both frontends map the tone to their jv-tone-* class.
+// matches ("amber"/"red"). In practice only called once bannerShouldShow has
+// cleared the notice (soft/severe/unknown, all versioned), so it returns "amber"
+// or "red"; a "none" (up-to-date) notice has no pill and so no tone (undefined),
+// but never reaches here. The SPA maps "red" -> Banner type="error", else
+// "warning", and both frontends map the tone to their jv-tone-* class.
 export function bannerToneFor(notice) {
 	return pillFor(notice).tone;
 }
