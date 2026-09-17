@@ -929,11 +929,7 @@ def assemble_prompt(
 		# (skill_clause) stays intentional and is not demoted. The
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
-<<<<<<< HEAD
-		f"[Context: today is {today}{locale_clause}{assistant_name_clause}{persona_clause}; chat user: {chat_user}"
-=======
-		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
->>>>>>> 4f60a48 (fix(chat): answer "what permissions do I have" from context + get_my_access tool)
+		f"[Context: today is {today}{locale_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
 		f"; conv: {conversation_id}{auto_apply}{armed_run}{autorun_run}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
