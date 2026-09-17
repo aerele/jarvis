@@ -139,7 +139,7 @@
 			<div class="flex items-center justify-between gap-4">
 				<Button
 					variant="solid"
-					:label="ended ? 'Renew subscription' : 'Manage plan and billing'"
+					:label="needsRenewLabel ? 'Renew subscription' : 'Manage plan and billing'"
 					iconRight="arrow-right"
 					@click="goBilling"
 				/>
@@ -212,6 +212,13 @@ const cancelling = computed(() => !!account.value.cancel_at_period_end);
 // fresh payment restores service. Distinct from `cancelling` (still entitled).
 const ENDED_STATUSES = new Set(["Expired", "Cancelled"]);
 const ended = computed(() => ENDED_STATUSES.has(account.value.subscription_status));
+// The footer CTA reads "Renew subscription" whenever renewing is the customer's
+// primary action - ended (Expired/Cancelled) OR Past Due (grace) - matching the
+// billing banners. Kept separate from ``ended``, which also gates cancel-button
+// visibility that a Past Due customer must NOT change.
+const needsRenewLabel = computed(
+	() => ended.value || account.value.subscription_status === "Past Due"
+);
 const statusTheme = computed(() =>
 	statusBadgeTheme(account.value.subscription_status, cancelling.value)
 );

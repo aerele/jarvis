@@ -2612,11 +2612,17 @@
 					v-else-if="suspendedNotice"
 					type="warning"
 					title="Chat is paused"
-					:message="suspendedNotice"
+					:message="suspendedBannerView.message"
 					style="margin-bottom: 10px"
 				>
 					<template #action>
-						<button class="jv-btn jv-btn--sm" @click="goRenew">Renew</button>
+						<button
+							v-if="suspendedBannerView.showRenew"
+							class="jv-btn jv-btn--sm"
+							@click="goRenew"
+						>
+							Renew
+						</button>
 					</template>
 				</Banner>
 				<!-- Soft worker warning: worker_warning (degraded / under-provisioned
@@ -4543,7 +4549,7 @@ import {
 	forgetReady,
 } from "@/onboarding/readiness.js";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
-import { billingBanner } from "@/account/format.js";
+import { billingBanner, suspendedBanner } from "@/account/format.js";
 import {
 	billingNoticeOf,
 	replacedNoticeOf,
@@ -4833,6 +4839,13 @@ const billingAlert = computed(() => {
 	if (!b || billingDismissedPhase.value === b.phase) return null;
 	return b;
 });
+// The readiness-driven "Chat is paused" banner (suspendedNotice) carries
+// ADMIN-framed copy ("Renew to restore access"); split it by audience so a
+// member gets an "ask your admin" message and no Renew button, matching
+// billingAlert. suspendedNotice stays the raw ref for its truthy-flag readers.
+const suspendedBannerView = computed(() =>
+	suspendedBanner(suspendedNotice.value || "", canRenewPlan)
+);
 function dismissBillingAlert() {
 	billingDismissedPhase.value = (billingAlert.value && billingAlert.value.phase) || "";
 }
@@ -9453,8 +9466,9 @@ async function send(textArg, resendAck) {
 			}
 			sending.value = false;
 			waiting.value = false;
-			// Lapsed sub: raise the persistent banner (with its Renew link)
-			// rather than a toast that vanishes before they can act on it.
+			// Lapsed sub: raise the persistent banner (admins get its Renew link,
+			// members an "ask your admin" message) rather than a toast that
+			// vanishes before they can act on it.
 			if (r.reason === "subscription_suspended") {
 				if (!suspendedNotice.value) suspendedNotice.value = SUSPENDED_FALLBACK;
 				return;
