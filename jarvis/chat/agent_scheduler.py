@@ -994,6 +994,20 @@ def _launch_audit(
 			)
 		)
 
+	# Reviewer invariant - the AUTHORITATIVE accountable-reviewer control (PP-4). An auditor's
+	# findings must have a named accountable reviewer; the installation backfills one, but a row
+	# created via ignore_validate (or a future path that bypasses validate) could be blank. The
+	# bench holds this invariant HERE so the container evaluator never has to mirror it - a
+	# delegate that mis-judges "no reviewer" can no longer self-block a properly configured run.
+	# Thrown BEFORE any row is inserted, so a refused launch leaves no orphan conversation/run.
+	if not (inst.reviewer or "").strip():
+		frappe.throw(
+			_(
+				"This agent installation has no accountable reviewer, so its findings would "
+				"have no owner. Set a reviewer on the installation, or disable it."
+			)
+		)
+
 	# JF-021: validate the launch-time provenance identity BEFORE any row is inserted,
 	# for the same reason as the run-as guard above — a refused launch must leave no
 	# orphan conversation/run behind. Deliberately ORDERED BEFORE the capability
