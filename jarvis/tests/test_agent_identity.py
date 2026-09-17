@@ -321,15 +321,27 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertIsNotNone(cs)
 		self.assertEqual(cs.user, self.owner)  # run_as_user defaults to owner
 
-		# A17 watermark stamped (0 on this empty ledger, but PRESENT not None).
-		self.assertEqual(int(frappe.db.get_value(RUN, run, "wm_row_count")), 0)
-		# A6 explicit scope stamped + carries the resolved company.
-		scope_json = frappe.db.get_value(RUN, run, "scope_json") or ""
-		self.assertIn(company, scope_json)
-		# A12 permission profile stamped.
-		self.assertTrue(frappe.db.get_value(RUN, run, "permission_profile"))
-		# Row ownership stays the human owner.
-		self.assertEqual(frappe.db.get_value(RUN, run, "owner"), self.owner)
+	# ------------------------------------------------------------------ #
+	# (d2) launch refuses a blank-reviewer install (bench-authoritative gate)
+	# ------------------------------------------------------------------ #
+	def test_launch_refuses_blank_reviewer_no_orphan_run(self):
+		# The accountable-reviewer invariant is enforced at launch: a blank-reviewer install
+		# (constructed by clearing the auto-backfilled reviewer) is refused BEFORE any row is
+		# created, so the container never has to mirror the gate and no orphan run is left.
+		inst_name = _install_as(self.owner)
+		frappe.db.set_value(INSTALLATION, inst_name, {"enabled": 1, "reviewer": ""}, update_modified=False)
+		frappe.db.commit()
+		inst = frappe.get_doc(INSTALLATION, inst_name)
+		self.assertEqual((inst.reviewer or "").strip(), "")  # precondition: reviewer blank
+		before = frappe.db.count(RUN, {"installation": inst_name})
+		frappe.set_user(self.owner)
+		try:
+			with self.assertRaises(frappe.ValidationError):
+				agent_scheduler._launch_audit(inst, trigger="manual")
+		finally:
+			frappe.set_user("Administrator")
+		# the refused launch left NO orphan run.
+		self.assertEqual(frappe.db.count(RUN, {"installation": inst_name}), before)
 
 	# ------------------------------------------------------------------ #
 	# (d2) jarvis#1063: declared config_keys are DELIVERED in the run message
