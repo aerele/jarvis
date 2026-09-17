@@ -11,9 +11,11 @@ import { ref } from "vue";
 export const copyPromptState = ref(null);
 let _resolve = null;
 
-// Resolves "yes" | "no" | "dontask". One at a time, same reasoning as
-// useConfirm: a second call while one is open resolves "no" rather than
-// clobbering what the user is looking at.
+// Resolves "yes" | "no" | "dontask" | "cancel" ("cancel" = the user dismissed
+// the prompt via the X, Escape, or an outside click; the caller aborts rather
+// than proceeding). One at a time, same reasoning as useConfirm: a second call
+// while one is open resolves "no" rather than clobbering what the user is
+// looking at.
 export function promptSupportCopy({ preview } = {}) {
 	if (_resolve) return Promise.resolve("no");
 	return new Promise((resolve) => {
