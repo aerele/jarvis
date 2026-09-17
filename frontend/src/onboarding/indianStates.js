@@ -339,3 +339,24 @@ export function isIndia(country) {
 export function isValidIndianState(state) {
 	return _STATE_SET.has((state || "").trim().toLowerCase());
 }
+
+// India Compliance derives a party's state from the GSTIN (titlecase of the registry `stcd`), so
+// the incoming string is already GSTIN-authoritative — but its spelling may not be verbatim one of
+// INDIAN_STATES (e.g. "Lakshadweep Islands" vs our "Lakshadweep", or a "& "/"Pondicherry" variant).
+// Resolve to the exact option a case-insensitive match or a known alias yields, else "" — a GSTIN
+// autofill must land a value the State <select> can actually show, never inject an unshowable one
+// that then blocks the form; on no confident match the field is left blank for manual pick.
+const _STATE_LC = new Map(INDIAN_STATES.map((s) => [s.toLowerCase(), s]));
+const STATE_ALIASES = {
+	"lakshadweep islands": "Lakshadweep",
+	"daman and diu": "Dadra and Nagar Haveli and Daman and Diu",
+	"dadra and nagar haveli": "Dadra and Nagar Haveli and Daman and Diu",
+	"dadra & nagar haveli": "Dadra and Nagar Haveli and Daman and Diu",
+	pondicherry: "Puducherry",
+	"andaman & nicobar islands": "Andaman and Nicobar Islands",
+};
+export function canonicalIndianState(value) {
+	const s = (value || "").trim();
+	if (!s) return "";
+	return STATE_ALIASES[s.toLowerCase()] || _STATE_LC.get(s.toLowerCase()) || "";
+}
