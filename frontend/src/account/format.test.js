@@ -15,6 +15,8 @@ import {
 	shortDate,
 	cancelPillLabel,
 	billingBanner,
+	suspendedBanner,
+	MEMBER_SUSPENDED_NOTICE,
 } from "./format.js";
 
 test("statusLabel: maps known states, passes through unknown", () => {
@@ -149,6 +151,23 @@ test("billingBanner: picks the wording for whoever is looking", () => {
 test("billingBanner: only offers Renew to someone who can renew", () => {
 	assert.equal(billingBanner(_notice("expired"), true).showRenew, true);
 	assert.equal(billingBanner(_notice("expired"), false).showRenew, false);
+	// Grace (Past Due) is admin-only too: a member sees the message, no button.
+	// (This guards the billingBanner path; the readiness-driven suspended banner
+	// is a separate mechanism covered by suspendedBanner below.)
+	assert.equal(billingBanner(_notice("grace"), true).showRenew, true);
+	assert.equal(billingBanner(_notice("grace"), false).showRenew, false);
+});
+
+test("suspendedBanner: admin keeps the bench copy + Renew; member gets 'ask your admin', no button", () => {
+	const detail = "Your subscription has expired. Renew to restore access to Jarvis.";
+	const admin = suspendedBanner(detail, true);
+	assert.equal(admin.showRenew, true);
+	assert.equal(admin.message, detail); // admin sees the bench's own wording
+	const member = suspendedBanner(detail, false);
+	assert.equal(member.showRenew, false); // no Renew button for a member
+	assert.equal(member.message, MEMBER_SUSPENDED_NOTICE);
+	assert.match(member.message, /ask your admin/i); // not the admin "Renew to restore" dead-end
+	assert.doesNotMatch(member.message, /Renew to restore/i);
 });
 
 test("billingBanner: only the pre-expiry nudge is dismissible", () => {
