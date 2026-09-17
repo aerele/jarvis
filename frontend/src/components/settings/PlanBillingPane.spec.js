@@ -307,4 +307,34 @@ describe("PlanBillingPane", () => {
 			expect(w.text()).toContain("excl. GST");
 		});
 	});
+
+	// The footer CTA must name "Renew" for a Past Due (grace) customer too, not
+	// just Expired/Cancelled - a late payer's primary action is to renew, same as
+	// the billing banners. ``ended`` stays unchanged (it also gates cancel
+	// visibility); a separate label computed carries Past Due.
+	describe("footer action label", () => {
+		const footerButton = (w) =>
+			w
+				.findAll(".stub-button")
+				.find(
+					(b) =>
+						b.text().includes("Renew subscription") ||
+						b.text().includes("Manage plan and billing")
+				);
+
+		it("labels the footer 'Renew subscription' for a Past Due customer", async () => {
+			const w = await mountPane({ subscription_status: "Past Due" });
+			expect(footerButton(w)?.text()).toContain("Renew subscription");
+		});
+
+		it("keeps 'Renew subscription' for an Expired customer", async () => {
+			const w = await mountPane({ subscription_status: "Expired" });
+			expect(footerButton(w)?.text()).toContain("Renew subscription");
+		});
+
+		it("labels the footer 'Manage plan and billing' for an Active customer", async () => {
+			const w = await mountPane({ subscription_status: "Active" });
+			expect(footerButton(w)?.text()).toContain("Manage plan and billing");
+		});
+	});
 });
