@@ -35,3 +35,17 @@ export function runReason(row) {
 	if (row.status === "stopped") return "Stopped by operator.";
 	return "";
 }
+
+/**
+ * Did this run leave coverage gaps the viewer must be warned about? A run that
+ * finished with only missing-data gaps now reads status "completed" (its lifecycle
+ * finished) yet still carries a coverage_note — so the "not clean" cue keys off the
+ * NOTE, not the status, and stays visible on a green "completed" row. Centralised so the
+ * runs board triangle and the FindingsPanel banner ask the same question (no drift).
+ * A failed run owns its own red banner, so it is excluded here; a stopped run with a
+ * coverage_note is intentionally included (it too is unreviewed, and reads neither green
+ * nor all-clear).
+ */
+export function coverageWarned(row) {
+	return !!(row && row.coverage_note) && row.status !== "failed";
+}
