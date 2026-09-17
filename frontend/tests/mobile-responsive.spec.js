@@ -15,8 +15,13 @@ import path from "node:path";
 const SRC = path.resolve(process.cwd(), "src");
 
 // Known, deliberate exceptions. Format: "<relpath> :: <rule> :: <match>".
-// Empty by design — the codebase is clean today; keep it that way.
-const ALLOWLIST = new Set([]);
+// Keep the allowlist tiny.
+const ALLOWLIST = new Set([
+	// The PDF template preview renders a fixed 560px A4 page and scales the iframe
+	// to 50% inside a max-w-[280px], overflow-hidden container, so the 560px is
+	// clipped and never reaches the viewport. See PdfTemplatesPane.vue fit-mode.
+	"src/components/settings/PdfTemplatesPane.vue :: fixed-width-over-480px :: w-[560px]",
+]);
 
 // Each rule returns the offending substrings for a file's source (empty = ok).
 const RULES = {

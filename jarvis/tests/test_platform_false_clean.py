@@ -29,6 +29,7 @@ RUN = "Jarvis Agent Run"
 FINDING = "Jarvis Agent Finding"
 PROVENANCE = "Jarvis Agent Provenance Event"
 DASHBOARD = "Jarvis Dashboard"
+ACTIVITY = "Jarvis Agent Activity"
 
 SLUG = "platform-false-clean-test-agent"
 TOK_A = "tok_fc_a"
@@ -109,7 +110,11 @@ def _wipe_residue() -> None:
 	frappe.db.delete(RUN, {"agent": SLUG})
 	frappe.db.delete(FINDING, {"agent": SLUG})
 	frappe.db.delete(PROVENANCE, {"agent": SLUG})
+	frappe.db.delete(ACTIVITY, {"agent": SLUG})
 	if dashboards:
+		frappe.db.delete(
+			"Notification Log", {"document_type": DASHBOARD, "document_name": ["in", dashboards]}
+		)
 		frappe.db.delete(DASHBOARD, {"name": ["in", dashboards]})
 	frappe.db.commit()
 
@@ -209,6 +214,132 @@ class TestPP2FalseCleanGate(FrappeTestCase):
 		self.assertEqual(run.result_state, "not_evaluable")
 		blob = json.loads(run.coverage_json)
 		self.assertEqual(blob["required_tokens"], sorted([TOK_A, TOK_B]))
+
+
+# --------------------------------------------------------------------------- #
+# Data-gap runs read status ``completed`` with the coverage warning still shown.
+# The lifecycle ``status`` and the coverage ``result_state`` are separate axes: a run
+# that finished executing but only lacks INPUT DATA reads ``completed`` while its verdict
+# stays non-clean (so the false-clean gate is untouched). Execution problems and
+# attention-needed coverage gaps (permanent / permission / truncation) stay ``partial``.
+# --------------------------------------------------------------------------- #
+def _nev(code):
+	return {"state": "not_evaluable", "reason_code": code}
+
+
+class TestDataGapCompletes(FrappeTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("fc-owner@example.com")
+		_mk_listing()
+		cls.company = frappe.db.get_value("Company", {}, "name")
+		cls.inst = _mk_installation(cls.owner)
+		frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		_wipe_residue()
+		super().tearDownClass()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+
+	def _record(self, coverage, findings=None, **kw):
+		run = _mk_run(self.owner)
+		agent_runs.record_delegate_run(
+			run, self.inst, findings or [], coverage=coverage, scope={"company": self.company}, **kw
+		)
+		run.reload()
+		return run
+
+	def _activity_action(self, run):
+		return frappe.db.get_value(ACTIVITY, {"run": run.name}, "action")
+
+	def _bell_subject(self, run):
+		dash = frappe.db.get_value(RUN, run.name, "dashboard")
+		if not dash:
+			return None
+		return frappe.db.get_value(
+			"Notification Log", {"document_type": DASHBOARD, "document_name": dash}, "subject"
+		)
+
+	# ---- data gaps only -> completed, verdict stays non-clean ------------- #
+	def test_data_gap_partial_verdict_reads_completed(self):
+		# one required check evaluated, the other blocked by stale input data.
+		run = self._record({TOK_A: "evaluated", TOK_B: _nev("source_stale")})
+		self.assertEqual(run.status, "completed")
+		self.assertEqual(run.result_state, "partial")  # verdict non-clean
+		self.assertTrue(run.coverage_note)  # the warning still fires
+		# F1: the activity feed keeps the amber "with issues" action, not a lone green check.
+		self.assertEqual(self._activity_action(run), "run_partial")
+		# the owner bell must not read identical to a clean run's bell.
+		self.assertIn("completed with issues", self._bell_subject(run) or "")
+
+	def test_all_data_gap_not_evaluable_verdict_reads_completed(self):
+		run = self._record({TOK_A: _nev("source_stale"), TOK_B: _nev("configuration_missing")})
+		self.assertEqual(run.status, "completed")
+		self.assertEqual(run.result_state, "not_evaluable")
+		self.assertTrue(run.coverage_note)
+
+	# ---- attention-needed coverage gaps stay partial --------------------- #
+	def test_permission_slice_stays_partial(self):
+		# retryable, but a permissions problem -> needs attention, not a data gap.
+		run = self._record({TOK_A: "evaluated", TOK_B: _nev("permission_slice")})
+		self.assertEqual(run.status, "partial")
+
+	def test_permanent_reason_stays_partial(self):
+		run = self._record({TOK_A: "evaluated", TOK_B: _nev("rule_expired")})
+		self.assertEqual(run.status, "partial")
+
+	def test_mixed_data_gap_and_permanent_stays_partial(self):
+		# any non-data-gap note anywhere -> the whole run stays partial.
+		run = self._record({TOK_A: _nev("source_stale"), TOK_B: _nev("rule_expired")})
+		self.assertEqual(run.status, "partial")
+
+	def test_unknown_reason_code_stays_partial(self):
+		# coerced to unsupported_customisation (data_gap False) -> fail-safe partial.
+		run = self._record({TOK_A: "evaluated", TOK_B: _nev("some novel gibberish")})
+		self.assertEqual(run.status, "partial")
+
+	# ---- execution problems dominate (data-gap note present too) --------- #
+	def test_truncated_with_data_gap_stays_partial(self):
+		run = self._record({TOK_A: "evaluated", TOK_B: _nev("source_stale")}, truncated=True)
+		self.assertEqual(run.status, "partial")
+
+	def test_dropped_row_with_data_gap_stays_partial(self):
+		# a rejected writeback row is an evaluator-integrity failure, never a data gap.
+		run = self._record(
+			{TOK_A: "evaluated", TOK_B: _nev("source_stale")},
+			dropped=[{"ref_doctype": "Purchase Invoice", "ref_name": "PI-DROP", "reason": "invalid"}],
+		)
+		self.assertEqual(run.status, "partial")
+
+	# ---- clean run unchanged --------------------------------------------- #
+	def test_clean_run_completed_and_clean(self):
+		run = self._record({TOK_A: "evaluated", TOK_B: "evaluated"})
+		self.assertEqual(run.status, "completed")
+		self.assertEqual(run.result_state, "evaluated_clean")
+		self.assertFalse(run.coverage_note)  # no warning on a truly clean run
+		# a truly clean run logs the plain green "Run completed" action + a plain bell.
+		self.assertEqual(self._activity_action(run), "run_completed")
+		subj = self._bell_subject(run) or ""
+		self.assertIn("run completed:", subj)
+		self.assertNotIn("with issues", subj)
+
+	# ---- the false-clean BLOCKER: a data-gap note on a token OUTSIDE the -- #
+	# ---- declared manifest must still block evaluated_clean -------------- #
+	def test_data_gap_outside_manifest_never_reads_clean(self):
+		# both required tokens evaluated (required_unevaluated empty), but an extra token
+		# carries a data-gap note. status=completed, yet the verdict MUST stay non-clean --
+		# result_state's ``partial`` arg keys off bool(coverage_notes), never the status bool.
+		run = self._record({TOK_A: "evaluated", TOK_B: "evaluated", "tok_extra": _nev("source_stale")})
+		self.assertEqual(run.status, "completed")
+		self.assertNotEqual(run.result_state, "evaluated_clean")
+		# the outward clean attestation is refused for this run (0 findings notwithstanding).
+		self.assertFalse(agent_runs._clean_attestation_allowed(run.result_state, 0, shadow=False))
 
 
 # --------------------------------------------------------------------------- #

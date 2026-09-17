@@ -73,6 +73,7 @@
 							:timestamp-full="m.timestampFull"
 							:copyable="false"
 							images-as-chips
+							@open-attachment="openAttachment"
 						>
 							<template v-if="m.fromSupport" #avatar>
 								<div class="jv-sup-avatar" aria-hidden="true">S</div>
@@ -111,6 +112,15 @@
 		<template #aside>
 			<SupportTicketPanel @open="replyExpanded = true" />
 		</template>
+
+		<!-- Attachment preview popup (image / pdf / sheet / text, download
+		     fallback) - the same shared dialog the chat surface opens, so support
+		     attachments preview inline like Helpdesk's instead of a new tab. -->
+		<FilePreview
+			v-model="filePreviewOpen"
+			:fileUrl="filePreview.file_url"
+			:fileName="filePreview.file_name"
+		/>
 	</SupportShell>
 </template>
 
@@ -120,6 +130,7 @@ import { useRoute } from "vue-router";
 import { Badge, Button, FeatherIcon, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import Message from "@/components/chat/Message.vue";
+import FilePreview from "@/components/FilePreview.vue";
 import SupportShell from "@/components/support/SupportShell.vue";
 import SupportReplyBox from "@/components/support/SupportReplyBox.vue";
 import SupportTicketPanel from "@/components/support/SupportTicketPanel.vue";
@@ -242,6 +253,22 @@ const ticketAttachments = computed(() => store.thread.attachments.map(classifyAt
 
 function downloadUrl(fileUrl) {
 	return supportDownloadUrl(ticketName.value, fileUrl);
+}
+
+// Message emits open-attachment (and preventDefaults its own <a>) so the surface
+// decides how to open it. Without a handler here the click was dead - default
+// prevented, nothing listening - and the attachment couldn't be opened at all.
+// Open it in the SAME shared FilePreview popup the chat surface uses (image /
+// pdf / sheet / text, download fallback), so support attachments preview inline
+// like Helpdesk's rather than dumping the user into a new tab. cv.file_url is
+// downloadUrl(...) from classifyAttachment - the authenticated same-origin proxy
+// - and cv.title carries the extension FilePreview needs to pick the renderer.
+const filePreviewOpen = ref(false);
+const filePreview = ref({ file_url: "", file_name: "" });
+function openAttachment(cv) {
+	if (!cv || !cv.file_url) return;
+	filePreview.value = { file_url: cv.file_url, file_name: cv.title || "" };
+	filePreviewOpen.value = true;
 }
 
 // I3: display objects computed ONCE per messages/ticket change, not re-parsed

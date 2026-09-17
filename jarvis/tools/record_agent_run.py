@@ -225,8 +225,15 @@ def record_agent_run(
 	run_doc = frappe.get_doc(RUN, run_row.name)
 
 	# The agent's bench-held id-only token manifest + allowed ref doctypes. Tokens
-	# are opaque (A2); allowed refs = the agent's declared doctypes_required plus
-	# the aggregate dims (Company/Account) an evaluator may key a finding on.
+	# are opaque (A2); allowed refs = the agent's declared doctypes_required plus the
+	# universal accounting anchors (Company/Account) and the universal transaction
+	# (Journal Entry) an evaluator may key a finding on. These anchors are ALLOWED as
+	# finding references but are NOT added to doctypes_required, so they never become
+	# a mandatory install permission (doctypes_required gates run-as read at install;
+	# an auditor must not be blocked from installing just because it *may* reference a
+	# Journal Entry). A referenced record is still verified to exist AND be readable by
+	# the run-as user below (_ref_verifiable), so widening the anchor set cannot leak an
+	# unreadable record.
 	listing = (
 		frappe.db.get_value(
 			LISTING,
@@ -237,7 +244,7 @@ def record_agent_run(
 		or {}
 	)
 	token_set = set(_as_list(listing.get("rule_tokens")))
-	allowed_refs = set(_as_list(listing.get("doctypes_required"))) | {"Company", "Account"}
+	allowed_refs = set(_as_list(listing.get("doctypes_required"))) | {"Company", "Account", "Journal Entry"}
 
 	raw_findings = _as_list(findings)
 	coverage = _as_dict(coverage)

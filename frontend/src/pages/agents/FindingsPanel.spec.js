@@ -849,7 +849,7 @@ describe("Findings demote engineering output (jarvis#1062 P0-2/P1-3)", () => {
 		const message = bannerComponent.props("message");
 		expect(message).not.toContain("nsv-tieout-7d92");
 		expect(message).not.toContain("Warehouse.account");
-		expect(message).toContain("Partial scan");
+		expect(message).toContain("Coverage gaps");
 		expect(message).toContain("not evaluable");
 
 		const banner = w.find(".banner");
@@ -857,6 +857,24 @@ describe("Findings demote engineering output (jarvis#1062 P0-2/P1-3)", () => {
 		expect(dl.exists()).toBe(true);
 		expect(dl.text()).toContain("nsv-tieout-7d92");
 		expect(dl.text()).toContain("Warehouse.account");
+	});
+
+	it("shows the coverage banner on a data-gap COMPLETED run, with no self-contradicting 'Partial scan'", async () => {
+		// a data-gap run now reads status "completed" but still carries a coverage_note;
+		// the banner must still fire and its copy must not contradict the green badge.
+		const w = mountPanel(
+			baseRun({
+				status: "completed",
+				coverage_note:
+					"not evaluable: rule36_4_in2b: The period GSTR-2B data is stale; refresh and re-run",
+			})
+		);
+		await flushPromises();
+
+		const message = w.findComponent({ name: "Banner" }).props("message");
+		expect(message).not.toContain("Partial scan");
+		expect(message).toContain("Coverage gaps");
+		expect(message).toContain("Treat gaps as unreviewed, not clean");
 	});
 });
 

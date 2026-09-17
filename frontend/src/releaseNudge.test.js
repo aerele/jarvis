@@ -21,13 +21,11 @@ test("pillFor: no notice or no target version -> hidden (never a false 'on the l
 	assert.deepEqual(pillFor({ version: "" }), { show: false });
 });
 
-test("pillFor: current (tier none, known version) -> green, branded label", () => {
-	const p = pillFor({ version: "16.4.0", tier: "none", behind: 0 });
-	assert.deepEqual(p, { show: true, tone: "green", label: "On the latest Jarvis" });
-});
-
-test("pillFor: agentName param brands the green label (not an import)", () => {
-	assert.equal(pillFor({ version: "16.4.0", tier: "none" }, "Aida").label, "On the latest Aida");
+test("pillFor: current (tier none) -> hidden (no positive 'on the latest' badge)", () => {
+	// Being up to date is the quiet default, not a pill: tier "none" renders
+	// nothing, same as no notice at all.
+	assert.deepEqual(pillFor({ version: "16.4.0", tier: "none", behind: 0 }), { show: false });
+	assert.deepEqual(pillFor({ version: "16.4.0", tier: "none" }), { show: false });
 });
 
 test("pillFor: soft -> amber; behind>=1 shows the count, behind<1 falls back", () => {
@@ -98,10 +96,10 @@ test("pillFor: an unknown-but-versioned future tier -> amber, NEVER a false gree
 	assert.notEqual(p.tone, "green");
 });
 
-test("pillFor: green is reserved for tier 'none' alone (not the catch-all)", () => {
-	// Regression pin for the forward-compat fix: only "none" is green; every other
-	// versioned tier is amber/red. Guards against green becoming the fallback again.
-	assert.equal(pillFor({ version: "16.4.0", tier: "none" }).tone, "green");
+test("pillFor: the pill only nudges - none is hidden, every other versioned tier is amber/red", () => {
+	// Regression pin: "none" (up to date) shows no pill at all; green is never
+	// produced. Every other versioned tier is a nudge (amber/red), never green.
+	assert.equal(pillFor({ version: "16.4.0", tier: "none" }).show, false);
 	assert.equal(pillFor({ version: "16.4.0", tier: "soft" }).tone, "amber");
 	assert.equal(pillFor({ version: "16.4.0", tier: "severe" }).tone, "red");
 	assert.equal(pillFor({ version: "16.4.0", tier: "hard" }).tone, "red");
@@ -110,8 +108,10 @@ test("pillFor: green is reserved for tier 'none' alone (not the catch-all)", () 
 
 // ---- bannerToneFor: single-sourced from pillFor --------------------------
 
-test("bannerToneFor: returns pillFor's tone (green/amber/red), single-sourced", () => {
-	assert.equal(bannerToneFor({ version: "16.4.0", tier: "none" }), "green");
+test("bannerToneFor: returns pillFor's tone (amber/red), single-sourced", () => {
+	// "none" has no pill now, so no tone (undefined) - but bannerShouldShow keeps
+	// it from ever reaching here.
+	assert.equal(bannerToneFor({ version: "16.4.0", tier: "none" }), undefined);
 	assert.equal(bannerToneFor({ version: "16.4.0", tier: "soft" }), "amber");
 	assert.equal(bannerToneFor({ version: "16.4.0", tier: "severe" }), "red");
 	assert.equal(bannerToneFor({ version: "16.4.0", tier: "hard" }), "red");

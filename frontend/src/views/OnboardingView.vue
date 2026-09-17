@@ -464,6 +464,70 @@
 									>
 										Invoicing details
 									</div>
+									<div
+										v-if="billingIsIndia"
+										class="col-span-2 flex flex-col gap-1"
+									>
+										<FormControl
+											type="text"
+											variant="outline"
+											label="GSTIN (optional)"
+											:model-value="billing.fields.gstin.value"
+											@update:model-value="
+												(v) => {
+													billing.setUserValue('gstin', v);
+													clearFieldErrorIfValid(
+														'gstin',
+														(val) =>
+															gstinError(val) ||
+															gstinStateError(_billingAddr()),
+														v
+													);
+												}
+											"
+											:placeholder="GSTIN_PLACEHOLDER"
+											:aria-invalid="
+												detailsFieldErrors.gstin ? 'true' : undefined
+											"
+											:aria-describedby="
+												detailsFieldErrors.gstin
+													? 'jv-ob-gstin-err'
+													: undefined
+											"
+											@blur="onGstinBlur"
+											@keydown.enter="onDetailsSubmit"
+										/>
+										<ErrorMessage
+											id="jv-ob-gstin-err"
+											:message="detailsFieldErrors.gstin"
+										/>
+										<!-- Tenant-local GSTIN autofill: shown ONLY where this site's own
+											 India Compliance can look the GSTIN up. Fail-open to manual. -->
+										<div
+											v-if="
+												gstinAutofillCapable &&
+												billing.gstinUndoAvailable.value
+											"
+											class="mt-1 flex flex-wrap items-center gap-3"
+										>
+											<button
+												v-if="billing.gstinUndoAvailable.value"
+												type="button"
+												class="text-p-sm text-ink-gray-6 underline underline-offset-2"
+												@click="onUndoGstinPrefill"
+											>
+												Undo autofill
+											</button>
+										</div>
+										<p
+											v-if="gstinAutofillNote"
+											role="status"
+											aria-live="polite"
+											class="mt-1 text-p-sm text-ink-gray-6"
+										>
+											{{ gstinAutofillNote }}
+										</p>
+									</div>
 									<FormControl
 										class="col-span-2"
 										type="text"
@@ -730,41 +794,6 @@
 										<ErrorMessage
 											id="jv-ob-state-err"
 											:message="detailsFieldErrors.state"
-										/>
-									</div>
-									<div class="col-span-2 flex flex-col gap-1">
-										<FormControl
-											type="text"
-											variant="outline"
-											label="GSTIN (optional)"
-											:model-value="billing.fields.gstin.value"
-											@update:model-value="
-												(v) => {
-													billing.setUserValue('gstin', v);
-													clearFieldErrorIfValid(
-														'gstin',
-														(val) =>
-															gstinError(val) ||
-															gstinStateError(_billingAddr()),
-														v
-													);
-												}
-											"
-											:placeholder="GSTIN_PLACEHOLDER"
-											:aria-invalid="
-												detailsFieldErrors.gstin ? 'true' : undefined
-											"
-											:aria-describedby="
-												detailsFieldErrors.gstin
-													? 'jv-ob-gstin-err'
-													: undefined
-											"
-											@blur="touchGstinField"
-											@keydown.enter="onDetailsSubmit"
-										/>
-										<ErrorMessage
-											id="jv-ob-gstin-err"
-											:message="detailsFieldErrors.gstin"
 										/>
 									</div>
 								</div>
@@ -2137,6 +2166,8 @@ import {
 	onboardingPaymentApi,
 	supportCreateTicket,
 	captureOnboardingLead,
+	gstinAutofillAvailable,
+	gstinAutofill,
 	getTermsUrl,
 } from "@/api";
 import {
@@ -2414,6 +2445,126 @@ const billing = useBillingDetails({
 	site: (typeof window !== "undefined" && window.location && window.location.host) || "",
 	user: readCookie("user_id") || "",
 });
+
+// GSTIN party autofill (tenant-local): the "Fetch details" button is offered ONLY where this site's
+// own India Compliance can look a GSTIN up (capability fetched once on entering Details). Every miss
+// just shows a hint and leaves manual entry untouched — the button never blocks the form.
+const gstinAutofillCapable = ref(false);
+const gstinFetching = ref(false);
+const gstinFetchHint = ref("");
+const _GSTIN_FETCH_TIMEOUT_MS = 9000;
+let _gstinCapabilityChecked = false;
+let _gstinLastLookedUp = "";
+
+const canFetchGstin = computed(
+	() =>
+		gstinAutofillCapable.value &&
+		!gstinFetching.value &&
+		!!(billing.fields.gstin.value || "").trim() &&
+		!gstinError(billing.fields.gstin.value)
+);
+
+// Re-run the billing validators after a programmatic change (autofill apply / undo) that wrote the
+// fields directly instead of through the inputs' handlers, so stale required / India-only errors
+// clear. touchStateField cascades to state+pincode+GSTIN; country/address/city have their own buckets.
+// One status line under the GSTIN field (there is no Fetch button now): a pre-fetch cue that
+// details autofill on blur, a "fetching…" state, the lookup result, or a filled confirmation
+// once a prefill is in effect.
+const gstinAutofillNote = computed(() => {
+	if (!gstinAutofillCapable.value) return "";
+	if (gstinFetching.value) return "Fetching your company details…";
+	if (gstinFetchHint.value) return gstinFetchHint.value;
+	if (billing.gstinUndoAvailable.value) return "Company details filled from your GSTIN.";
+	return "Enter your GSTIN and your company details fill in automatically.";
+});
+
+// Auto-fetch on blur (replaces the Fetch-details button): leaving the GSTIN field runs the
+// lookup, but ONLY for a new, checksum-valid GSTIN the tenant's IC can resolve (canFetchGstin)
+// and only when it CHANGED since the last settled lookup — so re-blurring an unchanged value
+// never re-hits the GST API.
+function onGstinBlur() {
+	touchGstinField();
+	const g = (billing.fields.gstin.value || "").trim();
+	if (g && g !== _gstinLastLookedUp && canFetchGstin.value) {
+		fetchGstinDetails();
+	}
+}
+
+function revalidateBillingFields() {
+	clearFieldErrorIfValid("country", countryError, billing.fields.country.value);
+	clearFieldErrorIfValid("address", addressError, billing.fields.address.value);
+	clearFieldErrorIfValid("city", cityError, billing.fields.city.value);
+	touchStateField();
+}
+
+async function fetchGstinDetails() {
+	if (!canFetchGstin.value) return;
+	const gstin = (billing.fields.gstin.value || "").trim();
+	gstinFetching.value = true;
+	gstinFetchHint.value = "";
+	try {
+		// Bound the wait: a slow GST-API round trip must not hang the form (IC has its own server
+		// timeout, but the button needs its own ceiling) — on timeout we fall back to manual entry.
+		const res = await Promise.race([
+			gstinAutofill(gstin),
+			new Promise((_, reject) =>
+				setTimeout(() => reject(new Error("timeout")), _GSTIN_FETCH_TIMEOUT_MS)
+			),
+		]);
+		// Discard a late response if the customer changed or cleared the GSTIN while it was in flight:
+		// applying it would pair the old registry party (name/address) with a different or absent GSTIN.
+		if ((billing.fields.gstin.value || "").trim() !== gstin) return;
+		_gstinLastLookedUp = gstin;
+		if (res && res.found === true) {
+			billing.applyGstinPrefill(res);
+			revalidateBillingFields();
+			gstinFetchHint.value =
+				res.status && res.status !== "Active"
+					? `Fetched — but this GSTIN is ${String(
+							res.status
+					  ).toLowerCase()} in the GST registry. Please verify before continuing.`
+					: "";
+		} else {
+			gstinFetchHint.value =
+				"Couldn't fetch details for that GSTIN — please enter them manually.";
+		}
+	} catch (e) {
+		gstinFetchHint.value = "Couldn't fetch details right now — please enter them manually.";
+	} finally {
+		gstinFetching.value = false;
+	}
+}
+
+// Undo the last GSTIN prefill AND drop the advisory hint (a lingering "…is cancelled" note after
+// the values are reverted would be stale).
+function onUndoGstinPrefill() {
+	billing.undoGstinPrefill();
+	gstinFetchHint.value = "";
+	// Restored values may flip India<->overseas (e.g. undoing the country coerce), so re-run the
+	// validators — else India-only state/PIN errors linger over now-valid overseas values.
+	revalidateBillingFields();
+}
+
+// Probe the capability once when the customer reaches Details; best-effort, a failure hides the button.
+watch(
+	() => state.step,
+	(step) => {
+		if (step !== "details" || _gstinCapabilityChecked) return;
+		try {
+			gstinAutofillAvailable()
+				.then((r) => {
+					_gstinCapabilityChecked = true; // only a real answer is final
+					gstinAutofillCapable.value = !!(r && r.available);
+				})
+				.catch(() => {
+					// transient probe failure: leave the guard unset so re-entering Details retries
+				});
+		} catch (e) {
+			/* never let the probe break the step transition (mirrors the lead-capture watch) */
+		}
+	},
+	{ immediate: true }
+);
 
 const steps = computed(() => STEPS_MANAGED);
 const selectedPlan = computed(() => state.plans.find((p) => p.name === state.planName) || {});
@@ -2925,6 +3076,18 @@ const stateOptions = [
 	...INDIAN_STATES.map((s) => ({ label: s, value: s })),
 ];
 const billingIsIndia = computed(() => isIndia(billing.fields.country.value || "India"));
+
+// GSTIN is an India-only identifier, so a foreign customer must never carry one. Whenever the
+// country becomes non-India — the user picking it, an ERP-prefill, or a resumed snapshot — clear
+// the value, its error and the autofill lookup state so a stale GSTIN can never be submitted. The
+// field and its autofill are hidden via v-if="billingIsIndia" in the template.
+watch(billingIsIndia, (isIndiaNow) => {
+	if (isIndiaNow) return;
+	if (billing.fields.gstin.value) billing.setUserValue("gstin", "");
+	detailsFieldErrors.gstin = "";
+	_gstinLastLookedUp = "";
+	gstinFetchHint.value = "";
+});
 function stateError(v) {
 	const s = (v || "").trim();
 	if (!billingIsIndia.value) return s ? "" : "Enter your state or region."; // non-India: free-text, required
