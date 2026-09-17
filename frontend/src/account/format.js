@@ -223,3 +223,24 @@ export function billingBanner(notice, canRenew) {
 		dismissible: phase === "expiring",
 	};
 }
+
+// Member-facing wording for a stopped (Expired/Cancelled) subscription. The
+// readiness-driven "Chat is paused" banner's copy (suspensionNotice -> detail /
+// SUSPENDED_FALLBACK) is ADMIN-framed ("Renew to restore access"); a member
+// cannot renew, so they get an "ask your admin" line instead. Mirrors the
+// backend _DEFAULT_MEMBER_SUSPENDED and billingBanner's member_message.
+export const MEMBER_SUSPENDED_NOTICE =
+	"Your subscription is no longer active - ask your admin to renew.";
+
+// The suspended ("Chat is paused") banner's message + whether to offer Renew,
+// split by audience. Sibling of billingBanner for the readiness-driven suspended
+// banner, which does NOT flow through billingBanner: renewing is the admin's
+// action, so a member gets the "ask your admin" copy and no button. Keeping the
+// audience split here (not in the template) keeps it unit-testable and stops the
+// admin/member wording drifting apart.
+export function suspendedBanner(adminMessage, canRenew) {
+	return {
+		message: canRenew ? adminMessage : MEMBER_SUSPENDED_NOTICE,
+		showRenew: !!canRenew,
+	};
+}
