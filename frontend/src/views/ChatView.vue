@@ -5018,6 +5018,11 @@ async function openSupport() {
 			copyBody = "";
 		} else {
 			const answer = await promptSupportCopy({ preview: recent.join("\n\n") });
+			// Dismissing the prompt (X / Escape / click-away -> "cancel") backs out
+			// of opening Support entirely; "No" still files the ticket, just without
+			// the chat. Return before the router.push below so a dismiss doesn't
+			// silently navigate the user somewhere they were backing out of.
+			if (answer === "cancel") return;
 			if (answer === "yes") copyBody = recent.join("\n\n");
 			if (answer === "dontask") {
 				// Don't-ask-again defaults to not copying: a permanent, silent "share my
