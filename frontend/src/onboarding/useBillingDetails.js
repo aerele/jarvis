@@ -22,7 +22,7 @@
 // useBillingDetails.spec.js.
 
 import { reactive, ref, computed } from "vue";
-import { canonicalCountry } from "./indianStates.js";
+import { canonicalCountry, canonicalIndianState, INDIA } from "./indianStates.js";
 
 // The Details-step billing inputs. State + Country drive India Compliance's place
 // of supply (State is a Select of Indian states when Country is India); the books
@@ -496,6 +496,80 @@ export function useBillingDetails(opts = {}) {
 		return any;
 	}
 
+	// --- GSTIN autofill prefill (tenant-local; fed by onboarding.gstin_autofill) ---
+	// The Fetch-details button hands the resolved party details here. Decision (Navin): OVERWRITE
+	// the fetched fields but keep a one-shot Undo. Rules: NON-EMPTY only (a blank registry field
+	// never wipes what the customer typed); fetched values become USER-OWNED so a late ERP-default
+	// response can't clobber them (same fence as a manual edit); business_name maps to the invoicing
+	// party; state is resolved to a valid <select> option, or "" when unmatched — and by the
+	// non-empty rule an unmatched "" is SKIPPED (a state the customer already typed is kept, and the
+	// view's touchStateField then flags it if it isn't valid under India). country is set to India
+	// (the view re-runs the India/Overseas validators). billingSaved is deliberately NOT touched —
+	// nothing is persisted server-side yet, so the "kept with your account" promise must not flip.
+	// The prior field + invoicing state is captured for a single Undo.
+	const _gstinUndo = ref(null);
+
+	function applyGstinPrefill(contract) {
+		if (!contract || contract.found !== true) return false;
+		const addr = contract.address || {};
+		const incoming = {
+			address: (addr.address_line1 || "").trim(),
+			address2: (addr.address_line2 || "").trim(),
+			city: (addr.city || "").trim(),
+			state: canonicalIndianState(addr.state),
+			pincode: (addr.pincode || "").trim(),
+			country: INDIA, // a GSTIN is India; the view coerces + re-validates the state/pincode fields
+		};
+		const businessName = (contract.business_name || "").trim();
+		// Undo captures ONLY the fields this prefill actually changes, so it can never roll back a
+		// value autofill never touched (a contact number or invoicing email typed afterwards) or a
+		// later GSTIN edit. Snapshot each field's prior state (provenance included) as it is overwritten.
+		const priorFields = {};
+		let any = false;
+		for (const name of Object.keys(incoming)) {
+			const v = incoming[name];
+			if (!v) continue; // non-empty only — never blank out an existing value
+			priorFields[name] = { ...fields[name] };
+			const f = fields[name];
+			f.value = v;
+			f.source = "user"; // wins the stale-response fence; a late ERP default can't overwrite it
+			f.source_company = "";
+			any = true;
+		}
+		let priorInvoicing = null;
+		if (businessName) {
+			priorInvoicing = {
+				company_name: invoicing.company_name,
+				userSet: invoicingCompanyUserSet,
+			};
+			setInvoicing(businessName, undefined); // -> invoicing party (pins invoicingCompanyUserSet)
+			any = true;
+		}
+		if (any) {
+			_gstinUndo.value = { fields: priorFields, invoicing: priorInvoicing };
+			persist();
+		}
+		return any;
+	}
+
+	const gstinUndoAvailable = computed(() => _gstinUndo.value !== null);
+
+	// Restore ONLY what the most recent applyGstinPrefill changed (one-shot). Fields the prefill did
+	// not touch — a contact number or invoicing email typed afterwards, a later GSTIN edit — are left
+	// exactly as the customer left them.
+	function undoGstinPrefill() {
+		const u = _gstinUndo.value;
+		if (!u) return false;
+		for (const name of Object.keys(u.fields)) Object.assign(fields[name], u.fields[name]);
+		if (u.invoicing) {
+			invoicing.company_name = u.invoicing.company_name;
+			invoicingCompanyUserSet = u.invoicing.userSet;
+		}
+		_gstinUndo.value = null;
+		persist();
+		return true;
+	}
+
 	// The single normalized billing object sent to admin AND rendered on Review &
 	// Pay (P1-03: the card reads THIS object, never re-joined form strings). Only
 	// non-empty keys are included; blank optional fields are simply omitted. GSTIN
@@ -572,6 +646,9 @@ export function useBillingDetails(opts = {}) {
 		clearStorage,
 		markBillingSaved,
 		hydrateServerSnapshot,
+		applyGstinPrefill,
+		gstinUndoAvailable,
+		undoGstinPrefill,
 		buildBilling,
 	};
 }
