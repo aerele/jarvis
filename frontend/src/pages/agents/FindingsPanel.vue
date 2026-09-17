@@ -79,7 +79,7 @@
 				<span>{{ run.error || "This run failed before writing any pages." }}</span>
 			</div>
 			<Banner
-				v-else-if="run.coverage_note"
+				v-else-if="coverageWarning"
 				class="mt-4"
 				type="warning"
 				:message="`${coverageNote}.`"
@@ -120,12 +120,14 @@
 		</template>
 
 		<template v-else>
-			<!-- coverage-honesty banner: a truncated scan must NEVER read as all-clear -->
+			<!-- coverage-honesty banner: a coverage gap must NEVER read as all-clear. Copy
+			     is status-neutral ("Coverage gaps") because it fires on a data-gap run whose
+			     badge now reads "completed" as well as on an execution-partial run -->
 			<Banner
 				v-if="coverageWarning"
 				class="mt-4"
 				type="warning"
-				:message="`Partial scan - ${coverageNote}. Treat gaps as unreviewed, not clean.`"
+				:message="`Coverage gaps - ${coverageNote}. Treat gaps as unreviewed, not clean.`"
 			>
 				<TechnicalDetails :details="coverageDetails" />
 			</Banner>
@@ -360,7 +362,8 @@
 // selected run's findings, grouped by severity (blocker → warning → note),
 // each row expandable to the recorded detail_md (markdown), the referenced
 // document, and the statutory caveat (section/effective_date/disclaimer).
-// A partial run always carries a coverage-honesty banner. Actions per finding:
+// Any coverage-gapped run (incl. a data-gap "completed" one) carries a coverage-honesty
+// banner. Actions per finding:
 // Discuss in chat (take_finding_to_chat → /c/:id), Open document, and the
 // open/acknowledged/resolved state select → setFindingState (optimistic).
 // No remediation text is ever fabricated - only what the run persisted.
@@ -373,7 +376,7 @@ import RunStepTimeline from "./RunStepTimeline.vue";
 // Shared, not a local copy: this panel's header pill is one of the surfaces
 // @/lib/agentRunStatus exists to keep in step with the rail and the Activity
 // feed (jarvis#1062). A second table here is exactly the drift it prevents.
-import { STATUS_THEME } from "@/lib/agentRunStatus";
+import { STATUS_THEME, coverageWarned } from "@/lib/agentRunStatus";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
 import TechnicalDetails from "@/components/doc/TechnicalDetails.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
@@ -507,12 +510,10 @@ onBeforeUnmount(stopStepsPoll);
 const runLabel = computed(() =>
 	props.run && props.run.started_at ? timeAgo(props.run.started_at) : props.run.name
 );
-// a failed run shows ONLY the red failed banner - never the amber partial one
-const coverageWarning = computed(
-	() =>
-		props.run.status === "partial" ||
-		(!!props.run.coverage_note && props.run.status !== "failed")
-);
+// a failed run shows ONLY the red failed banner - never the amber coverage one.
+// Delegates to the shared coverageWarned so the board triangle and this banner never
+// drift (every partial run also carries a coverage_note, so the note gate subsumes it).
+const coverageWarning = computed(() => coverageWarned(props.run));
 // jarvis#1062 P0-2: coverage_note is bundle-generated too - the same
 // extraction as findings' detail_md, so a rule code / DocType.field
 // reference in the coverage sentence lands in coverageDetails, never inline.
