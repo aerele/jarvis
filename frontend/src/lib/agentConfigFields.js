@@ -96,6 +96,33 @@ export const CONFIG_FIELD_SET = [
 		type: "number",
 		help: "Step used to detect round-number plugs",
 	},
+	{
+		key: "stale_floor_days",
+		path: "ageing.stale_floor_days",
+		label: "Stale-invoice floor",
+		type: "number",
+		suffix: "days",
+		placeholder: "30",
+		help: "An unpaid invoice open more than this many days past its due date is flagged stale.",
+	},
+	{
+		key: "advance_floor_days",
+		path: "ageing.advance_floor_days",
+		label: "Unlinked-advance floor",
+		type: "number",
+		suffix: "days",
+		placeholder: "30",
+		help: "A supplier advance left unlinked to an invoice longer than this is surfaced.",
+	},
+	{
+		key: "grir_floor_days",
+		path: "ageing.grir_floor_days",
+		label: "Received-not-billed floor",
+		type: "number",
+		suffix: "days",
+		placeholder: "30",
+		help: "A goods-received-not-billed line older than this is surfaced.",
+	},
 ];
 
 /** The always-rendered universal-scope subset (company/fiscal_year/period). */

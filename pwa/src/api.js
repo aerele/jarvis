@@ -64,6 +64,14 @@ export const getCanvas = (message, name = "", dark = 0) =>
 // Render-ready preview of a tabular/text artifact (xlsx/csv → sheets, txt → text).
 export const previewFile = (file_url) => call(CHAT + "preview_file", { file_url });
 
+// Predefined PDF templates: list the set + reformat a generated PDF into another
+// one (the per-document override). Mirrors the desktop SPA; the phone has no admin
+// pane, so the workspace-default get/set endpoints are intentionally not wired here.
+const PT = "jarvis.pdf_templates.";
+export const listPdfTemplates = () => call(PT + "list_pdf_templates");
+export const rerenderDocument = (source_name, template) =>
+	call(PT + "rerender_document", { source_name, template });
+
 // ── Account: who you are, what you're on, what you've used ──────────────────
 export const getAccount = () => call("jarvis.account.get_account");
 export const getUsage = () => call(CHAT + "get_usage");

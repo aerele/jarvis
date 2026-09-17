@@ -162,9 +162,17 @@ def render_pdf(
 	brand_header: str = "",
 	page_numbers: bool = True,
 	timeout: int = 25,
+	font_config_file: str | None = None,
 ) -> bytes:
 	"""Render ``body_html`` (a fragment the caller already sanitized) to PDF bytes
 	via a direct, hard-timed wkhtmltopdf subprocess.
+
+	``font_config_file`` (a ``FONTCONFIG_FILE`` path from ``font_catalog.staged_
+	fontconfig``) makes a staged catalog font resolvable to wkhtmltopdf BY FAMILY NAME
+	via fontconfig — the only way a real-sized custom font renders in the PDF (a
+	base64 ``@font-face`` blanks QtWebKit's page). It is injected into the subprocess
+	env only; it does not relax ``--disable-local-file-access`` (fontconfig loads the
+	font through the OS, not wkhtmltopdf's URL loader).
 
 	Branding lives in the running HTML header: ``brand_header`` is ALREADY
 	tool-built + safe (see ``build_brand_header`` / ``resolve_brand``); an agent
@@ -215,12 +223,17 @@ def render_pdf(
 			has_header=bool(header_doc),
 		)
 		document = _compose_document(body_html, "")
+		# Inherit the parent env, adding FONTCONFIG_FILE only when a brand font was
+		# staged, so a staged font resolves by family name (nothing else about the
+		# subprocess environment changes).
+		run_env = {**os.environ, "FONTCONFIG_FILE": font_config_file} if font_config_file else None
 		try:
 			result = subprocess.run(
 				args,
 				input=document.encode("utf-8"),
 				capture_output=True,
 				timeout=timeout,
+				env=run_env,
 			)
 		except subprocess.TimeoutExpired as exc:
 			# Hard bound hit: the child was killed, no usable output. Surface a
@@ -655,6 +668,74 @@ def resolve_letterhead(letterhead: str | None) -> tuple[str, str, str | None]:
 		# Letterhead is a nicety, never a hard failure of the export.
 		_log_infra_failure("rich-pdf letterhead resolution failed", f"letterhead={named!r}")
 		return "", "", (f"letterhead {named!r} could not be applied" if named else None)
+
+
+def _default_company() -> str | None:
+	"""The company to brand an unspecified export with: the resolved workspace default
+	(``frappe.db.get_default("company")`` — user default then Global Defaults, the same
+	key ERPNext stores under), else the ONLY company (unambiguous). Returns ``None``
+	when multi-company and no default — the caller then renders no footer rather than
+	guess a company's branding."""
+	try:
+		c = frappe.db.get_default("company")
+		if c:
+			return c
+		names = frappe.get_all("Company", limit=2, pluck="name")
+		return names[0] if len(names) == 1 else None
+	except Exception:
+		return None
+
+
+def resolve_company_letterhead_footer(
+	company_map: dict | None, company: str | None
+) -> tuple[str, str | None]:
+	"""Resolve the FULL Letter Head footer HTML for ``company`` from a custom
+	template's pinned Company->Letter Head map. Returns ``(footer_html, note)``.
+
+	Unlike ``resolve_letterhead`` (which keeps only logos on a doc-less report), a
+	custom template's footer is PINNED per company, so we render that company's
+	Letter Head ``footer`` WITH the Company as Jinja context and keep the text
+	(address/contact). Company-branded letterheads are usually static; a Jinja one
+	gets company-level fields. Same safety gate as the header path: same-site logos
+	inlined to permission-checked ``data:`` URIs, remote ``<img>`` dropped, then the
+	nh3 letterhead sanitizer (data-images only, no scripts).
+
+	Never raises. Unmapped company / disabled / missing letter head -> ``("", note)``
+	so the export renders without a footer rather than failing (edge case: pin-per-
+	company is explicit; we never fall back to another company's or the default LH).
+	"""
+	if not company_map:
+		return "", None
+	comp = company or _default_company()
+	if not comp or comp not in company_map:
+		return "", "no letter head is mapped for this company — rendered without a footer"
+	lh_name = company_map.get(comp)
+	if not lh_name:
+		return "", "no letter head is mapped for this company — rendered without a footer"
+	try:
+		lh = frappe.db.get_value("Letter Head", lh_name, ["footer", "disabled"], as_dict=True)
+		if not lh:
+			return "", f"letter head {lh_name!r} not found — rendered without a footer"
+		if lh.get("disabled"):
+			return "", f"letter head {lh_name!r} is disabled — rendered without a footer"
+		raw = lh.get("footer") or ""
+		if not raw.strip():
+			return "", None
+		if len(raw) > _MAX_FURNITURE_CHARS:
+			_log_infra_failure("rich-pdf company letterhead footer too large", f"{len(raw)} chars")
+			return "", "letter head footer is too large — rendered without it"
+		try:
+			comp_doc = frappe.get_doc("Company", comp)
+			rendered = frappe.render_template(raw, {"doc": comp_doc, "company": comp_doc})
+		except Exception:
+			# A doc-bound Jinja letter head that needs an invoice context; fall back to
+			# the raw HTML (sanitizer strips any leaked {%%}/{{}} as inert text).
+			rendered = raw
+		footer_html = sanitize_letterhead(_inline_letterhead_images(rendered))
+		return footer_html, None
+	except Exception:
+		_log_infra_failure("rich-pdf company letterhead footer failed", f"company={comp!r} lh={lh_name!r}")
+		return "", "letter head footer could not be applied"
 
 
 def _letterhead_logos(raw: str) -> str:

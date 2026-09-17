@@ -133,6 +133,12 @@ export const workspaceResetState = () => call("jarvis.onboarding.workspace_reset
 export const resetOnboarding = (wipeData = true) =>
 	call("jarvis.onboarding.reset_onboarding", { wipe_data: wipeData ? 1 : 0 });
 
+// GSTIN party autofill on the Details step, using THIS site's own India Compliance (offered only
+// where its lookup API is usable). `available` gates the button; `gstin_autofill` returns the party
+// details ({found, ...}) or a soft miss — the form always falls back to manual entry.
+export const gstinAutofillAvailable = () => call("jarvis.onboarding.gstin_autofill_available");
+export const gstinAutofill = (gstin) => call("jarvis.onboarding.gstin_autofill", { gstin });
+
 // --- Per-user chat settings + real (measured) usage tracking, incl. the
 // tenant-admin usage table (design doc §4/§6). All return the house
 // {ok, data} / {ok:false, reason} envelope — unlike getUsage above, which is
@@ -171,6 +177,27 @@ export const adminSyncUsage = () => call(US + "admin_sync_usage");
 const BR = "jarvis.branding.";
 export const getBranding = () => call(BR + "get_branding");
 export const updateBranding = (p) => call(BR + "update_branding", p || {});
+
+// --- Predefined + custom PDF templates. list/get default: any Jarvis user. set
+// default, and the whole custom-template CRUD + preview + options set below:
+// tenant-admin only (server re-checks). rerender: any user, ownership-checked on
+// the source File - the per-document override on a PDF artifact card. ---
+const PT = "jarvis.pdf_templates.";
+export const listPdfTemplates = () => call(PT + "list_pdf_templates");
+export const getDefaultPdfTemplate = () => call(PT + "get_default_pdf_template");
+export const setDefaultPdfTemplate = (key) => call(PT + "set_default_pdf_template", { key });
+export const rerenderDocument = (source_name, template) =>
+	call(PT + "rerender_document", { source_name, template });
+// Custom template admin CRUD (tenant-admin only). `payload`/`config` are plain
+// objects here - callers JSON.stringify them, matching the backend's `payload:
+// str` / `config: str` signatures (same convention as saveLlmPool's `models`).
+export const getPdfTemplate = (key) => call(PT + "get_pdf_template", { key });
+export const savePdfTemplate = (payload) => call(PT + "save_pdf_template", { payload });
+export const deletePdfTemplate = (key) => call(PT + "delete_pdf_template", { key });
+// config: {key, company} for a saved template, or {draft:{...}, company} for
+// unsaved edits - see PdfTemplatesPane.vue's payloadFromForm().
+export const previewPdfTemplate = (config) => call(PT + "preview_pdf_template", { config });
+export const pdfTemplateOptions = () => call(PT + "pdf_template_options");
 
 // --- Mobile onboarding: QR of the mobile PWA URL (no secret — just the public
 // URL). Scanning opens /jarvis-mobile (Android offers to install it, iOS opens

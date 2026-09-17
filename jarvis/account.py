@@ -1808,6 +1808,27 @@ def get_account() -> dict:
 	return _surface(admin_client.get_account_summary)
 
 
+# Short budget for the chat agent's live subscription read: the answer must be fresh AND fast, so it
+# never inherits the 150s account-summary ladder (a slow admin was stretching a "what's my plan?" turn
+# to ~1 minute) and never falls back to the stale onboarding cache.
+_SUBSCRIPTION_STATUS_TIMEOUT_S = 8
+
+
+@frappe.whitelist()
+def get_subscription_status() -> dict:
+	"""LIVE plan + status for the chat agent's 'what is my current subscription plan?' answer.
+
+	Reads the control plane directly on a short 8s budget and returns the fresh account summary
+	(plan, status, validity) — it deliberately does NOT read the bench-local onboarding cache
+	(``signup_context``), which a renewal never writes back, so the answer reflects the renewed
+	subscription immediately instead of the last bench-driven payment poll.
+
+	SM/Jarvis-Admin only, like its billing siblings (``get_account`` above). The persona's
+	subscription tool should call THIS rather than the cached onboarding state."""
+	require_jarvis_admin()
+	return _surface(admin_client.get_account_summary, timeout_s=_SUBSCRIPTION_STATUS_TIMEOUT_S)
+
+
 @frappe.whitelist()
 def preview_upgrade(target_plan: str) -> dict:
 	"""Prorated amount for the upgrade modal's per-plan cards.

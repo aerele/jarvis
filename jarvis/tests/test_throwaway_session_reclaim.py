@@ -301,7 +301,7 @@ class TestAutoTitleReclaim(FrappeTestCase):
 			title_text = self._generate(sess)
 
 		sess.delete_session.assert_not_called()
-		self.assertEqual(title_text, "", "a failed title turn still falls back to derive_title")
+		self.assertEqual(title_text, "", "a failed title turn yields no title (chat stays 'New chat')")
 
 	def test_a_title_run_that_has_not_started_yet_is_not_deleted(self):
 		"""Issue #535. Same raise path as above, but the gateway has not started

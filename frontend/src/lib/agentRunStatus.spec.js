@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { STATUS_THEME, runReason } from "./agentRunStatus";
+import { STATUS_THEME, runReason, coverageWarned } from "./agentRunStatus";
 
 describe("STATUS_THEME", () => {
 	it("covers every Jarvis Agent Run status with the app's theme colours", () => {
@@ -46,5 +46,33 @@ describe("runReason", () => {
 	it("handles a missing row without throwing", () => {
 		expect(runReason(null)).toBe("");
 		expect(runReason(undefined)).toBe("");
+	});
+});
+
+// A data-gap run reads status "completed" but must still show the "not clean" cue -
+// the signal is the coverage_note, not the status, so board + panel agree.
+describe("coverageWarned", () => {
+	it("is true for a completed run that carries a coverage_note (the data-gap case)", () => {
+		expect(
+			coverageWarned({ status: "completed", coverage_note: "not evaluable: 2B stale" })
+		).toBe(true);
+	});
+
+	it("is true for an execution-partial run (which always carries a coverage_note)", () => {
+		expect(coverageWarned({ status: "partial", coverage_note: "scan truncated" })).toBe(true);
+	});
+
+	it("is false for a clean completed run with no coverage_note", () => {
+		expect(coverageWarned({ status: "completed", coverage_note: "" })).toBe(false);
+		expect(coverageWarned({ status: "completed" })).toBe(false);
+	});
+
+	it("is false for a failed run even with a coverage_note (its red banner owns the row)", () => {
+		expect(coverageWarned({ status: "failed", coverage_note: "whatever" })).toBe(false);
+	});
+
+	it("handles a missing row without throwing", () => {
+		expect(coverageWarned(null)).toBe(false);
+		expect(coverageWarned(undefined)).toBe(false);
 	});
 });

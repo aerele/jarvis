@@ -1917,13 +1917,19 @@ def request_chat_pairing(public_key: str, device_id: str, *, request_timeout_s: 
 	)
 
 
-def get_account_summary() -> dict:
+def get_account_summary(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	"""Fetch the customer's plan + validity + upgrade-eligible plans. Used by
 	the /jarvis/billing SPA page to render the plan cards and the settings
-	dialog's Plan and billing summary."""
+	dialog's Plan and billing summary.
+
+	``timeout_s`` is keyword-only and defaults to DEFAULT_TIMEOUT_S so existing
+	callers are unaffected; the fast subscription-status read (jarvis.account.
+	get_subscription_status, for the chat agent's 'what's my plan?' answer) passes
+	a short 8s budget so a slow admin can't stretch a chat turn to the full ladder."""
 	return _post(
 		path=_m("api.account.get_account_summary"),
 		body={},
+		timeout_s=timeout_s,
 	)
 
 

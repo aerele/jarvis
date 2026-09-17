@@ -24,6 +24,15 @@ describe("useSupportCopyPrompt", () => {
 		expect(copyPromptState.value).toBeNull();
 	});
 
+	it("resolves 'cancel' when dismissed (X / Escape / outside click) and clears state", async () => {
+		// The dismiss affordances settle "cancel", distinct from the "No" button's
+		// "no" - openSupport() aborts on "cancel" instead of navigating to Support.
+		const p = promptSupportCopy({ preview: "back out of this" });
+		settleSupportCopyPrompt("cancel");
+		expect(await p).toBe("cancel");
+		expect(copyPromptState.value).toBeNull();
+	});
+
 	it("defaults preview to an empty string when none is given", () => {
 		promptSupportCopy();
 		expect(copyPromptState.value).toEqual({ preview: "" });
