@@ -375,13 +375,22 @@ def _notify_owner_dashboard(
 	status: str,
 	findings_count: int,
 	blocker_count: int,
+	coverage_note: str = "",
 ) -> None:
 	"""Best-effort bell notification to the human owner that a run finished + a
 	dashboard is ready to open. Never raises."""
 	if not owner or owner in ("Administrator", "Guest"):
 		return
 	try:
-		verb = {"completed": "completed", "partial": "completed (partial)"}.get(status, "finished")
+		# a data-gap run reads status "completed" but left coverage gaps: the bell must not
+		# read identical to a genuinely clean run's — "completed with issues" whenever a
+		# coverage_note is present (mirrors the activity ``run_action`` / frontend coverageWarned).
+		if status not in ("completed", "partial"):
+			verb = "finished"
+		elif coverage_note or status == "partial":
+			verb = "completed with issues"
+		else:
+			verb = "completed"
 		frappe.get_doc(
 			{
 				"doctype": "Notification Log",
@@ -826,23 +835,29 @@ def record_delegate_run(
 		f"rejected {d.get('ref_doctype', '?')}/{d.get('ref_name', '?')} ({d.get('reason', 'invalid')})"
 		for d in dropped
 	]
-	partial = bool(truncated) or wm_drift or scoped or row_shortfall or bool(dropped) or bool(coverage_notes)
-	status = "partial" if partial else "completed"
+	# Execution-lifecycle ``status`` vs the coverage-verdict ``result_state`` are SEPARATE
+	# axes. A run that finished executing reads ``completed`` even when it could not evaluate
+	# some checks BECAUSE THE INPUT DATA IS MISSING (a data-gap reason code) — that gap is the
+	# coverage verdict's job, not a lifecycle failure. ``partial`` is reserved for an execution
+	# problem OR a coverage gap that needs attention (permanent code, permission slice, or a
+	# truncation note). ``coverage_note`` still fires the warning on a data-gap ``completed`` run.
+	execution_partial = bool(truncated) or wm_drift or scoped or row_shortfall or bool(dropped)
+	non_data_gap = any(not cr.is_data_gap(n.get("reason_code")) for n in coverage_notes)
+	status = "partial" if (execution_partial or non_data_gap) else "completed"
 
 	# PP-2: resolve EXACTLY one coverage-verdict run_state from the DECLARED required
-	# checks. This is a SEPARATE axis from the execution-lifecycle ``status`` (which
-	# stays ``completed`` for a run that finished executing) — a run can complete yet
-	# leave required coverage incomplete. ``required_tokens`` is the agent's declared
-	# manifest (resolved above, NOT the writeback coverage keys, so a delegate cannot
-	# under-report to define its own bar): all-required-unevaluated -> not_evaluable;
-	# some required token unevaluated -> partial; else evaluated_clean. A declared
-	# required token the run never evaluated drives the coverage verdict off
-	# ``evaluated_clean`` WITHOUT touching ``status``. "No exceptions" is unreachable
-	# unless evaluated_clean.
+	# checks. ``required_tokens`` is the agent's declared manifest (resolved above, NOT the
+	# writeback coverage keys, so a delegate cannot under-report to define its own bar):
+	# all-required-unevaluated -> not_evaluable; some required token unevaluated -> partial;
+	# else evaluated_clean. ANY coverage gap (data-gap included) drives the verdict off
+	# ``evaluated_clean`` WITHOUT touching ``status`` — so the false-clean gate stays closed
+	# even when the run reads ``completed``. The ``partial`` argument is DELIBERATELY the full
+	# set (execution + every coverage_note + required_unevaluated), NOT the status boolean:
+	# a data-gap note on a token outside required_tokens must still block evaluated_clean.
 	result_state = cr.resolve_run_state(
 		required_tokens=required_tokens,
 		evaluated_tokens=evaluated_tokens,
-		partial=partial or bool(required_unevaluated),
+		partial=execution_partial or bool(coverage_notes) or bool(required_unevaluated),
 		failed=False,
 	)
 
@@ -975,11 +990,21 @@ def record_delegate_run(
 	# completion row + bell carry finding COUNTS, so in shadow they go to the reviewer
 	# (visibility_owner), never the general owner surface — the owner sees the
 	# preview's results only after promotion re-homes them.
+	# A data-gap run reads status ``completed`` but still carries a coverage_note; keep the
+	# amber "Run completed with issues" action (run_partial) so the feed never shows a lone
+	# green check for a run that left coverage gaps. Mirrors the frontend ``coverageWarned``.
+	run_action = (
+		"run_failed"
+		if status == "failed"
+		else "run_partial"
+		if (coverage_note or status == "partial")
+		else "run_completed"
+	)
 	log_activity(
 		agent=agent,
 		agent_title=agent_title,
 		installation=inst.name,
-		action={"completed": "run_completed", "partial": "run_partial"}.get(status, "run_failed"),
+		action=run_action,
 		run=run_doc.name,
 		detail=f"{len(seen_fps)} findings, {counts.get('blocker', 0)} blockers"
 		+ (f"; {coverage_note}" if coverage_note else "")
@@ -995,6 +1020,7 @@ def record_delegate_run(
 			status,
 			len(seen_fps),
 			counts.get("blocker", 0),
+			coverage_note,
 		)
 
 	# A8 (zero-trace): the per-run session bearer must not outlive the run.

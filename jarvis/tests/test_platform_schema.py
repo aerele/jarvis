@@ -53,12 +53,38 @@ class TestPlatformSchemaEnums(FrappeTestCase):
 				"unsupported_customisation",
 			},
 		)
-		# every code carries the full metadata contract
+		# every code carries the full metadata contract (data_gap present so a 10th code
+		# cannot be added without a completed-vs-partial classification decision)
 		for code, meta in cr.REASON_CODES.items():
 			self.assertIn("remediation", meta, code)
 			self.assertIn("retryable", meta, code)
 			self.assertIn("routing", meta, code)
+			self.assertIn("data_gap", meta, code)
 			self.assertIsInstance(meta["retryable"], bool, code)
+			self.assertIsInstance(meta["data_gap"], bool, code)
+
+	def test_data_gap_classification(self):
+		# exactly the four missing-input-DATA codes are data gaps (a run whose only gaps
+		# are these reads status=completed); the other five need attention -> partial.
+		self.assertEqual(
+			{c for c in cr.REASON_CODES if cr.is_data_gap(c)},
+			{
+				"source_stale",
+				"configuration_missing",
+				"external_evidence_absent",
+				"record_coverage_insufficient",
+			},
+		)
+		# INDEPENDENT of retryable: permission_slice / run_truncated_watermark are retryable
+		# but NOT data gaps (permissions problem / execution truncation).
+		self.assertTrue(cr.is_retryable("permission_slice") and not cr.is_data_gap("permission_slice"))
+		self.assertTrue(
+			cr.is_retryable("run_truncated_watermark") and not cr.is_data_gap("run_truncated_watermark")
+		)
+		# unknown / None fail SAFE to False via the fallback (never silently completes)
+		self.assertFalse(cr.is_data_gap(None))
+		self.assertFalse(cr.is_data_gap("some novel gibberish"))
+		self.assertFalse(cr.is_data_gap("unsupported_customisation"))
 
 	def test_reason_code_coercion_fail_safe(self):
 		self.assertEqual(cr.coerce_reason_code("source_stale"), ("source_stale", ""))

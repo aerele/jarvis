@@ -43,7 +43,11 @@ vi.mock("frappe-ui", () => ({
 		emits: ["update:modelValue"],
 		template: `<input :value="modelValue" @input="$emit('update:modelValue', $event.target.value)" />`,
 	},
-	Tooltip: { name: "Tooltip", template: `<span><slot /></span>` },
+	Tooltip: {
+		name: "Tooltip",
+		props: ["text"],
+		template: `<span :data-tip="text"><slot /></span>`,
+	},
 }));
 
 vi.mock("@/components/JvSpinner.vue", () => ({
@@ -112,6 +116,40 @@ describe("C1: the rail's status theme covers stopped", () => {
 		expect(
 			badges.some((b) => b.attributes("data-theme") === "gray" && b.text() === "stopped")
 		).toBe(true);
+	});
+});
+
+describe("coverage-gap indicator: a data-limited run never blends in with a clean one", () => {
+	const tip = (w) =>
+		w
+			.findAll("[data-tip]")
+			.find((el) => (el.attributes("data-tip") || "").includes("Coverage gaps"));
+
+	it("shows the triangle on a COMPLETED run that carries a coverage_note (the data-gap case)", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ status: "completed", coverage_note: "not evaluable: 2B stale" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(tip(w)).toBeTruthy();
+	});
+
+	it("shows NO triangle on a clean completed run (no coverage_note)", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ status: "completed", coverage_note: "" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(tip(w)).toBeFalsy();
+	});
+
+	it("shows NO triangle on a failed run even with a coverage_note (its red banner owns the row)", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ status: "failed", coverage_note: "whatever", error: "boom" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(tip(w)).toBeFalsy();
 	});
 });
 

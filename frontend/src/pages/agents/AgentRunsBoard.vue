@@ -99,16 +99,22 @@
 									{{ runReason(row) }}
 								</div>
 							</div>
-							<!-- partial scans carry an extra indicator so truncated coverage
-							     never blends in with clean completed runs -->
+							<!-- runs with any coverage gap carry an extra indicator so a
+							     data-limited run never blends in with a clean completed run
+							     (a data-gap run reads status "completed" but is not clean) -->
 							<Tooltip
-								v-if="row.status === 'partial'"
-								text="Partial scan - coverage gaps"
+								v-if="coverageWarned(row)"
+								text="Coverage gaps - treat as unreviewed, not clean"
 							>
 								<FeatherIcon
 									name="alert-triangle"
 									class="mt-1 size-3.5 shrink-0 text-ink-amber-3"
 								/>
+								<!-- the green "completed" badge would read as all-clear to a
+								     screen reader without this; the triangle is otherwise icon-only -->
+								<span class="sr-only"
+									>Coverage gaps - treat as unreviewed, not clean</span
+								>
 							</Tooltip>
 							<!-- PP-4 preview/shadow: a shadow run is reviewer-only and NOT a
 							     compliant attestation, so it must never read the same as a
@@ -223,7 +229,7 @@ import JvSpinner from "@/components/JvSpinner.vue";
 import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiAgents from "@/api/agents";
-import { STATUS_THEME, runReason } from "@/lib/agentRunStatus";
+import { STATUS_THEME, runReason, coverageWarned } from "@/lib/agentRunStatus";
 
 const props = defineProps({
 	agentName: { type: String, required: true }, // listing docname (list_runs_page filter)
