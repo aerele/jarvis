@@ -1028,7 +1028,7 @@
       "domain": "gst-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Works only the residue left after india_compliance's Purchase Reconciliation Tool: ranks the unmatched, mismatched and aged rows between your GSTR-2B ledger and your purchase register by rupees, groups them into a supplier follow-up worklist, and tracks the ageing window per invoice. Read-only; never edits an invoice, files a return, or decides what you may claim.",
       "tools_required": [
@@ -1083,7 +1083,7 @@
       "domain": "gst-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Pre-file data-quality worklist for your GST returns: on an india_compliance bench it works only the manual-override and data-import residue — lines with a blank or short HSN, invoices whose place-of-supply contradicts the tax head charged, one HSN billed at inconsistent rates across the period, and a books-vs-return tie-out where GSTR-1/3B are generated through india_compliance. Read-only; ranks the residue by rupees. Never edits an invoice, amends or files a return, and asserts no filing-correctness verdict.",
       "tools_required": [
@@ -1249,7 +1249,7 @@
       "domain": "india-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "For suppliers you have already classified as Micro/Small MSME, this overlays each open payable's elapsed days against its 15/45-day window and projects whether it will still be unpaid on 31-March, when s.43B(h) defers the deduction. Ships a pay-before-year-end worklist on top of ERPNext's native AP Ageing report. Read-only; never records a payment, edits a voucher, classifies a supplier, or decides what you may deduct.",
       "tools_required": [
@@ -1689,7 +1689,7 @@
       "domain": "tds-compliance",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Prepares your monthly TDS/TCS data before each deposit due date and before each 26Q/24Q quarter: reconciles the TDS booked in your ledger against the challan payments recorded in your books, tracks each supplier's running total against the section thresholds, checks the rate deducted against the effective section rate, and lists the deductee fields your return is missing. Read-only worklist; never edits a voucher, books TDS, deposits a challan, files a return, or decides what is legally deductible.",
       "tools_required": [
