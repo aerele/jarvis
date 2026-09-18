@@ -29,7 +29,8 @@ export const CSP_META =
 //   jarvis.ready()           → tells the parent boot finished (auto-posted on
 //                              DOMContentLoaded too).
 //   jarvis.renderError(el,e) → quiet inline per-widget error block.
-// Frames OUT: {jarvis:1, v:1, type:"data"|"ready"|"height"|"export:result", ...}
+// Frames OUT: {jarvis:1, v:1, type:"data"|"ready"|"height"|"export:progress"
+//   |"export:result", ...}
 // Frames IN (validated e.source === window.parent && d.jarvis === 1):
 //   {type:"data:result", id, ok, rows|error} · {type:"theme", dark} ·
 //   {type:"export", id, format:"png"|"slides", lib, pixelRatio}
@@ -168,11 +169,17 @@ export const RUNTIME_JS = `(function () {
 					: [];
 			if (!els.length) els = [document.body];
 			var pixelRatio = d.pixelRatio || 2;
-			// Browsers cap canvases near 16384px a side - drop to 1x past that.
+			// Cap the total raster work so large dashboards finish (and don't emit a
+			// huge PDF): drop to 1x past a browser canvas edge (~16384px a side) OR once
+			// the combined content area is big - a 2x capture is 4x the pixels to
+			// rasterize + encode, which is what pushed big dashboards past the timeout.
+			var totalArea = 0;
 			for (var i = 0; i < els.length; i++) {
+				totalArea += els[i].offsetWidth * els[i].offsetHeight;
 				var max = Math.max(els[i].offsetWidth, els[i].offsetHeight);
 				if (max * pixelRatio > 16384) pixelRatio = 1;
 			}
+			if (totalArea > 3000000) pixelRatio = 1;
 			// SEQUENTIAL captures: parallel toPng calls contend for layout/canvas.
 			var images = [];
 			var chain = Promise.resolve();
@@ -180,6 +187,15 @@ export const RUNTIME_JS = `(function () {
 				chain = chain.then(function () {
 					return captureOne(el, pixelRatio).then(function (img) {
 						images.push(img);
+						// Heartbeat after each slide: lets the parent distinguish "slow but
+						// progressing" from "stuck", so a big multi-slide dashboard is not
+						// killed by a fixed total cap (see exportAs's per-progress watchdog).
+						post({
+							type: "export:progress",
+							id: d.id,
+							done: images.length,
+							total: els.length,
+						});
 					});
 				});
 			});
