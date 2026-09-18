@@ -2,8 +2,9 @@
 // so it is unit-testable under the PWA's `node --test src/lib/*.test.js` harness
 // — the grid render itself is verified by the flow review.
 
-// Shown until the personalized suggestions load, and as the fallback if that
-// call fails or returns nothing. Wording mirrors the desktop DEFAULT_STARTERS.
+// Shown immediately (and as the fallback if the suggestions call fails or
+// returns nothing), so the empty chat is never a bare box. A PWA-tailored set
+// in the spirit of the desktop starters, not a verbatim copy.
 export const DEFAULT_STARTERS = [
 	{ title: "Analyse", prompt: "Which sales orders are overdue this month?" },
 	{ title: "Look up", prompt: "What does this customer owe us right now?" },
@@ -21,12 +22,23 @@ export function starterTint(i) {
 }
 
 // Coerce whatever get_prompt_suggestions returns into a safe {title, prompt}
-// list; fall back to the defaults on anything empty or malformed so the empty
-// chat is never a bare box.
+// list: drop rows with a blank/non-string title or prompt, cap the count
+// (client-side defence — the backend also caps at 4), and fall back to the
+// defaults on anything empty or malformed so the empty chat is never bare.
+const MAX_STARTERS = 8;
+
 export function normalizeStarters(rows) {
 	if (!Array.isArray(rows) || rows.length === 0) return DEFAULT_STARTERS;
 	const clean = rows
-		.filter((r) => r && typeof r.title === "string" && typeof r.prompt === "string")
-		.map((r) => ({ title: r.title, prompt: r.prompt }));
+		.filter(
+			(r) =>
+				r &&
+				typeof r.title === "string" &&
+				r.title.trim() &&
+				typeof r.prompt === "string" &&
+				r.prompt.trim()
+		)
+		.map((r) => ({ title: r.title, prompt: r.prompt }))
+		.slice(0, MAX_STARTERS);
 	return clean.length ? clean : DEFAULT_STARTERS;
 }

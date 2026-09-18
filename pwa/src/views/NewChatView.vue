@@ -25,7 +25,6 @@ const error = ref("");
 const attachments = ref([]);
 const settings = ref(null);
 const starters = ref(DEFAULT_STARTERS);
-const loadingStarters = ref(true);
 const modelSheet = ref(false);
 const voiceOpen = ref(false);
 const inputEl = ref(null);
@@ -90,6 +89,7 @@ function autoGrow() {
 // user reviews (and can edit) before pressing send, which matters most for the
 // action-flavoured prompts.
 function useStarter(card) {
+	error.value = ""; // clear any stale send-failure banner before a fresh start
 	input.value = pickStarterPrompt(card);
 	nextTick(() => {
 		autoGrow();
@@ -173,19 +173,16 @@ function onKeydown(e) {
 }
 
 onMounted(async () => {
-	try {
-		settings.value = await api.getChatUiSettings();
-	} catch {
-		/* the screen still works without the model chip */
-	}
-	try {
-		const res = await api.getPromptSuggestions();
-		starters.value = normalizeStarters(res?.data?.suggestions);
-	} catch {
-		/* keep DEFAULT_STARTERS - the empty chat is never a bare box */
-	} finally {
-		loadingStarters.value = false;
-	}
+	// Two independent reads - fire together so the starter grid isn't blocked on
+	// the model settings (and vice versa). The grid already shows DEFAULT_STARTERS
+	// from first paint, so a slow/failed suggestions read just leaves the defaults.
+	const [ui, sugg] = await Promise.allSettled([
+		api.getChatUiSettings(),
+		api.getPromptSuggestions(),
+	]);
+	if (ui.status === "fulfilled") settings.value = ui.value;
+	if (sugg.status === "fulfilled")
+		starters.value = normalizeStarters(sugg.value?.data?.suggestions);
 });
 onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview)));
 </script>
@@ -235,13 +232,14 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 		<h1 class="jv-greeting">{{ greeting }}</h1>
 	</div>
 
-	<!-- Starter prompts: tap to prefill the composer (never sends). Personalised
-	     from recent chats, with a default set so the empty chat is never bare. -->
-	<div v-if="!loadingStarters && starters.length" class="jv-starters">
+	<!-- Starter prompts: tap to prefill the composer (never sends). Shown from
+	     first paint (defaults, then personalised) and hidden once the user has a
+	     draft, so a tap can never clobber text they've started. -->
+	<div v-if="starters.length && !hasDraft" class="jv-starters">
 		<div class="jv-starters-grid">
 			<button
 				v-for="(s, i) in starters"
-				:key="i"
+				:key="`${s.title}-${i}`"
 				type="button"
 				class="jv-starter"
 				:class="`jv-tint-${starterTint(i)}`"
@@ -883,8 +881,14 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 /* Starter prompts on the empty new-chat screen (Move A). */
 .jv-starters {
 	width: 100%;
-	max-width: 560px;
-	margin: 0 auto 4px;
+	margin: 0 0 4px;
+}
+/* On a short (e.g. landscape) viewport, drop the grid rather than push the
+   composer off-screen - this view has no document scroll. */
+@media (max-height: 640px) {
+	.jv-starters {
+		display: none;
+	}
 }
 .jv-starters-grid {
 	display: grid;
@@ -919,23 +923,16 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 	font-size: 13px;
 	line-height: 1.35;
 }
+/* Tint is a decorative background only; the label uses the inherited default
+   ink so its contrast passes AA on every tint, in both light and dark. */
 .jv-tint-a {
 	background: var(--green-bg);
-}
-.jv-tint-a .jv-starter-k {
-	color: var(--green);
 }
 .jv-tint-b {
 	background: var(--amber-bg);
 }
-.jv-tint-b .jv-starter-k {
-	color: var(--amber);
-}
 .jv-tint-c {
 	background: var(--accent-bg);
-}
-.jv-tint-c .jv-starter-k {
-	color: var(--accent);
 }
 .jv-starter-hint {
 	margin: 8px 2px 0;

@@ -30,3 +30,16 @@ test("normalizeStarters coerces junk to the default list", () => {
 		{ title: "B", prompt: "b" },
 	]);
 });
+
+test("normalizeStarters drops blank title/prompt and caps length", () => {
+	assert.deepEqual(
+		normalizeStarters([
+			{ title: "A", prompt: "a" },
+			{ title: "", prompt: "b" },
+			{ title: "C", prompt: "   " },
+		]),
+		[{ title: "A", prompt: "a" }]
+	);
+	const many = Array.from({ length: 12 }, (_, i) => ({ title: `T${i}`, prompt: `p${i}` }));
+	assert.equal(normalizeStarters(many).length, 8);
+});
