@@ -14,7 +14,8 @@ network path (that is jarvis.connectors' own test suite's job).
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+import unittest
+from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import frappe
@@ -1338,7 +1339,8 @@ class TestCatalogPresetFlows(_McpOauthTestCase):
 
 		# One level below broker.test_connector, so the real _credential read runs:
 		# an empty Password resolves to "" and reaches the client as None.
-		with patch.object(broker.mcp_client, "fetch_tools", return_value=_TOOLS) as fetch:
+		probed = {"tools": _TOOLS, "era": "legacy", "protocol_version": "2025-06-18", "tools_ttl_ms": None}
+		with patch.object(broker.mcp_client, "probe", return_value=probed) as fetch:
 			result = connectors_api.test_connector(out["name"])
 		self.assertTrue(result["ok"], result)
 		self.assertEqual(fetch.call_args.args[0], MS_LEARN_BASE_URL)
@@ -2522,3 +2524,128 @@ class TestSelfHealGuards(_McpOauthTestCase):
 		self.assertFalse(
 			frappe.db.get_value(CONNECTOR, name, "mcp_oauth_client"), "stale client not relinked"
 		)
+
+
+class TestSanitizeTools(unittest.TestCase):
+	"""``sanitize_tools`` is pure logic plus a logger, so it is exercised hermetically
+	(frappe faked). It drops the tools a client MUST NOT cache and logs one line per
+	drop; a name outside the RECOMMENDED character set is kept and only flagged
+	(the spec makes that set a SHOULD)."""
+
+	def _sanitize(self, tools):
+		fake = MagicMock()
+		with patch.object(connectors_api, "frappe", fake):
+			kept = connectors_api.sanitize_tools(tools)
+		return kept, fake.logger.return_value.warning
+
+	def test_keeps_a_normal_tool_without_warning(self):
+		kept, warn = self._sanitize([{"name": "list_issues", "inputSchema": {"type": "object"}}])
+		self.assertEqual([t["name"] for t in kept], ["list_issues"])
+		warn.assert_not_called()
+
+	def test_drops_empty_long_and_control_char_names(self):
+		tools = [{"name": ""}, {"name": "a" * 129}, {"name": "bad\x01name"}]
+		kept, warn = self._sanitize(tools)
+		self.assertEqual(kept, [])
+		self.assertEqual(warn.call_count, 3)
+
+	def test_drops_duplicate_names_keeping_the_first(self):
+		kept, warn = self._sanitize([{"name": "dup"}, {"name": "dup"}])
+		self.assertEqual([t["name"] for t in kept], ["dup"])
+		warn.assert_called_once()
+
+	def test_drops_a_tool_with_an_invalid_x_mcp_header(self):
+		tools = [
+			{
+				"name": "t",
+				"inputSchema": {"properties": {"x": {"type": "string", "x-mcp-header": "bad header!"}}},
+			}
+		]
+		kept, warn = self._sanitize(tools)
+		self.assertEqual(kept, [])
+		warn.assert_called_once()
+
+	def test_keeps_but_flags_a_name_outside_the_recommended_set(self):
+		# A space is outside TOOL_NAME_RE but is not a control character: kept + flagged.
+		kept, warn = self._sanitize([{"name": "has space", "inputSchema": {"type": "object"}}])
+		self.assertEqual([t["name"] for t in kept], ["has space"])
+		warn.assert_called_once()
+
+	def test_skips_non_dict_entries(self):
+		kept, _ = self._sanitize(["not a dict", None, {"name": "ok"}])
+		self.assertEqual([t["name"] for t in kept], ["ok"])
+
+
+class TestPersistProbeResult(_ConnectorApiTestCase):
+	"""The extracted persist helper: it stores the new era/ttl fields, and its
+	background mode never flips a connector to Failed and never commits."""
+
+	def test_success_stores_era_and_ttl_fields(self):
+		name = self._mk("Personal", "era", owner=PLAIN_A, preset="GitHub")
+		frappe.set_user(PLAIN_A)
+		result = {"ok": True, "tools": _TOOLS, "protocol_version": "2026-07-28", "tools_ttl_ms": 90000}
+		with patch.object(broker, "test_connector", return_value=result):
+			out = connectors_api.test_connector(name)
+		self.assertTrue(out["ok"])
+		reloaded = frappe.get_doc(CONNECTOR, name)
+		self.assertEqual(reloaded.mcp_protocol_version, "2026-07-28")
+		self.assertEqual(reloaded.tools_ttl_ms, 90000)
+
+	def test_legacy_success_stores_empty_version_and_zero_ttl(self):
+		name = self._mk("Personal", "legacy", owner=PLAIN_A, preset="GitHub")
+		frappe.set_user(PLAIN_A)
+		result = {"ok": True, "tools": _TOOLS, "protocol_version": None, "tools_ttl_ms": 0}
+		with patch.object(broker, "test_connector", return_value=result):
+			connectors_api.test_connector(name)
+		reloaded = frappe.get_doc(CONNECTOR, name)
+		self.assertIn(reloaded.mcp_protocol_version, ("", None))
+		self.assertEqual(reloaded.tools_ttl_ms or 0, 0)
+
+	def test_background_failure_never_flips_status_or_writes(self):
+		name = self._mk("Personal", "bg", owner=PLAIN_A, preset="GitHub")
+		frappe.set_user(PLAIN_A)
+		with patch.object(broker, "test_connector", return_value={"ok": True, "tools": _TOOLS}):
+			connectors_api.test_connector(name)
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc(CONNECTOR, name)
+		failing = {"ok": False, "error": {"code": "transport_error", "message": "boom"}}
+		envelope, wrote = connectors_api.persist_probe_result(
+			doc, failing, now_datetime(), can_write=True, background=True
+		)
+		self.assertFalse(envelope["ok"])
+		self.assertFalse(wrote, "a background failure must write nothing")
+		self.assertEqual(frappe.db.get_value(CONNECTOR, name, "last_test_status"), "Passed")
+
+	def test_background_success_writes_the_fields(self):
+		name = self._mk("Personal", "bgok", owner=PLAIN_A, preset="GitHub")
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc(CONNECTOR, name)
+		result = {"ok": True, "tools": _TOOLS, "protocol_version": "2026-07-28", "tools_ttl_ms": 120000}
+		envelope, wrote = connectors_api.persist_probe_result(
+			doc, result, now_datetime(), can_write=True, background=True
+		)
+		self.assertTrue(envelope["ok"])
+		self.assertTrue(wrote)
+		# persist itself never commits (the worker does); commit here to read it back.
+		frappe.db.commit()
+		reloaded = frappe.get_doc(CONNECTOR, name)
+		self.assertEqual(reloaded.last_test_status, "Passed")
+		self.assertEqual(reloaded.mcp_protocol_version, "2026-07-28")
+		self.assertEqual(reloaded.tools_ttl_ms, 120000)
+
+	def test_test_button_sanitizes_before_caching(self):
+		name = self._mk("Personal", "sani", owner=PLAIN_A, preset="GitHub")
+		frappe.set_user(PLAIN_A)
+		tools = [
+			{"name": "good", "inputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True}},
+			{
+				"name": "bad",
+				"inputSchema": {"properties": {"x": {"type": "string", "x-mcp-header": "bad header!"}}},
+			},
+		]
+		with patch.object(broker, "test_connector", return_value={"ok": True, "tools": tools}):
+			out = connectors_api.test_connector(name)
+		self.assertEqual({t["action"] for t in out["tools"]}, {"good"})
+		reloaded = frappe.get_doc(CONNECTOR, name)
+		cached = json.loads(reloaded.tools_cache)["tools"]
+		self.assertEqual([t["name"] for t in cached], ["good"])

@@ -20,6 +20,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
+from jarvis.connectors import mcp_wire
 from jarvis.connectors.mcp_oauth import canonical, discovery, flow, pkce, registration
 from jarvis.connectors.mcp_oauth import transport as transport_module
 from jarvis.connectors.mcp_oauth.errors import (
@@ -403,7 +404,12 @@ class DiscoveryGateTests(unittest.TestCase):
 
 	def test_no_401_rejected(self):
 		script, _ = _happy_path_script()
-		script[BASE_URL] = HttpResult(status=200, headers={}, json={}, text="{}")
+		# Neither the modern server/discover probe nor the legacy initialize fallback
+		# draws a 401: the address needs no sign-in at all.
+		script[BASE_URL] = [
+			HttpResult(status=200, headers={}, json={}, text="{}"),
+			HttpResult(status=200, headers={}, json={}, text="{}"),
+		]
 		exc = self._discover_and_expect(script)
 		self.assertEqual(exc.code, "no_401_challenge")
 
@@ -583,14 +589,74 @@ class DiscoveryProbeTests(unittest.TestCase):
 
 	def test_an_event_stream_answer_is_simply_no_challenge(self):
 		# A server that ANSWERS the unauthenticated probe with a stream needs no
-		# sign-in; the caller maps this code to "no sign-in here".
+		# sign-in; the caller maps this code to "no sign-in here". A streamed body is
+		# ambiguous (json=None), so both the modern and the legacy probe are tried.
 		script, _ = _happy_path_script()
-		script[BASE_URL] = HttpResult(
-			status=200, headers={"content-type": "text/event-stream"}, json=None, text=""
-		)
+		script[BASE_URL] = [
+			HttpResult(status=200, headers={"content-type": "text/event-stream"}, json=None, text=""),
+			HttpResult(status=200, headers={"content-type": "text/event-stream"}, json=None, text=""),
+		]
 		with self.assertRaises(OAuthDiscoveryError) as ctx:
 			discovery.discover(BASE_URL, transport=_ScriptedTransport(script))
 		self.assertEqual(ctx.exception.code, "no_401_challenge")
+
+	def test_modern_probe_is_tried_first(self):
+		# The very first hop is the modern server/discover shape, mirrored into headers.
+		script, _ = _happy_path_script()
+		transport = _ScriptedTransport(script)
+
+		discovery.discover(BASE_URL, transport=transport)
+
+		first = transport.calls[0]
+		self.assertEqual(first["url"], BASE_URL)
+		self.assertEqual(first["headers"].get("Mcp-Method"), "server/discover")
+		self.assertEqual(first["headers"].get("MCP-Protocol-Version"), mcp_wire.MODERN_PROTOCOL_VERSION)
+		self.assertIn(b"server/discover", first["body"])
+
+	def test_a_modern_401_needs_no_fallback(self):
+		# A 401 to the modern probe is the challenge; the legacy initialize is not sent.
+		script, _ = _happy_path_script()  # BASE_URL is a single 401 with a challenge header
+		transport = _ScriptedTransport(script)
+
+		discovery.discover(BASE_URL, transport=transport)
+
+		base_calls = [c for c in transport.calls if c["url"] == BASE_URL]
+		self.assertEqual(len(base_calls), 1)
+
+	def test_a_modern_protocol_error_is_no_challenge_without_fallback(self):
+		# A recognised modern protocol error (here -32022) proves the server is modern
+		# and answered without a 401, so no sign-in is required and no fallback is sent.
+		script, _ = _happy_path_script()
+		script[BASE_URL] = HttpResult(
+			status=400,
+			headers={},
+			json={"jsonrpc": "2.0", "id": 1, "error": {"code": mcp_wire.RPC_UNSUPPORTED_PROTOCOL_VERSION}},
+			text="",
+		)
+		transport = _ScriptedTransport(script)
+		with self.assertRaises(OAuthDiscoveryError) as ctx:
+			discovery.discover(BASE_URL, transport=transport)
+		self.assertEqual(ctx.exception.code, "no_401_challenge")
+		self.assertEqual(len([c for c in transport.calls if c["url"] == BASE_URL]), 1)
+
+	def test_a_legacy_server_falls_back_to_the_initialize_probe(self):
+		# A legacy server rejects the modern shape with a plain 400 (not a modern
+		# error); the legacy initialize probe then draws the 401 challenge.
+		script, _ = _happy_path_script()
+		challenge = f'Bearer error="invalid_request", resource_metadata="{RESOURCE_METADATA_URL}"'
+		script[BASE_URL] = [
+			HttpResult(status=400, headers={}, json={"error": "bad request"}, text=""),
+			HttpResult(status=401, headers={"www-authenticate": challenge}, json=None, text=""),
+		]
+		transport = _ScriptedTransport(script)
+
+		result = discovery.discover(BASE_URL, transport=transport)
+
+		self.assertEqual(result.issuer, AS_URL)
+		base_calls = [c for c in transport.calls if c["url"] == BASE_URL]
+		self.assertEqual(len(base_calls), 2)
+		self.assertEqual(base_calls[1]["headers"].get("Mcp-Method"), None)
+		self.assertIn(b"initialize", base_calls[1]["body"])
 
 	def test_every_hop_is_handed_a_wall_clock_total(self):
 		transport = _ScriptedTransport(_happy_path_script()[0])

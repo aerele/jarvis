@@ -105,11 +105,15 @@ class TestResponseMatching(unittest.TestCase):
 		self.assertFalse(mcp_client._matches_response({"jsonrpc": "2.0", "id": 9, "result": {}}, 2))
 
 
-def _init_ok(session_id="sess-123", version="2025-06-18"):
+LEGACY = "2025-06-18"
+MODERN = mcp_client.MODERN_PROTOCOL_VERSION
+
+
+def _init_ok(session_id="sess-123", version="2025-06-18", request_id=1):
 	return _json_resp(
 		{
 			"jsonrpc": "2.0",
-			"id": 1,
+			"id": request_id,
 			"result": {
 				"protocolVersion": version,
 				"capabilities": {},
@@ -136,7 +140,9 @@ class TestSessionFlow(unittest.TestCase):
 			]
 		)
 		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
-			tools = mcp_client.fetch_tools("https://api.example.com/mcp", "PAT-TOKEN")
+			tools = mcp_client.fetch_tools(
+				"https://api.example.com/mcp", "PAT-TOKEN", protocol_version=LEGACY
+			)
 		self.assertEqual(tools, [{"name": "get_x", "inputSchema": {}}])
 
 		reqs = seam.request_calls()
@@ -162,7 +168,7 @@ class TestSessionFlow(unittest.TestCase):
 			]
 		)
 		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
-			tools = mcp_client.fetch_tools("https://api.example.com/mcp", None)
+			tools = mcp_client.fetch_tools("https://api.example.com/mcp", None, protocol_version=LEGACY)
 		self.assertEqual([t["name"] for t in tools], ["a", "b"])
 
 	def test_call_tool_over_sse(self):
@@ -186,14 +192,16 @@ class TestSessionFlow(unittest.TestCase):
 			]
 		)
 		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
-			result = mcp_client.run_tool("https://api.example.com/mcp", "t", "get_x", {"q": 1})
+			result = mcp_client.run_tool(
+				"https://api.example.com/mcp", "t", "get_x", {"q": 1}, protocol_version=LEGACY
+			)
 		self.assertEqual(result["content"][0]["text"], "hi")
 
 	def test_unsupported_protocol_version_rejected(self):
 		seam = _Seam([_init_ok(version="1999-01-01"), _initialized_202()])
 		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
 			with self.assertRaises(mcp_client.McpError) as cm:
-				mcp_client.fetch_tools("https://api.example.com/mcp", None)
+				mcp_client.fetch_tools("https://api.example.com/mcp", None, protocol_version=LEGACY)
 		self.assertEqual(cm.exception.kind, mcp_client.ERR_PROTOCOL)
 
 	def test_json_rpc_error_raises_rpc_kind(self):
@@ -206,7 +214,7 @@ class TestSessionFlow(unittest.TestCase):
 		)
 		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
 			with self.assertRaises(mcp_client.McpError) as cm:
-				mcp_client.run_tool("https://api.example.com/mcp", None, "nope", {})
+				mcp_client.run_tool("https://api.example.com/mcp", None, "nope", {}, protocol_version=LEGACY)
 		self.assertEqual(cm.exception.kind, mcp_client.ERR_RPC)
 		self.assertEqual(cm.exception.code, -32602)
 
@@ -226,7 +234,9 @@ class TestSessionFlow(unittest.TestCase):
 			]
 		)
 		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
-			result = mcp_client.run_tool("https://api.example.com/mcp", None, "get_x", {})
+			result = mcp_client.run_tool(
+				"https://api.example.com/mcp", None, "get_x", {}, protocol_version=LEGACY
+			)
 		self.assertEqual(result["content"][0]["text"], "ok")
 
 	def test_http_500_raises_http_kind_with_code(self):
@@ -239,7 +249,7 @@ class TestSessionFlow(unittest.TestCase):
 		)
 		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
 			with self.assertRaises(mcp_client.McpError) as cm:
-				mcp_client.run_tool("https://api.example.com/mcp", None, "get_x", {})
+				mcp_client.run_tool("https://api.example.com/mcp", None, "get_x", {}, protocol_version=LEGACY)
 		self.assertEqual(cm.exception.kind, mcp_client.ERR_HTTP)
 		self.assertEqual(cm.exception.code, 503)
 
@@ -259,7 +269,11 @@ class TestSessionFlow(unittest.TestCase):
 		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
 			with self.assertRaises(mcp_client.McpError) as cm:
 				mcp_client.fetch_tools(
-					"https://api.example.com/mcp", None, total_timeout=5.0, clock=lambda: next(gen)
+					"https://api.example.com/mcp",
+					None,
+					total_timeout=5.0,
+					clock=lambda: next(gen),
+					protocol_version=LEGACY,
 				)
 		self.assertEqual(cm.exception.kind, mcp_client.ERR_TRANSPORT)
 
@@ -276,7 +290,12 @@ class TestSessionFlow(unittest.TestCase):
 				constructed_budgets.append(kw.get("total_timeout"))
 				self._first = len(constructed_budgets) == 1
 
-			def initialize(self):
+			era = "legacy"
+			negotiated_version = "2025-06-18"
+			tools_ttl_ms = None
+			server_capabilities = {}
+
+			def connect(self):
 				# Each session burns 5s of wall-clock before its op runs.
 				t["now"] += 5.0
 
@@ -309,7 +328,12 @@ class TestSessionFlow(unittest.TestCase):
 			def __init__(self, base_url, token, **kw):
 				pass
 
-			def initialize(self):
+			era = "legacy"
+			negotiated_version = "2025-06-18"
+			tools_ttl_ms = None
+			server_capabilities = {}
+
+			def connect(self):
 				t["now"] += 25.0  # blow the whole 20s budget
 
 			def list_tools(self, **kw):
@@ -418,3 +442,253 @@ class TestBodyDripBoundedByBudget(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+# --------------------------------------------------------------------------- #
+# 2026-07-28 era: detection + modern request shape
+# --------------------------------------------------------------------------- #
+def _discover_ok(versions=(MODERN,), request_id=1):
+	return _json_resp(
+		{
+			"jsonrpc": "2.0",
+			"id": request_id,
+			"result": {"supportedVersions": list(versions), "capabilities": {"tools": {}}},
+		}
+	)
+
+
+def _rpc_error(code, status=400, data=None, request_id=1):
+	err = {"code": code, "message": "x"}
+	if data is not None:
+		err["data"] = data
+	return _json_resp({"jsonrpc": "2.0", "id": request_id, "error": err}, status=status)
+
+
+def _tools_ok(request_id, ttl=None):
+	result = {"resultType": "complete", "tools": [{"name": "get_x", "inputSchema": {"type": "object"}}]}
+	if ttl is not None:
+		result["ttlMs"] = ttl
+	return _json_resp({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+class TestEraDetection(unittest.TestCase):
+	def _probe(self, seam):
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			return mcp_client.probe("https://api.example.com/mcp", "tok")
+
+	def test_modern_server_answers_discover(self):
+		seam = _Seam([_discover_ok(), _tools_ok(2, ttl=300000)])
+		info = self._probe(seam)
+		self.assertEqual(info["era"], mcp_client.ERA_MODERN)
+		self.assertEqual(info["protocol_version"], MODERN)
+		self.assertEqual(info["tools_ttl_ms"], 300000)
+		self.assertEqual([t["name"] for t in info["tools"]], ["get_x"])
+		reqs = seam.request_calls()
+		self.assertEqual(json.loads(reqs[0]["body"])["method"], "server/discover")
+		self.assertEqual(reqs[0]["headers"]["MCP-Protocol-Version"], MODERN)
+		self.assertEqual(reqs[0]["headers"]["Mcp-Method"], "server/discover")
+		# No initialize, no initialized, no DELETE: exactly two POSTs.
+		self.assertEqual([c["method"] for c in seam.calls], ["POST", "POST"])
+
+	def test_legacy_server_400_without_modern_error_falls_back(self):
+		seam = _Seam(
+			[
+				_FakeResp(400, {"Content-Type": "text/plain"}, [b"Bad Request: Server not initialized"]),
+				_init_ok(request_id=2),
+				_initialized_202(),
+				_tools_ok(3),
+			]
+		)
+		info = self._probe(seam)
+		self.assertEqual(info["era"], mcp_client.ERA_LEGACY)
+		self.assertEqual(info["protocol_version"], LEGACY)
+		self.assertIsNone(info["tools_ttl_ms"])
+		bodies = [json.loads(c["body"])["method"] for c in seam.request_calls()]
+		self.assertEqual(bodies, ["server/discover", "initialize", "notifications/initialized", "tools/list"])
+		# The legacy initialize carries no modern headers.
+		self.assertNotIn("Mcp-Method", seam.request_calls()[1]["headers"])
+
+	def test_legacy_server_200_with_rpc_error_falls_back(self):
+		seam = _Seam(
+			[
+				_json_resp(
+					{"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "Method not found"}}
+				),
+				_init_ok(request_id=2),
+				_initialized_202(),
+				_tools_ok(3),
+			]
+		)
+		self.assertEqual(self._probe(seam)["era"], mcp_client.ERA_LEGACY)
+
+	def test_unsupported_version_error_listing_a_legacy_version_we_speak(self):
+		seam = _Seam(
+			[
+				_rpc_error(-32022, data={"supported": ["2025-11-25", "2025-06-18"], "requested": MODERN}),
+				_init_ok(version="2025-11-25", request_id=2),
+				_initialized_202(),
+				_tools_ok(3),
+			]
+		)
+		info = self._probe(seam)
+		self.assertEqual(info["era"], mcp_client.ERA_LEGACY)
+		self.assertEqual(info["protocol_version"], "2025-11-25")
+		self.assertEqual(
+			json.loads(seam.request_calls()[1]["body"])["params"]["protocolVersion"], "2025-11-25"
+		)
+
+	def test_unsupported_version_error_with_nothing_in_common(self):
+		seam = _Seam([_rpc_error(-32022, data={"supported": ["2030-01-01"], "requested": MODERN})])
+		with self.assertRaises(mcp_client.McpError) as cm:
+			self._probe(seam)
+		self.assertEqual(cm.exception.kind, mcp_client.ERR_PROTOCOL)
+
+	def test_401_on_probe_is_an_auth_error_not_a_fallback(self):
+		seam = _Seam([_FakeResp(401, {"Content-Type": "application/json"}, [b"{}"])])
+		with self.assertRaises(mcp_client.McpError) as cm:
+			self._probe(seam)
+		self.assertEqual(cm.exception.kind, mcp_client.ERR_HTTP)
+		self.assertEqual(cm.exception.code, 401)
+		self.assertEqual(len(seam.request_calls()), 1)
+
+	def test_legacy_server_200_empty_result_falls_back(self):
+		# A non-conformant legacy server answering an unknown method with an empty
+		# result instead of an error: still legacy, never a hard failure.
+		seam = _Seam(
+			[
+				_json_resp({"jsonrpc": "2.0", "id": 1, "result": {}}),
+				_init_ok(request_id=2),
+				_initialized_202(),
+				_tools_ok(3),
+			]
+		)
+		self.assertEqual(self._probe(seam)["era"], mcp_client.ERA_LEGACY)
+
+	def test_404_and_405_on_probe_fall_back(self):
+		for status in (404, 405):
+			seam = _Seam(
+				[
+					_FakeResp(status, {"Content-Type": "application/json"}, [b"{}"]),
+					_init_ok(request_id=2),
+					_initialized_202(),
+					_tools_ok(3),
+				]
+			)
+			self.assertEqual(self._probe(seam)["era"], mcp_client.ERA_LEGACY, status)
+
+	def test_5xx_on_probe_does_not_fall_back(self):
+		seam = _Seam([_FakeResp(503, {"Content-Type": "application/json"}, [b"{}"])])
+		with self.assertRaises(mcp_client.McpError) as cm:
+			self._probe(seam)
+		self.assertEqual(cm.exception.kind, mcp_client.ERR_HTTP)
+		self.assertEqual(cm.exception.code, 503)
+		self.assertEqual(len(seam.request_calls()), 1)
+
+	def test_4xx_error_body_is_capped(self):
+		big = b'{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"' + b"x" * (70 * 1024) + b'"}}'
+		seam = _Seam([_FakeResp(400, {"Content-Type": "application/json"}, [big])])
+		with self.assertRaises(mcp_client.McpError) as cm:
+			self._probe(seam)
+		# The oversize body is dropped, not parsed: no rpc object, so no fallback
+		# decision is taken from it and the HTTP error surfaces as-is.
+		self.assertEqual(cm.exception.kind, mcp_client.ERR_HTTP)
+		self.assertIsNone(cm.exception.rpc)
+
+	def test_stored_legacy_version_skips_the_probe(self):
+		seam = _Seam([_init_ok(), _initialized_202(), _tools_ok(2)])
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			info = mcp_client.probe("https://api.example.com/mcp", None, protocol_version=LEGACY)
+		self.assertEqual(json.loads(seam.request_calls()[0]["body"])["method"], "initialize")
+		self.assertEqual(info["era"], mcp_client.ERA_LEGACY)
+
+
+class TestModernRequests(unittest.TestCase):
+	def test_call_tool_is_one_post_with_meta_and_mirrored_headers(self):
+		seam = _Seam(
+			[_json_resp({"jsonrpc": "2.0", "id": 1, "result": {"resultType": "complete", "content": []}})]
+		)
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			result = mcp_client.run_tool(
+				"https://api.example.com/mcp",
+				"tok",
+				"get_x",
+				{"region": "us-west1"},
+				header_params={"Mcp-Param-Region": "us-west1"},
+				protocol_version=MODERN,
+			)
+		self.assertEqual(result["content"], [])
+		self.assertEqual(len(seam.calls), 1)  # no initialize, no initialized, no DELETE
+		call = seam.calls[0]
+		body = json.loads(call["body"])
+		self.assertEqual(body["method"], "tools/call")
+		meta = body["params"]["_meta"]
+		self.assertEqual(meta["io.modelcontextprotocol/protocolVersion"], MODERN)
+		self.assertEqual(meta["io.modelcontextprotocol/clientInfo"]["name"], "jarvis-connector")
+		self.assertEqual(meta["io.modelcontextprotocol/clientCapabilities"], {})
+		self.assertEqual(call["headers"]["MCP-Protocol-Version"], MODERN)
+		self.assertEqual(call["headers"]["Mcp-Method"], "tools/call")
+		self.assertEqual(call["headers"]["Mcp-Name"], "get_x")
+		self.assertEqual(call["headers"]["Mcp-Param-Region"], "us-west1")
+		self.assertEqual(call["headers"]["Authorization"], "Bearer tok")
+		self.assertNotIn("Mcp-Session-Id", call["headers"])
+
+	def test_header_params_are_not_sent_on_a_legacy_server(self):
+		seam = _Seam(
+			[
+				_init_ok(),
+				_initialized_202(),
+				_json_resp({"jsonrpc": "2.0", "id": 2, "result": {"content": []}}),
+			]
+		)
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			mcp_client.run_tool(
+				"https://api.example.com/mcp",
+				None,
+				"get_x",
+				{},
+				header_params={"Mcp-Param-Region": "x"},
+				protocol_version=LEGACY,
+			)
+		for c in seam.request_calls():
+			self.assertNotIn("Mcp-Param-Region", c["headers"])
+			self.assertNotIn("Mcp-Method", c["headers"])
+
+	def test_input_required_result_is_a_protocol_error(self):
+		seam = _Seam([_json_resp({"jsonrpc": "2.0", "id": 1, "result": {"resultType": "input_required"}})])
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			with self.assertRaises(mcp_client.McpError) as cm:
+				mcp_client.run_tool("https://api.example.com/mcp", None, "get_x", {}, protocol_version=MODERN)
+		self.assertEqual(cm.exception.kind, mcp_client.ERR_PROTOCOL)
+
+	def test_modern_400_error_body_is_attached_to_the_http_error(self):
+		seam = _Seam([_rpc_error(-32020, status=400)])
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			with self.assertRaises(mcp_client.McpError) as cm:
+				mcp_client.run_tool("https://api.example.com/mcp", None, "get_x", {}, protocol_version=MODERN)
+		self.assertEqual(cm.exception.kind, mcp_client.ERR_HTTP)
+		self.assertEqual(cm.exception.code, 400)
+		self.assertEqual(cm.exception.rpc["code"], -32020)
+
+	def test_ttl_is_the_minimum_across_pages(self):
+		seam = _Seam(
+			[
+				_json_resp(
+					{
+						"jsonrpc": "2.0",
+						"id": 1,
+						"result": {"tools": [{"name": "a"}], "nextCursor": "c", "ttlMs": 600000},
+					}
+				),
+				_json_resp({"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "b"}], "ttlMs": 60000}}),
+			]
+		)
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			info = mcp_client.probe("https://api.example.com/mcp", None, protocol_version=MODERN)
+		self.assertEqual(info["tools_ttl_ms"], 60000)
+		self.assertEqual([t["name"] for t in info["tools"]], ["a", "b"])
+
+	def test_era_for_version(self):
+		self.assertIsNone(mcp_client.era_for_version(""))
+		self.assertEqual(mcp_client.era_for_version(LEGACY), mcp_client.ERA_LEGACY)
+		self.assertEqual(mcp_client.era_for_version(MODERN), mcp_client.ERA_MODERN)
+		self.assertEqual(mcp_client.era_for_version("2027-01-01"), mcp_client.ERA_MODERN)

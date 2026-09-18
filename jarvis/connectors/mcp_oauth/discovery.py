@@ -5,10 +5,12 @@ discovery run against an untrusted, user-pasted server URL is egress to a host
 that URL chose, so nothing here trusts a response before it is validated.
 
 Steps:
-  (a) an unauthenticated MCP ``initialize`` POST to ``base_url``; the server is
-      expected to answer 401 with a ``WWW-Authenticate`` header naming a
-      ``resource_metadata`` URL (RFC 9728). This hop needs a JSON-RPC body, not
-      a form, so it calls ``transport`` directly rather than through
+  (a) an unauthenticated MCP probe POST to ``base_url`` - the modern
+      ``server/discover`` shape first, then a legacy ``initialize`` fallback when
+      the first answer is neither a 401 nor a recognised modern protocol error;
+      the server is expected to answer 401 with a ``WWW-Authenticate`` header
+      naming a ``resource_metadata`` URL (RFC 9728). This hop needs a JSON-RPC
+      body, not a form, so it calls ``transport`` directly rather than through
       ``http_form`` - see ``transport.py``'s module docstring.
   (b) GET that resource-metadata URL and parse the RFC 9728 document. A 401 that
       names no URL (or carries no challenge header at all) is NOT fatal: RFC 9728
@@ -22,9 +24,10 @@ Every step (b)/(c) GET goes through ``http_form`` with ``form=None`` (no
 body), which still routes through the same single ``transport`` seam.
 
 TIME. Each hop above is bounded by :data:`HOP_TOTAL_TIMEOUT_S`, and the whole
-run by :data:`RUN_TOTAL_TIMEOUT_S` - the fallbacks mean a run can make up to six
-hops (1 probe + 2 resource-metadata + 3 metadata), and six independent 15s hops
-would be 90 seconds of a worker held on a stalling host.
+run by :data:`RUN_TOTAL_TIMEOUT_S` - the fallbacks mean a run can make up to seven
+hops (2 probes + 2 resource-metadata + 3 metadata), and seven independent 15s hops
+would be 105 seconds of a worker held on a stalling host, which is why the run
+budget, not the per-hop one, is what actually bounds a caller.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 
+from jarvis.connectors import mcp_wire
 from jarvis.connectors.mcp_oauth import transport as transport_module
 from jarvis.connectors.mcp_oauth.canonical import canonical_resource, resource_covers
 from jarvis.connectors.mcp_oauth.errors import OAuthDiscoveryError
@@ -49,7 +53,7 @@ _AS_8414_PATH = "/.well-known/oauth-authorization-server"  # RFC 8414
 _AS_OIDC_PATH = "/.well-known/openid-configuration"  # OpenID Connect Discovery
 
 #: Wall-clock ceiling for ONE discovery hop, and for a whole discovery run.
-#: 6 hops x 15s would be 90s; the run budget is what actually bounds a caller
+#: 7 hops x 15s would be 105s; the run budget is what actually bounds a caller
 #: (``connectors_api.add_connector`` documents the arithmetic it depends on).
 HOP_TOTAL_TIMEOUT_S = transport_module.DISCOVERY_TOTAL_TIMEOUT_S
 RUN_TOTAL_TIMEOUT_S = 45.0
@@ -63,6 +67,37 @@ _PROBE_METHOD = {
 		"capabilities": {},
 		"clientInfo": {"name": "jarvis-mcp-oauth-probe", "version": "1.0"},
 	},
+}
+
+#: The MODERN (2026-07-28) unauthenticated probe: a ``server/discover`` request with
+#: the request-metadata the transport requires, mirrored into headers exactly as
+#: ``mcp_client`` sends it. A 2026-07-28 server answers a legacy ``initialize`` with a
+#: protocol error rather than the 401 its sign-in gate returns, so this shape is what
+#: surfaces a modern server's challenge.
+_MODERN_PROBE_BODY = json.dumps(
+	{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "server/discover",
+		"params": {
+			"_meta": {
+				mcp_wire.META_PROTOCOL_VERSION: mcp_wire.MODERN_PROTOCOL_VERSION,
+				mcp_wire.META_CLIENT_INFO: {"name": "jarvis-mcp-oauth-probe", "version": "1.0"},
+				mcp_wire.META_CLIENT_CAPABILITIES: {},
+			}
+		},
+	}
+).encode("utf-8")
+_MODERN_PROBE_HEADERS = {
+	"Content-Type": "application/json",
+	"Accept": "application/json, text/event-stream",
+	"MCP-Protocol-Version": mcp_wire.MODERN_PROTOCOL_VERSION,
+	"Mcp-Method": "server/discover",
+}
+_LEGACY_PROBE_BODY = json.dumps(_PROBE_METHOD).encode("utf-8")
+_LEGACY_PROBE_HEADERS = {
+	"Content-Type": "application/json",
+	"Accept": "application/json, text/event-stream",
 }
 
 
@@ -118,17 +153,73 @@ def _probe_unauthenticated(
 	read_timeout: float,
 	budget: _Budget,
 ) -> dict:
-	"""Send the unauthenticated ``initialize`` probe and return the parsed
-	``WWW-Authenticate`` challenge params (``{}`` when the 401 carried none).
-	Raises :class:`OAuthDiscoveryError` only if the server does not answer 401 -
-	an address that serves an unauthenticated call needs no sign-in at all.
+	"""Probe ``base_url`` unauthenticated and return the parsed ``WWW-Authenticate``
+	challenge params (``{}`` when the 401 carried none). Raises
+	:class:`OAuthDiscoveryError` only when NEITHER shape draws a 401 - an address that
+	serves an unauthenticated call needs no sign-in at all.
 
-	``drain_event_stream=False``: a server that ANSWERS this probe may answer it
-	with an event stream it holds open indefinitely, and its body tells us
-	nothing the status line has not - we already know there is no challenge."""
-	body = json.dumps(_PROBE_METHOD).encode("utf-8")
-	headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-	result = transport(
+	The MODERN ``server/discover`` shape is tried first: a 2026-07-28 server answers a
+	legacy ``initialize`` with a protocol error rather than the 401 its sign-in gate
+	returns, so probing modern-shaped first is what surfaces its challenge. A 401 from
+	the modern probe is the answer. A recognised modern protocol error (version /
+	header / capability) proves the server IS modern and answered WITHOUT a 401, so no
+	sign-in is required and there is nothing to fall back to. Anything else - a plain
+	4xx/2xx, or a body we cannot read such as a held-open event stream - may be a
+	legacy server rejecting the modern shape, so the legacy ``initialize`` probe is
+	tried once more; a 401 from it is the answer. Budget: one extra hop, still inside
+	:data:`RUN_TOTAL_TIMEOUT_S`.
+
+	``drain_event_stream=False``: a server that ANSWERS a probe may hold an event
+	stream open indefinitely, and its body tells us nothing the status line has not."""
+	modern = _send_probe(
+		base_url,
+		_MODERN_PROBE_BODY,
+		_MODERN_PROBE_HEADERS,
+		transport,
+		egress_allowed,
+		connect_timeout,
+		read_timeout,
+		budget,
+	)
+	if modern.status == 401:
+		return _challenge_params(modern)
+	err = modern.json.get("error") if isinstance(modern.json, dict) else None
+	if mcp_wire.is_modern_probe_error(err if isinstance(err, dict) else None):
+		raise OAuthDiscoveryError(
+			"no_401_challenge",
+			f"Expected 401 from an unauthenticated MCP call, got HTTP {modern.status}.",
+		)
+	legacy = _send_probe(
+		base_url,
+		_LEGACY_PROBE_BODY,
+		_LEGACY_PROBE_HEADERS,
+		transport,
+		egress_allowed,
+		connect_timeout,
+		read_timeout,
+		budget,
+	)
+	if legacy.status != 401:
+		raise OAuthDiscoveryError(
+			"no_401_challenge",
+			f"Expected 401 from an unauthenticated MCP call, got HTTP {legacy.status}.",
+		)
+	return _challenge_params(legacy)
+
+
+def _send_probe(
+	base_url: str,
+	body: bytes,
+	headers: dict,
+	transport: Callable,
+	egress_allowed: Callable[[str], bool] | None,
+	connect_timeout: float,
+	read_timeout: float,
+	budget: _Budget,
+):
+	"""One unauthenticated probe POST, asking the transport not to drain an event
+	stream (we only need the status line and headers)."""
+	return transport(
 		base_url,
 		method="POST",
 		headers=headers,
@@ -139,15 +230,14 @@ def _probe_unauthenticated(
 		egress_allowed=egress_allowed,
 		drain_event_stream=False,
 	)
-	if result.status != 401:
-		raise OAuthDiscoveryError(
-			"no_401_challenge",
-			f"Expected 401 from an unauthenticated MCP call, got HTTP {result.status}.",
-		)
+
+
+def _challenge_params(result) -> dict:
+	"""The parsed ``WWW-Authenticate`` params of a 401, or ``{}`` when it carried no
+	header (RFC 9728 section 3.1 still names the default document location, so a bare
+	401 is a fallback case, not a dead end)."""
 	challenge_header = result.headers.get("www-authenticate")
 	if not challenge_header:
-		# RFC 9728 section 3.1 still says where the document lives by default, so a
-		# bare 401 is a fallback case, not a dead end.
 		return {}
 	return _parse_www_authenticate(challenge_header)
 
