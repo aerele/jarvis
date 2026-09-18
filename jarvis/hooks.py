@@ -448,6 +448,11 @@ scheduler_events = {
 		# drift; short-circuits to a no-op push when the computed profile
 		# set already matches what admin last received.
 		"jarvis.chat.role_profiles.sync_role_profiles",
+		# MCP connectors caching (spec 2026-07-28): re-list tools daily for every
+		# enabled, previously-passed connector so a cache goes stale in the background
+		# rather than mid-chat. Each row runs under its own credential context; see
+		# jarvis.connectors.refresh.reprobe_all.
+		"jarvis.connectors.refresh.reprobe_all",
 	],
 	"weekly": [
 		# Wiki v2 health check: deterministic lint over Active pages
