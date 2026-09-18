@@ -259,15 +259,18 @@ let exportSeq = 0;
 async function exportAs(format, title) {
 	const lib = await loadCaptureLib();
 	const id = "x" + ++exportSeq;
+	// The watchdog fires only after this long with NO capture progress - so a big
+	// multi-slide dashboard that keeps producing slides is never killed by a fixed
+	// total cap, while a genuinely stuck capture still gives up. It is re-armed on
+	// each export:progress heartbeat (see onMessage).
+	const NO_PROGRESS_MS = 120000;
 	const result = new Promise((resolve, reject) => {
-		pendingExports[id] = {
-			resolve,
-			reject,
-			timer: setTimeout(() => {
+		const arm = () =>
+			setTimeout(() => {
 				delete pendingExports[id];
 				reject(new Error("Export timed out"));
-			}, 60000),
-		};
+			}, NO_PROGRESS_MS);
+		pendingExports[id] = { resolve, reject, arm, timer: arm() };
 	});
 	// pdf = the slide deck path (section.slide per page); png = one full-body shot
 	postToFrame({
@@ -306,6 +309,12 @@ function onMessage(e) {
 		if (props.mode === "view") frameH.value = Math.max(480, Math.ceil(d.height || 0));
 	} else if (d.type === "data") {
 		handleData(d);
+	} else if (d.type === "export:progress") {
+		// Each captured slide re-arms the watchdog: steady progress => keep waiting.
+		const p = pendingExports[d.id];
+		if (!p) return;
+		clearTimeout(p.timer);
+		p.timer = p.arm();
 	} else if (d.type === "export:result") {
 		const p = pendingExports[d.id];
 		if (!p) return;
