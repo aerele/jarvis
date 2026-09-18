@@ -83,7 +83,8 @@ Jarvis supports Frappe 15 and 16.
 Run these commands from your Frappe bench:
 
 ```bash
-bench get-app https://github.com/aerele/jarvis.git --branch main
+# On a Frappe 15 site, use --branch version-15 instead
+bench get-app https://github.com/aerele/jarvis.git --branch version-16
 bench --site your-site.example install-app jarvis
 ```
 
@@ -92,7 +93,8 @@ bench --site your-site.example install-app jarvis
 On a private bench group:
 
 1. Open **Bench Group > Apps**, choose **Add App**, and add
-   `https://github.com/aerele/jarvis.git` from the `main` branch.
+   `https://github.com/aerele/jarvis.git` from the `version-16` branch
+   (`version-15` for a Frappe 15 site).
 2. Deploy the bench update to your site.
 3. Open **Site > Apps**, choose **Install App**, and install **Jarvis**.
 
