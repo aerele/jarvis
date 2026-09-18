@@ -25,6 +25,8 @@
   "last_test_at",
   "column_break_status",
   "tools_cached_at",
+  "mcp_protocol_version",
+  "tools_ttl_ms",
   "tools_cache"
  ],
  "fields": [
@@ -166,6 +168,20 @@
    "read_only": 1
   },
   {
+   "fieldname": "mcp_protocol_version",
+   "fieldtype": "Data",
+   "label": "MCP Protocol Version",
+   "read_only": 1,
+   "description": "MCP protocol version the server negotiated at the last passing test; empty means the legacy handshake."
+  },
+  {
+   "fieldname": "tools_ttl_ms",
+   "fieldtype": "Int",
+   "label": "Tools TTL (ms)",
+   "read_only": 1,
+   "description": "Server ttlMs hint from the last tools/list, used to decide when the cached tool list is stale."
+  },
+  {
    "fieldname": "tools_cache",
    "fieldtype": "JSON",
    "label": "Tools Cache",
@@ -175,7 +191,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-05 10:00:00.000000",
+ "modified": "2026-09-16 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Connector",

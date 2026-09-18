@@ -98,7 +98,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, get_datetime, get_system_timezone, get_url, now_datetime
 
-from jarvis.connectors import action_rows, broker, catalog, mcp_oauth, mcp_oauth_store, oauth
+from jarvis.connectors import action_rows, broker, catalog, mcp_oauth, mcp_oauth_store, mcp_wire, oauth
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 
 CONNECTOR = "Jarvis Connector"
@@ -432,6 +432,7 @@ def _connector_summary(doc) -> dict:
 	total = len(children)
 	allowed = sum(1 for c in children if c.get("allowed"))
 	last_test_at = doc.get("last_test_at")
+	tools_cached_at = doc.get("tools_cached_at")
 	auth_method = doc.get("auth_method") or "API Key"
 	summary = {
 		"name": doc.name,
@@ -445,6 +446,10 @@ def _connector_summary(doc) -> dict:
 		"auth_method": auth_method,
 		"last_test_status": doc.get("last_test_status") or "",
 		"last_test_at": str(last_test_at) if last_test_at else None,
+		# Read-only display fields: the negotiated era ("" means legacy) and when the
+		# tool list was last cached.
+		"protocol_version": doc.get("mcp_protocol_version") or "",
+		"tools_cached_at": str(tools_cached_at) if tools_cached_at else None,
 		"allowed_actions": _action_summary(allowed, total),
 	}
 	if auth_method == oauth.OAUTH_AUTH_METHOD:
@@ -454,7 +459,7 @@ def _connector_summary(doc) -> dict:
 
 def _cached_tools(doc) -> list[dict]:
 	"""Parse ``tools_cache`` back into a list of tool dicts, same defensive
-	shape ``jarvis.connectors.policy._input_schema`` reads (``{"tools": [...]}``
+	shape ``jarvis.connectors.policy.input_schema`` reads (``{"tools": [...]}``
 	or a bare array)."""
 	cache = doc.get("tools_cache")
 	if not cache:
@@ -557,6 +562,133 @@ def _replace_allowed_actions(parent_name: str, actions: list[dict]) -> None:
 			}
 		).insert(ignore_permissions=True)
 	frappe.clear_document_cache(CONNECTOR, parent_name)
+
+
+# --------------------------------------------------------------------------- #
+# probe result -> row (shared by the Test button and the background refresh)
+# --------------------------------------------------------------------------- #
+def sanitize_tools(tools) -> list[dict]:
+	"""Return the tools from a fresh ``tools/list`` that are safe to cache, dropping
+	the ones the MCP spec says a client must not keep and logging one line per drop.
+
+	HARD DROP (removed from the cache): a tool whose name is empty, longer than 128
+	characters, or carries a control character; a duplicate name; and, a spec MUST, a
+	tool whose ``inputSchema`` has an invalid ``x-mcp-header`` annotation
+	(``mcp_wire.header_annotation_error`` set), which makes the whole tool definition
+	invalid. The recommended tool-name character set (``mcp_wire.TOOL_NAME_RE``) is
+	only a SHOULD, so a name outside it is KEPT and merely flagged. One warning per
+	dropped or flagged tool, with the name and reason, via
+	``frappe.logger("jarvis.connectors")`` (guarded: a logger that cannot write must
+	never fail the probe that produced the list). Applied before the merge and before the
+	cache write, so a bad tool never reaches ``allowed_actions`` or ``tools_cache``."""
+	kept: list[dict] = []
+	seen: set[str] = set()
+	for tool in tools:
+		if not isinstance(tool, dict):
+			continue
+		name = str(tool.get("name") or "")
+		if not name:
+			_warn("connector tool dropped: empty name")
+			continue
+		if len(name) > 128:
+			_warn(f"connector tool {name[:64]!r} dropped: name longer than 128 characters")
+			continue
+		if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
+			# The name itself is unsafe to log, so it is deliberately not interpolated.
+			_warn("connector tool dropped: name contains control characters")
+			continue
+		if name in seen:
+			_warn(f"connector tool {name!r} dropped: duplicate name")
+			continue
+		schema_error = mcp_wire.header_annotation_error(tool.get("inputSchema"))
+		if schema_error:
+			_warn(f"connector tool {name!r} dropped: invalid tool schema ({schema_error})")
+			continue
+		if not mcp_wire.TOOL_NAME_RE.match(name):
+			_warn(f"connector tool {name!r} kept but name is outside the recommended character set")
+		seen.add(name)
+		kept.append(tool)
+	return kept
+
+
+def _warn(message: str) -> None:
+	"""One warning line that can never raise into the caller: ``frappe.logger`` itself
+	fails without a writable log directory (see ``refresh.after_call``)."""
+	try:
+		frappe.logger("jarvis.connectors").warning(message)
+	except Exception:
+		pass
+
+
+def persist_probe_result(doc, result, now, *, can_write: bool, background: bool = False):
+	"""Write a broker probe ``result`` onto ``doc`` and return
+	``(response_envelope, wrote)``. ``wrote`` is True when a DB write happened, so the
+	SPA Test-button caller can issue its ONE explicit commit exactly where it always
+	has; this helper NEVER commits itself (a background refresh job is committed by the
+	worker, and a stray commit here would break the standing no-commit-in-app-code rule).
+
+	On SUCCESS it stores ``tools_cache``, ``tools_cached_at``, ``tools_ttl_ms``,
+	``mcp_protocol_version`` and ``last_test_status="Passed"``/``last_test_at``, and
+	MERGES the ``allowed_actions`` table (see ``_merge_allowed_actions``), after
+	:func:`sanitize_tools` has dropped any unsafe tools. On FAILURE it moves only
+	``last_test_status="Failed"``/``last_test_at`` and leaves any prior good cache alone.
+
+	``background`` is the daily/after-call refresh path: it NEVER flips a connector to
+	Failed (a transient re-probe failure must not disable it tenant-wide via
+	``call_connector``'s readiness guard, so the background path writes only on
+	success). A read-only caller (``can_write`` False) causes no write at all."""
+	if not result.get("ok"):
+		error = result.get("error") or {"code": "unknown_error", "message": "The connection test failed."}
+		# circuit_open / at_capacity are guard / transient-load signals, not a health
+		# measurement (the probe never ran), so they never flip last_test_status to
+		# Failed and disable the connector tenant-wide. A background refresh never flips
+		# Failed either (see the docstring).
+		transient = error.get("code") in {"circuit_open", "at_capacity"}
+		if can_write and not background and not transient:
+			frappe.db.set_value(
+				CONNECTOR,
+				doc.name,
+				{"last_test_status": "Failed", "last_test_at": now},
+				update_modified=False,
+			)
+			return {"ok": False, "error": error}, True
+		return {"ok": False, "error": error}, False
+
+	tools = sanitize_tools(result.get("tools") or [])
+	merged = _merge_allowed_actions(doc.get("allowed_actions") or [], tools)
+	wrote = False
+	if can_write:
+		frappe.db.set_value(
+			CONNECTOR,
+			doc.name,
+			{
+				"tools_cache": frappe.as_json({"tools": tools}),
+				"tools_cached_at": now,
+				# Empty version string means the legacy handshake; ttl 0 means "no hint".
+				"mcp_protocol_version": result.get("protocol_version") or "",
+				# Clamp to a signed 32-bit MariaDB Int: a server sending a larger ttlMs
+				# (or a negative one) must not overflow the column and 500 the write.
+				"tools_ttl_ms": max(0, min(cint(result.get("tools_ttl_ms")), 2**31 - 1)),
+				"last_test_status": "Passed",
+				"last_test_at": now,
+			},
+			update_modified=False,
+		)
+		_replace_allowed_actions(doc.name, merged)
+		wrote = True
+	return {
+		"ok": True,
+		"tools": [
+			{
+				"action": m["action"],
+				"allowed": bool(m["allowed"]),
+				"read_only": bool(m["read_only"]),
+				"destructive": bool(m["destructive"]),
+				"description": m["description"],
+			}
+			for m in merged
+		],
+	}, wrote
 
 
 # --------------------------------------------------------------------------- #
@@ -766,7 +898,7 @@ def _setup_mcp_oauth_client(doc) -> None:
 	(``ssrf.open_pinned_request`` clamps DNS, connect and header wait to one
 	deadline per hop; ``mcp_oauth.transport._read_capped`` reads the body one
 	syscall at a time under the same deadline): ``mcp_oauth.discovery.RUN_TOTAL_TIMEOUT_S`` (45s) for the
-	whole discovery run, up to six hops inside it, plus
+	whole discovery run, up to seven hops inside it, plus
 	``transport.TOKEN_TOTAL_TIMEOUT_S`` (10s) for the registration POST - 55s worst
 	case, with at most ``transport.MAX_REDIRECTS`` (2) redirects per hop, well under
 	gunicorn's 120s. The rate limit above is what stops a caller from queueing
@@ -1034,57 +1166,16 @@ def test_connector(name: str) -> dict:
 			},
 		}
 
+	# Read runs the probe, WRITE persists: only a writer may flip the stored status
+	# or refill the cache, so a reader's probe stays display-only and can never disable
+	# a Shared connector tenant-wide. :func:`persist_probe_result` does the writes but
+	# never commits; the button owns its ONE explicit commit here, exactly as before.
 	can_write = doc.has_permission("write")
 	result = broker.test_connector(doc)
-	now = now_datetime()
-
-	if not result.get("ok"):
-		error = result.get("error") or {"code": "unknown_error", "message": "The connection test failed."}
-		# circuit_open / at_capacity are guard / transient-load signals, not a health
-		# measurement (the probe never ran), so they must NOT flip last_test_status to
-		# Failed and disable the connector tenant-wide via call_connector's guard.
-		transient = error.get("code") in {"circuit_open", "at_capacity"}
-		# Only a writer may flip the stored status; a reader's probe is display-only
-		# so it can never disable a Shared connector tenant-wide.
-		if can_write and not transient:
-			frappe.db.set_value(
-				CONNECTOR,
-				doc.name,
-				{"last_test_status": "Failed", "last_test_at": now},
-				update_modified=False,
-			)
-			frappe.db.commit()
-		return {"ok": False, "error": error}
-
-	tools = [t for t in (result.get("tools") or []) if isinstance(t, dict)]
-	merged = _merge_allowed_actions(doc.get("allowed_actions") or [], tools)
-	if can_write:
-		frappe.db.set_value(
-			CONNECTOR,
-			doc.name,
-			{
-				"tools_cache": frappe.as_json({"tools": tools}),
-				"tools_cached_at": now,
-				"last_test_status": "Passed",
-				"last_test_at": now,
-			},
-			update_modified=False,
-		)
-		_replace_allowed_actions(doc.name, merged)
+	envelope, wrote = persist_probe_result(doc, result, now_datetime(), can_write=can_write)
+	if wrote:
 		frappe.db.commit()
-	return {
-		"ok": True,
-		"tools": [
-			{
-				"action": m["action"],
-				"allowed": bool(m["allowed"]),
-				"read_only": bool(m["read_only"]),
-				"destructive": bool(m["destructive"]),
-				"description": m["description"],
-			}
-			for m in merged
-		],
-	}
+	return envelope
 
 
 # --------------------------------------------------------------------------- #
@@ -1247,6 +1338,10 @@ def update_connector(
 			# empty string fails that check on save, NULL does not.
 			doc.tools_cache = None
 			doc.tools_cached_at = None
+			# The negotiated era and its TTL belong to the OLD endpoint; the next
+			# Test re-detects them (empty version = legacy handshake).
+			doc.mcp_protocol_version = None
+			doc.tools_ttl_ms = None
 			doc.set("allowed_actions", [])
 
 	doc.save()

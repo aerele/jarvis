@@ -16,8 +16,28 @@ import json
 import unittest
 from unittest import mock
 
-from jarvis.connectors import broker, ssrf
+from jarvis.connectors import broker, mcp_client, mcp_wire, ssrf
 from jarvis.connectors.limits import InMemoryStore
+
+
+class TestMcpCode(unittest.TestCase):
+	"""``broker._mcp_code`` maps an McpError kind to the stable broker error code. A
+	header/body mismatch (HTTP 4xx carrying JSON-RPC -32020) is a protocol_error, not a
+	generic http_error, so refresh.after_call re-lists the tools."""
+
+	def test_header_mismatch_is_protocol_error(self):
+		exc = mcp_client.McpError(
+			"bad headers", kind=mcp_client.ERR_HTTP, code=400, rpc={"code": mcp_wire.RPC_HEADER_MISMATCH}
+		)
+		self.assertEqual(broker._mcp_code(exc), "protocol_error")
+
+	def test_plain_http_error_stays_http_error(self):
+		exc = mcp_client.McpError("nope", kind=mcp_client.ERR_HTTP, code=400, rpc={"code": -32602})
+		self.assertEqual(broker._mcp_code(exc), "http_error")
+
+	def test_http_error_without_rpc_stays_http_error(self):
+		exc = mcp_client.McpError("nope", kind=mcp_client.ERR_HTTP, code=403)
+		self.assertEqual(broker._mcp_code(exc), "http_error")
 
 
 class _Row(dict):
@@ -89,31 +109,47 @@ class TestGuardedTestProbe(unittest.TestCase):
 		row.update(kw)
 		return _Row(row)
 
+	def _probe_result(self, **kw):
+		# The shape mcp_client.probe returns (Phase A): tools plus the era/cache hints
+		# _test_probe threads back to persist_probe_result.
+		result = {
+			"tools": [{"name": "t"}],
+			"era": "modern",
+			"protocol_version": "2026-07-28",
+			"tools_ttl_ms": 60000,
+			"capabilities": {},
+		}
+		result.update(kw)
+		return result
+
 	def test_success_returns_tools(self):
 		store = InMemoryStore()
 		with (
 			mock.patch.object(broker, "_store", return_value=store),
-			mock.patch.object(broker.mcp_client, "fetch_tools", return_value=[{"name": "t"}]),
+			mock.patch.object(broker.mcp_client, "probe", return_value=self._probe_result()),
 		):
 			out = broker.test_connector(self._row())
 		self.assertTrue(out["ok"])
 		self.assertEqual(out["tools"], [{"name": "t"}])
+		# The era/cache hints ride back so persist_probe_result can store them.
+		self.assertEqual(out["protocol_version"], "2026-07-28")
+		self.assertEqual(out["tools_ttl_ms"], 60000)
 
 	def test_repeated_transport_failures_open_the_circuit(self):
 		store = InMemoryStore()
 		boom = ssrf.SsrfError("unreachable", kind=ssrf.ERR_CONNECT_FAILED)
 		with (
 			mock.patch.object(broker, "_store", return_value=store),
-			mock.patch.object(broker.mcp_client, "fetch_tools", side_effect=boom),
+			mock.patch.object(broker.mcp_client, "probe", side_effect=boom),
 		):
 			row = self._row()
 			for _ in range(broker.CB_THRESHOLD):
 				out = broker.test_connector(row)
 				self.assertEqual(out["error"]["code"], "transport_error")
 			# The next probe is fast-failed by the now-open breaker, without a call.
-			with mock.patch.object(broker.mcp_client, "fetch_tools") as fetch:
+			with mock.patch.object(broker.mcp_client, "probe") as probe:
 				blocked = broker.test_connector(row)
-			fetch.assert_not_called()
+			probe.assert_not_called()
 		self.assertEqual(blocked["error"]["code"], "circuit_open")
 
 	def test_ssrf_block_does_not_open_the_circuit(self):
@@ -123,7 +159,7 @@ class TestGuardedTestProbe(unittest.TestCase):
 		boom = ssrf.SsrfError("blocked", kind=ssrf.ERR_BLOCKED_ADDRESS)
 		with (
 			mock.patch.object(broker, "_store", return_value=store),
-			mock.patch.object(broker.mcp_client, "fetch_tools", side_effect=boom),
+			mock.patch.object(broker.mcp_client, "probe", side_effect=boom),
 		):
 			row = self._row()
 			for _ in range(broker.CB_THRESHOLD + 2):
@@ -137,11 +173,58 @@ class TestGuardedTestProbe(unittest.TestCase):
 		store.set(f"cc:{'conn-1'}", broker.CC_LIMIT, 60)
 		with (
 			mock.patch.object(broker, "_store", return_value=store),
-			mock.patch.object(broker.mcp_client, "fetch_tools", return_value=[{"name": "t"}]) as fetch,
+			mock.patch.object(broker.mcp_client, "probe", return_value=self._probe_result()) as probe,
 		):
 			out = broker.test_connector(self._row())
-		fetch.assert_not_called()
+		probe.assert_not_called()
 		self.assertEqual(out["error"]["code"], "at_capacity")
+
+
+class TestDoCallPassthrough(unittest.TestCase):
+	"""``_do_call`` threads the row's stored era and the x-mcp-header mirrors derived
+	from the cached inputSchema into ``mcp_client.run_tool`` (spec 2026-07-28)."""
+
+	def _row(self, **kw):
+		row = {
+			"name": "conn-1",
+			"base_url": "https://api.example.com/mcp",
+			"tools_cache": json.dumps(
+				{
+					"tools": [
+						{
+							"name": "t",
+							"inputSchema": {
+								"properties": {"tenant": {"type": "string", "x-mcp-header": "X-Tenant"}}
+							},
+						}
+					]
+				}
+			),
+		}
+		row.update(kw)
+		return _Row(row)
+
+	def test_stored_era_and_header_params_are_passed(self):
+		with mock.patch.object(broker.mcp_client, "run_tool", return_value={}) as run_tool:
+			broker._do_call(
+				self._row(mcp_protocol_version="2026-07-28"),
+				"t",
+				{"tenant": "acme"},
+				"",
+				broker._NullBreaker(),
+			)
+		_, kwargs = run_tool.call_args
+		self.assertEqual(kwargs["protocol_version"], "2026-07-28")
+		self.assertEqual(kwargs["header_params"], {"Mcp-Param-X-Tenant": "acme"})
+
+	def test_no_stored_era_means_the_shipped_legacy_handshake(self):
+		# A row tested before the field existed must NOT pay era detection on a
+		# chat turn: it speaks the legacy version exactly as shipped.
+		with mock.patch.object(broker.mcp_client, "run_tool", return_value={}) as run_tool:
+			broker._do_call(self._row(), "t", {"tenant": "acme"}, "", broker._NullBreaker())
+		_, kwargs = run_tool.call_args
+		self.assertEqual(kwargs["protocol_version"], broker.mcp_client.DEFAULT_PROTOCOL_VERSION)
+		self.assertEqual(kwargs["header_params"], {"Mcp-Param-X-Tenant": "acme"})
 
 
 class _DoesNotExist(Exception):
