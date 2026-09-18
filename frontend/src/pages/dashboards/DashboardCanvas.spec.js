@@ -214,3 +214,71 @@ describe("DashboardCanvas re-drive reload (#965)", () => {
 		wrapper.unmount();
 	});
 });
+
+describe("DashboardCanvas export watchdog (progress heartbeat)", () => {
+	async function readyView() {
+		const wrapper = mount(DashboardCanvas, {
+			attachTo: document.body,
+			props: { mode: "view", html: "static only", dashboard: { name: "d1" } },
+		});
+		await flushPromises();
+		sendFrameMessage(wrapper, { type: "ready" });
+		await flushPromises();
+		return wrapper;
+	}
+
+	it("re-arms the watchdog on export:progress so a slow multi-slide export doesn't time out", async () => {
+		vi.useFakeTimers();
+		try {
+			const wrapper = await readyView();
+			let settled = null;
+			wrapper.vm.exportAs("pdf", "T").then(
+				() => (settled = "resolved"),
+				() => (settled = "rejected")
+			);
+			await flushPromises(); // awaits loadCaptureLib, posts the export frame
+			// progress keeps arriving just before each 120s window elapses
+			for (let k = 0; k < 3; k++) {
+				vi.advanceTimersByTime(90000);
+				sendFrameMessage(wrapper, {
+					type: "export:progress",
+					id: "x1",
+					done: k + 1,
+					total: 4,
+				});
+				await flushPromises();
+			}
+			expect(settled).toBe(null); // 270s elapsed, but steady progress => still going
+			sendFrameMessage(wrapper, { type: "export:result", id: "x1", ok: true, images: [] });
+			await flushPromises();
+			expect(settled).toBe("resolved");
+			wrapper.unmount();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("times out when no progress arrives within the window", async () => {
+		vi.useFakeTimers();
+		try {
+			const wrapper = await readyView();
+			let settled = null;
+			let msg = "";
+			wrapper.vm.exportAs("pdf", "T").then(
+				() => (settled = "resolved"),
+				(e) => {
+					settled = "rejected";
+					msg = e.message;
+				}
+			);
+			await flushPromises();
+			vi.advanceTimersByTime(120000); // no progress => watchdog fires
+			await flushPromises();
+			expect(settled).toBe("rejected");
+			expect(msg).toMatch(/timed out/i);
+			wrapper.unmount();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
