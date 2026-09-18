@@ -8,6 +8,20 @@ judgement.
 
 **Ask. Verify. Approve. Repeat.**
 
+## What makes Jarvis different
+
+Jarvis is not a chat window pointed at your database. Three things hold, always:
+
+- **It acts as you.** Every question and every action runs under your own Frappe
+  and ERPNext permissions. Jarvis can never see or touch a record you could not
+  open yourself.
+- **Nothing important happens without you.** Reading and explaining happen
+  directly. Anything that writes, submits, or is hard to reverse waits for a
+  person to review and approve it, with the evidence in view.
+- **Your data stays on your bench.** Your ERP records never leave your server.
+  The AI reaches them only through a single, permission-checked door, never a
+  copy of your books.
+
 ## Features
 
 ### Ask your business in plain language
@@ -61,12 +75,8 @@ judgement.
 - Continue conversations, approvals, File Box work, and key business views from
   the mobile app.
 
-### Keep people in control
+### Control & administration
 
-- Jarvis follows each person's existing Frappe and ERPNext access. Asking
-  Jarvis does not grant access to a record the person could not otherwise open.
-- Reading and explanation can happen directly. Important or hard-to-reverse
-  actions always wait for a person.
 - Administrators may allow ordinary, reversible changes within a conversation;
   proposed work and its evidence remain visible for review.
 - Connect a supported chat subscription you already pay for or an approved API
