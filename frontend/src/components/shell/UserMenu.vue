@@ -111,54 +111,57 @@ function cookie(name) {
 }
 const fullName = cookie("full_name") || session.user || "User";
 
-// The upper "Menu" group (Settings, Support tickets, Switch-to-Desk, Change theme)
-// is chat-only. On the customer support rail those live elsewhere: Settings is an
-// admin/chat concern; Switch-to-Desk + Change theme are top-bar shortcut buttons
-// (SupportShell); and the way back to chat is the sidebar's "Jarvis chat" link. So
-// the support card's menu is just Log out.
+// The chat card's menu carries Settings, Support tickets and Switch-to-Desk; the
+// customer support rail drops those (Settings is an admin/chat concern; Switch-to-
+// Desk is a top-bar shortcut; the way back to chat is the sidebar's "Jarvis chat"
+// link). Change theme stays in BOTH menus (it is also a top-bar shortcut, exactly
+// like the chat header), so the support card is never a lone "Log out".
 const menuOptions = computed(() => {
-	const groups = [];
+	const menu = [];
 	if (props.variant !== "support") {
-		groups.push({
-			group: "Menu",
-			hideLabel: true,
-			items: [
-				{ label: "Settings", icon: "settings", onClick: () => shellStore.openSettings() },
-				// Support tickets -> the LIST (/support), gated on supportOn so it is
-				// never a dead link (the /support routes sit behind the same flags).
-				...(supportOn
-					? [
-							{
-								label: store.awaitingCount
-									? `Support tickets · ${store.awaitingCount}`
-									: "Support tickets",
-								icon: "life-buoy",
-								onClick: () => router.push({ name: "Support" }),
-							},
-					  ]
-					: []),
-				{
-					label: "Switch to Desk",
-					icon: "grid",
-					onClick: () => {
-						window.location.href = "/app";
-					},
-				},
-				{
-					label: "Change theme",
-					icon: effectiveDark.value ? "sun" : "moon",
-					onClick: () => toggleTheme(),
-				},
-			],
+		menu.push({
+			label: "Settings",
+			icon: "settings",
+			onClick: () => shellStore.openSettings(),
+		});
+		// Support tickets -> the LIST (/support), gated on supportOn so it is never a
+		// dead link (the /support routes sit behind the same flags).
+		if (supportOn) {
+			menu.push({
+				label: store.awaitingCount
+					? `Support tickets · ${store.awaitingCount}`
+					: "Support tickets",
+				icon: "life-buoy",
+				onClick: () => router.push({ name: "Support" }),
+			});
+		}
+		menu.push({
+			label: "Switch to Desk",
+			icon: "grid",
+			onClick: () => {
+				window.location.href = "/app";
+			},
 		});
 	}
-	groups.push({
-		group: "Danger",
-		hideLabel: true,
-		items: [
-			{ label: "Log out", icon: "log-out", theme: "red", onClick: () => session.logout() },
-		],
+	menu.push({
+		label: "Change theme",
+		icon: effectiveDark.value ? "sun" : "moon",
+		onClick: () => toggleTheme(),
 	});
-	return groups;
+	return [
+		{ group: "Menu", hideLabel: true, items: menu },
+		{
+			group: "Danger",
+			hideLabel: true,
+			items: [
+				{
+					label: "Log out",
+					icon: "log-out",
+					theme: "red",
+					onClick: () => session.logout(),
+				},
+			],
+		},
+	];
 });
 </script>
