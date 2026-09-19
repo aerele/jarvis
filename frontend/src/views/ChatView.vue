@@ -703,6 +703,7 @@
 							</div>
 						</button>
 					</div>
+					<CapabilityCatalog @select="onWelcomeSuggestion" />
 				</div>
 			</div>
 
@@ -4609,6 +4610,7 @@ import { renderMarkdown } from "@/markdown";
 import JvChart from "@/charts/JvChart.vue";
 import ConnectPhoneDialog from "@/components/ConnectPhoneDialog.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
+import CapabilityCatalog from "@/components/CapabilityCatalog.vue";
 import DraftPreview from "@/components/doc/DraftPreview.vue";
 import ActionError from "@/components/ActionError.vue";
 import Banner from "@/components/Banner.vue";
