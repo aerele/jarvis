@@ -27,6 +27,12 @@ export const setAutoApply = (conversation, value) =>
 // key).
 export const getChatUiSettings = () => call(CHAT + "get_chat_ui_settings");
 
+// Starter prompts for the empty new-chat screen: a few example asks, synthesised
+// server-side from the user's own recent chats (the same endpoint the desktop
+// SPA uses). Lives in user_settings_api, not the CHAT namespace.
+export const getPromptSuggestions = () =>
+	call("jarvis.chat.user_settings_api.get_prompt_suggestions");
+
 // An empty `conversation` is allowed: the backend creates (or focuses) the
 // user's empty conversation and returns its id as `conversation_id`, which
 // saves the new-chat round-trip before the very first send.
