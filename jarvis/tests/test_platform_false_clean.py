@@ -21,7 +21,7 @@ import json
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import agent_runs
+from jarvis.chat import agent_runs, agents_api
 
 LISTING = "Jarvis Agent Listing"
 INSTALLATION = "Jarvis Agent Installation"
@@ -418,6 +418,7 @@ class TestAdvisoryFindings(FrappeTestCase):
 		super().setUpClass()
 		frappe.set_user("Administrator")
 		cls.owner = _mk_user("adv-owner@example.com")
+		frappe.get_doc("User", cls.owner).add_roles("System Manager")  # for the list_findings gate
 		_mk_listing_adv()
 		cls.company = frappe.db.get_value("Company", {}, "name")
 		cls.inst = _mk_installation(cls.owner, slug=SLUG_ADV)
@@ -523,3 +524,21 @@ class TestAdvisoryFindings(FrappeTestCase):
 		cov, adv = agent_runs._listing_token_sets(SLUG_ADV)
 		self.assertEqual(adv, {TOK_ADV})  # stray_z dropped
 		self.assertEqual(cov, {TOK_A, TOK_B})
+
+	def test_list_findings_exposes_advisory_flag_and_count(self):
+		# the read API the Findings panel calls must carry the ``advisory`` flag per row + the
+		# advisory_count, so an advisory-only run never reads like real exceptions in the UI.
+		run = self._record(
+			{TOK_A: "evaluated", TOK_B: "evaluated"},
+			findings=[self._finding(TOK_ADV), self._finding(TOK_A, severity="warning")],
+		)
+		frappe.set_user(self.owner)
+		try:
+			res = agents_api.list_findings(run=run.name)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(res["total"], 2)
+		self.assertEqual(res["advisory_count"], 1)  # actionable (non-advisory) = total - 1
+		adv = [r for r in res["rows"] if r.get("advisory")]
+		self.assertEqual(len(adv), 1)
+		self.assertEqual(adv[0]["rule_id"], TOK_ADV)

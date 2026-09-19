@@ -2212,6 +2212,7 @@ def list_findings(
 		return {
 			"rows": [],
 			"total": 0,
+			"advisory_count": 0,
 			"has_more": False,
 			"start": start,
 			"page_length": pl,
@@ -2254,6 +2255,9 @@ def list_findings(
 	total = frappe.db.count(FINDING, filters=filters)
 	for sev in severity_counts:
 		severity_counts[sev] = frappe.db.count(FINDING, filters={**filters, "severity": sev})
+	# advisory findings are non-attesting; expose their count so the UI distinguishes an
+	# advisory-only run from one carrying real exceptions (non-advisory = total - advisory_count).
+	advisory_count = frappe.db.count(FINDING, filters={**filters, "advisory": 1})
 
 	rows = frappe.get_all(
 		FINDING,
@@ -2264,6 +2268,9 @@ def list_findings(
 			"agent",
 			"rule_id",
 			"severity",
+			# non-attesting advisory signal (RET-3/RET-6-class): the SPA badges it and excludes
+			# it from the actionable-exception count so an advisory-only run never reads clean.
+			"advisory",
 			# PP-1: the immutable result class + its class-conditional metadata ride on
 			# EVERY read row so the SPA can label the class beside the amount and mark a
 			# derived_candidate / legal_scenario as unconfirmed — a candidate must never
@@ -2320,6 +2327,7 @@ def list_findings(
 	return {
 		"rows": rows,
 		"total": total,
+		"advisory_count": advisory_count,
 		"has_more": start + len(rows) < total,
 		"start": start,
 		"page_length": pl,

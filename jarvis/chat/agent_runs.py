@@ -391,6 +391,7 @@ def _notify_owner_dashboard(
 	findings_count: int,
 	blocker_count: int,
 	coverage_note: str = "",
+	advisory_findings_count: int = 0,
 ) -> None:
 	"""Best-effort bell notification to the human owner that a run finished + a
 	dashboard is ready to open. Never raises."""
@@ -411,8 +412,13 @@ def _notify_owner_dashboard(
 				"doctype": "Notification Log",
 				"for_user": owner,
 				"type": "Alert",
-				"subject": f"{agent_title or 'Agent'} run {verb}: {findings_count} finding(s), "
-				f"{blocker_count} blocker(s)",
+				# advisory findings are non-attesting: the bell counts only ACTIONABLE
+				# (non-advisory) findings so an advisory-only run never reads like real exceptions;
+				# any advisory items are named separately.
+				"subject": f"{agent_title or 'Agent'} run {verb}: "
+				f"{max(0, findings_count - advisory_findings_count)} finding(s), "
+				f"{blocker_count} blocker(s)"
+				+ (f" (+{advisory_findings_count} advisory)" if advisory_findings_count else ""),
 				"email_content": "Your agent finished a run. Open its findings dashboard from the "
 				"run, or the Dashboards page.",
 				"document_type": DASHBOARD,
@@ -1090,6 +1096,7 @@ def record_delegate_run(
 			len(seen_fps),
 			counts.get("blocker", 0),
 			coverage_note,
+			advisory_findings_count=advisory_count,
 		)
 
 	# A8 (zero-trace): the per-run session bearer must not outlive the run.
