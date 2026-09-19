@@ -18,7 +18,7 @@
 					     Open Desk (parity with the chat surface's header). Each page's own
 					     actions render after, so the primary action keeps the far corner. -->
 					<Button
-						variant="ghost"
+						variant="outline"
 						size="sm"
 						:icon="effectiveDark ? 'sun' : 'moon'"
 						:tooltip="'Change theme (light / dark / system)'"
@@ -26,7 +26,7 @@
 						@click="toggleTheme"
 					/>
 					<Button
-						variant="ghost"
+						variant="outline"
 						size="sm"
 						icon="external-link"
 						:tooltip="'Open ERPNext Desk'"
