@@ -110,7 +110,9 @@ _EMPTY_SENTENCE = {
 }
 
 
-def _clean_attestation_allowed(result_state: str, findings_count, *, shadow: bool) -> bool:
+def _clean_attestation_allowed(
+	result_state: str, findings_count, *, advisory_findings_count=0, shadow: bool
+) -> bool:
 	"""R5-J1 TWO-CONDITION render gate for the "No exceptions were found" sentence
 	(and any equivalent clean/compliant attestation).
 
@@ -120,13 +122,23 @@ def _clean_attestation_allowed(result_state: str, findings_count, *, shadow: boo
 	ONLY when BOTH hold:
 
 	  1. ``result_state == evaluated_clean`` (every required check evaluated), AND
-	  2. the run persisted ZERO findings (``findings_count == 0``).
+	  2. the run persisted ZERO NON-ADVISORY findings
+	     (``findings_count − advisory_findings_count == 0``).
 
-	A run that evaluated full coverage but DID persist findings therefore can never
+	Advisory findings (RET-3/RET-6-class signals bound to a listing ``advisory_token``,
+	never a required-coverage token) are visible worklist items but NON-attesting: they
+	are EXEMPT from this gate, so a run that surfaced only advisory items may still read
+	"no (statutory) exceptions". Any real (non-advisory) finding blocks it — a mis-count
+	that drove ``advisory_findings_count`` above ``findings_count`` leaves the difference
+	non-zero and therefore still SUPPRESSES (fail-closed). ``advisory_findings_count``
+	defaults 0 so an agent with no advisory tokens is byte-identical to the old gate.
+
+	A run that evaluated full coverage but DID persist a real finding therefore can never
 	read "no exceptions", closing the false-clean render R4-P0-03/R5 targeted. The
 	sentence is also unconditionally suppressed while the installation is in
 	shadow/preview (PP-4 — a preview issues no outward attestation)."""
-	return not shadow and result_state == cr.CLEAN_RUN_STATE and int(findings_count or 0) == 0
+	non_advisory = int(findings_count or 0) - int(advisory_findings_count or 0)
+	return not shadow and result_state == cr.CLEAN_RUN_STATE and non_advisory == 0
 
 
 def _fallback_dashboard_html(
