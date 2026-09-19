@@ -889,6 +889,26 @@ _DESTRUCTIVE = frozenset(
 # default-unrestricted allowlist under auto-apply + a prompt injection would be
 # an unconfirmed arbitrary whitelisted method call, so it never fast-paths.
 _AUTO_APPLYABLE = frozenset({"create_doc", "update_doc"})
+
+
+def _gating_badge(tool: str) -> str:
+	"""Safety badge for the in-product capability catalog.
+
+	Classifies a tool's DEFAULT single-call confirmation behaviour, derived from
+	the SAME frozensets that gate in ``_run_tool`` so a badge can never disagree
+	with the default gate. NOT an absolute guarantee: auto-apply, armed macros,
+	and skill "Approve & run" can run some tools uncarded - the catalog legend
+	says so. Total over any string.
+	"""
+	if tool not in _WRITE_TOOLS:
+		return "reads_only"
+	if tool in _DESTRUCTIVE or (tool in _GATED_WRITES and tool not in _AUTO_APPLYABLE):
+		return "always_asks"
+	if tool in _AUTO_APPLYABLE:
+		return "asks_to_approve"
+	return "writes_directly"
+
+
 # Armed-skip (macro skip-confirmation): an admin-armed macro (Jarvis Macro
 # .skip_confirmation, stamped onto its run conversation's skip_confirmation) runs
 # these WITHOUT a confirmation card - the BROAD covered set, far wider than the
