@@ -154,6 +154,8 @@ export const setSidebarOrder = (order) =>
 // titles. Returns the server-side CACHE (and quietly queues a refresh when it is
 // stale) — never generates inline, so this is a cheap read. {ok, data:{suggestions:[]}}.
 export const getPromptSuggestions = () => call(US + "get_prompt_suggestions");
+export const getCapabilityCatalog = () => call(US + "get_capability_catalog");
+export const logCapabilityPick = (title) => call(US + "log_capability_pick", { title });
 // Jarvis Admin (or System Manager) only — server re-checks independently of
 // the client's window.is_jarvis_admin gate.
 export const adminListUserUsage = () => call(US + "admin_list_user_usage");
