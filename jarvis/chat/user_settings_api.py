@@ -420,3 +420,42 @@ def get_prompt_suggestions() -> dict:
 		# cache stays as it is until the next visit.
 		frappe.logger("jarvis.chat.suggestions").debug("refresh enqueue failed", exc_info=True)
 	return {"ok": True, "data": {"suggestions": suggestions.read(user)}}
+
+
+@frappe.whitelist()
+def get_capability_catalog() -> dict:
+	"""Curated "What can I ask Jarvis?" task cards for the empty-chat catalog.
+
+	Static content (``jarvis._task_card_catalog``) with a SAFETY BADGE derived
+	live from ``jarvis.api._gating_badge`` at serve time - never stored - so the
+	badge can never disagree with the default gate. The internal tool mapping is
+	NOT sent to the client. Site-wide and cheap (a few set lookups); no cache.
+	"""
+	require_jarvis_access()
+	from jarvis import _task_card_catalog
+	from jarvis.api import _gating_badge  # function-local: api.py must not import chat/ at load
+
+	cards = [
+		{
+			"group": c["group"],
+			"title": c["title"],
+			"prompt": c["prompt"],
+			"badge": _gating_badge(c["tools"][0]),
+		}
+		for c in _task_card_catalog.TASK_CARDS
+	]
+	frappe.logger("jarvis.capability_catalog").info({"event": "opened", "user": frappe.session.user})
+	return {"ok": True, "data": {"cards": cards}}
+
+
+@frappe.whitelist()
+def log_capability_pick(title: str) -> dict:
+	"""Telemetry: a capability card was tapped. Logs only (no DB write) so we can
+	tell whether the catalog drives real usage. ``title`` is coerced defensively -
+	``from __future__ import annotations`` disables the whitelist arg-type gate.
+	"""
+	require_jarvis_access()
+	frappe.logger("jarvis.capability_catalog").info(
+		{"event": "picked", "title": str(title or "")[:120], "user": frappe.session.user}
+	)
+	return {"ok": True}
