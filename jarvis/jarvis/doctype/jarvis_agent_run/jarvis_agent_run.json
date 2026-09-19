@@ -22,6 +22,7 @@
   "finished_at",
   "conversation",
   "findings_count",
+  "advisory_findings_count",
   "blocker_count",
   "error",
   "coverage_note",
@@ -93,6 +94,13 @@
    "fieldtype": "Int",
    "label": "Findings Count",
    "in_list_view": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "advisory_findings_count",
+   "fieldtype": "Int",
+   "label": "Advisory Findings Count",
+   "description": "Count of this run's findings that are advisory (non-attesting). The clean-attestation gate counts only findings_count - advisory_findings_count."
   },
   {
    "default": "0",

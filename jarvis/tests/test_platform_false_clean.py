@@ -66,11 +66,11 @@ def _mk_listing() -> str:
 	return SLUG
 
 
-def _mk_installation(owner: str) -> object:
-	name = frappe.db.get_value(INSTALLATION, {"agent": SLUG, "owner": owner}, "name")
+def _mk_installation(owner: str, slug: str = SLUG) -> object:
+	name = frappe.db.get_value(INSTALLATION, {"agent": slug, "owner": owner}, "name")
 	if name:
 		return frappe.get_doc(INSTALLATION, name)
-	doc = frappe.get_doc({"doctype": INSTALLATION, "agent": SLUG, "run_as_user": owner, "reviewer": owner})
+	doc = frappe.get_doc({"doctype": INSTALLATION, "agent": slug, "run_as_user": owner, "reviewer": owner})
 	doc.owner = owner
 	doc.flags.ignore_permissions = True
 	doc.insert(ignore_permissions=True)
@@ -78,11 +78,11 @@ def _mk_installation(owner: str) -> object:
 	return frappe.get_doc(INSTALLATION, doc.name)
 
 
-def _mk_run(owner: str) -> object:
+def _mk_run(owner: str, slug: str = SLUG) -> object:
 	doc = frappe.get_doc(
 		{
 			"doctype": RUN,
-			"agent": SLUG,
+			"agent": slug,
 			"trigger": "manual",
 			"status": "running",
 			"started_at": frappe.utils.now(),
@@ -95,7 +95,7 @@ def _mk_run(owner: str) -> object:
 	return doc
 
 
-def _wipe_residue() -> None:
+def _wipe_residue(slug: str = SLUG) -> None:
 	"""Slug-scoped teardown: remove every Run / Finding / Provenance / Dashboard row
 	this module persisted under its test-agent slug, so run-persistence residue never
 	accrues on the shared site. Belt-and-suspenders alongside the ``frappe.flags.in_test``
@@ -104,13 +104,13 @@ def _wipe_residue() -> None:
 	for deleting this module's OWN test residue)."""
 	dashboards = [
 		d
-		for d in frappe.get_all(RUN, filters={"agent": SLUG}, pluck="dashboard", ignore_permissions=True)
+		for d in frappe.get_all(RUN, filters={"agent": slug}, pluck="dashboard", ignore_permissions=True)
 		if d
 	]
-	frappe.db.delete(RUN, {"agent": SLUG})
-	frappe.db.delete(FINDING, {"agent": SLUG})
-	frappe.db.delete(PROVENANCE, {"agent": SLUG})
-	frappe.db.delete(ACTIVITY, {"agent": SLUG})
+	frappe.db.delete(RUN, {"agent": slug})
+	frappe.db.delete(FINDING, {"agent": slug})
+	frappe.db.delete(PROVENANCE, {"agent": slug})
+	frappe.db.delete(ACTIVITY, {"agent": slug})
 	if dashboards:
 		frappe.db.delete(
 			"Notification Log", {"document_type": DASHBOARD, "document_name": ["in", dashboards]}
@@ -382,3 +382,144 @@ class TestPP3CoverageNoteIsCustomerText(FrappeTestCase):
 		# the customer remediation sentence, NOT the internal enum slug
 		self.assertIn("Configure", note)
 		self.assertNotIn("configuration_missing", note)
+
+
+# --------------------------------------------------------------------------- #
+# Advisory findings — non-attesting worklist signals (the token split + the
+# advisory-exempt clean gate). advisory_tokens is the SUBSET of rule_tokens that
+# is valid for findings but NOT required-coverage, so it never gates the verdict
+# and is exempt from the "no exceptions" attestation.
+# --------------------------------------------------------------------------- #
+SLUG_ADV = "platform-advisory-test-agent"
+TOK_ADV = "tok_adv_x"
+
+
+def _mk_listing_adv() -> str:
+	if not frappe.db.exists(LISTING, SLUG_ADV):
+		frappe.get_doc(
+			{
+				"doctype": LISTING,
+				"agent_slug": SLUG_ADV,
+				"title": "Platform Advisory Test Agent",
+				# rule_tokens = coverage ∪ advisory; TOK_ADV is the advisory (non-gating) subset.
+				"rule_tokens": json.dumps([TOK_A, TOK_B, TOK_ADV]),
+				"advisory_tokens": json.dumps([TOK_ADV]),
+				"doctypes_required": json.dumps([]),
+			}
+		).insert(ignore_permissions=True)
+	else:
+		frappe.db.set_value(LISTING, SLUG_ADV, "advisory_tokens", json.dumps([TOK_ADV]))
+	return SLUG_ADV
+
+
+class TestAdvisoryFindings(FrappeTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		cls.owner = _mk_user("adv-owner@example.com")
+		_mk_listing_adv()
+		cls.company = frappe.db.get_value("Company", {}, "name")
+		cls.inst = _mk_installation(cls.owner, slug=SLUG_ADV)
+		frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		_wipe_residue(slug=SLUG_ADV)
+		super().tearDownClass()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_mk_listing_adv()  # restore advisory_tokens (a test may mutate it)
+		# isolate each test: clear this slug's open findings so a prior test's finding never
+		# dedupes into (and re-homes) this test's finding by fingerprint (agent+token+ref).
+		frappe.db.delete(FINDING, {"agent": SLUG_ADV})
+		frappe.db.commit()
+
+	def _record(self, coverage, findings=None):
+		run = _mk_run(self.owner, slug=SLUG_ADV)
+		agent_runs.record_delegate_run(
+			run, self.inst, findings or [], coverage=coverage, scope={"company": self.company}
+		)
+		run.reload()
+		return run
+
+	def _finding(self, token, severity="note"):
+		return {
+			"token": token,
+			"ref_doctype": "Company",
+			"ref_name": self.company,
+			"severity": severity,
+			"result_class": "observed_fact",
+			"note": f"{token} signal",
+		}
+
+	def test_coverage_excludes_advisory_tokens(self):
+		cov, adv = agent_runs._listing_token_sets(SLUG_ADV)
+		self.assertEqual(cov, {TOK_A, TOK_B})  # coverage = rule_tokens − advisory_tokens
+		self.assertEqual(adv, {TOK_ADV})
+		self.assertEqual(agent_runs._listing_rule_tokens(SLUG_ADV), {TOK_A, TOK_B})
+		self.assertEqual(agent_runs._listing_advisory_tokens(SLUG_ADV), {TOK_ADV})
+
+	def test_advisory_never_forces_partial(self):
+		# both COVERAGE tokens evaluated; the advisory token is NOT required, so it never forces
+		# partial by being absent from coverage. Zero findings => clean.
+		run = self._record({TOK_A: "evaluated", TOK_B: "evaluated"})
+		self.assertEqual(run.result_state, "evaluated_clean")
+		blob = json.loads(run.coverage_json)
+		self.assertEqual(blob["required_tokens"], sorted([TOK_A, TOK_B]))  # advisory excluded
+
+	def test_advisory_finding_stamped_counted_and_exempt(self):
+		run = self._record({TOK_A: "evaluated", TOK_B: "evaluated"}, findings=[self._finding(TOK_ADV)])
+		# the coverage verdict is UNAFFECTED by the advisory finding:
+		self.assertEqual(run.result_state, "evaluated_clean")
+		self.assertEqual(run.findings_count, 1)
+		self.assertEqual(run.advisory_findings_count, 1)
+		fnd = frappe.get_all(FINDING, filters={"run": run.name}, fields=["rule_id", "advisory"])
+		self.assertEqual(len(fnd), 1)
+		self.assertEqual(fnd[0]["advisory"], 1)
+		# the clean sentence is ALLOWED — non-advisory count is 0:
+		self.assertTrue(
+			agent_runs._clean_attestation_allowed(
+				run.result_state,
+				run.findings_count,
+				advisory_findings_count=run.advisory_findings_count,
+				shadow=False,
+			)
+		)
+
+	def test_real_finding_alongside_advisory_blocks_clean(self):
+		run = self._record(
+			{TOK_A: "evaluated", TOK_B: "evaluated"},
+			findings=[self._finding(TOK_ADV), self._finding(TOK_A, severity="warning")],
+		)
+		self.assertEqual(run.findings_count, 2)
+		self.assertEqual(run.advisory_findings_count, 1)
+		# a real (non-advisory) finding present => NO clean sentence:
+		self.assertFalse(
+			agent_runs._clean_attestation_allowed(
+				run.result_state,
+				run.findings_count,
+				advisory_findings_count=run.advisory_findings_count,
+				shadow=False,
+			)
+		)
+
+	def test_advisory_blocker_severity_is_coerced_off_blocker_count(self):
+		run = self._record(
+			{TOK_A: "evaluated", TOK_B: "evaluated"},
+			findings=[self._finding(TOK_ADV, severity="blocker")],
+		)
+		self.assertEqual(run.advisory_findings_count, 1)
+		self.assertEqual(run.blocker_count, 0)  # an advisory blocker is coerced away
+		sev = frappe.db.get_value(FINDING, {"run": run.name}, "severity")
+		self.assertNotEqual(sev, "blocker")
+
+	def test_stray_advisory_token_dropped_by_subset_guard(self):
+		# an advisory_tokens id NOT in rule_tokens is dropped (⊆ guard), so it can never subtract
+		# a coverage token it does not belong to.
+		frappe.db.set_value(LISTING, SLUG_ADV, "advisory_tokens", json.dumps([TOK_ADV, "stray_z"]))
+		cov, adv = agent_runs._listing_token_sets(SLUG_ADV)
+		self.assertEqual(adv, {TOK_ADV})  # stray_z dropped
+		self.assertEqual(cov, {TOK_A, TOK_B})

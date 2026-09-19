@@ -148,6 +148,7 @@ def _fallback_dashboard_html(
 	coverage_note: str,
 	*,
 	result_state: str = "partial",
+	advisory_findings_count: int = 0,
 	coverage_notes: list | None = None,
 	shadow: bool = False,
 	integrity_digest: str | None = None,
@@ -222,7 +223,9 @@ def _fallback_dashboard_html(
 				"Preview (shadow) run - findings are visible to the reviewer only; "
 				"no clean or compliant attestation is issued while this capability is in preview."
 			)
-		elif _clean_attestation_allowed(result_state, total, shadow=shadow):
+		elif _clean_attestation_allowed(
+			result_state, total, advisory_findings_count=advisory_findings_count, shadow=shadow
+		):
 			sentence = _EMPTY_SENTENCE["evaluated_clean"]
 		else:
 			# Not both conditions met: never the clean sentence. An evaluated_clean
@@ -499,17 +502,11 @@ def _remediation_text(reason_code: str, detail: str = "") -> str:
 	return cr.remediation_for(reason_code, **{key: subject})
 
 
-def _listing_rule_tokens(agent: str) -> set:
-	"""The agent's DECLARED opaque rule-token manifest (``Jarvis Agent Listing.
-	rule_tokens``) — the AUTHORITATIVE required-check set for the PP-2 coverage
-	verdict. Sourcing the required tokens from the listing here (NOT from the
-	writeback-supplied coverage keys) is what stops a delegate under-reporting its
-	coverage to earn a false ``evaluated_clean``: a declared token the run never
-	returns ``evaluated`` is un-evaluated required coverage. Empty for operators /
-	legacy agents (no rule tokens -> no coverage bar to fail)."""
+def _parse_token_json(raw) -> set:
+	"""Parse an id-only token JSON array from a listing field into a set of str tokens;
+	NULL / empty / malformed / non-list -> empty set (fail-safe, never raises)."""
 	import json as _json
 
-	raw = frappe.db.get_value(LISTING, agent, "rule_tokens")
 	if not raw:
 		return set()
 	try:
@@ -517,6 +514,39 @@ def _listing_rule_tokens(agent: str) -> set:
 	except Exception:
 		return set()
 	return {str(t) for t in parsed if t} if isinstance(parsed, list) else set()
+
+
+def _listing_token_sets(agent: str) -> tuple[set, set]:
+	"""``(coverage_tokens, advisory_tokens)`` for the agent's ``Jarvis Agent Listing``.
+
+	``coverage_tokens = rule_tokens − advisory_tokens`` is the AUTHORITATIVE PP-2
+	required-check set (the tokens that gate the clean/partial verdict). ``advisory_tokens``
+	is the NON-gating subset — valid for findings but exempt from the coverage verdict AND
+	the clean-attestation count. Advisory is intersected with rule_tokens here (the ⊆ guard),
+	so a stray / mis-synced advisory id can NEVER subtract a coverage token it does not belong
+	to (defence in depth beside the export-time disjointness assertion). Empty for operators /
+	legacy agents (no rule tokens -> no coverage bar to fail; advisory_tokens defaults []
+	so every existing agent's coverage set is byte-identical to its rule_tokens)."""
+	row = frappe.db.get_value(LISTING, agent, ["rule_tokens", "advisory_tokens"], as_dict=True) or {}
+	rule = _parse_token_json(row.get("rule_tokens"))
+	advisory = _parse_token_json(row.get("advisory_tokens")) & rule
+	return (rule - advisory, advisory)
+
+
+def _listing_rule_tokens(agent: str) -> set:
+	"""The agent's PP-2 required-coverage set — ``rule_tokens − advisory_tokens`` (see
+	``_listing_token_sets``). Sourcing the required tokens from the listing (NOT from the
+	writeback-supplied coverage keys) is what stops a delegate under-reporting its coverage to
+	earn a false ``evaluated_clean``. Advisory tokens are DELIBERATELY excluded here — they are
+	non-attesting (a finding, never a required check)."""
+	return _listing_token_sets(agent)[0]
+
+
+def _listing_advisory_tokens(agent: str) -> set:
+	"""The agent's advisory (non-attesting) token set — see ``_listing_token_sets``. A finding
+	whose token is in here is stamped ``advisory`` and exempted from the clean-attestation gate
+	and ``blocker_count``."""
+	return _listing_token_sets(agent)[1]
 
 
 def _coverage_summary(coverage: dict) -> tuple[set, list]:
@@ -689,6 +719,10 @@ def record_delegate_run(
 	shadow = (inst.get("activation_state") or "shadow") == "shadow"
 	visibility_owner = _visibility_owner(inst)
 	agent = inst.agent
+	# PP-2 coverage set (gates the verdict) + the advisory set (non-attesting findings),
+	# read ONCE. A finding whose token is advisory is stamped ``advisory`` and exempted
+	# from the clean gate + blocker_count; advisory tokens are excluded from required_tokens.
+	required_coverage_tokens, advisory_token_set = _listing_token_sets(agent)
 	coverage = coverage or {}
 	scope = scope or {}
 	dropped = dropped or []
@@ -704,10 +738,24 @@ def record_delegate_run(
 	seen_fps = set(by_fp)
 
 	counts = {"blocker": 0, "warning": 0, "note": 0}
+	advisory_count = 0
 	for fp, f in by_fp.items():
 		token = f.get("token") or f.get("rule_id")
+		# ADVISORY is derived from the listing's advisory_tokens (the trusted synced manifest),
+		# NEVER from the model's payload — a delegate cannot self-declare a finding non-attesting.
+		advisory = token in advisory_token_set
 		sev = f.get("severity") or "note"
+		# An advisory finding is non-attesting; it must never carry blocker severity (which would
+		# leak into blocker_count / the must-block badge). Coerce a mislabelled advisory blocker
+		# down to warning and log it (defence beside the clean-gate exemption).
+		if advisory and sev == "blocker":
+			frappe.logger("jarvis.agent_runs").warning(
+				f"advisory finding {agent}/{token} carried blocker severity; coerced to warning"
+			)
+			sev = "warning"
 		counts[sev] = counts.get(sev, 0) + 1
+		if advisory:
+			advisory_count += 1
 		note = f.get("note") or f.get("detail") or ""
 
 		existing = frappe.db.get_value(
@@ -735,6 +783,9 @@ def record_delegate_run(
 				"rule_id": token or "",
 				"severity": sev,
 				"result_class": result_class,
+				# derived from the listing advisory_tokens (never model-supplied) — a
+				# non-attesting worklist signal, exempt from the clean gate + blocker_count.
+				"advisory": 1 if advisory else 0,
 				# A2: authored, outcome-level text only (the evaluator's fixed-template
 				# note). No as-coded threshold / carve-out text.
 				"title": note[:140],
@@ -805,7 +856,9 @@ def record_delegate_run(
 	# own bar. A declared token the run never returned ``evaluated`` (absent from,
 	# or not_evaluable in, the coverage payload) is un-evaluated required coverage:
 	# it forces the run partial so an empty/narrow manifest can never read as clean.
-	required_tokens = _listing_rule_tokens(agent)
+	# ``required_coverage_tokens`` = rule_tokens − advisory_tokens (computed once above); advisory
+	# tokens are deliberately NOT required coverage, so an advisory check never forces partial.
+	required_tokens = required_coverage_tokens
 	required_unevaluated = required_tokens - evaluated_tokens
 
 	if not truncated and not wm_drift and not scoped and not row_shortfall and evaluated_tokens:
@@ -927,6 +980,9 @@ def record_delegate_run(
 		"status": status,
 		"result_state": result_state,
 		"findings_count": len(seen_fps),
+		# advisory subset of findings_count (same post-dedup by_fp basis) — the clean gate
+		# counts only findings_count − advisory_findings_count.
+		"advisory_findings_count": advisory_count,
 		"blocker_count": counts.get("blocker", 0),
 		"finished_at": frappe.utils.now(),
 		"coverage_note": coverage_note[:140],
@@ -983,6 +1039,7 @@ def record_delegate_run(
 				counts,
 				coverage_note,
 				result_state=result_state,
+				advisory_findings_count=advisory_count,
 				coverage_notes=coverage_notes,
 				# PP-4: a shadow run's fallback artifact issues no outward clean/compliant
 				# attestation. PP-6: stamp the evaluator integrity digest in-body.
