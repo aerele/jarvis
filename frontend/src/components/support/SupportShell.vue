@@ -14,6 +14,25 @@
 			<header class="jv-sup-bar">
 				<Breadcrumbs class="min-w-0" :items="crumbs" />
 				<div class="jv-sup-right">
+					<!-- Top-bar shortcuts, uniform on every support page: theme toggle +
+					     Open Desk (parity with the chat surface's header). Each page's own
+					     actions render after, so the primary action keeps the far corner. -->
+					<Button
+						variant="ghost"
+						size="sm"
+						:icon="effectiveDark ? 'sun' : 'moon'"
+						:tooltip="'Change theme (light / dark / system)'"
+						aria-label="Change theme"
+						@click="toggleTheme"
+					/>
+					<Button
+						variant="ghost"
+						size="sm"
+						icon="external-link"
+						:tooltip="'Open ERPNext Desk'"
+						aria-label="Open ERPNext Desk"
+						@click="openDesk"
+					/>
 					<slot name="actions" />
 				</div>
 			</header>
@@ -38,9 +57,9 @@
 <script setup>
 // SupportShell is NOT a jv-root itself: the rail + bar are painted in frappe-ui
 // tokens to match the app shell, and the jv palette is applied only around the
-// chat-surface content (see chatSurface). Brand + Desk-open + chat navigation now
-// live in SupportSidebar.
-import { Breadcrumbs } from "frappe-ui";
+// chat-surface content (see chatSurface). Brand + chat navigation live in
+// SupportSidebar; the theme + Open-Desk shortcuts live in this top bar.
+import { Breadcrumbs, Button } from "frappe-ui";
 import SupportSidebar from "@/components/support/SupportSidebar.vue";
 import { useJarvisTheme } from "@/theme";
 
@@ -52,7 +71,12 @@ defineProps({
 	chatSurface: { type: Boolean, default: false },
 });
 
-const { effectiveDark, paletteVars } = useJarvisTheme();
+const { effectiveDark, paletteVars, toggleTheme } = useJarvisTheme();
+
+// Open ERPNext Desk in a new tab (same behavior as the chat header's openErpDesk).
+function openDesk() {
+	window.open("/app", "_blank");
+}
 </script>
 
 <style scoped>

@@ -111,78 +111,54 @@ function cookie(name) {
 }
 const fullName = cookie("full_name") || session.user || "User";
 
-// Cross-surface link: from the support rail -> back to chat (we're already in
-// support, so a "Support" link is pointless there). The chat-side "Support" entry
-// used to live here too, but it now lives in ChatView's header icon button
-// instead - keeping both would show Support twice on the chat side.
-const crossItem = computed(() => {
-	if (props.variant === "support") {
-		return {
-			label: `Switch to ${agentName} chat`,
-			icon: "message-circle",
-			onClick: () => router.push({ name: "Chat" }),
-		};
-	}
-	return null;
-});
-
-const menuOptions = computed(() => [
-	{
-		group: "Menu",
-		hideLabel: true,
-		items: [
-			// The app/LLM Settings dialog is an admin/chat concern — omit it on the
-			// customer support rail (variant "support").
-			...(props.variant === "support"
-				? []
-				: [
-						{
-							label: "Settings",
-							icon: "settings",
-							onClick: () => shellStore.openSettings(),
-						},
-				  ]),
-			// Support tickets -> the LIST (/support). Distinct from ChatView's header
-			// headset icon, which opens a NEW ticket pre-filled with the current chat;
-			// this entry is the way back to existing tickets. Chat variant only (the
-			// support rail reaches its own list), and gated on supportOn because the
-			// /support routes sit behind supportGuard on the same flags — so it is
-			// never a dead link that bounces the user back to Chat.
-			...(props.variant === "support" || !supportOn
-				? []
-				: [
-						{
-							// Count flag mirrors the chat header's pill (ChatView.vue's
-							// jv-support-btn), so opening this menu confirms where the
-							// waiting reply is.
-							label: store.awaitingCount
-								? `Support tickets · ${store.awaitingCount}`
-								: "Support tickets",
-							icon: "life-buoy",
-							onClick: () => router.push({ name: "Support" }),
-						},
-				  ]),
-			...(crossItem.value ? [crossItem.value] : []),
-			{
-				label: "Switch to Desk",
-				icon: "grid",
-				onClick: () => {
-					window.location.href = "/app";
+// The upper "Menu" group (Settings, Support tickets, Switch-to-Desk, Change theme)
+// is chat-only. On the customer support rail those live elsewhere: Settings is an
+// admin/chat concern; Switch-to-Desk + Change theme are top-bar shortcut buttons
+// (SupportShell); and the way back to chat is the sidebar's "Jarvis chat" link. So
+// the support card's menu is just Log out.
+const menuOptions = computed(() => {
+	const groups = [];
+	if (props.variant !== "support") {
+		groups.push({
+			group: "Menu",
+			hideLabel: true,
+			items: [
+				{ label: "Settings", icon: "settings", onClick: () => shellStore.openSettings() },
+				// Support tickets -> the LIST (/support), gated on supportOn so it is
+				// never a dead link (the /support routes sit behind the same flags).
+				...(supportOn
+					? [
+							{
+								label: store.awaitingCount
+									? `Support tickets · ${store.awaitingCount}`
+									: "Support tickets",
+								icon: "life-buoy",
+								onClick: () => router.push({ name: "Support" }),
+							},
+					  ]
+					: []),
+				{
+					label: "Switch to Desk",
+					icon: "grid",
+					onClick: () => {
+						window.location.href = "/app";
+					},
 				},
-			},
-			{
-				label: "Change theme",
-				icon: effectiveDark.value ? "sun" : "moon",
-				onClick: () => toggleTheme(),
-			},
-		],
-	},
-	{
+				{
+					label: "Change theme",
+					icon: effectiveDark.value ? "sun" : "moon",
+					onClick: () => toggleTheme(),
+				},
+			],
+		});
+	}
+	groups.push({
 		group: "Danger",
 		hideLabel: true,
 		items: [
 			{ label: "Log out", icon: "log-out", theme: "red", onClick: () => session.logout() },
 		],
-	},
-]);
+	});
+	return groups;
+});
 </script>
