@@ -174,6 +174,12 @@ export const adminSetUserModelLimit = (user, model, monthlyTokenLimit) =>
 		monthly_token_limit: monthlyTokenLimit,
 	});
 export const adminSyncUsage = () => call(US + "admin_sync_usage");
+// Manager agent-audit trail (Jarvis Admin only; server re-checks). Metadata-only
+// rows of what the agent wrote to ERP data — never conversation content.
+// opts = { actor?, outcome?, start?, page_length? }.
+export const adminListAgentWrites = (opts) => call(US + "admin_list_agent_writes", opts || {});
+export const adminAgentWriteSummary = (days) =>
+	call(US + "admin_agent_write_summary", days ? { days } : {});
 
 // --- Whitelabel branding (tenant-admin only; server re-checks) ---
 const BR = "jarvis.branding.";
