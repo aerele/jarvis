@@ -2082,6 +2082,7 @@ _RUN_LIST_FIELDS = [
 	"finished_at",
 	"conversation",
 	"findings_count",
+	"advisory_findings_count",
 	"blocker_count",
 	"error",
 	"coverage_note",

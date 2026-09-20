@@ -74,13 +74,22 @@
 									written
 								</div>
 								<div v-else class="mt-1 truncate text-sm text-ink-gray-5">
-									{{ row.findings_count || 0 }} finding{{
-										(row.findings_count || 0) === 1 ? "" : "s"
+									<!-- ACTIONABLE (non-advisory) findings: advisory items are
+									     non-attesting and counted separately so an advisory-only
+									     run never reads like real exceptions. -->
+									{{ (row.findings_count || 0) - (row.advisory_findings_count || 0) }}
+									finding{{
+										(row.findings_count || 0) - (row.advisory_findings_count || 0) === 1
+											? ""
+											: "s"
 									}}
 									<span v-if="row.blocker_count" class="text-ink-red-4">
 										· {{ row.blocker_count }} blocker{{
 											row.blocker_count === 1 ? "" : "s"
 										}}
+									</span>
+									<span v-if="row.advisory_findings_count" class="text-ink-blue-3">
+										· {{ row.advisory_findings_count }} advisory
 									</span>
 								</div>
 								<!-- jarvis#1062 P1-7 (production-readiness audit): failed and
