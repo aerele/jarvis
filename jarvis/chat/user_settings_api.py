@@ -19,7 +19,6 @@ import json
 import frappe
 from frappe.utils import cint, sbool
 
-from jarvis.agent_audit import AGENT_WRITE_FIELDS, OUTCOMES
 from jarvis.chat import agent_session_pool, usage
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.permissions import require_jarvis_access, require_jarvis_admin
@@ -252,71 +251,6 @@ def admin_list_user_usage() -> dict:
 			}
 		)
 	return {"ok": True, "data": out}
-
-
-_AGENT_WRITE_PAGE_CAP = 200
-
-
-@frappe.whitelist()
-def admin_list_agent_writes(
-	actor: str | None = None,
-	outcome: str | None = None,
-	start: int = 0,
-	page_length: int = 50,
-) -> dict:
-	"""Team-wide, read-only feed of what the agent WROTE to ERP data: one
-	metadata-only row per executed / failed / discarded write, newest first.
-	Admins only. Rows carry NO conversation content (the ``Jarvis Agent Write``
-	doctype has no such columns) — a manager sees who / what-tool / when /
-	outcome / target and follows the record link to the native ``Version`` diff.
-	``actor`` is a free-text substring search over the user id OR display name;
-	an unknown ``outcome`` is ignored (returns all), matching the pane's dropdown.
-	Paginated with a ``+1`` look-ahead for ``has_more``."""
-	require_jarvis_admin()
-	filters: dict = {}
-	or_filters = None
-	actor = _s(actor)
-	if actor:
-		# The pane's "Person" box is a search field, not an exact-id picker, so
-		# match the User id OR the display name (substring) — the agents_api
-		# person-search convention.
-		or_filters = [["actor", "like", f"%{actor}%"], ["actor_name", "like", f"%{actor}%"]]
-	outcome = _s(outcome)
-	if outcome in OUTCOMES:
-		filters["outcome"] = outcome
-	start = max(0, cint(start))
-	page_length = max(1, min(_AGENT_WRITE_PAGE_CAP, cint(page_length) or 50))
-	rows = frappe.get_all(
-		"Jarvis Agent Write",
-		filters=filters,
-		or_filters=or_filters,
-		fields=list(AGENT_WRITE_FIELDS),
-		order_by="at desc, name desc",
-		limit_start=start,
-		limit_page_length=page_length + 1,
-	)
-	has_more = len(rows) > page_length
-	return {"ok": True, "data": {"rows": rows[:page_length], "has_more": has_more}}
-
-
-@frappe.whitelist()
-def admin_agent_write_summary(days: int = 7) -> dict:
-	"""Headline stats for the audit pane's summary strip: over the last ``days``
-	(default 7, clamped 1–365), how many writes actually landed (``applied``), how
-	many failed, and across how many distinct actors. Admins only. Cheap aggregates
-	on the indexed ``at`` / ``outcome`` columns (run once per pane load, never per
-	row). ``writes`` counts ``applied`` only — a discarded/failed row never changed
-	ERP data, so counting it as a "write" would overstate what a manager acts on."""
-	require_jarvis_admin()
-	days = max(1, min(365, cint(days) or 7))
-	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-days)
-	base = {"at": [">=", cutoff]}
-	writes = frappe.db.count("Jarvis Agent Write", {**base, "outcome": "applied"})
-	failed = frappe.db.count("Jarvis Agent Write", {**base, "outcome": "failed"})
-	actors = len(
-		{r.actor for r in frappe.get_all("Jarvis Agent Write", filters=base, fields=["actor"], distinct=True)}
-	)
-	return {"ok": True, "data": {"days": days, "writes": writes, "failed": failed, "actors": actors}}
 
 
 @frappe.whitelist()

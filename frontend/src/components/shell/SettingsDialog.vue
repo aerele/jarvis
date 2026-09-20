@@ -162,9 +162,6 @@ const AiModelsPane = defineAsyncComponent(() => import("@/components/settings/Ai
 const UsageAdminPane = defineAsyncComponent(() =>
 	import("@/components/settings/UsageAdminPane.vue")
 );
-const AgentAuditPane = defineAsyncComponent(() =>
-	import("@/components/settings/AgentAuditPane.vue")
-);
 const BrandingPane = defineAsyncComponent(() => import("@/components/settings/BrandingPane.vue"));
 const PdfTemplatesPane = defineAsyncComponent(() =>
 	import("@/components/settings/PdfTemplatesPane.vue")
@@ -190,7 +187,6 @@ const PANES = {
 	branding: BrandingPane,
 	pdftemplates: PdfTemplatesPane,
 	usageadmin: UsageAdminPane,
-	agentaudit: AgentAuditPane,
 };
 
 // Rail labels live here; the header title and description each pane shows are
@@ -227,10 +223,7 @@ const NAV = [
 	{
 		name: "Administration",
 		gate: () => isAdmin,
-		items: [
-			{ key: "usageadmin", label: "User usage", icon: "users" },
-			{ key: "agentaudit", label: "Agent audit", icon: "shield" },
-		],
+		items: [{ key: "usageadmin", label: "User usage", icon: "users" }],
 	},
 ];
 
