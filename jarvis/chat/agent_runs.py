@@ -528,11 +528,16 @@ def _listing_token_sets(agent: str) -> tuple[set, set]:
 	``coverage_tokens = rule_tokens − advisory_tokens`` is the AUTHORITATIVE PP-2
 	required-check set (the tokens that gate the clean/partial verdict). ``advisory_tokens``
 	is the NON-gating subset — valid for findings but exempt from the coverage verdict AND
-	the clean-attestation count. Advisory is intersected with rule_tokens here (the ⊆ guard),
-	so a stray / mis-synced advisory id can NEVER subtract a coverage token it does not belong
-	to (defence in depth beside the export-time disjointness assertion). Empty for operators /
-	legacy agents (no rule tokens -> no coverage bar to fail; advisory_tokens defaults []
-	so every existing agent's coverage set is byte-identical to its rule_tokens)."""
+	the clean-attestation count. Advisory is intersected with rule_tokens (``& rule``) so a
+	stray advisory id OUTSIDE rule_tokens is ignored (it would be dropped by the writeback
+	anyway). NOTE: this intersection is NOT a disjointness guard — an advisory id that IS a
+	statutory coverage id would still be subtracted from coverage here. That disjointness
+	(advisory ∩ statutory-coverage = ∅) is enforced AUTHORITATIVELY at the moat choke point
+	(``export_registry._token_sets`` fails loud on overlap); this bench path trusts the
+	vendored ``rule_tokens``/``advisory_tokens`` to have come faithfully from that export
+	(the sync logs a warning if the vendored advisory set is not a subset of rule_tokens).
+	Empty for operators / legacy agents (no rule tokens -> no coverage bar; advisory_tokens
+	defaults [] so every existing agent's coverage set is byte-identical to its rule_tokens)."""
 	row = frappe.db.get_value(LISTING, agent, ["rule_tokens", "advisory_tokens"], as_dict=True) or {}
 	rule = _parse_token_json(row.get("rule_tokens"))
 	advisory = _parse_token_json(row.get("advisory_tokens")) & rule
