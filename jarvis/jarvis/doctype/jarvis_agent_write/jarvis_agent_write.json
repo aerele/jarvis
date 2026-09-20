@@ -1,0 +1,48 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-09-20 00:00:00.000000",
+ "description": "Append-only, metadata-only audit trail of ERP writes the agent made. Written server-side from the tool choke-point; no role may create/write/delete rows (retention prunes via clear_old_logs). Deliberately carries NO conversation content.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "at",
+  "actor",
+  "actor_name",
+  "tool",
+  "outcome",
+  "provenance",
+  "provenance_name",
+  "ref_doctype",
+  "ref_name",
+  "bulk_count"
+ ],
+ "fields": [
+  {"fieldname": "at", "fieldtype": "Datetime", "label": "At", "search_index": 1, "in_list_view": 1, "read_only": 1},
+  {"fieldname": "actor", "fieldtype": "Link", "options": "User", "label": "Actor", "search_index": 1, "in_list_view": 1, "read_only": 1},
+  {"fieldname": "actor_name", "fieldtype": "Data", "label": "Actor Name", "read_only": 1},
+  {"fieldname": "tool", "fieldtype": "Data", "label": "Tool", "in_list_view": 1, "read_only": 1},
+  {"fieldname": "outcome", "fieldtype": "Select", "options": "applied\nfailed\ndiscarded", "label": "Outcome", "search_index": 1, "in_list_view": 1, "read_only": 1},
+  {"fieldname": "provenance", "fieldtype": "Select", "options": "chat\nauto_apply\nmacro\nskill", "label": "Provenance", "read_only": 1},
+  {"fieldname": "provenance_name", "fieldtype": "Data", "label": "Provenance Name", "read_only": 1},
+  {"fieldname": "ref_doctype", "fieldtype": "Data", "label": "Reference Doctype", "read_only": 1},
+  {"fieldname": "ref_name", "fieldtype": "Data", "label": "Reference Name", "read_only": 1},
+  {"fieldname": "bulk_count", "fieldtype": "Int", "label": "Bulk Count", "read_only": 1}
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-20 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Agent Write",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {"read": 1, "report": 1, "export": 1, "print": 1, "role": "System Manager"},
+  {"read": 1, "report": 1, "export": 1, "print": 1, "role": "Jarvis Admin"}
+ ],
+ "sort_field": "at",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
