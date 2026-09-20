@@ -53,11 +53,34 @@ def _patched_pushes():
 		yield learned
 
 
+def _clear_push_dedup_jobs():
+	"""Drop any leftover deduplicate RQ job for the learned/custom push job_ids.
+
+	``enqueue(deduplicate=True)`` SKIPS the worker (returns without running) when
+	``get_job(job_id)`` finds a QUEUED/STARTED job for that id
+	(frappe/utils/background_jobs.py). Those RQ jobs live in REDIS, which
+	FrappeTestCase does NOT roll back — so a job left behind by an earlier test in
+	the shard makes the inline cutover workers silently skip and the chain's
+	post_push_* never fires (learned_skills_api enqueues learned + custom pushes
+	with these exact deduplicated job_ids). Clearing them makes the chained-worker
+	tests order-independent regardless of what ran before them in the shard."""
+	from frappe.utils.background_jobs import get_job
+
+	for job_id in ("jarvis_learned_skills_push", "jarvis_custom_skills_push"):
+		try:
+			job = get_job(job_id)
+			if job:
+				job.delete()
+		except Exception:
+			pass
+
+
 @contextlib.contextmanager
 def _patched_admin_wire(learned_side_effect=None):
 	"""Mock ONLY the admin wire so both deduped workers run inline end-to-end
 	(``frappe.flags.in_test`` makes every enqueue run ``now=True``). Yields the
 	``(post_push_learned_skills, post_push_custom_skills)`` mocks."""
+	_clear_push_dedup_jobs()  # a stale dedup job would skip the inline workers
 	with (
 		patch(
 			"jarvis.admin_client.post_push_learned_skills",
