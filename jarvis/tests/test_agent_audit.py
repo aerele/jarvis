@@ -232,3 +232,29 @@ class TestAdminReads(FrappeTestCase):
 		recent = usapi.admin_agent_write_summary(days=7)["data"]
 		self.assertGreaterEqual(recent["failed"], 1)
 		self.assertLess(recent["writes"], s["writes"])  # the 2020 row is excluded from 7-day
+
+
+class TestAgentWriteReport(FrappeTestCase):
+	def test_execute_returns_safe_columns_and_respects_filter(self):
+		from jarvis.jarvis.report.agent_write_log.agent_write_log import execute
+
+		# Seed both outcomes so the outcome filter has something to EXCLUDE (an
+		# empty result would make the all() assertion trivially true).
+		_row(actor="a@x.com", tool="submit_doc", outcome="failed", at="2026-09-19 09:00:00")
+		_row(actor="a@x.com", tool="create_doc", outcome="applied", at="2026-09-19 10:00:00")
+
+		columns, data = execute({"outcome": "failed"})
+		safe = {c["fieldname"] for c in columns}
+		self.assertFalse(_FORBIDDEN & safe)  # no content columns, ever
+		self.assertTrue(data)  # the seeded failed row is present
+		self.assertTrue(all(r.get("outcome") == "failed" for r in data))
+
+	def test_execute_gate_refuses_non_admin(self):
+		from jarvis.jarvis.report.agent_write_log.agent_write_log import execute
+
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				execute({})
+		finally:
+			frappe.set_user("Administrator")
