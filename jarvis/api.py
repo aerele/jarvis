@@ -1477,11 +1477,24 @@ def _translate_write_error(e: Exception, mark: int) -> dict | None:
 	return _error(code, message, detail=detail, hint=_hint_for(code, detail))
 
 
-def _dispatch_and_wrap(tool: str, args: dict, is_write: bool) -> dict:
+def _dispatch_and_wrap(
+	tool: str,
+	args: dict,
+	is_write: bool,
+	*,
+	provenance: str = "chat",
+	provenance_name: str = "",
+) -> dict:
 	"""Dispatch + translate exceptions into the ``{ok, data}`` / ``{ok, error}``
 	envelope + audit write tools. This is the shared core of ``_run_tool``'s
 	execute path, reused verbatim by ``confirm_tool`` so a confirmed write runs
 	through the exact same translation + audit as an inline one.
+
+	``provenance``/``provenance_name`` identify HOW this write reached dispatch
+	(chat / auto_apply / macro / skill) and ride into the durable
+	``Jarvis Agent Write`` audit row. They are threaded params, NOT read from
+	``_agent_run_ctx`` here — the manager audit is recorded from the two
+	committing branches below (never the re-raise/500 branch).
 
 	A write is scoped in a SAVEPOINT so a KNOWN failure is rolled back before we
 	RETURN the ``{ok:false}`` envelope. Frappe commits any endpoint that returns
@@ -1520,6 +1533,19 @@ def _dispatch_and_wrap(tool: str, args: dict, is_write: bool) -> dict:
 			audit.record(
 				tool=tool, args=args, ok=False, error_code=err_obj["code"], error_message=err_obj["message"]
 			)
+			# Manager audit: a KNOWN failure. Recorded AFTER the savepoint rollback so
+			# the tool's partial write is undone but this row rides the envelope commit.
+			from jarvis import agent_audit
+
+			agent_audit.record_write(
+				actor=frappe.session.user,
+				tool=tool,
+				args=args,
+				result=None,
+				outcome="failed",
+				provenance=provenance,
+				provenance_name=provenance_name,
+			)
 		return envelope
 	if sp:
 		try:
@@ -1528,17 +1554,46 @@ def _dispatch_and_wrap(tool: str, args: dict, is_write: bool) -> dict:
 			pass
 	if is_write:
 		audit.record(tool=tool, args=args, ok=True, result=data)
+		# Manager audit: a dispatched write (one metadata-only row; bulk collapses
+		# to one row + bulk_count). Own savepoint, never commits. This branch
+		# (version-15-hotfix) has no envelope_ok / _ENVELOPE_TOOLS machinery, so a
+		# dispatched write is recorded "applied" — consistent with the audit.record
+		# ok=True above; the call_connector inner-failure nuance is part of the
+		# connector-envelope feature that is not on this branch.
+		from jarvis import agent_audit
+
+		agent_audit.record_write(
+			actor=frappe.session.user,
+			tool=tool,
+			args=args,
+			result=data,
+			outcome="applied",
+			provenance=provenance,
+			provenance_name=provenance_name,
+		)
 	return {"ok": True, "data": data}
 
 
-def dispatch_confirmed(tool: str, args: dict) -> dict:
+def dispatch_confirmed(
+	tool: str,
+	args: dict,
+	*,
+	provenance: str = "chat",
+	provenance_name: str = "",
+) -> dict:
 	"""Execute a confirmed gated write. Public seam used by ``confirm_tool``
 	AFTER ``pending_confirm.consume`` has validated owner + single-use. Runs
 	the stored call directly (a gated write is always a _WRITE_TOOL, so it is
 	audited) WITHOUT re-entering ``_run_tool``'s gate - the gate would just
 	park it again. This is design option (a): the model can never execute a
-	gated write; only a confirmed human click reaches dispatch."""
-	return _dispatch_and_wrap(tool, args, is_write=True)
+	gated write; only a confirmed human click reaches dispatch.
+
+	``provenance`` defaults to ``chat`` (a human confirm click); the auto-apply
+	and armed macro/skill call-sites pass their own kind so the manager audit
+	row is labelled correctly."""
+	return _dispatch_and_wrap(
+		tool, args, is_write=True, provenance=provenance, provenance_name=provenance_name
+	)
 
 
 def _apply_run_method_read_filter(tool: str, result) -> None:
@@ -1594,7 +1649,7 @@ def _run_covered_write(
 	live-disarm re-check + sliding TTL) and their OWN post-dispatch flag handling (skill:
 	slide/clear on ``result.ok``). This helper is ONLY the dispatch + filter + announce +
 	provenance core - deliberately not the receipt/continuation settlement tail."""
-	result = dispatch_confirmed(tool, args)
+	result = dispatch_confirmed(tool, args, provenance=provenance_kind, provenance_name=provenance_name or "")
 	_apply_run_method_read_filter(tool, result)
 	if tool == "run_import" and isinstance(result, dict) and result.get("ok"):
 		# The gate branch bypasses _confirm_core, where a confirmed run_import normally
@@ -1928,7 +1983,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			# the created Draft + the approval board. Both flags are
 			# server-controlled and admin-gated against generic saves.
 			if _conv_flags.get("auto_apply") or _conv_flags.get("file_box"):
-				return dispatch_confirmed(tool, args)
+				return dispatch_confirmed(tool, args, provenance="auto_apply")
 		# Sequential confirmation (F16): at most ONE live confirmation card per
 		# conversation. If one is already awaiting the user here, REFUSE to park a
 		# second and tell the model to stop - the continuation turn fired after the
