@@ -574,6 +574,11 @@ default_log_clearing_doctypes = {
 	# The controller's clear_old_logs filters announced=1 AND modified<cutoff, so a
 	# still-live (announced=0) row is never swept.
 	"Jarvis Import Announcement": 30,
+	# Manager-facing audit trail of agent ERP writes (one metadata-only row per
+	# executed/discarded write). Append-only, so retention is the only cleanup;
+	# 90 days matches the other Jarvis logs. Its clear_old_logs prunes on the
+	# indexed `at` column.
+	"Jarvis Agent Write": 90,
 }
 
 # Slice B fast-path: runs in the `finally` of EVERY background job on the bench (Frappe
