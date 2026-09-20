@@ -111,14 +111,18 @@ function cookie(name) {
 }
 const fullName = cookie("full_name") || session.user || "User";
 
-// The chat card's menu carries Settings, Support tickets and Switch-to-Desk; the
-// customer support rail drops those (Settings is an admin/chat concern; Switch-to-
-// Desk is a top-bar shortcut; the way back to chat is the sidebar's "Jarvis chat"
-// link). Change theme stays in BOTH menus (it is also a top-bar shortcut, exactly
-// like the chat header), so the support card is never a lone "Log out".
+// Chat card: Settings + Support tickets. Support card: "Switch to <agent> chat"
+// (the way back). Both then share Switch to Desk + Change theme (also top-bar
+// shortcuts on the support surface, same dual placement as the chat header) + Log out.
 const menuOptions = computed(() => {
 	const menu = [];
-	if (props.variant !== "support") {
+	if (props.variant === "support") {
+		menu.push({
+			label: `Switch to ${agentName} chat`,
+			icon: "message-circle",
+			onClick: () => router.push({ name: "Chat" }),
+		});
+	} else {
 		menu.push({
 			label: "Settings",
 			icon: "settings",
@@ -135,14 +139,14 @@ const menuOptions = computed(() => {
 				onClick: () => router.push({ name: "Support" }),
 			});
 		}
-		menu.push({
-			label: "Switch to Desk",
-			icon: "grid",
-			onClick: () => {
-				window.location.href = "/app";
-			},
-		});
 	}
+	menu.push({
+		label: "Switch to Desk",
+		icon: "grid",
+		onClick: () => {
+			window.location.href = "/app";
+		},
+	});
 	menu.push({
 		label: "Change theme",
 		icon: effectiveDark.value ? "sun" : "moon",
