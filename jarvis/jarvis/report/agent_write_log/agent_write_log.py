@@ -45,8 +45,8 @@ def execute(filters=None):
 	if outcome in OUTCOMES:
 		query["outcome"] = outcome
 
-	# Date range on the indexed `at` column; coerce via getdate (defense-in-depth
-	# parity with the whitelisted read — the query builder also parameterizes).
+	# Date range on the indexed `at` column; coerce via getdate as defense-in-depth
+	# (the query builder also parameterizes, so this is belt-and-suspenders).
 	frm = getdate(filters["from_date"]) if filters.get("from_date") else None
 	to = getdate(filters["to_date"]) if filters.get("to_date") else None
 	if frm and to:
