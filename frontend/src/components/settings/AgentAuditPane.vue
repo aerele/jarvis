@@ -71,10 +71,17 @@
 
 		<div v-else-if="!rows.length" class="flex flex-col items-center gap-2 py-12 text-center">
 			<FeatherIcon name="shield" class="size-8 text-ink-gray-4" />
-			<span class="text-base text-ink-gray-6">No agent activity yet.</span>
+			<span class="text-base text-ink-gray-6">{{
+				hasFilters
+					? "No matching activity — try clearing the filters."
+					: "No agent activity yet."
+			}}</span>
 		</div>
 
-		<template v-else>
+		<!-- Dim the (stale) rows while a filter refetch is in flight so a second,
+		     possibly out-of-order, request is visible; the request-sequence guard
+		     in fetchPage drops any response a newer request has superseded. -->
+		<div v-else :class="{ 'pointer-events-none opacity-50 transition-opacity': loading }">
 			<div
 				class="mt-4 grid items-center gap-3.5 pb-2 text-xs font-medium text-ink-gray-5"
 				:style="gridCols"
@@ -97,7 +104,10 @@
 				</div>
 
 				<div class="min-w-0">
-					<div class="truncate text-sm text-ink-gray-8" :title="r.actor">
+					<div
+						class="truncate text-sm text-ink-gray-8"
+						:title="r.actor_name ? `${r.actor_name} · ${r.actor}` : r.actor"
+					>
 						{{ r.actor_name || r.actor }}
 					</div>
 				</div>
@@ -135,7 +145,7 @@
 			<div v-if="hasMore" class="flex justify-center pt-4">
 				<Button variant="subtle" label="Load more" :loading="loading" @click="loadMore" />
 			</div>
-		</template>
+		</div>
 	</SettingsPane>
 </template>
 
@@ -168,18 +178,44 @@ const actor = ref("");
 const outcome = ref("");
 
 const gridCols = { gridTemplateColumns: "0.9fr 1.3fr 1.3fr 1.6fr 0.9fr" };
+const hasFilters = computed(() => !!(actor.value || outcome.value));
 
 function plural(n, one, many) {
 	return Number(n) === 1 ? one : many || one + "s";
 }
 
-// snake_case tool name → "Sentence case" for the manager (no brittle label map;
-// the raw tool name is a fine fallback for a tool this simple rule doesn't cover).
+// snake_case tool name → "Sentence case", upcasing common acronym tokens so a
+// manager reads "Download PDF", not "Download pdf" (no brittle per-tool map; the
+// raw name is a fine fallback for anything the rule doesn't cover).
+const ACRONYMS = new Set([
+	"pdf",
+	"csv",
+	"xlsx",
+	"xls",
+	"api",
+	"url",
+	"id",
+	"sql",
+	"erp",
+	"hsn",
+	"uom",
+]);
 function toolLabel(tool) {
-	const t = String(tool || "")
+	const words = String(tool || "")
 		.replace(/_/g, " ")
-		.trim();
-	return t ? t.charAt(0).toUpperCase() + t.slice(1) : "-";
+		.trim()
+		.split(/\s+/)
+		.filter(Boolean);
+	if (!words.length) return "-";
+	return words
+		.map((w, i) =>
+			ACRONYMS.has(w.toLowerCase())
+				? w.toUpperCase()
+				: i === 0
+				? w.charAt(0).toUpperCase() + w.slice(1)
+				: w
+		)
+		.join(" ");
 }
 
 const OUTCOME_THEME = { applied: "green", failed: "red", discarded: "gray" };
@@ -200,7 +236,12 @@ function recordUrl(r) {
 	return `/app/${slug}/${encodeURIComponent(r.ref_name)}`;
 }
 
+// Monotonic request token: a filter change and its debounced sibling (or a
+// Load-more racing a reset) can be in flight together, so a slower earlier
+// response must not clobber a newer one. Only the latest request may mutate state.
+let reqSeq = 0;
 async function fetchPage({ reset }) {
+	const seq = ++reqSeq;
 	loading.value = true;
 	if (reset) loadError.value = false;
 	try {
@@ -210,6 +251,7 @@ async function fetchPage({ reset }) {
 			start: reset ? 0 : start.value,
 			page_length: PAGE_LENGTH,
 		});
+		if (seq !== reqSeq) return; // a newer request superseded this one
 		if (!res || res.ok === false) {
 			if (reset) loadError.value = true;
 			return;
@@ -225,9 +267,9 @@ async function fetchPage({ reset }) {
 		}
 		hasMore.value = !!data.has_more;
 	} catch (e) {
-		if (reset) loadError.value = true;
+		if (seq === reqSeq && reset) loadError.value = true;
 	} finally {
-		loading.value = false;
+		if (seq === reqSeq) loading.value = false;
 	}
 }
 

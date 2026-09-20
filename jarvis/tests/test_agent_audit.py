@@ -6,9 +6,12 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import agent_audit, api
 from jarvis.chat import user_settings_api as usapi
 
-# The audit sink is metadata-only BY CONSTRUCTION: these are the only fields it
-# may ever carry, and none of the content-adjacent ones may appear.
+# The audit sink is metadata-only BY CONSTRUCTION: this INDEPENDENT literal (never
+# imported from agent_audit — the guard must not derive from what it guards) is the
+# only field set the doctype may ever carry, and none of the content-adjacent ones
+# may appear. Adding a content column to the doctype trips test_schema_is_metadata_only.
 _META_ONLY = {
+	"at",
 	"actor",
 	"actor_name",
 	"tool",
@@ -18,9 +21,6 @@ _META_ONLY = {
 	"ref_doctype",
 	"ref_name",
 	"bulk_count",
-	"conversation",
-	"model",
-	"at",
 }
 _FORBIDDEN = {"tool_args", "tool_result", "content", "error"}
 
@@ -35,7 +35,9 @@ def _row(**kw):
 		"at": frappe.utils.now(),
 	}
 	d.update(kw)
-	return frappe.get_doc(d).insert(ignore_permissions=True).name
+	# ignore_links: `actor` is a Link(User) and the synthetic a@x.com/... actors are
+	# not real Users; _validate_links runs regardless of ignore_permissions.
+	return frappe.get_doc(d).insert(ignore_permissions=True, ignore_links=True).name
 
 
 def _ensure_jarvis_admin():
@@ -53,6 +55,20 @@ def _ensure_jarvis_admin():
 	return "mgr@example.com"
 
 
+def _ensure_plain_user():
+	"""A user with NO Jarvis/System role — must be refused by require_jarvis_admin."""
+	if not frappe.db.exists("User", "plain@example.com"):
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": "plain@example.com",
+				"first_name": "Plain",
+				"send_welcome_email": 0,
+			}
+		).insert(ignore_permissions=True)
+	return "plain@example.com"
+
+
 class TestAgentWriteDoctype(FrappeTestCase):
 	def test_schema_is_metadata_only(self):
 		fields = {f.fieldname for f in frappe.get_meta("Jarvis Agent Write").fields}
@@ -65,6 +81,25 @@ class TestAgentWriteDoctype(FrappeTestCase):
 		try:
 			with self.assertRaises(frappe.PermissionError):
 				frappe.delete_doc("Jarvis Agent Write", name, ignore_permissions=False)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_append_only_jarvis_admin_cannot_insert(self):
+		# No role holds `create` — a Jarvis Admin hand-crafting a row must be refused
+		# (server-authored rows use ignore_permissions=True; a role never can).
+		frappe.set_user(_ensure_jarvis_admin())
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				frappe.get_doc(
+					{
+						"doctype": "Jarvis Agent Write",
+						"actor": "Administrator",
+						"tool": "create_doc",
+						"outcome": "applied",
+						"provenance": "chat",
+						"at": frappe.utils.now(),
+					}
+				).insert(ignore_permissions=False)
 		finally:
 			frappe.set_user("Administrator")
 
@@ -107,15 +142,14 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 		self.assertEqual(rows[0]["ref_doctype"], "ToDo")
 
 	def test_hard_500_is_not_recorded(self):
-		# An UNEXPECTED exception re-raises (Frappe full-rollback → 500). No row is
-		# written; recording here would be lost to the rollback anyway. We assert the
-		# re-raise; the "no row survives" half is proven in the bench run (this txn
-		# rolls back at teardown).
+		# An UNEXPECTED exception re-raises (Frappe full-rollback → 500). record_write
+		# is NOT called on that branch, so no row exists even within this open txn.
 		with m.patch("jarvis.api.dispatch", side_effect=RuntimeError("boom")):
 			with self.assertRaises(RuntimeError):
 				api._dispatch_and_wrap(
 					"submit_doc", {"doctype": "ToDo", "name": "T-1"}, is_write=True, provenance="chat"
 				)
+		self.assertEqual(len(self._rows(tool="submit_doc")), 0)
 
 	def test_bulk_is_one_row_with_count(self):
 		with m.patch("jarvis.api.dispatch", return_value={}):
@@ -142,7 +176,20 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(rows[0]["outcome"], "failed")
 
-	def test_record_write_never_raises_and_leaves_txn_usable(self):
+	def test_unknown_outcome_coerced_to_applied(self):
+		name = agent_audit.record_write(
+			actor="Administrator",
+			tool="create_doc",
+			args={"doctype": "ToDo"},
+			result={"name": "Z-1"},
+			outcome="bogus",
+			provenance="chat",
+		)
+		self.assertTrue(name)
+		self.assertEqual(frappe.db.get_value("Jarvis Agent Write", name, "outcome"), "applied")
+
+	def test_record_write_never_raises_on_construction_failure(self):
+		# Failure BEFORE the savepoint (doc construction) → logged + None, txn intact.
 		with m.patch("frappe.get_doc", side_effect=Exception("db down")):
 			self.assertIsNone(
 				agent_audit.record_write(
@@ -154,30 +201,56 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 					provenance="chat",
 				)
 			)
-		# txn still usable afterwards (nothing poisoned it):
 		self.assertTrue(frappe.db.sql("SELECT 1"))
 
+	def test_record_write_survives_insert_failure_after_savepoint(self):
+		# Failure AT insert (AFTER the savepoint is taken) — the savepoint rollback
+		# must recover the txn, record_write must still return None (never raise), and
+		# the outer transaction must remain usable. This is the invariant the docstring
+		# names by name and the construction-failure test above does NOT reach.
+		from frappe.model.document import Document
 
-def _ensure_plain_user():
-	"""A user with NO Jarvis/System role — must be refused by require_jarvis_admin."""
-	if not frappe.db.exists("User", "plain@example.com"):
-		frappe.get_doc(
-			{
-				"doctype": "User",
-				"email": "plain@example.com",
-				"first_name": "Plain",
-				"send_welcome_email": 0,
-			}
-		).insert(ignore_permissions=True)
-	return "plain@example.com"
+		def boom(self, *a, **k):
+			raise frappe.ValidationError("insert boom")
+
+		with m.patch.object(Document, "insert", boom):
+			self.assertIsNone(
+				agent_audit.record_write(
+					actor="Administrator",
+					tool="create_doc",
+					args={"doctype": "ToDo"},
+					result={},
+					outcome="applied",
+					provenance="chat",
+				)
+			)
+		# txn recovered by the savepoint rollback — a real insert still works:
+		self.assertTrue(_row(actor="Administrator"))
 
 
 class TestAdminReads(FrappeTestCase):
 	def _seed(self):
-		# Deterministic timestamps so newest-first ordering is testable.
-		_row(actor="a@x.com", tool="create_doc", outcome="applied", at="2026-09-18 09:00:00")
-		_row(actor="a@x.com", tool="submit_doc", outcome="failed", at="2026-09-18 10:00:00")
-		_row(actor="b@x.com", tool="delete_doc", outcome="discarded", at="2026-09-18 11:00:00")
+		# Relative timestamps (not absolute strings — those become a time-bomb as the
+		# 7-day window slides past them) with a fixed ordering for the newest-first test.
+		now = frappe.utils.now_datetime()
+		_row(
+			actor="a@x.com",
+			tool="create_doc",
+			outcome="applied",
+			at=frappe.utils.add_to_date(now, minutes=-30),
+		)
+		_row(
+			actor="a@x.com",
+			tool="submit_doc",
+			outcome="failed",
+			at=frappe.utils.add_to_date(now, minutes=-20),
+		)
+		_row(
+			actor="b@x.com",
+			tool="delete_doc",
+			outcome="discarded",
+			at=frappe.utils.add_to_date(now, minutes=-10),
+		)
 
 	def test_gate_refuses_non_admins_allows_admins(self):
 		for u in ("Guest", _ensure_plain_user()):
@@ -201,7 +274,7 @@ class TestAdminReads(FrappeTestCase):
 		self._seed()
 		rows = usapi.admin_list_agent_writes()["data"]["rows"]
 		mine = [r for r in rows if r["actor"] in ("a@x.com", "b@x.com")]
-		# newest (11:00 discarded) first, oldest (09:00 applied) last
+		# newest (t-10 discarded) first, oldest (t-30 applied) last
 		self.assertEqual(mine[0]["outcome"], "discarded")
 		self.assertEqual(mine[-1]["outcome"], "applied")
 		# no content-adjacent key ever leaves the server
@@ -209,29 +282,79 @@ class TestAdminReads(FrappeTestCase):
 
 	def test_actor_and_outcome_filters(self):
 		self._seed()
-		by_actor = usapi.admin_list_agent_writes(actor="a@x.com")["data"]["rows"]
-		self.assertTrue(by_actor and all(r["actor"] == "a@x.com" for r in by_actor))
+		# free-text person search matches the User id as a substring (not exact)
+		by_substr = usapi.admin_list_agent_writes(actor="a@")["data"]["rows"]
+		self.assertTrue(by_substr and all("a@" in (r["actor"] or "") for r in by_substr))
 		by_outcome = usapi.admin_list_agent_writes(outcome="failed")["data"]["rows"]
 		self.assertTrue(by_outcome and all(r["outcome"] == "failed" for r in by_outcome))
-		# an unknown outcome value is ignored (returns all), not an error
-		self.assertTrue(usapi.admin_list_agent_writes(outcome="bogus")["ok"])
+		# an unknown outcome value is IGNORED (returns all) — proven by count, not just ok
+		allrows = usapi.admin_list_agent_writes(page_length=200)["data"]["rows"]
+		bogus = usapi.admin_list_agent_writes(outcome="bogus", page_length=200)["data"]["rows"]
+		self.assertEqual(len(bogus), len(allrows))
+
+	def test_hostile_type_filters_are_coerced(self):
+		# runtime type coercion is OFF here (from __future__ import annotations) → _s
+		# must force a list/dict arg to a harmless string, never a filter list/dict.
+		self.assertTrue(usapi.admin_list_agent_writes(actor=["x"], outcome={"a": 1})["ok"])
+
+	def test_clamps(self):
+		# page_length/days clamps don't crash on 0 / negative / huge inputs.
+		self.assertTrue(usapi.admin_list_agent_writes(page_length=-5)["ok"])
+		self.assertTrue(usapi.admin_list_agent_writes(page_length=99999)["ok"])
+		self.assertTrue(usapi.admin_agent_write_summary(days=-5)["ok"])
+		self.assertTrue(usapi.admin_agent_write_summary(days=99999)["ok"])
 
 	def test_has_more_lookahead(self):
 		self._seed()
 		page = usapi.admin_list_agent_writes(page_length=2)["data"]
 		self.assertEqual(len(page["rows"]), 2)
-		self.assertTrue(page["has_more"])  # 3 seeded, page of 2 → +1 look-ahead trips
+		self.assertTrue(page["has_more"])  # ≥3 rows exist → page of 2 trips the +1 look-ahead
 
 	def test_summary_counts_and_window(self):
-		self._seed()
-		# an old row (outside the 7-day window) must NOT count
-		_row(actor="c@x.com", tool="create_doc", outcome="applied", at="2020-01-01 00:00:00")
-		s = usapi.admin_agent_write_summary(days=3650)["data"]
-		self.assertGreaterEqual(s["writes"], 4)
-		self.assertGreaterEqual(s["actors"], 3)
-		recent = usapi.admin_agent_write_summary(days=7)["data"]
-		self.assertGreaterEqual(recent["failed"], 1)
-		self.assertLess(recent["writes"], s["writes"])  # the 2020 row is excluded from 7-day
+		now = frappe.utils.now_datetime()
+		recent = frappe.utils.add_to_date(now, hours=-2)
+		old = frappe.utils.add_to_date(now, days=-400)
+		_row(actor="s1@x.com", tool="create_doc", outcome="applied", at=recent)
+		_row(actor="s2@x.com", tool="create_doc", outcome="applied", at=recent)
+		_row(actor="s1@x.com", tool="submit_doc", outcome="failed", at=recent)
+		_row(actor="s1@x.com", tool="delete_doc", outcome="discarded", at=recent)
+		_row(actor="s3@x.com", tool="create_doc", outcome="applied", at=old)  # outside the 7-day window
+		wk = usapi.admin_agent_write_summary(days=7)["data"]
+		# "writes" counts APPLIED only — the failed + discarded rows are NOT writes
+		self.assertGreaterEqual(wk["writes"], 2)
+		self.assertGreaterEqual(wk["failed"], 1)
+		self.assertGreaterEqual(wk["actors"], 2)
+		yr = usapi.admin_agent_write_summary(days=3650)["data"]
+		self.assertGreater(yr["writes"], wk["writes"])  # the 400-day-old APPLIED row is excluded from 7d
+
+
+class TestDiscardCapture(FrappeTestCase):
+	def _rows(self, tool):
+		return frappe.get_all("Jarvis Agent Write", filters={"tool": tool}, fields=["outcome"])
+
+	def test_dismiss_records_discarded_for_write_tool(self):
+		from jarvis.chat import actions_api
+
+		rec = {"tool": "delete_doc", "args": {"doctype": "ToDo", "name": "T-1"}, "conversation": None}
+		with (
+			m.patch("jarvis.chat.pending_confirm.peek", return_value=rec),
+			m.patch("jarvis.chat.pending_confirm.consume", return_value=rec),
+		):
+			res = actions_api.dismiss_tool("tok")
+		self.assertEqual(res["data"]["status"], "discarded")
+		rows = self._rows("delete_doc")
+		self.assertTrue(rows and all(r["outcome"] == "discarded" for r in rows))
+
+	def test_dismiss_no_row_for_non_write_tool(self):
+		from jarvis.chat import actions_api
+
+		rec = {"tool": "read_doc", "args": {}, "conversation": None}
+		with (
+			m.patch("jarvis.chat.pending_confirm.peek", return_value=rec),
+			m.patch("jarvis.chat.pending_confirm.consume", return_value=rec),
+		):
+			actions_api.dismiss_tool("tok")
+		self.assertFalse(self._rows("read_doc"))
 
 
 class TestAgentWriteReport(FrappeTestCase):
@@ -240,8 +363,19 @@ class TestAgentWriteReport(FrappeTestCase):
 
 		# Seed both outcomes so the outcome filter has something to EXCLUDE (an
 		# empty result would make the all() assertion trivially true).
-		_row(actor="a@x.com", tool="submit_doc", outcome="failed", at="2026-09-19 09:00:00")
-		_row(actor="a@x.com", tool="create_doc", outcome="applied", at="2026-09-19 10:00:00")
+		now = frappe.utils.now_datetime()
+		_row(
+			actor="a@x.com",
+			tool="submit_doc",
+			outcome="failed",
+			at=frappe.utils.add_to_date(now, minutes=-20),
+		)
+		_row(
+			actor="a@x.com",
+			tool="create_doc",
+			outcome="applied",
+			at=frappe.utils.add_to_date(now, minutes=-10),
+		)
 
 		columns, data = execute({"outcome": "failed"})
 		safe = {c["fieldname"] for c in columns}

@@ -966,20 +966,24 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	args = record.get("args") or {}
 	# Manager audit: the human VETOED a proposed write. Recorded unconditionally
 	# (a conversation-less discard still audits) and keyed on tool being a write,
-	# the same invariant as the execute choke-point. Best-effort, never blocks the
-	# discard; record_write has its own savepoint and never commits.
+	# the same invariant as the execute choke-point. The token is already consumed
+	# above, so wrap defensively (matching the receipt/veto-note calls below) so a
+	# future break of record_write's never-raise contract can't 500 the discard
+	# after consumption and skip the receipt chip + veto note.
 	if tool in api._WRITE_TOOLS:
-		from jarvis import agent_audit
+		try:
+			from jarvis import agent_audit
 
-		agent_audit.record_write(
-			actor=frappe.session.user,
-			tool=tool,
-			args=args,
-			result=None,
-			outcome="discarded",
-			provenance="chat",
-			conversation=record.get("conversation") or "",
-		)
+			agent_audit.record_write(
+				actor=frappe.session.user,
+				tool=tool,
+				args=args,
+				result=None,
+				outcome="discarded",
+				provenance="chat",
+			)
+		except Exception:
+			frappe.log_error(title="dismiss_tool audit failed", message=frappe.get_traceback())
 	# Attach the discarded chip + veto note to the conversation the click came
 	# from when the token was minted conversation-less (F1), but only when the
 	# caller OWNS that conversation (passed_conv is client-supplied).

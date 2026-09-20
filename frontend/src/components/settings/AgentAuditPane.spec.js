@@ -143,6 +143,49 @@ describe("AgentAuditPane", () => {
 		expect(w.text()).toContain("No agent activity yet.");
 	});
 
+	it("distinguishes a filtered-empty result from the never-used empty state", async () => {
+		const w = await mountWith([]);
+		expect(w.text()).toContain("No agent activity yet.");
+		await w.find(".stub-select").setValue("failed"); // a filter is now active
+		await flushPromises();
+		expect(w.text()).toContain("No matching activity");
+		expect(w.text()).not.toContain("No agent activity yet.");
+	});
+
+	it("upcases acronym tokens in the humanised tool label", async () => {
+		const w = await mountWith([row({ tool: "download_pdf" })]);
+		expect(w.text()).toContain("Download PDF");
+		expect(w.text()).not.toContain("Download pdf");
+	});
+
+	it("drops a stale out-of-order response so the newest filter wins", async () => {
+		const deferreds = [];
+		api.adminListAgentWrites.mockImplementation(
+			() => new Promise((resolve) => deferreds.push(resolve))
+		);
+		api.adminAgentWriteSummary.mockResolvedValue({
+			ok: true,
+			data: { days: 7, writes: 0, failed: 0, actors: 0 },
+		});
+		const w = mount(AgentAuditPane);
+		await flushPromises(); // onMounted fired reload() → deferreds[0] (never resolved)
+		await w.find(".stub-select").setValue("applied"); // reset → deferreds[1]
+		await w.find(".stub-select").setValue("failed"); // reset → deferreds[2] (the latest)
+		// resolve the LATEST request first, then let the earlier (stale) one land
+		deferreds[2]({
+			ok: true,
+			data: { rows: [row({ name: "NEW", ref_name: "NEW-1" })], has_more: false },
+		});
+		await flushPromises();
+		deferreds[1]({
+			ok: true,
+			data: { rows: [row({ name: "OLD", ref_name: "OLD-1" })], has_more: false },
+		});
+		await flushPromises();
+		expect(w.text()).toContain("NEW-1"); // newest response kept
+		expect(w.text()).not.toContain("OLD-1"); // stale response dropped
+	});
+
 	it("the outcome filter refetches with the chosen outcome", async () => {
 		const w = await mountWith([row()]);
 		api.adminListAgentWrites.mockClear();

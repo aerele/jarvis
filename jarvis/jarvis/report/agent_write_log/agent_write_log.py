@@ -2,29 +2,16 @@
 
 Gives a Jarvis Admin one-click Desk export (Excel / CSV / PDF), print and chart
 of what the agent wrote to ERP data — the bulk-export twin of the in-app Agent
-Audit pane. Metadata only: the column list is the same explicit safe set the
-whitelisted read uses, so the report can never surface conversation content
-(the doctype has no such columns anyway)."""
+Audit pane. Metadata only: the fetched columns are the SAME shared safe field
+list the whitelisted read uses, so the report can never surface conversation
+content (the doctype has no such columns anyway)."""
 
 import frappe
 from frappe import _
+from frappe.utils import getdate
 
+from jarvis.agent_audit import AGENT_WRITE_FIELDS, OUTCOMES
 from jarvis.permissions import require_jarvis_admin
-
-_SAFE_FIELDS = (
-	"at",
-	"actor",
-	"actor_name",
-	"tool",
-	"outcome",
-	"provenance",
-	"provenance_name",
-	"ref_doctype",
-	"ref_name",
-	"bulk_count",
-	"model",
-)
-_OUTCOMES = frozenset({"applied", "failed", "discarded"})
 
 
 def _columns():
@@ -39,7 +26,6 @@ def _columns():
 		{"fieldname": "ref_doctype", "label": _("Reference Doctype"), "fieldtype": "Data", "width": 160},
 		{"fieldname": "ref_name", "label": _("Reference Name"), "fieldtype": "Data", "width": 160},
 		{"fieldname": "bulk_count", "label": _("Bulk Count"), "fieldtype": "Int", "width": 90},
-		{"fieldname": "model", "label": _("Model"), "fieldtype": "Data", "width": 150},
 	]
 
 
@@ -53,27 +39,27 @@ def execute(filters=None):
 	actor = filters.get("actor")
 	actor = str(actor).strip() if actor else ""
 	if actor:
-		query["actor"] = actor
+		query["actor"] = actor  # Desk Link(User) filter → exact id
 
 	outcome = filters.get("outcome")
-	if outcome in _OUTCOMES:
+	if outcome in OUTCOMES:
 		query["outcome"] = outcome
 
-	# Optional date range on the indexed `at` column (from_date / to_date, the
-	# Frappe filter convention). Half-open ranges are honoured.
-	from_date = filters.get("from_date")
-	to_date = filters.get("to_date")
-	if from_date and to_date:
-		query["at"] = ["between", [from_date, to_date]]
-	elif from_date:
-		query["at"] = [">=", from_date]
-	elif to_date:
-		query["at"] = ["<=", to_date]
+	# Date range on the indexed `at` column; coerce via getdate (defense-in-depth
+	# parity with the whitelisted read — the query builder also parameterizes).
+	frm = getdate(filters["from_date"]) if filters.get("from_date") else None
+	to = getdate(filters["to_date"]) if filters.get("to_date") else None
+	if frm and to:
+		query["at"] = ["between", [frm, to]]
+	elif frm:
+		query["at"] = [">=", frm]
+	elif to:
+		query["at"] = ["<=", to]
 
 	data = frappe.get_all(
 		"Jarvis Agent Write",
 		filters=query,
-		fields=list(_SAFE_FIELDS),
-		order_by="at desc",
+		fields=list(AGENT_WRITE_FIELDS),
+		order_by="at desc, name desc",
 	)
 	return _columns(), data

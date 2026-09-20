@@ -17,20 +17,30 @@ Two transactional invariants, both from plan-check:
 
 import frappe
 
-_OUTCOMES = {"applied", "failed", "discarded"}
+# The two enum-shaped invariants of this doctype, owned here and imported by the
+# whitelisted read + the Script Report so the pane, the report, and validation
+# can never silently diverge.
+OUTCOMES = frozenset({"applied", "failed", "discarded"})
+
+# The full, explicit safe projection for the metadata-only trail. The doctype has
+# NO content columns, so there is nothing content-adjacent to leak; the allowlist
+# (never ``*``) keeps a future field opt-in. ``name`` leads for the record key.
+AGENT_WRITE_FIELDS = (
+	"name",
+	"at",
+	"actor",
+	"actor_name",
+	"tool",
+	"outcome",
+	"provenance",
+	"provenance_name",
+	"ref_doctype",
+	"ref_name",
+	"bulk_count",
+)
 
 
-def record_write(
-	actor,
-	tool,
-	args,
-	result,
-	outcome,
-	provenance,
-	provenance_name="",
-	conversation="",
-	model="",
-):
+def record_write(actor, tool, args, result, outcome, provenance, provenance_name=""):
 	"""Insert one metadata-only ``Jarvis Agent Write`` row for an agent write.
 
 	Best-effort: never raises and never commits, so it is safe to call from
@@ -42,7 +52,7 @@ def record_write(
 		from jarvis.api import _BULK_ARG_KEYS, _bulk_len, _is_bulk_call
 		from jarvis.audit import _ref
 
-		if outcome not in _OUTCOMES:
+		if outcome not in OUTCOMES:
 			outcome = "applied"
 		a = args if isinstance(args, dict) else {}
 
@@ -70,7 +80,9 @@ def record_write(
 			{
 				"doctype": "Jarvis Agent Write",
 				"actor": actor,
-				"actor_name": frappe.get_cached_value("User", actor, "full_name") or actor,
+				# Single-field, request-cached read — lighter than get_cached_value,
+				# which unpickles the whole User doc (with its child tables) per write.
+				"actor_name": frappe.db.get_value("User", actor, "full_name", cache=True) or actor,
 				"tool": tool,
 				"outcome": outcome,
 				"provenance": provenance or "chat",
@@ -78,8 +90,6 @@ def record_write(
 				"ref_doctype": ref_doctype or "",
 				"ref_name": ref_name or "",
 				"bulk_count": bulk_count,
-				"conversation": conversation or "",
-				"model": model or "",
 				"at": frappe.utils.now(),
 			}
 		)
@@ -91,7 +101,16 @@ def record_write(
 		except Exception:
 			frappe.db.rollback(save_point=sp)  # recover the outer txn; never poison the tool write
 			raise
+		try:
+			frappe.db.release_savepoint(sp)  # tidy the stack on success, mirroring _dispatch_and_wrap
+		except Exception:
+			pass
 		return doc.name
 	except Exception:
-		frappe.logger("jarvis.agent_audit").error("agent-write audit failed", exc_info=True)
+		# File logger only (never frappe.log_error): an Error Log insert is itself a
+		# DB write that could touch this same transaction. Carry tool/actor/outcome
+		# so a wholesale failure is triageable from the log without the row.
+		frappe.logger("jarvis.agent_audit").error(
+			f"agent-write audit failed (tool={tool} actor={actor} outcome={outcome})", exc_info=True
+		)
 		return None
