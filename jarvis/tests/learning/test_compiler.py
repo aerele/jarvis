@@ -665,7 +665,15 @@ class TestApplyLearnedSkills(FrappeTestCase):
 	def _pre_cutover_state(self, phase1_row=True):
 		"""Empty learned sync pair (never pushed through the namespace) plus,
 		unless ``phase1_row=False``, a pre-existing managed row - the positive
-		Phase-1 evidence the cutover gate requires."""
+		Phase-1 evidence the cutover gate requires.
+
+		The custom sync pair is cleared TOO: a first cutover chains the graceful
+		custom reconcile only when ``custom_skills_sync_status`` is unstamped (the
+		deduped custom worker skips an already-stamped status). ``Jarvis Settings``
+		is a single doc whose status is committed suite-wide, so without this reset
+		a custom stamp COMMITTED by an earlier-running test leaks in and silently
+		skips the reconcile - making these tests order-dependent (they green in
+		isolation but fail once another test lands ahead of them in the shard)."""
 		if phase1_row:
 			frappe.get_doc(
 				{
@@ -681,7 +689,12 @@ class TestApplyLearnedSkills(FrappeTestCase):
 		frappe.db.set_value(
 			"Jarvis Settings",
 			"Jarvis Settings",
-			{"learned_skills_synced_at": None, "learned_skills_sync_status": None},
+			{
+				"learned_skills_synced_at": None,
+				"learned_skills_sync_status": None,
+				"custom_skills_synced_at": None,
+				"custom_skills_sync_status": None,
+			},
 			update_modified=False,
 		)
 		frappe.db.commit()

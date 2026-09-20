@@ -89,18 +89,26 @@ class TestAgentWriteDoctype(FrappeTestCase):
 			frappe.set_user("Administrator")
 
 
+# Isolation helpers: record_write is wired into the REAL choke-point, so many
+# other suite tests commit Jarvis Agent Write rows (via the downstream
+# persist_tool_receipt commit). A broad tool= query therefore sees rows this test
+# did NOT create — so every assertion diffs against the row names present BEFORE
+# the action and inspects only the rows this test produced.
+def _all_names():
+	return {r.name for r in frappe.get_all("Jarvis Agent Write", pluck="name")}
+
+
+def _new_rows(before, **f):
+	fields = ["name", "tool", "outcome", "provenance", "provenance_name", "bulk_count", "ref_doctype"]
+	return [r for r in frappe.get_all("Jarvis Agent Write", filters=f, fields=fields) if r.name not in before]
+
+
 class TestCaptureAtChokepoint(FrappeTestCase):
 	"""Exercise the REAL hook (patch jarvis.api.dispatch + call _dispatch_and_wrap
 	directly), not just record_write — the pattern in test_action_error_detail.py."""
 
-	def _rows(self, **f):
-		return frappe.get_all(
-			"Jarvis Agent Write",
-			filters=f,
-			fields=["tool", "outcome", "provenance", "provenance_name", "bulk_count", "ref_doctype"],
-		)
-
 	def test_success_write_records_one_row_with_provenance(self):
+		before = _all_names()
 		with m.patch("jarvis.api.dispatch", return_value={"name": "X-1"}):
 			api._dispatch_and_wrap(
 				"create_doc",
@@ -108,35 +116,40 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 				is_write=True,
 				provenance="auto_apply",
 			)
-		rows = self._rows(tool="create_doc", provenance="auto_apply")
-		self.assertEqual(len(rows), 1)
-		self.assertEqual(rows[0]["outcome"], "applied")
-		self.assertEqual(rows[0]["ref_doctype"], "ToDo")
+		new = _new_rows(before, tool="create_doc")
+		self.assertEqual(len(new), 1)
+		self.assertEqual(new[0]["outcome"], "applied")
+		self.assertEqual(new[0]["provenance"], "auto_apply")
+		self.assertEqual(new[0]["ref_doctype"], "ToDo")
 
 	def test_handled_failure_is_recorded_as_failed(self):
 		# A KNOWN failure is a RAISED, translatable exception (ValidationError etc.) —
 		# not a returned {ok:false}. The savepoint rolls the tool back; the audit row
 		# rides the envelope commit.
+		before = _all_names()
 		with m.patch("jarvis.api.dispatch", side_effect=frappe.ValidationError("bad")):
 			env = api._dispatch_and_wrap(
 				"update_doc", {"doctype": "ToDo", "name": "T-1"}, is_write=True, provenance="chat"
 			)
 		self.assertFalse(env["ok"])
-		rows = self._rows(tool="update_doc", outcome="failed", provenance="chat")
-		self.assertEqual(len(rows), 1)
-		self.assertEqual(rows[0]["ref_doctype"], "ToDo")
+		new = _new_rows(before, tool="update_doc")
+		self.assertEqual(len(new), 1)
+		self.assertEqual(new[0]["outcome"], "failed")
+		self.assertEqual(new[0]["ref_doctype"], "ToDo")
 
 	def test_hard_500_is_not_recorded(self):
 		# An UNEXPECTED exception re-raises (Frappe full-rollback → 500). record_write
-		# is NOT called on that branch, so no row exists even within this open txn.
+		# is NOT called on that branch, so this call produces no row.
+		before = _all_names()
 		with m.patch("jarvis.api.dispatch", side_effect=RuntimeError("boom")):
 			with self.assertRaises(RuntimeError):
 				api._dispatch_and_wrap(
 					"submit_doc", {"doctype": "ToDo", "name": "T-1"}, is_write=True, provenance="chat"
 				)
-		self.assertEqual(len(self._rows(tool="submit_doc")), 0)
+		self.assertEqual(len(_new_rows(before, tool="submit_doc")), 0)
 
 	def test_bulk_is_one_row_with_count(self):
+		before = _all_names()
 		with m.patch("jarvis.api.dispatch", return_value={}):
 			api._dispatch_and_wrap(
 				"create_docs",
@@ -144,22 +157,23 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 				is_write=True,
 				provenance="chat",
 			)
-		rows = self._rows(tool="create_docs")
-		self.assertEqual(len(rows), 1)
-		self.assertEqual(rows[0]["bulk_count"], 3)
-		self.assertEqual(rows[0]["ref_doctype"], "ToDo")
+		new = _new_rows(before, tool="create_docs")
+		self.assertEqual(len(new), 1)
+		self.assertEqual(new[0]["bulk_count"], 3)
+		self.assertEqual(new[0]["ref_doctype"], "ToDo")
 
 	def test_connector_inner_failure_is_filed_as_failed(self):
 		# call_connector is a write that dispatches but returns its OWN {ok:false}
 		# envelope. envelope_ok must file it as failed, not a false ERP-write success.
+		before = _all_names()
 		inner_fail = {"ok": False, "error": {"code": "transport_error", "message": "x"}}
 		with m.patch("jarvis.api.dispatch", return_value=inner_fail):
 			api._dispatch_and_wrap(
 				"call_connector", {"connector": "c", "action": "a"}, is_write=True, provenance="chat"
 			)
-		rows = self._rows(tool="call_connector")
-		self.assertEqual(len(rows), 1)
-		self.assertEqual(rows[0]["outcome"], "failed")
+		new = _new_rows(before, tool="call_connector")
+		self.assertEqual(len(new), 1)
+		self.assertEqual(new[0]["outcome"], "failed")
 
 	def test_unknown_outcome_coerced_to_applied(self):
 		name = agent_audit.record_write(
@@ -214,12 +228,10 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 
 
 class TestDiscardCapture(FrappeTestCase):
-	def _rows(self, tool):
-		return frappe.get_all("Jarvis Agent Write", filters={"tool": tool}, fields=["outcome"])
-
 	def test_dismiss_records_discarded_for_write_tool(self):
 		from jarvis.chat import actions_api
 
+		before = _all_names()
 		rec = {"tool": "delete_doc", "args": {"doctype": "ToDo", "name": "T-1"}, "conversation": None}
 		with (
 			m.patch("jarvis.chat.pending_confirm.peek", return_value=rec),
@@ -227,19 +239,21 @@ class TestDiscardCapture(FrappeTestCase):
 		):
 			res = actions_api.dismiss_tool("tok")
 		self.assertEqual(res["data"]["status"], "discarded")
-		rows = self._rows("delete_doc")
-		self.assertTrue(rows and all(r["outcome"] == "discarded" for r in rows))
+		new = _new_rows(before, tool="delete_doc")
+		self.assertEqual(len(new), 1)
+		self.assertEqual(new[0]["outcome"], "discarded")
 
 	def test_dismiss_no_row_for_non_write_tool(self):
 		from jarvis.chat import actions_api
 
+		before = _all_names()
 		rec = {"tool": "read_doc", "args": {}, "conversation": None}
 		with (
 			m.patch("jarvis.chat.pending_confirm.peek", return_value=rec),
 			m.patch("jarvis.chat.pending_confirm.consume", return_value=rec),
 		):
 			actions_api.dismiss_tool("tok")
-		self.assertFalse(self._rows("read_doc"))
+		self.assertEqual(len(_new_rows(before, tool="read_doc")), 0)
 
 
 class TestAgentWriteReport(FrappeTestCase):
