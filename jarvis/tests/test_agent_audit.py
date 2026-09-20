@@ -4,6 +4,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import agent_audit, api
+from jarvis.chat import user_settings_api as usapi
 
 # The audit sink is metadata-only BY CONSTRUCTION: these are the only fields it
 # may ever carry, and none of the content-adjacent ones may appear.
@@ -155,3 +156,79 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 			)
 		# txn still usable afterwards (nothing poisoned it):
 		self.assertTrue(frappe.db.sql("SELECT 1"))
+
+
+def _ensure_plain_user():
+	"""A user with NO Jarvis/System role — must be refused by require_jarvis_admin."""
+	if not frappe.db.exists("User", "plain@example.com"):
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": "plain@example.com",
+				"first_name": "Plain",
+				"send_welcome_email": 0,
+			}
+		).insert(ignore_permissions=True)
+	return "plain@example.com"
+
+
+class TestAdminReads(FrappeTestCase):
+	def _seed(self):
+		# Deterministic timestamps so newest-first ordering is testable.
+		_row(actor="a@x.com", tool="create_doc", outcome="applied", at="2026-09-18 09:00:00")
+		_row(actor="a@x.com", tool="submit_doc", outcome="failed", at="2026-09-18 10:00:00")
+		_row(actor="b@x.com", tool="delete_doc", outcome="discarded", at="2026-09-18 11:00:00")
+
+	def test_gate_refuses_non_admins_allows_admins(self):
+		for u in ("Guest", _ensure_plain_user()):
+			frappe.set_user(u)
+			try:
+				with self.assertRaises(frappe.PermissionError):
+					usapi.admin_list_agent_writes()
+				with self.assertRaises(frappe.PermissionError):
+					usapi.admin_agent_write_summary()
+			finally:
+				frappe.set_user("Administrator")
+		# Administrator + a Jarvis Admin both pass (no raise).
+		self.assertTrue(usapi.admin_list_agent_writes()["ok"])
+		frappe.set_user(_ensure_jarvis_admin())
+		try:
+			self.assertTrue(usapi.admin_list_agent_writes()["ok"])
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_newest_first_and_shape(self):
+		self._seed()
+		rows = usapi.admin_list_agent_writes()["data"]["rows"]
+		mine = [r for r in rows if r["actor"] in ("a@x.com", "b@x.com")]
+		# newest (11:00 discarded) first, oldest (09:00 applied) last
+		self.assertEqual(mine[0]["outcome"], "discarded")
+		self.assertEqual(mine[-1]["outcome"], "applied")
+		# no content-adjacent key ever leaves the server
+		self.assertFalse(_FORBIDDEN & set(rows[0].keys()))
+
+	def test_actor_and_outcome_filters(self):
+		self._seed()
+		by_actor = usapi.admin_list_agent_writes(actor="a@x.com")["data"]["rows"]
+		self.assertTrue(by_actor and all(r["actor"] == "a@x.com" for r in by_actor))
+		by_outcome = usapi.admin_list_agent_writes(outcome="failed")["data"]["rows"]
+		self.assertTrue(by_outcome and all(r["outcome"] == "failed" for r in by_outcome))
+		# an unknown outcome value is ignored (returns all), not an error
+		self.assertTrue(usapi.admin_list_agent_writes(outcome="bogus")["ok"])
+
+	def test_has_more_lookahead(self):
+		self._seed()
+		page = usapi.admin_list_agent_writes(page_length=2)["data"]
+		self.assertEqual(len(page["rows"]), 2)
+		self.assertTrue(page["has_more"])  # 3 seeded, page of 2 → +1 look-ahead trips
+
+	def test_summary_counts_and_window(self):
+		self._seed()
+		# an old row (outside the 7-day window) must NOT count
+		_row(actor="c@x.com", tool="create_doc", outcome="applied", at="2020-01-01 00:00:00")
+		s = usapi.admin_agent_write_summary(days=3650)["data"]
+		self.assertGreaterEqual(s["writes"], 4)
+		self.assertGreaterEqual(s["actors"], 3)
+		recent = usapi.admin_agent_write_summary(days=7)["data"]
+		self.assertGreaterEqual(recent["failed"], 1)
+		self.assertLess(recent["writes"], s["writes"])  # the 2020 row is excluded from 7-day
