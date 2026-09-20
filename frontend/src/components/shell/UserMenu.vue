@@ -111,9 +111,9 @@ function cookie(name) {
 }
 const fullName = cookie("full_name") || session.user || "User";
 
-// Chat card: Settings + Support tickets, then Switch to Desk + Change theme + Log
-// out. Support card: "Switch to <agent> chat" + "Switch to Desk" + Log out (theme
-// is the support top-bar shortcut, not duplicated in the menu).
+// Chat card: Settings + Support tickets. Support card: "Switch to <agent> chat".
+// Both then share Switch to Desk + Change theme + Log out (theme is also a top-bar
+// shortcut on the support surface, same dual placement as the chat header).
 const menuOptions = computed(() => {
 	const menu = [];
 	if (props.variant === "support") {
@@ -147,15 +147,13 @@ const menuOptions = computed(() => {
 			window.location.href = "/app";
 		},
 	});
-	// Change theme is chat-only in the menu: on the support surface it is the
-	// top-bar shortcut button (SupportShell), so it is not duplicated here.
-	if (props.variant !== "support") {
-		menu.push({
-			label: "Change theme",
-			icon: effectiveDark.value ? "sun" : "moon",
-			onClick: () => toggleTheme(),
-		});
-	}
+	// Change theme is in the menu on both variants (also a top-bar shortcut on the
+	// support surface, same dual placement as the chat header).
+	menu.push({
+		label: "Change theme",
+		icon: effectiveDark.value ? "sun" : "moon",
+		onClick: () => toggleTheme(),
+	});
 	return [
 		{ group: "Menu", hideLabel: true, items: menu },
 		{
