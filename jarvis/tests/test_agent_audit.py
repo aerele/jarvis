@@ -95,7 +95,8 @@ class TestAgentWriteDoctype(FrappeTestCase):
 # did NOT create — so every assertion diffs against the row names present BEFORE
 # the action and inspects only the rows this test produced.
 def _all_names():
-	return {r.name for r in frappe.get_all("Jarvis Agent Write", pluck="name")}
+	# pluck="name" yields the name strings directly (not row objects).
+	return set(frappe.get_all("Jarvis Agent Write", pluck="name"))
 
 
 def _new_rows(before, **f):
