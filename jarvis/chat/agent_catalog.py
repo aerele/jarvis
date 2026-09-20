@@ -146,6 +146,10 @@ def sync_agent_listings() -> dict:
 			# without ever holding a rule body/threshold. Empty for operators /
 			# legacy agents. Mirrors the bundle store's rules.ids.json.
 			"rule_tokens": frappe.as_json(a.get("rule_tokens") or []),
+			# the NON-attesting subset of rule_tokens (advisory findings). Its findings are
+			# valid but exempt from the coverage verdict + clean gate. Empty (absent from an
+			# OLD registry) -> coverage == rule_tokens, byte-identical to a pre-advisory bundle.
+			"advisory_tokens": frappe.as_json(a.get("advisory_tokens") or []),
 			"min_apps": frappe.as_json(a.get("min_apps") or []),
 			# R5-J9: the declarative operator write contract (manifest.writes[] —
 			# non-IP {doctype, mode} metadata the exporter emits). create_doc/
