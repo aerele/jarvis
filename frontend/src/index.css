@@ -110,15 +110,17 @@
 	outline-offset: 1px;
 }
 :root :where(.form-input, .form-select):focus-visible {
-	outline: 2px solid var(--focus-ring);
-	outline-offset: 1px;
+	outline: 1px solid var(--focus-ring);
+	outline-offset: -1px;
 }
 /* frappe-ui's own TextInput / Textarea / Select paint a 1px darker border PLUS a
    2px grey ring PLUS a shadow on :focus-visible, and Chrome treats a click into a
    text field as :focus-visible, so every search box and form field shows a
    double border on plain click. Outside the chat surfaces (which draw their own
-   focus above) replace that stack with one line in the accent: still a visible
-   indicator for keyboard users, one clean border for everyone else. `:root:root`
+   focus above) replace that stack with one 1px line in the accent, the same line
+   the `.form-input` rule above draws for Autocomplete's borderless search box:
+   still a visible indicator for keyboard users, one clean border for everyone
+   else. `:root:root`
    outranks the utility classes (0,2,0) without !important; `:not(.jv-root *)`
    keeps the chat and onboarding rules above in charge of their inputs. */
 :root:root
@@ -126,9 +128,13 @@
 		.jv-root *,
 		.jv-ob-root *
 	):focus-visible {
-	outline: none;
 	box-shadow: none;
 	border-color: var(--focus-ring);
+	/* Drawn as an inset 1px outline as well, so a field with no border of its
+	   own (Autocomplete's search box) shows the same single line as a bordered
+	   one; on a bordered field the two coincide and read as one line. */
+	outline: 1px solid var(--focus-ring);
+	outline-offset: -1px;
 }
 
 /* ===== §2.5 theme bridge: dark value overrides =============================
