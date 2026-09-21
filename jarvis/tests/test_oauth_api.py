@@ -773,6 +773,194 @@ class TestBeginPoolAccountSignin(_OAuthApiBase):
 		self.assertIsNone(entry.get("pool"))
 
 
+class TestClaudeCliLogin(_OAuthApiBase):
+	"""CLAUDE-LOGIN-CONTRACT.md: begin/complete/cancel_claude_cli_login relay to
+	admin/fleet, which run the official Claude Code CLI's own `claude auth
+	login` inside the tenant container. No token ever reaches Jarvis - these
+	tests stub admin_client throughout and never hit a real admin."""
+
+	# ---- begin_claude_cli_login -------------------------------------------
+
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_start")
+	def test_begin_returns_login_id_and_authorize_url(self, post_start):
+		post_start.return_value = {
+			"login_id": "deadbeefdeadbeef",
+			"authorize_url": "https://claude.com/cai/oauth/authorize?code=true",
+			"expires_at": 1234567890,
+		}
+		out = oauth_api.begin_claude_cli_login("claude-opus-4-8")
+		self.assertTrue(out["ok"], msg=str(out))
+		self.assertEqual(out["data"]["login_id"], "deadbeefdeadbeef")
+		self.assertEqual(out["data"]["authorize_url"], "https://claude.com/cai/oauth/authorize?code=true")
+		self.assertEqual(out["data"]["expires_at"], 1234567890)
+
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_start")
+	@patch("jarvis.oauth.api._coerce_subscription_model", return_value="claude-opus-4-8")
+	def test_begin_coerces_the_model_before_calling_admin(self, coerce, post_start):
+		post_start.return_value = {"login_id": "x", "authorize_url": "https://claude.com/x"}
+		oauth_api.begin_claude_cli_login("not-a-real-model")
+		coerce.assert_called_once_with("Anthropic", "not-a-real-model")
+		post_start.assert_called_once_with("claude-opus-4-8")
+
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_start")
+	def test_begin_maps_admin_auth_error(self, post_start):
+		from jarvis import admin_client
+
+		post_start.side_effect = admin_client.AdminAuthError("session expired", status_code=401)
+		out = oauth_api.begin_claude_cli_login("")
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "admin_auth")
+
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_start")
+	def test_begin_maps_no_running_tenant(self, post_start):
+		from jarvis import admin_client
+
+		post_start.side_effect = admin_client.AdminContractError(
+			"customer has no running tenant", code="NoRunningTenant"
+		)
+		out = oauth_api.begin_claude_cli_login("")
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "no_running_tenant")
+
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_start")
+	def test_begin_maps_cli_installing_to_a_retry_message(self, post_start):
+		from jarvis import admin_client
+
+		post_start.side_effect = admin_client.AdminContractError("installing", code="cli_installing")
+		out = oauth_api.begin_claude_cli_login("claude-opus-5")
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "cli_installing")
+		self.assertIn("30 seconds", out["error"]["message"])
+
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_start")
+	def test_begin_maps_fleet_too_old(self, post_start):
+		from jarvis import admin_client
+
+		for code in ("FleetTooOld", "FleetConfigError"):
+			with self.subTest(code=code):
+				post_start.side_effect = admin_client.AdminContractError("fleet-agent too old", code=code)
+				out = oauth_api.begin_claude_cli_login("claude-opus-5")
+				self.assertFalse(out["ok"])
+				self.assertEqual(out["error"]["code"], "fleet_too_old")
+		# The REAL wire shape: admin's @fleet_endpoint answers a fleet FleetConfigError
+		# with a 502 whose error.code is the class name, and admin_client classifies
+		# that 502 as AdminRejectedError (permanent), never as AdminContractError.
+		post_start.side_effect = admin_client.AdminRejectedError(
+			"admin returned a 502 error: fleet-agent too old", code="FleetConfigError", detail="too old"
+		)
+		out = oauth_api.begin_claude_cli_login("claude-opus-5")
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "fleet_too_old")
+		self.assertNotIn("try again", out["error"]["message"].lower())
+
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_start")
+	def test_begin_falls_back_to_push_failed_for_an_unmapped_code(self, post_start):
+		from jarvis import admin_client
+
+		post_start.side_effect = admin_client.AdminContractError("something else broke", code="SomeNewThing")
+		out = oauth_api.begin_claude_cli_login("")
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "push_failed")
+
+	# ---- complete_claude_cli_login -----------------------------------------
+
+	def test_complete_rejects_a_blank_login_id_without_calling_admin(self):
+		with patch("jarvis.oauth.api.admin_client.post_claude_login_submit") as post_submit:
+			out = oauth_api.complete_claude_cli_login("", "somecode123")
+			self.assertFalse(out["ok"])
+			self.assertEqual(out["error"]["code"], "unknown_login")
+			post_submit.assert_not_called()
+
+	def test_complete_rejects_a_malformed_code_without_calling_admin(self):
+		# Too short, and contains whitespace - same _BARE_CODE_RE rule fleet uses.
+		for bad in ("short", "has a space", ""):
+			with self.subTest(bad=bad):
+				with patch("jarvis.oauth.api.admin_client.post_claude_login_submit") as post_submit:
+					out = oauth_api.complete_claude_cli_login("login123", bad)
+					self.assertFalse(out["ok"])
+					self.assertEqual(out["error"]["code"], "invalid_code")
+					post_submit.assert_not_called()
+
+	@patch("jarvis.oauth.api.pending_capture.create_capture")
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_submit")
+	def test_complete_captures_the_account_with_no_secret_in_the_blob(self, post_submit, create_capture):
+		post_submit.return_value = {"account_email": "me@example.com", "subscription_type": "max"}
+		create_capture.return_value = {
+			"capture_id": "oacap_safe",
+			"account_ref": "CLAUDE_safe",
+			"label": "me@example.com",
+			"upstream": "anthropic",
+		}
+		out = oauth_api.complete_claude_cli_login("login123", "the-real-pasted-code-1234")
+		self.assertTrue(out["ok"], msg=str(out))
+		self.assertEqual(out["data"], create_capture.return_value)
+		kwargs = create_capture.call_args.kwargs
+		blob = json.loads(kwargs["oauth_blob"])
+		self.assertEqual(
+			blob,
+			{
+				"type": "oauth",
+				"provider": "anthropic",
+				"credential_kind": "claude_cli_login",
+				"account_email": "me@example.com",
+			},
+		)
+		self.assertNotIn("access", blob)
+		self.assertEqual(kwargs["upstream"], "anthropic")
+		self.assertEqual(kwargs["agent_provider"], "anthropic")
+		self.assertEqual(kwargs["account_email"], "me@example.com")
+		self.assertTrue(kwargs["account_ref"].startswith("CLAUDE_"))
+		self.assertEqual(kwargs["safe_label"], "me@example.com")
+		# The code itself never reaches the capture.
+		self.assertNotIn("the-real-pasted-code-1234", json.dumps(out))
+
+	@patch("jarvis.oauth.api.pending_capture.create_capture")
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_submit")
+	def test_complete_falls_back_to_a_generic_label_with_no_account_email(self, post_submit, create_capture):
+		post_submit.return_value = {"account_email": ""}
+		create_capture.return_value = {"capture_id": "oacap_x", "account_ref": "CLAUDE_x"}
+		oauth_api.complete_claude_cli_login("login123", "the-real-pasted-code-1234")
+		kwargs = create_capture.call_args.kwargs
+		self.assertEqual(kwargs["safe_label"], "Claude subscription")
+		self.assertEqual(kwargs["account_email"], "")
+
+	@patch("jarvis.oauth.api.pending_capture.create_capture")
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_submit")
+	def test_complete_maps_invalid_code_from_admin_and_never_creates_a_capture(
+		self, post_submit, create_capture
+	):
+		from jarvis import admin_client
+
+		post_submit.side_effect = admin_client.AdminContractError("bad code", code="InvalidCode")
+		out = oauth_api.complete_claude_cli_login("login123", "the-real-pasted-code-1234")
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "invalid_code")
+		create_capture.assert_not_called()
+
+	# ---- cancel_claude_cli_login --------------------------------------------
+
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_cancel")
+	def test_cancel_relays_to_admin(self, post_cancel):
+		out = oauth_api.cancel_claude_cli_login("login123")
+		self.assertTrue(out["ok"])
+		post_cancel.assert_called_once_with("login123")
+
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_cancel")
+	def test_cancel_with_a_blank_login_id_is_a_no_op(self, post_cancel):
+		out = oauth_api.cancel_claude_cli_login("")
+		self.assertTrue(out["ok"])
+		post_cancel.assert_not_called()
+
+	@patch("jarvis.oauth.api.admin_client.post_claude_login_cancel")
+	def test_cancel_maps_admin_errors(self, post_cancel):
+		from jarvis import admin_client
+
+		post_cancel.side_effect = admin_client.AdminUnreachableError("admin is unreachable")
+		out = oauth_api.cancel_claude_cli_login("login123")
+		self.assertFalse(out["ok"])
+		self.assertEqual(out["error"]["code"], "push_failed")
+
+
 class TestCompletePoolAccountSignin(_OAuthApiBase):
 	"""Task 2: complete_pool_account_signin captures ONE more subscription
 	account and RETURNS the blob (with id_token) for the frontend to store in

@@ -609,6 +609,20 @@ export const completePoolAccountSignin = (nonce, redirectedUrl) =>
 		nonce,
 		redirected_url: redirectedUrl,
 	});
+// Claude Pro/Max signs in through the browser, the same shape xAI's bare-code
+// paste uses: begin starts the official Claude CLI's own sign-in inside the
+// tenant container and returns { login_id, authorize_url, expires_at }; the
+// customer opens authorize_url, approves, and pastes the code Anthropic shows
+// back. complete relays that code and captures the account (same capture-only
+// shape as completePoolAccountSignin) - no token ever crosses the wire.
+export const beginClaudeCliLogin = (model) =>
+	call("jarvis.oauth.api.begin_claude_cli_login", { model });
+export const completeClaudeCliLogin = (loginId, code) =>
+	call("jarvis.oauth.api.complete_claude_cli_login", { login_id: loginId, code });
+// Customer backed out before pasting a code: best-effort, tells fleet to kill
+// the detached CLI login and drop its transcript.
+export const cancelClaudeCliLogin = (loginId) =>
+	call("jarvis.oauth.api.cancel_claude_cli_login", { login_id: loginId });
 // Device-code (Kimi) capture: begin returns { device_flow:true, user_code,
 // verification_uri, interval }; poll on `interval` → { status:"pending" } until
 // the user approves, then the same capture-only { status:"ok", capture_id,

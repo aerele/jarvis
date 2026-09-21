@@ -913,7 +913,28 @@
 										onUpstreamChange(panelRow);
 									}
 								"
-							/>
+							>
+								<!-- Same brand marks as the API-key provider list. -->
+								<template #option="{ option }"
+									><span
+										style="display: inline-flex; align-items: center; gap: 8px"
+										><ProviderLogo
+											:upstream="upstreamValueOf(option.label || option)"
+											:size="16"
+										/>{{ option.label || option }}</span
+									></template
+								>
+								<template #selected="{ label, placeholder }"
+									><span
+										style="display: inline-flex; align-items: center; gap: 8px"
+										><ProviderLogo
+											v-if="label"
+											:upstream="upstreamValueOf(label)"
+											:size="16"
+										/>{{ label || placeholder }}</span
+									></template
+								>
+							</JvCombo>
 						</div>
 					</div>
 
@@ -1042,7 +1063,11 @@
                    (Primary is reserved for the required next step -- Connect account when
                    there is none, and Save configuration.) -->
 							<button
-								v-if="canEdit && !(panelRow._connect && panelRow._connect.open)"
+								v-if="
+									canEdit &&
+									!isClaudeSubscription(panelRow) &&
+									!(panelRow._connect && panelRow._connect.open)
+								"
 								:disabled="!editable"
 								@click="openConnectPanel(panelRow)"
 								class="jv-btn jv-btn--sm jv-btn--ghost"
@@ -1126,7 +1151,7 @@
 								</button>
 							</div>
 						</template>
-						<!-- PASTE-BACK (OpenAI/Google/xAI): open sign-in, paste the callback URL. -->
+						<!-- PASTE-BACK (OpenAI/Google/xAI/Anthropic): open sign-in, paste the callback URL or code. -->
 						<template v-else>
 							<div class="jv-cstep">
 								<div class="jv-cnum">1</div>
@@ -1925,6 +1950,7 @@
 							"
 						>
 							<button
+								v-if="!isClaudeSubscription(m)"
 								type="button"
 								class="jv-btn jv-btn--sm jv-btn--ghost"
 								:disabled="
@@ -1942,6 +1968,9 @@
 							>
 								{{ subTest.testing ? "Testing…" : "Test" }}
 							</button>
+							<span v-else style="font-size: 12px; color: var(--text-3)">
+								Claude is checked on the first chat.
+							</span>
 						</div>
 						<Banner
 							v-if="singleMode && subTest.result"
@@ -2023,7 +2052,7 @@
 									</div>
 								</div>
 							</template>
-							<!-- PASTE-BACK (OpenAI/Google/xAI): open sign-in, paste the callback URL. -->
+							<!-- PASTE-BACK (OpenAI/Google/xAI/Anthropic): open sign-in, paste the callback URL or code. -->
 							<template v-else>
 								<div class="jv-cstep">
 									<div class="jv-cnum">1</div>
@@ -2546,7 +2575,7 @@ const credTypes = [
 	{
 		value: "subscription",
 		label: "Chat subscription",
-		desc: "Sign in with your ChatGPT plan",
+		desc: "Use your ChatGPT or Claude plan",
 	},
 	{
 		value: "api_key",
@@ -2559,18 +2588,16 @@ const credTypes = [
 // this list if the control ever comes back.)
 const upstreamOpts = [
 	{ value: "openai", label: "OpenAI" },
+	{ value: "anthropic", label: "Anthropic" },
 	{ value: "xai", label: "xAI Grok" },
 	{ value: "kimi", label: "Kimi (Moonshot)" },
 ];
-// upstream value -> the OAuth provider label the backend _PROVIDER_OAUTH_MAP is
-// keyed by (begin_pool_account_signin needs the label, not the upstream value).
-// MUST match jarvis/oauth/providers.py _PROVIDER_OAUTH_MAP keys.
-const UPSTREAM_OAUTH_PROVIDER = {
-	openai: "OpenAI",
-	anthropic: "Anthropic",
-	xai: "xAI Grok",
-	kimi: "Kimi (Moonshot)",
-};
+// Use the same provider labels for selection, saving and source chips. Claude
+// signs in through its own relay (beginClaudeCliLogin, no `provider` argument);
+// the other providers pass this label to beginPoolAccountSignin for OAuth.
+const UPSTREAM_PROVIDER = Object.fromEntries(
+	upstreamOpts.map(({ value, label }) => [value, label])
+);
 // JvCombo speaks display LABELS; a row stores `upstream` as the VALUE the pool spec
 // requires ("openai" / "google"). Bridge the two rather than letting "OpenAI" reach
 // the spec (the fleet validates upstream against openai|anthropic|google and 422s).
@@ -2580,6 +2607,7 @@ const upstreamLabels = upstreamOpts.map((o) => o.label);
 const upstreamLabelOf = (v) =>
 	(upstreamOpts.find((o) => o.value === v) || {}).label || v || "your provider";
 const upstreamValueOf = (l) => (upstreamOpts.find((o) => o.label === l) || {}).value || l;
+const isClaudeSubscription = (m) => !!m && m.upstream === "anthropic";
 
 // ---- singleMode (onboarding) chat-subscription Test -----------------------
 // The API-key Test above (smTest) is a stateless bench-side probe: it never
@@ -3013,7 +3041,9 @@ const badgeMode = computed(() => {
 	// forces the cliproxy/proxy path (compute_proxy_active), so reflect that.
 	if (llmMode.value === "quick") {
 		const r0 = rows.value[0];
-		return r0 && r0.credentialType === "subscription" ? "proxy" : "direct";
+		return r0 && r0.credentialType === "subscription" && !isClaudeSubscription(r0)
+			? "proxy"
+			: "direct";
 	}
 	if (llmMode.value === "preset") return selectedPreset.value ? "proxy" : "direct";
 	return deriveMode(validModels.value, null);
@@ -3099,6 +3129,11 @@ function blankConnect() {
 		error: "",
 		copied: false,
 		nonce: "",
+		// The Claude browser sign-in's flow id (fleet-agent's login_id). Kept
+		// separate from `nonce` (the paste-back providers' own flow id) rather
+		// than overloading one field, since the two never mix on one row -
+		// upstream picks exactly one of beginPoolAccountSignin/beginClaudeCliLogin.
+		loginId: "",
 		authorizeUrl: "",
 		pastedUrl: "",
 		reconnectIdx: null,
@@ -3150,19 +3185,10 @@ function copyTextWithFallback(text) {
 
 // Compact "source" label for a list row (unified failover list, !singleMode
 // only) - e.g. "Subscription · OpenAI" / "API key · Anthropic".
-// Subscription upstream key (openai / google / xai / kimi — what the pool editor
-// stores, same keys ProviderLogo maps to a logo) -> its display label. Without the
-// full map, Kimi/xAI/Gemini rows all mislabelled as "OpenAI" while showing the
-// correct logo. Unknown upstream falls back to the raw value, never a wrong vendor.
-const SUB_UPSTREAM_LABELS = {
-	openai: "OpenAI",
-	xai: "xAI Grok",
-	kimi: "Kimi (Moonshot)",
-};
 function sourceChip(row) {
 	if (!row) return "";
 	if (row.credentialType === "subscription")
-		return "Subscription · " + (SUB_UPSTREAM_LABELS[row.upstream] || row.upstream || "OpenAI");
+		return "Subscription · " + (UPSTREAM_PROVIDER[row.upstream] || row.upstream || "OpenAI");
 	return "API key · " + (row.provider || "-");
 }
 
@@ -3514,6 +3540,9 @@ function setPanelSource(src) {
 // model" doesn't leave a dead row in the pool.
 function closePanel() {
 	const r = panelRow.value;
+	// A Claude sign-in left in flight on this row has a real CLI process on the
+	// container; closing the whole panel must cancel it like the step's own Cancel.
+	if (r && r._connect && r.upstream === "anthropic" && r._connect.loginId) closeConnect(r);
 	// Add-mode api_key row, checkbox on, filled in: expand into the vendor's
 	// resilience chain before the empty-row cleanup below (a freshly-expanded
 	// row is never "empty").
@@ -4350,8 +4379,18 @@ async function startConnect(m, reconnectIdx = null, opts = {}) {
 		}
 	}
 	try {
-		const provider = UPSTREAM_OAUTH_PROVIDER[m.upstream] || "OpenAI";
-		const res = await api.beginPoolAccountSignin(provider, m.model.trim());
+		// Claude has no OAuth exchange of its own (CLAUDE-LOGIN-CONTRACT.md): the
+		// official Claude CLI runs its own sign-in inside the tenant container, and
+		// this relay only starts it and gets back the authorize URL to open. Treated
+		// like a code_only_paste provider below (isCodeOnlyPaste("anthropic")), the
+		// same bare-code paste xAI uses.
+		const isClaude = m.upstream === "anthropic";
+		const res = isClaude
+			? await api.beginClaudeCliLogin(m.model.trim())
+			: await api.beginPoolAccountSignin(
+					UPSTREAM_PROVIDER[m.upstream] || "OpenAI",
+					m.model.trim()
+			  );
 		// Backend returns an envelope: {ok:true, data:{nonce, authorize_url, …}} or
 		// {ok:false, error:{code, message}}. Unwrap data; surface errors instead of
 		// hanging on "Starting sign-in…".
@@ -4362,7 +4401,8 @@ async function startConnect(m, reconnectIdx = null, opts = {}) {
 			return;
 		}
 		const d = res.data || {};
-		m._connect.nonce = d.nonce;
+		if (isClaude) m._connect.loginId = d.login_id || "";
+		else m._connect.nonce = d.nonce;
 		m._connect.loading = false;
 		if (d.device_flow) {
 			// Device-code (Kimi): no authorize URL, no paste. Show the user_code +
@@ -4530,7 +4570,9 @@ async function _placeConnectedAccount(row, d) {
 	m._connect = blankConnect();
 }
 async function finishConnect(m) {
-	if (!m._connect || !m._connect.nonce) return;
+	const isClaude = m.upstream === "anthropic";
+	const flowId = m._connect && (isClaude ? m._connect.loginId : m._connect.nonce);
+	if (!m._connect || !flowId) return;
 	if (!(m._connect.pastedUrl || "").trim()) {
 		m._connect.error = isCodeOnlyPaste(m.upstream)
 			? "Paste the code you were shown."
@@ -4539,13 +4581,15 @@ async function finishConnect(m) {
 	}
 	m._connect.loading = true;
 	m._connect.error = "";
-	// The token exchange is part of the Connect, so the editor is inert for it. It is
+	// The exchange is part of the Connect, so the editor is inert for it. It is
 	// released before _placeConnectedAccount, which owns the apply and raises the
 	// overlay again with its own label.
 	setBusy("Connecting your account…");
 	let res = null;
 	try {
-		res = await api.completePoolAccountSignin(m._connect.nonce, m._connect.pastedUrl.trim());
+		res = isClaude
+			? await api.completeClaudeCliLogin(flowId, m._connect.pastedUrl.trim())
+			: await api.completePoolAccountSignin(flowId, m._connect.pastedUrl.trim());
 	} catch (e) {
 		m._connect.loading = false;
 		m._connect.error = _err(e);
@@ -4567,12 +4611,18 @@ async function finishConnect(m) {
 	// Place the (re)connected account. The backend mints a fresh account_ref on
 	// every sign-in, so it can't be a dedupe key: a per-account Reconnect refreshes
 	// that exact slot (reconnectIdx); otherwise fold onto an existing account with
-	// the same email; otherwise append a new one. The just-minted OAuth blob lives
+	// the same email; otherwise append a new one. The just-minted credential lives
 	// only in memory until the pool is saved, so _placeConnectedAccount persists
 	// immediately (unless footerless onboarding, where the host CTA drives save).
 	await _placeConnectedAccount(m, res.data || {});
 }
 function closeConnect(m) {
+	// Best-effort: a Claude sign-in in flight has a real detached CLI process and
+	// transcript on the container (unlike the paste-back providers' bare in-memory
+	// nonce), so tell fleet to kill it rather than leaving it to expire on its own
+	// TTL. Never blocks the panel closing on the result.
+	const loginId = m._connect && m.upstream === "anthropic" && m._connect.loginId;
+	if (loginId) Promise.resolve(api.cancelClaudeCliLogin(loginId)).catch(() => {});
 	m._connect = blankConnect();
 }
 function copyConnectUrl(m, url) {
@@ -4845,14 +4895,14 @@ function buildSaveModels(sourceRows) {
 				// the customer had picked one. Admin later rejected the apply with
 				// "provider + model required in oauth mode", but by then the wizard
 				// had already told the customer their connection was saved.
-				// UPSTREAM_OAUTH_PROVIDER is the same upstream-value -> label map the
+				// UPSTREAM_PROVIDER is the same upstream-value -> label map the
 				// OAuth sign-in call already uses (line ~3455), so a row that never
 				// resolves a label (should not happen - setCredType defaults upstream
 				// to "openai") posts an EMPTY provider here rather than a silently
 				// invented one - validatePool (jarvis/llm/pool.js) then refuses the
 				// save locally with a clear message instead of letting admin be the
 				// only thing that ever checks this.
-				provider: UPSTREAM_OAUTH_PROVIDER[r.upstream] || "",
+				provider: UPSTREAM_PROVIDER[r.upstream] || "",
 				model: (r.model || "").trim(),
 				order: i,
 				subscription: {
