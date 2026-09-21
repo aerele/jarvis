@@ -32,6 +32,9 @@ const api = vi.hoisted(() => ({
 	getDirectSubscriptionStatus: vi.fn(),
 	beginPoolAccountSignin: vi.fn(),
 	completePoolAccountSignin: vi.fn(),
+	beginClaudeCliLogin: vi.fn(),
+	completeClaudeCliLogin: vi.fn(),
+	cancelClaudeCliLogin: vi.fn(),
 }));
 vi.mock("@/api", () => api);
 
@@ -1093,5 +1096,286 @@ describe("row logo matches the row's own provider (jarvis: AI-models row icon bu
 
 		expect(subRow.find('[role="img"]').attributes("aria-label")).toBe("OpenAI logo");
 		expect(apiKeyRow.find('[role="img"]').attributes("aria-label")).toBe("Anthropic logo");
+	});
+});
+
+describe("Claude sign-in", () => {
+	// CLAUDE-LOGIN-CONTRACT.md: Claude has no token to paste. startConnect opens
+	// the official Claude CLI's own sign-in (relayed through beginClaudeCliLogin)
+	// and finishConnect submits the pasted code (completeClaudeCliLogin), the same
+	// bare-code paste xAI uses.
+	function claudeRow(connectOverrides = {}) {
+		return {
+			credentialType: "subscription",
+			upstream: "anthropic",
+			model: "claude-opus-5",
+			accounts: [],
+			_connect: { loading: false, pastedUrl: "", ...connectOverrides },
+		};
+	}
+
+	it("Open sign-in stores the authorize URL and login id, and switches to the code paste step", async () => {
+		const w = await mountEditor({ singleMode: true, footerless: true });
+		const row = claudeRow();
+		api.beginClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: {
+				login_id: "login-1",
+				authorize_url: "https://claude.com/cai/oauth/authorize?code=true",
+				expires_at: 0,
+			},
+		});
+		await w.vm.startConnect(row, null, { openTab: false });
+		expect(api.beginClaudeCliLogin).toHaveBeenCalledWith("claude-opus-5");
+		expect(api.beginPoolAccountSignin).not.toHaveBeenCalled();
+		expect(row._connect.loginId).toBe("login-1");
+		expect(row._connect.authorizeUrl).toBe("https://claude.com/cai/oauth/authorize?code=true");
+		// Claude is treated like a code_only_paste provider (same as xAI): a bare
+		// code, never a callback URL.
+		expect(w.vm.isCodeOnlyPaste(row.upstream)).toBe(true);
+		expect(w.vm.pasteTitle(row.upstream)).toBe("Paste the code");
+	});
+
+	it("an invalid code keeps the panel open with an error and places no account", async () => {
+		const w = await mountEditor({ singleMode: true, footerless: true });
+		const row = claudeRow({
+			loginId: "login-1",
+			authorizeUrl: "https://claude.com/x",
+			pastedUrl: "bad",
+		});
+		api.completeClaudeCliLogin.mockResolvedValue({
+			ok: false,
+			error: { code: "invalid_code", message: "Check the pasted code and try again." },
+		});
+		await w.vm.finishConnect(row);
+		expect(row.accounts).toHaveLength(0);
+		expect(row._connect.loading).toBe(false);
+		expect(row._connect.error).toMatch(/pasted code/i);
+	});
+
+	it("success places one connected account with the code never retained", async () => {
+		const w = await mountEditor({ singleMode: true, footerless: true });
+		const row = claudeRow({
+			loginId: "login-1",
+			authorizeUrl: "https://claude.com/x",
+			pastedUrl: "the-pasted-code-1234",
+		});
+		api.completeClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: {
+				capture_id: "capture-test",
+				account_ref: "CLAUDE_test",
+				upstream: "anthropic",
+				label: "Claude subscription",
+				account_email: "me@example.com",
+			},
+		});
+		await w.vm.finishConnect(row);
+		expect(api.completeClaudeCliLogin).toHaveBeenCalledWith("login-1", "the-pasted-code-1234");
+		expect(row.accounts).toHaveLength(1);
+		expect(row.accounts[0].account_ref).toBe("CLAUDE_test");
+		expect(row.accounts[0].capture_id).toBe("capture-test");
+		expect(JSON.stringify(row.accounts)).not.toContain("the-pasted-code-1234");
+	});
+});
+
+describe("Anthropic subscription save", () => {
+	it("saves Anthropic as a fallback after sign-in", async () => {
+		setPool([subModel("gpt-5.6-terra", 0, [account("SUB_existing", "test@example.com")])]);
+		const w = await mountEditor();
+		w.vm.openAdd();
+		const row = w.vm.rows[w.vm.rows.length - 1];
+		w.vm.setCredType(row, "subscription");
+		row.upstream = "anthropic";
+		w.vm.onUpstreamChange(row);
+		w.vm.llmMode = "custom";
+		api.beginClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: { login_id: "login-1", authorize_url: "https://claude.com/x", expires_at: 0 },
+		});
+		await w.vm.startConnect(row, null, { openTab: false });
+		row._connect.pastedUrl = "the-pasted-code-1234";
+		api.completeClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: {
+				capture_id: "capture-claude",
+				account_ref: "CLAUDE_new",
+				upstream: "anthropic",
+				label: "Claude subscription",
+			},
+		});
+		await w.vm.finishConnect(row);
+		await idle();
+		expect(api.saveLlmPool).toHaveBeenCalledTimes(1);
+		expect(savedModels()[1].provider).toBe("Anthropic");
+		expect(savedModels()[1].subscription.accounts[0].capture_id).toBe("capture-claude");
+		expect(w.text()).toContain("Subscription · Anthropic");
+		expect(w.text()).not.toContain("Choose a provider for your chat subscription.");
+		expect(w.vm.upstreamLabelOf("anthropic")).toBe("Anthropic");
+	});
+});
+
+describe("saved Anthropic subscription flows", () => {
+	const claude = (order = 1) =>
+		subModel("claude-opus-5", order, [
+			{
+				upstream: "anthropic",
+				account_ref: "CLAUDE_stored",
+				label: "Claude subscription",
+			},
+		]);
+	const codex = () => subModel("gpt-5.6-terra", 0, [account("SUB_stored", "test@example.com")]);
+	const apiKey = () => keyModel("anthropic", "claude-sonnet-5", 0);
+
+	it.each(["codex", "api_key"])(
+		"applies both orders with %s and retains stored credentials",
+		async (kind) => {
+			setPool([kind === "codex" ? codex() : apiKey(), claude()]);
+			const w = await mountEditor();
+			for (let n = 0; n < 2; n++) {
+				w.vm.move(0, 1);
+				await w.vm.applyOrder();
+				await idle();
+				const models = savedModels();
+				const c = models.find((m) => m.model === "claude-opus-5");
+				expect(c.provider).toBe("Anthropic");
+				expect(c.subscription.accounts).toEqual([
+					{
+						upstream: "anthropic",
+						account_ref: "CLAUDE_stored",
+						label: "Claude subscription",
+						capture_id: "",
+					},
+				]);
+				expect(models[0].model).toBe(
+					n === 0
+						? "claude-opus-5"
+						: kind === "codex"
+						? "gpt-5.6-terra"
+						: "claude-sonnet-5"
+				);
+				expect(w.vm.orderDirty).toBe(false);
+				expect(w.vm.busy.active).toBe(false);
+			}
+			expect(api.saveLlmPool).toHaveBeenCalledTimes(2);
+		}
+	);
+
+	it("reconnect replaces the stored Claude account without duplicating the row", async () => {
+		setPool([codex(), claude()]);
+		const w = await mountEditor();
+		w.vm.quickReconnect(1);
+		const row = w.vm.panelRow;
+		api.beginClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: { login_id: "login-2", authorize_url: "https://claude.com/x", expires_at: 0 },
+		});
+		await w.vm.startConnect(row, row._connect.reconnectIdx, { openTab: false });
+		row._connect.pastedUrl = "the-pasted-code-5678";
+		api.completeClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: {
+				capture_id: "capture-reconnect",
+				account_ref: "CLAUDE_reconnected",
+				upstream: "anthropic",
+				label: "Claude subscription",
+			},
+		});
+		await w.vm.finishConnect(row);
+		await idle();
+		expect(savedModels()).toHaveLength(2);
+		expect(savedModels()[1].provider).toBe("Anthropic");
+		expect(savedModels()[1].subscription.accounts).toHaveLength(1);
+		expect(savedModels()[1].subscription.accounts[0].capture_id).toBe("capture-reconnect");
+		expect(api.beginPoolAccountSignin).not.toHaveBeenCalled();
+		expect(api.beginClaudeCliLogin).toHaveBeenCalled();
+	});
+
+	it("editing a Claude model preserves its stored account", async () => {
+		setPool([codex(), claude()]);
+		const w = await mountEditor();
+		w.vm.openEdit(1);
+		w.vm.panelRow.model = "claude-sonnet-5";
+		await w.vm.runApply();
+		await idle();
+		expect(savedModels()[1].provider).toBe("Anthropic");
+		expect(savedModels()[1].model).toBe("claude-sonnet-5");
+		expect(savedModels()[1].subscription.accounts[0].account_ref).toBe("CLAUDE_stored");
+	});
+
+	it("failed sign-in preserves the connected account and does not save", async () => {
+		setPool([codex(), claude()]);
+		const w = await mountEditor();
+		w.vm.quickReconnect(1);
+		const row = w.vm.panelRow;
+		api.beginClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: { login_id: "login-3", authorize_url: "https://claude.com/x", expires_at: 0 },
+		});
+		await w.vm.startConnect(row, row._connect.reconnectIdx, { openTab: false });
+		row._connect.pastedUrl = "the-pasted-code-9999";
+		api.completeClaudeCliLogin.mockRejectedValueOnce(new Error("sign-in unavailable"));
+		await w.vm.finishConnect(row);
+		expect(api.saveLlmPool).not.toHaveBeenCalled();
+		expect(row.accounts[0].account_ref).toBe("CLAUDE_stored");
+		expect(row._connect.loading).toBe(false);
+		expect(w.vm.busy.active).toBe(false);
+	});
+
+	it("onboarding saves a stored Claude account with the correct provider", async () => {
+		setPool([claude(0)]);
+		const w = await mountEditor({ singleMode: true, footerless: true });
+		expect((await w.vm.save()).ok).toBe(true);
+		expect(savedModels()[0].provider).toBe("Anthropic");
+	});
+
+	it("removing ChatGPT preserves Claude as the only model", async () => {
+		setPool([codex(), claude()]);
+		const w = await mountEditor();
+		await w.vm.remove(0);
+		await idle();
+		expect(savedModels()).toHaveLength(1);
+		expect(savedModels()[0].provider).toBe("Anthropic");
+		expect(api.disconnectLlm).not.toHaveBeenCalled();
+	});
+
+	it("removing Claude preserves ChatGPT", async () => {
+		setPool([codex(), claude()]);
+		const w = await mountEditor();
+		await w.vm.remove(1);
+		await idle();
+		expect(savedModels()).toHaveLength(1);
+		expect(savedModels()[0].provider).toBe("OpenAI");
+	});
+
+	it("disconnects the final Claude model through the disconnect endpoint", async () => {
+		setPool([claude(0)]);
+		const w = await mountEditor();
+		await w.vm.remove(0);
+		await idle();
+		expect(api.disconnectLlm).toHaveBeenCalledTimes(1);
+		expect(api.saveLlmPool).not.toHaveBeenCalled();
+	});
+
+	it("a failed reorder releases the overlay and retains both stored accounts", async () => {
+		setPool([codex(), claude()]);
+		const w = await mountEditor();
+		api.saveLlmPool.mockRejectedValueOnce(new Error("save unavailable"));
+		w.vm.move(0, 1);
+		await w.vm.applyOrder();
+		expect(w.vm.busy.active).toBe(false);
+		expect(w.vm.applyResult.kind).toBe("failed");
+		expect(w.vm.rows.flatMap((r) => r.accounts.map((a) => a.account_ref))).toEqual([
+			"SUB_stored",
+			"CLAUDE_stored",
+		]);
+	});
+
+	it("rejects Claude between Codex and an API fallback before saving", async () => {
+		setPool([codex(), claude(), keyModel("openai", "gpt-4o", 2)]);
+		const w = await mountEditor();
+		await w.vm.save();
+		expect(api.saveLlmPool).not.toHaveBeenCalled();
+		expect(w.text()).toContain("keep Claude either first or last");
 	});
 });
