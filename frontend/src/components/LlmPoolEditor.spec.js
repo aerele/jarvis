@@ -520,7 +520,7 @@ describe("api-key model defaults survive a failed catalog fetch", () => {
 		Mistral: "mistral-large-latest",
 		Groq: "openai/gpt-oss-120b",
 		"Together AI": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-		DeepSeek: "deepseek-v4-flash",
+		DeepSeek: "deepseek-flash",
 		"Moonshot (Kimi)": "kimi-k2.6",
 		"xAI Grok": "grok-4.5",
 		"GLM / Z.ai": "glm-4.7",
@@ -560,7 +560,7 @@ describe("api-key model defaults survive a failed catalog fetch", () => {
 		const row = w.vm.rows[0] || (w.vm.rows.push(w.vm.newRow?.() ?? {}), w.vm.rows[0]);
 
 		w.vm.onProviderChange(row, "DeepSeek");
-		expect(row.model).toBe("deepseek-v4-flash");
+		expect(row.model).toBe("deepseek-flash");
 		expect(row.baseUrl).toBe("https://api.deepseek.com");
 
 		w.vm.onProviderChange(row, "Groq");
