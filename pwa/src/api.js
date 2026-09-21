@@ -19,8 +19,6 @@ export const renameConversation = (conversation, title) =>
 	call(CHAT + "rename_conversation", { conversation, title });
 export const setStar = (conversation, starred) =>
 	call(CHAT + "set_star", { conversation, starred: starred ? 1 : 0 });
-export const setAutoApply = (conversation, value) =>
-	call(CHAT + "set_auto_apply", { conversation, value: value ? 1 : 0 });
 
 // Model name for the chat header, the model/effort pickers, and whether the mic
 // is allowed to appear (STT is off unless the admin configured a transcription

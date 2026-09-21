@@ -65,12 +65,6 @@ export const setStar = (conversation, starred) =>
 	call("jarvis.chat.api.set_star", { conversation, starred: starred ? 1 : 0 });
 export const retryMessage = (message) => call("jarvis.chat.api.retry_message", { message });
 export const getChatUiSettings = () => call("jarvis.chat.api.get_chat_ui_settings");
-// Toggle per-conversation "auto-apply changes" (skip the write-safety
-// confirmation before mutating ERP data). Off = confirm every gated write
-// (default). Enabling requires System Manager (a non-admin gets a 403);
-// disabling is always allowed for the owner. Response: {ok, data:{auto_apply}}.
-export const setAutoApply = (conversation, value) =>
-	call("jarvis.chat.api.set_auto_apply", { conversation, value: value ? 1 : 0 });
 // Estimated token usage (this chat / this month / total + monthly budget).
 // Response also carries a "measured" block (real gateway-recorded counters +
 // the caller's own monthly_token_limit) once the backend records usage —

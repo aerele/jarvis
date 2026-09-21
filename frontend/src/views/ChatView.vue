@@ -5066,11 +5066,6 @@ const updateBannerVisible = computed(
 		!hasUrgentAlert.value &&
 		!announcementVisible.value
 );
-// Per-conversation "auto-apply changes" (issue #186): seeded from
-// get_conversation().conversation.auto_apply on each load; the toggle reflects
-// THIS chat. autoApplyNote surfaces the admin-only-enable message.
-const convAutoApply = ref(false);
-const autoApplyNote = ref("");
 // Which builder page started this thread ("dashboards" / "triggers" / ""),
 // from get_conversation. A Dashboards build is an ordinary conversation in
 // this list; this is the only thing that says its html artifacts are
@@ -5696,25 +5691,6 @@ const usagePct = computed(() => {
 // for frappe-ui; the .jv-dark class + inline paletteVars below keep the jv-*
 // scoped styles untouched.
 const { theme, effectiveDark, paletteVars, setTheme, toggleTheme } = useJarvisTheme();
-// Flip "confirm before changes" for THIS conversation (issue #186). Optimistic;
-// reverts on failure. auto_apply=1 = skip confirmation (auto mode). Enabling is
-// admin-only server-side - a non-admin gets a 403, so we revert + show a note.
-async function toggleAutoApply() {
-	if (!currentId.value) return;
-	const next = convAutoApply.value ? 0 : 1;
-	autoApplyNote.value = "";
-	convAutoApply.value = !!next; // optimistic
-	try {
-		const r = await api.setAutoApply(currentId.value, next);
-		// Response envelope is {ok, data:{auto_apply}} - trust the server's value.
-		if (r && r.data && typeof r.data.auto_apply !== "undefined")
-			convAutoApply.value = !!r.data.auto_apply;
-	} catch (e) {
-		convAutoApply.value = !next; // revert
-		// Enabling requires System Manager; a non-admin gets a PermissionError (403).
-		if (next) autoApplyNote.value = "Only an administrator can enable auto-apply.";
-	}
-}
 
 // Phase 1: streaming/metrics, live tool activity, file input, mentions, stop
 const runStartMs = ref(0);
@@ -9010,10 +8986,6 @@ async function loadConversation(id) {
 	// clicked — and leave it gone for good when that refetch rejects.
 	originPage.value = d?.conversation?.origin_page || "";
 	originOf.value = id;
-	// Per-conversation auto-apply + a fresh confirm-card slate for this chat
-	// (issue #186): a pending write from another conversation must not linger.
-	convAutoApply.value = !!(d?.conversation && d.conversation.auto_apply);
-	autoApplyNote.value = "";
 	// Per-conversation confirm-card slate (issue #186): drop any parked cards from
 	// OTHER conversations, then re-surface this conversation's still-live parked
 	// confirmations (R3 fix for #3 - survives reload / reconnect).
@@ -12090,15 +12062,13 @@ watchEffect(() => {
 			starredCount: starredCount.value,
 			toolCount: toolCount.value,
 		},
-		convAutoApply: convAutoApply.value,
-		autoApplyNote: autoApplyNote.value,
 		modelLabel: modelLabel.value,
 		ui: ui.value,
 	});
 });
 onMounted(() => {
 	// Actions with chat side-effects the panes invoke when a chat is active.
-	store.registerSettingsActions({ toggleAutoApply, clearAllHistory });
+	store.registerSettingsActions({ clearAllHistory });
 });
 onUnmounted(() => {
 	store.setChatContext(null);

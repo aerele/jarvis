@@ -124,7 +124,6 @@ const renaming = ref(false);
 const renameText = ref("");
 const menuError = ref("");
 const starred = ref(false);
-const autoApply = ref(false);
 
 const scroller = ref(null);
 const composer = ref(null);
@@ -287,7 +286,6 @@ async function load(force = false) {
 		const d = await api.getConversation(convId.value);
 		conversation.value = d?.conversation || null;
 		messages.value = d?.messages || [];
-		autoApply.value = !!d?.conversation?.auto_apply;
 		const row = store.conversations.find((c) => c.name === convId.value);
 		if (row) starred.value = !!row.starred;
 		// A reply still streaming when we (re)opened the chat: restore the busy
@@ -542,18 +540,6 @@ async function toggleStar() {
 		store.loadConversations();
 	} catch {
 		starred.value = !next;
-	}
-}
-
-async function toggleAutoApply() {
-	const next = !autoApply.value;
-	menuError.value = "";
-	try {
-		await api.setAutoApply(convId.value, next);
-		autoApply.value = next;
-	} catch (e) {
-		// Only a System Manager may turn this on — the server is the authority.
-		menuError.value = e?.message || "Only a System Manager can enable auto-apply.";
 	}
 }
 
@@ -1102,44 +1088,6 @@ onUnmounted(() => {
 					</svg>
 					Rename chat
 				</button>
-
-				<!-- Auto-apply removes the approval gate for this chat: the agent
-				     commits ERP writes without asking. It is the single most
-				     dangerous switch in the product, so it looks like one. -->
-				<div class="jv-danger">
-					<svg
-						viewBox="0 0 24 24"
-						width="18"
-						height="18"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-					>
-						<path
-							d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
-						/>
-						<path d="M12 9v4M12 17h.01" />
-					</svg>
-					<div class="jv-danger-main">
-						<div class="jv-danger-title">Auto-apply changes</div>
-						<div class="jv-danger-sub">
-							{{ agentName }} commits ERP writes without asking. Turns off approval
-							prompts.
-						</div>
-						<div v-if="menuError" class="jv-menu-error">{{ menuError }}</div>
-					</div>
-					<button
-						class="jv-toggle"
-						:class="{ 'is-on': autoApply }"
-						role="switch"
-						:aria-checked="autoApply"
-						@click="toggleAutoApply"
-					>
-						<span />
-					</button>
-				</div>
 			</template>
 		</div>
 	</Sheet>
@@ -1503,57 +1451,5 @@ onUnmounted(() => {
 }
 .jv-btn:disabled {
 	opacity: 0.55;
-}
-
-.jv-danger {
-	display: flex;
-	align-items: flex-start;
-	gap: 11px;
-	margin: 12px 0 0;
-	padding: 13px;
-	border: 1px solid var(--red);
-	border-radius: 12px;
-	background: var(--red-bg);
-	color: var(--red);
-}
-.jv-danger-main {
-	flex: 1;
-	min-width: 0;
-}
-.jv-danger-title {
-	font-size: 13.5px;
-	font-weight: 600;
-	color: var(--ink9);
-}
-.jv-danger-sub {
-	margin-top: 2px;
-	font-size: 12px;
-	line-height: 1.4;
-	color: var(--red);
-}
-.jv-toggle {
-	flex: none;
-	width: 44px;
-	height: 26px;
-	padding: 3px;
-	border: 0;
-	border-radius: 999px;
-	background: var(--card3);
-	cursor: pointer;
-	transition: background 0.15s ease;
-}
-.jv-toggle span {
-	display: block;
-	width: 20px;
-	height: 20px;
-	border-radius: 999px;
-	background: #fff;
-	transition: transform 0.15s ease;
-}
-.jv-toggle.is-on {
-	background: var(--red);
-}
-.jv-toggle.is-on span {
-	transform: translateX(18px);
 }
 </style>

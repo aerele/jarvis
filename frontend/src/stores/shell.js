@@ -58,7 +58,7 @@ const paletteOpen = ref(false);
 // and degrade gracefully (—/empty) on non-chat routes. Shape when set:
 //   { conversationId, sessionStats:{ msgCount,userMsgCount,assistantMsgCount,
 //       avgTokensPerMsg,convCount,starredCount,toolCount },
-//     convAutoApply, autoApplyNote, modelLabel, ui }
+//     modelLabel, ui }
 // Tool-call counts are deliberately NOT here: they are read from the persisted
 // rows (jarvis.chat.api.get_tool_activity), not from this live snapshot (#551).
 const chatContext = ref(null);
@@ -68,7 +68,7 @@ function setChatContext(v) {
 
 // Actions with chat side-effects, registered by ChatView while mounted so panes
 // can invoke them when present (and disable/hint when absent). ChatView
-// registers { toggleAutoApply, clearAllHistory }.
+// registers { clearAllHistory }.
 const settingsActions = reactive({});
 function registerSettingsActions(obj) {
 	Object.assign(settingsActions, obj || {});
