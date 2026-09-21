@@ -2859,9 +2859,10 @@ const PROVIDER_DEFAULTS = {
 		model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
 		baseUrl: "https://api.together.xyz/v1",
 	},
-	// deepseek-chat was deprecated 2026-07-24 and only maps to deepseek-v4-flash
-	// during a compatibility window, so it must not be what a new key preselects.
-	DeepSeek: { model: "deepseek-v4-flash", baseUrl: "https://api.deepseek.com" },
+	// deepseek-flash is DeepSeek's rolling name for the latest Flash (V4.1 Flash
+	// since 2026-09-10); deepseek-v4-flash is retired and deepseek-chat deprecated,
+	// so neither may be what a new key preselects.
+	DeepSeek: { model: "deepseek-flash", baseUrl: "https://api.deepseek.com" },
 	"Moonshot (Kimi)": { model: "kimi-k2.6", baseUrl: "https://api.moonshot.ai/v1" },
 	"xAI Grok": { model: "grok-4.5", baseUrl: "https://api.x.ai/v1" },
 	"GLM / Z.ai": { model: "glm-4.7", baseUrl: "https://api.z.ai/api/paas/v4" },
