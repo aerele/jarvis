@@ -208,6 +208,15 @@
 								:theme="SEVERITY_THEME[f.severity] || 'gray'"
 								:label="severityBadgeLabel(f.severity)"
 							/>
+							<!-- advisory (non-attesting) signal: a visible worklist item that does
+							     NOT gate the run verdict or the clean attestation. -->
+							<Badge
+								v-if="f.advisory"
+								class="shrink-0"
+								variant="subtle"
+								theme="blue"
+								label="Advisory"
+							/>
 							<!-- jarvis#1062 P0-2/P1-3: the rule code used to sit here as an
 							     unlabeled, truncated monospace column - engineering output
 							     ahead of the human summary. It now lives ONLY in the
