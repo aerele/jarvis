@@ -531,6 +531,7 @@ def persist_tool_receipt(
 	armed_by_macro: str | None = None,
 	armed_by_skill: str | None = None,
 	tool_call_id: str | None = None,
+	flip_token: str | None = None,
 ) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
 	publish the realtime tool:result event, running as the conversation owner so
@@ -554,7 +555,15 @@ def persist_tool_receipt(
 	  * ``(conversation, tool_call_id)`` is the durable idempotency key — a duplicate
 	    callback for the SAME tool call dedupes instead of double-writing. ``tool_call_id``
 	    is null for legacy callbacks that carry no id (no dedupe then, but
-	    the seq race is still fixed)."""
+	    the seq race is still fixed).
+
+	``flip_token`` (PR 1 - action-card overhaul): when set, a matching PENDING
+	action-row (tool_call_id=flip_token, tool_status='pending') is FLIPPED IN PLACE
+	into this receipt (a real UPDATE, NOT the dedupe-insert - which would no-op on the
+	matching row), so the pre-action card and the post-action receipt are ONE durable
+	row. Falls back to the normal INSERT when there is no pending row to flip (a
+	directly-minted token, a File-Box auto-apply, or a token parked before this
+	shipped) - exactly one terminal row per token either way."""
 	result = result or {}
 	discarded = action_outcome == "discarded"
 	if discarded:
@@ -595,29 +604,72 @@ def persist_tool_receipt(
 		# callback for the same tool call is a no-op. Commit-first so the FOR UPDATE
 		# is the first statement (REPEATABLE-READ discipline).
 		frappe.db.commit()
-		msg_name = _locked_insert_chat_message(
-			conv_name,
-			{
-				"role": "tool",
-				"tool_name": tool,
-				"tool_args": frappe.as_json(args),
-				"tool_result": frappe.as_json(result) if result else None,
-				"tool_status": status,
-				"tool_call_id": tool_call_id or None,
-				"action_outcome": action_outcome or None,
-				"armed_by_macro": armed_by_macro or None,
-				"armed_by_skill": armed_by_skill or None,
-				"ref_doctype": ref_doctype,
-				"ref_name": ref_name,
-				"content": f"{tool} → {action_outcome or status}",
-			},
-			# ``(conversation, tool_call_id)`` dedupe — a duplicate callback for the SAME
-			# tool call is a no-op (R-6 out-of-band idempotency). Null id: no dedupe, but
-			# the seq race is still fixed by the shared FOR UPDATE.
-			dedupe_filters=(
-				{"conversation": conv_name, "tool_call_id": tool_call_id} if tool_call_id else None
-			),
-		)
+		# PR-1 flip-else-insert: when a confirm/discard/approve passes ``flip_token``,
+		# turn the PENDING action-row parked at park (tool_call_id=flip_token,
+		# tool_status='pending') INTO this receipt IN PLACE - one durable "action row"
+		# for the whole lifecycle, so there is no orphan pending row and no second
+		# receipt row. A real UPDATE, NOT the dedupe-insert (which would no-op on the
+		# matching row). Falls through to the INSERT when there is no pending row to
+		# flip (a directly-minted token, a File-Box auto-apply, or a token parked
+		# before this shipped); the exactly-one-terminal-row invariant holds either way.
+		msg_name = None
+		if flip_token:
+			frappe.db.sql(
+				"SELECT name FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE",
+				{"c": conv_name},
+			)
+			existing = frappe.db.get_value(
+				"Jarvis Chat Message",
+				{"conversation": conv_name, "tool_call_id": flip_token, "tool_status": "pending"},
+				"name",
+			)
+			if existing:
+				frappe.db.set_value(
+					"Jarvis Chat Message",
+					existing,
+					{
+						"tool_args": frappe.as_json(args),
+						"tool_result": frappe.as_json(result) if result else None,
+						"tool_status": status,
+						"action_outcome": action_outcome or None,
+						"armed_by_macro": armed_by_macro or None,
+						"armed_by_skill": armed_by_skill or None,
+						"ref_doctype": ref_doctype,
+						"ref_name": ref_name,
+						# Minimize retained pre-action data: the receipt renders from the
+						# outcome now, so the parked card snapshot is no longer needed.
+						"pending_card": None,
+						"content": f"{tool} → {action_outcome or status}",
+					},
+					update_modified=True,
+				)
+				msg_name = existing
+		if msg_name is None:
+			msg_name = _locked_insert_chat_message(
+				conv_name,
+				{
+					"role": "tool",
+					"tool_name": tool,
+					"tool_args": frappe.as_json(args),
+					"tool_result": frappe.as_json(result) if result else None,
+					"tool_status": status,
+					"tool_call_id": tool_call_id or flip_token or None,
+					"action_outcome": action_outcome or None,
+					"armed_by_macro": armed_by_macro or None,
+					"armed_by_skill": armed_by_skill or None,
+					"ref_doctype": ref_doctype,
+					"ref_name": ref_name,
+					"content": f"{tool} → {action_outcome or status}",
+				},
+				# ``(conversation, tool_call_id)`` dedupe — a duplicate callback for the
+				# SAME tool call is a no-op (R-6). Keyed on the agent call id OR the flip
+				# token, so a re-confirm after a fallback insert also dedupes.
+				dedupe_filters=(
+					{"conversation": conv_name, "tool_call_id": tool_call_id or flip_token}
+					if (tool_call_id or flip_token)
+					else None
+				),
+			)
 		frappe.db.commit()
 		if msg_name is None:
 			# Duplicate callback for the same tool call — already recorded (R-6 idempotent).

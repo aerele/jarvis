@@ -656,6 +656,9 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 				# denied connector call reads "failed", consistent with its receipt
 				# status; non-connector tools keep the outer ok.
 				action_outcome="confirmed" if api.envelope_ok(record["tool"], result) else "failed",
+				# PR-1: flip the parked PENDING action-row into this receipt in place
+				# (else insert, for a directly-minted / pre-deploy token).
+				flip_token=token,
 			)
 		except Exception:
 			frappe.log_error(
@@ -807,6 +810,9 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 				# denied connector call reads "failed", consistent with its receipt
 				# status; non-connector tools keep the outer ok.
 				action_outcome="confirmed" if api.envelope_ok(record["tool"], result) else "failed",
+				# PR-1: flip the parked PENDING action-row into this receipt in place
+				# (else insert, for a directly-minted / pre-deploy token).
+				flip_token=token,
 			)
 		except Exception:
 			frappe.log_error(
@@ -993,7 +999,7 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	if conv:
 		# Durable "discarded" chip: what the user declined, in their transcript.
 		try:
-			api.persist_tool_receipt(conv, tool, args, None, action_outcome="discarded")
+			api.persist_tool_receipt(conv, tool, args, None, action_outcome="discarded", flip_token=token)
 		except Exception:
 			frappe.log_error(title="dismiss_tool receipt failed", message=frappe.get_traceback())
 		# Correct the agent's stale pending_confirmation memory on its next turn.
