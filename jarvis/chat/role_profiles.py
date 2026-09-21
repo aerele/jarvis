@@ -199,7 +199,10 @@ SHARED_CORE_SKILLS: frozenset[str] = frozenset(
 # Skill-set additions on top of SHARED_CORE_SKILLS, spec §3 table.
 SKILL_SETS: dict[str, frozenset[str]] = {
 	"accounts": frozenset({"erpnext-accounts", "erpnext-assets", "india-compliance"}),
-	"sales": frozenset({"erpnext-selling", "erpnext-crm", "erpnext-support", "erpnext-telephony"}),
+	# "crm" is the standalone Frappe CRM app skill (distinct from ERPNext's own CRM
+	# module skill "erpnext-crm"); it rides the shared Sales roles like india-compliance
+	# rides the Accounts roles, since Frappe CRM defines no distinct role of its own.
+	"sales": frozenset({"erpnext-selling", "erpnext-crm", "erpnext-support", "erpnext-telephony", "crm"}),
 	"purchase": frozenset({"erpnext-buying", "erpnext-subcontracting", "erpnext-edi"}),
 	"stock-mfg": frozenset(
 		{
