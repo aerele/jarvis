@@ -297,7 +297,13 @@ def resolve_profile(user: str) -> ProfileChoice:
 		skill_sets = get_skill_sets()
 		shared_core = get_shared_core()
 		skills = tuple(sorted(shared_core.union(*(skill_sets[key] for key in matched))))
-		agent_id = "role-" + "+".join(matched)
+		# Joined with "_", not "+": openclaw 2026.9.x validates agent ids
+		# against ^[a-z0-9][a-z0-9_-]{0,63}$, and a "+" (e.g. a past
+		# "role-hr+projects" id) fails that check and exits the gateway with
+		# code 78 on every boot. Set keys themselves match
+		# _CONFIG_SET_KEY_RE (^[a-z][a-z0-9-]{0,30}$, no underscore), so "_"
+		# here can only ever be this separator, never ambiguous with a key.
+		agent_id = "role-" + "_".join(matched)
 		allow = get_tools_allow()
 		return ProfileChoice(
 			agent_id=agent_id,
@@ -317,7 +323,19 @@ def needed_profiles() -> list[dict]:
 	Skills here are persona skills only; custom/learned skill slugs are
 	unioned in by fleet at apply time for every profile, main included
 	(spec §7), not here.
+
+	Gated on the tenant's mirrored ``enable_role_profiles`` switch: a
+	disabled tenant returns ``[]`` unconditionally, so :func:`sync_role_profiles`
+	reconciles admin down to no role profiles at all. Before this gate the
+	switch only stopped ``resolve_profile`` from being consulted in chat
+	(``chat/api.py``) - it never stopped this push boundary, so a disabled
+	tenant could still have role profiles pushed and rendered into its
+	openclaw.json. :func:`resolve_profile` itself stays ungated here on
+	purpose (chat/api.py is the only caller that needs to gate chat use).
 	"""
+	if not frappe.db.get_single_value(_SETTINGS, "enable_role_profiles", cache=False):
+		return []
+
 	user_names = frappe.get_all(
 		"Has Role",
 		filters={"role": "Jarvis User", "parenttype": "User"},
@@ -682,7 +700,9 @@ def get_tools_allow() -> list[str]:
 def sync_role_profile_config() -> dict:
 	"""Pull the admin-owned role-profile config, cache it, mirror the
 	admin-decided ``enable_role_profiles`` flag, and re-push role profiles
-	when the config's identity (``version``) changed since the last pull.
+	when the config's identity (``version``) changed since the last pull, OR
+	when the mirrored ``enable_role_profiles`` flag itself changed (see the
+	dedicated note on that below).
 
 	Never raises: this runs from the daily scheduler tick (and can be called
 	ad hoc via ``bench execute``), so every failure mode degrades rather than
@@ -715,6 +735,16 @@ def sync_role_profile_config() -> dict:
 	the NEXT tick sees ``version != previous_version`` again and retries the
 	push rather than silently going stale for up to a day.
 
+	The forced re-push ALSO fires when the mirrored ``enable_role_profiles``
+	flag changed, even if ``version`` did not: the admin config's ``version``
+	only bumps on an unrelated content edit (a set/mapping/tool-tier change),
+	so a bare enable/disable toggle would otherwise sit unreflected in this
+	tenant's pushed role profiles (and the fleet render built from them)
+	until some other config edit happened to bump the version too - up to
+	the next unrelated change rather than the next daily tick. This does
+	not touch ``role_profiles_config_version`` on its own: the version field
+	only ever advances on an actual version change, per the rule above.
+
 	Returns ``{"synced": bool}``.
 	"""
 	phase = "pull"
@@ -736,6 +766,7 @@ def sync_role_profile_config() -> dict:
 		phase = "store"
 		version = data["version"]
 		previous_version = frappe.db.get_single_value(_SETTINGS, "role_profiles_config_version", cache=False)
+		previous_flag = frappe.db.get_single_value(_SETTINGS, "enable_role_profiles", cache=False)
 
 		frappe.db.set_value(
 			_SETTINGS,
@@ -745,15 +776,23 @@ def sync_role_profile_config() -> dict:
 				"role_profiles_config_synced_at": frappe.utils.now(),
 			},
 		)
-		frappe.db.set_single_value(_SETTINGS, "enable_role_profiles", 1 if data["enabled"] else 0)
+		new_flag = 1 if data["enabled"] else 0
+		frappe.db.set_single_value(_SETTINGS, "enable_role_profiles", new_flag)
+		# Cast previous_flag to the same 0/1 shape before comparing: an
+		# unsynced mirror reads back as None, and a bare `None != new_flag`
+		# comparison would misreport every tenant's FIRST sync as a "flag
+		# changed" push trigger, which is already covered (and redundant)
+		# with the version-change branch below on a first sync anyway.
+		flag_changed = (1 if previous_flag else 0) != new_flag
 
-		if version != previous_version:
+		if version != previous_version or flag_changed:
 			phase = "push"
 			_invalidate_config_cache()
 			push_result = sync_role_profiles(force=True)
 			if not push_result.get("pushed"):
-				raise RuntimeError("role-profile push failed; config cached but version left unadvanced")
-			frappe.db.set_value(_SETTINGS, _SETTINGS, {"role_profiles_config_version": version})
+				raise RuntimeError("role-profile push failed; config cached but not re-pushed")
+			if version != previous_version:
+				frappe.db.set_value(_SETTINGS, _SETTINGS, {"role_profiles_config_version": version})
 
 		return {"synced": True}
 	except Exception:
