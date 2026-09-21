@@ -2553,6 +2553,7 @@ const upstreamOpts = [
 // MUST match jarvis/oauth/providers.py _PROVIDER_OAUTH_MAP keys.
 const UPSTREAM_OAUTH_PROVIDER = {
 	openai: "OpenAI",
+	anthropic: "Anthropic",
 	xai: "xAI Grok",
 	kimi: "Kimi (Moonshot)",
 };
