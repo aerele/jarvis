@@ -1156,10 +1156,14 @@ class TestSkillAutorunPartition(FrappeTestCase):
 			frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill", "call_connector"}),
 		)
 
-	def test_create_custom_skill_is_not_covered_here_though_the_macro_covers_it(self):
-		# The explicit divergence from the macro's _ARMED_SKIP_COVERED (D-COVERED).
+	def test_create_custom_skill_is_now_braked_in_both_modes(self):
+		# Unification (design A4): create_custom_skill moved into the BRAKE, so it is
+		# covered by NEITHER armed mode now - previously the macro set covered it while
+		# the skill set did not (the exact drift this overhaul removes). It always
+		# parks in chat, an armed macro, AND an approved skill run.
 		self.assertNotIn("create_custom_skill", api._SKILL_AUTORUN_COVERED)
-		self.assertIn("create_custom_skill", api._ARMED_SKIP_COVERED)
+		self.assertNotIn("create_custom_skill", api._ARMED_SKIP_COVERED)
+		self.assertIn("create_custom_skill", api._BRAKE)
 
 	def test_run_method_is_covered(self):
 		self.assertIn("run_method", api._SKILL_AUTORUN_COVERED)

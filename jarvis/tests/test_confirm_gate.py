@@ -34,6 +34,38 @@ def _spy_mint():
 	return patch("jarvis.chat.pending_confirm.mint", side_effect=spy), captured
 
 
+class TestUnifiedBrakeCovered(FrappeTestCase):
+	"""Task 3.1: one unified brake set + one unified covered set across BOTH armed
+	modes (macro skip-confirmation and skill "Approve & run"). Before this, the two
+	COVERED sets diverged on create_custom_skill (a real drift bug); now they are
+	the SAME set - derived as ``_GATED_WRITES - _BRAKE`` - so they can never drift
+	again. create_custom_skill lives in the brake, so it is excluded from BOTH
+	covered sets (a deliberate behaviour change from the old macro set, which used
+	to cover it)."""
+
+	def test_brake_is_the_five_always_ask_tools(self):
+		self.assertEqual(
+			api._BRAKE,
+			frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill", "call_connector"}),
+		)
+
+	def test_covered_is_gated_minus_brake_unified_across_modes(self):
+		self.assertEqual(api._ARMED_SKIP_COVERED, api._SKILL_AUTORUN_COVERED)
+		self.assertEqual(api._ARMED_SKIP_COVERED, api._GATED_WRITES - api._BRAKE)
+		self.assertEqual(api._COVERED, api._GATED_WRITES - api._BRAKE)
+
+	def test_create_custom_skill_in_neither_covered_set(self):
+		self.assertNotIn("create_custom_skill", api._ARMED_SKIP_COVERED)
+		self.assertNotIn("create_custom_skill", api._SKILL_AUTORUN_COVERED)
+
+	def test_partition_holds_for_both_modes(self):
+		for never in (api._ARMED_SKIP_NEVER, api._SKILL_AUTORUN_NEVER):
+			self.assertEqual(api._ARMED_SKIP_COVERED | never, api._GATED_WRITES)
+			self.assertEqual(api._ARMED_SKIP_COVERED & never, frozenset())
+		self.assertEqual(api._ARMED_SKIP_NEVER, api._BRAKE)
+		self.assertEqual(api._SKILL_AUTORUN_NEVER, api._BRAKE)
+
+
 class TestGateParks(FrappeTestCase):
 	def test_gated_create_with_no_token_parks(self):
 		desc = "jarvis-test-gate-park-001"

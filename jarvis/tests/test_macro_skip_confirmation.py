@@ -210,12 +210,15 @@ class TestArmedSkipPartition(FrappeTestCase):
 			"never (always parks) - a tool in neither is an unclassified fail-open gap",
 		)
 
-	def test_irreversible_trio_plus_call_connector_never_skips(self):
-		# call_connector joins the trio: its per-action reversibility is opaque to
-		# the bench (unlike the well-understood ERPNext writes covered above), so
-		# an armed macro must still stop at it rather than fire it uncarded.
+	def test_brake_is_the_trio_plus_create_custom_skill_and_call_connector(self):
+		# Unified brake (design A4): the irreversible trio + create_custom_skill (a
+		# consequential meta-write) + call_connector (opaque per-action reversibility)
+		# always park. The macro and skill modes now share ONE brake, so
+		# create_custom_skill NO LONGER skips inside an armed macro - a deliberate
+		# behaviour change from the pre-unification macro set that covered it.
 		self.assertEqual(
-			_ARMED_SKIP_NEVER, frozenset({"cancel_doc", "delete_doc", "amend_doc", "call_connector"})
+			_ARMED_SKIP_NEVER,
+			frozenset({"cancel_doc", "delete_doc", "amend_doc", "create_custom_skill", "call_connector"}),
 		)
 
 	def test_run_method_is_covered(self):

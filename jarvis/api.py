@@ -1060,84 +1060,47 @@ def _gating_badge(tool: str) -> str:
 	return "writes_directly"
 
 
-# Armed-skip (macro skip-confirmation): an admin-armed macro (Jarvis Macro
-# .skip_confirmation, stamped onto its run conversation's skip_confirmation) runs
-# these WITHOUT a confirmation card - the BROAD covered set, far wider than the
-# create/update-only _AUTO_APPLYABLE, and INCLUDING run_method (which gates in
-# ordinary chat; skips only inside an armed macro). This is an explicit ALLOWLIST,
-# NOT `_GATED_WRITES - _ARMED_SKIP_NEVER`: a new gated tool must NOT become
-# armed-skippable by default. The partition invariant (test_armed_skip_partition)
-# asserts COVERED and NEVER are disjoint and together == _GATED_WRITES, so adding a
-# gated tool to neither set turns that test RED until a human consciously files it.
-# The irreversible trio + call_connector (_ARMED_SKIP_NEVER) always park; an
-# armed macro that hits one stops the run (D5). Bulk covered writes DO skip;
-# the F16 over-size cap still bounces them. A gated tool NOT in COVERED (e.g.
-# a bulk light write) parks in an armed run like any other excluded write.
-# call_connector joins the never-skip set (not merely omitted from covered,
-# per the invariant below): a connector WRITE's per-action reversibility is
-# opaque to the bench - a connector action can be anything the third-party
-# service defines, unlike the well-understood ERPNext writes covered above - so
-# an armed macro must still stop at a connector WRITE rather than fire it uncarded.
-# A connector SAFE READ (user-allowed, read-only, non-destructive) is the one
-# exception, and it is NOT handled here: the action-aware carve-out in _run_tool
-# (_connector_call_is_safe_read) runs a safe read BEFORE this gate block, so a
-# read never force-stops an armed run. This set therefore governs only connector
-# WRITES, which stay never-skip.
-_ARMED_SKIP_COVERED = frozenset(
+# The BRAKE (design §3 A3, "Option A"): the always-ask set. delete_doc,
+# cancel_doc, amend_doc, create_custom_skill, and call_connector ALWAYS park a
+# confirmation card - in ordinary chat, inside an armed skip-macro, AND inside an
+# approved "Approve & run" skill. The irreversible ERPNext trio is destructive;
+# create_custom_skill is a consequential meta-write (a skill that writes another
+# skill); a connector WRITE's per-action reversibility is opaque to the bench (its
+# action can be anything the third-party service defines), so no armed mode may
+# fire it uncarded. A connector SAFE READ (user-allowed, read-only, non-destructive)
+# is the one exception and is NOT decided here: _run_tool's action-aware carve-out
+# (_connector_call_is_safe_read) runs a safe read BEFORE the gate block, so a read
+# never force-stops an armed run - the brake governs only connector WRITES.
+_BRAKE = frozenset(
 	{
-		"create_doc",
-		"create_docs",
-		"update_doc",
-		"submit_doc",
-		"run_method",
-		"run_import",
-		"apply_workflow_action",
-		"send_email",
-		"share_doc",
-		"assign_to",
+		"delete_doc",
+		"cancel_doc",
+		"amend_doc",
 		"create_custom_skill",
-		"update_wiki",
+		"call_connector",
 	}
 )
-_ARMED_SKIP_NEVER = frozenset({"cancel_doc", "delete_doc", "amend_doc", "call_connector"})
-# Skill "Approve & run the plan" (design §3.4, D-COVERED): a conversation in an
-# APPROVED skill run (Jarvis Conversation.skill_autorun=1, stamped by the
-# approve_and_run endpoint on step-1 success) runs THESE covered writes without a
-# confirmation card. Like _ARMED_SKIP_COVERED this is an EXPLICIT fail-CLOSED
-# allowlist, NOT `_ARMED_SKIP_COVERED - {...}`: a new gated tool must NOT become
-# auto-runnable by default (this path has no site-wide kill switch, so an
-# unclassified tool defaults to carding). It DIVERGES from the macro set in ONE
-# tool: create_custom_skill is COVERED for a macro but NEVER here - a skill that
-# writes another skill is a consequential meta-write the user should still confirm.
-# The irreversible trio (delete/cancel/amend) + create_custom_skill + call_connector
-# make up _SKILL_AUTORUN_NEVER and always park (a park mid-run is a legit PAUSE that
-# resumes on confirm) - call_connector for the same opaque-reversibility reason as
-# _ARMED_SKIP_NEVER above, i.e. a connector WRITE never auto-runs. As there, a
-# connector SAFE READ (user-allowed, read-only, non-destructive) is the exception
-# and is NOT decided here: _run_tool's action-aware carve-out
-# (_connector_call_is_safe_read) runs a safe read BEFORE this gate block, so a read
-# never pauses an approved skill run; this set governs only connector WRITES. The
-# partition invariant (test_covered_and_never_partition_gated_writes) asserts COVERED
-# and NEVER are disjoint and together == _GATED_WRITES, so a gated tool filed in
-# neither turns that test RED until a human classifies it.
-_SKILL_AUTORUN_COVERED = frozenset(
-	{
-		"create_doc",
-		"create_docs",
-		"update_doc",
-		"submit_doc",
-		"run_import",
-		"apply_workflow_action",
-		"send_email",
-		"share_doc",
-		"assign_to",
-		"update_wiki",
-		"run_method",
-	}
-)
-_SKILL_AUTORUN_NEVER = frozenset(
-	{"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill", "call_connector"}
-)
+# The unified COVERED set (design §3 A4): every gated write that is NOT a brake
+# runs uncarded in BOTH armed modes - an admin-armed macro (skip_confirmation) and
+# an approved "Approve & run" skill (skill_autorun). Deriving it as
+# ``_GATED_WRITES - _BRAKE`` makes the two modes ONE rule that can never drift again
+# (they previously diverged on create_custom_skill, a real bug the action-card
+# overhaul fixes) and keeps the partition invariant (COVERED and BRAKE disjoint,
+# together == _GATED_WRITES) true by construction. FAIL-CLOSED signal for a FUTURE
+# gated tool: adding a tool to _GATED_WRITES auto-covers it in the armed modes, so
+# the pinned membership test (test_covered_is_the_exact_expected_set) goes RED until
+# a human consciously confirms the new tool may auto-run - or files it in _BRAKE.
+# run_method is covered (gates in ordinary chat; skips only inside an armed macro /
+# approved skill). Bulk covered writes skip too; the F16 over-size cap still bounces
+# an oversized batch.
+_COVERED = _GATED_WRITES - _BRAKE
+# Back-compat aliases: the gate branches and the existing suites refer to the
+# per-mode names; both modes now point at the SAME unified sets so they cannot drift
+# (design §3 A4 - the old macro/skill divergence on create_custom_skill is gone).
+_ARMED_SKIP_COVERED = _COVERED
+_ARMED_SKIP_NEVER = _BRAKE
+_SKILL_AUTORUN_COVERED = _COVERED
+_SKILL_AUTORUN_NEVER = _BRAKE
 # Sliding-TTL horizon for an approved run: the auto-run branch runs a covered write
 # uncarded only while the LAST covered write (skill_autorun_at, which slides forward
 # on each success) is within this window. It must comfortably EXCEED the longest idle
