@@ -146,6 +146,25 @@ class TestCleanAttestationPredicate(FrappeTestCase):
 	def test_shadow_never_allows_sentence(self):
 		self.assertFalse(agent_runs._clean_attestation_allowed("evaluated_clean", 0, shadow=True))
 
+	def test_advisory_findings_are_exempt_from_the_clean_gate(self):
+		# Advisory findings are visible worklist items but NON-attesting: the gate counts only
+		# NON-advisory findings, i.e. (findings_count - advisory_findings_count) == 0.
+		gate = agent_runs._clean_attestation_allowed
+		# a real exception alongside an advisory finding still blocks the sentence:
+		self.assertFalse(gate("evaluated_clean", 2, advisory_findings_count=1, shadow=False))
+		# a real exception alone still blocks (the gate formula changed - prove it still holds):
+		self.assertFalse(gate("evaluated_clean", 1, advisory_findings_count=0, shadow=False))
+		# ONLY advisory findings present => sentence allowed (advisory is exempt):
+		self.assertTrue(gate("evaluated_clean", 1, advisory_findings_count=1, shadow=False))
+		self.assertTrue(gate("evaluated_clean", 3, advisory_findings_count=3, shadow=False))
+		# shadow still suppresses even a pure-advisory run:
+		self.assertFalse(gate("evaluated_clean", 1, advisory_findings_count=1, shadow=True))
+		# a non-clean coverage verdict still suppresses regardless of the advisory split:
+		self.assertFalse(gate("partial", 1, advisory_findings_count=1, shadow=False))
+		# defensive (locks `== 0`, not `<= 0`): an over-reported advisory count that drives
+		# the difference NEGATIVE must still SUPPRESS (fail-closed), never flip to clean:
+		self.assertFalse(gate("evaluated_clean", 1, advisory_findings_count=2, shadow=False))
+
 
 # --------------------------------------------------------------------------- #
 # Unit — the render itself (the truthful fallback dashboard path)

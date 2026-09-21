@@ -102,6 +102,22 @@ def sync_agent_listings() -> dict:
 			continue
 		seen_slugs.add(slug)
 
+		# Vendoring sanity check (M1): the AUTHORITATIVE disjointness invariant
+		# (advisory ∩ statutory-coverage = ∅) is enforced at the store export
+		# (export_registry._token_sets fails loud). This hand-vendored registry could
+		# still drift. We cannot re-derive the statutory/advisory split here (no rules
+		# file on the bench), but a vendored advisory_tokens that is NOT a subset of
+		# rule_tokens is an unambiguous vendoring error — log it loudly so a bad
+		# re-vendor is diagnosable rather than silently dropping the finding at run time.
+		_adv = {str(t) for t in (a.get("advisory_tokens") or []) if t}
+		_rule = {str(t) for t in (a.get("rule_tokens") or []) if t}
+		if _adv - _rule:
+			frappe.log_error(
+				title="Jarvis: agent registry advisory_tokens not a subset of rule_tokens",
+				message=f"{slug}: advisory_tokens {sorted(_adv - _rule)} are not in rule_tokens "
+				f"{sorted(_rule)} — the vendored registry.json disagrees with the store export.",
+			)
+
 		# All shipped agents are delegate (A2): the listing is a body-free STUB —
 		# every catalog field EXCEPT the SKILL body, which must NEVER enter the
 		# customer DB. The bench emits only an enablement signal; admin resolves
@@ -146,6 +162,10 @@ def sync_agent_listings() -> dict:
 			# without ever holding a rule body/threshold. Empty for operators /
 			# legacy agents. Mirrors the bundle store's rules.ids.json.
 			"rule_tokens": frappe.as_json(a.get("rule_tokens") or []),
+			# the NON-attesting subset of rule_tokens (advisory findings). Its findings are
+			# valid but exempt from the coverage verdict + clean gate. Empty (absent from an
+			# OLD registry) -> coverage == rule_tokens, byte-identical to a pre-advisory bundle.
+			"advisory_tokens": frappe.as_json(a.get("advisory_tokens") or []),
 			"min_apps": frappe.as_json(a.get("min_apps") or []),
 			# R5-J9: the declarative operator write contract (manifest.writes[] —
 			# non-IP {doctype, mode} metadata the exporter emits). create_doc/
