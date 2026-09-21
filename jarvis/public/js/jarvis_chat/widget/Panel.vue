@@ -1313,24 +1313,49 @@ async function load() {
 		// panel was closed (or a dropped realtime frame) never shows here, even
 		// though the full chat has it. Best-effort: chat must work without it.
 		try {
+			// PR-1 reliability: the durable pending action-rows (get_conversation, above)
+			// are the PRIMARY source - a card raised while the panel was closed (or a
+			// dropped realtime frame) still shows on open, riding the reliable message
+			// pipeline. list_pending is the backstop. Merge rows-first, dedup by token.
+			const toEpoch = (s) => {
+				const t = Date.parse(String(s || "").replace(" ", "T"));
+				return Number.isFinite(t) ? Math.round(t / 1000) : null;
+			};
+			const rowItems = (messages.value || [])
+				.filter(
+					(m) =>
+						m.role === "tool" &&
+						m.tool_status === "pending" &&
+						m.pending_card &&
+						m.tool_call_id
+				)
+				.map((m) => ({
+					token: m.tool_call_id,
+					tool: m.tool_name || "",
+					summary: m.tool_name || "",
+					expires_at: toEpoch(m.expires_at),
+					approve_run: !!(m.pending_card && m.pending_card.approve_run),
+				}));
 			const pc = await listPendingConfirmations(convId.value);
 			const rows = (pc && pc.data && pc.data.pending) || [];
-			stream.value = {
-				...stream.value,
-				pending: rows.map((r) => ({
-					token: r.token,
-					tool: r.tool || "",
-					summary: r.summary || r.preview || "",
-					// Carry expires_at so orderedPending sorts by (expires_at,
-					// token) the same way the server does; without it a typed
-					// "confirm N" can select a different card than shown.
-					expires_at: r.expires_at ?? null,
-					// Same text-only signal the live push carries (chat_stream.mjs) -
-					// a resync must not silently lose it and fall back to offering a
-					// plain Confirm on a runnable card (P1, skill approve-and-run).
-					approve_run: pendingApproveRun(r.preview),
-				})),
-			};
+			const backstop = rows.map((r) => ({
+				token: r.token,
+				tool: r.tool || "",
+				summary: r.summary || r.preview || "",
+				// Carry expires_at so orderedPending sorts by (expires_at, token) the
+				// same way the server does; without it a typed "confirm N" can select a
+				// different card than shown.
+				expires_at: r.expires_at ?? null,
+				// Same text-only signal the live push carries (chat_stream.mjs) - a resync
+				// must not silently lose it and fall back to offering a plain Confirm on a
+				// runnable card (P1, skill approve-and-run).
+				approve_run: pendingApproveRun(r.preview),
+			}));
+			const byToken = new Map();
+			for (const c of [...rowItems, ...backstop]) {
+				if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
+			}
+			stream.value = { ...stream.value, pending: [...byToken.values()] };
 		} catch (e) {
 			/* leave whatever the live stream captured */
 		}
