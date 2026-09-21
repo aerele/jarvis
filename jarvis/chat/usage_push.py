@@ -56,10 +56,11 @@ _UTC = ZoneInfo("UTC")
 _TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
 _JARVIS_TOOL_NAME_RE = re.compile(r"jarvis__[A-Za-z0-9_]+")
 
-# Mirrors the admin profile validator: "" | "full" | role-[a-z0-9+-]{1,63}.
-# profile_agent_id already stores "" or a well-formed "role-*" id in
-# practice; this is cheap insurance against ever emitting something the
-# validator would 400 on.
+# Mirrors the admin profile validator: "" | "full" | role-[a-z0-9_+-]{1,63}
+# (admin's validator is being widened to accept "_" in the same train as
+# this fix). profile_agent_id already stores "" or a well-formed "role-*"
+# id in practice; this is cheap insurance against ever emitting something
+# the validator would 400 on.
 #
 # This is a READ/validation regex over already-stored profile_agent_id
 # values, not a generator - it deliberately keeps accepting "+" alongside
