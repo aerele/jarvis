@@ -272,7 +272,7 @@ class TestNormalizeProfile(FrappeTestCase):
 	"""``usage_push._normalize_profile`` / ``_PROFILE_RE``: this is a
 	READ-side validator over already-stored ``profile_agent_id`` values, not
 	a generator. ``role_profiles.resolve_profile`` now joins role-set keys
-	with "_" instead of "+" (openclaw 2026.9.x rejects "+" in agent ids), but
+	with "_" instead of "+" (the agent runtime (2026.9.x) rejects "+" in agent ids), but
 	historical rows pushed before that change still carry a "+"-joined id
 	(e.g. "role-hr+projects"), so this regex must keep accepting both."""
 
