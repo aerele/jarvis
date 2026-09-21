@@ -52,7 +52,7 @@ class TestRoleProfiles(FrappeTestCase):
 		self.assertIn("erpnext-accounts", c.skills)
 
 	def test_two_set_join_uses_underscore_separator(self):
-		"""openclaw 2026.9.x rejects "+" in agent ids
+		"""The agent runtime (2026.9.x) rejects "+" in agent ids
 		(^[a-z0-9][a-z0-9_-]{0,63}$); a combo role-profile id must join its
 		sorted set keys with "_" instead, never "+"."""
 		u = self._mk_user("rp-two-set@example.com", ["Jarvis User", "HR User", "Projects User"])
@@ -338,7 +338,7 @@ class TestNeededProfilesGate(FrappeTestCase):
 	tenant's mirrored ``enable_role_profiles`` switch previously only gated
 	chat use (``resolve_profile`` via ``chat/api.py``), never this push
 	boundary - a disabled tenant could still have role profiles pushed and
-	rendered into its openclaw.json. ``needed_profiles`` must now read the
+	rendered into its agent config. ``needed_profiles`` must now read the
 	switch itself and short-circuit to ``[]`` when it is off."""
 
 	def test_disabled_switch_returns_empty_list_without_resolving_any_user(self):
