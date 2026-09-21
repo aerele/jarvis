@@ -1022,6 +1022,21 @@ _GATED_WRITES = frozenset(
 		"share_doc",
 		"assign_to",
 		"call_connector",
+		# Light collaboration writes (design A1): each mutates a real ERP record
+		# (a comment, a tag, an attachment, a share/assignment revocation), so every
+		# one now asks in ordinary chat too - "every real change goes through the
+		# gate". Their BULK forms already parked (the is_write + _is_bulk_call entry
+		# above); this adds the SINGLE forms. None is destructive, so all fall in
+		# _COVERED (they run uncarded in an armed macro / approved skill), not _BRAKE.
+		# build_card has no bespoke shape for them (like call_connector) - they take
+		# the described-intent park preview and render the summary fallback.
+		"add_comment",
+		"update_comment",
+		"add_tag",
+		"remove_tag",
+		"attach_to_doc",
+		"unshare_doc",
+		"unassign_from",
 	}
 )
 # #493: the agent-facing wiki surface, refused wholesale when the operator has

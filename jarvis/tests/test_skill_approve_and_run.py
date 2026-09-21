@@ -1131,6 +1131,10 @@ class TestSkillAutorunPartition(FrappeTestCase):
 		self.assertLessEqual(api._SKILL_AUTORUN_COVERED, api._GATED_WRITES)
 
 	def test_covered_is_the_exact_expected_set(self):
+		# Fail-closed pin: _COVERED is derived (_GATED_WRITES - _BRAKE), so adding a
+		# gated tool auto-covers it - this exact-membership assertion goes RED until a
+		# human confirms the new tool may auto-run (or files it in _BRAKE). Now includes
+		# the 7 light collab writes gated in design A1.
 		self.assertEqual(
 			api._SKILL_AUTORUN_COVERED,
 			frozenset(
@@ -1146,6 +1150,13 @@ class TestSkillAutorunPartition(FrappeTestCase):
 					"assign_to",
 					"update_wiki",
 					"run_method",
+					"add_comment",
+					"update_comment",
+					"add_tag",
+					"remove_tag",
+					"attach_to_doc",
+					"unshare_doc",
+					"unassign_from",
 				}
 			),
 		)
@@ -2701,13 +2712,15 @@ class TestApproveAndRunFlagSetBeforeContinuation(FrappeTestCase):
 		)
 
 
-class TestTerminalTurnKeepsFlagOnBulkLightWritePause(FrappeTestCase):
+class TestTerminalTurnKeepsFlagOnNonDestructivePause(FrappeTestCase):
 	"""Minor (review): the on_terminal_turn / reaper predicate is "no pending card AT
-	ALL", not "no DESTRUCTIVE card". A bulk add_comment (names=[...]) is not itself a
-	_GATED_WRITES tool, but a BULK call ALWAYS parks (one card per batch, even for an
-	otherwise-ungated light write) - a legitimate, non-destructive PAUSE. The terminal
-	clear must KEEP the flag on it exactly like it keeps it on a destructive pause
-	(mirrors TestTerminalTurnClear.test_pump_finalize_keeps_autorun_when_a_card_is_pending)."""
+	ALL", not "no DESTRUCTIVE card". create_custom_skill is a BRAKE (design A3/A4) - a
+	consequential-but-non-destructive meta-write that ALWAYS parks even inside an
+	approved skill run - a legitimate, non-destructive PAUSE. The terminal clear must
+	KEEP the flag on it exactly like it keeps it on a destructive pause (mirrors
+	TestTerminalTurnClear.test_pump_finalize_keeps_autorun_when_a_card_is_pending).
+	(This used to use a bulk light write; those are _COVERED as of design A1, so they
+	now run uncarded in an approved run instead of parking.)"""
 
 	@classmethod
 	def setUpClass(cls):
@@ -2732,32 +2745,30 @@ class TestTerminalTurnKeepsFlagOnBulkLightWritePause(FrappeTestCase):
 			run_id="r-fin-bulk", turn={}, conversation=conv, owner=TEST_USER, errored=False, payload={}
 		)
 
-	def test_bulk_light_write_pause_keeps_the_flag(self):
+	def test_non_destructive_brake_pause_keeps_the_flag(self):
 		conv = _make_conv(TEST_USER)
 		_stamp_autorun(conv)
-		t1 = frappe.get_doc({"doctype": "ToDo", "description": "bulk-pause-1"}).insert(
-			ignore_permissions=True
+		# create_custom_skill is non-destructive but a BRAKE (design A3/A4), so it parks
+		# even inside an approved run - a legitimate non-destructive PAUSE.
+		self.assertIn("create_custom_skill", api._BRAKE)
+		self.assertNotIn("create_custom_skill", api._DESTRUCTIVE)
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool(
+				"create_custom_skill",
+				{"skill_name": "term-pause-skill", "instructions": "do the thing"},
+				conversation=conv,
+			)
+		self.assertEqual(
+			r["data"]["status"], "pending_confirmation", "a brake tool parks even in an approved run"
 		)
-		t2 = frappe.get_doc({"doctype": "ToDo", "description": "bulk-pause-2"}).insert(
-			ignore_permissions=True
-		)
-		frappe.db.commit()
-		self.assertNotIn(
-			"add_comment", api._GATED_WRITES, "add_comment is ordinarily UNGATED - the BULK shape parks it"
-		)
-		r = api._run_tool(
-			"add_comment",
-			{"doctype": "ToDo", "names": [t1.name, t2.name], "content": "bulk note"},
-			conversation=conv,
-		)
-		self.assertEqual(r["data"]["status"], "pending_confirmation", "a bulk light write still parks a card")
+		self.assertFalse(disp.called)
 		self.assertEqual(_pending_for(conv, TEST_USER), 1)
 		finalize._effect_macro_advance(self._ctx(conv))
 		self.assertEqual(
 			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
 			1,
-			"a non-destructive BULK-LIGHT-WRITE pause must also KEEP the flag - the "
-			"predicate is 'no pending card at all', not 'no destructive card'",
+			"a non-destructive BRAKE pause must also KEEP the flag - the predicate is "
+			"'no pending card at all', not 'no destructive card'",
 		)
 
 

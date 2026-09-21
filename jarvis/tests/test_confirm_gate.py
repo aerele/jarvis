@@ -66,6 +66,72 @@ class TestUnifiedBrakeCovered(FrappeTestCase):
 		self.assertEqual(api._SKILL_AUTORUN_NEVER, api._BRAKE)
 
 
+class TestLightWritesGated(FrappeTestCase):
+	"""Task 3.2 (design A1): the light collaboration writes now gate in ordinary
+	chat - every real change asks. Their bulk forms already parked; now the SINGLE
+	forms park too. The genuinely personal / non-ERP-mutating tools stay ungated:
+	follow/unfollow (a personal notification toggle), the export/download family
+	(they hand the user a file, change no ERP data), save_dashboard (the builder
+	canvas can't render behind a card), and the detached agent write-backs (no
+	human present to click). Park happens before any dispatch, so minimal args are
+	enough - nothing executes."""
+
+	# (tool, minimal args) - each is a real _GATED_WRITES member post-3.2; the
+	# park short-circuits before validation so the target need not exist.
+	_LIGHT_WRITES = (
+		("add_comment", {"doctype": "ToDo", "name": "x", "content": "c"}),
+		("update_comment", {"name": "x", "content": "c"}),
+		("add_tag", {"doctype": "ToDo", "name": "x", "tag": "t"}),
+		("remove_tag", {"doctype": "ToDo", "name": "x", "tag": "t"}),
+		("attach_to_doc", {"file_url": "/f.pdf", "target_doctype": "ToDo", "target_name": "x"}),
+		("unshare_doc", {"doctype": "ToDo", "name": "x", "user": "u@example.com"}),
+		("unassign_from", {"doctype": "ToDo", "name": "x", "user": "u@example.com"}),
+	)
+
+	def test_each_light_write_is_gated(self):
+		for tool, _args in self._LIGHT_WRITES:
+			with self.subTest(tool=tool):
+				self.assertIn(tool, api._GATED_WRITES)
+
+	def test_each_light_write_parks_a_card(self):
+		for tool, args in self._LIGHT_WRITES:
+			with self.subTest(tool=tool):
+				patcher, captured = _spy_mint()
+				with patch("jarvis.api.dispatch") as disp, patcher:
+					r = api._run_tool(tool, args)
+					# Parks BEFORE any dispatch: the write never fired.
+					self.assertFalse(disp.called, f"{tool} must not execute at park")
+				self.assertTrue(r["ok"], msg=f"{tool}: {r}")
+				self.assertEqual(r["data"]["status"], "pending_confirmation", msg=tool)
+				self.assertIsNotNone(captured.get("token"), msg=tool)
+
+	def test_light_writes_are_covered_in_armed_modes(self):
+		# A brake they are NOT (design A4): the light writes are reversible, so an
+		# armed macro / approved skill runs them uncarded like other covered writes.
+		for tool, _args in self._LIGHT_WRITES:
+			with self.subTest(tool=tool):
+				self.assertIn(tool, api._COVERED)
+				self.assertNotIn(tool, api._BRAKE)
+
+	def test_personal_and_export_tools_stay_ungated(self):
+		for tool in (
+			"follow_document",
+			"unfollow_document",
+			"download_pdf",
+			"export_excel",
+			"export_query",
+			"report_pdf",
+			"export_document",
+			"save_dashboard",
+			"record_agent_run",
+			"record_app_wiki",
+			"finish_app_learning_run",
+			"save_agent_dashboard",
+		):
+			with self.subTest(tool=tool):
+				self.assertNotIn(tool, api._GATED_WRITES)
+
+
 class TestGateParks(FrappeTestCase):
 	def test_gated_create_with_no_token_parks(self):
 		desc = "jarvis-test-gate-park-001"
@@ -305,22 +371,26 @@ class TestGatePreValidatesBeforePark(FrappeTestCase):
 
 
 class TestNonGatedWriteRunsImmediately(FrappeTestCase):
-	def test_add_comment_executes_immediately(self):
-		# add_comment is a write but NOT gated - it must run inline, no park.
+	def test_ungated_write_executes_inline(self):
+		# add_comment is gated as of design A1; patched ungated here to prove the
+		# INLINE path (an ungated write executes immediately, no park, and actually
+		# writes) still works. The genuinely-ungated set is asserted by membership in
+		# TestLightWritesGated.test_personal_and_export_tools_stay_ungated.
 		todo = frappe.get_doc(
 			{
 				"doctype": "ToDo",
 				"description": "jarvis-test-nongated-target",
 			}
 		).insert(ignore_permissions=True)
-		r = api._run_tool(
-			"add_comment",
-			{
-				"doctype": "ToDo",
-				"name": todo.name,
-				"content": "inline note",
-			},
-		)
+		with patch.object(api, "_GATED_WRITES", api._GATED_WRITES - {"add_comment"}):
+			r = api._run_tool(
+				"add_comment",
+				{
+					"doctype": "ToDo",
+					"name": todo.name,
+					"content": "inline note",
+				},
+			)
 		self.assertTrue(r["ok"])
 		# Ran, did not park.
 		self.assertNotEqual((r.get("data") or {}).get("status"), "pending_confirmation")
