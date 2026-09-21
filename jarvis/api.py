@@ -1863,34 +1863,56 @@ def _file_box_wiki_write(args: dict, conv: str) -> dict:
 		"append_md": args.get("append_md") or args.get("replace_body_md"),
 		"scope": args.get("scope") or "Org",
 	}
-	outcomes = apply_extracted_page_updates(
-		[update],
-		source=FILE_BOX_WIKI_KIND,
-		user=frappe.session.user,
-		ref=conv,
-		provenance_prefix=FILE_BOX_WIKI_FENCE,
-		allow_body_replace=False,
-		preserve_curated=True,
-		return_outcomes=True,
-	)
-	outcome = outcomes[0] if outcomes else {"slug": None, "ok": False, "reason": "skipped"}
+	try:
+		outcomes = apply_extracted_page_updates(
+			[update],
+			source=FILE_BOX_WIKI_KIND,
+			user=frappe.session.user,
+			ref=conv,
+			provenance_prefix=FILE_BOX_WIKI_FENCE,
+			allow_body_replace=False,
+			preserve_curated=True,
+			return_outcomes=True,
+		)
+		outcome = outcomes[0] if outcomes else {"slug": None, "ok": False, "reason": "skipped"}
+	except Exception:
+		# Best-effort: a transaction-FATAL wiki error (deadlock / lock-wait) must NOT
+		# 500 the unattended run - the File Box prompt promises never to fail the run
+		# over a wiki write. This request's txn holds only this single-page write, so
+		# rolling it back cannot mis-report other work (the batch phantom-tally hazard
+		# that makes the funnel re-raise needs a multi-update batch). Recoverable
+		# per-page refusals never reach here (the funnel returns them as ok=False).
+		frappe.db.rollback()
+		frappe.log_error(title="file_box wiki write-back failed", message=frappe.get_traceback())
+		outcome = {"slug": update.get("slug"), "ok": False, "reason": "error"}
 	applied = bool(outcome.get("ok"))
 	if applied:
 		result = {"ok": True, "slug": outcome.get("slug"), "detail": "recorded to the wiki"}
 	else:
 		result = {"ok": False, "reason": outcome.get("reason") or "refused"}
-	# AUDIT: this branch bypasses _dispatch_and_wrap (where a dispatched write is
-	# audited via _record_tool_audit -> audit.record), so without this an
-	# unattended file_box wiki write would leave NO durable audit line - unlike the
-	# create/update file_box auto-apply above, which audits through
-	# dispatch_confirmed. Record it here, mirroring _record_tool_audit, and reflect
-	# the real (fenced, append-only) outcome so a refused write reads as error.
+	# AUDIT - both rows a dispatched write gets via _dispatch_and_wrap, because this
+	# fenced branch returns BEFORE it: (1) the tool_audit logger line, and (2) the
+	# durable Jarvis Agent Write manager-board row. Without (2), an unattended
+	# Org-scope wiki write would be missing from the manager write-audit board that
+	# every other file_box write (create/update, via dispatch_confirmed) files.
+	# Both reflect the real fenced outcome so a refused write reads as failed.
 	audit.record(
 		tool="update_wiki",
 		args=args,
 		ok=applied,
 		result=result,
 		error_message=None if applied else result["reason"],
+	)
+	from jarvis import agent_audit
+
+	agent_audit.record_write(
+		actor=frappe.session.user,
+		tool="update_wiki",
+		args=args,
+		result=result,
+		outcome="applied" if applied else "failed",
+		provenance="auto_apply",
+		provenance_name=conv,
 	)
 	return result
 
@@ -2235,6 +2257,11 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# the single-flight so an unattended run never parks a wiki card. The wiki
 		# kill-switch at the top of _run_tool already refused a wiki-off write before
 		# here; a bulk call falls through to the park.
+		# INVARIANT: a file_box conversation never also carries skip_confirmation /
+		# skill_autorun (drop_file sets ONLY file_box=1, and an unattended run arms no
+		# macro), so the armed-skip + skill-autorun covered-write branches above never
+		# pre-empt update_wiki into the RAW covered path (which would clobber a curated
+		# page). If that ever changes, this branch must move ABOVE them so the fence wins.
 		if conv and tool == "update_wiki" and _conv_flags.get("file_box") and not _is_bulk_call(args):
 			# _file_box_wiki_write returns the raw-update_wiki-compatible result as
 			# the DATA payload; wrap it in the standard envelope so the agent-session

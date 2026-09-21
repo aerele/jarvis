@@ -1451,3 +1451,96 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 		self.assertEqual(dc.call_args.kwargs.get("provenance"), "auto_apply")
 		self.assertTrue(r["ok"])
 		self.assertNotEqual((r.get("data") or {}).get("status"), "pending_confirmation")
+
+	def test_file_box_update_doc_still_auto_applies(self):
+		# update_doc shares create_doc's _AUTO_APPLYABLE fast-path: a single update_doc
+		# in a file_box run auto-applies (provenance=auto_apply), no card - unregressed
+		# by the update_wiki branch that sits right after this block.
+		conv = self._conv(file_box=1)
+		with patch(
+			"jarvis.api.dispatch_confirmed",
+			return_value={"ok": True, "data": {"name": "TODO-FAKE"}},
+		) as dc:
+			r = api._run_tool(
+				"update_doc",
+				{"doctype": "ToDo", "name": "TODO-FAKE", "values": {"priority": "High"}},
+				conversation=conv,
+			)
+		dc.assert_called_once()
+		self.assertEqual(dc.call_args.args[0], "update_doc")
+		self.assertEqual(dc.call_args.kwargs.get("provenance"), "auto_apply")
+		self.assertTrue(r["ok"])
+
+	def test_file_box_wiki_write_files_both_audit_rows(self):
+		# The fenced branch returns BEFORE _dispatch_and_wrap, so it must file BOTH
+		# audit rows itself: the tool_audit logger line AND the durable Jarvis Agent
+		# Write manager-board row - else an unattended Org-scope wiki write is missing
+		# from the board every other file_box write lands on.
+		conv = self._conv(file_box=1)
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch(
+				"jarvis.chat.wiki.apply_extracted_page_updates",
+				return_value=[{"slug": "party-fake-co", "ok": True, "reason": "applied"}],
+			),
+			patch("jarvis.api.audit.record") as rec,
+			patch("jarvis.agent_audit.record_write") as board,
+		):
+			api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+		rec.assert_called_once()
+		self.assertEqual(rec.call_args.kwargs["tool"], "update_wiki")
+		self.assertTrue(rec.call_args.kwargs["ok"])
+		board.assert_called_once()
+		self.assertEqual(board.call_args.kwargs["tool"], "update_wiki")
+		self.assertEqual(board.call_args.kwargs["outcome"], "applied")
+		self.assertEqual(board.call_args.kwargs["provenance_name"], conv)
+
+	def test_file_box_wiki_refusal_audits_as_failed(self):
+		# A fence refusal must audit as FAILED on both rows (not a false success).
+		conv = self._conv(file_box=1)
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch(
+				"jarvis.chat.wiki.apply_extracted_page_updates",
+				return_value=[{"slug": "party-fake-co", "ok": False, "reason": "refused"}],
+			),
+			patch("jarvis.api.audit.record") as rec,
+			patch("jarvis.agent_audit.record_write") as board,
+		):
+			api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+		self.assertFalse(rec.call_args.kwargs["ok"])
+		self.assertEqual(rec.call_args.kwargs["error_message"], "refused")
+		self.assertEqual(board.call_args.kwargs["outcome"], "failed")
+
+	def test_file_box_wiki_txn_fatal_is_best_effort(self):
+		# A transaction-fatal funnel error (deadlock / lock-wait) must NOT 500 the
+		# unattended run: the branch rolls back and returns a soft ok=False, never
+		# raises - honoring the prompt's "never fail the run over a wiki write".
+		conv = self._conv(file_box=1)
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch(
+				"jarvis.chat.wiki.apply_extracted_page_updates",
+				side_effect=Exception("deadlock"),
+			),
+			patch("frappe.db.rollback") as rb,
+			patch("jarvis.agent_audit.record_write"),
+		):
+			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+		self.assertTrue(r["ok"])
+		self.assertFalse(r["data"]["ok"])
+		self.assertEqual(r["data"]["reason"], "error")
+		rb.assert_called()
+
+	def test_file_box_wiki_empty_outcomes_reads_as_skipped(self):
+		# Defensive: the funnel returning no outcomes for our single update surfaces
+		# as a soft ok=False (skipped), never an IndexError.
+		conv = self._conv(file_box=1)
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch("jarvis.chat.wiki.apply_extracted_page_updates", return_value=[]),
+			patch("jarvis.agent_audit.record_write"),
+		):
+			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+		self.assertFalse(r["data"]["ok"])
+		self.assertEqual(r["data"]["reason"], "skipped")
