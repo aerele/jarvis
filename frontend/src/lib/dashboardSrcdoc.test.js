@@ -404,3 +404,15 @@ test("@layer DR3-1: an abrupt-closing empty comment <!--> does not swallow the r
 	const out = buildSrcdoc(`<!--><style>${REAL}</style>`, { theme: THEMES.jarvis });
 	assert.ok(out.includes(`@layer author{${REAL}}`), "real style after <!--> stays layered");
 });
+
+// ── export scaling for large dashboards (fix/dashboard-pdf-export-scale) ──────
+test("export: RUNTIME caps pixelRatio for large dashboards and heartbeats progress", () => {
+	// String-level (same convention as the other RUNTIME_JS assertions); the
+	// re-arm behavior is exercised in DashboardCanvas.spec.js.
+	assert.ok(RUNTIME_JS.includes("totalArea"), "sums content area to decide pixelRatio");
+	assert.ok(
+		/totalArea\s*>\s*3000000/.test(RUNTIME_JS),
+		"drops to 1x past a large-area threshold"
+	);
+	assert.ok(RUNTIME_JS.includes("export:progress"), "posts a per-slide progress heartbeat");
+});
