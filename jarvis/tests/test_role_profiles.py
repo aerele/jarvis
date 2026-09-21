@@ -136,7 +136,7 @@ class TestRoleProfiles(FrappeTestCase):
 		for skills in role_profiles.SKILL_SETS.values():
 			claimed |= skills
 		self.assertEqual(shared & claimed, set())
-		self.assertEqual(len(shared | claimed), 45)
+		self.assertEqual(len(shared | claimed), 46)
 
 
 class TestSyncRoleProfiles(FrappeTestCase):
