@@ -266,3 +266,31 @@ class TestPushJob(_Base):
 		):
 			usage_push.push_usage_rollup()  # must NOT raise, and not log_error
 		self.assertFalse(logged.called)
+
+
+class TestNormalizeProfile(FrappeTestCase):
+	"""``usage_push._normalize_profile`` / ``_PROFILE_RE``: this is a
+	READ-side validator over already-stored ``profile_agent_id`` values, not
+	a generator. ``role_profiles.resolve_profile`` now joins role-set keys
+	with "_" instead of "+" (openclaw 2026.9.x rejects "+" in agent ids), but
+	historical rows pushed before that change still carry a "+"-joined id
+	(e.g. "role-hr+projects"), so this regex must keep accepting both."""
+
+	def test_underscore_joined_profile_passes_through(self):
+		self.assertEqual(usage_push._normalize_profile("role-accounts_hr"), "role-accounts_hr")
+
+	def test_legacy_plus_joined_profile_still_passes_through(self):
+		self.assertEqual(usage_push._normalize_profile("role-accounts+hr"), "role-accounts+hr")
+
+	def test_single_set_profile_passes_through(self):
+		self.assertEqual(usage_push._normalize_profile("role-hr"), "role-hr")
+
+	def test_blank_profile_becomes_full(self):
+		self.assertEqual(usage_push._normalize_profile(""), "full")
+		self.assertEqual(usage_push._normalize_profile(None), "full")
+
+	def test_malformed_profile_falls_back_to_full_and_is_logged(self):
+		with patch.object(frappe, "logger") as mock_logger:
+			result = usage_push._normalize_profile("not-a-role-id!")
+		self.assertEqual(result, "full")
+		mock_logger.return_value.warning.assert_called_once()
