@@ -18,6 +18,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import pending_confirm
 from jarvis.chat.actions_api import confirm_tool, dismiss_tool
+from jarvis.chat.api import get_conversation
 
 
 def _make_conversation() -> str:
@@ -218,3 +219,23 @@ class TestFlipActionRow(FrappeTestCase):
 		self.assertEqual(same[0].action_outcome, "discarded")
 		self.assertFalse(same[0].pending_card)
 		self.assertFalse(frappe.db.exists("ToDo", {"description": "flip-discard-xyz"}))
+
+	def test_get_conversation_delivers_pending_row(self):
+		"""AC-R1: get_conversation returns the pending row with the card (parsed), token,
+		and expiry — so a reload (independent of Redis) shows a confirmable card; after
+		confirm the flipped row carries no pending_card."""
+		_name, token = self._park("flip-getconv-xyz")
+		conv = get_conversation(self.conv)
+		rows = [m for m in conv["messages"] if m.get("tool_call_id") == token]
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0]["tool_status"], "pending")
+		self.assertIsInstance(rows[0]["pending_card"], dict)  # parsed to a real object
+		self.assertTrue(rows[0]["tool_call_id"])
+		self.assertIsNotNone(rows[0]["expires_at"])  # client computes the countdown from this
+		with patch("jarvis.chat.api._dispatch_turn"):
+			confirm_tool(token, conversation=self.conv)
+		conv2 = get_conversation(self.conv)
+		flipped = [m for m in conv2["messages"] if m.get("tool_call_id") == token]
+		self.assertEqual(len(flipped), 1)
+		self.assertEqual(flipped[0]["action_outcome"], "confirmed")
+		self.assertFalse(flipped[0]["pending_card"])

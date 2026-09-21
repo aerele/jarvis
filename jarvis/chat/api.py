@@ -679,6 +679,14 @@ def get_conversation(conversation: str) -> dict:
 			"tool_result",
 			"tool_status",
 			"action_outcome",
+			# Action-card overhaul (PR 1): a parked gated write rides a durable pending
+			# row (tool_status="pending") carrying the card + token + expiry, so a reload
+			# always shows a confirmable card - independent of Redis and the best-effort
+			# push. Expiry is computed CLIENT-side from expires_at (no server peek), so a
+			# Redis blip can never mislabel a live card as expired.
+			"tool_call_id",
+			"pending_card",
+			"expires_at",
 			"canvas",
 			"reply_duration_ms",
 			# jarvis#560: which model actually produced each reply. The SPA renders it
@@ -692,13 +700,18 @@ def get_conversation(conversation: str) -> dict:
 		],
 		order_by="seq asc",
 	)
-	# canvas is stored as a JSON string; hand the UI a real list (or None).
+	# canvas + pending_card are stored as JSON strings; hand the UI real objects (or None).
 	for m in messages:
 		if m.get("canvas"):
 			try:
 				m["canvas"] = frappe.parse_json(m["canvas"])
 			except Exception:
 				m["canvas"] = None
+		if m.get("pending_card"):
+			try:
+				m["pending_card"] = frappe.parse_json(m["pending_card"])
+			except Exception:
+				m["pending_card"] = None
 	return {
 		"conversation": {
 			"name": doc.name,
