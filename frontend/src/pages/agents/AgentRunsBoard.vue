@@ -77,9 +77,14 @@
 									<!-- ACTIONABLE (non-advisory) findings: advisory items are
 									     non-attesting and counted separately so an advisory-only
 									     run never reads like real exceptions. -->
-									{{ (row.findings_count || 0) - (row.advisory_findings_count || 0) }}
+									{{
+										(row.findings_count || 0) -
+										(row.advisory_findings_count || 0)
+									}}
 									finding{{
-										(row.findings_count || 0) - (row.advisory_findings_count || 0) === 1
+										(row.findings_count || 0) -
+											(row.advisory_findings_count || 0) ===
+										1
 											? ""
 											: "s"
 									}}
@@ -88,7 +93,10 @@
 											row.blocker_count === 1 ? "" : "s"
 										}}
 									</span>
-									<span v-if="row.advisory_findings_count" class="text-ink-blue-3">
+									<span
+										v-if="row.advisory_findings_count"
+										class="text-ink-blue-3"
+									>
 										· {{ row.advisory_findings_count }} advisory
 									</span>
 								</div>
