@@ -103,3 +103,55 @@ class TestAutoApplyRemoved(FrappeTestCase):
 			pluck="name",
 		)
 		self.assertEqual(len(notices2), 1, "re-running the patch must not duplicate the notice")
+
+	def test_retirement_patch_flips_archived_conv_without_a_notice(self):
+		from jarvis.patches import v2_20_retire_admin_auto_apply as retire
+
+		conv = _make_conv(TEST_USER)
+		frappe.db.set_value(CONV, conv, {"auto_apply": 1, "status": "Archived"}, update_modified=False)
+		frappe.db.commit()
+
+		retire.execute()
+
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "auto_apply") or 0),
+			0,
+			"the stale flag is flipped even on an archived thread (hygiene + idempotency)",
+		)
+		notices = frappe.get_all(
+			"Jarvis Chat Message",
+			filters={
+				"conversation": conv,
+				"role": "assistant",
+				"content": ["like", "%Auto-Apply has been turned off%"],
+			},
+			pluck="name",
+		)
+		self.assertEqual(len(notices), 0, "an archived thread its owner may never reopen gets no notice")
+
+	def test_retirement_patch_appends_notice_onto_a_populated_transcript(self):
+		# Coverage gap (review): the happy-path test uses a fresh conv (seq=1). Prove the
+		# MAX(seq)+1 append lands on a conversation that already has messages.
+		from jarvis.patches import v2_20_retire_admin_auto_apply as retire
+
+		conv = _make_conv(TEST_USER)
+		for i in range(3):
+			frappe.get_doc(
+				{"doctype": "Jarvis Chat Message", "conversation": conv, "seq": i + 1, "role": "user"}
+			).insert(ignore_permissions=True)
+		frappe.db.set_value(CONV, conv, "auto_apply", 1, update_modified=False)
+		frappe.db.commit()
+
+		retire.execute()
+
+		notice = frappe.get_all(
+			"Jarvis Chat Message",
+			filters={
+				"conversation": conv,
+				"role": "assistant",
+				"content": ["like", "%Auto-Apply has been turned off%"],
+			},
+			fields=["seq"],
+		)
+		self.assertEqual(len(notice), 1)
+		self.assertEqual(notice[0]["seq"], 4, "the notice appends after the existing messages")

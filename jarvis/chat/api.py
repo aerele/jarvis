@@ -1168,11 +1168,13 @@ def _typed_confirmation(
 		# unseen, they still get their own card.
 		if approval_phrases.is_sweep_all(message):
 			swept = _confirm_reversible_sweep(user, conversation)
-			if swept is not None:
-				# The user approved this whole request: arm request-scoped auto-run so its
-				# remaining fan-out (continuation batches / a create->submit chain) also runs
-				# uncarded (design Layer B). Only after a REAL sweep, so an empty sweep (nothing
-				# parked) does not arm.
+			# Arm request-scoped auto-run for the request's remaining fan-out ONLY on an
+			# EXPLICIT blanket approval ("confirm all"/"do everything"), not any bare
+			# go-ahead ("yes"/"ok") - a bare yes sweeps the visible cards but must not
+			# pre-authorize future uncarded writes (design Layer B). And only after a REAL
+			# sweep (swept is not None => reversible cards were parked), so nothing-parked
+			# and brake-only-parked do not arm.
+			if swept is not None and approval_phrases.is_explicit_confirm_all(message):
 				_arm_request_autorun(conversation)
 			return swept
 		return None
@@ -1205,10 +1207,12 @@ def _typed_confirmation(
 		for i in picked
 	]
 	batch = _run_typed_batch(conversation, items)
-	# A sweep-all ("confirm all" / a plain go-ahead over several cards) also arms the
-	# request-scoped auto-run for this request's remaining fan-out; a NUMBERED pick
-	# ("confirm 1 and 3") does NOT - it approved only those, not the whole request.
-	if approval_phrases.is_sweep_all(message):
+	# An EXPLICIT blanket approval ("confirm all" / "do everything") also arms the
+	# request-scoped auto-run for this request's remaining fan-out. A bare go-ahead
+	# ("yes"/"go ahead") or a NUMBERED pick ("confirm 1 and 3") does NOT - it approved
+	# only the visible cards, not the whole request (design Layer B; keeps a typed "yes"
+	# exactly as powerful as the Confirm button, no more).
+	if approval_phrases.is_explicit_confirm_all(message):
 		_arm_request_autorun(conversation)
 	return batch
 
@@ -1803,6 +1807,12 @@ def send_message(
 			# busy copy so the composer doesn't hang on a reply that will never come.
 			try:
 				frappe.delete_doc(MSG, msg_doc.name, ignore_permissions=True, force=True)
+				# Undo an upfront "confirm all" arm too: this send is rejected (no turn
+				# runs), so its request-scoped approval must not linger and bleed into a
+				# concurrent/next turn. Idempotent (0->0 no-op when not armed).
+				from jarvis import api as _jarvis_api
+
+				_jarvis_api._request_autorun_clear(conversation)
 				frappe.db.commit()
 			except Exception:
 				frappe.log_error(title="send_message overload seed cleanup", message=frappe.get_traceback())
@@ -1819,6 +1829,12 @@ def send_message(
 		if isinstance(_adm, dict) and _adm.get("overloaded"):
 			try:
 				frappe.delete_doc(MSG, msg_doc.name, ignore_permissions=True, force=True)
+				# Undo an upfront "confirm all" arm too: this send is rejected (no turn
+				# runs), so its request-scoped approval must not linger and bleed into a
+				# concurrent/next turn. Idempotent (0->0 no-op when not armed).
+				from jarvis import api as _jarvis_api
+
+				_jarvis_api._request_autorun_clear(conversation)
 				frappe.db.commit()
 			except Exception:
 				frappe.log_error(title="send_message overload seed cleanup", message=frappe.get_traceback())
@@ -2805,12 +2821,19 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		# a stopped run leaves no dangling 'pending' row (which would show as a stale/
 		# soon-expired card on reload). Best-effort (self-guarding).
 		api.cancel_pending_action_rows(conversation)
-		# Layer B: Halt also ENDS a request-scoped "confirm all" run, so its remaining
-		# fan-out re-cards. (The gate's cancel-gate also hard-stops the next covered write
-		# via the run-cancel signal below; this is the explicit belt.)
-		api._request_autorun_clear(conversation)
 	except Exception:
 		frappe.log_error(title="stop_run token sweep", message=frappe.get_traceback())
+	# Layer B: Halt also ENDS a request-scoped "confirm all" run, so its remaining
+	# fan-out re-cards. In its OWN try/except (not coupled to the token sweep above): the
+	# run-cancel signal below has a shorter TTL than request_autorun (900s), so if the
+	# sweep raised on a DB hiccup and skipped this, a covered write in the gap could run
+	# uncarded. This explicit clear must fire regardless of the sweep's outcome.
+	try:
+		from jarvis import api
+
+		api._request_autorun_clear(conversation)
+	except Exception:
+		frappe.log_error(title="stop_run request_autorun clear", message=frappe.get_traceback())
 	# Skill "Approve & run" Halt cancel-gate (design §3.4): set the transport-
 	# independent run-cancel signal so an in-flight skill auto-run chain hard-stops
 	# at the bench within one covered write - in BOTH pump and legacy mode, and

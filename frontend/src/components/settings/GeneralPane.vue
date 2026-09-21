@@ -295,7 +295,6 @@ const store = useShellStore();
 
 // Chat-scoped context (null on non-chat routes — guard everything).
 const ctx = computed(() => store.chatContext);
-const hasConversation = computed(() => !!(ctx.value && ctx.value.conversationId));
 // Prefer the SERVER-VERIFIED default model over the conversation's label.
 //
 // ctx.modelLabel is scoped to the open conversation and falls back to the string

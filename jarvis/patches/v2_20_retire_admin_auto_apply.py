@@ -26,23 +26,43 @@ _NOTICE = (
 
 
 def execute():
-	affected = frappe.get_all("Jarvis Conversation", filters={"auto_apply": 1}, pluck="name")
-	for conv in affected:
-		next_seq = (
-			frappe.db.sql(
-				"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation = %s",
-				(conv,),
-			)[0][0]
-			or 0
-		) + 1
-		frappe.get_doc(
-			{
-				"doctype": "Jarvis Chat Message",
-				"conversation": conv,
-				"seq": next_seq,
-				"role": "assistant",
-				"content": _NOTICE,
-			}
-		).insert(ignore_permissions=True)
-		frappe.db.set_value("Jarvis Conversation", conv, "auto_apply", 0, update_modified=False)
-	frappe.db.commit()
+	affected = frappe.get_all("Jarvis Conversation", filters={"auto_apply": 1}, fields=["name", "status"])
+	done = 0
+	for row in affected:
+		conv = row["name"]
+		try:
+			# Post the teaching notice only into a still-Active thread - an Archived thread
+			# its owner may never reopen would just accrue noise. The stale flag is still
+			# flipped for every affected conversation (hygiene + idempotency).
+			if row.get("status") == "Active":
+				next_seq = (
+					frappe.db.sql(
+						"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation = %s",
+						(conv,),
+					)[0][0]
+					or 0
+				) + 1
+				frappe.get_doc(
+					{
+						"doctype": "Jarvis Chat Message",
+						"conversation": conv,
+						"seq": next_seq,
+						"role": "assistant",
+						"content": _NOTICE,
+					}
+				).insert(ignore_permissions=True)
+			frappe.db.set_value("Jarvis Conversation", conv, "auto_apply", 0, update_modified=False)
+			# Commit per conversation so one bad row cannot abort the whole patch (and
+			# block every later patch + the deploy). Idempotent: a re-run's selector
+			# (auto_apply=1) no longer matches a committed conversation, so no duplicate
+			# notice; a conversation that raised is rolled back (flag still 1) and retried.
+			frappe.db.commit()
+			done += 1
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(
+				title="retire_admin_auto_apply: conversation failed",
+				message=f"conversation={conv}\n{frappe.get_traceback()}",
+			)
+	if done:
+		frappe.logger("jarvis.migrate").info(f"retired admin auto_apply on {done} conversation(s)")

@@ -999,15 +999,16 @@ _PREVIEWABLE = frozenset(
 	}
 )
 # Writes that MUST get a human confirmation before executing (issue #186).
-# The lighter mutators in _WRITE_TOOLS (comments/tags/attach/dashboard-create)
-# are intentionally NOT gated - they never fire the card. share_doc/assign_to
-# WERE in that "lighter" bucket but their own descriptors promise "ALWAYS
-# confirm" (share_doc: re-share/everyone=true grants; assign_to: emails a
-# third party) - audit-findings.md F17/F20/F23 - so they now gate too. Neither
-# is in _PREVIEWABLE/_DRY_RUN_ON_PARK: no side-effect-free sandbox preview is
-# meaningful for a share grant or a ToDo+notification email, so both fall
-# through to the described-intent park path (like send_email) rather than a
-# sandboxed dry-run.
+# As of the action-card overhaul (design A1) the light collaboration mutators
+# (add_comment/update_comment/add_tag/remove_tag/attach_to_doc/unshare_doc/
+# unassign_from) ARE gated too - "every real change asks" - so they are members
+# below; only genuinely non-mutating tools (dashboard-create, follow/unfollow,
+# exports, detached write-backs) stay ungated. share_doc/assign_to were the first
+# of that widening (their own descriptors promise "ALWAYS confirm" -
+# audit-findings.md F17/F20/F23). None of these is in _PREVIEWABLE/_DRY_RUN_ON_PARK:
+# no side-effect-free sandbox preview is meaningful for a share grant, a comment, or
+# a ToDo+notification email, so they fall through to the described-intent park path
+# (like send_email) rather than a sandboxed dry-run.
 _GATED_WRITES = frozenset(
 	{
 		"create_doc",
@@ -1066,9 +1067,10 @@ def _gating_badge(tool: str) -> str:
 
 	Classifies a tool's DEFAULT single-call confirmation behaviour, derived from
 	the SAME frozensets that gate in ``_run_tool`` so a badge can never disagree
-	with the default gate. NOT an absolute guarantee: auto-apply, armed macros,
-	and skill "Approve & run" can run some tools uncarded - the catalog legend
-	says so. Total over any string.
+	with the default gate. NOT an absolute guarantee: the File Box fast-path, an
+	armed macro (skip_confirmation), an approved skill run (skill_autorun), and a
+	request-scoped "confirm all" (request_autorun) can run some tools uncarded -
+	the catalog legend says so. (Admin Auto-Apply was removed.) Total over any string.
 	"""
 	if tool not in _WRITE_TOOLS:
 		return "reads_only"
@@ -1276,13 +1278,15 @@ def _request_autorun_slide(conv: str) -> None:
 
 
 def _request_autorun_clear(conv: str) -> None:
-	"""End the request-scoped run: drop request_autorun so the next covered write re-cards.
-	Committed immediately so the cleared state survives a worker death (a concurrent 0->0
-	clear is an idempotent no-op)."""
+	"""End the request-scoped run: drop request_autorun (+ its sliding timestamp and the
+	originating-message breadcrumb) so the next covered write re-cards and a support query
+	on request_autorun_at never surfaces an already-cleared row. Committed immediately so
+	the cleared state survives a worker death (a concurrent 0->0 clear is an idempotent
+	no-op)."""
 	frappe.db.set_value(
 		"Jarvis Conversation",
 		conv,
-		{"request_autorun": 0, "request_autorun_msg": None},
+		{"request_autorun": 0, "request_autorun_at": None, "request_autorun_msg": None},
 		update_modified=False,
 	)
 	frappe.db.commit()
@@ -2127,13 +2131,23 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		if _is_bulk_call(args):
 			batch_n = _bulk_len(args)
 			if batch_n > _MAX_BATCH:
-				# Skill-aware wording (minor, review): under an approved skill run there
-				# is no card to confirm - the covered allowlist runs uncarded - so telling
-				# the model to "confirm each one" is actively wrong there. A cheap read
-				# (this is a one-shot park-time rejection, not a hot loop) picks the
-				# matching instruction; everything else about F16 (the cap itself) is
-				# unchanged.
-				if conversation and frappe.db.get_value("Jarvis Conversation", conversation, "skill_autorun"):
+				# Uncarded-run-aware wording (minor, review): under an approved skill run OR a
+				# request-scoped "confirm all" there is no card to confirm - the covered
+				# allowlist runs uncarded - so telling the model to "confirm each one" is
+				# actively wrong there. A cheap read (this is a one-shot park-time rejection,
+				# not a hot loop) picks the matching instruction; everything else about F16
+				# (the cap itself) is unchanged.
+				_autorun_flags = (
+					frappe.db.get_value(
+						"Jarvis Conversation",
+						conversation,
+						["skill_autorun", "request_autorun"],
+						as_dict=True,
+					)
+					if conversation
+					else None
+				) or {}
+				if _autorun_flags.get("skill_autorun") or _autorun_flags.get("request_autorun"):
 					next_step = (
 						f"Split into batches of {_MAX_BATCH}; the approved run keeps executing "
 						"each batch automatically before the next one starts - there is nothing "
