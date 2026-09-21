@@ -299,8 +299,8 @@ BUNDLED_MODEL_CATALOG: list[dict] = [
 		"is_local": False,
 		"models": [
 			{
-				"model_id": "deepseek-v4-flash",
-				"label": "deepseek-v4-flash",
+				"model_id": "deepseek-flash",
+				"label": "deepseek-flash",
 				"tier": "api_key",
 				"is_default": True,
 				"sort_order": 0,
@@ -313,11 +313,18 @@ BUNDLED_MODEL_CATALOG: list[dict] = [
 				"sort_order": 1,
 			},
 			{
+				"model_id": "deepseek-v4-flash",
+				"label": "deepseek-v4-flash",
+				"tier": "api_key",
+				"is_default": False,
+				"sort_order": 2,
+			},
+			{
 				"model_id": "deepseek-chat",
 				"label": "deepseek-chat",
 				"tier": "api_key",
 				"is_default": False,
-				"sort_order": 2,
+				"sort_order": 3,
 			},
 		],
 	},
