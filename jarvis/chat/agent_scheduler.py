@@ -1481,7 +1481,17 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 		"Your tenant's engagement tunables are handed below (authoritative) - use them exactly and "
 		"build the rest of your config.json as your skill directs."
 		if explicit_config
-		else f"Your engagement configuration is on your installation ({inst.name}); read it there."
+		# A6/hallucination fix: NAME the real doctype. The friendly "engagement
+		# configuration" is the customer-facing label (agent_run_steps.py) for
+		# `Jarvis Agent Installation`; handing the model the label but not the
+		# doctype made a weak model invent one ("Jarvis Engagement Configuration").
+		# The two auditors that read config today (close-auditor, fixed-asset)
+		# already name it exactly this way and never hallucinate.
+		else (
+			f"Your engagement configuration is the `Jarvis Agent Installation` record "
+			f"'{inst.name}' (its `config` field) - read it with jarvis__get_doc if your skill "
+			f"needs it. That is the ONLY configuration record; never invent another doctype for it."
+		)
 	)
 	return (
 		f"[Automated {trigger} run] Run your bundled playbook for this trigger now over "

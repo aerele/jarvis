@@ -437,9 +437,15 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertNotIn('"company"', msg.split("EXPLICIT CONFIG", 1)[1])  # non-declared filtered
 		# an agent declaring NO config_keys gets no EXPLICIT CONFIG (points to its installation).
 		bare = frappe._dict({"name": "y", "config_keys": []})
-		self.assertNotIn(
-			"EXPLICIT CONFIG", agent_scheduler._audit_prompt(bare, inst, trigger="manual", scope={})
-		)
+		bare_msg = agent_scheduler._audit_prompt(bare, inst, trigger="manual", scope={})
+		self.assertNotIn("EXPLICIT CONFIG", bare_msg)
+		# A6/hallucination fix: the pointer NAMES the real doctype so a weak model cannot invent
+		# one (e.g. "Jarvis Engagement Configuration"); the installation ROW name + the get_doc
+		# tool are present, and the old doctype-less "read it there" phrasing is gone.
+		self.assertIn("Jarvis Agent Installation", bare_msg)
+		self.assertIn("jarvis__get_doc", bare_msg)
+		self.assertIn("INST-1", bare_msg)  # the installation ROW name is still handed
+		self.assertNotIn("read it there", bare_msg)
 
 	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner
