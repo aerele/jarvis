@@ -149,6 +149,9 @@ class TestGstr1SummaryTool(FrappeTestCase):
 		cls.filed = cls._mk_log(GSTIN_A, "Filed", filed=True)
 		cls.notfiled = cls._mk_log(GSTIN_B, "Not Filed", filed=False)
 		cls.filed_no_summary = cls._mk_log(GSTIN_C, "Filed", filed=False)  # Filed but no attach
+		# the Not-Filed log ALSO carries a books_summary (IC generated it from books without
+		# filing) -> exercises source="books" which must NOT require filing.
+		frappe.get_doc(RETURN_LOG, cls.notfiled).update_json_for("books_summary", _filed_summary_rows())
 		frappe.db.commit()
 
 	@classmethod
@@ -208,6 +211,25 @@ class TestGstr1SummaryTool(FrappeTestCase):
 
 	def test_absent_period_is_no_log(self):
 		self.assertEqual(get_gstr1_summary(self.company, "012025")["reason"], "no_log")
+
+	# ---- source="books": the broader consistency signal (no filing needed) ---- #
+	def test_books_source_returns_totals_without_filing(self):
+		# the Not-Filed log carries a books_summary -> source="books" reads it fine.
+		r = get_gstr1_summary(self.company, PERIOD, gstin=GSTIN_B, source="books")
+		self.assertTrue(r["available"])
+		self.assertEqual(r["source"], "books_summary")
+		self.assertEqual(r["total_taxable_value"], 160000.0)
+		self.assertEqual(r["filing_status"], "Not Filed")  # books does NOT require filing
+
+	def test_books_source_without_summary_is_not_available(self):
+		# a log with no books_summary + source="books" -> honest not-available.
+		r = get_gstr1_summary(self.company, PERIOD, gstin=GSTIN_C, source="books")
+		self.assertFalse(r["available"])
+		self.assertEqual(r["reason"], "no_books_summary")
+
+	def test_invalid_source_raises(self):
+		with self.assertRaises(InvalidArgumentError):
+			get_gstr1_summary(self.company, PERIOD, gstin=GSTIN_A, source="nonsense")
 
 	def test_ambiguous_gstin_is_refused(self):
 		# two logs (A filed, B not) for the company+period, no gstin arg -> ambiguous.
