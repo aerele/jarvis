@@ -692,7 +692,21 @@
 										panelRow.model = v;
 									}
 								"
-							/>
+							>
+								<template #option="{ option }"
+									>{{ option.value
+									}}<span
+										v-if="option.hint"
+										class="jv-pool-opt"
+										style="margin-left: 6px"
+										>{{ option.hint }}</span
+									></template
+								>
+							</JvCombo>
+							<div class="jv-pool-opt" style="font-size: 11.5px; margin-top: 4px">
+								Pick a suggestion or type any model id your provider supports. Test
+								checks it before you save.
+							</div>
 						</div>
 						<div class="jv-pool-field">
 							<label class="jv-pool-lab"
@@ -2895,15 +2909,37 @@ function providerDefaultModel(label) {
 function modelSuggestionsForProvider(provider) {
 	const label = providerLabel(provider || "");
 	const out = [];
+	const indexOf = (id) => out.findIndex((o) => o.value === id);
+	// Presets carry no catalog label - bare id in, bare id out.
 	const push = (id) => {
-		if (id && out.indexOf(id) === -1) out.push(id);
+		if (id && indexOf(id) === -1) out.push({ value: id, label: id });
+	};
+	// A catalog row whose label differs from its id upgrades (or adds) that
+	// entry to "id  label" as the visible option text: JvCombo's dropdown row
+	// shows o.label, so this is what keeps the label visible there. The id
+	// alone still lands in the input and the row, because the allowCustom
+	// combo reads modelValue directly, never displayLabel. `hint` carries the
+	// bare catalog label for the settings panel's #option slot to render it
+	// muted beside the id; a preset that already pushed this id bare gets
+	// upgraded in place rather than dropped by the dedup.
+	const pushLabelled = (id, catalogLabel) => {
+		if (!id) return;
+		const hint = catalogLabel && catalogLabel !== id ? catalogLabel : "";
+		const entry = hint
+			? { value: id, label: `${id}  ${hint}`, hint }
+			: { value: id, label: id };
+		const i = indexOf(id);
+		if (i === -1) out.push(entry);
+		else out[i] = entry;
 	};
 	(catalog.value || []).forEach((e) =>
 		(e.models || []).forEach((m) => {
 			if (catalogVendorLabel(m.provider) === label) push(m.model);
 		})
 	);
-	((modelCatalog.value.api_key_models || {})[label] || []).forEach((m) => push(m.model_id));
+	((modelCatalog.value.api_key_models || {})[label] || []).forEach((m) =>
+		pushLabelled(m.model_id, m.label)
+	);
 	push(providerDefaultModel(label));
 	return out;
 }
