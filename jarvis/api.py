@@ -639,6 +639,60 @@ def persist_tool_receipt(
 		_maybe_attach_artifact(conv_name, conv_owner, result)
 
 
+def persist_pending_action(
+	conv_name: str, tool: str, preview: dict | None, token: str, expires_at: int
+) -> None:
+	"""Write a durable role=tool PENDING row for a parked gated write (PR 1 of the
+	action-card overhaul) - the pre-action twin of ``persist_tool_receipt``. The card
+	then rides the message pipeline, so a reload always shows it (reload-reliable),
+	instead of depending only on the best-effort ``action:pending`` push + the
+	list-pending resync (the single-shared-query fragility the overhaul removes).
+
+	Stores ONLY the perm-filtered card (``preview['card']`` - already secret-masked by
+	build_card) + the expiry. NEVER stores raw ``tool_args``: an unconfirmed (maybe-to-
+	be-discarded) row must not expose unmasked args via ``get_conversation``; args are
+	stamped only when the row flips to a receipt (persist_tool_receipt). The Redis
+	pending_confirm token stays the SOLE execution authority - this row is display-only.
+
+	Idempotent on ``(conversation, token)`` via the shared FOR UPDATE + dedupe. RAISES
+	on failure so the gate FAIL-CLOSES (rolls the token back): a token with no delivery
+	row is exactly the invisible-card defect this overhaul kills, and the single-flight
+	guard would treat the orphan as a live card and wedge the retry."""
+	# Convert the token's epoch expiry to a SITE-timezone datetime the same way the
+	# codebase does (now_datetime + remaining seconds), so the row's countdown is
+	# correct regardless of an OS-vs-site timezone gap (Frappe Datetime fields are
+	# stored in the site timezone, not the OS timezone).
+	remaining = max(0, int(expires_at) - int(time.time()))
+	card = preview.get("card") if isinstance(preview, dict) else None
+	conv_owner = frappe.db.get_value("Jarvis Conversation", conv_name, "owner")
+	if not conv_owner:
+		# Not a real, hostable conversation (a synthetic/stray id, or a session-
+		# resolution artifact) - it cannot host a Jarvis Chat Message row. Treat it
+		# like a conv-less park: skip the row and let the owner-scoped list-pending
+		# backstop deliver the card. A genuine insert FAILURE on a REAL conversation
+		# still raises below, so the gate fail-closes (rolls the token back) as designed.
+		return
+	with impersonate(conv_owner):
+		# Commit-first so the FOR UPDATE is the transaction's first statement
+		# (REPEATABLE-READ discipline), matching persist_tool_receipt.
+		frappe.db.commit()
+		_locked_insert_chat_message(
+			conv_name,
+			{
+				"role": "tool",
+				"tool_name": tool,
+				"tool_status": "pending",
+				"tool_call_id": token,
+				"pending_card": frappe.as_json(card) if card is not None else None,
+				"expires_at": frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=remaining),
+				"content": f"{tool} → pending",
+			},
+			# (conversation, token) dedupe: a re-park of the same token is a no-op.
+			dedupe_filters={"conversation": conv_name, "tool_call_id": token},
+		)
+		frappe.db.commit()
+
+
 def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 	"""Attach a tool-produced file artifact ({file_url, filename, …}) to the
 	current assistant message's ``canvas`` field and publish a canvas event so
@@ -2274,6 +2328,33 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				"still fails, tell the user the confirmation could not be shown right "
 				"now and stop - do not loop.",
 			)
+		# Durable pending action-row (PR 1): the card rides the message pipeline so a
+		# reload always shows it (reload-reliable), not only via the best-effort push
+		# below. Conv-less parks ("") can't host a row -> the list-pending backstop
+		# delivers those (no reliability gain there, no regression). FAIL-CLOSED: if the
+		# row write fails after a successful mint, roll the token back (no orphan token
+		# that the single-flight guard would treat as a live card and wedge the retry)
+		# and surface the retryable error - nothing ran.
+		if conv:
+			try:
+				persist_pending_action(conv, tool, preview, token, expires_at)
+			except Exception:
+				# Discard any partial row write so "nothing changed" stays airtight even
+				# if a future controller hook fails post-SQL, THEN roll the Redis token
+				# back (no orphan) and surface the retryable error.
+				frappe.db.rollback()
+				frappe.log_error(
+					title="persist_pending_action failed; rolling back token",
+					message=frappe.get_traceback(),
+				)
+				pending_confirm.rollback_token(token, owner_user)
+				return _error(
+					"ConfirmationUnavailableError",
+					"could not stage the confirmation for this action (a storage error). "
+					"Nothing was changed. You may retry the exact same call once; if it "
+					"still fails, tell the user the confirmation could not be shown right "
+					"now and stop - do not loop.",
+				)
 		# Deliver the token to the human's UI out-of-band, over the realtime
 		# channel, NEVER via the function return below - the model must never
 		# see it. Published to the OWNER (the subscribed browser), not the acting
