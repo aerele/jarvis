@@ -329,6 +329,7 @@ def _dispatch_from_session(
 		_agent_run_ctx.clear_session_key()
 		_agent_run_ctx.take_armed_by_macro()  # belt: never leak an armed marker across dispatches
 		_agent_run_ctx.take_armed_by_skill()  # belt: same for the approved-skill-run marker
+		_agent_run_ctx.take_request_autorun_applied()  # belt: same for the request-scoped marker
 
 
 #: The findings writeback narrates ITSELF (``record_agent_run`` records a
@@ -463,16 +464,19 @@ def _persist_and_publish_tool_call(
 	# of a silent Activity-accordion tool row.
 	from jarvis.tools import _agent_run_ctx
 
-	# An uncarded auto-run write carries EITHER a macro provenance (armed macro's
-	# skip_confirmation) or a skill provenance (approved run's skill_autorun) - never
-	# both (the gate branches are mutually exclusive, macro-first). Consume both markers
-	# (consume-once) so neither leaks onto the next, unrelated call in a reused worker.
+	# An uncarded auto-run write carries EXACTLY ONE provenance: a macro (armed macro's
+	# skip_confirmation), a skill (approved run's skill_autorun), or a request-scoped
+	# "confirm all" (request_autorun) - the gate branches are mutually exclusive
+	# (macro-first, then skill, then request). Consume all three markers (consume-once) so
+	# none leaks onto the next, unrelated call in a reused worker.
 	armed_by_macro = _agent_run_ctx.take_armed_by_macro()
 	armed_by_skill = _agent_run_ctx.take_armed_by_skill()
-	# A FAILED armed write must still be visible (it ran uncarded, unattended, and
-	# broke - exactly what T8 surfaces): label it "failed" (a red chip carrying the
-	# provenance) rather than letting it fall into the collapsed Activity row.
-	if armed_by_macro or armed_by_skill:
+	request_applied = _agent_run_ctx.take_request_autorun_applied()
+	# A FAILED armed write must still be visible (it ran uncarded and broke - exactly what
+	# T8 surfaces): label it "failed" (a red chip) rather than letting it fall into the
+	# collapsed Activity row. A request-scoped write has no armer NAME (the user approved
+	# it), so it only drives the outcome label, not an armed_by_* field.
+	if armed_by_macro or armed_by_skill or request_applied:
 		armed_outcome = "auto_applied" if (isinstance(result, dict) and result.get("ok")) else "failed"
 	else:
 		armed_outcome = None
@@ -1127,6 +1131,13 @@ _SKILL_AUTORUN_NEVER = _BRAKE
 # bounded by the destructive carve-out, hard-stop-on-error, the Halt cancel-gate,
 # and per-skill un-arm.
 _SKILL_AUTORUN_TTL_S = 900
+# Sliding-TTL horizon for a request-scoped "confirm all" (design Layer B). Same
+# rationale + value as the skill run's: it bounds a normal idle gap between two
+# covered writes of ONE request's fan-out, so a finished request (or a dead worker)
+# falls out of the window within the TTL and the reaper reaps it. The runaway bound
+# is the brake carve-out + hard-stop-on-error + the Halt cancel-gate + the reset on
+# the next human message.
+_REQUEST_AUTORUN_TTL_S = 900
 # Gated writes we dry-run in the sandbox AT PARK TIME and BLOCK on if the dry-run
 # fails, so a deterministic failure (missing mandatory field, bad link, no create
 # permission) is returned to the model BEFORE a confirmation card is shown instead
@@ -1226,6 +1237,52 @@ def _skill_autorun_clear(conv: str) -> None:
 		"Jarvis Conversation",
 		conv,
 		{"skill_autorun": 0, "skill_autorun_skill": None},
+		update_modified=False,
+	)
+	frappe.db.commit()
+
+
+def _request_autorun_arm(conv: str, msg_id: str | None) -> None:
+	"""Arm request-scoped 'confirm all' for the CURRENT request (design Layer B): the
+	user approved the whole request, so its covered writes run uncarded. Raw db_set
+	(bypasses the controller guard, exactly as approve_and_run arms skill_autorun);
+	stamps the sliding timestamp = now and records the originating message (observability
+	only - correctness rides the new-message reset + sliding TTL). Committed immediately
+	so the armed state survives the browser POST -> RQ worker handoff."""
+	frappe.db.set_value(
+		"Jarvis Conversation",
+		conv,
+		{
+			"request_autorun": 1,
+			"request_autorun_at": frappe.utils.now_datetime(),
+			"request_autorun_msg": msg_id or "",
+		},
+		update_modified=False,
+	)
+	frappe.db.commit()
+
+
+def _request_autorun_slide(conv: str) -> None:
+	"""Advance the sliding last-write timestamp after a request-scoped covered write, and
+	commit immediately, so a worker death leaves an accurate freeze-point for the reaper."""
+	frappe.db.set_value(
+		"Jarvis Conversation",
+		conv,
+		"request_autorun_at",
+		frappe.utils.now_datetime(),
+		update_modified=False,
+	)
+	frappe.db.commit()
+
+
+def _request_autorun_clear(conv: str) -> None:
+	"""End the request-scoped run: drop request_autorun so the next covered write re-cards.
+	Committed immediately so the cleared state survives a worker death (a concurrent 0->0
+	clear is an idempotent no-op)."""
+	frappe.db.set_value(
+		"Jarvis Conversation",
+		conv,
+		{"request_autorun": 0, "request_autorun_msg": None},
 		update_modified=False,
 	)
 	frappe.db.commit()
@@ -1857,6 +1914,11 @@ def _run_covered_write(
 		_agent_run_ctx.set_armed_by_macro(provenance_name)
 	elif provenance_kind == "skill":
 		_agent_run_ctx.set_armed_by_skill(provenance_name)
+	elif provenance_kind == "request":
+		# Request-scoped "confirm all": a boolean marker (no armer name - the user
+		# themselves approved the whole request), so the receipt persist labels the row
+		# auto_applied just like the macro/skill paths.
+		_agent_run_ctx.set_request_autorun_applied()
 	return result
 
 
@@ -2113,7 +2175,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# safe default: the write parks). skill_autorun + skill_autorun_at +
 		# skill_autorun_skill ride the SAME single query (design §3.4): the skill
 		# auto-run branch needs the flag, its sliding timestamp for the inline TTL
-		# check, and the armed skill docname for the LIVE disarm re-check (C2).
+		# check, and the armed skill docname for the LIVE disarm re-check (C2). The
+		# request-scoped "confirm all" branch (design Layer B) adds request_autorun +
+		# its sliding request_autorun_at to the same read (no request_autorun_msg -
+		# that is observability-only, not read in the hot gate).
 		_conv_flags = (
 			frappe.db.get_value(
 				"Jarvis Conversation",
@@ -2124,6 +2189,8 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					"skill_autorun",
 					"skill_autorun_at",
 					"skill_autorun_skill",
+					"request_autorun",
+					"request_autorun_at",
 				],
 				as_dict=True,
 			)
@@ -2242,6 +2309,57 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					err_obj = result.get("error")
 					if isinstance(err_obj, dict) and err_obj.get("message"):
 						err_obj["message"] += " The approved run has also ended - re-approve to continue."
+				return result
+			# TTL-expired / no timestamp: fall through to the normal park.
+		# Request-scoped "confirm all" (design Layer B): the user approved this whole
+		# request's fan-out at once, so a COVERED write (_GATED_WRITES - _BRAKE) runs
+		# uncarded while the request is live - armed by _typed_confirmation / the upfront
+		# detector, sliding request_autorun_at within the TTL. The brake is NOT covered,
+		# so delete/cancel/amend/create_custom_skill/connector still park (the brake
+		# protects what the user has not seen). Placed AFTER the skill-autorun branch (an
+		# approved skill run keeps its own provenance) and BEFORE the File Box fast-path.
+		# Bulk covered writes skip too (one approval covers the batch); the F16 over-size
+		# cap above still bounces an oversized batch.
+		if tool in _COVERED and _conv_flags.get("request_autorun"):
+			from jarvis.chat import turn_message_binding
+
+			# Cancel-gate FIRST (Halt): stop_run sets a transport-independent run-cancel
+			# signal; if set, HARD-STOP this covered write - clear the flag, clear the
+			# signal, and REFUSE without executing, so Halt stops the request chain within
+			# one write regardless of the container honouring chat_abort.
+			if turn_message_binding.is_run_cancel_requested(conv):
+				_request_autorun_clear(conv)
+				turn_message_binding.clear_run_cancel(conv)
+				return _error(RunHaltedError.__name__, "the run was halted - re-approve to continue")
+			# Sliding TTL: run uncarded only while the last covered write is recent. A
+			# missing/expired timestamp (a finished request, or a stranded flag after a
+			# worker death) does NOT auto-run - fall through to the normal park (a safe
+			# re-card); the reaper clears the stale flag.
+			autorun_at = _conv_flags.get("request_autorun_at")
+			if (
+				autorun_at
+				and (frappe.utils.now_datetime() - frappe.utils.get_datetime(autorun_at)).total_seconds()
+				<= _REQUEST_AUTORUN_TTL_S
+			):
+				result = _run_covered_write(
+					tool,
+					args,
+					conv=conv,
+					owner_user=owner_user,
+					provenance_kind="request",
+					provenance_name="",
+				)
+				# Hard-stop-on-error: the first covered ok:False clears the flag so the next
+				# write re-cards; a success slides the timestamp forward. On failure, append a
+				# one-line note to the tool's OWN error so the model re-cards the next covered
+				# write instead of retrying it uncarded (agent legibility).
+				if result.get("ok"):
+					_request_autorun_slide(conv)
+				else:
+					_request_autorun_clear(conv)
+					err_obj = result.get("error")
+					if isinstance(err_obj, dict) and err_obj.get("message"):
+						err_obj["message"] += " The approved request has also ended - re-approve to continue."
 				return result
 			# TTL-expired / no timestamp: fall through to the normal park.
 		# File Box fast-path (design A2): the ONE remaining path where a gated

@@ -1167,7 +1167,14 @@ def _typed_confirmation(
 		# Brake items (delete/cancel/amend/create-skill/connector) are NOT swept here:
 		# unseen, they still get their own card.
 		if approval_phrases.is_sweep_all(message):
-			return _confirm_reversible_sweep(user, conversation)
+			swept = _confirm_reversible_sweep(user, conversation)
+			if swept is not None:
+				# The user approved this whole request: arm request-scoped auto-run so its
+				# remaining fan-out (continuation batches / a create->submit chain) also runs
+				# uncarded (design Layer B). Only after a REAL sweep, so an empty sweep (nothing
+				# parked) does not arm.
+				_arm_request_autorun(conversation)
+			return swept
 		return None
 
 	# The server's own live set: needed so a selection that names ONLY cards the
@@ -1197,7 +1204,30 @@ def _typed_confirmation(
 		}
 		for i in picked
 	]
-	return _run_typed_batch(conversation, items)
+	batch = _run_typed_batch(conversation, items)
+	# A sweep-all ("confirm all" / a plain go-ahead over several cards) also arms the
+	# request-scoped auto-run for this request's remaining fan-out; a NUMBERED pick
+	# ("confirm 1 and 3") does NOT - it approved only those, not the whole request.
+	if approval_phrases.is_sweep_all(message):
+		_arm_request_autorun(conversation)
+	return batch
+
+
+def _arm_request_autorun(conversation: str) -> None:
+	"""Arm the request-scoped bulk approval (design Layer B) after a typed 'confirm all'
+	sweep, so the CURRENT request's remaining fan-out (continuation batches / a
+	create->submit chain) also runs uncarded. Best-effort + fail-safe: a failure just
+	means the next covered write re-cards (never a wrongful skip). request_autorun_msg
+	records the turn's triggering message (observability only - correctness rides the
+	new-message reset + sliding TTL)."""
+	from jarvis import api
+	from jarvis.chat import turn_message_binding
+
+	try:
+		msg_id = turn_message_binding.current_turn_message_id(conversation) or ""
+		api._request_autorun_arm(conversation, msg_id)
+	except Exception:
+		frappe.log_error(title="arm request_autorun (typed sweep)", message=frappe.get_traceback())
 
 
 def _run_typed_batch(conversation, items):
@@ -1535,6 +1565,23 @@ def send_message(
 
 		turn_message_binding.clear_skill_autorun(conversation)
 
+	# A genuine new top-level message also ENDS any request-scoped "confirm all" run
+	# (design Layer B): the prior request is over, so its bulk approval must never carry
+	# into THIS message's writes. Set in-memory so the conv_doc.save() below persists 0,
+	# and clear immediately (raw) so an early return before that save still ends it. Same
+	# placement invariants as the skill reset above (after the typed-approval early-return
+	# and every no-turn-created reject). Continuations never reach send_message (they go
+	# via _enqueue_turn), so they are excluded by construction. If THIS message itself
+	# carries a 'confirm all' directive, the upfront-arm AFTER save() re-arms on top of
+	# this reset.
+	if conv_doc.request_autorun:
+		conv_doc.request_autorun = 0
+		conv_doc.request_autorun_at = None
+		conv_doc.request_autorun_msg = None
+		from jarvis import api as _jarvis_api
+
+		_jarvis_api._request_autorun_clear(conversation)
+
 	# Every attachment is stored as a canvas item so both the SPA and the PWA
 	# render it as a clickable, previewable card (images inline, other files as a
 	# preview chip). The visible message text is just what the user typed - it can
@@ -1600,6 +1647,22 @@ def send_message(
 		conv_doc.flags.ignore_permissions = True
 	conv_doc.save()
 	frappe.db.commit()
+
+	# Upfront request-scoped "confirm all" (design Layer B): a compound message that
+	# bundles the go-ahead with the request ("create 3 todos and submit them, confirm
+	# all") is NOT a whole-message approval, so _typed_confirmation left it to fall
+	# through to the model. Detect the directive here and ARM the request-scoped auto-run
+	# for THIS turn's fan-out BEFORE the worker's covered writes hit the gate. Only a real
+	# interactive human send arms (never a delegated/background re-entry). Raw db_set AFTER
+	# conv_doc.save() so the save's reset above cannot clobber it, and bypassing the
+	# controller guard like every other server-side arm.
+	if not _delegated and not int(background or 0):
+		from jarvis.chat import approval_phrases
+
+		if approval_phrases.contains_confirm_all_directive(message):
+			from jarvis import api as _jarvis_api
+
+			_jarvis_api._request_autorun_arm(conversation, msg_doc.name)
 
 	# Enqueue the worker. Returns immediately; worker runs async.
 	run_id = uuid.uuid4().hex[:12]
@@ -2742,6 +2805,10 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		# a stopped run leaves no dangling 'pending' row (which would show as a stale/
 		# soon-expired card on reload). Best-effort (self-guarding).
 		api.cancel_pending_action_rows(conversation)
+		# Layer B: Halt also ENDS a request-scoped "confirm all" run, so its remaining
+		# fan-out re-cards. (The gate's cancel-gate also hard-stops the next covered write
+		# via the run-cancel signal below; this is the explicit belt.)
+		api._request_autorun_clear(conversation)
 	except Exception:
 		frappe.log_error(title="stop_run token sweep", message=frappe.get_traceback())
 	# Skill "Approve & run" Halt cancel-gate (design §3.4): set the transport-

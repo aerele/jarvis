@@ -372,6 +372,12 @@ scheduler_events = {
 		# no-pending-card discriminators the gate and on_terminal_turn use. Cheap no-op
 		# (one indexed flag scan) when nothing is stranded.
 		"jarvis.chat.session_lifecycle.reap_stranded_skill_autorun",
+		# Request-scoped "confirm all" backstop (design Layer B): clear a STRANDED
+		# request_autorun flag - a "confirm all" run whose worker died mid-request, so no
+		# reset fired and its sliding timestamp froze. Same shape as the skill reaper (a
+		# conversation-flag scan past the sliding TTL, with the no-live-turn + no-pending-
+		# card discriminators). Cheap no-op (one indexed flag scan) when nothing is stranded.
+		"jarvis.chat.session_lifecycle.reap_stranded_request_autorun",
 		# Fire any due scheduled auditor agents. Identity-safe (runs each audit
 		# as its owner, never Administrator); budget-capped; advances only on a
 		# successful enqueue. See jarvis/chat/agent_scheduler.py.

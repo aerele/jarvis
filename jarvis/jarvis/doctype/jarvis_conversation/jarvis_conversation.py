@@ -23,6 +23,7 @@ class JarvisConversation(Document):
 		self._guard_file_box_enable()
 		self._guard_skip_confirmation_enable()
 		self._guard_skill_autorun_enable()
+		self._guard_request_autorun_enable()
 
 	def _guard_file_box_enable(self):
 		"""``file_box`` grants a create/update confirm-card bypass (destructive ops
@@ -93,5 +94,29 @@ class JarvisConversation(Document):
 		if not has_jarvis_admin_access(frappe.session.user):
 			frappe.throw(
 				_("Enabling skill auto-run requires a Jarvis Admin or System Manager role."),
+				frappe.PermissionError,
+			)
+
+	def _guard_request_autorun_enable(self):
+		"""``request_autorun`` is the flag the write-confirmation gate reads to run the
+		CURRENT request's covered writes uncarded after the user typed 'confirm all' /
+		'do everything' (design Layer B). The one legitimate enabler is
+		``jarvis.chat.api`` (``_typed_confirmation`` after a sweep, or the upfront
+		detector on a compound send) -> raw ``frappe.db.set_value``, which bypasses this
+		controller.
+
+		This guards every OTHER path: the field is owner-writable with no permlevel, so a
+		non-admin owner must not flip it 0 -> 1 through a generic ``doc.save()`` /
+		``update_doc`` / ``frappe.client.set_value`` and turn their own chat into an
+		uncarded-write conversation. LOAD-BEARING (the gate reads THIS field). Only
+		0/unset -> 1 is gated; disabling and no-op saves stay free for the owner."""
+		if not self.request_autorun:
+			return
+		previous = self.get_doc_before_save()
+		if previous and bool(previous.request_autorun):
+			return
+		if not has_jarvis_admin_access(frappe.session.user):
+			frappe.throw(
+				_("Enabling request auto-run requires a Jarvis Admin or System Manager role."),
 				frappe.PermissionError,
 			)

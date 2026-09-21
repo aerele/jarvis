@@ -133,6 +133,48 @@ def is_sweep_all(text: str) -> bool:
 	return bool(_ALL_RE.match(norm))
 
 
+# ── request-scoped "confirm all" bundled with a request ─────────────────────
+#
+# A user can approve a whole request up front, in the SAME message that describes
+# it: "create 3 todos and submit them, confirm all". That message is not a
+# whole-message approval (it also carries the task), so is_approval / parse_approval
+# / is_sweep_all all correctly return False and it reaches the model. The bench
+# still needs to notice the "confirm all" directive to ARM the request-scoped bulk
+# approval (design Layer B) before the turn's covered writes hit the gate.
+_CONFIRM_ALL_DIRECTIVES = (
+	"confirm all",
+	"confirm everything",
+	"confirm them all",
+	"approve all",
+	"approve everything",
+	"do everything",
+	"do it all",
+	"do them all",
+)
+# Cheap negation / question guards so "should I confirm all?" or "don't do
+# everything" do not arm it. Not exhaustive - a false positive only arms a
+# per-request auto-run the BRAKE still cards and the next human message resets.
+_DIRECTIVE_NEGATIONS = ("don't", "do not", "dont", "without confirm", "no need")
+
+
+def contains_confirm_all_directive(text: str) -> bool:
+	"""True when a longer/compound message carries an explicit 'confirm all' /
+	'do everything' directive (SUBSTRING, not whole-message). Used ONLY to ARM the
+	request-scoped bulk approval for a request bundled with the go-ahead - NOT the
+	security gate (that stays whole-message in is_approval / parse_approval, which
+	grant execution). A false positive here only arms a per-request auto-run that the
+	brake still cards and the next human message resets, so a blunt substring match
+	guarded against an obvious negation or question is deliberately enough."""
+	if not text:
+		return False
+	if "?" in text:
+		return False
+	norm = normalise(text)
+	if any(neg in norm for neg in _DIRECTIVE_NEGATIONS):
+		return False
+	return any(phrase in norm for phrase in _CONFIRM_ALL_DIRECTIVES)
+
+
 def parse_approval(text: str, count: int) -> list[int] | None:
 	"""Which of ``count`` parked cards this message approves.
 

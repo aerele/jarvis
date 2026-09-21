@@ -758,3 +758,95 @@ def _has_live_turn(conversation: str) -> bool:
 			{"c": conversation},
 		)
 	)
+
+
+def _request_autorun_ttl_s() -> int:
+	"""The gate's request-scoped sliding-TTL horizon (``api._REQUEST_AUTORUN_TTL_S``), read
+	lazily so this scheduler module never imports the heavy ``api`` module at load time."""
+	from jarvis.api import _REQUEST_AUTORUN_TTL_S
+
+	return _REQUEST_AUTORUN_TTL_S
+
+
+def reap_stranded_request_autorun() -> int:
+	"""Hourly cron: clear a STRANDED ``request_autorun`` flag - a request-scoped "confirm
+	all" run (design Layer B) whose worker died mid-request, so no reset fired and its
+	sliding ``request_autorun_at`` froze. Returns how many were cleared. Runs as the
+	scheduler (Administrator); never raises out; best-effort per candidate.
+
+	The twin of :func:`reap_stranded_skill_autorun` for the request-scoped flag, with the
+	SAME three discriminators (no live turn, stale/NULL timestamp, no pending card - a run
+	PAUSED on a brake card is a legit pause, not stranded) and the same re-read-under-lock
+	discipline. Distinct lock name so the two reapers never contend on one conversation."""
+	reap_after_s = _REAP_AUTORUN_TTL_MULTIPLE * _request_autorun_ttl_s()
+	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-reap_after_s)
+	candidates = _stranded_request_autorun_candidates(cutoff)
+	if not candidates:
+		return 0
+	from jarvis import api
+	from jarvis._redis_lock import redis_lock
+	from jarvis.chat import turn_message_binding
+
+	reaped = 0
+	for conv in candidates:
+		try:
+			with redis_lock(
+				f"jarvis_request_autorun:{conv}", timeout_s=60, blocking_timeout_s=0.0
+			) as acquired:
+				if not acquired:
+					continue
+				# Close the scan snapshot so the FOR UPDATE read sees the row as it is NOW.
+				frappe.db.commit()
+				cur = frappe.db.get_value(
+					CONV,
+					conv,
+					["request_autorun", "request_autorun_at", "owner"],
+					as_dict=True,
+					for_update=True,
+				)
+				# Re-check ALL THREE discriminators under the lock; if any no longer holds the
+				# run came back to life since the scan - leave it (commit to release the lock).
+				if (
+					not cur
+					or not cur.request_autorun
+					or not _autorun_is_stale(cur.request_autorun_at, cutoff)
+					or _has_live_turn(conv)
+					or turn_message_binding._has_pending_card(cur.owner, conv)
+				):
+					frappe.db.commit()
+					continue
+				# _request_autorun_clear writes the row we hold FOR UPDATE and commits, releasing
+				# the lock; it is idempotent (0->0 no-op) and never raises.
+				api._request_autorun_clear(conv)
+				reaped += 1
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(
+				title="session_lifecycle: request_autorun reaper row failed",
+				message=f"conversation={conv}\n{frappe.get_traceback()}",
+			)
+	if reaped:
+		frappe.logger("jarvis.request_autorun").info(f"reaped {reaped} stranded request_autorun flags")
+	return reaped
+
+
+def _stranded_request_autorun_candidates(cutoff) -> list[str]:
+	"""Conversations whose request-scoped flag looks stranded: ``request_autorun=1``, a stale
+	or NULL sliding timestamp, and NO live turn. Its own function so the re-read-under-lock
+	can be exercised against a deliberately stale candidate snapshot in tests."""
+	return frappe.db.sql_list(
+		"""
+		SELECT c.name
+		FROM `tabJarvis Conversation` c
+		WHERE c.request_autorun = 1
+		  AND (c.request_autorun_at IS NULL OR c.request_autorun_at < %(cutoff)s)
+		  AND NOT EXISTS (
+			SELECT 1 FROM `tabJarvis Chat Message` m
+			WHERE m.conversation = c.name
+			  AND (m.streaming = 1 OR m.recovering = 1)
+		  )
+		ORDER BY c.request_autorun_at ASC
+		LIMIT %(limit)s
+		""",
+		{"cutoff": cutoff, "limit": _REAP_AUTORUN_BATCH_MAX},
+	)

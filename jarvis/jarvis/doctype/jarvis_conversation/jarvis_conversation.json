@@ -109,6 +109,32 @@
    "description": "The armed Jarvis Custom Skill DOCNAME whose approved run stamped skill_autorun on this conversation - set by approve_and_run alongside skill_autorun=1 (from the token's skill_docname). The write-confirmation gate re-reads allow_approve_run LIVE off THIS row before each uncarded covered write, so un-arming the skill mid-run hard-stops the auto-run within one write (the documented kill lever). Server-set only (db_set)."
   },
   {
+   "fieldname": "request_autorun",
+   "fieldtype": "Check",
+   "label": "Request auto-run (typed 'confirm all')",
+   "default": "0",
+   "hidden": 1,
+   "no_copy": 1,
+   "search_index": 1,
+   "description": "Set by _typed_confirmation / the upfront detector when the user says 'confirm all' / 'do everything' (design Layer B). When 1, every covered gated tool call (_GATED_WRITES - _BRAKE) in the CURRENT request's fan-out (the originating message plus its [System] Applied continuation chain) runs without a confirmation card, sliding request_autorun_at on each covered write; the brake (delete/cancel/amend/create_custom_skill/call_connector) still parks. Bounded to the request: a new top-level human message resets it, a first ok:False clears it, Halt clears it, and the sliding-TTL reaper reaps a stranded flag. NOT the persistent skill 'Approve & run'. Server-set only (raw db_set); enabling via a generic save requires the Jarvis Admin / System Manager role."
+  },
+  {
+   "fieldname": "request_autorun_at",
+   "fieldtype": "Datetime",
+   "label": "Request Auto-run At",
+   "hidden": 1,
+   "no_copy": 1,
+   "description": "Sliding last-write timestamp for request_autorun - set at arm time and advanced to now() on every subsequent covered write. The inline sliding-TTL check and the reaper read THIS field to expire a stranded request-autorun. Server-set only (db_set)."
+  },
+  {
+   "fieldname": "request_autorun_msg",
+   "fieldtype": "Data",
+   "label": "Request Auto-run Message",
+   "hidden": 1,
+   "no_copy": 1,
+   "description": "The originating human Jarvis Chat Message name that armed request_autorun (record/observability only - correctness rides the new-message reset + sliding TTL, not a descent-check). Server-set only (db_set)."
+  },
+  {
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",
