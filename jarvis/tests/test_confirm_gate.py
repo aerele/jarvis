@@ -1271,3 +1271,183 @@ class TestConfirmGracefulFailure(FrappeTestCase):
 		self.assertIn("error", res)
 		# The agent still gets a (failed) continuation, so it isn't left hanging.
 		self.assertEqual(disp.call_count, 1)
+
+
+class TestFileBoxWikiWriteBack(FrappeTestCase):
+	"""feat/filebox-skills-wiki: a File Box (file_box=1) conversation's update_wiki
+	is routed through the append-only, provenance-FENCED funnel
+	(jarvis.chat.wiki.apply_extracted_page_updates) - NOT the raw update_wiki tool
+	(scope=Org + ignore_permissions, stamps the human-curated "tool" kind, can
+	clobber curated pages) and NOT a confirmation card. Attended chat + admin
+	auto_apply are unaffected (still park a card - the guard is ``and file_box``,
+	not ``or``). The wiki kill-switch still refuses a wiki-off file_box write before
+	the branch. A destructive tool still parks; a single create_doc still
+	auto-applies (unregressed)."""
+
+	_ARGS = {
+		"slug": "party-fake-co",
+		"title": "Fake Co",
+		"page_type": "Reference",
+		"append_md": "## Invoice INV-1\nTotal 100",
+		"summary": "party page",
+	}
+
+	def tearDown(self):
+		for name in frappe.get_all(CONV, filters={"title": "file-box-wiki test"}, pluck="name"):
+			frappe.delete_doc(CONV, name, force=True, ignore_permissions=True)
+		frappe.db.delete("ToDo", {"description": ["like", "file-box-wiki-%"]})
+		frappe.db.commit()
+
+	def _conv(self, **flags) -> str:
+		"""A conversation owned by the test user, with ``file_box`` / ``auto_apply``
+		set directly (bypassing the controller's admin-gate, exactly as drop_file
+		does)."""
+		doc = frappe.get_doc({"doctype": CONV, "title": "file-box-wiki test"})
+		doc.insert(ignore_permissions=True)
+		if flags:
+			frappe.db.set_value(CONV, doc.name, flags, update_modified=False)
+		return doc.name
+
+	def test_file_box_update_wiki_routes_through_fenced_funnel(self):
+		# Case 1: file_box + update_wiki -> the fenced funnel runs once with the
+		# append-only / preserve-curated / file-box fence kwargs; no card; the raw
+		# update_wiki tool never dispatches.
+		conv = self._conv(file_box=1)
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch(
+				"jarvis.chat.wiki.apply_extracted_page_updates",
+				return_value=[{"slug": "party-fake-co", "ok": True, "reason": "applied"}],
+			) as apply,
+			patch("jarvis.chat.pending_confirm.mint") as mint,
+			patch("jarvis.api.dispatch") as disp,
+		):
+			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+		apply.assert_called_once()
+		kwargs = apply.call_args.kwargs
+		self.assertEqual(kwargs["allow_body_replace"], False)
+		self.assertEqual(kwargs["preserve_curated"], True)
+		self.assertEqual(kwargs["provenance_prefix"], "file-box")
+		self.assertEqual(kwargs["source"], "file-box:")
+		self.assertEqual(kwargs["return_outcomes"], True)
+		self.assertEqual(kwargs["ref"], conv)
+		# One update, append-only (append_md carried, no body_md replace).
+		updates = apply.call_args.args[0]
+		self.assertEqual(len(updates), 1)
+		self.assertEqual(updates[0]["append_md"], self._ARGS["append_md"])
+		self.assertNotIn("body_md", updates[0])
+		self.assertEqual(updates[0]["scope"], "Org")
+		# No confirmation card parked; the raw update_wiki tool never dispatched.
+		mint.assert_not_called()
+		disp.assert_not_called()
+		# Model-facing result: enveloped, inner ok=True with the normalized slug.
+		self.assertTrue(r["ok"])
+		self.assertTrue(r["data"]["ok"])
+		self.assertEqual(r["data"]["slug"], "party-fake-co")
+
+	def test_file_box_replace_body_is_downgraded_to_append(self):
+		# The fence is append-only: a replace_body_md becomes append_md, so an
+		# unattended run can never full-body-rewrite a page.
+		conv = self._conv(file_box=1)
+		args = {"slug": "party-fake-co", "replace_body_md": "WHOLE NEW BODY"}
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch(
+				"jarvis.chat.wiki.apply_extracted_page_updates",
+				return_value=[{"slug": "party-fake-co", "ok": True, "reason": "applied"}],
+			) as apply,
+		):
+			api._run_tool("update_wiki", args, conversation=conv)
+		update = apply.call_args.args[0][0]
+		self.assertEqual(update["append_md"], "WHOLE NEW BODY")
+
+	def test_file_box_fence_refusal_reports_reason(self):
+		# A funnel refusal (a slug colliding with a human/other page) surfaces as
+		# inner ok=False + reason - the model reads it and moves on (best-effort).
+		conv = self._conv(file_box=1)
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch(
+				"jarvis.chat.wiki.apply_extracted_page_updates",
+				return_value=[{"slug": "party-fake-co", "ok": False, "reason": "refused"}],
+			),
+			patch("jarvis.chat.pending_confirm.mint") as mint,
+		):
+			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+		self.assertTrue(r["ok"])  # the tool dispatched cleanly...
+		self.assertFalse(r["data"]["ok"])  # ...but the fenced write was refused.
+		self.assertEqual(r["data"]["reason"], "refused")
+		mint.assert_not_called()
+
+	def test_normal_conversation_parks_card_not_fenced(self):
+		# Case 2: file_box=0 -> the ordinary park path (a confirmation card), the
+		# fenced funnel is never touched.
+		conv = self._conv()  # file_box defaults to 0
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch("jarvis.chat.wiki.apply_extracted_page_updates") as apply,
+			patch("jarvis.chat.events.publish_to_user"),
+		):
+			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+		self.assertTrue(r["ok"])
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		apply.assert_not_called()
+
+	def test_admin_auto_apply_parks_card_not_fenced(self):
+		# Case 3: admin auto_apply (file_box=0) does NOT fenced-route update_wiki
+		# (it is not in _AUTO_APPLYABLE, and the branch keys on file_box, not
+		# auto_apply) - it still parks a card.
+		conv = self._conv(auto_apply=1)  # file_box stays 0
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch("jarvis.chat.wiki.apply_extracted_page_updates") as apply,
+			patch("jarvis.chat.events.publish_to_user"),
+		):
+			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		apply.assert_not_called()
+
+	def test_wiki_disabled_refuses_file_box_write_before_branch(self):
+		# Case 4: the wiki kill-switch (top of _run_tool) refuses a wiki-off
+		# file_box write before it can reach the branch - no funnel, no card.
+		conv = self._conv(file_box=1)
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=False),
+			patch("jarvis.chat.wiki.apply_extracted_page_updates") as apply,
+			patch("jarvis.chat.pending_confirm.mint") as mint,
+		):
+			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "FeatureDisabledError")
+		apply.assert_not_called()
+		mint.assert_not_called()
+
+	def test_file_box_destructive_still_parks(self):
+		# Case 5: a _DESTRUCTIVE tool in a file_box run still parks a card (only
+		# update_wiki is fenced-routed; delete/cancel/amend always confirm).
+		conv = self._conv(file_box=1)
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "file-box-wiki-del"}).insert(
+			ignore_permissions=True
+		)
+		with patch("jarvis.chat.events.publish_to_user"):
+			r = api._run_tool("delete_doc", {"doctype": "ToDo", "name": todo.name}, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertTrue(frappe.db.exists("ToDo", todo.name))
+
+	def test_file_box_create_doc_still_auto_applies(self):
+		# Case 6 (unregressed): a single create_doc still fast-paths under file_box
+		# via dispatch_confirmed(provenance="auto_apply"), no card.
+		conv = self._conv(file_box=1)
+		with patch(
+			"jarvis.api.dispatch_confirmed",
+			return_value={"ok": True, "data": {"name": "TODO-FAKE"}},
+		) as dc:
+			r = api._run_tool(
+				"create_doc",
+				{"doctype": "ToDo", "values": {"description": "file-box-wiki-create"}},
+				conversation=conv,
+			)
+		dc.assert_called_once()
+		self.assertEqual(dc.call_args.kwargs.get("provenance"), "auto_apply")
+		self.assertTrue(r["ok"])
+		self.assertNotEqual((r.get("data") or {}).get("status"), "pending_confirmation")

@@ -3,11 +3,14 @@
 The SPA's File Box pane uploads the file (standard Frappe upload_file),
 then calls ``drop_file``. That creates a conversation named after the
 file and sends ONE directed prompt through the normal send_message +
-attachments machinery: process via the ocr-data-entry skill, decide by
-convention, queue Jarvis Approval rows for real ambiguities, at most one
-consolidated question. The chat stays the execution surface - the File
-Box is just the directed entry point, so streaming, drafts, approvals
-and recovery all behave exactly like a hand-typed turn.
+attachments machinery: classify the file, follow a matching processing
+skill (a Jarvis Custom Skill / persona skill found by find_skills, else
+ocr-data-entry), consult the wiki before drafting and record findings
+back to it after, and queue Jarvis Approval rows for real ambiguities.
+The drafts-only / never-ask / ambiguity-to-Approval safety rules OVERRIDE
+any skill the run follows. The chat stays the execution surface - the
+File Box is just the directed entry point, so streaming, drafts,
+approvals and recovery all behave exactly like a hand-typed turn.
 """
 
 from __future__ import annotations
@@ -19,16 +22,32 @@ import frappe
 from jarvis.permissions import require_jarvis_user
 
 INBOUND_PROMPT = (
-	"This file arrived through the File Box - process it as an inbound "
-	"business document using the ocr-data-entry skill (read "
-	"skills/ocr-data-entry/SKILL.md first and follow its decision policy "
-	"exactly). Classify the document type, extract it fully - every line "
-	"item verbatim, never a lump-sum balancing line - resolve ambiguities "
-	"by the skill's convention ladder, and create the draft. Do NOT ask "
-	"me anything in this chat: I am not here. EVERY decision that needs "
-	"a human - including what document this is, or that the file is "
-	"unreadable - goes to a Jarvis Approval Request row (empty document_type for "
-	"classification decisions), then end the turn with a one-line summary."
+	"This file arrived through the File Box - process it as an inbound business "
+	"document, unattended, in this order.\n"
+	"1. Classify what the document is.\n"
+	"2. Look for a processing skill that fits this KIND of document: call "
+	"find_skills with the document kind and scan available_skills. Only follow a "
+	"skill whose description CLEARLY names this kind of document (find_skills is a "
+	"keyword match, so a loose match is not a match); read it with get_skill (or "
+	"cat its SKILL.md) and use it for classification, field mapping and routing. If "
+	"nothing clearly fits, use the ocr-data-entry skill (read "
+	"skills/ocr-data-entry/SKILL.md first and follow its decision policy exactly).\n"
+	"3. Before drafting, check the wiki for what we already know: read_wiki for the "
+	"party and the topic, and build on / reference existing content instead of "
+	"starting from scratch. If the wiki is unavailable, skip this step and carry on.\n"
+	"4. Extract the document fully - every line item verbatim, never a lump-sum "
+	"balancing line - resolve ambiguities by the skill's convention ladder, and "
+	"create the draft.\n"
+	"5. AFTER the draft exists, record what you learned back to the wiki with "
+	"update_wiki, extending the page from step 3 rather than duplicating it. This is "
+	"best-effort: if the write is refused or the wiki is off, note it and move on - "
+	"never fail or retry the run over a wiki write.\n"
+	"These rules OVERRIDE any skill you follow and are non-negotiable: do NOT ask me "
+	"anything in this chat (I am not here); only ever create Drafts, never submit; "
+	"destructive actions still wait for approval; and EVERY decision that needs a "
+	"human - including what document this is, or that the file is unreadable - goes "
+	"to a Jarvis Approval Request row (empty document_type for classification "
+	"decisions). End the turn with a one-line summary."
 )
 
 

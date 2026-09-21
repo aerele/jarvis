@@ -891,6 +891,18 @@ _GATED_WRITES = frozenset(
 # names - record_app_wiki (the app-learning scribe's audited-not-gated writeback)
 # is a different feature's pipeline and is out of scope here.
 _WIKI_TOOLS = frozenset({"read_wiki", "update_wiki"})
+# File Box unattended wiki write-back (feat/filebox-skills-wiki): a file_box run's
+# update_wiki is routed through the append-only, provenance-FENCED funnel
+# (jarvis.chat.wiki.apply_extracted_page_updates), NOT the raw update_wiki tool -
+# which defaults scope=Org + ignore_permissions and stamps the human-curated
+# "tool" kind, so a raw write could clobber a curated page. FILE_BOX_WIKI_KIND is
+# the provenance stamped on every file-box page; it MUST start with
+# FILE_BOX_WIKI_FENCE (the fence prefix that lets a file-box run refresh only its
+# OWN pages and REFUSES a slug colliding with any human/other page) and MUST NOT be
+# a _HUMAN_SOURCE_KINDS member ("file-box:" is neither). Mirrors record_app_wiki's
+# source=/provenance_prefix= pair.
+FILE_BOX_WIKI_KIND = "file-box:"
+FILE_BOX_WIKI_FENCE = "file-box"
 # Irreversible/consequential subset - gated even when a user has auto-apply
 # on (Task 4 uses this; define it here so the sets live together).
 _DESTRUCTIVE = frozenset(
@@ -1822,6 +1834,67 @@ def _connector_call_is_safe_read(args) -> bool:
 		return False
 
 
+def _file_box_wiki_write(args: dict, conv: str) -> dict:
+	"""Land a File Box conversation's ``update_wiki`` through the append-only,
+	provenance-FENCED wiki funnel instead of the raw ``update_wiki`` tool.
+
+	A file_box run is unattended (nobody can click a confirm card), so its
+	write-back must NOT reach the raw tool (scope=Org + ignore_permissions,
+	full-body replace, stamps the human-curated "tool" kind). It lands through
+	``apply_extracted_page_updates`` fenced to ``FILE_BOX_WIKI_FENCE`` with
+	``allow_body_replace=False`` + ``preserve_curated=True`` and stamped
+	``FILE_BOX_WIKI_KIND`` - so it can only create/refresh its OWN file-box pages,
+	appends (never replaces), and is REFUSED (never overwrites) on a slug that
+	collides with a human/other page. A ``replace_body_md`` is downgraded to an
+	append. Mirrors ``jarvis.tools.record_app_wiki``. Returns a
+	raw-update_wiki-compatible result dict the model reads (the caller wraps it in
+	the standard ``{ok, data}`` envelope)."""
+	from jarvis.chat.wiki import apply_extracted_page_updates
+
+	update = {
+		"slug": args.get("slug"),
+		"title": args.get("title"),
+		"page_type": args.get("page_type"),
+		"ref_doctype": args.get("ref_doctype"),
+		"ref_name": args.get("ref_name"),
+		"summary": args.get("summary"),
+		# Append-only: a replace becomes an append (the raw tool's full-body
+		# rewrite never runs on this unattended path).
+		"append_md": args.get("append_md") or args.get("replace_body_md"),
+		"scope": args.get("scope") or "Org",
+	}
+	outcomes = apply_extracted_page_updates(
+		[update],
+		source=FILE_BOX_WIKI_KIND,
+		user=frappe.session.user,
+		ref=conv,
+		provenance_prefix=FILE_BOX_WIKI_FENCE,
+		allow_body_replace=False,
+		preserve_curated=True,
+		return_outcomes=True,
+	)
+	outcome = outcomes[0] if outcomes else {"slug": None, "ok": False, "reason": "skipped"}
+	applied = bool(outcome.get("ok"))
+	if applied:
+		result = {"ok": True, "slug": outcome.get("slug"), "detail": "recorded to the wiki"}
+	else:
+		result = {"ok": False, "reason": outcome.get("reason") or "refused"}
+	# AUDIT: this branch bypasses _dispatch_and_wrap (where a dispatched write is
+	# audited via _record_tool_audit -> audit.record), so without this an
+	# unattended file_box wiki write would leave NO durable audit line - unlike the
+	# create/update file_box auto-apply above, which audits through
+	# dispatch_confirmed. Record it here, mirroring _record_tool_audit, and reflect
+	# the real (fenced, append-only) outcome so a refused write reads as error.
+	audit.record(
+		tool="update_wiki",
+		args=args,
+		ok=applied,
+		result=result,
+		error_message=None if applied else result["reason"],
+	)
+	return result
+
+
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
 	"""Parse args + dispatch + wrap in the bench's standard envelope.
 
@@ -2153,6 +2226,21 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			# server-controlled and admin-gated against generic saves.
 			if _conv_flags.get("auto_apply") or _conv_flags.get("file_box"):
 				return dispatch_confirmed(tool, args, provenance="auto_apply")
+		# File Box unattended wiki write-back: route update_wiki through the
+		# append-only, provenance-FENCED funnel (never the raw update_wiki tool,
+		# which defaults scope=Org + ignore_permissions and can clobber a curated
+		# page). ``and file_box`` (NOT ``or``) keeps attended chat + admin auto_apply
+		# on the park-a-card path. Placed AFTER the create/update auto-apply
+		# (update_wiki is not in _AUTO_APPLYABLE, so that block skipped it) and BEFORE
+		# the single-flight so an unattended run never parks a wiki card. The wiki
+		# kill-switch at the top of _run_tool already refused a wiki-off write before
+		# here; a bulk call falls through to the park.
+		if conv and tool == "update_wiki" and _conv_flags.get("file_box") and not _is_bulk_call(args):
+			# _file_box_wiki_write returns the raw-update_wiki-compatible result as
+			# the DATA payload; wrap it in the standard envelope so the agent-session
+			# path's result["data"] read stays valid and the model reads it exactly
+			# like a dispatched update_wiki result.
+			return {"ok": True, "data": _file_box_wiki_write(args, conv)}
 		# Sequential confirmation (F16): at most ONE live confirmation card per
 		# conversation. If one is already awaiting the user here, REFUSE to park a
 		# second and tell the model to stop - the continuation turn fired after the
