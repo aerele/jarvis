@@ -565,10 +565,11 @@ def persist_tool_receipt(
 	directly-minted token, a File-Box auto-apply, or a token parked before this
 	shipped) - exactly one terminal row per token either way."""
 	result = result or {}
-	discarded = action_outcome == "discarded"
-	if discarded:
-		# Nothing executed; the chip renders off action_outcome, and tool_status
-		# stays empty (a valid Select option) rather than a misleading completed/error.
+	# A discard (user declined) or a cancel (run stopped before confirm) executed
+	# NOTHING - the chip renders off action_outcome and tool_status stays empty
+	# (a valid Select option) rather than a misleading completed/error.
+	no_write = action_outcome in ("discarded", "cancelled")
+	if no_write:
 		status = ""
 	else:
 		# envelope_ok unwraps a connector tool's inner {ok:false} (a blocked/denied/
@@ -581,7 +582,7 @@ def persist_tool_receipt(
 	# missing/broken entities module must never break receipts. Skipped for a
 	# discard - it touched no document.
 	ref_doctype = ref_name = None
-	if not discarded:
+	if not no_write:
 		try:
 			from jarvis.chat.entities import refs_from_tool
 
@@ -743,6 +744,37 @@ def persist_pending_action(
 			dedupe_filters={"conversation": conv_name, "tool_call_id": token},
 		)
 		frappe.db.commit()
+
+
+def cancel_pending_action_rows(conversation: str) -> None:
+	"""Flip every still-PENDING action-row in ``conversation`` to a terminal
+	'cancelled' receipt (PR 1). Called from the stop-run / armed-macro-stop sweep so a
+	stopped run's parked card does NOT linger as a dangling 'pending' row - which would
+	otherwise show as a stale (soon 'expired') card on reload while its Redis token is
+	already swept. Best-effort per row; the flip runs as the conversation owner via
+	persist_tool_receipt (nothing executed -> no_write -> tool_status='')."""
+	rows = frappe.get_all(
+		"Jarvis Chat Message",
+		filters={"conversation": conversation, "role": "tool", "tool_status": "pending"},
+		fields=["tool_call_id", "tool_name"],
+	)
+	for r in rows:
+		if not r.tool_call_id:
+			continue
+		try:
+			persist_tool_receipt(
+				conversation,
+				r.tool_name or "",
+				{},
+				None,
+				action_outcome="cancelled",
+				flip_token=r.tool_call_id,
+			)
+		except Exception:
+			frappe.log_error(
+				title="cancel_pending_action_rows: flip failed",
+				message=frappe.get_traceback(),
+			)
 
 
 def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:

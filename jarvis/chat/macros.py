@@ -393,6 +393,16 @@ def advance_after_turn(conversation_id: str, *, errored: bool) -> None:
 					# destructive write. Consuming the token first makes a racing Confirm hit
 					# a dead token and be refused regardless of the flag (deterministic).
 					pending_confirm.clear_for_conversation(owner_user, run.conversation)
+					# PR-1: flip the swept row's pending card to a terminal 'cancelled'
+					# receipt so it doesn't linger as a dangling 'pending' row on reload.
+					try:
+						from jarvis import api as _jarvis_api
+
+						_jarvis_api.cancel_pending_action_rows(run.conversation)
+					except Exception:
+						frappe.log_error(
+							title="macro-stop cancel pending rows", message=frappe.get_traceback()
+						)
 					_finish(run, "failed", error=_armed_stop_message(run.current_step or 0, parked))
 					_publish_done(run, macro_doc, "failed")
 					return

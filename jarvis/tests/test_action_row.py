@@ -239,3 +239,16 @@ class TestFlipActionRow(FrappeTestCase):
 		self.assertEqual(len(flipped), 1)
 		self.assertEqual(flipped[0]["action_outcome"], "confirmed")
 		self.assertFalse(flipped[0]["pending_card"])
+
+	def test_stop_sweep_flips_pending_row_to_cancelled(self):
+		"""Task 1.4 (spec §9.3): the stop-run sweep flips a parked pending row to a
+		terminal 'cancelled' receipt (not a dangling 'pending' row), and nothing ran."""
+		_name, token = self._park("flip-cancel-xyz")
+		api.cancel_pending_action_rows(self.conv)
+		same = [r for r in self._rows() if r.tool_call_id == token]
+		self.assertEqual(len(same), 1)
+		self.assertEqual(same[0].action_outcome, "cancelled")
+		self.assertEqual(same[0].tool_status, "")  # nothing executed
+		self.assertFalse(same[0].pending_card)  # minimized
+		self.assertEqual(len(self._pending_rows()), 0)  # no dangling pending row
+		self.assertFalse(frappe.db.exists("ToDo", {"description": "flip-cancel-xyz"}))

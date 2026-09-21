@@ -2741,9 +2741,14 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	# F6: a stopped run's parked cards must not linger or resurface on resync.
 	# Sweep this owner's live confirmation tokens for the conversation (best-effort).
 	try:
+		from jarvis import api
 		from jarvis.chat import pending_confirm
 
 		pending_confirm.clear_for_conversation(frappe.session.user, conversation, run_id)
+		# PR-1: flip the swept rows' pending cards to a terminal 'cancelled' receipt so
+		# a stopped run leaves no dangling 'pending' row (which would show as a stale/
+		# soon-expired card on reload). Best-effort (self-guarding).
+		api.cancel_pending_action_rows(conversation)
 	except Exception:
 		frappe.log_error(title="stop_run token sweep", message=frappe.get_traceback())
 	# Skill "Approve & run" Halt cancel-gate (design §3.4): set the transport-
