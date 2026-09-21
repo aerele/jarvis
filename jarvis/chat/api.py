@@ -721,7 +721,6 @@ def get_conversation(conversation: str) -> dict:
 			"model_override": doc.model_override or "",
 			# "" means inherit Jarvis Settings; the picker renders that as "Auto".
 			"thinking_override": doc.thinking_override or "",
-			"auto_apply": int(doc.auto_apply or 0),
 			# "dashboards" / "triggers" when this thread was started from a
 			# builder page; "" for an ordinary chat. The SPA reads it to offer
 			# "Open in Dashboards" on a builder conversation's html artifacts.
@@ -2103,8 +2102,6 @@ def get_chat_ui_settings() -> dict:
 		# default on), read here AND in _persona_clause so flipping it off both hides
 		# the pill and stops the clause - never a client-only half-switch (N7).
 		"persona_enabled": _persona_feature_enabled(),
-		# auto-apply is per-conversation now (issue #186); the frontend reads
-		# ``auto_apply`` from the conversation payload, not this global endpoint.
 	}
 	# The server's current persona, so the SPA can reconcile a localStorage-booted
 	# pill to the row at mount. Only sent when we could actually read it: on a read
@@ -2176,44 +2173,6 @@ def _persona_feature_enabled() -> bool:
 		return persona_feature_enabled()
 	except Exception:
 		return True
-
-
-@frappe.whitelist()
-def set_auto_apply(conversation: str, value: str | int | bool) -> dict:
-	"""Toggle per-conversation 'auto-apply changes (skip confirmation)' (issue #186).
-
-	OFF (default) = the write-safety gate parks every mutating tool call for a
-	confirmation click; ON = only the reversible create/update pair
-	(create_doc/update_doc) fast-paths and executes immediately. Everything
-	else ALWAYS parks regardless: submit_doc, run_method, and the destructive
-	ops (delete/cancel/amend/send_email). run_method in particular never
-	fast-paths - its default-unrestricted allowlist under auto-apply would be
-	an unconfirmed arbitrary whitelisted method call.
-
-	Scoping + gating:
-	- Owner-only: the conversation must belong to the caller
-	  (``frappe.session.user == conv.owner``), else PermissionError. Jarvis
-	  Conversation is owner-guarded, so per-conversation == per-user.
-	- ENABLING requires the Jarvis Admin / System Manager tier
-	  (``require_jarvis_admin`` -> 403 for a plain Jarvis User; PART 4 REVISED,
-	  TASK 45). DISABLING is always allowed for the owner.
-
-	Writes ``auto_apply`` on the CONVERSATION row (not the deprecated site-wide
-	Jarvis Settings Single). Returns ``{ok, data: {auto_apply: on}}``.
-	"""
-	require_jarvis_access()
-	on = 1 if str(value) in ("1", "true", "True", "on", "yes") else 0
-	owner = frappe.db.get_value(CONV, conversation, "owner")
-	if owner is None:
-		raise frappe.DoesNotExistError(f"conversation {conversation!r} not found")
-	if owner != frappe.session.user:
-		raise frappe.PermissionError("not your conversation")
-	# Enabling is admin-only; disabling is always allowed for the owner.
-	if on:
-		require_jarvis_admin()
-	frappe.db.set_value(CONV, conversation, "auto_apply", on, update_modified=False)
-	frappe.db.commit()
-	return {"ok": True, "data": {"auto_apply": on}}
 
 
 def _est_tokens(text: str | None) -> int:

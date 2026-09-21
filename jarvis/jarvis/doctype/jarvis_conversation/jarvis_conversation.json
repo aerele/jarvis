@@ -11,7 +11,6 @@
   "session_key",
   "model_override",
   "thinking_override",
-  "auto_apply",
   "status",
   "last_active_at",
   "starred",
@@ -58,9 +57,12 @@
   {
    "fieldname": "auto_apply",
    "fieldtype": "Check",
-   "label": "Auto-apply changes (skip confirmation)",
+   "label": "Auto-apply changes (deprecated)",
    "default": "0",
-   "description": "When 1, reversible mutating tool calls in this conversation execute without a confirmation card. Enabling requires the System Manager role; destructive ops (delete/cancel/amend/send_email) still park regardless. Default 0 (confirm every write)."
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "DEPRECATED and removed (action-card overhaul): admin Auto-Apply no longer skips confirmation cards - every change asks, and request-scoped 'confirm all' is the user-facing replacement. The column is retained (not dropped) so history is preserved and the removal patch can flip stale 1 values to 0. Nothing reads it. File Box remains the one direct-apply path (see file_box)."
   },
   {
    "fieldname": "file_box",
@@ -69,7 +71,7 @@
    "default": "0",
    "hidden": 1,
    "no_copy": 1,
-   "description": "Set by the File Box drop path. When 1, reversible create/update tool calls execute directly (no confirmation card) because the run is unattended and review happens on the created Draft + the approval board; destructive ops still park. Server-set only; enabling via a generic save requires System Manager, like auto_apply."
+   "description": "Set by the File Box drop path. When 1, reversible create/update tool calls execute directly (no confirmation card) because the run is unattended and review happens on the created Draft + the approval board; destructive ops still park. Server-set only; enabling via a generic save requires the Jarvis Admin / System Manager role."
   },
   {
    "fieldname": "skip_confirmation",

@@ -2119,7 +2119,6 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				"Jarvis Conversation",
 				conv,
 				[
-					"auto_apply",
 					"file_box",
 					"skip_confirmation",
 					"skill_autorun",
@@ -2135,7 +2134,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# conversation carries skip_confirmation=1 (stamped by run_macro), so the
 		# BROAD covered set - incl. run_method / submit / send_email / run_import -
 		# runs uncarded. This is distinct from and wider than the create/update-only
-		# auto_apply below. The irreversible trio (delete/cancel/amend) is NOT in
+		# File Box fast-path below. The irreversible trio (delete/cancel/amend) is NOT in
 		# _ARMED_SKIP_COVERED, so it falls through to park (an armed macro that hits
 		# one stops the run - D5). Cheap frozenset membership test first; the
 		# kill-switch Settings read runs only when a covered write is actually armed.
@@ -2245,29 +2244,26 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						err_obj["message"] += " The approved run has also ended - re-approve to continue."
 				return result
 			# TTL-expired / no timestamp: fall through to the normal park.
-		# Auto-apply bypass (issue #186, Task 4 + #5): the OTHER path where a gated
-		# write runs without a confirmation token. Strictly limited to
-		# {a resolved conversation, admin-enabled auto_apply, an _AUTO_APPLYABLE
-		# (reversible create/update) tool}. Everything outside create/update -
-		# submit_doc, and every destructive tool (delete/cancel/amend/send_email) -
-		# ALWAYS parks under auto_apply (only armed-skip above runs the wider set).
+		# File Box fast-path (design A2): the ONE remaining path where a gated
+		# reversible create/update runs without a confirmation card - a File Box
+		# conversation, an unattended directed run where nobody can click a confirm
+		# card and review happens on the created Draft + the approval board. Admin
+		# Auto-Apply was REMOVED here (design A2); request-scoped "confirm all" is
+		# its user-facing replacement. Everything outside create/update - submit_doc
+		# and every destructive tool - ALWAYS parks; a bulk create/update (docs[] /
+		# updates[]) NEVER fast-paths (the batch card is the human checkpoint against
+		# a 20-doc mistake). file_box is server-set only and admin-gated against
+		# generic saves.
 		#
 		# conv is never a client claim - it is resolved server-side from the
-		# session_key upstream - so there is no owner to re-check here: an
-		# owner comparison against owner_user (itself read from this same conv
-		# a few lines up) would just be comparing one DB read to another read of
-		# the identical field, not a real access-control boundary.
-		# A bulk create/update (docs[] / updates[]) NEVER fast-paths - the batch
-		# card is the human checkpoint against a 20-doc mistake; only a single
-		# reversible create/update may auto-apply.
+		# session_key upstream - so there is no owner to re-check here.
 		if conv and tool in _AUTO_APPLYABLE and not _is_bulk_call(args):
-			# Two direct-apply paths for reversible create/update (destructive
-			# tools above are excluded and always park): admin-enabled
-			# auto_apply, OR a File Box conversation - an unattended directed
-			# run where nobody can click a confirm card and review happens on
-			# the created Draft + the approval board. Both flags are
-			# server-controlled and admin-gated against generic saves.
-			if _conv_flags.get("auto_apply") or _conv_flags.get("file_box"):
+			if _conv_flags.get("file_box"):
+				# Legacy provenance string: File Box shared the (now removed)
+				# Auto-Apply branch, so its audit rows have always been stamped
+				# "auto_apply" (a value the Jarvis Agent Write enum still carries).
+				# Kept as-is to avoid an enum migration; it reads as "an unattended
+				# direct-apply run".
 				return dispatch_confirmed(tool, args, provenance="auto_apply")
 		# Sequential confirmation (F16): at most ONE live confirmation card per
 		# conversation. If one is already awaiting the user here, REFUSE to park a

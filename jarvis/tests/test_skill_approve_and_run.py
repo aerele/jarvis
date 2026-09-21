@@ -27,7 +27,7 @@ from jarvis.chat import (
 )
 from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
 from jarvis.permissions import ensure_jarvis_user_role
-from jarvis.tests.test_auto_apply import (
+from jarvis.tests._conv_helpers import (
 	NON_ADMIN_USER,
 	_ensure_non_admin_user,
 	_make_conv,
@@ -1482,8 +1482,8 @@ class TestSkillAutorunDisarmGate(FrappeTestCase):
 
 class TestConvFlagsSingleQuery(FrappeTestCase):
 	"""_conv_flags stays ONE get_value even after skill_autorun + skill_autorun_at +
-	skill_autorun_skill join it: the gate reads all SIX conversation flags in a single
-	query."""
+	skill_autorun_skill join it: the gate reads all conversation flags in a single
+	query. (auto_apply was dropped from the read when admin Auto-Apply was removed.)"""
 
 	@classmethod
 	def setUpClass(cls):
@@ -1501,7 +1501,7 @@ class TestConvFlagsSingleQuery(FrappeTestCase):
 			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
-	def test_six_flags_read_in_one_query(self):
+	def test_conversation_flags_read_in_one_query(self):
 		conv = _make_conv(TEST_USER)
 		# Spy on the real DB instance (frappe.db is a LocalProxy over frappe.local.db);
 		# wraps=... records every get_value call yet executes it normally.
@@ -1520,7 +1520,6 @@ class TestConvFlagsSingleQuery(FrappeTestCase):
 		self.assertEqual(
 			list(flag_reads[0].args[2]),
 			[
-				"auto_apply",
 				"file_box",
 				"skip_confirmation",
 				"skill_autorun",

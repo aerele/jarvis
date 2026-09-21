@@ -16,7 +16,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.api import _ARMED_SKIP_COVERED, _ARMED_SKIP_NEVER, _GATED_WRITES
 from jarvis.permissions import ensure_jarvis_user_role
-from jarvis.tests.test_auto_apply import (
+from jarvis.tests._conv_helpers import (
 	NON_ADMIN_USER,
 	_ensure_non_admin_user,
 	_make_conv,
