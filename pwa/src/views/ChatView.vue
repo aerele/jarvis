@@ -304,17 +304,58 @@ async function load(force = false) {
 	}
 }
 
-// Parked writes survive a reload: re-ask rather than leaving an approval the
-// user can never reach.
+// PR-1: build a confirm-card item from a durable pending action-row (role="tool",
+// tool_status="pending"), mirroring the SPA. pendingCardOf reads preview.card.
+function _rowExpiresEpoch(s) {
+	if (!s) return null;
+	// The row's expires_at is a site-timezone datetime string; parse to epoch seconds
+	// (best-effort - a live push carries the authoritative epoch and the server
+	// enforces the real TTL, so null just omits the client countdown).
+	const t = Date.parse(String(s).replace(" ", "T"));
+	return Number.isFinite(t) ? Math.round(t / 1000) : null;
+}
+function pendingActionFromRow(m, cid) {
+	return {
+		conversation: cid,
+		token: m.tool_call_id,
+		tool: m.tool_name,
+		summary: "",
+		preview: { card: m.pending_card },
+		run_id: null,
+		expires_at: _rowExpiresEpoch(m.expires_at),
+	};
+}
+
+// Parked writes survive a reload: re-ask rather than leaving an approval the user
+// can never reach. PR-1 reliability: the durable pending action-rows
+// (get_conversation) are the PRIMARY source - a reload shows a confirmable card even
+// if the best-effort action:pending push was missed. list_pending (Redis) is the
+// backstop. Merge rows-first, dedup by token, REPLACE so a confirmed/expired card
+// (no longer a pending row and gone from Redis) drops.
 async function loadPending() {
 	if (!convId.value) return;
+	const fromRows = (messages.value || [])
+		.filter(
+			(m) =>
+				m.role === "tool" &&
+				m.tool_status === "pending" &&
+				m.pending_card &&
+				m.tool_call_id
+		)
+		.map((m) => pendingActionFromRow(m, convId.value));
+	let fromBackstop = [];
 	try {
 		const r = await api.listPendingConfirmations(convId.value);
 		if (r?.ok && r.data)
-			pending.value = r.data.pending.filter((p) => p.conversation === convId.value);
+			fromBackstop = r.data.pending.filter((p) => p.conversation === convId.value);
 	} catch {
-		/* the cards also arrive live; a failed resync is not worth a banner */
+		/* rows already cover it; a failed backstop is not worth a banner */
 	}
+	const byToken = new Map();
+	for (const c of [...fromRows, ...fromBackstop]) {
+		if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
+	}
+	pending.value = [...byToken.values()];
 }
 
 // ── sending ─────────────────────────────────────────────────────────────────
@@ -1077,7 +1118,12 @@ onUnmounted(() => {
 		</div>
 	</Sheet>
 
-	<DecisionSheet :action="decision" @close="decision = null" @resolved="onResolved" />
+	<DecisionSheet
+		:action="decision"
+		:streaming="sending"
+		@close="decision = null"
+		@resolved="onResolved"
+	/>
 	<FilePreviewSheet
 		:item="preview?.item"
 		:message-name="preview?.messageName || ''"
