@@ -1128,10 +1128,13 @@
 											{{ m.error }}
 										</div>
 										<button
-											v-if="errorInfo(m).retryable"
+											v-if="
+												errorInfo(m).retryable &&
+												mi === visibleMessages.length - 1
+											"
 											class="jv-retry"
 											@click="retry(m.name)"
-											:disabled="retrying"
+											:disabled="retrying || busy"
 											:style="{
 												marginTop: '10px',
 												display: 'inline-flex',
@@ -1145,11 +1148,11 @@
 												fontFamily: 'inherit',
 												fontSize: '12px',
 												fontWeight: '550',
-												cursor: retrying ? 'default' : 'pointer',
-												opacity: retrying ? 0.6 : 1,
+												cursor: retrying || busy ? 'default' : 'pointer',
+												opacity: retrying || busy ? 0.6 : 1,
 											}"
 										>
-											{{ retrying ? "Retrying…" : "Retry" }}
+											{{ retrying || busy ? "Retrying…" : "Retry" }}
 										</button>
 									</div>
 								</div>
@@ -9190,7 +9193,13 @@ function onDocClick(e) {
 	if (!e.target.closest(".jv-composer")) mention.value = { ...mention.value, open: false };
 }
 async function retry(messageId) {
-	if (retrying.value) return;
+	// Guard the WHOLE run, not just the enqueue: `retrying` clears in the finally
+	// below as soon as retryMessage() returns, but the turn keeps running (busy =
+	// sending || waiting) until the socket delivers the result. Without `busy`
+	// here the error card's Retry re-enables mid-run and every click launches
+	// another turn - the agent working "again and again". busy also blocks a
+	// retry while any other turn is in flight (single-flight chat).
+	if (retrying.value || busy.value) return;
 	retrying.value = true;
 	sending.value = true;
 	waiting.value = true;
