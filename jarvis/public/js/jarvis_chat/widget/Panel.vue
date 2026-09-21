@@ -562,6 +562,29 @@
 				<div class="jvp-typehint">{{ typedApprovalHint }}</div>
 			</div>
 
+			<!-- PR-2: always-present, model-proof + delivery-channel-proof manual lever
+			     to pull a parked confirmation the auto-resync missed (load() re-fetches
+			     with the row-primary merge). Not labelled "Approvals". -->
+			<button
+				type="button"
+				class="jvp-recheck"
+				style="
+					display: block;
+					margin: 2px auto 4px;
+					background: none;
+					border: none;
+					color: var(--jvp-muted, #8a8a8a);
+					font-size: 11px;
+					text-decoration: underline;
+					cursor: pointer;
+					padding: 3px;
+				"
+				aria-label="Re-check for a pending confirmation that did not appear"
+				@click="load"
+			>
+				Don't see a confirmation? Re-check
+			</button>
+
 			<!-- Jump to latest. stickToBottom already refuses to drag a reader who
 			     has scrolled up back down mid-reply, so without this arrow a long
 			     streamed answer left them stranded with no way back to the newest

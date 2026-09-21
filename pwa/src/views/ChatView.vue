@@ -332,6 +332,13 @@ function pendingActionFromRow(m, cid) {
 // if the best-effort action:pending push was missed. list_pending (Redis) is the
 // backstop. Merge rows-first, dedup by token, REPLACE so a confirmed/expired card
 // (no longer a pending row and gone from Redis) drops.
+// PR-2: the always-present re-check lever's handler. loadPending already merges the
+// durable rows (primary) + the Redis backstop, so a manual pull surfaces a parked
+// card the auto-resync missed. The card appearing is the feedback.
+async function recheckPending() {
+	await loadPending();
+}
+
 async function loadPending() {
 	if (!convId.value) return;
 	const fromRows = (messages.value || [])
@@ -972,6 +979,25 @@ onUnmounted(() => {
 		/>
 		<!-- Both ways to approve, shown once under the stack. -->
 		<p v-if="orderedPending.length" class="jv-typehint">{{ typedApprovalHint }}</p>
+		<!-- PR-2: always-present, model-proof + delivery-channel-proof manual lever to
+		     pull a parked confirmation the auto-resync missed. Not labelled "Approvals". -->
+		<button
+			type="button"
+			style="
+				display: block;
+				margin: 4px auto 0;
+				background: none;
+				border: none;
+				color: var(--ink5, #8a8a8a);
+				font-size: 12px;
+				text-decoration: underline;
+				padding: 4px;
+			"
+			aria-label="Re-check for a pending confirmation that did not appear"
+			@click="recheckPending"
+		>
+			Don't see a confirmation? Re-check
+		</button>
 	</div>
 
 	<div v-if="errorBanner" class="jv-banner">

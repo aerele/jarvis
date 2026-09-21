@@ -2561,6 +2561,29 @@
 				</div>
 			</div>
 
+			<!-- PR-2: always-present, model-proof + delivery-channel-proof manual lever
+			     to pull a parked confirmation the auto-resync missed. Deliberately NOT
+			     labelled "Approvals" (that names the separate Approvals Board). -->
+			<div style="flex: none; text-align: center; padding: 0 40px 4px">
+				<button
+					type="button"
+					class="jv-recheck-btn"
+					style="
+						background: none;
+						border: none;
+						color: var(--muted, #8a8a8a);
+						font-size: 12px;
+						cursor: pointer;
+						text-decoration: underline;
+						padding: 2px 6px;
+					"
+					aria-label="Re-check for a pending confirmation that did not appear"
+					@click="recheckPending"
+				>
+					Don't see a confirmation? Re-check
+				</button>
+			</div>
+
 			<!-- ===== COMPOSER ===== -->
 			<div
 				class="jv-composer-wrap"
@@ -8131,6 +8154,19 @@ async function discardPending(pa) {
 // action:pending event delivered before the page was open. Deduped by token
 // against whatever is already queued; freshness-guarded against a mid-flight
 // conversation switch.
+// PR-2: the always-present re-check lever's handler. Reseed from the durable rows
+// already loaded, then pull the Redis backstop; both dedup by token so it can't
+// double a card. Always gives a result so the click is never a silent no-op.
+async function recheckPending() {
+	if (!currentId.value) return;
+	const before = visiblePendingActions.value.length;
+	seedPendingFromRows(messages.value, currentId.value);
+	await resyncPendingConfirmations(currentId.value);
+	const after = visiblePendingActions.value.length;
+	if (after > before) notify("Found a pending confirmation.", { type: "success" });
+	else if (after === 0) notify("Nothing is waiting for your confirmation.", {});
+}
+
 async function resyncPendingConfirmations(id) {
 	if (!id) return;
 	let items = null;
