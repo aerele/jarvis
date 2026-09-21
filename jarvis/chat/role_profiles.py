@@ -297,7 +297,7 @@ def resolve_profile(user: str) -> ProfileChoice:
 		skill_sets = get_skill_sets()
 		shared_core = get_shared_core()
 		skills = tuple(sorted(shared_core.union(*(skill_sets[key] for key in matched))))
-		# Joined with "_", not "+": openclaw 2026.9.x validates agent ids
+		# Joined with "_", not "+": the agent runtime (2026.9.x) validates agent ids
 		# against ^[a-z0-9][a-z0-9_-]{0,63}$, and a "+" (e.g. a past
 		# "role-hr+projects" id) fails that check and exits the gateway with
 		# code 78 on every boot. Set keys themselves match
@@ -330,7 +330,7 @@ def needed_profiles() -> list[dict]:
 	switch only stopped ``resolve_profile`` from being consulted in chat
 	(``chat/api.py``) - it never stopped this push boundary, so a disabled
 	tenant could still have role profiles pushed and rendered into its
-	openclaw.json. :func:`resolve_profile` itself stays ungated here on
+	the agent config. :func:`resolve_profile` itself stays ungated here on
 	purpose (chat/api.py is the only caller that needs to gate chat use).
 	"""
 	if not frappe.db.get_single_value(_SETTINGS, "enable_role_profiles", cache=False):

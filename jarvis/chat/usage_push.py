@@ -65,7 +65,7 @@ _JARVIS_TOOL_NAME_RE = re.compile(r"jarvis__[A-Za-z0-9_]+")
 # This is a READ/validation regex over already-stored profile_agent_id
 # values, not a generator - it deliberately keeps accepting "+" alongside
 # the new "_" separator (role_profiles.resolve_profile now joins set keys
-# with "_", not "+", since openclaw 2026.9.x agent ids reject "+"). Historical
+# with "_", not "+", since the agent runtime (2026.9.x) agent ids reject "+"). Historical
 # rows written before that change still carry a "+"-joined id (e.g.
 # "role-hr+projects") and must keep validating here, or this month's rollup
 # push would silently drop every user still attributed to one of those rows.
