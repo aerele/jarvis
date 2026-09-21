@@ -114,6 +114,25 @@ def looks_like_approval(text: str) -> bool:
 	return bool(text) and len(text.strip()) <= MAX_SELECTION_LEN
 
 
+def is_sweep_all(text: str) -> bool:
+	"""True when the message means 'confirm EVERYTHING currently parked' - a plain
+	go-ahead ("yes", "go ahead") or an explicit all ("confirm all", "both") - as
+	opposed to a numbered pick ("confirm 2"). Used by the server-truth fallback: when
+	the client showed no card tokens (the cards never rendered), only a sweep-all can
+	safely resolve against the server's parked set, because a NUMBER cannot be mapped
+	to cards the user never saw. Mirrors ``parse_approval``'s all-branches, minus the
+	count (which the fallback doesn't have)."""
+	if not text:
+		return False
+	raw = text.strip()
+	if len(raw) > MAX_SELECTION_LEN:
+		return False
+	norm = normalise(raw)
+	if len(raw) <= MAX_APPROVAL_LEN and norm in APPROVAL_PHRASES:
+		return True
+	return bool(_ALL_RE.match(norm))
+
+
 def parse_approval(text: str, count: int) -> list[int] | None:
 	"""Which of ``count`` parked cards this message approves.
 

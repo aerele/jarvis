@@ -1160,8 +1160,15 @@ def _typed_confirmation(
 	client_tokens = _clean_approval_tokens(approval_tokens)
 	if not client_tokens:
 		# No displayed-token context (an older/other client, or a client that sent
-		# nothing): a number cannot be resolved safely, so fall through to the model
-		# and leave the user the Confirm button.
+		# nothing). A NUMBERED pick can't be resolved against a list the user never
+		# saw -> fall through and leave the Confirm button. But an UNNUMBERED sweep
+		# ("confirm all" / "go ahead" / "do everything") CAN resolve against SERVER
+		# TRUTH: confirm the parked REVERSIBLE cards. This is the recovery for when the
+		# cards never rendered (the invisible-card bug) - "confirm all" still works.
+		# Brake items (delete/cancel/amend/create-skill/connector) are NOT swept here:
+		# unseen, they still get their own card.
+		if approval_phrases.is_sweep_all(message):
+			return _confirm_reversible_sweep(user, conversation)
 		return None
 
 	# The server's own live set: needed so a selection that names ONLY cards the
@@ -1182,18 +1189,33 @@ def _typed_confirmation(
 	if not any(t in by_token for t in tokens_to_confirm):
 		return None
 
+	# Confirm the picked cards, mapping each to the NUMBER the user saw on screen.
+	items = [
+		{
+			"token": client_tokens[i],
+			"position": i + 1,
+			"summary": (by_token.get(client_tokens[i]) or {}).get("summary") or "",
+		}
+		for i in picked
+	]
+	return _run_typed_batch(conversation, items)
+
+
+def _run_typed_batch(conversation, items):
+	"""Confirm an ordered list of {token, position, summary} (owner-bound single-use
+	consume per token), compose ONE continuation for the batch, and return the client
+	envelope. Shared by the displayed-token path and the server-truth sweep-all fallback
+	so they cannot drift; each caller supplies the positions (the on-screen card numbers,
+	or 1..N for a server-truth sweep)."""
 	from jarvis.chat.actions_api import _confirm_core
 
-	single = len(picked) == 1
+	single = len(items) == 1
 	results, tokens, receipts = [], [], []
 	solo_envelope = None
-	for i in picked:
-		token = client_tokens[i]
-		card = by_token.get(token) or {}
-		# batch=True for every card in a multi-card approval so the follow-up turn
-		# is composed once, below, instead of one per card. A token no longer live
-		# (card gone since the client rendered it) reaches _confirm_core and fails
-		# its own card via the single-use consume - never a substitution.
+	for it in items:
+		token = it["token"]
+		# A token no longer live (card gone since it was listed) reaches _confirm_core and
+		# fails its own card via the single-use consume - never a substitution.
 		res = _confirm_core(token, conversation, batch=not single)
 		if not isinstance(res, dict):
 			res = {"ok": False, "error": {"type": "InternalError", "message": "confirmation failed"}}
@@ -1203,8 +1225,8 @@ def _typed_confirmation(
 		results.append(
 			{
 				"token": token,
-				"position": i + 1,
-				"summary": card.get("summary") or "",
+				"position": it["position"],
+				"summary": it.get("summary") or "",
 				"ok": bool(res.get("ok")),
 				"error": res.get("error"),
 			}
@@ -1213,8 +1235,8 @@ def _typed_confirmation(
 			receipts.append(res["receipt_text"])
 
 	failed = [r for r in results if not r["ok"]]
-	# One continuation for the whole batch. The single-card path already queued its
-	# own inside _confirm_core, so only the batch path composes one here.
+	# One continuation for the whole batch. The single-card path already queued its own
+	# inside _confirm_core, so only the batch path composes one here.
 	cont = None
 	if receipts:
 		from jarvis.chat.actions_api import enqueue_continuation as _enqueue_cont
@@ -1226,20 +1248,13 @@ def _typed_confirmation(
 				title="typed bulk confirmation continuation failed", message=frappe.get_traceback()
 			)
 
-	# The single-card envelope is the tool result itself, so the client keeps the
-	# shape it already handles. A batch reports per card instead: with three
-	# writes, "it worked" is not an answer when one of them did not.
 	if single:
-		# Pass the confirmation's own envelope straight through, so the queued
-		# chip details it already threaded on survive untouched.
+		# Pass the confirmation's own envelope straight through, so the queued chip
+		# details it already threaded on survive untouched.
 		out = dict(solo_envelope)
 	else:
 		out = {"ok": not failed}
 		if failed:
-			# Name the cards that failed by the number the user saw, so a partial
-			# batch is actionable ("card 2 could not be completed") instead of a
-			# bare count. The per-card results[] carries the same detail for a
-			# client that wants to render each chip; this is the at-a-glance line.
 			failed_positions = ", ".join(str(r["position"]) for r in failed)
 			out["error"] = {
 				"type": "PartialConfirmation",
@@ -1259,6 +1274,25 @@ def _typed_confirmation(
 	out["tokens"] = tokens
 	out["results"] = results
 	return out
+
+
+def _confirm_reversible_sweep(user, conversation):
+	"""Server-truth 'confirm all' (Task 2.1): confirm every parked REVERSIBLE card for
+	this owner+conversation from the store (not the client), so 'confirm all' works even
+	when no card rendered (the invisible-card recovery). Brake items (delete/cancel/amend/
+	create-skill/connector = api._SKILL_AUTORUN_NEVER) are NOT swept - unseen, they still
+	get their own card. None (fall through) when nothing reversible is parked."""
+	from jarvis import api
+
+	parked = _ordered_parked_cards(user, conversation) or []
+	reversible = [c for c in parked if c.get("token") and c.get("tool") not in api._SKILL_AUTORUN_NEVER]
+	if not reversible:
+		return None
+	items = [
+		{"token": c["token"], "position": pos + 1, "summary": c.get("summary") or ""}
+		for pos, c in enumerate(reversible)
+	]
+	return _run_typed_batch(conversation, items)
 
 
 @frappe.whitelist()
