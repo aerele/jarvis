@@ -7869,6 +7869,41 @@ function confirmationStorageUnavailable(response) {
 }
 // Enqueue a parked confirmation, deduped by token (a resync + a live event can
 // both carry the same card).
+// PR-1: build a confirm-card queue item from a durable pending action-row (a
+// role="tool" Jarvis Chat Message with tool_status="pending"), so the card renders
+// from the reliable message pipeline. pendingCardOf reads preview.card unchanged.
+function _rowExpiresEpoch(s) {
+	if (!s) return null;
+	// The row's expires_at is a site-timezone datetime string; parse to epoch seconds
+	// for the countdown. Best-effort: a live push carries the authoritative epoch and
+	// the server enforces the real TTL, so null here just omits the client countdown.
+	const t = Date.parse(String(s).replace(" ", "T"));
+	return Number.isFinite(t) ? Math.round(t / 1000) : null;
+}
+function pendingActionFromRow(m, convId) {
+	return {
+		conversation: convId,
+		token: m.tool_call_id,
+		tool: m.tool_name,
+		summary: "",
+		preview: { card: m.pending_card },
+		run_id: null,
+		expires_at: _rowExpiresEpoch(m.expires_at),
+	};
+}
+function seedPendingFromRows(msgs, convId) {
+	for (const m of msgs || []) {
+		if (
+			m &&
+			m.role === "tool" &&
+			m.tool_status === "pending" &&
+			m.pending_card &&
+			m.tool_call_id
+		) {
+			enqueuePending(pendingActionFromRow(m, convId));
+		}
+	}
+}
 function enqueuePending(card) {
 	if (!card || !card.token) return;
 	if (pendingActions.value.some((x) => x.token === card.token)) return;
@@ -8947,6 +8982,12 @@ async function loadConversation(id) {
 	// OTHER conversations, then re-surface this conversation's still-live parked
 	// confirmations (R3 fix for #3 - survives reload / reconnect).
 	pendingActions.value = pendingActions.value.filter((pa) => pa.conversation === id);
+	// PR-1 reliability: seed the confirm-card queue from THIS conversation's durable
+	// pending action-rows (get_conversation), so a reload shows a confirmable card even
+	// when the best-effort action:pending push was missed — the card rides the same
+	// reliable message pipeline as the reply text. resyncPendingConfirmations (the Redis
+	// backstop) below reconciles; enqueuePending dedups by token.
+	seedPendingFromRows(messages.value, id);
 	resyncPendingConfirmations(id);
 	// SUXI-1: rebuild the queued chip from server truth (reload / switch / second
 	// tab / reconnect all lose the client-only chip otherwise).
