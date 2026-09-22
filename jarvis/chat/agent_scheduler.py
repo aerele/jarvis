@@ -1489,8 +1489,8 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 		# already name it exactly this way and never hallucinate.
 		else (
 			f"Your engagement configuration is the `Jarvis Agent Installation` record "
-			f"'{inst.name}' (its `config` field) - read it with jarvis__get_doc if your skill "
-			f"needs it. That is the ONLY configuration record; never invent another doctype for it."
+			f"'{inst.name}' (its `config` field) - read it if your skill needs it. That is the "
+			f"ONLY configuration record; never invent another doctype for it."
 		)
 	)
 	return (
