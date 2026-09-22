@@ -122,12 +122,21 @@ class JarvisAgentInstallation(Document):
 		from jarvis import catalogue_visibility
 		from jarvis.permissions import has_jarvis_admin_access
 
+		# Governed slugs are ALWAYS teaser/hidden (available == ungoverned), and the stored
+		# keyset is authoritative — check it FIRST, before the local listing field. That field
+		# can transiently lag at 'available' between a bundle sync creating the listing and the
+		# next pull re-asserting the policy; a governed agent must be un-installable by ANYONE
+		# (tenant admins included) in that window too.
+		if catalogue_visibility.is_operator_governed(self.agent):
+			frappe.throw(
+				_("This agent is not available to install."),
+				frappe.PermissionError,
+				title=_("Agent not available"),
+			)
+		# Tenant-local teaser/hidden (a tenant's own catalogue tidy): a Jarvis Admin may still
+		# dogfood-install it, unchanged from Phase 1.
 		vis = frappe.db.get_value("Jarvis Agent Listing", self.agent, "operator_visibility") or "available"
-		if vis == "available":
-			return
-		if catalogue_visibility.is_operator_governed(self.agent) or not has_jarvis_admin_access(
-			frappe.session.user
-		):
+		if vis != "available" and not has_jarvis_admin_access(frappe.session.user):
 			frappe.throw(
 				_("This agent is not available to install."),
 				frappe.PermissionError,

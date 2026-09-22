@@ -41,7 +41,10 @@ _DEFAULT = "available"
 def governed_map() -> dict:
 	"""The last-applied ``{slug: visibility}`` policy map, or ``{}`` on any read/parse error.
 
-	Cached read (called from the install + listing guards on every save). Never raises."""
+	Cached read (called from the install + listing guards on every save). Never raises —
+	but it FAILS OPEN (returns ``{}`` -> nothing governed), so a corrupt blob would silently
+	un-gate; log the read failure so that lapse is never silent (it self-heals on the next
+	successful apply)."""
 	try:
 		raw = frappe.get_cached_value(SETTINGS, SETTINGS, "catalogue_visibility_governed")
 		if not raw:
@@ -49,6 +52,9 @@ def governed_map() -> dict:
 		data = frappe.parse_json(raw)
 		return data if isinstance(data, dict) else {}
 	except Exception:
+		frappe.log_error(
+			title="catalogue_visibility.governed_map read failed", message=frappe.get_traceback()
+		)
 		return {}
 
 
@@ -66,7 +72,16 @@ def persist_from_connection(conn: dict) -> None:
 	See the module docstring for the KEEP-on-doubt case table. Never raises."""
 	try:
 		if not conn.get(_MARKER):
-			return  # old / rolled-back CP: KEEP (un-hiding on rollback is the harm)
+			# Old / rolled-back CP: KEEP (un-hiding on rollback is the harm). If we currently
+			# hold a governed policy, breadcrumb it — a bench stuck polling an old CP would
+			# otherwise silently never pick up a newly-governed policy (deploy-order diagnostic,
+			# mirrors maintenance_notice).
+			if governed_map():
+				frappe.logger("jarvis").info(
+					"catalogue_visibility: KEEP -- connection lacks agent_visibility_supported "
+					"(old/rolled-back control plane); confirm CP-before-app deploy order"
+				)
+			return
 		if _KEY not in conn:
 			return  # transient / partial payload: KEEP last-applied
 		_apply(conn.get(_KEY))
@@ -81,9 +96,12 @@ def _apply(policy) -> None:
 	reverts dropped slugs and sets governed ones, and records the new map + synced_at."""
 	valid, normalized = _validate(policy)
 	if not valid:
+		# repr, not frappe.as_json: a non-JSON-native payload would make as_json raise, which
+		# would escape to the outer handler and mislabel this as the generic failure.
+		payload_repr = repr(policy)[:2000]
 		frappe.log_error(
 			title="catalogue_visibility apply skipped: malformed policy",
-			message=f"phase=validate payload={frappe.as_json(policy)[:2000]}",
+			message=f"phase=validate payload={payload_repr}",
 		)
 		return  # KEEP last-applied — a malformed payload must never revert a withdrawal
 
