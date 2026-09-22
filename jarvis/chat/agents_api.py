@@ -833,6 +833,41 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 	return {"ok": True, "status": doc.status}
 
 
+_VISIBILITY_CHOICES = ("available", "teaser", "hidden")
+
+
+@frappe.whitelist()
+def set_operator_visibility(agent_slug: str, visibility: str) -> dict:
+	"""Set an agent's operator catalogue visibility (available / teaser / hidden).
+
+	SYSTEM MANAGER ONLY — this is operator-global state, deliberately NOT
+	``require_jarvis_admin`` (a tenant's own Jarvis Admin must not flip what the whole
+	catalogue shows/hides). In Phase 2 the admin_v2 propagation channel calls this same
+	endpoint on every bench. The write goes through ``doc.save()``, so the listing's
+	``track_changes`` produces a Version record (actor + before->after) as the audit."""
+	frappe.only_for("System Manager")
+	if visibility not in _VISIBILITY_CHOICES:
+		frappe.throw(_("Visibility must be one of: {0}.").format(", ".join(_VISIBILITY_CHOICES)))
+	doc = frappe.get_doc(LISTING, agent_slug)
+	before = doc.operator_visibility or "available"
+	if before == visibility:
+		return {"ok": True, "visibility": visibility}
+	doc.operator_visibility = visibility
+	doc.save()  # track_changes -> Version (who + before->after), the audit trail
+	# teaser/hidden move the container roster (leg 1 of build_agent_push_payload skips
+	# them), exactly like a status flip — so signal "Apply pending" when the agent is
+	# granted or has an enabled install, mirroring set_listing_status above.
+	if before == "available" or visibility == "available":
+		if (
+			frappe.db.exists(INSTALLATION, {"agent": doc.name, "enabled": 1})
+			or frappe.db.exists(ALLOWED_ROLE, {"parenttype": LISTING, "parent": doc.name})
+			or frappe.db.exists(ALLOWED_USER, {"parenttype": LISTING, "parent": doc.name})
+		):
+			_mark_catalog_dirty()
+	frappe.db.commit()
+	return {"ok": True, "visibility": doc.operator_visibility}
+
+
 @frappe.whitelist()
 def get_agent_admin_overview() -> dict:
 	"""Bench-admin overview: the selectable Roles + every listing with its
