@@ -98,6 +98,7 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"get_party_dashboard_info",
 	"get_exchange_rate",
 	"get_fiscal_year",
+	"get_engagement_config",
 	"get_itemised_tax_breakup",
 	# Tier 2b HRMS + Frappe computed reads: leave/shift/holiday lookups
 	# the LLM gets wrong because they need policy-aware math, plus
