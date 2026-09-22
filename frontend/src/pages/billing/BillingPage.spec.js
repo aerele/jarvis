@@ -24,6 +24,7 @@ const api = vi.hoisted(() => ({
 	resumePlan: vi.fn(),
 	checkBillingPayment: vi.fn(),
 	billingPaymentState: vi.fn(),
+	stopAutopayToPay: vi.fn(),
 }));
 vi.mock("@/api", () => api);
 
@@ -1379,5 +1380,91 @@ describe("upgrade near-renewal lock freshness (R2)", () => {
 
 		expect(api.getAccount.mock.calls.length).toBeGreaterThan(before); // re-read, not stuck on the snapshot
 		expect(wrapper.vm.upgradeNearRenewal).toBe(false); // lock cleared client-side
+	});
+});
+
+describe("can_stop_autopay_to_pay: Past-Due pay-now (stop the live mandate, then reuse the reactivation flow)", () => {
+	it("renders the CTA and, through the confirm dialog, calls api.stopAutopayToPay", async () => {
+		const wrapper = await mountPage(baseAccount({ can_stop_autopay_to_pay: true }));
+		const cta = findByText(wrapper, "button", "Stop auto-retry & pay now");
+		expect(cta).toBeTruthy();
+
+		api.stopAutopayToPay.mockResolvedValue({ ok: true, outcome: "neutralized" });
+		await cta.trigger("click");
+		await flushPromises();
+		// The confirm dialog owns the deliberate step - nothing is called yet.
+		expect(api.stopAutopayToPay).not.toHaveBeenCalled();
+
+		const confirm = findByText(wrapper, ".dialog button", "Stop & continue");
+		expect(confirm).toBeTruthy();
+		await confirm.trigger("click");
+		await flushPromises();
+
+		expect(api.stopAutopayToPay).toHaveBeenCalledTimes(1);
+	});
+
+	it("renders no CTA when can_stop_autopay_to_pay is false", async () => {
+		const wrapper = await mountPage(baseAccount({ can_stop_autopay_to_pay: false }));
+		expect(findByText(wrapper, "button", "Stop auto-retry & pay now")).toBeUndefined();
+	});
+
+	// Cross-repo deploy order: an admin payload from before this flag shipped
+	// carries no such key at all - must render exactly like `false`.
+	it("renders no CTA when can_stop_autopay_to_pay is absent from the account payload", async () => {
+		const wrapper = await mountPage(baseAccount());
+		expect(findByText(wrapper, "button", "Stop auto-retry & pay now")).toBeUndefined();
+	});
+
+	it('outcome "neutralized" reloads the account so the reactivation grid can appear', async () => {
+		const wrapper = await mountPage(baseAccount({ can_stop_autopay_to_pay: true }));
+		api.stopAutopayToPay.mockResolvedValue({ ok: true, outcome: "neutralized" });
+		api.getAccount.mockClear();
+		api.getAccount.mockResolvedValue(
+			baseAccount({ can_stop_autopay_to_pay: false, can_reactivate: true })
+		);
+
+		await wrapper.vm.doStopAutopay();
+		await flushPromises();
+
+		expect(api.getAccount).toHaveBeenCalledTimes(1);
+		expect(wrapper.vm.account.can_reactivate).toBe(true);
+	});
+
+	it('outcome "already_dead" also reloads the account (same as "neutralized")', async () => {
+		const wrapper = await mountPage(baseAccount({ can_stop_autopay_to_pay: true }));
+		api.stopAutopayToPay.mockResolvedValue({ ok: true, outcome: "already_dead" });
+		api.getAccount.mockClear();
+		api.getAccount.mockResolvedValue(baseAccount({ can_reactivate: true }));
+
+		await wrapper.vm.doStopAutopay();
+		await flushPromises();
+
+		expect(api.getAccount).toHaveBeenCalledTimes(1);
+	});
+
+	it('outcome "already_active" shows a success message and reloads', async () => {
+		const wrapper = await mountPage(baseAccount({ can_stop_autopay_to_pay: true }));
+		api.stopAutopayToPay.mockResolvedValue({ ok: true, outcome: "already_active" });
+		api.getAccount.mockClear();
+		api.getAccount.mockResolvedValue(baseAccount({ subscription_status: "Active" }));
+
+		await wrapper.vm.doStopAutopay();
+		await flushPromises();
+
+		expect(wrapper.vm.notice).toContain("already paid");
+		expect(api.getAccount).toHaveBeenCalledTimes(1);
+	});
+
+	it("an error envelope surfaces the message and never reloads or clears state", async () => {
+		const wrapper = await mountPage(baseAccount({ can_stop_autopay_to_pay: true }));
+		api.stopAutopayToPay.mockRejectedValue(new Error("payment under review"));
+		api.getAccount.mockClear();
+
+		await wrapper.vm.doStopAutopay();
+		await flushPromises();
+
+		expect(wrapper.vm.actionErr).toContain("payment under review");
+		expect(api.getAccount).not.toHaveBeenCalled();
+		expect(wrapper.vm.account.can_stop_autopay_to_pay).toBe(true);
 	});
 });
