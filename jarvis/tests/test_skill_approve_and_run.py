@@ -27,7 +27,7 @@ from jarvis.chat import (
 )
 from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
 from jarvis.permissions import ensure_jarvis_user_role
-from jarvis.tests.test_auto_apply import (
+from jarvis.tests._conv_helpers import (
 	NON_ADMIN_USER,
 	_ensure_non_admin_user,
 	_make_conv,
@@ -1131,6 +1131,10 @@ class TestSkillAutorunPartition(FrappeTestCase):
 		self.assertLessEqual(api._SKILL_AUTORUN_COVERED, api._GATED_WRITES)
 
 	def test_covered_is_the_exact_expected_set(self):
+		# Fail-closed pin: _COVERED is derived (_GATED_WRITES - _BRAKE), so adding a
+		# gated tool auto-covers it - this exact-membership assertion goes RED until a
+		# human confirms the new tool may auto-run (or files it in _BRAKE). Now includes
+		# the 7 light collab writes gated in design A1.
 		self.assertEqual(
 			api._SKILL_AUTORUN_COVERED,
 			frozenset(
@@ -1146,20 +1150,31 @@ class TestSkillAutorunPartition(FrappeTestCase):
 					"assign_to",
 					"update_wiki",
 					"run_method",
+					"add_comment",
+					"update_comment",
+					"add_tag",
+					"remove_tag",
+					"attach_to_doc",
+					"unshare_doc",
+					"unassign_from",
 				}
 			),
 		)
 
-	def test_never_set_is_the_trio_plus_create_custom_skill(self):
+	def test_never_set_is_the_trio_plus_create_custom_skill_and_call_connector(self):
 		self.assertEqual(
 			api._SKILL_AUTORUN_NEVER,
-			frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill"}),
+			frozenset({"delete_doc", "cancel_doc", "amend_doc", "create_custom_skill", "call_connector"}),
 		)
 
-	def test_create_custom_skill_is_not_covered_here_though_the_macro_covers_it(self):
-		# The explicit divergence from the macro's _ARMED_SKIP_COVERED (D-COVERED).
+	def test_create_custom_skill_is_now_braked_in_both_modes(self):
+		# Unification (design A4): create_custom_skill moved into the BRAKE, so it is
+		# covered by NEITHER armed mode now - previously the macro set covered it while
+		# the skill set did not (the exact drift this overhaul removes). It always
+		# parks in chat, an armed macro, AND an approved skill run.
 		self.assertNotIn("create_custom_skill", api._SKILL_AUTORUN_COVERED)
-		self.assertIn("create_custom_skill", api._ARMED_SKIP_COVERED)
+		self.assertNotIn("create_custom_skill", api._ARMED_SKIP_COVERED)
+		self.assertIn("create_custom_skill", api._BRAKE)
 
 	def test_run_method_is_covered(self):
 		self.assertIn("run_method", api._SKILL_AUTORUN_COVERED)
@@ -1467,8 +1482,8 @@ class TestSkillAutorunDisarmGate(FrappeTestCase):
 
 class TestConvFlagsSingleQuery(FrappeTestCase):
 	"""_conv_flags stays ONE get_value even after skill_autorun + skill_autorun_at +
-	skill_autorun_skill join it: the gate reads all SIX conversation flags in a single
-	query."""
+	skill_autorun_skill join it: the gate reads all conversation flags in a single
+	query. (auto_apply was dropped from the read when admin Auto-Apply was removed.)"""
 
 	@classmethod
 	def setUpClass(cls):
@@ -1486,7 +1501,7 @@ class TestConvFlagsSingleQuery(FrappeTestCase):
 			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
-	def test_six_flags_read_in_one_query(self):
+	def test_conversation_flags_read_in_one_query(self):
 		conv = _make_conv(TEST_USER)
 		# Spy on the real DB instance (frappe.db is a LocalProxy over frappe.local.db);
 		# wraps=... records every get_value call yet executes it normally.
@@ -1505,12 +1520,13 @@ class TestConvFlagsSingleQuery(FrappeTestCase):
 		self.assertEqual(
 			list(flag_reads[0].args[2]),
 			[
-				"auto_apply",
 				"file_box",
 				"skip_confirmation",
 				"skill_autorun",
 				"skill_autorun_at",
 				"skill_autorun_skill",
+				"request_autorun",
+				"request_autorun_at",
 			],
 		)
 		self.assertTrue(flag_reads[0].kwargs.get("as_dict"), "flags read as_dict")
@@ -2697,13 +2713,15 @@ class TestApproveAndRunFlagSetBeforeContinuation(FrappeTestCase):
 		)
 
 
-class TestTerminalTurnKeepsFlagOnBulkLightWritePause(FrappeTestCase):
+class TestTerminalTurnKeepsFlagOnNonDestructivePause(FrappeTestCase):
 	"""Minor (review): the on_terminal_turn / reaper predicate is "no pending card AT
-	ALL", not "no DESTRUCTIVE card". A bulk add_comment (names=[...]) is not itself a
-	_GATED_WRITES tool, but a BULK call ALWAYS parks (one card per batch, even for an
-	otherwise-ungated light write) - a legitimate, non-destructive PAUSE. The terminal
-	clear must KEEP the flag on it exactly like it keeps it on a destructive pause
-	(mirrors TestTerminalTurnClear.test_pump_finalize_keeps_autorun_when_a_card_is_pending)."""
+	ALL", not "no DESTRUCTIVE card". create_custom_skill is a BRAKE (design A3/A4) - a
+	consequential-but-non-destructive meta-write that ALWAYS parks even inside an
+	approved skill run - a legitimate, non-destructive PAUSE. The terminal clear must
+	KEEP the flag on it exactly like it keeps it on a destructive pause (mirrors
+	TestTerminalTurnClear.test_pump_finalize_keeps_autorun_when_a_card_is_pending).
+	(This used to use a bulk light write; those are _COVERED as of design A1, so they
+	now run uncarded in an approved run instead of parking.)"""
 
 	@classmethod
 	def setUpClass(cls):
@@ -2728,32 +2746,30 @@ class TestTerminalTurnKeepsFlagOnBulkLightWritePause(FrappeTestCase):
 			run_id="r-fin-bulk", turn={}, conversation=conv, owner=TEST_USER, errored=False, payload={}
 		)
 
-	def test_bulk_light_write_pause_keeps_the_flag(self):
+	def test_non_destructive_brake_pause_keeps_the_flag(self):
 		conv = _make_conv(TEST_USER)
 		_stamp_autorun(conv)
-		t1 = frappe.get_doc({"doctype": "ToDo", "description": "bulk-pause-1"}).insert(
-			ignore_permissions=True
+		# create_custom_skill is non-destructive but a BRAKE (design A3/A4), so it parks
+		# even inside an approved run - a legitimate non-destructive PAUSE.
+		self.assertIn("create_custom_skill", api._BRAKE)
+		self.assertNotIn("create_custom_skill", api._DESTRUCTIVE)
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			r = api._run_tool(
+				"create_custom_skill",
+				{"skill_name": "term-pause-skill", "instructions": "do the thing"},
+				conversation=conv,
+			)
+		self.assertEqual(
+			r["data"]["status"], "pending_confirmation", "a brake tool parks even in an approved run"
 		)
-		t2 = frappe.get_doc({"doctype": "ToDo", "description": "bulk-pause-2"}).insert(
-			ignore_permissions=True
-		)
-		frappe.db.commit()
-		self.assertNotIn(
-			"add_comment", api._GATED_WRITES, "add_comment is ordinarily UNGATED - the BULK shape parks it"
-		)
-		r = api._run_tool(
-			"add_comment",
-			{"doctype": "ToDo", "names": [t1.name, t2.name], "content": "bulk note"},
-			conversation=conv,
-		)
-		self.assertEqual(r["data"]["status"], "pending_confirmation", "a bulk light write still parks a card")
+		self.assertFalse(disp.called)
 		self.assertEqual(_pending_for(conv, TEST_USER), 1)
 		finalize._effect_macro_advance(self._ctx(conv))
 		self.assertEqual(
 			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
 			1,
-			"a non-destructive BULK-LIGHT-WRITE pause must also KEEP the flag - the "
-			"predicate is 'no pending card at all', not 'no destructive card'",
+			"a non-destructive BRAKE pause must also KEEP the flag - the predicate is "
+			"'no pending card at all', not 'no destructive card'",
 		)
 
 

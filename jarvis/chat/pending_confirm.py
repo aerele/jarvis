@@ -258,6 +258,26 @@ def mint(
 	return token
 
 
+def rollback_token(token: str, owner: str) -> None:
+	"""Best-effort teardown of a just-minted token (record + owner-index member +
+	cards_open gauge), for the gate's FAIL-CLOSED path when the durable action-row
+	insert fails AFTER a successful mint. Mirrors mint's own internal rollback so no
+	orphan token lingers - an orphan would make the single-flight guard treat it as a
+	live pending card and wedge the retry. NEVER raises."""
+	if not token:
+		return
+	cache = frappe.cache()
+	for _rb in (
+		lambda: cache.delete_value(_key(token)),
+		lambda: cache.srem(_owner_key(owner), token),
+	):
+		try:
+			_rb()
+		except Exception:
+			pass
+	_gauge_remove(token)
+
+
 def _read_record(token: str, *, swallow: bool = True) -> dict | None:
 	"""Read the parked record directly from Redis, bypassing local cache.
 
