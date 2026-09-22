@@ -8,7 +8,14 @@ import unicodedata
 import frappe
 from frappe.utils import cint, validate_email_address
 
-from jarvis import admin_client, announcement, maintenance_notice, onboarding_contract, release_notice
+from jarvis import (
+	admin_client,
+	announcement,
+	catalogue_visibility,
+	maintenance_notice,
+	onboarding_contract,
+	release_notice,
+)
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
@@ -273,6 +280,10 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	from jarvis.chat import egress_rules
 
 	egress_rules.persist(data.get("redaction_patterns"))
+	# Same cadence: mirror the operator's fleet-global agent-catalogue visibility policy.
+	# Marker-aware + KEEP-on-doubt (jarvis.catalogue_visibility) so an old/rolled-back CP
+	# never un-hides a withdrawn agent fleet-wide.
+	catalogue_visibility.persist_from_connection(data)
 	if data.get("agent_url"):
 		write_connection(data)
 		return {"synced": True, "tenant_status": data.get("tenant_status")}

@@ -23,6 +23,7 @@ import unittest
 import frappe
 import frappe.permissions
 
+from jarvis import catalogue_visibility
 from jarvis.chat import agent_catalog, agents_api
 from jarvis.patches import v2_18_agent_access_grandfather as grandfather
 from jarvis.tests._agent_access import allow_listing_for, clear_listing_access
@@ -1038,3 +1039,224 @@ class TestOperatorVisibility(AccessGovernanceCase):
 		self.assertNotEqual(agents_api._opaque_id(SLUG), naive)
 		self.assertEqual(agents_api._opaque_id("x"), agents_api._opaque_id("x"))  # stable
 		self.assertNotEqual(agents_api._opaque_id("x"), agents_api._opaque_id("y"))  # unique
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2 - the operator's fleet-global visibility policy, pulled + applied.
+# The pull (catalogue_visibility.persist_from_connection) is the ONLY authoritative
+# writer of a governed agent's visibility; the two guards make a governed agent
+# read-only to the tenant and un-installable by anyone (the "disable" guarantee).
+# --------------------------------------------------------------------------- #
+class TestCatalogueVisibilityPull(AccessGovernanceCase):
+	SETTINGS = catalogue_visibility.SETTINGS
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+		self._reset_listing()
+		self._clear_governed()
+		self.addCleanup(self._reset_listing)
+		self.addCleanup(self._clear_governed)
+
+	def _reset_listing(self):
+		frappe.set_user("Administrator")
+		frappe.db.set_value(
+			LISTING, SLUG, {"operator_visibility": "available", "status": "Published"}, update_modified=False
+		)
+		frappe.db.commit()
+
+	def _clear_governed(self):
+		frappe.db.set_value(
+			self.SETTINGS,
+			self.SETTINGS,
+			{"catalogue_visibility_governed": "", "catalogue_visibility_synced_at": None},
+			update_modified=False,
+		)
+		frappe.clear_document_cache(self.SETTINGS, self.SETTINGS)
+		frappe.db.commit()
+
+	def _govern(self, mapping):
+		frappe.db.set_value(
+			self.SETTINGS,
+			self.SETTINGS,
+			"catalogue_visibility_governed",
+			frappe.as_json(mapping),
+			update_modified=False,
+		)
+		frappe.clear_document_cache(self.SETTINGS, self.SETTINGS)
+		frappe.db.commit()
+
+	def _vis(self):
+		return frappe.db.get_value(LISTING, SLUG, "operator_visibility")
+
+	def _stored(self):
+		raw = frappe.db.get_value(self.SETTINGS, self.SETTINGS, "catalogue_visibility_governed")
+		return frappe.parse_json(raw) if raw else {}
+
+	@staticmethod
+	def _conn(supported=True, **kw):
+		c = {}
+		if supported:
+			c["agent_visibility_supported"] = True
+		c.update(kw)
+		return c
+
+	# -- marker discipline (KEEP on any doubt) ------------------------------ #
+	def test_absent_marker_keeps_last_applied(self):
+		# An old / rolled-back CP sends no marker: never un-hide a withdrawn agent fleet-wide.
+		self._govern({SLUG: "hidden"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		catalogue_visibility.persist_from_connection({"agent_visibility": {}})  # no marker
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "hidden", "absent marker must KEEP, never revert")
+		self.assertEqual(self._stored(), {SLUG: "hidden"})
+
+	def test_marker_present_key_absent_keeps(self):
+		self._govern({SLUG: "teaser"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "teaser", update_modified=False)
+		frappe.db.commit()
+		catalogue_visibility.persist_from_connection(self._conn())  # marker, no agent_visibility key
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "teaser", "a transient/partial payload must KEEP")
+
+	def test_malformed_payload_is_rejected_whole_and_keeps(self):
+		self._govern({SLUG: "hidden"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		for bad in ([1, 2], "hidden", {SLUG: "nope"}, {SLUG: "hidden", 3: "teaser"}):
+			catalogue_visibility.persist_from_connection(self._conn(agent_visibility=bad))
+			frappe.db.commit()
+			self.assertEqual(self._vis(), "hidden", f"malformed payload {bad!r} must KEEP, not revert")
+			self.assertEqual(self._stored(), {SLUG: "hidden"})
+
+	# -- authoritative apply ------------------------------------------------ #
+	def test_populated_policy_applies_and_records(self):
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={SLUG: "teaser"}))
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "teaser")
+		self.assertEqual(self._stored(), {SLUG: "teaser"})
+		self.assertTrue(catalogue_visibility.is_operator_governed(SLUG))
+		self.assertIsNotNone(
+			frappe.db.get_value(self.SETTINGS, self.SETTINGS, "catalogue_visibility_synced_at")
+		)
+
+	def test_empty_policy_reverts_all_governed(self):
+		self._govern({SLUG: "hidden"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={}))
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "available", "an explicit empty policy is authoritative: revert all")
+		self.assertEqual(self._stored(), {})
+		self.assertFalse(catalogue_visibility.is_operator_governed(SLUG))
+
+	def test_drop_from_policy_reverts_that_slug(self):
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={SLUG: "hidden"}))
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "hidden")
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={"other-slug": "teaser"}))
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "available", "a slug dropped from the policy returns to available")
+
+	def test_unknown_slug_is_skipped_not_fatal(self):
+		catalogue_visibility.persist_from_connection(
+			self._conn(agent_visibility={"no-such-listing": "hidden", SLUG: "teaser"})
+		)
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "teaser", "the known slug still applied")
+		# The unknown slug stays in the stored map so governance attaches if its listing syncs in.
+		self.assertEqual(self._stored().get("no-such-listing"), "hidden")
+
+	def test_apply_is_idempotent(self):
+		conn = self._conn(agent_visibility={SLUG: "teaser"})
+		catalogue_visibility.persist_from_connection(conn)
+		frappe.db.commit()
+		mod1 = frappe.db.get_value(LISTING, SLUG, "modified")
+		catalogue_visibility.persist_from_connection(conn)
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "teaser")
+		self.assertEqual(
+			frappe.db.get_value(LISTING, SLUG, "modified"), mod1, "a no-op re-apply must not churn modified"
+		)
+
+	def test_persist_never_raises(self):
+		# A broken payload degrades (logged) rather than taking down sync_connection.
+		try:
+			catalogue_visibility.persist_from_connection(self._conn(agent_visibility=object()))
+		except Exception as e:
+			self.fail(f"persist_from_connection must never raise; raised {e!r}")
+
+	# -- T-GUARD: governed visibility is read-only to the tenant ------------ #
+	def test_governed_slug_is_read_only_even_to_system_manager(self):
+		# The real scenario: a tenant SM tries to UN-HIDE a governed-hidden agent.
+		self._govern({SLUG: "hidden"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		doc = frappe.get_doc(LISTING, SLUG)  # session = Administrator (a System Manager)
+		doc.operator_visibility = "available"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+	def test_ungoverned_slug_keeps_phase1_sm_only_rule(self):
+		# Not governed: a System Manager may still set it locally; a non-SM Jarvis Admin cannot.
+		doc = frappe.get_doc(LISTING, SLUG)
+		doc.operator_visibility = "teaser"
+		doc.save()  # Administrator = SM, allowed
+		self.assertEqual(self._vis(), "teaser")
+		self._as(self.admin)  # Jarvis Admin, NOT System Manager
+		doc = frappe.get_doc(LISTING, SLUG)
+		doc.operator_visibility = "available"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+	def test_pull_writes_bypass_the_guard(self):
+		# The authoritative pull uses db.set_value, so it is never blocked by T-GUARD.
+		self._govern({SLUG: "hidden"})
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={SLUG: "teaser"}))
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "teaser")
+
+	# -- T-INSTALL: hard-gate new installs of a governed teaser/hidden ------ #
+	def test_governed_hidden_blocks_new_install_even_for_admin(self):
+		self._govern({SLUG: "hidden"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		# Administrator is a Jarvis Admin/SM, yet a GOVERNED hidden agent is un-installable.
+		with self.assertRaises(frappe.PermissionError):
+			_mk_install(self.admin)
+
+	def test_governed_teaser_blocks_new_install_for_plain_user(self):
+		self._govern({SLUG: "teaser"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "teaser", update_modified=False)
+		frappe.db.commit()
+		allow_listing_for(SLUG, user=self.plain)
+		self._as(self.plain)
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.install_agent(SLUG)
+
+	def test_ungoverned_hidden_keeps_admin_dogfood_bypass(self):
+		# Tenant-LOCAL hidden (not governed): a Jarvis Admin may still dogfood-install it.
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		name = _mk_install(self.admin)  # Administrator, no governance -> allowed (Phase-1)
+		self.assertTrue(frappe.db.exists(INSTALLATION, name))
+
+	def test_grandfathering_existing_install_survives_governed_hide(self):
+		# Create an enabled install while available, THEN the operator governs it hidden via
+		# the PULL path: the existing install must survive (is_new-only gate) and stay on the
+		# owner's roster (leg 2), and the owner still sees it unmasked (owner carve-out).
+		allow_listing_for(SLUG, user=self.named)
+		name = _mk_install(self.named)
+		frappe.db.set_value(INSTALLATION, name, "enabled", 1, update_modified=False)
+		frappe.db.commit()
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={SLUG: "hidden"}))
+		frappe.db.commit()
+		self.assertTrue(frappe.db.exists(INSTALLATION, name), "grandfathered install must not be stripped")
+		self.assertEqual(frappe.db.get_value(INSTALLATION, name, "enabled"), 1)
+		self.assertEqual(self._vis(), "hidden")
+		frappe.set_user(self.named)
+		self.addCleanup(frappe.set_user, "Administrator")
+		row = next((r for r in agents_api.list_agents() if r["name"] == SLUG), None)
+		self.assertIsNotNone(row, "the owner still sees their installed agent (owner carve-out)")
+		self.assertFalse(row.get("masked"), "the owner's own installed agent is not masked")
