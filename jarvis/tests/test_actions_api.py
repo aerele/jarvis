@@ -825,3 +825,115 @@ class TestListPendingConfirmations(FrappeTestCase):
 		items = r["data"]["pending"]
 		self.assertEqual(len(items), 2)
 		self.assertEqual(sorted(it["summary"] for it in items), ["", "ok-summary"])
+
+	def test_pill_source_logs_rescue_with_source_tag(self):
+		"""AC-source-safety / observability: a user-driven pill re-check that surfaces a
+		card logs action_card_rescue WITH a validated source tag (so recoveries attribute
+		per layer)."""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		conv = self._conv()
+		pending_confirm.mint(
+			conversation=conv,
+			owner="Administrator",
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "x"},
+			run_id="",
+			preview={"p": True},
+		)
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			list_pending_confirmations(conversation=conv, source="pill")
+		msgs = [c.args[0] for c in gl.return_value.info.call_args_list if c.args]
+		self.assertTrue(any("action_card_rescue" in m and "source=%s" in m for m in msgs))
+		# the tag value is passed as an arg
+		tags = [
+			c.args[1]
+			for c in gl.return_value.info.call_args_list
+			if c.args and "action_card_rescue" in c.args[0]
+		]
+		self.assertIn("pill", tags)
+
+	def test_menu_and_recheck_sources_log_but_auto_does_not(self):
+		"""User-driven sources (recheck/menu/pill) are the 'delivery missed it, human acted'
+		signal and log; 'auto' fires constantly (focus/visibility/poll) so it stays SILENT
+		to avoid flooding the channel."""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		conv = self._conv()
+		pending_confirm.mint(
+			conversation=conv,
+			owner="Administrator",
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "y"},
+			run_id="",
+			preview={"p": True},
+		)
+
+		def _tags(source):
+			with patch("jarvis.chat.latency.get_logger") as gl:
+				list_pending_confirmations(conversation=conv, source=source)
+			return [
+				c.args[1]
+				for c in gl.return_value.info.call_args_list
+				if c.args and "action_card_rescue" in c.args[0]
+			]
+
+		self.assertIn("menu", _tags("menu"))
+		self.assertIn("recheck", _tags("recheck"))
+		self.assertEqual(_tags("auto"), [])  # auto is silent
+
+	def test_unknown_string_source_is_tagged_other_and_not_logged(self):
+		"""AC-source-safety: an unknown / injection-y STRING source must not crash and must
+		never reach the log raw - it clamps to the 'other' tag (not a user-driven rescue
+		source), so nothing is logged and no client string is emitted. (A non-string source
+		is separately rejected by Frappe's `str | None` whitelist validation, a clean 4xx,
+		before this code runs - so the `in {...}` membership test can never see a list.)"""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		conv = self._conv()
+		pending_confirm.mint(
+			conversation=conv,
+			owner="Administrator",
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "z"},
+			run_id="",
+			preview={"p": True},
+		)
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			r = list_pending_confirmations(conversation=conv, source="weird\ninjected count=999")
+		self.assertTrue(r["ok"])  # no crash
+		msgs = [c.args[0] for c in gl.return_value.info.call_args_list if c.args]
+		# unknown source is NOT a user-driven rescue source -> nothing logged, nothing raw
+		self.assertFalse(any("action_card_rescue" in m for m in msgs))
+
+	def test_logged_conversation_is_newline_sanitized(self):
+		"""Log-injection guard: the client-supplied conversation must never reach the
+		rescue log line with embedded newlines (a forged 'action_card_rescue' line could
+		trip a false alert). A conversation-less token surfaces under any filter, so a
+		bogus conversation arg with a newline still reaches the log path."""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		# conversation-less token surfaces under ANY conversation filter (F1)
+		pending_confirm.mint(
+			conversation="",
+			owner="Administrator",
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "nl"},
+			run_id="",
+			preview={"p": True},
+		)
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			list_pending_confirmations(conversation="a\ninjected count=999", source="pill")
+		conv_args = [
+			c.args[3]
+			for c in gl.return_value.info.call_args_list
+			if c.args and "action_card_rescue" in c.args[0] and len(c.args) > 3
+		]
+		self.assertTrue(conv_args)  # it did log
+		for ca in conv_args:
+			self.assertNotIn("\n", ca)
+			self.assertNotIn("\r", ca)
