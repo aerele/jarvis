@@ -141,6 +141,8 @@
 						:class="
 							a.masked
 								? 'cursor-default select-none opacity-50'
+								: a.install_disabled
+								? 'cursor-pointer select-none opacity-60 hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3'
 								: 'cursor-pointer hover:bg-surface-gray-1 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3'
 						"
 						@click="!a.masked && openAgent(a)"
@@ -191,6 +193,16 @@
 										variant="subtle"
 										theme="red"
 										label="Deprecated"
+									/>
+									<!-- The operator withdrew this agent (teaser/hidden): the owner's
+									     install is shown DISABLED so they can still open + uninstall it,
+									     but it does not run until the operator makes it available again. -->
+									<Badge
+										v-if="a.install_disabled"
+										class="shrink-0"
+										variant="subtle"
+										theme="red"
+										label="Unavailable"
 									/>
 								</div>
 								<div v-if="!a.masked" class="truncate text-sm text-ink-gray-5">

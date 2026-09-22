@@ -822,24 +822,51 @@ class TestOperatorVisibility(AccessGovernanceCase):
 		with self.assertRaises(frappe.DoesNotExistError):
 			agents_api.get_agent(SLUG)
 
-	def test_admin_sees_the_real_name_despite_teaser(self):
+	def test_admin_also_sees_teaser_masked(self):
+		# The operator's decision is final for EVERY role — an admin no longer sees through a
+		# teaser. get_agent returns the masked 'coming soon' card; the real name never leaks.
 		self._set_vis("teaser")
 		frappe.set_user(self.admin)
 		self.addCleanup(frappe.set_user, "Administrator")
 		out = agents_api.get_agent(SLUG)
-		self.assertEqual(out["masked"], 0)
-		self.assertEqual(out["agent_slug"], SLUG)
-		self.assertIn(self.REAL_TITLE, out["title"])
+		self.assertEqual(out["masked"], 1)
+		self.assertEqual(out["title"], "Coming soon")
+		self.assertNotIn(self.REAL_TITLE, json.dumps(out, default=str))
 
-	def test_owner_sees_installed_agent_unmasked_despite_teaser(self):
-		# An owner who installed the agent BEFORE it was masked keeps seeing it, unmasked —
-		# visible AND readable, so they can still identify and manage what they run.
+	def test_admin_does_not_see_hidden_in_catalogue(self):
+		# Hidden applies to admins too: absent from the catalogue and get_agent 404s.
+		self._set_vis("hidden")
+		self.assertNotIn(SLUG, [r.get("name") for r in self._list_as(self.admin)])
+		frappe.set_user(self.admin)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.DoesNotExistError):
+			agents_api.get_agent(SLUG)
+
+	def test_owner_sees_installed_teaser_disabled_not_unmasked(self):
+		# The owner still sees their own install (so they can view / uninstall it), but it is
+		# DISABLED while the operator keeps the agent teaser/hidden, and is NOT offered for
+		# discovery in the browse tabs (installed_only).
 		_mk_install(self.plain)
 		self._set_vis("teaser")
 		row = next((r for r in self._list_as(self.plain) if r.get("name") == SLUG), None)
 		self.assertIsNotNone(row, "owner lost sight of their own installed agent")
-		self.assertEqual(row.get("masked", 0), 0)
-		self.assertIn(self.REAL_TITLE, json.dumps(row, default=str))
+		self.assertEqual(row.get("masked", 0), 0, "the owner sees the real agent they installed")
+		self.assertEqual(row.get("install_disabled"), 1, "installed teaser/hidden is disabled")
+		self.assertEqual(row.get("installed_only"), 1, "not offered in the browse tabs")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		self.assertEqual(agents_api.get_agent(SLUG).get("install_disabled"), 1)
+
+	def test_installed_teaser_absent_from_browse_present_in_installed(self):
+		# The owner's disabled install shows ONLY in the Installed tab, never the browse tabs.
+		_mk_install(self.plain)
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		avail = [r["name"] for r in agents_api.list_agents_page(tab="available", page_length=100)["rows"]]
+		inst = [r["name"] for r in agents_api.list_agents_page(tab="installed", page_length=100)["rows"]]
+		self.assertNotIn(SLUG, avail, "a withdrawn install must not appear in the browse catalogue")
+		self.assertIn(SLUG, inst, "the owner still sees their disabled install in the Installed tab")
 
 	# -- doctype boundary (U3): the raw REST / Desk path ------------------- #
 	def test_raw_get_list_hides_teaser_from_a_plain_user(self):
@@ -889,6 +916,49 @@ class TestOperatorVisibility(AccessGovernanceCase):
 		frappe.set_user(self.admin)
 		self.addCleanup(frappe.set_user, "Administrator")
 		self.assertTrue(agents_api.install_agent(SLUG)["ok"])
+
+	# -- run-time gate: a withdrawn agent's existing install does not run ---- #
+	def test_run_agent_now_refused_when_operator_withdraws(self):
+		# An existing install stops running (disabled) the moment the operator sets the agent
+		# teaser/hidden — the manual run gate refuses it (the install itself is untouched).
+		inst = _mk_install(self.plain)
+		frappe.db.set_value(INSTALLATION, inst, "enabled", 1, update_modified=False)
+		frappe.db.commit()
+		self._set_vis("hidden")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.run_agent_now(inst)
+
+	def test_run_gate_is_reversible_no_stored_state(self):
+		# The gate is derived from operator_visibility at run time (no stored state / no
+		# mutation of the install's enabled flag), so available restores runnability.
+		self.assertFalse(agents_api._agent_is_withdrawn(SLUG))
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "teaser", update_modified=False)
+		self.assertTrue(agents_api._agent_is_withdrawn(SLUG))
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "available", update_modified=False)
+		self.assertFalse(agents_api._agent_is_withdrawn(SLUG))
+
+	def test_scheduler_skips_a_withdrawn_agents_install(self):
+		# The daily sweep must not dispatch a run for a withdrawn agent; it advances the slot
+		# (no busy-retry) instead of launching.
+		from jarvis.chat import agent_scheduler
+
+		self._set_vis("hidden")
+		row = frappe._dict(
+			owner=self.plain,
+			agent=SLUG,
+			schedule_frequency="daily",
+			schedule_time="09:00:00",
+			installable=1,
+		)
+		with (
+			patch.object(agent_scheduler, "_launch_audit") as launch,
+			patch.object(agent_scheduler, "_advance") as adv,
+		):
+			agent_scheduler._sweep_one(row, frappe.utils.now_datetime(), "Administrator", set())
+		launch.assert_not_called()
+		adv.assert_called_once()
 
 	def test_hidden_refuses_install_even_for_an_allowed_user(self):
 		# hidden is the more security-sensitive state (an operator withdrawal); give it
