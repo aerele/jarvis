@@ -440,13 +440,13 @@ class TestAgentIdentity(unittest.TestCase):
 		bare_msg = agent_scheduler._audit_prompt(bare, inst, trigger="manual", scope={})
 		self.assertNotIn("EXPLICIT CONFIG", bare_msg)
 		# A6/hallucination fix: the pointer NAMES the real doctype so a weak model cannot invent
-		# one (e.g. "Jarvis Engagement Configuration"); the installation ROW name + the get_doc
-		# tool are present, and the old doctype-less "read it there" phrasing is gone.
+		# one (e.g. "Jarvis Engagement Configuration"). Per the non-leak control the bench prompt
+		# names the doctype + the installation ROW but NO tool (the SKILL owns get_doc); the old
+		# doctype-less "read it there" phrasing is gone.
 		self.assertIn("Jarvis Agent Installation", bare_msg)
-		self.assertIn("jarvis__get_doc", bare_msg)
 		self.assertIn("INST-1", bare_msg)  # the installation ROW name is still handed
 		self.assertNotIn("read it there", bare_msg)
-		self.assertNotIn("jarvis__get_engagement_config", bare_msg)  # branch 3: no tool, so not named
+		self.assertNotIn("jarvis__", bare_msg)  # non-leak control: the bench prompt names NO tool
 		# fix #1: when the agent's tools_allow includes the zero-arg tool, the prompt PREFERS it
 		# (nothing for a weak model to fumble) but KEEPS the named-doctype get_doc as a fallback,
 		# so a deploy-skew window (tool not yet in the container / tenant Apply) degrades to the
