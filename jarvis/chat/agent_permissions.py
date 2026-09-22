@@ -133,8 +133,11 @@ def listing_query_conditions(user: str | None = None) -> str:
 		return ""
 	esc = frappe.db.escape(user)
 	# Show a row via generic list only if it is 'available', OR the caller installed it.
+	# COALESCE for exact parity with the app layer's ``(x or "available")`` — a NULL
+	# operator_visibility (only reachable via a raw insert, since the field DDL defaults
+	# to 'available') is treated as available, not silently hidden from non-admin lists.
 	return (
-		f"(`tab{LISTING}`.`operator_visibility` = 'available' "
+		f"(COALESCE(`tab{LISTING}`.`operator_visibility`, 'available') = 'available' "
 		f"OR `tab{LISTING}`.`name` IN "
 		f"(SELECT `agent` FROM `tab{INSTALLATION}` WHERE `owner` = {esc}))"
 	)
