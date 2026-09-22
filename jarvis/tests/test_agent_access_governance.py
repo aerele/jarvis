@@ -720,6 +720,13 @@ class TestOperatorVisibility(AccessGovernanceCase):
 	survive registry re-sync, exactly like ``allowed_roles`` — otherwise every
 	``bench migrate`` would revert an operator's live availability/masking decision."""
 
+	def setUp(self):
+		super().setUp()
+		# Order-independence: a sibling test runs sync_agent_listings, which
+		# DEPRECATES this non-registry fixture as a side effect. Reset the baseline
+		# (Published + available) before every test so masking assertions hold.
+		self._reset_visibility()
+
 	def _reset_visibility(self):
 		frappe.set_user("Administrator")
 		frappe.db.set_value(
@@ -766,3 +773,68 @@ class TestOperatorVisibility(AccessGovernanceCase):
 		agent_catalog.sync_agent_listings()
 		frappe.db.commit()
 		self.assertEqual(frappe.db.get_value(LISTING, real, "operator_visibility"), "teaser")
+
+	# -- masking (U2) ------------------------------------------------------- #
+	REAL_TITLE = "Access Governance Auditor"
+
+	def _set_vis(self, visibility):
+		self.addCleanup(self._reset_visibility)
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", visibility, update_modified=False)
+		frappe.db.commit()
+
+	def _list_as(self, user):
+		frappe.set_user(user)
+		try:
+			return agents_api.list_agents()
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_teaser_masks_name_for_a_plain_user(self):
+		# A teaser is a PUBLIC coming-soon card: shown to a plain user (bypasses the
+		# deny-by-default gate) but with the real name/slug/details never leaving the server.
+		self._set_vis("teaser")
+		rows = self._list_as(self.plain)
+		blob = json.dumps(rows, default=str)
+		self.assertNotIn(self.REAL_TITLE, blob, "real title leaked to a plain user")
+		self.assertNotIn(SLUG, blob, "real slug (= the name) leaked to a plain user")
+		masked = [r for r in rows if r.get("masked")]
+		self.assertTrue(masked, "teaser should surface as a masked card")
+		self.assertTrue(all(r.get("title") == "Coming soon" for r in masked))
+
+	def test_teaser_get_agent_by_guessed_slug_is_masked(self):
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		out = agents_api.get_agent(SLUG)  # a non-admin guesses the real slug
+		blob = json.dumps(out, default=str)
+		self.assertNotIn(self.REAL_TITLE, blob)
+		self.assertEqual(out["masked"], 1)
+		self.assertEqual(out["title"], "Coming soon")
+		self.assertNotEqual(out["agent_slug"], SLUG)
+
+	def test_hidden_is_absent_and_get_agent_404s_for_a_plain_user(self):
+		self._set_vis("hidden")
+		self.assertNotIn(SLUG, json.dumps(self._list_as(self.plain), default=str))
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.DoesNotExistError):
+			agents_api.get_agent(SLUG)
+
+	def test_admin_sees_the_real_name_despite_teaser(self):
+		self._set_vis("teaser")
+		frappe.set_user(self.admin)
+		self.addCleanup(frappe.set_user, "Administrator")
+		out = agents_api.get_agent(SLUG)
+		self.assertEqual(out["masked"], 0)
+		self.assertEqual(out["agent_slug"], SLUG)
+		self.assertIn(self.REAL_TITLE, out["title"])
+
+	def test_owner_sees_installed_agent_unmasked_despite_teaser(self):
+		# An owner who installed the agent BEFORE it was masked keeps seeing it, unmasked —
+		# visible AND readable, so they can still identify and manage what they run.
+		_mk_install(self.plain)
+		self._set_vis("teaser")
+		row = next((r for r in self._list_as(self.plain) if r.get("name") == SLUG), None)
+		self.assertIsNotNone(row, "owner lost sight of their own installed agent")
+		self.assertEqual(row.get("masked", 0), 0)
+		self.assertIn(self.REAL_TITLE, json.dumps(row, default=str))

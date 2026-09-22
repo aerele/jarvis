@@ -194,6 +194,36 @@ def list_agents() -> list[dict]:
 	return _enriched_catalog()
 
 
+_MASK_TITLE = "Coming soon"
+
+
+def _opaque_id(slug: str) -> str:
+	"""Stable, non-reversible id for a masked (teaser) row. The real ``agent_slug``
+	IS the agent's human name (``close-auditor``), so it must never reach a non-admin
+	client; the SPA keys/routes on this opaque id instead."""
+	import hashlib
+
+	return "cs-" + hashlib.sha256((slug or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _mask_teaser_row(r: dict) -> None:
+	"""Redact a ``teaser`` listing served to a non-admin non-owner, IN PLACE. The real
+	name/details never leave the server; the row stays a keyable 'coming soon' card
+	whose slug/name are replaced by an opaque id and whose detail fields are stripped."""
+	r["masked"] = 1
+	r["operator_visibility"] = "teaser"
+	r["opaque_id"] = _opaque_id(r.get("agent_slug") or r.get("name"))
+	r["name"] = r["opaque_id"]
+	r["agent_slug"] = r["opaque_id"]
+	r["title"] = _MASK_TITLE
+	r["description"] = ""
+	r["category"] = None
+	r["tools_required"] = None
+	r["publisher"] = None
+	r["rule_pack"] = None
+	r["installable"] = 0
+
+
 def _enriched_catalog() -> list[dict]:
 	"""The shared per-row enrichment behind ``list_agents`` AND
 	``list_agents_page`` — one implementation so the paginated SPA list can
@@ -217,6 +247,7 @@ def _enriched_catalog() -> list[dict]:
 			"version",
 			"publisher",
 			"status",
+			"operator_visibility",
 			"rule_pack",
 			"default_schedule",
 			"validated_for_fy",
@@ -280,6 +311,7 @@ def _enriched_catalog() -> list[dict]:
 		# moment either changed.
 		lst["allowed"] = 1 if _is_allowed(allowed_roles, allowed_users, me, my_roles, is_admin=is_sm) else 0
 		lst["install_count"] = install_counts.get(lst.name, 0)
+		lst["masked"] = 0
 		out.append(lst)
 	# jarvis#1062 D2 (revised): a non-admin never sees a row it may not
 	# DISCOVER, but a row it already INSTALLED stays visible regardless of role
@@ -296,7 +328,25 @@ def _enriched_catalog() -> list[dict]:
 	# choke point both list_agents and list_agents_page share, so neither can
 	# drift from the other.
 	if not is_sm:
-		out = [r for r in out if r["installed"] or (r["allowed"] and r["status"] in _DISCOVERABLE_STATUSES)]
+		kept = []
+		for r in out:
+			vis = r.get("operator_visibility") or "available"
+			if r["installed"]:
+				kept.append(r)  # owner carve-out: your own installed agent is always shown, unmasked
+				continue
+			if vis == "hidden":
+				continue  # operator removed it from non-admin discovery entirely
+			if r["status"] not in _DISCOVERABLE_STATUSES:
+				continue  # Draft/Deprecated are lifecycle states, not discoverable
+			if vis == "teaser":
+				# a teaser is a PUBLIC 'coming soon' card: shown MASKED to every
+				# non-admin (bypassing the deny-by-default role gate), never installable.
+				_mask_teaser_row(r)
+				kept.append(r)
+				continue
+			if r["allowed"]:  # available: the existing role-gated discovery rule, unchanged
+				kept.append(r)
+		out = kept
 		for r in out:
 			# WHO ELSE has access is admin-only information: a plain user learns
 			# whether THEY are allowed (the ``allowed`` flag), never the roster.
@@ -401,12 +451,19 @@ def get_agent(agent_slug: str) -> dict:
 	# deliberate teaser), so it passes like Published; Draft/Deprecated still
 	# need the install carve-out. Admin display parity is untouched: an admin
 	# (is_sm) always passes.
-	if (
-		not is_sm
-		and not installed_by_caller
-		and (not allowed or listing.status not in _DISCOVERABLE_STATUSES)
-	):
-		frappe.throw(_("You do not have access to this agent."), frappe.PermissionError)
+	# Operator visibility overlay (same gate the list applies in _enriched_catalog):
+	#  hidden -> unreachable even by slug (generic not-found, no leak);
+	#  teaser -> discoverable-but-masked, bypasses the role gate, redacted below;
+	#  available -> the existing role + discoverable-status gate.
+	vis = listing.operator_visibility or "available"
+	_masked = False
+	if not is_sm and not installed_by_caller:
+		if vis == "hidden":
+			frappe.throw(_("Agent not found."), frappe.DoesNotExistError)
+		if vis == "teaser" and listing.status in _DISCOVERABLE_STATUSES:
+			_masked = True
+		elif not allowed or listing.status not in _DISCOVERABLE_STATUSES:
+			frappe.throw(_("You do not have access to this agent."), frappe.PermissionError)
 
 	out: dict = {
 		"name": listing.name,
@@ -440,6 +497,25 @@ def get_agent(agent_slug: str) -> dict:
 		"install_count": frappe.db.count(INSTALLATION, {"agent": listing.name}),
 		"installation": None,
 	}
+	out["operator_visibility"] = vis
+	out["masked"] = 0
+	if _masked:
+		# Redact the teaser for a non-admin non-owner: the real name/details never
+		# leave the server, and the slug (which IS the name) becomes an opaque id.
+		out["opaque_id"] = _opaque_id(listing.agent_slug)
+		out["masked"] = 1
+		out["name"] = out["opaque_id"]
+		out["agent_slug"] = out["opaque_id"]
+		out["title"] = _MASK_TITLE
+		out["description"] = ""
+		out["category"] = None
+		out["tools_required"] = None
+		out["min_apps"] = None
+		out["doctypes_required"] = None
+		out["config_keys"] = None
+		out["publisher"] = None
+		out["rule_pack"] = None
+		out["installable"] = 0
 
 	inst = frappe.get_all(
 		INSTALLATION,
