@@ -2745,6 +2745,7 @@
 				<transition name="jv-rc">
 					<button
 						v-if="showScrollDown && !showWelcome && !booting"
+						type="button"
 						class="jv-recheck-float"
 						@click="recheckPending"
 						title="Re-check for a pending confirmation"
@@ -8022,7 +8023,9 @@ function startPendingPoll() {
 			stopPendingPoll();
 			return;
 		}
-		resyncPendingConfirmations(currentId.value);
+		// "auto" tags the silent auto-heal poll (matches the PWA + widget), so the server's
+		// per-source rescue signal attributes recoveries correctly; auto is never logged.
+		resyncPendingConfirmations(currentId.value, "auto");
 		// Keep polling while a run is live; once it settles, run a couple of
 		// trailing reconciles (a terminal frame can be the dropped one) then stop.
 		if (currentRunId.value) _pendingPollIdle = 0;
@@ -11948,6 +11951,10 @@ onUnmounted(() => {
 }
 .jv-recheck-float:active {
 	transform: translateX(calc(-50% - 46px)) scale(0.92);
+}
+.jv-recheck-float:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 2px;
 }
 .jv-rc-enter-active,
 .jv-rc-leave-active {

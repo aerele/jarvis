@@ -937,3 +937,43 @@ class TestListPendingConfirmations(FrappeTestCase):
 		for ca in conv_args:
 			self.assertNotIn("\n", ca)
 			self.assertNotIn("\r", ca)
+
+	def test_rescue_source_with_no_pending_does_not_log(self):
+		"""AC-source-safety: a user-driven re-check that surfaces NOTHING must NOT log a
+		rescue - the signal is 'a card surfaced', not 'the lever was clicked'. Guards the
+		`and items` flood-suppressor (a regression dropping it would log on every idle click)."""
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		conv = self._conv()  # nothing minted -> no pending
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			r = list_pending_confirmations(conversation=conv, source="pill")
+		self.assertTrue(r["ok"])
+		self.assertEqual(r["data"]["pending"], [])
+		msgs = [c.args[0] for c in gl.return_value.info.call_args_list if c.args]
+		self.assertFalse(any("action_card_rescue" in m for m in msgs))
+
+	def test_logged_conversation_is_length_capped(self):
+		"""AC-source-safety: the logged conversation is capped (<=64) so a client can't pad
+		a rescue line into a huge log entry. A conv-less token surfaces under any filter, so
+		an over-long conversation arg still reaches the log path."""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		pending_confirm.mint(
+			conversation="",
+			owner="Administrator",
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "cap"},
+			run_id="",
+			preview={"p": True},
+		)
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			list_pending_confirmations(conversation="Z" * 300, source="pill")
+		conv_args = [
+			c.args[3]
+			for c in gl.return_value.info.call_args_list
+			if c.args and "action_card_rescue" in c.args[0] and len(c.args) > 3
+		]
+		self.assertTrue(conv_args)
+		for ca in conv_args:
+			self.assertLessEqual(len(ca), 64)

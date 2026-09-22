@@ -864,8 +864,8 @@ def _stranded_request_autorun_candidates(cutoff) -> list[str]:
 # The invisible-submit-card bug slipped through because NOTHING measured whether a
 # minted card actually reached the screen. These constants + reconcile_action_cards
 # close that: a scheduled gauge of open + stranded cards, alerted past a threshold,
-# plus the immediate per-event action_card_rescue signal from a manual re-check
-# (jarvis.chat.actions_api.list_pending_confirmations source="recheck").
+# plus the immediate per-event action_card_rescue signal from a user-driven re-check
+# (jarvis.chat.actions_api.list_pending_confirmations source in pill/menu/recheck/typed).
 
 # Grace past a card's own expires_at before a still-"pending" row counts as stranded
 # (never race a just-expired card).

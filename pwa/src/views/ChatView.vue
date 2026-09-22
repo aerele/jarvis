@@ -341,7 +341,8 @@ async function recheckPending() {
 }
 
 async function loadPending(source) {
-	if (!convId.value) return;
+	const cid = convId.value;
+	if (!cid) return;
 	const fromRows = (messages.value || [])
 		.filter(
 			(m) =>
@@ -350,17 +351,26 @@ async function loadPending(source) {
 				m.pending_card &&
 				m.tool_call_id
 		)
-		.map((m) => pendingActionFromRow(m, convId.value));
-	let fromBackstop = [];
+		.map((m) => pendingActionFromRow(m, cid));
+	let fromBackstop = null; // null = backstop read failed/unavailable (a transient blip)
 	try {
-		const r = await api.listPendingConfirmations(convId.value, source);
-		if (r?.ok && r.data)
-			fromBackstop = r.data.pending.filter((p) => p.conversation === convId.value);
+		const r = await api.listPendingConfirmations(cid, source);
+		// Only a CLEAN ok:true result is authoritative. ok:false (a store blip) or a
+		// missing/malformed body leaves fromBackstop null so we KEEP the on-screen queue
+		// rather than wipe a live-only card (the fail-closed hole the SPA guards). This
+		// helper is also the open-seed path, so durable rows below always apply.
+		if (r?.ok && r.data) fromBackstop = r.data.pending.filter((p) => p.conversation === cid);
 	} catch {
-		/* rows already cover it; a failed backstop is not worth a banner */
+		/* leave null: durable rows still apply, live cards kept */
 	}
+	// A resync in flight across a conversation switch must not write the previous
+	// conversation's cards onto the new one (freshness guard, mirrors the SPA).
+	if (convId.value !== cid) return;
+	// On a blip keep the current cards; on a clean read the server list is authoritative
+	// for this conversation (resolved cards drop). Durable rows always apply.
+	const base = fromBackstop === null ? pending.value : [];
 	const byToken = new Map();
-	for (const c of [...fromRows, ...fromBackstop]) {
+	for (const c of [...base, ...fromRows, ...(fromBackstop || [])]) {
 		if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
 	}
 	pending.value = [...byToken.values()];
@@ -1015,15 +1025,19 @@ onUnmounted(() => {
 
 		<ThinkingIndicator v-if="sending && !(live && live.text)" />
 
-		<DecisionCard
-			v-for="(p, pi) in orderedPending"
-			:key="p.token"
-			:summary="
-				(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
-				(p.summary || p.tool || `${agentName} needs your approval`)
-			"
-			@open="decision = p"
-		/>
+		<!-- aria-live so a card surfaced by auto-heal / the menu re-check is announced to a
+		     screen reader, not silently inserted. display:contents = zero layout change. -->
+		<div style="display: contents" role="status" aria-live="polite">
+			<DecisionCard
+				v-for="(p, pi) in orderedPending"
+				:key="p.token"
+				:summary="
+					(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
+					(p.summary || p.tool || `${agentName} needs your approval`)
+				"
+				@open="decision = p"
+			/>
+		</div>
 		<!-- Both ways to approve, shown once under the stack. -->
 		<p v-if="orderedPending.length" class="jv-typehint">{{ typedApprovalHint }}</p>
 	</div>
