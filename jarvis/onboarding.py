@@ -576,7 +576,7 @@ def save_llm_pool(
 	System-Manager-gated. routing_mode is always 'failover' in v1. preset is an
 	admin-catalog key or None; validated against the fetched catalog."""
 	require_jarvis_admin()
-	# Same coercion convention as jarvis.chat.api.set_star / set_auto_apply: a
+	# Same coercion convention as jarvis.chat.api.set_star: a
 	# whitelisted call arrives over HTTP as a string most of the time, so an
 	# annotated `bool` param is trusted only after an explicit allowlist read,
 	# never truthy-cast directly.

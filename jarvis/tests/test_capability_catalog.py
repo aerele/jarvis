@@ -21,6 +21,7 @@ class TestGatingBadge(FrappeTestCase):
 
 	def test_always_asks(self):
 		# destructive + gated-non-autoapply, incl. bulk create_docs (in _GATED_WRITES)
+		# and the light collab writes now gated (design A1).
 		for t in (
 			"delete_doc",
 			"cancel_doc",
@@ -30,19 +31,21 @@ class TestGatingBadge(FrappeTestCase):
 			"run_method",
 			"create_docs",
 			"share_doc",
+			"add_comment",
+			"add_tag",
+			"attach_to_doc",
 		):
 			self.assertEqual(api._gating_badge(t), "always_asks", msg=t)
 
 	def test_writes_directly_family_is_flagged(self):
 		# audited-but-ungated singles: proves they resolve to the excluded tier
+		# (add_tag/add_comment/attach_to_doc moved to always_asks in design A1).
 		for t in (
 			"export_excel",
 			"download_pdf",
 			"report_pdf",
-			"add_tag",
-			"add_comment",
-			"attach_to_doc",
 			"create_dashboard",
+			"follow_document",
 		):
 			self.assertEqual(api._gating_badge(t), "writes_directly", msg=t)
 
