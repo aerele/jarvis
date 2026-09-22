@@ -69,6 +69,15 @@ class TestApprovalPhrases(FrappeTestCase):
 		for phrase in ("confirm?", "go ahead?", "ok?"):
 			self.assertFalse(approval_phrases.is_approval(phrase), phrase)
 
+	def test_is_sweep_all_distinguishes_all_from_a_numbered_pick(self):
+		"""is_sweep_all: a plain go-ahead or an explicit 'all' means EVERYTHING (used by
+		the server-truth fallback when no card tokens were displayed); a numbered pick or
+		a qualified reply does not."""
+		for yes in ("go ahead", "confirm", "yes", "ok", "confirm all", "yes to all", "both"):
+			self.assertTrue(approval_phrases.is_sweep_all(yes), yes)
+		for no in ("confirm 2", "confirm 1 and 3", "yes but change it", ""):
+			self.assertFalse(approval_phrases.is_sweep_all(no), no)
+
 	def test_rejects_declines_and_unrelated_text(self):
 		for phrase in ("no", "cancel", "stop", "discard", "wait", "hello", ""):
 			self.assertFalse(approval_phrases.is_approval(phrase), phrase)
@@ -387,26 +396,57 @@ class TestTypedApprovalBindsToDisplayedTokens(FrappeTestCase):
 		core.assert_called_once_with("B", self.conv, batch=False)
 		self.assertEqual(out["tokens"], ["B"])
 
-	def test_without_displayed_tokens_a_typed_approval_falls_through(self):
-		"""A client that sends no token list (an older or third-party client) cannot
-		resolve a number safely, so the message reaches the model and the button
-		still works - never a positional guess against a re-fetched list."""
+	def test_a_numbered_pick_without_displayed_tokens_falls_through(self):
+		"""A client that sends no token list cannot resolve a NUMBER safely, so a
+		numbered pick reaches the model and the button still works - never a positional
+		guess against a re-fetched list."""
 		with (
 			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[self._card("A")]),
 			patch("jarvis.chat.actions_api._confirm_core") as core,
 		):
 			self.assertIsNone(_typed_confirmation(self.user, self.conv, "confirm 1", None))
-			self.assertIsNone(_typed_confirmation(self.user, self.conv, "go ahead", []))
 		core.assert_not_called()
 
-	def test_a_malformed_token_list_falls_through(self):
-		"""A garbled position list must never be best-guessed against an ERP write."""
+	def test_an_unnumbered_sweep_without_displayed_tokens_uses_server_truth(self):
+		"""PR-2 (Task 2.1) recovery: 'confirm all' / 'go ahead' with NO displayed tokens
+		(the cards never rendered - the invisible-card bug) resolves against SERVER TRUTH
+		and confirms the parked REVERSIBLE cards, so 'confirm all' still works. Contrast
+		a numbered pick, which cannot map to unseen cards and still falls through."""
+		with (
+			patch(
+				"jarvis.chat.pending_confirm.list_items_for_owner",
+				return_value=[self._card("A"), self._card("B")],
+			),
+			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
+		):
+			out = _typed_confirmation(self.user, self.conv, "go ahead", [])
+		self.assertIsNotNone(out)
+		self.assertEqual(core.call_count, 2)
+		self.assertEqual(set(out["tokens"]), {"A", "B"})
+
+	def test_sweep_from_server_truth_excludes_brake_cards(self):
+		"""The server-truth sweep confirms reversible cards but NOT brake ones
+		(delete/cancel/amend/create-skill/connector): the user hasn't SEEN them, so they
+		still get their own card (D-A: only VISIBLE brake cards are swept, via the
+		displayed-token path)."""
+		cards = [self._card("A", tool="create_doc"), self._card("D", tool="delete_doc")]
+		with (
+			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=cards),
+			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
+		):
+			out = _typed_confirmation(self.user, self.conv, "confirm all", [])
+		self.assertEqual(out["tokens"], ["A"])  # only the reversible one swept
+		core.assert_called_once_with("A", self.conv, batch=False)
+
+	def test_a_malformed_token_list_with_a_numbered_pick_falls_through(self):
+		"""A garbled position list must never be best-guessed against a NUMBERED ERP
+		write. (An unnumbered sweep ignores the token list and uses server truth.)"""
 		for bad in (["A", ""], ["A", 2], "not-json", [""], list(range(60))):
 			with (
 				patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[self._card("A")]),
 				patch("jarvis.chat.actions_api._confirm_core") as core,
 			):
-				self.assertIsNone(_typed_confirmation(self.user, self.conv, "go ahead", bad), bad)
+				self.assertIsNone(_typed_confirmation(self.user, self.conv, "confirm 1", bad), bad)
 				core.assert_not_called()
 
 

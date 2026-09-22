@@ -1100,6 +1100,7 @@
         "jarvis__get_list",
         "jarvis__run_report",
         "jarvis__get_doc",
+        "jarvis__get_gstr1_summary",
         "jarvis__get_balance_on",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
@@ -1118,9 +1119,15 @@
       ],
       "rule_tokens": [
         "b2c_large_interstate_cutoff",
+        "books_ic_consistency",
         "gst_state_codes",
         "hsn_digit_thresholds",
+        "hsn_rate_drift",
         "notified_rcm_categories"
+      ],
+      "advisory_tokens": [
+        "books_ic_consistency",
+        "hsn_rate_drift"
       ],
       "writes": null,
       "rule_pack": "india-compliance-workbench",

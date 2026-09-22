@@ -57,3 +57,5 @@ jarvis.patches.v2_18_agent_access_grandfather
 jarvis.patches.v2_19_drop_connectors_kill_switch
 jarvis.patches.v2_19_clear_retired_openai_subscription_pins
 jarvis.patches.v2_19_clear_chat_device_for_9_3_reprovision
+jarvis.patches.v2_20_retire_admin_auto_apply
+jarvis.patches.v2_20_action_card_pending_index

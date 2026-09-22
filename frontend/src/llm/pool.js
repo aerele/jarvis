@@ -2,22 +2,29 @@
 // onboarding page (via jarvis_onboarding_llm.bundle.js -> window). No framework imports.
 export function deriveMode(models, preset) {
 	const list = Array.isArray(models) ? models : [];
-	// A chat-subscription model needs the cliproxy sidecar, which only the proxy
-	// path provisions - so even a single subscription is "proxy". (#200 review #1)
-	const hasSubscription = list.some(
-		(m) =>
-			m &&
-			(m.subscription ||
+	// Claude subscriptions are the exception: the agent serves them directly via
+	// its bundled first-party claude-cli backend, never CLIProxyAPI.
+	const hasProxySubscription = list.some((m) => {
+		if (
+			!m ||
+			!(
+				m.subscription ||
 				m.credentialType === "subscription" ||
-				m.credential_type === "subscription")
-	);
+				m.credential_type === "subscription"
+			)
+		)
+			return false;
+		const accounts = (m.subscription && m.subscription.accounts) || m.accounts || [];
+		const upstream = m.upstream || (accounts[0] && accounts[0].upstream) || "openai";
+		return upstream !== "anthropic";
+	});
 	// A preset is picked from a curated ladder that always resolves through the
 	// proxy path, so it stays "proxy" independent of model count. Otherwise mode
 	// mirrors the backend's compute_proxy_active: a proxy sidecar is only
 	// deployed for a subscription model, so a pool of any size that is purely
 	// BYO api keys is "direct" - it renders agent-direct with no sidecar.
 	// (was: any 2+-model pool counted as "proxy" regardless of credential type)
-	return hasSubscription || preset ? "proxy" : "direct";
+	return hasProxySubscription || preset ? "proxy" : "direct";
 }
 // The one place that NAMES a tenant's LLM topology. Settings > General and
 // Settings > Usage's pool-status section each used to name it themselves and
@@ -93,6 +100,16 @@ export function reorder(list, from, to) {
 // Do NOT add models here to make them selectable: add them in the admin desk.
 const FALLBACK_SUB_MODELS = {
 	openai: ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.5"],
+	anthropic: [
+		"claude-opus-5",
+		"claude-sonnet-5",
+		"claude-fable-5-1",
+		"claude-fable-5",
+		"claude-opus-4-8",
+		"claude-opus-4-7",
+		"claude-sonnet-4-6",
+		"claude-opus-4-6",
+	],
 	xai: ["grok-4.3", "grok-build-0.1"],
 	kimi: ["kimi-k2.7-code", "kimi-k2.6"],
 };
@@ -100,6 +117,7 @@ const FALLBACK_SUB_MODELS = {
 // Provider label (as admin stores it) -> the upstream key the pool editor uses.
 const LABEL_TO_UPSTREAM = {
 	OpenAI: "openai",
+	Anthropic: "anthropic",
 	"xAI Grok": "xai",
 	"Kimi (Moonshot)": "kimi",
 };
@@ -127,6 +145,10 @@ export function defaultSubscriptionModel(upstream, catalog) {
 export function validatePool(models, preset) {
 	if (!Array.isArray(models) || models.length === 0)
 		return { ok: false, error: "Add at least one model." };
+	const subscriptionUpstream = (m) => {
+		const accounts = (m && m.subscription && m.subscription.accounts) || [];
+		return (accounts[0] && accounts[0].upstream) || "openai";
+	};
 	for (const m of models) {
 		// Chat-subscription model: needs a provider + a model id + at least one
 		// connected account. No api_key required (jarvis#756: a subscription row
@@ -139,6 +161,11 @@ export function validatePool(models, preset) {
 			if (!(m.model || "").trim())
 				return { ok: false, error: "Every model needs a model id." };
 			const accounts = Array.isArray(m.subscription.accounts) ? m.subscription.accounts : [];
+			if (subscriptionUpstream(m) === "anthropic" && accounts.length !== 1)
+				return {
+					ok: false,
+					error: "A Claude subscription supports exactly one connected account.",
+				};
 			// Connected = a freshly-captured account this session (has a capture_id) OR a
 			// previously-connected account (has an account_ref; its stored blob is merged
 			// back on save). The raw oauth_blob is NEVER a wire field anymore (P0-04), so
@@ -171,6 +198,26 @@ export function validatePool(models, preset) {
 		// no auth of their own - a key is optional, not a value to make up.
 		if (!(m.api_key || "").trim() && !m.has_key && !LOCAL_PROVIDER_IDS.has(pid))
 			return { ok: false, error: `Model ${m.model} needs an API key.` };
+	}
+	const claudeIndexes = models
+		.map((m, i) => (m && m.subscription && subscriptionUpstream(m) === "anthropic" ? i : -1))
+		.filter((i) => i >= 0);
+	if (claudeIndexes.length > 1)
+		return { ok: false, error: "Only one Claude subscription model is supported per pool." };
+	const otherSubscriptions = models.filter(
+		(m) => m && m.subscription && subscriptionUpstream(m) !== "anthropic"
+	);
+	if (claudeIndexes.length && otherSubscriptions.length) {
+		if (otherSubscriptions.some((m) => subscriptionUpstream(m) !== "openai"))
+			return {
+				ok: false,
+				error: "Claude subscription failover can currently be combined only with OpenAI Codex.",
+			};
+		if (claudeIndexes[0] !== 0 && claudeIndexes[0] !== models.length - 1)
+			return {
+				ok: false,
+				error: "With Codex and Claude together, keep Claude either first or last.",
+			};
 	}
 	return { ok: true, error: "" };
 }
@@ -210,8 +257,10 @@ export function poolBackstopWarning(models) {
 		return m.upstream || (accounts[0] && accounts[0].upstream) || "openai";
 	};
 	const subUpstreams = new Set(list.filter(isSubscription).map(upstreamOf));
-	const hasNonSubscriptionModel = list.some((m) => m && !isSubscription(m));
-	if (subUpstreams.size >= 2 && !hasNonSubscriptionModel) {
+	const hasNativeBackstop = list.some(
+		(m) => m && (!isSubscription(m) || upstreamOf(m) === "anthropic")
+	);
+	if (subUpstreams.size >= 2 && !hasNativeBackstop) {
 		return "A pool with 2+ subscription providers and no API-key-backed model has no backstop - if a subscription is rate-limited or drops, chat can stall. Add an API-key model as a fallback.";
 	}
 	return "";
@@ -264,7 +313,13 @@ const _ID_BY_LABEL = Object.fromEntries(PROVIDER_LABELS.map((p) => [p.label, p.i
 // a bare code; this only steers the paste copy. Telling an xAI customer to
 // "copy the full URL from the address bar" sends them hunting for an address
 // bar that never holds a code.
-const _CODE_ONLY_PASTE = new Set(["xai", "xAI Grok"]);
+//
+// "anthropic" is the one exception to the providers.py rule above: Claude
+// isn't a registered OAuth provider there at all (CLAUDE-LOGIN-CONTRACT.md) -
+// the official Claude CLI runs its own sign-in inside the container and
+// prints a bare code the same way xAI's approval screen does, so it steers
+// the SAME copy here even though there is no `code_only_paste` flag to match.
+const _CODE_ONLY_PASTE = new Set(["xai", "xAI Grok", "anthropic", "Anthropic"]);
 export const isCodeOnlyPaste = (upstreamOrLabel) => _CODE_ONLY_PASTE.has(upstreamOrLabel);
 
 // Custom-endpoint providers whose whole identity IS the base_url (no default

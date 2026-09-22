@@ -124,7 +124,6 @@ const renaming = ref(false);
 const renameText = ref("");
 const menuError = ref("");
 const starred = ref(false);
-const autoApply = ref(false);
 
 const scroller = ref(null);
 const composer = ref(null);
@@ -287,7 +286,6 @@ async function load(force = false) {
 		const d = await api.getConversation(convId.value);
 		conversation.value = d?.conversation || null;
 		messages.value = d?.messages || [];
-		autoApply.value = !!d?.conversation?.auto_apply;
 		const row = store.conversations.find((c) => c.name === convId.value);
 		if (row) starred.value = !!row.starred;
 		// A reply still streaming when we (re)opened the chat: restore the busy
@@ -304,17 +302,68 @@ async function load(force = false) {
 	}
 }
 
-// Parked writes survive a reload: re-ask rather than leaving an approval the
-// user can never reach.
-async function loadPending() {
+// PR-1: build a confirm-card item from a durable pending action-row (role="tool",
+// tool_status="pending"), mirroring the SPA. pendingCardOf reads preview.card.
+function _rowExpiresEpoch(s) {
+	if (!s) return null;
+	// The row's expires_at is a site-timezone datetime string; parse to epoch seconds
+	// (best-effort - a live push carries the authoritative epoch and the server
+	// enforces the real TTL, so null just omits the client countdown).
+	const t = Date.parse(String(s).replace(" ", "T"));
+	return Number.isFinite(t) ? Math.round(t / 1000) : null;
+}
+function pendingActionFromRow(m, cid) {
+	return {
+		conversation: cid,
+		token: m.tool_call_id,
+		tool: m.tool_name,
+		summary: "",
+		preview: { card: m.pending_card },
+		run_id: null,
+		expires_at: _rowExpiresEpoch(m.expires_at),
+	};
+}
+
+// Parked writes survive a reload: re-ask rather than leaving an approval the user
+// can never reach. PR-1 reliability: the durable pending action-rows
+// (get_conversation) are the PRIMARY source - a reload shows a confirmable card even
+// if the best-effort action:pending push was missed. list_pending (Redis) is the
+// backstop. Merge rows-first, dedup by token, REPLACE so a confirmed/expired card
+// (no longer a pending row and gone from Redis) drops.
+// PR-2: the always-present re-check lever's handler. loadPending already merges the
+// durable rows (primary) + the Redis backstop, so a manual pull surfaces a parked
+// card the auto-resync missed. The card appearing is the feedback.
+async function recheckPending() {
+	// "recheck" tags this as the human-driven backstop so the server can count how
+	// often the manual lever surfaces a card the primary delivery missed. The
+	// automatic loadPending() callers pass no source (routine reconciliation).
+	await loadPending("recheck");
+}
+
+async function loadPending(source) {
 	if (!convId.value) return;
+	const fromRows = (messages.value || [])
+		.filter(
+			(m) =>
+				m.role === "tool" &&
+				m.tool_status === "pending" &&
+				m.pending_card &&
+				m.tool_call_id
+		)
+		.map((m) => pendingActionFromRow(m, convId.value));
+	let fromBackstop = [];
 	try {
-		const r = await api.listPendingConfirmations(convId.value);
+		const r = await api.listPendingConfirmations(convId.value, source);
 		if (r?.ok && r.data)
-			pending.value = r.data.pending.filter((p) => p.conversation === convId.value);
+			fromBackstop = r.data.pending.filter((p) => p.conversation === convId.value);
 	} catch {
-		/* the cards also arrive live; a failed resync is not worth a banner */
+		/* rows already cover it; a failed backstop is not worth a banner */
 	}
+	const byToken = new Map();
+	for (const c of [...fromRows, ...fromBackstop]) {
+		if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
+	}
+	pending.value = [...byToken.values()];
 }
 
 // ── sending ─────────────────────────────────────────────────────────────────
@@ -494,18 +543,6 @@ async function toggleStar() {
 		store.loadConversations();
 	} catch {
 		starred.value = !next;
-	}
-}
-
-async function toggleAutoApply() {
-	const next = !autoApply.value;
-	menuError.value = "";
-	try {
-		await api.setAutoApply(convId.value, next);
-		autoApply.value = next;
-	} catch (e) {
-		// Only a System Manager may turn this on — the server is the authority.
-		menuError.value = e?.message || "Only a System Manager can enable auto-apply.";
 	}
 }
 
@@ -931,6 +968,25 @@ onUnmounted(() => {
 		/>
 		<!-- Both ways to approve, shown once under the stack. -->
 		<p v-if="orderedPending.length" class="jv-typehint">{{ typedApprovalHint }}</p>
+		<!-- PR-2: always-present, model-proof + delivery-channel-proof manual lever to
+		     pull a parked confirmation the auto-resync missed. Not labelled "Approvals". -->
+		<button
+			type="button"
+			style="
+				display: block;
+				margin: 4px auto 0;
+				background: none;
+				border: none;
+				color: var(--ink5, #8a8a8a);
+				font-size: 12px;
+				text-decoration: underline;
+				padding: 4px;
+			"
+			aria-label="Re-check for a pending confirmation that did not appear"
+			@click="recheckPending"
+		>
+			Don't see a confirmation? Re-check
+		</button>
 	</div>
 
 	<div v-if="errorBanner" class="jv-banner">
@@ -1035,49 +1091,16 @@ onUnmounted(() => {
 					</svg>
 					Rename chat
 				</button>
-
-				<!-- Auto-apply removes the approval gate for this chat: the agent
-				     commits ERP writes without asking. It is the single most
-				     dangerous switch in the product, so it looks like one. -->
-				<div class="jv-danger">
-					<svg
-						viewBox="0 0 24 24"
-						width="18"
-						height="18"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-					>
-						<path
-							d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
-						/>
-						<path d="M12 9v4M12 17h.01" />
-					</svg>
-					<div class="jv-danger-main">
-						<div class="jv-danger-title">Auto-apply changes</div>
-						<div class="jv-danger-sub">
-							{{ agentName }} commits ERP writes without asking. Turns off approval
-							prompts.
-						</div>
-						<div v-if="menuError" class="jv-menu-error">{{ menuError }}</div>
-					</div>
-					<button
-						class="jv-toggle"
-						:class="{ 'is-on': autoApply }"
-						role="switch"
-						:aria-checked="autoApply"
-						@click="toggleAutoApply"
-					>
-						<span />
-					</button>
-				</div>
 			</template>
 		</div>
 	</Sheet>
 
-	<DecisionSheet :action="decision" @close="decision = null" @resolved="onResolved" />
+	<DecisionSheet
+		:action="decision"
+		:streaming="sending"
+		@close="decision = null"
+		@resolved="onResolved"
+	/>
 	<FilePreviewSheet
 		:item="preview?.item"
 		:message-name="preview?.messageName || ''"
@@ -1431,57 +1454,5 @@ onUnmounted(() => {
 }
 .jv-btn:disabled {
 	opacity: 0.55;
-}
-
-.jv-danger {
-	display: flex;
-	align-items: flex-start;
-	gap: 11px;
-	margin: 12px 0 0;
-	padding: 13px;
-	border: 1px solid var(--red);
-	border-radius: 12px;
-	background: var(--red-bg);
-	color: var(--red);
-}
-.jv-danger-main {
-	flex: 1;
-	min-width: 0;
-}
-.jv-danger-title {
-	font-size: 13.5px;
-	font-weight: 600;
-	color: var(--ink9);
-}
-.jv-danger-sub {
-	margin-top: 2px;
-	font-size: 12px;
-	line-height: 1.4;
-	color: var(--red);
-}
-.jv-toggle {
-	flex: none;
-	width: 44px;
-	height: 26px;
-	padding: 3px;
-	border: 0;
-	border-radius: 999px;
-	background: var(--card3);
-	cursor: pointer;
-	transition: background 0.15s ease;
-}
-.jv-toggle span {
-	display: block;
-	width: 20px;
-	height: 20px;
-	border-radius: 999px;
-	background: #fff;
-	transition: transform 0.15s ease;
-}
-.jv-toggle.is-on {
-	background: var(--red);
-}
-.jv-toggle.is-on span {
-	transform: translateX(18px);
 }
 </style>

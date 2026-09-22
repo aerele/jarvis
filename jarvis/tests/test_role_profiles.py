@@ -47,9 +47,25 @@ class TestRoleProfiles(FrappeTestCase):
 	def test_multi_role_merges_sorted(self):
 		u = self._mk_user("rp-multi@example.com", ["Jarvis User", "HR User", "Accounts User"])
 		c = role_profiles.resolve_profile(u)
-		self.assertEqual(c.agent_id, "role-accounts+hr")  # sorted set keys
+		self.assertEqual(c.agent_id, "role-accounts_hr")  # sorted set keys, "_" joined
 		self.assertIn("hrms-payroll", c.skills)
 		self.assertIn("erpnext-accounts", c.skills)
+
+	def test_two_set_join_uses_underscore_separator(self):
+		"""The agent runtime (2026.9.x) rejects "+" in agent ids
+		(^[a-z0-9][a-z0-9_-]{0,63}$); a combo role-profile id must join its
+		sorted set keys with "_" instead, never "+"."""
+		u = self._mk_user("rp-two-set@example.com", ["Jarvis User", "HR User", "Projects User"])
+		c = role_profiles.resolve_profile(u)
+		self.assertEqual(c.agent_id, "role-hr_projects")
+
+	def test_three_set_join_chains_all_underscores(self):
+		u = self._mk_user(
+			"rp-three-set@example.com",
+			["Jarvis User", "HR User", "Accounts User", "Projects User"],
+		)
+		c = role_profiles.resolve_profile(u)
+		self.assertEqual(c.agent_id, "role-accounts_hr_projects")
 
 	def test_unmapped_roles_fall_back_to_main(self):
 		u = self._mk_user("rp-none@example.com", ["Jarvis User", "Translator"])
@@ -282,7 +298,13 @@ class TestSyncRoleProfiles(FrappeTestCase):
 
 			return _get_all
 
-		with patch.object(role_profiles, "resolve_profile", side_effect=_resolve):
+		with (
+			patch.object(role_profiles, "resolve_profile", side_effect=_resolve),
+			# enable_role_profiles gate (Fix 2): force it ON so this test
+			# exercises the order-stability logic, not the gate itself
+			# (covered separately by TestNeededProfilesGate below).
+			patch.object(frappe.db, "get_single_value", return_value=1),
+		):
 			with patch.object(frappe, "get_all", side_effect=_make_get_all(["user-hr", "user-accounts"])):
 				first = role_profiles.needed_profiles()
 			with patch.object(frappe, "get_all", side_effect=_make_get_all(["user-accounts", "user-hr"])):
@@ -290,6 +312,68 @@ class TestSyncRoleProfiles(FrappeTestCase):
 
 		self.assertEqual(first, second)
 		self.assertEqual([p["slug"] for p in first], ["role-accounts", "role-hr"])
+
+	def test_disabling_switch_pushes_empty_list_on_next_sync(self):
+		"""sync_role_profiles's snapshot compare (a plain == against the last
+		pushed list) is what actually gets a disabled tenant's role profiles
+		off fleet: needed_profiles() returning [] instead of the previous
+		non-empty list reads as a real change, so the empty reconcile is
+		pushed rather than skipped as the unchanged-is-a-noop case."""
+		store, fake_get, fake_set = self._fake_settings_store(
+			initial={"role_profiles_pushed": frappe.as_json(self._fixture())}
+		)
+		with (
+			patch.object(role_profiles, "needed_profiles", return_value=[]),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch("jarvis.admin_client.post_push_role_profiles", return_value={"ok": True}) as mock_push,
+		):
+			result = role_profiles.sync_role_profiles()
+
+		self.assertTrue(result["pushed"])
+		self.assertEqual(result["profiles"], [])
+		mock_push.assert_called_once_with(role_profiles=[])
+
+
+class TestNeededProfilesGate(FrappeTestCase):
+	"""``role_profiles.needed_profiles`` push gate (Fix 2, 2026-09-21): the
+	tenant's mirrored ``enable_role_profiles`` switch previously only gated
+	chat use (``resolve_profile`` via ``chat/api.py``), never this push
+	boundary - a disabled tenant could still have role profiles pushed and
+	rendered into its agent config. ``needed_profiles`` must now read the
+	switch itself and short-circuit to ``[]`` when it is off."""
+
+	def test_disabled_switch_returns_empty_list_without_resolving_any_user(self):
+		with (
+			patch.object(frappe.db, "get_single_value", return_value=0),
+			patch.object(frappe, "get_all") as mock_get_all,
+			patch.object(role_profiles, "resolve_profile") as mock_resolve,
+		):
+			result = role_profiles.needed_profiles()
+
+		self.assertEqual(result, [])
+		mock_get_all.assert_not_called()
+		mock_resolve.assert_not_called()
+
+	def test_enabled_switch_still_computes_profiles(self):
+		def _resolve(user):
+			return role_profiles.ProfileChoice(
+				agent_id="role-hr", tier="standard", set_keys=("hr",), skills=("hrms-hr",), n_tools=1
+			)
+
+		def _get_all(doctype, filters=None, pluck=None, **kwargs):
+			if doctype == "Has Role":
+				return ["user-hr"]
+			return ["user-hr"]
+
+		with (
+			patch.object(frappe.db, "get_single_value", return_value=1),
+			patch.object(frappe, "get_all", side_effect=_get_all),
+			patch.object(role_profiles, "resolve_profile", side_effect=_resolve),
+		):
+			result = role_profiles.needed_profiles()
+
+		self.assertEqual([p["slug"] for p in result], ["role-hr"])
 
 
 class TestRoleProfileConfigSync(FrappeTestCase):
@@ -454,8 +538,12 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		self.assertEqual(frappe.parse_json(store["role_profiles_config"])["version"], "v1")
 
 	def test_unchanged_version_does_not_repush(self):
+		# enable_role_profiles seeded to match resp's enabled=True below: a
+		# truly UNCHANGED tick means both version and mirrored flag agree
+		# with what's already stored, or the new flag-change trigger (Fix 2)
+		# would force a re-push here too.
 		store, fake_get, fake_set, fake_set_single = self._fake_store(
-			initial={"role_profiles_config_version": "v1"}
+			initial={"role_profiles_config_version": "v1", "enable_role_profiles": 1}
 		)
 		# admin_client.get_role_profile_config() returns the bare data dict:
 		# _post already unwraps the {"ok", "data"} envelope (jarvis#907
@@ -476,6 +564,40 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		mock_invalidate.assert_not_called()
 		mock_sync.assert_not_called()
 		self.assertEqual(store["enable_role_profiles"], 1)
+
+	def test_flag_change_without_version_change_still_forces_repush(self):
+		"""Fix 2 (2026-09-21): the mirrored enable_role_profiles flag flipping
+		must force a re-push on the very next sync_role_profile_config tick
+		even when the config version is unchanged - version alone only bumps
+		on an unrelated content edit, so relying on it would leave a
+		disabled tenant's already-pushed role profiles live on fleet until
+		some other config edit happened to bump the version too."""
+		store, fake_get, fake_set, fake_set_single = self._fake_store(
+			initial={"role_profiles_config_version": "v1", "enable_role_profiles": 1}
+		)
+		resp = self._config(version="v1", enabled=False)  # same version, switch flipped off
+		calls = []
+
+		def fake_sync(**kw):
+			calls.append(("sync", kw))
+			return {"pushed": True, "profiles": []}
+
+		with (
+			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
+			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
+			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
+			patch.object(
+				role_profiles, "_invalidate_config_cache", side_effect=lambda: calls.append("invalidate")
+			),
+			patch.object(role_profiles, "sync_role_profiles", side_effect=fake_sync),
+		):
+			result = role_profiles.sync_role_profile_config()
+
+		self.assertEqual(result, {"synced": True})
+		self.assertEqual(store["enable_role_profiles"], 0)
+		self.assertEqual(store["role_profiles_config_version"], "v1")  # version itself never changed
+		self.assertEqual(calls, ["invalidate", ("sync", {"force": True})])
 
 	def test_pull_failure_with_existing_cache_keeps_cache_and_mirror(self):
 		store, fake_get, fake_set, fake_set_single = self._fake_store(
