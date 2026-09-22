@@ -23,6 +23,7 @@ import { useRouter } from "vue-router";
 import { renderMarkdown } from "@shared/markdown.js";
 import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
+import { isShowCardRequest } from "../lib/showCardRequest.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
@@ -428,6 +429,21 @@ async function send() {
 	// Hard block (Stream E maintenance hold): the server refuses every send during a hold and the
 	// composer is disabled; guard here too so a queued/programmatic send can't slip through.
 	if ((!text && !ready.length) || sending.value || holdActive.value) return;
+
+	// Layered re-check phase 2: a typed "show it" / "I can't see the card" re-surfaces a
+	// parked card instantly (source="typed"), no model round-trip. Only when it ACTUALLY
+	// surfaces one do we swallow the message; otherwise it falls through to a normal send so
+	// a false positive never eats a message and the persona backstop stays reachable. (No
+	// attachments in play - a re-check message is text-only.)
+	if (convId.value && !ready.length && isShowCardRequest(text)) {
+		const before = pending.value.length;
+		await loadPending("typed");
+		if (pending.value.length > before) {
+			input.value = "";
+			composer.value?.reset();
+			return;
+		}
+	}
 
 	errorBanner.value = "";
 	input.value = "";
