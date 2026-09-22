@@ -2556,29 +2556,6 @@
 				</div>
 			</div>
 
-			<!-- PR-2: always-present, model-proof + delivery-channel-proof manual lever
-			     to pull a parked confirmation the auto-resync missed. Deliberately NOT
-			     labelled "Approvals" (that names the separate Approvals Board). -->
-			<div style="flex: none; text-align: center; padding: 0 40px 4px">
-				<button
-					type="button"
-					class="jv-recheck-btn"
-					style="
-						background: none;
-						border: none;
-						color: var(--muted, #8a8a8a);
-						font-size: 12px;
-						cursor: pointer;
-						text-decoration: underline;
-						padding: 2px 6px;
-					"
-					aria-label="Re-check for a pending confirmation that did not appear"
-					@click="recheckPending"
-				>
-					Don't see a confirmation? Re-check
-				</button>
-			</div>
-
 			<!-- ===== COMPOSER ===== -->
 			<div
 				class="jv-composer-wrap"
@@ -2760,6 +2737,34 @@
 						</button>
 					</template>
 				</Banner>
+
+				<!-- On-demand re-check (layered design, phase 1): a distinct affordance
+				     beside the jump arrow, shown only when scrolled up (never a resting
+				     control), to pull a parked confirmation the silent auto-heal missed.
+				     Labelled for a11y via title + aria-label. -->
+				<transition name="jv-rc">
+					<button
+						v-if="showScrollDown && !showWelcome && !booting"
+						class="jv-recheck-float"
+						@click="recheckPending"
+						title="Re-check for a pending confirmation"
+						aria-label="Re-check for a pending confirmation that did not appear"
+					>
+						<svg
+							width="17"
+							height="17"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
+							<path d="M21 12a9 9 0 1 1-2.64-6.36" />
+							<path d="M21 3v6h-6" />
+						</svg>
+					</button>
+				</transition>
 
 				<!-- floats just above the composer; jumps the thread to the newest message -->
 				<transition name="jv-sd">
@@ -7945,10 +7950,10 @@ async function recheckPending() {
 	if (!currentId.value) return;
 	const before = visiblePendingActions.value.length;
 	seedPendingFromRows(messages.value, currentId.value);
-	// "recheck" tags this as the human-driven backstop so the server can count how
-	// often the manual lever surfaces a card the primary delivery missed. The
-	// automatic resync callers below pass no source (routine reconciliation).
-	await resyncPendingConfirmations(currentId.value, "recheck");
+	// "pill" tags this as the human-driven on-demand control (the ↻ beside the jump
+	// arrow) so the server can attribute how often the visible lever surfaces a card
+	// the silent auto-heal missed. The automatic resync callers pass no source.
+	await resyncPendingConfirmations(currentId.value, "pill");
 	const after = visiblePendingActions.value.length;
 	if (after > before) notify("Found a pending confirmation.", { type: "success" });
 	else if (after === 0) notify("Nothing is waiting for your confirmation.", {});
@@ -11450,6 +11455,12 @@ onMounted(async () => {
 	socket?.on("jarvis:event", onEvent);
 	socket?.on("connect", onResync);
 	document.addEventListener("visibilitychange", onVisibility);
+	// Auto-heal (layered design, phase 1): window `focus` closes the gap visibility
+	// misses (OS focus returning to an already-visible tab, e.g. multi-monitor). Routes
+	// through the same 2s-debounced onResync wake, so a focus+visibility co-fire = one
+	// resync. Card-agnostic (never gated on a known pending card) so it recovers a card
+	// the client doesn't yet know about.
+	window.addEventListener("focus", onResync);
 	// Live tool list for the "Tools available" count + /tool autocomplete
 	// (best-effort; falls back to the seeded core set on failure).
 	api.listTools()
@@ -11634,6 +11645,7 @@ onBeforeUnmount(() => {
 	socket?.off("jarvis:event", onEvent);
 	socket?.off("connect", onResync);
 	document.removeEventListener("visibilitychange", onVisibility);
+	window.removeEventListener("focus", onResync);
 	document.removeEventListener("pointerdown", onDocClick);
 	window.removeEventListener("keydown", onGlobalKey);
 	clearInterval(_thinkTimer);
@@ -11905,6 +11917,51 @@ onUnmounted(() => {
 .jv-sd-leave-to {
 	opacity: 0;
 	transform: translateX(-50%) translateY(10px);
+}
+/* on-demand re-check — sits just left of the jump arrow, same float. Its transition
+   is opacity-only so it never fights the offset transform below. */
+.jv-recheck-float {
+	position: absolute;
+	left: 50%;
+	bottom: 100%;
+	margin-bottom: 12px;
+	transform: translateX(calc(-50% - 46px));
+	z-index: 20;
+	width: 38px;
+	height: 38px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border-radius: 50%;
+	background: var(--surface);
+	color: var(--text-2);
+	border: 1px solid var(--border-2);
+	box-shadow: 0 6px 20px rgba(20, 20, 30, 0.18);
+	cursor: pointer;
+	transition: color 0.12s, border-color 0.12s, background 0.12s, box-shadow 0.12s;
+}
+.jv-recheck-float:hover {
+	color: var(--text);
+	border-color: var(--text-3);
+	box-shadow: 0 9px 24px rgba(20, 20, 30, 0.22);
+}
+.jv-recheck-float:active {
+	transform: translateX(calc(-50% - 46px)) scale(0.92);
+}
+.jv-rc-enter-active,
+.jv-rc-leave-active {
+	transition: opacity 0.18s ease;
+}
+.jv-rc-enter-from,
+.jv-rc-leave-to {
+	opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+	.jv-rc-enter-active,
+	.jv-rc-leave-active {
+		transition: none;
+	}
 }
 /* response metrics (tools · time) */
 .jv-skillused {
