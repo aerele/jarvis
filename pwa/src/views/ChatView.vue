@@ -426,24 +426,28 @@ function onVisible() {
 async function send() {
 	const text = input.value.trim();
 	const ready = attachments.value.filter((a) => a.file_url);
-	// Hard block (Stream E maintenance hold): the server refuses every send during a hold and the
-	// composer is disabled; guard here too so a queued/programmatic send can't slip through.
-	if ((!text && !ready.length) || sending.value || holdActive.value) return;
+	// Hard block (Stream E maintenance hold): the server refuses every send during a hold and
+	// the composer is disabled; guard here too (also blocks the re-check below, parity w/ SPA).
+	if (holdActive.value) return;
 
 	// Layered re-check phase 2: a typed "show it" / "I can't see the card" re-surfaces a
-	// parked card instantly (source="typed"), no model round-trip. Only when it ACTUALLY
-	// surfaces one do we swallow the message; otherwise it falls through to a normal send so
-	// a false positive never eats a message and the persona backstop stays reachable. (No
-	// attachments in play - a re-check message is text-only.)
+	// parked card instantly (source="typed"), no model round-trip. Runs BEFORE the sending
+	// guard so it works mid-turn too - the moment a card push is most likely dropped (parity
+	// with the SPA). Only when a card ACTUALLY surfaces do we swallow; otherwise it falls
+	// through to a normal send, so a false positive never eats a message and the persona
+	// backstop stays reachable. (Text-only - not while an attachment is staged.)
 	if (convId.value && !ready.length && isShowCardRequest(text)) {
+		const forConv = convId.value;
 		const before = pending.value.length;
 		await loadPending("typed");
-		if (pending.value.length > before) {
+		if (convId.value === forConv && pending.value.length > before) {
 			input.value = "";
 			composer.value?.reset();
 			return;
 		}
 	}
+
+	if ((!text && !ready.length) || sending.value) return;
 
 	errorBanner.value = "";
 	input.value = "";

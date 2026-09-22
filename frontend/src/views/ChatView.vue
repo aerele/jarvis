@@ -9359,11 +9359,14 @@ async function send(textArg, resendAck) {
 	// surfaces one do we swallow the message; otherwise it falls through to a normal send,
 	// so a false positive never eats a message and the persona "show it" backstop stays
 	// reachable. Main-composer sends only (not resend/prefill).
-	if (fromMain && currentId.value && isShowCardRequest(text)) {
+	if (fromMain && currentId.value && !pendingFiles.value.length && isShowCardRequest(text)) {
+		const _typedConv = currentId.value;
 		const before = visiblePendingActions.value.length;
-		seedPendingFromRows(messages.value, currentId.value);
-		await resyncPendingConfirmations(currentId.value, "typed");
-		if (visiblePendingActions.value.length > before) {
+		seedPendingFromRows(messages.value, _typedConv);
+		await resyncPendingConfirmations(_typedConv, "typed");
+		// Swallow ONLY if a card actually surfaced AND we're still on the same conversation
+		// (a switch during the await must not clear the new composer).
+		if (currentId.value === _typedConv && visiblePendingActions.value.length > before) {
 			input.value = "";
 			notify("Found a pending confirmation.", { type: "success" });
 			return;
