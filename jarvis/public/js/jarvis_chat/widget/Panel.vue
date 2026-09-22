@@ -562,6 +562,29 @@
 				<div class="jvp-typehint">{{ typedApprovalHint }}</div>
 			</div>
 
+			<!-- PR-2: always-present, model-proof + delivery-channel-proof manual lever
+			     to pull a parked confirmation the auto-resync missed (load() re-fetches
+			     with the row-primary merge). Not labelled "Approvals". -->
+			<button
+				type="button"
+				class="jvp-recheck"
+				style="
+					display: block;
+					margin: 2px auto 4px;
+					background: none;
+					border: none;
+					color: var(--jvp-muted, #8a8a8a);
+					font-size: 11px;
+					text-decoration: underline;
+					cursor: pointer;
+					padding: 3px;
+				"
+				aria-label="Re-check for a pending confirmation that did not appear"
+				@click="load({ recheck: true })"
+			>
+				Don't see a confirmation? Re-check
+			</button>
+
 			<!-- Jump to latest. stickToBottom already refuses to drag a reader who
 			     has scrolled up back down mid-reply, so without this arrow a long
 			     streamed answer left them stranded with no way back to the newest
@@ -1278,7 +1301,11 @@ function autoGrow() {
 // The panel's contract is to continue where the user left off, so the first
 // open resolves the newest conversation and restores it. A user with no history
 // gets the empty state, and an id is minted on first send.
-async function load() {
+async function load(opts) {
+	// `opts.recheck` marks a load driven by the manual "re-check for approvals"
+	// lever (vs. an open / turn-settle refresh), so the backstop query below can
+	// tag itself and the server can count human-driven rescues (AC-detect).
+	const fromRecheck = !!(opts && opts.recheck === true);
 	// Only blank the panel when there is nothing on screen yet; a refresh over
 	// an existing thread should be invisible.
 	loading.value = messages.value.length === 0;
@@ -1313,24 +1340,52 @@ async function load() {
 		// panel was closed (or a dropped realtime frame) never shows here, even
 		// though the full chat has it. Best-effort: chat must work without it.
 		try {
-			const pc = await listPendingConfirmations(convId.value);
-			const rows = (pc && pc.data && pc.data.pending) || [];
-			stream.value = {
-				...stream.value,
-				pending: rows.map((r) => ({
-					token: r.token,
-					tool: r.tool || "",
-					summary: r.summary || r.preview || "",
-					// Carry expires_at so orderedPending sorts by (expires_at,
-					// token) the same way the server does; without it a typed
-					// "confirm N" can select a different card than shown.
-					expires_at: r.expires_at ?? null,
-					// Same text-only signal the live push carries (chat_stream.mjs) -
-					// a resync must not silently lose it and fall back to offering a
-					// plain Confirm on a runnable card (P1, skill approve-and-run).
-					approve_run: pendingApproveRun(r.preview),
-				})),
+			// PR-1 reliability: the durable pending action-rows (get_conversation, above)
+			// are the PRIMARY source - a card raised while the panel was closed (or a
+			// dropped realtime frame) still shows on open, riding the reliable message
+			// pipeline. list_pending is the backstop. Merge rows-first, dedup by token.
+			const toEpoch = (s) => {
+				const t = Date.parse(String(s || "").replace(" ", "T"));
+				return Number.isFinite(t) ? Math.round(t / 1000) : null;
 			};
+			const rowItems = (messages.value || [])
+				.filter(
+					(m) =>
+						m.role === "tool" &&
+						m.tool_status === "pending" &&
+						m.pending_card &&
+						m.tool_call_id
+				)
+				.map((m) => ({
+					token: m.tool_call_id,
+					tool: m.tool_name || "",
+					summary: m.tool_name || "",
+					expires_at: toEpoch(m.expires_at),
+					approve_run: !!(m.pending_card && m.pending_card.approve_run),
+				}));
+			const pc = await listPendingConfirmations(
+				convId.value,
+				fromRecheck ? "recheck" : undefined
+			);
+			const rows = (pc && pc.data && pc.data.pending) || [];
+			const backstop = rows.map((r) => ({
+				token: r.token,
+				tool: r.tool || "",
+				summary: r.summary || r.preview || "",
+				// Carry expires_at so orderedPending sorts by (expires_at, token) the
+				// same way the server does; without it a typed "confirm N" can select a
+				// different card than shown.
+				expires_at: r.expires_at ?? null,
+				// Same text-only signal the live push carries (chat_stream.mjs) - a resync
+				// must not silently lose it and fall back to offering a plain Confirm on a
+				// runnable card (P1, skill approve-and-run).
+				approve_run: pendingApproveRun(r.preview),
+			}));
+			const byToken = new Map();
+			for (const c of [...rowItems, ...backstop]) {
+				if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
+			}
+			stream.value = { ...stream.value, pending: [...byToken.values()] };
 		} catch (e) {
 			/* leave whatever the live stream captured */
 		}

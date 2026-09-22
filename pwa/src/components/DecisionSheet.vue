@@ -15,7 +15,14 @@ import { agentName } from "@/branding";
 // puts a biometric prompt in front of approve; the browser has no equivalent it
 // can trust, and this surface is already behind the Frappe session, so the
 // confirmation itself is the gate.
-const props = defineProps({ action: { type: Object, default: null } });
+const props = defineProps({
+	action: { type: Object, default: null },
+	// PR-1: true while the parent reply is still streaming. A card is parked
+	// mid-turn, so Approve/Deny stay disabled until the parent turn settles (the
+	// SPA gates the same way via convStreaming) - a confirm must not run a
+	// continuation turn concurrently with the reply that parked it.
+	streaming: { type: Boolean, default: false },
+});
 const emit = defineEmits(["close", "resolved"]);
 
 const state = ref("review"); // review | busy | approved | denied
@@ -67,7 +74,7 @@ const previewHtml = computed(() => {
 });
 
 function deny() {
-	if (state.value === "busy") return;
+	if (state.value === "busy" || props.streaming) return;
 	state.value = "denied";
 	emit("resolved", props.action.token, "denied");
 }
@@ -81,7 +88,7 @@ function deny() {
 // function covers both without the two paths drifting in what a failure looks
 // like to the user.
 async function approve(mode = "step") {
-	if (state.value === "busy") return;
+	if (state.value === "busy" || props.streaming) return;
 	error.value = "";
 	state.value = "busy";
 	approveMode.value = mode;
@@ -174,10 +181,17 @@ async function approve(mode = "step") {
 						it.
 					</div>
 					<div v-if="error" class="jv-derror">{{ error }}</div>
+					<div v-if="props.streaming" class="jv-dnote">
+						Waiting for the reply to finish before this can run…
+					</div>
 				</div>
 
 				<div class="jv-dactions" :class="{ 'jv-dactions--run': card?.approve_run }">
-					<button class="jv-btn is-ghost" :disabled="state === 'busy'" @click="deny">
+					<button
+						class="jv-btn is-ghost"
+						:disabled="state === 'busy' || props.streaming"
+						@click="deny"
+					>
 						Deny
 					</button>
 					<!-- Step-by-step stays the plain, low-friction confirm - same call as
@@ -185,7 +199,7 @@ async function approve(mode = "step") {
 					     offer (D-TRIGGER). Default focus, never Approve & run. -->
 					<button
 						class="jv-btn is-primary jv-dapprove"
-						:disabled="state === 'busy' || expired"
+						:disabled="state === 'busy' || expired || props.streaming"
 						@click="approve('step')"
 					>
 						<span
@@ -201,7 +215,7 @@ async function approve(mode = "step") {
 				<div v-if="card?.approve_run" class="jv-drun-row">
 					<button
 						class="jv-btn is-run jv-drunbtn"
-						:disabled="state === 'busy' || expired"
+						:disabled="state === 'busy' || expired || props.streaming"
 						@click="approve('run')"
 					>
 						<span

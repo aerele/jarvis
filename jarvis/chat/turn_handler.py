@@ -843,10 +843,6 @@ def assemble_prompt(
 	# wall-clock too. Site-local (now_datetime), matching the tz the locale
 	# clause reports below.
 	today = now.strftime("%Y-%m-%d %H:%M (%A)")
-	# Fold the auto-apply preference into the system context line so the agent
-	# knows whether to confirm mutating ops. Default (off) = confirm; the persona
-	# confirms by default, so we only signal the non-default "auto" mode.
-	auto_apply = "; auto-apply changes: ON" if conv.auto_apply else ""
 	# Armed macro run: this run's conversation carries skip_confirmation=1 (an admin
 	# armed the macro). Signal the persona to call EVERY write tool directly - incl.
 	# create/update, which it would otherwise route through a jarvis-action card,
@@ -982,7 +978,7 @@ def assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
-		f"; conv: {conversation_id}{auto_apply}{armed_run}{autorun_run}{skill_clause}{learned_clause}"
+		f"; conv: {conversation_id}{armed_run}{autorun_run}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"
