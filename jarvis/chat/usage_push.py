@@ -56,11 +56,20 @@ _UTC = ZoneInfo("UTC")
 _TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
 _JARVIS_TOOL_NAME_RE = re.compile(r"jarvis__[A-Za-z0-9_]+")
 
-# Mirrors the admin profile validator: "" | "full" | role-[a-z0-9+-]{1,63}.
-# profile_agent_id already stores "" or a well-formed "role-*" id in
-# practice; this is cheap insurance against ever emitting something the
-# validator would 400 on.
-_PROFILE_RE = re.compile(r"role-[a-z0-9+-]{1,63}")
+# Mirrors the admin profile validator: "" | "full" | role-[a-z0-9_+-]{1,63}
+# (admin's validator is being widened to accept "_" in the same train as
+# this fix). profile_agent_id already stores "" or a well-formed "role-*"
+# id in practice; this is cheap insurance against ever emitting something
+# the validator would 400 on.
+#
+# This is a READ/validation regex over already-stored profile_agent_id
+# values, not a generator - it deliberately keeps accepting "+" alongside
+# the new "_" separator (role_profiles.resolve_profile now joins set keys
+# with "_", not "+", since the agent runtime (2026.9.x) agent ids reject "+"). Historical
+# rows written before that change still carry a "+"-joined id (e.g.
+# "role-hr+projects") and must keep validating here, or this month's rollup
+# push would silently drop every user still attributed to one of those rows.
+_PROFILE_RE = re.compile(r"role-[a-z0-9_+-]{1,63}")
 
 
 def _admin_configured() -> bool:
