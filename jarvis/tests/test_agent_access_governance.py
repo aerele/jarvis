@@ -19,6 +19,7 @@ Grouped by the thing that would break if the change were wrong:
 
 import json
 import unittest
+from unittest.mock import patch
 
 import frappe
 import frappe.permissions
@@ -1243,9 +1244,9 @@ class TestCatalogueVisibilityPull(AccessGovernanceCase):
 		self.assertTrue(frappe.db.exists(INSTALLATION, name))
 
 	def test_grandfathering_existing_install_survives_governed_hide(self):
-		# Create an enabled install while available, THEN the operator governs it hidden via
-		# the PULL path: the existing install must survive (is_new-only gate) and stay on the
-		# owner's roster (leg 2), and the owner still sees it unmasked (owner carve-out).
+		# Create an enabled install while available, THEN the operator governs it hidden via the
+		# PULL path: the existing install must survive (is_new-only gate), keep shipping on the
+		# owner's roster, and the owner still sees it unmasked (owner carve-out).
 		allow_listing_for(SLUG, user=self.named)
 		name = _mk_install(self.named)
 		frappe.db.set_value(INSTALLATION, name, "enabled", 1, update_modified=False)
@@ -1255,8 +1256,57 @@ class TestCatalogueVisibilityPull(AccessGovernanceCase):
 		self.assertTrue(frappe.db.exists(INSTALLATION, name), "grandfathered install must not be stripped")
 		self.assertEqual(frappe.db.get_value(INSTALLATION, name, "enabled"), 1)
 		self.assertEqual(self._vis(), "hidden")
+		self.assertIn(
+			f"agent-{SLUG}",
+			[e["slug"] for e in agent_catalog.build_agent_push_payload(owner=self.named)],
+			"a governed hide must not strip a grandfathered install's delivery from the roster",
+		)
 		frappe.set_user(self.named)
 		self.addCleanup(frappe.set_user, "Administrator")
 		row = next((r for r in agents_api.list_agents() if r["name"] == SLUG), None)
 		self.assertIsNotNone(row, "the owner still sees their installed agent (owner carve-out)")
 		self.assertFalse(row.get("masked"), "the owner's own installed agent is not masked")
+
+	# -- review-loop fix-wave regressions ---------------------------------- #
+	def test_pull_applies_as_a_non_system_manager_jarvis_admin(self):
+		# The manual "Sync now" / boot paths run as the CLICKING user — a tenant Jarvis Admin
+		# that is NOT a System Manager. The apply writes via db.set_value, so it must never hit
+		# the Phase-1 SM guard and throw (which never-raises would then swallow, silently
+		# applying nothing). Pin the session-independence against regression.
+		self._govern({SLUG: "teaser"})
+		frappe.set_user(self.admin)  # Jarvis Admin, NOT System Manager
+		self.addCleanup(frappe.set_user, "Administrator")
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={SLUG: "hidden"}))
+		frappe.db.commit()
+		frappe.set_user("Administrator")
+		self.assertEqual(self._vis(), "hidden", "the pull must apply regardless of the caller's role")
+
+	def test_governed_slug_hard_gated_even_when_listing_field_lags_available(self):
+		# Version-skew window: the slug is governed (in the keyset) but its local listing still
+		# reads 'available' (freshly bundle-synced, before the next pull re-asserts the value).
+		# The keyset is authoritative — the agent must be un-installable by anyone, incl. an
+		# allowed plain user, in that window.
+		self._govern({SLUG: "hidden"})
+		self.assertEqual(self._vis(), "available")  # field intentionally lagging
+		allow_listing_for(SLUG, user=self.plain)
+		self._as(self.plain)
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.install_agent(SLUG)
+
+	def test_governed_map_read_error_fails_open_but_logs(self):
+		# A corrupt/failed keyset read fails OPEN (nothing governed) but must never be silent.
+		with (
+			patch("jarvis.catalogue_visibility.frappe.get_cached_value", side_effect=RuntimeError("boom")),
+			patch("jarvis.catalogue_visibility.frappe.log_error") as mock_log,
+		):
+			self.assertEqual(catalogue_visibility.governed_map(), {})
+			self.assertFalse(catalogue_visibility.is_operator_governed(SLUG))
+			mock_log.assert_called()
+
+	def test_marker_present_key_absent_does_not_log(self):
+		# A transient/partial payload (marker, no key) is a benign KEEP, not an error — it must
+		# not spew a daily "malformed policy" Error Log. (Binds the key-absent early return.)
+		with patch("jarvis.catalogue_visibility.frappe.log_error") as mock_log:
+			catalogue_visibility.persist_from_connection(self._conn())
+			frappe.db.commit()
+			mock_log.assert_not_called()
