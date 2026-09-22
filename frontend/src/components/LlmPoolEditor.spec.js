@@ -523,7 +523,7 @@ describe("api-key model defaults survive a failed catalog fetch", () => {
 		Mistral: "mistral-large-latest",
 		Groq: "openai/gpt-oss-120b",
 		"Together AI": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-		DeepSeek: "deepseek-v4-flash",
+		DeepSeek: "deepseek-flash",
 		"Moonshot (Kimi)": "kimi-k2.6",
 		"xAI Grok": "grok-4.5",
 		"GLM / Z.ai": "glm-4.7",
@@ -563,7 +563,7 @@ describe("api-key model defaults survive a failed catalog fetch", () => {
 		const row = w.vm.rows[0] || (w.vm.rows.push(w.vm.newRow?.() ?? {}), w.vm.rows[0]);
 
 		w.vm.onProviderChange(row, "DeepSeek");
-		expect(row.model).toBe("deepseek-v4-flash");
+		expect(row.model).toBe("deepseek-flash");
 		expect(row.baseUrl).toBe("https://api.deepseek.com");
 
 		w.vm.onProviderChange(row, "Groq");
@@ -585,6 +585,85 @@ describe("api-key model defaults survive a failed catalog fetch", () => {
 		expect(w.vm.providerDefaultModel("DeepSeek")).toBe("deepseek-v9-future");
 		// A provider the catalog did not mention still uses the literal.
 		expect(w.vm.providerDefaultModel("Groq")).toBe("openai/gpt-oss-120b");
+	});
+});
+
+/**
+ * modelSuggestionsForProvider feeds the Model combobox's options. A catalog
+ * row whose label differs from its id (e.g. deepseek-flash / "Latest Flash
+ * (V4.1)") must still hand back the BARE id as the value that lands in the
+ * input and the row - only the dropdown row's label carries the catalog
+ * label, so the id stays what gets typed, saved and sent.
+ */
+describe("model suggestions carry the catalog label without changing the value", () => {
+	it("returns an option whose value is the bare id and whose label contains the catalog label", async () => {
+		api.getModelCatalogUi.mockResolvedValue({
+			api_key_models: {
+				DeepSeek: [
+					{ model_id: "deepseek-flash", label: "Latest Flash (V4.1)", is_default: true },
+				],
+			},
+			subscription_models: {},
+			default_models: {},
+		});
+		const w = await mountEditor();
+
+		const opts = w.vm.modelSuggestionsForProvider("DeepSeek");
+		const flash = opts.find((o) => o.value === "deepseek-flash");
+		expect(flash).toBeTruthy();
+		expect(flash.label).toContain("Latest Flash (V4.1)");
+	});
+
+	it("leaves an entry bare when its catalog label equals the id", async () => {
+		api.getModelCatalogUi.mockResolvedValue({
+			api_key_models: {
+				DeepSeek: [
+					{ model_id: "deepseek-v4-pro", label: "deepseek-v4-pro", is_default: false },
+				],
+			},
+			subscription_models: {},
+			default_models: {},
+		});
+		const w = await mountEditor();
+
+		const opts = w.vm.modelSuggestionsForProvider("DeepSeek");
+		const pro = opts.find((o) => o.value === "deepseek-v4-pro");
+		expect(pro.label).toBe("deepseek-v4-pro");
+	});
+
+	it("upgrades a preset-derived bare entry when the catalog later labels the same id", async () => {
+		// Presets-derived suggestions have no label. If a labelled catalog row
+		// shares an id with one, the label must win rather than be deduped away.
+		api.getPresetCatalog.mockResolvedValue([
+			{
+				key: "deepseek-only",
+				kind: "single_vendor",
+				models: [
+					{ provider: "deepseek", model: "deepseek-flash" },
+					{ provider: "deepseek", model: "deepseek-v4-pro" },
+				],
+			},
+		]);
+		api.getModelCatalogUi.mockResolvedValue({
+			api_key_models: {
+				DeepSeek: [
+					{ model_id: "deepseek-flash", label: "Latest Flash (V4.1)", is_default: true },
+				],
+			},
+			subscription_models: {},
+			default_models: {},
+		});
+		const w = await mountEditor();
+
+		const opts = w.vm.modelSuggestionsForProvider("DeepSeek");
+		// The preset loop reached this provider (proven by its OTHER id staying
+		// bare), so the single match below is the labelled catalog row winning
+		// the dedup, not the preset never having pushed deepseek-flash at all.
+		const untouched = opts.find((o) => o.value === "deepseek-v4-pro");
+		expect(untouched).toEqual({ value: "deepseek-v4-pro", label: "deepseek-v4-pro" });
+		const matches = opts.filter((o) => o.value === "deepseek-flash");
+		expect(matches).toHaveLength(1);
+		expect(matches[0].label).toContain("Latest Flash (V4.1)");
 	});
 });
 
