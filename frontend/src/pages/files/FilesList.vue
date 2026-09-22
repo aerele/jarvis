@@ -49,6 +49,17 @@
 			     highlight (the root handlers drive `dragging`), drop → uploadBatch -->
 			<template #banner>
 				<div class="mb-3">
+					<!-- optional drop-time skill pin: applies to the files dropped next -->
+					<div class="mb-2 flex items-center gap-2">
+						<span class="shrink-0 text-p-sm text-ink-gray-6">Process with</span>
+						<Autocomplete
+							class="w-72"
+							:options="skillOptions"
+							:modelValue="pinnedSkill"
+							placeholder="Auto — pick the best skill"
+							@update:modelValue="(o) => (pinnedSkill = o ? o.value : '')"
+						/>
+					</div>
 					<div
 						role="button"
 						tabindex="0"
@@ -112,10 +123,25 @@
 			</template>
 
 			<template #cell-title="{ row }">
-				<div class="flex items-center gap-2 overflow-hidden">
-					<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-5" />
-					<div class="truncate text-base font-medium text-ink-gray-9">
-						{{ stripTitle(row.title) }}
+				<div class="min-w-0">
+					<div class="flex items-center gap-2 overflow-hidden">
+						<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-5" />
+						<div class="truncate text-base font-medium text-ink-gray-9">
+							{{ stripTitle(row.title) }}
+						</div>
+					</div>
+					<!-- the skill the owner pinned at drop time (owner-only from the API) -->
+					<div v-if="row.pinned_skill" class="mt-0.5 pl-6">
+						<Tooltip
+							:text="`Tagged skill: ${pinnedLabel(row.pinned_skill, customSkills)}`"
+						>
+							<Badge
+								variant="subtle"
+								theme="gray"
+								:label="`tagged: ${pinnedLabel(row.pinned_skill, customSkills)}`"
+								class="max-w-[16rem] truncate"
+							/>
+						</Tooltip>
 					</div>
 				</div>
 			</template>
@@ -188,7 +214,16 @@
 // delete with skip reasons, Clear Processed.
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Button, Badge, FeatherIcon, Tooltip, Dropdown, toast, confirmDialog } from "frappe-ui";
+import {
+	Button,
+	Badge,
+	FeatherIcon,
+	Tooltip,
+	Dropdown,
+	Autocomplete,
+	toast,
+	confirmDialog,
+} from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import FilePreview from "@/components/FilePreview.vue";
 import { useListPage } from "@/composables/useListPage";
@@ -197,6 +232,7 @@ import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { skillOptions as buildSkillOptions, pinnedLabel } from "@/lib/fileboxSkills";
 
 const route = useRoute();
 const router = useRouter();
@@ -224,6 +260,21 @@ const columns = [
 	{ label: "Added", key: "creation", width: "8rem", align: "right" },
 	{ label: "", key: "_preview", width: "3rem", align: "right" },
 ];
+
+// ── drop-time skill pin ──────────────────────────────────────────────────────
+// Optionally pin ONE processing skill for the files dropped now (else the agent
+// auto-discovers one). Option/label logic lives in @/lib/fileboxSkills (tested).
+const pinnedSkill = ref(""); // "" = Auto (no pin)
+const customSkills = ref([]);
+const skillOptions = computed(() => buildSkillOptions(customSkills.value));
+async function loadSkills() {
+	// best-effort: if listing fails, Auto + OCR (hardcoded) stay selectable
+	try {
+		customSkills.value = ((await api.listCustomSkills()) || []).filter((s) => s.enabled);
+	} catch (e) {
+		customSkills.value = [];
+	}
+}
 // search rides the quick-filter strip (§15.1): it lives in the filters object
 // so the input stays controlled, and fetchFn moves it onto the envelope's
 // `search` param (backend matches the title).
@@ -332,7 +383,11 @@ async function uploadBatch(fileList) {
 			files.map(async (file) => {
 				try {
 					const up = await api.uploadFile(file);
-					const res = await api.fileboxDrop(up.file_url, up.file_name);
+					const res = await api.fileboxDrop(
+						up.file_url,
+						up.file_name,
+						pinnedSkill.value || undefined
+					);
 					if (!res || !res.ok) throw new Error((res && res.reason) || "drop failed");
 					okCount++;
 				} catch (e) {
@@ -348,7 +403,11 @@ async function uploadBatch(fileList) {
 	try {
 		await toast.promise(run, {
 			loading: `Uploading ${files.length} file${files.length === 1 ? "" : "s"}…`,
-			success: (n) => `Added ${n} file${n === 1 ? "" : "s"} to File Box`,
+			success: (n) =>
+				`Added ${n} file${n === 1 ? "" : "s"} to File Box` +
+				(pinnedSkill.value
+					? ` · tagged: ${pinnedLabel(pinnedSkill.value, customSkills.value)}`
+					: ""),
 			error: () => "Upload failed",
 		});
 	} catch (e) {
@@ -437,6 +496,7 @@ function onVisibility() {
 	if (document.visibilityState === "visible") refreshKeep();
 }
 onMounted(() => {
+	loadSkills();
 	// cheap tick: only refetches when a processing row is on screen
 	pollTimer = setInterval(() => {
 		if (rows.value.some((r) => r.status === "processing")) refreshKeep();

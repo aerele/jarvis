@@ -751,8 +751,8 @@ export async function uploadBrandAsset(file) {
 }
 
 // ── File Box: drop an inbound document, get a directed processing chat ──
-export const fileboxDrop = (file_url, file_name) =>
-	call("jarvis.chat.filebox.drop_file", { file_url, file_name });
+export const fileboxDrop = (file_url, file_name, skill) =>
+	call("jarvis.chat.filebox.drop_file", { file_url, file_name, skill });
 export const fileboxList = () => call("jarvis.chat.filebox.list_inbound", {});
 
 // ── Approvals: pending-decision queue + decide-and-resume ──
