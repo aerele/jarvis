@@ -1087,6 +1087,14 @@ def install_agent(agent_slug: str) -> dict:
 	# Operator overlay: a teaser (coming-soon preview) or hidden (withdrawn) agent is
 	# not installable — even when it is Published and role-granted. Admins may still
 	# install for testing; the gate is server-side (the SPA never offers the button).
+	# Operator-GOVERNED slugs (fleet policy) are hard-gated for EVERYONE incl. admins, and
+	# regardless of the local listing value (which can lag at 'available' briefly after a bundle
+	# sync re-creates the listing). Tenant-local teaser/hidden still allows an admin dogfood
+	# install (the check below). The controller re-enforces on every surface.
+	from jarvis import catalogue_visibility
+
+	if catalogue_visibility.is_operator_governed(listing.name):
+		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
 	if (listing.operator_visibility or "available") != "available" and not has_jarvis_admin_access(me):
 		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
 	if listing.status != "Published":
