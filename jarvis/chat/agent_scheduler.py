@@ -203,10 +203,14 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 		or frappe._dict()
 	)
 	# Operator-visibility gate: a teaser/hidden (operator-withdrawn) agent's installs are
-	# DISABLED and must not run. Advance the slot so the cadence does not busy-retry; reversible
-	# (agent -> available resumes the schedule, no stored state). Mirrors run_agent_now's gate.
+	# DISABLED and must not run. Advance ONLY the next slot (stamp_last_run=False -> no phantom
+	# 'last run') so the cadence does not busy-retry; reversible (agent -> available resumes the
+	# schedule, no stored state). Deliberately NOT recorded as a failed run (unlike the
+	# installable / status skips below): withdrawal is a normal reversible operator decision the
+	# owner cannot fix, surfaced as the "Unavailable" card + detail explanation, so a daily
+	# failed-run row would be misleading spam. Mirrors run_agent_now's withdrawn gate.
 	if (listing.get("operator_visibility") or "available") in ("teaser", "hidden"):
-		_advance(row, now)
+		_advance(row, now, stamp_last_run=False)
 		return
 	nature = listing.get("nature")
 	if nature not in ("Auditor", "Scribe"):
@@ -1676,25 +1680,25 @@ def _unclaim_slot(row, prev: dict) -> None:
 	frappe.db.commit()
 
 
-def _advance(row, now) -> None:
-	"""Advance the schedule with a raw set_value (no re-validate). ``last_run_at``
-	is stamped whether the slot produced a real, failed, or skipped run — the
-	slot was consumed either way."""
-	frappe.db.set_value(
-		INSTALLATION,
-		row.name,
-		{
-			"last_run_at": now,
-			"next_run_at": compute_next_run(
-				row.schedule_frequency,
-				row.schedule_time,
-				from_dt=now,
-				weekday=row.schedule_weekday,
-				day_of_month=row.schedule_day_of_month,
-			),
-		},
-		update_modified=False,
-	)
+def _advance(row, now, stamp_last_run: bool = True) -> None:
+	"""Advance the schedule with a raw set_value (no re-validate). ``last_run_at`` is stamped
+	whether the slot produced a real, failed, or skipped run — the slot was consumed either way.
+
+	``stamp_last_run=False`` advances ONLY the next slot without stamping ``last_run_at``: used
+	for the operator-withdrawn skip, a normal reversible state where no run occurred and no
+	failed-run row is recorded, so a phantom 'last run' timestamp would mislead the owner."""
+	vals = {
+		"next_run_at": compute_next_run(
+			row.schedule_frequency,
+			row.schedule_time,
+			from_dt=now,
+			weekday=row.schedule_weekday,
+			day_of_month=row.schedule_day_of_month,
+		),
+	}
+	if stamp_last_run:
+		vals["last_run_at"] = now
+	frappe.db.set_value(INSTALLATION, row.name, vals, update_modified=False)
 	frappe.db.commit()
 
 

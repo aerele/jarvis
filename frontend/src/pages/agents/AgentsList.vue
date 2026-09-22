@@ -137,12 +137,17 @@
 						:role="a.masked ? 'img' : 'button'"
 						:tabindex="a.masked ? undefined : 0"
 						:aria-label="a.masked ? 'Coming soon — not yet available' : undefined"
+						:title="
+							a.install_disabled
+								? 'Made unavailable by the operator; installed but paused - open to uninstall'
+								: undefined
+						"
 						class="flex flex-col rounded-lg border bg-surface-white p-5 transition"
 						:class="
 							a.masked
 								? 'cursor-default select-none opacity-50'
 								: a.install_disabled
-								? 'cursor-pointer select-none opacity-60 hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3'
+								? 'cursor-pointer select-none opacity-60 hover:bg-surface-gray-1 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3'
 								: 'cursor-pointer hover:bg-surface-gray-1 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3'
 						"
 						@click="!a.masked && openAgent(a)"
@@ -198,7 +203,7 @@
 									     install is shown DISABLED so they can still open + uninstall it,
 									     but it does not run until the operator makes it available again. -->
 									<Badge
-										v-if="a.install_disabled"
+										v-else-if="a.install_disabled"
 										class="shrink-0"
 										variant="subtle"
 										theme="red"

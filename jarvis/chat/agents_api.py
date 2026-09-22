@@ -228,6 +228,11 @@ _TEASER_STRIP_FIELDS = (
 	"default_schedule",
 	"validated_for_fy",
 	"modified",  # a real timestamp fingerprints the agent; not needed on a masked card
+	# The access roster fingerprints the withdrawn agent (allowed_users can be a single named
+	# person). Now that a teaser is masked for EVERY role incl. admins, strip it here too — the
+	# admin's roster pop in the list / the is_sm block in get_agent no longer covers a masked row.
+	"allowed_roles",
+	"allowed_users",
 )
 
 
@@ -261,7 +266,11 @@ def _agent_is_withdrawn(agent: str) -> bool:
 	installs are DISABLED — they do not run — but the install is NOT deleted and its own
 	``enabled`` flag is never mutated, so setting the agent back to ``available`` restores
 	it. Consulted at run time (manual + scheduler) so the operator's decision applies to
-	everyone, admins included, and is reversible with no stored state."""
+	everyone, admins included, and is reversible with no stored state.
+
+	Fails OPEN on a missing listing (get_value -> None -> 'available' -> not withdrawn): both
+	callers have a downstream existence/nature guard (a vanished listing is refused there), so
+	the aggregate stays fail-closed. Any NEW caller must keep that existence guard."""
 	return (frappe.db.get_value(LISTING, agent, "operator_visibility") or "available") in ("teaser", "hidden")
 
 
@@ -598,10 +607,12 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		out["installation"] = i
 
-	if is_sm:
+	if is_sm and not _masked:
 		# The ACCESS ROSTER (who may use this agent) is admin-only, exactly like the
 		# ``all_roles`` picker source that rides with it. A non-admin gets only the
 		# ``allowed`` boolean above: whether THEY are allowed, never who else is.
+		# NEVER on a masked teaser, even for an admin — the roster (esp. allowed_users) would
+		# fingerprint the withdrawn agent the operator's decision now hides from every role.
 		out["allowed_roles"] = [row.role for row in (listing.allowed_roles or [])]
 		out["allowed_users"] = [row.user for row in (listing.allowed_users or [])]
 		out["all_roles"] = [
