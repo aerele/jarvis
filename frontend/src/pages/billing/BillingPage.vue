@@ -117,22 +117,18 @@
 					     STILL retrying. Neither Renew nor the reactivation grid is offered while
 					     that mandate lives, so without this the customer has no move at all. Stopping
 					     it neutralizes the mandate and reloads, which flips can_reactivate true and
-					     surfaces the grid below. Red SUBTLE (never solid: PlanBillingPane's "Cancel is
-					     a red SUBTLE button" convention - the confirm dialog owns the deliberate step).
-					     !! guards the absent-key case so an older admin payload renders no CTA. -->
-					<div
+					     surfaces the grid below. Reuses BillingNotice (theme="red" without solid =
+					     red SUBTLE, per PlanBillingPane's convention - the confirm dialog owns the
+					     deliberate step). !! guards the absent-key case so an older admin payload
+					     renders no CTA. -->
+					<BillingNotice
 						v-if="canStopAutopayToPay"
-						class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-outline-gray-1 p-4"
-					>
-						<span class="text-p-sm text-ink-gray-7">{{ STOP_AUTOPAY_BANNER }}</span>
-						<Button
-							variant="subtle"
-							theme="red"
-							label="Stop auto-retry & pay now"
-							:loading="busy === 'stopAutopay'"
-							@click="confirmStopAutopay"
-						/>
-					</div>
+						:message="STOP_AUTOPAY_BANNER"
+						action-label="Stop auto-retry & pay now"
+						theme="red"
+						:loading="busy === 'stopAutopay'"
+						@action="confirmStopAutopay"
+					/>
 
 					<!-- F12: next to the controls above that raise it, not the page foot. -->
 					<ErrorMessage v-if="actionErr" class="mb-4" :message="actionErr" />
@@ -1112,6 +1108,8 @@ async function doStopAutopay() {
 		const out = (await api.stopAutopayToPay()) || {};
 		if (out.outcome === "already_active") {
 			notice.value = "You're already paid - your subscription is active.";
+		} else if (out.outcome === "neutralized" || out.outcome === "already_dead") {
+			notice.value = "Auto-retry stopped - pick a plan below to pay.";
 		}
 		// "neutralized" (just killed the live mandate) and "already_dead" (already
 		// gone) both mean nothing is left auto-retrying: reload so can_reactivate flips
