@@ -98,6 +98,7 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"get_party_dashboard_info",
 	"get_exchange_rate",
 	"get_fiscal_year",
+	"get_engagement_config",
 	"get_itemised_tax_breakup",
 	# Read-only GSTR-1 return-side period totals from india_compliance's filed
 	# return (the gzip filed_summary File, reduced server-side to the 5 heads), for
