@@ -275,7 +275,24 @@ class TestSubscriptionModelsMappings(FrappeTestCase):
 	def test_api_key_only_provider_is_excluded(self):
 		from jarvis import _subscription_models
 
+		# One real subscription provider so the catalog path is taken (an
+		# all-api-key payload has no subscription rows and falls back to the
+		# seed, which carries Anthropic since the Claude plan landed).
 		payload = [
+			{
+				"provider_id": "openai",
+				"label": "OpenAI",
+				"supports_subscription": True,
+				"models": [
+					{
+						"model_id": "gpt-9.9",
+						"label": "gpt-9.9",
+						"tier": "subscription",
+						"is_default": True,
+						"sort_order": 0,
+					}
+				],
+			},
 			{
 				"provider_id": "anthropic",
 				"label": "Anthropic",
@@ -289,10 +306,11 @@ class TestSubscriptionModelsMappings(FrappeTestCase):
 						"sort_order": 0,
 					}
 				],
-			}
+			},
 		]
 		with patch.object(admin_client, "get_model_catalog", return_value=payload):
 			_clear_sub_model_cache()
+			self.assertIn("OpenAI", _subscription_models.SUBSCRIPTION_MODELS)
 			self.assertNotIn("Anthropic", _subscription_models.SUBSCRIPTION_MODELS)
 
 	def test_default_falls_back_to_first_row_when_none_flagged(self):

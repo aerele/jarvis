@@ -1336,6 +1336,82 @@ def post_subscription_connect(
 	)
 
 
+# --- Claude browser sign-in relay (CLAUDE-LOGIN-CONTRACT.md) ---------------
+#
+# Jarvis never runs an OAuth exchange for Anthropic itself: the official
+# Claude Code CLI inside the tenant container does its own `claude auth
+# login`, and these three calls only relay the authorize URL out and the
+# pasted code back. No token ever crosses this boundary - admin's
+# claude_login_submit hands back an account_email (maybe blank) and a
+# subscription_type, never a credential.
+
+
+def post_claude_login_start(model: str) -> dict:
+	"""POST to admin's ``api.tenant.claude_login_start``, which resolves the
+	tenant's running container and relays to fleet-agent's
+	``POST /claude-login/start``: installs/enables the pinned Claude CLI if
+	needed and starts a detached, headless ``claude auth login`` inside the
+	container, returning the authorize URL it printed.
+
+	``model`` is the subscription model the customer picked (may be blank;
+	the caller coerces it against the catalog before this is called) - it is
+	only carried through for the login's own bookkeeping, not used to run the
+	CLI differently.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError,
+		AdminRateLimitedError as usual.
+	"""
+	return _post(
+		path=_m("api.tenant.claude_login_start"),
+		body={"model": model},
+	)
+
+
+def post_claude_login_submit(login_id: str, code: str) -> dict:
+	"""POST the customer's pasted code to admin's
+	``api.tenant.claude_login_submit``, relayed to fleet-agent's
+	``POST /claude-login/submit``: appends the code to the CLI's waiting
+	stdin and waits for it to confirm the sign-in.
+
+	``code`` is the only secret this call carries. It is sent as a JSON
+	body field (never a query string or a logged header), and
+	``_do_post``/``_extract_frappe_message`` never log request bodies - only
+	the URL and a truncated RESPONSE body reach ``frappe.log_error`` on a
+	transport failure, so the code itself is never written to Error Log.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError,
+		AdminRateLimitedError as usual. A wrong code is an
+		``AdminContractError`` carrying admin's ``invalid_code`` (or
+		equivalent) ``error.code`` - the caller keeps the login alive for a
+		retry rather than treating this like every other terminal rejection.
+	"""
+	return _post(
+		path=_m("api.tenant.claude_login_submit"),
+		body={"login_id": login_id, "code": code},
+	)
+
+
+def post_claude_login_cancel(login_id: str) -> dict:
+	"""POST to admin's ``api.tenant.claude_login_cancel``, relayed to
+	fleet-agent's ``POST /claude-login/cancel``: kills the detached CLI
+	process for this login and removes its transcript/stdin directory.
+
+	Best-effort from the caller's point of view (an already-expired or
+	already-cancelled login_id is not an error) - raises only on a genuine
+	transport/auth failure.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError,
+		AdminRateLimitedError as usual.
+	"""
+	return _post(
+		path=_m("api.tenant.claude_login_cancel"),
+		body={"login_id": login_id},
+	)
+
+
 def post_push_custom_skills(skills: list[dict]) -> dict:
 	"""POST the customer's rendered custom skills to admin → fleet → container.
 

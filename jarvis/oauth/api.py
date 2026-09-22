@@ -810,6 +810,195 @@ def poll_pool_account_signin(nonce: str) -> dict:
 	return _ok({"status": "ok", **view})
 
 
+# --- Claude browser sign-in relay (CLAUDE-LOGIN-CONTRACT.md) ---------------
+#
+# Anthropic isn't a registered OAuth provider in oauth/providers.py: there is
+# no PKCE exchange here at all. The official Claude Code CLI, running inside
+# the tenant container, does its own `claude auth login`; Jarvis only relays
+# the authorize URL admin/fleet captured out to the browser, then relays the
+# pasted code back. No token is ever minted, stored, or seen bench-side - the
+# CLI keeps and refreshes its own credentials under the container's
+# CLAUDE_CONFIG_DIR. Unlike the paste-back nonce flows above, the login's
+# state lives in fleet-agent (a file under /tmp keyed by login_id), not in
+# Jarvis's own cache, so there is nothing to bind to frappe.session.user here.
+
+# Admin/fleet error codes this relay knows how to translate into a clean
+# customer-facing code + message. Normalized (lowercased, "_"/"-" stripped)
+# so a PascalCase exception-class code (e.g. "InvalidCode", matching the rest
+# of admin's contract convention - see AdminContractError) and a snake_case
+# one compare equal. Anything else falls back to the generic push_failed
+# message built from the exception's own text.
+_CLAUDE_LOGIN_ERROR_MAP = {
+	"invalidcode": ("invalid_code", "Check the pasted code and try again."),
+	"loginnotfound": (
+		"expired",
+		'That sign-in expired. Click "Open sign-in" to start a new one.',
+	),
+	"loginnotconfirmed": (
+		"login_not_confirmed",
+		"The sign-in didn't finish on your agent. Try again.",
+	),
+	"norunningtenant": (
+		"no_running_tenant",
+		"Your agent isn't running right now. Start it, then try again.",
+	),
+	"fleettooold": (
+		"fleet_too_old",
+		"Your agent needs an update before it can sign in to Claude this way. Contact support.",
+	),
+	"contracttooold": (
+		"fleet_too_old",
+		"Your agent needs an update before it can sign in to Claude this way. Contact support.",
+	),
+	# admin's @fleet_endpoint serialises its contract-gate refusal as the
+	# FleetError subclass name, so this is the code that actually arrives.
+	"cliinstalling": (
+		"cli_installing",
+		"Your agent is still setting up Claude. Try again in about 30 seconds.",
+	),
+	"fleetconfigerror": (
+		"fleet_too_old",
+		"Your agent needs an update before it can sign in to Claude this way. Contact support.",
+	),
+}
+
+
+def _normalize_admin_code(code: str) -> str:
+	return (code or "").strip().lower().replace("_", "").replace("-", "")
+
+
+def _map_claude_login_error(e: Exception) -> dict:
+	"""Translate an admin_client exception raised by the claude-login relay
+	calls into the customer-facing ``_err`` envelope.
+
+	A coded business rejection (``AdminContractError``) is looked up in
+	``_CLAUDE_LOGIN_ERROR_MAP``; an unrecognized code (or an admin too old to
+	send one) falls back to a generic, still-actionable message rather than
+	the raw admin text. Auth/unreachable/rate-limit failures get the same
+	treatment ``complete_paste_signin`` gives a failed push, so this relay
+	reads like every other admin-backed connect flow in this module."""
+	if isinstance(e, admin_client.AdminContractError):
+		mapped = _CLAUDE_LOGIN_ERROR_MAP.get(_normalize_admin_code(e.stable_code))
+		if mapped:
+			return _err(mapped[0], mapped[1])
+		return _err("push_failed", str(e))
+	if isinstance(e, admin_client.AdminRejectedError):
+		# admin REACHED the fleet and it permanently refused (502 carrying the
+		# FleetError class name, e.g. FleetConfigError for a contract too old or
+		# an unusable CLI package). Not transient: never tell the customer to retry.
+		mapped = _CLAUDE_LOGIN_ERROR_MAP.get(_normalize_admin_code(getattr(e, "code", "")))
+		if mapped:
+			return _err(mapped[0], mapped[1])
+		return _err(
+			"push_failed",
+			"Your agent refused this sign-in and retrying will not help. Contact support.",
+		)
+	if isinstance(e, admin_client.AdminAuthError):
+		return _err(
+			"admin_auth",
+			f"Couldn't reach your agent - your session or admin credentials aren't "
+			f"valid. Refresh the page (re-login if prompted) and try again. ({e})",
+		)
+	if isinstance(e, admin_client.AdminRateLimitedError):
+		return _err("rate_limited", "Too many attempts - wait a moment and try again.")
+	# AdminUnreachableError, plain AdminValidationError (no code - an admin too
+	# old to speak this contract).
+	return _err("push_failed", f"Couldn't reach your agent right now - try again in a moment. ({e})")
+
+
+_CLAUDE_LOGIN_ADMIN_EXCEPTIONS = (
+	admin_client.AdminAuthError,
+	admin_client.AdminValidationError,
+	admin_client.AdminUnreachableError,
+	admin_client.AdminRateLimitedError,
+)
+
+
+@frappe.whitelist()
+def begin_claude_cli_login(model: str = "") -> dict:
+	"""Start the Claude browser sign-in: relays to admin/fleet, which runs the
+	official Claude Code CLI's own ``claude auth login`` headless inside the
+	tenant container and hands back the authorize URL to open.
+
+	Gated on System Manager, matching every other sign-in endpoint here.
+	Returns ``{login_id, authorize_url, expires_at}``; the login's state and
+	TTL live entirely in fleet-agent, not in any Jarvis cache.
+	"""
+	require_jarvis_admin()
+	model = _coerce_subscription_model("Anthropic", (model or "").strip())
+	try:
+		result = admin_client.post_claude_login_start(model) or {}
+	except _CLAUDE_LOGIN_ADMIN_EXCEPTIONS as e:
+		return _map_claude_login_error(e)
+	return _ok(
+		{
+			"login_id": result.get("login_id") or "",
+			"authorize_url": result.get("authorize_url") or "",
+			"expires_at": result.get("expires_at") or 0,
+		}
+	)
+
+
+@frappe.whitelist()
+def complete_claude_cli_login(login_id: str, code: str) -> dict:
+	"""Submit the code the customer pasted back from claude.com.
+
+	On success, captures the account (no token - the CLI keeps its own
+	credentials container-side) as a durable pending OAuth capture, exactly
+	like ``complete_pool_account_signin``, and returns the same view shape so
+	the frontend places it with the identical code path. A wrong code keeps
+	the login alive fleet-side for a retry (see CLAUDE-LOGIN-CONTRACT.md);
+	this endpoint just relays that as ``invalid_code``.
+	"""
+	require_jarvis_admin()
+	login_id = (login_id or "").strip()
+	code = (code or "").strip()
+	if not login_id:
+		return _err("unknown_login", "sign-in session not recognized")
+	if not _BARE_CODE_RE.match(code):
+		return _err("invalid_code", "Check the pasted code and try again.")
+	try:
+		result = admin_client.post_claude_login_submit(login_id, code) or {}
+	except _CLAUDE_LOGIN_ADMIN_EXCEPTIONS as e:
+		return _map_claude_login_error(e)
+
+	email = (result.get("account_email") or "").strip()
+	blob = {
+		"type": "oauth",
+		"provider": "anthropic",
+		"credential_kind": "claude_cli_login",
+		"account_email": email,
+	}
+	view = pending_capture.create_capture(
+		provider="Anthropic",
+		upstream="anthropic",
+		agent_provider="anthropic",
+		oauth_blob=json.dumps(blob),
+		account_email=email,
+		account_ref="CLAUDE_" + secrets.token_hex(8),
+		safe_label=email or "Claude subscription",
+		provider_subject="",
+	)
+	return _ok(view)
+
+
+@frappe.whitelist()
+def cancel_claude_cli_login(login_id: str) -> dict:
+	"""Customer backed out of the Claude sign-in before pasting a code: tell
+	fleet to kill the detached CLI process and drop its transcript. Best
+	effort from the caller's side - an already-expired login_id is not an
+	error."""
+	require_jarvis_admin()
+	login_id = (login_id or "").strip()
+	if not login_id:
+		return _ok({})
+	try:
+		admin_client.post_claude_login_cancel(login_id)
+	except _CLAUDE_LOGIN_ADMIN_EXCEPTIONS as e:
+		return _map_claude_login_error(e)
+	return _ok({})
+
+
 @frappe.whitelist()
 def list_pending_captures() -> dict:
 	"""The current user's live (un-consumed, un-expired) pending OAuth captures,

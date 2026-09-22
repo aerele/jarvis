@@ -41,7 +41,7 @@ from jarvis import compat
 from jarvis.chat import agent_session_pool, seq_watermark, vision
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.exceptions import AgentUnreachableError
-from jarvis.jarvis.pool_serialize import compute_pool_mode
+from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -475,8 +475,15 @@ def _session_model_for(conv) -> tuple[str | None, str | None]:
 	if model:
 		return model, provider
 	settings = frappe.get_single("Jarvis Settings")
-	if getattr(settings, "proxy_active", 0):
+	if getattr(settings, "proxy_active", 0) and not has_native_claude_subscription(settings):
 		return POOL_VIRTUAL_MODEL, None  # Bifrost expands it into the chain
+	# A pool with a native Claude-plan leg is NOT a Bifrost chain: fleet renders
+	# Claude as the claude-cli runtime and the ChatGPT leg as the proxy route, and
+	# the agent owns the failover between them (agents.defaults.model.fallbacks).
+	# Pinning "jarvis-pool" here would force every turn onto the proxy leg and,
+	# whenever Claude is the rendered primary, be stored as a USER override that
+	# zeroes the fallback chain -- Claude never answers and nothing fails over.
+	# Reset instead, exactly like the agent-direct pool below.
 	if compute_pool_mode(settings):
 		# agent-direct pool (no sidecar), no pin: RESET rather than name a model, so the
 		# session keeps no override and the container's model.fallbacks chain stays live.

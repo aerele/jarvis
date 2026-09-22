@@ -23,6 +23,8 @@ signed-in account. Verified live 2026-09-06 on that same pinned binary: the
 suffixed gpt-5.6 ids and gpt-6-astra serve (bare "gpt-5.6" is an API-only
 alias), while gpt-5.4 and gpt-5.4-mini were retired upstream and fail inside
 cliproxy, so they are gone from this tier.
+Claude subscriptions use the agent's native ``claude-cli`` backend and its
+bundled model catalogue instead of CLIProxyAPI.
 """
 
 from __future__ import annotations
@@ -36,12 +38,23 @@ import frappe
 # API key, which is served from the api_key-tier catalog, not this subscription seed.
 _SEED_SUBSCRIPTION_MODELS: dict[str, list[str]] = {
 	"OpenAI": ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.5"],
+	"Anthropic": [
+		"claude-opus-5",
+		"claude-sonnet-5",
+		"claude-fable-5-1",
+		"claude-fable-5",
+		"claude-opus-4-8",
+		"claude-opus-4-7",
+		"claude-sonnet-4-6",
+		"claude-opus-4-6",
+	],
 	"xAI Grok": ["grok-4.3", "grok-build-0.1"],
 	"Kimi (Moonshot)": ["kimi-k2.7-code", "kimi-k2.6"],
 }
 
 _SEED_DEFAULT_MODEL: dict[str, str] = {
 	"OpenAI": "gpt-5.6-terra",
+	"Anthropic": "claude-opus-5",
 	"xAI Grok": "grok-4.3",
 	"Kimi (Moonshot)": "kimi-k2.7-code",
 }

@@ -114,6 +114,22 @@ test("deriveMode: a single subscription model is proxy (needs cliproxy)", () => 
 		"proxy"
 	);
 });
+test("deriveMode: a Claude subscription is agent-direct and never needs cliproxy", () => {
+	assert.equal(
+		deriveMode(
+			[
+				{
+					provider: "Anthropic",
+					model: "claude-opus-4-8",
+					credentialType: "subscription",
+					upstream: "anthropic",
+				},
+			],
+			null
+		),
+		"direct"
+	);
+});
 test("deriveMode: a pool with ANY subscription model is proxy, even mixed with api keys", () => {
 	assert.equal(
 		deriveMode(
@@ -276,6 +292,34 @@ test("validatePool: subscription account with neither blob nor account_ref is in
 		},
 	};
 	assert.equal(validatePool([sub], null).ok, false);
+});
+test("validatePool: Claude alone and either two-way Claude/Codex order are valid", () => {
+	const claude = {
+		provider: "Anthropic",
+		model: "claude-opus-4-8",
+		subscription: {
+			rotation: "sticky",
+			accounts: [{ upstream: "anthropic", account_ref: "CLAUDE_a" }],
+		},
+	};
+	const codex = {
+		provider: "OpenAI",
+		model: "gpt-5.5",
+		subscription: {
+			rotation: "sticky",
+			accounts: [{ upstream: "openai", account_ref: "CODEX_a" }],
+		},
+	};
+	assert.equal(validatePool([claude], null).ok, true);
+	assert.equal(validatePool([claude, codex], null).ok, true);
+	assert.equal(validatePool([codex, claude], null).ok, true);
+	assert.match(
+		validatePool(
+			[codex, claude, { provider: "openai", model: "gpt-4o", api_key: "sk-api" }],
+			null
+		).error,
+		/either first or last/i
+	);
 });
 test("validatePool: api_key model with blank key but has_key is valid (key preserved on save)", () => {
 	assert.equal(
