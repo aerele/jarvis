@@ -3,11 +3,14 @@ import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 
 // SupportShell is now a 3-region layout: SupportSidebar + a main column (a
-// frappe-ui Breadcrumbs bar over the content). SupportSidebar is stubbed (it has
-// its own suite + pulls the router); only Breadcrumbs is needed from frappe-ui.
+// frappe-ui Breadcrumbs bar + two shortcut Buttons over the content).
+// SupportSidebar is stubbed (it has its own suite + pulls the router); Breadcrumbs
+// and Button are the frappe-ui pieces the bar renders.
 // matchMedia is absent in jsdom (theme.js needs it).
 vi.mock("frappe-ui", () => ({
 	Breadcrumbs: { name: "Breadcrumbs", props: ["items"], template: "<nav class='crumbs' />" },
+	// aria-label/icon/tooltip fall through onto the <button> so the tests below can find them.
+	Button: { name: "Button", template: "<button><slot/></button>" },
 }));
 
 // UserMenu (reused in SupportSidebar) pulls theme.js/frappe-ui at import time — module-mock it (own suite).
@@ -40,6 +43,12 @@ describe("SupportShell", () => {
 		const w = mount(SupportShell, { props: { crumbs }, global: { stubs } });
 		expect(w.findComponent(SupportSidebar).exists()).toBe(true);
 		expect(w.findComponent({ name: "Breadcrumbs" }).props("items")).toEqual(crumbs);
+	});
+
+	it("renders the top-bar shortcut buttons (theme toggle + Open Desk)", () => {
+		const w = mount(SupportShell, { global: { stubs } });
+		expect(w.find('[aria-label="Change theme"]').exists()).toBe(true);
+		expect(w.find('[aria-label="Open ERPNext Desk"]').exists()).toBe(true);
 	});
 
 	it("renders the actions slot and the default (center) slot", () => {

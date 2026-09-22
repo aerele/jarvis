@@ -32,12 +32,8 @@
 		</div>
 
 		<div class="jv-supsb-bottom">
-			<SidebarLink
-				icon="external-link"
-				label="Open ERPNext Desk"
-				:on-click="openDesk"
-				:is-collapsed="collapsed"
-			/>
+			<!-- Open-Desk moved to the top-bar shortcut cluster (SupportShell), next
+			     to the theme toggle — parity with the chat surface. -->
 			<SidebarLink
 				data-test="collapse-toggle"
 				:icon="collapsed ? 'chevrons-right' : 'chevrons-left'"
@@ -80,10 +76,6 @@ function toggle() {
 // "Support Tickets" is active across every support page (list/new/thread); "Jarvis
 // chat" is the exit link, never active while we're on a support route.
 const isTickets = computed(() => route.path.startsWith("/support"));
-
-function openDesk() {
-	window.open("/app", "_blank");
-}
 </script>
 
 <style scoped>
