@@ -926,6 +926,9 @@ class TestListPendingConfirmations(FrappeTestCase):
 			run_id="",
 			preview={"p": True},
 		)
+		# a conv-less token lives ~900s and surfaces under any filter -> purge after this
+		# test so it can't leak into a later test FILE on a sharded runner.
+		self.addCleanup(lambda: _purge_pending_confirmations("Administrator"))
 		with patch("jarvis.chat.latency.get_logger") as gl:
 			list_pending_confirmations(conversation="a\ninjected count=999", source="pill")
 		conv_args = [
@@ -967,6 +970,7 @@ class TestListPendingConfirmations(FrappeTestCase):
 			run_id="",
 			preview={"p": True},
 		)
+		self.addCleanup(lambda: _purge_pending_confirmations("Administrator"))
 		with patch("jarvis.chat.latency.get_logger") as gl:
 			list_pending_confirmations(conversation="Z" * 300, source="pill")
 		conv_args = [
