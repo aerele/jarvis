@@ -73,8 +73,9 @@ def __getattr__(name: str):
 # Google Gemini is deliberately absent - its consumer login-with-Google was
 # discontinued by Google 2026-06-18 (subscription removed 2026-08-19); Gemini
 # is available via API key only.
-# Anthropic Claude is deliberately absent - agent has no compatible
-# adapter for Claude Pro/Max subscriptions.
+# Claude Pro/Max signs in through its own browser relay (oauth/api.py
+# begin/complete_claude_cli_login) into the native Claude CLI runtime; it does
+# not register a client in this generic OAuth map.
 def _env_or_default(name: str, default: str) -> str:
 	import os
 
