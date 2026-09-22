@@ -134,12 +134,17 @@
 					<div
 						v-for="a in rows"
 						:key="a.agent_slug"
-						role="button"
-						tabindex="0"
-						class="flex cursor-pointer flex-col rounded-lg border bg-surface-white p-5 transition hover:bg-surface-gray-1 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3"
-						@click="openAgent(a)"
-						@keydown.enter.prevent="openAgent(a)"
-						@keydown.space.prevent="openAgent(a)"
+						:role="a.masked ? undefined : 'button'"
+						:tabindex="a.masked ? undefined : 0"
+						class="flex flex-col rounded-lg border bg-surface-white p-5 transition"
+						:class="
+							a.masked
+								? 'cursor-default select-none opacity-70'
+								: 'cursor-pointer hover:bg-surface-gray-1 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3'
+						"
+						@click="!a.masked && openAgent(a)"
+						@keydown.enter.prevent="!a.masked && openAgent(a)"
+						@keydown.space.prevent="!a.masked && openAgent(a)"
 					>
 						<div class="flex items-start gap-3">
 							<!-- letter-avatar logo (listing has no image field) -->
@@ -163,8 +168,17 @@
 									>
 										{{ a.title }}
 									</span>
+									<!-- Operator-masked (teaser): a distinct locked treatment, NOT the
+									     registry status 'Coming Soon' badge. The real name never arrives
+									     here — the server sends title 'Coming soon' + an opaque slug. -->
+									<FeatherIcon
+										v-if="a.masked"
+										name="lock"
+										class="mt-0.5 size-4 shrink-0 text-ink-gray-4"
+										title="Coming soon — not yet available"
+									/>
 									<Badge
-										v-if="a.status === 'Coming Soon'"
+										v-else-if="a.status === 'Coming Soon'"
 										class="shrink-0"
 										variant="subtle"
 										theme="blue"
