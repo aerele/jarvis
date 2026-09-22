@@ -1015,6 +1015,19 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	return {"ok": True, "data": {"status": "discarded", "tool": tool}}
 
 
+# Provenance tags the client may pass as ``source`` (layered re-check design).
+# Kept as a whitelist so nothing client-supplied reaches a log line raw, and so a
+# non-string value can be coerced instead of crashing a membership test.
+_KNOWN_RECHECK_SOURCES = frozenset({"recheck", "auto", "pill", "menu", "typed"})
+# The USER-DRIVEN subset: a human reached for recovery (clicked the pill, opened the
+# menu entry, typed "show it", or hit the legacy lever). Surfacing a card on one of
+# these is the "live delivery missed it, the human had to act" signal, so we log it.
+# ``auto`` (focus/visibility/poll) fires constantly and is deliberately NOT logged -
+# a per-call auto log would flood the channel and drown the real signal; auto's
+# effectiveness shows as the ABSENCE of user-driven rescues (+ reconcile_action_cards).
+_RESCUE_RECHECK_SOURCES = frozenset({"recheck", "pill", "menu", "typed"})
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def list_pending_confirmations(conversation: str | None = None, source: str | None = None) -> dict:
@@ -1027,13 +1040,14 @@ def list_pending_confirmations(conversation: str | None = None, source: str | No
 	same owner's UI - token + tool + preview + summary + conversation + run_id -
 	so no new information is leaked. Human cookie-session only.
 
-	``source`` marks HOW the client called this: the always-present "re-check"
-	control passes ``"recheck"`` (a deliberate human pull), vs an ordinary
-	reload/resync. When a re-check SURFACES a card we emit a measurable signal
-	(AC-detect). Read it as an UPPER BOUND on live-delivery misses, not an exact
-	count: the lever is always present, so a user who clicks it while a card is
-	already on screen also counts. Over-counting is the safe direction (a false
-	positive costs a look, a false negative hides the bug).
+	``source`` marks HOW the client called this (layered re-check design): the
+	user-driven controls pass ``recheck`` / ``pill`` / ``menu`` / ``typed``; the
+	silent auto-heal (focus / visibility / poll) passes ``auto``. When a user-driven
+	re-check SURFACES a card we emit a measurable, per-source signal (AC-detect) so
+	recoveries attribute per layer. Read it as an UPPER BOUND on live-delivery
+	misses, not an exact count (a user may pull while a card is already on screen);
+	over-counting is the safe direction. ``source`` is validated to a whitelist tag
+	before it is logged, and a non-string value is coerced (never a 500).
 	"""
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
@@ -1049,20 +1063,24 @@ def list_pending_confirmations(conversation: str | None = None, source: str | No
 		items = pending_confirm.list_items_for_owner(frappe.session.user, conversation=conv, strict=True)
 	except pending_confirm.PendingConfirmStorageError as exc:
 		return _confirmation_storage_error(exc)
-	# AC-detect (backstop-rescue signal): a manual re-check that surfaces a card is an
-	# upper-bound signal the auto delivery path may have missed it. Log to the
-	# jarvis.chat.latency channel (the same greppable channel cards_open uses) so the
-	# rescue rate is measurable. `conversation` is the triage key; the owner is derivable
-	# from it, so we do NOT log the user's email here (PII hygiene - no other action-card
-	# signal carries identity). Best-effort: a signal must never fail the re-surface.
-	if source == "recheck" and items:
+	# AC-detect (per-layer rescue signal): a USER-DRIVEN re-check that surfaces a card is
+	# an upper-bound signal the auto delivery path may have missed it. Log to the
+	# jarvis.chat.latency channel (the greppable channel cards_open uses) tagged by source
+	# so recoveries attribute per layer. `conversation` is the triage key; the owner is
+	# derivable from it, so we do NOT log the user's email (PII hygiene). The tag is
+	# whitelisted and `conversation` is newline-stripped + capped so nothing client-
+	# supplied can forge a log line. Best-effort: a signal must never fail the re-surface.
+	src = source if isinstance(source, str) else None
+	tag = src if src in _KNOWN_RECHECK_SOURCES else "other"
+	if tag in _RESCUE_RECHECK_SOURCES and items:
 		try:
 			from jarvis.chat.latency import get_logger
 
 			get_logger().info(
-				"action_card_rescue count=%d conversation=%s",
+				"action_card_rescue source=%s count=%d conversation=%s",
+				tag,
 				len(items),
-				conv or "",
+				(conv or "").replace("\n", " ").replace("\r", " ")[:64],
 			)
 		except Exception:
 			pass
