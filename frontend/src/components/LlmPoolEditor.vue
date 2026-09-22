@@ -1196,6 +1196,22 @@
 										Opens {{ upstreamLabelOf(panelRow.upstream) }} in a new
 										tab. Approve access, then come back here.
 									</div>
+									<div
+										v-if="isClaudeSubscription(panelRow)"
+										class="jv-cdesc"
+										style="margin-top: 6px"
+									>
+										Jarvis signs in with the official Claude Code app inside
+										your workspace, so your plan is used the way Anthropic
+										allows. Usage counts against your plan's limits.
+										<a
+											:href="CLAUDE_TERMS_URL"
+											target="_blank"
+											rel="noopener noreferrer"
+											class="jv-clink"
+											>Anthropic's terms ↗</a
+										>
+									</div>
 								</div>
 							</div>
 							<div
@@ -2099,6 +2115,23 @@
 											Opens {{ upstreamLabelOf(m.upstream) }} in a new tab.
 											Approve access, then come back here.
 										</div>
+										<div
+											v-if="isClaudeSubscription(m)"
+											class="jv-cdesc"
+											style="margin-top: 6px"
+										>
+											Jarvis signs in with the official Claude Code app
+											inside your workspace, so your plan is used the way
+											Anthropic allows. Usage counts against your plan's
+											limits.
+											<a
+												:href="CLAUDE_TERMS_URL"
+												target="_blank"
+												rel="noopener noreferrer"
+												class="jv-clink"
+												>Anthropic's terms ↗</a
+											>
+										</div>
 									</div>
 								</div>
 								<div
@@ -2605,6 +2638,9 @@ const upstreamLabelOf = (v) =>
 	(upstreamOpts.find((o) => o.value === v) || {}).label || v || "your provider";
 const upstreamValueOf = (l) => (upstreamOpts.find((o) => o.label === l) || {}).value || l;
 const isClaudeSubscription = (m) => !!m && m.upstream === "anthropic";
+// Anthropic's consumer terms: the sign-in copy links here so a customer sees
+// what their plan permits before connecting it.
+const CLAUDE_TERMS_URL = "https://www.anthropic.com/legal/consumer-terms";
 
 // ---- singleMode (onboarding) chat-subscription Test -----------------------
 // The API-key Test above (smTest) is a stateless bench-side probe: it never
@@ -6278,6 +6314,14 @@ defineExpose({
 }
 .jv-chead .jv-ctit {
 	margin-bottom: 0;
+}
+.jv-clink {
+	color: inherit;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+.jv-clink:hover {
+	color: var(--text-1);
 }
 .jv-cdesc {
 	font-size: 12.5px;
