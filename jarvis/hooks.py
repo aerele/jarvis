@@ -699,6 +699,10 @@ permission_query_conditions.update(
 		"Jarvis Agent Run": "jarvis.chat.agent_permissions.run_query_conditions",
 		"Jarvis Agent Finding": "jarvis.chat.agent_permissions.finding_query_conditions",
 		"Jarvis Agent Activity": "jarvis.chat.agent_permissions.activity_query_conditions",
+		# Catalogue-visibility boundary: a non-admin never LISTS a teaser/hidden
+		# agent it hasn't installed via generic REST/Desk (the SPA masks; the raw
+		# row would leak the real name).
+		"Jarvis Agent Listing": "jarvis.chat.agent_permissions.listing_query_conditions",
 	}
 )
 has_permission.update(
@@ -709,6 +713,9 @@ has_permission.update(
 		"Jarvis Agent Run": "jarvis.chat.agent_permissions.has_run_permission",
 		"Jarvis Agent Finding": "jarvis.chat.agent_permissions.has_finding_permission",
 		"Jarvis Agent Activity": "jarvis.chat.agent_permissions.has_activity_permission",
+		# Catalogue-visibility boundary: deny a non-admin READ of a teaser/hidden
+		# listing it hasn't installed (raw REST get / get_doc).
+		"Jarvis Agent Listing": "jarvis.chat.agent_permissions.has_listing_permission",
 	}
 )
 

@@ -43,6 +43,7 @@ class JarvisAgentInstallation(Document):
 	def validate(self):
 		self._default_reviewer()
 		self._guard_installability()
+		self._guard_operator_visibility()
 		self._validate_unique_per_owner()
 		self._validate_owner_cap()
 		self._validate_run_as_user()
@@ -101,6 +102,45 @@ class JarvisAgentInstallation(Document):
 			frappe.throw(
 				_("This agent requires {0}; enable it once the dependency is present.").format(detail),
 				title=_("Agent not installable"),
+			)
+
+	def _guard_operator_visibility(self):
+		"""Operator overlay: a ``teaser`` (coming-soon) or ``hidden`` (withdrawn) agent
+		is not installable. NEW installs ONLY — an EXISTING install of an agent later
+		set teaser/hidden keeps working (grandfathering). This gate is deliberately
+		SEPARATE from ``_guard_installability``/``evaluate_installability`` so
+		``reconcile_installations`` never strips an existing install from the roster.
+
+		Two tiers, by who set the visibility:
+		- OPERATOR-GOVERNED (fleet policy) teaser/hidden -> HARD gate: not installable by
+		  ANYONE, tenant admins included (the "disable"/coming-soon guarantee — an unreleased
+		  or withdrawn agent must not be installable anywhere on the fleet).
+		- tenant-local teaser/hidden (a tenant's own catalogue tidy) -> a Jarvis Admin may
+		  still create an install (dogfood/testing), unchanged from Phase 1."""
+		if not self.is_new():
+			return
+		from jarvis import catalogue_visibility
+		from jarvis.permissions import has_jarvis_admin_access
+
+		# Governed slugs are ALWAYS teaser/hidden (available == ungoverned), and the stored
+		# keyset is authoritative — check it FIRST, before the local listing field. That field
+		# can transiently lag at 'available' between a bundle sync creating the listing and the
+		# next pull re-asserting the policy; a governed agent must be un-installable by ANYONE
+		# (tenant admins included) in that window too.
+		if catalogue_visibility.is_operator_governed(self.agent):
+			frappe.throw(
+				_("This agent is not available to install."),
+				frappe.PermissionError,
+				title=_("Agent not available"),
+			)
+		# Tenant-local teaser/hidden (a tenant's own catalogue tidy): a Jarvis Admin may still
+		# dogfood-install it, unchanged from Phase 1.
+		vis = frappe.db.get_value("Jarvis Agent Listing", self.agent, "operator_visibility") or "available"
+		if vis != "available" and not has_jarvis_admin_access(frappe.session.user):
+			frappe.throw(
+				_("This agent is not available to install."),
+				frappe.PermissionError,
+				title=_("Agent not available"),
 			)
 
 	def _guard_activation_transition(self):

@@ -124,11 +124,13 @@ def sync_agent_listings() -> dict:
 		# the body from the private bundle store by slug and pushes it to fleet.
 		delivery = "delegate"
 
-		# NOTE: ``allowed_roles`` is deliberately ABSENT — it is bench-admin
-		# state (set via agents_api.set_agent_roles), not registry state. A
-		# re-sync must never clobber an admin's role restrictions: doc.update()
-		# only touches the keys given here, so the loaded child rows survive
-		# the save untouched.
+		# NOTE: ``allowed_roles`` and ``operator_visibility`` are deliberately
+		# ABSENT — both are operator/bench-admin state (roles via
+		# agents_api.set_agent_roles; visibility via set_operator_visibility),
+		# not registry state. A re-sync must never clobber them: doc.update()
+		# only touches the keys given here, so those fields survive the save
+		# untouched. operator_visibility is the runtime catalogue overlay
+		# (available/teaser/hidden) and MUST outlive every ``bench migrate``.
 		values = {
 			"agent_slug": slug,
 			"title": a.get("title") or slug,
@@ -440,11 +442,16 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		allowed_listings = frappe.get_all(
 			LISTING,
 			filters={"status": "Published"},
-			fields=["name", "agent_slug"],
+			fields=["name", "agent_slug", "operator_visibility"],
 			order_by="name asc",
 		)
 		for lst in allowed_listings:
 			if lst.name in seen_agents or lst.name not in granted:
+				continue
+			# Operator overlay: a teaser (coming-soon) / hidden (withdrawn) agent is not
+			# installable, so leg 1 must not pre-provision its delegate into a container.
+			# (Leg 2 — existing enabled installs — is untouched: grandfathering.)
+			if (lst.operator_visibility or "available") != "available":
 				continue
 			# Same reasoning as the install leg's ``installable`` check: an agent
 			# whose min_apps / required DocTypes are absent has no data to evaluate,
