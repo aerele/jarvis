@@ -122,8 +122,10 @@ def _apply(policy) -> None:
 
 
 def _validate(policy) -> tuple[bool, dict]:
-	"""A policy is a dict of ``{str slug: visibility-in-_VISIBILITY}``. Returns
-	``(ok, normalized)``; ``ok`` False rejects the WHOLE payload (all-or-nothing)."""
+	"""A policy is a dict of ``{str slug: visibility}``. Returns ``(ok, normalized)``; ``ok``
+	False rejects the WHOLE payload (all-or-nothing). ``available`` entries are DROPPED, not
+	stored: the governed map holds only teaser/hidden (available == ungoverned), so the guards'
+	"governed => teaser/hidden" assumption holds even if a non-conforming CP ever emits one."""
 	if not isinstance(policy, dict):
 		return False, {}
 	normalized = {}
@@ -132,6 +134,8 @@ def _validate(policy) -> tuple[bool, dict]:
 			return False, {}
 		if vis not in _VISIBILITY:
 			return False, {}
+		if vis == _DEFAULT:
+			continue  # 'available' in the map = ungoverned; never store it as governed
 		normalized[slug.strip()] = vis
 	return True, normalized
 
