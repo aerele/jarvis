@@ -1310,3 +1310,14 @@ class TestCatalogueVisibilityPull(AccessGovernanceCase):
 			catalogue_visibility.persist_from_connection(self._conn())
 			frappe.db.commit()
 			mock_log.assert_not_called()
+
+	def test_available_entry_in_the_map_is_dropped_not_governed(self):
+		# Defense-in-depth: a non-conforming CP entry of 'available' is treated as ungoverned
+		# (dropped from the governed map), so the map only ever holds teaser/hidden and the
+		# guards' governed => teaser/hidden assumption always holds.
+		catalogue_visibility.persist_from_connection(
+			self._conn(agent_visibility={SLUG: "available", "other-agent": "hidden"})
+		)
+		frappe.db.commit()
+		self.assertEqual(self._stored(), {"other-agent": "hidden"})
+		self.assertFalse(catalogue_visibility.is_operator_governed(SLUG))
