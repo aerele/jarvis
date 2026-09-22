@@ -69,7 +69,9 @@ function baseAccount(overrides = {}) {
 	};
 }
 
-const STUBS = { LayoutHeader: true, JvSpinner: true, PlanCard: true, BillingNotice: true };
+// BillingNotice is NOT stubbed: the pay-now CTA reuses it, and the tests find its
+// real <button> by text. Its only child (frappe-ui Button) is module-mocked anyway.
+const STUBS = { LayoutHeader: true, JvSpinner: true, PlanCard: true };
 
 async function mountPage(accountData) {
 	api.getAccount.mockResolvedValue(accountData || baseAccount());
@@ -1428,6 +1430,7 @@ describe("can_stop_autopay_to_pay: Past-Due pay-now (stop the live mandate, then
 
 		expect(api.getAccount).toHaveBeenCalledTimes(1);
 		expect(wrapper.vm.account.can_reactivate).toBe(true);
+		expect(wrapper.vm.notice).toContain("Auto-retry stopped");
 	});
 
 	it('outcome "already_dead" also reloads the account (same as "neutralized")', async () => {
@@ -1440,6 +1443,7 @@ describe("can_stop_autopay_to_pay: Past-Due pay-now (stop the live mandate, then
 		await flushPromises();
 
 		expect(api.getAccount).toHaveBeenCalledTimes(1);
+		expect(wrapper.vm.notice).toContain("Auto-retry stopped");
 	});
 
 	it('outcome "already_active" shows a success message and reloads', async () => {
