@@ -1339,23 +1339,26 @@ async function resyncPending(source) {
 				approve_run: !!(m.pending_card && m.pending_card.approve_run),
 			}));
 		const pc = await listPendingConfirmations(cid, source);
-		// ok:false is a transient store blip (the strict owner-index read); KEEP whatever is
-		// on screen and let the next tick retry - never wipe the queue on one bad read (the
-		// fail-closed hole that hid every card the live push missed). Mirrors the SPA.
-		if (pc && pc.ok === false) return;
 		// A resync in flight across a startNewChat / conversation switch must not write the
 		// previous conversation's cards onto the new one (freshness guard, mirrors the SPA).
 		if (convId.value !== cid) return;
-		const rows = (pc && pc.data && pc.data.pending) || [];
-		const backstop = rows.map((r) => ({
-			token: r.token,
-			tool: r.tool || "",
-			summary: r.summary || r.preview || "",
-			expires_at: r.expires_at ?? null,
-			approve_run: pendingApproveRun(r.preview),
-		}));
+		// Only a CLEAN ok:true read is authoritative. ok:false (a transient store blip) or a
+		// missing/malformed body keeps the current cards as the base so a live-only card is
+		// not wiped; the durable rowItems ALWAYS apply (this is also the open-seed path, so a
+		// blip on open must still show a parked card's durable row). Mirrors the PWA.
+		const clean = !!(pc && pc.ok !== false && pc.data);
+		const backstop = clean
+			? (pc.data.pending || []).map((r) => ({
+					token: r.token,
+					tool: r.tool || "",
+					summary: r.summary || r.preview || "",
+					expires_at: r.expires_at ?? null,
+					approve_run: pendingApproveRun(r.preview),
+			  }))
+			: [];
+		const base = clean ? [] : stream.value.pending || [];
 		const byToken = new Map();
-		for (const c of [...rowItems, ...backstop]) {
+		for (const c of [...base, ...rowItems, ...backstop]) {
 			if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
 		}
 		stream.value = { ...stream.value, pending: [...byToken.values()] };
