@@ -227,6 +227,7 @@ _TEASER_STRIP_FIELDS = (
 	"min_apps",
 	"default_schedule",
 	"validated_for_fy",
+	"modified",  # a real timestamp fingerprints the agent; not needed on a masked card
 )
 
 
@@ -245,6 +246,11 @@ def _mask_teaser_row(r: dict) -> None:
 	r["description"] = ""
 	r["installable"] = 0
 	r["install_count"] = 0  # a coming-soon card shows no adoption (also hides fingerprinting)
+	# Force the status to the generic teaser label rather than leak the real lifecycle
+	# state (Published/Deprecated/...); "Coming Soon" is discoverable, so the SPA tab
+	# filter still places the masked card in 'available' (never 'featured').
+	if "status" in r:
+		r["status"] = "Coming Soon"
 	for f in _TEASER_STRIP_FIELDS:
 		if f in r:
 			r[f] = None

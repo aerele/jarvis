@@ -886,7 +886,25 @@ class TestOperatorVisibility(AccessGovernanceCase):
 		self._set_vis("teaser")
 		frappe.set_user(self.admin)
 		self.addCleanup(frappe.set_user, "Administrator")
-		self.assertTrue(agents_api.install_agent(SLUG))
+		self.assertTrue(agents_api.install_agent(SLUG)["ok"])
+
+	def test_hidden_refuses_install_even_for_an_allowed_user(self):
+		# hidden is the more security-sensitive state (an operator withdrawal); give it
+		# its own explicit gate test rather than inferring it from the teaser path.
+		self._set_vis("hidden")
+		allow_listing_for(SLUG, roles=[ROLE_GRANTED])
+		self.addCleanup(clear_listing_access, SLUG)
+		frappe.set_user(self.roled)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.install_agent(SLUG)
+
+	def test_leg1_push_excludes_a_hidden(self):
+		self._set_vis("hidden")
+		allow_listing_for(SLUG, roles=[ROLE_GRANTED])
+		self.addCleanup(clear_listing_access, SLUG)
+		slugs = [e["slug"] for e in agent_catalog.build_agent_push_payload()]
+		self.assertNotIn(SLUG, slugs)
 
 	def test_existing_install_survives_masking(self):
 		# Grandfathering: install while available, then the operator masks it — the
@@ -984,6 +1002,32 @@ class TestOperatorVisibility(AccessGovernanceCase):
 		for f in ("nature", "version", "publisher", "validated_for_fy"):
 			self.assertIsNone(masked[0].get(f), f"masked list row leaked {f}")
 		self.assertEqual(masked[0].get("install_count"), 0)
+
+	# The FUTURE-PROOF no-leak assertion: every value on a masked row is either an
+	# allow-listed safe key or falsy/None — so a NEW listing field added later defaults
+	# to "must be redacted" instead of silently leaking (a substring check can't do this).
+	_MASK_SAFE_TRUTHY = {
+		"masked",
+		"opaque_id",
+		"name",
+		"agent_slug",
+		"title",
+		"status",
+		"operator_visibility",
+		"allowed",
+	}
+
+	def test_masked_row_reveals_only_allow_listed_keys(self):
+		self._set_vis("teaser")
+		masked = [r for r in self._list_as(self.plain) if r.get("masked")]
+		self.assertTrue(masked)
+		for k, v in dict(masked[0]).items():
+			if k in self._MASK_SAFE_TRUTHY:
+				continue
+			self.assertFalse(v, f"masked row leaked a truthy value for '{k}': {v!r}")
+		self.assertEqual(masked[0]["title"], "Coming soon")
+		self.assertEqual(masked[0]["status"], "Coming Soon")
+		self.assertTrue(str(masked[0]["agent_slug"]).startswith("cs-"))
 
 	def test_opaque_id_is_not_a_plain_hash_of_the_slug(self):
 		# HMAC (per-site secret), not sha256(slug): else a non-admin precomputes it for
