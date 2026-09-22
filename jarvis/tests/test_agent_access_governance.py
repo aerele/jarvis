@@ -903,3 +903,29 @@ class TestOperatorVisibility(AccessGovernanceCase):
 		self.addCleanup(clear_listing_access, SLUG)
 		slugs = [e["slug"] for e in agent_catalog.build_agent_push_payload()]
 		self.assertNotIn(SLUG, slugs)
+
+	# -- write endpoint + audit (U5) -------------------------------------- #
+	def test_set_visibility_requires_system_manager(self):
+		# Operator-global state: a TENANT Jarvis Admin must NOT be able to flip it.
+		frappe.set_user(self.admin)  # Jarvis Admin, NOT System Manager
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.set_operator_visibility(SLUG, "teaser")
+
+	def test_set_visibility_writes_and_audits(self):
+		self.addCleanup(self._reset_visibility)
+		frappe.set_user("Administrator")  # System Manager
+		res = agents_api.set_operator_visibility(SLUG, "teaser")
+		self.assertEqual(res["visibility"], "teaser")
+		self.assertEqual(frappe.db.get_value(LISTING, SLUG, "operator_visibility"), "teaser")
+		# Audit: the endpoint writes via doc.save() and the listing has track_changes,
+		# so every flip produces a Version (actor + before->after). Frappe suppresses
+		# Version ROWS under flags.in_test, so assert the mechanism here; the actual
+		# Version creation is verified out-of-band (console: count 1->2, data carries
+		# 'operator_visibility').
+		self.assertEqual(frappe.get_meta(LISTING).track_changes, 1)
+
+	def test_set_visibility_rejects_an_unknown_value(self):
+		frappe.set_user("Administrator")
+		with self.assertRaises(frappe.ValidationError):
+			agents_api.set_operator_visibility(SLUG, "bogus")
