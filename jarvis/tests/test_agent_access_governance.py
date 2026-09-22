@@ -710,3 +710,59 @@ def _mk_install(owner: str, reviewer: str | None = None) -> str:
 	frappe.db.set_value(INSTALLATION, doc.name, "owner", owner, update_modified=False)
 	frappe.db.commit()
 	return doc.name
+
+
+# --------------------------------------------------------------------------- #
+# Operator catalogue visibility overlay (available / teaser / hidden)
+# --------------------------------------------------------------------------- #
+class TestOperatorVisibility(AccessGovernanceCase):
+	"""The ``operator_visibility`` overlay is operator-owned RUNTIME state that must
+	survive registry re-sync, exactly like ``allowed_roles`` — otherwise every
+	``bench migrate`` would revert an operator's live availability/masking decision."""
+
+	def _reset_visibility(self):
+		frappe.set_user("Administrator")
+		frappe.db.set_value(
+			LISTING,
+			SLUG,
+			{"operator_visibility": "available", "status": "Published"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+	def test_defaults_to_available(self):
+		# A freshly created listing is 'available' — the catalogue stays lit by default.
+		self.assertEqual(frappe.db.get_value(LISTING, SLUG, "operator_visibility"), "available")
+
+	def test_survives_catalog_resync(self):
+		self.addCleanup(self._reset_visibility)
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "teaser", update_modified=False)
+		frappe.db.commit()
+		agent_catalog.sync_agent_listings()
+		frappe.db.commit()
+		self.assertEqual(
+			frappe.db.get_value(LISTING, SLUG, "operator_visibility"),
+			"teaser",
+			"operator_visibility was clobbered by sync_agent_listings — it must stay out of the values dict",
+		)
+
+	def test_survives_resync_update_branch(self):
+		# The fixture (not in the registry) hits the DEPRECATE branch; a REAL registry
+		# listing hits the UPDATE branch (doc.update(values)) — the live path a periodic
+		# migrate takes for a real agent, and the one where an in-`values` field would clobber.
+		real = frappe.db.get_value(LISTING, {"name": ["!=", SLUG], "status": "Published"}, "name")
+		if not real:
+			self.skipTest("no real registry listing on this bench")
+		prev = frappe.db.get_value(LISTING, real, "operator_visibility")
+
+		def _restore():
+			frappe.set_user("Administrator")
+			frappe.db.set_value(LISTING, real, "operator_visibility", prev, update_modified=False)
+			frappe.db.commit()
+
+		self.addCleanup(_restore)
+		frappe.db.set_value(LISTING, real, "operator_visibility", "teaser", update_modified=False)
+		frappe.db.commit()
+		agent_catalog.sync_agent_listings()
+		frappe.db.commit()
+		self.assertEqual(frappe.db.get_value(LISTING, real, "operator_visibility"), "teaser")

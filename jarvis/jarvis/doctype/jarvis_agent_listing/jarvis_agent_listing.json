@@ -15,6 +15,7 @@
   "version",
   "publisher",
   "status",
+  "operator_visibility",
   "tools_required",
   "doctypes_required",
   "config_keys",
@@ -92,6 +93,15 @@
    "options": "Draft\nPublished\nDeprecated\nComing Soon",
    "in_list_view": 1,
    "in_standard_filter": 1
+  },
+  {
+   "default": "available",
+   "fieldname": "operator_visibility",
+   "fieldtype": "Select",
+   "label": "Operator Visibility",
+   "options": "available\nteaser\nhidden",
+   "in_standard_filter": 1,
+   "description": "Operator-controlled catalogue visibility (runtime overlay, survives catalog sync). available = shown normally; teaser = a masked 'coming soon' card (name/details hidden, not installable); hidden = removed from non-admin discovery, existing installs keep running. Operator/System-Manager state, NEVER written by the catalog sync (like allowed_roles)."
   },
   {
    "fieldname": "tools_required",

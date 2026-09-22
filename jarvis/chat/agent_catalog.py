@@ -124,11 +124,13 @@ def sync_agent_listings() -> dict:
 		# the body from the private bundle store by slug and pushes it to fleet.
 		delivery = "delegate"
 
-		# NOTE: ``allowed_roles`` is deliberately ABSENT — it is bench-admin
-		# state (set via agents_api.set_agent_roles), not registry state. A
-		# re-sync must never clobber an admin's role restrictions: doc.update()
-		# only touches the keys given here, so the loaded child rows survive
-		# the save untouched.
+		# NOTE: ``allowed_roles`` and ``operator_visibility`` are deliberately
+		# ABSENT — both are operator/bench-admin state (roles via
+		# agents_api.set_agent_roles; visibility via set_operator_visibility),
+		# not registry state. A re-sync must never clobber them: doc.update()
+		# only touches the keys given here, so those fields survive the save
+		# untouched. operator_visibility is the runtime catalogue overlay
+		# (available/teaser/hidden) and MUST outlive every ``bench migrate``.
 		values = {
 			"agent_slug": slug,
 			"title": a.get("title") or slug,
