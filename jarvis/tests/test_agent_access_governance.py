@@ -929,3 +929,26 @@ class TestOperatorVisibility(AccessGovernanceCase):
 		frappe.set_user("Administrator")
 		with self.assertRaises(frappe.ValidationError):
 			agents_api.set_operator_visibility(SLUG, "bogus")
+
+	# -- full seam matrix (U7): list_agents_page + search ----------------- #
+	def test_teaser_masked_in_list_agents_page(self):
+		# The SPA calls list_agents_page (paginated), not list_agents — pin the mask there too.
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		env = agents_api.list_agents_page(tab="available", page_length=100)
+		blob = json.dumps(env["rows"], default=str)
+		self.assertNotIn(self.REAL_TITLE, blob)
+		self.assertNotIn(SLUG, blob)
+
+	def test_search_by_real_name_does_not_surface_a_teaser(self):
+		# Searching the real title or slug must not confirm a masked agent (search runs
+		# on the already-masked rows).
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		for term in ("Access Governance", "access-gov"):
+			env = agents_api.list_agents_page(tab="available", search=term, page_length=100)
+			blob = json.dumps(env["rows"], default=str)
+			self.assertNotIn(SLUG, blob, f"search '{term}' surfaced the masked slug")
+			self.assertNotIn(self.REAL_TITLE, blob, f"search '{term}' surfaced the real title")
