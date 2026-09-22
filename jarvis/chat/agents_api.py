@@ -1030,6 +1030,11 @@ def install_agent(agent_slug: str) -> dict:
 			_("You do not have access to this agent. Ask your administrator."),
 			frappe.PermissionError,
 		)
+	# Operator overlay: a teaser (coming-soon preview) or hidden (withdrawn) agent is
+	# not installable — even when it is Published and role-granted. Admins may still
+	# install for testing; the gate is server-side (the SPA never offers the button).
+	if (listing.operator_visibility or "available") != "available" and not has_jarvis_admin_access(me):
+		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
 	if listing.status != "Published":
 		frappe.throw(_("This agent is not available to install."))
 	if frappe.db.exists(INSTALLATION, {"owner": me, "agent": listing.name}):
