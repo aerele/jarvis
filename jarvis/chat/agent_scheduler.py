@@ -198,7 +198,16 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 	# with a schedule set just consumes its slot (it drafts through the board,
 	# not on a cron). A scribe's schedule is optional (manual run-now is the
 	# primary path) but honoured here when set, so periodic re-learning works.
-	listing = frappe.db.get_value(LISTING, row.agent, ["nature", "status"], as_dict=True) or frappe._dict()
+	listing = (
+		frappe.db.get_value(LISTING, row.agent, ["nature", "status", "operator_visibility"], as_dict=True)
+		or frappe._dict()
+	)
+	# Operator-visibility gate: a teaser/hidden (operator-withdrawn) agent's installs are
+	# DISABLED and must not run. Advance the slot so the cadence does not busy-retry; reversible
+	# (agent -> available resumes the schedule, no stored state). Mirrors run_agent_now's gate.
+	if (listing.get("operator_visibility") or "available") in ("teaser", "hidden"):
+		_advance(row, now)
+		return
 	nature = listing.get("nature")
 	if nature not in ("Auditor", "Scribe"):
 		_advance(row, now)

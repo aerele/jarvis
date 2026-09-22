@@ -321,6 +321,38 @@ describe("operator teaser (masked) card", () => {
 	});
 });
 
+// Operator withdrew the agent (teaser/hidden): the OWNER's install shows disabled but stays
+// openable, so they can still view + uninstall it. Distinct from a masked teaser card.
+describe("operator-withdrawn (install_disabled) card", () => {
+	const disabledRow = {
+		agent_slug: "close-auditor",
+		title: "Close Auditor",
+		status: "Published",
+		publisher: "Aerele",
+		version: "1.0.0",
+		description: "Checks the close.",
+		install_count: 3,
+		installed: 1,
+		install_disabled: 1,
+		installed_only: 1,
+	};
+
+	it("shows an 'Unavailable' badge and dims the card", async () => {
+		const w = await mountList({ caps: { review: true, admin: false }, rows: [disabledRow] });
+		expect(w.text()).toContain("Unavailable");
+		expect(w.find(".opacity-60").exists()).toBe(true);
+	});
+
+	it("stays openable (a real button, not masked) so the owner can view/uninstall", async () => {
+		const w = await mountList({ caps: { review: true, admin: false }, rows: [disabledRow] });
+		expect(w.find('[role="img"]').exists()).toBe(false); // not masked
+		const card = w.find('[role="button"]');
+		expect(card.exists()).toBe(true);
+		await card.trigger("click");
+		expect(router.push).toHaveBeenCalled();
+	});
+});
+
 // jarvis#1062 P2-9 (production-readiness audit): wired through to the real
 // component - agentsEmptyState.spec.js covers the pure-function decision.
 describe("Installed tab empty state names Administrator (jarvis#1062 P2-9)", () => {
