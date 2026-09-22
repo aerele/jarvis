@@ -44,5 +44,11 @@ def get_engagement_config() -> dict:
 	try:
 		cfg = frappe.parse_json(raw) if raw else {}
 	except Exception:
+		# Stored config is not valid JSON (bad deploy / manual edit) - treat as unset, but
+		# leave a trail so a corrupt row is discoverable, not silently read as "no config".
+		frappe.log_error(
+			title=f"jarvis get_engagement_config: bad config JSON on {run_row.installation}",
+			message=frappe.get_traceback(),
+		)
 		cfg = {}
 	return cfg if isinstance(cfg, dict) else {}

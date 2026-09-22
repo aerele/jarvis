@@ -1479,8 +1479,10 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 		)
 	# Config pointer, preference order:
 	#  1) explicit_config declared -> hand the tunables inline (no read at all).
-	#  2) the agent's tools_allow includes jarvis__get_engagement_config -> point at the
-	#     zero-arg tool (nothing to fumble - the bench resolves the installation).
+	#  2) the agent's tools_allow includes jarvis__get_engagement_config -> PREFER the
+	#     zero-arg tool (nothing to fumble), but keep the named-doctype get_doc as a fallback
+	#     so a deploy-skew window (app registry ahead of the container plugin / tenant
+	#     tools_allow Apply) degrades to the working A' path, not a dead end.
 	#  3) fallback -> NAME the real doctype (A6/hallucination fix). The friendly
 	#     "engagement configuration" is the customer-facing label (agent_run_steps.py)
 	#     for `Jarvis Agent Installation`; handing the label but not the doctype made a
@@ -1493,6 +1495,12 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			registry_tools_allow(_slug) or []
 		)
 	except Exception:
+		# Never blocks prompt-build; degrades to the branch-3 fallback. The dominant
+		# failure (missing/corrupt registry) already aborts the launch upstream, so a
+		# fault reaching here is genuinely unexpected - log it rather than swallow silently.
+		frappe.log_error(
+			title="jarvis _audit_prompt: config-tool lookup failed", message=frappe.get_traceback()
+		)
 		_has_config_tool = False
 	if explicit_config:
 		config_pointer = (
@@ -1502,7 +1510,9 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 	elif _has_config_tool:
 		config_pointer = (
 			"Read your engagement configuration by calling jarvis__get_engagement_config - it takes "
-			"NO arguments and returns your tunables. Do NOT get_doc any installation or config record."
+			"NO arguments and returns your tunables. If that tool is unavailable, read the "
+			f"`Jarvis Agent Installation` record '{inst.name}' (its `config` field) with jarvis__get_doc "
+			"instead; never invent another doctype for it."
 		)
 	else:
 		config_pointer = (
