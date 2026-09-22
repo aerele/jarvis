@@ -525,7 +525,7 @@
 				</div>
 			</div>
 
-			<div v-if="stream.pending.length" class="jvp-pending">
+			<div v-if="stream.pending.length" class="jvp-pending" role="status" aria-live="polite">
 				<div v-for="(p, pi) in orderedPending" :key="p.token" class="jvp-pending-row">
 					<div class="jvp-pending-txt">
 						<b v-if="orderedPending.length > 1"
@@ -1316,7 +1316,8 @@ function autoGrow() {
 // - so a resync never re-fetches the whole conversation. `source` tags the call for the
 // server's per-layer rescue signal. Best-effort: chat works without it.
 async function resyncPending(source) {
-	if (!convId.value) return;
+	const cid = convId.value;
+	if (!cid) return;
 	try {
 		const toEpoch = (s) => {
 			const t = Date.parse(String(s || "").replace(" ", "T"));
@@ -1337,7 +1338,14 @@ async function resyncPending(source) {
 				expires_at: toEpoch(m.expires_at),
 				approve_run: !!(m.pending_card && m.pending_card.approve_run),
 			}));
-		const pc = await listPendingConfirmations(convId.value, source);
+		const pc = await listPendingConfirmations(cid, source);
+		// ok:false is a transient store blip (the strict owner-index read); KEEP whatever is
+		// on screen and let the next tick retry - never wipe the queue on one bad read (the
+		// fail-closed hole that hid every card the live push missed). Mirrors the SPA.
+		if (pc && pc.ok === false) return;
+		// A resync in flight across a startNewChat / conversation switch must not write the
+		// previous conversation's cards onto the new one (freshness guard, mirrors the SPA).
+		if (convId.value !== cid) return;
 		const rows = (pc && pc.data && pc.data.pending) || [];
 		const backstop = rows.map((r) => ({
 			token: r.token,
@@ -1464,6 +1472,7 @@ async function load() {
 }
 
 function startNewChat() {
+	stopPendingPoll(); // a poll from the conversation being left must not carry over
 	convId.value = "";
 	messages.value = [];
 	// Keep the fence watermarks: the panel can rebind to the SAME conversation
@@ -1813,6 +1822,11 @@ function onRealtime(payload) {
 	}
 
 	const { state: next } = applyEventEx(stream.value, payload);
+
+	// Auto-heal: arm the run-scoped pending poll on a turn start / a card push (mirrors the
+	// SPA/PWA). Arming here - not only in send() - covers a cold-start turn whose run:start
+	// lands after the send-armed poll would have idled out, and a turn not locally initiated.
+	if (payload.kind === "run:start" || payload.kind === "action:pending") startPendingPoll();
 
 	// NB: we deliberately do NOT stop polling when a realtime frame arrives.
 	// Realtime gives the smooth live stream, but the relay can drop the TAIL
