@@ -110,13 +110,24 @@ class JarvisAgentInstallation(Document):
 		set teaser/hidden keeps working (grandfathering). This gate is deliberately
 		SEPARATE from ``_guard_installability``/``evaluate_installability`` so
 		``reconcile_installations`` never strips an existing install from the roster.
-		Admins may still create an install (dogfood/testing)."""
+
+		Two tiers, by who set the visibility:
+		- OPERATOR-GOVERNED (fleet policy) teaser/hidden -> HARD gate: not installable by
+		  ANYONE, tenant admins included (the "disable"/coming-soon guarantee — an unreleased
+		  or withdrawn agent must not be installable anywhere on the fleet).
+		- tenant-local teaser/hidden (a tenant's own catalogue tidy) -> a Jarvis Admin may
+		  still create an install (dogfood/testing), unchanged from Phase 1."""
 		if not self.is_new():
 			return
+		from jarvis import catalogue_visibility
 		from jarvis.permissions import has_jarvis_admin_access
 
 		vis = frappe.db.get_value("Jarvis Agent Listing", self.agent, "operator_visibility") or "available"
-		if vis != "available" and not has_jarvis_admin_access(frappe.session.user):
+		if vis == "available":
+			return
+		if catalogue_visibility.is_operator_governed(self.agent) or not has_jarvis_admin_access(
+			frappe.session.user
+		):
 			frappe.throw(
 				_("This agent is not available to install."),
 				frappe.PermissionError,

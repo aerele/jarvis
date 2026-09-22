@@ -33,6 +33,17 @@ class JarvisAgentListing(Document):
 			return
 		if (self.operator_visibility or "available") == (before.operator_visibility or "available"):
 			return
+		# A slug the operator governs is fleet-owned: read-only to the tenant on EVERY write
+		# surface, even a System Manager. The control-plane pull is the only authoritative
+		# writer (it writes via db.set_value, bypassing validate()), so no tenant-side edit —
+		# and hence no "flip governed->available then install in the window" race — is possible.
+		from jarvis import catalogue_visibility
+
+		if catalogue_visibility.is_operator_governed(self.name):
+			frappe.throw(
+				_("This agent's catalogue visibility is set by the operator and can't be changed here."),
+				frappe.PermissionError,
+			)
 		if "System Manager" not in frappe.get_roles(frappe.session.user):
 			frappe.throw(
 				_("Only a System Manager can change an agent's catalogue visibility."),
