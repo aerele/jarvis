@@ -869,3 +869,37 @@ class TestOperatorVisibility(AccessGovernanceCase):
 		self._set_vis("teaser")
 		masked = [r for r in self._list_as(self.plain) if r.get("masked")]
 		self.assertTrue(masked, "boundary hook wrongly removed the teaser from the SPA catalog")
+
+	# -- install/run gating + push (U4) ----------------------------------- #
+	def test_teaser_refuses_install_even_for_an_allowed_user(self):
+		# A teaser can be Published + role-granted; the overlay gate must still refuse
+		# a NEW install — distinct from the access gate.
+		self._set_vis("teaser")
+		allow_listing_for(SLUG, roles=[ROLE_GRANTED])
+		self.addCleanup(clear_listing_access, SLUG)
+		frappe.set_user(self.roled)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.install_agent(SLUG)
+
+	def test_admin_may_install_a_teaser(self):
+		self._set_vis("teaser")
+		frappe.set_user(self.admin)
+		self.addCleanup(frappe.set_user, "Administrator")
+		self.assertTrue(agents_api.install_agent(SLUG))
+
+	def test_existing_install_survives_masking(self):
+		# Grandfathering: install while available, then the operator masks it — the
+		# existing install still validates on re-save (NOT wired into installability).
+		name = _mk_install(self.plain)
+		self._set_vis("teaser")
+		frappe.get_doc(INSTALLATION, name).save(ignore_permissions=True)  # must NOT raise
+		self.assertTrue(frappe.db.exists(INSTALLATION, name))
+
+	def test_leg1_push_excludes_a_teaser(self):
+		# A granted, Published teaser must NOT be pre-provisioned onto containers.
+		self._set_vis("teaser")
+		allow_listing_for(SLUG, roles=[ROLE_GRANTED])
+		self.addCleanup(clear_listing_access, SLUG)
+		slugs = [e["slug"] for e in agent_catalog.build_agent_push_payload()]
+		self.assertNotIn(SLUG, slugs)

@@ -442,11 +442,16 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		allowed_listings = frappe.get_all(
 			LISTING,
 			filters={"status": "Published"},
-			fields=["name", "agent_slug"],
+			fields=["name", "agent_slug", "operator_visibility"],
 			order_by="name asc",
 		)
 		for lst in allowed_listings:
 			if lst.name in seen_agents or lst.name not in granted:
+				continue
+			# Operator overlay: a teaser (coming-soon) / hidden (withdrawn) agent is not
+			# installable, so leg 1 must not pre-provision its delegate into a container.
+			# (Leg 2 — existing enabled installs — is untouched: grandfathering.)
+			if (lst.operator_visibility or "available") != "available":
 				continue
 			# Same reasoning as the install leg's ``installable`` check: an agent
 			# whose min_apps / required DocTypes are absent has no data to evaluate,
