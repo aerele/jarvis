@@ -16,7 +16,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.api import _ARMED_SKIP_COVERED, _ARMED_SKIP_NEVER, _GATED_WRITES
 from jarvis.permissions import ensure_jarvis_user_role
-from jarvis.tests.test_auto_apply import (
+from jarvis.tests._conv_helpers import (
 	NON_ADMIN_USER,
 	_ensure_non_admin_user,
 	_make_conv,
@@ -210,8 +210,16 @@ class TestArmedSkipPartition(FrappeTestCase):
 			"never (always parks) - a tool in neither is an unclassified fail-open gap",
 		)
 
-	def test_irreversible_trio_never_skips(self):
-		self.assertEqual(_ARMED_SKIP_NEVER, frozenset({"cancel_doc", "delete_doc", "amend_doc"}))
+	def test_brake_is_the_trio_plus_create_custom_skill_and_call_connector(self):
+		# Unified brake (design A4): the irreversible trio + create_custom_skill (a
+		# consequential meta-write) + call_connector (opaque per-action reversibility)
+		# always park. The macro and skill modes now share ONE brake, so
+		# create_custom_skill NO LONGER skips inside an armed macro - a deliberate
+		# behaviour change from the pre-unification macro set that covered it.
+		self.assertEqual(
+			_ARMED_SKIP_NEVER,
+			frozenset({"cancel_doc", "delete_doc", "amend_doc", "create_custom_skill", "call_connector"}),
+		)
 
 	def test_run_method_is_covered(self):
 		# run_method gates in ordinary chat but skips inside an armed macro (D5).

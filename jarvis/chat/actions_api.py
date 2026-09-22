@@ -653,6 +653,9 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 				record["args"],
 				result,
 				action_outcome="confirmed" if ok else "failed",
+				# PR-1: flip the parked PENDING action-row into this receipt in place
+				# (else insert, for a directly-minted / pre-deploy token).
+				flip_token=token,
 			)
 		except Exception:
 			frappe.log_error(
@@ -801,6 +804,9 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 				record["args"],
 				result,
 				action_outcome="confirmed" if ok else "failed",
+				# PR-1: flip the parked PENDING action-row into this receipt in place
+				# (else insert, for a directly-minted / pre-deploy token).
+				flip_token=token,
 			)
 		except Exception:
 			frappe.log_error(
@@ -987,7 +993,7 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	if conv:
 		# Durable "discarded" chip: what the user declined, in their transcript.
 		try:
-			api.persist_tool_receipt(conv, tool, args, None, action_outcome="discarded")
+			api.persist_tool_receipt(conv, tool, args, None, action_outcome="discarded", flip_token=token)
 		except Exception:
 			frappe.log_error(title="dismiss_tool receipt failed", message=frappe.get_traceback())
 		# Correct the agent's stale pending_confirmation memory on its next turn.
@@ -1011,7 +1017,7 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 
 @frappe.whitelist()
 @require_jarvis_user
-def list_pending_confirmations(conversation: str | None = None) -> dict:
+def list_pending_confirmations(conversation: str | None = None, source: str | None = None) -> dict:
 	"""Re-surface the caller's OWN currently-parked confirmation cards after a
 	reload/reconnect (issue #186, enables R3's fix for #3).
 
@@ -1020,6 +1026,14 @@ def list_pending_confirmations(conversation: str | None = None) -> dict:
 	exactly what the ``action:pending`` realtime event already delivers to this
 	same owner's UI - token + tool + preview + summary + conversation + run_id -
 	so no new information is leaked. Human cookie-session only.
+
+	``source`` marks HOW the client called this: the always-present "re-check"
+	control passes ``"recheck"`` (a deliberate human pull), vs an ordinary
+	reload/resync. When a re-check SURFACES a card we emit a measurable signal
+	(AC-detect). Read it as an UPPER BOUND on live-delivery misses, not an exact
+	count: the lever is always present, so a user who clicks it while a card is
+	already on screen also counts. Over-counting is the safe direction (a false
+	positive costs a look, a false negative hides the bug).
 	"""
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
@@ -1035,4 +1049,21 @@ def list_pending_confirmations(conversation: str | None = None) -> dict:
 		items = pending_confirm.list_items_for_owner(frappe.session.user, conversation=conv, strict=True)
 	except pending_confirm.PendingConfirmStorageError as exc:
 		return _confirmation_storage_error(exc)
+	# AC-detect (backstop-rescue signal): a manual re-check that surfaces a card is an
+	# upper-bound signal the auto delivery path may have missed it. Log to the
+	# jarvis.chat.latency channel (the same greppable channel cards_open uses) so the
+	# rescue rate is measurable. `conversation` is the triage key; the owner is derivable
+	# from it, so we do NOT log the user's email here (PII hygiene - no other action-card
+	# signal carries identity). Best-effort: a signal must never fail the re-surface.
+	if source == "recheck" and items:
+		try:
+			from jarvis.chat.latency import get_logger
+
+			get_logger().info(
+				"action_card_rescue count=%d conversation=%s",
+				len(items),
+				conv or "",
+			)
+		except Exception:
+			pass
 	return {"ok": True, "data": {"pending": items}}

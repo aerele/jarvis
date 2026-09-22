@@ -57,7 +57,9 @@ describe("parked confirmations resync from durable state at every terminal", () 
 	});
 
 	it("the resync is freshness-guarded against a mid-flight conversation switch", () => {
-		const fn = src.slice(src.indexOf("async function resyncPendingConfirmations(id) {"));
+		const fn = src.slice(
+			src.indexOf("async function resyncPendingConfirmations(id, source) {")
+		);
 		const body = fn.slice(0, fn.indexOf("\n}"));
 		expect(body).toContain("if (currentId.value !== id) return;");
 		// and never throws into the terminal handler that now calls it unawaited

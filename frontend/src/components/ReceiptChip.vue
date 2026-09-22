@@ -83,6 +83,12 @@
 					:title="'Ran automatically under the approved skill run ' + armedSkill"
 					>· {{ armedSkill }}</span
 				>
+				<span
+					v-if="requestApproved"
+					class="jv-receipt-armed"
+					title="Ran automatically because you approved this request (confirm all)"
+					>· you approved this request</span
+				>
 				<a
 					v-if="singleUrl"
 					:href="singleUrl"
@@ -176,6 +182,13 @@ const armedMacro = computed(() => props.message.armed_by_macro || "");
 // "Approve & run" authorized this write without its own confirmation card.
 // Mutually exclusive with armedMacro (jarvis/api.py never sets both).
 const armedSkill = computed(() => props.message.armed_by_skill || "");
+// Request-scoped "confirm all" (design Layer B): ran uncarded because the user
+// approved the whole request. Unlike a macro/skill run there is no external armer
+// NAME, so a bare auto_applied chip would carry no "why"; this fallback labels it.
+// Only for an auto_applied outcome with neither macro nor skill provenance.
+const requestApproved = computed(
+	() => view.value.icon === "auto_applied" && !armedMacro.value && !armedSkill.value
+);
 
 // A single-record outcome with a Desk link → show a compact "open" affordance
 // (the record name is already in the title). Bulk uses the details expander.
