@@ -993,6 +993,25 @@ class TestCatalogModelsForPool(FrappeTestCase):
 		with patch("jarvis.admin_client.get_model_catalog", return_value=self.CATALOG):
 			return api._catalog_models_for_pool(self._settings(rows))
 
+	def test_native_claude_plan_offers_only_its_saved_model(self):
+		"""A Claude plan row runs on the agent's claude-cli runtime, which fleet
+		binds to the ONE saved model id. Expanding it to the whole Anthropic
+		subscription tier offered ids the container cannot serve, and a pick like
+		claude-sonnet-5 fell back to the pool primary (ChatGPT) with no error."""
+		out = self._run(
+			[
+				self._sub_row("gpt-5.5", "openai"),
+				self._sub_row("claude-opus-5", "anthropic"),
+			]
+		)
+		self.assertNotIn("anthropic", out, "no catalog expansion for a native Claude plan")
+		# The cliproxy-backed ChatGPT row still expands to its subscription tier.
+		self.assertEqual([r["model"] for r in out["openai"]], ["gpt-5.5", "gpt-5.4"])
+
+	def test_native_claude_plan_alone_offers_nothing_beyond_the_row(self):
+		out = self._run([self._sub_row("claude-opus-5", "anthropic")])
+		self.assertEqual(out, {})
+
 	def test_offers_catalog_models_for_a_configured_provider_only(self):
 		out = self._run([{"enabled": 1, "provider": "anthropic", "model": "claude-sonnet-4-6"}])
 		self.assertEqual(list(out), ["anthropic"], "a provider with no credential must not appear")

@@ -1891,6 +1891,11 @@ def _api_key_models() -> dict[str, list[dict]]:
 	return out
 
 
+# The chat-subscription upstream that runs on the agent's native Claude runtime
+# rather than through cliproxy (see pool_serialize.has_native_claude_subscription).
+_NATIVE_CLAUDE_UPSTREAM = "anthropic"
+
+
 def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 	"""Provider id -> catalog models the chat picker may offer BEYOND the exact ids
 	saved in the pool, for the providers this tenant has ALREADY configured.
@@ -1962,6 +1967,12 @@ def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 					up = (a.get("upstream") or "").strip() if isinstance(a, dict) else ""
 					if up:
 						wanted_sub.add(up)
+			# A Claude plan is NOT a cliproxy account: fleet binds exactly the saved
+			# model id to the agent's claude-cli runtime, so no other Anthropic id
+			# is served without a re-save. Offering the rest of the tier here made
+			# a "claude-sonnet-5" pick silently answer from the pool primary. The
+			# saved row itself still reaches the picker through pool_models.
+			wanted_sub.discard(_NATIVE_CLAUDE_UPSTREAM)
 		elif accepts_any_model(m):
 			pid = normalize_provider(getattr(m, "provider", "") or "")
 			if pid:
