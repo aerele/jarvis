@@ -838,3 +838,34 @@ class TestOperatorVisibility(AccessGovernanceCase):
 		self.assertIsNotNone(row, "owner lost sight of their own installed agent")
 		self.assertEqual(row.get("masked", 0), 0)
 		self.assertIn(self.REAL_TITLE, json.dumps(row, default=str))
+
+	# -- doctype boundary (U3): the raw REST / Desk path ------------------- #
+	def test_raw_get_list_hides_teaser_from_a_plain_user(self):
+		# The generic API bypasses the SPA masking; the boundary hook must keep a
+		# plain user from listing a teaser row (whose raw title is the real name).
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		rows = frappe.get_list(LISTING, filters={"name": SLUG}, fields=["name", "title"])
+		self.assertEqual(rows, [], "raw get_list leaked a teaser row to a plain user")
+
+	def test_raw_get_list_admin_still_sees_teaser(self):
+		self._set_vis("teaser")
+		frappe.set_user(self.admin)
+		self.addCleanup(frappe.set_user, "Administrator")
+		rows = frappe.get_list(LISTING, filters={"name": SLUG}, fields=["name", "title"])
+		self.assertEqual([r["title"] for r in rows], [self.REAL_TITLE])
+
+	def test_raw_get_doc_read_denied_for_teaser_to_a_plain_user(self):
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.PermissionError):
+			frappe.get_doc(LISTING, SLUG).check_permission("read")
+
+	def test_app_catalog_still_masks_teaser_after_boundary(self):
+		# Regression guard: the boundary hook (get_list) must NOT strip the teaser from
+		# the SPA catalog (_enriched_catalog uses get_all) — it stays, masked.
+		self._set_vis("teaser")
+		masked = [r for r in self._list_as(self.plain) if r.get("masked")]
+		self.assertTrue(masked, "boundary hook wrongly removed the teaser from the SPA catalog")
