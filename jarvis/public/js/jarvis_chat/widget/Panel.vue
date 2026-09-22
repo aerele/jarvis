@@ -784,6 +784,7 @@ import { turnErrorInfo } from "../../turn_errors.mjs";
 import { contextLabel } from "./desk_context.mjs";
 import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
+import { isShowCardRequest } from "./showCardRequest.mjs";
 import { resizeFrom } from "./panel_size.mjs";
 import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
 import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
@@ -1678,6 +1679,20 @@ async function send() {
 	const text = draft.value.trim();
 	const atts = attachments.value.slice();
 	if ((!text && !atts.length) || sending.value || stream.value.live) return;
+	// Layered re-check phase 2: a typed "show it" / "I can't see the card" re-surfaces a
+	// parked card instantly (source="typed"), no model round-trip. Only when it ACTUALLY
+	// surfaces one do we swallow the message; otherwise fall through to a normal send so a
+	// false positive never eats a message and the persona backstop stays reachable.
+	if (convId.value && !atts.length && isShowCardRequest(text)) {
+		const before = (stream.value.pending || []).length;
+		await resyncPending("typed");
+		if ((stream.value.pending || []).length > before) {
+			draft.value = "";
+			await nextTick();
+			autoGrow();
+			return;
+		}
+	}
 	sending.value = true;
 	// Auto-heal: poll for a parked card while this turn is in flight (self-stops after
 	// it settles + a couple trailing reconciles).

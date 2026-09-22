@@ -4468,6 +4468,7 @@ import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
 import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
+import { isShowCardRequest } from "@/lib/showCardRequest";
 import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
 import { shouldOfferFeedback, markRated, markIgnored } from "@/lib/feedbackGate";
@@ -9352,6 +9353,21 @@ async function send(textArg, resendAck) {
 		if (compactCmd.hint) await runCompact(compactCmd.hint);
 		else openCompactDialog("");
 		return;
+	}
+	// Layered re-check phase 2: a typed "show it" / "I can't see the card" re-surfaces a
+	// parked card instantly (source="typed"), no model round-trip. Only when it ACTUALLY
+	// surfaces one do we swallow the message; otherwise it falls through to a normal send,
+	// so a false positive never eats a message and the persona "show it" backstop stays
+	// reachable. Main-composer sends only (not resend/prefill).
+	if (fromMain && currentId.value && isShowCardRequest(text)) {
+		const before = visiblePendingActions.value.length;
+		seedPendingFromRows(messages.value, currentId.value);
+		await resyncPendingConfirmations(currentId.value, "typed");
+		if (visiblePendingActions.value.length > before) {
+			input.value = "";
+			notify("Found a pending confirmation.", { type: "success" });
+			return;
+		}
 	}
 	// A compaction in flight must never race a turn writing the same context.
 	// canSend already darkens Send while compacting, but Enter routes here
