@@ -2611,23 +2611,12 @@ const upstreamOpts = [
 	{ value: "xai", label: "xAI Grok" },
 	{ value: "kimi", label: "Kimi (Moonshot)" },
 ];
-<<<<<<< HEAD
-// upstream value -> the OAuth provider label the backend _PROVIDER_OAUTH_MAP is
-// keyed by (begin_pool_account_signin needs the label, not the upstream value).
-// MUST match jarvis/oauth/providers.py _PROVIDER_OAUTH_MAP keys.
-const UPSTREAM_OAUTH_PROVIDER = {
-	openai: "OpenAI",
-	xai: "xAI Grok",
-	kimi: "Kimi (Moonshot)",
-};
-=======
 // Use the same provider labels for selection, saving and source chips. Claude
 // signs in through its own relay (beginClaudeCliLogin, no `provider` argument);
 // the other providers pass this label to beginPoolAccountSignin for OAuth.
 const UPSTREAM_PROVIDER = Object.fromEntries(
 	upstreamOpts.map(({ value, label }) => [value, label])
 );
->>>>>>> 25a9fd1 (feat(settings): connect a Claude plan through the official browser sign-in)
 // JvCombo speaks display LABELS; a row stores `upstream` as the VALUE the pool spec
 // requires ("openai" / "google"). Bridge the two rather than letting "OpenAI" reach
 // the spec (the fleet validates upstream against openai|anthropic|google and 422s).
