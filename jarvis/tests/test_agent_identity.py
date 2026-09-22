@@ -446,6 +446,17 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertIn("jarvis__get_doc", bare_msg)
 		self.assertIn("INST-1", bare_msg)  # the installation ROW name is still handed
 		self.assertNotIn("read it there", bare_msg)
+		# fix #1: when the agent's tools_allow includes the zero-arg tool, the prompt
+		# points at it - nothing for a weak model to fumble, and NO doctype is named.
+		from unittest import mock
+
+		with mock.patch(
+			"jarvis.chat.agent_catalog.registry_tools_allow",
+			return_value=["jarvis__get_engagement_config", "jarvis__get_doc"],
+		):
+			tool_msg = agent_scheduler._audit_prompt(bare, inst, trigger="manual", scope={})
+		self.assertIn("jarvis__get_engagement_config", tool_msg)
+		self.assertNotIn("Jarvis Agent Installation", tool_msg)
 
 	# ------------------------------------------------------------------ #
 	# (e) run executes AS run_as_user (impersonate), not the owner

@@ -1477,22 +1477,39 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			"not read your installation to obtain THESE values. Keep every other field your skill "
 			f"builds into config.json. {json.dumps(explicit_config, sort_keys=True)}"
 		)
-	config_pointer = (
-		"Your tenant's engagement tunables are handed below (authoritative) - use them exactly and "
-		"build the rest of your config.json as your skill directs."
-		if explicit_config
-		# A6/hallucination fix: NAME the real doctype. The friendly "engagement
-		# configuration" is the customer-facing label (agent_run_steps.py) for
-		# `Jarvis Agent Installation`; handing the model the label but not the
-		# doctype made a weak model invent one ("Jarvis Engagement Configuration").
-		# The two auditors that read config today (close-auditor, fixed-asset)
-		# already name it exactly this way and never hallucinate.
-		else (
+	# Config pointer, preference order:
+	#  1) explicit_config declared -> hand the tunables inline (no read at all).
+	#  2) the agent's tools_allow includes jarvis__get_engagement_config -> point at the
+	#     zero-arg tool (nothing to fumble - the bench resolves the installation).
+	#  3) fallback -> NAME the real doctype (A6/hallucination fix). The friendly
+	#     "engagement configuration" is the customer-facing label (agent_run_steps.py)
+	#     for `Jarvis Agent Installation`; handing the label but not the doctype made a
+	#     weak model invent one ("Jarvis Engagement Configuration").
+	try:
+		from jarvis.chat.agent_catalog import registry_tools_allow
+
+		_slug = listing.get("agent_slug") or listing.get("name")
+		_has_config_tool = bool(_slug) and "jarvis__get_engagement_config" in (
+			registry_tools_allow(_slug) or []
+		)
+	except Exception:
+		_has_config_tool = False
+	if explicit_config:
+		config_pointer = (
+			"Your tenant's engagement tunables are handed below (authoritative) - use them exactly and "
+			"build the rest of your config.json as your skill directs."
+		)
+	elif _has_config_tool:
+		config_pointer = (
+			"Read your engagement configuration by calling jarvis__get_engagement_config - it takes "
+			"NO arguments and returns your tunables. Do NOT get_doc any installation or config record."
+		)
+	else:
+		config_pointer = (
 			f"Your engagement configuration is the `Jarvis Agent Installation` record "
 			f"'{inst.name}' (its `config` field) - read it with jarvis__get_doc if your skill "
 			f"needs it. That is the ONLY configuration record; never invent another doctype for it."
 		)
-	)
 	return (
 		f"[Automated {trigger} run] Run your bundled playbook for this trigger now over "
 		f"the scope below. {config_pointer} Follow your skill exactly and do only what it "
