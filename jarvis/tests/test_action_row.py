@@ -16,7 +16,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.chat import pending_confirm
+from jarvis.chat import pending_confirm, session_lifecycle
 from jarvis.chat.actions_api import confirm_tool, dismiss_tool
 from jarvis.chat.api import get_conversation
 
@@ -252,3 +252,209 @@ class TestFlipActionRow(FrappeTestCase):
 		self.assertFalse(same[0].pending_card)  # minimized
 		self.assertEqual(len(self._pending_rows()), 0)  # no dangling pending row
 		self.assertFalse(frappe.db.exists("ToDo", {"description": "flip-cancel-xyz"}))
+
+
+class TestActionCardHealth(FrappeTestCase):
+	"""PR 4 (Phase 5, AC-detect): the action-card DELIVERY-health reconciliation and
+	the manual-re-check RESCUE signal. Nothing here flips a row or changes execution;
+	it is measurement + alerting so a recurrence of the invisible-card bug is DETECTED
+	(hourly via the gauge, immediately via the rescue signal) instead of silent.
+
+	Spec: docs/superpowers/specs/2026-09-21-action-card-overhaul-design.md (§9)."""
+
+	def setUp(self):
+		super().setUp()
+		self.owner = frappe.session.user  # Administrator under the test runner
+		frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
+		self.conv = _make_conversation()
+		self._seq = 0
+		self._minted = []
+		self.addCleanup(self._cleanup)
+
+	def _cleanup(self):
+		# Redis is not rolled back by FrappeTestCase - drop any live tokens we minted
+		# and the owner index so the site-wide gauge/list stay isolated.
+		for token in self._minted:
+			try:
+				pending_confirm.consume(token, owner=self.owner, conversation=self.conv)
+			except Exception:
+				pass
+		frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
+		frappe.delete_doc("Jarvis Conversation", self.conv, force=True, ignore_permissions=True)
+
+	def _insert_pending_row(self, token, expires_at):
+		"""Insert a durable role="tool" pending action-row bound to `token`, expiring at
+		`expires_at`. Un-committed, so it is visible to the reconcile SQL in this same
+		transaction and rolled back at test end."""
+		self._seq += 1
+		m = frappe.get_doc(
+			{
+				"doctype": "Jarvis Chat Message",
+				"conversation": self.conv,
+				"seq": self._seq,
+				"role": "tool",
+				"tool_status": "pending",
+				"tool_call_id": token,
+				"pending_card": frappe.as_json({"kind": "verb", "verb": "submit"}),
+				"expires_at": expires_at,
+			}
+		)
+		m.insert(ignore_permissions=True)
+		return m.name
+
+	def _stranded_ts(self):
+		"""An expiry just past the buffer (so it counts) and near NOW (so it sorts to the
+		top of the DESC scan, inside the LIMIT, regardless of site-wide leftovers).
+
+		The delta assertions assume the test site holds fewer than _RECONCILE_SCAN_MAX
+		in-window pending rows; on a fresh jarvis.test that always holds. If it ever did
+		not, inserting a near-now probe could displace the oldest in-window row out of the
+		LIMIT and skew the delta - use a scoped fixture then."""
+		return frappe.utils.add_to_date(
+			frappe.utils.now_datetime(), seconds=-(session_lifecycle._STRANDED_BUFFER_S + 60)
+		)
+
+	def _mint_live(self):
+		token = pending_confirm.mint(
+			conversation=self.conv,
+			owner=self.owner,
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "x"},
+			run_id="",
+			preview={"preview": True},
+		)
+		self.assertTrue(token)
+		self._minted.append(token)
+		return token
+
+	def test_reconcile_counts_stranded_dead_token_row(self):
+		"""A 'pending' row whose token is DEAD (unknown to Redis) and that expired within
+		the rolling window (past the buffer) is counted as stranded - the F6 divergence a
+		delivery/resolution failure leaves behind."""
+		before = session_lifecycle.reconcile_action_cards()["stranded"]
+		self._insert_pending_row("dead_tok_stranded_xyz", self._stranded_ts())
+		after = session_lifecycle.reconcile_action_cards()["stranded"]
+		self.assertEqual(after, before + 1)
+
+	def test_reconcile_ignores_live_token_row(self):
+		"""A 'pending' row past the buffer but whose token is STILL LIVE is a legit
+		in-flight card (we raced its expires_at), NOT stranded - the dead-token
+		discriminator is what separates a failure from a slow confirm."""
+		token = self._mint_live()
+		before = session_lifecycle.reconcile_action_cards()["stranded"]
+		self._insert_pending_row(token, self._stranded_ts())
+		after = session_lifecycle.reconcile_action_cards()["stranded"]
+		self.assertEqual(after, before)
+
+	def test_reconcile_ignores_fresh_row(self):
+		"""A 'pending' row that expired only recently (inside the buffer grace) is NOT yet
+		stranded - we never race a just-expired card."""
+		fresh = frappe.utils.add_to_date(
+			frappe.utils.now_datetime(), seconds=-(session_lifecycle._STRANDED_BUFFER_S // 2)
+		)
+		before = session_lifecycle.reconcile_action_cards()["stranded"]
+		self._insert_pending_row("dead_tok_fresh_xyz", fresh)
+		after = session_lifecycle.reconcile_action_cards()["stranded"]
+		self.assertEqual(after, before)
+
+	def test_reconcile_ignores_row_outside_window(self):
+		"""A long-expired 'pending' row (older than the rolling window) is NOT counted, so
+		'stranded' is a RATE of recent failures, not a monotonic backlog of ancient cruft."""
+		old = frappe.utils.add_to_date(
+			frappe.utils.now_datetime(), seconds=-(session_lifecycle._STRANDED_WINDOW_S + 3600)
+		)
+		before = session_lifecycle.reconcile_action_cards()["stranded"]
+		self._insert_pending_row("dead_tok_ancient_xyz", old)
+		after = session_lifecycle.reconcile_action_cards()["stranded"]
+		self.assertEqual(after, before)
+
+	def test_reconcile_returns_cards_open_from_gauge(self):
+		"""The reconcile result carries the live open-card gauge (a minted card registers
+		on it), so the hourly tick measures both open + stranded."""
+		before = session_lifecycle.reconcile_action_cards()["cards_open"]
+		self._mint_live()
+		after = session_lifecycle.reconcile_action_cards()["cards_open"]
+		self.assertEqual(after, before + 1)
+
+	def test_reconcile_alerts_over_threshold(self):
+		"""Past the stranded threshold, the tick raises a Google-able alert (frappe.log_error
+		with a fixed title) so a delivery-failure spike pages someone."""
+		self._insert_pending_row("dead_tok_alert_xyz", self._stranded_ts())
+		# Force not-deduped so the assertion is isolated from any real Error Log the cron may
+		# have left on this site within the dedup window.
+		with (
+			patch.object(session_lifecycle, "_STRANDED_ALERT", 0),
+			patch.object(session_lifecycle, "_action_card_alert_deduped", return_value=False),
+			patch.object(frappe, "log_error") as le,
+		):
+			session_lifecycle.reconcile_action_cards()
+		titles = [(c.kwargs.get("title") or (c.args[0] if c.args else "")) for c in le.call_args_list]
+		self.assertIn(session_lifecycle._ACTION_CARD_ALERT_TITLE, titles)
+
+	def test_reconcile_alert_suppressed_when_deduped(self):
+		"""When an alert already fired within the dedup window, an over-threshold tick does
+		NOT re-alert (no hourly Error Log / email spam on a sustained condition)."""
+		self._insert_pending_row("dead_tok_dedup_xyz", self._stranded_ts())
+		with (
+			patch.object(session_lifecycle, "_STRANDED_ALERT", 0),
+			patch.object(session_lifecycle, "_action_card_alert_deduped", return_value=True),
+			patch.object(frappe, "log_error") as le,
+		):
+			session_lifecycle.reconcile_action_cards()
+		titles = [(c.kwargs.get("title") or (c.args[0] if c.args else "")) for c in le.call_args_list]
+		self.assertNotIn(session_lifecycle._ACTION_CARD_ALERT_TITLE, titles)
+
+	def test_reconcile_redis_outage_does_not_fabricate_stranded(self):
+		"""C1 fail-safe: during a Redis OUTAGE the token store's default read SWALLOWS the
+		error and returns None (indistinguishable from a dead token). reconcile must use the
+		strict read (which RAISES) so a recently-expired pending row is NOT counted as
+		stranded - an outage must never fabricate a false 'delivery-failure' alert."""
+
+		def _peek_outage(token, *, strict=False):
+			if strict:
+				raise pending_confirm.PendingConfirmStorageError("redis down")
+			return None  # the buggy swallow the strict read must avoid
+
+		self._insert_pending_row("dead_tok_outage_xyz", self._stranded_ts())
+		with patch("jarvis.chat.pending_confirm.peek", side_effect=_peek_outage):
+			result = session_lifecycle.reconcile_action_cards()
+		self.assertEqual(result["stranded"], 0)  # nothing counted while the store is down
+
+	def test_reconcile_no_alert_under_threshold(self):
+		"""Under both thresholds the tick is silent (logs the metric, raises no alert)."""
+		self._insert_pending_row("dead_tok_quiet_xyz", self._stranded_ts())
+		with (
+			patch.object(session_lifecycle, "_STRANDED_ALERT", 10**9),
+			patch.object(session_lifecycle, "_CARDS_OPEN_ALERT", 10**9),
+			patch.object(frappe, "log_error") as le,
+		):
+			session_lifecycle.reconcile_action_cards()
+		titles = [(c.kwargs.get("title") or (c.args[0] if c.args else "")) for c in le.call_args_list]
+		self.assertNotIn("action-card health threshold exceeded", titles)
+
+	def test_recheck_source_emits_rescue_signal(self):
+		"""A manual re-check (source="recheck") that SURFACES a card emits the
+		action_card_rescue signal - the live delivery path missed it, and now that miss is
+		measured, not asserted."""
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		self._mint_live()
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			r = list_pending_confirmations(conversation=self.conv, source="recheck")
+		self.assertTrue(r["ok"])
+		self.assertTrue(r["data"]["pending"])  # a card was surfaced
+		msgs = [c.args[0] for c in gl.return_value.info.call_args_list if c.args]
+		self.assertTrue(any("action_card_rescue" in m for m in msgs))
+
+	def test_no_source_emits_no_rescue_signal(self):
+		"""An ordinary resync (no source) never emits the rescue signal, even when it
+		surfaces a card - only the human-driven lever counts as a rescue."""
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		self._mint_live()
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			r = list_pending_confirmations(conversation=self.conv)
+		self.assertTrue(r["ok"])
+		self.assertTrue(r["data"]["pending"])
+		msgs = [c.args[0] for c in gl.return_value.info.call_args_list if c.args]
+		self.assertFalse(any("action_card_rescue" in m for m in msgs))

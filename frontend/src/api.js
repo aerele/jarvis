@@ -288,8 +288,14 @@ export const dismissTool = (token, conversation) =>
 // Resync (issue #186, R3 fix for #3): re-surface the caller's own currently
 // parked confirmation cards after a reload/reconnect. Returns
 // {ok, data:{pending:[{token, tool, preview, summary, conversation, run_id}]}}.
-export const listPendingConfirmations = (conversation) =>
-	call(AC + "list_pending_confirmations", { conversation: conversation || "" });
+// `source` is an optional provenance tag: the manual "re-check for approvals"
+// lever passes "recheck" so the backend can count how often the human-driven
+// backstop surfaces a card the primary delivery missed (AC-detect rescue signal).
+export const listPendingConfirmations = (conversation, source) =>
+	call(AC + "list_pending_confirmations", {
+		conversation: conversation || "",
+		...(source ? { source } : {}),
+	});
 
 export async function sendMessage(
 	conversation,

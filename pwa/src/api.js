@@ -115,9 +115,13 @@ export const dropFile = (file_url, file_name) =>
 // `action:pending` event carrying a one-time token. confirm_tool is the ONLY
 // path that runs the parked call. There is no deny endpoint by design: dropping
 // the card leaves the token to expire, which is exactly what "no" means.
-export const listPendingConfirmations = (conversation) =>
+// `source` is an optional provenance tag: the manual "re-check for approvals"
+// lever passes "recheck" so the backend can count how often the human-driven
+// backstop surfaces a card the primary delivery missed (AC-detect rescue signal).
+export const listPendingConfirmations = (conversation, source) =>
 	call("jarvis.chat.actions_api.list_pending_confirmations", {
 		conversation: conversation || "",
+		...(source ? { source } : {}),
 	});
 export const confirmTool = (token, conversation) =>
 	call("jarvis.chat.actions_api.confirm_tool", { token, conversation: conversation || "" });

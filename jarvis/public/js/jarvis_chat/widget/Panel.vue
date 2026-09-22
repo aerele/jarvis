@@ -580,7 +580,7 @@
 					padding: 3px;
 				"
 				aria-label="Re-check for a pending confirmation that did not appear"
-				@click="load"
+				@click="load({ recheck: true })"
 			>
 				Don't see a confirmation? Re-check
 			</button>
@@ -1301,7 +1301,11 @@ function autoGrow() {
 // The panel's contract is to continue where the user left off, so the first
 // open resolves the newest conversation and restores it. A user with no history
 // gets the empty state, and an id is minted on first send.
-async function load() {
+async function load(opts) {
+	// `opts.recheck` marks a load driven by the manual "re-check for approvals"
+	// lever (vs. an open / turn-settle refresh), so the backstop query below can
+	// tag itself and the server can count human-driven rescues (AC-detect).
+	const fromRecheck = !!(opts && opts.recheck === true);
 	// Only blank the panel when there is nothing on screen yet; a refresh over
 	// an existing thread should be invisible.
 	loading.value = messages.value.length === 0;
@@ -1359,7 +1363,10 @@ async function load() {
 					expires_at: toEpoch(m.expires_at),
 					approve_run: !!(m.pending_card && m.pending_card.approve_run),
 				}));
-			const pc = await listPendingConfirmations(convId.value);
+			const pc = await listPendingConfirmations(
+				convId.value,
+				fromRecheck ? "recheck" : undefined
+			);
 			const rows = (pc && pc.data && pc.data.pending) || [];
 			const backstop = rows.map((r) => ({
 				token: r.token,

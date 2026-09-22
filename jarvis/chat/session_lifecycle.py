@@ -1,5 +1,11 @@
 """Session lifecycle: idle-session reclaim + empty-chat + orphan sweeps.
 
+This module is also the home for the other hourly chat crons (each with its own
+section header below): ``reap_stranded_skill_autorun`` and
+``reap_stranded_request_autorun`` (clear a stranded approval flag whose worker
+died mid-run) and ``reconcile_action_cards`` (measure + alert on action-card
+delivery health). See hooks.py ``scheduler_events["hourly"]`` for the schedule.
+
 Every Jarvis Conversation maps to one agent session, created lazily on the
 first turn. Without a sweep, state accumulates forever:
 
@@ -850,3 +856,143 @@ def _stranded_request_autorun_candidates(cutoff) -> list[str]:
 		""",
 		{"cutoff": cutoff, "limit": _REAP_AUTORUN_BATCH_MAX},
 	)
+
+
+# --------------------------------------------------------------------------- #
+# Action-card DELIVERY health (AC-detect / plan-check B-8)
+# --------------------------------------------------------------------------- #
+# The invisible-submit-card bug slipped through because NOTHING measured whether a
+# minted card actually reached the screen. These constants + reconcile_action_cards
+# close that: a scheduled gauge of open + stranded cards, alerted past a threshold,
+# plus the immediate per-event action_card_rescue signal from a manual re-check
+# (jarvis.chat.actions_api.list_pending_confirmations source="recheck").
+
+# Grace past a card's own expires_at before a still-"pending" row counts as stranded
+# (never race a just-expired card).
+_STRANDED_BUFFER_S = 600
+# Rolling window: only count rows that expired within this span, so "stranded" is a
+# RATE over recent history, not a monotonic backlog of every card ever left unresolved
+# (naturally-expired cards are never flipped server-side, so the pending population only
+# grows - the window is what keeps this a rate).
+_STRANDED_WINDOW_S = 7 * 86400
+# Scan cap (bounds the RETURNED rows + the per-row peek count; NOT the rows examined -
+# see the index patch v2_20_action_card_pending_index that makes the scan a range seek).
+_RECONCILE_SCAN_MAX = 1000
+# Alert thresholds (tunable, and MEANT to be tuned per tenant). cards_open: too many live
+# cards piling up unconfirmed. stranded: see the docstring - it CONFLATES real delivery
+# failures with user-abandoned cards, so its baseline is tenant-specific; a spike above
+# baseline is the signal, and the once-a-day-deduped alert is a coarse backstop to the
+# hourly logged metric + the precise action_card_rescue signal.
+_CARDS_OPEN_ALERT = 200
+_STRANDED_ALERT = 50
+_ACTION_CARD_ALERT_TITLE = "action-card health threshold exceeded"
+# Dedup the threshold alert to ~once a day (mirrors turn_recovery.recovery_rate_watch):
+# a sustained over-threshold bench must not mint one Error Log (and email) every hour.
+_ACTION_CARD_ALERT_DEDUPE_HOURS = 24
+
+
+def reconcile_action_cards() -> dict:
+	"""Hourly cron: MEASURE + alert on action-card delivery health (AC-detect). Two
+	signals, both logged to the greppable jarvis.chat.latency channel:
+	  * cards_open - the live count of open confirmation cards (self-pruning ZSET gauge).
+	  * stranded   - durable role="tool" tool_status="pending" action-rows whose Redis
+	    token is already DEAD and that expired between _STRANDED_BUFFER_S and
+	    _STRANDED_WINDOW_S ago. Such a row never reached a terminal (confirm/discard/
+	    cancel all flip it OFF "pending"), so it CONFLATES two populations we cannot
+	    tell apart from the DB: (a) a real delivery failure - the invisible-card bug,
+	    the target signal - and (b) a card the user simply saw and ABANDONED until the
+	    TTL lapsed (ordinary behaviour; never flipped server-side). So `stranded` is a
+	    coarse health gauge, NOT a pure miss count - watch a SPIKE vs the bench's
+	    baseline. The precise per-miss signal is action_card_rescue (a manual re-check
+	    that surfaced a card). Client-side expiry (get_conversation) already renders
+	    these rows correctly; this is only the measurement.
+	Time-to-detect for a mass recurrence: <= the hourly cadence via the gauge; immediate
+	via the (user-triggered) rescue signal. Runs as the scheduler (Administrator); never
+	raises out; read-only (no flip)."""
+	from jarvis.chat import pending_confirm
+	from jarvis.chat.latency import get_logger
+
+	try:
+		open_n = pending_confirm.cards_open_gauge()
+	except Exception:
+		open_n = 0
+
+	now = frappe.utils.now_datetime()
+	old = frappe.utils.add_to_date(now, seconds=-_STRANDED_BUFFER_S)
+	floor = frappe.utils.add_to_date(now, seconds=-_STRANDED_WINDOW_S)
+	stranded = 0
+	scan_ok = True
+	try:
+		candidates = frappe.db.sql(
+			"""
+			SELECT tool_call_id FROM `tabJarvis Chat Message`
+			WHERE role = 'tool' AND tool_status = 'pending'
+			  AND expires_at < %(old)s AND expires_at >= %(floor)s
+			ORDER BY expires_at DESC LIMIT %(limit)s
+			""",
+			{"old": old, "floor": floor, "limit": _RECONCILE_SCAN_MAX},
+			as_dict=True,
+		)
+		for row in candidates:
+			token = row.get("tool_call_id")
+			# A row whose token is still READABLE is a legit in-flight card (we raced its
+			# expires_at), NOT stranded; only a DEAD (absent) token counts. strict=True is
+			# load-bearing: the default swallowing peek returns None on a Redis OUTAGE too,
+			# which would count every row as dead and fabricate a false alert during the
+			# incident. strict=True raises instead, so `except` fails toward NOT counting.
+			# (A malformed row with no token can't be a confirmable card, so it is skipped -
+			# an accepted, mint-can't-produce edge, not a stranded miss.)
+			try:
+				dead = bool(token) and pending_confirm.peek(token, strict=True) is None
+			except Exception:
+				dead = False
+			if dead:
+				stranded += 1
+	except Exception:
+		scan_ok = False
+		frappe.log_error(title="reconcile_action_cards scan", message=frappe.get_traceback())
+
+	# Tail is best-effort: an isolated scheduled job (one per scheduler_events entry), so an
+	# exception here fails only this tick, but wrap it so a logging/DB hiccup never raises out.
+	try:
+		# On a failed scan, log stranded="err" rather than a misleading "0" healthy reading.
+		get_logger().info(
+			"action_card_health cards_open=%d stranded=%s", open_n, stranded if scan_ok else "err"
+		)
+		# Only weigh stranded when the scan actually ran (a failed scan logged its own error).
+		over = open_n > _CARDS_OPEN_ALERT or (scan_ok and stranded > _STRANDED_ALERT)
+		if over and not _action_card_alert_deduped(now):
+			frappe.log_error(
+				title=_ACTION_CARD_ALERT_TITLE,
+				message=(
+					f"cards_open={open_n} (alert>{_CARDS_OPEN_ALERT}); "
+					f"stranded={stranded if scan_ok else 'err'} in the last "
+					f"{_STRANDED_WINDOW_S // 86400}d (alert>{_STRANDED_ALERT}).\n"
+					f"'stranded' = pending action-rows that never reached a terminal; it CONFLATES a "
+					f"real delivery failure (the invisible-card bug) with cards a user simply abandoned "
+					f"until expiry, so a chronic count is usually benign - investigate a SPIKE vs this "
+					f"bench's baseline, and tune the thresholds per tenant.\n"
+					f"Diagnose: grep the jarvis.chat.latency log for 'action_card_rescue' (the precise "
+					f"delivery-miss signal, carrying the conversation) and 'action_card_health' (the "
+					f"hourly trend). Thresholds live in jarvis/chat/session_lifecycle.py."
+				),
+			)
+	except Exception:
+		pass
+	return {"cards_open": open_n, "stranded": stranded}
+
+
+def _action_card_alert_deduped(now) -> bool:
+	"""True when an action-card health alert was already raised within the dedup window,
+	so the caller skips re-alerting. Mirrors turn_recovery.recovery_rate_watch: query the
+	Error Log by title (stored in ``method``). Fails toward NOT deduping (i.e. toward
+	alerting) if the lookup itself errors - an alarm should err on the side of firing."""
+	try:
+		since = frappe.utils.add_to_date(now, hours=-_ACTION_CARD_ALERT_DEDUPE_HOURS)
+		existing = frappe.db.sql(
+			"SELECT name FROM `tabError Log` WHERE method = %(t)s AND creation >= %(s)s LIMIT 1",
+			{"t": _ACTION_CARD_ALERT_TITLE, "s": since},
+		)
+		return bool(existing)
+	except Exception:
+		return False

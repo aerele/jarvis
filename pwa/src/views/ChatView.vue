@@ -334,10 +334,13 @@ function pendingActionFromRow(m, cid) {
 // durable rows (primary) + the Redis backstop, so a manual pull surfaces a parked
 // card the auto-resync missed. The card appearing is the feedback.
 async function recheckPending() {
-	await loadPending();
+	// "recheck" tags this as the human-driven backstop so the server can count how
+	// often the manual lever surfaces a card the primary delivery missed. The
+	// automatic loadPending() callers pass no source (routine reconciliation).
+	await loadPending("recheck");
 }
 
-async function loadPending() {
+async function loadPending(source) {
 	if (!convId.value) return;
 	const fromRows = (messages.value || [])
 		.filter(
@@ -350,7 +353,7 @@ async function loadPending() {
 		.map((m) => pendingActionFromRow(m, convId.value));
 	let fromBackstop = [];
 	try {
-		const r = await api.listPendingConfirmations(convId.value);
+		const r = await api.listPendingConfirmations(convId.value, source);
 		if (r?.ok && r.data)
 			fromBackstop = r.data.pending.filter((p) => p.conversation === convId.value);
 	} catch {

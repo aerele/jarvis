@@ -8137,17 +8137,20 @@ async function recheckPending() {
 	if (!currentId.value) return;
 	const before = visiblePendingActions.value.length;
 	seedPendingFromRows(messages.value, currentId.value);
-	await resyncPendingConfirmations(currentId.value);
+	// "recheck" tags this as the human-driven backstop so the server can count how
+	// often the manual lever surfaces a card the primary delivery missed. The
+	// automatic resync callers below pass no source (routine reconciliation).
+	await resyncPendingConfirmations(currentId.value, "recheck");
 	const after = visiblePendingActions.value.length;
 	if (after > before) notify("Found a pending confirmation.", { type: "success" });
 	else if (after === 0) notify("Nothing is waiting for your confirmation.", {});
 }
 
-async function resyncPendingConfirmations(id) {
+async function resyncPendingConfirmations(id, source) {
 	if (!id) return;
 	let items = null;
 	try {
-		const r = await api.listPendingConfirmations(id);
+		const r = await api.listPendingConfirmations(id, source);
 		// ok:false is a transient store blip (the strict owner-index read). Keep
 		// whatever is already on screen and let the next poll tick retry; never
 		// wipe the queue on a single bad read (that was the fail-closed hole that
