@@ -26,6 +26,8 @@ describe("isShowCardRequest (layered re-check phase 2 — typed 'show it' fast-p
 		expect(isShowCardRequest("show it.")).toBe(true);
 		expect(isShowCardRequest("show it!!")).toBe(true);
 		expect(isShowCardRequest("show   it")).toBe(true); // collapsed internal whitespace
+		expect(isShowCardRequest("show it")).toBe(true); // non-breaking space collapses
+		expect(isShowCardRequest("show it .")).toBe(true); // space before trailing punctuation
 		expect(isShowCardRequest("I can’t see the card")).toBe(true); // curly apostrophe (mobile)
 		expect(isShowCardRequest("The confirmation didn’t appear?")).toBe(true);
 	});
@@ -38,9 +40,15 @@ describe("isShowCardRequest (layered re-check phase 2 — typed 'show it' fast-p
 		"show it to me later",
 		"don't show it",
 		"do not show it",
+		"don’t show it", // negation with a curly apostrophe (mobile)
 		"i can't see the chart",
+		// one substring-superset per phrase: a substring/prefix regression would swallow these
 		"the confirmation didn't appear in the report",
-		"why can't i see the card in the list",
+		"please show the confirmation now",
+		"i can't see it anymore",
+		"i can't see the card in the list",
+		"i can't see the confirmation dialog",
+		"the card didn't appear yet",
 		"show", // partial
 		"it", // partial
 		"please show the card now", // extra words

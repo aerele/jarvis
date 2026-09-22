@@ -18,8 +18,16 @@ const NEGATIVES = [
 	"can you show it",
 	"show it to me later",
 	"don't show it",
+	"do not show it",
+	"don’t show it", // negation with a curly apostrophe
 	"i can't see the chart",
+	// one substring-superset per phrase: a substring/prefix regression would swallow these
 	"the confirmation didn't appear in the report",
+	"please show the confirmation now",
+	"i can't see it anymore",
+	"i can't see the card in the list",
+	"i can't see the confirmation dialog",
+	"the card didn't appear yet",
 	"please show the card now",
 	"",
 	"   ",
@@ -34,6 +42,8 @@ test("isShowCardRequest normalises case / whitespace / trailing punctuation / cu
 	assert.equal(isShowCardRequest("  show it  "), true);
 	assert.equal(isShowCardRequest("show it."), true);
 	assert.equal(isShowCardRequest("show   it"), true);
+	assert.equal(isShowCardRequest("show it"), true); // non-breaking space
+	assert.equal(isShowCardRequest("show it ."), true); // space before trailing punctuation
 	assert.equal(isShowCardRequest("I can’t see the card"), true);
 });
 
