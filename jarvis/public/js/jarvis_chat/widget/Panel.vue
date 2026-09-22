@@ -562,52 +562,62 @@
 				<div class="jvp-typehint">{{ typedApprovalHint }}</div>
 			</div>
 
-			<!-- PR-2: always-present, model-proof + delivery-channel-proof manual lever
-			     to pull a parked confirmation the auto-resync missed (load() re-fetches
-			     with the row-primary merge). Not labelled "Approvals". -->
-			<button
-				type="button"
-				class="jvp-recheck"
-				style="
-					display: block;
-					margin: 2px auto 4px;
-					background: none;
-					border: none;
-					color: var(--jvp-muted, #8a8a8a);
-					font-size: 11px;
-					text-decoration: underline;
-					cursor: pointer;
-					padding: 3px;
-				"
-				aria-label="Re-check for a pending confirmation that did not appear"
-				@click="load({ recheck: true })"
-			>
-				Don't see a confirmation? Re-check
-			</button>
-
 			<!-- Jump to latest. stickToBottom already refuses to drag a reader who
 			     has scrolled up back down mid-reply, so without this arrow a long
 			     streamed answer left them stranded with no way back to the newest
 			     text but a manual scroll. Sits above the composer, over the body. -->
-			<button
+			<!-- Jump + on-demand re-check, floated bottom-right above the composer. Both
+			     appear only when scrolled up (never resting chrome). The widget has no
+			     menu, so the re-check rides this float as its on-demand control. -->
+			<div
 				v-if="showScrollDown && readinessResolved && readiness !== 'gate'"
-				class="jvp-jump"
-				type="button"
-				title="Jump to latest"
-				aria-label="Jump to latest"
-				@click="jumpToBottom"
+				class="jvp-float-row"
 			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path
-						d="M6 9.5 L12 15.5 L18 9.5"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2.2"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-					/>
-				</svg>
-			</button>
+				<button
+					class="jvp-jump"
+					type="button"
+					title="Re-check for a pending confirmation"
+					aria-label="Re-check for a pending confirmation that did not appear"
+					@click="resyncPending('pill')"
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path
+							d="M21 12a9 9 0 1 1-2.64-6.36"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						/>
+						<path
+							d="M21 3v6h-6"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						/>
+					</svg>
+				</button>
+				<button
+					class="jvp-jump"
+					type="button"
+					title="Jump to latest"
+					aria-label="Jump to latest"
+					@click="jumpToBottom"
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path
+							d="M6 9.5 L12 15.5 L18 9.5"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						/>
+					</svg>
+				</button>
+			</div>
 
 			<!-- Hidden entirely in the gate state, not merely disabled: there is
 			     nothing to send to yet, and a live-but-disabled composer would
@@ -1301,11 +1311,92 @@ function autoGrow() {
 // The panel's contract is to continue where the user left off, so the first
 // open resolves the newest conversation and restores it. A user with no history
 // gets the empty state, and an id is minted on first send.
-async function load(opts) {
-	// `opts.recheck` marks a load driven by the manual "re-check for approvals"
-	// lever (vs. an open / turn-settle refresh), so the backstop query below can
-	// tag itself and the server can count human-driven rescues (AC-detect).
-	const fromRecheck = !!(opts && opts.recheck === true);
+// Light pending-only resync (rows-first + Redis backstop, dedup by token). The auto-heal
+// poll + focus/visibility wake + the on-demand re-check all call THIS - never full load()
+// - so a resync never re-fetches the whole conversation. `source` tags the call for the
+// server's per-layer rescue signal. Best-effort: chat works without it.
+async function resyncPending(source) {
+	if (!convId.value) return;
+	try {
+		const toEpoch = (s) => {
+			const t = Date.parse(String(s || "").replace(" ", "T"));
+			return Number.isFinite(t) ? Math.round(t / 1000) : null;
+		};
+		const rowItems = (messages.value || [])
+			.filter(
+				(m) =>
+					m.role === "tool" &&
+					m.tool_status === "pending" &&
+					m.pending_card &&
+					m.tool_call_id
+			)
+			.map((m) => ({
+				token: m.tool_call_id,
+				tool: m.tool_name || "",
+				summary: m.tool_name || "",
+				expires_at: toEpoch(m.expires_at),
+				approve_run: !!(m.pending_card && m.pending_card.approve_run),
+			}));
+		const pc = await listPendingConfirmations(convId.value, source);
+		const rows = (pc && pc.data && pc.data.pending) || [];
+		const backstop = rows.map((r) => ({
+			token: r.token,
+			tool: r.tool || "",
+			summary: r.summary || r.preview || "",
+			expires_at: r.expires_at ?? null,
+			approve_run: pendingApproveRun(r.preview),
+		}));
+		const byToken = new Map();
+		for (const c of [...rowItems, ...backstop]) {
+			if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
+		}
+		stream.value = { ...stream.value, pending: [...byToken.values()] };
+	} catch (e) {
+		/* leave whatever the live stream captured */
+	}
+}
+
+// Auto-heal (layered design, phase 1): recover a card the live push dropped with NO user
+// action, card-agnostic. A run-scoped self-stopping poll + window focus / tab-visibility
+// on return. Mirrors the desktop SPA + PWA.
+const PENDING_POLL_MS = 2500;
+const PENDING_POLL_TRAILING = 2;
+let pendingPoll = null;
+let pendingPollIdle = 0;
+function startPendingPoll() {
+	if (pendingPoll) {
+		pendingPollIdle = 0;
+		return;
+	}
+	pendingPollIdle = 0;
+	pendingPoll = window.setInterval(() => {
+		if (!convId.value) {
+			stopPendingPoll();
+			return;
+		}
+		resyncPending("auto");
+		if (stream.value.live) pendingPollIdle = 0;
+		else if (++pendingPollIdle > PENDING_POLL_TRAILING) stopPendingPoll();
+	}, PENDING_POLL_MS);
+}
+function stopPendingPoll() {
+	if (pendingPoll) window.clearInterval(pendingPoll);
+	pendingPoll = null;
+	pendingPollIdle = 0;
+}
+let lastWake = 0;
+function wakePending() {
+	if (!convId.value) return;
+	const now = Date.now();
+	if (now - lastWake < 2000) return; // focus + visibility often co-fire
+	lastWake = now;
+	resyncPending("auto");
+}
+function onVisiblePending() {
+	if (document.visibilityState === "visible") wakePending();
+}
+
+async function load() {
 	// Only blank the panel when there is nothing on screen yet; a refresh over
 	// an existing thread should be invisible.
 	loading.value = messages.value.length === 0;
@@ -1336,59 +1427,9 @@ async function load(opts) {
 			.map((m) => m.content);
 		histIdx.value = null;
 		histDraft.value = "";
-		// Resync open write confirmations. Without this a card raised while the
-		// panel was closed (or a dropped realtime frame) never shows here, even
-		// though the full chat has it. Best-effort: chat must work without it.
-		try {
-			// PR-1 reliability: the durable pending action-rows (get_conversation, above)
-			// are the PRIMARY source - a card raised while the panel was closed (or a
-			// dropped realtime frame) still shows on open, riding the reliable message
-			// pipeline. list_pending is the backstop. Merge rows-first, dedup by token.
-			const toEpoch = (s) => {
-				const t = Date.parse(String(s || "").replace(" ", "T"));
-				return Number.isFinite(t) ? Math.round(t / 1000) : null;
-			};
-			const rowItems = (messages.value || [])
-				.filter(
-					(m) =>
-						m.role === "tool" &&
-						m.tool_status === "pending" &&
-						m.pending_card &&
-						m.tool_call_id
-				)
-				.map((m) => ({
-					token: m.tool_call_id,
-					tool: m.tool_name || "",
-					summary: m.tool_name || "",
-					expires_at: toEpoch(m.expires_at),
-					approve_run: !!(m.pending_card && m.pending_card.approve_run),
-				}));
-			const pc = await listPendingConfirmations(
-				convId.value,
-				fromRecheck ? "recheck" : undefined
-			);
-			const rows = (pc && pc.data && pc.data.pending) || [];
-			const backstop = rows.map((r) => ({
-				token: r.token,
-				tool: r.tool || "",
-				summary: r.summary || r.preview || "",
-				// Carry expires_at so orderedPending sorts by (expires_at, token) the
-				// same way the server does; without it a typed "confirm N" can select a
-				// different card than shown.
-				expires_at: r.expires_at ?? null,
-				// Same text-only signal the live push carries (chat_stream.mjs) - a resync
-				// must not silently lose it and fall back to offering a plain Confirm on a
-				// runnable card (P1, skill approve-and-run).
-				approve_run: pendingApproveRun(r.preview),
-			}));
-			const byToken = new Map();
-			for (const c of [...rowItems, ...backstop]) {
-				if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
-			}
-			stream.value = { ...stream.value, pending: [...byToken.values()] };
-		} catch (e) {
-			/* leave whatever the live stream captured */
-		}
+		// Resync open write confirmations (rows-first + Redis backstop). A routine
+		// open / turn-settle refresh, so untagged. Best-effort: chat works without it.
+		await resyncPending();
 		if (_keepScrollTop !== null && bodyEl.value && convId.value === _convAtEntry) {
 			// In-place refresh of the thread already on screen, with the reader
 			// parked somewhere in it. Put them back exactly where they were and
@@ -1626,6 +1667,9 @@ async function send() {
 	const atts = attachments.value.slice();
 	if ((!text && !atts.length) || sending.value || stream.value.live) return;
 	sending.value = true;
+	// Auto-heal: poll for a parked card while this turn is in flight (self-stops after
+	// it settles + a couple trailing reconciles).
+	startPendingPoll();
 	dismissFeedback(); // a new turn clears any pending feedback pills
 	fbAwaiting = true; // watch shownMessages for this turn's reply
 	loadError.value = "";
@@ -1935,6 +1979,9 @@ onMounted(() => {
 		isDark.value = d;
 	});
 	ensureRealtime();
+	// Auto-heal: recover a card minted while the Desk tab / window was in the background.
+	window.addEventListener("focus", wakePending);
+	document.addEventListener("visibilitychange", onVisiblePending);
 	// The mic only exists when the site has STT configured.
 	getChatUiSettings()
 		.then((cfg) => {
@@ -1961,6 +2008,9 @@ onBeforeUnmount(() => {
 		rtTimer = null;
 	}
 	stopPolling();
+	stopPendingPoll();
+	window.removeEventListener("focus", wakePending);
+	document.removeEventListener("visibilitychange", onVisiblePending);
 	if (rtBound) window.frappe?.realtime?.off?.("jarvis:event", onRealtime);
 	// Drop any drag listeners if we unmount mid-resize (no commit — nothing to save).
 	window.removeEventListener("pointermove", onResizeMove);
@@ -2332,11 +2382,20 @@ defineExpose({ load, startNewChat, convId });
    the right edge and the negative top margin floats it over the last lines of
    the body. The margins cancel out (-44 + 36 + 8 = 0), so showing or hiding it
    never shifts the composer below. */
+/* jump + on-demand re-check float bottom-right above the composer; the row carries the
+   float offset so the two circular buttons sit side by side. */
+.jvp-float-row {
+	align-self: flex-end;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: -44px 14px 8px 0;
+	z-index: 3;
+}
 .jvp-jump {
 	position: relative;
 	z-index: 3;
-	align-self: flex-end;
-	margin: -44px 14px 8px 0;
+	margin: 0;
 	width: 36px;
 	height: 36px;
 	display: flex;
