@@ -952,3 +952,45 @@ class TestOperatorVisibility(AccessGovernanceCase):
 			blob = json.dumps(env["rows"], default=str)
 			self.assertNotIn(SLUG, blob, f"search '{term}' surfaced the masked slug")
 			self.assertNotIn(self.REAL_TITLE, blob, f"search '{term}' surfaced the real title")
+
+	# -- review-loop fix wave -------------------------------------------- #
+	def test_jarvis_admin_cannot_flip_visibility_via_generic_write(self):
+		# A tenant Jarvis Admin (NOT System Manager) has generic write on the listing but
+		# MUST NOT override operator-global visibility via Desk / set_value / REST — the
+		# controller validate() blocks the field change on every write surface.
+		self._set_vis("teaser")
+		frappe.set_user(self.admin)  # Jarvis Admin, not System Manager
+		self.addCleanup(frappe.set_user, "Administrator")
+		doc = frappe.get_doc(LISTING, SLUG)
+		doc.operator_visibility = "available"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+	def test_masked_get_agent_strips_identity_details(self):
+		# Defense-in-depth: a masked card carries NO fingerprinting metadata (nature,
+		# version, install_count, ...), not just a hidden title/slug.
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		out = agents_api.get_agent(SLUG)
+		for f in ("nature", "version", "publisher", "category", "tools_required", "validated_for_fy"):
+			self.assertIsNone(out.get(f), f"masked get_agent leaked {f}")
+		self.assertEqual(out.get("install_count"), 0)
+
+	def test_masked_list_row_strips_identity_details(self):
+		self._set_vis("teaser")
+		masked = [r for r in self._list_as(self.plain) if r.get("masked")]
+		self.assertTrue(masked)
+		for f in ("nature", "version", "publisher", "validated_for_fy"):
+			self.assertIsNone(masked[0].get(f), f"masked list row leaked {f}")
+		self.assertEqual(masked[0].get("install_count"), 0)
+
+	def test_opaque_id_is_not_a_plain_hash_of_the_slug(self):
+		# HMAC (per-site secret), not sha256(slug): else a non-admin precomputes it for
+		# every enumerable slug and recovers the identity.
+		import hashlib
+
+		naive = "cs-" + hashlib.sha256(SLUG.encode()).hexdigest()[:16]
+		self.assertNotEqual(agents_api._opaque_id(SLUG), naive)
+		self.assertEqual(agents_api._opaque_id("x"), agents_api._opaque_id("x"))  # stable
+		self.assertNotEqual(agents_api._opaque_id("x"), agents_api._opaque_id("y"))  # unique

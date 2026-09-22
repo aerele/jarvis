@@ -198,18 +198,44 @@ _MASK_TITLE = "Coming soon"
 
 
 def _opaque_id(slug: str) -> str:
-	"""Stable, non-reversible id for a masked (teaser) row. The real ``agent_slug``
-	IS the agent's human name (``close-auditor``), so it must never reach a non-admin
-	client; the SPA keys/routes on this opaque id instead."""
+	"""Stable, non-reversible id for a masked (teaser) row. The real ``agent_slug`` IS the
+	agent's human name (``close-auditor``) and slugs are low-entropy + fully enumerable
+	(they ship in the bundled registry.json), so a plain ``sha256(slug)`` would be a
+	dictionary/confirmation oracle — a non-admin could precompute it for every known slug
+	and recover the identity. HMAC with the per-site secret so the id cannot be
+	precomputed off-site. It is never resolved back server-side (get_agent(opaque)->404),
+	so it only needs to be stable + unique, not reversible."""
 	import hashlib
+	import hmac
 
-	return "cs-" + hashlib.sha256((slug or "").encode("utf-8")).hexdigest()[:16]
+	secret = (frappe.local.conf.get("encryption_key") or frappe.local.site or "jarvis").encode("utf-8")
+	return "cs-" + hmac.new(secret, (slug or "").encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+
+
+# Every agent-IDENTITY / detail field a teaser must hide from a non-admin non-owner.
+# Redaction is strip-to-safe in ONE place, so a new agent-metadata field added to either
+# read path (the list or the detail) can't leak through one seam by drifting from the other.
+_TEASER_STRIP_FIELDS = (
+	"category",
+	"nature",
+	"version",
+	"publisher",
+	"rule_pack",
+	"tools_required",
+	"doctypes_required",
+	"config_keys",
+	"min_apps",
+	"default_schedule",
+	"validated_for_fy",
+)
 
 
 def _mask_teaser_row(r: dict) -> None:
-	"""Redact a ``teaser`` listing served to a non-admin non-owner, IN PLACE. The real
-	name/details never leave the server; the row stays a keyable 'coming soon' card
-	whose slug/name are replaced by an opaque id and whose detail fields are stripped."""
+	"""Redact a ``teaser`` listing served to a non-admin non-owner, IN PLACE — the SINGLE
+	mask for BOTH the list (_enriched_catalog) and the detail (get_agent) seams. The real
+	name/slug/details never leave the server: the slug/name become an opaque id, the title
+	is masked, and every identity/detail field (incl. nature/version/install_count) is
+	stripped so a masked 'coming soon' card cannot fingerprint the real agent."""
 	r["masked"] = 1
 	r["operator_visibility"] = "teaser"
 	r["opaque_id"] = _opaque_id(r.get("agent_slug") or r.get("name"))
@@ -217,11 +243,11 @@ def _mask_teaser_row(r: dict) -> None:
 	r["agent_slug"] = r["opaque_id"]
 	r["title"] = _MASK_TITLE
 	r["description"] = ""
-	r["category"] = None
-	r["tools_required"] = None
-	r["publisher"] = None
-	r["rule_pack"] = None
 	r["installable"] = 0
+	r["install_count"] = 0  # a coming-soon card shows no adoption (also hides fingerprinting)
+	for f in _TEASER_STRIP_FIELDS:
+		if f in r:
+			r[f] = None
 
 
 def _enriched_catalog() -> list[dict]:
@@ -500,22 +526,9 @@ def get_agent(agent_slug: str) -> dict:
 	out["operator_visibility"] = vis
 	out["masked"] = 0
 	if _masked:
-		# Redact the teaser for a non-admin non-owner: the real name/details never
-		# leave the server, and the slug (which IS the name) becomes an opaque id.
-		out["opaque_id"] = _opaque_id(listing.agent_slug)
-		out["masked"] = 1
-		out["name"] = out["opaque_id"]
-		out["agent_slug"] = out["opaque_id"]
-		out["title"] = _MASK_TITLE
-		out["description"] = ""
-		out["category"] = None
-		out["tools_required"] = None
-		out["min_apps"] = None
-		out["doctypes_required"] = None
-		out["config_keys"] = None
-		out["publisher"] = None
-		out["rule_pack"] = None
-		out["installable"] = 0
+		# Redact the teaser for a non-admin non-owner via the SAME helper the list uses,
+		# so the detail seam can never drift from the list seam.
+		_mask_teaser_row(out)
 
 	inst = frappe.get_all(
 		INSTALLATION,
