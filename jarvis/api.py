@@ -1964,7 +1964,6 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	# namespace, not the reviewer's.
 	owner = frappe.db.get_value("Jarvis Conversation", conv, "owner") or frappe.session.user
 	title = (args.get("title") or slug or "wiki note")[:100]
-	summary = (args.get("summary") or "").strip()
 	payload = json.dumps(args, default=str, sort_keys=True)
 	# Dedupe: one Pending wiki proposal per (conversation, slug). A retried turn
 	# re-emitting the same write refreshes the held payload rather than stacking
@@ -1987,9 +1986,9 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		# rejected (they reviewed the payload they saw).
 		frappe.db.sql(
 			"""update `tabJarvis Approval Request`
-			set wiki_payload=%s, title=%s, context_md=%s, modified=%s, modified_by=%s
+			set wiki_payload=%s, title=%s, modified=%s, modified_by=%s
 			where name=%s and status='Pending'""",
-			(payload, title, summary[:2000], frappe.utils.now(), frappe.session.user, existing),
+			(payload, title, frappe.utils.now(), frappe.session.user, existing),
 		)
 		if frappe.db.get_value("Jarvis Approval Request", existing, "status") != "Pending":
 			existing = None
@@ -2004,7 +2003,10 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 				"source": FILE_BOX_WIKI_SOURCE,
 				"conversation": conv,
 				"question": f"Wiki write proposed by a File Box run - refresh the page '{title}'.",
-				"context_md": summary[:2000],
+				# NB: the agent-generated summary is intentionally NOT copied to
+				# context_md - the reviewer panel renders it (from wiki_payload) as
+				# escaped text, and leaving context_md empty keeps this row off the
+				# board's markdown v-html sink (get_approval -> renderMarkdown).
 				"ref_name": slug,
 				"wiki_payload": payload,
 				"apply_status": "Pending",

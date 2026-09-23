@@ -810,11 +810,13 @@ def _land_and_record(name: str, doc, dropper: str | None) -> dict:
 	token = frappe.generate_hash(length=16)
 	# Atomic claim: win the transition out of a re-drivable state. apply_reason
 	# briefly carries the token as the winner-marker; overwritten with the real
-	# reason (or NULL) below.
+	# reason (or NULL) below. COALESCE keeps the re-drivable set identical to the
+	# Actionable filter's, so a (today impossible) NULL apply_status can't show as
+	# needs_retry yet fail every claim - a stuck-looking row.
 	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set apply_status='Applying', apply_reason=%s
-		where name=%s and apply_status in ('Pending', 'Failed')""",
+		where name=%s and COALESCE(apply_status, 'Pending') in ('Pending', 'Failed')""",
 		(token, name),
 	)
 	if not frappe.db.sql(

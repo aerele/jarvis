@@ -340,6 +340,29 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 		self.assertTrue(res["applied"])  # reports the existing landed state
 		self.assertEqual(res["apply_status"], "Applied")
 
+	def test_funnel_raise_leaves_row_redrivable_not_stuck(self):
+		# A funnel that RAISES (txn-fatal deadlock) must never leave the row stuck in
+		# the transient 'Applying' claim or falsely 'Applied' - it stays re-drivable.
+		# rollback is mocked to keep the test's own transaction intact (the idiom
+		# test_executor_txn_fatal_is_best_effort uses).
+		conv = self._conv()
+		name = self._propose(conv)
+		with (
+			_funnel(side_effect=Exception("deadlock")) as (apply, _),
+			patch("frappe.db.rollback"),
+			_as(REVIEWER),
+		):
+			res = approvals_api.approve_wiki_write(name)
+		apply.assert_called_once()
+		self.assertFalse(res["applied"])
+		ar = frappe.get_doc(APPROVAL, name)
+		self.assertEqual(ar.status, "Approved")
+		self.assertNotIn(ar.apply_status, ("Applying", "Applied"))  # re-drivable, not stuck
+		# It re-surfaces on the actionable list for a Retry.
+		with _as(REVIEWER):
+			out = approvals_api.list_wiki_write_proposals()
+		self.assertIn(name, {r["name"] for r in out["rows"]})
+
 	# --- customer-board guards (defense in depth) -------------------------- #
 
 	def test_decide_refuses_wiki_write_row(self):
