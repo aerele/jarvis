@@ -114,6 +114,14 @@ watch(
 	() => props.defs,
 	(defs) => {
 		const names = new Set();
+		// Collected instead of emitted per-field: props.modelValue does not
+		// update within this synchronous callback, so two retargeted fields in
+		// the SAME defs change would each emit `{...props.modelValue, ...}`
+		// off the same stale snapshot - a parent that replaces its state
+		// wholesale (the normal v-model shape) would keep only the LAST emit,
+		// silently un-clearing every earlier field. One emit at the end,
+		// merging every cleared fieldname over the same base, avoids that.
+		const cleared = [];
 		for (const d of defs || []) {
 			names.add(d.fieldname);
 			const entry = ensure(d);
@@ -121,7 +129,7 @@ watch(
 				entry.target = d.options;
 				entry.label = "";
 				entry.linkSearch.reprime();
-				emit("update:modelValue", { ...props.modelValue, [d.fieldname]: "" });
+				cleared.push(d.fieldname);
 			}
 			entry.linkSearch.prime();
 		}
@@ -130,6 +138,12 @@ watch(
 				entry.linkSearch.cleanup();
 				searches.delete(name);
 			}
+		}
+		if (cleared.length) {
+			emit("update:modelValue", {
+				...props.modelValue,
+				...Object.fromEntries(cleared.map((k) => [k, ""])),
+			});
 		}
 	},
 	{ immediate: true }
