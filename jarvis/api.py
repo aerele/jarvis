@@ -18,7 +18,7 @@ from jarvis.exceptions import (
 )
 from jarvis.permissions import has_jarvis_access, refuse_in_tool_dispatch
 from jarvis.tools._result_guard import enforce_result_budget
-from jarvis.tools.registry import dispatch
+from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -208,7 +208,7 @@ def _dispatch_from_session(
 				# inside the deny branch, so the gate itself stays the first thing that
 				# runs and a malformed-args call is still refused on the contract.
 				try:
-					attempted = _parse_args(args)
+					attempted = _parse_args(args, tool)
 				except JarvisError:
 					attempted = {}
 				audit.record(
@@ -241,7 +241,7 @@ def _dispatch_from_session(
 			# dict shape the tool ran against (or the empty dict on a
 			# malformed-args rejection).
 			try:
-				parsed_args = _parse_args(args)
+				parsed_args = _parse_args(args, tool)
 			except InvalidArgumentError as e:
 				result = _error("InvalidArgumentError", str(e))
 				_persist_and_publish_tool_call(
@@ -888,14 +888,46 @@ def publish_realtime_tool_result(
 	)
 
 
-def _parse_args(args: dict | str | None) -> dict:
-	"""Decode the args input into a dict + strip legacy identity markers.
+# P0d (decision 16): a batch key the model sends ALONGSIDE single-record args
+# (``create_doc({doctype, values, docs: []})``) means "no batch" - not "a
+# batch of nothing" - but ~20 tools route any non-None batch key straight to
+# batch mode and fail on the empty list. See the h400jb1fdk File Box incident.
+_BATCH_KEYS = ("docs", "names", "updates", "messages")
+
+# Tools whose signature carries a batch key ALONGSIDE the single-record form
+# (a ``doctype`` param), derived from the registry's own accepted-params map
+# so this can't drift from the tool signatures. This is also what naturally
+# excludes the two dual-form-shaped exceptions: ``create_docs`` (batch only -
+# no ``doctype`` param at all; keeps its own clear "docs must be non-empty"
+# error) and ``get_my_access`` (``docs`` is a query list of doctype/name
+# pairs to check access on, not a batch of writes - also no ``doctype`` param).
+_DUAL_FORM_TOOLS = frozenset(
+	name
+	for name, params in _ACCEPTED_PARAMS.items()
+	if "doctype" in params and params.intersection(_BATCH_KEYS)
+)
+
+
+def _parse_args(args: dict | str | None, tool: str | None = None) -> dict:
+	"""Decode the args input into a dict + strip legacy identity markers +
+	normalise an empty batch array for a dual-form tool (P0d).
 
 	Raises ``InvalidArgumentError`` (a JarvisError subclass) on JSON
 	parse failure - that mirrors what tools raise for malformed input
 	and lets ``_run_tool`` translate it via the same path. The previous
 	shape returned either a dict OR an error envelope dict, which made
 	every caller branch on the result type.
+
+	Mutates ``args`` IN PLACE when it is already a dict (only reassigning it
+	for a JSON-string/falsy input), so every downstream reader sharing the
+	same reference - persistence, the step timeline, held_writes, the gate,
+	preview, seal, dispatch - sees the identical normalised call. Runs before
+	all of them (``_run_tool``), which is what keeps the transcript and the
+	executed args in agreement.
+
+	``tool`` is optional (the delegate-denial call site parses args only for
+	an audit row, before ``tool`` gating even runs) - normalisation simply
+	no-ops without it, since there is nothing to key the dual-form check on.
 	"""
 	if isinstance(args, str):
 		try:
@@ -903,14 +935,22 @@ def _parse_args(args: dict | str | None) -> dict:
 		except json.JSONDecodeError as e:
 			raise InvalidArgumentError(f"args is not valid JSON: {e}")
 	args = args or {}
-	# Defensive: strip LLM-hallucinated "_user" / "_session" fields. The
-	# old MCP design used them as in-band identity carriers; Path A moved
-	# identity to HTTPS headers. If the LLM has been trained on the older
-	# convention it may emit these even though our tool schemas don't list
-	# them - dropping them silently keeps such calls dispatching cleanly.
 	if isinstance(args, dict):
+		# Defensive: strip LLM-hallucinated "_user" / "_session" fields. The
+		# old MCP design used them as in-band identity carriers; Path A moved
+		# identity to HTTPS headers. If the LLM has been trained on the older
+		# convention it may emit these even though our tool schemas don't list
+		# them - dropping them silently keeps such calls dispatching cleanly.
 		for legacy in ("_user", "_session", "_session_key"):
 			args.pop(legacy, None)
+		if tool in _DUAL_FORM_TOOLS:
+			tool_params = _ACCEPTED_PARAMS.get(tool, frozenset())
+			for key in _BATCH_KEYS:
+				# Only a key THIS tool actually declares - never touch one it
+				# doesn't accept (dispatch's own param filter would drop it
+				# anyway, but this keeps the persisted/audited args honest).
+				if key in tool_params and args.get(key) in ([], ""):
+					del args[key]
 	return args
 
 
@@ -2263,7 +2303,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 
 	is_write = tool in _WRITE_TOOLS
 	try:
-		args = _parse_args(raw_args)
+		args = _parse_args(raw_args, tool)
 	except JarvisError as e:
 		return _error(type(e).__name__, str(e))
 
