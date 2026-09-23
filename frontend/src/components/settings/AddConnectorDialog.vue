@@ -612,7 +612,6 @@ const props = defineProps({
 	scope: { type: String, default: "Personal" },
 	// The catalog name chosen on Browse, or "Custom URL". Ignored in edit mode.
 	preset: { type: String, default: "" },
-	allowCustomUrls: { type: Boolean, default: true },
 	// listConnectors()'s site-wide oauth_redirect_uri - the register card's step 1
 	// needs this BEFORE any row exists (a static preset's register card can show
 	// first, on the very first render, with no connector created yet); once a row
@@ -773,7 +772,7 @@ function resetCustomUrlOauthState() {
 
 function defaultPreset() {
 	if (props.catalog.length) return props.catalog[0].name;
-	return props.allowCustomUrls ? "Custom URL" : "";
+	return "Custom URL";
 }
 
 // ── the connect card this render shows ──────────────────────────────────────
