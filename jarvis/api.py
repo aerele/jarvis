@@ -903,6 +903,12 @@ _WIKI_TOOLS = frozenset({"read_wiki", "update_wiki"})
 # source=/provenance_prefix= pair.
 FILE_BOX_WIKI_KIND = "file-box:"
 FILE_BOX_WIKI_FENCE = "file-box"
+# Approval Request `source` value for a HELD file-box wiki write-back proposal.
+# A wiki write from an unattended file-box run is no longer applied at drop time;
+# it is parked as a Pending row a Jarvis reviewer (NOT the dropper) approves before
+# it lands (separation of duties). Distinct from "File Box" (document-classification
+# approvals) so it routes to the reviewer lane and off the customer decide board.
+FILE_BOX_WIKI_SOURCE = "File Box Wiki"
 # Irreversible/consequential subset - gated even when a user has auto-apply
 # on (Task 4 uses this; define it here so the sets live together).
 _DESTRUCTIVE = frozenset(
@@ -1834,9 +1840,22 @@ def _connector_call_is_safe_read(args) -> bool:
 		return False
 
 
-def _file_box_wiki_write(args: dict, conv: str) -> dict:
+def _file_box_wiki_write(
+	args: dict, conv: str, *, user: str | None = None, provenance: str = "auto_apply"
+) -> dict:
 	"""Land a File Box conversation's ``update_wiki`` through the append-only,
 	provenance-FENCED wiki funnel instead of the raw ``update_wiki`` tool.
+
+	``user`` is the file-box dropper (``conversation.owner``), NOT the acting
+	session. At review-before-landing execute time the session is the REVIEWER;
+	passing the dropper keeps the write ATTRIBUTED to them - it sets the funnel's
+	``sources`` ``user`` field and the manager-board audit actor, so an approved
+	write reads as the dropper's content, not the reviewer's. (The own-pages FENCE
+	itself keys on the app-level provenance PREFIX ``FILE_BOX_WIKI_FENCE`` +
+	Org scope, not on this user - it is what refuses a human/other-app page; the
+	``user`` is attribution, not the isolation boundary.) Defaults to the session
+	user for the legacy auto-apply path. ``provenance`` labels the manager-board
+	write-audit row (``auto_apply`` | ``reviewer_approved``).
 
 	A file_box run is unattended (nobody can click a confirm card), so its
 	write-back must NOT reach the raw tool (scope=Org + ignore_permissions,
@@ -1867,7 +1886,7 @@ def _file_box_wiki_write(args: dict, conv: str) -> dict:
 		outcomes = apply_extracted_page_updates(
 			[update],
 			source=FILE_BOX_WIKI_KIND,
-			user=frappe.session.user,
+			user=user or frappe.session.user,
 			ref=conv,
 			provenance_prefix=FILE_BOX_WIKI_FENCE,
 			allow_body_replace=False,
@@ -1906,15 +1925,109 @@ def _file_box_wiki_write(args: dict, conv: str) -> dict:
 	from jarvis import agent_audit
 
 	agent_audit.record_write(
-		actor=frappe.session.user,
+		actor=user or frappe.session.user,
 		tool="update_wiki",
 		args=args,
 		result=result,
 		outcome="applied" if applied else "failed",
-		provenance="auto_apply",
+		provenance=provenance,
 		provenance_name=conv,
 	)
 	return result
+
+
+def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
+	"""HOLD a File Box run's ``update_wiki`` as a Pending reviewer proposal
+	instead of landing it (review-before-landing).
+
+	An unattended file-box run may DRAFT a wiki note but must not write to the
+	shared org wiki unreviewed. This parks the fenced write as a
+	``Jarvis Approval Request`` (source :data:`FILE_BOX_WIKI_SOURCE`) carrying the
+	raw args as ``wiki_payload``; a Jarvis reviewer - NOT the dropper (separation
+	of duties) - approves it via ``approvals_api.approve_wiki_write``, which
+	replays it through the SAME fenced funnel (:func:`_file_box_wiki_write`).
+	Returns a raw-update_wiki-compatible result telling the model the note was
+	recorded for reviewer approval (never that it landed), so it does not
+	re-propose. Idempotent per (conversation, slug): a retried turn re-emitting
+	the same write folds into the existing Pending row instead of stacking
+	duplicates for the reviewer."""
+	slug = (args.get("slug") or "").strip()
+	if not slug:
+		# A slugless update_wiki is degenerate - the fenced funnel derives no page
+		# from it and refuses it anyway. Refuse at PROPOSE so slugless writes don't
+		# all collapse onto a single ref_name="" dedupe row (each overwriting the
+		# last). The model reads ok=False and moves on (best-effort).
+		return {"ok": False, "reason": "no page slug - nothing proposed to the wiki"}
+	# Dropper = the conversation owner (read server-side, never a client claim):
+	# the AR is stamped to them, and it is the provenance ``user=`` the reviewer
+	# replays the write under so the fenced own-pages rule keys on the dropper's
+	# namespace, not the reviewer's.
+	owner = frappe.db.get_value("Jarvis Conversation", conv, "owner") or frappe.session.user
+	title = (args.get("title") or slug or "wiki note")[:100]
+	payload = json.dumps(args, default=str, sort_keys=True)
+	# Dedupe: one Pending wiki proposal per (conversation, slug). A retried turn
+	# re-emitting the same write refreshes the held payload rather than stacking
+	# duplicate rows the reviewer would have to triage.
+	existing = frappe.db.get_value(
+		"Jarvis Approval Request",
+		{
+			"conversation": conv,
+			"source": FILE_BOX_WIKI_SOURCE,
+			"status": "Pending",
+			"ref_name": slug,
+		},
+		"name",
+	)
+	if existing:
+		# Status-GUARDED refresh: only mutate the held payload while the row is
+		# still Pending. If a reviewer decided it between the read above and here,
+		# the refresh matches 0 rows and we fall through to a FRESH proposal - a
+		# re-emitted write must never rewrite what a reviewer already approved /
+		# rejected (they reviewed the payload they saw).
+		frappe.db.sql(
+			"""update `tabJarvis Approval Request`
+			set wiki_payload=%s, title=%s, modified=%s, modified_by=%s
+			where name=%s and status='Pending'""",
+			(payload, title, frappe.utils.now(), frappe.session.user, existing),
+		)
+		if frappe.db.get_value("Jarvis Approval Request", existing, "status") != "Pending":
+			existing = None
+	if existing:
+		name = existing
+	else:
+		doc = frappe.get_doc(
+			{
+				"doctype": "Jarvis Approval Request",
+				"title": title,
+				"status": "Pending",
+				"source": FILE_BOX_WIKI_SOURCE,
+				"conversation": conv,
+				"question": f"Wiki write proposed by a File Box run - refresh the page '{title}'.",
+				# NB: the agent-generated summary is intentionally NOT copied to
+				# context_md - the reviewer panel renders it (from wiki_payload) as
+				# escaped text, and leaving context_md empty keeps this row off the
+				# board's markdown v-html sink (get_approval -> renderMarkdown).
+				"ref_name": slug,
+				"wiki_payload": payload,
+				"apply_status": "Pending",
+			}
+		)
+		# ignore_permissions: the permlevel-1 fields (status / wiki_payload /
+		# apply_status) and a row naming the dropper's conversation are both
+		# beyond what the file-box run's session may write directly.
+		doc.insert(ignore_permissions=True)
+		name = doc.name
+		# v16 set_user_and_timestamp stamps owner=session on insert; re-stamp the
+		# dropper AFTER (the idiom chat_asks.materialize_from_turn uses).
+		if doc.owner != owner:
+			frappe.db.set_value("Jarvis Approval Request", name, "owner", owner, update_modified=False)
+	frappe.db.commit()
+	return {
+		"ok": True,
+		"proposed": True,
+		"approval": name,
+		"detail": "recorded for reviewer approval (not yet on the wiki)",
+	}
 
 
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
@@ -2263,11 +2376,15 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# pre-empt update_wiki into the RAW covered path (which would clobber a curated
 		# page). If that ever changes, this branch must move ABOVE them so the fence wins.
 		if conv and tool == "update_wiki" and _conv_flags.get("file_box") and not _is_bulk_call(args):
-			# _file_box_wiki_write returns the raw-update_wiki-compatible result as
-			# the DATA payload; wrap it in the standard envelope so the agent-session
-			# path's result["data"] read stays valid and the model reads it exactly
-			# like a dispatched update_wiki result.
-			return {"ok": True, "data": _file_box_wiki_write(args, conv)}
+			# REVIEW-BEFORE-LANDING: an unattended file-box run never writes the
+			# shared org wiki directly. HOLD the fenced write as a Pending reviewer
+			# proposal (approvals_api.approve_wiki_write replays it through the same
+			# funnel on approval). Enforced HERE in the dispatch so the agent cannot
+			# bypass review by any prompt path. _propose_file_box_wiki_write returns
+			# the raw-update_wiki-compatible result as the DATA payload; wrap it in
+			# the standard envelope so the agent-session path's result["data"] read
+			# stays valid and the model reads it like a dispatched update_wiki result.
+			return {"ok": True, "data": _propose_file_box_wiki_write(args, conv)}
 		# Sequential confirmation (F16): at most ONE live confirmation card per
 		# conversation. If one is already awaiting the user here, REFUSE to park a
 		# second and tell the model to stop - the continuation turn fired after the

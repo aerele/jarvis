@@ -1274,15 +1274,17 @@ class TestConfirmGracefulFailure(FrappeTestCase):
 
 
 class TestFileBoxWikiWriteBack(FrappeTestCase):
-	"""feat/filebox-skills-wiki: a File Box (file_box=1) conversation's update_wiki
-	is routed through the append-only, provenance-FENCED funnel
-	(jarvis.chat.wiki.apply_extracted_page_updates) - NOT the raw update_wiki tool
-	(scope=Org + ignore_permissions, stamps the human-curated "tool" kind, can
-	clobber curated pages) and NOT a confirmation card. Attended chat + admin
+	"""feat/filebox-wiki-review: a File Box (file_box=1) conversation's update_wiki
+	is HELD as a Pending reviewer proposal (a ``Jarvis Approval Request`` of source
+	``File Box Wiki`` carrying the raw args as ``wiki_payload``) instead of landing
+	at drop time. The fenced funnel does NOT run at drop; it replays later, only
+	when a reviewer approves (see TestWikiWriteReviewLanding). Attended chat + admin
 	auto_apply are unaffected (still park a card - the guard is ``and file_box``,
 	not ``or``). The wiki kill-switch still refuses a wiki-off file_box write before
 	the branch. A destructive tool still parks; a single create_doc still
-	auto-applies (unregressed)."""
+	auto-applies (unregressed). The bottom group are direct unit tests of the
+	executor (:func:`api._file_box_wiki_write`) - unchanged by review-before-landing,
+	just invoked from the reviewer approve path now instead of the dispatch."""
 
 	_ARGS = {
 		"slug": "party-fake-co",
@@ -1294,6 +1296,7 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 
 	def tearDown(self):
 		for name in frappe.get_all(CONV, filters={"title": "file-box-wiki test"}, pluck="name"):
+			frappe.db.delete("Jarvis Approval Request", {"conversation": name})
 			frappe.delete_doc(CONV, name, force=True, ignore_permissions=True)
 		frappe.db.delete("ToDo", {"description": ["like", "file-box-wiki-%"]})
 		frappe.db.commit()
@@ -1308,46 +1311,58 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 			frappe.db.set_value(CONV, doc.name, flags, update_modified=False)
 		return doc.name
 
-	def test_file_box_update_wiki_routes_through_fenced_funnel(self):
-		# Case 1: file_box + update_wiki -> the fenced funnel runs once with the
-		# append-only / preserve-curated / file-box fence kwargs; no card; the raw
-		# update_wiki tool never dispatches.
+	def test_file_box_update_wiki_proposes_not_executes(self):
+		# Case 1 (review-before-landing): file_box + update_wiki -> the fenced funnel
+		# does NOT run at drop; instead a Pending "File Box Wiki" proposal is created
+		# holding the raw args, and no confirmation card is parked / raw tool
+		# dispatched. The reviewer approve path (not this run) lands the write.
 		conv = self._conv(file_box=1)
 		with (
 			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
-			patch(
-				"jarvis.chat.wiki.apply_extracted_page_updates",
-				return_value=[{"slug": "party-fake-co", "ok": True, "reason": "applied"}],
-			) as apply,
+			patch("jarvis.chat.wiki.apply_extracted_page_updates") as apply,
 			patch("jarvis.chat.pending_confirm.mint") as mint,
 			patch("jarvis.api.dispatch") as disp,
 		):
 			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
-		apply.assert_called_once()
-		kwargs = apply.call_args.kwargs
-		self.assertEqual(kwargs["allow_body_replace"], False)
-		self.assertEqual(kwargs["preserve_curated"], True)
-		self.assertEqual(kwargs["provenance_prefix"], "file-box")
-		self.assertEqual(kwargs["source"], "file-box:")
-		self.assertEqual(kwargs["return_outcomes"], True)
-		self.assertEqual(kwargs["ref"], conv)
-		# One update, append-only (append_md carried, no body_md replace).
-		updates = apply.call_args.args[0]
-		self.assertEqual(len(updates), 1)
-		self.assertEqual(updates[0]["append_md"], self._ARGS["append_md"])
-		self.assertNotIn("body_md", updates[0])
-		self.assertEqual(updates[0]["scope"], "Org")
-		# No confirmation card parked; the raw update_wiki tool never dispatched.
+		# The write is HELD, not applied: the funnel never runs at drop time.
+		apply.assert_not_called()
 		mint.assert_not_called()
 		disp.assert_not_called()
-		# Model-facing result: enveloped, inner ok=True with the normalized slug.
+		# Model-facing result: enveloped, inner ok=True + proposed (never "landed").
 		self.assertTrue(r["ok"])
 		self.assertTrue(r["data"]["ok"])
-		self.assertEqual(r["data"]["slug"], "party-fake-co")
+		self.assertTrue(r["data"]["proposed"])
+		# A Pending reviewer proposal exists, source "File Box Wiki", holding the
+		# raw args as wiki_payload, apply_status Pending, stamped to the dropper.
+		name = r["data"]["approval"]
+		ar = frappe.get_doc("Jarvis Approval Request", name)
+		self.assertEqual(ar.status, "Pending")
+		self.assertEqual(ar.source, "File Box Wiki")
+		self.assertEqual(ar.apply_status, "Pending")
+		self.assertEqual(ar.conversation, conv)
+		self.assertEqual(ar.owner, frappe.db.get_value(CONV, conv, "owner"))
+		self.assertEqual(frappe.parse_json(ar.wiki_payload)["slug"], "party-fake-co")
 
-	def test_file_box_replace_body_is_downgraded_to_append(self):
-		# The fence is append-only: a replace_body_md becomes append_md, so an
-		# unattended run can never full-body-rewrite a page.
+	def test_file_box_wiki_proposal_dedupes_on_retry(self):
+		# A retried turn re-emitting the same (conversation, slug) write folds into
+		# the existing Pending row rather than stacking duplicates for the reviewer.
+		conv = self._conv(file_box=1)
+		with patch("jarvis.chat.wiki.wiki_enabled", return_value=True):
+			first = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+			second = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+		self.assertEqual(first["data"]["approval"], second["data"]["approval"])
+		self.assertEqual(
+			frappe.db.count(
+				"Jarvis Approval Request",
+				{"conversation": conv, "source": "File Box Wiki", "status": "Pending"},
+			),
+			1,
+		)
+
+	def test_executor_downgrades_replace_body_to_append(self):
+		# Unit test of the executor (now invoked from the reviewer approve path):
+		# append-only fence - a replace_body_md becomes append_md, so it can never
+		# full-body-rewrite a page.
 		conv = self._conv(file_box=1)
 		args = {"slug": "party-fake-co", "replace_body_md": "WHOLE NEW BODY"}
 		with (
@@ -1356,14 +1371,43 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 				"jarvis.chat.wiki.apply_extracted_page_updates",
 				return_value=[{"slug": "party-fake-co", "ok": True, "reason": "applied"}],
 			) as apply,
+			patch("jarvis.agent_audit.record_write"),
 		):
-			api._run_tool("update_wiki", args, conversation=conv)
+			api._file_box_wiki_write(args, conv)
 		update = apply.call_args.args[0][0]
 		self.assertEqual(update["append_md"], "WHOLE NEW BODY")
 
-	def test_file_box_fence_refusal_reports_reason(self):
+	def test_executor_passes_fence_kwargs_and_provenance_user(self):
+		# The executor runs the funnel with the append-only / preserve-curated /
+		# file-box fence kwargs, and keys the provenance user= on the caller-supplied
+		# dropper (not the acting session) so own-pages stays the dropper's namespace.
+		conv = self._conv(file_box=1)
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch(
+				"jarvis.chat.wiki.apply_extracted_page_updates",
+				return_value=[{"slug": "party-fake-co", "ok": True, "reason": "applied"}],
+			) as apply,
+			patch("jarvis.agent_audit.record_write") as board,
+		):
+			api._file_box_wiki_write(
+				dict(self._ARGS), conv, user="dropper@x.com", provenance="reviewer_approved"
+			)
+		kwargs = apply.call_args.kwargs
+		self.assertEqual(kwargs["allow_body_replace"], False)
+		self.assertEqual(kwargs["preserve_curated"], True)
+		self.assertEqual(kwargs["provenance_prefix"], "file-box")
+		self.assertEqual(kwargs["source"], "file-box:")
+		self.assertEqual(kwargs["ref"], conv)
+		self.assertEqual(kwargs["user"], "dropper@x.com")
+		# The manager-board write-audit row carries the dropper as actor + the
+		# reviewer-approved provenance label.
+		self.assertEqual(board.call_args.kwargs["actor"], "dropper@x.com")
+		self.assertEqual(board.call_args.kwargs["provenance"], "reviewer_approved")
+
+	def test_executor_fence_refusal_reports_reason(self):
 		# A funnel refusal (a slug colliding with a human/other page) surfaces as
-		# inner ok=False + reason - the model reads it and moves on (best-effort).
+		# ok=False + reason from the executor.
 		conv = self._conv(file_box=1)
 		with (
 			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
@@ -1371,13 +1415,11 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 				"jarvis.chat.wiki.apply_extracted_page_updates",
 				return_value=[{"slug": "party-fake-co", "ok": False, "reason": "refused"}],
 			),
-			patch("jarvis.chat.pending_confirm.mint") as mint,
+			patch("jarvis.agent_audit.record_write"),
 		):
-			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
-		self.assertTrue(r["ok"])  # the tool dispatched cleanly...
-		self.assertFalse(r["data"]["ok"])  # ...but the fenced write was refused.
-		self.assertEqual(r["data"]["reason"], "refused")
-		mint.assert_not_called()
+			r = api._file_box_wiki_write(dict(self._ARGS), conv)
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["reason"], "refused")
 
 	def test_normal_conversation_parks_card_not_fenced(self):
 		# Case 2: file_box=0 -> the ordinary park path (a confirmation card), the
@@ -1471,11 +1513,10 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 		self.assertEqual(dc.call_args.kwargs.get("provenance"), "auto_apply")
 		self.assertTrue(r["ok"])
 
-	def test_file_box_wiki_write_files_both_audit_rows(self):
-		# The fenced branch returns BEFORE _dispatch_and_wrap, so it must file BOTH
-		# audit rows itself: the tool_audit logger line AND the durable Jarvis Agent
-		# Write manager-board row - else an unattended Org-scope wiki write is missing
-		# from the board every other file_box write lands on.
+	def test_executor_files_both_audit_rows(self):
+		# The executor files BOTH audit rows itself: the tool_audit logger line AND
+		# the durable Jarvis Agent Write manager-board row - else an approved Org-scope
+		# wiki write is missing from the board every other file_box write lands on.
 		conv = self._conv(file_box=1)
 		with (
 			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
@@ -1486,7 +1527,7 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 			patch("jarvis.api.audit.record") as rec,
 			patch("jarvis.agent_audit.record_write") as board,
 		):
-			api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+			api._file_box_wiki_write(dict(self._ARGS), conv)
 		rec.assert_called_once()
 		self.assertEqual(rec.call_args.kwargs["tool"], "update_wiki")
 		self.assertTrue(rec.call_args.kwargs["ok"])
@@ -1495,7 +1536,7 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 		self.assertEqual(board.call_args.kwargs["outcome"], "applied")
 		self.assertEqual(board.call_args.kwargs["provenance_name"], conv)
 
-	def test_file_box_wiki_refusal_audits_as_failed(self):
+	def test_executor_refusal_audits_as_failed(self):
 		# A fence refusal must audit as FAILED on both rows (not a false success).
 		conv = self._conv(file_box=1)
 		with (
@@ -1507,15 +1548,15 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 			patch("jarvis.api.audit.record") as rec,
 			patch("jarvis.agent_audit.record_write") as board,
 		):
-			api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+			api._file_box_wiki_write(dict(self._ARGS), conv)
 		self.assertFalse(rec.call_args.kwargs["ok"])
 		self.assertEqual(rec.call_args.kwargs["error_message"], "refused")
 		self.assertEqual(board.call_args.kwargs["outcome"], "failed")
 
-	def test_file_box_wiki_txn_fatal_is_best_effort(self):
-		# A transaction-fatal funnel error (deadlock / lock-wait) must NOT 500 the
-		# unattended run: the branch rolls back and returns a soft ok=False, never
-		# raises - honoring the prompt's "never fail the run over a wiki write".
+	def test_executor_txn_fatal_is_best_effort(self):
+		# A transaction-fatal funnel error (deadlock / lock-wait) must NOT raise out
+		# of the executor: it rolls back and returns a soft ok=False, so the reviewer
+		# approve path can record apply_status=Failed instead of 500-ing.
 		conv = self._conv(file_box=1)
 		with (
 			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
@@ -1526,21 +1567,20 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 			patch("frappe.db.rollback") as rb,
 			patch("jarvis.agent_audit.record_write"),
 		):
-			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
-		self.assertTrue(r["ok"])
-		self.assertFalse(r["data"]["ok"])
-		self.assertEqual(r["data"]["reason"], "error")
+			r = api._file_box_wiki_write(dict(self._ARGS), conv)
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["reason"], "error")
 		rb.assert_called()
 
-	def test_file_box_wiki_empty_outcomes_reads_as_skipped(self):
+	def test_executor_empty_outcomes_reads_as_skipped(self):
 		# Defensive: the funnel returning no outcomes for our single update surfaces
 		# as a soft ok=False (skipped), never an IndexError.
 		conv = self._conv(file_box=1)
 		with (
-			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
 			patch("jarvis.chat.wiki.apply_extracted_page_updates", return_value=[]),
+			patch("jarvis.api.audit.record"),
 			patch("jarvis.agent_audit.record_write"),
 		):
-			r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
-		self.assertFalse(r["data"]["ok"])
-		self.assertEqual(r["data"]["reason"], "skipped")
+			r = api._file_box_wiki_write(dict(self._ARGS), conv)
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["reason"], "skipped")

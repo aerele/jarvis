@@ -751,8 +751,8 @@ export async function uploadBrandAsset(file) {
 }
 
 // ── File Box: drop an inbound document, get a directed processing chat ──
-export const fileboxDrop = (file_url, file_name) =>
-	call("jarvis.chat.filebox.drop_file", { file_url, file_name });
+export const fileboxDrop = (file_url, file_name, skill) =>
+	call("jarvis.chat.filebox.drop_file", { file_url, file_name, skill });
 export const fileboxList = () => call("jarvis.chat.filebox.list_inbound", {});
 
 // ── Approvals: pending-decision queue + decide-and-resume ──
@@ -766,6 +766,22 @@ export const dismissApproval = (name) =>
 	call("jarvis.chat.approvals_api.dismiss_approval", { name });
 export const restoreApproval = (name) =>
 	call("jarvis.chat.approvals_api.restore_approval", { name });
+
+// ── Wiki write-back review lane (reviewer-gated; review-before-landing) ──
+// A File Box run's wiki note is HELD as a proposal a Jarvis reviewer — NOT the
+// dropper (separation of duties) — approves before it lands.
+export const listWikiWriteProposals = (p = {}) =>
+	call("jarvis.chat.approvals_api.list_wiki_write_proposals", {
+		status: p.status || "Actionable",
+		start: p.start || 0,
+		page_length: p.page_length || 20,
+	});
+export const approveWikiWrite = (name) =>
+	call("jarvis.chat.approvals_api.approve_wiki_write", { name });
+export const rejectWikiWrite = (name) =>
+	call("jarvis.chat.approvals_api.reject_wiki_write", { name });
+export const retryWikiWrite = (name) =>
+	call("jarvis.chat.approvals_api.retry_wiki_write", { name });
 
 // ── Agents Marketplace: catalog, install/enable/schedule, apply, runs+findings ──
 // enable/disable + schedule + config are INSTANT (pure DB writes). Apply is the

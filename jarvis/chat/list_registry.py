@@ -504,6 +504,15 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 		"not a browsable document list"
 	),
 	"jarvis.chat.approvals_api.list_approvals": "unpaginated companion of approvals (list_approvals_page)",
+	# The Approval Board's reviewer-only wiki-write-proposal panel feed
+	# (review-before-landing): reviewer-gated (require_skill_reviewer), a small
+	# ACTIONABLE set (pending decisions + failed landings to retry) with no
+	# filter/sort/columns contract — an in-pane affordance, not a browsable
+	# document list, so there is no ListView to register.
+	"jarvis.chat.approvals_api.list_wiki_write_proposals": (
+		"Approval Board wiki-write review panel feed: a reviewer-gated actionable "
+		"slice (pending + failed-landing), not a browsable document list"
+	),
 	"jarvis.chat.custom_skills_api.list_custom_skills": (
 		"composer '/' autocomplete feed for skills; unpaginated companion of the skills view"
 	),

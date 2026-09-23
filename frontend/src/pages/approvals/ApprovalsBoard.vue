@@ -45,6 +45,10 @@
 			/>
 		</div>
 
+		<!-- reviewer-only wiki write-back review lane (self-gating; hidden for
+		     non-reviewers and when nothing is pending) -->
+		<WikiReviewPanel />
+
 		<div class="flex min-h-0 flex-1">
 			<!-- LEFT rail: inbox-style rows on a standing gray-1 surface so the
 			     selected row's white chip + shadow reads in light mode (CRM
@@ -512,6 +516,7 @@ import {
 	toast,
 } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
+import WikiReviewPanel from "@/pages/approvals/WikiReviewPanel.vue";
 import DocSection from "@/components/doc/DocSection.vue";
 import DocMetaPanel from "@/components/doc/DocMetaPanel.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";

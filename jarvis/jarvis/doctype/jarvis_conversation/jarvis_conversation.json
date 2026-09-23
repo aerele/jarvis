@@ -107,6 +107,14 @@
    "description": "The armed Jarvis Custom Skill DOCNAME whose approved run stamped skill_autorun on this conversation - set by approve_and_run alongside skill_autorun=1 (from the token's skill_docname). The write-confirmation gate re-reads allow_approve_run LIVE off THIS row before each uncarded covered write, so un-arming the skill mid-run hard-stops the auto-run within one write (the documented kill lever). Server-set only (db_set)."
   },
   {
+   "fieldname": "filebox_pinned_skill",
+   "fieldtype": "Data",
+   "label": "File Box Pinned Skill",
+   "hidden": 1,
+   "no_copy": 1,
+   "description": "The skill_name a user pinned at File Box drop time (or ocr-data-entry, or empty for auto-discovery). Server-set only via drop_file after validating the caller may use it (get_skill); the directed prompt then tells the agent to follow this skill and skip find_skills discovery."
+  },
+  {
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",

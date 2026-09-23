@@ -21,6 +21,12 @@ import frappe
 
 from jarvis.permissions import require_jarvis_user
 
+# The persona fallback skill (SHARED_CORE_SKILLS, role_profiles.py) - always
+# available, and NOT a Jarvis Custom Skill row, so it is validated by literal
+# match, never through get_skill. Defined once so the pin validation and the
+# prompt fallback reference the same string.
+OCR_DATA_ENTRY = "ocr-data-entry"
+
 INBOUND_PROMPT = (
 	"This file arrived through the File Box - process it as an inbound business "
 	"document, unattended, in this order.\n"
@@ -39,8 +45,10 @@ INBOUND_PROMPT = (
 	"balancing line - resolve ambiguities by the skill's convention ladder, and "
 	"create the draft.\n"
 	"5. AFTER the draft exists, record what you learned back to the wiki with "
-	"update_wiki, extending the page from step 3 rather than duplicating it. This is "
-	"best-effort: if the write is refused or the wiki is off, note it and move on - "
+	"update_wiki, extending the page from step 3 rather than duplicating it. Your "
+	"wiki note is PROPOSED for a Jarvis reviewer to approve before it lands - it does "
+	"not go live from this run, so do not re-submit or wait on it. This is "
+	"best-effort: if the proposal is refused or the wiki is off, note it and move on - "
 	"never fail or retry the run over a wiki write.\n"
 	"These rules OVERRIDE any skill you follow and are non-negotiable: do NOT ask me "
 	"anything in this chat (I am not here); only ever create Drafts, never submit; "
@@ -51,10 +59,70 @@ INBOUND_PROMPT = (
 )
 
 
+def build_inbound_prompt(skill: str | None = None) -> str:
+	"""The File Box directed prompt. ``skill=None`` returns ``INBOUND_PROMPT``
+	VERBATIM (the auto-discovery flow), so a tag can never drift the default path.
+	A tagged ``skill`` (a canonical skill_name) prepends a directive that applies
+	that skill ALONGSIDE the system's chosen skill (ADDITIVE, not a replacement):
+	the normal classify + base-extraction flow below still runs, and the tagged
+	skill layers its own rules on top. Every step and the safety envelope below
+	apply unchanged."""
+	if not skill:
+		return INBOUND_PROMPT
+	directive = (
+		f"This file also carries a TAGGED skill: '{skill}'. Run the normal flow below "
+		"(classify, and process with the system's chosen skill - a discovered skill, "
+		f"else {OCR_DATA_ENTRY} - as the base extraction) AND, IN ADDITION, read the "
+		f"'{skill}' skill (get_skill '{skill}', or cat skills/{skill}/SKILL.md) and apply "
+		"its instructions on top: its field mappings, validation and routing LAYER onto "
+		"the base, they do not replace it. If the tagged skill cannot be loaded, carry on "
+		"with the base flow alone. The safety rules below still OVERRIDE both.\n\n"
+	)
+	return directive + INBOUND_PROMPT
+
+
+def _validated_pinned_skill(skill: str | None) -> str | None:
+	"""Resolve a client-supplied skill slug to the CANONICAL skill_name to pin, or
+	None to fall back to auto-discovery. The client string is untrusted, so the
+	slug is validated through ``get_skill`` itself - the same resolver the agent
+	will use (system-user + enabled + own-row-wins) - so drop-time acceptance and
+	run-time load can never disagree, and only a validated slug (SLUG_RE, so no
+	newline / '<' / '_' / quote) is ever embedded in the prompt or stored.
+	Fallback is UNIFORM: a nonexistent slug and an inaccessible one both return
+	None (no enumeration oracle), and the note is server-side only."""
+	slug = (skill or "").strip()
+	if not slug:
+		return None
+	if slug == OCR_DATA_ENTRY:  # persona skill, no Custom Skill row - accept by literal
+		return OCR_DATA_ENTRY
+	from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+	from jarvis.tools.get_skill import get_skill
+
+	try:
+		row = get_skill(slug)
+	except (InvalidArgumentError, PermissionDeniedError):
+		# UNIFORM fallback: unknown slug AND inaccessible skill both land here -> None
+		# (no enumeration oracle). A transient/unexpected error is NOT caught - it
+		# propagates so the drop fails loudly rather than silently dropping the pin.
+		# Server-side note only (never in the return payload) so the client can't
+		# probe another user's private-skill existence by watching whether a pin stuck.
+		frappe.logger("jarvis").info(
+			"file_box pin fell back to auto: skill %r not usable by %s", slug, frappe.session.user
+		)
+		return None
+	return row.get("skill_name") or None
+
+
 @frappe.whitelist()
 @require_jarvis_user
-def drop_file(file_url: str, file_name: str | None = None) -> dict:
-	"""Create a conversation for an uploaded file and kick off processing."""
+def drop_file(file_url: str, file_name: str | None = None, skill: str | None = None) -> dict:
+	"""Create a conversation for an uploaded file and kick off processing.
+
+	``skill`` (optional) tags ONE extra processing skill for this file: a Jarvis
+	Custom Skill's skill_name. It is validated server-side (the client string is
+	untrusted) and, if usable, the agent applies it ALONGSIDE the system's chosen
+	skill (additive - the base extraction still runs, the tagged skill layers on
+	top). An unusable / absent skill just leaves the normal auto-discovery flow."""
 	file_url = (file_url or "").strip()
 	if not file_url:
 		frappe.throw("file_url is required")
@@ -74,16 +142,20 @@ def drop_file(file_url: str, file_name: str | None = None) -> dict:
 
 	from jarvis.chat.api import create_conversation, send_message
 
+	# Untrusted client slug -> canonical skill_name to pin, or None (auto).
+	pinned = _validated_pinned_skill(skill)
+
 	conv_id = create_conversation()
 	title = (file_name or fdoc.file_name or "Inbound document")[:60]
 	# file_box: this is an unattended directed run - nobody is present to
 	# click a write-confirmation card, so reversible create/update commit
 	# directly (destructive ops still park to the approval board). Set via
 	# db.set_value to bypass the controller's admin-gate on enabling it.
+	# filebox_pinned_skill: the validated pin (or "" for auto-discovery).
 	frappe.db.set_value(
 		"Jarvis Conversation",
 		conv_id,
-		{"title": f"File: {title}", "file_box": 1},
+		{"title": f"File: {title}", "file_box": 1, "filebox_pinned_skill": pinned or ""},
 		update_modified=False,
 	)
 	# Durable exact link: attach the File to the conversation so resumes
@@ -101,7 +173,7 @@ def drop_file(file_url: str, file_name: str | None = None) -> dict:
 	# drops drains FIFO and never jumps ahead of a human's typed question.
 	res = send_message(
 		conversation=conv_id,
-		message=INBOUND_PROMPT,
+		message=build_inbound_prompt(pinned),
 		attachments=attachments,
 		background=1,
 	)
@@ -399,6 +471,18 @@ def list_inbound_page(
 			r["file_name"] = fr["file_name"] if fr else None
 			fn = (fr and (fr.get("file_name") or fr.get("file_url"))) or ""
 			r["file_type"] = fn.rsplit(".", 1)[-1].lower() if "." in fn else None
+
+		# The pinned skill, OWNER-ONLY: a tagged (non-owner) viewer must not learn
+		# which skill the owner pinned. The owner=me filter returns only owned rows,
+		# so a tagged row's pinned_skill stays None by construction.
+		pin_rows = frappe.get_all(
+			CONV,
+			filters={"name": ["in", names], "owner": me},
+			fields=["name", "filebox_pinned_skill"],
+		)
+		pins = {p["name"]: (p.get("filebox_pinned_skill") or None) for p in pin_rows}
+		for r in rows:
+			r["pinned_skill"] = pins.get(r["name"])
 
 	return {
 		"rows": rows,
