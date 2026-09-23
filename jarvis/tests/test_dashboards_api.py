@@ -1370,3 +1370,12 @@ class TestRunWithFilters(_DashboardsApiTestCase):
 		frappe.set_user("Guest")
 		with self.assertRaises(frappe.PermissionError):
 			preview_dashboard_source("get_list", "{}", "", "")
+
+	def test_preview_non_list_filter_defs_is_invalid_argument(self):
+		frappe.set_user(PLAIN_A)
+		r = preview_dashboard_source(
+			"get_list", frappe.as_json(TODO_SRC_FILTERED["spec"]), frappe.as_json({"fieldname": "x"}), ""
+		)
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "InvalidArgumentError")
+		self.assertEqual(r["error"]["message"], "filter_defs must be a JSON array.")

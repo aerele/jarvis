@@ -180,6 +180,7 @@ import {
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { getDashboard, getDashboardsCaps, deleteDashboard, saveDashboard } from "@/api/dashboards";
+import { debouncedFilterValues } from "@/lib/debouncedFilterValues";
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
 import DashboardFilterBar from "./DashboardFilterBar.vue";
@@ -234,12 +235,27 @@ const caps = ref({ creatable_scopes: [], manageable_roles: [] });
 const filterValues = ref({});
 const filterErrors = ref({});
 const appliedFilters = ref({});
-let filterTimer = null;
+// Debounced: applies the values to the canvas (re-running its sources) and
+// syncs the URL only after the user stops picking, and clears prior errors -
+// a fresh value may or may not still be empty, and the canvas will say so again.
+const filterDebounce = debouncedFilterValues(filterValues, appliedFilters, (v) => {
+	filterErrors.value = {};
+	const q = { ...route.query };
+	for (const [k, val] of Object.entries(v)) {
+		if (val) q["f_" + k] = val;
+		else delete q["f_" + k];
+	}
+	router.replace({ query: q });
+});
+function onFilterChange(v) {
+	filterDebounce.onChange(v);
+}
 
 // Seeds from the route's f_<fieldname> query (a shared/bookmarked link) over
 // the server-resolved default. Reset on every load so a stale error or value
 // from a previously viewed dashboard never bleeds into this one.
 function initFilters(defs) {
+	filterDebounce.cancel();
 	const v = {};
 	for (const d of defs || []) {
 		const fromUrl = route.query["f_" + d.fieldname];
@@ -248,23 +264,6 @@ function initFilters(defs) {
 	filterValues.value = v;
 	appliedFilters.value = { ...v };
 	filterErrors.value = {};
-}
-// Debounced: applies the values to the canvas (re-running its sources) and
-// syncs the URL only after the user stops picking, and clears prior errors -
-// a fresh value may or may not still be empty, and the canvas will say so again.
-function onFilterChange(v) {
-	filterValues.value = v;
-	clearTimeout(filterTimer);
-	filterTimer = setTimeout(() => {
-		appliedFilters.value = { ...v };
-		filterErrors.value = {};
-		const q = { ...route.query };
-		for (const [k, val] of Object.entries(v)) {
-			if (val) q["f_" + k] = val;
-			else delete q["f_" + k];
-		}
-		router.replace({ query: q });
-	}, 300);
 }
 
 async function load() {
@@ -370,5 +369,5 @@ onMounted(() => {
 });
 // A pending debounced filter apply must not fire after navigating away - it
 // would router.replace() query keys onto whatever route the user landed on.
-onBeforeUnmount(() => clearTimeout(filterTimer));
+onBeforeUnmount(() => filterDebounce.cancel());
 </script>

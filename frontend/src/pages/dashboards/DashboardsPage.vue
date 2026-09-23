@@ -114,7 +114,8 @@
 					<DashboardFilterBar
 						:defs="detectedFilters"
 						:modelValue="builderFilters"
-						@update:modelValue="(v) => (builderFilters = v)"
+						:errors="builderFilterErrors"
+						@update:modelValue="onBuilderFilterChange"
 					/>
 					<DashboardCanvas
 						ref="canvasRef"
@@ -123,13 +124,17 @@
 						:html="builderHtml"
 						:caps="caps"
 						:theme="builderTheme"
-						:filters="builderFilters"
+						:filters="builderAppliedFilters"
 						@sources="(s) => (detectedSources = s)"
 						@filters="
 							(f) => {
 								detectedFilters = f;
 								initBuilderFilters(f);
 							}
+						"
+						@filter-error="
+							(name) =>
+								(builderFilterErrors = { ...builderFilterErrors, [name]: true })
 						"
 					/>
 				</div>
@@ -237,6 +242,7 @@ import {
 } from "@/api/dashboards";
 import { takeDashboardPrefill } from "@/composables/dashboardPrefill";
 import { gotoFiredKey } from "@/lib/chatGoto";
+import { debouncedFilterValues } from "@/lib/debouncedFilterValues";
 import { builderCanvasFrame } from "@/lib/dashboardRestore";
 import {
 	adoptionIdentity,
@@ -309,7 +315,17 @@ const editingDetail = ref(null); // full get_dashboard detail while editing
 const savedName = ref(""); // last save's name → the "View dashboard" link
 const detectedSources = ref([]); // parsed #jarvis-sources (DashboardCanvas emit)
 const detectedFilters = ref([]); // parsed #jarvis-filters (DashboardCanvas emit)
-const builderFilters = ref({}); // {fieldname: value} fed to the canvas; no URL sync here
+const builderFilters = ref({}); // {fieldname: value} fed to the bar; updated immediately
+const builderAppliedFilters = ref({}); // debounced copy fed to the canvas
+const builderFilterErrors = ref({}); // {fieldname: true} for required-empty (DashboardCanvas emit)
+// Same 300ms debounce DashboardView uses: a pick updates the bar right away,
+// but the canvas (and its iframe remount) only sees it once the user stops.
+const builderFilterDebounce = debouncedFilterValues(builderFilters, builderAppliedFilters, () => {
+	builderFilterErrors.value = {};
+});
+function onBuilderFilterChange(v) {
+	builderFilterDebounce.onChange(v);
+}
 // Last-seen defs' fieldname set. Re-initialising on every "filters" emit
 // (the html watcher fires on any rebuild, not just a new filter set) would
 // clobber a value the user already picked; only a genuinely new set resets.
@@ -321,6 +337,10 @@ function initBuilderFilters(defs) {
 		.join(",");
 	if (names === filterFieldnameKey) return;
 	filterFieldnameKey = names;
+	// A new filter set outdates any pending debounced apply and any error the
+	// canvas flagged against the OLD set - both would otherwise land after this.
+	builderFilterDebounce.cancel();
+	builderFilterErrors.value = {};
 	const next = {};
 	for (const d of defs || []) {
 		next[d.fieldname] = Object.prototype.hasOwnProperty.call(builderFilters.value, d.fieldname)
@@ -328,6 +348,7 @@ function initBuilderFilters(defs) {
 			: d.default || "";
 	}
 	builderFilters.value = next;
+	builderAppliedFilters.value = { ...next };
 }
 const saveOpen = ref(false);
 const chatPane = ref(null);
@@ -642,7 +663,10 @@ function clearBuilder() {
 	savedName.value = "";
 	detectedSources.value = [];
 	detectedFilters.value = [];
+	builderFilterDebounce.cancel();
 	builderFilters.value = {};
+	builderAppliedFilters.value = {};
+	builderFilterErrors.value = {};
 	filterFieldnameKey = "";
 	builderTheme.value = DEFAULT_THEME;
 }
@@ -756,7 +780,10 @@ function applyEditDetail(d, { deepLink = true } = {}) {
 	// protects, so only a genuine identity change resets.
 	if (d.name !== editingName()) {
 		detectedFilters.value = [];
+		builderFilterDebounce.cancel();
 		builderFilters.value = {};
+		builderAppliedFilters.value = {};
+		builderFilterErrors.value = {};
 		filterFieldnameKey = "";
 	}
 	builderHtml.value = d.html || "";
@@ -1237,6 +1264,8 @@ function resetSplit() {
 }
 onBeforeUnmount(stopResize);
 onBeforeUnmount(() => shell.setSpaciousView(false));
+// A pending debounced filter apply must not fire after this page unmounts.
+onBeforeUnmount(() => builderFilterDebounce.cancel());
 
 // ── caps probe (403 vs transient, TriggersPage pattern) ──────────────────────
 function isPermissionError(e) {
