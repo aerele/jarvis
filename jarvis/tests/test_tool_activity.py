@@ -88,6 +88,7 @@ class TestToolActivity(FrappeTestCase):
 				**fields,
 			}
 		)
+		doc.flags.jarvis_server_write = True  # a server-written fixture (P0a guard)
 		doc.insert(ignore_permissions=True)
 		return doc.name
 

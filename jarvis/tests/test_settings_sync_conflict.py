@@ -203,12 +203,15 @@ class _Base(FrappeTestCase):
 		has its transaction ended underneath it. ``frappe.local.job`` is what
 		``execute_job`` sets, so setting it is what makes these tests exercise the
 		real worker path rather than a shape production never takes."""
-		previous = getattr(frappe.local, "job", None)
+		had_job, previous = hasattr(frappe.local, "job"), getattr(frappe.local, "job", None)
 		frappe.local.job = frappe._dict(method="test", job_name="test", after_job=None)
 		try:
 			yield
 		finally:
-			frappe.local.job = previous
+			if had_job:
+				frappe.local.job = previous
+			else:
+				del frappe.local.job  # a leftover None still reads as "in a job" to frappe
 
 	@staticmethod
 	def _clear_cooldown():

@@ -52,6 +52,7 @@ class TestActionRowDoctype(FrappeTestCase):
 				"expires_at": frappe.utils.now_datetime(),
 			}
 		)
+		m.flags.jarvis_server_write = True  # a server-written fixture (P0a guard)
 		m.insert(ignore_permissions=True)  # must NOT raise InvalidSelectError
 		self.addCleanup(
 			lambda: frappe.delete_doc("Jarvis Chat Message", m.name, force=True, ignore_permissions=True)
@@ -299,6 +300,7 @@ class TestActionCardHealth(FrappeTestCase):
 				"expires_at": expires_at,
 			}
 		)
+		m.flags.jarvis_server_write = True  # a server-written fixture (P0a guard)
 		m.insert(ignore_permissions=True)
 		return m.name
 

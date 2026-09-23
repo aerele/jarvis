@@ -627,6 +627,7 @@ def _run_step(run, macro_doc, index: int) -> bool:
 	out = api._enqueue_turn(
 		run.conversation,
 		(step.prompt or "").strip() + _skill_invocations(step),
+		origin="macro",
 		model_override=(step.model_override or None),
 		thinking_override=(step.thinking_override or None),
 	)
@@ -680,6 +681,7 @@ def _run_merged(run, macro_doc, merged_prompt: str) -> bool:
 	out = api._enqueue_turn(
 		run.conversation,
 		merged_prompt + _merged_skill_invocations(macro_doc),
+		origin="macro",
 		model_override=model_o,
 		thinking_override=think_o,
 	)

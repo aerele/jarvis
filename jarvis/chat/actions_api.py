@@ -19,7 +19,7 @@ from jarvis import audit
 from jarvis._session import impersonate
 from jarvis.chat.api import _NON_EDIT_FIELDTYPES, _next_seq, enqueue_continuation
 from jarvis.exceptions import InvalidArgumentError
-from jarvis.permissions import require_jarvis_user
+from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_user
 
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
@@ -162,7 +162,7 @@ def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args:
 	"""Tool message first (feeds the SPA's docRefs → the receipt's doc id
 	linkifies to Desk), then a short assistant receipt the agent also sees in
 	the transcript on its next turn - so it never re-applies the change."""
-	frappe.get_doc(
+	receipt = frappe.get_doc(
 		{
 			"doctype": MSG,
 			"conversation": conversation,
@@ -181,7 +181,9 @@ def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args:
 			# record that does.
 			"action_outcome": "confirmed",
 		}
-	).insert(ignore_permissions=True)
+	)
+	receipt.flags.jarvis_server_write = True
+	receipt.insert(ignore_permissions=True)
 	frappe.get_doc(
 		{
 			"doctype": MSG,
@@ -195,7 +197,7 @@ def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args:
 	frappe.db.set_value(CONV, conversation, "last_active_at", frappe.utils.now(), update_modified=False)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def apply_action(action: dict | str | None = None) -> dict:
 	"""Apply a human-authored draft-panel edit: create or update ONLY, with the
@@ -209,6 +211,7 @@ def apply_action(action: dict | str | None = None) -> dict:
 	token gate (``confirm_tool``). ``conversation`` is mandatory and always
 	owner-checked: an apply can only ever act inside the caller's own
 	conversation."""
+	refuse_in_tool_dispatch()
 	a = frappe.parse_json(action) if isinstance(action, str) else (action or {})
 	verb = (a.get("verb") or "").strip()
 	doctype = (a.get("doctype") or "").strip()
@@ -446,7 +449,7 @@ def _confirmation_storage_error(exc) -> dict:
 	return _CONFIRMATION_UNAVAILABLE
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	"""Execute a parked mutating tool call after the human clicked Confirm.
@@ -479,10 +482,11 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	browser session's sid + data are always restored - a bare ``frappe.set_user``
 	would gut the cookie session and log the user out.
 	"""
+	refuse_in_tool_dispatch()
 	return _confirm_core(token, conversation)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def approve_and_run(token: str, conversation: str | None = None) -> dict:
 	"""Open an APPROVED skill run: confirm step 1 AND arm the conversation's
@@ -515,6 +519,7 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 	with ``confirm_tool``; the distinct skill-run provenance LABEL (``armed_by``
 	skill) is a later task.
 	"""
+	refuse_in_tool_dispatch()
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
 
@@ -928,7 +933,7 @@ def _dismiss_note(tool: str, args: dict) -> str:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	"""Discard a parked gated write after the human clicked Discard.
@@ -946,6 +951,7 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	``already_handled`` so the SPA silently drops the card. Human cookie-session
 	only.
 	"""
+	refuse_in_tool_dispatch()
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
 

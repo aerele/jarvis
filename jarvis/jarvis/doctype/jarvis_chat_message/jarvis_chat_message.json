@@ -12,6 +12,7 @@
     "role",
     "content",
     "via_voice",
+    "origin",
     "streaming",
     "error",
     "recovering",
@@ -75,6 +76,16 @@
       "default": 0,
       "depends_on": "eval:doc.role=='user'",
       "description": "Set when this message's text came from mic dictation rather than typing. No audio or transcript-origin metadata beyond this flag."
+    },
+    {
+      "fieldname": "origin",
+      "fieldtype": "Select",
+      "label": "Origin",
+      "options": "\nhuman\nboard_answer\ndelegated\nmacro\ncontinuation\nfile_box\nagent\nsystem",
+      "read_only": 1,
+      "hidden": 1,
+      "no_copy": 1,
+      "description": "Which server path wrote this user row (human send, board answer, delegated send, macro step, continuation, File-Box drop, agent finding, system). Stamped only by server writers; blank on legacy and non-user rows."
     },
     {
       "fieldname": "streaming",

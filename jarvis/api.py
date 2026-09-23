@@ -16,7 +16,7 @@ from jarvis.exceptions import (
 	RunDisarmedError,
 	RunHaltedError,
 )
-from jarvis.permissions import has_jarvis_access
+from jarvis.permissions import has_jarvis_access, refuse_in_tool_dispatch
 from jarvis.tools._result_guard import enforce_result_budget
 from jarvis.tools.registry import dispatch
 
@@ -521,6 +521,7 @@ def _locked_insert_chat_message(
 		or 0
 	) + 1
 	doc = frappe.get_doc({"doctype": "Jarvis Chat Message", "conversation": conv_name, "seq": seq, **fields})
+	doc.flags.jarvis_server_write = True
 	doc.insert(ignore_permissions=True)
 	return doc.name
 
@@ -2235,6 +2236,8 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	into one to match the reviewer's "native handler" pattern note
 	from the 2026-06-16 punch list.
 	"""
+	# S6: a tool body (e.g. run_method -> call_tool) must never re-enter the gate.
+	refuse_in_tool_dispatch()
 	# #493: "Enable Business Wiki" is the operator's only wiki kill switch, so it
 	# must refuse the agent-facing wiki tools too, not only the automatic
 	# behaviours. Checked HERE, ahead of everything, because update_wiki is a

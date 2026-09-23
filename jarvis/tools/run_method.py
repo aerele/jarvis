@@ -21,6 +21,24 @@ import frappe
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 
+# S6: Jarvis's own gate, turn-entry and decision endpoints are never a tool target
+# (``call_tool`` is allow_guest and ``frappe.call`` skips the HTTP-method check).
+# Matched on the RESOLVED function, so an alias path cannot slip past.
+_DENIED_PREFIXES = (
+	"jarvis.api.",
+	"jarvis.chat.actions_api.",
+	"jarvis.chat.approvals_api.",
+	"jarvis.chat.pending_actions.",
+	"jarvis.chat.macros_api.",
+)
+_DENIED = frozenset(
+	{
+		"jarvis.chat.api.send_message",
+		"jarvis.chat.api.retry_message",
+		"jarvis.chat.api.stop_run",
+	}
+)
+
 
 def run_method(method: str, args: dict | None = None) -> dict:
 	"""Call a whitelisted server method ``method`` with keyword ``args``.
@@ -73,6 +91,8 @@ def run_method(method: str, args: dict | None = None) -> dict:
 		fn = frappe.get_attr(method)
 	except (AttributeError, ModuleNotFoundError, frappe.AppNotInstalledError):
 		raise InvalidArgumentError(f"unknown method: {method}")
+	if _is_denied(fn):
+		raise PermissionDeniedError(f"method {method!r} cannot be called from a tool")
 
 	# Enforce @frappe.whitelist(): raises frappe.PermissionError if not.
 	try:
@@ -89,6 +109,11 @@ def run_method(method: str, args: dict | None = None) -> dict:
 		return frappe.call(fn, **(args or {}))
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"no permission to call {method}") from e
+
+
+def _is_denied(fn) -> bool:
+	path = f"{getattr(fn, '__module__', '') or ''}.{getattr(fn, '__qualname__', '') or ''}"
+	return path in _DENIED or path.startswith(_DENIED_PREFIXES)
 
 
 def _reject_unknown_args(fn, method: str, args: dict | None) -> None:

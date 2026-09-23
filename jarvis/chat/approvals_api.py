@@ -16,6 +16,8 @@ import frappe
 from jarvis._session import impersonate
 from jarvis.permissions import (
 	JARVIS_REVIEWER_ROLES,
+	message_origin,
+	refuse_in_tool_dispatch,
 	require_jarvis_user,
 	require_skill_reviewer,
 )
@@ -516,7 +518,7 @@ def pending_count() -> int:
 	)[0][0]
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def decide(name: str, decision: str, approve: int = 1) -> dict:
 	"""Record the decision and resume the linked conversation.
@@ -525,6 +527,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	resume message is a plain user message through send_message, so the
 	agent sees it exactly like any chat turn - same session, same context.
 	"""
+	refuse_in_tool_dispatch()
 	decision = (decision or "").strip()
 	if not decision:
 		frappe.throw("Decision text is required")
@@ -622,7 +625,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 				# does not hold the Jarvis User role.
 				from jarvis.permissions import delegated_send
 
-				with impersonate(switch_to), delegated_send():
+				with impersonate(switch_to), delegated_send(), message_origin("board_answer"):
 					res = send_message(conversation=doc.conversation, message=msg, attachments=attachments)
 				resumed = bool(res.get("ok"))
 			except Exception:
@@ -632,7 +635,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	return {"ok": True, "status": doc.status, "resumed": resumed}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def dismiss_approval(name: str) -> dict:
 	"""Clear a Pending request off the board WITHOUT acting on it — no
@@ -640,6 +643,7 @@ def dismiss_approval(name: str) -> dict:
 	handle (a stale ask, a question they'll ignore). Terminal but reversible
 	via ``restore_approval``; unlike Reject it never tells the agent anything.
 	"""
+	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
 	if not _may_act_on(doc.conversation):
@@ -662,11 +666,12 @@ def dismiss_approval(name: str) -> dict:
 	return {"ok": True, "status": "Dismissed"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def restore_approval(name: str) -> dict:
 	"""Put a Dismissed request back on the board (Pending). The undo for an
 	accidental dismiss."""
+	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
 	if not _may_act_on(doc.conversation):
@@ -871,7 +876,7 @@ def _land_and_record(name: str, doc, dropper: str | None) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def approve_wiki_write(name: str) -> dict:
 	"""Reviewer approves a held wiki proposal; the fenced write then LANDS.
@@ -884,6 +889,7 @@ def approve_wiki_write(name: str) -> dict:
 	(``api._file_box_wiki_write``) under the DROPPER's provenance (the session is
 	the reviewer, but the page belongs to the dropper's file-box namespace), and
 	record the outcome in ``apply_status`` / ``apply_reason``."""
+	refuse_in_tool_dispatch()
 	doc = _wiki_proposal_or_throw(name)
 	if doc.status != "Pending":
 		frappe.throw(f"Proposal {name} is already {doc.status}")
@@ -914,7 +920,7 @@ def approve_wiki_write(name: str) -> dict:
 	return _land_and_record(name, doc, dropper)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def retry_wiki_write(name: str) -> dict:
 	"""Re-drive the landing of an already-APPROVED proposal whose write did not
@@ -922,6 +928,7 @@ def retry_wiki_write(name: str) -> dict:
 	Failed - a transient funnel error). Reviewer-gated; the approve decision +
 	its SoD check already stand, so this only re-runs the mechanical write. The
 	reconciliation path for the one window approve can't cover atomically."""
+	refuse_in_tool_dispatch()
 	doc = _wiki_proposal_or_throw(name)
 	if doc.status != "Approved":
 		frappe.throw(f"Only an approved proposal can be retried (this is {doc.status})")
@@ -932,12 +939,13 @@ def retry_wiki_write(name: str) -> dict:
 	return _land_and_record(name, doc, _dropper_of(doc))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def reject_wiki_write(name: str) -> dict:
 	"""Reviewer rejects a held wiki proposal; nothing is written. Reviewer-gated.
 	No SoD gate on reject — declining to land a write is always safe, and a solo
 	reviewer must be able to clear their own proposal."""
+	refuse_in_tool_dispatch()
 	doc = _wiki_proposal_or_throw(name)
 	if doc.status != "Pending":
 		frappe.throw(f"Proposal {name} is already {doc.status}")

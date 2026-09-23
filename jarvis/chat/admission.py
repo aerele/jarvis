@@ -42,7 +42,7 @@ import time
 import frappe
 
 from jarvis.chat.events import publish_to_user
-from jarvis.permissions import require_jarvis_access
+from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_access
 
 TURN = "Jarvis Chat Turn"
 PUMP = "Jarvis Relay Pump"
@@ -476,6 +476,7 @@ def accept_or_queue(
 	dispatch,
 	dispatch_payload: dict | None = None,
 	seed_content: str | None = None,
+	seed_origin: str | None = None,
 	exempt_overload: bool = False,
 ) -> dict:
 	"""Admit or durably queue one turn. Returns one of:
@@ -488,7 +489,7 @@ def accept_or_queue(
 	macro all insert it before dispatch today - OAR-3's retry/orphan reuse is
 	automatic here since no caller asks admission to insert). ``seed_content``
 	+ ``seed_message=None`` is the WP-1 insert branch, wired but unused in
-	Phase-0's legacy integration.
+	Phase-0's legacy integration; ``seed_origin`` is the caller's origin for it.
 
 	``exempt_overload`` (SUXI-2 ruling): a confirm continuation is the follow-up
 	of an ALREADY-committed write - it must never be rejected by the accept-time
@@ -500,6 +501,9 @@ def accept_or_queue(
 	for this turn; it is invoked ONLY on the admit path and ONLY after the
 	admission txn commits."""
 	from jarvis.chat import pump
+
+	if not seed_message and not seed_origin:
+		raise ValueError("accept_or_queue: seed_origin is required when admission seeds the user row")
 
 	target = relay_target_id(conversation)
 	turn_class = turn_class if turn_class in ("interactive", "background") else "interactive"
@@ -574,9 +578,11 @@ def accept_or_queue(
 					"role": "user",
 					"content": seed_content or "",
 					"streaming": 0,
+					"origin": seed_origin,
 				}
 			)
 			msg.flags.ignore_permissions = True
+			msg.flags.jarvis_server_write = True
 			msg.insert()
 			seed_message = msg.name
 
@@ -1010,7 +1016,7 @@ def _assert_owner(conversation: str) -> str:
 	return owner
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_queued_turn(run_id: str) -> dict:
 	"""Owner-checked cancel of a pre-dispatch turn, ROUTED BY STATE (CDX-8):
 
@@ -1031,6 +1037,7 @@ def cancel_queued_turn(run_id: str) -> dict:
 	caller/UI knows which path won; ``{"ok": False, ...}`` when the turn already
 	advanced (e.g. dispatched) — the UI then KEEPS its chip until the server confirms
 	(no optimistic clear on failure)."""
+	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	row = frappe.db.get_value(
 		TURN,

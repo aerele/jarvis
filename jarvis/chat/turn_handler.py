@@ -2581,6 +2581,7 @@ def _handle_event_inner(
 						"streaming": 1,
 					}
 				)
+				doc.flags.jarvis_server_write = True
 				doc.insert(ignore_permissions=True)
 				frappe.db.commit()
 				tool_msg_by_call_id[tool_call_id] = doc.name

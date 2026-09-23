@@ -675,5 +675,7 @@ class TestRequestAutorunContinuationDoesNotReset(FrappeTestCase):
 		api._request_autorun_arm(conv, "orig-msg")
 		# A continuation turn (hidden) - the create->submit chain's next hop.
 		with patch("frappe.enqueue"):
-			chat_api._enqueue_turn(conv, "[System] Applied: created the ToDo. Continue.", hidden=True)
+			chat_api._enqueue_turn(
+				conv, "[System] Applied: created the ToDo. Continue.", hidden=True, origin="continuation"
+			)
 		self.assertEqual(_flag(conv), 1, "a hidden continuation must NOT reset the request-scoped approval")

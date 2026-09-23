@@ -1239,6 +1239,7 @@ def _insert_tool_start_row(conversation: str, tool_call_id: str, tool_name: str 
 		}
 	)
 	doc.flags.ignore_permissions = True
+	doc.flags.jarvis_server_write = True
 	doc.insert()
 	return doc.name
 

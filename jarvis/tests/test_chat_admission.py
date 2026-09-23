@@ -216,6 +216,36 @@ class TestAcceptOrQueueBasics(_AdmissionTestCase):
 		self.assertTrue(res.get("duplicate"))
 		self.assertEqual(frappe.db.count(TURN, {"run_id": "dup"}), 1)
 
+	def test_seed_insert_branch_writes_the_callers_origin(self):
+		"""P0a: the WP-1 seed branch is a guarded server writer stamping the caller's origin."""
+		conv = self._mk_conv()
+		with patch.object(admission, "_max_inflight", return_value=4):
+			res = admission.accept_or_queue(
+				conversation=conv,
+				run_id="seedrun",
+				seed_message=None,
+				seed_content="seeded",
+				seed_origin="system",
+				dispatch=lambda: None,
+			)
+		self.assertTrue(res["ok"])
+		seed = frappe.db.get_value(TURN, "seedrun", "seed_message")
+		row = frappe.db.get_value(MSG, seed, ["content", "origin"], as_dict=True)
+		self.assertEqual((row.content, row.origin), ("seeded", "system"))
+
+	def test_seed_insert_branch_requires_an_origin(self):
+		conv = self._mk_conv()
+		with self.assertRaises(ValueError):
+			admission.accept_or_queue(
+				conversation=conv,
+				run_id="seedrun-noorigin",
+				seed_message=None,
+				seed_content="seeded",
+				dispatch=lambda: None,
+			)
+		self.assertFalse(frappe.db.exists(TURN, "seedrun-noorigin"))
+		self.assertFalse(frappe.db.exists(MSG, {"conversation": conv}))
+
 
 class TestCompactionQueuesInsteadOfRejects(_AdmissionTestCase):
 	"""A compacting conversation is not a hard reject in admission - it is the
@@ -433,7 +463,7 @@ class TestFourCallersGated(_AdmissionTestCase):
 	def test_enqueue_turn_macro_caller_creates_turn(self):
 		conv = self._mk_conv()
 		with patch.object(chat_api, "_dispatch_turn", side_effect=lambda *a, **k: None):
-			out = chat_api._enqueue_turn(conv, "macro step", hidden=True)
+			out = chat_api._enqueue_turn(conv, "macro step", hidden=True, origin="macro")
 		self.assertTrue(frappe.db.exists(TURN, out["run_id"]))
 
 
@@ -1588,7 +1618,7 @@ class TestEnqueueOverloadFourCallers(_AdmissionTestCase):
 		# The macro/app-learning seam. hidden=True skips the session-key gateway handshake.
 		conv = self._mk_conv()
 		with patch.object(admission, "MAX_QUEUE_DEPTH", 0):
-			out = chat_api._enqueue_turn(conv, "macro step", hidden=True)
+			out = chat_api._enqueue_turn(conv, "macro step", hidden=True, origin="macro")
 		self.assertFalse(out.get("ok"), "typed rejection, never a silent ok:true")
 		self.assertTrue(out.get("overloaded"))
 		self.assertEqual(frappe.db.count(MSG, {"conversation": conv, "role": "user"}), 0, "seed deleted")
@@ -1602,7 +1632,9 @@ class TestEnqueueOverloadFourCallers(_AdmissionTestCase):
 			patch.object(admission, "MAX_QUEUE_DEPTH", 0),
 			patch.object(admission, "_max_inflight", return_value=0),
 		):
-			out = chat_api._enqueue_turn(conv, "continue", hidden=True, exempt_overload=True)
+			out = chat_api._enqueue_turn(
+				conv, "continue", hidden=True, exempt_overload=True, origin="continuation"
+			)
 		self.assertNotIn("overloaded", out, "the exemption survived — no rejection")
 		self.assertEqual(frappe.db.count(TURN, {"conversation": conv}), 1, "a durable queued Turn exists")
 		self.assertTrue(out.get("queued"))

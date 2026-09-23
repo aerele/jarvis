@@ -19,7 +19,7 @@ import json
 
 import frappe
 
-from jarvis.permissions import require_jarvis_user
+from jarvis.permissions import message_origin, require_jarvis_user
 
 # The persona fallback skill (SHARED_CORE_SKILLS, role_profiles.py) - always
 # available, and NOT a Jarvis Custom Skill row, so it is validated by literal
@@ -171,12 +171,13 @@ def drop_file(file_url: str, file_name: str | None = None, skill: str | None = N
 	attachments = json.dumps([{"file_url": file_url, "file_name": file_name or fdoc.file_name}])
 	# background=1 (requires the dedicated-chat-queue PR): a batch of
 	# drops drains FIFO and never jumps ahead of a human's typed question.
-	res = send_message(
-		conversation=conv_id,
-		message=build_inbound_prompt(pinned),
-		attachments=attachments,
-		background=1,
-	)
+	with message_origin("file_box"):
+		res = send_message(
+			conversation=conv_id,
+			message=build_inbound_prompt(pinned),
+			attachments=attachments,
+			background=1,
+		)
 	return {
 		"ok": bool(res.get("ok")),
 		"conversation_id": conv_id,

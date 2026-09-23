@@ -15,6 +15,7 @@ from jarvis.chat.usage import current_month_key as _usage_month_key
 from jarvis.chat.usage import period_select_fields
 from jarvis.permissions import (
 	has_jarvis_access,
+	refuse_in_tool_dispatch,
 	require_jarvis_access,
 	require_jarvis_admin,
 	require_jarvis_user,
@@ -863,7 +864,7 @@ def create_conversation(origin_page: str = "") -> str:
 	return doc.name
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def archive_conversation(conversation: str) -> dict:
 	"""Set status to archived (owner-only). The agent-side session is left in place."""
 	require_jarvis_access()
@@ -874,7 +875,7 @@ def archive_conversation(conversation: str) -> dict:
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def clear_chat_history() -> dict:
 	"""Permanently delete ALL of the current user's conversations and messages
 	(the settings "Danger zone" action). Macros, skills and settings are
@@ -1328,7 +1329,7 @@ def _confirm_reversible_sweep(user, conversation):
 	return _run_typed_batch(conversation, items)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def send_message(
 	conversation: str | None = None,
 	message: str = "",
@@ -1392,6 +1393,9 @@ def send_message(
 	send instead raises frappe.DoesNotExistError. frappe.PermissionError if the
 	conversation belongs to another user.
 	"""
+	# S6: never a turn entry from inside a running tool (a Server Script fired by
+	# an agent write included).
+	refuse_in_tool_dispatch()
 	# Access gate (PART 1 TASK 1). send_message is ALSO invoked under
 	# impersonate(owner) by delegated/system flows (agent_scheduler, approvals
 	# resume, agent-run, File-Box drop), where the impersonated owner may not
@@ -1608,8 +1612,11 @@ def send_message(
 			"streaming": 0,
 			"canvas": canvas_json,
 			"via_voice": 1 if voice else 0,
+			# Server context only (message_origin / delegated_send), never a request arg.
+			"origin": frappe.flags.get("jarvis_message_origin") or ("delegated" if _delegated else "human"),
 		}
 	)
+	msg_doc.flags.jarvis_server_write = True
 	# Delegated re-entry (scheduler/approval-resume/agent-run/File-Box): the
 	# impersonated owner may lack the now role-gated Message create perm, but
 	# ownership of THIS conversation is already asserted (_get_owned_conversation
@@ -2672,7 +2679,7 @@ def set_conversation_thinking(conversation: str, thinking: str | None = None) ->
 	return {"ok": True, "data": {"effective_thinking": level or "medium"}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def retry_message(message: str) -> dict:
 	"""Re-run the agent turn that produced an errored assistant message.
 
@@ -2687,6 +2694,7 @@ def retry_message(message: str) -> dict:
 	does not exist, or ``frappe.PermissionError`` if the caller does not own
 	the parent conversation.
 	"""
+	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	# Same entitlement gate as send_message: a retry re-runs a full turn, so a
 	# suspended sub must reject here, not grind the WS-open loop on a stopped
@@ -2779,13 +2787,14 @@ def retry_message(message: str) -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	"""Actually abort a running turn (agent chat.abort), not just hide it in
 	the UI. The gateway authorizes the abort from this web process (shared device
 	id + operator scope) even though the RQ worker started the run. Best-effort:
 	on any failure the Stop button's honest "still finishing in the background"
 	behaviour still applies."""
+	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
 	# Phase-0 admission (flag ON): record cancel intent on this conversation's
@@ -3135,6 +3144,7 @@ def _enqueue_turn(
 	conversation: str,
 	prompt: str,
 	*,
+	origin: str,
 	model_override: str | None = None,
 	thinking_override: str | None = None,
 	hidden: bool = False,
@@ -3149,7 +3159,8 @@ def _enqueue_turn(
 	``interactive=False`` dispatches the turn at BACKGROUND priority (it never
 	jumps ahead of a human's queued turn) — used by unattended, long-running
 	producers like app-learning that could otherwise monopolize the chat queue
-	for a run's duration. Returns ``{run_id, message_id}``."""
+	for a run's duration. ``origin`` (required) stamps the user row's source
+	(macro / continuation / system). Returns ``{run_id, message_id}``."""
 	conv_doc = frappe.get_doc(CONV, conversation)
 	if model_override:
 		conv_doc.model_override = model_override
@@ -3174,9 +3185,11 @@ def _enqueue_turn(
 			"content": prompt,
 			"streaming": 0,
 			"hidden": 1 if hidden else 0,
+			"origin": origin,
 		}
 	)
 	msg_doc.flags.ignore_permissions = True
+	msg_doc.flags.jarvis_server_write = True
 	msg_doc.insert()
 	conv_doc.last_active_at = frappe.utils.now()
 	conv_doc.flags.ignore_permissions = True
@@ -3311,7 +3324,13 @@ def enqueue_continuation(conversation: str, receipt: str, *, failed: bool = Fals
 	# SUXI-2 ruling: a continuation of an already-committed write is EXEMPT from
 	# the accept-time overload rejection - it always queues (with a visible
 	# position), never silently drops. The front-door senders keep backpressure.
-	return _enqueue_turn(conversation, scaffold.format(receipt=safe), hidden=True, exempt_overload=True)
+	return _enqueue_turn(
+		conversation,
+		scaffold.format(receipt=safe),
+		origin="continuation",
+		hidden=True,
+		exempt_overload=True,
+	)
 
 
 def _pushed_profile_slugs(settings) -> set[str]:

@@ -103,6 +103,7 @@ class TestSummarizeMacro(_MacroMergeBase):
 		self.assertEqual(args[0], conv)
 		self.assertIn("Sales analytics for last quarter", args[1])
 		self.assertIn("/macro-merge", args[1])
+		self.assertEqual(kwargs.get("origin"), "macro")
 		# throwaway conversation is hidden from the sidebar
 		self.assertEqual(frappe.db.get_value("Jarvis Conversation", conv, "status"), "Archived")
 		# the macro is marked "summarizing" so Run is gated until the worker applies
@@ -133,7 +134,7 @@ class TestSummarizeMacro(_MacroMergeBase):
 		)
 		seen = {}
 
-		def _capture(conversation, prompt):
+		def _capture(conversation, prompt, **kw):
 			seen["merge_status"] = frappe.db.get_value("Jarvis Macro", m.name, "merge_status")
 			seen["merge_conversation"] = frappe.db.get_value("Jarvis Macro", m.name, "merge_conversation")
 			return {"run_id": "r1", "message_id": "m1"}
