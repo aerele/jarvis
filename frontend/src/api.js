@@ -670,6 +670,15 @@ export const getAccount = () => call("jarvis.account.get_account");
 export const cancelPlanAtPeriodEnd = () => call("jarvis.account.cancel_plan_at_period_end");
 export const resumePlan = () => call("jarvis.account.resume_plan");
 export const reauthorizeAutopay = () => call("jarvis.account.reauthorize_autopay");
+// Past-Due pay-now, step one of two ("stop-autopay-to-pay"): neutralizes the
+// customer's still-live Razorpay mandate so the EXISTING reactivation grid
+// (can_reactivate) takes over for step two - this call never charges anything.
+// Unlike renewPlan, every refusal here (FeatureDisabled/NotEligible/
+// PAYMENT_UNDER_REVIEW/NoSubscription) is already reduced to a clean message by
+// the bench's onboarding._surface() before it reaches the browser, so this rides
+// the ordinary call() - no raw coded envelope to decode. Resolves {ok:true,
+// outcome:"neutralized"|"already_dead"|"already_active"}; a refusal rejects.
+export const stopAutopayToPay = () => call("jarvis.account.stop_autopay_to_pay");
 export const previewDowngrade = (targetPlan) =>
 	call("jarvis.account.preview_downgrade", { target_plan: targetPlan });
 export const startDowngrade = (targetPlan) =>

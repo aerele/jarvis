@@ -1168,6 +1168,27 @@ def renew(provider: str | None = None, target_plan: str | None = None) -> dict:
 	return _post(path=_m("api.tenant.renew"), body=body)
 
 
+def stop_autopay_to_pay(requesting_user: str | None = None, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
+	"""Past-Due pay-now, step one of two: ask admin to neutralize the customer's
+	still-live Razorpay mandate so the account's EXISTING reactivation grid
+	(``can_reactivate``) can take over for a fresh, one-shot payment through the
+	SAME renew/reactivate flow the billing page already runs. Never charges
+	anything itself - it only kills the auto-retry.
+
+	``requesting_user`` is the real human clicking the button (the bench's own
+	caller forwards ``frappe.session.user``) - admin's audit trail for who asked.
+
+	Returns admin's envelope verbatim: ``{"ok": true, "outcome":
+	"neutralized"|"already_dead"|"already_active"}``. A refusal (admin flag off,
+	no longer eligible, money under review, or no subscription) arrives as the
+	usual AdminAuthError/AdminContractError through _do_post's status routing."""
+	return _post(
+		path=_m("api.tenant.stop_autopay_to_pay"),
+		body={"requesting_user": requesting_user},
+		timeout_s=timeout_s,
+	)
+
+
 def post_update_llm_creds(
 	provider: str,
 	model: str,
