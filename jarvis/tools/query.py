@@ -353,6 +353,26 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 def _validate_spec_shape(spec: dict) -> None:
 	"""Top-of-pipe shape check. Catches obvious mistakes early so the
 	translator below can assume its inputs are well-formed."""
+	allowed_keys = {
+		"from",
+		"alias",
+		"joins",
+		"select",
+		"where",
+		"group_by",
+		"having",
+		"order_by",
+		"limit",
+		"offset",
+		"distinct",
+	}
+	unknown = set(spec) - allowed_keys
+	if unknown:
+		raise InvalidArgumentError(
+			f"unknown query spec keys: {', '.join(sorted(map(str, unknown)))}. "
+			"Use select for columns and aggregates, and where for filters. "
+			f"Allowed keys: {', '.join(sorted(allowed_keys))}"
+		)
 	if "from" not in spec or not isinstance(spec["from"], str):
 		raise InvalidArgumentError("spec.from must be a DocType name (string)")
 
