@@ -135,9 +135,15 @@ class _DashboardsApiTestCase(FrappeTestCase):
 		self._dashboards: list[str] = []
 		self._todos: list[str] = []
 		self._convs: list[str] = []
+		self._user_perms: list[str] = []
 
 	def tearDown(self):
 		frappe.set_user(self._orig_user)
+		for name in self._user_perms:
+			if frappe.db.exists("User Permission", name):
+				frappe.delete_doc("User Permission", name, ignore_permissions=True, force=True)
+		if self._user_perms:
+			frappe.clear_cache(user=PLAIN_A)
 		for name in self._dashboards:
 			if frappe.db.exists(DASHBOARD, name):
 				frappe.delete_doc(DASHBOARD, name, ignore_permissions=True, force=True)
@@ -1332,17 +1338,41 @@ class TestRunWithFilters(_DashboardsApiTestCase):
 		self.assertEqual(r["error"]["message"], "Pick a value for Assigned to to load this data.")
 
 	def test_filter_value_cannot_widen_access(self):
-		# PLAIN_B's ToDo is not readable by PLAIN_A (ToDo perms are owner/allocated based);
-		# asking for it by filter value must still return nothing.
+		# Give PLAIN_A a deterministic, non-role-polluted restriction: a User
+		# Permission scoping them to their own ToDo `a` alone. This is what
+		# the spec asked for (unlike ToDo's owner/allocated defaults, which
+		# hold on the role-polluted local site but not on a fresh CI DB).
+		# Asking for `b` by filter value must still return nothing.
 		d = self._dash()
+		a = self._mk_todo(PLAIN_A)
 		b = self._mk_todo(PLAIN_B)
+		frappe.set_user("Administrator")
+		perm = frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": PLAIN_A,
+				"allow": "ToDo",
+				"for_value": a,
+				"apply_to_all_doctypes": 1,
+			}
+		).insert(ignore_permissions=True)
+		self._user_perms.append(perm.name)
+		frappe.clear_cache(user=PLAIN_A)
+		frappe.cache.hdel("user_permissions", PLAIN_A)
+
 		frappe.set_user(PLAIN_A)
 		r = run_dashboard_source(d["name"], "todos", frappe.as_json({"assignee": PLAIN_B}))
 		self.assertTrue(r["ok"], r)
 		self.assertNotIn(b, [row["name"] for row in r["data"]["rows"]])
+		# The same User Permission still lets the permitted record through,
+		# proving the exclusion above is the User Permission narrowing access,
+		# not a fixture/binding bug.
+		r = run_dashboard_source(d["name"], "todos", frappe.as_json({"assignee": PLAIN_A}))
+		self.assertTrue(r["ok"], r)
+		self.assertIn(a, [row["name"] for row in r["data"]["rows"]])
 		# Positive control: the identical filter value DOES match `b` for a
-		# session whose own permissions allow it (Administrator bypasses ToDo's
-		# owner/allocated restriction). This proves the exclusion above is
+		# session whose own permissions allow it (Administrator bypasses the
+		# User Permission restriction). This proves the exclusion above is
 		# attributable to PLAIN_A's permissions, not to a fixture/binding bug.
 		frappe.set_user("Administrator")
 		r = run_dashboard_source(d["name"], "todos", frappe.as_json({"assignee": PLAIN_B}))
