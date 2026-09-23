@@ -5291,16 +5291,20 @@ class TestNativeClaudePickRouting(unittest.TestCase):
 
 	_ANTHROPIC_TIER = ["claude-opus-5", "claude-sonnet-5"]
 
-	def _settings(self, *, claude_leg: bool):
-		rows = [frappe._dict(model="gpt-5.6-terra", enabled=1)]
+	def _settings(self, *, claude_leg: bool, api_key_row: str = ""):
+		rows = [frappe._dict(model="gpt-5.6-terra", enabled=1, credential_type="subscription")]
 		if claude_leg:
-			rows.append(frappe._dict(model="claude-opus-5", enabled=1))
+			rows.append(frappe._dict(model="claude-opus-5", enabled=1, credential_type="subscription"))
+		if api_key_row:
+			rows.append(
+				frappe._dict(model=api_key_row, enabled=1, credential_type="api_key", provider="anthropic")
+			)
 		return frappe._dict(models=rows, proxy_active=1, llm_auth_mode="subscription")
 
-	def _resolve(self, override: str, *, claude_leg: bool = True):
+	def _resolve(self, override: str, *, claude_leg: bool = True, api_key_row: str = ""):
 		from jarvis.chat import turn_handler as th
 
-		settings = self._settings(claude_leg=claude_leg)
+		settings = self._settings(claude_leg=claude_leg, api_key_row=api_key_row)
 		with (
 			patch.object(th.frappe, "get_single", return_value=settings),
 			patch.object(th, "compute_pool_mode", return_value=True),
@@ -5327,6 +5331,23 @@ class TestNativeClaudePickRouting(unittest.TestCase):
 
 	def test_claude_id_without_a_claude_leg_lets_the_pool_route(self):
 		self.assertEqual(self._resolve("claude-sonnet-5", claude_leg=False), ("", None))
+
+	def test_anthropic_api_key_row_is_not_hijacked_onto_the_plan(self):
+		"""A tenant may keep a Claude plan AND a separate Anthropic API-key row; the
+		same ids exist in both catalog tiers. A pin of the API-key row's model must
+		route to that row (bare id, agent-direct provider), never to the plan."""
+		self.assertEqual(
+			self._resolve("claude-sonnet-5", api_key_row="claude-sonnet-5"), ("claude-sonnet-5", None)
+		)
+		# The plan row and an unsaved plan id keep routing to the plan.
+		self.assertEqual(
+			self._resolve("claude-opus-5", api_key_row="claude-sonnet-5"), ("claude-opus-5", "anthropic")
+		)
+		self._ANTHROPIC_TIER = ["claude-opus-5", "claude-sonnet-5", "claude-opus-4-8"]
+		self.assertEqual(
+			self._resolve("claude-opus-4-8", api_key_row="claude-sonnet-5"),
+			("claude-opus-4-8", "anthropic"),
+		)
 
 	def test_session_patch_carries_the_provider_prefix(self):
 		from jarvis.chat import turn_handler as th
