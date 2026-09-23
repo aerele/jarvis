@@ -1445,6 +1445,21 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 		self.assertEqual(ar.owner, frappe.db.get_value(CONV, conv, "owner"))
 		self.assertEqual(frappe.parse_json(ar.wiki_payload)["slug"], "party-fake-co")
 
+	def test_file_box_bulk_update_wiki_still_takes_the_proposal_path(self):
+		# PR-1 §4: stray batch args must not route a File Box update_wiki to a park
+		# card (whose confirm would run the raw, unfenced tool).
+		conv = self._conv(file_box=1)
+		args = {**self._ARGS, "docs": [{"slug": "other"}]}
+		with (
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+			patch("jarvis.chat.pending_confirm.mint") as mint,
+			patch("jarvis.api.dispatch") as disp,
+		):
+			r = api._run_tool("update_wiki", args, conversation=conv)
+		mint.assert_not_called()
+		disp.assert_not_called()
+		self.assertTrue(r["data"]["proposed"])
+
 	def test_file_box_wiki_proposal_dedupes_on_retry(self):
 		# A retried turn re-emitting the same (conversation, slug) write folds into
 		# the existing Pending row rather than stacking duplicates for the reviewer.

@@ -752,7 +752,7 @@ export async function uploadFile(file) {
 	if (!r.ok) throw new Error(`upload failed (${r.status})`);
 	const data = await r.json();
 	const f = data.message || data;
-	return { file_url: f.file_url, file_name: f.file_name || file.name };
+	return { file_url: f.file_url, file_name: f.file_name || file.name, name: f.name };
 }
 
 // Branding logo/favicon: PUBLIC file (the favicon <link> and the PWA manifest
@@ -774,9 +774,10 @@ export async function uploadBrandAsset(file) {
 }
 
 // ── File Box: drop an inbound document, get a directed processing chat ──
-export const fileboxDrop = (file_url, file_name, skill) =>
-	call("jarvis.chat.filebox.drop_file", { file_url, file_name, skill });
-export const fileboxList = () => call("jarvis.chat.filebox.list_inbound", {});
+// `file` is the uploaded File's docname: an identical re-upload shares the
+// file_url, so the url alone could pick an earlier drop's File.
+export const fileboxDrop = (file_url, file_name, skill, file) =>
+	call("jarvis.chat.filebox.drop_file", { file_url, file_name, skill, file });
 
 // ── Approvals: pending-decision queue + decide-and-resume ──
 export const listApprovals = (status = "Pending") =>
@@ -799,8 +800,10 @@ export const listWikiWriteProposals = (p = {}) =>
 		start: p.start || 0,
 		page_length: p.page_length || 20,
 	});
-export const approveWikiWrite = (name) =>
-	call("jarvis.chat.approvals_api.approve_wiki_write", { name });
+// expected_digest: the digest of the proposal the reviewer read (server refuses a
+// proposal that changed since).
+export const approveWikiWrite = (name, expected_digest) =>
+	call("jarvis.chat.approvals_api.approve_wiki_write", { name, expected_digest });
 export const rejectWikiWrite = (name) =>
 	call("jarvis.chat.approvals_api.reject_wiki_write", { name });
 export const retryWikiWrite = (name) =>

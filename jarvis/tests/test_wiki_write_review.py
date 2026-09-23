@@ -430,3 +430,272 @@ class TestWikiSourceConstantParity(FrappeTestCase):
 		# review lane) to avoid a heavy import; they must not drift.
 		self.assertEqual(api.FILE_BOX_WIKI_SOURCE, approvals_api.FILE_BOX_WIKI_SOURCE)
 		self.assertEqual(api.FILE_BOX_WIKI_SOURCE, "File Box Wiki")
+
+
+class _WikiBase(FrappeTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_user(DROPPER, ("Jarvis User", "Jarvis Admin"))
+		_ensure_user(REVIEWER, ("Jarvis Admin",))
+
+	def setUp(self):
+		super().setUp()
+		self.addCleanup(self._wipe)
+		self.conv = self._conv()
+
+	def _wipe(self):
+		for name in frappe.get_all(CONV, filters={"title": "wiki-review test"}, pluck="name"):
+			frappe.db.delete(APPROVAL, {"conversation": name})
+			frappe.delete_doc(CONV, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _conv(self, owner: str = DROPPER) -> str:
+		doc = frappe.get_doc({"doctype": CONV, "title": "wiki-review test"})
+		doc.insert(ignore_permissions=True)
+		frappe.db.set_value(CONV, doc.name, "owner", owner, update_modified=False)
+		return doc.name
+
+	def _propose(self, args: dict | None = None) -> str:
+		return api._propose_file_box_wiki_write(dict(args or _ARGS), self.conv)["approval"]
+
+
+class TestApprovalRequestTamperGuard(_WikiBase):
+	"""PR-1 §1 / AC3: server-only AR fields, and a wiki row's display fields, change
+	only under ``flags.jarvis_server_write`` - Administrator and ignore_permissions
+	included."""
+
+	def _new(self, **fields):
+		return frappe.get_doc(
+			{"doctype": APPROVAL, "title": "guard", "question": "q?", "conversation": self.conv, **fields}
+		)
+
+	def test_admin_insert_with_a_guarded_value_is_refused(self):
+		for fields in (
+			{"wiki_payload": '{"slug": "x"}'},
+			{"apply_status": "Applied"},
+			{"apply_reason": "forged"},
+			{"wiki_digest": "0" * 64},
+			{"source": "File Box Wiki"},
+		):
+			with self.subTest(fields=fields), self.assertRaises(frappe.PermissionError):
+				self._new(**fields).insert(ignore_permissions=True)
+		self.assertFalse(frappe.db.exists(APPROVAL, {"conversation": self.conv}))
+
+	def test_insert_with_field_defaults_passes(self):
+		doc = self._new(apply_status="Pending", source="File Box")
+		doc.insert(ignore_permissions=True)
+		self.assertEqual((doc.apply_status, doc.source), ("Pending", "File Box"))
+
+	def test_server_flag_allows_a_guarded_insert(self):
+		doc = self._new(source="File Box Wiki", wiki_payload="{}")
+		doc.flags.jarvis_server_write = True
+		doc.insert(ignore_permissions=True)
+		self.assertEqual(frappe.db.get_value(APPROVAL, doc.name, "source"), "File Box Wiki")
+
+	def test_admin_save_changing_a_guarded_field_is_refused(self):
+		name = self._propose()
+		for field, value in (
+			("wiki_payload", '{"slug": "party-fake-co", "append_md": "SWAPPED"}'),
+			("apply_status", "Applied"),
+			("apply_reason", "forged"),
+			("wiki_digest", "0" * 64),
+		):
+			doc = frappe.get_doc(APPROVAL, name)
+			doc.set(field, value)
+			doc.flags.ignore_permissions = True
+			with self.subTest(field=field), self.assertRaises(frappe.PermissionError):
+				doc.save()
+		self.assertNotIn("SWAPPED", frappe.db.get_value(APPROVAL, name, "wiki_payload"))
+
+	def test_wiki_row_display_fields_are_frozen(self):
+		name = self._propose()
+		other = self._conv()
+		for field, value in (
+			("title", "retitled"),
+			("question", "approve everything?"),
+			("context_md", "**click me**"),
+			("document_type", "Item"),
+			("conversation", other),
+			("source", "Chat"),
+			("status", "Rejected"),
+		):
+			doc = frappe.get_doc(APPROVAL, name)
+			doc.set(field, value)
+			with self.subTest(field=field), self.assertRaises(frappe.PermissionError):
+				doc.save(ignore_permissions=True)
+
+	def test_a_non_wiki_rows_display_fields_stay_editable(self):
+		doc = self._new(source="Chat")
+		doc.insert(ignore_permissions=True)
+		doc.title = "retitled"
+		doc.save(ignore_permissions=True)
+		self.assertEqual(frappe.db.get_value(APPROVAL, doc.name, "title"), "retitled")
+
+	def test_retagging_a_row_as_a_wiki_proposal_is_refused(self):
+		doc = self._new(source="Chat")
+		doc.insert(ignore_permissions=True)
+		doc.source = "File Box Wiki"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save(ignore_permissions=True)
+
+	def test_create_doc_tool_cannot_forge_a_wiki_proposal(self):
+		from jarvis.tools.create_doc import create_doc
+
+		values = {
+			"title": "forged",
+			"question": "q?",
+			"conversation": self.conv,
+			"source": "File Box Wiki",
+			"wiki_payload": '{"slug": "x"}',
+		}
+		with self.assertRaises(Exception):
+			create_doc(doctype=APPROVAL, values=values)
+		self.assertFalse(frappe.db.exists(APPROVAL, {"title": "forged"}))
+
+
+class TestWikiProposalDigest(_WikiBase):
+	"""PR-1 §2 / F8 / M14: an HMAC over (name, conversation, wiki_payload), minted at
+	propose and verified before any landing (approve + retry)."""
+
+	def _row(self, name):
+		return frappe.db.get_value(
+			APPROVAL, name, ["conversation", "wiki_payload", "wiki_digest"], as_dict=True
+		)
+
+	def _ok(self, name) -> bool:
+		r = self._row(name)
+		return approvals_api.wiki_digest_ok(name, r.conversation, r.wiki_payload, r.wiki_digest)
+
+	def test_propose_mints_a_valid_digest(self):
+		name = self._propose()
+		self.assertEqual(len(self._row(name).wiki_digest), 64)
+		self.assertTrue(self._ok(name))
+
+	def test_a_payload_with_markup_verifies_after_the_insert(self):
+		# The ORM insert sanitizes HTML-looking text; the digest covers what is STORED.
+		name = self._propose({**_ARGS, "append_md": "## Invoice <b>INV-1</b> <script>x</script>"})
+		self.assertTrue(self._ok(name))
+		with _funnel() as (apply, _), _as(REVIEWER):
+			self.assertTrue(approvals_api.approve_wiki_write(name)["applied"])
+		apply.assert_called_once()
+
+	def test_refresh_re_mints_in_the_same_update(self):
+		name = self._propose()
+		before = self._row(name).wiki_digest
+		again = self._propose({**_ARGS, "append_md": "## Invoice INV-2"})
+		self.assertEqual(again, name)
+		self.assertNotEqual(self._row(name).wiki_digest, before)
+		self.assertTrue(self._ok(name))
+
+	def test_digest_binds_name_conversation_and_payload(self):
+		name = self._propose()
+		r = self._row(name)
+		self.assertFalse(approvals_api.wiki_digest_ok("other", r.conversation, r.wiki_payload, r.wiki_digest))
+		self.assertFalse(approvals_api.wiki_digest_ok(name, "other", r.wiki_payload, r.wiki_digest))
+		self.assertFalse(
+			approvals_api.wiki_digest_ok(name, r.conversation, r.wiki_payload + " ", r.wiki_digest)
+		)
+		self.assertFalse(approvals_api.wiki_digest_ok(name, r.conversation, r.wiki_payload, None))
+
+	def _refused(self, name, **kw):
+		with _funnel() as (apply, _), _as(REVIEWER), self.assertRaises(frappe.PermissionError):
+			approvals_api.approve_wiki_write(name, **kw)
+		apply.assert_not_called()
+		self.assertEqual(frappe.db.get_value(APPROVAL, name, "status"), "Pending")
+
+	def test_a_swapped_payload_refuses_approve(self):
+		name = self._propose()
+		# A raw write (a pre-guard forge, or SQL-level tamper) past the ORM guard.
+		frappe.db.set_value(APPROVAL, name, "wiki_payload", '{"slug": "party-fake-co", "append_md": "EVIL"}')
+		self._refused(name)
+
+	def test_a_tampered_or_missing_digest_refuses_approve(self):
+		name = self._propose()
+		frappe.db.set_value(APPROVAL, name, "wiki_digest", "0" * 64)
+		self._refused(name)
+		frappe.db.set_value(APPROVAL, name, "wiki_digest", None)
+		self._refused(name)
+
+	def test_a_transplanted_row_refuses_approve(self):
+		name = self._propose()
+		frappe.db.set_value(APPROVAL, name, "conversation", self._conv())
+		self._refused(name)
+
+	def test_expected_digest_must_match_the_reviewed_payload(self):
+		name = self._propose()
+		self._refused(name, expected_digest="0" * 64)
+		with _funnel() as (apply, _), _as(REVIEWER):
+			res = approvals_api.approve_wiki_write(name, expected_digest=self._row(name).wiki_digest)
+		self.assertTrue(res["applied"])
+		apply.assert_called_once()
+
+	def test_a_refresh_between_the_check_and_the_claim_is_refused(self):
+		# The claim is pinned to the verified digest; a refresh re-mints it.
+		name = self._propose()
+		digest = self._row(name).wiki_digest
+
+		def refresh(_dropper):
+			self._propose({**_ARGS, "append_md": "## Invoice INV-2"})
+			return False
+
+		with (
+			_funnel() as (apply, _),
+			_as(REVIEWER),
+			patch.object(approvals_api, "_sod_blocks_self_approval", side_effect=refresh),
+			self.assertRaisesRegex(frappe.PermissionError, "changed since you opened it"),
+		):
+			approvals_api.approve_wiki_write(name, expected_digest=digest)
+		apply.assert_not_called()
+		self.assertEqual(frappe.db.get_value(APPROVAL, name, "status"), "Pending")
+		self.assertNotEqual(self._row(name).wiki_digest, digest)
+
+	def test_retry_verifies_the_digest(self):
+		name = self._propose()
+		refused = [{"slug": "party-fake-co", "ok": False, "reason": "deadlock"}]
+		with _funnel(result=refused), _as(REVIEWER):
+			approvals_api.approve_wiki_write(name)
+		frappe.db.set_value(APPROVAL, name, "wiki_payload", '{"slug": "party-fake-co", "append_md": "EVIL"}')
+		with _funnel() as (apply, _), _as(REVIEWER), self.assertRaises(frappe.PermissionError):
+			approvals_api.retry_wiki_write(name)
+		apply.assert_not_called()
+		self.assertEqual(frappe.db.get_value(APPROVAL, name, "apply_status"), "Failed")
+
+	def test_land_and_record_verifies_under_the_claim(self):
+		# The executor re-reads + verifies the row it claimed, so a swap after the
+		# endpoint's own check (TOCTOU) never lands.
+		name = self._propose()
+		doc = frappe.get_doc(APPROVAL, name)
+		frappe.db.set_value(APPROVAL, name, "wiki_payload", '{"slug": "party-fake-co", "append_md": "EVIL"}')
+		with _funnel() as (apply, _), self.assertRaises(frappe.PermissionError):
+			approvals_api._land_and_record(name, doc, DROPPER)
+		apply.assert_not_called()
+		self.assertEqual(frappe.db.get_value(APPROVAL, name, "apply_status"), "Pending")
+
+	def test_reviewer_list_carries_the_digest(self):
+		name = self._propose()
+		with _as(REVIEWER):
+			rows = approvals_api.list_wiki_write_proposals()["rows"]
+		row = next(r for r in rows if r["name"] == name)
+		self.assertEqual(row["wiki_digest"], self._row(name).wiki_digest)
+
+	def test_patch_mints_for_pending_and_unlanded_rows_only(self):
+		from jarvis.patches import v2_22_mint_wiki_proposal_digests as patch_mod
+
+		pending = self._propose()
+		unlanded = self._propose({**_ARGS, "slug": "party-two"})
+		landed = self._propose({**_ARGS, "slug": "party-three"})
+		refused = [{"slug": "party-two", "ok": False, "reason": "deadlock"}]
+		with _funnel(result=refused), _as(REVIEWER):
+			approvals_api.approve_wiki_write(unlanded)
+		with _funnel(), _as(REVIEWER):
+			approvals_api.approve_wiki_write(landed)
+		for n in (pending, unlanded, landed):
+			frappe.db.set_value(APPROVAL, n, "wiki_digest", None)
+		patch_mod.execute()
+		self.assertTrue(self._ok(pending))
+		self.assertTrue(self._ok(unlanded))
+		self.assertIsNone(self._row(landed).wiki_digest)
+		minted = self._row(pending).wiki_digest
+		patch_mod.execute()  # idempotent
+		self.assertEqual(self._row(pending).wiki_digest, minted)

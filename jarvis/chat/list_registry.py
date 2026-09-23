@@ -516,7 +516,6 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 	"jarvis.chat.custom_skills_api.list_custom_skills": (
 		"composer '/' autocomplete feed for skills; unpaginated companion of the skills view"
 	),
-	"jarvis.chat.filebox.list_inbound": "unpaginated companion of file_box (list_inbound_page)",
 	"jarvis.chat.macros_api.list_macros": (
 		"Settings macro-runs dropdown feed; unpaginated companion of the macros view"
 	),

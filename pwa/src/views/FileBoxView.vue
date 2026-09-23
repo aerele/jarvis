@@ -17,6 +17,19 @@ const busy = ref(false);
 const error = ref("");
 const fileEl = ref(null);
 
+// Mirrors the server's status ladder (jarvis/chat/filebox.py); legacy done/error
+// still read sensibly on a stale page.
+const STATUS = {
+	processing: { label: "Processing" },
+	needs_approval: { label: "Needs approval", tone: "is-warn" },
+	draft_created: { label: "Draft created", tone: "is-done" },
+	no_draft: { label: "No draft" },
+	failed: { label: "Failed", tone: "is-failed" },
+	done: { label: "Done", tone: "is-done" },
+	error: { label: "Failed", tone: "is-failed" },
+};
+const statusOf = (r) => STATUS[r.status] || { label: r.status || "Pending" };
+
 async function load() {
 	try {
 		const page = await api.listInbound(0, 30);
@@ -39,7 +52,7 @@ async function pick(e) {
 		// Upload, then hand the file to the agent. drop_file opens (and starts) a
 		// conversation about it, so go straight there — the processing IS the chat.
 		const up = await api.uploadFile(files[0]);
-		const r = await api.dropFile(up.file_url, up.file_name);
+		const r = await api.dropFile(up.file_url, up.file_name, up.name);
 		if (r?.ok === false) {
 			error.value = r.reason || "Jarvis couldn't take that file.";
 			return;
@@ -105,16 +118,12 @@ onMounted(load);
 					<div class="jv-row-main">
 						<div class="jv-row-title">{{ r.title || "Untitled document" }}</div>
 						<div class="jv-row-sub">
-							<span
-								class="jv-pill"
-								:class="{
-									'is-done': /done|complete|processed/i.test(r.status || ''),
-								}"
-							>
-								{{ r.status || "Pending" }}
+							<span class="jv-pill" :class="statusOf(r).tone">
+								{{ statusOf(r).label }}
 							</span>
 							{{ relativeTime(r.creation) }}
 						</div>
+						<div v-if="r.result" class="jv-row-result">{{ r.result }}</div>
 					</div>
 					<svg
 						class="jv-row-chev"
@@ -244,6 +253,22 @@ onMounted(load);
 .jv-pill.is-done {
 	background: var(--green-bg);
 	color: var(--green);
+}
+.jv-pill.is-warn {
+	background: var(--amber-bg);
+	color: var(--amber);
+}
+.jv-pill.is-failed {
+	background: var(--red-bg);
+	color: var(--red);
+}
+.jv-row-result {
+	margin-top: 3px;
+	font-size: 12px;
+	color: var(--ink6);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 .jv-row-chev {
 	width: 16px;

@@ -4,6 +4,13 @@
 import frappe
 from frappe.model.document import Document
 
+WIKI_SOURCE = "File Box Wiki"
+# Written only by server code that sets ``flags.jarvis_server_write`` (raw-SQL
+# transitions never reach validate). No Administrator / ignore_permissions exemption.
+_SERVER_FIELDS = ("wiki_payload", "apply_status", "apply_reason", "wiki_digest")
+# Frozen on a wiki proposal: what the reviewer reads and where it lands.
+_WIKI_FIELDS = ("title", "question", "context_md", "document_type", "conversation", "source", "status")
+
 
 class JarvisApprovalRequest(Document):
 	"""A decision the agent needs a human for.
@@ -16,9 +23,35 @@ class JarvisApprovalRequest(Document):
 	"""
 
 	def validate(self):
+		self._guard_server_fields()
 		self._guard_decided_fields()
 		if self.status != "Pending" and not self.decision:
 			frappe.throw("A decided approval must carry the decision text.")
+
+	def _guard_server_fields(self):
+		"""PR-1 §1: a document-injected model running as an Admin/SM dropper must not
+		forge or swap a wiki proposal or its apply outcome through the ORM."""
+		if self.flags.jarvis_server_write:
+			return
+		if self.is_new():
+			meta = self.meta
+			touched = [
+				f for f in _SERVER_FIELDS if (self.get(f) or "") not in ("", meta.get_field(f).default or "")
+			]
+			if self.source == WIKI_SOURCE:
+				touched.append("source")
+		else:
+			touched = [f for f in _SERVER_FIELDS if self.has_value_changed(f)]
+			before = self.get_doc_before_save()
+			if (before and before.source == WIKI_SOURCE) or self.source == WIKI_SOURCE:
+				touched += [f for f in _WIKI_FIELDS if self.has_value_changed(f)]
+		if touched:
+			frappe.throw(
+				frappe._("These approval fields are server-managed: {0}").format(
+					", ".join(sorted(set(touched)))
+				),
+				frappe.PermissionError,
+			)
 
 	def _guard_decided_fields(self):
 		"""TASK 25(b): the decided-outcome fields (status / decision / decided_by /

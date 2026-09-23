@@ -146,12 +146,15 @@ async function approve(p) {
 	if (busy.value) return;
 	busy.value = p.name;
 	try {
-		const r = await api.approveWikiWrite(p.name);
+		// the digest of what the reviewer read: a refreshed proposal is refused
+		const r = await api.approveWikiWrite(p.name, p.wiki_digest);
 		if (r && r.applied) toast.success("Wiki note approved and recorded");
 		else toast.warning("Approved, but the write did not land — use Retry below");
 		await load();
 	} catch (e) {
 		toast.error(errHtml(e));
+		// refused: the proposal changed or was decided elsewhere - show what is there now
+		await load();
 	} finally {
 		busy.value = null;
 	}

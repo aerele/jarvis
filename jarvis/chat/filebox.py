@@ -16,16 +16,21 @@ approvals and recovery all behave exactly like a hand-typed turn.
 from __future__ import annotations
 
 import json
+import re
 
 import frappe
 
-from jarvis.permissions import message_origin, require_jarvis_user
+from jarvis.permissions import message_origin, refuse_in_tool_dispatch, require_jarvis_user
 
 # The persona fallback skill (SHARED_CORE_SKILLS, role_profiles.py) - always
 # available, and NOT a Jarvis Custom Skill row, so it is validated by literal
 # match, never through get_skill. Defined once so the pin validation and the
 # prompt fallback reference the same string.
 OCR_DATA_ENTRY = "ocr-data-entry"
+
+CONV = "Jarvis Conversation"
+MSG = "Jarvis Chat Message"
+APPROVAL = "Jarvis Approval Request"
 
 INBOUND_PROMPT = (
 	"This file arrived through the File Box - process it as an inbound business "
@@ -113,34 +118,105 @@ def _validated_pinned_skill(skill: str | None) -> str | None:
 	return row.get("skill_name") or None
 
 
-@frappe.whitelist()
+def _resolve_drop_file(file: str | None, file_url: str | None):
+	"""The File to process: by docname (the upload response's ``name``), else by
+	``file_url`` preferring an unattached row. An identical re-upload shares the
+	file_url, so the url alone could pick an earlier drop's File."""
+	fields = ["name", "file_name", "file_url", "attached_to_doctype", "attached_to_name", "owner"]
+	if file:
+		return frappe.db.get_value("File", file, fields, as_dict=True)
+	file_url = (file_url or "").strip()
+	if not file_url:
+		frappe.throw("file is required")
+	rows = frappe.get_all(
+		"File", filters={"file_url": file_url}, fields=fields, order_by="creation desc", limit=20
+	)
+	# The caller's own unattached upload first, then any unattached row.
+	rows.sort(key=lambda r: (bool(r.attached_to_name), r.owner != frappe.session.user))
+	return rows[0] if rows else None
+
+
+def _refuse_foreign_attachment(fdoc) -> None:
+	"""M13: re-parent only the caller's own unattached upload or a File already on
+	their own conversation - never another document's attachment, nor another
+	user's unattached File (a public branding asset would be cascade-deleted)."""
+	if not fdoc.attached_to_name:
+		if fdoc.owner == frappe.session.user:
+			return
+		frappe.throw(
+			"This file was uploaded by someone else - upload your own copy to process it.",
+			frappe.PermissionError,
+		)
+	if fdoc.attached_to_doctype == CONV and (
+		frappe.db.get_value(CONV, fdoc.attached_to_name, "owner") == frappe.session.user
+	):
+		return
+	frappe.throw(
+		"This file is attached to another document - upload it again to process it.",
+		frappe.PermissionError,
+	)
+
+
+def _send_inbound(conv: str, file_doc, pinned: str | None, preamble: str | None = None) -> dict:
+	"""Send the directed File Box prompt for ``file_doc`` into ``conv`` and record the
+	outcome on the conversation: a refused or raising send stamps
+	``filebox_last_error`` (the row reads Failed with the reason), a successful one
+	clears it. Never raises, so a bulk drop keeps going. The caller commits first."""
+	from jarvis.chat.api import send_message
+
+	attachments = json.dumps([{"file_url": file_doc.file_url, "file_name": file_doc.file_name}])
+	message = build_inbound_prompt(pinned)
+	if preamble:
+		message = f"{preamble}\n\n{message}"
+	try:
+		# background=1: a batch of drops drains FIFO behind a human's typed question.
+		with message_origin("file_box"):
+			res = send_message(conversation=conv, message=message, attachments=attachments, background=1)
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="jarvis.file_box.send_failed", message=frappe.get_traceback())
+		res = {"ok": False, "reason": frappe._("something went wrong - try again")}
+	if res.get("ok"):
+		error = {"filebox_last_error": None, "filebox_last_error_at": None}
+	else:
+		reason = res.get("reason") or frappe._("the run could not be queued")
+		error = {
+			"filebox_last_error": f"Couldn't start: {reason}"[:500],
+			"filebox_last_error_at": frappe.utils.now_datetime(),
+		}
+	frappe.db.set_value(CONV, conv, error, update_modified=False)
+	frappe.db.commit()
+	return res
+
+
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def drop_file(file_url: str, file_name: str | None = None, skill: str | None = None) -> dict:
+def drop_file(
+	file_url: str | None = None,
+	file_name: str | None = None,
+	skill: str | None = None,
+	file: str | None = None,
+) -> dict:
 	"""Create a conversation for an uploaded file and kick off processing.
 
+	``file`` is the uploaded File's docname (``file_url`` is the legacy fallback).
 	``skill`` (optional) tags ONE extra processing skill for this file: a Jarvis
 	Custom Skill's skill_name. It is validated server-side (the client string is
 	untrusted) and, if usable, the agent applies it ALONGSIDE the system's chosen
 	skill (additive - the base extraction still runs, the tagged skill layers on
 	top). An unusable / absent skill just leaves the normal auto-discovery flow."""
-	file_url = (file_url or "").strip()
-	if not file_url:
-		frappe.throw("file_url is required")
-	# The URL must be a real uploaded File of this site (no external URLs).
-	fdoc = frappe.db.get_value(
-		"File",
-		{"file_url": file_url},
-		["name", "file_name", "file_size", "is_private"],
-		as_dict=True,
-	)
+	refuse_in_tool_dispatch()
+	# Must be a real uploaded File of this site (no external URLs).
+	fdoc = _resolve_drop_file(file, file_url)
 	if not fdoc:
 		frappe.throw("Unknown file - upload it first")
 	# Object-level auth: a caller must not be able to feed SOMEONE ELSE'S
-	# private file_url and have the agent OCR its contents back to them.
+	# private file and have the agent OCR its contents back to them.
 	if not frappe.has_permission("File", doc=fdoc.name):
 		frappe.throw("Not permitted", frappe.PermissionError)
+	_refuse_foreign_attachment(fdoc)
 
-	from jarvis.chat.api import create_conversation, send_message
+	from jarvis.chat.api import create_conversation
 
 	# Untrusted client slug -> canonical skill_name to pin, or None (auto).
 	pinned = _validated_pinned_skill(skill)
@@ -153,9 +229,14 @@ def drop_file(file_url: str, file_name: str | None = None, skill: str | None = N
 	# db.set_value to bypass the controller's admin-gate on enabling it.
 	# filebox_pinned_skill: the validated pin (or "" for auto-discovery).
 	frappe.db.set_value(
-		"Jarvis Conversation",
+		CONV,
 		conv_id,
-		{"title": f"File: {title}", "file_box": 1, "filebox_pinned_skill": pinned or ""},
+		{
+			"title": f"File: {title}",
+			"file_box": 1,
+			"filebox_pinned_skill": pinned or "",
+			"filebox_source_file": fdoc.name,
+		},
 		update_modified=False,
 	)
 	# Durable exact link: attach the File to the conversation so resumes
@@ -163,21 +244,14 @@ def drop_file(file_url: str, file_name: str | None = None, skill: str | None = N
 	frappe.db.set_value(
 		"File",
 		fdoc.name,
-		{"attached_to_doctype": "Jarvis Conversation", "attached_to_name": conv_id},
+		{"attached_to_doctype": CONV, "attached_to_name": conv_id},
 		update_modified=False,
 	)
 	frappe.db.commit()
 
-	attachments = json.dumps([{"file_url": file_url, "file_name": file_name or fdoc.file_name}])
-	# background=1 (requires the dedicated-chat-queue PR): a batch of
-	# drops drains FIFO and never jumps ahead of a human's typed question.
-	with message_origin("file_box"):
-		res = send_message(
-			conversation=conv_id,
-			message=build_inbound_prompt(pinned),
-			attachments=attachments,
-			background=1,
-		)
+	if file_name:
+		fdoc.file_name = file_name
+	res = _send_inbound(conv_id, fdoc, pinned)
 	return {
 		"ok": bool(res.get("ok")),
 		"conversation_id": conv_id,
@@ -186,106 +260,25 @@ def drop_file(file_url: str, file_name: str | None = None, skill: str | None = N
 	}
 
 
-@frappe.whitelist()
-@require_jarvis_user
-def list_inbound(limit: int = 30) -> list[dict]:
-	"""DEPRECATED (superseded by ``list_inbound_page``): kept for one release for
-	back-compat. Recent File-Box conversations for the pane's inbound list, with a
-	coarse status derived from live chat state - no extra bookkeeping
-	doctype to drift out of sync."""
-	rows = frappe.get_all(
-		"Jarvis Conversation",
-		# Exclude Archived: archiving (a.k.a. "delete") a File-Box chat is the
-		# way to clear it from the File Box - otherwise the soft-deleted row keeps
-		# showing here because we only match on the "File: " title.
-		filters={
-			"title": ["like", "File: %"],
-			"owner": frappe.session.user,
-			"status": ["!=", "Archived"],
-		},
-		fields=["name", "title", "creation"],
-		order_by="creation desc",
-		limit_page_length=int(limit),
-	)
-	conv_ids = [r.name for r in rows]
-	# Batched: one grouped query for pending approvals, one window query for
-	# each conversation's latest assistant message (was a 2xN loop).
-	pending_by_conv = {}
-	if conv_ids:
-		# Raw SQL: v16's get_all rejects SQL-function strings in fields
-		# ("count(name) as n" -> ValidationError), which 500'd this whole
-		# endpoint for anyone with a File-Box conversation.
-		for row in frappe.db.sql(
-			"""select conversation, count(name) n
-			from `tabJarvis Approval Request`
-			where conversation in %(convs)s and status='Pending'
-			group by conversation""",
-			{"convs": conv_ids},
-			as_dict=True,
-		):
-			pending_by_conv[row.conversation] = row.n
-	last_by_conv = {}
-	if conv_ids:
-		for row in frappe.db.sql(
-			"""select m.conversation, m.streaming, m.error, m.recovering
-			from `tabJarvis Chat Message` m
-			join (select conversation, max(seq) mseq from `tabJarvis Chat Message`
-			      where conversation in %(convs)s and role='assistant'
-			      group by conversation) x
-			  on x.conversation = m.conversation and x.mseq = m.seq
-			where m.role='assistant'""",
-			{"convs": conv_ids},
-			as_dict=True,
-		):
-			last_by_conv[row.conversation] = row
-	for r in rows:
-		last = [last_by_conv[r.name]] if r.name in last_by_conv else []
-		pending = pending_by_conv.get(r.name, 0)
-		if pending:
-			r["status"] = "needs_approval"
-		elif last and (last[0].streaming or last[0].recovering):
-			r["status"] = "processing"
-		elif last and last[0].error:
-			r["status"] = "error"
-		elif not last:
-			# Dropped but the worker hasn't inserted the assistant
-			# placeholder yet - queued, not done.
-			r["status"] = "processing"
-		else:
-			r["status"] = "done"
-		r["pending_approvals"] = pending
-	return rows
-
-
 # --------------------------------------------------------------------------- #
 # Paginated list (frozen envelope) + FB-1 cascade delete —
-# chat-features-page-migration-design §2.4 + orchestrator Q4.
-# ADDITIVE: list_inbound (above) STAYS (deprecated). The derived status moves
-# INTO SQL so it can be filtered server-side without breaking pagination.
+# chat-features-page-migration-design §2.4 + orchestrator Q4. The derived status
+# is computed IN SQL so it can be filtered server-side without breaking pagination.
 # --------------------------------------------------------------------------- #
-CONV = "Jarvis Conversation"
-MSG = "Jarvis Chat Message"
-APPROVAL = "Jarvis Approval Request"
-
-_INBOUND_STATUSES = {"done", "processing", "needs_approval", "error"}
+_STATUSES = ("processing", "needs_approval", "draft_created", "failed", "no_draft")
+# Pre-PR-1 filter values, accepted for one release (old clients / bookmarks).
+_STATUS_ALIASES = {"done": ("draft_created", "no_draft"), "error": ("failed",)}
+_CLEARABLE = ("draft_created", "no_draft")
 _INBOUND_SORTABLE = {"creation": "creation", "title": "title"}
 
-# The CASE precedence replicates list_inbound's Python ladder exactly:
-# pending > no-assistant-message > streaming/recovering > error > done.
-# `%%` is the literal LIKE percent under pyformat params; `{extra}` is the only
-# str.format hole (server-built AND-clauses; never user text).
 # VISIBILITY: a conversation is visible when the caller OWNS it, OR is TAGGED
 # on it — a `Jarvis Approval Request` of that conversation carries a DocShare
 # read grant for them (docmeta_api.toggle_share / assignment). EXISTS keeps the
 # probe boolean, so a row matching both arms never duplicates. Tagged users
 # view/preview only; delete/clear stay owner-gated (`_delete_one`).
-# Both grouped subqueries (pa: pending approvals; lm: latest assistant message)
-# are CORRELATED to the caller's VISIBLE conversations — the same visibility
-# filter is pushed inside via a JOIN so they never aggregate the whole global
-# tables (which scaled with everyone's data, not the caller's), and so shared
-# rows keep a correct status + pending count instead of being dropped by an
-# owner-only inner scope. The outer WHERE keeps only visible rows anyway, so
-# results are identical.
+# The grouped subqueries are CORRELATED to the caller's VISIBLE File Box
+# conversations (the same filter pushed inside via a JOIN), so they never
+# aggregate the whole global tables.
 
 
 def _conv_visible(alias: str) -> str:
@@ -302,40 +295,122 @@ def _conv_visible(alias: str) -> str:
 	)
 
 
-_INBOUND_INNER = f"""
-	SELECT c.name, c.title, c.creation,
-	       COALESCE(pa.n, 0) AS pending_approvals,
-	       COALESCE(bt.behind, 0) AS behind_chat,
-	       CASE
-	         WHEN COALESCE(pa.n, 0) > 0                 THEN 'needs_approval'
-	         WHEN lm.conversation IS NULL               THEN 'processing'
-	         WHEN lm.streaming = 1 OR lm.recovering = 1 THEN 'processing'
-	         WHEN COALESCE(lm.error, '') != ''          THEN 'error'
-	         ELSE 'done'
-	       END AS status
-	FROM `tabJarvis Conversation` c
-	LEFT JOIN (SELECT ar.conversation, COUNT(*) n
-	           FROM `tabJarvis Approval Request` ar
-	           JOIN `tabJarvis Conversation` ac
-	             ON ac.name = ar.conversation AND {_conv_visible("ac")}
-	           WHERE ar.status = 'Pending' GROUP BY ar.conversation) pa
-	  ON pa.conversation = c.name
-	LEFT JOIN (SELECT m.conversation, m.streaming, m.recovering, m.error
-	           FROM `tabJarvis Chat Message` m
-	           JOIN (SELECT mm.conversation, MAX(mm.seq) mseq
-	                 FROM `tabJarvis Chat Message` mm
-	                 JOIN `tabJarvis Conversation` mc
-	                   ON mc.name = mm.conversation AND {_conv_visible("mc")}
-	                 WHERE mm.role = 'assistant' GROUP BY mm.conversation) x
-	             ON x.conversation = m.conversation AND x.mseq = m.seq
-	           WHERE m.role = 'assistant') lm ON lm.conversation = c.name
-	LEFT JOIN (SELECT bT.conversation, 1 AS behind
-	           FROM `tabJarvis Chat Turn` bT
-	           WHERE bT.turn_class = 'background' AND bT.state = 'queued'
-	           GROUP BY bT.conversation) bt ON bt.conversation = c.name
-	WHERE {_conv_visible("c")} AND c.title LIKE 'File: %%' AND c.status != 'Archived'
-	{{extra}}
+# What makes a row "Needs approval": a Pending decision the dropper owes.
+# Wiki proposals are the reviewer's lane, never the dropper's (AC7). PR-2c adds
+# the Pending Action waiters here (UNION ALL, same columns).
+_PENDING_WAITS = f"""
+	SELECT ar.conversation, ar.name AS item, ar.title, ar.creation
+	FROM `tabJarvis Approval Request` ar
+	JOIN `tabJarvis Conversation` ac
+	  ON ac.name = ar.conversation AND ac.file_box = 1 AND {_conv_visible("ac")}
+	WHERE ar.status = 'Pending' AND COALESCE(ar.source, '') != 'File Box Wiki'
 """
+
+
+def _latest(where: str, alias: str, cols: str) -> str:
+	"""Latest (max seq) message matching ``where`` per visible File Box conversation."""
+	return f"""(SELECT {cols}
+	           FROM `tabJarvis Chat Message` m
+	           JOIN (SELECT m.conversation, MAX(m.seq) mseq
+	                 FROM `tabJarvis Chat Message` m
+	                 JOIN `tabJarvis Conversation` {alias}
+	                   ON {alias}.name = m.conversation AND {alias}.file_box = 1 AND {_conv_visible(alias)}
+	                 WHERE {where}
+	                 GROUP BY m.conversation) x
+	             ON x.conversation = m.conversation AND x.mseq = m.seq
+	           WHERE {where})"""
+
+
+# The final reply; a hidden assistant row is a discarded placeholder, not a reply.
+_LM = _latest(
+	"m.role = 'assistant' AND COALESCE(m.hidden, 0) = 0",
+	"mc",
+	"m.conversation, m.name, m.seq, m.streaming, m.recovering, m.error, m.stopped, m.modified, "
+	"CASE WHEN COALESCE(m.content, '') REGEXP '[^[:space:]]' THEN 0 ELSE 1 END AS empty",
+)
+# The last prompt (hidden continuations included) + the state of its latest turn
+# (NULL on the legacy dispatch path, which has no Turn rows).
+_LU = _latest(
+	"m.role = 'user'",
+	"uc",
+	"m.conversation, m.name, m.seq, m.creation, "
+	"(SELECT ct.state FROM `tabJarvis Chat Turn` ct WHERE ct.seed_message = m.name "
+	"ORDER BY ct.creation DESC LIMIT 1) AS turn_state",
+)
+
+# A send failure stamped after the last drop/resume outranks the unanswered arm (M8).
+_ERR_NEWER = (
+	"(c.filebox_last_error_at IS NOT NULL AND (lu.creation IS NULL OR c.filebox_last_error_at > lu.creation))"
+)
+_UNANSWERED = "(lm.seq IS NULL OR lm.seq < lu.seq)"
+
+# The status ladder (AC7), first match wins:
+#   needs_approval > processing > draft_created > failed > no_draft.
+# `live` = a reply is streaming (and fresh), a Jarvis Chat Turn is non-terminal, or
+# (legacy dispatch path, no Turn row) the last user row is unanswered but younger
+# than the orphan threshold. `fail_code` is why a finished run failed (NULL = ended cleanly);
+# it is computed even for a drafted run ("· ended with an error").
+# `{extra}` is the only str.format hole (server-built AND-clauses; never user text).
+_INBOUND_INNER = f"""
+	SELECT r.*,
+	       CASE
+	         WHEN r.pending_approvals > 0 THEN 'needs_approval'
+	         WHEN r.live = 1              THEN 'processing'
+	         WHEN r.has_draft = 1         THEN 'draft_created'
+	         WHEN r.fail_code IS NOT NULL THEN 'failed'
+	         ELSE 'no_draft'
+	       END AS status
+	FROM (
+	  SELECT c.name, c.title, c.creation, c.filebox_result_doctype, c.filebox_result_name,
+	         c.filebox_result_count, c.filebox_last_error, lm.name AS lm_name,
+	         COALESCE(pa.n, 0) AS pending_approvals,
+	         COALESCE(bt.behind, 0) AS behind_chat,
+	         CASE WHEN COALESCE(c.filebox_result_name, '') != '' THEN 1 ELSE 0 END AS has_draft,
+	         CASE
+	           WHEN (lm.streaming = 1 OR lm.recovering = 1) AND lm.modified >= %(fresh)s THEN 1
+	           WHEN EXISTS (SELECT 1 FROM `tabJarvis Chat Turn` lt
+	                        WHERE lt.conversation = c.name AND lt.state IN %(live_states)s) THEN 1
+	           WHEN lu.name IS NOT NULL AND lu.turn_state IS NULL AND {_UNANSWERED}
+	                AND lu.creation >= %(fresh)s
+	                AND NOT {_ERR_NEWER} THEN 1
+	           ELSE 0
+	         END AS live,
+	         CASE
+	           WHEN {_ERR_NEWER} THEN 'send_failed'
+	           WHEN lu.name IS NULL THEN 'no_start'
+	           WHEN lu.turn_state = 'cancelled' THEN 'cancelled'
+	           WHEN {_UNANSWERED} THEN 'no_start'
+	           WHEN COALESCE(lm.error, '') != '' THEN 'error'
+	           WHEN lm.stopped = 1 THEN 'stopped'
+	           WHEN lm.streaming = 1 OR lm.recovering = 1 THEN 'stale'
+	           WHEN lm.empty = 1 THEN 'empty'
+	         END AS fail_code
+	  FROM `tabJarvis Conversation` c
+	  LEFT JOIN (SELECT w.conversation, COUNT(*) n FROM ({_PENDING_WAITS}) w
+	             GROUP BY w.conversation) pa ON pa.conversation = c.name
+	  LEFT JOIN {_LM} lm ON lm.conversation = c.name
+	  LEFT JOIN {_LU} lu ON lu.conversation = c.name
+	  LEFT JOIN (SELECT bT.conversation, 1 AS behind
+	             FROM `tabJarvis Chat Turn` bT
+	             WHERE bT.turn_class = 'background' AND bT.state = 'queued'
+	             GROUP BY bT.conversation) bt ON bt.conversation = c.name
+	  WHERE {_conv_visible("c")} AND c.file_box = 1 AND c.status != 'Archived'
+	  {{extra}}
+	) r
+"""
+
+
+def _ladder_params(me: str) -> dict:
+	from frappe.utils import add_to_date, now_datetime
+
+	from jarvis.chat.stale_scan import ORPHAN_MAX_AGE_SECONDS
+	from jarvis.chat.turn_state import NONTERMINAL_STATES
+
+	return {
+		"me": me,
+		"fresh": add_to_date(now_datetime(), seconds=-ORPHAN_MAX_AGE_SECONDS),
+		"live_states": NONTERMINAL_STATES,
+	}
 
 
 def _lk(s: str) -> str:
@@ -386,6 +461,107 @@ def _order_by(sort_field, sort_dir, sortable: dict, default_field, default_dir, 
 	return f"{prefix}`{col}` {d}, {prefix}`name` asc"
 
 
+_MD_NOISE = (
+	(re.compile(r"<[^>]*>"), ""),
+	(re.compile(r"\[([^\]]*)\]\([^)]*\)"), r"\1"),
+	(re.compile(r"\*\*|__|`"), ""),
+	(re.compile(r"^\s*(#{1,6}|>|[-*+])\s+"), ""),
+)
+
+
+def _first_line(text: str | None, limit: int = 140) -> str:
+	"""First non-empty line of an agent-written text, markdown/HTML stripped and
+	truncated - rendered as plain text by the list."""
+	for line in (text or "").splitlines():
+		for pattern, repl in _MD_NOISE:
+			line = pattern.sub(repl, line)
+		line = " ".join(line.split())
+		if line:
+			return line if len(line) <= limit else line[:limit].rstrip() + "…"
+	return ""
+
+
+_FAILURES = {
+	"no_start": "Couldn't start - the run never began",
+	"cancelled": "Cancelled before it finished",
+	"stopped": "Stopped before it finished",
+	"stale": "Stopped responding",
+	"empty": "Ended without a reply",
+}
+
+
+def _draft_line(r: dict) -> str:
+	more = int(r.get("filebox_result_count") or 1) - 1
+	line = f"Draft {r['filebox_result_doctype']} {r['filebox_result_name']} created"
+	return line + (f" and {more} more" if more > 0 else "")
+
+
+def _result(r: dict, wait, msg) -> tuple[str, str | None]:
+	"""The row's one-line result + where it links (``/approvals/..`` in-app, or
+	the Desk form of the draft)."""
+	from urllib.parse import quote
+
+	status = r["status"]
+	if status == "needs_approval":
+		n = int(r["pending_approvals"])
+		line = f"{n} approval{'' if n == 1 else 's'} waiting" + (f": {wait.title}" if wait else "")
+		if r.get("filebox_result_name"):
+			line = f"{_draft_line(r)} · {line}"
+		return line, f"/approvals/{quote(wait.item, safe='')}" if wait else "/approvals"
+	if status == "draft_created":
+		slug = frappe.scrub(r["filebox_result_doctype"]).replace("_", "-")
+		line = _draft_line(r)
+		if r.get("fail_code") and r["fail_code"] != "empty":
+			line += " · ended with an error"
+		return line, f"/app/{slug}/{quote(r['filebox_result_name'], safe='')}"
+	if status == "failed":
+		code = r.get("fail_code")
+		if code == "send_failed":
+			return (r.get("filebox_last_error") or "Couldn't start"), None
+		if code == "error":
+			reason = _first_line(msg.error if msg else "")
+			return (f"Failed: {reason}" if reason else "Failed"), None
+		return _FAILURES.get(code, "Failed"), None
+	if status == "no_draft":
+		return _first_line(msg.content if msg else ""), None
+	return "", None
+
+
+# Ladder inputs the list computes with but never returns.
+_INTERNAL = (
+	"lm_name",
+	"fail_code",
+	"filebox_result_doctype",
+	"filebox_result_name",
+	"filebox_result_count",
+	"filebox_last_error",
+)
+
+
+def _attach_results(rows: list[dict], me: str) -> None:
+	"""Post-page enrichment (never in the COUNT / Clear queries): the first
+	waiting decision and the final reply are read for this page's rows only."""
+	waits: dict = {}
+	need = [r["name"] for r in rows if r["status"] == "needs_approval"]
+	if need:
+		for w in frappe.db.sql(
+			f"""SELECT w.conversation, w.item, w.title FROM ({_PENDING_WAITS}) w
+			WHERE w.conversation IN %(names)s ORDER BY w.creation ASC""",
+			{"me": me, "names": need},
+			as_dict=True,
+		):
+			waits.setdefault(w.conversation, w)
+	msgs: dict = {}
+	lm_names = [r["lm_name"] for r in rows if r["lm_name"] and r["status"] in ("failed", "no_draft")]
+	if lm_names:
+		for m in frappe.get_all(MSG, filters={"name": ["in", lm_names]}, fields=["name", "content", "error"]):
+			msgs[m.name] = m
+	for r in rows:
+		r["result"], r["result_link"] = _result(r, waits.get(r["name"]), msgs.get(r["lm_name"]))
+		for k in _INTERNAL:
+			r.pop(k, None)
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def list_inbound_page(
@@ -399,20 +575,21 @@ def list_inbound_page(
 	"""File-Box conversations visible to the caller — owned by them, or tagged to
 	them via a DocShare read grant on a related Jarvis Approval Request — with the
 	derived status computed IN SQL, so ``status`` filters and pagination compose.
-	Envelope ``{rows, total, has_more, start, page_length}``. Tagged users can
+	Envelope ``{rows, total, has_more, start, page_length}``; each row carries
+	``status``, a one-line ``result`` and its ``result_link``. Tagged users can
 	view; delete/clear remain owner-only.
 
-	Filters: ``status`` (done|processing|needs_approval|error), ``from_date`` /
-	``to_date`` (YYYY-MM-DD, inclusive; ``to_date`` implemented as ``creation <
-	to_date + 1 day``). Search matches the title. Sort: ``creation`` (default
-	desc) or ``title``."""
+	Filters: ``status`` (processing|needs_approval|draft_created|failed|no_draft;
+	legacy ``done`` / ``error`` still map), ``from_date`` / ``to_date``
+	(YYYY-MM-DD, inclusive; ``to_date`` implemented as ``creation < to_date + 1
+	day``). Search matches the title. Sort: ``creation`` (default desc) or ``title``."""
 	from frappe.utils import add_days, getdate
 
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
 	f = _load_filters(filters, {"status", "from_date", "to_date"})
 
-	params: dict = {"me": me, "start": start, "page_length": pl}
+	params: dict = {**_ladder_params(me), "start": start, "page_length": pl}
 	extra_parts: list[str] = []
 	if search:
 		params["q"] = f"%{_lk(search)}%"
@@ -433,16 +610,19 @@ def list_inbound_page(
 
 	outer = ""
 	if "status" in f:
-		if f["status"] not in _INBOUND_STATUSES:
+		status = f["status"]
+		if status not in _STATUSES and status not in _STATUS_ALIASES:
 			frappe.throw("Invalid status filter")
-		params["status"] = f["status"]
-		outer = "WHERE t.status = %(status)s"
+		params["statuses"] = _STATUS_ALIASES.get(status, (status,))
+		outer = "WHERE t.status IN %(statuses)s"
 
 	order = _order_by(sort_field, sort_dir, _INBOUND_SORTABLE, "creation", "desc", prefix="t.")
 
 	total = frappe.db.sql(f"SELECT COUNT(*) FROM ({inner}) t {outer}", params)[0][0]
 	rows = frappe.db.sql(
-		f"""SELECT t.name, t.title, t.creation, t.status, t.pending_approvals, t.behind_chat
+		f"""SELECT t.name, t.title, t.creation, t.status, t.pending_approvals, t.behind_chat,
+		t.lm_name, t.fail_code, t.filebox_result_doctype, t.filebox_result_name,
+		t.filebox_result_count, t.filebox_last_error
 		FROM ({inner}) t {outer}
 		ORDER BY {order}
 		LIMIT %(page_length)s OFFSET %(start)s""",
@@ -450,12 +630,13 @@ def list_inbound_page(
 		as_dict=True,
 	)
 
-	# Attach the source File so the list can offer an inline preview. Each File-Box
-	# conversation carries the dropped document as a File (drop_file, is_private=1);
-	# pick the earliest by creation. get_all bypasses File perms, but the rows are
-	# already scoped to conversations the caller may see, and the actual byte fetch
-	# (iframe/img/read_file) stays permission-gated by Frappe's file handler.
 	if rows:
+		_attach_results(rows, me)
+		# Attach the source File so the list can offer an inline preview. Each File-Box
+		# conversation carries the dropped document as a File (drop_file, is_private=1);
+		# pick the earliest by creation. get_all bypasses File perms, but the rows are
+		# already scoped to conversations the caller may see, and the actual byte fetch
+		# (iframe/img/read_file) stays permission-gated by Frappe's file handler.
 		names = [r["name"] for r in rows]
 		file_rows = frappe.get_all(
 			"File",
@@ -495,18 +676,19 @@ def list_inbound_page(
 
 
 # --------------------------------------------------------------------------- #
-# FB-1 cascade delete (owner-gated; refuses while the latest assistant message
-# is streaming/recovering — orchestrator Q6).
+# FB-1 cascade delete (owner-gated; refuses while the run is live or a wiki
+# note is still with a reviewer — orchestrator Q6, M8).
 # --------------------------------------------------------------------------- #
-def _latest_assistant(conversation: str):
-	rows = frappe.db.sql(
-		"""SELECT streaming, recovering FROM `tabJarvis Chat Message`
-		WHERE conversation = %s AND role = 'assistant'
-		ORDER BY seq DESC LIMIT 1""",
-		(conversation,),
-		as_dict=True,
+def _wiki_open(alias: str) -> str:
+	"""SQL predicate: conversation ``alias`` has a wiki note a reviewer still owes a
+	decision or a landing on (Pending, or Approved but not Applied). The cascade
+	would delete the proposal, so such a row is never cleared or deleted."""
+	return (
+		"EXISTS (SELECT 1 FROM `tabJarvis Approval Request` wa "
+		f"WHERE wa.conversation = {alias}.name AND wa.source = 'File Box Wiki' "
+		"AND (wa.status = 'Pending' OR (wa.status = 'Approved' "
+		"AND COALESCE(wa.apply_status, 'Pending') <> 'Applied')))"
 	)
-	return rows[0] if rows else None
 
 
 def _cascade(conversation: str) -> None:
@@ -525,36 +707,53 @@ def _cascade(conversation: str) -> None:
 	frappe.delete_doc(CONV, conversation, ignore_permissions=True, force=True)
 
 
-def _delete_one(conversation: str) -> None:
+def _delete_one(conversation: str, live: int | None = None) -> None:
 	"""Owner-gated cascade delete of ONE File-Box conversation. Raises on refusal:
-	not found / not permitted / not a File-Box row / still processing. All checks
-	run BEFORE any delete, so a refusal never leaves a partial delete."""
+	not found / not permitted / not a File-Box row / still live / a wiki note
+	still with a reviewer. All checks run BEFORE any delete, so a refusal never
+	leaves a partial delete. "Live" is the ladder's own arm, so an orphan past the
+	threshold (or a failed send) stays deletable; ``live`` is that arm when the
+	caller already computed it."""
+	me = frappe.session.user
 	doc = frappe.get_doc(CONV, conversation)  # DoesNotExistError if missing
-	if doc.owner != frappe.session.user:
+	if doc.owner != me:
 		frappe.throw("Not permitted", frappe.PermissionError)
-	if not (doc.title or "").startswith("File: "):
+	if not doc.file_box:
 		frappe.throw("Not a File Box conversation")
-	last = _latest_assistant(conversation)
-	if last and (last.streaming or last.recovering):
+	if live is None:
+		row = frappe.db.sql(
+			f"SELECT t.live FROM ({_INBOUND_INNER.format(extra='AND c.name = %(one)s')}) t",
+			{**_ladder_params(me), "one": conversation},
+		)
+		live = row[0][0] if row else 0
+	if live:
 		frappe.throw("Still processing — stop or wait for it to finish before deleting")
+	if frappe.db.sql(
+		f"SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name = %s AND {_wiki_open('c')}", (conversation,)
+	):
+		frappe.throw(
+			"A wiki note from this file is still awaiting review — try again once a reviewer has handled it"
+		)
 	_cascade(conversation)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_inbound(conversation: str) -> dict:
 	"""Owner-gated cascade delete of a File-Box conversation (FB-1)."""
+	refuse_in_tool_dispatch()
 	_delete_one(conversation)
 	frappe.db.commit()
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_inbound_bulk(conversations: str | list | None = None) -> dict:
 	"""Bulk cascade delete (orchestrator Q4). Owner-gated per row, same cascade +
-	streaming refusal as ``delete_inbound``. Returns ``{deleted, skipped:[{
-	conversation, reason}]}`` — a bad/streaming/foreign row is skipped, not fatal."""
+	refusals as ``delete_inbound``. Returns ``{deleted, skipped:[{conversation,
+	reason}]}`` — a live/foreign row is skipped, not fatal."""
+	refuse_in_tool_dispatch()
 	raw = frappe.parse_json(conversations) if isinstance(conversations, str) else (conversations or [])
 	convs = [str(c) for c in raw if c] if isinstance(raw, list) else []
 	deleted = 0
@@ -562,39 +761,46 @@ def delete_inbound_bulk(conversations: str | list | None = None) -> dict:
 	for conv in convs:
 		try:
 			_delete_one(conv)
-			deleted += 1
-		except frappe.PermissionError:
-			skipped.append({"conversation": conv, "reason": "not permitted"})
-		except frappe.DoesNotExistError:
-			skipped.append({"conversation": conv, "reason": "not found"})
 		except Exception as e:
-			skipped.append({"conversation": conv, "reason": str(e) or "error"})
-	frappe.db.commit()
+			frappe.db.rollback()  # never commit a half-deleted row with the next one
+			if isinstance(e, frappe.PermissionError):
+				reason = "not permitted"
+			elif isinstance(e, frappe.DoesNotExistError):
+				reason = "not found"
+			else:
+				reason = str(e) or "error"
+			skipped.append({"conversation": conv, "reason": reason})
+			continue
+		frappe.db.commit()
+		deleted += 1
 	return {"deleted": deleted, "skipped": skipped}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def clear_processed_inbound() -> dict:
-	"""Bulk-delete the caller's OWN File-Box rows whose derived status is
-	done|error (never processing/needs_approval), computed with the same status
-	SQL. Owner-only by design: the list SQL now also surfaces rows merely
-	DocShared to the caller, so the clear query pins ``c.owner = %(me)s`` via the
-	``extra`` hole — and ``_delete_one`` re-checks ownership as the backstop."""
+	"""Bulk-delete the caller's OWN File-Box rows that finished with a result
+	(``draft_created`` | ``no_draft``); failed, processing and needs-approval rows,
+	and rows with a wiki note still with a reviewer, stay. Owner-only by design:
+	the list SQL also surfaces rows merely DocShared to the caller, so the clear
+	query pins ``c.owner = %(me)s`` via the ``extra`` hole — and ``_delete_one``
+	re-checks ownership as the backstop."""
+	refuse_in_tool_dispatch()
 	me = frappe.session.user
+	extra = f"AND c.owner = %(me)s AND NOT {_wiki_open('c')}"
 	rows = frappe.db.sql(
-		f"SELECT t.name FROM ({_INBOUND_INNER.format(extra='AND c.owner = %(me)s')}) t "
-		f"WHERE t.status IN ('done', 'error')",
-		{"me": me},
+		f"SELECT t.name, t.live FROM ({_INBOUND_INNER.format(extra=extra)}) t WHERE t.status IN %(clearable)s",
+		{**_ladder_params(me), "clearable": _CLEARABLE},
 		as_dict=True,
 	)
 	deleted = 0
 	for r in rows:
 		try:
-			_delete_one(r.name)
-			deleted += 1
+			_delete_one(r.name, live=r.live)
 		except Exception:
-			# done/error rows are never streaming; only a concurrent race fails.
+			# finished rows are never live; only a concurrent race fails.
+			frappe.db.rollback()
 			continue
-	frappe.db.commit()
+		frappe.db.commit()
+		deleted += 1
 	return {"ok": True, "deleted": deleted}

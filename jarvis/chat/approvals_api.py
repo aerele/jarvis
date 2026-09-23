@@ -9,6 +9,8 @@ in the same chat with full context - no separate notification plumbing.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 
 import frappe
@@ -688,6 +690,36 @@ def restore_approval(name: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Wiki proposal digest (PR-1 §2): an HMAC over the exact stored (name,
+# conversation, wiki_payload), minted post-name in the propose transaction and
+# verified before any landing, so a forged or swapped proposal never lands.
+# --------------------------------------------------------------------------- #
+_WIKI_DIGEST_CONTEXT = b"jarvis-wiki-v1"
+_WIKI_TAMPERED = "This wiki proposal was changed after it was proposed - reject it."
+_WIKI_CHANGED = "This proposal changed since you opened it - reload and review it again."
+
+
+def wiki_digest(name: str, conversation: str | None, payload: str | None) -> str:
+	from frappe.utils.password import get_encryption_key
+
+	key = hmac.new(get_encryption_key().encode(), _WIKI_DIGEST_CONTEXT, hashlib.sha256).digest()
+	msg = json.dumps([name or "", conversation or "", payload or ""], separators=(",", ":"))
+	return hmac.new(key, msg.encode(), hashlib.sha256).hexdigest()
+
+
+def wiki_digest_ok(name: str, conversation: str | None, payload: str | None, digest: str | None) -> bool:
+	return bool(digest) and hmac.compare_digest(wiki_digest(name, conversation, payload), str(digest))
+
+
+def _refuse_unless_digest_ok(name: str) -> dict:
+	"""Read the stored proposal and refuse it unless its digest verifies."""
+	row = frappe.db.get_value(APPROVAL, name, ["conversation", "wiki_payload", "wiki_digest"], as_dict=True)
+	if not (row and wiki_digest_ok(name, row.conversation, row.wiki_payload, row.wiki_digest)):
+		frappe.throw(_WIKI_TAMPERED, frappe.PermissionError)
+	return row
+
+
+# --------------------------------------------------------------------------- #
 # Wiki write-back review lane (review-before-landing) — reviewer-gated.
 #
 # A file-box run's ``update_wiki`` is HELD as a Pending proposal (source
@@ -756,7 +788,7 @@ def list_wiki_write_proposals(status: str = "Actionable", start: int = 0, page_l
 	][0]
 	rows = frappe.db.sql(
 		f"""SELECT a.name, a.title, a.status, a.apply_status, a.apply_reason,
-		a.wiki_payload, a.ref_name, a.conversation, a.owner, a.decision,
+		a.wiki_payload, a.wiki_digest, a.ref_name, a.conversation, a.owner, a.decision,
 		a.decided_by, a.decided_at, a.creation
 		FROM `tabJarvis Approval Request` a
 		WHERE {where_sql}
@@ -841,16 +873,23 @@ def _land_and_record(name: str, doc, dropper: str | None) -> dict:
 			"apply_status": cur,
 			"reason": None if applied else "another reviewer is landing this write",
 		}
-	# Hold the claim under the row lock through the funnel (no commit here).
+	# Hold the claim under the row lock through the funnel (no commit here). Land
+	# what the locked row holds, and only if its digest verifies (the endpoints'
+	# own check ran before the claim).
 	from jarvis import api as _api
 
 	try:
-		args = json.loads(doc.wiki_payload)
+		row = _refuse_unless_digest_ok(name)
+	except frappe.PermissionError:
+		frappe.db.rollback()
+		raise
+	try:
+		args = json.loads(row.wiki_payload)
 	except Exception:
 		args = {}
 	if not isinstance(args, dict):
 		args = {}
-	result = _api._file_box_wiki_write(args, doc.conversation, user=dropper, provenance="reviewer_approved")
+	result = _api._file_box_wiki_write(args, row.conversation, user=dropper, provenance="reviewer_approved")
 	applied = bool(result.get("ok"))
 	# Guarded on the token: if the executor's own rollback (a funnel deadlock)
 	# discarded our claim, this matches 0 rows and we do NOT clobber whatever a
@@ -878,7 +917,7 @@ def _land_and_record(name: str, doc, dropper: str | None) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def approve_wiki_write(name: str) -> dict:
+def approve_wiki_write(name: str, expected_digest: str | None = None) -> dict:
 	"""Reviewer approves a held wiki proposal; the fenced write then LANDS.
 
 	Gate: ``require_skill_reviewer`` + separation of duties (a reviewer OTHER than
@@ -888,13 +927,19 @@ def approve_wiki_write(name: str) -> dict:
 	replay the write through the SAME fenced funnel as the auto path
 	(``api._file_box_wiki_write``) under the DROPPER's provenance (the session is
 	the reviewer, but the page belongs to the dropper's file-box namespace), and
-	record the outcome in ``apply_status`` / ``apply_reason``."""
+	record the outcome in ``apply_status`` / ``apply_reason``.
+
+	``expected_digest`` (M14) is the digest of the proposal the reviewer read; a
+	refreshed or swapped proposal no longer matches it and is refused."""
 	refuse_in_tool_dispatch()
 	doc = _wiki_proposal_or_throw(name)
 	if doc.status != "Pending":
 		frappe.throw(f"Proposal {name} is already {doc.status}")
 	if not doc.get("wiki_payload"):
 		frappe.throw("Proposal has no held wiki payload to apply")
+	row = _refuse_unless_digest_ok(name)
+	if expected_digest and not hmac.compare_digest(str(expected_digest), str(row.wiki_digest)):
+		frappe.throw(_WIKI_CHANGED, frappe.PermissionError)
 	dropper = _dropper_of(doc)
 	if _sod_blocks_self_approval(dropper):
 		frappe.throw(
@@ -905,16 +950,19 @@ def approve_wiki_write(name: str) -> dict:
 	me = frappe.session.user
 	# Claim-first: win the transition atomically before the (non-transactional
 	# from the AR's view) fenced write, so a double-approve executes the write once.
+	# Pinned to the verified digest: a refresh between the check and here re-mints it.
 	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status='Approved', decision=%s, decided_by=%s, decided_at=%s
-		where name=%s and status='Pending'""",
-		("(approved - wiki write applied)", me, frappe.utils.now_datetime(), name),
+		where name=%s and status='Pending' and wiki_digest=%s""",
+		("(approved - wiki write applied)", me, frappe.utils.now_datetime(), name, row.wiki_digest),
 	)
 	if not frappe.db.sql(
 		"select 1 from `tabJarvis Approval Request` where name=%s and status='Approved' and decided_by=%s",
 		(name, me),
 	):
+		if frappe.db.get_value(APPROVAL, name, "status") == "Pending":
+			frappe.throw(_WIKI_CHANGED, frappe.PermissionError)
 		frappe.throw(f"Proposal {name} was decided concurrently")
 	frappe.db.commit()
 	return _land_and_record(name, doc, dropper)
@@ -936,6 +984,7 @@ def retry_wiki_write(name: str) -> dict:
 		frappe.throw(f"Proposal {name} already landed")
 	if not doc.get("wiki_payload"):
 		frappe.throw("Proposal has no held wiki payload to apply")
+	_refuse_unless_digest_ok(name)
 	return _land_and_record(name, doc, _dropper_of(doc))
 
 

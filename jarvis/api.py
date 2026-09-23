@@ -2194,6 +2194,8 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	# the AR is stamped to them, and it is the provenance ``user=`` the reviewer
 	# replays the write under so the fenced own-pages rule keys on the dropper's
 	# namespace, not the reviewer's.
+	from jarvis.chat.approvals_api import wiki_digest
+
 	owner = frappe.db.get_value("Jarvis Conversation", conv, "owner") or frappe.session.user
 	title = (args.get("title") or slug or "wiki note")[:100]
 	payload = json.dumps(args, default=str, sort_keys=True)
@@ -2216,11 +2218,19 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		# the refresh matches 0 rows and we fall through to a FRESH proposal - a
 		# re-emitted write must never rewrite what a reviewer already approved /
 		# rejected (they reviewed the payload they saw).
+		# The refresh re-mints the digest in the same UPDATE (F8).
 		frappe.db.sql(
 			"""update `tabJarvis Approval Request`
-			set wiki_payload=%s, title=%s, modified=%s, modified_by=%s
+			set wiki_payload=%s, wiki_digest=%s, title=%s, modified=%s, modified_by=%s
 			where name=%s and status='Pending'""",
-			(payload, title, frappe.utils.now(), frappe.session.user, existing),
+			(
+				payload,
+				wiki_digest(existing, conv, payload),
+				title,
+				frappe.utils.now(),
+				frappe.session.user,
+				existing,
+			),
 		)
 		if frappe.db.get_value("Jarvis Approval Request", existing, "status") != "Pending":
 			existing = None
@@ -2246,9 +2256,20 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		)
 		# ignore_permissions: the permlevel-1 fields (status / wiki_payload /
 		# apply_status) and a row naming the dropper's conversation are both
-		# beyond what the file-box run's session may write directly.
+		# beyond what the file-box run's session may write directly. The server
+		# flag passes the AR tamper guard, which refuses every other writer.
+		doc.flags.jarvis_server_write = True
 		doc.insert(ignore_permissions=True)
 		name = doc.name
+		# Minted post-name, in the same transaction, over the STORED payload (the
+		# insert may have sanitized it; the raw-SQL refresh above stores it verbatim).
+		frappe.db.set_value(
+			"Jarvis Approval Request",
+			name,
+			"wiki_digest",
+			wiki_digest(name, doc.conversation, doc.wiki_payload),
+			update_modified=False,
+		)
 		# v16 set_user_and_timestamp stamps owner=session on insert; re-stamp the
 		# dropper AFTER (the idiom chat_asks.materialize_from_turn uses).
 		if doc.owner != owner:
@@ -2260,6 +2281,28 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		"approval": name,
 		"detail": "recorded for reviewer approval (not yet on the wiki)",
 	}
+
+
+def _stamp_file_box_draft(conv: str, data) -> None:
+	"""Record a File Box run's created draft (a SUBMITTABLE doctype) on its
+	conversation: the first draft is the row's result, later ones only count."""
+	doctype = data.get("doctype") if isinstance(data, dict) else None
+	name = data.get("name") if isinstance(data, dict) else None
+	if not (doctype and name):
+		return
+	try:
+		if not frappe.get_meta(doctype).is_submittable:
+			return
+	except frappe.DoesNotExistError:
+		return
+	frappe.db.sql(
+		"""UPDATE `tabJarvis Conversation`
+		SET filebox_result_doctype = IF(COALESCE(filebox_result_name, '') = '', %(dt)s, filebox_result_doctype),
+			filebox_result_name = IF(COALESCE(filebox_result_name, '') = '', %(name)s, filebox_result_name),
+			filebox_result_count = COALESCE(filebox_result_count, 0) + 1
+		WHERE name = %(conv)s""",
+		{"dt": doctype, "name": name, "conv": conv},
+	)
 
 
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
@@ -2656,7 +2699,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				# "auto_apply" (a value the Jarvis Agent Write enum still carries).
 				# Kept as-is to avoid an enum migration; it reads as "an unattended
 				# direct-apply run".
-				return dispatch_confirmed(tool, args, provenance="auto_apply")
+				result = dispatch_confirmed(tool, args, provenance="auto_apply")
+				if tool == "create_doc" and result.get("ok"):
+					_stamp_file_box_draft(conv, result.get("data"))
+				return result
 		# File Box unattended wiki write-back: route update_wiki through the
 		# append-only, provenance-FENCED funnel (never the raw update_wiki tool,
 		# which defaults scope=Org + ignore_permissions and can clobber a curated
@@ -2665,13 +2711,14 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# (update_wiki is not in _AUTO_APPLYABLE, so that block skipped it) and BEFORE
 		# the single-flight so an unattended run never parks a wiki card. The wiki
 		# kill-switch at the top of _run_tool already refused a wiki-off write before
-		# here; a bulk call falls through to the park.
+		# here; stray batch args never divert it to a park card (whose confirm would
+		# run the raw, unfenced tool).
 		# INVARIANT: a file_box conversation never also carries skip_confirmation /
 		# skill_autorun (drop_file sets ONLY file_box=1, and an unattended run arms no
 		# macro), so the armed-skip + skill-autorun covered-write branches above never
 		# pre-empt update_wiki into the RAW covered path (which would clobber a curated
 		# page). If that ever changes, this branch must move ABOVE them so the fence wins.
-		if conv and tool == "update_wiki" and _conv_flags.get("file_box") and not _is_bulk_call(args):
+		if conv and tool == "update_wiki" and _conv_flags.get("file_box"):
 			# REVIEW-BEFORE-LANDING: an unattended file-box run never writes the
 			# shared org wiki directly. HOLD the fenced write as a Pending reviewer
 			# proposal (approvals_api.approve_wiki_write replays it through the same

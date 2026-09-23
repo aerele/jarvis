@@ -11,6 +11,17 @@ from frappe.model.document import Document
 
 from jarvis.permissions import has_jarvis_admin_access
 
+# File Box status/result stamps: written by server code via ``frappe.db.set_value``
+# (or a doc carrying ``flags.jarvis_server_write``). No Admin/SM exemption (M12).
+_FILEBOX_SERVER_FIELDS = (
+	"filebox_source_file",
+	"filebox_result_doctype",
+	"filebox_result_name",
+	"filebox_result_count",
+	"filebox_last_error",
+	"filebox_last_error_at",
+)
+
 
 class JarvisConversation(Document):
 	def before_insert(self):
@@ -20,10 +31,38 @@ class JarvisConversation(Document):
 			self.status = "Active"
 
 	def validate(self):
+		self._guard_file_box_server_fields()
 		self._guard_file_box_enable()
 		self._guard_skip_confirmation_enable()
 		self._guard_skill_autorun_enable()
 		self._guard_request_autorun_enable()
+
+	def _guard_file_box_server_fields(self):
+		"""The File Box list reads these as ground truth (Draft created / Failed), so
+		no ORM path may forge them - Administrator included."""
+		if self.flags.jarvis_server_write:
+			return
+		if self.is_new():
+			touched = [f for f in _FILEBOX_SERVER_FIELDS if self.get(f)]
+		else:
+			touched = [f for f in _FILEBOX_SERVER_FIELDS if self.has_value_changed(f)]
+		if touched:
+			frappe.throw(
+				_("File Box status fields are server-managed: {0}").format(", ".join(touched)),
+				frappe.PermissionError,
+			)
+
+	def sync_file_box_fields(self):
+		"""Re-read the server-stamped File Box fields, row-locked until commit: a live
+		run stamps them via ``db.set_value`` while a request holds this doc, and a stale
+		save would trip the guard (or revert the stamp). A field not migrated yet is
+		skipped (new code ahead of its migrate)."""
+		fields = [f for f in _FILEBOX_SERVER_FIELDS if self.meta.has_field(f)]
+		if not fields:
+			return
+		current = frappe.db.get_value(self.doctype, self.name, fields, as_dict=True, for_update=True)
+		if current:
+			self.update(current)
 
 	def _guard_file_box_enable(self):
 		"""``file_box`` grants a create/update confirm-card bypass (destructive ops

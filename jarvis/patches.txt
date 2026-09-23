@@ -60,3 +60,5 @@ jarvis.patches.v2_19_clear_chat_device_for_9_3_reprovision
 jarvis.patches.v2_20_retire_admin_auto_apply
 jarvis.patches.v2_20_action_card_pending_index
 jarvis.patches.v2_21_drop_allow_custom_urls
+jarvis.patches.v2_22_mint_wiki_proposal_digests
+jarvis.patches.v2_22_backfill_filebox_results

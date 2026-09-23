@@ -26,7 +26,8 @@
   "trace_comment_added",
   "wiki_payload",
   "apply_status",
-  "apply_reason"
+  "apply_reason",
+  "wiki_digest"
  ],
  "fields": [
   {
@@ -190,11 +191,21 @@
    "read_only": 1,
    "no_copy": 1,
    "description": "WR — the refusal / error detail when apply_status is Failed (e.g. curated-collision refused, own-pages-only)."
+  },
+  {
+   "fieldname": "wiki_digest",
+   "fieldtype": "Data",
+   "label": "Wiki Digest",
+   "permlevel": 2,
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "description": "Server HMAC over (name, conversation, wiki_payload), minted at propose and verified before a reviewer-approved write lands."
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-07-07 09:00:00.000000",
+ "modified": "2026-09-24 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Approval Request",
@@ -229,6 +240,11 @@
    "permlevel": 1,
    "read": 1,
    "role": "Jarvis User"
+  },
+  {
+   "permlevel": 2,
+   "read": 1,
+   "role": "System Manager"
   }
  ],
  "sort_field": "creation",

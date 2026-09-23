@@ -84,8 +84,9 @@
 						</div>
 						<div class="max-w-2xl text-p-sm text-ink-gray-6">
 							Drop your files - single or in bulk - and leave them.
-							{{ agentName }} identifies each file's nature and processes it in the
-							background. If it needs your input, it asks in the
+							{{ agentName }} identifies each file's nature, processes it in the
+							background and shows what happened on each row - the draft it created,
+							or why it couldn't. If it needs your input, it asks in the
 							<!-- .stop keeps the link from also triggering the card's pickFiles
 							     (click) and from having Enter swallowed by the card's
 							     keydown.enter.prevent -->
@@ -149,17 +150,34 @@
 
 			<template #cell-status="{ row }">
 				<Badge
-					v-if="row.behind_chat && row.status === 'processing'"
 					variant="subtle"
-					theme="gray"
-					label="Waiting (behind chat)"
+					:theme="statusBadge(row).theme"
+					:label="statusBadge(row).label"
 				/>
-				<Badge
-					v-else
-					variant="subtle"
-					:theme="(STATUS_BADGE[row.status] || {}).theme || 'gray'"
-					:label="(STATUS_BADGE[row.status] || {}).label || row.status"
-				/>
+			</template>
+
+			<!-- one-line result; links open the approval (in-app) or the draft
+			     (Desk, new tab) without also opening the row's chat -->
+			<template #cell-result="{ row }">
+				<div class="min-w-0 truncate text-base text-ink-gray-7" :title="row.result || ''">
+					<a
+						v-if="resultLink(row) && resultLink(row).kind === 'desk'"
+						:href="resultLink(row).href"
+						target="_blank"
+						rel="noopener noreferrer"
+						class="text-ink-blue-3 hover:underline"
+						@click.stop
+						>{{ row.result }}</a
+					>
+					<router-link
+						v-else-if="resultLink(row)"
+						:to="resultLink(row).href"
+						class="text-ink-blue-3 hover:underline"
+						@click.stop
+						>{{ row.result }}</router-link
+					>
+					<span v-else>{{ row.result }}</span>
+				</div>
 			</template>
 
 			<template #cell-creation="{ row }">
@@ -234,30 +252,18 @@ import * as api from "@/api";
 import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { skillOptions as buildSkillOptions, pinnedLabel } from "@/lib/fileboxSkills";
+import { STATUSES, STATUS_OPTIONS, statusBadge, resultLink } from "@/lib/fileboxStatus";
 
 const route = useRoute();
 const router = useRouter();
 const store = useShellStore();
 
 // ── list config ──────────────────────────────────────────────────────────────
-const STATUS_BADGE = {
-	done: { label: "Done", theme: "green" },
-	processing: { label: "Processing", theme: "blue" },
-	needs_approval: { label: "Needs approval", theme: "orange" },
-	error: { label: "Error", theme: "red" },
-};
-const STATUS_OPTIONS = [
-	{ label: "All", value: "" },
-	{ label: "Processing", value: "processing" },
-	{ label: "Needs approval", value: "needs_approval" },
-	{ label: "Done", value: "done" },
-	{ label: "Error", value: "error" },
-];
-const STATUSES = ["done", "processing", "needs_approval", "error"];
-
+// statuses, badges and result links live in @/lib/fileboxStatus (tested).
 const columns = [
 	{ label: "File", key: "title", width: 3 },
-	{ label: "Status", key: "status", width: "9rem" },
+	{ label: "Status", key: "status", width: "10rem" },
+	{ label: "Result", key: "result", width: 3 },
 	{ label: "Added", key: "creation", width: "8rem", align: "right" },
 	{ label: "", key: "_preview", width: "3rem", align: "right" },
 ];
@@ -387,7 +393,8 @@ async function uploadBatch(fileList) {
 					const res = await api.fileboxDrop(
 						up.file_url,
 						up.file_name,
-						pinnedSkill.value || undefined
+						pinnedSkill.value || undefined,
+						up.name
 					);
 					if (!res || !res.ok) throw new Error((res && res.reason) || "drop failed");
 					okCount++;
@@ -475,7 +482,7 @@ function clearProcessed() {
 	confirmDialog({
 		title: "Clear processed documents?",
 		message:
-			"Deletes every done or errored document (with its file, messages, and approvals). Processing and needs-approval documents are kept.",
+			"Deletes every document marked Draft created or No draft (with its file, messages, and approvals). Failed, processing, and needs-approval documents, and files with wiki notes awaiting review, are kept. The drafts themselves are not touched.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				const res = (await api.fileboxClearProcessed()) || {};

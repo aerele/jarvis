@@ -1669,6 +1669,7 @@ def send_message(
 
 	if _delegated:
 		conv_doc.flags.ignore_permissions = True
+	conv_doc.sync_file_box_fields()
 	conv_doc.save()
 	frappe.db.commit()
 
@@ -3206,6 +3207,7 @@ def _enqueue_turn(
 	msg_doc.insert()
 	conv_doc.last_active_at = frappe.utils.now()
 	conv_doc.flags.ignore_permissions = True
+	conv_doc.sync_file_box_fields()
 	conv_doc.save()
 	frappe.db.commit()
 
