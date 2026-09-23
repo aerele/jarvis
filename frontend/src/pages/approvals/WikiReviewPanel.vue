@@ -101,7 +101,7 @@
 import { ref, computed, onMounted } from "vue";
 import { Badge, Button, FeatherIcon, toast } from "frappe-ui";
 import * as api from "@/api";
-import { errMessage as errMsg } from "@/lib/errors";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import {
 	isPermissionDenied,
 	proposalHeadline,
@@ -151,7 +151,7 @@ async function approve(p) {
 		else toast.warning("Approved, but the write did not land — use Retry below");
 		await load();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		busy.value = null;
 	}
@@ -165,7 +165,7 @@ async function reject(p) {
 		toast.success("Wiki note rejected — nothing was written");
 		await load();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		busy.value = null;
 	}
@@ -180,7 +180,7 @@ async function retry(p) {
 		else toast.warning("Still did not land — check the failure reason");
 		await load();
 	} catch (e) {
-		toast.error(errMsg(e));
+		toast.error(errHtml(e));
 	} finally {
 		busy.value = null;
 	}
