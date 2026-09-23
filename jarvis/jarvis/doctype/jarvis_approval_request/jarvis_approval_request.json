@@ -175,12 +175,12 @@
    "fieldname": "apply_status",
    "fieldtype": "Select",
    "label": "Apply Status",
-   "options": "Pending\nApplied\nFailed",
+   "options": "Pending\nApplying\nApplied\nFailed",
    "default": "Pending",
    "permlevel": 1,
    "read_only": 1,
    "no_copy": 1,
-   "description": "WR — the fenced-write outcome after reviewer approval: Pending (held, not yet run), Applied (landed), Failed (funnel refused / errored — see apply_reason)."
+   "description": "WR — the fenced-write outcome after reviewer approval: Pending (held, not yet run), Applying (a landing-claim in flight — held under the row lock, never committed on its own), Applied (landed), Failed (funnel refused / errored — see apply_reason)."
   },
   {
    "fieldname": "apply_reason",

@@ -772,12 +772,10 @@ export const restoreApproval = (name) =>
 // dropper (separation of duties) — approves before it lands.
 export const listWikiWriteProposals = (p = {}) =>
 	call("jarvis.chat.approvals_api.list_wiki_write_proposals", {
-		status: p.status || "Pending",
+		status: p.status || "Actionable",
 		start: p.start || 0,
 		page_length: p.page_length || 20,
 	});
-export const getWikiWriteProposal = (name) =>
-	call("jarvis.chat.approvals_api.get_wiki_write_proposal", { name });
 export const approveWikiWrite = (name) =>
 	call("jarvis.chat.approvals_api.approve_wiki_write", { name });
 export const rejectWikiWrite = (name) =>

@@ -717,19 +717,32 @@ def _sod_blocks_self_approval(dropper: str | None) -> bool:
 
 
 @frappe.whitelist()
-def list_wiki_write_proposals(status: str = "Pending", start: int = 0, page_length: int = 20) -> dict:
-	"""Wiki-write proposals awaiting review, newest first. Reviewer-gated: these
-	are org-wide wiki writes, visible to the reviewer set regardless of who
-	dropped the file. Each row carries a decoded ``preview`` and ``can_approve``
-	(the SoD gate, so the UI hides Approve where it would be refused). Envelope
-	``{rows, total, has_more, start, page_length}``."""
+@require_jarvis_user
+def list_wiki_write_proposals(status: str = "Actionable", start: int = 0, page_length: int = 20) -> dict:
+	"""Wiki-write proposals for the reviewer lane, newest first. Reviewer-gated:
+	these are org-wide wiki writes, visible to the reviewer set regardless of who
+	dropped the file. Each row carries a decoded ``preview``, ``can_approve`` (the
+	SoD gate, so the UI hides Approve where it would be refused) and ``needs_retry``
+	(an approved write that did not land - the reconciliation affordance).
+
+	``status`` = ``Actionable`` (default) returns the rows a reviewer must act on:
+	Pending (approve/reject) OR Approved-but-not-landed (retry). The explicit
+	``Pending``/``Approved``/``Rejected``/``All`` values scope to that status.
+	Envelope ``{rows, total, has_more, start, page_length}``."""
 	require_skill_reviewer()
-	if status not in ("Pending", "Approved", "Rejected", "All"):
+	if status not in ("Actionable", "Pending", "Approved", "Rejected", "All"):
 		frappe.throw("Invalid status filter")
 	start, pl = _clamp_page(start, page_length)
 	params: dict = {"src": FILE_BOX_WIKI_SOURCE, "start": start, "pl": pl}
 	where = ["a.source = %(src)s"]
-	if status != "All":
+	if status == "Actionable":
+		# Needs a reviewer's hand: awaiting decision, OR approved but the fenced
+		# write has not landed (Failed, or an interrupted Pending) — re-drivable.
+		where.append(
+			"(a.status = 'Pending' OR (a.status = 'Approved' "
+			"AND COALESCE(a.apply_status, 'Pending') <> 'Applied'))"
+		)
+	elif status != "All":
 		params["status"] = status
 		where.append("a.status = %(status)s")
 	where_sql = " AND ".join(where)
@@ -751,11 +764,18 @@ def list_wiki_write_proposals(status: str = "Pending", start: int = 0, page_leng
 	multi = _tenant_reviewer_count() > 1
 	for r in rows:
 		r["preview"] = _decode_wiki_preview(r.pop("wiki_payload", None))
-		dropper = _dropper_of(frappe._dict(conversation=r.get("conversation"), owner=r.get("owner")))
+		# The AR owner was stamped to the dropper (conversation owner) at propose
+		# time - use it directly to avoid an N+1 conversation lookup per row. This
+		# feeds only the display + the can_approve HINT; approve_wiki_write re-checks
+		# SoD against the LIVE conversation owner server-side.
+		dropper = r.get("owner")
 		r["dropper"] = dropper
 		r["apply_status"] = r.get("apply_status") or "Pending"
 		# Approve is offered only for a still-Pending row the caller may land.
 		r["can_approve"] = int(r["status"] == "Pending" and not (me == dropper and multi))
+		# An approved write that did not land (Failed / interrupted) — the panel
+		# offers Retry; any reviewer may re-drive (the approve decision already stood).
+		r["needs_retry"] = int(r["status"] == "Approved" and r["apply_status"] != "Applied")
 		r["decided_at"] = str(r.get("decided_at") or "")
 		r["creation"] = str(r.get("creation") or "")
 	return {
@@ -767,37 +787,54 @@ def list_wiki_write_proposals(status: str = "Pending", start: int = 0, page_leng
 	}
 
 
-@frappe.whitelist()
-def get_wiki_write_proposal(name: str) -> dict:
-	"""One wiki-write proposal with the full decoded page preview a reviewer reads
-	before approving. Reviewer-gated."""
-	doc = _wiki_proposal_or_throw(name)
-	dropper = _dropper_of(doc)
-	return {
-		"name": doc.name,
-		"title": doc.title,
-		"status": doc.status,
-		"apply_status": doc.get("apply_status") or "Pending",
-		"apply_reason": doc.get("apply_reason") or "",
-		"conversation": doc.conversation,
-		"dropper": dropper,
-		"dropper_name": ((frappe.db.get_value("User", dropper, "full_name") or dropper) if dropper else ""),
-		"decided_by": doc.decided_by or "",
-		"decided_at": str(doc.decided_at or ""),
-		"creation": str(doc.creation or ""),
-		"preview": _decode_wiki_preview(doc.get("wiki_payload")),
-		"can_approve": int(doc.status == "Pending" and not _sod_blocks_self_approval(dropper)),
-	}
-
-
 def _land_and_record(name: str, doc, dropper: str | None) -> dict:
-	"""Replay the held fenced write and record its outcome in apply_status /
-	apply_reason. Shared by approve (first landing) and retry (re-drive a landing
-	that was interrupted or refused transiently). Import api lazily (heavy module,
-	avoids an import cycle at load). The executor never raises past its own
-	best-effort guard - a refusal/error comes back as ok=False - so apply_status
-	always captures the real outcome and a crash here leaves apply_status unchanged
-	(re-drivable via retry_wiki_write), never a false Applied."""
+	"""Replay the held fenced write EXACTLY ONCE and record its outcome in
+	apply_status / apply_reason. Shared by approve (first landing) and retry
+	(re-drive an interrupted / transiently-refused landing).
+
+	Exactly-once under concurrency (two reviewers, a double-click, or a retry
+	racing an in-flight approve) is enforced by an atomic LANDING-CLAIM: an
+	``UPDATE ... SET apply_status='Applying' WHERE apply_status IN ('Pending',
+	'Failed')`` with a per-caller token marker (the ``decide()`` claim-first
+	idiom). Only one caller wins the row out of a re-drivable state; the loser
+	sees it and returns WITHOUT a second append to the shared wiki. The claim is
+	held under the AR row lock through the funnel (no intermediate commit), so a
+	concurrent lander blocks here, then re-reads the committed final state and
+	finds nothing to claim. On ANY failure - a funnel deadlock (which rolls back
+	inside the executor) OR a raise past the executor's guard (its audit sinks sit
+	outside the try/except) - request teardown rolls back the WHOLE txn including
+	the claim, so the row reverts to Pending/Failed (re-drivable), never stuck in
+	'Applying' and never a false 'Applied'. The final status write is itself
+	guarded on the token so a rolled-back claim can't clobber a concurrent
+	winner's outcome. Import api lazily (heavy module, avoids an import cycle."""
+	token = frappe.generate_hash(length=16)
+	# Atomic claim: win the transition out of a re-drivable state. apply_reason
+	# briefly carries the token as the winner-marker; overwritten with the real
+	# reason (or NULL) below.
+	frappe.db.sql(
+		"""update `tabJarvis Approval Request`
+		set apply_status='Applying', apply_reason=%s
+		where name=%s and apply_status in ('Pending', 'Failed')""",
+		(token, name),
+	)
+	if not frappe.db.sql(
+		"""select 1 from `tabJarvis Approval Request`
+		where name=%s and apply_status='Applying' and apply_reason=%s""",
+		(name, token),
+	):
+		# Lost the landing race (another approve/retry holds the claim) or the row
+		# is already Applied - do NOT append to the shared wiki a second time.
+		frappe.db.rollback()
+		cur = frappe.db.get_value("Jarvis Approval Request", name, "apply_status")
+		applied = cur == "Applied"
+		return {
+			"ok": applied,
+			"name": name,
+			"applied": applied,
+			"apply_status": cur,
+			"reason": None if applied else "another reviewer is landing this write",
+		}
+	# Hold the claim under the row lock through the funnel (no commit here).
 	from jarvis import api as _api
 
 	try:
@@ -808,13 +845,18 @@ def _land_and_record(name: str, doc, dropper: str | None) -> dict:
 		args = {}
 	result = _api._file_box_wiki_write(args, doc.conversation, user=dropper, provenance="reviewer_approved")
 	applied = bool(result.get("ok"))
+	# Guarded on the token: if the executor's own rollback (a funnel deadlock)
+	# discarded our claim, this matches 0 rows and we do NOT clobber whatever a
+	# concurrent winner recorded; the row stays re-drivable.
 	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
-		set apply_status=%s, apply_reason=%s where name=%s""",
+		set apply_status=%s, apply_reason=%s
+		where name=%s and apply_status='Applying' and apply_reason=%s""",
 		(
 			"Applied" if applied else "Failed",
 			None if applied else (str(result.get("reason") or "refused"))[:140],
 			name,
+			token,
 		),
 	)
 	frappe.db.commit()
@@ -828,6 +870,7 @@ def _land_and_record(name: str, doc, dropper: str | None) -> dict:
 
 
 @frappe.whitelist()
+@require_jarvis_user
 def approve_wiki_write(name: str) -> dict:
 	"""Reviewer approves a held wiki proposal; the fenced write then LANDS.
 
@@ -870,6 +913,7 @@ def approve_wiki_write(name: str) -> dict:
 
 
 @frappe.whitelist()
+@require_jarvis_user
 def retry_wiki_write(name: str) -> dict:
 	"""Re-drive the landing of an already-APPROVED proposal whose write did not
 	succeed (apply_status Pending - interrupted between claim and execute - or
@@ -887,6 +931,7 @@ def retry_wiki_write(name: str) -> dict:
 
 
 @frappe.whitelist()
+@require_jarvis_user
 def reject_wiki_write(name: str) -> dict:
 	"""Reviewer rejects a held wiki proposal; nothing is written. Reviewer-gated.
 	No SoD gate on reject — declining to land a write is always safe, and a solo

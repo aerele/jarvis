@@ -14,11 +14,17 @@ export function proposalHeadline(p) {
 	return pv.page_type ? `${name} · ${pv.page_type}` : name;
 }
 
-// The proposed append body, trimmed to a preview length (never mid-run huge).
-export function proposalExcerpt(p, max = 400) {
-	const body = (((p && p.preview) || {}).append_md || "").trim();
-	if (body.length <= max) return body;
-	return body.slice(0, max).trimEnd() + "…";
+// The FULL proposed append body a reviewer must read before approving. It is
+// NOT truncated — a benign head + malicious/incorrect tail is exactly what the
+// review gate defends against, so the whole body is shown (the panel scrolls it).
+export function proposalBody(p) {
+	return (((p && p.preview) || {}).append_md || "").trim();
+}
+
+// True when the body is long enough that the reviewer must scroll to read it all
+// — the panel shows a "scroll to review the full note" caption in that case.
+export function isLongBody(p, threshold = 600) {
+	return proposalBody(p).length > threshold;
 }
 
 // Human dropper label with a clear fallback (the row always carries a dropper,

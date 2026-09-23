@@ -1846,14 +1846,16 @@ def _file_box_wiki_write(
 	"""Land a File Box conversation's ``update_wiki`` through the append-only,
 	provenance-FENCED wiki funnel instead of the raw ``update_wiki`` tool.
 
-	``user`` is the PROVENANCE OWNER of the page - the file-box dropper
-	(``conversation.owner``), NOT the acting session. At review-before-landing
-	execute time the session is the REVIEWER, but the fenced funnel's
-	own-pages-only rule must key on the dropper's namespace (else a later
-	dropper's write to the same slug would be wrongly refused as another user's
-	page). Defaults to the session user for the legacy auto-apply path.
-	``provenance`` labels the manager-board write-audit row
-	(``auto_apply`` | ``reviewer_approved``).
+	``user`` is the file-box dropper (``conversation.owner``), NOT the acting
+	session. At review-before-landing execute time the session is the REVIEWER;
+	passing the dropper keeps the write ATTRIBUTED to them - it sets the funnel's
+	``sources`` ``user`` field and the manager-board audit actor, so an approved
+	write reads as the dropper's content, not the reviewer's. (The own-pages FENCE
+	itself keys on the app-level provenance PREFIX ``FILE_BOX_WIKI_FENCE`` +
+	Org scope, not on this user - it is what refuses a human/other-app page; the
+	``user`` is attribution, not the isolation boundary.) Defaults to the session
+	user for the legacy auto-apply path. ``provenance`` labels the manager-board
+	write-audit row (``auto_apply`` | ``reviewer_approved``).
 
 	A file_box run is unattended (nobody can click a confirm card), so its
 	write-back must NOT reach the raw tool (scope=Org + ignore_permissions,
@@ -1950,6 +1952,12 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	the same write folds into the existing Pending row instead of stacking
 	duplicates for the reviewer."""
 	slug = (args.get("slug") or "").strip()
+	if not slug:
+		# A slugless update_wiki is degenerate - the fenced funnel derives no page
+		# from it and refuses it anyway. Refuse at PROPOSE so slugless writes don't
+		# all collapse onto a single ref_name="" dedupe row (each overwriting the
+		# last). The model reads ok=False and moves on (best-effort).
+		return {"ok": False, "reason": "no page slug - nothing proposed to the wiki"}
 	# Dropper = the conversation owner (read server-side, never a client claim):
 	# the AR is stamped to them, and it is the provenance ``user=`` the reviewer
 	# replays the write under so the fenced own-pages rule keys on the dropper's
@@ -1972,12 +1980,20 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		"name",
 	)
 	if existing:
-		frappe.db.set_value(
-			"Jarvis Approval Request",
-			existing,
-			{"wiki_payload": payload, "title": title, "context_md": summary[:2000]},
-			update_modified=True,
+		# Status-GUARDED refresh: only mutate the held payload while the row is
+		# still Pending. If a reviewer decided it between the read above and here,
+		# the refresh matches 0 rows and we fall through to a FRESH proposal - a
+		# re-emitted write must never rewrite what a reviewer already approved /
+		# rejected (they reviewed the payload they saw).
+		frappe.db.sql(
+			"""update `tabJarvis Approval Request`
+			set wiki_payload=%s, title=%s, context_md=%s, modified=%s, modified_by=%s
+			where name=%s and status='Pending'""",
+			(payload, title, summary[:2000], frappe.utils.now(), frappe.session.user, existing),
 		)
+		if frappe.db.get_value("Jarvis Approval Request", existing, "status") != "Pending":
+			existing = None
+	if existing:
 		name = existing
 	else:
 		doc = frappe.get_doc(

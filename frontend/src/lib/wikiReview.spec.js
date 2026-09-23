@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { isPermissionDenied, proposalHeadline, proposalExcerpt, dropperLabel } from "./wikiReview";
+import {
+	isPermissionDenied,
+	proposalHeadline,
+	proposalBody,
+	isLongBody,
+	dropperLabel,
+} from "./wikiReview";
 
 describe("wikiReview helpers", () => {
 	it("treats a 403 / PermissionError as not-a-reviewer (panel hides)", () => {
@@ -18,13 +24,18 @@ describe("wikiReview helpers", () => {
 		expect(proposalHeadline({})).toBe("wiki page");
 	});
 
-	it("excerpts the append body and ellipsizes past the limit", () => {
-		expect(proposalExcerpt({ preview: { append_md: "  short  " } })).toBe("short");
-		const long = "x".repeat(500);
-		const out = proposalExcerpt({ preview: { append_md: long } }, 400);
-		expect(out.endsWith("…")).toBe(true);
-		expect(out.length).toBeLessThanOrEqual(401);
-		expect(proposalExcerpt({})).toBe("");
+	it("returns the FULL trimmed body (never truncated — the reviewer sees everything)", () => {
+		expect(proposalBody({ preview: { append_md: "  short  " } })).toBe("short");
+		const long = "x".repeat(5000);
+		// The whole body comes back untouched — no ellipsis, no length cap.
+		expect(proposalBody({ preview: { append_md: long } })).toBe(long);
+		expect(proposalBody({})).toBe("");
+	});
+
+	it("flags a long body so the panel nudges the reviewer to scroll", () => {
+		expect(isLongBody({ preview: { append_md: "x".repeat(700) } }, 600)).toBe(true);
+		expect(isLongBody({ preview: { append_md: "x".repeat(100) } }, 600)).toBe(false);
+		expect(isLongBody({})).toBe(false);
 	});
 
 	it("labels the dropper with a name preference and a safe fallback", () => {

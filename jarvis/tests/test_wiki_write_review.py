@@ -119,6 +119,28 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 		self.assertEqual(ar.owner, DROPPER)
 		self.assertEqual(frappe.parse_json(ar.wiki_payload)["slug"], "party-fake-co")
 
+	def test_propose_refuses_slugless(self):
+		# F4: a slugless update_wiki is degenerate (the funnel refuses it too);
+		# refuse at propose so slugless writes don't collapse onto one ref_name="".
+		conv = self._conv()
+		res = api._propose_file_box_wiki_write({"title": "no slug", "append_md": "x"}, conv)
+		self.assertFalse(res["ok"])
+		self.assertEqual(frappe.db.count(APPROVAL, {"conversation": conv, "source": "File Box Wiki"}), 0)
+
+	def test_dedupe_refresh_leaves_a_decided_row_untouched(self):
+		# F2: a re-emitted write must never rewrite a proposal a reviewer already
+		# decided. Approve the row, then re-propose the same slug with a NEW payload:
+		# the decided row is untouched and a FRESH proposal is created instead.
+		conv = self._conv()
+		first = self._propose(conv)
+		with _funnel(), _as(REVIEWER):
+			approvals_api.approve_wiki_write(first)
+		second = api._propose_file_box_wiki_write({**_ARGS, "append_md": "## TAMPERED"}, conv)["approval"]
+		self.assertNotEqual(second, first)
+		# The approved row still holds the payload the reviewer saw.
+		self.assertIn("INV-1", frappe.db.get_value(APPROVAL, first, "wiki_payload"))
+		self.assertNotIn("TAMPERED", frappe.db.get_value(APPROVAL, first, "wiki_payload"))
+
 	# --- approve ----------------------------------------------------------- #
 
 	def test_reviewer_approve_lands_write_under_dropper_provenance(self):
@@ -271,12 +293,52 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 		with _as(PLAIN), self.assertRaises(frappe.PermissionError):
 			approvals_api.list_wiki_write_proposals()
 
-	def test_get_proposal_hides_approve_from_dropper_when_multi_reviewer(self):
+	def test_actionable_list_surfaces_unlanded_approved_for_retry(self):
+		# An approved write that FAILED to land stays actionable (needs_retry) so the
+		# reviewer can re-drive it - it is not a dead-end Approved row.
+		conv = self._conv()
+		name = self._propose(conv)
+		refused = [{"slug": "party-fake-co", "ok": False, "reason": "deadlock"}]
+		with _funnel(result=refused), _as(REVIEWER):
+			approvals_api.approve_wiki_write(name)
+		with _as(REVIEWER):
+			out = approvals_api.list_wiki_write_proposals()  # default = Actionable
+		row = next(r for r in out["rows"] if r["name"] == name)
+		self.assertTrue(row["needs_retry"])
+		self.assertFalse(row["can_approve"])
+		self.assertEqual(row["apply_status"], "Failed")
+		# Once it lands, it drops off the actionable list.
+		with _funnel(), _as(REVIEWER):
+			approvals_api.retry_wiki_write(name)
+		with _as(REVIEWER):
+			out2 = approvals_api.list_wiki_write_proposals()
+		self.assertNotIn(name, {r["name"] for r in out2["rows"]})
+
+	def test_list_hides_approve_from_dropper_when_multi_reviewer(self):
 		conv = self._conv()
 		name = self._propose(conv)
 		with patch.object(approvals_api, "_tenant_reviewer_count", return_value=2), _as(DROPPER):
-			out = approvals_api.get_wiki_write_proposal(name)
-		self.assertFalse(out["can_approve"])
+			out = approvals_api.list_wiki_write_proposals()
+		row = next(r for r in out["rows"] if r["name"] == name)
+		self.assertFalse(row["can_approve"])
+		# The full proposed body is carried for the reviewer to read before approving.
+		self.assertEqual(row["preview"]["append_md"], _ARGS["append_md"])
+
+	def test_land_and_record_refuses_a_second_landing(self):
+		# F1 guard: once a row is Applied, _land_and_record (the shared executor for
+		# approve + retry) must NOT run the funnel again - the landing-claim finds
+		# nothing re-drivable and returns without a second append to the wiki.
+		conv = self._conv()
+		name = self._propose(conv)
+		with _funnel(), _as(REVIEWER):
+			approvals_api.approve_wiki_write(name)
+		doc = frappe.get_doc(APPROVAL, name)
+		self.assertEqual(doc.apply_status, "Applied")
+		with _funnel() as (apply, _):
+			res = approvals_api._land_and_record(name, doc, DROPPER)
+		apply.assert_not_called()
+		self.assertTrue(res["applied"])  # reports the existing landed state
+		self.assertEqual(res["apply_status"], "Applied")
 
 	# --- customer-board guards (defense in depth) -------------------------- #
 
