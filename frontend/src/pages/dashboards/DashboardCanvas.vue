@@ -99,7 +99,7 @@ const props = defineProps({
 // sources: the parsed #jarvis-sources list (save-dialog preview + payload);
 // filters: the parsed #jarvis-filters list (filter bar definitions);
 // state: "empty" | "loading" | "ready" | "error" for hosts that care.
-const emit = defineEmits(["sources", "filters", "state"]);
+const emit = defineEmits(["sources", "filters", "state", "filter-error"]);
 let filterDefs = [];
 
 const frame = ref(null);
@@ -239,6 +239,10 @@ async function handleData(d) {
 			reply = { ok: true, rows: dataPayload(env.data) };
 		} else {
 			const err = (env && env.error) || {};
+			// FilterRequired names the empty field so the bar can highlight it
+			// (the tile itself already shows the message, via renderError).
+			if (err.code === "FilterRequired" && err.fieldname)
+				emit("filter-error", err.fieldname);
 			reply = {
 				ok: false,
 				error: {

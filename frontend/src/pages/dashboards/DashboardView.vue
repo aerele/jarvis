@@ -121,6 +121,12 @@
 			<p v-if="detail.description" class="px-5 pt-1 text-p-sm text-ink-gray-6">
 				{{ detail.description }}
 			</p>
+			<DashboardFilterBar
+				:defs="detail.filters || []"
+				:modelValue="filterValues"
+				:errors="filterErrors"
+				@update:modelValue="onFilterChange"
+			/>
 			<div class="px-5 py-4">
 				<DashboardCanvas
 					ref="canvas"
@@ -129,6 +135,8 @@
 					:dashboard="{ name: detail.name }"
 					:caps="caps"
 					:theme="viewTheme"
+					:filters="appliedFilters"
+					@filter-error="(name) => (filterErrors = { ...filterErrors, [name]: true })"
 				/>
 			</div>
 		</div>
@@ -157,8 +165,8 @@
 // reported height while this page scrolls. Export captures inside the iframe
 // (html-to-image injected over postMessage - the CSP allows no external
 // fetches) and assembles PNG/PDF downloads out here.
-import { ref, computed, onMounted } from "vue";
-import { useRouter } from "vue-router";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import {
 	Badge,
 	Breadcrumbs,
@@ -174,6 +182,7 @@ import JvSpinner from "@/components/JvSpinner.vue";
 import { getDashboard, getDashboardsCaps, deleteDashboard, saveDashboard } from "@/api/dashboards";
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
+import DashboardFilterBar from "./DashboardFilterBar.vue";
 import SaveDashboardDialog from "./SaveDashboardDialog.vue";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
@@ -181,6 +190,7 @@ const props = defineProps({
 	id: { type: String, required: true },
 });
 
+const route = useRoute();
 const router = useRouter();
 
 const detail = ref(null);
@@ -218,6 +228,45 @@ async function pickTheme(key) {
 // until they land - view/export need nothing from them).
 const caps = ref({ creatable_scopes: [], manageable_roles: [] });
 
+// Builder-defined filters (detail.filters, Task 2): current picker values,
+// the debounced copy actually handed to the canvas, and which fields the
+// canvas has flagged as required-empty (cleared on the next change).
+const filterValues = ref({});
+const filterErrors = ref({});
+const appliedFilters = ref({});
+let filterTimer = null;
+
+// Seeds from the route's f_<fieldname> query (a shared/bookmarked link) over
+// the server-resolved default. Reset on every load so a stale error or value
+// from a previously viewed dashboard never bleeds into this one.
+function initFilters(defs) {
+	const v = {};
+	for (const d of defs || []) {
+		const fromUrl = route.query["f_" + d.fieldname];
+		v[d.fieldname] = fromUrl != null ? String(fromUrl) : d.default || "";
+	}
+	filterValues.value = v;
+	appliedFilters.value = { ...v };
+	filterErrors.value = {};
+}
+// Debounced: applies the values to the canvas (re-running its sources) and
+// syncs the URL only after the user stops picking, and clears prior errors -
+// a fresh value may or may not still be empty, and the canvas will say so again.
+function onFilterChange(v) {
+	filterValues.value = v;
+	clearTimeout(filterTimer);
+	filterTimer = setTimeout(() => {
+		appliedFilters.value = { ...v };
+		filterErrors.value = {};
+		const q = { ...route.query };
+		for (const [k, val] of Object.entries(v)) {
+			if (val) q["f_" + k] = val;
+			else delete q["f_" + k];
+		}
+		router.replace({ query: q });
+	}, 300);
+}
+
 async function load() {
 	loading.value = true;
 	blocked.value = false;
@@ -226,7 +275,10 @@ async function load() {
 	try {
 		detail.value = (await getDashboard(props.id)) || null;
 		if (!detail.value) notFound.value = true;
-		else viewTheme.value = themeKey(detail.value.theme);
+		else {
+			viewTheme.value = themeKey(detail.value.theme);
+			initFilters(detail.value.filters);
+		}
 	} catch (e) {
 		if (e && (e.status === 403 || e.exc_type === "PermissionError")) blocked.value = true;
 		else if (e && (e.status === 404 || e.exc_type === "DoesNotExistError"))
@@ -316,4 +368,7 @@ onMounted(() => {
 		})
 		.catch(() => {});
 });
+// A pending debounced filter apply must not fire after navigating away - it
+// would router.replace() query keys onto whatever route the user landed on.
+onBeforeUnmount(() => clearTimeout(filterTimer));
 </script>
