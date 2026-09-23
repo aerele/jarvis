@@ -776,13 +776,9 @@ def validate_models(settings) -> list:
 	]
 	if claude_positions and other_subscriptions:
 		if any(upstream != "openai" for upstream in other_subscriptions):
-			errors.append(
-				"A Claude plan runs on its own connection, outside the proxy. Right now it can be combined only with a ChatGPT plan or API keys. Remove the Kimi/xAI plan or the Claude plan."
-			)
+			errors.append("Claude can be combined only with ChatGPT or API keys for now.")
 		if claude_positions[0] not in (0, len(ordered_enabled) - 1):
-			errors.append(
-				"A Claude plan runs on its own connection, outside the proxy. Keep it first (primary) or last (fallback) so Jarvis knows which one to try first."
-			)
+			errors.append("Claude runs outside the proxy. Keep it first or last.")
 
 	return errors
 
