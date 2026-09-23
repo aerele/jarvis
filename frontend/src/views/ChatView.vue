@@ -2748,8 +2748,8 @@
 						type="button"
 						class="jv-recheck-float"
 						@click="recheckPending"
-						title="Re-check for a pending confirmation"
-						aria-label="Re-check for a pending confirmation that did not appear"
+						title="Show confirmation"
+						aria-label="Show a pending confirmation"
 					>
 						<svg
 							width="17"
