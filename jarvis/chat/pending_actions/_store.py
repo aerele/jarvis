@@ -133,16 +133,29 @@ def _transition(name: str, from_statuses, to: str, **cols) -> str:
 
 
 def claim(
-	name: str, approver: str, *, batch_id: str | None = None, adopted_conversation: str | None = None
+	name: str,
+	approver: str,
+	*,
+	batch_id: str | None = None,
+	adopted_conversation: str | None = None,
+	edited: bool = False,
 ) -> bool:
-	"""``Pending -> Executing`` with ``executing_at`` + ``decided_by`` (claim-first)."""
+	"""``Pending -> Executing`` with ``executing_at`` + ``decided_by`` (claim-first);
+	``edited`` stamps an Edit & create."""
 	now = frappe.utils.now_datetime()
 	frappe.db.sql(
 		"UPDATE `tabJarvis Pending Action` SET status='Executing', executing_at=%(now)s, decided_at=%(now)s,"
 		" decided_by=%(by)s, batch_id=IFNULL(%(batch)s, batch_id),"
-		" adopted_conversation=IFNULL(%(adopt)s, adopted_conversation), modified=%(now)s"
-		" WHERE name=%(n)s AND status='Pending'",
-		{"n": name, "now": now, "by": approver, "batch": batch_id, "adopt": adopted_conversation},
+		" adopted_conversation=IFNULL(%(adopt)s, adopted_conversation), edited=%(edited)s,"
+		" modified=%(now)s WHERE name=%(n)s AND status='Pending'",
+		{
+			"n": name,
+			"now": now,
+			"by": approver,
+			"batch": batch_id,
+			"adopt": adopted_conversation,
+			"edited": int(edited),
+		},
 	)
 	return rowcount() == 1
 

@@ -21,3 +21,8 @@ export const decideHeldAction = (name, action, useExisting) =>
 		action,
 		...(useExisting ? { use_existing: useExisting } : {}),
 	});
+// Edit & create (PR-2d): `values` = one patch per record over the proposed values
+// (only what the approver changed). Answers like decideHeldAction, plus `errors`
+// ([{doc_index, fieldname, parentfield?, idx?, label, message}]) on a refusal.
+export const editAndCreateHeld = (name, values) =>
+	call("jarvis.chat.approvals_api.edit_and_create_held", { name, values });

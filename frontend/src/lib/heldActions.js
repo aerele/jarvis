@@ -27,17 +27,24 @@ const REFUSALS = {
 	record_required: "Pick the existing record to use.",
 	use_existing_unavailable: "Use existing works for a single new record only.",
 	interrupted: "The create was interrupted. Check whether the record exists before retrying.",
+	edit_unavailable: "Edit & create works for new records only.",
 };
-const SERVER_WORDED = new Set(["exists", "record_not_found", "failed", "partial"]);
+// Refusals whose server message names the record or the field: shown as sent.
+const SERVER_WORDED = new Set([
+	"exists",
+	"record_not_found",
+	"needs_input",
+	"edit_refused",
+	"invalid",
+	"unreadable",
+	"pending_elsewhere",
+]);
 
 export function refusalMessage(res) {
 	const code = (res && res.reason_code) || "";
 	const server = res && res.error && res.error.message;
-	if (SERVER_WORDED.has(code) && server) {
-		return code === "exists" || code === "record_not_found"
-			? String(server)
-			: `Couldn't create: ${server}`;
-	}
+	if (SERVER_WORDED.has(code) && server) return String(server);
+	if ((code === "failed" || code === "partial") && server) return `Couldn't create: ${server}`;
 	return REFUSALS[code] || (server ? String(server) : "This approval could not be completed.");
 }
 
@@ -80,4 +87,11 @@ export function statusLine(rec) {
 	if (rec.status === "Executed") return "Created.";
 	if (rec.status === "Discarded") return "Skipped. Nothing was created.";
 	return rec.reason || "This approval was already handled.";
+}
+
+// "A, B, C (+N more)": the missing fields, as the File Box ladder words them.
+export function missingSummary(labels, top = 3) {
+	const list = [...new Set((labels || []).filter(Boolean))];
+	const more = list.length - top;
+	return list.slice(0, top).join(", ") + (more > 0 ? ` (+${more} more)` : "");
 }

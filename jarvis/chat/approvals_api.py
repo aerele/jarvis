@@ -1140,10 +1140,35 @@ def _candidates_as(exec_user: str, item: dict) -> list[dict]:
 		return []
 
 
+def _needs_input(row) -> list[dict]:
+	"""The row's missing fields: ``needs_input`` + its ``label`` and, for the form, the
+	``field`` (a child field too, so the grid can add the column)."""
+	from jarvis.chat import held_writes
+	from jarvis.chat.actions_api import _field_dict
+
+	out = []
+	for entry in held_writes.parse_needs_input(row.needs_input):
+		try:
+			meta = frappe.get_meta(entry["doctype"])
+			if entry.get("parentfield"):
+				meta = frappe.get_meta(meta.get_field(entry["parentfield"]).options)
+			field = _field_dict(meta.get_field(entry["fieldname"]))
+			label = held_writes.needs_input_label(entry)
+		except Exception:
+			field, label = None, entry["fieldname"]
+		out.append({**entry, "label": label, "field": field})
+	return out
+
+
 def _held_detail(row, me: str) -> dict:
+	"""AC-U4 carve-out: the owner / a System Manager sees the proposed values of a
+	Pending create (secrets masked) to fill or correct them."""
+	from jarvis.chat import held_edit
 	from jarvis.chat.pending_actions._store import PENDING, REASON_TEXT
 
-	item = _single_create(_held_items(row)) if row.status == PENDING else None
+	items = _held_items(row) if row.status == PENDING else []
+	item = _single_create(items)
+	editable = row.tool in held_edit.EDIT_TOOLS and bool(items)
 	code = row.reason_code or ""
 	return {
 		"name": row.name,
@@ -1159,6 +1184,9 @@ def _held_detail(row, me: str) -> dict:
 		"candidates": _candidates_as(row.exec_user, item) if item else [],
 		"can_act": int(row.status == PENDING),
 		"can_use_existing": int(bool(item)),
+		"can_edit": int(editable),
+		"docs": held_edit.view(items) if editable else [],
+		"needs_input": _needs_input(row) if row.status == PENDING else [],
 		"reason_code": code,
 		"reason": REASON_TEXT.get(code, ""),
 		"result_doctype": row.result_doctype or "",
@@ -1194,7 +1222,7 @@ def get_pending_action(name: str) -> dict:
 	if row.status in TERMINAL and not row.settled:
 		settle(row.name)
 		row = get_row(row.name)
-	return _held_detail(row, me)
+	return _value_free(_held_detail, "detail_crashed", row, me)
 
 
 def _identity_refusal(row, approver: str) -> dict | None:
@@ -1225,31 +1253,43 @@ def _lock_pending(name: str):
 
 def _handled(row) -> dict:
 	from jarvis.chat.pending_actions import settle
-	from jarvis.chat.pending_actions._store import EXECUTING, TERMINAL
+	from jarvis.chat.pending_actions._execute import handled
+	from jarvis.chat.pending_actions._store import TERMINAL
 
 	frappe.db.rollback()
 	if row.status in TERMINAL and not row.settled:
 		settle(row.name)
-	code = "executing" if row.status == EXECUTING else "already_handled"
-	return _held_refusal(code, "This approval was already handled.", pa_status=row.status)
+	return handled(row, "This approval was already handled.")
 
 
-def _now_existing(row) -> tuple[dict, dict] | None:
-	"""A party of this held create that exists now (created since it was held)."""
+def _first_existing(exec_user: str, items: list[dict]) -> tuple[dict, dict] | None:
+	"""A new party among ``items`` that exists now, as ``exec_user`` sees it."""
 	from jarvis.chat import held_parties
 
-	for item in _held_items(row):
+	for item in items:
 		if item["op"] != "create" or not held_parties.is_party(item["doctype"]):
 			continue
-		for match in _candidates_as(row.exec_user, item):
+		for match in _candidates_as(exec_user, item):
 			return item, match
 	return None
 
 
+def _now_existing(row) -> tuple[dict, dict] | None:
+	"""A party of this held create that exists now (created since it was held)."""
+	return _first_existing(row.exec_user, _held_items(row))
+
+
 def _create_held(row, approver: str) -> dict:
+	from jarvis.chat import held_writes
 	from jarvis.chat.pending_actions import execute
 	from jarvis.chat.pending_actions._store import PENDING
 
+	missing = held_writes.missing_labels(row.needs_input)
+	if missing and row.status == PENDING:
+		return _held_refusal(
+			"needs_input",
+			f"Fill {held_writes.missing_summary(missing)} first: use Edit & create.",
+		)
 	locked, refused = _lock_pending(row.name)
 	if refused:
 		return refused
@@ -1273,30 +1313,35 @@ def _create_held(row, approver: str) -> dict:
 	return execute(row.name, kind=HELD)
 
 
-def _use_existing_held(row, approver: str, link) -> dict:
-	"""AC-U4: the unsealed call lives only in the inner frame; an escaping error is
-	logged without locals and re-raised value-free, as ``execute`` does."""
-	from jarvis.chat.pending_actions._execute import _CRASHED, ExecuteCrashed
+def _value_free(fn, title: str, *args):
+	"""AC-U4, shared with ``execute``: ``_execute.value_free``."""
+	from jarvis.chat.pending_actions._execute import value_free
 
-	try:
-		return _use_existing_locked(row, approver, link)
-	except Exception:
-		tb = frappe.get_traceback()
-		frappe.db.rollback()
-		frappe.log_error(title="jarvis.pending_action.use_existing_crashed", message=tb)
-		frappe.db.commit()
-		raise ExecuteCrashed(_CRASHED) from None
+	return value_free(fn, title, *args)
+
+
+def _use_existing_held(row, approver: str, link) -> dict:
+	return _value_free(_use_existing_locked, "use_existing_crashed", row, approver, link)
+
+
+def _seal_failed(locked, approver: str, e) -> dict:
+	"""A seal that no longer verifies ends the row Failed, nothing run."""
+	from jarvis.chat.pending_actions import settle
+	from jarvis.chat.pending_actions._store import FAILED, PENDING, REASON_TEXT, _terminal_update
+
+	_terminal_update(locked.name, [PENDING], FAILED, reason_code=e.reason_code, decided_by=approver)
+	frappe.log_error(
+		title=f"jarvis.pending_action.{e.reason_code}",
+		message=f"{locked.name}: failed binding {e.binding}",
+	)
+	frappe.db.commit()
+	settle(locked.name)
+	return _held_refusal(e.reason_code, REASON_TEXT[e.reason_code], pa_status=FAILED, outcome="failed")
 
 
 def _use_existing_locked(row, approver: str, link) -> dict:
 	from jarvis.chat.pending_actions import _seal, settle
-	from jarvis.chat.pending_actions._store import (
-		EXECUTED,
-		FAILED,
-		PENDING,
-		REASON_TEXT,
-		_terminal_update,
-	)
+	from jarvis.chat.pending_actions._store import EXECUTED, PENDING, _terminal_update
 
 	link = str(link or "").strip()
 	if not link:
@@ -1315,14 +1360,7 @@ def _use_existing_locked(row, approver: str, link) -> dict:
 	try:
 		args = _seal.unseal_call(locked).get("args") or {}
 	except _seal.SealError as e:
-		_terminal_update(locked.name, [PENDING], FAILED, reason_code=e.reason_code, decided_by=approver)
-		frappe.log_error(
-			title=f"jarvis.pending_action.{e.reason_code}",
-			message=f"{locked.name}: failed binding {e.binding}",
-		)
-		frappe.db.commit()
-		settle(locked.name)
-		return _held_refusal(e.reason_code, REASON_TEXT[e.reason_code], pa_status=FAILED)
+		return _seal_failed(locked, approver, e)
 	from jarvis.chat import held_parties
 
 	item = _single_create(held_parties.items_of(locked.tool, args))
@@ -1354,7 +1392,7 @@ def _use_existing_locked(row, approver: str, link) -> dict:
 	)
 	frappe.db.commit()
 	settle(locked.name)
-	return {**result, "reason_code": "use_existing", "pa_status": EXECUTED}
+	return {**result, "reason_code": "use_existing", "pa_status": EXECUTED, "outcome": "confirmed"}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1394,3 +1432,267 @@ def decide_held_action(name: str, action: str, use_existing: str | None = None) 
 		"reason_code": res.get("reason_code") or ("created" if res.get("ok") else ""),
 		"waiters_count": waiting,
 	}
+
+
+_EDITED_REASON = "Created on the Approval Board with edited values."
+
+
+def _labelled(errors: list[dict], items: list[dict]) -> list[dict]:
+	from jarvis.chat import held_writes
+
+	out = []
+	for e in errors:
+		index = e.get("doc_index", 0)
+		label = e.get("fieldname") or ""
+		if index < len(items) and label:
+			try:
+				label = held_writes.needs_input_label({**e, "doctype": items[index]["doctype"]})
+			except Exception:
+				pass
+		out.append({**e, "label": label})
+	return out
+
+
+def _edit_dry_run(tool: str, args: dict, items: list[dict]) -> dict | None:
+	"""Step 4: the edited call dry-run AS THE APPROVER (the caller). Missing fields
+	come back inline, anything else as a banner; nothing is claimed."""
+	from jarvis import api
+	from jarvis.chat import held_writes
+
+	try:
+		api._run_preview(tool, args)
+	except (api.JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError) as e:
+		frappe.clear_messages()
+		missing = held_writes.collect_missing(tool, items)
+		if missing:
+			errors = [{**m, "message": frappe._("Required")} for m in missing]
+			return _held_refusal("invalid", "Fill the highlighted fields.", errors=_labelled(errors, items))
+		message = frappe.utils.strip_html(api._preview_error(e)["error"]["message"])
+		return _held_refusal("invalid", message or "These values can't be saved.")
+	frappe.clear_messages()
+	return None
+
+
+def _edit_precheck(locked, items: list[dict], merged: list[dict], approver: str) -> dict | None:
+	"""Step 3: a party of the EDITED create exists now, or another approval answers
+	for it. Read on the merged values: an args-keyed create gets its name / tax id
+	here (a party-keyed one can't change them, they're locked). Another user's
+	approval is named only to a System Manager (who may see it anyway)."""
+	from jarvis.chat import held_parties, held_writes
+
+	existing = _first_existing(locked.exec_user, merged)
+	if existing:
+		item, match = existing
+		label = match["title"] or match["name"]
+		return _held_refusal(
+			"exists",
+			f"{item['doctype']} {label} already exists now. Choose Use existing.",
+			candidates=[match],
+		)
+	keys = list(dict.fromkeys(held_parties.item_key(i) for i in (*items, *merged)))
+	sibling = held_writes.sibling_of(locked.name, keys)
+	if sibling:
+		seen = sibling.owner_user == approver or "System Manager" in frappe.get_roles(approver)
+		which = f" ({sibling.summary or sibling.name})" if seen else ""
+		return _held_refusal(
+			"pending_elsewhere",
+			f"Another approval covers this record{which}. Decide that one, or Skip this.",
+		)
+	return None
+
+
+def _our_claim(row, approver: str, stamp) -> bool:
+	from jarvis.chat.pending_actions._store import EXECUTING
+
+	return bool(row) and row.status == EXECUTING and row.decided_by == approver and row.executing_at == stamp
+
+
+def _claim_lost(name: str, ref: tuple[str, str] = ("", "")) -> None:
+	frappe.log_error(
+		title="jarvis.pending_action.claim_lost",
+		message=f"{name}: a rollback inside Edit & create dropped its claim; ended Failed (partial)"
+		+ (f", created {ref[0]} {ref[1]}" if ref[1] else ""),
+	)
+
+
+def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, str]) -> dict:
+	"""A successful Edit & create, the row re-read under its lock (a mid-dispatch commit
+	or rollback may have moved it): our claim -> Executed; Pending (a rollback dropped
+	the uncommitted claim, the insert went on) -> Failed/``partial`` naming the record,
+	never Pending with a record; decided elsewhere (the reconciler) -> its verdict
+	stands and the outcome is late."""
+	from jarvis.chat.pending_actions import _seal, settle
+	from jarvis.chat.pending_actions._execute import late_outcome, outcome_of
+	from jarvis.chat.pending_actions._store import (
+		EXECUTED,
+		EXECUTING,
+		FAILED,
+		PENDING,
+		REASON_TEXT,
+		_terminal_update,
+		get_row,
+	)
+
+	fresh = get_row(locked.name, lock="update")
+	cols = {"decided_by": approver, "result_doctype": ref[0], "result_name": ref[1], "edited": 1}
+	if _our_claim(fresh, approver, stamp) and _terminal_update(
+		locked.name,
+		[EXECUTING],
+		EXECUTED,
+		reason=_EDITED_REASON,
+		sealed_settlement=_seal.seal_settlement(locked.name, {"result": result, "outcome": "confirmed"}),
+		**cols,
+	):
+		frappe.db.commit()
+		settle(locked.name)
+		return {
+			**result,
+			"reason_code": "created",
+			"pa_status": EXECUTED,
+			"outcome": "confirmed",
+			"edited": 1,
+		}
+	if (
+		fresh
+		and fresh.status == PENDING
+		and _terminal_update(locked.name, [PENDING], FAILED, reason_code="partial", **cols)
+	):
+		_claim_lost(locked.name, ref)
+		frappe.db.commit()
+		settle(locked.name)
+		message = f"{REASON_TEXT['partial']} Check {ref[0]} {ref[1]} before retrying."
+		return _held_refusal("partial", message, pa_status=FAILED, outcome="partial")
+	late_outcome(locked.name, EXECUTED, None, "confirmed")
+	frappe.db.commit()
+	settle(locked.name)
+	final = get_row(locked.name) or frappe._dict()
+	return {
+		**result,
+		"reason_code": final.reason_code or None,
+		"pa_status": final.status or "",
+		"outcome": outcome_of(final.status, final.reason_code, locked.tool),
+		"edited": 1,
+	}
+
+
+def _edit_failed(locked, approver: str, stamp, result, interfered: bool) -> dict:
+	"""A failed Edit & create, after the full rollback. The row ends Failed when it is
+	Pending again or still our claim (committed mid-dispatch); ``partial`` when a
+	mid-dispatch commit or rollback means something may have been saved. The reply
+	carries the row's real status."""
+	from jarvis.chat.pending_actions import settle
+	from jarvis.chat.pending_actions._execute import late_outcome, outcome_of
+	from jarvis.chat.pending_actions._settle import outcome_for
+	from jarvis.chat.pending_actions._store import FAILED, PENDING, REASON_TEXT, _terminal_update, get_row
+
+	code = "partial" if interfered else "failed"
+	fresh = get_row(locked.name, lock="update")
+	if fresh and (fresh.status == PENDING or _our_claim(fresh, approver, stamp)):
+		done = _terminal_update(
+			locked.name, [fresh.status], FAILED, reason_code=code, decided_by=approver, edited=1
+		)
+		if done and interfered and fresh.status == PENDING:
+			_claim_lost(locked.name)
+	elif fresh and interfered:
+		late_outcome(locked.name, FAILED, code, outcome_for(FAILED, code, locked.tool))
+	frappe.db.commit()
+	settle(locked.name)
+	final = get_row(locked.name) or frappe._dict()
+	error = (result or {}).get("error") if isinstance(result, dict) else None
+	message = frappe.utils.strip_html((error or {}).get("message") or "") or REASON_TEXT[code]
+	return _held_refusal(
+		code,
+		message,
+		pa_status=final.status or "",
+		outcome=outcome_of(final.status, final.reason_code, locked.tool),
+	)
+
+
+def _edit_create_locked(row, approver: str, patches: list[dict]) -> dict:
+	from jarvis import api
+	from jarvis.chat import held_edit, held_parties
+	from jarvis.chat.pending_actions import _seal
+	from jarvis.chat.pending_actions._execute import _discard_failed_dispatch, _dispatch
+	from jarvis.chat.pending_actions._store import PENDING, claim, get_row
+
+	if row.tool not in held_edit.EDIT_TOOLS:
+		return _held_refusal("edit_unavailable", "Edit & create works for new records only.")
+	locked, refused = _lock_pending(row.name)
+	if refused:
+		return refused
+	if not locked:
+		return _held_refusal("not_found", _HELD_NOT_FOUND)
+	if locked.status != PENDING:
+		return _handled(locked)
+	refused = _identity_refusal(locked, approver)
+	if refused:
+		frappe.db.rollback()
+		return refused
+	try:
+		args = _seal.unseal_call(locked).get("args") or {}
+	except _seal.SealError as e:
+		return _seal_failed(locked, approver, e)
+	items = held_parties.items_of(locked.tool, args)
+	merged, errors = held_edit.apply_patches(items, patches, approver, locked.exec_user)
+	if errors:
+		frappe.db.rollback()
+		return _held_refusal(
+			"edit_refused", "Some of these values can't be used here.", errors=_labelled(errors, items)
+		)
+	edited = held_edit.call_args(locked.tool, args, merged)
+	with impersonate(approver):
+		refused = _edit_precheck(locked, items, merged, approver) or _edit_dry_run(
+			locked.tool, edited, merged
+		)
+	if refused:
+		frappe.db.rollback()
+		return refused
+
+	# Claim + insert + the exec_user read check commit together (or not at all).
+	if not claim(locked.name, approver, edited=True):
+		frappe.db.rollback()
+		return _held_refusal("busy", _HELD_BUSY)
+	stamp = get_row(locked.name).executing_at  # tells our claim apart after an interference
+	result, interfered, crash_tb = _dispatch(locked, edited, user=approver)
+	ok = not crash_tb and api.envelope_ok(locked.tool, result)
+	refs = held_edit.created_refs(locked.tool, edited, result) if ok else []
+	hidden = [dt for dt, n in refs if not frappe.has_permission(dt, "read", doc=n, user=locked.exec_user)]
+	if ok and not hidden:
+		return _edit_created(locked, approver, stamp, result, refs[0] if refs else ("", ""))
+
+	_discard_failed_dispatch(locked, edited, crash_tb, actor=approver)  # full rollback
+	if ok and not interfered:
+		frappe.db.commit()  # the failure audit; the row is Pending again
+		return _held_refusal(
+			"unreadable",
+			f"The person who dropped the file couldn't open the new {hidden[0]}, so nothing was "
+			"created. Use values they can see, or Skip.",
+		)
+	return _edit_failed(locked, approver, stamp, result, interfered)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def edit_and_create_held(name: str, values: str | list | dict | None = None) -> dict:
+	"""Edit & create (D11): the owner or a System Manager fills / corrects a held
+	create and creates it AS THEMSELVES. ``values``: one patch per record over the
+	proposed values (``jarvis.chat.held_edit``).
+
+	The patch checks, the existence / sibling pre-check and a dry-run as the
+	approver each refuse with nothing claimed. Then the claim (``edited``), the
+	insert and the ``exec_user`` read check commit together: a record the dropper
+	can't open rolls it all back (the row stays Pending). Success resolves like Use
+	existing and resumes every waiting run; a failure after the claim ends the row
+	Failed (the client keeps the values)."""
+	from jarvis._session import authenticated_user
+	from jarvis.chat import held_edit
+
+	refuse_in_tool_dispatch()
+	approver = authenticated_user()
+	row = _authorized_held(name, approver)
+	if not row:
+		return _held_refusal("not_found", _HELD_NOT_FOUND)
+	patches = held_edit.patches_of(values)
+	waiting = _waiters_count(row.name)
+	res = _value_free(_edit_create_locked, "edit_crashed", row, approver, patches)
+	return {**res, "waiters_count": waiting}

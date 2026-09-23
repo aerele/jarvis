@@ -326,13 +326,13 @@ def _conv_visible(alias: str) -> str:
 # proposals are the reviewer's lane, never the dropper's (AC7). `src` routes the
 # result link (an approval, or the board's held lane).
 _PENDING_WAITS = f"""
-	SELECT ar.conversation, ar.name AS item, ar.title, ar.creation, 'ar' AS src
+	SELECT ar.conversation, ar.name AS item, ar.title, ar.creation, 'ar' AS src, NULL AS needs_input
 	FROM `tabJarvis Approval Request` ar
 	JOIN `tabJarvis Conversation` ac
 	  ON ac.name = ar.conversation AND ac.file_box = 1 AND {_conv_visible("ac")}
 	WHERE ar.status = 'Pending' AND COALESCE(ar.source, '') != 'File Box Wiki'
 	UNION ALL
-	SELECT w.conversation, pa.name AS item, pa.summary AS title, pa.creation, 'pa' AS src
+	SELECT w.conversation, pa.name AS item, pa.summary AS title, pa.creation, 'pa' AS src, pa.needs_input
 	FROM `tabJarvis Pending Action Waiter` w
 	JOIN `tabJarvis Pending Action` pa
 	  ON pa.name = w.parent AND pa.kind = 'file_box_held' AND pa.status IN ('Pending', 'Executing')
@@ -585,6 +585,8 @@ def _result(r: dict, wait, msg) -> tuple[str, str | None]:
 	if status == "needs_approval":
 		n = int(r["pending_approvals"])
 		line = f"{n} approval{'' if n == 1 else 's'} waiting" + (f": {wait.title}" if wait else "")
+		if r.get("missing"):
+			line = f"Needs approval — missing: {r['missing']}"
 		if r.get("filebox_result_name"):
 			line = f"{_draft_line(r)} · {line}"
 		if not wait:
@@ -625,11 +627,13 @@ _INTERNAL = (
 def _attach_results(rows: list[dict], me: str) -> None:
 	"""Post-page enrichment (never in the COUNT / Clear queries): the first
 	waiting decision and the final reply are read for this page's rows only."""
+	from jarvis.chat import held_writes
+
 	waits: dict = {}
 	need = [r["name"] for r in rows if r["status"] == "needs_approval"]
 	if need:
 		for w in frappe.db.sql(
-			f"""SELECT w.conversation, w.item, w.title, w.src FROM ({_PENDING_WAITS}) w
+			f"""SELECT w.conversation, w.item, w.title, w.src, w.needs_input FROM ({_PENDING_WAITS}) w
 			WHERE w.conversation IN %(names)s ORDER BY w.creation ASC""",
 			{"me": me, "names": need},
 			as_dict=True,
@@ -641,7 +645,15 @@ def _attach_results(rows: list[dict], me: str) -> None:
 		for m in frappe.get_all(MSG, filters={"name": ["in", lm_names]}, fields=["name", "content", "error"]):
 			msgs[m.name] = m
 	for r in rows:
-		r["result"], r["result_link"] = _result(r, waits.get(r["name"]), msgs.get(r["lm_name"]))
+		wait = waits.get(r["name"])
+		# Held on missing fields: "Needs approval — missing: A, B, C (+N more)"; the PWA
+		# (no board) words it from ``missing`` itself.
+		r["missing"] = (
+			held_writes.missing_summary(held_writes.missing_labels(wait.needs_input))
+			if wait and wait.src == "pa" and wait.needs_input
+			else ""
+		)
+		r["result"], r["result_link"] = _result(r, wait, msgs.get(r["lm_name"]))
 		for k in _INTERNAL:
 			r.pop(k, None)
 

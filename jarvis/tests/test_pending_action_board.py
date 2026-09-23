@@ -147,8 +147,10 @@ class TestDetail(_Base):
 		self.assertEqual(res["card"], self.row(name)["card"] and json.loads(self.row(name)["card"]))
 		self.assertEqual((res["can_act"], res["can_use_existing"], res["doctype"]), (1, 1, "Supplier"))
 		self.assertEqual(res["waiters_count"], 1)
+		# AC-U4 carve-out (PR-2d): the owner sees the proposed values, never the seal.
+		self.assertEqual(res["docs"][0]["values"]["supplier_details"], SECRET)
 		dump = json.dumps(res)
-		for leak in (SECRET, "sealed", "open_key", self.row(name)["sealed_call"][:24]):
+		for leak in ("sealed", "open_key", self.row(name)["sealed_call"][:24]):
 			self.assertNotIn(leak, dump)
 
 	def test_unauthorized_or_wrong_kind_is_not_found(self):
@@ -250,7 +252,14 @@ class TestDecide(_Base):
 		before = frappe.db.count("Supplier")
 		with fake_dispatch() as calls:
 			res = self.decide(SM_USER, name, "use_existing", existing)
-		self.assertEqual((res["reason_code"], res["pa_status"]), ("use_existing", "Executed"))
+		self.assertEqual(
+			(res["reason_code"], res["pa_status"], res["outcome"]), ("use_existing", "Executed", "confirmed")
+		)
+		again = self.decide(SM_USER, name, "use_existing", existing)
+		self.assertEqual(
+			(again["reason_code"], again["pa_status"], again["outcome"]),
+			("already_handled", "Executed", "confirmed"),
+		)
 		row = self.row(name)
 		self.assertEqual(
 			(row.result_doctype, row.result_name, row.reason_code), ("Supplier", existing, "use_existing")

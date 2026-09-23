@@ -4678,6 +4678,7 @@ import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
+import { normDateVal as _normDateVal, panelField as _panelField } from "@/lib/docFields";
 import {
 	checkToYesNo,
 	coerceOut,
@@ -7153,45 +7154,6 @@ function _isLongVal(v) {
 	const s = String(v == null ? "" : v);
 	return s.length > 55 || s.includes("\n");
 }
-// Map a Frappe fieldtype → the edit control to render + its options payload.
-function _controlFor(fieldtype, options) {
-	switch (fieldtype) {
-		case "Link":
-			return ["link", options || ""]; // options = target doctype (searchLink)
-		case "Select":
-			return [
-				"select",
-				String(options || "")
-					.split("\n")
-					.map((o) => o.trim()),
-			];
-		case "Check":
-			return ["check", ""];
-		case "Date":
-			return ["date", ""];
-		case "Datetime":
-			return ["datetime", ""];
-		case "Time":
-			return ["time", ""];
-		case "Int":
-		case "Float":
-		case "Currency":
-		case "Percent":
-		case "Rating":
-			return ["number", ""];
-		case "Small Text":
-		case "Text":
-		case "Long Text":
-		case "Code":
-		case "Text Editor":
-		case "HTML Editor":
-		case "Markdown Editor":
-		case "JSON":
-			return ["text", ""];
-		default:
-			return ["data", ""];
-	}
-}
 // "Item Group" / "item_group" / "itemGroup" all → "itemgroup": the agent's
 // action JSON labels fields sometimes by display label, sometimes by fieldname.
 function _normKey(s) {
@@ -7290,54 +7252,6 @@ async function _formMeta(doctype) {
 	}
 	_formMetaCache[doctype] = r;
 	return r;
-}
-
-// Native date/time inputs REQUIRE canonical values (yyyy-mm-dd / yyyy-mm-ddThh:mm);
-// anything else — "2026-07-10 00:00:00", "10-07-2026" — renders the input EMPTY,
-// which read as "the date isn't picking". Normalize whatever the agent/doc gave us.
-function _normDateVal(fieldtype, v) {
-	const s = String(v == null ? "" : v).trim();
-	if (!s) return s;
-	if (fieldtype === "Date") {
-		let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-		if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-		m = s.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/); // dd-mm-yyyy / dd/mm/yyyy
-		if (m) return `${m[3]}-${m[2]}-${m[1]}`;
-	}
-	if (fieldtype === "Datetime") {
-		let m = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
-		if (m) return `${m[1]}T${m[2]}`;
-		m = s.match(/^(\d{4}-\d{2}-\d{2})$/);
-		if (m) return `${m[1]}T00:00`;
-	}
-	if (fieldtype === "Time") {
-		const m = s.match(/^(\d{2}:\d{2})/);
-		if (m) return m[1];
-	}
-	return s;
-}
-function _panelField(metaField, value) {
-	let [control, options] = _controlFor(metaField.fieldtype, metaField.options);
-	let v = value == null ? "" : String(value);
-	if (["date", "datetime", "time"].includes(control)) v = _normDateVal(metaField.fieldtype, v);
-	let orig = v;
-	if (control === "check") {
-		v = checkToYesNo(v);
-		orig = v;
-	}
-	if (control === "select" && Array.isArray(options) && v && !options.includes(v))
-		options = [v, ...options];
-	return {
-		fieldname: metaField.fieldname,
-		label: metaField.label,
-		control,
-		options,
-		fieldtype: metaField.fieldtype,
-		reqd: metaField.reqd,
-		read_only: metaField.read_only,
-		value: v,
-		orig,
-	};
 }
 
 // Build the draft model from an action + form meta (+ live doc for updates),
