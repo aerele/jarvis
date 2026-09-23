@@ -125,10 +125,18 @@ export const RUNTIME_JS = `(function () {
 		},
 		renderError: function (el, err) {
 			if (!el) return;
-			var msg =
-				err && err.code === "PermissionError"
-					? "No permission to view this data"
-					: "Couldn't load this data";
+			// FilterRequired carries a server-composed, safe-to-show message
+			// ("Pick a value for <label> to load this data.") - every other
+			// non-permission code stays generic so internal error text never
+			// reaches a viewer.
+			var msg;
+			if (err && err.code === "PermissionError") {
+				msg = "No permission to view this data";
+			} else if (err && err.code === "FilterRequired") {
+				msg = err.message || "Pick a value to load this data.";
+			} else {
+				msg = "Couldn't load this data";
+			}
 			el.innerHTML = "";
 			var d = document.createElement("div");
 			d.textContent = msg;
