@@ -30,6 +30,12 @@ import frappe
 from frappe import _
 
 from jarvis.chat import dashboard_permissions, list_filters
+from jarvis.chat.dashboard_filters import (
+	normalize_filter_rows,
+	parse_filters_block,
+	resolve_defaults,
+	validate_filter_defs,
+)
 from jarvis.chat.macros_api import _clamp_page, _lk, _load_filters
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
@@ -63,6 +69,7 @@ _ALLOWED_PAYLOAD_FIELDS = {
 	"scope",
 	"target_role",
 	"sources",
+	"filters",
 	"source_conversation",
 	"theme",
 }
@@ -134,6 +141,36 @@ def _set_stmt_timeout(seconds: int) -> None:
 		pass
 
 
+def _filter_rows(doc) -> list[dict]:
+	return [
+		{
+			"fieldname": r.fieldname,
+			"label": r.label,
+			"fieldtype": r.fieldtype,
+			"options": r.options or "",
+			"default_value": r.default_value or "",
+			"reqd": 1 if r.reqd else 0,
+		}
+		for r in (doc.filters or [])
+	]
+
+
+def _filter_defs_for_detail(doc) -> list[dict]:
+	rows = _filter_rows(doc)
+	defaults = resolve_defaults(rows, frappe.session.user)
+	return [
+		{
+			"fieldname": r["fieldname"],
+			"label": r["label"],
+			"fieldtype": r["fieldtype"],
+			"options": r["options"],
+			"reqd": r["reqd"],
+			"default": defaults.get(r["fieldname"], ""),
+		}
+		for r in rows
+	]
+
+
 def _dashboard_detail(doc) -> dict:
 	"""Full dashboard detail for the editor/viewer. ``can_edit`` tells the SPA
 	whether to offer the edit surfaces to this session user."""
@@ -150,6 +187,7 @@ def _dashboard_detail(doc) -> dict:
 		"sources": [
 			{"source_name": s.source_name, "tool": s.tool, "spec": s.spec or ""} for s in (doc.sources or [])
 		],
+		"filters": _filter_defs_for_detail(doc),
 		"source_conversation": doc.source_conversation or "",
 		"owner": doc.owner,
 		"modified": str(doc.modified),
@@ -474,6 +512,9 @@ def save_dashboard(payload: str) -> dict:
 	sources = fields.pop("sources", None)
 	if sources is None and "html" in fields:
 		sources = _parse_sources_block(fields.get("html") or "")
+	filters = fields.pop("filters", None)
+	if filters is None and "html" in fields:
+		filters = parse_filters_block(fields.get("html") or "")
 
 	if name:
 		doc = frappe.get_doc(DASHBOARD, name)
@@ -494,6 +535,13 @@ def save_dashboard(payload: str) -> dict:
 		doc.set("sources", [])
 		for row in _normalize_source_rows(sources):
 			doc.append("sources", row)
+
+	if filters is not None:
+		rows = normalize_filter_rows(filters)
+		validate_filter_defs(rows)  # unknown keys are rejected HERE; child rows would silently drop them
+		doc.set("filters", [])
+		for row in rows:
+			doc.append("filters", row)
 
 	if doc.is_new():
 		doc.insert()
