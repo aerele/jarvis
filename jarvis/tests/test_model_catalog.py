@@ -243,9 +243,16 @@ class TestSubscriptionModelsMappings(FrappeTestCase):
 	def test_keys_exactly_match_todays_hardcoded_catalogue(self):
 		# The pinned regression the reviewer asked for: whatever the catalog says,
 		# the KEY SET must not move, or oauth/api.py and the desk tab break.
-		from jarvis._subscription_models import _SEED_SUBSCRIPTION_MODELS, SUBSCRIPTION_MODELS
+		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+		from jarvis._subscription_models import SUBSCRIPTION_MODELS
 
-		self.assertEqual(set(SUBSCRIPTION_MODELS), set(_SEED_SUBSCRIPTION_MODELS))
+		bundled = {
+			p.get("subscription_label") or p["label"]
+			for p in BUNDLED_MODEL_CATALOG
+			if any(m["tier"] == "subscription" for m in p["models"])
+		}
+		self.assertEqual(bundled, {"OpenAI", "Anthropic", "xAI Grok", "Kimi (Moonshot)"})
+		self.assertEqual(set(SUBSCRIPTION_MODELS), bundled)
 
 	def test_reads_values_from_the_catalog(self):
 		from jarvis import _subscription_models

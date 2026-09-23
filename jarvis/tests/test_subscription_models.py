@@ -25,24 +25,21 @@ class TestSubscriptionCatalogue(unittest.TestCase):
 		for value in cat.SUBSCRIPTION_MODELS.values():
 			self.assertIsInstance(value, list)
 
-	def test_openai_seed_carries_the_codex_catalog_ids(self):
+	def test_bundled_openai_subscription_tier_carries_the_codex_catalog_ids(self):
 		# The Codex channel serves the suffixed gpt-5.6 ids and gpt-6-astra (bare
 		# "gpt-5.6" is an API-only alias); gpt-5.4 / gpt-5.4-mini were retired
-		# upstream and fail inside cliproxy, so they are gone from this tier.
-		self.assertEqual(
-			cat._SEED_SUBSCRIPTION_MODELS["OpenAI"],
-			["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.5"],
-		)
-		self.assertEqual(cat._SEED_DEFAULT_MODEL["OpenAI"], "gpt-5.6-terra")
-
-	def test_bundled_openai_subscription_tier_mirrors_the_seed(self):
+		# upstream and fail inside cliproxy, so they are gone from this tier. The
+		# bundled catalog is the only offline floor now (no seed literal here).
 		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
 
 		openai = next(p for p in BUNDLED_MODEL_CATALOG if p["provider_id"] == "openai")
 		rows = sorted(
 			(m for m in openai["models"] if m["tier"] == "subscription"), key=lambda m: m["sort_order"]
 		)
-		self.assertEqual([m["model_id"] for m in rows], cat._SEED_SUBSCRIPTION_MODELS["OpenAI"])
+		self.assertEqual(
+			[m["model_id"] for m in rows],
+			["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.5"],
+		)
 		self.assertEqual([m["model_id"] for m in rows if m["is_default"]], ["gpt-5.6-terra"])
 
 	def test_coerce_falls_back_to_default_for_bogus_and_empty(self):
@@ -58,13 +55,17 @@ class TestSubscriptionCatalogue(unittest.TestCase):
 			self.assertEqual(_coerce_subscription_model("OpenAI", "nope"), "gpt-5.6-terra")
 			self.assertEqual(_coerce_subscription_model("OpenAI", ""), "gpt-5.6-terra")
 
-	def test_google_gemini_has_no_subscription_seed(self):
+	def test_google_gemini_has_no_subscription_tier(self):
 		# Google's chat subscription was removed 2026-08-19 (Google discontinued
 		# consumer login-with-Google for Gemini 2026-06-18). Gemini stays
 		# available via API key, which is served from the api_key-tier catalog,
 		# not this subscription seed.
-		self.assertNotIn("Google Gemini", cat._SEED_SUBSCRIPTION_MODELS)
-		self.assertNotIn("Google Gemini", cat._SEED_DEFAULT_MODEL)
+		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+
+		google = next(p for p in BUNDLED_MODEL_CATALOG if p["provider_id"] == "google")
+		self.assertEqual([m for m in google["models"] if m["tier"] == "subscription"], [])
+		self.assertNotIn("Google Gemini", cat.SUBSCRIPTION_MODELS)
+		self.assertNotIn("Google Gemini", cat.DEFAULT_MODEL)
 		# With no valid models and no default, coercion for the removed
 		# provider falls all the way through to "".
 		self.assertEqual(_coerce_subscription_model("Google Gemini", "gemini-2.5-pro"), "")

@@ -1,9 +1,10 @@
 """Subscription-tier model catalogue.
 
 The source of truth is the `Jarvis LLM Provider` doctype in jarvis_admin_v2,
-fetched via admin_client.get_model_catalog() (guest read, Redis cache, bundled
-fallback). The literals below are the SEED and the degraded-mode floor only;
-they are no longer edited to add a model. Add it in the admin desk.
+fetched via admin_client.get_model_catalog() (guest read, Redis cache, and
+jarvis._model_catalog.BUNDLED_MODEL_CATALOG as the degraded-mode floor). There is
+no second literal list here: get_model_catalog() never returns an empty catalog,
+so the bundled catalog is the only offline source. Add a model in the admin desk.
 
 SUBSCRIPTION_MODELS and DEFAULT_MODEL keep their names and dict-like behaviour
 deliberately (spec 6.3): chat/api.py and oauth/api.py import them at module
@@ -33,31 +34,9 @@ from collections.abc import Mapping
 
 import frappe
 
-# Google Gemini has no entry: its chat subscription was removed 2026-08-19 (Google
-# discontinued consumer login-with-Google for Gemini). Gemini stays available via
-# API key, which is served from the api_key-tier catalog, not this subscription seed.
-_SEED_SUBSCRIPTION_MODELS: dict[str, list[str]] = {
-	"OpenAI": ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.5"],
-	"Anthropic": [
-		"claude-opus-5",
-		"claude-sonnet-5",
-		"claude-fable-5-1",
-		"claude-fable-5",
-		"claude-opus-4-8",
-		"claude-opus-4-7",
-		"claude-sonnet-4-6",
-		"claude-opus-4-6",
-	],
-	"xAI Grok": ["grok-4.3", "grok-build-0.1"],
-	"Kimi (Moonshot)": ["kimi-k2.7-code", "kimi-k2.6"],
-}
-
-_SEED_DEFAULT_MODEL: dict[str, str] = {
-	"OpenAI": "gpt-5.6-terra",
-	"Anthropic": "claude-opus-5",
-	"xAI Grok": "grok-4.3",
-	"Kimi (Moonshot)": "kimi-k2.7-code",
-}
+# Google Gemini has no subscription entry anywhere: its chat subscription was removed
+# 2026-08-19 (Google discontinued consumer login-with-Google for Gemini). Gemini stays
+# available via API key, served from the api_key-tier catalog.
 
 
 def _subscription_rows() -> dict[str, list[dict]]:
@@ -92,13 +71,13 @@ class _LazyModelMap(Mapping):
 	keep working unchanged per spec 6.3.
 	"""
 
-	def __init__(self, builder, seed):
+	def __init__(self, builder):
 		self._builder = builder
-		self._seed = seed
 
 	def _data(self):
-		rows = _subscription_rows()
-		return self._builder(rows) if rows else self._seed
+		# get_model_catalog() substitutes the bundled catalog on any failure, so rows
+		# are never empty in practice; an empty answer fails closed (no models).
+		return self._builder(_subscription_rows())
 
 	def __getitem__(self, k):
 		return self._data()[k]
@@ -125,5 +104,5 @@ def _defaults_from(rows) -> dict[str, str]:
 	return out
 
 
-SUBSCRIPTION_MODELS = _LazyModelMap(_models_from, _SEED_SUBSCRIPTION_MODELS)
-DEFAULT_MODEL = _LazyModelMap(_defaults_from, _SEED_DEFAULT_MODEL)
+SUBSCRIPTION_MODELS = _LazyModelMap(_models_from)
+DEFAULT_MODEL = _LazyModelMap(_defaults_from)
