@@ -2809,7 +2809,7 @@
 						v-model="input"
 						:attachments="composerAttachments"
 						:busy="busy"
-						:disabled="holdActive"
+						:disabled="holdActive || booting"
 						:canSend="canSend"
 						:sendTitle="voiceSendBlockReason"
 						:placeholder="composerPlaceholder"
@@ -6616,6 +6616,7 @@ const headerSub = computed(() => {
 });
 const canSend = computed(
 	() =>
+		!booting.value &&
 		(input.value.trim().length > 0 || pendingFiles.value.length > 0) &&
 		!sending.value &&
 		// A compaction (auto mid-turn, or one we started) must never race a turn
@@ -6852,7 +6853,9 @@ const triggerMode = ref(false);
 // "Ask Jarvis" style) instead of a chip list, and a small marker sits above it.
 const TRIGGER_PLACEHOLDER = "e.g. Warn me when a Sales Invoice over 1 lakh is submitted";
 const composerPlaceholder = computed(() =>
-	compacting.value
+	booting.value
+		? "Loading conversation…"
+		: compacting.value
 		? "Compacting this chat, try again in a moment"
 		: triggerMode.value
 		? TRIGGER_PLACEHOLDER
@@ -9531,6 +9534,8 @@ function resendFailed(m) {
 // optional `context`, e.g. a dashboard): consumed by the first send below.
 let _prefillSendContext = null;
 async function send(textArg, resendAck) {
+	// Restoration must choose the destination before a send captures its conversation scope.
+	if (booting.value) return;
 	dismissFeedback(); // sending the next turn clears any pending feedback line
 	// Maintenance HARD block: once a hold is known, no send runs — this guards the paths that call
 	// send() directly (AskCard/answer/resend/prefill), not just the disabled composer. On the FIRST
