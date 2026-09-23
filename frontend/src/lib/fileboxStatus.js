@@ -4,6 +4,8 @@
  * (jarvis/chat/filebox.py): processing / needs_approval / draft_created / failed /
  * no_draft. The pre-ladder done / error values still render for a stale page.
  */
+import { escapeHtml } from "./errors";
+
 export const STATUS_BADGE = {
 	processing: { label: "Processing", theme: "blue" },
 	needs_approval: { label: "Needs approval", theme: "orange" },
@@ -28,6 +30,34 @@ export function statusBadge(row) {
 	}
 	const status = (row && row.status) || "";
 	return STATUS_BADGE[status] || { label: status, theme: "gray" };
+}
+
+/**
+ * Re-run (PR-5, AC8) is offered only on the viewer's own failed / no_draft rows -
+ * never once a draft exists, never on a row merely shared with them.
+ */
+export function canRerun(row) {
+	const status = row && row.status;
+	return !!(row && row.is_owner) && (status === "failed" || status === "no_draft");
+}
+
+/**
+ * The toast for a bulk Re-run response. Skip reasons are server text bound into
+ * an HTML sink (frappe-ui Toast uses v-html), so they are escaped here.
+ */
+export function bulkRerunToast(res, requested) {
+	const skipped = (res && res.skipped) || [];
+	const sent = res && res.sent != null ? res.sent : requested - skipped.length;
+	if (!skipped.length) {
+		return { type: "success", message: `${sent} file${sent === 1 ? "" : "s"} re-running` };
+	}
+	const reasons = [...new Set(skipped.map((s) => s.reason || "skipped"))]
+		.map(escapeHtml)
+		.join(", ");
+	return {
+		type: "info",
+		message: `${sent} re-running · ${skipped.length} skipped (${reasons})`,
+	};
 }
 
 /**

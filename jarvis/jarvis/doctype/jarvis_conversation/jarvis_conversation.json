@@ -171,6 +171,15 @@
    "description": "When filebox_last_error was stamped. Server-set only."
   },
   {
+   "fieldname": "filebox_rerun_at",
+   "fieldtype": "Datetime",
+   "label": "File Box Re-run At",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Claim-first stamp for rerun_inbound (AC8): set while a re-run is in flight, cleared once _send_inbound knows the outcome, so a double click sends once. A stuck claim self-heals past the orphan threshold. Server-set only."
+  },
+  {
    "fieldname": "request_autorun",
    "fieldtype": "Check",
    "label": "Request auto-run (typed 'confirm all')",

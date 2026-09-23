@@ -188,6 +188,22 @@
 				</div>
 			</template>
 
+			<template #cell-_rerun="{ row }">
+				<div class="flex w-full items-center justify-end" @click.stop.prevent>
+					<Button
+						v-if="canRerun(row)"
+						variant="ghost"
+						icon="rotate-ccw"
+						size="sm"
+						:loading="rerunningRow === row.name"
+						:disabled="!!rerunningRow"
+						label="Re-run"
+						:tooltip="'Re-run'"
+						@click="rerunRow(row)"
+					/>
+				</div>
+			</template>
+
 			<template #cell-_preview="{ row }">
 				<div class="flex w-full items-center justify-end" @click.stop.prevent>
 					<Button
@@ -205,6 +221,7 @@
 			<template #select-actions="{ selections, unselectAll }">
 				<Dropdown
 					:options="[
+						{ label: 'Re-run', onClick: () => bulkRerun(selections, unselectAll) },
 						{ label: 'Delete', onClick: () => bulkDelete(selections, unselectAll) },
 					]"
 				>
@@ -250,9 +267,16 @@ import { useShellStore } from "@/stores/shell";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { agentName } from "@/branding";
-import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import { skillOptions as buildSkillOptions, pinnedLabel } from "@/lib/fileboxSkills";
-import { STATUSES, STATUS_OPTIONS, statusBadge, resultLink } from "@/lib/fileboxStatus";
+import {
+	STATUSES,
+	STATUS_OPTIONS,
+	statusBadge,
+	resultLink,
+	canRerun,
+	bulkRerunToast,
+} from "@/lib/fileboxStatus";
 
 const route = useRoute();
 const router = useRouter();
@@ -265,6 +289,7 @@ const columns = [
 	{ label: "Status", key: "status", width: "10rem" },
 	{ label: "Result", key: "result", width: 3 },
 	{ label: "Added", key: "creation", width: "8rem", align: "right" },
+	{ label: "", key: "_rerun", width: "3rem", align: "right" },
 	{ label: "", key: "_preview", width: "3rem", align: "right" },
 ];
 
@@ -441,6 +466,39 @@ function onDragLeave() {
 function onDrop(ev) {
 	dragDepth.value = 0;
 	uploadBatch(ev.dataTransfer && ev.dataTransfer.files);
+}
+
+// ── inline Re-run (failed / no_draft only, AC8: never a second draft) ────────
+const rerunningRow = ref("");
+async function rerunRow(row) {
+	if (rerunningRow.value || !canRerun(row)) return;
+	rerunningRow.value = row.name;
+	try {
+		const res = await api.fileboxRerun(row.name);
+		if (res && res.ok === false)
+			toast.error(escapeHtml(res.reason || "Couldn't re-run this file"));
+		else toast.success("Re-running…");
+		resetLoad();
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		rerunningRow.value = "";
+	}
+}
+
+function bulkRerun(selections, unselectAll) {
+	const names = Array.from(selections || []);
+	if (!names.length) return;
+	(async () => {
+		try {
+			const res = await api.fileboxRerunBulk(names);
+			toast.create(bulkRerunToast(res, names.length));
+			unselectAll();
+			resetLoad();
+		} catch (e) {
+			toast.error(errHtml(e));
+		}
+	})();
 }
 
 // ── bulk delete + clear processed ────────────────────────────────────────────

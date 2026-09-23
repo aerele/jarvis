@@ -889,6 +889,14 @@ export const fileboxDeleteBulk = (conversations) =>
 	call("jarvis.chat.filebox.delete_inbound_bulk", {
 		conversations: JSON.stringify(conversations || []),
 	});
+// rerun_inbound (PR-5, AC8): re-run a failed/no_draft file in place, claim-first.
+export const fileboxRerun = (conversation) =>
+	call("jarvis.chat.filebox.rerun_inbound", { conversation });
+// bulk_rerun_inbound: same per-row checks, skipped (not fatal) when ineligible.
+export const fileboxRerunBulk = (conversations) =>
+	call("jarvis.chat.filebox.bulk_rerun_inbound", {
+		conversations: JSON.stringify(conversations || []),
+	});
 
 // --- MCP Connectors (MCP_CONNECTORS_PLAN.md P4; broker + SSRF guard live
 // entirely server-side in jarvis.connectors, this is just the SPA's thin CRUD

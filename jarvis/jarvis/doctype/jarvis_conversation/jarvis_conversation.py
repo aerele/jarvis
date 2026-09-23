@@ -20,6 +20,7 @@ _FILEBOX_SERVER_FIELDS = (
 	"filebox_result_count",
 	"filebox_last_error",
 	"filebox_last_error_at",
+	"filebox_rerun_at",
 )
 
 

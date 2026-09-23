@@ -95,10 +95,11 @@ def discard(name: str, *, kind: str = "chat", conversation: str | None = None) -
 	return {"ok": True, "data": {"status": "discarded", "tool": row.tool}, "reason_code": "discarded"}
 
 
-def _drop_waiter(parent: str, conversation: str, reason: str) -> None:
+def _drop_waiter(parent: str, conversation: str, reason: str, *, to: str = CANCELLED) -> None:
 	"""Take ``conversation`` off a held row's waiter list, promoting the next waiter
-	when it was the primary; a Pending row left with no waiter is Cancelled. Does
-	not commit."""
+	when it was the primary; a Pending row left with no waiter moves to ``to``
+	(Cancelled by default - Stop/archive/delete; Superseded when a re-run retires
+	a stale ask instead). Does not commit."""
 	row = get_row(parent, lock="update")
 	if not row:
 		return
@@ -120,7 +121,7 @@ def _drop_waiter(parent: str, conversation: str, reason: str) -> None:
 			{"n": parent, "c": promoted.conversation if promoted else None},
 		)
 	if not rest and row.status == PENDING:
-		_terminal_update(parent, [PENDING], CANCELLED, reason_code=reason)
+		_terminal_update(parent, [PENDING], to, reason_code=reason)
 
 
 def _held_parents(conversation: str) -> list[str]:
