@@ -25,7 +25,8 @@ export const CSP_META =
 //   jarvis.data(name)        → Promise; `query`/`get_list` sources resolve with
 //                              the rows array; `run_report` sources resolve
 //                              with {columns, rows}. Rejections carry .code
-//                              ("PermissionError"|"NotFound"|"Timeout"|...).
+//                              ("PermissionError"|"NotFound"|"Timeout"
+//                              |"FilterRequired"|...).
 //   jarvis.ready()           → tells the parent boot finished (auto-posted on
 //                              DOMContentLoaded too).
 //   jarvis.renderError(el,e) → quiet inline per-widget error block.
@@ -124,10 +125,18 @@ export const RUNTIME_JS = `(function () {
 		},
 		renderError: function (el, err) {
 			if (!el) return;
-			var msg =
-				err && err.code === "PermissionError"
-					? "No permission to view this data"
-					: "Couldn't load this data";
+			// FilterRequired carries a server-composed, safe-to-show message
+			// ("Pick a value for <label> to load this data.") - every other
+			// non-permission code stays generic so internal error text never
+			// reaches a viewer.
+			var msg;
+			if (err && err.code === "PermissionError") {
+				msg = "No permission to view this data";
+			} else if (err && err.code === "FilterRequired") {
+				msg = err.message || "Pick a value to load this data.";
+			} else {
+				msg = "Couldn't load this data";
+			}
 			el.innerHTML = "";
 			var d = document.createElement("div");
 			d.textContent = msg;
@@ -703,6 +712,32 @@ export function parseSourcesBlock(html) {
 				return { source_name, tool, spec };
 			})
 			.filter(Boolean);
+	} catch (e) {
+		return [];
+	}
+}
+
+// Declared filters: <script type="application/json" id="jarvis-filters">
+// {"filters":[{fieldname,label,fieldtype,options,default?,reqd?}]}</script>.
+// Malformed -> [] here; the server rejects the block on save.
+export function parseFiltersBlock(html) {
+	const m = /<script[^>]*\bid\s*=\s*["']jarvis-filters["'][^>]*>([\s\S]*?)<\/script>/i.exec(
+		String(html || "")
+	);
+	if (!m) return [];
+	try {
+		const parsed = JSON.parse(m[1]);
+		const list = (parsed && parsed.filters) || [];
+		return list
+			.filter((f) => f && f.fieldname)
+			.map((f) => ({
+				fieldname: String(f.fieldname),
+				label: String(f.label || f.fieldname),
+				fieldtype: String(f.fieldtype || "Link"),
+				options: String(f.options || ""),
+				default: f.default == null ? "" : String(f.default),
+				reqd: f.reqd ? 1 : 0,
+			}));
 	} catch (e) {
 		return [];
 	}

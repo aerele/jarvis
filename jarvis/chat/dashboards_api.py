@@ -14,11 +14,12 @@ Visibility: the list uses raw SQL, which bypasses the ORM permission hooks, so
 for non-admins (the wiki list does the same). Per-doc reads go through
 ``doc.check_permission`` (the has_permission hook).
 
-Error contract of ``run_dashboard_source`` (always HTTP 200):
-``{ok: True, data: {source_name, tool, rows[, columns], truncated, took_ms}}``
-or ``{ok: False, error: {code, message}}`` with code one of
-``PermissionError`` / ``InvalidArgumentError`` / ``InternalError`` (internal
-errors are logged server-side and never leak tracebacks).
+Error contract of ``run_dashboard_source`` / ``preview_dashboard_source`` (always
+HTTP 200): ``{ok: True, data: {source_name, tool, rows[, columns], truncated,
+took_ms}}`` or ``{ok: False, error: {code, message}}`` with code one of
+``PermissionError`` / ``InvalidArgumentError`` / ``InternalError`` /
+``FilterRequired`` (the last also carries ``fieldname``; internal errors are
+logged server-side and never leak tracebacks).
 """
 
 from __future__ import annotations
@@ -30,6 +31,16 @@ import frappe
 from frappe import _
 
 from jarvis.chat import dashboard_permissions, list_filters
+from jarvis.chat.dashboard_filters import (
+	FilterRequiredError,
+	bind_spec,
+	check_placeholders,
+	coerce_values,
+	normalize_filter_rows,
+	parse_filters_block,
+	resolve_defaults,
+	validate_filter_defs,
+)
 from jarvis.chat.macros_api import _clamp_page, _lk, _load_filters
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
@@ -63,6 +74,7 @@ _ALLOWED_PAYLOAD_FIELDS = {
 	"scope",
 	"target_role",
 	"sources",
+	"filters",
 	"source_conversation",
 	"theme",
 }
@@ -134,6 +146,36 @@ def _set_stmt_timeout(seconds: int) -> None:
 		pass
 
 
+def _filter_rows(doc) -> list[dict]:
+	return [
+		{
+			"fieldname": r.fieldname,
+			"label": r.label,
+			"fieldtype": r.fieldtype,
+			"options": r.options or "",
+			"default_value": r.default_value or "",
+			"reqd": 1 if r.reqd else 0,
+		}
+		for r in (doc.filters or [])
+	]
+
+
+def _filter_defs_for_detail(doc) -> list[dict]:
+	rows = _filter_rows(doc)
+	defaults = resolve_defaults(rows, frappe.session.user)
+	return [
+		{
+			"fieldname": r["fieldname"],
+			"label": r["label"],
+			"fieldtype": r["fieldtype"],
+			"options": r["options"],
+			"reqd": r["reqd"],
+			"default": defaults.get(r["fieldname"], ""),
+		}
+		for r in rows
+	]
+
+
 def _dashboard_detail(doc) -> dict:
 	"""Full dashboard detail for the editor/viewer. ``can_edit`` tells the SPA
 	whether to offer the edit surfaces to this session user."""
@@ -150,6 +192,7 @@ def _dashboard_detail(doc) -> dict:
 		"sources": [
 			{"source_name": s.source_name, "tool": s.tool, "spec": s.spec or ""} for s in (doc.sources or [])
 		],
+		"filters": _filter_defs_for_detail(doc),
 		"source_conversation": doc.source_conversation or "",
 		"owner": doc.owner,
 		"modified": str(doc.modified),
@@ -474,6 +517,9 @@ def save_dashboard(payload: str) -> dict:
 	sources = fields.pop("sources", None)
 	if sources is None and "html" in fields:
 		sources = _parse_sources_block(fields.get("html") or "")
+	filters = fields.pop("filters", None)
+	if filters is None and "html" in fields:
+		filters = parse_filters_block(fields.get("html") or "")
 
 	if name:
 		doc = frappe.get_doc(DASHBOARD, name)
@@ -494,6 +540,13 @@ def save_dashboard(payload: str) -> dict:
 		doc.set("sources", [])
 		for row in _normalize_source_rows(sources):
 			doc.append("sources", row)
+
+	if filters is not None:
+		rows = normalize_filter_rows(filters)
+		validate_filter_defs(rows)  # unknown keys are rejected HERE; child rows would silently drop them
+		doc.set("filters", [])
+		for row in rows:
+			doc.append("filters", row)
 
 	if doc.is_new():
 		doc.insert()
@@ -630,16 +683,15 @@ def _validate_run_report_spec(label: str, spec: dict) -> None:
 # --------------------------------------------------------------------------- #
 @frappe.whitelist()
 @require_jarvis_user
-def run_dashboard_source(dashboard: str, source_name: str) -> dict:
+def run_dashboard_source(dashboard: str, source_name: str, filters: str = "") -> dict:
 	"""Execute one SAVED data source of a dashboard as the SESSION user.
 
-	Deliberately takes NO spec parameter — the saved child row is the only
-	thing that ever runs, so a shared dashboard can never carry a viewer-
-	supplied query. All record/field-level permissions are the tools' own
-	(query weaves Engine permission conditions; get_list is the ORM;
-	run_report is Frappe's report permission model) — a viewer sees exactly
-	the rows THEY are allowed to see. Errors come back as HTTP-200 envelopes
-	so the dashboard renderer can show a per-tile message."""
+	Deliberately takes NO spec parameter - the saved child row is the only
+	thing that ever runs. ``filters`` is a JSON object of viewer-picked values
+	for the dashboard's DECLARED filters; they are bound into value slots of the
+	saved spec only (see dashboard_filters), so field names, operators and
+	tables stay exactly as saved and every record/field permission applies
+	unchanged. Errors come back as HTTP-200 envelopes."""
 	doc = frappe.get_doc(DASHBOARD, dashboard)
 	try:
 		doc.check_permission("read")
@@ -650,8 +702,7 @@ def run_dashboard_source(dashboard: str, source_name: str) -> dict:
 	row = next((s for s in (doc.sources or []) if s.source_name == source_name), None)
 	if row is None:
 		return _error_envelope(
-			"InvalidArgumentError",
-			_("Unknown source '{0}' on this dashboard.").format(source_name),
+			"InvalidArgumentError", _("Unknown source '{0}' on this dashboard.").format(source_name)
 		)
 	try:
 		spec = frappe.parse_json(row.spec)
@@ -659,48 +710,51 @@ def run_dashboard_source(dashboard: str, source_name: str) -> dict:
 		spec = None
 	if not isinstance(spec, dict):
 		return _error_envelope("InvalidArgumentError", _("The saved spec for this source is not valid JSON."))
+	return _run_bound(row.tool, spec, _filter_rows(doc), filters, source_name)
 
-	tool = row.tool
-	columns = None
+
+def _parse_filter_values(filters: str) -> dict:
+	if not filters:
+		return {}
+	try:
+		raw = frappe.parse_json(filters)
+	except Exception:
+		raise InvalidArgumentError(_("filters must be a JSON object"))
+	if raw is None:
+		return {}
+	if not isinstance(raw, dict):
+		raise InvalidArgumentError(_("filters must be a JSON object"))
+	return raw
+
+
+def _run_bound(tool: str, spec: dict, filter_rows: list[dict], filters: str, source_name: str) -> dict:
+	"""Coerce + bind viewer values, then execute. Shared by the saved-view
+	runner and the builder preview so the two can never drift."""
 	t0 = time.monotonic()
+	columns = None
+	try:
+		values = coerce_values(filter_rows, _parse_filter_values(filters))
+		bound = bind_spec(tool, spec, filter_rows, values)
+	except FilterRequiredError as e:
+		env = _error_envelope("FilterRequired", _("Pick a value for {0} to load this data.").format(e.label))
+		env["error"]["fieldname"] = e.fieldname
+		return env
+	except InvalidArgumentError as e:
+		return _error_envelope("InvalidArgumentError", str(e))
+
 	# Bound the runner's wall-clock so a heavy report/query can't pin a web
 	# worker (MariaDB only; best-effort). Scoped to this whitelisted request.
 	_set_stmt_timeout(_SOURCE_STMT_TIMEOUT_S)
 	try:
-		if tool == "query":
-			from jarvis.tools.query import query as _query
-
-			# rows ONLY — the tool's "sql" debug key must never reach a viewer.
-			rows = list(_query(spec, confirm_large=True).get("rows") or [])
-		elif tool == "get_list":
-			from jarvis.tools.get_list import get_list as _get_list
-
-			kwargs = {k: v for k, v in spec.items() if k in _GET_LIST_SPEC_KEYS}
-			kwargs.setdefault("doctype", "")
-			rows = _get_list(confirm_large=True, **kwargs)
-		elif tool == "run_report":
-			from jarvis.tools.run_report import run_report as _run_report
-
-			res = _run_report(spec.get("report_name") or "", spec.get("filters") or {})
-			if (
-				not isinstance(res, dict)
-				or res.get("prepared_report")
-				or not isinstance(res.get("result"), list)
-			):
-				return _error_envelope(
-					"InvalidArgumentError",
-					_(
-						"This report did not return rows inline (it may run as a "
-						"background Prepared Report), so it cannot serve a dashboard."
-					),
-				)
-			columns = res.get("columns") or []
-			# run_report has no inherent row cap (query/get_list are ≤1000 by the
-			# tools); cap here so a huge report never materializes the full result
-			# set into the browser payload. The post-loop slice still applies.
-			rows = res["result"][: DASHBOARD_MAX_ROWS + 1]
-		else:
-			return _error_envelope("InvalidArgumentError", _("Unsupported tool: {0}").format(tool))
+		rows, columns = _execute_source(tool, bound)
+	except _PreparedReportError:
+		return _error_envelope(
+			"InvalidArgumentError",
+			_(
+				"This report did not return rows inline (it may run as a background "
+				"Prepared Report), so it cannot serve a dashboard."
+			),
+		)
 	except (PermissionDeniedError, frappe.PermissionError) as e:
 		# has_permission pushes "no access" lines into the message log on the
 		# denied path; clear them so they never ride back in _server_messages.
@@ -709,10 +763,7 @@ def run_dashboard_source(dashboard: str, source_name: str) -> dict:
 	except InvalidArgumentError as e:
 		return _error_envelope("InvalidArgumentError", str(e))
 	except Exception:
-		frappe.log_error(
-			title="Jarvis: dashboard source run failed",
-			message=frappe.get_traceback(),
-		)
+		frappe.log_error(title="Jarvis: dashboard source run failed", message=frappe.get_traceback())
 		return _error_envelope("InternalError", _("The data source could not be run. The error was logged."))
 
 	truncated = False
@@ -729,3 +780,65 @@ def run_dashboard_source(dashboard: str, source_name: str) -> dict:
 	if columns is not None:
 		data["columns"] = columns
 	return {"ok": True, "data": data}
+
+
+class _PreparedReportError(Exception):
+	pass
+
+
+def _execute_source(tool: str, spec: dict) -> tuple[list, list | None]:
+	"""Dispatch one bound spec to its read tool. Returns (rows, columns)."""
+	if tool == "query":
+		from jarvis.tools.query import query as _query
+
+		# rows ONLY - the tool's "sql" debug key must never reach a viewer.
+		return list(_query(spec, confirm_large=True).get("rows") or []), None
+	if tool == "get_list":
+		from jarvis.tools.get_list import get_list as _get_list
+
+		kwargs = {k: v for k, v in spec.items() if k in _GET_LIST_SPEC_KEYS}
+		kwargs.setdefault("doctype", "")
+		return _get_list(confirm_large=True, **kwargs), None
+	if tool == "run_report":
+		from jarvis.tools.run_report import run_report as _run_report
+
+		res = _run_report(spec.get("report_name") or "", spec.get("filters") or {})
+		if not isinstance(res, dict) or res.get("prepared_report") or not isinstance(res.get("result"), list):
+			raise _PreparedReportError()
+		# run_report has no inherent row cap; slice here so a huge report never
+		# materializes fully into the browser payload (the post-loop slice still applies).
+		return res["result"][: DASHBOARD_MAX_ROWS + 1], res.get("columns") or []
+	raise InvalidArgumentError(_("Unsupported tool: {0}").format(tool))
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def preview_dashboard_source(tool: str, spec: str, filter_defs: str = "", filters: str = "") -> dict:
+	"""Builder-canvas data path: run an UNSAVED spec from the html being
+	authored, with the same filter binding as the saved runner. ``spec`` and
+	``filter_defs`` are JSON strings straight from the html blocks. The caller is
+	the author previewing their own work under their own permissions."""
+	try:
+		parsed = frappe.parse_json(spec or "{}")
+		defs = frappe.parse_json(filter_defs) if filter_defs else []
+	except Exception:
+		return _error_envelope("InvalidArgumentError", _("spec and filter_defs must be JSON."))
+	if not isinstance(parsed, dict):
+		return _error_envelope("InvalidArgumentError", _("spec must be a JSON object."))
+	if not isinstance(defs, list):
+		return _error_envelope("InvalidArgumentError", _("filter_defs must be a JSON array."))
+	if tool not in _ALLOWED_TOOLS:
+		return _error_envelope("InvalidArgumentError", _("Unsupported tool: {0}").format(tool))
+	try:
+		_validate_source_row({"source_name": "preview", "tool": tool, "spec": frappe.as_json(parsed)})
+		rows = normalize_filter_rows(defs)
+		validate_filter_defs(rows)
+		check_placeholders(tool, parsed, {r["fieldname"] for r in rows})
+	except frappe.ValidationError as e:
+		return _error_envelope("InvalidArgumentError", str(e))
+	except InvalidArgumentError as e:
+		return _error_envelope("InvalidArgumentError", str(e))
+	except Exception:
+		frappe.log_error(title="Jarvis: dashboard preview validation failed", message=frappe.get_traceback())
+		return _error_envelope("InternalError", _("The data source could not be run. The error was logged."))
+	return _run_bound(tool, parsed, rows, filters, "preview")
