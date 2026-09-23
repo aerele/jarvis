@@ -5309,11 +5309,18 @@ class TestNativeClaudePickRouting(unittest.TestCase):
 			patch.object(th.frappe, "get_single", return_value=settings),
 			patch.object(th, "compute_pool_mode", return_value=True),
 			patch.object(th, "has_native_claude_subscription", return_value=claude_leg),
-			patch.dict(
-				"jarvis._subscription_models._SEED_SUBSCRIPTION_MODELS",
-				{"Anthropic": self._ANTHROPIC_TIER},
+			# The Anthropic subscription tier under test, injected the way the catalog
+			# delivers it (rows), since the module no longer carries a seed literal.
+			patch(
+				"jarvis._subscription_models._subscription_rows",
+				return_value={
+					"OpenAI": [{"model_id": "gpt-5.6-terra", "tier": "subscription", "sort_order": 0}],
+					"Anthropic": [
+						{"model_id": m, "tier": "subscription", "sort_order": i}
+						for i, m in enumerate(self._ANTHROPIC_TIER)
+					],
+				},
 			),
-			patch("jarvis._subscription_models._subscription_rows", return_value={}),
 		):
 			return th._resolve_model_and_provider(frappe._dict(model_override=override))
 
