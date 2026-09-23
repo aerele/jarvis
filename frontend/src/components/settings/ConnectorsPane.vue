@@ -35,7 +35,6 @@
 			v-else-if="activeTab === 'browse'"
 			:catalog="catalog"
 			:installed-rows="[...shared, ...mine]"
-			:allow-custom-urls="allowCustomUrls"
 			@add="openAddDialog"
 			@add-custom="openAddCustomDialog"
 		/>
@@ -125,7 +124,6 @@
 			v-model="addOpen"
 			:scope="addScope"
 			:preset="addPreset"
-			:allow-custom-urls="allowCustomUrls"
 			:redirect-uri="redirectUri"
 			:connector="editingRow"
 			:catalog="catalog"
@@ -143,8 +141,7 @@
 // confirmDialog for delete, JvSpinner while loading) rather than inventing a
 // new list shape.
 //
-// "Shared" rows are admin-managed (Jarvis Settings desk form owns the
-// allow-custom-urls policy — this pane is deliberately lean); a plain
+// "Shared" rows are admin-managed (this pane is deliberately lean); a plain
 // user sees them read-only (no edit/delete/toggle) but MAY still press Test —
 // connectors_api.test_connector is gated on read, not write, so any tenant
 // user can run a live health probe on a Shared connector. "Mine" rows are
@@ -170,7 +167,6 @@ const loaded = ref(false);
 const loadError = ref(false);
 const shared = ref([]);
 const mine = ref([]);
-const allowCustomUrls = ref(true);
 // The site-wide OAuth callback address (jarvis.chat.connectors_api.oauth_redirect_uri) -
 // AddConnectorDialog needs this for a bring-your-own-app static preset's "register
 // your app" step BEFORE any row exists, so it comes off list_connectors rather than
@@ -192,7 +188,6 @@ async function load() {
 		const res = await listConnectors();
 		shared.value = res.shared || [];
 		mine.value = res.mine || [];
-		allowCustomUrls.value = !!res.allow_custom_urls;
 		redirectUri.value = res.oauth_redirect_uri || "";
 		catalog.value = res.catalog || [];
 		loaded.value = true;
