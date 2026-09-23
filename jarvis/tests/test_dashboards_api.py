@@ -1340,6 +1340,14 @@ class TestRunWithFilters(_DashboardsApiTestCase):
 		r = run_dashboard_source(d["name"], "todos", frappe.as_json({"assignee": PLAIN_B}))
 		self.assertTrue(r["ok"], r)
 		self.assertNotIn(b, [row["name"] for row in r["data"]["rows"]])
+		# Positive control: the identical filter value DOES match `b` for a
+		# session whose own permissions allow it (Administrator bypasses ToDo's
+		# owner/allocated restriction). This proves the exclusion above is
+		# attributable to PLAIN_A's permissions, not to a fixture/binding bug.
+		frappe.set_user("Administrator")
+		r = run_dashboard_source(d["name"], "todos", frappe.as_json({"assignee": PLAIN_B}))
+		self.assertTrue(r["ok"], r)
+		self.assertIn(b, [row["name"] for row in r["data"]["rows"]])
 
 	def test_preview_binds_same_as_runner(self):
 		frappe.set_user(PLAIN_A)
