@@ -777,11 +777,11 @@ def validate_models(settings) -> list:
 	if claude_positions and other_subscriptions:
 		if any(upstream != "openai" for upstream in other_subscriptions):
 			errors.append(
-				"Claude subscription failover can currently be combined only with an OpenAI Codex subscription."
+				"A Claude plan runs on its own connection, outside the proxy. Right now it can be combined only with a ChatGPT plan or API keys. Remove the Kimi/xAI plan or the Claude plan."
 			)
 		if claude_positions[0] not in (0, len(ordered_enabled) - 1):
 			errors.append(
-				"With Codex and Claude subscriptions together, Claude must be either the primary or the last fallback."
+				"A Claude plan runs on its own connection, outside the proxy. Keep it first (primary) or last (fallback) so Jarvis knows which one to try first."
 			)
 
 	return errors

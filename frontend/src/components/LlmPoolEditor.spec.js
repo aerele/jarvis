@@ -1455,6 +1455,6 @@ describe("saved Anthropic subscription flows", () => {
 		const w = await mountEditor();
 		await w.vm.save();
 		expect(api.saveLlmPool).not.toHaveBeenCalled();
-		expect(w.text()).toContain("keep Claude either first or last");
+		expect(w.text()).toContain("Keep it first (primary) or last (fallback)");
 	});
 });
