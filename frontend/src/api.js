@@ -767,6 +767,24 @@ export const dismissApproval = (name) =>
 export const restoreApproval = (name) =>
 	call("jarvis.chat.approvals_api.restore_approval", { name });
 
+// ── Wiki write-back review lane (reviewer-gated; review-before-landing) ──
+// A File Box run's wiki note is HELD as a proposal a Jarvis reviewer — NOT the
+// dropper (separation of duties) — approves before it lands.
+export const listWikiWriteProposals = (p = {}) =>
+	call("jarvis.chat.approvals_api.list_wiki_write_proposals", {
+		status: p.status || "Pending",
+		start: p.start || 0,
+		page_length: p.page_length || 20,
+	});
+export const getWikiWriteProposal = (name) =>
+	call("jarvis.chat.approvals_api.get_wiki_write_proposal", { name });
+export const approveWikiWrite = (name) =>
+	call("jarvis.chat.approvals_api.approve_wiki_write", { name });
+export const rejectWikiWrite = (name) =>
+	call("jarvis.chat.approvals_api.reject_wiki_write", { name });
+export const retryWikiWrite = (name) =>
+	call("jarvis.chat.approvals_api.retry_wiki_write", { name });
+
 // ── Agents Marketplace: catalog, install/enable/schedule, apply, runs+findings ──
 // enable/disable + schedule + config are INSTANT (pure DB writes). Apply is the
 // only call that reconciles the container (install/uninstall/update → restart),
