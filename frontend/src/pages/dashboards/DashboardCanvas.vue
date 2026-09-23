@@ -46,6 +46,7 @@
 				v-if="doc"
 				ref="frame"
 				:key="frameKey"
+				:data-key="frameKey"
 				:srcdoc="doc"
 				sandbox="allow-scripts"
 				class="w-full border-0"
@@ -76,11 +77,11 @@
 import { ref, watch, onBeforeUnmount } from "vue";
 import { Button, ErrorMessage, FeatherIcon } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
-import { buildSrcdoc, parseSourcesBlock } from "@/lib/dashboardSrcdoc";
+import { buildSrcdoc, parseSourcesBlock, parseFiltersBlock } from "@/lib/dashboardSrcdoc";
 import { loadEchartsSource } from "@/lib/dashboardEcharts";
 import { THEMES, DEFAULT_THEME, themeKey } from "@/lib/dashboardThemes";
 import { loadCaptureLib, downloadPng, downloadPdf } from "@/lib/dashboardExport";
-import { runDashboardSource, callDashboardTool } from "@/api/dashboards";
+import { runDashboardSource, previewDashboardSource } from "@/api/dashboards";
 import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
@@ -92,11 +93,14 @@ const props = defineProps({
 	// look belongs to the dashboard, not the app shell - app dark mode does not
 	// restyle it, the picker does.
 	theme: { type: String, default: DEFAULT_THEME },
+	filters: { type: Object, default: () => ({}) }, // {fieldname: value} from the filter bar
 });
 
 // sources: the parsed #jarvis-sources list (save-dialog preview + payload);
+// filters: the parsed #jarvis-filters list (filter bar definitions);
 // state: "empty" | "loading" | "ready" | "error" for hosts that care.
-const emit = defineEmits(["sources", "state"]);
+const emit = defineEmits(["sources", "filters", "state"]);
+let filterDefs = [];
 
 const frame = ref(null);
 const doc = ref("");
@@ -184,6 +188,8 @@ watch(
 	() => props.html,
 	(h) => {
 		emit("sources", parseSourcesBlock(h));
+		filterDefs = parseFiltersBlock(h);
+		emit("filters", filterDefs);
 		rebuild();
 	},
 	{ immediate: true }
@@ -194,6 +200,16 @@ watch(
 watch(
 	() => props.theme,
 	() => rebuild()
+);
+
+// Filter value changes re-run the (already built) document's sources against
+// the new values - not immediate, so the initial mount does not double-build.
+watch(
+	() => JSON.stringify(props.filters || {}),
+	() => {
+		if (!hasSources) return; // static: nothing to re-fetch
+		rebuild();
+	}
 );
 
 // ── data bridge ──────────────────────────────────────────────────────────────
@@ -211,13 +227,14 @@ async function handleData(d) {
 	pendingData++;
 	let reply;
 	try {
-		// call_tool dispatches kwargs: query takes its DSL object under the
-		// `spec` kwarg; get_list/run_report take the object AS their kwargs.
-		const args = d.tool === "query" ? { spec: d.spec } : d.spec;
 		const env =
 			props.mode === "view"
-				? await runDashboardSource(props.dashboard && props.dashboard.name, d.name)
-				: await callDashboardTool(d.tool, args);
+				? await runDashboardSource(
+						props.dashboard && props.dashboard.name,
+						d.name,
+						props.filters || {}
+				  )
+				: await previewDashboardSource(d.tool, d.spec, filterDefs, props.filters || {});
 		if (env && env.ok) {
 			reply = { ok: true, rows: dataPayload(env.data) };
 		} else {
