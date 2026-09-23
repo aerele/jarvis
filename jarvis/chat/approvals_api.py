@@ -493,6 +493,14 @@ def get_approval(name: str) -> dict:
 @frappe.whitelist()
 @require_jarvis_user
 def pending_count() -> int:
+	"""The board badge: Pending approval requests + held File Box writes (these
+	badge immediately, decision 4)."""
+	return _ar_pending_count() + _held_pending_count(
+		frappe.session.user, "System Manager" in frappe.get_roles()
+	)
+
+
+def _ar_pending_count() -> int:
 	# Scoped like list_approvals_page: non-SM users count rows whose
 	# conversation they own OR that carry an approval-level DocShare read grant
 	# for them (tagging) — the same EXISTS semantics as the list, never by
@@ -1012,3 +1020,378 @@ def reject_wiki_write(name: str) -> dict:
 		frappe.throw(f"Proposal {name} was decided concurrently")
 	frappe.db.commit()
 	return {"ok": True, "name": name, "status": "Rejected"}
+
+
+# --------------------------------------------------------------------------- #
+# Held File Box writes: the board lane for ``Jarvis Pending Action`` rows of kind
+# ``file_box_held``. Rows are sealed and carry no DocPerm, so every read goes
+# through these endpoints with the executor's own authz (the owner, or a System
+# Manager); an unauthorized caller learns nothing. ``card`` / ``summary`` are
+# model-derived text: clients render them as text, never as HTML.
+# --------------------------------------------------------------------------- #
+HELD = "file_box_held"
+_HELD_LANE_LIMIT = 100
+_HELD_NOT_FOUND = "This approval is no longer available."
+_HELD_BUSY = "Someone is acting on this approval right now. Try again in a moment."
+
+
+def _held_refusal(reason_code: str, message: str, **extra) -> dict:
+	return {
+		"ok": False,
+		"error": {"type": "InvalidConfirmation", "message": message},
+		"reason_code": reason_code,
+		**extra,
+	}
+
+
+def _held_pending_count(me: str, is_sm: bool) -> int:
+	from jarvis.chat.pending_actions._store import table_ready
+
+	if not table_ready():
+		return 0
+	return frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND status='Pending'"
+		" AND (%(sm)s OR owner_user=%(me)s)",
+		{"k": HELD, "sm": int(is_sm), "me": me},
+	)[0][0]
+
+
+def _waiters_count(name: str) -> int:
+	return frappe.db.count(
+		"Jarvis Pending Action Waiter", {"parent": name, "parenttype": "Jarvis Pending Action"}
+	)
+
+
+def _age_s(created) -> int:
+	return max(0, int((frappe.utils.now_datetime() - frappe.utils.get_datetime(created)).total_seconds()))
+
+
+def _for_user(owner: str, me: str) -> str:
+	"""Whose drop this is, shown only to a System Manager acting for someone else."""
+	return "" if owner == me else (frappe.db.get_value("User", owner, "full_name") or owner)
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def list_pending_actions_lane() -> dict:
+	"""Held File Box writes awaiting a decision (or running): the caller's own, or
+	every user's for a System Manager. Oldest first; ``{rows, total}``."""
+	from jarvis.chat.pending_actions._store import table_ready
+
+	if not table_ready():
+		return {"rows": [], "total": 0}
+	me = frappe.session.user
+	rows = frappe.db.sql(
+		"""SELECT pa.name, pa.status, pa.summary, pa.owner_user, pa.creation,
+		(SELECT COUNT(*) FROM `tabJarvis Pending Action Waiter` w
+		 WHERE w.parent = pa.name AND w.parenttype = 'Jarvis Pending Action') AS waiters_count
+		FROM `tabJarvis Pending Action` pa
+		WHERE pa.kind = %(k)s AND pa.status IN ('Pending', 'Executing')
+		AND (%(sm)s OR pa.owner_user = %(me)s)
+		ORDER BY pa.creation ASC, pa.name ASC
+		LIMIT %(lim)s""",
+		{"k": HELD, "sm": int("System Manager" in frappe.get_roles()), "me": me, "lim": _HELD_LANE_LIMIT},
+		as_dict=True,
+	)
+	return {
+		"rows": [
+			{
+				"name": r.name,
+				"status": r.status,
+				"summary": r.summary or "",
+				"waiters_count": int(r.waiters_count or 0),
+				"created_at": str(r.creation),
+				"age": _age_s(r.creation),
+				"for_user": _for_user(r.owner_user, me),
+			}
+			for r in rows
+		],
+		"total": len(rows),
+	}
+
+
+def _held_items(row) -> list[dict]:
+	"""The records a Pending held row would write (from its sealed call)."""
+	from jarvis.chat import held_parties
+	from jarvis.chat.pending_actions import _seal
+
+	try:
+		args = _seal.unseal_call(row).get("args") or {}
+	except _seal.SealError:
+		return []
+	return held_parties.items_of(row.tool, args)
+
+
+def _single_create(items: list[dict]) -> dict | None:
+	"""Use existing maps ONE new record to an existing one (F5), never a batch."""
+	return items[0] if len(items) == 1 and items[0]["op"] == "create" else None
+
+
+def _candidates_as(exec_user: str, item: dict) -> list[dict]:
+	"""Existing records that look like ``item``'s party, as ``exec_user`` sees them."""
+	from jarvis.chat import held_parties
+
+	party = held_parties.party_of(item)
+	if not (party["title"] or party["gstin"]) or not frappe.db.get_value("User", exec_user, "enabled"):
+		return []
+	try:
+		with impersonate(exec_user):
+			return held_parties.find_existing(item["doctype"], title=party["title"], gstin=party["gstin"])
+	except Exception:
+		frappe.log_error(title="jarvis.pending_action.candidates_failed", message=frappe.get_traceback())
+		return []
+
+
+def _held_detail(row, me: str) -> dict:
+	from jarvis.chat.pending_actions._store import PENDING, REASON_TEXT
+
+	item = _single_create(_held_items(row)) if row.status == PENDING else None
+	code = row.reason_code or ""
+	return {
+		"name": row.name,
+		"kind": row.kind,
+		"status": row.status,
+		"tool": row.tool,
+		"summary": row.summary or "",
+		"card": json.loads(row.card) if row.card else None,
+		"doctype": item["doctype"] if item else "",
+		"created_at": str(row.creation),
+		"age": _age_s(row.creation),
+		"waiters_count": _waiters_count(row.name),
+		"candidates": _candidates_as(row.exec_user, item) if item else [],
+		"can_act": int(row.status == PENDING),
+		"can_use_existing": int(bool(item)),
+		"reason_code": code,
+		"reason": REASON_TEXT.get(code, ""),
+		"result_doctype": row.result_doctype or "",
+		"result_name": row.result_name or "",
+		"for_user": _for_user(row.owner_user, me),
+	}
+
+
+def _authorized_held(name, approver: str):
+	from jarvis.chat.pending_actions import authorize
+	from jarvis.chat.pending_actions._store import get_row, table_ready
+
+	name = str(name or "").strip()
+	row = get_row(name) if name and table_ready() else None
+	return row if authorize(row, approver, HELD)[0] else None
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def get_pending_action(name: str) -> dict:
+	"""One held row for the board: ``{kind, card, summary, age, waiters_count,
+	candidates, can_act, reason_code, ...}``. Never the sealed columns or
+	``open_key``; candidates are read as the row's ``exec_user`` (name/title/GSTIN
+	only). A terminal row still unsettled is settled on read (self-heal)."""
+	from jarvis._session import authenticated_user
+	from jarvis.chat.pending_actions import settle
+	from jarvis.chat.pending_actions._store import TERMINAL, get_row
+
+	me = authenticated_user()
+	row = _authorized_held(name, me)
+	if not row:
+		frappe.throw(_HELD_NOT_FOUND, frappe.DoesNotExistError)
+	if row.status in TERMINAL and not row.settled:
+		settle(row.name)
+		row = get_row(row.name)
+	return _held_detail(row, me)
+
+
+def _identity_refusal(row, approver: str) -> dict | None:
+	"""Execute's identity preflight: the sealed ``exec_user`` must still be able to act."""
+	from jarvis.permissions import is_valid_unattended_owner
+
+	if not frappe.db.get_value("User", row.exec_user, "enabled") or (
+		approver != row.exec_user and not is_valid_unattended_owner(row.exec_user)
+	):
+		return _held_refusal(
+			"identity_refused",
+			"This can no longer run as the person who dropped the file. Nothing ran.",
+		)
+	return None
+
+
+def _lock_pending(name: str):
+	"""Commit, then take the row lock without waiting: ``(row, refusal)``."""
+	from jarvis.chat.pending_actions._store import get_row
+
+	frappe.db.commit()
+	try:
+		return get_row(name, lock="nowait"), None
+	except (frappe.QueryTimeoutError, frappe.QueryDeadlockError):
+		frappe.db.rollback()
+		return None, _held_refusal("busy", _HELD_BUSY)
+
+
+def _handled(row) -> dict:
+	from jarvis.chat.pending_actions import settle
+	from jarvis.chat.pending_actions._store import EXECUTING, TERMINAL
+
+	frappe.db.rollback()
+	if row.status in TERMINAL and not row.settled:
+		settle(row.name)
+	code = "executing" if row.status == EXECUTING else "already_handled"
+	return _held_refusal(code, "This approval was already handled.", pa_status=row.status)
+
+
+def _now_existing(row) -> tuple[dict, dict] | None:
+	"""A party of this held create that exists now (created since it was held)."""
+	from jarvis.chat import held_parties
+
+	for item in _held_items(row):
+		if item["op"] != "create" or not held_parties.is_party(item["doctype"]):
+			continue
+		for match in _candidates_as(row.exec_user, item):
+			return item, match
+	return None
+
+
+def _create_held(row, approver: str) -> dict:
+	from jarvis.chat.pending_actions import execute
+	from jarvis.chat.pending_actions._store import PENDING
+
+	locked, refused = _lock_pending(row.name)
+	if refused:
+		return refused
+	if not locked:
+		return _held_refusal("not_found", _HELD_NOT_FOUND)
+	existing = _now_existing(locked) if locked.status == PENDING else None
+	frappe.db.rollback()
+	if existing:
+		item, match = existing
+		label = match["title"] or match["name"]
+		hint = (
+			"Choose Use existing."
+			if _single_create(_held_items(locked))
+			else "Skip this approval, then re-run the file."
+		)
+		return _held_refusal(
+			"exists",
+			f"{item['doctype']} {label} already exists now. {hint}",
+			candidates=[match],
+		)
+	return execute(row.name, kind=HELD)
+
+
+def _use_existing_held(row, approver: str, link) -> dict:
+	"""AC-U4: the unsealed call lives only in the inner frame; an escaping error is
+	logged without locals and re-raised value-free, as ``execute`` does."""
+	from jarvis.chat.pending_actions._execute import _CRASHED, ExecuteCrashed
+
+	try:
+		return _use_existing_locked(row, approver, link)
+	except Exception:
+		tb = frappe.get_traceback()
+		frappe.db.rollback()
+		frappe.log_error(title="jarvis.pending_action.use_existing_crashed", message=tb)
+		frappe.db.commit()
+		raise ExecuteCrashed(_CRASHED) from None
+
+
+def _use_existing_locked(row, approver: str, link) -> dict:
+	from jarvis.chat.pending_actions import _seal, settle
+	from jarvis.chat.pending_actions._store import (
+		EXECUTED,
+		FAILED,
+		PENDING,
+		REASON_TEXT,
+		_terminal_update,
+	)
+
+	link = str(link or "").strip()
+	if not link:
+		return _held_refusal("record_required", "Pick the existing record to use.")
+	locked, refused = _lock_pending(row.name)
+	if refused:
+		return refused
+	if not locked:
+		return _held_refusal("not_found", _HELD_NOT_FOUND)
+	if locked.status != PENDING:
+		return _handled(locked)
+	refused = _identity_refusal(locked, approver)
+	if refused:
+		frappe.db.rollback()
+		return refused
+	try:
+		args = _seal.unseal_call(locked).get("args") or {}
+	except _seal.SealError as e:
+		_terminal_update(locked.name, [PENDING], FAILED, reason_code=e.reason_code, decided_by=approver)
+		frappe.log_error(
+			title=f"jarvis.pending_action.{e.reason_code}",
+			message=f"{locked.name}: failed binding {e.binding}",
+		)
+		frappe.db.commit()
+		settle(locked.name)
+		return _held_refusal(e.reason_code, REASON_TEXT[e.reason_code], pa_status=FAILED)
+	from jarvis.chat import held_parties
+
+	item = _single_create(held_parties.items_of(locked.tool, args))
+	if not item:
+		frappe.db.rollback()
+		return _held_refusal(
+			"use_existing_unavailable", "Use existing is only available for a single new record."
+		)
+	doctype = item["doctype"]
+	if not (
+		frappe.db.exists(doctype, link)
+		and frappe.has_permission(doctype, "read", doc=link, user=locked.exec_user)
+	):
+		frappe.db.rollback()
+		return _held_refusal(
+			"record_not_found",
+			f"That {doctype} was not found, or the person who dropped the file can't open it.",
+		)
+	result = {"ok": True, "data": {"doctype": doctype, "name": link, "used_existing": True}}
+	_terminal_update(
+		locked.name,
+		[PENDING],
+		EXECUTED,
+		reason_code="use_existing",
+		decided_by=approver,
+		result_doctype=doctype,
+		result_name=link,
+		sealed_settlement=_seal.seal_settlement(locked.name, {"result": result, "outcome": "confirmed"}),
+	)
+	frappe.db.commit()
+	settle(locked.name)
+	return {**result, "reason_code": "use_existing", "pa_status": EXECUTED}
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def decide_held_action(name: str, action: str, use_existing: str | None = None) -> dict:
+	"""Decide a held File Box write (the owner, or a System Manager):
+
+	- ``create``: re-check the party doesn't exist now (else "use existing"), then
+	  run the sealed call at most once as the dropper (``exec_user``);
+	- ``use_existing``: resolve it with an existing record ``exec_user`` can read
+	  (single new record only; nothing is created or dispatched);
+	- ``skip``: discard it (no identity preflight).
+
+	Every response carries ``reason_code``."""
+	from jarvis._session import authenticated_user
+	from jarvis.chat.pending_actions import discard
+
+	refuse_in_tool_dispatch()
+	action = str(action or "").strip()
+	if action not in ("create", "use_existing", "skip"):
+		frappe.throw("Unknown action")
+	approver = authenticated_user()
+	row = _authorized_held(name, approver)
+	if not row:
+		return _held_refusal("not_found", _HELD_NOT_FOUND)
+	waiting = _waiters_count(row.name)
+	if action == "skip":
+		res = discard(row.name, kind=HELD)
+	elif action == "create":
+		res = _create_held(row, approver)
+	else:
+		res = _use_existing_held(row, approver, use_existing)
+	# Execute's success carries no code; the board keys its copy on one.
+	return {
+		**res,
+		"reason_code": res.get("reason_code") or ("created" if res.get("ok") else ""),
+		"waiters_count": waiting,
+	}

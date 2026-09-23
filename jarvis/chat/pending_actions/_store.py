@@ -39,6 +39,7 @@ REASON_TEXT = {
 	"discarded": "The action was discarded.",
 	"superseded": "A newer proposal replaced this action.",
 	"expired": "The action expired.",
+	"use_existing": "An existing record was used instead; nothing new was created.",
 }
 
 # Extra columns a terminal write may set (keys are interpolated, so allowlisted).

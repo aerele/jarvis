@@ -61,7 +61,7 @@
    "fieldname": "reason_code",
    "fieldtype": "Select",
    "label": "Reason Code",
-   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired"
+   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired\nuse_existing"
   },
   {
    "description": "Fixed bench text only; never tool args or error text.",
