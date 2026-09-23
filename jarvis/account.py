@@ -1902,6 +1902,29 @@ def reauthorize_autopay() -> dict:
 
 
 @frappe.whitelist()
+def stop_autopay_to_pay() -> dict:
+	"""Past-Due pay-now, step one of two: neutralize the customer's still-live
+	Razorpay mandate so the account's EXISTING reactivation grid (can_reactivate)
+	takes over for step two - the customer picks a plan and pays through the SAME
+	renew/reactivate flow already on this page. This call never charges anything.
+
+	Only reachable when get_account_summary's can_stop_autopay_to_pay was true (a
+	lapsed Past-Due sub, a still-live mandate, non-trial, admin flag ON) - admin
+	re-checks every one of those and answers a coded refusal (FeatureDisabled 403 /
+	NotEligible 409 / PAYMENT_UNDER_REVIEW 409 / NoSubscription 409) when they no
+	longer hold; _surface turns that into the same clean frappe.throw every other
+	billing action here uses.
+
+	require_jarvis_admin is the ONLY who-can-act gate (C1): the admin call is
+	single-identity, so there is nothing further to check bench-side. The real
+	human acting is forwarded as requesting_user for admin's audit trail. No
+	chat-gate bust: this only kills a mandate, it grants no entitlement.
+	"""
+	require_jarvis_admin()
+	return _surface(admin_client.stop_autopay_to_pay, requesting_user=frappe.session.user)
+
+
+@frappe.whitelist()
 def get_billing_payment_state() -> dict:
 	"""Where the current billing checkout stands, without asking a gateway.
 
