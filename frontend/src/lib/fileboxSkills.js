@@ -14,11 +14,12 @@ export function skillLabel(s) {
 	return `${s.skill_name} · shared`;
 }
 
-// The picker's options: Auto (no pin) + the OCR default + each accessible skill.
+// The picker's options: "None" (system default only) + each accessible skill to
+// apply ALONGSIDE the system's chosen skill. The OCR / Data Entry skill is the
+// system's own base, so it is not offered as an extra to layer on.
 export function skillOptions(customSkills) {
 	return [
-		{ label: "Auto — pick the best skill", value: "" },
-		{ label: "OCR / Data Entry", value: OCR_DATA_ENTRY },
+		{ label: "None", value: "" },
 		...(customSkills || []).map((s) => ({ label: skillLabel(s), value: s.skill_name })),
 	];
 }

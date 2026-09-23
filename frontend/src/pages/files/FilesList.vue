@@ -49,14 +49,15 @@
 			     highlight (the root handlers drive `dragging`), drop → uploadBatch -->
 			<template #banner>
 				<div class="mb-3">
-					<!-- optional drop-time skill pin: applies to the files dropped next -->
+					<!-- optional extra skill, applied ALONGSIDE the system's chosen skill,
+					     to the files dropped next -->
 					<div class="mb-2 flex items-center gap-2">
-						<span class="shrink-0 text-p-sm text-ink-gray-6">Process with</span>
+						<span class="shrink-0 text-p-sm text-ink-gray-6">Also apply skill</span>
 						<Autocomplete
 							class="w-72"
 							:options="skillOptions"
 							:modelValue="pinnedSkill"
-							placeholder="Auto — pick the best skill"
+							placeholder="None (system default)"
 							@update:modelValue="(o) => (pinnedSkill = o ? o.value : '')"
 						/>
 					</div>

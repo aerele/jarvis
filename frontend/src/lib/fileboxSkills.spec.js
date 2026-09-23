@@ -16,20 +16,19 @@ describe("fileboxSkills", () => {
 		expect(skillLabel(rows[3])).toBe("orphan · shared");
 	});
 
-	it("builds options: Auto + OCR default + each skill keyed by skill_name", () => {
+	it("builds options: None + each accessible skill keyed by skill_name (no OCR base)", () => {
 		const opts = skillOptions(rows);
-		expect(opts[0]).toEqual({ label: "Auto — pick the best skill", value: "" });
-		expect(opts[1]).toEqual({ label: "OCR / Data Entry", value: OCR_DATA_ENTRY });
+		expect(opts[0]).toEqual({ label: "None", value: "" });
+		// the OCR base is NOT offered as an extra to layer on
 		expect(opts.map((o) => o.value)).toEqual([
 			"",
-			OCR_DATA_ENTRY,
 			"invoicing",
 			"contracts",
 			"leads",
 			"orphan",
 		]);
-		// empty / undefined input still yields Auto + OCR (picker never breaks)
-		expect(skillOptions().map((o) => o.value)).toEqual(["", OCR_DATA_ENTRY]);
+		// empty / undefined input still yields the None option (picker never breaks)
+		expect(skillOptions().map((o) => o.value)).toEqual([""]);
 	});
 
 	it("maps a pinned slug to a human badge label", () => {

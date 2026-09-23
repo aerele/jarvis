@@ -61,18 +61,22 @@ INBOUND_PROMPT = (
 
 def build_inbound_prompt(skill: str | None = None) -> str:
 	"""The File Box directed prompt. ``skill=None`` returns ``INBOUND_PROMPT``
-	VERBATIM (the auto-discovery flow), so a pin can never drift the default path.
-	A pinned ``skill`` (a canonical skill_name) prepends a directive that REPLACES
-	step 2's find_skills discovery with that one skill; every other step and the
-	safety envelope below still apply unchanged."""
+	VERBATIM (the auto-discovery flow), so a tag can never drift the default path.
+	A tagged ``skill`` (a canonical skill_name) prepends a directive that applies
+	that skill ALONGSIDE the system's chosen skill (ADDITIVE, not a replacement):
+	the normal classify + base-extraction flow below still runs, and the tagged
+	skill layers its own rules on top. Every step and the safety envelope below
+	apply unchanged."""
 	if not skill:
 		return INBOUND_PROMPT
 	directive = (
-		f"This file was TAGGED for the '{skill}' skill. This REPLACES the skill "
-		"discovery in step 2 below: do NOT run find_skills - read '"
-		f"{skill}' with get_skill (or cat skills/{skill}/SKILL.md) and follow it for "
-		"classification, field mapping and routing. If it cannot be loaded, use the "
-		f"{OCR_DATA_ENTRY} skill instead. Every other step and rule below still applies.\n\n"
+		f"This file also carries a TAGGED skill: '{skill}'. Run the normal flow below "
+		"(classify, and process with the system's chosen skill - a discovered skill, "
+		f"else {OCR_DATA_ENTRY} - as the base extraction) AND, IN ADDITION, read the "
+		f"'{skill}' skill (get_skill '{skill}', or cat skills/{skill}/SKILL.md) and apply "
+		"its instructions on top: its field mappings, validation and routing LAYER onto "
+		"the base, they do not replace it. If the tagged skill cannot be loaded, carry on "
+		"with the base flow alone. The safety rules below still OVERRIDE both.\n\n"
 	)
 	return directive + INBOUND_PROMPT
 
@@ -114,11 +118,11 @@ def _validated_pinned_skill(skill: str | None) -> str | None:
 def drop_file(file_url: str, file_name: str | None = None, skill: str | None = None) -> dict:
 	"""Create a conversation for an uploaded file and kick off processing.
 
-	``skill`` (optional) pins ONE processing skill for this file: a Jarvis Custom
-	Skill's skill_name, or ``"ocr-data-entry"``. It is validated server-side (the
-	client string is untrusted) and, if usable, the agent follows it instead of
-	running find_skills discovery. An unusable / absent skill falls back to
-	auto-discovery."""
+	``skill`` (optional) tags ONE extra processing skill for this file: a Jarvis
+	Custom Skill's skill_name. It is validated server-side (the client string is
+	untrusted) and, if usable, the agent applies it ALONGSIDE the system's chosen
+	skill (additive - the base extraction still runs, the tagged skill layers on
+	top). An unusable / absent skill just leaves the normal auto-discovery flow."""
 	file_url = (file_url or "").strip()
 	if not file_url:
 		frappe.throw("file_url is required")

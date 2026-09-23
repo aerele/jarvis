@@ -46,12 +46,12 @@ class TestFileboxPrompt(FrappeTestCase):
 		self.assertEqual(build_inbound_prompt(None), INBOUND_PROMPT)
 		self.assertEqual(build_inbound_prompt(""), INBOUND_PROMPT)
 
-	def test_build_inbound_prompt_pinned_replaces_discovery(self):
+	def test_build_inbound_prompt_tagged_is_additive(self):
 		p = build_inbound_prompt("invoicing")
-		self.assertIn("invoicing", p)  # the pinned skill is named
-		self.assertIn("do NOT run find_skills", p)  # discovery replaced
-		self.assertIn(OCR_DATA_ENTRY, p)  # fallback still offered
-		# the whole safety envelope (the constant) is preserved verbatim, appended
+		self.assertIn("invoicing", p)  # the tagged skill is named
+		self.assertIn("IN ADDITION", p)  # applied ALONGSIDE the base, not replacing it
+		self.assertNotIn("do NOT run find_skills", p)  # the normal discovery still runs
+		# the whole base flow + safety envelope (the constant) is preserved verbatim
 		self.assertTrue(p.endswith(INBOUND_PROMPT))
 
 
