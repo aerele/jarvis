@@ -98,4 +98,56 @@ describe("DashboardFilterBar", () => {
 		await flushPromises();
 		expect(searchLink).toHaveBeenCalledWith("Company", "", 10);
 	});
+	it("clears every retargeted field in ONE emit when several change together", async () => {
+		const defsV1 = [
+			{
+				fieldname: "item",
+				label: "Item",
+				fieldtype: "Link",
+				options: "Item",
+				default: "",
+				reqd: 0,
+			},
+			{
+				fieldname: "loc",
+				label: "Location",
+				fieldtype: "Link",
+				options: "Warehouse",
+				default: "",
+				reqd: 0,
+			},
+			{
+				fieldname: "branch",
+				label: "Branch",
+				fieldtype: "Link",
+				options: "Company",
+				default: "",
+				reqd: 0,
+			},
+		];
+		const w = mount(DashboardFilterBar, {
+			props: {
+				defs: defsV1,
+				modelValue: { item: "IT-001", loc: "WH-001", branch: "C-001" },
+			},
+		});
+		await flushPromises();
+
+		// "loc" and "branch" both retarget in the SAME defs change; "item"
+		// keeps its DocType and value.
+		const defsV2 = [
+			defsV1[0],
+			{ ...defsV1[1], options: "Company" },
+			{ ...defsV1[2], options: "Territory" },
+		];
+		await w.setProps({ defs: defsV2 });
+		await flushPromises();
+
+		// a naive per-field emit would fire twice off the same stale
+		// props.modelValue snapshot, and a parent that replaces its state
+		// wholesale would keep only the LAST emit - un-clearing "loc" again.
+		const emits = w.emitted("update:modelValue");
+		expect(emits.length).toBe(1);
+		expect(emits[0][0]).toEqual({ item: "IT-001", loc: "", branch: "" });
+	});
 });
