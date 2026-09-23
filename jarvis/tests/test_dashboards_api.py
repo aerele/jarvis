@@ -19,6 +19,7 @@ from jarvis.chat.dashboards_api import (
 	get_dashboards_caps,
 	list_dashboard_conversations,
 	list_dashboards_page,
+	preview_dashboard_source,
 	run_dashboard_source,
 	save_dashboard,
 )
@@ -1292,3 +1293,72 @@ class TestDashboardFiltersSave(_DashboardsApiTestCase):
 		d2 = self._save({"name": d["name"], "html": "<h1>plain</h1>", "sources": [TODO_SRC_PLAIN]})
 		self._dashboards.pop()  # same name appended twice
 		self.assertEqual(d2["filters"], [])
+
+
+class TestRunWithFilters(_DashboardsApiTestCase):
+	def _dash(self):
+		frappe.set_user(PLAIN_A)
+		return self._save({"dashboard_title": "run-f", "html": FILTER_HTML, "sources": [TODO_SRC_FILTERED]})
+
+	def test_value_binds_and_empty_drops(self):
+		d = self._dash()
+		a = self._mk_todo(PLAIN_A)
+		frappe.set_user(PLAIN_A)
+		r = run_dashboard_source(d["name"], "todos", frappe.as_json({"assignee": PLAIN_A}))
+		self.assertTrue(r["ok"], r)
+		self.assertIn(a, [row["name"] for row in r["data"]["rows"]])
+		r = run_dashboard_source(d["name"], "todos", frappe.as_json({"assignee": "nobody@example.com"}))
+		self.assertTrue(r["ok"], r)
+		self.assertEqual(r["data"]["rows"], [])
+		r = run_dashboard_source(d["name"], "todos", "")
+		self.assertTrue(r["ok"], r)
+		self.assertIn(a, [row["name"] for row in r["data"]["rows"]])
+
+	def test_unknown_filter_name_is_invalid_argument(self):
+		d = self._dash()
+		frappe.set_user(PLAIN_A)
+		r = run_dashboard_source(d["name"], "todos", frappe.as_json({"other": "x"}))
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "InvalidArgumentError")
+
+	def test_required_empty_returns_filter_required(self):
+		frappe.set_user(PLAIN_A)
+		html = FILTER_HTML.replace('"options": "User"', '"options": "User", "reqd": 1')
+		d = self._save({"dashboard_title": "run-req", "html": html, "sources": [TODO_SRC_FILTERED]})
+		r = run_dashboard_source(d["name"], "todos", "")
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "FilterRequired")
+		self.assertEqual(r["error"]["fieldname"], "assignee")
+		self.assertEqual(r["error"]["message"], "Pick a value for Assigned to to load this data.")
+
+	def test_filter_value_cannot_widen_access(self):
+		# PLAIN_B's ToDo is not readable by PLAIN_A (ToDo perms are owner/allocated based);
+		# asking for it by filter value must still return nothing.
+		d = self._dash()
+		b = self._mk_todo(PLAIN_B)
+		frappe.set_user(PLAIN_A)
+		r = run_dashboard_source(d["name"], "todos", frappe.as_json({"assignee": PLAIN_B}))
+		self.assertTrue(r["ok"], r)
+		self.assertNotIn(b, [row["name"] for row in r["data"]["rows"]])
+
+	def test_preview_binds_same_as_runner(self):
+		frappe.set_user(PLAIN_A)
+		a = self._mk_todo(PLAIN_A)
+		defs = frappe.as_json(
+			[{"fieldname": "assignee", "label": "Assigned to", "fieldtype": "Link", "options": "User"}]
+		)
+		r = preview_dashboard_source(
+			"get_list", frappe.as_json(TODO_SRC_FILTERED["spec"]), defs, frappe.as_json({"assignee": PLAIN_A})
+		)
+		self.assertTrue(r["ok"], r)
+		self.assertIn(a, [row["name"] for row in r["data"]["rows"]])
+		r = preview_dashboard_source(
+			"get_list", frappe.as_json({"doctype": "ToDo", "fields": [{"$filter": "assignee"}]}), defs, ""
+		)
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "InvalidArgumentError")
+
+	def test_preview_requires_jarvis_user(self):
+		frappe.set_user("Guest")
+		with self.assertRaises(frappe.PermissionError):
+			preview_dashboard_source("get_list", "{}", "", "")
