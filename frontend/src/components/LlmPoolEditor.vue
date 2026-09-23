@@ -703,10 +703,6 @@
 									></template
 								>
 							</JvCombo>
-							<div class="jv-pool-opt" style="font-size: 11.5px; margin-top: 4px">
-								Pick a suggestion or type any model id your provider supports. Test
-								checks it before you save.
-							</div>
 						</div>
 						<div class="jv-pool-field">
 							<label class="jv-pool-lab"
@@ -970,7 +966,7 @@
                out afterwards used to cost a whole wasted OAuth round trip (#575). -->
 					<p v-if="addFoldsInto" class="jv-pool-foldnote">
 						{{ upstreamLabelOf(panelRow.upstream) }} is already connected. Signing in
-						again adds another account to this model, not a new model.
+						again adds another account.
 					</p>
 
 					<!-- Connect account: EDIT-mode re-entry only. In add mode the two-step sign-in
@@ -3685,6 +3681,15 @@ async function connectApiKeyRow(row) {
 		setApplyResult({ kind: "failed", text: blocked, detail: "" });
 		return;
 	}
+	// Validate the pool BEFORE probing the key: a combination the pool cannot
+	// serve (a Claude plan in the middle, Claude next to a Kimi plan) is refused
+	// on its own, and spending a live provider call on a row that will not be
+	// saved anyway showed "Key works" right above the refusal.
+	const pre = buildSavePayload();
+	if (pre.error) {
+		setApplyResult({ kind: "failed", text: pre.error, detail: "" });
+		return;
+	}
 	// Probe only what can actually be sent. A stored key is encrypted server-side and
 	// never comes back to the browser, so an untouched row has nothing to probe; and a
 	// container-only endpoint is reachable from the CONTAINER rather than from this
@@ -5976,11 +5981,19 @@ defineExpose({
    One grid + one input class, replacing per-field inline styles and flex ratios
    (1 / 1.5 / 1.5 / 1.5) that gave every field a different width. Two even columns
    read as a form; four uneven ones read as clutter. */
+.jv-pool-foldnote {
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--text-3);
+	margin: 2px 0 10px;
+}
 .jv-cfg-grid {
 	display: grid;
 	grid-template-columns: 1fr 1fr;
 	gap: 12px 14px;
-	align-items: end;
+	/* Top-aligned: a cell that grows (a hint, an error) must not push its
+	   neighbour's label down. */
+	align-items: start;
 }
 /* The dropdowns are JvCombo (the app's own), NOT native <select> — a native one is
    drawn by the OS with its own popup, which is exactly why this panel used to look
