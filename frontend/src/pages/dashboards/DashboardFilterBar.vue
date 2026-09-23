@@ -52,15 +52,22 @@ const props = defineProps({
 });
 const emit = defineEmits(["update:modelValue"]);
 
-// fieldname -> { linkSearch, label }. `label` is the last-picked title, kept
-// here (not derivable from the value alone) so the Autocomplete can show it
-// without a round trip back to the server.
+// fieldname -> { linkSearch, label, target }. `label` is the last-picked
+// title, kept here (not derivable from the value alone) so the Autocomplete
+// can show it without a round trip back to the server. `target` is the
+// DocType (def.options) this instance currently searches - read by the
+// fetcher AT CALL TIME (not captured once at creation) so a def that changes
+// its `options` under the same fieldname (a builder html re-parse can
+// re-point a filter at another DocType) searches the new target instead of
+// silently reusing the old one; the defs watcher below is what actually
+// updates `target` and reprimes when that happens.
 const searches = new Map();
 
 function ensure(d) {
 	let entry = searches.get(d.fieldname);
 	if (!entry) {
-		const linkSearch = useLinkSearch((query) => searchLink(d.options, query, 10), {
+		entry = { linkSearch: null, label: "", target: d.options };
+		entry.linkSearch = useLinkSearch((query) => searchLink(entry.target, query, 10), {
 			mapper: (rows) =>
 				(rows || []).map((r) => ({
 					value: String(r.value),
@@ -69,7 +76,6 @@ function ensure(d) {
 						r.label && r.label !== r.value ? String(r.value) : r.description || "",
 				})),
 		});
-		entry = { linkSearch, label: "" };
 		searches.set(d.fieldname, entry);
 	}
 	return entry;
@@ -98,15 +104,26 @@ function pick(name, opt) {
 defineExpose({ pick });
 
 // Prime each field's first page on mount and whenever the definition set
-// changes (a new html build declares different filters), and drop the search
-// state for any field that disappeared.
+// changes (a new html build declares different filters), drop the search
+// state for any field that disappeared, and reprime a field whose `options`
+// (link target DocType) changed under the SAME fieldname - the old value and
+// any cached options/label belong to a DocType this field no longer points
+// at, so both are cleared (FilterValueControl's field/operator-switch watch
+// does the same reprime for the same reason).
 watch(
 	() => props.defs,
 	(defs) => {
 		const names = new Set();
 		for (const d of defs || []) {
 			names.add(d.fieldname);
-			ensure(d).linkSearch.prime();
+			const entry = ensure(d);
+			if (entry.target !== d.options) {
+				entry.target = d.options;
+				entry.label = "";
+				entry.linkSearch.reprime();
+				emit("update:modelValue", { ...props.modelValue, [d.fieldname]: "" });
+			}
+			entry.linkSearch.prime();
 		}
 		for (const [name, entry] of searches) {
 			if (!names.has(name)) {
