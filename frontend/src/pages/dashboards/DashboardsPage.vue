@@ -111,6 +111,11 @@
 							/>
 						</div>
 					</div>
+					<DashboardFilterBar
+						:defs="detectedFilters"
+						:modelValue="builderFilters"
+						@update:modelValue="(v) => (builderFilters = v)"
+					/>
 					<DashboardCanvas
 						ref="canvasRef"
 						class="min-h-0 flex-1"
@@ -118,7 +123,14 @@
 						:html="builderHtml"
 						:caps="caps"
 						:theme="builderTheme"
+						:filters="builderFilters"
 						@sources="(s) => (detectedSources = s)"
+						@filters="
+							(f) => {
+								detectedFilters = f;
+								initBuilderFilters(f);
+							}
+						"
 					/>
 				</div>
 
@@ -235,6 +247,7 @@ import {
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
 import DashboardChatPane from "./DashboardChatPane.vue";
+import DashboardFilterBar from "./DashboardFilterBar.vue";
 import SavedDashboardsTab from "./SavedDashboardsTab.vue";
 import SaveDashboardDialog from "./SaveDashboardDialog.vue";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
@@ -295,6 +308,27 @@ const builderHtml = ref("");
 const editingDetail = ref(null); // full get_dashboard detail while editing
 const savedName = ref(""); // last save's name → the "View dashboard" link
 const detectedSources = ref([]); // parsed #jarvis-sources (DashboardCanvas emit)
+const detectedFilters = ref([]); // parsed #jarvis-filters (DashboardCanvas emit)
+const builderFilters = ref({}); // {fieldname: value} fed to the canvas; no URL sync here
+// Last-seen defs' fieldname set. Re-initialising on every "filters" emit
+// (the html watcher fires on any rebuild, not just a new filter set) would
+// clobber a value the user already picked; only a genuinely new set resets.
+let filterFieldnameKey = "";
+function initBuilderFilters(defs) {
+	const names = (defs || [])
+		.map((d) => d.fieldname)
+		.sort()
+		.join(",");
+	if (names === filterFieldnameKey) return;
+	filterFieldnameKey = names;
+	const next = {};
+	for (const d of defs || []) {
+		next[d.fieldname] = Object.prototype.hasOwnProperty.call(builderFilters.value, d.fieldname)
+			? builderFilters.value[d.fieldname]
+			: d.default || "";
+	}
+	builderFilters.value = next;
+}
 const saveOpen = ref(false);
 const chatPane = ref(null);
 const canvasRef = ref(null);
@@ -607,6 +641,9 @@ function clearBuilder() {
 	editingDetail.value = null;
 	savedName.value = "";
 	detectedSources.value = [];
+	detectedFilters.value = [];
+	builderFilters.value = {};
+	filterFieldnameKey = "";
 	builderTheme.value = DEFAULT_THEME;
 }
 
@@ -712,6 +749,16 @@ watch(
 // actual change). A future caller that adopts a row built by a DIFFERENT
 // conversation would need its own guard here; onDashboardSaved does not.
 function applyEditDetail(d, { deepLink = true } = {}) {
+	// A different saved dashboard: whatever the user picked belongs to the
+	// canvas that is about to be replaced, not this one. `onDashboardSaved`
+	// re-adopts the SAME row after every agent save and must NOT hit this -
+	// that is exactly the "keep the user's picks" case initBuilderFilters
+	// protects, so only a genuine identity change resets.
+	if (d.name !== editingName()) {
+		detectedFilters.value = [];
+		builderFilters.value = {};
+		filterFieldnameKey = "";
+	}
 	builderHtml.value = d.html || "";
 	editingDetail.value = d;
 	editingSticky.value = d.name;
