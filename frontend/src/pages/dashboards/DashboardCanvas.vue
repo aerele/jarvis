@@ -66,9 +66,9 @@
 
 <script setup>
 // DashboardCanvas - the sandboxed dashboard surface, shared by the builder
-// (mode="builder": fixed pane, sources executed ad-hoc via call_tool from the
-// spec the HTML itself declares) and the saved view page (mode="view": iframe
-// grows to its content, sources executed by name via run_dashboard_source -
+// (mode="builder": fixed pane, sources executed ad-hoc via preview_dashboard_source
+// from the spec the HTML itself declares) and the saved view page (mode="view":
+// iframe grows to its content, sources executed by name via run_dashboard_source -
 // the SERVER-stored spec is authoritative and the frame's spec is ignored).
 // The srcdoc is assembled by lib/dashboardSrcdoc (CSP + bridge runtime); the
 // echarts source only loads (dynamic ?raw import, its own chunk) when the
