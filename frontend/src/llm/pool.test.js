@@ -318,7 +318,7 @@ test("validatePool: Claude alone and either two-way Claude/Codex order are valid
 			[codex, claude, { provider: "openai", model: "gpt-4o", api_key: "sk-api" }],
 			null
 		).error,
-		/first \(primary\) or last \(fallback\)/i
+		/first or last/i
 	);
 });
 test("validatePool: api_key model with blank key but has_key is valid (key preserved on save)", () => {
