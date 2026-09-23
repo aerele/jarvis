@@ -177,10 +177,10 @@
       "fieldname": "action_outcome",
       "fieldtype": "Select",
       "label": "Action Outcome",
-      "options": "\nconfirmed\ndiscarded\nfailed\nauto_applied\ncancelled",
+      "options": "\nconfirmed\ndiscarded\nfailed\nauto_applied\ncancelled\nsuperseded\nexpired\nunknown\npartial",
       "read_only": 1,
       "depends_on": "eval:doc.role=='tool'",
-      "description": "Set on tool rows that originated from a confirmation card OR ran under an armed macro / approved skill run: 'confirmed' (user clicked Confirm and the write ran), 'discarded' (user declined - nothing ran), 'failed' (confirmed but the write errored/rolled back), or 'auto_applied' (ran WITHOUT a card under an armed macro's skip_confirmation or an approved skill run's skill_autorun - see armed_by_macro / armed_by_skill). Non-empty => the SPA renders this row as an inline receipt chip instead of an Activity-accordion tool row. Empty on ordinary (non-carded) tool calls."
+      "description": "Set on tool rows that originated from a confirmation card OR ran under an armed macro / approved skill run: 'confirmed' (user clicked Confirm and the write ran), 'discarded' (user declined - nothing ran), 'failed' (confirmed but the write errored/rolled back), 'auto_applied' (ran WITHOUT a card under an armed macro's skip_confirmation or an approved skill run's skill_autorun - see armed_by_macro / armed_by_skill), 'cancelled' (the run was stopped before confirm), 'superseded' (a newer proposal replaced this one before it was answered), 'expired' (the confirmation window lapsed unanswered), 'unknown' (the run was interrupted mid-execution - check before retrying), or 'partial' (partly applied - check before retrying). Non-empty => the SPA renders this row as an inline receipt chip instead of an Activity-accordion tool row. Empty on ordinary (non-carded) tool calls."
     },
     {
       "fieldname": "pending_card",

@@ -570,10 +570,19 @@ def persist_tool_receipt(
 	directly-minted token, a File-Box auto-apply, or a token parked before this
 	shipped) - exactly one terminal row per token either way."""
 	result = result or {}
-	# A discard (user declined) or a cancel (run stopped before confirm) executed
-	# NOTHING - the chip renders off action_outcome and tool_status stays empty
-	# (a valid Select option) rather than a misleading completed/error.
-	no_write = action_outcome in ("discarded", "cancelled")
+	# discarded/cancelled/superseded/expired executed NOTHING; unknown/partial's
+	# write state is UNVERIFIED (an interrupted or mid-dispatch outcome) - none of
+	# these get envelope_ok's binary completed/error classification. The chip
+	# renders off action_outcome and tool_status stays empty (a valid Select
+	# option) either way.
+	no_write = action_outcome in (
+		"discarded",
+		"cancelled",
+		"superseded",
+		"expired",
+		"unknown",
+		"partial",
+	)
 	if no_write:
 		status = ""
 	else:
@@ -584,8 +593,8 @@ def persist_tool_receipt(
 
 	# Entity stamping (org wiki): which doc this call touched, so wiki nudges
 	# can read a turn's entities off the receipt rows. Lazy + guarded: a
-	# missing/broken entities module must never break receipts. Skipped for a
-	# discard - it touched no document.
+	# missing/broken entities module must never break receipts. Skipped on
+	# no_write - either nothing ran, or whether it ran is unverified.
 	ref_doctype = ref_name = None
 	if not no_write:
 		try:
