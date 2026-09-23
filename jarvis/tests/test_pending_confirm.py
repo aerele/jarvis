@@ -424,9 +424,11 @@ class TestListForOwner(FrappeTestCase):
 		it = items[0]
 		self.assertEqual(
 			set(it.keys()),
-			{"token", "tool", "preview", "summary", "conversation", "run_id", "expires_at"},
+			{"token", "tool", "preview", "summary", "conversation", "run_id", "expires_at", "created_at"},
 		)
 		self.assertEqual(it["tool"], "create_doc")
+		# P0c: created_at is exact for a Redis record - always expires_at - TTL.
+		self.assertEqual(it["created_at"], it["expires_at"] - pending_confirm._TTL_S)
 		for internal in ("args", "exec_user", "args_hash"):
 			self.assertNotIn(internal, it)
 

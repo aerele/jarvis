@@ -171,6 +171,7 @@ def mint(
 	then carries no offer and Approve & run is unavailable for it.
 	"""
 	token = secrets.token_urlsafe(24)
+	resolved_expires_at = expires_at if expires_at is not None else int(time.time()) + _TTL_S
 	record = {
 		"conversation": conversation,
 		"owner": owner,
@@ -185,7 +186,12 @@ def mint(
 		# and distinguish a genuine TTL lapse from other confirm failures (F15).
 		# Defaults to now + TTL when the caller does not pass one, so every record
 		# carries it (the resync payload reads it straight off the record).
-		"expires_at": expires_at if expires_at is not None else int(time.time()) + _TTL_S,
+		"expires_at": resolved_expires_at,
+		# P0c: mint time (epoch seconds), the PRIMARY card-ordering key (stable
+		# under a future per-card TTL change; expires_at alone is not). Every
+		# token's TTL is _TTL_S, so this is exact - not just "expires_at minus a
+		# constant" by convention.
+		"created_at": resolved_expires_at - _TTL_S,
 	}
 	cache = frappe.cache()
 	# Persist the record, index it under its owner, and VERIFY it landed - all three
@@ -534,12 +540,18 @@ def _pending_item(
 	conversation: str,
 	run_id: str,
 	expires_at: int | None,
+	created_at: int | None = None,
 ) -> dict:
 	"""The ONE client-facing pending-confirmation item shape, shared by the live
 	``action:pending`` push (jarvis.api), the resync endpoint, and the ``run:end``
 	terminal - so the three cannot drift. Carries
 	``token``/``tool``/``preview``/``summary``/``conversation``/``run_id``/
-	``expires_at`` and NEVER the internal ``args``/``exec_user``/``args_hash``.
+	``expires_at``/``created_at`` and NEVER the internal ``args``/``exec_user``/
+	``args_hash``.
+
+	``created_at`` (P0c) is the primary card-ordering key; ``None`` for a record
+	minted before it existed (a mixed deploy) - every ordering comparator falls
+	back to ``expires_at`` for those.
 
 	``summary`` is COSMETIC: if ``_describe_call`` throws it degrades to "" (and is
 	logged) - a confirmable card must NEVER be dropped because its human label failed
@@ -562,6 +574,7 @@ def _pending_item(
 		"conversation": conversation,
 		"run_id": run_id,
 		"expires_at": expires_at,
+		"created_at": created_at,
 	}
 
 
@@ -581,6 +594,7 @@ def list_items_for_owner(owner: str, conversation: str | None = None, *, strict:
 			conversation=r.get("conversation"),
 			run_id=r.get("run_id"),
 			expires_at=r.get("expires_at"),
+			created_at=r.get("created_at"),
 		)
 		for r in list_for_owner(owner, conversation=conversation, strict=strict)
 	]

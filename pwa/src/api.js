@@ -113,11 +113,10 @@ export const dropFile = (file_url, file_name) =>
 // ── Write approvals (the write-safety gate) ─────────────────────────────────
 // A tool that would change ERP data is parked server-side and announced as an
 // `action:pending` event carrying a one-time token. confirm_tool is the ONLY
-// path that runs the parked call. There is no deny endpoint by design: dropping
-// the card leaves the token to expire, which is exactly what "no" means.
-// `source` is an optional provenance tag (layered re-check design): the on-demand
-// controls pass "pill"/"menu" and the silent auto-heal passes "auto", so the backend
-// attributes per layer how often a card had to be re-surfaced (AC-detect rescue).
+// path that runs the parked call. `source` is an optional provenance tag
+// (layered re-check design): the on-demand controls pass "pill"/"menu" and the
+// silent auto-heal passes "auto", so the backend attributes per layer how
+// often a card had to be re-surfaced (AC-detect rescue).
 export const listPendingConfirmations = (conversation, source) =>
 	call("jarvis.chat.actions_api.list_pending_confirmations", {
 		conversation: conversation || "",
@@ -130,6 +129,11 @@ export const confirmTool = (token, conversation) =>
 // Reachable only from a card whose preview.card.approve_run is true.
 export const approveAndRun = (token, conversation) =>
 	call("jarvis.chat.actions_api.approve_and_run", { token, conversation: conversation || "" });
+// Deny (P0c): consumes the token, leaves a durable "discarded" receipt chip,
+// and fires no agent turn - mirrors the desktop SPA's dismissTool. DecisionSheet
+// gates this behind its own "Discard this action?" confirm.
+export const dismissTool = (token, conversation) =>
+	call("jarvis.chat.actions_api.dismiss_tool", { token, conversation: conversation || "" });
 
 // ── Draft writes (the ```jarvis-action``` card) ─────────────────────────────
 // The other half of the write story, and the one the phone was missing entirely:

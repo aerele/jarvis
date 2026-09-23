@@ -4691,6 +4691,7 @@ import { shouldFollowBottom } from "@/lib/chatScroll";
 import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
+import { reconcilePending } from "@/lib/pendingResync";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
@@ -7782,12 +7783,11 @@ const approveRunBusyToken = ref(null);
 // Only the cards belonging to the conversation on screen render (a parked write
 // from another chat must not show here). The queue is already pruned to the
 // current conversation on load, but filter defensively for the template v-for.
-// Sorted the SAME way the server orders the parked list (mint order: expires_at
-// is mint time plus a fixed TTL, with the token breaking a same-second tie).
-// Load-bearing once a typed "confirm 1 and 3" can select by the number printed on
-// each card: if the screen and the server disagree about which card is number 1,
-// the wrong write runs. The queue's own arrival order is close but not identical,
-// since a resync merges cards in whatever order the store returned them.
+// Sorted in mint order (created_at, the token breaking a same-second tie;
+// expires_at is only the fallback for a pre-P0c record with no created_at), so the
+// numbers never shuffle: a typed "confirm 1 and 3" binds to the tokens THIS screen
+// numbered (approval_tokens), and a resync merges cards in whatever order the store
+// returned them.
 // What the hint offers depends on how many cards are stacked: with one there
 // is nothing to select, with several the useful thing to teach is that both
 // all-at-once and pick-a-few work.
@@ -7799,9 +7799,8 @@ const typedApprovalHint = computed(() => {
 	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
 });
 const visiblePendingActions = computed(() =>
-	// Ordered by the shared, unit-tested comparator (sortPendingCards) so the
-	// numbers on screen match the server's (expires_at, token) order a typed
-	// "confirm N" resolves against. See lib/sortPendingCards.js.
+	// Ordered by the shared, unit-tested comparator (sortPendingCards): stable
+	// numbers for a typed "confirm N". See lib/sortPendingCards.js.
 	sortPendingCards(pendingActions.value.filter((pa) => pa.conversation === currentId.value))
 );
 
@@ -7894,6 +7893,10 @@ function pendingActionFromRow(m, convId) {
 		summary: "",
 		preview: { card: m.pending_card },
 		run_id: null,
+		// The row has no dedicated created_at field; its own creation timestamp
+		// is stamped in the same request as the mint and is close enough for
+		// ordering (sortPendingCards falls back to expires_at when this is null).
+		created_at: _rowExpiresEpoch(m.creation),
 		expires_at: _rowExpiresEpoch(m.expires_at),
 	};
 }
@@ -7910,8 +7913,18 @@ function seedPendingFromRows(msgs, convId) {
 		}
 	}
 }
+// Tokens with a Confirm/Discard RPC currently in flight (confirmPending /
+// discardPending / approveAndRunPending). While a token is in here, the 2.5 s
+// pending poll / resync must not re-show its card: the RPC's own response
+// already removed it, but a STALE resync request issued just before the RPC
+// committed can still return the token as live and race the removal, re-adding
+// a card the user already acted on. Cleared once the acting function's whole
+// settle sequence (removePending + reload) has run.
+const inflightTokens = new Set();
+
 function enqueuePending(card) {
 	if (!card || !card.token) return;
+	if (inflightTokens.has(card.token)) return;
 	if (pendingActions.value.some((x) => x.token === card.token)) return;
 	pendingActions.value.push({
 		conversation: card.conversation,
@@ -7920,6 +7933,7 @@ function enqueuePending(card) {
 		summary: card.summary || "",
 		preview: card.preview || null,
 		run_id: card.run_id || null,
+		created_at: card.created_at || null,
 		expires_at: card.expires_at || null,
 		busy: false,
 		error: null,
@@ -7940,6 +7954,7 @@ async function confirmPending(pa) {
 	const cardById = () => pendingActions.value.find((x) => x.token === token);
 	pa.busy = true;
 	pa.error = null;
+	inflightTokens.add(token);
 	try {
 		const r = await api.confirmTool(token, pa.conversation || currentId.value || "");
 		if (r && r.ok === false) {
@@ -7995,6 +8010,7 @@ async function confirmPending(pa) {
 	} finally {
 		const card = cardById();
 		if (card) card.busy = false;
+		inflightTokens.delete(token);
 	}
 }
 // Approve & run (P1, skill approve-and-run): modeled on confirmPending above,
@@ -8016,6 +8032,7 @@ async function approveAndRunPending(pa) {
 	pa.busy = true;
 	pa.error = null;
 	approveRunBusyToken.value = token;
+	inflightTokens.add(token);
 	try {
 		const r = await api.approveAndRun(token, pa.conversation || currentId.value || "");
 		if (r && r.ok === false) {
@@ -8064,6 +8081,7 @@ async function approveAndRunPending(pa) {
 		const card = cardById();
 		if (card) card.busy = false;
 		approveRunBusyToken.value = null;
+		inflightTokens.delete(token);
 	}
 }
 // Resolution shared by the typed go-ahead and the Confirm button, so the two
@@ -8113,23 +8131,31 @@ async function discardPending(pa) {
 	const token = pa.token;
 	const conv = pa.conversation || currentId.value || "";
 	pa.busy = true;
+	// Outer try/finally guards the WHOLE settle sequence (including the reload
+	// below), not just the RPC, so a stale resync in flight during that reload
+	// still can't re-add this token (see inflightTokens above).
+	inflightTokens.add(token);
 	try {
-		const r = await api.dismissTool(token, conv);
-		if (r && r.ok === false && confirmationStorageUnavailable(r)) {
-			pa.error = r.error;
-			notify(r.error.message, { type: "error" });
+		try {
+			const r = await api.dismissTool(token, conv);
+			if (r && r.ok === false && confirmationStorageUnavailable(r)) {
+				pa.error = r.error;
+				notify(r.error.message, { type: "error" });
+				return;
+			}
+		} catch (e) {
+			pa.error = { message: errMessage(e, "Could not discard.") };
 			return;
+		} finally {
+			pa.busy = false;
 		}
-	} catch (e) {
-		pa.error = { message: errMessage(e, "Could not discard.") };
-		return;
+		removePending(token);
+		// Re-fetch so the durable "discarded" chip shows in the thread.
+		await loadConversation(currentId.value);
+		store.loadConversations();
 	} finally {
-		pa.busy = false;
+		inflightTokens.delete(token);
 	}
-	removePending(token);
-	// Re-fetch so the durable "discarded" chip shows in the thread.
-	await loadConversation(currentId.value);
-	store.loadConversations();
 }
 
 // Resync (R3 fix for #3): re-fetch the current conversation's live parked
@@ -8174,12 +8200,11 @@ async function resyncPendingConfirmations(id, source) {
 	// or a stale token orphaned by a model restage) and ADD any a dropped
 	// action:pending push missed. Cards for other conversations, and in-flight
 	// (busy) confirms, are left untouched. Server truth (not a caught socket
-	// frame) decides what shows.
-	const live = new Set(items.map((it) => it.token));
-	pendingActions.value = pendingActions.value.filter(
-		(pa) => pa.conversation !== id || pa.busy || live.has(pa.token)
-	);
-	for (const it of items) {
+	// frame) decides what shows. A token whose Confirm/Discard RPC is in flight
+	// is never (re)added (P0c in-flight suppression) - see reconcilePending.
+	const { kept, toAdd } = reconcilePending(pendingActions.value, id, items, inflightTokens);
+	pendingActions.value = kept;
+	for (const it of toAdd) {
 		enqueuePending({
 			conversation: it.conversation || id,
 			token: it.token,
@@ -8187,6 +8212,7 @@ async function resyncPendingConfirmations(id, source) {
 			summary: it.summary || "",
 			preview: it.preview || null,
 			run_id: it.run_id || null,
+			created_at: it.created_at || null,
 			expires_at: it.expires_at || null,
 		});
 	}
@@ -10030,6 +10056,7 @@ function onEvent(p) {
 				summary: p.summary || "",
 				preview: p.preview || null,
 				run_id: p.run_id || null,
+				created_at: p.created_at || null,
 				expires_at: p.expires_at || null,
 			});
 			// Keep pulling server truth for the rest of the turn: if THIS push

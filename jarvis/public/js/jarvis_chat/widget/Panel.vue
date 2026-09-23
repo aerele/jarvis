@@ -947,12 +947,9 @@ const draft = ref("");
 const sending = ref(false);
 const composerFocused = ref(false);
 const resolving = ref("");
-// Ordered the SAME way the server orders the parked list: a typed "confirm 2"
-// selects by the number shown here, and the store keeps tokens in a Redis SET
-// with no order of its own. Tokens compare by code unit so the tiebreak matches
-// the server's byte order rather than locale rules.
-// Ordered by the shared, unit-tested comparator so the numbers on screen match
-// the server's (expires_at, token) order a typed "confirm N" resolves against.
+// A typed "confirm 2" binds to the token shown as number 2 here (approval_tokens),
+// so the numbering must be stable: the shared, unit-tested comparator orders by
+// (created_at, token by code unit), whatever order the store listed them in.
 const orderedPending = computed(() => sortPendingCards(stream.value.pending || []));
 // Typed approval works in the widget too, but only the desktop advertised it.
 // The selective example numbers track the real count so it never overshoots.
@@ -1336,6 +1333,11 @@ async function resyncPending(source) {
 				token: m.tool_call_id,
 				tool: m.tool_name || "",
 				summary: m.tool_name || "",
+				// The row has no dedicated created_at field; its own creation
+				// timestamp is stamped in the same request as the mint and is close
+				// enough for ordering (the comparator falls back to expires_at
+				// anyway when this is missing).
+				created_at: toEpoch(m.creation),
 				expires_at: toEpoch(m.expires_at),
 				approve_run: !!(m.pending_card && m.pending_card.approve_run),
 			}));
@@ -1353,6 +1355,7 @@ async function resyncPending(source) {
 					token: r.token,
 					tool: r.tool || "",
 					summary: r.summary || r.preview || "",
+					created_at: r.created_at ?? null,
 					expires_at: r.expires_at ?? null,
 					approve_run: pendingApproveRun(r.preview),
 			  }))

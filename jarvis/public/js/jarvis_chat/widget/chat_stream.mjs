@@ -145,9 +145,11 @@ function applyAdmitted(s, p) {
         token: p.token,
         tool: p.tool || "",
         summary: p.summary || "",
-        // expires_at is the primary sort key for numbered typed approval
-        // ("confirm 2"). Dropping it makes orderedPending fall back to token
-        // order, which disagrees with the server and can run the wrong card.
+        // created_at (P0c) is the primary sort key for numbered typed approval
+        // ("confirm 2"); expires_at is kept as the fallback for a pre-P0c
+        // record. Dropping both makes orderedPending fall back to token order,
+        // which disagrees with the server and can run the wrong card.
+        created_at: p.created_at ?? null,
         expires_at: p.expires_at ?? null,
         // Text-only signal (see pendingApproveRun) - never the preview/plan
         // itself, so the widget stays a plain confirm/deflect surface.

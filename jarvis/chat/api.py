@@ -1001,6 +1001,15 @@ def _compacting_reject(conversation: str) -> dict | None:
 	return None
 
 
+def _card_sort_key(c: dict) -> int:
+	"""P0c ordering key for a pending-confirmation item: ``created_at`` when the
+	record carries one, else ``expires_at`` (a record minted before P0c
+	shipped). Shared by every server sort so a mixed deploy still numbers
+	consistently."""
+	created_at = c.get("created_at")
+	return created_at if created_at is not None else (c.get("expires_at") or 0)
+
+
 def _ordered_parked_cards(user: str, conversation: str) -> list[dict] | None:
 	"""This user's currently-live parked cards for this conversation.
 
@@ -1035,7 +1044,11 @@ def _ordered_parked_cards(user: str, conversation: str) -> list[dict] | None:
 			conversation,
 		)
 		return None
-	return sorted(parked, key=lambda c: (c.get("expires_at") or 0, c.get("token") or ""))
+	# P0c: (created_at, token) is the stable order - unlike expires_at, it never
+	# shifts if a future change gives cards a non-uniform TTL. A record minted
+	# before created_at existed (a mixed deploy) falls back to expires_at so
+	# numbering doesn't break mid-rollout.
+	return sorted(parked, key=lambda c: (_card_sort_key(c), c.get("token") or ""))
 
 
 #: Cap on how many displayed tokens a client may send. A confirmation stack is a

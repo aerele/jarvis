@@ -2813,6 +2813,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						conversation=conv,
 						run_id=run_id,
 						expires_at=expires_at,
+						created_at=expires_at - pending_confirm._TTL_S,
 					),
 				},
 			)
