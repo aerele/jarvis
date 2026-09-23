@@ -19,15 +19,25 @@
 				role="group"
 				:aria-label="`Value for ${d.label}`"
 			>
-				<Autocomplete
-					:options="optionsFor(d)"
-					:loading="loadingFor(d)"
-					:modelValue="modelFor(d)"
-					:placeholder="`Search ${d.options}…`"
-					bodyClasses="min-w-[16rem]"
-					@update:query="(q) => onQuery(d, q)"
-					@update:modelValue="(opt) => pick(d.fieldname, opt)"
-				/>
+				<div class="flex items-center gap-1">
+					<Autocomplete
+						:options="optionsFor(d)"
+						:loading="loadingFor(d)"
+						:modelValue="modelFor(d)"
+						:placeholder="`Search ${d.options}…`"
+						bodyClasses="min-w-[16rem]"
+						@update:query="(q) => onQuery(d, q)"
+						@update:modelValue="(opt) => pick(d.fieldname, opt)"
+					/>
+					<!-- label -> aria-label on icon-only frappe-ui buttons -->
+					<Button
+						v-if="modelFor(d)"
+						variant="ghost"
+						icon="x"
+						:label="`Clear ${d.label}`"
+						@click="pick(d.fieldname, null)"
+					/>
+				</div>
 			</div>
 		</div>
 	</div>
@@ -41,7 +51,7 @@
 // definition since the bar renders an arbitrary list of fields inline rather
 // than one control per mounted component.
 import { watch, onBeforeUnmount } from "vue";
-import { Autocomplete } from "frappe-ui";
+import { Autocomplete, Button } from "frappe-ui";
 import { searchLink } from "@/api";
 import { useLinkSearch } from "@/composables/useLinkSearch";
 
@@ -95,6 +105,9 @@ function modelFor(d) {
 function onQuery(d, q) {
 	ensure(d).linkSearch.onQuery(q);
 }
+// opt is null both when the clear button is clicked and when the
+// Autocomplete itself emits null on deselect - either way this resolves
+// to an empty value, which is what "no filter" (unfiltered) means.
 function pick(name, opt) {
 	const v = opt && opt.value != null ? String(opt.value) : "";
 	const entry = searches.get(name);
