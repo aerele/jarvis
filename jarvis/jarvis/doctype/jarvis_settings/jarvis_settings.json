@@ -157,7 +157,10 @@
   "signup_context",
   "maintenance_notice_section",
   "maintenance_active",
-  "maintenance_message"
+  "maintenance_message",
+  "catalogue_visibility_section",
+  "catalogue_visibility_governed",
+  "catalogue_visibility_synced_at"
  ],
  "fields": [
   {
@@ -1143,6 +1146,28 @@
    "fieldname": "maintenance_message",
    "fieldtype": "Small Text",
    "label": "Maintenance Message",
+   "read_only": 1
+  },
+  {
+   "fieldname": "catalogue_visibility_section",
+   "fieldtype": "Section Break",
+   "label": "Operator Catalogue Visibility",
+   "collapsible": 1,
+   "description": "Mirror of the operator's fleet-global agent-catalogue visibility policy, pulled from the control plane via get_connection (jarvis.catalogue_visibility). Read-only here; the pull is the only writer of a governed agent's operator_visibility."
+  },
+  {
+   "fieldname": "catalogue_visibility_governed",
+   "fieldtype": "Small Text",
+   "label": "Governed Catalogue Visibility",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Canonical JSON map {agent_slug: visibility} of the operator-governed agents last applied. Used to compute reverts (a slug dropped from the policy returns to 'available') and to hard-gate governed agents against tenant edits/installs. Empty {} = nothing governed; empty string = never pulled (or last pull kept last-known)."
+  },
+  {
+   "fieldname": "catalogue_visibility_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Catalogue Visibility Synced At",
+   "hidden": 1,
    "read_only": 1
   }
  ],

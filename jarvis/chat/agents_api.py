@@ -194,6 +194,86 @@ def list_agents() -> list[dict]:
 	return _enriched_catalog()
 
 
+_MASK_TITLE = "Coming soon"
+
+
+def _opaque_id(slug: str) -> str:
+	"""Stable, non-reversible id for a masked (teaser) row. The real ``agent_slug`` IS the
+	agent's human name (``close-auditor``) and slugs are low-entropy + fully enumerable
+	(they ship in the bundled registry.json), so a plain ``sha256(slug)`` would be a
+	dictionary/confirmation oracle — a non-admin could precompute it for every known slug
+	and recover the identity. HMAC with the per-site secret so the id cannot be
+	precomputed off-site. It is never resolved back server-side (get_agent(opaque)->404),
+	so it only needs to be stable + unique, not reversible."""
+	import hashlib
+	import hmac
+
+	secret = (frappe.local.conf.get("encryption_key") or frappe.local.site or "jarvis").encode("utf-8")
+	return "cs-" + hmac.new(secret, (slug or "").encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+
+
+# Every agent-IDENTITY / detail field a teaser must hide from a non-admin non-owner.
+# Redaction is strip-to-safe in ONE place, so a new agent-metadata field added to either
+# read path (the list or the detail) can't leak through one seam by drifting from the other.
+_TEASER_STRIP_FIELDS = (
+	"category",
+	"nature",
+	"version",
+	"publisher",
+	"rule_pack",
+	"tools_required",
+	"doctypes_required",
+	"config_keys",
+	"min_apps",
+	"default_schedule",
+	"validated_for_fy",
+	"modified",  # a real timestamp fingerprints the agent; not needed on a masked card
+	# The access roster fingerprints the withdrawn agent (allowed_users can be a single named
+	# person). Now that a teaser is masked for EVERY role incl. admins, strip it here too — the
+	# admin's roster pop in the list / the is_sm block in get_agent no longer covers a masked row.
+	"allowed_roles",
+	"allowed_users",
+)
+
+
+def _mask_teaser_row(r: dict) -> None:
+	"""Redact a ``teaser`` listing served to a non-admin non-owner, IN PLACE — the SINGLE
+	mask for BOTH the list (_enriched_catalog) and the detail (get_agent) seams. The real
+	name/slug/details never leave the server: the slug/name become an opaque id, the title
+	is masked, and every identity/detail field (incl. nature/version/install_count) is
+	stripped so a masked 'coming soon' card cannot fingerprint the real agent."""
+	r["masked"] = 1
+	r["operator_visibility"] = "teaser"
+	r["opaque_id"] = _opaque_id(r.get("agent_slug") or r.get("name"))
+	r["name"] = r["opaque_id"]
+	r["agent_slug"] = r["opaque_id"]
+	r["title"] = _MASK_TITLE
+	r["description"] = ""
+	r["installable"] = 0
+	r["install_count"] = 0  # a coming-soon card shows no adoption (also hides fingerprinting)
+	# Force the status to the generic teaser label rather than leak the real lifecycle
+	# state (Published/Deprecated/...); "Coming Soon" is discoverable, so the SPA tab
+	# filter still places the masked card in 'available' (never 'featured').
+	if "status" in r:
+		r["status"] = "Coming Soon"
+	for f in _TEASER_STRIP_FIELDS:
+		if f in r:
+			r[f] = None
+
+
+def _agent_is_withdrawn(agent: str) -> bool:
+	"""True iff the operator has set the agent teaser/hidden. A withdrawn agent's existing
+	installs are DISABLED — they do not run — but the install is NOT deleted and its own
+	``enabled`` flag is never mutated, so setting the agent back to ``available`` restores
+	it. Consulted at run time (manual + scheduler) so the operator's decision applies to
+	everyone, admins included, and is reversible with no stored state.
+
+	Fails OPEN on a missing listing (get_value -> None -> 'available' -> not withdrawn): both
+	callers have a downstream existence/nature guard (a vanished listing is refused there), so
+	the aggregate stays fail-closed. Any NEW caller must keep that existence guard."""
+	return (frappe.db.get_value(LISTING, agent, "operator_visibility") or "available") in ("teaser", "hidden")
+
+
 def _enriched_catalog() -> list[dict]:
 	"""The shared per-row enrichment behind ``list_agents`` AND
 	``list_agents_page`` — one implementation so the paginated SPA list can
@@ -217,6 +297,7 @@ def _enriched_catalog() -> list[dict]:
 			"version",
 			"publisher",
 			"status",
+			"operator_visibility",
 			"rule_pack",
 			"default_schedule",
 			"validated_for_fy",
@@ -280,6 +361,7 @@ def _enriched_catalog() -> list[dict]:
 		# moment either changed.
 		lst["allowed"] = 1 if _is_allowed(allowed_roles, allowed_users, me, my_roles, is_admin=is_sm) else 0
 		lst["install_count"] = install_counts.get(lst.name, 0)
+		lst["masked"] = 0
 		out.append(lst)
 	# jarvis#1062 D2 (revised): a non-admin never sees a row it may not
 	# DISCOVER, but a row it already INSTALLED stays visible regardless of role
@@ -295,8 +377,37 @@ def _enriched_catalog() -> list[dict]:
 	# always sees every row, `allowed` computed exactly as before. The ONE
 	# choke point both list_agents and list_agents_page share, so neither can
 	# drift from the other.
+	# Operator visibility is the catalogue's source of truth for EVERY role, admins
+	# INCLUDED — the operator's teaser/hidden decision is final, not a per-role view (an
+	# admin no longer sees through it). Access governance (role grants + lifecycle status)
+	# is a SEPARATE gate that still applies only to non-admins on AVAILABLE agents.
+	kept = []
+	for r in out:
+		vis = r.get("operator_visibility") or "available"
+		if vis in ("teaser", "hidden"):
+			if r["installed"]:
+				# The owner still sees their own install (Installed tab) but DISABLED: it does
+				# not run and is never offered for discovery in the browse tabs. Not a leak —
+				# only the owner sees it, and they already know the agent they installed.
+				r["install_disabled"] = 1
+				r["installed_only"] = 1
+				kept.append(r)
+				continue
+			if vis == "teaser" and r["status"] in _DISCOVERABLE_STATUSES:
+				_mask_teaser_row(r)  # masked 'coming soon' card for EVERYONE, admins included
+				kept.append(r)
+				continue
+			continue  # hidden (or non-discoverable teaser): absent for EVERYONE, admins included
+		# available: unchanged access governance — admins see all; non-admins role + status gated.
+		if is_sm or r["installed"]:
+			kept.append(r)
+			continue
+		if r["status"] not in _DISCOVERABLE_STATUSES:
+			continue  # Draft/Deprecated are lifecycle states, not discoverable
+		if r["allowed"]:  # the existing role-gated discovery rule, unchanged
+			kept.append(r)
+	out = kept
 	if not is_sm:
-		out = [r for r in out if r["installed"] or (r["allowed"] and r["status"] in _DISCOVERABLE_STATUSES)]
 		for r in out:
 			# WHO ELSE has access is admin-only information: a plain user learns
 			# whether THEY are allowed (the ``allowed`` flag), never the roster.
@@ -334,12 +445,14 @@ def list_agents_page(
 	start, pl = _clamp_page(start, page_length)
 	rows = _enriched_catalog()
 
+	# ``installed_only`` rows (an owner's install of an operator teaser/hidden agent) appear
+	# ONLY in the Installed tab, disabled — never offered for discovery in the browse tabs.
 	if tab == "featured":
-		rows = [r for r in rows if r.status == "Published"]
+		rows = [r for r in rows if r.status == "Published" and not r.get("installed_only")]
 	elif tab == "installed":
 		rows = [r for r in rows if r.installed]
 	else:  # available
-		rows = [r for r in rows if r.status != "Deprecated" or r.installed]
+		rows = [r for r in rows if (r.status != "Deprecated" or r.installed) and not r.get("installed_only")]
 
 	if category:
 		rows = [r for r in rows if (r.category or "") == category]
@@ -401,12 +514,25 @@ def get_agent(agent_slug: str) -> dict:
 	# deliberate teaser), so it passes like Published; Draft/Deprecated still
 	# need the install carve-out. Admin display parity is untouched: an admin
 	# (is_sm) always passes.
-	if (
-		not is_sm
-		and not installed_by_caller
-		and (not allowed or listing.status not in _DISCOVERABLE_STATUSES)
-	):
-		frappe.throw(_("You do not have access to this agent."), frappe.PermissionError)
+	# Operator visibility overlay (same gate the list applies in _enriched_catalog):
+	#  hidden -> unreachable even by slug (generic not-found, no leak);
+	#  teaser -> discoverable-but-masked, bypasses the role gate, redacted below;
+	#  available -> the existing role + discoverable-status gate.
+	vis = listing.operator_visibility or "available"
+	_masked = False
+	if not installed_by_caller:
+		# Operator visibility applies to EVERYONE, admins included — only the owner of an
+		# existing install may still read it (to view / uninstall the disabled install).
+		# Access governance still gates AVAILABLE agents for non-admins only.
+		if vis == "hidden":
+			frappe.throw(_("Agent not found."), frappe.DoesNotExistError)
+		if vis == "teaser":
+			if listing.status in _DISCOVERABLE_STATUSES:
+				_masked = True
+			else:
+				frappe.throw(_("Agent not found."), frappe.DoesNotExistError)
+		elif not is_sm and (not allowed or listing.status not in _DISCOVERABLE_STATUSES):
+			frappe.throw(_("You do not have access to this agent."), frappe.PermissionError)
 
 	out: dict = {
 		"name": listing.name,
@@ -440,6 +566,15 @@ def get_agent(agent_slug: str) -> dict:
 		"install_count": frappe.db.count(INSTALLATION, {"agent": listing.name}),
 		"installation": None,
 	}
+	out["operator_visibility"] = vis
+	out["masked"] = 0
+	# The owner reads a withdrawn (teaser/hidden) install as DISABLED — visible so they can
+	# view / uninstall it, but not runnable while the operator keeps it withdrawn.
+	out["install_disabled"] = 1 if (installed_by_caller and vis in ("teaser", "hidden")) else 0
+	if _masked:
+		# Redact the teaser for a non-admin non-owner via the SAME helper the list uses,
+		# so the detail seam can never drift from the list seam.
+		_mask_teaser_row(out)
 
 	inst = frappe.get_all(
 		INSTALLATION,
@@ -472,10 +607,12 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		out["installation"] = i
 
-	if is_sm:
+	if is_sm and not _masked:
 		# The ACCESS ROSTER (who may use this agent) is admin-only, exactly like the
 		# ``all_roles`` picker source that rides with it. A non-admin gets only the
 		# ``allowed`` boolean above: whether THEY are allowed, never who else is.
+		# NEVER on a masked teaser, even for an admin — the roster (esp. allowed_users) would
+		# fingerprint the withdrawn agent the operator's decision now hides from every role.
 		out["allowed_roles"] = [row.role for row in (listing.allowed_roles or [])]
 		out["allowed_users"] = [row.user for row in (listing.allowed_users or [])]
 		out["all_roles"] = [
@@ -757,6 +894,41 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 	return {"ok": True, "status": doc.status}
 
 
+_VISIBILITY_CHOICES = ("available", "teaser", "hidden")
+
+
+@frappe.whitelist()
+def set_operator_visibility(agent_slug: str, visibility: str) -> dict:
+	"""Set an agent's operator catalogue visibility (available / teaser / hidden).
+
+	SYSTEM MANAGER ONLY — this is operator-global state, deliberately NOT
+	``require_jarvis_admin`` (a tenant's own Jarvis Admin must not flip what the whole
+	catalogue shows/hides). In Phase 2 the admin_v2 propagation channel calls this same
+	endpoint on every bench. The write goes through ``doc.save()``, so the listing's
+	``track_changes`` produces a Version record (actor + before->after) as the audit."""
+	frappe.only_for("System Manager")
+	if visibility not in _VISIBILITY_CHOICES:
+		frappe.throw(_("Visibility must be one of: {0}.").format(", ".join(_VISIBILITY_CHOICES)))
+	doc = frappe.get_doc(LISTING, agent_slug)
+	before = doc.operator_visibility or "available"
+	if before == visibility:
+		return {"ok": True, "visibility": visibility}
+	doc.operator_visibility = visibility
+	doc.save()  # track_changes -> Version (who + before->after), the audit trail
+	# teaser/hidden move the container roster (leg 1 of build_agent_push_payload skips
+	# them), exactly like a status flip — so signal "Apply pending" when the agent is
+	# granted or has an enabled install, mirroring set_listing_status above.
+	if before == "available" or visibility == "available":
+		if (
+			frappe.db.exists(INSTALLATION, {"agent": doc.name, "enabled": 1})
+			or frappe.db.exists(ALLOWED_ROLE, {"parenttype": LISTING, "parent": doc.name})
+			or frappe.db.exists(ALLOWED_USER, {"parenttype": LISTING, "parent": doc.name})
+		):
+			_mark_catalog_dirty()
+	frappe.db.commit()
+	return {"ok": True, "visibility": doc.operator_visibility}
+
+
 @frappe.whitelist()
 def get_agent_admin_overview() -> dict:
 	"""Bench-admin overview: the selectable Roles + every listing with its
@@ -954,6 +1126,19 @@ def install_agent(agent_slug: str) -> dict:
 			_("You do not have access to this agent. Ask your administrator."),
 			frappe.PermissionError,
 		)
+	# Operator overlay: a teaser (coming-soon preview) or hidden (withdrawn) agent is
+	# not installable — even when it is Published and role-granted. Admins may still
+	# install for testing; the gate is server-side (the SPA never offers the button).
+	# Operator-GOVERNED slugs (fleet policy) are hard-gated for EVERYONE incl. admins, and
+	# regardless of the local listing value (which can lag at 'available' briefly after a bundle
+	# sync re-creates the listing). Tenant-local teaser/hidden still allows an admin dogfood
+	# install (the check below). The controller re-enforces on every surface.
+	from jarvis import catalogue_visibility
+
+	if catalogue_visibility.is_operator_governed(listing.name):
+		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
+	if (listing.operator_visibility or "available") != "available" and not has_jarvis_admin_access(me):
+		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
 	if listing.status != "Published":
 		frappe.throw(_("This agent is not available to install."))
 	if frappe.db.exists(INSTALLATION, {"owner": me, "agent": listing.name}):
@@ -1428,6 +1613,15 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	the run's immutable ``initiating_human`` (JF-021) — three distinct identities."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3: who may trigger
+	# Operator-visibility gate: a teaser/hidden (operator-withdrawn) agent does not run, even
+	# for an existing install — the install stays but is DISABLED. Reversible (agent -> available
+	# runs it again; never mutates ``enabled``), and applies to everyone incl. an admin
+	# triggering another owner's run.
+	if _agent_is_withdrawn(doc.agent):
+		frappe.throw(
+			_("This agent has been withdrawn by the operator and can't run right now."),
+			frappe.PermissionError,
+		)
 	# R1-F3: no ``or doc.owner`` fallback. A blank run-as user is a MISCONFIGURED
 	# install, and defaulting to the row owner would run this audit's ERP reads as
 	# an identity the A4 escalation guard never litigated — a privilege grant
