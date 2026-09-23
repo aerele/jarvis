@@ -211,12 +211,12 @@ export function validatePool(models, preset) {
 		if (otherSubscriptions.some((m) => subscriptionUpstream(m) !== "openai"))
 			return {
 				ok: false,
-				error: "A Claude plan runs on its own connection, outside the proxy. Right now it can be combined only with a ChatGPT plan or API keys. Remove the Kimi/xAI plan or the Claude plan.",
+				error: "Claude can be combined only with ChatGPT or API keys for now.",
 			};
 		if (claudeIndexes[0] !== 0 && claudeIndexes[0] !== models.length - 1)
 			return {
 				ok: false,
-				error: "A Claude plan runs on its own connection, outside the proxy. Keep it first (primary) or last (fallback) so Jarvis knows which one to try first.",
+				error: "Claude runs outside the proxy. Keep it first or last.",
 			};
 	}
 	return { ok: true, error: "" };

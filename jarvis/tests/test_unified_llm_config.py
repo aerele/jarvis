@@ -605,7 +605,7 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		self.assertEqual(validate_models(_make_settings_with_models([codex, claude])), [])
 		api_fallback = _api_key_model(order=2)
 		errors = validate_models(_make_settings_with_models([codex, claude, api_fallback]))
-		self.assertTrue(any("first (primary) or last (fallback)" in e for e in errors), errors)
+		self.assertTrue(any("first or last" in e for e in errors), errors)
 
 	# ------------------------------------------------------------------ #
 	# (c) Mixed upstream across accounts → validate_models error
