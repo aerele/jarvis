@@ -23,6 +23,9 @@ from jarvis.permissions import (
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
+# frappe.flags key (server-only): a callable run inside send_message's user-row
+# transaction; False rolls the send back (a held resume's waiter ``done`` rides it).
+SEND_CLAIM_FLAG = "jarvis_send_claim"
 
 
 def _get_owned_conversation(conversation: str):
@@ -1523,7 +1526,9 @@ def send_message(
 	# so an overloaded site never accretes orphaned messages, and the compaction
 	# front door (_compacting_reject) still gates both branches below it.
 	if admission.turn_machine_enabled():
-		if admission.shard_overloaded(conversation):
+		# A held File Box resume continues an already-decided approval: it queues,
+		# never bounces on overload (frappe.flags.jarvis_resume_exempt, server-set).
+		if admission.shard_overloaded(conversation) and not frappe.flags.get("jarvis_resume_exempt"):
 			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
 		if _rej := _compacting_reject(conversation):
 			return _rej
@@ -1683,6 +1688,10 @@ def send_message(
 		conv_doc.flags.ignore_permissions = True
 	conv_doc.sync_file_box_fields()
 	conv_doc.save()
+	_claim = frappe.flags.get(SEND_CLAIM_FLAG)
+	if _claim is not None and not _claim():
+		frappe.db.rollback()
+		return {"ok": False, "reason": "already_claimed"}
 	frappe.db.commit()
 
 	# Upfront request-scoped "confirm all" (design Layer B): a compound message that
@@ -2858,6 +2867,17 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		api.cancel_pending_action_rows(conversation)
 	except Exception:
 		frappe.log_error(title="stop_run token sweep", message=frappe.get_traceback())
+	# A stopped File Box run stops waiting on its held writes: its waiter membership
+	# is dropped (the next waiter is promoted; the last one leaving cancels the row).
+	# The held row itself stays for the other files waiting on it.
+	if conv.file_box:
+		try:
+			from jarvis.chat import pending_actions
+
+			pending_actions.cancel_for_conversation(conversation)
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title="jarvis.pending_action.stop_drop_failed", message=frappe.get_traceback())
 	# Layer B: Halt also ENDS a request-scoped "confirm all" run, so its remaining
 	# fan-out re-cards. In its OWN try/except (not coupled to the token sweep above): the
 	# run-cancel signal below has a shorter TTL than request_autorun (900s), so if the

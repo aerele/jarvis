@@ -94,7 +94,16 @@ class TestHeldParties(FrappeTestCase):
 		self.assertTrue(held_parties.item_key(bare).startswith("args:"))
 		self.assertEqual(len(held_parties.items_of("create_docs", _batch_args())), 2)
 		upd = held_parties.items_of("update_doc", {"doctype": "Supplier", "name": "S-1", "changes": {"x": 1}})
-		self.assertEqual(held_parties.item_key(upd[0]), "doc:Supplier:S-1")
+		key = held_parties.item_key(upd[0])
+		self.assertTrue(key.startswith("doc:Supplier:S-1:"), key)  # + a hash of the changes
+		same = held_parties.items_of(
+			"update_doc", {"doctype": "Supplier", "updates": [{"name": "S-1", "changes": {"x": 1}}]}
+		)
+		other = held_parties.items_of(
+			"update_doc", {"doctype": "Supplier", "name": "S-1", "changes": {"x": 2}}
+		)
+		self.assertEqual(held_parties.item_key(same[0]), key)
+		self.assertNotEqual(held_parties.item_key(other[0]), key)
 		self.assertEqual(held_parties.items_of("submit_doc", {"doctype": "Supplier"}), [])
 
 
@@ -223,6 +232,17 @@ class TestDecide(_Base):
 		self.assertEqual(res["candidates"][0]["name"], existing)
 		self.assertEqual(calls, [])
 		self.assertEqual(self.row(name)["status"], "Pending")
+
+	def test_a_batch_whose_party_exists_now_says_skip_not_rerun(self):
+		name, _ = self.held(owner=SM_USER, exec_user=BUYER, args=_batch_args())
+		self.supplier()
+		with fake_dispatch() as calls:
+			res = self.decide(SM_USER, name, "create")
+		self.assertEqual(res["reason_code"], "exists")
+		self.assertIn("Skip this approval", res["error"]["message"])
+		self.assertIn("drop the file again", res["error"]["message"])
+		self.assertNotIn("re-run", res["error"]["message"].lower())
+		self.assertEqual((calls, self.row(name)["status"]), ([], "Pending"))
 
 	def test_use_existing_resolves_without_creating(self):
 		existing = self.supplier()

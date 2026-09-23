@@ -25,6 +25,7 @@
   "run_id",
   "batch_id",
   "open_key",
+  "dedup_keys",
   "executing_at",
   "decided_at",
   "result_doctype",
@@ -161,6 +162,13 @@
    "fieldtype": "Data",
    "label": "Open Key",
    "unique": 1
+  },
+  {
+   "description": "Held rows: HMACs of the per-item dedup keys (the waiter subset rule). Kept after the row ends.",
+   "fieldname": "dedup_keys",
+   "fieldtype": "Small Text",
+   "label": "Dedup Keys",
+   "read_only": 1
   },
   {
    "fieldname": "executing_at",

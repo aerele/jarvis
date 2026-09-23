@@ -44,6 +44,11 @@ describe("fileboxStatus", () => {
 			kind: "route",
 			href: "/approvals/ab12",
 		});
+		// a held File Box write opens in the board's held lane
+		expect(resultLink({ result_link: "/approvals?held=pa12" })).toEqual({
+			kind: "route",
+			href: "/approvals?held=pa12",
+		});
 	});
 
 	it("never links anything else", () => {

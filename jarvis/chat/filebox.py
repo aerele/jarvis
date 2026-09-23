@@ -46,18 +46,26 @@ INBOUND_PROMPT = (
 	"3. Before drafting, check the wiki for what we already know: read_wiki for the "
 	"party and the topic, and build on / reference existing content instead of "
 	"starting from scratch. If the wiki is unavailable, skip this step and carry on.\n"
-	"4. Extract the document fully - every line item verbatim, never a lump-sum "
+	"4. BEFORE drafting, resolve the party and every master the draft links to "
+	"(supplier or customer, items, addresses...) with read tools. If any are missing, "
+	"create ALL of them in ONE create_doc batch (docs=[...]). The bench holds that batch "
+	"for a human on the Approval Board - do NOT also file a Jarvis Approval Request for "
+	"it. When a write comes back held (status pending_confirmation), END the turn right "
+	"away: the run resumes by itself once it is decided.\n"
+	"5. Extract the document fully - every line item verbatim, never a lump-sum "
 	"balancing line - resolve ambiguities by the skill's convention ladder, and "
-	"create the draft.\n"
-	"5. AFTER the draft exists, record what you learned back to the wiki with "
+	"create the draft on its own (never in a batch with masters).\n"
+	"6. AFTER the draft exists, record what you learned back to the wiki with "
 	"update_wiki, extending the page from step 3 rather than duplicating it. Your "
 	"wiki note is PROPOSED for a Jarvis reviewer to approve before it lands - it does "
 	"not go live from this run, so do not re-submit or wait on it. This is "
 	"best-effort: if the proposal is refused or the wiki is off, note it and move on - "
 	"never fail or retry the run over a wiki write.\n"
 	"These rules OVERRIDE any skill you follow and are non-negotiable: do NOT ask me "
-	"anything in this chat (I am not here); only ever create Drafts, never submit; "
-	"destructive actions still wait for approval; and EVERY decision that needs a "
+	"anything in this chat (I am not here); only ever create Drafts of documents, never "
+	"submit; new or changed master records wait for a human on the Approval Board as "
+	"above; every other action (submit, cancel, delete, email, share, assign, comments, "
+	"imports...) is refused in this run; and EVERY decision that needs a "
 	"human - including what document this is, or that the file is unreadable - goes "
 	"to a Jarvis Approval Request row (empty document_type for classification "
 	"decisions). End the turn with a one-line summary."
@@ -157,6 +165,24 @@ def _refuse_foreign_attachment(fdoc) -> None:
 	)
 
 
+def _source_file(conv: str):
+	"""The dropped File (``file_url``, ``file_name``) a resume re-attaches: the one
+	stamped at drop, else the conversation's earliest attachment."""
+	fields = ["file_url", "file_name"]
+	name = frappe.db.get_value(CONV, conv, "filebox_source_file")
+	row = frappe.db.get_value("File", name, fields, as_dict=True) if name else None
+	if row:
+		return row
+	rows = frappe.get_all(
+		"File",
+		filters={"attached_to_doctype": CONV, "attached_to_name": conv},
+		fields=fields,
+		order_by="creation asc",
+		limit=1,
+	)
+	return rows[0] if rows else None
+
+
 def _send_inbound(conv: str, file_doc, pinned: str | None, preamble: str | None = None) -> dict:
 	"""Send the directed File Box prompt for ``file_doc`` into ``conv`` and record the
 	outcome on the conversation: a refused or raising send stamps
@@ -223,10 +249,10 @@ def drop_file(
 
 	conv_id = create_conversation()
 	title = (file_name or fdoc.file_name or "Inbound document")[:60]
-	# file_box: this is an unattended directed run - nobody is present to
-	# click a write-confirmation card, so reversible create/update commit
-	# directly (destructive ops still park to the approval board). Set via
-	# db.set_value to bypass the controller's admin-gate on enabling it.
+	# file_box: this is an unattended directed run - nobody is present to click
+	# a write-confirmation card, so held_writes decides every write: drafts
+	# commit directly, masters wait on the Approval Board, the rest is refused.
+	# Set via db.set_value to bypass the controller's admin-gate on enabling it.
 	# filebox_pinned_skill: the validated pin (or "" for auto-discovery).
 	frappe.db.set_value(
 		CONV,
@@ -295,16 +321,58 @@ def _conv_visible(alias: str) -> str:
 	)
 
 
-# What makes a row "Needs approval": a Pending decision the dropper owes.
-# Wiki proposals are the reviewer's lane, never the dropper's (AC7). PR-2c adds
-# the Pending Action waiters here (UNION ALL, same columns).
+# What makes a row "Needs approval": a Pending decision the dropper owes - an
+# Approval Request, or an undecided held write (Pending Action) it waits on. Wiki
+# proposals are the reviewer's lane, never the dropper's (AC7). `src` routes the
+# result link (an approval, or the board's held lane).
 _PENDING_WAITS = f"""
-	SELECT ar.conversation, ar.name AS item, ar.title, ar.creation
+	SELECT ar.conversation, ar.name AS item, ar.title, ar.creation, 'ar' AS src
 	FROM `tabJarvis Approval Request` ar
 	JOIN `tabJarvis Conversation` ac
 	  ON ac.name = ar.conversation AND ac.file_box = 1 AND {_conv_visible("ac")}
 	WHERE ar.status = 'Pending' AND COALESCE(ar.source, '') != 'File Box Wiki'
+	UNION ALL
+	SELECT w.conversation, pa.name AS item, pa.summary AS title, pa.creation, 'pa' AS src
+	FROM `tabJarvis Pending Action Waiter` w
+	JOIN `tabJarvis Pending Action` pa
+	  ON pa.name = w.parent AND pa.kind = 'file_box_held' AND pa.status IN ('Pending', 'Executing')
+	JOIN `tabJarvis Conversation` wc
+	  ON wc.name = w.conversation AND wc.file_box = 1 AND {_conv_visible("wc")}
+	WHERE w.parenttype = 'Jarvis Pending Action'
 """
+
+
+def _held_open(alias: str) -> str:
+	"""SQL predicate: conversation ``alias`` waits on an undecided held write."""
+	return (
+		"EXISTS (SELECT 1 FROM `tabJarvis Pending Action Waiter` hw "
+		"JOIN `tabJarvis Pending Action` hp ON hp.name = hw.parent "
+		f"WHERE hw.conversation = {alias}.name AND hw.parenttype = 'Jarvis Pending Action' "
+		"AND hp.kind = 'file_box_held' AND hp.status IN ('Pending', 'Executing'))"
+	)
+
+
+def _decided_waiter(state: str) -> str:
+	"""SQL predicate: a decided held write's waiter on ``c`` matches ``state``."""
+	return (
+		"EXISTS (SELECT 1 FROM `tabJarvis Pending Action Waiter` rw "
+		"JOIN `tabJarvis Pending Action` rp ON rp.name = rw.parent "
+		"WHERE rw.conversation = c.name AND rw.parenttype = 'Jarvis Pending Action' "
+		f"AND rp.kind = 'file_box_held' AND rp.status NOT IN ('Pending', 'Executing') AND ({state}))"
+	)
+
+
+# After a decision, a resume still on its way reads processing: queued (`due`) until
+# the reconciler's retry cutoff, sending (`claimed`) until its reclaim, not yet queued
+# ('': the settle is still retrying). Past those, or failed past its retries:
+# "Approved, but the run couldn't continue" (AC13). Neither is ever clearable.
+_RESUME_WAITING = (
+	"(rw.resume_state = 'due' AND rw.modified >= %(resume_fresh)s)"
+	" OR (rw.resume_state = 'claimed' AND rw.modified >= %(claim_fresh)s)"
+	" OR (IFNULL(rw.resume_state, '') = '' AND rp.settle_attempts < %(max_settle)s)"
+)
+_RESUMING = _decided_waiter(_RESUME_WAITING)
+_RESUME_FAILED = _decided_waiter(f"IFNULL(rw.resume_state, '') != 'done' AND NOT ({_RESUME_WAITING})")
 
 
 def _latest(where: str, alias: str, cols: str) -> str:
@@ -345,17 +413,20 @@ _ERR_NEWER = (
 _UNANSWERED = "(lm.seq IS NULL OR lm.seq < lu.seq)"
 
 # The status ladder (AC7), first match wins:
-#   needs_approval > processing > draft_created > failed > no_draft.
-# `live` = a reply is streaming (and fresh), a Jarvis Chat Turn is non-terminal, or
-# (legacy dispatch path, no Turn row) the last user row is unanswered but younger
-# than the orphan threshold. `fail_code` is why a finished run failed (NULL = ended cleanly);
-# it is computed even for a drafted run ("· ended with an error").
+#   needs_approval > processing > failed (a held resume that couldn't continue)
+#   > draft_created > failed > no_draft.
+# `live` = a reply is streaming (and fresh), a Jarvis Chat Turn is non-terminal, a
+# held-write resume is on its way, or (legacy dispatch path, no Turn row) the last
+# user row is unanswered but younger than the orphan threshold. `fail_code` is why a
+# finished run failed (NULL = ended cleanly); it is computed even for a drafted run
+# ("· ended with an error").
 # `{extra}` is the only str.format hole (server-built AND-clauses; never user text).
 _INBOUND_INNER = f"""
 	SELECT r.*,
 	       CASE
 	         WHEN r.pending_approvals > 0 THEN 'needs_approval'
 	         WHEN r.live = 1              THEN 'processing'
+	         WHEN r.fail_code = 'resume_failed' THEN 'failed'
 	         WHEN r.has_draft = 1         THEN 'draft_created'
 	         WHEN r.fail_code IS NOT NULL THEN 'failed'
 	         ELSE 'no_draft'
@@ -370,12 +441,14 @@ _INBOUND_INNER = f"""
 	           WHEN (lm.streaming = 1 OR lm.recovering = 1) AND lm.modified >= %(fresh)s THEN 1
 	           WHEN EXISTS (SELECT 1 FROM `tabJarvis Chat Turn` lt
 	                        WHERE lt.conversation = c.name AND lt.state IN %(live_states)s) THEN 1
+	           WHEN {_RESUMING} THEN 1
 	           WHEN lu.name IS NOT NULL AND lu.turn_state IS NULL AND {_UNANSWERED}
 	                AND lu.creation >= %(fresh)s
 	                AND NOT {_ERR_NEWER} THEN 1
 	           ELSE 0
 	         END AS live,
 	         CASE
+	           WHEN {_RESUME_FAILED} THEN 'resume_failed'
 	           WHEN {_ERR_NEWER} THEN 'send_failed'
 	           WHEN lu.name IS NULL THEN 'no_start'
 	           WHEN lu.turn_state = 'cancelled' THEN 'cancelled'
@@ -403,12 +476,18 @@ _INBOUND_INNER = f"""
 def _ladder_params(me: str) -> dict:
 	from frappe.utils import add_to_date, now_datetime
 
+	from jarvis.chat.pending_actions._reconcile import INTERRUPT_AFTER_S, SETTLE_AFTER_S
+	from jarvis.chat.pending_actions._settle import MAX_SETTLE_ATTEMPTS
 	from jarvis.chat.stale_scan import ORPHAN_MAX_AGE_SECONDS
 	from jarvis.chat.turn_state import NONTERMINAL_STATES
 
+	now = now_datetime()
 	return {
 		"me": me,
-		"fresh": add_to_date(now_datetime(), seconds=-ORPHAN_MAX_AGE_SECONDS),
+		"fresh": add_to_date(now, seconds=-ORPHAN_MAX_AGE_SECONDS),
+		"resume_fresh": add_to_date(now, seconds=-SETTLE_AFTER_S),
+		"claim_fresh": add_to_date(now, seconds=-INTERRUPT_AFTER_S),
+		"max_settle": MAX_SETTLE_ATTEMPTS,
 		"live_states": NONTERMINAL_STATES,
 	}
 
@@ -482,6 +561,7 @@ def _first_line(text: str | None, limit: int = 140) -> str:
 
 
 _FAILURES = {
+	"resume_failed": "Approved, but the run couldn't continue",
 	"no_start": "Couldn't start - the run never began",
 	"cancelled": "Cancelled before it finished",
 	"stopped": "Stopped before it finished",
@@ -507,7 +587,11 @@ def _result(r: dict, wait, msg) -> tuple[str, str | None]:
 		line = f"{n} approval{'' if n == 1 else 's'} waiting" + (f": {wait.title}" if wait else "")
 		if r.get("filebox_result_name"):
 			line = f"{_draft_line(r)} · {line}"
-		return line, f"/approvals/{quote(wait.item, safe='')}" if wait else "/approvals"
+		if not wait:
+			return line, "/approvals"
+		if wait.src == "pa":
+			return line, f"/approvals?held={quote(wait.item, safe='')}"
+		return line, f"/approvals/{quote(wait.item, safe='')}"
 	if status == "draft_created":
 		slug = frappe.scrub(r["filebox_result_doctype"]).replace("_", "-")
 		line = _draft_line(r)
@@ -545,7 +629,7 @@ def _attach_results(rows: list[dict], me: str) -> None:
 	need = [r["name"] for r in rows if r["status"] == "needs_approval"]
 	if need:
 		for w in frappe.db.sql(
-			f"""SELECT w.conversation, w.item, w.title FROM ({_PENDING_WAITS}) w
+			f"""SELECT w.conversation, w.item, w.title, w.src FROM ({_PENDING_WAITS}) w
 			WHERE w.conversation IN %(names)s ORDER BY w.creation ASC""",
 			{"me": me, "names": need},
 			as_dict=True,
@@ -733,6 +817,12 @@ def _delete_one(conversation: str, live: int | None = None) -> None:
 	):
 		frappe.throw(
 			"A wiki note from this file is still awaiting review — try again once a reviewer has handled it"
+		)
+	if frappe.db.sql(
+		f"SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name = %s AND {_held_open('c')}", (conversation,)
+	):
+		frappe.throw(
+			"This file is waiting on an approval — decide or skip it on the Approval Board before deleting"
 		)
 	_cascade(conversation)
 

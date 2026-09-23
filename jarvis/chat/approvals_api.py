@@ -528,6 +528,40 @@ def _ar_pending_count() -> int:
 	)[0][0]
 
 
+def _resume_conversation(
+	conversation: str, message: str, *, origin: str, attachments: str | None = None, background: int = 0
+) -> dict:
+	"""Post ``message`` into ``conversation`` as a trusted delegated send stamped
+	``origin``, AS the conversation owner (send_message is owner-only, SEC-002).
+
+	Fail-closed identity guard (mirrors agents_api.run_agent_now): never resume AS
+	Administrator / Guest / a disabled user on someone else's behalf - that would
+	run an unattended agent turn with elevated rights. A self-owned resume (owner ==
+	caller) always proceeds. ``impersonate`` is session-safe (a bare set_user in an
+	HTTP path would gut the caller's cookie session) and no-ops for a self-owned
+	resume; ``delegated_send`` clears send_message's Jarvis-access gate and the
+	role-gated Message create perm for an owner without the Jarvis User role."""
+	from jarvis.chat.agent_scheduler import _valid_owner
+	from jarvis.chat.api import send_message
+	from jarvis.permissions import delegated_send
+
+	conv_owner = frappe.db.get_value("Jarvis Conversation", conversation, "owner")
+	switch_to = conv_owner if (conv_owner and conv_owner != frappe.session.user) else None
+	if switch_to and not _valid_owner(switch_to):
+		frappe.log_error(
+			title="jarvis.approval.resume_skipped",
+			message=(
+				f"Conversation {conversation}: owner {switch_to!r} is not an eligible run identity "
+				"(Administrator/Guest/disabled); the decision is recorded but the turn was not resumed."
+			),
+		)
+		return {"ok": False, "reason": "owner_ineligible"}
+	with impersonate(switch_to), delegated_send(), message_origin(origin):
+		return send_message(
+			conversation=conversation, message=message, attachments=attachments, background=background
+		)
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def decide(name: str, decision: str, approve: int = 1) -> dict:
@@ -568,8 +602,6 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 
 	resumed = False
 	if doc.conversation and frappe.db.exists("Jarvis Conversation", doc.conversation):
-		from jarvis.chat.api import send_message
-
 		verdict = "APPROVED" if doc.status == "Approved" else "REJECTED"
 		msg = (
 			f"[Approval {doc.name} - {doc.title}] {verdict}: {decision}\n"
@@ -601,47 +633,13 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 				attachments = json.dumps([{"file_url": f[0].file_url, "file_name": f[0].file_name}])
 		# The decision is durably recorded above; a resume failure must
 		# not 500 the endpoint (the SPA would re-show a decided row).
-		# send_message is owner-only (SEC-002). A System Manager may decide
-		# another user's approval (``_may_act_on`` gates that above), so the
-		# resume runs AS the conversation owner - the same identity hinge
-		# agents_api.run_agent_now uses. The decision itself stays attributed
-		# to the approver via decided_by on the Approval Request row.
-		from jarvis.chat.agent_scheduler import _valid_owner
-
-		conv_owner = frappe.db.get_value("Jarvis Conversation", doc.conversation, "owner")
-		original_user = frappe.session.user
-		# Fail-closed identity guard (mirrors agents_api.run_agent_now): never
-		# resume AS Administrator / Guest / a disabled user on someone else's
-		# behalf - that would run an unattended agent turn with elevated
-		# rights. A self-owned resume (owner == approver) always proceeds.
-		switch_to = conv_owner if (conv_owner and conv_owner != original_user) else None
-		if switch_to and not _valid_owner(switch_to):
-			frappe.log_error(
-				title="approval resume skipped (owner not an eligible run identity)",
-				message=(
-					f"Approval {doc.name}: conversation owner {switch_to!r} is not an "
-					f"eligible run identity (Administrator/Guest/disabled); the decision "
-					f"is recorded but the turn was not resumed."
-				),
-			)
-		else:
-			try:
-				# impersonate is session-safe (a bare frappe.set_user in this
-				# HTTP path would gut the approver's cookie session and log them
-				# out) and no-ops when switch_to is None (self-owned resume).
-				# delegated_send() marks this as a trusted server re-entry so the
-				# resume clears send_message's Jarvis-access gate and the now
-				# role-gated Message create perm even when the conversation owner
-				# does not hold the Jarvis User role.
-				from jarvis.permissions import delegated_send
-
-				with impersonate(switch_to), delegated_send(), message_origin("board_answer"):
-					res = send_message(conversation=doc.conversation, message=msg, attachments=attachments)
-				resumed = bool(res.get("ok"))
-			except Exception:
-				# impersonate's finally already restored the approver, so the
-				# Error Log is attributed to them, not the conversation owner.
-				frappe.log_error(title="approval resume failed", message=frappe.get_traceback())
+		try:
+			res = _resume_conversation(doc.conversation, msg, origin="board_answer", attachments=attachments)
+			resumed = bool(res.get("ok"))
+		except Exception:
+			# impersonate's finally already restored the approver, so the
+			# Error Log is attributed to them, not the conversation owner.
+			frappe.log_error(title="approval resume failed", message=frappe.get_traceback())
 	return {"ok": True, "status": doc.status, "resumed": resumed}
 
 
@@ -1265,7 +1263,7 @@ def _create_held(row, approver: str) -> dict:
 		hint = (
 			"Choose Use existing."
 			if _single_create(_held_items(locked))
-			else "Skip this approval, then re-run the file."
+			else "Skip this approval, then drop the file again: its new run uses the existing record."
 		)
 		return _held_refusal(
 			"exists",
@@ -1370,7 +1368,8 @@ def decide_held_action(name: str, action: str, use_existing: str | None = None) 
 	  (single new record only; nothing is created or dispatched);
 	- ``skip``: discard it (no identity preflight).
 
-	Every response carries ``reason_code``."""
+	Every response carries ``reason_code``. Any decision resumes every waiting
+	File Box run (held_writes.on_settled)."""
 	from jarvis._session import authenticated_user
 	from jarvis.chat.pending_actions import discard
 

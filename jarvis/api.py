@@ -2365,6 +2365,16 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	except JarvisError as e:
 		return _error(type(e).__name__, str(e))
 
+	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an
+	# unattended File Box run never reaches the preview / park / auto-apply paths
+	# below with a write the policy did not decide. None = not its call.
+	if conversation and is_write:
+		from jarvis.chat import held_writes
+
+		verdict = held_writes.apply(tool, args, conversation)
+		if verdict is not None:
+			return verdict
+
 	# ``preview`` is read, not popped: dispatch() filters args to the tool's
 	# signature so the flag never reaches the tool anyway, and leaving ``args``
 	# unmutated keeps the shared dict the session-persistence path holds intact.
@@ -2694,37 +2704,16 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						err_obj["message"] += " The approved request has also ended - re-approve to continue."
 				return result
 			# TTL-expired / no timestamp: fall through to the normal park.
-		# File Box fast-path (design A2): the ONE remaining path where a gated
-		# reversible create/update runs without a confirmation card - a File Box
-		# conversation, an unattended directed run where nobody can click a confirm
-		# card and review happens on the created Draft + the approval board. Admin
-		# Auto-Apply was REMOVED here (design A2); request-scoped "confirm all" is
-		# its user-facing replacement. Everything outside create/update - submit_doc
-		# and every destructive tool - ALWAYS parks; a bulk create/update (docs[] /
-		# updates[]) NEVER fast-paths (the batch card is the human checkpoint against
-		# a 20-doc mistake). file_box is server-set only and admin-gated against
-		# generic saves.
-		#
-		# conv is never a client claim - it is resolved server-side from the
-		# session_key upstream - so there is no owner to re-check here.
-		if conv and tool in _AUTO_APPLYABLE and not _is_bulk_call(args):
-			if _conv_flags.get("file_box"):
-				# Legacy provenance string: File Box shared the (now removed)
-				# Auto-Apply branch, so its audit rows have always been stamped
-				# "auto_apply" (a value the Jarvis Agent Write enum still carries).
-				# Kept as-is to avoid an enum migration; it reads as "an unattended
-				# direct-apply run".
-				result = dispatch_confirmed(tool, args, provenance="auto_apply")
-				if tool == "create_doc" and result.get("ok"):
-					_stamp_file_box_draft(conv, result.get("data"))
-				return result
+		# File Box direct-apply (a draft of a submittable doctype) and the held
+		# writes are decided by held_writes.apply at the top of _run_tool; a File
+		# Box write never reaches this point except update_wiki (below). Its audit
+		# provenance stays "auto_apply" (the Jarvis Agent Write enum value).
 		# File Box unattended wiki write-back: route update_wiki through the
 		# append-only, provenance-FENCED funnel (never the raw update_wiki tool,
 		# which defaults scope=Org + ignore_permissions and can clobber a curated
 		# page). ``and file_box`` (NOT ``or``) keeps attended chat + admin auto_apply
-		# on the park-a-card path. Placed AFTER the create/update auto-apply
-		# (update_wiki is not in _AUTO_APPLYABLE, so that block skipped it) and BEFORE
-		# the single-flight so an unattended run never parks a wiki card. The wiki
+		# on the park-a-card path. Placed BEFORE the single-flight so an unattended
+		# run never parks a wiki card. The wiki
 		# kill-switch at the top of _run_tool already refused a wiki-off write before
 		# here; stray batch args never divert it to a park card (whose confirm would
 		# run the raw, unfenced tool).

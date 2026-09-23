@@ -74,7 +74,9 @@ def _cleanup() -> None:
 
 
 def _submittable_doctype() -> str | None:
-	return frappe.db.get_value("DocType", {"is_submittable": 1, "istable": 0, "issingle": 0}, "name")
+	from jarvis.tests._pending_action_helpers import draft_doctype
+
+	return draft_doctype()
 
 
 class _Base(FrappeTestCase):

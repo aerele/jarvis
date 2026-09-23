@@ -93,6 +93,7 @@ def park(
 	skill_docname: str | None = None,
 	run_id: str | None = None,
 	dedup_key: str | None = None,
+	dedup_keys: list[str] | tuple = (),
 	waiters: list[str] | tuple = (),
 	needs_input=None,
 	legacy_pending: Callable[[str], bool] | None = None,
@@ -105,6 +106,8 @@ def park(
 	- ``display_row(doc)``: inserts the chat pending row in park's transaction (it must
 	  not commit), so the card and its row land or roll back together.
 	- ``waiters``: held rows' conversations, primary first (defaults to ``conversation``).
+	- ``dedup_key`` / ``dedup_keys``: a held row's primary key (the unique ``open_key``)
+	  and every per-item key, stored keyed (HMAC) for the waiter subset rule.
 
 	Raises ``ConfirmationPendingError`` (single-flight) and ``frappe.PermissionError``
 	inside a tool call (S6)."""
@@ -139,6 +142,9 @@ def park(
 				"skill_docname": skill_docname or "",
 				"run_id": run_id or "",
 				"open_key": _seal.open_key(owner_user, dedup_key) if dedup_key else None,
+				"dedup_keys": _seal.canonical([_seal.open_key(owner_user, k) for k in dedup_keys])
+				if dedup_keys
+				else None,
 				"needs_input": needs_input,
 				"waiters": [
 					{"conversation": c, "role": "primary" if i == 0 else "waiter"}

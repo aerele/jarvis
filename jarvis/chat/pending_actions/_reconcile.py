@@ -34,9 +34,12 @@ _SCAN = 200
 _AGE_ALERT_TITLE = "jarvis.pending_action.cards_aged"
 _AGE_ALERT_DEDUPE_HOURS = 24
 
-# Held resume (PR-2c), as a dotted path: ``fn(pa_name) -> None`` re-drives that
-# row's ``due`` waiters. None = no retry (they still fail past the budget).
-HELD_RESUME: str | None = None
+# Held resume, as a dotted path: ``fn(pa_name)`` re-drives that row's ``due``
+# waiters. None = no retry (they still fail past the budget).
+HELD_RESUME: str | None = "jarvis.chat.held_writes.resume_waiters"
+# ``fn(conversations)``: stamp waiters that failed past the budget on their
+# conversations (after the flips commit: conversation before waiter everywhere).
+HELD_FAILED: str | None = "jarvis.chat.held_writes.mark_resume_failed"
 
 
 def _log(title: str, message: str) -> None:
@@ -94,15 +97,44 @@ def _settle_unsettled() -> int:
 	return settled
 
 
+def _waiters_where(where: str, params: dict) -> list:
+	"""Select first, then flip by primary key (no range locks over the waiter table)."""
+	return frappe.db.sql(
+		"SELECT name, conversation FROM `tabJarvis Pending Action Waiter`"
+		f" WHERE parenttype='Jarvis Pending Action' AND {where} LIMIT %(lim)s",
+		{**params, "lim": _SCAN},
+		as_dict=True,
+	)
+
+
 def _retry_waiters() -> dict:
 	now = now_datetime()
-	frappe.db.sql(
-		"UPDATE `tabJarvis Pending Action Waiter` SET resume_state='failed', modified=%(now)s"
-		" WHERE parenttype='Jarvis Pending Action' AND resume_state='due' AND resume_attempts >= %(max)s",
-		{"now": now, "max": WAITER_MAX_ATTEMPTS},
-	)
-	failed = rowcount()
+	stale = add_to_date(now, seconds=-INTERRUPT_AFTER_S)
+	# A resume that claimed a waiter and died before its send committed (``done``
+	# rides that commit) never ran: count the attempt and make it due again.
+	for w in _waiters_where("resume_state='claimed' AND modified < %(stale)s", {"stale": stale}):
+		frappe.db.sql(
+			"UPDATE `tabJarvis Pending Action Waiter` SET resume_state='due',"
+			" resume_attempts=resume_attempts+1, modified=%(now)s"
+			" WHERE name=%(n)s AND resume_state='claimed' AND modified < %(stale)s",
+			{"n": w.name, "now": now, "stale": stale},
+		)
+	failed_convs = []
+	for w in _waiters_where(
+		"resume_state='due' AND resume_attempts >= %(max)s", {"max": WAITER_MAX_ATTEMPTS}
+	):
+		frappe.db.sql(
+			"UPDATE `tabJarvis Pending Action Waiter` SET resume_state='failed', modified=%(now)s"
+			" WHERE name=%(n)s AND resume_state='due' AND resume_attempts >= %(max)s",
+			{"n": w.name, "now": now, "max": WAITER_MAX_ATTEMPTS},
+		)
+		if rowcount():
+			failed_convs.append(w.conversation)
+	failed = len(failed_convs)
 	frappe.db.commit()
+	if failed_convs and HELD_FAILED:
+		frappe.get_attr(HELD_FAILED)(failed_convs)
+		frappe.db.commit()
 	retried = 0
 	if HELD_RESUME:
 		resume = frappe.get_attr(HELD_RESUME)
@@ -227,8 +259,9 @@ def reconcile() -> dict:
 
 def purge() -> int:
 	"""Daily (D3): delete settled terminal rows older than 7 days with their waiters,
-	in committed batches. Never a Pending/Executing row, nor a held row whose
-	waiters are still due or claimed."""
+	in committed batches. Never a Pending/Executing row, nor a held row with a waiter
+	not yet resumed (due, claimed, or failed: a re-run or delete drops that one), nor
+	a row another session holds (skipped, retried tomorrow)."""
 	if not table_ready():
 		return 0
 	cutoff = add_to_date(now_datetime(), days=-PURGE_AFTER_DAYS)
@@ -238,7 +271,7 @@ def purge() -> int:
 			"SELECT pa.name FROM `tabJarvis Pending Action` pa WHERE pa.settled=1 AND pa.status IN %(t)s"
 			" AND pa.settled_at < %(c)s AND NOT EXISTS (SELECT 1 FROM `tabJarvis Pending Action Waiter` w"
 			" WHERE w.parent=pa.name AND w.parenttype='Jarvis Pending Action'"
-			" AND w.resume_state IN ('due', 'claimed')) LIMIT %(lim)s",
+			" AND IFNULL(w.resume_state, '') != 'done') LIMIT %(lim)s FOR UPDATE SKIP LOCKED",
 			{"t": TERMINAL, "c": cutoff, "lim": PURGE_BATCH},
 		)
 		if not names:
