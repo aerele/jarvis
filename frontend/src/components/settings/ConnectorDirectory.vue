@@ -1,18 +1,29 @@
 <template>
 	<div class="flex flex-col gap-4">
 		<!-- Same search control as AgentsList / NotesView: fixed width, search
-		     icon prefix, left-aligned with the category chips below it. -->
-		<FormControl
-			type="text"
-			class="w-72 max-w-full"
-			placeholder="Search apps"
-			:modelValue="query"
-			@update:modelValue="(v) => (query = v)"
-		>
-			<template #prefix>
-				<FeatherIcon name="search" class="size-4 text-ink-gray-5" />
-			</template>
-		</FormControl>
+		     icon prefix, left-aligned with the category chips below it. The
+		     custom-server entry sits at the right end of this row: it is the one
+		     action that is not an app card, so it stays out of the grid. -->
+		<div class="flex flex-wrap items-center justify-between gap-3">
+			<FormControl
+				type="text"
+				class="w-72 max-w-full"
+				placeholder="Search apps"
+				:modelValue="query"
+				@update:modelValue="(v) => (query = v)"
+			>
+				<template #prefix>
+					<FeatherIcon name="search" class="size-4 text-ink-gray-5" />
+				</template>
+			</FormControl>
+			<Button
+				variant="ghost"
+				size="sm"
+				iconLeft="link"
+				label="Add custom URL"
+				@click="emit('add-custom')"
+			/>
+		</div>
 
 		<!-- Option-chip idiom (TriggerDetail.vue's ACTION_TYPES row): plain Buttons
 		     toggling solid/subtle, not TabButtons - a segmented control reads wrong
@@ -74,24 +85,13 @@
 				</div>
 			</div>
 		</div>
-
-		<div v-if="allowCustomUrls" class="flex items-center justify-between gap-3 border-t pt-3">
-			<span class="text-xs text-ink-gray-5">Have a server we do not list?</span>
-			<Button
-				variant="ghost"
-				size="sm"
-				iconLeft="link"
-				label="Add custom URL"
-				@click="emit('add-custom')"
-			/>
-		</div>
 	</div>
 </template>
 
 <script setup>
 // Browse tab (Option B, Directory.dc.html) - a searchable, categorized catalog
 // grid, one card per preset, replacing the old "pick from a Select" step
-// inside AddConnectorDialog. Pressing a card's Add (or the footer's Add
+// inside AddConnectorDialog. Pressing a card's Add (or the search row's Add
 // custom URL) doesn't connect anything itself - it just tells ConnectorsPane
 // which preset to open AddConnectorDialog against; every actual connect
 // action still lives in that dialog.
@@ -112,7 +112,6 @@ const props = defineProps({
 	// (needs_static_client) doesn't count for a plain user, who would
 	// otherwise see "Added" for something they can't sign in to yet.
 	installedRows: { type: Array, default: () => [] },
-	allowCustomUrls: { type: Boolean, default: true },
 });
 const emit = defineEmits(["add", "add-custom"]);
 

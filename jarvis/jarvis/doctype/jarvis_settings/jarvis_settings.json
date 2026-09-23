@@ -96,7 +96,6 @@
   "enable_customizations_clause",
   "enable_role_profiles",
   "connectors_section",
-  "allow_custom_urls",
   "connectors_col",
   "connector_egress_rules",
   "sync_tab",
@@ -219,7 +218,7 @@
   },
   {
    "default": "1",
-   "description": "PP-6 \u2014 site-wide ceiling on the number of LIVE agent modules (Jarvis Agent Installation.activation_state == live), global across all packs. Default 1: every customer starts with a single live module. The PP-4 promotion path refuses to flip an installation to live once the count of live installations reaches this ceiling. Raised to 2 (the stage maximum \u2014 no higher value is accepted) only by a Jarvis Admin, and only with a recorded reviewer-capacity justification (audited via track_changes + a provenance event).",
+   "description": "PP-6 — site-wide ceiling on the number of LIVE agent modules (Jarvis Agent Installation.activation_state == live), global across all packs. Default 1: every customer starts with a single live module. The PP-4 promotion path refuses to flip an installation to live once the count of live installations reaches this ceiling. Raised to 2 (the stage maximum — no higher value is accepted) only by a Jarvis Admin, and only with a recorded reviewer-capacity justification (audited via track_changes + a provenance event).",
    "fieldname": "activation_module_ceiling",
    "fieldtype": "Int",
    "label": "Activation Module Ceiling (live agents, site-wide)"
@@ -228,7 +227,7 @@
    "fieldname": "branding_section",
    "fieldtype": "Section Break",
    "label": "Branding",
-   "description": "Whitelabel identity shown to your users: the assistant's name (browser tab, chat header, notifications, and its own replies), logo, and browser-tab favicon. Blank name falls back to Jarvis. Edited by customers in Settings \u2192 Branding."
+   "description": "Whitelabel identity shown to your users: the assistant's name (browser tab, chat header, notifications, and its own replies), logo, and browser-tab favicon. Blank name falls back to Jarvis. Edited by customers in Settings → Branding."
   },
   {
    "fieldname": "agent_name",
@@ -742,13 +741,6 @@
    "description": "MCP connectors let the agent call external services (GitHub, Atlassian, Linear, Stripe and custom gateways) on a user's behalf."
   },
   {
-   "fieldname": "allow_custom_urls",
-   "fieldtype": "Check",
-   "label": "Allow Custom URL Connectors",
-   "default": "1",
-   "description": "When on, users may add a connector pointing at any admin-approved Custom URL, not just the built-in presets. Turn off to restrict everyone to the built-in presets only. Readers treat an unset value as ON (Single defaults are not backfilled on migrate)."
-  },
-  {
    "fieldname": "connectors_col",
    "fieldtype": "Column Break"
   },
@@ -1218,5 +1210,6 @@
    "read": 1,
    "write": 1
   }
- ]
+ ],
+ "modified": "2026-09-23 10:00:00.000000"
 }

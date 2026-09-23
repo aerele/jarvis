@@ -25,8 +25,7 @@ Endpoints:
     from (``jarvis.connectors.catalog.to_public``, public fields only).
   * ``add_connector``         — create; presets are pinned to their vendor
     endpoint server-side (see ``_PRESET_BASE_URLS``) so "Custom URL" is the
-    ONLY way a caller's own ``base_url`` ever reaches a saved row — otherwise
-    ``allow_custom_urls=0`` would be decorative.
+    ONLY way a caller's own ``base_url`` ever reaches a saved row.
   * ``test_connector``        — the "Test connection" button: runs a real
     ``initialize`` + ``tools/list`` through the broker, and on success writes
     ``tools_cache`` and MERGES the ``allowed_actions`` table (existing
@@ -73,14 +72,10 @@ class, and that class is the whole routing rule for ``auth_method="OAuth"``:
 Every OAuth row carries a ``mcp_oauth_client`` link, never anything else, and the
 connector controller guarantees a key-only row carries no link.
 
-``set_custom_url_policy`` is deliberately NOT here — MCP_CONNECTORS_PLAN.md's
-UI/UX decision #2 puts that admin control on the Jarvis Settings Desk form.
-
-Boot wiring: ``connector_flags()`` (not whitelisted) is also imported by
-``jarvis/www/jarvis.py`` to ship ``connectors_allow_custom_urls`` in the SPA
-boot payload, so the nav can read the Custom URL policy without a round trip.
-``list_connectors`` returns the same flag for callers that only have the API
-(e.g. a stale boot cache).
+Custom URL connectors are always available (the ``allow_custom_urls`` policy
+was retired on 2026-09-23): a Custom URL row is MCP-only, SSRF-checked and
+unusable until its connection test passes, and its write actions park behind
+the same confirmation card as a preset's, so it needs no extra gate.
 """
 
 from __future__ import annotations
@@ -129,9 +124,7 @@ _TEST_RATE_PER_MIN = 20
 # Vendor MCP endpoints come from ``jarvis.connectors.catalog``, the in-app
 # provider list that is the single source of truth for which apps may be
 # connected and where each one lives. Pinned SERVER-SIDE: add_connector /
-# update_connector never let a caller point a catalog preset anywhere else,
-# which is what makes the Custom URL policy (Jarvis Settings.allow_custom_urls)
-# mean anything at all.
+# update_connector never let a caller point a catalog preset anywhere else.
 #
 # ``base_urls``/``keys`` deliberately INCLUDE entries the catalog has disabled,
 # so an already-saved row still resolves its endpoint; ``_PRESETS`` (the create
@@ -156,32 +149,6 @@ _DESC_MAX = 500
 # --------------------------------------------------------------------------- #
 # settings flags (shared with jarvis/www/jarvis.py boot payload)
 # --------------------------------------------------------------------------- #
-def connector_flags() -> dict:
-	"""``{allow_custom_urls}`` off ``Jarvis Settings``. NOT whitelisted — called
-	directly by ``list_connectors`` below and by ``www/jarvis.py`` for the boot
-	payload (the custom-URL policy).
-
-	``allow_custom_urls`` defaults to 1 but — per its own field description —
-	Single defaults are NOT backfilled onto an existing site's ``tabSingles``
-	row on migrate, and ``get_single_value`` coerces a genuinely missing row to
-	0/off via ``cint`` — indistinguishable from an admin explicitly turning it
-	off. So it needs the same tabSingles row-existence probe
-	``personalise_api._single_bool`` uses, treating "no row at all" as ON."""
-	return {
-		"allow_custom_urls": _single_bool("allow_custom_urls", True),
-	}
-
-
-def _single_bool(field: str, default: bool) -> bool:
-	row = frappe.db.sql(
-		"select value from tabSingles where doctype=%s and field=%s",
-		(SETTINGS, field),
-	)
-	if not row:
-		return default
-	return bool(cint(row[0][0]))
-
-
 def _over_test_rate_limit(user: str) -> bool:
 	"""Per-user calendar-minute bucket for the Test-connection probe. Atomic
 	``incrby`` (race-free under concurrent requests, and not fooled by frappe's
@@ -697,7 +664,7 @@ def persist_probe_result(doc, result, now, *, can_write: bool, background: bool 
 @frappe.whitelist()
 @require_jarvis_user
 def list_connectors() -> dict:
-	"""``{allow_custom_urls, oauth_redirect_uri, catalog, shared, mine}``.
+	"""``{oauth_redirect_uri, catalog, shared, mine}``.
 	``frappe.get_list`` (not ``get_all``) so ``connector_query_conditions`` scopes
 	the query the same way the Desk list view is scoped: every Shared row plus the
 	caller's own Personal rows, nothing more. Never selects ``credential``.
@@ -711,7 +678,6 @@ def list_connectors() -> dict:
 	no secrets, disabled entries absent) the SPA builds its preset picker, logos,
 	hints, help links and per-preset flow from, so the flow a preset takes is
 	decided once, here, rather than duplicated in the client."""
-	flags = connector_flags()
 	rows = frappe.get_list(
 		CONNECTOR,
 		fields=[
@@ -749,7 +715,6 @@ def list_connectors() -> dict:
 		(shared if row["scope"] == "Shared" else mine).append(row)
 
 	return {
-		"allow_custom_urls": flags["allow_custom_urls"],
 		"oauth_redirect_uri": oauth_redirect_uri(),
 		"catalog": catalog.to_public(),
 		"shared": shared,
@@ -829,13 +794,6 @@ def add_connector(
 		frappe.throw(_("This app connects with a key, not a sign-in."))
 
 	if preset == catalog.CUSTOM_URL:
-		if not connector_flags()["allow_custom_urls"]:
-			frappe.throw(
-				_(
-					"Custom URL connectors are turned off. Ask an administrator to "
-					"enable them, or choose one of the built-in presets."
-				)
-			)
 		resolved_base_url = (base_url or "").strip()
 		host = (urlparse(resolved_base_url).hostname or "").strip()
 		resolved_key = (key or _slug(host)).strip()
@@ -905,7 +863,7 @@ def _setup_mcp_oauth_client(doc) -> None:
 	several of those at once.
 
 	ORDER MATTERS. This runs AFTER the insert so every cheap gate has already run
-	- the Shared-scope permission check, key uniqueness, the custom-URL policy.
+	- the Shared-scope permission check, key uniqueness.
 	Those are the likely failures and none of them should cost an outbound
 	request first; in particular, registering before the permission check would
 	let any Jarvis User drive registration POSTs at an arbitrary host by asking
@@ -1309,16 +1267,6 @@ def update_connector(
 				# new host under an existing grant. Neither is safe, so a different
 				# address is a different connector.
 				frappe.throw(_("Add a new connector to use a different address."))
-			# Re-point is a fresh custom URL, so re-apply the same allow_custom_urls
-			# gate add_connector uses. Without this, an admin turning the toggle OFF
-			# would still leave existing Custom URL rows freely re-pointable on edit.
-			if not connector_flags()["allow_custom_urls"]:
-				frappe.throw(
-					_(
-						"Custom URL connectors are turned off. Ask an administrator to "
-						"enable them before changing this Base URL."
-					)
-				)
 			doc.base_url = base_url
 			base_url_changed = True
 
@@ -1399,12 +1347,9 @@ def connect_oauth(name: str) -> dict:
 		# proceed. Non-fatal - a discovery failure keeps the row the user already owns
 		# and returns a friendly error rather than deleting it. The heal WRITES (a
 		# client, a link, maybe a remote registration), so a reader of a Shared row
-		# does not get to trigger it, and a Custom URL row honours the workspace
-		# policy exactly as add_connector does.
+		# does not get to trigger it.
 		if not doc.has_permission("write"):
 			return _error("oauth_not_configured", "Ask your admin to finish setup.")
-		if (doc.get("preset") or "") == catalog.CUSTOM_URL and not connector_flags()["allow_custom_urls"]:
-			return _error("oauth_not_configured", "Custom addresses are turned off. Ask an administrator.")
 		try:
 			_ensure_mcp_oauth_client(doc)
 		except mcp_oauth.OAuthError as exc:
@@ -1557,12 +1502,6 @@ def probe_connector_auth(base_url: str) -> dict:
 
 	Gated like the Test button, and for the same reason: it is a real outbound
 	call to a host the caller named."""
-	if not connector_flags()["allow_custom_urls"]:
-		return _error(
-			"custom_urls_disabled",
-			"Custom addresses are turned off. Ask an administrator to enable them.",
-		)
-
 	base_url = (base_url or "").strip()
 	parsed = urlparse(base_url)
 	if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -1631,12 +1570,10 @@ def set_oauth_client_credentials(name: str, client_id: str, client_secret: str =
 		# The same self-heal connect_oauth does: an OAuth row that never got a client
 		# is still configurable here rather than a dead end waiting on an admin. A
 		# key row is gated out by is_oauth, so this never discovers for one. A
-		# discovery failure keeps the row and surfaces a friendly error. Metered and
-		# policy-checked like every other path that can reach out to a host.
+		# discovery failure keeps the row and surfaces a friendly error. Metered
+		# like every other path that can reach out to a host.
 		if _over_test_rate_limit(frappe.session.user):
 			frappe.throw(_("Too many attempts. Please wait a moment and try again."))
-		if doc.preset == catalog.CUSTOM_URL and not connector_flags()["allow_custom_urls"]:
-			frappe.throw(_("Custom addresses are turned off. Ask an administrator."))
 		try:
 			_ensure_mcp_oauth_client(doc)
 		except mcp_oauth.OAuthError as exc:

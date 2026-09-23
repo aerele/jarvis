@@ -178,33 +178,6 @@ class TestAddConnector(_ConnectorApiTestCase):
 		self._connectors.append(out["name"])
 		self.assertEqual(out["base_url"], connectors_api._PRESET_BASE_URLS["GitHub"])
 
-	def test_custom_url_rejected_when_policy_off(self):
-		self._set_single("allow_custom_urls", 0)
-		frappe.set_user(PLAIN_A)
-		with self.assertRaises(frappe.ValidationError):
-			connectors_api.add_connector(
-				label="Custom",
-				preset="Custom URL",
-				base_url="https://my-gateway.invalid/mcp",
-				scope="Personal",
-				credential="tok",
-				key="mine",
-			)
-
-	def test_custom_url_allowed_when_row_absent_treated_as_on(self):
-		self._set_single("allow_custom_urls", None)
-		frappe.set_user(PLAIN_A)
-		out = connectors_api.add_connector(
-			label="Custom",
-			preset="Custom URL",
-			base_url="https://my-gateway.invalid/mcp",
-			scope="Personal",
-			credential="tok",
-			key="mine",
-		)
-		self._connectors.append(out["name"])
-		self.assertEqual(out["base_url"], "https://my-gateway.invalid/mcp")
-
 	def test_new_connector_never_marked_passed(self):
 		frappe.set_user(PLAIN_A)
 		out = connectors_api.add_connector(
@@ -230,7 +203,6 @@ class TestAddConnector(_ConnectorApiTestCase):
 		self.assertEqual(out["key"], "github")
 
 	def test_label_and_key_derived_from_host_for_custom_url(self):
-		self._set_single("allow_custom_urls", 1)
 		frappe.set_user(PLAIN_A)
 		out = connectors_api.add_connector(
 			preset="Custom URL",
@@ -540,17 +512,6 @@ class TestUpdateConnector(_ConnectorApiTestCase):
 		frappe.set_user(PLAIN_A)
 		with self.assertRaises(frappe.ValidationError):
 			connectors_api.update_connector(name, base_url="https://sneaky.invalid/mcp")
-
-	def test_custom_url_repoint_rejected_when_policy_off(self):
-		# An admin turning allow_custom_urls OFF must also constrain existing Custom
-		# URL rows on edit, not just new ones - re-pointing base_url is re-gated.
-		name = self._mk(
-			"Personal", "recustom", owner=PLAIN_A, preset="Custom URL", base_url="https://old.invalid/mcp"
-		)
-		self._set_single("allow_custom_urls", 0)
-		frappe.set_user(PLAIN_A)
-		with self.assertRaises(frappe.ValidationError):
-			connectors_api.update_connector(name, base_url="https://new.invalid/mcp")
 
 	def test_blank_credential_leaves_existing_one_unchanged(self):
 		name = self._mk("Personal", "credkeep", owner=PLAIN_A, preset="GitHub", credential="orig-token")
@@ -998,15 +959,6 @@ class TestProbeConnectorAuth(_McpOauthTestCase):
 		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
 			out = connectors_api.probe_connector_auth("file:///etc/passwd")
 		self.assertEqual(out["error"]["code"], "invalid_arguments")
-		self.assertEqual(transport.calls, [])
-
-	def test_custom_urls_off_blocks_the_probe(self):
-		self._set_single("allow_custom_urls", 0)
-		transport = _ScriptedTransport({})
-		frappe.set_user(PLAIN_A)
-		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
-			out = connectors_api.probe_connector_auth(MCP_BASE_URL)
-		self.assertEqual(out["error"]["code"], "custom_urls_disabled")
 		self.assertEqual(transport.calls, [])
 
 
@@ -2484,11 +2436,6 @@ class TestSelfHealGuards(_McpOauthTestCase):
 			return doc.name
 		finally:
 			frappe.set_user(prev)
-
-	def test_plain_user_cannot_raw_insert_a_custom_url_when_policy_is_off(self):
-		self._set_single("allow_custom_urls", 0)
-		with self.assertRaises(frappe.PermissionError):
-			self._raw_oauth_row("byoa-raw-custom", preset="Custom URL", base_url="https://evil.invalid/mcp")
 
 	def test_credentials_heal_is_rate_limited(self):
 		name = self._raw_oauth_row("byoa-rl", preset="GitHub")

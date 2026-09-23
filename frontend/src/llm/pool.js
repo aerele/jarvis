@@ -211,12 +211,12 @@ export function validatePool(models, preset) {
 		if (otherSubscriptions.some((m) => subscriptionUpstream(m) !== "openai"))
 			return {
 				ok: false,
-				error: "Claude subscription failover can currently be combined only with OpenAI Codex.",
+				error: "Claude can be combined only with ChatGPT or API keys for now.",
 			};
 		if (claudeIndexes[0] !== 0 && claudeIndexes[0] !== models.length - 1)
 			return {
 				ok: false,
-				error: "With Codex and Claude together, keep Claude either first or last.",
+				error: "Claude runs outside the proxy. Keep it first or last.",
 			};
 	}
 	return { ok: true, error: "" };
