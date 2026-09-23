@@ -84,24 +84,6 @@
 
 		<h3 class="text-base font-semibold text-ink-gray-9">Behavior</h3>
 		<div class="mt-2">
-			<!-- The stored flag is convAutoApply ("apply without asking"), but the
-			     row reads "Confirm before changes", so the binding is inverted here
-			     rather than in ToggleRow — the switch must match its own label
-			     (design.md §5 anti-pattern 17). -->
-			<ToggleRow
-				title="Confirm before changes"
-				help="Ask before creating, updating, or submitting in this chat. Deletes, cancels, amends, and emails always ask, even with this off."
-				:modelValue="!convAutoApply"
-				:disabled="!hasConversation"
-				@update:modelValue="onToggleAutoApply"
-			/>
-			<p v-if="!hasConversation" class="pb-2 text-p-sm text-ink-gray-5">
-				Open a conversation to change this. It is set per chat.
-			</p>
-			<p v-else-if="autoApplyNote" class="pb-2 text-p-sm text-ink-amber-3">
-				{{ autoApplyNote }}
-			</p>
-
 			<ToggleRow
 				title="Show tool activity"
 				help="Show the live tool steps with input and output above each reply. The tools count and time always show below."
@@ -313,7 +295,6 @@ const store = useShellStore();
 
 // Chat-scoped context (null on non-chat routes — guard everything).
 const ctx = computed(() => store.chatContext);
-const hasConversation = computed(() => !!(ctx.value && ctx.value.conversationId));
 // Prefer the SERVER-VERIFIED default model over the conversation's label.
 //
 // ctx.modelLabel is scoped to the open conversation and falls back to the string
@@ -334,8 +315,6 @@ const modelLabel = computed(() =>
 		  "Auto"
 );
 const ui = computed(() => (ctx.value && ctx.value.ui) || {});
-const convAutoApply = computed(() => !!(ctx.value && ctx.value.convAutoApply));
-const autoApplyNote = computed(() => (ctx.value && ctx.value.autoApplyNote) || "");
 
 // Real connection status, in two tiers. getLlmConnectionStatus is admin-tier on
 // the server (require_jarvis_admin) and returns the whole topology; General is
@@ -555,12 +534,6 @@ onMounted(async () => {
 		/* prefs stay on the localStorage cache */
 	}
 });
-
-// Confirm-before-changes → per-conversation action registered by ChatView.
-function onToggleAutoApply() {
-	const fn = store.settingsActions.toggleAutoApply;
-	if (typeof fn === "function") fn();
-}
 
 // Device-local prefs live in the shell store (single source of truth) so that
 // toggling here also updates ChatView's live gating same-tab. Read + delegate.

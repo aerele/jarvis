@@ -110,8 +110,16 @@
 								<span class="truncate">{{ heroMetaText }}</span>
 								<span>·</span>
 								<Badge variant="subtle" theme="gray" :label="agent.nature" />
+								<!-- Operator withdrew this agent: 'Unavailable' takes precedence over the
+								     registry status so a withdrawn install shows one clear disabled state. -->
 								<Badge
-									v-if="agent.status === 'Coming Soon'"
+									v-if="agent.install_disabled"
+									variant="subtle"
+									theme="red"
+									label="Unavailable"
+								/>
+								<Badge
+									v-else-if="agent.status === 'Coming Soon'"
 									variant="subtle"
 									theme="blue"
 									label="Coming Soon"
@@ -181,6 +189,15 @@
 				</div>
 				<div v-else-if="shadowScribeBlocked" class="mt-3 text-sm text-ink-gray-5">
 					Still in shadow preview - promote it to live under Configure first
+				</div>
+				<!-- Operator withdrew this agent: a visible hint (not only badge/tooltip) that Run
+				     Now is off, it resumes if made available, and it can still be uninstalled. -->
+				<div
+					v-if="installation && agent.install_disabled"
+					class="mt-3 text-sm text-ink-gray-5"
+				>
+					The operator has made this agent unavailable. It won't run until it's available
+					again; you can still uninstall it.
 				</div>
 				<!-- jarvis#1062 polish: install_agent refuses an Administrator run-as
 				     identity server-side ("agents cannot run as Administrator") - fail
@@ -927,12 +944,18 @@ const runDisabled = computed(
 	() =>
 		!installation.value ||
 		!installation.value.enabled ||
+		(agent.value && agent.value.install_disabled) ||
 		(agent.value && !["Auditor", "Scribe"].includes(agent.value.nature)) ||
 		!(agent.value && agent.value.allowed) ||
 		shadowScribeBlocked.value
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
+	// The operator withdrew this agent (teaser/hidden): it can't run for anyone until it is
+	// available again. The install is kept so it can be uninstalled; it resumes automatically
+	// if the operator restores availability.
+	if (agent.value.install_disabled)
+		return "The operator has made this agent unavailable — it can't run until it's available again";
 	const nature = agent.value.nature;
 	if (nature !== "Auditor" && nature !== "Scribe")
 		return "Operators draft through the Approval Board - no on-demand runs";

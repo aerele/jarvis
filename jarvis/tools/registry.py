@@ -98,7 +98,12 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"get_party_dashboard_info",
 	"get_exchange_rate",
 	"get_fiscal_year",
+	"get_engagement_config",
 	"get_itemised_tax_breakup",
+	# Read-only GSTR-1 return-side period totals from india_compliance's filed
+	# return (the gzip filed_summary File, reduced server-side to the 5 heads), for
+	# a books-vs-return tie-out. Never triggers IC generation / GSTN sync.
+	"get_gstr1_summary",
 	# Tier 2b HRMS + Frappe computed reads: leave/shift/holiday lookups
 	# the LLM gets wrong because they need policy-aware math, plus
 	# Frappe linked-doc walking + naming-series preview.

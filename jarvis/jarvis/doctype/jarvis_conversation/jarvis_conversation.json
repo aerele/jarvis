@@ -11,7 +11,6 @@
   "session_key",
   "model_override",
   "thinking_override",
-  "auto_apply",
   "status",
   "last_active_at",
   "starred",
@@ -58,9 +57,12 @@
   {
    "fieldname": "auto_apply",
    "fieldtype": "Check",
-   "label": "Auto-apply changes (skip confirmation)",
+   "label": "Auto-apply changes (deprecated)",
    "default": "0",
-   "description": "When 1, reversible mutating tool calls in this conversation execute without a confirmation card. Enabling requires the System Manager role; destructive ops (delete/cancel/amend/send_email) still park regardless. Default 0 (confirm every write)."
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "DEPRECATED and removed (action-card overhaul): admin Auto-Apply no longer skips confirmation cards - every change asks, and request-scoped 'confirm all' is the user-facing replacement. The column is retained (not dropped) so history is preserved and the removal patch can flip stale 1 values to 0. Nothing reads it. File Box remains the one direct-apply path (see file_box)."
   },
   {
    "fieldname": "file_box",
@@ -69,7 +71,7 @@
    "default": "0",
    "hidden": 1,
    "no_copy": 1,
-   "description": "Set by the File Box drop path. When 1, reversible create/update tool calls execute directly (no confirmation card) because the run is unattended and review happens on the created Draft + the approval board; destructive ops still park. Server-set only; enabling via a generic save requires System Manager, like auto_apply."
+   "description": "Set by the File Box drop path. When 1, reversible create/update tool calls execute directly (no confirmation card) because the run is unattended and review happens on the created Draft + the approval board; destructive ops still park. Server-set only; enabling via a generic save requires the Jarvis Admin / System Manager role."
   },
   {
    "fieldname": "skip_confirmation",
@@ -113,6 +115,32 @@
    "hidden": 1,
    "no_copy": 1,
    "description": "The skill_name a user pinned at File Box drop time (or ocr-data-entry, or empty for auto-discovery). Server-set only via drop_file after validating the caller may use it (get_skill); the directed prompt then tells the agent to follow this skill and skip find_skills discovery."
+  },
+  {
+   "fieldname": "request_autorun",
+   "fieldtype": "Check",
+   "label": "Request auto-run (typed 'confirm all')",
+   "default": "0",
+   "hidden": 1,
+   "no_copy": 1,
+   "search_index": 1,
+   "description": "Set by _typed_confirmation / the upfront detector when the user says 'confirm all' / 'do everything' (design Layer B). When 1, every covered gated tool call (_GATED_WRITES - _BRAKE) in the CURRENT request's fan-out (the originating message plus its [System] Applied continuation chain) runs without a confirmation card, sliding request_autorun_at on each covered write; the brake (delete/cancel/amend/create_custom_skill/call_connector) still parks. Bounded to the request: a new top-level human message resets it, a first ok:False clears it, Halt clears it, and the sliding-TTL reaper reaps a stranded flag. NOT the persistent skill 'Approve & run'. Server-set only (raw db_set); enabling via a generic save requires the Jarvis Admin / System Manager role."
+  },
+  {
+   "fieldname": "request_autorun_at",
+   "fieldtype": "Datetime",
+   "label": "Request Auto-run At",
+   "hidden": 1,
+   "no_copy": 1,
+   "description": "Sliding last-write timestamp for request_autorun - set at arm time and advanced to now() on every subsequent covered write. The inline sliding-TTL check and the reaper read THIS field to expire a stranded request-autorun. Server-set only (db_set)."
+  },
+  {
+   "fieldname": "request_autorun_msg",
+   "fieldtype": "Data",
+   "label": "Request Auto-run Message",
+   "hidden": 1,
+   "no_copy": 1,
+   "description": "The originating human Jarvis Chat Message name that armed request_autorun (record/observability only - correctness rides the new-message reset + sliding TTL, not a descent-check). Server-set only (db_set)."
   },
   {
    "fieldname": "status",

@@ -656,6 +656,9 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 				# denied connector call reads "failed", consistent with its receipt
 				# status; non-connector tools keep the outer ok.
 				action_outcome="confirmed" if api.envelope_ok(record["tool"], result) else "failed",
+				# PR-1: flip the parked PENDING action-row into this receipt in place
+				# (else insert, for a directly-minted / pre-deploy token).
+				flip_token=token,
 			)
 		except Exception:
 			frappe.log_error(
@@ -807,6 +810,9 @@ def _confirm_core(token: str, conversation: str | None = None, *, batch: bool = 
 				# denied connector call reads "failed", consistent with its receipt
 				# status; non-connector tools keep the outer ok.
 				action_outcome="confirmed" if api.envelope_ok(record["tool"], result) else "failed",
+				# PR-1: flip the parked PENDING action-row into this receipt in place
+				# (else insert, for a directly-minted / pre-deploy token).
+				flip_token=token,
 			)
 		except Exception:
 			frappe.log_error(
@@ -993,7 +999,7 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	if conv:
 		# Durable "discarded" chip: what the user declined, in their transcript.
 		try:
-			api.persist_tool_receipt(conv, tool, args, None, action_outcome="discarded")
+			api.persist_tool_receipt(conv, tool, args, None, action_outcome="discarded", flip_token=token)
 		except Exception:
 			frappe.log_error(title="dismiss_tool receipt failed", message=frappe.get_traceback())
 		# Correct the agent's stale pending_confirmation memory on its next turn.
@@ -1015,9 +1021,22 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	return {"ok": True, "data": {"status": "discarded", "tool": tool}}
 
 
+# Provenance tags the client may pass as ``source`` (layered re-check design).
+# Kept as a whitelist so nothing client-supplied reaches a log line raw, and so a
+# non-string value can be coerced instead of crashing a membership test.
+_KNOWN_RECHECK_SOURCES = frozenset({"recheck", "auto", "pill", "menu", "typed"})
+# The USER-DRIVEN subset: a human reached for recovery (clicked the pill, opened the
+# menu entry, typed "show it", or hit the legacy lever). Surfacing a card on one of
+# these is the "live delivery missed it, the human had to act" signal, so we log it.
+# ``auto`` (focus/visibility/poll) fires constantly and is deliberately NOT logged -
+# a per-call auto log would flood the channel and drown the real signal; auto's
+# effectiveness shows as the ABSENCE of user-driven rescues (+ reconcile_action_cards).
+_RESCUE_RECHECK_SOURCES = frozenset({"recheck", "pill", "menu", "typed"})
+
+
 @frappe.whitelist()
 @require_jarvis_user
-def list_pending_confirmations(conversation: str | None = None) -> dict:
+def list_pending_confirmations(conversation: str | None = None, source: str | None = None) -> dict:
 	"""Re-surface the caller's OWN currently-parked confirmation cards after a
 	reload/reconnect (issue #186, enables R3's fix for #3).
 
@@ -1026,6 +1045,15 @@ def list_pending_confirmations(conversation: str | None = None) -> dict:
 	exactly what the ``action:pending`` realtime event already delivers to this
 	same owner's UI - token + tool + preview + summary + conversation + run_id -
 	so no new information is leaked. Human cookie-session only.
+
+	``source`` marks HOW the client called this (layered re-check design): the
+	user-driven controls pass ``recheck`` / ``pill`` / ``menu`` / ``typed``; the
+	silent auto-heal (focus / visibility / poll) passes ``auto``. When a user-driven
+	re-check SURFACES a card we emit a measurable, per-source signal (AC-detect) so
+	recoveries attribute per layer. Read it as an UPPER BOUND on live-delivery
+	misses, not an exact count (a user may pull while a card is already on screen);
+	over-counting is the safe direction. ``source`` is validated to a whitelist tag
+	before it is logged, and a non-string value is coerced (never a 500).
 	"""
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
@@ -1041,4 +1069,25 @@ def list_pending_confirmations(conversation: str | None = None) -> dict:
 		items = pending_confirm.list_items_for_owner(frappe.session.user, conversation=conv, strict=True)
 	except pending_confirm.PendingConfirmStorageError as exc:
 		return _confirmation_storage_error(exc)
+	# AC-detect (per-layer rescue signal): a USER-DRIVEN re-check that surfaces a card is
+	# an upper-bound signal the auto delivery path may have missed it. Log to the
+	# jarvis.chat.latency channel (the greppable channel cards_open uses) tagged by source
+	# so recoveries attribute per layer. `conversation` is the triage key; the owner is
+	# derivable from it, so we do NOT log the user's email (PII hygiene). The tag is
+	# whitelisted and `conversation` is newline-stripped + capped so nothing client-
+	# supplied can forge a log line. Best-effort: a signal must never fail the re-surface.
+	src = source if isinstance(source, str) else None
+	tag = src if src in _KNOWN_RECHECK_SOURCES else "other"
+	if tag in _RESCUE_RECHECK_SOURCES and items:
+		try:
+			from jarvis.chat.latency import get_logger
+
+			get_logger().info(
+				"action_card_rescue source=%s count=%d conversation=%s",
+				tag,
+				len(items),
+				(conv or "").replace("\n", " ").replace("\r", " ")[:64],
+			)
+		except Exception:
+			pass
 	return {"ok": True, "data": {"pending": items}}

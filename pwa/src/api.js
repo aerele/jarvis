@@ -19,8 +19,6 @@ export const renameConversation = (conversation, title) =>
 	call(CHAT + "rename_conversation", { conversation, title });
 export const setStar = (conversation, starred) =>
 	call(CHAT + "set_star", { conversation, starred: starred ? 1 : 0 });
-export const setAutoApply = (conversation, value) =>
-	call(CHAT + "set_auto_apply", { conversation, value: value ? 1 : 0 });
 
 // Model name for the chat header, the model/effort pickers, and whether the mic
 // is allowed to appear (STT is off unless the admin configured a transcription
@@ -117,9 +115,13 @@ export const dropFile = (file_url, file_name) =>
 // `action:pending` event carrying a one-time token. confirm_tool is the ONLY
 // path that runs the parked call. There is no deny endpoint by design: dropping
 // the card leaves the token to expire, which is exactly what "no" means.
-export const listPendingConfirmations = (conversation) =>
+// `source` is an optional provenance tag (layered re-check design): the on-demand
+// controls pass "pill"/"menu" and the silent auto-heal passes "auto", so the backend
+// attributes per layer how often a card had to be re-surfaced (AC-detect rescue).
+export const listPendingConfirmations = (conversation, source) =>
 	call("jarvis.chat.actions_api.list_pending_confirmations", {
 		conversation: conversation || "",
+		...(source ? { source } : {}),
 	});
 export const confirmTool = (token, conversation) =>
 	call("jarvis.chat.actions_api.confirm_tool", { token, conversation: conversation || "" });

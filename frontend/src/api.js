@@ -65,12 +65,6 @@ export const setStar = (conversation, starred) =>
 	call("jarvis.chat.api.set_star", { conversation, starred: starred ? 1 : 0 });
 export const retryMessage = (message) => call("jarvis.chat.api.retry_message", { message });
 export const getChatUiSettings = () => call("jarvis.chat.api.get_chat_ui_settings");
-// Toggle per-conversation "auto-apply changes" (skip the write-safety
-// confirmation before mutating ERP data). Off = confirm every gated write
-// (default). Enabling requires System Manager (a non-admin gets a 403);
-// disabling is always allowed for the owner. Response: {ok, data:{auto_apply}}.
-export const setAutoApply = (conversation, value) =>
-	call("jarvis.chat.api.set_auto_apply", { conversation, value: value ? 1 : 0 });
 // Estimated token usage (this chat / this month / total + monthly budget).
 // Response also carries a "measured" block (real gateway-recorded counters +
 // the caller's own monthly_token_limit) once the backend records usage —
@@ -294,8 +288,14 @@ export const dismissTool = (token, conversation) =>
 // Resync (issue #186, R3 fix for #3): re-surface the caller's own currently
 // parked confirmation cards after a reload/reconnect. Returns
 // {ok, data:{pending:[{token, tool, preview, summary, conversation, run_id}]}}.
-export const listPendingConfirmations = (conversation) =>
-	call(AC + "list_pending_confirmations", { conversation: conversation || "" });
+// `source` is an optional provenance tag (layered re-check design): the on-demand
+// controls pass "pill"/"menu" and the silent auto-heal passes "auto", so the backend
+// attributes per layer how often a card had to be re-surfaced (AC-detect rescue).
+export const listPendingConfirmations = (conversation, source) =>
+	call(AC + "list_pending_confirmations", {
+		conversation: conversation || "",
+		...(source ? { source } : {}),
+	});
 
 export async function sendMessage(
 	conversation,
@@ -609,6 +609,20 @@ export const completePoolAccountSignin = (nonce, redirectedUrl) =>
 		nonce,
 		redirected_url: redirectedUrl,
 	});
+// Claude Pro/Max signs in through the browser, the same shape xAI's bare-code
+// paste uses: begin starts the official Claude CLI's own sign-in inside the
+// tenant container and returns { login_id, authorize_url, expires_at }; the
+// customer opens authorize_url, approves, and pastes the code Anthropic shows
+// back. complete relays that code and captures the account (same capture-only
+// shape as completePoolAccountSignin) - no token ever crosses the wire.
+export const beginClaudeCliLogin = (model) =>
+	call("jarvis.oauth.api.begin_claude_cli_login", { model });
+export const completeClaudeCliLogin = (loginId, code) =>
+	call("jarvis.oauth.api.complete_claude_cli_login", { login_id: loginId, code });
+// Customer backed out before pasting a code: best-effort, tells fleet to kill
+// the detached CLI login and drop its transcript.
+export const cancelClaudeCliLogin = (loginId) =>
+	call("jarvis.oauth.api.cancel_claude_cli_login", { login_id: loginId });
 // Device-code (Kimi) capture: begin returns { device_flow:true, user_code,
 // verification_uri, interval }; poll on `interval` → { status:"pending" } until
 // the user approves, then the same capture-only { status:"ok", capture_id,
@@ -662,6 +676,15 @@ export const getAccount = () => call("jarvis.account.get_account");
 export const cancelPlanAtPeriodEnd = () => call("jarvis.account.cancel_plan_at_period_end");
 export const resumePlan = () => call("jarvis.account.resume_plan");
 export const reauthorizeAutopay = () => call("jarvis.account.reauthorize_autopay");
+// Past-Due pay-now, step one of two ("stop-autopay-to-pay"): neutralizes the
+// customer's still-live Razorpay mandate so the EXISTING reactivation grid
+// (can_reactivate) takes over for step two - this call never charges anything.
+// Unlike renewPlan, every refusal here (FeatureDisabled/NotEligible/
+// PAYMENT_UNDER_REVIEW/NoSubscription) is already reduced to a clean message by
+// the bench's onboarding._surface() before it reaches the browser, so this rides
+// the ordinary call() - no raw coded envelope to decode. Resolves {ok:true,
+// outcome:"neutralized"|"already_dead"|"already_active"}; a refusal rejects.
+export const stopAutopayToPay = () => call("jarvis.account.stop_autopay_to_pay");
 export const previewDowngrade = (targetPlan) =>
 	call("jarvis.account.preview_downgrade", { target_plan: targetPlan });
 export const startDowngrade = (targetPlan) =>

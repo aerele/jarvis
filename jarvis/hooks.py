@@ -73,8 +73,9 @@ def __getattr__(name: str):
 # Google Gemini is deliberately absent - its consumer login-with-Google was
 # discontinued by Google 2026-06-18 (subscription removed 2026-08-19); Gemini
 # is available via API key only.
-# Anthropic Claude is deliberately absent - agent has no compatible
-# adapter for Claude Pro/Max subscriptions.
+# Claude Pro/Max signs in through its own browser relay (oauth/api.py
+# begin/complete_claude_cli_login) into the native Claude CLI runtime; it does
+# not register a client in this generic OAuth map.
 def _env_or_default(name: str, default: str) -> str:
 	import os
 
@@ -372,6 +373,19 @@ scheduler_events = {
 		# no-pending-card discriminators the gate and on_terminal_turn use. Cheap no-op
 		# (one indexed flag scan) when nothing is stranded.
 		"jarvis.chat.session_lifecycle.reap_stranded_skill_autorun",
+		# Request-scoped "confirm all" backstop (design Layer B): clear a STRANDED
+		# request_autorun flag - a "confirm all" run whose worker died mid-request, so no
+		# reset fired and its sliding timestamp froze. Same shape as the skill reaper (a
+		# conversation-flag scan past the sliding TTL, with the no-live-turn + no-pending-
+		# card discriminators). Cheap no-op (one indexed flag scan) when nothing is stranded.
+		"jarvis.chat.session_lifecycle.reap_stranded_request_autorun",
+		# Action-card DELIVERY health (AC-detect / plan-check B-8): the invisible-
+		# submit-card bug slipped through because nothing measured whether a minted
+		# card reached the screen. This tick gauges open cards + STRANDED pending
+		# action-rows (a card minted but never resolved, dead token) over a rolling
+		# window, logs both to the greppable latency channel, and alerts past a
+		# threshold. Read-only (never flips a row); cheap (one bounded scan + peeks).
+		"jarvis.chat.session_lifecycle.reconcile_action_cards",
 		# Fire any due scheduled auditor agents. Identity-safe (runs each audit
 		# as its owner, never Administrator); budget-capped; advances only on a
 		# successful enqueue. See jarvis/chat/agent_scheduler.py.
@@ -685,6 +699,10 @@ permission_query_conditions.update(
 		"Jarvis Agent Run": "jarvis.chat.agent_permissions.run_query_conditions",
 		"Jarvis Agent Finding": "jarvis.chat.agent_permissions.finding_query_conditions",
 		"Jarvis Agent Activity": "jarvis.chat.agent_permissions.activity_query_conditions",
+		# Catalogue-visibility boundary: a non-admin never LISTS a teaser/hidden
+		# agent it hasn't installed via generic REST/Desk (the SPA masks; the raw
+		# row would leak the real name).
+		"Jarvis Agent Listing": "jarvis.chat.agent_permissions.listing_query_conditions",
 	}
 )
 has_permission.update(
@@ -695,6 +713,9 @@ has_permission.update(
 		"Jarvis Agent Run": "jarvis.chat.agent_permissions.has_run_permission",
 		"Jarvis Agent Finding": "jarvis.chat.agent_permissions.has_finding_permission",
 		"Jarvis Agent Activity": "jarvis.chat.agent_permissions.has_activity_permission",
+		# Catalogue-visibility boundary: deny a non-admin READ of a teaser/hidden
+		# listing it hasn't installed (raw REST get / get_doc).
+		"Jarvis Agent Listing": "jarvis.chat.agent_permissions.has_listing_permission",
 	}
 )
 

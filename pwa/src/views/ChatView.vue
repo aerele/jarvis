@@ -124,7 +124,6 @@ const renaming = ref(false);
 const renameText = ref("");
 const menuError = ref("");
 const starred = ref(false);
-const autoApply = ref(false);
 
 const scroller = ref(null);
 const composer = ref(null);
@@ -287,7 +286,6 @@ async function load(force = false) {
 		const d = await api.getConversation(convId.value);
 		conversation.value = d?.conversation || null;
 		messages.value = d?.messages || [];
-		autoApply.value = !!d?.conversation?.auto_apply;
 		const row = store.conversations.find((c) => c.name === convId.value);
 		if (row) starred.value = !!row.starred;
 		// A reply still streaming when we (re)opened the chat: restore the busy
@@ -304,17 +302,123 @@ async function load(force = false) {
 	}
 }
 
-// Parked writes survive a reload: re-ask rather than leaving an approval the
-// user can never reach.
-async function loadPending() {
-	if (!convId.value) return;
+// PR-1: build a confirm-card item from a durable pending action-row (role="tool",
+// tool_status="pending"), mirroring the SPA. pendingCardOf reads preview.card.
+function _rowExpiresEpoch(s) {
+	if (!s) return null;
+	// The row's expires_at is a site-timezone datetime string; parse to epoch seconds
+	// (best-effort - a live push carries the authoritative epoch and the server
+	// enforces the real TTL, so null just omits the client countdown).
+	const t = Date.parse(String(s).replace(" ", "T"));
+	return Number.isFinite(t) ? Math.round(t / 1000) : null;
+}
+function pendingActionFromRow(m, cid) {
+	return {
+		conversation: cid,
+		token: m.tool_call_id,
+		tool: m.tool_name,
+		summary: "",
+		preview: { card: m.pending_card },
+		run_id: null,
+		expires_at: _rowExpiresEpoch(m.expires_at),
+	};
+}
+
+// Parked writes survive a reload: re-ask rather than leaving an approval the user
+// can never reach. PR-1 reliability: the durable pending action-rows
+// (get_conversation) are the PRIMARY source - a reload shows a confirmable card even
+// if the best-effort action:pending push was missed. list_pending (Redis) is the
+// backstop. Merge rows-first, dedup by token, REPLACE so a confirmed/expired card
+// (no longer a pending row and gone from Redis) drops.
+// Layered re-check (phase 1): the on-demand control's handler (the header-menu entry —
+// the PWA has no jump affordance to ride). loadPending merges durable rows (primary) +
+// the Redis backstop, so a manual pull surfaces a parked card the auto-heal missed. The
+// card appearing is the feedback.
+async function recheckPending() {
+	// "menu" tags this as the human-driven on-demand control so the server can
+	// attribute how often it surfaces a card the silent auto-heal missed.
+	await loadPending("menu");
+}
+
+async function loadPending(source) {
+	const cid = convId.value;
+	if (!cid) return;
+	const fromRows = (messages.value || [])
+		.filter(
+			(m) =>
+				m.role === "tool" &&
+				m.tool_status === "pending" &&
+				m.pending_card &&
+				m.tool_call_id
+		)
+		.map((m) => pendingActionFromRow(m, cid));
+	let fromBackstop = null; // null = backstop read failed/unavailable (a transient blip)
 	try {
-		const r = await api.listPendingConfirmations(convId.value);
-		if (r?.ok && r.data)
-			pending.value = r.data.pending.filter((p) => p.conversation === convId.value);
+		const r = await api.listPendingConfirmations(cid, source);
+		// Only a CLEAN ok:true result is authoritative. ok:false (a store blip) or a
+		// missing/malformed body leaves fromBackstop null so we KEEP the on-screen queue
+		// rather than wipe a live-only card (the fail-closed hole the SPA guards). This
+		// helper is also the open-seed path, so durable rows below always apply.
+		if (r?.ok && r.data) fromBackstop = r.data.pending.filter((p) => p.conversation === cid);
 	} catch {
-		/* the cards also arrive live; a failed resync is not worth a banner */
+		/* leave null: durable rows still apply, live cards kept */
 	}
+	// A resync in flight across a conversation switch must not write the previous
+	// conversation's cards onto the new one (freshness guard, mirrors the SPA).
+	if (convId.value !== cid) return;
+	// On a blip keep the current cards; on a clean read the server list is authoritative
+	// for this conversation (resolved cards drop). Durable rows always apply.
+	const base = fromBackstop === null ? pending.value : [];
+	const byToken = new Map();
+	for (const c of [...base, ...fromRows, ...(fromBackstop || [])]) {
+		if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
+	}
+	pending.value = [...byToken.values()];
+}
+
+// Auto-heal (layered design, phase 1): recover a card the live push dropped with NO user
+// action. Both triggers are card-agnostic (never gated on a known pending card) and route
+// through loadPending, inheriting its rows-first / failed-backstop-keeps-queue merge.
+//   (a) a run-scoped, self-stopping poll: while a turn is in flight, reconcile every
+//       PENDING_POLL_MS, then a couple of trailing reconciles after it settles (the
+//       terminal frame can be the dropped one), then stop. Mirrors the desktop SPA.
+//   (b) window focus + tab-visibility: a card minted while the app was backgrounded
+//       surfaces on return. Debounced so focus + visibility co-firing is one resync.
+const PENDING_POLL_MS = 2500;
+const PENDING_POLL_TRAILING = 2;
+let _pendingPoll = null;
+let _pendingPollIdle = 0;
+function startPendingPoll() {
+	if (_pendingPoll) {
+		_pendingPollIdle = 0;
+		return;
+	}
+	_pendingPollIdle = 0;
+	_pendingPoll = setInterval(() => {
+		if (!convId.value) {
+			stopPendingPoll();
+			return;
+		}
+		loadPending("auto");
+		if (live.value) _pendingPollIdle = 0;
+		else if (++_pendingPollIdle > PENDING_POLL_TRAILING) stopPendingPoll();
+	}, PENDING_POLL_MS);
+}
+function stopPendingPoll() {
+	if (_pendingPoll) clearInterval(_pendingPoll);
+	_pendingPoll = null;
+	_pendingPollIdle = 0;
+}
+let _lastWake = 0;
+function wakePending() {
+	if (!convId.value) return;
+	const now = Date.now();
+	if (now - _lastWake < 2000) return; // focus + visibility often co-fire
+	_lastWake = now;
+	loadPending("auto");
+}
+function onVisible() {
+	if (document.visibilityState === "visible") wakePending();
 }
 
 // ── sending ─────────────────────────────────────────────────────────────────
@@ -497,18 +601,6 @@ async function toggleStar() {
 	}
 }
 
-async function toggleAutoApply() {
-	const next = !autoApply.value;
-	menuError.value = "";
-	try {
-		await api.setAutoApply(convId.value, next);
-		autoApply.value = next;
-	} catch (e) {
-		// Only a System Manager may turn this on — the server is the authority.
-		menuError.value = e?.message || "Only a System Manager can enable auto-apply.";
-	}
-}
-
 async function saveRename() {
 	const t = renameText.value.trim();
 	if (!t) return;
@@ -551,6 +643,9 @@ function onEvent(p) {
 				text: "",
 				tools: [],
 			};
+			// Auto-heal: poll for a parked card while this turn is in flight (self-stops
+			// after it settles + a couple trailing reconciles).
+			startPendingPoll();
 			break;
 
 		case "assistant:delta":
@@ -652,6 +747,9 @@ function onEvent(p) {
 				expires_at: p.expires_at ?? null,
 			});
 			scrollToBottom();
+			// This push arrived; keep polling so a SIBLING card whose push was dropped
+			// in the same turn still self-heals (mirrors the desktop SPA).
+			startPendingPoll();
 			break;
 
 		case "canvas":
@@ -691,6 +789,7 @@ watch(
 		live.value = null;
 		sendBusy.value = false;
 		errorBanner.value = "";
+		stopPendingPoll(); // a poll from the previous conversation must not carry over
 		load(true);
 		loadPending();
 	}
@@ -699,6 +798,9 @@ watch(
 onMounted(async () => {
 	socket?.on("jarvis:event", onEvent);
 	window.addEventListener("jv:resync", onResync);
+	// Auto-heal: recover a card minted while the app was backgrounded, on return.
+	window.addEventListener("focus", wakePending);
+	document.addEventListener("visibilitychange", onVisible);
 	// Opening the chat IS reading it — drop the list's dot straight away.
 	store.clearUnread(convId.value);
 	if (!store.loaded) store.loadConversations();
@@ -714,6 +816,9 @@ onMounted(async () => {
 onUnmounted(() => {
 	socket?.off("jarvis:event", onEvent);
 	window.removeEventListener("jv:resync", onResync);
+	window.removeEventListener("focus", wakePending);
+	document.removeEventListener("visibilitychange", onVisible);
+	stopPendingPoll();
 	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
 });
 </script>
@@ -920,15 +1025,19 @@ onUnmounted(() => {
 
 		<ThinkingIndicator v-if="sending && !(live && live.text)" />
 
-		<DecisionCard
-			v-for="(p, pi) in orderedPending"
-			:key="p.token"
-			:summary="
-				(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
-				(p.summary || p.tool || `${agentName} needs your approval`)
-			"
-			@open="decision = p"
-		/>
+		<!-- aria-live so a card surfaced by auto-heal / the menu re-check is announced to a
+		     screen reader, not silently inserted. display:contents = zero layout change. -->
+		<div style="display: contents" role="status" aria-live="polite">
+			<DecisionCard
+				v-for="(p, pi) in orderedPending"
+				:key="p.token"
+				:summary="
+					(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
+					(p.summary || p.tool || `${agentName} needs your approval`)
+				"
+				@open="decision = p"
+			/>
+		</div>
 		<!-- Both ways to approve, shown once under the stack. -->
 		<p v-if="orderedPending.length" class="jv-typehint">{{ typedApprovalHint }}</p>
 	</div>
@@ -1036,48 +1145,35 @@ onUnmounted(() => {
 					Rename chat
 				</button>
 
-				<!-- Auto-apply removes the approval gate for this chat: the agent
-				     commits ERP writes without asking. It is the single most
-				     dangerous switch in the product, so it looks like one. -->
-				<div class="jv-danger">
+				<!-- Layered re-check (phase 1): the PWA has no jump affordance to ride,
+				     so the on-demand control lives here (no always-visible chrome).
+				     Re-surfaces a parked confirmation the silent auto-heal missed. -->
+				<button class="jv-row-btn" @click="(menuOpen = false), recheckPending()">
 					<svg
 						viewBox="0 0 24 24"
-						width="18"
-						height="18"
+						width="19"
+						height="19"
 						fill="none"
 						stroke="currentColor"
-						stroke-width="2"
+						stroke-width="1.8"
 						stroke-linecap="round"
 						stroke-linejoin="round"
 					>
-						<path
-							d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
-						/>
-						<path d="M12 9v4M12 17h.01" />
+						<path d="M21 12a9 9 0 1 1-2.64-6.36" />
+						<path d="M21 3v6h-6" />
 					</svg>
-					<div class="jv-danger-main">
-						<div class="jv-danger-title">Auto-apply changes</div>
-						<div class="jv-danger-sub">
-							{{ agentName }} commits ERP writes without asking. Turns off approval
-							prompts.
-						</div>
-						<div v-if="menuError" class="jv-menu-error">{{ menuError }}</div>
-					</div>
-					<button
-						class="jv-toggle"
-						:class="{ 'is-on': autoApply }"
-						role="switch"
-						:aria-checked="autoApply"
-						@click="toggleAutoApply"
-					>
-						<span />
-					</button>
-				</div>
+					Re-check for a confirmation
+				</button>
 			</template>
 		</div>
 	</Sheet>
 
-	<DecisionSheet :action="decision" @close="decision = null" @resolved="onResolved" />
+	<DecisionSheet
+		:action="decision"
+		:streaming="sending"
+		@close="decision = null"
+		@resolved="onResolved"
+	/>
 	<FilePreviewSheet
 		:item="preview?.item"
 		:message-name="preview?.messageName || ''"
@@ -1431,57 +1527,5 @@ onUnmounted(() => {
 }
 .jv-btn:disabled {
 	opacity: 0.55;
-}
-
-.jv-danger {
-	display: flex;
-	align-items: flex-start;
-	gap: 11px;
-	margin: 12px 0 0;
-	padding: 13px;
-	border: 1px solid var(--red);
-	border-radius: 12px;
-	background: var(--red-bg);
-	color: var(--red);
-}
-.jv-danger-main {
-	flex: 1;
-	min-width: 0;
-}
-.jv-danger-title {
-	font-size: 13.5px;
-	font-weight: 600;
-	color: var(--ink9);
-}
-.jv-danger-sub {
-	margin-top: 2px;
-	font-size: 12px;
-	line-height: 1.4;
-	color: var(--red);
-}
-.jv-toggle {
-	flex: none;
-	width: 44px;
-	height: 26px;
-	padding: 3px;
-	border: 0;
-	border-radius: 999px;
-	background: var(--card3);
-	cursor: pointer;
-	transition: background 0.15s ease;
-}
-.jv-toggle span {
-	display: block;
-	width: 20px;
-	height: 20px;
-	border-radius: 999px;
-	background: #fff;
-	transition: transform 0.15s ease;
-}
-.jv-toggle.is-on {
-	background: var(--red);
-}
-.jv-toggle.is-on span {
-	transform: translateX(18px);
 }
 </style>

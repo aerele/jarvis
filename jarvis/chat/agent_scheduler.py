@@ -198,7 +198,20 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 	# with a schedule set just consumes its slot (it drafts through the board,
 	# not on a cron). A scribe's schedule is optional (manual run-now is the
 	# primary path) but honoured here when set, so periodic re-learning works.
-	listing = frappe.db.get_value(LISTING, row.agent, ["nature", "status"], as_dict=True) or frappe._dict()
+	listing = (
+		frappe.db.get_value(LISTING, row.agent, ["nature", "status", "operator_visibility"], as_dict=True)
+		or frappe._dict()
+	)
+	# Operator-visibility gate: a teaser/hidden (operator-withdrawn) agent's installs are
+	# DISABLED and must not run. Advance ONLY the next slot (stamp_last_run=False -> no phantom
+	# 'last run') so the cadence does not busy-retry; reversible (agent -> available resumes the
+	# schedule, no stored state). Deliberately NOT recorded as a failed run (unlike the
+	# installable / status skips below): withdrawal is a normal reversible operator decision the
+	# owner cannot fix, surfaced as the "Unavailable" card + detail explanation, so a daily
+	# failed-run row would be misleading spam. Mirrors run_agent_now's withdrawn gate.
+	if (listing.get("operator_visibility") or "available") in ("teaser", "hidden"):
+		_advance(row, now, stamp_last_run=False)
+		return
 	nature = listing.get("nature")
 	if nature not in ("Auditor", "Scribe"):
 		_advance(row, now)
@@ -1477,12 +1490,49 @@ def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str
 			"not read your installation to obtain THESE values. Keep every other field your skill "
 			f"builds into config.json. {json.dumps(explicit_config, sort_keys=True)}"
 		)
-	config_pointer = (
-		"Your tenant's engagement tunables are handed below (authoritative) - use them exactly and "
-		"build the rest of your config.json as your skill directs."
-		if explicit_config
-		else f"Your engagement configuration is on your installation ({inst.name}); read it there."
-	)
+	# Config pointer, preference order:
+	#  1) explicit_config declared -> hand the tunables inline (no read at all).
+	#  2) the agent's tools_allow includes jarvis__get_engagement_config -> PREFER the
+	#     zero-arg tool (nothing to fumble), but keep the named-doctype get_doc as a fallback
+	#     so a deploy-skew window (app registry ahead of the container plugin / tenant
+	#     tools_allow Apply) degrades to the working A' path, not a dead end.
+	#  3) fallback -> NAME the real doctype (A6/hallucination fix). The friendly
+	#     "engagement configuration" is the customer-facing label (agent_run_steps.py)
+	#     for `Jarvis Agent Installation`; handing the label but not the doctype made a
+	#     weak model invent one ("Jarvis Engagement Configuration").
+	try:
+		from jarvis.chat.agent_catalog import registry_tools_allow
+
+		_slug = listing.get("agent_slug") or listing.get("name")
+		_has_config_tool = bool(_slug) and "jarvis__get_engagement_config" in (
+			registry_tools_allow(_slug) or []
+		)
+	except Exception:
+		# Never blocks prompt-build; degrades to the branch-3 fallback. The dominant
+		# failure (missing/corrupt registry) already aborts the launch upstream, so a
+		# fault reaching here is genuinely unexpected - log it rather than swallow silently.
+		frappe.log_error(
+			title="jarvis _audit_prompt: config-tool lookup failed", message=frappe.get_traceback()
+		)
+		_has_config_tool = False
+	if explicit_config:
+		config_pointer = (
+			"Your tenant's engagement tunables are handed below (authoritative) - use them exactly and "
+			"build the rest of your config.json as your skill directs."
+		)
+	elif _has_config_tool:
+		config_pointer = (
+			"Read your engagement configuration by calling jarvis__get_engagement_config - it takes "
+			"NO arguments and returns your tunables. If that tool is unavailable, read the "
+			f"`Jarvis Agent Installation` record '{inst.name}' (its `config` field) with jarvis__get_doc "
+			"instead; never invent another doctype for it."
+		)
+	else:
+		config_pointer = (
+			f"Your engagement configuration is the `Jarvis Agent Installation` record "
+			f"'{inst.name}' (its `config` field) - read it if your skill needs it. That is the "
+			f"ONLY configuration record; never invent another doctype for it."
+		)
 	return (
 		f"[Automated {trigger} run] Run your bundled playbook for this trigger now over "
 		f"the scope below. {config_pointer} Follow your skill exactly and do only what it "
@@ -1630,25 +1680,25 @@ def _unclaim_slot(row, prev: dict) -> None:
 	frappe.db.commit()
 
 
-def _advance(row, now) -> None:
-	"""Advance the schedule with a raw set_value (no re-validate). ``last_run_at``
-	is stamped whether the slot produced a real, failed, or skipped run — the
-	slot was consumed either way."""
-	frappe.db.set_value(
-		INSTALLATION,
-		row.name,
-		{
-			"last_run_at": now,
-			"next_run_at": compute_next_run(
-				row.schedule_frequency,
-				row.schedule_time,
-				from_dt=now,
-				weekday=row.schedule_weekday,
-				day_of_month=row.schedule_day_of_month,
-			),
-		},
-		update_modified=False,
-	)
+def _advance(row, now, stamp_last_run: bool = True) -> None:
+	"""Advance the schedule with a raw set_value (no re-validate). ``last_run_at`` is stamped
+	whether the slot produced a real, failed, or skipped run — the slot was consumed either way.
+
+	``stamp_last_run=False`` advances ONLY the next slot without stamping ``last_run_at``: used
+	for the operator-withdrawn skip, a normal reversible state where no run occurred and no
+	failed-run row is recorded, so a phantom 'last run' timestamp would mislead the owner."""
+	vals = {
+		"next_run_at": compute_next_run(
+			row.schedule_frequency,
+			row.schedule_time,
+			from_dt=now,
+			weekday=row.schedule_weekday,
+			day_of_month=row.schedule_day_of_month,
+		),
+	}
+	if stamp_last_run:
+		vals["last_run_at"] = now
+	frappe.db.set_value(INSTALLATION, row.name, vals, update_modified=False)
 	frappe.db.commit()
 
 

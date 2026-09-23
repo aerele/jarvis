@@ -1001,3 +1001,16 @@ describe("Breadcrumb: no slug flash while the agent is loading (jarvis#1062 P1-6
 		expect(lastCrumb.attributes("data-loading")).toBe("false");
 	});
 });
+
+describe("operator-withdrawn (install_disabled) detail", () => {
+	it("disables Run Now, shows the Unavailable badge + a visible hint", async () => {
+		const w = await mountDetail(
+			baseAgent({ install_disabled: 1, installation: installedInstallation({ enabled: 1 }) })
+		);
+		expect(w.text()).toContain("Unavailable");
+		expect(w.text()).toContain("The operator has made this agent unavailable");
+		const runBtn = w.findAll("button").find((b) => b.attributes("data-label") === "Run Now");
+		expect(runBtn).toBeTruthy();
+		expect(runBtn.attributes("disabled")).toBeDefined();
+	});
+});

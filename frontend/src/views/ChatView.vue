@@ -2743,6 +2743,35 @@
 					</template>
 				</Banner>
 
+				<!-- On-demand re-check (layered design, phase 1): a distinct affordance
+				     beside the jump arrow, shown only when scrolled up (never a resting
+				     control), to pull a parked confirmation the silent auto-heal missed.
+				     Labelled for a11y via title + aria-label. -->
+				<transition name="jv-rc">
+					<button
+						v-if="showScrollDown && !showWelcome && !booting"
+						type="button"
+						class="jv-recheck-float"
+						@click="recheckPending"
+						title="Re-check for a pending confirmation"
+						aria-label="Re-check for a pending confirmation that did not appear"
+					>
+						<svg
+							width="17"
+							height="17"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
+							<path d="M21 12a9 9 0 1 1-2.64-6.36" />
+							<path d="M21 3v6h-6" />
+						</svg>
+					</button>
+				</transition>
+
 				<!-- floats just above the composer; jumps the thread to the newest message -->
 				<transition name="jv-sd">
 					<button
@@ -5043,11 +5072,6 @@ const updateBannerVisible = computed(
 		!hasUrgentAlert.value &&
 		!announcementVisible.value
 );
-// Per-conversation "auto-apply changes" (issue #186): seeded from
-// get_conversation().conversation.auto_apply on each load; the toggle reflects
-// THIS chat. autoApplyNote surfaces the admin-only-enable message.
-const convAutoApply = ref(false);
-const autoApplyNote = ref("");
 // Which builder page started this thread ("dashboards" / "triggers" / ""),
 // from get_conversation. A Dashboards build is an ordinary conversation in
 // this list; this is the only thing that says its html artifacts are
@@ -5673,25 +5697,6 @@ const usagePct = computed(() => {
 // for frappe-ui; the .jv-dark class + inline paletteVars below keep the jv-*
 // scoped styles untouched.
 const { theme, effectiveDark, paletteVars, setTheme, toggleTheme } = useJarvisTheme();
-// Flip "confirm before changes" for THIS conversation (issue #186). Optimistic;
-// reverts on failure. auto_apply=1 = skip confirmation (auto mode). Enabling is
-// admin-only server-side - a non-admin gets a 403, so we revert + show a note.
-async function toggleAutoApply() {
-	if (!currentId.value) return;
-	const next = convAutoApply.value ? 0 : 1;
-	autoApplyNote.value = "";
-	convAutoApply.value = !!next; // optimistic
-	try {
-		const r = await api.setAutoApply(currentId.value, next);
-		// Response envelope is {ok, data:{auto_apply}} - trust the server's value.
-		if (r && r.data && typeof r.data.auto_apply !== "undefined")
-			convAutoApply.value = !!r.data.auto_apply;
-	} catch (e) {
-		convAutoApply.value = !next; // revert
-		// Enabling requires System Manager; a non-admin gets a PermissionError (403).
-		if (next) autoApplyNote.value = "Only an administrator can enable auto-apply.";
-	}
-}
 
 // Phase 1: streaming/metrics, live tool activity, file input, mentions, stop
 const runStartMs = ref(0);
@@ -7869,6 +7874,41 @@ function confirmationStorageUnavailable(response) {
 }
 // Enqueue a parked confirmation, deduped by token (a resync + a live event can
 // both carry the same card).
+// PR-1: build a confirm-card queue item from a durable pending action-row (a
+// role="tool" Jarvis Chat Message with tool_status="pending"), so the card renders
+// from the reliable message pipeline. pendingCardOf reads preview.card unchanged.
+function _rowExpiresEpoch(s) {
+	if (!s) return null;
+	// The row's expires_at is a site-timezone datetime string; parse to epoch seconds
+	// for the countdown. Best-effort: a live push carries the authoritative epoch and
+	// the server enforces the real TTL, so null here just omits the client countdown.
+	const t = Date.parse(String(s).replace(" ", "T"));
+	return Number.isFinite(t) ? Math.round(t / 1000) : null;
+}
+function pendingActionFromRow(m, convId) {
+	return {
+		conversation: convId,
+		token: m.tool_call_id,
+		tool: m.tool_name,
+		summary: "",
+		preview: { card: m.pending_card },
+		run_id: null,
+		expires_at: _rowExpiresEpoch(m.expires_at),
+	};
+}
+function seedPendingFromRows(msgs, convId) {
+	for (const m of msgs || []) {
+		if (
+			m &&
+			m.role === "tool" &&
+			m.tool_status === "pending" &&
+			m.pending_card &&
+			m.tool_call_id
+		) {
+			enqueuePending(pendingActionFromRow(m, convId));
+		}
+	}
+}
 function enqueuePending(card) {
 	if (!card || !card.token) return;
 	if (pendingActions.value.some((x) => x.token === card.token)) return;
@@ -8096,11 +8136,27 @@ async function discardPending(pa) {
 // action:pending event delivered before the page was open. Deduped by token
 // against whatever is already queued; freshness-guarded against a mid-flight
 // conversation switch.
-async function resyncPendingConfirmations(id) {
+// PR-2: the always-present re-check lever's handler. Reseed from the durable rows
+// already loaded, then pull the Redis backstop; both dedup by token so it can't
+// double a card. Always gives a result so the click is never a silent no-op.
+async function recheckPending() {
+	if (!currentId.value) return;
+	const before = visiblePendingActions.value.length;
+	seedPendingFromRows(messages.value, currentId.value);
+	// "pill" tags this as the human-driven on-demand control (the ↻ beside the jump
+	// arrow) so the server can attribute how often the visible lever surfaces a card
+	// the silent auto-heal missed. The automatic resync callers pass no source.
+	await resyncPendingConfirmations(currentId.value, "pill");
+	const after = visiblePendingActions.value.length;
+	if (after > before) notify("Found a pending confirmation.", { type: "success" });
+	else if (after === 0) notify("Nothing is waiting for your confirmation.", {});
+}
+
+async function resyncPendingConfirmations(id, source) {
 	if (!id) return;
 	let items = null;
 	try {
-		const r = await api.listPendingConfirmations(id);
+		const r = await api.listPendingConfirmations(id, source);
 		// ok:false is a transient store blip (the strict owner-index read). Keep
 		// whatever is already on screen and let the next poll tick retry; never
 		// wipe the queue on a single bad read (that was the fail-closed hole that
@@ -8159,7 +8215,9 @@ function startPendingPoll() {
 			stopPendingPoll();
 			return;
 		}
-		resyncPendingConfirmations(currentId.value);
+		// "auto" tags the silent auto-heal poll (matches the PWA + widget), so the server's
+		// per-source rescue signal attributes recoveries correctly; auto is never logged.
+		resyncPendingConfirmations(currentId.value, "auto");
 		// Keep polling while a run is live; once it settles, run a couple of
 		// trailing reconciles (a terminal frame can be the dropped one) then stop.
 		if (currentRunId.value) _pendingPollIdle = 0;
@@ -8939,14 +8997,16 @@ async function loadConversation(id) {
 	// clicked — and leave it gone for good when that refetch rejects.
 	originPage.value = d?.conversation?.origin_page || "";
 	originOf.value = id;
-	// Per-conversation auto-apply + a fresh confirm-card slate for this chat
-	// (issue #186): a pending write from another conversation must not linger.
-	convAutoApply.value = !!(d?.conversation && d.conversation.auto_apply);
-	autoApplyNote.value = "";
 	// Per-conversation confirm-card slate (issue #186): drop any parked cards from
 	// OTHER conversations, then re-surface this conversation's still-live parked
 	// confirmations (R3 fix for #3 - survives reload / reconnect).
 	pendingActions.value = pendingActions.value.filter((pa) => pa.conversation === id);
+	// PR-1 reliability: seed the confirm-card queue from THIS conversation's durable
+	// pending action-rows (get_conversation), so a reload shows a confirmable card even
+	// when the best-effort action:pending push was missed — the card rides the same
+	// reliable message pipeline as the reply text. resyncPendingConfirmations (the Redis
+	// backstop) below reconciles; enqueuePending dedups by token.
+	seedPendingFromRows(messages.value, id);
 	resyncPendingConfirmations(id);
 	// SUXI-1: rebuild the queued chip from server truth (reload / switch / second
 	// tab / reconnect all lose the client-only chip otherwise).
@@ -11761,6 +11821,12 @@ onMounted(async () => {
 	socket?.on("jarvis:event", onEvent);
 	socket?.on("connect", onResync);
 	document.addEventListener("visibilitychange", onVisibility);
+	// Auto-heal (layered design, phase 1): window `focus` closes the gap visibility
+	// misses (OS focus returning to an already-visible tab, e.g. multi-monitor). Routes
+	// through the same 2s-debounced onResync wake, so a focus+visibility co-fire = one
+	// resync. Card-agnostic (never gated on a known pending card) so it recovers a card
+	// the client doesn't yet know about.
+	window.addEventListener("focus", onResync);
 	// Live tool list for the "Tools available" count + /tool autocomplete
 	// (best-effort; falls back to the seeded core set on failure).
 	api.listTools()
@@ -11952,6 +12018,7 @@ onBeforeUnmount(() => {
 	socket?.off("jarvis:event", onEvent);
 	socket?.off("connect", onResync);
 	document.removeEventListener("visibilitychange", onVisibility);
+	window.removeEventListener("focus", onResync);
 	document.removeEventListener("pointerdown", onDocClick);
 	window.removeEventListener("keydown", onGlobalKey);
 	clearInterval(_thinkTimer);
@@ -12013,15 +12080,13 @@ watchEffect(() => {
 			starredCount: starredCount.value,
 			toolCount: toolCount.value,
 		},
-		convAutoApply: convAutoApply.value,
-		autoApplyNote: autoApplyNote.value,
 		modelLabel: modelLabel.value,
 		ui: ui.value,
 	});
 });
 onMounted(() => {
 	// Actions with chat side-effects the panes invoke when a chat is active.
-	store.registerSettingsActions({ toggleAutoApply, clearAllHistory });
+	store.registerSettingsActions({ clearAllHistory });
 });
 onUnmounted(() => {
 	store.setChatContext(null);
@@ -12237,6 +12302,55 @@ onUnmounted(() => {
 .jv-sd-leave-to {
 	opacity: 0;
 	transform: translateX(-50%) translateY(10px);
+}
+/* on-demand re-check — sits just left of the jump arrow, same float. Its transition
+   is opacity-only so it never fights the offset transform below. */
+.jv-recheck-float {
+	position: absolute;
+	left: 50%;
+	bottom: 100%;
+	margin-bottom: 12px;
+	transform: translateX(calc(-50% - 46px));
+	z-index: 20;
+	width: 38px;
+	height: 38px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border-radius: 50%;
+	background: var(--surface);
+	color: var(--text-2);
+	border: 1px solid var(--border-2);
+	box-shadow: 0 6px 20px rgba(20, 20, 30, 0.18);
+	cursor: pointer;
+	transition: color 0.12s, border-color 0.12s, background 0.12s, box-shadow 0.12s;
+}
+.jv-recheck-float:hover {
+	color: var(--text);
+	border-color: var(--text-3);
+	box-shadow: 0 9px 24px rgba(20, 20, 30, 0.22);
+}
+.jv-recheck-float:active {
+	transform: translateX(calc(-50% - 46px)) scale(0.92);
+}
+.jv-recheck-float:focus-visible {
+	outline: 2px solid var(--cta);
+	outline-offset: 2px;
+}
+.jv-rc-enter-active,
+.jv-rc-leave-active {
+	transition: opacity 0.18s ease;
+}
+.jv-rc-enter-from,
+.jv-rc-leave-to {
+	opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+	.jv-rc-enter-active,
+	.jv-rc-leave-active {
+		transition: none;
+	}
 }
 /* response metrics (tools · time) */
 .jv-skillused {

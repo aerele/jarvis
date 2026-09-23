@@ -15,10 +15,12 @@
   "version",
   "publisher",
   "status",
+  "operator_visibility",
   "tools_required",
   "doctypes_required",
   "config_keys",
   "rule_tokens",
+  "advisory_tokens",
   "min_apps",
   "rule_pack",
   "writes",
@@ -93,6 +95,15 @@
    "in_standard_filter": 1
   },
   {
+   "default": "available",
+   "fieldname": "operator_visibility",
+   "fieldtype": "Select",
+   "label": "Operator Visibility",
+   "options": "available\nteaser\nhidden",
+   "in_standard_filter": 1,
+   "description": "Operator-controlled catalogue visibility (runtime overlay, survives catalog sync). available = shown normally; teaser = a masked 'coming soon' card (name/details hidden, not installable); hidden = removed from non-admin discovery, existing installs keep running. Operator/System-Manager state, NEVER written by the catalog sync (like allowed_roles)."
+  },
+  {
    "fieldname": "tools_required",
    "fieldtype": "Small Text",
    "label": "Tools Required (JSON)",
@@ -115,6 +126,12 @@
    "fieldtype": "Small Text",
    "label": "Rule Tokens (JSON)",
    "description": "A2/A16 id-only rule token set for a delegate auditor: the OPAQUE tokens the container evaluator emits and record_agent_run validates a finding's rule against. Tokens only — NO rule bodies, statements, thresholds or predicates ever reach the bench. Empty for operators / legacy agents. Synced from registry.rule_tokens (itself mirrored from the bundle store's rules.ids.json)."
+  },
+  {
+   "fieldname": "advisory_tokens",
+   "fieldtype": "Small Text",
+   "label": "Advisory Tokens (JSON)",
+   "description": "A2 id-only ADVISORY token set: the SUBSET of rule_tokens whose findings are advisory (non-attesting) — valid worklist findings but NOT required-coverage tokens, so they never gate the clean/partial verdict nor the 'no exceptions' attestation. Must be a subset of rule_tokens and disjoint from the statutory coverage tokens. Empty for agents with no advisory checks. Synced from registry.advisory_tokens (mirrored from the bundle store's rules.ids.json tokens)."
   },
   {
    "fieldname": "min_apps",

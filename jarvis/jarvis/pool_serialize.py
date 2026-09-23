@@ -305,11 +305,16 @@ def compute_pool_mode(settings) -> bool:
 
 	True when >=2 models are enabled OR (a preset is selected AND >=1 model
 	enabled) OR any enabled model is a chat subscription that is NOT
-	``_lone_direct_capable`` (jarvis#715). An empty enabled-model list with a
-	preset does NOT count as pool-valid.
+	``_lone_direct_capable`` (jarvis#715). Claude-plan subscriptions always use
+	the pool sync leg because that is where their wire-only ``anthropic_cli``
+	route and encrypted login-capture blob are serialized, even though fleet
+	deploys no proxy sidecar for a Claude-only pool. An empty enabled-model list
+	with a preset does NOT count as pool-valid.
 	"""
 	enabled = _enabled_models(settings)
 	if len(enabled) >= 2 or (bool(settings.preset) and len(enabled) >= 1):
+		return True
+	if has_native_claude_subscription(settings):
 		return True
 	# A chat-subscription model normally REQUIRES the cliproxy sidecar, which is
 	# provisioned ONLY on the pool path - the DIRECT (single-model) path just
@@ -326,9 +331,32 @@ def compute_pool_mode(settings) -> bool:
 	return False
 
 
+def has_native_claude_subscription(settings) -> bool:
+	"""True when an ENABLED row is a Claude-plan subscription.
+
+	That row never goes through Bifrost/CLIProxy: fleet renders it as the
+	native ``claude-cli`` runtime and the agent itself owns the failover between
+	that leg and any proxy-backed leg, so callers that reason about the proxy
+	route (the ``jarvis-pool`` session pin above all) must treat such a pool as
+	agent-direct even when ``proxy_active`` is set for its ChatGPT sibling.
+	"""
+	return any(
+		_credential_type(m) == "subscription" and _subscription_upstream(m) == "anthropic"
+		for m in _enabled_models(settings)
+	)
+
+
 def has_subscription_model(settings) -> bool:
 	"""True when at least one ENABLED models[] row is a chat subscription."""
 	return any(_credential_type(m) == "subscription" for m in _enabled_models(settings))
+
+
+def _subscription_upstream(m) -> str:
+	"""Stored upstream for a subscription row, including an accountless draft."""
+	accounts = _model_accounts(m)
+	if accounts:
+		return (_field(accounts[0], "upstream") or "").strip().lower()
+	return normalize_provider(_field(m, "provider"))
 
 
 def has_configured_subscription_model(settings) -> bool:
@@ -361,8 +389,9 @@ def compute_proxy_active(settings) -> bool:
 	agent and agent drives failover natively through
 	``agents.defaults.model.{primary,fallbacks}``. No sidecar is deployed at all,
 	so there is no Bifrost to expand ``jarvis-pool`` and no cliproxy auth profile
-	to report. A pool holding ANY enabled subscription still takes the
-	Bifrost+cliproxy path, because cliproxy is what serves an OAuth blob.
+	to report. A pool holding any proxy-backed subscription still takes the
+	Bifrost+cliproxy path. Claude plans are the exception: the pool sync leg sends
+	the login-capture blob, but the agent serves it directly via Claude CLI.
 
 	This returned True for ANY 2+-model pool, which was right while every pool
 	had a Bifrost and became wrong the day agent-direct shipped: a pure
@@ -383,6 +412,14 @@ def compute_proxy_active(settings) -> bool:
 	#498 shape the implication above exists to rule out.
 	"""
 	if not has_subscription_model(settings):
+		return False
+	# Claude plan credentials are served by the agent's first-party claude-cli
+	# backend. A pool containing only Claude subscriptions plus API keys remains
+	# agent-direct; no Bifrost/CLIProxy sidecar is deployed.
+	if all(
+		_credential_type(m) != "subscription" or _subscription_upstream(m) == "anthropic"
+		for m in _enabled_models(settings)
+	):
 		return False
 	return not _lone_direct_capable(settings)
 
@@ -632,7 +669,7 @@ def validate_models(settings) -> list:
 				errors.append(f"{label}: enabled subscription model has no accounts configured")
 				continue
 
-			# Per-account upstream consistency + anthropic ToS check + malformed oauth_blob
+			# Per-account upstream consistency + credential-envelope validation.
 			upstreams = set()
 			for j, a in enumerate(accounts):
 				acc_ref = a.account_ref if hasattr(a, "account_ref") else a.get("account_ref", "")
@@ -642,21 +679,15 @@ def validate_models(settings) -> list:
 				if not acc_ref:
 					errors.append(f"{label} account[{j}]: subscription account is missing account_ref")
 
-				# anthropic upstream is ToS-banned
-				if upstream == "anthropic":
-					errors.append(
-						f"{label} account[{j}] ({acc_ref}): upstream='anthropic' is not permitted (ToS)"
-					)
 				# Only these subscription upstreams are supported (the pinned
 				# cli-proxy-api image ships codex/antigravity/xai/kimi channels;
-				# anthropic is ToS-banned above). The old child-doctype
+				# Anthropic is handled separately by the first-party Claude CLI).
+				# The old child-doctype
 				# Select(reqd) structurally enforced this; the JSON migration
 				# dropped the guard, so a typo'd upstream would route to a
 				# nonexistent provider. Re-enforce here. #200 review #6.
-				elif upstream and upstream not in ("openai", "google", "xai", "kimi"):
-					errors.append(
-						f"{label} account[{j}] ({acc_ref}): unsupported upstream '{upstream}' (must be openai, google, xai, or kimi)"
-					)
+				if upstream and upstream not in ("openai", "anthropic", "google", "xai", "kimi"):
+					errors.append(f"{label} account[{j}] ({acc_ref}): unsupported upstream '{upstream}'")
 
 				upstreams.add(upstream)
 
@@ -672,9 +703,24 @@ def validate_models(settings) -> list:
 					errors.append(f"cannot read oauth_blob for account '{acc_ref}' (decryption error)")
 					continue
 				if blob_raw:
-					_, parse_err = _safe_json_loads(blob_raw)
+					parsed, parse_err = _safe_json_loads(blob_raw)
 					if parse_err:
 						errors.append(f"{label} account[{j}] ({acc_ref}): {parse_err}")
+					elif upstream == "anthropic" and (
+						parsed.get("type") != "oauth"
+						or parsed.get("provider") != "anthropic"
+						or parsed.get("credential_kind") != "claude_cli_login"
+					):
+						# The old portable `claude setup-token` blob kind
+						# (credential_kind "claude_setup_token", carrying an
+						# `access` secret) is REMOVED - the browser sign-in flow
+						# never mints one. A row still holding the old kind fails
+						# here exactly like any other malformed blob, so it
+						# forces a reconnect through the new relay rather than
+						# being silently accepted.
+						errors.append(
+							f"{label} account[{j}] ({acc_ref}): Claude sign-in credential is malformed; reconnect it"
+						)
 				elif acc_ref:
 					# An enabled subscription account with an account_ref but NO
 					# oauth_blob would be emitted into the pool spec by
@@ -706,6 +752,38 @@ def validate_models(settings) -> list:
 					f" found mixed upstreams: {sorted(upstreams)}"
 				)
 
+	# Claude credentials may never enter the rotating CLIProxy path. One Claude
+	# row/account is supported. When Codex is also present, Claude may be first or
+	# last around the single collapsed Bifrost route. A middle position cannot be
+	# represented faithfully, so it fails closed.
+	ordered_enabled = sorted(_enabled_models(settings), key=_fleet_sort_key)
+	claude_positions = [
+		i
+		for i, m in enumerate(ordered_enabled)
+		if _credential_type(m) == "subscription" and _subscription_upstream(m) == "anthropic"
+	]
+	if len(claude_positions) > 1:
+		errors.append("Only one Claude subscription model is supported per pool.")
+	for pos in claude_positions:
+		if len(_model_accounts(ordered_enabled[pos])) != 1:
+			errors.append(
+				"A Claude subscription supports exactly one connected account; rotation is disabled."
+			)
+	other_subscriptions = [
+		_subscription_upstream(m)
+		for m in ordered_enabled
+		if _credential_type(m) == "subscription" and _subscription_upstream(m) != "anthropic"
+	]
+	if claude_positions and other_subscriptions:
+		if any(upstream != "openai" for upstream in other_subscriptions):
+			errors.append(
+				"Claude subscription failover can currently be combined only with an OpenAI Codex subscription."
+			)
+		if claude_positions[0] not in (0, len(ordered_enabled) - 1):
+			errors.append(
+				"With Codex and Claude subscriptions together, Claude must be either the primary or the last fallback."
+			)
+
 	return errors
 
 
@@ -722,7 +800,8 @@ def build_pool_payload(settings):
 
 	Hygiene guarantees:
 	- Secrets never appear in the returned spec dict.
-	- Subscription models never emit 'provider' or 'base_url'.
+	- Proxy subscription models never emit 'provider' or 'base_url'. Claude emits
+	  the reserved ``anthropic_cli`` provider so fleet can keep it out of CLIProxy.
 	- key_ref is only emitted when the secret is non-empty (no dangling refs).
 	- json.loads on oauth_blob is guarded; errors are silently skipped here
 	  (validate_models() catches them before save).
@@ -778,12 +857,20 @@ def build_pool_payload(settings):
 					upstream = upstreams_seen[0]
 				# else: mixed — validate_models will catch this; emit "openai" as safe default
 
-			rotation = (m.rotation if hasattr(m, "rotation") else m.get("rotation", "")) or "sticky"
-			entry["subscription"] = {
-				"upstream": upstream,
-				"accounts": serialized_accounts,
-				"rotation": rotation,
-			}
+			if upstream == "anthropic":
+				# Wire-only native runtime marker. The key_ref names the encrypted
+				# oauth_blobs entry; it is not an API key and is never rendered into
+				# Bifrost/CLIProxy environment or config.
+				entry["provider"] = "anthropic_cli"
+				if serialized_accounts and serialized_accounts[0].get("account_ref"):
+					entry["key_ref"] = serialized_accounts[0]["account_ref"]
+			else:
+				rotation = (m.rotation if hasattr(m, "rotation") else m.get("rotation", "")) or "sticky"
+				entry["subscription"] = {
+					"upstream": upstream,
+					"accounts": serialized_accounts,
+					"rotation": rotation,
+				}
 
 		else:
 			# api_key model: only emit key_ref when secret is actually present

@@ -293,6 +293,7 @@ import DocSection from "@/components/doc/DocSection.vue";
 import DocMetaPanel from "@/components/doc/DocMetaPanel.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
+import { useShortcuts } from "@/composables/useShortcuts";
 import SyncPill from "./SyncPill.vue";
 import ShareDialog from "./ShareDialog.vue";
 import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.vue";
@@ -637,6 +638,12 @@ function onBeforeUnload(e) {
 }
 onMounted(() => window.addEventListener("beforeunload", onBeforeUnload));
 onBeforeUnmount(() => window.removeEventListener("beforeunload", onBeforeUnload));
+
+// Ctrl/Cmd+S saves the skill in-app instead of falling through to the browser's
+// "Save Page". useShortcuts normalizes ⌘/Ctrl and preventDefaults the chord (so
+// the browser dialog never fires), even while the caret is in a field; save() is
+// itself a no-op unless dirty.
+useShortcuts([{ key: "s", meta: true, handler: save }]);
 
 // Resolve the pending navigation: proceed=true leaves the page, false stays.
 // Idempotent — closing via X/backdrop and a button click can't double-resolve.

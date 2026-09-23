@@ -25,6 +25,8 @@
     "tool_status",
     "tool_call_id",
     "action_outcome",
+    "pending_card",
+    "expires_at",
     "armed_by_macro",
     "armed_by_skill",
     "ref_doctype",
@@ -147,7 +149,7 @@
       "fieldname": "tool_status",
       "fieldtype": "Select",
       "label": "Tool Status",
-      "options": "\nrunning\ncompleted\nerror",
+      "options": "\npending\nrunning\ncompleted\nerror",
       "depends_on": "eval:doc.role=='tool'"
     },
     {
@@ -164,10 +166,28 @@
       "fieldname": "action_outcome",
       "fieldtype": "Select",
       "label": "Action Outcome",
-      "options": "\nconfirmed\ndiscarded\nfailed\nauto_applied",
+      "options": "\nconfirmed\ndiscarded\nfailed\nauto_applied\ncancelled",
       "read_only": 1,
       "depends_on": "eval:doc.role=='tool'",
       "description": "Set on tool rows that originated from a confirmation card OR ran under an armed macro / approved skill run: 'confirmed' (user clicked Confirm and the write ran), 'discarded' (user declined - nothing ran), 'failed' (confirmed but the write errored/rolled back), or 'auto_applied' (ran WITHOUT a card under an armed macro's skip_confirmation or an approved skill run's skill_autorun - see armed_by_macro / armed_by_skill). Non-empty => the SPA renders this row as an inline receipt chip instead of an Activity-accordion tool row. Empty on ordinary (non-carded) tool calls."
+    },
+    {
+      "fieldname": "pending_card",
+      "fieldtype": "JSON",
+      "label": "Pending Card",
+      "read_only": 1,
+      "no_copy": 1,
+      "depends_on": "eval:doc.tool_status=='pending'",
+      "description": "The render-ready confirmation card (confirm_card.build_card output) for a gated write parked awaiting the user's Confirm. Set while tool_status='pending'; minimized/cleared when the row flips to a terminal action_outcome. Delivered via get_conversation so the card rides the durable message pipeline (reload-reliable) instead of only the best-effort action:pending push. Already permission-filtered + secret-masked by build_card and carries NO raw tool_args. The Redis pending_confirm token remains the SOLE execution authority - this field is display-only."
+    },
+    {
+      "fieldname": "expires_at",
+      "fieldtype": "Datetime",
+      "label": "Expires At",
+      "read_only": 1,
+      "no_copy": 1,
+      "depends_on": "eval:doc.tool_status=='pending'",
+      "description": "Wall-clock expiry of the parked confirmation (mirrors the pending_confirm token's 15-min TTL), stamped at park. Expiry is computed from THIS field on read - never inferred from token-absence (which would mislabel a stopped / in-flight-confirmed / Redis-blip card as expired)."
     },
     {
       "fieldname": "armed_by_macro",
