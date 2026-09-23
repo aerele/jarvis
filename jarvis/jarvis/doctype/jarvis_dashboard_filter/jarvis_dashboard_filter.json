@@ -1,0 +1,23 @@
+{
+ "doctype": "DocType",
+ "name": "Jarvis Dashboard Filter",
+ "module": "Jarvis",
+ "istable": 1,
+ "custom": 0,
+ "engine": "InnoDB",
+ "field_order": ["fieldname", "label", "fieldtype", "options", "default_value", "reqd"],
+ "fields": [
+  {"fieldname": "fieldname", "fieldtype": "Data", "label": "Fieldname", "reqd": 1, "in_list_view": 1,
+   "description": "Identifier the dashboard specs reference as {\"$filter\": \"<fieldname>\"}. Lowercase letters, digits and underscores."},
+  {"fieldname": "label", "fieldtype": "Data", "label": "Label", "reqd": 1, "in_list_view": 1},
+  {"fieldname": "fieldtype", "fieldtype": "Select", "label": "Field Type", "reqd": 1, "in_list_view": 1, "options": "Link"},
+  {"fieldname": "options", "fieldtype": "Data", "label": "Options", "in_list_view": 1,
+   "description": "For Link: the DocType the viewer picks a record from."},
+  {"fieldname": "default_value", "fieldtype": "Data", "label": "Default",
+   "description": "A literal record name, or $user_default for the viewer's default of that DocType."},
+  {"fieldname": "reqd", "fieldtype": "Check", "label": "Required", "default": "0"}
+ ],
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC"
+}
