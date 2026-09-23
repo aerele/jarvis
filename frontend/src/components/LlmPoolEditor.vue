@@ -703,10 +703,6 @@
 									></template
 								>
 							</JvCombo>
-							<div class="jv-pool-opt" style="font-size: 11.5px; margin-top: 4px">
-								Pick a suggestion or type any model id your provider supports. Test
-								checks it before you save.
-							</div>
 						</div>
 						<div class="jv-pool-field">
 							<label class="jv-pool-lab"
@@ -5980,7 +5976,9 @@ defineExpose({
 	display: grid;
 	grid-template-columns: 1fr 1fr;
 	gap: 12px 14px;
-	align-items: end;
+	/* Top-aligned: a cell that grows (a hint, an error) must not push its
+	   neighbour's label down. */
+	align-items: start;
 }
 /* The dropdowns are JvCombo (the app's own), NOT native <select> — a native one is
    drawn by the OS with its own popup, which is exactly why this panel used to look
