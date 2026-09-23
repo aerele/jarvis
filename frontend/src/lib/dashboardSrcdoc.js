@@ -25,7 +25,8 @@ export const CSP_META =
 //   jarvis.data(name)        → Promise; `query`/`get_list` sources resolve with
 //                              the rows array; `run_report` sources resolve
 //                              with {columns, rows}. Rejections carry .code
-//                              ("PermissionError"|"NotFound"|"Timeout"|...).
+//                              ("PermissionError"|"NotFound"|"Timeout"
+//                              |"FilterRequired"|...).
 //   jarvis.ready()           → tells the parent boot finished (auto-posted on
 //                              DOMContentLoaded too).
 //   jarvis.renderError(el,e) → quiet inline per-widget error block.
@@ -703,6 +704,32 @@ export function parseSourcesBlock(html) {
 				return { source_name, tool, spec };
 			})
 			.filter(Boolean);
+	} catch (e) {
+		return [];
+	}
+}
+
+// Declared filters: <script type="application/json" id="jarvis-filters">
+// {"filters":[{fieldname,label,fieldtype,options,default?,reqd?}]}</script>.
+// Malformed -> [] here; the server rejects the block on save.
+export function parseFiltersBlock(html) {
+	const m = /<script[^>]*\bid\s*=\s*["']jarvis-filters["'][^>]*>([\s\S]*?)<\/script>/i.exec(
+		String(html || "")
+	);
+	if (!m) return [];
+	try {
+		const parsed = JSON.parse(m[1]);
+		const list = (parsed && parsed.filters) || [];
+		return list
+			.filter((f) => f && f.fieldname)
+			.map((f) => ({
+				fieldname: String(f.fieldname),
+				label: String(f.label || f.fieldname),
+				fieldtype: String(f.fieldtype || "Link"),
+				options: String(f.options || ""),
+				default: f.default == null ? "" : String(f.default),
+				reqd: f.reqd ? 1 : 0,
+			}));
 	} catch (e) {
 		return [];
 	}

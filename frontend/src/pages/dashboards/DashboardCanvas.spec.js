@@ -40,6 +40,19 @@ vi.mock("@/lib/dashboardSrcdoc", () => ({
 		String(html || "").includes("sources")
 			? [{ source_name: "s1", tool: "query", spec: {} }]
 			: [],
+	parseFiltersBlock: (html) =>
+		String(html || "").includes("jarvis-filters")
+			? [
+					{
+						fieldname: "item",
+						label: "Item",
+						fieldtype: "Link",
+						options: "Item",
+						default: "",
+						reqd: 0,
+					},
+			  ]
+			: [],
 }));
 
 vi.mock("@/lib/dashboardThemes", () => ({
@@ -55,8 +68,8 @@ vi.mock("@/lib/dashboardExport", () => ({
 vi.mock("@/lib/errors", () => ({ errMessage: (e) => String((e && e.message) || e) }));
 
 const api = vi.hoisted(() => ({
-	runDashboardSource: vi.fn(async () => ({ ok: true, data: [{ a: 1 }] })),
-	callDashboardTool: vi.fn(async () => ({ ok: true, data: [{ a: 1 }] })),
+	runDashboardSource: vi.fn(async () => ({ ok: true, data: { rows: [] } })),
+	previewDashboardSource: vi.fn(async () => ({ ok: true, data: { rows: [] } })),
 }));
 vi.mock("@/api/dashboards", () => api);
 
@@ -175,7 +188,7 @@ describe("DashboardCanvas data-phase spinner", () => {
 		// The widget requests its data; once it drains, the spinner clears.
 		sendFrameMessage(wrapper, { type: "data", id: "1", name: "s1", tool: "query", spec: {} });
 		await flushPromises();
-		expect(api.runDashboardSource).toHaveBeenCalledWith("d1", "s1");
+		expect(api.runDashboardSource).toHaveBeenCalledWith("d1", "s1", {});
 		expect(spinnerShown(wrapper)).toBe(false);
 		wrapper.unmount();
 	});
@@ -280,5 +293,45 @@ describe("DashboardCanvas export watchdog (progress heartbeat)", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe("DashboardCanvas filters", () => {
+	it("passes filter values to runDashboardSource and re-runs when they change", async () => {
+		const html =
+			'<script type="application/json" id="jarvis-sources">{"sources":[{"source_name":"s","tool":"get_list","spec":{"doctype":"ToDo"}}]}</script>' +
+			'<script type="application/json" id="jarvis-filters">{"filters":[{"fieldname":"item","label":"Item","fieldtype":"Link","options":"Item"}]}</script>';
+		const wrapper = mount(DashboardCanvas, {
+			attachTo: document.body,
+			props: { mode: "view", html, dashboard: { name: "D1" }, filters: { item: "A" } },
+		});
+		await flushPromises();
+		expect(wrapper.emitted("filters")[0][0]).toEqual([
+			{
+				fieldname: "item",
+				label: "Item",
+				fieldtype: "Link",
+				options: "Item",
+				default: "",
+				reqd: 0,
+			},
+		]);
+
+		// simulate the iframe asking for data
+		sendFrameMessage(wrapper, {
+			type: "data",
+			id: "d1",
+			name: "s",
+			tool: "get_list",
+			spec: { doctype: "ToDo" },
+		});
+		await flushPromises();
+		expect(api.runDashboardSource).toHaveBeenCalledWith("D1", "s", { item: "A" });
+
+		const keyBefore = wrapper.find("iframe").attributes("data-key");
+		await wrapper.setProps({ filters: { item: "B" } });
+		await flushPromises();
+		expect(wrapper.find("iframe").attributes("data-key")).not.toBe(keyBefore);
+		wrapper.unmount();
 	});
 });
