@@ -50,6 +50,23 @@ _HTML_WITH_BLOCK = (
 	"</script>"
 )
 
+FILTER_HTML = (
+	"<h1>data</h1>"
+	'<script type="application/json" id="jarvis-filters">'
+	'{"filters": [{"fieldname": "assignee", "label": "Assigned to", "fieldtype": "Link", "options": "User"}]}'
+	"</script>"
+)
+TODO_SRC_FILTERED = {
+	"source_name": "todos",
+	"tool": "get_list",
+	"spec": {
+		"doctype": "ToDo",
+		"fields": ["name", "allocated_to"],
+		"filters": {"allocated_to": {"$filter": "assignee"}},
+	},
+}
+TODO_SRC_PLAIN = {"source_name": "todos", "tool": "get_list", "spec": {"doctype": "ToDo", "fields": ["name"]}}
+
 
 def _ensure_user(email: str, roles: list[str]) -> None:
 	"""Create the fixture user if missing; idempotent."""
@@ -1205,3 +1222,73 @@ class TestDashboardForConversation(_DashboardsApiTestCase):
 	def test_a_missing_conversation_does_not_exist(self):
 		frappe.set_user(PLAIN_A)
 		self.assertRaises(frappe.DoesNotExistError, dashboard_for_conversation, "no-such-conversation")
+
+
+class TestDashboardFiltersSave(_DashboardsApiTestCase):
+	def test_filters_parsed_from_html_and_returned_in_detail(self):
+		frappe.set_user(PLAIN_A)
+		d = self._save({"dashboard_title": "f1", "html": FILTER_HTML, "sources": [TODO_SRC_FILTERED]})
+		self.assertEqual(d["dashboard_type"], "Connected")
+		self.assertEqual(
+			d["filters"],
+			[
+				{
+					"fieldname": "assignee",
+					"label": "Assigned to",
+					"fieldtype": "Link",
+					"options": "User",
+					"reqd": 0,
+					"default": "",
+				}
+			],
+		)
+		rows = frappe.get_all(
+			"Jarvis Dashboard Filter", filters={"parent": d["name"]}, fields=["fieldname", "options"]
+		)
+		self.assertEqual(rows, [{"fieldname": "assignee", "options": "User"}])
+
+	def test_filters_on_static_rejected(self):
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError):
+			save_dashboard(frappe.as_json({"dashboard_title": "f2", "html": FILTER_HTML}))
+
+	def test_unused_filter_rejected(self):
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError):
+			save_dashboard(
+				frappe.as_json({"dashboard_title": "f3", "html": FILTER_HTML, "sources": [TODO_SRC_PLAIN]})
+			)
+
+	def test_undeclared_placeholder_rejected(self):
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError):
+			save_dashboard(
+				frappe.as_json(
+					{"dashboard_title": "f4", "html": "<h1>x</h1>", "sources": [TODO_SRC_FILTERED]}
+				)
+			)
+
+	def test_placeholder_in_structural_slot_rejected(self):
+		frappe.set_user(PLAIN_A)
+		bad = {
+			"source_name": "t",
+			"tool": "get_list",
+			"spec": {"doctype": {"$filter": "assignee"}, "fields": ["name"]},
+		}
+		with self.assertRaises(frappe.ValidationError):
+			save_dashboard(frappe.as_json({"dashboard_title": "f5", "html": FILTER_HTML, "sources": [bad]}))
+
+	def test_unknown_def_key_rejected_on_save(self):
+		frappe.set_user(PLAIN_A)
+		html = FILTER_HTML.replace('"options": "User"', '"options": "User", "bogus": 1')
+		with self.assertRaises(frappe.ValidationError):
+			save_dashboard(
+				frappe.as_json({"dashboard_title": "f7", "html": html, "sources": [TODO_SRC_FILTERED]})
+			)
+
+	def test_resave_html_without_block_clears_filters(self):
+		frappe.set_user(PLAIN_A)
+		d = self._save({"dashboard_title": "f6", "html": FILTER_HTML, "sources": [TODO_SRC_FILTERED]})
+		d2 = self._save({"name": d["name"], "html": "<h1>plain</h1>", "sources": [TODO_SRC_PLAIN]})
+		self._dashboards.pop()  # same name appended twice
+		self.assertEqual(d2["filters"], [])
