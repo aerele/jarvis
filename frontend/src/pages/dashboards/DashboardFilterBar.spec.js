@@ -18,6 +18,15 @@ vi.mock("frappe-ui", () => ({
 			>{{ o.label }}</button>
 		</div>`,
 	},
+	// label -> aria-label on icon-only frappe-ui buttons; the real
+	// component does this, the mock below adds it so the clear-button
+	// test can query by aria-label.
+	Button: {
+		name: "Button",
+		props: ["label", "icon", "variant"],
+		emits: ["click"],
+		template: `<button :aria-label="label" :data-icon="icon" @click="$emit('click')" />`,
+	},
 }));
 
 vi.mock("@/api", () => ({
@@ -149,5 +158,21 @@ describe("DashboardFilterBar", () => {
 		const emits = w.emitted("update:modelValue");
 		expect(emits.length).toBe(1);
 		expect(emits[0][0]).toEqual({ item: "IT-001", loc: "", branch: "" });
+	});
+	it("shows a clear button once a filter has a value, and clears it on click", async () => {
+		const w = mount(DashboardFilterBar, {
+			props: { defs: DEFS, modelValue: { item: "ITEM-001" } },
+		});
+		const clearBtn = w.find('[aria-label="Clear Item"]');
+		expect(clearBtn.exists()).toBe(true);
+
+		await clearBtn.trigger("click");
+		const emits = w.emitted("update:modelValue");
+		expect(emits.length).toBe(1);
+		expect(emits[0][0]).toEqual({ item: "" });
+	});
+	it("renders no clear button when the filter has no value", () => {
+		const w = mount(DashboardFilterBar, { props: { defs: DEFS, modelValue: { item: "" } } });
+		expect(w.find('[aria-label="Clear Item"]').exists()).toBe(false);
 	});
 });
