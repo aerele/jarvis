@@ -112,9 +112,9 @@ _GOOGLE_AUTHORIZE_PARAMS = (("access_type", "offline"), ("prompt", "consent"))
 _GOOGLE_HELP_URL = "https://console.cloud.google.com/apis/credentials"
 _GOOGLE_HINT = "Register your own Google Cloud OAuth client, then paste its details here."
 
-# The free-form path: a caller's own base_url, gated separately by the
-# `allow_custom_urls` site setting. Not a Provider, so it can never end up in
-# PROVIDERS or leak through `by_name`.
+# The free-form path: a caller's own base_url (any remote MCP server that passes
+# the SSRF guard and its connection test). Not a Provider, so it can never end up
+# in PROVIDERS or leak through `by_name`.
 CUSTOM_URL = "Custom URL"
 
 

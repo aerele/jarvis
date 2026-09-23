@@ -118,7 +118,6 @@
   "run_method_blocklist",
   "core_apps_override",
   "connectors_section",
-  "allow_custom_urls",
   "connectors_col",
   "connector_egress_rules",
   "sync_tab",
@@ -933,13 +932,6 @@
    "description": "MCP connectors let the agent call external services (GitHub, Atlassian, Linear, Stripe and custom gateways) on a user's behalf."
   },
   {
-   "fieldname": "allow_custom_urls",
-   "fieldtype": "Check",
-   "label": "Allow Custom URL Connectors",
-   "default": "1",
-   "description": "When on, users may add a connector pointing at any admin-approved Custom URL, not just the built-in presets. Turn off to restrict everyone to the built-in presets only. Readers treat an unset value as ON (Single defaults are not backfilled on migrate)."
-  },
-  {
    "fieldname": "connectors_col",
    "fieldtype": "Column Break"
   },
@@ -1538,5 +1530,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-24 10:01:00.000000"
+ "modified": "2026-11-24 10:02:00.000000"
 }

@@ -49,32 +49,9 @@ class JarvisConnector(Document):
 		self._normalize_label()
 		self._pin_preset_base_url()
 		self._validate_base_url()
-		self._guard_custom_url_policy()
 		self._guard_shared_scope()
 		self._guard_oauth_fields()
 		self._enforce_uniqueness()
-
-	def _guard_custom_url_policy(self) -> None:
-		"""A Custom URL row may only be created, or re-pointed, by a plain user while
-		the workspace policy allows custom addresses. The API already refuses; this
-		closes the raw DocType write around it, which matters because a later sign-in
-		self-heal discovers whatever address the row carries. The admin tier and
-		server-side writes are exempt, as for the Shared-scope guard."""
-		from jarvis.connectors import catalog
-
-		if self.flags.ignore_permissions or self.preset != catalog.CUSTOM_URL:
-			return
-		if not (self.is_new() or self.has_value_changed("base_url")):
-			return
-		if has_jarvis_admin_access(frappe.session.user):
-			return
-		from jarvis.chat.connectors_api import connector_flags
-
-		if not connector_flags()["allow_custom_urls"]:
-			frappe.throw(
-				_("Custom URL connectors are turned off. Ask an administrator to enable them."),
-				frappe.PermissionError,
-			)
 
 	def _pin_preset_base_url(self) -> None:
 		"""A catalog preset's endpoint is pinned server-side on EVERY write path.
