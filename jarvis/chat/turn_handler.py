@@ -374,6 +374,32 @@ def _subscription_agent_provider(settings) -> str | None:
 		return None
 
 
+# Wire provider of the agent's native Claude runtime (fleet renders the plan as
+# ``anthropic/*`` bound to claude-cli). Mirrors pool_serialize's upstream value.
+NATIVE_CLAUDE_PROVIDER = "anthropic"
+
+
+def _is_native_claude_pick(settings, model_id: str) -> bool:
+	"""True when ``model_id`` is an Anthropic subscription-tier id and this pool has a
+	native Claude-plan leg to serve it. Reads the same catalog-backed allowlist the
+	picker and the pin validator use, so display, pin and routing cannot drift."""
+	if not model_id or not has_native_claude_subscription(settings):
+		return False
+	# An explicit API-key row for this id wins: a tenant may keep a Claude plan AND
+	# an Anthropic API key side by side (fleet isolates the two credentials), and
+	# the same ids exist in both catalog tiers. Routing the API-key row's model to
+	# the plan would silently bill the wrong credential.
+	from jarvis.jarvis.pool_serialize import _credential_type, _enabled_models
+
+	for m in _enabled_models(settings):
+		row_model = (getattr(m, "model", None) or (m.get("model") if hasattr(m, "get") else "") or "").strip()
+		if row_model == model_id and _credential_type(m) != "subscription":
+			return False
+	from jarvis._subscription_models import SUBSCRIPTION_MODELS
+
+	return model_id in set(SUBSCRIPTION_MODELS.get("Anthropic") or [])
+
+
 def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 	"""Return (effective_model, agent_provider_id_or_None) for this conv.
 
@@ -396,6 +422,14 @@ def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 			if m.enabled
 		}
 		override = (conv.model_override or "").strip()
+		if override and _is_native_claude_pick(settings, override):
+			# A Claude-plan pick names the agent's claude-cli runtime, which fleet
+			# binds provider-wide (anthropic/*), so ANY Anthropic subscription-tier
+			# id is servable without a re-save: the model id is a per-request slug
+			# and the saved row only decides Auto. The provider prefix is required:
+			# a bare id resolves through the proxy route first, and Bifrost's
+			# catch-all answers it from the ChatGPT leg (seen live 2026-09-23).
+			return override, NATIVE_CLAUDE_PROVIDER
 		if override and override in enabled_names:
 			return override, None  # Validated override accepted
 		return "", None  # Let the pool route
