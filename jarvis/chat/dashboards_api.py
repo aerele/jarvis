@@ -719,11 +719,11 @@ def _parse_filter_values(filters: str) -> dict:
 	try:
 		raw = frappe.parse_json(filters)
 	except Exception:
-		raise InvalidArgumentError("filters must be a JSON object")
+		raise InvalidArgumentError(_("filters must be a JSON object"))
 	if raw is None:
 		return {}
 	if not isinstance(raw, dict):
-		raise InvalidArgumentError("filters must be a JSON object")
+		raise InvalidArgumentError(_("filters must be a JSON object"))
 	return raw
 
 
@@ -808,7 +808,7 @@ def _execute_source(tool: str, spec: dict) -> tuple[list, list | None]:
 		# run_report has no inherent row cap; slice here so a huge report never
 		# materializes fully into the browser payload (the post-loop slice still applies).
 		return res["result"][: DASHBOARD_MAX_ROWS + 1], res.get("columns") or []
-	raise InvalidArgumentError(f"Unsupported tool: {tool}")
+	raise InvalidArgumentError(_("Unsupported tool: {0}").format(tool))
 
 
 @frappe.whitelist()
@@ -825,15 +825,20 @@ def preview_dashboard_source(tool: str, spec: str, filter_defs: str = "", filter
 		return _error_envelope("InvalidArgumentError", _("spec and filter_defs must be JSON."))
 	if not isinstance(parsed, dict):
 		return _error_envelope("InvalidArgumentError", _("spec must be a JSON object."))
+	if not isinstance(defs, list):
+		return _error_envelope("InvalidArgumentError", _("filter_defs must be a JSON array."))
 	if tool not in _ALLOWED_TOOLS:
 		return _error_envelope("InvalidArgumentError", _("Unsupported tool: {0}").format(tool))
 	try:
 		_validate_source_row({"source_name": "preview", "tool": tool, "spec": frappe.as_json(parsed)})
-		rows = normalize_filter_rows(defs if isinstance(defs, list) else [])
+		rows = normalize_filter_rows(defs)
 		validate_filter_defs(rows)
 		check_placeholders(tool, parsed, {r["fieldname"] for r in rows})
 	except frappe.ValidationError as e:
 		return _error_envelope("InvalidArgumentError", str(e))
 	except InvalidArgumentError as e:
 		return _error_envelope("InvalidArgumentError", str(e))
+	except Exception:
+		frappe.log_error(title="Jarvis: dashboard preview validation failed", message=frappe.get_traceback())
+		return _error_envelope("InternalError", _("The data source could not be run. The error was logged."))
 	return _run_bound(tool, parsed, rows, filters, "preview")
