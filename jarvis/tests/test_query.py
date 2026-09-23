@@ -45,6 +45,18 @@ def _patch_qb_run():
 class TestQuerySpecValidation(FrappeTestCase):
 	"""Top-of-pipe shape checks. Fail before any DB call."""
 
+	def test_rejects_fields_instead_of_select_before_query_execution(self):
+		with patch.object(query_mod, "_collect_doctypes") as collect:
+			with self.assertRaisesRegex(InvalidArgumentError, "select"):
+				query({"from": "Supplier", "fields": [{"agg": "count", "field": "name"}], "limit": 1})
+			collect.assert_not_called()
+
+	def test_rejects_unknown_top_level_keys(self):
+		for key in ("filters", "order", "selcet"):
+			with self.subTest(key=key):
+				with self.assertRaisesRegex(InvalidArgumentError, key):
+					query_mod._validate_spec_shape({"from": "Supplier", key: []})
+
 	def test_rejects_non_dict_spec(self):
 		with self.assertRaises(InvalidArgumentError):
 			query("not a dict")
