@@ -537,6 +537,7 @@ def persist_tool_receipt(
 	armed_by_skill: str | None = None,
 	tool_call_id: str | None = None,
 	flip_token: str | None = None,
+	overwrite_outcomes: tuple = (),
 ) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
 	publish the realtime tool:result event, running as the conversation owner so
@@ -568,7 +569,11 @@ def persist_tool_receipt(
 	matching row), so the pre-action card and the post-action receipt are ONE durable
 	row. Falls back to the normal INSERT when there is no pending row to flip (a
 	directly-minted token, a File-Box auto-apply, or a token parked before this
-	shipped) - exactly one terminal row per token either way."""
+	shipped) - exactly one terminal row per token either way.
+
+	``overwrite_outcomes``: with ``flip_token``, also re-flip that token's row when it
+	already carries one of these chips (a pending-action settle whose executed or
+	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``)."""
 	result = result or {}
 	# discarded/cancelled/superseded/expired executed NOTHING; unknown/partial's
 	# write state is UNVERIFIED (an interrupted or mid-dispatch outcome) - none of
@@ -638,6 +643,16 @@ def persist_tool_receipt(
 				{"conversation": conv_name, "tool_call_id": flip_token, "tool_status": "pending"},
 				"name",
 			)
+			if not existing and overwrite_outcomes:
+				existing = frappe.db.get_value(
+					"Jarvis Chat Message",
+					{
+						"conversation": conv_name,
+						"tool_call_id": flip_token,
+						"action_outcome": ["in", list(overwrite_outcomes)],
+					},
+					"name",
+				)
 			if existing:
 				frappe.db.set_value(
 					"Jarvis Chat Message",

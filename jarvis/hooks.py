@@ -301,6 +301,11 @@ scheduler_events = {
 			# installation) before the reaper below mislabelled it a duration timeout.
 			# Cheap no-op (one indexed status query) when nothing is in flight.
 			"jarvis.chat.agent_scheduler.poll_dispatched_runs",
+			# Jarvis Pending Action reconciler (§4.6): an Executing row past 10 min ->
+			# Failed/interrupted (never re-run), lost settles re-delivered, held waiter
+			# retries, disabled owners' cards cancelled, plus the cards_open gauge.
+			# Cheap no-op (indexed status scans) while the table is empty.
+			"jarvis.chat.pending_actions.reconcile",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -406,6 +411,9 @@ scheduler_events = {
 	],
 	"daily": [
 		"jarvis.onboarding.sync_connection",
+		# Jarvis Pending Action purge (D3): settled terminal rows older than 7 days,
+		# in committed batches; never Pending/Executing or a held row still resuming.
+		"jarvis.chat.pending_actions.purge",
 		# C2 (2026-06-16 review): nudge operators when the bench's
 		# agent_token is approaching or past its configured max age.
 		# Daily is plenty - the warning window is 7 days.
@@ -554,8 +562,15 @@ doc_events["Jarvis Conversation"] = {
 		# Slice B: delete the conversation's Jarvis Import Announcement rows so the
 		# Link never blocks deletion (LinkExistsError) or orphans the poll.
 		"jarvis.chat.import_announce.on_conversation_trash",
+		# Pending actions: cancel + delete its chat cards (never an Executing one) and
+		# drop it from held rows' waiters.
+		"jarvis.chat.pending_actions.on_conversation_trash",
 	],
 }
+
+# A pending action never blocks deleting the conversation it points at; the
+# on_trash hook above cleans it up instead.
+ignore_links_on_delete = ["Jarvis Pending Action"]
 
 # ---------------------------------------------------------------------------
 # Jarvis Triggers (user-defined doc-event automations)
@@ -801,5 +816,25 @@ permission_query_conditions.update(
 has_permission.update(
 	{
 		"Jarvis Connector": "jarvis.chat.connector_permissions.has_connector_permission",
+	}
+)
+
+# ---------------------------------------------------------------------------
+# Jarvis Pending Action (sealed executable cards)
+# ---------------------------------------------------------------------------
+# No DocPerm rows and a deny-all at the ORM: no REST/Desk/tool path reads or
+# writes a row (sealed args, open_key). Every read goes through whitelisted
+# endpoints with explicit authz.
+_PA_CONTROLLER = "jarvis.jarvis.doctype.jarvis_pending_action.jarvis_pending_action"
+permission_query_conditions.update(
+	{
+		"Jarvis Pending Action": f"{_PA_CONTROLLER}.get_permission_query_conditions",
+		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.get_permission_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis Pending Action": f"{_PA_CONTROLLER}.has_permission",
+		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.has_permission",
 	}
 )

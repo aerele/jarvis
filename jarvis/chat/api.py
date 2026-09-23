@@ -867,11 +867,22 @@ def create_conversation(origin_page: str = "") -> str:
 @frappe.whitelist(methods=["POST"])
 def archive_conversation(conversation: str) -> dict:
 	"""Set status to archived (owner-only). The agent-side session is left in place."""
+	refuse_in_tool_dispatch()  # it cancels cards and drops held waiters
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
 	doc.status = "Archived"
 	doc.save()
 	frappe.db.commit()
+	# Decision 12: archiving cancels its pending chat cards (held rows just stop
+	# waiting). The archive itself is already committed; this must not undo it.
+	try:
+		from jarvis.chat import pending_actions
+
+		pending_actions.cancel_for_conversation(doc.name, reason="archived")
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="jarvis.pending_action.archive_cancel_failed", message=frappe.get_traceback())
+		frappe.db.commit()
 	return {"ok": True}
 
 
@@ -881,6 +892,7 @@ def clear_chat_history() -> dict:
 	(the settings "Danger zone" action). Macros, skills and settings are
 	untouched; macro-run history rows survive but drop their (now deleted)
 	conversation reference."""
+	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	user = frappe.session.user
 	names = frappe.get_all(CONV, filters={"owner": user}, pluck="name")
