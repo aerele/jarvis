@@ -23,6 +23,7 @@ import { useRouter } from "vue-router";
 import { renderMarkdown } from "@shared/markdown.js";
 import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
+import { isShowCardRequest } from "../lib/showCardRequest.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
@@ -425,9 +426,28 @@ function onVisible() {
 async function send() {
 	const text = input.value.trim();
 	const ready = attachments.value.filter((a) => a.file_url);
-	// Hard block (Stream E maintenance hold): the server refuses every send during a hold and the
-	// composer is disabled; guard here too so a queued/programmatic send can't slip through.
-	if ((!text && !ready.length) || sending.value || holdActive.value) return;
+	// Hard block (Stream E maintenance hold): the server refuses every send during a hold and
+	// the composer is disabled; guard here too (also blocks the re-check below, parity w/ SPA).
+	if (holdActive.value) return;
+
+	// Layered re-check phase 2: a typed "show it" / "I can't see the card" re-surfaces a
+	// parked card instantly (source="typed"), no model round-trip. Runs BEFORE the sending
+	// guard so it works mid-turn too - the moment a card push is most likely dropped (parity
+	// with the SPA). Only when a card ACTUALLY surfaces do we swallow; otherwise it falls
+	// through to a normal send, so a false positive never eats a message and the persona
+	// backstop stays reachable. (Text-only - not while an attachment is staged.)
+	if (convId.value && !ready.length && isShowCardRequest(text)) {
+		const forConv = convId.value;
+		const before = pending.value.length;
+		await loadPending("typed");
+		if (convId.value === forConv && pending.value.length > before) {
+			input.value = "";
+			composer.value?.reset();
+			return;
+		}
+	}
+
+	if ((!text && !ready.length) || sending.value) return;
 
 	errorBanner.value = "";
 	input.value = "";
@@ -1162,7 +1182,7 @@ onUnmounted(() => {
 						<path d="M21 12a9 9 0 1 1-2.64-6.36" />
 						<path d="M21 3v6h-6" />
 					</svg>
-					Re-check for a confirmation
+					Show confirmation
 				</button>
 			</template>
 		</div>

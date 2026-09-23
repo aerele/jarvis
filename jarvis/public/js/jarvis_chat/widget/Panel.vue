@@ -576,8 +576,8 @@
 				<button
 					class="jvp-jump"
 					type="button"
-					title="Re-check for a pending confirmation"
-					aria-label="Re-check for a pending confirmation that did not appear"
+					title="Show confirmation"
+					aria-label="Show a pending confirmation"
 					@click="resyncPending('pill')"
 				>
 					<svg viewBox="0 0 24 24" aria-hidden="true">
@@ -784,6 +784,7 @@ import { turnErrorInfo } from "../../turn_errors.mjs";
 import { contextLabel } from "./desk_context.mjs";
 import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
+import { isShowCardRequest } from "./showCardRequest.mjs";
 import { resizeFrom } from "./panel_size.mjs";
 import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
 import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
@@ -1677,6 +1678,23 @@ async function send() {
 	if (maintenanceActive.value) return;
 	const text = draft.value.trim();
 	const atts = attachments.value.slice();
+	// Layered re-check phase 2: a typed "show it" / "I can't see the card" re-surfaces a
+	// parked card instantly (source="typed"), no model round-trip. Runs BEFORE the
+	// live/sending guard so it works mid-turn too - the exact moment a card push is most
+	// likely dropped (parity with the SPA). Only when a card ACTUALLY surfaces do we swallow;
+	// otherwise fall through to the normal guard, so a false positive never eats a message
+	// and the persona backstop stays reachable.
+	if (convId.value && !atts.length && isShowCardRequest(text)) {
+		const forConv = convId.value;
+		const before = (stream.value.pending || []).length;
+		await resyncPending("typed");
+		if (convId.value === forConv && (stream.value.pending || []).length > before) {
+			draft.value = "";
+			await nextTick();
+			autoGrow();
+			return;
+		}
+	}
 	if ((!text && !atts.length) || sending.value || stream.value.live) return;
 	sending.value = true;
 	// Auto-heal: poll for a parked card while this turn is in flight (self-stops after
