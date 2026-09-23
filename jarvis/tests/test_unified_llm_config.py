@@ -10,6 +10,7 @@ Verifies:
 """
 
 import json
+import unittest
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -5280,3 +5281,55 @@ class TestPushDirectSubscriptionBlobNoMatchInvariant(FrappeTestCase):
 		settings = _make_settings_with_models([])
 		with self.assertRaises(admin_client.AdminValidationError):
 			JarvisSettings._push_direct_subscription_blob(settings)
+
+
+class TestNativeClaudePickRouting(unittest.TestCase):
+	"""An explicit Claude-plan pick routes to the claude-cli runtime with the provider
+	prefix, for ANY Anthropic subscription-tier id, not only the saved row.
+
+	Pure in-memory: no pool is saved (saving one clobbers the developer's site)."""
+
+	_ANTHROPIC_TIER = ["claude-opus-5", "claude-sonnet-5"]
+
+	def _settings(self, *, claude_leg: bool):
+		rows = [frappe._dict(model="gpt-5.6-terra", enabled=1)]
+		if claude_leg:
+			rows.append(frappe._dict(model="claude-opus-5", enabled=1))
+		return frappe._dict(models=rows, proxy_active=1, llm_auth_mode="subscription")
+
+	def _resolve(self, override: str, *, claude_leg: bool = True):
+		from jarvis.chat import turn_handler as th
+
+		settings = self._settings(claude_leg=claude_leg)
+		with (
+			patch.object(th.frappe, "get_single", return_value=settings),
+			patch.object(th, "compute_pool_mode", return_value=True),
+			patch.object(th, "has_native_claude_subscription", return_value=claude_leg),
+			patch.dict(
+				"jarvis._subscription_models._SEED_SUBSCRIPTION_MODELS",
+				{"Anthropic": self._ANTHROPIC_TIER},
+			),
+			patch("jarvis._subscription_models._subscription_rows", return_value={}),
+		):
+			return th._resolve_model_and_provider(frappe._dict(model_override=override))
+
+	def test_catalog_claude_id_beyond_the_saved_row_routes_to_the_plan(self):
+		self.assertEqual(self._resolve("claude-sonnet-5"), ("claude-sonnet-5", "anthropic"))
+
+	def test_saved_claude_row_is_prefixed_too(self):
+		self.assertEqual(self._resolve("claude-opus-5"), ("claude-opus-5", "anthropic"))
+
+	def test_saved_proxy_row_stays_bare(self):
+		self.assertEqual(self._resolve("gpt-5.6-terra"), ("gpt-5.6-terra", None))
+
+	def test_unsaved_proxy_catalog_id_still_lets_the_pool_route(self):
+		self.assertEqual(self._resolve("gpt-5.6-sol"), ("", None))
+
+	def test_claude_id_without_a_claude_leg_lets_the_pool_route(self):
+		self.assertEqual(self._resolve("claude-sonnet-5", claude_leg=False), ("", None))
+
+	def test_session_patch_carries_the_provider_prefix(self):
+		from jarvis.chat import turn_handler as th
+
+		with patch.object(th, "_session_model_for", return_value=("claude-sonnet-5", "anthropic")):
+			self.assertEqual(th._session_model_patch(frappe._dict()), (True, "anthropic/claude-sonnet-5"))
