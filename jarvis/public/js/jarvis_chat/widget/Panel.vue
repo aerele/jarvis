@@ -576,8 +576,8 @@
 				<button
 					class="jvp-jump"
 					type="button"
-					title="Re-check for a pending confirmation"
-					aria-label="Re-check for a pending confirmation that did not appear"
+					title="Show confirmation"
+					aria-label="Show a pending confirmation"
 					@click="resyncPending('pill')"
 				>
 					<svg viewBox="0 0 24 24" aria-hidden="true">
