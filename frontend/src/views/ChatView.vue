@@ -9337,12 +9337,8 @@ function resendFailed(m) {
 // optional `context`, e.g. a dashboard): consumed by the first send below.
 let _prefillSendContext = null;
 async function send(textArg, resendAck) {
-<<<<<<< HEAD
-=======
 	// Restoration must choose the destination before a send captures its conversation scope.
 	if (booting.value) return;
-	dismissFeedback(); // sending the next turn clears any pending feedback line
->>>>>>> 88b96ae (fix(chat): guard restoration and validate record read arguments)
 	// Maintenance HARD block: once a hold is known, no send runs — this guards the paths that call
 	// send() directly (AskCard/answer/resend/prefill), not just the disabled composer. On the FIRST
 	// mid-session send holdActive is still false, so the detection branch below is preserved.
