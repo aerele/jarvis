@@ -58,6 +58,30 @@ class TestQuerySpecValidation(FrappeTestCase):
 				with self.assertRaisesRegex(InvalidArgumentError, key):
 					query_mod._validate_spec_shape({"from": "Supplier", key: []})
 
+	def test_accepts_every_allowlisted_top_level_key(self):
+		spec = {
+			"from": "Sales Invoice",
+			"alias": "si",
+			"joins": [
+				{
+					"type": "left",
+					"doctype": "Sales Invoice Item",
+					"alias": "sii",
+					"on": {"sii.parent": "si.name"},
+				}
+			],
+			"select": ["si.customer", {"agg": "sum", "field": "sii.qty", "as": "total_qty"}],
+			"where": [{"field": "si.status", "op": "=", "value": "Submitted"}],
+			"group_by": ["si.customer"],
+			"having": [{"agg": "sum", "field": "sii.qty", "op": ">", "value": 100}],
+			"order_by": [{"field": "total_qty", "dir": "desc"}],
+			"limit": 100,
+			"offset": 10,
+			"distinct": True,
+		}
+		self.assertEqual(len(spec), 11)
+		query_mod._validate_spec_shape(spec)  # must not raise
+
 	def test_rejects_non_dict_spec(self):
 		with self.assertRaises(InvalidArgumentError):
 			query("not a dict")
