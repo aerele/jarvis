@@ -274,12 +274,23 @@ def _embedded_media_lines(text: str):
 
 def has_media_marker(text: str) -> bool:
 	"""True if the reply has ANY line-anchored ``MEDIA:`` directive — qualifying
-	(fetchable image) or not (``.pdf`` / external / traversal) — OR any line
-	``strip_media_lines`` will remove for a qualifying embedded path. Broader
-	than ``detect_media_paths``: used to force the stored-content overwrite so
-	that no marker/path line survives in stored content even when stripping it
-	leaves the reply empty."""
-	return next(_media_lines(text), None) is not None or next(_embedded_media_lines(text), None) is not None
+	(fetchable image) or not (``.pdf`` / external / traversal). MEDIA:-only —
+	callers use this as a leak-safety gate for the dedicated protocol marker;
+	see ``has_embedded_media_path`` for the separate, narrower embedded-path
+	signal. Broader than ``detect_media_paths``: used to force the stored-
+	content overwrite so that no marker survives in stored content even when
+	stripping it leaves the reply empty."""
+	return next(_media_lines(text), None) is not None
+
+
+def has_embedded_media_path(text: str) -> bool:
+	"""True if the reply has any line ``strip_media_lines`` will remove for a
+	QUALIFYING embedded media path (outside a ``MEDIA:`` marker - see
+	``_embedded_media_lines``). Kept separate from ``has_media_marker``: an
+	embedded path is ordinary prose unless it fully qualifies, never a leak-
+	safety-first signal, so a caller must opt in explicitly rather than getting
+	it folded into the marker gate."""
+	return next(_embedded_media_lines(text), None) is not None
 
 
 def fetch_media(agent_url: str, token: str, source: str) -> bytes | None:

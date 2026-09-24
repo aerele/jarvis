@@ -1134,6 +1134,91 @@ class TestOpenclawYieldContinuation(_PumpTestCase):
 		self.assertNotIn(rid, ctx.mux._runs)
 		self.assertNotIn("image_generate:xyz", ctx.mux._runs)
 
+	def test_stop_after_adoption_releases_the_live_lane_not_the_dead_id(self):
+		"""A Stop landing AFTER the continuation is already adopted (streaming,
+		not yet terminaled) must release the LIVE lane via session_key - using
+		the stale gateway_run_id (the dead original run) would leak it."""
+		double = self._double()
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		rid = "pmp_yield_stop_postadopt"
+		sk = f"sess-{rid}"
+		conv, amsg = self._streaming_turn(rid, ctx, session_key=sk)
+		rs = self._rs(rid, conv, amsg, session_key=sk)
+		ctx.runs[rid] = rs
+		ctx.mux.register_run(rid, pump._make_handler(ctx, rs), session_key=sk)
+		ctx.mux._runs[rid].handler.on_terminal("relay:error", {"state": "aborted", "text": ""})
+
+		# The continuation is adopted (streaming, its own terminal not yet in).
+		ctx.mux._classify(
+			{
+				"type": "event",
+				"event": "chat",
+				"payload": {"runId": "cont-run", "sessionKey": sk, "state": "delta"},
+			}
+		)
+		ctx.mux.dispatch()
+		self.assertNotIn(rid, ctx.mux._runs)
+		self.assertIn("cont-run", ctx.mux._runs)
+
+		self.assertTrue(ts.request_cancel(rid, rs.version))
+		frappe.db.commit()
+		swept = pump._cancel_sweep(ctx)
+
+		self.assertEqual(swept, 1)
+		self.assertEqual(self._state(rid), "cancelled")
+		self.assertNotIn("cont-run", ctx.mux._runs)  # the LIVE lane was released
+
+
+# --------------------------------------------------------------------------- #
+# openclaw-yield wait vs a takeover: a new hop must not error-settle a parked
+# turn immediately (the gateway routinely shows no active run right after the
+# yield, before the deferred tool has posted anything) - it must park it into
+# the durable `recovering` route instead, same as a kill-switch halt.
+# --------------------------------------------------------------------------- #
+
+
+class TestYieldPendingSurvivesTakeover(_PumpTestCase):
+	def test_reattach_or_recover_parks_instead_of_error_settling(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="partial", streaming=1)
+		rid = "pmp_yield_takeover"
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"streaming",
+			version=1,
+			pump_epoch=ctx.epoch,
+			reserved=1,
+			assistant_message=amsg,
+			gateway_run_id=rid,
+			last_event_seq=3,
+			dispatching_at=frappe.utils.now(),
+			dispatch_payload=json.dumps({"session_key": f"sess-{rid}", "message": "hi"}),
+		)
+		pump._mark_yield_pending(rid)
+		r = {
+			"run_id": rid,
+			"state": "streaming",
+			"last_event_seq": 3,
+			"conversation": conv,
+			"assistant_message": amsg,
+		}
+
+		# active_keys=set() -> the gateway shows NO active run right now, exactly
+		# what happens right after a yield. Without the fix this would issue a
+		# recovery-tail against an empty transcript window and error immediately.
+		pump._reattach_or_recover(ctx, r, active_keys=set())
+
+		self.assertEqual(self._state(rid), "recovering")
+		row = frappe.db.get_value(MSG, amsg, ["streaming", "recovering"], as_dict=True)
+		self.assertEqual(row["recovering"], 1)
+		self.assertEqual(row["streaming"], 1)
+
 
 # --------------------------------------------------------------------------- #
 # 8. DB-disconnect -> bounded backoff -> park recovering -> exit hop
