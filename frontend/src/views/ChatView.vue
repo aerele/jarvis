@@ -865,6 +865,7 @@
 								/>
 							</template>
 							<template #above-body>
+								<ReportScope :tools="activityByAssistant[m.name] || []" />
 								<!-- Activity: the tool calls (with input + output) that produced
 								     this answer — agent-style, collapsible. -->
 								<div
@@ -4464,6 +4465,7 @@ import {
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import { Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
+import ReportScope from "@/components/chat/ReportScope.vue";
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
