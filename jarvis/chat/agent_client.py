@@ -138,6 +138,20 @@ _PRIMARY_AGENT_ID = "main"
 # for this turn + pair + WS connect overhead.
 TURN_TIMEOUT_SECONDS = 600
 
+# openclaw's image/video/music generation tools unconditionally detach into a
+# background task on every normal chat session (no config switch): the
+# in-flight run is aborted with an EMPTY terminal (sessions_yield/turnHandoff),
+# then ~25-30s later a NEW run on the SAME sessionKey (a fresh runId) posts the
+# real reply. This bounds how long a turn waits for that follow-up before
+# falling back to today's error path. Comfortably inside TURN_TIMEOUT_SECONDS.
+YIELD_CONTINUATION_WAIT_S = 150
+
+# Polling granularity while waiting for the yield's continuation: short enough
+# that a user Stop pressed mid-wait (which cannot otherwise interrupt a single
+# long _recv call - the dead original runId will never post another frame) is
+# observed promptly.
+YIELD_CONTINUATION_POLL_S = 3.0
+
 # --- pinned one-shots (issue #531) ------------------------------------------
 #
 # ``fire_agent`` / ``stream_agent_turn`` are the only two RPCs here that carry
@@ -1264,10 +1278,15 @@ class AgentSession:
 					yield _final
 					return
 				if state in ("error", "aborted"):
+					# ``text`` lets the caller tell an openclaw-yield abort (empty)
+					# from a genuine partial-content abort - see
+					# relay_yield_continuation. Absent for a plain error/aborted
+					# today, so this is a harmless addition for every OTHER caller.
 					yield {
 						"kind": "relay:error",
 						"state": state,
 						"error": egress_rules.redact(payload.get("errorMessage") or state),
+						"text": _chat_final_text(payload) or "",
 					}
 					return
 				continue  # delta (150ms cumulative mirror) and unknown states: ignore
@@ -1283,6 +1302,80 @@ class AgentSession:
 					failure_detail = str(parsed["error"])
 				continue
 			yield parsed
+
+	def relay_yield_continuation(
+		self,
+		session_key: str,
+		*,
+		soft_deadline_s: float,
+		cancel_check: Any = None,
+	) -> dict[str, Any]:
+		"""Wait for the follow-up ``chat`` terminal an openclaw-yield abort
+		(``relay_turn_events``' empty ``state == "aborted"``) posts on the SAME
+		``session_key`` under a FRESH runId (openclaw's image/video/music tools
+		unconditionally detach into a background task and restart the session
+		~25-30s later - see ``YIELD_CONTINUATION_WAIT_S``). Matches on
+		``sessionKey`` alone (the runId is unknown ahead of time).
+
+		Polls in ``YIELD_CONTINUATION_POLL_S`` chunks and calls ``cancel_check``
+		(when given) between them, so a user Stop pressed mid-wait is observed
+		promptly - the dead original runId will never itself post another frame,
+		so nothing on the wire would otherwise tell this loop to give up.
+
+		Non-``chat`` frames (the continuation's own tool/delta events) are
+		dropped: this call surfaces only the continuation's OUTCOME, not its
+		live stream - the deferred tool call already ran out of band and the
+		user was never shown it running.
+
+		NEVER raises. Terminal yields (mirrors ``relay_turn_events``):
+		  {"kind": "relay:final", "text": str, media_rels?: [...], marker_stripped?: True}
+		  {"kind": "relay:error", "state": "error"|"aborted"|"failed_final", "error": str}
+		  {"kind": "relay:interrupted", "reason": "deadline"|"transport"|"cancelled"}
+		"""
+		deadline = time.monotonic() + max(0.0, soft_deadline_s)
+		while True:
+			if cancel_check is not None and cancel_check():
+				return {"kind": "relay:interrupted", "reason": "cancelled"}
+			remaining = deadline - time.monotonic()
+			if remaining <= 0:
+				return {"kind": "relay:interrupted", "reason": "deadline"}
+			try:
+				frame = self._recv(min(YIELD_CONTINUATION_POLL_S, remaining))
+			except AgentUnreachableError as e:
+				try:
+					self.close()
+				except Exception:
+					pass
+				return {"kind": "relay:interrupted", "reason": "transport", "detail": str(e)}
+			if frame is None or frame.get("type") != "event" or frame.get("event") != "chat":
+				continue
+			payload = frame.get("payload") or {}
+			if payload.get("sessionKey") != session_key:
+				continue
+			state = payload.get("state")
+			if state == "final":
+				text = _chat_final_text(payload)
+				if _chat_final_failed(payload, text):
+					return {
+						"kind": "relay:error",
+						"state": "failed_final",
+						"error": failed_final_error(None),
+					}
+				_red, _rels, _marked = egress_rules.redact_final_with_media(text, run_id=payload.get("runId"))
+				out: dict[str, Any] = {"kind": "relay:final", "text": _red}
+				if _rels:
+					out["media_rels"] = _rels
+				if _marked:
+					out["marker_stripped"] = True
+				return out
+			if state in ("error", "aborted"):
+				return {
+					"kind": "relay:error",
+					"state": state,
+					"error": egress_rules.redact(payload.get("errorMessage") or state),
+					"text": _chat_final_text(payload) or "",
+				}
+			continue  # delta (cumulative mirror) / unknown chat states: keep waiting
 
 	def fire_agent(
 		self,

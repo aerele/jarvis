@@ -648,6 +648,30 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		self.assertEqual(args[1], self.conv.name)
 		self.assertEqual(args[3], "recovered")
 
+	def test_finalize_threads_media_rels_into_persist_rich_outputs(self):
+		# A recovered deferred image-gen reply (openclaw's image/video/music
+		# tools' unconditional background-detach abort - the turn parked here by
+		# the deadline/watchdog path when the yield-wait itself couldn't finish
+		# in time) must still seed its image, not just the text.
+		path = "/home/node/.openclaw/media/tool-image-generation/x.png"
+		sess = self._fake_sess(
+			messages_by_key={
+				SK: [
+					{
+						"role": "assistant",
+						"content": f"Here it is.\nAttachment: {path}",
+						"__openclaw": {"seq": 2},
+					},
+				]
+			}
+		)
+		with patch("jarvis.chat.turn_handler.persist_rich_outputs") as rich:
+			self._run(sess)
+		rich.assert_called_once()
+		self.assertEqual(rich.call_args.kwargs.get("media_rels"), [path])
+		row = self._row()
+		self.assertEqual(row.content, "Here it is.")
+
 	def test_finalize_survives_persist_rich_outputs_raising(self):
 		sess = self._fake_sess(
 			messages_by_key={

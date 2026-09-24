@@ -134,6 +134,13 @@ def _chat_final_frame(run_id, session_key, text="hi"):
 	}
 
 
+def _chat_aborted_frame(run_id, session_key, text=None):
+	payload = {"runId": run_id, "sessionKey": session_key, "state": "aborted", "errorMessage": "aborted"}
+	if text:
+		payload["message"] = {"content": [{"type": "text", "text": text}]}
+	return {"type": "event", "event": "chat", "payload": payload}
+
+
 def _chat_failed_final_frame(run_id, session_key, stop_reason=None):
 	"""The LIVE shape of a chat final for a turn that produced nothing (#543):
 	no ``message`` key at all, and ``stopReason`` (when the runtime resolved one) at
@@ -555,6 +562,99 @@ class TestRelayMuxWhiteBox(FrappeTestCase):
 			mux._classify(_agent_frame("r", "s", "assistant", {"text": f"t{i}", "delta": f"t{i}"}))
 		self.assertEqual(mux.dispatch(), total, "all events drained in one call (round-robin passes)")
 		self.assertFalse(mux._has_work())
+
+
+# --------------------------------------------------------------------------- #
+# openclaw-yield continuation adoption (image/video/music tools' unconditional
+# background-detach abort): pump.on_terminal parks a just-terminaled lane with
+# ``await_continuation``; the deferred tool's follow-up run posts under a FRESH
+# runId on the SAME session_key, which ``_route_event`` must adopt.
+# --------------------------------------------------------------------------- #
+
+
+class TestRelayMuxYieldContinuation(FrappeTestCase):
+	def _mux(self, **kw):
+		return RelayMux(MagicMock(), "wb-target", **kw)
+
+	def test_await_continuation_keeps_lane_registered_and_flagged(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		self.assertTrue(mux.await_continuation("r1"))
+		self.assertTrue(mux._runs["r1"].awaiting)
+
+	def test_await_continuation_false_when_lane_already_gone(self):
+		mux = self._mux()
+		self.assertFalse(mux.await_continuation("never-registered"))
+
+	def test_terminal_on_awaiting_lane_is_not_retired(self):
+		"""_apply must skip _retire_lane while a lane is parked awaiting - it is
+		on_terminal's OWN job to call await_continuation and return without
+		settling; the mux side is just: don't retire it."""
+		mux = self._mux()
+		rec = _Recorder()
+		lane = mux.register_run("r1", rec.handler(), session_key="s1")
+		lane.awaiting = True  # simulate what on_terminal already did before this terminal
+		mux._classify(_chat_aborted_frame("r1", "s1"))
+		mux.dispatch()
+		self.assertIsNotNone(rec.terminal)  # the handler still ran
+		self.assertIn("r1", mux._runs)  # but the lane was NOT retired
+
+	def test_continuation_final_adopted_under_fresh_run_id_same_session(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		self.assertTrue(mux.await_continuation("r1"))
+		# The deferred tool's follow-up run: a DIFFERENT runId, SAME session_key.
+		mux._classify(_chat_final_frame("image_generate:xyz", "s1", "here is the image"))
+		mux.dispatch()
+		self.assertEqual(rec.terminal[0], "relay:final")
+		self.assertEqual(rec.terminal[1]["text"], "here is the image")
+		# A normal (non-awaiting) terminal retires the lane, now under its NEW key.
+		self.assertNotIn("r1", mux._runs)
+		self.assertNotIn("image_generate:xyz", mux._runs)
+
+	def test_continuation_aborted_on_fresh_run_id_still_adopted(self):
+		"""Item 3: a continuation that itself fails must also reach on_terminal -
+		not just a continuation final."""
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		mux._classify(_chat_aborted_frame("image_generate:xyz", "s1"))
+		mux.dispatch()
+		self.assertEqual(rec.terminal[0], "relay:error")
+		self.assertEqual(rec.terminal[1]["state"], "aborted")
+
+	def test_different_session_key_never_adopted(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		before = mux.stats()["stray_frames"]
+		mux._classify(_chat_final_frame("some-other-run", "OTHER-SESSION", "nope"))
+		mux.dispatch()
+		self.assertIsNone(rec.terminal)  # never delivered to this lane
+		self.assertEqual(mux.stats()["stray_frames"], before + 1)
+		self.assertIn("r1", mux._runs)  # still parked, waiting for the right session
+
+	def test_release_continuation_drops_the_parked_lane(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		mux.release_continuation("r1")
+		self.assertNotIn("r1", mux._runs)
+		# A late continuation frame after release is now an ordinary stray.
+		before = mux.stats()["stray_frames"]
+		mux._classify(_chat_final_frame("image_generate:late", "s1", "too late"))
+		mux.dispatch()
+		self.assertIsNone(rec.terminal)
+		self.assertEqual(mux.stats()["stray_frames"], before + 1)
+
+	def test_release_continuation_is_idempotent(self):
+		mux = self._mux()
+		mux.release_continuation("never-there")  # must not raise
 
 
 # --------------------------------------------------------------------------- #

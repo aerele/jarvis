@@ -930,6 +930,212 @@ class TestCancelFlow(_PumpTestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 7b. openclaw-yield continuation wait (image/video/music tools' unconditional
+# background-detach abort): on_terminal must tell a real yield apart from a
+# user Stop, park via the mux instead of settling, expire it via
+# _yield_wait_sweep if nothing lands, and let the EXISTING _cancel_sweep handle
+# a Stop mid-wait for free (the Turn row is left `state='streaming'`).
+# --------------------------------------------------------------------------- #
+
+
+class TestOpenclawYieldContinuation(_PumpTestCase):
+	def _streaming_turn(self, rid, ctx, *, cancel_requested=0, session_key=None):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="partial", streaming=1)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"streaming",
+			version=4,
+			pump_epoch=ctx.epoch,
+			reserved=1,
+			assistant_message=amsg,
+			gateway_run_id=rid,
+			cancel_requested=cancel_requested,
+			dispatching_at=frappe.utils.now(),
+			dispatch_payload=json.dumps({"session_key": session_key or f"sess-{rid}", "message": "hi"}),
+		)
+		return conv, amsg
+
+	def _rs(self, rid, conv, amsg, *, session_key=None):
+		return pump._RunState(
+			run_id=rid,
+			conversation=conv,
+			owner=None,
+			assistant_message=amsg,
+			session_key=session_key or f"sess-{rid}",
+			version=4,
+			gateway_run_id=rid,
+		)
+
+	def test_unprompted_empty_abort_is_a_yield(self):
+		self.assertTrue(pump._is_unprompted_yield("r1", "relay:error", {"state": "aborted", "text": ""}))
+		self.assertTrue(pump._is_unprompted_yield("r1", "relay:error", {"state": "aborted", "text": "   "}))
+
+	def test_partial_text_abort_is_not_a_yield(self):
+		# A genuine partial-content abort must settle normally, not wait.
+		self.assertFalse(
+			pump._is_unprompted_yield("r1", "relay:error", {"state": "aborted", "text": "partial answer"})
+		)
+
+	def test_non_aborted_terminal_is_not_a_yield(self):
+		self.assertFalse(pump._is_unprompted_yield("r1", "relay:final", {"text": "hi"}))
+		self.assertFalse(pump._is_unprompted_yield("r1", "relay:error", {"state": "error", "text": ""}))
+
+	def test_cancel_requested_abort_is_not_a_yield(self):
+		# The pump's authoritative stop signal: a real user Stop must never wait.
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		self._mk_turn(conv, "pmp_yield_stop_check", seed, "streaming", version=1, cancel_requested=1)
+		self.assertFalse(
+			pump._is_unprompted_yield("pmp_yield_stop_check", "relay:error", {"state": "aborted", "text": ""})
+		)
+
+	def test_on_terminal_parks_instead_of_settling(self):
+		double = self._double()
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		rid = "pmp_yield1"
+		conv, amsg = self._streaming_turn(rid, ctx)
+		rs = self._rs(rid, conv, amsg)
+		ctx.runs[rid] = rs
+		handler = ctx.mux.register_run(rid, pump._make_handler(ctx, rs), session_key=rs.session_key).handler
+
+		handler.on_terminal("relay:error", {"state": "aborted", "text": ""})
+
+		# NOT settled — still streaming, no terminal recorded, slot still held.
+		self.assertEqual(self._state(rid), "streaming")
+		self.assertIsNone(self._val(rid, "terminal_observed_at"))
+		self.assertEqual(int(self._val(rid, "reserved")), 1)
+		# Parked: the lane is kept, flagged, and rs remembers the payload/deadline.
+		self.assertTrue(ctx.mux._runs[rid].awaiting)
+		self.assertIsNotNone(rs.yield_deadline)
+		self.assertEqual(rs.yield_payload, {"state": "aborted", "text": ""})
+		# The Message row is untouched — no "stopped", no error.
+		row = frappe.db.get_value(MSG, amsg, ["stopped", "streaming", "error"], as_dict=True)
+		self.assertFalse(row["stopped"])
+		self.assertEqual(row["streaming"], 1)
+		self.assertFalse(row["error"])
+
+	def test_on_terminal_settles_normally_without_a_mux(self):
+		# No transport (ctx.mux is None) — await_continuation can't park it, so
+		# on_terminal must fall through and settle exactly as before this change.
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rid = "pmp_yield_nomux"
+		conv, amsg = self._streaming_turn(rid, ctx)
+		rs = self._rs(rid, conv, amsg)
+		ctx.runs[rid] = rs
+		handler = pump._make_handler(ctx, rs)
+
+		handler.on_terminal("relay:error", {"state": "aborted", "text": ""})
+
+		# Settled all the way (today's error path) - no mux means no parking.
+		self.assertEqual(self._state(rid), "errored")
+		self.assertIsNone(rs.yield_deadline)
+
+	def test_yield_wait_sweep_expires_and_settles_like_the_original_yield(self):
+		double = self._double()
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		rid = "pmp_yield_timeout"
+		conv, amsg = self._streaming_turn(rid, ctx)
+		rs = self._rs(rid, conv, amsg)
+		ctx.runs[rid] = rs
+		ctx.mux.register_run(rid, pump._make_handler(ctx, rs), session_key=rs.session_key)
+		ctx.mux.await_continuation(rid)
+		rs.yield_payload = {"state": "aborted", "text": ""}
+		rs.yield_deadline = pump._monotonic() - 1  # already past the cap
+
+		pump._yield_wait_sweep(ctx)
+
+		# Settled EXACTLY as the original empty-aborted terminal would have —
+		# today's error path (cancel_requested was never set, so it settles
+		# errored, never cancelled - settlement's own cancel_requested gate).
+		self.assertEqual(self._state(rid), "errored")
+		self.assertIsNone(rs.yield_deadline)
+		self.assertIsNone(rs.yield_payload)
+		self.assertNotIn(rid, ctx.mux._runs)  # lane released
+
+	def test_yield_wait_sweep_ignores_runs_not_yet_due(self):
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rid = "pmp_yield_notyet"
+		conv, amsg = self._streaming_turn(rid, ctx)
+		rs = self._rs(rid, conv, amsg)
+		ctx.runs[rid] = rs
+		rs.yield_payload = {"state": "aborted", "text": ""}
+		rs.yield_deadline = pump._monotonic() + 999
+
+		pump._yield_wait_sweep(ctx)
+
+		self.assertEqual(self._state(rid), "streaming")
+		self.assertIsNotNone(rs.yield_deadline)
+
+	def test_stop_during_wait_is_settled_cancelled_by_the_existing_cancel_sweep(self):
+		# The Turn row was deliberately left `state='streaming'` by the yield
+		# branch, so a Stop pressed mid-wait needs NO special-case code here —
+		# the existing cancel_requested=1 sweep finds it on the very next tick,
+		# exactly like any other in-flight cancel.
+		double = self._double()
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		rid = "pmp_yield_stop"
+		conv, amsg = self._streaming_turn(rid, ctx)
+		rs = self._rs(rid, conv, amsg)
+		ctx.runs[rid] = rs
+		ctx.mux.register_run(rid, pump._make_handler(ctx, rs), session_key=rs.session_key)
+		ctx.mux.await_continuation(rid)
+		rs.yield_payload = {"state": "aborted", "text": ""}
+		rs.yield_deadline = pump._monotonic() + 999  # still well inside the wait
+
+		# The user hits Stop.
+		self.assertTrue(ts.request_cancel(rid, 4))
+		frappe.db.commit()
+
+		swept = pump._cancel_sweep(ctx)
+
+		self.assertEqual(swept, 1)
+		self.assertEqual(self._state(rid), "cancelled")
+		# The parked lane is released so a LATE continuation frame is a harmless
+		# stray instead of trying to adopt into an already-settled row.
+		self.assertIsNone(rs.yield_deadline)
+		self.assertIsNone(rs.yield_payload)
+		self.assertNotIn(rid, ctx.mux._runs)
+
+	def test_continuation_final_on_fresh_run_id_settles_the_turn(self):
+		"""End-to-end through the mux: the deferred tool's follow-up run (a
+		DIFFERENT runId, SAME session_key) is adopted and its final settles the
+		SAME Turn row/assistant message the original yielded run was on."""
+		from jarvis.tests.test_relay_mux import _chat_final_frame
+
+		double = self._double()
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		rid = "pmp_yield_cont"
+		sk = f"sess-{rid}"
+		conv, amsg = self._streaming_turn(rid, ctx, session_key=sk)
+		rs = self._rs(rid, conv, amsg, session_key=sk)
+		ctx.runs[rid] = rs
+		ctx.mux.register_run(rid, pump._make_handler(ctx, rs), session_key=sk)
+
+		# The original run yields (empty aborted) - on_terminal parks it.
+		ctx.mux._runs[rid].handler.on_terminal("relay:error", {"state": "aborted", "text": ""})
+		self.assertEqual(self._state(rid), "streaming")
+
+		# The deferred tool's follow-up run posts its final under a FRESH runId.
+		ctx.mux._classify(_chat_final_frame("image_generate:xyz", sk, "here is the image"))
+		ctx.mux.dispatch()
+
+		self.assertEqual(self._state(rid), "finalizing")
+		self.assertEqual(frappe.db.get_value(MSG, amsg, "content"), "here is the image")
+		self.assertNotIn(rid, ctx.mux._runs)
+		self.assertNotIn("image_generate:xyz", ctx.mux._runs)
+
+
+# --------------------------------------------------------------------------- #
 # 8. DB-disconnect -> bounded backoff -> park recovering -> exit hop
 # --------------------------------------------------------------------------- #
 
