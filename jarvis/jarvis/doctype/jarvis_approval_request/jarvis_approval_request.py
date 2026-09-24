@@ -7,9 +7,11 @@ from frappe.model.document import Document
 WIKI_SOURCE = "File Box Wiki"
 # Written only by server code that sets ``flags.jarvis_server_write`` (raw-SQL
 # transitions never reach validate). No Administrator / ignore_permissions exemption.
-_SERVER_FIELDS = ("wiki_payload", "apply_status", "apply_reason", "wiki_digest")
+_SERVER_FIELDS = ("wiki_payload", "apply_status", "apply_reason", "wiki_digest", "routing")
 # Frozen on a wiki proposal: what the reviewer reads and where it lands.
 _WIKI_FIELDS = ("title", "question", "context_md", "document_type", "conversation", "source", "status")
+# Frozen on a File Box routing question: the answer is validated against its options.
+_ROUTING_FIELDS = (*_WIKI_FIELDS, "options", "decision", "decided_by", "decided_at")
 
 
 class JarvisApprovalRequest(Document):
@@ -30,7 +32,8 @@ class JarvisApprovalRequest(Document):
 
 	def _guard_server_fields(self):
 		"""PR-1 §1: a document-injected model running as an Admin/SM dropper must not
-		forge or swap a wiki proposal or its apply outcome through the ORM."""
+		forge or swap a wiki proposal, its apply outcome, or a File Box routing question
+		through the ORM."""
 		if self.flags.jarvis_server_write:
 			return
 		if self.is_new():
@@ -45,6 +48,8 @@ class JarvisApprovalRequest(Document):
 			before = self.get_doc_before_save()
 			if (before and before.source == WIKI_SOURCE) or self.source == WIKI_SOURCE:
 				touched += [f for f in _WIKI_FIELDS if self.has_value_changed(f)]
+			if (before and before.get("routing")) or self.get("routing"):
+				touched += [f for f in _ROUTING_FIELDS if self.has_value_changed(f)]
 		if touched:
 			frappe.throw(
 				frappe._("These approval fields are server-managed: {0}").format(

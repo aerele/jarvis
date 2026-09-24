@@ -8,8 +8,10 @@ auto-apply dispatch). Rules, first match wins:
 a. this conversation waits on a Pending held write -> every write is refused;
 b. ``update_wiki`` -> the gate's fenced wiki proposal;
 c. ``Jarvis Approval Request`` create/update -> applied (single, or an all-AR batch);
-d. a denied doctype in any item -> refused;
-e. a single create/update of a draft of a submittable doctype -> auto-applied;
+d. a denied doctype in any item -> refused; while a skill_conflict routing question
+   is Pending, every create/update is refused too (``filebox_skills``);
+e. a single create/update of a draft of a submittable doctype -> auto-applied, when
+   it is the doctype the followed File Box skill drafts (``filebox_skills``);
 f. any other create/update -> HELD on the Approval Board (a batch that includes a
    submittable doctype is refused instead);
 g. every other gated tool, and bulk forms of ungated writes -> refused, no preview.
@@ -31,7 +33,7 @@ import re
 
 import frappe
 
-from jarvis.chat import held_parties
+from jarvis.chat import filebox_skills, held_parties
 from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._store import (
 	DISCARDED,
@@ -203,6 +205,9 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 		refusal = _denied(dt)
 		if refusal:
 			return "refuse", refusal
+	refusal = filebox_skills.routing_refusal(conversation)
+	if refusal:
+		return "refuse", refusal
 	submittable = [dt for dt in doctypes if frappe.get_meta(dt).is_submittable]
 	if submittable and bulk:
 		return "refuse", _refuse(
@@ -212,7 +217,8 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 			"draft by itself.",
 		)
 	if submittable and _is_draft(items[0]):
-		return "apply", None
+		refusal = filebox_skills.target_refusal(conversation, items[0]["doctype"])
+		return ("refuse", refusal) if refusal else ("apply", None)
 	return "hold", items
 
 
@@ -290,19 +296,24 @@ def _miss_key(conversation: str, key: str) -> str:
 
 def _missed_before(conversation: str, items: list[dict], needs_input: list[dict]) -> bool:
 	"""Tries once: True when a missing item's key already missed in this conversation
-	(then hold). Records the miss for an hour; a lost key just gives one more try, and
-	a cache failure holds (never an endless retry loop). Raw ``get`` / ``set``: the
-	wrappers (``get_value``, ``exists``, ...) read an outage as a miss."""
-	keys = {
-		frappe.cache.make_key(_miss_key(conversation, held_parties.item_key(items[e["doc_index"]])))
-		for e in needs_input
-	}
+	(then hold)."""
+	return seen_once(
+		_miss_key(conversation, held_parties.item_key(items[e["doc_index"]])) for e in needs_input
+	)
+
+
+def seen_once(keys, event: str = "held_miss_cache_failed") -> bool:
+	"""Tries once: True when one of ``keys`` was already seen. Records them for an
+	hour; a lost key just gives one more try, and a cache failure reads as seen
+	(never an endless retry loop). Raw ``get`` / ``set``: the wrappers
+	(``get_value``, ``exists``, ...) read an outage as a miss."""
+	keys = {frappe.cache.make_key(k) for k in keys}
 	try:
 		seen = any(frappe.cache.get(k) is not None for k in keys)
 		for k in keys:
 			frappe.cache.set(k, 1, ex=MISS_TTL_S)
 	except Exception:
-		frappe.log_error(title="jarvis.file_box.held_miss_cache_failed", message=frappe.get_traceback())
+		frappe.log_error(title=f"jarvis.file_box.{event}", message=frappe.get_traceback())
 		return True
 	return seen
 

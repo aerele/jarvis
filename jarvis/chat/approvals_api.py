@@ -17,6 +17,7 @@ import math
 import frappe
 
 from jarvis._session import impersonate
+from jarvis.chat import filebox_skills
 from jarvis.permissions import (
 	message_origin,
 	refuse_in_tool_dispatch,
@@ -537,9 +538,22 @@ def _resume_conversation(
 	HTTP path would gut the caller's cookie session) and no-ops for a self-owned
 	resume; ``delegated_send`` clears send_message's Jarvis-access gate and the
 	role-gated Message create perm for an owner without the Jarvis User role."""
-	from jarvis.chat.agent_scheduler import _valid_owner
 	from jarvis.chat.api import send_message
 	from jarvis.permissions import delegated_send
+
+	ok, switch_to = owner_run_identity(conversation)
+	if not ok:
+		return {"ok": False, "reason": "owner_ineligible"}
+	with impersonate(switch_to), delegated_send(), message_origin(origin):
+		return send_message(
+			conversation=conversation, message=message, attachments=attachments, background=background
+		)
+
+
+def owner_run_identity(conversation: str) -> tuple[bool, str | None]:
+	"""``(ok, owner to impersonate)`` for a run in ``conversation`` on its owner's
+	behalf: None for a self-owned run; not ok (logged) for an ineligible owner."""
+	from jarvis.chat.agent_scheduler import _valid_owner
 
 	conv_owner = frappe.db.get_value("Jarvis Conversation", conversation, "owner")
 	switch_to = conv_owner if (conv_owner and conv_owner != frappe.session.user) else None
@@ -551,11 +565,8 @@ def _resume_conversation(
 				"(Administrator/Guest/disabled); the decision is recorded but the turn was not resumed."
 			),
 		)
-		return {"ok": False, "reason": "owner_ineligible"}
-	with impersonate(switch_to), delegated_send(), message_origin(origin):
-		return send_message(
-			conversation=conversation, message=message, attachments=attachments, background=background
-		)
+		return False, switch_to
+	return True, switch_to
 
 
 @frappe.whitelist(methods=["POST"])
@@ -577,6 +588,9 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		frappe.throw("Not permitted", frappe.PermissionError)
 	if doc.status != "Pending":
 		frappe.throw(f"Approval {name} is already {doc.status}")
+	if doc.get("routing"):
+		decision = filebox_skills.validate_answer(doc, decision)
+		approve = 1  # an answer, never a rejection
 	new_status = "Approved" if int(approve) else "Rejected"
 	# Conditional flip closes the double-decide race: only ONE concurrent
 	# caller wins the Pending -> decided transition.
@@ -596,6 +610,8 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	# fire the trace-comment hook (db update bypasses on_update)
 	doc.run_method("on_update")
 
+	if doc.get("routing"):
+		return {"ok": True, "status": doc.status, "resumed": _apply_routing_answer(doc)}
 	resumed = False
 	if doc.conversation and frappe.db.exists("Jarvis Conversation", doc.conversation):
 		verdict = "APPROVED" if doc.status == "Approved" else "REJECTED"
@@ -639,6 +655,17 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	return {"ok": True, "status": doc.status, "resumed": resumed}
 
 
+def _apply_routing_answer(doc) -> bool:
+	"""A routing question's answer runs INSTEAD of the generic resume. The decision
+	is recorded already, so a failure is logged, never raised."""
+	try:
+		return filebox_skills.apply_answer(doc)
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="jarvis.file_box.routing_apply_failed", message=frappe.get_traceback())
+		return False
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def dismiss_approval(name: str) -> dict:
@@ -646,6 +673,8 @@ def dismiss_approval(name: str) -> dict:
 	verdict, no chat resume. For requests the user simply doesn't want to
 	handle (a stale ask, a question they'll ignore). Terminal but reversible
 	via ``restore_approval``; unlike Reject it never tells the agent anything.
+	A routing question is the exception: dismissing it answers "Skip this file"
+	(recorded as its decision, never restorable), which a run acts on.
 	"""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
@@ -654,12 +683,13 @@ def dismiss_approval(name: str) -> dict:
 		frappe.throw("Not permitted", frappe.PermissionError)
 	if doc.status != "Pending":
 		frappe.throw(f"Approval {name} is already {doc.status}")
+	decision = filebox_skills.SKIP if doc.get("routing") else "(dismissed - no action taken)"
 	# conditional flip: only one concurrent caller wins Pending -> Dismissed
 	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status='Dismissed', decision=%s, decided_by=%s, decided_at=%s
 		where name=%s and status='Pending'""",
-		("(dismissed - no action taken)", frappe.session.user, frappe.utils.now_datetime(), name),
+		(decision, frappe.session.user, frappe.utils.now_datetime(), name),
 	)
 	if not frappe.db.sql(
 		"select 1 from `tabJarvis Approval Request` where name=%s and status='Dismissed'",
@@ -667,7 +697,11 @@ def dismiss_approval(name: str) -> dict:
 	):
 		frappe.throw(f"Approval {name} was decided concurrently")
 	frappe.db.commit()
-	return {"ok": True, "status": "Dismissed"}
+	resumed = False
+	if doc.get("routing"):
+		doc.decision = decision
+		resumed = _apply_routing_answer(doc)
+	return {"ok": True, "status": "Dismissed", "resumed": resumed}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -680,6 +714,8 @@ def restore_approval(name: str) -> dict:
 	_refuse_if_wiki_write(doc)
 	if not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
+	if doc.get("routing"):
+		frappe.throw("A dismissed routing question was answered 'Skip this file': re-run the file instead.")
 	if doc.status != "Dismissed":
 		frappe.throw(f"Only a dismissed request can be restored (this is {doc.status})")
 	frappe.db.set_value(

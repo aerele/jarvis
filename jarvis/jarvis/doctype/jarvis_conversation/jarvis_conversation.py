@@ -21,6 +21,9 @@ _FILEBOX_SERVER_FIELDS = (
 	"filebox_last_error",
 	"filebox_last_error_at",
 	"filebox_rerun_at",
+	"filebox_skills",
+	"filebox_skill_choice",
+	"filebox_skipped_at",
 )
 
 

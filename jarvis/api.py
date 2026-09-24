@@ -2482,6 +2482,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		verdict = held_writes.apply(tool, args, conversation)
 		if verdict is not None:
 			return verdict
+	# File Box skill routing: only an eligible skill loads (and is recorded).
+	if conversation and tool == "get_skill":
+		from jarvis.chat import filebox_skills
+
+		verdict = filebox_skills.gate_get_skill(args, conversation)
+		if verdict is not None:
+			return verdict
 
 	# ``preview`` is read, not popped: dispatch() filters args to the tool's
 	# signature so the flag never reaches the tool anyway, and leaving ``args``

@@ -27,7 +27,8 @@
   "wiki_payload",
   "apply_status",
   "apply_reason",
-  "wiki_digest"
+  "wiki_digest",
+  "routing"
  ],
  "fields": [
   {
@@ -201,6 +202,17 @@
    "hidden": 1,
    "no_copy": 1,
    "description": "Server HMAC over (name, conversation, wiki_payload), minted at propose and verified before a reviewer-approved write lands."
+  },
+  {
+   "fieldname": "routing",
+   "fieldtype": "Select",
+   "label": "Routing",
+   "options": "\nskill_missing\nskill_conflict",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "search_index": 1,
+   "description": "A bench-filed File Box routing question (the chosen skill isn't available, or two skills disagree on the document type). Server-set only; its answer is validated against the options and applied by the bench."
   }
  ],
  "index_web_pages_for_search": 0,

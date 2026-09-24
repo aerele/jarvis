@@ -102,20 +102,26 @@ def user_can_use_skill(skill, user: str | None = None, user_roles: list[str] | N
 	scope = (skill.get("scope") or "Org").strip() or "Org"
 	if scope == "Personal":
 		scope = "User"
-	roles = set(user_roles)
 	if scope == "User":
 		# Private: owner/shared/SM already handled above.
 		return False
+	return scope_admits(skill, "Role" if scope == "Role" else "Org", user_roles)
+
+
+def scope_admits(skill, scope: str, user_roles) -> bool:
+	"""The Role/Org audience rule of the scope ladder: a Role skill admits holders of
+	``target_role`` (or of an ``allowed_roles`` role); an Org skill admits everyone
+	unless ``allowed_roles`` narrows it. Any other scope admits nobody."""
+	if scope not in ("Role", "Org"):
+		return False
+	roles = set(user_roles)
 	allowed = set(_child_values(skill, "allowed_roles", "role", "Jarvis Custom Skill Allowed Role"))
 	if scope == "Role":
 		target_role = (skill.get("target_role") or "").strip()
 		if target_role and target_role in roles:
 			return True
 		return bool(allowed & roles)
-	# Org (or legacy empty): everyone unless narrowed by allowed_roles.
-	if not allowed:
-		return True
-	return bool(allowed & roles)
+	return not allowed or bool(allowed & roles)
 
 
 def _child_values(skill, fieldname: str, value_field: str, child_doctype: str) -> list[str]:
@@ -205,6 +211,7 @@ class JarvisCustomSkill(Document):
 		self._guard_scope_change()
 		self._guard_content_change()
 		self._validate_lengths()
+		self._validate_file_box_creates()
 		self._validate_unique_per_owner()
 		self._validate_shared_slug_unique()
 		self._validate_owner_cap()
@@ -374,8 +381,9 @@ class JarvisCustomSkill(Document):
 
 	def _guard_content_change(self):
 		"""Only a reviewer (or the compiler) may change the CONTENT of an existing
-		Role/Org skill — the instructions, description or user-invocable flag the
-		shared audience runs. Without this, a promotion could be approved against a
+		Role/Org skill — the instructions, description, user-invocable flag or File
+		Box routing (target doctype, re-enabling) the shared audience runs. Without
+		this, a promotion could be approved against a
 		reviewed body and then have its instructions rewritten afterwards (or a hidden
 		tail slipped in) with no second review — the four-eyes bypass Codex flagged
 		(CDX-SP-1). Siblings _guard_new_scope / _guard_scope_change bind the SCOPE to
@@ -391,14 +399,20 @@ class JarvisCustomSkill(Document):
 		if self._scope_change_authorized():
 			return
 		prev = frappe.db.get_value(
-			self.doctype, self.name, ["instructions", "description", "user_invocable"], as_dict=True
+			self.doctype,
+			self.name,
+			["instructions", "description", "user_invocable", "file_box_creates", "use_in_file_box"],
+			as_dict=True,
 		)
 		if not prev:
 			return
+		# File Box: the target doctype, and opting back in (0 -> 1); opting out is free.
 		changed = (
 			(self.instructions or "") != (prev.instructions or "")
 			or (self.description or "") != (prev.description or "")
 			or int(self.user_invocable or 0) != int(prev.user_invocable or 0)
+			or (self.file_box_creates or "") != (prev.file_box_creates or "")
+			or (int(self.use_in_file_box or 0) and not int(prev.use_in_file_box or 0))
 		)
 		if not changed:
 			return
@@ -450,6 +464,23 @@ class JarvisCustomSkill(Document):
 			frappe.throw(_("Description must be at most {0} characters.").format(MAX_DESC_LEN))
 		if len(self.instructions) > MAX_INSTR_LEN:
 			frappe.throw(_("Instructions must be at most {0} characters.").format(MAX_INSTR_LEN))
+
+	def _validate_file_box_creates(self):
+		"""The File Box target must be a document a File Box run may draft: submittable
+		and outside the modules an unattended run never writes."""
+		if not self.file_box_creates:
+			return
+		from jarvis.chat.held_writes import DENIED_MODULES
+
+		meta = frappe.db.get_value(
+			"DocType", self.file_box_creates, ["is_submittable", "istable", "module"], as_dict=True
+		)
+		if not meta or not meta.is_submittable or meta.istable or meta.module in DENIED_MODULES:
+			frappe.throw(
+				_(
+					"File Box creates must be a submittable document type File Box may draft (e.g. {0})."
+				).format("Purchase Invoice")
+			)
 
 	def _validate_unique_per_owner(self):
 		# Frappe's field-level ``unique`` is global, not per-owner; enforce

@@ -4,7 +4,7 @@ The SPA's File Box pane uploads the file (standard Frappe upload_file),
 then calls ``drop_file``. That creates a conversation named after the
 file and sends ONE directed prompt through the normal send_message +
 attachments machinery: classify the file, follow a matching processing
-skill (a Jarvis Custom Skill / persona skill found by find_skills, else
+skill (one from the File Box skill list, ``filebox_skills``, else
 ocr-data-entry), consult the wiki before drafting and record findings
 back to it after, and queue Jarvis Approval rows for real ambiguities.
 The drafts-only / never-ask / ambiguity-to-Approval safety rules OVERRIDE
@@ -20,6 +20,7 @@ import re
 
 import frappe
 
+from jarvis.chat import filebox_skills
 from jarvis.permissions import message_origin, refuse_in_tool_dispatch, require_jarvis_user
 
 # The persona fallback skill (SHARED_CORE_SKILLS, role_profiles.py) - always
@@ -36,13 +37,13 @@ INBOUND_PROMPT = (
 	"This file arrived through the File Box - process it as an inbound business "
 	"document, unattended, in this order.\n"
 	"1. Classify what the document is.\n"
-	"2. Look for a processing skill that fits this KIND of document: call "
-	"find_skills with the document kind and scan available_skills. Only follow a "
-	"skill whose description CLEARLY names this kind of document (find_skills is a "
-	"keyword match, so a loose match is not a match); read it with get_skill (or "
-	"cat its SKILL.md) and use it for classification, field mapping and routing. If "
-	"nothing clearly fits, use the ocr-data-entry skill (read "
-	"skills/ocr-data-entry/SKILL.md first and follow its decision policy exactly).\n"
+	"2. Pick the processing skill. If a File Box skill list is given above, pick the skill "
+	"whose description CLEARLY names this kind of document (a loose match is not a match), "
+	"load it with get_skill and follow it: its target document type (creates) and its field "
+	"and party mappings override the document's printed title. Never follow a skill that is "
+	"not in that list. If none clearly fits, or there is no list, use the ocr-data-entry "
+	"skill (read skills/ocr-data-entry/SKILL.md first and follow its decision policy "
+	"exactly).\n"
 	"3. Before drafting, check the wiki for what we already know: read_wiki for the "
 	"party and the topic, and build on / reference existing content instead of "
 	"starting from scratch. If the wiki is unavailable, skip this step and carry on.\n"
@@ -72,58 +73,44 @@ INBOUND_PROMPT = (
 )
 
 
-def build_inbound_prompt(skill: str | None = None) -> str:
-	"""The File Box directed prompt. ``skill=None`` returns ``INBOUND_PROMPT``
-	VERBATIM (the auto-discovery flow), so a tag can never drift the default path.
-	A tagged ``skill`` (a canonical skill_name) prepends a directive that applies
-	that skill ALONGSIDE the system's chosen skill (ADDITIVE, not a replacement):
-	the normal classify + base-extraction flow below still runs, and the tagged
-	skill layers its own rules on top. Every step and the safety envelope below
-	apply unchanged."""
+def build_inbound_prompt(skill: str | None = None, skills=(), more: bool = False) -> str:
+	"""The File Box directed prompt. No pin and no skill list returns
+	``INBOUND_PROMPT`` VERBATIM. ``skills`` (the eligible File Box skills) are listed
+	above it as DATA; ``more`` says the list was capped. A tagged ``skill`` (a
+	canonical skill_name) prepends a directive that applies it ALONGSIDE the base
+	flow; if it can't be loaded, or disagrees with the skill the run follows, the
+	run stops for a human (K-D2/D3). The safety envelope below applies unchanged."""
+	block = filebox_skills.prompt_block(skills, more) if skills else ""
 	if not skill:
-		return INBOUND_PROMPT
+		return block + INBOUND_PROMPT
+	load = f"read skills/{skill}/SKILL.md" if skill == OCR_DATA_ENTRY else f"load it with get_skill '{skill}'"
 	directive = (
 		f"This file also carries a TAGGED skill: '{skill}'. Run the normal flow below "
-		"(classify, and process with the system's chosen skill - a discovered skill, "
-		f"else {OCR_DATA_ENTRY} - as the base extraction) AND, IN ADDITION, read the "
-		f"'{skill}' skill (get_skill '{skill}', or cat skills/{skill}/SKILL.md) and apply "
-		"its instructions on top: its field mappings, validation and routing LAYER onto "
-		"the base, they do not replace it. If the tagged skill cannot be loaded, carry on "
-		"with the base flow alone. The safety rules below still OVERRIDE both.\n\n"
+		"(classify, and process with the system's chosen skill - one from the File Box skill "
+		f"list, else {OCR_DATA_ENTRY} - as the base extraction) AND, IN ADDITION, {load} and "
+		"apply its instructions on top: its field mappings, validation and routing LAYER onto "
+		"the base. If the tagged skill cannot be loaded, do NOT carry on without it: record a "
+		"decision Jarvis Approval Request saying it isn't available and end your turn. If a "
+		"write is refused because the skills for this document disagree, end your turn: a human "
+		"is asked which one applies. The safety rules below still OVERRIDE both.\n\n"
 	)
-	return directive + INBOUND_PROMPT
+	return directive + block + INBOUND_PROMPT
 
 
-def _validated_pinned_skill(skill: str | None) -> str | None:
-	"""Resolve a client-supplied skill slug to the CANONICAL skill_name to pin, or
-	None to fall back to auto-discovery. The client string is untrusted, so the
-	slug is validated through ``get_skill`` itself - the same resolver the agent
-	will use (system-user + enabled + own-row-wins) - so drop-time acceptance and
-	run-time load can never disagree, and only a validated slug (SLUG_RE, so no
-	newline / '<' / '_' / quote) is ever embedded in the prompt or stored.
-	Fallback is UNIFORM: a nonexistent slug and an inaccessible one both return
-	None (no enumeration oracle), and the note is server-side only."""
+def _validated_pinned_skill(skill: str | None) -> dict | None:
+	"""Resolve a client-supplied skill slug to the pin entry ``{docname, slug,
+	creates, pinned}``, or None when it isn't usable. The client string is untrusted:
+	it is resolved for the dropper as a File Box run resolves it
+	(``filebox_skills.resolve``: system user + enabled + visible, own row first) and
+	must be eligible as a pin (``use_in_file_box``, not learned), so only a validated
+	slug (SLUG_RE) is ever embedded in the prompt or stored. UNIFORM: an unknown, an
+	inaccessible, an opted-out and a learned skill all return None (no oracle)."""
 	slug = (skill or "").strip()
 	if not slug:
 		return None
 	if slug == OCR_DATA_ENTRY:  # persona skill, no Custom Skill row - accept by literal
-		return OCR_DATA_ENTRY
-	from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
-	from jarvis.tools.get_skill import get_skill
-
-	try:
-		row = get_skill(slug)
-	except (InvalidArgumentError, PermissionDeniedError):
-		# UNIFORM fallback: unknown slug AND inaccessible skill both land here -> None
-		# (no enumeration oracle). A transient/unexpected error is NOT caught - it
-		# propagates so the drop fails loudly rather than silently dropping the pin.
-		# Server-side note only (never in the return payload) so the client can't
-		# probe another user's private-skill existence by watching whether a pin stuck.
-		frappe.logger("jarvis").info(
-			"file_box pin fell back to auto: skill %r not usable by %s", slug, frappe.session.user
-		)
-		return None
-	return row.get("skill_name") or None
+		return {"docname": "", "slug": OCR_DATA_ENTRY, "creates": "", "pinned": True}
+	return filebox_skills.validated_pin(slug)
 
 
 def _resolve_drop_file(file: str | None, file_url: str | None):
@@ -191,10 +178,10 @@ def _send_inbound(conv: str, file_doc, pinned: str | None, preamble: str | None 
 	from jarvis.chat.api import send_message
 
 	attachments = json.dumps([{"file_url": file_doc.file_url, "file_name": file_doc.file_name}])
-	message = build_inbound_prompt(pinned)
-	if preamble:
-		message = f"{preamble}\n\n{message}"
 	try:
+		message = build_inbound_prompt(pinned, *filebox_skills.prompt_skills(conv))
+		if preamble:
+			message = f"{preamble}\n\n{message}"
 		# background=1: a batch of drops drains FIFO behind a human's typed question.
 		with message_origin("file_box"):
 			res = send_message(conversation=conv, message=message, attachments=attachments, background=1)
@@ -232,9 +219,9 @@ def drop_file(
 	``file`` is the uploaded File's docname (``file_url`` is the legacy fallback).
 	``skill`` (optional) tags ONE extra processing skill for this file: a Jarvis
 	Custom Skill's skill_name. It is validated server-side (the client string is
-	untrusted) and, if usable, the agent applies it ALONGSIDE the system's chosen
-	skill (additive - the base extraction still runs, the tagged skill layers on
-	top). An unusable / absent skill just leaves the normal auto-discovery flow."""
+	untrusted) and, if usable, recorded as the run's pin and applied ALONGSIDE the
+	system's chosen skill. An unusable skill never falls back silently (K-D2): the
+	file waits on a skill_missing routing question and no run starts."""
 	refuse_in_tool_dispatch()
 	# Must be a real uploaded File of this site (no external URLs).
 	fdoc = _resolve_drop_file(file, file_url)
@@ -248,8 +235,9 @@ def drop_file(
 
 	from jarvis.chat.api import create_conversation
 
-	# Untrusted client slug -> canonical skill_name to pin, or None (auto).
-	pinned = _validated_pinned_skill(skill)
+	# Untrusted client slug -> the validated pin entry, or None.
+	requested = (skill or "").strip()
+	pin = _validated_pinned_skill(requested)
 
 	conv_id = create_conversation()
 	title = (file_name or fdoc.file_name or "Inbound document")[:60]
@@ -257,14 +245,16 @@ def drop_file(
 	# a write-confirmation card, so held_writes decides every write: drafts
 	# commit directly, masters wait on the Approval Board, the rest is refused.
 	# Set via db.set_value to bypass the controller's admin-gate on enabling it.
-	# filebox_pinned_skill: the validated pin (or "" for auto-discovery).
+	# filebox_pinned_skill: the validated pin (or "" for auto-discovery);
+	# filebox_skills records it (a Custom Skill pin) for the target check.
 	frappe.db.set_value(
 		CONV,
 		conv_id,
 		{
 			"title": f"File: {title}",
 			"file_box": 1,
-			"filebox_pinned_skill": pinned or "",
+			"filebox_pinned_skill": pin["slug"] if pin else "",
+			"filebox_skills": json.dumps([pin]) if pin and pin["docname"] else None,
 			"filebox_source_file": fdoc.name,
 		},
 		update_modified=False,
@@ -279,9 +269,12 @@ def drop_file(
 	)
 	frappe.db.commit()
 
+	if requested and not pin:
+		filebox_skills.file_skill_missing(conv_id, requested)
+		return {"ok": True, "conversation_id": conv_id, "run_id": None, "reason": None, "needs_approval": 1}
 	if file_name:
 		fdoc.file_name = file_name
-	res = _send_inbound(conv_id, fdoc, pinned)
+	res = _send_inbound(conv_id, fdoc, pin["slug"] if pin else None)
 	return {
 		"ok": bool(res.get("ok")),
 		"conversation_id": conv_id,
@@ -415,6 +408,10 @@ _ERR_NEWER = (
 	"(c.filebox_last_error_at IS NOT NULL AND (lu.creation IS NULL OR c.filebox_last_error_at > lu.creation))"
 )
 _UNANSWERED = "(lm.seq IS NULL OR lm.seq < lu.seq)"
+# "Skip this file" on a skill_missing routing question, with no later run.
+_SKIPPED = (
+	"(c.filebox_skipped_at IS NOT NULL AND (lu.creation IS NULL OR c.filebox_skipped_at > lu.creation))"
+)
 # A fresh re-run claim whose send hasn't landed a user row yet (``_rerun_claimed``).
 _RERUN_CLAIMED = (
 	"(c.filebox_rerun_at >= %(fresh)s AND (lu.creation IS NULL OR lu.creation <= c.filebox_rerun_at))"
@@ -456,7 +453,9 @@ _INBOUND_INNER = f"""
 	                AND NOT {_ERR_NEWER} THEN 1
 	           ELSE 0
 	         END AS live,
+	         CASE WHEN {_SKIPPED} THEN 1 ELSE 0 END AS skipped,
 	         CASE
+	           WHEN {_SKIPPED} THEN NULL
 	           WHEN {_RESUME_FAILED} THEN 'resume_failed'
 	           WHEN {_ERR_NEWER} THEN 'send_failed'
 	           WHEN lu.name IS NULL THEN 'no_start'
@@ -618,6 +617,8 @@ def _result(r: dict, wait, msg) -> tuple[str, str | None]:
 			return (f"Failed: {reason}" if reason else "Failed"), None
 		return _FAILURES.get(code, "Failed"), None
 	if status == "no_draft":
+		if r.get("skipped"):
+			return "Skipped by you", None
 		return _first_line(msg.content if msg else ""), None
 	return "", None
 
@@ -626,6 +627,7 @@ def _result(r: dict, wait, msg) -> tuple[str, str | None]:
 _INTERNAL = (
 	"lm_name",
 	"fail_code",
+	"skipped",
 	"filebox_result_doctype",
 	"filebox_result_name",
 	"filebox_result_count",
@@ -726,7 +728,7 @@ def list_inbound_page(
 	total = frappe.db.sql(f"SELECT COUNT(*) FROM ({inner}) t {outer}", params)[0][0]
 	rows = frappe.db.sql(
 		f"""SELECT t.name, t.title, t.creation, t.status, t.pending_approvals, t.behind_chat,
-		t.lm_name, t.fail_code, t.filebox_result_doctype, t.filebox_result_name,
+		t.lm_name, t.fail_code, t.skipped, t.filebox_result_doctype, t.filebox_result_name,
 		t.filebox_result_count, t.filebox_last_error
 		FROM ({inner}) t {outer}
 		ORDER BY {order}
@@ -1009,7 +1011,8 @@ def _rerun_one(conversation: str) -> dict:
 	if not doc.file_box:
 		frappe.throw("Not a File Box conversation")
 	# Re-validated as the dropper now: the pin may have been disabled or unshared.
-	pinned = _validated_pinned_skill(doc.filebox_pinned_skill)
+	requested = (doc.filebox_pinned_skill or "").strip()
+	pin = _validated_pinned_skill(requested)
 
 	frappe.db.commit()
 	lock_conversation(conversation)
@@ -1038,9 +1041,20 @@ def _rerun_one(conversation: str) -> dict:
 		CONV, conversation, "filebox_rerun_at", frappe.utils.now_datetime(), update_modified=False
 	)
 	held = _supersede_held(conversation)
+	# A fresh routing state: only the re-validated pin is recorded again.
 	frappe.db.set_value(
-		CONV, conversation, {"filebox_last_error": None, "filebox_last_error_at": None}, update_modified=False
+		CONV,
+		conversation,
+		{
+			"filebox_last_error": None,
+			"filebox_last_error_at": None,
+			"filebox_skills": json.dumps([pin]) if pin and pin["docname"] else None,
+			"filebox_skill_choice": None,
+			"filebox_skipped_at": None,
+		},
+		update_modified=False,
 	)
+	frappe.cache.delete_value(filebox_skills.backstop_key(conversation))
 	msg = (
 		frappe.db.get_value(MSG, r["lm_name"], ["content", "error"], as_dict=True)
 		if r.get("lm_name")
@@ -1058,7 +1072,18 @@ def _rerun_one(conversation: str) -> dict:
 			frappe.db.rollback()
 			frappe.log_error(title="jarvis.file_box.rerun_settle_failed", message=frappe.get_traceback())
 
-	res = _send_inbound(conversation, f, pinned, preamble=preamble)
+	if requested and not pin:
+		# K-D2: an unavailable pin asks again, never a silent fallback to auto.
+		frappe.db.set_value(CONV, conversation, "filebox_rerun_at", None, update_modified=False)
+		filebox_skills.file_skill_missing(conversation, requested)
+		return {
+			"ok": True,
+			"conversation_id": conversation,
+			"run_id": None,
+			"reason": None,
+			"needs_approval": 1,
+		}
+	res = _send_inbound(conversation, f, pin["slug"] if pin else None, preamble=preamble)
 	return {
 		"ok": bool(res.get("ok")),
 		"conversation_id": conversation,
