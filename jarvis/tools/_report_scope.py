@@ -60,4 +60,13 @@ def attach_scope(result: dict, scope: dict | None) -> dict:
 	# currency, even for an empty result. The UI names the basis explicitly.
 	if scope["currency_mode"] == "company" and not result.get("prepared_report"):
 		scope["currency"] = frappe.get_cached_value("Company", scope["company"], "default_currency")
+	# These standard reports expose their row currency as `currency`. Preserve
+	# mixed currencies; never imply a consolidated monetary total. Missing row
+	# codes make the list incomplete, so retain only the currency basis then.
+	rows = result["result"]
+	if rows and all(
+		isinstance(row, dict) and isinstance(row.get("currency"), str) and row["currency"].strip()
+		for row in rows
+	):
+		scope["currencies"] = sorted({row["currency"].strip() for row in rows})
 	return {**result, "report_scope": scope}
