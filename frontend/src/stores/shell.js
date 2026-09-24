@@ -361,7 +361,7 @@ async function loadConversations() {
 	_convsInflight = (async () => {
 		try {
 			conversations.value = (await api.listConversations()) || [];
-			refreshApprovalsCount(); // poll-on-activity parity (D12)
+			refreshBadges(); // poll-on-activity parity (D12)
 		} catch (e) {
 			toast.error(errHtml(e));
 		} finally {
