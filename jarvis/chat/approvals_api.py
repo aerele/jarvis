@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 
 import frappe
 
@@ -494,10 +495,22 @@ def get_approval(name: str) -> dict:
 @require_jarvis_user
 def pending_count() -> int:
 	"""The board badge: Pending approval requests + held File Box writes (these
-	badge immediately, decision 4)."""
-	return _ar_pending_count() + _held_pending_count(
-		frappe.session.user, "System Manager" in frappe.get_roles()
+	badge immediately, decision 4) + the caller's OWN chat cards once they have
+	waited ``BOARD_BADGE_DELAY_S`` (D1: never another user's, even for an SM)."""
+	me = frappe.session.user
+	return (
+		_ar_pending_count()
+		+ _held_pending_count(me, "System Manager" in frappe.get_roles())
+		+ _chat_pending_count(me)
 	)
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def pending_badge() -> dict:
+	"""``{count, next_in}``: the badge, plus the seconds until the caller's next chat
+	card joins it (None when none is on the way), so the client refreshes then."""
+	return {"count": pending_count(), "next_in": _chat_badge_next_in(frappe.session.user)}
 
 
 def _ar_pending_count() -> int:
@@ -1042,6 +1055,43 @@ def _held_refusal(reason_code: str, message: str, **extra) -> dict:
 	}
 
 
+# A chat card is on its conversation until then; the board lists it at once (decision 4).
+BOARD_BADGE_DELAY_S = 600
+CHAT = "chat"
+
+
+def _badge_cutoff():
+	return frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-BOARD_BADGE_DELAY_S)
+
+
+def _chat_pending_count(me: str) -> int:
+	from jarvis.chat.pending_actions._store import table_ready
+
+	if not table_ready():
+		return 0
+	return frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND status='Pending'"
+		" AND owner_user=%(me)s AND creation <= %(cutoff)s",
+		{"k": CHAT, "me": me, "cutoff": _badge_cutoff()},
+	)[0][0]
+
+
+def _chat_badge_next_in(me: str) -> int | None:
+	from jarvis.chat.pending_actions._store import table_ready
+
+	if not table_ready():
+		return None
+	oldest = frappe.db.sql(
+		"SELECT MIN(creation) FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND status='Pending'"
+		" AND owner_user=%(me)s AND creation > %(cutoff)s",
+		{"k": CHAT, "me": me, "cutoff": _badge_cutoff()},
+	)[0][0]
+	if not oldest:
+		return None
+	waited = (frappe.utils.now_datetime() - frappe.utils.get_datetime(oldest)).total_seconds()
+	return max(1, math.ceil(BOARD_BADGE_DELAY_S - waited))
+
+
 def _held_pending_count(me: str, is_sm: bool) -> int:
 	from jarvis.chat.pending_actions._store import table_ready
 
@@ -1072,39 +1122,94 @@ def _for_user(owner: str, me: str) -> str:
 @frappe.whitelist()
 @require_jarvis_user
 def list_pending_actions_lane() -> dict:
-	"""Held File Box writes awaiting a decision (or running): the caller's own, or
-	every user's for a System Manager. Oldest first; ``{rows, total}``."""
+	"""Pending actions awaiting a decision (or running), oldest first; ``{rows,
+	total}``. Held File Box writes: the caller's own, or every user's for a System
+	Manager. Chat cards: the caller's own only (D1), listed at once (decision 4)."""
 	from jarvis.chat.pending_actions._store import table_ready
 
 	if not table_ready():
 		return {"rows": [], "total": 0}
 	me = frappe.session.user
-	rows = frappe.db.sql(
-		"""SELECT pa.name, pa.status, pa.summary, pa.owner_user, pa.creation,
-		(SELECT COUNT(*) FROM `tabJarvis Pending Action Waiter` w
-		 WHERE w.parent = pa.name AND w.parenttype = 'Jarvis Pending Action') AS waiters_count
-		FROM `tabJarvis Pending Action` pa
-		WHERE pa.kind = %(k)s AND pa.status IN ('Pending', 'Executing')
-		AND (%(sm)s OR pa.owner_user = %(me)s)
-		ORDER BY pa.creation ASC, pa.name ASC
-		LIMIT %(lim)s""",
-		{"k": HELD, "sm": int("System Manager" in frappe.get_roles()), "me": me, "lim": _HELD_LANE_LIMIT},
-		as_dict=True,
-	)
+	params = {
+		"held": HELD,
+		"chat": CHAT,
+		"sm": int("System Manager" in frappe.get_roles()),
+		"me": me,
+		"lim": _HELD_LANE_LIMIT,
+	}
+	rows = []
+	# One capped query per kind: an SM's backlog of held rows never crowds out their own cards.
+	for scope in (
+		"pa.kind = %(held)s AND (%(sm)s OR pa.owner_user = %(me)s)",
+		"pa.kind = %(chat)s AND pa.owner_user = %(me)s",
+	):
+		rows += frappe.db.sql(
+			f"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.owner_user, pa.creation,
+			pa.conversation, c.title AS conversation_title, c.origin_page,
+			(SELECT COUNT(*) FROM `tabJarvis Pending Action Waiter` w
+			 WHERE w.parent = pa.name AND w.parenttype = 'Jarvis Pending Action') AS waiters_count
+			FROM `tabJarvis Pending Action` pa
+			LEFT JOIN `tabJarvis Conversation` c ON c.name = pa.conversation
+			WHERE pa.status IN ('Pending', 'Executing') AND {scope}
+			ORDER BY pa.creation ASC, pa.name ASC
+			LIMIT %(lim)s""",
+			params,
+			as_dict=True,
+		)
+	rows.sort(key=lambda r: (r.creation, r.name))
+	out = []
+	for r in rows:
+		row = {
+			"name": r.name,
+			"kind": r.kind,
+			"status": r.status,
+			"summary": r.summary or "",
+			"created_at": str(r.creation),
+			"age": _age_s(r.creation),
+		}
+		if r.kind == CHAT:
+			row.update(_chat_link(r.conversation, r.conversation_title, r.origin_page))
+		else:
+			row.update(waiters_count=int(r.waiters_count or 0), for_user=_for_user(r.owner_user, me))
+		out.append(row)
+	return {"rows": out, "total": len(out)}
+
+
+def _chat_link(conversation, title, origin_page) -> dict:
+	"""Where a chat card's "Open chat" goes (the title is user/model text)."""
 	return {
-		"rows": [
-			{
-				"name": r.name,
-				"status": r.status,
-				"summary": r.summary or "",
-				"waiters_count": int(r.waiters_count or 0),
-				"created_at": str(r.creation),
-				"age": _age_s(r.creation),
-				"for_user": _for_user(r.owner_user, me),
-			}
-			for r in rows
-		],
-		"total": len(rows),
+		"conversation": conversation or "",
+		"conversation_title": title or "",
+		"origin_page": origin_page or "",
+	}
+
+
+def _chat_detail(row) -> dict:
+	"""A chat card for its owner: the stored card (secret-masked at park), never the seal."""
+	from jarvis.chat.pending_actions._store import PENDING, REASON_TEXT
+
+	conv = frappe._dict()
+	if row.conversation:
+		conv = (
+			frappe.db.get_value(
+				"Jarvis Conversation", row.conversation, ["title", "origin_page"], as_dict=True
+			)
+			or conv
+		)
+	code = row.reason_code or ""
+	return {
+		"name": row.name,
+		"kind": row.kind,
+		"status": row.status,
+		"tool": row.tool,
+		"summary": row.summary or "",
+		"card": json.loads(row.card) if row.card else None,
+		"created_at": str(row.creation),
+		"age": _age_s(row.creation),
+		**_chat_link(row.conversation, conv.title, conv.origin_page),
+		"can_act": int(row.status == PENDING),
+		"reason_code": code,
+		"reason": REASON_TEXT.get(code, ""),
 	}
 
 
@@ -1195,33 +1300,40 @@ def _held_detail(row, me: str) -> dict:
 	}
 
 
-def _authorized_held(name, approver: str):
+def _authorized_held(name, approver: str, kinds=(HELD,)):
+	"""The row when ``approver`` may act on it: a held row (owner or SM), or with
+	``kinds`` also a chat card (its owner only, D1)."""
 	from jarvis.chat.pending_actions import authorize
 	from jarvis.chat.pending_actions._store import get_row, table_ready
 
 	name = str(name or "").strip()
 	row = get_row(name) if name and table_ready() else None
-	return row if authorize(row, approver, HELD)[0] else None
+	if not row or row.kind not in kinds:
+		return None
+	return row if authorize(row, approver, row.kind)[0] else None
 
 
 @frappe.whitelist()
 @require_jarvis_user
 def get_pending_action(name: str) -> dict:
-	"""One held row for the board: ``{kind, card, summary, age, waiters_count,
-	candidates, can_act, reason_code, ...}``. Never the sealed columns or
-	``open_key``; candidates are read as the row's ``exec_user`` (name/title/GSTIN
-	only). A terminal row still unsettled is settled on read (self-heal)."""
+	"""One lane row for the board: ``{kind, card, summary, age, can_act,
+	reason_code, ...}``; a held row adds ``waiters_count`` / ``candidates`` (read as
+	its ``exec_user``: name/title/GSTIN only), a chat card its conversation (decided
+	through ``confirm_tool`` / ``dismiss_tool``). Never the sealed columns or
+	``open_key``. A terminal row still unsettled is settled on read (self-heal)."""
 	from jarvis._session import authenticated_user
 	from jarvis.chat.pending_actions import settle
 	from jarvis.chat.pending_actions._store import TERMINAL, get_row
 
 	me = authenticated_user()
-	row = _authorized_held(name, me)
+	row = _authorized_held(name, me, kinds=(HELD, CHAT))
 	if not row:
 		frappe.throw(_HELD_NOT_FOUND, frappe.DoesNotExistError)
 	if row.status in TERMINAL and not row.settled:
 		settle(row.name)
 		row = get_row(row.name)
+	if row.kind == CHAT:
+		return _chat_detail(row)
 	return _value_free(_held_detail, "detail_crashed", row, me)
 
 

@@ -7,10 +7,11 @@ import { call } from "frappe-ui";
 
 export const getApproval = (name) => call("jarvis.chat.approvals_api.get_approval", { name });
 
-// Held File Box writes (Jarvis Pending Action, kind file_box_held): the board's
-// lane. Owner or System Manager only (server-enforced); card/summary are
-// model-derived text and must render as text, never HTML. Every decide response
-// carries a `reason_code` (copy lives in lib/heldActions).
+// The board's lane of Jarvis Pending Actions: held File Box writes (owner or System
+// Manager) and the viewer's own chat cards (owner only; decided through the chat's
+// confirmTool / dismissTool). All server-enforced; card/summary/conversation_title
+// are model-derived text and must render as text, never HTML. Every decide response
+// carries a `reason_code` (copy lives in lib/heldActions and lib/chatCardActions).
 export const listPendingActionsLane = () =>
 	call("jarvis.chat.approvals_api.list_pending_actions_lane", {});
 export const getPendingAction = (name) =>

@@ -24,6 +24,14 @@ vi.mock("./PendingActionDetail.vue", () => ({
 			'<div class="detail" @click="$emit(\'decided\', {ok: true})">detail {{ name }}</div>',
 	},
 }));
+vi.mock("./PendingChatDetail.vue", () => ({
+	default: {
+		props: ["name"],
+		emits: ["decided"],
+		template:
+			'<div class="chat-detail" @click="$emit(\'decided\', {ok: true})">chat {{ name }}</div>',
+	},
+}));
 
 import * as api from "@/api/approvals";
 import PendingActionLane from "./PendingActionLane.vue";
@@ -32,6 +40,7 @@ const HOSTILE = "<script>window.__pwned=1</script>";
 const rows = [
 	{
 		name: "PA-1",
+		kind: "file_box_held",
 		status: "Pending",
 		summary: "New supplier: Acme",
 		waiters_count: 1,
@@ -40,6 +49,7 @@ const rows = [
 	},
 	{
 		name: "PA-2",
+		kind: "file_box_held",
 		status: "Executing",
 		summary: HOSTILE,
 		waiters_count: 3,
@@ -47,6 +57,18 @@ const rows = [
 		for_user: "Asha",
 	},
 ];
+
+const chatRow = (over = {}) => ({
+	name: "PA-9",
+	kind: "chat",
+	status: "Pending",
+	summary: "Create a ToDo",
+	created_at: "",
+	conversation: "conv-1",
+	conversation_title: HOSTILE,
+	origin_page: "",
+	...over,
+});
 
 function mountLane(socket = null) {
 	return mount(PendingActionLane, { global: { provide: { $socket: socket } } });
@@ -131,5 +153,70 @@ describe("PendingActionLane", () => {
 		vi.advanceTimersByTime(1000);
 		await flushPromises();
 		expect(api.listPendingActionsLane).toHaveBeenCalledTimes(2);
+	});
+
+	it("refetches when a card is confirmed or any pending action settles", async () => {
+		vi.useFakeTimers();
+		const handlers = {};
+		const socket = { on: (ev, fn) => (handlers[ev] = fn), off: vi.fn() };
+		api.listPendingActionsLane.mockResolvedValue({ rows });
+		mountLane(socket);
+		await flushPromises();
+		for (const kind of ["action:confirmed", "action:settled"]) {
+			const calls = api.listPendingActionsLane.mock.calls.length;
+			handlers["jarvis:event"]({ kind });
+			vi.advanceTimersByTime(1000);
+			await flushPromises();
+			expect(api.listPendingActionsLane).toHaveBeenCalledTimes(calls + 1);
+		}
+	});
+
+	it("lists the viewer's chat cards with where and when they were proposed", async () => {
+		api.listPendingActionsLane.mockResolvedValue({
+			rows: [chatRow(), chatRow({ name: "PA-8", status: "Executing", summary: "" })],
+		});
+		const w = mountLane();
+		await flushPromises();
+		expect(w.text()).toContain("Actions waiting for your confirmation");
+		expect(w.text()).toContain("from your chats");
+		expect(w.text()).toContain("Create a ToDo");
+		expect(w.text()).toContain("Proposed 5 minutes ago");
+		expect(w.text()).toContain("Running…");
+		expect(w.text()).toContain("Action waiting");
+		expect(w.text()).not.toContain("files waiting");
+		// The conversation title is user/model text: shown, never parsed.
+		expect(w.text()).toContain(HOSTILE);
+		expect(w.html()).not.toContain("<script>");
+	});
+
+	it("opens a chat card in its own detail and names both sources when mixed", async () => {
+		api.listPendingActionsLane.mockResolvedValue({ rows: [rows[0], chatRow()] });
+		const w = mountLane();
+		await flushPromises();
+		expect(w.text()).toContain("Waiting for your approval");
+		expect(w.text()).toContain("from File Box runs and your chats");
+		const row = w
+			.findAll("button")
+			.find((b) => b.attributes("aria-controls") === "held-detail-PA-9");
+		await row.trigger("click");
+		expect(row.attributes("aria-expanded")).toBe("true");
+		expect(w.find(".chat-detail").text()).toBe("chat PA-9");
+		expect(w.find(".detail").exists()).toBe(false);
+	});
+
+	it("drops a decided chat card and refreshes the badge", async () => {
+		api.listPendingActionsLane
+			.mockResolvedValueOnce({ rows: [chatRow()] })
+			.mockResolvedValue({ rows: [] });
+		const w = mountLane();
+		await flushPromises();
+		await w
+			.findAll("button")
+			.find((b) => b.attributes("aria-controls") === "held-detail-PA-9")
+			.trigger("click");
+		await w.find(".chat-detail").trigger("click");
+		await flushPromises();
+		expect(refreshApprovalsCount).toHaveBeenCalled();
+		expect(w.find("section").exists()).toBe(false);
 	});
 });

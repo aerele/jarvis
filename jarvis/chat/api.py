@@ -739,24 +739,36 @@ def get_conversation(conversation: str) -> dict:
 
 
 def _pending_action_cards(messages: list) -> None:
-	"""For each still-pending row whose token is a chat pending action, render that
-	row's ``card`` (its column is never sealed and never holds args)."""
-	tokens = [m.tool_call_id for m in messages if m.get("tool_status") == "pending" and m.get("tool_call_id")]
+	"""Every still-pending row carries epoch ``created_at`` (the clients' age label and
+	order; no timezone guessing): a legacy card its row's own creation (stamped with
+	the mint), a chat pending action its mint time plus its ``card`` (that column is
+	never sealed and never holds args)."""
+	from jarvis.chat.pending_confirm import _epoch
+
+	pending = [m for m in messages if m.get("tool_status") == "pending" and m.get("tool_call_id")]
+	for m in pending:
+		if m.get("creation"):
+			m["created_at"] = _epoch(m.creation)
+	tokens = [m.tool_call_id for m in pending]
 	if not tokens:
 		return
 	from jarvis.chat.pending_actions._store import table_ready
 
 	if not table_ready():
 		return
-	cards = dict(
-		frappe.db.sql(
-			"SELECT name, card FROM `tabJarvis Pending Action` WHERE kind='chat' AND name IN %(t)s",
+	cards = {
+		r.name: r
+		for r in frappe.db.sql(
+			"SELECT name, card, creation FROM `tabJarvis Pending Action` WHERE kind='chat' AND name IN %(t)s",
 			{"t": tuple(tokens)},
+			as_dict=True,
 		)
-	)
+	}
 	for m in messages:
-		if m.get("tool_status") == "pending" and m.get("tool_call_id") in cards:
-			m["pending_card"] = cards[m.tool_call_id]
+		row = cards.get(m.get("tool_call_id")) if m.get("tool_status") == "pending" else None
+		if row:
+			m["pending_card"] = row.card
+			m["created_at"] = _epoch(row.creation)
 
 
 def _pending_recency(conversation: str, messages: list) -> None:

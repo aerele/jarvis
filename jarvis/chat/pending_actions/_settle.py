@@ -128,6 +128,26 @@ def _deliver(item: dict) -> None:
 		admission.publish_action_confirmed(conv)
 
 
+def _announce(item: dict) -> None:
+	"""Tell the owner (and a different approver) the lane and badge changed. Best-effort."""
+	from jarvis.chat import events
+
+	for user in sorted({item["owner_user"], item["decided_by"]} - {None, ""}):
+		try:
+			events.publish_to_user(
+				user,
+				{
+					"kind": "action:settled",
+					"name": item["name"],
+					"action_kind": item["kind"],
+					"status": item["status"],
+					"conversation_id": item["conversation"] or "",
+				},
+			)
+		except Exception:
+			pass
+
+
 def _continue(kind: str, conversation: str | None, items: list[dict]) -> None:
 	path = CONTINUATIONS.get(kind)
 	if path:
@@ -175,7 +195,10 @@ def settle(name: str, *, force: bool = False) -> bool:
 		frappe.log_error(title="jarvis.pending_action.settle_failed", message=frappe.get_traceback())
 		frappe.db.commit()
 		return False
-	return bool(frappe.db.get_value("Jarvis Pending Action", name, "settled"))
+	done = bool(frappe.db.get_value("Jarvis Pending Action", name, "settled"))
+	if done:
+		_announce(item)
+	return done
 
 
 def settle_batch(batch_id: str) -> int:
@@ -207,6 +230,8 @@ def settle_batch(batch_id: str) -> int:
 			null_sealed([i["name"] for i in items])
 			frappe.db.commit()
 			settled += len(items)
+			for item in items:
+				_announce(item)
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(title="jarvis.pending_action.settle_failed", message=frappe.get_traceback())

@@ -7,6 +7,7 @@ import {
   comparePendingCards,
   dropDiscarded,
   isRecentCard,
+  keptCardMessage,
   keepEarlier,
   markCardsEarlier,
   sortPendingCards,
@@ -178,4 +179,42 @@ test("Panel.vue wires the recency helpers into the hint, the send and the resync
   );
   assert.match(src, /keepEarlier\(\s*\[\.\.\.byToken\.values\(\)\]/);
   assert.match(src, /v-if="!isRecentCard\(p\)"[^>]*>Earlier</);
+});
+
+test("keptCardMessage: a refusal keeps the card unless it settled it, and says why", () => {
+  for (const code of ["busy", "identity_refused", "armed_run"])
+    assert.match(keptCardMessage({ ok: false, reason_code: code }), /\w/, code);
+  assert.equal(
+    keptCardMessage({
+      ok: false,
+      reason_code: "executing",
+      pa_status: "Executing",
+    }),
+    "This action is already running."
+  );
+  for (const res of [
+    { ok: true },
+    { ok: false, reason_code: "already_handled" },
+    { ok: false, reason_code: "not_found" },
+    { ok: false, reason_code: "failed", pa_status: "Failed" },
+    { ok: false, reason_code: "stale", pa_status: "Failed" },
+    { ok: false, error: { type: "InvalidConfirmation" } },
+    {
+      ok: false,
+      error: { type: "ValidationError", message: "legacy tool failed" },
+    },
+    undefined,
+  ])
+    assert.equal(keptCardMessage(res), "");
+});
+
+test("Panel.vue keeps a refused card instead of resolving it away", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
+  const body = src.slice(src.indexOf("async function resolvePending("));
+  const kept = body.search(
+    /if \(kept\) \{\s*loadError\.value = kept;\s*return;/
+  );
+  assert.ok(kept > -1 && body.includes("const kept = keptCardMessage("));
+  assert.ok(kept < body.indexOf('kind: "action:resolved"'));
 });

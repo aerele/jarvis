@@ -36,6 +36,7 @@ import {
 	toolStatus,
 } from "../lib/blocks";
 import { spanBetween } from "../lib/time";
+import { proposedLabel } from "../lib/cardAge.js";
 import { sortPendingCards } from "../lib/sortPendingCards.js";
 import { mergePendingSources } from "../lib/pendingResync.js";
 import {
@@ -109,6 +110,9 @@ const olderCardsNote = ref(false);
 const showOlderCardsNote = computed(
 	() => olderCardsNote.value && orderedPending.value.some((p) => !isRecentCard(p))
 );
+// A coarse clock for the "Proposed 3h ago" label on a card left waiting.
+const cardClock = ref(Date.now());
+let _cardClockTick = null;
 const settings = ref(null);
 
 // The turn in flight. Held separately from `messages` because it is not durable
@@ -335,10 +339,9 @@ function pendingActionFromRow(m, cid) {
 		summary: "",
 		preview: { card: m.pending_card },
 		run_id: null,
-		// The row has no dedicated created_at field; its own creation timestamp
-		// is stamped in the same request as the mint and is close enough for
-		// ordering (sortPendingCards falls back to expires_at when this is null).
-		created_at: _rowExpiresEpoch(m.creation),
+		// Server epoch on every pending row (a legacy one: its own creation); never a
+		// local-time parse (sortPendingCards falls back to expires_at when null).
+		created_at: m.created_at ?? null,
 		expires_at: _rowExpiresEpoch(m.expires_at),
 		seq: m.seq ?? null,
 		recent: m.recent !== false,
@@ -884,6 +887,7 @@ onMounted(async () => {
 	if (!store.loaded) store.loadConversations();
 	load(true);
 	loadPending();
+	_cardClockTick = setInterval(() => (cardClock.value = Date.now()), 60000);
 	try {
 		settings.value = await api.getChatUiSettings();
 	} catch {
@@ -897,6 +901,7 @@ onUnmounted(() => {
 	window.removeEventListener("focus", wakePending);
 	document.removeEventListener("visibilitychange", onVisible);
 	stopPendingPoll();
+	clearInterval(_cardClockTick);
 	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
 });
 </script>
@@ -1114,6 +1119,7 @@ onUnmounted(() => {
 					(p.summary || p.tool || `${agentName} needs your approval`)
 				"
 				:earlier="!isRecentCard(p)"
+				:proposed="proposedLabel(p.created_at, cardClock)"
 				@open="decision = p"
 			/>
 			<p v-if="showOlderCardsNote" class="jv-typehint">

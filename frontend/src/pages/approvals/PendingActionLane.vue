@@ -1,8 +1,9 @@
 <template>
-	<!-- Held File Box writes (PR-2b): new records an unattended File Box run wants
-	     to create, each paused on a human decision. Self-contained above the
-	     approval rail; hidden while there is nothing held. A row expands into its
-	     PendingActionDetail. -->
+	<!-- Pending actions: held File Box writes (PR-2b), new records an unattended
+	     File Box run wants to create, and the viewer's own chat cards (PR-3c), each
+	     paused on a human decision. Self-contained above the approval rail; hidden
+	     while nothing waits. A row expands into its PendingActionDetail, or
+	     PendingChatDetail for a chat card. -->
 	<section
 		v-if="rows.length || error"
 		class="border-b bg-surface-gray-1"
@@ -19,16 +20,16 @@
 				class="size-4 shrink-0 text-ink-gray-5"
 				aria-hidden="true"
 			/>
-			<span id="held-lane-title" class="text-sm font-medium text-ink-gray-8"
-				>New records waiting for approval</span
-			>
+			<span id="held-lane-title" class="text-sm font-medium text-ink-gray-8">{{
+				heading.title
+			}}</span>
 			<Badge
 				v-if="rows.length"
 				variant="subtle"
 				theme="orange"
 				:label="String(rows.length)"
 			/>
-			<span class="text-xs text-ink-gray-5">from File Box runs</span>
+			<span class="text-xs text-ink-gray-5">{{ heading.source }}</span>
 		</button>
 
 		<!-- Capped so the approval rail below and an open detail's buttons stay reachable. -->
@@ -52,15 +53,26 @@
 					@click="toggle(r.name)"
 				>
 					<FeatherIcon
-						name="user-plus"
+						:name="isChat(r) ? 'message-square' : 'user-plus'"
 						class="size-4 shrink-0 text-ink-gray-5"
 						aria-hidden="true"
 					/>
 					<div class="min-w-0 flex-1">
 						<div class="truncate text-base text-ink-gray-9">
-							{{ r.summary || "New record" }}
+							{{ r.summary || (isChat(r) ? "Action waiting" : "New record") }}
 						</div>
-						<div class="mt-0.5 flex items-center gap-2 text-sm text-ink-gray-5">
+						<div
+							v-if="isChat(r)"
+							class="mt-0.5 flex min-w-0 items-center gap-2 text-sm text-ink-gray-5"
+						>
+							<span class="truncate">{{ r.conversation_title || "Chat" }}</span>
+							<Tooltip :text="exactDate(r.created_at)">
+								<span class="whitespace-nowrap"
+									>· Proposed {{ timeAgo(r.created_at) }}</span
+								>
+							</Tooltip>
+						</div>
+						<div v-else class="mt-0.5 flex items-center gap-2 text-sm text-ink-gray-5">
 							<span>{{ filesWaiting(r.waiters_count) }}</span>
 							<span v-if="r.for_user">· dropped by {{ r.for_user }}</span>
 							<Tooltip :text="exactDate(r.created_at)">
@@ -72,11 +84,17 @@
 						v-if="r.status === 'Executing'"
 						variant="subtle"
 						theme="blue"
-						label="Creating…"
+						:label="isChat(r) ? 'Running…' : 'Creating…'"
 					/>
 				</button>
+				<PendingChatDetail
+					v-if="openName === r.name && isChat(r)"
+					:id="'held-detail-' + r.name"
+					:name="r.name"
+					@decided="onDecided(r.name)"
+				/>
 				<PendingActionDetail
-					v-if="openName === r.name"
+					v-else-if="openName === r.name"
 					:id="'held-detail-' + r.name"
 					:name="r.name"
 					@decided="onDecided(r.name)"
@@ -87,21 +105,29 @@
 </template>
 
 <script setup>
-// The Approval Board's held-writes lane (unified pending action, PR-2b). Rows come
-// from list_pending_actions_lane (owner, or every user's for a System Manager);
-// the AR rail below is untouched. Refetches (debounced) on the realtime frames
-// that mean "something new is waiting" and when the tab becomes visible.
-import { ref, inject, watch, onMounted, onBeforeUnmount } from "vue";
+// The Approval Board's pending-actions lane (unified pending action, PR-2b/PR-3c).
+// Rows come from list_pending_actions_lane: held writes (owner, or every user's for
+// a System Manager) and the viewer's own chat cards (never another user's, D1); the
+// AR rail below is untouched. Refetches (debounced) on the realtime frames that
+// mean "something new is waiting" and when the tab becomes visible.
+import { ref, computed, inject, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute } from "vue-router";
 import { Badge, Button, FeatherIcon, Tooltip } from "frappe-ui";
 import PendingActionDetail from "@/pages/approvals/PendingActionDetail.vue";
+import PendingChatDetail from "@/pages/approvals/PendingChatDetail.vue";
 import { listPendingActionsLane } from "@/api/approvals";
 import { useShellStore } from "@/stores/shell";
 import { errMessage } from "@/lib/errors";
 import { filesWaiting } from "@/lib/heldActions";
+import { laneHeading } from "@/lib/chatCardActions";
 import { timeAgo, exactDate } from "@/utils/datetime";
 
-const REFRESH_KINDS = new Set(["action:pending", "approval:new"]);
+const REFRESH_KINDS = new Set([
+	"action:pending",
+	"approval:new",
+	"action:confirmed",
+	"action:settled",
+]);
 const REFRESH_DEBOUNCE_MS = 1000;
 
 const route = useRoute();
@@ -110,6 +136,8 @@ const socket = inject("$socket", null);
 
 const rows = ref([]);
 const error = ref("");
+const heading = computed(() => laneHeading(rows.value));
+const isChat = (r) => r.kind === "chat";
 const collapsed = ref(false);
 const openName = ref("");
 // ?held=<name> (the File Box "Needs approval" link) opens that row once it loads.
@@ -132,7 +160,7 @@ async function load() {
 			openName.value = "";
 	} catch (e) {
 		if (id !== req) return;
-		error.value = errMessage(e, "Held records could not be loaded.");
+		error.value = errMessage(e, "Waiting approvals could not be loaded.");
 	}
 }
 

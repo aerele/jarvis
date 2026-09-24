@@ -782,7 +782,9 @@ export const fileboxDrop = (file_url, file_name, skill, file) =>
 // ── Approvals: pending-decision queue + decide-and-resume ──
 export const listApprovals = (status = "Pending") =>
 	call("jarvis.chat.approvals_api.list_approvals", { status });
-export const approvalsPendingCount = () => call("jarvis.chat.approvals_api.pending_count", {});
+// The badge `{count, next_in}`: next_in = seconds until the caller's next chat card
+// joins it (a chat card badges after 10 min), or null.
+export const approvalsBadge = () => call("jarvis.chat.approvals_api.pending_badge", {});
 export const decideApproval = (name, decision, approve = 1) =>
 	call("jarvis.chat.approvals_api.decide", { name, decision, approve });
 // Ignore a request off the board (no verdict, no chat resume); reversible.

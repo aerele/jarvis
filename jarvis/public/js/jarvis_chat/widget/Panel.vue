@@ -803,6 +803,7 @@ import {
 	dropDiscarded,
 	isRecentCard,
 	keepEarlier,
+	keptCardMessage,
 	markCardsEarlier,
 	sortPendingCards,
 	typedApprovalHint as hintFor,
@@ -1839,7 +1840,11 @@ async function resolvePending(token) {
 	if (resolving.value) return;
 	resolving.value = token;
 	try {
-		await confirmTool(token, convId.value);
+		const kept = keptCardMessage(await confirmTool(token, convId.value));
+		if (kept) {
+			loadError.value = kept;
+			return;
+		}
 		stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
 	} catch (e) {
 		loadError.value = "Could not confirm that action.";

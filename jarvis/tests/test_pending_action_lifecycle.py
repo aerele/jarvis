@@ -14,7 +14,7 @@ from cryptography.fernet import Fernet
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import pending_actions as pa
-from jarvis.chat.pending_actions import _reconcile, _settle
+from jarvis.chat.pending_actions import _reconcile, _settle, _store
 from jarvis.tests._pending_action_helpers import (
 	AGENT_WRITE,
 	CONV,
@@ -183,6 +183,24 @@ class TestSettle(_Base):
 		self.assertEqual(out, {"ok": True, "delivered": True})
 		self.assertEqual(self.receipts(conv, name), ["confirmed"])
 		self.assertEqual(len(self.logged("operator_settle", name)), 1)
+
+	def test_every_settle_tells_the_owner_and_the_approver_the_lane_changed(self):
+		"""E2: Discarded / Cancelled / held decisions too, not only an executed card."""
+		frames = []
+		conv = self.make_conv()
+		chat = self.park(conv)
+		held = self.park(self.make_conv(), kind="file_box_held")
+		_store._transition(chat, ["Pending"], "Discarded", reason_code="discarded")
+		_store._terminal_update(held, ["Pending"], "Cancelled", reason_code="cancelled", decided_by=SM_USER)
+		frappe.db.commit()
+		with patch(
+			"jarvis.chat.events.publish_to_user",
+			side_effect=lambda u, p: frames.append((u, p["kind"], p["name"])),
+		):
+			pa.settle(chat)
+			pa.settle(held)
+		settled = [(u, n) for u, k, n in frames if k == "action:settled"]
+		self.assertEqual(sorted(settled), sorted([(OWNER, chat), (OWNER, held), (SM_USER, held)]))
 
 	def test_batch_settles_with_one_continuation(self):
 		conv = self.make_conv()
