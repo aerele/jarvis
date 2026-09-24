@@ -24,6 +24,7 @@
     "tool_result",
     "tool_status",
     "tool_call_id",
+    "tool_call_ids",
     "action_outcome",
     "pending_card",
     "expires_at",
@@ -38,6 +39,14 @@
     "hidden"
   ],
   "fields": [
+    {
+      "fieldname": "tool_call_ids",
+      "fieldtype": "Long Text",
+      "label": "Tool calls owned by this assistant turn",
+      "read_only": 1,
+      "hidden": 1,
+      "description": "JSON IDs recorded from trusted run events; never inferred from message order."
+    },
     {
       "fieldname": "conversation",
       "fieldtype": "Link",
