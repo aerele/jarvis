@@ -69,6 +69,11 @@ class TestReportScope(TestCase):
 				with self.subTest(filters=filters), self.assertRaises(InvalidArgumentError):
 					run_report("Accounts Payable", filters)
 
+	def test_invalid_report_date_raises_invalid_argument(self):
+		for report_date in ("not a date", "2026-13-45", "0000-00-00", 20260924):
+			with self.subTest(report_date=report_date), self.assertRaises(InvalidArgumentError):
+				resolve_scope(REPORT, {"report_date": report_date})
+
 	def test_explicit_company_date_and_account_currency(self):
 		filters, scope = resolve_scope(
 			REPORT, {"company": "Other Company", "report_date": "2026-01-31", "party_account": "Creditors"}
