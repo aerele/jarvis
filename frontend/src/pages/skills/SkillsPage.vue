@@ -73,6 +73,7 @@ import WikiTab from "./WikiTab.vue";
 import KnowledgeGraph from "@/pages/wiki/KnowledgeGraph.vue";
 import { renderer3dEnabled } from "wiki-graph-core";
 import { getReviewAccess } from "@/api/learning";
+import { useShellStore } from "@/stores/shell";
 import { getSkillsAreaCaps } from "@/api/personalise";
 
 const route = useRoute();
@@ -191,6 +192,9 @@ async function refreshBadge() {
 			(a.pending_patterns || 0) +
 			(a.pending_promotions || 0) +
 			(a.pending_skill_promotions || 0);
+		// same total as the sidebar Skills badge: a decision here clears it now,
+		// not on the next 60s poll
+		useShellStore().reviewCount = learningPending.value;
 	} catch (e) {
 		// best-effort badge; a transient failure must not disturb the page
 	}
