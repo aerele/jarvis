@@ -245,7 +245,7 @@
 // File Box list - DESIGN-V3 §5.7 + §15.1: search quick filter (envelope
 // `search`), persistent drop card (click → picker, page-wide drag highlights
 // it, drop anywhere uploads) with per-file error chips, status quick filter
-// with ?status= deep link, date-range filter, processing poll (5s) +
+// with ?status= deep link, date-range filter, processing/applying poll (5s) +
 // visibilitychange refresh, per-row file preview (FilePreview dialog), bulk
 // delete with skip reasons, Clear Processed.
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
@@ -274,6 +274,7 @@ import {
 	STATUS_OPTIONS,
 	statusBadge,
 	resultLink,
+	isLive,
 	canRerun,
 	bulkRerunToast,
 } from "@/lib/fileboxStatus";
@@ -556,16 +557,16 @@ function clearProcessed() {
 	});
 }
 
-// ── freshness: poll while any visible row is processing + refetch on visible ──
+// ── freshness: poll while a row is processing/applying + refetch on visible ──
 let pollTimer = null;
 function onVisibility() {
 	if (document.visibilityState === "visible") refreshKeep();
 }
 onMounted(() => {
 	loadSkills();
-	// cheap tick: only refetches when a processing row is on screen
+	// cheap tick: only refetches when such a row is on screen
 	pollTimer = setInterval(() => {
-		if (rows.value.some((r) => r.status === "processing")) refreshKeep();
+		if (rows.value.some(isLive)) refreshKeep();
 	}, 5000);
 	document.addEventListener("visibilitychange", onVisibility);
 });

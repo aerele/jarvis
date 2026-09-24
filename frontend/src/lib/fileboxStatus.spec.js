@@ -5,6 +5,7 @@ import {
 	STATUS_OPTIONS,
 	statusBadge,
 	resultLink,
+	isLive,
 	canRerun,
 	bulkRerunToast,
 } from "./fileboxStatus";
@@ -14,6 +15,7 @@ describe("fileboxStatus", () => {
 		expect(STATUSES.map((s) => STATUS_BADGE[s].label)).toEqual([
 			"Processing",
 			"Needs approval",
+			"Applying",
 			"Draft created",
 			"No draft",
 			"Failed",
@@ -22,7 +24,15 @@ describe("fileboxStatus", () => {
 		expect(STATUS_BADGE.draft_created.theme).toBe("green");
 	});
 
-	it("offers All + the five statuses as filter options", () => {
+	it("reads a sheet being applied as Applying, live like processing", () => {
+		expect(statusBadge({ status: "applying" })).toEqual({ label: "Applying", theme: "blue" });
+		expect(isLive({ status: "applying" })).toBe(true);
+		expect(isLive({ status: "processing" })).toBe(true);
+		expect(isLive({ status: "needs_approval" })).toBe(false);
+		expect(isLive(null)).toBe(false);
+	});
+
+	it("offers All + every status as filter options", () => {
 		expect(STATUS_OPTIONS.map((o) => o.value)).toEqual(["", ...STATUSES]);
 	});
 

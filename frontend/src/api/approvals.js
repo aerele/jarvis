@@ -27,3 +27,16 @@ export const decideHeldAction = (name, action, useExisting) =>
 // ([{doc_index, fieldname, parentfield?, idx?, label, message}]) on a refusal.
 export const editAndCreateHeld = (name, values) =>
 	call("jarvis.chat.approvals_api.edit_and_create_held", { name, values });
+// A File Box approval sheet (kind file_box_sheet; its detail comes from
+// getPendingAction): the lazy Use existing candidates, the one apply and the
+// "Skip this file". Apply and discard answer {ok, reason_code, ...}; a refusal
+// may carry `errors` ({index | question | "sheet": message}) and `answer_errors`.
+export const getSheetCandidates = (name, indexes) =>
+	call("jarvis.chat.approvals_api.get_sheet_candidates", { name, indexes });
+// The slim poll while a sheet lists or applies: status/collecting/progress/sha
+// only (held_sheet_board.status) - no records, no unseal.
+export const getSheetStatus = (name) =>
+	call("jarvis.chat.approvals_api.get_pending_action", { name, slim: 1 });
+export const applySheet = (name, decisions) =>
+	call("jarvis.chat.approvals_api.apply_sheet", { name, decisions });
+export const discardSheet = (name) => call("jarvis.chat.approvals_api.discard_sheet", { name });

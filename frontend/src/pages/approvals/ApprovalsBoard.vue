@@ -109,7 +109,7 @@
 						<span
 							id="actions-title"
 							class="text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
-							>Needs your decision ({{ visibleActions.length }})</span
+							>Needs your decision ({{ decisionCount }})</span
 						>
 					</button>
 					<div v-if="actionsOpen" id="actions-body">
@@ -127,16 +127,20 @@
 							/>
 						</div>
 						<div class="flex flex-col divide-y">
-							<button
+							<!-- a sheet still listing shows, but opens nothing yet -->
+							<component
+								:is="a.collecting ? 'div' : 'button'"
 								v-for="a in visibleActions"
 								:key="a.key"
 								class="flex w-full items-start gap-3 px-4 py-3 text-left"
 								:class="
 									a.key === selectedKey
 										? 'bg-surface-selected shadow-sm'
+										: a.collecting
+										? ''
 										: 'hover:bg-surface-gray-2'
 								"
-								@click="onActionClick(a)"
+								@click="a.collecting || onActionClick(a)"
 							>
 								<div class="min-w-0 flex-1">
 									<div class="truncate text-base text-ink-gray-9">
@@ -152,7 +156,7 @@
 											:label="KIND_LABEL[a.kind]"
 										/>
 										<Badge
-											v-if="a.kind !== 'wiki'"
+											v-if="a.kind === 'held' || a.kind === 'chat'"
 											variant="subtle"
 											theme="gray"
 											:label="actionRowType(a)"
@@ -171,7 +175,10 @@
 									:theme="a.badge.theme"
 									:label="a.badge.label"
 								/>
-							</button>
+								<span v-if="a.collecting" class="sr-only"
+									>Opens for review once the run pauses.</span
+								>
+							</component>
 						</div>
 						<div
 							v-if="wikiTotal > wikiShown"
@@ -314,12 +321,22 @@
 							:name="selectedName"
 							:on-decided="settleSelected"
 						/>
+						<SheetDetail
+							v-else-if="selectedKind === 'sheet'"
+							:key="selectedKey"
+							ref="actionDetail"
+							:name="selectedName"
+							:on-decided="settleSelected"
+							:on-changed="loadActions"
+							:show-file-name="!selectedAction"
+						/>
 						<PendingActionDetail
 							v-else
 							:key="selectedKey"
 							ref="actionDetail"
 							:name="selectedName"
 							:on-decided="settleSelected"
+							:on-kind="correctSelected"
 						/>
 					</div>
 				</div>
@@ -649,9 +666,9 @@
 // (envelope.awaiting_reply — prose questions with no row behind them),
 // chat-sourced option-less rows hand off to the conversation ("Answer in
 // chat") instead of Approve/Reject, and the status filter gains "Answered".
-// One inbox: held File Box writes, chat cards and wiki notes are rail rows in a
-// "Needs your decision" group above the questions (Pending view), each opening
-// its own detail in the right pane; ?held= / ?wiki= deep-link them.
+// One inbox: held File Box writes, approval sheets, chat cards and wiki notes are
+// rail rows in a "Needs your decision" group above the questions (Pending view),
+// each opening its own detail in the right pane; ?held= / ?wiki= deep-link them.
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -668,6 +685,7 @@ import {
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import PendingActionDetail from "@/pages/approvals/PendingActionDetail.vue";
 import PendingChatDetail from "@/pages/approvals/PendingChatDetail.vue";
+import SheetDetail from "@/pages/approvals/SheetDetail.vue";
 import WikiProposalDetail from "@/pages/approvals/WikiProposalDetail.vue";
 import DocSection from "@/components/doc/DocSection.vue";
 import DocMetaPanel from "@/components/doc/DocMetaPanel.vue";
@@ -675,7 +693,12 @@ import CommentsSection from "@/components/doc/CommentsSection.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import { useListPage } from "@/composables/useListPage";
-import { useActionRows, filterActionRows, actionRowType } from "@/composables/useActionRows";
+import {
+	useActionRows,
+	filterActionRows,
+	actionRowType,
+	actionRowTypes,
+} from "@/composables/useActionRows";
 import { useShellStore } from "@/stores/shell";
 import { session } from "@/data/session";
 import { timeAgo, exactDate } from "@/utils/datetime";
@@ -683,6 +706,7 @@ import { getApproval } from "@/api/approvals";
 import * as api from "@/api";
 import { renderMarkdown } from "@/markdown";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { APPROVE_RE, REJECT_RE } from "@/lib/approvalVerbs";
 
 const route = useRoute();
 const router = useRouter();
@@ -760,8 +784,13 @@ const {
 	load: loadActions,
 	remove: removeAction,
 } = useActionRows();
-const KIND_LABEL = { held: "New record", chat: "Chat action", wiki: "Wiki note" };
-const KIND_THEME = { held: "gray", chat: "blue", wiki: "gray" };
+const KIND_LABEL = {
+	held: "New record",
+	sheet: "Approval sheet",
+	chat: "Chat action",
+	wiki: "Wiki note",
+};
+const KIND_THEME = { held: "gray", sheet: "gray", chat: "blue", wiki: "gray" };
 const actionsOpen = ref(true);
 const isPending = computed(() => (filters.status || "Pending") === "Pending");
 // Pending view only; search narrows the rows (and their type counts), then the type
@@ -774,6 +803,8 @@ const visibleActions = computed(() =>
 const showActions = computed(
 	() => isPending.value && (visibleActions.value.length > 0 || !!actionsError.value)
 );
+// counted like the badge: a sheet still listing waits on no one yet
+const decisionCount = computed(() => visibleActions.value.filter((a) => !a.collecting).length);
 
 // composable debounces search → resetLoad; the input just writes the ref
 function onSearch(v) {
@@ -782,15 +813,14 @@ function onSearch(v) {
 
 // document_type quick filter options from the page-1 facets ("Type (N)"; the
 // server pre-labels blank types as "Unclassified"), plus the held/chat rows'
-// doctypes (wiki notes carry none)
+// doctypes and each sheet's (wiki notes carry none)
 const typeOptions = computed(() => {
 	const counts = new Map();
 	const facetRows = (facets.value && facets.value.document_type) || [];
 	for (const f of facetRows) counts.set(f.value, f.count);
 	for (const r of searchedActions.value) {
 		if (r.kind === "wiki") continue;
-		const t = actionRowType(r);
-		counts.set(t, (counts.get(t) || 0) + 1);
+		for (const t of actionRowTypes(r)) counts.set(t, (counts.get(t) || 0) + 1);
 	}
 	const opts = [{ label: "All types", value: "" }];
 	for (const [value, count] of counts) opts.push({ label: `${value} (${count})`, value });
@@ -874,8 +904,9 @@ const railRows = computed(() => {
 // the seed sits outside the server's filtered total - count it explicitly
 const railTotal = computed(() => total.value + (railRows.value.length - rows.value.length));
 
-// A decision row's selection: "held:<pa>" | "chat:<pa>" | "wiki:<ar>". selectedId
-// stays AR-only, so a PA name never reaches get_approval, docmeta or comments.
+// A decision row's selection: "held:<pa>" | "sheet:<pa>" | "chat:<pa>" | "wiki:<ar>".
+// selectedId stays AR-only, so a PA name never reaches get_approval, docmeta or
+// comments.
 const selectedKey = ref("");
 const actionDetail = ref(null);
 const selectedKind = computed(() => selectedKey.value.slice(0, selectedKey.value.indexOf(":")));
@@ -917,9 +948,10 @@ function actionLink() {
 	if (typeof wiki === "string" && wiki) return { wiki: true, name: wiki };
 	return null;
 }
-// held and chat share ?held=: the rows say which. A name beyond them (an SM's
-// backlog, a settled row) still opens as held; its detail says what became of
-// it, and a later refresh that lists it as a chat card reopens it as one.
+// held, sheet and chat share ?held=: the rows say which. A name beyond them (an
+// SM's backlog, a settled row) still opens as held; its detail says what became
+// of it (a sheet's reopens as one), and a later refresh that lists it as a chat
+// card or a sheet reopens it as one.
 let guessedHeld = "";
 function syncActionFromRoute() {
 	const link = actionLink();
@@ -1040,8 +1072,8 @@ const showOptionChips = computed(() => {
 	if (opts.length === 1) return false;
 	if (opts.length === 2) {
 		const low = opts.map((o) => o.trim().toLowerCase());
-		const approveish = low.filter((o) => /^approve(d)?\b/.test(o)).length;
-		const rejectish = low.filter((o) => /^reject(ed)?\b/.test(o)).length;
+		const approveish = low.filter((o) => APPROVE_RE.test(o)).length;
+		const rejectish = low.filter((o) => REJECT_RE.test(o)).length;
 		if (approveish === 1 && rejectish === 1) return false;
 	}
 	return true;
@@ -1231,10 +1263,9 @@ function advanceAfterDecide(id) {
 // The rail top to bottom as the viewer sees it: the open decision group, then
 // the questions. Any decided row advances through this one order.
 const railOrder = computed(() => [
-	...(showActions.value && actionsOpen.value ? visibleActions.value : []).map((a) => ({
-		key: a.key,
-		action: a,
-	})),
+	...(showActions.value && actionsOpen.value ? visibleActions.value : [])
+		.filter((a) => !a.collecting)
+		.map((a) => ({ key: a.key, action: a })),
 	...railRows.value.map((r) => ({ key: "ar:" + r.name, row: r })),
 ]);
 // A decision can answer after the board is gone (the user navigated away): it
@@ -1272,6 +1303,16 @@ const settleSelected = computed(() => {
 	const key = selectedKey.value;
 	return () => onActionDecided(key);
 });
+// A ?held= name the rows don't list opens as held; its detail says when it is a
+// sheet (one already applied, say), and it reopens as one.
+const correctSelected = computed(() => {
+	const key = selectedKey.value;
+	return (kind) => {
+		if (!alive || selectedKey.value !== key || selectedKind.value !== "held") return;
+		guessedHeld = "";
+		selectAction(kind + ":" + selectedName.value);
+	};
+});
 
 // Refresh re-reads the decision rows too: wiki notes have no realtime event, and
 // a System Manager gets none for other users' held rows.
@@ -1300,20 +1341,27 @@ watch(rows, (r) => {
 	if (!route.params.id && !selectedId.value && !selectedKey.value && !actionLink() && r.length)
 		select(r[0].name);
 });
-// A refresh never yanks the pane: a selected held/chat row that left the rail
+// A refresh never yanks the pane: a selected held/chat/sheet row that left the rail
 // keeps its detail, which re-reads how it settled (a wiki note sees its row go
 // through its `proposal` prop). A ?held= name first opened as held is corrected
-// once the rows list it as a chat card.
+// once the rows list it as a chat card or a sheet.
 watch(actionRows, (now, before) => {
 	const key = selectedKey.value;
 	if (guessedHeld && key === "held:" + guessedHeld) {
 		const row = now.find((r) => r.kind !== "wiki" && r.name === guessedHeld);
 		if (row) guessedHeld = "";
-		if (row && row.kind === "chat") return selectAction(row.key);
+		if (row && row.kind !== "held") return selectAction(row.key);
 	}
-	if (!key || selectedKind.value === "wiki" || now.some((r) => r.key === key)) return;
-	if ((before || []).some((r) => r.key === key) && actionDetail.value)
-		actionDetail.value.refresh();
+	if (!key || selectedKind.value === "wiki") return;
+	const row = now.find((r) => r.key === key);
+	const was = (before || []).find((r) => r.key === key);
+	// a sheet that sealed or started applying re-reads itself
+	const moved =
+		row &&
+		was &&
+		row.kind === "sheet" &&
+		(row.status !== was.status || row.collecting !== was.collecting);
+	if ((moved || (!row && was)) && actionDetail.value) actionDetail.value.refresh();
 });
 
 // ── freshness: refetch on tab-visible (no realtime approval event today) ─────

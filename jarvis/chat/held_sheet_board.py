@@ -138,6 +138,7 @@ def detail(row, me: str) -> dict:
 		"status": row.status,
 		"summary": row.summary or "",
 		"file_name": (source and source.file_name) or "",
+		"conversation": row.conversation or "",
 		"created_at": str(row.creation),
 		"age": approvals_api._age_s(row.creation),
 		"for_user": approvals_api._for_user(row.owner_user, me),
