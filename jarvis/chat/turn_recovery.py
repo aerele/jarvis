@@ -160,7 +160,11 @@ def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 	and chat.turn_recovery). A macro chain that ends its turn via park-and-
 	recover (any post-ack interruption under the relay model) must still
 	step/terminate the macro, or the chain stalls forever. Best-effort: a
-	macro bug must never affect the recovery outcome."""
+	macro bug must never affect the recovery outcome. It also seals the File Box
+	sheet of the recovered turn (its Turn row is settled just before)."""
+	from jarvis.chat import held_sheet_seal
+
+	held_sheet_seal.after_turn(conversation_id, legacy=True)
 	try:
 		from jarvis.chat import macros
 

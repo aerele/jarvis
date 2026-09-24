@@ -33,6 +33,7 @@ REASON_TEXT = {
 	"unverifiable": "This action can no longer be verified on this site.",
 	"tampered": "This action failed an integrity check.",
 	"interrupted": "The action was interrupted; its outcome is unknown.",
+	"stuck": "The approval sheet got stuck while it was still being listed; nothing was changed.",
 	"partial": "The action failed after part of it was saved.",
 	"owner_disabled": "The user who owns this action is disabled or missing.",
 	"cancelled": "The action was cancelled.",
@@ -60,8 +61,8 @@ _TERMINAL_COLS = frozenset(
 
 
 # What a sheet append may rewrite besides its envelope (keys are interpolated).
-_SHEET_COLS = frozenset({"record_count", "needs_input", "needs_fix", "dedup_keys"})
-_SHEET_JSON = frozenset({"needs_input", "needs_fix"})
+_SHEET_COLS = frozenset({"record_count", "sheet_counts", "needs_input", "needs_fix", "dedup_keys"})
+_SHEET_JSON = frozenset({"sheet_counts", "needs_input", "needs_fix"})
 
 
 def rowcount() -> int:
@@ -124,6 +125,17 @@ def reseal_sheet(row, *, args: dict, card, **cols) -> bool:
 	return rowcount() == 1
 
 
+def seal_sheet(name: str) -> bool:
+	"""Collecting -> sealed (``collecting`` 1 -> 0) while Pending: the only writer of
+	that flip (a CAS). True iff this call sealed it."""
+	frappe.db.sql(
+		"UPDATE `tabJarvis Pending Action` SET collecting=0, modified=%(now)s"
+		" WHERE name=%(n)s AND kind=%(k)s AND status='Pending' AND collecting=1",
+		{"n": name, "k": SHEET, "now": frappe.utils.now_datetime()},
+	)
+	return rowcount() == 1
+
+
 def get_row(name: str, *, lock: str | None = None) -> frappe._dict | None:
 	"""One row as a dict. ``lock``: ``None``, ``"update"``, ``"nowait"`` or ``"skip"``."""
 	suffix = {
@@ -150,7 +162,8 @@ def _terminal_update(
 	name: str, from_statuses, to: str, *, reason_code: str | None = None, reason: str | None = None, **cols
 ) -> bool:
 	"""Move ``name`` from one of ``from_statuses`` to the terminal ``to``, NULLing
-	``open_key`` in the same statement. True iff this call made the transition."""
+	``open_key`` (and ending a sheet's collecting) in the same statement. True iff
+	this call made the transition."""
 	if to not in TERMINAL:
 		raise ValueError(f"not a terminal status: {to}")
 	bad = set(cols) - _TERMINAL_COLS
@@ -168,7 +181,7 @@ def _terminal_update(
 	}
 	extra = "".join(f", `{k}`=%(c_{k})s" for k in cols)
 	frappe.db.sql(
-		"UPDATE `tabJarvis Pending Action` SET status=%(to)s, open_key=NULL, reason_code=%(rc)s,"
+		"UPDATE `tabJarvis Pending Action` SET status=%(to)s, open_key=NULL, collecting=0, reason_code=%(rc)s,"
 		" reason=%(reason)s, decided_at=IFNULL(decided_at, %(now)s), modified=%(now)s" + extra + " "
 		"WHERE name=%(n)s AND status IN %(from)s",
 		params,

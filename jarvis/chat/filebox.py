@@ -33,7 +33,7 @@ CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
 APPROVAL = "Jarvis Approval Request"
 
-INBOUND_PROMPT = (
+_HEAD = (
 	"This file arrived through the File Box - process it as an inbound business "
 	"document, unattended, in this order.\n"
 	"1. Classify what the document is.\n"
@@ -47,12 +47,26 @@ INBOUND_PROMPT = (
 	"3. Before drafting, check the wiki for what we already know: read_wiki for the "
 	"party and the topic, and build on / reference existing content instead of "
 	"starting from scratch. If the wiki is unavailable, skip this step and carry on.\n"
+)
+_STEP4_HELD = (
 	"4. BEFORE drafting, resolve the party and every master the draft links to "
 	"(supplier or customer, items, addresses...) with read tools. If any are missing, "
 	"create ALL of them in ONE create_doc batch (docs=[...]). The bench holds that batch "
 	"for a human on the Approval Board - do NOT also file a Jarvis Approval Request for "
 	"it. When a write comes back held (status pending_confirmation), END the turn right "
 	"away: the run resumes by itself once it is decided.\n"
+)
+# ``file_box_sheets`` on: masters and questions collect on the document's sheet.
+_STEP4_SHEET = (
+	"4. BEFORE drafting, resolve the party and every master the draft links to "
+	"(supplier or customer, items, addresses...) with read tools. If any are missing, "
+	"keep going: propose EVERY missing master for this document (batches of up to 20) and "
+	"file every question as a Jarvis Approval Request in this same turn; do not draft yet; "
+	"END the turn once nothing else is missing. The bench collects them on this document's "
+	"approval sheet for a human (do NOT also file a Jarvis Approval Request for a master), "
+	"and the run resumes by itself once the sheet is applied.\n"
+)
+_TAIL = (
 	"5. Extract the document fully - every line item verbatim, never a lump-sum "
 	"balancing line - resolve ambiguities by the skill's convention ladder, and "
 	"create the draft on its own (never in a batch with masters).\n"
@@ -71,18 +85,25 @@ INBOUND_PROMPT = (
 	"to a Jarvis Approval Request row (empty document_type for classification "
 	"decisions). End the turn with a one-line summary."
 )
+INBOUND_PROMPT = _HEAD + _STEP4_HELD + _TAIL
+SHEET_INBOUND_PROMPT = _HEAD + _STEP4_SHEET + _TAIL
 
 
 def build_inbound_prompt(skill: str | None = None, skills=(), more: bool = False) -> str:
 	"""The File Box directed prompt. No pin and no skill list returns
-	``INBOUND_PROMPT`` VERBATIM. ``skills`` (the eligible File Box skills) are listed
-	above it as DATA; ``more`` says the list was capped. A tagged ``skill`` (a
-	canonical skill_name) prepends a directive that applies it ALONGSIDE the base
-	flow; if it can't be loaded, or disagrees with the skill the run follows, the
-	run stops for a human (K-D2/D3). The safety envelope below applies unchanged."""
+	``INBOUND_PROMPT`` VERBATIM (``SHEET_INBOUND_PROMPT``, whose step 4 collects on
+	the document's sheet, with ``file_box_sheets`` on). ``skills`` (the eligible File
+	Box skills) are listed above it as DATA; ``more`` says the list was capped. A
+	tagged ``skill`` (a canonical skill_name) prepends a directive that applies it
+	ALONGSIDE the base flow; if it can't be loaded, or disagrees with the skill the
+	run follows, the run stops for a human (K-D2/D3). The safety envelope below
+	applies unchanged."""
+	from jarvis.chat import held_sheets
+
 	block = filebox_skills.prompt_block(skills, more) if skills else ""
+	base = SHEET_INBOUND_PROMPT if held_sheets.enabled() else INBOUND_PROMPT
 	if not skill:
-		return block + INBOUND_PROMPT
+		return block + base
 	load = f"read skills/{skill}/SKILL.md" if skill == OCR_DATA_ENTRY else f"load it with get_skill '{skill}'"
 	directive = (
 		f"This file also carries a TAGGED skill: '{skill}'. Run the normal flow below "
@@ -94,7 +115,7 @@ def build_inbound_prompt(skill: str | None = None, skills=(), more: bool = False
 		"write is refused because the skills for this document disagree, end your turn: a human "
 		"is asked which one applies. The safety rules below still OVERRIDE both.\n\n"
 	)
-	return directive + block + INBOUND_PROMPT
+	return directive + block + base
 
 
 def _validated_pinned_skill(skill: str | None) -> dict | None:
@@ -288,7 +309,7 @@ def drop_file(
 # chat-features-page-migration-design §2.4 + orchestrator Q4. The derived status
 # is computed IN SQL so it can be filtered server-side without breaking pagination.
 # --------------------------------------------------------------------------- #
-_STATUSES = ("processing", "needs_approval", "draft_created", "failed", "no_draft")
+_STATUSES = ("processing", "needs_approval", "applying", "draft_created", "failed", "no_draft")
 # Pre-PR-1 filter values, accepted for one release (old clients / bookmarks).
 _STATUS_ALIASES = {"done": ("draft_created", "no_draft"), "error": ("failed",)}
 _CLEARABLE = ("draft_created", "no_draft")
@@ -319,44 +340,88 @@ def _conv_visible(alias: str) -> str:
 
 
 # What makes a row "Needs approval": a Pending decision the dropper owes - an
-# Approval Request, or an undecided held write (Pending Action) it waits on. Wiki
-# proposals are the reviewer's lane, never the dropper's (AC7). `src` routes the
-# result link (an approval, or the board's held lane).
-_PENDING_WAITS = f"""
-	SELECT ar.conversation, ar.name AS item, ar.title, ar.creation, 'ar' AS src, NULL AS needs_input
+# Approval Request, an undecided held write (Pending Action) it waits on, or its
+# sealed approval sheet (whose questions count through it, never on their own).
+# Wiki proposals are the reviewer's lane, never the dropper's (AC7). `src` routes
+# the result link (an approval, or the board's held lane).
+def _pending_waits_sql() -> str:
+	"""Built fresh per call (never a module constant): ``ar.sheet`` / ``sp.collecting``
+	/ ``sp.sheet_counts`` name columns the S1a migrate adds, so code served ahead of
+	it (``sheet_ready()`` False) drops the sheet-only clause/branch instead of
+	naming a missing column."""
+	from jarvis.jarvis.doctype.jarvis_approval_request.jarvis_approval_request import sheet_ready
+
+	ready = sheet_ready()
+	sheet_clause = "AND IFNULL(ar.sheet, '') = ''" if ready else ""
+	sheet_branch = (
+		f"""
+	UNION ALL
+	SELECT sp.conversation, sp.name AS item, sp.summary AS title, sp.creation, 'sheet' AS src,
+	       NULL AS needs_input, sp.sheet_counts AS counts, sp.question_count AS questions
+	FROM `tabJarvis Pending Action` sp
+	JOIN `tabJarvis Conversation` sc
+	  ON sc.name = sp.conversation AND sc.file_box = 1 AND {_conv_visible("sc")}
+	WHERE sp.kind = 'file_box_sheet' AND sp.status = 'Pending' AND sp.collecting = 0
+"""
+		if ready
+		else ""
+	)
+	return f"""
+	SELECT ar.conversation, ar.name AS item, ar.title, ar.creation, 'ar' AS src, NULL AS needs_input,
+	       NULL AS counts, 0 AS questions
 	FROM `tabJarvis Approval Request` ar
 	JOIN `tabJarvis Conversation` ac
 	  ON ac.name = ar.conversation AND ac.file_box = 1 AND {_conv_visible("ac")}
 	WHERE ar.status = 'Pending' AND COALESCE(ar.source, '') != 'File Box Wiki'
+	  {sheet_clause}
 	UNION ALL
-	SELECT w.conversation, pa.name AS item, pa.summary AS title, pa.creation, 'pa' AS src, pa.needs_input
+	SELECT w.conversation, pa.name AS item, pa.summary AS title, pa.creation, 'pa' AS src, pa.needs_input,
+	       NULL AS counts, 0 AS questions
 	FROM `tabJarvis Pending Action Waiter` w
 	JOIN `tabJarvis Pending Action` pa
 	  ON pa.name = w.parent AND pa.kind = 'file_box_held' AND pa.status IN ('Pending', 'Executing')
 	JOIN `tabJarvis Conversation` wc
 	  ON wc.name = w.conversation AND wc.file_box = 1 AND {_conv_visible("wc")}
 	WHERE w.parenttype = 'Jarvis Pending Action'
+	{sheet_branch}
 """
 
 
+# The File Box kinds a conversation waits on (a held write, or its approval sheet).
+_WAIT_KINDS = "('file_box_held', 'file_box_sheet')"
+
+
 def _held_open(alias: str) -> str:
-	"""SQL predicate: conversation ``alias`` waits on an undecided held write."""
+	"""SQL predicate: conversation ``alias`` waits on an undecided held write or sheet."""
 	return (
 		"EXISTS (SELECT 1 FROM `tabJarvis Pending Action Waiter` hw "
 		"JOIN `tabJarvis Pending Action` hp ON hp.name = hw.parent "
 		f"WHERE hw.conversation = {alias}.name AND hw.parenttype = 'Jarvis Pending Action' "
-		"AND hp.kind = 'file_box_held' AND hp.status IN ('Pending', 'Executing'))"
+		f"AND hp.kind IN {_WAIT_KINDS} AND hp.status IN ('Pending', 'Executing'))"
 	)
 
 
 def _decided_waiter(state: str) -> str:
-	"""SQL predicate: a decided held write's waiter on ``c`` matches ``state``."""
+	"""SQL predicate: a decided held write's (or ended sheet's) waiter on ``c`` matches ``state``."""
 	return (
 		"EXISTS (SELECT 1 FROM `tabJarvis Pending Action Waiter` rw "
 		"JOIN `tabJarvis Pending Action` rp ON rp.name = rw.parent "
 		"WHERE rw.conversation = c.name AND rw.parenttype = 'Jarvis Pending Action' "
-		f"AND rp.kind = 'file_box_held' AND rp.status NOT IN ('Pending', 'Executing') AND ({state}))"
+		f"AND rp.kind IN {_WAIT_KINDS} AND rp.status NOT IN ('Pending', 'Executing') AND ({state}))"
 	)
+
+
+def _sheet_in(status: str) -> str:
+	"""SQL predicate: ``c`` has an approval sheet matching ``status`` (server-built)."""
+	return (
+		"EXISTS (SELECT 1 FROM `tabJarvis Pending Action` xs WHERE xs.conversation = c.name "
+		f"AND xs.kind = 'file_box_sheet' AND {status})"
+	)
+
+
+# A sheet still listing reads processing; one being applied reads applying (S2).
+_SHEET_COLLECTING = _sheet_in("xs.status = 'Pending' AND xs.collecting = 1")
+_SHEET_APPLYING = _sheet_in("xs.status = 'Executing'")
 
 
 # After a decision, a resume still on its way reads processing: queued (`due`) until
@@ -417,19 +482,29 @@ _RERUN_CLAIMED = (
 	"(c.filebox_rerun_at >= %(fresh)s AND (lu.creation IS NULL OR lu.creation <= c.filebox_rerun_at))"
 )
 
+
 # The status ladder (AC7), first match wins:
-#   needs_approval > processing > failed (a held resume that couldn't continue)
-#   > draft_created > failed > no_draft.
-# `live` = a reply is streaming (and fresh), a Jarvis Chat Turn is non-terminal, a
-# held-write resume or a re-run is on its way, or (legacy dispatch path, no Turn row) the last
-# user row is unanswered but younger than the orphan threshold. `fail_code` is why a
-# finished run failed (NULL = ended cleanly); it is computed even for a drafted run
-# ("· ended with an error").
-# `{extra}` is the only str.format hole (server-built AND-clauses; never user text).
-_INBOUND_INNER = f"""
+#   needs_approval > applying (a sheet being applied) > processing > failed (a held
+#   resume that couldn't continue) > draft_created > failed > no_draft.
+# `live` = a reply is streaming (and fresh), a Jarvis Chat Turn is non-terminal, an
+# approval sheet is still listing, a held-write resume or a re-run is on its way, or
+# (legacy dispatch path, no Turn row) the last user row is unanswered but younger than
+# the orphan threshold. `fail_code` is why a finished run failed (NULL = ended
+# cleanly); it is computed even for a drafted run ("· ended with an error").
+# `extra` is a server-built AND-clause (never user text). A function (not a module
+# constant): it embeds `_pending_waits_sql()`, which must re-check `sheet_ready()`
+# on every call, not once at import, and names the sheet / skip columns only once
+# they are migrated (`filebox_migrated`).
+def _inbound_inner_sql(extra: str) -> str:
+	from jarvis.chat.pending_actions._store import filebox_migrated
+
+	ready = filebox_migrated()
+	collecting, skipped = (_SHEET_COLLECTING, _SKIPPED) if ready else ("FALSE", "FALSE")
+	return f"""
 	SELECT r.*,
 	       CASE
 	         WHEN r.pending_approvals > 0 THEN 'needs_approval'
+	         WHEN r.applying = 1          THEN 'applying'
 	         WHEN r.live = 1              THEN 'processing'
 	         WHEN r.fail_code = 'resume_failed' THEN 'failed'
 	         WHEN r.has_draft = 1         THEN 'draft_created'
@@ -446,6 +521,7 @@ _INBOUND_INNER = f"""
 	           WHEN (lm.streaming = 1 OR lm.recovering = 1) AND lm.modified >= %(fresh)s THEN 1
 	           WHEN EXISTS (SELECT 1 FROM `tabJarvis Chat Turn` lt
 	                        WHERE lt.conversation = c.name AND lt.state IN %(live_states)s) THEN 1
+	           WHEN {collecting} THEN 1
 	           WHEN {_RESUMING} THEN 1
 	           WHEN {_RERUN_CLAIMED} THEN 1
 	           WHEN lu.name IS NOT NULL AND lu.turn_state IS NULL AND {_UNANSWERED}
@@ -453,9 +529,10 @@ _INBOUND_INNER = f"""
 	                AND NOT {_ERR_NEWER} THEN 1
 	           ELSE 0
 	         END AS live,
-	         CASE WHEN {_SKIPPED} THEN 1 ELSE 0 END AS skipped,
+	         CASE WHEN {skipped} THEN 1 ELSE 0 END AS skipped,
+	         CASE WHEN {_SHEET_APPLYING} THEN 1 ELSE 0 END AS applying,
 	         CASE
-	           WHEN {_SKIPPED} THEN NULL
+	           WHEN {skipped} THEN NULL
 	           WHEN {_RESUME_FAILED} THEN 'resume_failed'
 	           WHEN {_ERR_NEWER} THEN 'send_failed'
 	           WHEN lu.name IS NULL THEN 'no_start'
@@ -467,7 +544,7 @@ _INBOUND_INNER = f"""
 	           WHEN lm.empty = 1 THEN 'empty'
 	         END AS fail_code
 	  FROM `tabJarvis Conversation` c
-	  LEFT JOIN (SELECT w.conversation, COUNT(*) n FROM ({_PENDING_WAITS}) w
+	  LEFT JOIN (SELECT w.conversation, COUNT(*) n FROM ({_pending_waits_sql()}) w
 	             GROUP BY w.conversation) pa ON pa.conversation = c.name
 	  LEFT JOIN {_LM} lm ON lm.conversation = c.name
 	  LEFT JOIN {_LU} lu ON lu.conversation = c.name
@@ -476,7 +553,7 @@ _INBOUND_INNER = f"""
 	             WHERE bT.turn_class = 'background' AND bT.state = 'queued'
 	             GROUP BY bT.conversation) bt ON bt.conversation = c.name
 	  WHERE {_conv_visible("c")} AND c.file_box = 1 AND c.status != 'Archived'
-	  {{extra}}
+	  {extra}
 	) r
 """
 
@@ -590,6 +667,17 @@ def _result(r: dict, wait, msg) -> tuple[str, str | None]:
 	from urllib.parse import quote
 
 	status = r["status"]
+	if status == "needs_approval" and wait and wait.src == "sheet":
+		from jarvis.chat import held_sheet_board
+
+		line = "Waiting for you: " + (
+			held_sheet_board.counts_line(wait.counts, wait.questions) or "an approval sheet"
+		)
+		if r.get("filebox_result_name"):
+			line = f"{_draft_line(r)} · {line}"
+		return line, f"/approvals?held={quote(wait.item, safe='')}"
+	if status == "applying":
+		return "Applying the approval sheet…", None  # S2: its progress and link
 	if status == "needs_approval":
 		n = int(r["pending_approvals"])
 		line = f"{n} approval{'' if n == 1 else 's'} waiting" + (f": {wait.title}" if wait else "")
@@ -644,7 +732,8 @@ def _attach_results(rows: list[dict], me: str) -> None:
 	need = [r["name"] for r in rows if r["status"] == "needs_approval"]
 	if need:
 		for w in frappe.db.sql(
-			f"""SELECT w.conversation, w.item, w.title, w.src, w.needs_input FROM ({_PENDING_WAITS}) w
+			f"""SELECT w.conversation, w.item, w.title, w.src, w.needs_input, w.counts, w.questions
+			FROM ({_pending_waits_sql()}) w
 			WHERE w.conversation IN %(names)s ORDER BY w.creation ASC""",
 			{"me": me, "names": need},
 			as_dict=True,
@@ -686,7 +775,7 @@ def list_inbound_page(
 	``status``, a one-line ``result`` and its ``result_link``. Tagged users can
 	view; delete/clear remain owner-only.
 
-	Filters: ``status`` (processing|needs_approval|draft_created|failed|no_draft;
+	Filters: ``status`` (processing|needs_approval|applying|draft_created|failed|no_draft;
 	legacy ``done`` / ``error`` still map), ``from_date`` / ``to_date``
 	(YYYY-MM-DD, inclusive; ``to_date`` implemented as ``creation < to_date + 1
 	day``). Search matches the title. Sort: ``creation`` (default desc) or ``title``."""
@@ -713,7 +802,7 @@ def list_inbound_page(
 		except Exception:
 			frappe.throw("Invalid to_date (expected YYYY-MM-DD)")
 		extra_parts.append("AND c.creation < %(to_plus)s")
-	inner = _INBOUND_INNER.format(extra=" ".join(extra_parts))
+	inner = _inbound_inner_sql(" ".join(extra_parts))
 
 	outer = ""
 	if "status" in f:
@@ -830,7 +919,7 @@ def _delete_one(conversation: str, live: int | None = None) -> None:
 		frappe.throw("Not a File Box conversation")
 	if live is None:
 		row = frappe.db.sql(
-			f"SELECT t.live FROM ({_INBOUND_INNER.format(extra='AND c.name = %(one)s')}) t",
+			f"SELECT t.live FROM ({_inbound_inner_sql('AND c.name = %(one)s')}) t",
 			{**_ladder_params(me), "one": conversation},
 		)
 		live = row[0][0] if row else 0
@@ -903,7 +992,7 @@ def clear_processed_inbound() -> dict:
 	me = frappe.session.user
 	extra = f"AND c.owner = %(me)s AND NOT {_wiki_open('c')}"
 	rows = frappe.db.sql(
-		f"SELECT t.name, t.live FROM ({_INBOUND_INNER.format(extra=extra)}) t WHERE t.status IN %(clearable)s",
+		f"SELECT t.name, t.live FROM ({_inbound_inner_sql(extra)}) t WHERE t.status IN %(clearable)s",
 		{**_ladder_params(me), "clearable": _CLEARABLE},
 		as_dict=True,
 	)
@@ -940,7 +1029,7 @@ def _rerun_row(conversation: str, me: str) -> dict | None:
 	"""One conversation's full ladder row (the ``_delete_one`` precedent), for the
 	re-run eligibility check and the preamble."""
 	rows = frappe.db.sql(
-		f"SELECT t.* FROM ({_INBOUND_INNER.format(extra='AND c.name = %(one)s')}) t",
+		f"SELECT t.* FROM ({_inbound_inner_sql('AND c.name = %(one)s')}) t",
 		{**_ladder_params(me), "one": conversation},
 		as_dict=True,
 	)

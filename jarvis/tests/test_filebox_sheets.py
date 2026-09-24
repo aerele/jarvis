@@ -900,6 +900,35 @@ class TestRuleA(_Base):
 		self.assertEqual(self.sheets(), [])
 		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_sheet_count"))
 
+	def test_an_archived_conversation_refuses_even_once_the_stop_signal_expires(self):
+		"""The run-cancel signal a Stop/archive sets expires in 120s; the conversation's
+		own Archived status never does - a later write must keep refusing."""
+		conv = self.conv()
+		frappe.db.set_value(CONV, conv, "status", "Archived", update_modified=False)
+		frappe.db.commit()
+		self.assert_refused(self.call("create_doc", _supplier(), conv), "FileBoxRefusedError")
+		self.assert_refused(self.call("create_doc", _question(), conv), "FileBoxRefusedError")
+		self.assertEqual(self.sheets(), [])
+
+	def test_an_archive_while_park_relocks_opens_nothing(self):
+		"""The ``_opened`` belt-and-braces check: park commits before it re-locks, so an
+		Archive landing in that exact window still opens no sheet."""
+		from jarvis.chat.pending_actions import _park
+
+		conv = self.conv()
+		real = _park.lock_conversation
+
+		def archive_then_lock(c):
+			frappe.db.set_value(CONV, c, "status", "Archived", update_modified=False)
+			frappe.db.commit()
+			return real(c)
+
+		with patch.object(_park, "lock_conversation", side_effect=archive_then_lock):
+			res = self.call("create_doc", _supplier(), conv)
+		self.assert_refused(res, "FileBoxRefusedError")
+		self.assertEqual(self.sheets(), [])
+		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_sheet_count"))
+
 	def test_a_draft_waits_while_the_sheet_holds_records(self):
 		dt = draft_doctype() or self.skipTest("no submittable doctype installed")
 		conv = self.conv()
@@ -1054,6 +1083,43 @@ class TestQuestions(_Base):
 		self.assertEqual(self.sheets(), [])
 		self.assertFalse(frappe.db.get_value(AR, name, "sheet"))
 		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_sheet_count"))
+
+	def test_a_stop_racing_the_link_closes_the_new_questions(self):
+		"""Filed just before a Stop: never left on the board to resume the stopped run."""
+		from jarvis.chat.pending_actions import _park
+
+		real = _park.lock_conversation
+
+		def stop_then_lock(c):
+			request_run_cancel(c)
+			return real(c)
+
+		def while_park_relocks(conv, name):
+			with patch.object(_park, "lock_conversation", side_effect=stop_then_lock):
+				return held_sheets.link_to_sheet(conv, [name])
+
+		def after_a_stop(conv, name):
+			request_run_cancel(conv)
+			return held_sheets.link_to_sheet(conv, [name])
+
+		def with_no_sheet_left(conv, name):
+			frappe.db.set_value(CONV, conv, "filebox_sheet_count", 2, update_modified=False)
+			frappe.db.commit()
+			self.assertIsNone(held_sheets.link_to_sheet(conv, [name]))
+			self.assertEqual(frappe.db.get_value(AR, name, "status"), "Pending", "not stopped: stays")
+			return after_a_stop(conv, name)
+
+		for race in (while_park_relocks, after_a_stop, with_no_sheet_left):
+			with self.subTest(race=race.__name__):
+				conv = self.conv()
+				self.addCleanup(clear_run_cancel, conv)
+				name = self.own(conv)
+				with as_user(OWNER):
+					self.assertIsNone(race(conv, name))
+				ar = frappe.db.get_value(AR, name, ["status", "sheet", "decision"], as_dict=True)
+				self.assertEqual((ar.status, ar.sheet or None), ("Dismissed", None))
+				self.assertEqual(ar.decision, held_sheets._STOPPED_NOTE)
+				self.assertFalse([s for s in self.sheets() if s.conversation == conv])
 
 	def test_a_parallel_open_while_linking_links_to_the_winner(self):
 		conv = self.conv()
@@ -1269,3 +1335,32 @@ class TestFreeze(_Base):
 		frappe.db.sql(f"UPDATE `tab{AR}` SET sheet=NULL WHERE conversation=%(c)s", {"c": conv})
 		frappe.db.commit()
 		self.assertEqual([r["conversation"] for r in approvals_api._awaiting_reply(OWNER)], [conv])
+
+
+class TestPreMigrateGuards(_Base):
+	"""S1 fixup #5: code served ahead of the S1a migrate never names ``ar.sheet`` /
+	``sp.collecting`` / ``sp.sheet_counts`` / ``pa.collecting`` / ``pa.record_count``."""
+
+	def test_the_board_query_drops_the_sheet_columns_before_the_migrate(self):
+		from jarvis.chat import filebox
+		from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as ar
+
+		with patch.object(ar, "sheet_ready", return_value=True):
+			ready_sql = filebox._pending_waits_sql()
+		with patch.object(ar, "sheet_ready", return_value=False):
+			unready_sql = filebox._pending_waits_sql()
+		for token in ("ar.sheet", "sp.collecting", "sp.sheet_counts"):
+			self.assertIn(token, ready_sql)
+			self.assertNotIn(token, unready_sql)
+
+	def test_the_lane_drops_the_sheet_query_before_the_migrate(self):
+		from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as ar
+
+		conv = self.conv()
+		self.call("create_doc", _supplier(), conv)
+		with as_user(OWNER):
+			[row] = approvals_api.list_pending_actions_lane()["rows"]
+			self.assertEqual(row["kind"], "file_box_sheet")
+			with patch.object(ar, "sheet_ready", return_value=False):
+				res = approvals_api.list_pending_actions_lane()
+		self.assertEqual(res["rows"], [])

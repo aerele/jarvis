@@ -271,7 +271,12 @@ def _record(conversation: str, row) -> str | None:
 	)
 	filed = _file_conflict(conversation, pin, new) if conflict else None
 	frappe.db.commit()
-	if filed and not _link(conversation, filed[1]):
+	# Off a sheet and still Pending (a stopped run dismisses it): on the board.
+	if (
+		filed
+		and not _link(conversation, filed[1])
+		and frappe.db.get_value(AR, filed[1], "status") == "Pending"
+	):
 		_notify(conv.owner, conversation, *filed)
 	if conflict:
 		return _CONFLICT_NOTE.format(new=_safe(new["creates"], 140), pin=_safe(pin["creates"], 140))

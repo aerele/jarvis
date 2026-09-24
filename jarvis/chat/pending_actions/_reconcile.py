@@ -17,6 +17,7 @@ from jarvis.chat.pending_actions._store import (
 	TERMINAL,
 	_terminal_update,
 	_transition,
+	filebox_migrated,
 	rowcount,
 	table_ready,
 )
@@ -40,6 +41,8 @@ HELD_RESUME: str | None = "jarvis.chat.held_writes.resume_waiters"
 # ``fn(conversations)``: stamp waiters that failed past the budget on their
 # conversations (after the flips commit: conversation before waiter everywhere).
 HELD_FAILED: str | None = "jarvis.chat.held_writes.mark_resume_failed"
+# File Box sheets: seal stranded ones, fail stuck ones, close orphaned questions.
+SHEET_BACKSTOP: str | None = "jarvis.chat.held_sheet_seal.backstop"
 
 
 def _log(title: str, message: str) -> None:
@@ -154,9 +157,12 @@ def _retry_waiters() -> dict:
 
 
 def _cancel_disabled_owners() -> int:
+	# A collecting sheet is left to its turn end (sealed, then cancelled next run).
 	names = frappe.db.sql_list(
 		"SELECT pa.name FROM `tabJarvis Pending Action` pa LEFT JOIN `tabUser` u ON u.name = pa.owner_user"
-		" WHERE pa.status='Pending' AND (u.name IS NULL OR u.enabled = 0) LIMIT %(lim)s",
+		" WHERE pa.status='Pending'"
+		+ (" AND pa.collecting=0" if filebox_migrated() else "")
+		+ " AND (u.name IS NULL OR u.enabled = 0) LIMIT %(lim)s",
 		{"lim": _SCAN},
 	)
 	moved = [n for n in names if _transition(n, [PENDING], CANCELLED, reason_code="owner_disabled") == "ok"]
@@ -197,12 +203,12 @@ def _warn_old_pending() -> int:
 	return count
 
 
-def _age_alert_deduped(now) -> bool:
+def _age_alert_deduped(now, title: str = _AGE_ALERT_TITLE) -> bool:
 	try:
 		return bool(
 			frappe.db.sql(
 				"SELECT name FROM `tabError Log` WHERE method=%(t)s AND creation >= %(s)s LIMIT 1",
-				{"t": _AGE_ALERT_TITLE, "s": add_to_date(now, hours=-_AGE_ALERT_DEDUPE_HOURS)},
+				{"t": title, "s": add_to_date(now, hours=-_AGE_ALERT_DEDUPE_HOURS)},
 			)
 		)
 	except Exception:
@@ -234,9 +240,14 @@ def _cards_health() -> dict:
 	return {"cards_open": open_n, "aged": aged}
 
 
+def _sheet_backstop() -> dict:
+	return frappe.get_attr(SHEET_BACKSTOP)() if SHEET_BACKSTOP else {}
+
+
 def reconcile() -> dict:
 	"""``*/5`` cron: interrupted, lost settles, waiter retries, disabled owners,
-	orphaned chat cards, and the health signals. Chat cards never expire."""
+	orphaned chat cards, the File Box sheet backstop, and the health signals. Chat
+	cards never expire."""
 	if not table_ready():
 		return {}
 	out = {}
@@ -246,6 +257,7 @@ def reconcile() -> dict:
 		_retry_waiters,
 		_cancel_disabled_owners,
 		_cancel_orphaned_chat,
+		_sheet_backstop,
 		_warn_old_pending,
 		_cards_health,
 	):

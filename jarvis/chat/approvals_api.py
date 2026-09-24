@@ -505,9 +505,10 @@ def get_approval(name: str) -> dict:
 @frappe.whitelist()
 @require_jarvis_user
 def pending_count() -> int:
-	"""The board badge: Pending approval requests + held File Box writes (these
-	badge immediately, decision 4) + the caller's OWN chat cards once they have
-	waited ``BOARD_BADGE_DELAY_S`` (D1: never another user's, even for an SM)."""
+	"""The board badge: Pending approval requests + held File Box writes and sealed
+	sheets (these badge immediately, decision 4; a sheet's questions count through
+	it) + the caller's OWN chat cards once they have waited ``BOARD_BADGE_DELAY_S``
+	(D1: never another user's, even for an SM)."""
 	me = frappe.session.user
 	return (
 		_ar_pending_count()
@@ -532,16 +533,18 @@ def _ar_pending_count() -> int:
 	# row matches both arms.
 	# Exclude wiki-write proposals (reviewer lane, not the customer badge).
 	# Raw SQL, NULL-safe: a `!=` filter would drop legacy rows (source NULL).
+	# A sheet's questions count through their sheet (the held count), never here.
+	unlinked = _unlinked()
 	if "System Manager" in frappe.get_roles():
 		return frappe.db.sql(
-			"""SELECT COUNT(*) FROM `tabJarvis Approval Request`
-			WHERE status = 'Pending' AND (source IS NULL OR source <> %(wiki_src)s)""",
+			f"""SELECT COUNT(*) FROM `tabJarvis Approval Request`
+			WHERE status = 'Pending' AND (source IS NULL OR source <> %(wiki_src)s){unlinked}""",
 			{"wiki_src": FILE_BOX_WIKI_SOURCE},
 		)[0][0]
 	return frappe.db.sql(
-		"""SELECT COUNT(*) FROM `tabJarvis Approval Request` a
+		f"""SELECT COUNT(*) FROM `tabJarvis Approval Request` a
 		WHERE a.status = 'Pending'
-		AND (a.source IS NULL OR a.source <> %(wiki_src)s)
+		AND (a.source IS NULL OR a.source <> %(wiki_src)s){unlinked}
 		AND (EXISTS (SELECT 1 FROM `tabJarvis Conversation` c
 		             WHERE c.name = a.conversation AND c.owner = %(me)s)
 		     OR EXISTS (SELECT 1 FROM `tabDocShare` ds
@@ -1095,6 +1098,7 @@ def reject_wiki_write(name: str) -> dict:
 # model-derived text: clients render them as text, never as HTML.
 # --------------------------------------------------------------------------- #
 HELD = "file_box_held"
+SHEET = "file_box_sheet"
 _HELD_LANE_LIMIT = 100
 _HELD_NOT_FOUND = "This approval is no longer available."
 _HELD_BUSY = "Someone is acting on this approval right now. Try again in a moment."
@@ -1147,14 +1151,16 @@ def _chat_badge_next_in(me: str) -> int | None:
 
 
 def _held_pending_count(me: str, is_sm: bool) -> int:
-	from jarvis.chat.pending_actions._store import table_ready
+	"""Undecided held writes and sealed sheets (one per document; not while listing)."""
+	from jarvis.chat.pending_actions._store import filebox_migrated, table_ready
 
 	if not table_ready():
 		return 0
 	return frappe.db.sql(
-		"SELECT COUNT(*) FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND status='Pending'"
-		" AND (%(sm)s OR owner_user=%(me)s)",
-		{"k": HELD, "sm": int(is_sm), "me": me},
+		"SELECT COUNT(*) FROM `tabJarvis Pending Action` WHERE kind IN %(k)s AND status='Pending'"
+		+ (" AND collecting=0" if filebox_migrated() else "")
+		+ " AND (%(sm)s OR owner_user=%(me)s)",
+		{"k": (HELD, SHEET), "sm": int(is_sm), "me": me},
 	)[0][0]
 
 
@@ -1187,9 +1193,11 @@ def _for_user(owner: str, me: str) -> str:
 @require_jarvis_user
 def list_pending_actions_lane() -> dict:
 	"""Pending actions awaiting a decision (or running), oldest first; ``{rows,
-	total}``. Held File Box writes: the caller's own, or every user's for a System
-	Manager. Chat cards: the caller's own only (D1), listed at once (decision 4).
-	Each row's ``document_type`` is its card's doctype; the card itself never ships."""
+	total}``. Held File Box writes and sheets: the caller's own, or every user's for
+	a System Manager. Chat cards: the caller's own only (D1), listed at once (decision
+	4). Each row's ``document_type`` is its card's doctype; the card itself never
+	ships. A sheet reads its plain columns (counts; ``collecting`` = still listing,
+	not actionable yet)."""
 	from jarvis.chat.pending_actions._store import table_ready
 
 	if not table_ready():
@@ -1221,9 +1229,33 @@ def list_pending_actions_lane() -> dict:
 			params,
 			as_dict=True,
 		)
+	# ``collecting``/``record_count``/``sheet_counts`` name the S1a migrate's columns:
+	# code served ahead of it (sheet_ready() False) skips this query rather than
+	# naming a missing column - no sheet row can exist yet anyway.
+	if _ar.sheet_ready():
+		rows += frappe.db.sql(
+			"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.owner_user, pa.creation, pa.collecting,
+			pa.record_count, pa.question_count, pa.sheet_counts, pa.conversation,
+			c.title AS conversation_title,
+			COALESCE(f.file_name, (SELECT a.file_name FROM `tabFile` a
+			 WHERE a.attached_to_doctype = 'Jarvis Conversation' AND a.attached_to_name = pa.conversation
+			 ORDER BY a.creation ASC LIMIT 1)) AS file_name
+			FROM `tabJarvis Pending Action` pa
+			LEFT JOIN `tabJarvis Conversation` c ON c.name = pa.conversation
+			LEFT JOIN `tabFile` f ON f.name = c.filebox_source_file
+			WHERE pa.status IN ('Pending', 'Executing') AND pa.kind = %(sheet)s
+			AND (%(sm)s OR pa.owner_user = %(me)s)
+			ORDER BY pa.creation ASC, pa.name ASC
+			LIMIT %(lim)s""",
+			{**params, "sheet": SHEET},
+			as_dict=True,
+		)
 	rows.sort(key=lambda r: (r.creation, r.name))
 	out = []
 	for r in rows:
+		if r.kind == SHEET:
+			out.append(_sheet_lane_row(r, me))
+			continue
 		row = {
 			"name": r.name,
 			"kind": r.kind,
@@ -1239,6 +1271,29 @@ def list_pending_actions_lane() -> dict:
 			row.update(waiters_count=int(r.waiters_count or 0), for_user=_for_user(r.owner_user, me))
 		out.append(row)
 	return {"rows": out, "total": len(out)}
+
+
+def _sheet_lane_row(r, me: str) -> dict:
+	from jarvis.chat import held_sheet_board, held_sheets
+
+	return {
+		"name": r.name,
+		"kind": r.kind,
+		"status": r.status,
+		"summary": r.summary or "",
+		"document_type": "",
+		"created_at": str(r.creation),
+		"age": _age_s(r.creation),
+		"collecting": int(r.collecting or 0),
+		"record_count": int(r.record_count or 0),
+		"question_count": int(r.question_count or 0),
+		"counts": held_sheets.json_dict(r.sheet_counts),
+		"counts_line": held_sheet_board.counts_line(r.sheet_counts, r.question_count),
+		"for_user": _for_user(r.owner_user, me),
+		"file_name": r.file_name or "",  # the dropped file (``filebox._source_file``)
+		"conversation": r.conversation or "",
+		"conversation_title": r.conversation_title or "",
+	}
 
 
 def _chat_link(conversation, title, origin_page) -> dict:
@@ -1366,9 +1421,10 @@ def _held_detail(row, me: str) -> dict:
 	}
 
 
-def _authorized_held(name, approver: str, kinds=(HELD,)):
-	"""The row when ``approver`` may act on it: a held row (owner or SM), or with
-	``kinds`` also a chat card (its owner only, D1)."""
+def _authorized_held(name, approver: str, kinds=(HELD,), *, acting: bool = True):
+	"""The row when ``approver`` may act on it (``acting=False``: read it): a held
+	row or sheet (owner or SM), or with ``kinds`` also a chat card (its owner only,
+	D1)."""
 	from jarvis.chat.pending_actions import authorize
 	from jarvis.chat.pending_actions._store import get_row, table_ready
 
@@ -1376,7 +1432,7 @@ def _authorized_held(name, approver: str, kinds=(HELD,)):
 	row = get_row(name) if name and table_ready() else None
 	if not row or row.kind not in kinds:
 		return None
-	return row if authorize(row, approver, row.kind)[0] else None
+	return row if authorize(row, approver, row.kind, acting=acting)[0] else None
 
 
 @frappe.whitelist()
@@ -1385,14 +1441,16 @@ def get_pending_action(name: str) -> dict:
 	"""One lane row for the board: ``{kind, card, summary, age, can_act,
 	reason_code, ...}``; a held row adds ``waiters_count`` / ``candidates`` (read as
 	its ``exec_user``: name/title/GSTIN only), a chat card its conversation (decided
-	through ``confirm_tool`` / ``dismiss_tool``). Never the sealed columns or
-	``open_key``. A terminal row still unsettled is settled on read (self-heal)."""
+	through ``confirm_tool`` / ``dismiss_tool``), a sheet its records view and
+	questions (``held_sheet_board.detail``; a listing one reads, not acts). Never the
+	sealed columns or ``open_key``. A terminal row still unsettled is settled on read
+	(self-heal)."""
 	from jarvis._session import authenticated_user
 	from jarvis.chat.pending_actions import settle
 	from jarvis.chat.pending_actions._store import TERMINAL, get_row
 
 	me = authenticated_user()
-	row = _authorized_held(name, me, kinds=(HELD, CHAT))
+	row = _authorized_held(name, me, kinds=(HELD, CHAT, SHEET), acting=False)
 	if not row:
 		frappe.throw(_HELD_NOT_FOUND, frappe.DoesNotExistError)
 	if row.status in TERMINAL and not row.settled:
@@ -1400,7 +1458,29 @@ def get_pending_action(name: str) -> dict:
 		row = get_row(row.name)
 	if row.kind == CHAT:
 		return _chat_detail(row)
+	if row.kind == SHEET:
+		from jarvis.chat import held_sheet_board
+
+		return _value_free(held_sheet_board.detail, "detail_crashed", row, me)
 	return _value_free(_held_detail, "detail_crashed", row, me)
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def get_sheet_candidates(name: str, indexes: str | list | None = None) -> dict:
+	"""Existing records per create record of a sealed sheet, read as its dropper
+	(``exec_user``), loaded lazily and capped: ``{index: [{name, title, gstin}]}``.
+	``indexes``: the records wanted (a JSON list), else the first ones."""
+	from jarvis._session import authenticated_user
+	from jarvis.chat import held_sheet_board
+
+	row = _authorized_held(name, authenticated_user(), kinds=(SHEET,), acting=False)
+	if not row:
+		frappe.throw(_HELD_NOT_FOUND, frappe.DoesNotExistError)
+	wanted = frappe.parse_json(indexes) if isinstance(indexes, str) and indexes.strip() else indexes
+	if wanted is not None and not isinstance(wanted, list):
+		frappe.throw("indexes must be a list of record numbers")
+	return _value_free(held_sheet_board.candidates, "candidates_crashed", row, wanted)
 
 
 def _identity_refusal(row, approver: str) -> dict | None:

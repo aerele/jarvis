@@ -426,6 +426,22 @@ class TestSendMessage(_ChatTestCase):
 		after = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
 		self.assertGreaterEqual(after, before)
 
+	def test_a_file_box_conversation_clears_a_leftover_run_cancel_signal(self):
+		"""I1 precedent (actions_api._open_skill_run): a Stop's 120s run-cancel signal
+		must not survive into the next admitted turn (Stop -> Re-run), or a File Box
+		sheet write on it is wrongly refused as "stopped"."""
+		from jarvis.chat.turn_message_binding import is_run_cancel_requested, request_run_cancel
+
+		frappe.db.set_value(CONV, self.conv, "file_box", 1, update_modified=False)
+		frappe.db.commit()
+		request_run_cancel(self.conv)
+		self.assertTrue(is_run_cancel_requested(self.conv))
+		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
+			with patch("frappe.enqueue"):
+				result = send_message(self.conv, "re-run")
+		self.assertTrue(result["ok"], result)
+		self.assertFalse(is_run_cancel_requested(self.conv))
+
 
 class TestRetryMessage(_ChatTestCase):
 	"""retry_message re-runs the worker for the user turn that preceded an

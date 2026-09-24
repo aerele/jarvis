@@ -25,7 +25,9 @@ TARGET_BOUND = frozenset(
 	{"update_doc", "submit_doc", "cancel_doc", "amend_doc", "delete_doc", "apply_workflow_action"}
 )
 # A File Box sheet's own columns (``park(sheet=...)``).
-_SHEET_FIELDS = frozenset({"collecting", "collecting_turn", "record_count", "question_count", "needs_fix"})
+_SHEET_FIELDS = frozenset(
+	{"collecting", "collecting_turn", "record_count", "sheet_counts", "question_count", "needs_fix"}
+)
 
 
 class ConfirmationPendingError(Exception):

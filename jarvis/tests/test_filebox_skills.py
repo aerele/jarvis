@@ -835,6 +835,27 @@ class TestEnforcement(_Base):
 		self.assertIn("Skip this file: make no more changes", calls[0]["message"])
 		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_skill_choice"))
 
+	def test_a_conflict_left_off_a_sheet_notifies_only_while_pending(self):
+		from jarvis.chat.turn_message_binding import clear_run_cancel, request_run_cancel
+
+		pin = skill(OWNER, "pinned5", creates=PI)
+		get = {"skill_name": skill(OWNER, "found5", creates=SI).skill_name}
+		board = self.pinned_conv(pin)
+		with (
+			patch.object(filebox_skills, "_link", return_value=None),
+			patch.object(filebox_skills, "_notify") as notify,
+		):
+			self.call("get_skill", get, board)
+		notify.assert_called_once()
+		stopped = self.pinned_conv(pin)
+		request_run_cancel(stopped)
+		self.addCleanup(clear_run_cancel, stopped)
+		with patch.object(filebox_skills, "_notify") as notify:
+			self.call("get_skill", get, stopped)
+		[ar] = self.routing_ars(stopped)
+		self.assertEqual(ar.status, "Dismissed")  # the stopped run's close
+		notify.assert_not_called()
+
 	def test_dismissing_the_conflict_question_skips_the_file(self):
 		pin = skill(OWNER, "pinned3", creates=PI)
 		found = skill(OWNER, "found3", creates=SI)
