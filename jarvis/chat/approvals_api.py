@@ -774,8 +774,10 @@ def _sod_blocks_self_approval(dropper: str | None) -> bool:
 
 @frappe.whitelist()
 @require_jarvis_user
-def list_wiki_write_proposals(status: str = "Actionable", start: int = 0, page_length: int = 20) -> dict:
-	"""Wiki-write proposals for the reviewer lane, newest first. Reviewer-gated:
+def list_wiki_write_proposals(
+	status: str = "Actionable", start: int = 0, page_length: int = 20, order: str = "newest"
+) -> dict:
+	"""Wiki-write proposals for the reviewer lane, newest first by default. Reviewer-gated:
 	these are org-wide wiki writes, visible to the reviewer set regardless of who
 	dropped the file. Each row carries a decoded ``preview``, ``can_approve`` (the
 	SoD gate, so the UI hides Approve where it would be refused) and ``needs_retry``
@@ -784,10 +786,13 @@ def list_wiki_write_proposals(status: str = "Actionable", start: int = 0, page_l
 	``status`` = ``Actionable`` (default) returns the rows a reviewer must act on:
 	Pending (approve/reject) OR Approved-but-not-landed (retry). The explicit
 	``Pending``/``Approved``/``Rejected``/``All`` values scope to that status.
-	Envelope ``{rows, total, has_more, start, page_length}``."""
+	``order`` = ``newest`` (default) or ``oldest`` first (the board leads with the
+	notes that waited longest). Envelope ``{rows, total, has_more, start, page_length}``."""
 	require_skill_reviewer()
 	if status not in ("Actionable", "Pending", "Approved", "Rejected", "All"):
 		frappe.throw("Invalid status filter")
+	if order not in ("newest", "oldest"):
+		frappe.throw("Invalid order")
 	start, pl = _clamp_page(start, page_length)
 	params: dict = {"src": FILE_BOX_WIKI_SOURCE, "start": start, "pl": pl}
 	where = ["a.source = %(src)s"]
@@ -811,7 +816,7 @@ def list_wiki_write_proposals(status: str = "Actionable", start: int = 0, page_l
 		a.decided_by, a.decided_at, a.creation
 		FROM `tabJarvis Approval Request` a
 		WHERE {where_sql}
-		ORDER BY a.creation DESC
+		ORDER BY a.creation {"ASC" if order == "oldest" else "DESC"}
 		LIMIT %(pl)s OFFSET %(start)s""",
 		params,
 		as_dict=True,

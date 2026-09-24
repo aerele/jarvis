@@ -289,6 +289,21 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 		self.assertEqual(row["dropper"], DROPPER)
 		self.assertTrue(row["can_approve"])  # reviewer != dropper
 
+	def test_list_orders_oldest_first_on_request(self):
+		"""The board leads with the notes that waited longest, so it asks for them
+		first; the default stays newest first."""
+		old = self._propose(self._conv())
+		new = self._propose(self._conv())
+		frappe.db.set_value(APPROVAL, old, "creation", "2000-01-01 00:00:00", update_modified=False)
+		frappe.db.set_value(APPROVAL, new, "creation", "2099-01-01 00:00:00", update_modified=False)
+		frappe.db.commit()
+		with _as(REVIEWER):
+			newest = approvals_api.list_wiki_write_proposals()["rows"]
+			oldest = approvals_api.list_wiki_write_proposals(order="oldest")["rows"]
+			self.assertEqual((newest[0]["name"], oldest[0]["name"]), (new, old))
+			with self.assertRaises(frappe.ValidationError):
+				approvals_api.list_wiki_write_proposals(order="sideways")
+
 	def test_non_reviewer_cannot_list_proposals(self):
 		with _as(PLAIN), self.assertRaises(frappe.PermissionError):
 			approvals_api.list_wiki_write_proposals()

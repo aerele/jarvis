@@ -97,7 +97,7 @@
 						variant="ghost"
 						:label="ended ? __('Close') : __('Cancel')"
 						:disabled="busy !== null"
-						@click="ended ? emit('decided', ended) : (editing = false)"
+						@click="ended ? decided(ended) : (editing = false)"
 					/>
 				</div>
 				<p v-if="editBlocked" :id="editReasonId" class="text-sm text-ink-amber-3">
@@ -231,8 +231,11 @@ import {
 
 const props = defineProps({
 	name: { type: String, required: true },
+	// Called with each settled answer. A callback, not an emit: Vue drops an unmounted
+	// instance's emits, and switching rows mid-decision unmounts this detail.
+	onDecided: { type: Function, default: null },
 });
-const emit = defineEmits(["decided"]);
+const decided = (res) => props.onDecided && props.onDecided(res);
 
 const rec = ref(null);
 const loading = ref(true);
@@ -298,13 +301,13 @@ async function decide(action, useExisting) {
 		const res = (await decideHeldAction(props.name, action, useExisting)) || {};
 		if (res.ok) {
 			toast.success(escapeHtml(outcomeMessage(res)));
-			emit("decided", res);
+			decided(res);
 			return;
 		}
 		const message = refusalMessage(res);
 		if (isSettled(res)) {
 			toast.error(escapeHtml(message));
-			emit("decided", res);
+			decided(res);
 			return;
 		}
 		notice.value = message;
@@ -393,7 +396,7 @@ async function submitEdit() {
 		const res = (await editAndCreateHeld(props.name, patches)) || {};
 		if (res.ok) {
 			toast.success(escapeHtml(outcomeMessage(res)));
-			emit("decided", res);
+			decided(res);
 			return;
 		}
 		if (res.reason_code === "exists") {

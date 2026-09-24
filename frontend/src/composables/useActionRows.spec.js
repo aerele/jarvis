@@ -162,6 +162,32 @@ describe("useActionRows", () => {
 		expect(w.vm.loaded).toBe(true);
 	});
 
+	it("is loaded only once the latest load settles, never on a stale answer", async () => {
+		const first = deferred();
+		const second = deferred();
+		approvals.listPendingActionsLane
+			.mockReturnValueOnce(first.promise)
+			.mockReturnValueOnce(second.promise);
+		const w = host();
+		w.vm.load();
+		first.resolve({ rows: [] });
+		await flushPromises();
+		expect(w.vm.loaded).toBe(false);
+		second.resolve({ rows: [held()] });
+		await flushPromises();
+		expect(w.vm.loaded).toBe(true);
+		expect(w.vm.rows.map((r) => r.key)).toEqual(["held:PA-1"]);
+	});
+
+	it("asks for the oldest wiki notes first, as many as a page allows", async () => {
+		host();
+		await flushPromises();
+		expect(api.listWikiWriteProposals).toHaveBeenCalledWith({
+			order: "oldest",
+			page_length: 100,
+		});
+	});
+
 	it("a non-reviewer's wiki 403 is silent, and the list is never asked again", async () => {
 		api.listWikiWriteProposals.mockRejectedValue(
 			Object.assign(new Error("Not permitted"), { exc_type: "PermissionError" })

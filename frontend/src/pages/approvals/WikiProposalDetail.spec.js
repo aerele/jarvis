@@ -46,14 +46,19 @@ const proposal = (over = {}, preview = {}) => ({
 
 const button = (w, label) => w.findAll("button").find((b) => b.text() === label);
 
+let onDecided, onChanged;
 function mountWith(p = proposal(), extra = {}) {
 	return mount(WikiProposalDetail, {
-		props: { name: "AR-1", proposal: p, loaded: true, ...extra },
+		props: { name: "AR-1", proposal: p, loaded: true, onDecided, onChanged, ...extra },
 	});
 }
 
 describe("WikiProposalDetail", () => {
-	beforeEach(() => vi.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		onDecided = vi.fn();
+		onChanged = vi.fn();
+	});
 
 	it("renders the proposed note as sanitized markdown, with its exact source a click away", async () => {
 		const w = mountWith(proposal({}, { append_md: `**Net 30** ${HOSTILE}` }));
@@ -66,12 +71,27 @@ describe("WikiProposalDetail", () => {
 		expect(w.text()).toContain("party-fake-co · Reference · dropped by asha@example.com");
 	});
 
-	it("opens a note with a link in source view, so the reviewer sees the real URL", () => {
-		const w = mountWith(
-			proposal({}, { append_md: "See [the bank](https://evil.example/login) for terms." })
-		);
-		expect(w.find("pre").text()).toContain("https://evil.example/login");
+	it.each([
+		["a plain link", "See [the bank](https://evil.example/x) for terms."],
+		[
+			"a code span that ends in ]",
+			"See [`https://docs.example.com/a]`](https://evil.example/x)",
+		],
+		["a NUL between text and URL", "[docs]\u0000(https://evil.example/x)"],
+	])("opens a note whose render has a link (%s) in source view", (_label, body) => {
+		const w = mountWith(proposal({}, { append_md: body }));
+		expect(w.find("pre").text()).toContain("https://evil.example/x");
+		expect(w.find("a").exists()).toBe(false);
 		expect(button(w, "View rendered")).toBeTruthy();
+	});
+
+	it("opens a note without a link rendered", () => {
+		const w = mountWith(
+			proposal({}, { append_md: "## Terms\n\n**Net 30**, see [3] (below)" })
+		);
+		expect(w.find("pre").exists()).toBe(false);
+		expect(w.find("strong").text()).toBe("Net 30");
+		expect(button(w, "View source")).toBeTruthy();
 	});
 
 	it("shows the preview summary, and the metadata-only state when there is no body", () => {
@@ -101,8 +121,8 @@ describe("WikiProposalDetail", () => {
 		await flushPromises();
 		expect(api.approveWikiWrite).toHaveBeenCalledWith("AR-1", "d1");
 		expect(toast.success).toHaveBeenCalled();
-		expect(w.emitted("decided")).toHaveLength(1);
-		expect(w.emitted("changed")).toBeUndefined();
+		expect(onDecided).toHaveBeenCalledTimes(1);
+		expect(onChanged).not.toHaveBeenCalled();
 	});
 
 	it("an approved write that did not land stays for a retry", async () => {
@@ -113,8 +133,8 @@ describe("WikiProposalDetail", () => {
 		expect(toast.warning).toHaveBeenCalledWith(
 			"Approved, but the write did not land. Use Retry."
 		);
-		expect(w.emitted("changed")).toHaveLength(1);
-		expect(w.emitted("decided")).toBeUndefined();
+		expect(onChanged).toHaveBeenCalledTimes(1);
+		expect(onDecided).not.toHaveBeenCalled();
 	});
 
 	it("a refused approve asks for a fresh list; it is not a decision", async () => {
@@ -127,8 +147,8 @@ describe("WikiProposalDetail", () => {
 		await button(w, "Approve").trigger("click");
 		await flushPromises();
 		expect(toast.error).toHaveBeenCalled();
-		expect(w.emitted("changed")).toHaveLength(1);
-		expect(w.emitted("decided")).toBeUndefined();
+		expect(onChanged).toHaveBeenCalledTimes(1);
+		expect(onDecided).not.toHaveBeenCalled();
 	});
 
 	it("a note that changed since it was opened must be reloaded before Approve", async () => {
@@ -155,7 +175,7 @@ describe("WikiProposalDetail", () => {
 		await button(w, "Reject").trigger("click");
 		await flushPromises();
 		expect(api.rejectWikiWrite).toHaveBeenCalledWith("AR-1");
-		expect(w.emitted("decided")).toHaveLength(1);
+		expect(onDecided).toHaveBeenCalledTimes(1);
 	});
 
 	it("offers Retry, not Approve, for an approved write that did not land", async () => {
@@ -169,7 +189,18 @@ describe("WikiProposalDetail", () => {
 		await button(w, "Retry").trigger("click");
 		await flushPromises();
 		expect(api.retryWikiWrite).toHaveBeenCalledWith("AR-1");
-		expect(w.emitted("decided")).toHaveLength(1);
+		expect(onDecided).toHaveBeenCalledTimes(1);
+	});
+
+	it("reports the outcome even after the board switched away mid-call", async () => {
+		let resolve;
+		api.approveWikiWrite.mockReturnValue(new Promise((r) => (resolve = r)));
+		const w = mountWith();
+		await button(w, "Approve").trigger("click");
+		w.unmount();
+		resolve({ ok: true, applied: false });
+		await flushPromises();
+		expect(onChanged).toHaveBeenCalledTimes(1);
 	});
 
 	it("is busy while deciding: a second click does nothing", async () => {

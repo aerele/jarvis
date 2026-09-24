@@ -105,7 +105,7 @@
 // Detail + decision for one wiki write proposal on the Approval Board. The note is
 // snapshotted when opened: Approve sends that snapshot's digest, so the server
 // refuses a proposal that changed since. `proposal` is the live list row (null
-// once it leaves the list); `changed` asks the board for a fresh list.
+// once it leaves the list).
 import { ref, computed, watch } from "vue";
 import { Button, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
@@ -118,11 +118,17 @@ const props = defineProps({
 	name: { type: String, required: true },
 	proposal: { type: Object, default: null },
 	loaded: { type: Boolean, default: false },
+	// Callbacks, not emits: Vue drops an unmounted instance's emits, and switching
+	// rows mid-decision unmounts this detail. `onChanged` asks for a fresh list.
+	onDecided: { type: Function, default: null },
+	onChanged: { type: Function, default: null },
 });
-const emit = defineEmits(["decided", "changed"]);
+const decided = (r) => props.onDecided && props.onDecided(r);
+const listChanged = (r) => props.onChanged && props.onChanged(r);
 
-// A rendered link hides its URL behind its text: such a note opens as source.
-const MD_LINK = /\[[^\]]+\]\(https?:/i;
+// A rendered link hides its URL behind its text, so a note whose RENDER has one
+// opens as source (judged on the renderer's output, not by re-parsing the body).
+const RENDERED_LINK = /<a\s[^>]*href=/i;
 
 const note = ref(null); // what the reviewer reads (and approves)
 const showSource = ref(false);
@@ -130,7 +136,7 @@ const busy = ref(null); // "approve" | "reject" | "retry" | null
 
 function open(p) {
 	note.value = p;
-	showSource.value = MD_LINK.test(proposalBody(p));
+	showSource.value = RENDERED_LINK.test(renderMarkdown(proposalBody(p)));
 }
 const mine = (p) => (p && p.name === props.name ? p : null);
 open(mine(props.proposal));
@@ -165,16 +171,16 @@ async function approve() {
 		const r = await approveWikiWrite(props.name, note.value.wiki_digest);
 		if (r && r.applied) {
 			toast.success("Wiki note approved and recorded");
-			emit("decided", r);
+			decided(r);
 		} else {
 			// approved, but the write did not land: the row stays, now as a retry
 			toast.warning("Approved, but the write did not land. Use Retry.");
-			emit("changed", r);
+			listChanged(r);
 		}
 	} catch (e) {
 		// refused (it changed, or was decided elsewhere): show what is there now
 		toast.error(errHtml(e));
-		emit("changed");
+		listChanged();
 	} finally {
 		busy.value = null;
 	}
@@ -186,10 +192,10 @@ async function reject() {
 	try {
 		await rejectWikiWrite(props.name);
 		toast.success("Wiki note rejected — nothing was written");
-		emit("decided");
+		decided();
 	} catch (e) {
 		toast.error(errHtml(e));
-		emit("changed");
+		listChanged();
 	} finally {
 		busy.value = null;
 	}
@@ -202,14 +208,14 @@ async function retry() {
 		const r = await retryWikiWrite(props.name);
 		if (r && r.applied) {
 			toast.success("Wiki note recorded");
-			emit("decided", r);
+			decided(r);
 		} else {
 			toast.warning("Still did not land — check the failure reason");
-			emit("changed", r);
+			listChanged(r);
 		}
 	} catch (e) {
 		toast.error(errHtml(e));
-		emit("changed");
+		listChanged();
 	} finally {
 		busy.value = null;
 	}

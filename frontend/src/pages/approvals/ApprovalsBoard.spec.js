@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // One inbox: held File Box writes, chat cards and wiki notes are rows in the rail's
 // "Needs your decision" group and open their detail in the right pane.
-const probe = vi.hoisted(() => ({ mounts: [], refreshes: [], docmetaIds: [] }));
+const probe = vi.hoisted(() => ({ mounts: [], refreshes: [], docmetaIds: [], later: null }));
 
 vi.mock("vue-router", async () => {
 	const { reactive } = await import("vue");
@@ -52,6 +52,9 @@ vi.mock("@/api", () => ({
 	decideApproval: vi.fn(),
 	dismissApproval: vi.fn(),
 	restoreApproval: vi.fn(),
+	approveWikiWrite: vi.fn(),
+	rejectWikiWrite: vi.fn(),
+	retryWikiWrite: vi.fn(),
 	listShareableUsers: vi.fn(async () => []),
 	getListFilterSchema: vi.fn(),
 	getListFilterCapabilities: vi.fn(),
@@ -79,34 +82,28 @@ vi.mock("@/components/doc/DocSection.vue", () => ({
 vi.mock("@/components/doc/DocMetaPanel.vue", () => ({ default: { template: "<div/>" } }));
 vi.mock("@/components/doc/CommentsSection.vue", () => ({ default: { template: "<div/>" } }));
 
-// The detail stubs record every mount (a new selection must mount a fresh one) and
-// every refresh the board asks for.
-function detailStub(kind, cls, extra = "") {
+// The held/chat detail stubs record every mount (a new selection must mount a fresh
+// one) and every refresh the board asks for. "decide later" keeps the board's
+// callback to answer after a switch unmounted the stub. The wiki detail is real.
+function detailStub(kind, cls) {
 	return async () => {
 		const { onMounted } = await import("vue");
 		return {
 			default: {
-				props: ["name", "proposal", "loaded"],
-				emits: ["decided", "changed"],
+				props: ["name", "onDecided"],
 				setup(props, { expose }) {
 					onMounted(() => probe.mounts.push(kind + ":" + props.name));
 					expose({ refresh: () => probe.refreshes.push(kind + ":" + props.name) });
+					// read at call time, as the details do: after the unmount
+					return { later: () => (probe.later = (res) => props.onDecided(res)) };
 				},
-				template: `<div class="${cls}"><span class="who">${kind} {{ name }}</span><button class="decide" @click="$emit('decided', { ok: true })">decide</button>${extra}</div>`,
+				template: `<div class="${cls}"><span class="who">${kind} {{ name }}</span><button class="decide" @click="onDecided({ ok: true })">decide</button><button class="decide-later" @click="later()">later</button></div>`,
 			},
 		};
 	};
 }
 vi.mock("./PendingActionDetail.vue", detailStub("held", "held-detail"));
 vi.mock("./PendingChatDetail.vue", detailStub("chat", "chat-detail"));
-vi.mock(
-	"./WikiProposalDetail.vue",
-	detailStub(
-		"wiki",
-		"wiki-detail",
-		`<button class="change" @click="$emit('changed')">change</button><span class="digest">{{ proposal ? proposal.wiki_digest : "none" }}</span>`
-	)
-);
 
 import { useRoute } from "vue-router";
 import * as api from "@/api";
@@ -206,6 +203,7 @@ const arRow = (w, name) =>
 		.findAll("button")
 		.find((b) => b.text().includes("Question " + name));
 const pane = (w) => w.find(".flex-1.overflow-y-auto");
+const button = (w, label) => w.findAll("button").find((b) => b.text() === label);
 
 describe("ApprovalsBoard one inbox", () => {
 	let mounted = [];
@@ -295,8 +293,8 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(route.query).toEqual({ held: "PA-9" });
 
 		await actionRow(w, "party-fake-co").trigger("click");
-		expect(pane(w).find(".wiki-detail .who").text()).toBe("wiki AR-W1");
-		expect(pane(w).find(".digest").text()).toBe("d1");
+		expect(pane(w).find("h1").text()).toBe("Fake Co terms");
+		expect(pane(w).text()).toContain("party-fake-co · dropped by asha@example.com");
 		expect(route.query).toEqual({ wiki: "AR-W1" });
 		expect(approvals.getApproval).not.toHaveBeenCalled();
 		expect(probe.docmetaIds[0].value).toBe("");
@@ -307,7 +305,7 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(route.name).toBe("ApprovalDetail");
 		expect(route.params).toEqual({ id: "AR-2" });
 		expect(route.query).toEqual({});
-		expect(pane(w).find(".wiki-detail").exists()).toBe(false);
+		expect(pane(w).text()).not.toContain("dropped by");
 		expect(pane(w).text()).toContain("Ship it?");
 	});
 
@@ -337,27 +335,63 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(route.query).toEqual({ held: "PA-2" });
 	});
 
+	it("deciding a chat card drops it, refreshes the badge and selects the next row", async () => {
+		const w = await board();
+		await actionRow(w, "Quarter close").trigger("click");
+		state.lane = state.lane.filter((r) => r.name !== "PA-9");
+		await pane(w).find(".chat-detail .decide").trigger("click");
+		await flushPromises();
+		expect(refreshApprovalsCount).toHaveBeenCalled();
+		expect(group(w).text()).not.toContain("Quarter close");
+		expect(pane(w).find("h1").text()).toBe("Fake Co terms");
+		expect(route.query).toEqual({ wiki: "AR-W1" });
+	});
+
+	it("an answer that lands after a switch settles its own row, not the open one", async () => {
+		const w = await board();
+		await actionRow(w, "1 file waiting").trigger("click");
+		await pane(w).find(".held-detail .decide-later").trigger("click");
+		await actionRow(w, "3 files waiting").trigger("click");
+		expect(probe.mounts).toEqual(["held:PA-1", "held:PA-2"]);
+		state.lane = state.lane.filter((r) => r.name !== "PA-1");
+		probe.later({ ok: true });
+		await flushPromises();
+		expect(refreshApprovalsCount).toHaveBeenCalled();
+		expect(group(w).text()).not.toContain("1 file waiting");
+		expect(group(w).text()).toContain("3 files waiting");
+		expect(pane(w).find(".held-detail .who").text()).toBe("held PA-2");
+		expect(route.query).toEqual({ held: "PA-2" });
+	});
+
 	it("deciding the last decision moves on to the first question", async () => {
 		const w = await board();
 		await actionRow(w, "party-fake-co").trigger("click");
 		state.wiki = [];
 		approvals.getApproval.mockClear();
-		await pane(w).find(".wiki-detail .decide").trigger("click");
+		api.approveWikiWrite.mockResolvedValue({ ok: true, applied: true });
+		await button(pane(w), "Approve").trigger("click");
 		await flushPromises();
+		expect(api.approveWikiWrite).toHaveBeenCalledWith("AR-W1", "d1");
 		expect(approvals.getApproval).toHaveBeenCalledWith("AR-1");
-		expect(pane(w).find(".wiki-detail").exists()).toBe(false);
+		expect(pane(w).text()).not.toContain("dropped by");
 		expect(route.params).toEqual({ id: "AR-1" });
 		expect(route.query).toEqual({});
 	});
 
-	it("a wiki note that changed reloads the list and keeps the selection", async () => {
+	it("a refused wiki approve reloads the list and keeps the note open", async () => {
 		const w = await board();
 		await actionRow(w, "party-fake-co").trigger("click");
 		state.wiki = [wikiRow({ wiki_digest: "d2" })];
-		await pane(w).find(".wiki-detail .change").trigger("click");
+		api.approveWikiWrite.mockRejectedValue(
+			Object.assign(new Error("This proposal changed since you opened it"), {
+				exc_type: "PermissionError",
+			})
+		);
+		const calls = api.listWikiWriteProposals.mock.calls.length;
+		await button(pane(w), "Approve").trigger("click");
 		await flushPromises();
-		expect(pane(w).find(".digest").text()).toBe("d2");
-		expect(probe.mounts).toEqual(["wiki:AR-W1"]);
+		expect(api.listWikiWriteProposals.mock.calls.length).toBe(calls + 1);
+		expect(pane(w).text()).toContain("This note changed since you opened it");
 		expect(route.query).toEqual({ wiki: "AR-W1" });
 	});
 
@@ -375,15 +409,40 @@ describe("ApprovalsBoard one inbox", () => {
 
 	it("?wiki= opens the wiki note; with both, held wins", async () => {
 		const w = await board({ wiki: "AR-W1" });
-		expect(pane(w).find(".wiki-detail .who").text()).toBe("wiki AR-W1");
+		expect(pane(w).text()).toContain("party-fake-co · dropped by asha@example.com");
 		const both = await board({ held: "PA-1", wiki: "AR-W1" });
 		expect(pane(both).find(".held-detail .who").text()).toBe("held PA-1");
-		expect(pane(both).find(".wiki-detail").exists()).toBe(false);
+		expect(pane(both).text()).not.toContain("dropped by");
 	});
 
 	it("a deep-linked name beyond the loaded rows still opens its detail", async () => {
 		const w = await board({ held: "PA-404" });
 		expect(pane(w).find(".held-detail .who").text()).toBe("held PA-404");
+		// no row to name it: one plain heading, no chip repeating it
+		expect(pane(w).find("h1").text()).toBe("New record");
+		expect(
+			pane(w)
+				.findAll(".badge")
+				.map((b) => b.text())
+		).not.toContain("New record");
+	});
+
+	it("?wiki= for a note not in the list says it isn't waiting for this reviewer", async () => {
+		const w = await board({ wiki: "AR-404" });
+		expect(pane(w).text()).toContain("This wiki note isn't waiting for your review.");
+		expect(button(pane(w), "Approve")).toBeFalsy();
+	});
+
+	it("a ?held= chat card the rows place late still opens as a chat card", async () => {
+		state.lane = [heldRow("PA-1")];
+		const w = await board({ held: "PA-9" });
+		expect(pane(w).find(".held-detail .who").text()).toBe("held PA-9");
+		state.lane = [heldRow("PA-1"), chatRow()];
+		await w.find('button[data-tip="Refresh"]').trigger("click");
+		await flushPromises();
+		expect(pane(w).find(".chat-detail .who").text()).toBe("chat PA-9");
+		expect(pane(w).find(".held-detail").exists()).toBe(false);
+		expect(route.query).toEqual({ held: "PA-9" });
 	});
 
 	it("follows the link as it changes, and ignores a link to what is already open", async () => {

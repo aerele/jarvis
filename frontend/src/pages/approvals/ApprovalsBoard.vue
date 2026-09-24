@@ -281,17 +281,20 @@
 						<h1 class="min-w-0 flex-1 truncate text-xl font-semibold text-ink-gray-9">
 							{{ selectedAction ? selectedAction.title : KIND_LABEL[selectedKind] }}
 						</h1>
-						<Badge
-							variant="subtle"
-							:theme="KIND_THEME[selectedKind]"
-							:label="KIND_LABEL[selectedKind]"
-						/>
-						<Badge
-							v-if="selectedAction"
-							variant="subtle"
-							:theme="selectedAction.badge.theme"
-							:label="selectedAction.badge.label"
-						/>
+						<!-- a row beyond the rail has only its kind for a heading: no chip
+						     repeating it -->
+						<template v-if="selectedAction">
+							<Badge
+								variant="subtle"
+								:theme="KIND_THEME[selectedKind]"
+								:label="KIND_LABEL[selectedKind]"
+							/>
+							<Badge
+								variant="subtle"
+								:theme="selectedAction.badge.theme"
+								:label="selectedAction.badge.label"
+							/>
+						</template>
 					</div>
 					<div class="mt-4">
 						<WikiProposalDetail
@@ -301,22 +304,22 @@
 							:name="selectedName"
 							:proposal="selectedAction ? selectedAction.raw : null"
 							:loaded="actionsLoaded"
-							@decided="onActionDecided(selectedKey)"
-							@changed="loadActions()"
+							:on-decided="settleFor(selectedKey)"
+							:on-changed="loadActions"
 						/>
 						<PendingChatDetail
 							v-else-if="selectedKind === 'chat'"
 							:key="selectedKey"
 							ref="actionDetail"
 							:name="selectedName"
-							@decided="onActionDecided(selectedKey)"
+							:on-decided="settleFor(selectedKey)"
 						/>
 						<PendingActionDetail
 							v-else
 							:key="selectedKey"
 							ref="actionDetail"
 							:name="selectedName"
-							@decided="onActionDecided(selectedKey)"
+							:on-decided="settleFor(selectedKey)"
 						/>
 					</div>
 				</div>
@@ -914,16 +917,19 @@ function actionLink() {
 	if (typeof wiki === "string" && wiki) return { wiki: true, name: wiki };
 	return null;
 }
+// held and chat share ?held=: the rows say which. A name beyond them (an SM's
+// backlog, a settled row) still opens as held; its detail says what became of
+// it, and a later refresh that lists it as a chat card reopens it as one.
+let guessedHeld = "";
 function syncActionFromRoute() {
 	const link = actionLink();
 	if (!link) return;
 	if (link.wiki) return selectAction("wiki:" + link.name);
 	if (selectedKey.value && selectedKind.value !== "wiki" && selectedName.value === link.name)
 		return;
-	// held and chat share ?held=: the rows say which. A name beyond them (an SM's
-	// backlog, a settled row) still opens; its detail says what became of it.
 	if (!actionsLoaded.value) return;
 	const row = actionRows.value.find((r) => r.kind !== "wiki" && r.name === link.name);
+	guessedHeld = row ? "" : link.name;
 	selectAction((row ? row.kind : "held") + ":" + link.name);
 }
 const actionLinkPending = computed(
@@ -1255,6 +1261,10 @@ function onActionDecided(key) {
 	store.refreshApprovalsCount();
 	loadActions();
 }
+// Bound at render, so an answer that lands after a switch unmounted its detail
+// still settles its own row (the details call it directly: Vue drops an
+// unmounted instance's emits).
+const settleFor = (key) => () => onActionDecided(key);
 
 // Refresh re-reads the decision rows too: wiki notes have no realtime event, and
 // a System Manager gets none for other users' held rows.
@@ -1285,9 +1295,15 @@ watch(rows, (r) => {
 });
 // A refresh never yanks the pane: a selected held/chat row that left the rail
 // keeps its detail, which re-reads how it settled (a wiki note sees its row go
-// through its `proposal` prop).
+// through its `proposal` prop). A ?held= name first opened as held is corrected
+// once the rows list it as a chat card.
 watch(actionRows, (now, before) => {
 	const key = selectedKey.value;
+	if (guessedHeld && key === "held:" + guessedHeld) {
+		const row = now.find((r) => r.kind !== "wiki" && r.name === guessedHeld);
+		if (row) guessedHeld = "";
+		if (row && row.kind === "chat") return selectAction(row.key);
+	}
 	if (!key || selectedKind.value === "wiki" || now.some((r) => r.key === key)) return;
 	if ((before || []).some((r) => r.key === key) && actionDetail.value)
 		actionDetail.value.refresh();

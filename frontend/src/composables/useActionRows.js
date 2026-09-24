@@ -19,6 +19,8 @@ const REFRESH_KINDS = new Set([
 	"action:settled",
 ]);
 const REFRESH_DEBOUNCE_MS = 1000;
+// the oldest wiki notes lead, so they must be the page fetched; 100 = the clamp max
+const WIKI_QUERY = { order: "oldest", page_length: 100 };
 const PENDING = { label: "Pending", theme: "orange" };
 
 const words = (...parts) => parts.filter(Boolean).join(" ").toLowerCase();
@@ -92,10 +94,11 @@ export function useActionRows() {
 	const wikiTotal = ref(0);
 	const laneError = ref("");
 	const wikiError = ref("");
-	const loaded = ref(false); // both sources answered once: the rail may say "empty"
+	const loaded = ref(false); // the latest load's sources answered: the rail may say "empty"
 	let wikiDenied = false;
 	let laneReq = 0; // monotonic per source: a stale answer never overwrites a newer one
 	let wikiReq = 0;
+	let loadReq = 0;
 
 	// oldest first: what has waited longest leads
 	const rows = computed(() =>
@@ -123,7 +126,7 @@ export function useActionRows() {
 		if (wikiDenied) return;
 		const id = ++wikiReq;
 		try {
-			const res = (await listWikiWriteProposals()) || {};
+			const res = (await listWikiWriteProposals(WIKI_QUERY)) || {};
 			if (id !== wikiReq) return;
 			wikiRows.value = (Array.isArray(res.rows) ? res.rows : []).map(wikiRow);
 			wikiTotal.value = Number(res.total) || wikiRows.value.length;
@@ -142,8 +145,9 @@ export function useActionRows() {
 	}
 
 	async function load() {
+		const id = ++loadReq;
 		await Promise.allSettled([loadLane(), loadWiki()]);
-		loaded.value = true;
+		if (id === loadReq) loaded.value = true;
 	}
 
 	function remove(key) {
