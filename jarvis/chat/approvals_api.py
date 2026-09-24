@@ -18,6 +18,7 @@ import frappe
 
 from jarvis._session import impersonate
 from jarvis.chat import filebox_skills
+from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as _ar
 from jarvis.permissions import (
 	message_origin,
 	refuse_in_tool_dispatch,
@@ -48,6 +49,17 @@ def _refuse_if_wiki_write(doc) -> None:
 			"This is a wiki-write proposal - use the reviewer approve/reject controls.",
 			frappe.PermissionError,
 		)
+
+
+def _refuse_if_linked(doc) -> None:
+	"""A question linked to a File Box sheet is answered in the sheet, never on its own."""
+	if doc.get("sheet"):
+		frappe.throw("This question is answered on its document's approval sheet.", frappe.ValidationError)
+
+
+def _unlinked() -> str:
+	"""The decide writes' ``sheet`` guard (once migrated)."""
+	return " and IFNULL(sheet, '')=''" if _ar.sheet_ready() else ""
 
 
 def _decode_wiki_preview(payload: str | None) -> dict:
@@ -107,6 +119,8 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 		filters = {"status": ["in", ["Approved", "Rejected"]]}
 	else:
 		filters = {"status": status}
+	if _ar.sheet_ready():
+		filters["sheet"] = ["is", "not set"]  # a sheet's questions are answered in the sheet
 	# Non-SM: filter by ownership IN the query so `limit` applies to the
 	# caller's rows, not to a mixed page that later shrinks (and no N+1).
 	if "System Manager" not in frappe.get_roles():
@@ -264,6 +278,8 @@ def list_approvals_page(
 	# rows (source NULL = File Box) still show.
 	params["wiki_src"] = FILE_BOX_WIKI_SOURCE
 	base.append("(a.source IS NULL OR a.source <> %(wiki_src)s)")
+	if _ar.sheet_ready():
+		base.append("IFNULL(a.sheet, '') = ''")  # answered in its File Box sheet
 	if not is_sm:
 		# Owner OR tagged: the caller owns the linked conversation, or holds a
 		# DocShare read grant on the approval (docmeta_api.toggle_share /
@@ -374,6 +390,14 @@ def _awaiting_reply(me: str) -> list[dict]:
 	last_at}."""
 	from jarvis.chat.chat_asks import question_excerpt
 
+	# A File Box sheet's conversation waits on its sheet, not on a reply.
+	on_sheet = (
+		"""AND NOT EXISTS (SELECT 1 FROM `tabJarvis Approval Request` sr
+		                WHERE sr.conversation = c.name
+		                AND sr.status = 'Pending' AND IFNULL(sr.sheet, '') <> '')"""
+		if _ar.sheet_ready()
+		else ""
+	)
 	rows = frappe.db.sql(
 		"""SELECT c.name AS conversation, c.title, c.origin_page,
 		m.content, m.creation AS last_at
@@ -410,6 +434,9 @@ def _awaiting_reply(me: str) -> list[dict]:
 		AND NOT EXISTS (SELECT 1 FROM `tabJarvis Approval Request` ar
 		                WHERE ar.conversation = c.name
 		                AND ar.status = 'Pending' AND ar.source = 'Chat')
+		"""
+		+ on_sheet
+		+ """
 		ORDER BY m.creation DESC
 		LIMIT 10""",
 		{"me": me, "fence": "%```jarvis-ask%", "qmark": "%?%"},
@@ -471,7 +498,7 @@ def get_approval(name: str) -> dict:
 		"decided_at": str(doc.decided_at or ""),
 		"creation": str(doc.creation or ""),
 		"owner": doc.owner,
-		"can_act": int(can_act),
+		"can_act": int(can_act and not doc.get("sheet")),  # a sheet's question: answered in the sheet
 	}
 
 
@@ -586,6 +613,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	_refuse_if_wiki_write(doc)
 	if not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
+	_refuse_if_linked(doc)
 	if doc.status != "Pending":
 		frappe.throw(f"Approval {name} is already {doc.status}")
 	if doc.get("routing"):
@@ -597,7 +625,8 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status=%s, decision=%s, decided_by=%s, decided_at=%s
-		where name=%s and status='Pending'""",
+		where name=%s and status='Pending'"""
+		+ _unlinked(),
 		(new_status, decision, frappe.session.user, frappe.utils.now_datetime(), name),
 	)
 	if not frappe.db.sql(
@@ -681,6 +710,7 @@ def dismiss_approval(name: str) -> dict:
 	_refuse_if_wiki_write(doc)
 	if not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
+	_refuse_if_linked(doc)
 	if doc.status != "Pending":
 		frappe.throw(f"Approval {name} is already {doc.status}")
 	decision = filebox_skills.SKIP if doc.get("routing") else "(dismissed - no action taken)"
@@ -688,7 +718,8 @@ def dismiss_approval(name: str) -> dict:
 	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status='Dismissed', decision=%s, decided_by=%s, decided_at=%s
-		where name=%s and status='Pending'""",
+		where name=%s and status='Pending'"""
+		+ _unlinked(),
 		(decision, frappe.session.user, frappe.utils.now_datetime(), name),
 	)
 	if not frappe.db.sql(
@@ -714,15 +745,22 @@ def restore_approval(name: str) -> dict:
 	_refuse_if_wiki_write(doc)
 	if not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
+	_refuse_if_linked(doc)
 	if doc.get("routing"):
 		frappe.throw("A dismissed routing question was answered 'Skip this file': re-run the file instead.")
 	if doc.status != "Dismissed":
 		frappe.throw(f"Only a dismissed request can be restored (this is {doc.status})")
-	frappe.db.set_value(
-		APPROVAL,
-		name,
-		{"status": "Pending", "decision": None, "decided_by": None, "decided_at": None},
+	frappe.db.sql(
+		"""update `tabJarvis Approval Request`
+		set status='Pending', decision=NULL, decided_by=NULL, decided_at=NULL, modified=%s, modified_by=%s
+		where name=%s and status='Dismissed'"""
+		+ _unlinked(),
+		(frappe.utils.now_datetime(), frappe.session.user, name),
 	)
+	if not frappe.db.sql(
+		"select 1 from `tabJarvis Approval Request` where name=%s and status='Pending'", (name,)
+	):
+		frappe.throw(f"Approval {name} was changed concurrently")
 	frappe.db.commit()
 	return {"ok": True, "status": "Pending"}
 

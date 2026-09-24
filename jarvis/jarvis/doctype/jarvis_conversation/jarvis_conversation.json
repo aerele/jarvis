@@ -207,6 +207,16 @@
    "description": "When the owner chose 'Skip this file' on a skill_missing routing question: the row reads no_draft (\"Skipped by you\") until a later run. Server-set only."
   },
   {
+   "fieldname": "filebox_sheet_count",
+   "fieldtype": "Int",
+   "label": "File Box Sheet Count",
+   "default": "0",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Approval sheets this File Box run opened (at most two per document: the second holds what only surfaces while drafting). Reset on a re-run. Server-set only."
+  },
+  {
    "fieldname": "request_autorun",
    "fieldtype": "Check",
    "label": "Request auto-run (typed 'confirm all')",

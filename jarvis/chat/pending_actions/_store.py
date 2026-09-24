@@ -13,7 +13,8 @@ PA = "Jarvis Pending Action"
 WAITER = "Jarvis Pending Action Waiter"
 CONV = "Jarvis Conversation"
 
-KINDS = ("chat", "file_box_held")
+SHEET = "file_box_sheet"
+KINDS = ("chat", "file_box_held", SHEET)
 PENDING, EXECUTING = "Pending", "Executing"
 EXECUTED, FAILED, DISCARDED, CANCELLED, SUPERSEDED = (
 	"Executed",
@@ -58,15 +59,69 @@ _TERMINAL_COLS = frozenset(
 )
 
 
+# What a sheet append may rewrite besides its envelope (keys are interpolated).
+_SHEET_COLS = frozenset({"record_count", "needs_input", "needs_fix", "dedup_keys"})
+_SHEET_JSON = frozenset({"needs_input", "needs_fix"})
+
+
 def rowcount() -> int:
 	"""Affected rows of the last statement, read before any commit resets it."""
 	cursor = getattr(frappe.db, "_cursor", None)
 	return int(cursor.rowcount) if cursor else 0
 
 
+# One new column per doctype of the File Box routing + sheets migrate.
+_FILEBOX_COLUMNS = (
+	(PA, "collecting"),
+	("Jarvis Approval Request", "sheet"),
+	(CONV, "filebox_sheet_count"),
+	("Jarvis Custom Skill", "file_box_creates"),
+	("Jarvis Settings", "file_box_sheets"),
+)
+
+
+def filebox_migrated() -> bool:
+	"""The File Box routing + sheets migrate ran. Code served ahead of it never names
+	those columns: File Box runs as it did before them. Cached per request."""
+	ready = getattr(frappe.local, "jarvis_filebox_migrated", None)
+	if ready is None:
+		ready = table_ready() and all(frappe.get_meta(dt).has_field(f) for dt, f in _FILEBOX_COLUMNS)
+		frappe.local.jarvis_filebox_migrated = ready
+	return ready
+
+
 def table_ready() -> bool:
 	"""False before migrate creates the table (hooks must no-op then)."""
 	return bool(frappe.db.table_exists(PA))
+
+
+def reseal_sheet(row, *, args: dict, card, **cols) -> bool:
+	"""The collecting-sheet append (the only writer of a live sheet's envelope):
+	re-seal ``args`` over the new card and write it only while ``row`` is still
+	Pending and collecting AND its envelope is the one read (a CAS). The card is
+	stored as the canonical text its hash covers. True iff written."""
+	from jarvis.chat.pending_actions import _seal
+
+	bad = set(cols) - _SHEET_COLS
+	if bad:
+		raise ValueError(f"not a sheet column: {sorted(bad)}")
+	fresh = frappe._dict(row, card=_seal.json_text(card))
+	params = {
+		"n": row.name,
+		"old": row.sealed_call,
+		"new": _seal.seal_call(fresh, args, []),
+		"card": fresh.card,
+		"now": frappe.utils.now_datetime(),
+		**{f"c_{k}": _seal.json_text(v) if k in _SHEET_JSON else v for k, v in cols.items()},
+	}
+	extra = "".join(f", `{k}`=%(c_{k})s" for k in cols)
+	frappe.db.sql(
+		"UPDATE `tabJarvis Pending Action` SET sealed_call=%(new)s, card=%(card)s, modified=%(now)s"
+		+ extra
+		+ " WHERE name=%(n)s AND status='Pending' AND collecting=1 AND sealed_call=%(old)s",
+		params,
+	)
+	return rowcount() == 1
 
 
 def get_row(name: str, *, lock: str | None = None) -> frappe._dict | None:

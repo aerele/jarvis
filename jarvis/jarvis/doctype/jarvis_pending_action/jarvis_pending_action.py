@@ -24,7 +24,7 @@ class JarvisPendingAction(Document):
 		self.summary = plain_text(self.summary)[:SUMMARY_MAX]
 		# Canonical JSON text, stored verbatim (the fields skip the XSS filter), so the
 		# card hash sealed below is exactly what a later unseal recomputes.
-		for field in ("card", "preview", "needs_input"):
+		for field in ("card", "preview", "needs_input", "needs_fix", "sheet_outcome"):
 			self.set(field, _seal.json_text(self.get(field)))
 		if self.flags.pa_args is None:
 			frappe.throw(_("A pending action needs its sealed call."))

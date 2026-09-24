@@ -271,7 +271,7 @@ def _record(conversation: str, row) -> str | None:
 	)
 	filed = _file_conflict(conversation, pin, new) if conflict else None
 	frappe.db.commit()
-	if filed:
+	if filed and not _link(conversation, filed[1]):
 		_notify(conv.owner, conversation, *filed)
 	if conflict:
 		return _CONFLICT_NOTE.format(new=_safe(new["creates"], 140), pin=_safe(pin["creates"], 140))
@@ -340,6 +340,13 @@ def _file_conflict(conversation: str, pin: dict, new: dict) -> tuple | None:
 		f"'{new['slug']}' drafts {_safe(new['creates'], 140)}. Which one should it follow?",
 		[pin["slug"], new["slug"], SKIP],
 	)
+
+
+def _link(conversation: str, name: str) -> str | None:
+	"""A conflict filed mid-run joins the run's sheet (a questions-only one first)."""
+	from jarvis.chat.held_sheets import link_to_sheet
+
+	return link_to_sheet(conversation, [name])
 
 
 def _notify(owner: str, conversation: str, title: str, name: str) -> None:

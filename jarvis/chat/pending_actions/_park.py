@@ -10,7 +10,7 @@ from collections.abc import Callable
 import frappe
 
 from jarvis.chat.pending_actions import _seal
-from jarvis.chat.pending_actions._store import EXECUTING, KINDS, PA, PENDING, lock_conversation
+from jarvis.chat.pending_actions._store import EXECUTING, KINDS, PA, PENDING, SHEET, lock_conversation
 from jarvis.permissions import refuse_in_tool_dispatch
 
 # D7 supersede, as a dotted path. Called under the conversation lock with a live
@@ -24,6 +24,8 @@ SUPERSEDE_HOOK: str | None = "jarvis.chat.pending_confirm.supersede_on_park"
 TARGET_BOUND = frozenset(
 	{"update_doc", "submit_doc", "cancel_doc", "amend_doc", "delete_doc", "apply_workflow_action"}
 )
+# A File Box sheet's own columns (``park(sheet=...)``).
+_SHEET_FIELDS = frozenset({"collecting", "collecting_turn", "record_count", "question_count", "needs_fix"})
 
 
 class ConfirmationPendingError(Exception):
@@ -96,6 +98,7 @@ def park(
 	dedup_keys: list[str] | tuple = (),
 	waiters: list[str] | tuple = (),
 	needs_input=None,
+	sheet: dict | None = None,
 	legacy_pending: Callable[[str], bool] | None = None,
 	display_row: Callable[[object], None] | None = None,
 ) -> str:
@@ -108,6 +111,7 @@ def park(
 	- ``waiters``: held rows' conversations, primary first (defaults to ``conversation``).
 	- ``dedup_key`` / ``dedup_keys``: a held row's primary key (the unique ``open_key``)
 	  and every per-item key, stored keyed (HMAC) for the waiter subset rule.
+	- ``sheet``: a File Box sheet's own columns (``_SHEET_FIELDS``).
 
 	Raises ``ConfirmationPendingError`` (single-flight) and ``frappe.PermissionError``
 	inside a tool call (S6)."""
@@ -115,7 +119,9 @@ def park(
 	if kind not in KINDS or not (owner_user and exec_user and tool) or not isinstance(args, dict):
 		raise ValueError("park: kind, owner_user, exec_user, tool and args are required")
 	conversation = conversation or None
-	waiters = list(waiters) or ([conversation] if kind == "file_box_held" and conversation else [])
+	if set(sheet or ()) - _SHEET_FIELDS:
+		raise ValueError("park: not a sheet column")
+	waiters = list(waiters) or ([conversation] if kind in ("file_box_held", SHEET) and conversation else [])
 	if waiters and waiters[0] != conversation:
 		raise ValueError("park: the primary waiter must be the conversation")
 	frappe.db.commit()
@@ -146,6 +152,7 @@ def park(
 				if dedup_keys
 				else None,
 				"needs_input": needs_input,
+				**(sheet or {}),
 				"waiters": [
 					{"conversation": c, "role": "primary" if i == 0 else "waiter"}
 					for i, c in enumerate(waiters)

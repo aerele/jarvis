@@ -5,7 +5,10 @@ in a ``file_box=1`` conversation, under the conversation lock (F7: commit, then
 ``FOR UPDATE`` as the first statement, then the reads; released before any
 auto-apply dispatch). Rules, first match wins:
 
-a. this conversation waits on a Pending held write -> every write is refused;
+a. this conversation waits on an undecided held write or a sealed sheet -> every
+   write is refused. With a collecting sheet (or ``file_box_sheets`` on) masters
+   collect on it, Approval Requests apply and link to it, and a draft waits while
+   it holds records (or questions, before any draft): ``held_sheets``;
 b. ``update_wiki`` -> the gate's fenced wiki proposal;
 c. ``Jarvis Approval Request`` create/update -> applied (single, or an all-AR batch);
 d. a denied doctype in any item -> refused; while a skill_conflict routing question
@@ -153,12 +156,19 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		return _refuse("InvalidArgumentError", "args must be a JSON object; nothing was written.")
 	if tool == "call_connector" and api._connector_call_is_safe_read(args):
 		return None
+	from jarvis.chat import held_sheets
+
 	frappe.db.commit()
 	lock_conversation(conversation)
+	collected = None
 	try:
 		verdict, payload = _classify(tool, args, conversation)
 		if verdict == "hold":
 			return _hold(tool, args, conversation, payload)
+		if verdict in ("collect", "split"):
+			collected = held_sheets.collect(conversation, *payload)
+			if verdict == "collect" or not collected.get("ok"):
+				return collected
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(
@@ -171,16 +181,26 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		if tool == "create_doc" and result.get("ok"):
 			api._stamp_file_box_draft(conversation, result.get("data"))
 		return result
+	if verdict == "question":
+		return held_sheets.file_questions(tool, args, conversation)
+	if verdict == "split":
+		return held_sheets.file_split(args, conversation, collected)
 	return payload  # a refusal envelope, or None (fall through)
 
 
 def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 	"""``(verdict, payload)``: ``refuse`` + envelope, ``pass`` + None, ``apply`` +
-	None, or ``hold`` + the items. Read-only, under the conversation lock."""
+	None, ``hold`` + the items, or with sheets ``question`` + None / ``collect`` or
+	``split`` + ``(master items, sheet)``. Read-only, under the conversation lock."""
 	from jarvis import api
+	from jarvis.chat import held_sheets
 
 	if waiting_on(conversation):
 		return "refuse", _refuse("ApprovalPendingError", _PENDING_REFUSAL)
+	sheet = held_sheets.live_sheet(conversation)
+	if sheet and held_sheets.paused(sheet):
+		return "refuse", _refuse("ApprovalPendingError", _PENDING_REFUSAL)
+	sheets = bool(sheet) or held_sheets.enabled()
 	if tool == "update_wiki":
 		return "pass", None
 	bulk = api._is_bulk_call(args) or tool == "create_docs"
@@ -200,7 +220,7 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 	items = held_parties.items_of(tool, args)
 	doctypes = [i["doctype"] for i in items]
 	if items and all(dt == AR for dt in doctypes):
-		return "apply", None
+		return held_sheets.classify_questions(tool, items, conversation, sheet) if sheets else ("apply", None)
 	for dt in doctypes:
 		refusal = _denied(dt)
 		if refusal:
@@ -218,8 +238,10 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 		)
 	if submittable and _is_draft(items[0]):
 		refusal = filebox_skills.target_refusal(conversation, items[0]["doctype"])
+		if not refusal and sheets:
+			refusal = held_sheets.draft_refusal(conversation, sheet)
 		return ("refuse", refusal) if refusal else ("apply", None)
-	return "hold", items
+	return held_sheets.classify_masters(items, conversation, sheet) if sheets else ("hold", items)
 
 
 def _denied(doctype: str) -> dict | None:
@@ -253,8 +275,6 @@ def collect_missing(tool: str, items: list[dict]) -> list[dict]:
 	parentfield?, idx?, fieldname}]``, or ``[]`` unless missing mandatory fields
 	the board can fill (permlevel 0, not secret, a form control) are the ONLY
 	problem. The inserts' hooks run under the dispatch-depth guard, as a tool's do."""
-	from jarvis.chat._record_summary import is_secret
-	from jarvis.chat.api import _NON_EDIT_FIELDTYPES
 	from jarvis.tools._preview_sandbox import preview_sandbox
 	from jarvis.tools.create_doc import _insert_one, _validate_create_args
 
@@ -267,26 +287,35 @@ def collect_missing(tool: str, items: list[dict]) -> list[dict]:
 			for index, item in enumerate(items):
 				_validate_create_args(item["doctype"], item["values"])
 				doc = _insert_one(item["doctype"], item["values"], ignore_mandatory=True)
-				for d in (doc, *doc.get_all_children()):
-					for fieldname, _msg in d._get_missing_mandatory_fields():
-						df = d.meta.get_field(fieldname)
-						# Rows can't be added, nor secrets / non-form fields filled, on the board.
-						if (
-							not df
-							or df.permlevel
-							or df.fieldtype in _NON_EDIT_FIELDTYPES
-							or is_secret(d.meta, fieldname)
-						):
-							return []
-						entry = {"doc_index": index, "doctype": item["doctype"], "fieldname": fieldname}
-						if d is not doc:
-							entry.update(parentfield=d.parentfield, idx=d.idx)
-						missing.append(entry)
+				found = missing_fields(doc, index)
+				if found is None:
+					return []
+				missing += found
 	except Exception:
 		return []
 	finally:
 		frappe.local.jarvis_dispatch_depth -= 1
 		frappe.clear_messages()
+	return missing
+
+
+def missing_fields(doc, index: int) -> list[dict] | None:
+	"""The mandatory fields ``doc`` (inserted with ``ignore_mandatory``) still misses,
+	per child row too; None when one of them can't be filled on the board."""
+	from jarvis.chat._record_summary import is_secret
+	from jarvis.chat.api import _NON_EDIT_FIELDTYPES
+
+	missing = []
+	for d in (doc, *doc.get_all_children()):
+		for fieldname, _msg in d._get_missing_mandatory_fields():
+			df = d.meta.get_field(fieldname)
+			# Rows can't be added, nor secrets / non-form fields filled, on the board.
+			if not df or df.permlevel or df.fieldtype in _NON_EDIT_FIELDTYPES or is_secret(d.meta, fieldname):
+				return None
+			entry = {"doc_index": index, "doctype": doc.doctype, "fieldname": fieldname}
+			if d is not doc:
+				entry.update(parentfield=d.parentfield, idx=d.idx)
+			missing.append(entry)
 	return missing
 
 

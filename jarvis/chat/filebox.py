@@ -1041,7 +1041,8 @@ def _rerun_one(conversation: str) -> dict:
 		CONV, conversation, "filebox_rerun_at", frappe.utils.now_datetime(), update_modified=False
 	)
 	held = _supersede_held(conversation)
-	# A fresh routing state: only the re-validated pin is recorded again.
+	# A fresh routing state (only the re-validated pin is recorded again) and a
+	# fresh two-sheet budget.
 	frappe.db.set_value(
 		CONV,
 		conversation,
@@ -1051,6 +1052,7 @@ def _rerun_one(conversation: str) -> dict:
 			"filebox_skills": json.dumps([pin]) if pin and pin["docname"] else None,
 			"filebox_skill_choice": None,
 			"filebox_skipped_at": None,
+			"filebox_sheet_count": 0,
 		},
 		update_modified=False,
 	)
