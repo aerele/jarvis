@@ -6,9 +6,10 @@ have different semantics and deliberately do not receive this receipt.
 """
 
 import frappe
+from frappe.exceptions import ValidationError
 from frappe.utils import getdate, nowdate
 
-from jarvis.exceptions import PermissionDeniedError
+from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._company_scope import assert_company_permitted
 
 REPORTS = frozenset(
@@ -34,7 +35,7 @@ def resolve_scope(report_name: str, filters: dict) -> tuple[dict, dict | None]:
 	):
 		raise PermissionDeniedError("No permission to access the report company")
 	resolved["company"] = company
-	resolved["report_date"] = str(getdate(resolved.get("report_date") or nowdate()))
+	resolved["report_date"] = _report_date(resolved.get("report_date"))
 	return resolved, {
 		"version": 1,
 		"report_name": report_name,
@@ -44,6 +45,16 @@ def resolve_scope(report_name: str, filters: dict) -> tuple[dict, dict | None]:
 		if resolved.get("in_party_currency") or resolved.get("party_account")
 		else "company",
 	}
+
+
+def _report_date(value) -> str:
+	try:
+		parsed = getdate(value or nowdate())
+	except (ValidationError, ValueError, TypeError) as e:
+		raise InvalidArgumentError(f"report_date is not a valid date: {value!r}") from e
+	if not parsed:
+		raise InvalidArgumentError(f"report_date is not a valid date: {value!r}")
+	return str(parsed)
 
 
 def attach_scope(result: dict, scope: dict | None) -> dict:
