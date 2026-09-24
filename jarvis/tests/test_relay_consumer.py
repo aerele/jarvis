@@ -287,6 +287,61 @@ class TestRelayTurnEvents(FrappeTestCase):
 			[{"kind": "relay:error", "state": "failed_final", "error": FAILED_FINAL_ERROR}],
 		)
 
+	def test_final_top_level_stop_reason_aborted_is_a_yield_not_a_failure(self):
+		# Corrected wire shape (verified live, 2026.9.3): the image/video/music
+		# tools' background-detach yield ends through a `final` whose
+		# stopReason is "aborted" (never "error"), sometimes with `message`
+		# omitted entirely - the SAME shape #543's failed-final guard covers,
+		# but this one must route into the yield-wait, not FAILED_FINAL_ERROR.
+		sess = self._sess([_chat_frame("r1", "sk", "final", stopReason="aborted")])
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(out, [{"kind": "relay:error", "state": "aborted", "text": ""}])
+
+	def test_final_top_level_stop_reason_aborted_with_message_present_is_a_yield(self):
+		sess = self._sess(
+			[
+				_chat_frame(
+					"r1",
+					"sk",
+					"final",
+					stopReason="aborted",
+					message={"content": [{"type": "text", "text": ""}], "stopReason": "aborted"},
+				)
+			]
+		)
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(out, [{"kind": "relay:error", "state": "aborted", "text": ""}])
+
+	def test_final_nested_message_stop_reason_aborted_is_a_yield(self):
+		# The transcript-projected shape: no top-level stopReason, only nested.
+		sess = self._sess(
+			[
+				_chat_frame(
+					"r1",
+					"sk",
+					"final",
+					message={"content": [{"type": "text", "text": ""}], "stopReason": "aborted"},
+				)
+			]
+		)
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(out, [{"kind": "relay:error", "state": "aborted", "text": ""}])
+
+	def test_final_real_text_beats_a_stray_aborted_stop_reason(self):
+		sess = self._sess(
+			[
+				_chat_frame(
+					"r1",
+					"sk",
+					"final",
+					stopReason="aborted",
+					message={"content": [{"type": "text", "text": "a real answer"}]},
+				)
+			]
+		)
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(out, [{"kind": "relay:final", "text": "a real answer"}])
+
 	def test_failed_final_names_the_provider_reason_from_the_lifecycle_frame(self):
 		# The lifecycle error frame is the ONLY place the runtime names the failure.
 		# It is dropped from the terminal path (the chat event stays the single

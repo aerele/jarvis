@@ -513,6 +513,32 @@ def _chat_final_failed(payload: dict, text: str | None) -> bool:
 	return msg.get("stopReason") == "error"
 
 
+def _is_yield_aborted_final(payload: dict, text: str | None) -> bool:
+	"""True when a ``state == "final"`` chat event is actually the agent
+	runtime's image/video/music tools' unconditional background-detach yield
+	(sessions_yield/turnHandoff), NOT a real failure or a plain empty final.
+
+	Verified against the 2026.9.3 bundle: the yielded run's terminal is a
+	``broadcastChatFinal`` whose assistant message is the runtime's own
+	``createYieldAbortedResponse`` - empty text with ``stopReason == "aborted"``
+	(never "error"). That ``stopReason`` rides in EITHER of the two shapes
+	``_chat_final_failed`` already has to tell apart: top-level (``message``
+	present or entirely omitted) or nested inside ``message``. MUST be checked
+	BEFORE ``_chat_final_failed`` - that guard's "no message at all" branch
+	would otherwise classify the omitted-``message`` shape as a hard failure
+	(FAILED_FINAL_ERROR) instead of the deferred-reply wait.
+
+	A real (possibly partial) answer always wins, same rule as
+	``_chat_final_failed``. This intentionally does NOT check for
+	``stopReason == "error"`` - that stays failed_final, unchanged."""
+	if text:
+		return False
+	if payload.get("stopReason") == "aborted":
+		return True
+	msg = payload.get("message")
+	return isinstance(msg, dict) and msg.get("stopReason") == "aborted"
+
+
 def _persisted_device_id() -> str:
 	"""Cheap unauthenticated read of Jarvis Settings.chat_device_id.
 
@@ -1256,6 +1282,19 @@ class AgentSession:
 				state = payload.get("state")
 				if state == "final":
 					text = _chat_final_text(payload)
+					# The runtime's image/video/music tools' unconditional
+					# background-detach yield reaches THIS path too (not only
+					# state=="aborted" below): a `final` whose text is empty and
+					# whose stopReason (top-level or nested in message) is
+					# "aborted", not "error". Route it through the SAME
+					# relay:error/aborted shape the state=="aborted" branch
+					# yields, so the caller's yield-wait applies unchanged.
+					# MUST be checked before _chat_final_failed - that guard's
+					# "no message at all" branch would otherwise call this a
+					# hard failure instead of a deferred reply.
+					if _is_yield_aborted_final(payload, text):
+						yield {"kind": "relay:error", "state": "aborted", "text": ""}
+						return
 					# A "final" whose assistant turn actually FAILED (stopReason
 					# error / stream-error sentinel) is surfaced as a terminal
 					# error, not a silent empty bubble. See _chat_final_failed.
