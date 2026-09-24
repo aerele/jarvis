@@ -1,4 +1,4 @@
-"""Curated "What can I ask Jarvis?" task cards (static, like _preset_catalog.py).
+"""Curated "What can I ask Jarvis?" task cards (static).
 
 Each card names exactly ONE tool; its SAFETY BADGE is derived at serve time from
 ``jarvis.api._gating_badge`` and never stored here. Tests forbid multi-tool
