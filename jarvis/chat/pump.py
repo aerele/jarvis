@@ -77,6 +77,7 @@ import frappe
 
 from jarvis import compat
 from jarvis.chat import turn_state as ts
+from jarvis.chat.agent_client import YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import AgentUnreachableError
 
@@ -1448,6 +1449,15 @@ class _RunState:
 	pending_delta: str = ""
 	events_since_flush: int = 0
 	last_flush_mono: float = 0.0
+	# --- openclaw-yield continuation wait (image/video/music tools' unconditional
+	# background-detach abort) --------------------------------------------------- #
+	# Non-None while this run is parked awaiting the deferred tool's follow-up
+	# chat final on the same session_key (see on_terminal / _yield_wait_sweep).
+	# ``yield_payload`` is the ORIGINAL empty-aborted terminal payload, stashed so
+	# a timeout settles EXACTLY as if no yield had been detected (today's error
+	# path, just delayed).
+	yield_deadline: float | None = None
+	yield_payload: dict | None = None
 
 
 @dataclass
@@ -1692,6 +1702,9 @@ def drain_slice(ctx: PumpContext) -> str:
 	  5. propagate a lease loss signalled from a lane callback;
 	  6. cancel-requested sweep (out-of-band ``chat.abort`` then the aborted
 	     terminal + settle);
+	  6b. openclaw-yield continuation-wait sweep (expire runs past
+	      YIELD_CONTINUATION_WAIT_S with no follow-up run on the session_key —
+	      settle exactly as the original yield would have, just delayed);
 	  7. heartbeat + lease renew (0 rows ⇒ lease-loss exit);
 	  8. idle-exit conditional release (0 rows ⇒ CONTINUE, OAR-12).
 
@@ -1729,6 +1742,7 @@ def drain_slice(ctx: PumpContext) -> str:
 		return "transport_closed"
 
 	_cancel_sweep(ctx)
+	_yield_wait_sweep(ctx)  # OAR-image-defer: expire runs past YIELD_CONTINUATION_WAIT_S
 
 	# GAP 3 A2: progress = the slice did real drain work (promoted / dispatched a turn
 	# or applied a mux frame) OR the pump is correctly capacity-blocked (fail-closed:
@@ -2270,6 +2284,73 @@ def _flush_all_pending(ctx: PumpContext) -> None:
 			frappe.log_error(title="pump.flush_pending", message=frappe.get_traceback())
 
 
+def _is_unprompted_yield(run_id: str, kind: str, payload: dict) -> bool:
+	"""True for an aborted terminal that is NOT a user Stop: empty/whitespace
+	text (a real partial-content abort still errors normally) AND the Turn row's
+	``cancel_requested`` is unset (the pump's OWN authoritative stop signal -
+	``_cancel_sweep`` is the only thing that drives a genuine user-stop aborted
+	terminal, and it always sets this first). A stale read here is safe either
+	way: if the flag flips to 1 immediately after, the yield-wait is entered but
+	the very next ``_cancel_sweep`` tick finds the Turn still `streaming` with
+	`cancel_requested=1` and settles it cancelled anyway (see on_terminal) - one
+	slice of latency, never a lost stop."""
+	if kind != "relay:error" or payload.get("state") != "aborted":
+		return False
+	if (payload.get("text") or "").strip():
+		return False
+	return not bool(frappe.db.get_value(TURN, run_id, "cancel_requested"))
+
+
+def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> None:
+	"""The CAS + settlement invocation ``on_terminal`` runs for an ordinary
+	terminal, factored out so ``_yield_wait_sweep`` can replay it VERBATIM for a
+	timed-out openclaw-yield wait (today's error path, just delayed - see
+	``_is_unprompted_yield``). Raises ``ts.LeaseLostExit`` on a lost epoch; the
+	caller converts that to ``ctx.lease_lost``."""
+	won = ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload)
+	if not won:
+		if _epoch_lost(ctx, rs.run_id):
+			ts.lease_lost_exit(rs.run_id)
+		return
+	rs.version += 1
+	frappe.db.commit()
+	ctx.deps.invoke_settlement(
+		rs.run_id,
+		relay_target_id=ctx.relay_target_id,
+		epoch=ctx.epoch,
+		version=rs.version,
+		terminal_kind=kind,
+		terminal_payload=payload,
+		assistant_message=rs.assistant_message,
+		owner=rs.owner,
+		conversation=rs.conversation,
+		deps=ctx.deps,
+	)
+
+
+def _yield_wait_sweep(ctx: PumpContext) -> None:
+	"""Expire runs whose openclaw-yield continuation-wait (``on_terminal`` /
+	``_is_unprompted_yield``) has outrun ``YIELD_CONTINUATION_WAIT_S`` with
+	nothing landing on the session_key. Settles EXACTLY as ``on_terminal`` would
+	have at the original yield - today's error path, just delayed. Called every
+	slice, right after ``_cancel_sweep`` (a Stop mid-wait needs no handling
+	here - see on_terminal's comment)."""
+	now = _monotonic()
+	for rs in list(ctx.runs.values()):
+		if rs.yield_deadline is None or now < rs.yield_deadline:
+			continue
+		payload = rs.yield_payload
+		rs.yield_deadline = None
+		rs.yield_payload = None
+		if ctx.mux is not None:
+			ctx.mux.release_continuation(rs.gateway_run_id or rs.run_id)
+		try:
+			_settle_terminal(ctx, rs, "relay:error", payload)
+		except ts.LeaseLostExit:
+			ctx.lease_lost = rs.run_id
+			return
+
+
 def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 	"""Build the per-turn lane callbacks (they run ON THE PUMP THREAD inside
 	``mux.dispatch``). A ``LeaseLostExit`` raised inside a callback is CAUGHT and
@@ -2347,25 +2428,22 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 			# Flush the last batched cumulative mirror before the terminal so the
 			# Message row holds the full streamed text if settlement carries no final.
 			_flush_deltas(ctx, rs)
-			won = ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload)
-			if not won:
-				if _epoch_lost(ctx, rs.run_id):
-					ts.lease_lost_exit(rs.run_id)
-				return
-			rs.version += 1
-			frappe.db.commit()
-			ctx.deps.invoke_settlement(
-				rs.run_id,
-				relay_target_id=ctx.relay_target_id,
-				epoch=ctx.epoch,
-				version=rs.version,
-				terminal_kind=kind,
-				terminal_payload=payload,
-				assistant_message=rs.assistant_message,
-				owner=rs.owner,
-				conversation=rs.conversation,
-				deps=ctx.deps,
-			)
+			if _is_unprompted_yield(rs.run_id, kind, payload):
+				# openclaw's image/video/music tools unconditionally detach into a
+				# background task and abort THIS run with an empty terminal - and
+				# nobody asked to stop. Park (mux-side, session_key-keyed) instead
+				# of settling: the deferred tool's follow-up run lands on the SAME
+				# session_key under a fresh runId within YIELD_CONTINUATION_WAIT_S
+				# (_yield_wait_sweep enforces the bound; a Stop mid-wait is caught
+				# for free by the next _cancel_sweep - the Turn row is left
+				# `state='streaming'`, exactly like any other in-flight cancel).
+				if ctx.mux is not None and ctx.mux.await_continuation(rs.gateway_run_id or rs.run_id):
+					rs.yield_payload = payload
+					rs.yield_deadline = _monotonic() + YIELD_CONTINUATION_WAIT_S
+					return
+				# No mux / lane already gone (e.g. a takeover retired it) - fall
+				# through and settle exactly as if no yield had been detected.
+			_settle_terminal(ctx, rs, kind, payload)
 		except ts.LeaseLostExit:
 			ctx.lease_lost = rs.run_id
 
@@ -2420,6 +2498,7 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 	for r in rows:
 		run_id = r["run_id"]
 		rs = ctx.runs.get(run_id)
+		awaiting_continuation = bool(rs and rs.yield_deadline is not None)
 		session_key = (
 			rs.session_key if rs else _load_dispatch(_read_dispatch_row(run_id) or {}).get("session_key", "")
 		)
@@ -2427,10 +2506,17 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 		# its ack — the abort result is never consulted (the terminal frame arrives
 		# regardless and the mux cancels the future on stop), so a per-abort .result()
 		# wait would only stall the reactor. We record the aborted terminal from the
-		# row + settle below, independent of the abort ack.
+		# row + settle below, independent of the abort ack. A yielded run's
+		# ``gateway_run_id`` is the ORIGINAL run openclaw already retired (that is
+		# why we are here waiting) - target the abort at the session's current run
+		# instead of a dead id.
 		try:
 			if ctx.mux is not None and session_key:
-				ctx.mux.abort(session_key, r.get("gateway_run_id"), timeout_s=ACK_TIMEOUT_S)
+				ctx.mux.abort(
+					session_key,
+					None if awaiting_continuation else r.get("gateway_run_id"),
+					timeout_s=ACK_TIMEOUT_S,
+				)
 		except Exception:
 			pass
 		if not ts.record_aborted_terminal(run_id, r["state"], int(r["version"]), ctx.epoch):
@@ -2438,6 +2524,14 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 				ts.lease_lost_exit(run_id)
 			continue
 		frappe.db.commit()
+		if awaiting_continuation:
+			# The Stop won the race against the deferred tool's continuation -
+			# release the mux's parked lane so a LATE continuation frame is a
+			# harmless stray instead of trying to adopt into an already-settled row.
+			rs.yield_deadline = None
+			rs.yield_payload = None
+			if ctx.mux is not None:
+				ctx.mux.release_continuation(rs.gateway_run_id or run_id)
 		owner = frappe.db.get_value(CONV, r["conversation"], "owner")
 		try:
 			ctx.deps.invoke_settlement(
@@ -2683,26 +2777,38 @@ def _resolve_recovery_tail(ctx: PumpContext, pr: _PendingRecovery, frame: dict) 
 	from jarvis.chat.turn_recovery import _latest_assistant_raw
 
 	raw = _latest_assistant_raw(messages, min_seq=pr.min_seq, max_seq=pr.max_seq)
-	text, _rels, marker_stripped = egress_rules.redact_final_with_media(raw)
+	text, rels, marker_stripped = egress_rules.redact_final_with_media(raw)
 	# A media/marker-only reply strips to "" but IS real in-window output — settle
 	# final with the clean (empty) text so the raw marker never lingers in stored
 	# content, rather than erroring and leaving the streamed tail. Parity with cron
 	# _recover_one. An empty window with no marker still errors honestly (Amendment D).
+	# ``rels`` rides through so a recovered deferred image-gen reply still seeds
+	# its image, not just the text (previously dropped here).
 	if text or marker_stripped:
-		_settle_recovered_final(ctx, pr.r, text, marker_stripped=marker_stripped)
+		_settle_recovered_final(ctx, pr.r, text, media_rels=rels, marker_stripped=marker_stripped)
 	else:
 		_settle_recovered_errored(ctx, pr.r)
 
 
-def _settle_recovered_final(ctx: PumpContext, r: dict, text: str, *, marker_stripped: bool = False) -> None:
+def _settle_recovered_final(
+	ctx: PumpContext,
+	r: dict,
+	text: str,
+	*,
+	media_rels: list[str] | None = None,
+	marker_stripped: bool = False,
+) -> None:
 	"""Genuine missed-terminal recovery: advance streaming->terminal_observed under
 	this epoch with the in-window durable text, mark ``was_recovered`` (SUX-6 — the
 	client may do a visible replacement), and settle to final. ``marker_stripped``
 	rides the payload so settlement forces the content overwrite on a marker-only
-	reply (empty text) instead of keeping the raw streamed tail."""
+	reply (empty text) instead of keeping the raw streamed tail. ``media_rels``
+	rides it too so ``finalize._effect_rich_outputs`` seeds the image."""
 	run_id = r["run_id"]
 	v = int(r["version"])
 	payload = {"text": text}
+	if media_rels:
+		payload["media_rels"] = media_rels
 	if marker_stripped:
 		payload["marker_stripped"] = True
 	if not ts.mark_terminal_observed(run_id, v, ctx.epoch, "relay:final", payload):

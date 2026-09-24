@@ -172,26 +172,38 @@ def _media_lines(text: str):
 			yield i, m.group(1).strip().strip("`").strip()
 
 
+def _valid_media_path(path: str) -> bool:
+	"""Root-confined, non-traversal, allowed-image-extension check shared by the
+	``MEDIA:`` marker and the embedded-path detectors below."""
+	if not path.startswith(_MEDIA_ROOT):
+		return False
+	rel = path[len(_MEDIA_ROOT) :]
+	# ``..`` can't escape the media root (the gateway also realpath-confines),
+	# but reject it here so we never even send a traversal path.
+	if not rel or rel.startswith("/") or ".." in rel.split("/"):
+		return False
+	return path.lower().endswith(tuple(_IMAGE_EXTS))
+
+
 def detect_media_paths(text: str) -> list[str]:
-	"""Full absolute container paths for line-anchored, local, image-extension
-	``MEDIA:`` markers under the agent media root, capped per turn.
+	"""Full absolute container paths for a qualifying (root-confined,
+	non-traversal, image-extension) media reference, capped per turn:
+	line-anchored ``MEDIA:`` markers FIRST, then embedded-path lines (see
+	``_embedded_media_lines`` - openclaw's image/video/music tools' deferred
+	reply, e.g. ``Attachment: <path>``).
 
 	The gateway resolves the full path against its own media roots, so we pass
 	the whole path (not a relpath). External URLs, non-image files, and traversal
-	attempts are excluded here — they are still stripped from the reply by
-	``strip_media_lines`` (strip-but-don't-fetch)."""
+	attempts are excluded here — a ``MEDIA:`` line is still stripped from the
+	reply regardless (strip-but-don't-fetch, ``strip_media_lines``); an embedded
+	one is left untouched (see ``_embedded_media_lines``)."""
 	out: list[str] = []
-	exts = tuple(_IMAGE_EXTS)
 	for _, path in _media_lines(text):
-		if not path.startswith(_MEDIA_ROOT):
-			continue
-		rel = path[len(_MEDIA_ROOT) :]
-		# ``..`` can't escape the media root (the gateway also realpath-confines),
-		# but reject it here so we never even send a traversal path.
-		if not rel or rel.startswith("/") or ".." in rel.split("/"):
-			continue
-		if not path.lower().endswith(exts):
-			continue
+		if _valid_media_path(path):
+			out.append(path)
+			if len(out) >= _MAX_MEDIA_PER_TURN:
+				return out
+	for _, path in _embedded_media_lines(text):
 		out.append(path)
 		if len(out) >= _MAX_MEDIA_PER_TURN:
 			break
@@ -200,27 +212,74 @@ def detect_media_paths(text: str) -> list[str]:
 
 def strip_media_lines(text: str) -> str:
 	"""Remove EVERY line-anchored ``MEDIA:`` line from the visible reply — handled,
-	external, malformed, even a ``MEDIA:``-prefixed prose/fenced line.
+	external, malformed, even a ``MEDIA:``-prefixed prose/fenced line — PLUS any
+	line carrying a qualifying embedded media path (see ``_embedded_media_lines``).
 
-	Deliberately broader than the agent runtime (which keeps a ``MEDIA:``-prefixed
-	line whose payload is not a path, and preserves fenced examples): we favour
-	leak-safety over that fidelity (Q3 decision D2). Being fence-UNAWARE is
-	load-bearing — an unbalanced fence must never leave a real trailing marker."""
+	Deliberately broader than the agent runtime for ``MEDIA:`` (which keeps a
+	``MEDIA:``-prefixed line whose payload is not a path, and preserves fenced
+	examples): we favour leak-safety over that fidelity (Q3 decision D2). Being
+	fence-UNAWARE is load-bearing — an unbalanced fence must never leave a real
+	trailing marker. An embedded-path line is the OPPOSITE: only stripped when its
+	path actually qualifies — it is ordinary prose otherwise (e.g. a path outside
+	the media root, a traversal attempt, or a non-image extension), never leak-
+	safety-first, since it is not a dedicated protocol marker."""
 	if not text:
 		return text
 	drop = {i for i, _ in _media_lines(text)}
+	drop |= {i for i, _ in _embedded_media_lines(text)}
 	if not drop:
 		return text  # nothing to strip -> return verbatim (no line-ending normalisation)
 	kept = [ln for i, ln in enumerate(text.splitlines()) if i not in drop]
 	return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
+# --------------------------------------------------------------------------- #
+# Embedded-path media detection (image/video/music tool deferred replies).
+#
+# openclaw's image/video/music generation tools detach into a background task
+# and, ~25-30s later, restart the session with a model-authored reply that
+# NAMES the generated file's path in free text - "Attachment: <path>",
+# `path="<path>"`, or a markdown image `![alt](<path>)` - not a ``MEDIA:``
+# marker line (that is a distinct protocol the runtime uses for its own
+# "automatic" delivery fallback). The wording is model-authored and unstable;
+# the absolute path under the agent media root is the only stable anchor.
+# --------------------------------------------------------------------------- #
+
+# A path token: the media root followed by everything up to the first
+# whitespace / quote / paren / angle-bracket / comma / semicolon - the usual
+# terminators of "Attachment: <path>", 'path="<path>"' and markdown
+# "![alt](<path>)". Matched on ANY line, not just a dedicated marker line.
+_EMBEDDED_MEDIA_PATH = re.compile(re.escape(_MEDIA_ROOT) + r"[^\s\"'()<>,;]+")
+
+
+def _embedded_media_lines(text: str):
+	"""Yield ``(line_index, path)`` for lines carrying a QUALIFYING embedded
+	media path outside a ``MEDIA:`` marker. A line whose only candidate path is
+	NOT qualifying (outside the root, a traversal attempt, a non-image
+	extension) yields nothing for that line - it is ordinary prose and stays
+	completely untouched, never partially stripped. A line already claimed by a
+	``MEDIA:`` marker is skipped (that marker already owns the line)."""
+	if not isinstance(text, str):
+		return
+	marker_lines = {i for i, _ in _media_lines(text)}
+	for i, line in enumerate(text.splitlines()):
+		if i in marker_lines:
+			continue
+		for m in _EMBEDDED_MEDIA_PATH.finditer(line):
+			path = m.group(0)
+			if _valid_media_path(path):
+				yield i, path
+				break  # one image per line is all the tool ever emits
+
+
 def has_media_marker(text: str) -> bool:
 	"""True if the reply has ANY line-anchored ``MEDIA:`` directive — qualifying
-	(fetchable image) or not (``.pdf`` / external / traversal). Broader than
-	``detect_media_paths``: used to force the stored-content overwrite so that NO
-	recognized marker survives in stored content, even one we don't fetch."""
-	return next(_media_lines(text), None) is not None
+	(fetchable image) or not (``.pdf`` / external / traversal) — OR any line
+	``strip_media_lines`` will remove for a qualifying embedded path. Broader
+	than ``detect_media_paths``: used to force the stored-content overwrite so
+	that no marker/path line survives in stored content even when stripping it
+	leaves the reply empty."""
+	return next(_media_lines(text), None) is not None or next(_embedded_media_lines(text), None) is not None
 
 
 def fetch_media(agent_url: str, token: str, source: str) -> bytes | None:

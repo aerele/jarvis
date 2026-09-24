@@ -56,7 +56,14 @@ class TestDetectMediaPaths(unittest.TestCase):
 		self.assertEqual(gm.detect_media_paths(f"　MEDIA:{_IMG}"), [_IMG])
 
 	def test_ignored_mid_line(self):
-		self.assertEqual(gm.detect_media_paths(f"see the file MEDIA:{_IMG} inline"), [])
+		# A "MEDIA:" NOT at the start of the line is never a dedicated protocol
+		# marker (the runtime's own contract requires line-start) - but as of the
+		# embedded-path detector (TestEmbeddedMediaPaths), the bare qualifying
+		# path itself is STILL found, since it now matches on ANY line. The two
+		# detectors are independent: this only proves the marker path finds
+		# nothing (there is no line-start "MEDIA:" line here).
+		text = f"see the file MEDIA:{_IMG} inline"
+		self.assertEqual([p for _, p in gm._media_lines(text)], [])
 
 	def test_external_url_excluded(self):
 		self.assertEqual(gm.detect_media_paths("MEDIA:https://example.com/x.png"), [])
@@ -134,6 +141,80 @@ class TestStripMediaLines(unittest.TestCase):
 	def test_empty(self):
 		self.assertEqual(gm.strip_media_lines(""), "")
 		self.assertIsNone(gm.strip_media_lines(None))
+
+
+class TestEmbeddedMediaPaths(unittest.TestCase):
+	"""openclaw's image/video/music generation tools unconditionally detach into
+	a background task; ~25-30s later the deferred reply NAMES the generated
+	file's path in free text (Attachment: / path="..." / a markdown image),
+	never a ``MEDIA:`` marker line. Unlike a marker (stripped unconditionally,
+	leak-safety-first), an embedded path is only touched when it FULLY
+	qualifies — anything else is ordinary prose and must survive intact."""
+
+	def test_attachment_line_detected_and_stripped(self):
+		text = f"Here's the bicycle.\nAttachment: {_IMG}"
+		self.assertEqual(gm.detect_media_paths(text), [_IMG])
+		self.assertEqual(gm.strip_media_lines(text), "Here's the bicycle.")
+		self.assertTrue(gm.has_media_marker(text))
+
+	def test_path_kwarg_quoted_detected_and_stripped(self):
+		text = f'1. type=image name="pic" mimeType=image/png path="{_IMG}"\nEnjoy!'
+		self.assertEqual(gm.detect_media_paths(text), [_IMG])
+		out = gm.strip_media_lines(text)
+		self.assertEqual(out, "Enjoy!")
+		self.assertNotIn("/home/node", out)
+
+	def test_markdown_image_detected_and_stripped(self):
+		text = f"Here you go.\n![the bicycle]({_IMG})\nEnjoy!"
+		self.assertEqual(gm.detect_media_paths(text), [_IMG])
+		self.assertEqual(gm.strip_media_lines(text), "Here you go.\nEnjoy!")
+
+	def test_outside_media_root_untouched(self):
+		text = "Attachment: /etc/passwd.png"
+		self.assertEqual(gm.detect_media_paths(text), [])
+		self.assertEqual(gm.strip_media_lines(text), text)
+		self.assertFalse(gm.has_media_marker(text))
+
+	def test_traversal_untouched(self):
+		text = f"Attachment: {_ROOT}../../etc/passwd.png"
+		self.assertEqual(gm.detect_media_paths(text), [])
+		self.assertEqual(gm.strip_media_lines(text), text)
+
+	def test_non_image_extension_untouched(self):
+		text = f"Attachment: {_ROOT}tool-image-generation/report.pdf"
+		self.assertEqual(gm.detect_media_paths(text), [])
+		self.assertEqual(gm.strip_media_lines(text), text)
+		self.assertFalse(gm.has_media_marker(text))
+
+	def test_media_marker_behaviour_is_unchanged(self):
+		# The MEDIA: marker path stays leak-safety-first (unconditional strip)
+		# even though the new embedded-path detector is more conservative.
+		pdf = _ROOT + "tool-image-generation/report.pdf"
+		self.assertTrue(gm.has_media_marker(f"MEDIA:{pdf}"))
+		self.assertEqual(gm.strip_media_lines(f"MEDIA:{pdf}\nok"), "ok")
+
+	def test_media_line_not_double_counted_as_embedded(self):
+		# A MEDIA: marker line is claimed by the marker detector; the embedded
+		# scanner must skip it (no double strip / double cap consumption).
+		text = f"MEDIA:{_IMG}"
+		self.assertEqual(gm.detect_media_paths(text), [_IMG])
+
+	def test_cap_shared_across_marker_and_embedded(self):
+		marker_lines = [f"MEDIA:{_ROOT}tool-image-generation/m{i}.png" for i in range(5)]
+		embedded_lines = [f"Attachment: {_ROOT}tool-image-generation/e{i}.png" for i in range(5)]
+		text = "\n".join(marker_lines + embedded_lines)
+		self.assertEqual(len(gm.detect_media_paths(text)), gm._MAX_MEDIA_PER_TURN)
+
+	def test_only_first_valid_path_per_line(self):
+		a = _ROOT + "tool-image-generation/a.png"
+		b = _ROOT + "tool-image-generation/b.png"
+		text = f"Attachment: {a} (also see {b})"
+		self.assertEqual(gm.detect_media_paths(text), [a])
+
+	def test_no_path_untouched(self):
+		text = "Attachment: nothing generated this turn."
+		self.assertEqual(gm.detect_media_paths(text), [])
+		self.assertEqual(gm.strip_media_lines(text), text)
 
 
 def _streamed_response(status=200, body=b"PNGDATA", chunk=64 * 1024):

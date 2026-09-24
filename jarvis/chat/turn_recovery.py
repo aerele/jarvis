@@ -187,9 +187,15 @@ def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 	turn_message_binding.on_terminal_turn(conversation_id)
 
 
-def _finalize(row: dict, text: str) -> None:
+def _finalize(row: dict, text: str, *, media_rels: list[str] | None = None) -> None:
 	"""Authoritative completion (conditional + idempotent): overwrite content
-	from the raw snapshot, clear the flags, then publish for any live viewer."""
+	from the raw snapshot, clear the flags, then publish for any live viewer.
+
+	``media_rels`` (native-media paths detected on the raw text - see
+	``egress_rules.redact_final_with_media``) rides through to
+	``persist_rich_outputs`` so a recovered turn seeds the SAME inline image a
+	live turn would have. Previously dropped here, silently leaving a recovered
+	deferred image-gen reply text-only."""
 	if not _conditional_clear(
 		row["name"],
 		{
@@ -243,6 +249,7 @@ def _finalize(row: dict, text: str) -> None:
 			row["owner"],
 			"recovered",
 			int(frappe.utils.get_datetime(row["creation"]).timestamp() * 1000) if row.get("creation") else 0,
+			media_rels=media_rels,
 		)
 	except Exception:
 		frappe.log_error(
@@ -408,13 +415,13 @@ def _recover_one(sess: AgentSession, row: dict, active: dict) -> str:
 		min_seq=row.get("agent_seq_watermark") or 0,
 		max_seq=_next_turn_watermark(row["conversation"], row["seq"]),
 	)
-	text, _rels, marker_stripped = egress_rules.redact_final_with_media(raw)
+	text, rels, marker_stripped = egress_rules.redact_final_with_media(raw)
 	# Finalize on real text OR when a MEDIA: marker was stripped to empty — a
 	# media-only reply IS real output (not "no output yet"), so finalize with the
 	# stripped text ("" when marker-only) to ensure the raw marker never lingers in
-	# stored content. D1: recovery strips but does not re-deliver the image.
+	# stored content. ``rels`` rides through to seed the image (see _finalize).
 	if text or marker_stripped:
-		_finalize(row, text)
+		_finalize(row, text, media_rels=rels)
 		return "finalized"
 	return "waiting"  # genuinely no output yet; the ceiling backstop bounds the wait
 
