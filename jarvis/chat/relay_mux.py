@@ -284,6 +284,12 @@ class _Lane:
 		# failed_final, and this in-flight history is the only thing that
 		# tells them apart.
 		self.saw_media_tool_start = False
+		# True once this lane has been adopted onto a fresh runId by
+		# _route_event (the deferred tool's follow-up run on the same
+		# sessionKey). Set at adoption, read in _route_terminal so its
+		# eventual final's terminal payload can be marked "yield_continuation"
+		# for the caller's post-settle rich-output step.
+		self.is_continuation = False
 
 	def next_seq(self) -> int:
 		self.watermark += 1
@@ -537,6 +543,7 @@ class RelayMux:
 					if lane is not None:
 						lane.run_id = run_id
 						lane.awaiting = False
+						lane.is_continuation = True
 						self._runs[run_id] = lane
 					self._awaiting.pop(sk, None)
 		if lane is None:
@@ -645,6 +652,13 @@ class RelayMux:
 				_urls = _chat_final_media_urls(payload)
 				if _urls:  # gateway-attached image/video/audio/document content blocks
 					term_payload["media_urls"] = _urls
+				if lane.is_continuation:
+					# Marks this as the yield's continuation outcome so the
+					# caller's post-settle rich-output step (finalize.
+					# _effect_rich_outputs) knows it may need to harvest the
+					# actual media from separate later transcript messages when
+					# neither media_rels nor media_urls landed here.
+					term_payload["yield_continuation"] = True
 		elif state in ("error", "aborted"):
 			term_kind = "relay:error"
 			# "text" lets pump.on_terminal tell an agent-yield abort (empty)

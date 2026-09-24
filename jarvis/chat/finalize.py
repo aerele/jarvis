@@ -261,6 +261,7 @@ def _effect_rich_outputs(ctx: _Ctx) -> None:
 	payload = settlement._coerce_payload(frappe.db.get_value(TURN, ctx.run_id, "terminal_payload"))
 	media_rels = (payload or {}).get("media_rels") or None
 	media_urls = (payload or {}).get("media_urls") or None
+	yield_continuation = bool((payload or {}).get("yield_continuation"))
 	turn_handler.persist_rich_outputs(
 		am,
 		ctx.conversation,
@@ -269,6 +270,7 @@ def _effect_rich_outputs(ctx: _Ctx) -> None:
 		_turn_start_ms(ctx),
 		media_rels=media_rels,
 		media_urls=media_urls,
+		yield_continuation=yield_continuation,
 	)
 
 

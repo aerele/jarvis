@@ -528,21 +528,27 @@ def _is_yield_aborted_final(payload: dict, text: str | None) -> bool:
 	runtime's image/video/music tools' unconditional background-detach yield
 	(sessions_yield/turnHandoff), NOT a real failure or a plain empty final.
 
-	Verified against the 2026.9.3 bundle: the yielded run's terminal is a
-	``broadcastChatFinal`` whose assistant message is the runtime's own
-	``createYieldAbortedResponse`` - empty text with ``stopReason == "aborted"``
-	(never "error"). That ``stopReason`` rides in EITHER of the two shapes
-	``_chat_final_failed`` already has to tell apart: top-level (``message``
-	present or entirely omitted) or nested inside ``message``. MUST be checked
-	BEFORE ``_chat_final_failed`` - that guard's "no message at all" branch
-	would otherwise classify the omitted-``message`` shape as a hard failure
-	(FAILED_FINAL_ERROR) instead of the deferred-reply wait.
+	Three positive signals, checked in order of directness (live-verified,
+	2026.9.3 bundle) - ANY one is sufficient:
+	  1. an explicit top-level ``yielded`` field (truthy) on the terminal -
+	     the runtime's own, unambiguous marker;
+	  2. ``stopReason == "aborted"`` (never "error"), top-level or nested in
+	     ``message`` - the ``createYieldAbortedResponse`` shape;
+	  3. (checked by the CALLER, not here - see ``MEDIA_GEN_TOOL_NAMES``) a
+	     bare final with none of the above, tied back to a media-gen tool
+	     start seen earlier on this run - the gateway sometimes settles with
+	     no message AND no stopReason AND no ``yielded`` field at all.
+	MUST be checked BEFORE ``_chat_final_failed`` - its "no message at all"
+	branch would otherwise classify signal 1/2's omitted-``message`` shape as
+	a hard failure (FAILED_FINAL_ERROR) instead of the deferred-reply wait.
 
 	A real (possibly partial) answer always wins, same rule as
 	``_chat_final_failed``. This intentionally does NOT check for
 	``stopReason == "error"`` - that stays failed_final, unchanged."""
 	if text:
 		return False
+	if payload.get("yielded"):
+		return True
 	if payload.get("stopReason") == "aborted":
 		return True
 	msg = payload.get("message")
@@ -1487,6 +1493,12 @@ class AgentSession:
 				_urls = _chat_final_media_urls(payload)
 				if _urls:  # gateway-attached image/video/audio/document content blocks
 					out["media_urls"] = _urls
+				# Marks this as the yield's continuation outcome (not an ordinary
+				# turn) so the caller's post-settle rich-output step knows it may
+				# need to harvest the actual media from separate later transcript
+				# messages when neither media_rels nor media_urls landed here -
+				# see turn_handler._harvest_post_yield_media.
+				out["yield_continuation"] = True
 				return out
 			if state in ("error", "aborted"):
 				return {
