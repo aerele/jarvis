@@ -225,7 +225,7 @@ class LaneHandler:
 	    (PRECIOUS, applied exactly once). ``kind`` ∈ {``relay:final``,
 	    ``relay:error``}; ``payload`` = {``text``} for a final, or {``state``,
 	    ``error``, ``text``} for an error/aborted/failed_final (``text`` is the
-	    aborted terminal's own message text, empty for an openclaw-yield abort -
+	    aborted terminal's own message text, empty for an agent-yield abort -
 	    see ``await_continuation``). A raise ⇒ QUARANTINE. May itself call
 	    ``await_continuation`` and return without settling - the mux then skips
 	    retiring the lane (``_apply`` checks ``lane.awaiting`` after the call).
@@ -261,7 +261,7 @@ class _Lane:
 		self.watermark = int(start_seq)
 		self.state = "active"  # active | quarantined | terminal | closed
 		self.poison_count = 0
-		# openclaw-yield continuation wait (image/video/music tools' unconditional
+		# agent-yield continuation wait (image/video/music tools' unconditional
 		# background-detach abort, see pump.on_terminal): True while this lane is
 		# parked waiting for a follow-up chat terminal under a FRESH runId on the
 		# SAME sessionKey. ``state`` stays "active" (the queue keeps accepting) -
@@ -356,7 +356,7 @@ class RelayMux:
 		self._quarantine_pending: list[tuple[_Lane, str]] = []
 		self._map_lock = threading.Lock()
 		# session_key -> the (dead) runId a lane is parked under while awaiting an
-		# openclaw-yield continuation (see ``await_continuation``). Guarded by
+		# agent-yield continuation (see ``await_continuation``). Guarded by
 		# ``_map_lock`` like ``_runs``.
 		self._awaiting: dict[str, str] = {}
 
@@ -506,13 +506,13 @@ class RelayMux:
 		with self._map_lock:
 			lane = self._runs.get(run_id)
 			if lane is not None and lane.awaiting:
-				# A frame under the STILL-PARKED (dead) original runId - openclaw
+				# A frame under the STILL-PARKED (dead) original runId - the agent runtime
 				# never posts anything more under an id it already retired, so
 				# this is stale/stray. Only a frame carrying a NEW runId on the
 				# same sessionKey (handled below) may un-park this lane.
 				lane = None
 			if lane is None and event == "chat" and sk:
-				# openclaw-yield continuation (OAR-image-defer): an unknown runId's
+				# agent-yield continuation (OAR-image-defer): an unknown runId's
 				# CHAT frame (only chat frames carry sessionKey) may be the deferred
 				# tool's follow-up run on a lane parked by ``await_continuation``.
 				# Adopt it in place (mirrors ``rekey_run``, inlined - it takes this
@@ -616,7 +616,7 @@ class RelayMux:
 					term_payload["marker_stripped"] = True
 		elif state in ("error", "aborted"):
 			term_kind = "relay:error"
-			# "text" lets pump.on_terminal tell an openclaw-yield abort (empty)
+			# "text" lets pump.on_terminal tell an agent-yield abort (empty)
 			# from a genuine partial-content abort (image/video/music tools'
 			# unconditional background-detach, see YIELD_CONTINUATION_WAIT_S).
 			# Harmless addition for every other consumer of this payload shape.
@@ -776,7 +776,7 @@ class RelayMux:
 			self._runs.pop(run_id, None)
 
 	def await_continuation(self, run_id: str) -> bool:
-		"""Park a just-terminaled lane awaiting an openclaw-yield continuation
+		"""Park a just-terminaled lane awaiting an agent-yield continuation
 		(pump ``on_terminal``, image/video/music tools' background-detach abort):
 		keep it registered under ``run_id`` (the now-dead gateway id) and index it
 		by session_key so ``_route_event`` can adopt the follow-up run's frames
@@ -885,7 +885,7 @@ class RelayMux:
 					h.on_terminal(ev.data["terminal_kind"], ev.data["payload"])
 				# The terminal is normally the last frame of a run — retire the
 				# lane so subsequent frames for this id count as stray. EXCEPT
-				# when on_terminal just parked it awaiting an openclaw-yield
+				# when on_terminal just parked it awaiting an agent-yield
 				# continuation (``await_continuation``): keep it registered so
 				# the follow-up run's frames can be adopted (``_route_event``).
 				if not lane.awaiting:

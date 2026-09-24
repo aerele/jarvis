@@ -172,7 +172,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		)
 
 	def test_chat_aborted_state_carries_partial_text(self):
-		# A genuine partial-content abort (NOT an openclaw-yield: the runtime did
+		# A genuine partial-content abort (NOT an agent-yield: the runtime did
 		# emit some assistant text before the gateway killed the run) surfaces its
 		# text so a caller (turn_handler) can tell it apart from an empty yield.
 		sess = self._sess(
@@ -394,7 +394,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 
 
 class TestRelayYieldContinuation(FrappeTestCase):
-	"""``AgentSession.relay_yield_continuation`` — the openclaw-yield wait: after
+	"""``AgentSession.relay_yield_continuation`` — the agent-yield wait: after
 	an image/video/music tool's unconditional background-detach abort (empty
 	``state=="aborted"``), wait for the deferred tool's follow-up ``chat``
 	terminal on the SAME session_key under a FRESH (unknown ahead of time)

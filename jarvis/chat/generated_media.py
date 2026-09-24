@@ -189,8 +189,8 @@ def detect_media_paths(text: str) -> list[str]:
 	"""Full absolute container paths for a qualifying (root-confined,
 	non-traversal, image-extension) media reference, capped per turn:
 	line-anchored ``MEDIA:`` markers FIRST, then embedded-path lines (see
-	``_embedded_media_lines`` - openclaw's image/video/music tools' deferred
-	reply, e.g. ``Attachment: <path>``).
+	``_embedded_media_lines`` - the agent runtime's image/video/music tools'
+	deferred reply, e.g. ``Attachment: <path>``).
 
 	The gateway resolves the full path against its own media roots, so we pass
 	the whole path (not a relpath). External URLs, non-image files, and traversal
@@ -236,8 +236,8 @@ def strip_media_lines(text: str) -> str:
 # --------------------------------------------------------------------------- #
 # Embedded-path media detection (image/video/music tool deferred replies).
 #
-# openclaw's image/video/music generation tools detach into a background task
-# and, ~25-30s later, restart the session with a model-authored reply that
+# The agent runtime's image/video/music generation tools detach into a
+# background task and, ~25-30s later, restart the session with a model-authored reply that
 # NAMES the generated file's path in free text - "Attachment: <path>",
 # `path="<path>"`, or a markdown image `![alt](<path>)` - not a ``MEDIA:``
 # marker line (that is a distinct protocol the runtime uses for its own
