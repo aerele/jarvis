@@ -94,11 +94,16 @@ export function useActionRows() {
 	const wikiTotal = ref(0);
 	const laneError = ref("");
 	const wikiError = ref("");
-	const loaded = ref(false); // the latest load's sources answered: the rail may say "empty"
+	const loaded = ref(false); // both sources show an answer: the rail may say "empty"
 	let wikiDenied = false;
-	let laneReq = 0; // monotonic per source: a stale answer never overwrites a newer one
+	// Per source: request ids, and the newest one whose answer is on screen. An
+	// answer lands unless a newer one already did, so a burst of reloads can't
+	// starve the rows and an older answer never overwrites a newer. Hence once any
+	// load settles, both sources show a real answer (its own or a newer one).
+	let laneReq = 0;
+	let laneOnScreen = 0;
 	let wikiReq = 0;
-	let loadReq = 0;
+	let wikiOnScreen = 0;
 
 	// oldest first: what has waited longest leads
 	const rows = computed(() =>
@@ -113,11 +118,13 @@ export function useActionRows() {
 		const id = ++laneReq;
 		try {
 			const res = (await listPendingActionsLane()) || {};
-			if (id !== laneReq) return;
+			if (id < laneOnScreen) return;
+			laneOnScreen = id;
 			laneRows.value = (Array.isArray(res.rows) ? res.rows : []).map(laneRow);
 			laneError.value = "";
 		} catch (e) {
-			if (id !== laneReq) return;
+			if (id < laneOnScreen) return;
+			laneOnScreen = id;
 			laneError.value = errMessage(e, "Waiting approvals could not be loaded.");
 		}
 	}
@@ -127,12 +134,14 @@ export function useActionRows() {
 		const id = ++wikiReq;
 		try {
 			const res = (await listWikiWriteProposals(WIKI_QUERY)) || {};
-			if (id !== wikiReq) return;
+			if (id < wikiOnScreen) return;
+			wikiOnScreen = id;
 			wikiRows.value = (Array.isArray(res.rows) ? res.rows : []).map(wikiRow);
 			wikiTotal.value = Number(res.total) || wikiRows.value.length;
 			wikiError.value = "";
 		} catch (e) {
-			if (id !== wikiReq) return;
+			if (id < wikiOnScreen) return;
+			wikiOnScreen = id;
 			if (isPermissionDenied(e)) {
 				// not a skill reviewer: no wiki rows, and no point asking again
 				wikiDenied = true;
@@ -145,9 +154,8 @@ export function useActionRows() {
 	}
 
 	async function load() {
-		const id = ++loadReq;
 		await Promise.allSettled([loadLane(), loadWiki()]);
-		if (id === loadReq) loaded.value = true;
+		loaded.value = true;
 	}
 
 	function remove(key) {

@@ -162,21 +162,42 @@ describe("useActionRows", () => {
 		expect(w.vm.loaded).toBe(true);
 	});
 
-	it("is loaded only once the latest load settles, never on a stale answer", async () => {
-		const first = deferred();
-		const second = deferred();
+	it("is loaded by the first answer it applies, and a burst of newer loads never starves it", async () => {
+		const answers = [deferred(), deferred(), deferred()];
 		approvals.listPendingActionsLane
-			.mockReturnValueOnce(first.promise)
-			.mockReturnValueOnce(second.promise);
+			.mockReturnValueOnce(answers[0].promise)
+			.mockReturnValueOnce(answers[1].promise)
+			.mockReturnValueOnce(answers[2].promise);
+		const names = (w) => w.vm.rows.map((r) => r.name);
 		const w = host();
 		w.vm.load();
-		first.resolve({ rows: [] });
+		w.vm.load();
 		await flushPromises();
 		expect(w.vm.loaded).toBe(false);
-		second.resolve({ rows: [held()] });
+		answers[0].resolve({ rows: [held({ name: "PA-OLD" })] });
 		await flushPromises();
 		expect(w.vm.loaded).toBe(true);
-		expect(w.vm.rows.map((r) => r.key)).toEqual(["held:PA-1"]);
+		expect(names(w)).toEqual(["PA-OLD"]);
+		answers[2].resolve({ rows: [held({ name: "PA-NEW" })] });
+		await flushPromises();
+		answers[1].resolve({ rows: [held({ name: "PA-MID" })] });
+		await flushPromises();
+		expect(names(w)).toEqual(["PA-NEW"]);
+	});
+
+	it("a wiki answer overtaken by a newer one does not count toward loaded", async () => {
+		const wikiAnswers = [deferred(), deferred()];
+		api.listWikiWriteProposals
+			.mockReturnValueOnce(wikiAnswers[0].promise)
+			.mockReturnValueOnce(wikiAnswers[1].promise);
+		const w = host();
+		w.vm.load();
+		wikiAnswers[1].resolve({ rows: [], total: 0 });
+		await flushPromises();
+		expect(w.vm.loaded).toBe(true);
+		wikiAnswers[0].resolve({ rows: [wiki()], total: 1 });
+		await flushPromises();
+		expect(w.vm.rows).toHaveLength(0);
 	});
 
 	it("asks for the oldest wiki notes first, as many as a page allows", async () => {

@@ -3,7 +3,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // One inbox: held File Box writes, chat cards and wiki notes are rows in the rail's
 // "Needs your decision" group and open their detail in the right pane.
-const probe = vi.hoisted(() => ({ mounts: [], refreshes: [], docmetaIds: [], later: null }));
+const probe = vi.hoisted(() => ({
+	mounts: [],
+	refreshes: [],
+	updates: 0,
+	docmetaIds: [],
+	later: null,
+}));
 
 vi.mock("vue-router", async () => {
 	const { reactive } = await import("vue");
@@ -87,12 +93,13 @@ vi.mock("@/components/doc/CommentsSection.vue", () => ({ default: { template: "<
 // callback to answer after a switch unmounted the stub. The wiki detail is real.
 function detailStub(kind, cls) {
 	return async () => {
-		const { onMounted } = await import("vue");
+		const { onMounted, onUpdated } = await import("vue");
 		return {
 			default: {
 				props: ["name", "onDecided"],
 				setup(props, { expose }) {
 					onMounted(() => probe.mounts.push(kind + ":" + props.name));
+					onUpdated(() => probe.updates++);
 					expose({ refresh: () => probe.refreshes.push(kind + ":" + props.name) });
 					// read at call time, as the details do: after the unmount
 					return { later: () => (probe.later = (res) => props.onDecided(res)) };
@@ -105,12 +112,13 @@ function detailStub(kind, cls) {
 vi.mock("./PendingActionDetail.vue", detailStub("held", "held-detail"));
 vi.mock("./PendingChatDetail.vue", detailStub("chat", "chat-detail"));
 
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import * as api from "@/api";
 import * as approvals from "@/api/approvals";
 import ApprovalsBoard from "./ApprovalsBoard.vue";
 
 const route = useRoute();
+const router = useRouter();
 const HOSTILE = "<script>window.__pwned=1</script>";
 
 const ar = (name, over = {}) => ({
@@ -212,6 +220,7 @@ describe("ApprovalsBoard one inbox", () => {
 		reset();
 		probe.mounts.length = 0;
 		probe.refreshes.length = 0;
+		probe.updates = 0;
 		probe.docmetaIds.length = 0;
 		api.listApprovalsPage.mockImplementation(async () => ({
 			rows: state.ar,
@@ -361,6 +370,51 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(group(w).text()).toContain("3 files waiting");
 		expect(pane(w).find(".held-detail .who").text()).toBe("held PA-2");
 		expect(route.query).toEqual({ held: "PA-2" });
+	});
+
+	it("an answer that lands after the board is gone never navigates back to it", async () => {
+		const w = await mountBoard();
+		await actionRow(w, "Quarter close").trigger("click");
+		await pane(w).find(".chat-detail .decide-later").trigger("click");
+		w.unmount();
+		router.replace.mockClear();
+		router.push.mockClear();
+		refreshApprovalsCount.mockClear();
+		probe.later({ ok: true });
+		await flushPromises();
+		expect(router.replace).not.toHaveBeenCalled();
+		expect(router.push).not.toHaveBeenCalled();
+		expect(refreshApprovalsCount).toHaveBeenCalled();
+	});
+
+	it("a question decided after the board is gone never navigates back to it", async () => {
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, { source: "File Box" }),
+			can_act: 1,
+		}));
+		let resolve;
+		api.decideApproval.mockReturnValue(new Promise((r) => (resolve = r)));
+		const w = await mountBoard();
+		await button(pane(w), "Approve").trigger("click");
+		w.unmount();
+		router.replace.mockClear();
+		router.push.mockClear();
+		resolve({});
+		await flushPromises();
+		expect(router.replace).not.toHaveBeenCalled();
+		expect(router.push).not.toHaveBeenCalled();
+		expect(refreshApprovalsCount).toHaveBeenCalled();
+	});
+
+	it("an open detail is not re-rendered by unrelated board updates", async () => {
+		const w = await board();
+		await actionRow(w, "1 file waiting").trigger("click");
+		await flushPromises();
+		probe.updates = 0;
+		await w.find('input[placeholder="Search approvals"]').setValue("acme");
+		await w.find('button[data-tip="Refresh"]').trigger("click");
+		await flushPromises();
+		expect(probe.updates).toBe(0);
 	});
 
 	it("deciding the last decision moves on to the first question", async () => {

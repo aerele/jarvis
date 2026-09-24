@@ -304,7 +304,7 @@
 							:name="selectedName"
 							:proposal="selectedAction ? selectedAction.raw : null"
 							:loaded="actionsLoaded"
-							:on-decided="settleFor(selectedKey)"
+							:on-decided="settleSelected"
 							:on-changed="loadActions"
 						/>
 						<PendingChatDetail
@@ -312,14 +312,14 @@
 							:key="selectedKey"
 							ref="actionDetail"
 							:name="selectedName"
-							:on-decided="settleFor(selectedKey)"
+							:on-decided="settleSelected"
 						/>
 						<PendingActionDetail
 							v-else
 							:key="selectedKey"
 							ref="actionDetail"
 							:name="selectedName"
-							:on-decided="settleFor(selectedKey)"
+							:on-decided="settleSelected"
 						/>
 					</div>
 				</div>
@@ -1237,11 +1237,15 @@ const railOrder = computed(() => [
 	})),
 	...railRows.value.map((r) => ({ key: "ar:" + r.name, row: r })),
 ]);
+// A decision can answer after the board is gone (the user navigated away): it
+// still drops its row and refreshes the badge, but never navigates back here.
+let alive = true;
+onBeforeUnmount(() => (alive = false));
 function advanceFrom(key, drop) {
 	const at = railOrder.value.findIndex((e) => e.key === key);
 	const current = key === (selectedKey.value || (selectedId.value && "ar:" + selectedId.value));
 	drop();
-	if (!current) return;
+	if (!current || !alive) return;
 	const order = railOrder.value;
 	const next = at === -1 ? order[0] : order[Math.min(at, order.length - 1)];
 	if (next && next.action) onActionClick(next.action);
@@ -1259,12 +1263,15 @@ function advanceFrom(key, drop) {
 function onActionDecided(key) {
 	advanceFrom(key, () => removeAction(key));
 	store.refreshApprovalsCount();
-	loadActions();
+	if (alive) loadActions();
 }
-// Bound at render, so an answer that lands after a switch unmounted its detail
-// still settles its own row (the details call it directly: Vue drops an
-// unmounted instance's emits).
-const settleFor = (key) => () => onActionDecided(key);
+// Bound to the row's key, so an answer that lands after a switch unmounted its
+// detail still settles its own row (the details call it directly: Vue drops an
+// unmounted instance's emits). A computed, so the prop only changes with the key.
+const settleSelected = computed(() => {
+	const key = selectedKey.value;
+	return () => onActionDecided(key);
+});
 
 // Refresh re-reads the decision rows too: wiki notes have no realtime event, and
 // a System Manager gets none for other users' held rows.
