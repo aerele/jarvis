@@ -704,6 +704,8 @@ def get_conversation(conversation: str) -> dict:
 		],
 		order_by="seq asc",
 	)
+	# A pending-action card renders from its row's card (the sealed record's own copy).
+	_pending_action_cards(messages)
 	# canvas + pending_card are stored as JSON strings; hand the UI real objects (or None).
 	for m in messages:
 		if m.get("canvas"):
@@ -733,6 +735,27 @@ def get_conversation(conversation: str) -> dict:
 		},
 		"messages": messages,
 	}
+
+
+def _pending_action_cards(messages: list) -> None:
+	"""For each still-pending row whose token is a chat pending action, render that
+	row's ``card`` (its column is never sealed and never holds args)."""
+	tokens = [m.tool_call_id for m in messages if m.get("tool_status") == "pending" and m.get("tool_call_id")]
+	if not tokens:
+		return
+	from jarvis.chat.pending_actions._store import table_ready
+
+	if not table_ready():
+		return
+	cards = dict(
+		frappe.db.sql(
+			"SELECT name, card FROM `tabJarvis Pending Action` WHERE kind='chat' AND name IN %(t)s",
+			{"t": tuple(tokens)},
+		)
+	)
+	for m in messages:
+		if m.get("tool_status") == "pending" and m.get("tool_call_id") in cards:
+			m["pending_card"] = cards[m.tool_call_id]
 
 
 @frappe.whitelist()
@@ -1272,13 +1295,18 @@ def _run_typed_batch(conversation, items):
 	from jarvis.chat.actions_api import _confirm_core
 
 	single = len(items) == 1
-	results, tokens, receipts = [], [], []
+	# Pending-action cards of a batch settle together: ONE continuation (settle_batch).
+	batch_id = None if single else frappe.generate_hash(length=12)
+	results, tokens, receipts, deferred = [], [], [], []
 	solo_envelope = None
 	for it in items:
 		token = it["token"]
 		# A token no longer live (card gone since it was listed) reaches _confirm_core and
 		# fails its own card via the single-use consume - never a substitution.
-		res = _confirm_core(token, conversation, batch=not single)
+		if single:
+			res = _confirm_core(token, conversation, batch=False)
+		else:
+			res = _confirm_core(token, conversation, batch=True, batch_id=batch_id)
 		if not isinstance(res, dict):
 			res = {"ok": False, "error": {"type": "InternalError", "message": "confirmation failed"}}
 		if single:
@@ -1293,12 +1321,15 @@ def _run_typed_batch(conversation, items):
 				"error": res.get("error"),
 			}
 		)
-		if res.get("receipt_text"):
+		if res.get("pa_deferred"):
+			deferred.append(token)
+		elif res.get("receipt_text"):
 			receipts.append(res["receipt_text"])
 
 	failed = [r for r in results if not r["ok"]]
 	# One continuation for the whole batch. The single-card path already queued its own
-	# inside _confirm_core, so only the batch path composes one here.
+	# inside _confirm_core, so only the batch path composes one here. (A batch mixing
+	# legacy and pending-action cards, only possible mid-rollout, gets one of each.)
 	cont = None
 	if receipts:
 		from jarvis.chat.actions_api import enqueue_continuation as _enqueue_cont
@@ -1309,6 +1340,15 @@ def _run_typed_batch(conversation, items):
 			frappe.log_error(
 				title="typed bulk confirmation continuation failed", message=frappe.get_traceback()
 			)
+	if deferred:
+		from jarvis.chat.actions_api import _take_continuation
+		from jarvis.chat.pending_actions import settle_batch
+
+		settle_batch(batch_id)
+		pa_cont = _take_continuation(deferred[0])
+		for token in deferred[1:]:
+			_take_continuation(token)
+		cont = cont or pa_cont
 
 	if single:
 		# Pass the confirmation's own envelope straight through, so the queued chip
@@ -3196,6 +3236,7 @@ def _enqueue_turn(
 	hidden: bool = False,
 	interactive: bool = True,
 	exempt_overload: bool = False,
+	claim=None,
 ) -> dict:
 	"""Persist a user message + dispatch an agent turn for ``prompt`` (no
 	attachments / no auto-context). The macro engine (``jarvis.chat.macros``) uses
@@ -3206,7 +3247,12 @@ def _enqueue_turn(
 	jumps ahead of a human's queued turn) — used by unattended, long-running
 	producers like app-learning that could otherwise monopolize the chat queue
 	for a run's duration. ``origin`` (required) stamps the user row's source
-	(macro / continuation / system). Returns ``{run_id, message_id}``."""
+	(macro / continuation / system). Returns ``{run_id, message_id}``.
+
+	``claim``: a pending action's ``settled`` compare-and-set, run inside the user
+	row's transaction (D5). When it returns False another settle already delivered
+	this outcome: nothing is written and ``{ok: False, already_settled: True}``
+	comes back."""
 	conv_doc = frappe.get_doc(CONV, conversation)
 	if model_override:
 		conv_doc.model_override = model_override
@@ -3237,10 +3283,16 @@ def _enqueue_turn(
 	msg_doc.flags.ignore_permissions = True
 	msg_doc.flags.jarvis_server_write = True
 	msg_doc.insert()
+	if msg_doc.owner != conv_doc.owner:
+		# The worker's chat user is the seed row's owner: never a cron's Administrator.
+		frappe.db.set_value(MSG, msg_doc.name, "owner", conv_doc.owner, update_modified=False)
 	conv_doc.last_active_at = frappe.utils.now()
 	conv_doc.flags.ignore_permissions = True
 	conv_doc.sync_file_box_fields()
 	conv_doc.save()
+	if claim is not None and not claim():
+		frappe.db.rollback()
+		return {"ok": False, "already_settled": True}
 	frappe.db.commit()
 
 	run_id = uuid.uuid4().hex[:12]
@@ -3360,7 +3412,7 @@ _CONTINUATION_PROMPT_UNKNOWN = (
 
 
 def enqueue_continuation(
-	conversation: str, receipt: str, *, failed: bool = False, outcome: str | None = None
+	conversation: str, receipt: str, *, failed: bool = False, outcome: str | None = None, claim=None
 ) -> dict:
 	"""Dispatch a follow-up agent turn after a human Apply/Confirm click
 	(multi-step plans: the agent stages the next write instead of waiting for
@@ -3381,9 +3433,7 @@ def enqueue_continuation(
 	auto-retry) instead of the continue-the-plan one. ``outcome`` is the P0b
 	generalisation: ``"unknown"``/``"partial"`` select the check-before-retrying
 	scaffold and win over ``failed`` (an unverified outcome is not a clean
-	rollback). Nothing produces those two outcomes yet - the PA executor
-	(§4.4) is a later change - but the mapping exists and is tested now so that
-	change only has to call this, not add a scaffold."""
+	rollback). ``claim`` is ``_enqueue_turn``'s pending-action compare-and-set."""
 	from jarvis.chat.turn_handler import _safe_label_name
 
 	safe = _safe_label_name(receipt)
@@ -3400,6 +3450,7 @@ def enqueue_continuation(
 		origin="continuation",
 		hidden=True,
 		exempt_overload=True,
+		claim=claim,
 	)
 
 

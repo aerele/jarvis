@@ -192,7 +192,11 @@ class TestFlipActionRow(FrappeTestCase):
 
 	def test_direct_mint_confirm_falls_back_to_insert(self):
 		"""AC-flip fallback: a directly-minted token (no gate -> no pending row) still
-		yields exactly one confirmed receipt row (insert path)."""
+		yields exactly one confirmed receipt row (insert path). A LEGACY token (flag 0):
+		a pending action's mint inserts its display row itself."""
+		flag = patch.dict(frappe.conf, {"jarvis_pa_chat_cards": 0})
+		flag.start()
+		self.addCleanup(flag.stop)
 		token = pending_confirm.mint(
 			conversation=self.conv,
 			owner=self.owner,
@@ -427,7 +431,6 @@ class TestActionCardHealth(FrappeTestCase):
 		self._insert_pending_row("dead_tok_quiet_xyz", self._stranded_ts())
 		with (
 			patch.object(session_lifecycle, "_STRANDED_ALERT", 10**9),
-			patch.object(session_lifecycle, "_CARDS_OPEN_ALERT", 10**9),
 			patch.object(frappe, "log_error") as le,
 		):
 			session_lifecycle.reconcile_action_cards()

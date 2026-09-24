@@ -733,13 +733,29 @@ def persist_pending_action(
 	Stores ONLY the perm-filtered card (``preview['card']`` - already secret-masked by
 	build_card) + the expiry. NEVER stores raw ``tool_args``: an unconfirmed (maybe-to-
 	be-discarded) row must not expose unmasked args via ``get_conversation``; args are
-	stamped only when the row flips to a receipt (persist_tool_receipt). The Redis
-	pending_confirm token stays the SOLE execution authority - this row is display-only.
+	stamped only when the row flips to a receipt (persist_tool_receipt). The card's
+	store (``Jarvis Pending Action``, or the legacy Redis token) stays the SOLE
+	execution authority - this row is display-only.
 
-	Idempotent on ``(conversation, token)`` via the shared FOR UPDATE + dedupe. RAISES
-	on failure so the gate FAIL-CLOSES (rolls the token back): a token with no delivery
-	row is exactly the invisible-card defect this overhaul kills, and the single-flight
-	guard would treat the orphan as a live card and wedge the retry."""
+	Idempotent on ``(conversation, token)`` via the shared FOR UPDATE + dedupe (a
+	pending action's row is already inserted by ``park``, so this is then a no-op).
+	RAISES on failure so the gate FAIL-CLOSES (rolls the token back): a token with no
+	delivery row is exactly the invisible-card defect this overhaul kills, and the
+	single-flight guard would treat the orphan as a live card and wedge the retry."""
+	# Commit-first so the FOR UPDATE is the transaction's first statement
+	# (REPEATABLE-READ discipline), matching persist_tool_receipt.
+	frappe.db.commit()
+	_insert_pending_row(conv_name, tool, preview, token, expires_at)
+	frappe.db.commit()
+
+
+def _insert_pending_row(
+	conv_name: str, tool: str, preview: dict | None, token: str, expires_at: int
+) -> str | None:
+	"""The pending row insert without any commit: ``persist_pending_action``'s core,
+	and ``pending_actions.park``'s ``display_row`` (same transaction as the card, so
+	the two land or roll back together). None when the conversation can't host a row
+	or the row already exists."""
 	# Convert the token's epoch expiry to a SITE-timezone datetime the same way the
 	# codebase does (now_datetime + remaining seconds), so the row's countdown is
 	# correct regardless of an OS-vs-site timezone gap (Frappe Datetime fields are
@@ -753,12 +769,9 @@ def persist_pending_action(
 		# like a conv-less park: skip the row and let the owner-scoped list-pending
 		# backstop deliver the card. A genuine insert FAILURE on a REAL conversation
 		# still raises below, so the gate fail-closes (rolls the token back) as designed.
-		return
+		return None
 	with impersonate(conv_owner):
-		# Commit-first so the FOR UPDATE is the transaction's first statement
-		# (REPEATABLE-READ discipline), matching persist_tool_receipt.
-		frappe.db.commit()
-		_locked_insert_chat_message(
+		return _locked_insert_chat_message(
 			conv_name,
 			{
 				"role": "tool",
@@ -772,7 +785,6 @@ def persist_pending_action(
 			# (conversation, token) dedupe: a re-park of the same token is a no-op.
 			dedupe_filters={"conversation": conv_name, "tool_call_id": token},
 		)
-		frappe.db.commit()
 
 
 def cancel_pending_action_rows(conversation: str) -> None:

@@ -229,8 +229,12 @@ class TestIncidentReplay(_Base):
 		# pre-P0d token stays exactly as sealed, per S4).
 		parked = pending_confirm.list_for_owner(frappe.session.user, conversation=conv)
 		self.assertEqual(len(parked), 1)
-		self.assertNotIn("docs", parked[0]["args"])
 		token = parked[0]["token"]
+		# A pending action's list never unseals: read the sealed call itself.
+		from jarvis.chat.pending_actions import _seal
+		from jarvis.chat.pending_actions._store import get_row
+
+		self.assertNotIn("docs", _seal.unseal_call(get_row(token))["args"])
 		with patch("jarvis.chat.api._dispatch_turn"):
 			res = confirm_tool(token, conversation=conv)
 		self.assertTrue(res["ok"], res)

@@ -11,6 +11,7 @@ from frappe.utils import add_to_date, now_datetime
 from jarvis.chat.pending_actions._settle import MAX_SETTLE_ATTEMPTS, settle, settle_batch
 from jarvis.chat.pending_actions._store import (
 	CANCELLED,
+	CHAT_TTL_S,
 	EXECUTING,
 	FAILED,
 	PENDING,
@@ -168,6 +169,23 @@ def _cancel_disabled_owners() -> int:
 	return len(moved)
 
 
+def _expire_chat_cards(conversation: str | None = None) -> int:
+	"""PR-3a keeps the 15-minute chat card life: an older Pending card is
+	``Cancelled``/``expired`` (chip ``expired``); ``conversation`` narrows it (a new
+	park clears its own conversation first). PR-3b removes this."""
+	where = " AND conversation=%(conv)s" if conversation else ""
+	names = frappe.db.sql_list(
+		"SELECT name FROM `tabJarvis Pending Action` WHERE kind='chat' AND status='Pending'"
+		f" AND creation < %(c)s{where} ORDER BY creation LIMIT %(lim)s",
+		{"c": add_to_date(now_datetime(), seconds=-CHAT_TTL_S), "lim": _SCAN, "conv": conversation},
+	)
+	moved = [n for n in names if _transition(n, [PENDING], CANCELLED, reason_code="expired") == "ok"]
+	frappe.db.commit()
+	for name in moved:
+		settle(name)
+	return len(moved)
+
+
 def _cancel_orphaned_chat() -> int:
 	"""Pending chat cards whose conversation was deleted without ``on_trash``."""
 	names = frappe.db.sql_list(
@@ -236,7 +254,7 @@ def _cards_health() -> dict:
 
 def reconcile() -> dict:
 	"""``*/5`` cron: interrupted, lost settles, waiter retries, disabled owners,
-	orphaned chat cards, and the health signals."""
+	expired and orphaned chat cards, and the health signals."""
 	if not table_ready():
 		return {}
 	out = {}
@@ -245,6 +263,7 @@ def reconcile() -> dict:
 		_settle_unsettled,
 		_retry_waiters,
 		_cancel_disabled_owners,
+		_expire_chat_cards,
 		_cancel_orphaned_chat,
 		_warn_old_pending,
 		_cards_health,

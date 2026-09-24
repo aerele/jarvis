@@ -33,8 +33,11 @@ MAY_HAVE_EXTERNAL_EFFECT = frozenset({"call_connector", "run_method"})
 # callable is ``fn(conversation: str | None, items: list[dict]) -> None`` and MUST
 # call ``_store.claim_settled(names)`` inside the transaction that commits its
 # effect (D5), acting only for the names it returns. ``None`` = settle marks the
-# rows settled itself. PR-3a wires "chat".
-CONTINUATIONS: dict[str, str | None] = {"chat": None, "file_box_held": "jarvis.chat.held_writes.on_settled"}
+# rows settled itself.
+CONTINUATIONS: dict[str, str | None] = {
+	"chat": "jarvis.chat.actions_api.on_chat_settled",
+	"file_box_held": "jarvis.chat.held_writes.on_settled",
+}
 
 _CHIP_BY_STATUS = {
 	EXECUTED: "confirmed",

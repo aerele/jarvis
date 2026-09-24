@@ -878,12 +878,12 @@ _STRANDED_WINDOW_S = 7 * 86400
 # Scan cap (bounds the RETURNED rows + the per-row peek count; NOT the rows examined -
 # see the index patch v2_20_action_card_pending_index that makes the scan a range seek).
 _RECONCILE_SCAN_MAX = 1000
-# Alert thresholds (tunable, and MEANT to be tuned per tenant). cards_open: too many live
-# cards piling up unconfirmed. stranded: see the docstring - it CONFLATES real delivery
-# failures with user-abandoned cards, so its baseline is tenant-specific; a spike above
-# baseline is the signal, and the once-a-day-deduped alert is a coarse backstop to the
-# hourly logged metric + the precise action_card_rescue signal.
-_CARDS_OPEN_ALERT = 200
+# Alert threshold (tunable, and MEANT to be tuned per tenant). stranded: see the docstring
+# - it CONFLATES real delivery failures with user-abandoned cards, so its baseline is
+# tenant-specific; a spike above baseline is the signal, and the once-a-day-deduped alert
+# is a coarse backstop to the hourly logged metric + the precise action_card_rescue signal.
+# The open-card alert is AGE-based, not a total count (a busy bench is not a fault): the
+# pending-action reconciler's ``cards_aged`` (jarvis.chat.pending_actions._reconcile).
 _STRANDED_ALERT = 50
 _ACTION_CARD_ALERT_TITLE = "action-card health threshold exceeded"
 # Dedup the threshold alert to ~once a day (mirrors turn_recovery.recovery_rate_watch):
@@ -894,7 +894,8 @@ _ACTION_CARD_ALERT_DEDUPE_HOURS = 24
 def reconcile_action_cards() -> dict:
 	"""Hourly cron: MEASURE + alert on action-card delivery health (AC-detect). Two
 	signals, both logged to the greppable jarvis.chat.latency channel:
-	  * cards_open - the live count of open confirmation cards (self-pruning ZSET gauge).
+	  * cards_open - the live count of open confirmation cards across both stores (logged,
+	    never alerted on: the age-based alert is the pending-action reconciler's).
 	  * stranded   - durable role="tool" tool_status="pending" action-rows whose Redis
 	    token is already DEAD and that expired between _STRANDED_BUFFER_S and
 	    _STRANDED_WINDOW_S ago. Such a row never reached a terminal (confirm/discard/
@@ -960,12 +961,12 @@ def reconcile_action_cards() -> dict:
 			"action_card_health cards_open=%d stranded=%s", open_n, stranded if scan_ok else "err"
 		)
 		# Only weigh stranded when the scan actually ran (a failed scan logged its own error).
-		over = open_n > _CARDS_OPEN_ALERT or (scan_ok and stranded > _STRANDED_ALERT)
+		over = scan_ok and stranded > _STRANDED_ALERT
 		if over and not _action_card_alert_deduped(now):
 			frappe.log_error(
 				title=_ACTION_CARD_ALERT_TITLE,
 				message=(
-					f"cards_open={open_n} (alert>{_CARDS_OPEN_ALERT}); "
+					f"cards_open={open_n}; "
 					f"stranded={stranded if scan_ok else 'err'} in the last "
 					f"{_STRANDED_WINDOW_S // 86400}d (alert>{_STRANDED_ALERT}).\n"
 					f"'stranded' = pending action-rows that never reached a terminal; it CONFLATES a "

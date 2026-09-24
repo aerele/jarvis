@@ -347,12 +347,17 @@ class TestReconcile(_Base):
 
 	def test_health_signals(self):
 		frappe.db.delete("Error Log", {"method": "jarvis.pending_action.cards_aged"})
+		# Site-wide counts: other suites' chat cards may still be pending, so deltas.
+		with patch.object(frappe, "log_error"):
+			base, old_base = _reconcile._cards_health(), _reconcile._warn_old_pending()
 		old = self.park(self.make_conv())
 		self.set_col(old, creation=_ago(days=31))
 		self.park(self.make_conv())
-		self.assertEqual(_reconcile._warn_old_pending(), 1)
-		with patch.object(_reconcile, "CARD_AGE_ALERT", 0):
-			self.assertEqual(_reconcile._cards_health(), {"cards_open": 2, "aged": 1})
+		self.assertEqual(_reconcile._warn_old_pending(), old_base + 1)
+		with patch.object(_reconcile, "CARD_AGE_ALERT", base["aged"]):
+			self.assertEqual(
+				_reconcile._cards_health(), {"cards_open": base["cards_open"] + 2, "aged": base["aged"] + 1}
+			)
 			_reconcile._cards_health()
 		self.assertEqual(len(self.logged("cards_aged")), 1)
 		frappe.db.delete("Error Log", {"method": "jarvis.pending_action.cards_aged"})

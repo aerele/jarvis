@@ -93,6 +93,8 @@ _MACRO_CHANGED_ERROR = (
 	"The macro was edited while this run was waiting for capacity, so the run could no "
 	"longer continue the way it started. Run it again."
 )
+# The capacity resume is a cron: its turn never binds a disabled user, Administrator or Guest.
+_OWNER_INELIGIBLE_ERROR = "The run's owner can no longer run unattended work, so the run was closed."
 
 # Human sentences for the MANUAL path (thrown, so the SPA's existing toast renders
 # them). The scheduled path reports the machine code instead and the scheduler
@@ -757,6 +759,7 @@ def resume_waiting_capacity_runs() -> None:
 	if not rows:
 		return
 	from jarvis._redis_lock import redis_lock
+	from jarvis.permissions import is_valid_unattended_owner
 
 	for run_name in rows:
 		try:
@@ -786,6 +789,19 @@ def resume_waiting_capacity_runs() -> None:
 						"failed",
 						finished_at=frappe.utils.now(),
 						error=_MACRO_CHANGED_ERROR,
+					):
+						frappe.db.commit()
+						_publish_done(run, macro_doc, "failed")
+					else:
+						frappe.db.commit()
+					continue
+				if not is_valid_unattended_owner(frappe.db.get_value(CONV, run.conversation, "owner")):
+					if _cas_run_status(
+						run.name,
+						"waiting_capacity",
+						"failed",
+						finished_at=frappe.utils.now(),
+						error=_OWNER_INELIGIBLE_ERROR,
 					):
 						frappe.db.commit()
 						_publish_done(run, macro_doc, "failed")

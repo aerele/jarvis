@@ -18,6 +18,7 @@ from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._park import target_state
 from jarvis.chat.pending_actions._settle import outcome_for, settle
 from jarvis.chat.pending_actions._store import (
+	CANCELLED,
 	CONV,
 	EXECUTED,
 	EXECUTING,
@@ -26,6 +27,7 @@ from jarvis.chat.pending_actions._store import (
 	REASON_TEXT,
 	TERMINAL,
 	_terminal_update,
+	chat_expired,
 	claim,
 	get_row,
 )
@@ -92,7 +94,13 @@ def authorize(row, approver: str, kind: str, conversation: str | None = None) ->
 
 
 def _preflight(row, approver: str, arm: ArmHook | None) -> dict | None:
-	"""Non-consuming refusals under the row lock; the row stays Pending."""
+	"""Refusals under the row lock. The row stays Pending, except a chat card past its
+	15 minutes (PR-3a), which ends ``Cancelled``/``expired`` here (committed + settled)."""
+	if chat_expired(row):
+		_terminal_update(row.name, [PENDING], CANCELLED, reason_code="expired", decided_by=approver)
+		frappe.db.commit()
+		settle(row.name)
+		return _refusal("expired", REASON_TEXT["expired"], pa_status=CANCELLED, outcome="expired")
 	if row.conversation and frappe.db.get_value(CONV, row.conversation, "skip_confirmation"):
 		return _refusal(*_ARMED)
 	if arm:
