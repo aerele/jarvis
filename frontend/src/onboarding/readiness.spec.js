@@ -449,11 +449,11 @@ describe("maintenance hold banner + send gate", () => {
 		expect(chatSrc.slice(start, end)).toContain("!holdActive.value");
 	});
 
-	it("HARD-blocks: passes :disabled=holdActive to the Composer (greys the box + blocks typing)", () => {
+	it("HARD-blocks: disables the Composer during maintenance or bootstrap (greys the box + blocks typing)", () => {
 		const c = chatSrc.indexOf("<Composer");
 		expect(c, "ChatView must render the Composer").not.toBe(-1);
 		const end = chatSrc.indexOf(">", c);
-		expect(chatSrc.slice(c, end)).toContain(':disabled="holdActive"');
+		expect(chatSrc.slice(c, end)).toContain(':disabled="holdActive || booting"');
 	});
 
 	it("orders the send-gate maintenance branch between release-update and workspace-resetting", () => {
