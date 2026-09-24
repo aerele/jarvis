@@ -8,7 +8,7 @@ import frappe
 from jarvis.chat import held_edit
 from jarvis.chat.held_sheets import category, json_dict
 from jarvis.chat.pending_actions import _seal
-from jarvis.chat.pending_actions._store import PENDING
+from jarvis.chat.pending_actions._store import EXECUTING, PENDING
 
 # --------------------------------------------------------------------------- #
 # Counts (the board and File Box lines read these, never the card)
@@ -97,9 +97,12 @@ def _sealed_records(row) -> list[dict] | None:
 def detail(row, me: str) -> dict:
 	"""The board's sheet view (owner / System Manager): per record its section, masked
 	values, locked fields, dependencies and flags; the linked questions; the counts
-	and ``card_sha256`` an apply echoes. Never the sealed call."""
+	and ``card_sha256`` an apply echoes; the last apply's errors and decisions (they
+	survive a bounce), its progress while it runs, and the outcome once applied.
+	Never the sealed call."""
 	from jarvis.chat import approvals_api
 	from jarvis.chat.filebox import _source_file
+	from jarvis.chat.pending_actions import _sheet
 	from jarvis.chat.pending_actions._store import REASON_TEXT
 
 	pending = row.status == PENDING
@@ -147,9 +150,33 @@ def detail(row, me: str) -> dict:
 		"card_sha256": _seal.card_sha256(row),
 		"records": records,
 		"questions": _questions(row.name),
-		"outcome": json_dict(row.sheet_outcome),
+		"errors": json_dict(row.get("apply_errors")) if pending else {},
+		"decisions": _decisions(row) if pending else {},
+		"progress": _sheet.progress(row.name) if row.status == EXECUTING else None,
+		"outcome": {k: v for k, v in json_dict(row.sheet_outcome).items() if k != "keys"},
 		"reason_code": code,
 		"reason": REASON_TEXT.get(code, ""),
+	}
+
+
+def _decisions(row) -> dict:
+	"""The last apply's decisions, to fill the sheet again after a bounce."""
+	plan = json_dict(row.get("apply_request"))
+	return {k: plan[k] for k in ("records", "answers") if k in plan}
+
+
+def status(row) -> dict:
+	"""The poll while a sheet lists or applies: its state, never its records or an unseal."""
+	from jarvis.chat.pending_actions import _sheet
+
+	return {
+		"name": row.name,
+		"status": row.status,
+		"collecting": int(row.collecting or 0),
+		"progress": _sheet.progress(row.name) if row.status == EXECUTING else None,
+		"card_sha256": _seal.card_sha256(row),
+		"record_count": int(row.record_count or 0),
+		"counts_line": counts_line(row.sheet_counts, row.question_count),
 	}
 
 
@@ -165,7 +192,7 @@ def candidates(row, indexes=None) -> dict:
 	wanted = range(len(records)) if indexes is None else indexes
 	picked = [
 		i
-		for i in dict.fromkeys(wanted)
-		if isinstance(i, int) and 0 <= i < len(records) and records[i]["op"] == "create"
+		for i in dict.fromkeys(i for i in wanted if type(i) is int)  # never a list, dict or bool
+		if 0 <= i < len(records) and records[i]["op"] == "create"
 	][:CANDIDATE_RECORDS]
 	return {str(i): approvals_api._candidates_as(row.exec_user, records[i]) for i in picked}

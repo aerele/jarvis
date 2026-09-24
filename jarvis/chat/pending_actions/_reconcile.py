@@ -14,6 +14,7 @@ from jarvis.chat.pending_actions._store import (
 	EXECUTING,
 	FAILED,
 	PENDING,
+	SHEET,
 	TERMINAL,
 	_terminal_update,
 	_transition,
@@ -43,6 +44,8 @@ HELD_RESUME: str | None = "jarvis.chat.held_writes.resume_waiters"
 HELD_FAILED: str | None = "jarvis.chat.held_writes.mark_resume_failed"
 # File Box sheets: seal stranded ones, fail stuck ones, close orphaned questions.
 SHEET_BACKSTOP: str | None = "jarvis.chat.held_sheet_seal.backstop"
+# A sheet being applied whose background job is gone goes back to Pending.
+SHEET_REAPER: str | None = "jarvis.chat.pending_actions._sheet.reap"
 
 
 def _log(title: str, message: str) -> None:
@@ -51,11 +54,13 @@ def _log(title: str, message: str) -> None:
 
 
 def _reap_interrupted() -> int:
+	"""Executing past ``INTERRUPT_AFTER_S``: Failed/interrupted. Never a sheet (its
+	apply is a background job: ``SHEET_REAPER`` asks RQ)."""
 	cutoff = add_to_date(now_datetime(), seconds=-INTERRUPT_AFTER_S)
 	rows = frappe.db.sql(
 		"SELECT name, batch_id FROM `tabJarvis Pending Action` WHERE status='Executing' AND executing_at < %(c)s"
-		" ORDER BY executing_at LIMIT %(lim)s",
-		{"c": cutoff, "lim": _SCAN},
+		" AND kind != %(sheet)s ORDER BY executing_at LIMIT %(lim)s",
+		{"c": cutoff, "lim": _SCAN, "sheet": SHEET},
 		as_dict=True,
 	)
 	flipped = [r for r in rows if _terminal_update(r.name, [EXECUTING], FAILED, reason_code="interrupted")]
@@ -244,15 +249,20 @@ def _sheet_backstop() -> dict:
 	return frappe.get_attr(SHEET_BACKSTOP)() if SHEET_BACKSTOP else {}
 
 
+def _reap_sheets() -> int:
+	return len(frappe.get_attr(SHEET_REAPER)()) if SHEET_REAPER else 0
+
+
 def reconcile() -> dict:
 	"""``*/5`` cron: interrupted, lost settles, waiter retries, disabled owners,
-	orphaned chat cards, the File Box sheet backstop, and the health signals. Chat
-	cards never expire."""
+	orphaned chat cards, the File Box sheet backstop and reaper, and the health
+	signals. Chat cards never expire."""
 	if not table_ready():
 		return {}
 	out = {}
 	for step in (
 		_reap_interrupted,
+		_reap_sheets,
 		_settle_unsettled,
 		_retry_waiters,
 		_cancel_disabled_owners,

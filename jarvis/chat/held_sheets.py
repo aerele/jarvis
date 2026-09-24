@@ -407,12 +407,14 @@ def _links(doctype: str, values: dict):
 						yield target, cell, (df.fieldname, i, cdf.fieldname)
 
 
-def _link_deps(records: list[dict]) -> None:
-	"""``depends_on`` = the other records each one links to (by doctype + name)."""
+def link_deps(records: list[dict], before: list[dict] | None = None) -> None:
+	"""``depends_on`` = the other records each one links to (by doctype + name, or by
+	the name it had in ``before``: the same records before an edit)."""
 	known: dict = {}
 	for j, r in enumerate(records):
-		for key in _ref_names(r):
-			known.setdefault((r["doctype"], key), j)
+		for version in (r, *(before[j : j + 1] if before else ())):
+			for key in _ref_names(version):
+				known.setdefault((version["doctype"], key), j)
 	for i, r in enumerate(records):
 		deps = {known.get((t, _key(v)), i) for t, v, _p in _links(r["doctype"], r["values"])}
 		r["depends_on"] = sorted(deps - {i})
@@ -476,7 +478,7 @@ def _merge(records: list[dict], new: list[dict]) -> tuple[list[dict], list[int]]
 		for i in [j, *_follow(records, old, record)]:
 			if i not in targets:
 				targets.append(i)
-	_link_deps(records)
+	link_deps(records)
 	return records, targets
 
 
@@ -765,7 +767,7 @@ def _open(
 	)
 
 
-def _drop_waiters(name: str) -> None:
+def drop_waiters(name: str) -> None:
 	frappe.db.sql(
 		"DELETE FROM `tabJarvis Pending Action Waiter` WHERE parent=%(p)s AND parenttype='Jarvis Pending Action'",
 		{"p": name},
@@ -777,7 +779,7 @@ def _tampered(sheet, e: _seal.SealError) -> dict:
 	told to stop right here, so it is not resumed too."""
 	from jarvis.chat.pending_actions import settle
 
-	_drop_waiters(sheet.name)
+	drop_waiters(sheet.name)
 	_terminal_update(sheet.name, [PENDING], FAILED, reason_code=e.reason_code)
 	frappe.log_error(
 		title=f"jarvis.file_box.sheet_{e.reason_code}", message=f"{sheet.name}: failed binding {e.binding}"

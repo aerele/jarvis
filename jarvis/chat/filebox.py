@@ -677,7 +677,7 @@ def _result(r: dict, wait, msg) -> tuple[str, str | None]:
 			line = f"{_draft_line(r)} · {line}"
 		return line, f"/approvals?held={quote(wait.item, safe='')}"
 	if status == "applying":
-		return "Applying the approval sheet…", None  # S2: its progress and link
+		return _applying(wait)
 	if status == "needs_approval":
 		n = int(r["pending_approvals"])
 		line = f"{n} approval{'' if n == 1 else 's'} waiting" + (f": {wait.title}" if wait else "")
@@ -723,6 +723,21 @@ _INTERNAL = (
 )
 
 
+def _applying(sheet) -> tuple[str, str | None]:
+	"""A sheet being applied: its progress when known, and a link to it."""
+	from urllib.parse import quote
+
+	from jarvis.chat.pending_actions import _sheet
+
+	if not sheet:
+		return "Applying the approval sheet…", None
+	done = _sheet.progress(sheet.item) or {}
+	line = "Applying the approval sheet…"
+	if done.get("total"):
+		line += f" {done.get('done', 0)}/{done['total']}"
+	return line, f"/approvals?held={quote(sheet.item, safe='')}"
+
+
 def _attach_results(rows: list[dict], me: str) -> None:
 	"""Post-page enrichment (never in the COUNT / Clear queries): the first
 	waiting decision and the final reply are read for this page's rows only."""
@@ -739,6 +754,15 @@ def _attach_results(rows: list[dict], me: str) -> None:
 			as_dict=True,
 		):
 			waits.setdefault(w.conversation, w)
+	applying = [r["name"] for r in rows if r["status"] == "applying"]
+	if applying:
+		for s in frappe.db.sql(
+			"""SELECT conversation, name AS item FROM `tabJarvis Pending Action`
+			WHERE kind = 'file_box_sheet' AND status = 'Executing' AND conversation IN %(names)s""",
+			{"names": applying},
+			as_dict=True,
+		):
+			waits.setdefault(s.conversation, s)
 	msgs: dict = {}
 	lm_names = [r["lm_name"] for r in rows if r["lm_name"] and r["status"] in ("failed", "no_draft")]
 	if lm_names:
@@ -1053,12 +1077,16 @@ def _supersede_held(conversation: str) -> list[str]:
 	return parents
 
 
+_RERUN_OUTCOME_CAP = 2000
+
+
 def _rerun_preamble(r: dict, msg, held_parents: list[str]) -> str:
 	"""DATA-quoted summary of the prior pass's outcome + any decision already made
 	about this file (a held write this conversation was party to), built before
 	the failure/held state is cleared - so the re-run doesn't repeat a mistake or
 	ask again. Untrusted (agent/vendor-authored) text, fenced as data, never
 	obeyed as instructions."""
+	from jarvis.chat import held_sheet_seal
 	from jarvis.chat.pending_actions._store import TERMINAL as _PA_TERMINAL
 	from jarvis.chat.pending_actions._store import get_row
 	from jarvis.chat.turn_handler import _safe_label_name
@@ -1070,7 +1098,10 @@ def _rerun_preamble(r: dict, msg, held_parents: list[str]) -> str:
 		if not row or row.status not in _PA_TERMINAL:
 			continue
 		data = row.summary or "held records"
-		if row.result_name:
+		if row.kind == "file_box_sheet":
+			done = held_sheet_seal.outcome_line(row.sheet_outcome, cap=_RERUN_OUTCOME_CAP)
+			data += f": {done}" if done else ""
+		elif row.result_name:
 			data += f" -> {row.result_doctype} {row.result_name}"
 		parts.append(f"decision: {data} ({row.status.lower()})")
 	return _RERUN_SCAFFOLD.format(data=_safe_label_name("; ".join(p for p in parts if p)))

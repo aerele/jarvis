@@ -1437,13 +1437,14 @@ def _authorized_held(name, approver: str, kinds=(HELD,), *, acting: bool = True)
 
 @frappe.whitelist()
 @require_jarvis_user
-def get_pending_action(name: str) -> dict:
+def get_pending_action(name: str, slim: int | str | None = None) -> dict:
 	"""One lane row for the board: ``{kind, card, summary, age, can_act,
 	reason_code, ...}``; a held row adds ``waiters_count`` / ``candidates`` (read as
 	its ``exec_user``: name/title/GSTIN only), a chat card its conversation (decided
 	through ``confirm_tool`` / ``dismiss_tool``), a sheet its records view and
-	questions (``held_sheet_board.detail``; a listing one reads, not acts). Never the
-	sealed columns or ``open_key``. A terminal row still unsettled is settled on read
+	questions (``held_sheet_board.detail``; a listing one reads, not acts), or with
+	``slim`` only its poll state (``held_sheet_board.status``). Never the sealed
+	columns or ``open_key``. A terminal row still unsettled is settled on read
 	(self-heal)."""
 	from jarvis._session import authenticated_user
 	from jarvis.chat.pending_actions import settle
@@ -1461,6 +1462,8 @@ def get_pending_action(name: str) -> dict:
 	if row.kind == SHEET:
 		from jarvis.chat import held_sheet_board
 
+		if frappe.utils.cint(slim):
+			return held_sheet_board.status(row)
 		return _value_free(held_sheet_board.detail, "detail_crashed", row, me)
 	return _value_free(_held_detail, "detail_crashed", row, me)
 
@@ -1537,9 +1540,21 @@ def _now_existing(row) -> tuple[dict, dict] | None:
 	return _first_existing(row.exec_user, _held_items(row))
 
 
+def _record_locked(row, fn, *args) -> dict:
+	"""``fn(*args)`` holding the File Box sheet apply's locks on this held row's new
+	records (never two creates of one record, sheet or held); busy past a short wait."""
+	from jarvis.chat.pending_actions import _sheet
+
+	try:
+		with _sheet.record_locks(_sheet.lock_keys(_held_items(row)), wait=_sheet.LEGACY_LOCK_WAIT_S):
+			return fn(*args)
+	except _sheet.LockBusy:
+		frappe.db.rollback()
+		return _held_refusal("busy", _HELD_BUSY)
+
+
 def _create_held(row, approver: str) -> dict:
 	from jarvis.chat import held_writes
-	from jarvis.chat.pending_actions import execute
 	from jarvis.chat.pending_actions._store import PENDING
 
 	missing = held_writes.missing_labels(row.needs_input)
@@ -1548,6 +1563,13 @@ def _create_held(row, approver: str) -> dict:
 			"needs_input",
 			f"Fill {held_writes.missing_summary(missing)} first: use Edit & create.",
 		)
+	return _record_locked(row, _create_locked, row, approver)
+
+
+def _create_locked(row, approver: str) -> dict:
+	from jarvis.chat.pending_actions import execute
+	from jarvis.chat.pending_actions._store import PENDING
+
 	locked, refused = _lock_pending(row.name)
 	if refused:
 		return refused
@@ -1952,5 +1974,30 @@ def edit_and_create_held(name: str, values: str | list | dict | None = None) -> 
 		return _held_refusal("not_found", _HELD_NOT_FOUND)
 	patches = held_edit.patches_of(values)
 	waiting = _waiters_count(row.name)
-	res = _value_free(_edit_create_locked, "edit_crashed", row, approver, patches)
+	res = _record_locked(row, _value_free, _edit_create_locked, "edit_crashed", row, approver, patches)
 	return {**res, "waiters_count": waiting}
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def apply_sheet(name: str, decisions: str | dict | None = None) -> dict:
+	"""Apply a sealed File Box sheet (the owner, or a System Manager). ``decisions``:
+	``{records: {index: {action, values?, existing?}}, answers: {question: {text,
+	approve}}, expected_card_sha256, record_count}`` (records default to create /
+	apply). Every check refuses with nothing claimed; then one background job applies
+	it (``pending_actions._sheet``): ``{ok, applying: true}``."""
+	from jarvis.chat.pending_actions import _sheet
+
+	refuse_in_tool_dispatch()
+	return _sheet.apply(name, decisions)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def discard_sheet(name: str) -> dict:
+	"""Skip a whole sealed File Box sheet: nothing is created, its questions close,
+	and its run resumes once ("skipped")."""
+	from jarvis.chat.pending_actions import _sheet
+
+	refuse_in_tool_dispatch()
+	return _sheet.discard(name)

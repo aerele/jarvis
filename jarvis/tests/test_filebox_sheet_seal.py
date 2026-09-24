@@ -918,6 +918,16 @@ class TestBoard(_SealBase):
 		with as_user(OTHER), self.assertRaises(frappe.DoesNotExistError):
 			approvals_api.get_sheet_candidates(sealed.name)
 
+	def test_malformed_candidate_indexes_are_ignored_without_an_error_log(self):
+		_c, _r, sealed = self.sealed()
+		crashed = "jarvis.pending_action.candidates_crashed"
+		frappe.db.delete("Error Log", {"method": crashed})
+		with as_user(OWNER):
+			for raw in ("[[1]]", '[{"i": 0}]', "[true]", '["0"]'):
+				with self.subTest(raw=raw):
+					self.assertEqual(approvals_api.get_sheet_candidates(sealed.name, raw), {})
+		self.assertFalse(frappe.db.exists("Error Log", {"method": crashed}))
+
 	def test_the_badge_leaves_the_sheet_clause_out_before_its_migrate(self):
 		from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as ar
 

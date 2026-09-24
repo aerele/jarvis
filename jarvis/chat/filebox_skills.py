@@ -423,6 +423,13 @@ def apply_answer(doc) -> bool:
 	return _resume(doc.conversation, message)
 
 
+def sheet_answer(conversation: str, routing: str, decision: str) -> None:
+	"""A routing question answered with its sheet: only its effect (no commit, no
+	resume; the sheet resumes the run once, and "Skip this file" skips the sheet)."""
+	if routing == CONFLICT and decision != SKIP:
+		frappe.db.set_value(CONV, conversation, "filebox_skill_choice", decision, update_modified=False)
+
+
 def skip_file(conversation: str) -> None:
 	"""'Skip this file': no run; the row reads no_draft ("Skipped by you")."""
 	frappe.db.set_value(

@@ -132,11 +132,17 @@ def is_party_key(key: str) -> bool:
 
 
 def find_existing(
-	doctype: str, *, title: str = "", gstin: str = "", limit: int = MAX_CANDIDATES
+	doctype: str,
+	*,
+	title: str = "",
+	gstin: str = "",
+	limit: int = MAX_CANDIDATES,
+	ignore_permissions: bool = False,
 ) -> list[dict]:
 	"""Existing ``doctype`` records matching the GSTIN or the normalised name, as
-	``[{name, title, gstin}]``; permission-scoped to the current user. A name match
-	carrying a different tax id is another registration, not this party."""
+	``[{name, title, gstin}]``; permission-scoped to the current user unless
+	``ignore_permissions``. A name match carrying a different tax id is another
+	registration, not this party."""
 	meta = _meta(doctype)
 	if not meta or meta.istable or meta.issingle:
 		return []
@@ -147,7 +153,13 @@ def find_existing(
 
 	def _scan(filters, cap):
 		try:
-			return frappe.get_list(doctype, filters=filters, fields=fields, limit_page_length=cap)
+			return frappe.get_list(
+				doctype,
+				filters=filters,
+				fields=fields,
+				limit_page_length=cap,
+				ignore_permissions=ignore_permissions,
+			)
 		except frappe.PermissionError:
 			return []
 
