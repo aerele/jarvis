@@ -1596,6 +1596,28 @@ class TestRunAgentTurnAborted(FrappeTestCase):
 		self.assertEqual(row["content"], "all done")
 		self.assertEqual(row["streaming"], 0)
 
+	def test_final_shaped_abort_with_stop_marker_still_settles_as_stop(self):
+		# relay_turn_events now ALSO yields this exact {"state":"aborted","text":
+		# ""} shape for a `final` whose stopReason is "aborted" (the corrected
+		# wire shape for the deferred-reply yield). Downstream classification
+		# (turn_handler) is shape-agnostic - it reads the cancel marker, not
+		# where the shape came from - so with the marker set (this class's
+		# setUp) it must settle as a stop, never wait on
+		# relay_yield_continuation, regardless of which wire path produced it.
+		fake_sess = MagicMock()
+		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
+		fake_sess.relay_turn_events.return_value = _fake_event_stream(
+			[{"kind": "relay:error", "state": "aborted", "text": ""}]
+		)
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user"):
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		fake_sess.relay_yield_continuation.assert_not_called()
+		row = self._assistant_row(["stopped", "streaming"])
+		self.assertEqual(row["stopped"], 1)
+		self.assertEqual(row["streaming"], 0)
+
 
 class TestRunAgentTurnFailedFinal(FrappeTestCase):
 	"""A terminal agent failure that agent reports as state="final" with an
