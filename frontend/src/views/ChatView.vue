@@ -865,6 +865,7 @@
 								/>
 							</template>
 							<template #above-body>
+								<ReportScope :tools="reportToolsByTurn[m.name] || []" />
 								<!-- Activity: the tool calls (with input + output) that produced
 								     this answer — agent-style, collapsible. -->
 								<div
@@ -4596,6 +4597,8 @@ import {
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import { Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
+import ReportScope from "@/components/chat/ReportScope.vue";
+import { reportToolsByAssistant } from "@/lib/reportScope";
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
@@ -6378,6 +6381,8 @@ const visibleMessages = computed(() =>
 // + output) that produced it — agent-style. Tool rows follow their
 // assistant placeholder in seq order, so we attach to the most recent
 // assistant message and reset on each user message.
+const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value));
+
 const activityByAssistant = computed(() => {
 	const map = {};
 	let cur = null;

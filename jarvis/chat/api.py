@@ -685,6 +685,7 @@ def get_conversation(conversation: str) -> dict:
 			# push. Expiry is computed CLIENT-side from expires_at (no server peek), so a
 			# Redis blip can never mislabel a live card as expired.
 			"tool_call_id",
+			"tool_call_ids",
 			"pending_card",
 			"expires_at",
 			"canvas",
