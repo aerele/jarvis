@@ -212,6 +212,9 @@ website_redirects = [
 # Personalisation Settings defaults. See jarvis/install.py.
 after_install = "jarvis.install.after_install"
 
+# Tests run without an admin; seed the catalog snapshot from test fixtures.
+before_tests = "jarvis.tests.catalog_seed.seed_catalog_snapshot"
+
 # Keep the Agents Marketplace catalog (Jarvis Agent Listing) in lockstep with
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
 # fetch — bundles are reviewed deploy artifacts, adversarial S2).
@@ -235,6 +238,9 @@ after_migrate = [
 	# Re-send installed_apps to admin when the app set changed (the fleet
 	# gates skills/tool-denies off the admin-persisted list).
 	"jarvis.installed_apps_sync.after_migrate",
+	# Queue a pull of the admin model and preset catalogs into this site's
+	# snapshot so a freshly deployed site has a last-known-good copy for outages.
+	"jarvis.catalog_store.enqueue_refresh_all",
 ]
 
 # Scheduled Tasks
@@ -336,6 +342,9 @@ scheduler_events = {
 		],
 	},
 	"hourly": [
+		# Admin model + preset catalogs into Redis and the site snapshot. Hot paths
+		# only read (jarvis.catalog_store), so this bounds how stale a site can be.
+		"jarvis.catalog_store.refresh_all",
 		# Session lifecycle: free dormant conversations' agent sessions, reap
 		# abandoned empty chats, and reap orphaned throwaway sessions
 		# (title/prewarm/polish, deleted conversations). Batch-capped; bench

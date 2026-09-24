@@ -57,6 +57,7 @@ vi.mock("@/composables/useConfirm", () => ({
 }));
 
 import LlmPoolEditor from "./LlmPoolEditor.vue";
+import { MODEL_CATALOG_UI } from "@/lib/__fixtures__/modelCatalogUi.fixtures.js";
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
@@ -98,11 +99,7 @@ beforeEach(() => {
 	api.getLlmConfig.mockImplementation(async () => clone(serverPool));
 	api.getLlmSyncStatus.mockImplementation(async () => clone(syncStatus));
 	api.getPresetCatalog.mockImplementation(async () => []);
-	api.getModelCatalogUi.mockImplementation(async () => ({
-		api_key_models: {},
-		subscription_models: {},
-		default_models: {},
-	}));
+	api.getModelCatalogUi.mockImplementation(async () => clone(MODEL_CATALOG_UI));
 	api.saveLlmPool.mockImplementation(async (models, preset) => {
 		serverPool.models = clone(models);
 		serverPool.preset = preset || "";
@@ -501,64 +498,23 @@ describe("the status keeps updating past the blocking wait (defect 3)", () => {
 });
 
 /**
- * PROVIDER_DEFAULTS is the local fallback for "which api-key model does this
- * provider preselect", used only while the admin catalog fetch is in flight or
- * after it fails. It is a hand-maintained mirror of the catalog's api_key
- * is_default, and nothing enforces the pairing: the 2026-07-26 catalog refresh
- * moved six ids and left this copy behind, so a customer whose catalog fetch
- * failed got preselected onto two vendor-DEPRECATED ids (deepseek-chat, retired
- * 2026-07-24, and llama-3.3-70b-versatile, retired 2026-06-17).
- *
- * These lock the fallback to the catalog. If a future refresh moves an id in
- * jarvis/_model_catalog.py without moving it here, this fails instead of
- * silently shipping a dead default.
+ * The editor has no model list of its own: every preselected model and base URL
+ * comes from the admin catalog (get_model_catalog_ui). A hand-kept copy here once
+ * drifted and preselected vendor-deprecated ids, which is why it was removed.
+ * With no catalog, nothing is guessed and adding or connecting stays disabled.
  */
-describe("api-key model defaults survive a failed catalog fetch", () => {
-	// The six the 2026-07-26 refresh stranded, plus the ones that were already
-	// correct, so the whole table is covered rather than just the regression.
-	const EXPECTED = {
-		OpenAI: "gpt-5.6",
-		Anthropic: "claude-sonnet-5",
-		"Google Gemini": "gemini-3.6-flash",
-		Mistral: "mistral-large-latest",
-		Groq: "openai/gpt-oss-120b",
-		"Together AI": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-		DeepSeek: "deepseek-flash",
-		"Moonshot (Kimi)": "kimi-k2.6",
-		"xAI Grok": "grok-4.5",
-		"GLM / Z.ai": "glm-4.7",
-		"GLM / Z.ai (Coding Plan)": "glm-4.7",
-		OpenRouter: "anthropic/claude-sonnet-4-6",
-		"Ollama (local)": "llama3",
-	};
-
-	it("falls back to the catalog's current api_key default for every provider", async () => {
-		api.getModelCatalogUi.mockRejectedValue(new Error("admin unreachable"));
+describe("model defaults come from the admin catalog only", () => {
+	it("preselects each provider's catalog api_key default", async () => {
 		const w = await mountEditor();
-
-		for (const [label, model] of Object.entries(EXPECTED)) {
-			expect(`${label}=${w.vm.providerDefaultModel(label)}`).toBe(`${label}=${model}`);
+		for (const [label, models] of Object.entries(MODEL_CATALOG_UI.api_key_models)) {
+			const flagged = models.find((m) => m.is_default);
+			expect(`${label}=${w.vm.providerDefaultModel(label)}`).toBe(
+				`${label}=${flagged ? flagged.model_id : ""}`
+			);
 		}
 	});
 
-	it("never falls back to a vendor-deprecated id", async () => {
-		api.getModelCatalogUi.mockRejectedValue(new Error("admin unreachable"));
-		const w = await mountEditor();
-
-		expect(w.vm.providerDefaultModel("DeepSeek")).not.toBe("deepseek-chat");
-		expect(w.vm.providerDefaultModel("Groq")).not.toBe("llama-3.3-70b-versatile");
-	});
-
-	it("clears the model for providers that have no default", async () => {
-		api.getModelCatalogUi.mockRejectedValue(new Error("admin unreachable"));
-		const w = await mountEditor();
-
-		expect(w.vm.providerDefaultModel("vLLM (local)")).toBe("");
-		expect(w.vm.providerDefaultModel("OpenAI-Compatible")).toBe("");
-	});
-
-	it("snaps a row's model to the fallback when the provider is switched", async () => {
-		api.getModelCatalogUi.mockRejectedValue(new Error("admin unreachable"));
+	it("snaps a row's model and base URL to the catalog when the provider is switched", async () => {
 		const w = await mountEditor();
 		const row = w.vm.rows[0] || (w.vm.rows.push(w.vm.newRow?.() ?? {}), w.vm.rows[0]);
 
@@ -568,23 +524,108 @@ describe("api-key model defaults survive a failed catalog fetch", () => {
 
 		w.vm.onProviderChange(row, "Groq");
 		expect(row.model).toBe("openai/gpt-oss-120b");
+		expect(row.baseUrl).toBe("https://api.groq.com/openai/v1");
 	});
 
-	it("prefers the fetched catalog over the local literal", async () => {
-		// The literal is only a stand-in. When admin answers, admin wins - that is
-		// what lets an operator add a model in the desk with no deploy.
+	it("uses whatever the admin serves, with no local list behind it", async () => {
 		api.getModelCatalogUi.mockResolvedValue({
+			...clone(MODEL_CATALOG_UI),
 			api_key_models: {
 				DeepSeek: [{ model_id: "deepseek-v9-future", label: "", is_default: true }],
 			},
-			subscription_models: {},
-			default_models: {},
 		});
 		const w = await mountEditor();
 
 		expect(w.vm.providerDefaultModel("DeepSeek")).toBe("deepseek-v9-future");
-		// A provider the catalog did not mention still uses the literal.
-		expect(w.vm.providerDefaultModel("Groq")).toBe("openai/gpt-oss-120b");
+		// A provider the catalog does not mention gets no guessed id.
+		expect(w.vm.providerDefaultModel("Groq")).toBe("");
+	});
+
+	it("an unreachable catalog guesses nothing and blocks adding and connecting", async () => {
+		api.getModelCatalogUi.mockRejectedValue(new Error("admin unreachable"));
+		const w = await mountEditor();
+
+		expect(w.vm.catalogReady).toBe(false);
+		expect(w.vm.providerDefaultModel("DeepSeek")).toBe("");
+		expect(w.text()).toContain("Models are unavailable right now.");
+		const panelBefore = JSON.stringify(w.vm.panel);
+		w.vm.openAdd();
+		expect(JSON.stringify(w.vm.panel)).toBe(panelBefore);
+	});
+
+	it("a row created before the catalog lands gets its defaults once it does", async () => {
+		api.getModelCatalogUi.mockResolvedValueOnce({ catalog_available: false });
+		const w = await mountEditor();
+		const row = { ...w.vm.newRow(), provider: "DeepSeek" };
+		w.vm.rows.push(row);
+		expect(row.model).toBe("");
+
+		await w.vm.loadModelCatalog();
+		expect(row.model).toBe("deepseek-flash");
+		expect(row.baseUrl).toBe("https://api.deepseek.com");
+	});
+
+	it("a provider or type switch waits for the catalog instead of blanking a saved row", async () => {
+		api.getModelCatalogUi.mockResolvedValueOnce({ catalog_available: false });
+		const w = await mountEditor();
+		const saved = {
+			...w.vm.newRow(),
+			provider: "Groq",
+			model: "openai/gpt-oss-120b",
+			baseUrl: "https://api.groq.com/openai/v1",
+		};
+		w.vm.onProviderChange(saved, "DeepSeek");
+		w.vm.pickCredType(saved, "subscription");
+		expect(saved.provider).toBe("Groq");
+		expect(saved.model).toBe("openai/gpt-oss-120b");
+		expect(saved.baseUrl).toBe("https://api.groq.com/openai/v1");
+		expect(saved.credentialType).not.toBe("subscription");
+	});
+
+	it("re-authorizing a saved account still works while the catalog is unavailable", async () => {
+		// Only work that would guess a model id waits for the catalog; a row that
+		// already names its model does not.
+		api.getModelCatalogUi.mockRejectedValue(new Error("admin unreachable"));
+		const w = await mountEditor({ singleMode: true, footerless: true });
+		expect(w.vm.catalogReady).toBe(false);
+		const saved = {
+			_uid: 9001,
+			credentialType: "subscription",
+			upstream: "anthropic",
+			model: "claude-opus-5",
+			accounts: [],
+			_connect: { loading: false, pastedUrl: "" },
+		};
+		api.beginClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: { login_id: "login-2", authorize_url: "https://claude.com/x", expires_at: 0 },
+		});
+		await w.vm.startConnect(saved, null, { openTab: false });
+		expect(api.beginClaudeCliLogin).toHaveBeenCalledWith("claude-opus-5");
+
+		api.beginClaudeCliLogin.mockClear();
+		await w.vm.startConnect({ ...saved, model: "" }, null, { openTab: false });
+		expect(api.beginClaudeCliLogin).not.toHaveBeenCalled();
+	});
+
+	it("Retry asks the server to skip its failure backoff", async () => {
+		api.getModelCatalogUi.mockResolvedValueOnce({ catalog_available: false });
+		const w = await mountEditor();
+		await w.vm.loadModelCatalog(true);
+		expect(api.getModelCatalogUi).toHaveBeenLastCalledWith(true);
+	});
+
+	it("an empty catalog answer is treated as unavailable, and Retry recovers", async () => {
+		api.getModelCatalogUi.mockResolvedValueOnce({
+			...clone(MODEL_CATALOG_UI),
+			catalog_available: false,
+		});
+		const w = await mountEditor();
+		expect(w.vm.catalogReady).toBe(false);
+
+		await w.vm.loadModelCatalog();
+		expect(w.vm.catalogReady).toBe(true);
+		expect(w.text()).not.toContain("Models are unavailable right now.");
 	});
 });
 

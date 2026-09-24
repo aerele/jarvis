@@ -133,7 +133,23 @@
 				Sign in with your existing ChatGPT Plus/Pro account - no API key needed. It's
 				served directly to the provider (codex), not through the proxy.
 			</p>
-			<div class="jv-dsub-pick">
+			<p v-if="catalogState === 'loading'" class="jv-dsub-muted" style="margin: 0">
+				Loading models…
+			</p>
+			<div v-else-if="catalogState === 'unavailable'" class="jv-dsub-err" style="margin: 0">
+				Models are unavailable right now.
+				<button class="jv-dsub-btn" style="margin-left: 8px" @click="loadCatalog(true)">
+					Retry
+				</button>
+			</div>
+			<p
+				v-else-if="catalogState === 'ready' && !SUB_PROVIDERS.length"
+				class="jv-dsub-muted"
+				style="margin: 0"
+			>
+				No subscription provider is available to connect here.
+			</p>
+			<div v-if="catalogState === 'ready' && SUB_PROVIDERS.length" class="jv-dsub-pick">
 				<label class="jv-dsub-field">
 					<span>Provider</span>
 					<select
@@ -156,9 +172,9 @@
 			</div>
 			<div class="jv-dsub-actions" style="margin-top: 12px">
 				<button
-					v-if="editable"
+					v-if="editable && catalogState === 'ready' && SUB_PROVIDERS.length"
 					class="jv-dsub-btn jv-dsub-btn-primary"
-					:disabled="busy"
+					:disabled="busy || !pickModel"
 					@click="startSignin(pickProvider, pickModel)"
 				>
 					Sign in with {{ pickProvider }}
@@ -173,7 +189,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import * as api from "@/api";
 import { errMessage as _err } from "@/lib/errors";
-import { isCodeOnlyPaste, subModelSuggestions } from "@/llm/pool";
+import { isCodeOnlyPaste } from "@/llm/pool";
 import { exactDate } from "@/utils/datetime";
 import { useConfirm } from "@/composables/useConfirm";
 import { agentName } from "@/branding";
@@ -194,21 +210,25 @@ const emit = defineEmits(["reauthorized", "disconnected"]);
 // on mount. subscription_connect_providers is gated on a non-empty
 // auth_profile_id (R7 - openai today; Gemini's subscription was removed 2026-08-19), never on
 // supports_subscription, so it never offers a provider whose OAuth blob admin
-// would reject. Falls back to the built-in SUB_PROVIDERS literal below when
-// the fetch fails or hasn't landed yet - never blank.
+// would reject.
 const modelCatalog = ref({ subscription_connect_providers: [] });
-onMounted(async () => {
+// "loading" | "ready" | "unavailable". The admin catalog is the only source of
+// model ids, so a new connect waits for it and offers Retry if it cannot load.
+const catalogState = ref("loading");
+async function loadCatalog(retry = false) {
+	catalogState.value = "loading";
 	try {
-		modelCatalog.value = (await api.getModelCatalogUi()) || modelCatalog.value;
+		const res = await api.getModelCatalogUi(retry);
+		if (res) modelCatalog.value = res;
+		// "ready" with no connect providers is a real answer, not an outage.
+		catalogState.value = res && res.catalog_available ? "ready" : "unavailable";
 	} catch (e) {
-		/* built-in SUB_PROVIDERS fallback below covers this */
+		catalogState.value = "unavailable";
 	}
-});
+	syncPicks();
+}
+onMounted(loadCatalog);
 
-// Built-in fallback: subscription providers offered for a fresh DIRECT connect
-// before the catalog fetch lands or if it fails. The model list is the pool
-// editor's own fallback (one literal, in pool.js), so the two cannot drift.
-const FALLBACK_SUB_PROVIDERS = [{ provider: "OpenAI", models: subModelSuggestions().openai }];
 // Gated server-side on a non-empty auth_profile_id (R7): supports_subscription
 // is true for xai and moonshot too (cliproxy really does serve their
 // subscription models), but only openai supports this card's paste-back connect
@@ -216,15 +236,12 @@ const FALLBACK_SUB_PROVIDERS = [{ provider: "OpenAI", models: subModelSuggestion
 // blob outright. Google Gemini's subscription was removed 2026-08-19 (Google
 // discontinued login-with-Google), so the seed sets auth_profile_id for openai
 // only and the rendered list is a single entry.
-const SUB_PROVIDERS = computed(() => {
-	const rows = modelCatalog.value.subscription_connect_providers || [];
-	return rows.length ? rows : FALLBACK_SUB_PROVIDERS;
-});
+const SUB_PROVIDERS = computed(() => modelCatalog.value.subscription_connect_providers || []);
 function _defaultProvider() {
 	if (SUB_PROVIDERS.value.some((p) => p.provider === props.status.provider))
 		return props.status.provider;
 	const byModel = SUB_PROVIDERS.value.find((p) => p.models.includes(props.status.model));
-	return byModel ? byModel.provider : "OpenAI";
+	return byModel ? byModel.provider : (SUB_PROVIDERS.value[0] || {}).provider || "";
 }
 const pickProvider = ref(_defaultProvider());
 // The Re-authorize path reuses `status.provider` regardless of SUB_PROVIDERS
@@ -241,14 +258,21 @@ const pickModels = computed(
 	() =>
 		(
 			SUB_PROVIDERS.value.find((p) => p.provider === pickProvider.value) ||
-			SUB_PROVIDERS.value[0]
+			SUB_PROVIDERS.value[0] || { models: [] }
 		).models
 );
-const pickModel = ref(
-	pickModels.value.includes(props.status.model) ? props.status.model : pickModels.value[0]
-);
+const pickModel = ref("");
+// Re-derive the picks once the catalog lands (they start empty while loading).
+function syncPicks() {
+	if (!SUB_PROVIDERS.value.some((p) => p.provider === pickProvider.value))
+		pickProvider.value = _defaultProvider();
+	if (!pickModels.value.includes(pickModel.value))
+		pickModel.value = pickModels.value.includes(props.status.model)
+			? props.status.model
+			: pickModels.value[0] || "";
+}
 function onPickProvider() {
-	pickModel.value = pickModels.value[0];
+	pickModel.value = pickModels.value[0] || "";
 }
 
 const flowOpen = ref(false);

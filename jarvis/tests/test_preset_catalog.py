@@ -1,67 +1,59 @@
+import json
 from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import admin_client
+from jarvis.catalog_store import PRESETS, SNAPSHOT_DT
 from jarvis.exceptions import AdminUnreachableError
 
+_PAYLOAD = [
+	{
+		"key": "openai-resilient",
+		"label": "OpenAI — resilient",
+		"kind": "single_vendor",
+		"blurb": "",
+		"enabled": True,
+		"models": [{"provider": "openai", "model": "gpt-5.5", "order": 0}],
+		"vendors": ["openai"],
+	}
+]
 
-class TestGetPresetCatalog(FrappeTestCase):
+
+def _snapshot_presets() -> list:
+	return json.loads(frappe.db.get_single_value(SNAPSHOT_DT, "preset_catalog") or "[]")
+
+
+class TestPresetCatalog(FrappeTestCase):
 	def setUp(self):
-		frappe.cache().delete_value(admin_client._PRESET_CATALOG_CACHE_KEY)
+		frappe.cache().delete_value(PRESETS.cache_key)
+		self.addCleanup(frappe.cache().delete_value, PRESETS.cache_key)
+		frappe.db.savepoint("preset_catalog_test")
+		self.addCleanup(frappe.db.rollback, save_point="preset_catalog_test")
 
-	def test_fetches_and_caches_admin_catalog(self):
-		payload = [
-			{
-				"key": "openai-resilient",
-				"label": "OpenAI — resilient",
-				"kind": "single_vendor",
-				"blurb": "",
-				"enabled": True,
-				"models": [{"provider": "openai", "model": "gpt-5.5", "order": 0}],
-				"vendors": ["openai"],
-			}
-		]
-		with patch.object(admin_client, "_post_guest", return_value=payload) as gp:
+	def test_read_never_calls_the_admin(self):
+		with patch.object(admin_client, "_post_guest", side_effect=AssertionError("no admin")):
 			out = admin_client.get_preset_catalog()
-		self.assertEqual(out, payload)
-		gp.assert_called_once()
-		self.assertIn("get_preset_catalog", gp.call_args.kwargs.get("path", ""))
-		with patch.object(admin_client, "_post_guest", side_effect=AssertionError("must use cache")):
-			self.assertEqual(admin_client.get_preset_catalog(), payload)
+		self.assertTrue(out)
+		self.assertEqual(out, _snapshot_presets())
 
-	def test_cache_hit_short_circuits_network(self):
-		cached = [
-			{
-				"key": "cost-saver",
-				"label": "Cost-saver",
-				"kind": "cross_vendor",
-				"blurb": "",
-				"enabled": True,
-				"models": [],
-				"vendors": [],
-			}
-		]
-		frappe.cache().set_value(
-			admin_client._PRESET_CATALOG_CACHE_KEY, cached, expires_in_sec=admin_client._PRESET_CATALOG_TTL_S
-		)
-		with patch.object(admin_client, "_post_guest") as m:
-			result = admin_client.get_preset_catalog()
-		self.assertEqual(result, cached)
-		m.assert_not_called()
+	def test_refresh_fetches_and_saves(self):
+		with patch.object(admin_client, "_post_guest", return_value=_PAYLOAD) as gp:
+			self.assertEqual(PRESETS.refresh(), _PAYLOAD)
+		self.assertIn("get_preset_catalog", gp.call_args.kwargs["path"])
+		self.assertEqual(_snapshot_presets(), _PAYLOAD)
 
-	def test_falls_back_to_bundled_when_admin_down_and_cache_empty(self):
-		from jarvis._preset_catalog import BUNDLED_PRESET_CATALOG
-
+	def test_refresh_with_admin_down_serves_the_snapshot(self):
+		before = _snapshot_presets()
 		with patch.object(admin_client, "_post_guest", side_effect=AdminUnreachableError("down")):
-			out = admin_client.get_preset_catalog()
-		self.assertEqual(out, BUNDLED_PRESET_CATALOG)
-		self.assertTrue(all("key" in e and "models" in e for e in out))
+			self.assertEqual(PRESETS.refresh(), before)
 
-	def test_wrapper_delegates_to_admin_client(self):
+	def test_onboarding_endpoint_fetches_live(self):
+		# Onboarding reads the admin directly (not Redis) so a new customer sees
+		# today's presets.
 		from jarvis import onboarding
 
-		with patch.object(admin_client, "get_preset_catalog", return_value=[{"key": "k"}]) as m:
+		with patch.object(PRESETS, "refresh", return_value=[{"key": "k"}]) as refresh:
 			self.assertEqual(onboarding.get_preset_catalog(), [{"key": "k"}])
-		m.assert_called_once()
+		refresh.assert_called_once()
