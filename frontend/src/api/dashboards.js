@@ -2,7 +2,7 @@
 // (src/api.js is frozen - new endpoints get per-feature modules under src/api/,
 // the api/triggers.js convention). CRUD endpoints answer with the {ok, data}
 // envelope and are unwrapped here; the two data-execution endpoints
-// (runDashboardSource / callDashboardTool) are passed through UN-unwrapped
+// (runDashboardSource / previewDashboardSource) are passed through UN-unwrapped
 // because their {ok:false, error:{code, message}} arm is load-bearing - the
 // canvas maps those codes onto per-widget errors inside the iframe.
 import { call } from "frappe-ui";
@@ -57,31 +57,30 @@ export const listDashboardConversations = (conversation = "") =>
 export const dashboardForConversation = (conversation) =>
 	call(DB + "dashboard_for_conversation", { conversation }).then(unwrap);
 
-// View-mode data: executes the SERVER-stored spec for one named source.
+// View-mode data: executes the SERVER-stored spec for one named source with
+// the viewer's filter values bound in server-side. filters: {fieldname: value}.
 // -> {ok:true, data:{source_name, tool, rows, columns? (run_report only),
 //     truncated, took_ms}}
 //  | {ok:false, error:{code:"PermissionError"|"InvalidArgumentError"|"NotFound"
-//     |"InternalError", message}}   (envelope passed through, NOT unwrapped)
-export const runDashboardSource = (dashboard, source_name) =>
-	call(DB + "run_dashboard_source", { dashboard, source_name });
+//     |"FilterRequired"|"InternalError", message, fieldname? (FilterRequired
+//     only)}}   (envelope passed through, NOT unwrapped)
+export const runDashboardSource = (dashboard, source_name, filters = {}) =>
+	call(DB + "run_dashboard_source", {
+		dashboard,
+		source_name,
+		filters: JSON.stringify(filters || {}),
+	});
 
-// Builder-mode ad-hoc data: the iframe's declared spec executed directly via
-// the generic tool endpoint. Client-side whitelist mirrors what dashboards may
-// declare; anything else short-circuits to the same error envelope shape.
+// Builder-mode data: the iframe's declared (unsaved) spec, run through the same
+// binder as the saved runner. filterDefs: the parsed #jarvis-filters list.
 // -> {ok, data} | {ok:false, error:{code, message}}  (NOT unwrapped)
-const DASH_TOOLS = ["query", "get_list", "run_report"];
-export const callDashboardTool = (tool, args = {}) => {
-	if (!DASH_TOOLS.includes(tool)) {
-		return Promise.resolve({
-			ok: false,
-			error: {
-				code: "InvalidArgumentError",
-				message: `Tool "${tool}" is not allowed in dashboards.`,
-			},
-		});
-	}
-	return call("jarvis.api.call_tool", { tool, args: JSON.stringify(args || {}) });
-};
+export const previewDashboardSource = (tool, spec, filterDefs = [], filters = {}) =>
+	call(DB + "preview_dashboard_source", {
+		tool,
+		spec: JSON.stringify(spec || {}),
+		filter_defs: JSON.stringify(filterDefs || []),
+		filters: JSON.stringify(filters || {}),
+	});
 
 // ── chat pane (existing chat endpoints, reused - the triggers.js shape) ───────
 // api.js#sendMessage only forwards `context` when it carries a doctype, so the

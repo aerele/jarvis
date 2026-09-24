@@ -375,14 +375,19 @@ class TestSchemaEndpointAnswersForEachWave1View(Wave1Base):
 				self.assertGreater(len(names), len(curated))
 
 	def test_dashboard_child_fields_are_offered(self):
-		"""Jarvis Dashboard Source is the wave's EXISTS-compilation case (D4)."""
+		"""Jarvis Dashboard Source is the wave's EXISTS-compilation case (D4).
+		Jarvis Dashboard Filter is a second child table on the same parent and
+		must not crowd Source's fields out of the catalog."""
 		from jarvis.chat.list_filters import get_list_filter_schema
 
 		with _as(USER_A):
 			schema = get_list_filter_schema("saved_dashboards")
 		child = {(f["doctype"], f["fieldname"]) for f in schema["fields"] if f["is_child"]}
 		self.assertTrue(child, "no child fields offered for saved_dashboards")
-		self.assertTrue(all(dt == "Jarvis Dashboard Source" for dt, _fn in child))
+		child_doctypes = {dt for dt, _fn in child}
+		self.assertEqual(child_doctypes, {"Jarvis Dashboard Source", "Jarvis Dashboard Filter"})
+		source_fields = {fn for dt, fn in child if dt == "Jarvis Dashboard Source"}
+		self.assertEqual(source_fields, {"source_name", "tool", "spec"})
 
 	def test_a_child_clause_compiles_and_narrows(self):
 		name = _mk_dashboard(USER_A, "lfw-dash-child")
@@ -601,13 +606,26 @@ class TestCatalogIsBrowsable(Wave1Base):
 		child = [f for f in fields if f["is_child"]]
 		self.assertTrue(child)
 		# The parent's Table-field label — the words on the form — rather than the
-		# child DocType name, which the user has never seen.
-		expected = frappe.get_meta(DASHBOARD).get_field("sources").label
-		self.assertEqual(expected, "Data Sources")
-		for entry in child:
-			self.assertEqual(entry["group"], expected)
-			self.assertIn(f"({expected})", entry["label"])
+		# child DocType name, which the user has never seen. Jarvis Dashboard
+		# carries two child tables (sources, filters); each gets its own group
+		# named after its own Table field, not a shared/hardcoded one.
+		sources_label = frappe.get_meta(DASHBOARD).get_field("sources").label
+		filters_label = frappe.get_meta(DASHBOARD).get_field("filters").label
+		self.assertEqual(sources_label, "Data Sources")
+		self.assertEqual(filters_label, "Filters")
+		source_entries = [e for e in child if e["parentfields"] == ["sources"]]
+		filter_entries = [e for e in child if e["parentfields"] == ["filters"]]
+		self.assertTrue(source_entries)
+		self.assertTrue(filter_entries)
+		self.assertEqual(len(source_entries) + len(filter_entries), len(child))
+		for entry in source_entries:
+			self.assertEqual(entry["group"], sources_label)
+			self.assertIn(f"({sources_label})", entry["label"])
 			self.assertNotIn("Jarvis Dashboard Source", entry["label"])
+		for entry in filter_entries:
+			self.assertEqual(entry["group"], filters_label)
+			self.assertIn(f"({filters_label})", entry["label"])
+			self.assertNotIn("Jarvis Dashboard Filter", entry["label"])
 
 	def test_standard_fields_are_grouped_apart(self):
 		from jarvis.chat.list_filters import get_list_filter_schema
