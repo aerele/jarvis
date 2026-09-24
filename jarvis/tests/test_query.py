@@ -12,6 +12,7 @@ Test surface:
 - Happy path against the always-populated ``tabDocType`` table
 """
 
+from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -3530,3 +3531,37 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		# Same key returns the identical cached object (frozenset), not a recompute.
 		self.assertIs(a1, a2)
 		self.assertIs(b1, b2)
+
+
+class TestExistsSpecShape(TestCase):
+	def test_unknown_nested_fields_fail_before_sql_construction(self):
+		from jarvis.tools.query import _build_exists_criterion
+
+		for op in (False, True):
+			for key in ("filters", "filter", "order", "select", "unexpected"):
+				with self.subTest(negate=op, key=key):
+					with self.assertRaisesRegex(InvalidArgumentError, "EXISTS sub-spec must not include"):
+						_build_exists_criterion({"from": "ToDo", key: []}, {}, 1, negate=op)
+
+
+class TestNestedQueryValidationIntegration(FrappeTestCase):
+	def test_nested_filter_is_not_silently_dropped(self):
+		frappe.set_user("Administrator")
+		for operator in ("exists", "not exists"):
+			inner = {
+				"from": "ToDo",
+				"alias": "inner_t",
+				"filters": [{"field": "inner_t.name", "op": "=", "value": "nonexistent-review-record"}],
+			}
+			spec = {
+				"from": "ToDo",
+				"alias": "outer_t",
+				"select": ["outer_t.name"],
+				"where": [{"op": operator, "value": inner}],
+			}
+			with self.assertRaisesRegex(InvalidArgumentError, "filters"):
+				query(spec)
+			inner["where"] = inner.pop("filters")
+			result = query(spec)
+			self.assertIn("nonexistent-review-record", result["sql"])
+			self.assertIn("EXISTS", result["sql"].upper())
