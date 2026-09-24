@@ -101,3 +101,17 @@ it("styles only with theme tokens that exist in both light and dark", () => {
 		expect(DARK_VARS).toHaveProperty([token]);
 	}
 });
+
+it("exposes the scopes as a labelled group to assistive technology", () => {
+	const group = mount(ReportScope, { props: { tools: [receipt()] } }).find(".report-scopes");
+	expect(group.attributes("role")).toBe("group");
+	expect(group.attributes("aria-label")).toBe("Reports consulted");
+});
+
+it("shows an identical scope once but keeps any visible difference", () => {
+	const again = { ...receipt(), name: "second-call" };
+	const otherDate = receipt("Example Company", { name: "third-call" });
+	otherDate.tool_result.data.report_scope.report_date = "2026-09-23";
+	const w = mount(ReportScope, { props: { tools: [receipt(), again, otherDate] } });
+	expect(w.findAll(".report-scope")).toHaveLength(2);
+});
