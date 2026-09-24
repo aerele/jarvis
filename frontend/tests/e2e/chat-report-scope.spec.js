@@ -37,17 +37,36 @@ test("shows report scope without model narration and survives reload", async ({ 
 				},
 				messages: [
 					{ name: "u1", role: "user", content: "What is payable?", seq: 1 },
-					{ name: "a1", role: "assistant", content: "No matching rows.", seq: 2 },
+					{
+						name: "a1",
+						role: "assistant",
+						content: "No matching rows.",
+						seq: 2,
+						tool_call_ids: '["report-call"]',
+					},
+					{ name: "queued", role: "user", content: "Another request", seq: 3 },
+					{
+						name: "cancelled",
+						role: "assistant",
+						content: "Cancelled",
+						stopped: 1,
+						seq: 4,
+					},
 					{
 						name: "t1",
 						role: "tool",
 						tool_name: "run_report",
+						tool_call_id: "report-call",
 						tool_status: "completed",
-						seq: 3,
+						seq: 5,
 						tool_result: JSON.stringify({
 							ok: true,
 							data: {
 								result: [],
+								prepared_report: true,
+								status: "ready",
+								as_of: "2026-09-22 10:00:00",
+								row_note: "Showing the first 500 of 700 rows.",
 								report_scope: {
 									version: 1,
 									report_name: "Accounts Payable Summary",
@@ -59,8 +78,8 @@ test("shows report scope without model narration and survives reload", async ({ 
 							},
 						}),
 					},
-					{ name: "u2", role: "user", content: "Hello", seq: 4 },
-					{ name: "a2", role: "assistant", content: "Hello!", seq: 5 },
+					{ name: "u2", role: "user", content: "Hello", seq: 6 },
+					{ name: "a2", role: "assistant", content: "Hello!", seq: 7 },
 				],
 			};
 		} else if (method.endsWith("send_message")) {
@@ -75,6 +94,11 @@ test("shows report scope without model narration and survives reload", async ({ 
 	const scope = page.locator(".report-scope");
 	await expect(scope).toHaveCount(1);
 	await expect(scope).toContainText("Example Company · As of 2026-09-24 · INR");
+	await expect(scope).toContainText("Generated: 2026-09-22 10:00:00");
+	await expect(scope).toContainText("Showing the first 500 of 700 rows.");
+	await expect(scope.locator("xpath=ancestor::*[contains(@class, 'jv-amsg')][1]")).toContainText(
+		"No matching rows."
+	);
 	await expect(page.locator(".jv-activity-body")).toHaveCount(0);
 	await page.reload();
 	await expect(scope).toHaveCount(1);

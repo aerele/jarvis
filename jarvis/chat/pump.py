@@ -1160,6 +1160,9 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 		# exception propagates, so quarantine/recovery starts from a FRESH transaction.
 		try:
 			rs.version += 1
+			from jarvis.chat.tool_ownership import record_tool_owner
+
+			record_tool_owner(conversation, rs.assistant_message, tool_call_id)
 			if owns_row:
 				if phase == "start":
 					message_id = _insert_tool_start_row(conversation, tool_call_id, tool_name)

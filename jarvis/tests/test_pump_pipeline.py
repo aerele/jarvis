@@ -1542,6 +1542,10 @@ class TestToolApplierEquivalence(_PipelineCase):
 		)
 		self.assertFalse(frappe.db.exists(MSG, {"conversation": conv, "tool_call_id": "t2", "role": "tool"}))
 
+		assistant = frappe.db.get_value(TURN, rid, "assistant_message")
+		owned = frappe.db.get_value(MSG, assistant, "tool_call_ids")
+		self.assertEqual(set(json.loads(owned)), {"t1", "t2", "t3"})
+
 		# Lifecycle publishes fired for ALL three tools (3 start + 3 end), epoch-fenced.
 		starts = [p for p in self._pubs if p.get("kind") == "tool:start"]
 		ends = [p for p in self._pubs if p.get("kind") == "tool:end"]

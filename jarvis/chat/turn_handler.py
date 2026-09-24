@@ -2556,6 +2556,11 @@ def _handle_event_inner(
 		phase = event.get("phase")
 		tool_call_id = event.get("tool_call_id")
 		tool_name = event.get("tool_name")
+		if phase in ("start", "end"):
+			from jarvis.chat.tool_ownership import record_tool_owner
+
+			record_tool_owner(conversation_id, assistant_msg_name, tool_call_id)
+			frappe.db.commit()
 		# jarvis__* tools execute through the backend call_tool path, which
 		# ALREADY persists a role=tool message carrying the full args + result
 		# (jarvis.api._persist_and_publish_tool_call). Persisting again here
