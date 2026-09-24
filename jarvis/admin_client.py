@@ -56,6 +56,15 @@ _OAUTH_EXPIRY_SKEW_S = 60
 # Upper bound the cache entry lives, so the refresh token outlives the
 # (~15min) access token; on entry expiry we re-mint with the password grant.
 _OAUTH_CACHE_TTL_S = 24 * 60 * 60
+# Frappe 16.35+ refuses the password grant outright (invalid_grant). After the
+# admin refuses it, skip the token endpoint for this long and use api_key:api_secret
+# directly, so each admin call does not pay a doomed round trip and an Error Log row.
+_OAUTH_REFUSED_KEY = "jarvis:admin_oauth_grant_refused"
+_OAUTH_REFUSED_TTL_S = 60 * 60
+# OAuth error codes that mean "this grant will not work here", as opposed to a blip.
+_OAUTH_REFUSAL_ERRORS = frozenset(
+	{"invalid_grant", "unsupported_grant_type", "unauthorized_client", "invalid_client"}
+)
 
 # The admin control-plane app namespace. SWITCH TO V2: v2 is now the default
 # control plane. Every admin /api/method path is built under this namespace via
@@ -1137,8 +1146,7 @@ def _authenticated_raw(path: str, body: dict, *, timeout_s: int):
 						raise
 			frappe.cache().delete_value(_OAUTH_CACHE_KEY)
 
-	api_key = (settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip()
-	api_secret = (settings.get_password("jarvis_admin_api_secret", raise_exception=False) or "").strip()
+	api_key, api_secret = _legacy_credentials(settings)
 	if not api_key or not api_secret:
 		raise AdminAuthError("not onboarded (no OAuth password and no api_key/secret)")
 	return _raise_for_admin_raw(_send({**bearer, "Authorization": f"token {api_key}:{api_secret}"}))
@@ -2112,11 +2120,12 @@ def cancel_scheduled_downgrade() -> dict:
 	)
 
 
-def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
-	"""POST a form-encoded grant to admin's OAuth token endpoint. Returns the
-	token dict ({access_token, refresh_token, expires_in, ...}) on success, or
-	None on any failure (network, non-JSON, non-200, missing access_token) so
-	the caller can fall back. Never raises; never logs token material.
+def _oauth_token_request(admin_url: str, grant: dict) -> tuple[dict | None, str | None]:
+	"""POST a form-encoded grant to admin's OAuth token endpoint. Returns
+	``(token, None)`` on success, ``(None, error_code)`` when the admin definitively
+	refused the grant (4xx with an OAuth refusal code), and ``(None, None)`` on any
+	other failure (network, non-JSON, 5xx, missing access_token) so the caller can
+	fall back. Never raises; never logs token material.
 
 	Form-encoded (not JSON): Frappe's get_token reads ``request.form``.
 	"""
@@ -2137,7 +2146,7 @@ def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
 			title="admin_client: oauth token network error",
 			message=f"url={url!r} grant={grant.get('grant_type')!r} error={e!r}",
 		)
-		return None
+		return None, None
 	try:
 		token = resp.json()
 	except ValueError:
@@ -2145,7 +2154,7 @@ def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
 			title="admin_client: oauth token non-JSON response",
 			message=f"grant={grant.get('grant_type')!r} status={resp.status_code}",
 		)
-		return None
+		return None, None
 	if resp.status_code != 200 or not isinstance(token, dict) or not token.get("access_token"):
 		# invalid_grant / invalid_client / expired-or-revoked refresh, etc.
 		# Log the error code only (never the credentials) for triage.
@@ -2154,16 +2163,19 @@ def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
 			title="admin_client: oauth token request rejected",
 			message=(f"grant={grant.get('grant_type')!r} status={resp.status_code} error={err!r}"),
 		)
-		return None
-	return token
+		refused = 400 <= resp.status_code < 500 and err in _OAUTH_REFUSAL_ERRORS
+		return None, (err if refused else None)
+	return token, None
 
 
 def clear_cached_token() -> None:
 	"""Drop the cached bearer. Anything that rotates this bench's admin credentials
 	MUST call it: the cached token was minted from the old ones, stays valid for its
 	full TTL, and keeps authenticating as the PREVIOUS account - so a reconnected
-	bench asks about a customer it no longer is and sits on "still being set up"."""
+	bench asks about a customer it no longer is and sits on "still being set up".
+	New credentials also deserve a fresh try at the grant, so the refusal goes too."""
 	frappe.cache().delete_value(_OAUTH_CACHE_KEY)
+	frappe.cache().delete_value(_OAUTH_REFUSED_KEY)
 
 
 def _cache_oauth_token(token: dict) -> None:
@@ -2191,7 +2203,12 @@ def _admin_access_token(settings, admin_url: str, *, force_refresh: bool = False
 
 	Serves a cached access token until shortly before expiry. On a miss, tries
 	the refresh token (best-effort), then the password grant (the durable
-	bootstrap). ``force_refresh`` bypasses the cache to re-mint after a 401.
+	bootstrap). ``force_refresh`` skips the cached access token to re-mint after a 401.
+
+	Once the admin refuses the password grant (Frappe 16.35+), that grant is not
+	retried for ``_OAUTH_REFUSED_TTL_S`` and the caller uses api_key:api_secret,
+	which every signup and reconnect issues. The refusal is only remembered when
+	that fallback exists, and it never blocks a cached refresh token.
 	"""
 	username = (settings.jarvis_admin_customer_email or "").strip()
 	# Password field -> get_password decrypts the real value out of __Auth.
@@ -2200,23 +2217,34 @@ def _admin_access_token(settings, admin_url: str, *, force_refresh: bool = False
 		return None
 
 	cache = frappe.cache()
-	cached = {} if force_refresh else (cache.get_value(_OAUTH_CACHE_KEY, expires=True) or {})
+	cached = cache.get_value(_OAUTH_CACHE_KEY, expires=True) or {}
 	access = cached.get("access_token")
-	if access and (cached.get("access_expires_at", 0) - _OAUTH_EXPIRY_SKEW_S) > time.time():
+	# force_refresh (after a 401) distrusts the access token only. Its refresh token
+	# is still tried first: on Frappe 16.35+ it is the only grant left.
+	if (
+		not force_refresh
+		and access
+		and (cached.get("access_expires_at", 0) - _OAUTH_EXPIRY_SKEW_S) > time.time()
+	):
 		return access
 
 	token = None
 	refresh = cached.get("refresh_token")
 	if refresh:
-		token = _oauth_token_request(
+		token, refusal = _oauth_token_request(
 			admin_url,
 			{
 				"grant_type": "refresh_token",
 				"refresh_token": refresh,
 			},
 		)
-	if not token:
-		token = _oauth_token_request(
+		if refusal == "invalid_grant":
+			# invalid_grant on a refresh means the token itself is dead (expired /
+			# revoked, RFC 6749 5.2): drop it so later calls do not replay it. A blip
+			# or a client-level refusal keeps it for the next try.
+			cache.delete_value(_OAUTH_CACHE_KEY)
+	if not token and not cache.get_value(_OAUTH_REFUSED_KEY, expires=True):
+		token, refusal = _oauth_token_request(
 			admin_url,
 			{
 				"grant_type": "password",
@@ -2224,10 +2252,29 @@ def _admin_access_token(settings, admin_url: str, *, force_refresh: bool = False
 				"password": password,
 			},
 		)
+		# Remember it only when api_key:api_secret can take over. Without that
+		# fallback, retrying on the next call is the bench's only way back in (a
+		# refusal mid-onboarding can be a race that clears seconds later).
+		if refusal and _has_legacy_credentials(settings):
+			cache.set_value(_OAUTH_REFUSED_KEY, refusal, expires_in_sec=_OAUTH_REFUSED_TTL_S)
 	if not token:
 		return None
 	_cache_oauth_token(token)
 	return token["access_token"]
+
+
+def _legacy_credentials(settings) -> tuple[str, str]:
+	"""The native api_key and api_secret, blank when missing. Both are Password
+	fields: attribute access returns the masked "*****" placeholder, so
+	get_password decrypts the real value out of __Auth."""
+	return (
+		(settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip(),
+		(settings.get_password("jarvis_admin_api_secret", raise_exception=False) or "").strip(),
+	)
+
+
+def _has_legacy_credentials(settings) -> bool:
+	return all(_legacy_credentials(settings))
 
 
 def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
@@ -2282,10 +2329,7 @@ def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 			frappe.cache().delete_value(_OAUTH_CACHE_KEY)
 
 	# Legacy native api_key:api_secret (pre-OAuth customers / OAuth fallback).
-	# Both are Password fields - attribute access returns the masked "*****"
-	# placeholder; get_password decrypts the real value out of __Auth.
-	api_key = (settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip()
-	api_secret = (settings.get_password("jarvis_admin_api_secret", raise_exception=False) or "").strip()
+	api_key, api_secret = _legacy_credentials(settings)
 	if not api_key or not api_secret:
 		raise AdminAuthError("not onboarded (Jarvis Settings: no OAuth password and no api_key/secret)")
 	headers = {
