@@ -1,5 +1,5 @@
 <template>
-	<div v-if="scopes.length" class="report-scopes" aria-label="Reports consulted">
+	<div v-if="scopes.length" class="report-scopes" role="group" aria-label="Reports consulted">
 		<span class="report-scope-title">Reports consulted</span>
 		<div v-for="scope in scopes" :key="scope.id" class="report-scope">
 			<span class="report-scope-title">{{ scope.report_name }}</span>
