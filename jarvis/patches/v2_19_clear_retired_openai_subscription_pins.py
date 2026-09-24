@@ -26,10 +26,8 @@ import json
 
 import frappe
 
-from jarvis._subscription_models import _SEED_DEFAULT_MODEL
-
 RETIRED_SUBSCRIPTION_MODELS = ("gpt-5.4", "gpt-5.4-mini")
-REPLACEMENT_MODEL = _SEED_DEFAULT_MODEL["OpenAI"]
+REPLACEMENT_MODEL = "gpt-5.6-terra"  # the OpenAI subscription default when this patch shipped
 _SUBSCRIPTION_MODES = {"oauth", "subscription"}
 _OPENAI = {"openai", "openai-codex"}
 
