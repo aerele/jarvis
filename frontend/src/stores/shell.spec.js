@@ -28,6 +28,8 @@ vi.hoisted(() => {
 // resolve under vitest). None of it is exercised by these sidebar-state tests.
 vi.mock("frappe-ui", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 vi.mock("@/api", () => ({}));
+const getReviewAccess = vi.fn();
+vi.mock("@/api/learning", () => ({ getReviewAccess }));
 vi.mock("@/lib/errors", () => ({ errHtml: (e) => String(e) }));
 vi.mock("@/onboarding/readiness.js", () => ({ needsOnboarding: () => false }));
 
@@ -73,5 +75,40 @@ describe("shell store: spacious-view auto-collapse (Dashboard Builder)", () => {
 		store.setSpaciousView(false); // leave
 		store.setSpaciousView(true); // come back
 		expect(store.sidebarCollapsed).toBe(true); // auto-collapse re-applies
+	});
+});
+
+describe("shell store: reviewer badge (sidebar Skills)", () => {
+	beforeEach(() => {
+		getReviewAccess.mockReset();
+		store.reviewCount = 0;
+	});
+
+	it("never calls the reviewer-guarded probe for a non-reviewer", async () => {
+		window.is_skill_reviewer = false;
+		await store.refreshReviewCount();
+		expect(getReviewAccess).not.toHaveBeenCalled();
+		expect(store.reviewCount).toBe(0);
+	});
+
+	it("sums every pending review queue for a reviewer", async () => {
+		window.is_skill_reviewer = true;
+		getReviewAccess.mockResolvedValue({
+			pending_patterns: 2,
+			pending_promotions: 1,
+			pending_skill_promotions: 3,
+		});
+		await store.refreshReviewCount();
+		expect(store.reviewCount).toBe(6);
+		delete window.is_skill_reviewer;
+	});
+
+	it("keeps the last count when the probe fails", async () => {
+		window.is_skill_reviewer = true;
+		store.reviewCount = 4;
+		getReviewAccess.mockRejectedValue(new Error("boom"));
+		await store.refreshReviewCount();
+		expect(store.reviewCount).toBe(4);
+		delete window.is_skill_reviewer;
 	});
 });
