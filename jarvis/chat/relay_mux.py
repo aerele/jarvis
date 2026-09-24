@@ -69,6 +69,7 @@ from jarvis.chat.agent_client import (
 	_build_request_frame,
 	_chat_final_failed,
 	_chat_final_text,
+	_is_yield_aborted_final,
 	failed_final_error,
 )
 from jarvis.chat.events import parse_event
@@ -596,7 +597,18 @@ class RelayMux:
 		state = payload.get("state")
 		if state == "final":
 			text = _chat_final_text(payload)
-			if _chat_final_failed(payload, text):
+			if _is_yield_aborted_final(payload, text):
+				# The runtime's image/video/music tools' unconditional
+				# background-detach yield reaches THIS path too (not only
+				# state=="aborted" below): a `final` whose text is empty and
+				# whose stopReason (top-level or nested in message) is
+				# "aborted", not "error". Same relay:error/aborted shape as the
+				# state=="aborted" branch, so on_terminal's yield-wait applies
+				# unchanged. MUST come before _chat_final_failed - its "no
+				# message at all" branch would otherwise call this a hard
+				# failure instead of a deferred reply.
+				term_kind, term_payload = "relay:error", {"state": "aborted", "text": ""}
+			elif _chat_final_failed(payload, text):
 				term_kind, term_payload = (
 					"relay:error",
 					{"state": "failed_final", "error": failed_final_error(lane.failure_detail)},

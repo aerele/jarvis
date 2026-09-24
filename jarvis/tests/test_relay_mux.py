@@ -828,6 +828,83 @@ class TestRelayMuxFailedFinal(FrappeTestCase):
 		self.assertIsNone(term[1]["text"])
 
 
+class TestRelayMuxYieldViaFinal(FrappeTestCase):
+	"""Corrected wire shape (verified live against the 2026.9.3 bundle): the
+	image/video/music tools' background-detach yield does NOT end with
+	``state=="aborted"`` - it ends through ``broadcastChatFinal``, a ``final``
+	whose assistant message is the runtime's own ``createYieldAbortedResponse``:
+	empty text, ``stopReason=="aborted"`` (never "error"), which can ride at
+	the top level, nested in ``message``, or with ``message`` omitted
+	entirely. Without ``_is_yield_aborted_final`` this reached
+	``_chat_final_failed`` and was misclassified as a hard failure
+	(FAILED_FINAL_ERROR) - see TestRelayMuxFailedFinal for that (still
+	correct) path for every OTHER empty/failed final."""
+
+	def _terminal_for(self, frames):
+		mux = RelayMux(MagicMock(), "yf-target")
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		for frame in frames:
+			mux._classify(frame)
+		mux.dispatch()
+		return rec.terminal
+
+	def test_top_level_stop_reason_aborted_message_omitted_is_a_yield(self):
+		term = self._terminal_for([_chat_failed_final_frame("r1", "s1", stop_reason="aborted")])
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_top_level_stop_reason_aborted_with_message_present_is_a_yield(self):
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"stopReason": "aborted",
+				"message": {"content": [{"type": "text", "text": ""}], "stopReason": "aborted"},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_nested_message_stop_reason_aborted_is_a_yield(self):
+		# The transcript-projected shape: no top-level stopReason, only nested.
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"message": {"content": [{"type": "text", "text": ""}], "stopReason": "aborted"},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_stop_reason_error_is_still_failed_final_not_a_yield(self):
+		term = self._terminal_for([_chat_failed_final_frame("r1", "s1", stop_reason="error")])
+		self.assertEqual(term[0], "relay:error")
+		self.assertEqual(term[1]["state"], "failed_final")
+
+	def test_real_text_beats_a_stray_aborted_stop_reason(self):
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"stopReason": "aborted",
+				"message": {"content": [{"type": "text", "text": "a real answer"}]},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term[0], "relay:final")
+		self.assertEqual(term[1]["text"], "a real answer")
+
+
 # --------------------------------------------------------------------------- #
 # Reader-loop tests (real reader thread + in-process transport double)
 # --------------------------------------------------------------------------- #
