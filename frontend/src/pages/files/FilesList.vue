@@ -405,11 +405,36 @@ function dismissDropError(key) {
 	dropErrors.value = dropErrors.value.filter((d) => d.key !== key);
 }
 
+// One check per batch: a tagged skill File Box can no longer use keeps every file
+// un-dropped (one toast), instead of one "skill not available" question per file.
+// A failed check lets the drop go ahead: drop_file validates the pin itself.
+async function pinUsable(pin) {
+	let res;
+	try {
+		res = await api.fileboxCheckSkill(pin);
+	} catch {
+		return true;
+	}
+	if (res && res.available) return true;
+	toast.error(
+		escapeHtml(
+			`The skill “${pin}” is no longer available for File Box, so nothing was added. ` +
+				"Choose another skill (or None) and add the files again."
+		)
+	);
+	pinnedSkill.value = "";
+	loadSkills();
+	return false;
+}
+
 async function uploadBatch(fileList) {
 	const files = Array.from(fileList || []);
 	if (!files.length) return;
+	const pin = pinnedSkill.value;
+	if (pin && !(await pinUsable(pin))) return;
 	const failures = [];
 	let okCount = 0;
+	let waiting = 0; // dropped, but waiting on a skill question (the pin went away mid-batch)
 	uploadingCount.value += files.length;
 	const run = (async () => {
 		await Promise.all(
@@ -419,11 +444,12 @@ async function uploadBatch(fileList) {
 					const res = await api.fileboxDrop(
 						up.file_url,
 						up.file_name,
-						pinnedSkill.value || undefined,
+						pin || undefined,
 						up.name
 					);
 					if (!res || !res.ok) throw new Error((res && res.reason) || "drop failed");
 					okCount++;
+					if (res.needs_approval) waiting++;
 				} catch (e) {
 					failures.push({ name: file.name, error: errMsg(e) });
 				} finally {
@@ -439,9 +465,8 @@ async function uploadBatch(fileList) {
 			loading: `Uploading ${files.length} file${files.length === 1 ? "" : "s"}…`,
 			success: (n) =>
 				`Added ${n} file${n === 1 ? "" : "s"} to File Box` +
-				(pinnedSkill.value
-					? ` · tagged: ${pinnedLabel(pinnedSkill.value, customSkills.value)}`
-					: ""),
+				(pin ? ` · tagged: ${pinnedLabel(pin, customSkills.value)}` : "") +
+				(waiting ? ` · ${waiting} waiting for your choice` : ""),
 			error: () => "Upload failed",
 		});
 	} catch (e) {
@@ -449,6 +474,7 @@ async function uploadBatch(fileList) {
 	}
 	for (const f of failures) pushDropError(f.name, f.error);
 	if (okCount) resetLoad();
+	if (waiting) store.refreshApprovalsCount();
 }
 
 // ── page-wide drag state (highlights the drop card; drop anywhere uploads) ───
@@ -478,7 +504,12 @@ async function rerunRow(row) {
 		const res = await api.fileboxRerun(row.name);
 		if (res && res.ok === false)
 			toast.error(escapeHtml(res.reason || "Couldn't re-run this file"));
-		else toast.success("Re-running…");
+		else if (res && res.needs_approval) {
+			// its tagged skill is gone: it waits on a question (the row's own words)
+			const words = res.result || "Waiting for your choice on the Approval Board";
+			toast.create({ type: "info", message: escapeHtml(words) });
+			store.refreshApprovalsCount();
+		} else toast.success("Re-running…");
 		resetLoad();
 	} catch (e) {
 		toast.error(errHtml(e));
@@ -494,6 +525,7 @@ function bulkRerun(selections, unselectAll) {
 		try {
 			const res = await api.fileboxRerunBulk(names);
 			toast.create(bulkRerunToast(res, names.length));
+			if (res && res.needs_choice) store.refreshApprovalsCount();
 			unselectAll();
 			resetLoad();
 		} catch (e) {
