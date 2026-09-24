@@ -39,6 +39,7 @@ import frappe
 
 from jarvis import compat
 from jarvis.chat import agent_session_pool, seq_watermark, vision
+from jarvis.chat.agent_client import TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription
@@ -1214,6 +1215,10 @@ def handle_chat_send(payload: dict) -> None:
 	try:
 		tool_msg_by_call_id: dict[str, str] = {}
 		batcher = _AssistantContentBatcher(assistant_msg.name)
+		# Own import (not the earlier best-effort one at bind_turn_message): the
+		# openclaw-yield wait below needs this name bound even if that earlier
+		# try/except swallowed an import failure.
+		from jarvis.chat import turn_message_binding
 
 		def _consume_relay(events) -> dict:
 			if stream_stats["t0"] is None:
@@ -1451,6 +1456,44 @@ def handle_chat_send(payload: dict) -> None:
 							ack.get("runId") or run_id,
 						)
 					)
+					# openclaw's image/video/music tools unconditionally detach into
+					# a background task and abort this run with an EMPTY terminal
+					# (sessions_yield/turnHandoff) - unless the user actually asked
+					# to stop, that is a runtime yield, not a real abort: wait
+					# (bounded, inside the turn's overall timeout) for the deferred
+					# tool's follow-up chat final on the SAME session_key under a
+					# fresh runId, and deliver it as THIS turn's reply. A genuine
+					# user stop (the cancel marker IS set) falls straight through to
+					# the existing L1515-ish aborted-stop handling below, unchanged.
+					if (
+						terminal.get("kind") == "relay:error"
+						and terminal.get("state") == "aborted"
+						and not (terminal.get("text") or "").strip()
+						and not turn_message_binding.is_run_cancel_requested(conversation_id)
+					):
+						_yield_wait_s = min(
+							YIELD_CONTINUATION_WAIT_S,
+							TURN_TIMEOUT_SECONDS - (time.time() - turn_start_ms / 1000.0),
+						)
+						if _yield_wait_s > 0:
+							terminal = sess.relay_yield_continuation(
+								conv.session_key,
+								soft_deadline_s=_yield_wait_s,
+								cancel_check=lambda: turn_message_binding.is_run_cancel_requested(
+									conversation_id
+								),
+							)
+							if terminal.get("kind") == "relay:interrupted":
+								if terminal.get("reason") == "cancelled":
+									# Stop landed during the wait - honour it exactly
+									# like a normal aborted-stop terminal (below).
+									terminal = {"kind": "relay:error", "state": "aborted", "text": ""}
+								else:
+									# Deadline / transport drop while waiting for the
+									# continuation: today's error path, unchanged -
+									# the ORIGINAL empty-aborted terminal is what the
+									# user sees, not a generic "interrupted" banner.
+									terminal = {"kind": "relay:error", "state": "aborted", "text": ""}
 				# Real usage accounting (design section 3): a genuinely
 				# completed run leaves fresh last-run token counts on the
 				# gateway's sessions.list row. Read them NOW, while `sess` is

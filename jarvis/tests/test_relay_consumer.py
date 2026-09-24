@@ -157,7 +157,7 @@ class TestRelayTurnEvents(FrappeTestCase):
 		self.assertEqual(
 			out,
 			[
-				{"kind": "relay:error", "state": "error", "error": "provider timed out"},
+				{"kind": "relay:error", "state": "error", "error": "provider timed out", "text": ""},
 			],
 		)
 
@@ -167,9 +167,26 @@ class TestRelayTurnEvents(FrappeTestCase):
 		self.assertEqual(
 			out,
 			[
-				{"kind": "relay:error", "state": "aborted", "error": "aborted"},
+				{"kind": "relay:error", "state": "aborted", "error": "aborted", "text": ""},
 			],
 		)
+
+	def test_chat_aborted_state_carries_partial_text(self):
+		# A genuine partial-content abort (NOT an openclaw-yield: the runtime did
+		# emit some assistant text before the gateway killed the run) surfaces its
+		# text so a caller (turn_handler) can tell it apart from an empty yield.
+		sess = self._sess(
+			[
+				_chat_frame(
+					"r1",
+					"sk",
+					"aborted",
+					message={"role": "assistant", "content": "partial answer"},
+				)
+			]
+		)
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(out[0]["text"], "partial answer")
 
 	def test_final_stop_reason_error_empty_content_yields_relay_error(self):
 		# A terminal agent failure (e.g. a precheck context overflow that then
@@ -374,6 +391,127 @@ class TestRelayTurnEvents(FrappeTestCase):
 		sess._recv = stalling_recv
 		out = list(sess.relay_turn_events("sk", "r1", soft_deadline_s=0.01))
 		self.assertEqual(out, [{"kind": "relay:interrupted", "reason": "deadline"}])
+
+
+class TestRelayYieldContinuation(FrappeTestCase):
+	"""``AgentSession.relay_yield_continuation`` — the openclaw-yield wait: after
+	an image/video/music tool's unconditional background-detach abort (empty
+	``state=="aborted"``), wait for the deferred tool's follow-up ``chat``
+	terminal on the SAME session_key under a FRESH (unknown ahead of time)
+	runId."""
+
+	def _sess(self, frames):
+		"""Like TestRelayTurnEvents._sess, but returns None (soft-timeout, the
+		real ``_recv`` contract) once the scripted queue is exhausted instead of
+		raising - relay_yield_continuation POLLS past a non-matching frame all
+		the way to its deadline, so a test with no eventual match must not blow
+		up on an empty queue."""
+		sess = AgentSession.__new__(AgentSession)
+		queue = list(frames)
+
+		def fake_recv(_timeout):
+			if not queue:
+				return None
+			frame = queue.pop(0)
+			if isinstance(frame, Exception):
+				raise frame
+			return frame
+
+		sess._recv = fake_recv
+		return sess
+
+	def test_final_on_fresh_run_id_is_consumed(self):
+		# The continuation posts under a DIFFERENT runId than the one that
+		# yielded - matched purely on session_key.
+		sess = self._sess(
+			[
+				_chat_frame(
+					"image_generate:abc", "sk", "final", message={"role": "assistant", "content": "done"}
+				)
+			]
+		)
+		out = sess.relay_yield_continuation("sk", soft_deadline_s=5)
+		self.assertEqual(out, {"kind": "relay:final", "text": "done"})
+
+	def test_final_extracts_and_strips_embedded_media_path(self):
+		from jarvis.chat.generated_media import _MEDIA_ROOT
+
+		path = _MEDIA_ROOT + "tool-image-generation/x---abcd1234.png"
+		sess = self._sess(
+			[
+				_chat_frame(
+					"image_generate:abc",
+					"sk",
+					"final",
+					message={"role": "assistant", "content": f"Here it is.\nAttachment: {path}"},
+				)
+			]
+		)
+		out = sess.relay_yield_continuation("sk", soft_deadline_s=5)
+		self.assertEqual(out["kind"], "relay:final")
+		self.assertEqual(out["text"], "Here it is.")
+		self.assertEqual(out["media_rels"], [path])
+		self.assertNotIn("/home/node", out["text"])
+
+	def test_different_session_key_never_consumed(self):
+		# A final on a DIFFERENT session_key must never be adopted - it belongs to
+		# another conversation entirely.
+		sess = self._sess(
+			[
+				_chat_frame(
+					"image_generate:abc",
+					"other-sk",
+					"final",
+					message={"role": "assistant", "content": "nope"},
+				),
+			]
+		)
+		out = sess.relay_yield_continuation("sk", soft_deadline_s=0.05)
+		self.assertEqual(out, {"kind": "relay:interrupted", "reason": "deadline"})
+
+	def test_aborted_or_error_on_fresh_run_id_yields_relay_error(self):
+		sess = self._sess([_chat_frame("image_generate:abc", "sk", "aborted")])
+		out = sess.relay_yield_continuation("sk", soft_deadline_s=5)
+		self.assertEqual(out, {"kind": "relay:error", "state": "aborted", "error": "aborted", "text": ""})
+
+	def test_deadline_yields_interrupted_deadline(self):
+		sess = AgentSession.__new__(AgentSession)
+		sess._recv = lambda _timeout: None
+		out = sess.relay_yield_continuation("sk", soft_deadline_s=0.01)
+		self.assertEqual(out, {"kind": "relay:interrupted", "reason": "deadline"})
+
+	def test_cancel_check_interrupts_immediately(self):
+		# A Stop pressed mid-wait: no frame will ever tell this loop to give up
+		# (the dead original runId posts nothing more), so cancel_check is polled
+		# directly - and wins even with a long soft_deadline_s.
+		sess = AgentSession.__new__(AgentSession)
+		sess._recv = lambda _timeout: (_ for _ in ()).throw(AssertionError("must not recv"))
+		out = sess.relay_yield_continuation("sk", soft_deadline_s=60, cancel_check=lambda: True)
+		self.assertEqual(out, {"kind": "relay:interrupted", "reason": "cancelled"})
+
+	def test_transport_drop_yields_interrupted_transport(self):
+		sess = self._sess([AgentUnreachableError("ws closed")])
+		closed = []
+		sess.close = lambda: closed.append(True)
+		out = sess.relay_yield_continuation("sk", soft_deadline_s=5)
+		self.assertEqual(out["kind"], "relay:interrupted")
+		self.assertEqual(out["reason"], "transport")
+		self.assertEqual(closed, [True])
+
+	def test_non_chat_frames_are_ignored_while_waiting(self):
+		sess = self._sess(
+			[
+				_agent_frame("image_generate:abc", "assistant", {"text": "partial", "delta": "partial"}),
+				_chat_frame(
+					"image_generate:abc",
+					"sk",
+					"final",
+					message={"role": "assistant", "content": "final answer"},
+				),
+			]
+		)
+		out = sess.relay_yield_continuation("sk", soft_deadline_s=5)
+		self.assertEqual(out, {"kind": "relay:final", "text": "final answer"})
 
 
 class TestSetSessionModel(FrappeTestCase):
