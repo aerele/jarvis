@@ -99,28 +99,34 @@
 			class="flex flex-col rounded-lg transition-colors"
 			:class="editing ? 'bg-surface-gray-1 ring-1 ring-outline-gray-2' : ''"
 		>
-			<SidebarLink
-				label="More"
-				icon="more-horizontal"
-				class="mx-2 my-[1.5px]"
-				:is-collapsed="collapsed"
-				:is-active="onMoreDestination"
-				:on-click="() => (moreOpen = !moreOpen)"
-			>
-				<template v-if="!collapsed" #right>
-					<div class="flex items-center gap-1.5">
-						<!-- a badged item folded away inside More still nudges -->
-						<div
-							v-if="!moreOpen && moreBadged"
-							class="size-1.5 rounded-full bg-surface-red-5"
-						/>
-						<FeatherIcon
-							:name="moreOpen ? 'chevron-down' : 'chevron-right'"
-							class="size-3.5 text-ink-gray-4"
-						/>
-					</div>
-				</template>
-			</SidebarLink>
+			<div class="relative flex flex-col">
+				<SidebarLink
+					label="More"
+					icon="more-horizontal"
+					class="mx-2 my-[1.5px]"
+					:is-collapsed="collapsed"
+					:is-active="onMoreDestination"
+					:on-click="() => (moreOpen = !moreOpen)"
+				>
+					<template v-if="!collapsed" #right>
+						<div class="flex items-center gap-1.5">
+							<!-- a badged item folded away inside More still nudges -->
+							<div
+								v-if="!moreOpen && moreBadged"
+								class="size-1.5 rounded-full bg-surface-red-5"
+							/>
+							<FeatherIcon
+								:name="moreOpen ? 'chevron-down' : 'chevron-right'"
+								class="size-3.5 text-ink-gray-4"
+							/>
+						</div>
+					</template>
+				</SidebarLink>
+				<div
+					v-if="collapsed && !moreOpen && moreBadged"
+					class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full bg-surface-red-5"
+				/>
+			</div>
 			<template v-if="moreOpen">
 				<div
 					v-for="(link, index) in moreLinks"
