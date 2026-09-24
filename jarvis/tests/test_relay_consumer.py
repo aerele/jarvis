@@ -520,7 +520,7 @@ class TestRelayYieldContinuation(FrappeTestCase):
 			]
 		)
 		out = sess.relay_yield_continuation("sk", soft_deadline_s=5)
-		self.assertEqual(out, {"kind": "relay:final", "text": "done"})
+		self.assertEqual(out, {"kind": "relay:final", "text": "done", "yield_continuation": True})
 
 	def test_final_extracts_and_strips_embedded_media_path(self):
 		from jarvis.chat.generated_media import _MEDIA_ROOT
@@ -600,7 +600,7 @@ class TestRelayYieldContinuation(FrappeTestCase):
 			]
 		)
 		out = sess.relay_yield_continuation("sk", soft_deadline_s=5)
-		self.assertEqual(out, {"kind": "relay:final", "text": "final answer"})
+		self.assertEqual(out, {"kind": "relay:final", "text": "final answer", "yield_continuation": True})
 
 
 _IMG_URL = "/api/chat/media/outgoing/sk-enc/12345678-1234-1234-1234-123456789012/full.png"
