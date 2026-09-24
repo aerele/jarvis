@@ -103,6 +103,21 @@ describe("shell store: reviewer badge (sidebar Skills)", () => {
 		delete window.is_skill_reviewer;
 	});
 
+	it("re-reads once when a refresh lands while one is in flight", async () => {
+		window.is_skill_reviewer = true;
+		let release;
+		getReviewAccess
+			.mockImplementationOnce(() => new Promise((r) => (release = r)))
+			.mockResolvedValueOnce({ pending_skill_promotions: 2 });
+		const first = store.refreshReviewCount();
+		store.refreshReviewCount(); // e.g. review:pending during a route refresh
+		release({ pending_skill_promotions: 1 });
+		await first;
+		expect(getReviewAccess).toHaveBeenCalledTimes(2);
+		expect(store.reviewCount).toBe(2);
+		delete window.is_skill_reviewer;
+	});
+
 	it("keeps the last count when the probe fails", async () => {
 		window.is_skill_reviewer = true;
 		store.reviewCount = 4;
