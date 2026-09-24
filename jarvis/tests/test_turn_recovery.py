@@ -649,7 +649,7 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		self.assertEqual(args[3], "recovered")
 
 	def test_finalize_threads_media_rels_into_persist_rich_outputs(self):
-		# A recovered deferred image-gen reply (openclaw's image/video/music
+		# A recovered deferred image-gen reply (the agent runtime's image/video/music
 		# tools' unconditional background-detach abort - the turn parked here by
 		# the deadline/watchdog path when the yield-wait itself couldn't finish
 		# in time) must still seed its image, not just the text.

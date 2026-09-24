@@ -946,8 +946,8 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 		self.assertEqual(row, 4)
 
 
-class TestRunAgentTurnOpenclawYield(FrappeTestCase):
-	"""openclaw's image/video/music tools unconditionally detach into a
+class TestRunAgentTurnAgentYield(FrappeTestCase):
+	"""the agent runtime's image/video/music tools unconditionally detach into a
 	background task and abort the in-flight run with an EMPTY terminal
 	(sessions_yield/turnHandoff). Legacy transport (relay_turn_events) must tell
 	that apart from a genuine user Stop, wait (bounded) for the deferred tool's
@@ -1103,7 +1103,7 @@ class TestRunAgentTurnOpenclawYield(FrappeTestCase):
 		self.assertIn("run:end", kinds)
 
 	def test_aborted_with_partial_text_never_waits(self):
-		# A genuine partial-content abort (NOT an openclaw-yield) must never
+		# A genuine partial-content abort (NOT an agent-yield) must never
 		# enter the continuation wait - today's aborted-stop handling applies
 		# directly, exactly as before this change.
 		fake_sess = MagicMock()
@@ -1495,6 +1495,13 @@ class TestRunAgentTurnAborted(FrappeTestCase):
 		frappe.set_user(TEST_USER)
 		_cleanup_user_conversations()
 		self.conv, self.user_msg = _make_conversation_with_user_message()
+		# This whole class models a REAL user Stop, which always sets the cancel
+		# marker BEFORE the aborted terminal ever arrives (stop_run -> agent
+		# chat.abort). Without it, an aborted terminal with no text (every
+		# frame list below) reads as an agent-yield and waits on
+		# relay_yield_continuation, which these tests never configure on their
+		# MagicMock session.
+		turn_message_binding.request_run_cancel(self.conv)
 
 	def tearDown(self):
 		_cleanup_user_conversations()

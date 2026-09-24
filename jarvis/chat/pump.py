@@ -1449,7 +1449,7 @@ class _RunState:
 	pending_delta: str = ""
 	events_since_flush: int = 0
 	last_flush_mono: float = 0.0
-	# --- openclaw-yield continuation wait (image/video/music tools' unconditional
+	# --- agent-yield continuation wait (image/video/music tools' unconditional
 	# background-detach abort) --------------------------------------------------- #
 	# Non-None while this run is parked awaiting the deferred tool's follow-up
 	# chat final on the same session_key (see on_terminal / _yield_wait_sweep).
@@ -1702,7 +1702,7 @@ def drain_slice(ctx: PumpContext) -> str:
 	  5. propagate a lease loss signalled from a lane callback;
 	  6. cancel-requested sweep (out-of-band ``chat.abort`` then the aborted
 	     terminal + settle);
-	  6b. openclaw-yield continuation-wait sweep (expire runs past
+	  6b. agent-yield continuation-wait sweep (expire runs past
 	      YIELD_CONTINUATION_WAIT_S with no follow-up run on the session_key —
 	      settle exactly as the original yield would have, just delayed);
 	  7. heartbeat + lease renew (0 rows ⇒ lease-loss exit);
@@ -2337,7 +2337,7 @@ def _is_unprompted_yield(run_id: str, kind: str, payload: dict) -> bool:
 def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> None:
 	"""The CAS + settlement invocation ``on_terminal`` runs for an ordinary
 	terminal, factored out so ``_yield_wait_sweep`` can replay it VERBATIM for a
-	timed-out openclaw-yield wait (today's error path, just delayed - see
+	timed-out agent-yield wait (today's error path, just delayed - see
 	``_is_unprompted_yield``). Raises ``ts.LeaseLostExit`` on a lost epoch; the
 	caller converts that to ``ctx.lease_lost``.
 
@@ -2370,7 +2370,7 @@ def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) 
 
 
 def _yield_wait_sweep(ctx: PumpContext) -> None:
-	"""Expire runs whose openclaw-yield continuation-wait (``on_terminal`` /
+	"""Expire runs whose agent-yield continuation-wait (``on_terminal`` /
 	``_is_unprompted_yield``) has outrun ``YIELD_CONTINUATION_WAIT_S`` with
 	nothing landing on the session_key. Settles EXACTLY as ``on_terminal`` would
 	have at the original yield - today's error path, just delayed. Called every
@@ -2470,7 +2470,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 			# Message row holds the full streamed text if settlement carries no final.
 			_flush_deltas(ctx, rs)
 			if _is_unprompted_yield(rs.run_id, kind, payload):
-				# openclaw's image/video/music tools unconditionally detach into a
+				# the agent runtime's image/video/music tools unconditionally detach into a
 				# background task and abort THIS run with an empty terminal - and
 				# nobody asked to stop. Park (mux-side, session_key-keyed) instead
 				# of settling: the deferred tool's follow-up run lands on the SAME
@@ -2549,7 +2549,7 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 		# regardless and the mux cancels the future on stop), so a per-abort .result()
 		# wait would only stall the reactor. We record the aborted terminal from the
 		# row + settle below, independent of the abort ack. A yielded run's
-		# ``gateway_run_id`` is the ORIGINAL run openclaw already retired (that is
+		# ``gateway_run_id`` is the ORIGINAL run the agent runtime already retired (that is
 		# why we are here waiting) - target the abort at the session's current run
 		# instead of a dead id.
 		try:
@@ -2734,7 +2734,7 @@ def _reattach_or_recover(ctx: PumpContext, r: dict, active_keys) -> None:
 	so a crash-reconcile of N gone turns does not serialize N×15s of blocking waits
 	off the delta-draining critical path.
 
-	A turn a prior hop parked mid openclaw-yield-wait (``_YIELD_PENDING_PREFIX``
+	A turn a prior hop parked mid agent-yield-wait (``_YIELD_PENDING_PREFIX``
 	marker, since ``rs.yield_deadline`` is hop-local and does not survive a
 	takeover) is handed to the SAME durable ``recovering`` route the kill-switch
 	halt uses INSTEAD of the checks below: the gateway routinely shows the
@@ -2745,7 +2745,7 @@ def _reattach_or_recover(ctx: PumpContext, r: dict, active_keys) -> None:
 	lets ``turn_recovery``'s cron poll the transcript properly (its own longer
 	ceiling), with the media_rels wiring already threaded through it."""
 	if _yield_pending(r["run_id"]):
-		_park_recovering(ctx, r["run_id"], reason="openclaw-yield")
+		_park_recovering(ctx, r["run_id"], reason="agent-yield")
 		return
 	if r.get("state") == "streaming" and active_keys is not None and int(r.get("last_event_seq") or 0) > 0:
 		session_key = _load_dispatch(_read_dispatch_row(r["run_id"]) or {}).get("session_key")

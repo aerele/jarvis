@@ -565,7 +565,7 @@ class TestRelayMuxWhiteBox(FrappeTestCase):
 
 
 # --------------------------------------------------------------------------- #
-# openclaw-yield continuation adoption (image/video/music tools' unconditional
+# agent-yield continuation adoption (image/video/music tools' unconditional
 # background-detach abort): pump.on_terminal parks a just-terminaled lane with
 # ``await_continuation``; the deferred tool's follow-up run posts under a FRESH
 # runId on the SAME session_key, which ``_route_event`` must adopt.
@@ -588,17 +588,28 @@ class TestRelayMuxYieldContinuation(FrappeTestCase):
 		self.assertFalse(mux.await_continuation("never-registered"))
 
 	def test_terminal_on_awaiting_lane_is_not_retired(self):
-		"""_apply must skip _retire_lane while a lane is parked awaiting - it is
-		on_terminal's OWN job to call await_continuation and return without
-		settling; the mux side is just: don't retire it."""
+		"""_apply must skip _retire_lane when on_terminal ITSELF parks the lane
+		(mux.await_continuation) while handling this exact terminal - the real
+		pump call sequence: the lane is still "active" (not yet awaiting) when
+		the frame is routed, and only becomes "awaiting" during on_terminal's
+		own callback. Pre-flagging the lane awaiting BEFORE the frame arrives is
+		a different case entirely (a stray dead-runId frame on an
+		already-parked lane) and the dead-runId stray-frame guard drops that
+		one before it ever reaches on_terminal - see the sibling stray tests."""
 		mux = self._mux()
-		rec = _Recorder()
-		lane = mux.register_run("r1", rec.handler(), session_key="s1")
-		lane.awaiting = True  # simulate what on_terminal already did before this terminal
+		recorded = []
+
+		def on_terminal(kind, payload):
+			recorded.append((kind, payload))
+			mux.await_continuation("r1")
+
+		mux.register_run("r1", LaneHandler(on_terminal=on_terminal), session_key="s1")
 		mux._classify(_chat_aborted_frame("r1", "s1"))
 		mux.dispatch()
-		self.assertIsNotNone(rec.terminal)  # the handler still ran
+
+		self.assertEqual(len(recorded), 1)  # the handler still ran
 		self.assertIn("r1", mux._runs)  # but the lane was NOT retired
+		self.assertTrue(mux._runs["r1"].awaiting)
 
 	def test_continuation_final_adopted_under_fresh_run_id_same_session(self):
 		mux = self._mux()
