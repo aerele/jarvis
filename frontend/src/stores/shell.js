@@ -400,23 +400,31 @@ function refreshApprovalsCount() {
 
 // Same triggers and de-dupe as refreshApprovalsCount. Reviewer-only: the
 // endpoint is reviewer-guarded, so nobody else ever calls it.
+// A call that lands mid-flight (e.g. review:pending racing a route-change
+// refresh) queues one re-read, since the running request may predate the row.
 let _reviewInflight = null;
+let _reviewAgain = false;
 function refreshReviewCount() {
 	if (!window.is_skill_reviewer) return Promise.resolve();
 	if (typeof document !== "undefined" && document.hidden) return Promise.resolve();
-	if (_reviewInflight) return _reviewInflight;
+	if (_reviewInflight) {
+		_reviewAgain = true;
+		return _reviewInflight;
+	}
 	_reviewInflight = (async () => {
-		try {
-			const a = (await getReviewAccess()) || {};
-			reviewCount.value =
-				(a.pending_patterns || 0) +
-				(a.pending_promotions || 0) +
-				(a.pending_skill_promotions || 0);
-		} catch (e) {
-			/* badge is best-effort */
-		} finally {
-			_reviewInflight = null;
-		}
+		do {
+			_reviewAgain = false;
+			try {
+				const a = (await getReviewAccess()) || {};
+				reviewCount.value =
+					(a.pending_patterns || 0) +
+					(a.pending_promotions || 0) +
+					(a.pending_skill_promotions || 0);
+			} catch (e) {
+				/* badge is best-effort */
+			}
+		} while (_reviewAgain);
+		_reviewInflight = null;
 	})();
 	return _reviewInflight;
 }

@@ -78,6 +78,7 @@ import { getSkillsAreaCaps } from "@/api/personalise";
 
 const route = useRoute();
 const router = useRouter();
+const shell = useShellStore();
 // The same shared socket AppShell's global notifier listens on (main.js
 // provides it app-wide; null under ?nosocket/headless screenshots) - reused
 // here for the Personalise unanswered-count badge's realtime refresh instead
@@ -176,6 +177,14 @@ watch(
 	}
 );
 
+// the sidebar's poll / review:pending refresh keeps this tab's count current too
+watch(
+	() => shell.reviewCount,
+	(n) => {
+		if (reviewAllowed.value) learningPending.value = n;
+	}
+);
+
 async function refreshBadge() {
 	// The Review badge is reviewer-gated server-side (`get_review_access` is the
 	// reviewer-set probe) - skip the call entirely for viewers who can't reach
@@ -194,7 +203,7 @@ async function refreshBadge() {
 			(a.pending_skill_promotions || 0);
 		// same total as the sidebar Skills badge: a decision here clears it now,
 		// not on the next 60s poll
-		useShellStore().reviewCount = learningPending.value;
+		shell.reviewCount = learningPending.value;
 	} catch (e) {
 		// best-effort badge; a transient failure must not disturb the page
 	}
