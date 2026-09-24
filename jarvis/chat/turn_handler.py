@@ -39,7 +39,7 @@ import frappe
 
 from jarvis import compat
 from jarvis.chat import agent_session_pool, seq_watermark, vision
-from jarvis.chat.agent_client import TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
+from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription
@@ -1483,17 +1483,23 @@ def handle_chat_send(payload: dict) -> None:
 									conversation_id
 								),
 							)
-							if terminal.get("kind") == "relay:interrupted":
-								if terminal.get("reason") == "cancelled":
-									# Stop landed during the wait - honour it exactly
-									# like a normal aborted-stop terminal (below).
-									terminal = {"kind": "relay:error", "state": "aborted", "text": ""}
-								else:
-									# Deadline / transport drop while waiting for the
-									# continuation: today's error path, unchanged -
-									# the ORIGINAL empty-aborted terminal is what the
-									# user sees, not a generic "interrupted" banner.
-									terminal = {"kind": "relay:error", "state": "aborted", "text": ""}
+							if terminal.get("reason") == "cancelled":
+								# Stop landed during the wait - honour it exactly
+								# like a normal aborted-stop terminal (below). ONLY
+								# this reason maps to the Stop shape.
+								terminal = {"kind": "relay:error", "state": "aborted", "text": ""}
+							elif terminal.get("kind") == "relay:interrupted":
+								# Deadline / transport drop while waiting for the
+								# continuation: nobody stopped this turn, it just
+								# never got an answer - the SAME error a "final"
+								# with no output produces (failed_final), not the
+								# softer Stop shape (which would wrongly read as
+								# "you stopped this" and never settle errored).
+								terminal = {
+									"kind": "relay:error",
+									"state": "failed_final",
+									"error": FAILED_FINAL_ERROR,
+								}
 				# Real usage accounting (design section 3): a genuinely
 				# completed run leaves fresh last-run token counts on the
 				# gateway's sessions.list row. Read them NOW, while `sess` is

@@ -2284,6 +2284,39 @@ def _flush_all_pending(ctx: PumpContext) -> None:
 			frappe.log_error(title="pump.flush_pending", message=frappe.get_traceback())
 
 
+# A yielded run's in-memory ``rs.yield_deadline``/``rs.yield_payload`` live only
+# in THIS hop's process and do not survive a hop handoff/takeover (D6 §10.4 hops
+# rotate well inside YIELD_CONTINUATION_WAIT_S). This Redis marker is the
+# cross-hop signal: a new hop's reconcile (``_reattach_or_recover``) checks it
+# before doing its normal missed-terminal snapshot recovery, which would
+# otherwise race ahead and error the turn out the instant the gateway shows no
+# active run - exactly the state right after the yield, before the deferred
+# tool has posted its follow-up. TTL comfortably outlives the wait itself.
+_YIELD_PENDING_PREFIX = "jarvis_pump_yield_pending::"
+_YIELD_PENDING_TTL_S = YIELD_CONTINUATION_WAIT_S + 60
+
+
+def _mark_yield_pending(run_id: str) -> None:
+	try:
+		frappe.cache().set_value(_YIELD_PENDING_PREFIX + run_id, "1", expires_in_sec=_YIELD_PENDING_TTL_S)
+	except Exception:
+		pass  # best-effort - worst case a takeover mid-wait recovers a beat too eagerly
+
+
+def _clear_yield_pending(run_id: str) -> None:
+	try:
+		frappe.cache().delete_value(_YIELD_PENDING_PREFIX + run_id)
+	except Exception:
+		pass
+
+
+def _yield_pending(run_id: str) -> bool:
+	try:
+		return bool(frappe.cache().get_value(_YIELD_PENDING_PREFIX + run_id))
+	except Exception:
+		return False
+
+
 def _is_unprompted_yield(run_id: str, kind: str, payload: dict) -> bool:
 	"""True for an aborted terminal that is NOT a user Stop: empty/whitespace
 	text (a real partial-content abort still errors normally) AND the Turn row's
@@ -2306,7 +2339,15 @@ def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) 
 	terminal, factored out so ``_yield_wait_sweep`` can replay it VERBATIM for a
 	timed-out openclaw-yield wait (today's error path, just delayed - see
 	``_is_unprompted_yield``). Raises ``ts.LeaseLostExit`` on a lost epoch; the
-	caller converts that to ``ctx.lease_lost``."""
+	caller converts that to ``ctx.lease_lost``.
+
+	ANY settlement (an ordinary terminal, the adopted continuation's own
+	terminal, or the sweep's timeout replay) ends a yield-wait if one was in
+	progress - clear it here, once, so a later ``_yield_wait_sweep`` tick can
+	never see stale fields and re-settle an already-settled turn."""
+	rs.yield_deadline = None
+	rs.yield_payload = None
+	_clear_yield_pending(rs.run_id)
 	won = ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload)
 	if not won:
 		if _epoch_lost(ctx, rs.run_id):
@@ -2339,11 +2380,11 @@ def _yield_wait_sweep(ctx: PumpContext) -> None:
 	for rs in list(ctx.runs.values()):
 		if rs.yield_deadline is None or now < rs.yield_deadline:
 			continue
-		payload = rs.yield_payload
-		rs.yield_deadline = None
-		rs.yield_payload = None
+		payload = rs.yield_payload  # captured BEFORE _settle_terminal clears it
 		if ctx.mux is not None:
-			ctx.mux.release_continuation(rs.gateway_run_id or rs.run_id)
+			# By session_key, never a runId: _route_event may already have
+			# adopted the continuation onto a fresh id by now.
+			ctx.mux.release_continuation(rs.session_key)
 		try:
 			_settle_terminal(ctx, rs, "relay:error", payload)
 		except ts.LeaseLostExit:
@@ -2440,6 +2481,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 				if ctx.mux is not None and ctx.mux.await_continuation(rs.gateway_run_id or rs.run_id):
 					rs.yield_payload = payload
 					rs.yield_deadline = _monotonic() + YIELD_CONTINUATION_WAIT_S
+					_mark_yield_pending(rs.run_id)  # survives a hop handoff mid-wait
 					return
 				# No mux / lane already gone (e.g. a takeover retired it) - fall
 				# through and settle exactly as if no yield had been detected.
@@ -2526,12 +2568,16 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 		frappe.db.commit()
 		if awaiting_continuation:
 			# The Stop won the race against the deferred tool's continuation -
-			# release the mux's parked lane so a LATE continuation frame is a
-			# harmless stray instead of trying to adopt into an already-settled row.
+			# release the mux's parked (or already-adopted-but-not-yet-terminaled)
+			# lane by session_key, never a runId (adoption may already have moved
+			# it onto a fresh one) - so a LATE continuation frame is a harmless
+			# stray instead of leaking the live lane or adopting into an
+			# already-settled row.
 			rs.yield_deadline = None
 			rs.yield_payload = None
+			_clear_yield_pending(run_id)
 			if ctx.mux is not None:
-				ctx.mux.release_continuation(rs.gateway_run_id or run_id)
+				ctx.mux.release_continuation(session_key)
 		owner = frappe.db.get_value(CONV, r["conversation"], "owner")
 		try:
 			ctx.deps.invoke_settlement(
@@ -2686,7 +2732,21 @@ def _reattach_or_recover(ctx: PumpContext, r: dict, active_keys) -> None:
 	from a session-wide tail (which could hold a PRIOR turn's answer). OARF-5: the
 	recovery tail RPC is ISSUED non-blocking and resolved by ``_poll_recoveries``,
 	so a crash-reconcile of N gone turns does not serialize N×15s of blocking waits
-	off the delta-draining critical path."""
+	off the delta-draining critical path.
+
+	A turn a prior hop parked mid openclaw-yield-wait (``_YIELD_PENDING_PREFIX``
+	marker, since ``rs.yield_deadline`` is hop-local and does not survive a
+	takeover) is handed to the SAME durable ``recovering`` route the kill-switch
+	halt uses INSTEAD of the checks below: the gateway routinely shows the
+	session with no active run right after the yield (the foreground run was
+	already aborted) even though the deferred tool is still generating, so the
+	missed-terminal snapshot recovery below would find an empty transcript
+	window and error the turn out immediately, discarding the reply. Parking
+	lets ``turn_recovery``'s cron poll the transcript properly (its own longer
+	ceiling), with the media_rels wiring already threaded through it."""
+	if _yield_pending(r["run_id"]):
+		_park_recovering(ctx, r["run_id"], reason="openclaw-yield")
+		return
 	if r.get("state") == "streaming" and active_keys is not None and int(r.get("last_event_seq") or 0) > 0:
 		session_key = _load_dispatch(_read_dispatch_row(r["run_id"]) or {}).get("session_key")
 		if session_key and session_key not in active_keys:

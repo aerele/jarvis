@@ -505,6 +505,12 @@ class RelayMux:
 		sk = payload.get("sessionKey")
 		with self._map_lock:
 			lane = self._runs.get(run_id)
+			if lane is not None and lane.awaiting:
+				# A frame under the STILL-PARKED (dead) original runId - openclaw
+				# never posts anything more under an id it already retired, so
+				# this is stale/stray. Only a frame carrying a NEW runId on the
+				# same sessionKey (handled below) may un-park this lane.
+				lane = None
 			if lane is None and event == "chat" and sk:
 				# openclaw-yield continuation (OAR-image-defer): an unknown runId's
 				# CHAT frame (only chat frames carry sessionKey) may be the deferred
@@ -514,7 +520,9 @@ class RelayMux:
 				# tool/delta ``agent`` frames arrive under the now-known runId on a
 				# LATER frame and route normally from then on.
 				old_run_id = self._awaiting.get(sk)
-				if old_run_id is not None:
+				if old_run_id is not None and old_run_id != run_id:
+					# Must be a NEW runId - a frame replaying the SAME dead id
+					# (e.g. a stray chat delta) is stray, never an adoption.
 					lane = self._runs.pop(old_run_id, None)
 					if lane is not None:
 						lane.run_id = run_id
@@ -783,16 +791,26 @@ class RelayMux:
 			self._awaiting[lane.session_key] = run_id
 			return True
 
-	def release_continuation(self, run_id: str) -> None:
-		"""Undo ``await_continuation``: drop the parked lane (timeout expiry) or
-		clear the awaiting index without dropping it (a Stop settled the Turn row
-		out of band via ``_cancel_sweep`` - any late continuation frame then
-		safely misses ``_runs`` and counts as stray). Idempotent; safe to call
-		when nothing is parked."""
+	def release_continuation(self, session_key: str) -> None:
+		"""Undo ``await_continuation`` for ``session_key`` - resolved by session
+		key, NEVER a runId (the caller cannot know it once ``_route_event`` has
+		adopted the continuation onto a fresh one; a stale runId would release
+		nothing and leak the live lane). Drops the parked lane if the
+		continuation never arrived (timeout / Stop before adoption), or the
+		ADOPTED-but-not-yet-terminaled lane if a Stop lands while the
+		continuation is already streaming. Idempotent; safe to call when nothing
+		is parked or the lane already retired via its own terminal. Admission
+		enforces one in-flight turn per conversation, so at most one lane can
+		ever be registered under a given session_key."""
 		with self._map_lock:
-			lane = self._runs.pop(run_id, None)
-			if lane is not None and self._awaiting.get(lane.session_key) == run_id:
-				self._awaiting.pop(lane.session_key, None)
+			run_id = self._awaiting.pop(session_key, None)
+			if run_id is None:
+				for rid, lane in self._runs.items():
+					if lane.session_key == session_key:
+						run_id = rid
+						break
+			if run_id is not None:
+				self._runs.pop(run_id, None)
 
 	# -- application (pump-thread; the mux invokes the pump callbacks here) -- #
 
