@@ -904,6 +904,39 @@ class TestRelayMuxYieldViaFinal(FrappeTestCase):
 		self.assertEqual(term[0], "relay:final")
 		self.assertEqual(term[1]["text"], "a real answer")
 
+	def test_bare_final_after_media_tool_start_is_a_yield(self):
+		# Corrected AGAIN (live e2e): the gateway settles a yielded run with NO
+		# message and NO stopReason at all when it produced no visible reply -
+		# wire-identical to a genuine failed_final. The only tell is whether a
+		# media-generation tool started during this run.
+		term = self._terminal_for(
+			[
+				_agent_frame(
+					"r1",
+					"s1",
+					"item",
+					{"kind": "tool", "phase": "start", "name": "image_generate", "toolCallId": "c1"},
+				),
+				_chat_failed_final_frame("r1", "s1"),
+			]
+		)
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_bare_final_with_no_media_tool_stays_failed_final(self):
+		term = self._terminal_for(
+			[
+				_agent_frame(
+					"r1",
+					"s1",
+					"item",
+					{"kind": "tool", "phase": "start", "name": "get_list", "toolCallId": "c1"},
+				),
+				_chat_failed_final_frame("r1", "s1"),
+			]
+		)
+		self.assertEqual(term[0], "relay:error")
+		self.assertEqual(term[1]["state"], "failed_final")
+
 
 # --------------------------------------------------------------------------- #
 # Reader-loop tests (real reader thread + in-process transport double)

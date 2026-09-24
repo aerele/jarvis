@@ -342,6 +342,40 @@ class TestRelayTurnEvents(FrappeTestCase):
 		out = list(sess.relay_turn_events("sk", "r1"))
 		self.assertEqual(out, [{"kind": "relay:final", "text": "a real answer"}])
 
+	def test_bare_final_after_media_tool_start_is_a_yield(self):
+		# Corrected AGAIN (live e2e): the gateway settles a yielded run with NO
+		# message and NO stopReason at all when it produced no visible reply -
+		# wire-identical to a genuine failed_final. The only tell is whether a
+		# media-generation tool started during this run.
+		sess = self._sess(
+			[
+				_agent_frame(
+					"r1",
+					"item",
+					{"kind": "tool", "phase": "start", "name": "image_generate", "toolCallId": "c1"},
+				),
+				_chat_frame("r1", "sk", "final"),
+			]
+		)
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(out[-1], {"kind": "relay:error", "state": "aborted", "text": ""})
+
+	def test_bare_final_with_no_media_tool_stays_failed_final(self):
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
+
+		sess = self._sess(
+			[
+				_agent_frame(
+					"r1", "item", {"kind": "tool", "phase": "start", "name": "get_list", "toolCallId": "c1"}
+				),
+				_chat_frame("r1", "sk", "final"),
+			]
+		)
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(
+			out[-1], {"kind": "relay:error", "state": "failed_final", "error": FAILED_FINAL_ERROR}
+		)
+
 	def test_failed_final_names_the_provider_reason_from_the_lifecycle_frame(self):
 		# The lifecycle error frame is the ONLY place the runtime names the failure.
 		# It is dropped from the terminal path (the chat event stays the single
