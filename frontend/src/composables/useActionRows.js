@@ -104,6 +104,10 @@ export function useActionRows() {
 	let laneOnScreen = 0;
 	let wikiReq = 0;
 	let wikiOnScreen = 0;
+	// A row decided here stays gone from any answer asked for before the decision:
+	// key -> its source's request id when it was removed.
+	const decidedAt = new Map();
+	const undecided = (rows, id) => rows.filter((r) => !(decidedAt.get(r.key) >= id));
 
 	// oldest first: what has waited longest leads
 	const rows = computed(() =>
@@ -120,7 +124,7 @@ export function useActionRows() {
 			const res = (await listPendingActionsLane()) || {};
 			if (id < laneOnScreen) return;
 			laneOnScreen = id;
-			laneRows.value = (Array.isArray(res.rows) ? res.rows : []).map(laneRow);
+			laneRows.value = undecided((Array.isArray(res.rows) ? res.rows : []).map(laneRow), id);
 			laneError.value = "";
 		} catch (e) {
 			if (id < laneOnScreen) return;
@@ -136,15 +140,16 @@ export function useActionRows() {
 			const res = (await listWikiWriteProposals(WIKI_QUERY)) || {};
 			if (id < wikiOnScreen) return;
 			wikiOnScreen = id;
-			wikiRows.value = (Array.isArray(res.rows) ? res.rows : []).map(wikiRow);
+			wikiRows.value = undecided((Array.isArray(res.rows) ? res.rows : []).map(wikiRow), id);
 			wikiTotal.value = Number(res.total) || wikiRows.value.length;
 			wikiError.value = "";
 		} catch (e) {
 			if (id < wikiOnScreen) return;
 			wikiOnScreen = id;
 			if (isPermissionDenied(e)) {
-				// not a skill reviewer: no wiki rows, and no point asking again
-				wikiDenied = true;
+				// not a skill reviewer: no wiki rows, and no point asking again (only
+				// the latest answer says so: a newer request may already know better)
+				wikiDenied = id === wikiReq;
 				wikiRows.value = [];
 				wikiError.value = "";
 			} else {
@@ -159,6 +164,7 @@ export function useActionRows() {
 	}
 
 	function remove(key) {
+		decidedAt.set(key, key.startsWith("wiki:") ? wikiReq : laneReq);
 		laneRows.value = laneRows.value.filter((r) => r.key !== key);
 		wikiRows.value = wikiRows.value.filter((r) => r.key !== key);
 	}

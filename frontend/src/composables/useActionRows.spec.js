@@ -54,9 +54,9 @@ function host(socket = null) {
 }
 
 function deferred() {
-	let resolve;
-	const promise = new Promise((r) => (resolve = r));
-	return { promise, resolve };
+	let resolve, reject;
+	const promise = new Promise((res, rej) => ((resolve = res), (reject = rej)));
+	return { promise, resolve, reject };
 }
 
 describe("useActionRows", () => {
@@ -185,7 +185,7 @@ describe("useActionRows", () => {
 		expect(names(w)).toEqual(["PA-NEW"]);
 	});
 
-	it("a wiki answer overtaken by a newer one does not count toward loaded", async () => {
+	it("an older wiki answer landing after a newer one is dropped", async () => {
 		const wikiAnswers = [deferred(), deferred()];
 		api.listWikiWriteProposals
 			.mockReturnValueOnce(wikiAnswers[0].promise)
@@ -261,6 +261,62 @@ describe("useActionRows", () => {
 		const w = host();
 		await flushPromises();
 		expect([w.vm.wikiShown, w.vm.wikiTotal]).toEqual([1, 34]);
+	});
+
+	it("a decided row never comes back from an answer asked for before the decision", async () => {
+		approvals.listPendingActionsLane.mockResolvedValueOnce({ rows: [held(), chat()] });
+		const w = host();
+		await flushPromises();
+		const inFlight = deferred();
+		const next = deferred();
+		approvals.listPendingActionsLane
+			.mockReturnValueOnce(inFlight.promise)
+			.mockReturnValueOnce(next.promise);
+		w.vm.load(); // k: asked before the decision
+		w.vm.remove("held:PA-1");
+		w.vm.load(); // k+1
+		inFlight.resolve({ rows: [held(), chat()] });
+		await flushPromises();
+		expect(w.vm.rows.map((r) => r.key)).toEqual(["chat:PA-9"]);
+		next.reject(new Error("boom"));
+		await flushPromises();
+		expect(w.vm.error).toBe("boom");
+		expect(w.vm.rows.map((r) => r.key)).toEqual(["chat:PA-9"]);
+		// a later answer is the server's word again
+		approvals.listPendingActionsLane.mockResolvedValueOnce({ rows: [held(), chat()] });
+		await w.vm.load();
+		expect(w.vm.rows.map((r) => r.key)).toEqual(["chat:PA-9", "held:PA-1"]);
+	});
+
+	it("a decided wiki note never comes back from an earlier wiki answer", async () => {
+		api.listWikiWriteProposals.mockResolvedValueOnce({ rows: [wiki()], total: 1 });
+		const w = host();
+		await flushPromises();
+		const inFlight = deferred();
+		api.listWikiWriteProposals.mockReturnValueOnce(inFlight.promise);
+		w.vm.load();
+		w.vm.remove("wiki:AR-7");
+		inFlight.resolve({ rows: [wiki()], total: 1 });
+		await flushPromises();
+		expect(w.vm.rows).toHaveLength(0);
+	});
+
+	it("an older 403 overtaken by a newer answer does not stop asking for wiki notes", async () => {
+		const first = deferred();
+		const second = deferred();
+		api.listWikiWriteProposals
+			.mockReturnValueOnce(first.promise)
+			.mockReturnValueOnce(second.promise);
+		const w = host();
+		w.vm.load();
+		first.reject(Object.assign(new Error("Not permitted"), { exc_type: "PermissionError" }));
+		await flushPromises();
+		second.resolve({ rows: [wiki()], total: 1 });
+		await flushPromises();
+		expect(w.vm.rows.map((r) => r.key)).toEqual(["wiki:AR-7"]);
+		api.listWikiWriteProposals.mockResolvedValue({ rows: [], total: 0 });
+		await w.vm.load();
+		expect(api.listWikiWriteProposals).toHaveBeenCalledTimes(3);
 	});
 
 	it("remove drops one row by key", async () => {
