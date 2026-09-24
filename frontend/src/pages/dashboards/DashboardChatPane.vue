@@ -1,11 +1,17 @@
 <template>
-	<div class="flex h-full flex-col overflow-hidden bg-surface-white">
+	<div
+		class="flex h-full min-h-0 min-w-0 flex-col overflow-x-hidden overflow-y-auto bg-surface-white"
+	>
 		<!-- header: this pane stays dashboard-native; it never hands the thread to
 		     the general chat surface. -->
-		<div class="flex min-h-[56px] shrink-0 items-center justify-between gap-2 border-b px-4">
+		<div
+			class="flex min-h-[56px] shrink-0 items-center justify-between gap-2 border-b px-4 py-2"
+		>
 			<div class="flex min-w-0 flex-col gap-0.5">
-				<span class="text-base font-semibold text-ink-gray-9">Describe a dashboard</span>
-				<span class="text-p-sm text-ink-gray-6"
+				<span class="truncate text-base font-semibold text-ink-gray-9"
+					>Describe a dashboard</span
+				>
+				<span class="truncate text-p-sm text-ink-gray-6"
 					>{{ agentName }} draws it on the canvas</span
 				>
 			</div>
@@ -36,7 +42,10 @@
 		</div>
 
 		<!-- transcript -->
-		<div ref="scroller" class="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+		<div
+			ref="scroller"
+			class="min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-auto break-words px-4 py-4 [overflow-wrap:anywhere]"
+		>
 			<div v-if="loadingTranscript && !bubbles.length" class="flex justify-center py-8">
 				<JvSpinner />
 			</div>
@@ -151,8 +160,8 @@
 								i < buildTickIndex
 									? 'text-ink-green-3'
 									: i === buildTickIndex
-									? 'font-medium text-ink-blue-3'
-									: 'text-ink-gray-4'
+										? 'font-medium text-ink-blue-3'
+										: 'text-ink-gray-4'
 							"
 						>
 							<span
@@ -161,8 +170,8 @@
 									i < buildTickIndex
 										? 'bg-surface-green-2'
 										: i === buildTickIndex
-										? 'bg-surface-blue-2 motion-safe:animate-pulse'
-										: 'bg-surface-gray-3'
+											? 'bg-surface-blue-2 motion-safe:animate-pulse'
+											: 'bg-surface-gray-3'
 								"
 							/>
 							{{ ph.label }}
@@ -186,7 +195,10 @@
 		<!-- parked ERP-write confirmations (create/update Jarvis Dashboard…):
 		     rendered in-pane so a chat-driven save never dead-ends into the
 		     full chat view just to click Approve -->
-		<div v-if="pendingCards.length" class="flex shrink-0 flex-col gap-2 border-t px-4 py-3">
+		<div
+			v-if="pendingCards.length"
+			class="flex max-h-[25%] shrink-0 flex-col gap-2 overflow-y-auto border-t px-4 py-3"
+		>
 			<div
 				v-for="pa in pendingCards"
 				:key="pa.token"
@@ -234,6 +246,7 @@
 				ref="box"
 				v-model="draft"
 				rows="2"
+				style="max-height: min(180px, 15dvh)"
 				placeholder="Describe the dashboard…"
 				class="block w-full resize-none rounded border border-transparent bg-surface-gray-2 px-2 py-1.5 text-base text-ink-gray-8 transition-colors placeholder-ink-gray-4 hover:border-outline-gray-modals hover:bg-surface-gray-3 focus:border-outline-gray-4 focus:bg-surface-white focus:shadow-sm focus:outline-none focus:ring-0 focus-visible:ring-2 focus-visible:ring-outline-gray-3"
 				@keydown="onKeydown"
