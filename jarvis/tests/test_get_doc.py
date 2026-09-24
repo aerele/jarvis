@@ -172,6 +172,8 @@ class TestGetDoc(FrappeTestCase):
 		try:
 			with self.assertRaises(PermissionDeniedError):
 				get_doc(doctype="Customer", name="Jarvis Test Customer")
+			with self.assertRaises(PermissionDeniedError):
+				get_doc(doctype="Customer", name="Jarvis Test Customer", names=[])
 		finally:
 			frappe.set_user("Administrator")
 
@@ -196,3 +198,56 @@ class TestGetDoc(FrappeTestCase):
 				get_doc(doctype="Stock Settings")
 		finally:
 			frappe.set_user("Administrator")
+
+
+class TestGetDocOptionalArguments(FrappeTestCase):
+	"""Exercise real reads using a built-in DocType, independent of ERPNext fixtures."""
+
+	def setUp(self):
+		super().setUp()
+		self.document_name = (
+			frappe.get_doc({"doctype": "ToDo", "description": "Lookup contract test"}).insert().name
+		)
+
+	def test_empty_optional_batch_keeps_single_record_shape(self):
+		result = get_doc(doctype="ToDo", name=self.document_name, names=[])
+		self.assertEqual(result["name"], self.document_name)
+		self.assertNotIn("docs", result)
+
+	def test_nonempty_batch_keeps_batch_shape(self):
+		result = get_doc(doctype="ToDo", names=[self.document_name])
+		self.assertEqual(result["count"], 1)
+		self.assertEqual(result["docs"][0]["name"], self.document_name)
+
+	def test_rejects_conflicting_single_and_batch_arguments(self):
+		with self.assertRaisesRegex(InvalidArgumentError, "either name or names"):
+			get_doc(doctype="ToDo", name=self.document_name, names=["Another ToDo"])
+
+	def test_empty_batch_does_not_hide_missing_record(self):
+		with self.assertRaisesRegex(InvalidArgumentError, "No ToDo named"):
+			get_doc(doctype="ToDo", name="Definitely Not A Customer", names=[])
+
+	def test_empty_batch_still_checks_record_permission(self):
+		from unittest.mock import patch
+
+		with patch("jarvis.tools.get_doc.frappe.has_permission", return_value=False) as permission:
+			with self.assertRaises(PermissionDeniedError):
+				get_doc(doctype="ToDo", name=self.document_name, names=[])
+			self.assertEqual(permission.call_args.kwargs["ptype"], "read")
+			self.assertEqual(permission.call_args.kwargs["doc"].name, self.document_name)
+
+	def test_empty_batch_without_a_name_is_invalid(self):
+		with self.assertRaises(InvalidArgumentError):
+			get_doc(doctype="ToDo", names=[])
+
+	def test_malformed_batch_with_a_name_is_invalid(self):
+		with self.assertRaises(InvalidArgumentError):
+			get_doc(doctype="ToDo", name=self.document_name, names="")
+
+	def test_single_doctype_preserves_flat_and_batch_shapes(self):
+		flat = get_doc(doctype="System Settings", name="ignored", names=[])
+		self.assertEqual(flat["name"], "System Settings")
+		self.assertNotIn("docs", flat)
+		batch = get_doc(doctype="System Settings", names=["ignored"])
+		self.assertEqual(batch["count"], 1)
+		self.assertEqual(batch["docs"][0]["name"], "System Settings")
