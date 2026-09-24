@@ -389,7 +389,7 @@ class TestSchemaEndpointAnswersForEachWave1View(Wave1Base):
 		doc = frappe.get_doc(DASHBOARD, name)
 		doc.append(
 			"sources",
-			{"source_name": "lfw-src", "tool": "query", "spec": '{"from": "ToDo", "fields": ["name"]}'},
+			{"source_name": "lfw-src", "tool": "query", "spec": '{"from": "ToDo", "select": ["name"]}'},
 		)
 		doc.flags.ignore_permissions = True
 		doc.save(ignore_permissions=True)

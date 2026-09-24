@@ -178,7 +178,7 @@ class TestPermissionConditionsAcrossMajors(FrappeTestCase):
 		from jarvis.tools.query import query
 
 		frappe.set_user(self.USER)
-		rows = {r["name"] for r in query({"from": "ToDo", "fields": ["name"], "limit": 500})["rows"]}
+		rows = {r["name"] for r in query({"from": "ToDo", "select": ["name"], "limit": 500})["rows"]}
 		expected = {r.name for r in frappe.get_list("ToDo", fields=["name"], limit_page_length=0)}
 		self.assertEqual(rows, expected)
 		# and it is genuinely filtering, not returning the whole table
@@ -194,8 +194,8 @@ class TestPermissionConditionsAcrossMajors(FrappeTestCase):
 		from jarvis.tools.query import query
 
 		frappe.set_user(self.USER)
-		plain = {r["name"] for r in query({"from": "ToDo", "fields": ["name"], "limit": 500})["rows"]}
-		aliased = query({"from": "ToDo", "alias": "td", "fields": ["td.name"], "limit": 500})["rows"]
+		plain = {r["name"] for r in query({"from": "ToDo", "select": ["name"], "limit": 500})["rows"]}
+		aliased = query({"from": "ToDo", "alias": "td", "select": ["td.name"], "limit": 500})["rows"]
 		self.assertEqual({r["name"] for r in aliased}, plain)
 
 	def test_hook_probe_is_selective(self):
@@ -217,7 +217,7 @@ class TestPermissionConditionsAcrossMajors(FrappeTestCase):
 			self.skipTest("erpnext not installed on this site")
 		frappe.set_user(self.USER)
 		with self.assertRaises(PermissionDeniedError):
-			query({"from": "Sales Invoice", "fields": ["name"], "limit": 5})
+			query({"from": "Sales Invoice", "select": ["name"], "limit": 5})
 
 
 class TestItemisedTaxAcrossMajors(FrappeTestCase):
