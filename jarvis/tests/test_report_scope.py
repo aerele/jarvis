@@ -113,6 +113,26 @@ class TestReportScope(TestCase):
 			with self.assertRaises(PermissionDeniedError):
 				resolve_scope(REPORT, {})
 
+	def test_denied_default_company_is_not_named(self):
+		for gate in ("assert_company_permitted", "frappe.has_permission"):
+			side = PermissionDeniedError("no access to company 'Example Company'")
+			with (
+				self.subTest(gate=gate),
+				patch(f"{MODULE}.{gate}", side_effect=side if "assert" in gate else None, return_value=False),
+				self.assertRaises(PermissionDeniedError) as denied,
+			):
+				resolve_scope(REPORT, {})
+			self.assertNotIn("Example Company", str(denied.exception))
+			self.assertIn("specify a company", str(denied.exception))
+
+	def test_denied_supplied_company_keeps_its_message(self):
+		with (
+			patch(f"{MODULE}.frappe.has_permission", return_value=False),
+			self.assertRaises(PermissionDeniedError) as denied,
+		):
+			resolve_scope(REPORT, {"company": "Other Company"})
+		self.assertEqual(str(denied.exception), "No permission to access the report company")
+
 	def test_prepared_lookup_uses_resolved_filters_and_only_ready_gets_scope(self):
 		for status in ("started", "generating", "failed", "ready"):
 			with (

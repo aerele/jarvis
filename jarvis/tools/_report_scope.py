@@ -24,16 +24,11 @@ def resolve_scope(report_name: str, filters: dict) -> tuple[dict, dict | None]:
 	if report.report_type != "Script Report" or report.is_standard != "Yes" or report.module != "Accounts":
 		return filters, None
 	resolved = dict(filters)
-	company = resolved.get("company") or frappe.db.get_single_value("Global Defaults", "default_company")
+	supplied = resolved.get("company")
+	company = supplied or frappe.db.get_single_value("Global Defaults", "default_company")
 	if not company:
 		return filters, None
-	assert_company_permitted(company)
-	# Standard reports often define Link filters in JS, which run() does not
-	# receive here. Gate the effective company explicitly, including defaults.
-	if not frappe.has_permission("Company", "read", doc=company) and not frappe.has_permission(
-		"Company", "select", doc=company
-	):
-		raise PermissionDeniedError("No permission to access the report company")
+	_assert_company_readable(company, supplied=bool(supplied))
 	resolved["company"] = company
 	resolved["report_date"] = _report_date(resolved.get("report_date"))
 	return resolved, {
@@ -45,6 +40,24 @@ def resolve_scope(report_name: str, filters: dict) -> tuple[dict, dict | None]:
 		if resolved.get("in_party_currency") or resolved.get("party_account")
 		else "company",
 	}
+
+
+def _assert_company_readable(company: str, *, supplied: bool) -> None:
+	# Standard reports often define Link filters in JS, which run() does not
+	# receive here. Gate the effective company explicitly, including defaults.
+	try:
+		assert_company_permitted(company)
+		if not frappe.has_permission("Company", "read", doc=company) and not frappe.has_permission(
+			"Company", "select", doc=company
+		):
+			raise PermissionDeniedError("No permission to access the report company")
+	except PermissionDeniedError:
+		if supplied:
+			raise
+		# The site default was never shown to this user; do not reveal its name.
+		raise PermissionDeniedError(
+			"No permission for the default report company; specify a company you can access"
+		) from None
 
 
 def _report_date(value) -> str:
