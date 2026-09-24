@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -546,6 +547,60 @@ def _is_yield_aborted_final(payload: dict, text: str | None) -> bool:
 		return True
 	msg = payload.get("message")
 	return isinstance(msg, dict) and msg.get("stopReason") == "aborted"
+
+
+# The gateway attaches a generated image/video/audio/document as a CONTENT
+# BLOCK on the final chat message, not text - the runtime's own
+# buildManagedMediaBlock: {"type":"image"|"audio"|"video", "url": ..., ...} or
+# {"type":"attachment","attachment":{"url": ..., ...}} for a document. The url
+# is a RELATIVE path served by the tenant's own gateway (same host as
+# agent_url, same bearer token Jarvis already holds) - never an absolute URL,
+# a traversal, or any other prefix.
+_MEDIA_URL_RE = re.compile(r"^/api/chat/media/outgoing/[A-Za-z0-9%._~:@-]+/[0-9a-f-]{36}/full")
+# Mirrors generated_media._MAX_MEDIA_PER_TURN (a separate cap: these blocks are
+# a distinct delivery mechanism from the native MEDIA:/embedded-path markers).
+_MAX_MEDIA_URLS_PER_TURN = 8
+
+
+def _valid_media_url(url) -> bool:
+	if not isinstance(url, str) or not url:
+		return False
+	if ".." in url or "\\" in url:
+		return False
+	return bool(_MEDIA_URL_RE.match(url))
+
+
+def _chat_final_media_urls(payload: dict) -> list[dict]:
+	"""Extract qualifying media/attachment blocks from a chat final's
+	``message.content``: ``{"url": <relative path>, "mime_type": <str|None>}``,
+	capped per turn. A block with a missing/invalid url (absolute, traversal,
+	wrong prefix) is silently skipped - never fetched, never raises."""
+	msg = payload.get("message")
+	if not isinstance(msg, dict):
+		return []
+	content = msg.get("content")
+	if not isinstance(content, list):
+		return []
+	out: list[dict] = []
+	for block in content:
+		if not isinstance(block, dict):
+			continue
+		btype = block.get("type")
+		if btype in ("image", "audio", "video"):
+			url, mime = block.get("url"), block.get("mimeType")
+		elif btype == "attachment":
+			att = block.get("attachment")
+			if not isinstance(att, dict):
+				continue
+			url, mime = att.get("url"), att.get("mimeType")
+		else:
+			continue
+		if not _valid_media_url(url):
+			continue
+		out.append({"url": url, "mime_type": mime})
+		if len(out) >= _MAX_MEDIA_URLS_PER_TURN:
+			break
+	return out
 
 
 def _persisted_device_id() -> str:
@@ -1328,6 +1383,9 @@ class AgentSession:
 						_final["media_rels"] = _rels
 					if _marked:  # any MEDIA: line stripped -> force the content overwrite
 						_final["marker_stripped"] = True
+					_urls = _chat_final_media_urls(payload)
+					if _urls:  # gateway-attached image/video/audio/document content blocks
+						_final["media_urls"] = _urls
 					yield _final
 					return
 				if state in ("error", "aborted"):
@@ -1426,6 +1484,9 @@ class AgentSession:
 					out["media_rels"] = _rels
 				if _marked:
 					out["marker_stripped"] = True
+				_urls = _chat_final_media_urls(payload)
+				if _urls:  # gateway-attached image/video/audio/document content blocks
+					out["media_urls"] = _urls
 				return out
 			if state in ("error", "aborted"):
 				return {

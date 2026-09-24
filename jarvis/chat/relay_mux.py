@@ -69,6 +69,7 @@ from jarvis.chat.agent_client import (
 	AgentSession,
 	_build_request_frame,
 	_chat_final_failed,
+	_chat_final_media_urls,
 	_chat_final_text,
 	_is_yield_aborted_final,
 	failed_final_error,
@@ -641,6 +642,9 @@ class RelayMux:
 					term_payload["media_rels"] = _rels
 				if _marked:  # any MEDIA: line stripped -> force the content overwrite
 					term_payload["marker_stripped"] = True
+				_urls = _chat_final_media_urls(payload)
+				if _urls:  # gateway-attached image/video/audio/document content blocks
+					term_payload["media_urls"] = _urls
 		elif state in ("error", "aborted"):
 			term_kind = "relay:error"
 			# "text" lets pump.on_terminal tell an agent-yield abort (empty)
