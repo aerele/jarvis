@@ -87,6 +87,17 @@ _ACK_TIMEOUT_PER_VISION_PART_S = 30.0
 _ACK_TIMEOUT_PER_INLINED_CHAR_S = 10.0 / 10_000  # ~10s per 10k inlined chars
 _ACK_TIMEOUT_CEILING_S = 180.0
 
+# Live-verified (2026.9.3): the deferred-reply yield's actual generated image
+# arrives as SEPARATE transcript messages (a MEDIA: text line, then an
+# image/audio/video content-block message) AFTER the continuation's own final
+# has already retired its lane - relay_turn_events / relay_mux never see them.
+# _harvest_post_yield_media polls the session's display transcript for up to
+# _YIELD_MEDIA_POLL_TIMEOUT_S, checking every _YIELD_MEDIA_POLL_INTERVAL_S.
+# Runs in the post-settle finalize effect, never the live relay loop, so
+# blocking here is fine.
+_YIELD_MEDIA_POLL_INTERVAL_S = 2.0
+_YIELD_MEDIA_POLL_TIMEOUT_S = 20.0
+
 
 def persist_rich_outputs(
 	assistant_msg_name: str,
@@ -96,6 +107,7 @@ def persist_rich_outputs(
 	turn_start_ms: int,
 	media_rels: list[str] | None = None,
 	media_urls: list[dict] | None = None,
+	yield_continuation: bool = False,
 ) -> None:
 	"""Best-effort canvas + generated-image persistence and publish for one
 	finished turn. Shared by the worker's clean exit and snapshot recovery
@@ -107,7 +119,20 @@ def persist_rich_outputs(
 	don't-deliver). ``media_urls`` (gateway-attached image/video/audio/document
 	content blocks on the final chat message - a distinct delivery mechanism,
 	see ``agent_client._chat_final_media_urls``) rides the same two transports.
+	``yield_continuation`` (also from both transports) marks a turn that
+	settled via the deferred-reply yield-wait: when neither media_rels nor
+	media_urls landed on the terminal itself, poll the transcript for the
+	image that arrives moments later (see ``_harvest_post_yield_media``).
 	Never raises."""
+	if yield_continuation and not media_rels and not media_urls:
+		try:
+			media_rels, media_urls = _harvest_post_yield_media(conversation_id, turn_start_ms)
+		except Exception:
+			frappe.log_error(
+				title="chat worker: post-yield media harvest failed",
+				message=frappe.get_traceback(),
+			)
+
 	settings = frappe.get_single("Jarvis Settings")
 
 	# Rich outputs: detect any canvas/chart artifact the agent produced this
@@ -251,6 +276,81 @@ def persist_rich_outputs(
 			title="chat worker: gateway media block persist failed",
 			message=frappe.get_traceback(),
 		)
+
+
+def _message_timestamp_ms(message: dict) -> int | None:
+	"""Best-effort epoch-ms timestamp for a transcript message, checking every
+	plausible field name (the exact wire key is unconfirmed) - accepts an
+	epoch number or an ISO/parseable string. None when no usable field is
+	present, in which case the caller treats the message as in-window rather
+	than risk silently dropping the real image over a naming guess."""
+	for key in ("timestamp", "createdAt", "ts", "time"):
+		v = message.get(key)
+		if isinstance(v, (int, float)):
+			return int(v)
+		if isinstance(v, str) and v:
+			try:
+				return int(frappe.utils.get_datetime(v).timestamp() * 1000)
+			except Exception:
+				continue
+	return None
+
+
+def _scan_history_for_media(messages: list, turn_start_ms: int) -> tuple[list[str], list[dict]]:
+	"""Scan a chat.history transcript for the yielded turn's actual media,
+	restricted to ASSISTANT messages at/after this turn's start. Prefers a
+	``MEDIA:`` path over a content-block url for the SAME delivery (the live
+	capture shows the runtime posting the image both ways) - only falls back
+	to urls when no MEDIA: path was found at all, so a plain image never
+	seeds twice as two separate canvas items."""
+	from jarvis.chat import generated_media
+	from jarvis.chat.agent_client import _chat_final_media_urls, _chat_final_text
+
+	rels: list[str] = []
+	urls: list[dict] = []
+	for m in messages or []:
+		if not isinstance(m, dict) or (m.get("role") or "").lower() != "assistant":
+			continue
+		ts = _message_timestamp_ms(m)
+		if ts is not None and ts < turn_start_ms:
+			continue
+		payload = {"message": m}
+		text = _chat_final_text(payload) or ""
+		if text:
+			rels.extend(generated_media.detect_media_paths(text))
+		urls.extend(_chat_final_media_urls(payload))
+	return (rels, []) if rels else ([], urls)
+
+
+def _harvest_post_yield_media(conversation_id: str, turn_start_ms: int) -> tuple[list[str], list[dict]]:
+	"""Poll the session's display transcript (chat.history) for the deferred-
+	reply yield's actual media - it arrives as separate transcript messages
+	AFTER the continuation's own final, past the point relay_turn_events /
+	relay_mux can still see them (their lane has already retired). Stops as
+	soon as anything is found; gives up empty-handed after
+	_YIELD_MEDIA_POLL_TIMEOUT_S. Uses the same pooled gateway connection as
+	the rest of a turn (agent_session_pool), not a dedicated one. Best-effort:
+	returns ([], []) on any connect/RPC failure rather than raising."""
+	from jarvis.chat import agent_session_pool
+
+	session_key = frappe.db.get_value(CONV, conversation_id, "session_key")
+	settings = frappe.get_single("Jarvis Settings")
+	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
+	if not session_key or not gateway_url:
+		return [], []
+	deadline = time.monotonic() + _YIELD_MEDIA_POLL_TIMEOUT_S
+	while True:
+		try:
+			with agent_session_pool.checkout(gateway_url) as sess:
+				history = sess.get_history(session_key, limit=20)
+		except Exception:
+			history = {}
+		rels, urls = _scan_history_for_media(history.get("messages") or [], turn_start_ms)
+		if rels or urls:
+			return rels, urls
+		if time.monotonic() >= deadline:
+			return [], []
+		time.sleep(_YIELD_MEDIA_POLL_INTERVAL_S)
 
 
 def _publish_to_user(user, payload):
@@ -1678,6 +1778,7 @@ def handle_chat_send(payload: dict) -> None:
 			turn_start_ms,
 			media_rels=terminal.get("media_rels"),
 			media_urls=terminal.get("media_urls"),
+			yield_continuation=bool(terminal.get("yield_continuation")),
 		)
 
 		# Chat-ask materialization (notify-approvals design Part 2): a final

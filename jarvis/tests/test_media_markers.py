@@ -667,6 +667,52 @@ class TestSeedBlockWiring(unittest.TestCase):
 			turn_handler.persist_rich_outputs("MSG-1", "C1", "u@x", "run1", 0, media_rels=None)
 		sm.assert_not_called()
 
+	def test_no_media_rels_but_not_yield_continuation_skips_harvest(self):
+		from jarvis.chat import turn_handler
+
+		with patch.object(turn_handler, "_harvest_post_yield_media") as harvest:
+			with (
+				patch("frappe.get_single", return_value=Mock(agent_url="ws://h:1")),
+				patch("frappe.db.get_value", return_value=""),
+				patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
+				patch("jarvis.chat.turn_handler._publish_to_user"),
+			):
+				turn_handler.persist_rich_outputs("MSG-1", "C1", "u@x", "run1", 0)
+		harvest.assert_not_called()
+
+	def test_yield_continuation_with_media_already_present_skips_harvest(self):
+		from jarvis.chat import turn_handler
+
+		with patch.object(turn_handler, "_harvest_post_yield_media") as harvest:
+			with (
+				patch("frappe.get_single", return_value=Mock(agent_url="ws://h:1")),
+				patch("frappe.db.get_value", return_value=""),
+				patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
+				patch("jarvis.chat.generated_media.seed_media", return_value=[]),
+				patch("jarvis.chat.turn_handler._publish_to_user"),
+			):
+				turn_handler.persist_rich_outputs(
+					"MSG-1", "C1", "u@x", "run1", 0, media_rels=[_IMG], yield_continuation=True
+				)
+		harvest.assert_not_called()
+
+	def test_yield_continuation_with_no_media_harvests_and_seeds(self):
+		from jarvis.chat import turn_handler
+
+		settings = Mock(agent_url="ws://h:1")
+		settings.get_password = Mock(return_value="tok")
+		with patch.object(turn_handler, "_harvest_post_yield_media", return_value=([_IMG], [])) as harvest:
+			with (
+				patch("frappe.get_single", return_value=settings),
+				patch("frappe.db.get_value", return_value=""),
+				patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
+				patch("jarvis.chat.generated_media.seed_media", return_value=[]) as sm,
+				patch("jarvis.chat.turn_handler._publish_to_user"),
+			):
+				turn_handler.persist_rich_outputs("MSG-1", "C1", "u@x", "run1", 123, yield_continuation=True)
+		harvest.assert_called_once_with("C1", 123)
+		sm.assert_called_once_with("MSG-1", "ws://h:1", "tok", [_IMG])
+
 
 class TestRecoveryStrip(unittest.TestCase):
 	"""Recovery (D1): _latest_assistant_text strips the marker at each return
@@ -686,6 +732,159 @@ class TestRecoveryStrip(unittest.TestCase):
 		out = turn_recovery._latest_assistant_text([msg])
 		self.assertNotIn("MEDIA:", out)
 		self.assertNotIn("/home/node", out)
+
+
+_URL_MSG_IMG = "/api/chat/media/outgoing/sk/12345678-1234-1234-1234-123456789012/full.png"
+
+
+class TestScanHistoryForMedia(unittest.TestCase):
+	"""The deferred-reply yield's actual media arrives as SEPARATE transcript
+	messages after the continuation's own final - _scan_history_for_media is
+	the pure extractor _harvest_post_yield_media polls chat.history with."""
+
+	def test_media_line_extracted(self):
+		from jarvis.chat.turn_handler import _scan_history_for_media
+
+		msg = {"role": "assistant", "content": f"here\nMEDIA:{_IMG}", "timestamp": 5000}
+		rels, urls = _scan_history_for_media([msg], turn_start_ms=1000)
+		self.assertEqual(rels, [_IMG])
+		self.assertEqual(urls, [])
+
+	def test_image_block_extracted(self):
+		from jarvis.chat.turn_handler import _scan_history_for_media
+
+		msg = {
+			"role": "assistant",
+			"content": [{"type": "image", "url": _URL_MSG_IMG, "mimeType": "image/png"}],
+			"timestamp": 5000,
+		}
+		rels, urls = _scan_history_for_media([msg], turn_start_ms=1000)
+		self.assertEqual(rels, [])
+		self.assertEqual(urls, [{"url": _URL_MSG_IMG, "mime_type": "image/png"}])
+
+	def test_timestamp_filter_excludes_older_messages(self):
+		from jarvis.chat.turn_handler import _scan_history_for_media
+
+		old = {"role": "assistant", "content": f"MEDIA:{_IMG}", "timestamp": 500}
+		rels, urls = _scan_history_for_media([old], turn_start_ms=1000)
+		self.assertEqual((rels, urls), ([], []))
+
+	def test_non_assistant_role_skipped(self):
+		from jarvis.chat.turn_handler import _scan_history_for_media
+
+		msg = {"role": "user", "content": f"MEDIA:{_IMG}", "timestamp": 5000}
+		rels, urls = _scan_history_for_media([msg], turn_start_ms=1000)
+		self.assertEqual((rels, urls), ([], []))
+
+	def test_media_line_preferred_over_image_block(self):
+		# The live capture shows the runtime posting the SAME image both ways -
+		# a MEDIA: text message AND an image-block message. Only one must seed.
+		from jarvis.chat.turn_handler import _scan_history_for_media
+
+		media_msg = {"role": "assistant", "content": f"MEDIA:{_IMG}", "timestamp": 5000}
+		block_msg = {
+			"role": "assistant",
+			"content": [{"type": "image", "url": _URL_MSG_IMG, "mimeType": "image/png"}],
+			"timestamp": 5001,
+		}
+		rels, urls = _scan_history_for_media([media_msg, block_msg], turn_start_ms=1000)
+		self.assertEqual(rels, [_IMG])
+		self.assertEqual(urls, [])
+
+	def test_no_timestamp_field_is_not_filtered_out(self):
+		from jarvis.chat.turn_handler import _scan_history_for_media
+
+		msg = {"role": "assistant", "content": f"MEDIA:{_IMG}"}
+		rels, urls = _scan_history_for_media([msg], turn_start_ms=1000)
+		self.assertEqual(rels, [_IMG])
+
+	def test_nothing_found_returns_empty(self):
+		from jarvis.chat.turn_handler import _scan_history_for_media
+
+		msg = {"role": "assistant", "content": "just a normal reply", "timestamp": 5000}
+		self.assertEqual(_scan_history_for_media([msg], turn_start_ms=1000), ([], []))
+		self.assertEqual(_scan_history_for_media([], turn_start_ms=1000), ([], []))
+
+
+class TestHarvestPostYieldMediaPolling(unittest.TestCase):
+	"""_harvest_post_yield_media: polls chat.history on the pooled gateway
+	connection every _YIELD_MEDIA_POLL_INTERVAL_S, stops on the first hit,
+	gives up after _YIELD_MEDIA_POLL_TIMEOUT_S."""
+
+	def _fake_checkout(self, sess):
+		import contextlib
+
+		@contextlib.contextmanager
+		def checkout(url):
+			yield sess
+
+		return checkout
+
+	def test_stops_polling_on_first_hit(self):
+		from jarvis.chat import turn_handler
+
+		calls = {"n": 0}
+
+		def fake_get_history(sk, limit=20):
+			calls["n"] += 1
+			if calls["n"] < 3:
+				return {"messages": []}
+			return {"messages": [{"role": "assistant", "content": f"MEDIA:{_IMG}", "timestamp": 999999}]}
+
+		sess = Mock()
+		sess.get_history = Mock(side_effect=fake_get_history)
+		settings = Mock(agent_url="ws://h:1")
+
+		with (
+			patch("frappe.db.get_value", return_value="sk-1"),
+			patch("frappe.get_single", return_value=settings),
+			patch("jarvis.chat.agent_session_pool.checkout", self._fake_checkout(sess)),
+			patch("time.sleep", return_value=None),
+		):
+			rels, urls = turn_handler._harvest_post_yield_media("C1", turn_start_ms=0)
+		self.assertEqual(rels, [_IMG])
+		self.assertEqual(calls["n"], 3)
+
+	def test_gives_up_after_the_cap(self):
+		from jarvis.chat import turn_handler
+
+		calls = {"n": 0}
+
+		def fake_get_history(sk, limit=20):
+			calls["n"] += 1
+			return {"messages": []}
+
+		sess = Mock()
+		sess.get_history = Mock(side_effect=fake_get_history)
+		settings = Mock(agent_url="ws://h:1")
+
+		clock = {"now": 0.0}
+
+		def fake_monotonic():
+			return clock["now"]
+
+		def fake_sleep(s):
+			clock["now"] += s
+
+		with (
+			patch("frappe.db.get_value", return_value="sk-1"),
+			patch("frappe.get_single", return_value=settings),
+			patch("jarvis.chat.agent_session_pool.checkout", self._fake_checkout(sess)),
+			patch("time.sleep", side_effect=fake_sleep),
+			patch("time.monotonic", side_effect=fake_monotonic),
+		):
+			rels, urls = turn_handler._harvest_post_yield_media("C1", turn_start_ms=0)
+		self.assertEqual((rels, urls), ([], []))
+		self.assertGreaterEqual(calls["n"], 1)
+
+	def test_missing_session_key_short_circuits(self):
+		from jarvis.chat import turn_handler
+
+		with (
+			patch("frappe.db.get_value", return_value=None),
+			patch("frappe.get_single", return_value=Mock(agent_url="ws://h:1")),
+		):
+			self.assertEqual(turn_handler._harvest_post_yield_media("C1", turn_start_ms=0), ([], []))
 
 
 if __name__ == "__main__":
