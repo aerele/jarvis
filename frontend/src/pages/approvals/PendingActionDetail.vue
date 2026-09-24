@@ -1,11 +1,8 @@
 <template>
-	<!-- One held File Box write, expanded under its lane row. The card is the
+	<!-- One held File Box write, in the board's right pane. The card is the
 	     server-built "what will be created" summary rendered by PendingCard (text
 	     interpolation only - the values are model-derived from a dropped file). -->
-	<div
-		class="border-t bg-surface-white px-5 py-4"
-		:aria-busy="loading || busy !== null ? 'true' : 'false'"
-	>
+	<div :aria-busy="loading || busy !== null ? 'true' : 'false'">
 		<div v-if="loading" class="flex justify-start">
 			<JvSpinner label="Loading the proposed record…" />
 		</div>
@@ -417,6 +414,13 @@ async function submitEdit() {
 	}
 }
 
+// The board calls this when the row leaves its rail: show the settled status, but
+// never over a decision in flight or an open edit (a failure keeps its values).
+function refresh() {
+	if (busy.value === null && !editing.value) load();
+}
+
 onMounted(load);
 onBeforeUnmount(() => linkSearch.cleanup());
+defineExpose({ refresh });
 </script>

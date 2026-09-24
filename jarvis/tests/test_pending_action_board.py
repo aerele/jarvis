@@ -127,13 +127,43 @@ class TestLane(_Base):
 		self.assertEqual(row["for_user"], "")
 		self.assertEqual(
 			set(row),
-			{"name", "kind", "status", "summary", "waiters_count", "created_at", "age", "for_user"},
+			{
+				"name",
+				"kind",
+				"status",
+				"summary",
+				"document_type",
+				"waiters_count",
+				"created_at",
+				"age",
+				"for_user",
+			},
 		)
 		self.assertNotIn(SECRET, json.dumps(res))
 		with as_user(SM_USER):
 			names = {r["name"] for r in board.list_pending_actions_lane()["rows"]}
 		self.assertTrue({mine, theirs} <= names)
 		self.assertNotIn(done, names)
+
+	def test_rows_carry_the_cards_doctype_never_the_card(self):
+		"""The board's type filter reads ``document_type`` off the stored card; the card
+		itself (model-derived values) never rides the lane."""
+		card = {"kind": "create", "doctype": "Supplier", "rows": [{"label": "Note", "value": SECRET}]}
+		typed, _ = self.held(card=card)
+		bare, _ = self.held()
+		odd, _ = self.held()
+		self.set_col(odd, card='["not", "a", "card"]')
+		with as_user(OWNER):
+			res = board.list_pending_actions_lane()
+		rows = {r["name"]: r for r in res["rows"]}
+		self.assertEqual(rows[typed]["document_type"], "Supplier")
+		self.assertEqual((rows[bare]["document_type"], rows[odd]["document_type"]), ("", ""))
+		self.assertNotIn(SECRET, json.dumps(res))
+
+	def test_card_doctype_tolerates_a_missing_or_unparseable_card(self):
+		for raw in (None, "", "{not json", "[1]", '"Supplier"', '{"doctype": 7}', '{"doctype": null}'):
+			self.assertEqual(board._card_doctype(raw), "", raw)
+		self.assertEqual(board._card_doctype('{"doctype": "Item"}'), "Item")
 
 	def test_pending_count_adds_held_rows(self):
 		with as_user(OWNER):
@@ -366,6 +396,7 @@ class TestChatLane(_Base):
 				"kind",
 				"status",
 				"summary",
+				"document_type",
 				"created_at",
 				"age",
 				"conversation",

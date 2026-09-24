@@ -7,7 +7,6 @@ import {
 	chatStatusLine,
 	isChatSettled,
 	keepsChatCard,
-	laneHeading,
 } from "./chatCardActions";
 
 describe("chatCardActions copy", () => {
@@ -91,19 +90,6 @@ describe("chatCardActions copy", () => {
 				reason: "A newer proposal replaced this action.",
 			})
 		).toBe("A newer proposal replaced this action.");
-	});
-
-	it("heads the lane by where its rows come from", () => {
-		expect(laneHeading([{ kind: "file_box_held" }]).title).toBe(
-			"New records waiting for approval"
-		);
-		expect(laneHeading([{ kind: "chat" }])).toEqual({
-			title: "Actions waiting for your confirmation",
-			source: "from your chats",
-		});
-		expect(laneHeading([{ kind: "chat" }, { kind: "file_box_held" }]).source).toBe(
-			"from File Box runs and your chats"
-		);
 	});
 });
 

@@ -1,9 +1,6 @@
 <template>
-	<div
-		class="border-t bg-surface-white px-5 py-4"
-		:aria-busy="loading || busy !== null ? 'true' : 'false'"
-	>
-		<!-- One chat action card, expanded under its lane row: the card the chat shows
+	<div :aria-busy="loading || busy !== null ? 'true' : 'false'">
+		<!-- One chat action card, in the board's right pane: the card the chat shows
 		     (PendingCard, text interpolation only - the values are model-derived),
 		     decided with the chat's own Confirm / Discard. Only its owner sees it (D1). -->
 		<div v-if="loading" class="flex justify-start">
@@ -157,5 +154,12 @@ function openChat() {
 	);
 }
 
+// The board calls this when the card leaves its rail: show the settled status, but
+// never over a decision in flight.
+function refresh() {
+	if (busy.value === null) load();
+}
+
 onMounted(load);
+defineExpose({ refresh });
 </script>

@@ -57,14 +57,3 @@ export function chatStatusLine(rec) {
 	if (rec.status === "Discarded") return "Discarded. Nothing ran.";
 	return rec.reason || "This action was already handled.";
 }
-
-// The lane's heading names where its rows come from.
-export function laneHeading(rows) {
-	const chat = (rows || []).some((r) => r && r.kind === "chat");
-	const held = (rows || []).some((r) => r && r.kind !== "chat");
-	if (chat && !held)
-		return { title: "Actions waiting for your confirmation", source: "from your chats" };
-	if (chat)
-		return { title: "Waiting for your approval", source: "from File Box runs and your chats" };
-	return { title: "New records waiting for approval", source: "from File Box runs" };
-}

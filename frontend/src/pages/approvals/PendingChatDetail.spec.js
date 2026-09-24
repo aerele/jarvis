@@ -181,14 +181,20 @@ describe("PendingChatDetail", () => {
 		await flushPromises();
 	});
 
-	it("takes the lane's id on its root so the row's aria-controls resolves", async () => {
-		approvals.getPendingAction.mockResolvedValue(rec());
-		const w = mount(PendingChatDetail, {
-			props: { name: "PA-9" },
-			attrs: { id: "held-detail-PA-9" },
-		});
+	it("refresh shows a card settled elsewhere, but never over a decision in flight", async () => {
+		const w = await mountWith(rec());
+		let resolve;
+		core.confirmTool.mockReturnValue(new Promise((r) => (resolve = r)));
+		await button(w, "Confirm").trigger("click");
+		w.vm.refresh();
+		expect(approvals.getPendingAction).toHaveBeenCalledTimes(1);
+		resolve({ ok: false, reason_code: "busy" });
 		await flushPromises();
-		expect(w.attributes("id")).toBe("held-detail-PA-9");
+		approvals.getPendingAction.mockResolvedValue(rec({ status: "Discarded", can_act: 0 }));
+		w.vm.refresh();
+		await flushPromises();
+		expect(w.find('[role="status"]').text()).toBe("Discarded. Nothing ran.");
+		expect(button(w, "Confirm")).toBeFalsy();
 	});
 
 	it("opens the conversation, or the dashboard pane it came from", async () => {

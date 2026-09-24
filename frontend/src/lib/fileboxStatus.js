@@ -69,7 +69,7 @@ export function resultLink(row) {
 	const href = row && row.result_link;
 	if (typeof href !== "string") return null;
 	if (href.startsWith("/app/")) return { kind: "desk", href };
-	// "/approvals?held=<name>" opens a held File Box write in the board's lane.
+	// "/approvals?held=<name>" opens a held File Box write on the board.
 	if (href === "/approvals" || /^\/approvals[/?]/.test(href)) return { kind: "route", href };
 	return null;
 }

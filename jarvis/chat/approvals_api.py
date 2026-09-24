@@ -1114,6 +1114,16 @@ def _age_s(created) -> int:
 	return max(0, int((frappe.utils.now_datetime() - frappe.utils.get_datetime(created)).total_seconds()))
 
 
+def _card_doctype(raw) -> str:
+	"""The stored card's ``doctype`` for the board's type filter; "" when absent or unparseable."""
+	try:
+		card = json.loads(raw) if raw else None
+	except Exception:
+		return ""
+	dt = card.get("doctype") if isinstance(card, dict) else None
+	return dt if isinstance(dt, str) else ""
+
+
 def _for_user(owner: str, me: str) -> str:
 	"""Whose drop this is, shown only to a System Manager acting for someone else."""
 	return "" if owner == me else (frappe.db.get_value("User", owner, "full_name") or owner)
@@ -1124,7 +1134,8 @@ def _for_user(owner: str, me: str) -> str:
 def list_pending_actions_lane() -> dict:
 	"""Pending actions awaiting a decision (or running), oldest first; ``{rows,
 	total}``. Held File Box writes: the caller's own, or every user's for a System
-	Manager. Chat cards: the caller's own only (D1), listed at once (decision 4)."""
+	Manager. Chat cards: the caller's own only (D1), listed at once (decision 4).
+	Each row's ``document_type`` is its card's doctype; the card itself never ships."""
 	from jarvis.chat.pending_actions._store import table_ready
 
 	if not table_ready():
@@ -1144,7 +1155,7 @@ def list_pending_actions_lane() -> dict:
 		"pa.kind = %(chat)s AND pa.owner_user = %(me)s",
 	):
 		rows += frappe.db.sql(
-			f"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.owner_user, pa.creation,
+			f"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.card, pa.owner_user, pa.creation,
 			pa.conversation, c.title AS conversation_title, c.origin_page,
 			(SELECT COUNT(*) FROM `tabJarvis Pending Action Waiter` w
 			 WHERE w.parent = pa.name AND w.parenttype = 'Jarvis Pending Action') AS waiters_count
@@ -1164,6 +1175,7 @@ def list_pending_actions_lane() -> dict:
 			"kind": r.kind,
 			"status": r.status,
 			"summary": r.summary or "",
+			"document_type": _card_doctype(r.card),
 			"created_at": str(r.creation),
 			"age": _age_s(r.creation),
 		}

@@ -202,6 +202,22 @@ describe("PendingActionDetail", () => {
 		expect(w.find('[role="status"]').text()).toContain("Skipped");
 	});
 
+	it("refresh shows a row settled elsewhere, but never over a decision in flight", async () => {
+		const w = await mountWith(rec());
+		let resolve;
+		api.decideHeldAction.mockReturnValue(new Promise((r) => (resolve = r)));
+		await button(w, "Create & continue").trigger("click");
+		w.vm.refresh();
+		expect(api.getPendingAction).toHaveBeenCalledTimes(1);
+		resolve({ ok: false, reason_code: "busy" });
+		await flushPromises();
+		api.getPendingAction.mockResolvedValue(rec({ status: "Executed", can_act: 0 }));
+		w.vm.refresh();
+		await flushPromises();
+		expect(w.find('[role="status"]').text()).toBe("Created.");
+		expect(button(w, "Create & continue")).toBeFalsy();
+	});
+
 	it("a batch offers no Use existing", async () => {
 		const w = await mountWith(rec({ can_use_existing: 0, doctype: "" }));
 		expect(button(w, "Use existing")).toBeFalsy();
@@ -362,6 +378,15 @@ describe("PendingActionDetail", () => {
 			expect(w.emitted("decided")).toBeUndefined();
 			await button(w, "Close").trigger("click");
 			expect(w.emitted("decided")).toHaveLength(1);
+		});
+
+		it("refresh never wipes an open edit or a failure's values", async () => {
+			const w = await editing();
+			await control(w, "Supplier Type").setValue("Company");
+			w.vm.refresh();
+			await flushPromises();
+			expect(api.getPendingAction).toHaveBeenCalledTimes(1);
+			expect(control(w, "Supplier Type").element.value).toBe("Company");
 		});
 
 		it("links the full Desk form with non-secret values, in a new tab", async () => {
