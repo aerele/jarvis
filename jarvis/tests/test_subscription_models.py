@@ -42,6 +42,24 @@ class TestSubscriptionCatalogue(unittest.TestCase):
 		)
 		self.assertEqual([m["model_id"] for m in rows if m["is_default"]], ["gpt-5.6-terra"])
 
+	def test_admin_catalog_without_subscription_tier_falls_back_to_bundled(self):
+		# The removed seed literal used to cover this; the bundled catalog does now.
+		from unittest.mock import patch
+
+		from jarvis import admin_client
+		from jarvis.tests.test_model_catalog import _clear_sub_model_cache
+
+		self.addCleanup(_clear_sub_model_cache)
+		api_key_only = [
+			{"provider_id": "openai", "label": "OpenAI", "models": [{"model_id": "gpt-5", "tier": "api_key"}]}
+		]
+		with patch.object(admin_client, "get_model_catalog", return_value=api_key_only):
+			_clear_sub_model_cache()
+			self.assertEqual(
+				set(cat.SUBSCRIPTION_MODELS), {"OpenAI", "Anthropic", "xAI Grok", "Kimi (Moonshot)"}
+			)
+			self.assertEqual(cat.DEFAULT_MODEL["OpenAI"], "gpt-5.6-terra")
+
 	def test_coerce_falls_back_to_default_for_bogus_and_empty(self):
 		from unittest.mock import patch
 
