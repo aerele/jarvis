@@ -65,6 +65,7 @@ from dataclasses import dataclass
 
 from jarvis.chat import egress_rules
 from jarvis.chat.agent_client import (
+	MEDIA_GEN_TOOL_NAMES,
 	AgentSession,
 	_build_request_frame,
 	_chat_final_failed,
@@ -275,6 +276,13 @@ class _Lane:
 		# there), so it needs no lock. Not terminal on its own: it just names the
 		# provider failure for a terminal that otherwise cannot.
 		self.failure_detail: str | None = None
+		# True once a MEDIA_GEN_TOOL_NAMES tool call started on this run.
+		# Written in _route_agent, read in _route_terminal (same reader-thread-
+		# only discipline as failure_detail): the gateway's bare terminal for a
+		# yielded run with no visible output is wire-identical to a genuine
+		# failed_final, and this in-flight history is the only thing that
+		# tells them apart.
+		self.saw_media_tool_start = False
 
 	def next_seq(self) -> int:
 		self.watermark += 1
@@ -568,6 +576,8 @@ class RelayMux:
 				data={"text": parsed.get("text", ""), "delta": parsed.get("delta", "")},
 			)
 		elif kind == "tool":
+			if parsed.get("phase") == "start" and parsed.get("tool_name") in MEDIA_GEN_TOOL_NAMES:
+				lane.saw_media_tool_start = True
 			seq = lane.next_seq()
 			ev = _LaneEvent(
 				cls=PRECIOUS,
@@ -597,18 +607,23 @@ class RelayMux:
 		state = payload.get("state")
 		if state == "final":
 			text = _chat_final_text(payload)
-			if _is_yield_aborted_final(payload, text):
+			failed = _chat_final_failed(payload, text)
+			if _is_yield_aborted_final(payload, text) or (failed and lane.saw_media_tool_start):
 				# The runtime's image/video/music tools' unconditional
 				# background-detach yield reaches THIS path too (not only
 				# state=="aborted" below): a `final` whose text is empty and
 				# whose stopReason (top-level or nested in message) is
-				# "aborted", not "error". Same relay:error/aborted shape as the
-				# state=="aborted" branch, so on_terminal's yield-wait applies
-				# unchanged. MUST come before _chat_final_failed - its "no
-				# message at all" branch would otherwise call this a hard
-				# failure instead of a deferred reply.
+				# "aborted", not "error" - OR, when the gateway settles a
+				# yielded run with NO stopReason at all (a bare terminal,
+				# wire-identical to a genuine failed_final), the fact that a
+				# media-gen tool started this run is the only tell. Same
+				# relay:error/aborted shape as the state=="aborted" branch, so
+				# on_terminal's yield-wait applies unchanged. MUST come before
+				# the failed_final branch below - both of its "no message"/
+				# "no signal" guards would otherwise call this a hard failure
+				# instead of a deferred reply.
 				term_kind, term_payload = "relay:error", {"state": "aborted", "text": ""}
-			elif _chat_final_failed(payload, text):
+			elif failed:
 				term_kind, term_payload = (
 					"relay:error",
 					{"state": "failed_final", "error": failed_final_error(lane.failure_detail)},

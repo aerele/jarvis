@@ -418,6 +418,15 @@ def _chat_final_text(payload: dict) -> str | None:
 # the row's ``error`` field so the user sees an honest failure.
 _STREAM_ERROR_SENTINEL = "[assistant turn failed before producing content]"
 
+# The agent runtime's media-generation tools: calling one unconditionally
+# detaches the reply into a background task, and when that yielded run then
+# settles with no visible output the gateway's bare terminal (no message, no
+# stopReason - see YIELD_CONTINUATION_WAIT_S) is WIRE-IDENTICAL to a genuine
+# failed_final. The only signal that tells them apart is whether one of these
+# tools started during this same run - tracked where tool events are already
+# routed (relay_turn_events here; the mux lane in relay_mux.py for the pump).
+MEDIA_GEN_TOOL_NAMES = frozenset({"image_generate", "video_generate", "music_generate"})
+
 # User-facing text stamped on the assistant row's ``error`` field (and shown in
 # the chat) for such a failed final when openclaw gave us nothing better.
 # Generic on purpose: a ``state == "final"`` event carries no ``errorMessage``
@@ -1254,6 +1263,10 @@ class AgentSession:
 		# (the chat event is the single terminal path); it is the only frame
 		# that names the provider failure, so it is kept for a failed final.
 		failure_detail: str | None = None
+		# True once a media-generation tool call started this run - see
+		# MEDIA_GEN_TOOL_NAMES. Turns a would-be failed_final bare terminal into
+		# a yield instead (the two are wire-identical without this history).
+		saw_media_tool_start = False
 		while True:
 			remaining = deadline - time.monotonic()
 			if remaining <= 0:
@@ -1292,13 +1305,14 @@ class AgentSession:
 					# MUST be checked before _chat_final_failed - that guard's
 					# "no message at all" branch would otherwise call this a
 					# hard failure instead of a deferred reply.
-					if _is_yield_aborted_final(payload, text):
+					failed = _chat_final_failed(payload, text)
+					if _is_yield_aborted_final(payload, text) or (failed and saw_media_tool_start):
 						yield {"kind": "relay:error", "state": "aborted", "text": ""}
 						return
 					# A "final" whose assistant turn actually FAILED (stopReason
 					# error / stream-error sentinel) is surfaced as a terminal
 					# error, not a silent empty bubble. See _chat_final_failed.
-					if _chat_final_failed(payload, text):
+					if failed:
 						yield {
 							"kind": "relay:error",
 							"state": "failed_final",
@@ -1340,6 +1354,12 @@ class AgentSession:
 				if parsed is not None and parsed.get("phase") == "error" and parsed.get("error"):
 					failure_detail = str(parsed["error"])
 				continue
+			if (
+				parsed.get("kind") == "tool"
+				and parsed.get("phase") == "start"
+				and parsed.get("tool_name") in MEDIA_GEN_TOOL_NAMES
+			):
+				saw_media_tool_start = True
 			yield parsed
 
 	def relay_yield_continuation(
