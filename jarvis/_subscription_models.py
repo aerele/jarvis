@@ -49,9 +49,20 @@ def _subscription_rows() -> dict[str, list[dict]]:
 	if cached is not None:
 		return cached
 	from jarvis import admin_client
+	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
 
+	out = _rows_from(admin_client.get_model_catalog() or [])
+	if not out:
+		# An admin catalog that carries no subscription tier at all falls back to the
+		# bundled floor, exactly as the removed seed literal used to.
+		out = _rows_from(BUNDLED_MODEL_CATALOG)
+	frappe.local._jarvis_sub_models = out
+	return out
+
+
+def _rows_from(catalog) -> dict[str, list[dict]]:
 	out: dict[str, list[dict]] = {}
-	for provider in admin_client.get_model_catalog() or []:
+	for provider in catalog:
 		rows = [m for m in provider.get("models") or [] if m.get("tier") == "subscription"]
 		if not rows:
 			continue
@@ -60,7 +71,6 @@ def _subscription_rows() -> dict[str, list[dict]]:
 		label = provider.get("subscription_label") or provider.get("label") or ""
 		if label:
 			out[label] = rows
-	frappe.local._jarvis_sub_models = out
 	return out
 
 
@@ -75,8 +85,7 @@ class _LazyModelMap(Mapping):
 		self._builder = builder
 
 	def _data(self):
-		# get_model_catalog() substitutes the bundled catalog on any failure, so rows
-		# are never empty in practice; an empty answer fails closed (no models).
+		# _subscription_rows() never returns empty: admin, else the bundled catalog.
 		return self._builder(_subscription_rows())
 
 	def __getitem__(self, k):
