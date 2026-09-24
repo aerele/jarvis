@@ -16,10 +16,11 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.chat import approvals_api
+from jarvis.chat import approvals_api, wiki
 
 CONV = "Jarvis Conversation"
 APPROVAL = "Jarvis Approval Request"
+WIKI = "Jarvis Wiki Page"
 
 DROPPER = "wiki-dropper@test.com"
 REVIEWER = "wiki-reviewer@test.com"
@@ -263,6 +264,46 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 	def test_non_reviewer_cannot_reject(self):
 		conv = self._conv()
 		name = self._propose(conv)
+		with _as(PLAIN), self.assertRaises(frappe.PermissionError):
+			approvals_api.reject_wiki_write(name)
+
+	def test_reject_accepts_an_approved_row_that_never_landed(self):
+		# MAJOR-1: an Approved-but-not-landed row (needs_retry) used to be stuck
+		# forever - Retry keeps re-driving a doomed write (page_full and the
+		# like), and reject_wiki_write refused anything but Pending. A reviewer
+		# must be able to say "won't land" instead.
+		conv = self._conv()
+		name = self._propose(conv)
+		refused = [{"slug": "party-fake-co", "ok": False, "reason": "page_full"}]
+		with _funnel(result=refused), _as(REVIEWER):
+			approvals_api.approve_wiki_write(name)
+		self.assertEqual(frappe.db.get_value(APPROVAL, name, "apply_status"), "Failed")
+		with _funnel() as (apply, _), _as(REVIEWER):
+			res = approvals_api.reject_wiki_write(name)
+		self.assertEqual(res["status"], "Rejected")
+		apply.assert_not_called()  # never replays the write
+		ar = frappe.get_doc(APPROVAL, name)
+		self.assertEqual(ar.status, "Rejected")
+		self.assertEqual(ar.apply_status, "Failed")  # untouched - it never landed
+		self.assertEqual(ar.decided_by, REVIEWER)
+
+	def test_reject_still_refuses_an_already_applied_row(self):
+		# The boundary the fix must NOT widen: a write that already landed is
+		# done, not retriable - reject must keep refusing it.
+		conv = self._conv()
+		name = self._propose(conv)
+		with _funnel(), _as(REVIEWER):
+			approvals_api.approve_wiki_write(name)
+		self.assertEqual(frappe.db.get_value(APPROVAL, name, "apply_status"), "Applied")
+		with _as(REVIEWER), self.assertRaises(frappe.ValidationError):
+			approvals_api.reject_wiki_write(name)
+
+	def test_non_reviewer_cannot_reject_an_approved_not_landed_row(self):
+		conv = self._conv()
+		name = self._propose(conv)
+		refused = [{"slug": "party-fake-co", "ok": False, "reason": "page_full"}]
+		with _funnel(result=refused), _as(REVIEWER):
+			approvals_api.approve_wiki_write(name)
 		with _as(PLAIN), self.assertRaises(frappe.PermissionError):
 			approvals_api.reject_wiki_write(name)
 
@@ -688,3 +729,232 @@ class TestWikiProposalDigest(_WikiBase):
 		minted = self._row(pending).wiki_digest
 		patch_mod.execute()  # idempotent
 		self.assertEqual(self._row(pending).wiki_digest, minted)
+
+
+class TestWikiPageFull(_WikiBase):
+	"""W: a File Box append/create that would exceed the page's length cap is
+	REFUSED outright rather than silently clipped (which used to drop the
+	page's OLDEST knowledge). Real funnel throughout — none of these tests use
+	the ``_funnel()`` mock."""
+
+	_SLUGS = ("party-fake-co", "party-two", "brand-new-page")
+
+	def setUp(self):
+		super().setUp()
+		self.addCleanup(self._wipe_pages)
+
+	def _wipe_pages(self):
+		frappe.db.delete(WIKI, {"slug": ["in", list(self._SLUGS)]})
+		frappe.db.commit()
+
+	def _seed_page(self, slug="party-fake-co", body_len=200):
+		"""A page created through the REAL funnel (so its ``sources`` fence
+		matches production exactly), then grown directly to ``body_len`` — only
+		the seeded LENGTH is synthetic, not the write path that created it."""
+		res = api._file_box_wiki_write(
+			{"slug": slug, "title": "Fake Co", "page_type": "Customer", "append_md": "seed"},
+			self.conv,
+			user=DROPPER,
+		)
+		self.assertTrue(res["ok"])
+		name = frappe.db.get_value(WIKI, {"slug": slug}, "name")
+		frappe.db.set_value(WIKI, name, "body_md", "x" * body_len, update_modified=False)
+		frappe.db.commit()
+		return name
+
+	# --- W-AC1: real funnel, both the auto and reviewer-approve paths ------ #
+
+	def test_auto_path_refuses_overflow_body_byte_identical(self):
+		name = self._seed_page(body_len=wiki.MAX_BODY_LEN - 50)
+		before = frappe.get_doc(WIKI, name).body_md
+		result = api._file_box_wiki_write(
+			{"slug": "party-fake-co", "append_md": "y" * 100}, self.conv, user=DROPPER
+		)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reason"], "page_full")
+		self.assertEqual(frappe.get_doc(WIKI, name).body_md, before)
+
+	def test_reviewer_approve_path_refuses_overflow_real_funnel(self):
+		# AC4: the page fills up AFTER the proposal, between propose and land.
+		name = self._seed_page(body_len=200)
+		ar = self._propose()  # default _ARGS, well under cap at propose time
+		frappe.db.set_value(WIKI, name, "body_md", "x" * (wiki.MAX_BODY_LEN - 10), update_modified=False)
+		frappe.db.commit()
+		before = frappe.get_doc(WIKI, name).body_md
+		with _as(REVIEWER):
+			res = approvals_api.approve_wiki_write(ar)
+		self.assertFalse(res["applied"])
+		row = frappe.get_doc(APPROVAL, ar)
+		self.assertEqual(row.apply_status, "Failed")
+		self.assertEqual(row.apply_reason, "page_full")
+		self.assertEqual(frappe.get_doc(WIKI, name).body_md, before)
+
+	# --- W-AC2: regression — under cap still appends ------------------------ #
+
+	def test_under_cap_append_still_lands(self):
+		name = self._seed_page(body_len=200)
+		result = api._file_box_wiki_write(
+			{"slug": "party-fake-co", "append_md": "fresh note"}, self.conv, user=DROPPER
+		)
+		self.assertTrue(result["ok"])
+		self.assertIn("fresh note", frappe.get_doc(WIKI, name).body_md)
+
+	def test_new_page_oversize_note_refused_by_the_funnel(self):
+		result = api._file_box_wiki_write(
+			{
+				"slug": "brand-new-page",
+				"title": "New",
+				"page_type": "Customer",
+				"append_md": "z" * (wiki.MAX_BODY_LEN + 100),
+			},
+			self.conv,
+			user=DROPPER,
+		)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reason"], "page_full")
+		self.assertFalse(frappe.db.exists(WIKI, {"slug": "brand-new-page"}))
+
+	# --- W-AC3: propose pre-check refuses before any AR row exists --------- #
+
+	def test_propose_refuses_before_ar_created_when_page_readable(self):
+		self._seed_page(body_len=wiki.MAX_BODY_LEN - 50)
+		res = api._propose_file_box_wiki_write(
+			{**_ARGS, "slug": "party-fake-co", "append_md": "y" * 100}, self.conv
+		)
+		self.assertFalse(res["ok"])
+		self.assertIn("is full", res["reason"])
+		self.assertIn(f"of {wiki.MAX_BODY_LEN:,}", res["reason"])
+		self.assertEqual(frappe.db.count(APPROVAL, {"conversation": self.conv, "source": "File Box Wiki"}), 0)
+
+	def test_propose_refuses_new_page_note_too_long(self):
+		res = api._propose_file_box_wiki_write(
+			{
+				"slug": "brand-new-page",
+				"title": "New",
+				"page_type": "Customer",
+				"append_md": "z" * (wiki.MAX_BODY_LEN + 100),
+			},
+			self.conv,
+		)
+		self.assertFalse(res["ok"])
+		self.assertIn("too long", res["reason"])
+		self.assertEqual(frappe.db.count(APPROVAL, {"conversation": self.conv}), 0)
+
+	def test_propose_overflow_message_hides_length_from_an_unreadable_page(self):
+		# A Role-scoped page the dropper doesn't hold: the message must never
+		# disclose how full it is.
+		name = self._seed_page(body_len=wiki.MAX_BODY_LEN - 50)
+		frappe.db.set_value(
+			WIKI, name, {"scope": "Role", "target_role": "System Manager"}, update_modified=False
+		)
+		frappe.db.commit()
+		res = api._propose_file_box_wiki_write(
+			{**_ARGS, "slug": "party-fake-co", "append_md": "y" * 100}, self.conv
+		)
+		self.assertFalse(res["ok"])
+		# MINOR-4: the OLD assertion checked for "20000" (no thousands separator),
+		# a string the readable branch never emits either - it formats with a comma
+		# (f"{MAX_BODY_LEN:,}"), so that assertion passed without exercising the
+		# leak it claims to guard. Check the strings that would ACTUALLY appear if
+		# this branch leaked: the comma-formatted cap, and the seeded page's exact
+		# length.
+		self.assertNotIn(f"{wiki.MAX_BODY_LEN:,}", res["reason"])
+		self.assertNotIn(str(wiki.MAX_BODY_LEN - 50), res["reason"])
+		self.assertIn("can't take this note", res["reason"])
+		self.assertEqual(frappe.db.count(APPROVAL, {"conversation": self.conv, "source": "File Box Wiki"}), 0)
+
+	# --- MINOR-2: pre-check / real-funnel boundary parity ------------------ #
+
+	def test_boundary_exactly_at_cap_allows_pre_check_and_funnel(self):
+		# E + 2 (the "\n\n" join) + I == MAX_BODY_LEN exactly: both the propose
+		# pre-check and the real landing funnel must ALLOW it. The two compute
+		# the same arithmetic in separate functions (not one shared helper - see
+		# file_box_append_would_overflow's docstring), so this pins them in
+		# lockstep against future drift.
+		existing_len = wiki.MAX_BODY_LEN - 2 - 100
+		name = self._seed_page(body_len=existing_len)
+		incoming = "y" * 100
+		pre = wiki.file_box_append_would_overflow(
+			"party-fake-co", incoming, None, provenance_prefix=api.FILE_BOX_WIKI_FENCE
+		)
+		self.assertFalse(pre["overflow"])
+		result = api._file_box_wiki_write(
+			{"slug": "party-fake-co", "append_md": incoming}, self.conv, user=DROPPER
+		)
+		self.assertTrue(result["ok"])
+		self.assertEqual(len(frappe.get_doc(WIKI, name).body_md), wiki.MAX_BODY_LEN)
+
+	def test_boundary_one_over_cap_refuses_pre_check_and_funnel(self):
+		existing_len = wiki.MAX_BODY_LEN - 2 - 100 + 1
+		name = self._seed_page(body_len=existing_len)
+		incoming = "y" * 100
+		pre = wiki.file_box_append_would_overflow(
+			"party-fake-co", incoming, None, provenance_prefix=api.FILE_BOX_WIKI_FENCE
+		)
+		self.assertTrue(pre["overflow"])
+		before = frappe.get_doc(WIKI, name).body_md
+		result = api._file_box_wiki_write(
+			{"slug": "party-fake-co", "append_md": incoming}, self.conv, user=DROPPER
+		)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reason"], "page_full")
+		self.assertEqual(frappe.get_doc(WIKI, name).body_md, before)
+
+	# --- MINOR-1: the pre-check is advisory, never a second gate ----------- #
+
+	def test_propose_precheck_failure_fails_open(self):
+		# approve-time replays the real fenced merge under refuse_overflow=True
+		# and is the actual gate; a broken pre-check must never block an
+		# otherwise-legitimate proposal, only skip its early warning.
+		with patch("jarvis.chat.wiki.file_box_append_would_overflow", side_effect=RuntimeError("boom")):
+			res = api._propose_file_box_wiki_write(dict(_ARGS), self.conv)
+		self.assertTrue(res["ok"])
+		self.assertTrue(
+			frappe.db.exists(
+				APPROVAL, {"conversation": self.conv, "source": "File Box Wiki", "status": "Pending"}
+			)
+		)
+
+	# --- MINOR-3: the propose-time refusal is logged too -------------------- #
+
+	def test_propose_overflow_refusal_is_logged(self):
+		self._seed_page(body_len=wiki.MAX_BODY_LEN - 50)
+		with patch("jarvis.chat.wiki._log_page_full_refusal") as log:
+			res = api._propose_file_box_wiki_write(
+				{**_ARGS, "slug": "party-fake-co", "append_md": "y" * 100}, self.conv
+			)
+		self.assertFalse(res["ok"])
+		log.assert_called_once()
+		# slug + lengths only - never the note's content.
+		args = log.call_args.args
+		self.assertEqual(args[0], "party-fake-co")
+
+	# --- MINOR-4: the DuplicateEntry -> merge branch also refuses overflow - #
+
+	def test_duplicate_entry_race_then_merge_still_refuses_overflow(self):
+		# A slug that raced into existence BETWEEN the unlocked lookup and the
+		# insert lands in the DuplicateEntryError -> merge branch of
+		# _apply_one_update, not the "page already resolved" branch taken by
+		# every other test in this class - refuse_overflow must apply there too.
+		slug = "party-fake-co"
+		name = self._seed_page(slug=slug, body_len=wiki.MAX_BODY_LEN - 10)
+		before = frappe.get_doc(WIKI, name).body_md
+		real_get_value = frappe.db.get_value
+		seen = {"n": 0}
+
+		def racy_get_value(doctype, filters=None, *a, **kw):
+			if doctype == WIKI and filters == {"slug": slug} and seen["n"] == 0:
+				seen["n"] += 1
+				return None  # simulate: not resolved yet at the unlocked read
+			return real_get_value(doctype, filters, *a, **kw)
+
+		with patch("frappe.db.get_value", side_effect=racy_get_value):
+			result = api._file_box_wiki_write(
+				{"slug": slug, "title": "Fake Co", "page_type": "Customer", "append_md": "z" * 100},
+				self.conv,
+				user=DROPPER,
+			)
+		self.assertEqual(seen["n"], 1)  # the race branch really fired
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reason"], "page_full")
+		self.assertEqual(frappe.get_doc(WIKI, name).body_md, before)

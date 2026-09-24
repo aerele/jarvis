@@ -1100,6 +1100,7 @@ def apply_extracted_page_updates(
 	allow_body_replace: bool = True,
 	preserve_curated: bool = False,
 	return_outcomes: bool = False,
+	refuse_overflow: bool = False,
 ) -> tuple[int, int] | list[dict]:
 	"""Create/update wiki pages from extracted updates (the note ingest above
 	and ``jarvis.learning.voice_facts`` both land here). At most
@@ -1158,6 +1159,13 @@ def apply_extracted_page_updates(
 	is a separate decision that this change deliberately does not take: ``test_wiki``
 	pins the current contract with an explicit comment, and flipping it would retry
 	unsalvageable input forever with no attempt counter to bound it.
+
+	``refuse_overflow=True`` (File Box write-back, issue: silent truncation): an update
+	whose merged/new body would exceed ``MAX_BODY_LEN`` is REFUSED outright rather than
+	saved via ``_clip_body`` (which drops the OLDEST text). Nothing is written; the
+	outcome reason is ``"page_full"`` (visible via ``return_outcomes=True``, and threaded
+	into the plain ``(applied, failed)`` tuple callers as an ordinary refusal). Default
+	False preserves every other caller's clip-and-save behavior byte-for-byte.
 	"""
 	if not isinstance(updates, list):
 		return [] if return_outcomes else (0, 0)
@@ -1191,20 +1199,19 @@ def apply_extracted_page_updates(
 		sp = f"aepu_{frappe.generate_hash(length=8)}"
 		frappe.db.savepoint(sp)
 		try:
-			ok = bool(
-				_apply_one_update(
-					update,
-					source,
-					user,
-					ref,
-					default_scope,
-					target_user,
-					provenance_prefix,
-					allow_body_replace,
-					preserve_curated,
-				)
+			ok, refuse_reason = _apply_one_update(
+				update,
+				source,
+				user,
+				ref,
+				default_scope,
+				target_user,
+				provenance_prefix,
+				allow_body_replace,
+				preserve_curated,
+				refuse_overflow,
 			)
-			reason = "applied" if ok else "refused"
+			reason = "applied" if ok else (refuse_reason or "refused")
 			if ok:
 				applied += 1
 			elif not provenance_prefix:
@@ -1249,8 +1256,8 @@ def apply_extracted_page_updates(
 def _log_refused_update(update: dict, source: str, ref: str | None) -> None:
 	"""Record WHY an update was refused, so knowledge lost this way is diagnosable (#613).
 
-	``_apply_one_update`` answers a bare bool, so the shape of the refused update is the
-	only evidence available at this layer, and it is the evidence that matters: the
+	This helper isn't handed ``_apply_one_update``'s ``(ok, reason)`` — only the
+	ORIGINAL update dict, since its shape is the evidence that matters here: the
 	common refusal is an update naming no existing page while carrying neither ``title``
 	nor ``page_type``, which cannot mint one. PR #611 made that shape ordinary rather
 	than rare by telling the ingest to emit ``append_md``.
@@ -1280,6 +1287,18 @@ def _log_refused_update(update: dict, source: str, ref: str | None) -> None:
 		pass
 
 
+def _log_page_full_refusal(slug_or_name: str, existing_len: int, incoming_len: int) -> None:
+	"""W: a ``refuse_overflow`` append/create was refused rather than clipped.
+	Slug/docname and lengths only — never the note's content."""
+	try:
+		frappe.log_error(
+			title="jarvis.wiki.append_refused_page_full",
+			message=f"{slug_or_name}: existing={existing_len} incoming={incoming_len} cap={MAX_BODY_LEN}",
+		)
+	except Exception:
+		pass
+
+
 def _apply_one_update(
 	update: dict,
 	source: str,
@@ -1290,10 +1309,14 @@ def _apply_one_update(
 	provenance_prefix: str | None = None,
 	allow_body_replace: bool = True,
 	preserve_curated: bool = False,
-) -> bool:
+	refuse_overflow: bool = False,
+) -> tuple[bool, str | None]:
+	"""(ok, reason) — reason is None for the ordinary "refused"/"applied" cases
+	(the caller falls back to its own generic label); only a distinguished
+	refusal (currently just ``"page_full"``) sets it."""
 	slug = _normalize_slug(update.get("slug"))
 	if not slug:
-		return False
+		return False, None
 
 	# Scope resolution: a per-update value wins over the call default. Only
 	# Org/User are supported on this extraction path (Role pages are widened
@@ -1302,7 +1325,7 @@ def _apply_one_update(
 	scope = (str(update.get("scope") or default_scope or "").strip()) or "Org"
 	tuser = (update.get("target_user") or target_user) if scope == "User" else None
 	if scope == "User" and not tuser:
-		return False
+		return False, None
 	if scope != "User":
 		scope = "Org"
 
@@ -1320,8 +1343,14 @@ def _apply_one_update(
 		title = " ".join(str(update.get("title") or "").split())
 		page_type = (update.get("page_type") or "").strip()
 		if not title or page_type not in PAGE_TYPES:
-			return False  # can't create a page without an identity
+			return False, None  # can't create a page without an identity
 		body = str(update.get("body_md") or update.get("append_md") or "").strip()
+		if refuse_overflow and len(body) > MAX_BODY_LEN:
+			# A brand-new page whose single note already exceeds the cap: never
+			# clip a first write down to fit (W). Nothing to merge into, so this
+			# is the note-too-long case rather than an existing page filling up.
+			_log_page_full_refusal(slug, existing_len=0, incoming_len=len(body))
+			return False, "page_full"
 		fields = {
 			"doctype": WIKI,
 			"slug": slug,
@@ -1342,7 +1371,7 @@ def _apply_one_update(
 		doc = frappe.get_doc(fields)
 		try:
 			doc.insert(ignore_permissions=True)
-			return True
+			return True, None
 		except frappe.DuplicateEntryError:
 			# The slug appeared concurrently — merge into it instead (the stored
 			# docname is the suffixed slug for User scope). The User re-probe stays
@@ -1363,9 +1392,20 @@ def _apply_one_update(
 	# with a human-authored / human-edited / other-feature page is refused rather
 	# than overwritten. Unlocked early-out here; re-checked under a row lock at save.
 	if provenance_prefix and not _page_is_agent_updatable(name, provenance_prefix):
-		return False
+		return False, None
 
-	args = (name, update, source, user, ref, provenance_prefix, allow_body_replace, preserve_curated, tuser)
+	args = (
+		name,
+		update,
+		source,
+		user,
+		ref,
+		provenance_prefix,
+		allow_body_replace,
+		preserve_curated,
+		tuser,
+		refuse_overflow,
+	)
 	try:
 		return _merge_update_into_page(*args)
 	except frappe.TimestampMismatchError:
@@ -1384,7 +1424,9 @@ def _merge_update_into_page(
 	allow_body_replace: bool = True,
 	preserve_curated: bool = False,
 	expect_target_user: str | None = None,
-) -> bool:
+	refuse_overflow: bool = False,
+) -> tuple[bool, str | None]:
+	"""(ok, reason) — see ``_apply_one_update``."""
 	body_md = update.get("body_md")
 	append_md = update.get("append_md")
 	contradiction = bool(update.get("contradiction"))
@@ -1410,9 +1452,9 @@ def _merge_update_into_page(
 		if provenance_prefix is not None and not _sources_agent_updatable(
 			locked.get("sources"), provenance_prefix
 		):
-			return False
+			return False, None
 		if expect_target_user is not None and locked.get("target_user") != expect_target_user:
-			return False
+			return False, None
 		curated = bool(preserve_curated) and _sources_are_curated(locked.get("sources"))
 
 	doc = frappe.get_doc(WIKI, name)
@@ -1471,12 +1513,76 @@ def _merge_update_into_page(
 				title="wiki: append refused, would truncate a human-edited page",
 				message=f"{name}: {len(existing)} + {len(incoming)} chars exceeds {MAX_BODY_LEN}",
 			)
-			return False
+			return False, None
+		if refuse_overflow and len(merged) > MAX_BODY_LEN:
+			# W: a File Box append that would overflow the page is REFUSED, never
+			# clipped — ``_clip_body`` drops the OLDEST text, and unlike the curated
+			# case above this page carries no human author to protect; it is simply
+			# full. (``curated`` is always False here in practice: a page this fence
+			# reaches has already passed ``_page_is_agent_updatable``, which requires
+			# no human source at all.)
+			_log_page_full_refusal(name, existing_len=len(existing), incoming_len=len(incoming))
+			return False, "page_full"
 		doc.body_md = _clip_body(merged)
 	append_source(doc, source, ref, user)
 	doc.last_confirmed_at = now_datetime()
 	doc.save(ignore_permissions=True)
-	return True
+	return True, None
+
+
+def file_box_append_would_overflow(
+	slug,
+	append_md,
+	replace_body_md,
+	*,
+	provenance_prefix: str,
+	scope: str | None = None,
+	target_user: str | None = None,
+	reader: str | None = None,
+) -> dict:
+	"""Unlocked PRE-CHECK mirror of the File Box wiki funnel's merge (the write
+	path above / ``api._file_box_wiki_write``), for ``api._propose_file_box_wiki_write``
+	to call BEFORE it files an Approval Request — a doomed proposal should never
+	reach a reviewer. Folds ``append_md``/``replace_body_md`` exactly as
+	``_file_box_wiki_write`` does (a replace becomes an append on this unattended
+	path) against the SAME page the funnel would resolve and merge into.
+
+	Returns ``{"overflow": bool, "existing_len": int, "readable": bool}``.
+	``existing_len`` is the stored body's length (0 for a page that doesn't exist
+	yet); ``readable`` is whether ``reader`` may read the resolved page (True when
+	``reader`` is unset, or there is no page to hide). A page the
+	``_page_is_agent_updatable`` fence would refuse anyway reports NO overflow —
+	that write was always going to be refused for provenance, not fullness, and
+	saying otherwise would be misleading."""
+	norm_slug = _normalize_slug(slug)
+	incoming = str(append_md or replace_body_md or "").strip()
+	scope = (str(scope or "").strip()) or "Org"
+	if scope == "User" and not target_user:
+		# Mirrors _apply_one_update: refused there for a missing identity, never
+		# for fullness.
+		return {"overflow": False, "existing_len": 0, "readable": True}
+	if scope != "User":
+		scope = "Org"
+	if not norm_slug or not incoming:
+		return {"overflow": False, "existing_len": 0, "readable": True}
+
+	if scope == "User":
+		name, _ = resolve_user_scope_page(norm_slug, target_user)
+	else:
+		name = frappe.db.get_value(WIKI, {"slug": norm_slug}, "name")
+	if not name:
+		# A brand-new page: the whole note becomes the body. Only an oversized
+		# SINGLE note can overflow it — there is no existing text to blame.
+		return {"overflow": len(incoming) > MAX_BODY_LEN, "existing_len": 0, "readable": True}
+	if not _page_is_agent_updatable(name, provenance_prefix):
+		return {"overflow": False, "existing_len": 0, "readable": True}
+
+	page = frappe.db.get_value(WIKI, name, ["body_md", "scope", "target_role", "target_user"], as_dict=True)
+	existing = (page.get("body_md") or "").strip()
+	sep = "\n\n" if existing else ""
+	overflow = (len(existing) + len(sep) + len(incoming)) > MAX_BODY_LEN
+	readable = wiki_permissions.can_read_page(page, reader) if reader else True
+	return {"overflow": overflow, "existing_len": len(existing), "readable": readable}
 
 
 # --------------------------------------------------------------------------- #

@@ -982,18 +982,26 @@ def retry_wiki_write(name: str) -> dict:
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def reject_wiki_write(name: str) -> dict:
-	"""Reviewer rejects a held wiki proposal; nothing is written. Reviewer-gated.
-	No SoD gate on reject — declining to land a write is always safe, and a solo
-	reviewer must be able to clear their own proposal."""
+	"""Reviewer rejects a held wiki proposal; nothing is written. Reviewer-gated, no
+	SoD gate (declining is always safe). Also takes an Approved-but-not-landed row
+	(``needs_retry``) whose write will never land (page_full), so it can leave the
+	board; an Applied row is untouched. The conditional flip fires only from the
+	status this call read, so a Retry that lands first wins."""
 	refuse_in_tool_dispatch()
 	doc = _wiki_proposal_or_throw(name)
-	if doc.status != "Pending":
+	needs_retry = doc.status == "Approved" and (doc.get("apply_status") or "Pending") != "Applied"
+	if doc.status != "Pending" and not needs_retry:
 		frappe.throw(f"Proposal {name} is already {doc.status}")
 	me = frappe.session.user
+	cond = (
+		"status='Pending'"
+		if doc.status == "Pending"
+		else "status='Approved' AND COALESCE(apply_status, 'Pending') <> 'Applied'"
+	)
 	frappe.db.sql(
-		"""update `tabJarvis Approval Request`
+		f"""update `tabJarvis Approval Request`
 		set status='Rejected', decision=%s, decided_by=%s, decided_at=%s
-		where name=%s and status='Pending'""",
+		where name=%s and {cond}""",
 		("(rejected - not written to the wiki)", me, frappe.utils.now_datetime(), name),
 	)
 	if not frappe.db.sql(
