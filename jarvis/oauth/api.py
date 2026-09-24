@@ -94,6 +94,16 @@ _REDIRECT_URI = "http://localhost:1455/auth/callback"
 # image pin.
 from jarvis._subscription_models import DEFAULT_MODEL as _DEFAULT_MODEL
 from jarvis._subscription_models import SUBSCRIPTION_MODELS as _SUBSCRIPTION_MODELS
+from jarvis.catalog_store import CATALOG_UNAVAILABLE_MESSAGE
+
+
+def _catalog_unavailable() -> dict | None:
+	"""The error envelope to return when no subscription catalog is available (a
+	site that has never reached the admin), so a sign-in never starts toward a
+	blank model. None when the catalog is present."""
+	if _SUBSCRIPTION_MODELS:
+		return None
+	return _err("catalog_unavailable", CATALOG_UNAVAILABLE_MESSAGE)
 
 
 def _coerce_subscription_model(provider: str, model: str) -> str:
@@ -212,6 +222,8 @@ def _begin_signin(provider: str, model: str, *, pool: bool) -> dict:
 		oidc_nonce=oidc_nonce,
 	)
 
+	if unavailable := _catalog_unavailable():
+		return unavailable
 	entry = {
 		"provider": provider,
 		"model": _coerce_subscription_model(provider, model),
@@ -258,6 +270,9 @@ def _begin_device_signin(provider: str, model: str) -> dict:
 	frontend to display. There is NO authorize URL / redirect / paste — the user
 	approves out-of-band and the frontend polls ``poll_pool_account_signin``.
 	"""
+	# Before contacting the provider: never mint a device code that must be discarded.
+	if unavailable := _catalog_unavailable():
+		return unavailable
 	p = get_provider(provider)
 	_gc_expired_nonces()
 	device_id = secrets.token_hex(16)
@@ -494,7 +509,9 @@ def _exchange_and_build_blob(entry: dict, redirected_url: str):
 	# (e.g. a codex model deprecated). begin_paste_signin already coerced
 	# at cache time; doing it again here means the cached model can never
 	# escape the codex-valid set even across config reloads.
-	model = _coerce_subscription_model(provider, entry["model"])
+	# `or entry["model"]`: if the catalog vanished mid-flight, keep the model that
+	# was valid when the sign-in began rather than failing a completed exchange.
+	model = _coerce_subscription_model(provider, entry["model"]) or entry["model"]
 
 	try:
 		tokens = _exchange_code(
@@ -925,6 +942,8 @@ def begin_claude_cli_login(model: str = "") -> dict:
 	TTL live entirely in fleet-agent, not in any Jarvis cache.
 	"""
 	require_jarvis_admin()
+	if unavailable := _catalog_unavailable():
+		return unavailable
 	model = _coerce_subscription_model("Anthropic", (model or "").strip())
 	try:
 		result = admin_client.post_claude_login_start(model) or {}

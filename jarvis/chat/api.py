@@ -1868,7 +1868,7 @@ def send_message(
 	return result
 
 
-def _api_key_models() -> dict[str, list[dict]]:
+def _api_key_models(catalog: list | None = None) -> dict[str, list[dict]]:
 	"""Provider label -> api-key-tier model rows for the pool editor's datalist.
 
 	Replaces the frontend's hardcoded STATIC_MODEL_SUGGESTIONS. Only display
@@ -1877,7 +1877,7 @@ def _api_key_models() -> dict[str, list[dict]]:
 	from jarvis import admin_client
 
 	out: dict[str, list[dict]] = {}
-	for provider in admin_client.get_model_catalog() or []:
+	for provider in catalog if catalog is not None else admin_client.get_model_catalog() or []:
 		rows = [m for m in provider.get("models") or [] if m.get("tier") == "api_key"]
 		rows.sort(key=lambda m: (m.get("sort_order") or 0, m.get("model_id") or ""))
 		out[provider.get("label") or provider.get("provider_id") or ""] = [
@@ -2005,7 +2005,7 @@ def _catalog_models_for_pool(settings) -> dict[str, list[dict]]:
 	return out
 
 
-def _subscription_connect_providers() -> list[dict]:
+def _subscription_connect_providers(catalog: list | None = None) -> list[dict]:
 	"""Providers offering DirectSubscriptionCard's paste-back OAuth connect flow.
 
 	Gated on a non-empty auth_profile_id (R7), NEVER on supports_subscription:
@@ -2018,7 +2018,7 @@ def _subscription_connect_providers() -> list[dict]:
 	from jarvis import admin_client
 
 	out: list[dict] = []
-	for provider in admin_client.get_model_catalog() or []:
+	for provider in catalog if catalog is not None else admin_client.get_model_catalog() or []:
 		if not (provider.get("auth_profile_id") or "").strip():
 			continue
 		label = provider.get("subscription_label") or provider.get("label") or ""
@@ -2030,24 +2030,43 @@ def _subscription_connect_providers() -> list[dict]:
 	return out
 
 
+def _provider_base_urls(catalog: list) -> dict[str, str]:
+	"""Provider label -> the admin catalog's default base URL, for the editor's
+	provider defaults (it used to hardcode these)."""
+	return {
+		p.get("label") or p.get("provider_id") or "": (p.get("default_base_url") or "").strip()
+		for p in catalog
+		if (p.get("default_base_url") or "").strip()
+	}
+
+
 @frappe.whitelist()
-def get_model_catalog_ui() -> dict:
+def get_model_catalog_ui(retry: bool = False) -> dict:
 	"""Catalog slice the pool editor and subscription card need, independent of
 	get_chat_ui_settings so the onboarding wizard (which never calls that) works.
 
 	Deliberately NOT on the chat hot path: mount-time only.
 	"""
 	require_jarvis_access()
+	# Settings and the onboarding wizard read the admin live (this also refreshes
+	# the site snapshot); the hot paths below it only read Redis or the snapshot.
+	from jarvis._subscription_models import mappings_from
+	from jarvis.catalog_store import MODELS
 
-	# dict() is MANDATORY here (R9): SUBSCRIPTION_MODELS/DEFAULT_MODEL are Mapping
-	# subclasses, and frappe's json_handler serialises a bare Mapping to its KEYS
-	# with no error. _api_key_models() and _subscription_connect_providers()
-	# already return plain dict/list structures.
+	catalog = MODELS.refresh(force=bool(retry))
+
+	# Every slice comes from this one catalog, so the flag and the lists can never
+	# disagree (a failed cache write must not leave the lists stale or empty).
+	subscription_models, default_models = mappings_from(catalog)
 	return {
-		"api_key_models": _api_key_models(),
-		"subscription_models": dict(_SUBSCRIPTION_MODELS),
-		"default_models": dict(_DEFAULT_MODEL),
-		"subscription_connect_providers": _subscription_connect_providers(),
+		# False only on a site that has never reached the admin: the editor shows
+		# an error with Retry and disables actions that would save a blank model.
+		"catalog_available": bool(catalog),
+		"provider_base_urls": _provider_base_urls(catalog),
+		"api_key_models": _api_key_models(catalog),
+		"subscription_models": subscription_models,
+		"default_models": default_models,
+		"subscription_connect_providers": _subscription_connect_providers(catalog),
 	}
 
 

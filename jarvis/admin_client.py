@@ -703,124 +703,23 @@ def terms_url() -> str:
 	return MARKETING_TERMS_URL
 
 
-# Admin-owned preset catalog (spec 3.3). Guest-safe fetch (get_plans pattern),
-# cached in per-site Redis, bundled fallback so onboarding never hard-fails.
-# The path is built per-call via _m() so the admin-app namespace override is
-# honored (a module-level constant binds at import and can't read config).
-_PRESET_CATALOG_CACHE_KEY = "jarvis:preset_catalog"
-_PRESET_CATALOG_TTL_S = 6 * 60 * 60
+# Admin-owned preset and model catalogs. The admin is the only source; this
+# site keeps a last-known-good snapshot for outages (jarvis.catalog_store).
+# These two names stay because many callers and tests use them: both are
+# hot-path reads that never call the admin, never write, and never raise. They
+# return [] only on a site that has never reached the admin.
 
 
 def get_preset_catalog() -> list:
-	"""Fetch the enabled Aerele preset catalog from admin (guest-safe), cache it,
-	and fall back to the last cached copy then the bundled default so onboarding
-	never hard-fails (spec L7). Never raises."""
-	from jarvis._preset_catalog import BUNDLED_PRESET_CATALOG
+	from jarvis.catalog_store import PRESETS
 
-	cache = frappe.cache()
-	cached = cache.get_value(_PRESET_CATALOG_CACHE_KEY, expires=True)
-	if cached:
-		return cached
-	try:
-		catalog = _post_guest(path=_m("billing.catalog.get_preset_catalog"), body={})
-	except Exception:
-		# "Never raises": onboarding's preset step must degrade to the bundled
-		# catalog on ANY failure, not just the Admin* family. A scheme-less
-		# jarvis_admin_url, for instance, raises requests.MissingSchema (a
-		# RequestException that _do_post does NOT convert to an Admin* error),
-		# which would otherwise 500 the whitelisted onboarding endpoint. #200
-		# review #9.
-		frappe.log_error(title="get_preset_catalog fell back to bundled")
-		return BUNDLED_PRESET_CATALOG
-	if isinstance(catalog, dict):
-		catalog = catalog.get("data") or catalog.get("catalog") or catalog.get("presets") or []
-	if isinstance(catalog, list) and catalog:
-		cache.set_value(_PRESET_CATALOG_CACHE_KEY, catalog, expires_in_sec=_PRESET_CATALOG_TTL_S)
-		return catalog
-	return BUNDLED_PRESET_CATALOG
-
-
-# Admin-owned provider + model catalog. Same shape as the preset catalog above,
-# with two MANDATORY differences because this one is read on the CHAT HOT PATH
-# (chat/api.py:940 inside send_message, chat/api.py:1456 inside
-# set_conversation_model), whereas presets are only read at onboarding time.
-#
-#   1. A SHORT timeout. _post_guest defaults to DEFAULT_TIMEOUT_S = 150. An admin
-#      that hangs rather than refuses would block a chat send for 2.5 minutes.
-#   2. NEGATIVE CACHING. Caching only successes means every single request
-#      retries a dead admin. The failure marker makes an outage cost one slow
-#      request per _MODEL_CATALOG_FAIL_TTL_S, not one per chat turn.
-_MODEL_CATALOG_CACHE_KEY = "jarvis:model_catalog"
-_MODEL_CATALOG_TTL_S = 6 * 60 * 60
-_MODEL_CATALOG_FAIL_KEY = "jarvis:model_catalog:failed"
-_MODEL_CATALOG_FAIL_TTL_S = 60
-_MODEL_CATALOG_TIMEOUT_S = 5
+	return PRESETS.read()
 
 
 def get_model_catalog() -> list:
-	"""Fetch the provider + model catalog from admin (guest-safe), cache it, and
-	fall back to the bundled default so the picker never hard-fails.
+	from jarvis.catalog_store import MODELS
 
-	NEVER raises, and never blocks a chat turn for more than
-	_MODEL_CATALOG_TIMEOUT_S. Callers on the chat hot path rely on both.
-	"""
-	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
-	try:
-		return _fetch_model_catalog()
-	except Exception as e:
-		# The whole body is guarded, not just the HTTP call: the Redis
-		# get_value/set_value calls can raise too (a connection blip during a
-		# cache read), and this runs inside send_message. An unguarded cache
-		# error would turn a transient Redis hiccup into a 500 on every chat
-		# send, which is precisely the failure this function exists to avoid.
-		#
-		# frappe.logger(), NOT frappe.log_error: log_error writes an Error Log
-		# DOCUMENT, so it needs the DB (and the cache) to be healthy. This is the
-		# last-resort guard, reached exactly when infrastructure is unhealthy, so
-		# logging through it would raise from the handler and defeat the guard.
-		frappe.logger().warning("get_model_catalog degraded to the bundled catalog: %s", e)
-		return BUNDLED_MODEL_CATALOG
-
-
-def _fetch_model_catalog() -> list:
-	"""Cache-then-network body of get_model_catalog. May raise; the caller
-	converts any failure into the bundled fallback."""
-	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
-	cache = frappe.cache()
-	cached = cache.get_value(_MODEL_CATALOG_CACHE_KEY, expires=True)
-	if cached:
-		return cached
-	# A recent failure short-circuits the network entirely. Without this, a
-	# hanging admin costs every chat send a full timeout.
-	if cache.get_value(_MODEL_CATALOG_FAIL_KEY, expires=True):
-		return BUNDLED_MODEL_CATALOG
-	try:
-		catalog = _post_guest(
-			path=_m("fleet.provider_catalog.get_provider_catalog"),
-			body={},
-			timeout_s=_MODEL_CATALOG_TIMEOUT_S,
-		)
-	except Exception:
-		# Degrade on ANY failure, not just the Admin* family: a scheme-less
-		# jarvis_admin_url raises requests.MissingSchema, which _do_post does not
-		# convert. Same reasoning as get_preset_catalog.
-		cache.set_value(_MODEL_CATALOG_FAIL_KEY, 1, expires_in_sec=_MODEL_CATALOG_FAIL_TTL_S)
-		frappe.log_error(title="get_model_catalog: admin unreachable")
-		return BUNDLED_MODEL_CATALOG
-	if isinstance(catalog, dict):
-		catalog = catalog.get("data") or []
-	if isinstance(catalog, list) and catalog:
-		cache.set_value(_MODEL_CATALOG_CACHE_KEY, catalog, expires_in_sec=_MODEL_CATALOG_TTL_S)
-		return catalog
-	# Admin answered but served nothing. Distinct from unreachable: log it
-	# separately so "admin is down" and "admin says zero enabled providers" are
-	# tellable apart in the logs. Still falls back, since an empty picker is
-	# worse for the customer than a slightly stale one.
-	cache.set_value(_MODEL_CATALOG_FAIL_KEY, 1, expires_in_sec=_MODEL_CATALOG_FAIL_TTL_S)
-	frappe.log_error(title="get_model_catalog: admin returned an empty catalog")
-	return BUNDLED_MODEL_CATALOG
+	return MODELS.read()
 
 
 # Admin-owned speech-to-text config (voice features). Authenticated tenant
@@ -1924,8 +1823,8 @@ def push_chat_feedback(item: dict) -> dict:
 	return _post(path=_m("api.tenant.ingest_chat_feedback"), body={"item": item})
 
 
-# Short timeout for the two feedback pushes below, for the same reason as
-# _MODEL_CATALOG_TIMEOUT_S: they run SYNCHRONOUSLY inside a customer web request
+# Short timeout for the two feedback pushes below, for the same reason as the
+# catalog fetch timeout in catalog_store: they run SYNCHRONOUSLY inside a customer web request
 # (submit_session_feedback / submit_pulse_feedback, neither is enqueued), so at
 # the DEFAULT_TIMEOUT_S = 150 an admin that hangs rather than refuses would pin
 # a web worker for 2.5 minutes per submit. Both callers already treat any
