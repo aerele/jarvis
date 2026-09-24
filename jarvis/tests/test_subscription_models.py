@@ -76,8 +76,7 @@ class TestSubscriptionCatalogue(unittest.TestCase):
 	def test_google_gemini_has_no_subscription_tier(self):
 		# Google's chat subscription was removed 2026-08-19 (Google discontinued
 		# consumer login-with-Google for Gemini 2026-06-18). Gemini stays
-		# available via API key, which is served from the api_key-tier catalog,
-		# not this subscription seed.
+		# available via API key, which is served from the api_key-tier catalog.
 		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
 
 		google = next(p for p in BUNDLED_MODEL_CATALOG if p["provider_id"] == "google")
