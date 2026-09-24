@@ -4,7 +4,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.exceptions import PermissionDeniedError
+from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._report_scope import attach_scope, resolve_scope
 from jarvis.tools.run_report import run_report
 
@@ -45,6 +45,29 @@ class TestReportScope(TestCase):
 		self.assertEqual(execute.call_args.kwargs["filters"]["company"], "Example Company")
 		self.assertEqual(execute.call_args.kwargs["filters"]["report_date"], "2026-09-24")
 		self.assertEqual(result["report_scope"]["currency"], "INR")
+
+	def test_string_filters_are_parsed_before_scope_resolution(self):
+		for prepared in (False, True):
+			with (
+				self.subTest(prepared=prepared),
+				patch("jarvis.tools.run_report.frappe.db.exists", return_value=True),
+				patch("jarvis.tools.run_report.frappe.db.get_value", return_value=prepared),
+				patch("jarvis.tools.run_report.frappe_run_report", return_value={"result": []}) as inline,
+				patch(
+					"jarvis.tools.run_report._prepared_reports.handle_prepared",
+					return_value={"prepared_report": True, "status": "ready", "result": []},
+				) as queued,
+			):
+				result = run_report("Accounts Payable", '{"company": "Other Company"}')
+				executed = queued.call_args.args[1] if prepared else inline.call_args.kwargs["filters"]
+				self.assertEqual(executed["company"], "Other Company")
+				self.assertEqual(result["report_scope"]["company"], "Other Company")
+
+	def test_malformed_filters_on_scoped_report_raise_invalid_argument(self):
+		with patch("jarvis.tools.run_report.frappe.db.exists", return_value=True):
+			for filters in ("not json", "[1, 2]", [1, 2], 5):
+				with self.subTest(filters=filters), self.assertRaises(InvalidArgumentError):
+					run_report("Accounts Payable", filters)
 
 	def test_explicit_company_date_and_account_currency(self):
 		filters, scope = resolve_scope(
