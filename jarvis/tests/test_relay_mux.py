@@ -639,11 +639,13 @@ class TestRelayMuxYieldContinuation(FrappeTestCase):
 		self.assertIn("r1", mux._runs)  # still parked, waiting for the right session
 
 	def test_release_continuation_drops_the_parked_lane(self):
+		# Resolved by session_key, NOT a runId (the caller cannot know one once
+		# adoption may have moved it onto a fresh id).
 		mux = self._mux()
 		rec = _Recorder()
 		mux.register_run("r1", rec.handler(), session_key="s1")
 		mux.await_continuation("r1")
-		mux.release_continuation("r1")
+		mux.release_continuation("s1")
 		self.assertNotIn("r1", mux._runs)
 		# A late continuation frame after release is now an ordinary stray.
 		before = mux.stats()["stray_frames"]
@@ -652,9 +654,58 @@ class TestRelayMuxYieldContinuation(FrappeTestCase):
 		self.assertIsNone(rec.terminal)
 		self.assertEqual(mux.stats()["stray_frames"], before + 1)
 
+	def test_release_continuation_after_adoption_finds_the_live_lane(self):
+		# A Stop landing AFTER the continuation is adopted (streaming, not yet
+		# terminaled) must still release the LIVE lane, not the dead original
+		# runId (which release_continuation never even sees any more).
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		# Adopt via a non-final chat frame (the continuation is streaming).
+		mux._classify(
+			{
+				"type": "event",
+				"event": "chat",
+				"payload": {"runId": "image_generate:xyz", "sessionKey": "s1", "state": "delta"},
+			}
+		)
+		mux.dispatch()
+		self.assertNotIn("r1", mux._runs)
+		self.assertFalse(mux._runs["image_generate:xyz"].awaiting)
+
+		mux.release_continuation("s1")
+
+		self.assertNotIn("image_generate:xyz", mux._runs)
+
 	def test_release_continuation_is_idempotent(self):
 		mux = self._mux()
 		mux.release_continuation("never-there")  # must not raise
+
+	def test_stray_frame_under_dead_runid_while_parked_is_dropped(self):
+		# Only a frame with a NEW runId on the same session_key may adopt the
+		# lane; a frame replaying the dead original runId (the gateway's own
+		# retired lane, e.g. a straggling delta) must be dropped, never routed.
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		before = mux.stats()["stray_frames"]
+		mux._classify(_agent_frame("r1", "s1", "assistant", {"text": "late", "delta": "late"}))
+		mux.dispatch()
+		self.assertEqual(rec.deltas, [])
+		self.assertEqual(mux.stats()["stray_frames"], before + 1)
+		self.assertTrue(mux._runs["r1"].awaiting)  # still parked, untouched
+
+	def test_chat_frame_replaying_the_dead_runid_does_not_self_adopt(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		mux._classify(_chat_final_frame("r1", "s1", "should never adopt itself"))
+		mux.dispatch()
+		self.assertIsNone(rec.terminal)
+		self.assertTrue(mux._runs["r1"].awaiting)
 
 
 # --------------------------------------------------------------------------- #

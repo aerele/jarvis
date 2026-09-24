@@ -155,7 +155,9 @@ class TestEmbeddedMediaPaths(unittest.TestCase):
 		text = f"Here's the bicycle.\nAttachment: {_IMG}"
 		self.assertEqual(gm.detect_media_paths(text), [_IMG])
 		self.assertEqual(gm.strip_media_lines(text), "Here's the bicycle.")
-		self.assertTrue(gm.has_media_marker(text))
+		self.assertTrue(gm.has_embedded_media_path(text))
+		# has_media_marker stays MEDIA:-only - it must NOT see this embedded path.
+		self.assertFalse(gm.has_media_marker(text))
 
 	def test_path_kwarg_quoted_detected_and_stripped(self):
 		text = f'1. type=image name="pic" mimeType=image/png path="{_IMG}"\nEnjoy!'
@@ -173,7 +175,7 @@ class TestEmbeddedMediaPaths(unittest.TestCase):
 		text = "Attachment: /etc/passwd.png"
 		self.assertEqual(gm.detect_media_paths(text), [])
 		self.assertEqual(gm.strip_media_lines(text), text)
-		self.assertFalse(gm.has_media_marker(text))
+		self.assertFalse(gm.has_embedded_media_path(text))
 
 	def test_traversal_untouched(self):
 		text = f"Attachment: {_ROOT}../../etc/passwd.png"
@@ -184,7 +186,12 @@ class TestEmbeddedMediaPaths(unittest.TestCase):
 		text = f"Attachment: {_ROOT}tool-image-generation/report.pdf"
 		self.assertEqual(gm.detect_media_paths(text), [])
 		self.assertEqual(gm.strip_media_lines(text), text)
-		self.assertFalse(gm.has_media_marker(text))
+		self.assertFalse(gm.has_embedded_media_path(text))
+
+	def test_has_embedded_media_path_stays_off_plain_prose(self):
+		self.assertFalse(gm.has_embedded_media_path("a plain reply"))
+		self.assertFalse(gm.has_embedded_media_path(""))
+		self.assertFalse(gm.has_embedded_media_path(None))
 
 	def test_media_marker_behaviour_is_unchanged(self):
 		# The MEDIA: marker path stays leak-safety-first (unconditional strip)
@@ -397,6 +404,18 @@ class TestRedactFinalWithMedia(unittest.TestCase):
 			text, rels, marked = egress_rules.redact_final_with_media(f"MEDIA:{pdf}")
 		self.assertEqual(text, "")
 		self.assertEqual(rels, [])
+		self.assertTrue(marked)
+
+	def test_embedded_attachment_line_strips_and_marks(self):
+		# has_media_marker alone stays MEDIA:-only (a separate leak-safety gate) -
+		# redact_final_with_media is the caller that ALSO considers embedded
+		# paths, so an Attachment:-only reply still forces the content overwrite.
+		from jarvis.chat import egress_rules
+
+		with patch("jarvis.chat.egress_rules.redact_and_flag", side_effect=lambda t, **k: t):
+			text, rels, marked = egress_rules.redact_final_with_media(f"Attachment: {_IMG}", run_id="R1")
+		self.assertEqual(text, "")
+		self.assertEqual(rels, [_IMG])
 		self.assertTrue(marked)
 
 	def test_no_marker_returns_empty_rels(self):

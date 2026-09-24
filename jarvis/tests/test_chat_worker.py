@@ -1052,17 +1052,36 @@ class TestRunAgentTurnOpenclawYield(FrappeTestCase):
 		self.assertIn("run:error", kinds)
 
 	def test_no_continuation_within_the_cap_falls_back_to_todays_error_path(self):
+		# Deadline: nobody stopped this turn, it just never got an answer - a real
+		# error card (failed_final's "turn ended without any output" text), NEVER
+		# the softer Stop shape (which would wrongly read as "you stopped this"
+		# and never settle errored).
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
+
 		fake_sess = self._fake_sess(yield_result={"kind": "relay:interrupted", "reason": "deadline"})
 		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user") as pub:
 				run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
+		row = self._assistant_row(["stopped", "streaming", "error"])
+		self.assertFalse(row["stopped"])
+		self.assertEqual(row["streaming"], 0)
+		self.assertEqual(row["error"], FAILED_FINAL_ERROR)
+		kinds = [c.args[1]["kind"] for c in pub.call_args_list]
+		self.assertIn("run:error", kinds)
+		self.assertNotIn("run:end", kinds)
+
+	def test_transport_drop_during_the_wait_also_errors_not_stops(self):
+		fake_sess = self._fake_sess(yield_result={"kind": "relay:interrupted", "reason": "transport"})
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user") as pub:
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
 		row = self._assistant_row(["stopped", "streaming"])
-		self.assertEqual(row["stopped"], 1)
+		self.assertFalse(row["stopped"])
 		self.assertEqual(row["streaming"], 0)
 		kinds = [c.args[1]["kind"] for c in pub.call_args_list]
-		self.assertIn("run:end", kinds)
-		self.assertNotIn("run:error", kinds)
+		self.assertIn("run:error", kinds)
 
 	def test_stop_arriving_during_the_wait_is_honoured(self):
 		fake_sess = self._fake_sess(yield_result={"kind": "relay:interrupted", "reason": "cancelled"})
