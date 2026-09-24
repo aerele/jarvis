@@ -810,6 +810,30 @@ class TestRelayMuxFailedFinal(FrappeTestCase):
 		self.assertEqual(term[0], "relay:final")
 		self.assertEqual(term[1]["text"], "recovered on the fallback model")
 
+	def test_image_content_block_rides_terminal_payload_as_media_urls(self):
+		# The gateway attaches a generated image as a CONTENT BLOCK on the final
+		# message, not text - a distinct delivery mechanism from media_rels.
+		img_url = "/api/chat/media/outgoing/sk-enc/12345678-1234-1234-1234-123456789012/full.png"
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"message": {
+					"content": [
+						{"type": "text", "text": "Here it is."},
+						{"type": "image", "url": img_url, "mimeType": "image/png"},
+					]
+				},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term[0], "relay:final")
+		self.assertEqual(term[1]["text"], "Here it is.")
+		self.assertEqual(term[1]["media_urls"], [{"url": img_url, "mime_type": "image/png"}])
+
 	def test_final_with_an_empty_message_and_benign_stop_reason_stays_final(self):
 		# A final that DOES carry an assistant message with no text and a non-error
 		# stopReason is the one empty shape that is not evidence of failure.

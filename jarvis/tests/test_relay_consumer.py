@@ -603,6 +603,108 @@ class TestRelayYieldContinuation(FrappeTestCase):
 		self.assertEqual(out, {"kind": "relay:final", "text": "final answer"})
 
 
+_IMG_URL = "/api/chat/media/outgoing/sk-enc/12345678-1234-1234-1234-123456789012/full.png"
+
+
+class TestChatFinalMediaUrls(FrappeTestCase):
+	"""The gateway attaches a generated image/video/audio/document as a CONTENT
+	BLOCK on the final chat message (buildManagedMediaBlock), not text. Both
+	transports must extract + carry these through as media_urls."""
+
+	def test_image_block_extracted(self):
+		from jarvis.chat.agent_client import _chat_final_media_urls
+
+		payload = {
+			"message": {
+				"content": [
+					{"type": "text", "text": "Here it is."},
+					{"type": "image", "url": _IMG_URL, "mimeType": "image/png"},
+				]
+			}
+		}
+		self.assertEqual(_chat_final_media_urls(payload), [{"url": _IMG_URL, "mime_type": "image/png"}])
+
+	def test_audio_block_extracted(self):
+		from jarvis.chat.agent_client import _chat_final_media_urls
+
+		url = "/api/chat/media/outgoing/sk/12345678-1234-1234-1234-123456789012/full.mp3"
+		payload = {"message": {"content": [{"type": "audio", "url": url, "mimeType": "audio/mpeg"}]}}
+		self.assertEqual(_chat_final_media_urls(payload), [{"url": url, "mime_type": "audio/mpeg"}])
+
+	def test_attachment_block_extracted(self):
+		from jarvis.chat.agent_client import _chat_final_media_urls
+
+		url = "/api/chat/media/outgoing/sk/12345678-1234-1234-1234-123456789012/full.pdf"
+		payload = {
+			"message": {
+				"content": [{"type": "attachment", "attachment": {"url": url, "mimeType": "application/pdf"}}]
+			}
+		}
+		self.assertEqual(_chat_final_media_urls(payload), [{"url": url, "mime_type": "application/pdf"}])
+
+	def test_absolute_url_rejected(self):
+		from jarvis.chat.agent_client import _chat_final_media_urls
+
+		payload = {"message": {"content": [{"type": "image", "url": "https://evil.example" + _IMG_URL}]}}
+		self.assertEqual(_chat_final_media_urls(payload), [])
+
+	def test_traversal_rejected(self):
+		from jarvis.chat.agent_client import _chat_final_media_urls
+
+		payload = {
+			"message": {
+				"content": [{"type": "image", "url": "/api/chat/media/outgoing/../../etc/passwd/full.png"}]
+			}
+		}
+		self.assertEqual(_chat_final_media_urls(payload), [])
+
+	def test_other_prefix_rejected(self):
+		from jarvis.chat.agent_client import _chat_final_media_urls
+
+		payload = {"message": {"content": [{"type": "image", "url": "/other/prefix/1234/full.png"}]}}
+		self.assertEqual(_chat_final_media_urls(payload), [])
+
+	def test_no_url_content_yields_nothing(self):
+		from jarvis.chat.agent_client import _chat_final_media_urls
+
+		self.assertEqual(
+			_chat_final_media_urls({"message": {"content": [{"type": "text", "text": "hi"}]}}), []
+		)
+		self.assertEqual(_chat_final_media_urls({}), [])
+
+	def test_relay_turn_events_carries_media_urls_on_final(self):
+		sess = self._sess(
+			[
+				_chat_frame(
+					"r1",
+					"sk",
+					"final",
+					message={
+						"content": [
+							{"type": "text", "text": "Here it is."},
+							{"type": "image", "url": _IMG_URL, "mimeType": "image/png"},
+						]
+					},
+				)
+			]
+		)
+		out = list(sess.relay_turn_events("sk", "r1"))
+		self.assertEqual(out[-1]["media_urls"], [{"url": _IMG_URL, "mime_type": "image/png"}])
+
+	def _sess(self, frames):
+		sess = AgentSession.__new__(AgentSession)
+		queue = list(frames)
+
+		def fake_recv(_timeout):
+			frame = queue.pop(0)
+			if isinstance(frame, Exception):
+				raise frame
+			return frame
+
+		sess._recv = fake_recv
+		return sess
+
+
 class TestSetSessionModel(FrappeTestCase):
 	def _capture(self, *args, **kwargs):
 		sess = AgentSession.__new__(AgentSession)

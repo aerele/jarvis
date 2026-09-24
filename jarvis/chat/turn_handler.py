@@ -95,6 +95,7 @@ def persist_rich_outputs(
 	run_id: str,
 	turn_start_ms: int,
 	media_rels: list[str] | None = None,
+	media_urls: list[dict] | None = None,
 ) -> None:
 	"""Best-effort canvas + generated-image persistence and publish for one
 	finished turn. Shared by the worker's clean exit and snapshot recovery
@@ -103,7 +104,10 @@ def persist_rich_outputs(
 	``media_rels`` (native ``MEDIA:`` marker paths, detected + stripped upstream
 	before egress) is passed on the delivering transports (direct relay inline;
 	pump via the Turn row in ``finalize``) and omitted on recovery (strip-but-
-	don't-deliver). Never raises."""
+	don't-deliver). ``media_urls`` (gateway-attached image/video/audio/document
+	content blocks on the final chat message - a distinct delivery mechanism,
+	see ``agent_client._chat_final_media_urls``) rides the same two transports.
+	Never raises."""
 	settings = frappe.get_single("Jarvis Settings")
 
 	# Rich outputs: detect any canvas/chart artifact the agent produced this
@@ -210,6 +214,41 @@ def persist_rich_outputs(
 	except Exception:
 		frappe.log_error(
 			title="chat worker: native media persist failed",
+			message=frappe.get_traceback(),
+		)
+
+	# Gateway-attached content blocks (image/video/audio/document on the final
+	# chat message itself - the runtime's own buildManagedMediaBlock, a distinct
+	# delivery mechanism from the MEDIA:/embedded-path markers above). Same
+	# ordering requirement as the block above: MUST run after persist_canvases.
+	try:
+		if media_urls:
+			from jarvis.chat import generated_media as gen_media
+
+			url_items = gen_media.seed_media_urls(
+				assistant_msg_name,
+				settings.agent_url or "",
+				settings.get_password("agent_token", raise_exception=False) or "",
+				media_urls,
+			)
+			if url_items:
+				all_items = (
+					frappe.parse_json(frappe.db.get_value(MSG, assistant_msg_name, "canvas") or "[]")
+					or url_items
+				)
+				_publish_to_user(
+					user,
+					{
+						"kind": "canvas",
+						"conversation_id": conversation_id,
+						"message_id": assistant_msg_name,
+						"run_id": run_id,
+						"items": all_items,
+					},
+				)
+	except Exception:
+		frappe.log_error(
+			title="chat worker: gateway media block persist failed",
 			message=frappe.get_traceback(),
 		)
 
@@ -1638,6 +1677,7 @@ def handle_chat_send(payload: dict) -> None:
 			run_id,
 			turn_start_ms,
 			media_rels=terminal.get("media_rels"),
+			media_urls=terminal.get("media_urls"),
 		)
 
 		# Chat-ask materialization (notify-approvals design Part 2): a final

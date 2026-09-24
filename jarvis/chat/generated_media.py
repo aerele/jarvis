@@ -14,6 +14,7 @@ artifact.
 from __future__ import annotations
 
 import base64
+import mimetypes
 import os
 import re
 
@@ -438,6 +439,137 @@ def seed_media(assistant_msg_name: str, agent_url: str, token: str, sources: lis
 		frappe.log_error(
 			title="chat worker: native media fetch returned no content",
 			message=f"{failures} of {len(sources)} media fetch(es) empty for {assistant_msg_name}",
+		)
+	if new_items:
+		_append_canvas_items(assistant_msg_name, new_items)
+	return new_items
+
+
+# --------------------------------------------------------------------------- #
+# Gateway-attached content blocks (image/video/audio/document on the final
+# chat message itself - the runtime's own buildManagedMediaBlock). Distinct
+# delivery mechanism from the MEDIA:/embedded-path text markers above: the
+# gateway serves these at a relative URL of its own, not a container path.
+# --------------------------------------------------------------------------- #
+
+_MEDIA_URL_ID_RE = re.compile(r"/([0-9a-f-]{36})/full")
+_MAX_MEDIA_URL_BYTES = 8 * 1024 * 1024
+
+
+def _media_url_id(url: str) -> str:
+	"""Dedup key for a media-block url: the attachment id segment (never the
+	full url, which embeds the session key)."""
+	m = _MEDIA_URL_ID_RE.search(url)
+	return m.group(1) if m else url
+
+
+def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | None = None) -> bytes | None:
+	"""GET one gateway-attached media block from the tenant's own gateway
+	(binary-safe, redirect-disabled, size-bounded). ``url`` is the RELATIVE
+	path the runtime put on the content block - validated by the caller
+	(``agent_client._valid_media_url``) before it ever reaches here. Rejects a
+	response whose content-type is neither ``image/*`` nor the block's own
+	declared ``mime_type`` (the gateway naming one thing and serving another is
+	itself a signal not to trust the body)."""
+	import requests
+
+	from jarvis.chat.canvas import _http_base
+
+	base = _http_base(agent_url)
+	if not base or not token:
+		return None
+	try:
+		with requests.get(
+			f"{base}{url}",
+			headers={"Authorization": f"Bearer {token}"},
+			timeout=15,
+			stream=True,
+			allow_redirects=False,
+		) as r:
+			if r.status_code != 200:
+				return None
+			ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+			if not (ctype.startswith("image/") or (mime_type and ctype == mime_type.lower())):
+				return None
+			buf = bytearray()
+			for chunk in r.iter_content(64 * 1024):
+				buf += chunk
+				if len(buf) > _MAX_MEDIA_URL_BYTES:
+					return None
+	except Exception:
+		return None
+	return bytes(buf) or None
+
+
+def _media_url_filename(url: str, mime_type: str | None) -> str:
+	ext = (mimetypes.guess_extension(mime_type or "") or "").lower() if mime_type else ""
+	if ext not in _IMAGE_EXTS and ext not in (".mp4", ".webm", ".mp3", ".wav", ".pdf"):
+		ext = ext or ".bin"
+	base = re.sub(r"[^\w.\-]", "", _media_url_id(url))[-40:] or "attachment"
+	return "jarvis-media-" + base + ext
+
+
+def _canvas_type_for_mime(mime_type: str | None) -> str:
+	m = (mime_type or "").lower()
+	if m.startswith("image/"):
+		return "image"
+	if m.startswith("video/"):
+		return "video"
+	if m.startswith("audio/"):
+		return "audio"
+	return "file"
+
+
+def seed_media_urls(assistant_msg_name: str, agent_url: str, token: str, items: list[dict]) -> list[dict]:
+	"""Fetch each gateway-attached media block (``items`` = ``[{"url", "mime_type"},
+	...]``, from ``agent_client._chat_final_media_urls``), save it as a private
+	File on the assistant message, append to its ``canvas`` JSON, and return the
+	new canvas items. Same idempotent-dedup / best-effort shape as ``seed_media``
+	(dedup key = the attachment id, never the full session-key-bearing url) - safe
+	to call again on a retry. MUST run AFTER ``canvas.persist_canvases`` (wholesale
+	overwrite) for the same reason ``seed_media`` must."""
+	from frappe.utils.file_manager import save_file
+
+	if not items:
+		return []
+	seen = _existing_media_sources(assistant_msg_name)
+	new_items: list[dict] = []
+	failures = 0
+	for item in items:
+		url = item.get("url")
+		mime_type = item.get("mime_type")
+		if not url:
+			continue
+		key = _media_url_id(url)
+		if key in seen:
+			continue
+		content = fetch_media_url(agent_url, token, url, mime_type=mime_type)
+		if not content:
+			failures += 1
+			continue
+		try:
+			f = save_file(_media_url_filename(url, mime_type), content, MSG, assistant_msg_name, is_private=1)
+		except Exception:
+			frappe.log_error(
+				title="chat worker: save gateway media block failed",
+				message=frappe.get_traceback(),
+			)
+			continue
+		new_items.append(
+			{
+				"name": f.file_url,
+				"title": "Generated attachment",
+				"type": _canvas_type_for_mime(mime_type),
+				"file_url": f.file_url,
+				"source": key,  # attachment id - dedup key, never the session-bearing url
+			}
+		)
+		seen.add(key)
+
+	if failures:
+		frappe.log_error(
+			title="chat worker: gateway media block fetch returned no content",
+			message=f"{failures} of {len(items)} media block fetch(es) empty for {assistant_msg_name}",
 		)
 	if new_items:
 		_append_canvas_items(assistant_msg_name, new_items)
