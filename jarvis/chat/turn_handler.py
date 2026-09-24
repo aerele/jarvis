@@ -1166,7 +1166,7 @@ def handle_chat_send(payload: dict) -> None:
 		tool_msg_by_call_id: dict[str, str] = {}
 		batcher = _AssistantContentBatcher(assistant_msg.name)
 		# Own import (not the earlier best-effort one at bind_turn_message): the
-		# openclaw-yield wait below needs this name bound even if that earlier
+		# agent-yield wait below needs this name bound even if that earlier
 		# try/except swallowed an import failure.
 		from jarvis.chat import turn_message_binding
 
@@ -1406,8 +1406,8 @@ def handle_chat_send(payload: dict) -> None:
 							ack.get("runId") or run_id,
 						)
 					)
-					# openclaw's image/video/music tools unconditionally detach into
-					# a background task and abort this run with an EMPTY terminal
+					# The agent runtime's image/video/music tools unconditionally detach
+					# into a background task and abort this run with an EMPTY terminal
 					# (sessions_yield/turnHandoff) - unless the user actually asked
 					# to stop, that is a runtime yield, not a real abort: wait
 					# (bounded, inside the turn's overall timeout) for the deferred

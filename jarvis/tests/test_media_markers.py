@@ -144,7 +144,7 @@ class TestStripMediaLines(unittest.TestCase):
 
 
 class TestEmbeddedMediaPaths(unittest.TestCase):
-	"""openclaw's image/video/music generation tools unconditionally detach into
+	"""the agent runtime's image/video/music generation tools unconditionally detach into
 	a background task; ~25-30s later the deferred reply NAMES the generated
 	file's path in free text (Attachment: / path="..." / a markdown image),
 	never a ``MEDIA:`` marker line. Unlike a marker (stripped unconditionally,

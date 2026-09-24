@@ -930,7 +930,7 @@ class TestCancelFlow(_PumpTestCase):
 
 
 # --------------------------------------------------------------------------- #
-# 7b. openclaw-yield continuation wait (image/video/music tools' unconditional
+# 7b. agent-yield continuation wait (image/video/music tools' unconditional
 # background-detach abort): on_terminal must tell a real yield apart from a
 # user Stop, park via the mux instead of settling, expire it via
 # _yield_wait_sweep if nothing lands, and let the EXISTING _cancel_sweep handle
@@ -938,7 +938,7 @@ class TestCancelFlow(_PumpTestCase):
 # --------------------------------------------------------------------------- #
 
 
-class TestOpenclawYieldContinuation(_PumpTestCase):
+class TestAgentYieldContinuation(_PumpTestCase):
 	def _streaming_turn(self, rid, ctx, *, cancel_requested=0, session_key=None):
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv)
@@ -1171,7 +1171,7 @@ class TestOpenclawYieldContinuation(_PumpTestCase):
 
 
 # --------------------------------------------------------------------------- #
-# openclaw-yield wait vs a takeover: a new hop must not error-settle a parked
+# agent-yield wait vs a takeover: a new hop must not error-settle a parked
 # turn immediately (the gateway routinely shows no active run right after the
 # yield, before the deferred tool has posted anything) - it must park it into
 # the durable `recovering` route instead, same as a kill-switch halt.
