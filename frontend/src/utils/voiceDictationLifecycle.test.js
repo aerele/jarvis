@@ -399,7 +399,7 @@ test("recovery is scoped by a session id that EXISTS by the time the banner is b
 	);
 	assert.match(
 		mount.slice(0, 200),
-		/\{\n\t\t_ensureVoiceSession\(\);\n\t\t_loadRecovery\(\);\n\t\}/,
+		/\{\n\t*_ensureVoiceSession\(\);\n\t*_loadRecovery\(\);\n\t*\}/,
 		"_voiceSessionId is minted by _ensureVoiceSession; loading recovery first left it null, so " +
 			"excludeSessionId never applied and the banner could offer THIS tab's own live take"
 	);

@@ -13,6 +13,8 @@ def get_doc(doctype: str, name: str | None = None, names: list | None = None) ->
 	"""Return one document as a dict - or a batch when ``names`` is given.
 
 	Enforces read permission on EACH specific document for the current user.
+	For a regular DocType, ``name`` with ``names=[]`` is a single-record read;
+	non-empty single and batch arguments together are rejected.
 
 	Single: returns the document dict - or, if the caller passed a non-empty
 	``names`` list, the SAME batch envelope as any other doctype
@@ -45,6 +47,12 @@ def get_doc(doctype: str, name: str | None = None, names: list | None = None) ->
 			return {"doctype": doctype, "docs": [doc], "count": 1}
 		return doc
 
+	# Models may populate an unused optional array with [] in single-record mode.
+	# Treat only that empty-list shape as absent; malformed batches still fail.
+	if name and isinstance(names, list) and not names:
+		names = None
+	if name and names is not None:
+		raise InvalidArgumentError("Pass either name or names, not both. Omit names for one document.")
 	if names is not None:
 		if not isinstance(names, list) or not names:
 			raise InvalidArgumentError(_NO_NAME_MESSAGE)
