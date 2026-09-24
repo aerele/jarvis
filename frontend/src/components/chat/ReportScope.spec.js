@@ -73,3 +73,20 @@ describe("ReportScope", () => {
 		expect(w.text()).not.toContain("INR");
 	});
 });
+
+it("distinguishes report date from cached generation time and partial results", () => {
+	const tool = receipt();
+	Object.assign(tool.tool_result.data, {
+		prepared_report: true,
+		status: "ready",
+		as_of: "2026-09-22 10:00:00",
+		row_note: "Showing the first 500 of 700 rows.",
+	});
+	tool.tool_result.data.report_scope.currencies = ["INR", "USD"];
+	const w = mount(ReportScope, { props: { tools: [tool] } });
+	expect(w.text()).toContain("Reports consulted");
+	expect(w.text()).toContain("As of 2026-09-24");
+	expect(w.text()).toContain("Generated: 2026-09-22 10:00:00");
+	expect(w.text()).toContain("Showing the first 500 of 700 rows.");
+	expect(w.text()).toContain("INR, USD");
+});

@@ -55,6 +55,31 @@ class TestReportScope(TestCase):
 		self.assertEqual(scope["currency_mode"], "account")
 		self.assertNotIn("currency", attach_scope({"result": []}, scope)["report_scope"])
 
+	def test_currency_codes_come_from_all_returned_rows(self):
+		_, scope = resolve_scope(REPORT, {"in_party_currency": 1})
+		result = attach_scope(
+			{"result": [{"currency": "USD"}, {"currency": "INR"}, {"currency": "USD"}]}, scope
+		)
+		self.assertEqual(result["report_scope"]["currencies"], ["INR", "USD"])
+		for rows in ([], [{"currency": "USD"}, {}], [["USD"]]):
+			self.assertNotIn("currencies", attach_scope({"result": rows}, scope)["report_scope"])
+
+	def test_prepared_freshness_and_partial_result_are_preserved(self):
+		_, scope = resolve_scope(REPORT, {})
+		result = attach_scope(
+			{
+				"result": [],
+				"prepared_report": True,
+				"status": "ready",
+				"as_of": "2026-09-22 10:00:00",
+				"row_note": "Showing first 500 rows",
+			},
+			scope,
+		)
+		self.assertEqual(result["as_of"], "2026-09-22 10:00:00")
+		self.assertEqual(result["row_note"], "Showing first 500 rows")
+		self.assertNotIn("currency", result["report_scope"])
+
 	def test_default_company_is_permission_checked(self):
 		with patch(f"{MODULE}.frappe.has_permission", return_value=False):
 			with self.assertRaises(PermissionDeniedError):

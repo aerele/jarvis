@@ -1,8 +1,11 @@
 <template>
-	<div v-if="scopes.length" class="report-scopes" aria-label="Report scope">
+	<div v-if="scopes.length" class="report-scopes" aria-label="Reports consulted">
+		<span class="report-scope-title">Reports consulted</span>
 		<div v-for="scope in scopes" :key="scope.id" class="report-scope">
 			<span class="report-scope-title">{{ scope.report_name }}</span>
 			<span>{{ scope.company }} · As of {{ scope.report_date }} · {{ scope.currency }}</span>
+			<span v-if="scope.generated_at">Generated: {{ scope.generated_at }}</span>
+			<span v-if="scope.row_note">{{ scope.row_note }}</span>
 		</div>
 	</div>
 </template>
