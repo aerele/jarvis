@@ -161,7 +161,7 @@ def _settings_for_oauth(
 	_ADMIN_SETTINGS.jarvis_admin_customer_password = password
 	_ADMIN_SETTINGS.jarvis_admin_api_key = api_key
 	_ADMIN_SETTINGS.jarvis_admin_api_secret = api_secret
-	frappe.cache().delete_value(admin_client._OAUTH_CACHE_KEY)
+	admin_client.clear_cached_token()
 
 
 def _settings_clear_admin():
@@ -169,7 +169,7 @@ def _settings_clear_admin():
 	the whole of "not onboarded" - nothing is deleted and nothing to restore."""
 	_require_fake_settings()
 	_ADMIN_SETTINGS.reset()
-	frappe.cache().delete_value(admin_client._OAUTH_CACHE_KEY)
+	admin_client.clear_cached_token()
 
 
 def _mock_response(status_code: int, json_body=None, text: str = ""):
@@ -2141,6 +2141,162 @@ class TestOAuthBearer(FrappeTestCase):
 		admin_client._cache_oauth_token({"access_token": "B", "expires_in": 900})
 		self.assertEqual(compat.cache_get_fresh(admin_client._OAUTH_CACHE_KEY)["access_token"], "B")
 		frappe.cache().delete_value(admin_client._OAUTH_CACHE_KEY)
+
+
+class TestOAuthGrantRefused(FrappeTestCase):
+	"""Frappe 16.35+ refuses grant_type=password. The bench must fall back to
+	api_key:api_secret and stop asking for an hour, but never treat a blip
+	(network error, 5xx) or a refused refresh token as that refusal."""
+
+	_route = TestOAuthBearer._route
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def _run(self, calls: int, token_response):
+		cap = {}
+		route = self._route(token_response=token_response, api_capture=cap)
+		with patch("requests.post", side_effect=route):
+			results = [admin_client.get_connection() for _ in range(calls)]
+		return cap, results
+
+	@staticmethod
+	def _refused(data=None):
+		return _mock_response(
+			400, json_body={"error": "invalid_grant", "error_description": "Invalid credentials given."}
+		)
+
+	def _refused_flag(self):
+		return compat.cache_get_fresh(admin_client._OAUTH_REFUSED_KEY)
+
+	def test_refusal_uses_legacy_and_is_remembered(self):
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		cap, results = self._run(3, self._refused)
+		self.assertEqual(results, [{"x": 1}] * 3)
+		# One doomed grant, then straight to the legacy header on every call.
+		self.assertEqual(len(cap["token_calls"]), 1)
+		self.assertEqual({h["Authorization"] for h in cap["api_headers"]}, {"token legacy-key:legacy-secret"})
+		self.assertEqual(self._refused_flag(), "invalid_grant")
+
+	def test_remembered_refusal_still_uses_a_cached_refresh_token(self):
+		# Frappe 16.35 still honours refresh_token: a bench holding one keeps its
+		# bearer; only the refused password grant is skipped.
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "STALE", "refresh_token": "REFRESH-1", "access_expires_at": 0},
+		)
+		frappe.cache().set_value(admin_client._OAUTH_REFUSED_KEY, "invalid_grant")
+		minted = _mock_response(200, json_body={"access_token": "ACCESS-2", "expires_in": 900})
+		cap, _ = self._run(1, minted)
+		self.assertEqual([c["grant_type"] for c in cap["token_calls"]], ["refresh_token"])
+		self.assertEqual(cap["api_headers"][0]["Authorization"], "Bearer ACCESS-2")
+
+	def test_refused_refresh_token_is_dropped_not_replayed(self):
+		# Refresh refused and password refusal remembered: the dead refresh token is
+		# dropped, so the next call makes no token request at all.
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "STALE", "refresh_token": "REFRESH-DEAD", "access_expires_at": 0},
+		)
+		frappe.cache().set_value(admin_client._OAUTH_REFUSED_KEY, "invalid_grant")
+		cap, _ = self._run(2, self._refused)
+		self.assertEqual([c["grant_type"] for c in cap["token_calls"]], ["refresh_token"])
+		self.assertEqual({h["Authorization"] for h in cap["api_headers"]}, {"token legacy-key:legacy-secret"})
+
+	def test_client_level_refusal_of_a_refresh_keeps_the_token(self):
+		# invalid_client says nothing about the refresh token itself: keep it and
+		# try it again next call rather than stranding the bench on the password.
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "STALE", "refresh_token": "REFRESH-1", "access_expires_at": 0},
+		)
+		frappe.cache().set_value(admin_client._OAUTH_REFUSED_KEY, "invalid_grant")
+		cap, _ = self._run(2, _mock_response(401, json_body={"error": "invalid_client"}))
+		self.assertEqual([c["grant_type"] for c in cap["token_calls"]], ["refresh_token", "refresh_token"])
+
+	def test_401_retry_uses_the_cached_refresh_token(self):
+		# The bearer is rejected mid-life; the re-mint must go through the cached
+		# refresh token (still honoured on 16.35), not straight to the password.
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "ACCESS-1", "refresh_token": "REFRESH-1", "access_expires_at": 9e12},
+		)
+		minted = _mock_response(200, json_body={"access_token": "ACCESS-2", "expires_in": 900})
+
+		seen = []
+
+		def _api(headers):
+			# Record at call time: _post reuses one headers dict for the retry.
+			seen.append(headers["Authorization"])
+			if headers["Authorization"] == "Bearer ACCESS-1":
+				return _mock_response(
+					401, json_body={"message": {"ok": False, "error": {"code": "AuthError"}}}
+				)
+			return None
+
+		cap = {}
+		route = self._route(token_response=minted, api_capture=cap, api_response=_api)
+		with patch("requests.post", side_effect=route):
+			self.assertEqual(admin_client.get_connection(), {"x": 1})
+		self.assertEqual([c["grant_type"] for c in cap["token_calls"]], ["refresh_token"])
+		self.assertEqual(seen, ["Bearer ACCESS-1", "Bearer ACCESS-2"])
+
+	def test_refusal_is_not_remembered_without_a_legacy_fallback(self):
+		# No api_key:api_secret: remembering would lock the bench out for an hour, so
+		# every call keeps trying the grant (e.g. an onboarding race that clears).
+		_settings_for_oauth()
+		cap = {}
+		route = self._route(token_response=self._refused, api_capture=cap)
+		with patch("requests.post", side_effect=route):
+			for _ in range(2):
+				with self.assertRaises(AdminAuthError):
+					admin_client.get_connection()
+		self.assertEqual(len(cap["token_calls"]), 2)
+		self.assertIsNone(self._refused_flag())
+
+	def test_network_error_is_not_remembered(self):
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+
+		def _down(data):
+			raise requests.ConnectionError("admin unreachable")
+
+		cap, _ = self._run(2, _down)
+		# Still tried on the next call: a blip must not park the bench on api_key.
+		self.assertEqual(len(cap["token_calls"]), 2)
+		self.assertIsNone(self._refused_flag())
+
+	def test_server_error_is_not_remembered(self):
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		cap, _ = self._run(2, _mock_response(500, json_body={"error": "invalid_grant"}))
+		self.assertEqual(len(cap["token_calls"]), 2)
+		self.assertIsNone(self._refused_flag())
+
+	def test_refused_refresh_alone_is_not_remembered(self):
+		# An expired refresh token is refused with invalid_grant too; the password
+		# grant still works on this admin, so nothing may be remembered.
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "STALE", "refresh_token": "REFRESH-OLD", "access_expires_at": 0},
+		)
+		minted = _mock_response(200, json_body={"access_token": "ACCESS-2", "expires_in": 900})
+
+		def _grant(data):
+			return self._refused() if data["grant_type"] == "refresh_token" else minted
+
+		cap, _ = self._run(1, _grant)
+		self.assertEqual([c["grant_type"] for c in cap["token_calls"]], ["refresh_token", "password"])
+		self.assertEqual(cap["api_headers"][0]["Authorization"], "Bearer ACCESS-2")
+		self.assertIsNone(self._refused_flag())
+
+	def test_clear_cached_token_forgets_the_refusal(self):
+		frappe.cache().set_value(admin_client._OAUTH_REFUSED_KEY, "invalid_grant")
+		admin_client.clear_cached_token()
+		self.assertIsNone(self._refused_flag())
 
 
 class TestAdminUrlResolution(FrappeTestCase):
