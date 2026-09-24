@@ -1,6 +1,7 @@
 // Read durable ERP tool receipts, never assistant prose or requested filters.
 export function reportScopes(tools) {
 	const scopes = [];
+	const shown = new Set();
 	for (const tool of tools) {
 		if (
 			tool.role !== "tool" ||
@@ -35,8 +36,7 @@ export function reportScopes(tools) {
 			scope.currencies.every((code) => typeof code === "string" && code.trim())
 				? [...new Set(scope.currencies)].join(", ")
 				: null;
-		scopes.push({
-			id: tool.name,
+		const entry = {
 			report_name: scope.report_name,
 			company: scope.company,
 			report_date: scope.report_date,
@@ -50,7 +50,13 @@ export function reportScopes(tools) {
 					? "Party/account currency"
 					: (typeof scope.currency === "string" && scope.currency.trim()) ||
 					  "Company currency"),
-		});
+		};
+		// One turn may run the same report twice; a repeated chip adds nothing.
+		// Any visible difference (date, currency, freshness, note) stays separate.
+		const key = JSON.stringify(Object.values(entry));
+		if (shown.has(key)) continue;
+		shown.add(key);
+		scopes.push({ id: tool.name, ...entry });
 	}
 	return scopes;
 }
