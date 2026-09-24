@@ -160,8 +160,8 @@
 								i < buildTickIndex
 									? 'text-ink-green-3'
 									: i === buildTickIndex
-										? 'font-medium text-ink-blue-3'
-										: 'text-ink-gray-4'
+									? 'font-medium text-ink-blue-3'
+									: 'text-ink-gray-4'
 							"
 						>
 							<span
@@ -170,8 +170,8 @@
 									i < buildTickIndex
 										? 'bg-surface-green-2'
 										: i === buildTickIndex
-											? 'bg-surface-blue-2 motion-safe:animate-pulse'
-											: 'bg-surface-gray-3'
+										? 'bg-surface-blue-2 motion-safe:animate-pulse'
+										: 'bg-surface-gray-3'
 								"
 							/>
 							{{ ph.label }}
