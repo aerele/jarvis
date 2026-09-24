@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { mount } from "@vue/test-utils";
 import ReportScope from "./ReportScope.vue";
+import source from "./ReportScope.vue?raw";
+import { LIGHT_VARS, DARK_VARS } from "@/theme";
 
 function receipt(company = "Example Company", extra = {}) {
 	return {
@@ -89,4 +91,13 @@ it("distinguishes report date from cached generation time and partial results", 
 	expect(w.text()).toContain("Generated: 2026-09-22 10:00:00");
 	expect(w.text()).toContain("Showing the first 500 of 700 rows.");
 	expect(w.text()).toContain("INR, USD");
+});
+
+it("styles only with theme tokens that exist in both light and dark", () => {
+	const tokens = [...source.matchAll(/var\((--[\w-]+)/g)].map((m) => m[1]);
+	expect(tokens.length).toBeGreaterThan(0);
+	for (const token of tokens) {
+		expect(LIGHT_VARS).toHaveProperty([token]);
+		expect(DARK_VARS).toHaveProperty([token]);
+	}
 });
