@@ -360,6 +360,128 @@ class TestSeedMedia(unittest.TestCase):
 			fm.assert_not_called()
 
 
+_URL_ITEM = {
+	"url": "/api/chat/media/outgoing/sk-enc/12345678-1234-1234-1234-123456789012/full.png",
+	"mime_type": "image/png",
+}
+
+
+class TestSeedMediaUrls(unittest.TestCase):
+	"""Gateway-attached content blocks (image/video/audio/document on the final
+	chat message itself) - a distinct delivery mechanism from seed_media's
+	native MEDIA:/embedded-path markers, but the same idempotent-dedup shape."""
+
+	def _patch_db(self, existing_canvas=None):
+		self.saved = []
+		self.set_values = []
+
+		def fake_save_file(name, content, dt, dn, is_private=1):
+			self.saved.append(name)
+			return Mock(file_url=f"/private/files/{name}")
+
+		def fake_get_value(dt, dn, field):
+			return existing_canvas
+
+		def fake_set_value(dt, dn, field, value):
+			self.set_values.append(value)
+
+		p1 = patch("frappe.utils.file_manager.save_file", side_effect=fake_save_file)
+		p2 = patch("frappe.db.get_value", side_effect=fake_get_value)
+		p3 = patch("frappe.db.set_value", side_effect=fake_set_value)
+		p4 = patch("frappe.db.commit")
+		return p1, p2, p3, p4
+
+	def test_seeds_and_builds_item(self):
+		ps = self._patch_db(existing_canvas=None)
+		with ps[0], ps[1], ps[2], ps[3], patch.object(gm, "fetch_media_url", return_value=b"PNG") as fm:
+			items = gm.seed_media_urls("MSG-1", "ws://h:1", "tok", [_URL_ITEM])
+		fm.assert_called_once_with("ws://h:1", "tok", _URL_ITEM["url"], mime_type="image/png")
+		self.assertEqual(len(items), 1)
+		it = items[0]
+		self.assertEqual(it["type"], "image")
+		self.assertEqual(it["source"], "12345678-1234-1234-1234-123456789012")  # attachment id only
+		self.assertNotIn("sk-enc", it["source"])  # never the session-bearing url
+		self.assertTrue(it["file_url"].startswith("/private/files/jarvis-media-"))
+
+	def test_skips_failed_fetch_and_logs(self):
+		ps = self._patch_db(existing_canvas=None)
+		with (
+			ps[0],
+			ps[1],
+			ps[2],
+			ps[3],
+			patch.object(gm, "fetch_media_url", return_value=None),
+			patch("frappe.log_error") as log,
+		):
+			items = gm.seed_media_urls("MSG-1", "ws://h:1", "tok", [_URL_ITEM])
+		self.assertEqual(items, [])
+		log.assert_called_once()
+
+	def test_dedups_by_attachment_id(self):
+		import json
+
+		existing = json.dumps(
+			[{"name": "x", "type": "image", "source": "12345678-1234-1234-1234-123456789012"}]
+		)
+		ps = self._patch_db(existing_canvas=existing)
+		with ps[0], ps[1], ps[2], ps[3], patch.object(gm, "fetch_media_url", return_value=b"PNG") as fm:
+			items = gm.seed_media_urls("MSG-1", "ws://h:1", "tok", [_URL_ITEM])
+		self.assertEqual(items, [])
+		fm.assert_not_called()
+
+	def test_empty_items(self):
+		with patch.object(gm, "fetch_media_url") as fm:
+			self.assertEqual(gm.seed_media_urls("MSG-1", "ws://h:1", "tok", []), [])
+			fm.assert_not_called()
+
+	def test_type_derived_from_mime(self):
+		video_item = {"url": _URL_ITEM["url"].replace(".png", ".mp4"), "mime_type": "video/mp4"}
+		ps = self._patch_db(existing_canvas=None)
+		with ps[0], ps[1], ps[2], ps[3], patch.object(gm, "fetch_media_url", return_value=b"VID"):
+			items = gm.seed_media_urls("MSG-1", "ws://h:1", "tok", [video_item])
+		self.assertEqual(items[0]["type"], "video")
+
+
+def _streamed_media_url_response(status=200, body=b"PNGDATA", content_type="image/png"):
+	cm = _streamed_response(status=status, body=body)
+	cm.__enter__.return_value.headers = {"Content-Type": content_type}
+	return cm
+
+
+class TestFetchMediaUrl(unittest.TestCase):
+	def test_url_and_header(self):
+		with patch("requests.get", return_value=_streamed_media_url_response()) as rget:
+			out = gm.fetch_media_url(
+				"ws://agent.host:9000", "tok123", _URL_ITEM["url"], mime_type="image/png"
+			)
+		self.assertEqual(out, b"PNGDATA")
+		args, kwargs = rget.call_args
+		self.assertEqual(args[0], "http://agent.host:9000" + _URL_ITEM["url"])
+		self.assertEqual(kwargs["headers"]["Authorization"], "Bearer tok123")
+		self.assertFalse(kwargs["allow_redirects"])
+
+	def test_content_type_mismatch_rejected(self):
+		with patch("requests.get", return_value=_streamed_media_url_response(content_type="text/html")):
+			out = gm.fetch_media_url("ws://h:1", "t", _URL_ITEM["url"], mime_type="image/png")
+		self.assertIsNone(out)
+
+	def test_declared_mime_type_accepted_even_when_not_image(self):
+		with patch(
+			"requests.get",
+			return_value=_streamed_media_url_response(content_type="application/pdf"),
+		):
+			out = gm.fetch_media_url("ws://h:1", "t", _URL_ITEM["url"], mime_type="application/pdf")
+		self.assertEqual(out, b"PNGDATA")
+
+	def test_missing_base_or_token(self):
+		self.assertIsNone(gm.fetch_media_url("", "t", _URL_ITEM["url"]))
+		self.assertIsNone(gm.fetch_media_url("ws://h:1", "", _URL_ITEM["url"]))
+
+	def test_non_200_returns_none(self):
+		with patch("requests.get", return_value=_streamed_media_url_response(status=404)):
+			self.assertIsNone(gm.fetch_media_url("ws://h:1", "t", _URL_ITEM["url"], mime_type="image/png"))
+
+
 class TestTitleAndFilename(unittest.TestCase):
 	def test_pretty_title_strips_uuid(self):
 		self.assertEqual(
