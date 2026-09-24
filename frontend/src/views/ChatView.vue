@@ -2804,7 +2804,7 @@
 						v-model="input"
 						:attachments="composerAttachments"
 						:busy="busy"
-						:disabled="holdActive"
+						:disabled="holdActive || booting"
 						:canSend="canSend"
 						:sendTitle="voiceSendBlockReason"
 						:placeholder="composerPlaceholder"
@@ -4505,6 +4505,7 @@ import {
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
+import { BOOT_TIMEOUT_MS, withDeadline } from "@/utils/bootDeadline";
 import { createEnrichmentPending } from "@/lib/enrichmentPending";
 import { currentThreadModel, modelBadgeFor, modelBadgeTitleFor } from "@/utils/modelBadge";
 import { renderMarkdown } from "@/markdown";
@@ -6392,6 +6393,15 @@ function prettyJson(s) {
 // True only until the initial conversation load finishes — keeps the welcome
 // screen from flashing on refresh before the open chat appears.
 const booting = ref(true);
+// Every boot await races a deadline (utils/bootDeadline.js): the composer and send() are gated
+// on `booting`, so one never-settling boot request would otherwise lock the composer for good.
+// window.__JARVIS_BOOT_TIMEOUT_MS is the e2e override (tests/e2e/chat-bootstrap.spec.js).
+let _bootTimedOut = false;
+function bootStep(p) {
+	return withDeadline(p, window.__JARVIS_BOOT_TIMEOUT_MS || BOOT_TIMEOUT_MS, () => {
+		_bootTimedOut = true;
+	});
+}
 const showWelcome = computed(
 	() =>
 		!booting.value &&
@@ -6424,6 +6434,7 @@ const headerSub = computed(() => {
 });
 const canSend = computed(
 	() =>
+		!booting.value &&
 		(input.value.trim().length > 0 || pendingFiles.value.length > 0) &&
 		!sending.value &&
 		// A compaction (auto mid-turn, or one we started) must never race a turn
@@ -6660,7 +6671,9 @@ const triggerMode = ref(false);
 // "Ask Jarvis" style) instead of a chip list, and a small marker sits above it.
 const TRIGGER_PLACEHOLDER = "e.g. Warn me when a Sales Invoice over 1 lakh is submitted";
 const composerPlaceholder = computed(() =>
-	compacting.value
+	booting.value
+		? "Loading conversation…"
+		: compacting.value
 		? "Compacting this chat, try again in a moment"
 		: triggerMode.value
 		? TRIGGER_PLACEHOLDER
@@ -9324,6 +9337,8 @@ function resendFailed(m) {
 // optional `context`, e.g. a dashboard): consumed by the first send below.
 let _prefillSendContext = null;
 async function send(textArg, resendAck) {
+	// Restoration must choose the destination before a send captures its conversation scope.
+	if (booting.value) return;
 	// Maintenance HARD block: once a hold is known, no send runs — this guards the paths that call
 	// send() directly (AskCard/answer/resend/prefill), not just the disabled composer. On the FIRST
 	// mid-session send holdActive is still false, so the detection branch below is preserved.
@@ -11558,52 +11573,53 @@ onMounted(async () => {
 		thinkTick.value = busy.value ? thinkTick.value + 1 : 0;
 		if (busy.value) nowMs.value = Date.now();
 	}, 1000);
-	ui.value = (await uiP) || {};
-	// Reconcile the persona pill with the server's current value, so a persona
-	// switched on another device shows up here too. Adopt only, never a write
-	// (persist:false), since this is us catching up to the server, not a change.
-	if (ui.value.preferred_persona !== undefined) {
-		store.setPreferredPersona(ui.value.preferred_persona, { persist: false });
-	}
-	// Offer recovery of any recording a prior session left un-transcribed (a tab
-	// crash / accidental reload) — only when dictation is actually enabled.
-	// _ensureVoiceSession FIRST: it mints _voiceSessionId, which is what excludes
-	// THIS tab's own fragments from the offer. Deferring it to the first startMic
-	// left the id null at load, so the exclusion never applied and the banner
-	// could offer — then adopt or discard — this tab's own live take.
-	if (ui.value && ui.value.stt_enabled && micRec.supported) {
-		_ensureVoiceSession();
-		_loadRecovery();
-	}
-	// Load custom skills so the "/" composer menu can offer them.
-	loadCustomSkills();
 	// "Discuss in chat" hand-off (Review tab → chatPrefill stash). Take the
 	// stash on EVERY mount — a stale prompt must never survive to pop into the
 	// composer on a later, unrelated visit — but only act on it when landing
 	// on the chat home (no /c/:id param).
 	const prefill = takeChatPrefill();
 	const applyPrefill = !route.params.id && !!(prefill && prefill.text);
+	// ONE try/finally spans the whole boot so nothing can leave `booting` (and the composer) stuck.
 	try {
-		await convsP;
+		ui.value = (await bootStep(uiP)) || {};
+		// Reconcile the persona pill with the server's current value, so a persona
+		// switched on another device shows up here too. Adopt only, never a write
+		// (persist:false), since this is us catching up to the server, not a change.
+		if (ui.value.preferred_persona !== undefined) {
+			store.setPreferredPersona(ui.value.preferred_persona, { persist: false });
+		}
+		// Offer recovery of any recording a prior session left un-transcribed (a tab
+		// crash / accidental reload) — only when dictation is actually enabled.
+		// _ensureVoiceSession FIRST: it mints _voiceSessionId, which is what excludes
+		// THIS tab's own fragments from the offer. Deferring it to the first startMic
+		// left the id null at load, so the exclusion never applied and the banner
+		// could offer — then adopt or discard — this tab's own live take.
+		if (ui.value && ui.value.stt_enabled && micRec.supported) {
+			_ensureVoiceSession();
+			_loadRecovery();
+		}
+		// Load custom skills so the "/" composer menu can offer them.
+		loadCustomSkills();
+		await bootStep(convsP);
 		if (applyPrefill) {
 			// The prompt must land as the FIRST message of a FRESH conversation.
 			// Restoring the last conversation here would both wipe the composer
 			// (the async restore races the prefill) and risk sending a drafted
 			// governance prompt into an unrelated thread's context.
 			_consumedNewChat = false; // newChat() below satisfies a pending request too
-			await newChat();
+			await bootStep(newChat());
 		} else if (route.query.new) {
 			// Desk FAB deep-link (jarvis_widget.bundle.js -> config.mjs NEW_CHAT_URL):
 			// ?new=1 means start a fresh conversation instead of restoring the last
 			// one. Strip the query so a refresh doesn't force ANOTHER new chat.
 			router.replace({ name: "Chat" });
 			_consumedNewChat = false; // newChat() below satisfies a pending request too
-			await newChat();
+			await bootStep(newChat());
 		} else if (_consumedNewChat) {
 			// New Chat was requested from another route while we booted —
 			// start on a fresh empty conversation instead of restoring.
 			_consumedNewChat = false;
-			await newChat();
+			await bootStep(newChat());
 		} else {
 			// Restore the chat the user was last on (survives refresh + duplicated
 			// tab) before falling back to the first sidebar entry, so a starred
@@ -11619,7 +11635,7 @@ onMounted(async () => {
 			if (first) {
 				currentId.value = first;
 				try {
-					await loadConversation(first);
+					await bootStep(loadConversation(first));
 				} catch (e) {
 					// The URL/stored conversation is gone (a reaped empty, a cleared or
 					// externally-deleted chat) — don't let the unhandled rejection abort
@@ -11639,6 +11655,17 @@ onMounted(async () => {
 		}
 	} finally {
 		booting.value = false; // reveal welcome/thread only after the first load
+	}
+	if (_bootTimedOut) {
+		// Recoverable, not a dead end: the composer is live again and whatever was still loading
+		// fills in when (if) it arrives; a reload retries the whole boot.
+		notify(
+			"Chat is taking longer than usual to load. You can keep typing, or reload to try again.",
+			{
+				type: "error",
+				duration: 10000,
+			}
+		);
 	}
 	// The thread (and its chart skeletons) only enter the DOM now that booting is
 	// false — loadConversation's earlier processMermaid pass ran against an empty
