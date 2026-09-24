@@ -1,5 +1,5 @@
 <template>
-	<div class="flex h-full flex-col overflow-hidden">
+	<div class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
 		<!-- friendly no-access state: get_dashboards_caps rejected with a real 403
 		     (TriggersPage probe precedent - transient failures retry, never block) -->
 		<template v-if="accessDenied">
@@ -51,7 +51,7 @@
 			<div
 				v-show="activeTab === 'builder'"
 				ref="builderEl"
-				class="flex min-h-0 flex-1 flex-row"
+				class="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden"
 			>
 				<!-- canvas pane (the surface's one solid action lives here). On a
 				     phone the split can't hold two usable columns, so the canvas
@@ -59,18 +59,19 @@
 				     open (Hide chat brings it back). -->
 				<div
 					v-show="!isMobile || !chatOpen"
-					class="flex min-h-0 flex-1 flex-col"
+					class="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto"
 					:class="resizing ? 'pointer-events-none select-none' : ''"
 				>
 					<div
-						class="flex min-h-[56px] shrink-0 items-center justify-between gap-2 border-b px-4"
+						class="flex min-h-[56px] shrink-0 flex-wrap items-center justify-between gap-2 border-b px-4 py-2"
 					>
-						<div class="flex min-w-0 items-center gap-2">
+						<div class="flex min-w-0 max-w-full items-center gap-2">
 							<span class="text-base font-semibold text-ink-gray-9">Canvas</span>
 							<!-- informational (which dashboard is loaded), not a dirty
 							     warning - so gray, not orange (§1.2 hue = meaning) -->
 							<Badge
 								v-if="editingDetail"
+								class="min-w-0 truncate"
 								theme="gray"
 								variant="subtle"
 								:label="`Editing ${
@@ -78,7 +79,7 @@
 								}`"
 							/>
 						</div>
-						<div class="flex shrink-0 items-center gap-3">
+						<div class="flex min-w-0 flex-wrap items-center gap-2">
 							<Button
 								v-if="!chatOpen"
 								variant="ghost"
@@ -119,7 +120,7 @@
 					/>
 					<DashboardCanvas
 						ref="canvasRef"
-						class="min-h-0 flex-1"
+						class="min-h-32 min-w-0 flex-1"
 						mode="builder"
 						:html="builderHtml"
 						:caps="caps"
@@ -169,7 +170,7 @@
 					v-show="chatOpen"
 					ref="chatPane"
 					:class="isMobile ? 'w-full' : 'shrink-0 border-l'"
-					:style="isMobile ? {} : { width: chatPct + '%' }"
+					:style="isMobile ? {} : { width: chatWidth + 'px' }"
 					:caps="caps"
 					:theme="builderTheme"
 					:editing-name="agentEditingName"
@@ -226,7 +227,7 @@
 // proceeds with default caps rather than blocking an authorized user.
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { useStorage } from "@vueuse/core";
+import { useElementSize, useStorage } from "@vueuse/core";
 import { Badge, Breadcrumbs, Button, Dialog, Dropdown, FeatherIcon, toast } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
@@ -266,7 +267,19 @@ const router = useRouter();
 // never overwritten, see stores/shell.setSpaciousView). `isMobile` drops the
 // side-by-side split for a single-pane swap below the phone breakpoint.
 const shell = useShellStore();
-const isMobile = computed(() => shell.mobile);
+const MIN_CHAT_WIDTH = 320;
+const MIN_CANVAS_WIDTH = 360;
+const DIVIDER_WIDTH = 10;
+const builderEl = ref(null);
+const { width: builderWidth } = useElementSize(builderEl);
+// Use the available builder width as well as the phone breakpoint (the rail
+// may be expanded). Below this width two useful panes no longer fit.
+const isMobile = computed(
+	() =>
+		shell.mobile ||
+		(builderWidth.value > 0 &&
+			builderWidth.value < MIN_CHAT_WIDTH + MIN_CANVAS_WIDTH + DIVIDER_WIDTH)
+);
 
 const TABS = [
 	{ label: "Builder", value: "builder" },
@@ -1223,7 +1236,6 @@ watch(
 );
 
 // ── the drag-split (Sidebar's resize machinery, horizontal right panel) ──
-const builderEl = ref(null);
 const _split = useStorage("jarvis-dash-panel-w", 34);
 // GMeet-style right chat panel: persisted width %, plus a show/hide toggle.
 const chatOpen = useStorage("jarvis-dash-chat-open", true);
@@ -1232,16 +1244,27 @@ const chatPct = computed({
 	get: () => clampPct(_split.value),
 	set: (v) => (_split.value = clampPct(v)),
 });
+// Persist the preferred percentage, but constrain its rendered width on every
+// container resize. Reserve 360px for the canvas and 10px for the divider.
+const chatWidth = computed(() =>
+	Math.max(
+		MIN_CHAT_WIDTH,
+		Math.min(
+			builderWidth.value - MIN_CANVAS_WIDTH - DIVIDER_WIDTH,
+			(builderWidth.value * chatPct.value) / 100
+		)
+	)
+);
 const resizing = ref(false);
 let startX = 0;
 let startPct = 34;
 let containerW = 1;
 
 function startResize(e) {
-	if (e.button !== 0) return;
+	if (e.button !== 0 || isMobile.value) return;
 	resizing.value = true;
 	startX = e.clientX;
-	startPct = chatPct.value;
+	startPct = (chatWidth.value / builderWidth.value) * 100;
 	containerW = (builderEl.value && builderEl.value.getBoundingClientRect().width) || 1;
 	window.addEventListener("mousemove", onResize);
 	window.addEventListener("mouseup", stopResize);
@@ -1262,6 +1285,9 @@ function stopResize() {
 function resetSplit() {
 	chatPct.value = 34;
 }
+watch(isMobile, (singlePane) => {
+	if (singlePane) stopResize();
+});
 onBeforeUnmount(stopResize);
 onBeforeUnmount(() => shell.setSpaciousView(false));
 // A pending debounced filter apply must not fire after this page unmounts.
