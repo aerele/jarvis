@@ -1,6 +1,6 @@
 <template>
 	<!-- One wiki note a File Box run wants on the shared org wiki, held for a
-	     reviewer who is NOT the dropper (separation of duties). The body is what
+	     Jarvis reviewer (the dropper too, with a reviewer role). The body is what
 	     lands: shown in full, never truncated. -->
 	<div :aria-busy="busy ? 'true' : 'false'">
 		<div v-if="!note && !loaded" class="flex justify-start">
@@ -62,9 +62,6 @@
 					Approved, but the write did not land{{
 						live.apply_reason ? ` (${live.apply_reason})` : ""
 					}}. Retry to re-drive it.
-				</div>
-				<div v-else-if="!live.can_approve" class="mt-3 text-sm text-ink-gray-6">
-					You dropped this file — a different reviewer must approve it.
 				</div>
 
 				<div class="mt-4 flex flex-wrap items-center gap-2">

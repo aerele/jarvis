@@ -107,10 +107,15 @@ describe("WikiProposalDetail", () => {
 		expect(long.text()).toContain("scroll the box");
 	});
 
-	it("offers no Approve to the dropper when another reviewer must approve", () => {
+	it("offers Approve to any reviewer, the dropper included", () => {
+		const w = mountWith(proposal({ can_approve: 1 }));
+		expect(button(w, "Approve")).toBeTruthy();
+		expect(w.text()).not.toContain("a different reviewer");
+	});
+
+	it("offers no Approve on a note that is no longer approvable", () => {
 		const w = mountWith(proposal({ can_approve: 0 }));
 		expect(button(w, "Approve")).toBeFalsy();
-		expect(w.text()).toContain("a different reviewer must approve it");
 		expect(button(w, "Reject")).toBeTruthy();
 	});
 

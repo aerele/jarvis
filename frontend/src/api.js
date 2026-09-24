@@ -794,8 +794,8 @@ export const restoreApproval = (name) =>
 	call("jarvis.chat.approvals_api.restore_approval", { name });
 
 // ── Wiki write-back review lane (reviewer-gated; review-before-landing) ──
-// A File Box run's wiki note is HELD as a proposal a Jarvis reviewer — NOT the
-// dropper (separation of duties) — approves before it lands.
+// A File Box run's wiki note is HELD as a proposal a Jarvis reviewer (the dropper
+// too, with a reviewer role) approves before it lands.
 // order: "newest" (the server default) or "oldest".
 export const listWikiWriteProposals = (p = {}) =>
 	call("jarvis.chat.approvals_api.list_wiki_write_proposals", {

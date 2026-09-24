@@ -1153,8 +1153,8 @@ FILE_BOX_WIKI_KIND = "file-box:"
 FILE_BOX_WIKI_FENCE = "file-box"
 # Approval Request `source` value for a HELD file-box wiki write-back proposal.
 # A wiki write from an unattended file-box run is no longer applied at drop time;
-# it is parked as a Pending row a Jarvis reviewer (NOT the dropper) approves before
-# it lands (separation of duties). Distinct from "File Box" (document-classification
+# it is parked as a Pending row a Jarvis reviewer (the dropper too, with a reviewer
+# role) approves before it lands. Distinct from "File Box" (document-classification
 # approvals) so it routes to the reviewer lane and off the customer decide board.
 FILE_BOX_WIKI_SOURCE = "File Box Wiki"
 # Irreversible/consequential subset - gated even when a user has auto-apply

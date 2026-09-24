@@ -18,7 +18,6 @@ import frappe
 
 from jarvis._session import impersonate
 from jarvis.permissions import (
-	JARVIS_REVIEWER_ROLES,
 	message_origin,
 	refuse_in_tool_dispatch,
 	require_jarvis_user,
@@ -48,22 +47,6 @@ def _refuse_if_wiki_write(doc) -> None:
 			"This is a wiki-write proposal - use the reviewer approve/reject controls.",
 			frappe.PermissionError,
 		)
-
-
-def _tenant_reviewer_count() -> int:
-	"""Distinct enabled tenant users holding a Jarvis reviewer role, EXCLUDING the
-	framework Administrator/Guest. Drives the separation-of-duties single-reviewer
-	fallback: when a tenant has exactly one reviewer, that reviewer may approve a
-	wiki write they dropped (else it could never land)."""
-	rows = frappe.db.sql(
-		"""SELECT COUNT(DISTINCT hr.parent)
-		FROM `tabHas Role` hr
-		JOIN `tabUser` u ON u.name = hr.parent
-		WHERE hr.parenttype = 'User' AND hr.role IN %(roles)s
-		  AND u.enabled = 1 AND u.name NOT IN ('Administrator', 'Guest')""",
-		{"roles": tuple(JARVIS_REVIEWER_ROLES)},
-	)
-	return int((rows and rows[0][0]) or 0)
 
 
 def _decode_wiki_preview(payload: str | None) -> dict:
@@ -743,8 +726,8 @@ def _refuse_unless_digest_ok(name: str) -> dict:
 #
 # A file-box run's ``update_wiki`` is HELD as a Pending proposal (source
 # ``File Box Wiki``, api._propose_file_box_wiki_write) instead of landing. These
-# endpoints are the ONLY way that proposal transitions: a Jarvis reviewer (NOT
-# the dropper — separation of duties) approves it, and only then does the fenced
+# endpoints are the ONLY way that proposal transitions: a Jarvis reviewer (the
+# dropper too, when they hold a reviewer role) approves it, and only then does the fenced
 # write replay through api._file_box_wiki_write under the DROPPER's provenance.
 # Reviewer visibility is by ROLE (require_skill_reviewer), independent of who
 # owns the linked conversation — the customer decide board never shows these.
@@ -766,12 +749,6 @@ def _dropper_of(doc) -> str | None:
 	return doc.owner
 
 
-def _sod_blocks_self_approval(dropper: str | None) -> bool:
-	"""Strict separation of duties WITH a single-reviewer fallback: the dropper may
-	approve their OWN wiki write only when they are the tenant's sole reviewer."""
-	return frappe.session.user == dropper and _tenant_reviewer_count() > 1
-
-
 @frappe.whitelist()
 @require_jarvis_user
 def list_wiki_write_proposals(
@@ -779,8 +756,8 @@ def list_wiki_write_proposals(
 ) -> dict:
 	"""Wiki-write proposals for the reviewer lane, newest first by default. Reviewer-gated:
 	these are org-wide wiki writes, visible to the reviewer set regardless of who
-	dropped the file. Each row carries a decoded ``preview``, ``can_approve`` (the
-	SoD gate, so the UI hides Approve where it would be refused) and ``needs_retry``
+	dropped the file. Each row carries a decoded ``preview``, ``can_approve`` (still
+	Pending, so the UI offers Approve) and ``needs_retry``
 	(an approved write that did not land - the reconciliation affordance).
 
 	``status`` = ``Actionable`` (default) returns the rows a reviewer must act on:
@@ -821,19 +798,15 @@ def list_wiki_write_proposals(
 		params,
 		as_dict=True,
 	)
-	me = frappe.session.user
-	multi = _tenant_reviewer_count() > 1
 	for r in rows:
 		r["preview"] = _decode_wiki_preview(r.pop("wiki_payload", None))
 		# The AR owner was stamped to the dropper (conversation owner) at propose
-		# time - use it directly to avoid an N+1 conversation lookup per row. This
-		# feeds only the display + the can_approve HINT; approve_wiki_write re-checks
-		# SoD against the LIVE conversation owner server-side.
+		# time - use it directly to avoid an N+1 conversation lookup per row (display only).
 		dropper = r.get("owner")
 		r["dropper"] = dropper
 		r["apply_status"] = r.get("apply_status") or "Pending"
-		# Approve is offered only for a still-Pending row the caller may land.
-		r["can_approve"] = int(r["status"] == "Pending" and not (me == dropper and multi))
+		# Any reviewer (the dropper included) may approve a still-Pending row.
+		r["can_approve"] = int(r["status"] == "Pending")
 		# An approved write that did not land (Failed / interrupted) — the panel
 		# offers Retry; any reviewer may re-drive (the approve decision already stood).
 		r["needs_retry"] = int(r["status"] == "Approved" and r["apply_status"] != "Applied")
@@ -944,8 +917,8 @@ def _land_and_record(name: str, doc, dropper: str | None) -> dict:
 def approve_wiki_write(name: str, expected_digest: str | None = None) -> dict:
 	"""Reviewer approves a held wiki proposal; the fenced write then LANDS.
 
-	Gate: ``require_skill_reviewer`` + separation of duties (a reviewer OTHER than
-	the dropper, with a single-reviewer fallback for a solo-admin tenant). Race:
+	Gate: ``require_skill_reviewer`` (the dropper may approve their own note when
+	they hold a reviewer role). Race:
 	claim-first — win the Pending->Approved flip atomically and COMMIT before any
 	side effect, so two concurrent approvers can't both execute the write. Then
 	replay the write through the SAME fenced funnel as the auto path
@@ -965,12 +938,6 @@ def approve_wiki_write(name: str, expected_digest: str | None = None) -> dict:
 	if expected_digest and not hmac.compare_digest(str(expected_digest), str(row.wiki_digest)):
 		frappe.throw(_WIKI_CHANGED, frappe.PermissionError)
 	dropper = _dropper_of(doc)
-	if _sod_blocks_self_approval(dropper):
-		frappe.throw(
-			"A reviewer other than the person who dropped the file must approve this "
-			"wiki write (separation of duties).",
-			frappe.PermissionError,
-		)
 	me = frappe.session.user
 	# Claim-first: win the transition atomically before the (non-transactional
 	# from the AR's view) fenced write, so a double-approve executes the write once.

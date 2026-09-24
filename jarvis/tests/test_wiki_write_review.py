@@ -2,12 +2,11 @@
 
 A file-box run's ``update_wiki`` is HELD as a Pending ``Jarvis Approval Request``
 of source ``File Box Wiki`` (api._propose_file_box_wiki_write) instead of landing.
-A Jarvis reviewer - NOT the dropper (separation of duties) - approves it through
-approvals_api.approve_wiki_write, which replays the fenced write under the
-dropper's provenance. These tests cover the reviewer gate, the SoD decision
-(strict with a single-reviewer fallback), the claim-first race guard, the
-apply-status bookkeeping, and the defense-in-depth guards that keep a wiki
-proposal OFF the customer decide board.
+A Jarvis reviewer (the dropper too, when they hold a reviewer role) approves it
+through approvals_api.approve_wiki_write, which replays the fenced write under the
+dropper's provenance. These tests cover the reviewer gate, the claim-first race
+guard, the apply-status bookkeeping, and the defense-in-depth guards that keep a
+wiki proposal OFF the customer decide board.
 """
 
 import contextlib
@@ -85,7 +84,7 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 	def setUpClass(cls):
 		super().setUpClass()
 		# Dropper mirrors grant_onboarding_admin: a Jarvis Admin who is ALSO the
-		# file dropper (the SoD problem the review gate defends against).
+		# file dropper, so the reviewer role is what lets them approve.
 		_ensure_user(DROPPER, ("Jarvis User", "Jarvis Admin"))
 		_ensure_user(REVIEWER, ("Jarvis Admin",))
 		_ensure_user(PLAIN, ("Jarvis User",))
@@ -168,31 +167,22 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 		apply.assert_not_called()
 		self.assertEqual(frappe.db.get_value(APPROVAL, name, "status"), "Pending")
 
-	def test_sod_blocks_dropper_self_approval_when_multiple_reviewers(self):
-		conv = self._conv()
-		name = self._propose(conv)
-		with (
-			patch.object(approvals_api, "_tenant_reviewer_count", return_value=2),
-			_funnel() as (apply, _),
-			_as(DROPPER),
-		):
-			with self.assertRaises(frappe.PermissionError):
-				approvals_api.approve_wiki_write(name)
-		apply.assert_not_called()
-		self.assertEqual(frappe.db.get_value(APPROVAL, name, "status"), "Pending")
-
-	def test_single_reviewer_fallback_allows_dropper_self_approval(self):
-		conv = self._conv()
-		name = self._propose(conv)
-		with (
-			patch.object(approvals_api, "_tenant_reviewer_count", return_value=1),
-			_funnel() as (apply, _),
-			_as(DROPPER),
-		):
+	def test_dropper_with_a_reviewer_role_approves_their_own_note(self):
+		# The reviewer role is the gate, however many other reviewers the tenant has.
+		name = self._propose(self._conv())
+		with _funnel() as (apply, _), _as(DROPPER):
 			res = approvals_api.approve_wiki_write(name)
 		self.assertTrue(res["applied"])
 		apply.assert_called_once()
 		self.assertEqual(frappe.db.get_value(APPROVAL, name, "status"), "Approved")
+
+	def test_dropper_without_a_reviewer_role_cannot_approve_their_own_note(self):
+		name = self._propose(self._conv(owner=PLAIN))
+		with _funnel() as (apply, _), _as(PLAIN):
+			with self.assertRaises(frappe.PermissionError):
+				approvals_api.approve_wiki_write(name)
+		apply.assert_not_called()
+		self.assertEqual(frappe.db.get_value(APPROVAL, name, "status"), "Pending")
 
 	def test_double_approve_is_race_safe(self):
 		conv = self._conv()
@@ -329,13 +319,12 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 			out2 = approvals_api.list_wiki_write_proposals()
 		self.assertNotIn(name, {r["name"] for r in out2["rows"]})
 
-	def test_list_hides_approve_from_dropper_when_multi_reviewer(self):
-		conv = self._conv()
-		name = self._propose(conv)
-		with patch.object(approvals_api, "_tenant_reviewer_count", return_value=2), _as(DROPPER):
+	def test_list_offers_approve_to_a_dropper_with_a_reviewer_role(self):
+		name = self._propose(self._conv())
+		with _as(DROPPER):
 			out = approvals_api.list_wiki_write_proposals()
 		row = next(r for r in out["rows"] if r["name"] == name)
-		self.assertFalse(row["can_approve"])
+		self.assertTrue(row["can_approve"])
 		# The full proposed body is carried for the reviewer to read before approving.
 		self.assertEqual(row["preview"]["append_md"], _ARGS["append_md"])
 
@@ -422,21 +411,6 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 			# The wiki row is not in the count: dropping it and re-counting is stable.
 			frappe.db.set_value(APPROVAL, wiki, "status", "Rejected", update_modified=False)
 			self.assertEqual(approvals_api.pending_count(), count)
-
-
-class TestTenantReviewerCount(FrappeTestCase):
-	def test_excludes_administrator_and_counts_enabled_reviewers(self):
-		_ensure_user(REVIEWER, ("Jarvis Admin",))
-		before = approvals_api._tenant_reviewer_count()
-		self.assertGreaterEqual(before, 1)
-		# The query excludes Administrator/Guest by name, so a site whose only
-		# reviewer-role holders are those framework accounts would count 0 - the
-		# count only reflects real tenant reviewers like the one just created.
-		# Disabling the reviewer drops the count by one; re-enabling restores it.
-		frappe.db.set_value("User", REVIEWER, "enabled", 0, update_modified=False)
-		self.assertEqual(approvals_api._tenant_reviewer_count(), before - 1)
-		frappe.db.set_value("User", REVIEWER, "enabled", 1, update_modified=False)
-		self.assertEqual(approvals_api._tenant_reviewer_count(), before)
 
 
 class TestWikiSourceConstantParity(FrappeTestCase):
@@ -650,14 +624,14 @@ class TestWikiProposalDigest(_WikiBase):
 		name = self._propose()
 		digest = self._row(name).wiki_digest
 
-		def refresh(_dropper):
+		def refresh(_doc):
 			self._propose({**_ARGS, "append_md": "## Invoice INV-2"})
-			return False
+			return DROPPER
 
 		with (
 			_funnel() as (apply, _),
 			_as(REVIEWER),
-			patch.object(approvals_api, "_sod_blocks_self_approval", side_effect=refresh),
+			patch.object(approvals_api, "_dropper_of", side_effect=refresh),
 			self.assertRaisesRegex(frappe.PermissionError, "changed since you opened it"),
 		):
 			approvals_api.approve_wiki_write(name, expected_digest=digest)
