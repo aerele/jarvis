@@ -1,5 +1,5 @@
-"""The ``pending_confirm`` facade on ``Jarvis Pending Action`` (PR-3a), with the
-Redis store kept for dual-read.
+"""The ``pending_confirm`` facade on ``Jarvis Pending Action`` (PR-3a; never-expiring
+since PR-3b), with the Redis store kept for dual-read.
 
 A card in a real conversation is a pending-action row plus its display row, one
 transaction; confirm/discard run through ``pending_actions.execute`` / ``discard``
@@ -13,10 +13,13 @@ FLUSHALL would wipe the shared bench's cache."""
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import timedelta
 from unittest.mock import patch
 
 import frappe
+import redis
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
@@ -106,7 +109,7 @@ class TestMint(_Base):
 		[shown] = self.display_rows(conv)
 		self.assertEqual((shown.tool_call_id, shown.tool_status), (token, "pending"))
 		self.assertEqual(json.loads(shown.pending_card), PREVIEW["card"])
-		self.assertIsNotNone(shown.expires_at)
+		self.assertIsNone(shown.expires_at, "a pending action never expires")
 		self.assertIsNone(pending_confirm_legacy.peek(token), "nothing on Redis")
 
 	def test_flag_zero_mints_a_redis_token(self):
@@ -161,19 +164,70 @@ class TestSingleFlightBothStores(_Base):
 		self.flag(0)
 		legacy_token = self.mint(conv)
 		frappe.conf[pending_confirm.FLAG] = 1
-		self.assertIsNone(self.mint(conv), "park's legacy_pending hook refuses")
+		with self.assertRaises(pending_confirm.ConfirmationPendingError, msg="park's legacy_pending hook"):
+			self.mint(conv)
 		self.assertFalse(frappe.db.exists(PA, {"conversation": conv}))
 		self.assertIsNotNone(pending_confirm.peek(legacy_token))
 
-	def test_a_legacy_store_outage_fails_the_park_closed(self):
+	def redis_down(self):
+		cache = type(frappe.cache())
+		return patch.object(cache, "smembers", side_effect=redis.exceptions.ConnectionError("down"))
+
+	def test_a_legacy_store_outage_never_blocks_pending_action_cards(self):
+		"""A1a: with the flag on Redis holds only leftovers, so its outage reads as "no
+		Redis card": new cards still park, and the gate and typed replies still answer."""
 		conv = self.make_conv()
-		failure = pending_confirm.PendingConfirmStorageError("redis down")
+		with self.redis_down():
+			token = self.mint(conv)
+			self.assertTrue(frappe.db.exists(PA, token))
+			self.assertTrue(pending_confirm.blocks_new_card(OWNER, conv))
+			self.assertEqual([c["token"] for c in api_chat._typed_cards(OWNER, conv)], [token])
+
+	def test_with_the_flag_off_a_legacy_store_outage_still_fails_closed(self):
+		conv = self.make_conv()
+		self.flag(0)
+		with self.redis_down(), self.assertRaises(pending_confirm.PendingConfirmStorageError):
+			pending_confirm.blocks_new_card(OWNER, conv)
+
+	def test_a_park_refused_under_its_lock_reaches_the_gate_as_single_flight(self):
+		"""Not a storage error, even when the gate's own pre-check saw nothing."""
+		conv = self.make_conv()
+		self.mint(conv)
+		with self.assertRaises(pending_confirm.ConfirmationPendingError):
+			self.mint(conv)
 		with (
-			patch.object(pending_confirm_legacy, "list_for_owner", side_effect=failure),
+			patch.object(pending_confirm, "blocks_new_card", return_value=False),
+			patch("jarvis.api._run_preview", return_value={"would": {"doctype": "ToDo"}}),
+			as_user(OWNER),
+		):
+			res = api._run_tool("create_doc", dict(TODO), conversation=conv)
+		self.assertEqual(res["error"]["code"], "ConfirmationPendingError", res)
+
+	def test_a_live_pending_action_refuses_a_flag_zero_redis_mint(self):
+		"""AC-U13, the other direction: single-flight sees the pending action."""
+		conv = self.make_conv()
+		token = self.mint(conv)
+		self.flag(0)
+		with as_user(OWNER):
+			res = api._run_tool("create_doc", dict(TODO), conversation=conv)
+		self.assertEqual(res["error"]["code"], "ConfirmationPendingError")
+		with self.assertRaises(pending_confirm.ConfirmationPendingError):
+			self.mint(conv)
+		self.assertEqual(pending_confirm_legacy.list_for_owner(OWNER, conversation=conv), [])
+		self.assertEqual(self.row(token).status, "Pending")
+
+	def test_a_legacy_supersede_failure_stores_nothing_and_never_crashes(self):
+		conv = self.make_conv()
+		self.flag(0)
+		with (
+			patch(
+				"jarvis.chat.pending_actions._park._check_single_flight",
+				side_effect=RuntimeError("lock wait timeout"),
+			),
 			patch.object(frappe, "log_error"),
 		):
 			self.assertIsNone(self.mint(conv))
-		self.assertFalse(frappe.db.exists(PA, {"conversation": conv}))
+		self.assertEqual(pending_confirm_legacy.list_for_owner(OWNER, conversation=conv), [])
 
 	def test_the_gate_refuses_a_second_card_whichever_store_holds_the_first(self):
 		for flag in (0, 1):
@@ -194,17 +248,18 @@ class TestReads(_Base):
 		self.assertEqual((rec["token"], rec["owner"], rec["conversation"]), (token, OWNER, conv))
 		self.assertEqual((rec["skill_docname"], rec["preview"]), ("zz-skill", PREVIEW))
 		self.assertNotIn("args", rec)
-		self.assertEqual(rec["expires_at"] - rec["created_at"], _store.CHAT_TTL_S)
+		self.assertIsNone(rec["expires_at"])
+		self.assertIsInstance(rec["created_at"], int)
 		_store._transition(token, ["Pending"], "Discarded", reason_code="discarded")
 		frappe.db.commit()
 		self.assertIsNone(pending_confirm.peek(token))
 
-	def test_a_card_past_fifteen_minutes_reads_as_gone(self):
+	def test_an_old_card_still_reads_live(self):
 		conv = self.make_conv()
 		token = self.mint(conv)
-		self.age(token, _store.CHAT_TTL_S + 5)
-		self.assertIsNone(pending_confirm.peek(token))
-		self.assertEqual(pending_confirm.list_for_owner(OWNER, conv), [])
+		self.age(token, 30 * 86400)
+		self.assertEqual(pending_confirm.peek(token)["token"], token)
+		self.assertEqual([c["token"] for c in pending_confirm.list_for_owner(OWNER, conv)], [token])
 
 	def test_a_db_outage_is_a_storage_error_on_strict_reads_only(self):
 		conv = self.make_conv()
@@ -240,8 +295,20 @@ class TestReads(_Base):
 			[only] = pending_confirm.list_items_for_owner(OWNER, pa_conv)
 		self.assertEqual(
 			set(only),
-			{"token", "tool", "preview", "summary", "conversation", "run_id", "expires_at", "created_at"},
+			{
+				"token",
+				"tool",
+				"preview",
+				"summary",
+				"conversation",
+				"run_id",
+				"expires_at",
+				"created_at",
+				"seq",
+				"recent",
+			},
 		)
+		self.assertTrue(only["recent"], "parked after the last human message (none yet)")
 		self.assertEqual((only["token"], only["preview"]), (pa_token, PREVIEW))
 		self.assertIsInstance(only["created_at"], int)
 
@@ -261,25 +328,67 @@ class TestReads(_Base):
 
 
 class TestConsumeClearRollback(_Base):
-	def test_consume_retires_the_card_unrun_and_does_not_burn_it_for_a_stranger(self):
+	def test_consume_never_hands_out_or_retires_a_pending_action(self):
+		"""Its sealed args never leave the executor: only execute / discard act on it."""
 		conv = self.make_conv()
 		token = self.mint(conv)
-		self.assertIsNone(pending_confirm.consume(token, owner=OTHER, conversation=conv))
-		self.assertIsNone(pending_confirm.consume(token, owner=OWNER, conversation="zz-other"))
-		self.assertEqual(self.row(token).status, "Pending")
 		with fake_dispatch() as calls:
-			rec = pending_confirm.consume(token, owner=OWNER, conversation=conv)
-		self.assertEqual(rec["args"], TODO)
-		self.assertEqual(calls, [], "consume never runs a pending action")
-		self.assertEqual((self.row(token).status, self.row(token).settled), ("Cancelled", 1))
-		self.assertEqual(self.display_rows(conv)[0].action_outcome, "cancelled")
+			for owner, where in ((OTHER, conv), (OWNER, "zz-other"), (OWNER, conv)):
+				self.assertIsNone(pending_confirm.consume(token, owner=owner, conversation=where))
+		self.assertEqual(calls, [])
+		self.assertEqual(
+			(self.row(token).status, self.display_rows(conv)[0].tool_status), ("Pending", "pending")
+		)
+
+	def test_the_stop_row_sweep_leaves_pending_action_rows_to_their_settle(self):
+		"""An executing card's row must not read "cancelled" while it runs."""
+		conv = self.make_conv()
+		running = self.mint(conv)
+		self.set_col(running, status="Executing")
+		legacy_token = pending_confirm_legacy.mint(
+			conversation=conv, owner=OWNER, tool="create_doc", args=dict(TODO), run_id=""
+		)
+		api.persist_pending_action(conv, "create_doc", dict(PREVIEW), legacy_token, int(time.time()) + 900)
+		api.cancel_pending_action_rows(conv)
+		rows = {r.tool_call_id: r for r in self.display_rows(conv)}
+		self.assertEqual((rows[running].tool_status, rows[running].action_outcome or ""), ("pending", ""))
+		self.assertEqual(rows[legacy_token].action_outcome, "cancelled")
+
+	def test_the_stop_sweep_waits_out_a_refused_confirms_row_lock(self):
+		"""A Confirm refused under its row lock (armed run) must not leave the card
+		Pending behind the Stop / macro sweep."""
+		conv = self.make_conv()
+		token = self.mint(conv)
+		site, locked = frappe.local.site, threading.Event()
+
+		def refused_confirm():
+			frappe.init(site=site)
+			frappe.connect()
+			try:
+				frappe.db.sql(f"SELECT name FROM `tab{PA}` WHERE name=%(n)s FOR UPDATE NOWAIT", {"n": token})
+				locked.set()
+				time.sleep(1.5)
+				frappe.db.rollback()
+			finally:
+				frappe.destroy()
+
+		t = threading.Thread(target=refused_confirm)
+		t.start()
+		try:
+			self.assertTrue(locked.wait(timeout=20))
+			cleared = pending_confirm.clear_for_conversation(OWNER, conv)
+		finally:
+			t.join(timeout=20)
+		self.assertEqual((cleared, self.row(token).status), (1, "Cancelled"))
 
 	def test_clear_for_conversation_cancels_that_conversations_cards_in_both_stores(self):
 		conv, keep = self.make_conv(), self.make_conv()
 		pa_token = self.mint(conv)
 		kept = self.mint(keep)
-		self.flag(0)
-		legacy_token = self.mint(conv)  # the legacy mint has no single-flight of its own
+		# Only reachable mid-rollout: the facade's legacy mint now honours single-flight.
+		legacy_token = pending_confirm_legacy.mint(
+			conversation=conv, owner=OWNER, tool="create_doc", args=dict(TODO), run_id=""
+		)
 		self.assertEqual(pending_confirm.clear_for_conversation(OWNER, conv), 2)
 		self.assertEqual(self.row(pa_token).status, "Cancelled")
 		self.assertIsNone(pending_confirm_legacy.peek(legacy_token))
@@ -298,8 +407,8 @@ class TestConsumeClearRollback(_Base):
 		before = pending_confirm.cards_open_gauge()
 		token = self.mint(self.make_conv())
 		self.assertEqual(pending_confirm.cards_open_gauge(), before + 1)
-		self.age(token, _store.CHAT_TTL_S + 5)
-		self.assertEqual(pending_confirm.cards_open_gauge(), before)
+		self.age(token, 30 * 86400)
+		self.assertEqual(pending_confirm.cards_open_gauge(), before + 1, "an old card is still open")
 
 
 class TestConfirmAndSettle(_Base):
@@ -397,6 +506,46 @@ class TestConfirmAndSettle(_Base):
 		self.assertTrue(row.batch_id)
 		self.assertEqual(len(self.user_rows(conv)), 1, "ONE continuation for the batch")
 
+	def test_a_stale_card_in_a_typed_batch_joins_its_one_continuation(self):
+		"""C3: a seal / staleness failure settles with its batch, not on its own."""
+		from jarvis.chat.api import _run_typed_batch
+
+		conv = self.make_conv()
+		todo = self.make_todo()
+		changes = {"description": "pa-test proposed"}
+		stale = self.mint(conv, tool="update_doc", args={"doctype": "ToDo", "name": todo, "changes": changes})
+		fine = self.park(None)
+		self.set_col(fine, conversation=conv)
+		frappe.db.set_value("ToDo", todo, "description", "pa-test edited meanwhile")
+		frappe.db.commit()
+		items = [{"token": t, "position": i, "summary": ""} for i, t in enumerate((stale, fine), 1)]
+		with fake_dispatch(), as_user(OWNER):
+			out = _run_typed_batch(conv, items)
+		self.assertEqual([r["ok"] for r in out["results"]], [False, True])
+		self.assertEqual([self.row(t).settled for t in (stale, fine)], [1, 1])
+		self.assertEqual(self.row(stale).batch_id, self.row(fine).batch_id)
+		self.assertEqual(len(self.user_rows(conv)), 1, "ONE continuation for the batch")
+
+	def test_a_click_on_a_card_that_left_pending_reports_and_self_heals(self):
+		"""R-m3: the click paths route a pending action in any state to the executor, so
+		they answer its real reason_code / pa_status and settle a lost settle."""
+		conv = self.make_conv()
+		running, done = self.mint(conv), None
+		_store.claim(running, OWNER)
+		frappe.db.commit()
+		with as_user(OWNER):
+			for call in (actions_api.confirm_tool, actions_api.approve_and_run):
+				res = call(running, conversation=conv)
+				self.assertEqual((res["reason_code"], res["pa_status"]), ("executing", "Executing"), call)
+			self.assertEqual(actions_api.dismiss_tool(running, conversation=conv)["reason_code"], "executing")
+		_store._terminal_update(running, ["Executing"], "Executed")
+		frappe.db.commit()
+		done = running
+		with as_user(OWNER):
+			res = actions_api.confirm_tool(done, conversation=conv)
+		self.assertEqual((res["reason_code"], res["pa_status"]), ("already_handled", "Executed"))
+		self.assertEqual(self.row(done).settled, 1, "the click settled what the lost settle left")
+
 	def _interrupt(self, token):
 		_store.claim(token, OWNER)
 		old = frappe.utils.now_datetime() - timedelta(seconds=_reconcile.INTERRUPT_AFTER_S + 60)
@@ -439,40 +588,57 @@ class TestConfirmAndSettle(_Base):
 		self.assertEqual(frappe.db.get_value(MSG, out["message_id"], "owner"), OWNER)
 
 
-class TestFifteenMinutes(_Base):
-	"""PR-3a keeps the legacy 15 minutes (PR-3b removes them)."""
+class TestNeverExpire(_Base):
+	"""PR-3b (decision 2): a pending-action card waits until a human acts on it."""
 
-	def test_execute_refuses_an_expired_card_and_ends_it_expired(self):
+	def test_an_old_card_still_confirms(self):
 		conv = self.make_conv()
 		token = self.mint(conv)
-		self.age(token, _store.CHAT_TTL_S + 5)
-		from jarvis.chat import pending_actions
-
+		self.age(token, 30 * 86400)
 		with fake_dispatch() as calls, as_user(OWNER):
-			res = pending_actions.execute(token, conversation=conv)
-		self.assertEqual((res["reason_code"], res["outcome"]), ("expired", "expired"))
-		self.assertEqual(calls, [])
-		self.assertEqual((self.row(token).status, self.row(token).reason_code), ("Cancelled", "expired"))
-		self.assertEqual(self.display_rows(conv)[0].action_outcome, "expired")
+			res = actions_api.confirm_tool(token, conversation=conv)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual((len(calls), self.row(token).status), (1, "Executed"))
 
-	def test_an_expired_card_never_holds_the_conversations_single_flight(self):
-		"""A lapsed Redis token never blocked the next card; neither may a pending
-		action the reconciler hasn't reached yet."""
+	def test_an_old_card_still_holds_the_conversations_single_flight(self):
+		"""Nothing times it out: only a human's next message lets a proposal supersede it."""
 		conv = self.make_conv()
 		stale = self.mint(conv)
-		self.age(stale, _store.CHAT_TTL_S + 5)
-		fresh = self.mint(conv)
-		self.assertTrue(fresh)
-		self.assertEqual((self.row(stale).status, self.row(stale).reason_code), ("Cancelled", "expired"))
+		self.age(stale, 30 * 86400)
+		with self.assertRaises(pending_confirm.ConfirmationPendingError):
+			self.mint(conv)
+		self.assertEqual(self.row(stale).status, "Pending")
 
-	def test_the_reconciler_expires_only_cards_past_fifteen_minutes(self):
-		old, fresh = self.make_conv(), self.make_conv()
-		stale, live = self.mint(old), self.mint(fresh)
-		self.age(stale, _store.CHAT_TTL_S + 5)
-		self.assertGreaterEqual(_reconcile._expire_chat_cards(), 1)
-		self.assertEqual((self.row(stale).status, self.row(stale).reason_code), ("Cancelled", "expired"))
-		self.assertEqual(self.row(live).status, "Pending")
-		self.assertEqual(self.display_rows(old)[0].action_outcome, "expired")
+	def test_the_reconciler_leaves_old_cards_pending(self):
+		conv = self.make_conv()
+		token = self.mint(conv)
+		self.age(token, 30 * 86400)
+		_reconcile.reconcile()
+		self.assertEqual(self.row(token).status, "Pending")
+		self.assertEqual(self.display_rows(conv)[0].tool_status, "pending")
+		self.assertFalse(hasattr(_reconcile, "_expire_chat_cards"))
+		self.assertFalse(hasattr(_store, "CHAT_TTL_S"))
+
+
+class TestChatTargetSnapshot(_Base):
+	"""D2 for chat cards: a never-expiring card re-validates its target at confirm."""
+
+	def test_a_target_changed_since_the_park_fails_stale_and_runs_nothing(self):
+		conv = self.make_conv()
+		todo = self.make_todo()
+		token = self.mint(
+			conv,
+			tool="update_doc",
+			args={"doctype": "ToDo", "name": todo, "changes": {"description": "pa-test proposed"}},
+		)
+		frappe.db.set_value("ToDo", todo, "description", "pa-test edited meanwhile")
+		frappe.db.commit()
+		with fake_dispatch() as calls, as_user(OWNER):
+			res = actions_api.confirm_tool(token, conversation=conv)
+		self.assertEqual((res["reason_code"], calls), ("stale", []))
+		self.assertEqual(
+			(self.row(token).status, self.display_rows(conv)[0].action_outcome), ("Failed", "failed")
+		)
 
 
 class TestApproveAndRun(_Base):

@@ -62,3 +62,4 @@ jarvis.patches.v2_20_action_card_pending_index
 jarvis.patches.v2_21_drop_allow_custom_urls
 jarvis.patches.v2_22_mint_wiki_proposal_digests
 jarvis.patches.v2_22_backfill_filebox_results
+jarvis.patches.v2_23_never_expire_chat_cards

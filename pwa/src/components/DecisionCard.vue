@@ -2,7 +2,12 @@
 // The agent has parked a write and is waiting for a human. This card is the
 // only thing standing between the model and your ERP data, so it is loud on
 // purpose: amber, full width, and it does not go away on its own.
-const props = defineProps({ summary: { type: String, required: true } });
+// `earlier`: parked before the user's latest message, so a bare typed "yes"/"no"
+// no longer binds it (decision 6).
+const props = defineProps({
+	summary: { type: String, required: true },
+	earlier: { type: Boolean, default: false },
+});
 const emit = defineEmits(["open"]);
 </script>
 
@@ -27,7 +32,9 @@ const emit = defineEmits(["open"]);
 		</span>
 		<span class="jv-decision-main">
 			<span class="jv-decision-title">{{ props.summary }}</span>
-			<span class="jv-decision-sub">Review and approve</span>
+			<span class="jv-decision-sub">{{
+				props.earlier ? "Earlier · Review and approve" : "Review and approve"
+			}}</span>
 		</span>
 		<svg
 			class="jv-decision-chev"

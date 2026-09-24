@@ -140,8 +140,12 @@ def cancel_for_conversation(conversation: str, *, reason: str = "cancelled") -> 
 		return []
 	frappe.db.commit()
 	lock_conversation(conversation)
+	# Blocking, not SKIP LOCKED: a Confirm refused under its row lock (an armed macro
+	# run) would otherwise leave its card Pending behind the sweep, confirmable once
+	# the run disarms. A Confirm that claims first leaves the row Executing instead.
 	chat = frappe.db.sql_list(
-		"SELECT name FROM `tabJarvis Pending Action` WHERE conversation=%(c)s AND kind='chat' AND status='Pending'",
+		"SELECT name FROM `tabJarvis Pending Action` WHERE conversation=%(c)s AND kind='chat'"
+		" AND status='Pending' FOR UPDATE",
 		{"c": conversation},
 	)
 	cancelled = [n for n in chat if _transition(n, [PENDING], CANCELLED, reason_code=reason) == "ok"]

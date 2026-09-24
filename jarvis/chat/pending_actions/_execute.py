@@ -18,7 +18,6 @@ from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._park import target_state
 from jarvis.chat.pending_actions._settle import outcome_for, settle
 from jarvis.chat.pending_actions._store import (
-	CANCELLED,
 	CONV,
 	EXECUTED,
 	EXECUTING,
@@ -27,7 +26,6 @@ from jarvis.chat.pending_actions._store import (
 	REASON_TEXT,
 	TERMINAL,
 	_terminal_update,
-	chat_expired,
 	claim,
 	get_row,
 )
@@ -94,13 +92,7 @@ def authorize(row, approver: str, kind: str, conversation: str | None = None) ->
 
 
 def _preflight(row, approver: str, arm: ArmHook | None) -> dict | None:
-	"""Refusals under the row lock. The row stays Pending, except a chat card past its
-	15 minutes (PR-3a), which ends ``Cancelled``/``expired`` here (committed + settled)."""
-	if chat_expired(row):
-		_terminal_update(row.name, [PENDING], CANCELLED, reason_code="expired", decided_by=approver)
-		frappe.db.commit()
-		settle(row.name)
-		return _refusal("expired", REASON_TEXT["expired"], pa_status=CANCELLED, outcome="expired")
+	"""Refusals under the row lock; the row stays Pending."""
 	if row.conversation and frappe.db.get_value(CONV, row.conversation, "skip_confirmation"):
 		return _refusal(*_ARMED)
 	if arm:
@@ -235,15 +227,18 @@ def _result_ref(args: dict, result) -> tuple[str, str]:
 	return doctype or "", name or ""
 
 
-def _fail_unrun(row, approver: str, code: str, binding: str = "") -> dict:
-	"""Step 5: a seal or staleness failure ends the row without dispatching."""
-	_terminal_update(row.name, [PENDING], FAILED, reason_code=code, decided_by=approver)
+def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=None, defer=False) -> dict:
+	"""Step 5: a seal or staleness failure ends the row without dispatching. In a typed
+	batch it joins the batch and waits for ``settle_batch`` (ONE continuation)."""
+	cols = {"batch_id": batch_id} if batch_id else {}
+	_terminal_update(row.name, [PENDING], FAILED, reason_code=code, decided_by=approver, **cols)
 	if code in ("tampered", "unverifiable"):
 		frappe.log_error(
 			title=f"jarvis.pending_action.{code}", message=f"{row.name}: failed binding {binding}"
 		)
 	frappe.db.commit()
-	settle(row.name)
+	if not defer:
+		settle(row.name)
 	return _refusal(code, REASON_TEXT[code], pa_status=FAILED, outcome="failed")
 
 
@@ -305,13 +300,14 @@ def _execute_locked(
 	if refused:
 		frappe.db.rollback()
 		return refused
+	unrun = {"batch_id": batch_id, "defer": defer_continuation}
 	try:
 		call = _seal.unseal_call(row)
 	except _seal.SealError as e:
-		return _fail_unrun(row, approver, e.reason_code, e.binding)
+		return _fail_unrun(row, approver, e.reason_code, e.binding, **unrun)
 	stale = _stale_code(call.get("targets"))
 	if stale:
-		return _fail_unrun(row, approver, stale)
+		return _fail_unrun(row, approver, stale, **unrun)
 
 	if not claim(name, approver, batch_id=batch_id, adopted_conversation=adopt):
 		frappe.db.rollback()

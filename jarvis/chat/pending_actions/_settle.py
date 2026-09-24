@@ -105,7 +105,14 @@ def _deliver(item: dict) -> None:
 	from jarvis import api
 
 	# A legacy sweep may have mislabelled an executing card; its real outcome wins.
-	overwrite = ("cancelled", "superseded") if item["status"] in (EXECUTED, FAILED) else ()
+	# Supersede flipped its own chip in park's transaction: re-flip it so the chip
+	# publishes live (the dedupe-insert fallback never publishes).
+	if item["status"] in (EXECUTED, FAILED):
+		overwrite = ("cancelled", "superseded")
+	elif item["status"] == SUPERSEDED:
+		overwrite = ("superseded",)
+	else:
+		overwrite = ()
 	api.persist_tool_receipt(
 		conv,
 		item["tool"] or "",

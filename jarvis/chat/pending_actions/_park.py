@@ -13,11 +13,11 @@ from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._store import EXECUTING, KINDS, PA, PENDING, lock_conversation
 from jarvis.permissions import refuse_in_tool_dispatch
 
-# D7 supersede (PR-3b), as a dotted path. Called under the conversation lock with a
-# live Pending chat row of the same conversation: ``fn(row, *, conversation,
+# D7 supersede, as a dotted path. Called under the conversation lock with a live
+# Pending chat row of the same conversation: ``fn(row, *, conversation,
 # owner_user) -> bool``. It must not commit; True means it moved ``row`` to
 # Superseded (via ``_store._transition``) and park may proceed. None = never.
-SUPERSEDE_HOOK: str | None = None
+SUPERSEDE_HOOK: str | None = "jarvis.chat.pending_confirm.supersede_on_park"
 
 # Target-bound tools re-validate against this snapshot at execute (D2); creates are
 # validated by the real write instead.

@@ -29,3 +29,53 @@ export function comparePendingCards(a, b) {
 export function sortPendingCards(cards) {
   return [...(cards || [])].sort(comparePendingCards);
 }
+
+// A typed "no" discards its cards before the turn starts (send_message's
+// `typed_rejection`); drop them from the stack so they never linger as live
+// offers. Tolerates a server that sends no such field.
+export function dropDiscarded(cards, res) {
+  const d = res && res.typed_rejection && res.typed_rejection.discarded;
+  const gone = new Set((Array.isArray(d) ? d : []).map((x) => x && x.token));
+  return gone.size
+    ? (cards || []).filter((c) => !gone.has(c.token))
+    : cards || [];
+}
+
+// Typed yes/no scope (decision 6), mirrored from frontend/src/lib/typedCardReply.js:
+// a bare or sweep phrase ("go ahead", "confirm all") binds only the cards parked
+// since the user's latest message (the server's `recent`). An older card is
+// "Earlier" and only its number binds it, so the hint never offers it a bare phrase.
+export function isRecentCard(card) {
+  return !!card && card.recent !== false;
+}
+
+export function typedApprovalHint(cards) {
+  const n = (cards || []).length;
+  if (!n) return "";
+  const allRecent = cards.every(isRecentCard);
+  if (n > 1)
+    return allRecent
+      ? `or type "confirm all", or "confirm 1 and ${n}"`
+      : `or type "confirm 1 and ${n}"`;
+  return allRecent ? 'or type "go ahead"' : 'or type "confirm 1"';
+}
+
+// An accepted send means the user just spoke: the cards on screen when they sent
+// (`tokens`) are now older than their latest message.
+export function markCardsEarlier(cards, tokens) {
+  const shown = new Set(tokens || []);
+  return (cards || []).map((c) =>
+    shown.has(c.token) ? { ...c, recent: false } : c
+  );
+}
+
+// A card only ever ages, so when a resync's sources disagree the Earlier reading
+// wins: a transcript row loaded before the send must not re-offer a bare phrase.
+export function keepEarlier(cards, ...sources) {
+  const older = new Set();
+  for (const src of sources)
+    for (const c of src || []) if (c && c.recent === false) older.add(c.token);
+  return (cards || []).map((c) =>
+    older.has(c.token) && isRecentCard(c) ? { ...c, recent: false } : c
+  );
+}

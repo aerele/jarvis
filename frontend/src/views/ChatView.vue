@@ -2438,6 +2438,11 @@
 								<path d="M12 9v4M12 17h.01" />
 							</svg>
 							<span class="jv-action-title">Confirm before this runs</span>
+							<!-- Parked before the user's latest message: a bare "yes"/"no"
+							     no longer binds it, only its number or its buttons. -->
+							<span v-if="!isRecentCard(pa)" class="jv-pending-earlier"
+								>Earlier</span
+							>
 							<!-- The number is what a typed "confirm 1 and 3" selects by, so it
 							     only appears when there is actually a choice to make. -->
 							<span v-if="visiblePendingActions.length > 1" class="jv-pending-num">
@@ -2557,6 +2562,13 @@
 								Discard
 							</button>
 						</div>
+					</div>
+					<!-- A typed yes/no that bound no card went to Jarvis as a normal
+					     message; say so without blocking anything (decision 13). The
+					     live region stays mounted and only its text toggles, so the
+					     change is announced. -->
+					<div class="jv-pending-older-note" role="status" aria-live="polite">
+						{{ olderCardsNoteText }}
 					</div>
 				</div>
 			</div>
@@ -4693,6 +4705,12 @@ import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { reconcilePending } from "@/lib/pendingResync";
+import {
+	discardedTokens,
+	isRecentCard,
+	markCardsEarlier,
+	typedApprovalHint as hintFor,
+} from "@/lib/typedCardReply";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
@@ -7705,13 +7723,23 @@ const approveRunBusyToken = ref(null);
 // What the hint offers depends on how many cards are stacked: with one there
 // is nothing to select, with several the useful thing to teach is that both
 // all-at-once and pick-a-few work.
-const typedApprovalHint = computed(() => {
-	const n = visiblePendingActions.value.length;
-	// The example must reference cards that actually exist: with two parked,
-	// "confirm 1 and 3" names a card 3 that is not there, so a user who copies it
-	// verbatim gets an out-of-range no-op. Use the real first and last numbers.
-	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
-});
+// An "Earlier" card (parked before the user's latest message) never gets the
+// bare-phrase hint: only its number binds it (lib/typedCardReply.js).
+const typedApprovalHint = computed(() => hintFor(visiblePendingActions.value));
+// The conversation whose last send was a typed yes/no that bound no card. The note
+// stays while an older card is still on screen there, and clears with the last one.
+const olderCardsNoteFor = ref("");
+const showOlderCardsNote = computed(
+	() =>
+		!!olderCardsNoteFor.value &&
+		olderCardsNoteFor.value === currentId.value &&
+		visiblePendingActions.value.some((pa) => !isRecentCard(pa))
+);
+const olderCardsNoteText = computed(() =>
+	showOlderCardsNote.value
+		? "An earlier action card is still waiting — use its buttons or the Approval Board."
+		: ""
+);
 const visiblePendingActions = computed(() =>
 	// Ordered by the shared, unit-tested comparator (sortPendingCards): stable
 	// numbers for a typed "confirm N". See lib/sortPendingCards.js.
@@ -7756,9 +7784,9 @@ function pendingBatchOf(pa) {
 function pendingDetailsOf(pa) {
 	return pendingPreviewOf(pa);
 }
-// Wall-clock expiry (F15): a coarse tick flips a card to its "expired" state once
-// the 15-min token TTL lapses, so a stale card stops looking actionable. Real
-// enforcement stays server-side (confirming an expired token fails).
+// Wall-clock expiry (F15), legacy Redis cards only: a coarse tick flips one to its
+// "expired" state once its 15-min token TTL lapses. A pending-action card carries
+// no expires_at and never expires. Real enforcement stays server-side.
 const pendingNowMs = ref(Date.now());
 let _expiryTick = null;
 onMounted(() => {
@@ -7812,6 +7840,8 @@ function pendingActionFromRow(m, convId) {
 		// ordering (sortPendingCards falls back to expires_at when this is null).
 		created_at: _rowExpiresEpoch(m.creation),
 		expires_at: _rowExpiresEpoch(m.expires_at),
+		seq: m.seq ?? null,
+		recent: m.recent !== false,
 	};
 }
 function seedPendingFromRows(msgs, convId) {
@@ -7849,6 +7879,8 @@ function enqueuePending(card) {
 		run_id: card.run_id || null,
 		created_at: card.created_at || null,
 		expires_at: card.expires_at || null,
+		seq: card.seq ?? null,
+		recent: card.recent !== false,
 		busy: false,
 		error: null,
 	});
@@ -8117,6 +8149,11 @@ async function resyncPendingConfirmations(id, source) {
 	// frame) decides what shows. A token whose Confirm/Discard RPC is in flight
 	// is never (re)added (P0c in-flight suppression) - see reconcilePending.
 	const { kept, toAdd } = reconcilePending(pendingActions.value, id, items, inflightTokens);
+	// Server truth also says which kept cards are still "recent" (decision 6).
+	const fresh = new Map(items.map((it) => [it.token, it]));
+	for (const pa of kept)
+		if (pa.conversation === id && fresh.has(pa.token))
+			pa.recent = fresh.get(pa.token).recent !== false;
 	pendingActions.value = kept;
 	for (const it of toAdd) {
 		enqueuePending({
@@ -8128,6 +8165,8 @@ async function resyncPendingConfirmations(id, source) {
 			run_id: it.run_id || null,
 			created_at: it.created_at || null,
 			expires_at: it.expires_at || null,
+			seq: it.seq ?? null,
+			recent: it.recent,
 		});
 	}
 }
@@ -9684,6 +9723,9 @@ async function send(textArg, resendAck) {
 		// duplicating them (the lifecycle tests anchor on the FIRST occurrence of
 		// those lines, and a second copy above the rejection block moves the anchor).
 		if (r && r.ok === false && !r.confirmed) {
+			// A typed "no" whose send then lost the admission race still discarded its
+			// cards (the server says which); they must not linger as live offers.
+			for (const t of discardedTokens(r)) removePending(t);
 			// The server rejected the send (e.g. the single-flight guard:
 			// "a reply is already in progress", or the monthly usage cap).
 			// Nothing was persisted — recover it (below) so no work and no voice audio
@@ -9805,6 +9847,13 @@ async function send(textArg, resendAck) {
 			await onTypedConfirmResolved(r);
 			return;
 		}
+		// A typed "no" discarded these before its turn started: drop them now, no
+		// reload mid-send. The user just spoke, so every card still here is Earlier;
+		// a yes/no that bound none raises the non-blocking note (decision 13).
+		const _spokeIn = r?.conversation_id || sentFrom;
+		for (const t of discardedTokens(r)) removePending(t);
+		markCardsEarlier(pendingActions.value, _spokeIn);
+		olderCardsNoteFor.value = r?.older_cards_waiting ? _spokeIn : "";
 		// Phase-0 admission: the send was accepted but QUEUED (all slots taken).
 		// Show the "~N ahead" chip + Cancel instead of the streaming spinner; the
 		// reply begins when a slot frees (run:start clears queuedTurn). Position
@@ -9972,6 +10021,8 @@ function onEvent(p) {
 				run_id: p.run_id || null,
 				created_at: p.created_at || null,
 				expires_at: p.expires_at || null,
+				seq: p.seq ?? null,
+				recent: p.recent,
 			});
 			// Keep pulling server truth for the rest of the turn: if THIS push
 			// arrived but a sibling's was dropped, the poll fills the gap.
@@ -15481,6 +15532,29 @@ onUnmounted(() => {
 	color: var(--cta-fg) !important;
 	border-color: var(--cta) !important;
 	filter: brightness(1.18);
+}
+/* Parked before the user's latest message: only its number binds it now. */
+.jv-pending-earlier {
+	margin-left: 6px;
+	padding: 1px 6px;
+	border-radius: 999px;
+	font-size: 11px;
+	color: var(--text-3);
+	background: var(--surface-2);
+}
+.jv-pending-older-note {
+	margin: 4px 14px 8px;
+	font-size: 12px;
+	color: var(--text-3);
+}
+/* Empty, it stays in the accessibility tree but out of the thread's flex gap. */
+.jv-pending-older-note:empty {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
 }
 /* The card's position in the parked stack. It is a selector, not decoration:
    "confirm 2" means this one. */

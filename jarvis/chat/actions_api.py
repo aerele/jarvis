@@ -658,6 +658,8 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 	try:
 		record = pending_confirm.peek(token, strict=True)
 		if not record:
+			if pending_confirm.is_pending_action(token):
+				return _run_pending_action(token, passed_conv)  # reports its state; nothing runs
 			return _INVALID_CONFIRM
 		refused = _approve_run_refusal(record)
 		if refused:
@@ -785,9 +787,9 @@ def _confirm_core(
 	token = (token or "").strip()
 	try:
 		record = pending_confirm.peek(token, strict=True)
-		if not record:
+		if not record and not pending_confirm.is_pending_action(token):
 			return _INVALID_CONFIRM
-		if record.get("pending_action"):
+		if not record or record.get("pending_action"):
 			# execute() refuses an armed macro run under the row lock itself.
 			return _confirm_pending_action(
 				token, (conversation or "").strip(), batch=batch, batch_id=batch_id
@@ -907,8 +909,8 @@ def _confirm_pending_action(token: str, passed_conv: str, *, batch: bool, batch_
 		from jarvis.chat.pending_actions._store import TERMINAL, get_row
 
 		row = get_row(token)
-		# Only a card THIS batch ran waits for settle_batch (a refusal or a seal /
-		# staleness failure is already settled on its own).
+		# Only a card THIS batch decided waits for settle_batch (ran, or failed its seal /
+		# staleness check); a refusal left it untouched.
 		if row and row.batch_id == batch_id and row.status in TERMINAL and not row.settled:
 			res["receipt_text"] = _pa_receipt_text(_item(row))
 			res["pa_deferred"] = True
@@ -994,11 +996,21 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	turn: the user just said no; let them speak next.
 
 	A benign no-op when the token is already consumed/expired (a Confirm in
-	another tab won the race, or the 15-min TTL lapsed): returns ok with
-	``already_handled`` so the SPA silently drops the card. Human cookie-session
-	only.
+	another tab won the race, or a legacy token's 15-min TTL lapsed): returns ok
+	with ``already_handled`` so the SPA silently drops the card. Human
+	cookie-session only.
 	"""
 	refuse_in_tool_dispatch()
+	return _dismiss_core(token, conversation)
+
+
+def _dismiss_core(token: str, conversation: str | None = None, *, typed: bool = False) -> dict:
+	"""The discard itself, with no HTTP surface: the Discard button (``dismiss_tool``)
+	and a typed rejection (``chat.api._apply_typed_rejection``) share it. A pending
+	action -> ``pending_actions.discard``; a legacy token -> the single-use consume.
+	Either way the ``discarded`` chip, the audit row and the autorun clear (A6).
+	``typed``: the caller appends ONE combined veto note for the whole reply, so no
+	per-card note is queued here."""
 	if frappe.session.user == "Guest":
 		raise frappe.PermissionError("authentication required")
 
@@ -1008,10 +1020,10 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	token = (token or "").strip()
 	try:
 		record = pending_confirm.peek(token, strict=True)
-		if not record:
-			return {"ok": True, "data": {"status": "already_handled"}}
-		if record.get("pending_action"):
-			return _discard_pending_action(token, (conversation or "").strip())
+		if not record and not pending_confirm.is_pending_action(token):
+			return {"ok": True, "data": {"status": "already_handled"}, "reason_code": "already_handled"}
+		if not record or record.get("pending_action"):
+			return _discard_pending_action(token, (conversation or "").strip(), typed=typed)
 
 		# Same owner + conversation binding as confirm_tool: consume atomically so a
 		# concurrent Confirm and Discard cannot both win.
@@ -1021,7 +1033,7 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 	except pending_confirm.PendingConfirmStorageError as exc:
 		return _confirmation_storage_error(exc)
 	if not record:
-		return {"ok": True, "data": {"status": "already_handled"}}
+		return {"ok": True, "data": {"status": "already_handled"}, "reason_code": "already_handled"}
 
 	tool = record.get("tool") or ""
 	args = record.get("args") or {}
@@ -1058,38 +1070,54 @@ def dismiss_tool(token: str, conversation: str | None = None) -> dict:
 		except Exception:
 			frappe.log_error(title="dismiss_tool receipt failed", message=frappe.get_traceback())
 		# Correct the agent's stale pending_confirmation memory on its next turn.
-		try:
-			from jarvis.chat import agent_notes
+		if not typed:
+			try:
+				from jarvis.chat import agent_notes
 
-			agent_notes.append(conv, _dismiss_note(tool, args))
-		except Exception:
-			frappe.log_error(title="dismiss_tool note failed", message=frappe.get_traceback())
+				agent_notes.append(conv, _dismiss_note(tool, args))
+			except Exception:
+				frappe.log_error(title="dismiss_tool note failed", message=frappe.get_traceback())
 		# Dismissing the paused card ENDS any approved skill run (skill "Approve & run",
-		# design §3.4): the user declined the paused destructive / create_custom_skill
-		# step, so the run is over. Guarded on the flag so an ordinary discard does no
-		# needless write; clear_skill_autorun is itself best-effort.
-		if frappe.db.get_value("Jarvis Conversation", conv, "skill_autorun"):
-			from jarvis.chat import turn_message_binding
+		# design §3.4) or request-scoped "confirm all" (A6): the user declined the step
+		# the run paused on. Both clears are guarded and best-effort.
+		from jarvis.chat.pending_actions._lifecycle import _clear_autorun
 
-			turn_message_binding.clear_skill_autorun(conv)
+		try:
+			_clear_autorun(conv)
+		except Exception:
+			frappe.log_error(
+				title="jarvis.pending_action.dismiss_autorun_clear_failed", message=frappe.get_traceback()
+			)
 
-	return {"ok": True, "data": {"status": "discarded", "tool": tool}}
+	return {"ok": True, "data": {"status": "discarded", "tool": tool}, "reason_code": "discarded"}
 
 
-def _discard_pending_action(token: str, passed_conv: str) -> dict:
+def _discard_pending_action(token: str, passed_conv: str, *, typed: bool = False) -> dict:
 	"""``dismiss_tool`` for a pending-action card: ``pending_actions.discard`` owns the
 	audit row and the autorun clear; settle leaves the ``discarded`` chip and
-	``on_chat_settled`` the veto note. A card the caller can't act on reads as
-	already handled, exactly like a used legacy token."""
+	``on_chat_settled`` the veto note (not for a typed reply: ``_QUIET_VETO``). A card
+	the caller can't act on reads as already handled, exactly like a used legacy
+	token."""
 	from jarvis.chat import pending_actions
 
-	res = pending_actions.discard(token, kind="chat", conversation=passed_conv or None)
+	quiet = frappe.flags.get(_QUIET_VETO) or set()
+	if typed:
+		frappe.flags[_QUIET_VETO] = quiet | {token}
+	try:
+		res = pending_actions.discard(token, kind="chat", conversation=passed_conv or None)
+	finally:
+		if typed:
+			frappe.flags[_QUIET_VETO] = quiet
 	if not res.get("ok") and res.get("reason_code") == "not_found":
-		return {"ok": True, "data": {"status": "already_handled"}}
+		return {"ok": True, "data": {"status": "already_handled"}, "reason_code": "already_handled"}
 	return res
 
 
 # ── Chat card settlement (pending actions) ───────────────────────────────────
+
+# frappe.flags key: the cards a typed rejection is discarding right now. Their
+# settle skips the per-card veto note; the typed path appends one combined note.
+_QUIET_VETO = "jarvis_pa_quiet_veto"
 
 
 def _supersede_note(tool: str, args: dict) -> str:
@@ -1174,10 +1202,12 @@ def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 		_stash_continuation(won or names, cont)
 		return
 	notes = []
+	quiet = frappe.flags.get(_QUIET_VETO) or ()
 	if conversation:
 		for i in items:
 			if i["status"] == DISCARDED:
-				notes.append(_dismiss_note(i["tool"] or "", i["args"]))
+				if i["name"] not in quiet:
+					notes.append(_dismiss_note(i["tool"] or "", i["args"]))
 			elif i["status"] == SUPERSEDED:
 				notes.append(_supersede_note(i["tool"] or "", i["args"]))
 	lock_conversation(conversation)  # conversation -> pending action lock order

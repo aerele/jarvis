@@ -38,6 +38,12 @@ import {
 import { spanBetween } from "../lib/time";
 import { sortPendingCards } from "../lib/sortPendingCards.js";
 import { mergePendingSources } from "../lib/pendingResync.js";
+import {
+	discardedTokens,
+	isRecentCard,
+	markCardsEarlier,
+	typedApprovalHint as hintFor,
+} from "../lib/typedCardReply.js";
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
 import Composer from "../components/Composer.vue";
@@ -94,12 +100,15 @@ const pending = ref([]); // parked writes awaiting approval
 // so the numbering must be stable: the shared, unit-tested comparator orders by
 // (created_at, token by code unit), whatever order the store listed them in.
 const orderedPending = computed(() => sortPendingCards(pending.value));
-// Typed approval works here as on the desktop, but only the desktop advertised
-// it. The selective example numbers track the real count so it never overshoots.
-const typedApprovalHint = computed(() => {
-	const n = orderedPending.value.length;
-	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
-});
+// Typed approval works here as on the desktop. An "Earlier" card (parked before the
+// user's latest message) never gets the bare-phrase hint: only its number binds it.
+const typedApprovalHint = computed(() => hintFor(orderedPending.value));
+// Set when a typed yes/no bound no card (it went to Jarvis as a message); shown while
+// an older card is still here, cleared with the last one (decision 13).
+const olderCardsNote = ref(false);
+const showOlderCardsNote = computed(
+	() => olderCardsNote.value && orderedPending.value.some((p) => !isRecentCard(p))
+);
 const settings = ref(null);
 
 // The turn in flight. Held separately from `messages` because it is not durable
@@ -331,6 +340,8 @@ function pendingActionFromRow(m, cid) {
 		// ordering (sortPendingCards falls back to expires_at when this is null).
 		created_at: _rowExpiresEpoch(m.creation),
 		expires_at: _rowExpiresEpoch(m.expires_at),
+		seq: m.seq ?? null,
+		recent: m.recent !== false,
 	};
 }
 
@@ -509,6 +520,10 @@ async function send() {
 			await loadPending();
 			return;
 		}
+		// A typed "no" discarded these before its turn (even one that then lost the
+		// admission race): they must not linger as live approvals.
+		const discarded = discardedTokens(res);
+		if (discarded.size) pending.value = pending.value.filter((p) => !discarded.has(p.token));
 		if (res?.ok === false) {
 			sendBusy.value = false;
 			messages.value = messages.value.filter((m) => !m.optimistic);
@@ -535,6 +550,9 @@ async function send() {
 		// An accepted send proves the maintenance hold lifted - clear the strip + wake
 		// the avatar now instead of stranding them until a reload (self-heal).
 		clearHold();
+		// The user just spoke: every card still here is now Earlier.
+		markCardsEarlier(pending.value, res?.conversation_id || convId.value);
+		olderCardsNote.value = !!res?.older_cards_waiting;
 		// First send of a brand-new chat: adopt the id the backend just created,
 		// and put the row in the list without a refetch.
 		const id = res?.conversation_id;
@@ -732,6 +750,8 @@ function onEvent(p) {
 						run_id: card.run_id,
 						created_at: card.created_at ?? null,
 						expires_at: card.expires_at ?? null,
+						seq: card.seq ?? null,
+						recent: card.recent !== false,
 					});
 				}
 			}
@@ -770,6 +790,8 @@ function onEvent(p) {
 						run_id: card.run_id,
 						created_at: card.created_at ?? null,
 						expires_at: card.expires_at ?? null,
+						seq: card.seq ?? null,
+						recent: card.recent !== false,
 					});
 				}
 			}
@@ -792,6 +814,8 @@ function onEvent(p) {
 				run_id: p.run_id,
 				created_at: p.created_at ?? null,
 				expires_at: p.expires_at ?? null,
+				seq: p.seq ?? null,
+				recent: p.recent !== false,
 			});
 			scrollToBottom();
 			// This push arrived; keep polling so a SIBLING card whose push was dropped
@@ -839,6 +863,7 @@ watch(
 		messages.value = [];
 		conversation.value = null;
 		pending.value = [];
+		olderCardsNote.value = false; // the note was about the previous conversation's cards
 		live.value = null;
 		sendBusy.value = false;
 		errorBanner.value = "";
@@ -1088,11 +1113,15 @@ onUnmounted(() => {
 					(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
 					(p.summary || p.tool || `${agentName} needs your approval`)
 				"
+				:earlier="!isRecentCard(p)"
 				@open="decision = p"
 			/>
+			<p v-if="showOlderCardsNote" class="jv-typehint">
+				An earlier action card is still waiting — tap it to approve or discard.
+			</p>
 		</div>
 		<!-- Both ways to approve, shown once under the stack. -->
-		<p v-if="orderedPending.length" class="jv-typehint">{{ typedApprovalHint }}</p>
+		<p v-if="typedApprovalHint" class="jv-typehint">{{ typedApprovalHint }}</p>
 	</div>
 
 	<div v-if="errorBanner" class="jv-banner">

@@ -722,7 +722,7 @@ def persist_tool_receipt(
 
 
 def persist_pending_action(
-	conv_name: str, tool: str, preview: dict | None, token: str, expires_at: int
+	conv_name: str, tool: str, preview: dict | None, token: str, expires_at: int | None
 ) -> None:
 	"""Write a durable role=tool PENDING row for a parked gated write (PR 1 of the
 	action-card overhaul) - the pre-action twin of ``persist_tool_receipt``. The card
@@ -731,7 +731,7 @@ def persist_pending_action(
 	list-pending resync (the single-shared-query fragility the overhaul removes).
 
 	Stores ONLY the perm-filtered card (``preview['card']`` - already secret-masked by
-	build_card) + the expiry. NEVER stores raw ``tool_args``: an unconfirmed (maybe-to-
+	build_card) + a legacy token's expiry. NEVER stores raw ``tool_args``: an unconfirmed (maybe-to-
 	be-discarded) row must not expose unmasked args via ``get_conversation``; args are
 	stamped only when the row flips to a receipt (persist_tool_receipt). The card's
 	store (``Jarvis Pending Action``, or the legacy Redis token) stays the SOLE
@@ -750,17 +750,20 @@ def persist_pending_action(
 
 
 def _insert_pending_row(
-	conv_name: str, tool: str, preview: dict | None, token: str, expires_at: int
+	conv_name: str, tool: str, preview: dict | None, token: str, expires_at: int | None
 ) -> str | None:
 	"""The pending row insert without any commit: ``persist_pending_action``'s core,
 	and ``pending_actions.park``'s ``display_row`` (same transaction as the card, so
 	the two land or roll back together). None when the conversation can't host a row
-	or the row already exists."""
-	# Convert the token's epoch expiry to a SITE-timezone datetime the same way the
-	# codebase does (now_datetime + remaining seconds), so the row's countdown is
+	or the row already exists. ``expires_at`` None (a pending action) = never expires."""
+	# Convert a legacy token's epoch expiry to a SITE-timezone datetime the same way
+	# the codebase does (now_datetime + remaining seconds), so the row's countdown is
 	# correct regardless of an OS-vs-site timezone gap (Frappe Datetime fields are
 	# stored in the site timezone, not the OS timezone).
-	remaining = max(0, int(expires_at) - int(time.time()))
+	expires = None
+	if expires_at is not None:
+		remaining = max(0, int(expires_at) - int(time.time()))
+		expires = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=remaining)
 	card = preview.get("card") if isinstance(preview, dict) else None
 	conv_owner = frappe.db.get_value("Jarvis Conversation", conv_name, "owner")
 	if not conv_owner:
@@ -779,7 +782,7 @@ def _insert_pending_row(
 				"tool_status": "pending",
 				"tool_call_id": token,
 				"pending_card": frappe.as_json(card) if card is not None else None,
-				"expires_at": frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=remaining),
+				"expires_at": expires,
 				"content": f"{tool} → pending",
 			},
 			# (conversation, token) dedupe: a re-park of the same token is a no-op.
@@ -793,14 +796,24 @@ def cancel_pending_action_rows(conversation: str) -> None:
 	stopped run's parked card does NOT linger as a dangling 'pending' row - which would
 	otherwise show as a stale (soon 'expired') card on reload while its Redis token is
 	already swept. Best-effort per row; the flip runs as the conversation owner via
-	persist_tool_receipt (nothing executed -> no_write -> tool_status='')."""
+	persist_tool_receipt (nothing executed -> no_write -> tool_status='').
+	A pending action's row is left to its own settle (the PA sweep flipped the cards
+	it cancelled; an executing one must not show "cancelled")."""
 	rows = frappe.get_all(
 		"Jarvis Chat Message",
 		filters={"conversation": conversation, "role": "tool", "tool_status": "pending"},
 		fields=["tool_call_id", "tool_name"],
 	)
+	tokens = tuple(r.tool_call_id for r in rows if r.tool_call_id)
+	owned_by_pa = set()
+	if tokens and frappe.db.table_exists("Jarvis Pending Action"):
+		owned_by_pa = set(
+			frappe.db.sql_list(
+				"SELECT name FROM `tabJarvis Pending Action` WHERE name IN %(t)s", {"t": tokens}
+			)
+		)
 	for r in rows:
-		if not r.tool_call_id:
+		if not r.tool_call_id or r.tool_call_id in owned_by_pa:
 			continue
 		try:
 			persist_tool_receipt(
@@ -2332,6 +2345,18 @@ def _stamp_file_box_draft(conv: str, data) -> None:
 	)
 
 
+def _single_flight_error() -> dict:
+	"""F16: a card already waits in this conversation. Cards never expire, so the
+	model must stop until the user answers it."""
+	return _error(
+		"ConfirmationPendingError",
+		"a confirmation card for a previous action is still awaiting the user in this "
+		"conversation. Only one runs at a time - do NOT retry this call; stop and end "
+		"your turn now. The card does not expire: the user confirms or discards it, and "
+		"once they confirm you'll get a follow-up turn to continue with the next step.",
+	)
+
+
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
 	"""Parse args + dispatch + wrap in the bench's standard envelope.
 
@@ -2495,7 +2520,8 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					)
 				else:
 					next_step = (
-						f"Split into batches of {_MAX_BATCH} and confirm each one before starting the next."
+						f"Split into batches of {_MAX_BATCH} and confirm each one before starting the "
+						"next (only one card can wait at a time: propose one batch, then end your turn)."
 					)
 				return _error(
 					"InvalidArgumentError",
@@ -2751,16 +2777,12 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# This makes "batch 2's card appears only after batch 1 completes" a bench
 		# guarantee (not just persona discipline) and is the server-side
 		# single-flight for the confirm path. Auto-apply above is deliberately NOT
-		# gated by this (it parks no card).
-		#   STRICT conversation match: list_for_owner returns conversation-LESS
-		#   tokens under any filter (F1), so re-filter to record.conversation == conv
-		#   - an unrelated conv-less token (a rare session-resolution miss) must not
-		#   block a legitimate new card here.
+		# gated by this (it parks no card). Cards never expire, so an ignored card
+		# yields only to a proposal made after the user spoke again (D7 supersede,
+		# re-checked under park's lock). Strict on the conversation: a
+		# conversation-LESS token (F1) must not block a legitimate new card here.
 		try:
-			conversation_pending = conv and any(
-				t.get("conversation") == conv
-				for t in pending_confirm.list_for_owner(owner_user, conversation=conv, strict=True)
-			)
+			conversation_pending = conv and pending_confirm.blocks_new_card(owner_user, conv)
 		except pending_confirm.PendingConfirmStorageError:
 			return _error(
 				"ConfirmationUnavailableError",
@@ -2769,14 +2791,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				"call once; if it still fails, tell the user and stop - do not loop.",
 			)
 		if conversation_pending:
-			return _error(
-				"ConfirmationPendingError",
-				"a confirmation card for a previous action is still awaiting the "
-				"user in this conversation. Only one runs at a time - do NOT retry "
-				"this call; stop and end your turn now. Once the user confirms the "
-				"pending card you'll get a follow-up turn to continue with the next "
-				"step.",
-			)
+			return _single_flight_error()
 		# Validate BEFORE parking. For a create/update (build-from-args) write,
 		# run the real call in the rollback sandbox now: a deterministic failure
 		# (missing mandatory field, bad link, no create permission) means the
@@ -2839,18 +2854,25 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			if skill_docname and isinstance(preview.get("card"), dict):
 				preview["card"]["approve_run"] = True
 				preview["card"]["skill_slug"] = skill_slug
-		expires_at = int(time.time()) + pending_confirm._TTL_S
-		token = pending_confirm.mint(
-			conversation=conv,
-			owner=owner_user,
-			tool=tool,
-			args=args,
-			run_id=run_id,
-			exec_user=exec_user,
-			preview=preview,
-			expires_at=expires_at,
-			skill_docname=skill_docname,
-		)
+		# A pending-action card never expires; a legacy (Redis) token keeps its 15 minutes.
+		now_s = int(time.time())
+		expires_at = None if pending_confirm.pa_minting(conv) else now_s + pending_confirm._TTL_S
+		try:
+			token = pending_confirm.mint(
+				conversation=conv,
+				owner=owner_user,
+				tool=tool,
+				args=args,
+				run_id=run_id,
+				exec_user=exec_user,
+				preview=preview,
+				expires_at=expires_at,
+				skill_docname=skill_docname,
+			)
+		except pending_confirm.ConfirmationPendingError:
+			# Park re-checks single-flight under its lock: a card that could not be
+			# superseded after all (another actor holds it) is not a storage error.
+			return _single_flight_error()
 		# mint returns None when it could not stage the park (a transient cache
 		# failure that it already rolled back, so nothing is persisted). Do NOT
 		# publish a card against a token whose record does not exist - that card is
@@ -2901,23 +2923,24 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# still surface it.
 		try:
 			origin_page = frappe.db.get_value("Jarvis Conversation", conv, "origin_page") or ""
+			# Same shared item shape the resync endpoint + run:end terminal use, so
+			# the live push can't drift from them (and gets the summary guard too).
+			item = pending_confirm._pending_item(
+				token=token,
+				tool=tool,
+				args=args,
+				preview=preview,
+				conversation=conv,
+				run_id=run_id,
+				expires_at=expires_at,
+				created_at=now_s,
+			)
 			events.publish_to_user(
 				owner_user,
-				# Same shared item shape the resync endpoint + run:end terminal use, so
-				# the live push can't drift from them (and gets the summary guard too).
 				{
 					"kind": "action:pending",
 					"origin_page": origin_page,
-					**pending_confirm._pending_item(
-						token=token,
-						tool=tool,
-						args=args,
-						preview=preview,
-						conversation=conv,
-						run_id=run_id,
-						expires_at=expires_at,
-						created_at=expires_at - pending_confirm._TTL_S,
-					),
+					**pending_confirm.with_recency([item])[0],
 				},
 			)
 		except Exception:

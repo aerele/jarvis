@@ -14,9 +14,6 @@ WAITER = "Jarvis Pending Action Waiter"
 CONV = "Jarvis Conversation"
 
 KINDS = ("chat", "file_box_held")
-# PR-3a keeps the legacy 15-minute chat card life (PR-3b removes it): the reconciler
-# cancels an older Pending chat card as ``expired`` and ``execute`` refuses one.
-CHAT_TTL_S = 900
 PENDING, EXECUTING = "Pending", "Executing"
 EXECUTED, FAILED, DISCARDED, CANCELLED, SUPERSEDED = (
 	"Executed",
@@ -41,6 +38,7 @@ REASON_TEXT = {
 	"archived": "The conversation was archived.",
 	"discarded": "The action was discarded.",
 	"superseded": "A newer proposal replaced this action.",
+	# Only rows PR-3a cancelled for age still carry it (cards no longer expire).
 	"expired": "The action expired.",
 	"use_existing": "An existing record was used instead; nothing new was created.",
 }
@@ -204,11 +202,3 @@ def waiters(name: str) -> list[frappe._dict]:
 		{"p": name},
 		as_dict=True,
 	)
-
-
-def chat_expired(row) -> bool:
-	"""A chat card past ``CHAT_TTL_S`` (PR-3a only)."""
-	if row.kind != "chat" or not row.creation:
-		return False
-	age = frappe.utils.now_datetime() - frappe.utils.get_datetime(row.creation)
-	return age.total_seconds() > CHAT_TTL_S

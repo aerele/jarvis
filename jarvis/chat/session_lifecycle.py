@@ -909,7 +909,8 @@ def reconcile_action_cards() -> dict:
 	    these rows correctly; this is only the measurement.
 	Time-to-detect for a mass recurrence: <= the hourly cadence via the gauge; immediate
 	via the (user-triggered) rescue signal. Runs as the scheduler (Administrator); never
-	raises out; read-only (no flip)."""
+	raises out. Its one write is ``_repair_orphaned_rows`` (pending-action rows only).
+	A pending-action card never expires, so ``stranded`` measures legacy rows only."""
 	from jarvis.chat import pending_confirm
 	from jarvis.chat.latency import get_logger
 
@@ -917,6 +918,12 @@ def reconcile_action_cards() -> dict:
 		open_n = pending_confirm.cards_open_gauge()
 	except Exception:
 		open_n = 0
+	try:
+		repaired = _repair_orphaned_rows()
+	except Exception:
+		frappe.db.rollback()
+		repaired = 0
+		frappe.log_error(title="jarvis.action_cards.orphan_repair_failed", message=frappe.get_traceback())
 
 	now = frappe.utils.now_datetime()
 	old = frappe.utils.add_to_date(now, seconds=-_STRANDED_BUFFER_S)
@@ -958,7 +965,10 @@ def reconcile_action_cards() -> dict:
 	try:
 		# On a failed scan, log stranded="err" rather than a misleading "0" healthy reading.
 		get_logger().info(
-			"action_card_health cards_open=%d stranded=%s", open_n, stranded if scan_ok else "err"
+			"action_card_health cards_open=%d stranded=%s repaired=%d",
+			open_n,
+			stranded if scan_ok else "err",
+			repaired,
 		)
 		# Only weigh stranded when the scan actually ran (a failed scan logged its own error).
 		over = scan_ok and stranded > _STRANDED_ALERT
@@ -980,7 +990,53 @@ def reconcile_action_cards() -> dict:
 			)
 	except Exception:
 		pass
-	return {"cards_open": open_n, "stranded": stranded}
+	return {"cards_open": open_n, "stranded": stranded, "repaired": repaired}
+
+
+def _repair_orphaned_rows() -> int:
+	"""Flip a pending display row whose pending action is terminal, or gone, to its chip
+	(never while it is Executing: its own final write settles it). The era is decided by
+	pending-action existence (``tool_call_id`` = its name); a row with no pending action
+	is one only when it carries no expiry, since legacy rows always do (the PR-3b patch
+	owns those)."""
+	from jarvis import api
+	from jarvis.chat.pending_actions import outcome_for, settle
+	from jarvis.chat.pending_actions._store import EXECUTED, table_ready
+
+	if not table_ready():
+		return 0
+	rows = frappe.db.sql(
+		"""SELECT m.conversation, m.tool_name, m.tool_call_id, pa.name AS pa, pa.status,
+			pa.reason_code, pa.settled
+		FROM `tabJarvis Chat Message` m
+		LEFT JOIN `tabJarvis Pending Action` pa ON pa.name = m.tool_call_id AND pa.kind = 'chat'
+		WHERE m.role = 'tool' AND m.tool_status = 'pending' AND IFNULL(m.tool_call_id, '') != ''
+		  AND ((pa.name IS NOT NULL AND pa.status NOT IN ('Pending', 'Executing'))
+		    OR (pa.name IS NULL AND m.expires_at IS NULL))
+		LIMIT %(limit)s""",
+		{"limit": _RECONCILE_SCAN_MAX},
+		as_dict=True,
+	)
+	repaired = 0
+	for r in rows:
+		try:
+			if r.pa and not r.settled:
+				settle(r.pa)
+				continue
+			outcome = outcome_for(r.status, r.reason_code, r.tool_name) if r.pa else "unknown"
+			api.persist_tool_receipt(
+				r.conversation,
+				r.tool_name or "",
+				{},
+				{"ok": True} if r.status == EXECUTED else None,
+				action_outcome=outcome,
+				flip_token=r.tool_call_id,
+			)
+			repaired += 1
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title="jarvis.action_cards.row_repair_failed", message=frappe.get_traceback())
+	return repaired
 
 
 def _action_card_alert_deduped(now) -> bool:
