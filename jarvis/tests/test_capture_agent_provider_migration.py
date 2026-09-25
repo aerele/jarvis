@@ -17,7 +17,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, now_datetime
 
-from jarvis.patches.v2_12_rename_capture_agent_provider import execute
+from jarvis.tests._legacy_migration_fixtures import load
 
 DT = "Jarvis Pending OAuth Capture"
 
@@ -25,12 +25,12 @@ DT = "Jarvis Pending OAuth Capture"
 class TestCaptureAgentProviderMigration(FrappeTestCase):
 	_added_legacy_col = False
 
-	@staticmethod
-	def _legacy_col_exists() -> bool:
+	@classmethod
+	def _legacy_col_exists(cls) -> bool:
 		# Ask the SERVER, not get_table_columns - that helper is redis/client cached
 		# and the DDL below makes the cache lie (the same staleness once made the
 		# watermark patch's own has-column guard no-op on CI).
-		return bool(frappe.db.sql(f"SHOW COLUMNS FROM `tab{DT}` LIKE 'openclaw_provider'"))
+		return bool(frappe.db.sql(f"SHOW COLUMNS FROM `tab{DT}` WHERE Field = %s", (cls._legacy_column,)))
 
 	@staticmethod
 	def _bust_columns_cache():
@@ -43,9 +43,13 @@ class TestCaptureAgentProviderMigration(FrappeTestCase):
 
 	@classmethod
 	def setUpClass(cls):
+		fixture = load()["capture_provider"]
+		cls._legacy_column = fixture["legacy_column"]
+		cls._execute = staticmethod(frappe.get_attr(fixture["patch"]))
+		cls._added_legacy_col = False
 		super().setUpClass()
 		if not cls._legacy_col_exists():
-			frappe.db.sql_ddl(f"ALTER TABLE `tab{DT}` ADD COLUMN openclaw_provider VARCHAR(140)")
+			frappe.db.sql_ddl(f"ALTER TABLE `tab{DT}` ADD COLUMN `{cls._legacy_column}` VARCHAR(140)")
 			cls._added_legacy_col = True
 		cls._bust_columns_cache()
 		assert cls._legacy_col_exists(), "simulated-upgrade column did not stick"
@@ -53,7 +57,7 @@ class TestCaptureAgentProviderMigration(FrappeTestCase):
 	@classmethod
 	def tearDownClass(cls):
 		if cls._added_legacy_col and cls._legacy_col_exists():
-			frappe.db.sql_ddl(f"ALTER TABLE `tab{DT}` DROP COLUMN openclaw_provider")
+			frappe.db.sql_ddl(f"ALTER TABLE `tab{DT}` DROP COLUMN `{cls._legacy_column}`")
 		cls._bust_columns_cache()
 		super().tearDownClass()
 
@@ -75,7 +79,7 @@ class TestCaptureAgentProviderMigration(FrappeTestCase):
 
 	def _set_cols(self, old, new):
 		frappe.db.sql(
-			f"UPDATE `tab{DT}` SET openclaw_provider=%s, agent_provider=%s WHERE name=%s",
+			f"UPDATE `tab{DT}` SET `{self._legacy_column}`=%s, agent_provider=%s WHERE name=%s",
 			(old, new, self.doc.name),
 		)
 
@@ -84,21 +88,21 @@ class TestCaptureAgentProviderMigration(FrappeTestCase):
 
 	def test_copies_old_provider_when_new_is_blank(self):
 		self._set_cols(old="google-gemini-cli", new="")
-		execute()
+		self._execute()
 		self.assertEqual(self._new(), "google-gemini-cli")
 
 	def test_copies_when_new_is_null(self):
 		self._set_cols(old="xai", new=None)
-		execute()
+		self._execute()
 		self.assertEqual(self._new(), "xai")
 
 	def test_idempotent_does_not_clobber_a_migrated_row(self):
 		# already migrated: new set, old since blanked -> a re-run must leave it alone
 		self._set_cols(old="", new="openai")
-		execute()
+		self._execute()
 		self.assertEqual(self._new(), "openai")
 
 	def test_never_overwrites_a_live_value_with_a_stale_one(self):
 		self._set_cols(old="openai", new="kimi")
-		execute()
+		self._execute()
 		self.assertEqual(self._new(), "kimi")

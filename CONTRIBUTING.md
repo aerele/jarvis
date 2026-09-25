@@ -39,3 +39,13 @@ from the app checkout. The scanner requires no Frappe site.
   match them (PR required, no force-push, no deletion).
 - On a release PR the same check also fails unless `__version__` moved up and its major
   matches the line, so a release cannot ship without the bump.
+
+## Upgrade regression tests
+
+Legacy upgrade tests require the independently maintained Admin fixture. Set
+`JARVIS_LEGACY_MIGRATION_FIXTURES_FILE` to an absolute path to
+`integration_fixtures/legacy_migrations.json` in the Admin checkout before running
+these tests on a dedicated test site. CI supplies the same checksum-pinned JSON
+through a versioned Actions variable. Missing inputs fail the tests; do not copy
+the fixture into this repository. See Admin's
+`jarvis_admin_v2/docs/legacy-migration-test-fixtures.md` for activation and commands.

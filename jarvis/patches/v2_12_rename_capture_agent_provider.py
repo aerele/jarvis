@@ -20,6 +20,8 @@ rollback net; a later contract patch drops it once the rename is proven.
 import frappe
 
 DT = "Jarvis Pending OAuth Capture"
+# Keep the historical identifier available during offline upgrades.
+_LEGACY_PROVIDER_COLUMN = "openclaw_provider"
 
 
 def execute():
@@ -28,12 +30,12 @@ def execute():
 		return
 	# Fresh install: the JSON only ever shipped agent_provider, so the old column
 	# never existed and there is nothing to copy.
-	if "openclaw_provider" not in frappe.db.get_table_columns(DT):
+	if _LEGACY_PROVIDER_COLUMN not in frappe.db.get_table_columns(DT):
 		return
 	frappe.db.sql(
-		"""
+		f"""
 		UPDATE `tabJarvis Pending OAuth Capture`
-		SET agent_provider = openclaw_provider
-		WHERE COALESCE(agent_provider, '') = '' AND COALESCE(openclaw_provider, '') != ''
+		SET agent_provider = `{_LEGACY_PROVIDER_COLUMN}`
+		WHERE COALESCE(agent_provider, '') = '' AND COALESCE(`{_LEGACY_PROVIDER_COLUMN}`, '') != ''
 		"""
 	)

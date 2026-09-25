@@ -14,7 +14,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import seq_watermark
 from jarvis.chat.turn_recovery import _next_turn_watermark
-from jarvis.patches.v2_10_rename_openclaw_seq_watermark import execute
+from jarvis.tests._legacy_migration_fixtures import load
 
 MSG = "Jarvis Chat Message"
 
@@ -22,12 +22,12 @@ MSG = "Jarvis Chat Message"
 class TestSeqWatermarkMigration(FrappeTestCase):
 	_added_legacy_col = False
 
-	@staticmethod
-	def _legacy_col_exists() -> bool:
+	@classmethod
+	def _legacy_col_exists(cls) -> bool:
 		# Ask the SERVER, not get_table_columns — that helper is redis/client cached
 		# and the DDL below makes the cache lie (this exact staleness broke CI once:
 		# the patch's own has-column guard read the stale cache and no-op'd).
-		return bool(frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` LIKE 'openclaw_seq_watermark'"))
+		return bool(frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` WHERE Field = %s", (cls._legacy_column,)))
 
 	@staticmethod
 	def _bust_columns_cache():
@@ -46,10 +46,14 @@ class TestSeqWatermarkMigration(FrappeTestCase):
 
 	@classmethod
 	def setUpClass(cls):
+		fixture = load()["watermark"]
+		cls._legacy_column = fixture["legacy_column"]
+		cls._execute = staticmethod(frappe.get_attr(fixture["patch"]))
+		cls._added_legacy_col = False
 		super().setUpClass()
 		if not cls._legacy_col_exists():
 			frappe.db.sql_ddl(
-				f"ALTER TABLE `tab{MSG}` ADD COLUMN openclaw_seq_watermark INT(11) NOT NULL DEFAULT 0"
+				f"ALTER TABLE `tab{MSG}` ADD COLUMN `{cls._legacy_column}` INT(11) NOT NULL DEFAULT 0"
 			)
 			cls._added_legacy_col = True
 		cls._bust_columns_cache()
@@ -58,7 +62,7 @@ class TestSeqWatermarkMigration(FrappeTestCase):
 	@classmethod
 	def tearDownClass(cls):
 		if cls._added_legacy_col and cls._legacy_col_exists():
-			frappe.db.sql_ddl(f"ALTER TABLE `tab{MSG}` DROP COLUMN openclaw_seq_watermark")
+			frappe.db.sql_ddl(f"ALTER TABLE `tab{MSG}` DROP COLUMN `{cls._legacy_column}`")
 		cls._bust_columns_cache()
 		super().tearDownClass()
 
@@ -87,13 +91,13 @@ class TestSeqWatermarkMigration(FrappeTestCase):
 
 	def _set_cols(self, old, new, name=None):
 		frappe.db.sql(
-			"UPDATE `tabJarvis Chat Message` SET openclaw_seq_watermark=%s, agent_seq_watermark=%s WHERE name=%s",
+			f"UPDATE `tabJarvis Chat Message` SET `{self._legacy_column}`=%s, agent_seq_watermark=%s WHERE name=%s",
 			(old, new, name or self.msg.name),
 		)
 
 	def _cols(self, name=None):
 		return frappe.db.sql(
-			"SELECT agent_seq_watermark, openclaw_seq_watermark FROM `tabJarvis Chat Message` WHERE name=%s",
+			f"SELECT agent_seq_watermark, `{self._legacy_column}` FROM `tabJarvis Chat Message` WHERE name=%s",
 			(name or self.msg.name,),
 		)[0]
 
@@ -104,36 +108,36 @@ class TestSeqWatermarkMigration(FrappeTestCase):
 
 	def test_copies_old_watermark_when_new_is_zero(self):
 		self._set_cols(old=42, new=0)
-		execute()
+		self._execute()
 		self.assertEqual(self._new(), 42)
 
 	def test_idempotent_does_not_clobber_a_migrated_row(self):
 		# already migrated: new set, old since zeroed -> a re-run must leave it alone
 		self._set_cols(old=0, new=5)
-		execute()
+		self._execute()
 		self.assertEqual(self._new(), 5)
 
 	def test_does_not_downgrade_when_new_already_fresher(self):
 		# new carries a fresher value than the stale old column -> never overwrite
 		self._set_cols(old=3, new=9)
-		execute()
+		self._execute()
 		self.assertEqual(self._new(), 9)
 
 	def test_reconciles_larger_legacy_value_even_when_new_is_nonzero(self):
 		self._set_cols(old=42, new=7)
-		execute()
+		self._execute()
 		self.assertEqual(self._cols(), (42, 42))
 
 	def test_reconciles_rollback_column_when_new_is_fresher(self):
 		self._set_cols(old=3, new=19)
-		execute()
+		self._execute()
 		self.assertEqual(self._cols(), (19, 19))
 
 	def test_after_migrate_handles_old_worker_writes_after_original_patch(self):
 		from jarvis import hooks
 
 		self._set_cols(old=7, new=0)
-		execute()
+		self._execute()
 		# A worker on the previous version writes after the one-shot patch.
 		self._set_cols(old=31, new=7)
 		value = frappe.db.sql(
