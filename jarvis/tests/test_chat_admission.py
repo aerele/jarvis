@@ -1624,6 +1624,24 @@ class TestEnqueueOverloadFourCallers(_AdmissionTestCase):
 		self.assertEqual(frappe.db.count(MSG, {"conversation": conv, "role": "user"}), 0, "seed deleted")
 		self.assertEqual(frappe.db.count(TURN, {"conversation": conv}), 0, "no Turn leaked")
 
+	def test_send_message_held_resume_is_exempt_at_depth0(self):
+		# PR-2c: a held File Box resume (frappe.flags.jarvis_resume_exempt, server-set)
+		# continues an already-decided approval, so it QUEUES at depth 0 - neither the
+		# send_message pre-check nor accept_or_queue's locked check may bounce it.
+		conv = self._mk_conv()
+		frappe.flags.jarvis_resume_exempt = True
+		try:
+			with (
+				patch.object(admission, "MAX_QUEUE_DEPTH", 0),
+				patch.object(admission, "_max_inflight", return_value=0),
+			):
+				res = chat_api.send_message(conversation=conv, message="resume after approval")
+		finally:
+			frappe.flags.jarvis_resume_exempt = None
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(frappe.db.count(MSG, {"conversation": conv, "role": "user"}), 1, "seed kept")
+		self.assertEqual(frappe.db.count(TURN, {"conversation": conv}), 1, "a durable queued Turn exists")
+
 	def test_enqueue_turn_continuation_exempt_never_rejected_at_depth0(self):
 		# R-7: a confirm CONTINUATION (exempt_overload=True) always QUEUES, never rejects — even
 		# at depth 0. Its seed is kept (a durable queued Turn owns it).

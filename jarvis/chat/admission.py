@@ -551,8 +551,10 @@ def accept_or_queue(
 			}
 
 		# Overload guard (SUX-5): authoritative check under the shard lock. No row.
-		# A confirm continuation (exempt_overload) skips it - it always queues.
-		if not exempt_overload and _shard_queued_depth(target) >= MAX_QUEUE_DEPTH:
+		# A confirm continuation (exempt_overload) and a held File Box resume
+		# (frappe.flags.jarvis_resume_exempt) skip it - they always queue.
+		exempt = exempt_overload or frappe.flags.get("jarvis_resume_exempt")
+		if not exempt and _shard_queued_depth(target) >= MAX_QUEUE_DEPTH:
 			frappe.db.rollback()
 			_telemetry("overload_reject", run_id=run_id, target=target)
 			return {

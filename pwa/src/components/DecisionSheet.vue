@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import { renderMarkdown } from "@shared/markdown.js";
 import { pendingCardOf, pendingExpiry } from "@shared/lib/actionSummary.js";
 import { denyOutcome } from "../lib/denyOutcome.js";
+import { keptCardMessage } from "../lib/keptCard.js";
 import Sheet from "./Sheet.vue";
 import PendingCard from "./PendingCard.vue";
 import * as api from "../api";
@@ -125,6 +126,12 @@ async function approve(mode = "step") {
 				? await api.approveAndRun(props.action.token, props.action.conversation)
 				: await api.confirmTool(props.action.token, props.action.conversation);
 		if (r && r.ok === false) {
+			const kept = keptCardMessage(r);
+			if (kept) {
+				error.value = kept;
+				state.value = "review";
+				return;
+			}
 			// The token is single-use and short-lived: a stale card must say so
 			// rather than look like a failure the user can retry.
 			if (r.error?.type === "InvalidConfirmation") {

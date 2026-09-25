@@ -5,6 +5,7 @@ import AppBar from "../components/AppBar.vue";
 import * as api from "../api";
 import { store } from "../store";
 import { relativeTime } from "../lib/time";
+import { resultLine } from "../lib/fileboxResult";
 
 // File Box: drop a document and get back a chat that has already read it.
 // This is the screen that most wants to be on a phone — the invoice arrives as a
@@ -22,6 +23,7 @@ const fileEl = ref(null);
 const STATUS = {
 	processing: { label: "Processing" },
 	needs_approval: { label: "Needs approval", tone: "is-warn" },
+	applying: { label: "Applying" },
 	draft_created: { label: "Draft created", tone: "is-done" },
 	no_draft: { label: "No draft" },
 	failed: { label: "Failed", tone: "is-failed" },
@@ -123,7 +125,7 @@ onMounted(load);
 							</span>
 							{{ relativeTime(r.creation) }}
 						</div>
-						<div v-if="r.result" class="jv-row-result">{{ r.result }}</div>
+						<div v-if="resultLine(r)" class="jv-row-result">{{ resultLine(r) }}</div>
 					</div>
 					<svg
 						class="jv-row-chev"

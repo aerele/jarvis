@@ -15,6 +15,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import pending_confirm
 from jarvis.chat.actions_api import confirm_tool
+from jarvis.tests._pending_action_helpers import draft_doctype
 from jarvis.tests._transport_helpers import provision_legacy_site
 
 
@@ -1581,48 +1582,47 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 		apply.assert_not_called()
 		mint.assert_not_called()
 
-	def test_file_box_destructive_still_parks(self):
-		# Case 5: a _DESTRUCTIVE tool in a file_box run still parks a card (only
-		# update_wiki is fenced-routed; delete/cancel/amend always confirm).
+	def test_file_box_destructive_is_refused_not_parked(self):
+		# Case 5 (PR-2c policy rule g): a _DESTRUCTIVE tool in a file_box run is refused
+		# before any preview - no card, nothing deleted.
 		conv = self._conv(file_box=1)
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "file-box-wiki-del"}).insert(
 			ignore_permissions=True
 		)
-		with patch("jarvis.chat.events.publish_to_user"):
+		with patch("jarvis.chat.pending_confirm.mint") as mint, patch("jarvis.api._pending_preview") as prev:
 			r = api._run_tool("delete_doc", {"doctype": "ToDo", "name": todo.name}, conversation=conv)
-		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertEqual(r["error"]["code"], "FileBoxRefusedError")
+		mint.assert_not_called()
+		prev.assert_not_called()
 		self.assertTrue(frappe.db.exists("ToDo", todo.name))
 
-	def test_file_box_create_doc_still_auto_applies(self):
-		# Case 6 (unregressed): a single create_doc still fast-paths under file_box
-		# via dispatch_confirmed(provenance="auto_apply"), no card.
+	def test_file_box_draft_create_still_auto_applies(self):
+		# Case 6 (policy rule e): a single create of a submittable draft still
+		# auto-applies via dispatch_confirmed(provenance="auto_apply"), no card.
+		dt = draft_doctype() or self.skipTest("no submittable doctype installed")
 		conv = self._conv(file_box=1)
 		with patch(
 			"jarvis.api.dispatch_confirmed",
-			return_value={"ok": True, "data": {"name": "TODO-FAKE"}},
+			return_value={"ok": True, "data": {"name": "DRAFT-FAKE"}},
 		) as dc:
-			r = api._run_tool(
-				"create_doc",
-				{"doctype": "ToDo", "values": {"description": "file-box-wiki-create"}},
-				conversation=conv,
-			)
+			r = api._run_tool("create_doc", {"doctype": dt, "values": {"remark": "x"}}, conversation=conv)
 		dc.assert_called_once()
 		self.assertEqual(dc.call_args.kwargs.get("provenance"), "auto_apply")
 		self.assertTrue(r["ok"])
 		self.assertNotEqual((r.get("data") or {}).get("status"), "pending_confirmation")
 
-	def test_file_box_update_doc_still_auto_applies(self):
-		# update_doc shares create_doc's _AUTO_APPLYABLE fast-path: a single update_doc
-		# in a file_box run auto-applies (provenance=auto_apply), no card - unregressed
-		# by the update_wiki branch that sits right after this block.
+	def test_file_box_draft_update_still_auto_applies(self):
+		# A single update_doc of a submittable draft auto-applies (provenance=auto_apply),
+		# no card - unregressed by the update_wiki branch.
+		dt = draft_doctype() or self.skipTest("no submittable doctype installed")
 		conv = self._conv(file_box=1)
 		with patch(
 			"jarvis.api.dispatch_confirmed",
-			return_value={"ok": True, "data": {"name": "TODO-FAKE"}},
+			return_value={"ok": True, "data": {"name": "DRAFT-FAKE"}},
 		) as dc:
 			r = api._run_tool(
 				"update_doc",
-				{"doctype": "ToDo", "name": "TODO-FAKE", "values": {"priority": "High"}},
+				{"doctype": dt, "name": "DRAFT-FAKE", "changes": {"remark": "y"}},
 				conversation=conv,
 			)
 		dc.assert_called_once()
