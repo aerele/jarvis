@@ -885,7 +885,8 @@ def _setup_mcp_oauth_client(doc) -> None:
 	wrapped, so a failure AFTER the row was inserted removes the row rather than
 	leaving a half-created, unusable connector behind. The seed half catches any
 	exception (a broken client insert is as much a dead end as a failed discovery);
-	the discovery half catches the engine's own ``OAuthError``."""
+	so does the discovery half, keeping the engine's own ``OAuthError`` apart so
+	the provider's reason still reaches the message."""
 	provider = _catalog_seed_provider((doc.get("preset") or "").strip())
 	if provider is not None:
 		try:
@@ -904,6 +905,14 @@ def _setup_mcp_oauth_client(doc) -> None:
 	except mcp_oauth.OAuthError as exc:
 		_discard_connector(doc)
 		frappe.throw(_oauth_error_message(exc.code, exc.detail))
+	except Exception:
+		# Saving what discovery found can fail too (a value too long for its column,
+		# a DB fault). That is as much a dead end as a failed discovery, so the row
+		# goes and the person sees the friendly sentence, not an exception class
+		# name. The cause is logged (never the row's credentials).
+		frappe.logger("jarvis.connectors").warning("sign-in setup failed after insert", exc_info=True)
+		_discard_connector(doc)
+		frappe.throw(_oauth_error_message(""))
 
 
 def _discover_and_save_client(doc) -> None:

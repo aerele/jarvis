@@ -1149,6 +1149,55 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 			"a failed setup must not leave an unusable row behind",
 		)
 
+	def test_a_scope_list_over_1000_characters_is_stored_whole(self):
+		# Atlassian names no scope in its challenge and advertises 38 scopes, 1023
+		# characters joined. A Data(1000) column refused that insert and the Sign in
+		# button died with CharacterLengthExceededError.
+		advertised = [f"write:product-{i:02d}:agent-interface" for i in range(40)]
+		script = _discovery_script(rm_overrides={"scopes_supported": advertised})
+		script[MCP_BASE_URL] = HttpResult(
+			status=401,
+			headers={"www-authenticate": f'Bearer resource_metadata="{MCP_RM_URL}"'},
+			json=None,
+			text="",
+		)
+		script[MCP_REGISTER] = _json_result({"client_id": "dcr-client"}, status=201)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", _ScriptedTransport(script)):
+			out = connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self._connectors.append(out["name"])
+
+		scope = frappe.db.get_value(CLIENT_DT, out["name"], "scope")
+		self.assertGreater(len(scope), 1000)
+		self.assertEqual(scope, " ".join(advertised))
+
+	def test_a_client_save_failure_leaves_no_connector_behind(self):
+		# Saving what discovery found is a dead end too when it fails: the row goes
+		# and the person reads the friendly sentence, never the raw exception class
+		# name the dialog used to show.
+		script = _discovery_script()
+		script[MCP_REGISTER] = _json_result({"client_id": "dcr-client"}, status=201)
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", _ScriptedTransport(script)),
+			patch.object(
+				connectors_api.mcp_oauth_store,
+				"save_client",
+				side_effect=frappe.CharacterLengthExceededError("Scope will get truncated"),
+			),
+			self.assertRaises(frappe.ValidationError) as ctx,
+		):
+			connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self.assertIn("We could not set up sign-in", str(ctx.exception))
+		self.assertFalse(
+			frappe.db.exists(CONNECTOR, {"key": "mcp_example_invalid", "owner": PLAIN_A}),
+			"a failed client save must not leave an unusable row behind",
+		)
+
 	def test_registration_failure_surfaces_the_providers_reason(self):
 		# Bug 2: the friendly sentence stays first, but the provider's own words
 		# (never ours) follow it, so the person hitting this is not stuck with
@@ -1503,6 +1552,20 @@ class TestMcpOauthCallback(_McpOauthTestCase):
 		for secret in ("fresh-access", "fresh-refresh", "the-code", state):
 			self.assertNotIn(secret, page["body"])
 			self.assertNotIn(secret, page["primary_action"])
+
+	def test_a_granted_scope_list_over_1000_characters_is_stored_whole(self):
+		# A provider that grants everything it advertised echoes the whole list back.
+		# Atlassian's is past 1000 characters, which a Data(1000) column refused, and
+		# the callback ended on the generic "could not finish" page.
+		granted = " ".join(f"write:product-{i:02d}:agent-interface" for i in range(40))
+		name = self._mk_mcp_connector("cb-long-scope")
+		frappe.set_user(PLAIN_A)
+		_url, state = self._connect(name)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", self._script(scope=granted)):
+			self._callback(code="the-code", state=state, iss=MCP_AS_URL)
+
+		self.assertEqual(self._page()["title"], "Connected")
+		self.assertEqual(frappe.db.get_value(TOKEN_DT, f"{name}-{PLAIN_A}", "granted_scopes"), granted)
 
 	def test_success_page_escapes_the_connector_label(self):
 		name = self._mk(
