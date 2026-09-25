@@ -64,23 +64,19 @@
 				<SidebarLink
 					:label="link.label"
 					:icon="link.icon"
-					:to="link.to"
+					:to="linkTo(link)"
 					:is-active="link.isActive()"
 					class="mx-2 my-[1.5px]"
 					:is-collapsed="collapsed"
 				>
-					<template v-if="link.badge && !collapsed && store.approvalsCount" #right>
-						<Badge
-							:label="store.approvalsCount > 9 ? '9+' : String(store.approvalsCount)"
-							theme="red"
-							variant="subtle"
-						/>
+					<template v-if="!collapsed && badgeCount(link)" #right>
+						<Badge :label="badgeLabel(link)" theme="red" variant="subtle" />
 					</template>
 				</SidebarLink>
 				<!-- collapsed badge → floating dot (HD pattern; red = pending action;
 				     semantic token so the dot tracks data-theme: #CC2929 light / #E43838 dark) -->
 				<div
-					v-if="link.badge && collapsed && store.approvalsCount"
+					v-if="collapsed && badgeCount(link)"
 					class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full bg-surface-red-5"
 				/>
 			</div>
@@ -103,21 +99,34 @@
 			class="flex flex-col rounded-lg transition-colors"
 			:class="editing ? 'bg-surface-gray-1 ring-1 ring-outline-gray-2' : ''"
 		>
-			<SidebarLink
-				label="More"
-				icon="more-horizontal"
-				class="mx-2 my-[1.5px]"
-				:is-collapsed="collapsed"
-				:is-active="onMoreDestination"
-				:on-click="() => (moreOpen = !moreOpen)"
-			>
-				<template v-if="!collapsed" #right>
-					<FeatherIcon
-						:name="moreOpen ? 'chevron-down' : 'chevron-right'"
-						class="size-3.5 text-ink-gray-4"
-					/>
-				</template>
-			</SidebarLink>
+			<div class="relative flex flex-col">
+				<SidebarLink
+					label="More"
+					icon="more-horizontal"
+					class="mx-2 my-[1.5px]"
+					:is-collapsed="collapsed"
+					:is-active="onMoreDestination"
+					:on-click="() => (moreOpen = !moreOpen)"
+				>
+					<template v-if="!collapsed" #right>
+						<div class="flex items-center gap-1.5">
+							<!-- a badged item folded away inside More still nudges -->
+							<div
+								v-if="!moreOpen && moreBadged"
+								class="size-1.5 rounded-full bg-surface-red-5"
+							/>
+							<FeatherIcon
+								:name="moreOpen ? 'chevron-down' : 'chevron-right'"
+								class="size-3.5 text-ink-gray-4"
+							/>
+						</div>
+					</template>
+				</SidebarLink>
+				<div
+					v-if="collapsed && !moreOpen && moreBadged"
+					class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full bg-surface-red-5"
+				/>
+			</div>
 			<template v-if="moreOpen">
 				<div
 					v-for="(link, index) in moreLinks"
@@ -143,10 +152,18 @@
 					<SidebarLink
 						:label="link.label"
 						:icon="link.icon"
-						:to="link.to"
+						:to="linkTo(link)"
 						:is-active="link.isActive()"
 						class="mx-2 my-[1.5px]"
 						:is-collapsed="collapsed"
+					>
+						<template v-if="!collapsed && badgeCount(link)" #right>
+							<Badge :label="badgeLabel(link)" theme="red" variant="subtle" />
+						</template>
+					</SidebarLink>
+					<div
+						v-if="collapsed && badgeCount(link)"
+						class="absolute size-1.5 translate-x-6 translate-y-1 rounded-full bg-surface-red-5"
 					/>
 				</div>
 				<!-- trailing drop zone (see the top group). onDragStart forces
@@ -352,7 +369,7 @@ const TOP_DEFS = [
 		icon: "check-square",
 		to: { name: "ApprovalsList" },
 		isActive: () => route.path.startsWith("/approvals"),
-		badge: true,
+		badge: "approvals",
 	},
 	{
 		label: "Dashboard",
@@ -365,6 +382,7 @@ const TOP_DEFS = [
 		icon: "zap",
 		to: { name: "SkillsList" },
 		isActive: () => route.path.startsWith("/skills"),
+		badge: "review",
 	},
 	{
 		label: "Agents",
@@ -388,10 +406,28 @@ const MORE_DEFS = [
 		isActive: () => route.path.startsWith("/triggers"),
 	},
 ];
+// Pending-action badge per def `badge` key (red = something waits on you).
+// "review" is only ever non-zero for skill reviewers (store gates the poll).
+const BADGE_COUNTS = {
+	approvals: () => store.approvalsCount,
+	review: () => store.reviewCount,
+};
+function badgeCount(link) {
+	return (link.badge && BADGE_COUNTS[link.badge]?.()) || 0;
+}
+function badgeLabel(link) {
+	const n = badgeCount(link);
+	return n > 9 ? "9+" : String(n);
+}
+// A badged Skills link opens straight on the Review tab, where the work is.
+function linkTo(link) {
+	return link.badge === "review" && badgeCount(link) ? { ...link.to, hash: "#review" } : link.to;
+}
 // Reactive, drag-reorderable order (persisted per user in Jarvis User Settings).
 const navLinks = ref([...TOP_DEFS]);
 const moreLinks = ref([...MORE_DEFS]);
 const moreOpen = ref(false);
+const moreBadged = computed(() => moreLinks.value.some((l) => badgeCount(l)));
 
 // Reconcile the saved {top, more} order against the current defs
 // (lib/sidebarOrder keeps the "a stale label can never hide a nav item" rule).

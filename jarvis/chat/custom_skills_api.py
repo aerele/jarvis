@@ -871,8 +871,10 @@ def decide_skill_promotion(
 	contender sees the published copy and either supersedes its own lineage row or
 	refuses a different-lineage slug clash — never a duplicate shared row). Being
 	global, the one lock also covers BOTH the old and the new slug when a renamed
-	lineage copy is superseded. The promoted skill joins the shared catalog on the
-	next explicit Apply (never auto-pushed here)."""
+	lineage copy is superseded. Nothing is pushed here (the push restarts the
+	container and must not run under the catalog lock): an approval that lands the
+	skill in the shared push set returns ``needs_apply`` and the reviewer's client
+	runs the Apply right after."""
 	from jarvis._redis_lock import redis_lock
 	from jarvis.permissions import require_skill_reviewer
 
@@ -967,7 +969,17 @@ def decide_skill_promotion(
 				}
 		out.update(_materialize_promotion(req, roles=effective_roles))
 		_stamp_decision(req, reviewer, True, decision_note)
+	out["needs_apply"] = _approval_needs_apply(req.to_scope, out.get("push_projection"))
 	return out
+
+
+def _approval_needs_apply(to_scope: str | None, projection: dict | None) -> bool:
+	"""Whether the reviewer's client should run the Apply after an approval. Only an
+	Org copy enters the shared push set (it never carries roles; a Role copy never
+	does), and only when the strict Apply can succeed: an over-cap catalog would
+	refuse the push right after the success toast. Reads the projection the approval
+	already computed (same ``_pushable_org_rows`` source), so no extra catalog query."""
+	return (to_scope or "") == "Org" and not (projection or {}).get("strict_would_fail")
 
 
 def _materialize_promotion(req, roles=None) -> dict:

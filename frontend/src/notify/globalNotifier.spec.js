@@ -18,6 +18,7 @@ const store = {
 	currentConvId: null,
 	conversations: [{ name: "conv-a", title: "Chat A" }],
 	approvalsCount: 0,
+	refreshReviewCount: vi.fn(),
 };
 
 vi.mock("@/stores/shell", () => ({ useShellStore: () => store }));
@@ -195,6 +196,13 @@ describe("dashboard-origin attention stays in Dashboard Builder", () => {
 		});
 		expect(useToasts().value).toHaveLength(0);
 		expect(store.approvalsCount).toBe(1);
+	});
+
+	it("re-reads the reviewer badge on review:pending without a toast", () => {
+		store.refreshReviewCount.mockClear();
+		socket.emit({ kind: "review:pending", queue: "skill_promotion", request: "JSPR-1" });
+		expect(store.refreshReviewCount).toHaveBeenCalledTimes(1);
+		expect(useToasts().value).toHaveLength(0);
 	});
 
 	it("opens an off-screen dashboard question in the builder, not Approval Board", () => {

@@ -54,13 +54,17 @@
 							:variant="queueType === 'skillpromotions' ? 'solid' : 'subtle'"
 							@click="setQueueType('skillpromotions')"
 						/>
+						<!-- the one shared-skills push status for every queue (renders
+						     nothing while idle); always mounted, so progress and failure
+						     survive a queue switch -->
+						<SyncPill ref="syncPill" class="ml-auto" />
 					</div>
 
 					<!-- ────────── Skill candidates (the existing board, unchanged) ────────── -->
 					<template v-if="queueType === 'candidates'">
 						<!-- Apply bar. Stays mounted while an apply is in flight (applyActive)
-					     even after the pending count hits 0, so the SyncPill's push
-					     progress / failure never unmounts mid-push. -->
+					     even after the pending count hits 0, so its progress never unmounts
+					     mid-push (the push status pill itself sits in the chip row above). -->
 						<div
 							v-if="pendingApplyCount > 0 || applyActive"
 							class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-outline-gray-2 bg-surface-gray-1 p-4"
@@ -86,7 +90,6 @@
 									}}
 									will be removed
 								</span>
-								<SyncPill ref="syncPill" />
 							</div>
 							<Button
 								v-if="pendingApplyCount > 0"
@@ -1674,7 +1677,7 @@
 		<InsightApplyDialog
 			v-model="insightApplyDialog.show"
 			:pattern="insightApplyDialog.row || {}"
-			@applied="afterAction"
+			@applied="onInsightApplied"
 		/>
 
 		<!-- "Ask the user" follow-up modal (Skills-area rework): the ask is
@@ -1822,6 +1825,7 @@ import { useRouter } from "vue-router";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import SyncPill from "./SyncPill.vue";
 import InsightApplyDialog from "@/components/learning/InsightApplyDialog.vue";
+import { applyCustomSkills } from "@/api";
 import JvSpinner from "@/components/JvSpinner.vue";
 import Banner from "@/components/Banner.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
@@ -1858,9 +1862,7 @@ import {
 } from "@/api/review";
 // Org push-budget warning formatter (ruling 2 + CDX-SP-2) — a pure, node-tested
 // module that RENDERS the server's projection (never a client-side guess).
-// `projectionChanged` cues a reviewer when the push impact moved since list-load
-// (R2-SP-5; the authoritative reconfirm is server-enforced).
-import { formatPushProjection, projectionChanged } from "./promotionBudget";
+import { formatPushProjection } from "./promotionBudget";
 // HTML-escape for every untrusted value interpolated into a confirm message
 // (ConfirmDialog renders `message` via v-html) — SAR-1 client belt.
 import { esc } from "./escapeHtml";
@@ -1962,10 +1964,10 @@ const selected = ref(new Set());
 const selectedNames = computed(() => Array.from(selected.value));
 const syncPill = ref(null);
 
-// apply lifecycle: applyActive keeps the Apply bar (and its SyncPill) mounted
-// through the apply->poll->done cycle even after pendingApplyCount drops to 0,
-// so the push progress / failure never vanishes mid-flight (mirrors the Skills
-// list banner, which is always mounted).
+// apply lifecycle: applyActive keeps the Apply bar mounted through the
+// apply->poll->done cycle even after pendingApplyCount drops to 0, so the push
+// progress never vanishes mid-flight. The status pill (syncPill) is always
+// mounted in the chip row, like the Skills list banner.
 const applyActive = ref(false);
 let applyTimer = null;
 // A cheap "active chats right now" count would render in the Apply modal; no
@@ -2300,6 +2302,7 @@ async function decidePromo(p, approve, note) {
 			// the stale card leaves the Pending list immediately, not just toast.
 			toast.error(r.reason || "Could not decide this promotion.");
 			fetchPromotions("reset");
+			emit("changed");
 			return false;
 		}
 		toast.success(approve ? "Promotion approved" : "Promotion rejected");
@@ -2365,40 +2368,33 @@ async function approveSkillPromotion(p) {
 	// Confirm + publish the KEPT roles (the reviewer may have trimmed the request),
 	// not the original ask. keptRolesFor reads the live per-request selection.
 	const kept = keptRolesFor(p);
-	const target =
-		p.to_scope === "Role"
-			? `Role${kept.length === 1 ? "" : "s"}: ${esc(kept.join(", ") || "-")}`
-			: "Org";
-	const who =
-		p.to_scope === "Role" ? (kept.length === 1 ? "that role" : "those roles") : "everyone";
 	// Recompute the budget truth fresh; fall back to the list-load projection if the
-	// preflight call fails (never block the decision on a warning fetch).
+	// preflight call fails (never block the decision on a warning fetch). The server
+	// re-checks at decide time and asks for a fresh confirm if the catalog moved.
 	let ackProjection = p.push_projection || null;
-	let moved = false;
 	try {
 		const pre = await preflightSkillPromotion(p.name);
-		moved = projectionChanged(p.push_projection, pre && pre.push_projection);
 		ackProjection = (pre && pre.push_projection) || null;
 	} catch (e) {
-		// keep the list-load projection; the server re-checks again at decide time
+		// keep the list-load projection
 	}
-	const warn = formatPushProjection(ackProjection);
-	// Every untrusted value is HTML-escaped — the message renders through v-html
-	// (SAR-1). The snapshot's description + user-invocable flag are shown so the
-	// reviewer confirms the WHOLE content their approval publishes (R2-SP-2). The
-	// budget warning folds in as plain "Note:" copy (no ⚠ glyph — design.md:563;
-	// the on-card banner already carries the colored warning).
+	// Short on purpose: the card behind this dialog already shows the reviewed
+	// description, slash flag and instructions, and the full budget banner. The
+	// message renders through v-html (SAR-1), so role names are escaped.
 	let message =
-		`This publishes “${esc(p.skill_name)}” to ${target}, usable by ${who}, as a shared ` +
-		"copy of exactly the reviewed content. Your original private skill stays intact and " +
-		"editable; the shared copy is locked to reviewers.";
-	if (p.description_snapshot) message += ` Description: “${esc(p.description_snapshot)}”.`;
-	if (p.user_invocable_snapshot != null)
-		message += ` Slash-invocable: ${p.user_invocable_snapshot ? "yes" : "no"}.`;
-	if (moved) message += " The push impact changed since the list loaded.";
-	if (warn) message += ` Note: ${esc(warn.message)}`;
+		p.to_scope === "Role"
+			? `People with ${esc(kept.join(", ") || "-")} can use it.`
+			: "Everyone in your org can use it. Your assistant picks it up in a few seconds.";
+	const warn = formatPushProjection(ackProjection);
+	if (warn) {
+		const limit = warn.projection.budget;
+		message +=
+			warn.level === "over"
+				? ` It goes over the ${limit}-skill limit, so your assistant cannot load it until a shared skill is removed.`
+				: ` It takes the last of the ${limit} shared-skill slots.`;
+	}
 	confirmDialog({
-		title: "Approve skill promotion?",
+		title: `Approve “${p.skill_name}”?`,
 		message,
 		onConfirm: async ({ hideDialog }) => {
 			hideDialog();
@@ -2442,6 +2438,7 @@ async function decideSkillPromo(p, approve, note, ackProjection = null, approved
 			// refresh so the stale card leaves the Pending list immediately.
 			toast.error(r.reason || "Could not decide this promotion.");
 			fetchSkillPromotions("reset");
+			emit("changed");
 			return false;
 		}
 		// On a successful APPROVE the server returns the FINAL projection — which
@@ -2450,6 +2447,9 @@ async function decideSkillPromo(p, approve, note, ackProjection = null, approved
 		const done = formatPushProjection(r && r.push_projection);
 		if (approve && done) toast.success(`Skill promotion approved. ${done.message}`);
 		else toast.success(approve ? "Skill promotion approved" : "Skill promotion rejected");
+		// An approval that lands the skill in the shared push set is pushed now:
+		// nothing else would, until an unrelated container restart.
+		if (approve && r && r.needs_apply) pushSharedSkills();
 		fetchSkillPromotions("reset");
 		emit("changed");
 		return true;
@@ -2839,6 +2839,26 @@ async function submitReject() {
 function openInsightApply(row) {
 	insightApplyDialog.row = row;
 	insightApplyDialog.show = true;
+}
+// A shared skill the insight created or rewrote is pushed now (the dialog's
+// toast says so); nothing else would push it until a container restart.
+function onInsightApplied(e) {
+	afterAction();
+	if (e && e.needs_apply) pushSharedSkills();
+}
+
+// Push the shared skills now, after an approval or insight that changed one. The
+// API call never depends on the pill being mounted, so a queue switch or leaving
+// the page mid-request cannot drop the push; the pill then shows progress and any
+// failure.
+async function pushSharedSkills() {
+	try {
+		await applyCustomSkills();
+	} catch (e) {
+		toast.error(errHtml(e));
+		return;
+	}
+	syncPill.value && syncPill.value.checkNow();
 }
 
 // edit-then-approve modal
