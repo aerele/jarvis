@@ -113,6 +113,13 @@ ADMIN_SYNC_LOCK_RETRIES = 4
 # status stays "pending: ..." and the UI shows a calm "finishing setup" state.
 _PENDING_APPLYING_STATUS = "pending: admin applying config"
 
+# jarvis#1425: a pooled workspace narrowed to one ChatGPT account is moving to
+# the direct leg. Distinct from _PENDING_APPLYING_STATUS on purpose: the SPA's
+# pending poller and the */5 reconcile stamp THAT one converged on an admin
+# "Ready", and admin says Ready for the still-pooled tenant, so reusing it would
+# close a handover that never happened.
+_PENDING_HANDOVER_STATUS = "pending: handover to direct"
+
 # In-job fast-path convergence poll. Bounded well under the RQ envelope (see the
 # budget note above); anything not converged inside it is finished by the
 # scheduled safety net (reconcile_pending_llm_sync, every 5 min). Probes use a
@@ -1278,6 +1285,28 @@ class JarvisSettings(Document):
 			deduplicate=True,
 			converge_teardown=converge_teardown,
 			idempotency_key=idempotency_key,
+		)
+
+	def _enqueue_handover(self) -> None:
+		"""Queue the pool -> direct handover (jarvis#1425). Same queue, timeout,
+		lock and inline-in-tests rules as _enqueue_pool_sync."""
+		_write_settings_fields(
+			self,
+			{
+				"last_sync_status": _PENDING_HANDOVER_STATUS,
+				"last_sync_requested_at": frappe.utils.now(),
+				"llm_last_apply_fingerprint": "",
+			},
+		)
+		run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
+		frappe.enqueue(
+			"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_handover_via_admin",
+			queue="long",
+			timeout=ADMIN_SYNC_RQ_TIMEOUT_S,
+			enqueue_after_commit=not run_inline,
+			now=run_inline,
+			job_id="jarvis_settings_sync:handover",
+			deduplicate=True,
 		)
 
 	def _on_update_single_model_legacy(self):
@@ -2596,6 +2625,150 @@ def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETR
 			return
 		settings = frappe.get_single("Jarvis Settings")
 		settings._sync_via_admin(action)
+
+
+def _enqueued_handover_via_admin(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> None:
+	"""Worker for _enqueue_handover. Serialized with every other LLM sync on the
+	same redis lock; the pool fallback is enqueued AFTER the lock is released so
+	an inline (test) run cannot wait on a lock it holds."""
+	from jarvis._redis_lock import redis_lock
+
+	fall_back = False
+	with redis_lock(
+		"jarvis_settings_admin_sync",
+		timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
+		blocking_timeout_s=_sync_lock_wait_s(retry_left),
+	) as acquired:
+		if not acquired:
+			if retry_left > 0:
+				_schedule_sync_lock_retry(
+					method="jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_handover_via_admin",
+					job_base="jarvis_settings_sync:handover",
+					retry_left=retry_left,
+				)
+				return
+			_write_settings_fields(
+				frappe.get_single("Jarvis Settings"),
+				{"last_sync_status": "failed: skipped (concurrent sync did not finish in time)"},
+			)
+			return
+		fall_back = _handover_via_admin(frappe.get_single("Jarvis Settings"))
+	if fall_back:
+		frappe.get_single("Jarvis Settings")._enqueue_pool_sync()
+
+
+def _handover_via_admin(settings) -> bool:
+	"""Ask admin to move this workspace off the proxy. Returns True when admin or
+	its fleet cannot (old deploy): the caller then runs today's pool push.
+
+	Stamps change in ONE write and only on a confirmed move: until then the pool
+	stamp keeps is_ready_for_chat open and proxy_active keeps Auto turns on the
+	proxy, which is still serving. Every unknown outcome records
+	_PENDING_HANDOVER_STATUS; a retry is safe because the fleet route is a no-op
+	once the tenant is direct."""
+	from jarvis import admin_client
+	from jarvis.installed_apps_sync import record_synced_snapshot
+	from jarvis.jarvis.pool_serialize import lone_direct_handover_due
+
+	if not lone_direct_handover_due(settings):
+		if (settings.get("last_sync_status") or "").startswith(_PENDING_HANDOVER_STATUS):
+			request_resync(settings)
+		return False
+	terminal_written = False
+	try:
+		provider, blob = _direct_subscription_blob(settings)
+		llm_provider = (settings.llm_provider or "").strip()
+		if not llm_provider:
+			raise admin_client.AdminValidationError("handover: missing llm_provider (catalog provider)")
+		result = (
+			admin_client.post_subscription_handover(
+				provider,
+				blob,
+				llm_provider,
+				model=settings.llm_model or "",
+				base_url=settings.llm_base_url or "",
+			)
+			or {}
+		)
+		record_synced_snapshot()
+		_refresh_db_snapshot()
+		if result.get("result") != "ok":
+			_write_settings_fields(settings, {"last_sync_status": _PENDING_HANDOVER_STATUS})
+		else:
+			now = frappe.utils.now()
+			landed = _write_settings_fields(
+				settings,
+				{
+					"llm_direct_synced_at": now,
+					"llm_pool_synced_at": None,
+					"proxy_active": 0,
+					"last_sync_at": now,
+					"last_sync_status": "ok (moved to direct via admin)",
+				},
+			)
+			if not landed:
+				_write_settings_fields(settings, {"last_sync_status": _PENDING_HANDOVER_STATUS})
+		_commit_terminal_sync_status()
+		terminal_written = True
+		from jarvis.account import _bust_chat_gate
+
+		_bust_chat_gate()
+		return False
+	except admin_client.AdminValidationError as e:
+		if admin_client.is_handover_unsupported(e):
+			terminal_written = True
+			return True
+		_write_settings_fields(
+			settings, {"last_sync_at": frappe.utils.now(), "last_sync_status": f"failed: validation: {e}"}
+		)
+		_commit_terminal_sync_status()
+		terminal_written = True
+		frappe.log_error(title="Jarvis: handover validation failed", message=frappe.get_traceback())
+	except admin_client.AdminRejectedError as e:
+		_write_settings_fields(
+			settings,
+			{"last_sync_at": frappe.utils.now(), "last_sync_status": f"failed: {_admin_rejection_reason(e)}"},
+		)
+		_commit_terminal_sync_status()
+		terminal_written = True
+	except (admin_client.AdminUnreachableError, *_WRITE_CONFLICT_ERRORS):
+		_write_settings_fields(settings, {"last_sync_status": _PENDING_HANDOVER_STATUS})
+		_commit_terminal_sync_status()
+		terminal_written = True
+	except admin_client.AdminRateLimitedError as e:
+		retry = e.retry_after_seconds or 0
+		_write_settings_fields(
+			settings,
+			{
+				"last_sync_at": frappe.utils.now(),
+				"last_sync_status": f"failed: rate-limited; retry_after={retry}s"
+				if retry
+				else "failed: rate-limited; retry shortly",
+			},
+		)
+		_commit_terminal_sync_status()
+		terminal_written = True
+	except admin_client.AdminAuthError as e:
+		_write_settings_fields(
+			settings, {"last_sync_at": frappe.utils.now(), "last_sync_status": f"failed: auth: {e}"}
+		)
+		_commit_terminal_sync_status()
+		terminal_written = True
+		raise
+	finally:
+		if not terminal_written:
+			try:
+				_write_settings_fields(
+					settings,
+					{
+						"last_sync_at": frappe.utils.now(),
+						"last_sync_status": "failed: unexpected error; see Error Log",
+					},
+				)
+				_commit_terminal_sync_status()
+			except Exception:
+				pass
+	return False
 
 
 def request_resync(settings) -> str:
