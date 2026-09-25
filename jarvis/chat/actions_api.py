@@ -519,7 +519,16 @@ def _open_skill_run(run_conv: str, skill_docname: str) -> None:
 	"""Open the approved run after a successful step 1, before its continuation, so
 	the resuming worker's gate sees ``skill_autorun`` (design §3.4). Raw set_value on
 	the token's OWN conversation is the sanctioned enable path (it bypasses the
-	owner-save guard)."""
+	owner-save guard). A Stop or an archive that landed while step 1 ran keeps the run
+	closed (read under the conversation lock); the Stop's signal is left for the gate."""
+	from jarvis.chat import turn_message_binding
+
+	status = frappe.db.sql_list(
+		"SELECT status FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE", {"c": run_conv}
+	)
+	if not status or status[0] == "Archived" or turn_message_binding.is_run_cancel_requested(run_conv):
+		frappe.db.commit()
+		return
 	# Stamp skill_autorun_skill (C2) so the gate can re-read allow_approve_run LIVE
 	# off THIS exact armed row before each uncarded covered write - un-arming the
 	# skill mid-run then hard-stops the auto-run within one write.
@@ -534,12 +543,18 @@ def _open_skill_run(run_conv: str, skill_docname: str) -> None:
 		update_modified=False,
 	)
 	frappe.db.commit()
-	# I1: a leftover run-cancel key from a PRIOR stop_run on this conversation must
-	# not halt the run we just opened. Clear it so the fresh run's first covered
-	# write dispatches instead of hard-stopping on a stale Halt.
+
+
+def _clear_stale_halt(run_conv: str | None) -> None:
+	"""I1: a leftover run-cancel key from a PRIOR stop_run must not keep the run closed.
+	Cleared once step 1 is ours and before it runs, so a Stop landing during step 1
+	still reads at ``_open_skill_run``. Best-effort."""
 	from jarvis.chat import turn_message_binding
 
-	turn_message_binding.clear_run_cancel(run_conv)
+	try:
+		turn_message_binding.clear_run_cancel(run_conv)
+	except Exception:
+		frappe.log_error(title="approve_and_run stale halt clear failed", message=frappe.get_traceback())
 
 
 def _dispatch_call(record: dict, token: str, guard_conv, crash_title: str) -> dict:
@@ -673,6 +688,7 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 			arm = pending_actions.ArmHook(
 				refuse=_approve_run_refusal,
 				apply=lambda row: _open_skill_run(row.conversation, row.skill_docname),
+				claimed=lambda row: _clear_stale_halt(row.conversation),
 			)
 			return _run_pending_action(token, passed_conv, arm=arm)
 
@@ -687,6 +703,7 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 	if not record:
 		return _INVALID_CONFIRM
 
+	_clear_stale_halt(record.get("conversation"))
 	# STEP 1: execute the parked write AS the scoped exec_user the gate stored.
 	result = _dispatch_call(record, token, guard_conv, "approve_and_run dispatch crashed")
 	ok = isinstance(result, dict) and bool(result.get("ok"))

@@ -42,10 +42,12 @@ _SYSTEM_MANAGER = "System Manager"
 class ArmHook:
 	"""Approve & run (PR-3a). ``refuse(row)`` runs under the row lock and returns a
 	refusal envelope (nothing consumed) or None; ``apply(row)`` arms the run after a
-	successful execute has committed, in its own short transaction."""
+	successful execute has committed, in its own short transaction. ``claimed(row)``
+	runs once the claim has committed, before the call (best-effort)."""
 
 	refuse: Callable[[dict], dict | None]
 	apply: Callable[[dict], None]
+	claimed: Callable[[dict], None] | None = None
 
 
 class ExecuteCrashed(frappe.ValidationError):
@@ -319,6 +321,12 @@ def _execute_locked(
 		frappe.db.rollback()
 		return _refusal(*_BUSY)
 	frappe.db.commit()
+	if arm and arm.claimed:
+		try:
+			arm.claimed(row)
+		except Exception:
+			frappe.log_error(title="jarvis.pending_action.arm_claimed_failed", message=frappe.get_traceback())
+			frappe.db.commit()
 
 	args = call.get("args") or {}
 	result, interfered, crash_tb = _dispatch(row, args)

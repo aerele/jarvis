@@ -694,6 +694,41 @@ class TestApproveAndRun(_Base):
 		self.assertEqual(calls, [])
 		self.assertEqual(self.row(token).status, "Pending", "a refusal consumes nothing")
 
+	def test_a_stop_or_archive_during_step_one_keeps_the_run_closed(self):
+		"""Arming after step 1 re-checks, under the conversation lock, for a Stop or an
+		archive that landed while it ran; the Stop's signal is left for the gate."""
+		from jarvis.chat import turn_message_binding
+
+		skill = self._armed_skill()
+
+		def _archive(conv):
+			frappe.db.set_value("Jarvis Conversation", conv, "status", "Archived", update_modified=False)
+
+		landings = {"stop": turn_message_binding.request_run_cancel, "archive": _archive}
+		for store in ("pending_action", "legacy"):
+			if store == "legacy":
+				self.flag(0)
+			for label, land in landings.items():
+				with self.subTest(store=store, landed=label):
+					conv = self.make_conv()
+					self.addCleanup(turn_message_binding.clear_run_cancel, conv)
+					token = self.mint(
+						conv, tool="run_method", args={"method": "frappe.ping"}, skill_docname=skill
+					)
+					self.assertEqual(bool(frappe.db.exists(PA, token)), store == "pending_action")
+
+					def _step_one(tool, args, conv=conv, land=land):
+						land(conv)
+						return {"name": "RESULT-1"}
+
+					with fake_dispatch(_step_one) as calls, as_user(OWNER):
+						res = actions_api.approve_and_run(token, conv)
+					self.assertTrue(res["ok"], res)
+					self.assertEqual(len(calls), 1, "step 1 still ran")
+					self.assertFalse(frappe.db.get_value("Jarvis Conversation", conv, "skill_autorun"))
+					if label == "stop":
+						self.assertTrue(turn_message_binding.is_run_cancel_requested(conv))
+
 
 class TestDualReadDeploy(_Base):
 	"""AC-U2 + AC-U13: a Redis loss spares pending actions; legacy tokens keep working."""
