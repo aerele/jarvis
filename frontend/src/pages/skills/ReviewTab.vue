@@ -54,13 +54,17 @@
 							:variant="queueType === 'skillpromotions' ? 'solid' : 'subtle'"
 							@click="setQueueType('skillpromotions')"
 						/>
+						<!-- the one shared-skills push status for every queue (renders
+						     nothing while idle); always mounted, so progress and failure
+						     survive a queue switch -->
+						<SyncPill ref="syncPill" class="ml-auto" />
 					</div>
 
 					<!-- ────────── Skill candidates (the existing board, unchanged) ────────── -->
 					<template v-if="queueType === 'candidates'">
 						<!-- Apply bar. Stays mounted while an apply is in flight (applyActive)
-					     even after the pending count hits 0, so the SyncPill's push
-					     progress / failure never unmounts mid-push. -->
+					     even after the pending count hits 0, so its progress never unmounts
+					     mid-push (the push status pill itself sits in the chip row above). -->
 						<div
 							v-if="pendingApplyCount > 0 || applyActive"
 							class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-outline-gray-2 bg-surface-gray-1 p-4"
@@ -86,7 +90,6 @@
 									}}
 									will be removed
 								</span>
-								<SyncPill ref="syncPill" />
 							</div>
 							<Button
 								v-if="pendingApplyCount > 0"
@@ -1007,17 +1010,13 @@
 
 					<!-- ────────── Skill promotions (User→Role/Org widen requests) ────────── -->
 					<template v-else>
-						<div class="flex flex-wrap items-start justify-between gap-2">
-							<div class="min-w-0">
-								<div class="text-base font-semibold text-ink-gray-9">
-									Skill promotions
-								</div>
-								<div class="text-sm text-ink-gray-5">
-									Requests to widen a private skill to a role or the whole org
-								</div>
+						<div class="min-w-0">
+							<div class="text-base font-semibold text-ink-gray-9">
+								Skill promotions
 							</div>
-							<!-- push progress after an Org approval (renders nothing while idle) -->
-							<SyncPill ref="promoSyncPill" />
+							<div class="text-sm text-ink-gray-5">
+								Requests to widen a private skill to a role or the whole org
+							</div>
 						</div>
 
 						<div
@@ -1966,12 +1965,11 @@ const dExpanded = reactive({}); // name -> detail | "loading"
 const selected = ref(new Set());
 const selectedNames = computed(() => Array.from(selected.value));
 const syncPill = ref(null);
-const promoSyncPill = ref(null); // Skill promotions queue: push progress after an approval
 
-// apply lifecycle: applyActive keeps the Apply bar (and its SyncPill) mounted
-// through the apply->poll->done cycle even after pendingApplyCount drops to 0,
-// so the push progress / failure never vanishes mid-flight (mirrors the Skills
-// list banner, which is always mounted).
+// apply lifecycle: applyActive keeps the Apply bar mounted through the
+// apply->poll->done cycle even after pendingApplyCount drops to 0, so the push
+// progress never vanishes mid-flight. The status pill (syncPill) is always
+// mounted in the chip row, like the Skills list banner.
 const applyActive = ref(false);
 let applyTimer = null;
 // A cheap "active chats right now" count would render in the Apply modal; no
@@ -2459,7 +2457,7 @@ async function decideSkillPromo(p, approve, note, ackProjection = null, approved
 		else toast.success(approve ? "Skill promotion approved" : "Skill promotion rejected");
 		// An approval that lands the skill in the shared push set is pushed now:
 		// nothing else would, until an unrelated container restart.
-		if (approve && r && r.needs_apply) promoSyncPill.value && promoSyncPill.value.apply();
+		if (approve && r && r.needs_apply) pushSharedSkills();
 		fetchSkillPromotions("reset");
 		emit("changed");
 		return true;
@@ -2852,14 +2850,23 @@ function openInsightApply(row) {
 }
 // A shared skill the insight created or rewrote is pushed now (the dialog's
 // toast says so); nothing else would push it until a container restart.
-async function onInsightApplied(e) {
+function onInsightApplied(e) {
 	afterAction();
-	if (!(e && e.needs_apply)) return;
+	if (e && e.needs_apply) pushSharedSkills();
+}
+
+// Push the shared skills now, after an approval or insight that changed one. The
+// API call never depends on the pill being mounted, so a queue switch or leaving
+// the page mid-request cannot drop the push; the pill then shows progress and any
+// failure.
+async function pushSharedSkills() {
 	try {
 		await applyCustomSkills();
-	} catch (err) {
-		toast.error(errHtml(err));
+	} catch (e) {
+		toast.error(errHtml(e));
+		return;
 	}
+	syncPill.value && syncPill.value.checkNow();
 }
 
 // edit-then-approve modal

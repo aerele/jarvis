@@ -614,7 +614,19 @@ class TestSkillPromotionSurfacing(Part2Base):
 			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
 		self.assertTrue(out["ok"])
 		self.assertIs(out["needs_apply"], True)
-		self.assertTrue(custom_skills.is_pushable_skill(out["materialized"]))
+		self.assertTrue(custom_skills.apply_would_push(out["materialized"]))
+		# over the push cap the strict Apply would refuse, so the client is not asked
+		with patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", 0):
+			self.assertFalse(custom_skills.apply_would_push(out["materialized"]))
+
+	def test_approval_needs_apply_rule(self):
+		from jarvis.chat.custom_skills_api import _approval_needs_apply
+
+		self.assertTrue(_approval_needs_apply("Org", {"strict_would_fail": False}))
+		self.assertTrue(_approval_needs_apply("Org", None))
+		# over-cap: the strict Apply would fail right after the success toast
+		self.assertFalse(_approval_needs_apply("Org", {"strict_would_fail": True}))
+		self.assertFalse(_approval_needs_apply("Role", None))
 
 	def test_role_approval_and_reject_need_no_apply(self):
 		# A Role copy never enters the shared container, and a rejection writes no
