@@ -421,7 +421,7 @@ class FakeGateway:
 		# on this session was armed with inject.recover_via == "history", the
 		# durable transcript still holds the complete answer, so surface it as a
 		# role=assistant tail message the way sessions.get / chat.history would
-		# (agent stamps __openclaw:{seq,id}). Stage-B recovery probes read it.
+		# (agent stamps runtime metadata containing seq and id). Stage-B recovery probes read it.
 		if not session_key:
 			return []
 		with self._state_lock:

@@ -9,9 +9,9 @@ from unittest.mock import Mock, patch
 
 from jarvis.chat import generated_media as gm
 
-# Import the root rather than re-hardcoding it — a Q2 rename that updates the
-# production constant must not leave the tests validating the old path.
-_ROOT = gm._MEDIA_ROOT
+# Independent gateway fixture: a production constant change must still be
+# checked against paths actually emitted by the supported runtime.
+_ROOT = "/home/node/.openclaw/media/"
 _IMG = _ROOT + "tool-image-generation/black-hole---4de239c0-8d05-41e5-9f52-e404ee9f0b21.png"
 _IMG_REL = _IMG[len(_ROOT) :]
 

@@ -1,8 +1,8 @@
 """Jarvis Custom Skill DocType controller.
 
 One row per customer-authored skill. Each row renders to a SKILL.md that is
-pushed into the customer's agent container (under ``openclaw_state/
-custom_skills/custom-<slug>/SKILL.md``) and loaded ALONGSIDE the shared
+pushed into the customer's agent container (under the runtime state directory,
+relative path ``custom_skills/custom-<slug>/SKILL.md``) and loaded ALONGSIDE the shared
 read-only persona skills. Rows are owned by the Frappe user who created them
 (``if_owner`` permission); the push itself is bench-global (a Jarvis bench maps
 to one customer / one container) and is triggered explicitly via

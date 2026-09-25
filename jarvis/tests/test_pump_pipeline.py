@@ -36,6 +36,7 @@ import frappe
 
 from jarvis.chat import admission, finalize, prepare, pump, settlement
 from jarvis.chat import turn_state as ts
+from jarvis.tests._gateway_fixtures import transcript_message
 from jarvis.tests.test_pump import TEST_USER, _PumpTestCase, _Recorder
 
 CONV = "Jarvis Conversation"
@@ -600,8 +601,8 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		double.arm_sessions_get(
 			"sess-rec",
 			[
-				{"role": "assistant", "content": "PRIOR ANSWER", "__openclaw": {"seq": 5}},
-				{"role": "user", "content": "second question", "__openclaw": {"seq": 6}},
+				transcript_message("assistant", "PRIOR ANSWER", seq=5),
+				transcript_message("user", "second question", seq=6),
 			],
 		)
 		ctx = self._ctx_for(double, epoch)
@@ -632,9 +633,9 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		double.arm_sessions_get(
 			"sess-rec",
 			[
-				{"role": "assistant", "content": "PRIOR ANSWER", "__openclaw": {"seq": 5}},
-				{"role": "user", "content": "second question", "__openclaw": {"seq": 6}},
-				{"role": "assistant", "content": "RECOVERED ANSWER", "__openclaw": {"seq": 7}},
+				transcript_message("assistant", "PRIOR ANSWER", seq=5),
+				transcript_message("user", "second question", seq=6),
+				transcript_message("assistant", "RECOVERED ANSWER", seq=7),
 			],
 		)
 		ctx = self._ctx_for(double, epoch)
@@ -662,7 +663,7 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		double.arm_sessions_get(
 			"sess-rec",
 			[
-				{"role": "user", "content": "second question", "__openclaw": {"seq": 6}},
+				transcript_message("user", "second question", seq=6),
 				{"role": "assistant", "content": marker, "__openclaw": {"seq": 7}},
 			],
 		)
@@ -2052,7 +2053,7 @@ class _ModelRowSess(_FakeSess):
 
 	The row is the REAL agent payload shape, not a convenience dict: the field
 	names and their casing are what ``buildGatewaySessionRow`` emits in
-	ghcr.io/openclaw/openclaw:2026.6.8 (``key``, ``model``, ``modelProvider``,
+	gateway image version 2026.6.8 (``key``, ``model``, ``modelProvider``,
 	``totalTokensFresh``, ``inputTokens``, ``outputTokens``, ``totalTokens``), so
 	``fetch_fresh_session_row`` and ``resolved_model_identity`` run for real
 	against the shape the gateway actually sends. A gateway rename would fail

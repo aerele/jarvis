@@ -40,6 +40,7 @@ import frappe
 from jarvis import compat
 from jarvis.chat import agent_session_pool, seq_watermark, vision
 from jarvis.chat.error_taxonomy import classify_error_text
+from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription
 
@@ -290,7 +291,7 @@ class _AssistantContentBatcher:
 # Provider label → agent provider id sent in the chat WS frame.
 #
 # Agent has two dispatch paths chosen at request time
-# (openclaw/src/agents/model-selection-cli.ts:6-20):
+# (see upstream model-selection details in the workspace integration reference):
 #
 #   - CLI backend: taken when isCliProvider(provider) returns true.
 #     Routes dispatch to a registered CliBackend that spawns an external
@@ -304,7 +305,7 @@ class _AssistantContentBatcher:
 # The two providers we currently support resolve to two different paths:
 #
 #   - OpenAI codex: codex IS a registered plugin harness
-#     (openclaw/extensions/codex/index.ts:34) whose allowlist accepts
+#     (see upstream provider registration in the workspace integration reference) whose allowlist accepts
 #     "openai" as the model-provider key. Use "openai" for the chat WS
 #     frame and the embedded codex-harness path handles the dispatch.
 #
@@ -320,7 +321,7 @@ _PROVIDER_LABEL_TO_AGENT_ID = {
 
 
 # The virtual model the fleet configures agent with whenever the proxy is active
-# (jarvis-fleet-agent compose.render_openclaw_config(model="jarvis-pool")). Bifrost
+# (fleet configuration uses model="jarvis-pool"). Bifrost
 # expands it into the pool's failover chain via its catch-all routing rule.
 #
 # The customer plane has to know this name because CLEARING a pin has to be an explicit
@@ -814,6 +815,9 @@ def assemble_prompt(
 	bracket) but NOT cleared — the clear fires only after PROVEN delivery
 	(post-ack), which is the pump's job in managed-pump mode (R-2) and
 	``handle_chat_send``'s job on the legacy path."""
+	# Resolve before dispatch, outside the best-effort watermark block. A broken
+	# contract must not send a turn whose transcript cannot be recovered safely.
+	get_profile()
 	settings = frappe.get_single("Jarvis Settings")
 	# Fetch content + sender of THIS user message in one round-trip.
 	# msg_row.owner is the Frappe user who sent this turn, set by Frappe
@@ -1325,7 +1329,10 @@ def handle_chat_send(payload: dict) -> None:
 				try:
 					_wm_msgs = sess.get_session_messages(conv.session_key, limit=5)
 					watermark = max(
-						(((m or {}).get("__openclaw") or {}).get("seq", 0) for m in _wm_msgs),
+						(
+							((m or {}).get(get_profile().message_metadata_key) or {}).get("seq", 0)
+							for m in _wm_msgs
+						),
 						default=0,
 					)
 					if watermark:

@@ -1,6 +1,6 @@
 """Transition-safe access to the renamed snapshot-recovery watermark column.
 
-The white-label rename moved ``Jarvis Chat Message.openclaw_seq_watermark`` to
+The white-label rename moved the legacy chat-message watermark column to
 ``agent_seq_watermark``. The one-shot v2_10 copy patch only migrates rows that exist
 when ``bench migrate`` runs — but the transition has live traffic on both sides of it:
 

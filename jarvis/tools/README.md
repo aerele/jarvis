@@ -16,9 +16,9 @@ set is `jarvis/tools/tool-names.json` (see the 3-way invariant below).
 
 Two tiers, one call mechanism:
 
-1. **Transport (TypeScript):** `jarvis-openclaw-plugin` exposes each tool to the
+1. **Transport (TypeScript):** The Jarvis agent plugin exposes each tool to the
    agent runtime - descriptors in `src/tool-defs.ts`, typed params in
-   `src/schemas.ts`, the contract list in `openclaw.plugin.json`. It calls back
+   `src/schemas.ts`, the contract list in the plugin manifest. It calls back
    to the bench over HTTP.
 2. **Execution (Python, in-process):** `jarvis.api.call_tool` is the whitelisted
    entry point. It authenticates the caller, resolves the user, runs
@@ -28,7 +28,7 @@ Two tiers, one call mechanism:
    boundary, not the tool code.
 
 A **3-way invariant** must hold for every change:
-`tool-defs.ts pythonNames == openclaw.plugin.json contracts == registry _TOOL_NAMES`.
+`tool-defs.ts pythonNames == plugin manifest contracts == registry _TOOL_NAMES`.
 
 It is no longer maintained by discipline. `jarvis/tools/tool-names.json` is the
 single artifact both repos test themselves against - generated from the registry
@@ -226,8 +226,16 @@ Every **mutating** tool call is logged from the `_run_tool` choke-point
 5. Copy `jarvis/tools/tool-names.json` **verbatim** into the plugin repo at
    `contracts/tool-names.json` - same bytes, same `digest`. Its contract test
    then fails until you add the descriptor (`src/tool-defs.ts`), the typed schema
-   (`src/schemas.ts`) and the manifest contract (`openclaw.plugin.json`), and
+   (`src/schemas.ts`) and the plugin manifest contract, and
    rebuild `dist`. Nothing in CI can see both repos, so this copy is the one
    manual step - the plugin PR is where a stale copy surfaces.
 6. Add a row to `jarvis-persona/TOOLS.md`.
 7. Add tests under `jarvis/tests/` (happy path + validation + permission).
+
+## Workspace integration reference
+
+Exact upstream commands, configuration filenames, source citations and historical
+migration explanations are maintained outside this app checkout in the workspace
+file `docs/jarvis-runtime-integration-reference.md`. References to the workspace
+integration reference in source comments refer to that document. It is maintained
+with the workspace and is not included in the standalone app distribution.

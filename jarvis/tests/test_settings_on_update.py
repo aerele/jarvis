@@ -135,7 +135,7 @@ class TestOnUpdateClassification(_SettingsSingletonTestCase):
 		field change, the no-diff classifier would normally return None
 		and skip the push, leaving the container with the previous (and
 		in re-authorize cases, broken) auth state. The flag forces
-		'restart' so admin re-renders openclaw.json + restarts the
+		'restart' so admin re-renders agent configuration + restarts the
 		container. Verified-live failure mode 2026-06-11."""
 		settings = frappe.get_single("Jarvis Settings")
 		settings.flags.force_admin_sync = True
