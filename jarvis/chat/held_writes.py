@@ -46,6 +46,7 @@ from jarvis.chat.pending_actions._store import (
 	PENDING,
 	SHEET,
 	TERMINAL,
+	filebox_migrated,
 	get_row,
 	lock_conversation,
 	rowcount,
@@ -576,8 +577,9 @@ def _dedup_or_park(tool, args, conversation, items, keys, owner, preview, needs_
 
 def _find_match(owner: str, keys: list[str]) -> tuple[str | None, str | None, bool]:
 	"""``("recent", name, _)`` when a row executing or approved in the last 10 minutes
-	shares a record; ``("join", name, subset)`` for the Pending row to wait on (a
-	superset row first); else ``(None, None, False)``."""
+	shares a record, or a sheet applied then created one; ``("join", name, subset)``
+	for the Pending row to wait on (a superset row first); else ``(None, None,
+	False)``."""
 	mine = {_seal.open_key(owner, k) for k in keys}
 	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-RECENT_DECISION_S)
 	rows = frappe.db.sql(
@@ -594,10 +596,34 @@ def _find_match(owner: str, keys: list[str]) -> tuple[str | None, str | None, bo
 			if r.status != PENDING:
 				return "recent", r.name, False
 			overlapping.append((r.name, mine <= theirs))
+	sheet = _recent_sheet(owner, mine, cutoff)
+	if sheet:
+		return "recent", sheet, False
 	for name, subset in overlapping:
 		if subset:
 			return "join", name, True
 	return ("join", overlapping[0][0], False) if overlapping else (None, None, False)
+
+
+def _recent_sheet(owner: str, mine: set, cutoff) -> str | None:
+	"""A sheet applied since ``cutoff`` that CREATED one of these records (its
+	``sheet_outcome`` keys; never a skipped or existing record)."""
+	if not filebox_migrated():
+		return None
+	rows = frappe.db.sql(
+		"SELECT name, sheet_outcome FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND owner_user=%(o)s"
+		" AND status='Executed' AND decided_at >= %(cut)s ORDER BY decided_at DESC LIMIT 50",
+		{"k": SHEET, "o": owner, "cut": cutoff},
+		as_dict=True,
+	)
+	for r in rows:
+		try:
+			theirs = (json.loads(r.sheet_outcome or "{}") or {}).get("keys") or []
+		except (ValueError, AttributeError):
+			continue
+		if mine & set(theirs):
+			return r.name
+	return None
 
 
 def _join(parent: str, conversation: str) -> bool:

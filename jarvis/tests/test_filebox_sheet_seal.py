@@ -846,6 +846,7 @@ class TestBoard(_SealBase):
 		self.assert_no_seal(d)
 		self.assertEqual((d["kind"], d["can_act"], d["collecting"]), (_store.SHEET, 1, 0))
 		self.assertEqual((d["record_count"], d["question_count"]), (2, 1))
+		self.assertEqual(d["conversation"], conv, "the board links the chat")
 		self.assertEqual(d["card_sha256"], _seal.card_sha256(self.row(sealed.name)))
 		sup, addr = d["records"]
 		self.assertEqual((sup["category"], sup["doctype"], sup["op"]), ("party", "Supplier", "create"))
@@ -917,6 +918,16 @@ class TestBoard(_SealBase):
 		self.assert_no_seal(out)
 		with as_user(OTHER), self.assertRaises(frappe.DoesNotExistError):
 			approvals_api.get_sheet_candidates(sealed.name)
+
+	def test_malformed_candidate_indexes_are_ignored_without_an_error_log(self):
+		_c, _r, sealed = self.sealed()
+		crashed = "jarvis.pending_action.candidates_crashed"
+		frappe.db.delete("Error Log", {"method": crashed})
+		with as_user(OWNER):
+			for raw in ("[[1]]", '[{"i": 0}]', "[true]", '["0"]'):
+				with self.subTest(raw=raw):
+					self.assertEqual(approvals_api.get_sheet_candidates(sealed.name, raw), {})
+		self.assertFalse(frappe.db.exists("Error Log", {"method": crashed}))
 
 	def test_the_badge_leaves_the_sheet_clause_out_before_its_migrate(self):
 		from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as ar

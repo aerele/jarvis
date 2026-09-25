@@ -96,7 +96,7 @@ function detailStub(kind, cls) {
 		const { onMounted, onUpdated } = await import("vue");
 		return {
 			default: {
-				props: ["name", "onDecided"],
+				props: ["name", "onDecided", "onChanged", "onKind", "showFileName"],
 				setup(props, { expose }) {
 					onMounted(() => probe.mounts.push(kind + ":" + props.name));
 					onUpdated(() => probe.updates++);
@@ -104,13 +104,14 @@ function detailStub(kind, cls) {
 					// read at call time, as the details do: after the unmount
 					return { later: () => (probe.later = (res) => props.onDecided(res)) };
 				},
-				template: `<div class="${cls}"><span class="who">${kind} {{ name }}</span><button class="decide" @click="onDecided({ ok: true })">decide</button><button class="decide-later" @click="later()">later</button></div>`,
+				template: `<div class="${cls}" :data-file-name="showFileName"><span class="who">${kind} {{ name }}</span><button class="decide" @click="onDecided({ ok: true })">decide</button><button class="decide-later" @click="later()">later</button><button v-if="onKind" class="is-sheet" @click="onKind('sheet')">is a sheet</button></div>`,
 			},
 		};
 	};
 }
 vi.mock("./PendingActionDetail.vue", detailStub("held", "held-detail"));
 vi.mock("./PendingChatDetail.vue", detailStub("chat", "chat-detail"));
+vi.mock("./SheetDetail.vue", detailStub("sheet", "sheet-detail"));
 
 import { useRoute, useRouter } from "vue-router";
 import * as api from "@/api";
@@ -139,6 +140,24 @@ const heldRow = (name, over = {}) => ({
 	waiters_count: 1,
 	for_user: "",
 	created_at: "2026-09-01 10:00:00",
+	...over,
+});
+const sheetRow = (name, over = {}) => ({
+	name,
+	kind: "file_box_sheet",
+	status: "Pending",
+	summary: "Approval sheet: loreal.pdf",
+	file_name: "loreal.pdf",
+	conversation: "conv-1",
+	conversation_title: "",
+	document_type: "",
+	collecting: 0,
+	record_count: 4,
+	question_count: 1,
+	counts: { Supplier: 1, Item: 3 },
+	counts_line: "1 supplier · 3 items · 1 question",
+	for_user: "",
+	created_at: "2026-09-01 09:30:00",
 	...over,
 });
 const chatRow = (over = {}) => ({
@@ -577,6 +596,130 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(group(w).text()).not.toContain("1 file waiting");
 		expect(pane(w).find(".held-detail .who").text()).toBe("held PA-1");
 		expect(probe.refreshes).toEqual(["held:PA-1"]);
+	});
+
+	describe("approval sheets", () => {
+		const listing = () =>
+			sheetRow("PA-S2", {
+				collecting: 1,
+				summary: "Approval sheet: kohl.pdf",
+				file_name: "kohl.pdf",
+				counts: { Item: 1 },
+				counts_line: "1 item",
+				created_at: "2026-09-01 09:40:00",
+			});
+
+		it("a sheet reads as its file and counts, and opens its own detail as ?held=", async () => {
+			state.lane.unshift(sheetRow("PA-S1"));
+			const w = await board();
+			const r = actionRow(w, "1 supplier · 3 items · 1 question");
+			expect(r.text()).toContain("loreal.pdf");
+			expect(r.findAll(".badge").map((b) => b.text())).toEqual([
+				"Approval sheet",
+				"Pending",
+			]);
+			approvals.getApproval.mockClear(); // the first question, auto-selected
+			await r.trigger("click");
+			expect(pane(w).find(".sheet-detail .who").text()).toBe("sheet PA-S1");
+			expect(pane(w).find("h1").text()).toBe("loreal.pdf");
+			// named once: the heading has it
+			expect(pane(w).find(".sheet-detail").attributes("data-file-name")).toBe("false");
+			expect(route.query).toEqual({ held: "PA-S1" });
+			expect(approvals.getApproval).not.toHaveBeenCalled();
+		});
+
+		it("a sheet still listing shows, but is no button and opens nothing", async () => {
+			state.lane.unshift(listing());
+			const w = await board();
+			// counted like the badge: a sheet still listing waits on no one yet
+			expect(group(w).text()).toContain("Needs your decision (4)");
+			expect(group(w).text()).toContain("Still listing…");
+			expect(group(w).text()).toContain("Opens for review once the run pauses.");
+			expect(actionRow(w, "kohl.pdf")).toBeFalsy();
+			const row = group(w)
+				.findAll("div.text-left")
+				.find((d) => d.text().includes("kohl.pdf"));
+			expect(row.attributes("tabindex")).toBeUndefined();
+			await row.trigger("click");
+			expect(route.query).toEqual({});
+			expect(pane(w).find(".sheet-detail").exists()).toBe(false);
+		});
+
+		it("?held= opens a sheet, listing or not; each selection mounts a fresh detail", async () => {
+			state.lane.unshift(sheetRow("PA-S1"), listing());
+			const w = await board({ held: "PA-S2" });
+			expect(pane(w).find(".sheet-detail .who").text()).toBe("sheet PA-S2");
+			await actionRow(w, "loreal.pdf").trigger("click");
+			await actionRow(w, "1 file waiting").trigger("click");
+			await actionRow(w, "loreal.pdf").trigger("click");
+			expect(probe.mounts).toEqual([
+				"sheet:PA-S2",
+				"sheet:PA-S1",
+				"held:PA-1",
+				"sheet:PA-S1",
+			]);
+		});
+
+		it("the type filter matches every doctype a sheet lists", async () => {
+			state.lane.unshift(sheetRow("PA-S1"));
+			const w = await board();
+			const [, type] = w.findAll("select");
+			const labels = type.findAll("option").map((o) => o.text());
+			expect(labels).toContain("Supplier (2)");
+			expect(labels).toContain("Item (1)");
+			await type.setValue("Item");
+			await flushPromises();
+			expect(group(w).text()).toContain("Needs your decision (1)");
+			expect(group(w).text()).toContain("loreal.pdf");
+		});
+
+		it("search finds a sheet by its file and its counts", async () => {
+			state.lane.unshift(sheetRow("PA-S1"));
+			const w = await board();
+			await w.find('input[placeholder="Search approvals"]').setValue("LOREAL");
+			expect(group(w).text()).toContain("Needs your decision (1)");
+			await w.find('input[placeholder="Search approvals"]').setValue("3 items");
+			expect(group(w).text()).toContain("Needs your decision (1)");
+		});
+
+		it("deciding a sheet moves on past a sheet still listing", async () => {
+			state.lane.unshift(sheetRow("PA-S1"), listing());
+			const w = await board();
+			await actionRow(w, "loreal.pdf").trigger("click");
+			state.lane = state.lane.filter((r) => r.name !== "PA-S1");
+			await pane(w).find(".sheet-detail .decide").trigger("click");
+			await flushPromises();
+			expect(pane(w).find(".held-detail .who").text()).toBe("held PA-1");
+			expect(route.query).toEqual({ held: "PA-1" });
+		});
+
+		it("a selected sheet re-reads itself when it seals or starts applying, not otherwise", async () => {
+			state.lane.unshift(sheetRow("PA-S1", { collecting: 1 }));
+			const w = await board({ held: "PA-S1" });
+			await w.find('button[data-tip="Refresh"]').trigger("click");
+			await flushPromises();
+			expect(probe.refreshes).toEqual([]);
+			state.lane[0] = sheetRow("PA-S1");
+			await w.find('button[data-tip="Refresh"]').trigger("click");
+			await flushPromises();
+			expect(probe.refreshes).toEqual(["sheet:PA-S1"]);
+			state.lane[0] = sheetRow("PA-S1", { status: "Executing" });
+			await w.find('button[data-tip="Refresh"]').trigger("click");
+			await flushPromises();
+			expect(probe.refreshes).toEqual(["sheet:PA-S1", "sheet:PA-S1"]);
+			expect(group(w).text()).toContain("Applying…");
+		});
+
+		it("a ?held= name beyond the rows that turns out a sheet reopens as one", async () => {
+			const w = await board({ held: "PA-S9" });
+			expect(pane(w).find(".held-detail .who").text()).toBe("held PA-S9");
+			await pane(w).find(".held-detail .is-sheet").trigger("click");
+			expect(pane(w).find(".sheet-detail .who").text()).toBe("sheet PA-S9");
+			expect(pane(w).find("h1").text()).toBe("Approval sheet");
+			expect(pane(w).find(".sheet-detail").attributes("data-file-name")).toBe("true");
+			expect(route.query).toEqual({ held: "PA-S9" });
+			expect(probe.mounts).toEqual(["held:PA-S9", "sheet:PA-S9"]);
+		});
 	});
 
 	it("a failed load says so, with a retry", async () => {

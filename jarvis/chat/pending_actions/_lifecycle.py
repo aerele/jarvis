@@ -19,11 +19,13 @@ from jarvis.chat.pending_actions._store import (
 	TERMINAL,
 	_terminal_update,
 	_transition,
+	apply_ready,
 	claim_settled,
 	filebox_migrated,
 	get_row,
 	lock_conversation,
 	null_sealed,
+	request_stop,
 	table_ready,
 	waiters,
 )
@@ -106,10 +108,14 @@ def _drop_waiter(
 	when it was the primary; a Pending row left with no waiter moves to ``to``
 	(Cancelled by default - Stop/archive/delete; Superseded when a re-run retires
 	a stale ask instead), a File Box sheet to ``sheet_to`` when given (a user Stop /
-	archive / delete discards it, collecting or sealed). An Executing sheet keeps its
-	waiter (S2: stop_requested). Does not commit."""
+	archive / delete discards it, collecting or sealed). A sheet being applied keeps
+	its waiter and is asked to stop: its job ends without a resume. Does not commit."""
 	row = get_row(parent, lock="update")
-	if not row or (row.kind == SHEET and row.status == EXECUTING):
+	if not row:
+		return
+	if row.kind == SHEET and row.status == EXECUTING:
+		if apply_ready():
+			request_stop(parent)
 		return
 	if row.kind == SHEET and sheet_to:
 		to = sheet_to

@@ -55,6 +55,12 @@
 				>
 					<Badge variant="subtle" theme="green" label="Personal" />
 				</Tooltip>
+				<Tooltip
+					v-if="createsChip(row)"
+					text="File Box drafts this document type when it follows this skill"
+				>
+					<Badge variant="subtle" theme="blue" :label="createsChip(row)" />
+				</Tooltip>
 			</div>
 		</template>
 
@@ -125,6 +131,7 @@ import { session } from "@/data/session";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiSkills from "@/api/skills";
 import { errHtml } from "@/lib/errors";
+import { createsChip } from "@/lib/fileboxSkills";
 
 const router = useRouter();
 // /skills is a TABBED shell (Skills | Learning), so the `fv2` query param is

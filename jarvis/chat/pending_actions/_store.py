@@ -2,8 +2,9 @@
 
 Transitions are raw conditional UPDATEs (the controller refuses every ORM save).
 ``_terminal_update`` is the ONLY writer of a terminal status and always NULLs
-``open_key``; ``claim`` is the only ``Pending -> Executing`` writer. A grep test
-pins both. Nothing here commits: callers own their transactions."""
+``open_key``; ``claim`` is the only ``Pending -> Executing`` writer and
+``release_sheet`` the only way back (a sheet apply that rolled back). A grep test
+pins all three. Nothing here commits: callers own their transactions."""
 
 from __future__ import annotations
 
@@ -56,8 +57,10 @@ _TERMINAL_COLS = frozenset(
 		"conversation",
 		"adopted_conversation",
 		"edited",
+		"sheet_outcome",
 	}
 )
+_TERMINAL_JSON = frozenset({"sheet_outcome"})
 
 
 # What a sheet append may rewrite besides its envelope (keys are interpolated).
@@ -94,6 +97,11 @@ def filebox_migrated() -> bool:
 def table_ready() -> bool:
 	"""False before migrate creates the table (hooks must no-op then)."""
 	return bool(frappe.db.table_exists(PA))
+
+
+def apply_ready() -> bool:
+	"""The sheet-apply columns are migrated (``filebox_migrated``: the same migrate)."""
+	return filebox_migrated()
 
 
 def reseal_sheet(row, *, args: dict, card, **cols) -> bool:
@@ -159,11 +167,19 @@ def lock_conversation(conversation: str | None) -> None:
 
 
 def _terminal_update(
-	name: str, from_statuses, to: str, *, reason_code: str | None = None, reason: str | None = None, **cols
+	name: str,
+	from_statuses,
+	to: str,
+	*,
+	reason_code: str | None = None,
+	reason: str | None = None,
+	token: str | None = None,
+	**cols,
 ) -> bool:
 	"""Move ``name`` from one of ``from_statuses`` to the terminal ``to``, NULLing
-	``open_key`` (and ending a sheet's collecting) in the same statement. True iff
-	this call made the transition."""
+	``open_key`` (and ending a sheet's collecting, dropping its apply decisions and
+	errors) in the same statement; with ``token``, only while it is that sheet
+	apply's. True iff this call made the transition."""
 	if to not in TERMINAL:
 		raise ValueError(f"not a terminal status: {to}")
 	bad = set(cols) - _TERMINAL_COLS
@@ -177,16 +193,26 @@ def _terminal_update(
 		"rc": reason_code or "",
 		"reason": reason if reason is not None else REASON_TEXT.get(reason_code or "", ""),
 		"now": now,
-		**{f"c_{k}": v for k, v in cols.items()},
+		"tok": token or "",
+		**{f"c_{k}": _json_col(k, v) for k, v in cols.items()},
 	}
 	extra = "".join(f", `{k}`=%(c_{k})s" for k in cols)
+	if filebox_migrated():
+		extra += ", collecting=0, apply_request=NULL, apply_errors=NULL"
+	mine = " AND IFNULL(apply_token, '')=%(tok)s" if token is not None else ""
 	frappe.db.sql(
-		"UPDATE `tabJarvis Pending Action` SET status=%(to)s, open_key=NULL, collecting=0, reason_code=%(rc)s,"
+		"UPDATE `tabJarvis Pending Action` SET status=%(to)s, open_key=NULL, reason_code=%(rc)s,"
 		" reason=%(reason)s, decided_at=IFNULL(decided_at, %(now)s), modified=%(now)s" + extra + " "
-		"WHERE name=%(n)s AND status IN %(from)s",
+		"WHERE name=%(n)s AND status IN %(from)s" + mine,
 		params,
 	)
 	return rowcount() == 1
+
+
+def _json_col(col: str, value):
+	from jarvis.chat.pending_actions import _seal
+
+	return _seal.json_text(value) if col in _TERMINAL_JSON else value
 
 
 def _transition(name: str, from_statuses, to: str, **cols) -> str:
@@ -208,15 +234,25 @@ def claim(
 	batch_id: str | None = None,
 	adopted_conversation: str | None = None,
 	edited: bool = False,
+	apply_token: str | None = None,
+	apply_request: dict | None = None,
 ) -> bool:
 	"""``Pending -> Executing`` with ``executing_at`` + ``decided_by`` (claim-first);
-	``edited`` stamps an Edit & create."""
+	``edited`` stamps an Edit & create; a sheet apply stores its token and the
+	validated decisions (and clears the last errors and any stop)."""
+	from jarvis.chat.pending_actions import _seal
+
 	now = frappe.utils.now_datetime()
+	sheet = (
+		", apply_token=%(tok)s, apply_request=%(req)s, apply_errors=NULL, stop_requested=0"
+		if apply_token
+		else ""
+	)
 	frappe.db.sql(
 		"UPDATE `tabJarvis Pending Action` SET status='Executing', executing_at=%(now)s, decided_at=%(now)s,"
 		" decided_by=%(by)s, batch_id=IFNULL(%(batch)s, batch_id),"
 		" adopted_conversation=IFNULL(%(adopt)s, adopted_conversation), edited=%(edited)s,"
-		" modified=%(now)s WHERE name=%(n)s AND status='Pending'",
+		" modified=%(now)s" + sheet + " WHERE name=%(n)s AND status='Pending'",
 		{
 			"n": name,
 			"now": now,
@@ -224,7 +260,51 @@ def claim(
 			"batch": batch_id,
 			"adopt": adopted_conversation,
 			"edited": int(edited),
+			"tok": apply_token,
+			"req": _seal.json_text(apply_request),
 		},
+	)
+	return rowcount() == 1
+
+
+def release_sheet(name: str, token: str, errors: dict) -> bool:
+	"""``Executing -> Pending`` for a sheet apply that rolled back cleanly (a CAS on
+	its token): the claim's decider and times cleared, ``errors`` stored, the
+	decisions (``apply_request``) kept. True iff released."""
+	from jarvis.chat.pending_actions import _seal
+
+	frappe.db.sql(
+		"UPDATE `tabJarvis Pending Action` SET status='Pending', decided_by=NULL, decided_at=NULL,"
+		" executing_at=NULL, apply_token=NULL, apply_errors=%(e)s, modified=%(now)s"
+		" WHERE name=%(n)s AND kind=%(k)s AND status='Executing' AND IFNULL(apply_token, '')=%(t)s",
+		{
+			"n": name,
+			"k": SHEET,
+			"t": token or "",
+			"e": _seal.json_text(errors),
+			"now": frappe.utils.now_datetime(),
+		},
+	)
+	return rowcount() == 1
+
+
+def restamp_apply(name: str, token: str) -> bool:
+	"""The apply job started: ``executing_at`` = now, while the claim is still its own."""
+	frappe.db.sql(
+		"UPDATE `tabJarvis Pending Action` SET executing_at=%(now)s WHERE name=%(n)s"
+		" AND status='Executing' AND apply_token=%(t)s",
+		{"n": name, "t": token, "now": frappe.utils.now_datetime()},
+	)
+	return rowcount() == 1
+
+
+def request_stop(name: str) -> bool:
+	"""A Stop / archive / delete while the sheet is being applied: its job ends
+	without a resume (a bounce discards it)."""
+	frappe.db.sql(
+		"UPDATE `tabJarvis Pending Action` SET stop_requested=1, modified=%(now)s"
+		" WHERE name=%(n)s AND kind=%(k)s AND status='Executing'",
+		{"n": name, "k": SHEET, "now": frappe.utils.now_datetime()},
 	)
 	return rowcount() == 1
 

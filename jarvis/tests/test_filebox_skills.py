@@ -10,18 +10,25 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
+import traceback
 from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.chat import approvals_api, filebox, filebox_skills, held_writes
-from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import user_can_use_skill
+from jarvis.chat import approvals_api, custom_skills_api, filebox, filebox_skills, held_writes
+from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import (
+	FileBoxCreatesError,
+	file_box_creates_filters,
+	user_can_use_skill,
+)
 from jarvis.tests import test_filebox_held as fbh
 from jarvis.tests._pending_action_helpers import as_user, ensure_user
 
 SKILL = "Jarvis Custom Skill"
+PROMO = "Jarvis Skill Promotion Request"
 CONV = "Jarvis Conversation"
 AR = "Jarvis Approval Request"
 PFX = "zz-fbk"
@@ -69,6 +76,15 @@ def skill(owner, slug, *, scope="User", creates=None, use=1, enabled=1, target_r
 	return doc
 
 
+def _denied():
+	"""A submittable doctype in a module File Box never writes (None on a site without one)."""
+	return frappe.db.get_value(
+		"DocType",
+		{"is_submittable": 1, "istable": 0, "module": ["in", sorted(held_writes.DENIED_MODULES)]},
+		"name",
+	)
+
+
 def same_slug(private_first: bool):
 	"""A peer's private copy (SM see-all shows it) and a reviewed Org row of one slug,
 	inserted in either order (the query leaves their tie unordered). Returns the Org row."""
@@ -82,6 +98,9 @@ def same_slug(private_first: bool):
 
 def sweep():
 	frappe.db.rollback()
+	for req in frappe.get_all(PROMO, filters={"skill_name": ["like", f"{PFX}-%"]}, pluck="name"):
+		frappe.db.delete("Jarvis Custom Skill Allowed Role", {"parenttype": PROMO, "parent": req})
+		frappe.db.delete(PROMO, {"name": req})
 	for name in frappe.get_all(SKILL, filters={"skill_name": ["like", f"{PFX}-%"]}, pluck="name"):
 		frappe.delete_doc(SKILL, name, force=True, ignore_permissions=True)
 	convs = frappe.get_all(CONV, filters={"owner": ["in", USERS]}, pluck="name")
@@ -155,12 +174,7 @@ class TestSkillFields(_Base):
 
 	def test_file_box_creates_must_be_a_submittable_allowed_doctype(self):
 		self.assertEqual(skill(OWNER, "pi", creates=PI).file_box_creates, PI)
-		denied = frappe.db.get_value(
-			"DocType",
-			{"is_submittable": 1, "istable": 0, "module": ["in", sorted(held_writes.DENIED_MODULES)]},
-			"name",
-		)
-		for bad in filter(None, ("Supplier", denied)):
+		for bad in filter(None, ("Supplier", _denied())):
 			with self.subTest(doctype=bad), self.assertRaises(frappe.ValidationError):
 				skill(OWNER, f"bad-{frappe.scrub(bad).replace('_', '-')}", creates=bad)
 
@@ -189,6 +203,148 @@ class TestSkillFields(_Base):
 			doc = frappe.get_doc(SKILL, row.name)
 			doc.update({"use_in_file_box": 1, "file_box_creates": SI})
 			doc.save(ignore_permissions=True)
+
+
+# --------------------------------------------------------------------------- #
+# K2: the skill editor's endpoints
+# --------------------------------------------------------------------------- #
+class TestSkillEditorEndpoints(_Base):
+	def fields(self, name):
+		return frappe.db.get_value(SKILL, name, ["use_in_file_box", "file_box_creates"], as_dict=True)
+
+	def test_create_and_update_persist_both_fields(self):
+		with as_user(OWNER):
+			made = custom_skills_api.create_custom_skill(
+				f"{PFX}-ed", "handles bills", "do it", use_in_file_box=0, file_box_creates=PI
+			)["data"]["name"]
+			self.assertEqual(self.fields(made), {"use_in_file_box": 0, "file_box_creates": PI})
+			custom_skills_api.update_custom_skill(name=made, use_in_file_box=1, file_box_creates=SI)
+			got = custom_skills_api.get_custom_skill(made)
+			self.assertEqual((got["use_in_file_box"], got["file_box_creates"]), (1, SI))
+			custom_skills_api.update_custom_skill(name=made, description="edited")  # omitted = kept
+			self.assertEqual(self.fields(made), {"use_in_file_box": 1, "file_box_creates": SI})
+			custom_skills_api.update_custom_skill(name=made, file_box_creates="")  # "" clears
+			self.assertEqual(custom_skills_api.get_custom_skill(made)["file_box_creates"], "")
+		self.assertFalse(self.fields(made).file_box_creates)
+
+	def test_a_new_skill_is_used_in_file_box_by_default(self):
+		with as_user(OWNER):
+			made = custom_skills_api.create_custom_skill(f"{PFX}-ed-default", "d", "i")["data"]["name"]
+		self.assertEqual(self.fields(made), {"use_in_file_box": 1, "file_box_creates": None})
+
+	def test_the_endpoints_refuse_a_type_file_box_can_not_draft(self):
+		row = skill(OWNER, "ed-bad", creates=PI)
+		for bad in filter(None, ("Supplier", "Purchase Invoice Item", "zz-fbk No Such Type", _denied())):
+			# the editor shows this error on the field (a missing type may trip the Link check first)
+			exc = frappe.ValidationError if "No Such" in bad else FileBoxCreatesError
+			with self.subTest(doctype=bad), as_user(OWNER):
+				with self.assertRaises(exc):
+					custom_skills_api.create_custom_skill(f"{PFX}-ed-new", "d", "i", file_box_creates=bad)
+				with self.assertRaises(exc):
+					custom_skills_api.update_custom_skill(name=row.name, file_box_creates=bad)
+		frappe.db.rollback()
+		self.assertEqual(self.fields(row.name).file_box_creates, PI)
+		self.assertFalse(frappe.db.exists(SKILL, {"skill_name": f"{PFX}-ed-new"}))
+
+	def test_a_shared_skill_opts_in_or_retargets_only_through_a_reviewer(self):
+		row = skill(PEER, "ed-org", scope="Org", creates=PI, use=0)
+		with as_user(PEER):
+			for change in ({"use_in_file_box": 1}, {"file_box_creates": SI}, {"file_box_creates": ""}):
+				with self.subTest(change=change), self.assertRaises(frappe.PermissionError):
+					custom_skills_api.update_custom_skill(name=row.name, **change)
+			on = skill(PEER, "ed-org-on", scope="Org", creates=PI)
+			custom_skills_api.update_custom_skill(name=on.name, use_in_file_box=0)  # opting out is free
+		frappe.db.rollback()
+		self.assertEqual(self.fields(row.name), {"use_in_file_box": 0, "file_box_creates": PI})
+		self.assertEqual(self.fields(on.name).use_in_file_box, 0)
+		with as_user(SM):  # a reviewer may
+			custom_skills_api.update_custom_skill(name=row.name, use_in_file_box=1, file_box_creates=SI)
+		self.assertEqual(self.fields(row.name), {"use_in_file_box": 1, "file_box_creates": SI})
+
+	def test_the_picker_lists_only_types_file_box_may_draft(self):
+		with as_user(OWNER):
+			self.assertIn(PI, custom_skills_api.file_box_doctypes("Purchase Inv"))
+			self.assertNotIn("Purchase Invoice Item", custom_skills_api.file_box_doctypes("Purchase Invoice"))
+			self.assertNotIn("Supplier", custom_skills_api.file_box_doctypes("Supplier"))
+			if _denied():
+				self.assertNotIn(_denied(), custom_skills_api.file_box_doctypes(_denied()))
+			self.assertEqual(custom_skills_api.file_box_doctypes("%"), [])  # wildcards are literal
+			listed = custom_skills_api.file_box_doctypes()
+		self.assertTrue(0 < len(listed) <= 20)
+		self.assertEqual(file_box_creates_filters()["istable"], 0)
+		for name in listed:  # the doctype's own rule
+			meta = frappe.db.get_value("DocType", name, ["is_submittable", "istable", "module"], as_dict=True)
+			self.assertEqual((meta.is_submittable, meta.istable), (1, 0))
+			self.assertNotIn(meta.module, held_writes.DENIED_MODULES)
+
+	def test_the_lists_carry_the_file_box_fields(self):
+		on = skill(OWNER, "ed-list", creates=PI)
+		off = skill(OWNER, "ed-list-off", use=0)
+		with as_user(OWNER):
+			flat = {r["name"]: r for r in custom_skills_api.list_custom_skills()}
+			page = custom_skills_api.list_custom_skills_page(search=f"{PFX}-ed-list")["rows"]
+		self.assertEqual((flat[on.name]["use_in_file_box"], flat[off.name]["use_in_file_box"]), (1, 0))
+		rows = {r["name"]: r for r in page}
+		self.assertEqual((rows[on.name]["use_in_file_box"], rows[on.name]["file_box_creates"]), (1, PI))
+		self.assertEqual(rows[off.name]["use_in_file_box"], 0)
+
+	def test_the_lists_skip_the_file_box_columns_before_their_migrate(self):
+		row = skill(OWNER, "ed-pre")
+		new = ("use_in_file_box", "file_box_creates")
+		meta = frappe.get_meta(SKILL)
+		has_field = meta.has_field
+		with (
+			as_user(OWNER),
+			patch.object(meta, "has_field", side_effect=lambda f: f not in new and has_field(f)),
+		):
+			flat = custom_skills_api.list_custom_skills()
+			page = custom_skills_api.list_custom_skills_page(search=row.skill_name)["rows"]
+		self.assertIn(row.name, [r["name"] for r in flat])
+		self.assertEqual([r["name"] for r in page], [row.name])
+		for r in (*flat, *page):
+			self.assertFalse(set(new) & set(r), r)
+
+
+class TestPromotionCarriesFileBox(_Base):
+	"""A promotion publishes the File Box settings the reviewer saw (the request's
+	snapshot), never the source's later edits."""
+
+	def request(self, row, to_scope, **kw):
+		with as_user(OWNER):
+			return custom_skills_api.request_skill_promotion(row.name, to_scope, **kw)["request"]
+
+	def approve(self, req):
+		with as_user(SM):
+			return custom_skills_api.decide_skill_promotion(req, 1)
+
+	def fields(self, name):
+		return frappe.db.get_value(SKILL, name, ["use_in_file_box", "file_box_creates"], as_dict=True)
+
+	def test_both_are_snapshotted_shown_and_published_in_either_branch(self):
+		src = skill(OWNER, "promo", creates=PI, use=0)
+		req = self.request(src, "Role", target_role=ROLE)
+		snap = ["use_in_file_box_snapshot", "file_box_creates_snapshot"]
+		self.assertEqual(frappe.db.get_value(PROMO, req, snap), (0, PI))
+		with as_user(OWNER):  # an edit after asking is never published
+			custom_skills_api.update_custom_skill(name=src.name, use_in_file_box=1, file_box_creates=SI)
+		with as_user(SM):
+			[row] = custom_skills_api.list_skill_promotion_requests(search=src.skill_name)["rows"]
+		self.assertEqual((row["use_in_file_box_snapshot"], row["file_box_creates_snapshot"]), (0, PI))
+		shared = self.approve(req)["materialized"]  # a new shared copy
+		self.assertEqual(self.fields(shared), {"use_in_file_box": 0, "file_box_creates": PI})
+		self.assertEqual(self.approve(self.request(src, "Org"))["materialized"], shared)  # widened in place
+		self.assertEqual(self.fields(shared), {"use_in_file_box": 1, "file_box_creates": SI})
+
+	def test_a_target_file_box_can_no_longer_draft_publishes_nothing(self):
+		src = skill(OWNER, "promo-bad", creates=PI)
+		req = self.request(src, "Org")
+		frappe.db.set_value(PROMO, req, "file_box_creates_snapshot", "Supplier")
+		frappe.db.commit()
+		with self.assertRaises(FileBoxCreatesError):
+			self.approve(req)
+		frappe.db.rollback()
+		self.assertFalse(frappe.db.exists(SKILL, {"source_skill": src.name}))
+		self.assertEqual(frappe.db.get_value(PROMO, req, "status"), "Pending")
 
 
 class TestBackfillPatch(_Base):
@@ -407,7 +563,40 @@ class TestDropPin(_Base):
 				self.assertEqual(
 					ar.question, f"The skill '{shown}' chosen for {fname} isn't available to you."
 				)
-				self.assertEqual(self.ladder()[conv]["status"], "needs_approval")
+				row = self.ladder()[conv]
+				self.assertEqual(
+					(row["status"], row["result"], row["result_link"]),
+					("needs_approval", filebox.NEEDS_CHOICE, f"/approvals/{ar.name}"),
+				)
+
+	def test_another_question_keeps_the_generic_waiting_line(self):
+		conv = self.conv()
+		doc = frappe.get_doc(
+			{"doctype": AR, "title": "zz-fbk which vendor?", "question": "?", "conversation": conv}
+		)
+		doc.flags.jarvis_server_write = True
+		doc.insert(ignore_permissions=True)
+		frappe.db.commit()
+		self.assertEqual(self.ladder()[conv]["result"], "1 approval waiting: zz-fbk which vendor?")
+
+	def test_the_bulk_precheck_is_uniform(self):
+		ok = skill(OWNER, "check", creates=PI)
+		private = skill(PEER, "check-private")
+		off = skill(OWNER, "check-off", use=0)
+		with as_user(OWNER):
+			self.assertEqual(filebox.check_skill(ok.skill_name), {"ok": True, "available": 1})
+			self.assertEqual(filebox.check_skill(filebox.OCR_DATA_ENTRY)["available"], 1)
+			for slug in ("zz-fbk-no-such", private.skill_name, off.skill_name, "", None):
+				with self.subTest(slug=slug):
+					self.assertEqual(filebox.check_skill(slug), {"ok": True, "available": 0})
+		self.assertEqual(frappe.get_all(CONV, filters={"owner": OWNER}), [])  # a check drops nothing
+
+	def test_the_precheck_never_resolves_a_learned_or_overlong_slug(self):
+		with as_user(OWNER), patch.object(filebox_skills, "resolve") as resolve:
+			for slug in ("learned-selling", " Learned-Buying ", "x" * 200):
+				with self.subTest(slug=slug[:20]):
+					self.assertEqual(filebox.check_skill(slug), {"ok": True, "available": 0})
+		resolve.assert_not_called()  # no lookup, so no learned-miss Error Log per check
 
 
 # --------------------------------------------------------------------------- #
@@ -432,6 +621,7 @@ class TestRoutingDecide(_Base):
 		[call] = calls
 		self.assertEqual((call["user"], call["origin"], call["delegated"]), (OWNER, "file_box", True))
 		self.assertNotIn("TAGGED skill", call["message"])
+		self.assertNotIn("[System] Re-run", call["message"])  # a first drop has no earlier pass
 		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_pinned_skill"), "")
 		self.assertEqual(frappe.db.get_value(AR, name, ["status", "decided_by"]), ("Approved", SM))
 
@@ -469,6 +659,15 @@ class TestRoutingDecide(_Base):
 		with as_user(OWNER):
 			approvals_api.dismiss_approval(doc.name)
 		self.assertEqual(frappe.db.get_value(AR, doc.name, "decision"), "(dismissed - no action taken)")
+
+	def test_a_start_that_raises_releases_its_claim(self):
+		conv, name = self.missing()
+		boom = patch.object(approvals_api, "owner_run_identity", side_effect=RuntimeError("boom"))
+		with boom, fbh.fake_send() as calls:
+			self.assertFalse(self.decide(name, filebox_skills.PROCESS_AUTO, user=SM)["resumed"])
+		self.assertEqual(calls, [])
+		self.assertIsNone(frappe.db.get_value(CONV, conv, "filebox_rerun_at"))
+		self.assertNotEqual(self.ladder()[conv]["status"], "processing")  # not stuck "re-running"
 
 	def test_a_dismissed_routing_question_can_not_be_restored(self):
 		conv, name = self.missing()
@@ -571,6 +770,7 @@ class TestTamper(_Base):
 			("filebox_skills", json.dumps([{"slug": "x", "creates": SI}])),
 			("filebox_skill_choice", "x"),
 			("filebox_skipped_at", "2026-01-01 00:00:00"),
+			("filebox_rerun_preamble", "[System] Re-run: forged"),
 		):
 			for user in (OWNER, "Administrator"):
 				with self.subTest(field=field, user=user), as_user(user):
@@ -936,11 +1136,50 @@ class TestRerun(_Base):
 		with fbh.fake_send() as calls, as_user(OWNER):
 			res = filebox._rerun_one(conv)
 		self.assertTrue(res["ok"])
+		self.assertEqual(res["result"], filebox.NEEDS_CHOICE)  # the row's own words
 		self.assertEqual(calls, [])
 		[ar] = self.routing_ars(conv)
 		self.assertEqual(ar.routing, filebox_skills.MISSING)
 		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_rerun_at"))
 		self.assertEqual(self.ladder()[conv]["status"], "needs_approval")
+
+	def gone_pin(self):
+		pin = skill(OWNER, f"rerun-gone-{frappe.generate_hash(length=6)}", creates=PI)
+		conv = self.failed(filebox_pinned_skill=pin.skill_name)
+		frappe.db.set_value(SKILL, pin.name, "enabled", 0)
+		frappe.db.commit()
+		return conv
+
+	def test_process_after_a_rerun_keeps_the_rerun_preamble(self):
+		conv = self.gone_pin()
+		with fbh.fake_send(), as_user(OWNER):
+			self.assertEqual(filebox._rerun_one(conv)["needs_approval"], 1)
+		[ar] = self.routing_ars(conv)
+		with fbh.fake_send() as calls, as_user(OWNER):
+			self.assertTrue(approvals_api.decide(ar.name, filebox_skills.PROCESS_AUTO)["resumed"])
+		[call] = calls
+		self.assertTrue(call["message"].startswith("[System] Re-run:"), call["message"][:60])
+		self.assertIn("LLM timed out", call["message"])
+		self.assertNotIn("TAGGED skill", call["message"])
+		self.assertIsNone(frappe.db.get_value(CONV, conv, "filebox_rerun_preamble"))  # sent once
+
+	def test_skip_drops_the_kept_preamble(self):
+		conv = self.gone_pin()
+		with fbh.fake_send(), as_user(OWNER):
+			filebox._rerun_one(conv)
+		self.assertIn("LLM timed out", frappe.db.get_value(CONV, conv, "filebox_rerun_preamble"))
+		[ar] = self.routing_ars(conv)
+		with fbh.fake_send() as calls, as_user(OWNER):
+			approvals_api.decide(ar.name, filebox_skills.SKIP)
+		self.assertEqual(calls, [])
+		self.assertIsNone(frappe.db.get_value(CONV, conv, "filebox_rerun_preamble"))
+
+	def test_a_bulk_rerun_counts_a_skill_question_as_needing_a_choice(self):
+		waiting, plain = self.gone_pin(), self.failed()
+		with fbh.fake_send() as calls, as_user(OWNER):
+			res = filebox.bulk_rerun_inbound([waiting, plain])
+		self.assertEqual(res, {"sent": 1, "needs_choice": 1, "skipped": []})
+		self.assertEqual(len(calls), 1)
 
 
 # --------------------------------------------------------------------------- #
@@ -1122,3 +1361,123 @@ class TestSalesInvoiceToPurchaseE2E(_Base):
 			self.assertEqual(row["status"], "draft_created")
 			self.assertIn(f"Draft {PI} {name} created", row["result"])
 		self.assertFalse(frappe.db.exists(SI, {"company": E2E_CO}))
+
+
+# --------------------------------------------------------------------------- #
+# Code served ahead of the File Box migrate (PD-1)
+# --------------------------------------------------------------------------- #
+_NEW_FIELDS = {
+	fbh.PA: (
+		"collecting",
+		"collecting_turn",
+		"record_count",
+		"question_count",
+		"sheet_counts",
+		"needs_fix",
+		"sheet_outcome",
+		"apply_token",
+		"apply_request",
+		"apply_errors",
+		"stop_requested",
+	),
+	AR: ("routing", "sheet"),
+	CONV: (
+		"filebox_skills",
+		"filebox_skill_choice",
+		"filebox_skipped_at",
+		"filebox_sheet_count",
+		"filebox_rerun_preamble",
+	),
+	SKILL: ("use_in_file_box", "file_box_creates"),
+	PROMO: ("use_in_file_box_snapshot", "file_box_creates_snapshot"),
+	"Jarvis Settings": ("file_box_sheets",),
+}
+_UNIQUE = sorted({f for fields in _NEW_FIELDS.values() for f in fields} - {"routing", "sheet"})
+# SQL naming a new column ("routing" / "sheet" only as a column, never an alias).
+_NAMES_ONE = re.compile(
+	rf"\b({'|'.join(_UNIQUE)})\b|`(routing|sheet)`|\b(?:ar|a|sp)\.(?:routing|sheet)\b"
+	r"|\b(?:routing|sheet)\s*(?:=|IN\b)|IFNULL\((?:routing|sheet)\b"
+)
+_ORM = {"db_insert", "db_update"}  # the ORM's own writes follow the meta
+
+
+@contextlib.contextmanager
+def before_the_migrate():
+	"""The File Box doctypes without their new fields (the meta, and so the one gate),
+	recording every SQL that still names one of them."""
+	named, real = [], frappe.db.sql
+
+	def sql(query, *a, **k):
+		text = str(query)
+		if _NAMES_ONE.search(text) and not any(f.name in _ORM for f in traceback.extract_stack()):
+			named.append(text)
+		return real(query, *a, **k)
+
+	with contextlib.ExitStack() as stack:
+		for doctype, fields in _NEW_FIELDS.items():
+			meta = frappe.get_meta(doctype)
+			has = meta.has_field
+			stack.enter_context(
+				patch.object(
+					meta, "has_field", side_effect=lambda f, has=has, gone=fields: f not in gone and has(f)
+				)
+			)
+		stack.enter_context(patch.object(frappe.local, "jarvis_filebox_migrated", None, create=True))
+		stack.enter_context(patch.object(frappe.db, "sql", side_effect=sql))
+		yield named
+
+
+class TestBeforeTheMigrate(_Base):
+	"""Pre-migrate, File Box runs exactly as it did before routing and sheets."""
+
+	def upload(self):
+		with as_user(OWNER):
+			return frappe.get_doc(
+				{"doctype": "File", "file_name": "fbk-pre.txt", "content": "fbk", "is_private": 1}
+			).insert(ignore_permissions=True)
+
+	def test_the_legacy_paths_work_and_name_no_new_column(self):
+		from jarvis.chat import held_sheet_seal
+		from jarvis.chat.pending_actions import _lifecycle, _reconcile, _sheet
+
+		pin = skill(OWNER, "pre", creates=PI)
+		shared = skill(PEER, "pre-shared", scope="Org", creates=PI)
+		conv = self.conv()
+		with before_the_migrate() as named:
+			self.assertFalse(filebox_skills.filebox_migrated())
+			self.assertEqual(filebox_skills.prompt_skills(conv), ([], False))
+			self.assertIsNone(filebox_skills.gate_get_skill({"skill_name": pin.skill_name}, conv))
+			self.assertIsNone(filebox_skills.target_refusal(conv, SI))
+			res = self.call("create_doc", fbh._supplier(), conv)
+			self.assertEqual(res["data"]["held_for"], "approval_board", res)
+			[held] = frappe.get_all(fbh.PA, {"owner_user": OWNER, "kind": "file_box_held"}, pluck="name")
+			with as_user(OWNER):
+				self.assertEqual(approvals_api._held_pending_count(OWNER, False), 1)
+				self.assertEqual(
+					[r["name"] for r in approvals_api.list_pending_actions_lane()["rows"]], [held]
+				)
+			self.assertEqual(self.ladder()[conv]["status"], "needs_approval")
+			self.assertIsNone(held_sheet_seal.seal_turn(conv, "fbk-no-turn"))
+			self.assertEqual((held_sheet_seal.backstop(), _sheet.reap()), ({}, []))
+			_reconcile._cancel_disabled_owners()
+			with as_user(OWNER):
+				_lifecycle.cancel_for_conversation(conv)  # a Stop: the held row's terminal write
+			self.assertEqual(frappe.db.get_value(fbh.PA, held, "status"), "Cancelled")
+			dropped = []
+			for slug, tagged in (("zz-fbk-no-such", False), (pin.skill_name, True)):
+				f = self.upload()
+				with fbh.fake_send() as calls, as_user(OWNER):
+					res = filebox.drop_file(file=f.name, skill=slug)
+				self.assertTrue(res["ok"], res)  # an unusable pin runs unpinned, as before
+				self.assertEqual("TAGGED skill" in calls[0]["message"], tagged)
+				dropped.append(res["conversation_id"])
+			with as_user(OWNER):
+				custom_skills_api.list_custom_skills()
+			with as_user(PEER):
+				doc = frappe.get_doc(SKILL, shared.name)
+				doc.enabled = 0
+				doc.save(ignore_permissions=True)
+		self.assertEqual(named, [])
+		self.assertFalse(frappe.db.exists(AR, {"conversation": ["in", dropped]}))
+		self.assertEqual([frappe.db.get_value(CONV, c, "filebox_skills") for c in dropped], [None, None])
+		self.assertTrue(filebox_skills.filebox_migrated())

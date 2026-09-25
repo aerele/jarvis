@@ -1288,12 +1288,16 @@ def _log_refused_update(update: dict, source: str, ref: str | None) -> None:
 
 
 def _log_page_full_refusal(slug_or_name: str, existing_len: int, incoming_len: int) -> None:
-	"""W: a ``refuse_overflow`` append/create was refused rather than clipped.
-	Slug/docname and lengths only — never the note's content."""
+	"""W: a ``refuse_overflow`` append/create was refused rather than clipped: an
+	admin alert, once a day per page. Slug/docname and lengths only — never the
+	note's content. Never commits: it runs under the reviewer-approve landing claim."""
+	from jarvis.chat import held_sheet_seal
+
 	try:
-		frappe.log_error(
-			title="jarvis.wiki.append_refused_page_full",
-			message=f"{slug_or_name}: existing={existing_len} incoming={incoming_len} cap={MAX_BODY_LEN}",
+		held_sheet_seal.alert(
+			f"wiki_page_full:{slug_or_name}",
+			f"{slug_or_name}: existing={existing_len} incoming={incoming_len} cap={MAX_BODY_LEN}",
+			commit=False,
 		)
 	except Exception:
 		pass

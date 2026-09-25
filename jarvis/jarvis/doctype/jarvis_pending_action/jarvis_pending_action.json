@@ -42,6 +42,10 @@
   "sheet_counts",
   "needs_fix",
   "sheet_outcome",
+  "apply_token",
+  "apply_request",
+  "apply_errors",
+  "stop_requested",
   "sealed_call",
   "sealed_settlement",
   "waiters"
@@ -279,6 +283,35 @@
    "permlevel": 1
   },
   {
+   "description": "Server-only. File Box sheets: the running apply's token (its background job id); every job exit is a compare-and-set on it.",
+   "fieldname": "apply_token",
+   "fieldtype": "Data",
+   "label": "Apply Token",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: the validated decisions of the last apply (kept when it bounces back to Pending, so the approver's edits survive).",
+   "fieldname": "apply_request",
+   "fieldtype": "JSON",
+   "label": "Apply Request",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: {record index: error} from the last apply that rolled back (nothing was created).",
+   "fieldname": "apply_errors",
+   "fieldtype": "JSON",
+   "label": "Apply Errors",
+   "permlevel": 1
+  },
+  {
+   "default": "0",
+   "description": "Server-only. File Box sheets: the run was stopped while its sheet was being applied; the apply ends without a resume.",
+   "fieldname": "stop_requested",
+   "fieldtype": "Check",
+   "label": "Stop Requested",
+   "permlevel": 1
+  },
+  {
    "description": "Fernet envelope of the exact call. NULLed at settle.",
    "fieldname": "sealed_call",
    "fieldtype": "Long Text",
@@ -302,7 +335,7 @@
  "in_create": 1,
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-25 01:00:00.000000",
+ "modified": "2026-09-25 03:00:00.000000",
  "module": "Jarvis",
  "name": "Jarvis Pending Action",
  "naming_rule": "Random",

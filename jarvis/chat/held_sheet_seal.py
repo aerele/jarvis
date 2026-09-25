@@ -5,7 +5,8 @@ A sheet seals (``collecting`` 1 -> 0) once, when the turn that opened it ends: t
 (``after_turn``), a later turn's first write (``seal_if_stale``) and the reconciler
 (``backstop``). Only the CAS winner notifies the owner; an empty sheet is dropped
 quietly. Every ended sheet closes its still-Pending questions in its settle
-continuation (``on_settled``). Apply (S2) builds on this."""
+continuation (``on_settled``); an applied one resumes its run with every outcome and
+answer (``resume_message``)."""
 
 from __future__ import annotations
 
@@ -16,15 +17,16 @@ from jarvis.chat.held_sheet_board import counts_line
 from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._store import (
 	DISCARDED,
+	EXECUTED,
 	FAILED,
 	PENDING,
 	SHEET,
 	TERMINAL,
 	_terminal_update,
+	filebox_migrated,
 	lock_conversation,
 	rowcount,
 	seal_sheet,
-	table_ready,
 )
 
 PA = "Jarvis Pending Action"
@@ -79,7 +81,7 @@ def _ended_by(sheet, turn: str | None, legacy: bool) -> bool:
 def seal_turn(conversation: str, turn: str | None, *, legacy: bool = False) -> str | None:
 	"""Turn end: seal the sheet this turn collected, or discard it when the user
 	stopped the turn. Idempotent, and never another turn's sheet. The sealed name."""
-	if not conversation or not table_ready():
+	if not conversation or not filebox_migrated():
 		return None
 	if not frappe.db.exists(
 		PA, {"conversation": conversation, "kind": SHEET, "status": PENDING, "collecting": 1}
@@ -126,13 +128,19 @@ def seal_if_stale(conversation: str, sheet):
 
 def _seal_locked(sheet) -> str | None:
 	"""Under the conversation lock: seal (only the CAS winner notifies), or drop an
-	empty sheet quietly. Commits."""
+	empty sheet quietly. A sheet of routing questions alone gives its pause back: it
+	never counts toward ``MAX_SHEETS``. Commits."""
 	if not seal_sheet(sheet.name):
 		frappe.db.commit()
 		return None
 	if not (sheet.record_count or sheet.question_count):
 		_discard(sheet, "discarded", empty=True)
 		return None
+	if not sheet.record_count and not frappe.db.sql(
+		"SELECT 1 FROM `tabJarvis Approval Request` WHERE sheet=%(s)s AND IFNULL(routing, '')='' LIMIT 1",
+		{"s": sheet.name},
+	):
+		_give_back(sheet.conversation)
 	frappe.db.commit()
 	line = counts_line(sheet.sheet_counts, sheet.question_count)
 	title = held_writes._clean_title(f"{sheet.summary} ({line})" if line else sheet.summary)
@@ -145,19 +153,24 @@ def _discard(sheet, reason: str, *, by: str | None = None, empty: bool = False) 
 	settling closes its questions. An empty sheet gives its pause back. Commits."""
 	from jarvis.chat.pending_actions import settle
 
-	held_sheets._drop_waiters(sheet.name)
+	held_sheets.drop_waiters(sheet.name)
 	cols = {"decided_by": by} if by else {}
 	moved = _terminal_update(sheet.name, [PENDING], DISCARDED, reason_code=reason, **cols)
 	if moved and empty:
-		frappe.db.sql(
-			"UPDATE `tabJarvis Conversation` SET filebox_sheet_count=GREATEST(IFNULL(filebox_sheet_count, 0)-1, 0)"
-			" WHERE name=%(c)s",
-			{"c": sheet.conversation},
-		)
+		_give_back(sheet.conversation)
 	frappe.db.commit()
 	if moved:
 		settle(sheet.name)
 	return moved
+
+
+def _give_back(conversation: str) -> None:
+	"""One of the document's ``MAX_SHEETS`` pauses back (no commit)."""
+	frappe.db.sql(
+		"UPDATE `tabJarvis Conversation` SET filebox_sheet_count=GREATEST(IFNULL(filebox_sheet_count, 0)-1, 0)"
+		" WHERE name=%(c)s",
+		{"c": conversation},
+	)
 
 
 # --------------------------------------------------------------------------- #
@@ -214,16 +227,77 @@ _ENDED = {
 }
 
 
-def resume_message(row) -> str:
-	"""The DATA-quoted resume of an ended sheet's run, from retained columns. S1b
-	sheets end unapplied; S2 adds the applied outcomes from ``sheet_outcome``."""
+_APPLIED = (
+	"the approver applied this document's approval sheet. Each answer below applies to its own "
+	"question only. Continue now: draft the document using exactly these records, by the names "
+	"given (a draft may already exist: look for it first and never create a second one), and do not "
+	"create any of these records again. If a master the draft needs was skipped, stop and end with "
+	"a one-line summary saying so."
+)
+OUTCOME_CAP = 20000
+ANSWER_CAP = 1000
+_DID = {
+	"created": "created as {name}",
+	"existing": "used the existing {name}",
+	"updated": "updated",
+	"skipped": "skipped",
+}
+
+
+def outcome_line(outcome, cap: int = OUTCOME_CAP) -> str:
+	""" "Supplier Acme: created as SUP-0001; Item X: skipped; ..." (labels and final
+	names only), capped with "(+N more)"."""
+	parts = []
+	for e in held_sheets.json_dict(outcome).get("records") or []:
+		label = held_writes._clean_title(f"{e.get('doctype') or ''} {e.get('title') or e.get('name') or ''}")
+		did = _DID.get(e.get("action"), "unknown").format(name=e.get("name") or "")
+		if e.get("auto"):
+			did += " (it exists now)"
+		if e.get("cascade"):
+			did += " (it needs a skipped record)"
+		parts.append(f"{label}: {did}")
+	out, used = [], 0
+	for i, part in enumerate(parts):
+		if used + len(part) > cap:
+			out.append(f"(+{len(parts) - i} more)")
+			break
+		out.append(part)
+		used += len(part) + 2
+	return "; ".join(out)
+
+
+def answer_lines(answers) -> list[str]:
+	""" "[Approval <name> - <title>] APPROVED: <answer>", one line each (the persona
+	contract), sanitised and capped."""
 	from jarvis.chat.turn_handler import _safe_label_name
 
-	key = "stuck" if row.reason_code == "stuck" else held_writes._verdict(row)
-	verdict = _ENDED.get(key, _ENDED["unknown"])
-	return held_writes._SCAFFOLD.format(
-		verdict=verdict, data=_safe_label_name(row.summary or "approval sheet")
-	)
+	out = []
+	for a in answers or []:
+		verdict = (
+			"ANSWERED" if a.get("routing") else ("APPROVED" if a.get("status") == "Approved" else "REJECTED")
+		)
+		title = held_writes._clean_title(a.get("title") or "")
+		out.append(
+			_safe_label_name(
+				f"[Approval {a.get('name')} - {title}] {verdict}: {str(a.get('answer') or '')[:ANSWER_CAP]}"
+			)
+		)
+	return out
+
+
+def resume_message(row) -> str:
+	"""The DATA-quoted resume of an ended sheet's run, from retained columns: an
+	applied one carries every record's outcome and every answer."""
+	from jarvis.chat.turn_handler import _safe_label_name
+
+	outcome = held_sheets.json_dict(row.sheet_outcome)
+	if row.status == EXECUTED:
+		verdict, data = _APPLIED, outcome_line(outcome) or row.summary or "approval sheet"
+	else:
+		key = "stuck" if row.reason_code == "stuck" else held_writes._verdict(row)
+		verdict, data = _ENDED.get(key, _ENDED["unknown"]), row.summary or "approval sheet"
+	text = held_writes._SCAFFOLD.format(verdict=verdict, data=_safe_label_name(data))
+	return "\n".join([text, *answer_lines(outcome.get("answers"))])
 
 
 # --------------------------------------------------------------------------- #
@@ -312,7 +386,7 @@ def _fail_stuck() -> list[str]:
 	for name in failed:
 		settle(name)
 	if failed:
-		_alert(
+		alert(
 			"sheet_collecting_stuck",
 			f"{len(failed)} File Box sheet(s) still collecting after {COLLECTING_MAX_S // 3600} h were "
 			"failed (a stuck turn, or its seal kept failing): " + ", ".join(failed),
@@ -342,7 +416,7 @@ def _routing_backlog() -> int:
 		{"cut": cut},
 	)[0][0]
 	if count > ROUTING_BACKLOG_ALERT:
-		_alert(
+		alert(
 			"routing_backlog",
 			f"{count} File Box routing questions have waited more than {ROUTING_BACKLOG_HOURS} h "
 			f"(alert>{ROUTING_BACKLOG_ALERT}). Threshold in jarvis/chat/held_sheet_seal.py.",
@@ -350,20 +424,22 @@ def _routing_backlog() -> int:
 	return count
 
 
-def _alert(event: str, message: str) -> None:
+def alert(event: str, message: str, commit: bool = True) -> None:
 	"""An admin alert ``jarvis.file_box.<event>``, at most once a day (the
-	``cards_aged`` pattern)."""
+	``cards_aged`` pattern). ``commit=False`` inside a caller's transaction."""
 	from jarvis.chat.pending_actions._reconcile import _age_alert_deduped
 
+	event = event[: 140 - len("jarvis.file_box.")]  # an Error Log title's length
 	if not _age_alert_deduped(frappe.utils.now_datetime(), f"jarvis.file_box.{event}"):
 		frappe.log_error(title=f"jarvis.file_box.{event}", message=message)
-		frappe.db.commit()
+		if commit:
+			frappe.db.commit()
 
 
 def backstop() -> dict:
 	"""Reconciler step: seal stranded sheets, fail stuck ones, close orphaned
 	questions, and alert on a routing-question backlog."""
-	if not table_ready():
+	if not filebox_migrated():
 		return {}
 	return {
 		"sealed": len(_seal_stranded()),
