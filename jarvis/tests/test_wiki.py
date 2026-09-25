@@ -408,6 +408,22 @@ class TestApplyPageUpdates(FrappeTestCase):
 			)
 		self.assertEqual((applied, failed), (0, 1))
 
+	def test_over_cap_voice_append_without_refuse_overflow_still_clips(self):
+		# MINOR-4 regression: refuse_overflow only refuses for the caller that
+		# opts in (File Box). Every other caller - the voice ingest here, the
+		# default - keeps the pre-W _clip_body behavior on a non-curated page.
+		doc = _make_page(ALPHA_SLUG, ALPHA, body_md="seed")
+		frappe.db.set_value(
+			WIKI_DT, doc.name, "body_md", "x" * (wiki.MAX_BODY_LEN - 10), update_modified=False
+		)
+		applied, failed = wiki.apply_extracted_page_updates(
+			[{"slug": ALPHA_SLUG, "append_md": "y" * 100}], "voice", "a@test.invalid"
+		)
+		self.assertEqual((applied, failed), (1, 0))
+		body = frappe.get_doc(WIKI_DT, ALPHA_SLUG).body_md
+		self.assertLessEqual(len(body), wiki.MAX_BODY_LEN)
+		self.assertTrue(body.endswith("y" * 100))
+
 
 class TestWikiClause(_ConversationFixture):
 	def _plant_pages_and_refs(self):

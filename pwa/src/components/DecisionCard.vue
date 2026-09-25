@@ -3,12 +3,21 @@
 // only thing standing between the model and your ERP data, so it is loud on
 // purpose: amber, full width, and it does not go away on its own.
 // `earlier`: parked before the user's latest message, so a bare typed "yes"/"no"
-// no longer binds it (decision 6).
+// no longer binds it (decision 6). `proposed`: "Proposed 3h ago" once it has
+// waited over an hour (cards never expire).
+import { computed } from "vue";
+
 const props = defineProps({
 	summary: { type: String, required: true },
 	earlier: { type: Boolean, default: false },
+	proposed: { type: String, default: "" },
 });
 const emit = defineEmits(["open"]);
+const sub = computed(() =>
+	[props.earlier ? "Earlier" : "", props.proposed, "Review and approve"]
+		.filter(Boolean)
+		.join(" · ")
+);
 </script>
 
 <template>
@@ -32,9 +41,7 @@ const emit = defineEmits(["open"]);
 		</span>
 		<span class="jv-decision-main">
 			<span class="jv-decision-title">{{ props.summary }}</span>
-			<span class="jv-decision-sub">{{
-				props.earlier ? "Earlier · Review and approve" : "Review and approve"
-			}}</span>
+			<span class="jv-decision-sub">{{ sub }}</span>
 		</span>
 		<svg
 			class="jv-decision-chev"

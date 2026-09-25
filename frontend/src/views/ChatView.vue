@@ -2443,6 +2443,10 @@
 							<span v-if="!isRecentCard(pa)" class="jv-pending-earlier"
 								>Earlier</span
 							>
+							<!-- Cards never expire: one that has waited over an hour says so. -->
+							<span v-if="pendingAgeOf(pa)" class="jv-pending-age">{{
+								pendingAgeOf(pa)
+							}}</span>
 							<!-- The number is what a typed "confirm 1 and 3" selects by, so it
 							     only appears when there is actually a choice to make. -->
 							<span v-if="visiblePendingActions.length > 1" class="jv-pending-num">
@@ -4711,6 +4715,8 @@ import {
 	markCardsEarlier,
 	typedApprovalHint as hintFor,
 } from "@/lib/typedCardReply";
+import { proposedLabel } from "@/lib/cardAge";
+import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
@@ -7805,6 +7811,9 @@ onUnmounted(() => {
 function pendingExpiredOf(pa) {
 	return pendingExpiry(pa && pa.expires_at, pendingNowMs.value).expired;
 }
+function pendingAgeOf(pa) {
+	return proposedLabel(pa && pa.created_at, pendingNowMs.value);
+}
 // Drop one card from the queue by its token (confirm-success / discard / expiry).
 function removePending(token) {
 	if (!token) return;
@@ -7835,10 +7844,9 @@ function pendingActionFromRow(m, convId) {
 		summary: "",
 		preview: { card: m.pending_card },
 		run_id: null,
-		// The row has no dedicated created_at field; its own creation timestamp
-		// is stamped in the same request as the mint and is close enough for
-		// ordering (sortPendingCards falls back to expires_at when this is null).
-		created_at: _rowExpiresEpoch(m.creation),
+		// Server epoch on every pending row (a legacy one: its own creation); never a
+		// local-time parse (sortPendingCards falls back to expires_at when null).
+		created_at: m.created_at ?? null,
 		expires_at: _rowExpiresEpoch(m.expires_at),
 		seq: m.seq ?? null,
 		recent: m.recent !== false,
@@ -7908,6 +7916,13 @@ async function confirmPending(pa) {
 				const card = cardById();
 				if (card) card.error = r.error;
 				notify(r.error.message, { type: "error" });
+				return;
+			}
+			if (keepsChatCard(r)) {
+				// Not settled (busy, already running, identity refused, a stopping armed run): keep it.
+				const card = cardById();
+				if (card) card.error = { message: chatRefusalMessage(r) };
+				notify(chatRefusalMessage(r), { type: "error" });
 				return;
 			}
 			// Token gone/expired/used, or the executed tool reported failure. Either
@@ -7986,6 +8001,12 @@ async function approveAndRunPending(pa) {
 				const card = cardById();
 				if (card) card.error = r.error;
 				notify(r.error.message, { type: "error" });
+				return;
+			}
+			if (keepsChatCard(r)) {
+				const card = cardById();
+				if (card) card.error = { message: chatRefusalMessage(r) };
+				notify(chatRefusalMessage(r), { type: "error" });
 				return;
 			}
 			if (r.error && r.error.type === "InvalidConfirmation") {
@@ -8087,6 +8108,11 @@ async function discardPending(pa) {
 			if (r && r.ok === false && confirmationStorageUnavailable(r)) {
 				pa.error = r.error;
 				notify(r.error.message, { type: "error" });
+				return;
+			}
+			if (keepsChatCard(r)) {
+				pa.error = { message: chatRefusalMessage(r) };
+				notify(chatRefusalMessage(r), { type: "error" });
 				return;
 			}
 		} catch (e) {
@@ -15541,6 +15567,12 @@ onUnmounted(() => {
 	font-size: 11px;
 	color: var(--text-3);
 	background: var(--surface-2);
+}
+.jv-pending-age {
+	margin-left: 6px;
+	font-size: 11px;
+	color: var(--text-3);
+	white-space: nowrap;
 }
 .jv-pending-older-note {
 	margin: 4px 14px 8px;

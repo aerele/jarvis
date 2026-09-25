@@ -15,19 +15,25 @@ from jarvis.chat.pending_actions._store import (
 	EXECUTING,
 	FAILED,
 	PENDING,
+	SHEET,
 	TERMINAL,
 	_terminal_update,
 	_transition,
+	apply_ready,
 	claim_settled,
+	filebox_migrated,
 	get_row,
 	lock_conversation,
 	null_sealed,
+	request_stop,
 	table_ready,
 	waiters,
 )
 from jarvis.permissions import refuse_in_tool_dispatch
 
 _BULK_LIMIT = 500
+# A File Box sheet's questions close with the sheet (``held_sheet_seal.close_ended``).
+SHEET_CLOSE = "jarvis.chat.held_sheet_seal.close_ended"
 
 
 def _clear_autorun(conversation: str) -> None:
@@ -86,7 +92,7 @@ def discard(name: str, *, kind: str = "chat", conversation: str | None = None) -
 			result=None,
 			outcome="discarded",
 			provenance="chat" if kind == "chat" else "approval",
-			provenance_name=row.name if kind == "file_box_held" else "",
+			provenance_name=row.name if kind != "chat" else "",
 		)
 	frappe.db.commit()
 	if kind == "chat" and row.conversation:
@@ -95,14 +101,24 @@ def discard(name: str, *, kind: str = "chat", conversation: str | None = None) -
 	return {"ok": True, "data": {"status": "discarded", "tool": row.tool}, "reason_code": "discarded"}
 
 
-def _drop_waiter(parent: str, conversation: str, reason: str, *, to: str = CANCELLED) -> None:
+def _drop_waiter(
+	parent: str, conversation: str, reason: str, *, to: str = CANCELLED, sheet_to: str | None = None
+) -> None:
 	"""Take ``conversation`` off a held row's waiter list, promoting the next waiter
 	when it was the primary; a Pending row left with no waiter moves to ``to``
 	(Cancelled by default - Stop/archive/delete; Superseded when a re-run retires
-	a stale ask instead). Does not commit."""
+	a stale ask instead), a File Box sheet to ``sheet_to`` when given (a user Stop /
+	archive / delete discards it, collecting or sealed). A sheet being applied keeps
+	its waiter and is asked to stop: its job ends without a resume. Does not commit."""
 	row = get_row(parent, lock="update")
 	if not row:
 		return
+	if row.kind == SHEET and row.status == EXECUTING:
+		if apply_ready():
+			request_stop(parent)
+		return
+	if row.kind == SHEET and sheet_to:
+		to = sheet_to
 	members = waiters(parent)
 	mine = [w for w in members if w.conversation == conversation]
 	if not mine:
@@ -121,7 +137,8 @@ def _drop_waiter(parent: str, conversation: str, reason: str, *, to: str = CANCE
 			{"n": parent, "c": promoted.conversation if promoted else None},
 		)
 	if not rest and row.status == PENDING:
-		_terminal_update(parent, [PENDING], to, reason_code=reason)
+		by = {"decided_by": frappe.session.user} if row.kind == SHEET and to == DISCARDED else {}
+		_terminal_update(parent, [PENDING], to, reason_code=reason, **by)
 
 
 def _held_parents(conversation: str) -> list[str]:
@@ -134,8 +151,9 @@ def _held_parents(conversation: str) -> list[str]:
 
 def cancel_for_conversation(conversation: str, *, reason: str = "cancelled") -> list[str]:
 	"""Stop / archive: cancel this conversation's Pending chat cards (only those
-	that actually transition; an executing card keeps running) and drop it from any
-	held row's waiters. Returns the chat cards cancelled."""
+	that actually transition; an executing card keeps running), drop it from any
+	held row's waiters and discard its File Box sheet (a system cancel seals it at
+	the turn end instead). Returns the chat cards cancelled."""
 	if not conversation or not table_ready():
 		return []
 	frappe.db.commit()
@@ -151,7 +169,7 @@ def cancel_for_conversation(conversation: str, *, reason: str = "cancelled") -> 
 	cancelled = [n for n in chat if _transition(n, [PENDING], CANCELLED, reason_code=reason) == "ok"]
 	held = _held_parents(conversation)
 	for parent in held:
-		_drop_waiter(parent, conversation, reason)
+		_drop_waiter(parent, conversation, reason, sheet_to=DISCARDED)
 	frappe.db.commit()
 	for name in cancelled + held:
 		settle(name)
@@ -162,8 +180,9 @@ def on_conversation_trash(doc, method=None) -> None:
 	"""``Jarvis Conversation`` on_trash (inside the delete's transaction; never
 	commits). Chat cards are cancelled then raw-deleted, except an Executing one,
 	whose final write/settle copes with the missing conversation. Held rows drop
-	the conversation from their waiters; one left terminal with nobody waiting has
-	nothing to deliver, so it is marked settled."""
+	the conversation from their waiters (its sheet is discarded); one left terminal
+	with nobody waiting has nothing to deliver, so it is marked settled (a sheet's
+	questions closed with it)."""
 	if not table_ready():
 		return
 	conv = doc.name
@@ -180,10 +199,13 @@ def on_conversation_trash(doc, method=None) -> None:
 	if names:
 		frappe.db.sql("DELETE FROM `tabJarvis Pending Action` WHERE name IN %(n)s", {"n": names})
 	for parent in _held_parents(conv):
-		_drop_waiter(parent, conv, "cancelled")
+		_drop_waiter(parent, conv, "cancelled", sheet_to=DISCARDED)
 		row = get_row(parent)
 		if row and row.status in TERMINAL and not row.settled and not waiters(parent):
-			null_sealed(claim_settled([parent]))
+			won = claim_settled([parent])
+			if won and row.kind == SHEET:
+				frappe.get_attr(SHEET_CLOSE)(won)
+			null_sealed(won)
 
 
 def _bulk_terminal(sql: str, to: str, reason_code: str) -> int:
@@ -210,9 +232,12 @@ def cancel_all_chat_pending() -> int:
 
 
 def withdraw_all_held() -> int:
-	"""Runbook (PR-2c rollback): withdraw every Pending held write."""
+	"""Runbook (PR-2c / sheets rollback): withdraw every Pending held write and sealed
+	File Box sheet. A collecting sheet seals at its turn end: run it again then."""
+	sealed = " OR (kind='file_box_sheet' AND collecting=0)" if filebox_migrated() else ""
 	return _bulk_terminal(
-		"SELECT name FROM `tabJarvis Pending Action` WHERE kind='file_box_held' AND status='Pending'",
+		"SELECT name FROM `tabJarvis Pending Action` WHERE status='Pending'"
+		f" AND (kind='file_box_held'{sealed})",
 		CANCELLED,
 		"cancelled",
 	)
@@ -220,9 +245,12 @@ def withdraw_all_held() -> int:
 
 def cancel_unverifiable() -> int:
 	"""Runbook (after a key rotation/restore): fail every Pending row whose seal no
-	longer opens, so none sits forever un-actionable."""
+	longer opens, so none sits forever un-actionable (a collecting sheet once sealed)."""
 	done = 0
-	names = frappe.db.sql_list("SELECT name FROM `tabJarvis Pending Action` WHERE status='Pending'")
+	names = frappe.db.sql_list(
+		"SELECT name FROM `tabJarvis Pending Action` WHERE status='Pending'"
+		+ (" AND collecting=0" if filebox_migrated() else "")
+	)
 	for name in names:
 		row = get_row(name)
 		try:
