@@ -1051,8 +1051,9 @@ def apply_insight_skill_update(
 	non-managed row. Writes go through ``doc.save`` / the SPA create endpoint
 	so the doctype controller re-runs slug/cap/uniqueness validation. Then the
 	JLP is terminal-marked exactly like Acknowledge but with the applied note
-	+ the ``materialized_skill`` provenance pointer. The skill change rides
-	the normal Skills-tab apply bar afterwards - deliberately NOT auto-pushed."""
+	+ the ``materialized_skill`` provenance pointer. Nothing is pushed here: when
+	the written row is in the shared push set the response carries
+	``needs_apply`` and the reviewer's client runs the Apply right after."""
 	_guard()
 	doc = _load_for_transition(pattern_name, _INSIGHT_APPLY_SOURCES, "apply to a skill")
 	if (doc.effective_sensitivity or "") not in ("B", "C"):
@@ -1084,7 +1085,9 @@ def apply_insight_skill_update(
 	doc.materialized_skill = row_name
 	doc.save()
 	frappe.db.commit()
-	out = {"ok": True, "skill_name": slug}
+	from jarvis.chat.custom_skills import is_pushable_skill
+
+	out = {"ok": True, "skill_name": slug, "needs_apply": is_pushable_skill(row_name)}
 	# TASK 16: folding a personalise-origin insight into a shared/org skill
 	# carries the same scrub obligation; surface the warning to the reviewer.
 	if doc.personalise_origin:
