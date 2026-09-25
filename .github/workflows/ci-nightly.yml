@@ -32,6 +32,8 @@ jobs:
     uses: ./.github/workflows/runtime-branding.yml
 
   tests:
+    env:
+      JARVIS_LEGACY_MIGRATION_FIXTURES: ${{ vars.JARVIS_LEGACY_MIGRATION_FIXTURES_6763DD766A33ABE8 }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -68,6 +70,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"   # frappe version-16 requires node >= 24
+
+      - name: Validate Admin-owned upgrade fixtures for this checkout
+        working-directory: app
+        run: |
+          git rev-parse HEAD
+          python3 -m jarvis.tests._legacy_migration_fixtures
 
       - name: System deps
         run: |

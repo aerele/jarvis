@@ -31,8 +31,9 @@ RENAMES = [
 
 # Password fields whose values also live in __Auth and must be renamed there.
 PASSWORD_RENAMES = {
-	"openclaw_api_key": "jarvis_admin_api_key",
-	"openclaw_gateway_token": "agent_token",
+	old_name: new_name
+	for old_name, new_name in RENAMES
+	if new_name in {"jarvis_admin_api_key", "agent_token"}
 }
 
 
