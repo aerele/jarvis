@@ -2234,7 +2234,8 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	W: refuses BEFORE creating the Approval Request when the note would overflow
 	the page (see :func:`jarvis.chat.wiki.file_box_append_would_overflow`) - a
 	reviewer should never see a proposal that can only ever land as page_full - or
-	when the page is one the own-pages fence refuses (not a File Box page)."""
+	any other refusal the funnel would make (a bad slug, a User-scope note, a new
+	page without a title / page_type, a page the own-pages fence refuses)."""
 	slug = (args.get("slug") or "").strip()
 	if not slug:
 		# A slugless update_wiki is degenerate - the fenced funnel derives no page
@@ -2266,6 +2267,7 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	from jarvis.chat.turn_handler import _safe_label_name
 	from jarvis.chat.wiki import (
 		MAX_BODY_LEN,
+		PAGE_TYPES,
 		_log_page_full_refusal,
 		_normalize_slug,
 		file_box_append_would_overflow,
@@ -2281,21 +2283,29 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 			scope=args.get("scope"),
 			target_user=None,
 			reader=owner,
+			title=args.get("title"),
+			page_type=args.get("page_type"),
 		)
 	except Exception:
 		frappe.log_error(title="jarvis.wiki.propose_overflow_check_failed", message=frappe.get_traceback())
 		overflow = {"overflow": False, "existing_len": 0, "readable": True}
-	if overflow.get("fenced"):
-		# The own-pages fence refuses it at land time too: never file a dead proposal.
+	refused = overflow.get("refused")
+	if refused:
+		# The funnel refuses it at land time too: never file a dead proposal.
 		safe_slug = _safe_label_name(norm_slug)
-		return {
-			"ok": False,
-			"reason": (
-				f"The wiki page '{safe_slug}' is kept by people or another feature, so a File Box "
-				"run can't add to it - nothing was proposed. Record this note on a File Box page "
-				f"of its own instead (a new slug, e.g. '{safe_slug}-<topic>')."
-			),
+		reasons = {
+			"slug": "That page slug has no usable letters or digits - nothing was proposed. Use a slug "
+			"like 'party-<name>'.",
+			"user_scope": "A File Box note goes on the shared wiki, never a personal (User-scope) page - "
+			"nothing was proposed. Record it again without a scope.",
+			"identity": f"There is no wiki page '{safe_slug}' yet, and a new page needs a title and a "
+			f"page_type (one of {', '.join(PAGE_TYPES)}) - nothing was proposed. Record it again "
+			"with both.",
+			"fenced": f"The wiki page '{safe_slug}' is kept by people or another feature, so a File "
+			"Box run can't add to it - nothing was proposed. Record this note on a File Box page of "
+			f"its own instead (a new slug, e.g. '{safe_slug}-<topic>').",
 		}
+		return {"ok": False, "reason": reasons[refused]}
 	if overflow["overflow"]:
 		incoming_len = len(str(args.get("append_md") or args.get("replace_body_md") or "").strip())
 		_log_page_full_refusal(norm_slug, existing_len=overflow["existing_len"], incoming_len=incoming_len)

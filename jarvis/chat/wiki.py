@@ -1543,6 +1543,8 @@ def file_box_append_would_overflow(
 	scope: str | None = None,
 	target_user: str | None = None,
 	reader: str | None = None,
+	title: str | None = None,
+	page_type: str | None = None,
 ) -> dict:
 	"""Unlocked PRE-CHECK mirror of the File Box wiki funnel's merge (the write
 	path above / ``api._file_box_wiki_write``), for ``api._propose_file_box_wiki_write``
@@ -1554,27 +1556,31 @@ def file_box_append_would_overflow(
 	Returns ``{"overflow": bool, "existing_len": int, "readable": bool}``.
 	``existing_len`` is the stored body's length (0 for a page that doesn't exist
 	yet); ``readable`` is whether ``reader`` may read the resolved page (True when
-	``reader`` is unset, or there is no page to hide). A page the
-	``_page_is_agent_updatable`` fence would refuse reports NO overflow but
-	``fenced: True`` — it is refused for provenance, not fullness."""
+	``reader`` is unset, or there is no page to hide). A write ``_apply_one_update``
+	refuses for another reason reports NO overflow but ``refused``: ``"slug"`` (no
+	usable slug), ``"user_scope"`` (no target user), ``"identity"`` (a new page
+	without a title or a valid page_type) or ``"fenced"`` (the provenance fence)."""
 	norm_slug = _normalize_slug(slug)
 	incoming = str(append_md or replace_body_md or "").strip()
 	scope = (str(scope or "").strip()) or "Org"
+	none = {"overflow": False, "existing_len": 0, "readable": True}
+	if not norm_slug:
+		return {**none, "refused": "slug"}
 	if scope == "User" and not target_user:
-		# Mirrors _apply_one_update: refused there for a missing identity, never
-		# for fullness.
-		return {"overflow": False, "existing_len": 0, "readable": True}
+		return {**none, "refused": "user_scope"}
 	if scope != "User":
 		scope = "Org"
-	if not norm_slug:
-		return {"overflow": False, "existing_len": 0, "readable": True}
 
 	if scope == "User":
 		name, _ = resolve_user_scope_page(norm_slug, target_user)
 	else:
 		name = frappe.db.get_value(WIKI, {"slug": norm_slug}, "name")
+	if not name and (
+		not " ".join(str(title or "").split()) or str(page_type or "").strip() not in PAGE_TYPES
+	):
+		return {**none, "refused": "identity"}
 	if name and not _page_is_agent_updatable(name, provenance_prefix):
-		return {"overflow": False, "existing_len": 0, "readable": True, "fenced": True}
+		return {**none, "refused": "fenced"}
 	if not incoming:
 		return {"overflow": False, "existing_len": 0, "readable": True}
 	if not name:

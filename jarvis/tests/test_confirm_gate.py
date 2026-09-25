@@ -1392,7 +1392,7 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 	_ARGS = {
 		"slug": "party-fake-co",
 		"title": "Fake Co",
-		"page_type": "Reference",
+		"page_type": "Customer",
 		"append_md": "## Invoice INV-1\nTotal 100",
 		"summary": "party page",
 	}

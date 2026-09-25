@@ -29,7 +29,7 @@ PLAIN = "wiki-plain@test.com"
 _ARGS = {
 	"slug": "party-fake-co",
 	"title": "Fake Co",
-	"page_type": "Reference",
+	"page_type": "Customer",
 	"append_md": "## Invoice INV-1\nTotal 100",
 	"summary": "party page",
 }
@@ -763,7 +763,7 @@ class TestWikiProposeFence(_WikiBase):
 	propose too, so a reviewer never gets a proposal that can't land."""
 
 	SLUG = "party-human-co"
-	ARGS = {**_ARGS, "slug": SLUG, "page_type": "Customer"}
+	ARGS = {**_ARGS, "slug": SLUG}
 
 	def setUp(self):
 		super().setUp()
@@ -795,6 +795,32 @@ class TestWikiProposeFence(_WikiBase):
 				self.assertEqual(frappe.db.count(APPROVAL, {"conversation": self.conv}), 0)
 				# Lockstep: the land-time funnel refuses the same write.
 				self.assertFalse(api._file_box_wiki_write(dict(args), self.conv, user=DROPPER)["ok"])
+
+	def _refused_like_the_funnel(self, args):
+		res = api._propose_file_box_wiki_write(dict(args), self.conv)
+		self.assertFalse(res["ok"])
+		self.assertIn("nothing was proposed", res["reason"])
+		self.assertEqual(frappe.db.count(APPROVAL, {"conversation": self.conv}), 0)
+		self.assertFalse(api._file_box_wiki_write(dict(args), self.conv, user=DROPPER)["ok"])
+		return res["reason"]
+
+	def test_propose_refuses_a_user_scope_note(self):
+		self.assertIn("personal", self._refused_like_the_funnel({**self.ARGS, "scope": "User"}))
+
+	def test_propose_refuses_a_new_page_without_title_or_a_valid_page_type(self):
+		for missing in ({"title": " "}, {"page_type": None}, {"page_type": "Reference"}):
+			with self.subTest(missing=missing):
+				reason = self._refused_like_the_funnel({**self.ARGS, **missing})
+				self.assertIn("page_type", reason)
+				self.assertFalse(frappe.db.exists(WIKI, {"slug": self.SLUG}))
+
+	def test_propose_refuses_a_slug_with_nothing_usable(self):
+		self._refused_like_the_funnel({**self.ARGS, "slug": "!!!"})
+
+	def test_an_existing_file_box_page_needs_no_title_or_page_type(self):
+		self.assertTrue(api._file_box_wiki_write(dict(self.ARGS), self.conv, user=DROPPER)["ok"])
+		res = api._propose_file_box_wiki_write({"slug": self.SLUG, "append_md": "more"}, self.conv)
+		self.assertTrue(res["proposed"])
 
 	def test_propose_still_files_for_a_file_box_page(self):
 		self.assertTrue(api._file_box_wiki_write(dict(self.ARGS), self.conv, user=DROPPER)["ok"])
