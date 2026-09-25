@@ -22,6 +22,7 @@ from jarvis.chat.custom_skills import (
 	MANAGED_OWNER,
 	MAX_SKILLS_PER_PUSH,
 	build_push_payload,
+	is_pushable_skill,
 	project_org_promotion_push,
 	pushable_org_skill_count,
 	role_scoped_skill_rows,
@@ -796,8 +797,10 @@ def decide_skill_promotion(
 	contender sees the published copy and either supersedes its own lineage row or
 	refuses a different-lineage slug clash — never a duplicate shared row). Being
 	global, the one lock also covers BOTH the old and the new slug when a renamed
-	lineage copy is superseded. The promoted skill joins the shared catalog on the
-	next explicit Apply (never auto-pushed here)."""
+	lineage copy is superseded. Nothing is pushed here (the push restarts the
+	container and must not run under the catalog lock): an approval that lands the
+	skill in the shared push set returns ``needs_apply`` and the reviewer's client
+	runs the Apply right after."""
 	from jarvis._redis_lock import redis_lock
 	from jarvis.permissions import require_skill_reviewer
 
@@ -892,6 +895,7 @@ def decide_skill_promotion(
 				}
 		out.update(_materialize_promotion(req, roles=effective_roles))
 		_stamp_decision(req, reviewer, True, decision_note)
+	out["needs_apply"] = is_pushable_skill(out["materialized"])
 	return out
 
 

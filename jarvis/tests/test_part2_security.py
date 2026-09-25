@@ -602,6 +602,40 @@ class TestSkillPromotionSurfacing(Part2Base):
 		with _as(USER_B):
 			self.assertEqual(custom_skills_api.my_skill_promotion(skill.name), {})
 
+	def test_org_approval_asks_client_to_apply(self):
+		# The approved Org copy is in the shared push set, but nothing server-side
+		# pushes it: needs_apply is what makes the reviewer's client run the Apply.
+		from jarvis.chat import custom_skills, custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-needsapply", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		self.assertIs(out["needs_apply"], True)
+		self.assertTrue(custom_skills.is_pushable_skill(out["materialized"]))
+
+	def test_role_approval_and_reject_need_no_apply(self):
+		# A Role copy never enters the shared container, and a rejection writes no
+		# skill, so neither may restart the container for everyone.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-roleonly", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Role", target_role="Sales User")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"])
+		self.assertIs(out["needs_apply"], False)
+
+		other = _mk_skill(USER_A, f"{PFX}-rejected", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(other.name, "Org")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 0, note="no")
+		self.assertFalse(out.get("needs_apply"))
+
 	def test_my_skill_promotion_reflects_decision(self):
 		from jarvis.chat import custom_skills_api
 
