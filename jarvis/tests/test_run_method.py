@@ -6,6 +6,7 @@ server-script map are the real security boundary; exercising them for real
 is more meaningful than mocking them)."""
 
 import frappe
+from frappe.tests.classes.context_managers import enable_safe_exec
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
@@ -28,10 +29,11 @@ _REPORT = "jarvis_test_report"
 
 
 def _set_blocklist(value: str) -> None:
-	settings = frappe.get_single("Jarvis Settings")
-	settings.run_method_blocklist = value
-	settings.save(ignore_permissions=True)
-	frappe.db.commit()
+	# Write straight to the Single instead of doc.save(): saving Jarvis Settings
+	# fires its on_update control-plane sync, which raises AdminAuthError on a bench
+	# that isn't onboarded (e.g. CI's baked test site). set_single_value is how the
+	# rest of the suite sets Jarvis Settings fields in tests.
+	frappe.db.set_single_value("Jarvis Settings", "run_method_blocklist", value)
 	frappe.clear_document_cache("Jarvis Settings")
 
 
@@ -54,6 +56,10 @@ class TestRunMethod(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
+		# CI's baked test site does not set server_script_enabled in
+		# common_site_config; enable safe exec for this class so the Server Script
+		# dispatch tests can execute (mirrors frappe's own server-script tests).
+		cls.enterClassContext(enable_safe_exec())
 		cls._ensure_api_script(_API_METHOD, _SCRIPT)
 		cls._ensure_api_script(_FLAGS_METHOD, _FLAGS_SCRIPT)
 		if not frappe.db.exists("Report", _REPORT):
