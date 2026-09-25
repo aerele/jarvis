@@ -731,6 +731,51 @@ class TestWikiProposalDigest(_WikiBase):
 		self.assertEqual(self._row(pending).wiki_digest, minted)
 
 
+class TestWikiProposeFence(_WikiBase):
+	"""A note the file-box provenance fence would refuse at land time is refused at
+	propose too, so a reviewer never gets a proposal that can't land."""
+
+	SLUG = "party-human-co"
+	ARGS = {**_ARGS, "slug": SLUG, "page_type": "Customer"}
+
+	def setUp(self):
+		super().setUp()
+		self.addCleanup(self._wipe_page)
+
+	def _wipe_page(self):
+		frappe.db.delete(WIKI, {"slug": self.SLUG})
+		frappe.db.commit()
+
+	def test_propose_refuses_a_page_the_fence_refuses(self):
+		args = self.ARGS
+		for kind in ("chat", "voice", "manual", "tool", "app-learning-agent:erpnext"):
+			with self.subTest(kind=kind):
+				self._wipe_page()
+				frappe.get_doc(
+					{
+						"doctype": WIKI,
+						"slug": self.SLUG,
+						"title": "Human Co",
+						"page_type": "Customer",
+						"body_md": "kept by people",
+						"status": "Active",
+						"sources": frappe.as_json([wiki._source_entry(kind, None, DROPPER)]),
+					}
+				).insert(ignore_permissions=True)
+				res = api._propose_file_box_wiki_write(dict(args), self.conv)
+				self.assertFalse(res["ok"])
+				self.assertIn("nothing was proposed", res["reason"])
+				self.assertEqual(frappe.db.count(APPROVAL, {"conversation": self.conv}), 0)
+				# Lockstep: the land-time funnel refuses the same write.
+				self.assertFalse(api._file_box_wiki_write(dict(args), self.conv, user=DROPPER)["ok"])
+
+	def test_propose_still_files_for_a_file_box_page(self):
+		self.assertTrue(api._file_box_wiki_write(dict(self.ARGS), self.conv, user=DROPPER)["ok"])
+		res = api._propose_file_box_wiki_write(dict(self.ARGS), self.conv)
+		self.assertTrue(res["ok"])
+		self.assertTrue(res["proposed"])
+
+
 class TestWikiPageFull(_WikiBase):
 	"""W: a File Box append/create that would exceed the page's length cap is
 	REFUSED outright rather than silently clipped (which used to drop the

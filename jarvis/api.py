@@ -2233,7 +2233,8 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 
 	W: refuses BEFORE creating the Approval Request when the note would overflow
 	the page (see :func:`jarvis.chat.wiki.file_box_append_would_overflow`) - a
-	reviewer should never see a proposal that can only ever land as page_full."""
+	reviewer should never see a proposal that can only ever land as page_full - or
+	when the page is one the own-pages fence refuses (not a File Box page)."""
 	slug = (args.get("slug") or "").strip()
 	if not slug:
 		# A slugless update_wiki is degenerate - the fenced funnel derives no page
@@ -2284,6 +2285,17 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	except Exception:
 		frappe.log_error(title="jarvis.wiki.propose_overflow_check_failed", message=frappe.get_traceback())
 		overflow = {"overflow": False, "existing_len": 0, "readable": True}
+	if overflow.get("fenced"):
+		# The own-pages fence refuses it at land time too: never file a dead proposal.
+		safe_slug = _safe_label_name(norm_slug)
+		return {
+			"ok": False,
+			"reason": (
+				f"The wiki page '{safe_slug}' is kept by people or another feature, so a File Box "
+				"run can't add to it - nothing was proposed. Record this note on a File Box page "
+				f"of its own instead (a new slug, e.g. '{safe_slug}-<topic>')."
+			),
+		}
 	if overflow["overflow"]:
 		incoming_len = len(str(args.get("append_md") or args.get("replace_body_md") or "").strip())
 		_log_page_full_refusal(norm_slug, existing_len=overflow["existing_len"], incoming_len=incoming_len)

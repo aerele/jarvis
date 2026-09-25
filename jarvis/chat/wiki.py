@@ -1555,9 +1555,8 @@ def file_box_append_would_overflow(
 	``existing_len`` is the stored body's length (0 for a page that doesn't exist
 	yet); ``readable`` is whether ``reader`` may read the resolved page (True when
 	``reader`` is unset, or there is no page to hide). A page the
-	``_page_is_agent_updatable`` fence would refuse anyway reports NO overflow —
-	that write was always going to be refused for provenance, not fullness, and
-	saying otherwise would be misleading."""
+	``_page_is_agent_updatable`` fence would refuse reports NO overflow but
+	``fenced: True`` — it is refused for provenance, not fullness."""
 	norm_slug = _normalize_slug(slug)
 	incoming = str(append_md or replace_body_md or "").strip()
 	scope = (str(scope or "").strip()) or "Org"
@@ -1567,19 +1566,21 @@ def file_box_append_would_overflow(
 		return {"overflow": False, "existing_len": 0, "readable": True}
 	if scope != "User":
 		scope = "Org"
-	if not norm_slug or not incoming:
+	if not norm_slug:
 		return {"overflow": False, "existing_len": 0, "readable": True}
 
 	if scope == "User":
 		name, _ = resolve_user_scope_page(norm_slug, target_user)
 	else:
 		name = frappe.db.get_value(WIKI, {"slug": norm_slug}, "name")
+	if name and not _page_is_agent_updatable(name, provenance_prefix):
+		return {"overflow": False, "existing_len": 0, "readable": True, "fenced": True}
+	if not incoming:
+		return {"overflow": False, "existing_len": 0, "readable": True}
 	if not name:
 		# A brand-new page: the whole note becomes the body. Only an oversized
 		# SINGLE note can overflow it — there is no existing text to blame.
 		return {"overflow": len(incoming) > MAX_BODY_LEN, "existing_len": 0, "readable": True}
-	if not _page_is_agent_updatable(name, provenance_prefix):
-		return {"overflow": False, "existing_len": 0, "readable": True}
 
 	page = frappe.db.get_value(WIKI, name, ["body_md", "scope", "target_role", "target_user"], as_dict=True)
 	existing = (page.get("body_md") or "").strip()
