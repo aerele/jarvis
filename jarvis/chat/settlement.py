@@ -44,14 +44,15 @@ CONV = "Jarvis Conversation"
 # canonical vocabulary ``turn_state.EFFECT_NAMES`` (never a local literal — the
 # insert seam rejects any name outside it). A relay:final success owes the FULL
 # vocabulary; an errored/cancelled terminal owes the macro-advance + telemetry
-# hooks (there is no rich output/title/usage to enrich, and its reply is already
-# terminal — finalize NEVER un-settles it). BOTH sets owe terminal_publish (CDX-12 /
-# R-5): the idempotent terminal re-publish backstop so a lost settlement terminal
-# (run:end / run:error) is redelivered off the durable row, on success AND error.
+# hooks and the File Box sheet seal (there is no rich output/title/usage to
+# enrich, and its reply is already terminal — finalize NEVER un-settles it).
+# BOTH sets owe terminal_publish (CDX-12 / R-5): the idempotent terminal
+# re-publish backstop so a lost settlement terminal (run:end / run:error) is
+# redelivered off the durable row, on success AND error.
 # If an effect is ever added that a SUCCESS does not owe, this stops being the whole
 # canon and must become an explicit subset of ``ts.EFFECT_NAMES``.
 FINAL_EFFECTS = ts.EFFECT_NAMES
-TERMINAL_EFFECTS = ("terminal_publish", "macro_advance", "telemetry_flush")
+TERMINAL_EFFECTS = ("terminal_publish", "file_box_sheet_seal", "macro_advance", "telemetry_flush")
 
 
 def invoke_settlement(

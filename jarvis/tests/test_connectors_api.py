@@ -809,6 +809,16 @@ def _token_response(
 	return _json_result(payload)
 
 
+def _throw_truncated(*_args, **_kwargs):
+	"""Fail the way Frappe's own length check does: through ``frappe.throw``, which
+	queues the raw text as a server message BEFORE raising."""
+	frappe.throw("Scope will get truncated", frappe.CharacterLengthExceededError)
+
+
+def _server_messages() -> str:
+	return frappe.as_json(frappe.get_message_log())
+
+
 class _McpOauthTestCase(_ConnectorApiTestCase):
 	"""Fixtures for a Custom URL connector backed by the discovery engine."""
 
@@ -1147,6 +1157,56 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 		self.assertFalse(
 			frappe.db.exists(CONNECTOR, {"key": "mcp_example_invalid", "owner": PLAIN_A}),
 			"a failed setup must not leave an unusable row behind",
+		)
+
+	def test_a_scope_list_over_1000_characters_is_stored_whole(self):
+		# Atlassian names no scope in its challenge and advertises 38 scopes, 1023
+		# characters joined. A Data(1000) column refused that insert and the Sign in
+		# button died with CharacterLengthExceededError.
+		advertised = [f"write:product-{i:02d}:agent-interface" for i in range(40)]
+		script = _discovery_script(rm_overrides={"scopes_supported": advertised})
+		script[MCP_BASE_URL] = HttpResult(
+			status=401,
+			headers={"www-authenticate": f'Bearer resource_metadata="{MCP_RM_URL}"'},
+			json=None,
+			text="",
+		)
+		script[MCP_REGISTER] = _json_result({"client_id": "dcr-client"}, status=201)
+		frappe.set_user(PLAIN_A)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", _ScriptedTransport(script)):
+			out = connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self._connectors.append(out["name"])
+
+		scope = frappe.db.get_value(CLIENT_DT, out["name"], "scope")
+		self.assertGreater(len(scope), 1000)
+		self.assertEqual(scope, " ".join(advertised))
+
+	def test_a_client_save_failure_leaves_no_connector_behind(self):
+		# Saving what discovery found is a dead end too when it fails: the row goes
+		# and the person reads the friendly sentence, never the raw exception class
+		# name the dialog used to show.
+		script = _discovery_script()
+		script[MCP_REGISTER] = _json_result({"client_id": "dcr-client"}, status=201)
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", _ScriptedTransport(script)),
+			patch.object(
+				connectors_api.mcp_oauth_store,
+				"save_client",
+				side_effect=_throw_truncated,
+			),
+			self.assertRaises(frappe.ValidationError) as ctx,
+		):
+			connectors_api.add_connector(
+				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
+			)
+		self.assertIn("We could not set up sign-in", str(ctx.exception))
+		self.assertNotIn("truncated", _server_messages(), "the SPA shows the first server message")
+		self.assertFalse(
+			frappe.db.exists(CONNECTOR, {"key": "mcp_example_invalid", "owner": PLAIN_A}),
+			"a failed client save must not leave an unusable row behind",
 		)
 
 	def test_registration_failure_surfaces_the_providers_reason(self):
@@ -1503,6 +1563,20 @@ class TestMcpOauthCallback(_McpOauthTestCase):
 		for secret in ("fresh-access", "fresh-refresh", "the-code", state):
 			self.assertNotIn(secret, page["body"])
 			self.assertNotIn(secret, page["primary_action"])
+
+	def test_a_granted_scope_list_over_1000_characters_is_stored_whole(self):
+		# A provider that grants everything it advertised echoes the whole list back.
+		# Atlassian's is past 1000 characters, which a Data(1000) column refused, and
+		# the callback ended on the generic "could not finish" page.
+		granted = " ".join(f"write:product-{i:02d}:agent-interface" for i in range(40))
+		name = self._mk_mcp_connector("cb-long-scope")
+		frappe.set_user(PLAIN_A)
+		_url, state = self._connect(name)
+		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", self._script(scope=granted)):
+			self._callback(code="the-code", state=state, iss=MCP_AS_URL)
+
+		self.assertEqual(self._page()["title"], "Connected")
+		self.assertEqual(frappe.db.get_value(TOKEN_DT, f"{name}-{PLAIN_A}", "granted_scopes"), granted)
 
 	def test_success_page_escapes_the_connector_label(self):
 		name = self._mk(
@@ -2454,6 +2528,44 @@ class TestSelfHealGuards(_McpOauthTestCase):
 		self.assertFalse(out.get("ok"))
 		self.assertEqual(out["error"]["code"], "oauth_not_configured")
 		self.assertFalse(frappe.db.exists(CLIENT_DT, name), "a reader's Connect writes nothing")
+
+	# A heal whose client save fails for a reason other than the engine's own refusal
+	# (a DB fault, a value too long for its column) keeps the row and reads the same
+	# friendly sentence as the create path, never an exception class name.
+	def test_a_connect_heal_that_fails_to_save_reads_friendly(self):
+		name = self._raw_oauth_row("heal-save-connect", preset="GitHub")
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "_over_test_rate_limit", return_value=False),
+			patch.object(
+				connectors_api,
+				"_seed_static_client_from_catalog",
+				side_effect=_throw_truncated,
+			),
+		):
+			out = connectors_api.connect_oauth(name)
+		self.assertFalse(out.get("ok"))
+		self.assertEqual(out["error"]["code"], "oauth_not_configured")
+		self.assertIn("We could not set up sign-in", out["error"]["message"])
+		self.assertNotIn("truncated", _server_messages())
+		self.assertTrue(frappe.db.exists(CONNECTOR, name), "a heal never deletes the row")
+
+	def test_a_credentials_heal_that_fails_to_save_reads_friendly(self):
+		name = self._raw_oauth_row("heal-save-creds", preset="GitHub")
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "_over_test_rate_limit", return_value=False),
+			patch.object(
+				connectors_api,
+				"_seed_static_client_from_catalog",
+				side_effect=_throw_truncated,
+			),
+			self.assertRaises(frappe.ValidationError) as ctx,
+		):
+			connectors_api.set_oauth_client_credentials(name, "cid", "sec")
+		self.assertIn("We could not set up sign-in", str(ctx.exception))
+		self.assertNotIn("truncated", _server_messages())
+		self.assertTrue(frappe.db.exists(CONNECTOR, name), "a heal never deletes the row")
 
 	def test_relink_is_refused_when_the_client_describes_another_address(self):
 		name = self._mk_mcp_connector("byoa-relink")

@@ -6,14 +6,20 @@
 					Promotion widens who can {{ verb }} this {{ noun }}. It stays private to you
 					until a reviewer approves the request.
 				</p>
-				<FormControl
-					type="select"
-					label="Promote to"
-					:options="TO_SCOPE_OPTIONS"
-					:modelValue="toScope"
-					@update:modelValue="(v) => (toScope = v)"
-				/>
-				<p class="text-p-sm text-ink-gray-5">{{ scopeHelp[toScope] }}</p>
+				<p v-if="!TO_SCOPE_OPTIONS.length" class="text-p-sm text-ink-gray-5">
+					This {{ noun }} is already shared with the whole organisation. There's nothing
+					wider to promote it to.
+				</p>
+				<template v-else>
+					<FormControl
+						type="select"
+						label="Promote to"
+						:options="TO_SCOPE_OPTIONS"
+						:modelValue="toScope"
+						@update:modelValue="(v) => (toScope = v)"
+					/>
+					<p class="text-p-sm text-ink-gray-5">{{ scopeHelp[toScope] }}</p>
+				</template>
 
 				<div v-if="toScope === 'Role'" class="flex flex-col gap-1">
 					<span class="block text-xs text-ink-gray-5">{{
@@ -109,6 +115,7 @@
 import { ref, computed, watch } from "vue";
 import { Button, Dialog, FeatherIcon, FormControl, toast } from "frappe-ui";
 import { promotableTargetRoles } from "@/api/skills";
+import { isWiderScope } from "@/pages/skills/promotionScope";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -118,13 +125,22 @@ const props = defineProps({
 	// the whole set becomes the skill's audience on approval. Wiki pages stay
 	// one-role-per-page, so WikiPageDialog leaves this false (single-select).
 	multiple: { type: Boolean, default: false },
+	// Skill-only (#595): the skill's CURRENT effective shared scope, resolved by
+	// lineage on the server (my_skill_promotion). A target at or below this is a
+	// no-op the server will reject, so it's filtered out of the picker instead of
+	// letting the requester pick it and hit an error. "" (the wiki host, or before
+	// the skill has loaded) offers both scopes, matching prior behaviour.
+	minScope: { type: String, default: "" },
 });
 const emit = defineEmits(["update:modelValue", "submit"]);
 
-const TO_SCOPE_OPTIONS = [
+const ALL_TO_SCOPE_OPTIONS = [
 	{ label: "A role (a team)", value: "Role" },
 	{ label: "The whole organisation", value: "Org" },
 ];
+const TO_SCOPE_OPTIONS = computed(() =>
+	ALL_TO_SCOPE_OPTIONS.filter((o) => isWiderScope(o.value, props.minScope))
+);
 // noun-keyed verb so the shared dialog reads naturally for a skill ("use") and
 // for a wiki page ("view") — SPX-10.
 const VERB = { skill: "use", page: "view" };
@@ -167,7 +183,9 @@ const filteredRoles = computed(() => {
 	return q ? roles.value.filter((r) => r.toLowerCase().includes(q)) : roles.value;
 });
 const canSubmit = computed(
-	() => !!toScope.value && (toScope.value !== "Role" || selected.value.length > 0)
+	() =>
+		TO_SCOPE_OPTIONS.value.some((o) => o.value === toScope.value) &&
+		(toScope.value !== "Role" || selected.value.length > 0)
 );
 const verb = computed(() => VERB[props.noun] || "use");
 const scopeHelp = computed(() => ({
@@ -198,7 +216,11 @@ watch(
 	() => props.modelValue,
 	(open) => {
 		if (!open) return;
-		toScope.value = "Org";
+		// Default to Org (SPX-3) when it's still a valid target; otherwise fall back
+		// to whatever the picker offers (there's always at most "nothing wider left").
+		toScope.value = TO_SCOPE_OPTIONS.value.some((o) => o.value === "Org")
+			? "Org"
+			: TO_SCOPE_OPTIONS.value[0]?.value || "Org";
 		selected.value = [];
 		roleQuery.value = "";
 		note.value = "";

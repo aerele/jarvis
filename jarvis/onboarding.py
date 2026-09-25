@@ -2066,6 +2066,8 @@ _WIPE_DOCTYPES = (
 	"Jarvis Chat Turn",
 	"Jarvis Turn Effect",
 	"Jarvis Chat Session",
+	"Jarvis Pending Action Waiter",
+	"Jarvis Pending Action",
 	"Jarvis Conversation",
 	"Jarvis Voice Note",
 	# skills

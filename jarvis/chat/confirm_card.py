@@ -58,6 +58,15 @@ from jarvis.chat._record_summary import (
 )
 
 _MAX_ROWS = 20  # cap fields / diff rows / batch bullets / targets shown
+
+# jarvis#596: Jarvis Trigger's own ``enabled`` field defaults to on, but a
+# create call that omits it (the common case - see the jarvis-triggers skill)
+# never shows an Enabled row on the card, because _create_card only renders
+# keys present in the caller's ``values``. A trigger's managed Server Script
+# is ALWAYS disabled by design (jarvis_trigger.py), so a card silent on
+# Enabled reads as "this was created off" to a user who then spots that
+# Disabled Server Script in Desk. Force the row in from the real default.
+_TRIGGER_DOCTYPE = "Jarvis Trigger"
 _BULK_KEYS = ("names", "updates", "docs", "messages")
 
 # tool -> present-tense verb for the "will <verb> this <doctype> <name>" card.
@@ -180,11 +189,44 @@ def _create_card(args: dict, would) -> dict:
 		if val is None or (not isinstance(val, list) and str(val).strip() == ""):
 			continue
 		df = meta.get_field(key) if meta else None
-		rows.append({"label": _label(meta, key), "value": fmt(val, df)})
+		# A held create with missing fields has no dry-run doc: never echo a secret arg.
+		shown = "[hidden]" if is_secret(meta, key) else fmt(val, df)
+		rows.append({"label": _label(meta, key), "value": shown})
 		if len(rows) >= _MAX_ROWS:
 			break
+	if doctype == _TRIGGER_DOCTYPE:
+		_ensure_effective_enabled_row(meta, would, rows)
 	name = would.get("name") if isinstance(would, dict) else None
 	return {"kind": "create", "doctype": doctype, "name": name, "rows": rows, "tables": tables}
+
+
+def _ensure_effective_enabled_row(meta, source, rows: list) -> None:
+	"""jarvis#596: always show Jarvis Trigger's effective Enabled state on a
+	create card, even when the caller's ``values`` never set it.
+
+	Reads ONLY from ``source`` - the perm-filtered ``would`` for a single
+	create - and honours the same perm-drop convention every other field in
+	this file uses: ``enabled`` ABSENT from ``source`` means it did not
+	survive field-level read permissions, so nothing is shown rather than a
+	guessed default. No hardcoded fallback: the value shown is always the
+	real one the resolved doc carries.
+
+	Respects ``_MAX_ROWS`` like every other row list here: replaces an
+	existing Enabled row in place, inserts when there is room, otherwise
+	replaces the last row rather than growing past the cap.
+	"""
+	if not isinstance(source, dict) or "enabled" not in source:
+		return
+	label = _label(meta, "enabled")
+	row = {"label": label, "value": fmt(source.get("enabled"), meta.get_field("enabled") if meta else None)}
+	for i, existing in enumerate(rows):
+		if existing["label"] == label:
+			rows[i] = row
+			return
+	if len(rows) < _MAX_ROWS:
+		rows.insert(0, row)
+	else:
+		rows[-1] = row
 
 
 def _update_card(args: dict, would) -> dict:
@@ -373,6 +415,11 @@ def _batch_create_card(args: dict, would) -> dict | None:
 				tables.append(t)
 				table_keys.add(key)
 		body = values_rows(meta, {k: v for k, v in values.items() if k not in table_keys})
+		if doctype == _TRIGGER_DOCTYPE:
+			# jarvis#596: batch create has no per-item perm-filtered doc (see the
+			# docstring above) - ``values`` is the only trustworthy source here,
+			# same as every other field this function renders.
+			_ensure_effective_enabled_row(meta, values, body["rows"])
 		records.append(
 			{
 				"doctype": doctype,

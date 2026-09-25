@@ -12,7 +12,7 @@ import frappe
 from frappe import _
 
 from jarvis.chat import list_filters
-from jarvis.permissions import require_jarvis_user
+from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_user
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
@@ -424,10 +424,11 @@ def delete_macros_bulk(names: str | list | None = None) -> dict:
 # --------------------------------------------------------------------------- #
 # Run / stop
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def run_macro(name: str) -> dict:
 	"""Start a macro now (manual trigger). Returns the run + conversation."""
+	refuse_in_tool_dispatch()
 	from jarvis.chat import macros
 
 	return macros.run_macro(name, trigger="manual")
@@ -608,7 +609,7 @@ def summarize_macro(name: str) -> dict:
 		update_modified=False,
 	)
 	frappe.db.commit()
-	out = chat_api._enqueue_turn(conv.name, prompt)
+	out = chat_api._enqueue_turn(conv.name, prompt, origin="macro")
 	# CDX-19: the site's turn queue was momentarily full, so the merge turn was NOT dispatched
 	# (its seed was cleaned up). Roll back the "pending" mark set above — there is no summary
 	# turn coming for it to wait on (get_macro_merge would poll pending forever otherwise).
