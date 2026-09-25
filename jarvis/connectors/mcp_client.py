@@ -127,6 +127,27 @@ def _rearm_socket(resp, remaining: float) -> None:
 			pass
 
 
+def _http_message(status: int, reason: str, challenge_error: str | None) -> str:
+	"""What failed in plain words, the provider's own reason, then the next step.
+	The status stays in the text because it is what a provider's docs key on."""
+	if status == 401:
+		headline, action = "The connector did not accept the sign-in", "Connect it again."
+	elif status == 403 and challenge_error == "insufficient_scope":
+		headline = "The connector needs permissions this sign-in did not grant"
+		action = "Connect it again and approve every permission."
+	elif status == 403:
+		headline = "The connector refused access"
+		action = "Check with the provider that API access is turned on."
+	else:
+		headline, action = "The connector returned an error", ""
+	parts = [f"{headline} (HTTP {status})."]
+	if reason:
+		parts.append(f"It said: {reason}" + ("" if reason.endswith((".", "!", "?")) else "."))
+	if action:
+		parts.append(action)
+	return " ".join(parts)
+
+
 class McpClient:
 	"""One MCP conversation over Streamable HTTP. Construct, ``connect()`` (or
 	``initialize()`` for a known-legacy server), then ``list_tools()`` /
@@ -457,16 +478,29 @@ class McpClient:
 	def _http_error(self, resp, status: int) -> McpError:
 		"""``code`` carries the HTTP status so the broker can count 5xx toward the
 		circuit breaker but leave 4xx (auth/bad request) out of it. A JSON 4xx body
-		is read (capped) so era detection can recognise a modern JSON-RPC error."""
-		rpc = None
-		if 400 <= status < 500:
-			content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-			if content_type == "application/json":
-				try:
-					rpc = mcp_wire.parse_rpc_error(self._read_capped(resp, limit=_ERROR_BODY_MAX))
-				except McpError:
-					rpc = None
-		return McpError(f"Connector returned HTTP {status}.", kind=ERR_HTTP, code=status, rpc=rpc)
+		is read (capped) so era detection can recognise a modern JSON-RPC error, and
+		so the message carries the provider's own reason: a bare "HTTP 403" tells
+		the person nothing about what to fix."""
+		raw = self._error_body(resp) if 400 <= status < 500 else b""
+		challenge = mcp_wire.challenge_params(resp.headers.get("WWW-Authenticate") or "")
+		reason = mcp_wire.error_reason(raw) or mcp_wire.clip_reason(challenge.get("error_description"))
+		return McpError(
+			_http_message(status, reason, challenge.get("error")),
+			kind=ERR_HTTP,
+			code=status,
+			rpc=mcp_wire.parse_rpc_error(raw),
+		)
+
+	def _error_body(self, resp) -> bytes:
+		"""The capped JSON error body, or ``b""``: an HTML error page, or a read that
+		failed, has no reason worth showing."""
+		content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+		if content_type != "application/json":
+			return b""
+		try:
+			return self._read_capped(resp, limit=_ERROR_BODY_MAX)
+		except McpError:
+			return b""
 
 	@staticmethod
 	def _unwrap(msg: dict) -> dict:

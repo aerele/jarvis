@@ -43,12 +43,62 @@ class TestModernErrors(unittest.TestCase):
 		self.assertFalse(mcp_wire.is_modern_probe_error({"code": -32601}))
 		self.assertFalse(mcp_wire.is_modern_probe_error(None))
 
+	def test_google_rest_error_is_not_a_modern_probe_error(self):
+		# Google's REST-style body has an int code, so it parses as an rpc error;
+		# its 403 must not be mistaken for a modern-era signal.
+		err = mcp_wire.parse_rpc_error(b'{"error":{"code":403,"message":"x","status":"PERMISSION_DENIED"}}')
+		self.assertEqual(err["code"], 403)
+		self.assertFalse(mcp_wire.is_modern_probe_error(err))
+
 	def test_pick_legacy_version_prefers_newest_common(self):
 		accepted = {"2025-11-25", "2025-06-18"}
 		self.assertEqual(
 			mcp_wire.pick_legacy_version(["2025-06-18", "2025-11-25", "2030-01-01"], accepted), "2025-11-25"
 		)
 		self.assertIsNone(mcp_wire.pick_legacy_version(["2030-01-01"], accepted))
+
+
+class TestErrorReason(unittest.TestCase):
+	def test_reason_shapes(self):
+		cases = {
+			b'{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"Token expired"}}': "Token expired",
+			b'{"error":{"code":403,"message":"Drive MCP API is disabled.","status":"PERMISSION_DENIED"}}': (
+				"Drive MCP API is disabled."
+			),
+			# Google's MCP servers answer 401/403 with an isError tool result.
+			b'{"id":1,"jsonrpc":"2.0","result":{"content":[{"text":"The caller does not have permission",'
+			b'"type":"text"}],"isError":true}}': "The caller does not have permission",
+			b'{"error":"invalid_token","error_description":"The token was revoked"}': "The token was revoked",
+			b'{"error":"forbidden"}': "forbidden",
+		}
+		for raw, expected in cases.items():
+			self.assertEqual(mcp_wire.error_reason(raw), expected)
+
+	def test_no_reason(self):
+		for raw in (
+			b"",
+			b"<html>Forbidden</html>",
+			b"[]",
+			b'{"jsonrpc":"2.0","id":1,"result":{"content":[]}}',
+		):
+			self.assertEqual(mcp_wire.error_reason(raw), "")
+
+	def test_reason_is_one_clipped_line(self):
+		reason = mcp_wire.error_reason(
+			('{"error":{"code":403,"message":"line one\\n  line two ' + "x" * 500 + '"}}').encode()
+		)
+		self.assertTrue(reason.startswith("line one line two x"))
+		self.assertLessEqual(len(reason), mcp_wire.REASON_MAX)
+		self.assertTrue(reason.endswith("..."))
+
+	def test_challenge_params(self):
+		params = mcp_wire.challenge_params(
+			'Bearer error="insufficient_scope", scope="a b", error_description="Needs more"'
+		)
+		self.assertEqual(params["error"], "insufficient_scope")
+		self.assertEqual(params["scope"], "a b")
+		self.assertEqual(params["error_description"], "Needs more")
+		self.assertEqual(mcp_wire.challenge_params(""), {})
 
 
 _SCHEMA = {
