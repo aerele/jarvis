@@ -539,6 +539,19 @@ class TestDedup(_Base):
 			)
 		)
 
+	def test_indic_names_one_vowel_sign_apart_are_two_parties(self):
+		"""Dedup and "already exists" keep matras: राम, रामा and रोम are three vendors."""
+		frappe.get_doc({"doctype": "Supplier", "supplier_name": "zz-fbh राम ट्रेडर्स"}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
+		self.assert_held(self.call("create_doc", _supplier("zz-fbh रोम ट्रेडर्स", ""), self.conv()))
+		self.assert_held(self.call("create_doc", _supplier("zz-fbh रामा ट्रेडर्स", ""), self.conv()))
+		self.assertEqual(len(self.rows()), 2, "never joined on a stripped name")
+		res = self.call("create_doc", _supplier("zz-fbh  राम ट्रेडर्स.", ""), self.conv())
+		self.assert_refused(res, "InvalidArgumentError")
+		self.assertIn("already exists", res["error"]["message"])
+
 
 class TestDecideAndResume(_Base):
 	"""AC4 / AC6 / AC13 / AC-U11: one decision resumes every waiter, at most once."""
@@ -953,3 +966,28 @@ class TestPartyKeys(FrappeTestCase):
 		self.assertLessEqual(len(title), held_writes.TITLE_MAX)
 		self.assertTrue(title.startswith("New supplier: Acme x"))
 		self.assertNotIn("<b>", title)
+
+	def test_indic_names_keep_their_vowel_signs_and_marks(self):
+		"""A matra, anusvara, nukta or virama is part of a name, never a separator."""
+		norm = held_parties.norm_name
+		for a, b in (
+			("राम ट्रेडर्स", "रामा ट्रेडर्स"),  # a vowel sign
+			("राम ट्रेडर्स", "रोम ट्रेडर्स"),
+			("संगम स्टोर्स", "सागम स्टोर्स"),  # an anusvara
+			("क़मल", "कोमल"),  # a nukta
+			("पत्र", "पति र"),  # a virama
+			("முருகன் ஸ்டோர்ஸ்", "மாரிகன் ஸ்டோர்ஸ்"),  # Tamil vowel signs + pulli
+		):
+			with self.subTest(a=a, b=b):
+				self.assertNotEqual(norm(a), norm(b))
+				keys = {
+					held_parties.item_key(held_parties.items_of("create_doc", _supplier(n, ""))[0])
+					for n in (a, b)
+				}
+				self.assertEqual(len(keys), 2)
+		self.assertEqual(norm("  राम-ट्रेडर्स. "), "राम ट्रेडर्स")
+		self.assertEqual(norm("\u0958\u092e\u0932"), norm("\u0915\u093c\u092e\u0932"))  # either nukta form
+		# Latin names normalise as before.
+		self.assertEqual(norm("  ACME   pvt. ltd "), "acme pvt ltd")
+		self.assertEqual(norm("Café_Déjà-vu No.2"), "café déjà vu no 2")
+		self.assertEqual(norm("Cafe\u0301 \uff22\uff45\uff52\uff52\uff59"), "café berry")  # NFKC folds them

@@ -21,7 +21,6 @@ CREATE_TOOLS = frozenset({"create_doc", "create_docs"})
 MAX_CANDIDATES = 5
 _LIKE_SCAN = 50
 _NOT_GSTIN = re.compile(r"[^0-9A-Z]")
-_NOT_WORD = re.compile(r"[\W_]+")
 
 
 def items_of(tool: str, args) -> list[dict]:
@@ -63,8 +62,10 @@ def norm_gstin(value) -> str:
 
 
 def norm_name(value) -> str:
+	"""Casefolded words of letters, digits and combining marks (an Indic matra,
+	virama, anusvara or nukta is part of a name); anything else separates."""
 	text = unicodedata.normalize("NFKC", str(value or "")).casefold()
-	return " ".join(_NOT_WORD.sub(" ", text).split())
+	return " ".join("".join(c if unicodedata.category(c)[0] in "LNM" else " " for c in text).split())
 
 
 def _meta(doctype: str):
