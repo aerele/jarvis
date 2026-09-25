@@ -1,9 +1,6 @@
 <template>
-	<div
-		class="border-t bg-surface-white px-5 py-4"
-		:aria-busy="loading || busy !== null ? 'true' : 'false'"
-	>
-		<!-- One chat action card, expanded under its lane row: the card the chat shows
+	<div :aria-busy="loading || busy !== null ? 'true' : 'false'">
+		<!-- One chat action card, in the board's right pane: the card the chat shows
 		     (PendingCard, text interpolation only - the values are model-derived),
 		     decided with the chat's own Confirm / Discard. Only its owner sees it (D1). -->
 		<div v-if="loading" class="flex justify-start">
@@ -87,8 +84,11 @@ import {
 
 const props = defineProps({
 	name: { type: String, required: true },
+	// Called with each settled answer. A callback, not an emit: Vue drops an unmounted
+	// instance's emits, and switching rows mid-decision unmounts this detail.
+	onDecided: { type: Function, default: null },
 });
-const emit = defineEmits(["decided"]);
+const decided = (res) => props.onDecided && props.onDecided(res);
 const router = useRouter();
 
 const rec = ref(null);
@@ -130,13 +130,13 @@ async function decide(action) {
 		const res = (await send(props.name, rec.value.conversation)) || {};
 		if (res.ok) {
 			toast.success(escapeHtml(chatOutcomeMessage(res, action)));
-			emit("decided", res);
+			decided(res);
 			return;
 		}
 		const message = chatRefusalMessage(res);
 		if (isChatSettled(res)) {
 			toast.error(escapeHtml(message));
-			emit("decided", res);
+			decided(res);
 			return;
 		}
 		notice.value = message;
@@ -157,5 +157,12 @@ function openChat() {
 	);
 }
 
+// The board calls this when the card leaves its rail: show the settled status, but
+// never over a decision in flight.
+function refresh() {
+	if (busy.value === null) load();
+}
+
 onMounted(load);
+defineExpose({ refresh });
 </script>

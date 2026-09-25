@@ -24,6 +24,7 @@ from jarvis.chat.pending_actions._store import (
 	FAILED,
 	PENDING,
 	REASON_TEXT,
+	SHEET,
 	TERMINAL,
 	_terminal_update,
 	claim,
@@ -31,7 +32,9 @@ from jarvis.chat.pending_actions._store import (
 )
 from jarvis.permissions import is_valid_unattended_owner, refuse_in_tool_dispatch
 
-_PROVENANCE = {"chat": "chat", "file_box_held": "approval"}
+_PROVENANCE = {"chat": "chat", "file_box_held": "approval", SHEET: "approval"}
+# Kinds a System Manager may act on for another user (the File Box dropper's).
+_SM_KINDS = frozenset({"file_box_held", SHEET})
 _SYSTEM_MANAGER = "System Manager"
 
 
@@ -71,15 +74,18 @@ _IDENTITY = (
 )
 
 
-def authorize(row, approver: str, kind: str, conversation: str | None = None) -> tuple[bool, str | None]:
+def authorize(
+	row, approver: str, kind: str, conversation: str | None = None, *, acting: bool = True
+) -> tuple[bool, str | None]:
 	"""D1 owner rule + the replay guard (no lock). Returns ``(allowed, adopt)``:
 	chat rows are owner-only (an SM too); a System Manager may act on another user's
-	held row. A caller-passed conversation must be the row's, or an owned
+	held row or sheet. A sheet still collecting may be read (``acting=False``), never
+	acted on. A caller-passed conversation must be the row's, or an owned
 	conversation a conversation-less card adopts (D9)."""
-	if not row or row.kind != kind:
+	if not row or row.kind != kind or (acting and kind == SHEET and row.get("collecting")):
 		return False, None
 	if row.owner_user != approver and not (
-		kind == "file_box_held" and _SYSTEM_MANAGER in frappe.get_roles(approver)
+		kind in _SM_KINDS and _SYSTEM_MANAGER in frappe.get_roles(approver)
 	):
 		return False, None
 	passed = str(conversation or "").strip()
@@ -172,7 +178,7 @@ def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None,
 				row.tool,
 				args,
 				provenance=_PROVENANCE[row.kind],
-				provenance_name=row.name if row.kind == "file_box_held" else "",
+				provenance_name=row.name if row.kind != "chat" else "",
 			)
 			api._apply_run_method_read_filter(row.tool, result)
 	except Exception:
@@ -200,7 +206,7 @@ def _discard_failed_dispatch(row, args: dict, crash_tb: str, *, actor: str | Non
 		result=None,
 		outcome="failed",
 		provenance=_PROVENANCE[row.kind],
-		provenance_name=row.name if row.kind == "file_box_held" else "",
+		provenance_name=row.name if row.kind != "chat" else "",
 	)
 	if crash_tb:
 		frappe.log_error(title="jarvis.pending_action.dispatch_crashed", message=crash_tb)

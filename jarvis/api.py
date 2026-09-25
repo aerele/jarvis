@@ -1153,8 +1153,8 @@ FILE_BOX_WIKI_KIND = "file-box:"
 FILE_BOX_WIKI_FENCE = "file-box"
 # Approval Request `source` value for a HELD file-box wiki write-back proposal.
 # A wiki write from an unattended file-box run is no longer applied at drop time;
-# it is parked as a Pending row a Jarvis reviewer (NOT the dropper) approves before
-# it lands (separation of duties). Distinct from "File Box" (document-classification
+# it is parked as a Pending row a Jarvis reviewer (the dropper too, with a reviewer
+# role) approves before it lands. Distinct from "File Box" (document-classification
 # approvals) so it routes to the reviewer lane and off the customer decide board.
 FILE_BOX_WIKI_SOURCE = "File Box Wiki"
 # Irreversible/consequential subset - gated even when a user has auto-apply
@@ -2137,7 +2137,10 @@ def _file_box_wiki_write(
 	``FILE_BOX_WIKI_KIND`` - so it can only create/refresh its OWN file-box pages,
 	appends (never replaces), and is REFUSED (never overwrites) on a slug that
 	collides with a human/other page. A ``replace_body_md`` is downgraded to an
-	append. Mirrors ``jarvis.tools.record_app_wiki``. Returns a
+	append. ``refuse_overflow=True`` (W): an append/create that would exceed the
+	page's length cap is likewise REFUSED rather than clipped, so approved File
+	Box knowledge is never silently truncated; the outcome reads
+	``reason="page_full"``. Mirrors ``jarvis.tools.record_app_wiki``. Returns a
 	raw-update_wiki-compatible result dict the model reads (the caller wraps it in
 	the standard ``{ok, data}`` envelope)."""
 	from jarvis.chat.wiki import apply_extracted_page_updates
@@ -2164,6 +2167,10 @@ def _file_box_wiki_write(
 			allow_body_replace=False,
 			preserve_curated=True,
 			return_outcomes=True,
+			# W: never truncate an approved File Box note — refuse an overflowing
+			# append/create outright instead of _clip_body silently dropping the
+			# page's oldest knowledge.
+			refuse_overflow=True,
 		)
 		outcome = outcomes[0] if outcomes else {"slug": None, "ok": False, "reason": "skipped"}
 	except Exception:
@@ -2222,7 +2229,11 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	recorded for reviewer approval (never that it landed), so it does not
 	re-propose. Idempotent per (conversation, slug): a retried turn re-emitting
 	the same write folds into the existing Pending row instead of stacking
-	duplicates for the reviewer."""
+	duplicates for the reviewer.
+
+	W: refuses BEFORE creating the Approval Request when the note would overflow
+	the page (see :func:`jarvis.chat.wiki.file_box_append_would_overflow`) - a
+	reviewer should never see a proposal that can only ever land as page_full."""
 	slug = (args.get("slug") or "").strip()
 	if not slug:
 		# A slugless update_wiki is degenerate - the fenced funnel derives no page
@@ -2237,6 +2248,66 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	from jarvis.chat.approvals_api import wiki_digest
 
 	owner = frappe.db.get_value("Jarvis Conversation", conv, "owner") or frappe.session.user
+
+	# W pre-check: refuse BEFORE any Approval Request exists rather than filing one a
+	# reviewer can never approve. Mirrors — in a SEPARATE function, not one shared
+	# helper — the same merge arithmetic _file_box_wiki_write's funnel applies at
+	# land time, so "would overflow" here PREDICTS a page_full refusal there too;
+	# the two must be kept in sync by hand (a boundary test pins them in lockstep).
+	# This is advisory only: approve-time re-runs the real fenced merge under
+	# refuse_overflow=True and is the actual gate, so a failure here fails OPEN
+	# (log + let the proposal proceed) rather than blocking a legitimate note.
+	#
+	# target_user is always None here, not args.get("target_user"): the funnel's
+	# own `update` dict (_file_box_wiki_write, above) never forwards one either,
+	# so predicting an overflow check the land-time funnel never actually runs
+	# would be misleading.
+	from jarvis.chat.turn_handler import _safe_label_name
+	from jarvis.chat.wiki import (
+		MAX_BODY_LEN,
+		_log_page_full_refusal,
+		_normalize_slug,
+		file_box_append_would_overflow,
+	)
+
+	norm_slug = _normalize_slug(slug) or slug
+	try:
+		overflow = file_box_append_would_overflow(
+			slug,
+			args.get("append_md"),
+			args.get("replace_body_md"),
+			provenance_prefix=FILE_BOX_WIKI_FENCE,
+			scope=args.get("scope"),
+			target_user=None,
+			reader=owner,
+		)
+	except Exception:
+		frappe.log_error(title="jarvis.wiki.propose_overflow_check_failed", message=frappe.get_traceback())
+		overflow = {"overflow": False, "existing_len": 0, "readable": True}
+	if overflow["overflow"]:
+		incoming_len = len(str(args.get("append_md") or args.get("replace_body_md") or "").strip())
+		_log_page_full_refusal(norm_slug, existing_len=overflow["existing_len"], incoming_len=incoming_len)
+		safe_slug = _safe_label_name(norm_slug)
+		if overflow["existing_len"] <= 0:
+			# No existing text to blame - the note itself is too long for a new page.
+			reason = (
+				f"That note is too long on its own for a new wiki page '{safe_slug}' - "
+				"nothing was proposed. Shorten it, or split it across more than one note."
+			)
+		elif overflow["readable"]:
+			reason = (
+				f"The wiki page '{safe_slug}' is full ({overflow['existing_len']} of "
+				f"{MAX_BODY_LEN:,} characters) - nothing was proposed. Record this note on "
+				f"a related page (a different slug, e.g. '{safe_slug}-<topic>') or shorten it."
+			)
+		else:
+			# Never reveal how full an unreadable page is.
+			reason = (
+				f"The wiki page '{safe_slug}' can't take this note - nothing was proposed. "
+				"Record it on a different page or shorten it."
+			)
+		return {"ok": False, "reason": reason}
+
 	title = (args.get("title") or slug or "wiki note")[:100]
 	payload = json.dumps(args, default=str, sort_keys=True)
 	# Dedupe: one Pending wiki proposal per (conversation, slug). A retried turn
@@ -2409,6 +2480,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		from jarvis.chat import held_writes
 
 		verdict = held_writes.apply(tool, args, conversation)
+		if verdict is not None:
+			return verdict
+	# File Box skill routing: only an eligible skill loads (and is recorded).
+	if conversation and tool == "get_skill":
+		from jarvis.chat import filebox_skills
+
+		verdict = filebox_skills.gate_get_skill(args, conversation)
 		if verdict is not None:
 			return verdict
 

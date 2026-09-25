@@ -47,22 +47,29 @@ const rec = (over = {}) => ({
 	...over,
 });
 
+let onDecided;
 const button = (w, label) => w.findAll("button").find((b) => b.text() === label);
 
 async function mountWith(r) {
 	approvals.getPendingAction.mockResolvedValue(r);
-	const w = mount(PendingChatDetail, { props: { name: "PA-9" }, attachTo: document.body });
+	const w = mount(PendingChatDetail, {
+		props: { name: "PA-9", onDecided },
+		attachTo: document.body,
+	});
 	await flushPromises();
 	return w;
 }
 
 describe("PendingChatDetail", () => {
-	beforeEach(() => vi.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		onDecided = vi.fn();
+	});
 
 	it("shows loading, then the chat's card with Confirm, Discard and Open chat", async () => {
 		let resolve;
 		approvals.getPendingAction.mockReturnValue(new Promise((r) => (resolve = r)));
-		const w = mount(PendingChatDetail, { props: { name: "PA-9" } });
+		const w = mount(PendingChatDetail, { props: { name: "PA-9", onDecided } });
 		expect(w.text()).toContain("Loading the proposed action");
 		expect(w.attributes("aria-busy")).toBe("true");
 		resolve(rec());
@@ -77,7 +84,7 @@ describe("PendingChatDetail", () => {
 
 	it("shows a load error with a retry", async () => {
 		approvals.getPendingAction.mockRejectedValueOnce(new Error("no longer available"));
-		const w = mount(PendingChatDetail, { props: { name: "PA-9" } });
+		const w = mount(PendingChatDetail, { props: { name: "PA-9", onDecided } });
 		await flushPromises();
 		expect(w.find('[role="alert"]').text()).toContain("no longer available");
 		approvals.getPendingAction.mockResolvedValueOnce(rec());
@@ -116,7 +123,7 @@ describe("PendingChatDetail", () => {
 		await flushPromises();
 		expect(core.confirmTool).toHaveBeenCalledWith("PA-9", "conv-1");
 		expect(toast.success).toHaveBeenCalledWith("Confirmed. Jarvis continues in the chat.");
-		expect(w.emitted("decided")).toHaveLength(1);
+		expect(onDecided).toHaveBeenCalledTimes(1);
 	});
 
 	it("discards through the chat's dismiss_tool", async () => {
@@ -126,7 +133,7 @@ describe("PendingChatDetail", () => {
 		await flushPromises();
 		expect(core.dismissTool).toHaveBeenCalledWith("PA-9", "conv-1");
 		expect(toast.success).toHaveBeenCalledWith("Discarded. Nothing ran.");
-		expect(w.emitted("decided")).toHaveLength(1);
+		expect(onDecided).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps a busy card open with the reason, and drops a decided one", async () => {
@@ -139,7 +146,7 @@ describe("PendingChatDetail", () => {
 		await button(w, "Confirm").trigger("click");
 		await flushPromises();
 		expect(w.find('[role="alert"]').text()).toContain("being handled right now");
-		expect(w.emitted("decided")).toBeUndefined();
+		expect(onDecided).not.toHaveBeenCalled();
 		core.confirmTool.mockResolvedValueOnce({
 			ok: false,
 			reason_code: "stale",
@@ -151,7 +158,7 @@ describe("PendingChatDetail", () => {
 		expect(toast.error).toHaveBeenCalledWith(
 			"The record changed after this was proposed. Nothing ran."
 		);
-		expect(w.emitted("decided")).toHaveLength(1);
+		expect(onDecided).toHaveBeenCalledTimes(1);
 	});
 
 	it("escapes a tool's failure words before the toast", async () => {
@@ -169,6 +176,17 @@ describe("PendingChatDetail", () => {
 		expect(html).toContain("&lt;img");
 	});
 
+	it("reports the outcome even after the board switched away mid-call", async () => {
+		const w = await mountWith(rec());
+		let resolve;
+		core.confirmTool.mockReturnValue(new Promise((r) => (resolve = r)));
+		await button(w, "Confirm").trigger("click");
+		w.unmount();
+		resolve({ ok: true, pa_status: "Executed" });
+		await flushPromises();
+		expect(onDecided).toHaveBeenCalledTimes(1);
+	});
+
 	it("disables both decisions while one is in flight", async () => {
 		const w = await mountWith(rec());
 		let resolve;
@@ -181,14 +199,20 @@ describe("PendingChatDetail", () => {
 		await flushPromises();
 	});
 
-	it("takes the lane's id on its root so the row's aria-controls resolves", async () => {
-		approvals.getPendingAction.mockResolvedValue(rec());
-		const w = mount(PendingChatDetail, {
-			props: { name: "PA-9" },
-			attrs: { id: "held-detail-PA-9" },
-		});
+	it("refresh shows a card settled elsewhere, but never over a decision in flight", async () => {
+		const w = await mountWith(rec());
+		let resolve;
+		core.confirmTool.mockReturnValue(new Promise((r) => (resolve = r)));
+		await button(w, "Confirm").trigger("click");
+		w.vm.refresh();
+		expect(approvals.getPendingAction).toHaveBeenCalledTimes(1);
+		resolve({ ok: false, reason_code: "busy" });
 		await flushPromises();
-		expect(w.attributes("id")).toBe("held-detail-PA-9");
+		approvals.getPendingAction.mockResolvedValue(rec({ status: "Discarded", can_act: 0 }));
+		w.vm.refresh();
+		await flushPromises();
+		expect(w.find('[role="status"]').text()).toBe("Discarded. Nothing ran.");
+		expect(button(w, "Confirm")).toBeFalsy();
 	});
 
 	it("opens the conversation, or the dashboard pane it came from", async () => {

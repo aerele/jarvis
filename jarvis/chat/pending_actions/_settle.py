@@ -37,6 +37,7 @@ MAY_HAVE_EXTERNAL_EFFECT = frozenset({"call_connector", "run_method"})
 CONTINUATIONS: dict[str, str | None] = {
 	"chat": "jarvis.chat.actions_api.on_chat_settled",
 	"file_box_held": "jarvis.chat.held_writes.on_settled",
+	"file_box_sheet": "jarvis.chat.held_sheet_seal.on_settled",
 }
 
 _CHIP_BY_STATUS = {

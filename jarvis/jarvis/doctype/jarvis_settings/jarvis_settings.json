@@ -95,6 +95,7 @@
   "core_apps_override",
   "enable_customizations_clause",
   "enable_role_profiles",
+  "file_box_sheets",
   "connectors_section",
   "connectors_col",
   "connector_egress_rules",
@@ -733,6 +734,13 @@
    "read_only": 1,
    "hidden": 1,
    "description": "When on, a new chat session may be pinned to a role-based agent profile (a reduced tool set plus the matching skill set derived from the user's ERPNext roles) instead of the main agent - but only once that profile has actually been rendered on the agent side (see Role Profiles Pushed below). Off (default): every session uses the main agent, matching pre-role-profiles behavior exactly. Admin-owned mirror of the pulled role_profiles_config's `enabled` flag (spec B4) - never tenant-controllable; only jarvis.chat.role_profiles.sync_role_profile_config writes it. Reset to 0 between tenancies."
+  },
+  {
+   "fieldname": "file_box_sheets",
+   "fieldtype": "Check",
+   "label": "File Box: one approval sheet per document",
+   "default": "0",
+   "description": "On: a File Box run lists every missing master and question for a document on ONE approval sheet, applied at once with one resume. Off: each master waits on its own held row. Turning it off stops new sheets; open ones still collect and drain."
   },
   {
    "fieldname": "connectors_section",

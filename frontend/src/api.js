@@ -206,6 +206,8 @@ export const listCustomSkills = () => call(SK + "list_custom_skills");
 export const getCustomSkill = (name) => call(SK + "get_custom_skill", { name });
 export const createCustomSkill = (p) => call(SK + "create_custom_skill", p);
 export const updateCustomSkill = (p) => call(SK + "update_custom_skill", p);
+// The editor's "File Box creates" search: document types File Box may draft.
+export const fileBoxDoctypes = (txt) => call(SK + "file_box_doctypes", { txt: txt || "" });
 export const deleteCustomSkill = (name) => call(SK + "delete_custom_skill", { name });
 export const applyCustomSkills = () => call(SK + "apply_custom_skills");
 export const getCustomSkillsSyncStatus = () => call(SK + "get_custom_skills_sync_status");
@@ -778,6 +780,8 @@ export async function uploadBrandAsset(file) {
 // file_url, so the url alone could pick an earlier drop's File.
 export const fileboxDrop = (file_url, file_name, skill, file) =>
 	call("jarvis.chat.filebox.drop_file", { file_url, file_name, skill, file });
+// Whether a skill may still tag the next drop ({available}): a bulk drop checks once.
+export const fileboxCheckSkill = (skill) => call("jarvis.chat.filebox.check_skill", { skill });
 
 // ── Approvals: pending-decision queue + decide-and-resume ──
 export const listApprovals = (status = "Pending") =>
@@ -794,13 +798,15 @@ export const restoreApproval = (name) =>
 	call("jarvis.chat.approvals_api.restore_approval", { name });
 
 // ── Wiki write-back review lane (reviewer-gated; review-before-landing) ──
-// A File Box run's wiki note is HELD as a proposal a Jarvis reviewer — NOT the
-// dropper (separation of duties) — approves before it lands.
+// A File Box run's wiki note is HELD as a proposal a Jarvis reviewer (the dropper
+// too, with a reviewer role) approves before it lands.
+// order: "newest" (the server default) or "oldest".
 export const listWikiWriteProposals = (p = {}) =>
 	call("jarvis.chat.approvals_api.list_wiki_write_proposals", {
 		status: p.status || "Actionable",
 		start: p.start || 0,
 		page_length: p.page_length || 20,
+		...(p.order ? { order: p.order } : {}),
 	});
 // expected_digest: the digest of the proposal the reviewer read (server refuses a
 // proposal that changed since).
@@ -894,7 +900,8 @@ export const fileboxDeleteBulk = (conversations) =>
 // rerun_inbound (PR-5, AC8): re-run a failed/no_draft file in place, claim-first.
 export const fileboxRerun = (conversation) =>
 	call("jarvis.chat.filebox.rerun_inbound", { conversation });
-// bulk_rerun_inbound: same per-row checks, skipped (not fatal) when ineligible.
+// bulk_rerun_inbound: same per-row checks, skipped (not fatal) when ineligible;
+// a re-run whose tagged skill is gone waits on a question (`needs_choice`).
 export const fileboxRerunBulk = (conversations) =>
 	call("jarvis.chat.filebox.bulk_rerun_inbound", {
 		conversations: JSON.stringify(conversations || []),
