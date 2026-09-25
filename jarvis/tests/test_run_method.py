@@ -5,8 +5,9 @@ permission errors. Runs against real Frappe (the whitelist gate and the
 server-script map are the real security boundary; exercising them for real
 is more meaningful than mocking them)."""
 
+from unittest.mock import patch
+
 import frappe
-from frappe.tests.classes.context_managers import enable_safe_exec
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
@@ -56,10 +57,13 @@ class TestRunMethod(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		# CI's baked test site does not set server_script_enabled in
-		# common_site_config; enable safe exec for this class so the Server Script
-		# dispatch tests can execute (mirrors frappe's own server-script tests).
-		cls.enterClassContext(enable_safe_exec())
+		# CI's baked test site does not enable server scripts (server_script_enabled
+		# in common_site_config). Frappe's own enable_safe_exec helper and
+		# enterClassContext are newer than Frappe v15, so patch the safe-exec gate
+		# directly - it works on v15 and v16 alike; addClassCleanup unpatches.
+		_safe_exec = patch("frappe.utils.safe_exec.is_safe_exec_enabled", return_value=True)
+		_safe_exec.start()
+		cls.addClassCleanup(_safe_exec.stop)
 		cls._ensure_api_script(_API_METHOD, _SCRIPT)
 		cls._ensure_api_script(_FLAGS_METHOD, _FLAGS_SCRIPT)
 		if not frappe.db.exists("Report", _REPORT):

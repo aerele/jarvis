@@ -193,7 +193,10 @@ def _run_doc_method(method: str, doctype: str, name: str | int | None, args: dic
 	doctype itself, i.e. the Single.
 	"""
 	try:
-		doc = frappe.get_doc(doctype, name or doctype, check_permission=True)
+		# Explicit read-permission check rather than get_doc(check_permission=True):
+		# the kwarg only exists on newer Frappe, and check_permission works on all.
+		doc = frappe.get_doc(doctype, name or doctype)
+		doc.check_permission("read")
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"no permission to read {doctype} {name}") from e
 
