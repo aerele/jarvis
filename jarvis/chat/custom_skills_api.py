@@ -22,7 +22,6 @@ from jarvis.chat.custom_skills import (
 	MANAGED_OWNER,
 	MAX_SKILLS_PER_PUSH,
 	build_push_payload,
-	is_pushable_skill,
 	project_org_promotion_push,
 	pushable_org_skill_count,
 	role_scoped_skill_rows,
@@ -895,8 +894,17 @@ def decide_skill_promotion(
 				}
 		out.update(_materialize_promotion(req, roles=effective_roles))
 		_stamp_decision(req, reviewer, True, decision_note)
-	out["needs_apply"] = is_pushable_skill(out["materialized"])
+	out["needs_apply"] = _approval_needs_apply(req.to_scope, out.get("push_projection"))
 	return out
+
+
+def _approval_needs_apply(to_scope: str | None, projection: dict | None) -> bool:
+	"""Whether the reviewer's client should run the Apply after an approval. Only an
+	Org copy enters the shared push set (it never carries roles; a Role copy never
+	does), and only when the strict Apply can succeed: an over-cap catalog would
+	refuse the push right after the success toast. Reads the projection the approval
+	already computed (same ``_pushable_org_rows`` source), so no extra catalog query."""
+	return (to_scope or "") == "Org" and not (projection or {}).get("strict_would_fail")
 
 
 def _materialize_promotion(req, roles=None) -> dict:

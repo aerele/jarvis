@@ -28,29 +28,42 @@ const fnBody = (src, sig) => {
 };
 
 describe("apply after approve: servers flag it, the client runs it", () => {
-	it("both server endpoints report needs_apply from the push-set rule", () => {
-		expect(skillsPy).toContain('out["needs_apply"] = is_pushable_skill(out["materialized"])');
-		expect(learnedPy).toContain('"needs_apply": is_pushable_skill(row_name)');
+	it("both server endpoints report needs_apply", () => {
+		expect(skillsPy).toContain(
+			'out["needs_apply"] = _approval_needs_apply(req.to_scope, out.get("push_projection"))'
+		);
+		expect(learnedPy).toContain('"needs_apply": apply_would_push(row_name)');
 	});
 
-	it("an approval with needs_apply starts the push on the queue's pill", () => {
-		const body = fnBody(reviewTab, "async function decideSkillPromo(");
-		expect(body).toMatch(/if \(approve && r && r\.needs_apply\) promoSyncPill\.value/);
-		expect(body).toContain("promoSyncPill.value.apply()");
-		expect(reviewTab).toContain('<SyncPill ref="promoSyncPill" />');
-	});
-
-	it("an applied insight with needs_apply runs the push", () => {
+	it("an approval or applied insight with needs_apply runs the push", () => {
+		const decide = fnBody(reviewTab, "async function decideSkillPromo(");
+		expect(decide).toContain("if (approve && r && r.needs_apply) pushSharedSkills();");
 		expect(reviewTab).toContain('@applied="onInsightApplied"');
-		const body = fnBody(reviewTab, "async function onInsightApplied(");
-		expect(body).toContain("e.needs_apply");
-		expect(body).toContain("await applyCustomSkills()");
+		const insight = fnBody(reviewTab, "function onInsightApplied(");
+		expect(insight).toContain("if (e && e.needs_apply) pushSharedSkills();");
 		expect(insightDialog).toContain(
 			'emit("applied", { skill_name: skill, needs_apply: needsApply })'
 		);
 	});
 
+	it("the push never depends on a mounted pill", () => {
+		// A queue switch mid-request used to unmount the pill and drop the push.
+		const push = fnBody(reviewTab, "async function pushSharedSkills(");
+		expect(push.indexOf("await applyCustomSkills()")).toBeGreaterThan(-1);
+		expect(push.indexOf("await applyCustomSkills()")).toBeLessThan(
+			push.indexOf("syncPill.value")
+		);
+		// one always-mounted pill, outside the per-queue templates
+		expect((reviewTab.match(/<SyncPill /g) || []).length).toBe(1);
+		const pillAt = reviewTab.indexOf('<SyncPill ref="syncPill"');
+		expect(pillAt).toBeLessThan(
+			reviewTab.indexOf("<template v-if=\"queueType === 'candidates'\">")
+		);
+	});
+
 	it("no copy still promises a push that never comes", () => {
-		expect(insightDialog).not.toContain("next skills push");
+		const flat = (t) => t.replace(/\s+/g, " ");
+		expect(flat(insightDialog)).not.toContain("next skills push");
+		expect(flat(insightDialog)).toContain("restarts your assistant briefly");
 	});
 });

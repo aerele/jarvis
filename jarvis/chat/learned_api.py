@@ -1085,9 +1085,9 @@ def apply_insight_skill_update(
 	doc.materialized_skill = row_name
 	doc.save()
 	frappe.db.commit()
-	from jarvis.chat.custom_skills import is_pushable_skill
+	from jarvis.chat.custom_skills import apply_would_push
 
-	out = {"ok": True, "skill_name": slug, "needs_apply": is_pushable_skill(row_name)}
+	out = {"ok": True, "skill_name": slug, "needs_apply": apply_would_push(row_name)}
 	# TASK 16: folding a personalise-origin insight into a shared/org skill
 	# carries the same scrub obligation; surface the warning to the reviewer.
 	if doc.personalise_origin:
