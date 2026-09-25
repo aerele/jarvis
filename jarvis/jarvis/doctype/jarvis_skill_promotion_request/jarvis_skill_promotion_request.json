@@ -13,6 +13,8 @@
     "instructions_snapshot",
     "description_snapshot",
     "user_invocable_snapshot",
+    "use_in_file_box_snapshot",
+    "file_box_creates_snapshot",
     "snapshotted",
     "from_scope",
     "to_scope",
@@ -64,6 +66,21 @@
       "label": "User Invocable Snapshot",
       "read_only": 1,
       "description": "The skill's user-invocable flag at request time (promoted alongside the snapshot)."
+    },
+    {
+      "fieldname": "use_in_file_box_snapshot",
+      "fieldtype": "Check",
+      "label": "Use in File Box Snapshot",
+      "default": "1",
+      "read_only": 1,
+      "description": "The skill's Use in File Box at request time (published alongside the snapshot). A request filed before this field existed reads 1, the value its skill then had."
+    },
+    {
+      "fieldname": "file_box_creates_snapshot",
+      "fieldtype": "Data",
+      "label": "File Box Creates Snapshot",
+      "read_only": 1,
+      "description": "The skill's File Box creates document type at request time (published alongside the snapshot, validated as the skill field is)."
     },
     {
       "fieldname": "snapshotted",

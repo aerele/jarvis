@@ -574,6 +574,27 @@ class TestD5StopAndReport(FrappeTestCase):
 			if rec.get("conversation") == conv
 		)
 
+	def test_every_terminal_path_sweeps_the_runs_cards_before_disarming(self):
+		"""C1: cards never expire, so a disarm that skipped the sweep (a stop, the stale
+		reaper, a finish after a store blip hid the card) would leave the run's
+		destructive card confirmable forever."""
+		from jarvis.chat import macros
+
+		for name, end in (
+			("c1-stop", macros.stop_macro_run),
+			("c1-reap", lambda run: macros._cas_run_status(run, "running", "failed")),
+			("c1-finish", lambda run: macros._finish(frappe.get_doc(self.RUN, run), "completed")),
+		):
+			with self.subTest(end=name):
+				run_name, conv = self._run_and_conv(armed=True, name=name)
+				self._park_delete_card(conv)
+				self.assertEqual(self._pending_count(conv), 1)
+				frappe.set_user(NON_ADMIN_USER)
+				end(run_name)
+				frappe.db.commit()
+				self.assertEqual(self._pending_count(conv), 0)
+				self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 0)
+
 	def test_armed_run_stops_and_sweeps_when_step_parks(self):
 		from jarvis.chat import macros
 
