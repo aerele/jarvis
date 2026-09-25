@@ -883,36 +883,31 @@ def _setup_mcp_oauth_client(doc) -> None:
 
 	ALL-OR-NOTHING: either half - the catalog seed or discovery/registration - is
 	wrapped, so a failure AFTER the row was inserted removes the row rather than
-	leaving a half-created, unusable connector behind. The seed half catches any
-	exception (a broken client insert is as much a dead end as a failed discovery);
-	so does the discovery half, keeping the engine's own ``OAuthError`` apart so
-	the provider's reason still reaches the message."""
+	leaving a half-created, unusable connector behind. ANY failure counts, not just
+	the engine's own ``OAuthError``: a client insert that fails (a DB fault, a value
+	too long for its column) is as much a dead end as a failed discovery."""
 	provider = _catalog_seed_provider((doc.get("preset") or "").strip())
-	if provider is not None:
-		try:
-			_seed_static_client_from_catalog(doc, provider)
-		except Exception as exc:
-			# ANY seed failure (not just an OAuthError) must not orphan the row: a
-			# broken client insert is as much a dead end as a failed discovery. The
-			# cause is logged (never the row's credentials) so a schema/DB fault is
-			# not hidden behind the friendly message.
-			frappe.logger("jarvis.connectors").warning("catalog seeding failed after insert", exc_info=True)
-			_discard_connector(doc)
-			frappe.throw(_oauth_error_message(getattr(exc, "code", ""), getattr(exc, "detail", "")))
-		return
 	try:
-		_discover_and_save_client(doc)
-	except mcp_oauth.OAuthError as exc:
+		if provider is not None:
+			_seed_static_client_from_catalog(doc, provider)
+		else:
+			_discover_and_save_client(doc)
+	except Exception as exc:
+		message = _setup_failure_message(exc)
 		_discard_connector(doc)
-		frappe.throw(_oauth_error_message(exc.code, exc.detail))
-	except Exception:
-		# Saving what discovery found can fail too (a value too long for its column,
-		# a DB fault). That is as much a dead end as a failed discovery, so the row
-		# goes and the person sees the friendly sentence, not an exception class
-		# name. The cause is logged (never the row's credentials).
-		frappe.logger("jarvis.connectors").warning("sign-in setup failed after insert", exc_info=True)
-		_discard_connector(doc)
-		frappe.throw(_oauth_error_message(""))
+		frappe.throw(message)
+
+
+def _setup_failure_message(exc: Exception) -> str:
+	"""The friendly sentence for a sign-in setup (create or self-heal) that failed.
+	The engine's own ``OAuthError`` is an expected refusal and carries the
+	provider's reason. Anything else is a fault, so its cause is logged (never the
+	row's credentials) and the person reads the generic sentence, not an exception
+	class name."""
+	if isinstance(exc, mcp_oauth.OAuthError):
+		return _oauth_error_message(exc.code, exc.detail)
+	frappe.logger("jarvis.connectors").warning("connector sign-in setup failed", exc_info=exc)
+	return _oauth_error_message("")
 
 
 def _discover_and_save_client(doc) -> None:
@@ -959,8 +954,9 @@ def _discard_connector(doc) -> None:
 
 def _ensure_mcp_oauth_client(doc) -> None:
 	"""Make an existing OAuth row that carries no ``mcp_oauth_client`` usable again,
-	IN PLACE - never deleting the row. Raises ``mcp_oauth.OAuthError`` when discovery
-	cannot set one up; the caller keeps the row and surfaces a friendly error.
+	IN PLACE - never deleting the row. Raises when it cannot set one up (the engine's
+	``OAuthError``, or a failed client save); the caller keeps the row and surfaces a
+	friendly error via :func:`_setup_failure_message`.
 
 	Three cases, in order:
 
@@ -1361,8 +1357,8 @@ def connect_oauth(name: str) -> dict:
 			return _error("oauth_not_configured", "Ask your admin to finish setup.")
 		try:
 			_ensure_mcp_oauth_client(doc)
-		except mcp_oauth.OAuthError as exc:
-			return _error("oauth_not_configured", _oauth_error_message(exc.code, exc.detail))
+		except Exception as exc:
+			return _error("oauth_not_configured", _setup_failure_message(exc))
 
 	if doc.get("mcp_oauth_client"):
 		return _connect_mcp_oauth(doc)
@@ -1585,8 +1581,8 @@ def set_oauth_client_credentials(name: str, client_id: str, client_secret: str =
 			frappe.throw(_("Too many attempts. Please wait a moment and try again."))
 		try:
 			_ensure_mcp_oauth_client(doc)
-		except mcp_oauth.OAuthError as exc:
-			frappe.throw(_oauth_error_message(exc.code, exc.detail))
+		except Exception as exc:
+			frappe.throw(_setup_failure_message(exc))
 	client = mcp_oauth_store.client_for(doc.name) if doc.get("mcp_oauth_client") else None
 	if client is None:
 		frappe.throw(_("This connector does not use this kind of sign-in."))

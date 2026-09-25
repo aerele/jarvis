@@ -2518,6 +2518,42 @@ class TestSelfHealGuards(_McpOauthTestCase):
 		self.assertEqual(out["error"]["code"], "oauth_not_configured")
 		self.assertFalse(frappe.db.exists(CLIENT_DT, name), "a reader's Connect writes nothing")
 
+	# A heal whose client save fails for a reason other than the engine's own refusal
+	# (a DB fault, a value too long for its column) keeps the row and reads the same
+	# friendly sentence as the create path, never an exception class name.
+	def test_a_connect_heal_that_fails_to_save_reads_friendly(self):
+		name = self._raw_oauth_row("heal-save-connect", preset="GitHub")
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "_over_test_rate_limit", return_value=False),
+			patch.object(
+				connectors_api,
+				"_seed_static_client_from_catalog",
+				side_effect=frappe.CharacterLengthExceededError("Scope will get truncated"),
+			),
+		):
+			out = connectors_api.connect_oauth(name)
+		self.assertFalse(out.get("ok"))
+		self.assertEqual(out["error"]["code"], "oauth_not_configured")
+		self.assertIn("We could not set up sign-in", out["error"]["message"])
+		self.assertTrue(frappe.db.exists(CONNECTOR, name), "a heal never deletes the row")
+
+	def test_a_credentials_heal_that_fails_to_save_reads_friendly(self):
+		name = self._raw_oauth_row("heal-save-creds", preset="GitHub")
+		frappe.set_user(PLAIN_A)
+		with (
+			patch.object(connectors_api, "_over_test_rate_limit", return_value=False),
+			patch.object(
+				connectors_api,
+				"_seed_static_client_from_catalog",
+				side_effect=frappe.CharacterLengthExceededError("Scope will get truncated"),
+			),
+			self.assertRaises(frappe.ValidationError) as ctx,
+		):
+			connectors_api.set_oauth_client_credentials(name, "cid", "sec")
+		self.assertIn("We could not set up sign-in", str(ctx.exception))
+		self.assertTrue(frappe.db.exists(CONNECTOR, name), "a heal never deletes the row")
+
 	def test_relink_is_refused_when_the_client_describes_another_address(self):
 		name = self._mk_mcp_connector("byoa-relink")
 		# A raw write nulls the link and re-points the row in one save (the guard
