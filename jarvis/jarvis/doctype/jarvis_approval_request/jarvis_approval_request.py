@@ -47,8 +47,11 @@ class JarvisApprovalRequest(Document):
 			return
 		if self.is_new():
 			meta = self.meta
+			# A field not migrated yet (code served ahead of its migrate) is skipped.
 			touched = [
-				f for f in _SERVER_FIELDS if (self.get(f) or "") not in ("", meta.get_field(f).default or "")
+				f
+				for f in _SERVER_FIELDS
+				if meta.has_field(f) and (self.get(f) or "") not in ("", meta.get_field(f).default or "")
 			]
 			if self.source == WIKI_SOURCE:
 				touched.append("source")

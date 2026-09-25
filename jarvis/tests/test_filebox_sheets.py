@@ -1385,3 +1385,24 @@ class TestPreMigrateGuards(_Base):
 			with patch.object(ar, "sheet_ready", return_value=False):
 				res = approvals_api.list_pending_actions_lane()
 		self.assertEqual(res["rows"], [])
+
+	def test_an_approval_request_inserts_before_its_new_fields_migrate(self):
+		"""The server-field guard skips a field the meta doesn't have yet (code served
+		ahead of the migrate), like ``filebox_migrated``."""
+		from frappe.model.meta import Meta
+
+		from jarvis.jarvis.doctype.jarvis_approval_request import jarvis_approval_request as ar
+
+		unmigrated = set(ar._SERVER_FIELDS)
+		get_field, has_field = Meta.get_field, Meta.has_field
+		with (
+			patch.object(
+				Meta, "get_field", lambda m, f: None if m.name == AR and f in unmigrated else get_field(m, f)
+			),
+			patch.object(
+				Meta, "has_field", lambda m, f: not (m.name == AR and f in unmigrated) and has_field(m, f)
+			),
+		):
+			doc = frappe.get_doc({"doctype": AR, "title": "zz-fbs pre-migrate", "question": "Which vendor?"})
+			doc.insert(ignore_permissions=True)
+		self.assertTrue(frappe.db.exists(AR, doc.name))
