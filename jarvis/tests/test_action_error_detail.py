@@ -320,3 +320,28 @@ class TestApplyActionContract(FrappeTestCase):
 		self.assertEqual(r["error"]["code"], "InvalidArgumentError")
 		# the successful create was undone - nothing persisted
 		self.assertFalse(frappe.db.exists("ToDo", {"description": marker}))
+
+	# jarvis-admin-v2#603: a drafted card left a required field empty and the person
+	# only saw "check the highlighted fields" with nothing highlighted.
+	def _apply_todo(self, values: dict) -> dict:
+		frappe.local.conf["disable_global_search"] = 1
+		self.addCleanup(lambda: frappe.local.conf.pop("disable_global_search", None))
+		with patch.object(frappe.db, "rollback"):
+			return apply_action(
+				frappe.as_json(
+					{"verb": "create", "doctype": "ToDo", "values": values, "conversation": self._conv()}
+				)
+			)
+
+	def test_missing_required_field_is_named(self):
+		r = self._apply_todo({"priority": "Medium"})
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "InvalidArgumentError")
+		self.assertEqual([f["fieldname"] for f in r["error"]["fields"]], ["description"])
+		self.assertEqual(r["error"]["message"], "ToDo needs a value for Description.")
+
+	def test_missing_field_with_another_error_keeps_generic_envelope(self):
+		# Naming only the empty field would hide the bad link, so nothing is named.
+		r = self._apply_todo({"priority": "Medium", "allocated_to": "nobody-603@example.invalid"})
+		self.assertFalse(r["ok"])
+		self.assertNotIn("fields", r["error"])

@@ -1303,8 +1303,13 @@
 													v-for="(r, i) in summaryState.view.rows"
 													:key="i"
 												>
-													<dt>{{ r.label }}</dt>
-													<dd>{{ r.value }}</dd>
+													<dt>
+														{{ r.label
+														}}<span v-if="r.missing" class="jv-req">
+															*</span
+														>
+													</dt>
+													<dd>{{ r.missing ? "-" : r.value }}</dd>
 												</template>
 											</dl>
 											<div v-else class="jv-summary-diff">
@@ -4214,7 +4219,10 @@
 							>
 								<label
 									>{{ f.label
-									}}<span v-if="f.reqd && !f.read_only" class="jv-req">
+									}}<span
+										v-if="(f.reqd || f.serverMissing) && !f.read_only"
+										class="jv-req"
+									>
 										*</span
 									></label
 								>
@@ -4698,7 +4706,11 @@ import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
-import { normDateVal as _normDateVal, panelField as _panelField } from "@/lib/docFields";
+import {
+	markMissing,
+	normDateVal as _normDateVal,
+	panelField as _panelField,
+} from "@/lib/docFields";
 import {
 	checkToYesNo,
 	coerceOut,
@@ -7594,6 +7606,18 @@ async function confirmSummary() {
 	const model = summaryState.value.model;
 	if (!model || model.applying || convStreaming.value) return;
 	await applyDraft(0, model);
+	if (model.error && model.error.fields) await openDraftForMissing(model.error);
+}
+// Confirm failed on empty required fields: open the edit panel on them, so the
+// person fills them in instead of hitting a dead end (#603).
+async function openDraftForMissing(error) {
+	const a = activeAction.value;
+	if (!a) return;
+	await openDraftPanel({ verb: a.verb || "create", ...a });
+	const p = draftPanel.value;
+	if (!p) return;
+	markMissing(p, error.fields, (_formMetaCache[p.doctype] || {}).fields);
+	p.error = error;
 }
 
 // Read-only preview: opens DraftPreview over the current summary's model.
@@ -7693,6 +7717,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			// raw Frappe 403/417. Keep the panel open so the values are editable.
 			p.applying = false;
 			p.error = r.error || { message: "Could not save. Check the values." };
+			markMissing(p, p.error.fields, (_formMetaCache[p.doctype] || {}).fields);
 			return;
 		}
 		closeDraftPanel();
@@ -15833,6 +15858,9 @@ onUnmounted(() => {
 	margin: 0;
 	font-size: 13.5px;
 	color: var(--text);
+}
+.jv-summary-fields .jv-req {
+	color: var(--red);
 }
 .jv-summary-diffrow {
 	display: flex;
