@@ -1,6 +1,6 @@
 <template>
 	<div v-if="pending || failed" class="inline-flex items-center gap-2">
-		<Tooltip v-if="pending" text="Updating your assistant… (restarts briefly, ~30s)">
+		<Tooltip v-if="pending" text="Updating your assistant…">
 			<Badge theme="orange" variant="subtle" size="lg">
 				<template #prefix>
 					<!-- currentColor so the spinner takes the orange badge tone,
