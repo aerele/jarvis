@@ -2300,6 +2300,7 @@ async function decidePromo(p, approve, note) {
 			// the stale card leaves the Pending list immediately, not just toast.
 			toast.error(r.reason || "Could not decide this promotion.");
 			fetchPromotions("reset");
+			emit("changed");
 			return false;
 		}
 		toast.success(approve ? "Promotion approved" : "Promotion rejected");
@@ -2442,6 +2443,7 @@ async function decideSkillPromo(p, approve, note, ackProjection = null, approved
 			// refresh so the stale card leaves the Pending list immediately.
 			toast.error(r.reason || "Could not decide this promotion.");
 			fetchSkillPromotions("reset");
+			emit("changed");
 			return false;
 		}
 		// On a successful APPROVE the server returns the FINAL projection — which

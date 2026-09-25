@@ -266,6 +266,13 @@ export function attachGlobalNotifier({ socket, router }) {
 				});
 				return;
 			}
+			case "review:pending": {
+				// a skill or wiki promotion is waiting on this reviewer: re-read the
+				// sidebar Skills badge now (server truth, not +1; both queues share
+				// this kind). Badge only, no toast.
+				store.refreshReviewCount();
+				return;
+			}
 			case "trigger:activity": {
 				// A trigger run the user would want to hear about: Failed / Blocked
 				// always; Success only for LLM actions (the "warn me when…" case —
