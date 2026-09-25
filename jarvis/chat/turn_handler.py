@@ -1047,9 +1047,22 @@ def assemble_prompt(
 	# (the container has a single role-blind custom_skills dir), so for those the
 	# clause tells the agent to fetch the body with jarvis__get_skill rather than
 	# asserting a directory that does not exist.
-	from jarvis.chat.custom_skills import armed_skill_clause, invoked_skill_clause, learned_skill_clause
+	from jarvis.chat.custom_skills import (
+		armed_skill_clause,
+		invoked_skill_clause,
+		invoked_skill_slugs,
+		learned_skill_clause,
+	)
 
-	skill_clause = invoked_skill_clause(msg_row.get("content") or "")
+	# Resolve invoked_skill_slugs ONCE under chat_user (the message's actual
+	# sender, not frappe.session.user - which can be a pump worker's exec
+	# identity in managed-pump mode) and hand the SAME set to both clauses
+	# below (code review on #580): before this fix invoked_skill_clause
+	# resolved its own set under the ambient session user while
+	# armed_skill_clause resolved under chat_user, so the two could disagree
+	# on identity, and each paid for its own table scan.
+	turn_invoked_slugs = invoked_skill_slugs(user_message or "", user=chat_user)
+	skill_clause = invoked_skill_clause(user_message or "", chat_user, slugs=turn_invoked_slugs)
 	# Armed-skill first-write fix (issue #580, found on live e2e): silent once a
 	# run is already approved (autorun_run above takes over) or an armed macro
 	# is already running (armed_run above already tells the agent to call every
@@ -1058,7 +1071,7 @@ def assemble_prompt(
 	armed_skill_run_clause = (
 		""
 		if (conv.skill_autorun or conv.skip_confirmation)
-		else armed_skill_clause(msg_row.get("content") or "", chat_user)
+		else armed_skill_clause(user_message or "", chat_user, slugs=turn_invoked_slugs)
 	)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the

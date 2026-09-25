@@ -513,14 +513,24 @@ class TestInvokedSkillSlugs(FrappeTestCase):
 
 
 def _mk_org_skill(
-	slug: str, *, armed: bool = False, allowed_roles=None, source_skill: str | None = None
+	slug: str,
+	*,
+	armed: bool = False,
+	allowed_roles=None,
+	source_skill: str | None = None,
+	description: str = "org-wide test skill",
+	instructions: str = "do the thing",
 ) -> str:
 	"""An enabled, unrestricted Org-scope skill (or role-restricted when
 	``allowed_roles`` is given), owned by Administrator - the shape a real skill
 	promotion (_materialize_promotion) leaves behind. ``source_skill`` links it
-	to a private row as its promotion lineage, exactly as materialize stamps it.
-	The engine flag bypasses the reviewer-only scope-creation guard, which is
-	proven elsewhere."""
+	to a private row as its promotion lineage, exactly as materialize stamps it
+	- pass matching ``description``/``instructions`` when the test wants the
+	lineage collapse to fire (resolve_armed_skill_docname now requires the two
+	rows' get_skill-served content to match, code review on #580); leave them
+	diverged (the defaults, vs. a differently-worded private row) to exercise
+	the TOCTOU refusal. The engine flag bypasses the reviewer-only
+	scope-creation guard, which is proven elsewhere."""
 	prev = frappe.flags.jarvis_pattern_engine
 	frappe.flags.jarvis_pattern_engine = True
 	try:
@@ -528,8 +538,8 @@ def _mk_org_skill(
 			{
 				"doctype": SKILL,
 				"skill_name": slug,
-				"description": "org-wide test skill",
-				"instructions": "do the thing",
+				"description": description,
+				"instructions": instructions,
 				"scope": "Org",
 				"user_invocable": 1,
 				"allowed_roles": [{"role": r} for r in (allowed_roles or [])],
@@ -541,14 +551,13 @@ def _mk_org_skill(
 		frappe.flags.jarvis_pattern_engine = prev
 	frappe.db.commit()
 	if armed:
-		frappe.db.set_value(SKILL, doc.name, "allow_approve_run", 1, update_modified=False)
-		frappe.db.commit()
-		# A raw write (bypassing the doctype's admin-only guard, deliberately -
-		# it simulates an already-armed row) does not fire on_update, so it
-		# never clears _pushable_org_rows's request memo on its own. Do it here
-		# so a resolve_armed_skill_docname/invoked_skill_slugs call right after
+		# set_skill_raw (not a bare db.set_value): bypasses the doctype's
+		# admin-only guard, deliberately - it simulates an already-armed row -
+		# and clears _pushable_org_rows's request memo so a
+		# resolve_armed_skill_docname/invoked_skill_slugs call right after
 		# sees this arm, not a scan cached before it.
-		custom_skills._clear_pushable_org_rows_memo()
+		custom_skills.set_skill_raw(doc.name, "allow_approve_run", 1)
+		frappe.db.commit()
 	return doc.name
 
 
@@ -594,9 +603,12 @@ class TestResolveArmedSkillDocnameOrgWide(FrappeTestCase):
 		row (the promotion source) was never armed; an admin armed the shared
 		copy AFTERWARDS through the normal toggle. The org copy - the body
 		actually pushed and run, and the one a Jarvis Admin actually reviewed
-		before arming - must supersede the stale own row, not be shadowed by it."""
+		before arming - must supersede the stale own row, not be shadowed by it.
+		Content matches (both "slug-set test skill"), so the collapse fires."""
 		priv = _mk_slug_skill(SLUGSET_USER_A, "orgres-lineage-orgonly")
-		shared = _mk_org_skill("orgres-lineage-orgonly", armed=True, source_skill=priv)
+		shared = _mk_org_skill(
+			"orgres-lineage-orgonly", armed=True, source_skill=priv, description="slug-set test skill"
+		)
 		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-orgonly", SLUGSET_USER_A), shared)
 
 	def test_armed_private_source_never_auto_arms_an_unarmed_org_copy(self):
@@ -605,29 +617,78 @@ class TestResolveArmedSkillDocnameOrgWide(FrappeTestCase):
 		allow_approve_run counts. An armed private source sitting next to its
 		still-unarmed Org descendant must NOT auto-run; the descendant still
 		wins the lineage (it supersedes the stale source either way), it is
-		just correctly unarmed."""
+		just correctly unarmed. Content matches, so the collapse itself fires -
+		it is the descendant's OWN arm bit that is 0."""
 		priv = _make_skill(SLUGSET_USER_A, armed=True, name="orgres-lineage-privarmed")
-		shared = _mk_org_skill("orgres-lineage-privarmed", armed=False, source_skill=priv)
+		shared = _mk_org_skill(
+			"orgres-lineage-privarmed",
+			armed=False,
+			source_skill=priv,
+			description="approve & run test skill",
+		)
 		self.assertIsNone(resolve_armed_skill_docname("orgres-lineage-privarmed", SLUGSET_USER_A))
 		# Confirm it's the descendant governing (unarmed), not a fallback to the
 		# armed source: arming the descendant directly now offers it.
-		frappe.db.set_value(SKILL, shared, "allow_approve_run", 1, update_modified=False)
-		custom_skills._clear_pushable_org_rows_memo()  # raw write: on_update never fired
+		custom_skills.set_skill_raw(shared, "allow_approve_run", 1)  # raw: on_update never fired
 		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-privarmed", SLUGSET_USER_A), shared)
 
 	def test_promoted_lineage_resolves_to_the_org_copy_when_both_are_armed(self):
 		"""Both halves of the same lineage independently armed (an admin can arm
 		either the private skill or its promoted copy at any time) must resolve
 		cleanly to the org copy, not trip the ambiguity guard meant for unrelated
-		duplicates."""
+		duplicates. Content matches, so the collapse fires."""
 		priv = _make_skill(SLUGSET_USER_A, armed=True, name="orgres-lineage-botharmed")
-		shared = _mk_org_skill("orgres-lineage-botharmed", armed=True, source_skill=priv)
+		shared = _mk_org_skill(
+			"orgres-lineage-botharmed",
+			armed=True,
+			source_skill=priv,
+			description="approve & run test skill",
+		)
 		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-botharmed", SLUGSET_USER_A), shared)
 
 	def test_promoted_lineage_with_neither_armed_does_not_resolve(self):
 		priv = _mk_slug_skill(SLUGSET_USER_A, "orgres-lineage-neither")
-		_mk_org_skill("orgres-lineage-neither", armed=False, source_skill=priv)
+		_mk_org_skill(
+			"orgres-lineage-neither", armed=False, source_skill=priv, description="slug-set test skill"
+		)
 		self.assertIsNone(resolve_armed_skill_docname("orgres-lineage-neither", SLUGSET_USER_A))
+
+	def test_edited_private_copy_diverging_from_an_armed_org_copy_gets_no_offer(self):
+		"""TOCTOU fail-safe (code review on #580, security round 2):
+		jarvis.tools.get_skill serves the OWNER's own row over the org copy for
+		THAT owner, regardless of which docname resolve_armed_skill_docname
+		picks - so if the owner has since edited their private row's content
+		away from what was reviewed and armed, NEITHER row may be offered: the
+		org copy's arm cannot vouch for content get_skill would never actually
+		serve to this owner."""
+		priv = _mk_slug_skill(SLUGSET_USER_A, "orgres-lineage-drifted")
+		shared = _mk_org_skill(
+			"orgres-lineage-drifted",
+			armed=True,
+			source_skill=priv,
+			description="slug-set test skill",
+		)
+		# The owner edits their private copy after promotion + arming - a
+		# reviewer never re-reviews a private (User-scope) row's content.
+		frappe.db.set_value(SKILL, priv, "instructions", "do something completely different now")
+		self.assertIsNone(resolve_armed_skill_docname("orgres-lineage-drifted", SLUGSET_USER_A))
+		# The org copy itself is untouched and still armed - a DIFFERENT
+		# identity with no own row still gets the offer off it (no collateral
+		# damage: only the owner whose own row diverged is refused).
+		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-drifted", SLUGSET_USER_B), shared)
+
+	def test_identical_private_copy_and_armed_org_copy_gets_the_offer(self):
+		"""Positive control for the TOCTOU check above: when the owner's private
+		row's content is IDENTICAL to the reviewed, armed org copy, get_skill
+		would serve the same body either way, so the offer fires normally."""
+		priv = _mk_slug_skill(SLUGSET_USER_A, "orgres-lineage-identical")
+		shared = _mk_org_skill(
+			"orgres-lineage-identical",
+			armed=True,
+			source_skill=priv,
+			description="slug-set test skill",
+		)
+		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-identical", SLUGSET_USER_A), shared)
 
 	def test_role_restricted_org_row_is_not_an_org_wide_candidate(self):
 		"""A role-restricted Org row (allowed_roles set) is reached via the
@@ -700,6 +761,31 @@ class TestPushableOrgRowsMemoization(FrappeTestCase):
 		finally:
 			frappe.set_user(orig_user)
 		self.assertEqual(resolve_armed_skill_docname("orgres-memo-fresh", SLUGSET_USER_B), docname)
+
+	def test_set_skill_raw_clears_the_memo_for_a_relevant_field(self):
+		"""set_skill_raw (code review on #580 round 2) is the ONE sanctioned raw
+		-write path for allow_approve_run/enabled/scope: unlike a bare
+		frappe.db.set_value, it clears the memo itself, so a read right after
+		sees the write within the SAME request/test - no manual clear needed
+		at the call site."""
+		docname = _mk_org_skill("orgres-memo-rawarm", armed=False)
+		self.assertIsNone(resolve_armed_skill_docname("orgres-memo-rawarm", SLUGSET_USER_B))
+		custom_skills.set_skill_raw(docname, "allow_approve_run", 1)
+		self.assertEqual(resolve_armed_skill_docname("orgres-memo-rawarm", SLUGSET_USER_B), docname)
+
+	def test_set_skill_raw_skips_the_clear_for_an_irrelevant_field(self):
+		"""A field _pushable_org_rows never reads (description) still writes
+		correctly but does not pay for a memo clear - the helper only clears
+		when the write actually could desync the cached scan."""
+		docname = _mk_org_skill("orgres-memo-irrelevant", armed=True)
+		# Populate the memo, then write an unrelated field through the helper.
+		resolve_armed_skill_docname("orgres-memo-irrelevant", SLUGSET_USER_B)
+		self.assertTrue(hasattr(frappe.local, custom_skills._PUSHABLE_ORG_ROWS_MEMO))
+		custom_skills.set_skill_raw(docname, "description", "a new description")
+		self.assertTrue(
+			hasattr(frappe.local, custom_skills._PUSHABLE_ORG_ROWS_MEMO), "unrelated write must not clear"
+		)
+		self.assertEqual(frappe.db.get_value(SKILL, docname, "description"), "a new description")
 
 
 class TestArmedSkillClause(FrappeTestCase):
@@ -811,6 +897,65 @@ class TestArmedSkillFirstWriteContext(FrappeTestCase):
 		prompt = self._assembled(doc, "/ctxarmed-macro do it")
 		self.assertNotIn("armed skill: Approve & run available", prompt)
 		self.assertIn("armed macro run: apply changes directly", prompt)
+
+	def test_invoked_skill_slugs_is_resolved_once_per_turn(self):
+		"""Code review on #580 round 2: assemble_prompt must resolve
+		invoked_skill_slugs EXACTLY once per turn and hand that SAME set to
+		both invoked_skill_clause and armed_skill_clause, rather than each
+		clause re-scanning under its own (possibly different) identity."""
+		from jarvis.chat import custom_skills
+
+		_make_skill(TEST_USER, armed=True, name="ctxarmed-once")
+		conv = _make_conv(TEST_USER)
+		doc = frappe.get_doc(CONV, conv)
+		real = custom_skills.invoked_skill_slugs
+		calls = []
+
+		def counting(*args, **kwargs):
+			calls.append(kwargs.get("user"))
+			return real(*args, **kwargs)
+
+		with patch.object(custom_skills, "invoked_skill_slugs", side_effect=counting):
+			prompt = self._assembled(doc, "/ctxarmed-once do it")
+		self.assertEqual(len(calls), 1, "invoked_skill_slugs must resolve exactly once per turn")
+		self.assertEqual(calls[0], TEST_USER)
+		self.assertIn("armed skill: Approve & run available for custom-ctxarmed-once", prompt)
+
+	def test_both_clauses_resolve_under_the_message_sender_not_the_exec_user(self):
+		"""Identity consistency (code review on #580 round 2): in a shared/pump
+		scenario the message's actual sender (chat_user = msg_row.owner) can
+		differ from the identity assemble_prompt executes as (`user`). Both
+		invoked_skill_clause and armed_skill_clause must key off chat_user, not
+		the exec identity - an admin-armed skill owned by the SENDER (never
+		shared with the exec identity) must still be named and offered."""
+		_ensure_non_admin_user()
+		sender = NON_ADMIN_USER
+		_make_skill(sender, armed=True, name="ctxarmed-sender")
+		conv = _make_conv(TEST_USER)
+		doc = frappe.get_doc(CONV, conv)
+		orig = frappe.session.user
+		frappe.set_user(sender)
+		try:
+			msg = frappe.get_doc(
+				{
+					"doctype": MSG,
+					"conversation": conv,
+					"seq": 1,
+					"role": "user",
+					"content": "/ctxarmed-sender do it",
+				}
+			).insert(ignore_permissions=True)
+			frappe.db.commit()
+		finally:
+			frappe.set_user(orig)
+		from jarvis.chat.turn_handler import assemble_prompt
+
+		ap = assemble_prompt(
+			doc, message_id=msg.name, conversation_id=conv, context={}, attachments=[], user=TEST_USER
+		)
+		self.assertIn("armed skill: Approve & run available for custom-ctxarmed-sender", ap.user_message)
+		frappe.db.delete(SKILL, {"owner": sender})
+		frappe.db.commit()
 
 
 # --------------------------------------------------------------------------- #
