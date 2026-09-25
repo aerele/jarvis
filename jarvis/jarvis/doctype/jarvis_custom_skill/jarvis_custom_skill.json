@@ -11,6 +11,8 @@
     "enabled",
     "user_invocable",
     "allow_approve_run",
+    "use_in_file_box",
+    "file_box_creates",
     "scope",
     "target_role",
     "description",
@@ -53,6 +55,20 @@
       "in_list_view": 1,
       "in_standard_filter": 1,
       "description": "ADMIN ONLY. When on, a declared 2+-step plan run of this skill offers 'Approve & run': one approval opens an uncarded run of the explicit _SKILL_AUTORUN_COVERED allowlist (create_doc/create_docs/update_doc/submit_doc/run_import/apply_workflow_action/send_email/share_doc/assign_to/update_wiki/run_method) until the run ends; the destructive trio (delete/cancel/amend) and create_custom_skill always still park. Enabling requires the Jarvis Admin / System Manager role; disabling is free for the owner - the toggle IS the kill switch (un-arm = instant off, no deploy)."
+    },
+    {
+      "fieldname": "use_in_file_box",
+      "fieldtype": "Check",
+      "label": "Use in File Box",
+      "default": "1",
+      "description": "When on, File Box may follow this skill automatically for a dropped document (your own skills, and reviewed Role/Org skills your roles admit). Untick to keep it out of automatic File Box processing; an explicit pin at drop still needs it on. Turning it back on for a Role/Org skill needs a reviewer."
+    },
+    {
+      "fieldname": "file_box_creates",
+      "fieldtype": "Link",
+      "label": "File Box creates",
+      "options": "DocType",
+      "description": "The document type a File Box run following this skill must draft (e.g. Purchase Invoice); the document's printed title never changes it. Must be a submittable document type."
     },
     {
       "fieldname": "scope",

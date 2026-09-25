@@ -1,11 +1,8 @@
 <template>
-	<!-- One held File Box write, expanded under its lane row. The card is the
+	<!-- One held File Box write, in the board's right pane. The card is the
 	     server-built "what will be created" summary rendered by PendingCard (text
 	     interpolation only - the values are model-derived from a dropped file). -->
-	<div
-		class="border-t bg-surface-white px-5 py-4"
-		:aria-busy="loading || busy !== null ? 'true' : 'false'"
-	>
+	<div :aria-busy="loading || busy !== null ? 'true' : 'false'">
 		<div v-if="loading" class="flex justify-start">
 			<JvSpinner label="Loading the proposed record…" />
 		</div>
@@ -100,7 +97,7 @@
 						variant="ghost"
 						:label="ended ? __('Close') : __('Cancel')"
 						:disabled="busy !== null"
-						@click="ended ? emit('decided', ended) : (editing = false)"
+						@click="ended ? decided(ended) : (editing = false)"
 					/>
 				</div>
 				<p v-if="editBlocked" :id="editReasonId" class="text-sm text-ink-amber-3">
@@ -234,8 +231,13 @@ import {
 
 const props = defineProps({
 	name: { type: String, required: true },
+	// Called with each settled answer. A callback, not an emit: Vue drops an unmounted
+	// instance's emits, and switching rows mid-decision unmounts this detail.
+	onDecided: { type: Function, default: null },
+	// Called with "sheet" when the row turns out to be an approval sheet.
+	onKind: { type: Function, default: null },
 });
-const emit = defineEmits(["decided"]);
+const decided = (res) => props.onDecided && props.onDecided(res);
 
 const rec = ref(null);
 const loading = ref(true);
@@ -273,6 +275,7 @@ async function load() {
 	try {
 		const res = await getPendingAction(props.name);
 		if (id !== req) return;
+		if (res && res.kind === "file_box_sheet" && props.onKind) return props.onKind("sheet");
 		rec.value = res || null;
 	} catch (e) {
 		if (id !== req) return;
@@ -301,13 +304,13 @@ async function decide(action, useExisting) {
 		const res = (await decideHeldAction(props.name, action, useExisting)) || {};
 		if (res.ok) {
 			toast.success(escapeHtml(outcomeMessage(res)));
-			emit("decided", res);
+			decided(res);
 			return;
 		}
 		const message = refusalMessage(res);
 		if (isSettled(res)) {
 			toast.error(escapeHtml(message));
-			emit("decided", res);
+			decided(res);
 			return;
 		}
 		notice.value = message;
@@ -396,7 +399,7 @@ async function submitEdit() {
 		const res = (await editAndCreateHeld(props.name, patches)) || {};
 		if (res.ok) {
 			toast.success(escapeHtml(outcomeMessage(res)));
-			emit("decided", res);
+			decided(res);
 			return;
 		}
 		if (res.reason_code === "exists") {
@@ -417,6 +420,13 @@ async function submitEdit() {
 	}
 }
 
+// The board calls this when the row leaves its rail: show the settled status, but
+// never over a decision in flight or an open edit (a failure keeps its values).
+function refresh() {
+	if (busy.value === null && !editing.value) load();
+}
+
 onMounted(load);
 onBeforeUnmount(() => linkSearch.cleanup());
+defineExpose({ refresh });
 </script>

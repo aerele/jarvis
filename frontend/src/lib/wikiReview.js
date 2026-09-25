@@ -32,3 +32,20 @@ export function isLongBody(p, threshold = 600) {
 export function dropperLabel(p) {
 	return (p && (p.dropper_name || p.dropper)) || "unknown";
 }
+
+// apply_reason short codes the server sets (wiki.py outcomes / approvals_api's
+// _land_and_record) mapped to what a reviewer reads. An unmapped code falls
+// back to the raw code in parens, same as before this map existed.
+const APPLY_REASON_COPY = {
+	page_full:
+		"The wiki page is full, so nothing was changed. Retry will keep failing until the page has room: record the note on another page, or reject it.",
+};
+
+// The message shown for an approved write that did not land (needs_retry).
+export function landingMessage(p) {
+	const reason = p && p.apply_reason;
+	if (reason && APPLY_REASON_COPY[reason]) return APPLY_REASON_COPY[reason];
+	return `Approved, but the write did not land${
+		reason ? ` (${reason})` : ""
+	}. Retry to re-drive it.`;
+}

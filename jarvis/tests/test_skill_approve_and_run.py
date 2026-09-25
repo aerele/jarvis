@@ -1801,7 +1801,7 @@ class TestApproveAndRun(FrappeTestCase):
 # plus the "approved skill run" [Context:] clause folded into assemble_prompt.
 
 
-def _park_pending_card(conv: str, owner: str) -> str | None:
+def _park_pending_card(conv: str, owner: str, name: str = "AUTORUN-PAUSE-X") -> str | None:
 	"""Mint a parked destructive card strictly bound to ``conv`` (a legit PAUSE of an
 	approved run) so on_terminal_turn sees a pending card and KEEPS the flag."""
 	return pending_confirm.mint(
@@ -1809,7 +1809,7 @@ def _park_pending_card(conv: str, owner: str) -> str | None:
 		owner=owner,
 		exec_user=owner,
 		tool="delete_doc",
-		args={"doctype": "ToDo", "name": "AUTORUN-PAUSE-X"},
+		args={"doctype": "ToDo", "name": name},
 		run_id="",
 	)
 
@@ -2342,7 +2342,14 @@ class TestMacroSkillFlagSeparation(FrappeTestCase):
 		conv = _make_conv(TEST_USER)
 		_stamp_autorun(conv)
 		frappe.set_user(TEST_USER)
-		token = _park_pending_card(conv, TEST_USER)
+		# A real target: a pending action re-validates a delete's record at confirm
+		# (D2), so a card for a record that doesn't exist ends target_missing unrun.
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "d1-resume-target"}).insert(
+			ignore_permissions=True
+		)
+		self.addCleanup(frappe.delete_doc, "ToDo", todo.name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		token = _park_pending_card(conv, TEST_USER, todo.name)
 		with (
 			patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}) as disp,
 			patch("jarvis.api.persist_tool_receipt"),
