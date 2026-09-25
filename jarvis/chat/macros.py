@@ -164,17 +164,24 @@ def _disarm_conversation(conversation: str | None) -> None:
 
 	The run's cards are swept FIRST, while the flag still refuses a Confirm: cards
 	never expire, so one a stop, the stale reaper or a store blip left behind would
-	otherwise stay confirmable forever (the sweep commits the caller's work first)."""
+	otherwise stay confirmable forever (the sweep commits the caller's work first).
+	A card the sweep left live keeps the flag (fail closed)."""
 	if not conversation or not frappe.db.get_value(CONV, conversation, "skip_confirmation"):
 		return
 	from jarvis import api as _jarvis_api
 	from jarvis.chat import pending_confirm
 
-	pending_confirm.clear_for_conversation(frappe.db.get_value(CONV, conversation, "owner"), conversation)
+	owner = frappe.db.get_value(CONV, conversation, "owner")
+	pending_confirm.clear_for_conversation(owner, conversation)
 	try:
 		_jarvis_api.cancel_pending_action_rows(conversation)
 	except Exception:
 		frappe.log_error(title="jarvis.macro.disarm_sweep_failed", message=frappe.get_traceback())
+	if pending_confirm.has_live_card(owner, conversation):
+		frappe.log_error(
+			title="jarvis.macro.disarm_withheld", message=f"{conversation}: a card outlived the sweep"
+		)
+		return
 	frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
 
 

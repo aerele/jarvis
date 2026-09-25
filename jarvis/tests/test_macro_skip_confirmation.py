@@ -595,6 +595,29 @@ class TestD5StopAndReport(FrappeTestCase):
 				self.assertEqual(self._pending_count(conv), 0)
 				self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 0)
 
+	def test_a_failed_sweep_keeps_the_run_armed(self):
+		"""Fail closed: disarming over a card the sweep could not cancel would leave the
+		unattended run's brake card confirmable forever."""
+		from jarvis.chat import actions_api, macros, pending_confirm
+
+		def _sweep_fails(conversation, **kw):
+			frappe.db.commit()  # the real sweep commits the caller's work first
+			raise RuntimeError("sweep failed")
+
+		run_name, conv = self._run_and_conv(armed=True, name="sweep-fails")
+		self._park_delete_card(conv)
+		[card] = pending_confirm.list_for_owner(NON_ADMIN_USER, conversation=conv)
+		frappe.set_user(NON_ADMIN_USER)
+		with patch("jarvis.chat.pending_actions.cancel_for_conversation", side_effect=_sweep_fails):
+			macros.stop_macro_run(run_name)
+		frappe.db.commit()
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "stopped")
+		self.assertEqual(self._pending_count(conv), 1)
+		self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 1)
+		res = actions_api.confirm_tool(card["token"], conversation=conv)
+		self.assertEqual(res.get("reason_code"), "armed_run", res)
+		self.assertEqual(self._pending_count(conv), 1, "the refused Confirm consumed nothing")
+
 	def test_armed_run_stops_and_sweeps_when_step_parks(self):
 		from jarvis.chat import macros
 

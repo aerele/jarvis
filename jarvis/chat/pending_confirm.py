@@ -500,6 +500,17 @@ def clear_for_conversation(owner: str, conversation: str, run_id: str | None = N
 	return cleared + legacy.clear_for_conversation(owner, conversation, run_id)
 
 
+def has_live_card(owner: str, conversation: str) -> bool:
+	"""Whether a card is still live in ``conversation`` after a sweep (any pending
+	action there, or ``owner``'s legacy token); an unreadable store counts as one."""
+	try:
+		return bool(_select("conversation=%(c)s AND status='Pending'", {"c": conversation}, strict=True)) or (
+			_legacy_pending(owner, conversation)
+		)
+	except PendingConfirmStorageError:
+		return True
+
+
 def cards_open_gauge() -> int:
 	"""Open cards across both stores (observability only)."""
 	count = legacy.cards_open_gauge()
