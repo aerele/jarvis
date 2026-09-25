@@ -26,6 +26,7 @@ from jarvis import api
 from jarvis.chat import pending_confirm
 from jarvis.chat.actions_api import confirm_tool
 from jarvis.exceptions import InvalidArgumentError
+from jarvis.tests._pending_action_helpers import draft_doctype
 from jarvis.tests._transport_helpers import provision_legacy_site
 from jarvis.tools.create_docs import create_docs
 
@@ -201,14 +202,18 @@ class TestIncidentReplay(_Base):
 		self.assertEqual(r["data"]["name"], todo.name)
 
 	def test_create_doc_with_empty_docs_auto_applies_in_a_file_box_conversation(self):
+		# h400jb1fdk: the draft create with a stray docs: [] is a SINGLE draft create to
+		# the File Box policy (P0d normalises first), so it auto-applies - never a batch.
+		dt = draft_doctype() or self.skipTest("no submittable doctype installed")
 		conv = self._conv(file_box=1)
-		desc = "p0d-create-doc-filebox"
-		r = api._run_tool(
-			"create_doc", {"doctype": "ToDo", "values": {"description": desc}, "docs": []}, conversation=conv
-		)
+		with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {"name": "D-1"}}) as dc:
+			r = api._run_tool(
+				"create_doc", {"doctype": dt, "values": {"remark": "p0d"}, "docs": []}, conversation=conv
+			)
 		self.assertTrue(r["ok"], r)
 		self.assertNotEqual((r.get("data") or {}).get("status"), "pending_confirmation")
-		self.assertTrue(frappe.db.exists("ToDo", {"description": desc}))
+		dc.assert_called_once()
+		self.assertNotIn("docs", dc.call_args.args[1])
 
 	def test_create_doc_with_empty_docs_parks_as_a_single_card_in_a_normal_conversation(self):
 		conv = self._conv()
@@ -224,8 +229,12 @@ class TestIncidentReplay(_Base):
 		# pre-P0d token stays exactly as sealed, per S4).
 		parked = pending_confirm.list_for_owner(frappe.session.user, conversation=conv)
 		self.assertEqual(len(parked), 1)
-		self.assertNotIn("docs", parked[0]["args"])
 		token = parked[0]["token"]
+		# A pending action's list never unseals: read the sealed call itself.
+		from jarvis.chat.pending_actions import _seal
+		from jarvis.chat.pending_actions._store import get_row
+
+		self.assertNotIn("docs", _seal.unseal_call(get_row(token))["args"])
 		with patch("jarvis.chat.api._dispatch_turn"):
 			res = confirm_tool(token, conversation=conv)
 		self.assertTrue(res["ok"], res)

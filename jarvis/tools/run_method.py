@@ -36,6 +36,8 @@ _DENIED = frozenset(
 		"jarvis.chat.api.send_message",
 		"jarvis.chat.api.retry_message",
 		"jarvis.chat.api.stop_run",
+		"jarvis.chat.api.archive_conversation",
+		"jarvis.chat.api.clear_chat_history",
 	}
 )
 

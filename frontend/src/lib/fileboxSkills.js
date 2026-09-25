@@ -14,13 +14,16 @@ export function skillLabel(s) {
 	return `${s.skill_name} · shared`;
 }
 
-// The picker's options: "None" (system default only) + each accessible skill to
-// apply ALONGSIDE the system's chosen skill. The OCR / Data Entry skill is the
-// system's own base, so it is not offered as an extra to layer on.
+// The picker's options: "None" (system default only) + each accessible skill File
+// Box may use ("Use in File Box" on) to apply ALONGSIDE the system's chosen skill.
+// The OCR / Data Entry skill is the system's own base, so it is not offered as an
+// extra to layer on.
 export function skillOptions(customSkills) {
 	return [
 		{ label: "None", value: "" },
-		...(customSkills || []).map((s) => ({ label: skillLabel(s), value: s.skill_name })),
+		...(customSkills || [])
+			.filter((s) => s.use_in_file_box)
+			.map((s) => ({ label: skillLabel(s), value: s.skill_name })),
 	];
 }
 
@@ -31,4 +34,26 @@ export function pinnedLabel(slug, customSkills) {
 	if (slug === OCR_DATA_ENTRY) return "OCR / Data Entry";
 	const s = (customSkills || []).find((x) => x.skill_name === slug);
 	return s ? s.skill_name : `${slug} (removed)`;
+}
+
+// The Skills list chip for a skill File Box follows to a fixed document type.
+export function createsChip(row) {
+	return row && row.use_in_file_box && row.file_box_creates
+		? `File Box → ${row.file_box_creates}`
+		: "";
+}
+
+// The skill editor shows the server's "File Box creates" refusal (the doctype's
+// FileBoxCreatesError) on that field; any other error stays a toast.
+export function isCreatesError(e) {
+	return !!e && e.exc_type === "FileBoxCreatesError";
+}
+
+// A promotion request's File Box snapshot as the reviewer's badge ("" when the
+// server sent none): approval publishes both fields.
+export function promoFileBox(p) {
+	if (!p || p.use_in_file_box_snapshot == null) return "";
+	const creates = p.file_box_creates_snapshot;
+	if (p.use_in_file_box_snapshot) return creates ? `File Box → ${creates}` : "Used in File Box";
+	return "Not used in File Box" + (creates ? ` · creates ${creates}` : "");
 }

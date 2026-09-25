@@ -107,8 +107,13 @@ export const listInbound = (start = 0, page_length = 20, search = "") =>
 		start,
 		page_length,
 	});
-export const dropFile = (file_url, file_name) =>
-	call("jarvis.chat.filebox.drop_file", { file_url, ...(file_name ? { file_name } : {}) });
+// `file` (the upload's docname) pins the exact File; file_url is the fallback.
+export const dropFile = (file_url, file_name, file) =>
+	call("jarvis.chat.filebox.drop_file", {
+		file_url,
+		...(file_name ? { file_name } : {}),
+		...(file ? { file } : {}),
+	});
 
 // ── Write approvals (the write-safety gate) ─────────────────────────────────
 // A tool that would change ERP data is parked server-side and announced as an
@@ -166,7 +171,7 @@ export async function uploadFile(file) {
 	if (!r.ok) throw new Error(`Couldn't upload ${file.name} (${r.status})`);
 	const data = await r.json();
 	const f = data.message || data;
-	return { file_url: f.file_url, file_name: f.file_name || file.name };
+	return { file_url: f.file_url, file_name: f.file_name || file.name, name: f.name };
 }
 
 // Dictation goes through the SPA's module unchanged: same endpoint, same
