@@ -91,6 +91,7 @@
   "chat_device_token",
   "agent_tools_section",
   "run_query_doctype_allowlist",
+  "run_method_blocklist",
   "disable_armed_skip",
   "core_apps_override",
   "enable_customizations_clause",
@@ -704,6 +705,13 @@
    "permlevel": 1,
    "label": "run_query DocType Allowlist",
    "description": "Defense-in-depth restriction for the run_query agent tool. Comma- or newline-separated list of DocType names. When non-empty, run_query refuses any query referencing a DocType not on this list - even if the calling user has read permission on it through Frappe's normal permission system. Leave empty (default) to allow any DocType the user can read. Use this to lock the agent to a known-good slice of your data (e.g. 'Sales Invoice, Customer, Item, Sales Invoice Item') so a future allowlist bypass in the SQL parser still can't reach the rest of the bench."
+  },
+  {
+   "fieldname": "run_method_blocklist",
+   "fieldtype": "Small Text",
+   "permlevel": 1,
+   "label": "run_method Blocklist",
+   "description": "Defense-in-depth restriction for the run_method agent tool. Comma- or newline-separated list of fnmatch patterns. When a pattern matches, run_method refuses to call that target - whether it is a whitelisted Python method (dotted path, e.g. 'frappe.*' or '*.delete_doc') or a Server Script API method (matched on its api_method name). Leave empty (default) to block nothing. Every run_method call still parks for a human confirmation card regardless; this list is the categorical 'never even offer these' hardstop."
   },
   {
    "fieldname": "disable_armed_skip",

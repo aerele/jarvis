@@ -155,6 +155,7 @@ class TestJarvisSettings(FrappeTestCase):
 			self.assertEqual(self._tab_of(meta, fieldname), "account_tab")
 		for fieldname in (
 			"run_query_doctype_allowlist",
+			"run_method_blocklist",
 			"disable_armed_skip",
 			"core_apps_override",
 			"enable_customizations_clause",
