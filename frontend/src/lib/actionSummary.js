@@ -3,7 +3,8 @@
 // Summarization is MODEL-DRIVEN: the card renders the fields the model proposed and
 // an optional model-written headline. It imposes no opinion on which fields matter
 // or what to total - that is the model's job, since it knows the doctype.
-import { isFieldMissing } from "@/lib/draftApply";
+// Relative, not "@/": actionSummary.test.js runs under plain `node --test`.
+import { isFieldMissing } from "./draftApply.js";
 
 export function proposedFields(action) {
 	return (action.fields || [])
